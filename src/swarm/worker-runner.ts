@@ -954,7 +954,7 @@ async function loop(): Promise<void> {
     }
   };
   try {
-    const localIp = getLocalIpAddress();
+    const localIp = W.AGENT_MESH_HOST === "127.0.0.1" || W.AGENT_MESH_HOST === "localhost" ? "127.0.0.1" : getLocalIpAddress();
     meshPeer = new MeshPeer({
       peerId: AGENT_ID,
       keys,
@@ -967,6 +967,9 @@ async function loop(): Promise<void> {
 
     meshServer = new MeshHttpServer({
       port: 0,
+      // Loopback unless the operator opts in to LAN gossip (AGENT_MESH_HOST): a container's
+      // HOST=0.0.0.0 must not expose the agent's mesh server to its network.
+      host: W.AGENT_MESH_HOST,
       meshPeer,
       meshToken: meshAuthToken || undefined,
     });

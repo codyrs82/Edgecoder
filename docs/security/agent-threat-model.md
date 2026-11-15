@@ -75,7 +75,7 @@ Listeners on an agent install:
 
 | Listener | Bind | Auth |
 |---|---|---|
-| Agent mesh HTTP server (random port) | `LISTEN_HOST`: 127.0.0.1 by default; 0.0.0.0 in `deploy/docker/Dockerfile.agent` | `/identity` open. `/mesh/ingest` accepts only messages from trusted peers (the verified coordinator and the peers it listed), signed by the key on file; an operator-configured token is also checked if set. `/mesh/peers` and `/mesh/register-peer` need an operator-configured token. |
+| Agent mesh HTTP server (random port) | `AGENT_MESH_HOST`: 127.0.0.1 by default, including in the Docker image; set 0.0.0.0 to opt in to LAN gossip | `/identity` open. `/mesh/ingest` accepts only messages from trusted peers (the verified coordinator and the peers it listed), signed by the key on file; an operator-configured token is also checked if set. `/mesh/peers` and `/mesh/register-peer` need an operator-configured token. |
 | Local forwarder (`LOCAL_FORWARD_PORT`) | 127.0.0.1 | IDE token; browser (Origin) requests refused |
 | IDE provider 4304 | 127.0.0.1 unless `IDE_PROVIDER_HOST` (then a token is required) | token, CORS, Host allowlist |
 | All-in-one / desktop 4301, 4302, 4303 | `LISTEN_HOST` (127.0.0.1 in the desktop app) | coordinator global hook, `INFERENCE_AUTH_TOKEN`, `ADMIN_API_TOKEN` |
@@ -289,9 +289,8 @@ Listeners on an agent install:
   `REQUIRE_VERIFIED_AGENTS` proves little against this attacker. Agent-side controls are not
   enforceable on a machine the attacker owns. Everything above is enforced on the coordinator.
 
+**Done:** the agent's mesh server binds `AGENT_MESH_HOST` (default 127.0.0.1), not the container's `HOST`.
+
 **Not changed here (protected paths):** `deploy/**`, `Dockerfile*`, `.github/**`. Proposed:
 
-- bind the agent image's mesh server to 127.0.0.1 unless LAN gossip is wanted (set
-  `HOST=127.0.0.1` for the worker process in `deploy/docker/Dockerfile.agent`, or start the mesh
-  server on loopback);
 - make https mandatory for non-loopback coordinator URLs in the installer.

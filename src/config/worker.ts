@@ -56,6 +56,11 @@ export const workerConfigSchema = z.object({
   EDGECODER_TRUST_REVERIFY_MS: amount(),
   EDGECODER_STEERING: envFlag({ off: ["off", "0", "false"], ci: true }),
   EDGECODER_STEERING_INTERVAL_MS: amount(),
+  /**
+   * Address the agent's mesh (gossip) server binds. Default 127.0.0.1: agents pull work from their
+   * coordinator, so nothing on the LAN needs to reach it. Set 0.0.0.0 only to opt in to LAN gossip.
+   */
+  AGENT_MESH_HOST: z.string().trim().min(1).default("127.0.0.1"),
   /** Loopback port for the IDE's swarm forwarder; unset or 0 = off. */
   LOCAL_FORWARD_PORT: envPort(undefined),
 
