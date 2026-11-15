@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { fitScore, paramsB, rankRoutes, routeModelId, sizeWorkload, type RouteInputs } from "../../src/inference-api/auto-route.js";
+import { callsTools, FALLBACK_NOTE, planRoutes, routeFromModelId, routeLabel } from "../../src/inference-api/auto-route.js";
+import { DEFAULT_QUALITY_FLOOR, fitScore, paramsB, qualityFloorFromEnv, rankRoutes, routeModelId, sizeWorkload, type RouteInputs } from "../../src/inference-api/auto-route.js";
 
-const light = sizeWorkload({ messages: [{ role: "user", content: "what does git rebase do?" }] });
-const heavy = sizeWorkload({ messages: [{ role: "user", content: "fix the bug" }], tools: [{ type: "function", function: { name: "Edit" } }] });
+const light = sizeWorkload({ messages: [{ role: "user", content: "what does git rebase do?" }] }, DEFAULT_QUALITY_FLOOR);
+const heavy = sizeWorkload({ messages: [{ role: "user", content: "fix the bug" }], tools: [{ type: "function", function: { name: "Edit" } }] }, DEFAULT_QUALITY_FLOOR);
+/** The pre-floor behaviour (any model from 1B for chat), for the tests that are about placement, not size. */
+const lightNoFloor = sizeWorkload({ messages: [{ role: "user", content: "what does git rebase do?" }] }, { chatB: 1, codingB: 6 });
 
 const prices = { cpu: 0.009, apple: 0.052, gpu: 0.043, "gpu.dc": 0.304 };
 const base: RouteInputs = { localModels: [], myModels: [], leases: [], networkModels: [], classPrice: prices };
@@ -20,9 +23,13 @@ describe("auto routing", () => {
     expect(paramsB("qwen2.5-coder:latest")).toBe(7);
   });
 
-  it("uses small models for quick tasks and capable coders for agent work", () => {
-    expect(fitScore("qwen2.5-coder:0.5b", light)).toBe(-1);
-    expect(fitScore("qwen2.5-coder:1.5b", light)).toBeGreaterThan(fitScore("qwen3.5:9b", light));
+  it("uses the smallest model that meets the floor for quick tasks and capable coders for agent work", () => {
+    expect(fitScore("qwen2.5-coder:0.5b", lightNoFloor)).toBe(-1);
+    expect(fitScore("qwen2.5-coder:1.5b", lightNoFloor)).toBeGreaterThan(fitScore("qwen3.5:9b", lightNoFloor));
+    // The default floor: a 1.5B or 3B model never answers a chat question on Auto.
+    expect(fitScore("qwen2.5-coder:1.5b", light)).toBe(-1);
+    expect(fitScore("llama3.2:3b", light)).toBe(-1);
+    expect(fitScore("qwen2.5-coder:7b", light)).toBeGreaterThan(fitScore("qwen3.5:9b", light));
     expect(fitScore("qwen2.5-coder:1.5b", heavy)).toBe(-1);
     expect(fitScore("qwen2.5-coder:14b", heavy)).toBeGreaterThan(fitScore("qwen3.5:9b", heavy));
     expect(fitScore("nomic-embed-text", light)).toBe(-1);
@@ -43,7 +50,7 @@ describe("auto routing", () => {
   });
 
   it("sends a quick task to the network when nothing free fits, CPU allowed after faster classes", () => {
-    const routes = rankRoutes(light, { ...base, localModels: ["qwen2.5-coder:0.5b"], networkModels: [{ model: "qwen2.5-coder:1.5b", classes: ["cpu", "gpu"] }] });
+    const routes = rankRoutes(lightNoFloor, { ...base, localModels: ["qwen2.5-coder:0.5b"], networkModels: [{ model: "qwen2.5-coder:1.5b", classes: ["cpu", "gpu"] }] });
     expect(routes.map((r) => `${r.placement}:${r.computeClass ?? ""}`)).toEqual(["network:gpu", "network:cpu"]);
     expect(routeModelId(routes[0])).toBe("network/qwen2.5-coder:1.5b@gpu");
   });
@@ -53,11 +60,50 @@ describe("auto routing", () => {
   });
 });
 
+describe("Auto quality floor", () => {
+  const explain = (floor = DEFAULT_QUALITY_FLOOR) => sizeWorkload({ messages: [{ role: "user", content: "Explain how this code works" }] }, floor);
+
+  it("a chat question skips tiny models and takes the cheapest model that meets the floor", () => {
+    const inp: RouteInputs = { ...base, localModels: ["qwen2.5-coder:1.5b", "llama3.2:3b", "qwen2.5-coder:7b", "qwen2.5-coder:14b"] };
+    expect(explain().minParamsB).toBe(7);
+    expect(rankRoutes(explain(), inp)[0]).toMatchObject({ placement: "local", model: "qwen2.5-coder:7b" });
+  });
+
+  it("free still beats paid among models that meet the floor; a tiny free model loses to a fitting network one", () => {
+    const net = [{ model: "qwen2.5-coder:7b", classes: ["gpu"], cSatsPerMTokens: { input: 100, output: 400 } }];
+    expect(planRoutes(explain(), { ...base, balanceCSats: 100, localModels: ["qwen3.5:9b"], networkModels: net }, "auto")[0].placement).toBe("local");
+    const routes = planRoutes(explain(), { ...base, balanceCSats: 100, localModels: ["qwen2.5-coder:1.5b"], networkModels: net }, "auto");
+    expect(routes.map((r) => `${r.placement}:${r.model}${r.fallback ? ":fallback" : ""}`)).toEqual(["network:qwen2.5-coder:7b", "local:qwen2.5-coder:1.5b:fallback"]);
+  });
+
+  it("with nothing that meets the floor, the biggest free model still answers (marked as a fallback)", () => {
+    const routes = planRoutes(explain(), { ...base, localModels: ["qwen2.5-coder:1.5b", "llama3.2:3b"] }, "auto");
+    expect(routes).toHaveLength(1);
+    expect(routes[0]).toMatchObject({ placement: "local", model: "llama3.2:3b", fallback: true });
+  });
+
+  it("is configurable per caller and from the environment", () => {
+    const inp: RouteInputs = { ...base, localModels: ["llama3.2:3b", "qwen2.5-coder:14b"] };
+    expect(rankRoutes(explain({ chatB: 3, codingB: 7 }), inp)[0].model).toBe("llama3.2:3b");
+    expect(rankRoutes(explain({ chatB: 13, codingB: 13 }), inp)[0].model).toBe("qwen2.5-coder:14b");
+    expect(qualityFloorFromEnv({})).toEqual(DEFAULT_QUALITY_FLOOR);
+    expect(qualityFloorFromEnv({ EDGECODER_AUTO_MIN_CHAT_B: "3", EDGECODER_AUTO_MIN_CODING_B: "14" })).toEqual({ chatB: 3, codingB: 14 });
+    expect(qualityFloorFromEnv({ EDGECODER_AUTO_MIN_CHAT_B: "lots", EDGECODER_AUTO_MIN_CODING_B: "" })).toEqual(DEFAULT_QUALITY_FLOOR);
+  });
+
+  it("an explicit model choice is untouched by the floor", () => {
+    expect(planRoutes(explain(), { ...base, localModels: ["qwen2.5-coder:7b"] }, "model", { model: "qwen2.5-coder:1.5b" })).toEqual([
+      expect.objectContaining({ placement: "local", model: "qwen2.5-coder:1.5b" }),
+    ]);
+    expect(planRoutes(explain(), { ...base }, "model", { model: "qwen2.5-coder:1.5b" })[0].fallback).toBeUndefined();
+  });
+});
+
 import { autoBackend } from "../../src/inference-api/backends.js";
 import { ChatBackendError, type ChatBackend, type ChatPiece } from "../../src/inference-api/types.js";
 
 describe("auto backend", () => {
-  const inputs = async (): Promise<RouteInputs> => ({ ...base, localModels: ["qwen2.5-coder:1.5b"], networkModels: [{ model: "qwen2.5-coder:1.5b", classes: ["gpu"] }] });
+  const inputs = async (): Promise<RouteInputs> => ({ ...base, localModels: ["qwen2.5-coder:7b"], networkModels: [{ model: "qwen2.5-coder:7b", classes: ["gpu"] }] });
   const collect = async (b: ChatBackend) => {
     const out: ChatPiece[] = [];
     for await (const p of b({ messages: [{ role: "user", content: "hi" }] })) out.push(p);
@@ -86,8 +132,6 @@ describe("auto backend", () => {
     await expect(collect(b)).rejects.toThrow(/No model fits this request/);
   });
 });
-
-import { callsTools, FALLBACK_NOTE, planRoutes, routeFromModelId, routeLabel } from "../../src/inference-api/auto-route.js";
 
 describe("compute policies", () => {
   const net = [{ model: "qwen2.5-coder:14b", classes: ["gpu"], cSatsPerMTokens: { input: 100, output: 400 } }];

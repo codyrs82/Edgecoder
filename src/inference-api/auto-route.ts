@@ -5,7 +5,9 @@
  * Auto routing: for each request, the cheapest place that can do the job well.
  *
  * 1. Size the job: does it need tools or a long context (an agent turn), or is it a short
- *    question? That sets the smallest model that will do it well.
+ *    question? That sets the smallest model that will do it well, never below the quality floor
+ *    (QualityFloor: 7B by default for both chat and coding, so "explain this code" is not
+ *    answered by a 1.5B model just because it is the cheapest).
  * 2. Rank where it can run, cheapest first: a machine you already reserved (prepaid), this
  *    computer (free), your other machines (free), then the network. Network model calls are
  *    priced per token (the same on every class), so among classes the fastest comes first.
@@ -57,14 +59,42 @@ export interface Workload {
   /** Estimated prompt tokens. */
   promptTokens: number;
   needsTools: boolean;
+  /** The smallest model (billions of parameters) Auto may pick for this job; see QualityFloor. */
+  minParamsB?: number;
 }
 
-/** An agent turn (tools) or a long prompt needs a capable model; a short question doesn't. */
-export function sizeWorkload(req: Pick<ChatRequest, "messages" | "tools">): Workload {
+/**
+ * The smallest model Auto picks, in billions of parameters: `chatB` for questions and chat,
+ * `codingB` for agent work (tools or a long context). Auto is still the cheapest place among the
+ * models that meet it; only when nothing that meets it can run does a smaller free model answer
+ * (marked as a fallback). Explicit model choices ignore it.
+ */
+export interface QualityFloor {
+  chatB: number;
+  codingB: number;
+}
+
+export const DEFAULT_QUALITY_FLOOR: QualityFloor = { chatB: 7, codingB: 7 };
+
+/** The floor from EDGECODER_AUTO_MIN_CHAT_B / EDGECODER_AUTO_MIN_CODING_B, else the default. */
+export function qualityFloorFromEnv(env: Record<string, string | undefined> = process.env): QualityFloor {
+  const read = (v: string | undefined, d: number) => {
+    const n = Number(v);
+    return v !== undefined && v.trim() !== "" && Number.isFinite(n) && n >= 0 ? n : d;
+  };
+  return {
+    chatB: read(env.EDGECODER_AUTO_MIN_CHAT_B, DEFAULT_QUALITY_FLOOR.chatB),
+    codingB: read(env.EDGECODER_AUTO_MIN_CODING_B, DEFAULT_QUALITY_FLOOR.codingB),
+  };
+}
+
+/** An agent turn (tools) or a long prompt needs a capable model; a short question gets the chat floor. */
+export function sizeWorkload(req: Pick<ChatRequest, "messages" | "tools">, floor: QualityFloor = qualityFloorFromEnv()): Workload {
   const chars = req.messages.reduce((n, m) => n + m.content.length, 0) + (req.tools ? JSON.stringify(req.tools).length : 0);
   const promptTokens = Math.ceil(chars / 3.5);
   const needsTools = !!req.tools?.length;
-  return { heavy: needsTools || promptTokens > 6_000, promptTokens, needsTools };
+  const heavy = needsTools || promptTokens > 6_000;
+  return { heavy, promptTokens, needsTools, minParamsB: heavy ? floor.codingB : floor.chatB };
 }
 
 /** Billions of parameters from a model tag ("qwen2.5-coder:7b" -> 7, "qwen3-coder:30b" -> 30); unknown tags count as 7. */
@@ -77,18 +107,17 @@ const isEmbedding = (m: string) => /embed/i.test(m);
 const isCoder = (m: string) => /coder|devstral|codestral|deepseek-coder/i.test(m);
 
 /**
- * How well a model fits the job (higher is better), or -1 when it shouldn't be used. Heavy work
- * wants at least ~7B (coders preferred: they follow tool calls); light work wants the smallest
- * model from ~1.5B up, since bigger models take longer and cost more seconds.
+ * How well a model fits the job (higher is better), or -1 when it shouldn't be used. Nothing below
+ * the job's floor (`minParamsB`; without one, ~6B for heavy work and 1B for light work) is used.
+ * Heavy work prefers ~14B coders (they follow tool calls); light work prefers the smallest model
+ * that meets the floor, since bigger models take longer and cost more seconds.
  */
 export function fitScore(model: string, w: Workload): number {
   if (isEmbedding(model)) return -1;
   const b = paramsB(model);
-  if (w.heavy) {
-    if (b < 6) return -1;
-    return 100 - Math.abs(b - 14) + (isCoder(model) ? 15 : 0);
-  }
-  if (b < 1) return -1;
+  const floor = w.minParamsB ?? (w.heavy ? 6 : 1);
+  if (b < floor) return -1;
+  if (w.heavy) return 100 - Math.abs(b - 14) + (isCoder(model) ? 15 : 0);
   return 100 - b * 2 + (isCoder(model) ? 3 : 0);
 }
 
