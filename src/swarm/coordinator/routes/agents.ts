@@ -24,7 +24,8 @@ import {
   queue,
   OLLAMA_MODEL,
   securityLog,
-  identity
+  identity,
+  preAuthFailures
 } from "../context.js";
 import { mutable } from "../mutable-state.js";
 import {
@@ -101,6 +102,12 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
     const hardwareClass = classifyHardware(body.hardwareProfile, rateOracleConfig.computeClasses);
     const origin = requestOrigin(req);
     const sourceIp = origin.clientIp;
+    // Denied registrations count against the caller's address (they cost an audit record, a
+    // signature and a portal round trip each); a flooding address is turned away up front.
+    const failureKey = sourceIp ?? "unknown";
+    if (!origin.loopback && preAuthFailures.blocked(failureKey)) {
+      return reply.code(429).send({ error: "too_many_failed_registrations" });
+    }
     const previous = agentCapabilities.get(body.agentId);
     const proofOfKey = await registerProvesStoredKey(req, body.agentId, body.publicKeyPem, previous?.publicKeyPem);
     const activation = await validatePortalNode({
@@ -113,6 +120,7 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       proofOfKey
     });
     if (!activation.allowed) {
+      if (!origin.loopback) preAuthFailures.record(failureKey);
       app.log.warn({ agentId: body.agentId, reason: activation.reason }, "register_denied");
       return reply.code(403).send({ error: "node_not_activated", reason: activation.reason });
     }
