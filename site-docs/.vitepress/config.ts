@@ -48,7 +48,8 @@ export default withMermaid(defineConfig({
           { text: "Executor Subset Reference", link: "/operations/executor-subset-reference" },
           { text: "iOS Power Scheduling", link: "/operations/ios-power-scheduling" },
           { text: "Stats Ledger Rollout", link: "/operations/stats-ledger-rollout" },
-          { text: "Coordinator Federation", link: "/operations/coordinator-federation" }
+          { text: "Coordinator Federation", link: "/operations/coordinator-federation" },
+          { text: "Load Testing", link: "/operations/load-testing" }
         ]
       },
       {
