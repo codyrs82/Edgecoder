@@ -125,6 +125,24 @@ const FIXTURES: Array<[RegExp, unknown]> = [
     needsDestination: false, legacyAddressRetired: false, supportedKinds: ["lightning_address", "bolt12"], onchainSupported: false,
   }],
   [/\/wallet\/send\/requests/, { requests: [] }],
+  [/\/portal\/api\/wallet\/overview/, {
+    connected: true, network: "regtest", networkSource: "coordinator", cSats: 125_000, earnedSats: 42, btcUsd: 98_450, rateStale: false,
+    fees: { purchaseFeeBps: 0, networkFeeBps: 500 }, topup: { minSats: 100, maxSats: 1_000_000 },
+    payouts: {
+      balance: { earnedMsat: 42_000, heldMsat: 2_000, maturesAtMs: NOW + 3_600_000, paidMsat: 10_000, pendingMsat: 0, payableMsat: 30_000 },
+      policy: { network: "regtest", minPayoutSats: 1_000, maxFeeBps: 100, minFeeFloorSats: 10, lightningEnabled: true, paused: false, limits: { maxSingleSats: 100_000, maxAccountDailySats: 500_000 } },
+      payouts: [{ createdAtMs: NOW - 86_400_000, kind: "withdraw", amountMsat: 10_000, feeMsat: 0, status: "paid" }],
+    },
+  }],
+  [/\/portal\/api\/wallet\/overview/, {
+    connected: true, network: "regtest", networkSource: "coordinator", cSats: 125_000, earnedSats: 42, btcUsd: 98_450, rateStale: false,
+    fees: { purchaseFeeBps: 0, networkFeeBps: 500 }, topup: { minSats: 100, maxSats: 1_000_000 },
+    payouts: {
+      balance: { earnedMsat: 42_000, heldMsat: 2_000, maturesAtMs: NOW + 3_600_000, paidMsat: 10_000, pendingMsat: 0, payableMsat: 30_000 },
+      policy: { network: "regtest", minPayoutSats: 1_000, maxFeeBps: 100, minFeeFloorSats: 10, lightningEnabled: true, paused: false, limits: { maxSingleSats: 100_000, maxAccountDailySats: 500_000 } },
+      payouts: [{ createdAtMs: NOW - 86_400_000, kind: "withdraw", amountMsat: 10_000, feeMsat: 0, status: "paid" }],
+    },
+  }],
 ];
 
 /** The canned answer for a backend URL; `{}` for anything not listed. */
@@ -141,7 +159,6 @@ export function fixtureFor(url: string): unknown {
 export const SECTION_SHOWS: Record<string, string> = {
   "General": "us-east",
   "Profile": "a11y@example.org",
-  "Plan & usage": "Recent activity",
   "Usage": "Compute time",
   "Compute": "free now",
   "Connect your tools": "Cursor",

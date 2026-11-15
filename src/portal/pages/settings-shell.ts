@@ -21,7 +21,7 @@ export type SettingsSection = "general" | "profile" | "plan" | "usage" | "comput
 export const SETTINGS_NAV: Array<{ key: SettingsSection; label: string; icon: string; href: string; adminOnly?: boolean }> = [
   { key: "general", label: "General", icon: "layers", href: "/portal/settings#general" },
   { key: "profile", label: "Profile", icon: "user", href: "/portal/settings#profile" },
-  { key: "plan", label: "Plan &amp; usage", icon: "wallet", href: "/portal/settings/plan" },
+  { key: "plan", label: "Wallet", icon: "wallet", href: "/portal/settings/plan" },
   { key: "usage", label: "Usage", icon: "zap", href: "/portal/settings#usage" },
   { key: "compute", label: "Compute", icon: "cpu", href: "/portal/settings/compute" },
   { key: "tools", label: "Connect your tools", icon: "key", href: "/portal/settings#tools" },
@@ -102,8 +102,9 @@ export const SETTINGS_CSS = `
     .lease .set-text .set-label { display: flex; align-items: center; gap: 8px; }
     #settingsNoMatch { color: var(--muted); font-size: 13px; padding: 24px 0; }
     @media (max-width: 900px) {
-      .settings-layout { grid-template-columns: 1fr; gap: 16px; }
-      .settings-nav { position: static; }
+      /* minmax(0, 1fr): the nowrap link row scrolls inside the column instead of widening the page. */
+      .settings-layout { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+      .settings-nav { position: static; min-width: 0; }
       .settings-links { flex-direction: row; overflow-x: auto; }
       .settings-link { white-space: nowrap; }
       .set-row { flex-direction: column; align-items: stretch; gap: 10px; }

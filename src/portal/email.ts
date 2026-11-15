@@ -159,7 +159,7 @@ export function createPortalMailer(cfg: PortalMailerConfig, log: { warn: (msg: s
       <p>Your wallet's payment server changed from <strong>${escapeHtml(input.previousHost)}</strong> to <strong>${escapeHtml(input.newHost)}</strong>
       for your payout address <strong>${escapeHtml(input.destination)}</strong>.</p>
       <p>We have paused payouts to that address. Your earnings are safe and still payable.</p>
-      <p>If your wallet provider moved its servers, confirm the change under Settings, Plan &amp; usage to keep receiving payouts:
+      <p>If your wallet provider moved its servers, confirm the change under Settings, Wallet to keep receiving payouts:
       <a href="${link}">${link}</a></p>
       <p>If you did not expect this, do not confirm. Change your payout address to a wallet you trust instead.</p>
     `;

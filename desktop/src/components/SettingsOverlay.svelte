@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowLeft, Search, Settings2, UserRound, CreditCard, BarChart3, Cpu, Plug, Boxes, Github, Network, LayoutDashboard, Activity, ListChecks, Wallet, ScrollText } from "@lucide/svelte";
+  import { ArrowLeft, Search, Settings2, UserRound, BarChart3, Cpu, Plug, Boxes, Github, Network, LayoutDashboard, Activity, ListChecks, Wallet, ScrollText } from "@lucide/svelte";
   import "../styles/settings-page.css";
   import Account from "../pages/Account.svelte";
   import Integrations from "../pages/Integrations.svelte";
@@ -7,7 +7,6 @@
   import Dashboard from "../pages/Dashboard.svelte";
   import MeshTopology from "../pages/MeshTopology.svelte";
   import ModelManager from "../pages/ModelManager.svelte";
-  import Credits from "../pages/Credits.svelte";
   import PlanUsage from "../pages/PlanUsage.svelte";
   import Usage from "../pages/Usage.svelte";
   import ComputeMarket from "../pages/ComputeMarket.svelte";
@@ -35,7 +34,7 @@
   const sections = [
     { id: "general", label: "General", icon: Settings2, group: 0, keywords: "preferences theme appearance editor network bluetooth ble mesh startup" },
     { id: "profile", label: "Profile", icon: UserRound, group: 0, keywords: "account name email sign out" },
-    { id: "plan", label: "Plan & usage", icon: CreditCard, group: 1, keywords: "csats buy balance lightning invoice billing activity" },
+    { id: "plan", label: "Wallet", icon: Wallet, group: 1, keywords: "csats buy add funds top up balance lightning invoice billing activity sats earnings withdraw payout" },
     { id: "usage", label: "Usage", icon: BarChart3, group: 1, keywords: "spend cost tokens budget requests history csv export chart" },
     { id: "compute", label: "Compute", icon: Cpu, group: 1, keywords: "reserve gpu cpu apple machines prices market" },
     { id: "connect", label: "Connect your tools", icon: Plug, group: 1, keywords: "claude code cursor continue cline aider zed api key port connection openai anthropic" },
@@ -45,11 +44,10 @@
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard, group: 3, keywords: "status cpu memory disk ollama" },
     { id: "active-work", label: "Active work", icon: Activity, group: 3, keywords: "queue agents jobs" },
     { id: "tasks", label: "Tasks", icon: ListChecks, group: 3, keywords: "task queue" },
-    { id: "wallet", label: "Wallet", icon: Wallet, group: 3, keywords: "sats earnings withdraw seed" },
     { id: "logs", label: "Logs", icon: ScrollText, group: 4, keywords: "debug log" },
   ] as const;
 
-  const LEGACY: Record<string, string> = { account: "profile", preferences: "general" };
+  const LEGACY: Record<string, string> = { account: "profile", preferences: "general", wallet: "plan" };
   // The section to open on is read once, when the window opens.
   const startAt = untrack(() => LEGACY[initialSection ?? ""] ?? initialSection);
   let activeSectionId = $state<string>(sections.some((s) => s.id === startAt) ? startAt! : "general");
@@ -143,8 +141,6 @@
       <ActiveWork />
     {:else if activeSectionId === "tasks"}
       <TaskQueue />
-    {:else if activeSectionId === "wallet"}
-      <Credits />
     {:else if activeSectionId === "logs"}
       <LogViewer />
     {:else}
