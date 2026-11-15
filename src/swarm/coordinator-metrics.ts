@@ -12,7 +12,10 @@ import type { ReconcileResult } from "../economy/payout-reconcile.js";
 
 export interface CoordinatorMetricSources {
   queue: () => { queued: number; agents: number; results: number };
+  /** Agents seen recently (heartbeat or register within the connected window). */
   connectedAgents: () => number;
+  /** Agents in the in-memory registry, seen recently or not (pruned after AGENT_CAPABILITY_TTL_MS). */
+  knownAgents?: () => number;
   payoutReconcile: () => ReconcileResult | null;
 }
 
@@ -22,7 +25,8 @@ export const PAYOUT_RECONCILE_STATES = ["ok", "alert", "tripped", "error", "unsu
 export function registerCoordinatorMetrics(metrics: ServiceMetrics, sources: CoordinatorMetricSources): void {
   metrics.gauge("edgecoder_queue_depth", "Tasks waiting in the swarm queue.", () => sources.queue().queued);
   metrics.gauge("edgecoder_queue_results", "Task results held by the swarm queue.", () => sources.queue().results);
-  metrics.gauge("edgecoder_connected_agents", "Agents currently known to this coordinator.", sources.connectedAgents);
+  metrics.gauge("edgecoder_connected_agents", "Agents seen by this coordinator in the last 2 minutes.", sources.connectedAgents);
+  if (sources.knownAgents) metrics.gauge("edgecoder_known_agents", "Agents in this coordinator's registry (seen within the retention window).", sources.knownAgents);
   metrics.stateGauge(
     "edgecoder_payout_reconcile_status",
     "Outcome of the last payout reconciliation run (1 for the current state).",

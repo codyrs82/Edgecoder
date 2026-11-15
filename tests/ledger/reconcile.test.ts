@@ -107,4 +107,15 @@ describe("#115 reconcileLedger", () => {
     expect(r.mismatches).toBe(30);
     expect(r.discrepancies).toHaveLength(5);
   });
+
+  it("flags a task that paid out plus refunded more than its reserve, and not one within it", () => {
+    const r = run(snapshot({ taskReserves: [
+      { taskId: "t-ok", reserved: "5.334000", paid: "0.007000", refunded: "5.327000" },
+      { taskId: "t-over", reserved: "5.334000", paid: "0.007000", refunded: "5.334000" },
+      { taskId: "t-no-reserve", reserved: "0", paid: "1", refunded: "0" }
+    ] }));
+    expect(r.byKind).toEqual({ task_overpaid: 1 });
+    expect(r.discrepancies[0]).toMatchObject({ kind: "task_overpaid", taskId: "t-over", detail: { over: 0.007 } });
+    expect(r.tasksChecked).toBe(3);
+  });
 });

@@ -550,6 +550,7 @@ The schemas are collected in `src/config/index.ts`. `tests/common/env-docs.test.
 | `RELAY_RATE_LIMIT_PER_10S` | integer ≥ 0 | `80` |
 | `DIRECT_WORK_OFFERS_PER_10S` | integer ≥ 0 | `20` |
 | `AGENT_ORCHESTRATION_ONLINE_WINDOW_MS` | integer ≥ 1 | `120000` |
+| `AGENT_CAPABILITY_TTL_MS` | integer ≥ 60000 | `3600000` |
 | `ROBOT_QUEUE_ENABLED` | true/false | `false` |
 | `REQUIRE_VERIFIED_AGENTS` | true/false | `false` |
 | `INFERENCE_URL` | http(s) URL | `http://127.0.0.1:4302` |

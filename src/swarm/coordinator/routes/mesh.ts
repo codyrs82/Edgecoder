@@ -43,7 +43,7 @@ import {
   protocol,
   queue,
   peerOfferBudgetMsat,
-  PEER_OFFER_BUDGET_MAX_ENTRIES,
+  peerGrants,
   SUBTASK_RESERVE_TIMEOUT_MS,
   taskOriginMap,
   nonceStore,
@@ -58,9 +58,10 @@ import {
   agentCapabilities
 } from "../agent-state.js";
 import { ADMIN_API_TOKEN, requireMeshToken, hasMeshToken } from "../auth.js";
-import { subtaskReserveMsat } from "../economy.js";
+import { subtaskReserveMsat, rateOracleConfig } from "../economy.js";
 import { persistStatsLedgerRecord } from "../stats-ledger.js";
 import { validatePortalNode } from "../enrollment.js";
+import { grantSubtaskToPeer, hasLiveAgentFor, requestOfferGrant } from "../grants.js";
 
 // `fingerprint` (sha256 of the SPKI DER) is what operators list in TRUSTED_COORDINATOR_KEYS and
 // MESH_PEER_ALLOWLIST; `legacyFingerprints` are the PEM-text forms older agent builds compare.
@@ -299,9 +300,13 @@ async function handleMeshIngest(
         // Capability constraints travel with the task so a peer cannot hand it to an under-spec agent.
         minVramGb: z.number().positive().max(4096).optional(),
         minMemoryGb: z.number().positive().max(4096).optional(),
+        // The requester's bid: class and price ceiling (msat per credit), enforced here too.
+        computeClass: z.string().max(64).optional(),
+        maxBidMsatPerCredit: z.number().positive().finite().optional(),
       }),
       originCoordinatorId: z.string(),
       originCoordinatorUrl: z.string(),
+      bidPremiumBps: z.number().int().min(0).max(100_000).optional(),
     }).safeParse(message.payload);
 
     if (!payload.success) {
@@ -318,65 +323,48 @@ async function handleMeshIngest(
     if (!peer || d.originCoordinatorId !== message.fromPeerId) {
       return { ok: false, statusCode: 403, error: "offer_origin_mismatch" };
     }
-    // Only accept if we have alive agents (heartbeat in last 30s)
-    const aliveAgents = [...agentCapabilities.values()].filter(
-      a => a.lastSeenMs > Date.now() - 30_000
-    );
-    if (aliveAgents.length === 0) {
+    // Only ask for it if a live agent here could run it.
+    if (!hasLiveAgentFor(d)) {
       return { ok: true, skipped: "no_agents" };
     }
-    // Enqueue locally (dedup by subtaskId handled in queue)
-    queue.enqueueSubtask({ ...d, id: d.subtaskId });
-    // The origin charges its requester at most its worst case for one subtask (perSubtaskReserveMsat):
-    // that is all an agent here may earn for running it.
-    if (!peerOfferBudgetMsat.has(d.subtaskId)) {
-      if (peerOfferBudgetMsat.size >= PEER_OFFER_BUDGET_MAX_ENTRIES) peerOfferBudgetMsat.delete(peerOfferBudgetMsat.keys().next().value as string);
-      peerOfferBudgetMsat.set(d.subtaskId, subtaskReserveMsat(d.projectMeta.resourceClass, "any", SUBTASK_RESERVE_TIMEOUT_MS));
+    // The requester's bid (stress finding 4): its class must be one we know; its ceiling is posted
+    // in our book for the task when granted, so only agents whose ask is within it can claim.
+    const bidClass = d.projectMeta.computeClass ?? "any";
+    if (bidClass !== "any" && !(bidClass in rateOracleConfig.computeClasses)) {
+      return { ok: true, skipped: "unknown_compute_class" };
     }
-    // Track origin for result forwarding: the origin peer's URL from the peer table.
-    taskOriginMap.set(d.subtaskId, {
-      coordinatorId: d.originCoordinatorId,
-      coordinatorUrl: peer.coordinatorUrl,
-    });
-    // Broadcast task_claim so origin coordinator knows we're handling it
-    const claimMsg = protocol.createMessage(
-      "task_claim",
-      identity.peerId,
-      { subtaskId: d.subtaskId, claimedByCoordinator: identity.peerId },
-      coordinatorKeys.privateKeyPem,
+    const ceiling = d.bidPremiumBps === undefined ? d.projectMeta.maxBidMsatPerCredit : undefined;
+    // The origin charges its requester at most its worst case for one subtask, lowered to the bid's
+    // ceiling: that is all an agent here may earn for running it, and only what the origin actually
+    // charges for the forwarded result is paid (results.ts).
+    const budgetMsat = subtaskReserveMsat(d.projectMeta.resourceClass, bidClass as ComputeClassId | "any", SUBTASK_RESERVE_TIMEOUT_MS, ceiling);
+    const bid = { computeClass: bidClass as ComputeClassId | "any", maxMsatPerCredit: ceiling, premiumBps: d.bidPremiumBps };
+    // Queued here only once the origin grants it to us (task_claim answered granted), so it never runs
+    // on two coordinators (src/swarm/remote-grants.ts).
+    const { bidPremiumBps: _premium, ...offered } = d;
+    void requestOfferGrant(peer, { ...offered, id: d.subtaskId }, budgetMsat, bid).catch((error) =>
+      app.log.warn({ subtaskId: d.subtaskId, error: String(error) }, "task_offer_grant_request_failed")
     );
-    void mesh.broadcast(claimMsg);
-    app.log.info({ subtaskId: d.subtaskId, from: d.originCoordinatorId }, "task_offer_accepted");
     if (peer) peerScore.set(peer.peerId, Math.min(200, (peerScore.get(peer.peerId) ?? 100) + 2));
-    return { ok: true, enqueued: true };
+    return { ok: true, claimRequested: true };
   }
 
   if (message.type === "task_claim") {
     const payload = z.object({
       subtaskId: z.string(),
+      taskId: z.string().optional(),
       claimedByCoordinator: z.string(),
     }).safeParse(message.payload);
-
-    if (payload.success && payload.data.claimedByCoordinator !== identity.peerId) {
-      // Only remove from our queue if we don't have alive local agents who
-      // could claim it.  When we *do* have agents (e.g. iPhone connected via
-      // WS), keep the task so local agents can still race for it via /pull.
-      const aliveLocalAgents = [...agentCapabilities.values()].filter(
-        a => a.lastSeenMs > Date.now() - 30_000
-      );
-      if (aliveLocalAgents.length === 0) {
-        const removed = queue.markRemoteClaimed(payload.data.subtaskId);
-        if (removed) {
-          app.log.info({ subtaskId: payload.data.subtaskId, by: payload.data.claimedByCoordinator }, "task_claim_remote");
-        }
-      } else {
-        app.log.info(
-          { subtaskId: payload.data.subtaskId, by: payload.data.claimedByCoordinator, localAgents: aliveLocalAgents.length },
-          "task_claim_remote_kept_for_local"
-        );
-      }
+    if (!payload.success) return { ok: false, statusCode: 400, error: "invalid_task_claim_payload" };
+    // A coordinator claims for itself only.
+    if (!peer || payload.data.claimedByCoordinator !== message.fromPeerId) {
+      return { ok: false, statusCode: 403, error: "claim_sender_mismatch" };
     }
-    return { ok: true };
+    // Only the origin answers: it grants the subtask to this peer or refuses (already granted to
+    // another peer, already claimed by a local agent, done, or not ours).
+    const decision = grantSubtaskToPeer(payload.data.subtaskId, peer.peerId);
+    if (decision.granted) return { ok: true, granted: true, grantTtlMs: decision.ttlMs };
+    return { ok: true, granted: false, reason: decision.reason };
   }
 
   // ── Result Announce from mesh peers (agent/phone executed a task) ──
@@ -391,8 +379,13 @@ async function handleMeshIngest(
     }).safeParse(message.payload);
 
     if (payload.success) {
-      // Remove from our queue if still pending
-      queue.markRemoteClaimed(payload.data.subtaskId);
+      // Only the subtask's origin may take back an unclaimed copy it granted us (it ran it itself
+      // after the grant lapsed); anyone else's announcement changes nothing here.
+      if (taskOriginMap.get(payload.data.subtaskId)?.coordinatorId === message.fromPeerId && queue.markRemoteClaimed(payload.data.subtaskId)) {
+        taskOriginMap.delete(payload.data.subtaskId);
+        peerOfferBudgetMsat.delete(payload.data.subtaskId);
+        peerGrants.delete(payload.data.subtaskId);
+      }
       app.log.info(
         { subtaskId: payload.data.subtaskId, from: message.fromPeerId, ok: payload.data.ok },
         "result_announce_from_mesh"

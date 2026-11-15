@@ -61,6 +61,7 @@ import {
   forwardReplayCache,
   PEER_ALLOWLIST_ENFORCED,
   offeredToPeers,
+  remoteGrants,
   REQUIRE_AGENT_SIGNED_FORWARDS,
   type ResultMeta
 } from "../context.js";
@@ -107,11 +108,17 @@ import {
   holdSettlement,
   publishResult,
   releaseDependents,
-  addTaskCost,
+  chargePeerWork,
+  taskOpenCount,
+  offerSubtaskToPeers,
+  isPeerOffered,
+  peerWorkCostMsat,
   accrueResultCredits,
   settleTaskIfDone
 } from "../results.js";
 import { inferenceStreams } from "./inference.js";
+import { peerGrantAllowsClaim } from "../grants.js";
+import type { RemoteGrant } from "../../remote-grants.js";
 
 async function enforceContributionFirstPolicy(accountId: string): Promise<{ ok: boolean; reason?: string }> {
   if (!pgStore) return { ok: true };
@@ -141,6 +148,10 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         // to the actual cost when it finishes (job-pricing.ts).
         const early = resolveRequestedClass(body.computeClass, body.maxBidMsatPerCredit, {}, rateOracleConfig.computeClasses);
         const perSubtask = subtaskReserveMsat(body.resourceClass as ResourceClass, (early.computeClass ?? "any") as ComputeClassId | "any", SUBTASK_RESERVE_TIMEOUT_MS, early.msatPerCredit);
+        // Durable billing first (stress finding 2): a restart resumes or refunds the task. Amounts
+        // are read back from the ledger, so a row whose debit never happened refunds nothing.
+        await pgStore?.insertTaskBilling({ taskId: body.taskId, coordinatorId: identity.peerId, accountId: body.submitterAccountId, kind: "job", perSubtaskReserveMsat: perSubtask, createdAtMs: Date.now() })
+          .catch((err) => req.log.warn({ err, taskId: body.taskId }, "task_billing_persist_failed"));
         // One charge per task id network-wide: the same task sent again (retry, or to the other seed) is refused.
         await spendCredits(body.submitterAccountId, msatToCSats(perSubtask), "task_reserve", body.taskId, { idempotencyKey: `task_reserve:${body.taskId}` });
         taskBilling.set(body.taskId, { accountId: body.submitterAccountId, reservedMsat: perSubtask, perSubtaskReserveMsat: perSubtask, costMsat: 0, refunded: false });
@@ -258,6 +269,11 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       }
     }));
 
+    // Which subtasks make up the task, for a restart to tell whether it can resume them.
+    if (taskBilling.has(body.taskId)) {
+      await pgStore?.setTaskBillingSubtasks(body.taskId, subtasksWithIds.map((s) => s.id)).catch((err) => req.log.warn({ err, taskId: body.taskId }, "task_billing_persist_failed"));
+    }
+
     // Detect circular dependencies and warn (enqueue anyway to avoid deadlock)
     const circularIds = depTracker.detectCircularDeps(subtasksWithIds);
     if (circularIds.size > 0) {
@@ -292,27 +308,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     }
 
     // Gossip each immediately-enqueued subtask as a task_offer to peer coordinators
-    for (const subtask of created) {
-      const offerMsg = protocol.createMessage(
-        "task_offer",
-        identity.peerId,
-        {
-          subtaskId: subtask.id,
-          taskId: subtask.taskId,
-          kind: subtask.kind,
-          language: subtask.language,
-          input: subtask.input,
-          timeoutMs: subtask.timeoutMs,
-          snapshotRef: subtask.snapshotRef,
-          projectMeta: subtask.projectMeta,
-          originCoordinatorId: identity.peerId,
-          originCoordinatorUrl: COORDINATOR_PUBLIC_URL,
-        },
-        coordinatorKeys.privateKeyPem,
-        60_000
-      );
-      void mesh.broadcast(offerMsg);
-    }
+    for (const subtask of created) offerSubtaskToPeers(subtask);
 
     const allIds = [...created.map((s) => s.id), ...deferred];
     const message = protocol.createMessage(
@@ -379,6 +375,8 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       // checked too, so a task gossiped from a peer (no local bid) still cannot go to an under-spec agent.
       (subtask) => {
         if (!agentMayClaim(capability, subtask)) return false;
+        // A subtask granted to us by its origin: only while enough of the grant is left to run it.
+        if (!peerGrantAllowsClaim(subtask)) return false;
         // #54: a job that names a model goes only to an agent that reported it (inference: installed;
         // code: its active model, which is what code work runs on).
         const hasModel = subtaskModelEligible(capability, subtask);
@@ -521,6 +519,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     });
     if (resultAuth === "reject") return reply.code(401).send({ error: "signature_required" });
     const isPeerForward = resultAuth === "peer_forward";
+    let grantedForward: RemoteGrant | undefined;
     if (isPeerForward) {
       // #52: a forwarded result must be signed by an allowlisted peer coordinator.
       const fwd = verifyForwardedResult({
@@ -536,6 +535,9 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         app.log.warn({ subtaskId: body.subtaskId, error: fwd.error }, "forwarded_result_rejected");
         return reply.code(fwd.code).send({ error: fwd.error });
       }
+      // A re-sent forward of a result already recorded gets the same answer and is not charged again.
+      const settledCharge = remoteGrants.settledCharge(body.subtaskId, fwd.fromPeerId ?? "", Date.now());
+      if (settledCharge !== undefined) return reply.send({ ok: true, duplicate: true, chargedMsat: settledCharge });
       // #118 review: only results for subtasks we offered to peers, and only once each.
       if (PEER_ALLOWLIST_ENFORCED) {
         const exp = offeredToPeers.get(body.subtaskId);
@@ -560,6 +562,17 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       if (agentCheck.mode === "legacy_unenveloped") {
         app.log.warn({ subtaskId: body.subtaskId, from: fwd.fromPeerId }, "forwarded_result_without_agent_signature_accepted");
       }
+      // Only the peer this coordinator granted the subtask to, once (src/swarm/remote-grants.ts).
+      const admission = remoteGrants.admitForward(body.subtaskId, fwd.fromPeerId ?? "", Date.now());
+      if (admission.kind === "duplicate") return reply.send({ ok: true, duplicate: true, chargedMsat: admission.chargedMsat });
+      if (admission.kind === "in_progress") return reply.code(409).send({ error: "forward_in_progress" });
+      if (admission.kind === "not_granted") {
+        app.log.warn({ subtaskId: body.subtaskId, from: fwd.fromPeerId }, "forwarded_result_not_granted");
+        return reply.code(409).send({ error: "subtask_not_granted" });
+      }
+      grantedForward = admission.grant;
+      // The grant names the task: a forward cannot charge another one.
+      body = { ...body, taskId: admission.grant.subtask.taskId };
     }
     // #122: kept with the result so the origin coordinator can check the agent's own signature.
     const signedHeaders = verified ? extractSignedHeaders((req as any).headers ?? {}) : null;
@@ -637,27 +650,41 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     // The result is visible to the requester's stream read from here on, and that read settles the
     // task: it must not return the reserve before this result's cost has been taken from it.
     const releaseSettlement = holdSettlement(body.taskId);
+    let chargedMsat = 0;
+    let recorded = false;
     try {
-      await publishResult(body, agentEnvelope);
+      // For a subtask a peer offered us: its cost here goes to the origin with the result, and what the
+      // origin charged for it (the forward's answer) is what the agent may be paid.
+      const execution: ExecutionResult<ResultMeta> | undefined = subtask
+        ? { subtaskId: body.subtaskId, agentId: body.agentId, ok: body.ok, output: body.output ?? "", meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask } }
+        : undefined;
+      const peerCostMsat = execution && isPeerOffered(body.subtaskId) ? peerWorkCostMsat(execution) : undefined;
+      const originChargedMsat = await publishResult(body, agentEnvelope, peerCostMsat);
+      recorded = true;
       inferenceStreams.finish(body.subtaskId, body.ok ? undefined : body.error ?? "failed");
       // ── Dependency tracking: store output and release dependent subtasks ──
       releaseDependents(body.subtaskId, body.output ?? "");
-      // Ran on another coordinator: its cost isn't measured here, so it is charged at the worst case.
-      if (isPeerForward) addTaskCost(body.taskId, taskBilling.get(body.taskId)?.perSubtaskReserveMsat ?? 0);
-
-      if (subtask) {
-        await accrueResultCredits({
-          subtaskId: body.subtaskId,
-          agentId: body.agentId,
-          ok: body.ok,
-          output: body.output ?? "",
-          meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask }
-        });
+      if (grantedForward) {
+        // Ran on the granted peer: charged what the peer says it cost (its pricing, signed with the
+        // forward), never more than the worst case for one subtask nor than what the task has left;
+        // a peer that sends no cost (older build) is charged the worst case, as before. Failed work is
+        // not charged. The answer tells the peer what it may pay its agent; the unused rest of the
+        // reserve goes back to the requester when the task settles.
+        const worstCase = taskBilling.get(body.taskId)?.perSubtaskReserveMsat ?? 0;
+        const reported = (rawBody as { peerCostMsat?: unknown }).peerCostMsat;
+        const peerCost = typeof reported === "number" && Number.isFinite(reported) && reported >= 0 ? reported : worstCase;
+        chargedMsat = body.ok ? chargePeerWork(body.taskId, Math.min(peerCost, worstCase)) : 0;
+        remoteGrants.settle(body.subtaskId, chargedMsat, Date.now());
+        if (taskOpenCount(body.taskId) === 0) orderBook.removeBid(body.taskId);
       }
+
+      if (execution) await accrueResultCredits(execution, { originChargedMsat });
     } finally {
+      // Nothing recorded: the granted peer may send the result again.
+      if (grantedForward && !recorded) remoteGrants.release(body.subtaskId);
       releaseSettlement();
     }
     await settleTaskIfDone(body.taskId);
-    return reply.send({ ok: true });
+    return reply.send({ ok: true, ...(grantedForward ? { chargedMsat } : {}) });
   });
 }

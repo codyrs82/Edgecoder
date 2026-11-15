@@ -134,6 +134,22 @@ describe.skipIf(!PG_URL)("ledger reconciliation on one Postgres shared by two co
     expect(r.byKind.earnings_projection_mismatch).toBe(1);
   });
 
+  it("flags a task that paid out (work + fee + refund) more than its requester set aside", async () => {
+    const pool = db.poolA;
+    const taskId = `task-over-${randomUUID()}`;
+    const now = Date.now();
+    await pool.query(`INSERT INTO credit_transactions (tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms) VALUES ($1, 'acct-buyer', 'earn', 10, 'test_funding', NULL, $2)`, [randomUUID(), now]);
+    await db.a.debitCredits({ txId: randomUUID(), accountId: "acct-buyer", type: "spend", credits: 5.334, reason: "task_reserve", relatedTaskId: taskId, timestampMs: now });
+    // The subtask ran on two coordinators: one paid its agent, the origin refunded the whole reserve.
+    await accrue(db.b, chainB, "coord-b", { account: "acct-1", taskId, durationMs: 5_000, msatPerCredit: 7, cps: 1 });
+    await pool.query(`INSERT INTO credit_transactions (tx_id, account_id, tx_type, credits, reason, timestamp_ms) VALUES ($1, 'acct-buyer', 'earn', 5.334, $2, $3)`, [randomUUID(), `task_submit_refund:${taskId}`, now]);
+    const r = await verify();
+    const over = r.discrepancies.find((d) => d.kind === "task_overpaid");
+    expect(over?.taskId).toBe(taskId);
+    expect(over!.detail.over as number).toBeGreaterThan(0);
+    expect(r.tasksChecked).toBeGreaterThanOrEqual(1);
+  });
+
   it("is read-only: verifying changes no balance", async () => {
     const before = await db.poolA.query(`SELECT account_id, SUM(credits)::text AS s, COUNT(*) AS n FROM credit_transactions GROUP BY account_id ORDER BY account_id`);
     await verify();

@@ -30,10 +30,11 @@ import {
   PROVIDER,
   OLLAMA_AUTO_INSTALL,
   OLLAMA_MODEL,
-  OLLAMA_HOST
+  OLLAMA_HOST,
+  queue
 } from "./context.js";
 import { mutable } from "./mutable-state.js";
-import { blacklistAuditLog, blacklistByAgent, cleanupStaleTunnels, agentCapabilities } from "./agent-state.js";
+import { blacklistAuditLog, blacklistByAgent, cleanupStaleTunnels, agentCapabilities, pruneStaleAgentCapabilities } from "./agent-state.js";
 import {
   PRICE_EPOCH_BOUNDS,
   latestPriceEpochByResource,
@@ -48,7 +49,8 @@ import {
   MARKET_TICK_MS,
   RATE_ORACLE_ENABLED,
   recalibrateRateEpoch,
-  RATE_RECALIBRATION_MS
+  RATE_RECALIBRATION_MS,
+  orderBook
 } from "./economy.js";
 import {
   ECONOMY_PAYMENTS_ENABLED,
@@ -71,6 +73,8 @@ import { runIssuanceTick, maybeAnchorLatestFinalizedEpoch } from "./issuance.js"
 import { reconcileIntent } from "./payments.js";
 import { restorePendingVerifications, runResultVerificationTick } from "./results.js";
 import { LEDGER_VERIFY_INTERVAL_MS, runLedgerVerifyTick } from "./ledger-verify.js";
+import { sweepGrants } from "./grants.js";
+import { restoreTaskBilling } from "./billing-restore.js";
 
 /** Initialize coordinator background tasks, intervals, and peer mesh.
  *  Call after the Fastify server is listening (either standalone or unified mode). */
@@ -120,6 +124,9 @@ export async function initCoordinator(): Promise<void> {
       }
       // #105: results held for verification before a restart are held again, not dropped.
       await restorePendingVerifications(storeRef).catch((error) => app.log.warn({ error: String(error) }, "result_verification_restore_failed"));
+      // Stress finding 2: tasks billed here and not settled before the restart are resumed or refunded
+      // (after the verifications, which own the subtasks they hold).
+      await restoreTaskBilling(storeRef).catch((error) => app.log.warn({ error: String(error) }, "task_billing_restore_failed"));
     };
     const startupDbInitTimeoutMs = 10_000;
     await Promise.race([
@@ -133,6 +140,19 @@ export async function initCoordinator(): Promise<void> {
   {
       setInterval(() => {
         cleanupStaleTunnels();
+        // Stress finding 5: agents not seen for AGENT_CAPABILITY_TTL_MS leave the registry (and the
+        // order book); one holding a reservation stays.
+        const now = Date.now();
+        for (const agentId of pruneStaleAgentCapabilities(now, CC.AGENT_CAPABILITY_TTL_MS, (id) => reservations.isHeld(id, now) || reservations.activeForAgent(id, now) !== undefined)) {
+          orderBook.removeAsk(agentId);
+          queue.forgetAgent(agentId);
+        }
+        // Execution grants between coordinators: lapsed grants go back on the queue (remote-grants.ts).
+        try {
+          sweepGrants();
+        } catch (error) {
+          app.log.warn({ error: String(error) }, "grant_sweep_failed");
+        }
       }, 15_000);
       // Hardware verification: expire unanswered challenges and missing witnesses, re-post changed asks.
       setInterval(() => {

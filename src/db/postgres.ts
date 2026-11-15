@@ -763,6 +763,21 @@ CREATE TABLE IF NOT EXISTS pending_verifications (
   updated_at_ms BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pending_verifications_coordinator ON pending_verifications (coordinator_id, started_at_ms);
+-- Stress finding 2: what a task's requester set aside is billed by the coordinator that took the
+-- submit. Kept until the task settles (its unused reserve refunded), so a restart can resume the
+-- task's queued subtasks or refund it, instead of keeping the reserve forever. Amounts are not
+-- stored here: reserve, work paid and refund are read back from credit_transactions.
+CREATE TABLE IF NOT EXISTS task_billing (
+  task_id TEXT PRIMARY KEY,
+  coordinator_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  per_subtask_reserve_msat BIGINT NOT NULL,
+  subtask_ids JSONB,
+  created_at_ms BIGINT NOT NULL,
+  settled_at_ms BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_task_billing_open ON task_billing (coordinator_id) WHERE settled_at_ms IS NULL;
 
 -- The Bitcoin network this database's ledger belongs to (src/db/ledger-network.ts). One row, written
 -- by the first coordinator start that checks it (assertLedgerNetwork); a coordinator configured for
@@ -2990,6 +3005,20 @@ export class PostgresStore {
         [feePoolAccountId]
       );
       const projections = await client.query(`SELECT account_id, total_credits FROM coordinator_earnings_projection`);
+      // Per task with a reserve: reserved vs paid out (work + network fee) vs refunded.
+      const taskReserves = await client.query(
+        `WITH reserve AS (
+           SELECT related_task_id AS task_id, SUM(credits) AS reserved FROM credit_transactions
+            WHERE tx_type = 'spend' AND reason IN ('task_reserve', 'inference_reserve') AND related_task_id IS NOT NULL GROUP BY 1),
+         work AS (
+           SELECT COALESCE(related_task_id, substring(reason FROM 13)) AS task_id, SUM(credits) AS paid FROM credit_transactions
+            WHERE tx_type = 'earn' AND (reason = 'compute_contribution' OR reason LIKE 'network\\_fee:%') GROUP BY 1),
+         refund AS (
+           SELECT substring(reason FROM 20) AS task_id, SUM(credits) AS refunded FROM credit_transactions
+            WHERE tx_type = 'earn' AND reason LIKE 'task\\_submit\\_refund:%' GROUP BY 1)
+         SELECT r.task_id, r.reserved::text AS reserved, COALESCE(w.paid, 0)::text AS paid, COALESCE(f.refunded, 0)::text AS refunded
+           FROM reserve r LEFT JOIN work w ON w.task_id = r.task_id LEFT JOIN refund f ON f.task_id = r.task_id`
+      );
       const reservations = await client.query(
         `SELECT reservation_id, record_json FROM compute_reservations WHERE record_json->>'status' = 'ended'`
       );
@@ -3021,6 +3050,7 @@ export class PostgresStore {
         })),
         earnRows: earn.rows.map((r) => ({ accountId: r.account_id, taskId: r.related_task_id ?? null, rows: r.rows, credits: r.credits, msat: r.msat ?? null, msatRows: r.msat_rows })),
         feeRows: fees.rows.map((r) => ({ taskId: r.task_id, rows: r.rows, msat: r.msat ?? null })),
+        taskReserves: taskReserves.rows.map((r) => ({ taskId: r.task_id, reserved: r.reserved, paid: r.paid, refunded: r.refunded })),
         projections: projections.rows.map((r) => ({ accountId: r.account_id, totalCredits: r.total_credits })),
         reservations: reservations.rows.flatMap((r) => {
           const rec = r.record_json as { agentAccountId?: unknown; usedMsat?: unknown };
@@ -3347,6 +3377,95 @@ export class PostgresStore {
   async deletePendingVerification(coordinatorId: string, originalSubtaskId: string): Promise<boolean> {
     const r = await this.pool.query(`DELETE FROM pending_verifications WHERE original_subtask_id = $1 AND coordinator_id = $2`, [originalSubtaskId, coordinatorId]);
     return (r.rowCount ?? 0) > 0;
+  }
+
+  // ── Task billing (stress finding 2) ──
+  async insertTaskBilling(row: { taskId: string; coordinatorId: string; accountId: string; kind: "job" | "inference"; perSubtaskReserveMsat: number; createdAtMs: number }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO task_billing (task_id, coordinator_id, account_id, kind, per_subtask_reserve_msat, created_at_ms)
+       VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (task_id) DO NOTHING`,
+      [row.taskId, row.coordinatorId, row.accountId, row.kind, Math.round(row.perSubtaskReserveMsat), row.createdAtMs]
+    );
+  }
+
+  async setTaskBillingSubtasks(taskId: string, subtaskIds: string[]): Promise<void> {
+    await this.pool.query(`UPDATE task_billing SET subtask_ids = $2 WHERE task_id = $1`, [taskId, JSON.stringify(subtaskIds)]);
+  }
+
+  async markTaskBillingSettled(taskId: string, atMs: number): Promise<void> {
+    await this.pool.query(`UPDATE task_billing SET settled_at_ms = $2 WHERE task_id = $1 AND settled_at_ms IS NULL`, [taskId, atMs]);
+  }
+
+  async listOpenTaskBilling(coordinatorId: string): Promise<Array<{ taskId: string; accountId: string; kind: string; perSubtaskReserveMsat: number; subtaskIds: string[] | null; createdAtMs: number }>> {
+    const r = await this.pool.query(
+      `SELECT task_id, account_id, kind, per_subtask_reserve_msat, subtask_ids, created_at_ms FROM task_billing
+        WHERE coordinator_id = $1 AND settled_at_ms IS NULL ORDER BY created_at_ms ASC`,
+      [coordinatorId]
+    );
+    return r.rows.map((row) => ({
+      taskId: row.task_id,
+      accountId: row.account_id,
+      kind: row.kind,
+      perSubtaskReserveMsat: Number(row.per_subtask_reserve_msat),
+      subtaskIds: Array.isArray(row.subtask_ids) ? (row.subtask_ids as string[]) : typeof row.subtask_ids === "string" ? (JSON.parse(row.subtask_ids) as string[]) : null,
+      createdAtMs: Number(row.created_at_ms)
+    }));
+  }
+
+  /**
+   * Per task, from the ledger (msat): what its requester set aside (task_reserve / inference_reserve
+   * spends), what was paid for its work (compute_contribution + network fee earns) and refunded
+   * (the one refund row, by its deterministic tx id).
+   */
+  async taskLedgerTotals(tasks: Array<{ taskId: string; refundTxId: string }>): Promise<Map<string, { reservedMsat: number; paidMsat: number; refundedMsat: number }>> {
+    const out = new Map<string, { reservedMsat: number; paidMsat: number; refundedMsat: number }>();
+    if (tasks.length === 0) return out;
+    for (const t of tasks) out.set(t.taskId, { reservedMsat: 0, paidMsat: 0, refundedMsat: 0 });
+    const ids = tasks.map((t) => t.taskId);
+    const r = await this.pool.query(
+      `SELECT related_task_id AS task_id,
+              COALESCE(SUM(credits) FILTER (WHERE tx_type = 'spend' AND reason IN ('task_reserve', 'inference_reserve')), 0)::text AS reserved,
+              COALESCE(SUM(credits) FILTER (WHERE tx_type = 'earn' AND (reason = 'compute_contribution' OR reason = 'network_fee:' || related_task_id)), 0)::text AS paid
+         FROM credit_transactions WHERE related_task_id = ANY($1::text[]) GROUP BY related_task_id`,
+      [ids]
+    );
+    for (const row of r.rows) {
+      const e = out.get(row.task_id);
+      if (e) {
+        e.reservedMsat = Math.round(Number(row.reserved) * 1000);
+        e.paidMsat = Math.round(Number(row.paid) * 1000);
+      }
+    }
+    const refunds = await this.pool.query(`SELECT tx_id, credits::text AS credits FROM credit_transactions WHERE tx_id = ANY($1::text[]) AND tx_type = 'earn'`, [tasks.map((t) => t.refundTxId)]);
+    const byTx = new Map(tasks.map((t) => [t.refundTxId, t.taskId]));
+    for (const row of refunds.rows) {
+      const e = out.get(byTx.get(row.tx_id) ?? "");
+      if (e) e.refundedMsat += Math.round(Number(row.credits) * 1000);
+    }
+    return out;
+  }
+
+  /** Queue rows of these subtasks with no recorded result (a restart resumes them). */
+  async listUnfinishedSubtasks(subtaskIds: string[]): Promise<Array<{ subtask: Subtask; claimedBy: string | null; claimedAtMs: number | null; attempts: number }>> {
+    if (subtaskIds.length === 0) return [];
+    const r = await this.pool.query(
+      `SELECT q.payload_json, q.claimed_by, q.claimed_at_ms, q.attempts FROM queue_tasks q
+        WHERE q.subtask_id = ANY($1::text[]) AND NOT EXISTS (SELECT 1 FROM queue_results r WHERE r.subtask_id = q.subtask_id)`,
+      [subtaskIds]
+    );
+    return r.rows.map((row) => ({
+      subtask: (typeof row.payload_json === "string" ? JSON.parse(row.payload_json) : row.payload_json) as Subtask,
+      claimedBy: row.claimed_by ?? null,
+      claimedAtMs: row.claimed_at_ms === null || row.claimed_at_ms === undefined ? null : Number(row.claimed_at_ms),
+      attempts: Number(row.attempts ?? 0)
+    }));
+  }
+
+  /** Which of these subtasks have a recorded result. */
+  async subtasksWithResults(subtaskIds: string[]): Promise<Set<string>> {
+    if (subtaskIds.length === 0) return new Set();
+    const r = await this.pool.query(`SELECT subtask_id FROM queue_results WHERE subtask_id = ANY($1::text[])`, [subtaskIds]);
+    return new Set(r.rows.map((row) => row.subtask_id as string));
   }
 
   /** The verifications this coordinator held before a restart, oldest first. */

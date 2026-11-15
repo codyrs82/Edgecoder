@@ -170,6 +170,38 @@ export class GossipMesh {
   }
 
   /**
+   * Send one message to one peer over HTTP and return its answer (status and parsed JSON body), or
+   * null when it could not be reached. Used for request/answer exchanges (a task_claim asks the
+   * origin for an execution grant), which a broadcast cannot carry.
+   */
+  async send(peerId: string, message: MeshMessage, timeoutMs = 8_000): Promise<{ statusCode: number; body: Record<string, unknown> | null } | null> {
+    const peer = this.peers.get(peerId);
+    if (!peer) return null;
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (this.meshToken) headers["x-mesh-token"] = this.meshToken;
+    try {
+      const res = await request(`${peer.coordinatorUrl}/mesh/ingest`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(message),
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+      const text = await res.body.text().catch(() => "");
+      let body: Record<string, unknown> | null = null;
+      try {
+        const parsed = JSON.parse(text) as unknown;
+        if (parsed && typeof parsed === "object") body = parsed as Record<string, unknown>;
+      } catch {
+        body = null;
+      }
+      return { statusCode: res.statusCode, body };
+    } catch (err) {
+      logger.warn({ peerUrl: peer.coordinatorUrl, type: message.type, error: (err as Error).message }, "gossip send failed");
+      return null;
+    }
+  }
+
+  /**
    * Try relaying a message to an unreachable peer through any WS-connected
    * coordinator that might be able to forward it.
    */

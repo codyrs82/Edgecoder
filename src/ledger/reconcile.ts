@@ -23,6 +23,11 @@
  *    (row count = report count, credits and msat sums); per task the network-fee rows must match
  *    the accruals' feeMsat. Reservation leases (report `reservation:<id>`, no ledger record) must
  *    have paid agent + fee = the lease's usedMsat.
+ *  - Task reserves: per task with a reserve (task_reserve / inference_reserve spends), what it paid
+ *    out (compute_contribution + network_fee:<task> earns) plus what was refunded to the requester
+ *    (task_submit_refund:<task>) must not exceed the reserve. More would be cSats created from
+ *    nothing (stress finding: a subtask executed and paid on two coordinators). Tasks without a
+ *    reserve row (legacy rows, reservations) are not compared.
  *  - Ordering: duplicate earnings_accrual records for one report id, ledger_records forks (two
  *    records on one prev_hash), duplicate hashes, and sequence breaks between linked records.
  *    A record whose predecessor isn't stored is a gap; gaps are reported as warnings, not
@@ -46,6 +51,8 @@ export interface ReconcileInput {
   feeRows: Array<{ taskId: string; rows: number; msat: string | number | null }>;
   /** coordinator_earnings_projection. */
   projections: Array<{ accountId: string; totalCredits: string | number }>;
+  /** Per task with a reserve: reserved, paid out (work + network fee) and refunded, in cSats. */
+  taskReserves?: Array<{ taskId: string; reserved: string | number; paid: string | number; refunded: string | number }>;
   /** Ended reservation leases. */
   reservations: Array<{ id: string; agentAccountId: string; usedMsat: number }>;
   /** ledger_records structure. */
@@ -72,6 +79,7 @@ export type DiscrepancyKind =
   | "credit_amount_mismatch"
   | "fee_mismatch"
   | "reservation_settlement_mismatch"
+  | "task_overpaid"
   | "ledger_chain_fork"
   | "ledger_duplicate_hash"
   | "ledger_sequence_break";
@@ -92,6 +100,7 @@ export interface ReconcileReport {
   /** Accruals whose credits can't be recomputed from what was recorded (see module comment). */
   notRecomputable: { legacyAccruals: number; tokenPricedSplitOnly: number };
   reservationsChecked: number;
+  tasksChecked: number;
   ledgerRecordsChecked: number;
   mismatches: number;
   byKind: Partial<Record<DiscrepancyKind, number>>;
@@ -301,6 +310,16 @@ export function reconcileLedger(input: ReconcileInput, opts: { maxDiscrepancies?
     }
   }
 
+  // ── Task reserves: paid out + refunded never more than set aside ──
+  const taskReserves = input.taskReserves ?? [];
+  for (const t of taskReserves) {
+    const reserved = micro(t.reserved);
+    const out = micro(t.paid) + micro(t.refunded);
+    if (reserved > 0 && out > reserved) {
+      flag({ kind: "task_overpaid", taskId: t.taskId, detail: { reserved: reserved / 1e6, paid: Number(t.paid), refunded: Number(t.refunded), over: (out - reserved) / 1e6 } });
+    }
+  }
+
   // ── Ordering (ledger_records) ──
   for (const f of input.chain.forks) flag({ kind: "ledger_chain_fork", detail: { prevHash: f.prevHash, records: f.count } });
   for (const d of input.chain.duplicateHashes) flag({ kind: "ledger_duplicate_hash", detail: { hash: d.hash, records: d.count } });
@@ -314,6 +333,7 @@ export function reconcileLedger(input: ReconcileInput, opts: { maxDiscrepancies?
     accrualsRecomputed,
     notRecomputable: { legacyAccruals, tokenPricedSplitOnly },
     reservationsChecked,
+    tasksChecked: taskReserves.length,
     ledgerRecordsChecked: input.chain.records,
     mismatches,
     byKind,
