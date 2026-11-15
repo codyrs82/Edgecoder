@@ -14,7 +14,7 @@ import { execFileSync } from "node:child_process";
 import { ensureSandboxImages, isDockerAvailable } from "../executor/docker-sandbox.js";
 import { runInferenceSubtask } from "./inference-runner.js";
 import { warmOllamaModel } from "../inference-api/ollama.js";
-import { detectHardware, hardwareProfileFor, selectGpu, type Probe } from "../install/hardware.js";
+import { detectHardware, hardwareProfileFor, selectGpu, selectGpuPool, type Probe } from "../install/hardware.js";
 import { enforceSandboxPolicy, inferenceOnlyRejection, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
 import { isAgentNotRegisteredError, parseRetryAfterMs, rateLimitWaitMs, registerRefreshMsFromEnv, shouldRegister } from "./registration-policy.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
@@ -147,7 +147,7 @@ function buildHardwareProfile(): Record<string, unknown> {
       overridden: true
     };
   }
-  return hardwareProfileFor(hw, selectGpu(hw, process.env));
+  return hardwareProfileFor(hw, selectGpu(hw, process.env), selectGpuPool(hw, process.env));
 }
 const HARDWARE_PROFILE = buildHardwareProfile();
 /**
@@ -194,7 +194,9 @@ async function warmNetworkModel(model: string, why: string): Promise<void> {
   const host = OLLAMA_HOST ?? "http://127.0.0.1:11434";
   const started = Date.now();
   try {
-    await warmOllamaModel(host, model, { keepAlive: MODEL_KEEP_ALIVE, timeoutMs: 180_000, numCtx: CONTEXT_WINDOW });
+    // `generate`: also run a first short generation, whose one-time set-up (seconds to tens of seconds
+    // on a GPU) would otherwise land on the first network call or the first benchmark challenge.
+    await warmOllamaModel(host, model, { keepAlive: MODEL_KEEP_ALIVE, timeoutMs: 180_000, numCtx: CONTEXT_WINDOW, generate: true });
     console.log(`[agent:${AGENT_ID}] model ${model} loaded (${why}) in ${Date.now() - started} ms, context ${CONTEXT_WINDOW}, keep_alive ${MODEL_KEEP_ALIVE}, ${MAX_PARALLEL_INFERENCE} parallel`);
   } catch (e) {
     console.warn(`[agent:${AGENT_ID}] could not load model ${model} (${why}): ${String(e).slice(0, 200)}`);
@@ -1269,7 +1271,7 @@ async function loop(): Promise<void> {
             try {
               lastBenchmark = await runLocalBenchmark({ ollama: currentProvider === "ollama-local" ? { host: OLLAMA_HOST, model: OLLAMA_MODEL, numCtx: CONTEXT_WINDOW } : undefined });
               benchmarkUnreported = true;
-              console.log(`[agent:${AGENT_ID}] benchmark: cpu=${lastBenchmark.cpu?.workUnitsPerSec ?? "-"} units/s gpu=${lastBenchmark.gpu ? `${lastBenchmark.gpu.tokensPerSec} tok/s (${lastBenchmark.gpu.bandwidthGbps ?? "?"} GB/s)` : "-"} in ${lastBenchmark.durationMs} ms`);
+              console.log(`[agent:${AGENT_ID}] benchmark: cpu=${lastBenchmark.cpu?.workUnitsPerSec ?? "-"} units/s gpu=${lastBenchmark.gpu ? `${lastBenchmark.gpu.tokensPerSec} tok/s (${lastBenchmark.gpu.bandwidthGbps ?? "?"} GB/s)` : "-"} in ${lastBenchmark.durationMs} ms${lastBenchmark.errors?.length ? ` (${lastBenchmark.errors.join("; ")})` : ""}`);
             } catch (e) {
               console.warn(`[agent:${AGENT_ID}] benchmark failed: ${e}`);
             }

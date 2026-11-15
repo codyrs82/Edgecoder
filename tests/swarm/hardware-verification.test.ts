@@ -61,7 +61,10 @@ describe("supportedTier (demotion ladder)", () => {
     expect(supportedTier("gpu.c24", "gpu", 60, cfg)).toEqual({ computeClass: "gpu", tier: "gpu.c8" });
     expect(supportedTier("gpu.c24", "gpu", 30, cfg)).toEqual({ computeClass: "cpu", tier: "cpu.std" }); // a "GPU" measuring like a CPU
     expect(supportedTier("gpu.dc80", "gpu", 500, cfg)).toEqual({ computeClass: "gpu.dc", tier: "gpu.dc40" });
-    expect(supportedTier("gpu.dc80", "gpu", 150, cfg)).toEqual({ computeClass: "gpu", tier: "gpu.c16" }); // below the dc floor: consumer tiers
+    expect(supportedTier("gpu.dc80", "gpu", 150, cfg)).toEqual({ computeClass: "gpu.dc", tier: "gpu.dc40" }); // the dc floor is a GPU floor, not an A100 bar
+    expect(supportedTier("gpu.dc40", "gpu", 95, cfg)).toEqual({ computeClass: "gpu.dc", tier: "gpu.dc40" }); // a warm 2x A16 on qwen3-coder:30b
+    expect(supportedTier("gpu.dc40", "gpu", 50, cfg)).toEqual({ computeClass: "gpu", tier: "gpu.c8" }); // below the dc floor: consumer tiers
+    expect(supportedTier("gpu.dc40", "gpu", 40, cfg)).toEqual({ computeClass: "cpu", tier: "cpu.std" }); // CPU-like
     expect(supportedTier("apple.m.hi", "gpu", 40, cfg)).toEqual({ computeClass: "apple", tier: "apple.m" });
     expect(supportedTier("apple.m.hi", "gpu", 5, cfg)).toEqual({ computeClass: "cpu", tier: "cpu.std" });
     expect(supportedTier("cpu.hi", "cpu", 3500, cfg)).toEqual({ computeClass: "cpu", tier: "cpu.hi" });
@@ -630,7 +633,12 @@ describe("GPU challenge: cross-check, plausibility, demotion", () => {
     const v2 = setup();
     const c2 = v2.nextChallenge("g1", { nowMs: T0, model }) as GpuChallenge;
     const a2 = answer(c2, 25, "a", 200); // CPU-like
-    expect(v2.submit("g1", a2.res, a2.at)).toMatchObject({ changed: true });
+    // One CPU-like sample is held and re-measured soon; a second one demotes out of the class.
+    expect(v2.submit("g1", a2.res, a2.at)).toMatchObject({ changed: false });
+    expect(v2.get("g1")).toMatchObject({ status: "unverified", granted: { tier: "gpu.c8" }, lastFailReason: "slow_sample_unconfirmed", nextChallengeAtMs: a2.at + CFG.slowConfirmMs });
+    const c3 = v2.nextChallenge("g1", { nowMs: a2.at + CFG.slowConfirmMs, model }) as GpuChallenge;
+    const a3 = answer(c3, 25, "a", 200);
+    expect(v2.submit("g1", a3.res, a2.at + CFG.slowConfirmMs + (a3.at - T0))).toMatchObject({ changed: true });
     expect(v2.get("g1")).toMatchObject({ status: "demoted", granted: { computeClass: "cpu", tier: "cpu.std" } });
     expect(v2.effective("g1", claimed)).toMatchObject({ computeClass: "cpu", creditsPerSecond: 1 });
   });
@@ -701,6 +709,149 @@ describe("GPU challenge: cross-check, plausibility, demotion", () => {
     expect(e.samples).toBe(10);
     expect(e.okRate).toBeLessThan(0.8);
     expect(v.reliability("w1")).toBe(e.score);
+  });
+});
+
+describe("datacenter GPU grants (live regtest 2026-11-15: 2x NVIDIA A16 demoted to cpu)", () => {
+  const model = "qwen3-coder:30b"; // MoE, 3.3B active: 1.98 GB read per token
+  const A16x2: HardwareProfile = { cpuCores: 12, ramGb: 120, platform: "linux", arch: "x64", cpuModel: "Intel Xeon (Cascadelake)", gpu: { vendor: "nvidia", model: "NVIDIA A16", vramGb: 30, datacenter: true, count: 2 } };
+  const claimed = classifyHardware(A16x2);
+
+  function setup(config: HardwareVerificationConfig = CFG) {
+    const v = verifier(config);
+    v.register({ agentId: "a16", claimed, profile: A16x2, challengeKinds: ["cpu", "gpu"], nowMs: T0 });
+    return v;
+  }
+  /** Answer `c` delivered at `at`: 512 tokens, Ollama's eval time, and the server's round trip. */
+  function answerAt(c: GpuChallenge, evalMs: number, roundTripMs: number) {
+    return { challengeId: c.challengeId, kind: "gpu" as const, output: fakeModelOutput(c.nonce, c.lines), evalCount: 512, evalDurationMs: evalMs, elapsedMs: roundTripMs - 100 };
+  }
+
+  it("claims gpu.dc40 with the pooled VRAM; unverified until measured, paid at the class base", () => {
+    expect(claimed).toMatchObject({ computeClass: "gpu.dc", tier: "gpu.dc40", vramGb: 30 });
+    const v = setup();
+    expect(v.get("a16")).toMatchObject({ status: "unverified", hardware: { gpuModel: "NVIDIA A16", vramGb: 30, gpuCount: 2 } });
+    expect(v.effective("a16", claimed)).toMatchObject({ computeClass: "gpu.dc", tier: "gpu.dc40" });
+  });
+
+  it("the live sample (cold first generation, 47 GB/s) no longer demotes to cpu; the warm re-measurement verifies gpu.dc40", () => {
+    const v = setup();
+    const c1 = v.nextChallenge("a16", { nowMs: T0, model }) as GpuChallenge;
+    expect(c1.model).toBe(model);
+    // As logged: 512 tokens in 18.9 s of eval (the first ~100 at ~10 tok/s), answered 23.5 s after delivery.
+    const r1 = v.submit("a16", answerAt(c1, 18_937, 23_500), T0 + 23_500);
+    expect(r1).toMatchObject({ accepted: true, changed: false });
+    expect(v.get("a16")?.measured).toMatchObject({ supportedClass: "cpu", supportedTier: "cpu.std" });
+    expect(v.get("a16")).toMatchObject({ status: "unverified", granted: { computeClass: "gpu.dc", tier: "gpu.dc40" }, lastFailReason: "slow_sample_unconfirmed" });
+    expect(v.get("a16")?.flags).toContain("challenge_slow_unconfirmed");
+    expect(v.effective("a16", claimed)).toMatchObject({ computeClass: "gpu.dc", tier: "gpu.dc40" });
+    // Re-measured a minute later, warm: ~48 tok/s.
+    const t2 = T0 + 23_500 + CFG.slowConfirmMs;
+    expect(v.nextChallenge("a16", { nowMs: t2 - 1, model })).toBeUndefined();
+    const c2 = v.nextChallenge("a16", { nowMs: t2, model }) as GpuChallenge;
+    expect(c2.nonce).not.toBe(c1.nonce);
+    const r2 = v.submit("a16", answerAt(c2, 10_667, 11_500), t2 + 11_500);
+    expect(r2.invalid).toBeUndefined();
+    const rec = v.get("a16")!;
+    expect(rec.measured?.value).toBeGreaterThan(90);
+    expect(rec).toMatchObject({ status: "verified", granted: { computeClass: "gpu.dc", tier: "gpu.dc40" } });
+    expect(rec.flags).not.toContain("challenge_slow_unconfirmed");
+    expect(rec.slowSample).toBeUndefined();
+  });
+
+  it("anti-spoofing: a CPU claiming a datacenter GPU measures CPU-like twice and is paid as cpu", () => {
+    const v = setup();
+    const c1 = v.nextChallenge("a16", { nowMs: T0, model }) as GpuChallenge;
+    v.submit("a16", answerAt(c1, 30_000, 31_000), T0 + 31_000); // ~35 GB/s
+    const t2 = T0 + 31_000 + CFG.slowConfirmMs;
+    const c2 = v.nextChallenge("a16", { nowMs: t2, model }) as GpuChallenge;
+    expect(v.submit("a16", answerAt(c2, 33_000, 34_000), t2 + 34_000)).toMatchObject({ changed: true });
+    expect(v.get("a16")).toMatchObject({ status: "demoted", granted: { computeClass: "cpu", tier: "cpu.std" }, lastFailReason: "below_claimed_tier" });
+    expect(v.effective("a16", claimed)).toMatchObject({ computeClass: "cpu", creditsPerSecond: 1 });
+  });
+
+  it("declining or ignoring the confirmation does not keep the grant: the held sample stands", () => {
+    const declined = setup();
+    const c1 = declined.nextChallenge("a16", { nowMs: T0, model }) as GpuChallenge;
+    declined.submit("a16", answerAt(c1, 30_000, 31_000), T0 + 31_000);
+    const c2 = declined.nextChallenge("a16", { nowMs: T0 + 31_000 + CFG.slowConfirmMs, model }) as GpuChallenge;
+    expect(declined.submit("a16", { challengeId: c2.challengeId, kind: "gpu", elapsedMs: 5, declined: "busy" }, T0 + 100_000)).toMatchObject({ changed: true });
+    expect(declined.get("a16")).toMatchObject({ status: "demoted", granted: { computeClass: "cpu" } });
+
+    const silent = setup();
+    const s1 = silent.nextChallenge("a16", { nowMs: T0, model }) as GpuChallenge;
+    silent.submit("a16", answerAt(s1, 30_000, 31_000), T0 + 31_000);
+    const t2 = T0 + 31_000 + CFG.slowConfirmMs;
+    const s2 = silent.nextChallenge("a16", { nowMs: t2, model }) as GpuChallenge;
+    silent.tick(t2 + s2.deadlineMs * CFG.expiryFactor + 1);
+    expect(silent.get("a16")).toMatchObject({ status: "demoted", granted: { computeClass: "cpu" } });
+  });
+
+  it("a held slow sample older than the window is forgotten (a slow sample hours apart is a new first one)", () => {
+    const v = setup();
+    const c1 = v.nextChallenge("a16", { nowMs: T0, model }) as GpuChallenge;
+    v.submit("a16", answerAt(c1, 30_000, 31_000), T0 + 31_000);
+    const late = T0 + 31_000 + CFG.slowConfirmWindowMs + 1;
+    const c2 = v.nextChallenge("a16", { nowMs: late, model }) as GpuChallenge;
+    expect(v.submit("a16", answerAt(c2, 30_000, 31_000), late + 31_000)).toMatchObject({ changed: false });
+    expect(v.get("a16")).toMatchObject({ status: "unverified", granted: { tier: "gpu.dc40" }, lastFailReason: "slow_sample_unconfirmed" });
+  });
+
+  it("an invalid answer still demotes at once (no confirmation for forged output)", () => {
+    const v = setup();
+    const c1 = v.nextChallenge("a16", { nowMs: T0, model }) as GpuChallenge;
+    v.submit("a16", answerAt(c1, 30_000, 31_000), T0 + 31_000);
+    const c2 = v.nextChallenge("a16", { nowMs: T0 + 31_000 + CFG.slowConfirmMs, model }) as GpuChallenge;
+    const res = v.submit("a16", { ...answerAt(c2, 10_000, 11_000), output: fakeModelOutput("replayed", 24) }, T0 + 200_000);
+    expect(res.invalid).toBe("output_missing_tags");
+    expect(v.get("a16")).toMatchObject({ status: "demoted", granted: { tier: "gpu.dc40" } });
+    expect(v.get("a16")?.slowSample).toBeUndefined();
+  });
+
+  it("faster than two A16s can be is not a measurement; the pool's sum bounds it", () => {
+    const v = setup();
+    const c = v.nextChallenge("a16", { nowMs: T0, model }) as GpuChallenge;
+    // 1014 GB in 2.2 s by the server clock = 460 GB/s: under 2 x 200 x 1.2, so measured (and verified).
+    expect(v.submit("a16", answerAt(c, 2_000, 2_200), T0 + 2_200).invalid).toBeUndefined();
+    const single = verifier();
+    const one = { ...A16x2, gpu: { ...A16x2.gpu!, vramGb: 15, count: undefined } };
+    single.register({ agentId: "one", claimed: classifyHardware(one), profile: one, challengeKinds: ["gpu"], nowMs: T0 });
+    const c1 = single.nextChallenge("one", { nowMs: T0, model }) as GpuChallenge;
+    expect(single.submit("one", answerAt(c1, 2_000, 2_200), T0 + 2_200).invalid).toBe("faster_than_hardware");
+  });
+
+  it("a verified tier survives one cold revalidation; two slow ones demote to the better of the two", () => {
+    const v = verifier({ ...CFG, requireCrossCheck: false });
+    const rtx = classifyHardware(RTX4090);
+    v.register({ agentId: "g1", claimed: rtx, profile: RTX4090, challengeKinds: ["gpu"], nowMs: T0 });
+    const m9 = "qwen3.5:9b";
+    const at = (c: GpuChallenge, gbps: number, t: number) => {
+      const ms = Math.round(((512 * 5.4) / gbps) * 1000);
+      return v.submit("g1", { challengeId: c.challengeId, kind: "gpu", output: fakeModelOutput(c.nonce, c.lines), evalCount: 512, evalDurationMs: ms, elapsedMs: ms }, t + ms + 100);
+    };
+    at(v.nextChallenge("g1", { nowMs: T0, model: m9 }) as GpuChallenge, 450, T0);
+    expect(v.get("g1")).toMatchObject({ status: "verified", granted: { tier: "gpu.c24" } });
+    const t1 = v.get("g1")!.nextChallengeAtMs!;
+    expect(at(v.nextChallenge("g1", { nowMs: t1, model: m9 }) as GpuChallenge, 200, t1)).toMatchObject({ changed: false });
+    expect(v.get("g1")).toMatchObject({ status: "verified", granted: { tier: "gpu.c24" }, slowSample: { tier: "gpu.c16" } });
+    const t2 = v.get("g1")!.nextChallengeAtMs!;
+    expect(t2 - t1).toBeLessThan(CFG.slowConfirmMs + 30_000);
+    expect(at(v.nextChallenge("g1", { nowMs: t2, model: m9 }) as GpuChallenge, 100, t2)).toMatchObject({ changed: true });
+    expect(v.get("g1")).toMatchObject({ status: "demoted", granted: { tier: "gpu.c16" } }); // the better sample (c16), not c8
+  });
+
+  it("an unanswered challenge on a base-tier claim is not reported as verified", () => {
+    const v = setup();
+    const c = v.nextChallenge("a16", { nowMs: T0, model }) as GpuChallenge;
+    v.tick(T0 + c.deadlineMs * CFG.expiryFactor + 1);
+    expect(v.get("a16")).toMatchObject({ status: "unverified", lastFailReason: "challenge_timeout", granted: { tier: "gpu.dc40" } });
+    expect(v.get("a16")?.lastPassAtMs).toBeUndefined();
+  });
+
+  it("pooled cards change the profile key only when there are several", () => {
+    const single = { ...A16x2, gpu: { ...A16x2.gpu!, count: undefined } };
+    expect(hardwareProfileKey("gpu.dc40", A16x2)).toBe(`${hardwareProfileKey("gpu.dc40", single)}|x2`);
+    expect(hardwareProfileKey("gpu.dc40", { ...A16x2, gpu: { ...A16x2.gpu!, count: 1 } })).toBe(hardwareProfileKey("gpu.dc40", single));
   });
 });
 

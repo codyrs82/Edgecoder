@@ -17,9 +17,14 @@
  *     agent from being credited with network slack. A tier is supported when measured ≥ min / slack.
  *
  * Pass => granted = claimed. A slow or late answer demotes to the highest tier the measurement
- * supports, which can fall out of the class (a "GPU" measuring like a CPU settles as cpu). An
- * invalid answer (bad proof, missing tags, cross-check mismatch, faster than the claimed part can
- * physically be) grants the class base tier and is logged as a security event.
+ * supports, which can fall out of the class (a "GPU" measuring like a CPU settles as cpu), but one
+ * slow sample never lowers a grant on its own: the first is held (the grant stays, status
+ * "unverified", flag challenge_slow_unconfirmed) and re-measured `slowConfirmMs` later, when a
+ * model loaded or warmed up by the first challenge, or a busy start-up (sandbox image builds), no
+ * longer weighs on it. A second slow sample within `slowConfirmWindowMs` demotes to the better of
+ * the two; so does declining or not answering the confirmation. An invalid answer (bad proof,
+ * missing tags, cross-check mismatch, faster than the claimed part can physically be) grants the
+ * class base tier at once and is logged as a security event.
  *
  * Witnesses are picked at random by the coordinator among eligible agents (`canWitness` here, plus
  * account and network checks in pickBenchmarkWitness): a passed GPU challenge, no blacklist, few
@@ -97,7 +102,11 @@ export const DEFAULT_TIER_MINIMUMS: Record<ComputeTierId, number> = {
   "gpu.c16": 150,
   "gpu.c24": 350, // 3090 / 4090 class
   "gpu.c32": 600, // 5090 class
-  "gpu.dc40": 300,
+  // The datacenter class floor, not a performance bar (gpu.dc80 is that): every card the agent labels
+  // datacenter must be able to clear it, including the weak ones (A16 / A2 ~200 GB/s peak, L4 / T4
+  // ~300, which decode at ~90-160 effective). Was 300 until 2026-11-15, which no A16, A2, L4, T4 or
+  // A4000 can reach, so they fell to the consumer tiers or to cpu. Still above CPU decode (~30-70).
+  "gpu.dc40": 80,
   "gpu.dc80": 900 // A100-80 / H100 / H200
 };
 
@@ -130,6 +139,10 @@ export interface HardwareVerificationConfig {
   revalidateMs: number;
   /** Retry after a failure, decline or a missing witness. */
   retryMs: number;
+  /** A first slow sample (one that would lower the grant) is re-measured this soon instead of applied. */
+  slowConfirmMs: number;
+  /** A held slow sample confirms a second one within this long; older, it is forgotten. */
+  slowConfirmWindowMs: number;
   /** A delivered challenge is measured until deadline × expiryFactor, then expires (no answer). */
   expiryFactor: number;
   evidence: { alpha: number; minSamples: number; demoteSpeedRatio: number; persistEveryMs: number };
@@ -156,6 +169,8 @@ export const DEFAULT_HARDWARE_VERIFICATION: HardwareVerificationConfig = {
   witnessMaxDisagreements: 3,
   revalidateMs: 6 * 60 * 60_000,
   retryMs: 15 * 60_000,
+  slowConfirmMs: 60_000,
+  slowConfirmWindowMs: 30 * 60_000,
   expiryFactor: 4,
   evidence: { alpha: 0.1, minSamples: 10, demoteSpeedRatio: 0.08, persistEveryMs: 60_000 }
 };
@@ -246,8 +261,13 @@ export interface HardwareVerificationRecord {
   challengeKinds: ChallengeMetric[];
   /** Plausibility findings on the self-reported profile / benchmark (informational). */
   flags: string[];
-  hardware: { cpuModel?: string; gpuModel?: string; vramGb?: number; cpuCores?: number };
+  hardware: { cpuModel?: string; gpuModel?: string; vramGb?: number; cpuCores?: number; gpuCount?: number };
   measured?: HardwareMeasurement;
+  /**
+   * A slow measurement that would have lowered the grant, held until a second one confirms it (see
+   * the header). Cleared by any measurement that does not lower the grant.
+   */
+  slowSample?: { atMs: number; computeClass: ComputeClassId; tier: ComputeTierId; value: number };
   selfReport?: AgentBenchmarkReport;
   lastChallengeAtMs?: number;
   lastPassAtMs?: number;
@@ -355,7 +375,16 @@ const KINDS: ChallengeMetric[] = ["cpu", "gpu"];
 /** Fingerprint of the hardware a claim rests on (tier plus the fields that produced it). */
 export function hardwareProfileKey(claimedTier: ComputeTierId, profile: HardwareProfile | undefined): string {
   const g = profile?.gpu;
-  return [claimedTier, profile?.platform ?? "", profile?.arch ?? "", profile?.cpuCores ?? "", profile?.cpuModel ?? "", g?.vendor ?? "", g?.model ?? "", g?.vramGb ?? "", g?.datacenter ? "dc" : ""].join("|");
+  const key = [claimedTier, profile?.platform ?? "", profile?.arch ?? "", profile?.cpuCores ?? "", profile?.cpuModel ?? "", g?.vendor ?? "", g?.model ?? "", g?.vramGb ?? "", g?.datacenter ? "dc" : ""].join("|");
+  // Pooled cards (one agent, several GPUs): appended only then, so single-card keys are unchanged.
+  return g?.count !== undefined && g.count > 1 ? `${key}|x${g.count}` : key;
+}
+
+const CLASS_RANK: Record<ComputeClassId, number> = { cpu: 0, apple: 1, gpu: 1, "gpu.dc": 2 };
+
+/** Order of grants along a demotion chain (gpu.dc > gpu > cpu, then tier weight). */
+function grantRank(classes: Record<ComputeClassId, ComputeClassSpec>, g: { computeClass: ComputeClassId; tier: ComputeTierId }): number {
+  return CLASS_RANK[g.computeClass] * 1_000 + (tierSpec(classes, g.tier)?.creditsPerSecond ?? 1);
 }
 
 /** Tiers of a class, highest weight first. */
@@ -572,6 +601,7 @@ export class HardwareVerifier {
       ...(profile?.cpuModel ? { cpuModel: profile.cpuModel } : {}),
       ...(profile?.gpu?.model ? { gpuModel: profile.gpu.model } : {}),
       ...(profile?.gpu?.vramGb !== undefined ? { vramGb: profile.gpu.vramGb } : {}),
+      ...(profile?.gpu?.count !== undefined && profile.gpu.count > 1 ? { gpuCount: profile.gpu.count } : {}),
       ...(profile?.cpuCores !== undefined ? { cpuCores: profile.cpuCores } : {})
     };
     if (input.benchmark) rec.selfReport = input.benchmark;
@@ -686,11 +716,11 @@ export class HardwareVerifier {
     rec: HardwareVerificationRecord,
     g: { computeClass: ComputeClassId; tier: ComputeTierId },
     nowMs: number,
-    otherwise: { status: "demoted" | "unverified"; reason: string } = { status: "demoted", reason: "below_claimed_tier" }
+    otherwise: { status: "demoted" | "unverified"; reason: string; /** Never "verified", even when g is the claim (an invalid answer on a base-tier claim). */ failed?: boolean } = { status: "demoted", reason: "below_claimed_tier" }
   ): boolean {
     const changed = rec.granted.tier !== g.tier || rec.granted.computeClass !== g.computeClass;
     rec.granted = g;
-    if (g.tier === rec.claimed.tier && g.computeClass === rec.claimed.computeClass) {
+    if (!otherwise.failed && g.tier === rec.claimed.tier && g.computeClass === rec.claimed.computeClass) {
       rec.status = "verified";
       rec.lastPassAtMs = nowMs;
       rec.nextChallengeAtMs = nowMs + this.config.revalidateMs;
@@ -716,7 +746,25 @@ export class HardwareVerifier {
     rec.measured = m.metric === "gpu" ? { ...m, crossChecked } : m;
     if (m.tokensPerSec !== undefined) rec.evidence.baselineTokensPerSec = m.tokensPerSec;
     const base = this.base(rec.claimed.computeClass);
-    const target = { computeClass: m.supportedClass, tier: m.supportedTier };
+    let target = { computeClass: m.supportedClass, tier: m.supportedTier };
+    // One slow sample does not lower a grant: hold it and measure again soon (see the header).
+    if (grantRank(this.classes, target) < grantRank(this.classes, rec.granted)) {
+      const held = this.heldSlowSample(rec, nowMs);
+      if (!held) {
+        rec.slowSample = { atMs: nowMs, ...target, value: m.value };
+        this.flag(rec, "challenge_slow_unconfirmed");
+        // A verified grant stays verified until confirmed; anything else (pending now) is unverified.
+        rec.status = rec.status === "verified" ? "verified" : "unverified";
+        rec.lastFailAtMs = nowMs;
+        rec.lastFailReason = "slow_sample_unconfirmed";
+        rec.nextChallengeAtMs = nowMs + this.config.slowConfirmMs;
+        return false;
+      }
+      // Confirmed: the better of the two samples.
+      if (grantRank(this.classes, held) > grantRank(this.classes, target)) target = { computeClass: held.computeClass, tier: held.tier };
+    }
+    rec.slowSample = undefined;
+    rec.flags = rec.flags.filter((f) => f !== "challenge_slow_unconfirmed");
     const aboveBase = target.computeClass === base.computeClass && target.tier !== base.tier;
     rec.flags = rec.flags.filter((f) => f !== "challenge_unconfirmed");
     if (m.metric === "gpu" && aboveBase && !crossChecked && this.config.requireCrossCheck) {
@@ -728,7 +776,27 @@ export class HardwareVerifier {
 
   private invalid(rec: HardwareVerificationRecord, reason: string, nowMs: number): boolean {
     this.flag(rec, `challenge_invalid:${reason}`);
-    return this.grant(rec, this.base(rec.claimed.computeClass), nowMs, { status: "demoted", reason: `invalid:${reason}` });
+    rec.slowSample = undefined;
+    return this.grant(rec, this.base(rec.claimed.computeClass), nowMs, { status: "demoted", reason: `invalid:${reason}`, failed: true });
+  }
+
+  /** The held slow sample, if it is recent enough to confirm another. */
+  private heldSlowSample(rec: HardwareVerificationRecord, nowMs: number): HardwareVerificationRecord["slowSample"] {
+    const s = rec.slowSample;
+    return s && nowMs - s.atMs <= this.config.slowConfirmWindowMs ? s : undefined;
+  }
+
+  /**
+   * The confirmation of a held slow sample was declined or never answered: the held sample stands
+   * (otherwise not answering would keep a grant the measurement did not support). True when applied.
+   */
+  private applyHeldSlowSample(rec: HardwareVerificationRecord, nowMs: number): boolean {
+    const held = this.heldSlowSample(rec, nowMs);
+    rec.slowSample = undefined;
+    rec.flags = rec.flags.filter((f) => f !== "challenge_slow_unconfirmed");
+    if (!held) return false;
+    this.grant(rec, { computeClass: held.computeClass, tier: held.tier }, nowMs);
+    return true;
   }
 
   submit(agentId: string, response: ChallengeResponse, nowMs: number): SubmitResult {
@@ -748,6 +816,8 @@ export class HardwareVerifier {
     };
     if (response.declined) {
       this.flag(rec, "challenge_declined");
+      const prev = rec.granted;
+      if (this.applyHeldSlowSample(rec, nowMs)) return done(prev.tier !== rec.granted.tier || prev.computeClass !== rec.granted.computeClass);
       rec.lastFailReason = `declined:${String(response.declined).slice(0, 40)}`;
       rec.nextChallengeAtMs = nowMs + this.config.retryMs;
       if (rec.status === "pending") rec.status = "unverified";
@@ -773,7 +843,9 @@ export class HardwareVerifier {
       if (tokens < this.config.gpuMinTokens) return done(this.invalid(rec, "output_too_short", nowMs), "output_too_short");
       work = tokens * (pend.weightsGb as number);
       // Faster than the claimed part can physically be (even counting the whole round trip): not a measurement.
-      const peak = knownBandwidthGbps(rec.hardware.gpuModel ?? rec.hardware.cpuModel) ?? MAX_KNOWN_BANDWIDTH_GBPS;
+      // Pooled cards: at most their sum (a layer split reads them one after the other, so in practice ~one card's).
+      const known = knownBandwidthGbps(rec.hardware.gpuModel ?? rec.hardware.cpuModel);
+      const peak = known !== undefined ? known * Math.max(1, rec.hardware.gpuCount ?? 1) : MAX_KNOWN_BANDWIDTH_GBPS;
       if (work / (elapsed / 1000) > peak * 1.2) return done(this.invalid(rec, "faster_than_hardware", nowMs), "faster_than_hardware");
       agentMs = selfMs(response.evalDurationMs);
       allowance = this.config.gpuAllowanceMs;
@@ -1038,9 +1110,10 @@ export class HardwareVerifier {
         this.witnessOutputs.delete(p.challenge.challengeId);
         const rec = this.records.get(agentId);
         if (!rec || rec.claimed.tier !== p.claimedTier) continue;
-        // No answer: no measurement, so no demotion below the class, but no grant above base either.
+        // No answer: no measurement, so no demotion below the class, but no grant above base either
+        // (a held slow sample whose confirmation went unanswered stands).
         this.flag(rec, "challenge_timeout");
-        this.grant(rec, this.base(rec.claimed.computeClass), nowMs, { status: "unverified", reason: "challenge_timeout" });
+        if (!this.applyHeldSlowSample(rec, nowMs)) this.grant(rec, this.base(rec.claimed.computeClass), nowMs, { status: "unverified", reason: "challenge_timeout", failed: true });
         this.save(rec, nowMs);
       }
       if (keep.length) this.pending.set(agentId, keep);

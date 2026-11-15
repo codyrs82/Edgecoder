@@ -302,6 +302,7 @@ const KNOWN_BANDWIDTH: Array<[RegExp, number]> = [
   [/\bB200\b/i, 8000], [/\bH200\b/i, 4800], [/\bMI3\d\dX?\b/i, 5300], [/\bH100\b/i, 3350], [/\bH800\b/i, 3350],
   [/\bA100\b.*80/i, 2039], [/\bA100\b/i, 1555], [/\bA800\b/i, 2039], [/\bL40S?\b/i, 864], [/RTX\s*6000\s*Ada/i, 960],
   [/\bA6000\b/i, 768], [/\bA5000\b/i, 768], [/\bA4000\b/i, 448], [/\bL4\b/i, 300], [/\bA10G?\b/i, 600], [/\bV100\b/i, 900],
+  [/\bA40\b/i, 696], [/\bA30\b/i, 933], [/\bA16\b/i, 200], [/\bA2\b/i, 200], [/\bT4\b/i, 320],
   [/\b5090\b/, 1792], [/\b5080\b/, 960], [/\b5070\s*Ti\b/i, 896], [/\b5070\b/, 672], [/\b5060\s*Ti\b/i, 448],
   [/\b4090\b/, 1008], [/\b4080\b/, 736], [/\b4070\s*Ti\s*Super\b/i, 672], [/\b4070\b/, 504], [/\b4060\s*Ti\b/i, 288], [/\b4060\b/, 272],
   [/\b3090\b/, 936], [/\b3080\b/, 912], [/\b3070\b/, 448], [/\b3060\s*Ti\b/i, 448], [/\b3060\b/, 360],
@@ -385,11 +386,18 @@ async function ollamaHasModel(host: string | undefined, model: string): Promise<
 
 export const LOCAL_BENCH_SEED = "edgecoder-local-benchmark-v1";
 
+/** Self-benchmark generation limits: an untimed warm-up first, then the timed run. */
+export const LOCAL_BENCH_WARMUP_TIMEOUT_MS = 120_000;
+export const LOCAL_BENCH_TIMEOUT_MS = 60_000;
+
 /**
- * The agent's periodic self-benchmark (< ~30 s): a time-boxed CPU scan on every core, then (when an
- * Ollama model is configured) a short fixed-seed generation and the largest model in VRAM.
+ * The agent's periodic self-benchmark (< ~30 s once the model is warm): a time-boxed CPU scan on
+ * every core, then (when an Ollama model is configured) a short untimed warm-up generation and a
+ * fixed-seed timed one, and the largest model in VRAM. The warm-up matters: the first generation
+ * after a model load can stall for tens of seconds (kernel set-up, a host still busy starting), and
+ * timing it, under a 20 s limit, reported a working GPU as having no GPU result at all (gpu=-).
  */
-export async function runLocalBenchmark(opts: { cpuBudgetMs?: number; threads?: number; ollama?: { host?: string; model: string; timeoutMs?: number; numCtx?: number } }): Promise<AgentBenchmarkReport> {
+export async function runLocalBenchmark(opts: { cpuBudgetMs?: number; threads?: number; ollama?: { host?: string; model: string; timeoutMs?: number; warmupTimeoutMs?: number; numCtx?: number } }): Promise<AgentBenchmarkReport> {
   const t0 = Date.now();
   const errors: string[] = [];
   const report: AgentBenchmarkReport = { version: 1, ranAtMs: t0, durationMs: 0 };
@@ -409,7 +417,13 @@ export async function runLocalBenchmark(opts: { cpuBudgetMs?: number; threads?: 
   if (opts.ollama?.model) {
     const { host, model } = opts.ollama;
     try {
-      const gen = await ollamaGenerate({ host, model, prompt: inferencePrompt(LOCAL_BENCH_SEED, 12), seed: 7, numPredict: 192, timeoutMs: opts.ollama.timeoutMs ?? 20_000, numCtx: opts.ollama.numCtx });
+      // Warm-up (not timed): loads the model if needed and runs the first generation's set-up.
+      await ollamaGenerate({ host, model, prompt: "Say OK.", seed: 7, numPredict: 4, timeoutMs: opts.ollama.warmupTimeoutMs ?? LOCAL_BENCH_WARMUP_TIMEOUT_MS, numCtx: opts.ollama.numCtx });
+    } catch (e) {
+      errors.push(`gpu_warmup:${String(e).slice(0, 80)}`);
+    }
+    try {
+      const gen = await ollamaGenerate({ host, model, prompt: inferencePrompt(LOCAL_BENCH_SEED, 12), seed: 7, numPredict: 192, timeoutMs: opts.ollama.timeoutMs ?? LOCAL_BENCH_TIMEOUT_MS, numCtx: opts.ollama.numCtx });
       const tokens = estimateTokens(gen.response, gen.evalCount);
       const tps = gen.evalDurationMs && gen.evalDurationMs > 0 ? (tokens / gen.evalDurationMs) * 1000 : 0;
       const size = modelWeightsGb(model);

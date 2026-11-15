@@ -115,6 +115,10 @@ export class NetworkInferenceError extends Error {
  */
 function noCapacityError(json: Record<string, unknown>, model: string): NetworkInferenceError {
   const retryAfterSec = typeof json.retryAfterSec === "number" && json.retryAfterSec > 0 ? Math.ceil(json.retryAfterSec) : 15;
+  // The coordinator says whether the class had any machine with the model at all (older ones never do: "busy").
+  if (json.reason === "none_in_class") {
+    return new NetworkInferenceError(`No ${String(json.computeClass ?? "requested-class")} machine runs ${model} right now (machines of other classes do). Nothing was charged; try another class or try again later.`, 503, retryAfterSec);
+  }
   return new NetworkInferenceError(`Every machine that runs ${model} is busy and none could start this request in time. Nothing was charged; try again in ${retryAfterSec} s.`, 503, retryAfterSec);
 }
 
@@ -148,6 +152,7 @@ export async function* streamNetworkCompletion(
     const msg =
       err === "no_agent_has_model" ? `No machine on the network has ${req.model} right now.` :
       err === "no_own_agent_has_model" ? `None of your own machines has ${req.model} (or none is online).` :
+      err === "no_agent_in_class" ? `No ${String(sub.json.computeClass ?? req.computeClass)} machine runs ${req.model} right now; it runs on: ${((sub.json.availableClasses as string[]) ?? []).join(", ") || "no class"}. Nothing was charged.` :
       err === "reservation_not_active" ? "That reservation has ended. Reserve again on the Compute page." :
       err === "reserved_agent_lacks_model" ? `The reserved machine doesn't have ${req.model}; it has: ${((sub.json.models as string[]) ?? []).join(", ") || "no models"}.` :
       err === "insufficient_credits" ? `Not enough cSats for this request (it sets aside up to ${sub.json.neededCSats} cSats; unused cSats come back).` :

@@ -37,7 +37,7 @@ infrastructure hosts unless `FEE_POOL_HOST_DISTRIBUTION` is set.
 ```
 price(paramsB)  = TOKEN_PRICE_USD_PER_M row for the model's size (USD per million tokens, input / output)
 tokenUsd        = (promptTokens × input + outputTokens × output) / 1,000,000
-floorUsd        = POWER_FLOOR_USD_PER_HOUR[class] × max(1, tierWeight) × seconds / 3600
+floorUsd        = POWER_FLOOR_USD_PER_HOUR[class] × max(1, tierWeight) × (seconds − loadSeconds) / 3600
 cost (msat)     = usdToMsat(max(tokenUsd, floorUsd), btcUsd)        # usdToMsat = usd / btcUsd × 1e8 × 1000
 ```
 
@@ -54,6 +54,12 @@ cost (msat)     = usdToMsat(max(tokenUsd, floorUsd), btcUsd)        # usdToMsat 
 The prices are set below typical hosted prices for open models of the same size. The power floor
 (`cpu` $0.005/h, `apple` $0.01/h, `gpu` $0.05/h, `gpu.dc` $0.15/h of the base tier, scaled by the
 tier weight) means a machine's owner never earns less than the electricity the seconds cost.
+The floor's seconds are the call's measured seconds less `loadSeconds`, the model-load time the
+agent reports with the final piece (Ollama's `load_duration`; `floorExcludeMs` in
+`inferenceCostMsat`). A host that unloaded its model does not bill the buyer for loading it
+again, so a cold call costs what the same call costs warm. Only the agent is paid by the floor, so
+over-reporting load time only lowers its own pay; older agents report none and the whole duration
+counts. Queue time before an agent claims the call was never billed (seconds run from the claim).
 `btcUsd` is the live rate oracle's BTC price (below), with a 100,000 USD fallback before the first
 epoch. Model size comes from the model name (`paramsB` in `src/inference-api/auto-route.ts`). When
 an agent reports no token counts the call falls back to the per-second price. Token counts are
@@ -193,9 +199,23 @@ dynamic:
    the same model (`HARDWARE_GPU_REQUIRE_CROSS_CHECK`). The deadline is
    `allowance + work × slack / tierMinimum`; speed is `work / max(server time − allowance, agent
    time)`. Slow or late answers demote to the tier the speed supports (a "GPU" that measures like
-   a CPU settles as `cpu`); invalid answers grant the base tier. Passes are re-proven every 6 h;
-   real-task speed far below the challenge baseline demotes again. Tier minimums
-   (`HARDWARE_TIER_MIN_JSON`) need calibrating on the fleet. The per-agent record, including the
+   a CPU settles as `cpu`), but never on one sample: a first slow sample is held (the grant stays,
+   flag `challenge_slow_unconfirmed`) and re-measured a minute later (`slowConfirmMs`), when a cold
+   model or a busy start-up no longer weighs on it; a second slow sample within 30 min demotes to
+   the better of the two, and so does declining or not answering the re-measurement. Invalid
+   answers grant the base tier at once. Passes are re-proven every 6 h; real-task speed far below
+   the challenge baseline demotes again. Tier minimums (`HARDWARE_TIER_MIN_JSON`) need calibrating
+   on the fleet. The base tier of a class is its floor, not a performance bar: `gpu.dc40` needs
+   80 GB/s effective (64 after the 1.25 slack), which every card the agent labels datacenter
+   reaches, including the weak ones (A16 / A2 ~200 GB/s peak, L4 / T4 ~300, ~90-160 effective);
+   until 2026-11-15 it was 300, which those cards never reach, so they fell to the consumer tiers
+   or to `cpu`. CPUs decode at ~30-70. An agent whose Ollama pools several cards
+   (`CUDA_VISIBLE_DEVICES=0,1`) reports their summed VRAM and `count`; a layer split reads the cards
+   one after the other, so it measures about one card's bandwidth, and its "faster than the
+   hardware" bound is the cards' sum. Matching is by granted class: an agent granted `cpu` takes
+   no `@gpu.dc` call. A call for a class in which no online agent holds the model is refused at
+   submit with `409 no_agent_in_class` (and `availableClasses`); a call that times out unclaimed
+   says `reason: "busy"` or `"none_in_class"` in its `503 no_capacity`. The per-agent record, including the
    rolling `evidence.score` that a bid's `minReliability` checks, is on
    `GET /economy/hardware/verifications`.
 2. **Model size.** Per-second prices do not depend on the model. Model size enters through the

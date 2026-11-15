@@ -67,7 +67,8 @@ export async function runInferenceSubtask(
   let lastFlush = Date.now();
   let full = "";
   const toolCalls: ToolCall[] = [];
-  let tokens: { promptTokens?: number; outputTokens?: number } = {};
+  // Token counts, and the model-load time of a cold call (the power floor leaves it out: job-pricing.ts).
+  let tokens: { promptTokens?: number; outputTokens?: number; loadMs?: number } = {};
   const flush = async (done: boolean, error?: string) => {
     if (!pending && !done) return;
     const delta = pending;
@@ -92,7 +93,7 @@ export async function runInferenceSubtask(
   try {
     for await (const piece of ollamaChat(deps.ollamaHost, { model, messages: input.messages, tools: input.tools, maxTokens: input.maxTokens, temperature: input.temperature, keepAlive: deps.keepAlive, numCtx: deps.contextWindow }, abort.signal, deadlineMs + 1_000)) {
       if ("toolCalls" in piece) toolCalls.push(...piece.toolCalls);
-      else if ("doneReason" in piece) tokens = { promptTokens: piece.promptTokens, outputTokens: piece.outputTokens };
+      else if ("doneReason" in piece) tokens = { promptTokens: piece.promptTokens, outputTokens: piece.outputTokens, ...(piece.loadMs !== undefined ? { loadMs: piece.loadMs } : {}) };
       else if ("delta" in piece) {
         full += piece.delta;
         pending += piece.delta;

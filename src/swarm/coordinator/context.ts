@@ -112,6 +112,8 @@ interface TaskBilling {
   /** Token counts an inference call was billed on (bounded), returned to the requester with the result. */
   promptTokens?: number;
   outputTokens?: number;
+  /** The agent's model-load time for the call (Ollama load_duration), left out of the power floor. */
+  loadMs?: number;
 }
 export const taskBilling = new Map<string, TaskBilling>();
 /** Usage records being filled in (keyed by task) until the task settles; then saved. */

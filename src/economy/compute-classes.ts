@@ -74,6 +74,8 @@ export interface HardwareProfile {
     vramGb?: number;
     /** Datacenter parts (A100/H100/L40/A6000) go to the gpu.dc class, not gpu. */
     datacenter?: boolean;
+    /** Cards pooled into this one agent (its Ollama sees all of them); vramGb is then their sum. */
+    count?: number;
   };
   /** Optional benchmark the agent ran (single-thread score); reserved for future tiering. */
   benchmarkScore?: number;
@@ -373,4 +375,17 @@ export function settlementClassFor(
 ): { computeClass: ComputeClassId; creditsPerSecond: number } {
   if (resourceClass === "cpu" && agentClass !== "cpu") return { computeClass: "cpu", creditsPerSecond: 1 };
   return { computeClass: agentClass, creditsPerSecond: agentWeight };
+}
+
+/**
+ * Why a model call found no agent, from the classes of the online agents that hold the model:
+ * "none" (no agent holds it), "none_in_class" (agents hold it, but none is paid at the requested
+ * class: e.g. an @gpu.dc call while every holder is granted gpu or cpu), or "busy" (an agent of the
+ * class exists; it was occupied or its price was above the bid). The class filter itself is by
+ * design: an agent is matched at its granted class only, so a demoted agent takes no @gpu.dc call.
+ */
+export function capacityGap(requested: ComputeClassId | "any", holderClasses: ReadonlyArray<ComputeClassId>): "none" | "none_in_class" | "busy" {
+  if (holderClasses.length === 0) return "none";
+  if (requested === "any" || holderClasses.includes(requested)) return "busy";
+  return "none_in_class";
 }

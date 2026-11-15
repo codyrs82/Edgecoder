@@ -115,16 +115,37 @@ export function detectHardware(input: DetectInput): HostHardware {
   return hw;
 }
 
-/** The hardware profile the agent reports for one GPU (or none): the coordinator prices it. */
-export function hardwareProfileFor(hw: HostHardware, gpu: GpuInfo | undefined): Record<string, unknown> {
+/**
+ * The hardware profile the agent reports for one GPU (or none): the coordinator prices it. With a
+ * pool (several cards behind this instance's Ollama, src/install/plan.ts) the VRAM is the pool's
+ * sum and `count` says how many cards, so a model needing the pooled memory is matched to it; the
+ * reported card (model, datacenter) is the first.
+ */
+export function hardwareProfileFor(hw: HostHardware, gpu: GpuInfo | undefined, pool: GpuInfo[] = []): Record<string, unknown> {
+  const cards = gpu && pool.length > 1 && pool.some((g) => g.index === gpu.index) ? pool : gpu ? [gpu] : [];
   return {
     cpuCores: hw.cpuCores,
     cpuModel: hw.cpuModel,
     ramGb: hw.ramGb,
     arch: hw.arch,
     platform: hw.platform,
-    ...(gpu ? { gpu: { vendor: gpu.vendor, model: gpu.model, vramGb: gpu.vramGb, datacenter: gpu.datacenter } } : {})
+    ...(gpu
+      ? { gpu: { vendor: gpu.vendor, model: gpu.model, vramGb: cards.reduce((n, g) => n + g.vramGb, 0), datacenter: gpu.datacenter, ...(cards.length > 1 ? { count: cards.length } : {}) } }
+      : {})
   };
+}
+
+/**
+ * Every GPU this instance's Ollama uses: the cards CUDA_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES list
+ * (nvidia-smi and rocm-smi indexes ignore those variables, so they match), else the selected one.
+ */
+export function selectGpuPool(hw: HostHardware, env: NodeJS.ProcessEnv): GpuInfo[] {
+  const one = selectGpu(hw, env);
+  if (!one) return [];
+  const raw = (one.vendor === "amd" ? env.HIP_VISIBLE_DEVICES ?? env.CUDA_VISIBLE_DEVICES : env.CUDA_VISIBLE_DEVICES ?? env.HIP_VISIBLE_DEVICES) ?? "";
+  const indexes = raw.split(",").map((x) => x.trim()).filter((x) => /^\d+$/.test(x)).map(Number);
+  const pool = [...new Set(indexes)].map((i) => hw.gpus.find((g) => g.index === i && g.vendor === one.vendor)).filter((g): g is GpuInfo => !!g);
+  return pool.length > 1 && pool.some((g) => g.index === one.index) ? pool : [one];
 }
 
 /** Which of the detected GPUs this process should report: CUDA_VISIBLE_DEVICES / EDGECODER_GPU_INDEX, else the first. */

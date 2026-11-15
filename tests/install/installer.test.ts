@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { detectHardware, isDatacenterGpu, parseNvidiaSmi, parseRocmSmi, selectGpu, type Probe } from "../../src/install/hardware.js";
+import { detectHardware, hardwareProfileFor, isDatacenterGpu, parseNvidiaSmi, parseRocmSmi, selectGpu, selectGpuPool, type Probe } from "../../src/install/hardware.js";
 import { helpText, parseInstallArgs, parseTokensFile, INSTALL_OPTIONS } from "../../src/install/options.js";
 import { pickModel, planInstall, renderEnvFile } from "../../src/install/plan.js";
 import { applyPlan, defaultPaths, launchdAgentPlist, removeServices, systemdAgentUnit, systemdOllamaUnit, windowsAgentCmd, type Host } from "../../src/install/services.js";
@@ -53,6 +53,21 @@ describe("hardware detection", () => {
     expect(selectGpu(hw, { CUDA_VISIBLE_DEVICES: "5" })?.index).toBe(5);
     expect(selectGpu(hw, { EDGECODER_GPU_INDEX: "2", CUDA_VISIBLE_DEVICES: "5" })?.index).toBe(2);
     expect(selectGpu(hw, {})?.index).toBe(0);
+  });
+
+  it("a pooled instance reports every card its Ollama uses: summed VRAM and a count (2x A16 regtest host)", () => {
+    const A16 = "0, NVIDIA A16, 15356\n1, NVIDIA A16, 15356\n2, NVIDIA A16, 15356\n3, NVIDIA A16, 15356\n";
+    const hw = detectHardware({ probe: () => A16, platform: "linux", arch: "x64", ramGb: 120, cpuModel: "Xeon", cpuCores: 12, hostname: "chi" });
+    // As the installer writes it for a pooled pair (src/install/plan.ts).
+    const env = { CUDA_VISIBLE_DEVICES: "0,1", HIP_VISIBLE_DEVICES: "0,1", EDGECODER_GPU_INDEX: "0" };
+    expect(selectGpuPool(hw, env).map((g) => g.index)).toEqual([0, 1]);
+    expect(hardwareProfileFor(hw, selectGpu(hw, env), selectGpuPool(hw, env)).gpu).toEqual({ vendor: "nvidia", model: "NVIDIA A16", vramGb: 30, datacenter: true, count: 2 });
+    // One card per instance: as before, no count.
+    const one = { CUDA_VISIBLE_DEVICES: "2", EDGECODER_GPU_INDEX: "2" };
+    expect(hardwareProfileFor(hw, selectGpu(hw, one), selectGpuPool(hw, one)).gpu).toEqual({ vendor: "nvidia", model: "NVIDIA A16", vramGb: 15, datacenter: true });
+    expect(selectGpuPool(hw, {}).map((g) => g.index)).toEqual([0]);
+    // A pool that does not contain the reported card is ignored.
+    expect(selectGpuPool(hw, { CUDA_VISIBLE_DEVICES: "1,2", EDGECODER_GPU_INDEX: "0" }).map((g) => g.index)).toEqual([0]);
   });
 });
 

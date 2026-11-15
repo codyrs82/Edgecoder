@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  capacityGap,
   COMPUTE_CLASS_IDS,
   DEFAULT_COMPUTE_CLASSES,
   LEGACY_COMPUTE_CLASS_IDS,
@@ -391,5 +392,15 @@ describe("settlementClassFor (self-reported hardware cap)", () => {
   it("keeps a cpu agent's own tier, and the agent's class on GPU tasks", () => {
     expect(settlementClassFor("cpu", "cpu", 4)).toEqual({ computeClass: "cpu", creditsPerSecond: 4 });
     expect(settlementClassFor("gpu", "gpu.dc", 2.9)).toEqual({ computeClass: "gpu.dc", creditsPerSecond: 2.9 });
+  });
+});
+
+describe("capacityGap: why a model call found no agent", () => {
+  it("busy when an agent of the class (or any class for 'any') holds the model; none_in_class when only other classes do", () => {
+    expect(capacityGap("gpu.dc", [])).toBe("none");
+    expect(capacityGap("any", ["cpu", "apple"])).toBe("busy");
+    expect(capacityGap("gpu.dc", ["gpu.dc", "cpu"])).toBe("busy");
+    // The 2x A16 demoted to cpu: an @gpu.dc call had holders, but none at gpu.dc.
+    expect(capacityGap("gpu.dc", ["cpu", "apple", "apple"])).toBe("none_in_class");
   });
 });

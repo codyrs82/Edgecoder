@@ -133,8 +133,10 @@ matching `OLLAMA_NUM_PARALLEL`.
 
 The agent reports the GPU it owns (`nvidia-smi`, `rocm-smi`, or Apple silicon's unified memory),
 so the coordinator prices it in the right class (an RTX 6000 Ada is `gpu.dc40`, an H100
-`gpu.dc80`). The installer does not write `AGENT_GPU_*`: those override detection inside
-containers, and an overridden profile re-proves its tier every session.
+`gpu.dc80`). An instance whose Ollama pools several cards (`CUDA_VISIBLE_DEVICES=0,1`) reports the
+first card's model with the pool's summed VRAM and a `count`. The installer does not write
+`AGENT_GPU_*`: those override detection inside containers, and an overridden profile re-proves its
+tier every session.
 
 ## Service accounts
 

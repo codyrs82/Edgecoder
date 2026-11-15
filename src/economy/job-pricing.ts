@@ -97,6 +97,11 @@ export const usdToMsat = (usd: number, btcUsd: number) => (btcUsd > 0 ? (usd / b
  * What a model call costs (msat): its tokens at the reference price, never below the power floor
  * for the seconds it ran. Without token counts (an agent that doesn't report them) it is the
  * per-second cost, as before.
+ *
+ * The floor's seconds leave out `floorExcludeMs`, the agent's model-load time for the call (Ollama
+ * load_duration): a host that unloaded its model (keep_alive) should not bill the buyer for loading
+ * it again, so a cold call costs what the same call costs warm. Only the agent is paid by the floor,
+ * so it gains nothing by over-reporting load time.
  */
 export function inferenceCostMsat(input: {
   promptTokens?: number;
@@ -104,6 +109,8 @@ export function inferenceCostMsat(input: {
   paramsB: number;
   btcUsd: number;
   durationMs: number;
+  /** Model-load time inside durationMs, left out of the power floor. */
+  floorExcludeMs?: number;
   computeClass: string;
   tierWeight: number;
   /** The per-second cost, used when there are no token counts. */
@@ -112,7 +119,9 @@ export function inferenceCostMsat(input: {
   if (input.promptTokens === undefined && input.outputTokens === undefined) return { costMsat: input.perSecondCostMsat, basis: "per_second" };
   const price = tokenPriceUsdPerM(input.paramsB);
   const tokenUsd = ((input.promptTokens ?? 0) * price.input + (input.outputTokens ?? 0) * price.output) / 1_000_000;
-  const floorUsd = ((POWER_FLOOR_USD_PER_HOUR[input.computeClass] ?? POWER_FLOOR_USD_PER_HOUR.cpu) * Math.max(1, input.tierWeight) * Math.max(0, input.durationMs)) / 3_600_000;
+  const exclude = typeof input.floorExcludeMs === "number" && Number.isFinite(input.floorExcludeMs) ? Math.max(0, input.floorExcludeMs) : 0;
+  const floorMs = Math.max(0, input.durationMs - exclude);
+  const floorUsd = ((POWER_FLOOR_USD_PER_HOUR[input.computeClass] ?? POWER_FLOOR_USD_PER_HOUR.cpu) * Math.max(1, input.tierWeight) * floorMs) / 3_600_000;
   const tokenMsat = usdToMsat(tokenUsd, input.btcUsd);
   const floorMsat = usdToMsat(floorUsd, input.btcUsd);
   return tokenMsat >= floorMsat ? { costMsat: Math.round(tokenMsat), basis: "tokens" } : { costMsat: Math.round(floorMsat), basis: "power_floor" };
