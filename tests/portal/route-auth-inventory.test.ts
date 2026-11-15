@@ -59,6 +59,8 @@ const PUBLIC: Record<string, string> = {
   "GET /": "marketing page",
   "GET /privacy": "static page",
   "GET /terms": "static page",
+  "GET /host": "Host with us page and its request form",
+  "POST /host/request": "public Request to host form (honeypot, rate limited per IP and per email)",
   "GET /install.sh": "installer script",
   "GET /install.ps1": "installer script",
   "GET /assets/tokens.css": "static asset",

@@ -535,6 +535,8 @@ The schemas are collected in `src/config/index.ts`. `tests/common/env-docs.test.
 | `PASSKEY_ALLOWED_ORIGINS` | string | unset |
 | `COORDINATOR_OPERATIONS_OWNER_EMAILS` | string | unset |
 | `SYSTEM_ADMIN_EMAILS` | string | unset |
+| `HOST_APPROVAL_REQUIRED` | flag, on unless `0` or `false`. Hosting by request (`src/portal/host-requests.ts`). On: the portal tells coordinators (`hostApproved` in `/internal/nodes/validate` and `/internal/nodes/lookup`) which nodes belong to approved hosts, and a coordinator lets every other agent run only its owner's own work ("My machines", free): no other account's jobs, no reservations. Approved: `SYSTEM_ADMIN_EMAILS`, `HOST_APPROVED_EMAILS`, and the emails in Settings > Admin > Approved hosts (approved requests, admin approvals, and the owners of every node approved when the table was first created, grandfathered). Coordinators re-check every 2 minutes, so an approval or revocation reaches running agents without a restart. | on |
+| `HOST_APPROVED_EMAILS` | comma list: emails always treated as approved hosts | unset (only admins and approved hosts) |
 | `COORDINATOR_ADMIN_EMAILS` | string | unset |
 | `IOS_OAUTH_CALLBACK_PREFIX` | string | `edgecoder://oauth-callback` |
 | `OAUTH_GOOGLE_CLIENT_ID` | string | unset |

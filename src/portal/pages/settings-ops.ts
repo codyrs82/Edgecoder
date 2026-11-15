@@ -15,6 +15,10 @@ app.get("/portal/settings/nodes", async (_req, reply) => {
     <section class="set-section">
       <h2 class="set-title">Nodes</h2>
       <p class="set-lead">Machines enrolled to your account. Nodes become active after email verification and coordinator approval.</p>
+      <div class="callout" id="hostStatusNote">
+        <h3 id="hostStatusTitle">My machines run your own work, free</h3>
+        <div class="muted" id="hostStatusText">Hosting for others is by request during early access. <a href="/host#request">Request to host</a>.</div>
+      </div>
       <div class="set-group">Enroll a node</div>
       <div class="set-card">
         ${settingRow("Node ID", "A name for the machine, e.g. mac-worker-001.", '<input id="nodeId" type="text" placeholder="mac-worker-001" />')}
@@ -132,6 +136,12 @@ app.get("/portal/settings/nodes", async (_req, reply) => {
       revealSettingsAdminTab(me);
       const user = me.user || {};
       if (!user.emailVerified) document.getElementById("emailVerifyNote").classList.remove("hidden");
+      // Host approval (src/portal/host-requests.ts): approved hosts' machines also take other people's work.
+      api("/portal/api/host/status", { method: "GET", headers: {} }).then(function(st) {
+        if (!st || !st.required || !st.approved) return;
+        document.getElementById("hostStatusTitle").textContent = "Approved host";
+        document.getElementById("hostStatusText").textContent = "Your account is an approved early-access host: your agents run your own work and take work from the network.";
+      }).catch(function() {});
       await loadNodes();
     })().catch((err) => {
       showToast("Could not load nodes: " + String(err.message || err), true);
@@ -143,7 +153,7 @@ app.get("/portal/settings/nodes", async (_req, reply) => {
 app.get("/portal/settings/admin", async (_req, reply) => {
   const content = `
     <h2 class="set-title">Admin</h2>
-    <p class="set-lead">Early access invites, user management and node enrollment approvals.</p>
+    <p class="set-lead">Early access invites, host requests, user management and node enrollment approvals.</p>
     <div id="adminDeniedNote" class="callout warn hidden">
       <h3>Admin access required</h3>
       <div class="muted">This section is only available to system administrators.</div>
@@ -166,6 +176,33 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       <table>
         <thead><tr><th>Code</th><th>Label</th><th>Uses</th><th>Expires</th><th>Status</th><th>Created by</th><th>Actions</th></tr></thead>
         <tbody id="inviteBody"></tbody>
+      </table>
+    </div>
+    </div>
+    <div id="hostRequestSection" class="hidden">
+    <div class="card" id="hostRequests">
+      <h2 class="u-mt-0">Host requests</h2>
+      <p class="muted" id="hostGateNote">Loading…</p>
+      <table>
+        <thead><tr><th>Received</th><th>Who</th><th>Would host</th><th>Hardware / region</th><th>Message</th><th>Status</th><th>Notes</th><th>Actions</th></tr></thead>
+        <tbody id="hostRequestBody"></tbody>
+      </table>
+      <div id="hostInviteWrap" class="hidden u-mt-10">
+        <div class="muted" id="hostInviteNote">Invite code for the approved host, shown only once.</div>
+        <div id="hostInviteCode" class="token-box"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3 class="u-mt-0">Approved hosts</h3>
+      <p class="muted">Accounts with these emails may take other people's work. Everyone else's machines run only their own work.</p>
+      <div class="row">
+        <input id="hostApproveEmail" type="email" maxlength="254" placeholder="host@example.com" aria-label="Host email" />
+        <input id="hostApproveNote" type="text" maxlength="200" placeholder="Note (optional)" aria-label="Note" />
+        <button class="primary" id="hostApproveBtn">Approve host</button>
+      </div>
+      <table>
+        <thead><tr><th>Email</th><th>Source</th><th>Approved</th><th>By</th><th>Note</th><th>Actions</th></tr></thead>
+        <tbody id="hostListBody"></tbody>
       </table>
     </div>
     </div>
@@ -379,6 +416,93 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       }
     });
 
+    /* ── Host requests (admin only; src/portal/host-requests.ts) ── */
+    const HOST_STATUS = { new: ["NEW", "info"], contacted: ["CONTACTED", "warn"], approved: ["APPROVED", "ok"], declined: ["DECLINED", "warn"] };
+    const HOST_KIND = { compute_agent: "Compute agent", coordinator: "Coordinator", bitcoin_node: "Bitcoin node", lightning_node: "Lightning node" };
+    const HW = { cpu: "CPU", nvidia_gpu: "NVIDIA GPU", amd_gpu: "AMD GPU", apple_silicon: "Apple silicon", other: "Other" };
+    let hostRequestsCache = [];
+    async function loadHostRequests() {
+      try {
+        const data = await api("/portal/api/admin/host-requests", { method: "GET", headers: {} });
+        document.getElementById("hostGateNote").textContent = data.required
+          ? "HOST_APPROVAL_REQUIRED is on: only approved hosts' machines take other people's work. Approving a request approves its email" + (data.allowlist && data.allowlist.length ? " (also always approved: " + data.allowlist.length + " allowlisted email(s))." : ".")
+          : "HOST_APPROVAL_REQUIRED=0: every account's machines may take network work. Approvals here start to matter once the gate is on.";
+        hostRequestsCache = data.requests || [];
+        const rows = hostRequestsCache.map(function(r) {
+          const st = HOST_STATUS[r.status] || [String(r.status), "warn"];
+          const sel = "<select class='hostStatusSel' data-id='" + encodeAttr(r.requestId) + "' aria-label='Status'>" +
+            ["new", "contacted", "approved", "declined"].map(function(s) { return "<option value='" + s + "'" + (s === r.status ? " selected" : "") + ">" + s + "</option>"; }).join("") + "</select>";
+          return "<tr><td>" + fmtTime(r.createdAtMs) + "</td><td><b>" + escapeHtml(r.name) + "</b><br><a href='mailto:" + encodeAttr(r.email) + "'>" + escapeHtml(r.email) + "</a>" +
+            (r.organisation ? "<br><span class='muted'>" + escapeHtml(r.organisation) + "</span>" : "") + "</td><td>" +
+            (r.hostKinds || []).map(function(k) { return escapeHtml(HOST_KIND[k] || k); }).join(", ") + "</td><td>" +
+            escapeHtml(r.computeHardware ? (HW[r.computeHardware] || r.computeHardware) : "") + (r.hardwareDetails ? "<br><span class='muted'>" + escapeHtml(r.hardwareDetails) + "</span>" : "") +
+            (r.region ? "<br>" + escapeHtml(r.region) : "") + "</td><td>" + escapeHtml(r.message || "") + "</td><td>" + statusBadge(st[0], st[1]) + "<br>" + sel +
+            "</td><td><textarea class='hostNotes' data-id='" + encodeAttr(r.requestId) + "' rows='2' maxlength='4000' aria-label='Notes'>" + escapeHtml(r.notes || "") + "</textarea></td>" +
+            "<td><button class='hostSaveBtn' data-id='" + encodeAttr(r.requestId) + "'>Save</button></td></tr>";
+        });
+        renderRows("hostRequestBody", rows, 8, "No host requests yet.");
+        const hosts = (data.hosts || []).map(function(h) {
+          return "<tr><td>" + escapeHtml(h.email) + "</td><td>" + escapeHtml(h.source) + "</td><td>" + fmtTime(h.approvedAtMs) + "</td><td>" + escapeHtml(h.approvedBy) +
+            "</td><td>" + escapeHtml(h.note || "") + "</td><td><button class='hostRevokeBtn' data-email='" + encodeAttr(h.email) + "'>Revoke</button></td></tr>";
+        });
+        renderRows("hostListBody", hosts, 6, "No approved hosts.");
+      } catch (err) {
+        renderRows("hostRequestBody", [], 8, "Could not load host requests.");
+      }
+    }
+    document.getElementById("hostRequestBody").addEventListener("click", async function(event) {
+      const target = event.target;
+      if (!target || !target.classList || !target.classList.contains("hostSaveBtn")) return;
+      const id = decodeURIComponent(target.getAttribute("data-id") || "");
+      const row = target.closest("tr");
+      const status = row.querySelector(".hostStatusSel").value;
+      const notes = row.querySelector(".hostNotes").value;
+      const prev = hostRequestsCache.find(function(r) { return r.requestId === id; });
+      if (status === "approved" && prev && prev.status !== "approved" &&
+          !window.confirm("Approve " + prev.email + " as a host? Their machines will take other people's work. If they have no account yet, an invite code is created and emailed.")) return;
+      try {
+        const r = await api("/portal/api/admin/host-requests/" + encodeURIComponent(id), { method: "POST", body: JSON.stringify({ status: status, notes: notes }) });
+        if (r.invite) {
+          document.getElementById("hostInviteWrap").classList.remove("hidden");
+          document.getElementById("hostInviteCode").textContent = r.invite.code;
+          document.getElementById("hostInviteNote").textContent = r.invite.emailed
+            ? "Invite code emailed to " + prev.email + " (shown only once):"
+            : "Email is not configured: send this invite code to " + (prev ? prev.email : "the requester") + " yourself (shown only once):";
+        }
+        showToast(status === "approved" && r.approvalEmailed ? "Saved; the requester was emailed." : "Saved.");
+        await loadHostRequests();
+      } catch (err) {
+        showToast("Could not save: " + String(err.message || err), true);
+      }
+    });
+    document.getElementById("hostApproveBtn").addEventListener("click", async function() {
+      const email = document.getElementById("hostApproveEmail").value.trim();
+      const note = document.getElementById("hostApproveNote").value.trim();
+      if (!email) return;
+      try {
+        await api("/portal/api/admin/hosts", { method: "POST", body: JSON.stringify(note ? { email: email, note: note } : { email: email }) });
+        document.getElementById("hostApproveEmail").value = "";
+        document.getElementById("hostApproveNote").value = "";
+        showToast("Host approved. Their agents pick it up within a few minutes.");
+        await loadHostRequests();
+      } catch (err) {
+        showToast("Could not approve: " + String(err.message || err), true);
+      }
+    });
+    document.getElementById("hostListBody").addEventListener("click", async function(event) {
+      const target = event.target;
+      if (!target || !target.classList || !target.classList.contains("hostRevokeBtn")) return;
+      const email = decodeURIComponent(target.getAttribute("data-email") || "");
+      if (!email || !window.confirm("Revoke host approval for " + email + "? Their machines go back to running only their own work.")) return;
+      try {
+        await api("/portal/api/admin/hosts/revoke", { method: "POST", body: JSON.stringify({ email: email }) });
+        showToast("Host approval revoked.");
+        await loadHostRequests();
+      } catch (err) {
+        showToast("Revoke failed: " + String(err.message || err), true);
+      }
+    });
+
     /* ── User management (admin only) ── */
     async function loadUserManagement() {
       try {
@@ -425,6 +549,8 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       }
       document.getElementById("inviteSection").classList.remove("hidden");
       loadInvites();
+      document.getElementById("hostRequestSection").classList.remove("hidden");
+      loadHostRequests();
       document.getElementById("userMgmtSection").classList.remove("hidden");
       document.getElementById("adminNodeApprovalSection").classList.remove("hidden");
       loadUserManagement();
@@ -434,6 +560,6 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       showToast("Could not load admin settings: " + String(err.message || err), true);
     });
   `;
-  return reply.type("text/html").send(settingsPage("admin", "User management and node enrollment approvals.", content, script));
+  return reply.type("text/html").send(settingsPage("admin", "Invites, host requests, user management and node enrollment approvals.", content, script));
 });
 }

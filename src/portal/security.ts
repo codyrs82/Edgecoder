@@ -102,6 +102,10 @@ export const TOPUP_RATE_LIMIT = { max: 10, timeWindow: "1 minute" } as const;
 // A Bitcoin deposit address may ask the node for a new address: same limit.
 const TOPUP_ROUTES: RegExp[] = [/^\/v1\/account\/topup$/, /^\/portal\/api\/wallet\/topup$/, /^\/portal\/api\/wallet\/onchain\/address$/];
 
+/** The public "Request to host" form (host-requests.ts; it also caps requests per email and IP per day). */
+export const HOST_REQUEST_RATE_LIMIT = { max: 5, timeWindow: "10 minutes" } as const;
+const HOST_REQUEST_ROUTES: RegExp[] = [/^\/host\/request$/];
+
 /**
  * The only legitimate cross-site POST: Apple's OAuth uses response_mode=form_post, so
  * appleid.apple.com POSTs the callback (currently disabled; kept for when Apple returns).
@@ -119,6 +123,7 @@ export function rateLimitFor(url: string, method: string | string[] = "POST"): {
   if (methods.includes("POST") && TOPUP_ROUTES.some((r) => r.test(url))) return TOPUP_RATE_LIMIT;
   if (methods.includes("POST") && PASSWORD_RESET_ROUTES.some((r) => r.test(url))) return PASSWORD_RESET_RATE_LIMIT;
   if (methods.includes("POST") && CHAT_ROUTES.some((r) => r.test(url))) return CHAT_RATE_LIMIT;
+  if (methods.includes("POST") && HOST_REQUEST_ROUTES.some((r) => r.test(url))) return HOST_REQUEST_RATE_LIMIT;
   if (AUTH_ROUTES.some((r) => r.test(url))) return AUTH_RATE_LIMIT;
   return undefined;
 }

@@ -7,6 +7,7 @@ import { registerAccountPages } from "./account.js";
 import { registerChatPage } from "./chat.js";
 import { registerDashboardPages } from "./dashboard.js";
 import { registerHomePage } from "./home.js";
+import { registerHostPage } from "./host.js";
 import { registerPublicPages, type PublicPagesDeps } from "./public.js";
 import { registerResetPasswordPage } from "./reset-password.js";
 import { registerReviewsPage } from "./reviews.js";
@@ -17,6 +18,8 @@ export function registerPortalPages(app: FastifyInstance, deps: PublicPagesDeps 
   // #89: /assets/tokens.css and /assets/theme.js, linked from every page.
   registerPortalAssets(app);
   registerPublicPages(app, deps);
+  // Hosting by request (src/portal/host-requests.ts): the "Host with us" page and its form.
+  registerHostPage(app);
   // #27: /portal-legacy was the first single-page portal. Nothing linked to it and every function
   // it had lives on /portal and in Settings, so the page is gone; old bookmarks land on sign-in.
   app.get("/portal-legacy", async (_req, reply) => reply.redirect("/portal", 302));

@@ -103,6 +103,27 @@ export async function inviteCodeUsable(store: Pick<InviteStore, "inviteCodeRedee
   return (await store.inviteCodeRedeemable(inviteCodeHash(normalized), nowMs)) ? normalized : null;
 }
 
+/** Creates a code and stores only its hash; the code itself is returned once, to show or send. */
+export async function mintInviteCode(
+  store: Pick<InviteStore, "createInviteCode">,
+  input: { label: string | null; maxUses: number; expiresInDays?: number; createdBy: string; nowMs: number }
+): Promise<{ code: string; record: InviteRecord }> {
+  const code = generateInviteCode();
+  const record: InviteRecord = {
+    codeId: randomBytes(12).toString("hex"),
+    prefix: code.slice(0, 7),
+    label: input.label,
+    maxUses: input.maxUses,
+    uses: 0,
+    expiresAtMs: input.expiresInDays ? input.nowMs + input.expiresInDays * DAY_MS : null,
+    createdBy: input.createdBy,
+    createdAtMs: input.nowMs,
+    revokedAtMs: null
+  };
+  await store.createInviteCode({ ...record, codeHash: inviteCodeHash(code) });
+  return { code, record };
+}
+
 export interface InviteAdminDeps {
   store: InviteStore | null | undefined;
   launchMode: LaunchMode;
@@ -160,20 +181,7 @@ export function registerInviteAdminRoutes(app: FastifyInstance, deps: InviteAdmi
     if (!a) return reply;
     const parsed = mintBody.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: "invalid_invite", detail: `maxUses: 1 to ${MAX_INVITE_USES}; expiresInDays: 1 to ${MAX_INVITE_DAYS}; label: up to 80 characters` });
-    const code = generateInviteCode();
-    const createdAtMs = now();
-    const record: InviteRecord = {
-      codeId: randomBytes(12).toString("hex"),
-      prefix: code.slice(0, 7),
-      label: parsed.data.label || null,
-      maxUses: parsed.data.maxUses,
-      uses: 0,
-      expiresAtMs: parsed.data.expiresInDays ? createdAtMs + parsed.data.expiresInDays * DAY_MS : null,
-      createdBy: a.user.email,
-      createdAtMs,
-      revokedAtMs: null
-    };
-    await a.store.createInviteCode({ ...record, codeHash: inviteCodeHash(code) });
+    const { code, record } = await mintInviteCode(a.store, { label: parsed.data.label || null, maxUses: parsed.data.maxUses, expiresInDays: parsed.data.expiresInDays, createdBy: a.user.email, nowMs: now() });
     req.log.info({ codeId: record.codeId, maxUses: record.maxUses, expiresAtMs: record.expiresAtMs, by: a.user.userId }, "invite_code_minted");
     return reply.send({ invite: view(record), code });
   });
