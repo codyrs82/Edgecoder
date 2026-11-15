@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { BLECreditTransaction } from "../../../src/common/types.js";
 import { CreditEngine } from "../../../src/credits/engine.js";
@@ -335,4 +335,9 @@ describe("settledBleTxIds (#63 flush bookkeeping)", () => {
     })).toEqual(["a", "d", "s", "f"]);
     expect(settledBleTxIds(undefined)).toEqual([]);
   });
+});
+
+// helpers/cosign.ts advances a mocked clock by each task's reported time; give the real one back.
+afterEach(() => {
+  vi.useRealTimers();
 });

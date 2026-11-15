@@ -46,7 +46,10 @@ export class MeshHttpServer {
     this.config.meshToken = token || undefined;
   }
 
-  /** Fails closed: until a mesh token is set, only GET /identity answers. */
+  /**
+   * Operator-configured token (a private mesh). Without one, /mesh/peers and /mesh/register-peer
+   * are closed; /mesh/ingest admits trusted, signed senders only (see the route).
+   */
   private requireMeshToken(req: { headers: Record<string, string | string[] | undefined> }): boolean {
     const expected = this.config.meshToken;
     if (!expected) return false;
@@ -101,10 +104,19 @@ export class MeshHttpServer {
     });
 
     this.app.post("/mesh/ingest", async (req, reply) => {
-      if (!this.requireMeshToken(req as any)) {
+      // An operator-configured token (private mesh) is still checked when set. It is not what
+      // admits a message: agents are never given the coordinators' token, and a token every install
+      // holds proves nothing. A message is heard only from a trusted peer (the verified coordinator
+      // and the peers it listed), signed by the key on file for it (MeshPeer.handleIngest).
+      if (this.config.meshToken && !this.requireMeshToken(req as any)) {
         return reply.code(401).send({ error: "mesh_unauthorized" });
       }
-      const raw = messageSchema.parse(req.body);
+      const parsed = messageSchema.safeParse(req.body);
+      if (!parsed.success) return reply.code(400).send({ error: "invalid_message" });
+      const raw = parsed.data;
+      if (!meshPeer.getPeer(raw.fromPeerId)?.trusted) {
+        return reply.code(403).send({ error: "untrusted_sender" });
+      }
       const result = await meshPeer.handleIngest(raw as any);
       if (!result.ok) {
         return reply.code(400).send({ error: result.reason });

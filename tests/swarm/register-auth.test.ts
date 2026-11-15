@@ -102,7 +102,7 @@ describe("/register key ownership", () => {
     expect((await register("agent-c1-b", { key: keys, token: VALID_TOKEN, signWith: keys })).statusCode).toBe(200);
     const res = await register("agent-c1-b", { key: keys, signWith: keys });
     expect(res.statusCode).toBe(200);
-    expect(res.json().meshToken).toBe("mesh-secret-test");
+    expect(res.json().meshToken).toBeUndefined(); // agents never receive the coordinators' token
   });
 
   test("re-register with a valid token and a new key is accepted and rotates the key", async () => {
@@ -149,7 +149,7 @@ describe("/register loopback exemption", () => {
     const keys = createPeerKeys("agent-h1-local");
     const v4 = await register("agent-h1-local", { key: keys, signWith: keys, remoteAddress: "127.0.0.1" });
     expect(v4.statusCode).toBe(200);
-    expect(v4.json().meshToken).toBe("mesh-secret-test");
+    expect(v4.json().meshToken).toBeUndefined();
     // The bundled worker restarts with a fresh key; loopback may still register it.
     const restarted = createPeerKeys("agent-h1-local");
     expect((await register("agent-h1-local", { key: restarted, signWith: restarted, remoteAddress: "::1" })).statusCode).toBe(200);

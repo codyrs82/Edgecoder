@@ -25,7 +25,7 @@ import {
   OLLAMA_MODEL,
   securityLog,
   identity,
-  MESH_AUTH_TOKEN
+  preAuthFailures
 } from "../context.js";
 import { mutable } from "../mutable-state.js";
 import {
@@ -40,11 +40,14 @@ import {
   pendingTunnelCloseNotices,
   directWorkInbox,
   directWorkById,
+  pruneDirectWork,
+  DIRECT_WORK_OFFER_TTL_MS,
+  DIRECT_WORK_INBOX_MAX,
   type DirectWorkOffer,
   agentOrchestration,
   blacklistByAgent
 } from "../agent-state.js";
-import { extractSignedHeaders, verifyAgentRequest, hasMeshToken, hasPortalServiceToken } from "../auth.js";
+import { extractSignedHeaders, verifyAgentRequest, hasMeshToken, hasPortalServiceToken, agentSignatureAtGate } from "../auth.js";
 import {
   rateOracleConfig,
   hardwareVerifier,
@@ -102,6 +105,12 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
     const hardwareClass = classifyHardware(body.hardwareProfile, rateOracleConfig.computeClasses);
     const origin = requestOrigin(req);
     const sourceIp = origin.clientIp;
+    // Denied registrations count against the caller's address (they cost an audit record, a
+    // signature and a portal round trip each); a flooding address is turned away up front.
+    const failureKey = sourceIp ?? "unknown";
+    if (!origin.loopback && preAuthFailures.blocked(failureKey)) {
+      return reply.code(429).send({ error: "too_many_failed_registrations" });
+    }
     const previous = agentCapabilities.get(body.agentId);
     const proofOfKey = await registerProvesStoredKey(req, body.agentId, body.publicKeyPem, previous?.publicKeyPem);
     const activation = await validatePortalNode({
@@ -114,6 +123,7 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       proofOfKey
     });
     if (!activation.allowed) {
+      if (!origin.loopback) preAuthFailures.record(failureKey);
       app.log.warn({ agentId: body.agentId, reason: activation.reason }, "register_denied");
       return reply.code(403).send({ error: "node_not_activated", reason: activation.reason });
     }
@@ -259,7 +269,8 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       accepted: true,
       policy: defaultPolicy,
       mode: body.mode,
-      meshToken: MESH_AUTH_TOKEN || undefined,
+      // No meshToken: the coordinators' shared token is never handed to agents. Agents authenticate
+      // every request with their own key (docs/security/agent-threat-model.md).
       hardwareVerification: verificationSummary(hardwareRecord),
       // #63: BLE credit transactions sign the reward account; tell the agent which one we resolve.
       rewardAccountId: await rewardAccountForAgent(body.agentId)
@@ -361,15 +372,17 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
     pendingTunnelInvites.set(body.agentId, []);
     const tunnelCloseNotices = pendingTunnelCloseNotices.get(body.agentId) ?? [];
     pendingTunnelCloseNotices.set(body.agentId, []);
+    pruneDirectWork(now);
     const directOfferIds = directWorkInbox.get(body.agentId) ?? [];
     const directWorkOffers = directOfferIds
       .map((id) => directWorkById.get(id))
-      .filter((offer): offer is DirectWorkOffer => Boolean(offer && offer.status === "offered"));
+      .filter((offer): offer is DirectWorkOffer => Boolean(offer && offer.status === "offered" && now - offer.createdAtMs <= DIRECT_WORK_OFFER_TTL_MS))
+      .slice(0, DIRECT_WORK_INBOX_MAX);
     // Hardware verification: hand out a benchmark challenge when one is due (the deadline runs from now).
     const benchmarkChallenge = hardwareVerifier.nextChallenge(body.agentId, {
       nowMs: now,
       model: benchmarkModelFor(body.agentId),
-      pickWitness: (model) => pickBenchmarkWitness(body.agentId, model, now)
+      pickWitness: (model, exclude) => pickBenchmarkWitness(body.agentId, model, now, exclude)
     });
     return reply.send({
       ok: true,
@@ -413,6 +426,18 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
         coordinatorId: identity.peerId
       });
     }
+    if (result.disagreeingWitness) {
+      // A second witness overruled this one's mismatch: recorded on its verification record
+      // (witnessDisagreements); repeated disagreement is the signal for a witness penalty.
+      securityLog.log({
+        level: securityLog.severity("hardware_witness_disagreement"),
+        event: "hardware_witness_disagreement",
+        source: { type: "agent", id: result.disagreeingWitness },
+        details: { subjectId, claimedTier: result.record?.claimed.tier, overruledBy: agentId, disagreements: hardwareVerifier.get(result.disagreeingWitness)?.witnessDisagreements },
+        action: "record_witness_disagreement",
+        coordinatorId: identity.peerId
+      });
+    }
     if (result.changed) repostAsk(subjectId);
     if (result.record) {
       app.log.info({ agentId: subjectId, status: result.record.status, granted: result.record.granted.tier, measured: result.record.measured?.value, unit: result.record.measured?.unit }, "hardware_challenge_result");
@@ -422,6 +447,11 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
 
   app.post("/agent/diagnostics", async (req, reply) => {
     const body = diagnosticsSchema.parse(req.body);
+    // An agent writes its own diagnostics only (shown to the operator); the mesh token is a coordinator's.
+    const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
+    if (!hasMeshToken(headers) && agentSignatureAtGate(headers, "POST", "/agent/diagnostics") !== body.agentId) {
+      return reply.code(403).send({ error: "agent_identity_mismatch" });
+    }
     if (!agentCapabilities.has(body.agentId)) {
       return reply.code(401).send({ error: "mesh_unauthorized", reason: "agent_not_registered" });
     }

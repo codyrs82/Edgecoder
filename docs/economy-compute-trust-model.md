@@ -120,6 +120,13 @@ BHV003 on every honest agent and blacklisted the whole network for an hour. Mode
 by BHV001 (below) and result verification instead. `AgentBehaviorStats.outputTasks` is the number of
 results these rules look at.
 
+They also flag rather than strike. A code result's output is what the requester's program prints,
+so a buyer could make an honest worker's outputs identical, empty or tiny on purpose: three
+`print('OK')` jobs blacklisted the worker instantly (BHV003 was CRITICAL) and the blacklist was
+gossiped to every coordinator. A flag sends the agent's next results to re-execution verification,
+which decides. With verification off (`RESULT_VERIFICATION_RATE=0`) these rules only log, so an agent
+returning canned output is not caught by them; see `docs/security/agent-threat-model.md`.
+
 ### BHV001: suspiciously fast results
 
 A result that arrives impossibly soon after its claim suggests the agent did not do the work.
@@ -167,7 +174,7 @@ Handling is graduated; speed alone never blacklists at once:
 **Still open.**
 
 - The allowlist is a static environment variable on each coordinator, not a signed document. Adding a peer means changing the configuration of every coordinator.
-- `MESH_AUTH_TOKEN` is still a shared secret that gates the transport. It no longer confers peer trust.
+- `MESH_AUTH_TOKEN` is still a shared secret that gates the transport between coordinators. It no longer confers peer trust, and agents are no longer given it (they authenticate with their own keys; `docs/security/agent-threat-model.md`). Every agent registered before that change received it, so it must be rotated once coordinators and agents are updated.
 - `MESH_PEER_ALLOWLIST` is not in the `[env]` of the Fly seed configs; whether it is set as a secret on the deployed seeds was not verified.
 
 ## 8. End-to-end acceptance (#56, third criterion): not met

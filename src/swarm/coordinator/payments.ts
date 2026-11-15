@@ -135,6 +135,16 @@ async function expireIntentIfStale(intent: PaymentIntent): Promise<boolean> {
   return true;
 }
 
+/** Unpaid, unexpired invoices one account may hold (an invoice flood starves the reconcile loop). */
+export const MAX_OPEN_INTENTS_PER_ACCOUNT = 5;
+export function openIntentCount(accountId: string, nowMs = Date.now()): number {
+  let n = 0;
+  for (const intent of paymentIntents.values()) {
+    if (intent.accountId === accountId && intent.status === "created" && nowMs - intent.createdAtMs <= PAYMENT_INTENT_TTL_MS) n += 1;
+  }
+  return n;
+}
+
 /** A Lightning invoice that buys cSats for an account: 1 cSat per sat, after the coordinator fee. */
 export async function createPaymentIntent(accountId: string, amountSats: number, walletType: WalletType = "lightning"): Promise<PaymentIntent> {
   const { feeSats, netSats } = computeIntentFee(amountSats, COORDINATOR_FEE_BPS);

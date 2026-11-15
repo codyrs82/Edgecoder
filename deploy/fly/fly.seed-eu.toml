@@ -12,6 +12,8 @@ primary_region = "cdg"
   NODE_ENV = "production"
   # #5: services bind 127.0.0.1 unless HOST is set. Required secrets are listed in #5 / env docs.
   HOST = "0.0.0.0"
+  # Re-execute a sample of deterministic (code) results so fake work is caught and not paid.
+  RESULT_VERIFICATION_RATE = "0.05"
   # #43: production requires LIGHTNING_PROVIDER=lnd|cln (+ LND_*/CLN_* via fly secrets).
   # Regtest phase: payouts run against the test Lightning hub (deploy/lnd-test) over Fly 6PN.
   # LND_MACAROON_HEX and LND_TLS_CERT_BASE64 are Fly secrets (deploy/lnd-test/connect-seeds.sh).

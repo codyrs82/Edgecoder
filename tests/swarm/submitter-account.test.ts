@@ -32,6 +32,14 @@ describe("submitterAccountDecision (/submit billing)", () => {
     expect(submitterAccountDecision({ ...base, signature: { agentId: "mac-1" }, requested: "mac-1" })).toEqual({ accountId: "mac-1" });
   });
 
+  it("bills a remote signed agent asking for anonymous (unbilled work is unpaid for workers)", () => {
+    const signed = { ...base, signature: { agentId: "mac-1" }, ownerAccountId: "acct-u1" };
+    expect(submitterAccountDecision({ ...signed, requested: "anonymous" })).toEqual({ accountId: "acct-u1" });
+    expect(submitterAccountDecision({ ...base, signature: { agentId: "mac-2" }, requested: "anonymous" })).toEqual({ accountId: "mac-2" });
+    // The embedded worker on the coordinator's own machine may still submit unbilled work.
+    expect(submitterAccountDecision({ ...signed, requested: "anonymous", loopback: true })).toEqual({ accountId: "anonymous" });
+  });
+
   it("rejects a bad signature", () => {
     expect(submitterAccountDecision({ ...base, signature: "rejected", requested: "anonymous" })).toEqual({ status: 401, error: "invalid_signature" });
   });

@@ -26,9 +26,14 @@
 
 ## Coordinator route authority
 
-Every enrolled agent receives `MESH_AUTH_TOKEN`, so the coordinator treats it as a transport gate
-(the global `onRequest` hook) and never as authority for acting on another agent, another account
-or the operator's settings. Each route covered by the hook falls into one of these classes:
+`MESH_AUTH_TOKEN` belongs to coordinators and operator tooling only. Agents are never given it
+(`/register` no longer returns it; the agent ignores one if an older coordinator sends it). A
+registered agent passes the global `onRequest` hook with its own Ed25519 key, over the request's
+method and path, and only on the routes agents use (`isAgentGateRoute` in
+`src/swarm/coordinator/auth.ts`); every other route behind the hook is coordinator/operator-only.
+The token is still never authority for acting on another agent, another account or the operator's
+settings. See `docs/security/agent-threat-model.md`. Each route covered by the hook falls into one
+of these classes:
 
 | Class | Authority | Routes |
 |---|---|---|
@@ -36,7 +41,8 @@ or the operator's settings. Each route covered by the hook falls into one of the
 | Account-scoped | Portal service token (the portal binds `acct-<userId>` from the session), or the signer's own account (`callerAccount`) | `/account/*`, `/economy/market/orders` (POST), `/economy/payouts/*` (portal only) |
 | Peer coordinator | Signed by an allowlisted peer key (`MESH_PEER_ALLOWLIST`; enforced whenever it is set and always in production) or a payload signed by a known coordinator key | `/mesh/register-peer`, `/mesh/ingest`, `/mesh/relay-gossip`, `/economy/hosts/heartbeat`, `/stats/ledger/ingest`, `/receipts/replicate`, forwarded `/result` |
 | Operator | `authorizeAdmin` (`x-admin-token` = `ADMIN_API_TOKEN`) | `/economy/treasury/policies`, `/economy/treasury/policies/:policyId/activate`, `/economy/issuance/recalculate`, `/economy/issuance/quorum/vote`, `/economy/issuance/anchor`, `/economy/price/propose`, `/economy/price/consensus`, `/economy/payments/intents` (POST), `/economy/payments/intents/:intentId/confirm`, `/economy/payments/reconcile`, `/economy/rates/recalibrate`, `/economy/fee-pool/distribute`, `/orchestration/coordinator/ollama-install`, `/orchestration/agents/:agentId/ollama-install`, `/stats/anchors/anchor-latest`, `/security/blacklist` writes, `/admin/*` |
-| Transport-gated reads | Mesh token (or portal token where noted in code) | Status, capacity, ledger/stats reads, market data, issuance/treasury reads, rollout list, `/agent-mesh/peers/:agentId`, `/agent-mesh/models/available`, `/agent-mesh/models/request/:offerId` (offer ids are random) |
+| Agent reads (signed GET) | The agent's own signature over GET and the path; scoped to the signer | `/agent-mesh/peers/:agentId` (the agent itself), `/inference/models`, `/tasks/:taskId/subtasks/:subtaskId/result` (tasks the signer's account submitted; the mesh token reads any) |
+| Coordinator/operator reads | Mesh token (or portal token where noted in code); agents cannot reach these | Status, capacity, ledger/stats reads, market data, issuance/treasury reads, rollout list, `/agent-mesh/models/available`, `/agent-mesh/models/request/:offerId`, hardware verifications, diagnostics reads, receipts |
 
 The control plane forwards operator requests with both the mesh token and its `ADMIN_API_TOKEN`,
 which must equal the coordinator's. The portal's `/internal/*` read and validate routes accept
@@ -44,8 +50,9 @@ which must equal the coordinator's. The portal's `/internal/*` read and validate
 `CONTROL_PLANE_ADMIN_TOKEN`. The portal sends its service token only to coordinator URLs that
 pass `src/portal/coordinator-url-policy.ts`.
 
-Not yet covered by this split: `/agent/diagnostics` (POST), `/escalate*`, `/portal/chat`,
-anonymous `/submit` and the feature-flagged `/robot/*` routes still accept the mesh token alone.
+Not yet covered by this split: `/escalate*`, `/portal/chat` and the feature-flagged `/robot/*`
+routes accept the mesh token alone (coordinators and operators only, since agents no longer hold
+it); anonymous `/submit` is open to any signed agent.
 Within those limits:
 
 - Anonymous `/submit` work earns nothing: an agent is paid only out of what a requester set aside.

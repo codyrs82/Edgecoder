@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { vi } from "vitest";
 import type { BLETaskRequest, BLETaskResponse } from "../../../../src/common/types.js";
 import { BleCosignProvider } from "../../../../src/mesh/ble/ble-cosign.js";
 import type { BLETransport } from "../../../../src/mesh/ble/ble-transport.js";
@@ -39,6 +40,8 @@ export function serveWithCosign(
   transport.onTaskRequest(async (req) => {
     const response = await handler(req);
     if (response.status !== "completed") return response;
+    // The work takes the time it reports: the requester never pays for more than it waited.
+    vi.setSystemTime(Date.now() + Math.ceil(response.cpuSeconds * 1000));
     const taskHash = createHash("sha256").update(req.task).digest("hex");
     cosigner.recordServed(req.requestId, req.requesterId, taskHash, Math.round(response.cpuSeconds * 1000));
     return { ...response, providerAccountId: accountId };

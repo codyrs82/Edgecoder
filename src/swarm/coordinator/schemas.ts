@@ -76,12 +76,13 @@ const benchmarkReportSchema = z
 const challengeKindsSchema = z.array(z.string().max(16)).max(8).optional().catch(undefined);
 
 export const registerSchema = z.object({
-  agentId: z.string(),
+  // Bounded: an agent id is copied into audit records, logs and every registry map.
+  agentId: z.string().min(1).max(128).regex(/^[^\u0000-\u001f\u007f]+$/),
   deviceId: z.string().min(3).max(128).optional(),
   os: z.string().min(2),
   version: z.string(),
   mode: z.enum(["swarm-only", "ide-enabled"]),
-  registrationToken: z.string().optional(),
+  registrationToken: z.string().max(512).optional(),
   localModelProvider: z.enum(["edgecoder-local", "ollama-local"]).default("edgecoder-local"),
   /** Models installed in the agent's Ollama (network inference runs only on agents that have the model). */
   installedModels: z.array(z.string().min(1).max(200)).max(200).optional(),

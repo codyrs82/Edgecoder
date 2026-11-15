@@ -12,6 +12,10 @@ import { EventEmitter } from "node:events";
 
 const KEEP_AFTER_DONE_MS = 10 * 60_000;
 const MAX_CHARS = 2_000_000;
+/** Everything a stream may hold (text and tool calls, UTF-8): tool calls used to be unbounded. */
+const MAX_BYTES = 8_000_000;
+/** A stream that never ends (its subtask's lease lapsed, the agent went away) is dropped after this. */
+const MAX_STREAM_AGE_MS = 2 * 60 * 60_000;
 
 interface Stream {
   chunks: string[];
@@ -27,6 +31,7 @@ interface Stream {
   doneAtMs?: number;
   /** Tool calls the model made (Ollama format), sent with the last piece. */
   toolCalls?: unknown[];
+  openedAtMs: number;
 }
 
 export class InferenceStreams {
@@ -39,7 +44,7 @@ export class InferenceStreams {
 
   /** Open a stream for a subtask (at submit). */
   open(subtaskId: string, taskId?: string): void {
-    if (!this.streams.has(subtaskId)) this.streams.set(subtaskId, { chunks: [], nextSeq: 0, chars: 0, bytes: 0, done: false, taskId });
+    if (!this.streams.has(subtaskId)) this.streams.set(subtaskId, { chunks: [], nextSeq: 0, chars: 0, bytes: 0, done: false, taskId, openedAtMs: Date.now() });
   }
 
   /** Task a stream was opened for, or undefined. */
@@ -68,6 +73,8 @@ export class InferenceStreams {
     if (s.done) return "closed";
     if (seq > s.nextSeq) return "gap";
     if (s.chars + delta.length > MAX_CHARS) return "too_large";
+    const toolBytes = toolCalls?.length ? Buffer.byteLength(JSON.stringify(toolCalls), "utf8") : 0;
+    if (s.bytes + Buffer.byteLength(delta, "utf8") + toolBytes > MAX_BYTES) return "too_large";
     s.nextSeq++;
     if (delta) {
       s.chunks.push(delta);
@@ -76,7 +83,7 @@ export class InferenceStreams {
     }
     if (toolCalls?.length) {
       s.toolCalls = [...(s.toolCalls ?? []), ...toolCalls];
-      s.bytes += Buffer.byteLength(JSON.stringify(toolCalls), "utf8");
+      s.bytes += toolBytes;
     }
     // A final piece that ends a reply with no text and no tool call (and no error) does not end the
     // stream: an empty reply is a failed call, which the coordinator may give to another agent.
@@ -143,7 +150,10 @@ export class InferenceStreams {
 
   /** Drop streams that ended long ago. */
   prune(now = Date.now()): void {
-    for (const [id, s] of this.streams) if (s.done && s.doneAtMs !== undefined && now - s.doneAtMs > KEEP_AFTER_DONE_MS) this.streams.delete(id);
+    for (const [id, s] of this.streams) {
+      if (s.done && s.doneAtMs !== undefined && now - s.doneAtMs > KEEP_AFTER_DONE_MS) this.streams.delete(id);
+      else if (now - s.openedAtMs > MAX_STREAM_AGE_MS) this.streams.delete(id);
+    }
   }
 }
 

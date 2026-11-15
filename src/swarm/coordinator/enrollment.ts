@@ -28,6 +28,35 @@ async function linkPortalOwnership(agentId: string, ownerUserId: string): Promis
   }
 }
 
+/**
+ * Whether a portal-validated registration may (re)bind `requestedAgentId`. The portal can validate a
+ * different node than the one named (its device-id fallback returns the device's canonical node),
+ * and the coordinator links ownership to the agent id the caller named, so without this check a
+ * user's own valid token could take over another user's agent id: its key, its in-flight claims and
+ * every later accrual. Refused:
+ *  - an agent already linked to another portal user (ownership never moves between users here);
+ *  - a known agent bound through another node's token (the device fallback) without proof of the
+ *    key this coordinator holds for it.
+ */
+export function portalBindDecision(input: {
+  requestedAgentId: string;
+  validatedNodeId?: string;
+  validatedOwnerUserId?: string;
+  existingOwnerUserId?: string;
+  /** This coordinator already holds a key for the agent. */
+  knownAgent: boolean;
+  /** The request is signed by that stored key (registerProvesStoredKey). */
+  proofOfKey: boolean;
+}): { ok: true } | { ok: false; reason: string } {
+  if (input.existingOwnerUserId && input.validatedOwnerUserId && input.existingOwnerUserId !== input.validatedOwnerUserId) {
+    return { ok: false, reason: "agent_owned_by_another_account" };
+  }
+  // Another node's token speaks for a known agent only together with proof of its stored key.
+  const otherNode = input.validatedNodeId !== undefined && input.validatedNodeId !== input.requestedAgentId;
+  if (otherNode && input.knownAgent && !input.proofOfKey) return { ok: false, reason: "node_id_mismatch_for_known_agent" };
+  return { ok: true };
+}
+
 export async function validatePortalNode(input: {
   nodeId: string;
   nodeKind: "agent" | "coordinator";
@@ -141,6 +170,7 @@ export async function validatePortalNode(input: {
       allowed?: boolean;
       reason?: string;
       node?: {
+        nodeId?: string;
         ownerUserId?: string;
         ownerEmail?: string;
         sourceIp?: string;
@@ -163,8 +193,27 @@ export async function validatePortalNode(input: {
       reason: payload.reason,
       ownerEmail: payload.node?.ownerEmail
     });
-    if (payload.allowed === true && input.nodeKind === "agent" && payload.node?.ownerUserId) {
-      await linkPortalOwnership(input.nodeId, payload.node.ownerUserId);
+    if (payload.allowed === true && input.nodeKind === "agent") {
+      let existingOwnerUserId: string | undefined;
+      try {
+        existingOwnerUserId = (await pgStore?.getAgentOwnership(input.nodeId))?.ownerUserId;
+      } catch {
+        existingOwnerUserId = undefined;
+      }
+      const bind = portalBindDecision({
+        requestedAgentId: input.nodeId,
+        validatedNodeId: payload.node?.nodeId,
+        validatedOwnerUserId: payload.node?.ownerUserId,
+        existingOwnerUserId,
+        knownAgent: Boolean(agentCapabilities.get(input.nodeId)?.publicKeyPem),
+        proofOfKey: input.proofOfKey === true
+      });
+      if (!bind.ok) {
+        app.log.warn({ agentId: input.nodeId, validatedNodeId: payload.node?.nodeId, reason: bind.reason }, "agent_bind_refused");
+        await appendValidationEvent({ allowed: false, reason: bind.reason });
+        return { allowed: false, reason: bind.reason };
+      }
+      if (payload.node?.ownerUserId) await linkPortalOwnership(input.nodeId, payload.node.ownerUserId);
     }
     return {
       allowed: payload.allowed === true,

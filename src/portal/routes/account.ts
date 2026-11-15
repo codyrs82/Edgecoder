@@ -19,6 +19,12 @@ export function isReservedNodeId(nodeId: string): boolean {
 }
 
 /** #16: Account, nodes and dashboard API (/me, /nodes/*, /dashboard/*, /ios/*, /portal/api/admin/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
+/** Agents one account may enrol (PORTAL_MAX_AGENTS_PER_ACCOUNT, default 25). */
+export function maxAgentsPerAccount(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.PORTAL_MAX_AGENTS_PER_ACCOUNT);
+  return Number.isInteger(n) && n >= 1 ? n : 25;
+}
+
 export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordinatorUrlsForPortal, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store }: AccountApiRoutesDeps): void {
   app.get("/ios/dashboard", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
@@ -197,6 +203,14 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
     // A coordinator's DNS name comes from its node ID; two IDs that map to the same name can't both have one.
     if (body.nodeKind === "coordinator" && dnsLabelConflicts(body.nodeId, await store.listCoordinatorNodeIds()).length > 0) {
       return reply.code(409).send({ error: "dns_name_taken", detail: "Another coordinator uses a node ID with the same DNS name. Pick a different node ID." });
+    }
+    // Sybil bound: every per-agent limit on the coordinator scales with the agents one account can
+    // enrol. Re-enrolling a node already yours is never refused.
+    if (body.nodeKind === "agent" && !byNodeId && !byDeviceId && typeof store.listNodesByOwner === "function") {
+      const agents = (await store.listNodesByOwner(user.userId)).filter((n) => n.nodeKind === "agent").length;
+      if (agents >= maxAgentsPerAccount()) {
+        return reply.code(429).send({ error: "agent_limit_reached", detail: `An account may enrol at most ${maxAgentsPerAccount()} agents.` });
+      }
     }
     const registrationToken = randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, "");
     let record = await store.upsertNodeEnrollment({

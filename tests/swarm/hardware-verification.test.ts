@@ -273,15 +273,139 @@ describe("GPU challenge: cross-check, plausibility, demotion", () => {
     expect(v.get("g1")?.measured?.crossChecked).toBe(true);
   });
 
-  it("output that does not match the witness (fabricated or another model) is invalid", () => {
-    const v = setup();
+  /** Verifier with a second-witness picker (w2 by default) and three GPU agents: subject g1, witnesses w1, w2. */
+  function setup2(pick: (subjectId: string, model: string, exclude: string[], nowMs: number) => string | undefined = () => "w2") {
+    let n = 0;
+    const calls: Array<{ subjectId: string; exclude: string[] }> = [];
+    const v = new HardwareVerifier({
+      config: CFG,
+      random: { id: () => `ch-${++n}` },
+      pickWitness: (subjectId, m, exclude, nowMs) => {
+        calls.push({ subjectId, exclude });
+        return pick(subjectId, m, exclude, nowMs);
+      }
+    });
+    v.register({ agentId: "g1", claimed, profile: RTX4090, benchmark: GPU_BENCH, challengeKinds: ["cpu", "gpu"], nowMs: T0 });
+    for (const id of ["w1", "w2"]) v.register({ agentId: id, claimed: classifyHardware(RTX3060), profile: RTX3060, challengeKinds: ["cpu", "gpu"], nowMs: T0 });
+    return { v, calls };
+  }
+  /** Subject answers with `subject`, the first witness with `first`; returns the second witness's challenge (if one was issued). */
+  function firstRound(v: HardwareVerifier, subject: string, first: string) {
     const c = v.nextChallenge("g1", { nowMs: T0, model, pickWitness: () => "w1" }) as GpuChallenge;
     const w = v.nextChallenge("w1", { nowMs: T0, model }) as GpuChallenge;
-    const a = answer(c, 450, "small-model");
+    const a = answer(c, 450, subject);
     v.submit("g1", a.res, a.at);
-    const wr = v.submit("w1", { ...answer(w, 200).res, challengeId: w.challengeId }, T0 + 20_000);
-    expect(wr.invalid).toBe("cross_check_mismatch");
+    const r1 = v.submit("w1", { ...answer(w, 200, first).res, challengeId: w.challengeId }, T0 + 20_000);
+    // w2 would get its own GPU challenge when nothing else is queued: only the subject's prompt is a witness challenge.
+    const next = v.nextChallenge("w2", { nowMs: T0 + 21_000, model }) as GpuChallenge | undefined;
+    const w2 = next?.nonce === c.nonce ? next : undefined;
+    return { c, r1, w2 };
+  }
+
+  it("first witness agrees: verified at once, no second witness asked", () => {
+    const { v, calls } = setup2();
+    const { r1, w2 } = firstRound(v, "a", "a");
+    expect(r1).toMatchObject({ accepted: true, changed: true });
+    expect(r1.invalid).toBeUndefined();
+    expect(r1.disagreeingWitness).toBeUndefined();
+    expect(calls).toHaveLength(0);
+    expect(w2).toBeUndefined();
+    expect(v.get("g1")).toMatchObject({ status: "verified", granted: { tier: "gpu.c24" }, measured: { crossChecked: true } });
+  });
+
+  it("one lying witness no longer demotes: a second witness that agrees with the subject verifies it", () => {
+    const { v, calls } = setup2();
+    const { c, r1, w2 } = firstRound(v, "a", "small-model"); // w1 lies
+    expect(r1.invalid).toBeUndefined();
+    expect(r1.changed).toBe(false);
+    expect(v.get("g1")?.status).toBe("pending");
+    expect(calls).toEqual([{ subjectId: "g1", exclude: ["g1", "w1"] }]);
+    expect(w2).toBeDefined();
+    expect(w2!.nonce).toBe(c.nonce); // same prompt
+    expect(w2!.challengeId).not.toBe(c.challengeId);
+    const r2 = v.submit("w2", { ...answer(w2!, 200).res, challengeId: w2!.challengeId }, T0 + 40_000);
+    expect(r2).toMatchObject({ accepted: true, changed: true, disagreeingWitness: "w1" });
+    expect(r2.invalid).toBeUndefined();
+    expect(r2.record?.agentId).toBe("g1");
+    expect(v.get("g1")).toMatchObject({ status: "verified", granted: { tier: "gpu.c24" }, measured: { crossChecked: true } });
+    expect(v.get("w1")).toMatchObject({ witnessDisagreements: 1, lastWitnessDisagreementAtMs: T0 + 40_000 });
+    expect(v.get("w2")?.witnessDisagreements).toBeUndefined();
+  });
+
+  it("the same holds when the lying witness answers before the subject", () => {
+    const { v } = setup2();
+    const c = v.nextChallenge("g1", { nowMs: T0, model, pickWitness: () => "w1" }) as GpuChallenge;
+    const w = v.nextChallenge("w1", { nowMs: T0, model }) as GpuChallenge;
+    v.submit("w1", { ...answer(w, 200, "small-model").res, challengeId: w.challengeId }, T0 + 5_000);
+    const a = answer(c, 450);
+    expect(v.submit("g1", a.res, a.at).invalid).toBeUndefined();
+    expect(v.get("g1")?.status).toBe("pending");
+    const w2 = v.nextChallenge("w2", { nowMs: a.at + 1, model }) as GpuChallenge;
+    expect(v.submit("w2", { ...answer(w2, 200).res, challengeId: w2.challengeId }, a.at + 30_000)).toMatchObject({ disagreeingWitness: "w1" });
+    expect(v.get("g1")).toMatchObject({ status: "verified", granted: { tier: "gpu.c24" } });
+  });
+
+  it("two witnesses that agree on the mismatch demote (fabricated output or another model)", () => {
+    const { v } = setup2();
+    const { w2 } = firstRound(v, "small-model", "a");
+    expect(v.get("g1")?.status).toBe("pending");
+    const r2 = v.submit("w2", { ...answer(w2!, 200).res, challengeId: w2!.challengeId }, T0 + 40_000);
+    expect(r2.invalid).toBe("cross_check_mismatch");
+    expect(r2.disagreeingWitness).toBeUndefined();
     expect(v.get("g1")).toMatchObject({ status: "demoted", granted: { tier: "gpu.c8" }, lastFailReason: "invalid:cross_check_mismatch" });
+    expect(v.get("w1")?.witnessDisagreements).toBeUndefined();
+  });
+
+  it("two agreeing lying witnesses still demote an honest subject (the residual risk)", () => {
+    const { v } = setup2();
+    const { w2 } = firstRound(v, "a", "small-model");
+    const r2 = v.submit("w2", { ...answer(w2!, 200, "small-model").res, challengeId: w2!.challengeId }, T0 + 40_000);
+    expect(r2.invalid).toBe("cross_check_mismatch");
+    expect(v.get("g1")).toMatchObject({ status: "demoted", lastFailReason: "invalid:cross_check_mismatch" });
+  });
+
+  it("no second witness available: settled unconfirmed, never invalid", () => {
+    const { v } = setup2(() => undefined);
+    const { r1, w2 } = firstRound(v, "a", "small-model");
+    expect(w2).toBeUndefined();
+    expect(r1.invalid).toBeUndefined();
+    expect(v.get("g1")).toMatchObject({ status: "unverified", granted: { tier: "gpu.c8" }, lastFailReason: "cross_check_unavailable" });
+    // A picker that returns an excluded agent counts as none.
+    const again = setup2(() => "w1");
+    expect(firstRound(again.v, "a", "small-model").r1.invalid).toBeUndefined();
+    expect(again.v.get("g1")).toMatchObject({ status: "unverified", lastFailReason: "cross_check_unavailable" });
+    // No picker configured at all: the same.
+    const plain = setup();
+    const c = plain.nextChallenge("g1", { nowMs: T0, model, pickWitness: () => "w1" }) as GpuChallenge;
+    const w = plain.nextChallenge("w1", { nowMs: T0, model }) as GpuChallenge;
+    const a = answer(c, 450);
+    plain.submit("g1", a.res, a.at);
+    expect(plain.submit("w1", { ...answer(w, 200, "small-model").res, challengeId: w.challengeId }, T0 + 20_000).invalid).toBeUndefined();
+    expect(plain.get("g1")).toMatchObject({ status: "unverified", lastFailReason: "cross_check_unavailable" });
+  });
+
+  it("second witness never answers: settled unconfirmed after the witness timeout, never invalid", () => {
+    const { v } = setup2();
+    const { w2 } = firstRound(v, "a", "small-model");
+    expect(w2).toBeDefined();
+    expect(v.tick(T0 + 20_000 + CFG.witnessTimeoutMs - 1)).toEqual([]);
+    expect(v.get("g1")?.status).toBe("pending");
+    v.tick(T0 + 20_000 + CFG.witnessTimeoutMs + 1);
+    expect(v.get("g1")).toMatchObject({ status: "unverified", lastFailReason: "cross_check_unavailable" });
+    // The late answer finds nothing to settle.
+    const late = v.submit("w2", { ...answer(w2!, 200, "small-model").res, challengeId: w2!.challengeId }, T0 + 20_000 + CFG.witnessTimeoutMs + 2);
+    expect(late.invalid).toBeUndefined();
+    expect(v.get("g1")?.status).toBe("unverified");
+  });
+
+  it("a second witness that did not follow the prompt counts as no witness", () => {
+    const { v } = setup2();
+    const { w2 } = firstRound(v, "a", "small-model");
+    const r2 = v.submit("w2", { challengeId: w2!.challengeId, kind: "gpu", output: fakeModelOutput("another-nonce", 24), evalCount: 512, elapsedMs: 8_000 }, T0 + 40_000);
+    expect(r2.invalid).toBeUndefined();
+    expect(r2.disagreeingWitness).toBeUndefined();
+    expect(v.get("g1")).toMatchObject({ status: "unverified", lastFailReason: "cross_check_unavailable" });
+    expect(v.get("w1")?.witnessDisagreements).toBeUndefined();
   });
 
   it("no witness: base tier when the cross-check is required, the measured tier when it is not", () => {

@@ -63,6 +63,8 @@ interface QueueItem {
   excludeAgents?: string[];
   /** #50: reward accounts that may not claim this item (same operator, different agent id). */
   excludeAccounts?: string[];
+  /** Lease expiries per agent on this item: a second expiry bars that agent from it. */
+  leaseExpiries?: Record<string, number>;
 }
 
 export class SwarmQueue {
@@ -256,10 +258,17 @@ export class SwarmQueue {
     agentActiveModel?: string,
     accountId: string = agentId,
     /** Market gate: return false when the agent's ask is above the task's bid or the class doesn't match. */
-    canTake?: (subtask: Subtask) => boolean
+    canTake?: (subtask: Subtask) => boolean,
+    /** Open claims this agent may hold at once (undefined: no limit). Claim hoarding stops here. */
+    maxOpenClaims?: number
   ): Subtask | undefined {
     const now = Date.now();
     this.expireLeases(now);
+    if (maxOpenClaims !== undefined) {
+      let open = 0;
+      for (const t of this.tasks) if (t.claimedBy === agentId) open += 1;
+      if (open >= maxOpenClaims) return undefined;
+    }
     const unclaimed = this.tasks.filter(
       (task) =>
         !task.claimedBy &&
@@ -474,6 +483,11 @@ export class SwarmQueue {
       if (!item.claimedBy || now <= this.leaseDeadline(item)) continue;
       const holder = item.claimedBy;
       this.markExpired(item.subtask.id, holder);
+      // One agent may let a lease on this subtask lapse once (a dropped connection) and re-claim it;
+      // after a second lapse it is barred from it, so one agent cannot burn every retry and fail it.
+      const expiries = (item.leaseExpiries ??= {});
+      expiries[holder] = (expiries[holder] ?? 0) + 1;
+      if (expiries[holder] >= 2 && !item.excludeAgents?.includes(holder)) item.excludeAgents = [...(item.excludeAgents ?? []), holder];
       item.claimedBy = undefined;
       item.claimedAt = undefined;
       item.leaseRenewedAt = undefined;

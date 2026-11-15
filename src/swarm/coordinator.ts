@@ -32,7 +32,7 @@ import { app, metrics } from "./coordinator/app.js";
 import { queue, identity, coordinatorKeys, CC, mesh, MESH_AUTH_TOKEN } from "./coordinator/context.js";
 import "./coordinator/mutable-state.js";
 import { agentCapabilities, connectedAgentCount } from "./coordinator/agent-state.js";
-import { hasMeshToken, hasPortalServiceToken, requireMeshToken } from "./coordinator/auth.js";
+import { hasMeshToken, hasPortalServiceToken, requireMeshToken, isAgentGateRoute, agentSignatureAtGate } from "./coordinator/auth.js";
 import { isPaymentGatedRequest } from "./coordinator/economy.js";
 import { ECONOMY_PAYMENTS_ENABLED, lightningProvider, payoutReconciler } from "./coordinator/payouts.js";
 import { robotQueue, receiptStore, discoveryAnnouncer } from "./coordinator/services.js";
@@ -153,8 +153,8 @@ app.addHook("onReady", async () => {
 registerDiscoveryRoutes(app, discoveryAnnouncer);
 
 app.addHook("onRequest", async (req, reply) => {
-  // Allow initial agent registration without mesh token; coordinator validates
-  // portal enrollment token and returns mesh auth material in the response.
+  // Initial agent registration needs no token: the coordinator validates the portal enrollment
+  // token (or proof of the stored key). The response carries no mesh token.
   const reqPath = (req as any).url as string | undefined;
   if (reqPath === "/register") return;
   // Health check must be unauthenticated for Fly health probes
@@ -186,6 +186,13 @@ app.addHook("onRequest", async (req, reply) => {
   ) {
     return;
   }
+  const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
+  if (hasMeshToken(headers)) return;
+  // Agents never hold the coordinators' mesh token: a registered agent passes with its own key,
+  // and only on the routes agents use (auth.ts isAgentGateRoute). Everything else (fleet-wide
+  // reads, gossip ingest, receipts, escalation) stays coordinator/operator-only.
+  const gatePath = String(reqPath ?? "").split("?")[0];
+  if (isAgentGateRoute(req.method, gatePath) && agentSignatureAtGate(headers, req.method, gatePath)) return;
   if (!requireMeshToken(req as any, reply)) {
     return reply.send({ error: "mesh_unauthorized" });
   }

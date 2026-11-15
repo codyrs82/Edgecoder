@@ -59,6 +59,27 @@ export type DirectWorkOffer = {
 
 export const directWorkById = new Map<string, DirectWorkOffer>();
 export const directWorkInbox = new Map<string, string[]>();
+/** Pending direct-work offers expire; offers of any state are forgotten after DIRECT_WORK_RETAIN_MS. */
+export const DIRECT_WORK_OFFER_TTL_MS = 10 * 60_000;
+export const DIRECT_WORK_RETAIN_MS = 60 * 60_000;
+/** Pending offers one agent may hold: another agent cannot fill its heartbeat or the coordinator's memory. */
+export const DIRECT_WORK_INBOX_MAX = 16;
+export const DIRECT_WORK_INPUT_MAX_CHARS = 64 * 1024;
+let lastDirectWorkPruneMs = 0;
+/** Drop expired pending offers from inboxes and forget old offers (at most once a minute unless forced). */
+export function pruneDirectWork(nowMs = Date.now(), force = false): void {
+  if (!force && nowMs - lastDirectWorkPruneMs < 60_000) return;
+  lastDirectWorkPruneMs = nowMs;
+  for (const [id, offer] of directWorkById) {
+    if (offer.status === "offered" && nowMs - offer.createdAtMs > DIRECT_WORK_OFFER_TTL_MS) offer.status = "rejected";
+    if (nowMs - offer.createdAtMs > DIRECT_WORK_RETAIN_MS) directWorkById.delete(id);
+  }
+  for (const [agentId, ids] of directWorkInbox) {
+    const live = ids.filter((id) => directWorkById.get(id)?.status === "offered");
+    if (live.length) directWorkInbox.set(agentId, live);
+    else directWorkInbox.delete(agentId);
+  }
+}
 export const agentCapabilities = new Map<
   string,
   {
@@ -246,8 +267,9 @@ export function evaluateAndEnforce(agentId: string): void {
         coordinatorId: identity.peerId,
       });
     }
-    // Flags are not strikes: BHV001's first stage sends the agent's next results to verification.
-    if (anomalies.some((a) => a.enforcement === "flag" && a.ruleId === "BHV001")) fastResultVerificationFlags.flag(agentId);
+    // Flags are not strikes: BHV001's first stage and the output-content rules (BHV002, BHV003,
+    // BHV010) send the agent's next results to verification.
+    if (anomalies.some((a) => a.enforcement === "flag")) fastResultVerificationFlags.flag(agentId);
     autoBlacklister.processAnomalies(agentId, anomalies);
   }
 }

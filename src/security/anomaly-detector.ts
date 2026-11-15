@@ -131,6 +131,13 @@ const bhv001SuspiciouslyFast: AnomalyRule = (stats, config) => {
   return null;
 };
 
+/*
+ * Output-content rules (BHV002 empty, BHV003 identical, BHV010 tiny) flag, never strike. A code
+ * result's output is what the requester's program prints, so a buyer can make an honest worker's
+ * outputs empty, identical or tiny at will (three "print('OK')" jobs used to blacklist the worker
+ * instantly through BHV003). A flag sends the agent's next results to re-execution verification,
+ * which decides; see docs/security/agent-threat-model.md.
+ */
 const bhv002MassEmptyOutputs: AnomalyRule = (stats, config) => {
   if (stats.totalTasks === 0) return null;
   if (stats.outputTasks === 0) return null;
@@ -139,10 +146,11 @@ const bhv002MassEmptyOutputs: AnomalyRule = (stats, config) => {
     return {
       ruleId: "BHV002",
       ruleName: "Mass empty outputs",
-      severity: "HIGH",
+      severity: "WARN",
       blacklistReason: "forged_results",
       description: `${stats.emptyOutputCount}/${stats.outputTasks} code tasks returned empty output (${(emptyRatio * 100).toFixed(0)}%)`,
       stats: { emptyOutputCount: stats.emptyOutputCount, totalTasks: stats.outputTasks, emptyRatio },
+      enforcement: "flag",
     };
   }
   return null;
@@ -153,10 +161,11 @@ const bhv003DuplicateForgery: AnomalyRule = (stats, config) => {
     return {
       ruleId: "BHV003",
       ruleName: "Duplicate forgery",
-      severity: "CRITICAL",
+      severity: "WARN",
       blacklistReason: "forged_results",
       description: `${stats.identicalOutputCount} consecutive identical output hashes`,
       stats: { identicalOutputCount: stats.identicalOutputCount },
+      enforcement: "flag",
     };
   }
   return null;
@@ -267,6 +276,7 @@ const bhv010TinyOutputs: AnomalyRule = (stats, config) => {
       blacklistReason: "forged_results",
       description: `Avg output length ${stats.avgOutputLength.toFixed(1)} over ${stats.outputTasks} code tasks`,
       stats: { avgOutputLength: stats.avgOutputLength, totalTasks: stats.totalTasks, successRate: stats.successRate },
+      enforcement: "flag",
     };
   }
   return null;

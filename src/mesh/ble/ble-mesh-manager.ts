@@ -90,10 +90,12 @@ export class BLEMeshManager {
     if (peers.length === 0) return null;
 
     for (const peer of peers) {
+      const startedMs = Date.now();
       const response = await this.transport.sendTaskRequest(peer.agentId, request);
+      const elapsedMs = Date.now() - startedMs;
 
       if (response.status === "completed") {
-        await this.settleCredits(request, response, peer);
+        await this.settleCredits(request, response, peer, elapsedMs);
         return response;
       }
       // Failed — try next peer
@@ -109,13 +111,17 @@ export class BLEMeshManager {
   private async settleCredits(
     request: BLETaskRequest,
     response: BLETaskResponse,
-    peer: { agentId: string; accountId: string; modelParamSize: number }
+    peer: { agentId: string; accountId: string; modelParamSize: number },
+    elapsedMs?: number
   ): Promise<BLECreditTransaction | null> {
     if (!this.privateKeyPem) {
       console.warn(`[BLE] no signing key; not recording credits for ${request.requestId}`);
       return null;
     }
-    const cpuMillis = toMillis(response.cpuSeconds);
+    // The provider reports its own CPU time; it cannot have used more than the request took on our
+    // clock, so we never sign for more (a peer reporting 1e6 s used to be paid for it).
+    const reportedMillis = toMillis(response.cpuSeconds);
+    const cpuMillis = elapsedMs !== undefined && Number.isSafeInteger(reportedMillis) ? Math.min(reportedMillis, Math.max(0, Math.ceil(elapsedMs))) : reportedMillis;
     const creditMillis = bleCreditMillis(cpuMillis, peer.modelParamSize);
     if (!Number.isSafeInteger(cpuMillis) || cpuMillis < 0 || creditMillis <= 0) return null;
     const fields: BleTxV3Fields = {

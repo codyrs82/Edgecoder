@@ -124,3 +124,41 @@ describe("POST /auth/passkey/register/verify", () => {
     expect(res.json().error).toBe("passkey_already_registered");
   });
 });
+
+describe("agents per account (sybil bound)", () => {
+  it("a new agent beyond PORTAL_MAX_AGENTS_PER_ACCOUNT is refused; re-enrolling an existing one is not", async () => {
+    process.env.PORTAL_MAX_AGENTS_PER_ACCOUNT = "3";
+    try {
+      // A store that can list an owner's nodes (setup()'s cannot).
+      const Fastify2 = (await import("fastify")).default;
+      const app2 = Fastify2();
+      const { registerAccountApiRoutes: reg } = await import("../../src/portal/routes/account.js");
+      const nodes2 = new Map<string, any>();
+      reg(app2, {
+        store: {
+          getNodeEnrollment: async (id: string) => nodes2.get(id) ?? null,
+          getNodeEnrollmentByDeviceId: async () => null,
+          listCoordinatorNodeIds: async () => [],
+          listNodesByOwner: async (uid: string) => [...nodes2.values()].filter((n) => n.ownerUserId === uid),
+          upsertNodeEnrollment: async (r: any) => { const rec = { ...r, nodeApproved: false, active: false }; nodes2.set(r.nodeId, rec); return rec; },
+          setNodeApproval: async (id: string, v: boolean) => ({ ...nodes2.get(id), nodeApproved: v })
+        },
+        getCurrentUser: async (req: any) => (String(req.headers.authorization) === "Bearer alice" ? { userId: "alice", email: "a@x.io", emailVerified: true } : null),
+        buildAccessContext: async () => ({ isSystemAdmin: false, isCoordinatorAdmin: false }),
+        getCoordinatorHostname: (id: string) => `${id}.coord.edgecoder.io`,
+        sha256Hex,
+        deriveIosDeviceIdFromNodeId: () => undefined
+      } as never);
+      const e = (nodeId: string) => app2.inject({ method: "POST", url: "/nodes/enroll", headers: { authorization: "Bearer alice" }, payload: { nodeId, nodeKind: "agent" } });
+      expect((await e("mac-1")).statusCode).toBe(200);
+      expect((await e("mac-2")).statusCode).toBe(200);
+      expect((await e("mac-3")).statusCode).toBe(200);
+      const fourth = await e("mac-4");
+      expect(fourth.statusCode).toBe(429);
+      expect(fourth.json().error).toBe("agent_limit_reached");
+      expect((await e("mac-2")).statusCode).toBe(200);
+    } finally {
+      delete process.env.PORTAL_MAX_AGENTS_PER_ACCOUNT;
+    }
+  });
+});
