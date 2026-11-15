@@ -24,7 +24,10 @@ import {
   LEASE_CONFIG
 } from "./context.js";
 import { agentCapabilities } from "./agent-state.js";
-import { offerSubtaskToPeers } from "./results.js";
+import { offerSubtaskToPeers, taskOpenCount } from "./results.js";
+import { orderBook, MARKET_DEFAULT_BID_PREMIUM_BPS } from "./economy.js";
+import { capabilityConstraints } from "../../economy/order-book.js";
+import type { ComputeClassId } from "../../economy/compute-classes.js";
 
 /** Most a peer may hold a grant, whatever it is told: the longest subtask plus the slack. */
 const MAX_PEER_GRANT_TTL_MS = remoteGrantTtlMs(LEASE_CONFIG.maxTimeoutMs, LEASE_CONFIG.maxTimeoutMs);
@@ -64,7 +67,12 @@ export function hasLiveAgentFor(subtask: { kind: string }, nowMs = Date.now()): 
  * then no agent here can claim it, so it never runs on two coordinators. `budgetMsat` is the most an
  * agent here may be paid for it (the origin's answer to the forwarded result caps it again).
  */
-export async function requestOfferGrant(origin: MeshPeerIdentity, subtask: Subtask, budgetMsat: number): Promise<boolean> {
+export async function requestOfferGrant(
+  origin: MeshPeerIdentity,
+  subtask: Subtask,
+  budgetMsat: number,
+  bid?: { computeClass: ComputeClassId | "any"; maxMsatPerCredit?: number; premiumBps?: number }
+): Promise<boolean> {
   if (peerGrants.has(subtask.id) || queue.getSubtask(subtask.id)) return false;
   const claimMsg = protocol.createMessage(
     "task_claim",
@@ -87,6 +95,11 @@ export async function requestOfferGrant(origin: MeshPeerIdentity, subtask: Subta
   peerOfferBudgetMsat.set(subtask.id, budgetMsat);
   // Results go back to the origin peer's pinned URL from the peer table.
   taskOriginMap.set(subtask.id, { coordinatorId: origin.peerId, coordinatorUrl: origin.coordinatorUrl });
+  // The requester's bid, in our book: /pull lets only agents within its class, ceiling and
+  // capability constraints claim (OrderBook.canMatch), as at the origin.
+  if (bid && !orderBook.bidFor(subtask.taskId)) {
+    orderBook.postBid(subtask.taskId, bid.computeClass, bid.maxMsatPerCredit, bid.premiumBps ?? MARKET_DEFAULT_BID_PREMIUM_BPS, Date.now(), capabilityConstraints(subtask.projectMeta));
+  }
   queue.enqueueSubtask(subtask);
   app.log.info({ subtaskId: subtask.id, from: origin.peerId, ttlMs }, "task_offer_granted");
   return true;
@@ -101,7 +114,8 @@ export function peerGrantAllowsClaim(subtask: Subtask, nowMs = Date.now()): bool
 }
 
 /** Drop the local bookkeeping of a peer-offered subtask (it left our queue without a result). */
-function forgetPeerOffered(subtaskId: string): void {
+function forgetPeerOffered(subtaskId: string, taskId: string): void {
+  if (taskOpenCount(taskId) === 0) orderBook.removeBid(taskId);
   peerGrants.delete(subtaskId);
   peerOfferBudgetMsat.delete(subtaskId);
   taskOriginMap.delete(subtaskId);
@@ -130,7 +144,7 @@ export function sweepGrants(nowMs = Date.now()): { requeued: number; dropped: nu
     }
     if (claim.claimedBy || peerGrantAllowsClaim(claim.subtask, nowMs)) continue;
     if (queue.markRemoteClaimed(subtaskId)) {
-      forgetPeerOffered(subtaskId);
+      forgetPeerOffered(subtaskId, claim.subtask.taskId);
       dropped++;
       app.log.warn({ subtaskId, origin: g.originId }, "peer_grant_lapsed_dropped");
     }

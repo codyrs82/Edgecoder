@@ -228,10 +228,10 @@ describe("origin: a subtask offered to peers runs on one coordinator only", () =
 });
 
 describe("peer: an offered subtask is run only once granted, and paid only what the origin charged", () => {
-  function offer(subtaskId: string, taskId: string) {
+  function offer(subtaskId: string, taskId: string, bid: Record<string, unknown> = {}) {
     return fromPeer("task_offer", {
       subtaskId, taskId, kind: "single_step", language: "python", input: "print(2)", timeoutMs: 30_000, snapshotRef: "commit:test",
-      projectMeta: { projectId: "p-remote", resourceClass: "cpu", priority: 10 },
+      projectMeta: { projectId: "p-remote", resourceClass: "cpu", priority: 10, ...bid },
       originCoordinatorId: PEER_ID, originCoordinatorUrl: "https://ignored.invalid"
     });
   }
@@ -276,5 +276,29 @@ describe("peer: an offered subtask is run only once granted, and paid only what 
     const fwd = peerState.forwarded.find((f) => f.subtaskId === subtaskId);
     expect(typeof fwd?.peerCostMsat).toBe("number");
     expect(fwd!.peerCostMsat).toBeGreaterThan(0);
+  });
+
+  test("stress finding 4: the requester's bid ceiling holds here too", async () => {
+    // The worker asks 1,000 msat per credit; a requester's ceiling of 10 is below it.
+    expect((await post("/economy/market/orders", { accountId: worker.peerId, side: "sell", computeClass: "any", msatPerCredit: 1_000 }, worker)).statusCode).toBe(200);
+    const low = randomUUID();
+    await offer(low, randomUUID(), { computeClass: "cpu", maxBidMsatPerCredit: 10 });
+    await sleep(200);
+    expect(peerState.ingested.some((m) => m.type === "task_claim" && m.payload.subtaskId === low)).toBe(true);
+    expect(await pull()).toBeNull();
+    // A ceiling well above the ask: claimable.
+    const high = randomUUID();
+    await offer(high, randomUUID(), { computeClass: "cpu", maxBidMsatPerCredit: 1_000_000 });
+    await sleep(200);
+    const st = await pull();
+    expect(st?.id).toBe(high);
+    await post("/result", { subtaskId: high, taskId: st!.taskId, agentId: worker.peerId, ok: true, output: "2\n", durationMs: 1 }, worker);
+    await post("/economy/market/orders", { accountId: worker.peerId, side: "sell", computeClass: "any", msatPerCredit: 0 }, worker);
+  });
+
+  test("an offer naming an unknown compute class is not taken", async () => {
+    const subtaskId = randomUUID();
+    const res = await offer(subtaskId, randomUUID(), { computeClass: "quantum", maxBidMsatPerCredit: 1_000_000 });
+    expect(res.json()).toMatchObject({ skipped: "unknown_compute_class" });
   });
 });

@@ -107,6 +107,9 @@ export function offerSubtaskToPeers(subtask: Subtask): void {
       projectMeta: subtask.projectMeta,
       originCoordinatorId: identity.peerId,
       originCoordinatorUrl: COORDINATOR_PUBLIC_URL,
+      // The requester's bid travels with the offer (projectMeta carries the class and ceiling): a
+      // default bid on "any" class is relative to each class's reference, which the premium says.
+      ...(orderBook.bidFor(subtask.taskId)?.premiumBps !== undefined ? { bidPremiumBps: orderBook.bidFor(subtask.taskId)!.premiumBps } : {}),
     },
     coordinatorKeys.privateKeyPem,
     60_000

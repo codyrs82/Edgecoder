@@ -58,7 +58,7 @@ import {
   agentCapabilities
 } from "../agent-state.js";
 import { ADMIN_API_TOKEN, requireMeshToken, hasMeshToken } from "../auth.js";
-import { subtaskReserveMsat } from "../economy.js";
+import { subtaskReserveMsat, rateOracleConfig } from "../economy.js";
 import { persistStatsLedgerRecord } from "../stats-ledger.js";
 import { validatePortalNode } from "../enrollment.js";
 import { grantSubtaskToPeer, hasLiveAgentFor, requestOfferGrant } from "../grants.js";
@@ -300,9 +300,13 @@ async function handleMeshIngest(
         // Capability constraints travel with the task so a peer cannot hand it to an under-spec agent.
         minVramGb: z.number().positive().max(4096).optional(),
         minMemoryGb: z.number().positive().max(4096).optional(),
+        // The requester's bid: class and price ceiling (msat per credit), enforced here too.
+        computeClass: z.string().max(64).optional(),
+        maxBidMsatPerCredit: z.number().positive().finite().optional(),
       }),
       originCoordinatorId: z.string(),
       originCoordinatorUrl: z.string(),
+      bidPremiumBps: z.number().int().min(0).max(100_000).optional(),
     }).safeParse(message.payload);
 
     if (!payload.success) {
@@ -323,13 +327,22 @@ async function handleMeshIngest(
     if (!hasLiveAgentFor(d)) {
       return { ok: true, skipped: "no_agents" };
     }
-    // The origin charges its requester at most its worst case for one subtask (perSubtaskReserveMsat):
-    // that is all an agent here may earn for running it, and only what the origin actually charges
-    // for the forwarded result is paid (results.ts).
-    const budgetMsat = subtaskReserveMsat(d.projectMeta.resourceClass, "any", SUBTASK_RESERVE_TIMEOUT_MS);
+    // The requester's bid (stress finding 4): its class must be one we know; its ceiling is posted
+    // in our book for the task when granted, so only agents whose ask is within it can claim.
+    const bidClass = d.projectMeta.computeClass ?? "any";
+    if (bidClass !== "any" && !(bidClass in rateOracleConfig.computeClasses)) {
+      return { ok: true, skipped: "unknown_compute_class" };
+    }
+    const ceiling = d.bidPremiumBps === undefined ? d.projectMeta.maxBidMsatPerCredit : undefined;
+    // The origin charges its requester at most its worst case for one subtask, lowered to the bid's
+    // ceiling: that is all an agent here may earn for running it, and only what the origin actually
+    // charges for the forwarded result is paid (results.ts).
+    const budgetMsat = subtaskReserveMsat(d.projectMeta.resourceClass, bidClass as ComputeClassId | "any", SUBTASK_RESERVE_TIMEOUT_MS, ceiling);
+    const bid = { computeClass: bidClass as ComputeClassId | "any", maxMsatPerCredit: ceiling, premiumBps: d.bidPremiumBps };
     // Queued here only once the origin grants it to us (task_claim answered granted), so it never runs
     // on two coordinators (src/swarm/remote-grants.ts).
-    void requestOfferGrant(peer, { ...d, id: d.subtaskId }, budgetMsat).catch((error) =>
+    const { bidPremiumBps: _premium, ...offered } = d;
+    void requestOfferGrant(peer, { ...offered, id: d.subtaskId }, budgetMsat, bid).catch((error) =>
       app.log.warn({ subtaskId: d.subtaskId, error: String(error) }, "task_offer_grant_request_failed")
     );
     if (peer) peerScore.set(peer.peerId, Math.min(200, (peerScore.get(peer.peerId) ?? 100) + 2));
