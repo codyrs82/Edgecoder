@@ -172,3 +172,26 @@ describe("runInferenceSubtask", () => {
     expect(r).toMatchObject({ ok: false, error: "ollama: model 'x' not found" });
   });
 });
+
+describe("stream memory is bounded (DoS by the agent running the subtask)", () => {
+  it("tool calls count against the stream's size cap", async () => {
+    const { InferenceStreams } = await import("../../src/swarm/inference-streams.js");
+    const streams = new InferenceStreams();
+    streams.open("sub-tc", "task-tc");
+    const big = [{ function: { name: "f", arguments: { pad: "x".repeat(500_000) } } }];
+    const results: string[] = [];
+    for (let seq = 0; seq < 40; seq++) results.push(streams.append("sub-tc", seq, "", false, undefined, big));
+    expect(results.filter((r) => r === "ok").length).toBeLessThanOrEqual(16);
+    expect(results).toContain("too_large");
+    expect(streams.replyBytes("sub-tc")!).toBeLessThanOrEqual(8_000_000);
+  });
+
+  it("a stream that never ends is dropped eventually", async () => {
+    const { InferenceStreams } = await import("../../src/swarm/inference-streams.js");
+    const streams = new InferenceStreams();
+    streams.open("sub-open", "task-open");
+    streams.append("sub-open", 0, "partial");
+    streams.prune(Date.now() + 3 * 60 * 60_000);
+    expect(streams.has("sub-open")).toBe(false);
+  });
+});
