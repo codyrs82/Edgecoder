@@ -1755,3 +1755,120 @@ export const syncBotRepository = (id: string) => fsCall<{ bot: Bot }>("POST", bo
 export const approveBotCall =(id: string, callId: string, approved: boolean) => fsCall<{ ok: boolean; bot: Bot }>("POST", botPath(id, "/approve"), { callId, approved });
 /** The server's message for a failed bot call (its `error` field). */
 export const botErrorText = (err: unknown) => (err instanceof FsError ? err.code : (err as Error)?.message ?? String(err));
+
+// ---------------------------------------------------------------------------
+// Shared coding sessions (:4304 /v1/ide/sessions): sessions the terminal (`edgecoder code`)
+// published with /remote, continued here. The provider runs the turns; this app is a client.
+// ---------------------------------------------------------------------------
+
+export interface SessionClientRef {
+  clientId: string;
+  kind: "terminal" | "desktop" | "api";
+  label?: string;
+}
+export interface SessionSummary {
+  id: string;
+  title: string;
+  projectRoot: string;
+  branch: string | null;
+  model: string;
+  origin: "terminal" | "desktop" | "api";
+  published: boolean;
+  updatedAt: number;
+  messages: number;
+  running: boolean;
+  live: boolean;
+  controller: SessionClientRef | null;
+  clients: SessionClientRef[];
+  pending: number;
+}
+export interface SessionEntry {
+  id: string;
+  role: "user" | "assistant" | "note";
+  content: string;
+  at: number;
+  by?: string;
+  events?: IdeStreamEvent[];
+  turnId?: string;
+  changedFiles?: string[];
+  usage?: { cSats: number; where?: string };
+  undone?: boolean;
+}
+export interface SessionSnapshotView {
+  session: { id: string; title: string; projectRoot: string; branch: string | null; model: string; compute: { target: string }; published: boolean; cSats: number; transcript: SessionEntry[] };
+  seq: number;
+  controller: SessionClientRef | null;
+  clients: SessionClientRef[];
+  running: { turnId: string; text: string; events: IdeStreamEvent[] } | null;
+  pending: Array<{ id: string; tool: string; args: Record<string, unknown> }>;
+}
+export interface SessionEvent {
+  seq: number;
+  type: string;
+  [k: string]: unknown;
+}
+
+/** This window, as a session client (one id per app run). */
+export const DESKTOP_CLIENT: SessionClientRef = { clientId: `desk-${Math.random().toString(36).slice(2, 12)}`, kind: "desktop", label: "EdgeCoder app" };
+
+const sessionPost = <T>(id: string, action: string, body: Record<string, unknown> = {}) =>
+  fsCall<T>("POST", `/v1/ide/sessions/${id}/${action}`, { ...DESKTOP_CLIENT, ...body });
+
+/** Sessions shown live in the app (published from a terminal). */
+export const listPublishedSessions = () => fsCall<{ sessions: SessionSummary[] }>("GET", "/v1/ide/sessions?published=1").then((r) => r.sessions);
+export const getSession = (id: string) => fsCall<SessionSnapshotView>("GET", `/v1/ide/sessions/${id}`);
+export const sessionSend = (id: string, text: string) => sessionPost<{ turnId: string }>(id, "messages", { text });
+export const sessionApprove = (id: string, callId: string, approved: boolean, always = false) => sessionPost(id, "approve", { callId, approved, always });
+export const sessionTakeControl = (id: string) => sessionPost(id, "control");
+export const sessionCancel = (id: string) => sessionPost(id, "cancel");
+export const sessionUndo = (id: string) => sessionPost<{ reverted: string[] }>(id, "undo");
+
+/** Follow a session's events after `since` until the signal aborts; reconnects resume after the last event. */
+export async function followSession(id: string, since: number, onEvent: (e: SessionEvent) => void, signal: AbortSignal): Promise<void> {
+  let last = since;
+  while (!signal.aborted) {
+    try {
+      const q = new URLSearchParams({ since: String(last), clientId: DESKTOP_CLIENT.clientId, kind: "desktop", label: DESKTOP_CLIENT.label ?? "" });
+      const res = await ideFetch(`${ideBase()}/v1/ide/sessions/${id}/events?${q}`, { method: "GET", signal });
+      if (!res.ok || !res.body) throw new Error(`events: ${res.status}`);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let i: number;
+        while ((i = buf.indexOf("\n\n")) >= 0) {
+          const line = buf.slice(0, i).split("\n").find((l) => l.startsWith("data: "));
+          buf = buf.slice(i + 2);
+          if (!line) continue;
+          try {
+            const e = JSON.parse(line.slice(6)) as SessionEvent;
+            if (e.type !== "resync" && e.seq <= last) continue;
+            last = e.seq;
+            onEvent(e);
+          } catch {
+            // skip malformed
+          }
+        }
+      }
+    } catch {
+      if (signal.aborted) return;
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
+// Signing in to GitHub from the app (:4304 /v1/ide/github/login): gh's device flow.
+export interface GitHubDeviceLogin {
+  id: string;
+  state: "starting" | "waiting" | "done" | "error" | "cancelled";
+  code: string | null;
+  url: string;
+  login: string | null;
+  message: string | null;
+}
+export const githubLoginStart = () => fsCall<GitHubDeviceLogin>("POST", "/v1/ide/github/login", {});
+export const githubLoginStatus = (id: string) => fsCall<GitHubDeviceLogin>("GET", `/v1/ide/github/login/${id}`);
+export const githubLoginCancel = (id: string) => fsCall<GitHubDeviceLogin>("POST", `/v1/ide/github/login/${id}/cancel`, {});

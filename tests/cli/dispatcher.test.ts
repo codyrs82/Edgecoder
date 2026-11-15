@@ -7,6 +7,7 @@ describe("edgecoder role dispatcher", () => {
     expect(resolveRole(["agent", "--x"], {})).toEqual({ role: "agent", rest: ["--x"] });
     expect(resolveRole([], { EDGE_RUNTIME_MODE: "portal" })).toEqual({ role: "portal", rest: [] });
     expect(resolveRole([], {})).toEqual({ role: "all-in-one", rest: [] });
+    expect(resolveRole(["code", "--repo", "owner/repo"], {})).toEqual({ role: "code", rest: ["--repo", "owner/repo"] });
     expect(resolveRole(["nope"], {})).toMatchObject({ error: expect.stringContaining("unknown role") });
     expect(resolveRole([], { EDGE_RUNTIME_MODE: "nope" })).toMatchObject({ error: expect.stringContaining("not a role") });
   });

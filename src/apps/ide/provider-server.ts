@@ -51,6 +51,10 @@ import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
 import { loadConfigOrExit } from "../../common/config.js";
 import { ideProviderConfigSchema } from "../../config/ide-provider.js";
+import { SessionHub, type SessionData } from "./sessions.js";
+import { registerSessionRoutes } from "./session-routes.js";
+import { hostedBackend, hostedConfigFromEnv } from "./hosted-backend.js";
+import { GitHubDeviceLogins } from "./github-device.js";
 
 // Forked by the agent: exit with it, so a restarted agent's provider can take the port.
 if (process.send) process.on("disconnect", () => process.exit(0));
@@ -701,6 +705,21 @@ app.post("/v1/ide/git/clone", async (req, reply) => {
 });
 app.get("/v1/ide/git/github/status", async (_req, reply) => reply.send(await githubStatus()));
 
+// Sign in to GitHub with the GitHub CLI's device flow (github-device.ts): the code is shown in the
+// app or terminal, the user enters it at github.com/login/device, and the status is polled here.
+const githubLogins = new GitHubDeviceLogins();
+app.post("/v1/ide/github/login", async (_req, reply) => reply.send(await githubLogins.start()));
+app.get("/v1/ide/github/login/:id", async (req, reply) => {
+  const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+  const l = githubLogins.get(id);
+  return l ? reply.send(l) : reply.status(404).send({ error: "not_found" });
+});
+app.post("/v1/ide/github/login/:id/cancel", async (req, reply) => {
+  const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+  const l = githubLogins.cancel(id);
+  return l ? reply.send(l) : reply.status(404).send({ error: "not_found" });
+});
+
 // The projects folder (default ~/EdgeCoder) and connecting a repository into it (repo-connect.ts).
 app.get("/v1/ide/settings/projects-folder", async (_req, reply) => {
   const f = getProjectsFolder();
@@ -721,12 +740,13 @@ app.get("/v1/ide/repos/recent", async (_req, reply) => {
   return reply.send({ ...st, repos: st.loggedIn ? await recentGitHubRepos(20) : [] });
 });
 app.post("/v1/ide/repos/connect", async (req, reply) => {
-  const b = z.object({ repo: remoteUrl, stream: z.boolean().default(false) }).safeParse(req.body ?? {});
+  // `open: false` (the terminal): connect without changing the desktop's open project.
+  const b = z.object({ repo: remoteUrl, stream: z.boolean().default(false), open: z.boolean().default(true) }).safeParse(req.body ?? {});
   if (!b.success) return reply.status(400).send({ error: "invalid", message: zodMessage(b.error) });
   if (!b.data.stream) {
     try {
       const r = await connectRepoUrl(b.data.repo);
-      activeProjectRoot = r.path;
+      if (b.data.open) activeProjectRoot = r.path;
       return reply.send(r);
     } catch (err) {
       if (err instanceof GitSetupError) return reply.status(400).send({ error: "git", message: err.message });
@@ -746,7 +766,7 @@ app.post("/v1/ide/repos/connect", async (req, reply) => {
         send({ type: "progress", line: line.slice(0, 300) });
       },
     });
-    activeProjectRoot = r.path;
+    if (b.data.open) activeProjectRoot = r.path;
     send({ type: "done", result: r });
   } catch (err) {
     send({ type: "error", message: err instanceof GitSetupError ? err.message : "Couldn't connect the repository." });
@@ -1039,8 +1059,21 @@ const ideChatSchema = z.object({
     .optional(),
 });
 
+/** The hosted endpoint and the user's API key (EDGECODER_API_KEY / _FILE), for network models without an enrolled agent. */
+const hosted = hostedConfigFromEnv();
+
+function sessionModelId(compute: NonNullable<z.infer<typeof ideChatSchema>["compute"]>, model: string): string {
+  if (compute.target === "auto") return "auto";
+  if (compute.target === "mine") return `mine/${model}`;
+  if (compute.target === "reserved") return `reserved/${compute.reservationId ?? ""}/${model}`;
+  return `network/${model}${compute.computeClass && compute.computeClass !== "any" ? `@${compute.computeClass}` : ""}`;
+}
+
 /** The agent's model calls, on the compute the chat picked. */
 function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: string, ollamaHost: string, sendEvent: (e: IdeStreamEvent) => void, signal: AbortSignal, source = "EdgeCoder chat") {
+  if (compute?.target === "auto" && !networkDeps && hosted) {
+    return backendChat(hostedBackend(hosted, "auto"), (cSats) => sendEvent({ type: "usage", cSats, where: "Auto (hosted)" }), signal);
+  }
   if (compute?.target === "auto") {
     // Auto picks the model too; each step of the agent may land somewhere else (cheapest that fits).
     // When the network isn't affordable, Auto falls back to the biggest free model (planRoutes).
@@ -1050,6 +1083,11 @@ function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: str
       sendEvent({ type: "status", message: `Auto: ${r.reason}` });
     }, source);
     return backendChat(backend, (cSats) => sendEvent({ type: "usage", cSats, where }), signal);
+  }
+  if (compute && compute.target !== "local" && !networkDeps && hosted) {
+    // No enrolled agent here, but an API key: the network through the hosted endpoint.
+    const id = sessionModelId(compute, model);
+    return backendChat(hostedBackend(hosted, id), (cSats) => sendEvent({ type: "usage", cSats, where: `${id} (hosted)` }), signal);
   }
   if (!compute || compute.target === "local" || !networkDeps) return ollamaChat(ollamaHost, model, signal);
   const where = routeLabel({
@@ -1181,6 +1219,50 @@ app.post("/v1/ide/chat", async (req, reply) => {
 
   sendEvent({ type: "done" });
   reply.raw.end();
+});
+
+// --- Shared coding sessions (sessions.ts): the terminal (`edgecoder code`) and the desktop's Code view ---
+
+function currentBranch(root: string): string | null {
+  try {
+    const b = execFileSync("git", hardenedGitArgs(["-C", root, "rev-parse", "--abbrev-ref", "HEAD"], root), {
+      env: gitExecEnv(),
+      encoding: "utf8",
+      timeout: 3_000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    return b && b !== "HEAD" ? b : null;
+  } catch {
+    return null;
+  }
+}
+
+const sessions = new SessionHub({
+  chat: (s: SessionData, emit, signal) => {
+    const ollamaHost = process.env.OLLAMA_HOST || "http://127.0.0.1:11434";
+    const model = s.compute.target === "local" ? s.model || process.env.OLLAMA_MODEL || "qwen3.5:9b" : s.model;
+    return chatFnFor({ target: s.compute.target, computeClass: s.compute.computeClass as never, reservationId: s.compute.reservationId }, model, ollamaHost, emit, signal, s.origin === "terminal" ? "edgecoder code" : "EdgeCoder chat");
+  },
+  systemPrompt: async (s) => {
+    const ctx = await agentPromptContext(s.compute.target === "local" ? s.model : process.env.OLLAMA_MODEL || "qwen3.5:9b");
+    const rules = readProjectRules(s.projectRoot);
+    return (format) => buildIdeAgentSystemPrompt(ctx, s.projectRoot, rules, format);
+  },
+  executor: (s) => {
+    const index = codebaseIndexFor(s.projectRoot, ollamaHostForIndex());
+    const executor = new ToolExecutor(s.projectRoot, undefined, index.getStatus().state === "ready" ? async (q) => formatSearchHits(await index.search(q, 6)) : undefined);
+    return { execute: (tool, args, opts) => executor.execute(tool, args, opts), prepare: (tool, args) => preparePullRequestArgs(executor, tool, args) };
+  },
+  tools: (s) => (hasGitHubOrigin(s.projectRoot) ? toolSchemas() : toolSchemas().filter((t) => t.function.name !== "open_pull_request")),
+  checkpoints,
+  branch: currentBranch,
+});
+registerSessionRoutes(app, sessions);
+app.addHook("onReady", async () => {
+  sessions.load();
+});
+app.addHook("onClose", async () => {
+  sessions.shutdown();
 });
 
 // --- Legacy endpoints (backward compat) ---

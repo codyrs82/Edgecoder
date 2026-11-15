@@ -1,4 +1,5 @@
 <script lang="ts">
+  import GitHubSignIn from "./GitHubSignIn.svelte";
   // The coding chat's project line: project · branch (switcher), uncommitted changes, ahead/behind,
   // the GitHub repository, and Pull / Commit / Publish / Connect GitHub.
   import { Popover } from "bits-ui";
@@ -293,8 +294,9 @@
       <pre class="cmd">brew install gh
 gh auth login</pre>
     {:else}
-      <p class="hint">Pushing and publishing use the GitHub CLI. Sign in once in a terminal:</p>
-      <pre class="cmd">gh auth login</pre>
+      <p class="hint">Pushing and publishing use the GitHub CLI. Sign in with a one-time code:</p>
+      <GitHubSignIn compact onSignedIn={() => void recheckGitHub()} />
+      <p class="hint">Or run <code>gh auth login</code> in a terminal.</p>
     {/if}
     <div class="pop-actions">
       {#if onConnectGitHub}<button class="btn btn--sm" type="button" onclick={() => { githubOpen = false; publishOpen = false; onConnectGitHub?.(); }}>Settings</button>{/if}

@@ -24,6 +24,8 @@
   import { computeChoice } from "./lib/compute-choice";
   import { Settings as SettingsIcon, Plus, SquarePen, FolderPlus, FolderOpen, FolderGit2, Folder, Bot, PanelLeft } from "@lucide/svelte";
   import ProjectSidebar from "./components/ProjectSidebar.svelte";
+  import LiveSessionPanel from "./components/LiveSessionPanel.svelte";
+  import { listPublishedSessions, type SessionSummary } from "./lib/api";
   import NewProjectDialog from "./components/NewProjectDialog.svelte";
   import { forgetProject, loadRecentProjects, projectName as folderName, rememberProject, tildePath, type CreatedProject, type RecentProject } from "./lib/projects";
   import { notify } from "./lib/toast";
@@ -319,7 +321,36 @@
   }
 
   /** A new coding chat in `root` (null: the open project). */
+  // Sessions published from a terminal (`edgecoder code`, /remote): listed live in the Code view.
+  let liveSessions = $state<SessionSummary[]>([]);
+  let liveSessionId = $state<string | null>(null);
+  $effect(() => {
+    if (!user) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        liveSessions = await listPublishedSessions();
+      } catch {
+        // an older provider without sessions, or not running yet
+      }
+      if (!stopped) timer = setTimeout(poll, 3000);
+    };
+    backendReady.then(() => { if (!stopped) void poll(); });
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  });
+
+  async function openLiveSession(x: SessionSummary) {
+    activeTab = "editor";
+    if (x.projectRoot !== projectRoot) await openProjectRoot(x.projectRoot);
+    liveSessionId = x.id;
+  }
+
   async function newCodingChat(root: string | null) {
+    liveSessionId = null;
     activeTab = "editor";
     if (root && !(await openProjectRoot(root))) return;
     await tick();
@@ -328,6 +359,7 @@
   }
 
   async function openCodingChat(c: Conversation) {
+    liveSessionId = null;
     activeTab = "editor";
     if (c.projectRoot) {
       if (!(await openProjectRoot(c.projectRoot))) return;
@@ -534,9 +566,19 @@
             user={user!}
             onOpenSettings={openSettings}
             onLogout={logout}
+            {liveSessions}
+            activeSessionId={liveSessionId}
+            onSelectSession={(x) => void openLiveSession(x)}
           />
         </div>
-        <div class="chat-main">
+        {#if liveSessionId}
+          <div class="chat-main">
+            {#key liveSessionId}
+              <LiveSessionPanel sessionId={liveSessionId} onFilesChanged={() => editorView?.onAgentChangedFiles()} onOpenPath={(p) => { liveSessionId = null; openInEditor(p); }} />
+            {/key}
+          </div>
+        {/if}
+        <div class="chat-main" class:hidden={!!liveSessionId}>
           <EditorView
             bind:this={editorView}
             {projectRoot}

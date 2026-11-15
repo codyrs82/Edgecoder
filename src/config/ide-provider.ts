@@ -52,6 +52,14 @@ export const ideProviderConfigSchema = z.object({
   EDGECODER_PROJECTS_DIR: str(),
   EDGECODER_GH_BIN: str(),
   EDGECODER_TRUST_FILE: str(),
+  /** Shared coding sessions (src/apps/ide/sessions.ts), one JSON file each. Default ~/.edgecoder/sessions. */
+  EDGECODER_SESSIONS_DIR: str(),
+  /** The hosted endpoint and an API key (src/apps/ide/hosted-backend.ts): network models without an enrolled agent. */
+  EDGECODER_URL: str(),
+  EDGECODER_API_KEY: str(),
+  EDGECODER_API_KEY_FILE: str(),
+  /** Where `edgecoder code` looks for a running provider (default http://127.0.0.1:4304). */
+  IDE_PROVIDER_URL: envUrl(),
   /** Auto's quality floor in billions of parameters (src/inference-api/auto-route.ts): chat and agent work. */
   EDGECODER_AUTO_MIN_CHAT_B: envNumber(undefined, { min: 0 }),
   EDGECODER_AUTO_MIN_CODING_B: envNumber(undefined, { min: 0 })

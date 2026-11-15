@@ -1,4 +1,5 @@
 <script lang="ts">
+  import GitHubSignIn from "../components/GitHubSignIn.svelte";
   import { getGitHubStatus, getOAuthStartUrl, disconnectGitHub } from "../lib/api";
   import { open } from "@tauri-apps/plugin-shell";
   import { githubCli, githubCliStatus } from "../lib/github-cli";
@@ -94,8 +95,13 @@
           Cloning private repositories, pushing and publishing projects use the GitHub CLI, which isn't installed. Install it, then sign in:
         {/if}
       </p>
-      <pre class="cmd">{$githubCli.ghInstalled ? "gh auth login" : "brew install gh\ngh auth login"}</pre>
-      <button type="button" class="btn-primary" onclick={() => void checkCli(true)} disabled={checkingCli}>{checkingCli ? "Checking..." : "Check again"}</button>
+      {#if $githubCli.ghInstalled}
+        <GitHubSignIn onSignedIn={() => void checkCli(true)} />
+        <p class="description cli-note">Or sign in in a terminal with <code>gh auth login</code>, then check again.</p>
+      {:else}
+        <pre class="cmd">brew install gh{"\n"}gh auth login</pre>
+      {/if}
+      <button type="button" class="btn-secondary" onclick={() => void checkCli(true)} disabled={checkingCli}>{checkingCli ? "Checking..." : "Check again"}</button>
     {/if}
   </div>
 

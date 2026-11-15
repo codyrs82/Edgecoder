@@ -350,8 +350,13 @@ export interface ToolRunnerDeps {
   /** Keep a file's original before the turn first writes it; returns the tracked path or null. */
   captureBeforeWrite: (path: string) => string | null;
   turnId: string;
-  /** Apply write_file / edit_file without asking (the turn's checkpoint keeps them undoable). */
-  autoApproveEdits?: boolean;
+  /** Apply write_file / edit_file without asking (the turn's checkpoint keeps them undoable). A function is asked per call. */
+  autoApproveEdits?: boolean | (() => boolean);
+  /**
+   * Calls the user already approved "always" (a shared session: a command name). They run without
+   * asking and count as approved; never consulted for ALWAYS_ASK_TOOLS.
+   */
+  alwaysAllowed?: (tool: ToolName, args: Record<string, unknown>) => boolean;
   /** Honour IDE_SHELL_AUTO_APPROVE=1 (default true; bots pass false so their commands always ask). */
   allowShellAutoApprove?: boolean;
   /**
@@ -394,9 +399,10 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
     const shellAutoApprove = d.allowShellAutoApprove !== false && tool === "run_shell" && process.env.IDE_SHELL_AUTO_APPROVE === "1";
     // Edits to the git directory or to files tooling executes (.gitmodules, .husky/, ...) are never
     // auto-approved; the executor refuses .git outright and the rest without an explicit approval.
-    const editAutoApprove =
-      d.autoApproveEdits === true && (tool === "write_file" || tool === "edit_file") && protectedToolPath(args.path) === null;
-    const requiresApproval = ALWAYS_ASK_TOOLS.has(tool) || (!READ_TOOLS.has(tool) && !shellAutoApprove && !editAutoApprove);
+    const autoEdits = typeof d.autoApproveEdits === "function" ? d.autoApproveEdits() : d.autoApproveEdits === true;
+    const editAutoApprove = autoEdits && (tool === "write_file" || tool === "edit_file") && protectedToolPath(args.path) === null;
+    const always = !ALWAYS_ASK_TOOLS.has(tool) && !READ_TOOLS.has(tool) && d.alwaysAllowed?.(tool, args) === true;
+    const requiresApproval = ALWAYS_ASK_TOOLS.has(tool) || (!READ_TOOLS.has(tool) && !shellAutoApprove && !editAutoApprove && !always);
     d.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: requiresApproval });
     if (requiresApproval && !(await d.waitForApproval(callId, tool, args))) {
       const msg = `Tool call ${tool} was rejected by the user.`;
@@ -406,7 +412,7 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
     const writesFile = tool === "write_file" || tool === "edit_file";
     const tracked = writesFile ? d.captureBeforeWrite(String(args.path ?? "")) : null;
     // `approved` means the user approved this call; auto-approved edits don't count.
-    const result = await d.execute(tool, args, { approved: requiresApproval });
+    const result = await d.execute(tool, args, { approved: requiresApproval || always });
     if (tracked && !result.error) d.sendEvent({ type: "file_change", turnId: d.turnId, path: tracked });
     if (tool === "run_shell" && result.result) {
       try {
