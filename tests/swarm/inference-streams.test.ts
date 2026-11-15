@@ -32,6 +32,37 @@ describe("InferenceStreams", () => {
     expect(s.append("nope", 0, "x")).toBe("unknown");
   });
 
+  // Live probe (2026-11-15): 2 of 120 calls ended 200 with no text but were billed. The agent's
+  // result carried the reply; its pieces had not reached the stream (a lost post makes every later
+  // piece a gap). The result fills in what the stream is missing before it ends.
+  it("backfills text the stream lost from the result, and never rewrites what was sent", async () => {
+    const s = new InferenceStreams();
+    s.open("lost");
+    expect(s.backfill("lost", "Paris")).toBe(true);
+    s.finish("lost");
+    expect((await s.read("lost", 0, 0))!.chunks.join("")).toBe("Paris");
+
+    s.open("partial");
+    s.append("partial", 0, "Par");
+    expect(s.append("partial", 2, "s")).toBe("gap");
+    expect(s.backfill("partial", "Paris")).toBe(true);
+    expect((await s.read("partial", 0, 0))!.chunks).toEqual(["Par", "is"]);
+
+    s.open("complete");
+    s.append("complete", 0, "Paris");
+    expect(s.backfill("complete", "Paris")).toBe(false);
+
+    // What the requester already has is not a prefix of the result: leave it alone.
+    s.open("diverged");
+    s.append("diverged", 0, "Lyon");
+    expect(s.backfill("diverged", "Paris")).toBe(false);
+    expect((await s.read("diverged", 0, 0))!.chunks).toEqual(["Lyon"]);
+
+    s.open("ended");
+    s.append("ended", 0, "x", true);
+    expect(s.backfill("ended", "xyz")).toBe(false);
+  });
+
   it("a long poll returns as soon as a piece arrives, and at once when there is news", async () => {
     const s = new InferenceStreams();
     s.open("st");
@@ -104,6 +135,40 @@ describe("runInferenceSubtask", () => {
     expect(posted.map((p) => p.delta).join("")).toBe("Hello, world");
     expect(posted.map((p) => p.seq)).toEqual(posted.map((_, i) => i));
     expect(posted.at(-1)?.done).toBe(true);
+  });
+
+  it("a lost piece is sent again with the next one, keeping its number (no gap for the rest)", async () => {
+    server = createServer((req, res) => {
+      req.resume();
+      req.on("end", async () => {
+        for (const w of ["Hello", ", ", "world"]) {
+          res.write(JSON.stringify({ message: { content: w } }) + "\n");
+          await new Promise((r) => setTimeout(r, 120)); // past the flush interval: one post per word
+        }
+        res.end(JSON.stringify({ done: true }) + "\n");
+      });
+    });
+    await new Promise<void>((r) => server!.listen(0, "127.0.0.1", r));
+    const host = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const accepted: Array<{ seq: number; delta: string; done: boolean }> = [];
+    let calls = 0;
+    const st = {
+      id: "s2", taskId: "t2", kind: "inference", timeoutMs: 30_000, requestedModel: "x",
+      input: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }),
+    } as unknown as Subtask;
+    const r = await runInferenceSubtask(st, {
+      agentId: "a1", ollamaHost: host,
+      post: async (_p, b) => {
+        if (++calls === 1) throw new Error("socket hang up");
+        accepted.push(b as never);
+        return {};
+      },
+    });
+    expect(r).toMatchObject({ ok: true, output: "Hello, world" });
+    expect(calls).toBeGreaterThan(1);
+    expect(accepted.map((p) => p.seq)).toEqual(accepted.map((_, i) => i));
+    expect(accepted.map((p) => p.delta).join("")).toBe("Hello, world");
+    expect(accepted.at(-1)?.done).toBe(true);
   });
 
   const st1 = { id: "s1", taskId: "t1", kind: "inference", timeoutMs: 5_000, requestedModel: "x", input: JSON.stringify({ messages: [{ role: "user", content: "hi" }] }) } as unknown as Subtask;
