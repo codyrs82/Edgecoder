@@ -81,7 +81,9 @@ type TierName = "cpu" | "mac" | "gpu";
 const TIERS: Record<TierName, { model: string; ideModel: string; cls: string; label: string; maxTokens?: number }> = {
   cpu: { model: "network/qwen2.5-coder:1.5b@cpu", ideModel: "qwen2.5-coder:1.5b", cls: "cpu", label: "CPU fleet, qwen2.5-coder:1.5b", maxTokens: 1024 },
   mac: { model: "network/qwen2.5-coder:7b", ideModel: "qwen2.5-coder:7b", cls: "any", label: "Mac, qwen2.5-coder:7b" },
-  gpu: { model: "network/qwen3-coder:30b@gpu.dc", ideModel: "qwen3-coder:30b", cls: "gpu.dc", label: "datacenter GPU, qwen3-coder:30b" },
+  // No class pin: the GPU agent's granted class has flipped between gpu.dc and cpu across its
+  // restarts (hardware re-verification), and only that machine holds the 30b anyway.
+  gpu: { model: "network/qwen3-coder:30b", ideModel: "qwen3-coder:30b", cls: "any", label: "datacenter GPU, qwen3-coder:30b" },
 };
 const STRONGER: Record<TierName, TierName> = { cpu: "mac", mac: "gpu", gpu: "gpu" };
 export function tierFor(j: Pick<Job, "job" | "complexity" | "tier">): TierName {
