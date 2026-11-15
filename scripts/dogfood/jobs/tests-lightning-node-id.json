@@ -1,0 +1,32 @@
+{
+  "id": "tests-lightning-node-id",
+  "title": "Unit tests for isLightningNodeId (src/economy/service-probes.ts)",
+  "job": "tests",
+  "complexity": "small",
+  "hints": [
+    "tests",
+    "typescript",
+    "small"
+  ],
+  "files": [
+    "src/economy/service-probes.ts"
+  ],
+  "instructions": "Add a new vitest unit test file `tests/economy/lightning-node-id.test.ts` for `isLightningNodeId` in `src/economy/service-probes.ts`.\n- Read the code first (it is pasted below) and assert what it actually does; if you think the code has a bug, say so in your final answer instead of changing it.\n- Use `import { describe, expect, it } from \"vitest\";` and import the code under test with a relative path ending in `.js` (for example `../../src/economy/service-probes.js`), like the other tests in this repository.\n- Cover: a 66-character hex id starting with 02 or 03 is valid (also upper case); a 04 prefix, 64 or 68 characters, non-hex characters, an empty string and undefined are invalid.",
+  "acceptance": [
+    {
+      "kind": "vitest",
+      "args": {
+        "files": [
+          "tests/economy/lightning-node-id.test.ts"
+        ],
+        "minTests": 3
+      }
+    },
+    {
+      "kind": "tsc"
+    }
+  ],
+  "allowedPaths": [
+    "tests/economy/lightning-node-id.test.ts"
+  ]
+}

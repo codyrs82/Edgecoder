@@ -1,0 +1,37 @@
+{
+  "id": "docs-load-generator",
+  "title": "site-docs: load testing the network",
+  "job": "docs",
+  "complexity": "small",
+  "hints": [
+    "docs"
+  ],
+  "files": [
+    "docs/load-testing.md",
+    "site-docs/.vitepress/config.ts#L38-L54"
+  ],
+  "instructions": "Write `site-docs/operations/load-testing.md`, an operator page for the load generator, from docs/load-testing.md (pasted below): a `# Load Testing the Network` title, what it does, the limits, the profiles table, how to run and tear down, and how to read Settings > Network during a run. Shorter than the source; keep commands exactly as they are. Then add `{ text: \"Load Testing\", link: \"/operations/load-testing\" }` at the end of the Operations sidebar in site-docs/.vitepress/config.ts.",
+  "acceptance": [
+    {
+      "kind": "grep",
+      "args": [
+        {
+          "file": "site-docs/operations/load-testing.md",
+          "pattern": "^# Load Testing"
+        },
+        {
+          "file": "site-docs/operations/load-testing.md",
+          "pattern": "scripts/loadgen/fly.sh"
+        },
+        {
+          "file": "site-docs/.vitepress/config.ts",
+          "pattern": "/operations/load-testing"
+        }
+      ]
+    }
+  ],
+  "allowedPaths": [
+    "site-docs/operations/load-testing.md",
+    "site-docs/.vitepress/config.ts"
+  ]
+}

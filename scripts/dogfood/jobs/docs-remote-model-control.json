@@ -1,0 +1,38 @@
+{
+  "id": "docs-remote-model-control",
+  "title": "site-docs: changing a machine's models from the portal (Settings > Nodes)",
+  "job": "docs",
+  "complexity": "small",
+  "hints": [
+    "docs"
+  ],
+  "files": [
+    "docs/install.md#L272-L319",
+    "site-docs/.vitepress/config.ts#L22-L40",
+    "site-docs/guide/model-management.md#L1-L30"
+  ],
+  "instructions": "Write a user-facing page `site-docs/guide/remote-model-control.md` from the section \"Changing models from the portal\" of docs/install.md (pasted below): a `# Changing models from the portal` title, what it is for (headless hosts, no SSH), the steps in Settings > Nodes, and its limits, in plain words. Keep facts to what the section says. Then add `{ text: \"Changing Models from the Portal\", link: \"/guide/remote-model-control\" }` to the Guide sidebar in site-docs/.vitepress/config.ts, right after the Model Management entry.",
+  "acceptance": [
+    {
+      "kind": "grep",
+      "args": [
+        {
+          "file": "site-docs/guide/remote-model-control.md",
+          "pattern": "^# .*[Pp]ortal"
+        },
+        {
+          "file": "site-docs/guide/remote-model-control.md",
+          "pattern": "Settings > Nodes|Settings \u2192 Nodes"
+        },
+        {
+          "file": "site-docs/.vitepress/config.ts",
+          "pattern": "/guide/remote-model-control"
+        }
+      ]
+    }
+  ],
+  "allowedPaths": [
+    "site-docs/guide/remote-model-control.md",
+    "site-docs/.vitepress/config.ts"
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "id": "tests-parse-plan",
+  "title": "Unit tests for parsePlan (src/apps/ide/agent-loop.ts)",
+  "job": "tests",
+  "complexity": "small",
+  "hints": [
+    "tests",
+    "typescript",
+    "small"
+  ],
+  "files": [
+    "src/apps/ide/agent-loop.ts"
+  ],
+  "instructions": "Add a new vitest unit test file `tests/ide/parse-plan.test.ts` for `parsePlan` in `src/apps/ide/agent-loop.ts`.\n- Read the code first (it is pasted below) and assert what it actually does; if you think the code has a bug, say so in your final answer instead of changing it.\n- Use `import { describe, expect, it } from \"vitest\";` and import the code under test with a relative path ending in `.js` (for example `../../src/apps/ide/agent-loop.js`), like the other tests in this repository.\n- Cover: a JSON list of steps keeps index, description and status; a missing index uses the position; a missing status becomes \"pending\"; a missing description becomes \"\"; a JSON object that is not a list and malformed JSON give null.",
+  "acceptance": [
+    {
+      "kind": "vitest",
+      "args": {
+        "files": [
+          "tests/ide/parse-plan.test.ts"
+        ],
+        "minTests": 3
+      }
+    },
+    {
+      "kind": "tsc"
+    }
+  ],
+  "allowedPaths": [
+    "tests/ide/parse-plan.test.ts"
+  ]
+}

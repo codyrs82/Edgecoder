@@ -1,0 +1,35 @@
+{
+  "id": "summary-threat-model-residuals",
+  "title": "Checklist: residual risks in the agent threat model",
+  "job": "summarize",
+  "hints": [
+    "summarize"
+  ],
+  "commit": false,
+  "output": "dogfood-output/threat-model-residuals.md",
+  "files": [
+    "docs/security/agent-threat-model.md#L150-L182",
+    "docs/security/agent-threat-model.md#L258-L268",
+    "docs/security/agent-threat-model.md#L360-L404",
+    "docs/security/agent-threat-model.md#L430-L462"
+  ],
+  "instructions": "Write `dogfood-output/threat-model-residuals.md`: a checklist of the residual risks in docs/security/agent-threat-model.md (the excerpts below), one `- [ ] ` line per risk, grouped under the section it comes from (`## Lateral movement`, `## Theft of bitcoin/cSats`, `## Denial of service`). Each line: the risk in under 25 words. Only risks the text states.",
+  "acceptance": [
+    {
+      "kind": "grep",
+      "args": [
+        {
+          "file": "dogfood-output/threat-model-residuals.md",
+          "pattern": "^- \\[ \\] "
+        },
+        {
+          "file": "dogfood-output/threat-model-residuals.md",
+          "pattern": "^## "
+        }
+      ]
+    }
+  ],
+  "allowedPaths": [
+    "dogfood-output/threat-model-residuals.md"
+  ]
+}

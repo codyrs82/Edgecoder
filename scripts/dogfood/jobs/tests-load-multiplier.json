@@ -1,0 +1,32 @@
+{
+  "id": "tests-load-multiplier",
+  "title": "Unit tests for dynamicLoadMultiplier (src/economy/pricing.ts)",
+  "job": "tests",
+  "complexity": "small",
+  "hints": [
+    "tests",
+    "typescript",
+    "small"
+  ],
+  "files": [
+    "src/economy/pricing.ts"
+  ],
+  "instructions": "Add a new vitest unit test file `tests/economy/dynamic-load-multiplier.test.ts` for `dynamicLoadMultiplier` in `src/economy/pricing.ts`.\n- Read the code first (it is pasted below) and assert what it actually does; if you think the code has a bug, say so in your final answer instead of changing it.\n- Use `import { describe, expect, it } from \"vitest\";` and import the code under test with a relative path ending in `.js` (for example `../../src/economy/pricing.js`), like the other tests in this repository.\n- Read DynamicPriceInputs in the same file and build complete input objects. Cover: demand equal to capacity gives 1.0; an idle network gives the floor; extreme demand is capped at 4.0; cpu and gpu use their own capacity field; a capacity of 0 is treated as 1.",
+  "acceptance": [
+    {
+      "kind": "vitest",
+      "args": {
+        "files": [
+          "tests/economy/dynamic-load-multiplier.test.ts"
+        ],
+        "minTests": 3
+      }
+    },
+    {
+      "kind": "tsc"
+    }
+  ],
+  "allowedPaths": [
+    "tests/economy/dynamic-load-multiplier.test.ts"
+  ]
+}
