@@ -235,12 +235,24 @@ Listeners on an agent install:
 | Lightning invoice flood: every `/account/buy` created a real invoice and an intent never pruned; the reconcile loop reads the 500 oldest | at most 5 open invoices per account |
 | Sybil: any number of agents per account, each auto-approved | `PORTAL_MAX_AGENTS_PER_ACCOUNT`, default 25 (proposed default) |
 | Unsigned `/agent/diagnostics` could overwrite any agent's diagnostics | the signer must be the named agent |
+| A buyer could get honest workers struck and blacklisted through BHV004 (success collapse): jobs whose programs exit non-zero (`sys.exit(1)`) counted as the worker's failures | results say whether the agent executed the job (`executed`, `exitCode`, `programError`); a program error is a correctly executed, paid job; agent failures count at most `BEHAVIOR_SUBMITTER_FAILURE_CAP` (3) per submitter account per hour; a verified-failing replica excuses the failure. See [Failed programs are not failed agents](../economy-compute-trust-model.md#failed-programs-are-not-failed-agents-bhv004) |
 
 **Residual risk**
 
-- **BHV004 (success collapse) still strikes.** A buyer can submit programs that exit non-zero, and
-  failed results count. Proposed: tell agent-side failures (model down, sandbox down) apart from
-  the program's exit status in the result, and count only the former.
+- **BHV004 framing, what is left.** Fixed above for program errors; what remains:
+  - Agents that predate `executed` are judged as before (a failure is theirs), so a buyer can still
+    add up to the cap (3 per hour) of failures per account to them, and needs four or more funded
+    accounts to collapse one. Sybil accounts are cheap (see section 2).
+  - Agent-side failures a buyer can still provoke on any agent: a program that loops without
+    printing (a timeout with no output is judged the agent's, since a stalled container looks the
+    same), or one that exits 125 to 127 and prints Docker's own `docker:` message on stderr. These
+    are capped per submitter the same way.
+  - A broken agent whose work comes from fewer than four submitters in an hour is not caught by
+    BHV004 (10 counted results needed, at most 3 per submitter).
+  - Program errors are paid on the worker's word plus the coordinator's credibility checks; with
+    verification off (`RESULT_VERIFICATION_RATE=0`) nothing re-runs them, as for successes. The seeds
+    run 0.05. A weak model's buggy program also counts as a program error: the buyer pays for a run
+    whose program failed (a quality question, not an integrity one).
 - **BHV009 (duration "robot precision")** strikes on a standard deviation under 50 ms over 10 or
   more tasks. Durations are server-measured and include model and container start-up, so a buyer
   can hardly force this, but it was not tested against real workloads.

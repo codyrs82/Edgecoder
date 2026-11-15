@@ -230,6 +230,15 @@ export function policyToDockerOptions(policy?: SandboxPolicy): DockerSandboxOpti
   };
 }
 
+/**
+ * `docker run` itself failed rather than the program: it exits 125 (daemon or flag error), 126 (the
+ * image's command could not be invoked) or 127 (not found), and the Docker CLI says so on stderr
+ * ("docker: ..."). A program can exit with those codes too, so the stderr prefix is required.
+ */
+export function dockerRunFailed(exitCode: number, stderr: string): boolean {
+  return (exitCode === 125 || exitCode === 126 || exitCode === 127) && /(^|\n)docker: |Error response from daemon/.test(stderr);
+}
+
 export async function runInDockerSandbox(
   language: Language,
   code: string,
@@ -279,7 +288,11 @@ export async function runInDockerSandbox(
           stderr: `${text("stderr")}\n${note}${cleanup}`,
           exitCode: reason === "timeout" ? 124 : 137,
           queueForCloud: reason === "timeout",
-          ...(reason === "timeout" ? { queueReason: "timeout" as const } : {})
+          ...(reason === "timeout" ? { queueReason: "timeout" as const } : {}),
+          // The program hit the output cap, or ran out of time after printing: it ran. A timeout
+          // with nothing printed can't be told apart from a container that never started; an
+          // abort is the agent's own.
+          executed: reason === "output_limit" || (reason === "timeout" && size.stdout > 0)
         });
       });
       // Nothing more is captured once stopping.
@@ -312,12 +325,14 @@ export async function runInDockerSandbox(
 
     proc.on("close", (exitCode) => {
       if (settled || stopping) return;
+      const stderr = text("stderr");
       finish({
         ok: (exitCode ?? 1) === 0,
         stdout: text("stdout"),
-        stderr: text("stderr"),
+        stderr,
         exitCode: exitCode ?? 1,
-        queueForCloud: false
+        queueForCloud: false,
+        executed: !dockerRunFailed(exitCode ?? 1, stderr)
       });
     });
 

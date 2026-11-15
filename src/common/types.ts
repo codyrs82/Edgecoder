@@ -18,6 +18,12 @@ export interface RunResult {
   durationMs: number;
   queueForCloud: boolean;
   queueReason?: QueueReasonCode;
+  /**
+   * The program itself ran and ended (an exit status, a time or output limit it hit). False or
+   * absent: it never ran or the runner failed (sandbox missing or broken, Docker error, aborted, a
+   * timeout before it printed anything). Tells a program that failed apart from an agent that did.
+   */
+  executed?: boolean;
 }
 
 export interface IterationRecord {
@@ -72,14 +78,30 @@ export interface Subtask {
   subtaskIndex?: number;
 }
 
+/** Why a job the agent did execute failed (see SubtaskResult.programError). */
+export type ProgramErrorReason = "exit_nonzero" | "timeout" | "output_limit" | "outside_subset";
+
 export interface SubtaskResult {
   subtaskId: string;
   taskId: string;
   agentId: string;
+  /** The job succeeded: for code kinds, the program exited 0. */
   ok: boolean;
   output: string;
   error?: string;
   durationMs: number;
+  /**
+   * Code kinds, agents from this change on: the agent did its part. true when the program ran to an
+   * end in the sandbox (or the sandbox policy refused the generated code); a failure is then the
+   * job's, named by programError. false when the agent failed: model, sandbox, crash, or a timeout
+   * before the program printed anything. Absent: an older agent (the coordinator judges !ok as an
+   * agent failure, under the per-submitter cap; docs/security/agent-threat-model.md).
+   */
+  executed?: boolean;
+  /** The program's exit status, when it ran. */
+  exitCode?: number;
+  /** With executed and !ok: why the job failed. */
+  programError?: ProgramErrorReason;
   snapshotRef?: string;
   reportNonce?: string;
   reportSignature?: string;

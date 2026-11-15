@@ -43,6 +43,7 @@ import {
   MIN_CONTRIBUTION_RATIO,
   SUBTASK_RESERVE_TIMEOUT_MS,
   taskBilling,
+  taskOriginMap,
   usagePending,
   identity,
   coordinatorKeys,
@@ -116,8 +117,21 @@ import {
 } from "../results.js";
 import { inferenceStreams, retryInferenceElsewhere } from "./inference.js";
 import { EMPTY_REPLY_ERROR } from "../../inference-runner.js";
+import { judgeResult } from "../../result-outcome.js";
 import { claimRule, mayTakeNow, noteAgentPull, noteClaimed } from "../dispatch.js";
 import type { RemoteGrant } from "../../remote-grants.js";
+
+/**
+ * The account a job's failures are attributed to for the per-submitter failure cap: the billed
+ * requester, else the coordinator that offered it to us, else one shared bucket.
+ */
+function jobSubmitter(taskId: string, subtaskId: string): string {
+  const billed = taskBilling.get(taskId)?.accountId;
+  if (billed) return `acct:${billed}`;
+  const origin = taskOriginMap.get(subtaskId);
+  if (origin) return `peer:${origin.coordinatorId}`;
+  return "unattributed";
+}
 
 async function enforceContributionFirstPolicy(accountId: string): Promise<{ ok: boolean; reason?: string }> {
   if (!pgStore) return { ok: true };
@@ -596,19 +610,35 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     }
     // Server-side duration: never more than measured since claim or the subtask timeout.
     const durationMs = claim ? creditedDurationMs(body.durationMs, claim) : 0;
+    // The program failed, or the agent did (src/swarm/result-outcome.ts). Only the agent's failures
+    // count against it, and only a program error it credibly ran is paid. A peer-offered subtask's
+    // failure is not (its origin charges only successes).
+    const judgement = judgeResult(body, { kind: claim?.subtask.kind, serverMeasuredMs: claim ? serverMeasuredDurationMs(claim) : 0 });
+    if (judgement.rejectedClaim) {
+      app.log.warn({ subtaskId: body.subtaskId, agentId: body.agentId, reason: judgement.rejectedClaim }, "program_error_claim_rejected");
+    }
+    const payableFailure = judgement.payableFailure && !isPeerForward && !isPeerOffered(body.subtaskId);
     // Ongoing hardware evidence: real work against the verified tier (server clock, not the agent's).
     // The ask is re-posted every time so its reliability score (minReliability bids) stays current.
     if (!isPeerForward && claim?.claimedAt) {
       const nowMs = Date.now();
       // Model calls carry the model's real token count (reported with the last streamed piece).
-      hardwareVerifier.recordTask(body.agentId, { ok: body.ok, outputChars: (body.output ?? "").length, elapsedMs: nowMs - claim.claimedAt, outputTokens: usagePending.get(body.taskId)?.outputTokens }, nowMs);
+      hardwareVerifier.recordTask(body.agentId, { ok: judgement.outcome !== "agent_failure", outputChars: (body.output ?? "").length, elapsedMs: nowMs - claim.claimedAt, outputTokens: usagePending.get(body.taskId)?.outputTokens }, nowMs);
       repostAsk(body.agentId, nowMs);
     }
 
     // ── Behavioral monitoring ── (skipped for peer-forwarded results: body.agentId is unauthenticated there)
     if (!isPeerForward && claim) {
       // BHV001 judges speed by the coordinator's clock (claim to receipt), never the reported duration.
-      behaviorTracker.recordTaskResult(body.agentId, { ok: body.ok, output: body.output, durationMs: serverMeasuredDurationMs(claim), kind: claim.subtask.kind });
+      behaviorTracker.recordTaskResult(body.agentId, {
+        ok: body.ok,
+        output: body.output,
+        durationMs: serverMeasuredDurationMs(claim),
+        kind: claim.subtask.kind,
+        outcome: judgement.outcome,
+        submitter: jobSubmitter(body.taskId, body.subtaskId),
+        subtaskId: body.subtaskId
+      });
       evaluateAndEnforce(body.agentId);
     }
 
@@ -633,7 +663,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         accountId: await verificationAccountFor(body.agentId),
         ok: body.ok,
         output: body.output ?? "",
-        meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask, agentEnvelope }
+        meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask, agentEnvelope, payableFailure }
       };
       if (resultVerifier.isReplica(body.subtaskId)) {
         verificationHold = true;
@@ -665,7 +695,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       // For a subtask a peer offered us: its cost here goes to the origin with the result, and what the
       // origin charged for it (the forward's answer) is what the agent may be paid.
       const execution: ExecutionResult<ResultMeta> | undefined = subtask
-        ? { subtaskId: body.subtaskId, agentId: body.agentId, ok: body.ok, output: body.output ?? "", meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask } }
+        ? { subtaskId: body.subtaskId, agentId: body.agentId, ok: body.ok, output: body.output ?? "", meta: { report: body, taskId: body.taskId, durationMs, reportedDurationMs: body.durationMs, subtask, payableFailure } }
         : undefined;
       const peerCostMsat = execution && isPeerOffered(body.subtaskId) ? peerWorkCostMsat(execution) : undefined;
       const originChargedMsat = await publishResult(body, agentEnvelope, peerCostMsat);

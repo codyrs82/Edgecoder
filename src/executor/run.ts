@@ -121,7 +121,9 @@ async function runPython(code: string, timeoutMs: number, start: number): Promis
           exitCode: 124,
           durationMs: Date.now() - start,
           queueForCloud: true,
-          queueReason: "timeout"
+          queueReason: "timeout",
+          // A timeout before any output can't be told apart from a stalled runner: the agent's.
+          executed: stdout.length > 0
         });
       }
     }, timeoutMs);
@@ -145,7 +147,8 @@ async function runPython(code: string, timeoutMs: number, start: number): Promis
         stderr,
         exitCode,
         durationMs: Date.now() - start,
-        queueForCloud: false
+        queueForCloud: false,
+        executed: true
       });
     });
   });
@@ -170,7 +173,8 @@ async function runJavaScript(code: string, timeoutMs: number, start: number): Pr
       stderr: "",
       exitCode: 0,
       durationMs: Date.now() - start,
-      queueForCloud: false
+      queueForCloud: false,
+      executed: true
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -183,7 +187,9 @@ async function runJavaScript(code: string, timeoutMs: number, start: number): Pr
       exitCode: timeout ? 124 : 1,
       durationMs: Date.now() - start,
       queueForCloud: timeout,
-      queueReason: timeout ? "timeout" : undefined
+      queueReason: timeout ? "timeout" : undefined,
+      // The script threw (or did not parse): the program failed. A silent timeout is the runner's.
+      executed: !timeout || captured.length > 0
     };
   }
 }

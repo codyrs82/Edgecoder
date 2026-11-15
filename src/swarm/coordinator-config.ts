@@ -167,6 +167,9 @@ export const coordinatorConfigSchema = z.object({
   TUNNEL_MAX_RELAYS_PER_MIN: envInt(120, { min: 0 }),
   RELAY_RATE_LIMIT_PER_10S: envInt(80, { min: 0 }),
   DIRECT_WORK_OFFERS_PER_10S: envInt(20, { min: 0 }),
+  // Agent failures from one submitter account that count toward an agent's failure-rate rules
+  // (BHV004) per behaviour window (1 h): one buyer's failing jobs can't sink a worker.
+  BEHAVIOR_SUBMITTER_FAILURE_CAP: envInt(3, { min: 1 }),
   PAYMENT_INTENT_EXPIRY_GRACE_MS: envInt(120000, { min: 1 }),
   AGENT_ORCHESTRATION_ONLINE_WINDOW_MS: envInt(120000, { min: 1 }),
   /** Agents not seen this long are dropped from the in-memory registry (they re-register as after a restart). */

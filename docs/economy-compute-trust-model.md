@@ -127,13 +127,48 @@ gossiped to every coordinator. A flag sends the agent's next results to re-execu
 which decides. With verification off (`RESULT_VERIFICATION_RATE=0`) these rules only log, so an agent
 returning canned output is not caught by them; see `docs/security/agent-threat-model.md`.
 
+### Failed programs are not failed agents (BHV004)
+
+A code job's program is the buyer's to decide: `import sys; sys.exit(1)` fails on every honest
+worker. Counted as worker failures, a handful of such jobs collapsed the worker's success rate
+(BHV004, HIGH) and struck or blacklisted it. Results now say what failed
+(`SubtaskResult.executed`, `exitCode`, `programError`; the coordinator's judgement is
+`judgeResult`, `src/swarm/result-outcome.ts`):
+
+| Result | Behaviour rules | Pay |
+|---|---|---|
+| `ok` | success | paid |
+| `executed: true`, program exited non-zero, hit the time limit after printing, or hit the output cap | success (a correctly executed job) | **paid** if credible: a code kind, a real non-zero exit status, and no faster on the coordinator's clock than BHV001's bar for the kind. Not credible: the agent's failure, unpaid. |
+| `executed: true`, `programError: "outside_subset"` (the sandbox policy refused the generated code) | success | unpaid (nothing ran) |
+| `executed: false` (model, sandbox or Docker failure, abort, a timeout before any output, a policy refusal) | agent failure | unpaid |
+| no `executed` field (agents before this change) | agent failure, as before | unpaid, as before |
+
+Two further limits apply to every agent failure:
+
+- **Per-submitter cap.** At most `BEHAVIOR_SUBMITTER_FAILURE_CAP` (default 3) agent failures from one
+  submitter account count toward an agent's failure rate in the one-hour window; the rest are left
+  out of the rate altogether. The submitter is the billed requester, else the coordinator that
+  offered the job, else one shared bucket. BHV004 needs 10 counted results, so a broken agent is
+  still caught once it fails jobs from at least four submitters; one buyer can't sink a worker.
+- **Replica confirmation.** When a sampled result is verified as a failure (an agreeing replica on
+  another account failed it the same way) and at least one agreeing agent reports that it ran the
+  program, the recorded failures become program errors.
+
+Paying program errors also closes a free-compute path: before, a buyer could append `sys.exit(1)`
+and get the output unbilled. A worker that claims a program error it did not run is no better off
+than one that forges a success: its result goes through the same verification sampling, whose
+code comparator keys on the exit status and stdout, so a replica that ran the program outvotes it
+(VRF001, no pay). Program errors also count with successes for the forgery signals (BHV001, BHV002,
+BHV003, BHV010), so they can't be used to dodge those. Program errors of a subtask offered by a peer
+coordinator stay unpaid: the origin charges only successes.
+
 ### BHV001: suspiciously fast results
 
 A result that arrives impossibly soon after its claim suggests the agent did not do the work.
 The rule judges speed by the coordinator's own clock, **claim to result receipt**
 (`serverMeasuredDurationMs`, `src/swarm/result-integrity.ts`), never by the duration the agent
 reports: an honest worker reports only its sandbox run (fast even when the model took seconds), and
-a cheater could report anything. Only results the agent reports as successful count.
+a cheater could report anything. Only paid results count: successes and program errors.
 
 Thresholds per subtask kind (`FAST_RESULT_THRESHOLD_MS`, `src/security/behavior-tracker.ts`):
 

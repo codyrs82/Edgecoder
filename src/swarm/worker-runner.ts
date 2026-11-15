@@ -934,7 +934,7 @@ async function loop(): Promise<void> {
     const policy = checkSnapshotPolicy(st, SNAPSHOT_ENFORCEMENT);
     if (!policy.run) {
       console.error(`[agent:${AGENT_ID}] snapshot enforcement: ${policy.error}`);
-      return { subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID, ok: false, output: "", error: policy.error, durationMs: 0 };
+      return { subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID, ok: false, output: "", error: policy.error, durationMs: 0, executed: false };
     }
     if (policy.warning && !opts.quiet) console.warn(`[agent:${AGENT_ID}] snapshot warning: ${policy.warning}`);
     return worker.runSubtask(st, AGENT_ID);
@@ -1482,7 +1482,7 @@ async function loop(): Promise<void> {
             try {
               await post("/result", {
                 subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID,
-                ok: false, output: "", error: inferenceOnlyRefusal, durationMs: 0,
+                ok: false, output: "", error: inferenceOnlyRefusal, durationMs: 0, executed: false,
               }, { signed: true });
             } catch { /* best effort */ }
             continue;
@@ -1497,7 +1497,7 @@ async function loop(): Promise<void> {
               const snapshotRejection = {
                 subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID,
                 ok: false, output: "", error: "snapshot_invalid: frozen snapshot enforcement rejected this subtask",
-                durationMs: 0,
+                durationMs: 0, executed: false,
               };
               await post("/result", snapshotRejection, { signed: true });
             } catch { /* best effort */ }
