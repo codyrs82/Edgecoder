@@ -209,7 +209,9 @@ export function submitterAccountDecision(input: {
   if (input.signature === "rejected") return { status: 401, error: "invalid_signature" };
   if (input.signature) {
     const owner = input.ownerAccountId ?? input.signature.agentId;
-    if (requested === "anonymous") return { accountId: "anonymous" };
+    // A remote agent's work is paid for by its owner: "anonymous" (unbilled, and unpaid for the
+    // workers that run it) is for the coordinator's own callers (loopback, mesh token) only.
+    if (requested === "anonymous") return input.loopback ? { accountId: "anonymous" } : { accountId: owner };
     if (requested !== owner && requested !== input.signature.agentId) {
       return { status: 403, error: "submitter_account_mismatch" };
     }
