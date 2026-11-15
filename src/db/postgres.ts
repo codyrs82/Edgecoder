@@ -12,7 +12,7 @@ import type { HardwareVerificationRecord } from "../swarm/hardware-verification.
 import type { NonceStore } from "../security/nonce-verifier.js";
 import type { EarningsSummary, FeePoolLockResult, ReservationLimits, ReserveResult } from "../economy/payout-service.js";
 import { assertLedgerNetwork, type LedgerNetworkCheck } from "./ledger-network.js";
-import type { SolvencyInputs } from "../economy/payout-reconcile.js";
+import type { ReconcileSnapshot, SolvencyInputs } from "../economy/payout-reconcile.js";
 import { creditsToMsat, msatToCredits, payoutDebitTxId, payoutFeeExcessTxId, payoutRefundTxId, payoutSettlementRefundMsat, withdrawableMsat } from "../economy/payouts.js";
 import type { PayoutPauseState } from "../economy/payout-safeguards.js";
 import type { ReconcileInput } from "../ledger/reconcile.js";
@@ -2982,6 +2982,22 @@ export class PostgresStore {
       `INSERT INTO payout_controls (control_key, value_json, updated_at_ms) VALUES ('pause', $1, $2)
        ON CONFLICT (control_key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at_ms = EXCLUDED.updated_at_ms`,
       [JSON.stringify(state), Date.now()]
+    );
+  }
+
+  /** payout-reconcile.ts: the last reconciliation snapshot, shared by every coordinator on this database. */
+  async loadReconcileSnapshot(): Promise<ReconcileSnapshot | null> {
+    const r = await this.pool.query(`SELECT value_json FROM payout_controls WHERE control_key = 'reconcile_snapshot'`);
+    const v = r.rows[0]?.value_json as ReconcileSnapshot | undefined;
+    return v && Number.isFinite(v.atMs) && Number.isFinite(v.nodeTotalMsat) && Number.isFinite(v.outflowMsat) && Number.isFinite(v.receivedMsat) ? v : null;
+  }
+
+  async saveReconcileSnapshot(snapshot: ReconcileSnapshot): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO payout_controls (control_key, value_json, updated_at_ms) VALUES ('reconcile_snapshot', $1, $2)
+       ON CONFLICT (control_key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at_ms = EXCLUDED.updated_at_ms
+       WHERE payout_controls.updated_at_ms <= EXCLUDED.updated_at_ms`,
+      [JSON.stringify(snapshot), snapshot.atMs]
     );
   }
 
