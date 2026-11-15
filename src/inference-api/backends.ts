@@ -3,7 +3,7 @@
 
 /** What can run a chat: this machine's Ollama (free), or the network (your machines, a lease, or any agent). */
 
-import { NetworkInferenceError, streamNetworkCompletion, type NetworkDeps, type NetworkTarget } from "../apps/ide/network-inference.js";
+import { AutoUnsupportedError, NetworkInferenceError, RouteElsewhereError, streamNetworkCompletion, type NetworkDeps, type NetworkTarget } from "../apps/ide/network-inference.js";
 import { contextWindowFor, ollamaChat } from "./ollama.js";
 import { noRouteMessage, planRoutes, sizeWorkload, type ComputePolicy, type PlanOptions, type QualityFloor, type Route, type RouteInputs } from "./auto-route.js";
 import { ChatBackendError, type ChatBackend, type ChatPiece } from "./types.js";
@@ -38,18 +38,72 @@ export function localBackend(ollamaHost: string, model: string): ChatBackend {
 export function networkBackend(deps: NetworkDeps, target: { model: string; computeClass?: string } & NetworkTarget): ChatBackend {
   return async function* (req, signal) {
     try {
-      for await (const p of streamNetworkCompletion(deps, { ...target, computeClass: target.computeClass ?? "any", messages: req.messages, tools: req.tools, maxTokens: req.maxTokens, temperature: req.temperature }, signal)) {
+      const routing = target.model === "auto" ? { routing: target.routing ?? req.hints } : {};
+      for await (const p of streamNetworkCompletion(deps, { ...target, ...routing, computeClass: target.computeClass ?? "any", messages: req.messages, tools: req.tools, maxTokens: req.maxTokens, temperature: req.temperature }, signal)) {
         if (p.delta) yield { delta: p.delta };
         if (p.toolCalls?.length) yield { toolCalls: p.toolCalls };
         if (p.done) {
           if (p.error) throw new ChatBackendError(`The machine running ${target.model} reported: ${p.error}`, 502);
-          yield { done: true, ...(p.creditsSpent !== undefined ? { cSatsSpent: p.creditsSpent } : {}), ...(p.promptTokens !== undefined ? { promptTokens: p.promptTokens } : {}), ...(p.outputTokens !== undefined ? { outputTokens: p.outputTokens } : {}) };
+          yield { done: true, ...(p.routed ? { where: p.routed } : {}), ...(p.creditsSpent !== undefined ? { cSatsSpent: p.creditsSpent } : {}), ...(p.promptTokens !== undefined ? { promptTokens: p.promptTokens } : {}), ...(p.outputTokens !== undefined ? { outputTokens: p.outputTokens } : {}) };
         }
       }
     } catch (err) {
       if (err instanceof ChatBackendError) throw err;
+      if (err instanceof RouteElsewhereError) throw new RouteElsewhere(err.message, err.url);
+      if (err instanceof AutoUnsupportedError) throw new AutoUnsupported(err.message);
       if (err instanceof NetworkInferenceError) throw new ChatBackendError(err.message, err.status, err.retryAfterSec);
       throw new ChatBackendError((err as Error).message, 502);
+    }
+  };
+}
+
+/** model "auto" on the coordinator: the best fit is on another coordinator (`url`). */
+export class RouteElsewhere extends ChatBackendError {
+  constructor(message: string, readonly url: string) {
+    super(message, 409);
+  }
+}
+
+/** model "auto" reached a coordinator that does not route it (older build). */
+export class AutoUnsupported extends ChatBackendError {
+  constructor(message: string) {
+    super(message, 404);
+  }
+}
+
+/**
+ * Hosted "auto" with network best-fit routing (src/swarm/coordinator/routing.ts): the coordinator
+ * picks the model, class and agent for each request from the job and the live network.
+ *
+ * - Free places come first, as before: when the client-side plan's first route is a reservation
+ *   you hold or your own machines (`useClientSide`), `clientSide` runs it.
+ * - Otherwise the request goes to `pick()`'s coordinator as model "auto" (with the client's
+ *   hints). When it answers that a peer is the best fit, the request goes there once (only to a
+ *   coordinator `allowed` names), without a further redirect; a peer that is not allowed is not
+ *   followed and the first coordinator places it on its own agents.
+ * - An older coordinator that does not route "auto" falls back to `clientSide`.
+ */
+export function coordinatorAutoBackend(opts: {
+  useClientSide: (req: Parameters<ChatBackend>[0]) => Promise<boolean>;
+  clientSide: ChatBackend;
+  pick: () => Promise<string | null>;
+  allowed: (url: string) => boolean | Promise<boolean>;
+  run: (url: string, routeRedirect: boolean) => ChatBackend;
+}): ChatBackend {
+  return async function* (req, signal) {
+    if (await opts.useClientSide(req).catch(() => false)) return yield* opts.clientSide(req, signal);
+    const url = await opts.pick().catch(() => null);
+    if (!url) return yield* opts.clientSide(req, signal);
+    try {
+      return yield* opts.run(url, true)(req, signal);
+    } catch (err) {
+      if (err instanceof RouteElsewhere) {
+        const next = err.url.replace(/\/+$/, "");
+        const follow = next !== url && (await Promise.resolve(opts.allowed(next)).catch(() => false));
+        return yield* opts.run(follow ? next : url, false)(req, signal);
+      }
+      if (err instanceof AutoUnsupported) return yield* opts.clientSide(req, signal);
+      throw err;
     }
   };
 }

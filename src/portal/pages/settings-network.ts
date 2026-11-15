@@ -154,6 +154,14 @@ export function networkPageContent(): string {
         </div>
       </div>
       <div class="net-card">
+        <h3>Routing decisions</h3>
+        <div class="hint muted">Requests sent with model "auto": the job and its complexity, what best-fit routing chose and why, the score breakdown (quality · latency · price · reliability), and the estimate against what happened.</div>
+        <div class="net-table-wrap">
+          <table><thead><tr><th>When</th><th>Job</th><th>Complexity</th><th>Chosen</th><th>Score (Q · L · P · R)</th><th class="num">Est. wait / TTFT / total</th><th class="num">Actual TTFT / total</th><th class="num">Est. / actual cSats</th><th>Why</th></tr></thead><tbody id="routingBody"></tbody></table>
+        </div>
+        <div class="muted" id="routingWeights"></div>
+      </div>
+      <div class="net-card">
         <h3>Gaps</h3>
         <div class="net-gaps">
           <div class="net-gap"><h4>Requested with no capacity (1 h)</h4><ul id="gapMissing"></ul></div>
@@ -358,6 +366,32 @@ export function networkPageScript(): string {
       }
       if (!data.models.length) { const tr = el("tr"); tr.appendChild(el("td", { colspan: "8" }, "No models reported or requested.")); body.appendChild(tr); }
     }
+    function renderRouting() {
+      const body = $("routingBody"); body.textContent = "";
+      const r = data.routing || { decisions: [] };
+      const two = (n) => (n === null || n === undefined ? "-" : Number(n).toFixed(2));
+      for (const d of r.decisions || []) {
+        const tr = el("tr");
+        tr.appendChild(el("td", {}, ago(d.atMs)));
+        tr.appendChild(el("td", {}, String(d.job || "-").replace("_", " ") + (d.jobInferred ? "" : " (sent)") + (d.quality && d.quality !== "balanced" ? " · " + d.quality : "")));
+        const cx = d.complexity || {};
+        const sig = (cx.signals || []).filter((s) => s.contribution > 0).slice(0, 3).map((s) => s.detail).join(", ");
+        tr.appendChild(el("td", { title: (cx.signals || []).map((s) => s.name + " " + two(s.value) + " (" + (s.contribution >= 0 ? "+" : "") + two(s.contribution) + ")").join("\\n") }, String(cx.level || "-").replace("_", " ") + " " + two(cx.score) + (sig ? " · " + sig : "") + (cx.hinted !== undefined ? " · hint" : "")));
+        const actual = d.actual || {};
+        tr.appendChild(el("td", { class: "mono" }, (d.model || "-") + " @ " + (d.computeClass || "-") + (d.agent ? " · " + d.agent : "") + (actual.agent && actual.ranOnPreferred === false ? " (ran on " + actual.agent + ")" : "")));
+        const p = d.parts || {};
+        tr.appendChild(el("td", { class: "mono" }, two(d.score) + " = " + [p.quality, p.latency, p.price, p.reliability].map(two).join(" · ")));
+        const e = d.estimate || {};
+        tr.appendChild(el("td", { class: "num" }, fmtMs(e.waitMs) + " / " + fmtMs(e.ttftMs) + " / " + fmtMs(e.totalMs)));
+        tr.appendChild(el("td", { class: "num" }, fmtMs(actual.ttftMs) + " / " + fmtMs(actual.totalMs) + (actual.ok === false ? " · failed" : "")));
+        tr.appendChild(el("td", { class: "num" }, (e.cSats === undefined ? "-" : String(e.cSats)) + " / " + (actual.cSats === undefined ? "-" : String(actual.cSats))));
+        tr.appendChild(el("td", {}, String(d.reason || "") + (d.affinity && d.affinity.status === "broken" ? " · affinity broken: " + d.affinity.reason : "")));
+        body.appendChild(tr);
+      }
+      if (!(r.decisions || []).length) { const tr = el("tr"); tr.appendChild(el("td", { colspan: "9" }, 'No model "auto" requests yet.')); body.appendChild(tr); }
+      const w = r.config && r.config.weights;
+      setText("routingWeights", w ? "Base weights: quality " + w.quality + " · latency " + w.latency + " · price " + w.price + " · reliability " + w.reliability + " · complexity shift " + r.config.complexityShift + " · preference " + r.config.preferMs + " ms" : "");
+    }
     function list(id, items, empty) {
       const ul = $(id); ul.textContent = "";
       for (const [label, n] of items) { const li = el("li"); li.appendChild(el("span", {}, label)); li.appendChild(el("span", { class: "n" }, n)); ul.appendChild(li); }
@@ -377,7 +411,7 @@ export function networkPageScript(): string {
     function render() {
       $("netError").classList.add("hidden");
       $("netBody").classList.remove("hidden");
-      renderKpis(); renderCoordinators(); renderAgents(); renderModels(); renderGaps(); drawCharts();
+      renderKpis(); renderCoordinators(); renderAgents(); renderModels(); renderRouting(); renderGaps(); drawCharts();
       const down = data.coordinators.filter((c) => !c.ok).length;
       setText("netUpdated", "Updated " + new Date(data.generatedAtMs).toLocaleTimeString() + " · every " + (REFRESH_MS / 1000) + " s" + (down ? " · " + down + " coordinator(s) not answering" : ""));
     }

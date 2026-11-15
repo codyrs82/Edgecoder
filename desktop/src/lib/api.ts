@@ -1691,6 +1691,8 @@ export interface UsageRecord {
   costMsat: number;
   promptTokens?: number;
   outputTokens?: number;
+  /** model "auto": "routed to <model> on <class> because <reason>". */
+  routing?: string;
 }
 export interface UsageSlice { key: string; requests: number; cSats: number; seconds: number; promptTokens: number; outputTokens: number }
 export interface UsageSummary {

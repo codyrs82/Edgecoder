@@ -1,6 +1,6 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { mergeNetworkSnapshots, mergeSeries, registerNetworkAdminRoutes, type OwnerDirectory } from "../../src/portal/routes/network-admin.js";
+import { mergeNetworkSnapshots, mergeRoutingDecisions, mergeSeries, registerNetworkAdminRoutes, type OwnerDirectory } from "../../src/portal/routes/network-admin.js";
 import { cannedSnapshots } from "./fixtures/network-snapshots.js";
 
 /** Settings > Network's API: system admins only; every coordinator asked with the admin token, merged, joined to emails. */
@@ -119,6 +119,21 @@ describe("portal network admin API", () => {
     expect(r.coordinators).toEqual([expect.objectContaining({ ok: true, peerId: "coord-us" }), { url: "http://127.0.0.1:1", ok: false, error: "coordinator_unreachable", status: null }]);
     expect(r.gaps.unreachableCoordinators).toEqual(["http://127.0.0.1:1"]);
     expect(r.kpis.agentsOnline).toBe(3);
+  });
+
+  it("merges routing decisions from every coordinator, newest first, marked with where they were made", () => {
+    const { us, eu } = cannedSnapshots(1_000_000);
+    us.routing = { decisions: [{ atMs: 10, model: "qwen3-coder:30b", job: "agentic" }, { atMs: 30, model: "qwen2.5-coder:7b", job: "chat" }], config: { weights: { quality: 0.4 } } };
+    eu.routing = { decisions: [{ atMs: 20, model: "qwen2.5-coder:14b", job: "code_edit" }] };
+    const d = mergeRoutingDecisions([{ url: "https://us.example", snapshot: us }, { url: "https://eu.example", snapshot: eu }]);
+    expect(d.map((x) => [x.atMs, x.coordinator])).toEqual([[30, "us.example"], [20, "eu.example"], [10, "us.example"]]);
+    const r = mergeNetworkSnapshots([{ url: "https://us.example", ok: true, snapshot: us }, { url: "https://eu.example", ok: true, snapshot: eu }], { nodeOwners: new Map(), userEmails: new Map() }, "1h");
+    expect(r.routing.decisions).toHaveLength(3);
+    expect(r.routing.config).toEqual({ weights: { quality: 0.4 } });
+    // Older coordinators send no routing: nothing, not an error.
+    delete us.routing;
+    delete eu.routing;
+    expect(mergeRoutingDecisions([{ url: "https://us.example", snapshot: us }])).toEqual([]);
   });
 
   it("a wrong admin token on the coordinator shows as admin_token_rejected", async () => {

@@ -185,3 +185,20 @@ describe("parseLocalWorld (a peer coordinator's answer)", () => {
     expect(parseLocalWorld("nope")).toBeNull();
   });
 });
+
+describe("routing facts (perf) between coordinators", () => {
+  it("a peer's perf is parsed field by field, and never reaches a public answer", () => {
+    const w = world("coord-eu", "https://eu.example", [facts("gpu-box")]);
+    const perf = { contextWindow: 32_768, tokensPerSec: 40.5, reliability: 0.97, verified: true, freeSlots: 1, failRate: 0.05, tierWeight: 2 };
+    const raw = JSON.parse(JSON.stringify({ ...w, agents: w.agents.map((a) => ({ ...a, perf })) }));
+    const parsed = parseLocalWorld(raw)!;
+    expect(parsed.agents[0].perf).toEqual(perf);
+    // Malformed fields are dropped to null, not passed on.
+    const bad = parseLocalWorld({ ...raw, agents: raw.agents.map((a: object) => ({ ...a, perf: { contextWindow: "big", tokensPerSec: -1, reliability: 3, verified: "yes", freeSlots: 1e9, failRate: null } })) })!;
+    expect(bad.agents[0].perf).toEqual({ contextWindow: null, tokensPerSec: null, reliability: null, verified: false, freeSlots: 0, failRate: null, tierWeight: 1 });
+    expect(parseLocalWorld({ ...raw, agents: raw.agents.map(({ perf: _p, ...a }: { perf: unknown }) => a) })!.agents[0].perf).toBeUndefined();
+    const pub = toPublicWorld(world("coord-us", "https://us.example", []), [{ url: "https://eu.example", id: "coord-eu", world: parsed, rttMs: 80 }], null, NOW);
+    expect(pub.agents).toHaveLength(1);
+    expect("perf" in pub.agents[0]).toBe(false);
+  });
+});

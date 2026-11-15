@@ -32,6 +32,7 @@ import { parsePeerUrlPins } from "../../../mesh/peer-trust.js";
 import { routableModels } from "../../model-catalog.js";
 import { meshRtt } from "./mesh.js";
 import { accountsFor } from "./admin-network.js";
+import { agentPerf, setPeerWorldSource } from "../routing.js";
 import {
   WORLD_AGENT_TTL_MS,
   WORLD_MAX_COORDINATORS,
@@ -115,7 +116,7 @@ export async function buildLocalWorld(nowMs = Date.now()): Promise<LocalWorld> {
   const owners = await accountsFor(entries.map(([id]) => id), nowMs);
   const agents = entries.map(([agentId, cap]) => {
     const hw = effectiveHardware(agentId, cap);
-    return localWorldAgent(maskKey, identity.peerId, {
+    const agent = localWorldAgent(maskKey, identity.peerId, {
       agentId,
       ownerAccountId: owners.get(agentId) ?? null,
       os: cap.os,
@@ -133,6 +134,8 @@ export async function buildLocalWorld(nowMs = Date.now()): Promise<LocalWorld> {
       lastSeenMs: cap.lastSeenMs,
       rttMs: meshRtt.rttMs(agentId, nowMs)
     });
+    // For peers' best-fit routing (stripped from every public answer).
+    return { ...agent, perf: agentPerf(agentId, claims) };
   });
   const region = regionInfo(coordinatorRegion(), null);
   return {
@@ -233,7 +236,20 @@ export const worldRateLimiter = new WorldRateLimiter();
 
 const portalQuery = z.object({ accountId: z.string().min(1).max(128).optional() });
 
+/** Peers' views for best-fit routing (cached like the world view's), with the link round trip. */
+async function peerWorldsForRouting(nowMs: number): Promise<Array<{ world: LocalWorld; linkRttMs: number | null }>> {
+  const peers = peerCoordinators();
+  const views = await Promise.all(peers.map((p) => fetchPeerWorld(p, nowMs)));
+  const out: Array<{ world: LocalWorld; linkRttMs: number | null }> = [];
+  views.forEach((world, i) => {
+    if (world) out.push({ world, linkRttMs: linkRtt(peers[i].peerId, nowMs) });
+  });
+  return out;
+}
+
 export function registerNetworkWorldRoutes(app: CoordinatorApp): void {
+  setPeerWorldSource(peerWorldsForRouting, (agentId) => meshRtt.rttMs(agentId, Date.now()));
+
   app.get("/network/world/local", async (req, reply) => {
     if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
     reply.header("cache-control", "no-store");

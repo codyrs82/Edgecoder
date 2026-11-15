@@ -11,6 +11,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { writeSseHead } from "../common/sse.js";
 import { anthropicResponse, anthropicStream, countTokens, fromAnthropic } from "./anthropic.js";
 import { fromOpenAi, openAiResponse, openAiStream } from "./openai.js";
+import { routingHintsFrom } from "./job-descriptor.js";
 import { ChatBackendError, type ChatBackend, type ChatPiece } from "./types.js";
 
 export interface CompatRoutes<Ctx> {
@@ -71,6 +72,8 @@ export const STREAM_KEEPALIVE_MS = 15_000;
 export async function respondWith(req: FastifyRequest, reply: FastifyReply, format: Format, backend: ChatBackend, model: string, opts: { keepaliveMs?: number } = {}) {
   const body = (req.body ?? {}) as { stream?: boolean };
   const chat = format === "anthropic" ? fromAnthropic(body as never) : fromOpenAi(body as never);
+  const hints = routingHintsFrom(body, req.headers as Record<string, unknown>);
+  if (Object.keys(hints).length) chat.hints = hints;
   const abort = new AbortController();
   // The client went away when the response closes before it ended (the request's own "close"
   // fires as soon as its body has been read, which aborted fast requests).

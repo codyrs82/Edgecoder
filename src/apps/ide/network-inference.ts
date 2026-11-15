@@ -11,6 +11,7 @@
 import { randomUUID } from "node:crypto";
 import { request } from "undici";
 import type { ChatMessage, ToolCall, ToolSpec } from "../../inference-api/types.js";
+import type { RoutingHints } from "../../inference-api/job-descriptor.js";
 
 export const NETWORK_PREFIX = "network/";
 const CLASSES = new Set(["cpu", "apple", "gpu", "gpu.dc"]);
@@ -91,6 +92,8 @@ export interface CompletionPiece {
   creditsSpent?: number;
   promptTokens?: number;
   outputTokens?: number;
+  /** model "auto": "routed to <model> on <class> because <reason>" (the coordinator's best-fit choice). */
+  routed?: string;
 }
 
 /** Where a network chat runs: any agent (billed per second), your own machines, or a lease you hold. */
@@ -101,11 +104,29 @@ export interface NetworkTarget {
   maxCSatsPerSecond?: number;
   /** What sent it, for the usage page. */
   source?: string;
+  /** model "auto": the client's hints for best-fit routing (job-descriptor.ts). */
+  routing?: RoutingHints;
+  /** model "auto": the coordinator may answer route_elsewhere when a peer is the best fit. */
+  routeRedirect?: boolean;
 }
 
 export class NetworkInferenceError extends Error {
   constructor(message: string, readonly status: number, readonly retryAfterSec?: number) {
     super(message);
+  }
+}
+
+/** model "auto": the coordinator's best fit is on a peer coordinator; resubmit there. */
+export class RouteElsewhereError extends NetworkInferenceError {
+  constructor(readonly url: string, readonly routing: Record<string, unknown> | undefined) {
+    super(`The best fit for this request is on another coordinator (${url}).`, 409);
+  }
+}
+
+/** model "auto" sent to a coordinator that does not route it (an older build): plan on this side instead. */
+export class AutoUnsupportedError extends NetworkInferenceError {
+  constructor() {
+    super("This coordinator does not route model auto.", 404);
   }
 }
 
@@ -146,9 +167,17 @@ export async function* streamNetworkCompletion(
     ...(req.maxCSatsPerSecond ? { maxBidMsatPerCredit: Math.round(req.maxCSatsPerSecond * 1000) } : {}),
     ...(req.maxTokens ? { maxTokens: Math.min(32_768, req.maxTokens) } : {}),
     ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+    ...(req.model === "auto" && req.routing && Object.keys(req.routing).length ? { routing: req.routing } : {}),
+    ...(req.model === "auto" && req.routeRedirect ? { routeRedirect: true } : {}),
   }, signal);
   if (sub.status !== 200) {
     const err = String(sub.json.error ?? `HTTP ${sub.status}`);
+    if (req.model === "auto") {
+      if (err === "route_elsewhere" && typeof sub.json.coordinatorUrl === "string") throw new RouteElsewhereError(sub.json.coordinatorUrl, sub.json.routing as Record<string, unknown> | undefined);
+      // An older coordinator looks for a model called "auto"; one that routes says no_route_fits.
+      if (err === "no_agent_has_model") throw new AutoUnsupportedError();
+      if (err === "no_route_fits") throw new NetworkInferenceError(`No model on the network fits this request: ${String(sub.json.detail ?? "nothing is available")}.`, 404);
+    }
     const msg =
       err === "no_agent_has_model" ? `No machine on the network has ${req.model} right now.` :
       err === "no_own_agent_has_model" ? `None of your own machines has ${req.model} (or none is online).` :
@@ -161,6 +190,7 @@ export async function* streamNetworkCompletion(
     throw new NetworkInferenceError(msg, sub.status === 402 ? 402 : sub.status === 409 ? 404 : 502);
   }
   const subtaskId = String(sub.json.subtaskId);
+  const routed = typeof (sub.json.routing as { line?: unknown } | undefined)?.line === "string" ? String((sub.json.routing as { line: string }).line) : undefined;
   let after = 0;
   const deadline = Date.now() + 6 * 60_000;
   while (Date.now() < deadline) {
@@ -173,7 +203,7 @@ export async function* streamNetworkCompletion(
     after = Number(r.json.next ?? after + chunks.length);
     if (r.json.done) {
       if (Array.isArray(r.json.toolCalls) && r.json.toolCalls.length) yield { toolCalls: r.json.toolCalls as ToolCall[] };
-      yield { done: true, ...(r.json.error ? { error: String(r.json.error) } : {}), ...(typeof r.json.creditsSpent === "number" ? { creditsSpent: r.json.creditsSpent } : {}), ...(typeof r.json.promptTokens === "number" ? { promptTokens: r.json.promptTokens } : {}), ...(typeof r.json.outputTokens === "number" ? { outputTokens: r.json.outputTokens } : {}) };
+      yield { done: true, ...(r.json.error ? { error: String(r.json.error) } : {}), ...(typeof r.json.creditsSpent === "number" ? { creditsSpent: r.json.creditsSpent } : {}), ...(typeof r.json.promptTokens === "number" ? { promptTokens: r.json.promptTokens } : {}), ...(typeof r.json.outputTokens === "number" ? { outputTokens: r.json.outputTokens } : {}), ...(routed ? { routed } : {}) };
       return;
     }
   }

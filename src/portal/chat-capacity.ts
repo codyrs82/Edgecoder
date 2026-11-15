@@ -188,6 +188,14 @@ export interface ChatCapacityDirectory {
    * in (what /v1/models may advertise as network/<model>@<class>). Empty when none reports.
    */
   networkModels(): Promise<NetworkModelSummary[]>;
+  /**
+   * model "auto": the coordinator to ask first (it routes across its peers and may send the call on):
+   * the reachable one with the most free model slots over all models, configured order breaking
+   * ties; null when none is known.
+   */
+  pickAuto(): Promise<string | null>;
+  /** A vetted coordinator URL (a route_elsewhere answer is followed only to one of these). */
+  isKnown(url: string): Promise<boolean>;
 }
 
 interface CacheEntry {
@@ -339,6 +347,22 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
     },
     markFailed(url) {
       failedAt.set(url.replace(/\/+$/, ""), now());
+    },
+    async pickAuto() {
+      const urls = await knownUrls();
+      if (urls.length === 0) return null;
+      const reports = await Promise.all(urls.map((u) => reportOf(u, "network", LOAD_REPORT_MAX_AGE_MS)));
+      let best: { url: string; room: number } | null = null;
+      for (let i = 0; i < urls.length; i++) {
+        const r = reports[i];
+        if (!r.reachable || recentlyFailed(urls[i]) || !r.agentModels?.length) continue;
+        const room = Object.values(r.modelLoad ?? {}).reduce((n, l) => n + (l.free ?? l.idle) - l.waiting, 0);
+        if (!best || room > best.room) best = { url: urls[i], room };
+      }
+      return best?.url ?? urls[0];
+    },
+    async isKnown(url) {
+      return (await knownUrls()).includes(url.trim().replace(/\/+$/, ""));
     },
     async networkModels() {
       const urls = await knownUrls();

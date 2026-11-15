@@ -47,6 +47,19 @@ export interface LocalWorldAgent {
   slotsUsed: number;
   coordinatorId: string;
   rttMs: number | null;
+  /** Internal (coordinator to coordinator, for best-fit routing): what scoring the agent needs. */
+  perf?: WorldAgentPerf;
+}
+
+/** An agent's routing facts (src/swarm/coordinator/routing.ts agentPerf). */
+export interface WorldAgentPerf {
+  contextWindow: number | null;
+  tokensPerSec: number | null;
+  reliability: number | null;
+  verified: boolean;
+  freeSlots: number;
+  failRate: number | null;
+  tierWeight: number;
 }
 
 export interface WorldCoordinator {
@@ -78,7 +91,7 @@ export interface LocalWorld {
   generatedAtMs: number;
 }
 
-export type PublicWorldAgent = Omit<LocalWorldAgent, "agentId" | "ownerTag" | "lastSeenMs"> & { mine: boolean; name?: string };
+export type PublicWorldAgent = Omit<LocalWorldAgent, "agentId" | "ownerTag" | "lastSeenMs" | "perf"> & { mine: boolean; name?: string };
 
 export interface PublicWorld {
   generatedAtMs: number;
@@ -282,7 +295,7 @@ export function toPublicWorld(
   );
   const kept = all.slice(0, WORLD_MAX_AGENTS);
   const agents: PublicWorldAgent[] = kept.map(({ a, mine }) => {
-    const { agentId, ownerTag: _tag, lastSeenMs: _seen, ...rest } = a;
+    const { agentId, ownerTag: _tag, lastSeenMs: _seen, perf: _perf, ...rest } = a;
     return mine ? { ...rest, mine: true, name: agentId } : { ...rest, mine: false };
   });
 
@@ -333,6 +346,24 @@ export function toPublicWorld(
  * A peer coordinator's /network/world/local answer, checked field by field: anything malformed is
  * dropped rather than passed on to clients. Returns null when the shape is not a LocalWorld.
  */
+/** A peer's `perf` for one agent, checked field by field (absent when malformed). */
+function parsePerf(raw: unknown): { perf?: WorldAgentPerf } {
+  if (!raw || typeof raw !== "object") return {};
+  const p = raw as Record<string, unknown>;
+  const num = (v: unknown, max: number): number | null => (typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= max ? v : null);
+  return {
+    perf: {
+      contextWindow: num(p.contextWindow, 10_000_000),
+      tokensPerSec: num(p.tokensPerSec, 10_000),
+      reliability: num(p.reliability, 1),
+      verified: p.verified === true,
+      freeSlots: Math.floor(num(p.freeSlots, 64) ?? 0),
+      failRate: num(p.failRate, 1),
+      tierWeight: num(p.tierWeight, 1_000) ?? 1,
+    },
+  };
+}
+
 export function parseLocalWorld(raw: unknown): LocalWorld | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
@@ -384,7 +415,8 @@ export function parseLocalWorld(raw: unknown): LocalWorld | null {
       slots,
       slotsUsed: Math.max(0, Math.min(slots, Math.floor(num(a.slotsUsed) ?? 0))),
       coordinatorId: coordinator.id,
-      rttMs: num(a.rttMs)
+      rttMs: num(a.rttMs),
+      ...parsePerf(a.perf)
     });
   }
   return { coordinator, links, agents, generatedAtMs: num(r.generatedAtMs) ?? 0 };

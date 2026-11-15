@@ -48,6 +48,19 @@ export interface CoordinatorSnapshot {
   models: Array<{ model: string; agents: number; idleAgents: number; slots: number; freeSlots: number; waiting: number; callsWindow: number; completedWindow: number; failedWindow: number; calls24h: number; noAgentHasModel24h: number; noCapacity24h: number }>;
   gaps: { windowMs: number; missingModels: Array<{ model: string; noAgentHasModel: number; noCapacity: number }>; saturatedModels: unknown[]; staleAgents: unknown[] };
   series: { range: SeriesRange; bucketMs: number; points: Sample[] };
+  /** Best-fit routing (model "auto"; newer coordinators): recent decisions, newest first. */
+  routing?: { decisions?: Array<Record<string, unknown> & { atMs: number }>; config?: unknown };
+}
+
+/** Routing decisions across coordinators, newest first, each marked with the coordinator that made it. */
+export function mergeRoutingDecisions(snapshots: Array<{ url: string; snapshot: CoordinatorSnapshot }>, limit = 60): Array<Record<string, unknown> & { atMs: number; coordinator: string }> {
+  const all: Array<Record<string, unknown> & { atMs: number; coordinator: string }> = [];
+  for (const r of snapshots) {
+    for (const d of r.snapshot.routing?.decisions ?? []) {
+      if (d && typeof d.atMs === "number") all.push({ ...d, coordinator: r.url.replace(/^https?:\/\//, "") });
+    }
+  }
+  return all.sort((a, b) => b.atMs - a.atMs).slice(0, limit);
 }
 
 export type CoordinatorResult = { url: string; ok: true; snapshot: CoordinatorSnapshot } | { url: string; ok: false; error: string; status?: number };
@@ -196,7 +209,8 @@ export function mergeNetworkSnapshots(results: CoordinatorResult[], owners: Owne
       unreachableCoordinators: results.filter((r) => !r.ok).map((r) => r.url),
       regions: [...byCountry.entries()].map(([country, agents]) => ({ country, agents })).sort((a, b) => b.agents - a.agents)
     },
-    series: { range, bucketMs: snapshots[0]?.snapshot.series.bucketMs ?? null, points: mergeSeries(snapshots.map((r) => r.snapshot.series.points ?? [])) }
+    series: { range, bucketMs: snapshots[0]?.snapshot.series.bucketMs ?? null, points: mergeSeries(snapshots.map((r) => r.snapshot.series.points ?? [])) },
+    routing: { decisions: mergeRoutingDecisions(snapshots), config: snapshots.find((r) => r.snapshot.routing?.config)?.snapshot.routing?.config ?? null }
   };
 }
 

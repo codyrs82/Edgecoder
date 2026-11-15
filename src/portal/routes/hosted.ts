@@ -26,8 +26,8 @@ import {
   parseNetworkModel,
   type NetworkDeps,
 } from "../../apps/ide/network-inference.js";
-import { autoBackend, networkBackend } from "../../inference-api/backends.js";
-import { AUTO_MODEL_ID, routeInputsFrom } from "../../inference-api/auto-route.js";
+import { autoBackend, coordinatorAutoBackend, networkBackend } from "../../inference-api/backends.js";
+import { AUTO_MODEL_ID, planRoutes, routeInputsFrom, sizeWorkload } from "../../inference-api/auto-route.js";
 import { apiKeyOf, registerCompatRoutes } from "../../inference-api/routes.js";
 import type { PortalStore } from "../store.js";
 import { withInvoiceQr } from "../invoice-qr.js";
@@ -109,11 +109,14 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
       // "auto": the cheapest place that fits each request: a reservation you hold, your own machines (free), then the network.
       if (model === AUTO_MODEL_ID) {
         const d = networkFor(ctx.accountId);
-        const backend = autoBackend({
-          inputs: async () => {
-            const [ov, leases] = await Promise.all([computeOverview(d).catch(() => null), listReservations(d).then((r) => (r.status === 200 ? ((r.json.reservations as never[]) ?? []) : [])).catch(() => [])]);
-            return routeInputsFrom({ localModels: [], machines: ov?.account?.machines, networkModels: ov?.models, classes: ov?.classes, leases });
-          },
+        const inputs = async () => {
+          const [ov, leases] = await Promise.all([computeOverview(d).catch(() => null), listReservations(d).then((r) => (r.status === 200 ? ((r.json.reservations as never[]) ?? []) : [])).catch(() => [])]);
+          return routeInputsFrom({ localModels: [], machines: ov?.account?.machines, networkModels: ov?.models, classes: ov?.classes, leases });
+        };
+        // The client-side plan: free places (a lease you hold, your own machines), and the fallback
+        // for coordinators that do not route "auto" themselves.
+        const clientSide = autoBackend({
+          inputs,
           run: (r) =>
             networkBackend(d, {
               model: r.model,
@@ -121,6 +124,18 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
               ...(r.placement === "mine" ? { target: "mine" as const } : {}),
               ...(r.placement === "reserved" ? { reservationId: r.reservationId } : {}),
             }),
+        });
+        // Network calls: the coordinator picks model, class and agent (best-fit routing).
+        const backend = coordinatorAutoBackend({
+          useClientSide: async (req) => {
+            const first = planRoutes(sizeWorkload(req), await inputs(), "auto")[0];
+            return !!first && first.placement !== "network";
+          },
+          clientSide,
+          pick: async () => (await capacity.pickAuto?.()) ?? null,
+          allowed: (url) => capacity.isKnown(url),
+          run: (url, routeRedirect) =>
+            networkBackend(portalNetworkDeps({ PORTAL_SERVICE_TOKEN: deps.PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, ctx.accountId), { model: AUTO_MODEL_ID, computeClass: "any", routeRedirect }),
         });
         return { backend, model: AUTO_MODEL_ID };
       }
