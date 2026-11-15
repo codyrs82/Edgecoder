@@ -194,9 +194,14 @@ Listeners on an agent install:
   below rely on it.
 - **Inference padding.** An agent can stream filler and report output tokens up to the reply size.
   The cost to the requester is bounded by the reserve. Inference is not verified.
-- **Hardware witness.** A single witness's cross-check mismatch demotes the subject to its base tier,
-  and the witness is never penalised. Proposed: require two agreeing witnesses before demoting, and
-  record witness disagreement.
+- **Hardware witness.** Fixed: one witness's cross-check mismatch no longer demotes. The prompt goes
+  to a second witness (not the subject or the first witness, nor their owner or IP). Only if it also
+  disagrees is the subject demoted to its base tier (`cross_check_mismatch`). If it agrees, the
+  subject is verified and the first witness's disagreement is counted on its record
+  (`witnessDisagreements`) and logged as `hardware_witness_disagreement`. No second witness, or one
+  that times out, settles unconfirmed at base tier, never invalid. Residual: two colluding witnesses
+  on separate accounts can still demote an honest agent, and a disagreeing witness is recorded but
+  not yet penalised.
 - **Sybil replicas.** Replicas exclude the executor's agent and account only. A second account can
   claim the replica and agree with a forged result.
 - **Reserved agents** are paid for time held. The work during a reservation is not checked.

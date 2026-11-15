@@ -93,7 +93,9 @@ export const marketOrders = new Map<string, MarketOrder>();
 export const hardwareVerifier = new HardwareVerifier({
   config: hardwareVerificationConfigFromEnv(),
   classes: rateOracleConfig.computeClasses,
-  persist: (r) => pgStore?.upsertHardwareVerification(r)
+  persist: (r) => pgStore?.upsertHardwareVerification(r),
+  // Second witness after the first one disagreed (one witness alone cannot demote).
+  pickWitness: (subjectId, model, exclude, nowMs) => pickBenchmarkWitness(subjectId, model, nowMs, exclude)
 });
 /** The class, tier and weight an agent is paid and matched at (its verified grant); undefined for an unknown agent. */
 export function effectiveHardware(agentId: string, cap?: { hardwareClass?: HardwareClassification }): HardwareClassification | undefined {
@@ -127,16 +129,17 @@ export function benchmarkModelFor(agentId: string): string | undefined {
 }
 /**
  * A second agent to run the same GPU challenge (cross-check): online, same model, not the subject's
- * owner or IP, preferring agents that are themselves cross-checked. Sybils across owners are the
- * residual risk; ongoing evidence and re-challenges with a fresh random witness bound it.
+ * owner or IP, preferring agents that are themselves cross-checked. `exclude` (e.g. the first
+ * witness, when a second one is needed) is skipped along with its owner and IP, so two witnesses
+ * are independent of each other as well as of the subject. Sybils across owners are the residual
+ * risk; ongoing evidence and re-challenges with a fresh random witness bound it.
  */
-export function pickBenchmarkWitness(subjectId: string, model: string, nowMs: number): string | undefined {
-  const subject = agentCapabilities.get(subjectId);
+export function pickBenchmarkWitness(subjectId: string, model: string, nowMs: number, exclude: string[] = []): string | undefined {
+  const others = [subjectId, ...exclude].map((id) => ({ id, cap: agentCapabilities.get(id) }));
   const candidates: Array<{ id: string; rank: number }> = [];
   for (const [id, cap] of agentCapabilities) {
-    if (id === subjectId || nowMs - cap.lastSeenMs > 2 * 60_000 || activeBlacklistRecord(id)) continue;
-    if (subject?.ownerEmail && cap.ownerEmail === subject.ownerEmail) continue;
-    if (subject?.sourceIp && cap.sourceIp === subject.sourceIp) continue;
+    if (nowMs - cap.lastSeenMs > 2 * 60_000 || activeBlacklistRecord(id)) continue;
+    if (others.some((o) => o.id === id || (o.cap?.ownerEmail && cap.ownerEmail === o.cap.ownerEmail) || (o.cap?.sourceIp && cap.sourceIp === o.cap.sourceIp))) continue;
     const rec = hardwareVerifier.get(id);
     if (!rec?.challengeKinds.includes("gpu") || benchmarkModelFor(id) !== model) continue;
     candidates.push({ id, rank: rec.measured?.crossChecked ? 2 : rec.status === "verified" ? 1 : 0 });

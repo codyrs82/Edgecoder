@@ -382,7 +382,7 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
     const benchmarkChallenge = hardwareVerifier.nextChallenge(body.agentId, {
       nowMs: now,
       model: benchmarkModelFor(body.agentId),
-      pickWitness: (model) => pickBenchmarkWitness(body.agentId, model, now)
+      pickWitness: (model, exclude) => pickBenchmarkWitness(body.agentId, model, now, exclude)
     });
     return reply.send({
       ok: true,
@@ -423,6 +423,18 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
         source: { type: "agent", id: subjectId },
         details: { reason: result.invalid, claimedTier: result.record?.claimed.tier, reportedBy: agentId },
         action: "grant_base_tier",
+        coordinatorId: identity.peerId
+      });
+    }
+    if (result.disagreeingWitness) {
+      // A second witness overruled this one's mismatch: recorded on its verification record
+      // (witnessDisagreements); repeated disagreement is the signal for a witness penalty.
+      securityLog.log({
+        level: securityLog.severity("hardware_witness_disagreement"),
+        event: "hardware_witness_disagreement",
+        source: { type: "agent", id: result.disagreeingWitness },
+        details: { subjectId, claimedTier: result.record?.claimed.tier, overruledBy: agentId, disagreements: hardwareVerifier.get(result.disagreeingWitness)?.witnessDisagreements },
+        action: "record_witness_disagreement",
         coordinatorId: identity.peerId
       });
     }
