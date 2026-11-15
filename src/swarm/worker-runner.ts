@@ -14,7 +14,7 @@ import { ensureSandboxImages, isDockerAvailable } from "../executor/docker-sandb
 import { runInferenceSubtask } from "./inference-runner.js";
 import { detectHardware, hardwareProfileFor, selectGpu, type Probe } from "../install/hardware.js";
 import { enforceSandboxPolicy, inferenceOnlyRejection, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
-import { isAgentNotRegisteredError, registerRefreshMsFromEnv, shouldRegister } from "./registration-policy.js";
+import { isAgentNotRegisteredError, parseRetryAfterMs, rateLimitWaitMs, registerRefreshMsFromEnv, shouldRegister } from "./registration-policy.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
 import { signMeshWsBind } from "../mesh/ws-auth.js";
 import { hashResultOutput, signReceiptAsAgent } from "../receipts/receipt.js";
@@ -607,6 +607,7 @@ async function post(
         const payloadText = rawText && rawText !== "{}" ? rawText : "<empty>";
         const err = new Error(`POST ${path} failed (${res.statusCode}): ${payloadText}`);
         (err as any).statusCode = res.statusCode;
+        if (res.statusCode === 429) (err as any).retryAfterMs = parseRetryAfterMs(res.headers["retry-after"]) ?? undefined;
         throw err;
       }
       return parsed;
@@ -619,6 +620,12 @@ async function post(
       // A refused response is not retried: the coordinator is re-verified first.
       if (error instanceof CoordinatorResponseRejectedError) break;
       if (attempt >= retries) break;
+      // 429: over the per-agent request rate. Wait what the coordinator asked, then try again.
+      const rateLimitWait = rateLimitWaitMs(error);
+      if (rateLimitWait !== null) {
+        await new Promise((r) => setTimeout(r, rateLimitWait));
+        continue;
+      }
       await new Promise((r) => setTimeout(r, 300 * (attempt + 1)));
     }
   }
@@ -1787,6 +1794,15 @@ async function loop(): Promise<void> {
         : 5000;
       await new Promise((r) => setTimeout(r, idleDelayMs));
     } catch (error) {
+      // 429: the coordinator is fine and knows us; we are only sending too fast. Back off for its
+      // Retry-After without counting a failure: failures lead to offline mode and re-registering,
+      // and registering on every refusal is what trips the registration-storm rule (BHV008).
+      const rateLimitWait = rateLimitWaitMs(error);
+      if (rateLimitWait !== null) {
+        console.warn(`[agent:${AGENT_ID}] coordinator rate limit hit; backing off ${rateLimitWait}ms`);
+        await new Promise((r) => setTimeout(r, rateLimitWait));
+        continue;
+      }
       consecutiveFailures++;
       console.error(`[agent:${AGENT_ID}] loop error (failures: ${consecutiveFailures}): ${String(error)}`);
       if (isAgentNotRegisteredError(error)) {

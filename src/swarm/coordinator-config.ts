@@ -151,6 +151,10 @@ export const coordinatorConfigSchema = z.object({
   // (~100/min), so the limit must sit well above that or healthy agents read as bad signatures.
   AGENT_RATE_LIMIT_MAX: envInt(300, { min: 0 }),
   AGENT_RATE_LIMIT_WINDOW_MS: envInt(60000, { min: 1 }),
+  // A network inference call no agent has claimed by then is cancelled, its reserve refunded in
+  // full, and the requester told 503 no_capacity: well under the 100 s a proxy in front of the
+  // portal (Cloudflare) waits for a response, so an overloaded call fails cleanly instead.
+  INFERENCE_CLAIM_TIMEOUT_MS: envInt(45_000, { min: 1_000, max: 600_000 }),
   // Signed requests per client address per window whose signature fails before the signer is proven
   // (bad signature, clock skew). Past it the address is refused until the window passes.
   PREAUTH_FAILURE_MAX_PER_IP: envInt(120, { min: 1 }),

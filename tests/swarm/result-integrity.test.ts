@@ -185,3 +185,13 @@ describe("/result integrity (#44)", () => {
     });
   });
 });
+
+describe("serverMeasuredDurationMs (BHV001's clock)", () => {
+  test("is claim to receipt, ignores what the agent reports, and treats an unknown claim time as slow", async () => {
+    const { serverMeasuredDurationMs } = await import("../../src/swarm/result-integrity.js");
+    const st = { id: "s", timeoutMs: 60_000 };
+    expect(serverMeasuredDurationMs({ subtask: st, claimedBy: "a", claimedAt: 1_000 }, 1_040)).toBe(40);
+    expect(serverMeasuredDurationMs({ subtask: st, claimedBy: "a" }, 1_040)).toBe(60_000);
+    expect(serverMeasuredDurationMs({ subtask: st, claimedBy: "a", claimedAt: 2_000 }, 1_000)).toBe(0);
+  });
+});

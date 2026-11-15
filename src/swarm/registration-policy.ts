@@ -37,3 +37,32 @@ export function isAgentNotRegisteredError(err: unknown): boolean {
   const e = err as { statusCode?: number; message?: string } | null;
   return e?.statusCode === 401 && typeof e.message === "string" && e.message.includes("agent_not_registered");
 }
+
+/** Longest a worker waits on one 429 before trying again (a bad Retry-After must not park it). */
+export const MAX_RATE_LIMIT_WAIT_MS = 60_000;
+/** Wait used when a 429 carries no usable Retry-After. */
+export const DEFAULT_RATE_LIMIT_WAIT_MS = 5_000;
+
+/** Retry-After (delta seconds or an HTTP date) in ms, or null when absent or unreadable. */
+export function parseRetryAfterMs(value: unknown, nowMs = Date.now()): number | null {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (typeof raw !== "string" && typeof raw !== "number") return null;
+  const text = String(raw).trim();
+  if (text === "") return null;
+  if (/^\d+(\.\d+)?$/.test(text)) return Math.round(Number(text) * 1000);
+  const at = Date.parse(text);
+  return Number.isFinite(at) ? Math.max(0, at - nowMs) : null;
+}
+
+/**
+ * A 429 from the coordinator: the agent is over its request rate. The answer is to wait the
+ * Retry-After and carry on, never to re-register (a 401-style reaction): registering again on
+ * every refusal is what trips the registration-storm rule (BHV008). Returns the wait in ms, or
+ * null when the error is not a rate limit.
+ */
+export function rateLimitWaitMs(err: unknown): number | null {
+  const e = err as { statusCode?: number; retryAfterMs?: number } | null;
+  if (e?.statusCode !== 429) return null;
+  const wait = typeof e.retryAfterMs === "number" && Number.isFinite(e.retryAfterMs) ? e.retryAfterMs : DEFAULT_RATE_LIMIT_WAIT_MS;
+  return Math.min(MAX_RATE_LIMIT_WAIT_MS, Math.max(1_000, wait));
+}

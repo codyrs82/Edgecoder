@@ -12,6 +12,8 @@ import { queue, mesh } from "../context.js";
 import { agentCapabilities, behaviorTracker, anomalyDetector, autoBlacklister } from "../agent-state.js";
 import { authorizeAdmin } from "../auth.js";
 import { payoutPause, payoutLimits, payoutReconcileConfig, payoutReconciler } from "../payouts.js";
+import { revenueReport, withdrawRevenue } from "../revenue.js";
+import { payoutRefusalStatus } from "../../../economy/revenue.js";
 
 function adminDashboardHtml(status: { queued: number; agents: number; results: number }, agentList: Array<{ agentId: string; os?: string; provider?: string; maxConcurrentTasks?: number; modelCatalog?: string[] }>, nonce: string): string {
   const agentRows = agentList.map((a) =>
@@ -177,6 +179,22 @@ export function registerAdminRoutes(app: CoordinatorApp): void {
   admin.post("/admin/payouts/reconciliation/run", async (req, reply) => {
     if (!authorizeAdmin(req, reply)) return;
     return payoutReconciler.run();
+  });
+
+  // EdgeCoder's revenue: the network fee pool (network:fee_pool). Withdrawals go through
+  // PayoutService like any account's (caps, pause, earnings hold, reconciliation, ledger record).
+  admin.get("/admin/revenue", async (req, reply) => {
+    if (!authorizeAdmin(req, reply)) return;
+    return revenueReport();
+  });
+  admin.post("/admin/revenue/withdraw", async (req, reply) => {
+    if (!authorizeAdmin(req, reply)) return;
+    const parsed = z.object({ bolt11: z.string().min(20).max(4096), actor: z.string().max(128).optional() }).safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ ok: false, code: "invalid_request", detail: parsed.error.issues.map((i) => i.message).join("; ") });
+    const actor = `admin:${parsed.data.actor ?? "token"}@${req.ip}`;
+    const result = await withdrawRevenue(parsed.data.bolt11.trim(), actor, req.ip);
+    if (!result.ok) return reply.code(payoutRefusalStatus(result.code)).send(result);
+    return result;
   });
 
   admin.get("/admin/agents/:agentId/behavior", async (req, reply) => {

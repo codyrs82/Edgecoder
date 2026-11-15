@@ -38,7 +38,9 @@ export class AutoBlacklister {
     this.strikeThreshold = strikeThreshold;
   }
 
-  processAnomalies(agentId: string, anomalies: AnomalyEvent[], nowMs: number = Date.now()): BlacklistAction | null {
+  processAnomalies(agentId: string, events: AnomalyEvent[], nowMs: number = Date.now()): BlacklistAction | null {
+    // Flags (e.g. BHV001's first stage) are acted on elsewhere and are never strikes.
+    const anomalies = events.filter(a => a.enforcement !== "flag");
     if (anomalies.length === 0) return null;
 
     // CRITICAL severity → instant blacklist

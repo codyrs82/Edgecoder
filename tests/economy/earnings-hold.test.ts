@@ -154,6 +154,11 @@ describe.skipIf(!PG_URL)("earnings hold (Postgres)", () => {
     await holdScenario(db.a, async (rows) => db.a.recordCreditTransactions(rows), acct);
   });
 
+  it("EdgeCoder's revenue (the fee pool, withdrawn via /admin/revenue/withdraw) is held like any earnings", async () => {
+    // Capacity comes from the purchase recorded by the previous test (same database).
+    await holdScenario(db.a, async (rows) => db.a.recordCreditTransactions(rows), "network:fee_pool");
+  });
+
   it("earnedMsat and earnings use the same maturity rule; reservation rechecks it in the transaction", async () => {
     const acct = `hold-${randomUUID()}`;
     await db.a.recordCreditTransactions([earn(acct, 10_000, T0 - HOLD), earn(acct, 5_000, T0 - HOLD + 1)]);

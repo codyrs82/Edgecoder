@@ -6,7 +6,44 @@ import { createHash } from "node:crypto";
 export interface TaskResultInput {
   ok: boolean;
   output: string;
+  /**
+   * The coordinator's own measurement, claim to result receipt (serverMeasuredDurationMs in
+   * src/swarm/result-integrity.ts). Never the duration the agent reports: an honest agent reports
+   * only its sandbox run (fast), and a cheater can report whatever it likes.
+   */
   durationMs: number;
+  /** Subtask kind ("micro_loop" | "single_step" | "inference"); sets the "fast" threshold. */
+  kind?: string;
+}
+
+/**
+ * BHV001: a successful result received sooner than this after its claim (server-measured) is
+ * "suspiciously fast" for its kind. The time includes the pull response, the agent's model call
+ * and (for code) a sandbox run, and the result upload.
+ * - Code kinds (micro_loop, single_step): the agent generates a program with a model and runs it in
+ *   a container; under 300 ms end to end is not something an honest run does. Being fast only
+ *   sends results to verification (see the anomaly detector), so this can be tight.
+ * - inference: one model call with no sandbox; a hot GPU can answer a short prompt in a few hundred
+ *   ms, so only under 100 ms counts.
+ * Unknown kinds use the code threshold.
+ */
+export const FAST_RESULT_THRESHOLD_MS: Readonly<Record<string, number>> = {
+  micro_loop: 300,
+  single_step: 300,
+  inference: 100,
+};
+export const DEFAULT_FAST_RESULT_THRESHOLD_MS = 300;
+
+export function fastResultThresholdMs(kind: string | undefined): number {
+  return (kind !== undefined && Object.prototype.hasOwnProperty.call(FAST_RESULT_THRESHOLD_MS, kind))
+    ? FAST_RESULT_THRESHOLD_MS[kind]
+    : DEFAULT_FAST_RESULT_THRESHOLD_MS;
+}
+
+/** Fast successful results and all successful results of one subtask kind, in the window. */
+export interface FastResultCounts {
+  fast: number;
+  ok: number;
 }
 
 export interface AgentBehaviorStats {
@@ -23,7 +60,10 @@ export interface AgentBehaviorStats {
   avgDurationMs: number;
   minDurationMs: number;
   durationStdDev: number;
+  /** Successful results faster than their kind's threshold (fastResultThresholdMs). */
   suspiciouslyFastCount: number;
+  /** The same per subtask kind ("unknown" when the kind wasn't recorded). */
+  fastResultsByKind?: Record<string, FastResultCounts>;
 
   // Protocol
   signatureFailureCount: number;
@@ -51,6 +91,7 @@ interface TaskEvent extends TimestampedEvent {
   outputHash: string;
   outputLength: number;
   durationMs: number;
+  kind?: string;
 }
 
 interface ProtocolEvent extends TimestampedEvent {
@@ -120,6 +161,7 @@ export class AgentBehaviorTracker {
       outputHash: this.hashOutput(result.output),
       outputLength: result.output.length,
       durationMs: result.durationMs,
+      kind: result.kind,
     });
   }
 
@@ -210,7 +252,17 @@ export class AgentBehaviorTracker {
       : 0;
     const minDurationMs = durations.length > 0 ? Math.min(...durations) : 0;
     const durationStdDev = computeStdDev(durations, avgDurationMs);
-    const suspiciouslyFastCount = okTasks.filter(t => t.durationMs < 500).length;
+    const fastResultsByKind: Record<string, FastResultCounts> = {};
+    let suspiciouslyFastCount = 0;
+    for (const t of okTasks) {
+      const key = t.kind ?? "unknown";
+      const counts = (fastResultsByKind[key] ??= { fast: 0, ok: 0 });
+      counts.ok += 1;
+      if (t.durationMs < fastResultThresholdMs(t.kind)) {
+        counts.fast += 1;
+        suspiciouslyFastCount += 1;
+      }
+    }
 
     // Protocol
     const signatureFailureCount = entry.protocolEvents.filter(e => e.type === "signature_failure").length;
@@ -247,6 +299,7 @@ export class AgentBehaviorTracker {
       minDurationMs,
       durationStdDev,
       suspiciouslyFastCount,
+      fastResultsByKind,
       signatureFailureCount,
       replayAttemptCount,
       rateLimitHitCount,

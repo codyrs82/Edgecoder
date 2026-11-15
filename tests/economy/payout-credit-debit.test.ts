@@ -213,6 +213,57 @@ describe.skipIf(!PG_URL)("withdrawals consume the credit balance (Postgres)", ()
     }
   });
 
+  it("EdgeCoder withdrawing its revenue from the fee pool keeps the solvency gap unchanged", async () => {
+    const isolated = await twoCoordinatorsOneDatabase();
+    try {
+      const s = isolated.a;
+      const gap = async () => {
+        const sv = await s.solvencyMsat();
+        return sv.outstandingMsat - ((await s.receivedPurchaseMsat()) - (await s.payoutsOutflowMsat()) + sv.grantedMsat);
+      };
+      await s.persistCreditTransaction(earn("acct-a", 9_500));
+      // The network fee on a compute payment: cSats and their sats value on the pool.
+      await s.persistCreditTransaction({ txId: randomUUID(), accountId: "network:fee_pool", type: "earn", credits: 5_000, reason: "network_fee:t1", relatedTaskId: "t1", timestampMs: Date.now(), msat: 5_000_000 });
+      const before = await gap();
+      const p = payout("network:fee_pool", 2_000_000);
+      expect((await s.reservePayout(p, big)).ok).toBe(true);
+      expect(await gap()).toBe(before);
+      await s.settlePayout(p.payoutId, { status: "paid", feeMsat: 1_000 });
+      expect(await gap()).toBe(before);
+      const q = payout("network:fee_pool", 1_000_000);
+      expect((await s.reservePayout(q, big)).ok).toBe(true);
+      await s.settlePayout(q.payoutId, { status: "failed", error: "x" });
+      expect(await gap()).toBe(before);
+    } finally {
+      await isolated.close();
+    }
+  });
+
+  it("fee income by UTC day (earnIncome) counts only the pool's network_fee earn rows", async () => {
+    const isolated = await twoCoordinatorsOneDatabase();
+    try {
+      const s = isolated.a;
+      const DAY = 86_400_000;
+      const today = Math.floor(Date.now() / DAY);
+      const row = (accountId: string, reason: string, msat: number, atMs: number, type: "earn" | "spend" = "earn"): CreditTransaction => ({ txId: randomUUID(), accountId, type, credits: msat / 1000, reason, timestampMs: atMs, msat });
+      await s.persistCreditTransaction(row("network:fee_pool", "network_fee:a", 1_000, today * DAY + 10));
+      await s.persistCreditTransaction(row("network:fee_pool", "network_fee:b", 2_000, today * DAY + 20));
+      await s.persistCreditTransaction(row("network:fee_pool", "network_fee:c", 4_000, (today - 2) * DAY + 5));
+      await s.persistCreditTransaction(row("network:fee_pool", "network_fee:old", 8_000, (today - 40) * DAY));
+      // Not fee income: another reason, another account, a spend, and a LIKE wildcard look-alike.
+      await s.persistCreditTransaction(row("network:fee_pool", "purchase_fee:x", 16_000, today * DAY + 30));
+      await s.persistCreditTransaction(row("network:fee_pool", "networkXfee:y", 32_000, today * DAY + 40));
+      await s.persistCreditTransaction(row("acct-z", "network_fee:z", 64_000, today * DAY + 50));
+      await s.persistCreditTransaction(row("network:fee_pool", "network_fee:spent", 128_000, today * DAY + 60, "spend"));
+      const r = await s.earnIncome("network:fee_pool", "network_fee:", (today - 29) * DAY);
+      expect(r.totalMsat).toBe(15_000);
+      expect(r.count).toBe(4);
+      expect(r.days).toEqual([{ day: today - 2, msat: 4_000, count: 1 }, { day: today, msat: 3_000, count: 2 }]);
+    } finally {
+      await isolated.close();
+    }
+  });
+
   it("a payout reserved before debits existed gets no refund at settlement", async () => {
     await withStore(async (store, pool, acct) => {
       await store.persistCreditTransaction(earn(acct, 10_000));

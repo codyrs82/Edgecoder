@@ -488,6 +488,7 @@ The schemas are collected in `src/config/index.ts`. `tests/common/env-docs.test.
 | `PORTAL_EXTERNAL_HTTP_TIMEOUT_MS` | integer ≥ 100 | `7000` |
 | `RESEND_FROM_EMAIL` | string | unset |
 | `CONTROL_PLANE_ADMIN_TOKEN` | string (also the credential `/internal/nodes/:nodeId/approval` requires, as `x-admin-token` or Bearer) | unset |
+| `COORDINATOR_ADMIN_TOKEN` | string: the coordinators' `ADMIN_API_TOKEN`, for Settings > Revenue (EdgeCoder's fee pool report and withdrawals); sent server-side only, to allowlisted coordinators | unset (the page reports it is not configured) |
 | `PORTAL_COORDINATOR_TOKEN` | string | unset |
 | `PORTAL_COORDINATOR_HOSTS` | comma list | hosts of `COORDINATOR_DISCOVERY_URLS` |
 | `PORTAL_SESSION_TTL_MS` | integer ms, 1000 to 31 days | `604800000` |
@@ -539,6 +540,7 @@ The schemas are collected in `src/config/index.ts`. `tests/common/env-docs.test.
 | `STATS_ANCHOR_INTERVAL_MS` | integer ≥ 1 | `600000` |
 | `AGENT_RATE_LIMIT_MAX` | integer ≥ 0 | `300` |
 | `AGENT_RATE_LIMIT_WINDOW_MS` | integer ≥ 1 | `60000` |
+| `INFERENCE_CLAIM_TIMEOUT_MS` | integer ms, 1000 to 600000 (a network inference call no agent claimed by then is cancelled, refunded in full and answered `503 no_capacity` with `Retry-After`) | `45000` |
 | `PREAUTH_FAILURE_MAX_PER_IP` | integer ≥ 1 | `120` |
 | `AUTO_BLACKLIST_TTL_MS` | integer ≥ 0 | `3600000` |
 | `SECURITY_NONCE_TTL_MS` | integer ≥ 1 | `300000` |

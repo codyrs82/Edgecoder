@@ -203,4 +203,20 @@ describe("AgentBehaviorTracker", () => {
     expect(stats2.totalTasks).toBe(1);
     expect(stats2.successRate).toBe(0);
   });
+
+  it("judges fast per subtask kind (code under 300 ms, inference under 100 ms)", () => {
+    const tracker = new AgentBehaviorTracker();
+    const now = Date.now();
+    tracker.recordTaskResult("agent-k", { ok: true, output: "a", durationMs: 250, kind: "single_step" }, now);
+    tracker.recordTaskResult("agent-k", { ok: true, output: "b", durationMs: 250, kind: "inference" }, now + 1);
+    tracker.recordTaskResult("agent-k", { ok: true, output: "c", durationMs: 80, kind: "inference" }, now + 2);
+    tracker.recordTaskResult("agent-k", { ok: true, output: "d", durationMs: 450, kind: "micro_loop" }, now + 3);
+    const stats = tracker.getStats("agent-k", now + 10)!;
+    expect(stats.suspiciouslyFastCount).toBe(2);
+    expect(stats.fastResultsByKind).toEqual({
+      single_step: { fast: 1, ok: 1 },
+      inference: { fast: 1, ok: 2 },
+      micro_loop: { fast: 0, ok: 1 },
+    });
+  });
 });

@@ -107,7 +107,39 @@ This replaces the draft's "daily merkle root of ledger records", which is **not 
 | Isolation | Remote tasks run in a sandbox; no host execution for swarm work. | **Done, with a limit (#45).** The coordinator gives no work to an agent that declares no sandbox (`pullSandboxRejection`, `src/swarm/sandbox-enforcement.ts:60`, called at `src/swarm/coordinator/routes/tasks.ts:366`), and the executor refuses to run remote work on the host (`src/executor/run.ts:46-47`). The limit: the coordinator trusts the mode the agent **declares**; it cannot prove what the agent really runs. `vm` is an accepted declared mode, but the executor here implements only `host` and `docker` (`run.ts:39`). |
 | Model honesty | A result must come from the model the task asked for. | **Done in PR #275 (#54).** `resultModelMismatch` at `src/swarm/coordinator/routes/tasks.ts:571`; the agent's model list comes from signed heartbeats. |
 | Verification | Sampled k-of-n re-execution with reputation; per-kind comparators; LLM `inference` is never verified. | **Built, off by default (#50, #104).** `src/swarm/verification.ts:138-151` (`rate: 0`, at most 3 executions); sampling at `src/swarm/coordinator/routes/tasks.ts:618`, settlement at `src/swarm/coordinator/results.ts:386`. The Fly configs do not set `RESULT_VERIFICATION_RATE`. Env reference: [DEPLOYMENT.md](DEPLOYMENT.md#result-verification). **Trust gap, unchanged:** nothing checks non-deterministic (LLM) output, which is the main workload; it is paid unverified. |
+| Behaviour rules | Per-agent anomaly rules (BHV001-BHV010, `src/security/anomaly-detector.ts`) over a one-hour window of each agent's results and protocol events; strikes lead to an automatic, expiring blacklist (`src/security/auto-blacklister.ts`). | **Done.** BHV001 ("suspiciously fast") is described below. |
 | Spend caps | IDE swarm requests are capped per request and per session. | **Done (#71).** `src/apps/ide/swarm-budget.ts`, `src/apps/ide/provider-server.ts:117`. |
+
+### BHV001: suspiciously fast results
+
+A result that arrives impossibly soon after its claim suggests the agent did not do the work.
+The rule judges speed by the coordinator's own clock, **claim to result receipt**
+(`serverMeasuredDurationMs`, `src/swarm/result-integrity.ts`), never by the duration the agent
+reports: an honest worker reports only its sandbox run (fast even when the model took seconds), and
+a cheater could report anything. Only results the agent reports as successful count.
+
+Thresholds per subtask kind (`FAST_RESULT_THRESHOLD_MS`, `src/security/behavior-tracker.ts`):
+
+| Kind | Fast below | Why |
+|---|---|---|
+| `micro_loop`, `single_step` (code) | 300 ms | Covers the pull response, a model call that writes the program, a container run and the upload. |
+| `inference` | 100 ms | One model call, no sandbox; a hot GPU can answer a short prompt in a few hundred ms. |
+
+Handling is graduated; speed alone never blacklists at once:
+
+1. **Flag (3 fast results in the window).** WARN, not a strike. The agent's next 5 results of kinds
+   the coordinator verifies are sent to result verification whatever the sampling draw
+   (`VerificationFlags`, `src/swarm/verification.ts`), refreshed while the agent stays fast. Only
+   when verification is on (`RESULT_VERIFICATION_RATE` > 0): with it off, replicas are an expense the
+   operator has not opted into.
+2. **Verification decides verifiable work.** A forged result is outvoted by honest replicas and
+   becomes a VRF001 strike (three blacklist the agent, `recordVerificationMismatchStrike`,
+   `src/swarm/coordinator/results.ts`); an honest fast agent's results match and are paid, only held
+   until the verdict. Fast results of verifiable kinds never strike on speed.
+3. **Sustained pattern on unverifiable work.** For kinds the coordinator cannot re-execute
+   (`inference`, and every kind while verification is off), 20 or more fast results that make up
+   at least 80% of the agent's successful results of those kinds in the window is a HIGH
+   `forged_results` strike; three strikes in an hour blacklist (for `AUTO_BLACKLIST_TTL_MS`).
 
 ## 7. Mesh trust
 

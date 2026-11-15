@@ -13,6 +13,7 @@ import { registerErrorTracking } from "../../common/error-tracking.js";
 import cors from "@fastify/cors";
 import websocket from "@fastify/websocket";
 import { installRawBodyCapture } from "../../security/request-signing.js";
+import { isAgentRateLimitedError } from "../../security/agent-rate-limiter.js";
 
 export const app = Fastify({ ...serviceLoggerOptions("coordinator") });
 exposeRequestId(app);
@@ -28,6 +29,16 @@ await app.register(cors, {
   credentials: true,
 });
 await app.register(websocket);
+
+// A signed agent request over its per-identity limit (thrown from verifyAgentRequest) is answered
+// 429 with Retry-After and a stable error code. Every other error goes on to Fastify's default
+// handler, unchanged.
+app.setErrorHandler((error, _req, reply) => {
+  if (isAgentRateLimitedError(error)) {
+    return reply.code(429).headers(error.headers).send({ error: "agent_rate_limited", retryAfterMs: error.retryAfterMs });
+  }
+  throw error;
+});
 
 /** The coordinator's Fastify instance type. Route modules take it as `registerXRoutes(app)`. */
 export type CoordinatorApp = typeof app;

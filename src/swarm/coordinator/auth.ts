@@ -17,6 +17,7 @@ import { checkSharedToken } from "../../common/env-guard.js";
 import { unsignedRequestDecision } from "../result-integrity.js";
 import { rawBodyOf, verifySignedRequest, type SignedHeaders } from "../../security/request-signing.js";
 import { verifyNonce } from "../../security/nonce-verifier.js";
+import { AgentRateLimitedError } from "../../security/agent-rate-limiter.js";
 import type { SecurityEventType } from "../../audit/security-events.js";
 import {
   MESH_AUTH_TOKEN,
@@ -199,18 +200,21 @@ export async function verifyAgentRequest(
     return "rejected";
   }
 
-  // 5. Per-agent rate limit, now that the request is the agent's own — skip for loopback
+  // 5. Per-agent rate limit, now that the request is the agent's own — skip for loopback.
+  //    Over the limit is not an authentication failure: the request is refused with 429 and
+  //    Retry-After (AgentRateLimitedError, answered by the coordinator's error handler) and is
+  //    not recorded as a protocol violation, so it feeds no behaviour rule.
   if (!isLoopback && !agentRateLimiter.check(agentId)) {
+    const retryAfterMs = agentRateLimiter.retryAfterMs(agentId);
     securityLog.log({
       level: securityLog.severity("auth_rate_limit_hit"),
       event: "auth_rate_limit_hit",
       source: { type: "agent", id: agentId, ip: clientIp },
-      details: { route: routePath },
+      details: { route: routePath, retryAfterMs },
       action: "reject_request",
       coordinatorId: identity.peerId,
     });
-    behaviorTracker.recordProtocolViolation(agentId, "rate_limit_hit");
-    return "rejected";
+    throw new AgentRateLimitedError(retryAfterMs);
   }
 
   // 6. Nonce replay detection

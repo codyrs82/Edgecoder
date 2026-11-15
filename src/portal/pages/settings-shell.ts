@@ -16,7 +16,7 @@ import { CSP_NONCE } from "../csp-nonce.js";
  * /portal/settings/. Admin is revealed client-side for system admins only; its APIs enforce
  * authorization server-side.
  */
-export type SettingsSection = "general" | "profile" | "plan" | "usage" | "compute" | "tools" | "nodes" | "install" | "admin";
+export type SettingsSection = "general" | "profile" | "plan" | "usage" | "compute" | "tools" | "nodes" | "install" | "admin" | "revenue";
 
 export const SETTINGS_NAV: Array<{ key: SettingsSection; label: string; icon: string; href: string; adminOnly?: boolean }> = [
   { key: "general", label: "General", icon: "layers", href: "/portal/settings#general" },
@@ -27,7 +27,8 @@ export const SETTINGS_NAV: Array<{ key: SettingsSection; label: string; icon: st
   { key: "tools", label: "Connect your tools", icon: "key", href: "/portal/settings#tools" },
   { key: "nodes", label: "Nodes", icon: "server", href: "/portal/settings/nodes" },
   { key: "install", label: "Install agent", icon: "download", href: "/portal/settings/install" },
-  { key: "admin", label: "Admin", icon: "shield", href: "/portal/settings/admin", adminOnly: true }
+  { key: "admin", label: "Admin", icon: "shield", href: "/portal/settings/admin", adminOnly: true },
+  { key: "revenue", label: "Revenue", icon: "wallet", href: "/portal/settings/revenue", adminOnly: true }
 ];
 
 /**
@@ -117,7 +118,7 @@ export const SETTINGS_CSS = `
 function settingsNav(active: SettingsSection): string {
   const links = SETTINGS_NAV.map((t) => {
     const cls = ["settings-link", t.adminOnly && t.key !== active ? "hidden" : ""].filter(Boolean).join(" ");
-    const id = t.adminOnly ? ' id="settingsAdminTab" data-admin-only' : "";
+    const id = t.adminOnly ? `${t.key === "admin" ? ' id="settingsAdminTab"' : ""} data-admin-only` : "";
     const current = t.key === active ? ' aria-current="page"' : "";
     return `<a class="${cls}" href="${t.href}"${id} data-section="${t.key}"${current}>${icon(t.icon, 16)}<span>${t.label}</span></a>`;
   }).join("");
@@ -131,8 +132,8 @@ function settingsNav(active: SettingsSection): string {
 const SETTINGS_SHELL_SCRIPT = `
     function revealSettingsAdminTab(me) {
       const user = (me && me.user) || {};
-      const tab = document.getElementById("settingsAdminTab");
-      if (tab && user.roles && user.roles.isSystemAdmin) tab.classList.remove("hidden");
+      if (!(user.roles && user.roles.isSystemAdmin)) return;
+      for (const tab of document.querySelectorAll(".settings-link[data-admin-only]")) tab.classList.remove("hidden");
     }
     (function() {
       const input = document.getElementById("settingsSearch");

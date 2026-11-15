@@ -167,7 +167,7 @@ describe("coordinator wiring (source)", () => {
   const src = ["src/swarm/coordinator/payouts.ts", "src/swarm/coordinator/routes/admin.ts"].map((f) => readFileSync(f, "utf8")).join("\n");
   it("pause and reconciliation routes live in the admin plugin; the payout service pays through the pause-guarded provider", () => {
     const plugin = src.slice(src.indexOf("app.register(async (admin) => {"));
-    for (const r of ['admin.get("/admin/payouts/pause"', 'admin.post("/admin/payouts/pause"', 'admin.get("/admin/payouts/reconciliation"', 'admin.post("/admin/payouts/reconciliation/run"']) {
+    for (const r of ['admin.get("/admin/payouts/pause"', 'admin.post("/admin/payouts/pause"', 'admin.get("/admin/payouts/reconciliation"', 'admin.post("/admin/payouts/reconciliation/run"', 'admin.get("/admin/revenue"', 'admin.post("/admin/revenue/withdraw"']) {
       expect(plugin).toContain(r);
     }
     const svc = src.slice(src.indexOf("const payoutService = new PayoutService({"), src.indexOf("const payoutService = new PayoutService({") + 400);
@@ -216,6 +216,14 @@ describe("fee-pool distribution lock", () => {
     const svc = poolSetup(store);
     expect(await svc.distributeFeePool(10, { minIntervalMs: 3_600_000 })).toMatchObject({ distributedMsat: 0, skipped: "recent" });
     expect((await svc.distributeFeePool(10, { minIntervalMs: 0 })).distributedMsat).toBe(1_000_000);
+  });
+
+  it("what EdgeCoder withdrew from the pool is never distributed to hosts afterwards", async () => {
+    const store = new MemoryPayoutStore(() => 0);
+    await store.recordCreditTransactions([{ txId: "f", accountId: "pool", type: "earn", credits: 3_000, reason: "network_fee:t", timestampMs: 1, msat: 3_000_000 }]);
+    store.payouts.set("p", { payoutId: "p", accountId: "pool", coordinatorId: "c", kind: "withdraw", bolt11: "lntbs1", paymentHash: "aa", amountMsat: 2_000_000, feeMsat: 10_000, maxFeeMsat: 10_000, status: "paid", createdAtMs: 1 });
+    const svc = poolSetup(store);
+    expect((await svc.distributeFeePool(10)).distributedMsat).toBe(990_000);
   });
 });
 

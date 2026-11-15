@@ -56,6 +56,23 @@ describe("streamNetworkCompletion", () => {
     expect((submitted.messages as Array<{ role: string }>).map((m) => m.role)).toEqual(["user", "user"]);
   });
 
+  it("a call the coordinator cancelled for lack of capacity is a 503 with when to retry", async () => {
+    const deps = await fakeForwarder((path, body) =>
+      path === "/forward/inference/submit"
+        ? { json: { taskId: body.taskId, subtaskId: "st-busy", reservedCSats: 10 } }
+        : { status: 503, json: { error: "no_capacity", retryAfterSec: 20 } }
+    );
+    const err = await (async () => {
+      try {
+        for await (const _ of streamNetworkCompletion(deps, { model: "m", computeClass: "any", messages: [{ role: "user", content: "hi" }] })) void _;
+      } catch (e) {
+        return e as { status: number; retryAfterSec?: number; message: string };
+      }
+    })();
+    expect(err).toMatchObject({ status: 503, retryAfterSec: 20 });
+    expect(err!.message).toContain("Nothing was charged");
+  });
+
   it("explains why a request couldn't start", async () => {
     const deps = await fakeForwarder(() => ({ status: 409, json: { error: "no_agent_has_model" } }));
     await expect(streamNetworkCompletion(deps, { model: "x", computeClass: "any", messages: [{ role: "user", content: "hi" }] }).next()).rejects.toThrow(/No machine on the network has x/);
