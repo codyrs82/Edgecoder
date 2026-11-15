@@ -98,7 +98,8 @@ Listeners on an agent install:
   verified (`isFromIdentity`). `task_claim` is accepted only from trusted peers.
 - Orchestration (model pull, Ollama install) is admin-only on the coordinator. The agent accepts only
   Ollama-library model names (`isOllamaLibraryModelName`) and never installs binaries from it.
-- Agent-mesh tunnels relay only a counter. Direct-work routes are signed agent-self.
+- Agent-mesh tunnels relay only a counter. Direct-work routes are signed agent-self, and direct work
+  is same-account only (below).
 
 **Gaps found and fixes**
 
@@ -122,6 +123,22 @@ Listeners on an agent install:
 - **Direct-work offers had no size, count or lifetime bound.** They are pushed into the target's
   heartbeat and auto-accepted by the target's worker (power policy permitting). Fixed: input at most
   64 KiB, at most 16 pending offers per target, a 10 min expiry, and offers forgotten after 1 h.
+- **Unpaid, cross-user direct work.** Any agent could have another user's agent run code or model
+  calls for it, unbilled, outside the market. Fixed (owner decision: same account only,
+  `src/swarm/direct-work-policy.ts`):
+  - The coordinator relays a direct-work offer or model request only when both agents have a
+    verified ownership row (the portal-linked agent → account mapping) naming the same account. The
+    sender's claims play no part. An agent with no ownership row does no direct work at all: its id
+    would double as an account id, and `/register` does not stop an agent from taking an id equal
+    to another user's account id.
+  - Refusals are logged (`direct_work_offer_refused`, `direct_work_model_request_refused`) and
+    answered `403 direct_work_cross_account` (or `direct_work_account_unverified`) with a message
+    and `market: "/submit"` pointing the sender at the market. Accepting re-checks both accounts.
+  - The receiving worker runs an offer only when the coordinator's signed heartbeat names the
+    sender's account (`fromAccountId`) and it equals the account the coordinator named in its signed
+    `/register` response; it refuses and logs everything else, including any offer from a
+    coordinator that predates this check. A sending worker backs off an hour from a peer that
+    refused it.
 
 **Residual risk**
 
@@ -132,9 +149,12 @@ Listeners on an agent install:
   buyer's IDE agent or tools. Mitigations are on the buyer side: treat swarm output as untrusted
   input, show diffs before applying, and do not auto-execute tool calls from network results.
   Result verification (when enabled) catches divergent outputs only for verifiable kinds.
-- **Unpaid, cross-user direct work.** Any agent can still ask another agent's model to work for
-  free, now bounded. Owner decision. Proposed default: allow direct work only between agents of
-  the same owner account, or charge it like a network job.
+- **Direct work within one account** is still unbilled and unverified, by design: the account pays
+  for its own machines. Workers older than this change still accept whatever a coordinator relays;
+  the coordinator check covers them once coordinators run this change. Without a database
+  (in-memory dev coordinators) no agent has an ownership row, so direct work is off there.
+- **BLE peer work** is not covered by this rule: it is gated by an operator-configured mesh token and
+  settled through BLE credit sync.
 - **Sandbox kernel sharing.** No gVisor or userns-remap, and seccomp is Docker's default unless
   `SANDBOX_SECCOMP_PROFILE` is set. On Linux installs the agent user is in the `docker` group, so a
   compromise of the agent process is root on that host (not a cross-user path by itself). Task code
@@ -261,8 +281,9 @@ Listeners on an agent install:
 - **Per-agent limits still scale** with the agent cap times the number of accounts.
 - **In-memory growth over time.** `queue.results` and the in-memory ordering chain grow with
   legitimate traffic. They are bounded per request now, but not over time.
-- **Unpaid inference requests to a chosen agent** (`/agent-mesh/models/request`) and tunnel close
-  notices are rate-limited and now inbox-capped, but not charged.
+- **Unpaid inference requests to a chosen agent** (`/agent-mesh/models/request`) are now limited to
+  agents of the sender's own account (section 1). Tunnel close notices are rate-limited and
+  inbox-capped, but not charged.
 - **The order-book clearing price** can be pushed down by claiming at ask=1. It is used for display
   and coordinator selection only.
 

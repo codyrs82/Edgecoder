@@ -55,6 +55,8 @@ export type DirectWorkOffer = {
   acceptedBy?: string;
   acceptedAtMs?: number;
   result?: { ok: boolean; output: string; error?: string; durationMs: number; completedAtMs: number };
+  /** The verified account both agents share (direct work is same-account only); sent to the target. */
+  fromAccountId?: string;
 };
 
 export const directWorkById = new Map<string, DirectWorkOffer>();

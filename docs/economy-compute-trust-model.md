@@ -199,6 +199,7 @@ Handling is graduated; speed alone never blacklists at once:
 - Every path into the peer table (registration, bootstrap, gossip) goes through one admission rule.
 - Endpoints are pinned from the allowlist or bootstrap. Gossip never sets or changes a URL.
 - Forwarded results are signed by the forwarding coordinator, protected against replay, and accepted only for subtasks the origin offered.
+- Direct work between agents (`/agent-mesh/direct-work/*`, `/agent-mesh/models/request`) is unbilled, so it is allowed only between agents of the same account, by the coordinator's verified ownership mapping; an agent with no ownership row does none. Work for another account's agents goes through the market (`POST /submit`), where it is billed (`src/swarm/direct-work-policy.ts`).
 
 **Status as of 2026-11-14: done.**
 

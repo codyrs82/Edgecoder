@@ -376,7 +376,8 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
     const directOfferIds = directWorkInbox.get(body.agentId) ?? [];
     const directWorkOffers = directOfferIds
       .map((id) => directWorkById.get(id))
-      .filter((offer): offer is DirectWorkOffer => Boolean(offer && offer.status === "offered" && now - offer.createdAtMs <= DIRECT_WORK_OFFER_TTL_MS))
+      // Only offers whose same-account check passed carry fromAccountId; the worker checks it too.
+      .filter((offer): offer is DirectWorkOffer => Boolean(offer && offer.status === "offered" && offer.fromAccountId && now - offer.createdAtMs <= DIRECT_WORK_OFFER_TTL_MS))
       .slice(0, DIRECT_WORK_INBOX_MAX);
     // Hardware verification: hand out a benchmark challenge when one is due (the deadline runs from now).
     const benchmarkChallenge = hardwareVerifier.nextChallenge(body.agentId, {

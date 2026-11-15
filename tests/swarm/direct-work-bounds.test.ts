@@ -9,6 +9,11 @@ import { hashRequestBody, signRequest } from "../../src/security/request-signing
  * target's heartbeat responses, so their size, count and lifetime must be bounded.
  */
 
+// Direct work is same-account only (verified ownership): the bounds apply within one account.
+vi.mock("../../src/swarm/coordinator/agent-accounts.js", () => ({
+  verifiedAccountOf: async (agentId: string) => (agentId.startsWith("agent-dw-") ? "acct-dw" : null)
+}));
+
 const VALID_TOKEN = "valid-registration-token";
 const REMOTE = "203.0.113.55";
 let portal: Server;

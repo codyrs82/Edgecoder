@@ -26,6 +26,7 @@ import { ActiveCoordinator, meshWsUrl } from "./active-coordinator.js";
 import { createCoordinatorClient, CoordinatorResponseRejectedError } from "./coordinator-client.js";
 import { ResponseVerifier, responseSigningPolicyFromEnv } from "../trust/response-signing.js";
 import { checkSnapshotPolicy, envelopeResultPayload, parseSnapshotEnforcement } from "./execution-policy.js";
+import { DIRECT_WORK_MARKET_HINT, workerAcceptsDirectWorkOffer } from "./direct-work-policy.js";
 import { BleRequestGuard, bleRequestProof } from "../mesh/ble/ble-request-guard.js";
 import { selectCoordinatorFromEnv } from "../discovery/index.js";
 import { createCoordinatorSteering, registryUrlsFor, type SteeringResult } from "../discovery/steering.js";
@@ -211,6 +212,8 @@ const envelopeKeys = generateX25519KeyPair();
 const peerTunnels = new Map<string, string>();
 const peerOfferCooldownMs = W.PEER_OFFER_COOLDOWN_MS;
 const lastOfferAtByPeer = new Map<string, number>();
+/** Direct-work offers already refused (logged once each). */
+const refusedDirectOffers = new Set<string>();
 let peerWorkCursor = 0;
 async function discoverCoordinatorFromPortal(): Promise<string | null> {
   if (!PORTAL_URL || !AGENT_REGISTRATION_TOKEN) return null;
@@ -818,6 +821,8 @@ type HeartbeatReply = {
     workType: "code_task" | "model_inference";
     language?: "python" | "javascript";
     input: string;
+    /** The verified account of the sender; the coordinator relays only same-account offers. */
+    fromAccountId?: string;
   }>;
   blacklist?: { version: number; agents: string[] };
     benchmarkChallenge?: BenchmarkChallenge;
@@ -1652,7 +1657,17 @@ async function loop(): Promise<void> {
         const incomingDirect = hb.directWorkOffers ?? [];
         const canUsePeerDirect = allowPeerDirectWork(powerTelemetry);
         if (incomingDirect.length > 0 && canUsePeerDirect) {
-          const offer = incomingDirect.find((item) => !blacklistSet.has(item.fromAgentId));
+          // Direct work is unpaid: only from agents of this agent's own account (src/swarm/direct-work-policy.ts).
+          // Everything else is refused here too, whatever the coordinator relayed, and logged once.
+          const offer = incomingDirect.find((item) => {
+            const decision = workerAcceptsDirectWorkOffer(item, rewardAccountId, (id) => blacklistSet.has(id));
+            if (!decision.ok && decision.reason !== "sender_blacklisted" && !refusedDirectOffers.has(item.offerId)) {
+              refusedDirectOffers.add(item.offerId);
+              if (refusedDirectOffers.size > 256) refusedDirectOffers.delete(refusedDirectOffers.values().next().value!);
+              console.warn(`[agent:${AGENT_ID}] direct-work offer ${item.offerId} from ${item.fromAgentId} refused (${decision.reason}): ${DIRECT_WORK_MARKET_HINT}`);
+            }
+            return decision.ok;
+          });
           if (!offer) {
             await new Promise((r) => setTimeout(r, 500));
             continue;
@@ -1741,6 +1756,10 @@ async function loop(): Promise<void> {
               });
               if (offerRes.statusCode >= 200 && offerRes.statusCode < 300) {
                 lastOfferAtByPeer.set(peerId, now);
+              } else if (offerRes.statusCode === 403) {
+                // Another account's agent (or no verified account): direct work is same-account only.
+                // Back off for an hour; work for other accounts goes through the market.
+                lastOfferAtByPeer.set(peerId, now + 60 * 60_000);
               }
             }
           }
