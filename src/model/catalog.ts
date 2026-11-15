@@ -346,3 +346,34 @@ export function catalogEntryForTag(tag: string, catalog: CatalogModel[] = MODEL_
   if (suffix && suffix !== "latest") return undefined;
   return catalog.find((m) => m.modelId.split(":")[0] === name);
 }
+
+/**
+ * Extracts the parameter size from a model tag or catalog entry.
+ * For a catalog entry, parses the leading number of its `paramSize`.
+ * For a tag not in the catalog, parses a size from the tag itself.
+ * Returns 0 for unknown tags.
+ */
+export function paramSizeBillions(tag: string, catalog: CatalogModel[] = MODEL_CATALOG): number {
+  // First try to find the model in the catalog
+  const entry = catalogEntryForTag(tag, catalog);
+
+  if (entry) {
+    // Parse the leading number from paramSize (e.g. "30B (3.3B active)" -> 30, "7B" -> 7, "1.5B" -> 1.5)
+    const paramSize = entry.paramSize;
+    const match = paramSize.match(/^(\d+(?:\.\d+)?)B/);
+    if (match) {
+      return parseFloat(match[1]);
+    }
+    return 0;
+  }
+
+  // If not in catalog, try to parse from the tag itself
+  // e.g. "qwen2.5-coder:7b" -> 7, "llama3:70b-instruct" -> 70
+  const match = tag.match(/:(\d+(?:\.\d+)?)b/i);
+  if (match) {
+    return parseFloat(match[1]);
+  }
+
+  // If no match found, return 0
+  return 0;
+}

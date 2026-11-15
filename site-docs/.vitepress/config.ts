@@ -33,7 +33,8 @@ export default withMermaid(defineConfig({
           { text: "Model Provider Abstraction", link: "/guide/model-provider-abstraction" },
           { text: "Executor Sandbox and Isolation", link: "/guide/executor-sandbox-isolation" },
           { text: "BLE Local Mesh", link: "/guide/ble-local-mesh" },
-          { text: "Model Management", link: "/guide/model-management" }
+          { text: "Model Management", link: "/guide/model-management" },
+          { text: "Changing Models from the Portal", link: "/guide/remote-model-control" }
         ]
       },
       {
@@ -48,7 +49,8 @@ export default withMermaid(defineConfig({
           { text: "Executor Subset Reference", link: "/operations/executor-subset-reference" },
           { text: "iOS Power Scheduling", link: "/operations/ios-power-scheduling" },
           { text: "Stats Ledger Rollout", link: "/operations/stats-ledger-rollout" },
-          { text: "Coordinator Federation", link: "/operations/coordinator-federation" }
+          { text: "Coordinator Federation", link: "/operations/coordinator-federation" },
+          { text: "Load Testing", link: "/operations/load-testing" }
         ]
       },
       {
