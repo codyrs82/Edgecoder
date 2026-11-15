@@ -61,4 +61,23 @@ describe("installer host: secret files and command lines", () => {
     expect(out.join("\n")).not.toMatch(/secret-reg|secret-mesh/);
     expect(out.join("\n")).toContain("<redacted>");
   });
+
+  it("a re-run keeps the tuning flags the previous run recorded in the instance env file", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ec-tuning-"));
+    try {
+      writeFileSync(join(dir, "agent-0.env"), "AGENT_ID=box-cpu\nEDGECODER_INSTALL_TUNING=parallel:3,keep-alive:-1\n");
+      const host: Host = { platform: "linux", writeFile: () => undefined, removeFile: () => undefined, run: () => ({ code: 1, stdout: "", stderr: "" }), exists: () => false };
+      const out: string[] = [];
+      const log = vi.spyOn(console, "log").mockImplementation((m: unknown) => { out.push(String(m)); });
+      try {
+        expect(await runInstaller(["plan", "--json", "--sandbox", "docker", "--config-dir", dir, "--context-window", "16384"], {}, host)).toBe(0);
+      } finally {
+        log.mockRestore();
+      }
+      const env = JSON.parse(out.join("\n")).plan.instances[0].env;
+      expect([env.AGENT_PARALLEL_INFERENCE, env.AGENT_MODEL_KEEP_ALIVE, env.AGENT_CONTEXT_WINDOW]).toEqual(["3", "-1", "16384"]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

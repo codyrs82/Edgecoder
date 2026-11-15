@@ -11,10 +11,10 @@ import { chmodSync, closeSync, cpSync, existsSync, mkdirSync, openSync, readFile
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectHardware, type HostHardware, type Probe } from "./hardware.js";
-import { helpText, parseInstallArgs, parseTokensFile, TOKEN_PATTERN, validateInstallOptions, type InstallOptions } from "./options.js";
+import { helpText, inheritTuning, parseInstallArgs, parseTokensFile, TOKEN_PATTERN, validateInstallOptions, type InstallOptions } from "./options.js";
 import { planInstall, type AgentInstance, type InstallPlan } from "./plan.js";
 import { appDirProblems, planBinary, stageBinary, type BinFs, type StagePlan } from "./binaries.js";
-import { applyPlan, defaultPaths, lockConfigDir, removeServices, serviceStatus, windowsDirOwnerProblems, type Host, type ServicePaths } from "./services.js";
+import { applyPlan, defaultPaths, envFilePath, lockConfigDir, removeServices, serviceStatus, windowsDirOwnerProblems, type Host, type ServicePaths } from "./services.js";
 
 export const probe: Probe = (cmd, args) => {
   try {
@@ -230,6 +230,14 @@ function describePlan(plan: InstallPlan, p: ServicePaths): string {
   return lines.join("\n");
 }
 
+function readIfPresent(path: string): string | undefined {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
 export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = process.env, host: Host = realHost, post: HttpPost = fetchPost, binFs: BinFs = realBinFs): Promise<number> {
   let opts: InstallOptions;
   try {
@@ -281,6 +289,9 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     return 0;
   }
 
+  // A re-run without the tuning flags (a package upgrade's apply --from-package) keeps the values
+  // the previous run recorded in the first instance's env file.
+  opts = inheritTuning(opts, readIfPresent(envFilePath(p, { index: 0 } as AgentInstance)));
   const dockerPresent = opts.sandbox === "docker" ? true : dockerAvailable();
   let plan = planInstall(hw, opts, dockerPresent);
   if (opts.command === "plan") {

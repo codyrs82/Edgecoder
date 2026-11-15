@@ -586,6 +586,7 @@ These are not service configuration, so no schema lists them and the docs test s
 | `NO_COLOR`, `GIT_CONFIG_COUNT` | IDE provider | Set by the IDE provider for the child processes it starts. |
 | `VITEST` | portal registry | Set by the test runner. |
 | `CUDA_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`, `EDGECODER_GPU_INDEX`, `OLLAMA_NUM_PARALLEL` | installer (`src/install/`), worker | Written into the service units the installer generates; a worker uses them to pick its GPU. |
+| `EDGECODER_INSTALL_TUNING` | installer CLI (`src/install/options.ts`) | Written into each instance's env file: the tuning flags (`--context-window`, `--parallel`, `--keep-alive`) the last `edgecoder-install apply` was given, so a re-run without them (a package upgrade) keeps their values. The agent ignores it. |
 | `EDGECODER_COORDINATOR_URL`, `EDGECODER_PORTAL_URL`, `EDGECODER_MESH_TOKEN`, `EDGECODER_REGISTRATION_TOKEN`, `EDGECODER_ENROLL_TOKEN`, `EDGECODER_API_KEY` | installer CLI (`src/install/options.ts`) | Defaults for the installer's command-line options. |
 | `BT_PROXY_PORT` | BLE proxy launch scripts | Port the Swift `edgecoder-ble-proxy` companion listens on (default `11435`). |
 | `BT_PROXY_HOST` | BLE proxy launch scripts | Host for the BLE proxy HTTP API (default `127.0.0.1`). |
