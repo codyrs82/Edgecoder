@@ -163,6 +163,47 @@ for (const vp of VIEWPORTS) {
       await expect(trigger).toBeFocused();
     });
 
+    // The Code view: projects sidebar, the pick-a-project prompt, the New project sheet, and a
+    // project's chat header with its branch menu.
+    test("code view: projects", async ({ page }) => {
+      await openApp(page);
+      await page.getByRole("tab", { name: "Code" }).click();
+      await expect(page.getByRole("heading", { name: "Pick a project to start" })).toBeVisible();
+      await audit(page, "no project");
+      await noHorizontalOverflow(page);
+      await page.getByRole("navigation", { name: "Code" }).getByRole("button", { name: "New project" }).click();
+      const sheet = page.getByRole("dialog", { name: "New project" });
+      await expect(sheet).toBeVisible();
+      await expect(sheet.getByRole("textbox", { name: /Name/ })).toBeFocused();
+      await settle(sheet);
+      await audit(page, "new project");
+      await insideViewport(sheet, page);
+      await sheet.locator("label", { hasText: "Clone from GitHub" }).click();
+      await expect(sheet.getByRole("button", { name: "a11y/demo" })).toBeVisible();
+      await audit(page, "clone");
+      await sheet.getByRole("button", { name: "Cancel" }).click();
+      await expect(sheet).toHaveCount(0);
+    });
+
+    test("code view: a project's chat", async ({ page }) => {
+      await page.addInitScript(() => localStorage.setItem("edgecoder-project-root", "/Users/a11y/EdgeCoder/demo"));
+      await openApp(page);
+      await page.getByRole("tab", { name: "Code" }).click();
+      const branch = page.getByRole("button", { name: /^Branch main/ });
+      await expect(branch).toBeVisible();
+      await audit(page, "project");
+      await noHorizontalOverflow(page);
+      await branch.click();
+      const menu = page.getByRole("dialog", { name: "Branches" });
+      await expect(menu).toBeVisible();
+      await settle(menu);
+      await audit(page, "branch menu");
+      await insideViewport(menu, page);
+      await page.keyboard.press("Escape");
+      await expect(menu).toHaveCount(0);
+      await expect(branch).toBeFocused();
+    });
+
     // #24/#26: Settings is a modal dialog of vertical tabs; every section is audited.
     test("settings: every section", async ({ page }) => {
       test.setTimeout(180_000);
@@ -266,6 +307,8 @@ for (const vp of VIEWPORTS) {
     });
 
     test("editor view", async ({ page }) => {
+      // A coding chat needs a project (with none, the view is the pick-a-project prompt, tested above).
+      await page.addInitScript(() => localStorage.setItem("edgecoder-project-root", "/Users/a11y/EdgeCoder/demo"));
       await openApp(page);
       const tab = page.getByRole("tab", { name: "Code" });
       await tab.click();
