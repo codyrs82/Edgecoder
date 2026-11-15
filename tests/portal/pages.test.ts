@@ -83,10 +83,21 @@ describe("portal pages module (#16)", () => {
     expect(compute).toContain('"/portal/api/compute/reservations"');
     expect(compute).toContain('"/portal/api/market/orders"');
 
-    // Plan & usage: the wallet, including where we pay you.
+    // Wallet: balance, Add funds, the fees, earnings and withdrawals, where we pay you.
     const plan = (await app.inject({ url: "/portal/settings/plan" })).body;
     expect(plan).toContain("Where should we pay you?");
-    for (const id of ["payoutDestInput", "withdrawBtn", "creditHistoryBody"]) expect(plan, id).toContain(`id="${id}"`);
+    for (const id of ["netBadge", "balanceValue", "add-funds", "topupBtn", "invoiceText", "copyInvoiceBtn", "openWalletLink", "stepPaid", "stepExpired", "payoutHeld", "payoutDestInput", "withdrawBtn", "payoutsBody", "creditHistoryBody"]) {
+      expect(plan, id).toContain(`id="${id}"`);
+    }
+    expect(plan).toContain('"/portal/api/wallet/overview"');
+    expect(plan).toContain('"/portal/api/wallet/topup"');
+    // Payout methods: Lightning is live; on-chain Bitcoin and Litecoin are labelled placeholders only.
+    expect(plan).toMatch(/Lightning<\/span> <span class="wl-pill ok">Active<\/span>/);
+    expect(plan).toMatch(/Bitcoin on-chain<\/span> <span class="wl-pill soon">Coming soon<\/span>/);
+    expect(plan).toMatch(/Litecoin on-chain<\/span> <span class="wl-pill soon">Coming soon<\/span>/);
+    // Fees are stated, and motion stops under reduced motion.
+    expect(plan).toContain("Where your sats go");
+    expect(plan).toContain("prefers-reduced-motion: reduce");
 
     // Install agent: no inline handlers, and a malformed token falls back to the placeholder.
     const install = (await app.inject({ url: "/portal/settings/install?token=%3Cb%3E", headers: { "user-agent": "Macintosh" } })).body;

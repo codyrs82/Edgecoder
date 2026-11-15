@@ -66,7 +66,7 @@ const USAGE = section(
   "Usage",
   "You pay for compute in cSats (1 cSat = 1 sat). Chats, tools and reservations spend them; your machines earn sats.",
   card(
-    settingRow("cSats balance", "What you can spend on network compute.", `<span class="set-big" id="usageBalance">—</span><a class="btn primary" href="/portal/settings/plan">Buy cSats</a>`, { keywords: "balance credits csats plan buy wallet" }) +
+    settingRow("cSats balance", "What you can spend on network compute.", `<span class="set-big" id="usageBalance">—</span><a class="btn primary" href="/portal/settings/plan?topup=1">Add funds</a>`, { keywords: "balance credits csats plan buy wallet" }) +
       settingRow("Earned", "Sats your machines have earned running jobs for others.", `<span class="set-value" id="usageEarned">—</span>`, { keywords: "earned earnings sats payout" }) +
       settingRow("Prices", "Per second of compute on the base tier of each class.", `<span class="set-value" id="usagePrices">—</span>`, { keywords: "price rate cost per second class" })
   ) +
