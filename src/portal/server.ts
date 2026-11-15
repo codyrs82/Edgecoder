@@ -30,6 +30,8 @@ import { registerMachineRoutes } from "./routes/machines.js";
 import { registerPayoutRoutes } from "./routes/payouts.js";
 import { registerRevenueRoutes } from "./routes/revenue.js";
 import { registerNetworkAdminRoutes } from "./routes/network-admin.js";
+import { registerAdminUserRoutes } from "./routes/admin-users.js";
+import { fetchAccountBalances, startUnverifiedPurge } from "./account-admin.js";
 import { registerWalletApiRoutes } from "./routes/wallet-api.js";
 import { registerConversationRoutes } from "./routes/conversations.js";
 import { registerEscalationRoutes } from "./routes/escalations.js";
@@ -934,6 +936,25 @@ registerNetworkAdminRoutes(app, {
     };
   }
 });
+
+// Settings > Admin > Users: the account list, deleting accounts and the cleanup of abandoned sign-ups
+// (src/portal/account-admin.ts). Balances come from every allowlisted coordinator, with the service token.
+const allowlistedCoordinatorUrls = async () =>
+  [...COORDINATOR_DISCOVERY_URLS, ...(await controlPlaneCoordinatorUrls())].filter((url) => coordinatorUrlAllowed(url, COORDINATOR_URL_POLICY));
+const accountBalanceDeps = { coordinatorUrls: allowlistedCoordinatorUrls, serviceToken: PORTAL_SERVICE_TOKEN, timeoutMs: EXTERNAL_HTTP_TIMEOUT_MS };
+registerAdminUserRoutes(app, { store, getCurrentUser, buildAccessContext, balances: accountBalanceDeps });
+// PORTAL_PURGE_UNVERIFIED_AFTER_DAYS (unset = off): the daily cleanup, under the same checks.
+startUnverifiedPurge(
+  store
+    ? {
+        store,
+        balances: (userId) => fetchAccountBalances(accountBalanceDeps, userId),
+        // The job never deletes an admin; the allowlist is checked by email here.
+        isAdmin: (u) => u.role === "admin" || (u.emailVerified && SYSTEM_ADMIN_EMAILS.has(normalizeEmail(u.email)))
+      }
+    : null,
+  C.PORTAL_PURGE_UNVERIFIED_AFTER_DAYS
+);
 
 // #16: HTML pages live in src/portal/pages/; the home page shows live sats pricing (public-pricing.ts).
 registerPortalPages(app, { getPricing: coordinatorPricingSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }) });

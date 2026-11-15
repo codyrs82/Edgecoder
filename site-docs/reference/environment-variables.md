@@ -533,6 +533,7 @@ The schemas are collected in `src/config/index.ts`. `tests/common/env-docs.test.
 | `WALLET_SEND_MFA_TTL_MS` | integer ms, 1000 to 31 days | `600000` |
 | `PORTAL_WITHDRAW_DAILY_CAP_SATS` | integer sats ≥ 0 (0 = no portal cap) | `500000` |
 | `MOBILE_OAUTH_TOKEN_TTL_MS` | integer ms, 1000 to 31 days | `300000` |
+| `PORTAL_PURGE_UNVERIFIED_AFTER_DAYS` | integer days, 1 to 3650: once a day, delete unverified email accounts older than this with no enrolled machines, no API keys, no activity in that window, and no cSats balance or pending payout on any coordinator (each coordinator is asked; one that does not answer skips the account). Agent-key accounts and admins are never purged. Each deletion is recorded in the admin audit log | unset (off) |
 | `OAUTH_MICROSOFT_PROMPT` | string | `select_account` |
 | `PASSKEY_ALLOWED_ORIGINS` | string | unset |
 | `COORDINATOR_OPERATIONS_OWNER_EMAILS` | string | unset |

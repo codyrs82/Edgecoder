@@ -49,6 +49,11 @@ export const portalConfigSchema = z.object({
   /** Most sats one account can withdraw to invoices per rolling 24 h through the portal; 0 = no portal cap. */
   PORTAL_WITHDRAW_DAILY_CAP_SATS: envInt(500_000, { min: 0, max: 2_100_000_000_000_000 }),
   MOBILE_OAUTH_TOKEN_TTL_MS: ttl(300_000),
+  /**
+   * Daily deletion of unverified accounts older than this many days with no machines, API keys,
+   * balance, pending payouts or activity (src/portal/account-admin.ts). Unset: off.
+   */
+  PORTAL_PURGE_UNVERIFIED_AFTER_DAYS: envInt(undefined, { min: 1, max: 3650 }),
   // #39: read by chatCapacityOptionsFromEnv (src/portal/chat-capacity.ts); declared here so a bad value stops startup.
   PORTAL_CHAT_CAPACITY_TIMEOUT_MS: envInt(2_000, { min: 100, max: 30_000 }),
   PORTAL_CHAT_CAPACITY_TTL_MS: envInt(15_000, { min: 0, max: 600_000 }),
