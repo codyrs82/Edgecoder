@@ -181,3 +181,12 @@ describe("diagnostics are written by the agent itself", () => {
     expect(own.statusCode).toBe(200);
   });
 });
+
+describe("invoice flood", () => {
+  test("an account holds at most 5 open invoices", async () => {
+    const codes: number[] = [];
+    for (let i = 0; i < 8; i++) codes.push((await signedPost(agentB, "/account/buy", { amountSats: 1000 })).statusCode);
+    expect(codes.slice(0, 5)).toEqual([200, 200, 200, 200, 200]);
+    expect(codes.slice(5)).toEqual([429, 429, 429]);
+  });
+});

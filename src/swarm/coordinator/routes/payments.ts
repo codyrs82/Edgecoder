@@ -13,7 +13,7 @@ import { PAYMENT_INTENT_TTL_MS, PAYMENT_WEBHOOK_SECRET } from "../context.js";
 import { authorizeAdmin, callerAccount, requireMeshToken } from "../auth.js";
 import { paymentIntents } from "../economy.js";
 import { ECONOMY_PAYMENTS_ENABLED } from "../payouts.js";
-import { createPaymentIntent, reconcileIntent, settleIfPaid } from "../payments.js";
+import { createPaymentIntent, reconcileIntent, settleIfPaid, openIntentCount, MAX_OPEN_INTENTS_PER_ACCOUNT } from "../payments.js";
 
 export function registerPaymentRoutes(app: CoordinatorApp): void {
   app.post("/economy/payments/intents", async (req, reply) => {
@@ -36,6 +36,7 @@ export function registerPaymentRoutes(app: CoordinatorApp): void {
     if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
     if (!ECONOMY_PAYMENTS_ENABLED) return reply.code(503).send({ error: "payments_disabled" });
     const accountId = caller.accountId;
+    if (openIntentCount(accountId) >= MAX_OPEN_INTENTS_PER_ACCOUNT) return reply.code(429).send({ error: "too_many_open_invoices" });
     const intent = await createPaymentIntent(accountId, amountSats);
     return reply.send({ intentId: intent.intentId, invoice: intent.invoiceRef, amountSats: intent.amountSats, cSats: intent.quotedCredits, feeSats: intent.coordinatorFeeSats, network: intent.network, expiresInSeconds: Math.floor(PAYMENT_INTENT_TTL_MS / 1000) });
   });
