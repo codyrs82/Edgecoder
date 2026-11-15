@@ -1,0 +1,137 @@
+# Load testing the live regtest network
+
+`scripts/loadgen/` drives realistic traffic at the live **regtest** network through the public
+OpenAI-compatible API (`https://edgecoder.io/v1/chat/completions`), from a temporary Fly app with
+one machine per region, so the owner can push the network and watch it on **edgecoder.io →
+Settings → Network**. It has no dependencies (Node 22) and ships to Fly as a base64 tarball in the
+machine environment on a stock `node:22-slim` image (no image build).
+
+It is not the stress harness: `scripts/stress/` simulates agents locally against a docker cluster;
+this one uses the real agents on the real network and only plays the buyers.
+
+## What it does
+
+Each test account (`st1`–`st10`, `~/.config/edgecoder/e2e/accounts/*.json`) is a virtual user, so
+the agents' owners are also the network's customers and their machines serve each other. Users get
+a persona (coder, chatter, integrator) that weights three behaviours:
+
+| behaviour | what | models (weighted) |
+|---|---|---|
+| chat | short questions with one checkable answer (accuracy is measured) | `network/qwen2.5-coder:1.5b`, `:7b@apple`, `qwen3-coder:30b`, `auto` |
+| coding | an agent-style session: system prompt with tools (`read_file`, `search`, `edit_file`, `answer`), a stable session id (`user` field and `x-session-id`), and turn after turn of pasted source with a checkable "what does this function return" question; the conversation grows from ~2K to ~20K tokens (8K on smaller models), with 5–20 s of think time between turns | `qwen3-coder:30b` (the GPU), `:7b@apple`, `auto` |
+| burst | 2–5 concurrent one-offs | mostly `1.5b`, some `auto` |
+
+Arrivals are open-loop (Poisson) at the stage's rate; a burst of k calls uses k arrivals, and a
+coding turn whose think time is over takes the next arrival. **Code tasks** (sandboxed jobs) are not
+generated: `/submit` needs a signed agent identity enrolled under the buyer's account (the stress
+harness does this), which would add phantom agents to the network, and every live agent today is
+inference-only (`SANDBOX_MODE=none`), so jobs would never run.
+
+## Limits (enforced in code)
+
+- **16 calls/s across the whole network**, hard-coded (`HARD_MAX_RATE`). Each machine starts at
+  most `floor(cap / machines)` calls in any sliding second; `--max-rate` can only lower the cap.
+  With 4 regions that is 4/s each; a split that cannot fit (e.g. 5 machines under a 3/s cap)
+  refuses to start.
+- The smoke profile is capped at 3 calls/s and 2 minutes.
+- At most 48 calls in flight per machine; arrivals beyond that are counted as `dropped`.
+- **Backoff**: when *load* errors (timeouts, `no_capacity`, 429, 5xx, stream errors) pass the
+  profile's threshold over 30 s, the machine drops to the previous stage's rate for the rest of the
+  stage and then stops; a second breach stops it at once. Gaps (`no_agent_has_model`,
+  `no_agent_in_class`) and empty wallets do not count: they say nothing about load.
+- **Budget**: a user is skipped below `--min-balance` (default 1500 cSats: every network call sets
+  aside up to ~750 cSats up front, refunded after); a `402` pauses that user for a minute; each
+  machine stops after its share of `--budget` cSats (default 2000 for the run).
+- This tool generates no agents (the owner's limit is ≤ 60 agents on the network).
+- Regtest only: top-ups refuse any invoice that is not `lnbcrt…`.
+
+## Profiles
+
+| profile | schedule (network-wide calls/s) | backoff threshold |
+|---|---|---|
+| `smoke` | 1.5 for 2 min | 50 % |
+| `steady` | 4 (or `--rate`) for `--duration` (default 30 min) | 15 % |
+| `ramp` | 0.5 → 2 → 4 → 8 → 12 → 16, `--stage-minutes` each (default 5) | 10 % |
+| `saturate` | 2 → 4 → 8 → 12 (2 min each), then 16 for 20 min | 40 % |
+| `soak` | 2 → 4 → 6 → 4 (15 min each), looped for `--duration` (default 2 h) | 10 % |
+
+`--loop` repeats any schedule until `--duration`; `--duration` also cuts a schedule short.
+`node scripts/loadgen/loadgen.mjs --profile ramp --dry-run` prints the schedule without sending anything.
+
+## Running it
+
+Prerequisites: `fly` logged in (or `FLY_API_TOKEN`, else `~/.config/edgecoder/fly.token`), the
+account files with API keys, and the coordinator admin token in
+`~/.config/edgecoder/coordinator-admin-token` for the server-side report. No command prints a key.
+
+```sh
+# 0. Once: the app and its only secret (LOADGEN_KEYS, built from the account files on stdin)
+scripts/loadgen/fly.sh create
+
+# 1. Budget: balances, then top up every account below 1500 to 3000 cSats (at most 21000 sats)
+node scripts/loadgen/budget.mjs check
+node scripts/loadgen/budget.mjs topup --min 1500 --to 3000 --max-total 21000 [--dry-run]
+
+# 2. Run (all machines start together ~150 s after the deploy; the generated fly.toml goes to
+#    $LOADGEN_FLY_DIR, default $TMPDIR/edgecoder-loadgen, never into the repo)
+scripts/loadgen/fly.sh run smoke    --regions iad,lhr
+scripts/loadgen/fly.sh run steady   --rate 4 --duration 30m
+scripts/loadgen/fly.sh run ramp     --stage-minutes 5               # add --max-rate 8 to stop at 8/s
+scripts/loadgen/fly.sh run saturate --budget 6000
+scripts/loadgen/fly.sh run soak     --duration 2h --loop
+
+# 3. Watch: live JSON lines, and the admin page (below)
+scripts/loadgen/fly.sh logs
+
+# 4. Results: merges every machine's stages and adds the coordinators' series for the same window
+scripts/loadgen/fly.sh report --out /tmp/loadgen-report.json
+
+# 5. Tear down (results on the machines are gone after this, so report first)
+scripts/loadgen/fly.sh stop        # fly scale count 0: no machines, no cost
+scripts/loadgen/fly.sh destroy     # delete the app and its secret
+```
+
+Locally, one process plays every user (useful for a quick check):
+`node scripts/loadgen/loadgen.mjs --profile smoke --users st1,st2 --duration 60s`.
+
+Machines stop on their own `LOADGEN_LINGER_SEC` (default 30 min) after their run ends (restart
+policy `never`), so a forgotten app costs at most that.
+
+## Output
+
+Every line is `TAG {json}` with `run` and `region`:
+
+- `LOADGEN_START` (config and schedule), `LOADGEN_USER` (balance, persona, active or why not)
+- `LOADGEN_TICK` every 10 s: rate, calls in flight, calls/errors over the last 30 s, cSats spent
+- `LOADGEN_ERR`: every error while few, then every 20th (`detail` is the API's message)
+- `LOADGEN_EVENT`: `stage_start`, `backoff`, `user_paused`, `user_stopped`, `stopping`
+- `LOADGEN_STAGE` at each stage end, `LOADGEN_STAGE_FINAL` after the drain (late calls included):
+  throughput (ok/s), success %, accuracy %, TTFT and total p50/p90/p99, errors by type
+  (`no_capacity`, `no_agent_has_model`, `no_agent_in_class`, `rate_limited`, `timeout`,
+  `insufficient_funds`, `http_5xx`, …), cSats, tokens, and the same per model, per class asked for
+  and per behaviour
+- `LOADGEN_SUMMARY` and a table at the end
+
+`report.mjs` merges machines (latency histograms with ~5 % buckets, so percentiles stay correct
+across machines) and, for each stage window, the coordinators' `/admin/network` samples:
+utilization (busy slots / slots, average and peak), busy agents, queue and waiting-inference
+peaks, dispatch pickup p90, server-side TTFT p90, started/completed/failed and no-capacity counts.
+Those samples live in coordinator memory (24 h): a coordinator restart during a run loses them.
+
+## Reading Settings → Network during a run
+
+- **Utilization** should climb with each stage. If it stays low while the client sees
+  `no_capacity`, slots are idle but not picked up: compare pickup p90.
+- **Queue / waiting inference** rising and not draining between ticks means arrivals exceed
+  service; the saturation point is the stage where client throughput stops tracking offered rate.
+- **Pickup p90** is dispatch latency (queued → claimed); client TTFT minus pickup is model time.
+- **Gaps** list models asked for with no holder or no free slot: expect `qwen2.5-coder:7b` (apple)
+  when the Macs are offline or registered as `cpu`.
+- Coding sessions land on the GPU (`qwen3-coder:30b`, one slot): it saturates first.
+
+## Cost
+
+Measured on the smoke run (168 calls in 2 min): 17.9 cSats, ~0.11 cSats per call on this mix
+(30b coding calls ≈ 0.6 cSats, 1.5b chat ≈ 0.001). Every call also sets aside ~750 cSats while it
+runs, which is why accounts need a cushion. Fly: `shared-cpu-1x` 512 MB machines, about $0.005 per
+machine-hour.
