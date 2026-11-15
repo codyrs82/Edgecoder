@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { MockBLETransport } from "../../../src/mesh/ble/ble-transport.js";
 import { BLEMeshManager } from "../../../src/mesh/ble/ble-mesh-manager.js";
@@ -512,4 +512,9 @@ describe("BLE mesh e2e (mock transport)", () => {
     expect(engine.balance("laptop-owner")).toBeCloseTo(1.776, 9);
     expect(engine.balance("phone-owner")).toBeCloseTo(10 - 1.776, 9);
   });
+});
+
+// helpers/cosign.ts advances a mocked clock by each task's reported time; give the real one back.
+afterEach(() => {
+  vi.useRealTimers();
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { BLEMeshManager, modelQualityMultiplier } from "../../../src/mesh/ble/ble-mesh-manager.js";
 import { MockBLETransport } from "../../../src/mesh/ble/ble-transport.js";
 import { SQLiteStore } from "../../../src/db/sqlite-store.js";
@@ -527,5 +527,36 @@ describe("modelQualityMultiplier", () => {
   it("returns 0.3 for sub-1.5B models", () => {
     expect(modelQualityMultiplier(0.5)).toBe(0.3);
     expect(modelQualityMultiplier(1)).toBe(0.3);
+  });
+});
+
+// helpers/cosign.ts advances a mocked clock by each task's reported time; give the real one back.
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("BLE credit inflation by a provider (agent attacker model)", () => {
+  it("a provider reporting far more CPU time than the request took is paid at most the elapsed time", async () => {
+    const { signBleTxV3 } = await import("../../../src/credits/ble-tx-v3.js");
+    const network = new Map<string, MockBLETransport>();
+    const requester = new MockBLETransport("agent-req", network);
+    const liar = new MockBLETransport("agent-liar", network);
+    liar.startAdvertising({ agentId: "agent-liar", model: "m", modelParamSize: 7, memoryMB: 8192, batteryPct: 90, currentLoad: 0, deviceType: "workstation" });
+    liar.onTaskRequest(async (req) => ({ requestId: req.requestId, providerId: "agent-liar", providerAccountId: "acct-liar", status: "completed" as const, output: "x", cpuSeconds: 1_000_000, providerSignature: "" }));
+    // Co-signs whatever it is asked to.
+    const signed: number[] = [];
+    liar.onCosignRequest(async (req) => {
+      signed.push(req.tx.cpuMillis);
+      return { type: "cosign_result", requestId: req.requestId, txId: req.tx.txId, status: "signed", providerSignature: signBleTxV3(req.tx, keysFor("agent-liar").privateKeyPem) } as any;
+    });
+    const manager = new BLEMeshManager("agent-req", "acct-req", requester, store, requesterOptions("agent-req"));
+    manager.setOffline(true);
+    manager.refreshPeers();
+    const res = await manager.routeTask({ requestId: "r-liar", requesterId: "agent-req", task: "t", language: "python", requesterSignature: "" }, 1);
+    expect(res?.status).toBe("completed");
+    const pending = manager.pendingTransactions();
+    // Nothing near the claimed 1e6 s: at most what the (instant) request took on the requester's clock.
+    for (const tx of pending) expect(tx.cpuSeconds).toBeLessThan(5);
+    for (const ms of signed) expect(ms).toBeLessThan(5_000);
   });
 });
