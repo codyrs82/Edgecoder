@@ -35,6 +35,7 @@ import { ensureOllamaModelInstalled, isOllamaLibraryModelName } from "../model/o
 import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
 import { BLEMeshManager } from "../mesh/ble/ble-mesh-manager.js";
 import { BleCosignProvider } from "../mesh/ble/ble-cosign.js";
+import { paramSizeBillions } from "../model/catalog.js";
 import { ledgerRowToTransaction, settledBleTxIds } from "../mesh/ble/offline-ledger.js";
 import { localStore } from "../db/local-store.js";
 import { hashRequestBody, signRequest } from "../security/request-signing.js";
@@ -1237,7 +1238,7 @@ async function loop(): Promise<void> {
       bleTransport.startAdvertising({
         agentId: AGENT_ID,
         model: OLLAMA_MODEL,
-        modelParamSize: 0,
+        modelParamSize: paramSizeBillions(OLLAMA_MODEL),
         memoryMB: Math.round(totalmem() / 1_000_000),
         batteryPct: 100,
         currentLoad: 0,
