@@ -464,6 +464,8 @@ Amounts must be numbers of 0 or more. A value the reader's own limit rejects (no
 | `EDGECODER_IDE_SETTINGS_FILE` | `~/.edgecoder/ide-settings.json` | Where IDE settings are stored. |
 | `EDGECODER_PROJECTS_DIR` | the setting, else `~/EdgeCoder` | Where projects are created. |
 | `EDGECODER_GH_BIN` | found on `PATH` | Path of the GitHub CLI. |
+| `EDGECODER_AUTO_MIN_CHAT_B` | `7` | Auto's quality floor for questions and chat: the smallest model (billions of parameters) Auto picks. Auto stays the cheapest place among models that meet it. Also read by the hosted endpoint's `auto`. |
+| `EDGECODER_AUTO_MIN_CODING_B` | `7` | The same floor for agent work (tools or a long context). |
 
 ## Startup validation (#15)
 

@@ -51,7 +51,10 @@ export const ideProviderConfigSchema = z.object({
   EDGECODER_IDE_SETTINGS_FILE: str(),
   EDGECODER_PROJECTS_DIR: str(),
   EDGECODER_GH_BIN: str(),
-  EDGECODER_TRUST_FILE: str()
+  EDGECODER_TRUST_FILE: str(),
+  /** Auto's quality floor in billions of parameters (src/inference-api/auto-route.ts): chat and agent work. */
+  EDGECODER_AUTO_MIN_CHAT_B: envNumber(undefined, { min: 0 }),
+  EDGECODER_AUTO_MIN_CODING_B: envNumber(undefined, { min: 0 })
 });
 
 export type IdeProviderConfig = z.infer<typeof ideProviderConfigSchema>;
