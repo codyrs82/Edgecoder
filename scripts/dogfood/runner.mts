@@ -536,7 +536,7 @@ async function attempt(job: Job, tier: TierName, n: number, base: string, contex
     if (acc.passed && job.output && existsSync(join(wt, job.output))) copyFileSync(join(wt, job.output), join(outDir, `${job.id}-${job.output.split("/").pop()}`));
     if (acc.passed && COMMIT && job.commit !== false) {
       const where = card.where.length ? card.where.join(", ") : TIERS[tier].label;
-      const checks = acc.checks.map((c) => c.kind === "vitest" ? `vitest ${c.testsPassed} passed` : c.kind === "tsc" ? `tsc clean${c.files ? " (test file)" : ""}` : c.kind === "grep" ? `grep ${c.file}` : c.kind).join(", ");
+      const checks = acc.checks.map((c) => c.kind === "vitest" ? `vitest ${c.testsPassed} passed` : c.kind === "tsc" ? (c.skipped ? "project tsc not needed (no src/ change)" : `tsc clean${c.files ? " (test file, strict)" : " (project)"}`) : c.kind === "grep" ? `grep ${c.file}` : c.kind).join(", ");
       const msg = `${job.title}\n\nDone by the EdgeCoder network: model ${model} (tier ${tier}, ran on ${where}),\ndriven by the IDE agent loop (${r.via}), dogfood job ${job.id}, attempt ${n}.\nPassed the acceptance checks: ${checks || "diff limited to allowed paths"}.\nReviewed by nobody yet: check before merging.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01MUkD5bLaq2ZfyAYXZLm2ne\n`;
       execFileSync("git", ["-c", "user.name=EdgeCoder dogfood", "-c", "user.email=dogfood@edgecoder.invalid", "commit", "-q", "-F", "-"], { cwd: wt, input: msg });
       let target = `dogfood/${job.id}`;
