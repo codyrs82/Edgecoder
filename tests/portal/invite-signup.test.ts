@@ -93,7 +93,7 @@ function build(mode: "open" | "invite") {
 }
 
 const signup = (ctx: ReturnType<typeof build>, extra: Record<string, unknown> = {}) =>
-  ctx.app.inject({ method: "POST", url: "/auth/signup", payload: { email: "new@example.test", password: "correct-horse-1", ...extra } });
+  ctx.app.inject({ method: "POST", url: "/auth/signup", payload: { email: "new@example.test", password: "correct-horse-1", acceptTerms: true, ...extra } });
 
 async function oauth(ctx: ReturnType<typeof build>, query = "") {
   const start = await ctx.app.inject({ url: `/auth/oauth/google/start${query}` });

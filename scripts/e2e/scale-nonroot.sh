@@ -39,7 +39,7 @@ email="scale-$(openssl rand -hex 4)@example.com"
 password="$(openssl rand -hex 16)"
 json() { node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const v=JSON.parse(d)[process.argv[1]];if(v===undefined)process.exit(1);console.log(v)})' "$1"; }
 post() { curl -sS --fail-with-body -X POST -H 'content-type: application/json' "$@"; }
-signup=$(post -d "{\"email\":\"$email\",\"password\":\"$password\",\"displayName\":\"Scale Test\"}" "$PORTAL_URL/auth/signup") \
+signup=$(post -d "{\"email\":\"$email\",\"password\":\"$password\",\"displayName\":\"Scale Test\",\"acceptTerms\":true}" "$PORTAL_URL/auth/signup") \
   || fail "portal signup failed: $signup"
 user_id=$(printf '%s' "$signup" | json userId) || fail "signup returned no userId: $signup"
 dc exec -T postgres psql -v ON_ERROR_STOP=1 -q -U "${POSTGRES_USER:-edgecoder}" -d "${POSTGRES_DB:-edgecoder}" \

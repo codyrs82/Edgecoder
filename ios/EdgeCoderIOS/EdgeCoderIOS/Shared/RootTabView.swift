@@ -115,13 +115,15 @@ private struct LoginSheet: View {
                     }
                     .disabled(viewModel.email.isEmpty || viewModel.password.isEmpty || viewModel.isLoading)
 
+                    TermsAgreementToggle(isOn: $viewModel.acceptedTerms)
+
                     Button("Create Account") {
                         Task {
                             await viewModel.signUp(sessionStore: sessionStore)
                             if sessionStore.isAuthenticated { dismiss() }
                         }
                     }
-                    .disabled(viewModel.email.isEmpty || viewModel.password.count < 8 || viewModel.isLoading)
+                    .disabled(viewModel.email.isEmpty || viewModel.password.count < 8 || viewModel.isLoading || !viewModel.acceptedTerms)
                 }
 
                 if !viewModel.statusMessage.isEmpty {

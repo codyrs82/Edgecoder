@@ -80,6 +80,13 @@ app.get("/portal/dashboard", async (_req, reply) => {
     </div>
     <div id="adminOpsSection" class="hidden">
     </div>
+    <div id="termsCard" class="callout warn hidden" data-legal-draft="true">
+      <h3>Please review and accept our terms</h3>
+      <div class="muted">Your account was created without accepting the current Terms, or they have changed. The documents are drafts pending legal review.</div>
+      <style nonce="${CSP_NONCE}">.agree-row{display:flex;gap:8px;align-items:flex-start;font-size:13px;margin-top:10px;cursor:pointer}.agree-row input{width:auto;min-height:0;margin:2px 0 0;flex:none}.agree-row a{color:var(--brand-2);text-decoration:underline}</style>
+      <label class="agree-row" for="termsAcceptBox"><input id="termsAcceptBox" type="checkbox" /><span>I agree to the <a href="/terms" target="_blank" rel="noopener">Terms</a>, <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a> and <a href="/acceptable-use" target="_blank" rel="noopener">Acceptable Use Policy</a></span></label>
+      <div class="row u-mt-10"><button class="primary" id="termsAcceptBtn" disabled>Accept</button></div>
+    </div>
     <div id="emailVerifyCard" class="callout warn hidden">
       <h3>Email verification required</h3>
       <div class="muted">Your account email is not verified yet. Verify it to fully activate enrolled nodes.</div>
@@ -331,6 +338,26 @@ app.get("/portal/dashboard", async (_req, reply) => {
     })().catch((err) => {
       showToast("Could not load dashboard: " + String(err.message || err), true);
     });
+
+    /* ── Legal acceptance: accounts without the current Terms (SSO from an app, older accounts) ── */
+    (async () => {
+      const legal = await api("/portal/api/legal", { method: "GET", headers: {} });
+      if (!legal || legal.termsCurrent) return;
+      const card = document.getElementById("termsCard");
+      const box = document.getElementById("termsAcceptBox");
+      const btn = document.getElementById("termsAcceptBtn");
+      card.classList.remove("hidden");
+      box.addEventListener("change", () => { btn.disabled = !box.checked; });
+      btn.addEventListener("click", async () => {
+        try {
+          await api("/portal/api/legal/accept", { method: "POST", body: JSON.stringify({ document: "terms", version: legal.current.terms }) });
+          card.classList.add("hidden");
+          showToast("Thanks. Your acceptance is recorded.");
+        } catch (err) {
+          showToast("Could not record acceptance: " + String(err.message || err), true);
+        }
+      });
+    })().catch(() => undefined);
 
     /* ── Coordinator Ops load + refresh ── */
     let opsTimer = null;

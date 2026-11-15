@@ -44,6 +44,7 @@ async function seedData(): Promise<void> {
       email: "test@edgecoder.io",
       password: "TestPassword123!",
       displayName: "E2E Test User",
+      acceptTerms: true,
     }),
   });
   if (!signupRes.ok) throw new Error(`Signup failed: ${signupRes.status} ${await signupRes.text()}`);

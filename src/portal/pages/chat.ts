@@ -5,6 +5,8 @@ import type { FastifyInstance } from "fastify";
 import { portalAuthedPageHtml } from "./layout.js";
 import { icon } from "./design-system.js";
 import { CSP_NONCE } from "../csp-nonce.js";
+import { escapeHtml } from "./escape.js";
+import { NOTICES } from "../../common/legal-notices.js";
 
 // #16: moved verbatim from src/portal/server.ts (split from home-chat.ts to leave room for #27).
 export function registerChatPage(app: FastifyInstance): void {
@@ -169,6 +171,7 @@ app.get("/portal/chat", async (_req, reply) => {
               </div>
             </div>
             <div class="muted u-fs-10 u-mt-6 u-center">Enter to send, Shift+Enter for newline</div>
+            <div class="muted u-fs-10 u-mt-6 u-center" id="aiNotice">${escapeHtml(NOTICES.aiOutput)}</div>
           </div>
         </div>
       </div>

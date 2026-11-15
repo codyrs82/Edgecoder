@@ -179,7 +179,7 @@ export function hostPageHtml(state: HostFormState = { kind: "blank" }): string {
             ${formHtml(state)}
           </section>
         </div>
-        <div class="foot"><span>&copy; 2025 EdgeCoder, LLC</span><a href="/">Home</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></div>
+        <div class="foot"><span>&copy; 2025 EdgeCoder, LLC</span><a href="/">Home</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="/acceptable-use">Acceptable Use</a><a href="/host-agreement">Host Agreement</a></div>
       </main>
     </body>
   </html>`;

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { computeOverview, getIdentity, getDashboardOverview, getModelList, backendReady, isRemoteMode, getProjectsFolder, setProjectsFolder, type ProjectsFolder } from "../lib/api";
+  import { computeOverview, getIdentity, getDashboardOverview, getModelList, backendReady, isRemoteMode, getProjectsFolder, setProjectsFolder, portalWebUrl, type ProjectsFolder } from "../lib/api";
   import { loadSettings, saveSetting } from "../lib/stores";
   import { coordinatorUrl as currentCoordinatorUrl, portalUrl as currentPortalUrl, setEndpoint, resetEndpoints, syncEndpointsToShell, testEndpoint, validateEndpointUrl, defaultEndpoints, type EndpointKind } from "../lib/endpoints";
   import { checkForUpdate, onUpdateStatus, downloadAndInstall, type UpdateStatus } from "../lib/updater";
@@ -7,6 +7,18 @@
   import { getThemePreference, setTheme, type ThemePreference } from "../lib/theme";
   import Select from "../components/ui/Select.svelte";
   import { notify } from "../lib/toast";
+  import { LEGAL_LINKS, NOTICES } from "../lib/legal-notices";
+
+  /** Open a portal page (legal drafts, the Bluetooth explainer) in the browser. */
+  async function openPortalPage(path: string) {
+    const url = portalWebUrl(path);
+    try {
+      const { open } = await import("@tauri-apps/plugin-shell");
+      await open(url);
+    } catch {
+      window.open(url, "_blank", "noopener");
+    }
+  }
 
   // App version
   let appVersion = $state("—");
@@ -82,7 +94,7 @@
   let bleSaving = $state(false);
   let bleNote = $state("");
 
-  // BLE peer discovery: the app keeps the choice and restarts its agent with it.
+  // Bluetooth mesh (docs/bluetooth-mesh.md): the app keeps the choice and restarts its agent with it.
   $effect(() => {
     import("@tauri-apps/api/core")
       .then(({ invoke }) => invoke<{ bleEnabled: boolean }>("get_agent_settings"))
@@ -396,11 +408,18 @@
       </div>
       <div class="sp-row">
         <div class="sp-text">
-          <span class="sp-title">BLE peer discovery</span>
-          <span class="sp-desc">{bleNote || "Find EdgeCoder machines nearby over Bluetooth (macOS)."}</span>
+          <span class="sp-title">Bluetooth mesh</span>
+          <span class="sp-desc" data-testid="ble-description">
+            When this Mac can't reach EdgeCoder over the internet, it can find nearby EdgeCoder devices over Bluetooth and get AI prompts answered by them; nearby devices can find this Mac too. Payment is signed by both devices and settled once one of them is back online.
+          </span>
+          <span class="sp-desc">
+            Prompts and answers travel to the nearby device without encryption, so don't send secrets. This Mac runs prompts for others only if an operator has set a mesh token (off by default), and never runs code from Bluetooth. Early feature: macOS and iOS only. It scans only while offline; advertising uses little power.
+            <button class="link-inline" onclick={() => openPortalPage("/bluetooth")}>Learn more ↗</button>
+          </span>
+          {#if bleNote}<span class="sp-desc" role="status">{bleNote}</span>{/if}
         </div>
         <div class="sp-controls">
-          <button class="sp-switch" role="switch" aria-checked={bleEnabled} aria-label="Enable BLE peer discovery" disabled={bleSaving} onclick={() => setBle(!bleEnabled)}></button>
+          <button class="sp-switch" role="switch" aria-checked={bleEnabled} aria-label="Enable Bluetooth mesh" disabled={bleSaving} onclick={() => setBle(!bleEnabled)}></button>
         </div>
       </div>
     </div>
@@ -437,6 +456,26 @@
       {:else}
         <div class="sp-row"><span class="sp-muted">Loading identity…</span></div>
       {/if}
+    </div>
+  </section>
+
+  <section class="sp-group" aria-labelledby="gen-legal">
+    <h2 class="sp-group-title" id="gen-legal">Legal</h2>
+    <div class="sp-card">
+      <div class="sp-row">
+        <div class="sp-text">
+          <span class="sp-title">Terms and policies</span>
+          <span class="sp-desc"><span class="sp-warn">{NOTICES.draft}</span></span>
+          <span class="sp-desc">{NOTICES.aiOutput}</span>
+          <span class="sp-desc">{NOTICES.hosting}</span>
+        </div>
+      </div>
+      {#each LEGAL_LINKS as doc (doc.href)}
+        <div class="sp-row">
+          <div class="sp-text"><span class="sp-title">{doc.label}</span></div>
+          <div class="sp-controls"><button onclick={() => openPortalPage(doc.href)}>Open ↗</button></div>
+        </div>
+      {/each}
     </div>
   </section>
 
@@ -488,4 +527,5 @@
   .general span.value { font-size: var(--fs-sm); }
   .general .save-row { display: flex; justify-content: flex-end; margin-top: 4px; }
   .general p { margin: 0; }
+  .general .link-inline { background: none; border: none; padding: 0; min-height: 0; color: var(--accent); font-size: inherit; cursor: pointer; text-decoration: underline; }
 </style>

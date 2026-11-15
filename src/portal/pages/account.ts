@@ -7,6 +7,7 @@ import { displayEnrollmentToken, escapeHtml } from "./escape.js";
 import { settingsPage } from "./settings-shell.js";
 import { WALLET_CONTENT, WALLET_SCRIPT } from "./wallet.js";
 import { CSP_NONCE } from "../csp-nonce.js";
+import { HOST_AGREEMENT_VERSION, NOTICES } from "../../common/legal-notices.js";
 
 // #16: moved verbatim from src/portal/server.ts.
 export function detectOS(userAgent: string): "macos" | "windows" | "linux" | "ios" | "unknown" {
@@ -156,6 +157,15 @@ app.get("/portal/settings/install", async (req, reply) => {
       .wz-more{font-size:11px;color:var(--brand);margin-left:8px;}
       .wz-aside{font-size:10px;color:var(--muted);}
       .wz-after{font-size:12px;color:var(--muted);margin-top:8px;}
+      .host-ack{background:var(--card);border:1px solid var(--brand-border);border-radius:var(--radius-md);padding:16px 18px;margin:0 0 22px;}
+      .host-ack h3{margin:0 0 6px;font-size:14px;}
+      .host-ack p{margin:0 0 10px;font-size:13px;color:var(--text-secondary);line-height:1.55;}
+      .host-ack label{display:flex;gap:8px;align-items:flex-start;font-size:13px;cursor:pointer;}
+      .host-ack input{width:auto;min-height:0;margin:2px 0 0;flex:none;}
+      .host-ack a{color:var(--brand-2);text-decoration:underline;}
+      .host-ack .ack-state{font-size:12px;color:var(--muted);margin-top:8px;}
+      .host-ack.done{border-color:var(--card-border);}
+      .needs-host-ack{opacity:.45;pointer-events:none;user-select:none;}
     </style>
 
     <!-- ── Hero ──────────────────────────────────────────────────────── -->
@@ -194,6 +204,15 @@ app.get("/portal/settings/install", async (req, reply) => {
       </div>
     </div>
 
+    <!-- ── Host Agreement (DRAFT pending legal review): accepted before the install steps ── -->
+    <div class="host-ack" id="hostAck" data-legal-draft="true">
+      <h3>Before you install: the Host Agreement</h3>
+      <p>${escapeHtml(NOTICES.hosting)} The <a href="/host-agreement" target="_blank" rel="noopener">Host Agreement</a> (a draft pending legal review) explains resources used, payouts and holds.</p>
+      <label for="hostAckBox"><input id="hostAckBox" type="checkbox" /><span>I agree to the <a href="/host-agreement" target="_blank" rel="noopener">Host Agreement</a> for every machine I install EdgeCoder on.</span></label>
+      <div class="ack-state" id="hostAckState">Accept to see the install steps.</div>
+    </div>
+
+    <div id="installSteps" class="needs-host-ack" aria-disabled="true">
     <!-- ── Primary platform card ─────────────────────────────────────── -->
     ${primaryCard}
 
@@ -204,10 +223,30 @@ app.get("/portal/settings/install", async (req, reply) => {
         ${secondaryCards}
       </div>
     </div>
+    </div>
   `;
 
   const script = `
     requireAuth().then(revealSettingsAdminTab).catch(() => {});
+
+    // Host Agreement: the install steps unlock once the current version is accepted (stored per account).
+    var HOST_AGREEMENT_VERSION = ${JSON.stringify(HOST_AGREEMENT_VERSION)};
+    function unlockInstall(atMs) {
+      var steps = document.getElementById('installSteps');
+      steps.classList.remove('needs-host-ack'); steps.removeAttribute('aria-disabled');
+      document.getElementById('hostAck').classList.add('done');
+      var box = document.getElementById('hostAckBox'); box.checked = true; box.disabled = true;
+      document.getElementById('hostAckState').textContent = 'Accepted (version ' + HOST_AGREEMENT_VERSION + (atMs ? ', ' + new Date(atMs).toLocaleString() : '') + ').';
+    }
+    api('/portal/api/legal', { method: 'GET', headers: {} }).then(function (r) {
+      if (r && r.hostAgreementCurrent) unlockInstall(r.accepted && r.accepted.hostAgreementAcceptedAtMs);
+    }).catch(function () {});
+    document.getElementById('hostAckBox').addEventListener('change', function (e) {
+      if (!e.target.checked) return;
+      api('/portal/api/legal/accept', { method: 'POST', body: JSON.stringify({ document: 'host-agreement', version: HOST_AGREEMENT_VERSION }) })
+        .then(function (r) { unlockInstall(r && r.acceptedAtMs); })
+        .catch(function (err) { e.target.checked = false; document.getElementById('hostAckState').textContent = 'Could not record acceptance: ' + String(err.message || err); });
+    });
 
     function copyCmd(id) {
       var el = document.getElementById(id);

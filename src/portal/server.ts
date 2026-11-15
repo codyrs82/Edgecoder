@@ -34,6 +34,7 @@ import { registerAdminUserRoutes } from "./routes/admin-users.js";
 import { fetchAccountBalances, startUnverifiedPurge } from "./account-admin.js";
 import { registerWalletApiRoutes } from "./routes/wallet-api.js";
 import { registerConversationRoutes } from "./routes/conversations.js";
+import { registerLegalRoutes } from "./routes/legal.js";
 import { registerEscalationRoutes } from "./routes/escalations.js";
 // Kept for existing importers (tests/portal/download-page.test.ts).
 export { detectOS } from "./pages/account.js";
@@ -865,6 +866,7 @@ registerCoordinatorOpsRoutes(app, coordinatorOpsRouteDeps);
 
 // Chat API — conversations CRUD + streaming chat
 registerConversationRoutes(app, { store, getCurrentUser });
+registerLegalRoutes(app, { store, getCurrentUser });
 
 // #39: a chat goes to a coordinator that reports capacity for it (src/portal/chat-capacity.ts):
 // the configured list in order, then the control plane's, each URL through the policy above.
