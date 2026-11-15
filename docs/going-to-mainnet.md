@@ -43,6 +43,36 @@ To move a database to a new network, wipe its ledger explicitly:
    `KEPT_TABLES` in `src/db/ledger-reset.ts`; a test fails if a new table is in neither.
 4. Start the coordinators with `BITCOIN_NETWORK=bitcoin`.
 
+## Signet stage
+
+Before mainnet, the coordinators move from the private regtest hub (`deploy/lnd-test`) to a
+Lightning node on a **public** test network, so payouts and purchases route through third-party
+channels: `edgecoder-lnd-signet` on Mutinynet (a public signet with 30 s blocks), set up in
+[deploy/lnd-signet/README.md](../deploy/lnd-signet/README.md). Its wallet seed sits on the node's
+volume (test coins only; never on mainnet).
+
+The switch is prepared but not applied; it needs the owner's go-ahead. Steps are in that README,
+section 4. In short:
+
+1. Preconditions: the node is synced, has an inbound channel (the faucet's channel to us) and an
+   outbound one, and paid and received a faucet invoice (README sections 2 and 3).
+2. Stage on `edgecoder-seed` and `edgecoder-seed-eu`, as Fly secrets (they override the seeds'
+   `fly.toml` `[env]`): `LIGHTNING_PROVIDER=lnd`,
+   `LND_REST_URL=https://edgecoder-lnd-signet.internal:8080`, `LND_TLS_CERT_BASE64` and
+   `LND_MACAROON_HEX` (the node's cert and scoped `coordinator.macaroon`) and
+   `BITCOIN_NETWORK=signet`: `deploy/lnd-signet/connect-seeds.sh --i-have-the-owners-go-ahead`.
+3. Stop both seeds, back up the database, then reset the ledger:
+   `npx tsx scripts/ledger-reset-network.ts --confirm-wipe-ledger regtest --to signet --dry-run`,
+   then without `--dry-run` (see "Switching the database to mainnet" above for what it wipes).
+4. `fly secrets deploy` on both seeds; check `ledger_network_checked` in the logs, a purchase, a
+   withdrawal and `GET /admin/payouts/reconciliation` (`ok`).
+5. Rollback: stop the seeds, reset the ledger `signet` to `regtest` (or restore the step-3
+   backup), `fly secrets unset --stage` the five names except the cert and macaroon, re-run
+   `deploy/lnd-test/connect-seeds.sh`, `fly secrets deploy`.
+
+The signet revenue withdrawal under "Withdrawing EdgeCoder revenue" can then be done on this
+network. (The anchoring validation run needs a bitcoind wallet, which this node does not expose.)
+
 ## Lightning node
 
 - [ ] `LIGHTNING_PROVIDER=lnd` (or `cln`) with `LND_REST_URL` on a private network or loopback.

@@ -1,0 +1,41 @@
+# Public-test-network (Mutinynet signet) Lightning node for the coordinators (see Dockerfile and
+# README.md). Test coins only. One machine runs bitcoind and lnd:
+#   bitcoind  pruned, P2P outbound only, RPC/ZMQ on loopback
+#   lnd       REST (8080) on Fly's private network only; P2P (9735) public
+# The coordinators would reach it at https://edgecoder-lnd-signet.internal:8080 over 6PN.
+app = "edgecoder-lnd-signet"
+primary_region = "ord" # next to edgecoder-seed and edgecoder-pg
+kill_timeout = 120     # let lnd and bitcoind flush on stop
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  LND_ALIAS = "edgecoder-signet"
+  BITCOIN_PRUNE_MB = "4000"   # the whole Mutinynet chain is a few GB; this caps block storage
+  BITCOIN_DBCACHE_MB = "450"
+  LND_EXTERNAL_IP = "137.66.52.175" # the app's dedicated IPv4 (README step 1), so peers can find the node
+
+[[mounts]]
+  source = "lnsignet"
+  destination = "/data"
+  initial_size = "10gb"
+  snapshot_retention = 7
+
+# Lightning P2P, public (dedicated IPv4 + IPv6). REST 8080 is deliberately not a service.
+[[services]]
+  internal_port = 9735
+  protocol = "tcp"
+  auto_stop_machines = "off"
+  auto_start_machines = false
+  min_machines_running = 1
+  [[services.ports]]
+    port = 9735
+  [[services.tcp_checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "120s"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"
