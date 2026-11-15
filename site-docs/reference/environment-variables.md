@@ -274,7 +274,7 @@ Validated by `workerConfigSchema` (`src/config/worker.ts`). Intervals are in ms.
 | `EDGECODER_RESPONSE_SIGNING` | by trust mode | `required` or `optional`: whether coordinator responses must be signed. |
 | `EDGECODER_STEERING` | on | `off`, `0` or `false` stops the worker following the signed coordinator registry. |
 | `EDGECODER_STEERING_INTERVAL_MS` | `600000` | Registry refresh interval (min 60000). |
-| `AGENT_PARALLEL_INFERENCE` | by installed memory | Concurrent model calls, 1 to 16. Other values fall back to the memory-based default. |
+| `AGENT_PARALLEL_INFERENCE` | by memory and model size | Concurrent model calls, 1 to 16. Default: as many 8k-token contexts as fit next to `OLLAMA_MODEL` in 60% of RAM, at most 2 below 31 GB and 4 above (a 4 GB machine with a 1.5B model runs 2, 8 GB with a 7B model 1); never more than `OLLAMA_NUM_PARALLEL` when that is set. The coordinator hands an agent a model call only while it has a free slot. Other values fall back to the default. |
 | `AGENT_MODEL_KEEP_ALIVE` | `30m`; `-1` with `AGENT_INFERENCE_ONLY` | How long Ollama keeps a model loaded after a network call (sent as Ollama's `keep_alive`): a duration such as `30m` or `1h`, a number of seconds, or `-1` to never unload (dedicated hosts). The agent also loads `OLLAMA_MODEL` at startup and after a model switch, before it pulls work, so the first call does not wait for a cold load (several seconds on a CPU). |
 | `SANDBOX_MODE` | `docker` (swarm-only), else `none` | `docker` or `none`. Any other value is treated as `none` with a warning, and the node takes no swarm tasks. |
 | `SANDBOX_REQUIRED` | unset | `true` refuses to run a task without a sandbox. |

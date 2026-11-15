@@ -137,9 +137,10 @@ describe("plan", () => {
     const mixed: Probe = (cmd) => (cmd === "nvidia-smi" ? "0, NVIDIA RTX 6000 Ada Generation, 49140\n1, NVIDIA GeForce RTX 4080, 16376\n2, NVIDIA GeForce RTX 3070, 8192\n" : null);
     const hw = detectHardware({ probe: mixed, platform: "linux", arch: "x64", ramGb: 512, cpuModel: "EPYC", cpuCores: 64, hostname: "mix" });
     const plan = planInstall(hw, parseInstallArgs(["apply", "--token", "t"]), true);
-    expect(plan.instances.map((i) => i.env.AGENT_PARALLEL_INFERENCE)).toEqual(["4", "2", "1"]);
+    // 48 GB: 4; 16 GB: 2; 8 GB with the small model picked for it: 2 (it fits twice next to the model).
+    expect(plan.instances.map((i) => [i.model, i.env.AGENT_PARALLEL_INFERENCE])).toEqual([["qwen3-coder:30b", "4"], [plan.instances[1].model, "2"], [plan.instances[2].model, "2"]]);
     const p = defaultPaths("linux", { nodeBin: "/usr/bin/node" });
-    expect(systemdOllamaUnit(p, plan.instances[2])).toContain('Environment="OLLAMA_NUM_PARALLEL=1"');
+    expect(systemdOllamaUnit(p, plan.instances[2])).toContain('Environment="OLLAMA_NUM_PARALLEL=2"');
   });
 
   it("the curl bootstrap installs zstd (Ollama's .tar.zst) first and hands every option to edgecoder-install", () => {

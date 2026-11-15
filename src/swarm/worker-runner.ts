@@ -6,6 +6,7 @@ import WebSocket from "ws";
 import { randomUUID, createHash } from "node:crypto";
 import { cpus, hostname, totalmem } from "node:os";
 import { parallelInferenceFor } from "./parallelism.js";
+import { paramsB } from "../inference-api/auto-route.js";
 import { ProviderRegistry } from "../model/providers.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
 import { Subtask, SubtaskResult, BLETaskRequest, Language, MeshMessage, SandboxMode } from "../common/types.js";
@@ -93,7 +94,11 @@ const PROVIDER = W.LOCAL_MODEL_PROVIDER;
 const OLLAMA_MODEL = W.OLLAMA_MODEL;
 const OLLAMA_HOST = W.OLLAMA_HOST;
 const OLLAMA_AUTO_INSTALL = W.OLLAMA_AUTO_INSTALL;
-const MAX_PARALLEL_INFERENCE = parallelInferenceFor(totalmem(), process.env.AGENT_PARALLEL_INFERENCE);
+// By memory and OLLAMA_MODEL's size, never past this machine's OLLAMA_NUM_PARALLEL when set (src/swarm/parallelism.ts).
+const MAX_PARALLEL_INFERENCE = parallelInferenceFor(totalmem(), process.env.AGENT_PARALLEL_INFERENCE, {
+  modelParamsB: W.OLLAMA_MODEL ? paramsB(W.OLLAMA_MODEL) : undefined,
+  ollamaNumParallel: process.env.OLLAMA_NUM_PARALLEL
+});
 const inflightInference = new Set<Promise<void>>();
 let meshAuthToken = W.MESH_AUTH_TOKEN ?? "";
 const COORDINATOR_HTTP_TIMEOUT_MS = W.COORDINATOR_HTTP_TIMEOUT_MS;

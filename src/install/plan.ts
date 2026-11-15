@@ -9,6 +9,7 @@
 import { EDGECODER_SEED_KEYS, isEdgecoderNetworkUrl } from "../trust/seed-keys.js";
 import { gpuModelForVram, MODEL_CATALOG, type CatalogModel } from "../model/catalog.js";
 import { parallelInferenceFor } from "../swarm/parallelism.js";
+import { paramsB } from "../inference-api/auto-route.js";
 import type { GpuInfo, HostHardware } from "./hardware.js";
 import type { InstallOptions } from "./options.js";
 
@@ -90,9 +91,9 @@ export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvaila
       OLLAMA_HOST: `http://127.0.0.1:${ollamaPort}`,
       OLLAMA_MODEL: model,
       MAX_CONCURRENT_TASKS: "1",
-      // Parallel model calls sized by this instance's own memory (the GPU's VRAM, not host RAM);
+      // Parallel model calls sized by this instance's own memory (the GPU's VRAM, not host RAM) and its model;
       // its Ollama gets the same OLLAMA_NUM_PARALLEL (services.ts), as the desktop app does.
-      AGENT_PARALLEL_INFERENCE: String(parallelInferenceFor(memoryGb * 1024 ** 3)),
+      AGENT_PARALLEL_INFERENCE: String(parallelInferenceFor(memoryGb * 1024 ** 3, undefined, { modelParamsB: paramsB(model), gpu: discreteGpu })),
       EDGECODER_INSTANCE: String(index)
     };
     // On the edgecoder.io network the agent trusts only the seeds' published keys, as the desktop app does.

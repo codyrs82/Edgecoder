@@ -126,8 +126,10 @@ Env files live in `/etc/edgecoder` (Windows `C:\ProgramData\EdgeCoder`); models 
 `/var/lib/edgecoder/ollama` so each model downloads once. The model per instance is the best
 catalog model that fits the GPU's memory (recommended first, coding before general: 24 to 80 GB →
 `qwen3-coder:30b`, 12 to 16 GB → `qwen3.5:9b`, 8 GB → `qwen3.5:4b`); override with `--model`.
-Parallel model calls are sized by the same memory (4 at 32 GB or more, 2 at 16 GB, else 1): the
-agent gets `AGENT_PARALLEL_INFERENCE` and its Ollama server the matching `OLLAMA_NUM_PARALLEL`.
+Parallel model calls are sized by the same memory and the model: as many 8k-token contexts as fit
+next to the model (90% of a GPU's VRAM, 60% of RAM), at most 2 below 31 GB and 4 above
+(`src/swarm/parallelism.ts`). The agent gets `AGENT_PARALLEL_INFERENCE` and its Ollama server the
+matching `OLLAMA_NUM_PARALLEL`.
 
 The agent reports the GPU it owns (`nvidia-smi`, `rocm-smi`, or Apple silicon's unified memory),
 so the coordinator prices it in the right class (an RTX 6000 Ada is `gpu.dc40`, an H100
