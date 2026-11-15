@@ -251,16 +251,17 @@ const bhv008RegistrationStorm: AnomalyRule = (stats, config) => {
 
 const bhv009RobotPrecision: AnomalyRule = (stats, config) => {
   if (
-    stats.durationStdDev < config.robotPrecisionStdDevThreshold &&
-    stats.totalTasks >= config.robotPrecisionMinTasks
+    // Code results only: model calls are timed by their prompt and model (see BehaviorStats.codeDurationStdDev).
+    (stats.codeTimingTasks ?? 0) >= config.robotPrecisionMinTasks &&
+    (stats.codeDurationStdDev ?? Infinity) < config.robotPrecisionStdDevThreshold
   ) {
     return {
       ruleId: "BHV009",
       ruleName: "Robot precision",
       severity: "WARN",
       blacklistReason: "forged_results",
-      description: `Duration stddev ${stats.durationStdDev.toFixed(1)}ms over ${stats.totalTasks} tasks (unnaturally consistent)`,
-      stats: { durationStdDev: stats.durationStdDev, totalTasks: stats.totalTasks },
+      description: `Duration stddev ${(stats.codeDurationStdDev ?? 0).toFixed(1)}ms over ${stats.codeTimingTasks} code tasks (unnaturally consistent)`,
+      stats: { durationStdDev: stats.codeDurationStdDev ?? 0, totalTasks: stats.codeTimingTasks ?? 0 },
     };
   }
   return null;

@@ -236,6 +236,8 @@ describe("AnomalyDetector", () => {
       const stats = baseStats({
         durationStdDev: 20,
         totalTasks: 12,
+        codeDurationStdDev: 20,
+        codeTimingTasks: 12,
       });
       const events = detector.evaluate(stats);
       const bhv009 = events.find(e => e.ruleId === "BHV009");
@@ -247,6 +249,20 @@ describe("AnomalyDetector", () => {
       const stats = baseStats({
         durationStdDev: 200,
         totalTasks: 15,
+        codeDurationStdDev: 200,
+        codeTimingTasks: 15,
+      });
+      expect(detector.evaluate(stats).find(e => e.ruleId === "BHV009")).toBeUndefined();
+    });
+
+    // Live regtest load test (2026-11-15): an honest CPU agent answering short, similar questions
+    // with a 1.5B model was blacklisted at a 48 ms spread. Model calls don't count toward this rule.
+    it("does not trigger on consistent model calls (inference only)", () => {
+      const stats = baseStats({
+        durationStdDev: 48,
+        totalTasks: 40,
+        codeDurationStdDev: 0,
+        codeTimingTasks: 0,
       });
       expect(detector.evaluate(stats).find(e => e.ruleId === "BHV009")).toBeUndefined();
     });
@@ -255,6 +271,8 @@ describe("AnomalyDetector", () => {
       const stats = baseStats({
         durationStdDev: 10,
         totalTasks: 5,
+        codeDurationStdDev: 10,
+        codeTimingTasks: 5,
       });
       expect(detector.evaluate(stats).find(e => e.ruleId === "BHV009")).toBeUndefined();
     });
