@@ -87,6 +87,29 @@ To move a database to a new network, wipe its ledger explicitly:
 - [ ] Runbook for a trip: payouts stay paused until an admin resumes. Read the failed checks,
       compare `GET /economy/payouts/:accountId` and the node's payments, fix the cause, then resume.
 
+## Soft launch
+
+Open real-Bitcoin purchases to a small group first: set `LAUNCH_MODE=invite` on the portal and on
+every coordinator (`src/economy/launch-gate.ts`).
+
+- **Sign-up by invite.** A new account (email sign-up, a first Google or Microsoft sign-in, a new
+  AI-agent key) needs an invite code. System admins create codes in Settings > Admin > Early
+  access: one use or several, with an optional expiry and a label. A code is shown once, with a
+  sign-up link (`/portal?invite=CODE#signup`); the list shows its uses, expiry and status, and
+  any code can be revoked. Accounts that already exist are not affected.
+- **Low caps per account** on the coordinator, on top of the payout safeguards below:
+  `LAUNCH_MAX_BUY_SATS_PER_DAY` (default 50,000 sats per rolling 24 h; open invoices count),
+  `LAUNCH_MAX_BALANCE_SATS` (default 200,000 cSats after a purchase) and
+  `LAUNCH_MAX_PAYOUT_SATS_PER_DAY` (default 50,000, layered under `PAYOUT_MAX_ACCOUNT_DAILY_SATS`;
+  it applies to every account, the fee pool's revenue withdrawals included). `0` lifts a cap.
+  Every purchase path (portal, `/v1/account/topup`, the desktop app's signed requests) ends at the
+  coordinator's `/account/buy`, which enforces them. The Wallet shows them as "Early access".
+- **Going open.** Set `LAUNCH_MODE=open` (or unset it) on the portal and the coordinators and
+  restart them. The invite codes stay in the database, unused.
+
+The desktop and iOS apps' sign-up screens do not have an invite field yet: in invite mode, new
+users sign up on the web portal.
+
 ## Withdrawing EdgeCoder revenue
 
 EdgeCoder keeps `NETWORK_FEE_BPS` (5 %) of every compute payment, booked as `network_fee:<task>`
