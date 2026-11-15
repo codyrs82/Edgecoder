@@ -174,7 +174,7 @@ const PAGES: Case[] = [
   ["Bot", "Tidy the README", BotView, { bot: BOT, onEdit: noop, onDeleted: noop }],
   ["Conversation sidebar", "Seeded chat", ConversationSidebar, { open: true, inline: true, onClose: noop, onSelectConversation: noop, onNewChat: noop, activeConversationId: "c1", user: USER, onOpenSettings: noop, onLogout: noop }],
   ["Editor chat panel", "Ask about your code", EditorChatPanel, {}],
-  ["Editor", "No folder open", EditorView, { projectRoot: null }],
+  ["Editor", "Open a project", EditorView, { projectRoot: null }],
 ];
 
 const OVERLAYS: Case[] = [
@@ -244,5 +244,27 @@ describe("axe: overlays (#29)", () => {
     notify("Settings saved");
     await screen.findByText("Settings saved");
     await audit();
+  });
+});
+
+// desktop-polish: with no folder open the Code view is one empty state and the chat takes the room.
+describe("Code view with no folder", () => {
+  it("shows one Open folder action and no editor or file panes", async () => {
+    const onBareChange = vi.fn();
+    const { container } = render(EditorView, { projectRoot: null, onBareChange });
+    await screen.findByRole("heading", { name: "Open a project" });
+    expect(screen.getAllByRole("button", { name: /Open folder/ })).toHaveLength(1);
+    expect(container.querySelector(".explorer-panel")).toBeNull();
+    expect(container.querySelector(".editor-panel")?.classList.contains("hidden")).toBe(true);
+    expect(onBareChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it("brings the files and the editor back once a folder is open", async () => {
+    const onBareChange = vi.fn();
+    const { container } = render(EditorView, { projectRoot: "/Users/a11y/EdgeCoder/demo", onBareChange });
+    await waitFor(() => expect(container.querySelector(".explorer-panel")).not.toBeNull());
+    expect(container.querySelector(".editor-panel")?.classList.contains("hidden")).toBe(false);
+    expect(screen.queryByRole("heading", { name: "Open a project" })).toBeNull();
+    expect(onBareChange).toHaveBeenLastCalledWith(false);
   });
 });

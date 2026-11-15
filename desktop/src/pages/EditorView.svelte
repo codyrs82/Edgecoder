@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from "svelte";
   import { Popover, Tabs } from "bits-ui";
-  import { Settings as SettingsIcon, MessageSquare } from "@lucide/svelte";
+  import { Settings2, PanelRight, Globe, Columns2, SquareTerminal, Sparkles, TriangleAlert, GitBranch, FolderOpen, X, RotateCw } from "@lucide/svelte";
   import { notify } from "../lib/toast";
   import FileTree from "../components/FileTree.svelte";
   import Select from "../components/ui/Select.svelte";
@@ -26,8 +26,12 @@
     onProjectOpened?: (root: string) => void;
     /** A repository was connected from the empty state (it is now the open project). */
     onRepoConnected?: (r: RepoConnection) => void;
+    /** The files sidebar (the title bar's left toggle). */
+    explorerOpen?: boolean;
+    /** Told when the view has nothing to edit (no folder, no file): the chat then takes the room. */
+    onBareChange?: (bare: boolean) => void;
   }
-  let { projectRoot = null, onOpenProject, onProjectOpened, onRepoConnected }: Props = $props();
+  let { projectRoot = null, onOpenProject, onProjectOpened, onRepoConnected, explorerOpen = true, onBareChange }: Props = $props();
 
   /** Prefix for buffers that are not (yet) a project file, e.g. code opened from chat. */
   const UNTITLED = "untitled:";
@@ -53,6 +57,11 @@
   let editorChatPanel: EditorChatPanel | undefined = $state(undefined);
 
   let activeFile = $derived(files.find((f) => f.path === activeFilePath) ?? null);
+  /** No folder and no open file: one empty state, and the chat gets the whole view. */
+  const bare = $derived(!projectRoot && files.length === 0);
+  $effect(() => {
+    onBareChange?.(bare);
+  });
 
   let offTheme: (() => void) | undefined;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
@@ -678,7 +687,27 @@
   <QuickOpen onOpen={(p) => void openPath(p)} onClose={() => { quickOpen = false; editor?.focus(); }} />
 {/if}
 
-<div class="editor-layout" class:resizing={isResizing}>
+<!-- No folder open: one card, in the chat's empty state (a slim bar once the chat has messages). -->
+{#snippet noProject(compact: boolean)}
+  {#if compact}
+    <div class="no-folder-bar">
+      <span>No folder open. The agent can answer questions; open a folder to let it edit files.</span>
+      <button class="btn btn--sm" onclick={() => onOpenProject?.()}><FolderOpen size={13} /> Open folder…</button>
+    </div>
+  {:else}
+    <div class="no-folder-card">
+      <h2>Open a project</h2>
+      <p>Open a folder or connect a GitHub repository, and the agent can read and edit its files and run commands. You can also just ask.</p>
+      <button class="btn btn--primary btn--lg" onclick={() => onOpenProject?.()}><FolderOpen size={15} /> Open folder…</button>
+      {#if onRepoConnected}
+        <div class="no-folder-repo"><ConnectRepo onConnected={(r) => onRepoConnected?.(r)} /></div>
+      {/if}
+    </div>
+  {/if}
+{/snippet}
+
+<div class="editor-layout" class:resizing={isResizing} class:bare>
+  {#if !bare && explorerOpen}
   <div class="explorer-panel" style="width: {explorerWidth}px">
     {#if projectRoot}
       <!-- #24: bits-ui Tabs. Only the open view is mounted, as before. -->
@@ -722,14 +751,15 @@
     {:else}
       <div class="no-project">
         <p>No folder open</p>
-        <button class="open-btn" onclick={() => onOpenProject?.()}>Open Folder…</button>
+        <button class="btn" onclick={() => onOpenProject?.()}><FolderOpen size={14} /> Open folder…</button>
       </div>
     {/if}
   </div>
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions (mouse drag handle for resizing) -->
 
   <div class="resize-handle" role="separator" aria-orientation="vertical" onmousedown={(e) => startResize(e, "explorer")}></div>
-  <div class="editor-panel">
+  {/if}
+  <div class="editor-panel" class:hidden={bare}>
     <div class="tab-bar">
       {#each files as file (file.path)}
         <div class="file-tab" class:active={activeFilePath === file.path} title={file.path.replace(UNTITLED, "")}>
@@ -742,55 +772,55 @@
         </div>
       {/each}
       <div class="tab-bar-spacer"></div>
-      {#if gitBranch}<span class="branch" title="Git branch">⎇ {gitBranch}</span>{/if}
-      {#if checking}
-        <span class="branch" title="Running the project's checkers">checking…</span>
-      {:else if problemCount}
-        <button class="ac-toggle problems" title="{problemCount} problem(s) from the project's checkers. Click for the next one." onclick={nextProblem}>⚠ {problemCount}</button>
-      {/if}
-      {#if projectRoot}
-        <button class="ac-toggle" class:on={Boolean(previewUrl)} title={previewUrl ? "Close the preview" : "Preview the project's web page (index.html, or the open .html file)"} onclick={() => (previewUrl ? (previewUrl = null) : void openPreview())}>Preview</button>
-      {/if}
-      {#if activeFile}
-        <button class="ac-toggle" class:on={Boolean(splitPath)} title={splitPath ? "Close split view" : "Split: show a second file side by side"} onclick={() => (splitPath ? closeSplit() : openSplit())}>Split</button>
-      {/if}
-      <button class="ac-toggle" class:on={terminalOpen} title="Terminal (Ctrl+`)" onclick={toggleTerminal}>Terminal</button>
-      <!-- #24: a bits-ui Popover: closes on Escape or a click away and returns focus to the button. -->
-      <Popover.Root bind:open={settingsOpen}>
-        <Popover.Trigger>
-          {#snippet child({ props })}
-            <button {...props} class="ac-toggle" class:on={settingsOpen} title="Editor settings" aria-label="Editor settings"><SettingsIcon size={13} /></button>
-          {/snippet}
-        </Popover.Trigger>
-        <Popover.Portal>
-          <Popover.Content class="ui-popup settings-pop" role="dialog" aria-label="Editor settings" align="end" sideOffset={6} collisionPadding={8}>
-            <label>Font size <input type="number" min="10" max="28" value={editorSettings.fontSize} onchange={(e) => updateSettings({ fontSize: Number((e.target as HTMLInputElement).value) })} /></label>
-            <label>Tab size <input type="number" min="1" max="8" value={editorSettings.tabSize} onchange={(e) => updateSettings({ tabSize: Number((e.target as HTMLInputElement).value) })} /></label>
-            <label class="check"><input type="checkbox" checked={editorSettings.wordWrap} onchange={(e) => updateSettings({ wordWrap: (e.target as HTMLInputElement).checked })} /> Word wrap</label>
-            <label class="check"><input type="checkbox" checked={editorSettings.minimap} onchange={(e) => updateSettings({ minimap: (e.target as HTMLInputElement).checked })} /> Minimap</label>
-            <label class="check"><input type="checkbox" checked={editorSettings.diagnostics} onchange={(e) => updateSettings({ diagnostics: (e.target as HTMLInputElement).checked })} /> Check files on open and save</label>
-            {#if projectRoot && projectTrusted !== null}
-              <label class="check" title="Lets this folder's own TypeScript and Rust checkers run. They run code from the folder."><input type="checkbox" checked={projectTrusted} disabled={trustBusy} onchange={(e) => void setTrust((e.target as HTMLInputElement).checked)} /> Trust this folder (run its own checkers)</label>
-            {/if}
-            <label>Autocomplete model <input type="text" placeholder="qwen2.5-coder:1.5b" value={editorSettings.completionModel} onchange={(e) => updateSettings({ completionModel: (e.target as HTMLInputElement).value })} /></label>
-            <p class="settings-note">A coder model that can fill in the middle (qwen2.5-coder). Bigger is better but slower.</p>
-          </Popover.Content>
-        </Popover.Portal>
-      </Popover.Root>
-      <button
-        class="ac-toggle"
-        class:on={autocompleteOn}
-        title={autocompleteOn ? "AI autocomplete on (Tab accepts). Click to turn off." : "AI autocomplete off. Click to turn on."}
-        onclick={() => { autocompleteOn = !autocompleteOn; try { localStorage.setItem("edgecoder-autocomplete", autocompleteOn ? "on" : "off"); } catch { /* storage unavailable */ } }}
-      >AI {autocompleteOn ? "✓" : "–"}</button>
-      <button
-        class="toggle-chat-btn"
-        class:chat-active={chatPanelVisible}
-        onclick={toggleChatPanel}
-        title={chatPanelVisible ? "Hide chat" : "Show chat"}
-      >
-        <MessageSquare size={16} />
-      </button>
+      <div class="tools">
+        {#if gitBranch}<span class="branch" title="Git branch"><GitBranch size={13} /> {gitBranch}</span>{/if}
+        {#if checking}
+          <span class="branch" title="Running the project's checkers">Checking…</span>
+        {:else if problemCount}
+          <button class="btn btn--ghost btn--sm problems" title="{problemCount} problem(s) from the project's checkers. Click for the next one." onclick={nextProblem}><TriangleAlert size={13} /> {problemCount}</button>
+        {/if}
+        {#if projectRoot}
+          <button class="icon-btn" class:on={Boolean(previewUrl)} aria-pressed={Boolean(previewUrl)} title={previewUrl ? "Close the preview" : "Preview the project's web page (index.html, or the open .html file)"} aria-label="Preview" onclick={() => (previewUrl ? (previewUrl = null) : void openPreview())}><Globe size={16} /></button>
+        {/if}
+        {#if activeFile}
+          <button class="icon-btn" class:on={Boolean(splitPath)} aria-pressed={Boolean(splitPath)} title={splitPath ? "Close split view" : "Split: show a second file side by side"} aria-label="Split" onclick={() => (splitPath ? closeSplit() : openSplit())}><Columns2 size={16} /></button>
+        {/if}
+        <button class="icon-btn" class:on={terminalOpen} aria-pressed={terminalOpen} title="Terminal (Ctrl+`)" aria-label="Terminal" onclick={toggleTerminal}><SquareTerminal size={16} /></button>
+        <button
+          class="icon-btn"
+          class:on={autocompleteOn}
+          aria-pressed={autocompleteOn}
+          aria-label="AI autocomplete"
+          title={autocompleteOn ? "AI autocomplete on (Tab accepts). Click to turn off." : "AI autocomplete off. Click to turn on."}
+          onclick={() => { autocompleteOn = !autocompleteOn; try { localStorage.setItem("edgecoder-autocomplete", autocompleteOn ? "on" : "off"); } catch { /* storage unavailable */ } }}
+        ><Sparkles size={16} /></button>
+        <!-- #24: a bits-ui Popover: closes on Escape or a click away and returns focus to the button. -->
+        <Popover.Root bind:open={settingsOpen}>
+          <Popover.Trigger>
+            {#snippet child({ props })}
+              <button {...props} class="icon-btn" class:on={settingsOpen} title="Editor settings" aria-label="Editor settings"><Settings2 size={16} /></button>
+            {/snippet}
+          </Popover.Trigger>
+          <Popover.Portal>
+            <Popover.Content class="ui-popup settings-pop" role="dialog" aria-label="Editor settings" align="end" sideOffset={6} collisionPadding={8}>
+              <label>Font size <input type="number" min="10" max="28" value={editorSettings.fontSize} onchange={(e) => updateSettings({ fontSize: Number((e.target as HTMLInputElement).value) })} /></label>
+              <label>Tab size <input type="number" min="1" max="8" value={editorSettings.tabSize} onchange={(e) => updateSettings({ tabSize: Number((e.target as HTMLInputElement).value) })} /></label>
+              <label class="check"><input type="checkbox" checked={editorSettings.wordWrap} onchange={(e) => updateSettings({ wordWrap: (e.target as HTMLInputElement).checked })} /> Word wrap</label>
+              <label class="check"><input type="checkbox" checked={editorSettings.minimap} onchange={(e) => updateSettings({ minimap: (e.target as HTMLInputElement).checked })} /> Minimap</label>
+              <label class="check"><input type="checkbox" checked={editorSettings.diagnostics} onchange={(e) => updateSettings({ diagnostics: (e.target as HTMLInputElement).checked })} /> Check files on open and save</label>
+              {#if projectRoot && projectTrusted !== null}
+                <label class="check" title="Lets this folder's own TypeScript and Rust checkers run. They run code from the folder."><input type="checkbox" checked={projectTrusted} disabled={trustBusy} onchange={(e) => void setTrust((e.target as HTMLInputElement).checked)} /> Trust this folder (run its own checkers)</label>
+              {/if}
+              <label>Autocomplete model <input type="text" placeholder="qwen2.5-coder:1.5b" value={editorSettings.completionModel} onchange={(e) => updateSettings({ completionModel: (e.target as HTMLInputElement).value })} /></label>
+              <p class="settings-note">A coder model that can fill in the middle (qwen2.5-coder). Bigger is better but slower.</p>
+            </Popover.Content>
+          </Popover.Portal>
+        </Popover.Root>
+        <span class="tools-sep" aria-hidden="true"></span>
+        <button class="icon-btn" class:on={chatPanelVisible} aria-pressed={chatPanelVisible} onclick={toggleChatPanel} title={chatPanelVisible ? "Hide chat" : "Show chat"} aria-label="Chat panel">
+          <PanelRight size={16} />
+        </button>
+      </div>
     </div>
     {#if trustPrompt && projectRoot}
       <div class="notice" role="status" data-testid="trust-notice">
@@ -815,8 +845,8 @@
         <div class="split-pane">
           <div class="split-bar">
             <span class="preview-label" title={previewUrl}>Preview</span>
-            <button title="Reload" aria-label="Reload preview" onclick={() => previewNonce++}>↻</button>
-            <button title="Close preview" aria-label="Close preview" onclick={() => (previewUrl = null)}>×</button>
+            <button class="icon-btn icon-btn--sm" title="Reload" aria-label="Reload preview" onclick={() => previewNonce++}><RotateCw size={14} /></button>
+            <button class="icon-btn icon-btn--sm" title="Close preview" aria-label="Close preview" onclick={() => (previewUrl = null)}><X size={14} /></button>
           </div>
           {#key previewNonce}
             <!-- Project content: it may run scripts, but never navigate or take over the app window. -->
@@ -834,24 +864,15 @@
               onChange={(p) => (splitPath = p)}
               options={files.map((f) => ({ value: f.path, label: `${tabName(f.path)}${f.dirty ? " ●" : ""}` }))}
             />
-            <button title="Close split" aria-label="Close split" onclick={closeSplit}>×</button>
+            <button class="icon-btn icon-btn--sm" title="Close split" aria-label="Close split" onclick={closeSplit}><X size={14} /></button>
           </div>
           <div class="split-editor" bind:this={splitContainer}></div>
         </div>
       {/if}
-      {#if files.length === 0}
+      {#if files.length === 0 && projectRoot}
         <div class="editor-empty">
-          {#if projectRoot}
-            <p>Open a file from the tree, or ask the agent in the chat panel.</p>
-            <p class="hint">⌘P go to file · ⌘K edit with AI · Tab accepts suggestions · Ctrl+` terminal · ⌘S save</p>
-          {:else}
-            <p>Open a folder to start.</p>
-            <button class="open-btn" onclick={() => onOpenProject?.()}>Open Folder…</button>
-            {#if onRepoConnected}
-              <p class="or">or</p>
-              <ConnectRepo onConnected={(r) => onRepoConnected?.(r)} />
-            {/if}
-          {/if}
+          <p>Open a file from the tree, or ask the agent in the chat panel.</p>
+          <p class="hint"><kbd>⌘P</kbd> go to file · <kbd>⌘K</kbd> edit with AI · <kbd>Tab</kbd> accept · <kbd>⌃`</kbd> terminal · <kbd>⌘S</kbd> save</p>
         </div>
       {/if}
     </div>
@@ -862,19 +883,22 @@
         <div class="terminal-resize" role="separator" aria-orientation="horizontal" onmousedown={startTerminalResize}></div>
         <div class="terminal-bar">
           <span>Terminal</span>
-          <button title="Hide (Ctrl+`)" aria-label="Hide terminal" onclick={toggleTerminal}>×</button>
+          <button class="icon-btn icon-btn--sm" title="Hide (Ctrl+`)" aria-label="Hide terminal" onclick={toggleTerminal}><X size={14} /></button>
         </div>
         <div class="terminal-body"><TerminalPanel bind:this={terminalPanel} cwd={projectRoot} /></div>
       </div>
     {/if}
   </div>
-  {#if chatPanelVisible}
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions (mouse drag handle for resizing) -->
-
-    <div class="resize-handle" role="separator" aria-orientation="vertical" onmousedown={(e) => startResize(e, "chat")}></div>
-    <div class="chat-panel" style="width: {chatPanelWidth}px">
+  {#if chatPanelVisible || bare}
+    {#if !bare}
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions (mouse drag handle for resizing) -->
+      <div class="resize-handle" role="separator" aria-orientation="vertical" onmousedown={(e) => startResize(e, "chat")}></div>
+    {/if}
+    <div class="chat-panel" class:wide={bare} style={bare ? "" : `width: ${chatPanelWidth}px`}>
       <EditorChatPanel
         bind:this={editorChatPanel}
+        wide={bare}
+        {noProject}
         {projectRoot}
         onApplyCode={handleApplyCode}
         getFileContext={getActiveFileContext}
@@ -899,7 +923,7 @@
   .explorer-panel {
     flex-shrink: 0;
     overflow: hidden;
-    background: var(--bg-base);
+    background: var(--bg-deep);
   }
   .explorer-panel {
     display: flex;
@@ -907,57 +931,57 @@
   }
   .sidebar-tabs {
     display: flex;
+    align-items: center;
     gap: 2px;
-    padding: 6px 8px 0;
+    height: 36px;
+    padding: 0 6px;
     border-bottom: 0.5px solid var(--border);
     flex-shrink: 0;
   }
   .sidebar-tabs :global(button) {
-    border: none;
-    background: none;
-    color: var(--text-muted);
-    font-size: 11px;
-    padding: 4px 8px 6px;
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
     display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 6px;
+    height: var(--control-sm);
+    padding: 0 8px;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: var(--fs-xs);
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .sidebar-tabs :global(button:hover) {
+    color: var(--text-primary);
   }
   .sidebar-tabs :global(button[data-state="active"]) {
+    background: var(--bg-elevated);
     color: var(--text-primary);
-    border-bottom-color: var(--accent);
   }
   .count {
-    background: var(--bg-elevated);
-    border-radius: 8px;
+    background: var(--bg-surface);
+    border-radius: 999px;
     padding: 0 5px;
-    font-size: 10px;
+    font-size: var(--fs-2xs);
+    line-height: 16px;
   }
   .sidebar-body {
     flex: 1;
     min-height: 0;
   }
   .no-project {
-    padding: 24px 16px;
-    font-size: 13px;
-    color: var(--text-muted);
+    padding: 16px 12px;
+    font-size: var(--fs-sm);
+    color: var(--text-secondary);
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 8px;
     align-items: flex-start;
   }
-  .open-btn {
-    padding: 6px 12px;
-    border-radius: var(--radius-sm);
-    border: 0.5px solid var(--border);
-    background: var(--bg-surface);
-    color: var(--text-primary);
-    cursor: pointer;
-    font-size: 13px;
-  }
-  .open-btn:hover {
-    border-color: var(--accent);
+  .no-project p {
+    margin: 0;
   }
   .editor-panel {
     flex: 1;
@@ -966,14 +990,34 @@
     overflow: hidden;
     min-width: 200px;
   }
+  /* Kept mounted (Monaco lives here) but out of the way while there is nothing to edit. */
+  .editor-panel.hidden {
+    display: none;
+  }
   .tab-bar {
     display: flex;
     align-items: center;
-    background: var(--bg-surface);
+    background: var(--bg-base);
     border-bottom: 0.5px solid var(--border);
     overflow-x: auto;
     flex-shrink: 0;
-    min-height: 34px;
+    height: 36px;
+  }
+  .tools {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 0 6px 0 8px;
+    flex-shrink: 0;
+  }
+  .tools-sep {
+    width: 0.5px;
+    height: 16px;
+    margin: 0 4px;
+    background: var(--border-strong);
+  }
+  .tools .problems {
+    color: var(--yellow);
   }
   .tab-bar-spacer {
     flex: 1;
@@ -1025,24 +1069,13 @@
     color: var(--accent);
   }
   .branch {
-    font-size: 11px;
-    color: var(--text-muted);
-    margin-right: 10px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-right: 6px;
+    font-size: var(--fs-xs);
+    color: var(--text-secondary);
     white-space: nowrap;
-  }
-  .ac-toggle {
-    border: 0.5px solid var(--border);
-    background: none;
-    color: var(--text-muted);
-    border-radius: var(--radius-sm);
-    font-size: 11px;
-    padding: 2px 6px;
-    margin-right: 8px;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .ac-toggle :global(svg) {
-    vertical-align: -2px;
   }
   /* Portalled to <body> by bits-ui, outside this component's scope. */
   :global {
@@ -1085,36 +1118,7 @@
       color: var(--text-muted);
     }
   }
-  .ac-toggle.problems {
-    color: var(--yellow);
-    border-color: var(--yellow);
-  }
-  .ac-toggle.on {
-    color: var(--accent);
-    border-color: var(--accent);
-  }
-  .toggle-chat-btn {
-    width: 28px;
-    height: 28px;
-    border: none;
-    background: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    border-radius: var(--radius-sm);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    margin-right: 8px;
-    flex-shrink: 0;
-    transition: all 0.15s;
-  }
-  .toggle-chat-btn:hover {
-    color: var(--accent);
-    background: var(--bg-elevated);
-  }
-  .toggle-chat-btn.chat-active {
-    color: var(--accent);
-  }
+
   .notice {
     display: flex;
     align-items: center;
@@ -1168,18 +1172,11 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 2px 8px 2px 12px;
-    font-size: 11px;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-  .terminal-bar button {
-    border: none;
-    background: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    font-size: 14px;
+    height: 32px;
+    padding: 0 6px 0 12px;
+    font-size: var(--fs-xs);
+    font-weight: 500;
+    color: var(--text-secondary);
   }
   .terminal-body {
     flex: 1;
@@ -1199,24 +1196,17 @@
   .split-bar {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 3px 8px;
+    gap: 4px;
+    height: 36px;
+    padding: 0 6px 0 10px;
     border-bottom: 0.5px solid var(--border);
-    background: var(--bg-surface);
-  }
-  .split-bar button {
-    border: none;
-    background: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    font-size: 14px;
+    background: var(--bg-base);
   }
   .preview-label {
     flex: 1;
-    font-size: 11px;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    font-size: var(--fs-xs);
+    font-weight: 500;
+    color: var(--text-secondary);
   }
   .preview-frame {
     flex: 1;
@@ -1229,9 +1219,15 @@
     flex: 1;
     min-height: 0;
   }
-  .editor-empty .or {
-    margin: 4px 0;
-    font-size: 12px;
+  .editor-empty p {
+    margin: 0;
+  }
+  .editor-empty kbd {
+    font-family: inherit;
+    padding: 1px 5px;
+    border: 0.5px solid var(--border-strong);
+    border-radius: 4px;
+    color: var(--text-secondary);
   }
   .editor-empty {
     position: absolute;
@@ -1243,12 +1239,54 @@
     gap: 8px;
     /* Keeps the repository form off the pane edges when the pane is narrow. */
     padding: 0 12px;
-    color: var(--text-muted);
-    font-size: 13px;
+    color: var(--text-secondary);
+    font-size: var(--fs-sm);
     background: var(--bg-base);
   }
   .hint {
-    font-size: 11px;
+    font-size: var(--fs-xs);
+    color: var(--text-muted);
+  }
+  /* The no-folder card (rendered inside the chat's empty state) and its compact bar. */
+  .no-folder-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    max-width: 520px;
+    text-align: center;
+  }
+  .no-folder-card h2 {
+    margin: 0;
+    font-size: var(--fs-xl);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--text-primary);
+  }
+  .no-folder-card p {
+    margin: 0 0 8px;
+    color: var(--text-secondary);
+    font-size: var(--fs-base);
+    line-height: var(--lh-ui);
+  }
+  .no-folder-repo {
+    width: 100%;
+    margin-top: 16px;
+    padding-top: 20px;
+    border-top: 0.5px solid var(--border);
+    display: flex;
+    justify-content: center;
+  }
+  .no-folder-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 6px 8px 6px 14px;
+    border-bottom: 0.5px solid var(--border);
+    font-size: var(--fs-xs);
+    color: var(--text-secondary);
   }
   .resize-handle {
     width: 4px;
@@ -1269,6 +1307,10 @@
     overflow: hidden;
     background: var(--bg-base);
     position: relative;
+  }
+  .chat-panel.wide {
+    flex: 1;
+    min-width: 0;
   }
   /* #29: the side panels keep their dragged widths until the window is too narrow for all three. */
   @media (max-width: 860px) {

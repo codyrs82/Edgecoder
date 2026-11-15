@@ -21,7 +21,6 @@
   } from "../lib/api";
   import type { StreamProgress, ModelPullProgress, IdeStreamEvent, RepoConnection } from "../lib/api";
   import ConnectRepo from "../components/ConnectRepo.svelte";
-  import { GitBranch } from "@lucide/svelte";
   import {
     createConversation,
     addMessage,
@@ -41,8 +40,10 @@
     onPreview?: (path: string) => void;
     /** A repository was connected from this chat's empty state; it is now the open project. */
     onRepoConnected?: (r: RepoConnection) => void;
+    /** The title bar's text: this chat's title and its project (and branch) or "Synced". */
+    onHeaderChange?: (h: { title: string; detail: string | null }) => void;
   }
-  let { onOpenInEditor, projectRoot = null, onStreamingChange, onOpenPath, onPreview, onRepoConnected }: Props = $props();
+  let { onOpenInEditor, projectRoot = null, onStreamingChange, onOpenPath, onPreview, onRepoConnected, onHeaderChange }: Props = $props();
 
   let connectRepoBox: ConnectRepo | undefined = $state(undefined);
   /** The open project's folder name and branch, for the header. */
@@ -74,6 +75,11 @@
   }
 
   let conversation: Conversation = $state(createConversation("chat"));
+  $effect(() => {
+    const title = conversation.messages.length ? conversation.title : "New chat";
+    const detail = usePortalChat ? "Synced" : projectName ? `${projectName}${projectBranch ? ` · ${projectBranch}` : ""}` : null;
+    onHeaderChange?.({ title, detail });
+  });
   let streamingContent = $state("");
   let isStreaming = $state(false);
   let streamProgress: StreamProgress | undefined = $state(undefined);
@@ -377,21 +383,6 @@
 </script>
 
 <div class="chat-view" bind:this={scrollContainer}>
-  <div class="chat-header">
-    {#if projectName && !usePortalChat}
-      <span class="repo-badge" title={projectRoot}>
-        <span class="repo-name">{projectName}</span>
-        {#if projectBranch}<span class="repo-branch"><GitBranch size={11} /> {projectBranch}</span>{/if}
-      </span>
-    {/if}
-    {#if usePortalChat}
-      <span class="portal-badge" title="Chat synced with portal server">
-        <span class="portal-dot"></span>
-        Portal
-      </span>
-    {/if}
-  </div>
-
   {#if meshWarning}
     <div class="mesh-warning">
       <span class="mesh-warning-icon">&#9888;</span>
@@ -412,7 +403,7 @@
   {#if conversation.messages.length === 0 && !isStreaming}
     <div class="empty-state">
       <h2>What would you like to build?</h2>
-      <p>Chat with your local EdgeCoder agent. It can write code, run tests, and delegate to the network.</p>
+      <p>Ask a question, or describe a change. With a project open, the agent can read and edit its files and run commands.</p>
       <div class="quick-actions">
         {#each quickActions as action}
           <button class="chip" onclick={() => handleQuickAction(action.prompt)}>
@@ -445,64 +436,14 @@
     display: flex;
     flex-direction: column;
   }
-  .chat-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 16px;
-    flex-shrink: 0;
-  }
-  .repo-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 12px;
-    color: var(--text-secondary);
-    padding: 2px 10px;
-    border: 0.5px solid var(--border);
-    border-radius: 999px;
-    background: var(--bg-surface);
-    max-width: 60%;
-    overflow: hidden;
-  }
-  .repo-name {
-    font-weight: 600;
-    color: var(--text-primary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .repo-branch {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--text-muted);
-    white-space: nowrap;
-  }
   .connect-slot {
     width: 100%;
+    max-width: 520px;
     display: flex;
     justify-content: center;
-    margin-top: 20px;
-  }
-  .portal-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 11px;
-    color: var(--text-muted);
-    padding: 2px 8px;
-    border: 0.5px solid var(--border);
-    border-radius: 999px;
-    background: var(--bg-surface);
-  }
-  .portal-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--green);
+    margin-top: 24px;
+    padding-top: 24px;
+    border-top: 0.5px solid var(--border);
   }
   .empty-state {
     flex: 1;
@@ -510,47 +451,56 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 12px;
+    gap: 8px;
     text-align: center;
     padding: 24px;
   }
   .empty-state h2 {
     margin: 0;
-    font-size: 1.4rem;
+    font-size: var(--fs-xl);
+    font-weight: 600;
+    letter-spacing: -0.01em;
     color: var(--text-primary);
   }
   .empty-state p {
     margin: 0;
     color: var(--text-secondary);
-    max-width: 400px;
+    font-size: var(--fs-base);
+    max-width: 440px;
   }
   .quick-actions {
     display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
     gap: 8px;
     margin-top: 8px;
   }
   .chip {
-    padding: 8px 16px;
+    height: var(--control-md);
+    padding: 0 12px;
     border: 0.5px solid var(--border-strong);
-    background: var(--bg-surface);
+    background: transparent;
     color: var(--text-secondary);
-    border-radius: 20px;
+    border-radius: 999px;
     cursor: pointer;
-    font-size: 13px;
-    transition: all 0.15s;
+    font: inherit;
+    font-size: var(--fs-sm);
+    transition: background-color .12s, color .12s;
   }
   .chip:hover {
-    border-color: var(--accent);
+    background: var(--bg-elevated);
     color: var(--text-primary);
   }
   .messages {
     flex: 1;
     display: flex;
     flex-direction: column;
-    max-width: 768px;
+    gap: 24px;
+    max-width: 760px;
     width: 100%;
     margin: 0 auto;
-    padding: 16px 0;
+    padding: 24px 24px 16px;
+    box-sizing: border-box;
   }
   .mesh-warning {
     display: flex;
