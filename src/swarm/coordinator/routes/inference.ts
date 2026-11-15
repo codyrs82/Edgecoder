@@ -19,8 +19,8 @@ import {
 import { syncReservations } from "../../../economy/reservations.js";
 import { agentHasModel, routableModels } from "../../model-catalog.js";
 import { rawBodyOf } from "../../../security/request-signing.js";
-import type { CoordinatorApp } from "../app.js";
-import { FALLBACK_BTC_USD, reservations, taskBilling, usagePending, queue } from "../context.js";
+import { app as coordinatorApp, type CoordinatorApp } from "../app.js";
+import { CC, FALLBACK_BTC_USD, reservations, taskBilling, usagePending, queue } from "../context.js";
 import { mutable } from "../mutable-state.js";
 import { agentCapabilities, activeBlacklistRecord } from "../agent-state.js";
 import { resolveSubmitterAccount, verifyAgentRequest } from "../auth.js";
@@ -32,12 +32,63 @@ import {
   orderBook,
   MARKET_DEFAULT_BID_PREMIUM_BPS
 } from "../economy.js";
-import { taskIdInUse, accrualsInFlight, settleTaskIfDone } from "../results.js";
+import { taskIdInUse, accrualsInFlight, settleTaskIfDone, refundTaskSubmit } from "../results.js";
 
 // ── Network inference (chat completions on agents' local models, streamed) ──────────────────
 export const inferenceStreams = new InferenceStreams();
 setInterval(() => inferenceStreams.prune(), 60_000).unref?.();
 const INFERENCE_MAX_TIMEOUT_MS = 300_000;
+
+/**
+ * No capacity: a call no agent claimed within INFERENCE_CLAIM_TIMEOUT_MS is cancelled. It is
+ * taken off the queue (so no agent can claim it later: it never runs and nobody is paid), its
+ * reserve comes back in full, and the requester's next stream read is 503 no_capacity with
+ * Retry-After. Kept a while so a reader that comes back late still gets the reason.
+ */
+export const INFERENCE_CLAIM_TIMEOUT_MS = CC.INFERENCE_CLAIM_TIMEOUT_MS;
+export const NO_CAPACITY_RETRY_AFTER_SEC = 15;
+const NO_CAPACITY_KEEP_MS = 10 * 60_000;
+const noCapacity = new Map<string, { accountId: string; subtaskId: string; atMs: number }>();
+const claimDeadlines = new Map<string, ReturnType<typeof setTimeout>>();
+
+function pruneNoCapacity(now = Date.now()): void {
+  for (const [taskId, c] of noCapacity) if (now - c.atMs > NO_CAPACITY_KEEP_MS) noCapacity.delete(taskId);
+}
+setInterval(() => pruneNoCapacity(), 60_000).unref?.();
+
+/** True when the call was cancelled for lack of capacity (the stream read answers 503). */
+export function inferenceCancelledForCapacity(taskId: string): boolean {
+  return noCapacity.has(taskId);
+}
+
+/**
+ * Cancel an inference subtask nobody has claimed. Returns false (and changes nothing) when an agent
+ * holds it: that call runs and is settled as usual. Removal from the queue is synchronous and only
+ * of an unclaimed item, so a claim racing the cancel either got it first or finds nothing.
+ */
+export async function cancelUnclaimedInference(taskId: string, subtaskId: string): Promise<boolean> {
+  const timer = claimDeadlines.get(subtaskId);
+  if (timer) clearTimeout(timer);
+  claimDeadlines.delete(subtaskId);
+  if (!queue.markRemoteClaimed(subtaskId)) return false;
+  const accountId = taskBilling.get(taskId)?.accountId ?? usagePending.get(taskId)?.accountId ?? "";
+  noCapacity.set(taskId, { accountId, subtaskId, atMs: Date.now() });
+  // A failed result from the coordinator (like a lease failure), so the subtask is settled everywhere.
+  queue.complete({ subtaskId, taskId, agentId: "coordinator", ok: false, output: "", error: "no_capacity", durationMs: 0 });
+  inferenceStreams.finish(subtaskId, "no_capacity");
+  orderBook.removeBid(taskId);
+  // Nothing ran, so nothing was spent: the refund is the whole reserve (refundTaskSubmit is idempotent).
+  await refundTaskSubmit(taskId);
+  coordinatorApp.log.warn({ taskId, subtaskId, claimTimeoutMs: INFERENCE_CLAIM_TIMEOUT_MS }, "inference_no_capacity_cancelled");
+  return true;
+}
+
+function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: string) => { send: (b: unknown) => unknown } } }) {
+  return reply
+    .code(503)
+    .header("retry-after", String(NO_CAPACITY_RETRY_AFTER_SEC))
+    .send({ error: "no_capacity", message: `No agent could take this call within ${Math.round(INFERENCE_CLAIM_TIMEOUT_MS / 1000)} s; nothing was charged.`, retryAfterSec: NO_CAPACITY_RETRY_AFTER_SEC });
+}
 
 const inferenceSubmitSchema = z.object({
   taskId: z.string().min(1).max(200),
@@ -157,6 +208,12 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       },
     });
     inferenceStreams.open(subtask.id, body.taskId);
+    const deadline = setTimeout(() => {
+      claimDeadlines.delete(subtask.id);
+      void cancelUnclaimedInference(body.taskId, subtask.id).catch((err) => coordinatorApp.log.error({ err, taskId: body.taskId }, "inference_no_capacity_cancel_failed"));
+    }, INFERENCE_CLAIM_TIMEOUT_MS);
+    deadline.unref?.();
+    claimDeadlines.set(subtask.id, deadline);
     app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, holders: holders.length }, "inference_submitted");
     return reply.send({ taskId: body.taskId, subtaskId: subtask.id, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second" });
   });
@@ -200,12 +257,18 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
   app.post("/inference/stream", async (req, reply) => {
     const body = z.object({ taskId: z.string().min(1), subtaskId: z.string().min(1), after: z.number().int().min(0).default(0), waitMs: z.number().int().min(0).max(25_000).default(15_000) }).parse(req.body);
     const billing = taskBilling.get(body.taskId);
-    const reader = await resolveSubmitterAccount(req as any, billing?.accountId ?? "", "/inference/stream");
-    if ("error" in reader || !billing || reader.accountId !== billing.accountId) return reply.code(403).send({ error: "not_requester" });
+    // A call cancelled for lack of capacity was refunded (its billing entry is gone): its owner is kept with the cancellation.
+    const owner = billing?.accountId ?? noCapacity.get(body.taskId)?.accountId;
+    const reader = await resolveSubmitterAccount(req as any, owner ?? "", "/inference/stream");
+    if ("error" in reader || !owner || reader.accountId !== owner) return reply.code(403).send({ error: "not_requester" });
     // The subtask must be one of this task's: owning a task gives no read of another's stream.
     if (inferenceStreams.taskOf(body.subtaskId) !== body.taskId) return reply.code(404).send({ error: "unknown_stream" });
+    if (noCapacity.has(body.taskId)) return noCapacityReply(reply);
+    if (!billing) return reply.code(403).send({ error: "not_requester" });
     const r = await inferenceStreams.read(body.subtaskId, body.after, body.waitMs);
     if (!r) return reply.code(404).send({ error: "unknown_stream" });
+    // Cancelled while this read waited.
+    if (noCapacity.has(body.taskId)) return noCapacityReply(reply);
     // The agent's last piece arrives just before its result, which settles the cost: wait for it briefly.
     let result = r.done ? queue.getResult(body.subtaskId) : undefined;
     for (let i = 0; r.done && (!result || accrualsInFlight.has(body.taskId)) && i < 40; i++) {

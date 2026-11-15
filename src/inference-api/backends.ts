@@ -45,7 +45,7 @@ export function networkBackend(deps: NetworkDeps, target: { model: string; compu
       }
     } catch (err) {
       if (err instanceof ChatBackendError) throw err;
-      if (err instanceof NetworkInferenceError) throw new ChatBackendError(err.message, err.status);
+      if (err instanceof NetworkInferenceError) throw new ChatBackendError(err.message, err.status, err.retryAfterSec);
       throw new ChatBackendError((err as Error).message, 502);
     }
   };

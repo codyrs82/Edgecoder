@@ -48,7 +48,8 @@ export type ChatPiece =
     };
 
 export class ChatBackendError extends Error {
-  constructor(message: string, readonly status: number) {
+  /** `retryAfterSec`: when a 429/503 should be tried again (sent as Retry-After). */
+  constructor(message: string, readonly status: number, readonly retryAfterSec?: number) {
     super(message);
   }
 }

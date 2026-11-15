@@ -104,9 +104,18 @@ export interface NetworkTarget {
 }
 
 export class NetworkInferenceError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(message: string, readonly status: number, readonly retryAfterSec?: number) {
     super(message);
   }
+}
+
+/**
+ * The coordinator cancelled the call because no agent claimed it in time (503 no_capacity):
+ * nothing was charged and it can be sent again after `retryAfterSec`.
+ */
+function noCapacityError(json: Record<string, unknown>, model: string): NetworkInferenceError {
+  const retryAfterSec = typeof json.retryAfterSec === "number" && json.retryAfterSec > 0 ? Math.ceil(json.retryAfterSec) : 15;
+  return new NetworkInferenceError(`Every machine that runs ${model} is busy and none could start this request in time. Nothing was charged; try again in ${retryAfterSec} s.`, 503, retryAfterSec);
 }
 
 /** Run a chat on the network and yield the reply as it streams. */
@@ -152,6 +161,7 @@ export async function* streamNetworkCompletion(
   while (Date.now() < deadline) {
     if (signal?.aborted) return;
     const r = await call(d, "POST", "/inference/stream", { taskId, subtaskId, after, waitMs: 15_000 }, signal);
+    if (r.status === 503 && r.json.error === "no_capacity") throw noCapacityError(r.json, req.model);
     if (r.status !== 200) throw new NetworkInferenceError(`Network stream failed: ${String(r.json.error ?? r.status)}`, 502);
     const chunks = (r.json.chunks as string[]) ?? [];
     for (const c of chunks) if (c) yield { delta: c };
