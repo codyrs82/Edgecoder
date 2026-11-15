@@ -118,7 +118,7 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
     // it) the chat stays there: a second submit could bill twice. When no coordinator lists the
     // model, a reachable one is still asked, so the user gets its exact refusal.
     while (!first && tried.length < CHAT_MAX_COORDINATOR_ATTEMPTS) {
-      const { url, known } = await capacity.pick({ kind: "network", model: compute.model }, tried);
+      const { url, known } = await capacity.pick({ kind: "network", model: compute.model, computeClass: compute.target === "network" ? compute.computeClass : undefined }, tried);
       if (!url) {
         if (tried.length > 0) break;
         if (known === 0) return reply.code(502).send({ error: "no_coordinators_available", compute: computeLabel(compute) });
