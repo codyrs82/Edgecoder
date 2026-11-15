@@ -97,6 +97,10 @@ describe("portal pages module (#16)", () => {
     expect(plan).toMatch(/Litecoin on-chain<\/span> <span class="wl-pill soon">Coming soon<\/span>/);
     // Fees are stated, and motion stops under reduced motion.
     expect(plan).toContain("Where your sats go");
+    // Owner fee policy (2026-11-15): buying is free unless the coordinator sets a fee; EdgeCoder keeps 5 % of compute payments.
+    expect(plan).toContain("No purchase fee: 1 sat buys 1 cSat.");
+    expect(plan).toContain("kept by EdgeCoder");
+    expect(plan).not.toMatch(/paid to the hosts that run coordinators/);
     expect(plan).toContain("prefers-reduced-motion: reduce");
 
     // Install agent: no inline handlers, and a malformed token falls back to the placeholder.

@@ -14,12 +14,13 @@ get**, and **what does the network keep**. Test sats can never be mistaken for r
 | Fact | Source | Shown as |
 |---|---|---|
 | 1 cSat = 1 sat | economy-math.md | "1 cSat = 1 sat" next to every balance |
-| Purchase fee | `purchaseFeeBps` (COORDINATOR_FEE_BPS, 150) from `/economy/market/book` | "1.5 % purchase fee" with the sat amount. The invoice response (`feeSats`, `cSats`) is authoritative; the preview before it uses the same formula `floor(amount × bps / 10000)` |
-| Network fee | `networkFeeBps` (NETWORK_FEE_BPS, 500) | "5 % of every earning funds the infrastructure hosts" |
+| Purchase fee | `purchaseFeeBps` (COORDINATOR_FEE_BPS) from `/economy/market/book`; **0 by default: buying cSats is free** (owner decision 2026-11-15, PR #279) | At 0: no fee line, "No purchase fee: 1 sat buys 1 cSat" (20,000 sats → 20,000 cSats). If an operator sets a fee, a fee line appears with the sat amount, computed as the coordinator does, `floor(amount × bps / 10000)`; the invoice response (`feeSats`, `cSats`) is authoritative |
+| Network fee | `networkFeeBps` (NETWORK_FEE_BPS, 500) | "Of every compute payment (model call, job, reservation) the machine's owner gets 95 %, EdgeCoder keeps 5 %." The fee pool is EdgeCoder's revenue; it is not described as funding hosts (host sharing is opt-in, `FEE_POOL_HOST_DISTRIBUTION`) |
 | Price per model | `models[].cSatsPerMTokens` | cSats per million tokens in / out |
 | Price per class | `classes[].cSatsPerSecondBaseTier`; order book `bestAsk/bestBid/mid`, reference, trades | cSats/s, sats/h, ≈ USD/h; matched prices are held to 0.25x to 4x of the class reference |
 | BTC/USD | rate-oracle epoch `btcUsd` | "≈ $x" after sats; hidden when there is no epoch, marked when stale |
 | Network | coordinator payout policy `network` (fallback: portal `WALLET_DEFAULT_NETWORK`) | Network badge, see below |
+| Earnings | `payouts.balance.*Msat` | Shown in sats with up to 3 decimals (msat / 1000), so earnings below 1 sat are not shown as 0 (`earnedSats` is whole sats only and is just the fallback) |
 | Earnings hold | `balance.heldMsat`, `balance.maturesAtMs` (PAYOUT_EARNINGS_HOLD_MS: 24 h mainnet, 0 regtest) | "x sats held until <time>" |
 | Payout limits, pause | `policy.minPayoutSats`, `maxFeeBps`, `limits`, `paused`, `lightningEnabled` | Limits line; pause banner |
 
@@ -28,9 +29,9 @@ get**, and **what does the network keep**. Test sats can never be mistaken for r
 One **Wallet** area with three parts, the same on every surface:
 
 1. **Balance + Add funds** (hero). Big cSats balance, "≈ $" estimate, network badge, primary
-   action "Add funds", secondary "Withdraw". Under it, **Where your sats go**: a three-step
-   strip (you pay → purchase fee → your cSats; then on spend: 95 % to the machine owner, 5 %
-   network fee to infrastructure hosts).
+   action "Add funds", secondary "Withdraw". Under it, **Where your sats go**: you pay → purchase
+   fee (free) → your cSats, then a bar for every compute payment: 95 % to the machine's owner,
+   5 % kept by EdgeCoder.
 2. **Earnings & withdrawals.** Four figures: Earned, Held (with matures-at), Available to
    withdraw, Paid out. Payout methods (see below). Payout history with an **Asset** column.
    "Where we pay you" (Lightning address for automatic payouts).
@@ -51,8 +52,8 @@ of the Wallet screen):
 ```
 [Amount]  presets 5,000 · 20,000 · 100,000 · custom (100 to 1,000,000 sats)
           You pay        20,000 sats   ≈ $20.00
-          Purchase fee   −   300 sats  (1.5 %)
-          You get        19,700 cSats
+          You get        20,000 cSats
+          "No purchase fee: 1 sat buys 1 cSat."   (a fee line appears only if purchaseFeeBps > 0)
           [Create Lightning invoice]
    ↓
 [Invoice] QR (where available) · invoice text · Copy · Open in wallet (lightning:)
@@ -60,8 +61,8 @@ of the Wallet screen):
           polls /topup/:intentId every 3 s
    ↓                         ↓                          ↓
 [Paid]  check mark,       [Expired]  "This invoice    [Error] message + Try again
- "+19,700 cSats added",    expired. Nothing was
- fee line, new balance,    charged." Create a new
+ "+20,000 cSats added",    expired. Nothing was
+ paid/added, new balance,  charged." Create a new
  Done                      invoice (same amount)
 ```
 
@@ -129,3 +130,8 @@ coordinator shows a banner and disables the form.
   on the web only; there is no account-scoped list for the desktop or iOS.
 - **Order book on desktop and iOS**: they show the price board; the full exchange stays on the
   web.
+- **iOS payout destination** is shown read-only; setting or changing it (with its emailed code)
+  stays in the portal and the desktop app for now.
+- **Fee wording follows the coordinator.** The screens read `purchaseFeeBps` and `networkFeeBps`
+  and fall back to 0 and 500 (the owner's defaults) only when an older coordinator does not
+  report them.

@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { countdown, fmtUsd, networkInfo, purchasePreview, reasonText } from "../src/lib/wallet-format";
+import { countdown, fmtMsat, fmtUsd, networkInfo, purchasePreview, reasonText } from "../src/lib/wallet-format";
 
 describe("wallet formatting", () => {
-  it("previews the purchase fee the way the coordinator computes it (1.5 %: 20,000 sats -> 19,700 cSats)", () => {
+  it("previews the purchase fee the way the coordinator computes it (free by default; 1.5 % if set)", () => {
+    expect(purchasePreview(20_000, 0)).toEqual({ fee: 0, get: 20_000 });
     expect(purchasePreview(20_000, 150)).toEqual({ fee: 300, get: 19_700 });
     expect(purchasePreview(10_000, 150)).toEqual({ fee: 150, get: 9_850 });
     expect(purchasePreview(101, 150)).toEqual({ fee: 1, get: 100 });
@@ -19,6 +20,11 @@ describe("wallet formatting", () => {
   it("names ledger rows in plain words", () => {
     expect(reasonText("credit_purchase:pi-1")).toBe("Bought cSats");
     expect(reasonText("something_new:x")).toBe("something new");
+  });
+  it("shows earnings below 1 sat (msat with 3 decimals)", () => {
+    expect(fmtMsat(420)).toBe("0.42");
+    expect(fmtMsat(1_234_567)).toBe("1,234.567");
+    expect(fmtMsat(0)).toBe("0");
   });
   it("counts an invoice down", () => {
     expect(countdown(65_000)).toBe("Expires in 1:05");

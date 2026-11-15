@@ -3,7 +3,8 @@
 
 /**
  * Settings > Wallet (/portal/settings/plan): balance and Add funds (Lightning top-up with a live
- * invoice), where your sats go (the purchase fee and the network fee), Earnings & withdrawals
+ * invoice), where your sats go (buying is free unless the coordinator sets a purchase fee; EdgeCoder
+ * keeps the 5 % network fee of every compute payment), Earnings & withdrawals
  * (earned, held, available, paid; payout methods; payout history with the asset), and Activity.
  * Design: docs/design/wallet-and-market.md. All numbers come from the coordinator through
  * /portal/api/wallet/overview, /portal/api/wallet/topup and /wallet/payouts*; the page never
@@ -122,7 +123,7 @@ export const WALLET_CSS = `
     @media (max-width: 860px) { .wl-methods { grid-template-columns: 1fr; } }
     .wl-method { border: 1px solid var(--card-border); border-radius: 12px; padding: 12px 14px; background: var(--card); display: flex; flex-direction: column; gap: 4px; }
     .wl-method.active { border-color: var(--brand); box-shadow: 0 0 0 1px var(--brand) inset; }
-    .wl-method[aria-disabled="true"] { opacity: 0.62; }
+    .wl-method.soon { opacity: 0.62; }
     .wl-method .t { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-weight: 600; font-size: 14px; }
     .wl-method .d { font-size: 12.5px; color: var(--muted); line-height: 1.45; }
     .wl-banner { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 10px; margin: 10px 0; font-size: 13px;
@@ -194,9 +195,10 @@ export const WALLET_CONTENT = `
           </div>
           <dl class="wl-break" id="breakdown">
             <div><dt>You pay</dt><dd><span id="bdPay">20,000 sats</span><small id="bdPayUsd"></small></dd></div>
-            <div class="fee"><dt id="bdFeeLabel">Purchase fee (1.5 %)</dt><dd id="bdFee">− 300 sats</dd></div>
-            <div class="get"><dt>You get</dt><dd id="bdGet">19,700 cSats</dd></div>
+            <div class="fee hidden" id="bdFeeRow"><dt id="bdFeeLabel">Purchase fee</dt><dd id="bdFee"></dd></div>
+            <div class="get"><dt>You get</dt><dd id="bdGet">20,000 cSats</dd></div>
           </dl>
+          <div class="wl-faint u-mb-10" id="bdFreeNote">No purchase fee: 1 sat buys 1 cSat.</div>
           <button class="primary wl-primary" id="topupBtn">Create Lightning invoice</button>
           <div class="wl-err hidden" id="topupError" role="alert"></div>
           <div class="wl-testnote hidden" id="topupTestNote">${icon("alert", 14)}<span id="topupTestNoteText"></span></div>
@@ -230,7 +232,7 @@ export const WALLET_CONTENT = `
             <div class="big" id="paidAmount"></div>
             <dl class="wl-break" id="paidBreakdown">
               <div><dt>You paid</dt><dd id="paidPay"></dd></div>
-              <div class="fee"><dt id="paidFeeLabel">Purchase fee</dt><dd id="paidFee"></dd></div>
+              <div class="fee hidden" id="paidFeeRow"><dt id="paidFeeLabel">Purchase fee</dt><dd id="paidFee"></dd></div>
               <div class="get"><dt>Added to your balance</dt><dd id="paidGet"></dd></div>
               <div><dt>New balance</dt><dd id="paidBalance">–</dd></div>
             </dl>
@@ -254,23 +256,23 @@ export const WALLET_CONTENT = `
 
     <div class="wl-card">
       <h3>Where your sats go</h3>
-      <div class="wl-faint">Two fees, both shown before you pay. Nothing else is taken.</div>
+      <div class="wl-faint">Adding funds is free. When you use compute on someone else's machine, 95 % goes to that machine's owner and EdgeCoder keeps 5 %. Nothing else is taken.</div>
       <div class="wl-flow">
         <div><div class="k">You pay</div><div class="v" id="flowPay">20,000 sats</div><div class="d">A Lightning invoice from your wallet</div></div>
-        <div><div class="k" id="flowFeeLabel">Purchase fee · 1.5 %</div><div class="v" id="flowFee">300 sats</div><div class="d">Kept by the coordinator; it goes to the network fee pool</div></div>
-        <div><div class="k">Your balance</div><div class="v" id="flowGet">19,700 cSats</div><div class="d">Spent per token on model calls, per second on jobs</div></div>
+        <div><div class="k" id="flowFeeLabel">Purchase fee · free</div><div class="v" id="flowFee">0 sats</div><div class="d" id="flowFeeDesc">Buying cSats costs nothing</div></div>
+        <div><div class="k">Your balance</div><div class="v" id="flowGet">20,000 cSats</div><div class="d">Spent per token on model calls, per second on jobs</div></div>
       </div>
       <div class="wl-sub">When you spend cSats on someone else's machine</div>
-      <div class="wl-split" role="img" id="splitBar" aria-label="95 % to the machine's owner, 5 % network fee"><span class="owner" id="splitOwner"></span><span class="net" id="splitNet"></span></div>
+      <div class="wl-split" role="img" id="splitBar" aria-label="95 % to the machine's owner, 5 % kept by EdgeCoder"><span class="owner" id="splitOwner"></span><span class="net" id="splitNet"></span></div>
       <div class="wl-split-legend">
-        <span><i class="owner"></i><span id="splitOwnerText">95 % to the machine's owner</span></span>
-        <span><i class="net"></i><span id="splitNetText">5 % network fee, paid to the hosts that run coordinators and Bitcoin/Lightning nodes</span></span>
+        <span><i class="owner"></i><span id="splitOwnerText">95 % to the machine's owner (the compute host)</span></span>
+        <span><i class="net"></i><span id="splitNetText">5 % kept by EdgeCoder (the network fee)</span></span>
       </div>
       <div class="wl-faint u-mt-8">Work on your own machines costs nothing. Failed work is not charged.</div>
     </div>
 
     <h2 class="wl-section-title" id="earnings">Earnings &amp; withdrawals</h2>
-    <p class="set-lead">What your machines earned, minus the 5 % network fee. Purchased cSats can be spent but not withdrawn.</p>
+    <p class="set-lead">What your machines earned: 95 % of what their work was paid (EdgeCoder keeps 5 %). Purchased cSats can be spent but not withdrawn.</p>
     <div class="wl-banner danger hidden" id="payoutPausedBanner" role="alert">${icon("alert", 16)}<span>Withdrawals are paused on this coordinator while it is checked. Your earnings are safe and keep counting; buying cSats still works.</span></div>
     <div class="wl-kpis">
       <div><div class="k">Earned</div><div class="v" id="payoutEarned">–</div><div class="d">All time</div></div>
@@ -282,8 +284,8 @@ export const WALLET_CONTENT = `
     <div class="wl-sub">Payout method</div>
     <div class="wl-methods" role="list">
       <div class="wl-method active" role="listitem"><div class="t"><span class="wl-asset">${icon("zap", 15)} Lightning</span> <span class="wl-pill ok">Active</span></div><div class="d">BTC. Withdraw now to an invoice, or get paid automatically to a Lightning address.</div></div>
-      <div class="wl-method" role="listitem" aria-disabled="true"><div class="t"><span class="wl-asset">${icon("bitcoin", 15)} Bitcoin on-chain</span> <span class="wl-pill soon">Coming soon</span></div><div class="d">BTC. Batched payouts above a minimum, to your own address. Not available yet.</div></div>
-      <div class="wl-method" role="listitem" aria-disabled="true"><div class="t"><span class="wl-asset">${icon("layers", 15)} Litecoin on-chain</span> <span class="wl-pill soon">Coming soon</span></div><div class="d">LTC. Batched payouts. Not available yet.</div></div>
+      <div class="wl-method soon" role="listitem"><div class="t"><span class="wl-asset">${icon("bitcoin", 15)} Bitcoin on-chain</span> <span class="wl-pill soon">Coming soon</span></div><div class="d">BTC. Batched payouts above a minimum, to your own address. Not available yet.</div></div>
+      <div class="wl-method soon" role="listitem"><div class="t"><span class="wl-asset">${icon("layers", 15)} Litecoin on-chain</span> <span class="wl-pill soon">Coming soon</span></div><div class="d">LTC. Batched payouts. Not available yet.</div></div>
     </div>
 
     <div class="wl-two">
@@ -393,7 +395,8 @@ export const WALLET_CONTENT = `
 /** Formatting and network helpers shared by the Wallet page and the Compute page's price board. */
 export const WALLET_HELPERS_SCRIPT = `
     const fmtSats = (n) => Number(n || 0).toLocaleString("en-US", { maximumFractionDigits: 0 });
-    const fmtMsat = (m) => fmtSats(Math.floor(Number(m || 0) / 1000));
+    /** msat as sats with up to 3 decimals, so earnings below 1 sat are not shown as 0. */
+    const fmtMsat = (m) => (Number(m || 0) / 1000).toLocaleString("en-US", { maximumFractionDigits: 3 });
     function fmtUsd(sats, btcUsd) {
       if (!btcUsd || !isFinite(sats)) return "";
       const usd = sats / 1e8 * btcUsd;
@@ -433,7 +436,8 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
     function reasonText(r) { const base = String(r || "").replace(/:.*/, ""); return REASONS[base] || base.replace(/_/g, " ") || "–"; }
 
     /* ── Add funds ── */
-    function feeBps() { return state.feeBps === null ? 150 : state.feeBps; }
+    // The coordinator's purchase fee; 0 (free) is the default when it does not say.
+    function feeBps() { return state.feeBps === null ? 0 : state.feeBps; }
     function preview(amount) { const fee = Math.floor(amount * feeBps() / 10000); return { fee, get: amount - fee }; }
     function btc() { return state.overview && state.overview.btcUsd; }
     function renderBreakdown() {
@@ -443,11 +447,15 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
       const approx = state.feeBps === null ? "≈ " : "";
       $("bdPay").textContent = valid ? fmtSats(a) + " sats" : "100 to 1,000,000 sats";
       $("bdPayUsd").textContent = valid ? fmtUsd(a, btc()) : "";
+      const charged = feeBps() > 0;
+      $("bdFeeRow").classList.toggle("hidden", !charged);
+      $("bdFreeNote").classList.toggle("hidden", charged);
       $("bdFeeLabel").textContent = "Purchase fee (" + pct(feeBps()) + ")";
       $("bdFee").textContent = valid ? "− " + approx + fmtSats(p.fee) + " sats" : "–";
-      $("bdGet").textContent = valid ? approx + fmtSats(p.get) + " cSats" : "–";
+      $("bdGet").textContent = valid ? (charged ? approx : "") + fmtSats(p.get) + " cSats" : "–";
       $("flowPay").textContent = valid ? fmtSats(a) + " sats" : "–";
-      $("flowFeeLabel").textContent = "Purchase fee · " + pct(feeBps());
+      $("flowFeeLabel").textContent = "Purchase fee · " + (charged ? pct(feeBps()) : "free");
+      $("flowFeeDesc").textContent = charged ? "Set by this coordinator and kept by it" : "Buying cSats costs nothing";
       $("flowFee").textContent = valid ? fmtSats(p.fee) + " sats" : "–";
       $("flowGet").textContent = valid ? fmtSats(p.get) + " cSats" : "–";
       $("topupBtn").disabled = !valid;
@@ -492,7 +500,7 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
       const net = networkInfo(r.json.network);
       $("invoiceNet").textContent = net.test ? net.short + " · test sats" : "Lightning · mainnet";
       $("invoiceNet").className = "wl-pill" + (net.test ? "" : " ok");
-      $("invoiceSummary").textContent = "Pay " + fmtSats(r.json.amountSats) + " sats" + (fmtUsd(r.json.amountSats, btc()) ? " (" + fmtUsd(r.json.amountSats, btc()) + ")" : "") + ". You get " + fmtNum(r.json.cSats, 3) + " cSats after the " + fmtSats(r.json.feeSats) + " sat purchase fee.";
+      $("invoiceSummary").textContent = "Pay " + fmtSats(r.json.amountSats) + " sats" + (fmtUsd(r.json.amountSats, btc()) ? " (" + fmtUsd(r.json.amountSats, btc()) + ")" : "") + ". You get " + fmtNum(r.json.cSats, 3) + " cSats" + (r.json.feeSats > 0 ? " after the " + fmtSats(r.json.feeSats) + " sat purchase fee." : "; there is no purchase fee.");
       $("invoiceText").textContent = r.json.invoice;
       $("openWalletLink").setAttribute("href", "lightning:" + r.json.invoice);
       $("invoiceStatus").textContent = "Waiting for payment…";
@@ -521,6 +529,7 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
       const i = state.intent;
       $("paidAmount").textContent = "+" + fmtNum(status.cSats ?? i.cSats, 3) + " cSats";
       $("paidPay").textContent = fmtSats(i.amountSats) + " sats";
+      $("paidFeeRow").classList.toggle("hidden", !(i.feeSats > 0));
       $("paidFeeLabel").textContent = "Purchase fee (" + pct(i.amountSats ? Math.round(i.feeSats / i.amountSats * 10000) : feeBps()) + ")";
       $("paidFee").textContent = "− " + fmtSats(i.feeSats) + " sats";
       $("paidGet").textContent = fmtNum(status.cSats ?? i.cSats, 3) + " cSats";
@@ -558,11 +567,13 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
         $("balanceValue").textContent = "–";
         $("balanceUsd").textContent = "Not connected to the network right now. Your balance is safe; try again in a minute.";
       }
-      $("balanceEarned").textContent = o.earnedSats !== null ? fmtSats(o.earnedSats) + " sats" : "–";
+      // The payout balance carries msat; earnedSats is whole sats only, so it is the fallback.
+      const earnedMsat = o.payouts && o.payouts.balance ? o.payouts.balance.earnedMsat : null;
+      $("balanceEarned").textContent = earnedMsat !== null && earnedMsat !== undefined ? fmtMsat(earnedMsat) + " sats" : o.earnedSats !== null ? fmtSats(o.earnedSats) + " sats" : "–";
       const nf = o.fees && o.fees.networkFeeBps !== null && o.fees.networkFeeBps !== undefined ? o.fees.networkFeeBps : 500;
-      $("splitOwnerText").textContent = pct(10000 - nf) + " to the machine's owner";
-      $("splitNetText").textContent = pct(nf) + " network fee, paid to the hosts that run coordinators and Bitcoin/Lightning nodes";
-      $("splitBar").setAttribute("aria-label", pct(10000 - nf) + " to the machine's owner, " + pct(nf) + " network fee");
+      $("splitOwnerText").textContent = pct(10000 - nf) + " to the machine's owner (the compute host)";
+      $("splitNetText").textContent = pct(nf) + " kept by EdgeCoder (the network fee)";
+      $("splitBar").setAttribute("aria-label", pct(10000 - nf) + " to the machine's owner, " + pct(nf) + " kept by EdgeCoder");
       // The bar's proportions: flex-grow set through CSSOM (allowed under the CSP; no style attribute in markup).
       $("splitOwner").style.flexGrow = String(10000 - nf); $("splitNet").style.flexGrow = String(nf);
       renderPayouts(o.payouts);

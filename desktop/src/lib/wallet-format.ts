@@ -2,7 +2,8 @@
 // Pure functions: no money logic, only how the coordinator's numbers are shown.
 
 export const fmtSats = (n: number) => Math.round(Number(n) || 0).toLocaleString("en-US");
-export const fmtMsat = (m: number) => fmtSats(Math.floor((Number(m) || 0) / 1000));
+/** msat as sats with up to 3 decimals, so earnings below 1 sat are not shown as 0. */
+export const fmtMsat = (m: number) => ((Number(m) || 0) / 1000).toLocaleString("en-US", { maximumFractionDigits: 3 });
 export const fmtNum = (n: number, d = 2) => (Number(n) || 0).toLocaleString("en-US", { maximumFractionDigits: d });
 export const pct = (bps: number) => `${(bps / 100).toLocaleString("en-US", { maximumFractionDigits: 2 })} %`;
 

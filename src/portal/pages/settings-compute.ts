@@ -65,7 +65,8 @@ const PRICE_BOARD_SCRIPT = WALLET_HELPERS_SCRIPT + `
         }).join("") : "<tr><td colspan='4' class='muted'>No machines are offering models right now.</td></tr>";
         const f = o.fees || {};
         const nf = f.networkFeeBps === null || f.networkFeeBps === undefined ? 500 : f.networkFeeBps;
-        $p("pbFees").textContent = "Fees: " + pct(nf) + " of every earning is the network fee, paid to infrastructure hosts; the machine's owner gets the rest. Buying cSats costs a " + pct(f.purchaseFeeBps === null || f.purchaseFeeBps === undefined ? 150 : f.purchaseFeeBps) + " purchase fee. Your own machines are free.";
+        const pf = f.purchaseFeeBps === null || f.purchaseFeeBps === undefined ? 0 : f.purchaseFeeBps;
+        $p("pbFees").textContent = "Fees: of every payment for compute, the machine's owner gets " + pct(10000 - nf) + " and EdgeCoder keeps " + pct(nf) + ". " + (pf > 0 ? "Buying cSats has a " + pct(pf) + " purchase fee on this coordinator." : "Buying cSats is free.") + " Your own machines are free.";
       }).catch(() => { $p("pbClasses").innerHTML = "<div class='pb-class'><div class='t'>Prices unavailable</div><div class='d'>Try again in a minute.</div></div>"; $p("pbModels").innerHTML = "<tr><td colspan='4' class='muted'>Unavailable.</td></tr>"; });
     })();
 `;

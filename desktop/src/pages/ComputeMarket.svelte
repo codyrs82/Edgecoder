@@ -252,7 +252,7 @@
         </table>
       </div>
       <p class="sp-muted">Prices are for each class's base tier; faster tiers cost more per second and finish sooner. The price a machine is paid comes from the order book and stays between 0.25x and 4x of the class reference. {overview.account?.networkAgents ?? 0} machines are online.</p>
-      <p class="sp-muted">1 cSat = 1 sat. Of everything you pay, {pct(10000 - (wallet?.fees.networkFeeBps ?? 500))} goes to the machine's owner and {pct(wallet?.fees.networkFeeBps ?? 500)} is the network fee that pays infrastructure hosts. Your own machines are free.{#if wallet} Network: {networkInfo(wallet.network).label}.{/if}</p>
+      <p class="sp-muted">1 cSat = 1 sat. Of everything you pay, {pct(10000 - (wallet?.fees.networkFeeBps ?? 500))} goes to the machine's owner and {pct(wallet?.fees.networkFeeBps ?? 500)} is kept by EdgeCoder (the network fee). {(wallet?.fees.purchaseFeeBps ?? 0) > 0 ? `Buying cSats has a ${pct(wallet?.fees.purchaseFeeBps ?? 0)} fee on this coordinator.` : "Buying cSats is free."} Your own machines are free.{#if wallet} Network: {networkInfo(wallet.network).label}.{/if}</p>
     </div>
 
     {#if ended.length}

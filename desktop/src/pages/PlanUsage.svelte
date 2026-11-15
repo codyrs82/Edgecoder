@@ -56,7 +56,9 @@
 
   let net = $derived(networkInfo(wallet?.network ?? invoice?.network));
   let btcUsd = $derived(wallet?.btcUsd ?? null);
-  let feeBps = $derived(wallet?.fees.purchaseFeeBps ?? 150);
+  // Buying is free (0) unless the coordinator states a purchase fee.
+  let feeBps = $derived(wallet?.fees.purchaseFeeBps ?? 0);
+  let charged = $derived(feeBps > 0);
   let feeKnown = $derived(wallet?.fees.purchaseFeeBps != null);
   let netFeeBps = $derived(wallet?.fees.networkFeeBps ?? 500);
   let valid = $derived(Number.isInteger(amount) && amount >= 100 && amount <= 1_000_000);
@@ -227,7 +229,7 @@
         <div class="wl-amount"><span class="big">{balance === null ? "–" : fmtNum(balance)}</span><span class="unit">cSats</span></div>
         <div class="wl-sub">{balance !== null && btcUsd ? `${fmtUsd(balance, btcUsd)} · BTC $${fmtSats(btcUsd)}${wallet?.rateStale ? " (rate is stale)" : ""}` : " "}</div>
         <div class="wl-mini">
-          <div><div class="k">Earned by your machines</div><div class="v">{earned === null ? "–" : `${fmtSats(earned)} sats`}</div></div>
+          <div><div class="k">Earned by your machines</div><div class="v">{pb ? `${fmtMsat(pb.earnedMsat)} sats` : earned === null ? "–" : `${fmtSats(earned)} sats`}</div></div>
           <div><div class="k">Available to withdraw</div><div class="v">{pb ? `${fmtMsat(pb.payableMsat)} sats` : "–"}</div></div>
         </div>
         <p class="wl-faint">Spend it on model calls, code jobs and reserved machines. Earnings from your machines can be withdrawn below; purchased cSats are for spending.</p>
@@ -255,9 +257,10 @@
           {/if}
           <dl class="wl-break">
             <div><dt>You pay</dt><dd>{valid ? `${fmtSats(amount)} sats` : "100 to 1,000,000 sats"}<small>{valid ? fmtUsd(amount, btcUsd) : ""}</small></dd></div>
-            <div class="fee"><dt>Purchase fee ({pct(feeBps)})</dt><dd>{valid ? `− ${feeKnown ? "" : "≈ "}${fmtSats(previewed.fee)} sats` : "–"}</dd></div>
-            <div class="get"><dt>You get</dt><dd>{valid ? `${feeKnown ? "" : "≈ "}${fmtSats(previewed.get)} cSats` : "–"}</dd></div>
+            {#if charged}<div class="fee"><dt>Purchase fee ({pct(feeBps)})</dt><dd>{valid ? `− ${feeKnown ? "" : "≈ "}${fmtSats(previewed.fee)} sats` : "–"}</dd></div>{/if}
+            <div class="get"><dt>You get</dt><dd>{valid ? `${charged && !feeKnown ? "≈ " : ""}${fmtSats(previewed.get)} cSats` : "–"}</dd></div>
           </dl>
+          {#if !charged}<p class="wl-faint">No purchase fee: 1 sat buys 1 cSat.</p>{/if}
           <button class="primary wl-wide" disabled={!valid || creating || !local?.connected} onclick={createInvoice}>
             {creating ? "Creating invoice…" : valid ? `Create invoice for ${fmtSats(amount)} sats` : "Enter 100 to 1,000,000 sats"}
           </button>
@@ -265,7 +268,7 @@
           {#if net.test && wallet}<p class="wl-test"><TriangleAlert size={14} /> This coordinator runs on {net.short}. Pay with a {net.short} wallet; these sats have no value.</p>{/if}
         {:else if step === "invoice" && invoice}
           <h2 class="wl-h" id="wl-funds-title">Pay this invoice <span class="wl-pill">{networkInfo(invoice.network).test ? `${networkInfo(invoice.network).short} · test sats` : "Lightning · mainnet"}</span></h2>
-          <p class="wl-faint">Pay {fmtSats(invoice.amountSats)} sats{fmtUsd(invoice.amountSats, btcUsd) ? ` (${fmtUsd(invoice.amountSats, btcUsd)})` : ""}. You get {fmtNum(invoice.cSats, 3)} cSats after the {fmtSats(invoice.feeSats)} sat purchase fee.</p>
+          <p class="wl-faint">Pay {fmtSats(invoice.amountSats)} sats{fmtUsd(invoice.amountSats, btcUsd) ? ` (${fmtUsd(invoice.amountSats, btcUsd)})` : ""}. You get {fmtNum(invoice.cSats, 3)} cSats{invoice.feeSats > 0 ? ` after the ${fmtSats(invoice.feeSats)} sat purchase fee.` : "; there is no purchase fee."}</p>
           <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
           <div class="wl-inv-text" tabindex="0" aria-label="Lightning invoice">{invoice.invoice}</div>
           <div class="wl-inv-actions">
@@ -285,7 +288,7 @@
             <div class="wl-done-big" id="wl-funds-title">+{fmtNum(paidCSats, 3)} cSats</div>
             <dl class="wl-break">
               <div><dt>You paid</dt><dd>{fmtSats(invoice.amountSats)} sats</dd></div>
-              <div class="fee"><dt>Purchase fee</dt><dd>− {fmtSats(invoice.feeSats)} sats</dd></div>
+              {#if invoice.feeSats > 0}<div class="fee"><dt>Purchase fee</dt><dd>− {fmtSats(invoice.feeSats)} sats</dd></div>{/if}
               <div class="get"><dt>Added to your balance</dt><dd>{fmtNum(paidCSats, 3)} cSats</dd></div>
               <div><dt>New balance</dt><dd>{balance === null ? "–" : `${fmtNum(balance)} cSats`}</dd></div>
             </dl>
@@ -305,24 +308,24 @@
 
     <section class="wl-card" aria-labelledby="wl-where">
       <h2 class="wl-h" id="wl-where">Where your sats go</h2>
-      <p class="wl-faint">Two fees, both shown before you pay. Nothing else is taken.</p>
+      <p class="wl-faint">Adding funds is {charged ? `${pct(feeBps)} on this coordinator` : "free"}. When you use compute on someone else's machine, {pct(10000 - netFeeBps)} goes to that machine's owner and EdgeCoder keeps {pct(netFeeBps)}. Nothing else is taken.</p>
       <div class="wl-flow">
         <div><div class="k">You pay</div><div class="v">{valid ? fmtSats(amount) : "–"} sats</div><div class="d">A Lightning invoice from your wallet</div></div>
-        <div><div class="k">Purchase fee · {pct(feeBps)}</div><div class="v">{valid ? fmtSats(previewed.fee) : "–"} sats</div><div class="d">Kept by the coordinator for the network fee pool</div></div>
+        <div><div class="k">Purchase fee · {charged ? pct(feeBps) : "free"}</div><div class="v">{valid ? fmtSats(previewed.fee) : "–"} sats</div><div class="d">{charged ? "Set by this coordinator and kept by it" : "Buying cSats costs nothing"}</div></div>
         <div><div class="k">Your balance</div><div class="v">{valid ? fmtSats(previewed.get) : "–"} cSats</div><div class="d">Spent per token on model calls, per second on jobs</div></div>
       </div>
       <div class="wl-sub">When you spend cSats on someone else's machine</div>
-      <div class="wl-split" role="img" aria-label="{pct(10000 - netFeeBps)} to the machine's owner, {pct(netFeeBps)} network fee">
+      <div class="wl-split" role="img" aria-label="{pct(10000 - netFeeBps)} to the machine's owner, {pct(netFeeBps)} kept by EdgeCoder">
         <span class="owner" style:flex-grow={10000 - netFeeBps}></span><span class="net" style:flex-grow={netFeeBps}></span>
       </div>
       <div class="wl-legend">
-        <span><i class="owner"></i>{pct(10000 - netFeeBps)} to the machine's owner</span>
-        <span><i class="net"></i>{pct(netFeeBps)} network fee, paid to the hosts that run coordinators and Bitcoin/Lightning nodes</span>
+        <span><i class="owner"></i>{pct(10000 - netFeeBps)} to the machine's owner (the compute host)</span>
+        <span><i class="net"></i>{pct(netFeeBps)} kept by EdgeCoder (the network fee)</span>
       </div>
     </section>
 
     <h2 class="wl-section" id="wallet-earnings">Earnings &amp; withdrawals</h2>
-    <p class="wl-faint wl-lead">What your machines earned, minus the {pct(netFeeBps)} network fee. Purchased cSats can be spent but not withdrawn.</p>
+    <p class="wl-faint wl-lead">What your machines earned: {pct(10000 - netFeeBps)} of what their work was paid (EdgeCoder keeps {pct(netFeeBps)}). Purchased cSats can be spent but not withdrawn.</p>
     {#if walletError}<p class="sp-err">{walletError}</p>{/if}
     {#if paused}
       <p class="wl-banner" role="alert"><TriangleAlert size={15} /> Withdrawals are paused on this coordinator while it is checked. Your earnings are safe and keep counting; buying cSats still works.</p>
