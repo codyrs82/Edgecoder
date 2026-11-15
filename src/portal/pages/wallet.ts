@@ -68,6 +68,11 @@ export const WALLET_CSS = `
     .wl-break .fee dd { color: var(--text-secondary); }
     .wl-primary { width: 100%; min-height: 44px; font-size: 14.5px; }
     .wl-step[hidden] { display: none; }
+    .wl-fund-methods { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 10px; }
+    .wl-fund { display: inline-flex; align-items: center; gap: 6px; height: var(--control-md, 28px); padding: 0 10px; border-radius: 999px; border: 1px solid var(--card-border); font-size: 12.5px; font-weight: 600; color: var(--text-secondary); }
+    .wl-fund.active { border-color: var(--brand); color: var(--text); background: var(--bg-elevated); }
+    .wl-fund.soon { opacity: 0.6; }
+    .wl-fund small { font-weight: 500; color: var(--muted); }
     .wl-invoice { display: grid; grid-template-columns: 176px minmax(0, 1fr); gap: 16px; align-items: start; margin-top: 12px; }
     @media (max-width: 560px) { .wl-invoice { grid-template-columns: 1fr; } }
     .wl-bolt { width: 176px; height: 176px; border-radius: 14px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
@@ -166,7 +171,7 @@ export const WALLET_CONTENT = `
       <h2 class="set-title">Wallet</h2>
       <span class="net-badge" id="netBadge" title="Which Bitcoin network this coordinator settles on"><span class="dot"></span><span id="netBadgeText">Checking network…</span></span>
     </div>
-    <p class="set-lead">cSats pay for compute on the network. 1 cSat = 1 sat. Add funds with Lightning, see what the network keeps, and withdraw what your machines earn.</p>
+    <p class="set-lead">cSats pay for compute on the network. 1 cSat = 1 sat. Buy cSats with Lightning, see what the network keeps, and withdraw what your machines earn.</p>
 
     <div class="wl-grid">
       <div class="wl-card wl-balance" aria-labelledby="balanceLabel">
@@ -179,15 +184,19 @@ export const WALLET_CONTENT = `
         </div>
         <div class="wl-faint" id="balanceNote">Spend it on model calls, code jobs and reserved machines. Models on your own machines are free.</div>
         <div class="wl-actions u-mt-12">
-          <button class="primary" id="addFundsBtn">${icon("zap", 14)}Add funds</button>
+          <button class="primary" id="addFundsBtn">${icon("zap", 14)}Buy cSats</button>
           <a class="btn" href="#earnings" id="withdrawJump">Withdraw</a>
         </div>
       </div>
 
       <div class="wl-card" id="add-funds">
         <div class="wl-step" id="stepAmount">
-          <h3>Add funds <span class="wl-pill">Lightning</span></h3>
-          <div class="wl-faint">Pay a Lightning invoice from any wallet. Your cSats arrive as soon as it is paid.</div>
+          <h3>Buy cSats</h3>
+          <div class="wl-fund-methods" role="list" aria-label="How to fund">
+            <div class="wl-fund active" role="listitem">${icon("zap", 14)}<span>Fund with Lightning</span></div>
+            <div class="wl-fund soon" role="listitem" title="Coming soon">${icon("bitcoin", 14)}<span>Fund with Bitcoin</span><small>Coming soon</small></div>
+          </div>
+          <div class="wl-faint">Pay from any Lightning wallet. Your cSats arrive the moment the payment lands.</div>
           <div class="wl-presets" role="radiogroup" aria-label="Amount in sats">
             ${presets.map((p, i) => `<button type="button" role="radio" aria-checked="${i === 1 ? "true" : "false"}" data-amount="${p}">${p.toLocaleString("en-US")}<small>sats</small></button>`).join("")}
             <button type="button" role="radio" aria-checked="false" data-amount="custom">Custom<small>100 to 1M</small></button>
@@ -202,23 +211,23 @@ export const WALLET_CONTENT = `
             <div class="get"><dt>You get</dt><dd id="bdGet">20,000 cSats</dd></div>
           </dl>
           <div class="wl-faint u-mb-10" id="bdFreeNote">No purchase fee: 1 sat buys 1 cSat.</div>
-          <button class="primary wl-primary" id="topupBtn">Create Lightning invoice</button>
+          <button class="primary wl-primary" id="topupBtn">Fund with Lightning</button>
           <div class="wl-err hidden" id="topupError" role="alert"></div>
           <div class="wl-testnote hidden" id="topupTestNote">${icon("alert", 14)}<span id="topupTestNoteText"></span></div>
         </div>
 
         <div class="wl-step" id="stepInvoice" hidden>
-          <h3>Pay this invoice <span class="wl-pill" id="invoiceNet">Lightning</span></h3>
+          <h3>Scan to pay <span class="wl-pill" id="invoiceNet">Lightning</span></h3>
           <div class="wl-faint" id="invoiceSummary"></div>
           <div class="wl-invoice">
             <div>
-              <img class="wl-qr" id="invoiceQr" alt="QR code of the Lightning invoice. Scan it with your wallet." hidden />
-              <div class="wl-bolt" id="invoiceQrFallback" aria-hidden="true">${icon("zap", 34)}<span>Open in your Lightning wallet, or copy the invoice</span></div>
+              <img class="wl-qr" id="invoiceQr" alt="Lightning payment QR code. Scan it with your wallet." hidden />
+              <div class="wl-bolt" id="invoiceQrFallback" aria-hidden="true">${icon("zap", 34)}<span>Open in your Lightning wallet, or copy the payment code</span></div>
             </div>
             <div>
-              <div class="wl-inv-text" id="invoiceText" tabindex="0" aria-label="Lightning invoice"></div>
+              <div class="wl-inv-text" id="invoiceText" tabindex="0" aria-label="Lightning payment code"></div>
               <div class="wl-inv-actions">
-                <button class="primary" id="copyInvoiceBtn">${icon("copy", 14)}<span id="copyInvoiceLabel">Copy invoice</span></button>
+                <button class="primary" id="copyInvoiceBtn">${icon("copy", 14)}<span id="copyInvoiceLabel">Copy payment code</span></button>
                 <a class="btn" id="openWalletLink" href="#">${icon("external", 14)}Open in wallet</a>
               </div>
             </div>
@@ -249,10 +258,10 @@ export const WALLET_CONTENT = `
         <div class="wl-step" id="stepExpired" hidden>
           <div class="wl-done">
             <div class="wl-check warn">${icon("clock", 28)}</div>
-            <div class="big">Invoice expired</div>
-            <p class="wl-faint u-mt-6">Nothing was charged. Create a new invoice to try again.</p>
+            <div class="big">This payment code expired</div>
+            <p class="wl-faint u-mt-6">Nothing was charged. Get a new code to try again.</p>
             <div class="wl-actions u-mt-12">
-              <button class="primary wl-primary" id="retryInvoiceBtn">New invoice</button>
+              <button class="primary wl-primary" id="retryInvoiceBtn">New payment code</button>
               <button class="ghost wl-primary" id="expiredBackBtn">Change amount</button>
             </div>
           </div>
@@ -264,7 +273,7 @@ export const WALLET_CONTENT = `
       <h3>Where your sats go</h3>
       <div class="wl-faint">Adding funds is free. When you use compute on someone else's machine, 95 % goes to that machine's owner and EdgeCoder keeps 5 %. Nothing else is taken.</div>
       <div class="wl-flow">
-        <div><div class="k">You pay</div><div class="v" id="flowPay">20,000 sats</div><div class="d">A Lightning invoice from your wallet</div></div>
+        <div><div class="k">You pay</div><div class="v" id="flowPay">20,000 sats</div><div class="d">From any Lightning wallet</div></div>
         <div><div class="k" id="flowFeeLabel">Purchase fee · free</div><div class="v" id="flowFee">0 sats</div><div class="d" id="flowFeeDesc">Buying cSats costs nothing</div></div>
         <div><div class="k">Your balance</div><div class="v" id="flowGet">20,000 cSats</div><div class="d">Spent per token on model calls, per second on jobs</div></div>
       </div>
@@ -289,7 +298,7 @@ export const WALLET_CONTENT = `
 
     <div class="wl-sub">Payout method</div>
     <div class="wl-methods" role="list">
-      <div class="wl-method active" role="listitem"><div class="t"><span class="wl-asset">${icon("zap", 15)} Lightning</span> <span class="wl-pill ok">Active</span></div><div class="d">BTC. Withdraw now to an invoice, or get paid automatically to a Lightning address.</div></div>
+      <div class="wl-method active" role="listitem"><div class="t"><span class="wl-asset">${icon("zap", 15)} Lightning</span> <span class="wl-pill ok">Active</span></div><div class="d">BTC. Withdraw now from any Lightning wallet, or get paid automatically to a Lightning address.</div></div>
       <div class="wl-method soon" role="listitem"><div class="t"><span class="wl-asset">${icon("bitcoin", 15)} Bitcoin on-chain</span> <span class="wl-pill soon">Coming soon</span></div><div class="d">BTC. Batched payouts above a minimum, to your own address. Not available yet.</div></div>
       <div class="wl-method soon" role="listitem"><div class="t"><span class="wl-asset">${icon("layers", 15)} Litecoin on-chain</span> <span class="wl-pill soon">Coming soon</span></div><div class="d">LTC. Batched payouts. Not available yet.</div></div>
     </div>
@@ -297,8 +306,8 @@ export const WALLET_CONTENT = `
     <div class="wl-two">
       <div class="wl-card">
         <h3>Withdraw now</h3>
-        <div class="wl-faint">Create an invoice in your wallet for the exact amount, paste it here, and confirm with the code we email you.</div>
-        <label for="withdrawInvoice">Lightning invoice (BOLT11)</label>
+        <div class="wl-faint">In your Lightning wallet, choose Receive for the exact amount, paste its payment code here, and confirm with the code we email you.</div>
+        <label for="withdrawInvoice">Your wallet's payment code (starts with lnbc)</label>
         <textarea id="withdrawInvoice" rows="3" placeholder="lnbc…" spellcheck="false" autocomplete="off"></textarea>
         <div class="row u-mt-8"><button class="primary" id="withdrawBtn">Email me a code</button></div>
         <div id="withdrawCodeWrap" class="hidden u-mt-8">
@@ -465,7 +474,7 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
       $("flowFee").textContent = valid ? fmtSats(p.fee) + " sats" : "–";
       $("flowGet").textContent = valid ? fmtSats(p.get) + " cSats" : "–";
       $("topupBtn").disabled = !valid;
-      $("topupBtn").textContent = valid ? "Create invoice for " + fmtSats(a) + " sats" : "Enter 100 to 1,000,000 sats";
+      $("topupBtn").textContent = valid ? "Buy " + fmtSats(a) + " cSats with Lightning" : "Enter 100 to 1,000,000 sats";
     }
     function pickAmount(btn) {
       for (const b of document.querySelectorAll(".wl-presets button")) b.setAttribute("aria-checked", b === btn ? "true" : "false");
@@ -497,7 +506,7 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
     async function createInvoice() {
       topupError("");
       const btn = $("topupBtn");
-      btn.disabled = true; btn.textContent = "Creating invoice…";
+      btn.disabled = true; btn.textContent = "Preparing payment…";
       const r = await call("/portal/api/wallet/topup", { method: "POST", body: JSON.stringify({ amountSats: state.amount }) }).catch(() => ({ ok: false, json: {} }));
       renderBreakdown();
       if (!r.ok || !r.json.invoice) { topupError(TOPUP_ERRORS[r.json.error] || "Could not create the invoice (" + (r.json.error || r.status || "network error") + ")."); return; }
@@ -515,7 +524,7 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
       if (qr) $("invoiceQr").setAttribute("src", "data:image/svg+xml;base64," + btoa(qr)); else $("invoiceQr").removeAttribute("src");
       $("openWalletLink").setAttribute("href", "lightning:" + r.json.invoice);
       $("invoiceStatus").textContent = "Waiting for payment…";
-      $("copyInvoiceLabel").textContent = "Copy invoice";
+      $("copyInvoiceLabel").textContent = "Copy payment code";
       showStep("stepInvoice");
       stopPolling();
       state.poll = setInterval(checkInvoice, 3000);
@@ -556,7 +565,7 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
       if (!state.intent) return;
       try { await navigator.clipboard.writeText(state.intent.invoice); $("copyInvoiceLabel").textContent = "Copied"; }
       catch { const sel = window.getSelection(); const range = document.createRange(); range.selectNodeContents($("invoiceText")); sel.removeAllRanges(); sel.addRange(range); $("copyInvoiceLabel").textContent = "Press Ctrl/Cmd+C"; }
-      setTimeout(() => { $("copyInvoiceLabel").textContent = "Copy invoice"; }, 1800);
+      setTimeout(() => { $("copyInvoiceLabel").textContent = "Copy payment code"; }, 1800);
     });
     const backToAmount = () => { stopPolling(); state.intent = null; showStep("stepAmount"); renderBreakdown(); };
     $("invoiceBackBtn").addEventListener("click", backToAmount);
@@ -625,7 +634,7 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
       const rows = recent.length
         ? recent.map((t) => { const earn = t.type === "earn"; return "<tr><td>" + escapeHtml(fmtTime(t.atMs)) + "</td><td>" + escapeHtml(reasonText(t.reason)) + "</td><td class='num" + (earn ? " pos" : "") + "'>" + (earn ? "+" : "−") + escapeHtml(fmtNum(Math.abs(Number(t.cSats) || 0), 3)) + "</td></tr>"; })
         : (legacy || []).map((t) => "<tr><td>" + escapeHtml(fmtTime(t.timestampMs)) + "</td><td>" + escapeHtml(reasonText(t.reason) + " · " + t.type) + "</td><td class='num'>" + escapeHtml(t.credits) + "</td></tr>");
-      $("creditHistoryBody").innerHTML = rows.length ? rows.join("") : "<tr><td colspan='3' class='muted'>Nothing yet. Add funds or connect a machine to get started.</td></tr>";
+      $("creditHistoryBody").innerHTML = rows.length ? rows.join("") : "<tr><td colspan='3' class='muted'>Nothing yet. Buy cSats or connect a machine to get started.</td></tr>";
     }
     async function loadOverview() {
       const r = await call("/portal/api/wallet/overview").catch(() => null);
@@ -665,7 +674,7 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
     function resetWithdrawCode() { withdrawChallenge = null; $("withdrawCodeWrap").classList.add("hidden"); $("withdrawCode").value = ""; }
     async function submitWithdraw(withCode) {
       const bolt11 = $("withdrawInvoice").value.trim();
-      if (!bolt11) { showToast("Paste a Lightning invoice first.", true); return; }
+      if (!bolt11) { showToast("Paste your wallet's payment code first.", true); return; }
       const body = { bolt11 };
       if (withCode) {
         const emailCode = $("withdrawCode").value.trim();

@@ -70,7 +70,7 @@ struct InvoiceQRCode: View {
                 .padding(10)
                 .background(Color.white)
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .accessibilityLabel("QR code of the Lightning invoice")
+                .accessibilityLabel("Lightning payment QR code")
         } else {
             Image(systemName: "qrcode").font(.largeTitle).foregroundColor(Theme.textMuted)
         }
@@ -215,10 +215,10 @@ struct WalletView: View {
     private var amountStep: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Add funds").font(.headline).foregroundColor(Theme.textPrimary)
+                Text("Buy cSats").font(.headline).foregroundColor(Theme.textPrimary)
                 pill("Lightning")
             }
-            Text("Pay a Lightning invoice from any wallet. Your cSats arrive as soon as it is paid.")
+            Text("Fund with Lightning from any wallet. Your cSats arrive the moment the payment lands. Fund with Bitcoin is coming soon.")
                 .font(.footnote).foregroundColor(Theme.textSecondary)
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
                 ForEach(Self.presets, id: \.self) { p in
@@ -251,7 +251,7 @@ struct WalletView: View {
             Button {
                 Task { await createInvoice() }
             } label: {
-                Text(creating ? "Creating invoice…" : amountValid ? "Create invoice for \(WalletFormat.sats(Double(chosenAmount))) sats" : "Enter 100 to 1,000,000 sats")
+                Text(creating ? "Preparing payment…" : amountValid ? "Buy \(WalletFormat.sats(Double(chosenAmount))) cSats with Lightning" : "Enter 100 to 1,000,000 sats")
                     .font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity).padding(.vertical, 12)
             }
             .buttonStyle(.borderedProminent).tint(Theme.accent).foregroundColor(Theme.onAccent)
@@ -270,7 +270,7 @@ struct WalletView: View {
         if let invoice {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Text("Pay this invoice").font(.headline).foregroundColor(Theme.textPrimary)
+                    Text("Scan to pay").font(.headline).foregroundColor(Theme.textPrimary)
                     pill(NetworkInfo(invoice.network).isTest ? "\(NetworkInfo(invoice.network).short) · test sats" : "Lightning · mainnet")
                 }
                 Text("Pay \(WalletFormat.sats(Double(invoice.amountSats))) sats\(WalletFormat.usd(Double(invoice.amountSats), overview?.btcUsd).map { " (\($0))" } ?? ""). You get \(WalletFormat.num(invoice.cSats, digits: 3)) cSats\(invoice.feeSats > 0 ? " after the \(WalletFormat.sats(Double(invoice.feeSats))) sat purchase fee." : "; there is no purchase fee.")")
@@ -287,7 +287,7 @@ struct WalletView: View {
                         copied = true
                         Task { try? await Task.sleep(nanoseconds: 1_600_000_000); copied = false }
                     } label: {
-                        Label(copied ? "Copied" : "Copy invoice", systemImage: copied ? "checkmark" : "doc.on.doc").frame(maxWidth: .infinity)
+                        Label(copied ? "Copied" : "Copy payment code", systemImage: copied ? "checkmark" : "doc.on.doc").frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent).tint(Theme.accent).foregroundColor(Theme.onAccent)
                     Button {
@@ -347,9 +347,9 @@ struct WalletView: View {
     private var expiredStep: some View {
         VStack(spacing: 10) {
             Image(systemName: "clock.badge.exclamationmark").font(.system(size: 44)).foregroundColor(Theme.yellow)
-            Text("Invoice expired").font(.title3.weight(.semibold)).foregroundColor(Theme.textPrimary)
-            Text("Nothing was charged. Create a new invoice to try again.").font(.footnote).foregroundColor(Theme.textSecondary)
-            Button { Task { step = .amount; await createInvoice() } } label: { Text("New invoice").frame(maxWidth: .infinity).padding(.vertical, 10) }
+            Text("This payment code expired").font(.title3.weight(.semibold)).foregroundColor(Theme.textPrimary)
+            Text("Nothing was charged. Get a new code to try again.").font(.footnote).foregroundColor(Theme.textSecondary)
+            Button { Task { step = .amount; await createInvoice() } } label: { Text("New payment code").frame(maxWidth: .infinity).padding(.vertical, 10) }
                 .buttonStyle(.borderedProminent).tint(Theme.accent).foregroundColor(Theme.onAccent)
             Button("Change amount") { backToAmount() }.font(.footnote).foregroundColor(Theme.textSecondary)
         }
@@ -436,7 +436,7 @@ struct WalletView: View {
             kpi("Paid out", b.map { "\(WalletFormat.msat($0.paidMsat)) sats" } ?? "–", (b?.pendingMsat ?? 0) > 0 ? "\(WalletFormat.msat(b!.pendingMsat)) sats on the way" : " ", Theme.textPrimary)
         }
         Text("Payout method").font(.footnote).foregroundColor(Theme.textSecondary)
-        method("bolt.fill", "Lightning", "BTC. Withdraw now to an invoice, or get paid automatically to a Lightning address.", active: true)
+        method("bolt.fill", "Lightning", "BTC. Withdraw now from any Lightning wallet, or get paid automatically to a Lightning address.", active: true)
         method("bitcoinsign.circle", "Bitcoin on-chain", "BTC. Batched payouts above a minimum. Not available yet.", active: false)
         method("l.circle", "Litecoin on-chain", "LTC. Batched payouts. Not available yet.", active: false)
         withdrawCard(policy: policy)
@@ -473,14 +473,14 @@ struct WalletView: View {
     private func withdrawCard(policy: WalletOverview.PayoutPolicy?) -> some View {
         card {
             Text("Withdraw now").font(.headline).foregroundColor(Theme.textPrimary)
-            Text("Create an invoice in your wallet for the exact amount, paste it here, and confirm with the code we email you.")
+            Text("In your Lightning wallet, choose Receive for the exact amount, paste its payment code here, and confirm with the code we email you.")
                 .font(.footnote).foregroundColor(Theme.textSecondary)
             TextField("lnbc…", text: $bolt11, axis: .vertical)
                 .lineLimit(2...4)
                 .font(.system(.footnote, design: .monospaced))
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
                 .textFieldStyle(.roundedBorder)
-                .accessibilityLabel("Lightning invoice")
+                .accessibilityLabel("Lightning payment code")
             if challengeId != nil {
                 Text(challengeDetail).font(.footnote).foregroundColor(Theme.textSecondary)
                 HStack {
@@ -507,7 +507,7 @@ struct WalletView: View {
             Text("Activity").font(.headline).foregroundColor(Theme.textPrimary)
             let rows = overview?.recent ?? []
             if rows.isEmpty {
-                Text("Nothing yet. Add funds or connect a machine to get started.").font(.footnote).foregroundColor(Theme.textSecondary)
+                Text("Nothing yet. Buy cSats or connect a machine to get started.").font(.footnote).foregroundColor(Theme.textSecondary)
             }
             ForEach(rows) { r in
                 HStack {

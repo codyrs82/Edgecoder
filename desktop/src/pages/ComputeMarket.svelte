@@ -163,7 +163,7 @@
             {/if}
           </div>
           {#if estimate > balance}
-            <button onclick={() => onNavigate?.("plan")}>Add funds</button>
+            <button onclick={() => onNavigate?.("plan")}>Buy cSats</button>
           {/if}
           <button class="primary" disabled={reserving || !option?.available || estimate > balance} onclick={reserve}>{reserving ? "Reserving…" : "Reserve"}</button>
         </div>
