@@ -120,6 +120,13 @@ BHV003 on every honest agent and blacklisted the whole network for an hour. Mode
 by BHV001 (below) and result verification instead. `AgentBehaviorStats.outputTasks` is the number of
 results these rules look at.
 
+They also flag rather than strike. A code result's output is what the requester's program prints,
+so a buyer could make an honest worker's outputs identical, empty or tiny on purpose: three
+`print('OK')` jobs blacklisted the worker instantly (BHV003 was CRITICAL) and the blacklist was
+gossiped to every coordinator. A flag sends the agent's next results to re-execution verification,
+which decides. With verification off (`RESULT_VERIFICATION_RATE=0`) these rules only log, so an agent
+returning canned output is not caught by them; see `docs/security/agent-threat-model.md`.
+
 ### BHV001: suspiciously fast results
 
 A result that arrives impossibly soon after its claim suggests the agent did not do the work.

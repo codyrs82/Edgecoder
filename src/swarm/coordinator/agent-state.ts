@@ -246,8 +246,9 @@ export function evaluateAndEnforce(agentId: string): void {
         coordinatorId: identity.peerId,
       });
     }
-    // Flags are not strikes: BHV001's first stage sends the agent's next results to verification.
-    if (anomalies.some((a) => a.enforcement === "flag" && a.ruleId === "BHV001")) fastResultVerificationFlags.flag(agentId);
+    // Flags are not strikes: BHV001's first stage and the output-content rules (BHV002, BHV003,
+    // BHV010) send the agent's next results to verification.
+    if (anomalies.some((a) => a.enforcement === "flag")) fastResultVerificationFlags.flag(agentId);
     autoBlacklister.processAnomalies(agentId, anomalies);
   }
 }
