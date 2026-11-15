@@ -33,10 +33,19 @@ export function jobCostMsat(durationMs: number, ratePerSecondMsat: number): numb
   return Math.round((durationMs / 1000) * ratePerSecondMsat);
 }
 
+/**
+ * How the network fee is rounded to whole msat. `nearest` (half up) since 2026-11-15: model calls
+ * cost a few msat, and flooring kept EdgeCoder well under its 5 % (a 16 msat call paid no fee).
+ * `floor` is what accruals recorded before then used; ledger verification recomputes those with it.
+ */
+export type FeeRounding = "floor" | "nearest";
+export const FEE_ROUNDING: FeeRounding = "nearest";
+
 /** The network fee taken out of a job's cost (basis points); the agent gets the rest. */
-export function splitJobCost(costMsat: number, feeBps: number): { agentMsat: number; feeMsat: number } {
+export function splitJobCost(costMsat: number, feeBps: number, rounding: FeeRounding = FEE_ROUNDING): { agentMsat: number; feeMsat: number } {
   const bps = Math.max(0, Math.min(10_000, Math.floor(feeBps)));
-  const feeMsat = Math.floor((costMsat * bps) / 10_000);
+  const exact = (costMsat * bps) / 10_000;
+  const feeMsat = Math.min(costMsat, rounding === "nearest" ? Math.floor(exact + 0.5) : Math.floor(exact));
   return { agentMsat: costMsat - feeMsat, feeMsat };
 }
 

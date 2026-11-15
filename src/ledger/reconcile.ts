@@ -223,7 +223,8 @@ export function reconcileLedger(input: ReconcileInput, opts: { maxDiscrepancies?
     }
     accrualsRecomputed++;
     const problems: Record<string, unknown> = {};
-    const split = splitJobCost(costMsat, feeBps);
+    // Accruals from before the fee was rounded to the nearest msat carry no feeRounding (floor).
+    const split = splitJobCost(costMsat, feeBps, p.feeRounding === "nearest" ? "nearest" : "floor");
     if (msat !== split.agentMsat) problems.msat = { recorded: msat ?? null, recomputed: split.agentMsat };
     if (num(p.feeMsat) !== split.feeMsat) problems.feeMsat = { recorded: p.feeMsat ?? null, recomputed: split.feeMsat };
     if (Math.round(credits * 1_000_000) !== roundCreditsMicro(split.agentMsat)) problems.credits = { recorded: credits, recomputed: roundCreditsMicro(split.agentMsat) / 1e6 };
