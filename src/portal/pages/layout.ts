@@ -53,6 +53,11 @@ export function portalAuthedPageHtml(input: {
   script: string;
   /** Optional HTML rendered on the right of the top bar (buttons, filters). */
   actions?: string;
+  /**
+   * Replaces the sidebar's navigation (chat, search, recent chats) with this HTML. Settings uses it
+   * so its sections take over the left pane, as in Claude and Cursor, with a way back to the app.
+   */
+  sidebarNav?: string;
 }): string {
   const onChat = input.activeTab === "chat";
   // On the chat page New chat starts a chat in place; elsewhere it opens the chat page on a new chat.
@@ -200,7 +205,7 @@ export function portalAuthedPageHtml(input: {
           <div class="sidebar-brand">
             <a href="/portal/chat">${brandMark(28)}<span><div class="brand-name">EdgeCoder</div><div class="brand-sub">Compute network</div></span></a>
           </div>
-          <nav class="sidebar-nav" aria-label="Primary">
+          ${input.sidebarNav ?? `<nav class="sidebar-nav" aria-label="Primary">
             <div class="nav-group">
               ${newChat}
               <button type="button" class="nav-link" id="sidebarSearchBtn" aria-expanded="false" aria-controls="sidebarSearch">${icon("search", 16)}<span class="nav-label">Search</span></button>
@@ -210,7 +215,7 @@ export function portalAuthedPageHtml(input: {
             <div class="nav-group" aria-label="Recent chats">
               <div class="conv-list" id="convList"></div>
             </div>
-          </nav>
+          </nav>`}
           <div class="sidebar-foot">
             <div class="account-menu" id="accountMenu" role="menu" aria-labelledby="profileBtn" hidden>
               <div class="menu-head" id="accountMenuEmail"></div>
@@ -393,6 +398,7 @@ export function portalAuthedPageHtml(input: {
           }).join("");
         }
         (function() {
+          if (!document.getElementById("convList")) return;
           var btn = document.getElementById("sidebarSearchBtn");
           var wrap = document.getElementById("sidebarSearch");
           var input = document.getElementById("convSearch");

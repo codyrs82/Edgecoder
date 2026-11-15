@@ -232,6 +232,7 @@ const ICON_PATHS: Record<string, string> = {
   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
   arrowRight: '<path d="M5 12h14"/><path d="M13 6l6 6-6 6"/>',
   chevronDown: '<path d="M6 9l6 6 6-6"/>',
+  chevronLeft: `<path d="m15 18-6-6 6-6"/>`,
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
   zap: '<path d="M13 2L3 14h8l-1 8 10-12h-8l1-8z"/>',
   layers: '<path d="M12 2l10 5-10 5L2 7l10-5z"/><path d="M2 12l10 5 10-5"/><path d="M2 17l10 5 10-5"/>',

@@ -25,7 +25,7 @@ function accountMenu(html: string): string {
 
 describe("portal navigation like the desktop app", () => {
   it("keeps the sidebar to New chat, Search, Chat, Overview, Reviews and recent chats", async () => {
-    for (const url of ["/portal/dashboard", "/portal/settings", "/portal/reviews"]) {
+    for (const url of ["/portal/dashboard", "/portal/reviews"]) {
       const nav = sidebar(await page(url));
       expect(nav, url).toContain('id="newChatBtn" href="/portal/chat?new=1"');
       expect(nav, url).toContain('id="sidebarSearchBtn"');
@@ -93,7 +93,8 @@ describe("portal navigation like the desktop app", () => {
 
   it("lists every Settings section, with Admin hidden for non-admins", async () => {
     const html = await page("/portal/settings");
-    const nav = html.slice(html.indexOf('<nav class="settings-links"'), html.indexOf("</nav>", html.indexOf('<nav class="settings-links"')));
+    const start = html.indexOf('<nav class="sidebar-nav settings-sidebar"');
+    const nav = html.slice(start, html.indexOf("</nav>", start));
     const sections: Array<[string, string]> = [
       ["general", "/portal/settings#general"],
       ["profile", "/portal/settings#profile"],
@@ -107,6 +108,24 @@ describe("portal navigation like the desktop app", () => {
     ];
     for (const [key, href] of sections) expect(nav, key).toMatch(new RegExp(`href="${href.replace(/[/#]/g, "\\$&")}"[^>]*data-section="${key}"`));
     expect(nav).toMatch(/class="settings-link hidden" href="\/portal\/settings\/admin"/);
+  });
+
+  // Owner feedback (2026-11-15): Settings showed inside the chat sidebar with a second column of
+  // links. Like Claude and Cursor, Settings now take over the left pane, with a way back.
+  it("Settings replace the chat sidebar with a back link, search and the sections", async () => {
+    const html = await page("/portal/settings");
+    const at = html.indexOf('<nav class="sidebar-nav settings-sidebar"');
+    expect(at).toBeGreaterThan(0);
+    const nav = html.slice(at, html.indexOf("</nav>", at));
+    expect(html).not.toContain('<nav class="sidebar-nav" aria-label="Primary">');
+    expect(nav).toContain('class="nav-link settings-back" href="/portal/chat"');
+    expect(nav).toContain('id="settingsSearch"');
+    expect(nav).toContain('data-section="compute"');
+    for (const gone of ['id="convList"', 'id="sidebarSearchBtn"', 'id="newChatBtn"']) expect(nav, gone).not.toContain(gone);
+    // One search box and one admin tab id on the page; the narrow-screen row of links has neither.
+    expect(html.match(/id="settingsSearch"/g)).toHaveLength(1);
+    expect(html.match(/id="settingsAdminTab"/g)).toHaveLength(1);
+    expect(html).toContain('class="settings-nav settings-nav-inline"');
   });
 
   it("redirects every old page to its Settings section, keeping the query string", async () => {
