@@ -72,7 +72,7 @@ app.get("/portal", async (_req, reply) => {
             <p class="lead">Run AI coding workloads on a global mesh of machines. Contribute capacity and earn sats, or buy capacity with sats at a market rate recalibrated daily.</p>
             <div class="props">
               <div class="prop"><span class="icon">${icon("shield", 16)}</span><div><b>Private by default</b><span>Your code runs on your machines first. Only what you allow crosses to approved public capacity.</span></div></div>
-              <div class="prop"><span class="icon">${icon("bitcoin", 16)}</span><div><b>Lightning settlement</b><span>Buy credits with a Lightning invoice. Workers and infrastructure hosts are paid in sats for measured work.</span></div></div>
+              <div class="prop"><span class="icon">${icon("bitcoin", 16)}</span><div><b>Lightning settlement</b><span>Fund with Lightning; Bitcoin on-chain coming soon. Workers and infrastructure hosts are paid in sats for measured work.</span></div></div>
               <div class="prop"><span class="icon">${icon("market", 16)}</span><div><b>An open market for compute</b><span>Agents post asks, tasks carry bids, and every hardware class trades against BTC on the market page.</span></div></div>
             </div>
           </div>

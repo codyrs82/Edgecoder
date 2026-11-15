@@ -7,7 +7,7 @@ import { SETTINGS_HELPERS_SCRIPT, settingsPage } from "./settings-shell.js";
 
 /**
  * Settings > Revenue (/portal/settings/revenue), system admins only: EdgeCoder's fee revenue (the
- * network fee pool) and withdrawing it to a Lightning invoice. The page shell carries no data; its
+ * network fee pool) and withdrawing it over Lightning. The page shell carries no data; its
  * script calls /portal/api/admin/revenue*, which check the session is a system admin and talk to the
  * coordinator server-side (src/portal/routes/revenue.ts).
  */
@@ -26,7 +26,7 @@ export function registerSettingsRevenuePage(app: FastifyInstance): void {
       table.rev-table { width:100%; }
     </style>
     <h2 class="set-title">Revenue</h2>
-    <p class="set-lead">EdgeCoder's share of every compute payment (the network fee pool), and withdrawing it to a Lightning invoice.</p>
+    <p class="set-lead">EdgeCoder's share of every compute payment (the network fee pool), and withdrawing it over Lightning.</p>
     <div id="revDenied" class="callout warn hidden"><h3>Admin access required</h3><div class="muted">This section is only available to system administrators.</div></div>
     <div id="revError" class="callout warn hidden"></div>
     <div id="revBody" class="hidden">
@@ -48,9 +48,9 @@ export function registerSettingsRevenuePage(app: FastifyInstance): void {
       </div>
       <div class="card">
         <h3 class="u-mt-0">Withdraw</h3>
-        <p class="muted">Paste a BOLT11 invoice with an amount. Room for the routing fee cap must remain in the payable balance. We email you a code to confirm. The coordinator's payout caps, pause switch and earnings hold apply.</p>
+        <p class="muted">Paste a Lightning payment code (lnbc…) with an amount from your wallet's Receive screen. Room for the routing fee cap must remain in the payable balance. We email you a code to confirm. The coordinator's payout caps, pause switch and earnings hold apply.</p>
         <div class="rev-form">
-          <textarea id="revInvoice" placeholder="lnbc..." aria-label="BOLT11 invoice"></textarea>
+          <textarea id="revInvoice" placeholder="lnbc..." aria-label="Lightning payment code"></textarea>
           <div id="revCodeRow" class="hidden"><input id="revCode" inputmode="numeric" autocomplete="one-time-code" placeholder="Code from the email" aria-label="Email code" /></div>
           <div><button class="primary" id="revWithdrawBtn">Withdraw</button></div>
           <div id="revWithdrawNote" class="muted"></div>

@@ -175,7 +175,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
             <p>No tokens to speculate on. One credit is one server-measured second of work on a known hardware class, and its sats value is locked the moment it is earned.</p>
           </div>
           <div class="steps">
-            <div class="step"><h3>Contribute or buy</h3><p>Install the agent to sell idle capacity, or buy credits with a Lightning invoice at the day's market rate.</p></div>
+            <div class="step"><h3>Contribute or buy</h3><p>Install the agent to sell idle capacity, or fund with Lightning (Bitcoin on-chain coming soon) at the day's market rate.</p></div>
             <div class="step"><h3>Match on the book</h3><p>Agents post an ask per hardware class, tasks carry a bid. A task is claimed only when the ask clears the bid, and it trades at the ask.</p></div>
             <div class="step"><h3>Verify and pay</h3><p>The coordinator measures run time itself, samples results for redundant verification, and credits the worker at the agreed price.</p></div>
             <div class="step"><h3>Withdraw in sats</h3><p>Earned sats are paid to your Lightning wallet on request or automatically to a Lightning address. Infrastructure hosts are paid from the network fee pool.</p></div>

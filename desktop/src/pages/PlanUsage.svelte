@@ -117,7 +117,7 @@
       pollTimer = setInterval(checkInvoice, 3000);
     } catch (e) {
       const m = (e as Error).message;
-      topupError = /payments_disabled/.test(m) ? "Buying cSats is turned off on this coordinator." : `Couldn't create the invoice: ${m}`;
+      topupError = /payments_disabled/.test(m) ? "Buying cSats is turned off on this coordinator." : `Couldn't start the payment: ${m}`;
     } finally {
       creating = false;
     }
@@ -153,7 +153,7 @@
   async function withdraw(withCode: boolean) {
     wMsg = null;
     const inv = bolt11.trim();
-    if (!inv) { wMsg = { ok: false, text: "Paste a Lightning invoice first." }; return; }
+    if (!inv) { wMsg = { ok: false, text: "Paste your wallet's payment code first." }; return; }
     if (withCode && (!wChallenge || wChallenge.bolt11 !== inv || !wCode.trim())) { wMsg = { ok: false, text: "Enter the code from the email, or request a new one." }; return; }
     wBusy = true;
     try {
@@ -236,15 +236,19 @@
         </div>
         <p class="wl-faint">Spend it on model calls, code jobs and reserved machines. Earnings from your machines can be withdrawn below; purchased cSats are for spending.</p>
         <div class="wl-actions">
-          <button class="primary" onclick={scrollToFunds}><Zap size={14} /> Add funds</button>
+          <button class="primary" onclick={scrollToFunds}><Zap size={14} /> Buy cSats</button>
           <button onclick={() => document.getElementById("wallet-earnings")?.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth" })}>Withdraw</button>
         </div>
       </section>
 
       <section class="wl-card" id="wallet-add-funds" aria-labelledby="wl-funds-title">
         {#if step === "amount"}
-          <h2 class="wl-h" id="wl-funds-title">Add funds <span class="wl-pill">Lightning</span></h2>
-          <p class="wl-faint">Pay a Lightning invoice from any wallet. Your cSats arrive as soon as it is paid.</p>
+          <h2 class="wl-h" id="wl-funds-title">Buy cSats</h2>
+          <div class="wl-fund-methods" role="list" aria-label="How to fund">
+            <span class="wl-fund active" role="listitem"><Zap size={14} /> Fund with Lightning</span>
+            <span class="wl-fund soon" role="listitem" title="Coming soon">Fund with Bitcoin <small>Coming soon</small></span>
+          </div>
+          <p class="wl-faint">Pay from any Lightning wallet. Your cSats arrive the moment the payment lands.</p>
           <div class="wl-presets" role="radiogroup" aria-label="Amount in sats">
             {#each [...PRESETS, "custom" as const] as p, i}
               <button id="wallet-preset-{i}" type="button" role="radio" aria-checked={preset === p} tabindex={preset === p ? 0 : -1}
@@ -264,25 +268,25 @@
           </dl>
           {#if !charged}<p class="wl-faint">No purchase fee: 1 sat buys 1 cSat.</p>{/if}
           <button class="primary wl-wide" disabled={!valid || creating || !local?.connected} onclick={createInvoice}>
-            {creating ? "Creating invoice…" : valid ? `Create invoice for ${fmtSats(amount)} sats` : "Enter 100 to 1,000,000 sats"}
+            {creating ? "Preparing payment…" : valid ? `Buy ${fmtSats(amount)} cSats with Lightning` : "Enter 100 to 1,000,000 sats"}
           </button>
           {#if topupError}<p class="sp-err" role="alert">{topupError}</p>{/if}
           {#if net.test && wallet}<p class="wl-test"><TriangleAlert size={14} /> This coordinator runs on {net.short}. Pay with a {net.short} wallet; these sats have no value.</p>{/if}
         {:else if step === "invoice" && invoice}
-          <h2 class="wl-h" id="wl-funds-title">Pay this invoice <span class="wl-pill">{networkInfo(invoice.network).test ? `${networkInfo(invoice.network).short} · test sats` : "Lightning · mainnet"}</span></h2>
+          <h2 class="wl-h" id="wl-funds-title">Scan to pay <span class="wl-pill">{networkInfo(invoice.network).test ? `${networkInfo(invoice.network).short} · test sats` : "Lightning · mainnet"}</span></h2>
           <p class="wl-faint">Pay {fmtSats(invoice.amountSats)} sats{fmtUsd(invoice.amountSats, btcUsd) ? ` (${fmtUsd(invoice.amountSats, btcUsd)})` : ""}. You get {fmtNum(invoice.cSats, 3)} cSats{invoice.feeSats > 0 ? ` after the ${fmtSats(invoice.feeSats)} sat purchase fee.` : "; there is no purchase fee."}</p>
           <div class="wl-inv">
             {#if qr}
-              <svg class="wl-qr" viewBox="0 0 {qr.size + QR_QUIET * 2} {qr.size + QR_QUIET * 2}" shape-rendering="crispEdges" role="img" aria-label="QR code of the Lightning invoice. Scan it with your wallet.">
+              <svg class="wl-qr" viewBox="0 0 {qr.size + QR_QUIET * 2} {qr.size + QR_QUIET * 2}" shape-rendering="crispEdges" role="img" aria-label="Lightning payment QR code. Scan it with your wallet.">
                 <rect width={qr.size + QR_QUIET * 2} height={qr.size + QR_QUIET * 2} fill={QR_LIGHT} />
                 <path transform="translate({QR_QUIET} {QR_QUIET})" d={qr.d} fill={QR_DARK} />
               </svg>
             {/if}
             <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-            <div class="wl-inv-text" tabindex="0" aria-label="Lightning invoice">{invoice.invoice}</div>
+            <div class="wl-inv-text" tabindex="0" aria-label="Lightning payment code">{invoice.invoice}</div>
           </div>
           <div class="wl-inv-actions">
-            <button class="primary" onclick={copyInvoice}>{#if copied}<Check size={14} /> Copied{:else}<Copy size={14} /> Copy invoice{/if}</button>
+            <button class="primary" onclick={copyInvoice}>{#if copied}<Check size={14} /> Copied{:else}<Copy size={14} /> Copy payment code{/if}</button>
             <a class="sp-button" href={`lightning:${invoice.invoice}`}><ExternalLink size={14} /> Open in wallet</a>
           </div>
           <div class="wl-wait" role="status">
@@ -307,9 +311,9 @@
         {:else}
           <div class="wl-done" role="status">
             <div class="wl-check warn"><Clock size={26} /></div>
-            <div class="wl-done-big" id="wl-funds-title">Invoice expired</div>
-            <p class="wl-faint">Nothing was charged. Create a new invoice to try again.</p>
-            <button class="primary wl-wide" onclick={() => { step = "amount"; void createInvoice(); }}>New invoice</button>
+            <div class="wl-done-big" id="wl-funds-title">This payment code expired</div>
+            <p class="wl-faint">Nothing was charged. Get a new code to try again.</p>
+            <button class="primary wl-wide" onclick={() => { step = "amount"; void createInvoice(); }}>New payment code</button>
             <button class="ghost wl-wide" onclick={backToAmount}>Change amount</button>
           </div>
         {/if}
@@ -320,7 +324,7 @@
       <h2 class="wl-h" id="wl-where">Where your sats go</h2>
       <p class="wl-faint">Adding funds is {charged ? `${pct(feeBps)} on this coordinator` : "free"}. When you use compute on someone else's machine, {pct(10000 - netFeeBps)} goes to that machine's owner and EdgeCoder keeps {pct(netFeeBps)}. Nothing else is taken.</p>
       <div class="wl-flow">
-        <div><div class="k">You pay</div><div class="v">{valid ? fmtSats(amount) : "–"} sats</div><div class="d">A Lightning invoice from your wallet</div></div>
+        <div><div class="k">You pay</div><div class="v">{valid ? fmtSats(amount) : "–"} sats</div><div class="d">From any Lightning wallet</div></div>
         <div><div class="k">Purchase fee · {charged ? pct(feeBps) : "free"}</div><div class="v">{valid ? fmtSats(previewed.fee) : "–"} sats</div><div class="d">{charged ? "Set by this coordinator and kept by it" : "Buying cSats costs nothing"}</div></div>
         <div><div class="k">Your balance</div><div class="v">{valid ? fmtSats(previewed.get) : "–"} cSats</div><div class="d">Spent per token on model calls, per second on jobs</div></div>
       </div>
@@ -350,7 +354,7 @@
 
     <div class="wl-sub">Payout method</div>
     <div class="wl-methods" role="list">
-      <div class="wl-method active" role="listitem"><div class="t"><span><Zap size={15} /> Lightning</span><span class="wl-pill ok">Active</span></div><div class="d">BTC. Withdraw now to an invoice, or get paid automatically to a Lightning address.</div></div>
+      <div class="wl-method active" role="listitem"><div class="t"><span><Zap size={15} /> Lightning</span><span class="wl-pill ok">Active</span></div><div class="d">BTC. Withdraw now from any Lightning wallet, or get paid automatically to a Lightning address.</div></div>
       <div class="wl-method soon" role="listitem"><div class="t"><span><Bitcoin size={15} /> Bitcoin on-chain</span><span class="wl-pill">Coming soon</span></div><div class="d">BTC. Batched payouts above a minimum. Not available yet.</div></div>
       <div class="wl-method soon" role="listitem"><div class="t"><span><Coins size={15} /> Litecoin on-chain</span><span class="wl-pill">Coming soon</span></div><div class="d">LTC. Batched payouts. Not available yet.</div></div>
     </div>
@@ -359,7 +363,7 @@
       <div class="sp-group-title">Withdraw now</div>
       <div class="sp-card">
         <div class="sp-row stack">
-          <label class="wl-label" for="wallet-bolt11">Lightning invoice (BOLT11) for the exact amount, from your wallet</label>
+          <label class="wl-label" for="wallet-bolt11">Your wallet's payment code (lnbc…) for the exact amount, from its Receive screen</label>
           <textarea id="wallet-bolt11" class="wl-textarea" rows="3" placeholder="lnbc…" spellcheck="false" bind:value={bolt11}></textarea>
           {#if wChallenge}
             <p class="wl-faint">{wChallenge.detail} Amount: {fmtMsat(wChallenge.amountMsat)} sats.</p>
@@ -433,7 +437,7 @@
       <div class="sp-group-title">Activity</div>
       <div class="sp-card sp-table-scroll" role="group" aria-label="Activity" use:scrollRegion>
         {#if recent.length === 0}
-          <div class="sp-row"><span class="sp-muted">Nothing yet. Add funds or connect a machine to get started.</span></div>
+          <div class="sp-row"><span class="sp-muted">Nothing yet. Buy cSats or connect a machine to get started.</span></div>
         {:else}
           <table>
             <tbody>
@@ -468,6 +472,11 @@
 </div>
 
 <style>
+  .wl-fund-methods { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 10px; }
+  .wl-fund { display: inline-flex; align-items: center; gap: 6px; height: var(--control-md, 28px); padding: 0 10px; border-radius: 999px; border: 1px solid var(--card-border, var(--border)); font-size: 12.5px; font-weight: 600; }
+  .wl-fund.active { border-color: var(--brand, var(--accent)); }
+  .wl-fund.soon { border-style: dashed; }
+  .wl-fund small { font-weight: 500; }
   .wl { gap: 18px; }
   .wl-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .net-badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
