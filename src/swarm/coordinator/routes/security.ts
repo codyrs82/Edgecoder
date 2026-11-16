@@ -150,19 +150,56 @@ export function registerSecurityRoutes(app: CoordinatorApp): void {
    *  earlier one here, on reload and on peers that receive the gossip. */
   app.post("/security/blacklist/:agentId/lift", async (req, reply) => {
     if (!authorizeAdmin(req, reply)) return;
-    const params = z.object({ agentId: z.string().min(1) }).parse(req.params);
-    const body = z.object({ reason: z.string().min(3).default("lifted by admin") }).parse(req.body ?? {});
-    if (!activeBlacklistRecord(params.agentId)) return reply.code(404).send({ error: "not_blacklisted" });
-    const record = issueCoordinatorBlacklistRecord({
-      agentId: params.agentId,
-      reasonCode: "manual_review",
-      reason: `lifted: ${body.reason}`,
-      evidenceHashSha256: createHash("sha256").update(`lift:${params.agentId}`).digest("hex"),
-      reportedBy: "admin",
-      expiresAtMs: Date.now(),
-    });
-    behaviorTracker.reset(params.agentId);
-    autoBlacklister.clearStrikes(params.agentId);
-    return { ok: true, record, version: mutable.blacklistVersion };
+    return liftBlacklist(req, reply);
   });
+
+  // The portal's admin page (Settings > Network): list and lift with the admin token alone. Its own
+  // plugin with the admin gate, like routes/admin.ts (coordinator.ts lets /admin/* past the mesh check).
+  app.register(async (admin) => {
+    admin.addHook("onRequest", async (req, reply) => {
+      if (!authorizeAdmin(req, reply)) return reply;
+    });
+    /** Active records, newest first, with whether behavioural monitoring issued each and when it lifts by itself. */
+    admin.get("/admin/security/blacklist", async (req, reply) => {
+      if (!authorizeAdmin(req, reply)) return;
+      const now = Date.now();
+      const records = [...blacklistByAgent.values()]
+        .filter((record) => Boolean(activeBlacklistRecord(record.agentId)))
+        .sort((a, b) => b.timestampMs - a.timestampMs)
+        .map((r) => ({
+          agentId: r.agentId,
+          reasonCode: r.reasonCode,
+          reason: r.reason,
+          reportedBy: r.reportedBy,
+          automatic: r.reportedBy === "behavioral_monitoring",
+          sourceCoordinatorId: r.sourceCoordinatorId,
+          timestampMs: r.timestampMs,
+          expiresAtMs: r.expiresAtMs ?? null,
+          expiresInMs: r.expiresAtMs ? Math.max(0, r.expiresAtMs - now) : null,
+        }));
+      reply.header("cache-control", "no-store");
+      return { coordinatorId: identity.peerId, version: mutable.blacklistVersion, records };
+    });
+    admin.post("/admin/security/blacklist/:agentId/lift", async (req, reply) => {
+      if (!authorizeAdmin(req, reply)) return;
+      return liftBlacklist(req, reply);
+    });
+  });
+}
+
+async function liftBlacklist(req: { params: unknown; body: unknown }, reply: { code: (n: number) => { send: (b: unknown) => unknown } }) {
+  const params = z.object({ agentId: z.string().min(1) }).parse(req.params);
+  const body = z.object({ reason: z.string().min(3).default("lifted by admin") }).parse(req.body ?? {});
+  if (!activeBlacklistRecord(params.agentId)) return reply.code(404).send({ error: "not_blacklisted" });
+  const record = issueCoordinatorBlacklistRecord({
+    agentId: params.agentId,
+    reasonCode: "manual_review",
+    reason: `lifted: ${body.reason}`,
+    evidenceHashSha256: createHash("sha256").update(`lift:${params.agentId}`).digest("hex"),
+    reportedBy: "admin",
+    expiresAtMs: Date.now(),
+  });
+  behaviorTracker.reset(params.agentId);
+  autoBlacklister.clearStrikes(params.agentId);
+  return { ok: true, record, version: mutable.blacklistVersion };
 }

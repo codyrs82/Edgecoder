@@ -648,6 +648,8 @@ The schemas are collected in `src/config/index.ts`. `tests/common/env-docs.test.
 | `RELAY_RATE_LIMIT_PER_10S` | integer ≥ 0 | `80` |
 | `DIRECT_WORK_OFFERS_PER_10S` | integer ≥ 0 | `20` |
 | `BEHAVIOR_SUBMITTER_FAILURE_CAP` | integer ≥ 1 (agent failures from one submitter account that count toward an agent's failure-rate rule, BHV004, per hour; the rest are left out) | `3` |
+| `BEHAVIOR_ABANDONED_CLAIM_THRESHOLD` | integer, 1 to 1000: abandoned claims (a claim whose lease lapsed and went back on the queue) that make the BHV006 pattern within the window: that many in a row without the agent returning any result, or that many held past their deadline while it kept heartbeating. A heartbeat gap alone (sleep, an app update restart) is never a strike, and a claim the agent hands back when it announces it is going offline is not abandoned | `5` |
+| `BEHAVIOR_ABANDONED_CLAIM_WINDOW_MS` | integer ms, 60000 to 604800000: the window BHV006 counts abandoned claims over | `86400000` |
 | `AGENT_ORCHESTRATION_ONLINE_WINDOW_MS` | integer ≥ 1 | `120000` |
 | `AGENT_CAPABILITY_TTL_MS` | integer ≥ 60000 | `3600000` |
 | `ROBOT_QUEUE_ENABLED` | true/false | `false` |

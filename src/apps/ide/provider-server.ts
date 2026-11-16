@@ -34,7 +34,7 @@ import { GitSetupError, cloneRepo, githubStatus, normalizeRemoteUrl } from "./gi
 import { connectRepoUrl, defaultProjectsFolder, getProjectsFolder, recentGitHubRepos, setProjectsFolder } from "./repo-connect.js";
 import { isAbsolute } from "node:path";
 import { NetworkTasks } from "./network-tasks.js";
-import { buyCSats, usageSummary, cancelReservation, computeOverview, contentToText, createReservation, listNetworkModels, listReservations, networkContextWindow, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
+import { buyCSats, usageSummary, cancelReservation, computeOverview, contentToText, drainAgent, createReservation, listNetworkModels, listReservations, networkContextWindow, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
 import { networkWorld } from "./network-world.js";
 import { ConnectionManager } from "./connections.js";
 import { BotManager, agentBotRunner, botBranchPrefix, botComputeChat, botWorkRoot, registerBotRoutes, type ApprovalEntry } from "./bots.js";
@@ -940,6 +940,18 @@ app.get("/v1/ide/network/world", async (_req, reply) => {
     return reply.send({ connected: true, ...r.json, selfAgentId: networkDeps.agentId });
   } catch (err) {
     return reply.status(502).send({ connected: false, reason: "agent_unreachable", error: (err as Error).message });
+  }
+});
+
+// Before an update restart or quit: the agent stops taking network work and hands its claims back.
+app.post("/v1/ide/compute/drain", async (req, reply) => {
+  if (!networkDeps || networkDeps.transport) return reply.send({ ok: true, draining: false, released: 0, reason: "not_enrolled" });
+  const { resume } = z.object({ resume: z.boolean().default(false) }).parse(req.body ?? {});
+  try {
+    const r = await drainAgent(networkDeps, resume);
+    return reply.status(r.status === 200 ? 200 : 502).send(r.json);
+  } catch (err) {
+    return reply.status(502).send({ ok: false, error: "agent_unreachable", detail: (err as Error).message });
   }
 });
 

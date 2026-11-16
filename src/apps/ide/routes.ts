@@ -64,6 +64,7 @@ export const IDE_ROUTES = [
   { method: "POST", path: "/v1/ide/projects/new", auth: true },
   { method: "GET", path: "/v1/ide/compute", auth: true },
   { method: "GET", path: "/v1/ide/network/world", auth: true },
+  { method: "POST", path: "/v1/ide/compute/drain", auth: true },
   { method: "POST", path: "/v1/ide/compute/buy", auth: true },
   { method: "POST", path: "/v1/ide/compute/intent", auth: true },
   { method: "GET", path: "/v1/ide/connections", auth: true },

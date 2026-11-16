@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AutoRestart, COUNTDOWN_S, LATER_MS, POLL_MS, STUCK_BUSY_MS, AUTO_RESTART_KEY, autoRestartEnabled,
-  networkJobBusy, restartDecision, sessionsBusy, takeUpdatedTo, rememberUpdatingTo, setBusy, busyReasons, type BusyReason,
+  networkJobBusy, restartWithDrain, restartDecision, sessionsBusy, takeUpdatedTo, rememberUpdatingTo, setBusy, busyReasons, type BusyReason,
 } from "../src/lib/auto-restart";
 
 const base = { autoUpdate: true, autoRestart: true, ready: true, busy: [] as BusyReason[], nowMs: 1_000, postponedUntilMs: 0, readySinceMs: 0 };
@@ -26,6 +26,9 @@ describe("signals", () => {
     expect(networkJobBusy(0, [100_000 - 29_000], 100_000)).toBe(true);
     expect(networkJobBusy(0, [100_000 - 31_000], 100_000)).toBe(false);
     expect(networkJobBusy(undefined, [], 0)).toBe(false);
+    // The agent is running a network job: restarting would abandon it (BHV006).
+    expect(networkJobBusy(0, [], 0, 1)).toBe(true);
+    expect(networkJobBusy(0, [], 0, 0)).toBe(false);
   });
   it("sessions: a running turn or pending approval", () => {
     expect(sessionsBusy([{ running: false, pending: 0 }])).toBe(false);
@@ -136,5 +139,32 @@ describe("AutoRestart", () => {
     await ar.evaluate();
     await ar.restartNow();
     expect(restart).toHaveBeenCalledWith("1.4.2");
+  });
+});
+
+describe("restartWithDrain (BHV006: no network job left abandoned by an update restart)", () => {
+  it("drains the agent before installing", async () => {
+    const order: string[] = [];
+    const restart = restartWithDrain(
+      async (resume) => { order.push(resume ? "resume" : "drain"); },
+      async (v) => { order.push(`install ${v}`); },
+    );
+    await restart("1.4.44");
+    expect(order).toEqual(["drain", "install 1.4.44"]);
+  });
+
+  it("a failing or slow drain never blocks the update", async () => {
+    const install = vi.fn(async () => {});
+    await restartWithDrain(async () => { throw new Error("agent down"); }, install)("1");
+    expect(install).toHaveBeenCalledTimes(1);
+    await restartWithDrain(() => new Promise(() => {}), install, 10)("1");
+    expect(install).toHaveBeenCalledTimes(2);
+  });
+
+  it("takes work again when the install fails", async () => {
+    const calls: boolean[] = [];
+    const restart = restartWithDrain(async (resume) => { calls.push(resume); }, async () => { throw new Error("install failed"); });
+    await expect(restart("1")).rejects.toThrow("install failed");
+    expect(calls).toEqual([false, true]);
   });
 });

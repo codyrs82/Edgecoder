@@ -282,6 +282,26 @@ export interface ComputeOverview {
   models?: Array<{ model: string; agents: number; classes: string[]; cSatsPerMTokens?: { input: number; output: number }; restricted?: string }>;
   /** How this machine's agent chose its coordinator (signed registry + latency), from /forward/health. */
   steering?: CoordinatorSteeringView | null;
+  /**
+   * The network refused this machine's agent (blacklisted by its safety checks), with the reason;
+   * the app says so instead of "not connected". From /forward/health.
+   */
+  paused?: { reason: string; sinceMs: number } | null;
+  /** Network subtasks this machine's agent is running now (the update restart waits for them). */
+  claims?: number;
+  /** The agent stopped taking work ahead of a restart. */
+  draining?: boolean;
+}
+
+/** paused / claims / draining from the forwarder's /forward/health (agent-lifecycle.ts). */
+function lifecycleView(raw: Record<string, unknown> | undefined): Pick<ComputeOverview, "paused" | "claims" | "draining"> {
+  if (!raw) return {};
+  const out: Pick<ComputeOverview, "paused" | "claims" | "draining"> = {};
+  const p = raw.paused as { reason?: unknown; sinceMs?: unknown } | null | undefined;
+  if (p && typeof p === "object" && typeof p.reason === "string") out.paused = { reason: p.reason.slice(0, 500), sinceMs: typeof p.sinceMs === "number" ? p.sinceMs : 0 };
+  if (typeof raw.claims === "number") out.claims = raw.claims;
+  if (typeof raw.draining === "boolean") out.draining = raw.draining;
+  return out;
 }
 
 /** The agent's last steering decision as the app shows it (src/discovery/steering.ts SteeringResult). */
@@ -318,15 +338,25 @@ export async function computeOverview(d: NetworkDeps): Promise<ComputeOverview> 
     // The local forwarder's own state (which coordinator steering picked); not a coordinator route.
     d.transport ? Promise.resolve(null) : call(d, "GET", "/health").catch(() => null),
   ]);
-  if (acct.status !== 200 && cat.status !== 200) return { connected: false };
+  const lifecycle = lifecycleView(health?.status === 200 ? health.json : undefined);
+  if (acct.status !== 200 && cat.status !== 200) return { connected: false, ...lifecycle };
   const steering = health?.status === 200 ? steeringView(health.json.steering) : null;
   return {
     connected: true,
     selfAgentId: d.agentId,
     ...(steering ? { steering } : {}),
+    ...lifecycle,
     ...(acct.status === 200 ? { account: acct.json as unknown as ComputeOverview["account"] } : {}),
     ...(cat.status === 200 ? { classes: cat.json.classes as ComputeOverview["classes"], models: cat.json.models as ComputeOverview["models"] } : {}),
   };
+}
+
+/**
+ * Before the app restarts (an update) or quits: this machine's agent stops taking network work and
+ * hands what it holds to other agents (BHV006). `resume` takes work again (the restart was put off).
+ */
+export async function drainAgent(d: NetworkDeps, resume = false) {
+  return call(d, "POST", "/drain", { resume });
 }
 
 /** Ask for a Lightning invoice that buys cSats for this machine's owner. */

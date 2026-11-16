@@ -1,4 +1,5 @@
 <script lang="ts">
+  import AgentPausedNotice from "../components/AgentPausedNotice.svelte";
   // Settings > Wallet: balance and Add funds (Lightning top-up with a live invoice, or Fund with
   // Bitcoin on-chain to a deposit address when the coordinator has ONCHAIN_ENABLED), where your sats
   // go, Earnings & withdrawals, where we pay you, and activity. docs/design/wallet-and-market.md.
@@ -266,7 +267,9 @@
   {#if loading}
     <div class="wl-grid" aria-busy="true"><div class="wl-card wl-skel-card"></div><div class="wl-card wl-skel-card"></div></div>
   {:else}
-    {#if !local?.connected && !wallet?.connected}
+    {#if local?.paused}
+      <AgentPausedNotice reason={local.paused.reason} agentId={local.selfAgentId} onRetry={load} />
+    {:else if !local?.connected && !wallet?.connected}
       <div class="sp-card"><div class="sp-row"><div class="sp-text"><span class="sp-title">Not connected to the network</span><span class="sp-desc">Sign in and let this computer's agent connect; then you can add funds and use compute. Your balance is safe.</span></div><button onclick={load}>Retry</button></div></div>
     {/if}
 

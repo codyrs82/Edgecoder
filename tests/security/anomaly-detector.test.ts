@@ -172,30 +172,35 @@ describe("AnomalyDetector", () => {
     });
   });
 
-  describe("BHV006 — Heartbeat manipulation", () => {
-    it("triggers with large gap and active claims", () => {
-      const stats = baseStats({
-        heartbeatGapMaxMs: 6 * 60 * 1000,
-        taskClaimCount: 3,
-      });
-      const events = detector.evaluate(stats);
-      expect(events.find(e => e.ruleId === "BHV006")).toBeDefined();
-    });
-
-    it("does not trigger if no task claims", () => {
-      const stats = baseStats({
-        heartbeatGapMaxMs: 6 * 60 * 1000,
-        taskClaimCount: 0,
-      });
+  describe("BHV006 — Abandoned claims (a pattern, never a single heartbeat gap)", () => {
+    it("a long heartbeat gap while claiming is not a strike on its own", () => {
+      // The owner's Mac (2026-11-16): a 495 s gap from an update restart got it blacklisted.
+      const stats = baseStats({ heartbeatGapMaxMs: 495_000, taskClaimCount: 3, abandonedClaimCount: 1, abandonedClaimStreak: 1 });
       expect(detector.evaluate(stats).find(e => e.ruleId === "BHV006")).toBeUndefined();
     });
 
-    it("does not trigger if gap is small", () => {
-      const stats = baseStats({
-        heartbeatGapMaxMs: 60_000,
-        taskClaimCount: 5,
-      });
+    it("triggers at the threshold of abandoned claims in a row without a result", () => {
+      const n = DEFAULT_ANOMALY_CONFIG.abandonedClaimThreshold;
+      expect(n).toBe(5);
+      expect(detector.evaluate(baseStats({ abandonedClaimCount: n - 1, abandonedClaimStreak: n - 1 })).find(e => e.ruleId === "BHV006")).toBeUndefined();
+      const ev = detector.evaluate(baseStats({ abandonedClaimCount: n, abandonedClaimStreak: n })).find(e => e.ruleId === "BHV006");
+      expect(ev).toMatchObject({ ruleName: "Abandoned claims", severity: "HIGH", blacklistReason: "dos_behavior" });
+      expect(ev?.enforcement).toBeUndefined();
+    });
+
+    it("abandoned claims spread between completed work are not a pattern", () => {
+      const stats = baseStats({ abandonedClaimCount: 8, abandonedClaimStreak: 1 });
       expect(detector.evaluate(stats).find(e => e.ruleId === "BHV006")).toBeUndefined();
+    });
+
+    it("triggers on claims held past their deadline while heartbeating", () => {
+      const stats = baseStats({ abandonedClaimCount: 5, abandonedClaimStreak: 0, abandonedWhileActiveCount: 5 });
+      expect(detector.evaluate(stats).find(e => e.ruleId === "BHV006")?.description).toContain("while heartbeating");
+    });
+
+    it("honours a configured threshold", () => {
+      const strict = new AnomalyDetector({ abandonedClaimThreshold: 2 });
+      expect(strict.evaluate(baseStats({ abandonedClaimStreak: 2 })).find(e => e.ruleId === "BHV006")).toBeDefined();
     });
   });
 

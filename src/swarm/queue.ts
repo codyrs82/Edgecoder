@@ -46,6 +46,18 @@ export interface LeaseExpiry {
   failed: string[];
 }
 
+/**
+ * A claim whose holder let its lease lapse ("abandoned claim", BHV006). `holderLive`: the holder
+ * was still heartbeating, so the claim ran past its hard deadline (timeout + grace) rather than
+ * the holder going quiet (sleep, crash, a restart without notice).
+ */
+export interface AbandonedClaim {
+  subtaskId: string;
+  agentId: string;
+  atMs: number;
+  holderLive: boolean;
+}
+
 const MAX_TRACKED_EXPIRED = 10_000;
 
 interface QueueItem {
@@ -97,6 +109,16 @@ export class SwarmQueue {
 
   onLeaseFailure(listener: (result: SubtaskResult) => void): void {
     this.leaseFailureListener = listener;
+  }
+
+  /**
+   * BHV006: called once for every claim whose lease expired, whichever caller triggered expiry.
+   * A clean hand-back (releaseClaimsOf, the agent announcing it is going offline) is not one.
+   */
+  private abandonListener?: (claim: AbandonedClaim) => void;
+
+  onClaimAbandoned(listener: (claim: AbandonedClaim) => void): void {
+    this.abandonListener = listener;
   }
 
   /**
@@ -435,6 +457,31 @@ export class SwarmQueue {
     return true;
   }
 
+  /**
+   * The agent announced it is going offline (an app update or quit, the machine going to sleep):
+   * hand every claim it holds back for other agents now instead of at lease expiry. Not an
+   * abandoned claim. The attempt still counts toward the retry cap (a worker can't bounce a
+   * subtask forever by claiming and releasing it), and a late result from it is refused, as after
+   * a lease expiry. Returns the released subtask ids.
+   */
+  releaseClaimsOf(agentId: string, nowMs = Date.now()): string[] {
+    const released: string[] = [];
+    for (const item of this.tasks) {
+      if (item.claimedBy !== agentId) continue;
+      this.markExpired(item.subtask.id, agentId);
+      item.claimedBy = undefined;
+      item.claimedAt = undefined;
+      item.leaseRenewedAt = undefined;
+      item.claimableAfterMs = undefined;
+      const attempts = item.attempts ?? 0;
+      const subtaskId = item.subtask.id;
+      this.persist(subtaskId, (store) => store.markSubtaskReleased(subtaskId, attempts, { agentId, atMs: nowMs }));
+      released.push(subtaskId);
+      this.notifyClaimable(item);
+    }
+    return released;
+  }
+
   /** True while the subtask is queued and nobody holds it. */
   isUnclaimed(subtaskId: string): boolean {
     const item = this.tasks.find((t) => t.subtask.id === subtaskId);
@@ -525,6 +572,7 @@ export class SwarmQueue {
       const item = this.tasks[i];
       if (!item.claimedBy || now <= this.leaseDeadline(item)) continue;
       const holder = item.claimedBy;
+      const holderLive = now <= (item.leaseRenewedAt ?? item.claimedAt ?? 0) + this.lease.livenessMs;
       this.markExpired(item.subtask.id, holder);
       // One agent may let a lease on this subtask lapse once (a dropped connection) and re-claim it;
       // after a second lapse it is barred from it, so one agent cannot burn every retry and fail it.
@@ -563,6 +611,11 @@ export class SwarmQueue {
       } else {
         requeued.push(item.subtask.id);
         this.notifyClaimable(item);
+      }
+      try {
+        this.abandonListener?.({ subtaskId: item.subtask.id, agentId: holder, atMs: now, holderLive });
+      } catch {
+        // a listener error must not break lease bookkeeping
       }
     }
     return { requeued, failed };

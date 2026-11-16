@@ -22,6 +22,7 @@ import type { AgentPowerTelemetry } from "../power-policy.js";
 import { buildBlacklistEventHash } from "../../security/blacklist.js";
 import { AgentBehaviorTracker } from "../../security/behavior-tracker.js";
 import { AnomalyDetector } from "../../security/anomaly-detector.js";
+import type { AbandonedClaim } from "../queue.js";
 import { VerificationFlags, verificationConfigFromEnv } from "../verification.js";
 import { AutoBlacklister, type BlacklistAction } from "../../security/auto-blacklister.js";
 import { ReleaseManifestCache } from "../../security/release-manifest-cache.js";
@@ -195,13 +196,17 @@ export const blacklistByAgent = new Map<string, BlacklistRecord>();
 export const blacklistAuditLog: BlacklistRecord[] = [];
 
 // ── Behavioral monitoring ──
-export const behaviorTracker = new AgentBehaviorTracker(undefined, { submitterFailureCap: CC.BEHAVIOR_SUBMITTER_FAILURE_CAP });
+export const behaviorTracker = new AgentBehaviorTracker(undefined, {
+  submitterFailureCap: CC.BEHAVIOR_SUBMITTER_FAILURE_CAP,
+  abandonedClaimWindowMs: CC.BEHAVIOR_ABANDONED_CLAIM_WINDOW_MS,
+});
 // BHV001 never strikes on speed for kinds this coordinator verifies by re-execution: it flags
 // the agent (fastResultVerificationFlags) and verification decides. With verification off
 // (RESULT_VERIFICATION_RATE=0) nothing is verifiable, so a sustained pattern can strike.
 const behaviourVerification = verificationConfigFromEnv();
 export const anomalyDetector = new AnomalyDetector({
   suspiciouslyFastVerifiableKinds: behaviourVerification.rate > 0 ? [...behaviourVerification.kinds] : [],
+  abandonedClaimThreshold: CC.BEHAVIOR_ABANDONED_CLAIM_THRESHOLD,
 });
 /** Agents whose next verifiable results are verified whatever the sampling draw (BHV001 flags). */
 export const fastResultVerificationFlags = new VerificationFlags();
@@ -260,6 +265,9 @@ export function issueCoordinatorBlacklistRecord(input: {
 }
 
 export const autoBlacklister = new AutoBlacklister((action: BlacklistAction) => {
+  // The pattern was acted on: when this blacklist expires the agent starts with a clean slate
+  // rather than being struck again at once for the same abandoned claims.
+  if (action.anomalyEvents.some((e) => e.ruleId === "BHV006")) behaviorTracker.clearAbandonedClaims(action.agentId);
   issueCoordinatorBlacklistRecord({
     agentId: action.agentId,
     reasonCode: action.reasonCode,
@@ -300,6 +308,24 @@ export function evaluateAndEnforce(agentId: string): void {
   }
 }
 
+/**
+ * BHV006: a claim this agent held lapsed and went back on the queue (src/swarm/queue.ts). Logged
+ * and recorded; only a pattern of them strikes (anomaly-detector.ts). Deferred so enforcement never
+ * runs inside the queue's lease bookkeeping.
+ */
+export function recordAbandonedClaim(claim: AbandonedClaim): void {
+  behaviorTracker.recordAbandonedClaim(claim.agentId, { whileActive: claim.holderLive }, claim.atMs);
+  securityLog.log({
+    level: "INFO",
+    event: "claim_abandoned",
+    source: { type: "agent", id: claim.agentId },
+    details: { subtaskId: claim.subtaskId, whileActive: claim.holderLive },
+    action: "claim_requeued",
+    coordinatorId: identity.peerId,
+  });
+  queueMicrotask(() => evaluateAndEnforce(claim.agentId));
+}
+
 // ── Release manifest cache for code signing verification ──
 export const releaseManifestCache = new ReleaseManifestCache();
 releaseManifestCache.start();
@@ -314,7 +340,8 @@ export const pendingTunnelCloseNotices = new Map<string, Array<{ peerAgentId: st
 export function activeBlacklistRecord(agentId: string): BlacklistRecord | undefined {
   const record = blacklistByAgent.get(agentId);
   if (!record) return undefined;
-  if (record.expiresAtMs && Date.now() > record.expiresAtMs) {
+  // >=: a lift is a record expiring now; it must not read as active in that same millisecond.
+  if (record.expiresAtMs && Date.now() >= record.expiresAtMs) {
     blacklistByAgent.delete(agentId);
     mutable.blacklistVersion += 1;
     return undefined;
@@ -327,7 +354,7 @@ export async function meshBlacklistReason(agentId: string): Promise<string | nul
   const local = activeBlacklistRecord(agentId);
   if (local) return local.reason;
   const shared = await pgStore?.latestBlacklistEvent(agentId);
-  if (shared && !(shared.expiresAtMs && Date.now() > shared.expiresAtMs)) return shared.reason;
+  if (shared && !(shared.expiresAtMs && Date.now() >= shared.expiresAtMs)) return shared.reason;
   return null;
 }
 

@@ -31,7 +31,7 @@ import { anchorEpoch, closeEpoch } from "../receipts/epochs.js";
 import { app, metrics } from "./coordinator/app.js";
 import { queue, identity, coordinatorKeys, CC, mesh, MESH_AUTH_TOKEN } from "./coordinator/context.js";
 import "./coordinator/mutable-state.js";
-import { agentCapabilities, connectedAgentCount } from "./coordinator/agent-state.js";
+import { agentCapabilities, connectedAgentCount, recordAbandonedClaim } from "./coordinator/agent-state.js";
 import { hasMeshToken, hasPortalServiceToken, requireMeshToken, isAgentGateRoute, agentSignatureAtGate } from "./coordinator/auth.js";
 import { isPaymentGatedRequest } from "./coordinator/economy.js";
 import { ECONOMY_PAYMENTS_ENABLED, lightningProvider, payoutReconciler } from "./coordinator/payouts.js";
@@ -98,6 +98,9 @@ queue.onLeaseFailure((result) => {
     app.log.error({ err, subtaskId: result.subtaskId }, "subtask_failure_finalize_failed")
   );
 });
+
+// BHV006: a lapsed claim is requeued (above) and recorded as abandoned; only a pattern strikes.
+queue.onClaimAbandoned((claim) => recordAbandonedClaim(claim));
 
 // Every response to an agent request (one carrying x-agent-nonce: register, heartbeat, pull, result,
 // agent-mesh, inference, orchestration, errors included) is signed with the identity key, in headers

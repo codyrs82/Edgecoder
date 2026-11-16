@@ -340,4 +340,122 @@ export function registerNetworkAdminRoutes(app: FastifyInstance, deps: NetworkAd
     reply.header("cache-control", "no-store");
     return reply.send(mergeNetworkSnapshots(results, owners, range));
   });
+
+  // Blacklisted agents across coordinators (an agent that is blacklisted can't register, so it is not
+  // in /admin/network's agent list), with a Lift button on Settings > Network.
+  app.get("/portal/api/admin/blacklist", async (req, reply) => {
+    const gate = await adminGate(req, reply);
+    if (!gate) return;
+    const results = await Promise.all(gate.urls.map((u) => fetchBlacklist(u, deps.coordinatorAdminToken, deps.EXTERNAL_HTTP_TIMEOUT_MS)));
+    let owners: OwnerDirectory = { nodeOwners: new Map(), userEmails: new Map() };
+    const agentIds = [...new Set(results.flatMap((r) => (r.ok ? r.records.map((x) => x.agentId) : [])))];
+    try {
+      if (agentIds.length) owners = await deps.lookupOwners(agentIds, []);
+    } catch (error) {
+      req.log.warn({ error: error instanceof Error ? error.message : String(error) }, "blacklist_owner_lookup_failed");
+    }
+    reply.header("cache-control", "no-store");
+    return reply.send(mergeBlacklists(results, owners));
+  });
+
+  app.post("/portal/api/admin/blacklist/:agentId/lift", async (req, reply) => {
+    const gate = await adminGate(req, reply);
+    if (!gate) return;
+    const agentId = String((req.params as { agentId?: string }).agentId ?? "");
+    if (!/^[A-Za-z0-9._:@-]{1,200}$/.test(agentId)) return reply.code(400).send({ error: "invalid_agent_id" });
+    const reason = `lifted by ${gate.email} from the portal`;
+    // Every coordinator that has it (they share the record by gossip; lifting on each is idempotent: 404 = not there).
+    const results = await Promise.all(gate.urls.map((u) => liftOn(u, agentId, reason, deps.coordinatorAdminToken, deps.EXTERNAL_HTTP_TIMEOUT_MS)));
+    const lifted = results.filter((r) => r.status === 200).length;
+    req.log.info({ agentId, by: gate.email, lifted }, "admin_blacklist_lift");
+    return reply.code(lifted > 0 ? 200 : results.every((r) => r.status === 404) ? 404 : 502).send({ ok: lifted > 0, agentId, lifted, coordinators: results });
+  });
+
+  async function adminGate(req: unknown, reply: { code: (n: number) => { send: (b: unknown) => unknown } }): Promise<{ email: string; urls: string[] } | null> {
+    const user = await deps.getCurrentUser(req as never);
+    if (!user) {
+      reply.code(401).send({ error: "not_authenticated" });
+      return null;
+    }
+    if (!(await deps.buildAccessContext(user)).isSystemAdmin) {
+      reply.code(403).send({ error: "admin_only" });
+      return null;
+    }
+    if (!deps.coordinatorAdminToken) {
+      reply.code(503).send({ error: "coordinator_admin_token_not_configured", detail: "Set COORDINATOR_ADMIN_TOKEN on the portal (the coordinators' ADMIN_API_TOKEN)." });
+      return null;
+    }
+    const urls = [...new Set((await deps.coordinatorUrls()).map((u) => u.replace(/\/+$/, "")))];
+    if (!urls.length) {
+      reply.code(503).send({ error: "no_coordinator" });
+      return null;
+    }
+    return { email: user.email, urls };
+  }
+}
+
+/** One record of a coordinator's GET /admin/security/blacklist (src/swarm/coordinator/routes/security.ts). */
+export interface BlacklistRow {
+  agentId: string;
+  reasonCode: string;
+  reason: string;
+  reportedBy: string | null;
+  automatic: boolean;
+  timestampMs: number;
+  expiresAtMs: number | null;
+}
+export type BlacklistResult = { url: string; ok: true; records: BlacklistRow[] } | { url: string; ok: false; error: string; status?: number };
+
+async function fetchBlacklist(url: string, token: string, timeoutMs: number): Promise<BlacklistResult> {
+  try {
+    const res = await request(`${url}/admin/security/blacklist`, { method: "GET", headers: { "x-admin-token": token }, headersTimeout: timeoutMs, bodyTimeout: timeoutMs, signal: AbortSignal.timeout(timeoutMs) });
+    if (res.statusCode !== 200) {
+      await res.body.dump().catch(() => undefined);
+      return { url, ok: false, error: res.statusCode === 401 ? "admin_token_rejected" : res.statusCode === 404 ? "route_not_deployed" : "coordinator_error", status: res.statusCode };
+    }
+    const body = (await res.body.json()) as { records?: BlacklistRow[] };
+    return { url, ok: true, records: Array.isArray(body.records) ? body.records : [] };
+  } catch (error) {
+    logger.warn({ url, error: error instanceof Error ? error.message : String(error) }, "coordinator blacklist fetch failed");
+    return { url, ok: false, error: "coordinator_unreachable" };
+  }
+}
+
+async function liftOn(url: string, agentId: string, reason: string, token: string, timeoutMs: number): Promise<{ url: string; status: number }> {
+  try {
+    const res = await request(`${url}/admin/security/blacklist/${encodeURIComponent(agentId)}/lift`, {
+      method: "POST",
+      headers: { "x-admin-token": token, "content-type": "application/json" },
+      body: JSON.stringify({ reason }),
+      headersTimeout: timeoutMs,
+      bodyTimeout: timeoutMs,
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    await res.body.dump().catch(() => undefined);
+    return { url, status: res.statusCode };
+  } catch {
+    return { url, status: 0 };
+  }
+}
+
+/** One row per agent (newest record wins), with the coordinators that hold it and the owner's email. */
+export function mergeBlacklists(results: BlacklistResult[], owners: OwnerDirectory) {
+  const byAgent = new Map<string, BlacklistRow & { coordinators: string[]; ownerEmail: string | null }>();
+  for (const r of results) {
+    if (!r.ok) continue;
+    for (const rec of r.records) {
+      const host = r.url.replace(/^https?:\/\//, "");
+      const e = byAgent.get(rec.agentId);
+      if (!e) {
+        byAgent.set(rec.agentId, { ...rec, coordinators: [host], ownerEmail: owners.nodeOwners.get(rec.agentId)?.email ?? null });
+        continue;
+      }
+      e.coordinators.push(host);
+      if (rec.timestampMs > e.timestampMs) Object.assign(e, { ...rec, coordinators: e.coordinators, ownerEmail: e.ownerEmail });
+    }
+  }
+  return {
+    agents: [...byAgent.values()].sort((a, b) => b.timestampMs - a.timestampMs),
+    coordinators: results.map((r) => (r.ok ? { url: r.url, ok: true as const, count: r.records.length } : { url: r.url, ok: false as const, error: r.error }))
+  };
 }
