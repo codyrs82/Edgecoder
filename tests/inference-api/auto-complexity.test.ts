@@ -210,7 +210,7 @@ describe("complexity-aware Auto: the backend", () => {
   it("a caller's estimate (req.complexity) is used as is", async () => {
     const h = harness();
     const b = autoBackend({ inputs, run: h.run, networkBestFit: h.networkBestFit });
-    await collect(b, { ...agentStep, complexity: { level: "very_high", score: 0.8, estimated: 0.8, floor: 0, signals: [] } });
+    await collect(b, { ...agentStep, complexity: { level: "very_high", score: 0.8, estimated: 0.8, floor: 0, hinted: 0.8, signals: [] } });
     expect(h.hints[0].complexity).toBe(0.8);
   });
 
@@ -284,5 +284,55 @@ describe("complexity-aware Auto: what a bot run shows", () => {
     expect(routeChoiceNote({ placement: "local", model: "qwen2.5-coder:14b", cSatsPerSecond: 0, reason: "", fallback: true, why: "high-complexity step; a larger model wasn't available (balance 0)" }, "local_first")).toBe(
       "Local first → qwen2.5-coder:14b on this computer (high-complexity step; a larger model wasn't available (balance 0))",
     );
+  });
+});
+
+import { contentComplexity, estimateComplexity } from "../../src/inference-api/job-complexity.js";
+
+describe("complexity-aware Auto: agent-loop depth alone never makes a step high", () => {
+  const tools = [{ type: "function" as const, function: { name: "edit_file" } }, { type: "function" as const, function: { name: "read_file" } }, { type: "function" as const, function: { name: "run_command" } }];
+  /** An agent turn `n` tool rounds in: each round reads a small file. */
+  const turn = (task: string, n: number) => {
+    const messages: ChatRequest["messages"] = [{ role: "system", content: "You are a coding agent working in the user's project." }, { role: "user", content: task }];
+    for (let i = 0; i < n; i++) {
+      messages.push({ role: "assistant", content: "", tool_calls: [{ id: `c${i}`, type: "function", function: { name: "read_file", arguments: "{}" } }] } as never);
+      messages.push({ role: "tool", content: "export function main(argv: string[]) {\n  return run(argv);\n}" } as never);
+    }
+    return { messages, tools };
+  };
+  const levels = (task: string) => [0, 1, 2, 3, 4, 5, 6].map((n) => contentComplexity(estimateComplexity(turn(task, n))).level);
+  const simple = "add a --verbose flag to the CLI";
+  const refactor =
+    "Refactor the session handling across the codebase: move it out of src/auth/session.ts, src/auth/login.ts, src/api/routes.ts, src/api/middleware.ts, src/db/users.ts and src/web/app.tsx into a new module, design the migration plan step by step, and debug the race condition between login and token refresh.";
+
+  it("a simple task stays low or medium through steps 0–6 (the coordinator's own estimate still floors it at high)", () => {
+    const local = levels(simple);
+    expect(local.every((l) => l === "low" || l === "medium")).toBe(true);
+    // The coordinator's best-fit scoring is unchanged.
+    expect(estimateComplexity(turn(simple, 3)).level).toBe("high");
+  });
+
+  it("a multi-file refactor is high from the first step", () => {
+    expect(levels(refactor).every((l) => l === "high" || l === "very_high")).toBe(true);
+  });
+
+  it("on a 14B local the simple task runs every step here; the refactor goes to the network; best fit gets the full estimate", async () => {
+    for (const [task, expected] of [[simple, "local:qwen2.5-coder:14b"], [refactor, "best-fit"]] as const) {
+      const ran: string[] = [];
+      const hints: RoutingHints[] = [];
+      const ok = (label: string): ChatBackend => async function* () { ran.push(label); yield { done: true, cSatsSpent: 0 }; };
+      const b = autoBackend({
+        inputs: async () => ({ ...base, balanceCSats: 500, localModels: ["qwen2.5-coder:14b"], networkModels: net30 }),
+        run: (r) => ok(`${r.placement}:${r.model}`),
+        networkBestFit: (h) => { hints.push(h); return ok("best-fit"); },
+      });
+      for (let n = 0; n <= 6; n++) for await (const _ of b(turn(task, n))) void _;
+      expect(ran, task).toEqual(Array(7).fill(expected));
+      for (const h of hints) expect(typeof h.complexity).toBe("number");
+    }
+  });
+
+  it("a client's hint still counts", () => {
+    expect(contentComplexity(estimateComplexity(turn(simple, 0), "high")).level).toBe("high");
   });
 });

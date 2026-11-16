@@ -9,7 +9,7 @@ import { AutoUnsupportedError, NetworkInferenceError, RouteElsewhereError, strea
 import { contextWindowFor, ollamaChat, type OllamaPiece } from "./ollama.js";
 import { ENGINE_PRESETS, EngineError, openAiEngineChat, type OpenAiEngine } from "./openai-engine.js";
 import { BEST_FIT_ROUTE, ComplexityWindow, networkAllowance, noRouteMessage, planRoutes, routeModelId, sizeWorkload, type ComplexityFloors, type ComputePolicy, type PlanOptions, type QualityFloor, type Route, type RouteInputs } from "./auto-route.js";
-import { complexityWeightsFromEnv, estimateComplexity } from "./job-complexity.js";
+import { complexityWeightsFromEnv, contentComplexity, estimateComplexity } from "./job-complexity.js";
 import { ChatBackendError, type ChatBackend, type ChatPiece } from "./types.js";
 import type { RoutingHints } from "./job-descriptor.js";
 
@@ -157,10 +157,12 @@ const MAX_COMPLEXITY_SESSIONS = 200;
  * piece says where it ran.
  *
  * Each request's complexity is estimated once (estimateComplexity, the coordinator's scorer; a
- * caller that already did sets `req.complexity`) and counted as the hardest of the session's last
- * few steps (ComplexityWindow; the session is `hints.sessionId`, else this backend, which is one
- * agent turn or bot run). It sizes the free places and goes to the network's best fit as the
- * `complexity` hint, so the coordinator doesn't estimate it differently.
+ * caller that already did sets `req.complexity`). The free places are sized by its content-only
+ * level (contentComplexity: agent-loop depth alone never makes a step high), counted as the
+ * hardest of the session's last few steps (ComplexityWindow; the session is `hints.sessionId`,
+ * else this backend, which is one agent turn or bot run). The network's best fit gets the full
+ * estimate as its `complexity` hint: the score the coordinator would compute itself, so its
+ * choice is the same as without the hint.
  */
 export function autoBackend(opts: {
   inputs: () => Promise<RouteInputs>;
@@ -207,7 +209,8 @@ export function autoBackend(opts: {
     const planOpts = opts.plan?.() ?? {};
     const estimated = req.complexity ?? estimateComplexity({ messages: req.messages, tools: req.tools, maxTokens: req.maxTokens }, req.hints?.complexity, complexityWeightsFromEnv());
     const session = req.hints?.sessionId ?? (opts.hysteresis === "session" ? undefined : "");
-    const complexity = session === undefined ? { level: estimated.level, score: estimated.score, held: false } : windowFor(session).push(estimated);
+    const local = contentComplexity(estimated);
+    const complexity = session === undefined ? { ...local, held: false } : windowFor(session).push(local);
     const planned = planRoutes(sizeWorkload(req, opts.floor, complexity, opts.complexityFloors), inputs, policy, planOpts).map((r) => ({ ...r, complexity: complexity.level }));
     const all = opts.networkBestFit && policy !== "model" ? withBestFit(planned) : planned;
     // A bot escalating past a model that only described its plan: the next place, when there is one.
@@ -218,7 +221,7 @@ export function autoBackend(opts: {
     const allowance = networkAllowance(inputs, planOpts);
     const bestFitHints = (): RoutingHints => {
       const ceiling = Number.isFinite(allowance) ? Math.min(req.hints?.maxCSats ?? Infinity, allowance) : req.hints?.maxCSats;
-      return { ...req.hints, complexity: complexity.score, ...(ceiling !== undefined && Number.isFinite(ceiling) ? { maxCSats: Math.max(0.001, ceiling) } : {}) };
+      return { ...req.hints, complexity: estimated.score, ...(ceiling !== undefined && Number.isFinite(ceiling) ? { maxCSats: Math.max(0.001, ceiling) } : {}) };
     };
     // The small free fallback is always tried, whatever maxTries cuts (the best-fit leg does not count).
     const main = routes.filter((r) => !r.fallback).slice(0, (opts.maxTries ?? 4) + (routes.some((r) => r.bestFit) ? 1 : 0));

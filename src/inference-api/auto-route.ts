@@ -8,7 +8,8 @@
  *    question? That sets the smallest model that will do it well, never below the quality floor
  *    (QualityFloor: 7B by default for both chat and coding, so "explain this code" is not
  *    answered by a 1.5B model just because it is the cheapest).
- * 2. How hard is it (job-complexity.ts, the same estimate the coordinator's best fit uses)? A
+ * 2. How hard is it (job-complexity.ts: the coordinator's estimate, with the level taken from the
+ *    task's content, contentComplexity, so agent-loop depth alone never makes a step high)? A
  *    medium, high or very high step raises the smallest model a free place may use
  *    (ComplexityFloors: ~14B, ~30B, ~30B and a coder or reasoning model), so a hard agent step
  *    doesn't land on a 7B model just because it's free. Within a session the hardest of the last
