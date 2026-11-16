@@ -26,11 +26,27 @@ const listen = (s: HttpServer | TcpServer, host: string) =>
     s.listen(0, host, () => ok((s.address() as { port: number }).port));
   });
 
-function fakeRpc(opts: { chain?: string; pruned?: boolean } = {}) {
-  return createHttpServer((req, res) => {
+type RpcOpts = { chain?: string; pruned?: boolean; forbid?: string[] };
+
+function fakeRpc(opts: RpcOpts = {}) {
+  return createHttpServer(async (req, res) => {
     const want = "Basic " + Buffer.from(`${USER}:${PASS}`).toString("base64");
     if (req.headers.authorization !== want) {
       res.writeHead(401).end();
+      return;
+    }
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const method = (JSON.parse(body || "{}") as { method?: string }).method ?? "";
+    // Bitcoin Core's rpcwhitelist: 403 with an empty body.
+    if (opts.forbid?.includes(method)) {
+      res.writeHead(403).end();
+      return;
+    }
+    // getinfo no longer exists in Bitcoin Core: an allowed call is "method not found".
+    if (method === "getinfo") {
+      res.writeHead(404, { "content-type": "application/json" });
+      res.end(JSON.stringify({ result: null, error: { code: -32601, message: "Method not found" }, id: "x" }));
       return;
     }
     res.writeHead(200, { "content-type": "application/json" });
@@ -69,7 +85,7 @@ describe.skipIf(process.platform === "win32")("deploy/lnd-mainnet entrypoint", (
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  async function serve(host: string, opts?: { chain?: string; pruned?: boolean }) {
+  async function serve(host: string, opts?: RpcOpts) {
     const rpc = fakeRpc(opts);
     const zb = createTcpServer((c) => c.end());
     const zt = createTcpServer((c) => c.end());
@@ -183,6 +199,22 @@ describe.skipIf(process.platform === "win32")("deploy/lnd-mainnet entrypoint", (
     expect(r.log).not.toContain("wrong-pass-zzz");
   });
 
+  it("waits (does not start lnd) while the rpcwhitelist blocks methods lnd needs, naming them", async () => {
+    const p = await serve("127.0.0.1", { forbid: ["getinfo", "getdeploymentinfo", "getmempoolinfo", "uptime", "getpeerinfo", "gettxspendingprevout"] });
+    const r = await run("lnd", external("127.0.0.1", p), 3500);
+    expect(r.code).not.toBe(0); // killed by the test while still waiting
+    expect(r.args).toEqual([]);
+    expect(r.log).toMatch(/rpcwhitelist blocks methods lnd needs: getinfo getdeploymentinfo getmempoolinfo uptime getpeerinfo gettxspendingprevout/);
+    expect(r.log).not.toContain(PASS);
+  });
+
+  it("treats getinfo's \"method not found\" (404) as allowed and starts lnd", async () => {
+    const p = await serve("127.0.0.1");
+    const r = await run("lnd", external("127.0.0.1", p));
+    expect(r.code, r.log).toBe(0);
+    expect(r.log).not.toMatch(/rpcwhitelist blocks/);
+  });
+
   it("refuses a backend that is not on mainnet", async () => {
     const p = await serve("127.0.0.1", { chain: "test" });
     const r = await run("lnd", external("127.0.0.1", p));
@@ -207,11 +239,11 @@ describe.skipIf(process.platform === "win32")("deploy/lnd-mainnet entrypoint", (
     }
   });
 
-  it("external is the default mode, and it runs no bitcoind", async () => {
-    const r = await run("bitcoind", { BTC_RPC_PASS: BTC_RPC });
-    expect(r.code).toBe(2);
-    expect(r.args).toEqual([]);
-    expect(r.log).toMatch(/BITCOIND_MODE=external: this app runs no bitcoind/);
+  it("the bitcoind process still runs the pruned node in external mode (the stopped machine is the rollback)", async () => {
+    const r = await run("bitcoind", { BITCOIND_MODE: "external", BTC_RPC_PASS: BTC_RPC });
+    expect(r.code, r.log).toBe(0);
+    expect(r.args).toContain("-prune=50000");
+    expect(r.log).not.toContain(BTC_RPC);
   });
 
   it("check-backend.sh checks the ports and the limited user without printing the credentials", async () => {
@@ -228,6 +260,9 @@ describe.skipIf(process.platform === "win32")("deploy/lnd-mainnet entrypoint", (
     expect(out.code, out.log).toBe(0);
     expect(out.log).toMatch(/ok {4}getblockchaininfo: chain=main blocks=900000/);
     expect(out.log).toMatch(/ok {4}sendrawtransaction/);
+    for (const m of ["getinfo", "getdeploymentinfo", "getmempoolinfo", "uptime", "getpeerinfo", "gettxspendingprevout"]) {
+      expect(out.log).toMatch(new RegExp(`ok {4}${m}$`, "m"));
+    }
     expect(out.log).toMatch(/PASS$/m);
     expect(out.log).not.toContain(PASS);
     expect(out.log).not.toContain(USER);
@@ -286,33 +321,38 @@ describe.skipIf(process.platform === "win32")("deploy/lnd-mainnet entrypoint", (
   });
 });
 
-describe("deploy/lnd-mainnet fly configs", () => {
+describe("deploy/lnd-mainnet fly config", () => {
   const ext = read("fly.toml");
-  const bundled = read("fly.bundled.toml");
+  const host = "fdaa:ec:ae3e:a7b:9016:7eba:d6ac:1b02";
 
-  it("fly.toml is external mode: lnd only, lnddata kept, btcdata not mounted", () => {
+  it("is external mode against ocean-node's 6PN address, with IPv6 brackets in the ZMQ URLs", () => {
     expect(ext).toMatch(/^app = "edgecoder-lnd"$/m);
     expect(ext).toMatch(/^\s*BITCOIND_MODE = "external"$/m);
-    expect(ext).toMatch(/^\[processes\]\n\s+lnd = "lnd"\n\n/m);
-    expect(ext).not.toMatch(/^\s*bitcoind = "bitcoind"/m);
+    expect(ext).toContain(`BITCOIND_HOST = "${host}"`);
+    expect(ext).toMatch(/^\s*BITCOIND_RPC_PORT = "8332"$/m);
+    expect(ext).toContain(`BITCOIND_ZMQ_BLOCK = "tcp://[${host}]:28332"`);
+    expect(ext).toContain(`BITCOIND_ZMQ_TX = "tcp://[${host}]:28333"`);
+    expect(ext).toMatch(/^\s*BITCOIND_ESTIMATEMODE = "ECONOMICAL"$/m);
+    expect(ext).not.toMatch(/REPLACE_WITH/);
+  });
+
+  it("keeps the bitcoind process group, volume and size so no deploy can destroy that machine", () => {
+    expect(ext).toMatch(/^\[processes\]\n\s+bitcoind = "bitcoind"\n\s+lnd = "lnd"\n/m);
+    expect(ext).toMatch(/source = "btcdata"\n\s+destination = "\/data"\n\s+initial_size = "80gb"\n\s+processes = \["bitcoind"\]/);
     expect(ext).toMatch(/source = "lnddata"/);
-    expect(ext).not.toMatch(/source = "btcdata"/);
-    // First deploy keeps the current lnd size.
+    expect(ext).toMatch(/processes = \["bitcoind"\]\n\s+size = "shared-cpu-4x"/);
+    // The first external-mode deploy keeps the current lnd size.
     expect(ext).toMatch(/size = "shared-cpu-2x"\n\s+memory = "2gb"/);
-    // No secrets in config.
+    expect(existsSync(resolve(DIR, "fly.bundled.toml"))).toBe(false);
+  });
+
+  it("holds no secrets", () => {
     expect(ext).not.toMatch(/^\s*(BITCOIND_RPC_USER|BITCOIND_RPC_PASS|LND_WALLET_PASS|BTC_RPC_PASS)\s*=/m);
   });
 
-  it("fly.bundled.toml is the old layout plus BITCOIND_MODE=bundled", () => {
-    expect(bundled).toMatch(/^\s*BITCOIND_MODE = "bundled"$/m);
-    expect(bundled).toMatch(/^\s*bitcoind = "bitcoind"$/m);
-    expect(bundled).toMatch(/source = "btcdata"\n\s+destination = "\/data"\n\s+initial_size = "80gb"\n\s+processes = \["bitcoind"\]/);
-    expect(bundled).toMatch(/source = "lnddata"/);
-  });
-
-  it("the image ships the pre-flight script and both configs build the same Dockerfile", () => {
+  it("the image ships the pre-flight script", () => {
     expect(read("Dockerfile")).toMatch(/^COPY --chmod=0755 check-backend\.sh \/usr\/local\/bin\/check-backend$/m);
-    for (const t of [ext, bundled]) expect(t).toMatch(/dockerfile = "Dockerfile"/);
+    expect(ext).toMatch(/dockerfile = "Dockerfile"/);
   });
 
   it("check-backend.sh never echoes the credentials", () => {

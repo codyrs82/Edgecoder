@@ -9,9 +9,11 @@
 #                       BITCOIND_ZMQ_BLOCK, BITCOIND_ZMQ_TX (default tcp://[host]:28332 / :28333),
 #                       BITCOIND_ESTIMATEMODE (ECONOMICAL), BITCOIND_LABEL (ocean-node, for logs).
 #   bundled             the fallback: the pruned Bitcoin Core in this app's `bitcoind` process
-#                       group (fly.bundled.toml). Secrets: BTC_RPC_PASS, LND_WALLET_PASS.
-#                       Env: BITCOIN_PRUNE_MB, BITCOIN_DBCACHE_MB.
+#                       group. Secrets: BTC_RPC_PASS, LND_WALLET_PASS.
 # Both: LND_ALIAS, LND_EXTERNAL_IP (optional).
+# BITCOIND_MODE only changes what `entrypoint.sh lnd` connects to. `entrypoint.sh bitcoind` always
+# runs the pruned node (env BITCOIN_PRUNE_MB, BITCOIN_DBCACHE_MB), so the stopped bitcoind machine
+# can be started again as-is for a rollback (README: "Rollback").
 #
 # The wallet is never created here. On first boot lnd waits for `lnc create`, run by the
 # operator over `fly ssh console`, so the 24-word seed is shown on their terminal only and is
@@ -79,9 +81,47 @@ rpc() {
     "http://$RPC_HOSTPORT/" 2> /dev/null || true
 }
 
+# The RPC methods lnd v0.21.8-beta (with its btcwallet/btcd rpcclient) calls on a bitcoind
+# backend. Bitcoin Core answers a method outside the user's rpcwhitelist with HTTP 403 and an
+# empty body, which lnd cannot tell apart from a broken node:
+#   getinfo               rpcclient's BackendVersion() asks getinfo first and only falls back to
+#                         getnetworkinfo on a JSON-RPC "method not found" (Core removed getinfo in
+#                         0.16, so whitelisting it just turns the 403 into that 404). Without it,
+#                         getblockchaininfo, sendrawtransaction, testmempoolaccept and
+#                         gettxspendingprevout all fail inside lnd.
+#   getdeploymentinfo     startup taproot check (chainreg/taproot_check.go): fatal if blocked.
+#   getmempoolinfo        fee estimator start (chainfee BitcoindEstimator): fatal if blocked.
+#   uptime, getpeerinfo   lnd's chain-backend health check, every minute: lnd shuts itself down
+#                         after 3 failures.
+#   gettxspendingprevout  mempool spend lookups (sweeper, contract resolution): silently "not
+#                         found" if blocked, with no local fallback on Core >= 24.
+# The entrypoint refuses to start lnd until every one is allowed, instead of crash-looping.
+LND_BITCOIND_RPCS=${LND_BITCOIND_RPCS:-"getblockchaininfo getbestblockhash getblockcount getblockhash getblockheader getblock getnetworkinfo estimatesmartfee getrawtransaction gettxout getmempoolentry getrawmempool sendrawtransaction testmempoolaccept getzmqnotifications getinfo getdeploymentinfo getmempoolinfo uptime getpeerinfo gettxspendingprevout"}
+
+# rpc_allowed method: does the whitelist let this method through? Called with no params, so
+# methods that need arguments fail validation (HTTP 500) after the whitelist check, and nothing is
+# read or sent. The body (getpeerinfo lists the node's peers) is discarded, never logged.
+rpc_allowed() {
+  local code
+  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -K "$RUN/curl-rpc.conf" \
+    -H 'content-type: text/plain' \
+    --data-binary "{\"jsonrpc\":\"1.0\",\"id\":\"edgecoder-lnd\",\"method\":\"$1\",\"params\":[]}" \
+    "http://$RPC_HOSTPORT/" 2> /dev/null || true)
+  case "$code" in 200 | 404 | 500) return 0 ;; *) return 1 ;; esac
+}
+
+# missing_rpcs: the methods lnd needs that the whitelist blocks (empty = none).
+missing_rpcs() {
+  local m missing=""
+  for m in $LND_BITCOIND_RPCS; do
+    rpc_allowed "$m" || missing="$missing $m"
+  done
+  printf '%s' "${missing# }"
+}
+
 # Block until the external node answers getblockchaininfo with our credentials, logging why not.
 wait_for_backend() {
-  local label=${BITCOIND_LABEL:-ocean-node} every=${BITCOIND_WAIT_INTERVAL:-10} code chain summary
+  local label=${BITCOIND_LABEL:-ocean-node} every=${BITCOIND_WAIT_INTERVAL:-10} code chain summary missing
   local rpc_h=${RPC_HOSTPORT%:*} rpc_p=${RPC_HOSTPORT##*:}
   rpc_h=${rpc_h#[}; rpc_h=${rpc_h%]}
   while :; do
@@ -90,7 +130,11 @@ wait_for_backend() {
     else
       code=$(rpc getblockchaininfo)
       case "$code" in
-        200) break ;;
+        200)
+          missing=$(missing_rpcs)
+          [ -z "$missing" ] && break
+          log "waiting for $label RPC at $RPC_HOSTPORT: this user's rpcwhitelist blocks methods lnd needs: $missing (README: External Bitcoin node)"
+          ;;
         401) log "waiting for $label RPC at $RPC_HOSTPORT: it rejected BITCOIND_RPC_USER/BITCOIND_RPC_PASS (401)" ;;
         403) log "waiting for $label RPC at $RPC_HOSTPORT: getblockchaininfo is not in this user's rpcwhitelist (403)" ;;
         *) log "waiting for $label RPC at $RPC_HOSTPORT: getblockchaininfo answered HTTP ${code:-none}" ;;
@@ -138,10 +182,9 @@ esac
 
 case "${1:-}" in
   bitcoind)
-    if [ "$MODE" != bundled ]; then
-      log "BITCOIND_MODE=$MODE: this app runs no bitcoind (deploy fly.bundled.toml for the bundled node)"
-      exit 2
-    fi
+    # Runs only on the `bitcoind` process machine. In external mode that machine is stopped, not
+    # destroyed, and kept with its volume for the rollback; starting it runs this, whatever
+    # BITCOIND_MODE says.
     : "${BTC_RPC_PASS:?BTC_RPC_PASS is not set (fly secrets set -a $APP BTC_RPC_PASS=...)}"
     # RPC and ZMQ listen on Fly's private network only (no public service is defined for them),
     # and RPC accepts only loopback (bitcoin-cli in the machine) and 6PN addresses. P2P is

@@ -100,8 +100,11 @@ else
     *) bad "getblockchaininfo: HTTP ${code:-none}" ;;
   esac
   if [ "$code" = 200 ]; then
-    # The calls LND makes on a bitcoind backend. Each probe is harmless: read-only, or given an
-    # invalid argument so the node rejects it after the whitelist check (HTTP 500, not 403).
+    # The calls LND v0.21.8 makes on a bitcoind backend (entrypoint.sh: LND_BITCOIND_RPCS says
+    # why each is needed). Each probe is harmless: read-only, or given an invalid argument so the
+    # node rejects it after the whitelist check (HTTP 500, not 403). getinfo no longer exists in
+    # Bitcoin Core, so an allowed getinfo answers 404 (method not found), which is what lnd needs.
+    # Response bodies (getpeerinfo lists the node's peers) stay in $dir and are never printed.
     genesis=000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f
     zero=0000000000000000000000000000000000000000000000000000000000000000
     echo "rpcwhitelist (403 = blocked):"
@@ -110,10 +113,12 @@ else
       "getblockheader [\"$genesis\"]" "getblock [\"$genesis\",0]" "estimatesmartfee [6]" \
       "getrawtransaction [\"$zero\"]" "gettxout [\"$zero\",0]" "getmempoolentry [\"$zero\"]" \
       "sendrawtransaction [\"00\"]" "testmempoolaccept [[\"00\"]]" "getzmqnotifications []" \
-      "getrawmempool []"; do
+      "getrawmempool []" \
+      "getinfo []" "getdeploymentinfo []" "getmempoolinfo []" "uptime []" "getpeerinfo []" \
+      "gettxspendingprevout [[]]"; do
       m=${probe%% *}; code=$(call "$m" "${probe#* }")
       case "$code" in
-        200 | 500) ok "$m" ;;
+        200 | 404 | 500) ok "$m" ;;
         403) bad "$m blocked by rpcwhitelist" ;;
         *) bad "$m: HTTP ${code:-none}" ;;
       esac

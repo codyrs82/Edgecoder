@@ -1,7 +1,7 @@
 # Mainnet Lightning node for the EdgeCoder coordinators: LND, plus Bitcoin Core (pruned) for the
-# bundled fallback. One image. fly.toml (external mode, the default) runs only the `lnd` process
-# against ocean-node; fly.bundled.toml also runs the `bitcoind` process. Real funds: every
-# artifact is pinned and verified.
+# bundled fallback. One image, two Fly process groups (fly.toml). In external mode (the default)
+# lnd uses ocean-node and the bitcoind machine is stopped and kept for the rollback. Real funds:
+# every artifact is pinned and verified.
 #
 # - Bitcoin Core: the official release tarball, checked against the SHA256SUMS entry published
 #   at https://bitcoincore.org/bin/bitcoin-core-<version>/SHA256SUMS. Bumping BITCOIN_VERSION
