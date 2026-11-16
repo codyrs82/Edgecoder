@@ -180,7 +180,7 @@ The biggest ones need several cards pooled; `qwen3-coder:480b` needs seven or ei
 
 ## Pricing
 
-- **Model calls** are priced per token by model size, below typical hosted prices for open models of that size (`TOKEN_PRICE_USD_PER_M` in `src/economy/job-pricing.ts`), converted to cSats at a live BTC price. A call never costs less than a per-class electricity floor for the seconds it ran. The price is the same on every class; faster hardware finishes sooner. The Compute page lists cSats per million tokens in and out for each model.
+- **Model calls** are priced per token by model size, set so a host profits at half load (`TOKEN_PRICE_USD_PER_M` in `src/economy/job-pricing.ts`), converted to cSats at a live BTC price. A call never costs less than a per-class electricity floor for the seconds it ran. The price is the same on every class; faster hardware finishes sooner. The Compute page lists cSats per million tokens in and out for each model.
 - **Code jobs and reservations** are priced per second at the class's rate times the tier weight. The Compute page lists each class's base-tier rate.
 - Your own machines and this computer are free.
 

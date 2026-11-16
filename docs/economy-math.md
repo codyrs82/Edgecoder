@@ -51,13 +51,18 @@ cost (msat)     = usdToMsat(max(tokenUsd, floorUsd), btcUsd)        # usdToMsat 
 | ≤ 4B | 0.02 | 0.05 |
 | ≤ 9B | 0.04 | 0.10 |
 | ≤ 16B | 0.07 | 0.20 |
-| ≤ 35B | 0.12 | 0.35 |
-| ≤ 80B | 0.30 | 0.80 |
-| larger | 0.60 | 1.50 |
+| ≤ 35B | 1.05 | 3.05 |
+| ≤ 80B | 2.60 | 6.95 |
+| larger | 5.20 | 13.00 |
 
-The prices are set below typical hosted prices for open models of the same size. The power floor
-(`cpu` $0.005/h, `apple` $0.01/h, `gpu` $0.05/h, `gpu.dc` $0.15/h of the base tier, scaled by the
-tier weight) means a machine's owner never earns less than the electricity the seconds cost.
+Since 2026-11-16 the prices are set so that every host class makes a profit
+(`HOST_PROFIT_MARGIN`, 20 % over its cost) at 50 % utilization, on measured throughput; see
+"Host break-even and profit" below. Up to 16B they are unchanged since 2026-11-03. The 30B
+class and larger are 8.64× their 2026-11-03 prices (0.12 / 0.35, 0.30 / 0.80, 0.60 / 1.50),
+rounded up to 0.05, which puts them above hosted prices for the same open models. The power floor
+(`cpu` $0.025/h, `apple` $0.014/h, `gpu` $0.05/h, `gpu.dc` $0.15/h of the base tier, scaled by the
+tier weight; `cpu` was $0.005/h and `apple` $0.01/h) means a machine's owner never earns less than
+the electricity the seconds cost.
 The floor is one machine's power, so it is divided by `slots`, the parallel model slots the agent
 reports (`inferenceSlots` with each pull; 1 when it reports none; `floorSlots` in
 `inferenceCostMsat`). Until 2026-11-16 every call running at once paid the whole floor, so an
@@ -83,6 +88,45 @@ Example at 100,000 USD/BTC: a 9B model reads 2,000 tokens and writes 500.
 `tokenUsd = (2000 × 0.04 + 500 × 0.10) / 1e6 = 0.00013 USD` = 130 msat = **0.13 cSats**. If it ran
 for 10 s on a base-tier `gpu`, the floor is `0.05 × 10 / 3600 = 0.000139 USD` = 0.139 cSats, so the
 floor applies and the call costs 0.139 cSats.
+
+### Host break-even and profit (model calls)
+
+`scripts/pricing/break-even.mjs` sets the prices. For each host class it takes the measured
+throughput, the host's hourly cost and the 5 % fee, and finds what a fully busy hour must earn
+for the host to make `PROFIT_MARGIN` (20 %, the same value as `HOST_PROFIT_MARGIN`) at
+`TARGET_UTILIZATION` (50 %, the share of the hour its slots serve calls):
+
+```
+needed(full hour) = (1 + margin) × hostCostUsdPerHour / (0.95 × 0.5)
+revenue(full)     ≈ max(tokensPerHour × band price, floor × tierWeight × concurrent calls / slots)
+breakEvenUtil     = hostCostUsdPerHour / (0.95 × revenue(full))
+profitUtil        = (1 + margin) × breakEvenUtil
+```
+
+Two levers: the 30B-and-up band prices (one multiplier on their 2026-11-03 prices, set by the
+costliest target host, larger bands scaled alike), and the `cpu` and `apple` power floors (what a
+CPU or Mac host needs from the floor alone; the floor's purpose is electricity). Measured on
+2026-11-16 (60-minute sustained load, iad, 64,870 USD/BTC, Ollama with today's slots):
+
+| Host class (cost) | Model, measured | Break-even, old → now | 20 % profit at | Margin at 50 % |
+|---|---|---|---|---|
+| Vultr 2×A16, 1.00 USD/h | qwen3-coder:30b, 1 slot, 754 calls/h fully busy | never (360 %) → 41 % | 49 % | 21 % |
+| Vultr A100 80GB, 2.397 USD/h | 30B, 1 slot, *assumed 6× the A16* | never (144 %) → 16 % | 20 % | 204 % |
+| Mac Studio M1 Max, ~0.0135 USD/h electricity | qwen3.5:9b, 4 slots | 14 % → 33 % | 39 % | 52 % |
+| Mac Studio | qwen2.5-coder:7b, 4 slots | 14 % → 18 % | 21 % | 181 % |
+| Mac Studio | 14B, *assumed 9B × 9/14* | 14 % → 29 % | 34 % | 74 % |
+| Home CPU, 65 W, ~0.0098 USD/h | qwen2.5-coder:1.5b, 2 slots | never (103 %) → 41 % | 49 % | 22 % |
+
+The 2×A16 sets the large-band multiplier (8.64×); the home CPU sets the `cpu` floor; the Mac
+Studio (tier weight 2.5) sets the `apple` floor, though its tokens alone already clear the target
+on the ≤16B bands. Macs are targeted on electricity only; counting depreciation ($2,000 over three
+years, about 0.076 USD/h) none of them breaks even. EdgeCoder's own Fly CPU agents
+(`edgecoder-agents`, ~0.035 USD/h) are a test fleet, not a host business, and are not targeted
+(they do not break even).
+
+vLLM's parallel slots (#329) are not counted: with the same prices a 2×A16 running 5 vLLM slots
+(assumed 3.5× the throughput) would make about 325 % at 50 %. Once vLLM throughput is measured,
+the large-band multiplier should come down by the measured gain (8.64 / gain).
 
 ### Code jobs: per second
 
