@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { classifyHardware, type HardwareProfile } from "../../src/economy/compute-classes.js";
 import { capabilityConstraints, meetsCapability } from "../../src/economy/order-book.js";
@@ -32,9 +33,25 @@ const RTX4090: HardwareProfile = { cpuCores: 16, ramGb: 64, platform: "linux", a
 const RTX3060: HardwareProfile = { cpuCores: 8, ramGb: 32, platform: "linux", arch: "x64", cpuModel: "Intel i5", gpu: { vendor: "nvidia", model: "NVIDIA GeForce RTX 3060", vramGb: 8 } };
 const GPU_BENCH = { version: 1 as const, ranAtMs: T0, durationMs: 5000, gpu: { model: "qwen3.5:9b", tokensPerSec: 120, evalTokens: 192, weightsGb: 5.4, bandwidthGbps: 648 } };
 
-function verifier(config: HardwareVerificationConfig = CFG, persist?: (r: HardwareVerificationRecord) => unknown) {
+/**
+ * Seeded nonce/seed source: the same bytes on every run, distinct per call and per verifier (each
+ * verifier gets the next stream), so no test depends on a lucky nonce.
+ */
+let streams = 0;
+function seededRandom() {
+  const stream = ++streams;
   let n = 0;
-  return new HardwareVerifier({ config, persist, random: { id: () => `ch-${++n}` } });
+  let k = 0;
+  const bytes = (len: number) => {
+    const out = Buffer.alloc(len);
+    for (let off = 0; off < len; off += 32) createHash("sha256").update(`hv-test:${stream}:${++k}`).digest().copy(out, off);
+    return out;
+  };
+  return { id: () => `ch-${++n}`, bytes, int: (max: number) => bytes(4).readUInt32BE(0) % max };
+}
+
+function verifier(config: HardwareVerificationConfig = CFG, persist?: (r: HardwareVerificationRecord) => unknown) {
+  return new HardwareVerifier({ config, persist, random: seededRandom() });
 }
 
 function registerCpuHi(v: HardwareVerifier, opts: { kinds?: string[]; overridden?: boolean; agentId?: string; nowMs?: number } = {}) {
@@ -282,11 +299,10 @@ describe("GPU challenge: cross-check, plausibility, demotion", () => {
 
   /** Verifier with a second-witness picker (w2 by default) and three GPU agents: subject g1, witnesses w1, w2. */
   function setup2(pick: (subjectId: string, model: string, exclude: string[], nowMs: number) => string | undefined = () => "w2") {
-    let n = 0;
     const calls: Array<{ subjectId: string; exclude: string[] }> = [];
     const v = new HardwareVerifier({
       config: CFG,
-      random: { id: () => `ch-${++n}` },
+      random: seededRandom(),
       pickWitness: (subjectId, m, exclude, nowMs) => {
         calls.push({ subjectId, exclude });
         return pick(subjectId, m, exclude, nowMs);
@@ -358,11 +374,10 @@ describe("GPU challenge: cross-check, plausibility, demotion", () => {
    * `pool` not excluded.
    */
   function setupConfirm(pool: string[] = ["w2", "w3", "w4"], config: HardwareVerificationConfig = CFG) {
-    let n = 0;
     const calls: Array<{ subjectId: string; exclude: string[] }> = [];
     const v = new HardwareVerifier({
       config,
-      random: { id: () => `ch-${++n}` },
+      random: seededRandom(),
       pickWitness: (subjectId, _m, exclude) => {
         calls.push({ subjectId, exclude: [...exclude] });
         return pool.find((id) => !exclude.includes(id));

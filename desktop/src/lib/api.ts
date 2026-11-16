@@ -108,8 +108,14 @@ function schedulePoll(): void {
   }, interval);
 }
 
-/** Resolves once the first backend detection completes or after 20s timeout. */
-export const backendReady: Promise<void> = Promise.race([
+/**
+ * Resolves once the first backend detection completes or after 20s timeout. Outside a window (the
+ * root suite's node tests import this module) there is no shell or local agent to find, and the
+ * probes' retries and log lines outlived the test file (Vitest then failed the run with
+ * EnvironmentTeardownError), so nothing is started there; useRemote stays true, as detection
+ * would have left it.
+ */
+export const backendReady: Promise<void> = typeof window === "undefined" ? Promise.resolve() : Promise.race([
   Promise.all([detectBackend(), getLocalToken()]).then(() => {
     console.log("[api] backendReady resolved — useRemote:", useRemote);
   }),

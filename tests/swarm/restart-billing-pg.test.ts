@@ -134,7 +134,8 @@ describe.skipIf(!PG_URL)("a coordinator restart resumes or refunds what it bille
       await pgStore!.insertTaskBilling({ taskId: unsplit, coordinatorId: identity.peerId, accountId: requester.peerId, kind: "job", perSubtaskReserveMsat: 5_334, createdAtMs: Date.now() });
       await spendCredits(requester.peerId, 5.334, "task_reserve", unsplit, { idempotencyKey: `task_reserve:${unsplit}` });
     }
-    await sleep(300); // queue writes are fire-and-forget
+    // Queue writes are fire-and-forget: wait for exactly those before the "restart".
+    await (await import("../../src/swarm/coordinator/context.js")).queue.writesSettled();
     for (const t of [running, queued, unsplit]) expect((await retained(t)).retained).toBeGreaterThan(0);
 
     // ── restart ──
@@ -156,7 +157,7 @@ describe.skipIf(!PG_URL)("a coordinator restart resumes or refunds what it bille
     expect(again?.id).toBe(queuedSub);
     await sleep(1_200);
     expect((await post("/result", { subtaskId: queuedSub, taskId: queued, agentId: worker.peerId, ok: true, output: "1\n", durationMs: 1_000 }, worker)).statusCode).toBe(200);
-    await sleep(300);
+    await (await import("../../src/swarm/coordinator/context.js")).queue.writesSettled();
     for (const t of [running, queued]) {
       const r = await retained(t);
       expect(r.paid).toBeGreaterThan(0);
