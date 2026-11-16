@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
 
-const api = vi.hoisted(() => ({ getOllamaTags: vi.fn(), computeOverview: vi.fn(), listReservations: vi.fn() }));
+const api = vi.hoisted(() => ({ getOllamaTags: vi.fn(), computeOverview: vi.fn(), listReservations: vi.fn(), getFrontierStatus: vi.fn() }));
 vi.mock("../src/lib/api", () => api);
 
 import ComputePicker from "../src/components/ComputePicker.svelte";
@@ -23,6 +23,15 @@ describe("ComputePicker (#24/#26 searchable model combobox)", () => {
       models: [{ model: "deepseek-r1:32b", agents: 2, classes: ["gpu"], cSatsPerMTokens: { input: 3, output: 9 } }],
     });
     api.listReservations.mockResolvedValue({ reservations: [] });
+    api.getFrontierStatus.mockResolvedValue({ models: [] });
+  });
+
+  it("offers frontier leads only for keys this account has, named with the key", async () => {
+    api.getFrontierStatus.mockResolvedValue({ models: ["frontier/anthropic/claude-opus-5-5"] });
+    const { onSelect } = await openPicker();
+    const opt = await screen.findByRole("option", { name: /Lead: Claude Opus 5\.5 · your key/ });
+    await fireEvent.click(opt);
+    expect(onSelect).toHaveBeenCalledWith("frontier/anthropic/claude-opus-5-5");
   });
 
   it("opens a named popup with the search field focused and every choice as an option", async () => {

@@ -11,6 +11,8 @@
  * working for tasks that don't name a model.
  */
 
+import { isFrontierModelId } from "../inference-api/frontier-models.js";
+
 export interface ModelCapability {
   activeModel?: string;
   localModelCatalog?: string[];
@@ -26,7 +28,8 @@ export function normalizeReportedModels(models: readonly string[] | undefined): 
   const out = new Set<string>();
   for (const m of models ?? []) {
     const t = typeof m === "string" ? m.trim() : "";
-    if (t && t !== DEFAULT_CATALOG_ENTRY) out.add(t);
+    // Frontier models run only on their owner's own key, in their own IDE provider: never network work.
+    if (t && t !== DEFAULT_CATALOG_ENTRY && !isFrontierModelId(t)) out.add(t);
   }
   return [...out];
 }
@@ -34,7 +37,7 @@ export function normalizeReportedModels(models: readonly string[] | undefined): 
 /** Models this agent may serve a model-named job for (inference: any installed model). */
 export function routableModels(cap: ModelCapability | undefined): string[] {
   if (!cap?.modelsReported) return [];
-  return (cap.localModelCatalog ?? []).filter((m) => m && m !== DEFAULT_CATALOG_ENTRY);
+  return (cap.localModelCatalog ?? []).filter((m) => m && m !== DEFAULT_CATALOG_ENTRY && !isFrontierModelId(m));
 }
 
 /** The agent has `model` installed (reported). Inference runs any installed model by name. */

@@ -51,11 +51,16 @@ import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
 import { loadConfigOrExit } from "../../common/config.js";
 import { ideProviderConfigSchema } from "../../config/ide-provider.js";
-import { SessionHub, type SessionData } from "./sessions.js";
+import { SessionHub, compactionModelOf, modelIdOf, parseModelId as parseModelIdForChat, workerModelOf, type ClientRef, type SessionData } from "./sessions.js";
 import { cliStatus, installCli } from "./cli-install.js";
 import { registerSessionRoutes } from "./session-routes.js";
 import { hostedBackend, hostedConfigFromEnv } from "./hosted-backend.js";
 import { GitHubDeviceLogins } from "./github-device.js";
+import { FrontierAccess, autoWithFrontier, frontierChat, type FrontierRequest } from "./frontier-access.js";
+import { FrontierKeyError, FrontierKeyStore } from "../../inference-api/frontier-keys.js";
+import { FrontierSpend } from "../../inference-api/frontier-usage.js";
+import { frontierContextWindow, isFrontierModelId } from "../../inference-api/frontier-models.js";
+import { request as undiciRequest } from "undici";
 
 // Forked by the agent: exit with it, so a restarted agent's provider can take the port.
 if (process.send) process.on("disconnect", () => process.exit(0));
@@ -142,6 +147,41 @@ const networkDeps: NetworkDeps | null = C.SWARM_VIA_LOCAL_AGENT_URL
   ? { forwarder: C.SWARM_VIA_LOCAL_AGENT_URL.replace(/\/$/, ""), token: () => (ideToken ??= resolveIdeToken()), agentId: C.AGENT_ACCOUNT_ID ?? C.AGENT_ID ?? "local-agent" }
   : null;
 
+// --- Frontier models on the user's own key (docs/frontier-keys.md, frontier-access.ts) ---
+
+/** The hosted endpoint and the user's API key (EDGECODER_API_KEY / _FILE), for network models without an enrolled agent. */
+const hosted = hostedConfigFromEnv();
+
+/**
+ * The EdgeCoder account signed in on this computer: from this machine's enrolled agent (the
+ * coordinator's account summary), else from the hosted endpoint for the API key. Cached briefly.
+ */
+let accountCache: { at: number; id: string | null } | null = null;
+let lastAccount: string | undefined;
+async function machineAccount(): Promise<string | null> {
+  if (accountCache && Date.now() - accountCache.at < (accountCache.id ? 60_000 : 10_000)) return accountCache.id;
+  let id: string | null = null;
+  try {
+    if (networkDeps) {
+      id = (await computeOverview(networkDeps)).account?.accountId ?? null;
+    } else if (hosted) {
+      const res = await undiciRequest(`${hosted.baseUrl}/v1/account`, { method: "GET", headers: { authorization: `Bearer ${hosted.apiKey()}` }, headersTimeout: 10_000, bodyTimeout: 10_000 });
+      const j = res.statusCode === 200 ? ((await res.body.json()) as { accountId?: unknown }) : (await res.body.dump(), null);
+      id = typeof j?.accountId === "string" ? j.accountId : null;
+    }
+  } catch {
+    id = null;
+  }
+  accountCache = { at: Date.now(), id };
+  if (id) lastAccount = id;
+  return id;
+}
+
+const frontier = new FrontierAccess({ store: new FrontierKeyStore(), spend: new FrontierSpend(), account: machineAccount });
+
+const frontierChatFn = (id: string, req: Omit<FrontierRequest, "onWarn" | "onCost">, sendEvent: (e: IdeStreamEvent) => void, signal: AbortSignal, fallback?: () => ChatFn) =>
+  frontierChat({ access: frontier, id, request: req, sendEvent, signal, fallback });
+
 // --- Auto: each request at the cheapest place that fits it (src/inference-api/auto-route.ts) ---
 
 let routeCache: { at: number; inputs: RouteInputs } | null = null;
@@ -194,6 +234,8 @@ app.get("/v1/models", async () => {
       // not connected right now
     }
   }
+  // Frontier models only when the signed-in account has a key for that provider here.
+  for (const id of await frontier.modelIds().catch(() => [])) ids.add(id);
   return formatOpenAiModelsResponse([...ids]);
 });
 
@@ -214,6 +256,12 @@ app.post("/v1/chat/completions", async (req, reply) => {
   const requestId = `chatcmpl-${randomUUID()}`;
   // "auto": the cheapest place that fits this request (tools and all, so through the shared writer).
   if (body.model === AUTO_MODEL_ID) return respondWith(req, reply, "openai", autoHere(), AUTO_MODEL_ID);
+  // "frontier/<provider>/<model>": the signed-in account's own key, straight to the provider.
+  if (isFrontierModelId(body.model)) {
+    const r = await frontier.resolve(body.model, { sessionKey: "api" });
+    if (!r.ok) return reply.status(r.status).send({ error: { message: r.message, type: "frontier_unavailable" } });
+    return respondWith(req, reply, "openai", r.backend, body.model);
+  }
 
   // "network/<model>[@class]": run on an agent on the network, billed per second by class.
   const network = parseNetworkModel(body.model);
@@ -1020,6 +1068,10 @@ registerCompatRoutes(
     resolve: async (_ctx, model) => {
       if (!model) return { status: 400, error: "model is required (auto, a local model, network/<model>[@class] or mine/<model>)" };
       if (model === AUTO_MODEL_ID) return { backend: autoHere(), model };
+      if (isFrontierModelId(model)) {
+        const r = await frontier.resolve(model, { sessionKey: "api" });
+        return r.ok ? { backend: r.backend, model } : { status: r.status, error: r.message };
+      }
       const network = parseNetworkModel(model);
       if (network) {
         if (!networkDeps) return { status: 409, error: "This computer's agent isn't connected to the network." };
@@ -1067,9 +1119,6 @@ const ideChatSchema = z.object({
     .optional(),
 });
 
-/** The hosted endpoint and the user's API key (EDGECODER_API_KEY / _FILE), for network models without an enrolled agent. */
-const hosted = hostedConfigFromEnv();
-
 function sessionModelId(compute: NonNullable<z.infer<typeof ideChatSchema>["compute"]>, model: string): string {
   if (compute.target === "auto") return "auto";
   if (compute.target === "mine") return `mine/${model}`;
@@ -1078,7 +1127,7 @@ function sessionModelId(compute: NonNullable<z.infer<typeof ideChatSchema>["comp
 }
 
 /** The agent's model calls, on the compute the chat picked. */
-function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: string, ollamaHost: string, sendEvent: (e: IdeStreamEvent) => void, signal: AbortSignal, source = "EdgeCoder chat") {
+function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: string, ollamaHost: string, sendEvent: (e: IdeStreamEvent) => void, signal: AbortSignal, source = "EdgeCoder chat", frontierAuto?: Omit<FrontierRequest, "onWarn" | "onCost">) {
   if (compute?.target === "auto" && !networkDeps && hosted) {
     return backendChat(hostedBackend(hosted, "auto"), (cSats, served) => sendEvent({ type: "usage", cSats, where: "Auto (hosted)", ...(served ? { served } : {}) }), signal);
   }
@@ -1086,11 +1135,27 @@ function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: str
     // Auto picks the model too; each step of the agent may land somewhere else (cheapest that fits).
     // When the network isn't affordable, Auto falls back to the biggest free model (planRoutes).
     let where = "Auto";
-    const backend = autoHere((r) => {
+    const auto = autoHere((r) => {
       where = routeLabel(r);
       sendEvent({ type: "status", message: `Auto: ${r.reason}` });
     }, source);
-    return backendChat(backend, (cSats, served) => sendEvent({ type: "usage", cSats, where, ...(served ? { served } : {}) }), signal);
+    // "Use my frontier key for Auto" (off by default): high-complexity jobs may go to the default lead.
+    const backend = frontierAuto
+      ? autoWithFrontier({
+          auto,
+          access: frontier,
+          request: () => ({
+            ...frontierAuto,
+            onWarn: (message) => sendEvent({ type: "status", message }),
+          }),
+          onPick: (label) => {
+            where = label;
+            sendEvent({ type: "status", message: `Auto: ${label} (high complexity)` });
+          },
+        })
+      : auto;
+    // A frontier call's served line carries its estimated USD (the user's own key, not cSats).
+    return backendChat(backend, (cSats, served) => sendEvent({ type: "usage", cSats, where, ...(served ? { served } : {}), ...(served?.usd !== undefined ? { usd: served.usd } : {}) }), signal);
   }
   if (compute && compute.target !== "local" && !networkDeps && hosted) {
     // No enrolled agent here, but an API key: the network through the hosted endpoint.
@@ -1199,7 +1264,9 @@ app.post("/v1/ide/chat", async (req, reply) => {
   // open_pull_request is offered only when the project is a GitHub repository.
   const tools = hasGitHubOrigin(projectRoot) ? toolSchemas() : toolSchemas().filter((t) => t.function.name !== "open_pull_request");
   await runAgentLoop({
-    chat: chatFnFor(body.compute, chatModel, ollamaHost, sendEvent, abort.signal),
+    chat: isFrontierModelId(chatModel)
+      ? frontierChatFn(chatModel, { sessionKey: `chat:${turnId}` }, sendEvent, abort.signal)
+      : chatFnFor(body.compute, chatModel, ollamaHost, sendEvent, abort.signal, "EdgeCoder chat", body.compute?.target === "auto" ? { sessionKey: `chat:${turnId}` } : undefined),
     systemPrompt: (format) => (promptCtx ? buildIdeAgentSystemPrompt(promptCtx, projectRoot, projectRules, format) : ""),
     messages: body.messages,
     sendEvent,
@@ -1254,12 +1321,26 @@ function currentBranch(root: string): string | null {
   }
 }
 
+/** A session's model calls by model id (lead or worker); frontier ids only for the owner's own requests. */
+function sessionChat(s: SessionData, id: string, emit: (e: IdeStreamEvent) => void, signal: AbortSignal, client: ClientRef | null, role: "lead" | "worker"): ReturnType<typeof chatFnFor> {
+  const source = s.origin === "terminal" ? "edgecoder code" : "EdgeCoder chat";
+  const ollamaHost = process.env.OLLAMA_HOST || "http://127.0.0.1:11434";
+  const who = { requester: client?.accountId, owner: s.ownerAccount, sessionKey: `session:${s.id}` };
+  if (isFrontierModelId(id)) {
+    // Never a frontier worker; a refused frontier lead falls back to the worker model.
+    if (role === "worker") return sessionChat(s, workerModelOf(s), emit, signal, client, "worker");
+    return frontierChatFn(id, who, emit, signal, () => sessionChat(s, workerModelOf(s), emit, signal, client, "worker"));
+  }
+  const p = parseModelIdForChat(id);
+  const model = p.compute.target === "local" ? p.model || process.env.OLLAMA_MODEL || "qwen3.5:9b" : p.model;
+  // Only the lead may let Auto pick the frontier key (when the user opted in); worker calls never do.
+  return chatFnFor({ target: p.compute.target as "local", computeClass: p.compute.computeClass as never, reservationId: p.compute.reservationId }, model, ollamaHost, emit, signal, source, p.compute.target === "auto" && role === "lead" ? who : undefined);
+}
+
 const sessions = new SessionHub({
-  chat: (s: SessionData, emit, signal) => {
-    const ollamaHost = process.env.OLLAMA_HOST || "http://127.0.0.1:11434";
-    const model = s.compute.target === "local" ? s.model || process.env.OLLAMA_MODEL || "qwen3.5:9b" : s.model;
-    return chatFnFor({ target: s.compute.target, computeClass: s.compute.computeClass as never, reservationId: s.compute.reservationId }, model, ollamaHost, emit, signal, s.origin === "terminal" ? "edgecoder code" : "EdgeCoder chat");
-  },
+  chat: (s: SessionData, emit, signal, ctx) =>
+    sessionChat(s, ctx?.role === "worker" ? workerModelOf(s) : modelIdOf(s), emit, signal, ctx?.client ?? null, ctx?.role ?? "lead"),
+  owner: () => lastAccount,
   systemPrompt: async (s) => {
     const ctx = await agentPromptContext(s.compute.target === "local" ? s.model : process.env.OLLAMA_MODEL || "qwen3.5:9b");
     const rules = readProjectRules(s.projectRoot);
@@ -1276,16 +1357,22 @@ const sessions = new SessionHub({
   contextWindow: async (s) => {
     const fixed = Number(process.env.AGENT_CONTEXT_WINDOW);
     if (s.compute.target === "local") return Number.isInteger(fixed) && fixed >= 2048 ? fixed : 32_768;
+    // A frontier lead: the model's own window (Anthropic's current models: 1M tokens).
+    if (s.compute.target === "frontier") return frontierContextWindow(s.compute.provider ?? "", s.model);
     // auto may land anywhere: the default (conservative) window.
     if (s.compute.target === "auto" || !networkDeps) return undefined;
     return networkContextWindow(networkDeps, s.model).catch(() => undefined);
   },
-  summarize: (s, emit, signal) => async (text) => {
-    // A cheap call: auto on the network (it picks a small model for a short job), else the local model.
-    const cheap = networkDeps || hosted ? { target: "auto" as const } : { target: "local" as const };
-    const model = cheap.target === "local" ? (s.compute.target === "local" ? s.model : process.env.OLLAMA_MODEL || "qwen3.5:9b") : "auto";
+  summarize: (s, emit, signal, ctx) => async (text) => {
+    // A cheap call on the session's worker model (default auto: a small model for a short job, on
+    // the network or this computer). Never the frontier lead, unless the user opted in
+    // (frontier setting compactWithLead), and then only for the key owner's own turn.
     const sig = AbortSignal.any([signal, AbortSignal.timeout(60_000)]);
-    const chat = chatFnFor(cheap, model, process.env.OLLAMA_HOST || "http://127.0.0.1:11434", emit, sig, "edgecoder compaction");
+    const pick = compactionModelOf(s, frontier.store.settings().compactWithLead);
+    const chat =
+      pick.role === "worker" && pick.id === "auto" && !networkDeps && !hosted
+        ? chatFnFor({ target: "local" }, s.compute.target === "local" ? s.model : process.env.OLLAMA_MODEL || "qwen3.5:9b", process.env.OLLAMA_HOST || "http://127.0.0.1:11434", emit, sig, "edgecoder compaction")
+        : sessionChat(s, pick.id, emit, sig, ctx?.client ?? null, pick.role);
     const r = await chat({
       messages: [
         { role: "system", content: "Summarize this coding-agent conversation for the agent itself, in at most 200 words: what was asked, what was found and changed (with exact file paths and line numbers), and what is left to do. No preamble." },
@@ -1298,7 +1385,63 @@ const sessions = new SessionHub({
 registerSessionRoutes(app, sessions);
 app.addHook("onReady", async () => {
   sessions.load();
+  void machineAccount();
 });
+
+// --- Frontier keys (Settings → Frontier models, `edgecoder keys`): loopback + IDE token like every route here ---
+// The key arrives in a request body (never logged: request bodies aren't) and goes straight to the
+// OS credential store; no response or error ever contains it.
+
+async function frontierRoute(reply: FastifyReply, fn: () => Promise<unknown>): Promise<unknown> {
+  try {
+    return reply.send(await fn());
+  } catch (err) {
+    if (err instanceof z.ZodError) return reply.status(400).send({ error: "invalid", message: err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+    if (err instanceof FrontierKeyError || err instanceof ChatBackendError) return reply.status(err.status).send({ error: "frontier", message: err.message });
+    throw err;
+  }
+}
+
+const frontierKeyInput = z.object({
+  id: z.string().min(1).max(32),
+  kind: z.enum(["anthropic", "openai-compatible"]).optional(),
+  baseUrl: z.string().max(500).optional(),
+  key: z.string().min(1).max(600),
+});
+
+app.get("/v1/ide/frontier", (_req, reply) => frontierRoute(reply, () => frontier.status()));
+app.post("/v1/ide/frontier/keys", (req, reply) =>
+  frontierRoute(reply, async () => {
+    const b = frontierKeyInput.extend({ skipTest: z.boolean().optional() }).parse(req.body ?? {});
+    return frontier.add(b);
+  }));
+app.post("/v1/ide/frontier/keys/test", (req, reply) =>
+  frontierRoute(reply, async () => {
+    const b = z.object({ id: z.string().min(1).max(32), kind: z.enum(["anthropic", "openai-compatible"]).optional(), baseUrl: z.string().max(500).optional(), key: z.string().min(1).max(600).optional() }).parse(req.body ?? {});
+    return b.key ? frontier.test({ ...b, key: b.key }) : frontier.retest(b.id);
+  }));
+app.post("/v1/ide/frontier/keys/remove", (req, reply) =>
+  frontierRoute(reply, async () => {
+    const b = z.object({ id: z.string().min(1).max(32), ownerAccount: z.string().min(1).max(128).optional() }).parse(req.body ?? {});
+    return { removed: await frontier.remove(b.id, b.ownerAccount) };
+  }));
+app.post("/v1/ide/frontier/settings", (req, reply) =>
+  frontierRoute(reply, async () => {
+    const price = z.object({ input: z.number().min(0), output: z.number().min(0), cacheWrite: z.number().min(0).optional(), cacheRead: z.number().min(0).optional() });
+    const b = z
+      .object({
+        defaultLead: z.string().max(240).optional(),
+        workerModel: z.string().max(240).optional(),
+        sessionCapUsd: z.number().min(0).nullable().optional(),
+        dailyCapUsd: z.number().min(0).nullable().optional(),
+        useForAuto: z.boolean().optional(),
+        compactWithLead: z.boolean().optional(),
+        effort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
+        prices: z.record(z.string().max(200), price).optional(),
+      })
+      .parse(req.body ?? {});
+    return { settings: frontier.store.updateSettings(b) };
+  }));
 app.addHook("onClose", async () => {
   sessions.shutdown();
 });

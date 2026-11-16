@@ -11,6 +11,7 @@
   import { applySessionEvent, presenceText, viewFromSnapshot, type LiveView } from "../lib/live-session";
   import { markApproval } from "../lib/agent-events";
   import { projectName, tildePath } from "../lib/projects";
+  import { frontierFooter } from "../lib/compute-choice";
 
   interface Props {
     sessionId: string;
@@ -87,7 +88,7 @@
     <div class="live-header">
       <span class="live-badge" title="Shared with the terminal"><Radio size={12} /> Live</span>
       <span class="live-title" title={view.title}>{view.title}</span>
-      <span class="live-meta" title={tildePath(view.projectRoot)}>{projectName(view.projectRoot)} · {view.model} · {view.mode}</span>
+      <span class="live-meta" title={tildePath(view.projectRoot)}>{projectName(view.projectRoot)} · {view.frontierModel ? frontierFooter(view.frontierModel, view.frontierUsd ?? 0) : view.model} · {view.mode}</span>
     </div>
     <div class="presence-bar" role="status">
       <span><Users size={13} /> {presence}</span>

@@ -15,7 +15,7 @@
  *   POST /v1/ide/sessions/:id/unqueue    {queuedId}    remove a queued message before it starts
  *   POST /v1/ide/sessions/:id/approve    {callId, approved, always?}   first answer wins
  *   POST /v1/ide/sessions/:id/control    {release?}    no-op, kept for older clients
- *   POST /v1/ide/sessions/:id/settings   {model?, title?, mode?, autoApprove?}
+ *   POST /v1/ide/sessions/:id/settings   {model? (= leadModel), leadModel?, workerModel?, title?, mode?, autoApprove?}
  *   POST /v1/ide/sessions/:id/publish    {published}   show it live in the desktop app
  *   POST /v1/ide/sessions/:id/trust      {trusted}     trust the session's project folder (workspace-trust.ts)
  *   POST /v1/ide/sessions/:id/cancel | /undo {turnId?} | /clear | /delete
@@ -73,6 +73,7 @@ export function registerSessionRoutes(app: FastifyInstance, hub: SessionHub): vo
           ...client,
           projectRoot: z.string().min(1).max(4096).refine((p) => isAbsolute(p), "projectRoot must be an absolute path"),
           model: z.string().min(1).max(200).optional(),
+          workerModel: z.string().min(1).max(200).optional(),
           title: z.string().max(120).optional(),
           autoApprove: z.enum(["none", "edits"]).optional(),
           mode: z.enum(["ask", "auto-edits", "auto"]).optional(),
@@ -80,7 +81,7 @@ export function registerSessionRoutes(app: FastifyInstance, hub: SessionHub): vo
         })
         .parse(req.body ?? {});
       if (!existsSync(b.projectRoot) || !statSync(b.projectRoot).isDirectory()) throw new SessionError("invalid", `${b.projectRoot} isn't a folder.`);
-      const s = hub.create({ projectRoot: b.projectRoot, model: b.model, title: b.title, autoApprove: b.autoApprove, mode: b.mode, client: refOf(b) });
+      const s = hub.create({ projectRoot: b.projectRoot, model: b.model, workerModel: b.workerModel, title: b.title, autoApprove: b.autoApprove, mode: b.mode, client: refOf(b) });
       if (b.published) hub.publish(s.id, true, refOf(b));
       return { ...hub.snapshot(s.id), trusted: isProjectTrusted(s.projectRoot) };
     }));
@@ -157,8 +158,8 @@ export function registerSessionRoutes(app: FastifyInstance, hub: SessionHub): vo
   app.post("/v1/ide/sessions/:id/settings", (req, reply) =>
     handle(reply, () => {
       const { id } = idParams.parse(req.params);
-      const b = z.object({ ...client, model: z.string().min(1).max(200).optional(), title: z.string().max(120).optional(), autoApprove: z.enum(["none", "edits"]).optional(), mode: z.enum(["ask", "auto-edits", "auto"]).optional() }).parse(req.body ?? {});
-      const s = hub.update(id, { model: b.model, title: b.title, autoApprove: b.autoApprove, mode: b.mode }, refOf(b));
+      const b = z.object({ ...client, model: z.string().min(1).max(200).optional(), leadModel: z.string().min(1).max(200).optional(), workerModel: z.string().min(1).max(200).optional(), title: z.string().max(120).optional(), autoApprove: z.enum(["none", "edits"]).optional(), mode: z.enum(["ask", "auto-edits", "auto"]).optional() }).parse(req.body ?? {});
+      const s = hub.update(id, { model: b.model, leadModel: b.leadModel, workerModel: b.workerModel, title: b.title, autoApprove: b.autoApprove, mode: b.mode }, refOf(b));
       return { session: s };
     }));
 

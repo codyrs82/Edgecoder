@@ -17,6 +17,7 @@
 
 import { catalogEntryForTag } from "../model/catalog.js";
 import type { ChatRequest } from "./types.js";
+import { isFrontierModelId } from "./frontier-models.js";
 
 /** False only for a catalog model that lacks tool calling; models not in the catalog count as able. */
 export function callsTools(model: string): boolean {
@@ -181,7 +182,8 @@ export const AUTO_MODEL_ID = "auto";
 /** The route a model id names (the inverse of routeModelId); "network/<model>" without a class runs on any. */
 export function routeFromModelId(id: string): Route | null {
   const t = id.trim();
-  if (!t || t === AUTO_MODEL_ID) return null;
+  // Frontier ids run only on the user's own key in the IDE provider, never on a route (bots included).
+  if (!t || t === AUTO_MODEL_ID || isFrontierModelId(t)) return null;
   if (t.startsWith("mine/")) return { placement: "mine", model: t.slice(5), cSatsPerSecond: 0, reason: `your machines (free) · ${t.slice(5)}` };
   const reserved = /^reserved\/([^/]+)\/(.+)$/.exec(t);
   if (reserved) return { placement: "reserved", model: reserved[2], reservationId: reserved[1], cSatsPerSecond: 0, reason: `your reserved machine (already paid) · ${reserved[2]}` };

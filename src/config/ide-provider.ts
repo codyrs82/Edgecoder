@@ -58,6 +58,14 @@ export const ideProviderConfigSchema = z.object({
   EDGECODER_URL: str(),
   EDGECODER_API_KEY: str(),
   EDGECODER_API_KEY_FILE: str(),
+  /** Frontier keys (docs/frontier-keys.md): providers, settings and caps (never the keys). Default ~/.edgecoder/frontier.json. */
+  EDGECODER_FRONTIER_FILE: str(),
+  /** "off": keep frontier keys in a 0600 file next to frontier.json instead of the OS keychain. */
+  EDGECODER_FRONTIER_KEYCHAIN: str(),
+  /** The credential-store tools (tests, unusual installs): macOS `security`, Linux `secret-tool`, Windows PowerShell. */
+  EDGECODER_SECURITY_BIN: str(),
+  EDGECODER_SECRET_TOOL_BIN: str(),
+  EDGECODER_POWERSHELL_BIN: str(),
   /** Where `edgecoder code` looks for a running provider (default http://127.0.0.1:4304). */
   IDE_PROVIDER_URL: envUrl(),
   /** Auto's quality floor in billions of parameters (src/inference-api/auto-route.ts): chat and agent work. */

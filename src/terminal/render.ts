@@ -59,8 +59,13 @@ export function usageLine(calls: CallUsage[], fallbackModel = ""): string {
   const last = calls[calls.length - 1];
   const bits: string[] = [];
   const model = last.model ?? fallbackModel;
-  if (model) bits.push(model.replace(/^network\//, ""));
-  if (last.served) {
+  const frontier = last.served?.computeClass === "frontier";
+  // Your own frontier key: provider · model · your key · tokens · $cost (no cSats).
+  if (frontier) bits.push(last.served!.hardware.split(" · ")[0], model.replace(/^frontier\/[^/]+\//, ""), "your key");
+  else if (model) bits.push(model.replace(/^network\//, ""));
+  if (frontier) {
+    // the provider and "your key" are already in the line
+  } else if (last.served) {
     bits.push(hardwareShort(last.served));
     const place = last.served.city ?? last.served.region ?? last.served.country;
     if (place) bits.push(place);
@@ -73,7 +78,13 @@ export function usageLine(calls: CallUsage[], fallbackModel = ""): string {
   if (pin) bits.push(`read ${tok(pin)} tok${sum("promptMs") ? ` in ${secs(sum("promptMs"))}` : ""}`);
   if (pout) bits.push(`wrote ${tok(pout)} tok${sum("genMs") ? ` in ${secs(sum("genMs"))}` : ""}`);
   if (calls.length > 1) bits.push(`${calls.length} calls`);
-  bits.push(formatCSats(calls.reduce((n, c) => n + (Number.isFinite(c.cSats) ? c.cSats : 0), 0)));
+  const cSats = calls.reduce((n, c) => n + (Number.isFinite(c.cSats) ? c.cSats : 0), 0);
+  const anyFrontier = calls.some((c) => c.served?.computeClass === "frontier");
+  if (cSats > 0 || !anyFrontier) bits.push(formatCSats(cSats));
+  if (anyFrontier) {
+    const usd = calls.reduce((n, c) => n + (c.served?.usd ?? 0), 0);
+    bits.push(usd > 0 && usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`);
+  }
   return bits.join(" · ");
 }
 

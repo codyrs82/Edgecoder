@@ -30,15 +30,42 @@ computeChoice.subscribe((v) => {
 export const CLASS_LABELS: Record<string, string> = { any: "Any", cpu: "CPU", apple: "Apple", gpu: "GPU", "gpu.dc": "Datacenter GPU" };
 
 export interface ParsedChoice {
-  where: "auto" | "anywhere" | "local" | "mine" | "network" | "reserved";
+  where: "auto" | "anywhere" | "local" | "mine" | "network" | "reserved" | "frontier";
   model?: string;
   computeClass?: string;
   reservationId?: string;
+  /** "frontier": the provider of your own key (anthropic, openai, ...). */
+  provider?: string;
+}
+
+/** Names of the Anthropic models offered on your own key (src/inference-api/frontier-models.ts). */
+const FRONTIER_NAMES: Record<string, string> = {
+  "claude-opus-5-5": "Claude Opus 5.5",
+  "claude-fable-5-1": "Claude Fable 5.1",
+  "claude-sonnet-5-5": "Claude Sonnet 5.5",
+  "claude-haiku-5-5": "Claude Haiku 5.5",
+};
+
+export const isFrontierChoice = (id: string | undefined) => typeof id === "string" && id.startsWith("frontier/");
+
+/** "frontier/anthropic/claude-opus-5-5" -> "Claude Opus 5.5"; other providers show the model id. */
+export function frontierName(id: string): string {
+  const c = parseChoice(id);
+  return (c.provider === "anthropic" && c.model && FRONTIER_NAMES[c.model]) || c.model || id;
+}
+
+export const formatUsd = (usd: number) => (usd > 0 && usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`);
+
+/** The session footer on a frontier lead: "Claude Opus 5.5 · your key · $0.42 this session". */
+export function frontierFooter(id: string, sessionUsd: number): string {
+  return `${frontierName(id)} · your key · ${formatUsd(sessionUsd)} this session`;
 }
 
 export function parseChoice(id: string | undefined): ParsedChoice {
   if (!id) return { where: "auto" };
   if (id === "auto") return { where: "anywhere" };
+  const frontier = /^frontier\/([a-z0-9-]+)\/(.+)$/.exec(id);
+  if (frontier) return { where: "frontier", provider: frontier[1], model: frontier[2] };
   if (id.startsWith("mine/")) return { where: "mine", model: id.slice(5) };
   const reserved = /^reserved\/([^/]+)\/(.+)$/.exec(id);
   if (reserved) return { where: "reserved", reservationId: reserved[1], model: reserved[2] };
@@ -55,6 +82,7 @@ export function choiceId(c: ParsedChoice): string | undefined {
   if (c.where === "anywhere") return "auto";
   if (c.where === "auto" || !c.model) return undefined;
   if (c.where === "local") return c.model;
+  if (c.where === "frontier") return `frontier/${c.provider}/${c.model}`;
   if (c.where === "mine") return `mine/${c.model}`;
   if (c.where === "reserved") return `reserved/${c.reservationId}/${c.model}`;
   return `network/${c.model}${c.computeClass && c.computeClass !== "any" ? `@${c.computeClass}` : ""}`;
@@ -72,6 +100,7 @@ export function choiceLabel(id: string | undefined): { model: string; where: str
   const c = parseChoice(id);
   if (c.where === "anywhere") return { model: "Auto", where: "Cheapest anywhere" };
   if (c.where === "auto" || !c.model) return { model: "Auto", where: "This computer" };
+  if (c.where === "frontier") return { model: `Lead: ${frontierName(id!)}`, where: "your key" };
   const where =
     c.where === "local" ? "This computer" : c.where === "mine" ? "My machines" : c.where === "reserved" ? "Reserved" : c.computeClass && c.computeClass !== "any" ? `Network ${CLASS_LABELS[c.computeClass]}` : "Network";
   return { model: shortModel(c.model), where };
@@ -90,8 +119,10 @@ export function freeReplyUsage(id: string | undefined): { cSats: number; where: 
  * are free (this computer, your machines); a reservation is prepaid; anything else shows the cSats,
  * even 0. Nothing when the reply never ran anywhere (no place, no cost), e.g. a failed run.
  */
-export function usageText(u: { cSats: number; where?: string }): string | null {
+export function usageText(u: { cSats: number; where?: string; usd?: number }): string | null {
   const where = u.where?.trim();
+  // Your own frontier key: billed by the provider in dollars, never cSats.
+  if (typeof u.usd === "number" && Number.isFinite(u.usd)) return `${where || "Your key"} · ${formatUsd(u.usd)}`;
   const spent = Number.isFinite(u.cSats) && u.cSats > 0;
   if (!where && !spent) return null;
   const place = where || "Network";

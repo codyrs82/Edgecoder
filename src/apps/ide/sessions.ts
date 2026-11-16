@@ -24,6 +24,8 @@ import { ALWAYS_ASK_TOOLS, makeToolRunner, runAgentLoop, type ChatFn, type ToolR
 import type { CheckpointStore } from "./checkpoints.js";
 import { defaultMode, defaultPermissionsFile, isReadOnlyCommand, PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
 import { protectedToolPath } from "./tool-executor.js";
+import { redactApiKeys } from "../../common/redaction.js";
+import { parseFrontierModelId } from "../../inference-api/frontier-models.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 
 export type ClientKind = "terminal" | "desktop" | "api";
@@ -33,12 +35,19 @@ export interface ClientRef {
   kind: ClientKind;
   /** Shown to the other clients ("Terminal on cody-mbp"). */
   label?: string;
+  /**
+   * The EdgeCoder account behind this client, when the provider authenticated one (remote attach).
+   * Unset for this computer's own clients, which act for the account signed in here.
+   */
+  accountId?: string;
 }
 
 export interface ComputeSetting {
-  target: "local" | "mine" | "network" | "reserved" | "auto";
+  target: "local" | "mine" | "network" | "reserved" | "auto" | "frontier";
   computeClass?: string;
   reservationId?: string;
+  /** target "frontier": the provider of the user's own key (docs/frontier-keys.md). */
+  provider?: string;
 }
 
 export interface TranscriptEntry {
@@ -61,7 +70,9 @@ export interface TranscriptEntry {
 export interface TurnUsage {
   cSats: number;
   where?: string;
-  calls?: Array<{ cSats: number; where?: string; model?: string; served?: Extract<IdeStreamEvent, { type: "usage" }>["served"] }>;
+  calls?: Array<{ cSats: number; where?: string; model?: string; served?: Extract<IdeStreamEvent, { type: "usage" }>["served"]; usd?: number }>;
+  /** Estimated USD of the turn's frontier calls (the user's own key; billed by the provider). */
+  usd?: number;
 }
 
 export interface SessionData {
@@ -86,6 +97,15 @@ export interface SessionData {
   /** cSats spent by this session's model calls. */
   cSats: number;
   transcript: TranscriptEntry[];
+  /**
+   * The lead is `model` + `compute` (it runs the main agent loop). The worker (tentacle/default)
+   * model runs helpers (summaries, compaction) and what a `delegate` tool spawns; default "auto".
+   */
+  workerModel?: string;
+  /** The account signed in on this computer when the session was created; frontier leads serve only it. */
+  ownerAccount?: string;
+  /** Estimated USD of this session's frontier calls (the user's own key; billed by the provider). */
+  frontierUsd?: number;
 }
 
 export interface SessionEvent {
@@ -108,6 +128,8 @@ export interface SessionSummary {
   branch: string | null;
   model: string;
   compute: ComputeSetting;
+  workerModel: string;
+  frontierUsd: number;
   origin: ClientKind;
   published: boolean;
   createdAt: number;
@@ -128,6 +150,9 @@ export interface QueuedMessage {
   by: ClientKind;
   label?: string;
   at: number;
+  /** The client that sent it, and that client's authenticated account (remote attach); unset = this computer's own. */
+  clientId?: string;
+  accountId?: string;
 }
 
 export interface SessionSnapshot {
@@ -148,7 +173,11 @@ export interface SessionSnapshot {
  * `executor` and can run its sub-job as a child session (create / send / idle) on a cheaper model.
  */
 export interface TurnEnv {
-  chat: (s: SessionData, emit: (e: IdeStreamEvent) => void, signal: AbortSignal) => ChatFn;
+  /**
+   * Model calls for a turn. `ctx.role` is "lead" for the main agent loop and "worker" for helpers
+   * (compaction, summaries, delegated sub-jobs: workerModelOf(s)); `ctx.client` sent the message.
+   */
+  chat: (s: SessionData, emit: (e: IdeStreamEvent) => void, signal: AbortSignal, ctx?: { client: ClientRef | null; role: "lead" | "worker" }) => ChatFn;
   systemPrompt: (s: SessionData) => Promise<(format: "native" | "text") => string>;
   executor: (s: SessionData) => { execute: ToolRunnerDeps["execute"]; prepare?: ToolRunnerDeps["prepare"] };
   tools?: (s: SessionData) => ToolSchema[] | undefined;
@@ -158,7 +187,9 @@ export interface TurnEnv {
   /** The session model's context window in tokens (the loop compacts to fit it); undefined: a conservative default. */
   contextWindow?: (s: SessionData) => Promise<number | undefined>;
   /** A cheap model call that summarizes older messages when the loop compacts. */
-  summarize?: (s: SessionData, emit: (e: IdeStreamEvent) => void, signal: AbortSignal) => (text: string) => Promise<string | null>;
+  summarize?: (s: SessionData, emit: (e: IdeStreamEvent) => void, signal: AbortSignal, ctx?: { client: ClientRef | null }) => (text: string) => Promise<string | null>;
+  /** The EdgeCoder account signed in on this computer (last known), recorded as a new session's owner. */
+  owner?: () => string | undefined;
 }
 
 export class SessionError extends Error {
@@ -169,6 +200,8 @@ export class SessionError extends Error {
 
 interface Running {
   turnId: string;
+  /** The client whose message started the turn. */
+  by?: ClientRef;
   abort: AbortController;
   text: string;
   events: IdeStreamEvent[];
@@ -196,10 +229,11 @@ export function defaultSessionsDir(env: NodeJS.ProcessEnv = process.env): string
   return env.EDGECODER_SESSIONS_DIR || join(homedir(), ".edgecoder", "sessions");
 }
 
-/** The model id clients show ("network/qwen3-coder:30b@gpu", "auto", a local tag). */
+/** The model id clients show ("network/qwen3-coder:30b@gpu", "auto", a local tag, "frontier/anthropic/<model>"). */
 export function modelIdOf(s: Pick<SessionData, "model" | "compute">): string {
   const c = s.compute;
   if (c.target === "auto") return "auto";
+  if (c.target === "frontier") return `frontier/${c.provider ?? ""}/${s.model}`;
   if (c.target === "local") return s.model;
   if (c.target === "mine") return `mine/${s.model}`;
   if (c.target === "reserved") return `reserved/${c.reservationId ?? ""}/${s.model}`;
@@ -209,6 +243,9 @@ export function modelIdOf(s: Pick<SessionData, "model" | "compute">): string {
 /** A model id from a picker or `--model` as the session keeps it. */
 export function parseModelId(id: string): { model: string; compute: ComputeSetting } {
   if (id === "auto") return { model: "auto", compute: { target: "auto" } };
+  // Only the provider and model are kept (never a key): "frontier/anthropic/claude-opus-5-5".
+  const frontier = parseFrontierModelId(id);
+  if (frontier) return { model: frontier.model, compute: { target: "frontier", provider: frontier.provider } };
   if (id.startsWith("mine/")) return { model: id.slice(5), compute: { target: "mine" } };
   const reserved = /^reserved\/([^/]+)\/(.+)$/.exec(id);
   if (reserved) return { model: reserved[2], compute: { target: "reserved", reservationId: reserved[1] } };
@@ -221,6 +258,22 @@ export function parseModelId(id: string): { model: string; compute: ComputeSetti
       : { model: rest, compute: { target: "network", computeClass: "any" } };
   }
   return { model: id, compute: { target: "local" } };
+}
+
+/** The worker (tentacle/default) model: helpers and delegated work. Never a frontier model. */
+export function workerModelOf(s: Pick<SessionData, "workerModel">): string {
+  const w = s.workerModel;
+  return w && !parseFrontierModelId(w) ? w : "auto";
+}
+
+/**
+ * The model compaction's summary call runs on: the worker, never a frontier lead, unless the user
+ * opted in (frontier setting compactWithLead); the lead's account check still applies then.
+ */
+export function compactionModelOf(s: Pick<SessionData, "model" | "compute" | "workerModel">, compactWithLead = false): { id: string; role: "lead" | "worker" } {
+  const lead = modelIdOf(s);
+  if (parseFrontierModelId(lead) && compactWithLead) return { id: lead, role: "lead" };
+  return { id: workerModelOf(s), role: "worker" };
 }
 
 /** The command's program name when "always" may cover it: a plain command with no shell syntax. */
@@ -284,7 +337,8 @@ export class SessionHub {
     mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     const file = join(this.dir, `${s.id}.json`);
     const tmp = `${file}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(s), { mode: 0o600 });
+    // A provider key pasted into a message never reaches the disk (docs/frontier-keys.md).
+    writeFileSync(tmp, redactApiKeys(JSON.stringify(s)), { mode: 0o600 });
     renameSync(tmp, file);
     try {
       chmodSync(file, 0o600); // whatever the umask (and a file that existed with looser bits)
@@ -333,7 +387,7 @@ export class SessionHub {
     return this.liveOf(id);
   }
 
-  create(input: { projectRoot: string; model?: string; title?: string; autoApprove?: "none" | "edits"; mode?: PermissionMode; client: ClientRef }): SessionData {
+  create(input: { projectRoot: string; model?: string; workerModel?: string; title?: string; autoApprove?: "none" | "edits"; mode?: PermissionMode; client: ClientRef; ownerAccount?: string }): SessionData {
     const now = Date.now();
     const parsed = parseModelId(input.model || "auto");
     const mode: PermissionMode = input.mode ?? (input.autoApprove === "edits" ? "auto-edits" : input.autoApprove === "none" ? "ask" : defaultMode(input.projectRoot, this.permissions.get(input.projectRoot)));
@@ -353,6 +407,8 @@ export class SessionHub {
       updatedAt: now,
       cSats: 0,
       transcript: [],
+      workerModel: input.workerModel && !parseFrontierModelId(input.workerModel) ? input.workerModel : "auto",
+      ...((input.ownerAccount ?? this.env.owner?.()) ? { ownerAccount: input.ownerAccount ?? this.env.owner?.() } : {}),
     };
     this.sessions.set(s.id, s);
     this.liveOf(s.id);
@@ -375,6 +431,8 @@ export class SessionHub {
           branch: s.branch,
           model: modelIdOf(s),
           compute: s.compute,
+          workerModel: workerModelOf(s),
+          frontierUsd: s.frontierUsd ?? 0,
           origin: s.origin,
           published: s.published,
           createdAt: s.createdAt,
@@ -446,7 +504,8 @@ export class SessionHub {
     this.need(id);
     const l = this.liveOf(id);
     if (!text.trim()) throw new SessionError("invalid", "The message is empty.");
-    const q: QueuedMessage = { id: randomUUID(), text, by: client.kind, ...(client.label ? { label: client.label } : {}), at: Date.now() };
+    // A provider key pasted into a message goes nowhere: not to the model, the events or the disk.
+    const q: QueuedMessage = { id: randomUUID(), text: redactApiKeys(text), by: client.kind, ...(client.label ? { label: client.label } : {}), at: Date.now(), clientId: client.clientId, ...(client.accountId ? { accountId: client.accountId } : {}) };
     if (l.running || l.queue.length) {
       l.queue.push(q);
       this.emit(id, { type: "queued", entry: q, queue: plain(l.queue) });
@@ -478,7 +537,10 @@ export class SessionHub {
     }
     this.save(s);
     const turnId = randomUUID();
-    const running: Running = { turnId, abort: new AbortController(), text: "", events: [], changed: [], done: Promise.resolve() };
+    // The turn acts for the account behind its messages (startTurn never mixes accounts).
+    const first = msgs[0];
+    const by: ClientRef = { clientId: first?.clientId ?? "unknown", kind: first?.by ?? "api", ...(first?.label ? { label: first.label } : {}), ...(first?.accountId ? { accountId: first.accountId } : {}) };
+    const running: Running = { turnId, by, abort: new AbortController(), text: "", events: [], changed: [], done: Promise.resolve() };
     l.running = running;
     running.done = this.runTurn(s, l, running);
     return turnId;
@@ -491,9 +553,12 @@ export class SessionHub {
       if (e.type === "file_change" && !r.changed.includes(e.path)) r.changed.push(e.path);
       if (e.type === "usage") {
         const cSats = Number.isFinite(e.cSats) ? e.cSats : 0;
-        const call = { cSats, where: e.where, ...(e.model ? { model: e.model } : {}), ...(e.served ? { served: e.served } : {}) };
-        r.usage = { cSats: Number(((r.usage?.cSats ?? 0) + cSats).toFixed(6)), where: e.where, calls: [...(r.usage?.calls ?? []), call].slice(-50) };
+        const usd = typeof e.usd === "number" && Number.isFinite(e.usd) ? e.usd : 0;
+        const call = { cSats, where: e.where, ...(e.model ? { model: e.model } : {}), ...(e.served ? { served: e.served } : {}), ...(usd ? { usd } : {}) };
+        const turnUsd = Number(((r.usage?.usd ?? 0) + usd).toFixed(6));
+        r.usage = { cSats: Number(((r.usage?.cSats ?? 0) + cSats).toFixed(6)), where: e.where, calls: [...(r.usage?.calls ?? []), call].slice(-50), ...(turnUsd ? { usd: turnUsd } : {}) };
         s.cSats = Number((s.cSats + cSats).toFixed(6));
+        if (usd) s.frontierUsd = Number(((s.frontierUsd ?? 0) + usd).toFixed(6));
       }
       if (e.type === "status" && e.message.startsWith("Auto: ")) r.usage = { ...r.usage, cSats: r.usage?.cSats ?? 0, where: e.message.slice(6) };
       if (e.type !== "done") r.events.push(storable(e));
@@ -505,14 +570,14 @@ export class SessionHub {
       const exec = this.env.executor(s);
       const messages = s.transcript.filter((t) => t.role === "user" || t.role === "assistant").map((t) => ({ role: t.role, content: t.content }));
       await runAgentLoop({
-        chat: this.env.chat(s, sendEvent, r.abort.signal),
+        chat: this.env.chat(s, sendEvent, r.abort.signal, { client: r.by ?? null, role: "lead" }),
         systemPrompt: await this.env.systemPrompt(s),
         messages,
         sendEvent,
         isCancelled: () => r.abort.signal.aborted,
         tools: this.env.tools?.(s),
         ...(this.env.contextWindow ? { contextWindow: () => this.env.contextWindow!(s) } : {}),
-        ...(this.env.summarize ? { summarize: this.env.summarize(s, (e) => e.type === "usage" && sendEvent(e), r.abort.signal) } : {}),
+        ...(this.env.summarize ? { summarize: this.env.summarize(s, (e) => e.type === "usage" && sendEvent(e), r.abort.signal, { client: r.by ?? null }) } : {}),
         runTool: makeToolRunner({
           prepare: exec.prepare,
           execute: exec.execute,
@@ -554,8 +619,13 @@ export class SessionHub {
       this.emit(id, { type: "turn_end", entry, stopped, cSats: s.cSats, branch: s.branch });
       // Messages queued meanwhile start the next turn (together, in order).
       if (l.queue.length && this.sessions.has(id)) {
-        const next = l.queue.splice(0);
-        this.emit(id, { type: "unqueued", ids: next.map((q) => q.id), queue: [] });
+        // One turn per requesting account: a run of messages from the same account starts the
+        // next turn, so another account's message never rides on a frontier lead (frontier-access.ts).
+        const acct = l.queue[0].accountId;
+        let n = 0;
+        while (n < l.queue.length && l.queue[n].accountId === acct) n++;
+        const next = l.queue.splice(0, n);
+        this.emit(id, { type: "unqueued", ids: next.map((q) => q.id), queue: plain(l.queue) });
         this.startTurn(id, next);
       }
     }
@@ -648,12 +718,17 @@ export class SessionHub {
   }
 
   /** Settings from any client; every client hears the change and who made it. */
-  update(id: string, patch: { model?: string; title?: string; autoApprove?: "none" | "edits"; mode?: PermissionMode }, client: ClientRef): SessionData {
+  update(id: string, patch: { model?: string; leadModel?: string; workerModel?: string; title?: string; autoApprove?: "none" | "edits"; mode?: PermissionMode }, client: ClientRef): SessionData {
     const s = this.need(id);
-    if (patch.model) {
-      const p = parseModelId(patch.model);
+    const lead = patch.leadModel ?? patch.model;
+    if (lead) {
+      const p = parseModelId(lead);
       s.model = p.model;
       s.compute = p.compute;
+    }
+    if (patch.workerModel) {
+      if (parseFrontierModelId(patch.workerModel)) throw new SessionError("invalid", "The worker model runs helpers and delegated work: use auto or a network/local model, not a frontier one.");
+      s.workerModel = patch.workerModel;
     }
     if (patch.title?.trim()) s.title = patch.title.trim().slice(0, 120);
     if (patch.mode) s.mode = patch.mode;
@@ -663,6 +738,7 @@ export class SessionHub {
     this.emit(id, {
       type: "settings",
       model: modelIdOf(s),
+      workerModel: workerModelOf(s),
       title: s.title,
       mode: s.mode,
       autoApprove: s.autoApprove,

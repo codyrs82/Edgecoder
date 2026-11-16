@@ -46,6 +46,8 @@ untrusted unless you pass `--trust`.
 | --- | --- |
 | `--repo <url\|owner/repo>` | Clone into the projects folder (`EDGECODER_PROJECTS_DIR`, default `~/EdgeCoder`), or fast-forward the copy already there. The desktop's open project doesn't change. |
 | `--model <id>` | A local Ollama tag, `network/<model>[@cpu\|apple\|gpu\|gpu.dc]`, `mine/<model>`, or `auto` (the default). |
+| `--lead <id>` | The lead model, which runs the agent loop. For example `frontier/anthropic/claude-opus-5-5` on your own key (next section). Wins over `--model`. |
+| `--worker <id>` | The worker model, for helpers and delegated work. The default is `auto`. It can't be a frontier model. |
 | `--compute local\|network\|mine\|auto` | Where the model runs. A default model is picked for that place. |
 | `--remote` | Show the session live in the app from the start. |
 | `--mode ask\|auto-edits\|auto` | How much it asks first (below). Default: `auto-edits` in a git repository with a clean working tree (the checkpoint and git both keep the originals), else `ask`. |
@@ -106,10 +108,35 @@ In every mode:
 | `/undo` | Revert the files the last reply changed (the turn's checkpoint). |
 | `/clear` | Start the conversation over (same session and settings). |
 | `/status` | Session, project and branch, model, mode, where the last call ran, who is connected, the queue, the provider. |
-| `/cost` | cSats this session has spent. |
+| `/lead [id]`, `/worker [id]` | Show or set the lead and the worker (next section). |
+| `/cost` | cSats this session has spent, plus the estimated USD on your own frontier key. |
 | `/remote [off]` | Continue this session in the app, or stop showing it there. |
 | `/github` | Sign in to GitHub with a one-time code (below). |
 | `/help`, `/exit` | Help, and leave. The session is kept. |
+
+## Frontier models on your own key
+
+The network's open models can't yet lead long coding work. You can let a frontier model lead, on
+your own API key, and keep the worker on Auto:
+
+```sh
+edgecoder keys add anthropic                                         # once; asks for the key (hidden)
+edgecoder code --lead frontier/anthropic/claude-opus-5-5 --worker auto
+```
+
+- The key stays in your keychain and is usable only by your EdgeCoder account on this computer.
+  It is never used for other people's requests or network work.
+- Calls go straight to the provider (Anthropic, or any OpenAI-compatible API you add with
+  `--base-url`), and the provider bills you. EdgeCoder charges no cSats for them.
+- Each turn's usage line says where it ran and what it cost, like a network call's:
+  `Anthropic · claude-opus-5-5 · your key · read 24.8k tok · wrote 312 tok · $0.42`. `/cost`
+  shows the session's total.
+- Compaction summaries run on the worker model, never on your key, unless you opt in.
+- A per-session cap and a daily cap (defaults $5 and $25) warn at 80% and stop at 100%. Change
+  them with `edgecoder keys set --session-cap 10 --daily-cap 40`.
+
+The full details are in [frontier-keys.md](frontier-keys.md): storage per OS, the account rule,
+prices, retries, and `edgecoder keys`.
 
 ## Where it runs (the provider)
 
@@ -245,8 +272,10 @@ cli.github.com).
 The session store is built to carry orchestration such as a `delegate` tool, where a master
 session sends sub-jobs to cheaper network tiers. The extension points are:
 
-- **`TurnEnv`** (`sessions.ts`): `chat` decides where each model call goes per session, and
-  `executor` decides what each tool does. A `delegate` tool can be added in `executor` and run its
+- **`TurnEnv`** (`sessions.ts`): `chat` decides where each model call goes per session. Its
+  `ctx.role` is `"lead"` for the main loop and `"worker"` for helpers, and the worker runs on
+  `workerModelOf(s)`. So a `delegate` tool or compaction asks for `role: "worker"` and never
+  spends the user's frontier key. Separately, `executor` decides what each tool does. A `delegate` tool can be added in `executor` and run its
   sub-job as a child session: `SessionHub.create` with a cheaper model, then `send` and `idle` to
   wait.
 - **`ToolRunnerDeps`** (`agent-loop.ts`):

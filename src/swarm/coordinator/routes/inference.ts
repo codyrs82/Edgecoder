@@ -54,6 +54,7 @@ import {
 } from "../economy.js";
 import { registerRestrictedRoutes } from "./restricted.js";
 import { servedBy } from "../served-by-route.js";
+import { isFrontierModelId } from "../../../inference-api/frontier-models.js";
 import { taskIdInUse, accrualsInFlight, settleTaskIfDone, refundTaskSubmit } from "../results.js";
 
 // ── Network inference (chat completions on agents' local models, streamed) ──────────────────
@@ -397,6 +398,8 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
 
   app.post("/inference/submit", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply) => {
     const body = inferenceSubmitSchema.parse(req.body);
+    // Frontier models run on their owner's own API key in their own IDE provider, never on the network.
+    if (isFrontierModelId(body.model)) return reply.code(400).send({ error: "frontier_model_not_routable", message: "frontier/<provider>/<model> runs only on your own key on your own computer; the network never serves it." });
     const submitter = await resolveSubmitterAccount(req as any, body.submitterAccountId, "/inference/submit");
     if ("error" in submitter) return reply.code(submitter.status).send({ error: submitter.error });
     if (submitter.accountId === "anonymous") return reply.code(403).send({ error: "account_required" });
