@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
 import { registerPortalPages } from "../../src/portal/pages/index.js";
@@ -8,21 +8,30 @@ import { LEGAL_PAGES } from "../../src/portal/pages/public.js";
 
 const LEGAL = ["terms", "privacy", "acceptable-use", "host-agreement"] as const;
 
-describe("legal documents (docs/legal/*.md, DRAFT pending legal review)", () => {
+describe("legal documents (docs/legal/*.md)", () => {
   it("the portal's compiled copy matches the Markdown sources (run: node scripts/sync-legal-docs.mjs)", () => {
     for (const [key, path] of Object.entries(PUBLIC_DOCUMENT_SOURCES)) {
       expect(PUBLIC_DOCUMENTS[key as keyof typeof PUBLIC_DOCUMENTS], path).toBe(readFileSync(path, "utf8"));
     }
   });
 
-  it("each starts with the DRAFT banner and keeps placeholders for counsel", () => {
+  it("each starts with its version and dates, with no draft banner, placeholder, counsel note or LLC", () => {
     for (const key of LEGAL) {
       const md = PUBLIC_DOCUMENTS[key];
-      expect(md.split("\n")[2], key).toMatch(/^> \*\*DRAFT — pending legal review\.\*\*/);
-      expect(md, key).toContain("[CONTACT EMAIL]");
+      expect(md.split("\n")[2], key).toBe("Version: 2026-11-16 · Effective date: 16 November 2026 · Last updated: 16 November 2026");
+      expect(md, key).not.toMatch(/DRAFT|pending legal review|working draft/);
+      // The only square brackets left are Markdown links: [text](/path).
+      expect(md.match(/\[[^\]]*\](?!\()/g), key).toBeNull();
+      expect(md, key).not.toMatch(/COUNSEL|ENGINEERING|MAILING ADDRESS|LLC/);
     }
-    expect(PUBLIC_DOCUMENTS.terms).toContain("[GOVERNING LAW");
-    expect(PUBLIC_DOCUMENTS.terms).toContain("[VENUE]");
+    expect(PUBLIC_DOCUMENTS.terms).toContain("governed by the laws of the State of Texas, USA");
+    expect(PUBLIC_DOCUMENTS.terms).toContain("state and federal courts located in Texas");
+  });
+
+  it("the counsel notes stay internal: not a public document", () => {
+    expect(Object.values(PUBLIC_DOCUMENT_SOURCES)).not.toContain("docs/legal/COUNSEL-NOTES.md");
+    // Counsel notes are kept privately, outside this public repo.
+    expect(existsSync("docs/legal/COUNSEL-NOTES.md")).toBe(false);
   });
 });
 
@@ -35,16 +44,19 @@ describe("legal and Bluetooth pages", () => {
     return res;
   }
 
-  it("serves each legal page with its title, a visible draft banner, highlighted placeholders and links to the others", async () => {
+  it("serves each legal page with its title, its last-updated date, no draft banner or placeholders, and links to the others", async () => {
     for (const key of LEGAL) {
       const page = LEGAL_PAGES[key];
       const res = await get(page.path);
       expect(res.statusCode, page.path).toBe(200);
       expect(res.headers["content-type"]).toMatch(/text\/html/);
       expect(res.body.match(/<title>([^<]*)<\/title>/)?.[1]).toBe(`${page.title} | EdgeCoder`);
-      expect(res.body).toContain('class="draft-banner"');
-      expect(res.body).toContain("<strong>DRAFT — pending legal review.</strong>");
-      expect(res.body).toContain('<mark class="placeholder">[CONTACT EMAIL]</mark>');
+      expect(res.body).toContain("Last updated: 16 November 2026");
+      expect(res.body).not.toMatch(/draft-banner|pending legal review|DRAFT/);
+      expect(res.body).not.toMatch(/<meta name="description" content="[^"]*draft/i);
+      expect(res.body).not.toContain('<mark class="placeholder">');
+      expect(res.body).not.toContain("EdgeCoder, LLC");
+      expect(res.body).toContain("&copy; 2026 EdgeCoder<");
       for (const other of LEGAL) expect(res.body).toContain(`href="${LEGAL_PAGES[other].path}"`);
       expect(res.body).toContain('aria-current="page"');
     }

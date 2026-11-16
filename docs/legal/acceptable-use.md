@@ -1,8 +1,6 @@
 # Acceptable Use Policy
 
-> **DRAFT — pending legal review.** This document is a working draft prepared for review by counsel. It is not final, it is not legal advice, and it has not been approved by EdgeCoder. Bracketed items such as [CONTACT EMAIL] are placeholders to be completed.
-
-Version: 2026-11-15-draft · Effective date: [EFFECTIVE DATE]
+Version: 2026-11-16 · Effective date: 16 November 2026 · Last updated: 16 November 2026
 
 This Acceptable Use Policy ("AUP") is part of the EdgeCoder [Terms of Service](/terms). It applies to everyone who uses the Service: Buyers, Hosts, API users and AI agents acting for someone. "You" includes anyone using your account, keys or agents.
 
@@ -53,7 +51,7 @@ Do not:
 
 ## 6. Sanctions and export control
 
-Do not use the Service if you are, or are acting for, a person or entity on a U.S. or other applicable sanctions or restricted-party list, or if you are located in a comprehensively sanctioned country or region. Do not use the Service to export, re-export or transfer software, technology or services in violation of U.S. export controls (EAR, ITAR) or applicable sanctions (OFAC). Hosts may not offer their machines from sanctioned jurisdictions. [COUNSEL: confirm list and screening approach.]
+Do not use the Service if you are, or are acting for, a person or entity on a U.S. or other applicable sanctions or restricted-party list, or if you are located in a comprehensively sanctioned country or region. Do not use the Service to export, re-export or transfer software, technology or services in violation of U.S. export controls (EAR, ITAR) or applicable sanctions (OFAC). Hosts may not offer their machines from sanctioned jurisdictions.
 
 ## 7. Authorized security research
 
@@ -63,7 +61,7 @@ Security research is allowed on the network only within these limits:
 - Running exploit code, scanners or malware samples in a job is allowed only for that authorized purpose, and only against those systems. It must not target Hosts' machines or networks, EdgeCoder systems, or any third party.
 - **Verification.** We may ask you to show your authorization (for example a signed engagement letter or scope document) before or after such use, and may require it before allowing certain workloads.
 - **Suspension.** We may suspend jobs, accounts or keys that look like attacks, even if you say they are authorized, until we are satisfied. We are not liable for disruption this causes.
-- **EdgeCoder itself.** To report a vulnerability in EdgeCoder, follow our security policy (SECURITY.md in the EdgeCoder source repository) and contact [SECURITY EMAIL]. Do not test against production systems, other users' accounts or Hosts' machines without our written permission. [COUNSEL: consider safe-harbor language.]
+- **EdgeCoder itself.** To report a vulnerability in EdgeCoder, follow our security policy (SECURITY.md in the EdgeCoder source repository) and contact security@edgecoder.io. Do not test against production systems, other users' accounts or Hosts' machines without our written permission.
 
 ## 8. Your responsibility
 
@@ -75,4 +73,4 @@ We may investigate suspected violations and, without notice where reasonable, re
 
 ## 10. Reporting
 
-Report violations or abuse to [ABUSE EMAIL]. Include the job, agent or account identifiers you have.
+Report violations or abuse to abuse@edgecoder.io. Include the job, agent or account identifiers you have.

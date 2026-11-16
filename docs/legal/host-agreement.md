@@ -1,10 +1,8 @@
 # Host Agreement
 
-> **DRAFT — pending legal review.** This document is a working draft prepared for review by counsel. It is not final, it is not legal advice, and it has not been approved by EdgeCoder. Bracketed items such as [CONTACT EMAIL] are placeholders to be completed.
+Version: 2026-11-16 · Effective date: 16 November 2026 · Last updated: 16 November 2026
 
-Version: 2026-11-15-draft · Effective date: [EFFECTIVE DATE]
-
-This Host Agreement is between you and EdgeCoder. It applies when you install the EdgeCoder agent, the desktop app with the agent enabled, the iOS app with its swarm runtime, or any other EdgeCoder software that lets your machine run work for others (a "Host"). It adds to the [Terms of Service](/terms), the [Acceptable Use Policy](/acceptable-use) and the [Privacy Policy](/privacy). If this agreement conflicts with the Terms on hosting, this agreement controls.
+This Host Agreement is between you and EdgeCoder ("EdgeCoder", "we", "us"). It applies when you install the EdgeCoder agent, the desktop app with the agent enabled, the iOS app with its swarm runtime, or any other EdgeCoder software that lets your machine run work for others (a "Host"). It adds to the [Terms of Service](/terms), the [Acceptable Use Policy](/acceptable-use) and the [Privacy Policy](/privacy). If this agreement conflicts with the Terms on hosting, this agreement controls.
 
 By installing or running the agent, enrolling a machine, or checking the box to accept this agreement, you agree to it.
 
@@ -46,17 +44,17 @@ Code jobs run inside a sandbox (currently a Docker container with no network acc
 
 ## 5. Payment
 
-- **What you are paid for.** You are paid for computing services your machine performs and that the coordinator measures and accepts. You receive 95% of the compute payment for that work; EdgeCoder keeps 5% as a network fee. [COUNSEL: confirm fee description; infrastructure-host fee-pool distributions may need their own section.]
+- **What you are paid for.** You are paid for computing services your machine performs and that the coordinator measures and accepts. You receive 95% of the compute payment for that work; EdgeCoder keeps 5% as a network fee.
 - **How work is measured.** The coordinator measures the time your machine spends on accepted work and converts it to credits by hardware class and tier at the price in effect. Your hardware tier is verified by speed checks and cross-checks against other machines; until it is verified you are paid at your class's standard tier. Results may be sampled and checked against other machines.
 - **Payouts.** Earnings are paid in bitcoin, usually over Lightning, to the payout destination you set, on request or automatically, subject to a minimum payout amount and network fees shown in the Service. You are responsible for giving a correct destination; payments sent to the destination you gave are final (see section 5 of the [Terms](/terms)).
-- **Holds.** We may delay or hold payouts: (a) while work is being verified; (b) when we suspect fraud, invalid results, misreported hardware, or a breach of this agreement; (c) for sanctions, tax or legal reasons, including until you give required tax information; (d) for security incidents; and (e) when a payout destination was recently changed. [HOLD PERIODS AND RELEASE PROCESS — counsel and operations to define.]
+- **Holds.** We may delay or hold payouts: (a) while work is being verified; (b) when we suspect fraud, invalid results, misreported hardware, or a breach of this agreement; (c) for sanctions, tax or legal reasons, including until you give required tax information; (d) for security incidents; and (e) when a payout destination was recently changed. Earnings may be held for up to 7 days for fraud and abuse review.
 - **Forfeiture and clawback.** We may withhold, reverse or offset earnings for work that was invalid, fabricated, obtained through a breach of this agreement or the AUP, or credited by error.
 - **Test mode.** While network settlement runs on a Bitcoin test network or with test funds, earnings shown may have no real value and may be reset. See section 6 of the [Terms](/terms).
 - **No guarantee.** We do not guarantee any amount of work, earnings or uptime rewards. Demand and prices change.
 
 ## 6. Taxes and tax information
 
-You are an independent provider, not an employee, and you are responsible for all taxes on your earnings, including income and self-employment taxes and any sales, VAT or similar taxes. We may be required to ask you for tax information (for example IRS Form W-9 or W-8BEN, or an equivalent in your country), to issue tax forms such as Form 1099, to report your earnings to tax authorities, or to withhold tax. We may hold payouts until you provide what is required. [COUNSEL: confirm thresholds, the treatment of payments in bitcoin, and the forms needed.]
+You are an independent provider, not an employee, and you are responsible for all taxes on your earnings, including income and self-employment taxes and any sales, VAT or similar taxes. We may be required to ask you for tax information (for example IRS Form W-9 or W-8BEN, or an equivalent in your country), to issue tax forms such as Form 1099, to report your earnings to tax authorities, or to withhold tax. We may hold payouts until you provide what is required.
 
 ## 7. Suspension, blacklisting and removal
 
@@ -70,7 +68,7 @@ Where reasonable we will tell you why, unless that would compromise security or 
 
 ## 8. Disclaimers and liability
 
-EDGECODER DOES NOT WARRANT THAT THE AGENT, THE SANDBOX OR JOBS FROM OTHER USERS ARE SAFE, SECURE OR FREE OF HARMFUL CODE, OR THAT HOSTING WILL NOT AFFECT YOUR MACHINE, DATA, NETWORK OR ACCOUNTS WITH THIRD PARTIES. TO THE MAXIMUM EXTENT PERMITTED BY LAW, EDGECODER IS NOT LIABLE FOR DAMAGE TO YOUR HARDWARE OR DATA, FOR YOUR POWER, BANDWIDTH OR OTHER COSTS, OR FOR CONSEQUENCES WITH YOUR ISP, EMPLOYER OR OTHERS, AND THE LIMITATIONS IN SECTIONS 14 AND 15 OF THE [TERMS](/terms) APPLY. You will indemnify EdgeCoder as described in section 16 of the Terms, including for claims arising from the operation of your machine and network.
+EDGECODER DOES NOT WARRANT THAT THE AGENT, THE SANDBOX OR JOBS FROM OTHER USERS ARE SAFE, SECURE OR FREE OF HARMFUL CODE, OR THAT HOSTING WILL NOT AFFECT YOUR MACHINE, DATA, NETWORK OR ACCOUNTS WITH THIRD PARTIES. TO THE MAXIMUM EXTENT PERMITTED BY LAW, EDGECODER IS NOT LIABLE FOR DAMAGE TO YOUR HARDWARE OR DATA, FOR YOUR POWER, BANDWIDTH OR OTHER COSTS, OR FOR CONSEQUENCES WITH YOUR ISP, EMPLOYER OR OTHERS, AND THE LIMITATIONS IN SECTIONS 14 AND 15 OF THE [TERMS OF SERVICE](/terms) APPLY. You will indemnify EdgeCoder as described in section 16 of the Terms, including for claims arising from the operation of your machine and network.
 
 ## 9. Changes and termination
 
@@ -78,4 +76,4 @@ We may change this agreement as described in section 17 of the [Terms](/terms); 
 
 ## 10. Contact
 
-EdgeCoder · [MAILING ADDRESS] · [CONTACT EMAIL]
+EdgeCoder · support@edgecoder.io

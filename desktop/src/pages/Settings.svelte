@@ -10,10 +10,9 @@
   import { getThemePreference, setTheme, type ThemePreference } from "../lib/theme";
   import Select from "../components/ui/Select.svelte";
   import { notify } from "../lib/toast";
-  import { LEGAL_LINKS, NOTICES } from "../lib/legal-notices";
   import FrontierKeys from "../components/FrontierKeys.svelte";
 
-  /** Open a portal page (legal drafts, the Bluetooth explainer) in the browser. */
+  /** Open a portal page (the Bluetooth explainer) in the browser. */
   async function openPortalPage(path: string) {
     const url = portalWebUrl(path);
     try {
@@ -509,26 +508,6 @@
       {:else}
         <div class="sp-row"><span class="sp-muted">Loading identity…</span></div>
       {/if}
-    </div>
-  </section>
-
-  <section class="sp-group" aria-labelledby="gen-legal">
-    <h2 class="sp-group-title" id="gen-legal">Legal</h2>
-    <div class="sp-card">
-      <div class="sp-row">
-        <div class="sp-text">
-          <span class="sp-title">Terms and policies</span>
-          <span class="sp-desc"><span class="sp-warn">{NOTICES.draft}</span></span>
-          <span class="sp-desc">{NOTICES.aiOutput}</span>
-          <span class="sp-desc">{NOTICES.hosting}</span>
-        </div>
-      </div>
-      {#each LEGAL_LINKS as doc (doc.href)}
-        <div class="sp-row">
-          <div class="sp-text"><span class="sp-title">{doc.label}</span></div>
-          <div class="sp-controls"><button onclick={() => openPortalPage(doc.href)}>Open ↗</button></div>
-        </div>
-      {/each}
     </div>
   </section>
 

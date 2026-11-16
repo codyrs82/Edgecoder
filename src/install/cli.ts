@@ -440,7 +440,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
 
 /** Printed after an install: running the agent means hosting other people's work under the Host Agreement. */
 export function hostAgreementLine(portalUrl: string): string {
-  return `\nBy running the EdgeCoder agent on this machine you agree to the Host Agreement (draft ${HOST_AGREEMENT_VERSION}, pending legal review): ${portalUrl.replace(/\/$/, "")}/host-agreement\nIt runs other people's AI and code jobs here; the sandbox reduces risk but doesn't guarantee isolation.`;
+  return `\nBy running the EdgeCoder agent on this machine you agree to the Host Agreement (version ${HOST_AGREEMENT_VERSION}): ${portalUrl.replace(/\/$/, "")}/host-agreement\nIt runs other people's AI and code jobs here; the sandbox reduces risk but doesn't guarantee isolation.`;
 }
 
 if (process.argv[1] && /cli\.(js|ts)$/.test(process.argv[1]) && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {

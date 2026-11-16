@@ -7,6 +7,7 @@ import { DOCS_SITE_URL } from "./urls.js";
 import { CSP_NONCE } from "../csp-nonce.js";
 import { CLIENT_ESCAPE_JS } from "./escape.js";
 import { CLIENT_BOT_HELPERS_JS } from "./bot-helpers.js";
+import { LEGAL_FOOTER_CSS, legalFooterHtml } from "./legal-footer.js";
 
 /** Account menu entries (the popup above the avatar row), in the desktop app's order. */
 export const ACCOUNT_MENU_ITEMS: Array<{ href: string; label: string; icon: string; external?: boolean; adminOnly?: boolean; separatorBefore?: boolean }> = [
@@ -35,7 +36,7 @@ export const PRIMARY_NAV_ITEMS: Array<{ key: string; href: string; label: string
  * row at the bottom (name and cSats balance, a gear that opens Settings). Clicking the avatar opens
  * the account menu. Market, Wallet, Install agent and the rest live in Settings. Top bar (page
  * title, subtitle, actions) and content area on the right; on mobile the sidebar slides in behind
- * the menu button.
+ * the menu button. Every page but the chat (which fills the window) ends with the legal footer.
  *
  * Pages supply `content` (HTML) and `script` (JS) and keep using the shell's helpers: api(),
  * requireAuth(), showToast(), statusBadge(), boolBadge(), sidebarConversationsHtml(). The theme
@@ -215,6 +216,8 @@ export function portalAuthedPageHtml(input: {
         .verify-banner-text { font-size: 13px; }
         .verify-banner .link-btn { background: none; border: none; padding: 0; min-height: 0; color: var(--brand-2); text-decoration: underline; font: inherit; cursor: pointer; }
         .verify-banner-close { flex: none; min-height: 0; padding: 4px; }
+        ${LEGAL_FOOTER_CSS}
+        .main > .legal-footer { margin-top: auto; }
         /* ── Mobile ── */
         @media (max-width: 900px) {
           .app { grid-template-columns: 1fr; }
@@ -283,6 +286,7 @@ export function portalAuthedPageHtml(input: {
               ${input.content}
             </div>
           </div>
+          ${onChat ? "" : legalFooterHtml()}
         </div>
       </div>
       <div id="toast" class="card hidden" role="status" aria-live="polite"></div>
@@ -569,7 +573,8 @@ export function portalCardPageHtml(input: {
       <style nonce="${CSP_NONCE}">
         ${TOKENS_CSS}
         ${BASE_CSS}
-        .wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 36px 16px; }
+        .wrap { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 36px 16px; }
+        ${LEGAL_FOOTER_CSS}
         .page-card { width: min(420px, 100%); }
         .page-card .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; margin-bottom: 24px; }
         .page-card h2 { font-size: 20px; margin-bottom: 4px; }
@@ -590,6 +595,7 @@ export function portalCardPageHtml(input: {
           ${input.note ? `<p class="muted page-note">${input.note}</p>` : ""}
           <div class="page-foot"><a href="/portal">Back to sign in</a>${themeToggleButton()}</div>
         </div>
+        ${legalFooterHtml()}
       </div>
       <script nonce="${CSP_NONCE}">
         const msg = document.getElementById("msg");

@@ -262,7 +262,7 @@ private extension View {
 }
 
 /// Required before creating an account (docs/legal/): the portal refuses a sign-up without it.
-/// The documents are drafts pending legal review; the links open the published versions.
+/// The links open the published documents.
 struct TermsAgreementToggle: View {
     @Binding var isOn: Bool
 
