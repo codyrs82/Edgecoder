@@ -21,6 +21,8 @@ export type SecurityEventType =
   | "binary_integrity_failure"
   | "behavioral_anomaly_detected"
   | "auto_blacklist_triggered"
+  | "claim_abandoned"
+  | "agent_went_offline"
   | "result_verification_mismatch"
   | "result_verification_replica_abandoned"
   | "hardware_challenge_invalid"
@@ -68,6 +70,8 @@ const SEVERITY_MAP: Record<SecurityEventType, SecurityLevel> = {
   key_rotation_overdue: "WARN",
   key_expired: "CRITICAL",
   ast_validation_rejection: "INFO",
+  claim_abandoned: "INFO",
+  agent_went_offline: "INFO",
   sandbox_timeout: "WARN",
   sandbox_seccomp_violation: "HIGH",
   binary_integrity_failure: "HIGH",

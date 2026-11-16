@@ -138,6 +138,12 @@ export const heartbeatSchema = z.object({
   agentId: z.string(),
   /** #51: renew claim leases only; don't drain tunnel invites/notices or offers. */
   leaseOnly: z.boolean().optional(),
+  /**
+   * BHV006: the agent is about to go offline (an app update or quit, the machine going to sleep,
+   * the process stopping, or a drain before a restart). Its claims go back on the queue now, and
+   * none of them counts as abandoned.
+   */
+  goingOffline: z.enum(["update", "quit", "sleep", "shutdown", "drain"]).optional(),
   powerTelemetry: z
     .object({
       onExternalPower: z.boolean().optional(),

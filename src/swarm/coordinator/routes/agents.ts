@@ -319,6 +319,22 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
         blacklistVersion: mutable.blacklistVersion
       });
     }
+    if (body.goingOffline) {
+      // BHV006: a clean goodbye. Hand its claims to other agents now (no abandoned claims), and
+      // show it offline until it heartbeats again.
+      const released = queue.releaseClaimsOf(body.agentId, now);
+      const cap = agentCapabilities.get(body.agentId);
+      if (cap) cap.lastSeenMs = 0;
+      securityLog.log({
+        level: "INFO",
+        event: "agent_went_offline",
+        source: { type: "agent", id: body.agentId },
+        details: { reason: body.goingOffline, released: released.length },
+        action: "claims_released",
+        coordinatorId: identity.peerId,
+      });
+      return reply.send({ ok: true, offline: true, released: released.length });
+    }
     queue.heartbeat(body.agentId);
     // A busy agent is alive: without this a long job (a big prompt on a slow model) made it look
     // offline, which ended its reservation and hid it from the model list.

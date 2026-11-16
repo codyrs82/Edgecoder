@@ -44,8 +44,39 @@ export function clearBusy(key: string): void { busy.delete(key); }
 export function busyReasons(): BusyReason[] { return [...new Set(busy.values())]; }
 
 // ---- Network-job heuristic -------------------------------------------------------------
-export function networkJobBusy(queued: number | undefined, recentAtMs: number[], nowMs: number): boolean {
-  return (queued ?? 0) > 0 || recentAtMs.some((t) => nowMs - t < NETWORK_JOB_GRACE_MS);
+/**
+ * `claims`: network jobs the agent reports running now (/v1/ide/compute claims; newer agents).
+ * Restarting with one would abandon it, and the network counts abandoned jobs (BHV006).
+ */
+export function networkJobBusy(queued: number | undefined, recentAtMs: number[], nowMs: number, claims = 0): boolean {
+  return claims > 0 || (queued ?? 0) > 0 || recentAtMs.some((t) => nowMs - t < NETWORK_JOB_GRACE_MS);
+}
+
+// ---- Drain before restarting -----------------------------------------------------------
+export const DRAIN_TIMEOUT_MS = 8_000;
+/**
+ * The restart the controller runs: first ask the agent to drain (stop taking network work and
+ * hand any job it holds to other agents, so nothing is left abandoned), then install and relaunch.
+ * A drain that fails or is slow never blocks the update; if the install fails, the agent takes
+ * work again.
+ */
+export function restartWithDrain(
+  drain: (resume: boolean) => Promise<unknown>,
+  install: (version: string) => Promise<void>,
+  timeoutMs = DRAIN_TIMEOUT_MS,
+): (version: string) => Promise<void> {
+  return async (version) => {
+    await Promise.race([
+      drain(false).catch(() => undefined),
+      new Promise((resolve) => setTimeout(resolve, timeoutMs)),
+    ]);
+    try {
+      await install(version);
+    } catch (err) {
+      void drain(true).catch(() => undefined);
+      throw err;
+    }
+  };
 }
 export function sessionsBusy(sessions: Array<{ running?: boolean; pending?: number }>): boolean {
   return sessions.some((s) => s.running || (s.pending ?? 0) > 0);

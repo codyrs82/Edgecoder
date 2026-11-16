@@ -1537,6 +1537,12 @@ export interface ComputeOverview {
   models?: Array<{ model: string; agents: number; classes: string[]; cSatsPerMTokens?: { input: number; output: number }; restricted?: string }>;
   /** How this computer's agent chose its coordinator: from the signed registry by latency, or the fallback URL. */
   steering?: CoordinatorSteering | null;
+  /** The network refused this computer's agent (its safety check blacklisted it), with the reason. */
+  paused?: { reason: string; sinceMs: number } | null;
+  /** Network jobs this computer's agent is running now (the update restart waits for them). */
+  claims?: number;
+  /** The agent stopped taking network work ahead of a restart. */
+  draining?: boolean;
 }
 export interface CoordinatorSteering {
   url: string;
@@ -1549,6 +1555,8 @@ export interface CoordinatorSteering {
   decidedAtMs: number;
 }
 export const computeOverview = () => fsCall<ComputeOverview>("GET", "/v1/ide/compute");
+/** Before an update restart: this computer's agent stops taking network work and hands its jobs to others. */
+export const drainAgent = (resume = false) => fsCall<{ ok?: boolean; draining?: boolean; released?: number }>("POST", "/v1/ide/compute/drain", { resume });
 // The network's world view (:4304 /v1/ide/network/world): every coordinator and every machine on
 // it, other people's masked, plus this computer's round trip to each coordinator (myRttMs).
 export type { WorldStatus, WorldAgent, WorldCoordinator, WorldView } from "./world-view";

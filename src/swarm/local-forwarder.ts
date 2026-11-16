@@ -12,7 +12,10 @@
  *   GET  /forward/inference/models                            -> GET  {coordinator}/inference/models
  *   GET  /forward/network/world                               -> GET  {coordinator}/network/world (anonymized)
  *   GET  /forward/tasks/:taskId/subtasks/:subtaskId/result    -> GET  {coordinator}/tasks/...
- *   GET  /forward/health                                      -> forwarder state (+ coordinator steering)
+ *   GET  /forward/health                                      -> forwarder state (+ coordinator steering,
+ *                                                                paused/draining/claims: agent-lifecycle.ts)
+ *   POST /forward/drain   {resume?}                           -> stop taking work and hand claims back before
+ *                                                                the app restarts (BHV006); resume: take work again
  *
  * Every route needs `Authorization: Bearer <IDE token>`; browser requests (an Origin header)
  * are refused, and the server binds 127.0.0.1 only.
@@ -21,6 +24,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { request } from "undici";
 import { safeTokenEqual } from "../apps/ide/ide-auth.js";
+import type { LifecycleStatus } from "./agent-lifecycle.js";
 
 export const LOCAL_FORWARD_DEFAULT_PORT = 4305;
 /** POST routes relayed to the coordinator, signed by this agent over the exact body bytes. */
@@ -51,6 +55,10 @@ export interface LocalForwarderDeps {
   coordinatorUrl: () => string | null;
   /** The last coordinator-steering decision (registry pick, region, latency), for the app's Settings. */
   steering?: () => unknown;
+  /** Paused (blacklisted) with the coordinator's reason, draining, claims running now. */
+  lifecycle?: () => LifecycleStatus;
+  /** Drain before a restart (hand claims back, pull nothing new for a while), or resume. */
+  drain?: (resume: boolean) => Promise<{ draining: boolean; released: number; told: boolean }>;
   /** x-mesh-token, only when the operator configured one (agents are never given the coordinators' token). */
   meshHeaders: () => Record<string, string>;
   /** Agent request-signing headers over the exact body bytes (method defaults to POST). */
@@ -99,7 +107,18 @@ export function createLocalForwarder(deps: LocalForwarderDeps): Server {
       const coordinator = deps.coordinatorUrl();
 
       if (req.method === "GET" && path === "/forward/health") {
-        return send(res, 200, { ok: true, agentId: deps.agentId, coordinatorUrl: coordinator, registered: Boolean(coordinator), steering: deps.steering?.() ?? null });
+        return send(res, 200, { ok: true, agentId: deps.agentId, coordinatorUrl: coordinator, registered: Boolean(coordinator), steering: deps.steering?.() ?? null, ...(deps.lifecycle ? deps.lifecycle() : {}) });
+      }
+      if (req.method === "POST" && path === "/forward/drain") {
+        if (!deps.drain) return send(res, 404, { error: "not_found" });
+        let resume = false;
+        try {
+          const raw = await readBody(req);
+          resume = raw ? Boolean((JSON.parse(raw) as { resume?: unknown }).resume) : false;
+        } catch {
+          return send(res, 400, { error: "invalid_json" });
+        }
+        return send(res, 200, { ok: true, ...(await deps.drain(resume)) });
       }
       if (!coordinator) return send(res, 503, { error: "agent_not_registered" });
 

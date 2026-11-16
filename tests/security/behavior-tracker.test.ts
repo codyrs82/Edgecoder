@@ -157,6 +157,23 @@ describe("AgentBehaviorTracker", () => {
     expect(stats.heartbeatGapMaxMs).toBe(340_000);
   });
 
+  it("counts abandoned claims over their own (24 h) window, and the streak since the last result", () => {
+    const tracker = new AgentBehaviorTracker();
+    const t0 = 1_000_000_000;
+    tracker.recordAbandonedClaim("agent-1", {}, t0);
+    tracker.recordAbandonedClaim("agent-1", {}, t0 + 1_000);
+    tracker.recordTaskResult("agent-1", { ok: true, output: "x", durationMs: 5000 }, t0 + 2_000);
+    tracker.recordAbandonedClaim("agent-1", { whileActive: true }, t0 + 3_000);
+    // Two hours later: outside the hour window, inside the abandoned-claim window.
+    const stats = tracker.getStats("agent-1", t0 + 2 * 3600_000)!;
+    expect(stats.abandonedClaimCount).toBe(3);
+    expect(stats.abandonedClaimStreak).toBe(1);
+    expect(stats.abandonedWhileActiveCount).toBe(1);
+    expect(tracker.getStats("agent-1", t0 + 25 * 3600_000)!.abandonedClaimCount).toBe(0);
+    tracker.clearAbandonedClaims("agent-1");
+    expect(tracker.getStats("agent-1", t0 + 3_000)!.abandonedClaimCount).toBe(0);
+  });
+
   it("tracks task claims", () => {
     const tracker = new AgentBehaviorTracker();
     const now = Date.now();

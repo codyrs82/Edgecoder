@@ -196,6 +196,11 @@ export const coordinatorConfigSchema = z.object({
   // Agent failures from one submitter account that count toward an agent's failure-rate rules
   // (BHV004) per behaviour window (1 h): one buyer's failing jobs can't sink a worker.
   BEHAVIOR_SUBMITTER_FAILURE_CAP: envInt(3, { min: 1 }),
+  // BHV006: abandoned claims (a lease that lapsed) that make a pattern within the window, either in
+  // a row without returning any result or held past their deadline while heartbeating. A single
+  // heartbeat gap (sleep, an update restart) is never one; see src/security/anomaly-detector.ts.
+  BEHAVIOR_ABANDONED_CLAIM_THRESHOLD: envInt(5, { min: 1, max: 1000 }),
+  BEHAVIOR_ABANDONED_CLAIM_WINDOW_MS: envInt(86_400_000, { min: 60_000, max: 7 * 86_400_000 }),
   PAYMENT_INTENT_EXPIRY_GRACE_MS: envInt(120000, { min: 1 }),
   AGENT_ORCHESTRATION_ONLINE_WINDOW_MS: envInt(120000, { min: 1 }),
   /** Agents not seen this long are dropped from the in-memory registry (they re-register as after a restart). */

@@ -55,6 +55,7 @@ import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from 
 import { answerChallenge, runLocalBenchmark, type AgentBenchmarkReport, type BenchmarkChallenge } from "./benchmark.js";
 import { appVersion } from "../common/app-version.js";
 import { createLocalForwarder } from "./local-forwarder.js";
+import { AgentLifecycle, DEFAULT_DRAIN_MS, announceGoingOffline, blacklistReasonFromError, type GoingOfflineReason } from "./agent-lifecycle.js";
 import { resolveIdeToken } from "../apps/ide/ide-auth.js";
 import { loadConfigOrExit } from "../common/config.js";
 import { workerConfigSchema } from "../config/worker.js";
@@ -90,8 +91,34 @@ const coordinatorTrust = new CoordinatorTrustGate({
   }
 }
 
+// BHV006: draining before a restart or quit, paused by a blacklist, claims running (agent-lifecycle.ts).
+const lifecycle = new AgentLifecycle();
+let shuttingDown = false;
+/**
+ * Stopping (SIGTERM / SIGINT, or the all-in-one parent went away: the desktop app quit or restarted
+ * to finish an update): pull nothing more and tell the coordinator, so the claims we hold go to
+ * other agents now instead of lapsing as abandoned claims. Bounded; then exit.
+ */
+async function shutdownGracefully(reason: GoingOfflineReason, code = 0): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  lifecycle.startDrain(Infinity);
+  let registered = false;
+  try {
+    registered = Boolean(registeredWithUrl);
+  } catch {
+    // stopped before registration state existed
+  }
+  if (registered) {
+    const r = await announceGoingOffline((body) => post("/heartbeat", body, { retries: 0, timeoutMs: 2_500, signed: true }), AGENT_ID, reason, 3_000);
+    console.log(`[agent:${AGENT_ID}] going offline (${reason})${r.ok ? `: ${r.released} claim(s) handed back` : ": coordinator not told; claims lapse at lease expiry"}`);
+  }
+  process.exit(code);
+}
 // Forked by the all-in-one agent: exit with it rather than linger as an orphan.
-if (process.send) process.on("disconnect", () => process.exit(0));
+if (process.send) process.on("disconnect", () => void shutdownGracefully("quit"));
+process.once("SIGTERM", () => void shutdownGracefully("shutdown"));
+process.once("SIGINT", () => void shutdownGracefully("shutdown", 130));
 
 const COORDINATOR_BOOTSTRAP_URL = W.COORDINATOR_URL ?? "http://127.0.0.1:4301";
 const SNAPSHOT_ENFORCEMENT = parseSnapshotEnforcement(W.SNAPSHOT_ENFORCEMENT);
@@ -508,6 +535,18 @@ if (LOCAL_FORWARD_PORT > 0) {
     token: () => (forwardToken ??= resolveIdeToken()),
     coordinatorUrl: () => registeredWithUrl,
     steering: () => steeringStatus,
+    lifecycle: () => lifecycle.status(),
+    drain: async (resume) => {
+      if (resume) {
+        lifecycle.endDrain();
+        return { draining: false, released: 0, told: false };
+      }
+      lifecycle.startDrain(DEFAULT_DRAIN_MS);
+      if (!registeredWithUrl) return { draining: true, released: 0, told: false };
+      const r = await announceGoingOffline((body) => post("/heartbeat", body, { retries: 0, timeoutMs: 4_000, signed: true }), AGENT_ID, "drain", 5_000);
+      console.log(`[agent:${AGENT_ID}] draining for a restart${r.ok ? `: ${r.released} claim(s) handed back` : ""}`);
+      return { draining: true, released: r.released, told: r.ok };
+    },
     meshHeaders,
     signedHeaders,
     agentId: AGENT_ID
@@ -787,6 +826,7 @@ const LEASE_HEARTBEAT_MS = Math.max(1_000, W.LEASE_HEARTBEAT_MS || 15_000);
  * leased by their origin coordinator, and peer-direct/offline runs hold no lease.
  */
 function startLeaseHeartbeat(): () => void {
+  const claimEnded = lifecycle.claimStarted();
   const timer = setInterval(() => {
     const body = { agentId: AGENT_ID, sandboxMode: SANDBOX_MODE, leaseOnly: true };
     void post("/heartbeat", body, { retries: 0, timeoutMs: 5000, signed: true }).catch(
@@ -794,7 +834,10 @@ function startLeaseHeartbeat(): () => void {
     );
   }, LEASE_HEARTBEAT_MS);
   timer.unref?.();
-  return () => clearInterval(timer);
+  return () => {
+    clearInterval(timer);
+    claimEnded();
+  };
 }
 
 async function post(
@@ -1530,6 +1573,7 @@ async function loop(): Promise<void> {
             registeredWithUrl = coordinator.url;
             lastRegisteredAtMs = Date.now();
             console.log(registeredLogLine(AGENT_ID, coordinator.url, registerResponse));
+            lifecycle.noteAccepted();
             adoptMeshToken(registerResponse.meshToken);
             adoptRewardAccount(registerResponse.rewardAccountId);
           }
@@ -1547,6 +1591,7 @@ async function loop(): Promise<void> {
           cacheCoordinatorUrl(coordinator.url);
 
           if (hb.blacklisted) {
+            lifecycle.notePaused(hb.reason ?? "policy_violation");
             console.error(`[agent:${AGENT_ID}] blacklisted by coordinator: ${hb.reason ?? "policy_violation"}`);
             await new Promise((r) => setTimeout(r, 5000));
             continue;
@@ -1565,6 +1610,7 @@ async function loop(): Promise<void> {
               console.warn(`[agent:${AGENT_ID}] benchmark challenge answer failed: ${e}`);
             }
           }
+          lifecycle.noteAccepted();
           blacklistSet = new Set(hb.blacklist?.agents ?? []);
           for (const notice of hb.tunnelCloseNotices ?? []) {
             peerTunnels.delete(notice.peerAgentId);
@@ -1676,7 +1722,8 @@ async function loop(): Promise<void> {
           console.log(`[agent:${AGENT_ID}] inference-only: pulling inference subtasks only (no sandbox, no task code is run)`);
         }
         // Inference-only with every slot busy: nothing we could take; a finishing call wakes the loop.
-        const pulled = (PULLS_FROM_COORDINATOR && !sandboxDown && !(INFERENCE_ONLY && freeInferenceSlots === 0)
+        // Draining (a restart or quit is coming) or stopping: take nothing new (BHV006).
+        const pulled = (PULLS_FROM_COORDINATOR && !sandboxDown && lifecycle.canPull() && !shuttingDown && !(INFERENCE_ONLY && freeInferenceSlots === 0)
           ? await post("/pull", pullBody, { signed: true })
           : { subtask: null }) as {
           subtask: Subtask | null;
@@ -2145,6 +2192,8 @@ async function loop(): Promise<void> {
         await new Promise((r) => setTimeout(r, rateLimitWait));
         continue;
       }
+      const blacklistReason = blacklistReasonFromError(error);
+      if (blacklistReason) lifecycle.notePaused(blacklistReason);
       consecutiveFailures++;
       console.error(`[agent:${AGENT_ID}] loop error (failures: ${consecutiveFailures}): ${String(error)}`);
       if (isAgentNotRegisteredError(error)) {

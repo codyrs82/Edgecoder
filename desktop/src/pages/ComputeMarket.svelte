@@ -1,4 +1,5 @@
 <script lang="ts">
+  import AgentPausedNotice from "../components/AgentPausedNotice.svelte";
   import { onMount, onDestroy } from "svelte";
   import { open as openUrl } from "@tauri-apps/plugin-shell";
   import {
@@ -128,6 +129,8 @@
 
   {#if loading}
     <p class="sp-muted">Loading…</p>
+  {:else if overview?.paused}
+    <AgentPausedNotice reason={overview.paused.reason} agentId={overview.selfAgentId} onRetry={load} />
   {:else if !overview?.connected}
     <div class="sp-card"><div class="sp-row"><div class="sp-text"><span class="sp-title">Not connected to the network</span><span class="sp-desc">Sign in and let this computer's agent connect.</span></div><button onclick={load}>Retry</button></div></div>
   {:else}

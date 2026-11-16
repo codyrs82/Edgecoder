@@ -34,7 +34,8 @@ describe("auto-update", () => {
     expect(check).toContain("downloadInBackground()");
     expect(check).not.toMatch(/relaunch|downloadAndInstall/);
     const wiring = readFileSync(new URL("../src/lib/auto-restart-app.ts", import.meta.url), "utf8");
-    expect(wiring).toContain("restart: () => downloadAndInstall()");
+    // BHV006: the agent drains (hands its network jobs back) before the update installs.
+    expect(wiring).toContain("restart: restartWithDrain((resume) => drainAgent(resume), () => downloadAndInstall())");
     const menu = readFileSync(new URL("../src/components/ProfileMenu.svelte", import.meta.url), "utf8");
     expect(menu).toContain("Restart to update");
   });

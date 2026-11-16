@@ -30,6 +30,13 @@ export interface TaskResultInput {
   subtaskId?: string;
 }
 
+/**
+ * BHV006 counts abandoned claims (a claim whose lease lapsed: the holder went quiet, or ran past
+ * the subtask's hard deadline) over this window, not the hour-long one: the rule looks for a
+ * pattern, and one laptop sleep or app restart is a single abandoned claim, not misbehaviour.
+ */
+export const DEFAULT_ABANDONED_CLAIM_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 /** Agent failures from one submitter that count toward the failure-rate rules per window (default). */
 export const DEFAULT_SUBMITTER_FAILURE_CAP = 3;
 
@@ -116,7 +123,21 @@ export interface AgentBehaviorStats {
   taskClaimRate: number;
   requeueCount: number;
   concurrentClaimCount: number;
+  /**
+   * Longest gap between heartbeats in the window. Informational only: a gap alone is not
+   * misbehaviour (sleep, an app update restart, a network drop); its claims are requeued at lease
+   * expiry and recorded as abandoned claims, which BHV006 looks at instead.
+   */
   heartbeatGapMaxMs: number;
+  /** Abandoned claims (lease lapsed) in the abandoned-claim window (24 h by default). */
+  abandonedClaimCount?: number;
+  /**
+   * Abandoned claims since the agent last returned any result, within that window: the agent
+   * came back and kept claiming without completing anything.
+   */
+  abandonedClaimStreak?: number;
+  /** Abandoned claims in that window that ran past their hard deadline while the agent was heartbeating. */
+  abandonedWhileActiveCount?: number;
 
   windowStartMs: number;
   windowEndMs: number;
@@ -147,6 +168,10 @@ interface TaskClaimEvent extends TimestampedEvent {}
 
 interface HeartbeatEvent extends TimestampedEvent {}
 
+interface AbandonedClaimEvent extends TimestampedEvent {
+  whileActive: boolean;
+}
+
 const DEFAULT_WINDOW_MS = 60 * 60 * 1000; // 1 hour
 /** BHV008 counts registrations over 10 minutes, not the hour-long window: a healthy worker
  *  refreshes every 4 minutes (15 an hour), which the hour window read as a storm. */
@@ -156,19 +181,24 @@ const OUTPUT_HASH_RING_SIZE = 20;
 export class AgentBehaviorTracker {
   private readonly windowMs: number;
   private readonly submitterFailureCap: number;
+  private readonly abandonedClaimWindowMs: number;
   private readonly agents = new Map<string, {
     tasks: TaskEvent[];
     protocolEvents: ProtocolEvent[];
     registrations: RegistrationEvent[];
     taskClaims: TaskClaimEvent[];
     heartbeats: HeartbeatEvent[];
+    abandonedClaims: AbandonedClaimEvent[];
+    /** Last result of any kind (success, program error or agent failure); not pruned. */
+    lastResultAtMs: number;
     requeueCount: number;
     concurrentClaimCount: number;
   }>();
 
-  constructor(windowMs: number = DEFAULT_WINDOW_MS, opts: { submitterFailureCap?: number } = {}) {
+  constructor(windowMs: number = DEFAULT_WINDOW_MS, opts: { submitterFailureCap?: number; abandonedClaimWindowMs?: number } = {}) {
     this.windowMs = windowMs;
     this.submitterFailureCap = Math.max(1, Math.floor(opts.submitterFailureCap ?? DEFAULT_SUBMITTER_FAILURE_CAP));
+    this.abandonedClaimWindowMs = Math.max(1, Math.floor(opts.abandonedClaimWindowMs ?? DEFAULT_ABANDONED_CLAIM_WINDOW_MS));
   }
 
   private getOrCreate(agentId: string) {
@@ -180,6 +210,8 @@ export class AgentBehaviorTracker {
         registrations: [],
         taskClaims: [],
         heartbeats: [],
+        abandonedClaims: [],
+        lastResultAtMs: 0,
         requeueCount: 0,
         concurrentClaimCount: 0,
       };
@@ -188,8 +220,8 @@ export class AgentBehaviorTracker {
     return entry;
   }
 
-  private pruneWindow<T extends TimestampedEvent>(events: T[], now: number): T[] {
-    const cutoff = now - this.windowMs;
+  private pruneWindow<T extends TimestampedEvent>(events: T[], now: number, windowMs: number = this.windowMs): T[] {
+    const cutoff = now - windowMs;
     return events.filter(e => e.timestampMs >= cutoff);
   }
 
@@ -200,6 +232,7 @@ export class AgentBehaviorTracker {
   recordTaskResult(agentId: string, result: TaskResultInput, nowMs: number = Date.now()): void {
     const entry = this.getOrCreate(agentId);
     entry.tasks = this.pruneWindow(entry.tasks, nowMs);
+    entry.lastResultAtMs = Math.max(entry.lastResultAtMs, nowMs);
     entry.tasks.push({
       timestampMs: nowMs,
       ok: result.ok,
@@ -228,6 +261,22 @@ export class AgentBehaviorTracker {
     const entry = this.getOrCreate(agentId);
     entry.heartbeats = this.pruneWindow(entry.heartbeats, nowMs);
     entry.heartbeats.push({ timestampMs: nowMs });
+  }
+
+  /**
+   * A claim this agent held lapsed (src/swarm/queue.ts onClaimAbandoned) and went back on the
+   * queue for others. `whileActive`: it ran past its hard deadline while the agent heartbeated.
+   */
+  recordAbandonedClaim(agentId: string, opts: { whileActive?: boolean } = {}, nowMs: number = Date.now()): void {
+    const entry = this.getOrCreate(agentId);
+    entry.abandonedClaims = this.pruneWindow(entry.abandonedClaims, nowMs, this.abandonedClaimWindowMs);
+    entry.abandonedClaims.push({ timestampMs: nowMs, whileActive: Boolean(opts.whileActive) });
+  }
+
+  /** Forget an agent's abandoned claims (a BHV006 blacklist was issued: its expiry starts afresh). */
+  clearAbandonedClaims(agentId: string): void {
+    const entry = this.agents.get(agentId);
+    if (entry) entry.abandonedClaims = [];
   }
 
   /** Forget an agent's history (an admin lifted its blacklist). */
@@ -273,6 +322,7 @@ export class AgentBehaviorTracker {
     entry.registrations = this.pruneWindow(entry.registrations, nowMs);
     entry.taskClaims = this.pruneWindow(entry.taskClaims, nowMs);
     entry.heartbeats = this.pruneWindow(entry.heartbeats, nowMs);
+    entry.abandonedClaims = this.pruneWindow(entry.abandonedClaims, nowMs, this.abandonedClaimWindowMs);
 
     const tasks = entry.tasks;
     const totalTasks = tasks.length;
@@ -370,6 +420,11 @@ export class AgentBehaviorTracker {
       }
     }
 
+    // Abandoned claims (BHV006)
+    const abandonedClaimCount = entry.abandonedClaims.length;
+    const abandonedClaimStreak = entry.abandonedClaims.filter(e => e.timestampMs > entry.lastResultAtMs).length;
+    const abandonedWhileActiveCount = entry.abandonedClaims.filter(e => e.whileActive).length;
+
     const windowStartMs = nowMs - this.windowMs;
 
     return {
@@ -399,6 +454,9 @@ export class AgentBehaviorTracker {
       requeueCount: entry.requeueCount,
       concurrentClaimCount: entry.concurrentClaimCount,
       heartbeatGapMaxMs,
+      abandonedClaimCount,
+      abandonedClaimStreak,
+      abandonedWhileActiveCount,
       windowStartMs,
       windowEndMs: nowMs,
     };

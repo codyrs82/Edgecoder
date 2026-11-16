@@ -44,8 +44,13 @@ export interface AnomalyConfig {
   successCollapseRateThreshold: number;
   // BHV005
   protocolAbuseThreshold: number;
-  // BHV006
-  heartbeatGapThresholdMs: number;
+  // BHV006 (the window is the tracker's abandonedClaimWindowMs, 24 h by default)
+  /**
+   * Abandoned claims that make a pattern: this many since the agent last returned any result (it
+   * reconnected and kept claiming without completing), or this many that ran past their deadline
+   * while it was heartbeating. A heartbeat gap alone is never a strike (sleep, an update restart).
+   */
+  abandonedClaimThreshold: number;
   // BHV007
   taskHoardingConcurrentMultiplier: number;
   taskHoardingRequeueThreshold: number;
@@ -73,7 +78,7 @@ export const DEFAULT_ANOMALY_CONFIG: AnomalyConfig = {
   successCollapseMinTasks: 10,
   successCollapseRateThreshold: 0.15,
   protocolAbuseThreshold: 5,
-  heartbeatGapThresholdMs: 5 * 60 * 1000,
+  abandonedClaimThreshold: 5,
   taskHoardingConcurrentMultiplier: 2,
   taskHoardingRequeueThreshold: 8,
   taskHoardingMaxConcurrent: 1,
@@ -203,18 +208,28 @@ const bhv005ProtocolAbuse: AnomalyRule = (stats, config) => {
   return null;
 };
 
-const bhv006HeartbeatManipulation: AnomalyRule = (stats, config) => {
-  if (stats.heartbeatGapMaxMs > config.heartbeatGapThresholdMs && stats.taskClaimCount > 0) {
-    return {
-      ruleId: "BHV006",
-      ruleName: "Heartbeat manipulation",
-      severity: "HIGH",
-      blacklistReason: "dos_behavior",
-      description: `Max heartbeat gap ${Math.round(stats.heartbeatGapMaxMs / 1000)}s while still claiming tasks`,
-      stats: { heartbeatGapMaxMs: stats.heartbeatGapMaxMs, taskClaimCount: stats.taskClaimCount },
-    };
-  }
-  return null;
+/**
+ * BHV006 "abandoned claims". A heartbeat gap is not misbehaviour: a laptop sleeps, the desktop app
+ * restarts to finish an update, a network drops. The claims it held are requeued at lease expiry
+ * (src/swarm/queue.ts), and an agent that announces it is going offline hands them back at once and
+ * abandons nothing. Only a pattern strikes: the agent keeps claiming and abandoning without ever
+ * returning a result, or keeps holding claims past their deadline while heartbeating.
+ */
+const bhv006AbandonedClaims: AnomalyRule = (stats, config) => {
+  const streak = stats.abandonedClaimStreak ?? 0;
+  const whileActive = stats.abandonedWhileActiveCount ?? 0;
+  if (streak < config.abandonedClaimThreshold && whileActive < config.abandonedClaimThreshold) return null;
+  const description = streak >= config.abandonedClaimThreshold
+    ? `${streak} claims abandoned in a row without returning a result (lease lapsed; ${stats.abandonedClaimCount ?? streak} in the window)`
+    : `${whileActive} claims held past their deadline while heartbeating`;
+  return {
+    ruleId: "BHV006",
+    ruleName: "Abandoned claims",
+    severity: "HIGH",
+    blacklistReason: "dos_behavior",
+    description,
+    stats: { abandonedClaimCount: stats.abandonedClaimCount ?? 0, abandonedClaimStreak: streak, abandonedWhileActiveCount: whileActive, heartbeatGapMaxMs: stats.heartbeatGapMaxMs },
+  };
 };
 
 const bhv007TaskHoarding: AnomalyRule = (stats, config) => {
@@ -292,7 +307,7 @@ const ALL_RULES: AnomalyRule[] = [
   bhv003DuplicateForgery,
   bhv004SuccessCollapse,
   bhv005ProtocolAbuse,
-  bhv006HeartbeatManipulation,
+  bhv006AbandonedClaims,
   bhv007TaskHoarding,
   bhv008RegistrationStorm,
   bhv009RobotPrecision,

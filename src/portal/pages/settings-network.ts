@@ -248,6 +248,14 @@ export function networkPageContent(): string {
         </div>
         <div class="muted" id="agentsCount"></div>
       </div>
+      <div class="net-card" id="blacklistCard">
+        <h3>Paused agents (blacklisted)</h3>
+        <div class="hint muted">Agents a coordinator refuses: they can't register, so they are not in the table above. Automatic pauses come from behavioural monitoring and lift by themselves at their expiry; Lift ends one now on every coordinator that has it.</div>
+        <div class="net-table-wrap">
+          <table><thead><tr><th>Agent</th><th>Owner</th><th>Reason</th><th>By</th><th class="num">Since</th><th class="num">Lifts</th><th>Coordinators</th><th></th></tr></thead><tbody id="blacklistBody"></tbody></table>
+        </div>
+        <div class="muted" id="blacklistStatus"></div>
+      </div>
       <div class="net-card">
         <h3>Models in use</h3>
         <div class="net-table-wrap">
@@ -569,7 +577,44 @@ export function networkPageScript(): string {
       if (!r.ok) { showError("Could not load the network: " + (r.json.detail || r.json.error || r.status)); return; }
       data = r.json;
       render();
+      loadBlacklist().catch(() => undefined);
     }
+    function renderBlacklist(b) {
+      const body = $("blacklistBody");
+      body.textContent = "";
+      for (const a of b.agents || []) {
+        const tr = el("tr");
+        tr.appendChild(el("td", { class: "mono" }, a.agentId));
+        tr.appendChild(el("td", {}, a.ownerEmail || "-"));
+        tr.appendChild(el("td", {}, String(a.reason || a.reasonCode || "")));
+        tr.appendChild(el("td", {}, a.automatic ? "automatic" : (a.reportedBy || "-")));
+        tr.appendChild(el("td", { class: "num" }, ago(a.timestampMs)));
+        tr.appendChild(el("td", { class: "num" }, a.expiresAtMs ? "in " + fmtMs(Math.max(0, a.expiresAtMs - Date.now())) : "never"));
+        tr.appendChild(el("td", {}, (a.coordinators || []).join(", ")));
+        const td = el("td");
+        const btn = el("button", { type: "button", class: "btn-secondary", "data-agent": a.agentId }, "Lift");
+        btn.addEventListener("click", () => liftAgent(a.agentId, btn).catch((err) => setText("blacklistStatus", "Lift failed: " + String(err.message || err))));
+        td.appendChild(btn);
+        tr.appendChild(td);
+        body.appendChild(tr);
+      }
+      if (!(b.agents || []).length) { const tr = el("tr"); tr.appendChild(el("td", { colspan: "8" }, "No agent is paused.")); body.appendChild(tr); }
+      const down = (b.coordinators || []).filter((c) => !c.ok);
+      setText("blacklistStatus", down.length ? down.length + " coordinator(s) did not answer: " + down.map((c) => c.url + " (" + c.error + ")").join(", ") : "");
+    }
+    async function loadBlacklist() {
+      const r = await call("/portal/api/admin/blacklist", { method: "GET", headers: {} });
+      if (!r.ok) { setText("blacklistStatus", "Could not load paused agents: " + (r.json.detail || r.json.error || r.status)); return; }
+      renderBlacklist(r.json);
+    }
+    async function liftAgent(agentId, btn) {
+      if (!confirm("Lift the pause on " + agentId + "? It can register and take work again at once.")) return;
+      btn.disabled = true;
+      const r = await call("/portal/api/admin/blacklist/" + encodeURIComponent(agentId) + "/lift", { method: "POST", body: "{}" });
+      setText("blacklistStatus", r.ok ? "Lifted " + agentId + " on " + r.json.lifted + " coordinator(s)." : "Lift failed: " + (r.json.error || r.status));
+      await loadBlacklist();
+    }
+    window.__renderBlacklist = (json) => renderBlacklist(json);
     function stop() { if (timer) clearInterval(timer); timer = null; }
     function start() { stop(); timer = setInterval(() => { if (!document.hidden) load().catch(() => undefined); }, REFRESH_MS); }
     window.__renderNetwork = (json) => { data = json; render(); };

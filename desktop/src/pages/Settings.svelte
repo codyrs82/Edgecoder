@@ -1,4 +1,5 @@
 <script lang="ts">
+  import AgentPausedNotice from "../components/AgentPausedNotice.svelte";
   import { computeOverview, getIdentity, getDashboardOverview, getModelList, backendReady, isRemoteMode, getProjectsFolder, setProjectsFolder, portalWebUrl, getCliStatus, installCliTool, type CliStatus, type ProjectsFolder } from "../lib/api";
   import { loadSettings, saveSetting } from "../lib/stores";
   import { coordinatorUrl as currentCoordinatorUrl, portalUrl as currentPortalUrl, setEndpoint, resetEndpoints, syncEndpointsToShell, testEndpoint, validateEndpointUrl, defaultEndpoints, type EndpointKind } from "../lib/endpoints";
@@ -188,9 +189,11 @@
   // lowest latency) when there is one, else the coordinator the account summary came from.
   type MeshStatus = { url: string; machines: number; agents: number; region: string | null; latencyMs: number | null; steered: boolean; fallbackReason: string | null };
   let meshStatus = $state<"loading" | MeshStatus | null>("loading");
+  let meshPaused = $state<{ reason: string; agentId?: string } | null>(null);
   $effect(() => {
     computeOverview()
       .then((ov) => {
+        meshPaused = ov.paused ? { reason: ov.paused.reason, agentId: ov.selfAgentId } : null;
         const a = ov.account;
         const s = ov.steering ?? null;
         const url = s?.source === "registry" ? s.url : a?.coordinator?.url;
@@ -379,6 +382,8 @@
               {/if}
               This computer joined the network when you signed in; its mesh credentials are issued and renewed automatically. {meshStatus.machines} of your machine{meshStatus.machines === 1 ? "" : "s"} and {meshStatus.agents} machines in all are online.
             </span>
+          {:else if meshPaused}
+            <AgentPausedNotice reason={meshPaused.reason} agentId={meshPaused.agentId} />
           {:else}
             <span class="sp-desc">Not connected yet. Sign in and keep EdgeCoder open; the agent joins the network on its own.</span>
           {/if}
