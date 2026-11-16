@@ -255,6 +255,28 @@ export interface AgentLoopDeps {
   summarize?: (text: string) => Promise<string | null>;
   /** Waits before retrying a transient model-call failure (default 1.5 s, then 4 s). */
   retryDelaysMs?: number[];
+  /**
+   * A reply that only announces work ("I'll start by checking the project…") with no tool call gets
+   * one "go ahead" instead of ending the turn. Bots set this: nobody is watching to say "go on".
+   */
+  continueOnIntent?: boolean;
+}
+
+/** What the model hears when it announced work and stopped. */
+export const GO_AHEAD = "Go ahead: do that now by calling the tools (don't describe it, call them). When you're done, reply with a short summary.";
+
+/**
+ * True when a reply's last paragraph only says what it's about to do ("I'll start by checking…",
+ * "Let me look at…", "Next, I'll…") rather than reporting or asking: the work hasn't happened yet.
+ */
+export function announcesWork(text: string): boolean {
+  const paras = text.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+  const last = (paras[paras.length - 1] ?? "").replace(/^[*_>#\s-]+/, "");
+  if (!last || last.length > 600 || /\?\s*$/.test(last)) return false;
+  return (
+    /^(?:(?:ok(?:ay)?|sure|great|alright|got it|understood)[,.!]?\s+)?(?:(?:first|next|now|then)[,]?\s+)?(?:i'?ll|i will|i'm going to|i am going to|let me|let's|i need to|i'm about to|i am about to)\b/i.test(last) ||
+    /^next steps?\s*:/im.test(last)
+  );
 }
 
 /** Sleeps that stop early when the turn is cancelled. */
@@ -361,6 +383,15 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
   let emitted = false;
   let needBreak = false;
   let nudged = false;
+  let intentNudged = false;
+  /** One "go ahead" when a reply only announced work (continueOnIntent). */
+  const goAhead = (content: string): boolean => {
+    if (!d.continueOnIntent || intentNudged || !announcesWork(content)) return false;
+    intentNudged = true;
+    messages.push({ role: "assistant", content });
+    messages.push({ role: "user", content: GO_AHEAD });
+    return true;
+  };
   const say = (text: string) => {
     if (!text) return;
     d.sendEvent({ type: "text", content: needBreak && emitted ? `\n\n${text}` : text });
@@ -392,7 +423,10 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
         // Small models sometimes write ```plan / ```tool_call blocks as text instead of calling tools.
         // The text is already on screen; act on the blocks so the turn doesn't just stop.
         const blocks = parseTextBlocks(reply.content);
-        if (blocks.length === 0) return;
+        if (blocks.length === 0) {
+          if (goAhead(reply.content)) continue;
+          return;
+        }
         const results: string[] = [];
         const resultLabels: string[] = [];
         for (const b of blocks) {
@@ -447,6 +481,7 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
     const blocks = parseTextBlocks(content);
     if (blocks.length === 0) {
       say(content);
+      if (goAhead(content)) continue;
       return;
     }
     let cursor = 0;

@@ -247,7 +247,7 @@ describe("agentBotRunner", () => {
     await m.idle(bot.id);
     expect(system).toContain("BASE PROMPT");
     expect(system).toContain("Keep the notes tidy.");
-    expect(new Set(seen)).toEqual(new Set(["read_file", "run_shell", "remember"]));
+    expect(new Set(seen)).toEqual(new Set(["read_file", "run_shell", "remember", "follow_up"]));
     expect(m.memory(bot.id)).toContain("notes.txt says hello");
     const [run] = m.history(bot.id);
     expect(run.status).toBe("done");

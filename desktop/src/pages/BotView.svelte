@@ -4,10 +4,10 @@
   import ChatInput from "../components/ChatInput.svelte";
   import BotAvatar from "../components/BotAvatar.svelte";
   import ToolArgs from "../components/ToolArgs.svelte";
-  import { Play, Pause, Square, Pencil, Trash2, History, MessageSquare, Ellipsis, CircleAlert, X, CalendarClock, Cpu, Folder, PanelRight, Copy, FolderOpen, GitPullRequest, GitBranch, Zap, RefreshCw } from "@lucide/svelte";
+  import { Play, Pause, Square, RotateCw, Pencil, Trash2, History, MessageSquare, Ellipsis, CircleAlert, X, CalendarClock, Cpu, Folder, PanelRight, Copy, FolderOpen, GitPullRequest, GitBranch, Zap, RefreshCw } from "@lucide/svelte";
   import { approveBotCall, botHistory, botMessages, cancelBotRun, deleteBot, getBot, runBot, sendBotMessage, syncBotRepository, updateBot, botErrorText } from "../lib/api";
   import {
-    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, botCompute, botStatusLine, computeText, failureNotice, foldBotReply, folderName, formatCSats, prCards, readableSummary, relativeTime, runSourceText, scheduleText, statusChip,
+    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, autoStatus, botCompute, checksIn, routineText, botStatusLine, computeText, failureNotice, foldBotReply, folderName, formatCSats, prCards, readableSummary, relativeTime, runSourceText, scheduleText, statusChip,
     triggerStatusText, triggerText,
     type Bot, type BotMessage, type BotRun, type NoticeAction,
   } from "../lib/bots";
@@ -104,6 +104,13 @@
   }
 
   const chip = $derived(statusChip(bot));
+  // The header says what it's doing or when it next works on its own; the clock keeps "in 12 min" fresh.
+  let now = $state(Date.now());
+  $effect(() => {
+    const t = setInterval(() => (now = Date.now()), 30_000);
+    return () => clearInterval(t);
+  });
+  const auto = $derived(autoStatus(bot, now));
   const compute = $derived(botCompute(bot));
   const computeLabel = $derived(computeText(compute, choiceLabel));
   const notice = $derived.by(() => {
@@ -198,7 +205,11 @@
     await load(bot.id);
   }
 
-  const runNow = () => act(() => runBot(bot.id));
+  /** A manual nudge (the overflow menu): it normally works on its own. */
+  const checkNow = () => {
+    closeMenu();
+    return act(() => runBot(bot.id));
+  };
   const stop = () => act(() => cancelBotRun(bot.id));
   const togglePause = () => {
     closeMenu();
@@ -236,9 +247,7 @@
       <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
       <div class="menu-backdrop" onclick={closeMenu}></div>
       <div class="menu" role="menu" tabindex="-1" bind:this={menuEl} onkeydown={menuKey}>
-        <button role="menuitem" onclick={togglePause}>
-          {#if bot.enabled}<Pause size={14} /> Pause schedule{:else}<Play size={14} /> Resume schedule{/if}
-        </button>
+        <button role="menuitem" onclick={checkNow} disabled={busy || bot.status === "over_budget"} title={bot.status === "over_budget" ? "Today's budget is spent" : `Have ${bot.name} check in now instead of waiting`}><RotateCw size={14} /> Check now</button>
         <button role="menuitem" onclick={() => { closeMenu(); onEdit(bot); }}><Pencil size={14} /> Edit</button>
         <button role="menuitem" class="danger" onclick={remove}><Trash2 size={14} /> {confirmDelete ? "Click again to delete" : "Delete"}</button>
       </div>
@@ -259,7 +268,7 @@
         <div class="meta status-line" title={botStatusLine(bot)}>{botStatusLine(bot)}</div>
       {:else}
       <div class="meta" data-testid="bot-meta">
-        <span class="m" title="Schedule"><CalendarClock size={12} />{scheduleText(bot.schedule)}{bot.enabled && bot.nextRunAtMs ? ` · next ${relativeTime(bot.nextRunAtMs)}` : !bot.enabled && bot.schedule ? " · paused" : ""}</span>
+        <span class="m" title="Routine"><CalendarClock size={12} />{routineText(bot)}{!bot.enabled && (bot.schedule || checksIn(bot)) ? " · paused" : ""}</span>
         <span class="sep" aria-hidden="true">·</span>
         <span class="m budget" title="cSats spent today against the daily budget">
           {#if bot.budgetCSatsPerDay != null}
@@ -281,11 +290,13 @@
       {/if}
     </div>
     <div class="actions">
+      <span class="auto-status {auto.tone}" role="status" aria-live="polite" data-testid="bot-auto-status">{auto.text}</span>
       {#if busy}
         <button onclick={stop} title="Stop this run"><Square size={14} /> Stop</button>
-      {:else}
-        <button class="primary" onclick={runNow} disabled={bot.status === "over_budget"} title={bot.status === "over_budget" ? "Today's budget is spent" : "Start a run now"}><Play size={14} /> Run now</button>
       {/if}
+      <button onclick={togglePause} aria-label={bot.enabled ? `Pause ${bot.name}` : `Resume ${bot.name}`} title={bot.enabled ? "Stop working on its own (messages still get answers)" : "Start working on its own again"}>
+        {#if bot.enabled}<Pause size={14} /> Pause{:else}<Play size={14} /> Resume{/if}
+      </button>
       {#if !panelOpen}{@render moreMenu()}{/if}
       <button class="icon" class:on={panelOpen} onclick={togglePanel} aria-pressed={panelOpen} aria-label={panelOpen ? "Hide details" : "Show details"} title={panelOpen ? "Hide details" : "Show details"}><PanelRight size={16} /></button>
     </div>
@@ -329,7 +340,7 @@
       {#if messages.length === 0}
         <div class="empty">
           <BotAvatar name={bot.name} color={bot.color} shape={bot.avatarShape} status={bot.status} size={72} decorative />
-          <p>Message {bot.name} or press <b>Run now</b>. {bot.schedule ? `It also runs ${scheduleText(bot.schedule).toLowerCase()}.` : ""}</p>
+          <p>{bot.enabled && bot.nextRun ? `${bot.name} works on its own: ${auto.text.toLowerCase()}.` : bot.enabled ? `Message ${bot.name} to get it started.` : `${bot.name} is paused. Resume it, or message it.`} {bot.schedule || checksIn(bot) ? `${routineText(bot)}.` : ""}</p>
         </div>
       {/if}
       {#each messages as m (m.id)}
@@ -471,13 +482,22 @@
               <CalendarClock size={15} />
               <div class="routine-text">
                 <div class="routine-title">{scheduleText(bot.schedule)}</div>
-                <div class="routine-sub">{bot.enabled ? (bot.nextRunAtMs ? `Next run ${relativeTime(bot.nextRunAtMs)}` : "On") : "Off: runs only when asked"}</div>
+                <div class="routine-sub">{bot.enabled ? (bot.nextRunAtMs ? `Next run ${relativeTime(bot.nextRunAtMs)}` : "On") : "Paused: answers messages only"}</div>
               </div>
               <button class="switch" role="switch" aria-checked={bot.enabled} aria-label="Run {scheduleText(bot.schedule).toLowerCase()}" onclick={togglePause}></button>
             </div>
+          {:else if checksIn(bot)}
+            <div class="routine">
+              <CalendarClock size={15} />
+              <div class="routine-text">
+                <div class="routine-title">{routineText(bot)}</div>
+                <div class="routine-sub">{bot.enabled ? `${auto.text}${(bot.auto?.idleStreak ?? 0) > 0 ? " · waiting longer while nothing changes" : ""}` : "Paused: answers messages only"}</div>
+              </div>
+              <button class="switch" role="switch" aria-checked={bot.enabled} aria-label="{routineText(bot)}" onclick={togglePause}></button>
+            </div>
           {:else}
             <div class="routine empty-routine">
-              <div class="routine-text"><div class="routine-sub">No routine: it runs when you message it or press Run now.</div></div>
+              <div class="routine-text"><div class="routine-sub">No routine: give it a role or instructions and it checks in on its own, or add a schedule.</div></div>
               <button class="link" onclick={() => onEdit(bot)}>Add one</button>
             </div>
           {/if}
@@ -1142,11 +1162,27 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
-  .actions button.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--on-accent);
-    font-weight: 600;
+  /* What it's doing or when it next works on its own (replaces the old "Run now" button). */
+  .auto-status {
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 12px;
+    color: var(--text-secondary);
+  }
+  .auto-status.accent {
+    color: var(--accent);
+  }
+  .auto-status.warn {
+    color: var(--yellow);
+  }
+  .auto-status.err {
+    color: var(--red-strong);
+  }
+  .menu button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   .actions button.icon {
     padding: 6px 7px;

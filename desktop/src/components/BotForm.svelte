@@ -7,7 +7,7 @@
   import BotAvatar from "./BotAvatar.svelte";
   import { AVATAR_COLORS, AVATAR_SHAPES, AVATAR_SHAPE_LABELS, colorFromName, shapeFor, type AvatarShape } from "../lib/bot-avatar";
   import {
-    BOT_TOOL_GROUPS, CI_SCOPE_OPTIONS, COMPUTE_POLICY_OPTIONS, DEFAULT_COMPUTE, SCHEDULE_PRESETS, TRIGGER_KIND_OPTIONS, botCompute, groupsOf, toolsFor,
+    BOT_TOOL_GROUPS, CI_SCOPE_OPTIONS, COMPUTE_POLICY_OPTIONS, DEFAULT_COMPUTE, DEFAULT_HEARTBEAT_MINUTES, DEFAULT_MAX_RUNS_PER_DAY, HEARTBEAT_OPTIONS, SCHEDULE_PRESETS, TRIGGER_KIND_OPTIONS, botCompute, groupsOf, toolsFor,
     type Bot, type BotTriggerConfig, type ComputePolicy, type TriggerKind,
   } from "../lib/bots";
 
@@ -41,6 +41,10 @@
     triggers = triggers.filter((_, j) => j !== i);
   }
   let schedule = $state(initial?.schedule ?? "");
+  // Without a schedule it checks in on its own this often ("" = never).
+  let heartbeat = $state(initial ? (initial.heartbeatMinutes === null ? "" : String(initial.heartbeatMinutes ?? DEFAULT_HEARTBEAT_MINUTES)) : String(DEFAULT_HEARTBEAT_MINUTES));
+  const heartbeatOptions = $derived(HEARTBEAT_OPTIONS.some((o) => o.value === heartbeat) ? HEARTBEAT_OPTIONS : [{ value: heartbeat, label: `Every ${heartbeat} minutes` }, ...HEARTBEAT_OPTIONS]);
+  let runsPerDayText = $state(String(initial?.maxRunsPerDay ?? DEFAULT_MAX_RUNS_PER_DAY));
   let customSchedule = $state(!!initial?.schedule && !SCHEDULE_PRESETS.some((p) => p.value === initial.schedule));
   let budgetText = $state(initial ? (initial.budgetCSatsPerDay == null ? "" : String(initial.budgetCSatsPerDay)) : "100");
   let groups = $state<Record<string, boolean>>(initial ? groupsOf(initial.allowedTools) : { edit: true, shell: true, git: true });
@@ -95,6 +99,11 @@
       error = "Trigger runs an hour must be a whole number from 1 to 60.";
       return;
     }
+    const runsPerDay = Number(runsPerDayText);
+    if (!Number.isInteger(runsPerDay) || runsPerDay < 1 || runsPerDay > 500) {
+      error = "Runs a day must be a whole number from 1 to 500.";
+      return;
+    }
     if (triggers.some((t) => t.kind === "issue_labeled" && !t.label?.trim())) {
       error = "Type the label the issue trigger watches for.";
       return;
@@ -112,6 +121,8 @@
       triggers: triggers.map((t) => ({ ...t, label: t.label?.trim() || undefined })),
       maxTriggerRunsPerHour: maxRuns,
       schedule: schedule.trim(),
+      heartbeatMinutes: heartbeat ? Number(heartbeat) : null,
+      maxRunsPerDay: runsPerDay,
       budgetCSatsPerDay: budget,
       allowedTools: toolsFor(groups),
       autoApproveEdits,
@@ -134,7 +145,7 @@
 <Dialog labelledby="bf-title" width="680px" {onClose}>
   <form class="sp bf-form" onsubmit={save}>
     <h1 id="bf-title">{initial ? `Edit ${initial.name}` : "New bot"}</h1>
-    <p class="sp-lead">A bot owns a job and keeps its own home folder. It runs on its schedule, when you press Run now, or when you message it, on the compute you choose below.</p>
+    <p class="sp-lead">A bot owns a job and keeps its own home folder. It works on its own: it starts when you save it, checks in on its project (or runs on its schedule), follows up on unfinished work, and answers your messages, on the compute you choose below. Pause it any time.</p>
 
     <div class="sp-group">
       <div class="sp-group-title">Who it is</div>
@@ -202,6 +213,16 @@
             <button type="button" class="ghost small" onclick={() => (customSchedule = !customSchedule)}>{customSchedule ? "Presets" : "Custom"}</button>
           </div>
         </div>
+        {#if !schedule.trim()}
+          <div class="sp-row">
+            <span class="sp-text"><span class="sp-title">Check in</span><span class="sp-desc">How often it looks for work without a schedule. While nothing in the project changes it waits longer (up to 8 hours).</span></span>
+            <Select bind:value={heartbeat} ariaLabel="Check in" options={heartbeatOptions} />
+          </div>
+        {/if}
+        <label class="sp-row">
+          <span class="sp-text"><span class="sp-title">Runs a day</span><span class="sp-desc">At most this many runs it starts on its own each day (your messages don't count).</span></span>
+          <input type="number" min="1" max="500" step="1" bind:value={runsPerDayText} class="bf-num" />
+        </label>
       </div>
     </div>
 
