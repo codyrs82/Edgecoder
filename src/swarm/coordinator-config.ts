@@ -13,6 +13,7 @@ import {
   escalationEnv,
   hardwareVerificationEnv,
   leaseEnv,
+  postgresPoolEnv,
   bestFitEnv,
   launchEnv,
   lightningEnv,
@@ -65,6 +66,16 @@ export const coordinatorConfigSchema = z.object({
   ...bleSyncEnv,
   EDGECODER_RESPONSE_SIGNING: trustEnv.EDGECODER_RESPONSE_SIGNING,
   DATABASE_URL: str(),
+  ...postgresPoolEnv,
+  /**
+   * Task privacy: agents without an envelope key (X25519) may not claim subtasks that carry user
+   * data. Off by default so older agents and the iOS app keep working (src/swarm/envelope-policy.ts).
+   */
+  ENVELOPE_REQUIRED: envFlag({ on: ["1", "true"], ci: true }),
+  /** 32 bytes (base64 or hex) encrypting queue payloads and results at rest; unset derives one from COORDINATOR_PRIVATE_KEY_PEM. */
+  QUEUE_DATA_KEY: str(),
+  /** Days a completed subtask's payload and output stay in Postgres; 0 keeps them. */
+  QUEUE_RETENTION_DAYS: envNumber(30, { min: 0 }),
   // Tokens: required in production by requireProdEnv() in coordinator/context.ts (#5).
   MESH_AUTH_TOKEN: str(),
   ADMIN_API_TOKEN: str(),

@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { randomUUID } from "node:crypto";
-import { Pool } from "pg";
+import type { Pool } from "pg";
+import { createPgPool } from "./pool.js";
+import { QueueDataCodec } from "./queue-data-codec.js";
 import type { WorkReceipt } from "../receipts/receipt.js";
 import { clampLimit, parseCursor, type ReceiptEpoch, type ReceiptPage, type ReceiptStore } from "../receipts/store.js";
 import type { RateEpoch } from "../economy/rate-oracle.js";
@@ -869,13 +871,13 @@ const ANCHOR_COLUMNS =
   "anchor_id, epoch_id, checkpoint_hash, anchor_network, tx_ref, status, anchored_at_ms, created_at_ms, confirmations, block_hash, block_height, last_checked_at_ms, reconcile_attempts, abandoned_at_ms, anchor_provider";
 
 export class PostgresStore {
-  constructor(private readonly pool: Pool) {}
+  /** `dataCodec` encrypts queue payloads and outputs at rest (src/db/queue-data-codec.ts). */
+  constructor(private readonly pool: Pool, private readonly dataCodec: QueueDataCodec = QueueDataCodec.disabled()) {}
 
   static fromEnv(): PostgresStore | null {
     const url = process.env.DATABASE_URL;
     if (!url) return null;
-    const pool = new Pool({ connectionString: url });
-    return new PostgresStore(pool);
+    return new PostgresStore(createPgPool(url, "coordinator"), QueueDataCodec.fromEnv());
   }
 
   async migrate(): Promise<void> {
@@ -933,7 +935,7 @@ export class PostgresStore {
       [
         subtask.id,
         subtask.taskId,
-        JSON.stringify(subtask),
+        this.dataCodec.encodeJson(subtask, `queue_tasks:${subtask.id}`),
         subtask.projectMeta.projectId,
         subtask.projectMeta.tenantId ?? null,
         subtask.projectMeta.resourceClass,
@@ -1015,7 +1017,7 @@ export class PostgresStore {
         result.taskId,
         result.agentId,
         result.ok,
-        result.output,
+        this.dataCodec.encodeText(result.output, `queue_results:${result.subtaskId}`),
         result.error ?? null,
         result.durationMs,
         result.reportNonce ?? null,
@@ -3627,16 +3629,62 @@ export class PostgresStore {
   async listUnfinishedSubtasks(subtaskIds: string[]): Promise<Array<{ subtask: Subtask; claimedBy: string | null; claimedAtMs: number | null; attempts: number }>> {
     if (subtaskIds.length === 0) return [];
     const r = await this.pool.query(
-      `SELECT q.payload_json, q.claimed_by, q.claimed_at_ms, q.attempts FROM queue_tasks q
+      `SELECT q.subtask_id, q.payload_json, q.claimed_by, q.claimed_at_ms, q.attempts FROM queue_tasks q
         WHERE q.subtask_id = ANY($1::text[]) AND NOT EXISTS (SELECT 1 FROM queue_results r WHERE r.subtask_id = q.subtask_id)`,
       [subtaskIds]
     );
-    return r.rows.map((row) => ({
-      subtask: (typeof row.payload_json === "string" ? JSON.parse(row.payload_json) : row.payload_json) as Subtask,
-      claimedBy: row.claimed_by ?? null,
-      claimedAtMs: row.claimed_at_ms === null || row.claimed_at_ms === undefined ? null : Number(row.claimed_at_ms),
-      attempts: Number(row.attempts ?? 0)
-    }));
+    const out: Array<{ subtask: Subtask; claimedBy: string | null; claimedAtMs: number | null; attempts: number }> = [];
+    for (const row of r.rows) {
+      let subtask: Subtask;
+      try {
+        // Plaintext rows (written before encryption at rest) read as they are.
+        subtask = this.dataCodec.decodeJson<Subtask>(row.payload_json, `queue_tasks:${row.subtask_id}`);
+      } catch {
+        // Encrypted under a key this coordinator does not have (another coordinator's derived key):
+        // skipped, as if the row were not there.
+        continue;
+      }
+      out.push({
+        subtask,
+        claimedBy: row.claimed_by ?? null,
+        claimedAtMs: row.claimed_at_ms === null || row.claimed_at_ms === undefined ? null : Number(row.claimed_at_ms),
+        attempts: Number(row.attempts ?? 0)
+      });
+    }
+    return out;
+  }
+
+  /** A stored result's output, decrypted (plaintext rows read as they are); null when there is none. */
+  async getResultOutput(subtaskId: string): Promise<string | null> {
+    const r = await this.pool.query(`SELECT output FROM queue_results WHERE subtask_id = $1`, [subtaskId]);
+    const row = r.rows[0];
+    return row ? this.dataCodec.decodeText(String(row.output), `queue_results:${subtaskId}`) : null;
+  }
+
+  /**
+   * Retention (QUEUE_RETENTION_DAYS): delete the results recorded before `cutoffMs` and their
+   * subtask rows, i.e. the user's input and the agent's output of finished work. Billing, ledger and
+   * receipt rows are separate and kept. Batched so no single statement runs long. Returns the
+   * number of subtasks removed.
+   */
+  async sweepQueueRetention(cutoffMs: number, batchSize = 1_000): Promise<number> {
+    let removed = 0;
+    for (;;) {
+      const r = await this.pool.query(
+        `WITH done AS (
+           DELETE FROM queue_results
+            WHERE subtask_id IN (SELECT subtask_id FROM queue_results WHERE created_at_ms < $1 LIMIT $2)
+           RETURNING subtask_id
+         ), tasks AS (
+           DELETE FROM queue_tasks q USING done WHERE q.subtask_id = done.subtask_id RETURNING q.subtask_id
+         )
+         SELECT (SELECT COUNT(*) FROM done)::int AS n`,
+        [cutoffMs, batchSize]
+      );
+      const n = Number(r.rows[0]?.n ?? 0);
+      removed += n;
+      if (n < batchSize) return removed;
+    }
   }
 
   /** Which of these subtasks have a recorded result. */

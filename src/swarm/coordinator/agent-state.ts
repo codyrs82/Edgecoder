@@ -28,6 +28,7 @@ import { ReleaseManifestCache } from "../../security/release-manifest-cache.js";
 import { app } from "./app.js";
 import { identity, coordinatorKeys, CC, protocol, mesh, securityLog } from "./context.js";
 import { mutable } from "./mutable-state.js";
+import { envelopeRootSecretFromPem } from "../../security/envelope.js";
 
 export const ordering = new OrderingChain(identity.peerId, coordinatorKeys.privateKeyPem);
 
@@ -152,8 +153,17 @@ export function pruneStaleAgentCapabilities(nowMs: number, ttlMs: number, keep: 
   }
   return dropped;
 }
+/** Envelope keys of subtasks handed out by this process (a cache: they can be re-derived, see below). */
 export const envelopeSharedKeys = new Map<string, { key: Buffer; createdAtMs: number }>();
 export const ENVELOPE_KEY_TTL_MS = 60 * 60 * 1000; // 1 hour
+/**
+ * Root of the per-subtask envelope keys. It comes from the coordinator's identity key, so with
+ * COORDINATOR_PRIVATE_KEY_PEM set (every production coordinator) a restart derives the same keys
+ * and results for subtasks claimed before it still decrypt. Without it the identity key, and so
+ * this root, is generated per process (dev).
+ */
+export const ENVELOPE_ROOT_SECRET = envelopeRootSecretFromPem(coordinatorKeys.privateKeyPem);
+export const ENVELOPE_REQUIRED = CC.ENVELOPE_REQUIRED;
 export const federatedCapabilities = new Map<string, CapabilitySummaryPayload>();
 export const lastTaskAssignedByAgent = new Map<string, number>();
 export const ollamaRollouts = new Map<string, OllamaRolloutRecord>();
