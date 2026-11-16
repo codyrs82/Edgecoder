@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { cliStatus, installCli, launcherContent } from "../../src/apps/ide/cli-install.js";
+import { cliStatus, dirOnPath, installCli, launcherContent, launcherPath } from "../../src/apps/ide/cli-install.js";
 
 let home: string;
 let agent: string;
@@ -61,12 +61,10 @@ exec "$APP/node/node" "$APP/dist/cli/edgecoder.js" "$@"
     expect(readFileSync(join(bin, "edgecoder"), "utf8")).toBe("#!/bin/sh\necho something else\n");
   });
 
-  it("Windows: %LOCALAPPDATA%\\EdgeCoder\\bin\\edgecoder.cmd", () => {
-    const local = join(home, "AppData", "Local");
-    const r = installCli({ platform: "win32", home, env: { LOCALAPPDATA: local, Path: "C:\\Windows" }, agentDir: agent });
-    expect(r.ok).toBe(true);
-    expect(r.path.endsWith("EdgeCoder\\bin\\edgecoder.cmd")).toBe(true);
-    expect(r.onPath).toBe(false);
+  it("Windows: %LOCALAPPDATA%\\EdgeCoder\\bin\\edgecoder.cmd, and whether that folder is on Path", () => {
+    const env = { LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local", Path: "C:\\Windows;C:\\Users\\me\\AppData\\Local\\EdgeCoder\\bin\\" };
+    expect(launcherPath("win32", "C:\\Users\\me", env)).toEqual({ dir: "C:\\Users\\me\\AppData\\Local\\EdgeCoder\\bin", file: "C:\\Users\\me\\AppData\\Local\\EdgeCoder\\bin\\edgecoder.cmd" });
+    expect(dirOnPath("c:\\users\\me\\appdata\\local\\edgecoder\\bin", env, "win32")).toBe(true);
     expect(launcherContent("win32", "C:\\Program Files\\EdgeCoder\\resources\\agent")).toContain('"%APP%\\node\\node.exe" "%APP%\\dist\\cli\\edgecoder.js" %*');
   });
 
