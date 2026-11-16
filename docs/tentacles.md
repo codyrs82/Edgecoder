@@ -1,10 +1,13 @@
 # Tentacles: helper agents for the lead
 
 A coding session's **lead** agent runs on the strongest model you have: your own frontier key
-(BYOK, when it lands) or the best network model. With tentacles on, the lead can spin off
+(BYOK, #323, for your own requests only) or the best network model. With tentacles on, the lead can spin off
 **helper agents ("tentacles")** onto the EdgeCoder network's cheaper, slower models. Each one works
 in parallel on a scoped piece of work: tests for a function, a contained edit, a search, a summary.
 It then hands its result back to the lead as a patch.
+
+Helpers always run on network models (the session's worker model, or `auto`), never on a frontier
+model and never with your frontier key, whoever the lead is.
 
 The lead keeps planning and integration. Tentacles do the well-specified pieces.
 
@@ -19,8 +22,8 @@ edgecoder code --tentacles 2 --tentacle-budget 40            # lead on auto, 2 h
 
 | Flag | Meaning |
 | --- | --- |
-| `--lead <id>` | The lead's model. Until the lead/worker split lands, this is the same as `--model`. |
-| `--worker <id>` | The model the tentacles run on. The default, `auto`, picks the best fit per piece (see Routing). |
+| `--lead <id>` | The lead's model, e.g. `frontier/anthropic/claude-opus-5-5` on your own key (#323). |
+| `--worker <id>` | The session's worker model: tentacles run on it. The default, `auto`, picks the best fit per piece (see Routing). Never a frontier model. |
 | `--tentacles <n>` | How many helpers may run at once (`0` turns them off). |
 | `--tentacle-budget <cSats>` | What all of the session's tentacles may spend together. |
 
@@ -35,15 +38,21 @@ In the session:
 | `/tentacles on` / `/tentacles off` | Turns delegation on or off. |
 | `/tentacles max <n>` | Sets how many may run at once. |
 | `/tentacles budget <cSats>` | Sets the session's tentacle budget. |
-| `/tentacles worker <model>` | Sets the worker model. |
+| `/tentacles worker <model>` | Sets the tentacles' worker model when the session's is `auto` (never a frontier model). |
 
 The terminal prints a line as each tentacle starts, begins running, finishes, or is merged:
 
 ```
   ⟡ tentacle t3fa91c2: Write tests for parseFileRef (tests)
   ⟡ t3fa91c2 running on auto
-  ⟡ t3fa91c2 passed · applied · Write tests for parseFileRef · qwen3-coder:30b on gpu · 3.10 cSats
+    ↳ t3fa91c2 · qwen3-coder:30b · gpu · lin-•••3f2a Chicago · 4.2k in / 310 out tok · 1.6 cSats
+    ↳ t3fa91c2 · qwen3-coder:30b · gpu · lin-•••3f2a Chicago · 5.0k in / 120 out tok · 1.5 cSats
+  ⟡ t3fa91c2 passed · applied · Write tests for parseFileRef · qwen3-coder:30b on gpu · 3.1 cSats
+  ⟡ helpers merged: 1 helper · 2 calls · qwen3-coder:30b · 9.2k in / 430 out tok · 3.1 cSats
 ```
+
+Each `↳` line is one helper model call: model · class · host and region · tokens · cSats.
+`/tentacles` shows them under each tentacle, with the session's total.
 
 `/undo` undoes the last change, whether a turn or an applied tentacle. Each applied tentacle is
 its own checkpoint.
@@ -51,7 +60,8 @@ its own checkpoint.
 ### Desktop
 
 The Live session panel (Code view, a session published with `/remote`) shows the same tree above
-the conversation. Expand a row to see the tentacle's summary and patch. While you are in control:
+the conversation, each helper call's served line under its row, and the merged totals at the
+bottom. Expand a row to see the tentacle's summary and patch. Any attached client can:
 
 - **×** cancels a running tentacle.
 - **Merge** and **Drop** answer a passed patch that is waiting for approval.
@@ -67,7 +77,7 @@ the conversation. Expand a row to see the tentacle's summary and patch. While yo
 | `EDGECODER_TENTACLES_WORKER` | Default worker model (`auto`). |
 | `EDGECODER_TENTACLE_CONTEXT_CHARS` | How many characters of files a tentacle's prompt may carry (36,000; about 12K tokens). |
 
-Over HTTP, on the IDE provider (same token and control rules as the session routes):
+Over HTTP, on the IDE provider (same token rules as the session routes; any attached client):
 
 ```
 GET  /v1/ide/sessions/:id/tentacles                {config, spentCSats, tentacles}
@@ -179,7 +189,7 @@ arguments:
 | Hint | Value |
 | --- | --- |
 | `job` | From `kind`: tests→`tests`, code_edit→`code_edit`, docs→`code_edit`, refactor_piece→`refactor`, review→`code_review`, search→`extract`, summarize→`summarize`. |
-| `complexity` | The given one, or a default per kind (low for search, summarize and docs; medium otherwise). |
+| `complexity` | A score from 0 to 1: the given level, or a default per kind (low for search, summarize and docs; medium otherwise), moved by the prompt's size, the number of files and whether a test or tsc check must pass, and one level up on the retry. Small, simple helpers score low and land on small models; bigger ones graduate up. |
 | `quality` | `fast` for low complexity, `balanced` otherwise, `best` on the retry. |
 | `latency` | `batch`. |
 | `needsTools` | `true`. |
@@ -197,6 +207,25 @@ How a call reaches the coordinator:
 - Otherwise through Auto on this computer.
 
 An explicit worker model (`network/<m>[@class]`, `mine/<m>`, or a local tag) runs exactly there.
+
+None of these paths can use your frontier key. A frontier id as the worker becomes `auto`, the
+tentacle settings refuse one, and a call answered by a frontier model stops the tentacle with an
+error. A frontier lead serves only its owner's own requests (#323); a turn started by another
+account's message leads on the worker model and can still delegate.
+
+### Permissions
+
+Tentacles follow the session's permission mode (#321) and never go past it. They can't ask, so
+whatever the mode would ask about is refused or waits for you:
+
+- **Shell:** the shared classifier (`permissions.ts`) decides. Risky commands never run. Read-only
+  commands run in any mode. Anything else must be on the tentacle allowlist (tests, type checks,
+  lint) and be something the session runs without asking: mode `auto`, or a command name you
+  answered "always". `npx` runs with `--no-install`.
+- **Acceptance checks:** a grep always runs. A vitest or tsc check runs the project's code, so it
+  follows the same rule; otherwise the patch comes back marked unverified and waits for approval.
+- **Merging the patch:** the same rule as the lead's own edits. In `auto-edits` and `auto` a clean
+  patch applies on its own unless it touches a protected path; in `ask` it waits for approval.
 
 ### Escalation
 
@@ -216,10 +245,10 @@ didn't choose. A tentacle that ran out of budget is not retried.
 ### Merge back
 
 When a tentacle passes and its patch applies cleanly (`git apply --check` against the lead's
-working tree), what happens depends on the session's edit setting:
+working tree), what happens depends on the session's permission mode:
 
-- **Edits apply on their own** (`autoApprove: "edits"`, or `--auto-edits`): the patch is applied
-  at once, as its own checkpoint. `/undo` reverts it like a turn.
+- **`auto-edits` or `auto`**, no protected path, and the check ran: the patch is applied at once,
+  as its own checkpoint. `/undo` reverts it like a turn.
 - **Otherwise:** it waits with merge state `awaiting_approval` until you merge or drop it. Merging
   checks the patch again first.
 
@@ -258,6 +287,8 @@ Session events, through the existing stream (`GET /v1/ide/sessions/:id/events`):
 | --- | --- |
 | `tentacle_started` | `{tentacle}` (queued) |
 | `tentacle_progress` | `{id, status, progress, cSats, model?}`, sent at each step and check |
+| `tentacle_usage` | `{id, call, line, cSats, spentCSats}`, one per helper model call: `call` has the model, cSats, tokens and `served` (where it ran); `line` is its served line |
+| `tentacle_totals` | `{ids, totals, session}`, when await_tentacles hands results to the lead: the batch's and the session's totals (`line`, calls, models, tokens, cSats) |
 | `tentacle_finished` | `{tentacle}`, with its result and merge state |
 | `tentacle_merge` | `{id, merge, tentacle}`, when an approval is answered |
 | `tentacle_config` | `{config, spentCSats}` |
@@ -268,9 +299,10 @@ Session events, through the existing stream (`GET /v1/ide/sessions/:id/events`):
 As a lead's conversation grows, `chooseLeadModel` (`lead-model.ts`) moves the lead, for that turn,
 to a model with a larger window instead of letting it lose the start of the conversation:
 
-- With a frontier lead (BYOK), it moves to the frontier lead.
-- Otherwise, it moves to the smallest-window candidate that fits within 75% of its window,
-  cheapest first.
+- A frontier lead is left alone (it has the largest window). Graduation never moves a lead onto a
+  frontier model, since that would spend the key for whoever sent the message.
+- Otherwise, it moves to the smallest-window network candidate that fits within 75% of its
+  window, cheapest first.
 
 It is wired where each turn's model is chosen (`provider-server.ts`, the sessions' `chat`), behind
 these settings:
@@ -279,15 +311,15 @@ these settings:
 | --- | --- |
 | `EDGECODER_CONTEXT_GRADUATION=1` | Turns graduation on. |
 | `EDGECODER_LEAD_CANDIDATES="network/qwen3-coder:30b=32768,network/big:70b@gpu=131072"` | The candidate models and their windows. |
-| `EDGECODER_FRONTIER_CONTEXT` | The frontier lead's window (default 200000). |
 
-A session on `auto` is left alone without a frontier lead, because Auto sizes each call itself.
+A session on `auto` is left alone, because Auto sizes each call itself.
 
-## Hook points (for the in-flight branches)
+## Where it plugs in
 
-The tentacle code lives in new files:
+The tentacle code lives in its own files:
 
 - `src/apps/ide/tentacles.ts`
+- `src/apps/ide/tentacle-format.ts`
 - `src/apps/ide/tentacle-workspace.ts`
 - `src/apps/ide/delegate.ts`
 - `src/apps/ide/tentacle-routes.ts`
@@ -296,30 +328,15 @@ The tentacle code lives in new files:
 - `desktop/src/lib/tentacles.ts`
 - `desktop/src/components/TentacleTree.svelte`
 
-Existing files get only thin, marked hooks:
+Existing files get thin, marked hooks:
 
 | File | Hook |
 | --- | --- |
 | `sessions.ts` | `TurnEnv.onSessionStop` (called from `cancel`, `remove` and `shutdown`); `SessionHub.peek`, `publishEvent` and `recordNote`; `undo` also accepts notes; `TranscriptEntry.tentacle`. |
 | `tool-types.ts` | Three tool names and `TENTACLE_TOOLS`, included in `READ_TOOLS` so they don't ask. `bots.ts` filters them out of bot defaults; `tool-executor.ts` has a refusing `case` for them. |
-| `provider-server.ts` | Builds the `TentacleManager` and `tentacleWorkerBackend`; wraps the session `executor`, `tools` and `systemPrompt`; registers the routes; adds context graduation in `chat`. |
+| `provider-server.ts` | Builds the `TentacleManager` with `tentacleWorkerBackend` (the worker role: `workerModelOf`, never frontier) and `shellAllowed` (`SessionHub.allowedWithoutAsking`); wraps the session `executor`, `tools` and `systemPrompt`; registers the routes; context graduation for network leads in `chat`. |
 | `hosted-backend.ts` | Forwards `req.hints` as the body's `edgecoder` field. |
 | `src/terminal/repl.ts` | Hands `tentacle_*` events and `/tentacles` to `TentacleTracker`. |
-| `src/terminal/cli.ts` | `--lead`, `--worker`, `--tentacles` and `--tentacle-budget`; posts the config after the session is created. |
+| `src/terminal/cli.ts` | `--tentacles` and `--tentacle-budget`; posts the config after the session is created. |
 | `LiveSessionPanel.svelte` | Loads and folds the tree, and renders `<TentacleTree>`. |
 | `desktop/src/lib/api.ts` | Three calls. |
-
-Where the other branches plug in:
-
-- **BYOK (`frontierBackend`, session `leadModel` / `workerModel`):**
-  - `TentacleDeps.workerModelFor` already reads `session.workerModel` when it exists.
-  - `tentacleWorkerBackend` should route a frontier id to `frontierBackend`.
-  - Graduation reads `session.leadModel` as the frontier step.
-  - `--lead` in `initialModel` should set `leadModel` instead of the model.
-- **Terminal usability (permission modes, co-editing queue, read-only / allowlist classification):**
-  - `TentacleDeps.canAutoApply(session)` decides auto-apply versus approval. The default is
-    `autoApprove === "edits"`; map the new permission modes there.
-  - `TENTACLE_SHELL_ALLOW` and `tentacleShellDecision` should defer to the shared read-only /
-    allowlist classifier.
-  - The lead's turn is not blocked by tentacles, so a message queue can carry tentacle results as
-    they arrive. `TentacleManager.unreported()` already feeds the next turn's prompt.
