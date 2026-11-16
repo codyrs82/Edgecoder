@@ -262,6 +262,12 @@ export interface HardwareVerificationRecord {
   /** Plausibility findings on the self-reported profile / benchmark (informational). */
   flags: string[];
   hardware: { cpuModel?: string; gpuModel?: string; vramGb?: number; cpuCores?: number; gpuCount?: number };
+  /**
+   * The full profile of the last registration that carried one. A registration without a profile
+   * (an agent's reconnect probe, older agents) re-asserts this claim instead of dropping to cpu.std;
+   * it is still only a claim, granted above its class base tier only on proof.
+   */
+  profile?: HardwareProfile & { overridden?: boolean };
   measured?: HardwareMeasurement;
   /**
    * A slow measurement that would have lowered the grant, held until a second one confirms it (see
@@ -617,6 +623,7 @@ export class HardwareVerifier {
     }
     rec.overridden = overridden;
     rec.challengeKinds = kinds;
+    if (profile) rec.profile = structuredClone(profile);
     rec.hardware = {
       ...(profile?.cpuModel ? { cpuModel: profile.cpuModel } : {}),
       ...(profile?.gpu?.model ? { gpuModel: profile.gpu.model } : {}),
