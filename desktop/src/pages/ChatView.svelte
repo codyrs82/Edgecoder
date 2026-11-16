@@ -228,6 +228,7 @@
           get(computeChoice),
           await agentGitHubToken().catch(() => null),
           autoApplyEdits(projectRoot) ? "edits" : "none",
+          "chat",
         );
       } else if (usePortalChat) {
         // Stream through the portal API (server persists messages)

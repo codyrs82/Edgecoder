@@ -52,6 +52,8 @@ export async function runInferenceSubtask(
     chat?: (model: string, req: { messages: ChatMessage[]; tools?: ToolSpec[]; maxTokens?: number; temperature?: number }, signal: AbortSignal, timeoutMs: number) => AsyncIterable<OllamaPiece>;
     /** Cancels the call from outside (critical memory pressure): it fails with CANCELLED_FOR_MEMORY_ERROR. */
     signal?: AbortSignal;
+    /** Each piece of reply text as it is generated (Active work's tokens-so-far). */
+    onDelta?: (text: string) => void;
   },
 ): Promise<SubtaskResult> {
   const started = Date.now();
@@ -122,6 +124,7 @@ export async function runInferenceSubtask(
       else if ("delta" in piece) {
         full += piece.delta;
         pending += piece.delta;
+        deps.onDelta?.(piece.delta);
         if (pending.length >= FLUSH_CHARS || Date.now() - lastFlush >= FLUSH_MS) await flush(false);
       }
     }

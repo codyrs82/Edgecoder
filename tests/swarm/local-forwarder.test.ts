@@ -53,6 +53,22 @@ describe("local forwarder", () => {
 
   const auth = { authorization: "Bearer secret-token" };
 
+  it("reports the jobs this machine serves and its slots on /forward/health", async () => {
+    const withServing = createLocalForwarder({
+      token: () => "secret-token",
+      coordinatorUrl: () => registered,
+      meshHeaders: () => ({}),
+      signedHeaders: () => ({}),
+      agentId: "mac-1",
+      lifecycle: () => ({ paused: { reason: "too many failures", sinceMs: 5 }, draining: false, drainingUntilMs: null, claims: 1 }),
+      serving: () => ({ jobs: [{ id: "s1", taskId: "inf-1", kind: "inference", model: "qwen3:8b", startedAtMs: 1, outputTokens: 7 }], slots: { total: 2, busy: 1 }, computeClass: "apple", tier: "apple.m" }),
+    });
+    const url = await listen(withServing);
+    const res = await request(`${url}/forward/health`, { headers: { authorization: "Bearer secret-token" } });
+    expect(await res.body.json()).toMatchObject({ paused: { reason: "too many failures" }, claims: 1, serving: { slots: { total: 2, busy: 1 }, jobs: [{ model: "qwen3:8b", outputTokens: 7 }] } });
+    withServing.close();
+  });
+
   it("requires the bearer token and refuses browser requests", async () => {
     expect((await request(`${fwdUrl}/forward/health`)).statusCode).toBe(401);
     expect((await request(`${fwdUrl}/forward/health`, { headers: { authorization: "Bearer wrong" } })).statusCode).toBe(401);

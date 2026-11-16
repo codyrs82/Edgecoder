@@ -102,15 +102,6 @@ export interface SystemMetrics {
 }
 
 // Task submission to POST /submit
-export interface TaskSubmission {
-  taskId: string;
-  prompt: string;
-  language: "python" | "javascript";
-  snapshotRef: string;
-  resourceClass?: "cpu" | "gpu";
-  priority?: number;
-}
-
 // IDE agent tool event (rendered inline in assistant messages)
 export interface ToolEvent {
   type: "tool_call" | "tool_result" | "shell_request" | "shell_output" | "diff" | "plan" | "status";

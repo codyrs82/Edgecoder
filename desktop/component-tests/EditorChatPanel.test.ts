@@ -17,6 +17,8 @@ vi.mock("../src/lib/api", async (original) => ({
   backendReady: Promise.resolve(),
   isRemoteMode: () => false,
   getGitHubToken: vi.fn(async () => null),
+  // The real one fetches the portal (10 s timeout): a send would wait on the network before streaming.
+  agentGitHubToken: vi.fn(async () => null),
   getModelPullProgress: vi.fn(async () => null),
   streamIdeChat: api.streamIdeChat,
   gitState: vi.fn(async () => ({ branch: "main", upstream: null, ahead: 0, behind: 0, staged: [], unstaged: [], branches: ["main"], remotes: [], remoteUrl: null, hasCommits: true })),

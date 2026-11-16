@@ -13,7 +13,8 @@
  *   GET  /forward/network/world                               -> GET  {coordinator}/network/world (anonymized)
  *   GET  /forward/tasks/:taskId/subtasks/:subtaskId/result    -> GET  {coordinator}/tasks/...
  *   GET  /forward/health                                      -> forwarder state (+ coordinator steering,
- *                                                                paused/draining/claims: agent-lifecycle.ts)
+ *                                                                paused/draining/claims: agent-lifecycle.ts,
+ *                                                                serving: the jobs running now, serving-jobs.ts)
  *   POST /forward/drain   {resume?}                           -> stop taking work and hand claims back before
  *                                                                the app restarts (BHV006); resume: take work again
  *
@@ -25,6 +26,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { request } from "undici";
 import { safeTokenEqual } from "../apps/ide/ide-auth.js";
 import type { LifecycleStatus } from "./agent-lifecycle.js";
+import type { ServingView } from "./serving-jobs.js";
 
 export const LOCAL_FORWARD_DEFAULT_PORT = 4305;
 /** POST routes relayed to the coordinator, signed by this agent over the exact body bytes. */
@@ -57,6 +59,8 @@ export interface LocalForwarderDeps {
   steering?: () => unknown;
   /** Paused (blacklisted) with the coordinator's reason, draining, claims running now. */
   lifecycle?: () => LifecycleStatus;
+  /** The network jobs running on this machine now and its model slots (serving-jobs.ts), for Active work. */
+  serving?: () => ServingView;
   /** Drain before a restart (hand claims back, pull nothing new for a while), or resume. */
   drain?: (resume: boolean) => Promise<{ draining: boolean; released: number; told: boolean }>;
   /** x-mesh-token, only when the operator configured one (agents are never given the coordinators' token). */
@@ -107,7 +111,7 @@ export function createLocalForwarder(deps: LocalForwarderDeps): Server {
       const coordinator = deps.coordinatorUrl();
 
       if (req.method === "GET" && path === "/forward/health") {
-        return send(res, 200, { ok: true, agentId: deps.agentId, coordinatorUrl: coordinator, registered: Boolean(coordinator), steering: deps.steering?.() ?? null, ...(deps.lifecycle ? deps.lifecycle() : {}) });
+        return send(res, 200, { ok: true, agentId: deps.agentId, coordinatorUrl: coordinator, registered: Boolean(coordinator), steering: deps.steering?.() ?? null, ...(deps.lifecycle ? deps.lifecycle() : {}), ...(deps.serving ? { serving: deps.serving() } : {}) });
       }
       if (req.method === "POST" && path === "/forward/drain") {
         if (!deps.drain) return send(res, 404, { error: "not_found" });

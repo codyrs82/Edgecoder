@@ -68,3 +68,13 @@
   /* Cells squeezed to one word per line are harder to read than a table that scrolls. */
   .sp .sp-table-scroll th, .sp .sp-table-scroll td { white-space: nowrap; padding: 8px 12px; }
 }
+
+/* Settings → Active work, Tasks and Logs: status pills (text, never colour alone), a hidden live region. */
+.sp .sp-pill.ok { color: var(--green); border-color: color-mix(in srgb, var(--green) 40%, transparent); }
+.sp .sp-pill.err { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, transparent); }
+.sp .sp-pill.warn { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 40%, transparent); }
+.sp .sp-pill.run { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.sp .sp-dot.warn { background: var(--yellow); }
+.sp .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.sp select { height: var(--control-md); padding: 0 6px; background: var(--bg-input); color: var(--text-primary); border: 0.5px solid var(--border-control); border-radius: var(--radius-sm); font: inherit; font-size: var(--fs-sm); }
+.sp input[type="search"] { height: var(--control-md); padding: 0 9px; box-sizing: border-box; background: var(--bg-input); color: var(--text-primary); border: 0.5px solid var(--border-control); border-radius: var(--radius-sm); font: inherit; font-size: var(--fs-sm); }

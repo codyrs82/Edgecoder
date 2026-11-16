@@ -115,6 +115,41 @@ const FIXTURES: Array<[RegExp, unknown]> = [
       { id: "u2", atMs: NOW - 900_000, kind: "inference", placement: "network", model: "deepseek-r1:32b", computeClass: "gpu", source: "desktop", ok: false, durationMs: 900, costMsat: 0 },
     ],
   }],
+  // Settings → Active work: this Mac serves two jobs (one of them yours) and you have a chat running.
+  [/\/v1\/ide\/activity$/, {
+    atMs: NOW,
+    agent: {
+      reachable: true, agentId: "agent-mac", coordinatorUrl: "https://coordinator.edgecoder.io", registered: true, region: "us-east",
+      paused: null, draining: false, claims: 2, slots: { total: 2, busy: 2 }, computeClass: "apple", tier: "apple.m", jobsUnknown: false,
+      jobs: [
+        { id: "sub-a11y-1", kind: "inference", model: "qwen2.5-coder:7b", startedAtMs: NOW - 12_000, elapsedMs: 12_000, outputTokens: 340, requester: "network" },
+        { id: "sub-a11y-2", kind: "inference", model: "llama3.2:3b", startedAtMs: NOW - 3_000, elapsedMs: 3_000, outputTokens: 20, requester: "you" },
+      ],
+    },
+    mine: [
+      { id: "act-1", kind: "chat", title: "Explain the retry logic", source: "EdgeCoder chat", model: "auto", startedAtMs: NOW - 3_000, status: "running", cSats: 0.4, steps: [], progress: "Thinking…",
+        calls: [{ cSats: 0.4, model: "network/qwen2.5-coder:32b", served: { label: "m-1", own: false, computeClass: "gpu", tier: "24gb", hardware: "GPU", region: "us-east", country: "US", promptTokens: 900, outputTokens: 40 } }] },
+    ],
+  }],
+  // Settings → Tasks: an API call the IDE server kept (chats come from IndexedDB, mocked separately).
+  [/\/v1\/ide\/activity\/recent$/, {
+    items: [
+      { id: "act-0", kind: "api", title: "Summarize the changelog", source: "OpenAI API", model: "llama3.2:3b", startedAtMs: NOW - 600_000, endedAtMs: NOW - 594_000, status: "done", cSats: 0, steps: [], calls: [{ cSats: 0, where: "This computer · llama3.2:3b" }] },
+      { id: "act-00", kind: "api", title: "Draft release notes", source: "Anthropic API", startedAtMs: NOW - 900_000, endedAtMs: NOW - 899_000, status: "failed", error: "HTTP 503", cSats: 0, steps: [], calls: [] },
+    ],
+  }],
+  // Settings → Logs: the agent log's JSON request lines and a plain agent warning.
+  [/\/v1\/ide\/logs/, {
+    source: "agent", exists: true, size: 900, start: 0, next: 900, truncated: false, reset: false,
+    sources: [{ id: "agent", label: "Agent and services", exists: true, size: 900 }, { id: "ollama", label: "Ollama", exists: false, size: 0 }],
+    lines: [
+      JSON.stringify({ level: 30, time: NOW - 5_000, service: "ide-provider", requestId: "r1", req: { method: "POST", url: "/v1/ide/chat" }, msg: "incoming request" }),
+      JSON.stringify({ level: 30, time: NOW - 4_000, service: "ide-provider", requestId: "r1", res: { statusCode: 200 }, responseTime: 812.4, msg: "request completed" }),
+      JSON.stringify({ level: 30, time: NOW - 3_000, service: "inference", requestId: "r2", req: { method: "GET", url: "/model/pull/progress" }, msg: "incoming request" }),
+      JSON.stringify({ level: 30, time: NOW - 3_000, service: "inference", requestId: "r2", res: { statusCode: 200 }, responseTime: 0.4, msg: "request completed" }),
+      "[agent:agent-mac] offline probe failed (Error: POST /register failed (403): unknown agent)",
+    ],
+  }],
   [/\/v1\/ide\/bots$/, { bots: [] }],
   [/\/v1\/ide\/bots\/[^/]+\/messages$/, {
     messages: [
@@ -182,8 +217,8 @@ export const SECTION_SHOWS: Record<string, string> = {
   "Integrations": "@a11y",
   "Network": "codys-mac-studio",
   "Dashboard": "ollama-local",
-  "Active work": "Connected Agents (2)",
-  "Tasks": "Submit New Task",
+  "Active work": "Someone on the network",
+  "Tasks": "Summarize the changelog",
   "Wallet": "a11y@example.org",
-  "Logs": "Log viewer started",
+  "Logs": "offline probe failed",
 };
