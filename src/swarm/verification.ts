@@ -466,6 +466,12 @@ export class ResultVerifier<T = unknown> {
     return this.pending.has(originalSubtaskId);
   }
 
+  /** True while a result of any subtask of `taskId` is held for verification. */
+  hasPendingForTask(taskId: string): boolean {
+    for (const p of this.pending.values()) if (p.original.taskId === taskId) return true;
+    return false;
+  }
+
   private nextReplica(p: Pending<T>, preferredId?: string): ReplicaRequest {
     let id = preferredId ?? replicaId(p.original.id, p.results.length);
     while (p.replicaIds.has(id) || this.replicaToOriginal.has(id)) id = `${id}:r`;

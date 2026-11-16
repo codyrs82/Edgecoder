@@ -77,7 +77,7 @@ import { startOnchainTimers } from "./onchain.js";
 import { restorePendingVerifications, runResultVerificationTick } from "./results.js";
 import { LEDGER_VERIFY_INTERVAL_MS, runLedgerVerifyTick } from "./ledger-verify.js";
 import { sweepGrants } from "./grants.js";
-import { restoreTaskBilling, sweepTaskBilling } from "./billing-restore.js";
+import { restoreTaskBilling, sweepIdleTaskBilling, sweepTaskBilling } from "./billing-restore.js";
 import { TASK_BILLING_SWEEP_INTERVAL_MS } from "../billing-sweep.js";
 
 /** Initialize coordinator background tasks, intervals, and peer mesh.
@@ -166,6 +166,11 @@ export async function initCoordinator(): Promise<void> {
           app.log.warn({ error: String(error) }, "grant_sweep_failed");
         }
       }, 15_000);
+      // Reserves this process forgot to settle (no open work for TASK_BILLING_IDLE_SWEEP_MS) are
+      // settled; with or without Postgres (billing-sweep.ts).
+      setInterval(() => {
+        void sweepIdleTaskBilling().catch((error) => app.log.warn({ error: String(error) }, "task_billing_idle_sweep_failed"));
+      }, TASK_BILLING_SWEEP_INTERVAL_MS).unref?.();
       // Host approval (src/portal/host-requests.ts): an admin's approve or revoke reaches agents already registered.
       setInterval(() => {
         void refreshHostApprovals().catch((error) => app.log.warn({ error: String(error) }, "host_approval_refresh_failed"));

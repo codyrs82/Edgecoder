@@ -6,7 +6,9 @@
  */
 import { randomInt } from "node:crypto";
 import type { PaymentIntent, PriceEpochRecord, ResourceClass } from "../../common/types.js";
-import { reserveMsat } from "../../economy/job-pricing.js";
+import { cSatsToMsat, inferenceReserveMsat, reserveMsat } from "../../economy/job-pricing.js";
+import { paramsB } from "../../inference-api/auto-route.js";
+import { OUTPUT_TOKEN_ALLOWANCE, PROMPT_TOKEN_ALLOWANCE } from "../inference-streams.js";
 import { pgStore } from "../../db/store.js";
 import { dynamicLoadMultiplier, LEGACY_BASE_SATS_PER_UNIT } from "../../economy/pricing.js";
 import { priceEpochBoundsFromEnv } from "../../economy/price-epoch-guard.js";
@@ -60,6 +62,26 @@ export function subtaskReserveMsat(resourceClass: ResourceClass, taskClass: Comp
       })
     )
   );
+}
+
+/**
+ * What to set aside for one model call (job-pricing.ts inferenceReserveMsat): an upper bound on its
+ * settled cost from its own size. Token bounds are the ones /inference/chunks applies to reported
+ * counts (the queued input's bytes + PROMPT_TOKEN_ALLOWANCE in, maxTokens + OUTPUT_TOKEN_ALLOWANCE
+ * out); the power floor is the requested class's (every class for "any") at its top tier for the
+ * call's timeout, the most it can be billed for. `maxCSats` (the buyer's ceiling) caps it.
+ */
+export function inferenceCallReserve(input: { model: string; taskClass: ComputeClassId | "any"; timeoutMs: number; inputBytes: number; maxTokens: number; maxCSats?: number }) {
+  const classes = (input.taskClass === "any" ? Object.keys(rateOracleConfig.computeClasses) : [input.taskClass]) as ComputeClassId[];
+  return inferenceReserveMsat({
+    paramsB: paramsB(input.model),
+    btcUsd: mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD,
+    promptTokensMax: Math.max(0, input.inputBytes) + PROMPT_TOKEN_ALLOWANCE,
+    outputTokensMax: Math.max(0, input.maxTokens) + OUTPUT_TOKEN_ALLOWANCE,
+    maxDurationMs: input.timeoutMs,
+    floorClasses: classes.map((c) => ({ computeClass: c, maxTierWeight: Math.max(1, ...(rateOracleConfig.computeClasses[c]?.tiers ?? []).map((t) => t.creditsPerSecond)) })),
+    ...(input.maxCSats !== undefined ? { capMsat: cSatsToMsat(input.maxCSats) } : {}),
+  });
 }
 
 export const paymentIntents = new Map<string, PaymentIntent>();

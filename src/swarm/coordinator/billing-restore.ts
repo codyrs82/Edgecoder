@@ -23,14 +23,14 @@
  */
 import type { Subtask, SubtaskResult } from "../../common/types.js";
 import type { PostgresStore } from "../../db/postgres.js";
-import { sweepStaleTaskBilling, type OpenTaskBillingRow } from "../billing-sweep.js";
+import { idleTaskBilling, sweepStaleTaskBilling, type OpenTaskBillingRow } from "../billing-sweep.js";
 import { refundTxId } from "../../credits/store.js";
 import type { ComputeClassId } from "../../economy/compute-classes.js";
 import { capabilityConstraints } from "../../economy/order-book.js";
 import { app } from "./app.js";
 import { identity, queue, taskBilling } from "./context.js";
 import { orderBook, MARKET_DEFAULT_BID_PREMIUM_BPS } from "./economy.js";
-import { refundTaskSubmit, resultVerifier, settleTaskIfDone } from "./results.js";
+import { accrualsInFlight, refundTaskSubmit, resultVerifier, settleTaskIfDone, taskOpenCount } from "./results.js";
 
 export interface BillingRestoreSummary {
   resumed: number;
@@ -104,4 +104,34 @@ export async function restoreTaskBillingRows(store: PostgresStore, rows: OpenTas
 export async function sweepTaskBilling(store: PostgresStore): Promise<void> {
   const r = await sweepStaleTaskBilling({ store, coordinatorId: identity.peerId, isLive: (taskId) => taskBilling.has(taskId), restore: (rows) => restoreTaskBillingRows(store, rows) });
   if (r.swept > 0) app.log.warn({ ...r }, "task_billing_swept");
+}
+
+/** First sighting of each idle in-memory billing entry (idleTaskBilling). */
+const idleBillingSince = new Map<string, number>();
+
+/**
+ * The idle sweep (billing-sweep.ts): settle in-memory billing this process holds with no open work
+ * for TASK_BILLING_IDLE_SWEEP_MS, returning what was set aside and not used. Runs without Postgres.
+ */
+export async function sweepIdleTaskBilling(nowMs = Date.now(), minIdleMs?: number): Promise<{ swept: number; refunded: number }> {
+  const stale = idleTaskBilling({
+    taskIds: [...taskBilling.keys()],
+    isBusy: (taskId) => taskOpenCount(taskId) > 0 || accrualsInFlight.has(taskId) || resultVerifier.hasPendingForTask(taskId),
+    idleSince: idleBillingSince,
+    nowMs,
+    ...(minIdleMs !== undefined ? { minIdleMs } : {}),
+  });
+  let refunded = 0;
+  for (const taskId of stale) {
+    const b = taskBilling.get(taskId);
+    if (!b) continue;
+    const unusedMsat = Math.max(0, b.reservedMsat - b.costMsat);
+    const ok = await refundTaskSubmit(taskId);
+    if (ok) {
+      refunded++;
+      idleBillingSince.delete(taskId);
+    }
+    app.log.warn({ taskId, accountId: b.accountId, reservedMsat: b.reservedMsat, costMsat: b.costMsat, unusedMsat, ok }, "task_billing_idle_swept");
+  }
+  return { swept: stale.length, refunded };
 }

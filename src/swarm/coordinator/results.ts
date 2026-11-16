@@ -376,6 +376,12 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
   // (never more), before the store is awaited, so results settling together cannot both spend it.
   // Work nobody set anything aside for (an anonymous task) earns nothing.
   const costMsat = takeTaskBudget(taskId, r.subtaskId, priced.costMsat, opts.originChargedMsat);
+  // The reserve is an upper bound on the cost (job-pricing.ts inferenceReserveMsat); a cost above
+  // what is left of it is settled at the reserve, never more. Logged: it should be rare.
+  const billing = taskBilling.get(taskId);
+  if (billing && !billing.refunded && Number.isFinite(priced.costMsat) && Math.round(priced.costMsat) > costMsat) {
+    app.log.warn({ taskId, subtaskId: r.subtaskId, kind: subtask.kind, model: subtask.requestedModel, pricedMsat: Math.round(priced.costMsat), settledMsat: costMsat, reservedMsat: billing.reservedMsat, basis: priced.basis }, "job_cost_capped_at_reserve");
+  }
   const { agentMsat, feeMsat } = splitJobCost(costMsat, NETWORK_FEE_BPS);
   const valuation = { msatPerCredit: Math.round(perCredit), networkFeeBps: NETWORK_FEE_BPS };
   let accrued: Awaited<ReturnType<typeof accruePricedJob>> = null;
