@@ -18,6 +18,12 @@
  *    critical it also cancels its running network calls and hands its claims back (onCritical),
  *    and unloads everything but the owner's active model. It resumes once the pressure has been
  *    lower for a while (PressureGuard's hysteresis).
+ *  - vLLM / MLX (`engine`): the engine loads its one model at start and holds its memory (vLLM
+ *    preallocates --gpu-memory-utilization of the VRAM for weights and KV cache), so there is
+ *    nothing to load, fit or unload. The served model is reported as loaded, filling the budget:
+ *    the coordinator sends calls for it up to the engine's slots (from its reported KV cache,
+ *    engine-probe.ts) and never sends another model on the strength of free-looking headroom.
+ *    The pressure guard applies as with Ollama.
  */
 
 import { estimateModelBytes, fmtGb, planLoad, planServing, type InstalledModel, type LoadedModel, type MemoryTelemetry, type PressureLevel, type ServingPlan } from "./memory-budget.js";
@@ -40,8 +46,17 @@ export interface MemorySettings {
   kvSlots: number;
 }
 
+/** The model a vLLM / MLX engine serves now; undefined while it is down or loading. */
+export interface EngineServed {
+  model: string;
+  /** Memory the engine holds for it (the whole budget for vLLM: it preallocates the GPUs). */
+  bytes: number;
+}
+
 export interface MemoryManagerDeps {
   ollama: MemoryOllama;
+  /** Set when an OpenAI-compatible engine (vLLM / MLX) serves the model instead of Ollama. */
+  engine?: () => EngineServed | undefined;
   readPressure: () => MemorySnapshot;
   budgetBytes: number;
   maxModels?: number;
@@ -137,6 +152,12 @@ export class HostMemoryManager {
   }
 
   private async readOllama(nowMs: number): Promise<void> {
+    if (this.d.engine) {
+      const e = this.d.engine();
+      this.loaded = e ? [{ name: e.model, sizeBytes: e.bytes }] : [];
+      this.installed = e ? [{ name: e.model, sizeBytes: e.bytes }] : [];
+      return;
+    }
     try {
       this.loaded = (await this.d.ollama.loaded()).map((m) => ({ name: m.name, sizeBytes: m.sizeBytes, expiresAt: m.expiresAt }));
     } catch {
@@ -154,6 +175,11 @@ export class HostMemoryManager {
   }
 
   private replan(): void {
+    if (this.d.engine) {
+      const e = this.loaded[0];
+      this.plan = e ? { serving: [{ model: e.name, bytes: e.sizeBytes, loaded: true }], localOnly: [], tooBig: [] } : undefined;
+      return;
+    }
     const s = this.d.settings();
     if (this.installed.length === 0) {
       this.plan = undefined;
@@ -183,6 +209,7 @@ export class HostMemoryManager {
   }
 
   private async unload(model: string, why: string): Promise<void> {
+    if (this.d.engine) return; // the engine's model stays: it is managed on the host, not by the agent
     try {
       await this.d.ollama.unload(model);
       this.loaded = this.loaded.filter((m) => m.name !== model);
@@ -223,6 +250,12 @@ export class HostMemoryManager {
       const serving = this.plan.serving.map((m) => m.model).join(", ") || "none";
       return { ok: false, error: `memory_model_not_served: ${model} is not served on the network from this host (its memory budget serves: ${serving})` };
     }
+    if (this.d.engine) {
+      // One model, resident: it may take calls up to the engine's slots, nothing else loads.
+      const e = this.d.engine();
+      if (!e || e.model !== model) return { ok: false, error: `memory_model_not_served: ${model} is not served by this host's engine (it serves ${e?.model ?? "nothing yet"})` };
+      return this.track(model);
+    }
     try {
       this.loaded = (await this.d.ollama.loaded()).map((m) => ({ name: m.name, sizeBytes: m.sizeBytes, expiresAt: m.expiresAt }));
     } catch {
@@ -237,6 +270,10 @@ export class HostMemoryManager {
     const plan = planLoad({ model, needBytes: need, budgetBytes: this.d.budgetBytes, loaded: view, busy: this.busy(), protectedModels: this.ownerModels() });
     if (!plan.ok) return { ok: false, error: plan.reason ?? "memory_budget" };
     for (const m of plan.unload) await this.unload(m, `to make room for ${model}: needs ${fmtGb(need)}`);
+    return this.track(model);
+  }
+
+  private track(model: string): Admission {
     this.inflight.set(model, (this.inflight.get(model) ?? 0) + 1);
     this.networkUsed.set(model, this.now());
     let released = false;

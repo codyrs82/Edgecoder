@@ -96,7 +96,13 @@ journalctl -fu edgecoder-vllm@0            # first start: load + compile, a few 
 curl -s http://127.0.0.1:8000/v1/models    # -> the model and its max_model_len
 ```
 
-Then in `/etc/edgecoder/agent-0.env`:
+Then point the agent at it, with the installer so that every later run keeps it:
+
+```bash
+sudo edgecoder-install apply --engine vllm --vllm-model QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ --vllm-slots 2
+```
+
+It writes into `/etc/edgecoder/agent-0.env`:
 
 ```bash
 EDGECODER_ENGINE=vllm
@@ -105,12 +111,23 @@ VLLM_MODEL=QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ
 VLLM_MAX_SLOTS=2
 ```
 
-and `sudo systemctl restart edgecoder-agent-0`. The agent logs
+and restarts the agent, which logs
 `vLLM at http://127.0.0.1:8000 serves … as qwen3-coder:30b: context 65536 (max_model_len 65536), 2 slot(s), KV cache … tokens`.
+(`edgecoder-install apply --engine vllm --vllm-profile a16x2` does the install-vllm.sh step too
+when vLLM is missing.)
 
-`--start` stops and **masks** `edgecoder-ollama-0` first: Ollama holds the GPUs' memory while its
-model is loaded, and the agent unit `Wants=` its Ollama, so an unmasked one would start again with
-every agent restart.
+The instance's Ollama is held off by `/etc/edgecoder/vllm-0.active` and the drop-in
+`/etc/systemd/system/edgecoder-ollama-0.service.d/vllm-switch.conf`
+(`ConditionPathExists=!/etc/edgecoder/vllm-0.active`): Ollama holds the GPUs' memory while its
+model is loaded, and the agent unit `Wants=` its Ollama, so it would otherwise start again with
+every agent restart. Not a mask: the installer rewrites the Ollama unit file on every run, which
+would lift a mask. `install-vllm.sh --start` writes the same marker and drop-in.
+
+**Re-runs and upgrades keep vLLM.** Every `edgecoder-install apply` without `--engine` (a package
+upgrade, `install.sh --from-source`, a re-run with new tokens) reads the engine back from
+`agent-<n>.env` (and the marker, if an older run dropped the lines) and writes the same lines, marker
+and drop-in again. It starts `edgecoder-vllm@<n>` if it is down but never restarts a running one, so
+only the agent restarts.
 
 The installer puts vLLM in `/opt/edgecoder/vllm/venv` (a pinned `vllm==` from PyPI), the weights
 in `/var/lib/edgecoder/hf`, the serve flags in `/etc/edgecoder/vllm-<n>.env`
@@ -118,8 +135,17 @@ in `/var/lib/edgecoder/hf`, the serve flags in `/etc/edgecoder/vllm-<n>.env`
 `edgecoder` user on 127.0.0.1 with the same systemd hardening as the Ollama unit. Change flags in
 the env file and `systemctl restart edgecoder-vllm@0`.
 
-**Back to Ollama:** remove the four lines from the agent env, then
-`systemctl disable --now edgecoder-vllm@0 && systemctl unmask edgecoder-ollama-0 && systemctl start edgecoder-ollama-0 && systemctl restart edgecoder-agent-0`.
+**Back to Ollama:** `sudo edgecoder-install apply --engine ollama`. It removes the engine lines, the
+marker and the drop-in, stops and disables `edgecoder-vllm@0` before Ollama starts, and restarts the
+agent. `vllm-0.env`, the venv and the weights stay, so `--engine vllm` later needs no reinstall.
+
+**Memory safety with vLLM.** vLLM preallocates `--gpu-memory-utilization` of the cards' VRAM
+(weights plus KV cache) when it starts, so the agent's host memory manager does not fit or unload
+models there: it reports the served model as loaded, holding the whole memory budget, with the
+slots derived from vLLM's reported KV cache (above). The coordinator then sends calls for that
+model up to its slots and never another model on free-looking headroom. The instance's Ollama unit
+keeps its memory-safety settings (`OLLAMA_MAX_LOADED_MODELS` etc.) for when it runs again; the
+pressure guard applies on either engine.
 
 ### Sizing: 2× NVIDIA A16 (16 GB each, compute capability 8.6)
 

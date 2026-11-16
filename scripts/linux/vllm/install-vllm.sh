@@ -13,11 +13,14 @@
 #   - writes /etc/edgecoder/vllm-<instance>.env from the profile (kept if it exists);
 #   - installs the edgecoder-vllm@.service unit;
 #   - --download: fetches the model weights into /var/lib/edgecoder/hf as the edgecoder user;
-#   - --start: stops and masks edgecoder-ollama-<instance> (its GPU memory; masked so the agent
-#     unit's Wants= does not start it again), enables and starts edgecoder-vllm@<instance>, and
+#   - --start: holds edgecoder-ollama-<instance> off (its GPU memory) with the same marker and
+#     drop-in edgecoder-install uses (/etc/edgecoder/vllm-<instance>.active and
+#     edgecoder-ollama-<instance>.service.d/vllm-switch.conf, ConditionPathExists=!marker, so the
+#     agent unit's Wants= cannot start it), enables and starts edgecoder-vllm@<instance>, and
 #     waits until /v1/models answers.
-# It does not touch the agent's env file: switching the agent to vLLM is a separate step
-# (the lines to add are printed at the end).
+# It does not touch the agent's env file. Point the agent at vLLM with
+#   edgecoder-install apply --engine vllm
+# which writes the env lines, the marker and the drop-in, and keeps them on every later run.
 set -euo pipefail
 
 VLLM_VERSION="${VLLM_VERSION:-0.33.0}"
@@ -161,9 +164,18 @@ fi
 # ---- start ----
 if [ "$start" -eq 1 ]; then
   if systemctl list-unit-files "edgecoder-ollama-$instance.service" --no-legend 2>/dev/null | grep -q .; then
-    echo "install-vllm: stopping and masking edgecoder-ollama-$instance (undo: systemctl unmask edgecoder-ollama-$instance)"
-    systemctl stop "edgecoder-ollama-$instance.service" || true
-    systemctl mask "edgecoder-ollama-$instance.service"
+    # Not a mask: edgecoder-install rewrites the Ollama unit file on every run, which would lift it.
+    marker="$ETC/vllm-$instance.active"
+    dropin="/etc/systemd/system/edgecoder-ollama-$instance.service.d/vllm-switch.conf"
+    echo "install-vllm: holding edgecoder-ollama-$instance off ($marker; undo: edgecoder-install apply --engine ollama)"
+    printf '# install-vllm.sh: instance %s runs its model on vLLM (edgecoder-vllm@%s); its Ollama stays off.\n' "$instance" "$instance" > "$marker"
+    chmod 0644 "$marker"
+    install -d -m 0755 "$(dirname "$dropin")"
+    printf '[Unit]\nConditionPathExists=!%s\n' "$marker" > "$dropin"
+    chmod 0644 "$dropin"
+    systemctl unmask "edgecoder-ollama-$instance.service" >/dev/null 2>&1 || true
+    systemctl daemon-reload
+    systemctl disable --now "edgecoder-ollama-$instance.service" || true
   fi
   systemctl enable "edgecoder-vllm@$instance.service"
   systemctl restart "edgecoder-vllm@$instance.service"
@@ -180,14 +192,9 @@ fi
 
 cat <<NEXT
 
-Next: point agent $instance at vLLM. Add to $ETC/agent-$instance.env:
-  EDGECODER_ENGINE=vllm
-  VLLM_URL=http://127.0.0.1:$port
-  VLLM_MODEL=$model${slots:+
-  VLLM_MAX_SLOTS=$slots}
-then: systemctl restart edgecoder-agent-$instance
-Back to Ollama: remove those lines, then
-  systemctl disable --now edgecoder-vllm@$instance
-  systemctl unmask edgecoder-ollama-$instance && systemctl start edgecoder-ollama-$instance
-  systemctl restart edgecoder-agent-$instance
+Next: point agent $instance at vLLM (re-runs and upgrades keep it there):
+  sudo edgecoder-install apply --engine vllm --vllm-model $model${slots:+ --vllm-slots $slots}
+It writes EDGECODER_ENGINE=vllm, VLLM_URL=http://127.0.0.1:$port, VLLM_MODEL and VLLM_MAX_SLOTS
+into $ETC/agent-$instance.env, keeps edgecoder-ollama-$instance off and restarts the agent.
+Back to Ollama: sudo edgecoder-install apply --engine ollama
 NEXT

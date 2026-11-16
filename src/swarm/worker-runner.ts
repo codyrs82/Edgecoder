@@ -649,6 +649,10 @@ const networkCallAborts = new Set<AbortController>();
 const MANAGES_OLLAMA_MEMORY = SERVES_OLLAMA && !OPENAI_ENGINE;
 const hostMemory = new HostMemoryManager({
   ollama: MANAGES_OLLAMA_MEMORY ? ollamaAdmin : { list: async () => [], loaded: async () => [], unload: async () => undefined },
+  // vLLM / MLX: the served model is resident and holds the whole budget (vLLM preallocates
+  // --gpu-memory-utilization of the VRAM); calls for it are limited by the engine's slots, which
+  // come from its reported KV cache (refreshEngine), not from Ollama's /api/ps.
+  ...(OPENAI_ENGINE ? { engine: () => (engineStatus?.ok && engineStatus.model ? { model: engineStatus.model.tag, bytes: MEMORY_BUDGET_BYTES } : undefined) } : {}),
   readPressure: () =>
     readMemoryPressure({
       platform: process.platform,
