@@ -351,7 +351,13 @@ export function welcomeScript(): string {
       bar.max = prog.total; bar.value = prog.completed;
       bar.setAttribute("aria-valuetext", prog.completed + " of " + prog.total + " steps done");
       document.getElementById("wzNav").innerHTML = wzStepNav(wzCtx);
+      // Keep the step's video player across re-renders (the guide refreshes every 10 s): replacing
+      // it would restart playback. Re-attach the same element when the step hasn't changed.
+      var oldSlot = document.querySelector("#wzMain .wz-video");
+      var keepVideo = oldSlot && oldSlot.getAttribute("data-video-slot") === wzCtx.state.current ? oldSlot : null;
+      if (keepVideo) keepVideo.parentNode.removeChild(keepVideo);
       document.getElementById("wzMain").innerHTML = wzPanel(wzCtx);
+      if (keepVideo) { var newSlot = document.querySelector("#wzMain .wz-video"); if (newSlot) newSlot.parentNode.replaceChild(keepVideo, newSlot); }
       var step = stepById(wzCtx.state.current);
       document.title = step.title + " · Getting started · EdgeCoder";
       if (focusTitle) {
