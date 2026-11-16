@@ -6,7 +6,10 @@
  * /portal/market redirects there): exchange-style view of compute priced in Bitcoin. One "pair" per compute
  * class (CPU, Apple silicon, GPU, Datacenter GPU / BTC), quoted in msat per credit. The price is
  * flat within a class; one credit is one measured second on the class's base tier and faster
- * tiers mint more credits per second (the weight table under the order book). Candlesticks from the coordinator's minute ticks, a depth chart and order book
+ * tiers mint more credits per second (the weight table under the order book). Every task is matched
+ * on the book (ask <= bid), and code jobs pay the traded price per second; reservations pay the class
+ * reference per second; model calls are charged per token by model size with a class power floor
+ * (src/economy/job-pricing.ts, src/swarm/coordinator/results.ts). Candlesticks from the coordinator's minute ticks, a depth chart and order book
  * from live asks/bids, the trade tape, and a panel to place standing buy/sell orders.
  * Chart: TradingView Lightweight Charts, served from /portal/vendor (CSP script-src 'self').
  */
@@ -14,7 +17,7 @@ import { CSP_NONCE } from "../csp-nonce.js";
 import { verificationMessage } from "../../common/hardware-verification-copy.js";
 
 export const MARKET_SUBTITLE =
-  "Compute priced in Bitcoin: four pairs (CPU, Apple silicon, GPU, datacenter GPU), each one flat price in msat per credit. Faster hardware in a class earns more credits per second. Agents ask, tasks bid, trades clear at the ask.";
+  "Compute priced in Bitcoin: four pairs (CPU, Apple silicon, GPU, datacenter GPU), each one flat price in msat per credit (one measured second on the class's base tier). Faster hardware in a class earns more credits per second. Agents ask, tasks bid, trades clear at the ask. Code jobs pay the traded price per second; model calls are matched here too but charged per token by model size, with a power floor per class.";
 
 export const MARKET_CONTENT = `
     <style nonce="${CSP_NONCE}">
