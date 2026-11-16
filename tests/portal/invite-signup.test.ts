@@ -117,6 +117,7 @@ describe("email signup in invite mode", () => {
     const none = await signup(ctx);
     expect(none.statusCode).toBe(403);
     expect(none.json().error).toBe("invite_required");
+    expect(ctx.sessions.size).toBe(0);
     expect((await signup(ctx, { inviteCode: "EC-AAAA-BBBB-CCCC-DDDD" })).json().error).toBe("invite_invalid");
     expect(ctx.users.size).toBe(0);
   });
@@ -125,6 +126,8 @@ describe("email signup in invite mode", () => {
     const code = await ctx.mint(1);
     const res = await signup(ctx, { inviteCode: code.toLowerCase() });
     expect(res.statusCode).toBe(200);
+    // Signed in straight away.
+    expect(ctx.sessions.get(res.json().sessionToken)).toBe(res.json().userId);
     expect(ctx.invites.redemptions).toEqual([{ codeId: expect.any(String), userId: res.json().userId }]);
     expect((await signup(ctx, { email: "second@example.test", inviteCode: code })).json().error).toBe("invite_invalid");
   });
@@ -171,6 +174,10 @@ describe("OAuth sign-up in invite mode", () => {
     expect(res!.statusCode).toBe(302);
     expect(ctx.users.size).toBe(1);
     expect(ctx.invites.redemptions).toHaveLength(1);
+    // Lands signed in: a session for the new account, then into the app.
+    const [userId] = [...ctx.users.keys()];
+    expect([...ctx.sessions.values()]).toEqual([userId]);
+    expect(res!.headers.location).toBe("/portal/dashboard");
   });
 
   it("an existing account signs in without a code, and a code given is not spent", async () => {

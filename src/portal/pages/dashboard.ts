@@ -87,13 +87,7 @@ app.get("/portal/dashboard", async (_req, reply) => {
       <label class="agree-row" for="termsAcceptBox"><input id="termsAcceptBox" type="checkbox" /><span>I agree to the <a href="/terms" target="_blank" rel="noopener">Terms</a>, <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a> and <a href="/acceptable-use" target="_blank" rel="noopener">Acceptable Use Policy</a></span></label>
       <div class="row u-mt-10"><button class="primary" id="termsAcceptBtn" disabled>Accept</button></div>
     </div>
-    <div id="emailVerifyCard" class="callout warn hidden">
-      <h3>Email verification required</h3>
-      <div class="muted">Your account email is not verified yet. Verify it to fully activate enrolled nodes.</div>
-      <div class="row u-mt-10">
-        <button class="primary" id="emailVerifyNowBtn">Send verification email</button>
-      </div>
-    </div>
+    <!-- An unverified address shows the shell's "Verify your email" banner (layout.ts). -->
     <!-- Recent Activity Feed -->
     <div class="card">
       <h3 class="u-mt-0">Recent activity</h3>
@@ -313,28 +307,6 @@ app.get("/portal/dashboard", async (_req, reply) => {
       );
       renderRows("modelMeshBody", modelRows, 4, "No model-serving agents advertising yet.");
 
-      const emailVerifyCard = document.getElementById("emailVerifyCard");
-      const emailVerifyNowBtn = document.getElementById("emailVerifyNowBtn");
-      if (!emailVerified) {
-        emailVerifyCard.classList.remove("hidden");
-        emailVerifyNowBtn.addEventListener("click", async () => {
-          try {
-            const payload = await api("/auth/resend-verification", {
-              method: "POST",
-              body: JSON.stringify({ email: user.email || "" })
-            });
-            if (payload && payload.alreadyVerified) {
-              showToast("Your email is already verified.");
-            } else {
-              showToast("Verification email sent. Check your inbox.");
-            }
-          } catch (err) {
-            showToast("Could not send verification email: " + String(err.message || err), true);
-          }
-        });
-      } else {
-        emailVerifyCard.classList.add("hidden");
-      }
     })().catch((err) => {
       showToast("Could not load dashboard: " + String(err.message || err), true);
     });
