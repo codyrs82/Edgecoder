@@ -301,12 +301,11 @@
           <p class="wz-body">{step.body}</p>
           {#if loadError && !loaded}<p class="wz-err" role="alert">{loadError}</p>{/if}
 
+          <!-- Explainer videos play on the web guide only; here the slot links to it. -->
           <div class="wz-video" data-video-slot={step.id} hidden={!step.video.src}>
             {#if step.video.src}
-              <!-- svelte-ignore a11y_media_has_caption (the track is there whenever the step's video has captions) -->
-              <video controls preload="none" src={step.video.src} poster={step.video.poster ?? undefined}>
-                {#if step.video.captions}<track kind="captions" srclang="en" label="English" default src={step.video.captions} />{/if}
-              </video>
+              <button class="wz-link" onclick={() => void openUrl(portalWebUrl(O.stepRoute(step.id, "web"))).catch(() => undefined)}>Watch the explainer</button>
+              <span class="wz-muted">(opens in your browser)</span>
             {/if}
           </div>
 
@@ -550,7 +549,6 @@
   .wz-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 24px; padding-top: 14px; border-top: 0.5px solid var(--border); flex-wrap: wrap; }
   .wz-footer-right { display: flex; gap: 8px; flex-wrap: wrap; }
   .wz-video { margin: 0 0 14px; }
-  .wz-video video { width: 100%; border-radius: var(--radius-lg); background: var(--bg-surface); }
   .wz-est { display: flex; flex-direction: column; gap: 6px; max-width: 520px; }
   .wz-est select { width: max-content; height: var(--control-md); background: var(--bg-input); color: var(--text-primary); border: 0.5px solid var(--border-control); border-radius: var(--radius-sm); }
   .wz-table { overflow-x: auto; }

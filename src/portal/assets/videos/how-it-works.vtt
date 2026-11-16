@@ -1,0 +1,93 @@
+WEBVTT
+
+1
+00:00:01.000 --> 00:00:03.149
+Here's how EdgeCoder works.
+
+2
+00:00:03.149 --> 00:00:04.740
+Five things to know.
+
+3
+00:00:05.740 --> 00:00:07.110
+First, you ask.
+
+4
+00:00:07.110 --> 00:00:11.674
+In a chat, a Code task, a bot, or through the API.
+
+5
+00:00:12.674 --> 00:00:15.869
+Next, the coordinator picks the best fit.
+
+6
+00:00:15.869 --> 00:00:19.375
+It matches your job to a model and a machine.
+
+7
+00:00:20.375 --> 00:00:22.044
+Then a machine runs it.
+
+8
+00:00:22.044 --> 00:00:24.003
+Your own machines are free.
+
+9
+00:00:24.003 --> 00:00:26.543
+A host's machine is paid per token.
+
+10
+00:00:27.543 --> 00:00:31.609
+Jobs travel encrypted between the coordinator and the machine.
+
+11
+00:00:31.609 --> 00:00:36.331
+It's not end to end: the coordinator can read a job, so it can route it.
+
+12
+00:00:36.331 --> 00:00:38.495
+Work on this computer stays here.
+
+13
+00:00:39.495 --> 00:00:42.879
+Network calls cost cSats per token.
+
+14
+00:00:42.879 --> 00:00:44.813
+One cSat is one sat.
+
+15
+00:00:44.813 --> 00:00:46.940
+Hosts keep 95 percent.
+
+16
+00:00:47.940 --> 00:00:52.155
+Also in EdgeCoder: bots run on a schedule, with a daily budget.
+
+17
+00:00:53.155 --> 00:00:54.440
+Code is an agent.
+
+18
+00:00:54.440 --> 00:01:00.262
+It edits your project, runs tests, and opens pull requests when you allow it.
+
+19
+00:01:01.262 --> 00:01:03.915
+Tentacles are helpers on cheap models.
+
+20
+00:01:03.915 --> 00:01:06.569
+They take parts of a big task at once.
+
+21
+00:01:07.569 --> 00:01:11.969
+And type /remote in edgecoder code to carry on in the app.
+
+22
+00:01:12.969 --> 00:01:13.816
+That's it.
+
+23
+00:01:13.816 --> 00:01:16.779
+Press Next to set up this computer.

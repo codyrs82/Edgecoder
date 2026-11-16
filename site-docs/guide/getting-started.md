@@ -5,6 +5,14 @@ itself the first time you sign in to the desktop app, and it is on the web at
 [`/portal/welcome`](https://edgecoder.io/portal/welcome). Reopen it any time from Settings →
 Getting started.
 
+<video controls preload="none" width="100%" poster="https://edgecoder.io/assets/videos/how-it-works.jpg" crossorigin="anonymous">
+  <source src="https://edgecoder.io/assets/videos/how-it-works.webm" type="video/webm">
+  <source src="https://edgecoder.io/assets/videos/how-it-works.mp4" type="video/mp4">
+  <track kind="captions" srclang="en" label="English" default src="https://edgecoder.io/assets/videos/how-it-works.vtt">
+</video>
+
+*How EdgeCoder works, in 79 seconds (captions on).*
+
 1. **Welcome:** use your own machines (free), buy network compute, both, or host for others (by request).
 2. **How EdgeCoder works:** you ask, the coordinator picks the best fit, a machine runs it (yours free, a host's paid), the job travels encrypted, and you pay per token in cSats. Hosts get 95 %, the network 5 %.
 3. **Set up this computer:** the desktop app bundles the agent and Ollama and suggests a model for your memory and GPU.

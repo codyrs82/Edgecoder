@@ -12,9 +12,15 @@
  *
  * Both are linked with a content hash in the query string and served with a one-year immutable
  * cache, so a deploy that changes either file changes its URL.
+ *
+ * - /assets/videos/<name>.{mp4,webm,vtt,jpg}: the Getting started explainer videos, their captions
+ *   and posters (docs/videos/README.md; built by scripts/videos/build.mjs into
+ *   src/portal/assets/videos/, copied to dist/portal/assets/videos/ by copy-portal-assets.mjs).
+ *   Byte ranges for seeking (Safari needs them), a one-day cache (the URLs carry no hash), and
+ *   `Access-Control-Allow-Origin: *` so docs.edgecoder.io can load the captions.
  */
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { FastifyInstance } from "fastify";
 import { CSP_NONCE } from "./csp-nonce.js";
@@ -143,6 +149,46 @@ export function messagePage(title: string, bodyHtml: string): string {
 
 const LONG_CACHE ="public, max-age=31536000, immutable";
 
+/** Built server: dist/portal/assets/videos; from source: src/portal/assets/videos. */
+export const VIDEO_DIR = fileURLToPath(new URL("./assets/videos/", import.meta.url));
+const VIDEO_TYPES: Record<string, string> = { mp4: "video/mp4", webm: "video/webm", vtt: "text/vtt; charset=utf-8", jpg: "image/jpeg" };
+const VIDEO_FILE = /^([a-z0-9]+(?:-[a-z0-9]+)*)\.(mp4|webm|vtt|jpg)$/;
+const videoCache = new Map<string, { body: Buffer; mtimeMs: number }>();
+
+/** A video file's bytes (cached until the file changes), or null when there is no such file. */
+function videoFile(name: string): Buffer | null {
+  if (!VIDEO_FILE.test(name)) return null;
+  const path = `${VIDEO_DIR}${name}`;
+  let mtimeMs: number;
+  try {
+    mtimeMs = statSync(path).mtimeMs;
+  } catch {
+    return null;
+  }
+  const hit = videoCache.get(name);
+  if (hit && hit.mtimeMs === mtimeMs) return hit.body;
+  const body = readFileSync(path);
+  videoCache.set(name, { body, mtimeMs });
+  return body;
+}
+
+/** A single `bytes=` range of a file of `size` bytes: [start, end] inclusive, or null if unsatisfiable. */
+export function parseByteRange(header: string, size: number): [number, number] | null {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!m || (m[1] === "" && m[2] === "") || size === 0) return null;
+  let start: number, end: number;
+  if (m[1] === "") {
+    const n = Number(m[2]);
+    if (n === 0) return null;
+    start = Math.max(0, size - n);
+    end = size - 1;
+  } else {
+    start = Number(m[1]);
+    end = m[2] === "" ? size - 1 : Math.min(Number(m[2]), size - 1);
+  }
+  return start <= end && start < size ? [start, end] : null;
+}
+
 export function registerPortalAssets(app: FastifyInstance): void {
   const css = portalTokensCss();
   app.get("/assets/tokens.css", async (_req, reply) => {
@@ -152,5 +198,23 @@ export function registerPortalAssets(app: FastifyInstance): void {
   app.get("/assets/theme.js", async (_req, reply) => {
     reply.header("cache-control", LONG_CACHE).type("text/javascript; charset=utf-8");
     return THEME_JS;
+  });
+  app.get<{ Params: { file: string } }>("/assets/videos/:file", async (req, reply) => {
+    const body = videoFile(req.params.file);
+    if (!body) return reply.code(404).type("text/plain; charset=utf-8").send("not found");
+    const ext = req.params.file.slice(req.params.file.lastIndexOf(".") + 1);
+    reply
+      .header("cache-control", "public, max-age=86400")
+      .header("access-control-allow-origin", "*")
+      .header("accept-ranges", "bytes")
+      .type(VIDEO_TYPES[ext]);
+    const range = req.headers.range;
+    if (typeof range !== "string") return reply.send(body);
+    const r = parseByteRange(range, body.length);
+    if (!r) return reply.code(416).header("content-range", `bytes */${body.length}`).send();
+    return reply
+      .code(206)
+      .header("content-range", `bytes ${r[0]}-${r[1]}/${body.length}`)
+      .send(body.subarray(r[0], r[1] + 1));
   });
 }

@@ -15,6 +15,8 @@
  *
  * Videos: every step has a stable route (desktop `#/welcome/<id>`, web `/portal/welcome/<id>`), a
  * `data-video-anchor` hook (`welcome-<id>`) and a video slot that stays hidden until `src` is set.
+ * Video paths are on the portal (/assets/videos/, built by scripts/videos/build.mjs, see
+ * docs/videos/README.md). Only the web plays them; the desktop app links to the step on the web.
  */
 
 // ── Types ──
@@ -143,7 +145,7 @@ export const HOW_MORE: Array<{ title: string; body: string }> = [
   { title: "Bots", body: "Run on a schedule with a daily budget in cSats, so they never overspend." },
   { title: "Code", body: "An agent that reads and edits a project, runs tests and opens pull requests when you allow it." },
   { title: "Tentacles", body: "Helpers on cheap models that take parts of a big task at once." },
-  { title: "Remote co-editing", body: "Type /remote in `edgecoder code` and keep working on the same session in the app." },
+  { title: "Remote co-editing", body: "Type /remote in edgecoder code and keep working on the same session in the app." },
 ];
 
 export const ROUTING_OPTIONS: Array<{ id: RoutingPolicy; title: string; desc: string; recommended?: boolean }> = [
@@ -223,7 +225,7 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
     actions: [],
     skip: null,
     goals: [],
-    video: NO_VIDEO,
+    video: { src: "/assets/videos/how-it-works.mp4", poster: "/assets/videos/how-it-works.jpg", captions: "/assets/videos/how-it-works.vtt" },
   },
   {
     id: "this-machine",

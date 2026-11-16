@@ -67,6 +67,17 @@ describe("Getting started (desktop wizard)", () => {
     await waitFor(() => expect(api.saveOnboarding).toHaveBeenCalledWith({ current: "welcome", dismissed: false }));
   });
 
+  it("How EdgeCoder works links to its explainer on the web guide instead of embedding it", async () => {
+    current = saved({ goal: "both", current: "how", done: ["welcome"] });
+    render(OnboardingWizard, props());
+    await waitFor(() => expect(heading().textContent).toBe("How EdgeCoder works"));
+    const slot = document.querySelector("[data-video-slot='how']") as HTMLElement;
+    expect(slot.hidden).toBe(false);
+    expect(slot.querySelector("video")).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "Watch the explainer" }));
+    expect(shell.open).toHaveBeenCalledWith("https://edgecoder.io/portal/welcome/how");
+  });
+
   it("resumes at the saved step", async () => {
     current = saved({ goal: "both", current: "fund", done: ["welcome", "how"] });
     render(OnboardingWizard, props());
