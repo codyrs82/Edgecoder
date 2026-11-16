@@ -95,12 +95,16 @@ export class CapacityPlanner {
     }
   }
 
-  /** Weighted pick over { modelId: weight } by weight x headroom; null when nothing has room. */
-  pick(weights, r) {
+  /**
+   * Weighted pick over { modelId: weight } by weight x headroom; null when nothing has room.
+   * avoid: capacity keys this caller must not use (a buyer's own agents hold them: no self-dealing).
+   */
+  pick(weights, r, avoid = null) {
     const options = [];
     for (const [id, w] of Object.entries(weights)) {
       const res = this.resolve(id);
       if (!res || w <= 0) continue;
+      if (avoid?.has?.(res.key)) continue;
       const room = this.headroom(res.key);
       if (room <= 0) continue;
       options.push({ ...res, weight: w * Math.min(room, 1_000) });
@@ -132,8 +136,153 @@ export class CapacityPlanner {
     return error;
   }
 
+  /** This machine's whole-slot share of the model's real slots (no oversubscription). */
+  slotShare(key) {
+    const slots = key === "auto" ? 0 : this.capacity?.models?.[key]?.slots ?? DEFAULT_SLOTS[key] ?? 0;
+    return shareOf(slots, this.machines, this.index, key);
+  }
+
+  /**
+   * Slot utilization as this machine sees it: calls in flight over its share of the real slots,
+   * summed over `keys` (the models its buyers may use; default all). 0..1; null with no slots.
+   */
+  utilization(keys = null) {
+    let busy = 0, slots = 0;
+    const classes = new Set();
+    for (const k of keys ?? Object.keys(this.netCap)) {
+      const s = this.slotShare(k);
+      if (s <= 0) continue;
+      slots += s;
+      busy += Math.min(s, this.inflight[k] ?? 0);
+      for (const c of this.capacity?.models?.[k]?.classes ?? []) classes.add(c);
+    }
+    // A machine's slots are shared by every model it holds (a Mac with 4 slots counts 4 for each of
+    // its models): never count more slots than the classes holding these models have.
+    const classSlots = [...classes].reduce((a, c) => a + (this.capacity?.classes?.[c]?.slots ?? Infinity), 0);
+    if (classes.size && Number.isFinite(classSlots)) slots = Math.min(slots, classSlots / this.machines);
+    return slots > 0 ? Math.min(1, busy / slots) : null;
+  }
+
   /** Per-model caps on this machine, for the logs. */
   view() {
     return Object.fromEntries(Object.keys(this.netCap).map((k) => [k, { networkCap: this.netCap[k], share: this.share(k), inflight: this.inflight[k] ?? 0, penalty: this.penalty[k] ?? 0 }]));
   }
+}
+
+/**
+ * Arrival-rate control: a load test holds its load instead of stopping.
+ *
+ * - schedule mode (ramp, steady, saturate, soak): the stage list says the rate, but never above
+ *   `ceiling`. A breach (real-failure rate over the profile's threshold in the 30 s window) steps
+ *   the rate down to the last rate that ran a clean window (or x0.7 when there is none lower) and
+ *   makes that the ceiling, so later, higher stages hold the highest sustainable rate. Another
+ *   breach steps down again, never below minRate. The run goes on to --duration.
+ * - adaptive mode (the sustain profile): starts at startRate and every probeEverySec multiplies the
+ *   rate by 1.5 while slot utilization is under the target band (and nothing breached); inside the
+ *   band [low, high] it holds; above it, or on a breach, it steps down. After the probe it adjusts
+ *   gently (x1.15 / x0.85) every adjustEverySec. A breach ceiling relaxes by 10% after 10 clean minutes.
+ *
+ * Errors never stop a run here; see fatalStop for what does.
+ */
+export class RateGovernor {
+  constructor({ mode = "schedule", maxRate = Infinity, minRate = 0.02, startRate = null, breach = { errorRate: 0.1, minCalls: 20 }, target = [0.7, 0.85], probeEverySec = 60, adjustEverySec = 120, now = () => Date.now() } = {}) {
+    Object.assign(this, { mode, maxRate, minRate, breach, target, probeEverySec, adjustEverySec, now });
+    this.ceiling = Infinity;
+    this.lastGood = 0;
+    this.rate = Math.min(maxRate, startRate ?? minRate);
+    this.phase = mode === "adaptive" ? "probe" : "schedule";
+    this.lastAdjustMs = now();
+    this.lastBreachMs = 0;
+    this.lastRelaxMs = 0;
+    this.utilSum = 0;
+    this.utilN = 0;
+    this.breaches = 0;
+  }
+
+  /** A new schedule stage: its rate, held under the ceiling. Adaptive mode keeps its own rate. */
+  setStage(scheduled) {
+    if (this.mode === "adaptive") return this.rate;
+    this.rate = Math.max(0, Math.min(scheduled, this.ceiling, this.maxRate));
+    return this.rate;
+  }
+
+  /** One utilization sample (0..1 or null), averaged until the next adjustment. */
+  sample(util) {
+    if (util === null || util === undefined || !Number.isFinite(util)) return;
+    this.utilSum += util;
+    this.utilN++;
+  }
+
+  #set(rate) {
+    this.rate = Math.max(this.minRate, Math.min(this.maxRate, this.ceiling, rate));
+    this.lastAdjustMs = this.now();
+    this.utilSum = 0;
+    this.utilN = 0;
+    return this.rate;
+  }
+
+  /**
+   * The 30 s window at a tick: { calls, failures }. Returns null (nothing changed) or
+   * { action, rate, from, ... } for the log: backoff | probe_up | nudge_up | nudge_down | hold.
+   */
+  observe({ calls = 0, failures = 0 } = {}) {
+    const now = this.now();
+    const from = this.rate;
+    const errorRate = calls ? failures / calls : 0;
+    const breached = calls >= this.breach.minCalls && errorRate > this.breach.errorRate;
+    if (breached) {
+      if (now - this.lastBreachMs <= 30_000) return null; // one step per window
+      this.lastBreachMs = now;
+      this.breaches++;
+      const down = this.lastGood > 0 && this.lastGood < from ? this.lastGood : from * 0.7;
+      this.ceiling = Math.max(this.minRate, down);
+      this.lastGood = 0;
+      if (this.mode === "adaptive") this.phase = "hold";
+      return { action: "backoff", from, rate: this.#set(down), ceiling: this.ceiling, errorRate: Math.round(errorRate * 1000) / 1000 };
+    }
+    if (calls >= Math.max(1, Math.ceil(this.breach.minCalls / 2))) this.lastGood = from;
+    // A breach ceiling relaxes after 10 clean minutes (the trouble may have been a restart).
+    if (Number.isFinite(this.ceiling) && now - Math.max(this.lastBreachMs, this.lastRelaxMs) > 600_000) {
+      this.ceiling = this.ceiling * 1.1 >= this.maxRate ? Infinity : this.ceiling * 1.1;
+      this.lastRelaxMs = now;
+    }
+    if (this.mode !== "adaptive") return null;
+    const every = (this.phase === "probe" ? this.probeEverySec : this.adjustEverySec) * 1000;
+    if (now - this.lastAdjustMs < every || !this.utilN) return null;
+    const util = this.utilSum / this.utilN;
+    const [low, high] = this.target;
+    const u = Math.round(util * 1000) / 1000;
+    if (util > high) {
+      this.phase = "hold";
+      return { action: "nudge_down", from, rate: this.#set(from * 0.85), util: u };
+    }
+    if (util < low && from < Math.min(this.maxRate, this.ceiling)) {
+      const action = this.phase === "probe" ? "probe_up" : "nudge_up";
+      return { action, from, rate: this.#set(from * (this.phase === "probe" ? 1.5 : 1.15)), util: u };
+    }
+    if (this.phase === "probe") this.phase = "hold";
+    this.#set(from);
+    return { action: "hold", from, rate: from, util: u };
+  }
+}
+
+/** Errors that mean the coordinator (or the API in front of it) is down, not busy. */
+export const DOWN_ERRORS = new Set(["network_error", "http_500", "http_502", "http_504", "http_520", "http_521", "http_522", "http_523", "http_524", "http_530"]);
+
+/**
+ * Whether a run must stop: only for real failure, never for capacity. Arguments: the 30 s window
+ * ({ calls, errors: { type: n } }) and how many consecutive ticks the coordinator looked down.
+ * Returns { stop, downTicks } where stop is null or "auth_failed" | "coordinator_down".
+ * Budget and balance stops (budget_exhausted, all_users_stopped) are decided by the caller.
+ */
+export function fatalStop(window, downTicks = 0, { downTicksToStop = 12 } = {}) {
+  const calls = window?.calls ?? 0;
+  const errs = window?.errors ?? {};
+  const auth = errs.auth_error ?? 0;
+  if (auth >= 3 && auth / Math.max(1, calls) >= 0.5) return { stop: "auth_failed", downTicks };
+  const down = Object.entries(errs).reduce((a, [k, n]) => a + (DOWN_ERRORS.has(k) ? n : 0), 0);
+  const isDown = calls >= 3 && down / calls >= 0.9;
+  const ticks = isDown ? downTicks + 1 : 0;
+  // 12 ticks of 10 s: two minutes of nothing but connection failures and 5xx.
+  return { stop: ticks >= downTicksToStop ? "coordinator_down" : null, downTicks: ticks };
 }

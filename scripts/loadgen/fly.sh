@@ -9,13 +9,19 @@
 #   scripts/loadgen/fly.sh watch                         sample the coordinators' per-model slots every 15 s until
 #                                                        the run ends (run it alongside; report.mjs uses it)
 #   scripts/loadgen/fly.sh status | logs                 machines / live JSON lines
-#   scripts/loadgen/fly.sh report [--out file.json]      merge every machine's results + coordinator series
+#   scripts/loadgen/fly.sh report [--out file.json]      merge every machine's results + coordinator series, and the
+#                                                        money report (ledger snapshot taken at `run` vs now)
 #   scripts/loadgen/fly.sh stop                          scale to 0 machines (no cost; results are gone)
 #   scripts/loadgen/fly.sh destroy                       delete the app and its secrets
 #
 # run opts: --regions iad,lhr,sin,syd (default; at most 16 machines, cap 16 calls/s is split between them)
 #           --duration 30m  --rate N  --max-rate N (lower the 16 calls/s cap)  --stage-minutes N  --loop  --budget CSATS  --min-balance CSATS
-#           --users st1,st2  --start-in SECONDS (default 150, so all regions start together)
+#           --buyers st9,st10 (alias --users; default: accounts that host nothing, else every funded account)
+#           --buyer-cap CSATS (most one buyer spends in the run)  --min-rate N (per machine floor, default 0.02/s)
+#           --start-in SECONDS (default 150, so all regions start together)
+# Buyers: budget.mjs buyers picks them and, per buyer, the models its own agents hold (LOADGEN_AVOID),
+# which it never asks for, so its calls pay other accounts. A ledger snapshot (balances + who hosts
+# what) is saved before the run for the money report.
 #           --oversub X (bulk models' in-flight cap = slots x X, default 1.5)  --auto-slots N (default 3)
 # Capacity: the run takes a snapshot of slots per model (capacity.mjs, with the admin token on this
 # host) and passes it to the machines as LOADGEN_CAPACITY; the admin token itself is not sent.
@@ -48,12 +54,13 @@ case "$cmd" in
     fly secrets list -a "$APP" ;;
 
   run)
-    profile=${1:?profile: smoke|steady|ramp|saturate|soak}; shift
-    regions=iad,lhr,sin,syd; duration=""; rate=""; max_rate=""; stage_minutes=""; loop=""; budget=2000; min_balance=1500; users=""; start_in=150; oversub=""; auto_slots=""
+    profile=${1:?profile: smoke|steady|ramp|saturate|soak|sustain}; shift
+    regions=iad,lhr,sin,syd; duration=""; rate=""; max_rate=""; stage_minutes=""; loop=""; budget=2000; min_balance=1500; users=""; start_in=150; oversub=""; auto_slots=""; buyer_cap=""; min_rate=""
     while [ $# -gt 0 ]; do case "$1" in
       --regions) regions=$2; shift 2;; --duration) duration=$2; shift 2;; --rate) rate=$2; shift 2;; --max-rate) max_rate=$2; shift 2;;
       --stage-minutes) stage_minutes=$2; shift 2;; --loop) loop=1; shift;; --budget) budget=$2; shift 2;;
-      --min-balance) min_balance=$2; shift 2;; --users) users=$2; shift 2;; --start-in) start_in=$2; shift 2;;
+      --min-balance) min_balance=$2; shift 2;; --users|--buyers) users=$2; shift 2;; --start-in) start_in=$2; shift 2;;
+      --buyer-cap) buyer_cap=$2; shift 2;; --min-rate) min_rate=$2; shift 2;;
       --oversub) oversub=$2; shift 2;; --auto-slots) auto_slots=$2; shift 2;;
       *) echo "unknown option $1" >&2; exit 2;; esac; done
     IFS=, read -r -a R <<<"$regions"
@@ -66,6 +73,17 @@ case "$cmd" in
     capacity=$(node "$HERE/capacity.mjs" 2>/dev/null || true)
     [ -n "$capacity" ] || echo "warning: no capacity snapshot (admin token?); machines use built-in slot defaults" >&2
     printf 'RUN_ID=%s\nSTART_AT=%s\nEND_AT=%s\n' "$run_id" "$start_at" $(( start_at + duration_sec * 1000 )) >"$DIR/last-run.env"
+    # Buyers and the models each must avoid (its own agents hold them); then the "before" ledger.
+    pick=$(node "$HERE/budget.mjs" buyers ${users:+--buyers "$users"} --min-balance "$min_balance" 2>/dev/null || true)
+    avoid="{}"
+    if [ -n "$pick" ]; then
+      users=$(printf '%s' "$pick" | node -e 'console.log(JSON.parse(require("fs").readFileSync(0,"utf8")).buyers.join(","))')
+      avoid=$(printf '%s' "$pick" | node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync(0,"utf8")).avoid))')
+      echo "buyers: $users ($(printf '%s' "$pick" | node -e 'const p=JSON.parse(require("fs").readFileSync(0,"utf8"));console.log(p.reason+"; avoid "+JSON.stringify(p.avoid))'))"
+    else
+      echo "warning: could not choose buyers (admin token?); every account buys and self-dealing is not avoided" >&2
+    fi
+    node "$HERE/budget.mjs" ledger --out "$DIR/ledger-before-$run_id.json" >/dev/null 2>&1 && echo "ledger snapshot: $DIR/ledger-before-$run_id.json" || echo "warning: no ledger snapshot; the report will lack the money section" >&2
     tgz=$(tar czf - -C "$HERE/.." --exclude='*.sh' loadgen | base64 | tr -d '\n')
     toml="$DIR/fly.loadgen.toml"
     cat >"$toml" <<TOML
@@ -85,8 +103,11 @@ primary_region = "${R[0]}"
   LOADGEN_RESULTS = "/tmp/loadgen-results.jsonl"
   LOADGEN_TGZ = "$tgz"
   LOADGEN_CAPACITY = '$capacity'
+  LOADGEN_AVOID = '$avoid'
 $( [ -n "$oversub" ] && echo "  LOADGEN_OVERSUB = \"$oversub\"" )
 $( [ -n "$auto_slots" ] && echo "  LOADGEN_AUTO_SLOTS = \"$auto_slots\"" )
+$( [ -n "$buyer_cap" ] && echo "  LOADGEN_BUYER_CAP_CSATS = \"$buyer_cap\"" )
+$( [ -n "$min_rate" ] && echo "  LOADGEN_MIN_RATE = \"$min_rate\"" )
 $( [ -n "$rate" ] && echo "  LOADGEN_RATE = \"$rate\"" )
 $( [ -n "$max_rate" ] && echo "  LOADGEN_MAX_RATE = \"$max_rate\"" )
 $( [ -n "$stage_minutes" ] && echo "  LOADGEN_STAGE_MINUTES = \"$stage_minutes\"" )
@@ -125,8 +146,13 @@ TOML
   status) fly machines list -a "$APP" ;;
   logs) fly logs -a "$APP" "$@" ;;
   report)
-    samples=""; [ -f "$DIR/last-run.env" ] && . "$DIR/last-run.env" && [ -f "$DIR/samples-$RUN_ID.jsonl" ] && samples="$DIR/samples-$RUN_ID.jsonl"
-    node "$HERE/report.mjs" --app "$APP" ${samples:+--samples "$samples"} "$@" ;;
+    samples=""; ledger=""; [ -f "$DIR/last-run.env" ] && . "$DIR/last-run.env" && [ -f "$DIR/samples-$RUN_ID.jsonl" ] && samples="$DIR/samples-$RUN_ID.jsonl"
+    if [ -n "${RUN_ID:-}" ] && [ -f "$DIR/ledger-before-$RUN_ID.json" ]; then
+      ledger="$DIR/ledger-before-$RUN_ID.json"
+      node "$HERE/budget.mjs" ledger --out "$DIR/ledger-after-$RUN_ID.json" >/dev/null 2>&1 || true
+    fi
+    node "$HERE/report.mjs" --app "$APP" ${samples:+--samples "$samples"} ${ledger:+--ledger-before "$ledger"} \
+      $( [ -n "$ledger" ] && [ -f "$DIR/ledger-after-$RUN_ID.json" ] && echo --ledger-after "$DIR/ledger-after-$RUN_ID.json" ) "$@" ;;
   stop) fly scale count 0 -a "$APP" --yes ;;
   destroy) fly apps destroy "$APP" --yes ;;
   *) sed -n '5,20p' "$0"; exit 2 ;;

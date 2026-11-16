@@ -14,10 +14,15 @@
  * Safety:
  *   - HARD_MAX_RATE (16 calls/s) for the whole network: this machine never starts more than
  *     floor(cap / machines) calls in any sliding second.
- *   - backoff: if the error rate over 30 s passes the profile's threshold, the rate drops one
- *     stage for the rest of the stage and the run then stops; a second breach stops it at once.
- *   - budget: a user stops below LOADGEN_MIN_BALANCE cSats; the machine stops after its share of
- *     LOADGEN_BUDGET_CSATS.
+ *   - hold, don't stop: if the error rate over 30 s passes the profile's threshold, the rate steps
+ *     down and is held there (planner.mjs RateGovernor) until --duration ends. The sustain profile
+ *     finds the rate that keeps 70-85% of the slots busy and holds it. A run stops early only for
+ *     real failure: auth errors, budget exhausted, every buyer out of cSats, coordinator down.
+ *   - budget: a user stops below LOADGEN_MIN_BALANCE cSats or after --buyer-cap cSats; the machine
+ *     stops after its share of LOADGEN_BUDGET_CSATS.
+ *   - buyers (--buyers / LOADGEN_BUYERS, default every account) and LOADGEN_AVOID (JSON
+ *     { buyer: [model, ...] }, from budget.mjs buyers): a buyer never asks for a model its own
+ *     agents hold, so its money goes to other accounts (fly.sh fills both).
  *   - API keys are read from LOADGEN_KEYS (JSON {name: key}) or from account files; never printed.
  *
  * Output: JSON lines on stdout (LOADGEN_START, LOADGEN_TICK, LOADGEN_EVENT, LOADGEN_STAGE,
@@ -31,11 +36,11 @@ import { appendFileSync, existsSync, readFileSync, readdirSync, writeFileSync } 
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { HARD_MAX_RATE, PERSONAS, MODELS, CODING_CONTEXT, buildSchedule, parseDuration } from "./profiles.mjs";
+import { HARD_MAX_RATE, PERSONAS, MODELS, buildSchedule, codingContext, parseDuration } from "./profiles.mjs";
 import { StageStats, classifyError, digestStage, isFailure, table } from "./stats.mjs";
-import { CapacityPlanner } from "./planner.mjs";
+import { CapacityPlanner, RateGovernor, fatalStop, parseModelId } from "./planner.mjs";
 import { fetchCapacity } from "./capacity.mjs";
-import { CodingSession, pickWeighted, question, rng } from "./workload.mjs";
+import { CodingSession, codegenSize, codegenTask, modelMix, pickWeighted, question, rng } from "./workload.mjs";
 
 // ---------------------------------------------------------------------------- configuration
 const argv = process.argv.slice(2);
@@ -58,6 +63,9 @@ const RUN_ID = opt("run-id", "LOADGEN_RUN_ID", `lg-${new Date().toISOString().sl
 const START_AT = Number(opt("start-at", "LOADGEN_START_AT", 0)) || Date.now() + 2_000;
 const BUDGET = Number(opt("budget", "LOADGEN_BUDGET_CSATS", 2_000));
 const MIN_BALANCE = Number(opt("min-balance", "LOADGEN_MIN_BALANCE", 1000));
+// Most one buyer may spend in this run (all machines together); 0 = no cap beyond the balance floor.
+const BUYER_CAP = Number(opt("buyer-cap", "LOADGEN_BUYER_CAP_CSATS", 0));
+const MIN_RATE = Number(opt("min-rate", "LOADGEN_MIN_RATE", 0.02));
 const MAX_INFLIGHT = Number(opt("max-inflight", "LOADGEN_MAX_INFLIGHT", 48));
 const LINGER_SEC = Number(opt("linger", "LOADGEN_LINGER_SEC", 0));
 const RESULTS = opt("results", "LOADGEN_RESULTS", join(tmpdir(), `loadgen-${RUN_ID}-${REGION}.jsonl`));
@@ -112,19 +120,29 @@ function loadKeys() {
   return keys;
 }
 const allKeys = loadKeys();
-const only = (opt("users", "LOADGEN_USERS", "") || "").split(",").map((s) => s.trim()).filter(Boolean);
+const only = (opt("buyers", "LOADGEN_BUYERS", "") || opt("users", "LOADGEN_USERS", "") || "").split(",").map((s) => s.trim()).filter(Boolean);
+let AVOID = {};
+try { AVOID = JSON.parse(opt("avoid", "LOADGEN_AVOID", "") || "{}"); } catch { AVOID = {}; }
 const names = Object.keys(allKeys).filter((n) => !only.length || only.includes(n)).sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
 const personaNames = Object.keys(PERSONAS);
+// Fewer buyers than machines: every machine uses every buyer (caps are then split between machines).
+const SHARED = names.length < MACHINES;
+const newMoney = () => ({ calls: 0, ok: 0, cSats: 0, byModel: {}, ownCalls: 0, ownCSats: 0, servedSeen: 0 });
 const users = names
   .map((name, j) => ({ name, j }))
-  .filter(({ j }) => j % MACHINES === INDEX)
-  .map(({ name, j }) => ({ name, key: allKeys[name], persona: personaNames[j % personaNames.length], balance: null, spent: 0, stopped: null, sessions: 0 }));
+  .filter(({ j }) => SHARED || j % MACHINES === INDEX)
+  .map(({ name, j }) => ({
+    name, key: allKeys[name], persona: personaNames[j % personaNames.length], balance: null, spent: 0, stopped: null, sessions: 0,
+    avoid: new Set((AVOID[name] ?? []).map((m) => parseModelId(m).key)), money: newMoney(),
+  }));
+const USER_CAP = BUYER_CAP > 0 ? BUYER_CAP / (SHARED ? MACHINES : 1) : Infinity;
 
 out("LOADGEN_START", {
   profile: PROFILE, url: URL_, machines: MACHINES, index: INDEX, perSecondLimit: PER_SECOND_LIMIT, networkCap: schedule.cap,
   startAt: new Date(START_AT).toISOString(), durationSec: schedule.durationSec, loop: schedule.loop,
   stages: schedule.stages.map((s) => ({ i: s.index, rate: s.rate, sec: s.seconds })), breach: schedule.breach,
-  users: users.map((u) => ({ name: u.name, persona: u.persona })), budgetCSats: BUDGET / MACHINES, minBalance: MIN_BALANCE, results: RESULTS,
+  users: users.map((u) => ({ name: u.name, persona: u.persona, avoid: [...u.avoid] })), budgetCSats: BUDGET / MACHINES, buyerCapCSats: Number.isFinite(USER_CAP) ? USER_CAP : null, minBalance: MIN_BALANCE, results: RESULTS,
+  adaptive: schedule.adaptive, startRate: schedule.startRate ?? null,
 });
 if (DRY) process.exit(0);
 if (!users.length) { console.error("no users (API keys) for this machine"); process.exit(2); }
@@ -149,7 +167,7 @@ async function balance(u) {
  */
 async function chatCall(u, body, { timeoutMs, sessionId }) {
   const t0 = performance.now();
-  let ttft = null, text = "", status = 0, errBody = "", cSats = 0, usage = null, where = null;
+  let ttft = null, text = "", status = 0, errBody = "", cSats = 0, usage = null, where = null, served = null;
   const toolCalls = [];
   try {
     const res = await fetch(`${URL_}/v1/chat/completions`, {
@@ -182,6 +200,8 @@ async function chatCall(u, body, { timeoutMs, sessionId }) {
           if (j.usage) usage = j.usage;
           if (j.edgecoder?.cSatsSpent !== undefined) cSats = Number(j.edgecoder.cSatsSpent) || 0;
           if (j.edgecoder?.where) where = String(j.edgecoder.where);
+          // Not sent by /v1/chat/completions today; used when it is (exact self-dealing count).
+          if (j.edgecoder?.served && typeof j.edgecoder.served === "object") served = { own: j.edgecoder.served.own === true, computeClass: j.edgecoder.served.computeClass ?? null };
         }
       }
     }
@@ -194,7 +214,7 @@ async function chatCall(u, body, { timeoutMs, sessionId }) {
   const error = status === 200 && !errBody ? null : classifyError(status, errBody) ?? `http_${status}`;
   return {
     status, error, errDetail: error ? errBody.slice(0, 160) : undefined, ttftMs: ttft === null ? null : Math.round(ttft), totalMs, text, toolCalls,
-    cSats, where, promptTokens: usage?.prompt_tokens ?? 0, outputTokens: usage?.completion_tokens ?? 0,
+    cSats, where, served, promptTokens: usage?.prompt_tokens ?? 0, outputTokens: usage?.completion_tokens ?? 0,
   };
 }
 
@@ -223,7 +243,10 @@ const stageStats = [];
 let inflight = 0;
 let stopReason = null;
 let machineSpent = 0;
-const recent = []; // { atMs, error } of finished calls, for the breach check (error = a real failure)
+const recent = []; // { atMs, error, type } of finished calls, for the breach check (error = a real failure)
+const droppedModels = new Map(); // capacity key -> until (ms): the network refused it (gone, restricted)
+const refusals = {};
+const REFUSED = new Set(["model_not_found", "no_agent_has_model", "http_403"]);
 const readySessions = []; // coding sessions waiting for their next turn
 let seq = 0;
 let debt = 0; // arrivals a burst already used (a burst of k calls stands for k arrivals)
@@ -231,9 +254,28 @@ let debt = 0; // arrivals a burst already used (a burst of k calls stands for k 
 function record(stats, u, behaviour, model, r, correct, extra = {}) {
   const res = { behaviour, model, error: r.error, ttftMs: r.ttftMs, totalMs: r.totalMs, correct, cSats: r.cSats, promptTokens: r.promptTokens, outputTokens: r.outputTokens, where: r.where };
   stats.add(res);
-  recent.push({ atMs: Date.now(), error: isFailure(r.error) });
+  recent.push({ atMs: Date.now(), error: isFailure(r.error), type: r.error });
   u.spent += r.cSats ?? 0;
   machineSpent += r.cSats ?? 0;
+  const mo = u.money;
+  mo.calls++;
+  if (!r.error) mo.ok++;
+  mo.cSats += r.cSats ?? 0;
+  const bm = (mo.byModel[model] ??= { calls: 0, cSats: 0 });
+  bm.calls++;
+  bm.cSats += r.cSats ?? 0;
+  if (r.served) { mo.servedSeen++; if (r.served.own) { mo.ownCalls++; mo.ownCSats += r.cSats ?? 0; } }
+  // A model the network keeps refusing (gone, or restricted) leaves the mix for 10 minutes.
+  const key = parseModelId(model).key;
+  if (REFUSED.has(r.error) && key !== "auto" && (refusals[key] = (refusals[key] ?? 0) + 1) >= 3) {
+    refusals[key] = 0;
+    droppedModels.set(key, Date.now() + 600_000);
+    out("LOADGEN_EVENT", { type: "model_dropped", model: key, error: r.error, minutes: 10 });
+  }
+  if (mo.cSats >= USER_CAP && !u.stopped) {
+    u.stopped = "buyer_cap";
+    out("LOADGEN_EVENT", { type: "user_stopped", user: u.name, reason: "buyer_cap", cSats: Math.round(mo.cSats * 1000) / 1000 });
+  }
   // Every error while they are few, then every 20th (the stage lines carry the full counts).
   if (r.error && (process.env.LOADGEN_VERBOSE === "1" || stats.errLogged++ < 30 || stats.errLogged % 20 === 0)) out("LOADGEN_ERR", { user: u.name, behaviour, model, error: r.error, status: r.status, detail: r.errDetail, ...extra });
   if (u.balance !== null && u.balance - u.spent < MIN_BALANCE && !u.stopped) {
@@ -249,9 +291,20 @@ function record(stats, u, behaviour, model, r, correct, extra = {}) {
   if (machineSpent > BUDGET / MACHINES && !stopReason) stopReason = "budget_exhausted";
 }
 
-/** Pick a model with room (planner), noting once when a class nobody holds is dropped. */
-function pickModel(behaviour) {
-  const m = planner.pick(MODELS[behaviour], R);
+/** The behaviour's model mix now: from the capacity snapshot, less models the network refused. */
+function weightsFor(behaviour) {
+  const w = modelMix(planner.capacity, behaviour, MODELS[behaviour]);
+  const now = Date.now();
+  for (const id of Object.keys(w)) {
+    const until = droppedModels.get(parseModelId(id).key);
+    if (until && until > now) delete w[id];
+  }
+  return w;
+}
+
+/** Pick a model with room (planner) that this buyer's own agents do not hold. */
+function pickModel(behaviour, u) {
+  const m = planner.pick(weightsFor(behaviour), R, u?.avoid);
   if (m?.rewrittenFrom && !rewritten.has(m.rewrittenFrom)) {
     rewritten.add(m.rewrittenFrom);
     out("LOADGEN_EVENT", { type: "class_unavailable", asked: m.rewrittenFrom, sent: m.id, note: "no machine holds the model in that class; sent without the class" });
@@ -276,7 +329,7 @@ async function plannedCall(u, m, body, opts) {
 }
 
 async function doChat(u, stats, behaviour) {
-  const m = pickModel(behaviour);
+  const m = pickModel(behaviour, u);
   if (!m) { stats.drop("capacity"); return; }
   const { q, ok } = question(seq++);
   const r = await plannedCall(u, m, { max_tokens: 16, messages: [{ role: "user", content: q }] }, { timeoutMs: 120_000 });
@@ -289,10 +342,20 @@ async function doBurst(u, stats) {
   await Promise.all(Array.from({ length: k }, () => doChat(u, stats, "burst")));
 }
 
+/** One code-generation call: a module as context, a function and tests out (hundreds of tokens). */
+async function doCodegen(u, stats) {
+  const m = pickModel("codegen", u);
+  if (!m) { stats.drop("capacity"); return; }
+  const { contextTokens, maxTokens } = codegenSize(m.key, planner.capacity, schedule.codingContextScale);
+  const t = codegenTask(R, seq++, contextTokens);
+  const r = await plannedCall(u, m, { max_tokens: maxTokens, messages: t.messages }, { timeoutMs: 300_000 });
+  record(stats, u, "codegen", m.id, r, r.error ? null : t.ok(r.text), { contextTokens: t.contextTokens });
+}
+
 function newSession(u) {
-  const m = pickModel("coding");
+  const m = pickModel("coding", u);
   if (!m) return null;
-  const full = CODING_CONTEXT[m.id] ?? CODING_CONTEXT.default;
+  const full = codingContext(m.id);
   const target = Math.max(2_500, Math.round(full * schedule.codingContextScale));
   u.sessions++;
   const s = new CodingSession({ id: `${RUN_ID}-${REGION}-${u.name}-${randomUUID().slice(0, 8)}`, model: m.id, seed: Math.floor(R() * 2 ** 31), targetTokens: target, startTokens: 2_000, maxTurns: schedule.codingContextScale < 1 ? 4 : 12 });
@@ -302,7 +365,7 @@ function newSession(u) {
 
 async function doCodingTurn(u, s, stats) {
   const { messages, tools, contextTokens } = s.next();
-  const r = await plannedCall(u, s.planned, { max_tokens: 64, messages, tools }, { timeoutMs: 300_000, sessionId: s.id });
+  const r = await plannedCall(u, s.planned, { max_tokens: 160, messages, tools }, { timeoutMs: 300_000, sessionId: s.id });
   const correct = r.error ? null : s.record({ text: r.text, toolCalls: r.toolCalls });
   record(stats, u, "coding", s.model, r, correct, { session: s.id, turn: s.turn, contextTokens });
   if (r.error || s.done || stopReason || u.stopped) {
@@ -343,6 +406,7 @@ function arrival(stats) {
   const s = b === "coding" ? newSession(u) : null;
   if (s) void doCodingTurn(u, s, stats);
   else if (b === "burst") void doBurst(u, stats);
+  else if (b === "codegen") void doCodegen(u, stats);
   else void doChat(u, stats, "chat");
 }
 
@@ -366,8 +430,33 @@ setInterval(async () => {
 const endAt = START_AT + schedule.durationSec * 1000;
 if (Date.now() < START_AT) await sleep(START_AT - Date.now());
 const runStarted = Date.now();
-let backedOff = false;
 let lastTickCalls = 0;
+let downTicks = 0;
+const governor = new RateGovernor({
+  mode: schedule.adaptive ? "adaptive" : "schedule",
+  maxRate: schedule.cap / MACHINES,
+  minRate: MIN_RATE,
+  startRate: schedule.adaptive ? schedule.startRate / MACHINES : null,
+  breach: schedule.breach,
+  ...(schedule.target ? { target: schedule.target } : {}),
+});
+let rate = governor.rate;
+/** Models some active buyer may use: what slot utilization is measured over. */
+function usableKeys() {
+  const active = users.filter((u) => !u.stopped);
+  return Object.keys(planner.netCap).filter((k) => k !== "auto" && active.some((u) => !u.avoid.has(k)));
+}
+// Slot utilization once a second, for the sustain profile's controller and the stage lines.
+setInterval(() => {
+  const u = planner.utilization(usableKeys());
+  governor.sample(u);
+  if (current && !current.endMs) {
+    current.rateSum = (current.rateSum ?? 0) + rate;
+    current.rateN = (current.rateN ?? 0) + 1;
+    if (u !== null) { current.utilSum = (current.utilSum ?? 0) + u; current.utilN = (current.utilN ?? 0) + 1; }
+  }
+}, 1_000).unref();
+const gapMs = (r) => (r > 0 ? (-Math.log(1 - R()) / r) * 1000 : 1000);
 
 for (const st of schedule.stages) {
   const stageStart = START_AT + st.startSec * 1000;
@@ -378,45 +467,49 @@ for (const st of schedule.stages) {
     if (cap) planner.setCapacity(cap);
   }
   out("LOADGEN_CAPACITY", { stage: st.index, source: ADMIN_TOKEN ? "admin_network" : initialCapacity ? "snapshot" : "defaults", snapshotAt: planner.capacity?.atMs ? new Date(planner.capacity.atMs).toISOString() : null, models: planner.view() });
-  current = new StageStats({ index: st.index, rate: st.rate / MACHINES });
+  rate = governor.setStage(st.rate / MACHINES);
+  lastTickCalls = 0;
+  current = new StageStats({ index: st.index, rate });
   current.startMs = Math.max(Date.now(), stageStart);
   stageStats.push(current);
-  let rate = st.rate / MACHINES;
-  let breachedAt = 0;
   let nextTick = Date.now() + 10_000;
-  out("LOADGEN_EVENT", { type: "stage_start", stage: st.index, networkRate: st.rate, machineRate: Math.round(rate * 100) / 100 });
+  let nextArrival = Date.now() + gapMs(rate);
+  out("LOADGEN_EVENT", { type: "stage_start", stage: st.index, networkRate: Math.round(rate * MACHINES * 100) / 100, machineRate: Math.round(rate * 100) / 100, ceiling: Number.isFinite(governor.ceiling) ? Math.round(governor.ceiling * 100) / 100 : null });
   while (Date.now() < stageEnd && !stopReason) {
-    const gap = rate > 0 ? -Math.log(1 - R()) / rate * 1000 : 1000;
-    const wakeAt = Math.min(stageEnd, Date.now() + gap);
-    await sleep(wakeAt - Date.now());
+    await sleep(Math.min(stageEnd, nextArrival, nextTick) - Date.now());
     if (Date.now() >= stageEnd || stopReason) break;
-    if (rate > 0) arrival(current);
+    if (Date.now() >= nextArrival) {
+      if (rate > 0) arrival(current);
+      nextArrival = Date.now() + gapMs(rate);
+    }
     if (Date.now() >= nextTick) {
       nextTick += 10_000;
       const now = Date.now();
       while (recent.length && now - recent[0].atMs > 30_000) recent.shift();
       const errs = recent.filter((x) => x.error).length;
-      const errRate = recent.length ? errs / recent.length : 0;
-      out("LOADGEN_TICK", { stage: st.index, machineRate: Math.round(rate * 100) / 100, inflight, waiting, calls: current.all.calls - lastTickCalls, ok: current.all.ok, errors30s: errs, calls30s: recent.length, dropped: current.dropped, inflightByModel: planner.inflight, penalties: planner.penalty, cSats: Math.round(machineSpent * 1000) / 1000, readySessions: readySessions.length });
+      const byType = {};
+      for (const x of recent) if (x.type) byType[x.type] = (byType[x.type] ?? 0) + 1;
+      const util = planner.utilization(usableKeys());
+      out("LOADGEN_TICK", { stage: st.index, machineRate: Math.round(rate * 100) / 100, util: util === null ? null : Math.round(util * 1000) / 1000, inflight, waiting, calls: current.all.calls - lastTickCalls, ok: current.all.ok, errors30s: errs, calls30s: recent.length, dropped: current.dropped, inflightByModel: planner.inflight, penalties: planner.penalty, cSats: Math.round(machineSpent * 1000) / 1000, readySessions: readySessions.length });
       lastTickCalls = current.all.calls;
-      if (recent.length >= schedule.breach.minCalls && errRate > schedule.breach.errorRate && now - breachedAt > 30_000) {
-        if (!backedOff) {
-          backedOff = true;
-          breachedAt = now;
-          const prev = st.index > 0 ? schedule.stages[st.index - 1].rate / MACHINES : rate / 2;
-          rate = Math.min(rate, prev);
-          recent.length = 0;
-          out("LOADGEN_EVENT", { type: "backoff", stage: st.index, errorRate: Math.round(errRate * 1000) / 1000, newMachineRate: Math.round(rate * 100) / 100, note: "holding the lower rate to the end of this stage, then stopping" });
-        } else {
-          stopReason = `error_rate_${Math.round(errRate * 100)}pct_after_backoff`;
-        }
+      // Capacity trouble never stops the run: the governor steps the rate down and holds it.
+      const ch = governor.observe({ calls: recent.length, failures: errs });
+      if (ch) {
+        if (ch.action === "backoff") recent.length = 0;
+        if (ch.action !== "hold" || ch.rate !== rate) out("LOADGEN_EVENT", { type: "rate", stage: st.index, ...ch, from: Math.round(ch.from * 1000) / 1000, rate: Math.round(ch.rate * 1000) / 1000, networkRate: Math.round(ch.rate * MACHINES * 100) / 100, ...(ch.ceiling !== undefined ? { ceiling: Math.round(ch.ceiling * 1000) / 1000 } : {}) });
+        rate = ch.rate;
+        nextArrival = Math.min(nextArrival, Date.now() + gapMs(rate));
       }
+      // Only real failure stops it: auth refused, or the coordinator down for two minutes.
+      const f = fatalStop({ calls: recent.length, errors: byType }, downTicks);
+      downTicks = f.downTicks;
+      if (f.stop && !stopReason) stopReason = f.stop;
     }
   }
   current.endMs = Math.min(Date.now(), stageEnd);
+  if (current.rateN) current.rate = current.rateSum / current.rateN;
   const d = digestStage(current.toJSON());
   out("LOADGEN_STAGE", { ...d, inflightAtEnd: inflight, note: "calls still in flight are added in LOADGEN_STAGE_FINAL" });
-  if (backedOff && !stopReason) stopReason = "stopped_after_backoff";
   if (Date.now() >= endAt) break;
 }
 
@@ -435,7 +528,9 @@ const digests = finals.map(digestStage);
 const summary = {
   type: "summary", profile: PROFILE, stopReason, startedAt: new Date(runStarted).toISOString(), endedAt: new Date().toISOString(),
   calls: digests.reduce((a, d) => a + d.calls, 0), cSatsSpent: Math.round(machineSpent * 1000) / 1000,
-  users: users.map((u) => ({ name: u.name, persona: u.persona, stopped: u.stopped })),
+  rate: { final: Math.round(rate * 1000) / 1000, ceiling: Number.isFinite(governor.ceiling) ? Math.round(governor.ceiling * 1000) / 1000 : null, breaches: governor.breaches },
+  shared: SHARED,
+  users: users.map((u) => ({ name: u.name, persona: u.persona, stopped: u.stopped, avoid: [...u.avoid], money: { ...u.money, cSats: Math.round(u.money.cSats * 1000) / 1000 } })),
 };
 save(summary);
 out("LOADGEN_SUMMARY", summary);
