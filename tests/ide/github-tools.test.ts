@@ -8,6 +8,8 @@ import { createServer, type IncomingMessage, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+// The gh and credential-helper stubs are shell scripts; Windows runs the real gh.exe instead.
+const itPosix = process.platform === "win32" ? it.skip : it;
 import { makeToolRunner, runAgentLoop, type ChatFn } from "../../src/apps/ide/agent-loop.js";
 import { parseGitHubRemote, tokenFromRemoteUrl } from "../../src/apps/ide/github-auth.js";
 import { ToolExecutor } from "../../src/apps/ide/tool-executor.js";
@@ -146,7 +148,7 @@ describe("credential sources", () => {
     expect(seen).toEqual([T.project]);
   });
 
-  it("gh's sign-in (gh auth token) when there's no agent connection", async () => {
+  itPosix("gh's sign-in (gh auth token) when there's no agent connection", async () => {
     process.env.EDGECODER_GH_BIN = ghStub(T.gh);
     const r = await listPrs(new ToolExecutor(root));
     expect(r.result).toContain("#12 [open] Fix the footer");
@@ -154,7 +156,7 @@ describe("credential sources", () => {
     expect(seen).toEqual([T.gh]);
   });
 
-  it("git's credential helper for github.com, last", async () => {
+  itPosix("git's credential helper for github.com, last", async () => {
     process.env.EDGECODER_GH_BIN = ghStub(null);
     credentialHelper(T.helper);
     const r = await new ToolExecutor(root).execute("github_list_issues", {});
@@ -172,14 +174,14 @@ describe("credential sources", () => {
     expect(seen).toEqual([]);
   });
 
-  it("a revoked agent connection (401) falls back to gh's sign-in", async () => {
+  itPosix("a revoked agent connection (401) falls back to gh's sign-in", async () => {
     process.env.EDGECODER_GH_BIN = ghStub(T.gh);
     const r = await listPrs(new ToolExecutor(root, T.bad));
     expect(r.result).toContain("#12");
     expect(seen).toEqual([T.bad, T.gh]);
   });
 
-  it("says exactly what's missing when there's no credential at all", async () => {
+  itPosix("says exactly what's missing when there's no credential at all", async () => {
     process.env.EDGECODER_GH_BIN = ghStub(null);
     const r = await listPrs(new ToolExecutor(root, undefined, undefined, { github: { integrationToken: () => null, integrationMissing: () => "not connected" } }));
     expect(r.error).toMatch(/No GitHub credential found for acme\/my\.repo/);
@@ -199,7 +201,7 @@ describe("real errors", () => {
     noTokenIn(r.error);
   });
 
-  it("403: names the missing repo scope and how to grant it", async () => {
+  itPosix("403: names the missing repo scope and how to grant it", async () => {
     process.env.EDGECODER_GH_BIN = ghStub(T.noScope);
     const r = await listPrs(new ToolExecutor(root));
     expect(r.error).toMatch(/lacks the repo scope \(HTTP 403/);
@@ -213,7 +215,7 @@ describe("real errors", () => {
     expect(r.error).toMatch(/acme\/my\.repo doesn't exist or isn't visible to the agent's GitHub connection .*HTTP 404/);
   });
 
-  it("rate limit: says when it resets and doesn't hammer other credentials", async () => {
+  itPosix("rate limit: says when it resets and doesn't hammer other credentials", async () => {
     process.env.EDGECODER_GH_BIN = ghStub(T.gh);
     const r = await listPrs(new ToolExecutor(root, T.limited));
     expect(r.error).toMatch(/rate limit reached .*resets at \d\d:\d\d UTC \(in 1\d min\)/);
@@ -229,7 +231,7 @@ describe("real errors", () => {
 });
 
 describe("a chat turn: what open PRs do we have?", () => {
-  it("runs github_list_prs from a text tool call, marks it ok, and answers with the list", async () => {
+  itPosix("runs github_list_prs from a text tool call, marks it ok, and answers with the list", async () => {
     process.env.EDGECODER_GH_BIN = ghStub(T.gh);
     const executor = new ToolExecutor(root, undefined, undefined, { github: { integrationToken: () => null } });
     const events: Array<Record<string, unknown>> = [];
