@@ -38,6 +38,7 @@ import {
 } from "../verification.js";
 import { app } from "./app.js";
 import {
+  rememberSettled,
   queue,
   protocol,
   identity,
@@ -723,6 +724,7 @@ export async function refundTaskSubmit(taskId: string): Promise<boolean> {
         usage.costMsat = billing.costMsat;
         void saveUsage(usage);
       }
+      rememberSettled(taskId, billing);
       taskBilling.delete(taskId);
       return true;
     } catch (err) {

@@ -22,7 +22,7 @@ export function scriptedModel(replies: Reply[]) {
   return { chat, requests, replies };
 }
 
-export function makeHub(replies: Reply[], opts: { dir?: string | null; approvalTimeoutMs?: number } = {}) {
+export function makeHub(replies: Reply[], opts: { dir?: string | null; approvalTimeoutMs?: number; permissionsFile?: string | null } = {}) {
   const model = scriptedModel(replies);
   const checkpoints = new CheckpointStore();
   const hub = new SessionHub(
@@ -36,7 +36,7 @@ export function makeHub(replies: Reply[], opts: { dir?: string | null; approvalT
       checkpoints,
       branch: () => "main",
     },
-    { dir: opts.dir ?? null, approvalTimeoutMs: opts.approvalTimeoutMs },
+    { dir: opts.dir ?? null, approvalTimeoutMs: opts.approvalTimeoutMs, permissionsFile: opts.permissionsFile ?? null },
   );
   return { hub, model, checkpoints };
 }

@@ -8,9 +8,10 @@
  * a snapshot, follow the session's events and act on it through the provider; the agent turn runs
  * here, so it does not depend on any one client staying connected.
  *
- * One writer at a time: the client in control sends messages, answers approvals and changes
- * settings; the others observe. Taking control hands the turn over (an approval that is waiting
- * can then be answered by the new controller). Sessions persist as one JSON file each in
+ * Co-editing: every attached client may send, answer approvals and change settings at any time.
+ * A message sent while a turn runs waits in the session's queue (labelled with its client) and the
+ * next turn starts with the queued messages; stopping the turn lets them run now. The first answer
+ * to an approval wins and every client sees who gave it. Sessions persist as one JSON file each in
  * EDGECODER_SESSIONS_DIR (default ~/.edgecoder/sessions, files 0600); what a running turn is doing
  * and its approvals live in memory and end with the provider.
  */
@@ -21,6 +22,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { ALWAYS_ASK_TOOLS, makeToolRunner, runAgentLoop, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
 import type { CheckpointStore } from "./checkpoints.js";
+import { defaultMode, defaultPermissionsFile, isReadOnlyCommand, PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
 import { protectedToolPath } from "./tool-executor.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 
@@ -50,9 +52,16 @@ export interface TranscriptEntry {
   events?: IdeStreamEvent[];
   turnId?: string;
   changedFiles?: string[];
-  usage?: { cSats: number; where?: string };
+  usage?: TurnUsage;
   /** The turn's file changes were undone. */
   undone?: boolean;
+}
+
+/** What a turn's model calls cost, where the last ran, and each call (model, machine, timings). */
+export interface TurnUsage {
+  cSats: number;
+  where?: string;
+  calls?: Array<{ cSats: number; where?: string; model?: string; served?: Extract<IdeStreamEvent, { type: "usage" }>["served"] }>;
 }
 
 export interface SessionData {
@@ -63,7 +72,9 @@ export interface SessionData {
   /** The model name (no placement prefix); "auto" when compute is auto. */
   model: string;
   compute: ComputeSetting;
-  /** "edits": file edits apply without asking (undoable); commands still ask. */
+  /** How much the session asks before it acts (permissions.ts). */
+  mode: PermissionMode;
+  /** Older clients' view of mode: "edits" for auto-edits and auto. */
   autoApprove: "none" | "edits";
   /** Command names the user approved "always" for this session (`npm`, `git`); no shell metacharacters. */
   alwaysShell: string[];
@@ -110,14 +121,25 @@ export interface SessionSummary {
   pending: number;
 }
 
+/** A message sent while a turn ran: it starts the next turn. */
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  by: ClientKind;
+  label?: string;
+  at: number;
+}
+
 export interface SessionSnapshot {
   session: SessionData;
   /** The last event so far; follow from here. */
   seq: number;
+  /** Always null: sessions are co-edited (kept for older clients). */
   controller: ClientRef | null;
   clients: ClientRef[];
   running: { turnId: string; text: string; events: IdeStreamEvent[] } | null;
   pending: PendingApproval[];
+  queue: QueuedMessage[];
 }
 
 /**
@@ -133,10 +155,14 @@ export interface TurnEnv {
   checkpoints: CheckpointStore;
   /** The project's current branch (null outside git). */
   branch?: (projectRoot: string) => string | null;
+  /** The session model's context window in tokens (the loop compacts to fit it); undefined: a conservative default. */
+  contextWindow?: (s: SessionData) => Promise<number | undefined>;
+  /** A cheap model call that summarizes older messages when the loop compacts. */
+  summarize?: (s: SessionData, emit: (e: IdeStreamEvent) => void, signal: AbortSignal) => (text: string) => Promise<string | null>;
 }
 
 export class SessionError extends Error {
-  constructor(readonly code: "not_found" | "busy" | "not_in_control" | "invalid" | "checkpoint_gone" | "nothing_to_undo", message: string, readonly extra: Record<string, unknown> = {}) {
+  constructor(readonly code: "not_found" | "busy" | "invalid" | "checkpoint_gone" | "nothing_to_undo", message: string, readonly extra: Record<string, unknown> = {}) {
     super(message);
   }
 }
@@ -147,7 +173,7 @@ interface Running {
   text: string;
   events: IdeStreamEvent[];
   changed: string[];
-  usage?: { cSats: number; where?: string };
+  usage?: TurnUsage;
   done: Promise<void>;
 }
 
@@ -158,6 +184,7 @@ interface Live {
   controller: ClientRef | null;
   running: Running | null;
   pending: Map<string, PendingApproval & { resolve: (ok: boolean) => void; timer: ReturnType<typeof setTimeout> }>;
+  queue: QueuedMessage[];
 }
 
 const BUFFER = 1000;
@@ -223,10 +250,14 @@ export class SessionHub {
   private listenerSeq = 0;
   private readonly dir: string | null;
   private readonly approvalTimeoutMs: number;
+  readonly permissions: PermissionStore;
 
-  constructor(private readonly env: TurnEnv, opts: { dir?: string | null; approvalTimeoutMs?: number } = {}) {
+  constructor(private readonly env: TurnEnv, opts: { dir?: string | null; approvalTimeoutMs?: number; permissionsFile?: string | null } = {}) {
     this.dir = opts.dir === undefined ? defaultSessionsDir() : opts.dir;
     this.approvalTimeoutMs = opts.approvalTimeoutMs ?? 30 * 60_000;
+    // The default sessions folder keeps "always" answers in ~/.edgecoder/permissions.json; any
+    // other setup (tests) keeps them in memory unless given a file.
+    this.permissions = new PermissionStore(opts.permissionsFile !== undefined ? opts.permissionsFile : opts.dir === undefined ? defaultPermissionsFile() : null);
   }
 
   /** Read the saved sessions (once, at startup). */
@@ -239,6 +270,7 @@ export class SessionHub {
         if (!ID_RE.test(s.id) || typeof s.projectRoot !== "string" || !Array.isArray(s.transcript)) continue;
         s.alwaysShell ??= [];
         s.cSats ??= 0;
+        s.mode ??= s.autoApprove === "edits" ? "auto-edits" : "ask";
         this.sessions.set(s.id, s);
       } catch {
         // a damaged file is skipped, not fatal
@@ -264,7 +296,7 @@ export class SessionHub {
   private liveOf(id: string): Live {
     let l = this.live.get(id);
     if (!l) {
-      l = { seq: 0, buffer: [], listeners: new Map(), controller: null, running: null, pending: new Map() };
+      l = { seq: 0, buffer: [], listeners: new Map(), controller: null, running: null, pending: new Map(), queue: [] };
       this.live.set(id, l);
     }
     return l;
@@ -296,22 +328,15 @@ export class SessionHub {
     return [...seen.values()];
   }
 
-  /** Writes come from the client in control; with nobody in control, the first writer takes it. */
-  private requireControl(id: string, client: ClientRef): Live {
-    const l = this.liveOf(id);
-    if (!l.controller) {
-      l.controller = { ...client };
-      this.emit(id, { type: "control", controller: l.controller });
-    }
-    if (l.controller.clientId !== client.clientId) {
-      throw new SessionError("not_in_control", `${l.controller.label ?? `The ${l.controller.kind}`} is in control of this session. Take control to send.`, { controller: l.controller });
-    }
-    return l;
+  /** Any attached client may write (co-editing); kept as one place to look up the live state. */
+  private requireControl(id: string, _client: ClientRef): Live {
+    return this.liveOf(id);
   }
 
-  create(input: { projectRoot: string; model?: string; title?: string; autoApprove?: "none" | "edits"; client: ClientRef }): SessionData {
+  create(input: { projectRoot: string; model?: string; title?: string; autoApprove?: "none" | "edits"; mode?: PermissionMode; client: ClientRef }): SessionData {
     const now = Date.now();
     const parsed = parseModelId(input.model || "auto");
+    const mode: PermissionMode = input.mode ?? (input.autoApprove === "edits" ? "auto-edits" : input.autoApprove === "none" ? "ask" : defaultMode(input.projectRoot, this.permissions.get(input.projectRoot)));
     const s: SessionData = {
       id: randomUUID(),
       title: input.title?.trim() || "New session",
@@ -319,7 +344,8 @@ export class SessionHub {
       branch: this.env.branch?.(input.projectRoot) ?? null,
       model: parsed.model,
       compute: parsed.compute,
-      autoApprove: input.autoApprove ?? "none",
+      mode,
+      autoApprove: mode === "ask" ? "none" : "edits",
       alwaysShell: [],
       origin: input.client.kind,
       published: false,
@@ -329,7 +355,7 @@ export class SessionHub {
       transcript: [],
     };
     this.sessions.set(s.id, s);
-    this.liveOf(s.id).controller = { ...input.client };
+    this.liveOf(s.id);
     this.save(s);
     return plain(s);
   }
@@ -356,7 +382,7 @@ export class SessionHub {
           messages: s.transcript.length,
           running: !!l.running,
           live: s.published && (clients.length > 0 || !!l.running),
-          controller: l.controller,
+          controller: null,
           clients,
           pending: l.pending.size,
         };
@@ -369,10 +395,11 @@ export class SessionHub {
     return {
       session: plain(s),
       seq: l.seq,
-      controller: l.controller,
+      controller: null,
       clients: this.clientsOf(l),
       running: l.running ? { turnId: l.running.turnId, text: l.running.text, events: plain(l.running.events) } : null,
       pending: [...l.pending.values()].map((p) => ({ id: p.id, tool: p.tool, args: plain(p.args) })),
+      queue: plain(l.queue),
     };
   }
 
@@ -395,39 +422,61 @@ export class SessionHub {
     };
   }
 
-  /** Throws unless `client` may write (taking control when nobody has it). */
-  assertControl(id: string, client: ClientRef): void {
+  /** Kept for older clients: every attached client may write, so this only checks the session exists. */
+  assertControl(id: string, _client: ClientRef): void {
     this.need(id);
-    this.requireControl(id, client);
   }
 
+  /** No-op (co-editing has no exclusive control); kept for older clients. */
   takeControl(id: string, client: ClientRef): ClientRef {
     this.need(id);
-    const l = this.liveOf(id);
-    l.controller = { ...client };
-    this.emit(id, { type: "control", controller: l.controller });
-    return l.controller;
+    return { ...client };
   }
 
-  release(id: string, client: ClientRef): void {
+  /** No-op, see takeControl. */
+  release(id: string, _client: ClientRef): void {
+    this.need(id);
+  }
+
+  /**
+   * A message from any attached client. With no turn running it starts one; while one runs it
+   * waits in the queue (in order, labelled with its client) and starts the next turn.
+   */
+  send(id: string, text: string, client: ClientRef): { turnId: string | null; queued?: QueuedMessage } {
     this.need(id);
     const l = this.liveOf(id);
-    if (l.controller?.clientId !== client.clientId) return;
-    l.controller = null;
-    this.emit(id, { type: "control", controller: null });
+    if (!text.trim()) throw new SessionError("invalid", "The message is empty.");
+    const q: QueuedMessage = { id: randomUUID(), text, by: client.kind, ...(client.label ? { label: client.label } : {}), at: Date.now() };
+    if (l.running || l.queue.length) {
+      l.queue.push(q);
+      this.emit(id, { type: "queued", entry: q, queue: plain(l.queue) });
+      return { turnId: null, queued: q };
+    }
+    return { turnId: this.startTurn(id, [q]) };
   }
 
-  /** Start a turn with the controller's message; resolves with the turn id once it has started. */
-  send(id: string, text: string, client: ClientRef): string {
+  /** Remove a queued message before it starts (any client). */
+  unqueue(id: string, queuedId: string, _client: ClientRef): boolean {
+    this.need(id);
+    const l = this.liveOf(id);
+    const i = l.queue.findIndex((q) => q.id === queuedId);
+    if (i < 0) return false;
+    l.queue.splice(i, 1);
+    this.emit(id, { type: "unqueued", id: queuedId, queue: plain(l.queue) });
+    return true;
+  }
+
+  /** Start a turn with these messages (each kept in the transcript with the client that sent it). */
+  private startTurn(id: string, msgs: QueuedMessage[]): string {
     const s = this.need(id);
-    const l = this.requireControl(id, client);
-    if (l.running) throw new SessionError("busy", "A reply is still running. Wait for it or stop it first.");
-    if (!text.trim()) throw new SessionError("invalid", "The message is empty.");
-    const entry: TranscriptEntry = { id: randomUUID(), role: "user", content: text, at: Date.now(), by: client.kind };
-    s.transcript.push(entry);
-    if (s.title === "New session") s.title = text.trim().split("\n")[0].slice(0, 60) + (text.length > 60 ? "…" : "");
+    const l = this.liveOf(id);
+    for (const q of msgs) {
+      const entry: TranscriptEntry = { id: q.id, role: "user", content: q.text, at: Date.now(), by: q.by };
+      s.transcript.push(entry);
+      if (s.title === "New session") s.title = q.text.trim().split("\n")[0].slice(0, 60) + (q.text.length > 60 ? "…" : "");
+      this.emit(id, { type: "message", entry, ...(q.label ? { label: q.label } : {}) });
+    }
     this.save(s);
-    this.emit(id, { type: "message", entry });
     const turnId = randomUUID();
     const running: Running = { turnId, abort: new AbortController(), text: "", events: [], changed: [], done: Promise.resolve() };
     l.running = running;
@@ -442,10 +491,11 @@ export class SessionHub {
       if (e.type === "file_change" && !r.changed.includes(e.path)) r.changed.push(e.path);
       if (e.type === "usage") {
         const cSats = Number.isFinite(e.cSats) ? e.cSats : 0;
-        r.usage = { cSats: Number(((r.usage?.cSats ?? 0) + cSats).toFixed(6)), where: e.where };
+        const call = { cSats, where: e.where, ...(e.model ? { model: e.model } : {}), ...(e.served ? { served: e.served } : {}) };
+        r.usage = { cSats: Number(((r.usage?.cSats ?? 0) + cSats).toFixed(6)), where: e.where, calls: [...(r.usage?.calls ?? []), call].slice(-50) };
         s.cSats = Number((s.cSats + cSats).toFixed(6));
       }
-      if (e.type === "status" && e.message.startsWith("Auto: ")) r.usage = { cSats: r.usage?.cSats ?? 0, where: e.message.slice(6) };
+      if (e.type === "status" && e.message.startsWith("Auto: ")) r.usage = { ...r.usage, cSats: r.usage?.cSats ?? 0, where: e.message.slice(6) };
       if (e.type !== "done") r.events.push(storable(e));
       this.emit(id, { type: "agent", turnId: r.turnId, event: e });
     };
@@ -461,6 +511,8 @@ export class SessionHub {
         sendEvent,
         isCancelled: () => r.abort.signal.aborted,
         tools: this.env.tools?.(s),
+        ...(this.env.contextWindow ? { contextWindow: () => this.env.contextWindow!(s) } : {}),
+        ...(this.env.summarize ? { summarize: this.env.summarize(s, (e) => e.type === "usage" && sendEvent(e), r.abort.signal) } : {}),
         runTool: makeToolRunner({
           prepare: exec.prepare,
           execute: exec.execute,
@@ -468,8 +520,8 @@ export class SessionHub {
           waitForApproval: (callId, tool, args) => this.waitForApproval(s, l, r, callId, tool, args),
           captureBeforeWrite: (path) => this.env.checkpoints.capture(r.turnId, path),
           turnId: r.turnId,
-          autoApproveEdits: () => s.autoApprove === "edits",
-          alwaysAllowed: (tool, args) => tool === "run_shell" && s.alwaysShell.includes(shellPrefix(args.command) ?? "\0"),
+          autoApproveEdits: () => s.mode !== "ask",
+          alwaysAllowed: (tool, args) => this.allowedWithoutAsking(s, tool, args),
         }),
       });
     } catch (err) {
@@ -500,16 +552,35 @@ export class SessionHub {
       l.running = null;
       this.save(s);
       this.emit(id, { type: "turn_end", entry, stopped, cSats: s.cSats, branch: s.branch });
+      // Messages queued meanwhile start the next turn (together, in order).
+      if (l.queue.length && this.sessions.has(id)) {
+        const next = l.queue.splice(0);
+        this.emit(id, { type: "unqueued", ids: next.map((q) => q.id), queue: [] });
+        this.startTurn(id, next);
+      }
     }
   }
 
+  /**
+   * A call that runs without asking (it counts as approved): a read-only command in any mode, a
+   * command name approved "always" for the session or the project, or any command that isn't
+   * risky in auto mode. Risky commands (permissions.ts riskOf) always ask.
+   */
+  allowedWithoutAsking(s: SessionData, tool: ToolName, args: Record<string, unknown>): boolean {
+    if (tool !== "run_shell") return false;
+    if (isReadOnlyCommand(args.command, s.projectRoot)) return true;
+    if (riskOf(args.command, s.projectRoot) !== null) return false;
+    if (s.mode === "auto") return true;
+    const prefix = shellPrefix(args.command);
+    return prefix !== null && (s.alwaysShell.includes(prefix) || this.permissions.get(s.projectRoot).shell.includes(prefix));
+  }
+
   private waitForApproval(s: SessionData, l: Live, r: Running, callId: string, tool: ToolName, args: Record<string, unknown>): Promise<boolean> {
-    // "Always" answers from earlier in this session (never for the tools that always ask).
+    // The mode or an "always" answer given meanwhile (never for the tools that always ask).
     if (!ALWAYS_ASK_TOOLS.has(tool)) {
-      const prefix = tool === "run_shell" ? shellPrefix(args.command) : null;
       const always =
-        (prefix !== null && s.alwaysShell.includes(prefix)) ||
-        ((tool === "write_file" || tool === "edit_file") && s.autoApprove === "edits" && protectedToolPath(args.path) === null);
+        this.allowedWithoutAsking(s, tool, args) ||
+        ((tool === "write_file" || tool === "edit_file") && s.mode !== "ask" && protectedToolPath(args.path) === null);
       if (always) {
         this.emit(s.id, { type: "approval", id: callId, approved: true, by: "always" });
         return Promise.resolve(true);
@@ -526,32 +597,47 @@ export class SessionHub {
     });
   }
 
-  approve(id: string, callId: string, approved: boolean, client: ClientRef, always = false): void {
+  /**
+   * An answer from any attached client. The first answer wins: a later one (the call was answered
+   * elsewhere, or it timed out) returns false and changes nothing.
+   */
+  approve(id: string, callId: string, approved: boolean, client: ClientRef, always = false): boolean {
     const s = this.need(id);
-    const l = this.requireControl(id, client);
+    const l = this.liveOf(id);
     const p = l.pending.get(callId);
-    if (!p) throw new SessionError("not_found", "No tool call is waiting with that id.");
-    if (approved && always && !ALWAYS_ASK_TOOLS.has(p.tool)) {
-      if (p.tool === "write_file" || p.tool === "edit_file") s.autoApprove = "edits";
-      if (p.tool === "run_shell") {
-        const prefix = shellPrefix(p.args.command);
-        if (prefix && !s.alwaysShell.includes(prefix)) s.alwaysShell.push(prefix);
-      }
-      this.save(s);
-      this.emit(id, { type: "settings", autoApprove: s.autoApprove, alwaysShell: [...s.alwaysShell] });
-    }
+    if (!p) return false;
     l.pending.delete(callId);
     clearTimeout(p.timer);
-    this.emit(id, { type: "approval", id: callId, approved, by: client.kind });
+    if (approved && always && !ALWAYS_ASK_TOOLS.has(p.tool)) {
+      if (p.tool === "write_file" || p.tool === "edit_file") {
+        if (s.mode === "ask") s.mode = "auto-edits";
+        this.permissions.allowEdits(s.projectRoot);
+      }
+      if (p.tool === "run_shell" && riskOf(p.args.command, s.projectRoot) === null) {
+        // "Always" for a command name, kept for the project; never for a risky command.
+        const prefix = shellPrefix(p.args.command);
+        if (prefix && !s.alwaysShell.includes(prefix)) s.alwaysShell.push(prefix);
+        if (prefix) this.permissions.allowShell(s.projectRoot, prefix);
+      }
+      s.autoApprove = s.mode === "ask" ? "none" : "edits";
+      this.save(s);
+      this.emit(id, { type: "settings", mode: s.mode, autoApprove: s.autoApprove, alwaysShell: [...s.alwaysShell], by: client.kind, ...(client.label ? { label: client.label } : {}) });
+    }
+    this.emit(id, { type: "approval", id: callId, approved, by: client.kind, ...(client.label ? { label: client.label } : {}), ...(always ? { always: true } : {}) });
     p.resolve(approved);
+    return true;
   }
 
-  /** Stop the running turn (pending approvals are rejected; what was written stays, undoable). */
+  /**
+   * Stop the running turn (any client; pending approvals are rejected; what was written stays,
+   * undoable). Queued messages then start the next turn.
+   */
   cancel(id: string, client: ClientRef): boolean {
     this.need(id);
-    const l = this.requireControl(id, client);
+    const l = this.liveOf(id);
     if (!l.running) return false;
     l.running.abort.abort();
+    this.emit(id, { type: "stopping", by: client.kind, ...(client.label ? { label: client.label } : {}) });
     for (const [callId, p] of l.pending) {
       clearTimeout(p.timer);
       l.pending.delete(callId);
@@ -561,18 +647,31 @@ export class SessionHub {
     return true;
   }
 
-  update(id: string, patch: { model?: string; title?: string; autoApprove?: "none" | "edits" }, client: ClientRef): SessionData {
+  /** Settings from any client; every client hears the change and who made it. */
+  update(id: string, patch: { model?: string; title?: string; autoApprove?: "none" | "edits"; mode?: PermissionMode }, client: ClientRef): SessionData {
     const s = this.need(id);
-    this.requireControl(id, client);
     if (patch.model) {
       const p = parseModelId(patch.model);
       s.model = p.model;
       s.compute = p.compute;
     }
     if (patch.title?.trim()) s.title = patch.title.trim().slice(0, 120);
-    if (patch.autoApprove) s.autoApprove = patch.autoApprove;
+    if (patch.mode) s.mode = patch.mode;
+    else if (patch.autoApprove) s.mode = patch.autoApprove === "edits" ? (s.mode === "auto" ? "auto" : "auto-edits") : "ask";
+    s.autoApprove = s.mode === "ask" ? "none" : "edits";
     this.save(s);
-    this.emit(id, { type: "settings", model: modelIdOf(s), title: s.title, autoApprove: s.autoApprove, alwaysShell: [...s.alwaysShell] });
+    this.emit(id, {
+      type: "settings",
+      model: modelIdOf(s),
+      title: s.title,
+      mode: s.mode,
+      autoApprove: s.autoApprove,
+      alwaysShell: [...s.alwaysShell],
+      changed: Object.keys(patch).filter((k) => (patch as Record<string, unknown>)[k] !== undefined),
+      by: client.kind,
+      byClient: client.clientId,
+      ...(client.label ? { label: client.label } : {}),
+    });
     return plain(s);
   }
 
@@ -622,9 +721,13 @@ export class SessionHub {
     if (this.dir) rmSync(join(this.dir, `${id}.json`), { force: true });
   }
 
-  /** Resolves when no turn is running (tests, shutdown). */
+  /** Resolves when no turn is running and nothing is queued (tests, shutdown). */
   async idle(id: string): Promise<void> {
-    await this.live.get(id)?.running?.done;
+    for (let i = 0; i < 100; i++) {
+      const r = this.live.get(id)?.running;
+      if (!r) return;
+      await r.done;
+    }
   }
 
   /** Stop every running turn (provider shutdown). */

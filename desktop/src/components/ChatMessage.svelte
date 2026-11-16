@@ -9,6 +9,7 @@
   import NetworkTaskCard from "./NetworkTaskCard.svelte";
   import type { StreamProgress } from "../lib/api";
   import { usageText } from "../lib/compute-choice";
+  import { servedBreakdown, servedLine, type CallUsage } from "../lib/served";
   import type { ToolEvent } from "../lib/types";
   import { ChevronRight } from "@lucide/svelte";
   import { summarizeSteps } from "../lib/tool-steps";
@@ -30,8 +31,13 @@
     networkTaskId?: string;
     onPreview?: (path: string) => void;
     /** What the reply cost and where it ran. */
-    usage?: { cSats: number; where?: string };
+    usage?: { cSats: number; where?: string; calls?: CallUsage[] };
   }
+  /** The footer's tooltip: each model call (machine, hardware, region, timings, cost). */
+  function usageTitle(u: { cSats: number; where?: string; calls?: CallUsage[] }): string {
+    return u.calls?.length ? `Where this reply ran:\n${servedBreakdown(u.calls)}` : "Where this reply ran and what it cost";
+  }
+
   let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview, usage }: Props = $props();
 
   /** A finished turn's steps start folded into their summary line. */
@@ -117,11 +123,11 @@
             {#if copied}<Check size={14} />{:else}<Copy size={14} />{/if}
           </button>
           {#if usage && usageText(usage)}
-            <span class="reply-usage" title="Where this reply ran and what it cost">{usageText(usage)}</span>
+            <span class="reply-usage" title={usageTitle(usage)}>{servedLine(usage.calls) ?? usageText(usage)}</span>
           {/if}
         </div>
       {:else if usage && !streaming && usageText(usage)}
-        <div class="reply-footer"><span class="reply-usage" title="Where this reply ran and what it cost">{usageText(usage)}</span></div>
+        <div class="reply-footer"><span class="reply-usage" title={usageTitle(usage)}>{servedLine(usage.calls) ?? usageText(usage)}</span></div>
       {/if}
     </div>
   {/if}

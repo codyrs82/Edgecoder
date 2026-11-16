@@ -157,7 +157,9 @@ ${toolFormat === "native" ? "" : PLAN_FORMAT_SECTION}## Rules
 4. **Explain your reasoning** — briefly describe what you are doing and why before each tool call.
 5. **No destructive operations without explicit request** — do not delete files, force-push, reset branches, or run destructive shell commands unless the user explicitly asks.
 6. **Stay within the project** — all file paths must be within the project root.
-7. **Be concise** — keep explanations short and focused; let the code speak for itself.`;
+7. **Be concise** — keep explanations short and focused; let the code speak for itself.
+8. **Read large files in parts** — read_file returns at most 400 lines per call and says where to continue (offset). Use search_files to find the lines you need, then read around them with offset and limit, rather than paging through a whole large file.
+9. **Keep exact paths** — use the paths tools returned (for example src/swarm/worker-runner.ts), not a guessed shorter one.`;
 
   const rulesSection = projectRules
     ? `

@@ -76,7 +76,7 @@ export function contextWindowFor(messages: ChatMessage[], tools: ToolSpec[] | un
   return ctx;
 }
 
-export type OllamaPiece = { delta: string } | { toolCalls: ToolCall[] } | { doneReason: string; promptTokens?: number; outputTokens?: number; /** Ollama's load_duration: time spent loading the model for this call. */ loadMs?: number };
+export type OllamaPiece = { delta: string } | { toolCalls: ToolCall[] } | { doneReason: string; promptTokens?: number; outputTokens?: number; /** Ollama's load_duration: time spent loading the model for this call. */ loadMs?: number; /** prompt_eval_duration and eval_duration: reading the prompt and writing the reply. */ promptMs?: number; genMs?: number };
 
 export async function* ollamaChat(
   host: string,
@@ -127,7 +127,7 @@ export async function* ollamaChat(
     buf = lines.pop() ?? "";
     for (const line of lines) {
       if (!line.trim()) continue;
-      let chunk: { message?: { content?: string; tool_calls?: ToolCall[] }; error?: string; done?: boolean; done_reason?: string; prompt_eval_count?: number; eval_count?: number; load_duration?: number };
+      let chunk: { message?: { content?: string; tool_calls?: ToolCall[] }; error?: string; done?: boolean; done_reason?: string; prompt_eval_count?: number; eval_count?: number; load_duration?: number; prompt_eval_duration?: number; eval_duration?: number };
       try {
         chunk = JSON.parse(line);
       } catch {
@@ -137,8 +137,11 @@ export async function* ollamaChat(
       if (chunk.message?.content) yield { delta: chunk.message.content };
       if (chunk.message?.tool_calls?.length) yield { toolCalls: chunk.message.tool_calls };
       if (chunk.done) {
-        const loadMs = typeof chunk.load_duration === "number" && Number.isFinite(chunk.load_duration) && chunk.load_duration > 0 ? Math.round(chunk.load_duration / 1e6) : undefined;
-        yield { doneReason: chunk.done_reason ?? "stop", promptTokens: chunk.prompt_eval_count, outputTokens: chunk.eval_count, ...(loadMs !== undefined ? { loadMs } : {}) };
+        const ms = (ns: unknown) => (typeof ns === "number" && Number.isFinite(ns) && ns > 0 ? Math.round(ns / 1e6) : undefined);
+        const loadMs = ms(chunk.load_duration);
+        const promptMs = ms(chunk.prompt_eval_duration);
+        const genMs = ms(chunk.eval_duration);
+        yield { doneReason: chunk.done_reason ?? "stop", promptTokens: chunk.prompt_eval_count, outputTokens: chunk.eval_count, ...(loadMs !== undefined ? { loadMs } : {}), ...(promptMs !== undefined ? { promptMs } : {}), ...(genMs !== undefined ? { genMs } : {}) };
       }
     }
   }

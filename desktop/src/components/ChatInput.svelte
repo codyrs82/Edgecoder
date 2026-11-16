@@ -1,20 +1,57 @@
 <script lang="ts">
-  import { Square, ArrowUp, Plus } from "@lucide/svelte";
+  import { Square, ArrowUp, Plus, X } from "@lucide/svelte";
   import { tick, type Snippet } from "svelte";
 
   interface Props {
     onSend: (message: string) => void;
     placeholder?: string;
     disabled?: boolean;
-    /** A reply is streaming: the send button becomes Stop (typing stays allowed). */
+    /**
+     * A reply is streaming. Send stays: Enter queues the message (shown as Queued, removable) and
+     * it is sent when the reply ends. Stop is a separate button next to Send (Esc too).
+     */
     streaming?: boolean;
     onStop?: () => void;
+    /**
+     * The queue lives elsewhere (a shared session's queue on the provider): onSend is called at
+     * once even while streaming, and these are shown as Queued; onUnqueue removes one.
+     */
+    queue?: Array<{ id: string; text: string; from?: string }>;
+    onUnqueue?: (id: string) => void;
     /** Project path search; when set, typing @ offers files and folders to mention. */
     mentions?: (query: string) => Promise<Array<{ path: string; kind: "file" | "dir" | "codebase" }>>;
     /** Controls on the bottom-right of the box, before Send (the compute picker). */
     toolbar?: Snippet;
   }
-  let { onSend, placeholder = "Message EdgeCoder...", disabled = false, streaming = false, onStop, mentions, toolbar }: Props = $props();
+  let { onSend, placeholder = "Message EdgeCoder...", disabled = false, streaming = false, onStop, mentions, toolbar, queue, onUnqueue }: Props = $props();
+
+  // Messages typed while a reply streams, sent in order when it ends (unless the queue is external).
+  let localQueue = $state<Array<{ id: string; text: string }>>([]);
+  let queueSeq = 0;
+  const shownQueue = $derived(queue ?? localQueue);
+  // One at a time: after sending a queued message, wait for its reply to start (and end) before
+  // the next; a reply that never starts (an error) releases the queue after a few seconds.
+  let awaitingStart = $state(false);
+  let releaseTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => {
+    if (streaming && awaitingStart) {
+      awaitingStart = false;
+      clearTimeout(releaseTimer);
+    }
+  });
+  $effect(() => {
+    if (queue || streaming || disabled || awaitingStart || localQueue.length === 0) return;
+    const [next, ...rest] = localQueue;
+    localQueue = rest;
+    awaitingStart = true;
+    clearTimeout(releaseTimer);
+    releaseTimer = setTimeout(() => (awaitingStart = false), 5_000);
+    onSend(next.text);
+  });
+  function unqueue(id: string) {
+    if (queue) onUnqueue?.(id);
+    else localQueue = localQueue.filter((q) => q.id !== id);
+  }
 
   let text = $state("");
   let textareaEl: HTMLTextAreaElement | undefined = $state(undefined);
@@ -94,8 +131,9 @@
 
   function send() {
     const trimmed = text.trim();
-    if (!trimmed || disabled || streaming) return;
-    onSend(trimmed);
+    if (!trimmed || disabled) return;
+    if (streaming && !queue) localQueue = [...localQueue, { id: `q${++queueSeq}`, text: trimmed }];
+    else onSend(trimmed);
     text = "";
     if (textareaEl) textareaEl.style.height = "auto";
   }
@@ -123,6 +161,20 @@
 </script>
 
 <div class="input-bar">
+  {#if shownQueue.length > 0}
+    <ol class="queued" aria-label="Queued messages">
+      {#each shownQueue as q, i (q.id)}
+        <li class="queued-item">
+          <span class="queued-tag">Queued{shownQueue.length > 1 ? ` ${i + 1}` : ""}</span>
+          <span class="queued-text" title={q.text}>{q.text}</span>
+          {#if "from" in q && q.from}<span class="queued-from">from {q.from}</span>{/if}
+          {#if !queue || onUnqueue}
+            <button type="button" class="icon-btn icon-btn--sm" aria-label={`Remove queued message: ${q.text}`} title="Remove from the queue" onclick={() => unqueue(q.id)}><X size={12} /></button>
+          {/if}
+        </li>
+      {/each}
+    </ol>
+  {/if}
   {#if mention && matches.length > 0}
     <div class="mentions" role="listbox" aria-label="Mention a file">
       {#each matches as m, i (m.path)}
@@ -162,14 +214,13 @@
   {/if}
   <div class="toolbar">{@render toolbar?.()}</div>
   {#if streaming && onStop}
-    <button type="button" class="send-btn stop" aria-label="Stop" onclick={onStop} title="Stop (Esc)">
+    <button type="button" class="send-btn stop" aria-label="Stop" onclick={onStop} title="Stop the reply (Esc)">
       <Square size={12} fill="currentColor" />
     </button>
-  {:else}
-    <button type="button" class="send-btn" aria-label="Send message" onclick={send} disabled={!text.trim() || disabled} title="Send (Enter)">
-      <ArrowUp size={16} strokeWidth={2.25} />
-    </button>
   {/if}
+  <button type="button" class="send-btn" aria-label="Send message" onclick={send} disabled={!text.trim() || disabled} title={streaming ? "Queue: sent when the reply ends (Enter)" : "Send (Enter)"}>
+    <ArrowUp size={16} strokeWidth={2.25} />
+  </button>
   </div>
 </div>
 
@@ -293,5 +344,39 @@
   .send-btn.stop {
     background: var(--text-primary);
     color: var(--bg-surface);
+  }
+  .queued {
+    list-style: none;
+    margin: 0 0 6px;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .queued-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px 4px 10px;
+    border: 0.5px dashed var(--border-control);
+    border-radius: var(--radius-md);
+    font-size: var(--fs-xs);
+    color: var(--text-secondary);
+    min-width: 0;
+  }
+  .queued-tag {
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+  .queued-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .queued-from {
+    color: var(--text-muted);
+    flex-shrink: 0;
   }
 </style>

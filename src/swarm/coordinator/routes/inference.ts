@@ -29,7 +29,7 @@ import { syncReservations } from "../../../economy/reservations.js";
 import { agentHasModel, routableModels } from "../../model-catalog.js";
 import { rawBodyOf } from "../../../security/request-signing.js";
 import { app as coordinatorApp, type CoordinatorApp } from "../app.js";
-import { CC, FALLBACK_BTC_USD, claimedTradePrice, reservations, taskBilling, usagePending, queue, identity, securityLog } from "../context.js";
+import { CC, FALLBACK_BTC_USD, claimedTradePrice, reservations, taskBilling, settledBilling, usagePending, queue, identity, securityLog } from "../context.js";
 import { mutable } from "../mutable-state.js";
 import { agentCapabilities, activeBlacklistRecord, autoBlacklister } from "../agent-state.js";
 import { agentSignatureAtGate, hasPortalServiceToken, resolveSubmitterAccount, verifyAgentRequest } from "../auth.js";
@@ -53,6 +53,7 @@ import {
   MARKET_DEFAULT_BID_PREMIUM_BPS
 } from "../economy.js";
 import { registerRestrictedRoutes } from "./restricted.js";
+import { servedBy } from "../served-by-route.js";
 import { taskIdInUse, accrualsInFlight, settleTaskIfDone, refundTaskSubmit } from "../results.js";
 
 // ── Network inference (chat completions on agents' local models, streamed) ──────────────────
@@ -355,7 +356,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const now = Date.now();
     // Security research tier: a restricted model is listed only to an account entitled to it.
     const viewer = restrictedCatalog.size > 0 ? await modelViewerAccount(req) : undefined;
-    const byModel = new Map<string, { agents: number; idle: number; free: number; classes: Set<ComputeClassId> }>();
+    const byModel = new Map<string, { agents: number; idle: number; free: number; classes: Set<ComputeClassId>; ctx?: number }>();
     const claims = queue.activeClaims();
     for (const [id, cap] of agentCapabilities) {
       if (activeBlacklistRecord(id) || (cap.lastSeenMs !== undefined && now - cap.lastSeenMs > 3 * 60_000)) continue;
@@ -369,6 +370,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         if (queue.agentClaims(id) === 0) e.idle++;
         e.free += freeModelSlots(id, claims);
         e.classes.add(cls);
+        // The smallest window an agent serves the model with: what a caller can count on (agent loops compact to it).
+        const ctx = agentContextWindow(id);
+        if (ctx) e.ctx = e.ctx === undefined ? ctx : Math.min(e.ctx, ctx);
         byModel.set(m, e);
       }
     }
@@ -384,7 +388,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         .map(([model, e]) => {
           const restricted = restrictedCatalog.tierOf(model);
           // restricted: runs only on your own machines or a lease you hold, never as a network call.
-          return { model, agents: e.agents, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD), ...(restricted ? { restricted } : {}) };
+          return { model, agents: e.agents, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD), ...(e.ctx ? { contextWindow: e.ctx } : {}), ...(restricted ? { restricted } : {}) };
         })
         .sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model)),
       classes,
@@ -482,7 +486,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         return reply.code(500).send({ error: "credit_debit_failed" });
       }
     }
-    taskBilling.set(body.taskId, { accountId, reservedMsat: reserve, perSubtaskReserveMsat: reserve, costMsat: 0, refunded: false });
+    taskBilling.set(body.taskId, { accountId, reservedMsat: reserve, perSubtaskReserveMsat: reserve, costMsat: 0, refunded: false, submittedAtMs: Date.now() });
     usagePending.set(body.taskId, {
       id: body.taskId, accountId, atMs: Date.now(), kind: "inference", placement: reservationId ? "reserved" : onlyAccountId ? "mine" : "network",
       model: body.model, ...(taskClass !== "any" ? { computeClass: taskClass } : {}), ok: false, durationMs: 0, costMsat: 0, ...(body.source ? { source: body.source } : {}),
@@ -535,6 +539,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         // The agent's model-load time for this call: left out of the power floor (job-pricing.ts). Only
         // the agent is paid by the floor, so reporting more than it spent only lowers its own pay.
         loadMs: z.number().min(0).max(INFERENCE_MAX_TIMEOUT_MS).optional(),
+        // Reading the prompt and writing the reply (Ollama's durations): shown to the requester, never priced.
+        promptMs: z.number().min(0).max(INFERENCE_MAX_TIMEOUT_MS).optional(),
+        genMs: z.number().min(0).max(INFERENCE_MAX_TIMEOUT_MS).optional(),
       })
       .parse(req.body);
     const claim = queue.getClaim(body.subtaskId);
@@ -566,13 +573,24 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         if (body.loadMs !== undefined) b.loadMs = Math.round(body.loadMs);
       }
     }
+    // Where it ran, for the requester's last read (agent, pickup, prompt and generation time).
+    if (r === "ok" && body.done) {
+      const b = taskBilling.get(claim.subtask.taskId);
+      if (b) {
+        b.servedAgentId = verified.agentId;
+        if (b.submittedAtMs !== undefined && claim.claimedAt !== undefined) b.pickupMs = Math.max(0, claim.claimedAt - b.submittedAtMs);
+        if (body.promptMs !== undefined) b.promptMs = Math.round(body.promptMs);
+        if (body.genMs !== undefined) b.genMs = Math.round(body.genMs);
+      }
+    }
     return reply.code(r === "ok" || r === "duplicate" ? 200 : 409).send({ status: r });
   });
 
   /** The requester reads the reply as it streams (long poll; signed by the requester's own agent). */
   app.post("/inference/stream", async (req, reply) => {
     const body = z.object({ taskId: z.string().min(1), subtaskId: z.string().min(1), after: z.number().int().min(0).default(0), waitMs: z.number().int().min(0).max(25_000).default(15_000) }).parse(req.body);
-    const billing = taskBilling.get(body.taskId);
+    // A call whose result already settled it is read from the settled entry (its last poll can land just after).
+    const billing = taskBilling.get(body.taskId) ?? settledBilling.get(body.taskId);
     // A call cancelled for lack of capacity was refunded (its billing entry is gone): its owner is kept with the cancellation.
     const owner = billing?.accountId ?? noCapacity.get(body.taskId)?.accountId ?? restrictedCancelled.get(body.taskId)?.accountId;
     const reader = await resolveSubmitterAccount(req as any, owner ?? "", "/inference/stream");
@@ -599,6 +617,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       ...(billing.outputTokens !== undefined ? { outputTokens: billing.outputTokens } : {})
     };
     if (result) await settleTaskIfDone(body.taskId);
-    return reply.send({ ...r, ...(result ? { creditsSpent: msatToCSats(billing.refunded ? billing.costMsat : billing.reservedMsat), durationMs: result.durationMs, ...tokens } : {}) });
+    const served = r.done && (billing.servedAgentId ?? result?.agentId) ? await servedBy(billing.servedAgentId ?? result!.agentId, owner, billing) : undefined;
+    return reply.send({ ...r, ...(result ? { creditsSpent: msatToCSats(billing.refunded ? billing.costMsat : billing.reservedMsat), durationMs: result.durationMs, ...tokens } : {}), ...(served ? { served } : {}) });
   });
 }

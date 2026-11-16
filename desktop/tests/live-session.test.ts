@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { applySessionEvent, canWrite, viewFromSnapshot } from "../src/lib/live-session";
+import { applySessionEvent, presenceText, viewFromSnapshot } from "../src/lib/live-session";
+import { servedBreakdown, servedLine } from "../src/lib/served";
 import type { SessionSnapshotView } from "../src/lib/api";
 
 const TERM = { clientId: "term-1", kind: "terminal" as const, label: "Terminal on mbp" };
@@ -30,14 +31,15 @@ describe("live session view", () => {
     expect(v.messages.map((m) => [m.role, m.content, m.by])).toEqual([["user", "Add a footer", "terminal"], ["assistant", "Done.", undefined]]);
     expect(v.messages[1].toolEvents?.[0]).toMatchObject({ tool: "edit_file", approval_status: "approved", result: "ok" });
     expect(v.messages[1].changedFiles).toEqual(["index.html"]);
-    expect(canWrite(v, DESK)).toBe(false);
-    expect(canWrite(v, TERM)).toBe(true);
+    // Co-editing: no controller, a light presence line instead.
+    expect(v.controller).toBeNull();
+    expect(presenceText(v, DESK)).toBe("Terminal and EdgeCoder app connected");
   });
 
-  it("follows a running turn, approvals, control changes and the end of the turn", () => {
+  it("follows a running turn, approvals and the end of the turn", () => {
     let v = viewFromSnapshot(snap());
     v = applySessionEvent(v, { seq: 11, type: "control", controller: DESK });
-    expect(canWrite(v, DESK)).toBe(true);
+    expect(v.controller).toBeNull();
     v = applySessionEvent(v, { seq: 12, type: "message", entry: { id: "u2", role: "user", content: "and a header", at: 3, by: "desktop" } });
     v = applySessionEvent(v, { seq: 13, type: "agent", turnId: "t2", event: { type: "turn", id: "t2" } });
     v = applySessionEvent(v, { seq: 14, type: "agent", turnId: "t2", event: { type: "text", content: "Adding" } });
@@ -67,5 +69,32 @@ describe("live session view", () => {
       pending: [{ id: "x2", tool: "run_shell", args: {} }],
     }));
     expect(v.streaming?.toolEvents.map((e) => e.approval_status)).toEqual(["approved", "pending"]);
+  });
+
+  it("queues messages from either client in order, removes them as they start or are removed, and notes what the other client did", () => {
+    let v = viewFromSnapshot(snap({ queue: [{ id: "q1", text: "from the terminal", by: "terminal", at: 1 }] }));
+    expect(v.queue).toEqual([{ id: "q1", text: "from the terminal", from: "the terminal" }]);
+    v = applySessionEvent(v, { seq: 11, type: "queued", entry: { id: "q2", text: "from here", by: "desktop", label: "EdgeCoder app", at: 2 } });
+    expect(v.queue.map((q) => q.id)).toEqual(["q1", "q2"]);
+    v = applySessionEvent(v, { seq: 12, type: "unqueued", id: "q2", queue: [{ id: "q1", text: "from the terminal", by: "terminal", at: 1 }] });
+    expect(v.queue.map((q) => q.id)).toEqual(["q1"]);
+    v = applySessionEvent(v, { seq: 13, type: "message", entry: { id: "q1", role: "user", content: "from the terminal", at: 3, by: "terminal" } });
+    expect(v.queue).toEqual([]);
+    v = applySessionEvent(v, { seq: 14, type: "agent", turnId: "t9", event: { type: "turn", id: "t9" } });
+    v = applySessionEvent(v, { seq: 15, type: "agent", turnId: "t9", event: { type: "tool_call", id: "c7", tool: "edit_file", args: {}, requires_approval: true } });
+    v = applySessionEvent(v, { seq: 16, type: "approval", id: "c7", approved: true, by: "terminal", label: "Terminal on mbp" });
+    expect(v.streaming?.toolEvents[0].approval_status).toBe("approved");
+    expect(v.notes.at(-1)).toBe("Approved in the terminal.");
+    v = applySessionEvent(v, { seq: 17, type: "settings", model: "network/qwen2.5-coder:32b", mode: "auto", changed: ["model", "mode"], by: "terminal" });
+    expect(v.mode).toBe("auto");
+    expect(v.notes.at(-1)).toBe("The terminal changed the model to network/qwen2.5-coder:32b and mode to auto.");
+  });
+
+  it("the reply footer says where each call ran", () => {
+    const served = { label: "lin-•••3f2a", own: false, computeClass: "gpu.dc", tier: "gpu.dc40", hardware: "Datacenter GPU (gpu.dc40)", gpu: "2× NVIDIA A16", region: "ord", city: "Chicago", country: "US", promptTokens: 24_800, outputTokens: 312, promptMs: 81_000, genMs: 6_500, pickupMs: 400 };
+    expect(servedLine([{ cSats: 3.4, model: "qwen3-coder:30b", served }])).toBe("qwen3-coder:30b · Datacenter GPU 2×A16 · Chicago · read 24.8k tok in 81 s · wrote 312 tok in 6.5 s · 3.4 cSats");
+    expect(servedLine([{ cSats: 0, model: "qwen3.5:9b", served: { label: "This computer", own: true, computeClass: "local", tier: null, hardware: "This computer (Apple M1 Max)", region: null, country: null } }])).toBe("qwen3.5:9b · This computer (Apple M1 Max) · free");
+    expect(servedLine([{ cSats: 1, where: "Network" }])).toBeNull();
+    expect(servedBreakdown([{ cSats: 3.4, model: "qwen3-coder:30b", served }])).toBe("1. qwen3-coder:30b · lin-•••3f2a · Datacenter GPU (gpu.dc40) · 2× NVIDIA A16 · Chicago ord (pickup 0.4 s, read 24.8k tok in 81 s, wrote 312 tok in 6.5 s) · 3.4 cSats");
   });
 });

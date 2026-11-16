@@ -41,13 +41,12 @@ describe("provider: shared sessions and GitHub sign-in", () => {
     const created = await app.inject({ method: "POST", url: "/v1/ide/sessions", headers, payload: { ...who, projectRoot: project, model: "network/qwen3-coder:30b" } });
     expect(created.statusCode).toBe(200);
     const snap = created.json();
-    expect(snap).toMatchObject({ trusted: false, controller: who, session: { projectRoot: project, model: "qwen3-coder:30b", compute: { target: "network" } } });
+    expect(snap).toMatchObject({ trusted: false, controller: null, session: { projectRoot: project, model: "qwen3-coder:30b", compute: { target: "network" } } });
     const id = snap.session.id;
     expect((await app.inject({ method: "POST", url: `/v1/ide/sessions/${id}/trust`, headers, payload: { ...who, trusted: true } })).json()).toMatchObject({ trusted: true });
-    // Another client can't publish (or write) until it takes control.
+    // Co-editing: another client may publish (and write) too.
     const desk = { clientId: "desk-y", kind: "desktop" };
-    expect((await app.inject({ method: "POST", url: `/v1/ide/sessions/${id}/publish`, headers, payload: { ...desk, published: true } })).statusCode).toBe(409);
-    expect((await app.inject({ method: "POST", url: `/v1/ide/sessions/${id}/publish`, headers, payload: { ...who, published: true } })).statusCode).toBe(200);
+    expect((await app.inject({ method: "POST", url: `/v1/ide/sessions/${id}/publish`, headers, payload: { ...desk, published: true } })).statusCode).toBe(200);
     const list = (await app.inject({ method: "GET", url: "/v1/ide/sessions?published=1", headers })).json();
     expect(list.sessions.map((s: { id: string }) => s.id)).toEqual([id]);
     expect((await app.inject({ method: "POST", url: "/v1/ide/sessions", headers, payload: { ...who, projectRoot: "relative/path" } })).statusCode).toBe(400);

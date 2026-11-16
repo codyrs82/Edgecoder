@@ -40,7 +40,7 @@ describe("SessionHub", () => {
     const { hub, model } = makeHub([{ content: "Hello from the model.", toolCalls: [] }], { dir });
     const s = hub.create({ projectRoot: root, model: "network/qwen3-coder:30b", client: TERM });
     expect(s.branch).toBe("main");
-    expect(hub.snapshot(s.id).controller).toEqual(TERM);
+    expect(hub.snapshot(s.id).controller).toBeNull();
     hub.send(s.id, "hi there", TERM);
     await hub.idle(s.id);
     const snap = hub.snapshot(s.id);
@@ -56,31 +56,92 @@ describe("SessionHub", () => {
     expect(again.list()[0]).toMatchObject({ id: s.id, title: "hi there", messages: 2, model: "network/qwen3-coder:30b", running: false });
   });
 
-  it("only the controller writes; take control hands the turn over, including a waiting approval", async () => {
-    const { hub } = makeHub([
-      { content: "Writing.", toolCalls: [{ name: "write_file", arguments: { path: "b.txt", content: "new\n" } }] },
-      { content: "Done.", toolCalls: [] },
+  it("co-editing: any client sends; messages sent during a turn queue in order, labelled, and run next together", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { hub, model } = makeHub([
+      async () => {
+        await gate;
+        return { content: "First reply.", toolCalls: [] };
+      },
+      { content: "Second reply.", toolCalls: [] },
     ]);
     const s = hub.create({ projectRoot: root, client: TERM });
     const events: SessionEvent[] = [];
     hub.subscribe(s.id, DESK, 0, (e) => events.push(e));
-    expect(() => hub.send(s.id, "from the app", DESK)).toThrow(SessionError);
+    expect(hub.send(s.id, "from the terminal", TERM).turnId).toBeTruthy();
+    // Concurrent sends from both clients while the turn runs: queued, in order.
+    const a = hub.send(s.id, "from the app", DESK);
+    const b = hub.send(s.id, "and the terminal again", TERM);
+    expect(a.turnId).toBeNull();
+    expect(a.queued).toMatchObject({ by: "desktop", label: "EdgeCoder app" });
+    expect(hub.snapshot(s.id).queue.map((q) => [q.by, q.text])).toEqual([["desktop", "from the app"], ["terminal", "and the terminal again"]]);
+    // One can be removed before it starts.
+    const c = hub.send(s.id, "never mind", DESK);
+    expect(hub.unqueue(s.id, c.queued!.id, TERM)).toBe(true);
+    expect(events.filter((e) => e.type === "queued")).toHaveLength(3);
+    release();
+    await hub.idle(s.id);
+    const t = hub.snapshot(s.id).session.transcript.map((x) => [x.role, x.by ?? "", x.content]);
+    expect(t).toEqual([
+      ["user", "terminal", "from the terminal"],
+      ["assistant", "", "First reply."],
+      ["user", "desktop", "from the app"],
+      ["user", "terminal", "and the terminal again"],
+      ["assistant", "", "Second reply."],
+    ]);
+    expect(model.requests[1].messages.slice(-2).map((m) => m.content)).toEqual(["from the app", "and the terminal again"]);
+    expect(hub.snapshot(s.id).queue).toEqual([]);
+    expect(b.queued?.id).toBeTruthy();
+  });
+
+  it("approvals: any client answers, the first answer wins and everyone hears who answered", async () => {
+    const { hub } = makeHub([
+      { content: "Writing.", toolCalls: [{ name: "write_file", arguments: { path: "b.txt", content: "new\n" } }] },
+      { content: "Done.", toolCalls: [] },
+    ]);
+    const s = hub.create({ projectRoot: root, client: TERM, mode: "ask" });
+    const events: SessionEvent[] = [];
+    hub.subscribe(s.id, TERM, 0, (e) => events.push(e));
     hub.send(s.id, "write b", TERM);
     await until(() => hub.snapshot(s.id).pending.length === 1, 3000, "approval");
     const callId = hub.snapshot(s.id).pending[0].id;
-    expect(() => hub.approve(s.id, callId, true, DESK)).toThrow(/in control/);
-    expect(() => hub.send(s.id, "again", TERM)).toThrow(/still running/);
-    hub.takeControl(s.id, DESK);
-    hub.approve(s.id, callId, true, DESK);
+    expect(hub.approve(s.id, callId, true, DESK)).toBe(true);
+    // The terminal's answer arrives second: no effect, no error.
+    expect(hub.approve(s.id, callId, false, TERM)).toBe(false);
     await hub.idle(s.id);
     expect(readFileSync(join(root, "b.txt"), "utf8")).toBe("new\n");
-    const types = events.map((e) => e.type);
-    expect(types).toContain("control");
-    expect(events.find((e) => e.type === "approval")).toMatchObject({ id: callId, approved: true, by: "desktop" });
-    const end = events.find((e) => e.type === "turn_end") as SessionEvent & { entry: { changedFiles: string[]; content: string } };
-    expect(end.entry).toMatchObject({ changedFiles: ["b.txt"], content: "Writing.\n\nDone." });
-    // seq numbers are strictly increasing
-    expect(events.map((e) => e.seq)).toEqual([...events.map((e) => e.seq)].sort((a, b) => a - b));
+    const approvals = events.filter((e) => e.type === "approval");
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]).toMatchObject({ id: callId, approved: true, by: "desktop", label: "EdgeCoder app" });
+    expect(events.map((e) => e.seq)).toEqual([...events.map((e) => e.seq)].sort((x, y) => x - y));
+  });
+
+  it("interrupt plus queue: stopping the turn runs the queued message now", async () => {
+    const { hub } = makeHub([
+      { content: "", toolCalls: [{ name: "write_file", arguments: { path: "slow.txt", content: "x" } }] },
+      { content: "Queued one ran.", toolCalls: [] },
+    ]);
+    const s = hub.create({ projectRoot: root, client: TERM, mode: "ask" });
+    hub.send(s.id, "long job", TERM);
+    await until(() => hub.snapshot(s.id).pending.length === 1, 3000, "approval");
+    hub.send(s.id, "do this instead", DESK);
+    expect(hub.cancel(s.id, DESK)).toBe(true);
+    await hub.idle(s.id);
+    const t = hub.snapshot(s.id).session.transcript;
+    expect(t.map((x) => x.content)).toEqual(["long job", expect.stringContaining("(stopped)"), "do this instead", "Queued one ran."]);
+    expect(existsSync(join(root, "slow.txt"))).toBe(false);
+  });
+
+  it("settings from either client are mirrored to the other with who changed them", () => {
+    const { hub } = makeHub([]);
+    const s = hub.create({ projectRoot: root, client: TERM });
+    const seen: SessionEvent[] = [];
+    hub.subscribe(s.id, TERM, 0, (e) => seen.push(e));
+    hub.update(s.id, { model: "network/qwen3-coder:30b", mode: "auto" }, DESK);
+    const ev = seen.find((e) => e.type === "settings")!;
+    expect(ev).toMatchObject({ model: "network/qwen3-coder:30b", mode: "auto", autoApprove: "edits", by: "desktop", label: "EdgeCoder app", changed: ["model", "mode"] });
+    expect(hub.takeControl(s.id, DESK)).toEqual(DESK); // a no-op kept for older clients
   });
 
   it("'always' for edits applies later edits without asking; always for a command covers that program only", async () => {

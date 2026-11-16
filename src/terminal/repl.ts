@@ -2,22 +2,29 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 /**
- * The `edgecoder code` REPL: a client of one shared session on the IDE provider. Replies stream
- * in, tool calls print in one line, writes and commands ask inline (y / n / always) with the diff,
- * and whatever another client (the desktop app) does in the same session is mirrored here.
+ * The `edgecoder code` REPL: a client of one shared session on the IDE provider, co-edited with the
+ * desktop app. You can type at any time: a message sent while a reply runs is queued (the next
+ * turn starts with it), Esc stops the reply, Shift+Tab cycles the permission mode. Approvals ask
+ * inline (Enter = yes) and close themselves when the app answers first. Slash commands work at
+ * any prompt, an approval prompt included.
  */
 
-import type { ClientRef, SessionEvent, TranscriptEntry } from "../apps/ide/sessions.js";
+import type { PermissionMode } from "../apps/ide/permissions.js";
+import type { ClientRef, QueuedMessage, SessionEvent, TranscriptEntry } from "../apps/ide/sessions.js";
 import type { IdeStreamEvent } from "../apps/ide/tool-types.js";
 import { ProviderError, type ProviderClient, type Snapshot } from "./client.js";
-import { formatCSats, formatDiff, outputTail, proposedDiff, resultSummary, toolSummary, type Style } from "./render.js";
+import { clean, formatCSats, formatDiff, outputTail, proposedDiff, resultSummary, servedDetail, toolSummary, usageLine, type CallUsage, type Style } from "./render.js";
 
 export interface ReplIO {
   /** One line of input after showing `prompt`; null at the end of input. */
   readLine(prompt: string): Promise<string | null>;
+  /** Change the prompt shown while a line is being read (what was typed stays). */
+  setPrompt?(prompt: string): void;
   write(text: string): void;
   /** Ctrl+C. */
   onInterrupt?(fn: () => void): void;
+  /** Esc (stop the reply) and Shift+Tab (next permission mode). */
+  onKey?(fn: (key: "escape" | "shift-tab") => void): void;
   close?(): void;
 }
 
@@ -34,25 +41,33 @@ export interface ReplOptions {
   defaults?: { local?: string; network?: string };
 }
 
-export const HELP = `Commands:
+export const HELP = `Commands (they work at any prompt, an approval included):
   /model [name]                 show or set the model (a local tag, network/<model>[@class], auto)
   /compute [local|network|mine|auto]   where the model runs
-  /remote [off]                 continue this session in the EdgeCoder app (Code view), or stop
-  /take                         take control back from the app
+  /mode [ask|auto-edits|auto]   how much to ask first (Shift+Tab cycles)
+  /remote [off]                 show this session live in the EdgeCoder app (Code view), or stop
+  /stop                         stop the reply (Esc does the same); queued messages run next
+  /queue                        list queued messages; /unqueue [n] removes one (default: the last)
   /undo                         undo the files the last reply changed
   /clear                        start the conversation over
-  /status                       session, project, branch, model, who is connected
+  /status                       session, project, model, mode, where the last call ran, who is connected
   /cost                         what this session has spent
   /github                       sign in to GitHub (device code)
   /help                         this list
   /exit                         leave (the session stays; reopen it in the app or with --resume)
-Approvals: y = yes, n = no, a = always (edits for this session, or this command name). Ctrl+C stops a reply.`;
+Modes: ask (edits and commands ask), auto-edits (edits apply, undoable; commands ask),
+       auto (edits and commands apply; risky ones still ask). Read-only commands never ask.
+Approvals: Enter or y = yes, n = no, a = always (edits: this project; a command name: this project).
+Type while a reply runs: Enter queues the message for the next turn.`;
 
 interface Pending {
   id: string;
   tool: string;
   args: Record<string, unknown>;
 }
+
+const MODE_LABEL: Record<PermissionMode, string> = { ask: "ask", "auto-edits": "auto-edits", auto: "auto" };
+const KIND_LABEL: Record<string, string> = { terminal: "the terminal", desktop: "the EdgeCoder app", api: "a script" };
 
 export class Repl {
   private readonly c: ProviderClient;
@@ -61,35 +76,30 @@ export class Repl {
   private readonly me: ClientRef;
   private snap!: Snapshot;
   private follower: { close: () => void } | null = null;
-  private controllerId: string | null = null;
-  private controllerLabel = "";
   private running = false;
-  private currentTurn: string | null = null;
-  private endedTurns = new Set<string>();
-  private queue: Pending[] = [];
-  private calls = new Map<string, Pending>();
+  /** Approvals waiting, oldest first (any client may answer; the first answer wins). */
+  private approvals: Pending[] = [];
   private answered = new Set<string>();
-  private wake: () => void = () => undefined;
+  private queue: QueuedMessage[] = [];
+  /** Texts this terminal sent that haven't come back as a transcript message yet. */
+  private mine: string[] = [];
   private atLineStart = true;
-  private echoExpected = 0;
-  private turnCost = 0;
-  private turnWhere = "";
+  private turnCalls: CallUsage[] = [];
+  private lastCall: CallUsage | undefined;
   private cSats = 0;
   private model = "";
+  private mode: PermissionMode = "ask";
   private published = false;
   private clients: ClientRef[] = [];
   private exiting = false;
   private interrupts = 0;
+  private badAnswerShown: string | null = null;
 
   constructor(private readonly o: ReplOptions) {
     this.c = o.client;
     this.io = o.io;
     this.st = o.style;
     this.me = o.client.client;
-  }
-
-  private get inControl(): boolean {
-    return this.controllerId === this.me.clientId;
   }
 
   private out(text: string): void {
@@ -103,6 +113,10 @@ export class Repl {
     this.out(`${text}\n`);
   }
 
+  private refreshPrompt(): void {
+    this.io.setPrompt?.(this.prompt());
+  }
+
   async run(): Promise<number> {
     this.snap = await this.c.snapshot(this.o.sessionId);
     this.applySnapshot(this.snap);
@@ -113,26 +127,18 @@ export class Repl {
       },
     });
     this.io.onInterrupt?.(() => void this.interrupt());
+    this.io.onKey?.((k) => void this.key(k));
     if (this.o.remote) await this.command("/remote");
-    // A turn that was already running (resuming), or one the app started: follow it to the end.
+    // A turn already running (resuming, or one the app started): follow it, and its approvals.
     if (this.snap.running) {
       this.running = true;
-      this.currentTurn = this.snap.running.turnId;
-      for (const p of this.snap.pending) this.queue.push(p);
+      for (const p of this.snap.pending) this.addApproval(p, false);
     }
     try {
       for (;;) {
-        if (this.running && this.inControl) await this.waitTurn();
         const input = await this.io.readLine(this.prompt());
         if (input === null) break;
-        this.interrupts = 0;
-        const text = input.trim();
-        if (!text) continue;
-        if (text.startsWith("/")) {
-          if ((await this.command(text)) === "exit") break;
-          continue;
-        }
-        await this.say(text);
+        if ((await this.handle(input)) === "exit") break;
       }
     } finally {
       await this.leave();
@@ -140,17 +146,44 @@ export class Repl {
     return 0;
   }
 
-  private prompt(): string {
-    return this.inControl ? this.st.bold("› ") : this.st.dim(`(${this.controllerLabel || "the app"} is in control) › `);
+  /** One line typed at the prompt. */
+  async handle(input: string): Promise<"exit" | void> {
+    this.interrupts = 0;
+    const text = input.trim();
+    // Slash commands work at any prompt; an approval that is waiting stays waiting.
+    if (text.startsWith("/")) {
+      const r = await this.command(text);
+      this.refreshPrompt();
+      return r;
+    }
+    const p = this.currentApproval();
+    if (p) {
+      await this.answer(p, text);
+      return;
+    }
+    if (!text) return;
+    await this.say(input);
+  }
+
+  private currentApproval(): Pending | undefined {
+    while (this.approvals.length && this.answered.has(this.approvals[0].id)) this.approvals.shift();
+    return this.approvals[0];
+  }
+
+  prompt(): string {
+    const p = this.currentApproval();
+    if (p) return this.st.yellow(`  Allow ${toolSummary(p.tool, p.args)}? [Y/n/a] › `);
+    const state = this.running ? this.st.dim(` · running${this.queue.length ? `, ${this.queue.length} queued` : ""} (Esc stops)`) : "";
+    return `${this.st.dim(`[${MODE_LABEL[this.mode]}]`)}${state} ${this.st.bold("›")} `;
   }
 
   private applySnapshot(s: Snapshot): void {
-    this.controllerId = s.controller?.clientId ?? null;
-    this.controllerLabel = s.controller ? s.controller.label ?? s.controller.kind : "";
     this.model = modelLabel(s.session.model, s.session.compute);
     this.cSats = s.session.cSats;
     this.published = s.session.published;
     this.clients = s.clients;
+    this.mode = (s.session.mode ?? (s.session.autoApprove === "edits" ? "auto-edits" : "ask")) as PermissionMode;
+    this.queue = [...(s.queue ?? [])];
   }
 
   private header(): void {
@@ -159,147 +192,146 @@ export class Repl {
     this.line(st.bold("EdgeCoder") + st.dim(` · ${this.o.providerLabel}`));
     this.line(`${st.dim("project")} ${s.projectRoot}${s.branch ? st.dim(` (${s.branch})`) : ""}`);
     this.line(`${st.dim("model  ")} ${this.model}`);
+    this.line(`${st.dim("mode   ")} ${this.mode} ${st.dim("(Shift+Tab or /mode changes it)")}`);
     this.line(`${st.dim("session")} ${s.id}${s.transcript.length ? st.dim(` · ${s.transcript.length} messages`) : ""}`);
     for (const t of s.transcript.slice(-6)) this.replay(t);
-    this.line(st.dim("Type a request, or /help. /remote continues this session in the EdgeCoder app."));
+    this.line(st.dim("Type a request, or /help. /remote shows this session in the EdgeCoder app; both can type at once."));
   }
 
   private replay(t: TranscriptEntry): void {
-    if (t.role === "user") this.line(`${this.st.bold("›")} ${t.content}`);
-    else this.line(this.st.dim(t.content.length > 400 ? `${t.content.slice(0, 400)}…` : t.content));
+    const c = clean(t.content);
+    if (t.role === "user") this.line(`${this.st.bold("›")} ${c}`);
+    else this.line(this.st.dim(c.length > 400 ? `${c.slice(0, 400)}…` : c));
   }
 
   private async say(text: string): Promise<void> {
-    if (!this.inControl) {
-      this.line(this.st.yellow(`${this.controllerLabel || "The app"} is in control of this session. /take to take it back.`));
-      return;
-    }
-    if (this.running) {
-      this.line(this.st.yellow("A reply is still running. Ctrl+C stops it."));
-      return;
-    }
-    this.echoExpected++;
+    this.mine.push(text.trim());
     try {
-      const { turnId } = await this.c.send(this.o.sessionId, text);
-      if (!this.endedTurns.has(turnId)) {
-        this.running = true;
-        this.currentTurn = turnId;
+      const r = await this.c.send(this.o.sessionId, text);
+      if (r.turnId) this.running = true;
+      else if (r.queued) {
+        if (!this.queue.some((q) => q.id === r.queued!.id)) this.queue.push(r.queued);
+        this.line(this.st.dim(`  ▸ Queued (#${this.queue.length}): runs when the current reply ends. /unqueue removes it, Esc stops the reply.`));
       }
     } catch (err) {
-      this.echoExpected = Math.max(0, this.echoExpected - 1);
+      this.mine.splice(this.mine.indexOf(text.trim()), 1);
       this.line(this.st.red(errText(err)));
-      return;
     }
-    await this.waitTurn();
+    this.refreshPrompt();
   }
 
-  /** Until the running turn ends: answer approvals as they come (while in control). */
-  private async waitTurn(): Promise<void> {
-    while (this.running) {
-      if (this.inControl && this.queue.length) {
-        const p = this.queue.shift()!;
-        if (!this.answered.has(p.id)) await this.ask(p);
-        continue;
-      }
-      await new Promise<void>((r) => (this.wake = r));
-    }
-  }
-
-  private async ask(p: Pending): Promise<void> {
-    for (let tries = 0; tries < 3; tries++) {
-      const a = await this.io.readLine(this.st.yellow(`  Allow ${toolSummary(p.tool, p.args)}? [y]es / [n]o / [a]lways › `));
-      if (this.answered.has(p.id)) return; // answered elsewhere meanwhile
-      const ans = (a ?? "n").trim().toLowerCase();
-      const choice = ans === "y" || ans === "yes" ? "y" : ans === "n" || ans === "no" ? "n" : ans === "a" || ans === "always" ? "a" : null;
-      if (!choice) {
-        this.line(this.st.dim("  Answer y, n or a."));
-        continue;
-      }
-      this.answered.add(p.id);
-      try {
-        await this.c.approve(this.o.sessionId, p.id, choice !== "n", choice === "a");
-      } catch (err) {
-        this.line(this.st.red(`  ${errText(err)}`));
-      }
+  private async answer(p: Pending, text: string): Promise<void> {
+    const ans = text.toLowerCase();
+    // Enter means yes.
+    const choice = ans === "" || ans === "y" || ans === "yes" ? "y" : ans === "n" || ans === "no" ? "n" : ans === "a" || ans === "always" ? "a" : null;
+    if (!choice) {
+      if (this.badAnswerShown !== p.id) this.line(this.st.dim("  Enter or y = yes, n = no, a = always. (Slash commands work here too.)"));
+      this.badAnswerShown = p.id;
       return;
     }
     this.answered.add(p.id);
-    await this.c.approve(this.o.sessionId, p.id, false).catch(() => undefined);
+    this.approvals = this.approvals.filter((q) => q.id !== p.id);
+    try {
+      const r = await this.c.approve(this.o.sessionId, p.id, choice !== "n", choice === "a");
+      if (r.applied === false) this.line(this.st.dim("  (already answered in the other client)"));
+    } catch (err) {
+      this.line(this.st.red(`  ${errText(err)}`));
+    }
+    this.refreshPrompt();
+  }
+
+  private addApproval(p: Pending, showDiff: boolean): void {
+    if (this.answered.has(p.id) || this.approvals.some((q) => q.id === p.id)) return;
+    if (showDiff) {
+      const diff = proposedDiff(this.snap.session.projectRoot, p.tool, p.args);
+      if (diff?.length) this.line(formatDiff(diff, this.st));
+      else if (p.tool === "run_shell") this.line(`    ${this.st.yellow("$")} ${clean(String(p.args.command ?? ""))}`);
+    }
+    this.approvals.push(p);
+    this.refreshPrompt();
+  }
+
+  private who(e: SessionEvent): string {
+    const label = typeof e.label === "string" ? e.label : "";
+    return label || KIND_LABEL[String(e.by)] || String(e.by ?? "another client");
   }
 
   private onEvent(e: SessionEvent): void {
     const st = this.st;
     switch (e.type) {
       case "agent":
-        this.onAgent(e.event as IdeStreamEvent, String(e.turnId ?? ""));
+        this.onAgent(e.event as IdeStreamEvent);
         break;
       case "message": {
         const entry = e.entry as TranscriptEntry;
-        if (entry.by === this.me.kind && this.echoExpected > 0) {
-          this.echoExpected--;
-          break;
-        }
-        this.line(`${st.magenta(`› [${entry.by ?? "app"}]`)} ${entry.content}`);
+        const own = entry.by === this.me.kind && this.mine.includes(entry.content.trim());
+        if (own) {
+          this.mine.splice(this.mine.indexOf(entry.content.trim()), 1);
+          // A queued message of ours starts now.
+          if (this.queue.some((q) => q.id === entry.id)) this.line(`${st.bold("›")} ${clean(entry.content)} ${st.dim("(from the queue)")}`);
+        } else this.line(`${st.magenta(`› [from ${typeof e.label === "string" ? e.label : KIND_LABEL[entry.by ?? "api"] ?? entry.by}]`)} ${clean(entry.content)}`);
+        this.queue = this.queue.filter((q) => q.id !== entry.id);
+        this.running = true;
         break;
       }
+      case "queued": {
+        const q = e.entry as QueuedMessage;
+        if (!this.queue.some((x) => x.id === q.id)) this.queue.push(q);
+        if (!(q.by === this.me.kind && this.mine.includes(q.text.trim()))) this.line(st.dim(`  ▸ Queued from ${q.label ?? KIND_LABEL[q.by] ?? q.by}: ${clean(q.text).slice(0, 120)}`));
+        break;
+      }
+      case "unqueued":
+        this.queue = Array.isArray(e.queue) ? (e.queue as QueuedMessage[]) : this.queue.filter((q) => q.id !== e.id);
+        break;
       case "turn_end": {
         const entry = e.entry as TranscriptEntry;
-        if (entry.turnId) this.endedTurns.add(entry.turnId);
         if (!this.atLineStart) this.out("\n");
         const bits: string[] = [];
         if (entry.changedFiles?.length) bits.push(`changed ${entry.changedFiles.join(", ")} (/undo reverts)`);
-        if (this.turnCost > 0 || this.turnWhere) bits.push(`${formatCSats(this.turnCost)}${this.turnWhere ? ` · ${this.turnWhere}` : ""}`);
         if (e.stopped) bits.push("stopped");
         if (bits.length) this.line(st.dim(`  ${bits.join(" · ")}`));
+        const usage = usageLine(this.turnCalls, this.model);
+        if (usage) this.line(st.dim(`  ${usage}`));
         this.cSats = Number(e.cSats ?? this.cSats);
-        this.turnCost = 0;
-        this.turnWhere = "";
-        if (!this.currentTurn || entry.turnId === this.currentTurn) {
-          this.running = false;
-          this.currentTurn = null;
-        }
-        this.queue = [];
+        this.turnCalls = [];
+        this.running = false;
+        this.approvals = [];
         break;
       }
       case "approval": {
         const id = String(e.id);
-        const had = this.answered.has(id);
+        const mineAnswer = this.answered.has(id) && e.by === this.me.kind;
+        const wasWaiting = this.approvals.some((q) => q.id === id);
         this.answered.add(id);
-        this.queue = this.queue.filter((q) => q.id !== id);
-        if (e.by === "always") this.line(st.dim("  ✓ allowed (always)"));
-        else if (!had || e.by !== this.me.kind) this.line(st.dim(`  ${e.approved ? "✓ approved" : "✗ rejected"}${e.by && e.by !== this.me.kind ? ` (${e.by})` : ""}`));
-        break;
-      }
-      case "control": {
-        const ctl = e.controller as ClientRef | null;
-        const was = this.inControl;
-        this.controllerId = ctl?.clientId ?? null;
-        this.controllerLabel = ctl ? ctl.label ?? ctl.kind : "";
-        if (was && !this.inControl) this.line(st.yellow(`▸ ${this.controllerLabel || "Nobody"} ${ctl ? "took control" : "has control"}. You're watching; /take takes it back.`));
-        else if (!was && this.inControl) {
-          this.line(st.green("▸ You're in control."));
-          // Approvals still waiting in a running turn are now ours to answer.
-          void this.c.snapshot(this.o.sessionId).then((s) => {
-            for (const p of s.pending) if (!this.answered.has(p.id) && !this.queue.some((q) => q.id === p.id)) this.queue.push(p);
-            if (s.running) {
-              this.running = true;
-              this.currentTurn = s.running.turnId;
-            }
-            this.wake();
-          }).catch(() => undefined);
-        }
+        this.approvals = this.approvals.filter((q) => q.id !== id);
+        if (e.by === "always") this.line(st.dim("  ✓ allowed (mode or an earlier \"always\")"));
+        else if (e.by === "timeout") this.line(st.dim("  ✗ no answer in time: rejected"));
+        else if (e.by === "stopped") {
+          if (wasWaiting) this.line(st.dim("  ✗ stopped"));
+        } else if (!mineAnswer) this.line(st.dim(`  ${e.approved ? "✓ approved" : "✗ rejected"} in ${this.who(e)}`));
+        else this.line(st.dim(`  ${e.approved ? "✓ approved" : "✗ rejected"}`));
         break;
       }
       case "presence": {
         const before = new Set(this.clients.map((c) => c.clientId));
         this.clients = (e.clients as ClientRef[]) ?? [];
-        for (const c of this.clients) if (!before.has(c.clientId) && c.clientId !== this.me.clientId) this.line(st.dim(`▸ ${c.label ?? c.kind} is following this session.`));
         const now = new Set(this.clients.map((c) => c.clientId));
-        for (const id of before) if (!now.has(id) && id !== this.me.clientId) this.line(st.dim("▸ A client left this session."));
+        const changed = this.clients.some((c) => !before.has(c.clientId)) || [...before].some((id) => !now.has(id));
+        if (changed) this.line(st.dim(`▸ ${this.presence()}`));
         break;
       }
-      case "settings":
+      case "settings": {
         if (typeof e.model === "string") this.model = e.model;
+        if (typeof e.mode === "string") this.mode = e.mode as PermissionMode;
+        if (e.byClient !== undefined && e.byClient !== this.me.clientId) {
+          const changed = Array.isArray(e.changed) ? (e.changed as string[]) : [];
+          const what = [changed.includes("model") ? `model → ${this.model}` : "", changed.includes("mode") || changed.includes("autoApprove") ? `mode → ${this.mode}` : "", changed.includes("title") ? "title" : ""].filter(Boolean).join(", ");
+          if (what) this.line(st.dim(`▸ ${this.who(e)} changed ${what}`));
+        }
+        break;
+      }
+      case "stopping":
+        if (e.by !== this.me.kind) this.line(st.yellow(`▸ ${this.who(e)} stopped the reply.`));
         break;
       case "published":
         this.published = Boolean(e.published);
@@ -311,47 +343,46 @@ export class Repl {
         this.line(st.dim("▸ The conversation was cleared."));
         break;
       case "resync":
-        void this.c.snapshot(this.o.sessionId).then((s) => this.applySnapshot(s)).catch(() => undefined);
+        void this.c.snapshot(this.o.sessionId).then((s) => {
+          this.applySnapshot(s);
+          this.running = !!s.running;
+          for (const p of s.pending) this.addApproval(p, false);
+          this.refreshPrompt();
+        }).catch(() => undefined);
         break;
       case "deleted":
         this.line(st.red("▸ This session was deleted."));
         this.running = false;
         break;
     }
-    this.wake();
+    this.refreshPrompt();
   }
 
-  private onAgent(ev: IdeStreamEvent, turnId: string): void {
+  private presence(): string {
+    const names = [...new Set(this.clients.map((c) => (c.clientId === this.me.clientId ? "this terminal" : c.kind === "desktop" ? "EdgeCoder app" : c.label ?? c.kind)))];
+    return names.length > 1 ? `Connected: ${names.join(" and ")}` : "Only this terminal is connected.";
+  }
+
+  private onAgent(ev: IdeStreamEvent): void {
     const st = this.st;
     switch (ev.type) {
       case "turn":
-        if (!this.running) {
-          // A turn someone else started (the app): follow it.
-          this.running = true;
-          this.currentTurn = turnId;
-        }
+        this.running = true;
+        this.turnCalls = [];
         break;
       case "text":
-        this.out(ev.content);
+        this.out(clean(ev.content));
         break;
       case "status":
-        this.line(st.dim(`  ${ev.message}`));
+        this.line(st.dim(`  ${clean(ev.message)}`));
         break;
       case "tool_call": {
-        const p = { id: ev.id, tool: ev.tool, args: ev.args };
-        this.calls.set(ev.id, p);
         this.line(`${st.cyan("●")} ${toolSummary(ev.tool, ev.args)}`);
-        if (ev.requires_approval) {
-          const diff = proposedDiff(this.snap.session.projectRoot, ev.tool, ev.args);
-          if (diff?.length) this.line(formatDiff(diff, st));
-          else if (ev.tool === "run_shell") this.line(`    ${st.yellow("$")} ${String(ev.args.command ?? "")}`);
-          if (this.inControl) this.queue.push(p);
-          else this.line(st.dim(`  waiting for ${this.controllerLabel || "the app"} to approve…`));
-        }
+        if (ev.requires_approval) this.addApproval({ id: ev.id, tool: ev.tool, args: ev.args }, true);
         break;
       }
       case "tool_result":
-        this.line(ev.error ? st.red(`  ⎿ ${resultSummary(undefined, ev.error)}`) : st.dim(`  ⎿ ${resultSummary(ev.result, undefined)}`));
+        this.line(ev.error ? st.red(`  ⎿ ${resultSummary(undefined, clean(ev.error))}`) : st.dim(`  ⎿ ${resultSummary(ev.result === undefined ? undefined : clean(ev.result), undefined)}`));
         break;
       case "shell_output": {
         const text = [ev.stdout, ev.stderr].filter(Boolean).join("\n");
@@ -360,13 +391,25 @@ export class Repl {
         break;
       }
       case "plan":
-        this.line(st.dim(ev.steps.map((s, i) => `  ${i + 1}. ${s.description}`).join("\n")));
+        this.line(st.dim(ev.steps.map((s, i) => `  ${i + 1}. ${clean(s.description)}`).join("\n")));
         break;
-      case "usage":
-        this.turnCost += Number.isFinite(ev.cSats) ? ev.cSats : 0;
-        this.turnWhere = ev.where;
+      case "usage": {
+        const call: CallUsage = { cSats: Number.isFinite(ev.cSats) ? ev.cSats : 0, where: ev.where, ...(ev.model ? { model: ev.model } : {}), ...(ev.served ? { served: ev.served } : {}) };
+        this.turnCalls.push(call);
+        this.lastCall = call;
         break;
+      }
     }
+  }
+
+  private async key(k: "escape" | "shift-tab"): Promise<void> {
+    if (k === "escape") {
+      if (this.running) await this.command("/stop");
+      return;
+    }
+    const order: PermissionMode[] = ["ask", "auto-edits", "auto"];
+    await this.command(`/mode ${order[(order.indexOf(this.mode) + 1) % order.length]}`);
+    this.refreshPrompt();
   }
 
   /** Slash commands; returns "exit" to leave. */
@@ -411,6 +454,45 @@ export class Repl {
           this.line(st.dim(`▸ compute: ${where} · model: ${next}`));
           return;
         }
+        case "/mode": {
+          const m = arg.toLowerCase();
+          if (!m) {
+            this.line(`mode: ${this.mode} ${st.dim("(ask, auto-edits or auto; Shift+Tab cycles)")}`);
+            return;
+          }
+          if (!["ask", "auto-edits", "auto"].includes(m)) {
+            this.line(st.red("Use /mode ask, auto-edits or auto."));
+            return;
+          }
+          await this.c.settings(id, { mode: m as PermissionMode });
+          this.mode = m as PermissionMode;
+          this.line(st.dim(`▸ mode: ${m}${m === "auto" ? " (edits and commands apply without asking; risky commands still ask)" : m === "auto-edits" ? " (edits apply without asking, undoable; commands ask)" : " (edits and commands ask)"}`));
+          return;
+        }
+        case "/stop": {
+          const r = (await this.c.cancel(id)) as { stopped?: boolean };
+          this.line(st.yellow(r?.stopped ? `▸ Stopping…${this.queue.length ? " The queued message runs next." : ""}` : "▸ Nothing is running."));
+          return;
+        }
+        case "/queue":
+          this.line(this.queue.length ? this.queue.map((q, i) => `  ${i + 1}. ${clean(q.text).slice(0, 100)} ${st.dim(`(from ${q.label ?? KIND_LABEL[q.by] ?? q.by})`)}`).join("\n") : st.dim("Nothing is queued."));
+          return;
+        case "/unqueue": {
+          if (!this.queue.length) {
+            this.line(st.dim("Nothing is queued."));
+            return;
+          }
+          const n = arg ? Number(arg) : this.queue.length;
+          const q = Number.isInteger(n) && n >= 1 && n <= this.queue.length ? this.queue[n - 1] : undefined;
+          if (!q) {
+            this.line(st.red(`Use /unqueue 1-${this.queue.length}.`));
+            return;
+          }
+          const r = await this.c.unqueue(id, q.id);
+          this.queue = this.queue.filter((x) => x.id !== q.id);
+          this.line(st.dim(r.removed ? `▸ Removed: ${clean(q.text).slice(0, 80)}` : "▸ It had already started."));
+          return;
+        }
         case "/clear":
           await this.c.clear(id);
           return;
@@ -425,14 +507,15 @@ export class Repl {
         case "/status": {
           const s = await this.c.snapshot(id);
           this.applySnapshot(s);
-          const others = s.clients.filter((c) => c.clientId !== this.me.clientId);
           this.line(
             [
               `session  ${s.session.id}`,
               `project  ${s.session.projectRoot}${s.session.branch ? ` (${s.session.branch})` : ""}${s.trusted ? "" : st.dim(" · not trusted")}`,
-              `model    ${this.model}`,
-              `control  ${this.inControl ? "you" : this.controllerLabel || "nobody"}`,
-              `watching ${others.length ? others.map((c) => c.label ?? c.kind).join(", ") : "nobody else"}`,
+              `model    ${this.model} (${placementOf(this.model)})`,
+              `mode     ${this.mode}`,
+              `last ran ${servedDetail(this.lastCall)}`,
+              `clients  ${this.presence()}`,
+              `queue    ${this.queue.length ? `${this.queue.length} waiting` : "empty"}`,
               `remote   ${s.session.published ? "on (shown live in the EdgeCoder app)" : "off (/remote)"}`,
               `provider ${this.o.providerLabel} (${this.c.baseUrl})`,
               `spent    ${formatCSats(s.session.cSats)}`,
@@ -443,29 +526,21 @@ export class Repl {
         case "/remote": {
           if (arg === "off") {
             await this.c.publish(id, false);
-            this.line(st.dim("▸ Remote control off: the session is no longer shown live in the app."));
+            this.line(st.dim("▸ Remote off: the session is no longer shown live in the app."));
             return;
           }
           await this.c.publish(id, true);
           const title = (await this.c.snapshot(id).catch(() => this.snap)).session.title;
           this.line(
-            st.green("▸ Remote control on.") +
+            st.green("▸ Remote on.") +
               ` Open the EdgeCoder app → Code → ${this.snap.session.projectRoot.split(/[/\\]/).pop()} → "${title}" (live).\n` +
-              st.dim("  The app can send messages and approve tool calls; this terminal mirrors it. /take takes control back, /remote off stops."),
+              st.dim("  Both can type, approve and change settings at once; the first answer to an approval wins. /remote off stops."),
           );
           return;
         }
-        case "/take": {
-          await this.c.takeControl(id);
-          const s = await this.c.snapshot(id);
-          this.controllerId = s.controller?.clientId ?? null;
-          for (const p of s.pending) if (!this.answered.has(p.id) && !this.queue.some((q) => q.id === p.id)) this.queue.push(p);
-          if (s.running) {
-            this.running = true;
-            this.currentTurn = s.running.turnId;
-          }
+        case "/take":
+          this.line(st.dim("Nothing to take: the terminal and the app work on this session together."));
           return;
-        }
         case "/github":
           await this.githubLogin();
           return;
@@ -500,7 +575,7 @@ export class Repl {
   }
 
   private async interrupt(): Promise<void> {
-    if (this.running && this.inControl) {
+    if (this.running) {
       this.line(this.st.yellow("▸ Stopping…"));
       await this.c.cancel(this.o.sessionId).catch(() => undefined);
       return;
@@ -515,8 +590,6 @@ export class Repl {
   private async leave(): Promise<void> {
     this.exiting = true;
     this.follower?.close();
-    // Hand control back so the app can carry on (the session itself stays).
-    if (this.inControl) await this.c.releaseControl(this.o.sessionId).catch(() => undefined);
     this.line(this.st.dim(`Session ${this.o.sessionId} kept. Continue it in the app${this.published ? " (it's live there)" : " (/remote)"} or with: edgecoder code --resume ${this.o.sessionId}`));
   }
 }

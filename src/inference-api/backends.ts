@@ -3,15 +3,26 @@
 
 /** What can run a chat: this machine's Ollama (free), or the network (your machines, a lease, or any agent). */
 
+import { cpus } from "node:os";
+import type { ServedBy } from "../swarm/served-by.js";
 import { AutoUnsupportedError, NetworkInferenceError, RouteElsewhereError, streamNetworkCompletion, type NetworkDeps, type NetworkTarget } from "../apps/ide/network-inference.js";
 import { contextWindowFor, ollamaChat } from "./ollama.js";
 import { noRouteMessage, planRoutes, sizeWorkload, type ComputePolicy, type PlanOptions, type QualityFloor, type Route, type RouteInputs } from "./auto-route.js";
 import { ChatBackendError, type ChatBackend, type ChatPiece } from "./types.js";
 
+/** "This computer (Apple M1 Max)": a call that ran on this machine's Ollama. */
+export function thisComputer(t: { promptMs?: number; genMs?: number; promptTokens?: number; outputTokens?: number } = {}): ServedBy {
+  const cpu = (cpus()[0]?.model ?? "").replace(/\s+/g, " ").trim();
+  const out: ServedBy = { label: "This computer", own: true, computeClass: "local", tier: null, hardware: cpu ? `This computer (${cpu})` : "This computer", region: null, country: null };
+  for (const k of ["promptMs", "genMs", "promptTokens", "outputTokens"] as const) if (typeof t[k] === "number" && Number.isFinite(t[k])) out[k] = Math.round(t[k]!);
+  return out;
+}
+
 export function localBackend(ollamaHost: string, model: string): ChatBackend {
   return async function* (req, signal) {
     let stopped = "stop";
     let tokens: { promptTokens?: number; outputTokens?: number } = {};
+    let timing: { promptMs?: number; genMs?: number } = {};
     try {
       // Sized per call, but never below the window this machine's agent serves network calls with
       // (AGENT_CONTEXT_WINDOW), so a short local chat does not make Ollama reload the model.
@@ -23,6 +34,7 @@ export function localBackend(ollamaHost: string, model: string): ChatBackend {
             ...(p.promptTokens !== undefined ? { promptTokens: p.promptTokens } : {}),
             ...(p.outputTokens !== undefined ? { outputTokens: p.outputTokens } : {})
           };
+          timing = { promptMs: p.promptMs, genMs: p.genMs };
         } else yield p;
       }
     } catch (err) {
@@ -31,7 +43,7 @@ export function localBackend(ollamaHost: string, model: string): ChatBackend {
       if (/not found/i.test(msg)) throw new ChatBackendError(`${model} isn't installed on this computer. Install it from Settings > Models.`, 404);
       throw new ChatBackendError(msg, 502);
     }
-    yield { done: true, cSatsSpent: 0, stopReason: stopped === "length" ? "length" : "stop", ...tokens };
+    yield { done: true, cSatsSpent: 0, stopReason: stopped === "length" ? "length" : "stop", ...tokens, served: thisComputer({ ...tokens, ...timing }) };
   };
 }
 
@@ -44,7 +56,7 @@ export function networkBackend(deps: NetworkDeps, target: { model: string; compu
         if (p.toolCalls?.length) yield { toolCalls: p.toolCalls };
         if (p.done) {
           if (p.error) throw new ChatBackendError(`The machine running ${target.model} reported: ${p.error}`, 502);
-          yield { done: true, ...(p.routed ? { where: p.routed } : {}), ...(p.creditsSpent !== undefined ? { cSatsSpent: p.creditsSpent } : {}), ...(p.promptTokens !== undefined ? { promptTokens: p.promptTokens } : {}), ...(p.outputTokens !== undefined ? { outputTokens: p.outputTokens } : {}) };
+          yield { done: true, ...(p.routed ? { where: p.routed } : {}), ...(p.creditsSpent !== undefined ? { cSatsSpent: p.creditsSpent } : {}), ...(p.promptTokens !== undefined ? { promptTokens: p.promptTokens } : {}), ...(p.outputTokens !== undefined ? { outputTokens: p.outputTokens } : {}), ...(p.served ? { served: p.served } : {}) };
         }
       }
     } catch (err) {

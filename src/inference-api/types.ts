@@ -7,6 +7,7 @@
  * the model in the end, locally or on a network agent.
  */
 
+import type { ServedBy } from "../swarm/served-by.js";
 import type { RoutingHints } from "./job-descriptor.js";
 
 export interface ToolCall {
@@ -49,6 +50,8 @@ export type ChatPiece =
       /** Token counts as billed (the model's own counts, bounded by the coordinator); absent when unknown. */
       promptTokens?: number;
       outputTokens?: number;
+      /** Where the call ran (the serving machine's masked label, hardware, region, timings). */
+      served?: ServedBy;
     };
 
 export class ChatBackendError extends Error {

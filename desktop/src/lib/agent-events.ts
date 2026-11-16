@@ -3,6 +3,7 @@
 // full chat page and the editor's side panel.
 import type { IdeStreamEvent } from "./api";
 import type { ToolEvent } from "./types";
+import type { CallUsage, Served } from "./served";
 
 export interface AgentTurn {
   text: string;
@@ -11,8 +12,8 @@ export interface AgentTurn {
   turnId?: string;
   /** Project files the turn wrote, in first-write order. */
   changedFiles?: string[];
-  /** cSats the turn's model calls cost, and where the last one ran. */
-  usage?: { cSats: number; where?: string };
+  /** cSats the turn's model calls cost, where the last one ran, and each call (machine, timings). */
+  usage?: { cSats: number; where?: string; calls?: CallUsage[] };
 }
 
 /** Tools whose successful result means files in the project changed. */
@@ -57,7 +58,9 @@ export function applyAgentEvent(turn: AgentTurn, event: IdeStreamEvent): { turn:
     case "usage": {
       const cSats = Number(event.cSats ?? 0);
       const where = typeof event.where === "string" ? event.where : turn.usage?.where;
-      return { turn: { ...turn, usage: { cSats: Number(((turn.usage?.cSats ?? 0) + (Number.isFinite(cSats) ? cSats : 0)).toFixed(6)), where } }, filesChanged: false };
+      const call: CallUsage = { cSats: Number.isFinite(cSats) ? cSats : 0, ...(where ? { where } : {}), ...(typeof event.model === "string" ? { model: event.model } : {}), ...(event.served && typeof event.served === "object" ? { served: event.served as Served } : {}) };
+      const calls = [...(turn.usage?.calls ?? []), call].slice(-50);
+      return { turn: { ...turn, usage: { cSats: Number(((turn.usage?.cSats ?? 0) + call.cSats).toFixed(6)), where, calls } }, filesChanged: false };
     }
     case "file_change": {
       const path = String(event.path);
@@ -84,7 +87,7 @@ export function applyAgentEvent(turn: AgentTurn, event: IdeStreamEvent): { turn:
     case "status": {
       // Auto says where each model call went ("Auto: this computer (free) · qwen3.5:9b for agent work").
       const msg = String(event.message ?? "");
-      return msg.startsWith("Auto: ") ? { turn: { ...turn, usage: { cSats: turn.usage?.cSats ?? 0, where: msg.slice(6) } }, filesChanged: false } : { turn, filesChanged: false };
+      return msg.startsWith("Auto: ") ? { turn: { ...turn, usage: { ...turn.usage, cSats: turn.usage?.cSats ?? 0, where: msg.slice(6) } }, filesChanged: false } : { turn, filesChanged: false };
     }
     default:
       return { turn, filesChanged: false };

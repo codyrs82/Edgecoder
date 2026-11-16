@@ -1,13 +1,14 @@
 <script lang="ts">
-  // A shared session from the terminal (`edgecoder code`, /remote), continued here. The IDE
-  // provider runs the turns; this panel follows the session's events, and while it is in control
-  // sends messages and answers approvals. The terminal mirrors whatever happens here.
+  // A shared session from the terminal (`edgecoder code`, /remote), co-edited here. The IDE
+  // provider runs the turns; this panel follows the session's events. Both clients may send at any
+  // time (a message sent during a turn is queued for the next one), approve (the first answer
+  // wins) and change settings; neither has to take control.
   import { onDestroy, untrack } from "svelte";
-  import { Radio, SquareTerminal } from "@lucide/svelte";
+  import { Radio, Users } from "@lucide/svelte";
   import ChatMessage from "./ChatMessage.svelte";
   import ChatInput from "./ChatInput.svelte";
-  import { DESKTOP_CLIENT, followSession, getSession, sessionApprove, sessionCancel, sessionSend, sessionTakeControl } from "../lib/api";
-  import { applySessionEvent, canWrite, viewFromSnapshot, type LiveView } from "../lib/live-session";
+  import { DESKTOP_CLIENT, followSession, getSession, sessionApprove, sessionCancel, sessionSend, sessionUnqueue } from "../lib/api";
+  import { applySessionEvent, presenceText, viewFromSnapshot, type LiveView } from "../lib/live-session";
   import { markApproval } from "../lib/agent-events";
   import { projectName, tildePath } from "../lib/projects";
 
@@ -22,13 +23,11 @@
 
   let view = $state<LiveView | null>(null);
   let error = $state<string | null>(null);
-  let busy = $state(false);
   let scroller: HTMLDivElement | undefined = $state();
   let abort: AbortController | null = null;
 
-  const inControl = $derived(view ? canWrite(view, DESKTOP_CLIENT) : false);
-  const controllerName = $derived(view?.controller ? (view.controller.clientId === DESKTOP_CLIENT.clientId ? "You" : view.controller.label ?? view.controller.kind) : null);
-  const terminalHere = $derived(view?.clients.some((c) => c.kind === "terminal") ?? false);
+  const presence = $derived(view ? presenceText(view, DESKTOP_CLIENT) : "");
+  const lastNote = $derived(view?.notes.at(-1) ?? null);
 
   async function load(id: string) {
     abort?.abort();
@@ -65,20 +64,18 @@
   }
 
   async function act(fn: () => Promise<unknown>) {
-    busy = true;
     error = null;
     try {
       await fn();
     } catch (err) {
       error = (err as Error).message;
-    } finally {
-      busy = false;
     }
   }
 
-  const take = () => act(() => sessionTakeControl(sessionId));
+  // Sent at once; while a turn runs the provider queues it (it shows below as Queued).
   const send = (text: string) => act(() => sessionSend(sessionId, text));
   const stop = () => act(() => sessionCancel(sessionId));
+  const unqueue = (id: string) => act(() => sessionUnqueue(sessionId, id));
   function approve(id: string, approved: boolean) {
     if (view?.streaming) view = { ...view, streaming: { ...view.streaming, toolEvents: markApproval(view.streaming.toolEvents, id, approved) } };
     void act(() => sessionApprove(sessionId, id, approved));
@@ -90,15 +87,11 @@
     <div class="live-header">
       <span class="live-badge" title="Shared with the terminal"><Radio size={12} /> Live</span>
       <span class="live-title" title={view.title}>{view.title}</span>
-      <span class="live-meta" title={tildePath(view.projectRoot)}>{projectName(view.projectRoot)} · {view.model}</span>
+      <span class="live-meta" title={tildePath(view.projectRoot)}>{projectName(view.projectRoot)} · {view.model} · {view.mode}</span>
     </div>
-    <div class="control-bar" role="status">
-      {#if inControl}
-        <span>You're in control.{terminalHere ? " The terminal is following along." : ""}</span>
-      {:else}
-        <span><SquareTerminal size={13} /> {controllerName ?? "The terminal"} is in control. You're watching.</span>
-        <button class="btn btn--sm btn--primary" type="button" onclick={() => void take()} disabled={busy}>Take control</button>
-      {/if}
+    <div class="presence-bar" role="status">
+      <span><Users size={13} /> {presence}</span>
+      {#if lastNote}<span class="note-inline">{lastNote}</span>{/if}
     </div>
   {/if}
 
@@ -113,7 +106,7 @@
           <ChatMessage role={m.role} content={m.content} toolEvents={m.toolEvents} turnId={m.turnId} changedFiles={m.changedFiles} usage={m.usage} onFilesReverted={onFilesChanged} {onOpenPath} {onPreview} />
         {/each}
         {#if view.streaming}
-          <ChatMessage role="assistant" content={view.streaming.text} streaming={true} toolEvents={view.streaming.toolEvents} onToolApproval={inControl ? approve : undefined} />
+          <ChatMessage role="assistant" content={view.streaming.text} streaming={true} toolEvents={view.streaming.toolEvents} usage={view.streaming.usage} onToolApproval={approve} />
         {/if}
       </div>
     {:else if !error}
@@ -124,10 +117,12 @@
   <div class="panel-input">
     <ChatInput
       onSend={(t) => void send(t)}
-      placeholder={inControl ? "Message this session (the terminal sees it too)…" : "Take control to send messages"}
-      disabled={!inControl || busy}
+      placeholder={view?.streaming ? "Type the next message: it runs when this reply ends (Esc stops the reply)" : "Message this session (the terminal sees it too)…"}
+      disabled={!view || view.deleted}
       streaming={!!view?.streaming}
-      onStop={inControl ? () => void stop() : undefined}
+      onStop={() => void stop()}
+      queue={view?.queue ?? []}
+      onUnqueue={(id) => void unqueue(id)}
     />
   </div>
 </div>
@@ -170,7 +165,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .control-bar {
+  .presence-bar {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -180,10 +175,16 @@
     font-size: var(--fs-xs);
     color: var(--text-secondary);
   }
-  .control-bar span {
+  .presence-bar span {
     display: inline-flex;
     align-items: center;
     gap: 6px;
+  }
+  .note-inline {
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .messages-scroll {
     flex: 1;

@@ -1,0 +1,77 @@
+// Where a reply's model calls ran (the coordinator's served-by, or "This computer (…)"), as the
+// footer under a reply shows it, and the per-call breakdown its tooltip shows. The terminal prints
+// the same line (src/terminal/render.ts usageLine).
+
+export interface Served {
+  label: string;
+  own: boolean;
+  computeClass: string;
+  tier: string | null;
+  hardware: string;
+  gpu?: string;
+  region: string | null;
+  city?: string;
+  country: string | null;
+  pickupMs?: number;
+  promptMs?: number;
+  genMs?: number;
+  promptTokens?: number;
+  outputTokens?: number;
+}
+
+export interface CallUsage {
+  cSats: number;
+  where?: string;
+  model?: string;
+  served?: Served;
+}
+
+const tok = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1).replace(/\.0$/, "")}k` : String(n));
+const secs = (ms: number) => (ms >= 10_000 ? `${Math.round(ms / 1000)} s` : `${(ms / 1000).toFixed(1)} s`);
+const cost = (n: number) => `${n.toLocaleString(undefined, { maximumFractionDigits: 3 })} cSats`;
+
+/** "Datacenter GPU 2×A16", or "This computer (Apple M1 Max)". */
+export function hardwareShort(s: Served): string {
+  if (s.computeClass === "local") return s.hardware;
+  const cls = s.hardware.replace(/\s*\([^)]*\)\s*$/, "");
+  const gpu = s.gpu ? s.gpu.replace(/^(\d+)× /, "$1×").replace(/^(\d+×)?(NVIDIA|AMD|Apple|Intel) /, "$1") : "";
+  return `${cls}${gpu ? ` ${gpu}` : s.tier ? ` (${s.tier})` : ""}${s.own ? " · your machine" : ""}`;
+}
+
+/** `qwen3-coder:30b · Datacenter GPU 2×A16 · Chicago · read 24.8k tok in 81 s · wrote 312 tok in 6.5 s · 3.4 cSats`; null without served calls. */
+export function servedLine(calls: CallUsage[] | undefined): string | null {
+  const withServed = (calls ?? []).filter((c) => c.served);
+  if (!withServed.length || !calls) return null;
+  const last = withServed[withServed.length - 1];
+  const s = last.served!;
+  const bits: string[] = [];
+  if (last.model) bits.push(last.model.replace(/^network\//, ""));
+  bits.push(hardwareShort(s));
+  const place = s.city ?? s.region ?? s.country;
+  if (place) bits.push(place);
+  const machines = new Set(withServed.map((c) => c.served!.label));
+  if (machines.size > 1) bits.push(`${machines.size} machines`);
+  const sum = (k: "promptTokens" | "outputTokens" | "promptMs" | "genMs") => calls.reduce((n, c) => n + (c.served?.[k] ?? 0), 0);
+  if (sum("promptTokens")) bits.push(`read ${tok(sum("promptTokens"))} tok${sum("promptMs") ? ` in ${secs(sum("promptMs"))}` : ""}`);
+  if (sum("outputTokens")) bits.push(`wrote ${tok(sum("outputTokens"))} tok${sum("genMs") ? ` in ${secs(sum("genMs"))}` : ""}`);
+  if (calls.length > 1) bits.push(`${calls.length} calls`);
+  const total = calls.reduce((n, c) => n + (Number.isFinite(c.cSats) ? c.cSats : 0), 0);
+  bits.push(s.computeClass === "local" && total === 0 ? "free" : cost(total));
+  return bits.join(" · ");
+}
+
+/** One line per call, for the footer's tooltip. */
+export function servedBreakdown(calls: CallUsage[] | undefined): string {
+  return (calls ?? [])
+    .map((c, i) => {
+      const s = c.served;
+      if (!s) return `${i + 1}. ${c.where ?? "unknown"} · ${cost(c.cSats)}`;
+      const t = [
+        s.pickupMs !== undefined ? `pickup ${secs(s.pickupMs)}` : "",
+        s.promptTokens !== undefined ? `read ${tok(s.promptTokens)} tok${s.promptMs !== undefined ? ` in ${secs(s.promptMs)}` : ""}` : "",
+        s.outputTokens !== undefined ? `wrote ${tok(s.outputTokens)} tok${s.genMs !== undefined ? ` in ${secs(s.genMs)}` : ""}` : "",
+      ].filter(Boolean);
+      return `${i + 1}. ${[c.model?.replace(/^network\//, ""), s.label, s.hardware, s.gpu, [s.city, s.region].filter(Boolean).join(" ")].filter(Boolean).join(" · ")}${t.length ? ` (${t.join(", ")})` : ""} · ${cost(c.cSats)}`;
+    })
+    .join("\n");
+}

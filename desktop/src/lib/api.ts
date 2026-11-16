@@ -1400,6 +1400,11 @@ export interface ProjectsFolder {
 }
 export const getProjectsFolder = () => fsCall<ProjectsFolder>("GET", "/v1/ide/settings/projects-folder");
 export const setProjectsFolder = (path: string) => fsCall<ProjectsFolder>("POST", "/v1/ide/settings/projects-folder", { path });
+/** The `edgecoder` command-line launcher (~/.local/bin/edgecoder, or edgecoder.cmd on Windows). */
+export interface CliStatus { path: string; dir: string; installed: boolean; ours: boolean; onPath: boolean }
+export const getCliStatus = () => fsCall<CliStatus>("GET", "/v1/ide/settings/cli");
+/** Writes the launcher; the message says where and whether its folder is on PATH. Throws with the reason when it can't. */
+export const installCliTool = () => fsCall<{ ok: boolean; path: string; dir: string; state: string; onPath: boolean; message: string }>("POST", "/v1/ide/settings/cli/install", {});
 /** gh's sign-in and, when signed in, the user's 20 most recent repositories (owner/name). */
 export const recentRepos = () => fsCall<GitHubCliStatus & { repos: string[] }>("GET", "/v1/ide/repos/recent");
 export interface RepoConnection {
@@ -1761,7 +1766,8 @@ export const botErrorText = (err: unknown) => (err instanceof FsError ? err.code
 
 // ---------------------------------------------------------------------------
 // Shared coding sessions (:4304 /v1/ide/sessions): sessions the terminal (`edgecoder code`)
-// published with /remote, continued here. The provider runs the turns; this app is a client.
+// published with /remote, continued here. The provider runs the turns; this app and the terminal
+// are both clients of the session and may send, approve and change settings at any time.
 // ---------------------------------------------------------------------------
 
 export interface SessionClientRef {
@@ -1794,16 +1800,24 @@ export interface SessionEntry {
   events?: IdeStreamEvent[];
   turnId?: string;
   changedFiles?: string[];
-  usage?: { cSats: number; where?: string };
+  usage?: { cSats: number; where?: string; calls?: import("./served").CallUsage[] };
   undone?: boolean;
 }
+export interface SessionQueued {
+  id: string;
+  text: string;
+  by: "terminal" | "desktop" | "api";
+  label?: string;
+  at: number;
+}
 export interface SessionSnapshotView {
-  session: { id: string; title: string; projectRoot: string; branch: string | null; model: string; compute: { target: string }; published: boolean; cSats: number; transcript: SessionEntry[] };
+  session: { id: string; title: string; projectRoot: string; branch: string | null; model: string; compute: { target: string }; published: boolean; cSats: number; transcript: SessionEntry[]; mode?: "ask" | "auto-edits" | "auto"; autoApprove?: "none" | "edits" };
   seq: number;
   controller: SessionClientRef | null;
   clients: SessionClientRef[];
   running: { turnId: string; text: string; events: IdeStreamEvent[] } | null;
   pending: Array<{ id: string; tool: string; args: Record<string, unknown> }>;
+  queue?: SessionQueued[];
 }
 export interface SessionEvent {
   seq: number;
@@ -1822,9 +1836,12 @@ export const listPublishedSessions = () => fsCall<{ sessions: SessionSummary[] }
 /** Every session on the IDE server (auto-restart checks for running turns); older servers may 404. */
 export const listAllSessions = () => fsCall<{ sessions: SessionSummary[] }>("GET", "/v1/ide/sessions").then((r) => r.sessions ?? []);
 export const getSession = (id: string) => fsCall<SessionSnapshotView>("GET", `/v1/ide/sessions/${id}`);
-export const sessionSend = (id: string, text: string) => sessionPost<{ turnId: string }>(id, "messages", { text });
-export const sessionApprove = (id: string, callId: string, approved: boolean, always = false) => sessionPost(id, "approve", { callId, approved, always });
-export const sessionTakeControl = (id: string) => sessionPost(id, "control");
+/** Starts a turn, or queues the message while one runs (turnId null). */
+export const sessionSend = (id: string, text: string) => sessionPost<{ turnId: string | null; queued?: SessionQueued }>(id, "messages", { text });
+export const sessionUnqueue = (id: string, queuedId: string) => sessionPost<{ removed: boolean }>(id, "unqueue", { queuedId });
+/** `applied` false: the terminal answered first. */
+export const sessionApprove = (id: string, callId: string, approved: boolean, always = false) => sessionPost<{ ok: boolean; applied?: boolean }>(id, "approve", { callId, approved, always });
+export const sessionSettings = (id: string, patch: { model?: string; mode?: "ask" | "auto-edits" | "auto" }) => sessionPost(id, "settings", patch);
 export const sessionCancel = (id: string) => sessionPost(id, "cancel");
 export const sessionUndo = (id: string) => sessionPost<{ reverted: string[] }>(id, "undo");
 

@@ -25,7 +25,7 @@ import { ToolExecutor, hasGitHubOrigin, preparePullRequestArgs } from "./tool-ex
 import { MAX_EDITOR_FILE_BYTES, ProjectFs, ProjectFsError, findPaths, readProjectRules } from "./project-fs.js";
 import { CheckpointStore } from "./checkpoints.js";
 import { cleanInlineEdit, inlineEditMessages } from "./inline-edit.js";
-import { backendChat, makeToolRunner, ollamaChat, runAgentLoop, toolSchemas } from "./agent-loop.js";
+import { backendChat, makeToolRunner, ollamaChat, runAgentLoop, toolSchemas, type ChatFn } from "./agent-loop.js";
 import { completeAt } from "./complete.js";
 import { codebaseIndexFor } from "./codebase-index.js";
 import { GitError, GitOps } from "./git-ops.js";
@@ -33,7 +33,7 @@ import { GitSetupError, cloneRepo, githubStatus, normalizeRemoteUrl } from "./gi
 import { connectRepoUrl, defaultProjectsFolder, getProjectsFolder, recentGitHubRepos, setProjectsFolder } from "./repo-connect.js";
 import { isAbsolute } from "node:path";
 import { NetworkTasks } from "./network-tasks.js";
-import { buyCSats, usageSummary, cancelReservation, computeOverview, contentToText, createReservation, listNetworkModels, listReservations, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
+import { buyCSats, usageSummary, cancelReservation, computeOverview, contentToText, createReservation, listNetworkModels, listReservations, networkContextWindow, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
 import { networkWorld } from "./network-world.js";
 import { ConnectionManager } from "./connections.js";
 import { BotManager, agentBotRunner, botBranchPrefix, botComputeChat, botWorkRoot, registerBotRoutes, type ApprovalEntry } from "./bots.js";
@@ -52,6 +52,7 @@ import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, res
 import { loadConfigOrExit } from "../../common/config.js";
 import { ideProviderConfigSchema } from "../../config/ide-provider.js";
 import { SessionHub, type SessionData } from "./sessions.js";
+import { cliStatus, installCli } from "./cli-install.js";
 import { registerSessionRoutes } from "./session-routes.js";
 import { hostedBackend, hostedConfigFromEnv } from "./hosted-backend.js";
 import { GitHubDeviceLogins } from "./github-device.js";
@@ -720,6 +721,13 @@ app.post("/v1/ide/github/login/:id/cancel", async (req, reply) => {
   return l ? reply.send(l) : reply.status(404).send({ error: "not_found" });
 });
 
+// Settings > Install command-line tool (cli-install.ts): an `edgecoder` launcher on the PATH.
+app.get("/v1/ide/settings/cli", async (_req, reply) => reply.send(cliStatus()));
+app.post("/v1/ide/settings/cli/install", async (_req, reply) => {
+  const r = installCli();
+  return reply.status(r.ok ? 200 : r.state === "exists_other" ? 409 : 404).send(r);
+});
+
 // The projects folder (default ~/EdgeCoder) and connecting a repository into it (repo-connect.ts).
 app.get("/v1/ide/settings/projects-folder", async (_req, reply) => {
   const f = getProjectsFolder();
@@ -1072,7 +1080,7 @@ function sessionModelId(compute: NonNullable<z.infer<typeof ideChatSchema>["comp
 /** The agent's model calls, on the compute the chat picked. */
 function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: string, ollamaHost: string, sendEvent: (e: IdeStreamEvent) => void, signal: AbortSignal, source = "EdgeCoder chat") {
   if (compute?.target === "auto" && !networkDeps && hosted) {
-    return backendChat(hostedBackend(hosted, "auto"), (cSats) => sendEvent({ type: "usage", cSats, where: "Auto (hosted)" }), signal);
+    return backendChat(hostedBackend(hosted, "auto"), (cSats, served) => sendEvent({ type: "usage", cSats, where: "Auto (hosted)", ...(served ? { served } : {}) }), signal);
   }
   if (compute?.target === "auto") {
     // Auto picks the model too; each step of the agent may land somewhere else (cheapest that fits).
@@ -1082,14 +1090,23 @@ function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: str
       where = routeLabel(r);
       sendEvent({ type: "status", message: `Auto: ${r.reason}` });
     }, source);
-    return backendChat(backend, (cSats) => sendEvent({ type: "usage", cSats, where }), signal);
+    return backendChat(backend, (cSats, served) => sendEvent({ type: "usage", cSats, where, ...(served ? { served } : {}) }), signal);
   }
   if (compute && compute.target !== "local" && !networkDeps && hosted) {
     // No enrolled agent here, but an API key: the network through the hosted endpoint.
     const id = sessionModelId(compute, model);
-    return backendChat(hostedBackend(hosted, id), (cSats) => sendEvent({ type: "usage", cSats, where: `${id} (hosted)` }), signal);
+    return backendChat(hostedBackend(hosted, id), (cSats, served) => sendEvent({ type: "usage", cSats, where: `${id} (hosted)`, model: id, ...(served ? { served } : {}) }), signal);
   }
-  if (!compute || compute.target === "local" || !networkDeps) return ollamaChat(ollamaHost, model, signal);
+  if (!compute || compute.target === "local" || !networkDeps) {
+    // This computer: free, and the footer says so ("This computer (Apple M1 Max)").
+    const local = ollamaChat(ollamaHost, model, signal);
+    const fn: ChatFn = async (req, onDelta) => {
+      const r = await local(req, onDelta);
+      sendEvent({ type: "usage", cSats: 0, where: r.served?.hardware ?? "This computer", model, ...(r.served ? { served: r.served } : {}) });
+      return r;
+    };
+    return fn;
+  }
   const where = routeLabel({
     placement: compute.target,
     model,
@@ -1104,7 +1121,7 @@ function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: str
     ...(compute.target === "reserved" ? { reservationId: compute.reservationId } : {}),
     source,
   });
-  return backendChat(backend, (cSats) => sendEvent({ type: "usage", cSats, where }), signal);
+  return backendChat(backend, (cSats, served) => sendEvent({ type: "usage", cSats, where, model, ...(served ? { served } : {}) }), signal);
 }
 
 /** What the agent's system prompt says about the models here. */
@@ -1256,6 +1273,27 @@ const sessions = new SessionHub({
   tools: (s) => (hasGitHubOrigin(s.projectRoot) ? toolSchemas() : toolSchemas().filter((t) => t.function.name !== "open_pull_request")),
   checkpoints,
   branch: currentBranch,
+  contextWindow: async (s) => {
+    const fixed = Number(process.env.AGENT_CONTEXT_WINDOW);
+    if (s.compute.target === "local") return Number.isInteger(fixed) && fixed >= 2048 ? fixed : 32_768;
+    // auto may land anywhere: the default (conservative) window.
+    if (s.compute.target === "auto" || !networkDeps) return undefined;
+    return networkContextWindow(networkDeps, s.model).catch(() => undefined);
+  },
+  summarize: (s, emit, signal) => async (text) => {
+    // A cheap call: auto on the network (it picks a small model for a short job), else the local model.
+    const cheap = networkDeps || hosted ? { target: "auto" as const } : { target: "local" as const };
+    const model = cheap.target === "local" ? (s.compute.target === "local" ? s.model : process.env.OLLAMA_MODEL || "qwen3.5:9b") : "auto";
+    const sig = AbortSignal.any([signal, AbortSignal.timeout(60_000)]);
+    const chat = chatFnFor(cheap, model, process.env.OLLAMA_HOST || "http://127.0.0.1:11434", emit, sig, "edgecoder compaction");
+    const r = await chat({
+      messages: [
+        { role: "system", content: "Summarize this coding-agent conversation for the agent itself, in at most 200 words: what was asked, what was found and changed (with exact file paths and line numbers), and what is left to do. No preamble." },
+        { role: "user", content: text },
+      ],
+    });
+    return r.content.trim() || null;
+  },
 });
 registerSessionRoutes(app, sessions);
 app.addHook("onReady", async () => {

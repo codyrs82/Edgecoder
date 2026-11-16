@@ -229,7 +229,7 @@ describe("ollamaChat", () => {
     const deltas: string[] = [];
     const r = await ollamaChat(host, "m")({ messages: [{ role: "user", content: "hi" }], tools: toolSchemas() }, (d) => deltas.push(d));
     expect(deltas).toEqual(["Hel", "lo"]);
-    expect(r).toEqual({ content: "Hello", toolCalls: [{ name: "read_file", arguments: { path: "a" } }] });
+    expect(r).toMatchObject({ content: "Hello", toolCalls: [{ name: "read_file", arguments: { path: "a" } }], served: { label: "This computer", own: true } });
     expect(sent.stream).toBe(true);
     expect(sent.think).toBe(false);
     expect((sent.tools as unknown[]).length).toBeGreaterThan(5);

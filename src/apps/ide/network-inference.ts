@@ -8,6 +8,7 @@
  * reply back as it is generated.
  */
 
+import type { ServedBy } from "../../swarm/served-by.js";
 import { randomUUID } from "node:crypto";
 import { request } from "undici";
 import type { ChatMessage, ToolCall, ToolSpec } from "../../inference-api/types.js";
@@ -89,6 +90,17 @@ export async function listNetworkModels(d: NetworkDeps): Promise<NetworkModel[]>
   return out;
 }
 
+/**
+ * The context window (tokens) a network model can be counted on to serve: the coordinator's
+ * /inference/models figure (the smallest any agent serves it with), else undefined.
+ */
+export async function networkContextWindow(d: NetworkDeps, model: string): Promise<number | undefined> {
+  const { status, json } = await call(d, "GET", "/inference/models");
+  if (status !== 200) return undefined;
+  const m = ((json.models as Array<{ model: string; contextWindow?: unknown }>) ?? []).find((x) => x.model === model);
+  return typeof m?.contextWindow === "number" && m.contextWindow >= 2048 ? m.contextWindow : undefined;
+}
+
 export interface CompletionPiece {
   delta?: string;
   toolCalls?: ToolCall[];
@@ -99,6 +111,27 @@ export interface CompletionPiece {
   outputTokens?: number;
   /** model "auto": "routed to <model> on <class> because <reason>" (the coordinator's best-fit choice). */
   routed?: string;
+  /** Where the call ran (coordinator's served-by: masked machine label, hardware, region, timings). */
+  served?: ServedBy;
+}
+
+/** A coordinator's `served` object, kept only when it has the expected shape. */
+export function servedOf(v: unknown): ServedBy | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const o = v as Record<string, unknown>;
+  if (typeof o.label !== "string" || typeof o.hardware !== "string") return undefined;
+  const str = (x: unknown, n = 80) => (typeof x === "string" ? x.slice(0, n) : undefined);
+  const num = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x >= 0 ? x : undefined);
+  const out: ServedBy = { label: o.label.slice(0, 80), own: o.own === true, computeClass: str(o.computeClass, 20) ?? "", tier: str(o.tier, 20) ?? null, hardware: o.hardware.slice(0, 80), region: str(o.region, 24) ?? null, country: str(o.country, 4) ?? null };
+  const gpu = str(o.gpu);
+  if (gpu) out.gpu = gpu;
+  const city = str(o.city, 40);
+  if (city) out.city = city;
+  for (const k of ["pickupMs", "promptMs", "genMs", "promptTokens", "outputTokens"] as const) {
+    const n = num(o[k]);
+    if (n !== undefined) out[k] = n;
+  }
+  return out;
 }
 
 /** Where a network chat runs: any agent (billed per second), your own machines, or a lease you hold. */
@@ -208,7 +241,7 @@ export async function* streamNetworkCompletion(
     after = Number(r.json.next ?? after + chunks.length);
     if (r.json.done) {
       if (Array.isArray(r.json.toolCalls) && r.json.toolCalls.length) yield { toolCalls: r.json.toolCalls as ToolCall[] };
-      yield { done: true, ...(r.json.error ? { error: String(r.json.error) } : {}), ...(typeof r.json.creditsSpent === "number" ? { creditsSpent: r.json.creditsSpent } : {}), ...(typeof r.json.promptTokens === "number" ? { promptTokens: r.json.promptTokens } : {}), ...(typeof r.json.outputTokens === "number" ? { outputTokens: r.json.outputTokens } : {}), ...(routed ? { routed } : {}) };
+      yield { done: true, ...(r.json.error ? { error: String(r.json.error) } : {}), ...(typeof r.json.creditsSpent === "number" ? { creditsSpent: r.json.creditsSpent } : {}), ...(typeof r.json.promptTokens === "number" ? { promptTokens: r.json.promptTokens } : {}), ...(typeof r.json.outputTokens === "number" ? { outputTokens: r.json.outputTokens } : {}), ...(routed ? { routed } : {}), ...(servedOf(r.json.served) ? { served: servedOf(r.json.served) } : {}) };
       return;
     }
   }

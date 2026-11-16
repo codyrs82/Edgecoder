@@ -141,6 +141,33 @@ describe("/inference/chunks token counts", () => {
   });
 });
 
+describe("/inference/stream after the result settled the call", () => {
+  test("a poll that lands just after the result still reads the end of the reply (not not_requester)", async () => {
+    const taskId = `inf-${randomUUID()}`;
+    expect((await submitInference(taskId)).statusCode).toBe(200);
+    const st = await pull();
+    expect(st?.taskId).toBe(taskId);
+    // The requester read the first piece, then the agent finished and its result settled the call
+    // before the requester's next poll.
+    await post("/inference/chunks", { subtaskId: st!.id, seq: 0, delta: "hello" }, worker);
+    const first = await post("/inference/stream", { taskId, subtaskId: st!.id, waitMs: 0 }, requester);
+    expect(first.statusCode).toBe(200);
+    await post("/inference/chunks", { subtaskId: st!.id, seq: 1, delta: " there", done: true, promptTokens: 5, outputTokens: 2, promptMs: 810, genMs: 65 }, worker);
+    expect((await post("/result", { subtaskId: st!.id, taskId, agentId: worker.peerId, ok: true, output: "hello there", durationMs: 500 }, worker)).statusCode).toBe(200);
+    const next = await post("/inference/stream", { taskId, subtaskId: st!.id, after: first.json().next ?? 1, waitMs: 0 }, requester);
+    expect(next.statusCode, JSON.stringify(next.json())).toBe(200);
+    expect(next.json()).toMatchObject({ done: true, promptTokens: 5, outputTokens: 2 });
+    expect(next.json().chunks.join("")).toBe(" there");
+    expect(typeof next.json().creditsSpent).toBe("number");
+    // Where it ran: the serving machine's masked label (never its id), hardware and timings.
+    const served = next.json().served;
+    expect(served).toMatchObject({ own: false, computeClass: "cpu", hardware: expect.stringContaining("CPU"), promptMs: 810, genMs: 65, promptTokens: 5, outputTokens: 2 });
+    expect(served.label).toMatch(/^[a-z]{3}-\u2022\u2022\u2022[0-9a-f]{4}$/);
+    expect(JSON.stringify(served)).not.toContain(worker.peerId);
+    expect(typeof served.pickupMs).toBe("number");
+  });
+});
+
 describe("anonymous /submit", () => {
   test("work nobody paid for earns nothing", async () => {
     const taskId = randomUUID();
