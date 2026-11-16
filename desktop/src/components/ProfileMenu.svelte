@@ -66,7 +66,14 @@
 </script>
 
 <div class="profile-area" bind:this={rowEl}>
-  {#if update.state === "downloading" || update.state === "installing"}
+  {#if update.state === "ready" || update.state === "available"}
+    <!-- Its own row, so it never covers the name and balance (owner feedback, 1.4.39). -->
+    <button class="update-row update-action" onclick={() => downloadAndInstall()} aria-label="Restart to update to EdgeCoder {update.update.version}" title="Install EdgeCoder {update.update.version} and restart">
+      <ArrowUpCircle size={14} />
+      <span class="update-text">EdgeCoder {update.update.version} is ready</span>
+      <span class="update-cta">Restart</span>
+    </button>
+  {:else if update.state === "downloading" || update.state === "installing"}
     <div class="update-row" role="status">
       <ArrowUpCircle size={14} />
       {#if update.state === "downloading"}
@@ -104,9 +111,6 @@
         <span class="sub">{cSats === null ? "EdgeCoder" : `${fmt(cSats)} cSats`}</span>
       </span>
     </button>
-    {#if update.state === "ready" || update.state === "available"}
-      <button class="pill" onclick={() => downloadAndInstall()} title="Install EdgeCoder {update.update.version} and restart">Restart to update</button>
-    {/if}
     <button class="gear" onclick={() => onOpenSettings()} title="Settings" aria-label="Settings"><Settings size={16} /></button>
   </div>
 </div>
@@ -129,10 +133,14 @@
   }
   .text { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
   .name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .sub { font-size: 11.5px; color: var(--text-secondary); white-space: nowrap; }
-  .pill {
-    padding: 4px 10px; border: none; border-radius: 999px; background: var(--accent); color: var(--on-accent);
-    font-size: 12px; font-weight: 600; cursor: pointer;
+  .sub { font-size: 11.5px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .update-action { font-family: inherit; }
+  .update-action:hover { background: color-mix(in srgb, var(--accent) 14%, var(--bg-surface)); }
+  .update-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .update-text { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .update-cta {
+    flex-shrink: 0; padding: 2px 10px; border-radius: 999px; background: var(--accent); color: var(--on-accent);
+    font-size: 12px; font-weight: 600;
   }
   .gear {
     width: 30px; height: 30px; display: grid; place-items: center; border: none; border-radius: 8px; background: none;
