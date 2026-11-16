@@ -3,6 +3,7 @@
   import Dialog from "./ui/Dialog.svelte";
   import Select from "./ui/Select.svelte";
   import { createBot, updateBot, getBot, botErrorText } from "../lib/api";
+  import { RESTARTING_TEXT, localServiceRestarting } from "../lib/local-service";
   import ComputePicker from "./ComputePicker.svelte";
   import BotAvatar from "./BotAvatar.svelte";
   import { AVATAR_COLORS, AVATAR_SHAPES, AVATAR_SHAPE_LABELS, colorFromName, shapeFor, type AvatarShape } from "../lib/bot-avatar";
@@ -315,6 +316,7 @@
       </div>
     </div>
 
+    {#if saving && $localServiceRestarting}<div class="sp-desc" role="status">{RESTARTING_TEXT}</div>{/if}
     {#if error}<div class="sp-err" role="alert">{error}</div>{/if}
     <div class="bf-actions">
       <button type="button" class="ghost" onclick={onClose}>Cancel</button>
