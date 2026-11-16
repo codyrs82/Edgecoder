@@ -28,11 +28,13 @@ describe("auto-update", () => {
     expect(focusCheckDue(FOCUS_CHECK_MIN_MS - 1, 0)).toBe(false);
   });
 
-  it("never restarts by itself: it downloads, then waits for Restart to update", () => {
+  it("installs only through downloadAndInstall: the check itself downloads, never relaunches", () => {
     const src = readFileSync(new URL("../src/lib/updater.ts", import.meta.url), "utf8");
     const check = src.slice(src.indexOf("export async function checkForUpdate"), src.indexOf("async function download("));
     expect(check).toContain("downloadInBackground()");
     expect(check).not.toMatch(/relaunch|downloadAndInstall/);
+    const wiring = readFileSync(new URL("../src/lib/auto-restart-app.ts", import.meta.url), "utf8");
+    expect(wiring).toContain("restart: () => downloadAndInstall()");
     const menu = readFileSync(new URL("../src/components/ProfileMenu.svelte", import.meta.url), "utf8");
     expect(menu).toContain("Restart to update");
   });

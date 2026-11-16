@@ -1,5 +1,6 @@
 <script lang="ts">
   import { ChevronDown, Plus, PanelRight } from "@lucide/svelte";
+  import { setBusy as setRestartBusy, clearBusy as clearRestartBusy } from "../lib/auto-restart";
   import { menu } from "../lib/menu";
   import { onMount, onDestroy, untrack } from "svelte";
   import ChatProjectHeader from "./ChatProjectHeader.svelte";
@@ -132,6 +133,11 @@
   }
   let streamingContent = $state("");
   let isStreaming = $state(false);
+  const restartKey = `editor-chat:${Math.random().toString(36).slice(2)}`;
+  $effect(() => {
+    setRestartBusy(restartKey, isStreaming && "streaming");
+    return () => clearRestartBusy(restartKey);
+  });
   let streamProgress: StreamProgress | undefined = $state(undefined);
   let abortController: AbortController | null = $state(null);
   let scrollContainer: HTMLDivElement | undefined = $state(undefined);

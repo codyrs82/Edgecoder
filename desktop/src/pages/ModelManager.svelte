@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { setBusy as setRestartBusy, clearBusy as clearRestartBusy } from "../lib/auto-restart";
   import {
     getModelList,
     getModelCatalog,
@@ -49,6 +50,11 @@
   // ---- Pull state ----
   let pullTarget = $state("");
   let pulling = $state(false);
+  const restartKey = `model-manager:${Math.random().toString(36).slice(2)}`;
+  $effect(() => {
+    setRestartBusy(restartKey, pulling && "model-pull");
+    return () => clearRestartBusy(restartKey);
+  });
   let pullingModelId = $state<string | null>(null);
   let pullStatus = $state("");
   let pullCompleted = $state(0);

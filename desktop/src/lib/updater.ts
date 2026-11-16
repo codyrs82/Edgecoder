@@ -1,5 +1,6 @@
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { rememberUpdatingTo } from "./auto-restart";
 
 export type UpdateStatus =
   | { state: "idle" }
@@ -7,7 +8,7 @@ export type UpdateStatus =
   | { state: "up-to-date" }
   | { state: "available"; update: Update }
   | { state: "downloading"; progress: number }
-  /** Downloaded and verified; installs when the user chooses "Restart to update". */
+  /** Downloaded and verified; installs on "Restart to update", or by itself when idle (auto-restart.ts). */
   | { state: "ready"; update: Update }
   | { state: "installing" }
   | { state: "error"; message: string };
@@ -17,8 +18,9 @@ export const CHECK_INTERVAL_MS = 30 * 60 * 1000;
 export const FOCUS_CHECK_MIN_MS = 10 * 60 * 1000;
 
 /**
- * Download updates in the background (default on); the app never restarts by itself, it shows
- * "Restart to update". Opt out with localStorage edgecoder_autoUpdate = "off".
+ * Download updates in the background (default on). The restart that installs one is either the
+ * user's "Restart to update" or auto-restart.ts (only when nothing is in progress). Opt out of
+ * both with localStorage edgecoder_autoUpdate = "off".
  */
 export const AUTO_UPDATE_KEY = "edgecoder_autoUpdate";
 
@@ -116,6 +118,7 @@ export async function downloadAndInstall(): Promise<void> {
     if (currentStatus.state !== "ready") await download(update);
     // The bundled agent restarts with the app; in-flight swarm tasks are re-leased by the coordinator.
     setStatus({ state: "installing" });
+    rememberUpdatingTo(update.version);
     await update.install();
     await relaunch();
   } catch (err) {
