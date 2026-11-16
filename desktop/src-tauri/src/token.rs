@@ -1,4 +1,4 @@
-// Copyright (c) 2025 EdgeCoder, LLC
+// Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 
 //! Per-launch local auth tokens (#6): 32 bytes from the OS CSPRNG, hex-encoded.

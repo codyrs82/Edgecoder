@@ -1,4 +1,4 @@
-// Copyright (c) 2025 EdgeCoder, LLC
+// Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 //
 // Nostr transport for coordinator announcements (NIP-01 websockets, NIP-33 parameterized

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright (c) 2025 EdgeCoder, LLC
+# Copyright (c) 2025 EdgeCoder
 # SPDX-License-Identifier: BUSL-1.1
 #
 # Run the load generator as a temporary Fly app, one machine per region (REGTEST network only).

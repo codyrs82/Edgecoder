@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright (c) 2025 EdgeCoder, LLC
+# Copyright (c) 2025 EdgeCoder
 # SPDX-License-Identifier: BUSL-1.1
 #
 # Build the prebuilt agent tarball that deploy/install.sh and deploy/install.ps1 install:

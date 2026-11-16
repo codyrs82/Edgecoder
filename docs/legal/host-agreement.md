@@ -1,10 +1,10 @@
 # Host Agreement
 
-> **DRAFT — pending legal review.** This document is a working draft prepared for review by counsel. It is not final, it is not legal advice, and it has not been approved by EdgeCoder, LLC. Bracketed items such as [CONTACT EMAIL] are placeholders to be completed.
+> **DRAFT — pending legal review.** This document is a working draft prepared for review by counsel. It is not final, it is not legal advice, and it has not been approved by EdgeCoder. Bracketed items such as [CONTACT EMAIL] are placeholders to be completed.
 
 Version: 2026-11-15-draft · Effective date: [EFFECTIVE DATE]
 
-This Host Agreement is between you and EdgeCoder, LLC ("EdgeCoder"). It applies when you install the EdgeCoder agent, the desktop app with the agent enabled, the iOS app with its swarm runtime, or any other EdgeCoder software that lets your machine run work for others (a "Host"). It adds to the [Terms of Service](/terms), the [Acceptable Use Policy](/acceptable-use) and the [Privacy Policy](/privacy). If this agreement conflicts with the Terms on hosting, this agreement controls.
+This Host Agreement is between you and EdgeCoder. It applies when you install the EdgeCoder agent, the desktop app with the agent enabled, the iOS app with its swarm runtime, or any other EdgeCoder software that lets your machine run work for others (a "Host"). It adds to the [Terms of Service](/terms), the [Acceptable Use Policy](/acceptable-use) and the [Privacy Policy](/privacy). If this agreement conflicts with the Terms on hosting, this agreement controls.
 
 By installing or running the agent, enrolling a machine, or checking the box to accept this agreement, you agree to it.
 
@@ -78,4 +78,4 @@ We may change this agreement as described in section 17 of the [Terms](/terms); 
 
 ## 10. Contact
 
-EdgeCoder, LLC · [MAILING ADDRESS] · [CONTACT EMAIL]
+EdgeCoder · [MAILING ADDRESS] · [CONTACT EMAIL]

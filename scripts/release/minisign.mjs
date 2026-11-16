@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Copyright (c) 2025 EdgeCoder, LLC
+// Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 //
 // Minisign-compatible Ed25519 signing for agent releases, with nothing but Node's crypto.

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Copyright (c) 2025 EdgeCoder, LLC
+// Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 //
 // Check a release directory exactly as the installers will: run the verify-release.js embedded
