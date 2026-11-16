@@ -3,9 +3,9 @@
   // Combobox is made of). Typing filters; Up/Down move through every choice, Enter picks it,
   // Escape closes and returns focus to the trigger.
   import { Command, Popover } from "bits-ui";
-  import { ChevronDown, Check, Laptop, Server, Globe, Lock, Search, Plus, Zap } from "@lucide/svelte";
-  import { computeOverview, getOllamaTags, listReservations, type ComputeOverview, type Reservation } from "../lib/api";
-  import { CLASS_LABELS, choiceId, choiceLabel, parseChoice, shortModel } from "../lib/compute-choice";
+  import { ChevronDown, Check, Laptop, Server, Globe, Lock, Search, Plus, Zap, KeyRound } from "@lucide/svelte";
+  import { computeOverview, getFrontierStatus, getOllamaTags, listReservations, type ComputeOverview, type Reservation } from "../lib/api";
+  import { CLASS_LABELS, choiceId, choiceLabel, frontierName, parseChoice, shortModel } from "../lib/compute-choice";
 
   interface Props {
     selected: string | undefined;
@@ -23,6 +23,8 @@
   let localModels = $state<string[]>([]);
   let overview = $state<ComputeOverview | null>(null);
   let leases = $state<Reservation[]>([]);
+  /** Frontier models on your own key (only those your account has a key for here). */
+  let frontierModels = $state<string[]>([]);
   const uid = $props.id();
   const listId = `${uid}-list`;
   let searchEl: HTMLInputElement | null = $state(null);
@@ -35,11 +37,13 @@
 
   async function refresh() {
     loading = true;
-    const [tags, ov, res] = await Promise.all([
+    const [tags, ov, res, frontier] = await Promise.all([
       getOllamaTags().catch(() => ({ models: [] as Array<{ name: string }> })),
       computeOverview().catch(() => null),
       listReservations().catch(() => null),
+      getFrontierStatus().catch(() => null),
     ]);
+    frontierModels = frontier?.models ?? [];
     localModels = (tags.models ?? []).map((m) => m.name).filter((n) => !/embed/i.test(n));
     overview = ov;
     leases = (res?.reservations ?? []).filter((r) => r.status === "active");
@@ -82,8 +86,9 @@
     leases.flatMap((r) => (r.models.length ? r.models : r.model ? [r.model] : []).filter(match).map((model) => ({ r, model, id: choiceId({ where: "reserved", reservationId: r.id, model }) }))),
   );
   // While searching, the two Auto rows show only if they match, so Enter picks the first model found.
+  let frontierMatches = $derived(frontierModels.filter((id) => match(id) || match(frontierName(id))));
   let showAuto = $derived(match("auto"));
-  let nothing = $derived(!showAuto && !localMatches.length && !myModels.length && !leaseModels.length && !networkModels.length);
+  let nothing = $derived(!showAuto && !frontierMatches.length && !localMatches.length && !myModels.length && !leaseModels.length && !networkModels.length);
 </script>
 
 <Popover.Root bind:open {onOpenChange}>
@@ -133,6 +138,21 @@
                 <span class="meta">This computer only · free</span>
                 {#if current.where === "auto"}{@render currentMark()}{/if}
               </Command.Item>
+            {/if}
+
+            {#if frontierMatches.length}
+              <Command.Group value="group-frontier">
+                <Command.GroupHeading class="group"><KeyRound size={12} /> Lead on your key <span class="tag">billed by the provider</span></Command.GroupHeading>
+                <Command.GroupItems>
+                  {#each frontierMatches as id (id)}
+                    <Command.Item class="ui-command-item row {selected === id ? 'current' : ''}" value={id} onSelect={() => pick(id)}>
+                      <span class="name">Lead: {frontierName(id)} · your key</span>
+                      <span class="meta">{id}</span>
+                      {#if selected === id}{@render currentMark()}{/if}
+                    </Command.Item>
+                  {/each}
+                </Command.GroupItems>
+              </Command.Group>
             {/if}
 
             {#if localMatches.length}

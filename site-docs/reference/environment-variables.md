@@ -519,6 +519,11 @@ Amounts must be numbers of 0 or more. A value the reader's own limit rejects (no
 | `EDGECODER_PROJECTS_DIR` | the setting, else `~/EdgeCoder` | Where projects are created. |
 | `EDGECODER_GH_BIN` | found on `PATH` | Path of the GitHub CLI (also runs the device sign-in, `/v1/ide/github/login`). |
 | `EDGECODER_SESSIONS_DIR` | `~/.edgecoder/sessions` | Shared coding sessions (`edgecoder code` and the Code view), one JSON file each (0600). |
+| `EDGECODER_FRONTIER_FILE` | `~/.edgecoder/frontier.json` | Frontier keys ("bring your own key", docs/frontier-keys.md): which providers have a key, the account each belongs to, the default lead, worker, caps and prices. Never the keys themselves. Spend goes to `frontier-usage.json` next to it. |
+| `EDGECODER_FRONTIER_KEYCHAIN` | `auto` | `off` keeps frontier keys in `frontier-keys.json` (0600) next to `frontier.json` instead of the macOS keychain, the Linux Secret Service or the Windows Credential Locker. Used automatically when no credential store is found. |
+| `EDGECODER_SECURITY_BIN` | `/usr/bin/security` | macOS: the `security` tool that stores frontier keys in the keychain. |
+| `EDGECODER_SECRET_TOOL_BIN` | `secret-tool` on `PATH` | Linux: the Secret Service tool that stores frontier keys. |
+| `EDGECODER_POWERSHELL_BIN` | `powershell.exe` | Windows: PowerShell, which stores frontier keys in the Credential Locker. |
 | `EDGECODER_API_KEY` | unset | An `eck_` API key: network models go through the hosted endpoint when this machine has no enrolled agent (`edgecoder code` on a server). Never logged. The installer reads it too, as the default for `--enroll`. |
 | `EDGECODER_API_KEY_FILE` | unset | A file holding that key (keeps it out of the environment; `edgecoder code --api-key-file`). |
 | `EDGECODER_URL` | `https://edgecoder.io` | The hosted endpoint the API key is used with. Must be `https://` (or `http://127.0.0.1` / `localhost`). |

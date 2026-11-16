@@ -12,8 +12,8 @@ export interface AgentTurn {
   turnId?: string;
   /** Project files the turn wrote, in first-write order. */
   changedFiles?: string[];
-  /** cSats the turn's model calls cost, where the last one ran, and each call (machine, timings). */
-  usage?: { cSats: number; where?: string; calls?: CallUsage[] };
+  /** cSats the turn's model calls cost, where the last one ran, each call (machine, timings), and USD on your own frontier key. */
+  usage?: { cSats: number; where?: string; calls?: CallUsage[]; usd?: number };
 }
 
 /** Tools whose successful result means files in the project changed. */
@@ -60,7 +60,8 @@ export function applyAgentEvent(turn: AgentTurn, event: IdeStreamEvent): { turn:
       const where = typeof event.where === "string" ? event.where : turn.usage?.where;
       const call: CallUsage = { cSats: Number.isFinite(cSats) ? cSats : 0, ...(where ? { where } : {}), ...(typeof event.model === "string" ? { model: event.model } : {}), ...(event.served && typeof event.served === "object" ? { served: event.served as Served } : {}) };
       const calls = [...(turn.usage?.calls ?? []), call].slice(-50);
-      return { turn: { ...turn, usage: { cSats: Number(((turn.usage?.cSats ?? 0) + call.cSats).toFixed(6)), where, calls } }, filesChanged: false };
+      const usd = typeof event.usd === "number" && Number.isFinite(event.usd) ? Number(((turn.usage?.usd ?? 0) + event.usd).toFixed(6)) : turn.usage?.usd;
+      return { turn: { ...turn, usage: { cSats: Number(((turn.usage?.cSats ?? 0) + call.cSats).toFixed(6)), where, calls, ...(usd !== undefined ? { usd } : {}) } }, filesChanged: false };
     }
     case "file_change": {
       const path = String(event.path);

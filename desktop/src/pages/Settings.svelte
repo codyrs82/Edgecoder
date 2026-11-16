@@ -10,6 +10,7 @@
   import Select from "../components/ui/Select.svelte";
   import { notify } from "../lib/toast";
   import { LEGAL_LINKS, NOTICES } from "../lib/legal-notices";
+  import FrontierKeys from "../components/FrontierKeys.svelte";
 
   /** Open a portal page (legal drafts, the Bluetooth explainer) in the browser. */
   async function openPortalPage(path: string) {
@@ -335,6 +336,8 @@
       </div>
     </div>
   </section>
+
+  <FrontierKeys />
 
   <section class="sp-group" aria-labelledby="gen-cli">
     <h2 class="sp-group-title" id="gen-cli">Command line</h2>

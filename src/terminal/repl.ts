@@ -13,6 +13,7 @@ import type { PermissionMode } from "../apps/ide/permissions.js";
 import type { ClientRef, QueuedMessage, SessionEvent, TranscriptEntry } from "../apps/ide/sessions.js";
 import type { IdeStreamEvent } from "../apps/ide/tool-types.js";
 import { ProviderError, type ProviderClient, type Snapshot } from "./client.js";
+import { formatUsd, frontierLabel, isFrontierModelId } from "../inference-api/frontier-models.js";
 import { clean, formatCSats, formatDiff, outputTail, proposedDiff, resultSummary, servedDetail, toolSummary, usageLine, type CallUsage, type Style } from "./render.js";
 
 export interface ReplIO {
@@ -43,6 +44,8 @@ export interface ReplOptions {
 
 export const HELP = `Commands (they work at any prompt, an approval included):
   /model [name]                 show or set the model (a local tag, network/<model>[@class], auto)
+  /lead [id]                    show or set the lead model, e.g. frontier/anthropic/claude-opus-5-5 (your own key)
+  /worker [id]                  show or set the worker model for helpers and delegated work (default auto)
   /compute [local|network|mine|auto]   where the model runs
   /mode [ask|auto-edits|auto]   how much to ask first (Shift+Tab cycles)
   /remote [off]                 show this session live in the EdgeCoder app (Code view), or stop
@@ -51,7 +54,7 @@ export const HELP = `Commands (they work at any prompt, an approval included):
   /undo                         undo the files the last reply changed
   /clear                        start the conversation over
   /status                       session, project, model, mode, where the last call ran, who is connected
-  /cost                         what this session has spent
+  /cost                         what this session has spent (cSats, and USD on your own frontier key)
   /github                       sign in to GitHub (device code)
   /help                         this list
   /exit                         leave (the session stays; reopen it in the app or with --resume)
@@ -89,6 +92,8 @@ export class Repl {
   private cSats = 0;
   private model = "";
   private mode: PermissionMode = "ask";
+  private worker = "auto";
+  private usd = 0;
   private published = false;
   private clients: ClientRef[] = [];
   private exiting = false;
@@ -180,6 +185,8 @@ export class Repl {
   private applySnapshot(s: Snapshot): void {
     this.model = modelLabel(s.session.model, s.session.compute);
     this.cSats = s.session.cSats;
+    this.worker = s.session.workerModel ?? "auto";
+    this.usd = s.session.frontierUsd ?? 0;
     this.published = s.session.published;
     this.clients = s.clients;
     this.mode = (s.session.mode ?? (s.session.autoApprove === "edits" ? "auto-edits" : "ask")) as PermissionMode;
@@ -191,7 +198,7 @@ export class Repl {
     const st = this.st;
     this.line(st.bold("EdgeCoder") + st.dim(` · ${this.o.providerLabel}`));
     this.line(`${st.dim("project")} ${s.projectRoot}${s.branch ? st.dim(` (${s.branch})`) : ""}`);
-    this.line(`${st.dim("model  ")} ${this.model}`);
+    this.line(`${st.dim("model  ")} ${isFrontierModelId(this.model) ? `${frontierLabel(this.model)} ${st.dim(`(lead) · worker ${this.worker}`)}` : this.model}`);
     this.line(`${st.dim("mode   ")} ${this.mode} ${st.dim("(Shift+Tab or /mode changes it)")}`);
     this.line(`${st.dim("session")} ${s.id}${s.transcript.length ? st.dim(` · ${s.transcript.length} messages`) : ""}`);
     for (const t of s.transcript.slice(-6)) this.replay(t);
@@ -322,6 +329,7 @@ export class Repl {
       }
       case "settings": {
         if (typeof e.model === "string") this.model = e.model;
+        if (typeof e.workerModel === "string") this.worker = e.workerModel;
         if (typeof e.mode === "string") this.mode = e.mode as PermissionMode;
         if (e.byClient !== undefined && e.byClient !== this.me.clientId) {
           const changed = Array.isArray(e.changed) ? (e.changed as string[]) : [];
@@ -397,6 +405,7 @@ export class Repl {
         const call: CallUsage = { cSats: Number.isFinite(ev.cSats) ? ev.cSats : 0, where: ev.where, ...(ev.model ? { model: ev.model } : {}), ...(ev.served ? { served: ev.served } : {}) };
         this.turnCalls.push(call);
         this.lastCall = call;
+        if (typeof ev.usd === "number" && Number.isFinite(ev.usd)) this.usd = Number((this.usd + ev.usd).toFixed(6));
         break;
       }
     }
@@ -502,8 +511,28 @@ export class Repl {
           return;
         }
         case "/cost":
-          this.line(`This session has spent ${formatCSats(this.cSats)}.`);
+          this.line(`This session has spent ${formatCSats(this.cSats)}.${this.usd > 0 || isFrontierModelId(this.model) ? ` On your own frontier key: ${formatUsd(this.usd)} (estimated; billed by the provider, not in cSats).` : ""}`);
           return;
+        case "/lead": {
+          if (!arg) {
+            this.line(`lead: ${isFrontierModelId(this.model) ? `${frontierLabel(this.model)} (${this.model})` : this.model}  ${st.dim("(/lead <id> changes it, e.g. frontier/anthropic/claude-opus-5-5 or auto)")}`);
+            return;
+          }
+          await this.c.settings(id, { leadModel: arg });
+          this.model = arg;
+          this.line(st.dim(`▸ lead: ${isFrontierModelId(arg) ? frontierLabel(arg) : arg}`));
+          return;
+        }
+        case "/worker": {
+          if (!arg) {
+            this.line(`worker: ${this.worker}  ${st.dim("(runs helpers and delegated work; /worker <id> changes it)")}`);
+            return;
+          }
+          await this.c.settings(id, { workerModel: arg });
+          this.worker = arg;
+          this.line(st.dim(`▸ worker: ${arg}`));
+          return;
+        }
         case "/status": {
           const s = await this.c.snapshot(id);
           this.applySnapshot(s);
@@ -599,8 +628,9 @@ function errText(err: unknown): string {
   return (err as Error).message ?? String(err);
 }
 
-function modelLabel(model: string, compute: { target: string; computeClass?: string; reservationId?: string }): string {
+function modelLabel(model: string, compute: { target: string; computeClass?: string; reservationId?: string; provider?: string }): string {
   if (compute.target === "auto") return "auto";
+  if (compute.target === "frontier") return `frontier/${compute.provider ?? ""}/${model}`;
   if (compute.target === "local") return model;
   if (compute.target === "mine") return `mine/${model}`;
   if (compute.target === "reserved") return `reserved/${compute.reservationId}/${model}`;
@@ -625,7 +655,7 @@ function bareModel(id: string): string {
 
 /** `/model qwen3-coder:30b` keeps the current placement (network stays network). */
 export function withPlacement(name: string, current: string): string {
-  if (name === "auto" || /^(network|mine|reserved)\//.test(name)) return name;
+  if (name === "auto" || /^(network|mine|reserved|frontier)\//.test(name)) return name;
   const where = placementOf(current);
   if (where === "network") return `network/${name}`;
   if (where === "mine") return `mine/${name}`;
@@ -635,7 +665,7 @@ export function withPlacement(name: string, current: string): string {
 /** `/compute network` keeps the model (from auto: the default for that placement). */
 export function placeModel(current: string, where: "local" | "network" | "mine" | "auto", defaults: { local?: string; network?: string } = {}): string {
   if (where === "auto") return "auto";
-  const bare = current === "auto" ? (where === "local" ? defaults.local ?? "qwen3.5:9b" : defaults.network ?? "qwen3-coder:30b") : bareModel(current);
+  const bare = current === "auto" || isFrontierModelId(current) ? (where === "local" ? defaults.local ?? "qwen3.5:9b" : defaults.network ?? "qwen3-coder:30b") : bareModel(current);
   if (where === "local") return bare;
   return `${where}/${bare}`;
 }

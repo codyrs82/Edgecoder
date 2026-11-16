@@ -52,6 +52,10 @@ export type ChatPiece =
       outputTokens?: number;
       /** Where the call ran (the serving machine's masked label, hardware, region, timings). */
       served?: ServedBy;
+      /** Frontier calls (the user's own key): estimated USD, billed by the provider, never in cSats. */
+      usd?: number;
+      /** Frontier calls: the model that answered (a server-side fallback may differ from the one asked). */
+      servedBy?: string;
     };
 
 export class ChatBackendError extends Error {

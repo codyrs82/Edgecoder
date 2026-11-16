@@ -29,6 +29,7 @@ import {
 } from "../agent-state.js";
 import { diagnosticsByAgentId } from "../services.js";
 import { agentAccount, agentSignatureAtGate, hasMeshToken, hasPortalServiceToken } from "../auth.js";
+import { isFrontierModelId } from "../../../inference-api/frontier-models.js";
 
 export function registerStatusRoutes(app: CoordinatorApp): void {
   app.get("/status", async () => queue.status());
@@ -126,7 +127,8 @@ export function registerStatusRoutes(app: CoordinatorApp): void {
 
     for (const [_agentId, cap] of agentCapabilities) {
       const model = cap.activeModel;
-      if (!model) continue;
+      // Frontier ids (someone's own key) are never advertised as network models.
+      if (!model || isFrontierModelId(model)) continue;
       if (!modelMap[model]) {
         modelMap[model] = { model, paramSize: cap.activeModelParamSize ?? 0, agentCount: 0, avgLoad: 0 };
       }

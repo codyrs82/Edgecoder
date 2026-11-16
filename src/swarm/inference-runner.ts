@@ -11,6 +11,7 @@
 import type { Subtask, SubtaskResult } from "../common/types.js";
 import { contextNeeded, ollamaChat } from "../inference-api/ollama.js";
 import type { ChatMessage, ToolCall, ToolSpec } from "../inference-api/types.js";
+import { isFrontierModelId } from "../inference-api/frontier-models.js";
 
 export interface InferenceInput {
   messages: ChatMessage[];
@@ -23,6 +24,8 @@ export interface InferenceInput {
 export const EMPTY_REPLY_ERROR = "empty_reply";
 /** Error of a call longer than the agent's context window (another agent may serve a bigger one). */
 export const CONTEXT_TOO_LONG_ERROR = "context_too_long";
+/** A subtask naming a frontier model (frontier/<provider>/<model>): those run only on their owner's own key, never here. */
+export const FRONTIER_REFUSED_ERROR = "frontier_models_are_not_network_work";
 
 /** Send what has arrived at least this often, or sooner once this much has piled up. */
 const FLUSH_MS = 150;
@@ -52,6 +55,8 @@ export async function runInferenceSubtask(
   }
   const model = st.requestedModel;
   if (!model) return { ...base, ok: false, output: "", error: "no model requested", durationMs: 0 };
+  // A frontier model (someone's own API key) is never network work: refused before anything runs.
+  if (isFrontierModelId(model)) return { ...base, ok: false, output: "", error: FRONTIER_REFUSED_ERROR, durationMs: 0 };
 
   // A call that does not fit the agent's window is refused before Ollama sees it (asking for a bigger
   // window would reload the model). Nothing was sent, so the coordinator gives it to another agent.

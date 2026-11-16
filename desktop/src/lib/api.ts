@@ -1800,7 +1800,7 @@ export interface SessionEntry {
   events?: IdeStreamEvent[];
   turnId?: string;
   changedFiles?: string[];
-  usage?: { cSats: number; where?: string; calls?: import("./served").CallUsage[] };
+  usage?: { cSats: number; where?: string; calls?: import("./served").CallUsage[]; usd?: number };
   undone?: boolean;
 }
 export interface SessionQueued {
@@ -1811,7 +1811,7 @@ export interface SessionQueued {
   at: number;
 }
 export interface SessionSnapshotView {
-  session: { id: string; title: string; projectRoot: string; branch: string | null; model: string; compute: { target: string }; published: boolean; cSats: number; transcript: SessionEntry[]; mode?: "ask" | "auto-edits" | "auto"; autoApprove?: "none" | "edits" };
+  session: { id: string; title: string; projectRoot: string; branch: string | null; model: string; compute: { target: string; provider?: string }; published: boolean; cSats: number; transcript: SessionEntry[]; mode?: "ask" | "auto-edits" | "auto"; autoApprove?: "none" | "edits"; workerModel?: string; frontierUsd?: number };
   seq: number;
   controller: SessionClientRef | null;
   clients: SessionClientRef[];
@@ -1894,3 +1894,46 @@ export interface GitHubDeviceLogin {
 export const githubLoginStart = () => fsCall<GitHubDeviceLogin>("POST", "/v1/ide/github/login", {});
 export const githubLoginStatus = (id: string) => fsCall<GitHubDeviceLogin>("GET", `/v1/ide/github/login/${id}`);
 export const githubLoginCancel = (id: string) => fsCall<GitHubDeviceLogin>("POST", `/v1/ide/github/login/${id}/cancel`, {});
+
+// ---------------------------------------------------------------------------
+// Frontier models on your own key (docs/frontier-keys.md), via the provider on this computer
+// (:4304 /v1/ide/frontier). The key is sent only to that loopback provider, which keeps it in the
+// OS keychain bound to your account; no response ever contains it.
+// ---------------------------------------------------------------------------
+
+export interface FrontierProviderView {
+  id: string;
+  kind: "anthropic" | "openai-compatible";
+  baseUrl?: string;
+  accountId: string;
+  storage: "keychain" | "file";
+  usable: boolean;
+  reason?: string;
+  models?: string[];
+}
+
+export interface FrontierSettingsView {
+  defaultLead: string;
+  workerModel: string;
+  sessionCapUsd: number | null;
+  dailyCapUsd: number | null;
+  useForAuto: boolean;
+  effort: "low" | "medium" | "high" | "xhigh" | "max";
+}
+
+export interface FrontierStatusView {
+  account: string | null;
+  storage: string;
+  fallbackFile: boolean;
+  providers: FrontierProviderView[];
+  models: string[];
+  settings: FrontierSettingsView;
+  spend: { today: number; last30Days: number };
+}
+
+export const getFrontierStatus = () => fsCall<FrontierStatusView>("GET", "/v1/ide/frontier");
+export const addFrontierKey = (input: { id: string; key: string; kind?: "anthropic" | "openai-compatible"; baseUrl?: string }) =>
+  fsCall<{ provider: FrontierProviderView; models: string[] }>("POST", "/v1/ide/frontier/keys", input);
+export const testFrontierKey = (id: string) => fsCall<{ models: string[] }>("POST", "/v1/ide/frontier/keys/test", { id });
+export const removeFrontierKey = (id: string, ownerAccount?: string) => fsCall<{ removed: boolean }>("POST", "/v1/ide/frontier/keys/remove", { id, ...(ownerAccount ? { ownerAccount } : {}) });
+export const updateFrontierSettings = (patch: Partial<FrontierSettingsView>) => fsCall<{ settings: FrontierSettingsView }>("POST", "/v1/ide/frontier/settings", patch);

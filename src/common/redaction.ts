@@ -53,11 +53,20 @@ export const REDACT_PATHS = [
 // "Bearer token required" intact.
 const URL_USERINFO_RE = /\/\/[^\s/:@]+:[^\s/@]+@/g;
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/=-]{16,}/gi;
+// Frontier provider API keys (docs/frontier-keys.md): Anthropic `sk-ant-...`, OpenAI and most
+// OpenAI-compatible providers `sk-...` / `sk-proj-...`, OpenRouter `sk-or-...`, Groq `gsk_...`,
+// xAI `xai-...`. The length floor keeps words like "sk-learn" intact.
+const API_KEY_RE = /\b(?:sk-ant-[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{20,}|gsk_[A-Za-z0-9]{20,}|xai-[A-Za-z0-9]{20,})/g;
+
+/** Mask provider API keys (sk-ant-..., sk-..., gsk_..., xai-...) in free text. */
+export function redactApiKeys(text: string): string {
+  return text.replace(API_KEY_RE, CENSOR);
+}
 
 /** Mask credentials embedded in free text. */
 export function scrubText(text: string): string {
   if (text.length < 8) return text;
-  return text.replace(URL_USERINFO_RE, `//${CENSOR}@`).replace(BEARER_RE, `Bearer ${CENSOR}`);
+  return redactApiKeys(text.replace(URL_USERINFO_RE, `//${CENSOR}@`).replace(BEARER_RE, `Bearer ${CENSOR}`));
 }
 
 function isSecretKey(key: string): boolean {

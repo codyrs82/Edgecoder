@@ -30,6 +30,8 @@ Start a coding agent in [folder] (default: the current folder).
 Options:
   --repo <url|owner/repo>  clone (or update) a GitHub repository into your projects folder and work there
   --model <id>             a local model tag, network/<model>[@class], mine/<model> or auto (default auto)
+  --lead <id>              the lead model (runs the agent loop), e.g. frontier/anthropic/claude-opus-5-5 on your own key
+  --worker <id>            the worker model for helpers and delegated work (default auto; never a frontier model)
   --compute <where>        local, network or auto (picks a default model for that place)
   --remote                 show the session live in the EdgeCoder app from the start (same as /remote)
   --resume <session-id>    continue a saved session
@@ -53,6 +55,8 @@ interface Args {
   folder?: string;
   repo?: string;
   model?: string;
+  lead?: string;
+  worker?: string;
   compute?: string;
   remote: boolean;
   resume?: string;
@@ -75,6 +79,8 @@ export function parseCodeArgs(argv: string[]): Args | { error: string } {
       options: {
         repo: { type: "string" },
         model: { type: "string" },
+        lead: { type: "string" },
+        worker: { type: "string" },
         compute: { type: "string" },
         remote: { type: "boolean", default: false },
         resume: { type: "string" },
@@ -91,6 +97,7 @@ export function parseCodeArgs(argv: string[]): Args | { error: string } {
     });
     if (positionals.length > 1) return { error: "Give at most one folder." };
     if (values.mode && !["ask", "auto-edits", "auto"].includes(values.mode)) return { error: "--mode is ask, auto-edits or auto." };
+    if (values.worker?.toLowerCase().startsWith("frontier/")) return { error: "--worker can't be a frontier model: helpers and delegated work run on auto, the network or this computer." };
     if (values.compute && !["local", "network", "auto", "mine"].includes(values.compute)) return { error: "--compute is local, network, mine or auto." };
     const port = values.port ? Number(values.port) : undefined;
     if (port !== undefined && !(Number.isInteger(port) && port > 0 && port < 65536)) return { error: "--port must be a port number." };
@@ -98,6 +105,8 @@ export function parseCodeArgs(argv: string[]): Args | { error: string } {
       folder: positionals[0],
       repo: values.repo,
       model: values.model,
+      lead: values.lead,
+      worker: values.worker,
       compute: values.compute,
       remote: values.remote ?? false,
       resume: values.resume,
@@ -117,7 +126,8 @@ export function parseCodeArgs(argv: string[]): Args | { error: string } {
 }
 
 /** The model a new session starts on. */
-export function initialModel(a: Pick<Args, "model" | "compute">, env: NodeJS.ProcessEnv = process.env): string {
+export function initialModel(a: Pick<Args, "model" | "compute"> & { lead?: string }, env: NodeJS.ProcessEnv = process.env): string {
+  if (a.lead) return a.lead;
   if (a.model) return a.model;
   if (a.compute === "local") return env.OLLAMA_MODEL || "qwen3.5:9b";
   if (a.compute === "network") return "network/qwen3-coder:30b";
@@ -224,7 +234,7 @@ export function terminalIO(): ReplIO {
 const DEFAULT_PROVIDER = "http://127.0.0.1:4304";
 
 /** Use the app's provider when it answers, else start one in this process. */
-async function connectProvider(a: Args, me: ClientRef, say: (s: string) => void): Promise<{ client: ProviderClient; label: string; stop?: () => Promise<void> }> {
+export async function connectProvider(a: Pick<Args, "provider" | "standalone" | "port" | "apiKeyFile">, me: ClientRef, say: (s: string) => void): Promise<{ client: ProviderClient; label: string; stop?: () => Promise<void> }> {
   const { resolveIdeToken } = await import("../apps/ide/ide-auth.js");
   const explicit = a.provider ?? process.env.IDE_PROVIDER_URL;
   if (!a.standalone) {
@@ -306,7 +316,7 @@ export async function runCode(argv: string[]): Promise<number> {
         }
       }
       // No --mode: the provider picks (auto-edits in a clean git repository, else ask).
-      const snap = await client.createSession({ projectRoot, model: initialModel(a), ...(a.mode ? { mode: a.mode } : {}) });
+      const snap = await client.createSession({ projectRoot, model: initialModel(a), ...(a.worker ? { workerModel: a.worker } : {}), ...(a.mode ? { mode: a.mode } : {}) });
       sessionId = snap.session.id;
       if (!snap.trusted) {
         let trust = a.trust;

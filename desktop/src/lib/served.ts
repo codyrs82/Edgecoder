@@ -17,6 +17,8 @@ export interface Served {
   genMs?: number;
   promptTokens?: number;
   outputTokens?: number;
+  /** A frontier call on your own key (computeClass "frontier"): estimated USD. */
+  usd?: number;
 }
 
 export interface CallUsage {
@@ -45,10 +47,15 @@ export function servedLine(calls: CallUsage[] | undefined): string | null {
   const last = withServed[withServed.length - 1];
   const s = last.served!;
   const bits: string[] = [];
-  if (last.model) bits.push(last.model.replace(/^network\//, ""));
-  bits.push(hardwareShort(s));
-  const place = s.city ?? s.region ?? s.country;
-  if (place) bits.push(place);
+  if (s.computeClass === "frontier") {
+    // Your own frontier key: provider · model · your key · tokens · $cost (no cSats).
+    bits.push(s.hardware.split(" · ")[0], (last.model ?? "").replace(/^frontier\/[^/]+\//, ""), "your key");
+  } else {
+    if (last.model) bits.push(last.model.replace(/^network\//, ""));
+    bits.push(hardwareShort(s));
+    const place = s.city ?? s.region ?? s.country;
+    if (place) bits.push(place);
+  }
   const machines = new Set(withServed.map((c) => c.served!.label));
   if (machines.size > 1) bits.push(`${machines.size} machines`);
   const sum = (k: "promptTokens" | "outputTokens" | "promptMs" | "genMs") => calls.reduce((n, c) => n + (c.served?.[k] ?? 0), 0);
@@ -56,7 +63,12 @@ export function servedLine(calls: CallUsage[] | undefined): string | null {
   if (sum("outputTokens")) bits.push(`wrote ${tok(sum("outputTokens"))} tok${sum("genMs") ? ` in ${secs(sum("genMs"))}` : ""}`);
   if (calls.length > 1) bits.push(`${calls.length} calls`);
   const total = calls.reduce((n, c) => n + (Number.isFinite(c.cSats) ? c.cSats : 0), 0);
-  bits.push(s.computeClass === "local" && total === 0 ? "free" : cost(total));
+  const anyFrontier = calls.some((c) => c.served?.computeClass === "frontier");
+  if (!anyFrontier || total > 0) bits.push(s.computeClass === "local" && total === 0 ? "free" : cost(total));
+  if (anyFrontier) {
+    const usd = calls.reduce((n, c) => n + (c.served?.usd ?? 0), 0);
+    bits.push(usd > 0 && usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`);
+  }
   return bits.join(" · ");
 }
 

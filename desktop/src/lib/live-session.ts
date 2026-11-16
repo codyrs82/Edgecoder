@@ -16,7 +16,7 @@ export interface LiveMessage {
   toolEvents?: ToolEvent[];
   turnId?: string;
   changedFiles?: string[];
-  usage?: { cSats: number; where?: string; calls?: import("./served").CallUsage[] };
+  usage?: { cSats: number; where?: string; calls?: import("./served").CallUsage[]; usd?: number };
 }
 
 export interface QueuedView {
@@ -33,6 +33,10 @@ export interface LiveView {
   model: string;
   /** ask | auto-edits | auto. */
   mode: string;
+  /** The lead's full id when it runs on your own frontier key ("frontier/anthropic/claude-opus-5-5"). */
+  frontierModel?: string;
+  /** Estimated USD this session spent on your own frontier key. */
+  frontierUsd?: number;
   seq: number;
   /** Always null now (co-editing); kept for older providers' snapshots. */
   controller: SessionClientRef | null;
@@ -105,6 +109,8 @@ export function viewFromSnapshot(s: SessionSnapshotView): LiveView {
     projectRoot: s.session.projectRoot,
     model: s.session.model,
     mode: s.session.mode ?? (s.session.autoApprove === "edits" ? "auto-edits" : "ask"),
+    ...(s.session.compute.target === "frontier" ? { frontierModel: `frontier/${s.session.compute.provider ?? ""}/${s.session.model}` } : {}),
+    frontierUsd: s.session.frontierUsd ?? 0,
     seq: s.seq,
     controller: null,
     clients: s.clients,
@@ -146,7 +152,8 @@ export function applySessionEvent(v: LiveView, e: SessionEvent): LiveView {
     }
     case "turn_end": {
       const m = messageOf(e.entry as SessionEntry);
-      return { ...next, streaming: null, messages: m ? [...v.messages, m] : v.messages };
+      const usd = (e.entry as SessionEntry | undefined)?.usage?.usd ?? 0;
+      return { ...next, streaming: null, messages: m ? [...v.messages, m] : v.messages, ...(usd ? { frontierUsd: Number(((v.frontierUsd ?? 0) + usd).toFixed(6)) } : {}) };
     }
     case "control":
       return next;
@@ -156,7 +163,7 @@ export function applySessionEvent(v: LiveView, e: SessionEvent): LiveView {
       const changed = Array.isArray(e.changed) ? (e.changed as string[]) : [];
       const what = [changed.includes("model") && typeof e.model === "string" ? `model to ${e.model}` : "", (changed.includes("mode") || changed.includes("autoApprove")) && typeof e.mode === "string" ? `mode to ${e.mode}` : ""].filter(Boolean).join(" and ");
       const notes = e.by && e.by !== "desktop" && what ? note(v, `${fromWhom(e.by, e.label).replace(/^the t/, "The t").replace(/^the E/, "The E")} changed the ${what}.`) : v.notes;
-      return { ...next, notes, ...(typeof e.model === "string" ? { model: e.model } : {}), ...(typeof e.title === "string" ? { title: e.title } : {}), ...(typeof e.mode === "string" ? { mode: e.mode } : {}) };
+      return { ...next, notes, ...(typeof e.model === "string" ? { model: e.model, frontierModel: e.model.startsWith("frontier/") ? e.model : undefined } : {}), ...(typeof e.title === "string" ? { title: e.title } : {}), ...(typeof e.mode === "string" ? { mode: e.mode } : {}) };
     }
     case "undo": {
       const turnId = String(e.turnId);

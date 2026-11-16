@@ -151,6 +151,8 @@ export interface ChatMessage {
 export interface ReplyUsage {
   cSats: number;
   where?: string;
+  /** Frontier calls on your own key: estimated USD (billed by the provider, not in cSats). */
+  usd?: number;
 }
 
 export interface Conversation {

@@ -90,7 +90,7 @@ export class ProviderClient {
     }
   }
 
-  createSession(input: { projectRoot: string; model?: string; autoApprove?: "none" | "edits"; mode?: PermissionMode; published?: boolean }): Promise<Snapshot> {
+  createSession(input: { projectRoot: string; model?: string; workerModel?: string; autoApprove?: "none" | "edits"; mode?: PermissionMode; published?: boolean }): Promise<Snapshot> {
     return this.req("POST", "/v1/ide/sessions", input);
   }
   snapshot(id: string): Promise<Snapshot> {
@@ -116,7 +116,7 @@ export class ProviderClient {
   releaseControl(id: string): Promise<unknown> {
     return this.req("POST", `/v1/ide/sessions/${id}/control`, { release: true });
   }
-  settings(id: string, patch: { model?: string; title?: string; autoApprove?: "none" | "edits"; mode?: PermissionMode }): Promise<unknown> {
+  settings(id: string, patch: { model?: string; leadModel?: string; workerModel?: string; title?: string; autoApprove?: "none" | "edits"; mode?: PermissionMode }): Promise<unknown> {
     return this.req("POST", `/v1/ide/sessions/${id}/settings`, patch);
   }
   publish(id: string, published: boolean): Promise<unknown> {

@@ -31,6 +31,8 @@ export interface ServedBy {
   genMs?: number;
   promptTokens?: number;
   outputTokens?: number;
+  /** A frontier call on the user's own key (computeClass "frontier"): estimated USD, billed by the provider. */
+  usd?: number;
 }
 
 export interface ServedFacts {

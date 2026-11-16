@@ -120,6 +120,8 @@ export type IdeStreamEvent =
       where: string;
       /** The model that answered, and where it ran (machine label, hardware, region, timings and tokens). */
       model?: string;
+      /** Frontier calls on the user's own key: estimated USD (billed by the provider, not in cSats). */
+      usd?: number;
       served?: {
         label: string;
         own: boolean;
@@ -135,6 +137,8 @@ export type IdeStreamEvent =
         genMs?: number;
         promptTokens?: number;
         outputTokens?: number;
+        /** Frontier calls (computeClass "frontier"): estimated USD on the user's own key. */
+        usd?: number;
       };
     }
   | { type: "done" };

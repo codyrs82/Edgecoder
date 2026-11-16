@@ -11,6 +11,7 @@
  *   control-plane, inference, ide-provider                           -> their services
  *   install        the installer (edgecoder-install)                 -> dist/install/cli.js
  *   code           the terminal coding agent (docs/terminal.md)      -> dist/terminal/cli.js
+ *   keys           your own frontier API keys (docs/frontier-keys.md) -> dist/terminal/keys.js
  * The Docker image, the systemd/launchd/scheduled-task services and the npm bins all go through
  * this dispatcher, so a role behaves the same wherever it runs.
  */
@@ -26,7 +27,8 @@ export const ROLES = {
   inference: "../inference/service.js",
   "ide-provider": "../apps/ide/provider-server.js",
   install: "../install/cli.js",
-  code: "../terminal/cli.js"
+  code: "../terminal/cli.js",
+  keys: "../terminal/keys.js"
 } as const;
 export type Role = keyof typeof ROLES;
 
@@ -54,6 +56,10 @@ async function main(): Promise<void> {
   if (resolved.role === "code") {
     const { runCode } = await import("../terminal/cli.js");
     process.exit(await runCode(resolved.rest));
+  }
+  if (resolved.role === "keys") {
+    const { runKeys } = await import("../terminal/keys.js");
+    process.exit(await runKeys(resolved.rest));
   }
   // The services only start when they are the main script (import.meta.url === file://argv[1]).
   const target = fileURLToPath(new URL(ROLES[resolved.role], import.meta.url));
