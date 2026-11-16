@@ -1761,7 +1761,8 @@ export const botErrorText = (err: unknown) => (err instanceof FsError ? err.code
 
 // ---------------------------------------------------------------------------
 // Shared coding sessions (:4304 /v1/ide/sessions): sessions the terminal (`edgecoder code`)
-// published with /remote, continued here. The provider runs the turns; this app is a client.
+// published with /remote, continued here. The provider runs the turns; this app and the terminal
+// are both clients of the session and may send, approve and change settings at any time.
 // ---------------------------------------------------------------------------
 
 export interface SessionClientRef {
@@ -1794,16 +1795,24 @@ export interface SessionEntry {
   events?: IdeStreamEvent[];
   turnId?: string;
   changedFiles?: string[];
-  usage?: { cSats: number; where?: string };
+  usage?: { cSats: number; where?: string; calls?: import("./served").CallUsage[] };
   undone?: boolean;
 }
+export interface SessionQueued {
+  id: string;
+  text: string;
+  by: "terminal" | "desktop" | "api";
+  label?: string;
+  at: number;
+}
 export interface SessionSnapshotView {
-  session: { id: string; title: string; projectRoot: string; branch: string | null; model: string; compute: { target: string }; published: boolean; cSats: number; transcript: SessionEntry[] };
+  session: { id: string; title: string; projectRoot: string; branch: string | null; model: string; compute: { target: string }; published: boolean; cSats: number; transcript: SessionEntry[]; mode?: "ask" | "auto-edits" | "auto"; autoApprove?: "none" | "edits" };
   seq: number;
   controller: SessionClientRef | null;
   clients: SessionClientRef[];
   running: { turnId: string; text: string; events: IdeStreamEvent[] } | null;
   pending: Array<{ id: string; tool: string; args: Record<string, unknown> }>;
+  queue?: SessionQueued[];
 }
 export interface SessionEvent {
   seq: number;
@@ -1820,9 +1829,12 @@ const sessionPost = <T>(id: string, action: string, body: Record<string, unknown
 /** Sessions shown live in the app (published from a terminal). */
 export const listPublishedSessions = () => fsCall<{ sessions: SessionSummary[] }>("GET", "/v1/ide/sessions?published=1").then((r) => r.sessions);
 export const getSession = (id: string) => fsCall<SessionSnapshotView>("GET", `/v1/ide/sessions/${id}`);
-export const sessionSend = (id: string, text: string) => sessionPost<{ turnId: string }>(id, "messages", { text });
-export const sessionApprove = (id: string, callId: string, approved: boolean, always = false) => sessionPost(id, "approve", { callId, approved, always });
-export const sessionTakeControl = (id: string) => sessionPost(id, "control");
+/** Starts a turn, or queues the message while one runs (turnId null). */
+export const sessionSend = (id: string, text: string) => sessionPost<{ turnId: string | null; queued?: SessionQueued }>(id, "messages", { text });
+export const sessionUnqueue = (id: string, queuedId: string) => sessionPost<{ removed: boolean }>(id, "unqueue", { queuedId });
+/** `applied` false: the terminal answered first. */
+export const sessionApprove = (id: string, callId: string, approved: boolean, always = false) => sessionPost<{ ok: boolean; applied?: boolean }>(id, "approve", { callId, approved, always });
+export const sessionSettings = (id: string, patch: { model?: string; mode?: "ask" | "auto-edits" | "auto" }) => sessionPost(id, "settings", patch);
 export const sessionCancel = (id: string) => sessionPost(id, "cancel");
 export const sessionUndo = (id: string) => sessionPost<{ reverted: string[] }>(id, "undo");
 

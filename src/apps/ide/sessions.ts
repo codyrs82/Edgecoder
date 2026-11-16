@@ -52,9 +52,16 @@ export interface TranscriptEntry {
   events?: IdeStreamEvent[];
   turnId?: string;
   changedFiles?: string[];
-  usage?: { cSats: number; where?: string };
+  usage?: TurnUsage;
   /** The turn's file changes were undone. */
   undone?: boolean;
+}
+
+/** What a turn's model calls cost, where the last ran, and each call (model, machine, timings). */
+export interface TurnUsage {
+  cSats: number;
+  where?: string;
+  calls?: Array<{ cSats: number; where?: string; model?: string; served?: Extract<IdeStreamEvent, { type: "usage" }>["served"] }>;
 }
 
 export interface SessionData {
@@ -166,7 +173,7 @@ interface Running {
   text: string;
   events: IdeStreamEvent[];
   changed: string[];
-  usage?: { cSats: number; where?: string };
+  usage?: TurnUsage;
   done: Promise<void>;
 }
 
@@ -484,10 +491,11 @@ export class SessionHub {
       if (e.type === "file_change" && !r.changed.includes(e.path)) r.changed.push(e.path);
       if (e.type === "usage") {
         const cSats = Number.isFinite(e.cSats) ? e.cSats : 0;
-        r.usage = { cSats: Number(((r.usage?.cSats ?? 0) + cSats).toFixed(6)), where: e.where };
+        const call = { cSats, where: e.where, ...(e.model ? { model: e.model } : {}), ...(e.served ? { served: e.served } : {}) };
+        r.usage = { cSats: Number(((r.usage?.cSats ?? 0) + cSats).toFixed(6)), where: e.where, calls: [...(r.usage?.calls ?? []), call].slice(-50) };
         s.cSats = Number((s.cSats + cSats).toFixed(6));
       }
-      if (e.type === "status" && e.message.startsWith("Auto: ")) r.usage = { cSats: r.usage?.cSats ?? 0, where: e.message.slice(6) };
+      if (e.type === "status" && e.message.startsWith("Auto: ")) r.usage = { ...r.usage, cSats: r.usage?.cSats ?? 0, where: e.message.slice(6) };
       if (e.type !== "done") r.events.push(storable(e));
       this.emit(id, { type: "agent", turnId: r.turnId, event: e });
     };

@@ -71,7 +71,8 @@ describe("reply usage", () => {
     turn = applyAgentEvent(turn, { type: "status", message: "Auto: network gpu (0.043 cSats/s, cheapest for this job) · qwen2.5-coder:14b" }).turn;
     turn = applyAgentEvent(turn, { type: "usage", cSats: 0.25, where: "network gpu · qwen2.5-coder:14b" }).turn;
     turn = applyAgentEvent(turn, { type: "usage", cSats: 0.125 }).turn;
-    expect(turn.usage).toEqual({ cSats: 0.375, where: "network gpu · qwen2.5-coder:14b" });
+    expect(turn.usage).toMatchObject({ cSats: 0.375, where: "network gpu · qwen2.5-coder:14b" });
+    expect(turn.usage?.calls?.map((c) => c.cSats)).toEqual([0.25, 0.125]);
     expect(applyAgentEvent(turn, { type: "status", message: "Thinking" }).turn.usage).toEqual(turn.usage);
   });
 });
