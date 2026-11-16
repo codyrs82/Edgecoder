@@ -43,6 +43,7 @@ export type SecurityEventType =
   | "onchain_batch_resurfaced"
   | "onchain_batch_stuck"
   | "model_control_not_owner"
+  | "bot_control_not_owner"
   | "restricted_model_call"
   | "restricted_model_refused"
   | "restricted_access_suspended";
@@ -101,6 +102,7 @@ const SEVERITY_MAP: Record<SecurityEventType, SecurityLevel> = {
   onchain_batch_stuck: "HIGH",
   // A portal session asked to control a machine its account does not own (src/swarm/coordinator/model-control.ts).
   model_control_not_owner: "HIGH",
+  bot_control_not_owner: "HIGH",
   // Security research tier (docs/security-research-tier.md): every restricted-model call is recorded.
   restricted_model_call: "INFO",
   restricted_model_refused: "WARN",

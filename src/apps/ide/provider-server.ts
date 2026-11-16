@@ -38,6 +38,7 @@ import { NetworkTasks } from "./network-tasks.js";
 import { buyCSats, usageSummary, cancelReservation, computeOverview, contentToText, drainAgent, createReservation, listNetworkModels, listReservations, networkContextWindow, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
 import { networkWorld } from "./network-world.js";
 import { ConnectionManager } from "./connections.js";
+import { registerRemoteBotRoutes } from "./bot-remote.js";
 import { BotManager, agentBotRunner, botBranchPrefix, botComputeChat, botWorkRoot, registerBotRoutes, type ApprovalEntry } from "./bots.js";
 import { autoBackend, localBackend, networkBackend } from "../../inference-api/backends.js";
 import { registerCompatRoutes, respondWith } from "../../inference-api/routes.js";
@@ -1029,6 +1030,8 @@ const bots = new BotManager({
   }),
 });
 registerBotRoutes(app, bots);
+// Bots on the web: this machine's agent publishes their summaries and relays the owner's commands (bot-remote.ts).
+registerRemoteBotRoutes(app, bots, { account: machineAccount });
 app.addHook("onReady", async () => {
   bots.load();
 });

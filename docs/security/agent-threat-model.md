@@ -267,6 +267,36 @@ changes both). `num_ctx` and `keep_alive` are sent with each request.
   have no ownership rows, so no remote control is possible there at all.
 - The desktop app's own machine view does not show remote commands yet (the portal does).
 
+## Bots on the web
+
+The bots on a desktop machine are shown and driven from the owner's portal (src/common/bot-relay.ts).
+They keep running on the Mac, with its folder and tools.
+
+- **Publishing.** The agent reads the local IDE provider's bots over loopback with the IDE token.
+  It sends a capped snapshot to its coordinator, as a signed agent request filed under its own id:
+  at most 30 bots, each with the 12 latest messages at 4k characters each, under 256 KB in all.
+  Tool steps are one line (a command or a path, never file contents), and only the folder's name
+  is sent, not its path. It sends on change and every 2 minutes. The coordinator keeps a snapshot
+  only for a machine with a verified owner, keeps it in memory, and serves it only to that owner.
+- **Commands.** The chain is the same as remote model control: portal session, then the portal
+  (service token, account from the session, enrolled-node check), then the coordinator (verified
+  ownership row, rate limits of 60 changes and 120 reads per account per 10 minutes, and 30
+  changes per machine), then a `bot_control` frame. The coordinator signs the frame with its
+  identity key and sends it down the agent's authenticated socket. The agent checks it the same
+  way as `model_control` (pinned key, own id, 2-minute lifetime, replay cache), then applies the
+  host policy and its own rate limit. The provider then requires the account signed in on the
+  Mac to be the account that asked.
+- **No new privileges.** A remote settings change uses the desktop form's validation. It cannot
+  change the folder, repository, tools or auto-approval. An approval answers only a call the bot
+  is waiting on right now, and the first answer (Mac or web) wins. The bot's own rules decide
+  what asks.
+- **Host policy.** `AGENT_BOT_RELAY=view`, or `AGENT_REMOTE_CONTROL=off`, makes the web
+  read-only, and approvals show "Approve on your Mac". `AGENT_BOT_RELAY=off` publishes nothing.
+- **Residual risk.** A stolen portal session can message the owner's bots and answer their
+  approvals while the Mac is online, within the bot's allowed tools and budget. The mitigation is
+  `AGENT_BOT_RELAY=view`. Snapshots (conversation tails) sit in coordinator memory. They are
+  readable by the coordinator's operator, like the inference traffic the coordinator already relays.
+
 ## 2. Theft of bitcoin/cSats
 
 **Current controls (verified in code and tests)**

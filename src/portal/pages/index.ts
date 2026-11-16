@@ -11,6 +11,7 @@ import { registerHostPage } from "./host.js";
 import { registerPublicPages, type PublicPagesDeps } from "./public.js";
 import { registerResetPasswordPage } from "./reset-password.js";
 import { registerReviewsPage } from "./reviews.js";
+import { registerBotsPage } from "./bots.js";
 import { registerSettingsPages } from "./settings.js";
 import { registerWelcomePages } from "./welcome.js";
 
@@ -33,4 +34,5 @@ export function registerPortalPages(app: FastifyInstance, deps: PublicPagesDeps 
   // Getting started (/portal/welcome): the same steps as the desktop app's wizard.
   registerWelcomePages(app);
   registerReviewsPage(app);
+  registerBotsPage(app);
 }

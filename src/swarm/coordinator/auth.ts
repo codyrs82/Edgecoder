@@ -96,7 +96,9 @@ const AGENT_POST_ROUTES: ReadonlySet<string> = new Set([
 const AGENT_POST_PATTERNS: readonly RegExp[] = [
   /^\/orchestration\/agents\/[^/]+\/(status|ack)$/,
   // Remote model control: the agent's own state and command results (routes/model-control.ts).
-  /^\/agent-control\/agents\/[^/]+\/report$/
+  /^\/agent-control\/agents\/[^/]+\/report$/,
+  // Bots on the web: the agent's bot snapshot and command results (routes/bot-relay.ts).
+  /^\/agent-control\/agents\/[^/]+\/bots\/report$/
 ];
 /** GET routes a signed agent may call; each scopes what it returns to the signer (see the route). */
 const AGENT_GET_PATTERNS: readonly RegExp[] = [

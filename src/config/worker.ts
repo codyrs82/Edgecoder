@@ -124,6 +124,12 @@ export const workerConfigSchema = z.object({
    */
   AGENT_REMOTE_CONTROL: z.string().trim().regex(/^(on|off|1|0|true|false|yes|no)$/i, "on or off").optional(),
   /**
+   * The desktop's bots on the owner's web portal (src/common/bot-relay.ts): "on" (default) publishes
+   * them and takes the owner's commands, "view" publishes read-only, "off" publishes nothing.
+   * AGENT_REMOTE_CONTROL=off also makes them read-only.
+   */
+  AGENT_BOT_RELAY: z.string().trim().regex(/^(on|off|view|1|0|true|false|yes|no)$/i, "on, view or off").optional(),
+  /**
    * Models a remote command (the owner's, or an operator rollout) may pull or select: comma-separated
    * Ollama tags. Unset = the curated catalog; `catalog` in the list adds it back; `none` allows nothing.
    */

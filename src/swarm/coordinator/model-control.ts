@@ -31,6 +31,10 @@ export function setModelControlTransport(t: ModelControlTransport | undefined): 
 export function agentControlConnected(agentId: string): boolean {
   return transport?.connected(agentId) ?? false;
 }
+/** Sends a signed owner frame down the agent's authenticated socket (also bot_control: bot-relay.ts). */
+export function sendAgentControlFrame(agentId: string, frame: string): boolean {
+  return transport?.send(agentId, frame) ?? false;
+}
 
 export type AuditStatus = "sent" | "accepted" | "progress" | "done" | "refused" | "failed" | "undelivered" | "expired";
 const FINAL: ReadonlySet<AuditStatus> = new Set(["done", "refused", "failed", "undelivered", "expired"]);

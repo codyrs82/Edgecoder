@@ -1,0 +1,393 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
+/**
+ * Bots on the web ("same bots, everywhere"): the bots on the owner's desktop machines are shown and
+ * driven from the portal, while they keep running on their Mac with its folder and tools.
+ *
+ * Publishing (desktop -> web):
+ *   provider (/v1/ide/bots/remote/snapshot, IDE token) <- this machine's agent polls it, and sends a
+ *   capped BotsSnapshot to its coordinator on change and on a heartbeat (signed agent request).
+ *   The coordinator serves a snapshot only to the agent's verified owning account.
+ *
+ * Commands (web -> desktop), the same chain as remote model control (#302):
+ *   portal session -> portal (service token, accountId = acct-<session user>, enrolled-node check)
+ *     -> coordinator (verified ownership row names the account; rate limits)
+ *     -> agent (a bot_control frame signed by the coordinator's identity key, down the agent's
+ *        authenticated mesh WebSocket; pinned key, own agent id, 2-minute lifetime, replay cache)
+ *     -> provider (/v1/ide/bots/remote/command, IDE token; the account signed in on the Mac must be
+ *        the one that asked; the desktop form's validation; the bot's own permission rules).
+ *   The agent reports each result (and any data asked for) back with a signed request; the portal
+ *   polls for it.
+ *
+ * No new privileges: a remote settings change cannot touch the bot's folder, repository, tools or
+ * auto-approval (change those on the Mac), and approvals answer only calls the bot itself asked
+ * about. AGENT_BOT_RELAY=view (or AGENT_REMOTE_CONTROL=off) makes the web read-only; off publishes
+ * nothing.
+ */
+
+import { randomUUID } from "node:crypto";
+import { z } from "zod";
+import { signPayload, verifyPayload } from "../mesh/peer.js";
+import { canonicalJson, CommandReplayGuard } from "../model/remote-control/protocol.js";
+import { capMarkdownSource } from "./markdown-cap.js";
+
+export { CommandReplayGuard };
+
+export const BOT_CONTROL_FRAME_TYPE = "bot_control";
+export const BOT_CONTROL_VERSION = 1;
+export const BOT_CONTROL_MAX_LIFETIME_MS = 2 * 60_000;
+export const BOT_CONTROL_MAX_FUTURE_SKEW_MS = 60_000;
+
+// ---- Size caps (the #333 caps: a message renders at most MAX_MARKDOWN characters) ----
+
+/** Messages of each bot's conversation published with the snapshot (the rest is fetched on demand). */
+export const SNAPSHOT_TAIL_MESSAGES = 12;
+/** Each published message's text is capped to this (start + latest part). */
+export const SNAPSHOT_MESSAGE_CHARS = 4_000;
+/** Bots per machine in a snapshot. */
+export const SNAPSHOT_MAX_BOTS = 30;
+/** A whole snapshot; a bigger one is shrunk (shorter tails) before it is sent, and refused above this. */
+export const MAX_SNAPSHOT_BYTES = 256 * 1024;
+/** A command result's data (a page of messages, the run history, the memory). */
+export const MAX_RESULT_BYTES = 192 * 1024;
+/** Messages per page fetched on demand. */
+export const MAX_PAGE_MESSAGES = 40;
+/** Each message in a fetched page (the #333 markdown cap). */
+export const PAGE_MESSAGE_CHARS = 8_000;
+/** Tool steps listed per published message. */
+const MAX_TOOL_STEPS = 12;
+
+// ---- Snapshot (what the web sees) ----
+
+export type RelayControls = "on" | "view";
+
+export interface RemoteToolStep {
+  tool: string;
+  /** One line: the command, the file, the commit message. */
+  detail: string;
+  status: "ok" | "error" | "pending" | "denied" | "running";
+}
+
+export interface RemoteBotMessage {
+  id: string;
+  role: "user" | "assistant" | "event";
+  content: string;
+  atMs: number;
+  runId?: string;
+  steps?: RemoteToolStep[];
+}
+
+export interface RemoteBotRun {
+  id: string;
+  trigger: string;
+  source?: string;
+  startedAtMs: number;
+  endedAtMs?: number;
+  status: string;
+  summary: string;
+  cSats: number;
+  where?: string;
+  note?: string;
+  error?: string;
+  pullRequests?: Array<{ url: string; number?: number; title?: string }>;
+}
+
+export interface RemotePendingCall {
+  callId: string;
+  tool: string;
+  detail: string;
+}
+
+export interface RemoteBotSummary {
+  id: string;
+  name: string;
+  role: string;
+  color: string;
+  avatarShape?: string;
+  status: string;
+  activity?: string;
+  enabled: boolean;
+  instructions: string;
+  /** The home folder's name only (the full path stays on the Mac). */
+  folderName: string;
+  repository?: string;
+  repo?: { state: string; message: string };
+  schedule: string;
+  heartbeatMinutes: number | null;
+  maxRunsPerDay: number;
+  runsToday: number;
+  runCount: number;
+  budgetCSatsPerDay: number | null;
+  spentTodayCSats: number;
+  compute: { policy: string; model?: string };
+  triggers: Array<{ id: string; kind: string; enabled: boolean; label?: string; scope?: string; onlyOthers?: boolean }>;
+  maxTriggerRunsPerHour: number;
+  triggerStatus?: Record<string, { lastCheckedAtMs?: number; error?: string; backoffUntilMs?: number }>;
+  nextRun?: { kind: string; atMs: number };
+  held?: string;
+  lastRun?: RemoteBotRun;
+  pending: RemotePendingCall[];
+  queuedMessages: number;
+  idleStreak?: number;
+  /** The conversation's latest messages (capped); `messageCount` says how many there are. */
+  tail: RemoteBotMessage[];
+  messageCount: number;
+  updatedAtMs: number;
+}
+
+export interface BotsSnapshot {
+  v: 1;
+  /** The Mac's name as its owner sees it ("MAW-MB-02"). */
+  machineName: string;
+  /** on: the web may message, pause, edit and approve; view: read-only ("Approve on your Mac"). */
+  controls: RelayControls;
+  bots: RemoteBotSummary[];
+  generatedAtMs: number;
+}
+
+const short = (v: unknown, n: number) => {
+  const s = typeof v === "string" ? v : v === undefined || v === null ? "" : JSON.stringify(v);
+  const one = s.replace(/\s+/g, " ").trim();
+  return one.length > n ? `${one.slice(0, n - 1)}…` : one;
+};
+
+/** One line for a tool call: what it runs or touches, never the file contents. */
+export function toolCallDetail(tool: string, args: Record<string, unknown> | undefined): string {
+  const a = args ?? {};
+  switch (tool) {
+    case "run_shell":
+      return short(a.command, 300);
+    case "git_commit":
+      return short(a.message, 200);
+    case "git_push":
+      return short([a.remote, a.branch].filter(Boolean).join(" ") || "push", 200);
+    case "open_pull_request":
+      return short([a.title, a.branch ? `(${String(a.branch)})` : ""].filter(Boolean).join(" "), 200);
+    default:
+      return short(a.path ?? a.file ?? a.query ?? a.pattern ?? a.url ?? a.note ?? "", 200);
+  }
+}
+
+interface StreamEventLike {
+  type: string;
+  id?: string;
+  tool?: string;
+  args?: Record<string, unknown>;
+  requires_approval?: boolean;
+  error?: string;
+  result?: string;
+  approval_status?: string;
+}
+
+/** A message's tool steps (call + its result), at most MAX_TOOL_STEPS of the latest. */
+export function toolSteps(events: StreamEventLike[] | undefined, pendingIds: ReadonlySet<string>): RemoteToolStep[] {
+  if (!events?.length) return [];
+  const calls = new Map<string, RemoteToolStep>();
+  for (const e of events) {
+    if (e.type === "tool_call" && e.id && e.tool) {
+      calls.set(e.id, { tool: e.tool, detail: toolCallDetail(e.tool, e.args), status: pendingIds.has(e.id) ? "pending" : "running" });
+    } else if (e.type === "tool_result" && e.id) {
+      const c = calls.get(e.id);
+      if (c) c.status = e.error ? (/denied|rejected/i.test(e.error) ? "denied" : "error") : "ok";
+    }
+  }
+  return [...calls.values()].slice(-MAX_TOOL_STEPS);
+}
+
+export function capMessage<T extends { content: string }>(m: T, chars: number): T {
+  return m.content.length > chars ? { ...m, content: capMarkdownSource(m.content, chars) } : m;
+}
+
+/** Shrinks a snapshot until it fits MAX_SNAPSHOT_BYTES: shorter tails, then shorter messages. */
+export function fitSnapshot(s: BotsSnapshot, maxBytes = MAX_SNAPSHOT_BYTES): BotsSnapshot {
+  let out = s;
+  const size = () => Buffer.byteLength(JSON.stringify(out));
+  for (const [keep, chars] of [[SNAPSHOT_TAIL_MESSAGES, SNAPSHOT_MESSAGE_CHARS], [6, 2_000], [3, 1_000], [1, 500], [0, 0]] as const) {
+    if (size() <= maxBytes) return out;
+    out = { ...out, bots: out.bots.map((b) => ({ ...b, tail: b.tail.slice(-keep).map((m) => capMessage({ ...m, steps: m.steps?.slice(-3) }, Math.max(chars, 1))) })) };
+  }
+  while (size() > maxBytes && out.bots.length) out = { ...out, bots: out.bots.slice(0, -1) };
+  return out;
+}
+
+// ---- Commands ----
+
+export const BOT_CONTROL_ACTIONS = ["message", "pause", "resume", "check_now", "stop", "update_settings", "approve", "messages", "history", "memory"] as const;
+export type BotControlAction = (typeof BOT_CONTROL_ACTIONS)[number];
+/** Actions that only read (their own, larger rate limit; allowed in view-only mode). */
+export const BOT_READ_ACTIONS: ReadonlySet<BotControlAction> = new Set(["messages", "history", "memory"]);
+
+const enumLike = z.string().trim().min(1).max(40).regex(/^[a-z_]+$/);
+/**
+ * What a remote settings change may set: the desktop form's fields and bounds (src/apps/ide/bots.ts
+ * botFields), without the folder, repository, tools and auto-approval (those widen what the bot can
+ * touch, so they are changed on the Mac). The provider validates again with the desktop schema.
+ */
+export const remoteBotSettingsSchema = z
+  .object({
+    name: z.string().trim().min(1).max(60),
+    role: z.string().max(80),
+    instructions: z.string().max(8_000),
+    enabled: z.boolean(),
+    schedule: z.string().max(100),
+    heartbeatMinutes: z.number().int().min(5).max(1440).nullable(),
+    maxRunsPerDay: z.number().int().min(1).max(500),
+    budgetCSatsPerDay: z.number().positive().max(1e9).nullable(),
+    compute: z.object({ policy: enumLike, model: z.string().trim().min(1).max(300).optional() }).strict(),
+    color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+    avatarShape: enumLike,
+    triggers: z
+      .array(
+        z
+          .object({
+            id: z.string().max(40).optional(),
+            kind: enumLike,
+            enabled: z.boolean().default(true),
+            label: z.string().trim().max(100).optional(),
+            onlyOthers: z.boolean().optional(),
+            scope: enumLike.optional()
+          })
+          .strict()
+      )
+      .max(10),
+    maxTriggerRunsPerHour: z.number().int().min(1).max(60),
+    memory: z.string().max(8_000)
+  })
+  .strict()
+  .partial()
+  .refine((p) => Object.keys(p).length > 0, "at least one setting");
+export type RemoteBotSettings = z.infer<typeof remoteBotSettingsSchema>;
+
+const none = z.object({}).strict().default({});
+export const botControlRequestSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("message"), args: z.object({ content: z.string().trim().min(1).max(20_000) }).strict() }),
+  z.object({ action: z.literal("pause"), args: none }),
+  z.object({ action: z.literal("resume"), args: none }),
+  z.object({ action: z.literal("check_now"), args: none }),
+  z.object({ action: z.literal("stop"), args: none }),
+  z.object({ action: z.literal("update_settings"), args: remoteBotSettingsSchema }),
+  z.object({ action: z.literal("approve"), args: z.object({ callId: z.string().min(1).max(100), approved: z.boolean() }).strict() }),
+  z.object({
+    action: z.literal("messages"),
+    args: z.object({ beforeMs: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(MAX_PAGE_MESSAGES).default(20) }).strict().default({ limit: 20 })
+  }),
+  z.object({ action: z.literal("history"), args: none }),
+  z.object({ action: z.literal("memory"), args: none })
+]);
+export type BotControlRequest = z.infer<typeof botControlRequestSchema>;
+
+export const botIdSchema = z.string().min(1).max(100).regex(/^[A-Za-z0-9_-]+$/);
+
+export interface BotControlCommand {
+  v: typeof BOT_CONTROL_VERSION;
+  id: string;
+  agentId: string;
+  coordinatorId: string;
+  /** The owning account the coordinator verified (acct-<userId>). */
+  requestedBy: string;
+  issuedAtMs: number;
+  expiresAtMs: number;
+  botId: string;
+  action: BotControlAction;
+  args: Record<string, unknown>;
+}
+
+export interface BotControlFrame {
+  type: typeof BOT_CONTROL_FRAME_TYPE;
+  command: BotControlCommand;
+  signature: string;
+}
+
+export function botControlSigningPayload(command: BotControlCommand): string {
+  return `edgecoder-bot-control-v1\n${canonicalJson(command)}`;
+}
+
+export function createBotControlFrame(input: {
+  request: BotControlRequest;
+  botId: string;
+  agentId: string;
+  coordinatorId: string;
+  requestedBy: string;
+  privateKeyPem: string;
+  nowMs?: number;
+  id?: string;
+}): BotControlFrame {
+  const issuedAtMs = input.nowMs ?? Date.now();
+  const command: BotControlCommand = {
+    v: BOT_CONTROL_VERSION,
+    id: input.id ?? randomUUID(),
+    agentId: input.agentId,
+    coordinatorId: input.coordinatorId,
+    requestedBy: input.requestedBy,
+    issuedAtMs,
+    expiresAtMs: issuedAtMs + BOT_CONTROL_MAX_LIFETIME_MS,
+    botId: input.botId,
+    action: input.request.action,
+    args: input.request.args as Record<string, unknown>
+  };
+  return { type: BOT_CONTROL_FRAME_TYPE, command, signature: signPayload(botControlSigningPayload(command), input.privateKeyPem) };
+}
+
+const commandShape = z
+  .object({
+    v: z.literal(BOT_CONTROL_VERSION),
+    id: z.string().min(8).max(64).regex(/^[A-Za-z0-9-]+$/),
+    agentId: z.string().min(1).max(128),
+    coordinatorId: z.string().min(1).max(256),
+    requestedBy: z.string().min(1).max(160),
+    issuedAtMs: z.number().int().nonnegative(),
+    expiresAtMs: z.number().int().nonnegative(),
+    botId: botIdSchema,
+    action: z.enum(BOT_CONTROL_ACTIONS),
+    args: z.record(z.string(), z.unknown())
+  })
+  .strict();
+
+export type BotFrameVerdict =
+  | { ok: true; command: BotControlCommand; request: BotControlRequest }
+  | { ok: false; reason: "malformed" | "no_verified_coordinator" | "wrong_coordinator" | "invalid_signature" | "wrong_agent" | "expired" | "from_future" | "lifetime_too_long" | "replayed" | "replay_cache_full" | "invalid_request" };
+
+/** The agent's check of a bot_control frame (the same rules as verifyModelControlFrame). */
+export function verifyBotControlFrame(
+  frame: unknown,
+  ctx: { agentId: string; coordinator: { peerId: string; publicKeyPem: string } | null; replay: CommandReplayGuard; nowMs?: number }
+): BotFrameVerdict {
+  const f = frame as Partial<BotControlFrame> | null;
+  if (!f || typeof f !== "object" || f.type !== BOT_CONTROL_FRAME_TYPE || typeof f.signature !== "string") return { ok: false, reason: "malformed" };
+  const parsed = commandShape.safeParse(f.command);
+  if (!parsed.success) return { ok: false, reason: "malformed" };
+  const command = parsed.data as BotControlCommand;
+  if (!ctx.coordinator) return { ok: false, reason: "no_verified_coordinator" };
+  if (command.coordinatorId !== ctx.coordinator.peerId) return { ok: false, reason: "wrong_coordinator" };
+  if (!verifyPayload(botControlSigningPayload(f.command as BotControlCommand), f.signature, ctx.coordinator.publicKeyPem)) return { ok: false, reason: "invalid_signature" };
+  if (command.agentId !== ctx.agentId) return { ok: false, reason: "wrong_agent" };
+  const now = ctx.nowMs ?? Date.now();
+  if (command.issuedAtMs > now + BOT_CONTROL_MAX_FUTURE_SKEW_MS) return { ok: false, reason: "from_future" };
+  if (command.expiresAtMs - command.issuedAtMs > BOT_CONTROL_MAX_LIFETIME_MS || command.expiresAtMs < command.issuedAtMs) return { ok: false, reason: "lifetime_too_long" };
+  if (now > command.expiresAtMs) return { ok: false, reason: "expired" };
+  const request = botControlRequestSchema.safeParse({ action: command.action, args: command.args });
+  if (!request.success) return { ok: false, reason: "invalid_request" };
+  const fresh = ctx.replay.accept(command.id, command.expiresAtMs, now);
+  if (fresh === "full") return { ok: false, reason: "replay_cache_full" };
+  if (!fresh) return { ok: false, reason: "replayed" };
+  return { ok: true, command, request: request.data };
+}
+
+/** One command's outcome, reported by the agent. */
+export interface BotControlResult {
+  commandId: string;
+  status: "done" | "refused" | "failed";
+  error?: string;
+  message?: string;
+  /** What a read asked for (messages, runs, memory) or what a change returned (started, queued). */
+  data?: unknown;
+}
+
+/** AGENT_BOT_RELAY: off publishes nothing; view publishes read-only; on (default) also takes commands. */
+export function botRelayMode(value: string | undefined, remoteControl: boolean): "off" | RelayControls {
+  const v = (value ?? "").trim().toLowerCase();
+  if (v === "off" || v === "0" || v === "false" || v === "no") return "off";
+  if (v === "view" || !remoteControl) return "view";
+  return "on";
+}
