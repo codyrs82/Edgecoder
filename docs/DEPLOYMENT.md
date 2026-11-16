@@ -77,6 +77,16 @@ Ollama and its `ollama_data_eu` volume):
   the next one that reports capacity, retries once on another coordinator when the chosen one fails
   before any token was streamed, and answers "No compute is available right now" at once when no
   coordinator can serve the request. Answers are cached for `PORTAL_CHAT_CAPACITY_TTL_MS`.
+- Network calls (portal chat on a network model or Auto, hosted `/v1`) then take latency into
+  account (`src/portal/coordinator-latency.ts`): expected latency = the portal machine's measured
+  round trip to the coordinator + its pickup p90 (+ queued rounds x call p50 when no slot is free) +
+  its round trip to the agents holding the model. The load pick (most free slots) is replaced only
+  by a coordinator that is faster by `PORTAL_COORD_LATENCY_MARGIN_MS` and
+  `PORTAL_COORD_LATENCY_MARGIN_PCT` and has a free slot, or by a faster one when the load pick has
+  no free slot (overflow). The portal relays every call, so the buyer's own location only matters
+  through which portal machine serves them: a European buyer reaches the EU coordinator on latency
+  only when a portal machine runs in Europe. The choice and why are kept on the call's routing
+  decision (Settings > Network, "Routing decisions", Coordinator column).
 - Only coordinators that pass the portal's URL policy (`PORTAL_COORDINATOR_HOSTS` plus the hosts of
   `COORDINATOR_DISCOVERY_URLS` / `CONTROL_PLANE_URL`) are probed or sent a chat.
 - Callers that reach the US seed's `/portal/chat` directly still get an answer while a mesh peer

@@ -181,6 +181,10 @@ async function chatCall(u, body, { timeoutMs, sessionId }) {
       method: "POST",
       headers: {
         authorization: `Bearer ${u.key}`, "content-type": "application/json", "user-agent": UA,
+        // Where this buyer runs (FLY_REGION on Fly): the portal records it with its coordinator choice
+        // (routing decisions on Settings > Network). Recorded, not scored: the portal relays the call,
+        // so its own round trip to each coordinator is what decides.
+        "x-edgecoder-client-region": REGION,
         ...(sessionId ? { "x-session-id": sessionId } : {}),
       },
       body: JSON.stringify({ ...body, stream: true, temperature: 0, ...(sessionId ? { user: sessionId } : {}) }),

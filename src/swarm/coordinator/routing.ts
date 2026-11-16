@@ -17,6 +17,7 @@
 
 import type { UsageRecord } from "../../economy/usage.js";
 import type { JobDescriptor } from "../../inference-api/job-descriptor.js";
+import type { CoordinatorChoice } from "../../common/coordinator-choice.js";
 import { complexityWeightsFromEnv, type ComplexityWeights } from "../../inference-api/job-complexity.js";
 import { worldOwnerTag, type LocalWorld } from "../network-world.js";
 import { routableModels } from "../model-catalog.js";
@@ -161,6 +162,27 @@ export function setPeerWorldSource(source: PeerWorldSource | undefined, rtt?: (a
   peerSource = source;
   if (rtt) rttSource = rtt;
 }
+/** This coordinator's measured round trip to one of its agents (null: not measured). */
+export function agentRttMs(agentId: string): number | null {
+  return rttSource(agentId);
+}
+
+/** A typical call's duration here (p50 of recent calls), registered by routes/admin-network.ts. */
+let callP50Source: () => number | null = () => null;
+export function setCallDurationSource(source: () => number | null): void {
+  callP50Source = source;
+}
+/** What /inference/models tells the portal about queueing here: pickup p90 and call duration p50 (ms). */
+export function coordinatorLoadSignals(): { pickupP90Ms: number | null; callP50Ms: number | null } {
+  const p = pickupStats();
+  let callP50Ms: number | null = null;
+  try {
+    callP50Ms = callP50Source();
+  } catch {
+    callP50Ms = null;
+  }
+  return { pickupP90Ms: p.count ? Math.round(p.p90) : null, callP50Ms: callP50Ms === null ? null : Math.round(callP50Ms) };
+}
 
 async function peerViews(nowMs: number): Promise<Array<{ world: LocalWorld; linkRttMs: number | null }>> {
   if (!peerSource) return [];
@@ -279,8 +301,15 @@ export type RoutingSummary = ReturnType<typeof routingSummary>;
 
 // ── Decision log ─────────────────────────────────────────────────────────────────────────
 
-export interface RoutingDecision extends RoutingSummary {
+/** Best-fit fields a pinned-model call (recordPlacement) does not have. */
+type BestFitOnly = "job" | "jobInferred" | "quality" | "latency" | "complexity" | "requirements" | "weights" | "affinity";
+
+export interface RoutingDecision extends Omit<RoutingSummary, BestFitOnly>, Partial<Pick<RoutingSummary, BestFitOnly>> {
   atMs: number;
+  /** A call that named its model: only the portal's coordinator choice was decided. */
+  pinned?: true;
+  /** Why the portal sent the call to this coordinator (latency-aware choice; common/coordinator-choice.ts). */
+  coordinatorChoice?: CoordinatorChoice;
   taskId: string;
   subtaskId: string;
   sessionKey: string;
@@ -332,8 +361,41 @@ export function restoreDecisions(stored: readonly StoredRoutingDecision[]): numb
   return add.length;
 }
 
-export function recordDecision(taskId: string, subtaskId: string, job: JobDescriptor, r: BestFitResult, nowMs = Date.now()): RoutingDecision {
-  const d: RoutingDecision = { ...routingSummary(job, r), atMs: nowMs, taskId, subtaskId, sessionKey: job.sessionKey, preferredAgentId: r.chosen?.agentId ?? null, actual: {} };
+export function recordDecision(taskId: string, subtaskId: string, job: JobDescriptor, r: BestFitResult, nowMs = Date.now(), coordinatorChoice?: CoordinatorChoice): RoutingDecision {
+  const d: RoutingDecision = { ...routingSummary(job, r), atMs: nowMs, taskId, subtaskId, sessionKey: job.sessionKey, preferredAgentId: r.chosen?.agentId ?? null, actual: {}, ...(coordinatorChoice ? { coordinatorChoice } : {}) };
+  return logDecision(d);
+}
+
+/**
+ * A network call that named its model, sent here by the portal's latency-aware coordinator choice:
+ * logged with that choice so the admin Network page shows which coordinator took it and why.
+ */
+export function recordPlacement(taskId: string, subtaskId: string, call: { model: string; computeClass: string | null }, coordinatorChoice: CoordinatorChoice, nowMs = Date.now()): RoutingDecision {
+  const line = `${call.model} (named) sent to ${coordinatorChoice.chosen}: ${coordinatorChoice.reason}`.slice(0, 300);
+  return logDecision({
+    model: call.model,
+    computeClass: call.computeClass,
+    agent: null,
+    coordinatorId: identity.peerId,
+    score: null,
+    parts: null,
+    estimate: null,
+    alternatives: [],
+    reason: `coordinator: ${coordinatorChoice.reason}`.slice(0, 300),
+    line,
+    pinned: true,
+    coordinatorChoice,
+    atMs: nowMs,
+    taskId,
+    subtaskId,
+    sessionKey: "",
+    preferredAgentId: null,
+    actual: {},
+  });
+}
+
+function logDecision(d: RoutingDecision): RoutingDecision {
+  const { taskId, subtaskId } = d;
   decisions.push(d);
   changed(d);
   bySubtask.set(subtaskId, d);
@@ -355,9 +417,9 @@ export function noteRoutedChunk(subtaskId: string, agentId: string | undefined, 
     d.actual.ttftMs = nowMs - d.atMs;
     if (agentId) {
       d.actual.agent = `agent-${agentId.slice(-6)}`;
-      d.actual.ranOnPreferred = agentId === d.preferredAgentId;
+      if (!d.pinned) d.actual.ranOnPreferred = agentId === d.preferredAgentId;
       // The session's prefix is now cached there.
-      if (d.model && d.computeClass) rememberSession(d.sessionKey, { agentId, model: d.model, computeClass: d.computeClass, atMs: nowMs });
+      if (d.sessionKey && d.model && d.computeClass) rememberSession(d.sessionKey, { agentId, model: d.model, computeClass: d.computeClass, atMs: nowMs });
     }
   }
   if (done) {

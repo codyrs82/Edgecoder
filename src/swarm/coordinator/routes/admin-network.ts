@@ -34,7 +34,7 @@ import { agentContextWindow, agentLoadReport, agentSocketConnected, freeModelSlo
 import { effectiveHardware, hardwareVerifier } from "../economy.js";
 import { routableModels } from "../../model-catalog.js";
 import { inferenceCancelledForCapacity } from "./inference.js";
-import { bestFitConfig, complexityWeights, noteRoutedChunk, recentDecisions, restoreDecisions, ROUTING_LOG_SIZE, setDecisionSink, storedDecision } from "../routing.js";
+import { bestFitConfig, complexityWeights, noteRoutedChunk, recentDecisions, restoreDecisions, ROUTING_LOG_SIZE, setCallDurationSource, setDecisionSink, storedDecision } from "../routing.js";
 import {
   InferenceTracker,
   MAX_SERIES_KEYS,
@@ -58,6 +58,11 @@ export const GAP_WINDOW_MS = 60 * 60_000;
 /** Account lookups (agent -> owner account) are cached this long. */
 
 export const inferenceTracker = new InferenceTracker();
+// Typical call duration here, for /inference/models `load` (the portal's latency-aware coordinator choice).
+setCallDurationSource(() => {
+  const p = inferenceTracker.duration.percentiles(Date.now() - LATENCY_WINDOW_MS);
+  return p.count ? p.p50 : null;
+});
 export const networkSamples = new RingBuffer<NetworkSample>(SAMPLE_CAPACITY);
 /** Persists networkSamples to the coordinator's Postgres (memory only without DATABASE_URL). */
 export const networkHistory = new NetworkHistory({

@@ -24,6 +24,8 @@
  */
 
 import { request } from "undici";
+import { cleanRegion, coordinatorHost, type CoordinatorChoice } from "../common/coordinator-choice.js";
+import { chooseByLatency, latencyPolicyFromEnv, type LatencyCandidate, type LatencyPolicy } from "./coordinator-latency.js";
 
 /**
  * - yes: it reports something to run the chat on.
@@ -53,9 +55,23 @@ export interface CapacityReport {
   agentModels?: string[];
   /** kind "network": per model, idle agents and calls waiting (coordinators that report them). */
   /** agents: holding the model; idle: holding nothing; free: model slots free now (newer coordinators); waiting: calls queued. */
-  modelLoad?: Record<string, { agents?: number; idle: number; free?: number; waiting: number }>;
+  modelLoad?: Record<string, ModelLoad>;
+  /** Portal <-> coordinator round trip of this probe (time to response headers), ms. */
+  rttMs?: number;
+  /** kind "network" (newer coordinators): its pickup p90 and typical call duration (p50), ms. */
+  pickupP90Ms?: number;
+  callP50Ms?: number;
   /** kind "network": per model, the compute classes of the agents holding it (coordinators that report them). */
   modelClasses?: Record<string, string[]>;
+}
+
+/** agents: holding the model; idle: holding nothing; free: model slots free now (newer coordinators); waiting: calls queued; agentRttMs: coordinator <-> agent round trip (newer coordinators). */
+export interface ModelLoad {
+  agents?: number;
+  idle: number;
+  free?: number;
+  waiting: number;
+  agentRttMs?: number;
 }
 
 /** A model the network can run now, across coordinators: agents holding it and their classes. */
@@ -88,9 +104,15 @@ export const LOAD_REPORT_MAX_AGE_MS = 2_000;
 /** A "no" older than this is asked again before a chat is refused for lack of compute. */
 const RECHECK_NO_AFTER_MS = 3_000;
 const CANDIDATE_LIST_TTL_MS = 60_000;
+/** Round trips kept per coordinator, and how long one counts. */
+const RTT_SAMPLES = 5;
+const RTT_MAX_AGE_MS = 5 * 60_000;
 
-/** PORTAL_CHAT_CAPACITY_TIMEOUT_MS / PORTAL_CHAT_CAPACITY_TTL_MS; the only place they are read. */
-export function chatCapacityOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): { timeoutMs: number; ttlMs: number } {
+/**
+ * PORTAL_CHAT_CAPACITY_TIMEOUT_MS / PORTAL_CHAT_CAPACITY_TTL_MS (the only place they are read), and
+ * this machine's FLY_REGION: the latency-aware choice measures round trips from here and records it.
+ */
+export function chatCapacityOptionsFromEnv(env: NodeJS.ProcessEnv = process.env): { timeoutMs: number; ttlMs: number; portalRegion: string | null } {
   const num = (raw: string | undefined, fallback: number, min: number, max: number) => {
     const n = Number((raw ?? "").trim() || NaN);
     return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : fallback;
@@ -98,6 +120,7 @@ export function chatCapacityOptionsFromEnv(env: NodeJS.ProcessEnv = process.env)
   return {
     timeoutMs: num(env.PORTAL_CHAT_CAPACITY_TIMEOUT_MS, CHAT_CAPACITY_DEFAULT_TIMEOUT_MS, 100, 30_000),
     ttlMs: num(env.PORTAL_CHAT_CAPACITY_TTL_MS, CHAT_CAPACITY_DEFAULT_TTL_MS, 0, 600_000),
+    portalRegion: cleanRegion(env.FLY_REGION),
   };
 }
 
@@ -124,6 +147,7 @@ export function httpCapacityProbe(opts: { serviceToken?: string; timeoutMs: numb
         const count = typeof o.modelCount === "number" && Number.isFinite(o.modelCount) ? o.modelCount : 0;
         return { reachable: true, ownModelCount: o.reachable ? count : 0 };
       }
+      const started = performance.now();
       const res = await request(`${base}/inference/models`, {
         method: "GET",
         headers: opts.serviceToken ? { "x-portal-service-token": opts.serviceToken } : {},
@@ -131,27 +155,38 @@ export function httpCapacityProbe(opts: { serviceToken?: string; timeoutMs: numb
         bodyTimeout: opts.timeoutMs,
         signal: AbortSignal.timeout(opts.timeoutMs),
       });
+      const rttMs = Math.round(performance.now() - started);
       if (res.statusCode !== 200) {
         await res.body.dump().catch(() => undefined);
         // It answered, so it is up; a gateway error means the coordinator behind it is not.
         return { reachable: res.statusCode < 502 || res.statusCode > 504 };
       }
-      const json = (await res.body.json().catch(() => null)) as { models?: unknown } | null;
-      if (!json || !Array.isArray(json.models)) return { reachable: true };
+      const json = (await res.body.json().catch(() => null)) as { models?: unknown; load?: { pickupP90Ms?: unknown; callP50Ms?: unknown } } | null;
+      if (!json || !Array.isArray(json.models)) return { reachable: true, rttMs };
       const agentModels: string[] = [];
-      const modelLoad: Record<string, { agents?: number; idle: number; free?: number; waiting: number }> = {};
+      const modelLoad: Record<string, ModelLoad> = {};
       const modelClasses: Record<string, string[]> = {};
       const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
-      for (const m of json.models as Array<{ model?: unknown; agents?: unknown; idleAgents?: unknown; freeSlots?: unknown; waiting?: unknown; classes?: unknown }>) {
+      for (const m of json.models as Array<{ model?: unknown; agents?: unknown; idleAgents?: unknown; freeSlots?: unknown; waiting?: unknown; classes?: unknown; agentRttMs?: unknown }>) {
         if (m && typeof m.model === "string" && typeof m.agents === "number" && m.agents > 0) {
           agentModels.push(m.model);
           if (Array.isArray(m.classes)) modelClasses[m.model] = m.classes.filter((c): c is string => typeof c === "string");
           if (num(m.idleAgents)) {
-            modelLoad[m.model] = { agents: m.agents, idle: m.idleAgents, ...(num(m.freeSlots) ? { free: m.freeSlots } : {}), waiting: num(m.waiting) ? m.waiting : 0 };
+            modelLoad[m.model] = { agents: m.agents, idle: m.idleAgents, ...(num(m.freeSlots) ? { free: m.freeSlots } : {}), waiting: num(m.waiting) ? m.waiting : 0, ...(num(m.agentRttMs) ? { agentRttMs: m.agentRttMs } : {}) };
           }
         }
       }
-      return { reachable: true, agentModels, ...(Object.keys(modelLoad).length ? { modelLoad } : {}), ...(Object.keys(modelClasses).length ? { modelClasses } : {}) };
+      const pickupP90Ms = num(json.load?.pickupP90Ms) ? json.load.pickupP90Ms : undefined;
+      const callP50Ms = num(json.load?.callP50Ms) ? json.load.callP50Ms : undefined;
+      return {
+        reachable: true,
+        rttMs,
+        agentModels,
+        ...(Object.keys(modelLoad).length ? { modelLoad } : {}),
+        ...(Object.keys(modelClasses).length ? { modelClasses } : {}),
+        ...(pickupP90Ms !== undefined ? { pickupP90Ms } : {}),
+        ...(callP50Ms !== undefined ? { callP50Ms } : {}),
+      };
     } catch {
       return { reachable: false };
     }
@@ -169,6 +204,15 @@ export interface ChatCapacityOptions {
   now?: () => number;
   /** Tests: replaces the HTTP probe. */
   probe?: CapacityProbe;
+  /** Latency-aware choice among coordinators with room (coordinator-latency.ts); default from PORTAL_COORD_LATENCY_*. */
+  latency?: LatencyPolicy;
+  /** Region of this portal machine (FLY_REGION), recorded with each choice. */
+  portalRegion?: string | null;
+}
+
+/** Where the call came from, recorded with the choice (common/coordinator-choice.ts clientRegionOf). */
+export interface PickContext {
+  clientRegion?: string | null;
 }
 
 export interface ChatCapacityPick {
@@ -176,11 +220,13 @@ export interface ChatCapacityPick {
   url: string | null;
   /** How many vetted coordinators there are, whatever their capacity. */
   known: number;
+  /** Network calls: which coordinator and why (sent with the call, kept on its routing decision). */
+  choice?: CoordinatorChoice;
 }
 
 export interface ChatCapacityDirectory {
   /** The best coordinator for `need`, leaving out `exclude` (the ones this chat already tried). */
-  pick(need: ChatNeed, exclude?: readonly string[]): Promise<ChatCapacityPick>;
+  pick(need: ChatNeed, exclude?: readonly string[], ctx?: PickContext): Promise<ChatCapacityPick>;
   /** A chat sent to `url` failed before it produced anything: prefer the others for a while. */
   markFailed(url: string): void;
   /**
@@ -194,12 +240,16 @@ export interface ChatCapacityDirectory {
    * ties; null when none is known.
    */
   pickAuto(): Promise<string | null>;
+  /** pickAuto with the latency-aware choice and why. */
+  pickAutoChoice?(ctx?: PickContext): Promise<{ url: string | null; choice?: CoordinatorChoice }>;
   /** A vetted coordinator URL (a route_elsewhere answer is followed only to one of these). */
   isKnown(url: string): Promise<boolean>;
 }
 
 interface CacheEntry {
   at: number;
+  /** When the probe behind `report` was sent: a report that took long to come back is stale on arrival. */
+  takenAt?: number;
   report?: CapacityReport;
   pending?: Promise<CapacityReport>;
 }
@@ -208,6 +258,21 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
   const now = opts.now ?? Date.now;
   const ttlMs = opts.ttlMs ?? CHAT_CAPACITY_DEFAULT_TTL_MS;
   const probe = opts.probe ?? httpCapacityProbe({ serviceToken: opts.serviceToken, timeoutMs: opts.timeoutMs ?? CHAT_CAPACITY_DEFAULT_TIMEOUT_MS });
+  const latency = opts.latency ?? latencyPolicyFromEnv(process.env, LOAD_REPORT_MAX_AGE_MS);
+  const portalRegion = opts.portalRegion ?? null;
+  /** Recent round trips per coordinator (from probes); the median of the fresh ones is used. */
+  const rtts = new Map<string, Array<{ at: number; ms: number }>>();
+  const noteRtt = (url: string, ms: number | undefined) => {
+    if (ms === undefined || !Number.isFinite(ms) || ms < 0) return;
+    const list = (rtts.get(url) ?? []).concat({ at: now(), ms });
+    rtts.set(url, list.slice(-RTT_SAMPLES));
+  };
+  const rttOf = (url: string): number | null => {
+    const fresh = (rtts.get(url) ?? []).filter((s) => now() - s.at <= RTT_MAX_AGE_MS).map((s) => s.ms).sort((a, b) => a - b);
+    if (!fresh.length) return null;
+    const mid = Math.floor(fresh.length / 2);
+    return fresh.length % 2 ? fresh[mid] : (fresh[mid - 1] + fresh[mid]) / 2;
+  };
   const cache = new Map<string, CacheEntry>();
   const failedAt = new Map<string, number>();
   let list: { at: number; urls: string[] } | undefined;
@@ -248,10 +313,12 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
     const hit = cache.get(key);
     if (hit?.pending) return hit.pending;
     if (hit?.report && now() - hit.at < maxAgeMs) return Promise.resolve(hit.report);
+    const takenAt = now();
     const pending = probe(url, kind)
       .catch((): CapacityReport => ({ reachable: false }))
       .then((report) => {
-        cache.set(key, { at: now(), report });
+        cache.set(key, { at: now(), takenAt, report });
+        noteRtt(url, report.rttMs);
         return report;
       });
     cache.set(key, { at: hit?.at ?? 0, report: hit?.report, pending });
@@ -285,11 +352,29 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
    * breaks ties. Inference runs where it is submitted, so this is what spreads calls across seeds.
    * Null when no coordinator reports load (older builds): the priority order below decides.
    */
-  async function chooseByLoad(urls: string[], model: string, cls: string | undefined, maxAgeMs: number): Promise<string | null> {
+  /** How old the network report behind `url` is (from when its probe was sent). */
+  const reportAge = (url: string) => {
+    const e = cache.get(`network|${url}`);
+    return e?.takenAt === undefined ? Infinity : now() - e.takenAt;
+  };
+
+  /** The latency-aware step over what the load rule scored; `baseline` is the load rule's pick. */
+  const withLatency = (scored: Array<LatencyCandidate>, baseline: string, ctx: PickContext | undefined): CoordinatorChoice =>
+    chooseByLatency(scored, baseline, latency, { clientRegion: ctx?.clientRegion ?? null, portalRegion });
+
+  /**
+   * Network calls: among coordinators that list the model and report their load, the one with the
+   * most free agents for it (idle minus waiting minus calls sent since its report); configured order
+   * breaks ties. Inference runs where it is submitted, so this is what spreads calls across seeds.
+   * That pick is then checked against expected latency (coordinator-latency.ts): a coordinator with
+   * a free slot that is faster by the margin, or any faster one when the pick has no free slot, wins.
+   * Null when no coordinator reports load (older builds): the priority order below decides.
+   */
+  async function chooseByLoad(urls: string[], model: string, cls: string | undefined, maxAgeMs: number, ctx: PickContext | undefined): Promise<{ url: string; choice: CoordinatorChoice } | null> {
     // Load moves in seconds: a report older than LOAD_REPORT_MAX_AGE_MS is fetched again, so calls
     // that already finished are not still counted against a coordinator for the whole cache TTL.
     const reports = await Promise.all(urls.map((u) => reportOf(u, "network", Math.min(maxAgeMs, LOAD_REPORT_MAX_AGE_MS))));
-    const scored: Array<{ url: string; free: number; agents: number }> = [];
+    const scored: Array<LatencyCandidate> = [];
     for (let i = 0; i < urls.length; i++) {
       const r = reports[i];
       const load = r.modelLoad?.[model];
@@ -297,7 +382,17 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
       const reportAt = cache.get(`network|${urls[i]}`)?.at ?? 0;
       // Free model slots when the coordinator reports them (agents run several calls at once), else idle agents.
       const room = load.free ?? load.idle;
-      scored.push({ url: urls[i], free: room - load.waiting - sentCount(urls[i], model, reportAt), agents: Math.max(1, load.agents ?? 1) });
+      scored.push({
+        url: urls[i],
+        free: room - load.waiting - sentCount(urls[i], model, reportAt),
+        waiting: load.waiting,
+        agents: Math.max(1, load.agents ?? 1),
+        rttMs: rttOf(urls[i]),
+        pickupP90Ms: r.pickupP90Ms ?? null,
+        callP50Ms: r.callP50Ms ?? null,
+        agentRttMs: load.agentRttMs ?? null,
+        reportAgeMs: reportAge(urls[i]),
+      });
     }
     let best: (typeof scored)[number] | null = null;
     if (scored.some((s) => s.free > 0)) {
@@ -308,13 +403,16 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
       // take as many queued calls as a 7-agent one (equal absolute backlogs would).
       for (const s of scored) if (!best || s.free / s.agents > best.free / best.agents || (s.free / s.agents === best.free / best.agents && s.agents > best.agents)) best = s;
     }
-    if (best) noteSent(best.url, model, cache.get(`network|${best.url}`)?.at ?? 0);
-    return best?.url ?? null;
+    if (!best) return null;
+    const choice = withLatency(scored, best.url, ctx);
+    const url = scored.find((s) => coordinatorHost(s.url) === choice.chosen)?.url ?? best.url;
+    noteSent(url, model, cache.get(`network|${url}`)?.at ?? 0);
+    return { url, choice };
   }
 
-  async function choose(urls: string[], need: ChatNeed, maxAgeMs: number): Promise<string | null> {
+  async function choose(urls: string[], need: ChatNeed, maxAgeMs: number, ctx: PickContext | undefined): Promise<{ url: string | null; choice?: CoordinatorChoice }> {
     if (need.kind === "network") {
-      const byLoad = await chooseByLoad(urls, need.model, wantsClass(need), maxAgeMs);
+      const byLoad = await chooseByLoad(urls, need.model, wantsClass(need), maxAgeMs, ctx);
       if (byLoad) return byLoad;
     }
     // Start every probe now so the wait is one timeout at most, then read them in priority order.
@@ -325,41 +423,66 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
       if (capacity === "no") continue;
       const failed = recentlyFailed(urls[i]);
       // The first coordinator that says yes wins without waiting for the ones after it.
-      if (capacity === "yes" && !failed) return urls[i];
+      if (capacity === "yes" && !failed) return { url: urls[i] };
       // Then: did not say, then ones a chat just failed on, then ones whose list lacks the model.
       const rank = capacity === "unlisted" ? 4 : (failed ? 2 : 0) + (capacity === "yes" ? 0 : 1);
       lesser.push({ url: urls[i], rank: rank + (capacity === "unlisted" && failed ? 1 : 0) });
     }
     lesser.sort((a, b) => a.rank - b.rank);
-    return lesser[0]?.url ?? null;
+    return { url: lesser[0]?.url ?? null };
+  }
+
+  /** model "auto": the reachable coordinator with the most room over all models, then the latency step. */
+  async function chooseAuto(ctx: PickContext | undefined): Promise<{ url: string | null; choice?: CoordinatorChoice }> {
+    const urls = await knownUrls();
+    if (urls.length === 0) return { url: null };
+    const reports = await Promise.all(urls.map((u) => reportOf(u, "network", LOAD_REPORT_MAX_AGE_MS)));
+    const scored: LatencyCandidate[] = [];
+    let best: { url: string; room: number } | null = null;
+    for (let i = 0; i < urls.length; i++) {
+      const r = reports[i];
+      if (!r.reachable || recentlyFailed(urls[i]) || !r.agentModels?.length) continue;
+      const loads = Object.values(r.modelLoad ?? {});
+      const room = loads.reduce((n, l) => n + (l.free ?? l.idle) - l.waiting, 0);
+      if (!best || room > best.room) best = { url: urls[i], room };
+      const agentRtts = loads.map((l) => l.agentRttMs).filter((n): n is number => typeof n === "number");
+      scored.push({
+        url: urls[i],
+        free: room,
+        waiting: loads.reduce((n, l) => n + l.waiting, 0),
+        agents: Math.max(1, ...loads.map((l) => l.agents ?? 1)),
+        rttMs: rttOf(urls[i]),
+        pickupP90Ms: r.pickupP90Ms ?? null,
+        callP50Ms: r.callP50Ms ?? null,
+        // Best fit places the call on one of them; the nearest is the fair estimate.
+        agentRttMs: agentRtts.length ? Math.min(...agentRtts) : null,
+        reportAgeMs: reportAge(urls[i]),
+      });
+    }
+    if (!best) return { url: urls[0] };
+    const choice = withLatency(scored, best.url, ctx);
+    return { url: scored.find((s) => coordinatorHost(s.url) === choice.chosen)?.url ?? best.url, choice };
   }
 
   return {
-    async pick(need, exclude = []) {
+    async pick(need, exclude = [], ctx) {
       const all = await knownUrls();
       const skip = new Set(exclude.map((u) => u.replace(/\/+$/, "")));
       const urls = all.filter((u) => !skip.has(u));
       if (urls.length === 0) return { url: null, known: all.length };
-      let url = await choose(urls, need, ttlMs);
+      let picked = await choose(urls, need, ttlMs, ctx);
       // Before refusing a chat for lack of compute, ask again where the "no" is not fresh.
-      if (!url && ttlMs > RECHECK_NO_AFTER_MS) url = await choose(urls, need, RECHECK_NO_AFTER_MS);
-      return { url, known: all.length };
+      if (!picked.url && ttlMs > RECHECK_NO_AFTER_MS) picked = await choose(urls, need, RECHECK_NO_AFTER_MS, ctx);
+      return { url: picked.url, known: all.length, ...(picked.choice ? { choice: picked.choice } : {}) };
     },
     markFailed(url) {
       failedAt.set(url.replace(/\/+$/, ""), now());
     },
     async pickAuto() {
-      const urls = await knownUrls();
-      if (urls.length === 0) return null;
-      const reports = await Promise.all(urls.map((u) => reportOf(u, "network", LOAD_REPORT_MAX_AGE_MS)));
-      let best: { url: string; room: number } | null = null;
-      for (let i = 0; i < urls.length; i++) {
-        const r = reports[i];
-        if (!r.reachable || recentlyFailed(urls[i]) || !r.agentModels?.length) continue;
-        const room = Object.values(r.modelLoad ?? {}).reduce((n, l) => n + (l.free ?? l.idle) - l.waiting, 0);
-        if (!best || room > best.room) best = { url: urls[i], room };
-      }
-      return best?.url ?? urls[0];
+      return (await chooseAuto(undefined)).url;
+    },
+    pickAutoChoice(ctx) {
+      return chooseAuto(ctx);
     },
     async isKnown(url) {
       return (await knownUrls()).includes(url.trim().replace(/\/+$/, ""));

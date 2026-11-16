@@ -168,3 +168,69 @@ describe("/inference/submit with model auto", () => {
     expect(r.r.json().error).toBe("no_route_fits");
   });
 });
+
+describe("the portal's coordinator choice is kept on the routing decision", () => {
+  const choice = {
+    chosen: "coordinator-eu.edgecoder.io",
+    rule: "overflow",
+    reason: "overflow: coordinator.edgecoder.io has no free slot (queue ~15500 ms); expected 640 ms vs 15600 ms",
+    clientRegion: "lhr",
+    portalRegion: "ord",
+    candidates: [
+      { coordinator: "coordinator.edgecoder.io", rttMs: 2, queueMs: 15500, agentRttMs: 40, expectedMs: 15600, free: -3, waiting: 5, agents: 9 },
+      { coordinator: "coordinator-eu.edgecoder.io", rttMs: 99, queueMs: 500, agentRttMs: 41, expectedMs: 640, free: 1, waiting: 0, agents: 2 },
+    ],
+    injected: "<script>",
+  };
+
+  test("/inference/models reports queueing signals for the portal", async () => {
+    const res = await app.inject({ method: "GET", url: "/inference/models", remoteAddress: REMOTE, headers: { "x-mesh-token": MESH } });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().load).toEqual({ pickupP90Ms: expect.anything(), callP50Ms: expect.anything() });
+  });
+
+  test("a named-model call the portal placed is logged with which coordinator and why", async () => {
+    const taskId = `inf-${randomUUID()}`;
+    const r = await post("/inference/submit", { taskId, submitterAccountId: requester.peerId, model: "qwen2.5-coder:7b", timeoutMs: 60_000, messages: [{ role: "user", content: "hi" }], coordinatorChoice: choice }, requester);
+    expect(r.statusCode, r.body).toBe(200);
+    const d = recentDecisions(1)[0];
+    expect(d).toMatchObject({ taskId, pinned: true, model: "qwen2.5-coder:7b", reason: expect.stringMatching(/^coordinator: overflow: /) });
+    expect(d.coordinatorChoice).toMatchObject({ chosen: "coordinator-eu.edgecoder.io", rule: "overflow", clientRegion: "lhr", portalRegion: "ord" });
+    expect(d.coordinatorChoice!.candidates[1]).toEqual(choice.candidates[1]);
+    expect(d.coordinatorChoice).not.toHaveProperty("injected");
+    const subtaskId = r.json().subtaskId as string;
+    for (const k of [a7, b7]) {
+      if ((await pull(k)) === subtaskId) {
+        await finish(k, taskId, subtaskId, "qwen2.5-coder:7b");
+        break;
+      }
+    }
+  });
+
+  test("a model auto call carries the choice on its best-fit decision", async () => {
+    const { r, taskId } = await submitAuto({ messages: [{ role: "user", content: "What is a closure?" }], coordinatorChoice: { ...choice, rule: "latency", reason: "faster with a free slot" } });
+    expect(r.statusCode, r.body).toBe(200);
+    const d = recentDecisions(1)[0];
+    expect(d).toMatchObject({ taskId, job: "chat", coordinatorChoice: { rule: "latency", reason: "faster with a free slot" } });
+    expect(d.pinned).toBeUndefined();
+    const j = r.json();
+    const preferred = byId(preferredAgentFor(j.subtaskId));
+    expect(await pull(preferred)).toBe(j.subtaskId);
+    await finish(preferred, taskId, j.subtaskId, j.model);
+  });
+
+  test("a call without a choice logs no placement", async () => {
+    const before = recentDecisions(1)[0]?.taskId;
+    const taskId = `inf-${randomUUID()}`;
+    const r = await post("/inference/submit", { taskId, submitterAccountId: requester.peerId, model: "qwen2.5-coder:7b", timeoutMs: 60_000, messages: [{ role: "user", content: "hi" }] }, requester);
+    expect(r.statusCode, r.body).toBe(200);
+    expect(recentDecisions(1)[0]?.taskId).toBe(before);
+    const subtaskId = r.json().subtaskId as string;
+    for (const k of [a7, b7]) {
+      if ((await pull(k)) === subtaskId) {
+        await finish(k, taskId, subtaskId, "qwen2.5-coder:7b");
+        break;
+      }
+    }
+  });
+});
