@@ -4,17 +4,18 @@
 /**
  * Shared coding sessions over HTTP (sessions.ts), on the IDE provider: 127.0.0.1 and the IDE
  * token only, like every other provider route. Mutations are POST (the desktop's CORS allows GET
- * and POST). Every write names the client (`clientId`, `kind`); only the client in control may
- * write, the others observe through the event stream.
+ * and POST). Every write names the client (`clientId`, `kind`, `label`); sessions are co-edited,
+ * so any attached client may send, answer approvals and change settings.
  *
  *   GET  /v1/ide/sessions[?projectRoot=&published=1]   summaries
  *   POST /v1/ide/sessions                              create (the creator is in control)
  *   GET  /v1/ide/sessions/:id                          snapshot
  *   GET  /v1/ide/sessions/:id/events?since=N&clientId=&kind=&label=   SSE: replay after N, then live
- *   POST /v1/ide/sessions/:id/messages   {text}        start a turn
- *   POST /v1/ide/sessions/:id/approve    {callId, approved, always?}
- *   POST /v1/ide/sessions/:id/control    {release?}    take (or release) control
- *   POST /v1/ide/sessions/:id/settings   {model?, title?, autoApprove?}
+ *   POST /v1/ide/sessions/:id/messages   {text}        start a turn, or queue it while one runs
+ *   POST /v1/ide/sessions/:id/unqueue    {queuedId}    remove a queued message before it starts
+ *   POST /v1/ide/sessions/:id/approve    {callId, approved, always?}   first answer wins
+ *   POST /v1/ide/sessions/:id/control    {release?}    no-op, kept for older clients
+ *   POST /v1/ide/sessions/:id/settings   {model?, title?, mode?, autoApprove?}
  *   POST /v1/ide/sessions/:id/publish    {published}   show it live in the desktop app
  *   POST /v1/ide/sessions/:id/trust      {trusted}     trust the session's project folder (workspace-trust.ts)
  *   POST /v1/ide/sessions/:id/cancel | /undo {turnId?} | /clear | /delete
@@ -31,7 +32,6 @@ import { isProjectTrusted, setProjectTrusted } from "./workspace-trust.js";
 const STATUS: Record<SessionError["code"], number> = {
   not_found: 404,
   busy: 409,
-  not_in_control: 409,
   invalid: 400,
   checkpoint_gone: 410,
   nothing_to_undo: 409,
@@ -75,11 +75,12 @@ export function registerSessionRoutes(app: FastifyInstance, hub: SessionHub): vo
           model: z.string().min(1).max(200).optional(),
           title: z.string().max(120).optional(),
           autoApprove: z.enum(["none", "edits"]).optional(),
+          mode: z.enum(["ask", "auto-edits", "auto"]).optional(),
           published: z.boolean().optional(),
         })
         .parse(req.body ?? {});
       if (!existsSync(b.projectRoot) || !statSync(b.projectRoot).isDirectory()) throw new SessionError("invalid", `${b.projectRoot} isn't a folder.`);
-      const s = hub.create({ projectRoot: b.projectRoot, model: b.model, title: b.title, autoApprove: b.autoApprove, client: refOf(b) });
+      const s = hub.create({ projectRoot: b.projectRoot, model: b.model, title: b.title, autoApprove: b.autoApprove, mode: b.mode, client: refOf(b) });
       if (b.published) hub.publish(s.id, true, refOf(b));
       return { ...hub.snapshot(s.id), trusted: isProjectTrusted(s.projectRoot) };
     }));
@@ -123,15 +124,23 @@ export function registerSessionRoutes(app: FastifyInstance, hub: SessionHub): vo
     handle(reply, () => {
       const { id } = idParams.parse(req.params);
       const b = z.object({ ...client, text: z.string().min(1).max(100_000) }).parse(req.body ?? {});
-      return { turnId: hub.send(id, b.text, refOf(b)) };
+      return hub.send(id, b.text, refOf(b));
+    }));
+
+  app.post("/v1/ide/sessions/:id/unqueue", (req, reply) =>
+    handle(reply, () => {
+      const { id } = idParams.parse(req.params);
+      const b = z.object({ ...client, queuedId: z.string().min(1).max(100) }).parse(req.body ?? {});
+      return { removed: hub.unqueue(id, b.queuedId, refOf(b)) };
     }));
 
   app.post("/v1/ide/sessions/:id/approve", (req, reply) =>
     handle(reply, () => {
       const { id } = idParams.parse(req.params);
       const b = z.object({ ...client, callId: z.string().min(1).max(100), approved: z.boolean(), always: z.boolean().default(false) }).parse(req.body ?? {});
-      hub.approve(id, b.callId, b.approved, refOf(b), b.always);
-      return { ok: true };
+      // A second answer (another client answered first) is not an error: it changes nothing.
+      const applied = hub.approve(id, b.callId, b.approved, refOf(b), b.always);
+      return { ok: true, applied, ...(applied ? {} : { reason: "already_answered" }) };
     }));
 
   app.post("/v1/ide/sessions/:id/control", (req, reply) =>
@@ -148,8 +157,8 @@ export function registerSessionRoutes(app: FastifyInstance, hub: SessionHub): vo
   app.post("/v1/ide/sessions/:id/settings", (req, reply) =>
     handle(reply, () => {
       const { id } = idParams.parse(req.params);
-      const b = z.object({ ...client, model: z.string().min(1).max(200).optional(), title: z.string().max(120).optional(), autoApprove: z.enum(["none", "edits"]).optional() }).parse(req.body ?? {});
-      const s = hub.update(id, { model: b.model, title: b.title, autoApprove: b.autoApprove }, refOf(b));
+      const b = z.object({ ...client, model: z.string().min(1).max(200).optional(), title: z.string().max(120).optional(), autoApprove: z.enum(["none", "edits"]).optional(), mode: z.enum(["ask", "auto-edits", "auto"]).optional() }).parse(req.body ?? {});
+      const s = hub.update(id, { model: b.model, title: b.title, autoApprove: b.autoApprove, mode: b.mode }, refOf(b));
       return { session: s };
     }));
 
