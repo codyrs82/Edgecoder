@@ -1,21 +1,35 @@
 /* Settings pages, Cursor-style: a title, then groups of rows in rounded cards
    (title and description on the left, the control on the right). */
-.sp { display: flex; flex-direction: column; gap: 24px; max-width: 760px; margin: 0 auto; padding: 32px 32px 48px; box-sizing: border-box; }
+/* The page fills the settings pane up to a readable width (forms), or all of it (`sp-wide`, for
+   tables). Every flex child may shrink (min-width: 0), so a narrow window wraps rows instead of
+   pushing controls off the right edge. */
+.sp { display: flex; flex-direction: column; gap: 24px; width: 100%; max-width: 1100px; min-width: 0; margin: 0 auto; padding: 32px 32px 48px; box-sizing: border-box; }
+.sp.sp-wide { max-width: 1600px; }
+.sp > *, .sp .sp-group, .sp .sp-card { min-width: 0; max-width: 100%; }
 .sp h1 { margin: 0; font-size: var(--fs-xl); font-weight: 600; letter-spacing: -0.01em; }
 .sp .sp-lead { margin: -16px 0 0; color: var(--text-secondary); font-size: var(--fs-sm); line-height: var(--lh-ui); }
 .sp .sp-group { display: flex; flex-direction: column; gap: 8px; margin: 0; }
 .sp .sp-group-title { margin: 0; font-size: var(--fs-sm); font-weight: 500; color: var(--text-secondary); padding-left: 4px; display: flex; align-items: center; gap: 8px; }
 .sp .sp-group-title .sp-link { margin-left: auto; }
 .sp .sp-card { border: 0.5px solid var(--border); border-radius: var(--radius-xl); background: var(--bg-surface); overflow: hidden; }
-.sp .sp-row { display: flex; align-items: center; gap: 16px; padding: 12px 16px; min-height: 56px; box-sizing: border-box; }
+.sp .sp-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 12px 16px; min-height: 56px; box-sizing: border-box; min-width: 0; }
+.sp .sp-row > * { min-width: 0; max-width: 100%; }
 .sp .sp-row + .sp-row { border-top: 0.5px solid var(--border); }
-.sp .sp-row .sp-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.sp .sp-row .sp-text { flex: 1 1 240px; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .sp .sp-row .sp-title { font-size: var(--fs-sm); font-weight: 500; color: var(--text-primary); }
 .sp .sp-row .sp-desc { font-size: var(--fs-xs); color: var(--text-secondary); line-height: var(--lh-ui); }
 .sp .sp-row.stack { gap: 8px; }
-.sp .sp-row.stack { flex-direction: column; align-items: stretch; }
+.sp .sp-row.stack { flex-direction: column; flex-wrap: nowrap; align-items: stretch; }
 .sp .sp-row.stack .sp-text { flex: none; }
-.sp .sp-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.sp .sp-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; min-width: 0; max-width: 100%; margin-left: auto; }
+/* A line of inputs and buttons under a row's text: inputs take the room, buttons keep their size. */
+.sp .sp-inline { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.sp .sp-inline > input.grow, .sp .sp-inline > input[type="password"] { flex: 1 1 220px; min-width: 0; }
+.sp .sp-inline > select, .sp .sp-inline > input:not(.grow):not([type="checkbox"]) { flex: 0 1 auto; min-width: 0; }
+.sp .sp-inline > label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: var(--fs-sm); color: var(--text-secondary); }
+.sp .sp-inline > label > input { width: 90px; min-width: 0; }
+.sp .sp-inline > button { flex: none; }
+.sp select, .sp input[type="text"], .sp input[type="number"], .sp input[type="password"], .sp input[type="search"] { max-width: 100%; min-width: 0; }
 .sp .sp-big { font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .sp .sp-unit { font-size: 13px; color: var(--text-secondary); font-weight: 400; }
 .sp .sp-muted { color: var(--text-secondary); font-size: 12.5px; }
@@ -34,7 +48,7 @@
 .sp button.ghost:hover { color: var(--text-primary); }
 .sp button.danger { color: var(--danger); }
 .sp button.small { height: var(--control-sm); padding: 0 8px; font-size: var(--fs-xs); }
-.sp input[type="text"], .sp input[type="number"] {
+.sp input[type="text"], .sp input[type="number"], .sp input[type="password"] {
   height: var(--control-md); padding: 0 9px; box-sizing: border-box; background: var(--bg-input); color: var(--text-primary);
   border: 0.5px solid var(--border-control); border-radius: var(--radius-sm); font: inherit; font-size: var(--fs-sm);
 }
@@ -59,12 +73,13 @@
 .sp .sp-switch[aria-checked="true"] { background: var(--green); }
 .sp .sp-switch[aria-checked="true"]::after { transform: translateX(14px); }
 
-/* #29: at the 640px minimum window a row's control drops under its text instead of squeezing it. */
-@media (max-width: 760px) {
+/* #29: in a narrow pane a row's control drops under its text instead of squeezing it. A container
+   query on the settings pane (SettingsOverlay's .settings-content), not the window: the pane is the
+   window minus the section list, so a 900px window already leaves only ~650px here. */
+@container settings-pane (max-width: 640px) {
   .sp { padding: 20px 16px 32px; }
-  .sp .sp-row { flex-wrap: wrap; gap: 10px 16px; }
   .sp .sp-row .sp-text { flex: 1 1 180px; }
-  .sp .sp-controls { justify-content: flex-start; }
+  .sp .sp-controls { justify-content: flex-start; margin-left: 0; }
   /* Cells squeezed to one word per line are harder to read than a table that scrolls. */
   .sp .sp-table-scroll th, .sp .sp-table-scroll td { white-space: nowrap; padding: 8px 12px; }
 }

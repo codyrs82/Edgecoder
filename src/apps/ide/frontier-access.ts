@@ -25,11 +25,20 @@ import { ChatBackendError, type ChatBackend } from "../../inference-api/types.js
 import { backendChat, type ChatFn } from "./agent-loop.js";
 import type { IdeStreamEvent } from "./tool-types.js";
 
+export type FrontierAccountState = "signed_in" | "signed_out" | "unknown";
+
 export interface FrontierAccessDeps {
   store: FrontierKeyStore;
   spend: FrontierSpend;
   /** The EdgeCoder account signed in on this computer (`acct-...`), or null when none is. */
   account: () => Promise<string | null>;
+  /**
+   * Whether the last `account()` answer was definitive: "signed_out" only when the check said no
+   * account (or there are no credentials at all), "unknown" when it failed or is still starting
+   * (agent not connected yet, coordinator slow). Settings shows "sign in" only for "signed_out".
+   * Absent: a null account counts as "signed_out".
+   */
+  accountState?: () => FrontierAccountState;
   /** Tests: fake provider timings. */
   target?: Partial<Pick<FrontierTarget, "maxRetries" | "baseDelayMs" | "sleep">>;
 }
@@ -75,8 +84,10 @@ export class FrontierAccess {
   /** Settings, providers (never keys) and spend, for Settings and `edgecoder keys list`. */
   async status() {
     const account = await this.d.account().catch(() => null);
+    const accountState: FrontierAccountState = account ? "signed_in" : (this.d.accountState?.() ?? "signed_out") === "unknown" ? "unknown" : "signed_out";
     return {
       account,
+      accountState,
       storage: this.d.store.storageLabel,
       fallbackFile: this.d.store.fallback,
       providers: this.d.store.list(account),

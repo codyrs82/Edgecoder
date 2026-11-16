@@ -46,6 +46,8 @@ Commands:
 
 interface FrontierStatus {
   account: string | null;
+  /** "unknown": the account check failed or is still starting; not the same as signed out. */
+  accountState?: "signed_in" | "signed_out" | "unknown";
   storage: string;
   fallbackFile: boolean;
   providers: Array<{ id: string; kind: string; baseUrl?: string; accountId: string; storage: string; usable: boolean; reason?: string; models?: string[] }>;
@@ -97,7 +99,7 @@ function capArg(v: string | undefined, name: string): number | null | undefined 
 
 export function formatKeysList(s: FrontierStatus, st: Style): string {
   const out: string[] = [];
-  out.push(`${st.dim("account ")} ${s.account ?? st.yellow("not signed in (keys can't be used until you sign in)")}`);
+  out.push(`${st.dim("account ")} ${s.account ?? (s.accountState === "unknown" ? st.yellow("couldn't check your account yet (try again in a moment)") : st.yellow("not signed in (keys can't be used until you sign in)"))}`);
   out.push(`${st.dim("storage ")} ${s.storage}${s.fallbackFile ? st.yellow("  (no keychain found)") : ""}`);
   if (!s.providers.length) out.push(st.dim("No keys yet. Add one: edgecoder keys add anthropic"));
   for (const p of s.providers) {

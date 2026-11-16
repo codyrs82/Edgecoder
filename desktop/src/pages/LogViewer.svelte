@@ -113,7 +113,7 @@
   }
 </script>
 
-<div class="sp">
+<div class="sp sp-wide">
   <h1>Logs</h1>
   <p class="sp-lead">The app's own log, live: the agent, the coordinator, inference and the IDE server. Credentials are masked.</p>
   <p class="sr-only" aria-live="polite">{announce}</p>

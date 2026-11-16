@@ -2142,6 +2142,11 @@ export interface FrontierSettingsView {
 
 export interface FrontierStatusView {
   account: string | null;
+  /**
+   * How sure the provider is about `account`: "unknown" while this computer's agent is still
+   * connecting or the check failed (not the same as signed out). Absent from older providers.
+   */
+  accountState?: "signed_in" | "signed_out" | "unknown";
   storage: string;
   fallbackFile: boolean;
   providers: FrontierProviderView[];

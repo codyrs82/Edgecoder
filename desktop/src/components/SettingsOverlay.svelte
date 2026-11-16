@@ -264,7 +264,10 @@
   .settings-content {
     flex: 1;
     overflow-y: auto;
+    overflow-x: hidden;
     min-width: 0;
+    /* Pages size themselves to this pane (styles/settings-page.css @container settings-pane). */
+    container: settings-pane / inline-size;
   }
   /* On macOS the window's traffic lights sit over the top of the section list. */
   :global(html[data-titlebar="overlay"]) .settings-side {

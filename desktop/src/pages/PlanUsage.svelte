@@ -273,7 +273,7 @@
     {#if local?.paused}
       <AgentPausedNotice reason={local.paused.reason} agentId={local.selfAgentId} onRetry={load} />
     {:else if !local?.connected && !wallet?.connected}
-      <div class="sp-card"><div class="sp-row"><div class="sp-text"><span class="sp-title">Not connected to the network</span><span class="sp-desc">Sign in and let this computer's agent connect; then you can add funds and use compute. Your balance is safe.</span></div><button onclick={load}>Retry</button></div></div>
+      <div class="sp-card"><div class="sp-row"><div class="sp-text"><span class="sp-title">Not connected to the network</span><span class="sp-desc">This computer's agent isn't connected yet. It connects on its own while you're signed in, which can take a minute after the app starts; then you can add funds and use compute. Your balance is safe.</span></div><button onclick={load}>Retry</button></div></div>
     {/if}
 
     <div class="wl-grid">
