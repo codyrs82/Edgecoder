@@ -13,6 +13,9 @@ const api = vi.hoisted(() => ({
   sessionCancel: vi.fn(async () => ({})),
   fsFind: vi.fn(async () => []),
   checkpointChanges: vi.fn(async () => ({ changes: [] })),
+  sessionTentacles: vi.fn(async () => ({ config: { enabled: false }, spentCSats: 0, tentacles: [] })),
+  tentacleCancel: vi.fn(async () => ({ cancelled: true })),
+  tentacleMerge: vi.fn(async () => ({})),
 }));
 vi.mock("../src/lib/api", () => api);
 

@@ -44,9 +44,6 @@
       if (ctl.signal.aborted) return;
       view = viewFromSnapshot(snap);
       scrollDown();
-      void sessionTentacles(id).then((r) => {
-        if (!ctl.signal.aborted) tentacles = { items: r.tentacles, spentCSats: r.spentCSats, enabled: r.config.enabled };
-      }).catch(() => undefined);
       void followSession(id, snap.seq, (e) => {
         if (!view || ctl.signal.aborted) return;
         view = applySessionEvent(view, e);
@@ -55,6 +52,13 @@
         if (view.needsResync) void load(id);
         scrollDown();
       }, ctl.signal);
+      // Tentacles hook: never in the way of the session itself (an older provider has no tentacles).
+      void Promise.resolve()
+        .then(() => sessionTentacles(id))
+        .then((r) => {
+          if (!ctl.signal.aborted && r) tentacles = { items: r.tentacles, spentCSats: r.spentCSats, enabled: r.config.enabled };
+        })
+        .catch(() => undefined);
     } catch (err) {
       error = (err as Error).message;
     }

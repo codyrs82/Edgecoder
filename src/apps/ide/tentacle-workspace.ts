@@ -30,7 +30,8 @@ const TENTACLE_IDENT = ["-c", "user.name=EdgeCoder tentacle", "-c", "user.email=
 export class WorkspaceError extends Error {}
 
 function git(cwd: string, args: string[], input?: string): string {
-  return execFileSync("git", hardenedGitArgs(["-C", cwd, ...args], cwd), {
+  // Byte-exact on every platform: no CRLF conversion between the lead's tree, the worktree and patches.
+  return execFileSync("git", hardenedGitArgs(["-C", cwd, "-c", "core.autocrlf=false", "-c", "core.safecrlf=false", ...args], cwd), {
     env: gitExecEnv(),
     encoding: "utf8",
     timeout: GIT_TIMEOUT_MS,
@@ -52,16 +53,23 @@ function gitTry(cwd: string, args: string[], input?: string): { ok: true; out: s
 /** A path with symlinks resolved (/var -> /private/var on macOS), as git reports paths. */
 export function realOf(p: string): string {
   try {
-    return realpathSync(p);
+    // .native also expands Windows 8.3 short names (C:\Users\RUNNER~1), which git never reports.
+    return realpathSync.native(p);
   } catch {
-    return p;
+    try {
+      return realpathSync(p);
+    } catch {
+      return p;
+    }
   }
 }
 
 /** The repository's top folder, or null outside git. */
 export function repoTop(projectRoot: string): string | null {
   const r = gitTry(projectRoot, ["rev-parse", "--show-toplevel"]);
-  return r.ok ? r.out.trim() || null : null;
+  const top = r.ok ? r.out.trim() : "";
+  // git prints C:/a/b on Windows: the same folder in this platform's form, so relative() works.
+  return top ? realOf(normalize(top)) : null;
 }
 
 export interface Workspace {
