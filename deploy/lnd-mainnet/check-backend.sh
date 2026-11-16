@@ -50,7 +50,11 @@ fail=0
 ok() { echo "  ok    $*"; }
 bad() { echo "  FAIL  $*"; fail=1; }
 
-tcp_open() { timeout 5 bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$2" 2> /dev/null; }
+tcp_open() { # 5 s limit where coreutils `timeout` exists (not on macOS)
+  local t=()
+  command -v timeout > /dev/null && t=(timeout 5)
+  ${t[@]+"${t[@]}"} bash -c 'exec 3<>"/dev/tcp/$0/$1"' "$1" "$2" 2> /dev/null
+}
 check_port() { # label host port
   if tcp_open "$2" "$3"; then ok "$1 reachable"; else bad "$1 not reachable (WireGuard peer down, wrong address, or bound elsewhere)"; fi
 }

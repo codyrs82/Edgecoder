@@ -60,7 +60,20 @@ function fakeRpc(opts: RpcOpts = {}) {
   });
 }
 
-describe.skipIf(process.platform === "win32")("deploy/lnd-mainnet entrypoint", () => {
+// The scripts run as the image's non-root user and use jq (both in the image). Skip where that
+// can't be reproduced: Windows, a root runner (the entrypoint would chown to the image's
+// `lightning` user) or a runner without jq (debian-validation's slim container).
+const hasJq = (() => {
+  try {
+    execFileSync("jq", ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+const canRunScripts = process.platform !== "win32" && process.getuid?.() !== 0 && hasJq;
+
+describe.skipIf(!canRunScripts)("deploy/lnd-mainnet entrypoint", () => {
   let tmp: string;
   let bin: string;
   const servers: (HttpServer | TcpServer)[] = [];
