@@ -159,7 +159,8 @@ ${toolFormat === "native" ? "" : PLAN_FORMAT_SECTION}## Rules
 6. **Stay within the project** — all file paths must be within the project root.
 7. **Be concise** — keep explanations short and focused; let the code speak for itself.
 8. **Read large files in parts** — read_file returns at most 400 lines per call and says where to continue (offset). Use search_files to find the lines you need, then read around them with offset and limit, rather than paging through a whole large file.
-9. **Keep exact paths** — use the paths tools returned (for example src/swarm/worker-runner.ts), not a guessed shorter one.`;
+9. **Keep exact paths** — use the paths tools returned (for example src/swarm/worker-runner.ts), not a guessed shorter one.
+10. **Report tool errors as they are** — when a tool returns [Error], tell the user that error's actual words and the fix it names; don't guess another cause, and don't contradict what the user tells you about their setup.`;
 
   const rulesSection = projectRules
     ? `

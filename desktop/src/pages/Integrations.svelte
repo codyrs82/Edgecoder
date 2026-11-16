@@ -1,6 +1,6 @@
 <script lang="ts">
   import GitHubSignIn from "../components/GitHubSignIn.svelte";
-  import { getGitHubStatus, getOAuthStartUrl, disconnectGitHub } from "../lib/api";
+  import { agentGitHubToken, getGitHubStatus, getOAuthStartUrl, disconnectGitHub } from "../lib/api";
   import { open } from "@tauri-apps/plugin-shell";
   import { githubCli, githubCliStatus } from "../lib/github-cli";
 
@@ -44,7 +44,7 @@
 
   // Listen for refresh signals from deep-link handler
   $effect(() => {
-    const handler = () => { fetchStatus(); };
+    const handler = () => { fetchStatus(); void agentGitHubToken(true).catch(() => {}); };
     window.addEventListener("edgecoder:github-connected", handler);
     return () => window.removeEventListener("edgecoder:github-connected", handler);
   });
@@ -62,6 +62,7 @@
     disconnecting = true;
     try {
       await disconnectGitHub();
+      void agentGitHubToken(true).catch(() => {});
       connected = false;
       login = undefined;
       avatarUrl = undefined;

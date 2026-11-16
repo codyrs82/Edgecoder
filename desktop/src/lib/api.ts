@@ -722,6 +722,44 @@ export async function getGitHubToken(): Promise<string | null> {
   return data.accessToken ?? null;
 }
 
+/** The last agent GitHub token read from the portal (short-lived cache; never logged). */
+let agentGitHubCache: { token: string | null; at: number } | null = null;
+
+/**
+ * The agent's GitHub connection (Settings → Integrations → GitHub for the agent), read fresh from
+ * the portal (cached a minute, ten seconds when not connected) and handed to the local IDE server,
+ * so the Code view, shared sessions and bots all use it. Read at send time, not once at startup:
+ * a token fetched when a panel first mounted went stale or stayed null after connecting later.
+ * A failed read keeps the last good token. `force` re-reads (after connect or disconnect).
+ */
+export async function agentGitHubToken(force = false): Promise<string | null> {
+  const c = agentGitHubCache;
+  if (!force && c && Date.now() - c.at < (c.token ? 60_000 : 10_000)) return c.token;
+  let token: string | null;
+  let reason = "";
+  try {
+    const res = await fetch(`${portalBase()}/portal/api/github/token`, { headers: authHeaders(), credentials: "include", signal: AbortSignal.timeout(10_000) });
+    if (res.ok) {
+      token = ((await res.json()) as { accessToken?: string | null }).accessToken ?? null;
+      if (!token) reason = "not connected";
+    } else {
+      token = null;
+      reason = res.status === 404 ? "not connected" : res.status === 401 ? "you're signed out of EdgeCoder in the app" : `EdgeCoder answered HTTP ${res.status}`;
+      if (res.status !== 404 && res.status !== 401 && c?.token) return c.token;
+    }
+  } catch {
+    // Unreachable for now: keep what we had.
+    if (c?.token) return c.token;
+    token = null;
+    reason = "EdgeCoder couldn't be reached to read it";
+  }
+  agentGitHubCache = { token, at: Date.now() };
+  if (!isRemoteMode()) {
+    void fsCall("POST", "/v1/ide/github/agent-token", token ? { token } : { token: null, reason }).catch(() => {});
+  }
+  return token;
+}
+
 export async function disconnectGitHub(): Promise<void> {
   await fetch(`${portalBase()}/portal/api/github/disconnect`, {
     method: "DELETE",

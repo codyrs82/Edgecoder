@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { editDiff, stepLabel, summarizeSteps } from "../src/lib/tool-steps";
+import { applyAgentEvent } from "../src/lib/agent-events";
+import { servedLine } from "../src/lib/served";
+import { editDiff, failureReason, stepLabel, summarizeSteps, toolStepStatus } from "../src/lib/tool-steps";
 import type { ToolEvent } from "../src/lib/types";
 
 const call = (tool: string, args: Record<string, unknown>): ToolEvent => ({ type: "tool_call", tool, args, result: "ok" });
@@ -28,5 +30,40 @@ describe("tool steps", () => {
     expect(editDiff("write_file", { path: "x", content: "one\ntwo\n" })).toEqual([{ kind: "add", text: "one" }, { kind: "add", text: "two" }]);
     expect(editDiff("read_file", { path: "x" })).toBeNull();
     expect(editDiff("edit_file", { path: "x" })).toBeNull();
+  });
+});
+
+describe("failed steps", () => {
+  const err = "GitHub token from your GitHub CLI sign-in (gh) lacks the repo scope (HTTP 403).\nThe token has scopes: read:user.";
+
+  it("a call that returned an error is failed (✗), not completed (✓)", () => {
+    expect(toolStepStatus({ error: err })).toBe("failed");
+    expect(toolStepStatus({ result: "#12 [open] Fix" })).toBe("completed");
+    expect(toolStepStatus({ error: "Tool call run_shell was rejected by the user." })).toBe("rejected");
+    expect(toolStepStatus({ approval_status: "rejected" })).toBe("rejected");
+    expect(toolStepStatus({ approval_status: "pending" })).toBe("pending");
+    expect(toolStepStatus({})).toBe("executing");
+  });
+
+  it("labels a failed step as failed, with the reason's first line", () => {
+    expect(stepLabel("github_list_prs", {}, true, true)).toEqual({ verb: "Listing failed", target: "" });
+    expect(failureReason(err)).toBe("GitHub token from your GitHub CLI sign-in (gh) lacks the repo scope (HTTP 403).");
+    expect(failureReason("x".repeat(300)).length).toBe(140);
+  });
+
+  it("counts failures in a turn's summary", () => {
+    expect(summarizeSteps([
+      { type: "tool_call", tool: "github_list_prs", args: {}, error: err },
+      call("read_file", { path: "a" }),
+    ])).toBe("Read 1 file, 1 git step, 1 failed");
+  });
+});
+
+describe("reply footer", () => {
+  it("names the model for a local Auto run", () => {
+    const served = { label: "This computer", own: true, computeClass: "local", tier: null, hardware: "This computer (Apple M5 Max)", region: null, country: null, promptTokens: 6200, outputTokens: 49 };
+    let turn = { text: "", toolEvents: [] as ToolEvent[] };
+    for (let i = 0; i < 2; i++) turn = applyAgentEvent(turn, { type: "usage", cSats: 0, where: "This computer", model: "qwen3.5:9b", served }).turn as typeof turn;
+    expect(servedLine((turn as { usage?: { calls?: never[] } }).usage?.calls)).toBe("qwen3.5:9b · This computer (Apple M5 Max) · read 12.4k tok · wrote 98 tok · 2 calls · free");
   });
 });

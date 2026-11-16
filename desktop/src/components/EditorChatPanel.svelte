@@ -11,7 +11,7 @@
   import ComputePicker from "./ComputePicker.svelte";
   import { computeChoice, freeReplyUsage } from "../lib/compute-choice";
   import { get } from "svelte/store";
-  import { streamPortalChat, streamIdeChat, ideSendToolApproval, getGitHubToken, portalCreateConversation, getModelPullProgress, isRemoteMode, backendReady } from "../lib/api";
+  import { streamPortalChat, streamIdeChat, ideSendToolApproval, agentGitHubToken, portalCreateConversation, getModelPullProgress, isRemoteMode, backendReady } from "../lib/api";
   import type { StreamProgress, ModelPullProgress, IdeStreamEvent } from "../lib/api";
   import { applyAgentEvent, markApproval } from "../lib/agent-events";
   import { expandMentions, mentionSuggestions } from "../lib/mentions";
@@ -75,7 +75,6 @@
   let streamingTurnId: string | undefined = $state(undefined);
   let streamingUsage: ReplyUsage | undefined = $state(undefined);
   let streamingChanged: string[] = $state([]);
-  let githubToken: string | null = null;
 
   /** A new coding chat in `root` (none: it waits for a project). */
   function freshConversation(root: string | null): Conversation {
@@ -170,7 +169,8 @@
     }
     await refreshConversationList();
 
-    getGitHubToken().then((t) => { githubToken = t; }).catch(() => {});
+    // Hand the agent's GitHub connection to the IDE server early (sessions and bots use it too).
+    void agentGitHubToken().catch(() => {});
 
     // Poll for model download progress
     pullPollTimer = setInterval(async () => {
@@ -274,7 +274,8 @@
           },
           abortController.signal,
           get(computeChoice),
-          githubToken,
+          // Read at send time: connecting GitHub after this panel opened must count.
+          await agentGitHubToken().catch(() => null),
           autoApply ? "edits" : "none",
         );
       }
