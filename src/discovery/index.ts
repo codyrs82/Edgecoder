@@ -1,4 +1,4 @@
-// Copyright (c) 2025 EdgeCoder, LLC
+// Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 //
 // Coordinator discovery entry points: merge static, DNS and Nostr sources, then rank with the

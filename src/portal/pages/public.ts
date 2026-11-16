@@ -1,4 +1,4 @@
-// Copyright (c) 2025 EdgeCoder, LLC
+// Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 
 import type { FastifyInstance } from "fastify";
@@ -264,7 +264,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
 
 /** Footer links on every public page (the legal drafts and the Bluetooth explainer). */
 export function footerLegalLinks(): string {
-  return `<span>&copy; 2025 EdgeCoder, LLC</span>${LEGAL_LINKS.map((l) => `<a href="${l.href}">${escapeHtml(l.label.replace(/ of Service| Policy/g, ""))}</a>`).join("")}<a href="/bluetooth">Bluetooth mesh</a><a href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">Source (BUSL-1.1)</a>`;
+  return `<span>&copy; 2025 EdgeCoder</span>${LEGAL_LINKS.map((l) => `<a href="${l.href}">${escapeHtml(l.label.replace(/ of Service| Policy/g, ""))}</a>`).join("")}<a href="/bluetooth">Bluetooth mesh</a><a href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">Source (BUSL-1.1)</a>`;
 }
 
 /** Nav, footer and document styling shared by the public document pages (legal drafts, Bluetooth). */

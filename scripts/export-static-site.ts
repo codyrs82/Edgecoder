@@ -1,4 +1,4 @@
-// Copyright (c) 2025 EdgeCoder, LLC
+// Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 // Usage: PORTAL_PUBLIC_URL=https://edgecoder.io npx tsx scripts/export-static-site.ts [outDir]
 import { exportStaticSite } from "../src/portal/static-site.js";

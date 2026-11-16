@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright (c) 2025 EdgeCoder, LLC
+# Copyright (c) 2025 EdgeCoder
 # SPDX-License-Identifier: BUSL-1.1
 #
 # Put the portal behind Cloudflare (docs/edge-and-redundancy.md). Idempotent: re-running

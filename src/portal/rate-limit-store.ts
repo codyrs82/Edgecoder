@@ -1,4 +1,4 @@
-// Copyright (c) 2025 EdgeCoder, LLC
+// Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 
 // Shared Postgres store for @fastify/rate-limit. The portal runs on more than one Fly machine; with

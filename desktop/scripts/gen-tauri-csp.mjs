@@ -1,4 +1,4 @@
-// Copyright (c) 2025 EdgeCoder, LLC
+// Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 //
 // #83: add the origins of VITE_COORDINATOR_URL and VITE_PORTAL_URL to the release CSP

@@ -1,4 +1,4 @@
-// Copyright (c) 2025 EdgeCoder, LLC
+// Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 
 /** The one way the MCP server talks to EdgeCoder: JSON over HTTPS to the portal's hosted API. */

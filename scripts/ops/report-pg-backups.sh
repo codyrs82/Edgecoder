@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright (c) 2025 EdgeCoder, LLC
+# Copyright (c) 2025 EdgeCoder
 # SPDX-License-Identifier: BUSL-1.1
 #
 # Production alerting, rule 6 (Postgres backups). The coordinators and the portal cannot run

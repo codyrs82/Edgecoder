@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Copyright (c) 2025 EdgeCoder, LLC
+// Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 //
 // Builds the explainer video for one Getting started step (docs/videos/README.md):

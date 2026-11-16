@@ -1,4 +1,4 @@
-// Copyright (c) 2025 EdgeCoder, LLC
+// Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 
 /** What can run a chat: this machine's Ollama (free), or the network (your machines, a lease, or any agent). */

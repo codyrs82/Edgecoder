@@ -1,10 +1,10 @@
 # Terms of Service
 
-> **DRAFT — pending legal review.** This document is a working draft prepared for review by counsel. It is not final, it is not legal advice, and it has not been approved by EdgeCoder, LLC. Bracketed items such as [GOVERNING LAW] are placeholders to be completed.
+> **DRAFT — pending legal review.** This document is a working draft prepared for review by counsel. It is not final, it is not legal advice, and it has not been approved by EdgeCoder. Bracketed items such as [GOVERNING LAW] are placeholders to be completed.
 
 Version: 2026-11-15-draft · Effective date: [EFFECTIVE DATE]
 
-These Terms of Service (the "Terms") are an agreement between you and EdgeCoder, LLC ("EdgeCoder", "we", "us"). They govern your use of the EdgeCoder website ([WEBSITE DOMAIN]), the EdgeCoder portal, the desktop and iOS apps, the EdgeCoder agent, the hosted API and any related services (together, the "Service").
+These Terms of Service (the "Terms") are an agreement between you and EdgeCoder ("we", "us"). They govern your use of the EdgeCoder website ([WEBSITE DOMAIN]), the EdgeCoder portal, the desktop and iOS apps, the EdgeCoder agent, the hosted API and any related services (together, the "Service").
 
 By creating an account, checking the box at sign-up, or using the Service, you agree to these Terms, the [Privacy Policy](/privacy) and the [Acceptable Use Policy](/acceptable-use), which is part of these Terms. If you install the EdgeCoder agent to run work for others, the [Host Agreement](/host-agreement) also applies. If you do not agree, do not use the Service.
 
@@ -151,4 +151,4 @@ These Terms, with the policies they incorporate, are the entire agreement betwee
 
 ## 20. Contact
 
-EdgeCoder, LLC · [MAILING ADDRESS] · [CONTACT EMAIL]
+EdgeCoder · [MAILING ADDRESS] · [CONTACT EMAIL]

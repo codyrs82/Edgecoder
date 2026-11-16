@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Copyright (c) 2025 EdgeCoder, LLC
+// Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 
 /** edgecoder-mcp: the MCP server on stdio. Only MCP messages go to stdout; errors go to stderr. */
