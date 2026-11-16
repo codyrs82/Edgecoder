@@ -32,6 +32,8 @@ describe("explainer video scripts", () => {
     }
     expect(() => V.parseScript("no front matter")).toThrow(/front matter/);
     expect(() => V.parseScript("---\nstep: how\nname: x\ntitle: X\n---\n### a\nfocus: sideways\n\nHi.\n")).toThrow(/bad focus/);
+    expect(() => V.parseScript("---\nstep: how\nname: x\ntitle: X\ntts: espeak\n---\n### a\n\nHi.\n")).toThrow(/tts must be/);
+    expect(V.parseScript("---\nstep: how\nname: x\ntitle: X\ntts: kokoro\nvoice: af_heart\n---\n### a\n\nHi.\n").meta).toMatchObject({ tts: "kokoro", voice: "af_heart" });
   });
 
   it("the voice says cSats and /remote the way they are meant; captions keep the written form", () => {

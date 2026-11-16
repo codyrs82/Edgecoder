@@ -54,6 +54,38 @@ sentences, 1 s between segments, and each highlight lands 0.6 s before its narra
 (`scripts/videos/lib.mjs`). Keep sentences short: one idea each, no long lists. Spoken forms
 (owner-confirmed): cSats is "see sats", `/remote` is "forward slash remote" (`PRONOUNCE`).
 
+### Kokoro (`tts: kokoro`)
+
+The owner found the Piper voices above not good enough, so the pipeline also runs
+[Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) through
+[kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx) (onnxruntime, no PyTorch).
+Set `tts: kokoro` and `voice: <id>` in a script's front matter, or try one without editing the
+script: `node scripts/videos/build.mjs how --tts=kokoro --voice=af_heart --tag=kokoro` (writes
+`how-it-works-kokoro.*` in the work folder and leaves the repo alone).
+
+- **Licences (checked 2026-11-16):** the Kokoro-82M weights and its voice packs are **Apache-2.0**
+  (model card: "Apache-licensed weights … deployed in numerous projects and commercial APIs").
+  kokoro-onnx (the runner, which also hosts the converted `kokoro-v1.0.onnx` and
+  `voices-v1.0.bin` in its `model-files-v1.0` release) is MIT. Its espeak-ng comes bundled
+  (`espeakng-loader`, GPL-3.0, a local tool only); no Homebrew install is needed.
+- **Training data** (model card): permissive or public-domain audio, plus synthetic audio from
+  closed commercial TTS models; the only CC BY sets are Japanese and French data, not used here.
+- **Voice grades** (the model card's VOICES.md; overall grade reflects the training data's quality
+  and quantity):
+
+  | Voice | | Grade |
+  | --- | --- | --- |
+  | af_heart | American female | **A** |
+  | af_bella | American female | **A-** |
+  | af_nicole | American female (whispery, "headphones") | B- |
+  | bf_emma | British female | B- |
+  | am_michael | American male | C+ |
+  | am_fenrir | American male | C+ |
+  | bm_george | British male | C |
+
+- **Delivery:** speed 0.85 (`KOKORO_SPEED`), one sentence at a time with 0.35 s between, the same
+  pronunciations (`PRONOUNCE`). Voices starting with `b` use British English phonemes.
+
 ## Making a video
 
 One-time setup (about 330 MB, outside the repo):
@@ -68,12 +100,20 @@ for ext in onnx onnx.json; do
   curl -fLO "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/cori/high/en_GB-cori-high.$ext"
 done
 npx playwright install chromium                       # if not installed yet
+
+# Kokoro (about 480 MB: 130 MB venv, 325 MB model, 28 MB voices)
+uv venv --python 3.12 "$VIDEO_WORK_DIR/kokoro-venv"
+uv pip install --python "$VIDEO_WORK_DIR/kokoro-venv/bin/python" kokoro-onnx soundfile
+mkdir -p "$VIDEO_WORK_DIR/kokoro" && cd "$VIDEO_WORK_DIR/kokoro"
+for f in kokoro-v1.0.onnx voices-v1.0.bin; do
+  curl -fLO "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/$f"
+done
 ```
 
 Then, from the repo:
 
 ```sh
-node scripts/videos/build.mjs how                     # --say: macOS voice; --no-copy: leave the repo alone
+node scripts/videos/build.mjs how                     # --tts=, --voice=, --tag=: try another voice; --no-copy
 ```
 
 `build.mjs` speaks each segment, lays them out with short pauses, writes the captions, records the

@@ -21,6 +21,8 @@ export const TAIL_S = 2.0;
 export const FOCUS_LEAD_S = 0.6;
 /** Piper: speaking pace (>1 is slower) and the pause between sentences within a segment. */
 export const LENGTH_SCALE = 1.12;
+/** Kokoro: speaking speed (<1 is slower), the same pace as Piper's LENGTH_SCALE. */
+export const KOKORO_SPEED = 0.85;
 export const SENTENCE_SILENCE_S = 0.35;
 
 /**
@@ -47,6 +49,7 @@ export function parseScript(md) {
     if (m) meta[m[1]] = m[2].trim();
   }
   for (const k of ["step", "name", "title"]) if (!meta[k]) throw new Error(`script: front matter needs ${k}`);
+  if (meta.tts && !["piper", "kokoro", "say"].includes(meta.tts)) throw new Error(`script: tts must be piper, kokoro or say, not "${meta.tts}"`);
   const segments = [];
   const parts = md.slice(fm[0].length).split(/^### /m).slice(1);
   for (const part of parts) {

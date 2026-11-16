@@ -3,15 +3,19 @@
 // SPDX-License-Identifier: BUSL-1.1
 //
 // Builds the explainer video for one Getting started step (docs/videos/README.md):
-//   1. narration: each segment of docs/videos/scripts/<name>.md spoken by Piper (local, offline),
-//      or macOS `say` when Piper isn't set up;
+//   1. narration: each segment of docs/videos/scripts/<name>.md spoken by Kokoro or Piper (local,
+//      offline), or macOS `say` when neither is set up;
 //   2. timeline + WebVTT captions from the segments' audio lengths;
 //   3. screen: record.mjs walks /portal/welcome/<step> with fixture data, in time with the narration;
 //   4. mux with ffmpeg: H.264/AAC MP4, VP9/Opus WebM, a JPEG poster;
 //   5. copies <name>.{mp4,webm,vtt,jpg} to src/portal/assets/videos/ (served at /assets/videos/).
 //
-// Usage: node scripts/videos/build.mjs <step> [--say] [--no-copy]
-// Env:   PIPER_PYTHON  python with piper-tts installed   (default: $VIDEO_WORK_DIR/piper-venv/bin/python)
+// Usage: node scripts/videos/build.mjs <step> [--tts=piper|kokoro|say] [--voice=<id>] [--tag=<t>] [--no-copy]
+//   The script's front matter picks the engine (`tts:`, default piper) and `voice:`; the flags
+//   override them for a trial. --tag=<t> names the files <name>-<t>.* and leaves the repo alone.
+// Env:   KOKORO_PYTHON python with kokoro-onnx installed  (default: $VIDEO_WORK_DIR/kokoro-venv/bin/python)
+//        KOKORO_DIR    kokoro-v1.0.onnx + voices-v1.0.bin  (default: $VIDEO_WORK_DIR/kokoro)
+//        PIPER_PYTHON  python with piper-tts installed   (default: $VIDEO_WORK_DIR/piper-venv/bin/python)
 //        PIPER_VOICE   voice model .onnx                 (default: $VIDEO_WORK_DIR/voices/<script voice>.onnx)
 //        SAY_VOICE     macOS voice for the fallback      (default: Samantha)
 //        VIDEO_WORK_DIR intermediate files              (default: <tmp>/edgecoder-videos)
@@ -20,7 +24,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statfsSync, statSync, writeFileSync } from "node:fs";
 import { loadavg, tmpdir } from "node:os";
 import { join } from "node:path";
-import { LENGTH_SCALE, PORTAL_VIDEO_DIR, ROOT, SENTENCE_SILENCE_S, mixNarration, readWav, scriptForStep, spokenText, timeline, toVtt } from "./lib.mjs";
+import { KOKORO_SPEED, LENGTH_SCALE, PORTAL_VIDEO_DIR, ROOT, SENTENCE_SILENCE_S, mixNarration, readWav, scriptForStep, spokenText, timeline, toVtt } from "./lib.mjs";
 
 const args = process.argv.slice(2);
 const step = args.find((a) => !a.startsWith("--"));
@@ -33,10 +37,16 @@ if (!script) {
   console.error(`build: no script for step "${step}" in docs/videos/scripts/ (front matter step: ${step})`);
   process.exit(1);
 }
-const name = script.meta.name;
+const flag = (k) => args.find((a) => a.startsWith(`--${k}=`))?.slice(k.length + 3);
+const tag = flag("tag");
+const name = tag ? `${script.meta.name}-${tag}` : script.meta.name;
+const tts = args.includes("--say") ? "say" : flag("tts") || script.meta.tts || "piper";
+const voiceId = flag("voice") || script.meta.voice;
+if (!["piper", "kokoro", "say"].includes(tts)) throw new Error(`build: unknown tts "${tts}" (piper, kokoro or say)`);
+const copyToRepo = !args.includes("--no-copy") && !tag;
 const WORK_ROOT = process.env.VIDEO_WORK_DIR || join(tmpdir(), "edgecoder-videos");
-const work = join(WORK_ROOT, name);
-mkdirSync(join(work, "segments"), { recursive: true });
+const work = join(WORK_ROOT, script.meta.name);
+mkdirSync(join(work, `segments-${tag || "main"}`), { recursive: true });
 
 /** This build is meant for a shared laptop: wait while the machine is busy, stop when disk is low. */
 function guard(what) {
@@ -57,8 +67,33 @@ function run(cmd, argv, opts = {}) {
 // ── 1. Narration ──
 
 const PIPER_PYTHON = process.env.PIPER_PYTHON || join(WORK_ROOT, "piper-venv/bin/python");
-const PIPER_VOICE = process.env.PIPER_VOICE || join(WORK_ROOT, "voices", `${script.meta.voice || "en_GB-cori-high"}.onnx`);
-const usePiper = !args.includes("--say") && existsSync(PIPER_PYTHON) && existsSync(PIPER_VOICE);
+const PIPER_VOICE = process.env.PIPER_VOICE || join(WORK_ROOT, "voices", `${voiceId || "en_GB-cori-high"}.onnx`);
+const KOKORO_PYTHON = process.env.KOKORO_PYTHON || join(WORK_ROOT, "kokoro-venv/bin/python");
+const KOKORO_DIR = process.env.KOKORO_DIR || join(WORK_ROOT, "kokoro");
+const KOKORO_FILES = [join(KOKORO_DIR, "kokoro-v1.0.onnx"), join(KOKORO_DIR, "voices-v1.0.bin")];
+const usePiper = tts === "piper" && existsSync(PIPER_PYTHON) && existsSync(PIPER_VOICE);
+const useKokoro = tts === "kokoro" && existsSync(KOKORO_PYTHON) && KOKORO_FILES.every((f) => existsSync(f));
+if (tts !== "say" && !usePiper && !useKokoro) console.warn(`build: ${tts} is not set up (see docs/videos/README.md); using macOS say`);
+
+// Kokoro (kokoro-onnx): one sentence at a time with a pause between, 24 kHz. Voices starting
+// with b (bf_, bm_) are British English.
+const KOKORO_HELPER = `
+import json, re, sys, numpy as np, soundfile as sf
+from kokoro_onnx import Kokoro
+job = json.load(sys.stdin)
+k = Kokoro(job["model"], job["voices"])
+lang = "en-gb" if job["voice"].startswith("b") else "en-us"
+for item in job["items"]:
+    parts, sr = [], 24000
+    for s in re.findall(r"[^.!?]+[.!?]+|[^.!?]+$", item["text"]):
+        if not s.strip():
+            continue
+        a, sr = k.create(s.strip(), voice=job["voice"], speed=job["speed"], lang=lang)
+        if parts:
+            parts.append(np.zeros(int(sr * job["sentenceSilence"]), dtype=a.dtype))
+        parts.append(a)
+    sf.write(item["out"], np.concatenate(parts), sr, subtype="PCM_16")
+`;
 
 // espeak-ng (inside Piper) silently ignores a data path over 160 characters, so the helper runs
 // from Piper's package folder and passes the data folder relative to it.
@@ -79,13 +114,18 @@ for item in job["items"]:
             w.writeframes(chunk.audio_int16_bytes)
 `;
 
-const segWav = (s) => join(work, "segments", `${s.id}.wav`);
+const segWav = (s) => join(work, `segments-${tag || "main"}`, `${s.id}.wav`);
 guard("narration");
 if (usePiper) {
   const pkg = execFileSync(PIPER_PYTHON, ["-I", "-c", "import os, piper; print(os.path.dirname(piper.__file__))"], { encoding: "utf8" }).trim();
   const job = { model: PIPER_VOICE, lengthScale: LENGTH_SCALE, sentenceSilence: SENTENCE_SILENCE_S, items: script.segments.map((s) => ({ text: spokenText(s.text), out: segWav(s) })) };
   run(PIPER_PYTHON, ["-I", "-c", PIPER_HELPER], { cwd: pkg, input: JSON.stringify(job) });
   console.log(`narration: Piper, ${PIPER_VOICE.split("/").pop()}`);
+} else if (useKokoro) {
+  const voice = voiceId || "af_heart";
+  const job = { model: KOKORO_FILES[0], voices: KOKORO_FILES[1], voice, speed: KOKORO_SPEED, sentenceSilence: SENTENCE_SILENCE_S, items: script.segments.map((s) => ({ text: spokenText(s.text), out: segWav(s) })) };
+  run(KOKORO_PYTHON, ["-I", "-c", KOKORO_HELPER], { input: JSON.stringify(job) });
+  console.log(`narration: Kokoro, ${voice}`);
 } else {
   const voice = process.env.SAY_VOICE || "Samantha";
   for (const s of script.segments) run("say", ["-v", voice, "-r", "160", "--file-format=WAVE", "--data-format=LEI16@22050", "-o", segWav(s), spokenText(s.text)]);
@@ -128,7 +168,7 @@ run("ffmpeg", ["-y", "-hide_banner", "-loglevel", "error", "-ss", ((first.start 
 const probe = (f) => Number(execFileSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", f], { encoding: "utf8" }).trim());
 const files = ["mp4", "webm", "vtt", "jpg"].map((ext) => join(work, `${name}.${ext}`));
 for (const f of files) console.log(`${f}  ${(statSync(f).size / 1e6).toFixed(2)} MB${/\.(mp4|webm)$/.test(f) ? `  ${probe(f).toFixed(1)} s` : ""}`);
-if (!args.includes("--no-copy")) {
+if (copyToRepo) {
   mkdirSync(PORTAL_VIDEO_DIR, { recursive: true });
   for (const f of files) copyFileSync(f, join(PORTAL_VIDEO_DIR, f.split("/").pop()));
   console.log(`copied to ${PORTAL_VIDEO_DIR}`);
