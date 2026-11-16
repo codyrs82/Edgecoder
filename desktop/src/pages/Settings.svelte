@@ -384,7 +384,7 @@
           {:else if meshPaused}
             <AgentPausedNotice reason={meshPaused.reason} agentId={meshPaused.agentId} />
           {:else}
-            <span class="sp-desc">Not connected yet. Sign in and keep EdgeCoder open; the agent joins the network on its own.</span>
+            <span class="sp-desc">Not connected yet. While you're signed in and EdgeCoder is open, this computer's agent joins the network on its own; this can take a minute after the app starts.</span>
           {/if}
         </div>
       </div>
@@ -559,8 +559,6 @@
 </div>
 
 <style>
-  .general .sp-inline { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
-  .general .sp-inline input.grow { flex: 1 1 220px; min-width: 0; }
   .general .mesh-line { margin: 2px 0; font-size: var(--fs-sm); }
   .general .mesh-line code { overflow-wrap: anywhere; }
   .general input.num { width: 72px; }

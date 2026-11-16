@@ -5,10 +5,31 @@
   // the key in the OS keychain, bound to your account; the key is never shown again after saving.
   import { addFrontierKey, getFrontierStatus, getMe, removeFrontierKey, testFrontierKey, updateFrontierSettings, type FrontierStatusView } from "../lib/api";
   import { formatUsd, frontierName } from "../lib/compute-choice";
+  import { onDestroy } from "svelte";
 
   let status = $state<FrontierStatusView | null>(null);
   let loadError = $state("");
   let email = $state<string | null>(null);
+  /** The app's own sign-in: "out" only when the portal said so, not when it couldn't be reached. */
+  let appSession = $state<"checking" | "in" | "out" | "unknown">("checking");
+
+  // Signed in / signed out / not known yet. "Sign in" shows only for a definitive "no": the
+  // provider's account check said signed out (older providers: a null account) and the app isn't
+  // signed in either. While this computer's agent is still connecting, the check fails or comes
+  // back empty: that is "checking", re-polled a few times, then a neutral retry, never "sign in".
+  type AccountView = "checking" | "signed_in" | "signed_out" | "unknown";
+  let accountView = $derived.by((): AccountView => {
+    if (!status) return "checking";
+    if (status.account) return "signed_in";
+    const providerSaysOut = (status.accountState ?? "signed_out") === "signed_out";
+    // The provider says no: believe it unless the app itself is signed in (then the agent is late).
+    if (providerSaysOut && appSession !== "in") return appSession === "checking" ? "checking" : "signed_out";
+    return accountRetries < MAX_ACCOUNT_RETRIES ? "checking" : "unknown";
+  });
+  const MAX_ACCOUNT_RETRIES = 5;
+  let accountRetries = $state(0);
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  onDestroy(() => clearTimeout(retryTimer));
 
   // Add form
   let provider = $state<"anthropic" | "openai" | "other">("anthropic");
@@ -31,26 +52,58 @@
   let providerId = $derived(provider === "other" ? otherName.trim().toLowerCase() : provider);
   let providerName = $derived(providerLabel(providerId || "your provider"));
 
-  async function load() {
+  async function load(keepDrafts = false) {
     try {
       const s = await getFrontierStatus();
+      // Read everything first: a malformed answer is a load error, not a half-drawn panel.
+      const next = {
+        lead: s.settings.defaultLead,
+        worker: s.settings.workerModel,
+        sessionCap: s.settings.sessionCapUsd === null ? "" : String(s.settings.sessionCapUsd),
+        dailyCap: s.settings.dailyCapUsd === null ? "" : String(s.settings.dailyCapUsd),
+        useForAuto: s.settings.useForAuto,
+      };
+      if (!Array.isArray(s.providers) || !Array.isArray(s.models)) throw new Error("Unexpected answer from EdgeCoder on this computer.");
+      // A background re-check of the account keeps the drafts the user may be editing.
+      const keep = keepDrafts && status;
       status = s;
       loadError = "";
-      lead = s.settings.defaultLead;
-      worker = s.settings.workerModel;
-      sessionCap = s.settings.sessionCapUsd === null ? "" : String(s.settings.sessionCapUsd);
-      dailyCap = s.settings.dailyCapUsd === null ? "" : String(s.settings.dailyCapUsd);
-      useForAuto = s.settings.useForAuto;
+      if (!keep) ({ lead, worker, sessionCap, dailyCap, useForAuto } = next);
     } catch (e) {
-      loadError = e instanceof Error ? e.message : "Couldn't reach EdgeCoder on this computer.";
+      loadError = e instanceof Error && e.message ? e.message : "Couldn't reach EdgeCoder on this computer.";
     }
+    scheduleAccountRetry();
+  }
+
+  /** While the account isn't known yet, look again shortly (a few times). */
+  function scheduleAccountRetry() {
+    clearTimeout(retryTimer);
+    if (!status || status.account || accountView !== "checking" || accountRetries >= MAX_ACCOUNT_RETRIES) return;
+    retryTimer = setTimeout(() => {
+      accountRetries += 1;
+      void load(true);
+    }, 2_000);
+  }
+
+  function retry() {
+    accountRetries = 0;
+    loadError = "";
+    void load();
   }
 
   $effect(() => {
     void load();
     getMe()
-      .then((u) => (email = u.email))
-      .catch(() => (email = null));
+      .then((u) => {
+        email = u.email;
+        appSession = "in";
+      })
+      .catch((e) => {
+        email = null;
+        // getMe throws "Not authenticated" for a definitive answer; anything else is a network error.
+        appSession = e instanceof Error && e.message === "Not authenticated" ? "out" : "unknown";
+      })
+      .finally(() => scheduleAccountRetry());
   });
 
   async function add() {
@@ -123,11 +176,21 @@
       </div>
     </div>
 
-    {#if loadError}
-      <div class="sp-row"><p class="sp-err" role="alert">{loadError}</p></div>
+    {#if loadError && !status}
+      <div class="sp-row">
+        <p class="sp-desc" role="status" data-testid="frontier-load-error">Couldn't load your keys right now ({loadError}).</p>
+        <div class="sp-controls"><button onclick={retry}>Try again</button></div>
+      </div>
     {:else if status}
-      {#if !status.account}
+      {#if accountView === "signed_out"}
         <div class="sp-row"><p class="sp-err" role="status">Sign in to EdgeCoder on this computer to add or use keys: each key is bound to your account.</p></div>
+      {:else if accountView === "checking"}
+        <div class="sp-row"><p class="sp-desc" role="status" data-testid="frontier-account-checking">Checking your account…</p></div>
+      {:else if accountView === "unknown"}
+        <div class="sp-row">
+          <p class="sp-desc" role="status" data-testid="frontier-account-unknown">Couldn't confirm your account yet: this computer's agent may still be connecting.</p>
+          <div class="sp-controls"><button onclick={retry}>Try again</button></div>
+        </div>
       {/if}
       {#if status.fallbackFile}
         <div class="sp-row"><p class="sp-desc" role="status">No keychain was found, so keys are kept in {status.storage}.</p></div>
@@ -166,7 +229,7 @@
             <input type="text" class="grow" aria-label="Base URL" placeholder="https://openrouter.ai/api/v1" bind:value={baseUrl} />
           {/if}
           <input type="password" class="grow" aria-label="API key" autocomplete="off" spellcheck="false" placeholder={provider === "anthropic" ? "sk-ant-…" : "sk-…"} bind:value={key} />
-          <button class="primary" onclick={() => void add()} disabled={adding || !key.trim() || !providerId || !status.account}>{adding ? "Testing…" : "Test and save"}</button>
+          <button class="primary" onclick={() => void add()} disabled={adding || !key.trim() || !providerId || accountView !== "signed_in"}>{adding ? "Testing…" : "Test and save"}</button>
         </div>
         {#if addMsg}<span class={addMsg.ok ? "sp-ok" : "sp-err"} role="status">{addMsg.text}</span>{/if}
       </div>
@@ -213,7 +276,7 @@
         </div>
       </div>
     {:else}
-      <div class="sp-row"><span class="sp-desc" role="status">Loading…</span></div>
+      <div class="sp-row"><span class="sp-desc" role="status">Checking your account…</span></div>
     {/if}
   </div>
 </section>

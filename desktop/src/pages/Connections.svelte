@@ -359,11 +359,13 @@
   .conn-main {
     flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
     border: none !important; background: none !important; padding: 0 !important; text-align: left; white-space: normal !important;
+    /* A button in .sp is one control high; this one holds the name and the address lines. */
+    height: auto !important;
   }
   .conn-main .sp-desc { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   /* A loopback address has no break points and would run under the buttons in a narrow window. */
   .conn-main .sp-desc { overflow-wrap: anywhere; }
-  @media (max-width: 760px) {
+  @container settings-pane (max-width: 640px) {
     .conn-main { flex: 1 1 180px; }
     /* The copy button sits over the first line once the lines reach the right edge. */
     .code-wrap .sp-code { padding-top: 36px; }

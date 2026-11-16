@@ -63,6 +63,27 @@ describe("frontier models: listed and usable only for the key owner's account", 
     expect(await access.remove("anthropic", "acct-alice")).toBe(true);
   });
 
+  it("says whether a missing account is signed out or just not known yet (Settings shows 'sign in' only for the first)", async () => {
+    const acct = { id: "acct-alice" as string | null };
+    let state: "signed_in" | "signed_out" | "unknown" = "signed_in";
+    const dir = mkdtempSync(join(tmp, "s-"));
+    const access = new FrontierAccess({
+      store: new FrontierKeyStore({ file: join(dir, "frontier.json"), keychain: memKeychain() }),
+      spend: new FrontierSpend(join(dir, "usage.json")),
+      account: async () => acct.id,
+      accountState: () => state,
+    });
+    expect(await access.status()).toMatchObject({ account: "acct-alice", accountState: "signed_in" });
+    acct.id = null;
+    state = "unknown";
+    expect(await access.status()).toMatchObject({ account: null, accountState: "unknown" });
+    state = "signed_out";
+    expect(await access.status()).toMatchObject({ account: null, accountState: "signed_out" });
+    // Without a state hook (older wiring), a null account reads as signed out.
+    const { access: plain } = setup({ id: null });
+    expect(await plain.status()).toMatchObject({ account: null, accountState: "signed_out" });
+  });
+
   it("re-checks the account on every call: a key stops working when the account signs out mid-session", async () => {
     const acct = { id: "acct-alice" as string | null };
     const { access } = setup(acct);

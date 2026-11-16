@@ -54,7 +54,7 @@
   const since = (start: number) => elapsedText(nowMs - start);
 </script>
 
-<div class="sp">
+<div class="sp sp-wide">
   <h1>Active work</h1>
   <p class="sp-lead">What {machine} is doing on the network right now, and your own requests while they run. Updates every few seconds.</p>
   <p class="sr-only" aria-live="polite">{summary}</p>

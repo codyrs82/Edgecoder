@@ -116,11 +116,68 @@ describe("Settings → Frontier models (your keys)", () => {
     expect(await screen.findByText("Saved")).toBeTruthy();
   });
 
-  it("asks to sign in when no account is signed in on this computer", async () => {
-    api.getFrontierStatus.mockResolvedValue(status({ account: null }));
+  it("asks to sign in only when the account check says signed out", async () => {
+    api.getFrontierStatus.mockResolvedValue(status({ account: null, accountState: "signed_out" }));
+    api.getMe.mockRejectedValue(new Error("Not authenticated"));
     render(FrontierKeys);
     expect(await screen.findByText(/Sign in to EdgeCoder on this computer to add or use keys/)).toBeTruthy();
     expect((screen.getByRole("button", { name: "Test and save" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("shows no sign-in error while the account is still loading", async () => {
+    api.getFrontierStatus.mockReturnValue(new Promise(() => {}));
+    render(FrontierKeys);
+    expect(await screen.findByText("Checking your account…")).toBeTruthy();
+    expect(screen.queryByText(/Sign in to EdgeCoder/)).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("treats an account the provider couldn't check yet as checking, then shows the key form once it's known", async () => {
+    api.getFrontierStatus.mockResolvedValueOnce(status({ account: null, accountState: "unknown" })).mockResolvedValue(status());
+    render(FrontierKeys);
+    expect(await screen.findByTestId("frontier-account-checking")).toBeTruthy();
+    expect(screen.queryByText(/Sign in to EdgeCoder/)).toBeNull();
+    expect((screen.getByRole("button", { name: "Test and save" }) as HTMLButtonElement).disabled).toBe(true);
+    // Re-checked shortly: now signed in, the form is usable.
+    await waitFor(() => expect(screen.queryByTestId("frontier-account-checking")).toBeNull(), { timeout: 4000 });
+    await fireEvent.input(screen.getByLabelText("API key"), { target: { value: KEY } });
+    expect((screen.getByRole("button", { name: "Test and save" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText(/Sign in to EdgeCoder/)).toBeNull();
+  });
+
+  it("an older provider's null account while the app is signed in is checking, not signed out", async () => {
+    api.getFrontierStatus.mockResolvedValue(status({ account: null }));
+    render(FrontierKeys);
+    expect(await screen.findByTestId("frontier-account-checking")).toBeTruthy();
+    expect(screen.queryByText(/Sign in to EdgeCoder/)).toBeNull();
+  });
+
+  it("after a few unanswered checks, offers a neutral retry instead of 'sign in'", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      api.getFrontierStatus.mockResolvedValue(status({ account: null, accountState: "unknown" }));
+      render(FrontierKeys);
+      expect(await screen.findByTestId("frontier-account-checking")).toBeTruthy();
+      for (let i = 0; i < 6; i++) await vi.advanceTimersByTimeAsync(2_100);
+      expect(await screen.findByTestId("frontier-account-unknown")).toBeTruthy();
+      expect(screen.queryByText(/Sign in to EdgeCoder/)).toBeNull();
+      api.getFrontierStatus.mockResolvedValue(status());
+      await fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+      await waitFor(() => expect(screen.queryByTestId("frontier-account-unknown")).toBeNull());
+      expect(screen.getByLabelText("API key")).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a failed status request is a neutral, retryable message", async () => {
+    api.getFrontierStatus.mockRejectedValueOnce(new Error("fetch failed")).mockResolvedValue(status());
+    render(FrontierKeys);
+    expect((await screen.findByTestId("frontier-load-error")).textContent).toContain("Couldn't load your keys right now");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/Sign in to EdgeCoder/)).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByLabelText("API key")).toBeTruthy();
   });
 });
 

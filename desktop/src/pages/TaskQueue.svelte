@@ -86,7 +86,7 @@
   }
 </script>
 
-<div class="sp">
+<div class="sp sp-wide">
   <h1>Tasks</h1>
   <p class="sp-lead">Everything you ran from this computer: chats, Code turns, bot runs, helper jobs and API calls, with where each ran and what it cost.</p>
 
@@ -133,18 +133,18 @@
       {:else}
         <div class="sp-table-scroll" role="group" aria-labelledby="tq-history" use:scrollRegion>
           <table>
-            <thead><tr><th scope="col">When</th><th scope="col">What</th><th scope="col">Where it ran</th><th scope="col" class="num">Tokens in / out</th><th scope="col" class="num">cSats</th><th scope="col">Status</th><th scope="col" class="num">Time</th></tr></thead>
+            <thead><tr><th scope="col">When</th><th scope="col" class="what-col">What</th><th scope="col" class="where-col">Where it ran</th><th scope="col" class="num">Tokens in / out</th><th scope="col" class="num">cSats</th><th scope="col">Status</th><th scope="col" class="num">Time</th></tr></thead>
             <tbody>
               {#each shown.slice(0, SHOWN) as r (r.id)}
                 <tr class:failed={r.status === "failed"}>
                   <td class="sp-muted">{when(r.atMs)}</td>
                   <td class="what">
-                    <button class="link" aria-expanded={open === r.id} aria-controls="task-{r.id}" onclick={() => (open = open === r.id ? null : r.id)}>
+                    <button class="link" title={r.title} aria-expanded={open === r.id} aria-controls="task-{r.id}" onclick={() => (open = open === r.id ? null : r.id)}>
                       <span class="kind">{KIND_LABEL[r.kind]}</span> {r.title}
                     </button>
                     {#if r.context}<div class="sp-muted ctx">{r.context}</div>{/if}
                   </td>
-                  <td class="where">{r.where ?? "–"}</td>
+                  <td class="where"><span class="where-text" title={r.where ?? undefined}>{r.where ?? "–"}</span></td>
                   <td class="num">{r.promptTokens === null && r.outputTokens === null ? "–" : `${tok(r.promptTokens) || "0"} / ${tok(r.outputTokens) || "0"}`}</td>
                   <td class="num">{r.cSats === null ? "–" : fmt(r.cSats)}{#if r.usd}<div class="sp-muted">${r.usd.toFixed(2)}</div>{/if}</td>
                   <td><StatusPill status={r.status} />{#if r.error}<div class="sp-err reason">{r.error}</div>{/if}</td>
@@ -185,12 +185,26 @@
   .field { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--text-secondary); }
   .field.grow { flex: 1 1 200px; }
   .field.grow input { width: 100%; }
-  .what { max-width: 300px; }
-  .what .link { all: unset; cursor: pointer; color: var(--text-primary); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; }
+  /* What and Where share the spare width; each line is cut with an ellipsis (the full text is in
+     the tooltip and the row's details) instead of wrapping into a tall stack;
+     max-width: 0 lets the percentage, not the untruncated text, size the column.
+  */
+  .what-col, .what { width: 45%; min-width: 220px; max-width: 0; }
+  .where-col, .where { width: 30%; min-width: 180px; max-width: 0; }
+  .what .link { all: unset; cursor: pointer; color: var(--text-primary); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+  .where-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; white-space: normal; }
   .what .link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
   .what .kind { font-size: 11px; color: var(--text-secondary); margin-right: 4px; }
-  .ctx { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; }
-  .where { max-width: 260px; }
+  .ctx { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  td.sp-muted, th { white-space: nowrap; }
+  /* A narrow pane: tighter cells, and the headers may take two lines, so What and Where
+     keep a readable width without the table scrolling sideways at a ~900px window. */
+  @container settings-pane (max-width: 760px) {
+    th, td { padding: 8px; }
+    th { white-space: normal; }
+    .what-col, .what { min-width: 130px; }
+    .where-col, .where { min-width: 110px; }
+  }
   .reason { max-width: 220px; white-space: normal; }
   tr.details td { background: var(--bg-base); }
   dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0 0 8px; }

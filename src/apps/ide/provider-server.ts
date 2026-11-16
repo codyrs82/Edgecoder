@@ -66,7 +66,7 @@ import { chooseLeadModel, estimateTokens, parseLeadCandidates } from "./lead-mod
 import { registerSessionRoutes } from "./session-routes.js";
 import { hostedBackend, hostedConfigFromEnv } from "./hosted-backend.js";
 import { GitHubDeviceLogins } from "./github-device.js";
-import { FrontierAccess, autoWithFrontier, frontierChat, type FrontierRequest } from "./frontier-access.js";
+import { FrontierAccess, autoWithFrontier, frontierChat, type FrontierAccountState, type FrontierRequest } from "./frontier-access.js";
 import { FrontierKeyError, FrontierKeyStore } from "../../inference-api/frontier-keys.js";
 import { FrontierSpend } from "../../inference-api/frontier-usage.js";
 import { frontierContextWindow, isFrontierModelId } from "../../inference-api/frontier-models.js";
@@ -186,28 +186,38 @@ const hosted = hostedConfigFromEnv();
  * The EdgeCoder account signed in on this computer: from this machine's enrolled agent (the
  * coordinator's account summary), else from the hosted endpoint for the API key. Cached briefly.
  */
-let accountCache: { at: number; id: string | null } | null = null;
+let accountCache: { at: number; id: string | null; state: FrontierAccountState } | null = null;
 let lastAccount: string | undefined;
 async function machineAccount(): Promise<string | null> {
-  if (accountCache && Date.now() - accountCache.at < (accountCache.id ? 60_000 : 10_000)) return accountCache.id;
+  // A definitive answer is kept a minute (signed in) or 10 s (signed out); an unknown one (the
+  // agent isn't connected yet, the coordinator is slow) is retried after 3 s.
+  if (accountCache && Date.now() - accountCache.at < (accountCache.state === "signed_in" ? 60_000 : accountCache.state === "signed_out" ? 10_000 : 3_000)) return accountCache.id;
   let id: string | null = null;
+  let state: FrontierAccountState = "signed_out";
   try {
     if (networkDeps) {
-      id = (await computeOverview(networkDeps)).account?.accountId ?? null;
+      const ov = await computeOverview(networkDeps);
+      id = ov.account?.accountId ?? null;
+      // No account summary from a connected agent's coordinator is still not a "no": the agent's
+      // credentials are for this machine's signed-in account, the summary just didn't come back.
+      state = id ? "signed_in" : "unknown";
     } else if (hosted) {
       const res = await undiciRequest(`${hosted.baseUrl}/v1/account`, { method: "GET", headers: { authorization: `Bearer ${hosted.apiKey()}` }, headersTimeout: 10_000, bodyTimeout: 10_000 });
       const j = res.statusCode === 200 ? ((await res.body.json()) as { accountId?: unknown }) : (await res.body.dump(), null);
       id = typeof j?.accountId === "string" ? j.accountId : null;
+      state = id ? "signed_in" : res.statusCode === 401 || res.statusCode === 403 || res.statusCode === 200 ? "signed_out" : "unknown";
     }
   } catch {
     id = null;
+    state = "unknown";
   }
-  accountCache = { at: Date.now(), id };
+  accountCache = { at: Date.now(), id, state };
   if (id) lastAccount = id;
   return id;
 }
+const machineAccountState = (): FrontierAccountState => accountCache?.state ?? "unknown";
 
-const frontier = new FrontierAccess({ store: new FrontierKeyStore(), spend: new FrontierSpend(), account: machineAccount });
+const frontier = new FrontierAccess({ store: new FrontierKeyStore(), spend: new FrontierSpend(), account: machineAccount, accountState: machineAccountState });
 
 const frontierChatFn = (id: string, req: Omit<FrontierRequest, "onWarn" | "onCost">, sendEvent: (e: IdeStreamEvent) => void, signal: AbortSignal, fallback?: () => ChatFn) =>
   frontierChat({ access: frontier, id, request: req, sendEvent, signal, fallback });
