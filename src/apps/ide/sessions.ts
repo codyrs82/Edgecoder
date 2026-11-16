@@ -64,6 +64,8 @@ export interface TranscriptEntry {
   usage?: TurnUsage;
   /** The turn's file changes were undone. */
   undone?: boolean;
+  /** A note recorded by a tentacle (tentacles.ts): what ran where, its outcome and patch. */
+  tentacle?: Record<string, unknown>;
 }
 
 /** What a turn's model calls cost, where the last ran, and each call (model, machine, timings). */
@@ -190,6 +192,8 @@ export interface TurnEnv {
   summarize?: (s: SessionData, emit: (e: IdeStreamEvent) => void, signal: AbortSignal, ctx?: { client: ClientRef | null }) => (text: string) => Promise<string | null>;
   /** The EdgeCoder account signed in on this computer (last known), recorded as a new session's owner. */
   owner?: () => string | undefined;
+  /** Tentacles hook: the session was stopped, deleted or the provider is shutting down (cancel its helpers). */
+  onSessionStop?: (sessionId: string) => void;
 }
 
 export class SessionError extends Error {
@@ -705,6 +709,7 @@ export class SessionHub {
   cancel(id: string, client: ClientRef): boolean {
     this.need(id);
     const l = this.liveOf(id);
+    this.env.onSessionStop?.(id); // tentacles hook: stop means its helpers too
     if (!l.running) return false;
     l.running.abort.abort();
     this.emit(id, { type: "stopping", by: client.kind, ...(client.label ? { label: client.label } : {}) });
@@ -765,8 +770,8 @@ export class SessionHub {
     const l = this.requireControl(id, client);
     if (l.running) throw new SessionError("busy", "Wait for the reply to finish before undoing.");
     const entry = turnId
-      ? s.transcript.find((t) => t.turnId === turnId && t.role === "assistant")
-      : [...s.transcript].reverse().find((t) => t.role === "assistant" && t.changedFiles?.length && !t.undone);
+      ? s.transcript.find((t) => t.turnId === turnId && (t.role === "assistant" || t.role === "note"))
+      : [...s.transcript].reverse().find((t) => (t.role === "assistant" || t.role === "note") && t.changedFiles?.length && !t.undone);
     if (!entry?.turnId) throw new SessionError("nothing_to_undo", "No changes to undo in this session.");
     const reverted = this.env.checkpoints.revert(entry.turnId);
     if (!reverted) throw new SessionError("checkpoint_gone", "That turn's checkpoint is gone (the provider restarted). Use git to undo it.");
@@ -791,6 +796,7 @@ export class SessionHub {
     this.need(id);
     const l = this.requireControl(id, client);
     l.running?.abort.abort();
+    this.env.onSessionStop?.(id); // tentacles hook
     this.emit(id, { type: "deleted" });
     this.sessions.delete(id);
     this.live.delete(id);
@@ -809,5 +815,36 @@ export class SessionHub {
   /** Stop every running turn (provider shutdown). */
   shutdown(): void {
     for (const l of this.live.values()) l.running?.abort.abort();
+    for (const id of this.sessions.keys()) this.env.onSessionStop?.(id); // tentacles hook
+  }
+
+  // --- Tentacles hooks (tentacles.ts): extra session events and transcript notes ---
+
+  /** A session's data (a copy), or null. */
+  peek(id: string): SessionData | null {
+    const s = this.sessions.get(id);
+    return s ? plain(s) : null;
+  }
+
+  /** Send a session event of a kind this file doesn't know (`tentacle_started`, ...) to every client. */
+  publishEvent(id: string, ev: Record<string, unknown> & { type: string }): void {
+    if (!this.sessions.has(id)) return;
+    this.emit(id, ev);
+  }
+
+  /**
+   * Add a note to the transcript (not sent to the model). Its `usage.cSats` counts toward the
+   * session's spend; a `turnId` with `changedFiles` makes it undoable like a turn.
+   */
+  recordNote(id: string, note: Omit<TranscriptEntry, "id" | "role" | "at">): TranscriptEntry | null {
+    const s = this.sessions.get(id);
+    if (!s) return null;
+    const entry: TranscriptEntry = { ...note, id: randomUUID(), role: "note", at: Date.now() };
+    s.transcript.push(entry);
+    const cSats = Number(note.usage?.cSats);
+    if (Number.isFinite(cSats) && cSats > 0) s.cSats = Number((s.cSats + cSats).toFixed(6));
+    this.save(s);
+    this.emit(id, { type: "note", entry, cSats: s.cSats });
+    return entry;
   }
 }

@@ -83,6 +83,8 @@ export function hostedBackend(cfg: HostedConfig, model: string): ChatBackend {
           ...(req.tools?.length ? { tools: req.tools } : {}),
           ...(req.maxTokens ? { max_tokens: req.maxTokens } : {}),
           ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+          // model "auto": the job hints for the coordinator's best-fit routing (tentacles send them).
+          ...(req.hints && Object.keys(req.hints).length ? { edgecoder: req.hints } : {}),
         }),
         headersTimeout: 120_000,
         bodyTimeout: 300_000,

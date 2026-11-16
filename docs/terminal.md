@@ -270,7 +270,8 @@ cli.github.com).
 ## For builders: extending the agent
 
 The session store is built to carry orchestration such as a `delegate` tool, where a master
-session sends sub-jobs to cheaper network tiers. The extension points are:
+session sends sub-jobs to cheaper network tiers. That exists now as tentacles
+([tentacles.md](tentacles.md): `--tentacles`, `/tentacles`). The extension points are:
 
 - **`TurnEnv`** (`sessions.ts`): `chat` decides where each model call goes per session. Its
   `ctx.role` is `"lead"` for the main loop and `"worker"` for helpers, and the worker runs on

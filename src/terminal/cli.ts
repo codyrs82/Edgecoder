@@ -33,6 +33,8 @@ Options:
   --lead <id>              the lead model (runs the agent loop), e.g. frontier/anthropic/claude-opus-5-5 on your own key
   --worker <id>            the worker model for helpers and delegated work (default auto; never a frontier model)
   --compute <where>        local, network or auto (picks a default model for that place)
+  --tentacles <n>          let the lead delegate to up to n helper agents at once (0 = off); docs/tentacles.md
+  --tentacle-budget <c>    cSats the session's tentacles may spend in all (default 100)
   --remote                 show the session live in the EdgeCoder app from the start (same as /remote)
   --resume <session-id>    continue a saved session
   --trust                  trust the folder without asking (the project's own tooling may then run)
@@ -67,6 +69,8 @@ interface Args {
   standalone: boolean;
   port?: number;
   apiKeyFile?: string;
+  tentacles?: number;
+  tentacleBudget?: number;
   list: boolean;
   help: boolean;
 }
@@ -91,6 +95,8 @@ export function parseCodeArgs(argv: string[]): Args | { error: string } {
         standalone: { type: "boolean", default: false },
         port: { type: "string" },
         "api-key-file": { type: "string" },
+        tentacles: { type: "string" },
+        "tentacle-budget": { type: "string" },
         list: { type: "boolean", default: false },
         help: { type: "boolean", short: "h", default: false },
       },
@@ -100,6 +106,11 @@ export function parseCodeArgs(argv: string[]): Args | { error: string } {
     if (values.worker?.toLowerCase().startsWith("frontier/")) return { error: "--worker can't be a frontier model: helpers and delegated work run on auto, the network or this computer." };
     if (values.compute && !["local", "network", "auto", "mine"].includes(values.compute)) return { error: "--compute is local, network, mine or auto." };
     const port = values.port ? Number(values.port) : undefined;
+    const tentacles = values.tentacles !== undefined ? Number(values.tentacles) : undefined;
+    if (tentacles !== undefined && !(Number.isInteger(tentacles) && tentacles >= 0 && tentacles <= 16)) return { error: "--tentacles is 0 to 16." };
+    const tentacleBudget = values["tentacle-budget"] !== undefined ? Number(values["tentacle-budget"]) : undefined;
+    if (tentacleBudget !== undefined && !(Number.isFinite(tentacleBudget) && tentacleBudget >= 0)) return { error: "--tentacle-budget is a number of cSats." };
+    if (values.lead && values.model && values.lead !== values.model) return { error: "Give --lead or --model, not both." };
     if (port !== undefined && !(Number.isInteger(port) && port > 0 && port < 65536)) return { error: "--port must be a port number." };
     return {
       folder: positionals[0],
@@ -117,6 +128,8 @@ export function parseCodeArgs(argv: string[]): Args | { error: string } {
       standalone: values.standalone ?? false,
       port,
       apiKeyFile: values["api-key-file"],
+      tentacles,
+      tentacleBudget,
       list: values.list ?? false,
       help: values.help ?? false,
     };
@@ -136,13 +149,25 @@ export function initialModel(a: Pick<Args, "model" | "compute"> & { lead?: strin
 }
 
 /**
+ * The tentacle settings the flags ask for, or null when none was given. Helpers run on the
+ * session's worker model (--worker, set on the session; never a frontier model).
+ */
+export function tentacleConfigFromArgs(a: Pick<Args, "tentacles" | "tentacleBudget">): Record<string, unknown> | null {
+  if (a.tentacles === undefined && a.tentacleBudget === undefined) return null;
+  return {
+    ...(a.tentacles !== undefined ? { enabled: a.tentacles > 0, ...(a.tentacles > 0 ? { maxParallel: a.tentacles } : {}) } : { enabled: true }),
+    ...(a.tentacleBudget !== undefined ? { budgetCSats: a.tentacleBudget } : {}),
+  };
+}
+
+/**
  * Lines from a terminal (readline) or a pipe. The REPL always has a line being read, so whatever
  * arrives meanwhile (the reply streaming, a tool call, the app's messages) is printed above the
  * prompt and what you were typing is redrawn below it. Esc and Shift+Tab are reported as keys.
  */
 export function terminalIO(): ReplIO {
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
-  const slash = ["/help", "/model", "/compute", "/mode", "/remote", "/stop", "/queue", "/unqueue", "/undo", "/clear", "/status", "/cost", "/github", "/exit"];
+  const slash = ["/help", "/model", "/compute", "/mode", "/remote", "/stop", "/queue", "/unqueue", "/undo", "/clear", "/status", "/cost", "/github", "/tentacles", "/exit"];
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -327,6 +352,9 @@ export async function runCode(argv: string[]): Promise<number> {
         if (trust) await client.trust(sessionId, true);
       }
     }
+    // Tentacles (docs/tentacles.md): the session's helper-agent settings.
+    const tentaclePatch = tentacleConfigFromArgs(a);
+    if (tentaclePatch) await client.req("POST", `/v1/ide/sessions/${sessionId}/tentacles/config`, tentaclePatch);
     return await new Repl({ client, sessionId, io, style: st, providerLabel: conn.label, remote: a.remote, defaults: { local: process.env.OLLAMA_MODEL || undefined } }).run();
   } catch (err) {
     console.error(st.red(err instanceof ProviderError ? err.message : (err as Error).message));

@@ -39,7 +39,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { announcesWork, backendChat, makeToolRunner, runAgentLoop, toolSchemas, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
-import { READ_TOOLS, TOOL_DEFINITIONS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
+import { READ_TOOLS, TENTACLE_TOOLS, TOOL_DEFINITIONS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
 import {
   CI_SCOPES, TRIGGER_KINDS, TRIGGER_POLL_MS, ghApiCli, parseGitHubRepo, pollTrigger, untrustedEventBlock,
   type BotGitHubTrigger, type GhApi, type TriggerCursor, type TriggerEvent,
@@ -179,7 +179,7 @@ export function nextRunAt(schedule: Schedule, fromMs: number): number | null {
 // ---------------------------------------------------------------------------
 
 /** Read tools, file edits, shell commands and commit/push. Edits apply on their own; commands and git writes ask. */
-export const DEFAULT_BOT_TOOLS: ToolName[] = [...READ_TOOLS, "write_file", "edit_file", "run_shell", "git_commit", "git_push", "open_pull_request"];
+export const DEFAULT_BOT_TOOLS: ToolName[] = [...[...READ_TOOLS].filter((t) => !TENTACLE_TOOLS.has(t)), "write_file", "edit_file", "run_shell", "git_commit", "git_push", "open_pull_request"];
 /** Runs GitHub triggers may start per bot per hour, unless the bot sets its own limit. */
 export const DEFAULT_TRIGGER_RUNS_PER_HOUR = 6;
 const MAX_TRIGGERS = 10;

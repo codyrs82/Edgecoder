@@ -1844,6 +1844,11 @@ export const sessionApprove = (id: string, callId: string, approved: boolean, al
 export const sessionSettings = (id: string, patch: { model?: string; mode?: "ask" | "auto-edits" | "auto" }) => sessionPost(id, "settings", patch);
 export const sessionCancel = (id: string) => sessionPost(id, "cancel");
 export const sessionUndo = (id: string) => sessionPost<{ reverted: string[] }>(id, "undo");
+// Tentacles (helper agents; docs/tentacles.md): the session's tree, cancel, merge or drop a waiting patch.
+export const sessionTentacles = (id: string) =>
+  fsCall<{ config: { enabled: boolean }; spentCSats: number; tentacles: import("./tentacles").TentacleItem[] }>("GET", `/v1/ide/sessions/${id}/tentacles`);
+export const tentacleCancel = (id: string, tid: string) => sessionPost<{ cancelled: boolean }>(id, `tentacles/${tid}/cancel`);
+export const tentacleMerge = (id: string, tid: string, approved: boolean) => sessionPost(id, `tentacles/${tid}/merge`, { approved });
 
 /** Follow a session's events after `since` until the signal aborts; reconnects resume after the last event. */
 export async function followSession(id: string, since: number, onEvent: (e: SessionEvent) => void, signal: AbortSignal): Promise<void> {
