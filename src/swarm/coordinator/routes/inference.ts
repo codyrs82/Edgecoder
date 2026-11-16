@@ -58,6 +58,7 @@ import { registerRestrictedRoutes } from "./restricted.js";
 import { servedBy } from "../served-by-route.js";
 import { isFrontierModelId } from "../../../inference-api/frontier-models.js";
 import { taskIdInUse, accrualsInFlight, settleTaskIfDone, refundTaskSubmit } from "../results.js";
+import { recordMeshWork } from "../world-activity.js";
 
 // ── Network inference (chat completions on agents' local models, streamed) ──────────────────
 export const inferenceStreams = new InferenceStreams();
@@ -437,6 +438,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       const { result, elsewhere } = await resolveAuto(job, { peers: body.routeRedirect, requesterAccountId: accountId, ...(body.computeClass !== "any" ? { computeClass: body.computeClass } : {}) });
       const summary = routingSummary(job, result);
       if (!result.chosen) return reply.code(409).send({ error: "no_route_fits", detail: result.rejected ?? result.reason, routing: summary });
+      if (elsewhere) recordMeshWork(elsewhere.coordinatorId);
       if (elsewhere) return reply.code(409).send({ error: "route_elsewhere", coordinatorId: elsewhere.coordinatorId, coordinatorUrl: elsewhere.url, routing: summary });
       const chosen = result.chosen;
       body.model = chosen.model;

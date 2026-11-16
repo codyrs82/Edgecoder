@@ -12,11 +12,44 @@
  * the portal ships these functions to the browser via Function.prototype.toString, so every
  * function is a declaration and every constant it reads is exported (WORLD_VIEW_BROWSER_SCRIPT
  * in the portal lists them).
+ *
+ * Pulses (the graph's activity): `pulseLanes` turns the answer's activity counts into travelling
+ * dots along the lines, capped (PULSE_MAX_DOTS in all, PULSE_MAX_PER_LANE per line) and quantized
+ * to a few speeds so a refresh rarely changes one; `pulseBegin` places each dot on the wall clock,
+ * so a redrawn graph carries on where the last one was instead of starting over. `yourPath` is the
+ * route of the caller's own requests (You, coordinator, machine). Nothing here implies traffic the
+ * answer does not report.
  */
 
 // ── Types (the answer of /network/world, plus this computer's round trips) ──
 
 export type WorldStatus = "idle" | "busy" | "stale";
+/** What a machine is doing now: counts only, never who it is serving. */
+export interface WorldActivity {
+  /** Calls it is running now. */
+  callsNow: number;
+  /** Of those, model calls streaming a reply. */
+  streaming: number;
+  /** Calls it took in the last minute. */
+  callsPerMin: number;
+}
+export type WorldRequestState = "queued" | "starting" | "streaming";
+/** One of your own requests in flight: the coordinator it is on and the machine running it. */
+export interface WorldYourRequest {
+  coordinator: string;
+  /** The machine's `id` (masked); null while the request waits for a machine. */
+  machineKey: string | null;
+  state: WorldRequestState;
+}
+export interface WorldLink {
+  from: string;
+  to: string;
+  rttMs: number | null;
+  /** Work (task offers, claims, results, calls sent elsewhere) across the link in the last minute. */
+  workPerMin?: number;
+  /** Other mesh messages across the link in the last minute. */
+  gossipPerMin?: number;
+}
 export interface WorldAgent {
   /** Opaque stable id (a keyed hash), for keys only. */
   id: string;
@@ -51,6 +84,8 @@ export interface WorldAgent {
    * network, likely one LAN (an opaque per-answer id, no address).
    */
   lanGroup?: string;
+  /** Absent from coordinators older than the pulses. */
+  activity?: WorldActivity;
 }
 export interface WorldCoordinator {
   id: string;
@@ -71,11 +106,13 @@ export interface WorldView {
   generatedAtMs: number;
   servedBy: string;
   coordinators: WorldCoordinator[];
-  links: Array<{ from: string; to: string; rttMs: number | null }>;
+  links: WorldLink[];
   agents: WorldAgent[];
   models: Array<{ model: string; agents: number; online: number }>;
   totals: { coordinators: number; agents: number; online: number; busy: number; mine: number; models: number; slots: number; slotsUsed: number };
   truncated: boolean;
+  /** Your own requests in flight (absent from older coordinators). */
+  yourRequests?: WorldYourRequest[];
   /** This computer's agent id (its entry is one of `mine`). */
   selfAgentId?: string;
 }
@@ -333,4 +370,224 @@ export function hostOf(url: string): string {
   } catch {
     return url;
   }
+}
+
+// ── Activity and pulses ──
+
+/** Moving dots on the whole graph at once, at most. */
+export const PULSE_MAX_DOTS = 60;
+/** Dots on one line at once, at most. */
+export const PULSE_MAX_PER_LANE = 4;
+/** The few travel times a dot may take (ms), fastest first: a busier line moves faster. */
+export const PULSE_PERIODS = [900, 1400, 2000, 3000];
+/** A quiet mesh or "You" line breathes once in this long (liveness, not traffic). */
+export const HEARTBEAT_MS = 8000;
+
+/** A machine's activity; an older coordinator's answer (no `activity`) falls back to its slots in use. */
+export function activityOf(a: WorldAgent): WorldActivity {
+  if (a.status === "stale") return { callsNow: 0, streaming: 0, callsPerMin: a.activity ? a.activity.callsPerMin : 0 };
+  if (a.activity) return a.activity;
+  return { callsNow: a.status === "busy" ? Math.max(1, a.slotsUsed) : 0, streaming: 0, callsPerMin: 0 };
+}
+
+/** Travel time for a line carrying `perMin` events a minute: one of PULSE_PERIODS. */
+export function pulsePeriod(perMin: number): number {
+  const n = Number.isFinite(perMin) ? perMin : 0;
+  return n >= 60 ? PULSE_PERIODS[0] : n >= 20 ? PULSE_PERIODS[1] : n >= 5 ? PULSE_PERIODS[2] : PULSE_PERIODS[3];
+}
+
+/** Static intensity of a line (0 quiet .. 3 busiest): its thickness and opacity, and all reduced motion shows. */
+export function pulseLevel(count: number, perMin: number): number {
+  if (count <= 0) return 0;
+  if (count >= 3 || perMin >= 60) return 3;
+  if (count >= 2 || perMin >= 20) return 2;
+  return 1;
+}
+
+/** Dots on a machine's line: one per reply streaming (else one for the call starting), one more when it is busy all minute. */
+export function machinePulseCount(act: WorldActivity): number {
+  if (act.callsNow <= 0) return 0;
+  const base = act.streaming > 0 ? act.streaming : 1;
+  return Math.min(PULSE_MAX_PER_LANE, base + (act.callsPerMin >= 30 ? 1 : 0));
+}
+
+/** Dots on a mesh line: none without work; one per ten calls a minute, up to the lane cap. */
+export function meshPulseCount(workPerMin: number): number {
+  if (!(workPerMin > 0)) return 0;
+  return Math.min(PULSE_MAX_PER_LANE, 1 + Math.floor(workPerMin / 10));
+}
+
+export interface YourPath {
+  /** Your requests in flight, as the answer listed them. */
+  requests: WorldYourRequest[];
+  /** Coordinators your requests are on, with how many and whether a reply is streaming. */
+  coordinators: Record<string, { count: number; streaming: boolean }>;
+  /** Machines (masked ids, in this view) running your requests. */
+  machines: string[];
+}
+
+/** Where your own requests are: You → coordinator → machine. Machines not in the view are left out. */
+export function yourPath(view: Pick<WorldView, "agents" | "coordinators" | "yourRequests">): YourPath {
+  const known: Record<string, boolean> = {};
+  view.coordinators.forEach((c) => (known[c.id] = true));
+  const onView: Record<string, boolean> = {};
+  view.agents.forEach((a) => (onView[a.id] = true));
+  const requests = (view.yourRequests || []).filter((r) => known[r.coordinator]);
+  const coordinators: Record<string, { count: number; streaming: boolean }> = {};
+  const machines: string[] = [];
+  for (const r of requests) {
+    const c = coordinators[r.coordinator] || { count: 0, streaming: false };
+    c.count++;
+    if (r.state === "streaming") c.streaming = true;
+    coordinators[r.coordinator] = c;
+    if (r.machineKey && onView[r.machineKey] && machines.indexOf(r.machineKey) < 0) machines.push(r.machineKey);
+  }
+  return { requests, coordinators, machines };
+}
+
+export type PulseKind = "spoke" | "mesh" | "you";
+export interface PulseLane {
+  /** Stable key across refreshes ("spoke:<machine id>", "mesh:<a>|<b>", "you:<coordinator id>"). */
+  id: string;
+  kind: PulseKind;
+  /** Dots travel from (x1, y1) to (x2, y2); on a two-way lane every other dot goes back. */
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  twoWay: boolean;
+  /** Dots on the line now (0: none, after the cap too). */
+  count: number;
+  periodMs: number;
+  /** Static intensity, 0..3. */
+  level: number;
+  /** Your own request is on this line. */
+  yours: boolean;
+  /** Background mesh chatter only: drawn faint. */
+  faint: boolean;
+  /** Quiet but up: the line breathes now and then (no dot). */
+  heartbeat: boolean;
+}
+
+/**
+ * The pulses to draw on a laid-out graph:
+ *   machine lines   while a machine runs calls: toward the coordinator while a reply streams, else
+ *                   one dot toward the machine (the call going in);
+ *   "You" lines     while your requests are on that coordinator: toward you while a reply streams;
+ *   mesh lines      work both ways, scaled by work a minute; gossip alone is one faint dot; a quiet
+ *                   line only breathes.
+ * Capped at `maxDots` in all: your own lines first, then the busiest.
+ */
+export function pulseLanes(view: Pick<WorldView, "agents" | "coordinators" | "links" | "yourRequests">, layout: WorldLayout, maxDots?: number): PulseLane[] {
+  const cap = typeof maxDots === "number" ? maxDots : PULSE_MAX_DOTS;
+  const path = yourPath(view);
+  const hubs: Record<string, HubNode> = {};
+  layout.hubs.forEach((h) => (hubs[h.id] = h));
+  const lanes: PulseLane[] = [];
+  for (const node of layout.agents) {
+    const hub = hubs[node.hubId];
+    if (!hub) continue;
+    const act = activityOf(node.row.agent);
+    const count = machinePulseCount(act);
+    if (count === 0) continue;
+    const out = act.streaming > 0;
+    lanes.push({
+      id: "spoke:" + node.id, kind: "spoke",
+      x1: out ? node.x : hub.x, y1: out ? node.y : hub.y, x2: out ? hub.x : node.x, y2: out ? hub.y : node.y,
+      twoWay: false, count, periodMs: out ? pulsePeriod(act.callsPerMin) : PULSE_PERIODS[3],
+      level: pulseLevel(count, act.callsPerMin), yours: path.machines.indexOf(node.id) >= 0, faint: false, heartbeat: false
+    });
+  }
+  for (const link of view.links) {
+    const a = hubs[link.from], b = hubs[link.to];
+    if (!a || !b) continue;
+    const work = link.workPerMin || 0;
+    const gossip = link.gossipPerMin || 0;
+    const count = meshPulseCount(work);
+    const up = a.coordinator.reachable && b.coordinator.reachable;
+    lanes.push({
+      id: "mesh:" + [link.from, link.to].sort().join("|"), kind: "mesh",
+      x1: a.x, y1: a.y, x2: b.x, y2: b.y, twoWay: count > 1,
+      count: count > 0 ? count : gossip > 0 && up ? 1 : 0,
+      periodMs: count > 0 ? pulsePeriod(work) : PULSE_PERIODS[3],
+      level: pulseLevel(count, work), yours: false, faint: count === 0, heartbeat: count === 0 && gossip === 0 && up
+    });
+  }
+  if (layout.you) {
+    for (const hub of layout.hubs) {
+      const mine = path.coordinators[hub.id];
+      const linked = typeof hub.coordinator.myRttMs === "number";
+      if (!mine && !linked) continue;
+      const count = mine ? Math.min(PULSE_MAX_PER_LANE, mine.count) : 0;
+      const toYou = !!mine && mine.streaming;
+      lanes.push({
+        id: "you:" + hub.id, kind: "you",
+        x1: toYou ? hub.x : layout.you.x, y1: toYou ? hub.y : layout.you.y, x2: toYou ? layout.you.x : hub.x, y2: toYou ? layout.you.y : hub.y,
+        twoWay: false, count, periodMs: toYou ? PULSE_PERIODS[1] : PULSE_PERIODS[2],
+        level: pulseLevel(count, 0), yours: count > 0, faint: false, heartbeat: count === 0 && hub.coordinator.reachable
+      });
+    }
+  }
+  // The cap: your own lines first, then the busiest; a lane past it keeps its static level only.
+  const order = lanes.slice().sort((x, y) => Number(y.yours) - Number(x.yours) || Number(x.faint) - Number(y.faint) || y.count - x.count || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  let left = Math.max(0, cap);
+  for (const lane of order) {
+    const take = Math.min(lane.count, left);
+    lane.count = take;
+    left -= take;
+  }
+  return lanes;
+}
+
+/** Dots a set of lanes draws in all. */
+export function pulseDotCount(lanes: readonly PulseLane[]): number {
+  return lanes.reduce((n, l) => n + l.count, 0);
+}
+
+/**
+ * SVG `begin` for dot `index` of a lane, so it sits where the wall clock says: a graph drawn at
+ * `clockMs` (its SVG timeline starting then) shows every dot at the same phase as the one before it.
+ */
+export function pulseBegin(lane: Pick<PulseLane, "periodMs" | "count">, index: number, clockMs: number): string {
+  const p = lane.periodMs;
+  const offset = (((clockMs % p) + (index * p) / Math.max(1, lane.count)) % p + p) % p;
+  return "-" + (offset / 1000).toFixed(3) + "s";
+}
+
+/** Same for a heartbeat line (one breath every HEARTBEAT_MS, on the wall clock). */
+export function heartbeatBegin(clockMs: number): string {
+  return "-" + ((((clockMs % HEARTBEAT_MS) + HEARTBEAT_MS) % HEARTBEAT_MS) / 1000).toFixed(3) + "s";
+}
+
+export function plural(n: number, one: string): string {
+  return n + " " + one + (n === 1 ? "" : "s");
+}
+
+/** The details panel's line: "Serving 2 calls now · 14 calls in the last minute". */
+export function activityText(a: WorldAgent): string {
+  const act = activityOf(a);
+  const now = act.callsNow > 0 ? "Serving " + plural(act.callsNow, "call") + " now" : "Not serving any calls now";
+  return now + " · " + (act.callsPerMin > 0 ? plural(act.callsPerMin, "call") + " in the last minute" : "none in the last minute");
+}
+
+/** For screen readers: "3 machines busy; your request is running on mac-•••30e5". */
+export function activitySummary(view: Pick<WorldView, "agents" | "coordinators" | "links" | "yourRequests">, selfAgentId?: string): string {
+  const busy = view.agents.filter((a) => activityOf(a).callsNow > 0).length;
+  const parts = [busy === 0 ? "No machines busy" : plural(busy, "machine") + " busy"];
+  const path = yourPath(view);
+  const byId: Record<string, WorldAgent> = {};
+  view.agents.forEach((a) => (byId[a.id] = a));
+  const running = path.requests.filter((r) => r.machineKey && byId[r.machineKey]);
+  const names: string[] = [];
+  running.forEach((r) => {
+    const n = displayName(byId[r.machineKey as string], selfAgentId);
+    if (names.indexOf(n) < 0) names.push(n);
+  });
+  const waiting = path.requests.length - running.length;
+  if (running.length === 1) parts.push("your request is running on " + names[0]);
+  else if (running.length > 1) parts.push(running.length + " of your requests are running, on " + names.slice(0, 3).join(", ") + (names.length > 3 ? " and " + (names.length - 3) + " more" : ""));
+  if (waiting > 0) parts.push(path.requests.length === 1 ? "your request is waiting for a machine" : waiting === 1 ? "1 of your requests is waiting for a machine" : waiting + " of your requests are waiting for a machine");
+  const work = view.links.reduce((n, l) => n + (l.workPerMin || 0), 0);
+  if (work > 0) parts.push(plural(work, "call") + " a minute crossing between coordinators");
+  return parts.join("; ") + ".";
 }

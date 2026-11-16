@@ -20,6 +20,13 @@ import { settingsPage } from "./settings-shell.js";
  * by pure functions (WORLD_RENDER_SCRIPT) so tests can render it without a DOM; everything from the
  * network goes through escapeHtml.
  *
+ * Pulses: dots travel along the lines while calls are in flight (W.pulseLanes; SVG animateMotion,
+ * capped at W.PULSE_MAX_DOTS). Each dot's `begin` is set from the wall clock (W.pulseBegin), so the
+ * graph, rebuilt on every refresh and hover, carries on rather than restarting. Your own requests
+ * light the path You → coordinator → machine in your accent. Reduced motion draws no moving dots:
+ * line weight shows the load and a "Live" badge says the view is live. A hidden tab pauses the
+ * animations (SVGSVGElement.pauseAnimations). A text summary is there for screen readers.
+ *
  * The admin dashboard at /portal/settings/network (settings-network.ts) is a different page.
  */
 export const WORLD_REFRESH_MS = 15_000;
@@ -33,6 +40,8 @@ export const WORLD_VIEW_BROWSER_LIB = [
   `var STATUS_ORDER = ${JSON.stringify(W.STATUS_ORDER)};`,
   `var CONTINENT_X = ${JSON.stringify(W.CONTINENT_X)};`,
   `var RING_MIN = ${W.RING_MIN}, RING_MAX = ${W.RING_MAX}, CELL = ${W.CELL}, MS_LO = ${W.MS_LO}, MS_HI = ${W.MS_HI};`,
+  `var PULSE_MAX_DOTS = ${W.PULSE_MAX_DOTS}, PULSE_MAX_PER_LANE = ${W.PULSE_MAX_PER_LANE}, HEARTBEAT_MS = ${W.HEARTBEAT_MS};`,
+  `var PULSE_PERIODS = ${JSON.stringify(W.PULSE_PERIODS)};`,
   ...[
     W.lanMs,
     W.estimateMs,
@@ -52,7 +61,20 @@ export const WORLD_VIEW_BROWSER_LIB = [
     W.lanDistance,
     W.nodeRadius,
     W.worldLayout,
-    W.hostOf
+    W.hostOf,
+    W.activityOf,
+    W.pulsePeriod,
+    W.pulseLevel,
+    W.machinePulseCount,
+    W.meshPulseCount,
+    W.yourPath,
+    W.pulseLanes,
+    W.pulseDotCount,
+    W.pulseBegin,
+    W.heartbeatBegin,
+    W.plural,
+    W.activityText,
+    W.activitySummary
   ].map((f) => f.toString())
 ].join("\n");
 
@@ -102,7 +124,8 @@ export const WORLD_PING_SCRIPT = `
 
 /**
  * Pure HTML builders (plain JS on top of WORLD_VIEW_BROWSER_LIB and escapeHtml). `s` is the page
- * state: { mode, scope, model, sortKey, sortDir, selectedId, hoverId, focusIndex }.
+ * state: { mode, scope, model, sortKey, sortDir, selectedId, hoverId, focusIndex, reducedMotion,
+ * paused, clockMs }.
  */
 export const WORLD_RENDER_SCRIPT = `
     var SORTS = [["latency", "Nearest"], ["region", "Region"], ["model", "Model"], ["status", "Status"]];
@@ -121,8 +144,24 @@ export const WORLD_RENDER_SCRIPT = `
     function wvDerive(view, s) {
       var rows = rowsFor(view);
       var visible = sortRows(filterRows(rows, { scope: s.scope, model: s.model }), s.sortKey, s.sortDir);
-      return { rows: rows, visible: visible, layout: worldLayout(view, visible), nearest: nearestPeers(rows) };
+      var layout = worldLayout(view, visible);
+      return { rows: rows, visible: visible, layout: layout, nearest: nearestPeers(rows), lanes: pulseLanes(view, layout), path: yourPath(view) };
     }
+
+    // One travelling dot (SVG animateMotion; its begin is on the wall clock, see pulseBegin).
+    function wvDotHtml(lane, i, clockMs) {
+      var back = lane.twoWay && i % 2 === 1;
+      var p = back ? "M" + lane.x2 + " " + lane.y2 + " L" + lane.x1 + " " + lane.y1 : "M" + lane.x1 + " " + lane.y1 + " L" + lane.x2 + " " + lane.y2;
+      var t = "dur='" + lane.periodMs + "ms' begin='" + pulseBegin(lane, i, clockMs) + "' repeatCount='indefinite'";
+      return "<circle class='wv-pulse k-" + lane.kind + (lane.yours ? " yours" : "") + (lane.faint ? " faint" : "") + "' r='" + (lane.kind === "mesh" ? 3.5 : 2.8) + "' opacity='0'>" +
+        "<animateMotion " + t + " path='" + p + "'/>" +
+        "<animate attributeName='opacity' values='0;1;1;0' keyTimes='0;0.12;0.82;1' " + t + "/></circle>";
+    }
+    function wvLaneOf(d, id) {
+      for (var i = 0; i < d.lanes.length; i++) if (d.lanes[i].id === id) return d.lanes[i];
+      return null;
+    }
+    function wvLvl(lane) { return lane && lane.level ? " lvl-" + lane.level : ""; }
 
     function wvStatsHtml(view, d) {
       var t = view.totals;
@@ -146,7 +185,10 @@ export const WORLD_RENDER_SCRIPT = `
       var showLabels = d.visible.length <= 24;
       var focus = Math.min(Math.max(0, s.focusIndex), Math.max(0, L.agents.length - 1));
       var out = [];
-      out.push("<svg class='wv-graph' viewBox='0 0 " + L.width + " " + L.height + "' role='group' aria-label='Network graph: " + wvPlural(L.hubs.length, "coordinator") + " and " + wvPlural(L.agents.length, "machine") + ". Arrow keys move between machines, Enter pins a machine&#39;s details.'>");
+      var still = !!s.reducedMotion;
+      var clockMs = typeof s.clockMs === "number" ? s.clockMs : Date.now();
+      var path = d.path;
+      out.push("<svg class='wv-graph" + (still ? " wv-still" : "") + (s.paused ? " wv-paused" : "") + "' viewBox='0 0 " + L.width + " " + L.height + "' role='group' aria-describedby='wvActivity' aria-label='Network graph: " + wvPlural(L.hubs.length, "coordinator") + " and " + wvPlural(L.agents.length, "machine") + ". Arrow keys move between machines, Enter pins a machine&#39;s details.'>");
       L.rings.forEach(function (ring) {
         var hub = hubById[ring.hubId];
         if (!hub) return;
@@ -156,20 +198,34 @@ export const WORLD_RENDER_SCRIPT = `
       view.links.forEach(function (link) {
         var a = hubById[link.from], b = hubById[link.to];
         if (!a || !b) return;
-        out.push("<line class='wv-clink' x1='" + a.x + "' y1='" + a.y + "' x2='" + b.x + "' y2='" + b.y + "' aria-hidden='true'/>");
+        var mesh = wvLaneOf(d, "mesh:" + [link.from, link.to].sort().join("|"));
+        out.push("<line class='wv-clink" + wvLvl(mesh) + "' x1='" + a.x + "' y1='" + a.y + "' x2='" + b.x + "' y2='" + b.y + "' aria-hidden='true'/>");
+        if (mesh && mesh.heartbeat && !still) out.push("<line class='wv-beat' x1='" + a.x + "' y1='" + a.y + "' x2='" + b.x + "' y2='" + b.y + "' aria-hidden='true'><animate attributeName='stroke-opacity' values='0;0.5;0;0' keyTimes='0;0.08;0.22;1' dur='" + HEARTBEAT_MS + "ms' begin='" + heartbeatBegin(clockMs) + "' repeatCount='indefinite'/></line>");
         out.push("<text class='wv-clink-label' x='" + (a.x + b.x) / 2 + "' y='" + ((a.y + b.y) / 2 - 8) + "' text-anchor='middle' aria-hidden='true'>" + escapeHtml(formatMs(link.rttMs)) + "</text>");
       });
       if (L.you) {
         L.hubs.forEach(function (hub) {
-          if (typeof hub.coordinator.myRttMs !== "number") return;
-          out.push("<line class='wv-you-link' x1='" + L.you.x + "' y1='" + L.you.y + "' x2='" + hub.x + "' y2='" + hub.y + "' aria-hidden='true'/>");
-          out.push("<text class='wv-you-link-label' x='" + ((L.you.x + hub.x) / 2 + 6) + "' y='" + ((L.you.y + hub.y) / 2 + 40) + "' aria-hidden='true'>" + escapeHtml(formatMs(hub.coordinator.myRttMs)) + "</text>");
+          var lane = wvLaneOf(d, "you:" + hub.id);
+          if (!lane) return;
+          out.push("<line class='wv-you-link" + (lane.yours ? " yours" : "") + "' x1='" + L.you.x + "' y1='" + L.you.y + "' x2='" + hub.x + "' y2='" + hub.y + "' aria-hidden='true'/>");
+          if (lane.heartbeat && !still) out.push("<line class='wv-beat' x1='" + L.you.x + "' y1='" + L.you.y + "' x2='" + hub.x + "' y2='" + hub.y + "' aria-hidden='true'><animate attributeName='stroke-opacity' values='0;0.35;0;0' keyTimes='0;0.08;0.22;1' dur='" + HEARTBEAT_MS + "ms' begin='" + heartbeatBegin(clockMs + HEARTBEAT_MS / 2) + "' repeatCount='indefinite'/></line>");
+          if (typeof hub.coordinator.myRttMs === "number") out.push("<text class='wv-you-link-label' x='" + ((L.you.x + hub.x) / 2 + 6) + "' y='" + ((L.you.y + hub.y) / 2 + 40) + "' aria-hidden='true'>" + escapeHtml(formatMs(hub.coordinator.myRttMs)) + "</text>");
         });
       }
       L.agents.forEach(function (node) {
         var hub = hubById[node.hubId];
-        if (hub) out.push("<line class='wv-spoke" + (detailId === node.id ? " on" : "") + "' x1='" + hub.x + "' y1='" + hub.y + "' x2='" + node.x + "' y2='" + node.y + "' aria-hidden='true'/>");
+        var lane = wvLaneOf(d, "spoke:" + node.id);
+        if (hub) out.push("<line class='wv-spoke" + wvLvl(lane) + (lane && lane.yours ? " yours" : "") + (detailId === node.id ? " on" : "") + "' x1='" + hub.x + "' y1='" + hub.y + "' x2='" + node.x + "' y2='" + node.y + "' aria-hidden='true'/>");
       });
+      // Busy machines glow softly (static), under the dots and the nodes.
+      L.agents.forEach(function (node) {
+        if (activityOf(node.row.agent).callsNow > 0) out.push("<circle class='wv-glow' cx='" + node.x + "' cy='" + node.y + "' r='" + (node.r + 7) + "' aria-hidden='true'/>");
+      });
+      if (!still) {
+        out.push("<g class='wv-pulses' aria-hidden='true'>");
+        d.lanes.forEach(function (lane) { for (var i = 0; i < lane.count; i++) out.push(wvDotHtml(lane, i, clockMs)); });
+        out.push("</g>");
+      }
       L.hubs.forEach(function (hub) {
         var c = hub.coordinator;
         out.push("<g class='wv-hub" + (c.reachable ? "" : " down") + "' transform='translate(" + hub.x + " " + hub.y + ")'>" +
@@ -183,11 +239,16 @@ export const WORLD_RENDER_SCRIPT = `
         out.push("<g data-node='" + escapeHtml(a.id) + "' data-index='" + i + "' class='wv-node st-" + escapeHtml(a.status) + (a.mine ? " mine" : "") + (sel ? " selected" : "") +
           "' transform='translate(" + node.x + " " + node.y + ")' role='button' tabindex='" + (i === focus ? "0" : "-1") + "' aria-pressed='" + sel + "' aria-label='" + escapeHtml(wvNodeLabel(node.row)) + "'>" +
           "<circle r='" + node.r + "'/>" + (a.mine ? "<circle class='wv-mine-ring' r='" + (node.r + 4) + "'/>" : "") +
+          (path.machines.indexOf(a.id) >= 0 ? "<circle class='wv-serving-ring' r='" + (node.r + (a.mine ? 8 : 5)) + "'/>" : "") +
           (a.mine || showLabels ? "<text y='" + (node.r + 13) + "' text-anchor='middle' aria-hidden='true'>" + escapeHtml(a.mine ? displayName(a) : a.label) + "</text>" : "") + "</g>");
       });
       if (L.you) out.push("<g class='wv-you' transform='translate(" + L.you.x + " " + L.you.y + ")' aria-hidden='true'><circle r='10'/><text y='26' text-anchor='middle'>You</text></g>");
       out.push("</svg>");
-      out.push("<div class='wv-legend' aria-hidden='true'><span><i class='wv-dot idle'></i>Idle</span><span><i class='wv-dot busy'></i>Busy</span><span><i class='wv-dot stale'></i>Not seen lately</span><span><i class='wv-dot mine'></i>Yours</span><span>Distance from a coordinator: its round trip to the machine. Size: model slots.</span></div>");
+      out.push("<p class='wv-vh' id='wvActivity'>" + escapeHtml(activitySummary(view)) + "</p>");
+      out.push("<div class='wv-legend' aria-hidden='true'>" + (still ? "<span class='wv-live'><i class='wv-dot idle'></i>Live</span>" : "") +
+        "<span><i class='wv-dot idle'></i>Idle</span><span><i class='wv-dot busy'></i>Busy</span><span><i class='wv-dot stale'></i>Not seen lately</span><span><i class='wv-dot mine'></i>Yours</span>" +
+        "<span><i class='wv-dot pulse'></i>" + (still ? "Thicker line: more calls" : "Moving dots: calls in flight") + "</span><span><i class='wv-dot path'></i>Your request</span>" +
+        "<span>Distance from a coordinator: its round trip to the machine. Size: model slots.</span></div>");
       return out.join("");
     }
 
@@ -202,8 +263,10 @@ export const WORLD_RENDER_SCRIPT = `
     function wvDetailsHtml(view, row) {
       if (!row) return "<h3>Select a machine</h3><p class='muted'>Hover or select a machine to see its models, class, region, load and how far it is from you.</p>";
       var a = row.agent;
+      var serving = yourPath(view).machines.indexOf(a.id) >= 0;
       return "<h3 class='wv-name'>" + escapeHtml(displayName(a)) + "</h3>" +
-        "<span class='wv-badges'><span class='wv-pill st-" + escapeHtml(a.status) + "'>" + wvStatusText(a.status) + "</span>" + (a.mine ? "<span class='wv-pill yours'>Yours</span>" : "") + "</span>" +
+        "<span class='wv-badges'><span class='wv-pill st-" + escapeHtml(a.status) + "'>" + wvStatusText(a.status) + "</span>" + (a.mine ? "<span class='wv-pill yours'>Yours</span>" : "") + (serving ? "<span class='wv-pill yours'>Serving you</span>" : "") + "</span>" +
+        "<p class='wv-activity'>" + escapeHtml(activityText(a)) + "</p>" +
         "<dl>" +
         "<dt>Latency to you</dt><dd>" + escapeHtml(formatMs(row.estimateMs, true)) + " <span class='muted'>estimate</span></dd>" +
         "<dt>Region</dt><dd>" + escapeHtml(regionText(a) + (a.continent ? " · " + continentName(a.continent) : "")) + "</dd>" +
@@ -285,7 +348,22 @@ export function worldPageContent(): string {
       .wv-clink-label, .wv-you-link-label { fill: var(--text-secondary); font-size: 11px; }
       .wv-you-link { stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 5 5; }
       .wv-spoke { stroke: var(--border-strong); stroke-width: 1; }
+      .wv-spoke.lvl-1 { stroke: var(--accent-secondary); stroke-opacity: 0.5; stroke-width: 1.5; }
+      .wv-spoke.lvl-2 { stroke: var(--accent-secondary); stroke-opacity: 0.65; stroke-width: 2.25; }
+      .wv-spoke.lvl-3 { stroke: var(--accent-secondary); stroke-opacity: 0.8; stroke-width: 3; }
+      .wv-clink.lvl-1 { opacity: 0.8; stroke-width: 3; }
+      .wv-clink.lvl-2 { opacity: 0.9; stroke-width: 3.75; }
+      .wv-clink.lvl-3 { opacity: 1; stroke-width: 4.5; }
+      .wv-spoke.yours, .wv-you-link.yours { stroke: var(--brand); stroke-opacity: 1; stroke-width: 2.5; stroke-dasharray: none; }
       .wv-spoke.on { stroke: var(--brand); stroke-width: 2; }
+      .wv-beat { stroke: var(--accent-secondary); stroke-width: 5; stroke-opacity: 0; stroke-linecap: round; }
+      .wv-glow { fill: color-mix(in srgb, var(--accent-secondary) 16%, transparent); stroke: color-mix(in srgb, var(--accent-secondary) 35%, transparent); stroke-width: 1; }
+      .wv-pulse { fill: var(--accent-secondary); stroke: var(--bg-surface); stroke-width: 1; }
+      .wv-pulse.yours { fill: var(--brand); }
+      .wv-pulse.faint { fill-opacity: 0.45; stroke-opacity: 0.45; }
+      .wv-node .wv-serving-ring { fill: none; stroke: var(--brand); stroke-width: 2; stroke-dasharray: 3 2; }
+      .wv-paused .wv-pulses { visibility: hidden; }
+      @media (prefers-reduced-motion: reduce) { .wv-pulses, .wv-beat { display: none; } }
       .wv-hub circle { fill: var(--accent-secondary); stroke: var(--bg-surface); stroke-width: 3; }
       .wv-hub.down circle { fill: var(--muted); }
       .wv-hub-region { fill: var(--on-accent); font-size: 12px; font-weight: 700; letter-spacing: 0.04em; }
@@ -308,6 +386,10 @@ export function worldPageContent(): string {
       .wv-dot.idle { background: var(--green); }
       .wv-dot.busy { background: var(--yellow); }
       .wv-dot.mine { background: none; box-shadow: inset 0 0 0 2px var(--text); }
+      .wv-dot.pulse { width: 6px; height: 6px; background: var(--accent-secondary); }
+      .wv-dot.path { width: 14px; height: 3px; border-radius: 2px; background: var(--brand); }
+      .wv-live { font-weight: 600; color: var(--text); }
+      .wv-activity { font-size: var(--fs-xs); color: var(--text); }
       .wv-details { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
       .wv-details h3 { margin: 0; font-size: var(--fs-base); font-weight: 600; }
       .wv-details .wv-name { font-family: var(--font-mono); word-break: break-all; }
@@ -392,7 +474,8 @@ export function worldPageScript(): string {
     ${WORLD_RENDER_SCRIPT}
     (function () {
       var $ = function (id) { return document.getElementById(id); };
-      var s = { mode: "graph", scope: "all", model: "", sortKey: "latency", sortDir: "asc", selectedId: null, hoverId: null, focusIndex: 0 };
+      var motionQuery = window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
+      var s = { mode: "graph", scope: "all", model: "", sortKey: "latency", sortDir: "asc", selectedId: null, hoverId: null, focusIndex: 0, reducedMotion: !!(motionQuery && motionQuery.matches), paused: document.hidden, clockMs: 0 };
       var view = null;
       var myRtt = {};
       var pingedAt = 0;
@@ -437,7 +520,9 @@ export function worldPageScript(): string {
         $("wvGraphWrap").classList.toggle("hidden", s.mode !== "graph");
         $("wvCards").classList.toggle("hidden", s.mode !== "cards");
         if (s.mode === "graph") {
+          s.clockMs = Date.now();
           $("wvGraph").innerHTML = wvGraphHtml(v, d, s);
+          syncPause();
           var detailId = s.hoverId || s.selectedId;
           $("wvDetails").innerHTML = wvDetailsHtml(v, d.rows.find(function (r) { return r.agent.id === detailId; }) || null);
           if (focusedNode) {
@@ -498,7 +583,19 @@ export function worldPageScript(): string {
         }
         if (!document.hidden) timer = setTimeout(refresh, ${WORLD_REFRESH_MS});
       }
-      document.addEventListener("visibilitychange", function () { if (!document.hidden) refresh(); });
+      // A hidden tab pauses the pulses; showing it again resumes them (and refreshes).
+      function syncPause() {
+        var svg = $("wvGraph").querySelector("svg");
+        if (!svg) return;
+        svg.classList.toggle("wv-paused", s.paused);
+        try { if (s.paused) svg.pauseAnimations(); else svg.unpauseAnimations(); } catch (e) {}
+      }
+      document.addEventListener("visibilitychange", function () {
+        s.paused = document.hidden;
+        syncPause();
+        if (!document.hidden) refresh();
+      });
+      if (motionQuery && motionQuery.addEventListener) motionQuery.addEventListener("change", function () { s.reducedMotion = motionQuery.matches; render(); });
 
       document.querySelectorAll("[data-mode]").forEach(function (b) { b.addEventListener("click", function () { s.mode = b.getAttribute("data-mode"); render(); }); });
       document.querySelectorAll("[data-scope]").forEach(function (b) { b.addEventListener("click", function () { s.scope = b.getAttribute("data-scope"); render(); }); });

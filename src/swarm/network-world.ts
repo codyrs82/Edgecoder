@@ -15,6 +15,14 @@
  * only, mesh token); the one asked merges its peers' views into the public answer. The internal
  * fields (`agentId`, `ownerTag`, `lastSeenMs`, `netTag`, `lan`) never leave `toPublicWorld`.
  *
+ * Activity (the graph's pulses). Every machine carries `activity`: calls it runs now, how many of
+ * them are streaming a reply, and calls it took in the last minute. Counts only: never who asked.
+ * Each coordinator also reports, coordinator to coordinator only, the model calls queued or
+ * running on it as (requester tag, masked machine id, state); `toPublicWorld` keeps only the
+ * caller's own (`yourRequests`) and drops the rest, so no answer says which other account is
+ * talking to which machine. Mesh links carry the work and gossip that crossed them in the last
+ * minute.
+ *
  * LAN proximity (src/swarm/lan-proximity.ts). A machine's private LAN addresses and whether it
  * connects from the same public network as the caller are shared only with the machine's owner,
  * and only when the caller is a signed agent (the desktop app, which probes them itself): never
@@ -59,6 +67,38 @@ export interface LocalWorldAgent {
   rttMs: number | null;
   /** Internal (coordinator to coordinator, for best-fit routing): what scoring the agent needs. */
   perf?: WorldAgentPerf;
+  /** What the machine is doing now (counts only; never who it is serving). */
+  activity: WorldAgentActivity;
+}
+
+/** A machine's load, for the graph's pulses and the details panel. */
+export interface WorldAgentActivity {
+  /** Calls (subtasks) it holds now. */
+  callsNow: number;
+  /** Of those, model calls streaming a reply now (the rest are starting: the prompt is being read). */
+  streaming: number;
+  /** Calls it took in the last minute. */
+  callsPerMin: number;
+}
+
+/**
+ * Internal (coordinator to coordinator only): one model call queued or running on a coordinator,
+ * tagged with its requester (worldOwnerTag), so the coordinator asked can show the caller theirs.
+ */
+export interface LocalWorldRequest {
+  tag: string;
+  /** Masked id of the machine running it (null while queued). */
+  machine: string | null;
+  state: WorldRequestState;
+}
+export type WorldRequestState = "queued" | "starting" | "streaming";
+
+/** One of the caller's own requests in flight: where it is (coordinator id, masked machine id). */
+export interface WorldYourRequest {
+  coordinator: string;
+  /** The masked id (`PublicWorldAgent.id`) of the machine running it; null while queued. */
+  machineKey: string | null;
+  state: WorldRequestState;
 }
 
 /** An agent's routing facts (src/swarm/coordinator/routing.ts agentPerf). */
@@ -91,6 +131,10 @@ export interface WorldLink {
   to: string;
   /** Measured round trip between the two coordinators, ms (null when not measured). */
   rttMs: number | null;
+  /** Task offers, claims, results and calls sent elsewhere across the link in the last minute. */
+  workPerMin?: number;
+  /** Other mesh messages across the link in the last minute. */
+  gossipPerMin?: number;
 }
 
 export interface LocalWorld {
@@ -98,6 +142,8 @@ export interface LocalWorld {
   /** Coordinators this one is meshed with and its measured round trip to each. */
   links: WorldLink[];
   agents: LocalWorldAgent[];
+  /** Internal: model calls queued or running here, by requester tag (never passed on to clients). */
+  requests?: LocalWorldRequest[];
   generatedAtMs: number;
 }
 
@@ -129,6 +175,8 @@ export interface PublicWorld {
   agents: PublicWorldAgent[];
   models: Array<{ model: string; agents: number; online: number }>;
   totals: { coordinators: number; agents: number; online: number; busy: number; mine: number; models: number; slots: number; slotsUsed: number };
+  /** The caller's own model calls queued or running, and where (none for an anonymous caller). */
+  yourRequests: WorldYourRequest[];
   /** True when agents were left out to keep the answer bounded. */
   truncated: boolean;
   limits: { maxAgents: number; maxModelsPerAgent: number; maxCoordinators: number };
@@ -137,6 +185,13 @@ export interface PublicWorld {
 export const WORLD_MAX_AGENTS = 500;
 export const WORLD_MAX_MODELS_PER_AGENT = 12;
 export const WORLD_MAX_COORDINATORS = 16;
+/** At most this many of the caller's requests per answer. */
+export const WORLD_MAX_YOUR_REQUESTS = 20;
+/** At most this many tagged requests per coordinator view. */
+export const WORLD_MAX_LOCAL_REQUESTS = 500;
+/** Caps on the activity counts (a malformed peer cannot inflate the pulses). */
+export const WORLD_MAX_CALLS_PER_MIN = 10_000;
+export const WORLD_MAX_LINK_PER_MIN = 100_000;
 /** Agents not seen for this long are left out of the view (stale ones before that are shown as stale). */
 export const WORLD_AGENT_TTL_MS = 15 * 60_000;
 
@@ -236,6 +291,15 @@ export interface AgentFacts {
   sourceIp?: string | null;
   /** Private IPv4 addresses the agent reported. */
   lanAddresses?: readonly string[] | null;
+  /** Model calls it is streaming a reply for now. */
+  streaming?: number;
+  /** Calls it took in the last minute. */
+  callsPerMin?: number;
+}
+
+/** A count bounded to [0, max] (anything not a finite number is 0). */
+export function boundedCount(v: unknown, max: number): number {
+  return typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.min(max, Math.floor(v))) : 0;
 }
 
 export function localWorldAgent(key: Buffer, coordinatorId: string, a: AgentFacts): LocalWorldAgent {
@@ -265,11 +329,18 @@ export function localWorldAgent(key: Buffer, coordinatorId: string, a: AgentFact
     slots,
     slotsUsed: Math.min(slots, Math.max(0, a.claims)),
     coordinatorId,
-    rttMs: a.connected && a.rttMs !== null && Number.isFinite(a.rttMs) ? Math.round(a.rttMs) : null
+    rttMs: a.connected && a.rttMs !== null && Number.isFinite(a.rttMs) ? Math.round(a.rttMs) : null,
+    activity: agentActivity(a.connected ? a.claims : 0, a.connected ? a.streaming : 0, a.callsPerMin)
   };
 }
 
+function agentActivity(callsNow: unknown, streaming: unknown, callsPerMin: unknown): WorldAgentActivity {
+  const now = boundedCount(callsNow, 64);
+  return { callsNow: now, streaming: Math.min(now, boundedCount(streaming, 64)), callsPerMin: boundedCount(callsPerMin, WORLD_MAX_CALLS_PER_MIN) };
+}
+
 const STATUS_ORDER: Record<WorldStatus, number> = { busy: 0, idle: 1, stale: 2 };
+const REQUEST_ORDER: Record<WorldRequestState, number> = { streaming: 0, starting: 1, queued: 2 };
 
 /**
  * Merge this coordinator's view with its peers' into the public answer for one caller.
@@ -289,13 +360,28 @@ export function toPublicWorld(
   const callerTag = callerAccountId ? worldOwnerTag(callerAccountId) : null;
   const coordinators: WorldCoordinator[] = [{ ...self.coordinator, reachable: true, self: true }];
   const linkMap = new Map<string, WorldLink>();
-  const addLink = (l: WorldLink) => {
+  // Each coordinator counts what crossed its own links (what its peers sent it, and what it sent
+  // elsewhere); a link's activity is the sum of its two ends' reports.
+  const linkActivity = new Map<string, Map<string, { work: number; gossip: number }>>();
+  const pairKey = (a: string, b: string) => [a, b].sort().join("\u0000");
+  const addLink = (l: WorldLink, reporter?: string) => {
     if (!l.from || !l.to || l.from === l.to) return;
-    const k = [l.from, l.to].sort().join("\u0000");
+    const k = pairKey(l.from, l.to);
     const prev = linkMap.get(k);
-    if (!prev || (prev.rttMs === null && l.rttMs !== null)) linkMap.set(k, { from: l.from, to: l.to, rttMs: l.rttMs === null ? null : Math.round(l.rttMs) });
+    if (!prev || (prev.rttMs === null && l.rttMs !== null)) linkMap.set(k, { from: prev?.from ?? l.from, to: prev?.to ?? l.to, rttMs: l.rttMs === null ? null : Math.round(l.rttMs) });
+    if (reporter && l.from === reporter) {
+      const byReporter = linkActivity.get(k) ?? new Map<string, { work: number; gossip: number }>();
+      byReporter.set(reporter, { work: boundedCount(l.workPerMin, WORLD_MAX_LINK_PER_MIN), gossip: boundedCount(l.gossipPerMin, WORLD_MAX_LINK_PER_MIN) });
+      linkActivity.set(k, byReporter);
+    }
   };
-  self.links.forEach(addLink);
+  self.links.forEach((l) => addLink(l, self.coordinator.id));
+  const requests: Array<{ coordinator: string; r: LocalWorldRequest }> = [];
+  const takeRequests = (w: LocalWorld) => {
+    if (!callerAccountId) return;
+    for (const r of (w.requests ?? []).slice(0, WORLD_MAX_LOCAL_REQUESTS)) requests.push({ coordinator: w.coordinator.id, r });
+  };
+  takeRequests(self);
 
   // An agent known to two coordinators (it moved) is shown where it was seen last.
   const byAgent = new Map<string, LocalWorldAgent>();
@@ -311,15 +397,34 @@ export function toPublicWorld(
     if (coordinators.some((c) => c.id === id)) continue;
     if (p.world) {
       coordinators.push({ ...p.world.coordinator, url: p.world.coordinator.url || p.url, reachable: true, self: false });
-      p.world.links.forEach(addLink);
+      p.world.links.forEach((l) => addLink(l, p.world!.coordinator.id));
       p.world.agents.forEach(take);
+      takeRequests(p.world);
     } else {
       coordinators.push({ id, url: p.url, region: null, country: null, continent: null, agents: 0, agentsOnline: 0, reachable: false, self: false });
     }
     addLink({ from: self.coordinator.id, to: id, rttMs: p.rttMs });
   }
   const known = new Set(coordinators.map((c) => c.id));
-  const links = [...linkMap.values()].filter((l) => known.has(l.from) && known.has(l.to));
+  const links = [...linkMap.entries()]
+    .filter(([, l]) => known.has(l.from) && known.has(l.to))
+    .map(([k, l]) => {
+      let work = 0;
+      let gossip = 0;
+      for (const v of linkActivity.get(k)?.values() ?? []) {
+        work += v.work;
+        gossip += v.gossip;
+      }
+      return { ...l, workPerMin: Math.min(WORLD_MAX_LINK_PER_MIN, work), gossipPerMin: Math.min(WORLD_MAX_LINK_PER_MIN, gossip) };
+    });
+  // The caller's own requests only: every other account's are dropped here.
+  const yourRequests: WorldYourRequest[] = callerTag
+    ? requests
+        .filter(({ r }) => r.tag === callerTag)
+        .sort((x, y) => REQUEST_ORDER[x.r.state] - REQUEST_ORDER[y.r.state])
+        .slice(0, WORLD_MAX_YOUR_REQUESTS)
+        .map(({ coordinator, r }) => ({ coordinator, machineKey: r.machine, state: r.state }))
+    : [];
 
   const all = [...byAgent.values()].map((a) => {
     const mine = callerTag !== null && (a.ownerTag === callerTag || a.agentId === callerAccountId);
@@ -390,6 +495,7 @@ export function toPublicWorld(
       slots: online.reduce((n, { a }) => n + a.slots, 0),
       slotsUsed: online.reduce((n, { a }) => n + a.slotsUsed, 0)
     },
+    yourRequests,
     truncated: all.length > kept.length,
     limits: { maxAgents: WORLD_MAX_AGENTS, maxModelsPerAgent: WORLD_MAX_MODELS_PER_AGENT, maxCoordinators: WORLD_MAX_COORDINATORS }
   };
@@ -417,6 +523,12 @@ function parsePerf(raw: unknown): { perf?: WorldAgentPerf } {
   };
 }
 
+/** A peer's `activity` for one agent, bounded; a stale machine is doing nothing. */
+function parseActivity(raw: unknown, status: WorldStatus): WorldAgentActivity {
+  const a = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  return status === "stale" ? agentActivity(0, 0, a.callsPerMin) : agentActivity(a.callsNow, a.streaming, a.callsPerMin);
+}
+
 export function parseLocalWorld(raw: unknown): LocalWorld | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
@@ -437,7 +549,13 @@ export function parseLocalWorld(raw: unknown): LocalWorld | null {
     .slice(0, 64)
     .map((l) => l as Record<string, unknown>)
     .filter((l) => typeof l?.from === "string" && typeof l?.to === "string")
-    .map((l) => ({ from: String(l.from).slice(0, 200), to: String(l.to).slice(0, 200), rttMs: num(l.rttMs) }));
+    .map((l) => ({
+      from: String(l.from).slice(0, 200),
+      to: String(l.to).slice(0, 200),
+      rttMs: num(l.rttMs),
+      workPerMin: boundedCount(l.workPerMin, WORLD_MAX_LINK_PER_MIN),
+      gossipPerMin: boundedCount(l.gossipPerMin, WORLD_MAX_LINK_PER_MIN)
+    }));
   const agents: LocalWorldAgent[] = [];
   for (const item of (Array.isArray(r.agents) ? r.agents : []).slice(0, WORLD_MAX_AGENTS * 2)) {
     const a = item as Record<string, unknown>;
@@ -471,8 +589,18 @@ export function parseLocalWorld(raw: unknown): LocalWorld | null {
       slotsUsed: Math.max(0, Math.min(slots, Math.floor(num(a.slotsUsed) ?? 0))),
       coordinatorId: coordinator.id,
       rttMs: num(a.rttMs),
+      activity: parseActivity(a.activity, status),
       ...parsePerf(a.perf)
     });
   }
-  return { coordinator, links, agents, generatedAtMs: num(r.generatedAtMs) ?? 0 };
+  const requests: LocalWorldRequest[] = [];
+  for (const item of (Array.isArray(r.requests) ? r.requests : []).slice(0, WORLD_MAX_LOCAL_REQUESTS)) {
+    const q = item as Record<string, unknown>;
+    if (!q || typeof q.tag !== "string" || !/^[0-9a-f]{32}$/.test(q.tag)) continue;
+    const state = q.state === "queued" || q.state === "starting" || q.state === "streaming" ? q.state : null;
+    if (!state) continue;
+    const machine = typeof q.machine === "string" && /^[0-9a-f]{4,32}$/.test(q.machine) ? q.machine : null;
+    requests.push({ tag: q.tag, machine: state === "queued" ? null : machine, state });
+  }
+  return { coordinator, links, agents, requests, generatedAtMs: num(r.generatedAtMs) ?? 0 };
 }

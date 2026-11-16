@@ -65,6 +65,7 @@ import { subtaskReserveMsat, rateOracleConfig } from "../economy.js";
 import { persistStatsLedgerRecord } from "../stats-ledger.js";
 import { validatePortalNode } from "../enrollment.js";
 import { grantSubtaskToPeer, hasLiveAgentFor, requestOfferGrant } from "../grants.js";
+import { recordMeshMessage } from "../world-activity.js";
 
 // `fingerprint` (sha256 of the SPKI DER) is what operators list in TRUSTED_COORDINATOR_KEYS and
 // MESH_PEER_ALLOWLIST; `legacyFingerprints` are the PEM-text forms older agent builds compare.
@@ -153,6 +154,8 @@ async function handleMeshIngest(
       peerScore.set(peer.peerId, Math.max(0, (peerScore.get(peer.peerId) ?? 100) - 5));
       return { ok: false, statusCode: 400, error: validation.reason };
     }
+    // Counted for the Network page's mesh-link pulses (work or gossip per minute).
+    recordMeshMessage(peer.peerId, message.type);
   }
   if (message.type === "blacklist_update" && peer) {
     const payload = z

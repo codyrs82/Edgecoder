@@ -4,13 +4,14 @@ import { CLIENT_ESCAPE_JS } from "../../src/portal/pages/escape.js";
 import { registerPortalPages } from "../../src/portal/pages/index.js";
 import { WORLD_RENDER_SCRIPT, WORLD_VIEW_BROWSER_LIB, worldPageScript } from "../../src/portal/pages/settings-world.js";
 import type { WorldView } from "../../src/common/world-view.js";
-import { MY_MACHINE, WORLD } from "./fixtures/world-view.js";
+import { ACTIVE_WORLD, MY_MACHINE, SERVING, WORLD } from "./fixtures/world-view.js";
+import { PULSE_MAX_DOTS } from "../../src/common/world-view.js";
 
 /*
  * Settings > Network for everyone (/portal/settings/world): the shell, its nav entry, and the page's
  * HTML builders run against a world view (they are plain JS, so they run here without a DOM).
  */
-type State = { mode: string; scope: "all" | "mine"; model: string; sortKey: string; sortDir: string; selectedId: string | null; hoverId: string | null; focusIndex: number };
+type State = { mode: string; scope: "all" | "mine"; model: string; sortKey: string; sortDir: string; selectedId: string | null; hoverId: string | null; focusIndex: number; reducedMotion?: boolean; paused?: boolean; clockMs?: number };
 type R = {
   wvDerive(v: WorldView, s: State): any;
   wvStatsHtml(v: WorldView, d: any): string;
@@ -101,7 +102,7 @@ describe("Settings > Network page (everyone)", () => {
   it("graph a11y: one tab stop, every machine a labelled toggle, the svg described", () => {
     const d = R.wvDerive(WORLD, S({ selectedId: WORLD.agents[2].id, focusIndex: 1 }));
     const graph = R.wvGraphHtml(WORLD, d, S({ selectedId: WORLD.agents[2].id, focusIndex: 1 }));
-    expect(graph).toMatch(/^<svg class='wv-graph' viewBox='0 0 \d+ \d+' role='group' aria-label='Network graph: 2 coordinators and 6 machines\. Arrow keys/);
+    expect(graph).toMatch(/^<svg class='wv-graph' viewBox='0 0 \d+ \d+' role='group' aria-describedby='wvActivity' aria-label='Network graph: 2 coordinators and 6 machines\. Arrow keys/);
     const nodes = graph.match(/<g data-node=[^>]*>/g) ?? [];
     expect(nodes).toHaveLength(WORLD.agents.length);
     for (const n of nodes) {
@@ -152,3 +153,72 @@ describe("Settings > Network page (everyone)", () => {
     expect(html).not.toContain("'><b>");
   });
 });
+
+describe("Settings > Network page: pulses", () => {
+  const CLOCK = 1_800_000_000_750;
+  const graphOf = (v: WorldView, over: Partial<State> = {}) => R.wvGraphHtml(v, R.wvDerive(v, S(over)), S({ clockMs: CLOCK, ...over }));
+
+  it("draws travelling dots on the busy lines, and your path in your accent", () => {
+    const html = graphOf(ACTIVE_WORLD);
+    const dots = html.match(/<circle class='wv-pulse[^']*'/g) ?? [];
+    // lin-•••f468 streams 2 replies, the cdg machine starts 1 call, your reply to you, work across the mesh (2).
+    expect(dots).toHaveLength(6);
+    expect(dots.filter((d) => d.includes(" yours"))).toHaveLength(3);
+    expect(html.match(/<animateMotion /g)).toHaveLength(6);
+    expect(html).toContain("begin='-0.750s'");
+    expect(html).toMatch(/<line class='wv-spoke lvl-2 yours'/);
+    expect(html).toMatch(/<line class='wv-you-link yours'/);
+    expect(html).toContain("class='wv-serving-ring'");
+    // Busy machines glow; idle ones don't.
+    expect(html.match(/class='wv-glow'/g)).toHaveLength(2);
+    expect(html).toMatch(/<line class='wv-clink lvl-2'/);
+    // The quiet You → cdg line only breathes.
+    expect(html.match(/<line class='wv-beat'/g)).toHaveLength(1);
+    expect(html).toContain("Moving dots: calls in flight");
+    expect(html).toContain("<p class='wv-vh' id='wvActivity'>2 machines busy; your request is running on lin-•••f468; 12 calls a minute crossing between coordinators.</p>");
+  });
+
+  it("a quiet network has no dots, only a heartbeat on the lines", () => {
+    const html = graphOf({ ...WORLD, agents: WORLD.agents.map((a) => ({ ...a, status: a.status === "busy" ? ("idle" as const) : a.status, slotsUsed: 0 })) });
+    expect(html).not.toContain("wv-pulse ");
+    expect(html).not.toContain("wv-glow");
+    expect(html.match(/<line class='wv-beat'/g)).toHaveLength(3);
+    expect(html).toContain("No machines busy.");
+  });
+
+  it("reduced motion: nothing animated; line weight shows the load and a Live badge", () => {
+    const html = graphOf(ACTIVE_WORLD, { reducedMotion: true });
+    expect(html).not.toMatch(/<animate|wv-pulse|wv-beat/);
+    expect(html).toContain("wv-graph wv-still");
+    expect(html).toMatch(/<line class='wv-spoke lvl-2 yours'/);
+    expect(html).toContain("class='wv-live'");
+    expect(html).toContain("Thicker line: more calls");
+    expect(graphOf(ACTIVE_WORLD)).not.toContain("class='wv-live'");
+  });
+
+  it("a hidden tab pauses the animations", () => {
+    expect(graphOf(ACTIVE_WORLD, { paused: true })).toMatch(/^<svg class='wv-graph wv-paused'/);
+    expect(graphOf(ACTIVE_WORLD)).toMatch(/^<svg class='wv-graph' /);
+    const script = worldPageScript();
+    expect(script).toContain("svg.pauseAnimations()");
+    expect(script).toMatch(/visibilitychange[\s\S]*s\.paused = document\.hidden;[\s\S]*syncPause\(\)/);
+    expect(script).toContain("(prefers-reduced-motion: reduce)");
+  });
+
+  it("the details panel says what a machine is doing, and that it is serving you", () => {
+    const d = R.wvDerive(ACTIVE_WORLD, S());
+    const serving = R.wvDetailsHtml(ACTIVE_WORLD, d.rows.find((r: any) => r.agent.id === SERVING));
+    expect(serving).toContain("Serving 2 calls now · 14 calls in the last minute");
+    expect(serving).toContain("Serving you");
+    const idle = R.wvDetailsHtml(ACTIVE_WORLD, d.rows.find((r: any) => r.agent.label === "lin-•••4e08"));
+    expect(idle).toContain("Not serving any calls now · 1 call in the last minute");
+    expect(idle).not.toContain("Serving you");
+  });
+
+  it("caps the dots on a crowded graph", () => {
+    const agents = Array.from({ length: 60 }, (_, i) => ({ ...ACTIVE_WORLD.agents[0], id: `c${String(i).padStart(9, "0")}`, label: `lin-•••${String(i).padStart(4, "0")}`, status: "busy" as const, activity: { callsNow: 4, streaming: 4, callsPerMin: 90 } }));
+    const html = graphOf({ ...ACTIVE_WORLD, agents });
+    expect((html.match(/<circle class='wv-pulse/g) ?? []).length).toBe(PULSE_MAX_DOTS);
+  });
+});
+

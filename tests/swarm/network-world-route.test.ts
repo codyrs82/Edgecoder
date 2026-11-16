@@ -186,6 +186,68 @@ describe("round trip on the mesh WebSocket", () => {
   });
 });
 
+describe("GET /network/world: activity and your own requests", () => {
+  const someoneElse = "acct-someone-else-private";
+  let mineId = "";
+  let theirsId = "";
+
+  beforeAll(async () => {
+    // The caller's call and another account's, both running on the stranger's machine.
+    const base = { kind: "inference" as const, language: "python" as const, input: "{}", timeoutMs: 60_000, snapshotRef: "inference", requestedModel: "qwen3.5:9b" };
+    mineId = ctx.queue.enqueueSubtask({ ...base, taskId: "world-mine-task", projectMeta: { projectId: `inference:${caller.peerId}`, resourceClass: "gpu", priority: 60 } }).id;
+    theirsId = ctx.queue.enqueueSubtask({ ...base, taskId: "world-theirs-task", projectMeta: { projectId: `inference:${someoneElse}`, resourceClass: "gpu", priority: 60 } }).id;
+    for (let i = 0; i < 2; i++) ctx.queue.claim(stranger.peerId);
+    // The caller's reply is streaming.
+    const { inferenceStreams } = await import("../../src/swarm/coordinator/routes/inference.js");
+    inferenceStreams.open(mineId, "world-mine-task");
+    inferenceStreams.append(mineId, 0, "Hello");
+    route.clearWorldLocalCache();
+  });
+
+  afterAll(() => {
+    ctx.queue.removeHeld(mineId);
+    ctx.queue.removeHeld(theirsId);
+    route.clearWorldLocalCache();
+  });
+
+  test("a busy machine shows how much it is doing, never for whom", async () => {
+    const res = await get(`/network/world?accountId=${caller.peerId}`, { "x-portal-service-token": PORTAL });
+    const body = res.json();
+    const busy = body.agents.find((a: any) => !a.mine);
+    expect(busy.activity).toEqual({ callsNow: 2, streaming: 1, callsPerMin: expect.any(Number) });
+    expect(busy.activity.callsPerMin).toBeGreaterThanOrEqual(2);
+    expect(res.body).not.toContain(someoneElse);
+    expect(res.body).not.toContain(theirsId);
+    expect(res.body).not.toContain(mineId);
+    expect(res.body).not.toMatch(/"tag"|ownerTag|"requests"/);
+  });
+
+  test("the caller sees only their own request, and which machine is serving it", async () => {
+    const body = (await get(`/network/world?accountId=${caller.peerId}`, { "x-portal-service-token": PORTAL })).json();
+    const busy = body.agents.find((a: any) => !a.mine);
+    expect(body.yourRequests).toEqual([{ coordinator: ctx.identity.peerId, machineKey: busy.id, state: "streaming" }]);
+    // The same through the desktop app (signed agent of the same account).
+    const signed = (await get("/network/world", signedHeaders(caller, "/network/world"))).json();
+    expect(signed.yourRequests).toEqual(body.yourRequests);
+  });
+
+  test("another account sees its own request only; nobody's without an account", async () => {
+    const theirs = (await get(`/network/world?accountId=${someoneElse}`, { "x-portal-service-token": PORTAL })).json();
+    expect(theirs.yourRequests).toEqual([{ coordinator: ctx.identity.peerId, machineKey: expect.stringMatching(/^[0-9a-f]{10}$/), state: "starting" }]);
+    const nobody = (await get("/network/world", { "x-portal-service-token": PORTAL })).json();
+    expect(nobody.yourRequests).toEqual([]);
+    const stranger3 = (await get("/network/world", signedHeaders(stranger, "/network/world"))).json();
+    expect(stranger3.yourRequests).toEqual([]);
+  });
+
+  test("peers get the tagged requests (mesh token only); the tags are hashes, not accounts", async () => {
+    const local = (await get("/network/world/local", { "x-mesh-token": MESH })).json();
+    expect(local.requests).toHaveLength(2);
+    for (const r of local.requests) expect(r.tag).toMatch(/^[0-9a-f]{32}$/);
+    expect(JSON.stringify(local.requests)).not.toContain(someoneElse);
+  });
+});
+
 describe("bounds", () => {
   test("rate-limited per caller", () => {
     const limiter = new route.WorldRateLimiter(3, 10);

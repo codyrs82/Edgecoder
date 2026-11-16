@@ -56,3 +56,19 @@ export const WORLD: WorldView = {
   totals: { coordinators: 2, agents: 6, online: 5, busy: 1, mine: 1, models: 2, slots: 12, slotsUsed: 1 },
   truncated: false
 };
+
+/** The same network, busy: the ord machine lin-•••f468 streams your reply, work crosses ord ↔ cdg. */
+export const SERVING = WORLD.agents[1].id;
+export const ACTIVE_WORLD: WorldView = {
+  ...WORLD,
+  links: [{ from: ORD, to: CDG, rttMs: 99, workPerMin: 12, gossipPerMin: 30 }],
+  agents: WORLD.agents.map((a, i) =>
+    i === 1
+      ? { ...a, status: "busy", slotsUsed: 2, activity: { callsNow: 2, streaming: 2, callsPerMin: 14 } }
+      : i === 4
+        ? { ...a, status: "busy", slotsUsed: 1, activity: { callsNow: 1, streaming: 0, callsPerMin: 3 } }
+        : { ...a, activity: { callsNow: 0, streaming: 0, callsPerMin: a.status === "stale" ? 0 : 1 } }
+  ),
+  yourRequests: [{ coordinator: ORD, machineKey: WORLD.agents[1].id, state: "streaming" }],
+  totals: { ...WORLD.totals, busy: 2, slotsUsed: 3 }
+};
