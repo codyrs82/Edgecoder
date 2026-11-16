@@ -1335,6 +1335,38 @@ async function loop(): Promise<void> {
     console.warn(`[agent:${AGENT_ID}] binary integrity check failed (non-fatal): ${String(e)}`);
   }
 
+  /**
+   * The /register body, for the regular registration and the reconnect probe alike. The probe once
+   * sent a short body without the hardware profile, so a coordinator that had restarted classified
+   * the agent as cpu.std (and reset its proven GPU / Apple tier) until the next full registration.
+   */
+  const buildRegisterBody = async (powerTelemetry: ReturnType<typeof readAgentPowerTelemetry>): Promise<Record<string, unknown>> => {
+    if (currentProvider === "ollama-local") installedModelsCache = undefined; // register reads them fresh
+    const installedModels = currentProvider === "ollama-local" ? await installedModelsCached() : [];
+    return {
+      ...(installedModels.length ? { installedModels, activeModel: installedModels.includes(OLLAMA_MODEL) ? OLLAMA_MODEL : installedModels[0] } : {}),
+      agentId: AGENT_ID,
+      ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
+      os: OS,
+      version: appVersion(),
+      mode: effectiveMode,
+      registrationToken: AGENT_REGISTRATION_TOKEN,
+      localModelProvider: currentProvider,
+      clientType: AGENT_CLIENT_TYPE,
+      ...(AGENT_REGION ? { region: AGENT_REGION } : {}),
+      maxConcurrentTasks: MAX_CONCURRENT_TASKS,
+      sandboxMode: SANDBOX_MODE,
+      powerTelemetry,
+      publicKeyPem: keys.publicKeyPem,
+      x25519PublicKey: envelopeKeys.publicKey.toString("base64"),
+      hardwareProfile: HARDWARE_PROFILE,
+      ...(BENCHMARK_ENABLED ? { challengeKinds: currentProvider === "ollama-local" ? ["cpu", "gpu"] : ["cpu"] } : {}),
+      ...(lastBenchmark ? { benchmark: lastBenchmark } : {}),
+      ...(ASK_MSAT_PER_CREDIT !== undefined ? { askMsatPerCredit: ASK_MSAT_PER_CREDIT } : {}),
+      ...(binaryIntegrity ? { binaryIntegrity } : {})
+    };
+  };
+
   let bleTaskTestDone = false;
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -1397,30 +1429,7 @@ async function loop(): Promise<void> {
             }
           }
           if (shouldRegister({ registeredWithUrl, lastRegisteredAtMs }, coordinator.url, Date.now(), REGISTER_REFRESH_MS)) {
-            if (currentProvider === "ollama-local") installedModelsCache = undefined; // register reads them fresh
-            const installedModels = currentProvider === "ollama-local" ? await installedModelsCached() : [];
-            const registerBody = {
-              ...(installedModels.length ? { installedModels, activeModel: installedModels.includes(OLLAMA_MODEL) ? OLLAMA_MODEL : installedModels[0] } : {}),
-              agentId: AGENT_ID,
-              ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
-              os: OS,
-              version: appVersion(),
-              mode: effectiveMode,
-              registrationToken: AGENT_REGISTRATION_TOKEN,
-              localModelProvider: currentProvider,
-              clientType: AGENT_CLIENT_TYPE,
-              ...(AGENT_REGION ? { region: AGENT_REGION } : {}),
-              maxConcurrentTasks: MAX_CONCURRENT_TASKS,
-              sandboxMode: SANDBOX_MODE,
-              powerTelemetry,
-              publicKeyPem: keys.publicKeyPem,
-              x25519PublicKey: envelopeKeys.publicKey.toString("base64"),
-              hardwareProfile: HARDWARE_PROFILE,
-              ...(BENCHMARK_ENABLED ? { challengeKinds: currentProvider === "ollama-local" ? ["cpu", "gpu"] : ["cpu"] } : {}),
-              ...(lastBenchmark ? { benchmark: lastBenchmark } : {}),
-              ...(ASK_MSAT_PER_CREDIT !== undefined ? { askMsatPerCredit: ASK_MSAT_PER_CREDIT } : {}),
-              ...(binaryIntegrity ? { binaryIntegrity } : {})
-            };
+            const registerBody = await buildRegisterBody(powerTelemetry);
             const registerResponse = (await post("/register", registerBody, {
               signed: true,
             })) as RegisterReply & {
@@ -1910,18 +1919,7 @@ async function loop(): Promise<void> {
             // Reconnecting: the coordinator proves its key again before we register.
             await verifyCoordinatorOrThrow({ force: true });
             // Re-register first (coordinator may have restarted and lost agent state)
-            const registerBody = {
-              agentId: AGENT_ID,
-              ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
-              os: OS, version: appVersion(), mode: effectiveMode,
-              registrationToken: AGENT_REGISTRATION_TOKEN,
-              localModelProvider: currentProvider,
-              clientType: AGENT_CLIENT_TYPE,
-              ...(AGENT_REGION ? { region: AGENT_REGION } : {}),
-              maxConcurrentTasks: MAX_CONCURRENT_TASKS,
-              powerTelemetry,
-              publicKeyPem: keys.publicKeyPem
-            };
+            const registerBody = await buildRegisterBody(powerTelemetry);
             // Keep the mesh token from this register too: an agent that went offline before its first
             // registration has none, and without it every heartbeat is refused (mesh_unauthorized).
             const probeRegister = (await post("/register", registerBody, { retries: 0, timeoutMs: 5000, signed: true })) as RegisterReply & { meshToken?: string; rewardAccountId?: string };

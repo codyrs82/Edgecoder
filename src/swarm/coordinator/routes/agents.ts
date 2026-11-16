@@ -103,7 +103,15 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
     }
     const body = parsedRegister.data;
     const now = Date.now();
-    const hardwareClass = classifyHardware(body.hardwareProfile, rateOracleConfig.computeClasses);
+    // A registration without a hardware profile (the agent's reconnect probe after a coordinator
+    // restart, older agents) makes no new claim: it keeps the last one this agent made (in memory,
+    // else from its stored verification record) instead of reclassifying it as cpu.std, which reset
+    // a proven grant and showed GPUs / Apple silicon as CPU until the next full registration.
+    // Anti-spoofing is unchanged: the kept claim is verified exactly as if it had been re-sent.
+    const priorHardware = body.hardwareProfile ? undefined : hardwareVerifier.get(body.agentId);
+    const hardwareProfile = body.hardwareProfile ?? agentCapabilities.get(body.agentId)?.hardwareProfile ?? priorHardware?.profile;
+    const challengeKinds = body.hardwareProfile ? body.challengeKinds : (body.challengeKinds ?? priorHardware?.challengeKinds);
+    const hardwareClass = classifyHardware(hardwareProfile, rateOracleConfig.computeClasses);
     const origin = requestOrigin(req);
     const sourceIp = origin.clientIp;
     // Denied registrations count against the caller's address (they cost an audit record, a
@@ -179,7 +187,7 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
         body.x25519PublicKey ??
         (previous?.publicKeyPem && (body.publicKeyPem ?? previous.publicKeyPem) === previous.publicKeyPem ? previous.x25519PublicKey : undefined),
       sandboxMode: body.sandboxMode as SandboxMode,
-      hardwareProfile: body.hardwareProfile,
+      hardwareProfile,
       computeClass: hardwareClass.computeClass,
       hardwareClass,
       lastSeenMs: now
@@ -229,9 +237,9 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
     const hardwareRecord = hardwareVerifier.register({
       agentId: body.agentId,
       claimed: hardwareClass,
-      profile: body.hardwareProfile,
+      profile: hardwareProfile,
       benchmark: body.benchmark,
-      challengeKinds: body.challengeKinds,
+      challengeKinds,
       nowMs: now
     });
     // Market: post the agent's ask on its (verified) compute class (tracking the oracle reference unless explicit).
