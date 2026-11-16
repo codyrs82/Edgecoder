@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { Tabs } from "bits-ui";
   import ChatMessage from "../components/ChatMessage.svelte";
   import ChatInput from "../components/ChatInput.svelte";
@@ -7,7 +8,7 @@
   import { Play, Pause, Square, RotateCw, Pencil, Trash2, History, MessageSquare, Ellipsis, CircleAlert, X, CalendarClock, Cpu, Folder, PanelRight, Copy, FolderOpen, GitPullRequest, GitBranch, Zap, RefreshCw } from "@lucide/svelte";
   import { approveBotCall, botHistory, botMessages, cancelBotRun, deleteBot, getBot, runBot, sendBotMessage, syncBotRepository, updateBot, botErrorText } from "../lib/api";
   import {
-    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, autoStatus, botCompute, checksIn, routineText, botStatusLine, computeText, failureNotice, foldBotReply, folderName, formatCSats, prCards, readableSummary, relativeTime, runSourceText, scheduleText, statusChip,
+    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, autoStatus, botCompute, checksIn, routineText, botStatusLine, computeText, failureNotice, foldBotReply, folderName, formatCSats, prCards, readableSummary, reconcileRuns, relativeTime, runSourceText, shownReplyText, scheduleText, statusChip,
     triggerStatusText, triggerText,
     type Bot, type BotMessage, type BotRun, type NoticeAction,
   } from "../lib/bots";
@@ -59,9 +60,14 @@
       // storage unavailable
     }
   }
+  // The bots list is polled every few seconds and every poll hands this page a new `bot` object, so
+  // effects depend on these values (compared by value), never on the object itself: depending on
+  // the object re-ran every effect on every poll (reloads, memory refetches, menu and scroll resets).
+  const botId = $derived(bot.id);
+  const updatedAt = $derived(bot.updatedAtMs);
   $effect(() => {
-    const id = bot.id;
-    void bot.updatedAtMs;
+    const id = botId;
+    void updatedAt;
     if (!panelOpen || panelTab !== "memory") return;
     getBot(id)
       .then((r) => {
@@ -148,6 +154,10 @@
 
   let messages = $state<BotMessage[]>([]);
   let runs = $state<BotRun[]>([]);
+  /** The history as shown: it agrees with the details panel's Last run, and shows it before the history loads. */
+  const shownRuns = $derived(reconcileRuns(runs, bot.lastRun));
+  /** The conversation and history have loaded once for this bot (until then there's no empty state). */
+  let loaded = $state(false);
   let view = $state<"chat" | "history">("chat");
   let error = $state<string | null>(null);
   let confirmDelete = $state(false);
@@ -163,6 +173,7 @@
       if (id !== bot.id) return;
       messages = m;
       runs = h;
+      loaded = true;
       const count = m.length + m.reduce((n, x) => n + (x.events?.length ?? 0), 0);
       if (count !== lastCount) {
         lastCount = count;
@@ -173,25 +184,49 @@
     }
   }
 
-  // Reload when the bot changes or its state does (the store polls), and poll while it works.
+  /** One load at a time: a request that's still out when the next is due is followed by one more, not stacked. */
+  let inflight = false;
+  let again = false;
+  function reload() {
+    if (inflight) {
+      again = true;
+      return;
+    }
+    inflight = true;
+    void load(bot.id).finally(() => {
+      inflight = false;
+      if (again) {
+        again = false;
+        reload();
+      }
+    });
+  }
+
+  /** What the conversation and history depend on; a poll that changes none of it loads nothing. */
+  const loadKey = $derived(`${bot.status}|${bot.lastRun?.id ?? ""}|${bot.lastRun?.status ?? ""}|${bot.pending.length}|${bot.queuedMessages}`);
+  let shownId: string | null = null;
+  // Load when the bot or its state changes, and poll while it works.
   $effect(() => {
-    const id = bot.id;
-    void bot.status;
-    void bot.lastRun?.id;
-    void bot.lastRun?.status;
-    void bot.pending.length;
-    void load(id);
+    const id = botId;
+    void loadKey;
+    if (id !== shownId) {
+      shownId = id;
+      // Another bot: start clean.
+      untrack(() => {
+        confirmDelete = false;
+        menuOpen = false;
+        memory = null;
+        error = null;
+        messages = [];
+        runs = [];
+        loaded = false;
+        lastCount = 0;
+      });
+    }
+    untrack(reload);
     if (!busy) return;
-    const t = setInterval(() => load(id), 1_500);
+    const t = setInterval(reload, 1_500);
     return () => clearInterval(t);
-  });
-  $effect(() => {
-    void bot.id;
-    confirmDelete = false;
-    menuOpen = false;
-    memory = null;
-    error = null;
-    lastCount = 0;
   });
 
   async function act(fn: () => Promise<unknown>) {
@@ -308,7 +343,7 @@
     {#snippet child({ props })}
       <div {...props} class="tabs">
         <Tabs.Trigger value="chat"><MessageSquare size={13} /> Conversation</Tabs.Trigger>
-        <Tabs.Trigger value="history"><History size={13} /> Runs ({runs.length})</Tabs.Trigger>
+        <Tabs.Trigger value="history"><History size={13} /> Runs ({shownRuns.length})</Tabs.Trigger>
       </div>
     {/snippet}
   </Tabs.List>
@@ -337,9 +372,14 @@
     <Tabs.Content value="chat">
     {#snippet child({ props })}
     <div {...props} class="messages" bind:this={scrollEl}>
-      {#if messages.length === 0}
+      {#if !loaded}
+        <div class="empty"><p>Loading…</p></div>
+      {:else if messages.length === 0}
         <div class="empty">
           <BotAvatar name={bot.name} color={bot.color} shape={bot.avatarShape} status={bot.status} size={72} decorative />
+          {#if bot.lastRun}
+            <p data-testid="bot-last-run-note">{bot.name} last worked {relativeTime(bot.lastRun.startedAtMs, now)}{bot.lastRun.summary ? `: ${readableSummary(bot.lastRun.summary)}` : ""}. Its runs are under Runs.</p>
+          {/if}
           <p>{bot.enabled && bot.nextRun ? `${bot.name} works on its own: ${auto.text.toLowerCase()}.` : bot.enabled ? `Message ${bot.name} to get it started.` : `${bot.name} is paused. Resume it, or message it.`} {bot.schedule || checksIn(bot) ? `${routineText(bot)}.` : ""}</p>
         </div>
       {/if}
@@ -350,14 +390,14 @@
           <ChatMessage role="user" content={m.content} />
         {:else}
           {@const turn = foldBotReply(m.events, pendingIds)}
-          {@const run = runs.find((r) => r.id === m.runId)}
+          {@const run = shownRuns.find((r) => r.id === m.runId)}
           {@const cards = askCards(turn.toolEvents, bot.name)}
           <div class="bot-turn">
             <BotAvatar name={bot.name} color={bot.color} shape={bot.avatarShape} status={run?.status === "running" ? "running" : "idle"} mood={run?.status === "running" ? "working" : run?.status === "needs_approval" ? "needs" : run?.status === "failed" ? "failed" : "idle"} size={26} decorative />
             <div class="bot-turn-body">
               <ChatMessage
                 role="assistant"
-                content={turn.text}
+                content={shownReplyText(turn.text)}
                 streaming={(run?.status === "running" || run?.status === "needs_approval") && !turn.text && turn.toolEvents.length === 0}
                 toolEvents={withoutPendingBars(turn.toolEvents)}
                 turnId={turn.turnId}
@@ -414,13 +454,13 @@
     <Tabs.Content value="history">
     {#snippet child({ props })}
     <div {...props} class="history">
-      {#if runs.length === 0}
-        <div class="empty"><p>No runs yet.</p></div>
+      {#if shownRuns.length === 0}
+        <div class="empty"><p>{loaded ? "No runs yet." : "Loading…"}</p></div>
       {:else}
         <table>
           <thead><tr><th>Started</th><th>Trigger</th><th>Status</th><th>Summary</th><th class="num">cSats</th><th>Ran on</th><th class="num">Time</th></tr></thead>
           <tbody>
-            {#each runs as r (r.id)}
+            {#each shownRuns as r (r.id)}
               <tr>
                 <td>{when(r.startedAtMs)}</td>
                 <td class="src" title={runSourceText(r)}>{runSourceText(r)}</td>

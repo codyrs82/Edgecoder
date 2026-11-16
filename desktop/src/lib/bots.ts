@@ -448,6 +448,20 @@ export function foldBotReply(events: IdeStreamEvent[] | undefined, pendingCallId
   return turn;
 }
 
+/** How much of one bot reply the page renders as markdown (the same cap as every chat view). */
+export { MAX_MARKDOWN as MAX_SHOWN_REPLY, TRIMMED_TEXT as REPLY_TRIMMED_TEXT, capMarkdownSource as shownReplyText } from "./markdown";
+
+/**
+ * The runs list as the page shows it: the history, reconciled with the bot's last run (it comes
+ * with every poll of the bots list, so it is fresher, and it is there before the history loads).
+ */
+export function reconcileRuns(history: BotRun[], lastRun: BotRun | undefined): BotRun[] {
+  if (!lastRun) return history;
+  const i = history.findIndex((r) => r.id === lastRun.id);
+  if (i < 0) return [lastRun, ...history];
+  return history.map((r, k) => (k === i ? lastRun : r));
+}
+
 /** The pull requests a run's tool events opened (for the PR card). */
 export function prCards(events: Array<{ type: string; id?: string; tool?: string; args?: Record<string, unknown>; result?: string; error?: string }>): Array<{ id: string; url: string; number: number; title: string; branch: string; base: string }> {
   const out: Array<{ id: string; url: string; number: number; title: string; branch: string; base: string }> = [];

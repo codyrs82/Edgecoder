@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderMarkdown, safeLinkUrl } from "../src/lib/markdown";
+import { capMarkdownSource, MAX_MARKDOWN, renderMarkdown, safeLinkUrl, TRIMMED_TEXT } from "../src/lib/markdown";
 
 /** Tag names that appear as real markup (not escaped text) in the output. */
 const tags = (html: string) => [...html.matchAll(/<([a-zA-Z][\w-]*)/g)].map((m) => m[1].toLowerCase());
@@ -55,5 +55,21 @@ describe("chat markdown from model output", () => {
     const html = renderMarkdown("# Title\n\n**bold** and `code`\n\n- one\n- two");
     expect(tags(html)).toEqual(expect.arrayContaining(["h1", "strong", "code", "ul", "li"]));
     expect(renderMarkdown('```plan\n[{"description":"<b>step</b>","status":"completed"}]\n```')).toContain("&lt;b&gt;step");
+  });
+});
+
+describe("long messages", () => {
+  it("renders a long message as its start and latest part, quickly and the same each time", () => {
+    const long = "Start." + " self._cache".repeat(20_000) + "\n\nEnd.";
+    expect(capMarkdownSource("short")).toBe("short");
+    const capped = capMarkdownSource(long);
+    expect(capped.length).toBeLessThanOrEqual(MAX_MARKDOWN);
+    expect(capped).toContain(TRIMMED_TEXT);
+    const t = performance.now();
+    const a = renderMarkdown(long);
+    const b = renderMarkdown(long);
+    expect(performance.now() - t).toBeLessThan(2_000);
+    expect(b).toBe(a);
+    expect(a).toContain("End.");
   });
 });

@@ -199,3 +199,64 @@ describe("BotView avatar, ask cards and details panel", () => {
     expect(p.onEdit).toHaveBeenCalled();
   });
 });
+
+describe("BotView settles (it froze the app on a bot with a last run)", () => {
+  const lastRun = { id: "run_9", trigger: "schedule" as const, startedAtMs: Date.now() - 20 * 60_000, endedAtMs: Date.now() - 19 * 60_000, status: "done" as const, summary: "I'll start by checking the current status of the project.", cSats: 0, where: "This computer · qwen2.5-coder:7b" };
+  const idle = () => harry({ status: "idle", lastRun: { ...lastRun }, nextRunAtMs: Date.now() + 10 * 60_000 });
+  const settle = () => new Promise((r) => setTimeout(r, 20));
+
+  it("loads once per change, not once per poll of the bots list, and agrees with Last run", async () => {
+    localStorage.setItem("edgecoder-bot-panel", "open");
+    for (const f of [api.botMessages, api.botHistory, api.getBot]) f.mockReset();
+    api.botMessages.mockResolvedValue([]);
+    api.botHistory.mockResolvedValue([]);
+    api.getBot.mockResolvedValue({ bot: idle(), memory: "" });
+    const { rerender } = render(BotView, { bot: idle(), onEdit: vi.fn(), onDeleted: vi.fn() });
+    await settle();
+    // The store hands the page a new, equal bot object every poll (every 8 s).
+    for (let i = 0; i < 20; i++) {
+      await rerender({ bot: idle() });
+      await settle();
+    }
+    expect(api.botMessages).toHaveBeenCalledTimes(1);
+    expect(api.botHistory).toHaveBeenCalledTimes(1);
+    expect(api.getBot).not.toHaveBeenCalled();
+    // Runs agrees with the details panel's Last run, even when the history came back empty.
+    expect(screen.getByRole("tab", { name: /Runs \(1\)/ })).toBeTruthy();
+    expect(screen.getByTestId("bot-details").textContent).toMatch(/Last run\s*Done/);
+    expect(screen.getByTestId("bot-last-run-note").textContent).toMatch(/last worked 20 min ago: I'll start by checking/);
+    // A real change loads again, once.
+    await rerender({ bot: harry({ status: "idle", lastRun: { ...lastRun, id: "run_10" } }) });
+    await settle();
+    expect(api.botMessages).toHaveBeenCalledTimes(2);
+  });
+
+  it("a poll doesn't close the open menu", async () => {
+    setup(idle());
+    await settle();
+    await fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    expect(screen.getByRole("menu")).toBeTruthy();
+    cleanup();
+    const { rerender } = render(BotView, { bot: idle(), onEdit: vi.fn(), onDeleted: vi.fn() });
+    await fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    await rerender({ bot: idle() });
+    await settle();
+    expect(screen.getByRole("menu")).toBeTruthy();
+  });
+
+  it("renders a huge reply quickly, trimmed to its start and latest part", async () => {
+    // A small model wrote whole files as text tool calls: markdown parsing of this grows
+    // quadratically, and at this size it pinned the page for minutes.
+    const huge = "I'll start by checking the current status." + " self._cache".repeat(25_000) + "\n\nAll done.";
+    api.botMessages.mockResolvedValue([{ id: "m1", role: "assistant", content: huge, atMs: 0, runId: "run_9", events: [{ type: "text", content: huge }] }]);
+    api.botHistory.mockResolvedValue([lastRun]);
+    const t = performance.now();
+    render(BotView, { bot: idle(), onEdit: vi.fn(), onDeleted: vi.fn() });
+    const reply = await screen.findByText(/earlier output trimmed/);
+    expect(performance.now() - t).toBeLessThan(3_000);
+    const text = reply.closest(".markdown")?.textContent ?? "";
+    expect(text).toMatch(/^I'll start by checking/);
+    expect(text.trim()).toMatch(/All done\.$/);
+    expect(text.length).toBeLessThan(9_000);
+  });
+});

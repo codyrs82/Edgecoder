@@ -204,6 +204,16 @@ const MAX_MESSAGES = 200;
 const CONTEXT_MESSAGES = 20;
 const MAX_EVENTS_PER_REPLY = 300;
 const MAX_EVENT_TEXT = 4_000;
+/**
+ * A reply's text is kept to its start and its latest part. A small model that writes tool calls
+ * (whole files) as text can stream hundreds of KB into one reply; stored whole, the bot page had
+ * to parse all of it as markdown at once, which froze the app.
+ */
+export const MAX_REPLY_TEXT = 12_000;
+const REPLY_HEAD = 3_000;
+/** Trim only once it has grown this far past the limit, so appending a token stays cheap. */
+const REPLY_SLACK = 6_000;
+export const REPLY_TRIMMED = "\n\n… (earlier output trimmed) …\n\n";
 const MAX_MEMORY_BYTES = 8_000;
 const APPROVAL_TIMEOUT_MS = 24 * 60 * MINUTE;
 const COLORS = ["#e5484d", "#f76b15", "#ffc53d", "#46a758", "#12a594", "#0090ff", "#6e56cf", "#d6409f"];
@@ -482,6 +492,25 @@ function clip(s: string, n = MAX_EVENT_TEXT): string {
   return s.length > n ? `${s.slice(0, n)}… (${s.length - n} more characters)` : s;
 }
 
+/** Reply text within MAX_REPLY_TEXT: its first part, a marker, and its latest part (where a run's outcome is). */
+export function trimReplyText(s: string, max = MAX_REPLY_TEXT): string {
+  if (s.length <= max) return s;
+  const cut = s.indexOf(REPLY_TRIMMED);
+  const head = cut >= 0 && cut <= REPLY_HEAD ? s.slice(0, cut) : s.slice(0, REPLY_HEAD);
+  const tail = Math.max(0, max - head.length - REPLY_TRIMMED.length);
+  return head + REPLY_TRIMMED + s.slice(s.length - tail);
+}
+
+/** A stored message within the limits (conversations saved before them are trimmed when read). */
+function boundedMessage(m: BotMessage): BotMessage {
+  if (m.role !== "assistant") return m;
+  const content = typeof m.content === "string" ? trimReplyText(m.content) : "";
+  const events = Array.isArray(m.events)
+    ? m.events.slice(0, MAX_EVENTS_PER_REPLY).map((e) => (e?.type === "text" && typeof e.content === "string" && e.content.length > MAX_REPLY_TEXT ? { ...e, content: trimReplyText(e.content) } : e))
+    : m.events;
+  return { ...m, content, ...(events ? { events } : {}) };
+}
+
 /** The run's summary: the last paragraph of its reply, shortened. */
 /**
  * The tools a paragraph names when it is only a tool call a model wrote as text
@@ -754,7 +783,8 @@ export class BotManager {
     if (!c) {
       try {
         const f = join(this.botDir(id), "conversation.json");
-        c = existsSync(f) ? ((JSON.parse(readFileSync(f, "utf8")) as { messages: BotMessage[] }).messages ?? []) : [];
+        const stored = existsSync(f) ? ((JSON.parse(readFileSync(f, "utf8")) as { messages: BotMessage[] }).messages ?? []) : [];
+        c = (Array.isArray(stored) ? stored : []).slice(-MAX_MESSAGES).map(boundedMessage);
       } catch {
         c = [];
       }
@@ -1481,9 +1511,12 @@ export class BotManager {
     const events = act.reply.events!;
     if (event.type === "text") {
       act.reply.content += event.content;
+      if (act.reply.content.length > MAX_REPLY_TEXT + REPLY_SLACK) act.reply.content = trimReplyText(act.reply.content);
       const last = events[events.length - 1];
-      if (last?.type === "text") last.content += event.content;
-      else events.push({ ...event });
+      if (last?.type === "text") {
+        last.content += event.content;
+        if (last.content.length > MAX_REPLY_TEXT + REPLY_SLACK) last.content = trimReplyText(last.content);
+      } else events.push({ ...event });
     } else if (event.type === "done") {
       return;
     } else if (events.length < MAX_EVENTS_PER_REPLY) {
