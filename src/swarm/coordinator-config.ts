@@ -214,6 +214,32 @@ export const coordinatorConfigSchema = z.object({
   OLLAMA_AUTO_INSTALL: envBool(false),
   REQUIRE_VERIFIED_AGENTS: envBool(false),
   BITCOIN_NETWORK: z.enum(["bitcoin", "testnet", "signet", "regtest"], { message: "must be bitcoin, testnet, signet or regtest" }).default("testnet"),
+  // Direct (non-custodial) payment paths, src/economy/direct/ and docs/design/noncustodial-payments.md.
+  // Read raw by src/economy/direct/flags.ts and src/swarm/coordinator/direct-payments.ts; listed here
+  // so they are declared and documented. None is set on a live coordinator.
+  PAYMENTS_PREPAID: z.string().optional(),
+  PAYMENTS_DIRECT_RESERVATIONS: z.string().optional(),
+  PAYMENTS_NWC: z.string().optional(),
+  SETTLE_MIN_SATS: z.string().optional(),
+  MAX_UNSETTLED_SATS: z.string().optional(),
+  SETTLE_INTERVAL_MS: z.string().optional(),
+  SETTLE_MAX_FAILURES: z.string().optional(),
+  NONCUSTODIAL_SECRET_KEY: z.string().optional(),
+  EDGECODER_FEE_LIGHTNING_ADDRESS: z.string().optional(),
+  EDGECODER_FEE_BTC_ADDRESS: z.string().optional(),
+  EDGECODER_FEE_ZCASH_ADDRESS: z.string().optional(),
+  EDGECODER_FEE_ZCASH_VIEWING_KEY: z.string().optional(),
+  DIRECT_PAY_RECEIPT_KEY_PEM: z.string().optional(),
+  DIRECT_PAY_ESPLORA_URL: z.string().optional(),
+  DIRECT_PAY_ONCHAIN_MIN_CONF: z.string().optional(),
+  DIRECT_PAY_DEV_HTTP: z.string().optional(),
+  DIRECT_PAY_ALLOW_UNCOMMITTED: z.string().optional(),
+  ZCASH_NETWORK: z.string().optional(),
+  ZCASHD_RPC_URL: z.string().optional(),
+  ZCASHD_RPC_USER: z.string().optional(),
+  ZCASHD_RPC_PASSWORD: z.string().optional(),
+  ZCASH_MIN_CONFIRMATIONS: z.string().optional(),
+  ZEC_USD: z.string().optional(),
   LOCAL_MODEL_PROVIDER: z.enum(["edgecoder-local", "ollama-local"], { message: "must be edgecoder-local or ollama-local" }).default("edgecoder-local"),
   // Security research tier (docs/security-research-tier.md). RESTRICTED_MODELS_JSON is the operator's
   // list of restricted model tags, {"<tag>": "security_research"}; empty by default. A restricted model

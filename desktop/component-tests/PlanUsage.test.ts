@@ -15,6 +15,7 @@ const api = vi.hoisted(() => ({
   savePayoutDestination: vi.fn(),
   getWalletSendRequests: vi.fn(async () => []),
   getOnchainAddress: vi.fn(),
+  getPaymentPaths: vi.fn(async () => ({ prepaid: true, directReservations: false, nwc: false })),
   getOnchainDeposits: vi.fn(),
 }));
 vi.mock("../src/lib/api", () => api);

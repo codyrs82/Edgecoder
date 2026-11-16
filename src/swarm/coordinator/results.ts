@@ -4,6 +4,7 @@
 /**
  * Result handling: verification, credit accrual, task budgets, settlement and refunds.
  */
+import { recordNwcCall } from "./direct-payments.js";
 import { request } from "undici";
 import type { Subtask, SubtaskResult } from "../../common/types.js";
 import { signForwardedResult } from "../../mesh/peer-trust.js";
@@ -383,6 +384,13 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
     app.log.warn({ taskId, subtaskId: r.subtaskId, kind: subtask.kind, model: subtask.requestedModel, pricedMsat: Math.round(priced.costMsat), settledMsat: costMsat, reservedMsat: billing.reservedMsat, basis: priced.basis }, "job_cost_capped_at_reserve");
   }
   const { agentMsat, feeMsat } = splitJobCost(costMsat, NETWORK_FEE_BPS);
+  if (billing?.nwc) {
+    // Paid from the buyer's own wallet: a tally to the host and to EdgeCoder's fee, settled over
+    // Lightning (direct-payments.ts). No cSats move.
+    await recordNwcCall(billing.accountId, rewardAccountId, agentMsat, feeMsat);
+    marketHistory.settleTrade(r.subtaskId, Number(((durationMs / 1000) * hardwareWeight).toFixed(6)));
+    return;
+  }
   const valuation = { msatPerCredit: Math.round(perCredit), networkFeeBps: NETWORK_FEE_BPS };
   let accrued: Awaited<ReturnType<typeof accruePricedJob>> = null;
   try {
@@ -723,7 +731,7 @@ export async function refundTaskSubmit(taskId: string): Promise<boolean> {
   const txId = refundTxId(taskId);
   for (let attempt = 0; ; attempt++) {
     try {
-      const unusedMsat = Math.max(0, billing.reservedMsat - billing.costMsat);
+      const unusedMsat = billing.nwc ? 0 : Math.max(0, billing.reservedMsat - billing.costMsat);
       if (unusedMsat > 0) await grantCreditsIdempotent(billing.accountId, msatToCSats(unusedMsat), `task_submit_refund:${taskId}`, txId);
       billing.refunded = true;
       await pgStore?.markTaskBillingSettled(taskId, Date.now()).catch((err) => app.log.warn({ err, taskId }, "task_billing_settle_persist_failed"));

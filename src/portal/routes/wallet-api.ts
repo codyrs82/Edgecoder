@@ -36,6 +36,19 @@ export interface WalletApiDeps extends ComputeRoutesDeps {
   fallbackNetwork: string;
 }
 
+/** Portal action → coordinator route for the direct payment paths (flag-gated on the coordinator). */
+export const DIRECT_PAYMENT_ACTIONS: Record<string, string> = {
+  "payout-profile": "/account/payout-profile",
+  "nwc-connect": "/account/wallet/nwc/connect",
+  "nwc-status": "/account/wallet/nwc/status",
+  "nwc-settle": "/account/wallet/nwc/settle",
+  "nwc-disconnect": "/account/wallet/nwc/disconnect",
+  "reserve-quote": "/account/reservations/direct/quote",
+  "reserve-confirm": "/account/reservations/direct/confirm",
+  "reserve-list": "/account/reservations/direct/list",
+  receipts: "/account/payment-receipts",
+};
+
 /** The limits /account/buy enforces (whole sats). */
 export const TOPUP_MIN_SATS = 100;
 export const TOPUP_MAX_SATS = 1_000_000;
@@ -112,6 +125,24 @@ export function registerWalletApiRoutes(app: FastifyInstance, deps: WalletApiDep
       t("GET", `/economy/payouts/${encodeURIComponent(accountId)}`).then(ok).catch(() => null)
     ]);
     return reply.send(walletOverviewView({ fallbackNetwork: deps.fallbackNetwork, overview: overview as never, rates, book, payouts }));
+  });
+
+  // Direct payments (docs/design/noncustodial-payments.md): pass-through to the coordinator's
+  // flag-gated routes. Bodies may carry an NWC connection string or a viewing key; nothing here logs them.
+  app.get("/portal/api/payments/paths", async (req, reply) => {
+    const user = await userOf(req, reply);
+    if (!user) return reply;
+    const r = await portalCoordinatorTransport(deps, accountIdFor(user.userId))("GET", "/payments/paths").catch(() => unreachable);
+    return reply.code(r.status).send(r.status === 404 ? { prepaid: true, directReservations: false, nwc: false } : r.json);
+  });
+  app.post<{ Params: { action: string } }>("/portal/api/payments/:action", async (req, reply) => {
+    const user = await userOf(req, reply);
+    if (!user) return reply;
+    const path = DIRECT_PAYMENT_ACTIONS[req.params.action];
+    if (!path) return reply.code(404).send({ error: "unknown_action" });
+    const body = typeof req.body === "object" && req.body !== null ? (req.body as Json) : {};
+    const r = await portalCoordinatorTransport(deps, accountIdFor(user.userId))("POST", path, body).catch(() => unreachable);
+    return reply.code(r.status).send(r.json);
   });
 
   app.post("/portal/api/wallet/topup", async (req, reply) => {

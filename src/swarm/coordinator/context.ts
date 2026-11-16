@@ -109,6 +109,11 @@ interface TaskBilling {
   perSubtaskReserveMsat: number;
   costMsat: number;
   refunded: boolean;
+  /**
+   * Paid from the buyer's own wallet (PAYMENTS_NWC): nothing was debited at submit, so nothing is
+   * refunded; each result's cost is added to the (buyer, host) tally instead of the cSats ledger.
+   */
+  nwc?: boolean;
   /** Token counts an inference call was billed on (bounded), returned to the requester with the result. */
   promptTokens?: number;
   outputTokens?: number;

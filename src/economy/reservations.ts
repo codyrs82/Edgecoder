@@ -33,6 +33,12 @@ export interface Reservation {
   endReason?: ReservationEndReason;
   usedMsat?: number;
   refundMsat?: number;
+  /**
+   * Paid buyer → host directly (src/economy/direct/reservations-direct.ts), not from cSats: ending
+   * it moves no cSats (no payout, no refund); usedMsat/refundMsat are informational, and a refund
+   * of unused time (host offline) is owed by the host. Absent on prepaid leases.
+   */
+  direct?: { rail: "lightning" | "onchain" | "zcash"; receiptIds: string[] };
 }
 
 export const RESERVATION_MIN_MINUTES = 5;

@@ -280,9 +280,13 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
   {
     id: "fund",
     title: "Fund your account",
-    body: "Your own machines are free. Network calls cost cSats per token (1 cSat = 1 sat). Estimate what you need, then buy cSats with Lightning.",
+    body: "Your own machines are free. For on-demand calls, buy cSats: prepaid credit spent per token (1 cSat = 1 sat). To reserve a host for longer, pay the host directly from your own wallet.",
     checklist: [{ id: "funded", label: "Your balance is above zero" }],
-    actions: [{ id: "buy", label: "Buy cSats", desktop: "settings:plan", web: "/portal/settings/plan", primary: true }],
+    actions: [
+      { id: "buy", label: "Buy cSats for on-demand compute", desktop: "settings:plan", web: "/portal/settings/plan", primary: true },
+      { id: "direct", label: "Connect a wallet to pay hosts directly for reservations", desktop: "settings:plan", web: "/portal/settings/plan#reservations-direct" },
+      { id: "payout", label: "Hosting? Set your payout addresses", desktop: "settings:plan", web: "/portal/settings/plan#payout-addresses" },
+    ],
     skip: "Skip: I'll use my own machines",
     goals: [],
     video: { src: "/assets/videos/fund.mp4", poster: "/assets/videos/fund.jpg", captions: "/assets/videos/fund.vtt" },
