@@ -16,13 +16,13 @@
  */
 
 import { catalogEntryForTag } from "../model/catalog.js";
+import { supportsTools } from "../model/tool-support.js";
 import type { ChatRequest } from "./types.js";
 import { isFrontierModelId } from "./frontier-models.js";
 
-/** False only for a catalog model that lacks tool calling; models not in the catalog count as able. */
+/** Whether a model can do an agent step (take tools and call them); see model/tool-support.ts. */
 export function callsTools(model: string): boolean {
-  const entry = catalogEntryForTag(model);
-  return !entry || entry.capabilities.includes("tools");
+  return supportsTools(model);
 }
 
 export type Placement = "reserved" | "local" | "mine" | "network";
@@ -40,6 +40,11 @@ export interface Route {
   fallback?: boolean;
   /** The network leg handed to the coordinator as model "auto" (best-fit picks model, class and machine). */
   bestFit?: boolean;
+  /**
+   * Why Auto didn't take the obvious free model, for the reply footer and the run details: "tools
+   * needed; local deepseek-r1:14b has no tool support".
+   */
+  why?: string;
 }
 
 export interface RouteInputs {
@@ -145,13 +150,15 @@ export function rankRoutes(w: Workload, inp: RouteInputs): Route[] {
   const out: Route[] = [];
   const sizeNote = w.heavy ? "agent work" : "quick task";
 
+  // An agent step (tools) only goes to a model that calls tools, wherever it runs.
+  const usable = (models: string[]) => (w.needsTools ? models.filter(callsTools) : models);
   for (const l of inp.leases) {
-    const model = bestModel(l.models, w);
+    const model = bestModel(usable(l.models), w);
     if (model) out.push({ placement: "reserved", model, reservationId: l.id, computeClass: l.computeClass, cSatsPerSecond: 0, reason: `your reserved ${l.computeClass} machine (already paid) · ${model}` });
   }
-  const local = bestModel(w.needsTools ? inp.localModels.filter(callsTools) : inp.localModels, w);
+  const local = bestModel(usable(inp.localModels), w);
   if (local) out.push({ placement: "local", model: local, cSatsPerSecond: 0, reason: `this computer (free) · ${local} for ${sizeNote}` });
-  const mine = bestModel(inp.myModels, w);
+  const mine = bestModel(usable(inp.myModels), w);
   if (mine) out.push({ placement: "mine", model: mine, cSatsPerSecond: 0, reason: `your machines (free) · ${mine} for ${sizeNote}` });
 
   const net: Array<Route & { cost: number }> = [];
@@ -160,7 +167,7 @@ export function rankRoutes(w: Workload, inp: RouteInputs): Route[] {
     if (w.heavy && cls === "cpu") continue;
     const price = inp.classPrice[cls];
     if (price === undefined) continue;
-    const model = bestModel(inp.networkModels.filter((m) => m.classes.includes(cls)).map((m) => m.model), w);
+    const model = bestModel(usable(inp.networkModels.filter((m) => m.classes.includes(cls)).map((m) => m.model)), w);
     if (!model) continue;
     // Same token price on every class: the faster one finishes sooner for the same cSats.
     const cost = 1 / CLASS_SPEED[cls];
@@ -267,10 +274,12 @@ function biggestUsable(models: string[]): string | undefined {
 
 export const FALLBACK_NOTE = "ran on a smaller local model (no cSats)";
 
-function fallbackRoutes(inp: RouteInputs, places: Array<"local" | "mine">): Route[] {
+function fallbackRoutes(inp: RouteInputs, places: Array<"local" | "mine">, needsTools = false): Route[] {
   const out: Route[] = [];
   for (const p of places) {
-    const model = biggestUsable(p === "local" ? inp.localModels : inp.myModels);
+    const models = p === "local" ? inp.localModels : inp.myModels;
+    // Never a model that can't call tools for an agent step, not even as the last resort.
+    const model = biggestUsable(needsTools ? models.filter(callsTools) : models);
     if (model) out.push({ placement: p, model, cSatsPerSecond: 0, fallback: true, reason: `${p === "local" ? "this computer" : "your machines"} · ${model} · ${FALLBACK_NOTE}` });
   }
   return out;
@@ -281,6 +290,12 @@ export interface PlanOptions {
   allowanceCSats?: number;
   /** The model id for the "model" policy. */
   model?: string;
+  /**
+   * Routes to leave out (routeModelId form, "network/auto@any" for the network's best fit): a bot
+   * whose model answered an agent step with a plan and no tool call tries the next place once.
+   * Ignored when it would leave nothing to try.
+   */
+  exclude?: string[];
   /**
    * The smallest model (billions of parameters) for agent work (tools or a long context) under
    * local_first and auto, when it's above the usual floor. Bots set it: a 7B model on this computer
@@ -317,18 +332,35 @@ export function planRoutes(w: Workload, inp: RouteInputs, policy: ComputePolicy 
   }
   if (policy === "local_only") {
     const fit = rankRoutes(w, { ...inp, myModels: [], leases: [], networkModels: [] });
-    return fit.length ? fit : fallbackRoutes(inp, ["local"]);
+    return withWhy(fit.length ? fit : fallbackRoutes(inp, ["local"], w.needsTools), toolSkipNote(w, { ...inp, myModels: [] }));
   }
   if (policy === "mine_only") {
     const fit = rankRoutes(w, { ...inp, leases: [], networkModels: [] });
-    return fit.length ? fit : fallbackRoutes(inp, ["local", "mine"]);
+    return withWhy(fit.length ? fit : fallbackRoutes(inp, ["local", "mine"], w.needsTools), toolSkipNote(w, inp));
   }
   if (w.heavy && opts.agentMinParamsB && opts.agentMinParamsB > (w.minParamsB ?? 0)) w = { ...w, minParamsB: opts.agentMinParamsB };
   const ranked = rankRoutes(w, inp);
   const order: Placement[] = policy === "local_first" ? ["local", "mine", "reserved"] : ["reserved", "local", "mine"];
   const free = order.flatMap((p) => ranked.filter((r) => r.placement === p));
   const net = ranked.filter((r) => r.placement === "network" && ok(r));
-  return [...free, ...net, ...(free.length ? [] : fallbackRoutes(inp, ["local", "mine"]))];
+  return withWhy([...free, ...net, ...(free.length ? [] : fallbackRoutes(inp, ["local", "mine"], w.needsTools))], toolSkipNote(w, inp));
+}
+
+/**
+ * Why an agent step skipped a free model it would otherwise have used: the biggest model on this
+ * computer (then your machines) that can't call tools. Undefined when nothing was skipped.
+ */
+export function toolSkipNote(w: Workload, inp: Pick<RouteInputs, "localModels" | "myModels">): string | undefined {
+  if (!w.needsTools) return undefined;
+  for (const [where, models] of [["local", inp.localModels], ["your machines'", inp.myModels]] as const) {
+    const skipped = biggestUsable(models.filter((m) => !callsTools(m)));
+    if (skipped) return `tools needed; ${where} ${skipped} has no tool support`;
+  }
+  return undefined;
+}
+
+function withWhy(routes: Route[], why: string | undefined): Route[] {
+  return why ? routes.map((r) => ({ ...r, why })) : routes;
 }
 
 /** Why a policy found nowhere to run, in plain words. */
@@ -350,7 +382,7 @@ export function noRouteMessage(policy: ComputePolicy, inp: RouteInputs, opts: Pl
     default:
       return broke
         ? `Nothing to run on: no model is installed on this computer or your machines, and the network can't be used because ${why}. Install a model in Settings > Models, or buy cSats.`
-        : "No model fits this request: install a coder model (7B or larger) on one of your machines, or try again when the network has one.";
+        : "No model fits this request: install a coder model that calls tools (7B or larger, e.g. qwen2.5-coder:7b or qwen3.5:9b) on one of your machines, or try again when the network has one.";
   }
 }
 

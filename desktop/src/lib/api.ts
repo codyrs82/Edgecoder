@@ -1,4 +1,5 @@
 import { localAgentUsable, parseAgentStatus, shouldDropToken, statusFromTokenError, type LocalAgentStatus } from "./agent-status";
+import { fetchLocalService } from "./local-service";
 import { coordinatorUrl, defaultEndpoints, fetchEndpoint, portalUrl, type EndpointKind } from "./endpoints";
 import type {
   HealthRuntime,
@@ -981,8 +982,12 @@ function isUnauthorized(e: unknown): boolean {
  * file may have been regenerated, so drop the cached value, reread it and retry once.
  */
 async function ideFetch(url: string, init: RequestInit): Promise<Response> {
+  // While the local service restarts (an auto-update), retry for ~10 s instead of failing with "Load failed".
   const send = async () =>
-    fetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), ...(await ideHeaders()) } });
+    fetchLocalService(
+      async () => fetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), ...(await ideHeaders()) } }),
+      { method: init.method, signal: init.signal },
+    );
   let res = await send();
   if (res.status === 401) {
     resetIdeToken();

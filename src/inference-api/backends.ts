@@ -8,7 +8,7 @@ import type { ServedBy } from "../swarm/served-by.js";
 import { AutoUnsupportedError, NetworkInferenceError, RouteElsewhereError, streamNetworkCompletion, type NetworkDeps, type NetworkTarget } from "../apps/ide/network-inference.js";
 import { contextWindowFor, ollamaChat, type OllamaPiece } from "./ollama.js";
 import { ENGINE_PRESETS, EngineError, openAiEngineChat, type OpenAiEngine } from "./openai-engine.js";
-import { BEST_FIT_ROUTE, networkAllowance, noRouteMessage, planRoutes, sizeWorkload, type ComputePolicy, type PlanOptions, type QualityFloor, type Route, type RouteInputs } from "./auto-route.js";
+import { BEST_FIT_ROUTE, networkAllowance, noRouteMessage, planRoutes, routeModelId, sizeWorkload, type ComputePolicy, type PlanOptions, type QualityFloor, type Route, type RouteInputs } from "./auto-route.js";
 import { ChatBackendError, type ChatBackend, type ChatPiece } from "./types.js";
 import type { RoutingHints } from "./job-descriptor.js";
 
@@ -176,7 +176,11 @@ export function autoBackend(opts: {
     const policy = opts.policy ?? "auto";
     const planOpts = opts.plan?.() ?? {};
     const planned = planRoutes(sizeWorkload(req, opts.floor), inputs, policy, planOpts);
-    const routes = opts.networkBestFit && policy !== "model" ? withBestFit(planned) : planned;
+    const all = opts.networkBestFit && policy !== "model" ? withBestFit(planned) : planned;
+    // A bot escalating past a model that only described its plan: the next place, when there is one.
+    const skip = new Set(planOpts.exclude ?? []);
+    const kept = skip.size ? all.filter((r) => !skip.has(routeModelId(r))) : all;
+    const routes = kept.length ? kept : all;
     if (!routes.length) throw new ChatBackendError(noRouteMessage(policy, inputs, planOpts), 404);
     const allowance = networkAllowance(inputs, planOpts);
     const bestFitHints = (): RoutingHints => {
@@ -198,7 +202,13 @@ export function autoBackend(opts: {
       opts.onRoute?.(r);
       for (let n = first; !n.done; n = await it.next()) {
         // Best fit: the coordinator's own line says where it ran.
-        yield "done" in n.value ? { ...n.value, where: r.bestFit && n.value.where ? n.value.where : r.reason } : n.value;
+        // A route Auto took because a free model can't call tools says so ("… (tools needed; local deepseek-r1:14b has no tool support)").
+        if (!("done" in n.value)) {
+          yield n.value;
+          continue;
+        }
+        const where = r.bestFit && n.value.where ? n.value.where : r.reason;
+        yield { ...n.value, where: r.why ? `${where} (${r.why})` : where };
       }
       return;
     }
@@ -217,5 +227,6 @@ export function autoBackend(opts: {
 export function withBestFit(routes: Route[]): Route[] {
   const i = routes.findIndex((r) => r.placement === "network" && !r.fallback);
   if (i < 0) return routes;
-  return [...routes.slice(0, i), BEST_FIT_ROUTE, ...routes.slice(i)];
+  const why = routes[i].why;
+  return [...routes.slice(0, i), why ? { ...BEST_FIT_ROUTE, why } : BEST_FIT_ROUTE, ...routes.slice(i)];
 }

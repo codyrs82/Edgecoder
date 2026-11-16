@@ -265,6 +265,12 @@ export interface AgentLoopDeps {
    * one "go ahead" instead of ending the turn. Bots set this: nobody is watching to say "go on".
    */
   continueOnIntent?: boolean;
+  /**
+   * With continueOnIntent: the go-ahead got another plan and still no tool call. Switch the model
+   * calls to the next model in the ranking and return true to retry that step once there (a bot on
+   * a model that only describes work); false when there's nowhere else to go, and the turn ends.
+   */
+  escalate?: () => boolean;
 }
 
 /** What the model hears when it announced work and stopped. */
@@ -282,6 +288,27 @@ export function announcesWork(text: string): boolean {
     /^(?:(?:ok(?:ay)?|sure|great|alright|got it|understood)[,.!]?\s+)?(?:(?:first|next|now|then)[,]?\s+)?(?:i'?ll|i will|i'm going to|i am going to|let me|let's|i need to|i'm about to|i am about to)\b/i.test(last) ||
     /^next steps?\s*:/im.test(last)
   );
+}
+
+/**
+ * True when a reply lays out steps it hasn't taken: a numbered or bulleted list of at least two
+ * steps ("1. **Identify Relevant Files**: …", "- Read and summarize …"), or a "Plan:"/"Steps:"
+ * heading, and no question for the user at the end. With asksToAct, the go-ahead fires on it.
+ */
+export function listsSteps(text: string): boolean {
+  const t = text.trim();
+  if (!t || /\?\s*$/.test(t)) return false;
+  const steps = t.split("\n").filter((l) => /^\s*(?:\d+[.)]|[-*•]|step \d+[:.])\s+\S/i.test(l)).length;
+  return steps >= 2 || /^\s*(?:#+\s*)?(?:\*\*)?(?:plan|steps|approach|here'?s (?:my|the) plan)\b[^\n]{0,40}:?\s*$/im.test(t);
+}
+
+/**
+ * True when the user's message asks for something to be done ("do it", "read all of the files in
+ * those folders", "go ahead", "fix the tests"), not only explained.
+ */
+export function asksToAct(text: string | undefined): boolean {
+  if (!text) return false;
+  return /\b(?:do (?:it|that|this|so)|go ahead|go on|proceed|continue|start|begin|read|look (?:at|through|in)|check|open|list|fix|run|write|create|update|review|find|search|summari[sz]e|implement|make|add|edit|change|delete|remove|install|clone|commit|push|test)\b/i.test(text);
 }
 
 /** Sleeps that stop early when the turn is cancelled. */
@@ -389,12 +416,25 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
   let needBreak = false;
   let nudged = false;
   let intentNudged = false;
-  /** One "go ahead" when a reply only announced work (continueOnIntent). */
+  let escalated = false;
+  /** The reply describes work instead of doing it: it announces the work, or lists steps the user asked to have done. */
+  const describesWork = (content: string) => announcesWork(content) || (listsSteps(content) && asksToAct(request?.content));
+  /**
+   * One "go ahead" when a reply only announced or planned work (continueOnIntent). When the reply to
+   * the go-ahead is again only a plan, the step is retried once on the next model (escalate).
+   */
   const goAhead = (content: string): boolean => {
-    if (!d.continueOnIntent || intentNudged || !announcesWork(content)) return false;
-    intentNudged = true;
-    messages.push({ role: "assistant", content });
-    messages.push({ role: "user", content: GO_AHEAD });
+    if (!d.continueOnIntent || !describesWork(content)) return false;
+    if (!intentNudged) {
+      intentNudged = true;
+      messages.push({ role: "assistant", content });
+      messages.push({ role: "user", content: GO_AHEAD });
+      return true;
+    }
+    if (escalated || !d.escalate?.()) return false;
+    escalated = true;
+    // Same conversation (ending with the go-ahead), next model; this reply is left out.
+    d.sendEvent({ type: "status", message: "The model described the work but didn't use any tools; trying the next model." });
     return true;
   };
   const say = (text: string) => {

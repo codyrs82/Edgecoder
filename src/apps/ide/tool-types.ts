@@ -98,7 +98,8 @@ export interface PlanStep {
 
 export type IdeStreamEvent =
   | { type: "text"; content: string }
-  | { type: "status"; message: string }
+  /** `note`: why compute went where it did, for the run details ("Auto → … (tools needed; …)"). */
+  | { type: "status"; message: string; note?: string }
   | {
       type: "tool_call";
       id: string;
