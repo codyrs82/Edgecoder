@@ -128,6 +128,15 @@ export const workerConfigSchema = z.object({
    * Ollama tags. Unset = the curated catalog; `catalog` in the list adds it back; `none` allows nothing.
    */
   AGENT_MODEL_ALLOWLIST: z.string().trim().max(4000).optional(),
+  /**
+   * Share of physical RAM (10-90%) models may use on this host (src/swarm/memory-budget.ts); a
+   * discrete GPU's models get 90% of its VRAM. Unset or out of range: 60.
+   */
+  AGENT_MEMORY_BUDGET_PCT: envNumber(undefined),
+  /** Distinct models this host serves on the network at once (1-8). Unset: as many as fit the budget together. */
+  AGENT_MAX_NETWORK_MODELS: envInt(undefined, { min: 1, max: 8 }),
+  /** System memory pressure guard (src/swarm/memory-pressure.ts): on by default; "off" disables it. */
+  AGENT_MEMORY_GUARD: envFlag({ off: ["off", "0", "false"], ci: true }),
   SANDBOX_REQUIRED: envFlag({ on: ["true"] }),
   // Pull and run inference subtasks only, without a sandbox (SANDBOX_MODE=none): for GPU container hosts that cannot run Docker.
   AGENT_INFERENCE_ONLY: envFlag({ on: ["1", "true"] }),

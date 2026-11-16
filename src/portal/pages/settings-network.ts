@@ -95,6 +95,11 @@ export const GAP_CHARTS_SCRIPT = `
       const saturation = sat.length
         ? "Saturated now: " + sat.slice(0, 4).map((m) => m.model + " (" + n(m.agents, "agent") + (m.waiting ? ", " + m.waiting + " waiting" : "") + ")").join(", ") + more(sat, 4) + "."
         : "Every model has a free slot.";
+      // Agents out of memory (pressure, paused) or cooling down after failures: no capacity until they recover.
+      const mem = g.memoryLimitedAgents || [];
+      const memoryNote = mem.length
+        ? " " + n(mem.length, "agent") + " memory-limited now: " + mem.slice(0, 3).map((a) => a.agentId + " (" + (a.circuitOpen ? "cooling down" : (a.pressure || "paused") + " pressure") + ")").join(", ") + more(mem, 3) + "."
+        : "";
       const st = g.staleAgents || [];
       const stale = st.length
         ? st.length + " stale now: " + st.slice(0, 3).map((a) => a.agentId + " (" + gapAgo(a.lastSeenMs, nowMs) + ")").join(", ") + more(st, 3) + "."
@@ -108,7 +113,7 @@ export const GAP_CHARTS_SCRIPT = `
       if (thin.length) regions += " Few agents: " + thin.map((c) => c.connected + " on " + c.coordinator.split(".")[0] + (c.region ? " (" + c.region + ")" : "")).join(", ") + ".";
       const down = g.unreachableCoordinators || [];
       if (down.length) regions += " Not answering: " + down.map((u) => u.replace(/^https?:\\/\\//, "")).join(", ") + ".";
-      return { unmet, saturation, stale, regions };
+      return { unmet, saturation: saturation + memoryNote, stale, regions };
     }
 `;
 
@@ -465,6 +470,8 @@ export function networkPageScript(): string {
       if (!unmet.length) unmet = [{ label: "All models", cls: "s-c1", value: (p) => (p.unmetByModel ? 0 : null) }];
       drawChart("chartUnmet", pts, unmet, { stacked: true, legend: true, fmt: (v) => fmtNum(v, 1), desc: sum.unmet });
       const slots = keyedSeries("chartSaturation", pts, "modelSlots", (v) => (v ? count(v.total) : 0), (v) => (v ? count(v.free) : 0), false);
+      // Memory-limited agents (no capacity for memory or an open circuit) on the same chart, when the coordinators report them.
+      if (pts.some((p) => p.memoryLimitedAgents !== undefined)) slots.push({ label: "Memory-limited agents", cls: "s-info", dashed: true, value: (p) => (p.memoryLimitedAgents === undefined ? null : Number(p.memoryLimitedAgents)) });
       drawChart("chartSaturation", pts, slots, { legend: true, fmt: (v) => fmtNum(v, 1), desc: sum.saturation });
       drawChart("chartStale", pts, [{ label: "Stale agents", cls: "s-brand", area: true, value: (p) => (p.staleAgents === undefined ? null : Number(p.staleAgents)) }], { fmt: (v) => fmtNum(v, 1), desc: sum.stale });
       let regions = keyedSeries("chartRegions", pts, "agentsByRegion", count, count, true);
@@ -518,7 +525,7 @@ export function networkPageScript(): string {
         tr.appendChild(el("td", {}, (a.countryCode || "-") + (a.vpnDetected ? " (VPN)" : "")));
         const cls = el("td"); cls.appendChild(el("div", {}, classLabel(a.computeClass || "-") + (a.tier ? " · " + a.tier : ""))); cls.appendChild(el("div", { class: "muted" }, a.verification ? "hw " + a.verification : "hw unverified")); tr.appendChild(cls);
         const models = el("td", { class: "net-models-list" }, (a.modelsInstalled || []).join(", ") || "-"); if (a.activeModel && (a.modelsInstalled || []).indexOf(a.activeModel) < 0) models.appendChild(el("div", { class: "muted" }, "active: " + a.activeModel)); tr.appendChild(models);
-        const used = el("td", { class: "num nowrap" }, a.connected && !a.blacklisted ? (a.slots - a.freeSlots) + " / " + a.slots : "- / " + a.slots); if (a.contextWindow) used.appendChild(el("div", { class: "muted" }, fmtNum(a.contextWindow, 0) + " ctx")); tr.appendChild(used);
+        const used = el("td", { class: "num nowrap" }, a.connected && !a.blacklisted ? (a.slots - a.freeSlots) + " / " + a.slots : "- / " + a.slots); if (a.contextWindow) used.appendChild(el("div", { class: "muted" }, fmtNum(a.contextWindow, 0) + " ctx")); if (a.memory) { const m = a.memory; const gb = (b) => fmtNum((b || 0) / 1073741824, 1) + " GB"; used.appendChild(el("div", { class: "muted", title: "Loaded: " + ((m.loadedModels || []).map((x) => x.name + " " + gb(x.bytes)).join(", ") || "none") + (m.peakPressure && m.peakPressure !== "normal" ? " · peak pressure " + m.peakPressure : "") }, "mem " + m.pressure + " · " + gb(m.usedBytes) + " / " + gb(m.budgetBytes) + ((m.loadedModels || []).length ? " · " + m.loadedModels.map((x) => x.name).join(", ") : ""))); } if (a.circuit && a.circuit.open) used.appendChild(el("div", { class: "muted" }, "cooling down (failures)")); tr.appendChild(used);
         tr.appendChild(el("td", { class: "num nowrap" }, ago(a.lastSeenMs)));
         const s = el("td"); s.appendChild(badge(a.status, STATUS_TONE[a.status])); if (a.status !== "stale" && a.status !== "blacklisted") s.appendChild(el("div", { class: "muted" }, a.socketConnected ? "socket open" : "polling")); if (a.blacklistReason) s.appendChild(el("div", { class: "muted" }, a.blacklistReason)); if (a.reserved) s.appendChild(el("div", { class: "muted" }, "reserved")); tr.appendChild(s);
         body.appendChild(tr);

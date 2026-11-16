@@ -148,6 +148,65 @@ points the agent at it. Sizing for 2× A16 and A100 80 GB, the variables, and th
 Ollama: [docs/inference-engines.md](inference-engines.md). Apple silicon's equivalent is MLX
 (`EDGECODER_ENGINE=mlx`), described there too.
 
+## Memory safety
+
+EdgeCoder never lets network work push a host into memory exhaustion. (On 2026-11-16 a load test
+sent calls for six models to a 48 GB Mac; its Ollama kept about ten models loaded, ~120 GB, and the
+Mac was force-restarted.) Three layers, all on by default:
+
+**1. The Ollama EdgeCoder starts** (the desktop app's bundled Ollama, the installer's service units,
+the agent's own auto-start) gets, unless the environment already sets them:
+
+| RAM | `OLLAMA_MAX_LOADED_MODELS` | `OLLAMA_NUM_PARALLEL` (desktop app) | other |
+| --- | --- | --- | --- |
+| up to 32 GB | 1 | 1 below 15 GB, else 2 | `OLLAMA_KEEP_ALIVE=5m` (desktop app), `OLLAMA_FLASH_ATTENTION=1`, `OLLAMA_KV_CACHE_TYPE=q8_0` |
+| 33 to 63 GB | 2 | 2 | same |
+| 64 GB and more | 2 | 4 | same |
+
+Flash attention with a `q8_0` cache roughly halves the KV cache (Ollama 0.5 and newer; the bundled
+Ollama is 0.40.x). The installer's GPU instances keep their per-instance `OLLAMA_NUM_PARALLEL` and
+keep-alive (dedicated hosts) and get the loaded-model cap by the instance's memory.
+
+**2. A memory budget in the agent** (`src/swarm/memory-budget.ts`): 60% of RAM
+(`AGENT_MEMORY_BUDGET_PCT`), or 90% of a discrete GPU's VRAM. A model needs its weights (its file
+size), 0.5 GB runtime, and a KV cache of max(0.25, params × 0.12) GB per 8k tokens per parallel slot
+(Ollama allocates `num_ctx` × `OLLAMA_NUM_PARALLEL`). The agent:
+
+- lowers its context window, then its parallel slots, until its model fits, even an explicit
+  `AGENT_CONTEXT_WINDOW`, and logs and reports the effective values;
+- advertises to the coordinator only the installed models that fit the budget on their own, and
+  serves at most as many distinct models as fit together (`AGENT_MAX_NETWORK_MODELS`, never past
+  `OLLAMA_MAX_LOADED_MODELS`); the rest stay local-only. Loaded models come first, so the
+  coordinator keeps sending the model already in memory;
+- before a network call loads a model, checks it fits next to what Ollama has loaded (`/api/ps`),
+  unloads idle network models first (`keep_alive: 0`), and otherwise hands the call back (a
+  `memory_` error: the coordinator gives it to another agent). The owner's own chat model is never
+  unloaded to make room: local chats come first;
+- reports its memory (pressure, budget, loaded models, served models with their footprint) with
+  each heartbeat; an updated coordinator uses it for admission control.
+
+Default budgets and what fits at the served window (2 slots up to 63 GB, 4 above):
+
+| RAM | Budget | 7B | 9B | 14B | 30B |
+| --- | --- | --- | --- | --- | --- |
+| 16 GB | 9.6 GB | 16k | 8k | no | no |
+| 32 GB | 19.2 GB | 32k | 32k | 16k | no |
+| 48 GB | 28.8 GB | 32k | 32k | 32k | 8k |
+| 64 GB | 38.4 GB | 32k (4 slots) | 32k (4 slots) | 32k (4 slots) | 8k (4 slots) |
+
+**3. A memory pressure guard** (`src/swarm/memory-pressure.ts`, `AGENT_MEMORY_GUARD`): macOS
+`kern.memorystatus_vm_pressure_level` and `vm_stat`, Linux `MemAvailable` and PSI
+(`/proc/pressure/memory`).
+
+| Level | macOS | Linux | The agent |
+| --- | --- | --- | --- |
+| warning | kernel level 2, under 8% available, or the compressor holding 40% of RAM | under 10% `MemAvailable`, or PSI some avg10 ≥ 25 | takes no new network work, unloads its idle models |
+| critical | kernel level 4, or under 3% available | under 5%, or PSI full avg10 ≥ 10 | also cancels its running network calls and hands its claims back, unloads all but the owner's active model |
+
+It resumes once the pressure has stayed lower for 30 s. The desktop app shows "Paused: this Mac is
+low on memory" in Active work and Settings → Models, and Settings → Models lists what this machine
+serves ("Serving on the network: qwen3.5:9b") and what stays local-only.
+
 ## Service accounts
 
 No service runs as root or SYSTEM.

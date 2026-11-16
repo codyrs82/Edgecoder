@@ -14,6 +14,7 @@
  * (binaries.ts stages a root-owned copy when they are not), so the service user cannot swap them.
  * File writes and commands go through an injected `Host` so the exact output is unit-tested.
  */
+import { ollamaMemorySafetyEnv } from "../swarm/memory-budget.js";
 import type { AgentInstance, InstallPlan } from "./plan.js";
 import { renderEnvFile } from "./plan.js";
 
@@ -95,6 +96,9 @@ function ollamaEnv(p: ServicePaths, inst: AgentInstance): Record<string, string>
   };
   // Same slot count the agent sends at once (plan.ts AGENT_PARALLEL_INFERENCE).
   if (inst.env?.AGENT_PARALLEL_INFERENCE) env.OLLAMA_NUM_PARALLEL = inst.env.AGENT_PARALLEL_INFERENCE;
+  // Memory safety (src/swarm/memory-budget.ts): at most 1-2 models loaded by the instance's memory,
+  // and a smaller KV cache, so network load for many models can never exhaust the host.
+  Object.assign(env, ollamaMemorySafetyEnv((inst.memoryGb || 8) * 1024 ** 3));
   if (inst.gpu && inst.gpu.vendor !== "apple") {
     // Every card of the instance: Ollama spreads a model too big for one across them.
     const visible = (inst.gpus?.length ? inst.gpus : [inst.gpu]).map((g) => g.index).join(",");

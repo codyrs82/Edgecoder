@@ -121,6 +121,7 @@ import {
   settleTaskIfDone
 } from "../results.js";
 import { inferenceStreams, judgeInferenceReply, retryInferenceElsewhere } from "./inference.js";
+import { isMemoryRefusal, noteAgentResult, noteDispatched } from "../memory-admission.js";
 import { EMPTY_REPLY_ERROR } from "../../inference-runner.js";
 import { judgeResult } from "../../result-outcome.js";
 import { claimRule, mayTakeNow, noteAgentPull, noteClaimed } from "../dispatch.js";
@@ -441,6 +442,8 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       }
     }
     if (task) noteClaimed(task.id);
+    // Host memory: a call for a model not loaded there counts against the agent's headroom until it shows as loaded.
+    if (task?.kind === "inference") noteDispatched(body.agentId, task.requestedModel, nowMs);
     if (task) restrictedCalls.claimed(task.id, body.agentId, pullerAccount);
     if (task) {
       // Market: the trade prices at the agent's ask; remembered per subtask for accrual.
@@ -671,7 +674,13 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     const payableFailure = judgement.payableFailure && !isPeerForward && !isPeerOffered(body.subtaskId);
     // Ongoing hardware evidence: real work against the verified tier (server clock, not the agent's).
     // The ask is re-posted every time so its reliability score (minReliability bids) stays current.
-    if (!isPeerForward && claim?.claimedAt) {
+    // The agent handed the call back for memory ("memory_..."): not a failure of the agent, but no
+    // more calls for that model to it for a while (memory-admission.ts). Other model-call results
+    // feed its circuit breaker (a failure counts, a success closes it). Code results do not: a buyer
+    // controls whether its program fails, and must not be able to cool an honest agent down (BHV004).
+    const memoryRefusal = !isPeerForward && !!claim && !body.ok && isMemoryRefusal(body.error);
+    if (!isPeerForward && claim?.subtask.kind === "inference") noteAgentResult(body.agentId, claim.subtask.requestedModel, judgement.outcome !== "agent_failure", body.error);
+    if (!isPeerForward && claim?.claimedAt && !memoryRefusal) {
       const nowMs = Date.now();
       // Model calls carry the model's real token count (reported with the last streamed piece).
       hardwareVerifier.recordTask(body.agentId, { ok: judgement.outcome !== "agent_failure", outputChars: (body.output ?? "").length, elapsedMs: nowMs - claim.claimedAt, outputTokens: usagePending.get(body.taskId)?.outputTokens }, nowMs);
@@ -679,7 +688,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     }
 
     // ── Behavioral monitoring ── (skipped for peer-forwarded results: body.agentId is unauthenticated there)
-    if (!isPeerForward && claim) {
+    if (!isPeerForward && claim && !memoryRefusal) {
       // BHV001 judges speed by the coordinator's clock (claim to receipt), never the reported duration.
       behaviorTracker.recordTaskResult(body.agentId, {
         ok: body.ok,

@@ -5,6 +5,7 @@
   import { timeAgo } from "../lib/format";
   import StatusDot from "../components/StatusDot.svelte";
   import ErrorBanner from "../components/ErrorBanner.svelte";
+  import MemoryNotice from "../components/MemoryNotice.svelte";
 
   let status: CoordinatorStatus | null = $state(null);
   let capacity: CapacityResponse | null = $state(null);
@@ -55,6 +56,7 @@
 
 <div class="active-work">
   <h1>Active Work</h1>
+  {#if !noLocalAgent}<MemoryNotice />{/if}
 
   {#if noLocalAgent}
     <div class="info-banner" role="status">No local agent running. Install and start the EdgeCoder agent to see active work.</div>

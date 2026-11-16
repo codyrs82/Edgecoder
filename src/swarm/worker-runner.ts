@@ -4,8 +4,11 @@
 import { request } from "undici";
 import WebSocket from "ws";
 import { randomUUID, createHash } from "node:crypto";
-import { cpus, hostname, totalmem } from "node:os";
+import { cpus, freemem, hostname, totalmem } from "node:os";
 import { parallelInferenceFor, servedContextWindow } from "./parallelism.js";
+import { fitModel, fmtGb, memoryBudgetBytes, memoryBudgetPct } from "./memory-budget.js";
+import { readMemoryPressure } from "./memory-pressure.js";
+import { HostMemoryManager } from "./memory-manager.js";
 import { paramsB } from "../inference-api/auto-route.js";
 import { OpenAiEngineProvider, ProviderRegistry } from "../model/providers.js";
 import { ENGINE_PRESETS, openAiEngineChat, resolveEngine, type EngineConfig } from "../inference-api/openai-engine.js";
@@ -15,6 +18,7 @@ import { engineServing, probeEngine, type EngineStatus } from "./engine-probe.js
 import { SwarmWorkerAgent } from "../agent/worker.js";
 import { Subtask, SubtaskResult, BLETaskRequest, Language, MeshMessage, SandboxMode } from "../common/types.js";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { ensureSandboxImages, isDockerAvailable } from "../executor/docker-sandbox.js";
 import { runInferenceSubtask } from "./inference-runner.js";
 import { warmOllamaModel } from "../inference-api/ollama.js";
@@ -152,6 +156,60 @@ if (OPENAI_ENGINE && W.LOCAL_MODEL_PROVIDER !== "ollama-local") console.log(`[wo
 const PROVIDER = OPENAI_ENGINE ? "ollama-local" : W.LOCAL_MODEL_PROVIDER;
 const OLLAMA_HOST = W.OLLAMA_HOST;
 const OLLAMA_AUTO_INSTALL = W.OLLAMA_AUTO_INSTALL;
+const hardwareProbe: Probe = (cmd, args) => {
+  try {
+    return execFileSync(cmd, args, { encoding: "utf8", timeout: 8000, stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return null;
+  }
+};
+/**
+ * Hardware profile reported at registration; the coordinator classifies it into a compute class
+ * that prices this agent's seconds. GPUs are detected (nvidia-smi / rocm-smi / Apple silicon,
+ * src/install/hardware.ts); CUDA_VISIBLE_DEVICES or EDGECODER_GPU_INDEX picks the card this
+ * instance owns. AGENT_GPU_VENDOR / AGENT_GPU_MODEL / AGENT_GPU_VRAM_GB / AGENT_GPU_DATACENTER=1
+ * override detection (containers and unusual hardware); such a profile is marked `overridden` and
+ * the coordinator re-proves it with a benchmark challenge every session.
+ */
+function buildHardwareProfile(): Record<string, unknown> {
+  const hw = detectHardware({ probe: hardwareProbe });
+  const gpuModel = W.AGENT_GPU_MODEL;
+  const gpuVram = W.AGENT_GPU_VRAM_GB ?? Number.NaN;
+  if (gpuModel || (Number.isFinite(gpuVram) && gpuVram > 0)) {
+    return {
+      ...hardwareProfileFor(hw, undefined),
+      gpu: {
+        vendor: W.AGENT_GPU_VENDOR,
+        model: gpuModel || undefined,
+        vramGb: Number.isFinite(gpuVram) && gpuVram > 0 ? gpuVram : undefined,
+        datacenter: W.AGENT_GPU_DATACENTER
+      },
+      overridden: true
+    };
+  }
+  return hardwareProfileFor(hw, selectGpu(hw, process.env), selectGpuPool(hw, process.env));
+}
+const HARDWARE_PROFILE = buildHardwareProfile();
+/**
+ * Host memory budget (src/swarm/memory-budget.ts): AGENT_MEMORY_BUDGET_PCT of RAM (default 60%),
+ * or 90% of a discrete GPU's VRAM. Network models are loaded, served and sized to fit it.
+ */
+const OLLAMA_SERVER_PARALLEL = (() => {
+  const n = Number(process.env.OLLAMA_NUM_PARALLEL);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
+})();
+const MEMORY_BUDGET_BYTES = (() => {
+  const gpu = HARDWARE_PROFILE.gpu as { vendor?: string; vramGb?: number } | undefined;
+  const vram = gpu && gpu.vendor !== "apple" && gpu.vramGb ? gpu.vramGb * 1024 ** 3 : undefined;
+  return memoryBudgetBytes(totalmem(), memoryBudgetPct(W.AGENT_MEMORY_BUDGET_PCT), vram);
+})();
+/** Distinct models served on the network at once: AGENT_MAX_NETWORK_MODELS, never past Ollama's OLLAMA_MAX_LOADED_MODELS. */
+const MAX_NETWORK_MODELS = (() => {
+  const loadedCap = Number(process.env.OLLAMA_MAX_LOADED_MODELS);
+  const caps = [W.AGENT_MAX_NETWORK_MODELS, Number.isInteger(loadedCap) && loadedCap > 0 ? loadedCap : undefined].filter((n): n is number => typeof n === "number");
+  return caps.length ? Math.min(...caps) : undefined;
+})();
+
 /*
  * Model settings: the env file, with the owner's remote changes layered over it
  * (src/model/remote-control/overrides.ts). The env file is root's on a headless install; remote
@@ -188,10 +246,23 @@ function computeModelSettings(): CurrentModelSettings {
   const parallel = parallelInferenceFor(totalmem(), layered.env.parallel, { modelParamsB, ollamaNumParallel: process.env.OLLAMA_NUM_PARALLEL });
   const ctxRaw = layered.env.contextWindow !== undefined ? Number(layered.env.contextWindow) : undefined;
   /** One context window for every network call (Ollama reloads the model when num_ctx changes). */
-  const contextWindow = servedContextWindow(totalmem(), Number.isInteger(ctxRaw) ? ctxRaw : undefined, { modelParamsB, slots: parallel });
-  const keepAlive = layered.env.keepAlive ?? (SANDBOX_MODE_FOR_DEFAULTS === "none" && W.AGENT_INFERENCE_ONLY === true ? "-1" : "30m");
+  const wantContext = servedContextWindow(totalmem(), Number.isInteger(ctxRaw) ? ctxRaw : undefined, { modelParamsB, slots: parallel });
+  // The memory budget has the last word, an explicit AGENT_CONTEXT_WINDOW / AGENT_PARALLEL_INFERENCE
+  // included: the window (then the slots) come down until the model fits (memory-budget.ts fitModel).
+  let contextWindow = wantContext;
+  let slots = parallel;
+  if (model && !OPENAI_ENGINE) {
+    const fit = fitModel(model, { budgetBytes: MEMORY_BUDGET_BYTES, wantContext, wantSlots: parallel, fixedKvSlots: OLLAMA_SERVER_PARALLEL });
+    if (fit.contextWindow !== wantContext || fit.slots !== parallel || !fit.fits) {
+      console.warn(`[worker] memory budget ${fmtGb(MEMORY_BUDGET_BYTES)}: ${model} at ${wantContext} tokens x ${parallel} slot(s) ${fit.fits ? "does not fit; serving" : "does not fit even at"} ${fit.contextWindow} tokens x ${fit.slots} slot(s) (${fmtGb(fit.bytes)})`);
+    }
+    contextWindow = fit.contextWindow;
+    slots = fit.slots;
+  }
+  // The desktop app (all-in-one) frees an idle model after 5 minutes, as its Ollama does (OLLAMA_KEEP_ALIVE).
+  const keepAlive = layered.env.keepAlive ?? (SANDBOX_MODE_FOR_DEFAULTS === "none" && W.AGENT_INFERENCE_ONLY === true ? "-1" : process.env.EDGE_RUNTIME_MODE === "all-in-one" ? "5m" : "30m");
   const src = (k: keyof EnvModelSettings): "env" | "remote" | "default" => (layered.sources[k] === "remote" ? "remote" : ENV_MODEL_SETTINGS[k] !== undefined ? "env" : "default");
-  return { model, parallel, contextWindow, keepAlive, sources: { model: src("model"), contextWindow: src("contextWindow"), parallel: src("parallel"), keepAlive: src("keepAlive") } };
+  return { model, parallel: slots, contextWindow, keepAlive, sources: { model: src("model"), contextWindow: src("contextWindow"), parallel: src("parallel"), keepAlive: src("keepAlive") } };
 }
 const SANDBOX_MODE_FOR_DEFAULTS: SandboxMode = resolveSandboxMode(process.env);
 let modelSettings = computeModelSettings();
@@ -209,40 +280,6 @@ const AGENT_REGION = [W.AGENT_REGION, process.env.FLY_REGION].find((r) => typeof
 const PEER_DIRECT_WORK_ITEMS = (W.PEER_DIRECT_WORK_ITEMS ??
   "help peer with lightweight test scaffolding||review edge case handling").split("||");
 const SANDBOX_MODE: SandboxMode = resolveSandboxMode(process.env);
-const hardwareProbe: Probe = (cmd, args) => {
-  try {
-    return execFileSync(cmd, args, { encoding: "utf8", timeout: 8000, stdio: ["ignore", "pipe", "ignore"] });
-  } catch {
-    return null;
-  }
-};
-/**
- * Hardware profile reported at registration; the coordinator classifies it into a compute class
- * that prices this agent's seconds. GPUs are detected (nvidia-smi / rocm-smi / Apple silicon,
- * src/install/hardware.ts); CUDA_VISIBLE_DEVICES or EDGECODER_GPU_INDEX picks the card this
- * instance owns. AGENT_GPU_VENDOR / AGENT_GPU_MODEL / AGENT_GPU_VRAM_GB / AGENT_GPU_DATACENTER=1
- * override detection (containers and unusual hardware); such a profile is marked `overridden` and
- * the coordinator re-proves it with a benchmark challenge every session.
- */
-function buildHardwareProfile(): Record<string, unknown> {
-  const hw = detectHardware({ probe: hardwareProbe });
-  const gpuModel = W.AGENT_GPU_MODEL;
-  const gpuVram = W.AGENT_GPU_VRAM_GB ?? Number.NaN;
-  if (gpuModel || (Number.isFinite(gpuVram) && gpuVram > 0)) {
-    return {
-      ...hardwareProfileFor(hw, undefined),
-      gpu: {
-        vendor: W.AGENT_GPU_VENDOR,
-        model: gpuModel || undefined,
-        vramGb: Number.isFinite(gpuVram) && gpuVram > 0 ? gpuVram : undefined,
-        datacenter: W.AGENT_GPU_DATACENTER
-      },
-      overridden: true
-    };
-  }
-  return hardwareProfileFor(hw, selectGpu(hw, process.env), selectGpuPool(hw, process.env));
-}
-const HARDWARE_PROFILE = buildHardwareProfile();
 /**
  * Throughput benchmark (src/swarm/benchmark.ts): a < ~30 s self-benchmark at startup and every
  * AGENT_BENCHMARK_INTERVAL_MS (default 6 h), reported with the profile, plus answers to the
@@ -288,6 +325,13 @@ async function warmNetworkModel(model: string, why: string): Promise<void> {
   if (OPENAI_ENGINE) return refreshEngine(why);
   const host = OLLAMA_HOST ?? "http://127.0.0.1:11434";
   const started = Date.now();
+  // Never load past the host's memory budget (memory-manager.ts admits it or says why not).
+  await hostMemory.refresh();
+  const admission = await hostMemory.admit(model);
+  if (!admission.ok) {
+    console.warn(`[agent:${AGENT_ID}] not loading ${model} (${why}): ${admission.error}`);
+    return;
+  }
   try {
     // `generate`: also run a first short generation, whose one-time set-up (seconds to tens of seconds
     // on a GPU) would otherwise land on the first network call or the first benchmark challenge.
@@ -295,6 +339,8 @@ async function warmNetworkModel(model: string, why: string): Promise<void> {
     console.log(`[agent:${AGENT_ID}] model ${model} loaded (${why}) in ${Date.now() - started} ms, context ${CONTEXT_WINDOW}, keep_alive ${MODEL_KEEP_ALIVE}, ${MAX_PARALLEL_INFERENCE} parallel`);
   } catch (e) {
     console.warn(`[agent:${AGENT_ID}] could not load model ${model} (${why}): ${String(e).slice(0, 200)}`);
+  } finally {
+    admission.release();
   }
 }
 /** Last vLLM / MLX probe (undefined with Ollama, or before the first probe). */
@@ -535,7 +581,7 @@ if (LOCAL_FORWARD_PORT > 0) {
     token: () => (forwardToken ??= resolveIdeToken()),
     coordinatorUrl: () => registeredWithUrl,
     steering: () => steeringStatus,
-    lifecycle: () => lifecycle.status(),
+    lifecycle: () => ({ ...lifecycle.status(), memory: hostMemory.view() }),
     drain: async (resume) => {
       if (resume) {
         lifecycle.endDrain();
@@ -588,6 +634,56 @@ async function installedModelsCached(nowMs = Date.now()): Promise<string[]> {
 // bounds, disk and memory) decides what is done.
 const ollamaAdmin = createOllamaAdmin(OLLAMA_HOST);
 const SERVES_OLLAMA = PROVIDER === "ollama-local" || INFERENCE_ONLY;
+/** Running network model calls, cancelled together under critical memory pressure. */
+const networkCallAborts = new Set<AbortController>();
+/**
+ * Host memory (src/swarm/memory-manager.ts): which models this host serves on the network, what
+ * may load, and the pressure guard. With vLLM / MLX (or no local model) only the guard applies.
+ */
+const MANAGES_OLLAMA_MEMORY = SERVES_OLLAMA && !OPENAI_ENGINE;
+const hostMemory = new HostMemoryManager({
+  ollama: MANAGES_OLLAMA_MEMORY ? ollamaAdmin : { list: async () => [], loaded: async () => [], unload: async () => undefined },
+  readPressure: () =>
+    readMemoryPressure({
+      platform: process.platform,
+      totalBytes: totalmem(),
+      freeBytes: freemem,
+      exec: (cmd, args) => {
+        try {
+          return execFileSync(cmd, args, { encoding: "utf8", timeout: 3000, stdio: ["ignore", "pipe", "ignore"] });
+        } catch {
+          return null;
+        }
+      },
+      readFile: (path) => {
+        try {
+          return readFileSync(path, "utf8");
+        } catch {
+          return null;
+        }
+      }
+    }),
+  budgetBytes: MEMORY_BUDGET_BYTES,
+  maxModels: MAX_NETWORK_MODELS,
+  settings: () => ({ primary: OLLAMA_MODEL, contextWindow: CONTEXT_WINDOW, slots: MAX_PARALLEL_INFERENCE, kvSlots: OLLAMA_SERVER_PARALLEL ?? MAX_PARALLEL_INFERENCE }),
+  guardEnabled: W.AGENT_MEMORY_GUARD !== false,
+  // Critical pressure: cancel the running model calls (each fails with a memory_ error, so the
+  // coordinator gives it to another agent) and hand every claim back (BHV006 going-offline path).
+  onCritical: async () => {
+    for (const a of networkCallAborts) a.abort();
+    if (!registeredWithUrl) return;
+    const r = await announceGoingOffline((body) => post("/heartbeat", body, { retries: 0, timeoutMs: 4_000, signed: true }), AGENT_ID, "drain", 5_000);
+    console.warn(`[agent:${AGENT_ID}] critical memory pressure: network calls cancelled${r.ok ? `, ${r.released} claim(s) handed back` : ""}`);
+  },
+  log: (msg) => console.log(`[agent:${AGENT_ID}] ${msg}`)
+});
+setInterval(() => void hostMemory.refresh(), 5_000).unref?.();
+void hostMemory.refresh();
+console.log(`[agent:${AGENT_ID}] memory budget ${fmtGb(MEMORY_BUDGET_BYTES)}${MAX_NETWORK_MODELS ? `, at most ${MAX_NETWORK_MODELS} network model(s)` : ""}; pressure guard ${W.AGENT_MEMORY_GUARD !== false ? "on" : "off"}`);
+/** keep_alive for a network call: the agent's own model keeps the configured one; other models go after 5 minutes idle. */
+function keepAliveFor(model: string | undefined): string {
+  return model && model !== OLLAMA_MODEL && MODEL_KEEP_ALIVE !== "0" ? "5m" : MODEL_KEEP_ALIVE;
+}
 /** Puts the env + override file back into effect after a remote change (model reload included). */
 async function applyModelSettings(): Promise<void> {
   const before = OLLAMA_MODEL;
@@ -1468,9 +1564,12 @@ async function loop(): Promise<void> {
    */
   const buildRegisterBody = async (powerTelemetry: ReturnType<typeof readAgentPowerTelemetry>): Promise<Record<string, unknown>> => {
     if (currentProvider === "ollama-local") installedModelsCache = undefined; // register reads them fresh
-    const installedModels = currentProvider === "ollama-local" ? await installedModelsCached() : [];
+    // Only the models this host serves on the network (they fit its memory budget; memory-manager.ts).
+    const installedModels = currentProvider === "ollama-local" ? hostMemory.advertised(await installedModelsCached()) : [];
+    const memoryActive = hostMemory.activeModel();
     return {
-      ...(installedModels.length ? { installedModels, activeModel: installedModels.includes(OLLAMA_MODEL) ? OLLAMA_MODEL : installedModels[0] } : {}),
+      ...(installedModels.length ? { installedModels, activeModel: memoryActive && installedModels.includes(memoryActive) ? memoryActive : installedModels.includes(OLLAMA_MODEL) ? OLLAMA_MODEL : installedModels[0] } : {}),
+      ...(hostMemory.telemetry() ? { memory: hostMemory.telemetry() } : {}),
       agentId: AGENT_ID,
       ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
       os: OS,
@@ -1580,8 +1679,11 @@ async function loop(): Promise<void> {
 
           const hbStart = Date.now();
           // #54: the installed-model list rides every heartbeat (cached), so a pulled or removed model is routed correctly.
-          const hbModels = currentProvider === "ollama-local" ? await installedModelsCached() : [];
-          const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE, ...(hbModels.length ? { installedModels: hbModels } : {}), ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
+          const hbModels = currentProvider === "ollama-local" ? hostMemory.advertised(await installedModelsCached()) : [];
+          // The model already in memory, so the coordinator sends calls for it here first (affinity).
+          const hbActive = currentProvider === "ollama-local" ? hostMemory.activeModel() : undefined;
+          const hbMemory = hostMemory.telemetry();
+          const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE, ...(hbModels.length ? { installedModels: hbModels } : {}), ...(hbActive && hbModels.includes(hbActive) ? { activeModel: hbActive, activeModelParamSize: paramsB(hbActive) } : {}), ...(hbMemory ? { memory: hbMemory } : {}), ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
           hb = (await post("/heartbeat", hbBody, { signed: true })) as HeartbeatReply;
           if ("benchmark" in hbBody) benchmarkUnreported = false;
           try { localStore.recordHeartbeat(coordinator.url, hb.blacklisted ? "blacklisted" : "ok", Date.now() - hbStart); } catch (e) { console.warn(`[db] heartbeat write failed: ${e}`); }
@@ -1710,7 +1812,9 @@ async function loop(): Promise<void> {
 
         // Our model slots (the coordinator hands a call only to an agent with one free) and that we take nudges.
         // A vLLM / MLX engine that is down or serves no catalog model: no free slot (no model call is handed to us).
-        const freeInferenceSlots = engineReady() ? Math.max(0, MAX_PARALLEL_INFERENCE - inflightInference.size) : 0;
+        // Low on memory (or nothing fits the budget): no free slot, and no pull below.
+        const memoryOk = hostMemory.canPull();
+        const freeInferenceSlots = engineReady() && memoryOk ? Math.max(0, MAX_PARALLEL_INFERENCE - inflightInference.size) : 0;
         // AGENT_ALLOW_RESTRICTED_MODELS: the owner lets this machine take restricted-model calls (security
         // research tier; the coordinator also needs the owner's admin-approved host entitlement).
         const pullBody = { agentId: AGENT_ID, inferenceSlots: MAX_PARALLEL_INFERENCE, freeInferenceSlots, contextWindow: CONTEXT_WINDOW, wake: true, ...(W.AGENT_ALLOW_RESTRICTED_MODELS ? { allowRestrictedModels: true } : {}) };
@@ -1723,7 +1827,7 @@ async function loop(): Promise<void> {
         }
         // Inference-only with every slot busy: nothing we could take; a finishing call wakes the loop.
         // Draining (a restart or quit is coming) or stopping: take nothing new (BHV006).
-        const pulled = (PULLS_FROM_COORDINATOR && !sandboxDown && lifecycle.canPull() && !shuttingDown && !(INFERENCE_ONLY && freeInferenceSlots === 0)
+        const pulled = (PULLS_FROM_COORDINATOR && !sandboxDown && lifecycle.canPull() && memoryOk && !shuttingDown && !(INFERENCE_ONLY && freeInferenceSlots === 0)
           ? await post("/pull", pullBody, { signed: true })
           : { subtask: null }) as {
           subtask: Subtask | null;
@@ -1800,11 +1904,24 @@ async function loop(): Promise<void> {
             try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, coordinator.url); } catch (e) { console.warn(`[db] task start write failed: ${e}`); }
             // #51: keep the coordinator's claim lease alive while the subtask runs.
             const stopLeaseHeartbeat = startLeaseHeartbeat();
-            const run = st.kind === "inference"
-              ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: MODEL_KEEP_ALIVE, contextWindow: CONTEXT_WINDOW, post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }), ...(OPENAI_ENGINE ? { chat: engineChat } : {}) })
+            // Host memory: the model must fit this host's budget next to what is loaded (idle network
+            // models are unloaded first); otherwise the call is handed back with a memory_ error and
+            // the coordinator gives it to another agent (memory-manager.ts).
+            const admission = st.kind === "inference" && MANAGES_OLLAMA_MEMORY && st.requestedModel ? await hostMemory.admit(st.requestedModel) : undefined;
+            const callAbort = new AbortController();
+            networkCallAborts.add(callAbort);
+            const run = admission && !admission.ok
+              ? Promise.resolve<SubtaskResult>({ subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID, ok: false, output: "", error: admission.error, durationMs: 0, executed: false })
+              : st.kind === "inference"
+              ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: keepAliveFor(st.requestedModel), contextWindow: CONTEXT_WINDOW, signal: callAbort.signal, post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }), ...(OPENAI_ENGINE ? { chat: engineChat } : {}) })
               : runPolicedSubtask(st, { quiet: true });
-            if (st.kind === "inference") console.log(`[agent:${AGENT_ID}] running inference ${st.id} on ${st.requestedModel}`);
-            const result = await run.finally(stopLeaseHeartbeat);
+            if (admission && !admission.ok) console.warn(`[agent:${AGENT_ID}] handed back inference ${st.id} on ${st.requestedModel}: ${admission.error}`);
+            else if (st.kind === "inference") console.log(`[agent:${AGENT_ID}] running inference ${st.id} on ${st.requestedModel}`);
+            const result = await run.finally(() => {
+              stopLeaseHeartbeat();
+              networkCallAborts.delete(callAbort);
+              if (admission?.ok) admission.release();
+            });
             result.snapshotRef = st.snapshotRef;
             try {
               if (result.ok) {

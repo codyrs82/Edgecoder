@@ -218,6 +218,17 @@ Which quant (all `mlx-community`):
 
 The 6-bit (24.8 GB) and 8-bit (32.4 GB) Qwen3-Coder-30B builds do not fit a 32 GB Mac.
 
+## Memory safety on GPU hosts
+
+With Ollama the agent keeps every network model inside a memory budget: 90% of the instance's GPU
+VRAM on a discrete card (60% of RAM on Apple silicon and CPU hosts; `AGENT_MEMORY_BUDGET_PCT`). It
+sizes its context window and slots to fit, advertises only models that fit, serves at most
+`AGENT_MAX_NETWORK_MODELS` / `OLLAMA_MAX_LOADED_MODELS` distinct models at once (the installer
+writes 1 up to 32 GB of instance memory and 2 above, with flash attention and a `q8_0` KV cache),
+and stops taking network work under host memory pressure. vLLM and MLX size their own cache at
+start (`--gpu-memory-utilization`, the MLX server's model); with them only the pressure guard
+applies. Details and thresholds: [Memory safety](install.md#memory-safety).
+
 ## Troubleshooting
 
 | Log line | Meaning |

@@ -16,6 +16,8 @@
  *    waits while there are any).
  */
 
+import type { MemoryStatusView } from "./memory-manager.js";
+
 export type GoingOfflineReason = "update" | "quit" | "sleep" | "shutdown" | "drain";
 
 export interface PausedState {
@@ -28,6 +30,8 @@ export interface LifecycleStatus {
   draining: boolean;
   drainingUntilMs: number | null;
   claims: number;
+  /** Host memory: pressure, budget, loaded and served models (src/swarm/memory-manager.ts). */
+  memory?: MemoryStatusView;
 }
 
 /** How long a drain the app asked for lasts when the restart doesn't come. */

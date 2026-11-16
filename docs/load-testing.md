@@ -147,6 +147,29 @@ utilization (busy slots / slots, average and peak), busy agents, queue and waiti
 peaks, dispatch pickup p90, server-side TTFT p90, started/completed/failed and no-capacity counts.
 Those samples live in coordinator memory (24 h): a coordinator restart during a run loses them.
 
+## Including the owner's Macs (`--include-macs`)
+
+There is no `--include-macs` switch: any Mac whose agent is online holds models, gets traffic, and is
+part of the run (`:7b@apple` targets it on purpose). A run is safe for Macs only with this release
+on both sides: the agents keep network models inside their memory budget and stop under memory
+pressure, and the coordinator dispatches a model only to an agent that has it loaded or has room
+for it ([Memory safety](install.md#memory-safety)). To keep the Macs out, take their agents offline
+(quit the app, or Settings → stop sharing compute) before the run.
+
+`report.mjs` proves it. It prints `Host memory (coordinators' view of agent heartbeats; peak over the
+run):`, one line per host with peak pressure and peak loaded-model memory against its budget, and
+for any host that hit critical pressure or loaded past its budget:
+
+```
+FLAG host-memory: <agentId> hit CRITICAL memory pressure during the run
+FLAG host-memory: <agentId> loaded <X> GB of models, over its <Y> GB budget
+RUN FAILED: network load pushed a host into memory trouble (see FLAGs above).
+```
+
+and exits with code 3 (the `--out` JSON has `hostMemory: { ok, hosts, flags }`). It reads the
+`fly.sh watch` samples (15 s) and the incidents the coordinator logs between them, over the run
+window plus 60 s. Agents older than this release report no memory and are not judged.
+
 ## Reading Settings → Network during a run
 
 - **Utilization** should climb with each stage. If it stays low while the client sees

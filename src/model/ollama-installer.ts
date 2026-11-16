@@ -1,6 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { ollamaMemorySafetyEnv, ollamaParallelFor } from "../swarm/memory-budget.js";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream, existsSync } from "node:fs";
@@ -84,7 +85,9 @@ function runCommand(
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
-      env: { ...process.env, ...(env ?? {}) },
+      // Memory safety (src/swarm/memory-budget.ts): a loaded-model cap, slots, keep-alive and a smaller
+    // KV cache by this machine's memory; values already in the environment win.
+    env: { ...ollamaServeDefaults(os.totalmem()), ...process.env, ...(env ?? {}) },
       stdio: opts?.silent ? "pipe" : "inherit"
     });
 
@@ -264,6 +267,11 @@ async function isOllamaServing(host?: string): Promise<boolean> {
     req.on("error", () => resolve(false));
     req.setTimeout(2000, () => { req.destroy(); resolve(false); });
   });
+}
+
+/** Env for an `ollama serve` the agent starts itself: as the desktop app's (local_compute.rs ollama_server_env). */
+export function ollamaServeDefaults(memoryBytes: number): Record<string, string> {
+  return { OLLAMA_NUM_PARALLEL: String(ollamaParallelFor(memoryBytes)), OLLAMA_KEEP_ALIVE: "5m", ...ollamaMemorySafetyEnv(memoryBytes) };
 }
 
 function startOllamaServeBackground(role: string, env?: NodeJS.ProcessEnv): void {

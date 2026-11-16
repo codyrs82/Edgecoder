@@ -57,6 +57,8 @@ export interface AgentView {
   tierWeight: number;
   models: string[];
   activeModel?: string | null;
+  /** Models loaded on the agent now (its memory telemetry); undefined: not reported. */
+  loadedModels?: string[];
   slots: number;
   freeSlots: number;
   /** Context window the agent serves with; undefined: not reported (the model's own). */
@@ -262,6 +264,11 @@ export interface Estimate {
   cSats: number;
 }
 
+/** Rough cold-load time of a model (weights read into memory): ~1 s plus ~0.4 s per billion parameters. */
+export function coldLoadMs(model: string): number {
+  return Math.round(1_000 + paramsB(model) * 400);
+}
+
 export function estimate(job: JobDescriptor, agent: AgentView, model: string, view: Pick<NetworkView, "pickupP50Ms" | "waitingByModel" | "btcUsd">, holdersOfModel: number, cachedPrefix = false): Estimate {
   const tps = decodeTps(agent, model);
   const pre = prefillTps(agent, model);
@@ -274,6 +281,9 @@ export function estimate(job: JobDescriptor, agent: AgentView, model: string, vi
     const queued = (view.waitingByModel[model] ?? 0) / Math.max(1, holdersOfModel);
     waitMs += typical * (0.5 + queued / Math.max(1, agent.slots));
   }
+  // Model affinity: an agent that has to load the model first pays the load (and it may unload
+  // another to make room), so an agent with it loaded wins a close call.
+  if (agent.loadedModels && !agent.loadedModels.includes(model)) waitMs += coldLoadMs(model);
   const rttMs = (agent.rttMs ?? 50) + (agent.local ? 0 : agent.linkRttMs ?? 100);
   const ttftMs = waitMs + rttMs + prefillMs;
   const totalMs = ttftMs + decodeMs;

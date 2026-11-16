@@ -51,7 +51,7 @@ export interface CoordinatorSnapshot {
   dispatch: { pickup: Pct; nudges: number };
   latency: { windowMs: number; pickup: Pct; ttft: Pct; duration: Pct };
   models: Array<{ model: string; agents: number; idleAgents: number; slots: number; freeSlots: number; waiting: number; callsWindow: number; completedWindow: number; failedWindow: number; calls24h: number; noAgentHasModel24h: number; noCapacity24h: number }>;
-  gaps: { windowMs: number; missingModels: Array<{ model: string; noAgentHasModel: number; noCapacity: number }>; saturatedModels: unknown[]; staleAgents: unknown[] };
+  gaps: { windowMs: number; missingModels: Array<{ model: string; noAgentHasModel: number; noCapacity: number }>; saturatedModels: unknown[]; staleAgents: unknown[]; memoryLimitedAgents?: unknown[] };
   series: { range: SeriesRange; bucketMs: number; points: Sample[] };
   /** Best-fit routing (model "auto"; newer coordinators): recent decisions, newest first. */
   routing?: { decisions?: Array<Record<string, unknown> & { atMs: number }>; config?: unknown };
@@ -148,6 +148,12 @@ export function mergeSeries(seriesList: Sample[][], labels?: string[]): Sample[]
       return out;
     });
 }
+
+/** An agent's memory report and circuit as the coordinator's /admin/network gives them (newer coordinators). */
+type AgentMemory = { pressure?: string; loadedModels?: Array<{ name: string; bytes: number }> } | null | undefined;
+const memoryOf = (a: Record<string, unknown>): AgentMemory => (a.memory && typeof a.memory === "object" ? (a.memory as AgentMemory) : undefined);
+const circuitOf = (a: Record<string, unknown>): { open?: boolean } | undefined => (a.circuit && typeof a.circuit === "object" ? (a.circuit as { open?: boolean }) : undefined);
+const isMemoryLimited = (a: Record<string, unknown>): boolean => a.memoryLimited === true || circuitOf(a)?.open === true;
 
 /** The coordinators' name for "every other model" in a capped map (network-observer.ts OTHER_MODEL). */
 const OTHER_KEY = "(other)";
@@ -246,7 +252,8 @@ export function mergeNetworkSnapshots(results: CoordinatorResult[], owners: Owne
       ttftP90: ttft.p90,
       callsPerMin: Math.round(sum((s) => Number(s.totals.startedPerMin ?? 0)) * 10) / 10,
       completedPerMin: Math.round(sum((s) => Number(s.totals.completedPerMin ?? 0)) * 10) / 10,
-      nudges: sum((s) => s.dispatch.nudges)
+      nudges: sum((s) => s.dispatch.nudges),
+      agentsMemoryLimited: live.filter(isMemoryLimited).length
     },
     agents: agentList,
     queue: { waitingByModel: [...waitingByModel.entries()].map(([model, waiting]) => ({ model, waiting })).sort((a, b) => b.waiting - a.waiting) },
@@ -257,6 +264,8 @@ export function mergeNetworkSnapshots(results: CoordinatorResult[], owners: Owne
       missingModels: [...missing.values()].sort((a, b) => b.noAgentHasModel + b.noCapacity - (a.noAgentHasModel + a.noCapacity)),
       saturatedModels: modelList.filter((m) => m.agents > 0 && m.freeSlots === 0).map((m) => ({ model: m.model, agents: m.agents, slots: m.slots, waiting: m.waiting })),
       staleAgents: agentList.filter((a) => a.status === "stale").map((a) => ({ agentId: a.agentId, email: a.email, coordinator: a.coordinator, lastSeenMs: a.lastSeenMs })),
+      // Live agents with no capacity for memory (pressure, paused) or an open circuit (coordinator memory-admission.ts).
+      memoryLimitedAgents: live.filter(isMemoryLimited).map((a) => ({ agentId: a.agentId, email: a.email, coordinator: a.coordinator, pressure: memoryOf(a)?.pressure ?? null, circuitOpen: circuitOf(a)?.open === true, loadedModels: (memoryOf(a)?.loadedModels ?? []).map((m) => m.name) })),
       thinCoordinators: byCoordinator.filter((c) => c.connected < FEW_AGENTS),
       coordinators: byCoordinator,
       unreachableCoordinators: results.filter((r) => !r.ok).map((r) => r.url),

@@ -16,6 +16,7 @@
   import { MODEL_CATALOG, CATEGORY_LABELS, type CatalogModel } from "../lib/models";
   import type { ModelInfo, OllamaModel, OllamaRunningModel } from "../lib/types";
   import ErrorBanner from "../components/ErrorBanner.svelte";
+  import MemoryNotice from "../components/MemoryNotice.svelte";
   import Skeleton from "../components/Skeleton.svelte";
 
   interface Props {
@@ -341,6 +342,7 @@
   {#if noLocalAgent}
     <div class="info-banner">No local agent running. Install and start the EdgeCoder agent to manage models.</div>
   {/if}
+  {#if !noLocalAgent}<MemoryNotice showServing />{/if}
   {#if error}
     <ErrorBanner message={error} onRetry={refresh} />
   {/if}
