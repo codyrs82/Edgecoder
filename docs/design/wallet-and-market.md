@@ -90,10 +90,10 @@ Earnings area is therefore designed for several payout methods and assets:
 |---|---|---|---|
 | Lightning (invoice now, or automatic to a Lightning address) | BTC | **Active today** | Enabled |
 | Bitcoin on-chain, batched payouts above a minimum | BTC | Behind `ONCHAIN_ENABLED` | "Available" with minimum, schedule and fee note when the coordinator's policy says enabled; otherwise "Coming soon" |
-| Litecoin on-chain, batched | LTC | Coming soon | Shown, disabled, labelled "Coming soon" |
+| Zcash on-chain, batched | ZEC | Coming soon | Shown, disabled, labelled "Coming soon" |
 
 Bitcoin on-chain is built (docs/economy-math.md "On-chain payouts, batched") and shown as active
-only when `policy.onchain.enabled` comes back from the coordinator; Litecoin is still a UI
+only when `policy.onchain.enabled` comes back from the coordinator; Zcash is still a UI
 placeholder with no backend. Payout history has an **Asset** column: "BTC · Lightning" or
 "BTC · On-chain" with the start of the txid.
 

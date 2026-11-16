@@ -452,7 +452,7 @@
       {:else}
         <div class="wl-method soon" role="listitem"><div class="t"><span><Bitcoin size={15} /> Bitcoin on-chain</span><span class="wl-pill">Coming soon</span></div><div class="d">BTC. Batched payouts above a minimum. Not available yet.</div></div>
       {/if}
-      <div class="wl-method soon" role="listitem"><div class="t"><span><Coins size={15} /> Litecoin on-chain</span><span class="wl-pill">Coming soon</span></div><div class="d">LTC. Batched payouts. Not available yet.</div></div>
+      <div class="wl-method soon" role="listitem"><div class="t"><span><Coins size={15} /> Zcash on-chain</span><span class="wl-pill">Coming soon</span></div><div class="d">ZEC. Batched payouts. Not available yet.</div></div>
     </div>
 
     <div class="sp-group">

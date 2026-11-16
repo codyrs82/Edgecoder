@@ -98,12 +98,12 @@ describe("portal pages module (#16)", () => {
     expect(plan).toContain('"/portal/api/wallet/overview"');
     expect(plan).toContain('"/portal/api/wallet/topup"');
     // Payout methods: Lightning is live; Bitcoin on-chain is "Coming soon" until the coordinator's
-    // policy says ONCHAIN_ENABLED (the page script flips it); Litecoin is a labelled placeholder only.
+    // policy says ONCHAIN_ENABLED (the page script flips it); Zcash is a labelled placeholder only.
     expect(plan).toMatch(/Lightning<\/span> <span class="wl-pill ok">Active<\/span>/);
     expect(plan).toMatch(/Bitcoin on-chain<\/span> <span class="wl-pill soon" id="methodOnchainPill">Coming soon<\/span>/);
     expect(plan).toMatch(/id="fundBtcBtn" aria-pressed="false" disabled title="Coming soon"/);
     expect(plan).toContain('"/portal/api/wallet/onchain/address"');
-    expect(plan).toMatch(/Litecoin on-chain<\/span> <span class="wl-pill soon">Coming soon<\/span>/);
+    expect(plan).toMatch(/Zcash on-chain<\/span> <span class="wl-pill soon">Coming soon<\/span>/);
     // Fees are stated, and motion stops under reduced motion.
     expect(plan).toContain("Where your sats go");
     // Owner fee policy (2026-11-15): buying is free unless the coordinator sets a fee; EdgeCoder keeps 5 % of compute payments.

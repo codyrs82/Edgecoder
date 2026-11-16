@@ -562,7 +562,7 @@ struct WalletView: View {
         } else {
             method("bitcoinsign.circle", "Bitcoin on-chain", "BTC. Batched payouts above a minimum. Not available yet.", active: false)
         }
-        method("l.circle", "Litecoin on-chain", "LTC. Batched payouts. Not available yet.", active: false)
+        method("z.circle", "Zcash on-chain", "ZEC. Batched payouts. Not available yet.", active: false)
         withdrawCard(policy: policy)
         card {
             Text("Where we pay you").font(.headline).foregroundColor(Theme.textPrimary)
