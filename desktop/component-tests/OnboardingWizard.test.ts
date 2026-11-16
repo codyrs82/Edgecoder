@@ -186,6 +186,91 @@ describe("Getting started (desktop wizard)", () => {
     expect(container).toBeTruthy();
   });
 
+  describe("layout", () => {
+    const stepButton = (name: RegExp) => screen.getByRole("button", { name });
+
+    it("reserves the macOS title bar: a drag strip above the side title and above the step column", async () => {
+      render(OnboardingWizard, props());
+      await waitFor(() => expect(heading().textContent).toBe("Welcome to EdgeCoder"));
+      const strips = document.querySelectorAll(".wz-titlebar[data-tauri-drag-region]");
+      expect(strips).toHaveLength(2);
+      // The side strip comes before the "Getting started" title, out of the accessibility tree.
+      const side = screen.getByTestId("wz-titlebar");
+      expect(side.nextElementSibling?.textContent).toBe("Getting started");
+      expect(side.getAttribute("aria-hidden")).toBe("true");
+      // The step's heading, checklist and Back / Next row share one centred column.
+      const col = screen.getByTestId("wz-col");
+      expect(col.contains(heading())).toBe(true);
+      expect(col.contains(screen.getByRole("button", { name: "Next" }))).toBe(true);
+      expect(col.contains(screen.getByRole("status"))).toBe(true);
+    });
+
+    it("hides the checklist when its only item repeats the step's own choice", async () => {
+      render(OnboardingWizard, props());
+      await waitFor(() => expect(heading().textContent).toBe("Welcome to EdgeCoder"));
+      expect(screen.queryByRole("list", { name: "Checklist" })).toBeNull();
+      expect(document.querySelector("[data-item='goal']")).toBeNull();
+      expect(screen.queryByText("Choose what you want to do")).toBeNull();
+    });
+
+    it("hides the routing row on Models but keeps real checklists elsewhere", async () => {
+      current = saved({ current: "models", goal: "both" });
+      render(OnboardingWizard, props());
+      await waitFor(() => expect(heading().textContent).toBe("Choose models and where they run"));
+      expect(document.querySelector("[data-item='routing']")).toBeNull();
+      expect(screen.queryByRole("list", { name: "Checklist" })).toBeNull();
+    });
+
+    it("keeps checklists that read real state", async () => {
+      current = saved({ current: "fund", goal: "both" });
+      render(OnboardingWizard, props());
+      await waitFor(() => expect(heading().textContent).toBe("Fund your account"));
+      expect(screen.getByRole("list", { name: "Checklist" })).toBeTruthy();
+      expect(document.querySelector("[data-item='funded']")).toBeTruthy();
+    });
+
+    it("step list: filled check for steps moved past, a quieter check for steps already complete but not reached", async () => {
+      // Welcome and How moved past; Set up this computer is complete from state (a machine and a model).
+      current = saved({ goal: "both", current: "machines", done: ["welcome", "how"] });
+      render(OnboardingWizard, props());
+      await waitFor(() => expect(heading().textContent).toBe("Add your other machines"));
+      await waitFor(() => expect(stepButton(/^Set up this computer/).textContent).toContain("done"));
+      const welcome = stepButton(/^Welcome to EdgeCoder/);
+      expect(welcome.classList.contains("done")).toBe(true);
+      expect(welcome.classList.contains("ready")).toBe(false);
+      const thisMachine = stepButton(/^Set up this computer/);
+      expect(thisMachine.classList.contains("ready")).toBe(true);
+      expect(thisMachine.classList.contains("done")).toBe(false);
+      // The current step is marked (and isn't complete: one machine of two).
+      const cur = stepButton(/^Add your other machines/);
+      expect(cur.getAttribute("aria-current")).toBe("step");
+      expect(cur.classList.contains("done") || cur.classList.contains("ready")).toBe(false);
+      // A step not reached and not complete is plain.
+      const fund = stepButton(/^Fund your account/);
+      expect(fund.className).not.toMatch(/\b(done|ready)\b/);
+      // Both complete looks say "done" to a screen reader.
+      expect(thisMachine.textContent).toContain(", done");
+    });
+
+    it("the current step reads as done once its choice is made", async () => {
+      render(OnboardingWizard, props());
+      await waitFor(() => expect(heading().textContent).toBe("Welcome to EdgeCoder"));
+      await fireEvent.click(screen.getByLabelText(/Both/));
+      await waitFor(() => expect(stepButton(/^Welcome to EdgeCoder/).classList.contains("done")).toBe(true));
+    });
+
+    it("step labels sit beside a top-aligned badge (two-line labels keep the number on the first line)", async () => {
+      render(OnboardingWizard, props());
+      await waitFor(() => expect(heading().textContent).toBe("Welcome to EdgeCoder"));
+      const btn = stepButton(/^Choose models and where they run/);
+      const [badge, label] = Array.from(btn.children) as HTMLElement[];
+      expect(badge.classList.contains("wz-num")).toBe(true);
+      expect(label.classList.contains("wz-step-label")).toBe(true);
+      expect(label.textContent).toBe("Choose models and where they run");
+      expect(getComputedStyle(btn).alignItems).toBe("flex-start");
+    });
+  });
+
   it("Settings → Getting started shows progress and reopens the guide", async () => {
     current = saved({ goal: "both", done: ["welcome", "how"], dismissed: true });
     const onOpenGuide = vi.fn();

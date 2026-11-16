@@ -105,4 +105,23 @@ describe("/portal/welcome (Getting started on the web)", () => {
     expect(nav).toContain("data-step='fund' class='wz-step-link' aria-current='step'");
     expect(nav).toContain("href='/portal/welcome/machines'");
   });
+
+  it("hides a checklist that repeats the step's choice; the step list tells moved-past steps from ones complete ahead", () => {
+    expect(R.wzPanel(ctx("welcome"))).not.toContain("wz-checklist");
+    expect(R.wzPanel(ctx("models"))).not.toContain("data-item='routing'");
+    expect(R.wzPanel(ctx("fund"))).toContain("data-item='funded'");
+    const c = ctx("how", { state: { ...O.emptyOnboardingState(0), current: "how", goal: "both", done: ["welcome"] } });
+    const nav = R.wzStepNav(c);
+    expect(nav).toContain("data-step='welcome' class='wz-step-link done'");
+    // this-machine is complete from the account (a machine is connected) but not reached: quieter.
+    expect(nav).toContain("data-step='this-machine' class='wz-step-link ready'");
+    expect(nav).toContain("data-step='how' class='wz-step-link' aria-current='step'");
+    expect(nav).toContain("<span class='wz-step-label'>Choose models and where they run</span>");
+  });
+
+  it("centres the guide in the wide Settings pane", async () => {
+    const html = await page("/portal/welcome");
+    expect(html).toContain('<div class="wz-wrap">');
+    expect(html).toMatch(/\.wz-wrap \{ max-width: \d+px; margin: 0 auto; \}/);
+  });
 });

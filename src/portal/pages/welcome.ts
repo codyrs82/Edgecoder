@@ -42,6 +42,7 @@ export const ONBOARDING_BROWSER_LIB = [
     O.stepById,
     O.stepsFor,
     O.checklistFor,
+    O.shownChecklist,
     O.itemDone,
     O.stepComplete,
     O.progressFor,
@@ -80,7 +81,7 @@ export const WELCOME_RENDER_SCRIPT = `
     }
     function wzStatusText(v) { return v === true ? "Done" : v === false ? "Not yet" : "Check in the app"; }
     function wzChecklist(step, ctx) {
-      var items = checklistFor(step, "web");
+      var items = shownChecklist(step, "web");
       if (!items.length) return "";
       return "<ul class='wz-checklist' aria-label='Checklist'>" + items.map(function (c) {
         var v = itemDone(c.id, ctx.signals, ctx.state);
@@ -201,8 +202,10 @@ export const WELCOME_RENDER_SCRIPT = `
       return "<ol class='wz-steps'>" + prog.steps.map(function (p, i) {
         var st = stepById(p.id);
         var cur = p.id === ctx.state.current;
-        return "<li><a href='/portal/welcome/" + p.id + "' data-step='" + p.id + "' class='wz-step-link" + (p.complete ? " done" : "") + "'" + (cur ? " aria-current='step'" : "") + ">" +
-          "<span class='wz-step-num' aria-hidden='true'>" + (p.complete ? "✓" : String(i + 1)) + "</span><span>" + escapeHtml(st.title) + "</span>" +
+        // done: complete and moved past (or current); ready: complete from the account's state, not reached yet (quieter).
+        var look = !p.complete ? "" : p.visited || cur ? " done" : " ready";
+        return "<li><a href='/portal/welcome/" + p.id + "' data-step='" + p.id + "' class='wz-step-link" + look + "'" + (cur ? " aria-current='step'" : "") + ">" +
+          "<span class='wz-step-num' aria-hidden='true'>" + (p.complete ? "✓" : String(i + 1)) + "</span><span class='wz-step-label'>" + escapeHtml(st.title) + "</span>" +
           "<span class='wz-sr'>" + (p.complete ? ", done" : p.skipped ? ", skipped" : "") + "</span></a></li>";
       }).join("") + "</ol>";
     }
@@ -223,17 +226,24 @@ export const WELCOME_RENDER_SCRIPT = `
 
 const WELCOME_CSS = `
   <style nonce="${CSP_NONCE}">
+    /* One centred block in the wide Settings pane: the step list and an ~820px step column. */
+    .wz-wrap { max-width: 1064px; margin: 0 auto; }
     .wz { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 24px; }
     .wz-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
     .wz-head h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.015em; }
     .wz-head p { margin: 0; color: var(--muted); font-size: 13px; }
     .wz-progress { width: 100%; height: 6px; margin: 4px 0 16px; accent-color: var(--brand); }
     .wz-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
-    .wz-step-link { display: flex; align-items: center; gap: 10px; padding: 7px 8px; border-radius: var(--radius-sm); color: var(--text-secondary); font-size: 13px; }
+    /* Badge and label share a 20px line, so a two-line label keeps its badge on the first line. */
+    .wz-step-link { display: flex; align-items: flex-start; gap: 10px; padding: 7px 8px; border-radius: var(--radius-sm); color: var(--text-secondary); font-size: 13px; line-height: 20px; }
+    .wz-step-label { min-width: 0; }
     .wz-step-link:hover { background: var(--bg-elevated); color: var(--text); }
     .wz-step-link[aria-current="step"] { background: var(--bg-elevated); color: var(--text); font-weight: 600; }
-    .wz-step-num { flex: none; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--card-border); display: inline-flex; align-items: center; justify-content: center; font-size: 11px; }
+    .wz-step-num { flex: none; box-sizing: border-box; width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--card-border); display: inline-flex; align-items: center; justify-content: center; font-size: 11px; line-height: 1; font-variant-numeric: tabular-nums; }
+    .wz-step-link[aria-current="step"] .wz-step-num { border-color: var(--brand); color: var(--brand); }
     .wz-step-link.done .wz-step-num { background: var(--brand); border-color: var(--brand); color: var(--on-accent); }
+    .wz-step-link.ready { color: var(--muted); }
+    .wz-step-link.ready .wz-step-num { color: var(--muted); }
     .wz-panel { border: 1px solid var(--card-border); border-radius: var(--radius-lg); background: var(--card); padding: 20px; min-width: 0; }
     .wz-panel h2 { font-size: 20px; margin: 0 0 6px; letter-spacing: -0.015em; }
     .wz-panel h2:focus { outline: none; }
@@ -284,7 +294,7 @@ const WELCOME_CSS = `
     @media (max-width: 760px) {
       .wz { grid-template-columns: minmax(0, 1fr); gap: 12px; }
       .wz-steps { flex-direction: row; overflow-x: auto; gap: 4px; }
-      .wz-step-link { white-space: nowrap; }
+      .wz-step-link { white-space: nowrap; align-items: center; }
       .wz-step-link span:not(.wz-step-num):not(.wz-sr) { display: none; }
       .wz-step-link[aria-current="step"] span:not(.wz-step-num):not(.wz-sr) { display: inline; }
       .wz-panel { padding: 14px; }
@@ -294,6 +304,7 @@ const WELCOME_CSS = `
 
 export function welcomeContent(): string {
   return `${WELCOME_CSS}
+    <div class="wz-wrap">
     <div class="wz-head">
       <div><h1 id="wzHeading">Getting started</h1><p>From zero to taking part: your machines, models, funds and tools.</p></div>
       <button type="button" class="wz-btn ghost" id="wzDismiss">Close guide</button>
@@ -303,6 +314,7 @@ export function welcomeContent(): string {
     <div class="wz">
       <nav aria-label="Getting started steps" id="wzNav"><div class="muted">Loading…</div></nav>
       <div id="wzMain"><div class="muted">Loading…</div></div>
+    </div>
     </div>`;
 }
 

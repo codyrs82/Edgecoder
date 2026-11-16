@@ -123,6 +123,28 @@ describe("completion detection reads real state", () => {
     expect(p.completed).toBe(3); // welcome (goal chosen), how (moved past), fund (balance)
   });
 
+  it("doesn't list checklist items the step's own choice answers, but still counts them", () => {
+    const welcome = O.stepById("welcome");
+    const models = O.stepById("models");
+    expect(O.shownChecklist(welcome, "desktop")).toEqual([]);
+    expect(O.shownChecklist(models, "web")).toEqual([]);
+    expect(O.stepComplete(welcome, SIGNALS, state({ goal: null }), "web")).toBe(false);
+    expect(O.stepComplete(welcome, SIGNALS, state({ goal: "own" }), "web")).toBe(true);
+    // Items that read real state stay listed.
+    expect(O.shownChecklist(O.stepById("fund"), "web").map((c) => c.id)).toEqual(["funded"]);
+    expect(O.shownChecklist(O.stepById("this-machine"), "desktop").map((c) => c.id)).toEqual(["local-model", "machine-linked"]);
+  });
+
+  it("marks steps the person moved past (Next or Skip) as visited", () => {
+    const p = O.progressFor(state({ goal: "both", current: "machines", done: ["welcome"], skipped: ["how"] }), { ...SIGNALS, balanceCSats: 10 }, "web");
+    const by = (id: O.StepId) => p.steps.find((s) => s.id === id)!;
+    expect(by("welcome").visited).toBe(true);
+    expect(by("how").visited).toBe(true);
+    // Fund is complete from the balance but not reached yet.
+    expect(by("fund")).toMatchObject({ complete: true, visited: false });
+    expect(by("machines").visited).toBe(false);
+  });
+
   it("shows itself on first sign-in, resumes, and stays closed once dismissed or finished", () => {
     expect(O.shouldShowOnboarding(null, SIGNALS)).toBe(true);
     expect(O.shouldShowOnboarding(null, { ...SIGNALS, newAccount: false, machines: 2, balanceCSats: 100 })).toBe(false);
