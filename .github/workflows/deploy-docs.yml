@@ -36,10 +36,9 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci --ignore-scripts
+      # Served at the root of the custom domain docs.edgecoder.io (site-docs/public/CNAME), so the
+      # build uses base "/" (the config's default). codyrs82.github.io/Edgecoder/ redirects there.
       - run: npm run docs:build
-        env:
-          # Project Pages site: https://codyrs82.github.io/Edgecoder/
-          DOCS_BASE: /Edgecoder/
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         if: github.event_name != 'pull_request'
         with:
