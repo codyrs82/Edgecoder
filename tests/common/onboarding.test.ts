@@ -52,14 +52,14 @@ describe("the step model", () => {
     for (const s of O.ONBOARDING_STEPS) {
       expect(s.title.length).toBeGreaterThan(3);
       expect(s.body.length).toBeLessThan(220);
-      // Steps without an explainer yet keep the slot hidden.
-      if (s.id !== "how") expect(s.video).toEqual({ src: null, poster: null, captions: null });
+      // Welcome, hosting and the summary have no explainer: their slot stays hidden.
+      if (["welcome", "host", "done"].includes(s.id)) expect(s.video).toEqual({ src: null, poster: null, captions: null });
     }
   });
 
   it("each step's video, poster and captions are files the portal serves (/assets/videos/)", () => {
     const withVideo = O.ONBOARDING_STEPS.filter((s) => s.video.src);
-    expect(withVideo.map((s) => s.id)).toEqual(["how"]);
+    expect(withVideo.map((s) => s.id)).toEqual(["how", "this-machine", "machines", "models", "fund", "tools", "try"]);
     for (const s of withVideo) {
       for (const url of [s.video.src, s.video.poster, s.video.captions]) {
         expect(url).toMatch(/^\/assets\/videos\/[a-z0-9-]+\.(mp4|jpg|vtt)$/);

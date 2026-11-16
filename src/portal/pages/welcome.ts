@@ -256,9 +256,11 @@ const WELCOME_CSS = `
     .wz-note { padding: 10px 12px; border: 1px solid var(--card-border); border-radius: var(--radius-sm); background: var(--bg-soft); }
     .wz-sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
     .wz-choices { border: 0; padding: 0; margin: 0 0 12px; display: grid; gap: 8px; }
-    .wz-choice { display: flex; gap: 10px; align-items: flex-start; padding: 12px; border: 1px solid var(--card-border); border-radius: var(--radius-md); cursor: pointer; }
+    /* The portal's form styles make every label a small uppercase caption and every input full width
+       (design-system.ts); a choice row is neither. */
+    .wz-choice { display: flex; gap: 10px; align-items: flex-start; margin: 0; padding: 12px; border: 1px solid var(--card-border); border-radius: var(--radius-md); cursor: pointer; font-size: 13.5px; font-weight: 400; letter-spacing: normal; text-transform: none; color: var(--text); }
     .wz-choice:has(input:checked) { border-color: var(--brand); background: var(--brand-soft); }
-    .wz-choice input { margin-top: 3px; }
+    .wz-choice input { flex: none; width: auto; min-height: 0; margin: 3px 0 0; padding: 0; box-shadow: none; accent-color: var(--brand); }
     .wz-choice-title { display: block; font-weight: 600; font-size: 13.5px; }
     .wz-choice-desc { display: block; color: var(--muted); font-size: 12.5px; }
     .wz-tag { font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 999px; background: var(--brand); color: var(--on-accent); }

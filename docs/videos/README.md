@@ -5,9 +5,18 @@ and the desktop wizard). A synthetic voice reads a script, a scripted screen rec
 step follows it, and the captions come from the same script. Everything is made locally and
 self-hosted: no script or video goes to a third party.
 
-| Step | Video | Script | Length |
-| --- | --- | --- | --- |
-| How EdgeCoder works (`how`) | [how-it-works.mp4](https://edgecoder.io/assets/videos/how-it-works.mp4) ([WebM](https://edgecoder.io/assets/videos/how-it-works.webm), [captions](https://edgecoder.io/assets/videos/how-it-works.vtt)) | [scripts/how-it-works.md](scripts/how-it-works.md) | 79 s |
+| Step | Video | Script |
+| --- | --- | --- |
+| How EdgeCoder works (`how`) | [how-it-works.mp4](https://edgecoder.io/assets/videos/how-it-works.mp4) ([WebM](https://edgecoder.io/assets/videos/how-it-works.webm), [captions](https://edgecoder.io/assets/videos/how-it-works.vtt)) | [scripts/how-it-works.md](scripts/how-it-works.md) |
+| Set up this computer (`this-machine`) | [this-machine.mp4](https://edgecoder.io/assets/videos/this-machine.mp4) ([WebM](https://edgecoder.io/assets/videos/this-machine.webm), [captions](https://edgecoder.io/assets/videos/this-machine.vtt)) | [scripts/this-machine.md](scripts/this-machine.md) |
+| Add your other machines (`machines`) | [machines.mp4](https://edgecoder.io/assets/videos/machines.mp4) ([WebM](https://edgecoder.io/assets/videos/machines.webm), [captions](https://edgecoder.io/assets/videos/machines.vtt)) | [scripts/machines.md](scripts/machines.md) |
+| Choose models and where they run (`models`) | [models.mp4](https://edgecoder.io/assets/videos/models.mp4) ([WebM](https://edgecoder.io/assets/videos/models.webm), [captions](https://edgecoder.io/assets/videos/models.vtt)) | [scripts/models.md](scripts/models.md) |
+| Fund your account (`fund`) | [fund.mp4](https://edgecoder.io/assets/videos/fund.mp4) ([WebM](https://edgecoder.io/assets/videos/fund.webm), [captions](https://edgecoder.io/assets/videos/fund.vtt)) | [scripts/fund.md](scripts/fund.md) |
+| Connect your tools (`tools`) | [tools.mp4](https://edgecoder.io/assets/videos/tools.mp4) ([WebM](https://edgecoder.io/assets/videos/tools.webm), [captions](https://edgecoder.io/assets/videos/tools.vtt)) | [scripts/tools.md](scripts/tools.md) |
+| Try it (`try`) | [try.mp4](https://edgecoder.io/assets/videos/try.mp4) ([WebM](https://edgecoder.io/assets/videos/try.webm), [captions](https://edgecoder.io/assets/videos/try.vtt)) | [scripts/try.md](scripts/try.md) |
+
+Welcome, Host for the network and You're set have no video. The fund video is kept generic on
+purpose (see its script): how payments work may change.
 
 ## Where they live
 
@@ -22,14 +31,20 @@ self-hosted: no script or video goes to a third party.
 
 ## Voice
 
-[Piper](https://github.com/OHF-Voice/piper1-gpl) (`piper-tts`, GPL-3.0), run as a separate local
-tool; nothing of it ships with EdgeCoder and its licence doesn't reach the audio it makes.
+**Voice in use: Kokoro `af_heart`** (American female, the model card's only grade-A voice),
+approved by the owner on 2026-11-16, at speed 0.85 with 0.35 s between sentences. Every script
+sets `tts: kokoro` and `voice: af_heart`, which are also the pipeline's defaults. Licences and the
+other Kokoro voices: [Kokoro](#kokoro-tts-kokoro) below.
 
-**Voice in use: `en_GB-cori-high`** from [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices)
-(model files: MIT, per the repository). Trained by Bryce Beattie on about 24 hours of
-[LibriVox](https://librivox.org) recordings read by Cori Samuel. LibriVox recordings are in the
-**public domain**, so the voice is safe for commercial use; no attribution is required (we give
-it here anyway). Model card: `en/en_GB/cori/high/MODEL_CARD` (checked 2026-11-16).
+### Piper (`tts: piper`)
+
+[Piper](https://github.com/OHF-Voice/piper1-gpl) (`piper-tts`, GPL-3.0), run as a separate local
+tool; nothing of it ships with EdgeCoder and its licence doesn't reach the audio it makes. The
+owner found its voices not natural enough; it stays as an option. The best of them was
+`en_GB-cori-high` from [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices)
+(model files: MIT), trained by Bryce Beattie on about 24 hours of [LibriVox](https://librivox.org)
+recordings read by Cori Samuel: **public domain**, safe for commercial use. Model card:
+`en/en_GB/cori/high/MODEL_CARD` (checked 2026-11-16).
 
 Voices checked for commercial use (dataset licence from each MODEL_CARD, 2026-11-16):
 
@@ -56,8 +71,7 @@ sentences, 1 s between segments, and each highlight lands 0.6 s before its narra
 
 ### Kokoro (`tts: kokoro`)
 
-The owner found the Piper voices above not good enough, so the pipeline also runs
-[Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) through
+The pipeline's default: [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) through
 [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx) (onnxruntime, no PyTorch).
 Set `tts: kokoro` and `voice: <id>` in a script's front matter, or try one without editing the
 script: `node scripts/videos/build.mjs how --tts=kokoro --voice=af_heart --tag=kokoro` (writes

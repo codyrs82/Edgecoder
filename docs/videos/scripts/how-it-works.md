@@ -2,7 +2,8 @@
 step: how
 name: how-it-works
 title: How EdgeCoder works
-voice: en_GB-cori-high
+tts: kokoro
+voice: af_heart
 ---
 
 # How EdgeCoder works (narration script)

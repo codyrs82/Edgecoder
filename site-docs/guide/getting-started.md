@@ -11,7 +11,7 @@ Getting started.
   <track kind="captions" srclang="en" label="English" default src="https://edgecoder.io/assets/videos/how-it-works.vtt">
 </video>
 
-*How EdgeCoder works, in 79 seconds (captions on).*
+*How EdgeCoder works (captions on). Each step of the guide on the web has its own short video.*
 
 1. **Welcome:** use your own machines (free), buy network compute, both, or host for others (by request).
 2. **How EdgeCoder works:** you ask, the coordinator picks the best fit, a machine runs it (yours free, a host's paid), the job travels encrypted, and you pay per token in cSats. Hosts get 95 %, the network 5 %.

@@ -30,15 +30,28 @@ const SIZE = { width: 1280, height: 720 };
 const STEP_ORDER = ["welcome", "how", "this-machine", "machines", "models", "fund", "tools", "try", "host", "done"];
 const done = STEP_ORDER.slice(0, Math.max(0, STEP_ORDER.indexOf(tl.step)));
 
+/**
+ * What each step's video shows of the made-up account (on top of a new one with nothing yet), so
+ * its checklist reads the way the narration says.
+ */
+const STEP_SIGNALS = {
+  "this-machine": { machines: 1, machinesOnline: 1 },
+  machines: { machines: 2, machinesOnline: 2 },
+  models: { machines: 2, machinesOnline: 2 },
+  fund: { machines: 2, machinesOnline: 2 },
+  tools: { machines: 2, machinesOnline: 2, github: true, apiKeys: 1 },
+  try: { machines: 2, machinesOnline: 2 },
+};
+
 /** A made-up new account: no machines or cSats yet, the steps before this one done. */
 const FIXTURES = {
   "/me": { user: { email: "demo@example.com", displayName: "Demo", roles: {} } },
   "/portal/api/compute/summary": { connected: true, cSats: 0 },
   "/portal/api/onboarding": {
     state: { goal: "both", done, skipped: [], current: tl.step, routing: null, dismissed: false, completedAtMs: null, firstSeenAtMs: 1, firstTaskAtMs: null, updatedAtMs: 1 },
-    signals: { machines: 0, machinesOnline: 0, balanceCSats: 0, apiKeys: 0, github: false, firstTask: false, hostApproved: false, hostRequested: false, newAccount: true, localModels: null, cliInstalled: null },
+    signals: { machines: 0, machinesOnline: 0, balanceCSats: 0, apiKeys: 0, github: false, firstTask: false, hostApproved: false, hostRequested: false, newAccount: true, localModels: null, cliInstalled: null, ...STEP_SIGNALS[tl.step] },
   },
-  "/portal/api/wallet/overview": { models: [{ model: "qwen3-coder:30b", cSatsPerMTokens: { input: 322.7, output: 939.8 } }], btcUsd: 176600, launch: { mode: "invite", maxBuySatsPerDay: 50000 } },
+  "/portal/api/wallet/overview": { models: [{ model: "qwen3-coder:30b", cSatsPerMTokens: { input: 322.7, output: 939.8 } }], btcUsd: 176600 },
   "/portal/api/wallet/onchain": { enabled: false },
 };
 
@@ -78,6 +91,12 @@ try {
   await page.evaluate(() => document.fonts.ready);
   // The guide re-renders every 10 s to pick up account changes; stop that so highlights stay put.
   await page.evaluate(() => { const top = setInterval(() => {}, 1e6); for (let i = 1; i <= top; i++) clearInterval(i); });
+  // Commands on the page show the address they were opened at; show the real portal's instead.
+  await page.evaluate(() => {
+    if (typeof wzCtx === "undefined" || typeof wzRender !== "function") return;
+    wzCtx.origin = "https://edgecoder.io";
+    wzRender(false);
+  });
   // Keyboard focus on the title draws a ring; the video doesn't need it.
   await page.evaluate(() => document.activeElement && document.activeElement.blur());
   await page.waitForTimeout(400);

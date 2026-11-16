@@ -35,8 +35,10 @@ export const PRONOUNCE = [
   [/\/remote\b/g, "forward slash remote"],
   [/\bedgecoder code\b/g, "edge coder code"],
   [/\bEdgeCoder\b/g, "Edge Coder"],
-  [/\bAPI\b/g, "A P I"],
   [/\b95 percent\b/g, "ninety-five percent"],
+  [/\b(\d+) GB\b/g, "$1 gigabytes"],
+  [/\b(\d+)B\b/g, "$1 B"],
+  [/\bOllama\b/g, "Oh-llama"],
 ];
 
 /** A narration script: front matter (step, name, title, voice) and `### <id>` segments. */

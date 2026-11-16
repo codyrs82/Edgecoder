@@ -1,0 +1,53 @@
+WEBVTT
+
+1
+00:00:01.000 --> 00:00:03.197
+Step three: set up this computer.
+
+2
+00:00:04.197 --> 00:00:08.665
+Install the EdgeCoder desktop app on your Mac or Windows PC.
+
+3
+00:00:08.665 --> 00:00:11.421
+It runs the agent and Ollama for you.
+
+4
+00:00:11.421 --> 00:00:13.729
+And it keeps itself up to date.
+
+5
+00:00:14.729 --> 00:00:18.922
+The app suggests a model sized for this computer.
+
+6
+00:00:18.922 --> 00:00:23.885
+A good GPU, or a Mac with 32 GB or more, gets a 30B coder.
+
+7
+00:00:23.885 --> 00:00:25.853
+With 16 GB, a 9B model.
+
+8
+00:00:25.853 --> 00:00:32.185
+Smaller machines get a smaller model, and send bigger jobs to the network.
+
+9
+00:00:33.185 --> 00:00:35.528
+Download it for Mac or Windows here.
+
+10
+00:00:35.528 --> 00:00:37.545
+Then sign in with this account.
+
+11
+00:00:38.545 --> 00:00:42.518
+Once the app is signed in, this computer joins your account.
+
+12
+00:00:42.518 --> 00:00:44.570
+This item checks off by itself.
+
+13
+00:00:45.570 --> 00:00:46.829
+Then press Next.

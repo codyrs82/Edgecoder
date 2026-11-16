@@ -11,7 +11,8 @@
 //   5. copies <name>.{mp4,webm,vtt,jpg} to src/portal/assets/videos/ (served at /assets/videos/).
 //
 // Usage: node scripts/videos/build.mjs <step> [--tts=piper|kokoro|say] [--voice=<id>] [--tag=<t>] [--no-copy]
-//   The script's front matter picks the engine (`tts:`, default piper) and `voice:`; the flags
+//   The script's front matter picks the engine (`tts:`, default kokoro) and `voice:` (default
+//   af_heart for Kokoro, en_GB-cori-high for Piper); the flags
 //   override them for a trial. --tag=<t> names the files <name>-<t>.* and leaves the repo alone.
 // Env:   KOKORO_PYTHON python with kokoro-onnx installed  (default: $VIDEO_WORK_DIR/kokoro-venv/bin/python)
 //        KOKORO_DIR    kokoro-v1.0.onnx + voices-v1.0.bin  (default: $VIDEO_WORK_DIR/kokoro)
@@ -40,7 +41,7 @@ if (!script) {
 const flag = (k) => args.find((a) => a.startsWith(`--${k}=`))?.slice(k.length + 3);
 const tag = flag("tag");
 const name = tag ? `${script.meta.name}-${tag}` : script.meta.name;
-const tts = args.includes("--say") ? "say" : flag("tts") || script.meta.tts || "piper";
+const tts = args.includes("--say") ? "say" : flag("tts") || script.meta.tts || "kokoro";
 const voiceId = flag("voice") || script.meta.voice;
 if (!["piper", "kokoro", "say"].includes(tts)) throw new Error(`build: unknown tts "${tts}" (piper, kokoro or say)`);
 const copyToRepo = !args.includes("--no-copy") && !tag;
