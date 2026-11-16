@@ -1,14 +1,18 @@
 <script lang="ts">
-  import { Square, ArrowUp, Plus, X } from "@lucide/svelte";
+  import { Square, ArrowUp, Plus, X, FileText, Paperclip, AtSign } from "@lucide/svelte";
   import { tick, type Snippet } from "svelte";
+  import { ACCEPT, MAX_ATTACHMENTS, formatBytes, readAttachment, toPayload, visionNote, type Attachment, type AttachmentPayload, type Vision } from "../lib/attachments";
+  import { menu } from "../lib/menu";
 
   interface Props {
-    onSend: (message: string) => void;
+    /** `attachments`: files attached in the box (only when `attach` is set). */
+    onSend: (message: string, attachments?: AttachmentPayload[]) => void;
     placeholder?: string;
     disabled?: boolean;
     /**
-     * A reply is streaming. Send stays: Enter queues the message (shown as Queued, removable) and
-     * it is sent when the reply ends. Stop is a separate button next to Send (Esc too).
+     * A reply is streaming (or the bot is working). With `onStop`, the send arrow becomes Stop
+     * (Esc too) and Enter queues what is typed (shown as Queued, removable; an "Enter to queue"
+     * hint shows while there is text); it is sent when the reply ends.
      */
     streaming?: boolean;
     onStop?: () => void;
@@ -22,11 +26,17 @@
     mentions?: (query: string) => Promise<Array<{ path: string; kind: "file" | "dir" | "codebase" }>>;
     /** The quiet row under the box: the compute picker, Auto-apply edits and the like. */
     controls?: Snippet;
+    /**
+     * Attachments (+, paste, drag and drop): what the model can see, who it is ("Cyber SIMP") and
+     * whether the app saves attachments into its folder (bots), for the note shown when it can't
+     * see an attached image or PDF.
+     */
+    attach?: { vision: Vision; who?: string; savedToFolder?: boolean };
   }
-  let { onSend, placeholder = "Message EdgeCoder...", disabled = false, streaming = false, onStop, mentions, controls, queue, onUnqueue }: Props = $props();
+  let { onSend, placeholder = "Message EdgeCoder...", disabled = false, streaming = false, onStop, mentions, controls, queue, onUnqueue, attach }: Props = $props();
 
   // Messages typed while a reply streams, sent in order when it ends (unless the queue is external).
-  let localQueue = $state<Array<{ id: string; text: string }>>([]);
+  let localQueue = $state<Array<{ id: string; text: string; attachments?: AttachmentPayload[] }>>([]);
   let queueSeq = 0;
   const shownQueue = $derived(queue ?? localQueue);
   // One at a time: after sending a queued message, wait for its reply to start (and end) before
@@ -46,7 +56,8 @@
     awaitingStart = true;
     clearTimeout(releaseTimer);
     releaseTimer = setTimeout(() => (awaitingStart = false), 5_000);
-    onSend(next.text);
+    if (next.attachments?.length) onSend(next.text, next.attachments);
+    else onSend(next.text);
   });
   function unqueue(id: string) {
     if (queue) onUnqueue?.(id);
@@ -131,16 +142,101 @@
 
   function send() {
     const trimmed = text.trim();
-    if (!trimmed || disabled) return;
-    if (streaming && !queue) localQueue = [...localQueue, { id: `q${++queueSeq}`, text: trimmed }];
+    if ((!trimmed && attached.length === 0) || disabled || reading > 0) return;
+    const files = attached.map(toPayload);
+    if (streaming && !queue) localQueue = [...localQueue, { id: `q${++queueSeq}`, text: trimmed, ...(files.length ? { attachments: files } : {}) }];
+    else if (files.length) onSend(trimmed, files);
     else onSend(trimmed);
     text = "";
+    clearAttachments();
     // Back to one line once the box is empty (the value is written on the next tick).
     void tick().then(resize);
   }
 
+  // --- Attachments ---
+  let attached = $state<Attachment[]>([]);
+  let attachError = $state<string | null>(null);
+  let reading = $state(0);
+  let dragging = $state(false);
+  let fileInput: HTMLInputElement | undefined = $state(undefined);
+  let plusEl: HTMLButtonElement | undefined = $state(undefined);
+  let plusMenuOpen = $state(false);
+  const note = $derived(attach ? visionNote(attached, attach.vision, attach.who, attach.savedToFolder) : null);
+  const canSend = $derived((!!text.trim() || attached.length > 0) && !disabled && reading === 0);
+
+  async function addFiles(files: Iterable<File>) {
+    if (!attach) return;
+    attachError = null;
+    for (const f of files) {
+      if (attached.length + reading >= MAX_ATTACHMENTS) {
+        attachError = `Up to ${MAX_ATTACHMENTS} files per message.`;
+        break;
+      }
+      reading++;
+      try {
+        const r = await readAttachment(f);
+        if ("error" in r) attachError = r.error;
+        else attached = [...attached, r];
+      } catch {
+        attachError = `${f.name || "That file"} couldn't be read.`;
+      } finally {
+        reading--;
+      }
+    }
+  }
+  function removeAttachment(id: string) {
+    const a = attached.find((x) => x.id === id);
+    if (a?.previewUrl) URL.revokeObjectURL?.(a.previewUrl);
+    attached = attached.filter((x) => x.id !== id);
+    attachError = null;
+    textareaEl?.focus();
+  }
+  function clearAttachments() {
+    for (const a of attached) if (a.previewUrl) URL.revokeObjectURL?.(a.previewUrl);
+    attached = [];
+    attachError = null;
+  }
+  function pickFiles() {
+    plusMenuOpen = false;
+    fileInput?.click();
+  }
+  function onPicked(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const files = [...(input.files ?? [])];
+    input.value = "";
+    void addFiles(files);
+  }
+  /** Cmd+V with an image (a screenshot) attaches it; pasted text stays plain text. */
+  function onPaste(e: ClipboardEvent) {
+    if (!attach) return;
+    const files = [...(e.clipboardData?.files ?? [])];
+    if (files.length === 0) return;
+    e.preventDefault();
+    void addFiles(files);
+  }
+  function hasFiles(e: DragEvent) {
+    return !!attach && [...(e.dataTransfer?.types ?? [])].includes("Files");
+  }
+  function onDragOver(e: DragEvent) {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragging = true;
+  }
+  function onDrop(e: DragEvent) {
+    dragging = false;
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    void addFiles([...(e.dataTransfer?.files ?? [])]);
+  }
+  function onPlus() {
+    if (attach && mentions) plusMenuOpen = !plusMenuOpen;
+    else if (attach) pickFiles();
+    else void addContext();
+  }
+
   /** The + button: start an @-mention, which offers the project's files and folders. */
   async function addContext() {
+    plusMenuOpen = false;
     if (!textareaEl) return;
     const caret = textareaEl.selectionStart ?? text.length;
     const before = text.slice(0, caret);
@@ -198,7 +294,7 @@
       {#each shownQueue as q, i (q.id)}
         <li class="queued-item">
           <span class="queued-tag">Queued{shownQueue.length > 1 ? ` ${i + 1}` : ""}</span>
-          <span class="queued-text" title={q.text}>{q.text}</span>
+          <span class="queued-text" title={q.text}>{q.text}{"attachments" in q && q.attachments?.length ? ` (+${q.attachments.length} file${q.attachments.length > 1 ? "s" : ""})` : ""}</span>
           {#if "from" in q && q.from}<span class="queued-from">from {q.from}</span>{/if}
           {#if !queue || onUnqueue}
             <button type="button" class="icon-btn icon-btn--sm" aria-label={`Remove queued message: ${q.text}`} title="Remove from the queue" onclick={() => unqueue(q.id)}><X size={12} /></button>
@@ -207,8 +303,31 @@
       {/each}
     </ol>
   {/if}
-  <!-- One slim row: + on the left, the text inline, Stop and Send on the right. It grows with the text. -->
-  <div class="composer-box" data-testid="composer-box">
+  {#if attached.length > 0 || reading > 0 || attachError || note}
+    <div class="attachments" data-testid="composer-attachments">
+      {#if attached.length > 0 || reading > 0}
+        <ul class="att-list" aria-label="Attached files">
+          {#each attached as a (a.id)}
+            <li class="att" title="{a.name} · {formatBytes(a.size)}">
+              {#if a.kind === "image" && a.previewUrl}
+                <img class="thumb" src={a.previewUrl} alt="" />
+              {:else}
+                <span class="att-icon" aria-hidden="true"><FileText size={14} /></span>
+              {/if}
+              <span class="att-name">{a.name}</span>
+              <button type="button" class="icon-btn icon-btn--sm" aria-label={`Remove ${a.name}`} title="Remove" onclick={() => removeAttachment(a.id)}><X size={12} /></button>
+            </li>
+          {/each}
+          {#if reading > 0}<li class="att reading" aria-live="polite">Reading…</li>{/if}
+        </ul>
+      {/if}
+      {#if note}<p class="att-note" data-testid="attach-note">{note}</p>{/if}
+      {#if attachError}<p class="att-error" role="alert">{attachError}</p>{/if}
+    </div>
+  {/if}
+  <!-- One slim row: + on the left, the text inline, Send (or Stop while working) on the right. It grows with the text. -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="composer-box" class:dragging data-testid="composer-box" ondragover={onDragOver} ondragleave={() => (dragging = false)} ondrop={onDrop}>
     {#if mention && matches.length > 0}
       <div class="mentions" role="listbox" aria-label="Mention a file">
         {#each matches as m, i (m.path)}
@@ -230,7 +349,18 @@
         {/each}
       </div>
     {/if}
-    {#if mentions}
+    {#if attach}
+      <button type="button" class="round-btn add" bind:this={plusEl} title={mentions ? "Attach files or mention a project file" : "Attach files (or paste / drop them)"} aria-label={mentions ? "Add files" : "Attach files"} aria-haspopup={mentions ? "menu" : undefined} aria-expanded={mentions ? plusMenuOpen : undefined} onclick={onPlus}>
+        <Plus size={16} />
+      </button>
+      <input bind:this={fileInput} type="file" multiple accept={ACCEPT} class="file-input" tabindex="-1" aria-hidden="true" onchange={onPicked} />
+      {#if plusMenuOpen}
+        <div class="plus-menu" role="menu" aria-label="Add" use:menu={{ trigger: plusEl, onClose: (returnFocus) => { plusMenuOpen = false; if (returnFocus) plusEl?.focus(); } }}>
+          <button type="button" role="menuitem" onclick={pickFiles}><Paperclip size={14} /> Attach files…</button>
+          <button type="button" role="menuitem" onclick={() => void addContext()}><AtSign size={14} /> Mention a project file</button>
+        </div>
+      {/if}
+    {:else if mentions}
       <button type="button" class="round-btn add" title="Add a file or folder (@)" aria-label="Add a file or folder" onclick={() => void addContext()}>
         <Plus size={16} />
       </button>
@@ -242,17 +372,22 @@
       aria-label={placeholder || "Message"}
       {disabled}
       rows="1"
+      aria-describedby={streaming && onStop && canSend ? "composer-queue-hint" : undefined}
       onkeydown={handleKeydown}
       oninput={onInput}
+      onpaste={onPaste}
     ></textarea>
     {#if streaming && onStop}
-      <button type="button" class="round-btn send-btn stop" aria-label="Stop" onclick={onStop} title="Stop the reply (Esc)">
+      <!-- Working: the send arrow becomes Stop; Enter queues what is typed for when the work ends. -->
+      {#if canSend}<span class="queue-hint" id="composer-queue-hint">Enter to queue</span>{/if}
+      <button type="button" class="round-btn send-btn stop" aria-label="Stop" onclick={onStop} title="Stop (Esc). Enter queues your message for when this ends.">
         <Square size={12} fill="currentColor" />
       </button>
+    {:else}
+      <button type="button" class="round-btn send-btn" aria-label="Send message" onclick={send} disabled={!canSend} title={streaming ? "Queue: sent when the reply ends (Enter)" : "Send (Enter)"}>
+        <ArrowUp size={16} strokeWidth={2.25} />
+      </button>
     {/if}
-    <button type="button" class="round-btn send-btn" aria-label="Send message" onclick={send} disabled={!text.trim() || disabled} title={streaming ? "Queue: sent when the reply ends (Enter)" : "Send (Enter)"}>
-      <ArrowUp size={16} strokeWidth={2.25} />
-    </button>
   </div>
   {#if controls || streaming}
     <div class="controls" data-testid="composer-controls">
@@ -432,6 +567,109 @@
     .ring {
       animation: none;
     }
+  }
+  .file-input {
+    display: none;
+  }
+  .composer-box.dragging {
+    border-color: var(--accent);
+    border-style: dashed;
+  }
+  .queue-hint {
+    align-self: center;
+    flex-shrink: 0;
+    padding: 0 4px;
+    font-size: var(--fs-xs);
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+  .plus-menu {
+    position: absolute;
+    left: 4px;
+    bottom: calc(100% + 6px);
+    display: flex;
+    flex-direction: column;
+    min-width: 200px;
+    padding: 4px;
+    background: var(--bg-elevated);
+    border: 0.5px solid var(--border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-md);
+    z-index: 30;
+  }
+  .plus-menu button {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border: none;
+    background: none;
+    color: var(--text-primary);
+    font-size: var(--fs-sm, 12px);
+    text-align: left;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+  .plus-menu button:hover,
+  .plus-menu button:focus-visible {
+    background: var(--bg-surface);
+  }
+  .attachments {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 0 0 6px;
+  }
+  .att-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .att {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 220px;
+    padding: 3px 4px 3px 4px;
+    border: 0.5px solid var(--border-control);
+    border-radius: var(--radius-md);
+    background: var(--bg-surface);
+    font-size: var(--fs-xs);
+    color: var(--text-secondary);
+  }
+  .att.reading {
+    padding: 3px 8px;
+    color: var(--text-muted);
+  }
+  .thumb {
+    width: 28px;
+    height: 28px;
+    object-fit: cover;
+    border-radius: var(--radius-sm);
+  }
+  .att-icon {
+    display: inline-flex;
+    padding: 0 2px;
+    color: var(--text-muted);
+  }
+  .att-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .att-note,
+  .att-error {
+    margin: 0;
+    padding: 0 4px;
+    font-size: var(--fs-xs);
+    color: var(--text-secondary);
+  }
+  .att-error {
+    color: var(--danger, var(--text-primary));
   }
   .queued {
     list-style: none;

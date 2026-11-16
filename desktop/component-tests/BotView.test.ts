@@ -97,13 +97,48 @@ describe("BotView header", () => {
     setup(harry({ status: "running", lastRun: undefined }));
     const pill = screen.getByTestId("composer-box");
     expect(within(pill).getByRole("textbox", { name: "Harry is working; your message goes next…" })).toBeTruthy();
-    expect(within(pill).getByRole("button", { name: "Send message" })).toBeTruthy();
+    // Working: the send arrow is Stop, and there is no Stop in the header.
+    expect(within(pill).getByRole("button", { name: "Stop" })).toBeTruthy();
+    expect(within(pill).queryByRole("button", { name: "Send message" })).toBeNull();
+    expect(within(document.querySelector(".bot-head") as HTMLElement).queryByRole("button", { name: /Stop/ })).toBeNull();
+    // + attaches files, and the bot can't see images: the note says so when one is attached.
+    expect(within(pill).getByRole("button", { name: "Attach files" })).toBeTruthy();
   });
 
-  it("shows Working… and Stop while it runs", () => {
+  it("shows Working… while it runs; Stop in the composer cancels the run, and Enter still sends (the bot takes it next)", async () => {
     setup(harry({ status: "running", lastRun: undefined }));
     expect(screen.getByTestId("bot-auto-status").textContent).toBe("Working…");
-    expect(screen.getByRole("button", { name: /Stop/ })).toBeTruthy();
+    await fireEvent.click(within(screen.getByTestId("composer-box")).getByRole("button", { name: "Stop" }));
+    expect(api.cancelBotRun).toHaveBeenCalledWith("bot_h");
+    const box = screen.getByRole("textbox");
+    await fireEvent.input(box, { target: { value: "then check the firewall" } });
+    expect(screen.getByText("Enter to queue")).toBeTruthy();
+    await fireEvent.keyDown(box, { key: "Enter" });
+    expect(api.sendBotMessage).toHaveBeenCalledWith("bot_h", "then check the firewall", undefined);
+  });
+
+  it("says where the current step runs, next to the compute choice", async () => {
+    const run = { id: "run_9", trigger: "message" as const, startedAtMs: 0, status: "running" as const, summary: "", cSats: 2.5 };
+    api.botHistory.mockResolvedValue([]);
+    api.botMessages.mockResolvedValue([
+      {
+        id: "a1", role: "assistant", content: "", atMs: 0, runId: "run_9",
+        events: [
+          { type: "status", message: "Compute: network · qwen3-coder:30b" },
+          { type: "usage", cSats: 2.5, where: "Network · qwen3-coder:30b", model: "network/qwen3-coder:30b@gpu.dc", served: { label: "lin-•••3f2a", own: false, computeClass: "gpu.dc", tier: null, hardware: "Datacenter GPU (gpu.dc40)", gpu: "2× NVIDIA A16", region: null, country: null } },
+        ],
+      },
+    ]);
+    render(BotView, { bot: harry({ status: "running", lastRun: run }), onEdit: vi.fn(), onDeleted: vi.fn(), onOpenSettings: vi.fn() });
+    const where = await screen.findByTestId("bot-placement");
+    expect(where.textContent).toBe("Running on: Network · Datacenter GPU 2×A16 · qwen3-coder:30b · 2.5 cSats");
+  });
+
+  it("idle: the normal send arrow, no Stop", () => {
+    setup(harry({ status: "idle", lastRun: undefined }));
+    const pill = screen.getByTestId("composer-box");
+    expect(within(pill).getByRole("button", { name: "Send message" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
   });
 
   it("Pause and Resume are in the ⋯ menu and toggle the bot", async () => {

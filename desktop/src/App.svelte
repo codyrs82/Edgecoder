@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { NO_VISION, visionFor, type AttachmentPayload } from "./lib/attachments";
   import { ensureNetworkEnrollment } from "./lib/network-enrollment";
   import TabSwitcher from "./components/TabSwitcher.svelte";
   import { menu } from "./lib/menu";
@@ -517,7 +518,7 @@
     }
   }
 
-  async function handleSend(message: string) {
+  async function handleSend(message: string, attachments?: AttachmentPayload[]) {
     if (activeTab !== "chat" || !chatView) return;
     // Asked to build something with no folder open: start a project for it, like other coding
     // assistants do, and let the agent write the files there.
@@ -533,7 +534,7 @@
         console.warn("Couldn't create a project:", err);
       }
     }
-    chatView.sendMessage(message);
+    chatView.sendMessage(message, attachments);
   }
 </script>
 
@@ -628,7 +629,7 @@
         <div class="chat-main" class:hidden={!!activeBot}>
           <ChatView bind:this={chatView} onHeaderChange={(h) => (chatHeader = h)} onOpenInEditor={handleOpenInEditor} {projectRoot} onRepoConnected={(r) => void repoConnected(r)} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} onPreview={previewInEditor} />
           <div class="composer">
-            <ChatInput onSend={handleSend} streaming={chatStreaming} onStop={() => chatView?.stop()} mentions={projectRoot ? (q) => mentionSuggestions(q, (x) => fsFind(x, 8)) : undefined}>
+            <ChatInput onSend={handleSend} streaming={chatStreaming} onStop={() => chatView?.stop()} attach={{ vision: projectRoot ? visionFor($computeChoice) : NO_VISION, who: "This model" }} mentions={projectRoot ? (q) => mentionSuggestions(q, (x) => fsFind(x, 8)) : undefined}>
               {#snippet controls()}
                 <ComputePicker selected={$computeChoice} onSelect={(id) => computeChoice.set(id)} onOpenSettings={openSettings} />
               {/snippet}

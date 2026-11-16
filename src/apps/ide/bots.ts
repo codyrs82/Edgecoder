@@ -41,6 +41,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { announcesWork, backendChat, makeToolRunner, runAgentLoop, toolSchemas, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
+import { ATTACHMENT_BODY_LIMIT, attachedLine, attachmentsSchema, saveAttachments, savedAttachmentsText, type AttachmentInput, type SavedAttachment } from "./attachments.js";
 import { READ_TOOLS, TENTACLE_TOOLS, TOOL_DEFINITIONS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
 import {
   CI_SCOPES, TRIGGER_KINDS, TRIGGER_POLL_MS, ghApiCli, parseGitHubRepo, pollTrigger, untrustedEventBlock,
@@ -346,6 +347,8 @@ export interface BotMessage {
   runId?: string;
   /** assistant: the run's stream events (text merged), for tool calls and approvals. */
   events?: IdeStreamEvent[];
+  /** user: files attached in the composer, saved in the bot's folder (attachments.ts). */
+  attachments?: SavedAttachment[];
 }
 
 export type BotStatus = "idle" | "running" | "needs_approval" | "paused" | "over_budget" | "error";
@@ -1507,11 +1510,21 @@ export class BotManager {
   // --- runs ---
 
   /** Message the bot: it answers in a run now, or right after the current one. */
-  message(id: string, text: string): { started: boolean; queued: boolean; runId?: string; reason?: string } {
-    this.find(id);
-    const content = text.trim();
-    if (!content) throw new BotError("Empty message");
-    this.conversation(id).push({ id: randomUUID(), role: "user", content, atMs: this.now() });
+  message(id: string, text: string, attachments: AttachmentInput[] = []): { started: boolean; queued: boolean; runId?: string; reason?: string } {
+    const bot = this.find(id);
+    const typed = text.trim();
+    if (!typed && attachments.length === 0) throw new BotError("Empty message");
+    let saved: SavedAttachment[] = [];
+    if (attachments.length) {
+      try {
+        saved = saveAttachments(botWorkRoot(bot), attachments, this.now());
+      } catch (err) {
+        throw new BotError(`Couldn't save the attached files in ${bot.name}'s folder: ${(err as Error).message}`, 400);
+      }
+    }
+    // The conversation shows what you typed and the attached names; the model also gets the files (runNow).
+    const content = [typed, attachedLine(saved)].filter(Boolean).join("\n\n");
+    this.conversation(id).push({ id: randomUUID(), role: "user", content, atMs: this.now(), ...(saved.length ? { attachments: saved } : {}) });
     this.saveConversation(id);
     if (this.active.has(id)) {
       this.queued.set(id, (this.queued.get(id) ?? 0) + 1);
@@ -1528,10 +1541,17 @@ export class BotManager {
     const now = this.now();
     const memory = this.memory(id);
     const conv = this.conversation(id);
+    // Text files attached to messages it hasn't answered yet are inlined; older ones are paths.
+    const answered = conv.map((m) => m.role).lastIndexOf("assistant");
+    const root = botWorkRoot(bot);
     const context = conv
-      .filter((m) => m.role === "user" || (m.role === "assistant" && m.content.trim()))
+      .map((m, i) => ({ m, fresh: i > answered }))
+      .filter(({ m }) => m.role === "user" || (m.role === "assistant" && m.content.trim()))
       .slice(-CONTEXT_MESSAGES)
-      .map((m) => ({ role: m.role, content: m.content }));
+      .map(({ m, fresh }) => ({
+        role: m.role,
+        content: m.attachments?.length ? [m.content, savedAttachmentsText(root, m.attachments, fresh)].join("\n\n") : m.content,
+      }));
     if (trigger === "github" && event) {
       // The conversation shows only the app-written source line; the event's own text goes to the
       // model inside the untrusted block and is never stored as a message from you.
@@ -1869,7 +1889,14 @@ export function botComputeChat(
   );
   // Tell the network's best fit this is agent work, so it picks a model that handles tools well.
   const agentic: ChatBackend = (req, signal) => backend(req.tools?.length ? { ...req, hints: { job: "agentic", needsTools: true, ...req.hints } } : req, signal);
-  const chat: BotChatFn = backendChat(agentic, (cSats) => ctx.sendEvent({ type: "usage", cSats, where, ...(reason ? { reason } : {}) }), ctx.signal);
+  // With the model and the machine that answered (served), so the bot view shows where each step ran,
+  // and the routing reason (complexity) for the Tasks history.
+  const chat: BotChatFn = backendChat(
+    agentic,
+    (cSats, served) =>
+      ctx.sendEvent({ type: "usage", cSats, where, ...(reason ? { reason } : {}), ...(last && !last.bestFit ? { model: routeModelId(last) } : {}), ...(served ? { served } : {}) }),
+    ctx.signal,
+  );
   // A pinned model has nowhere else to go.
   if (compute.policy !== "model") {
     chat.escalate = () => {
@@ -2027,11 +2054,14 @@ export function registerBotRoutes(app: FastifyInstance, bots: BotManager): void 
   );
   app.post("/v1/ide/bots/:id/cancel", (req, reply) => handle(reply, () => ({ cancelled: bots.cancel(idParams.parse(req.params).id) })));
   app.get("/v1/ide/bots/:id/messages", (req, reply) => handle(reply, () => ({ messages: bots.messages(idParams.parse(req.params).id) })));
-  app.post("/v1/ide/bots/:id/messages", (req, reply) =>
+  app.post("/v1/ide/bots/:id/messages", { bodyLimit: ATTACHMENT_BODY_LIMIT }, (req, reply) =>
     handle(reply, () => {
       const id = idParams.parse(req.params).id;
-      const { content } = z.object({ content: z.string().min(1).max(20_000) }).parse(req.body ?? {});
-      return { ...bots.message(id, content), bot: bots.get(id) };
+      const { content, attachments } = z
+        .object({ content: z.string().max(20_000), attachments: attachmentsSchema.default([]) })
+        .refine((b) => b.content.trim() !== "" || b.attachments.length > 0, { message: "Empty message", path: ["content"] })
+        .parse(req.body ?? {});
+      return { ...bots.message(id, content, attachments), bot: bots.get(id) };
     }),
   );
   app.get("/v1/ide/bots/:id/history", (req, reply) => handle(reply, () => ({ runs: bots.history(idParams.parse(req.params).id) })));

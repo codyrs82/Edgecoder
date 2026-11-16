@@ -47,6 +47,7 @@ import { registerCompatRoutes, respondWith } from "../../inference-api/routes.js
 import type { RoutingHints } from "../../inference-api/job-descriptor.js";
 import { AUTO_MODEL_ID, AUTO_POLICIES, autoPolicyFromEnv, isUnpinnedModel, routeInputsFrom, routeLabel, routeSummary, type ComputePolicy, type PlanOptions, type Route, type RouteInputs } from "../../inference-api/auto-route.js";
 import { ChatBackendError, type ChatBackend } from "../../inference-api/types.js";
+import { ATTACHMENT_BODY_LIMIT, attachmentsSchema, withAttachments } from "./attachments.js";
 import { checkProject } from "./diagnostics.js";
 import { isProjectTrusted, setProjectTrusted } from "./workspace-trust.js";
 import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
@@ -1204,6 +1205,8 @@ const ideChatSchema = z.object({
   autoApprove: z.enum(["none", "edits"]).default("none"),
   /** Which desktop view sent it (Settings → Active work / Tasks). */
   origin: z.enum(["chat", "code"]).optional(),
+  /** Files attached to the last user message in the composer (attachments.ts). */
+  attachments: attachmentsSchema.optional(),
   /** Where the model runs: this computer (default), your machines, any network agent (optionally one class), or a reserved machine. */
   compute: z
     .object({
@@ -1315,7 +1318,7 @@ async function agentPromptContext(chatModel: string): Promise<SystemPromptContex
   return { activeModel: chatModel, activeModelParamSize, activeModelQuantization, installedModels, swarmModels: [], ollamaHealthy, queueDepth: 0, connectedAgents: 0 };
 }
 
-app.post("/v1/ide/chat", async (req, reply) => {
+app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply) => {
   const body = ideChatSchema.parse(req.body);
   const projectRoot = body.projectRoot ?? activeProjectRoot;
 
@@ -1340,6 +1343,7 @@ app.post("/v1/ide/chat", async (req, reply) => {
 
   const promptCtx = await agentPromptContext(chatModel);
   const projectRules = readProjectRules(projectRoot);
+  const messages = withAttachments(body.messages, body.attachments ?? [], chatModel);
 
   // SSE setup
   writeSseHead(reply);
@@ -1380,7 +1384,7 @@ app.post("/v1/ide/chat", async (req, reply) => {
       ? frontierChatFn(chatModel, { sessionKey: `chat:${turnId}` }, sendEvent, abort.signal)
       : chatFnFor(body.compute, chatModel, ollamaHost, sendEvent, abort.signal, "EdgeCoder chat", body.compute?.target === "auto" ? { sessionKey: `chat:${turnId}` } : undefined),
     systemPrompt: (format) => (promptCtx ? buildIdeAgentSystemPrompt(promptCtx, projectRoot, projectRules, format) : ""),
-    messages: body.messages,
+    messages,
     sendEvent,
     isCancelled: () => clientDisconnected,
     tools,

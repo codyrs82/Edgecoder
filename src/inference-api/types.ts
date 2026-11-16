@@ -21,6 +21,18 @@ export interface ChatMessage {
   tool_calls?: ToolCall[];
   /** On a tool result: the tool it answers. */
   tool_name?: string;
+  /**
+   * On a user message: images / PDFs attached in the desktop composer. Only frontier backends send
+   * them (frontier.ts); the IDE strips them before any other backend (attachments.ts withoutMedia).
+   */
+  media?: ChatMedia[];
+}
+
+/** An image or PDF on a user message, base64 without a data: prefix. */
+export interface ChatMedia {
+  kind: "image" | "pdf";
+  mediaType: string;
+  data: string;
 }
 
 /** A function tool (OpenAI / Ollama shape). */

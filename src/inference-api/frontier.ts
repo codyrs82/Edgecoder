@@ -230,7 +230,15 @@ export function toAnthropicMessages(messages: ChatMessage[], raw: Map<string, Bl
       }
       continue;
     }
-    if (m.content.trim()) userBlocks().push({ type: "text", text: m.content });
+    const blocks = userBlocks();
+    // Images and PDFs first, then the text that asks about them (Anthropic's recommended order).
+    for (const md of m.media ?? []) {
+      blocks.push(md.kind === "pdf"
+        ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: md.data } }
+        : { type: "image", source: { type: "base64", media_type: md.mediaType, data: md.data } });
+    }
+    if (m.content.trim()) blocks.push({ type: "text", text: m.content });
+    else if (!blocks.length) out.pop();
   }
   // A tool_use left without its result (cancelled turn) would be rejected: answer it.
   if (pending.length) {
