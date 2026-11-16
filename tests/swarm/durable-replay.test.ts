@@ -26,7 +26,8 @@ function subtask(id = randomUUID()): Subtask {
   };
 }
 
-const flush = () => new Promise((r) => setTimeout(r, 50));
+// Store writes are fire-and-forget for the queue; tests wait for exactly those writes (a fixed
+// sleep was too short on a loaded CI Postgres, where a new pool connection alone can take longer).
 
 describe("production coordinator requires Postgres (#55)", () => {
   it("refuses to start in production without DATABASE_URL", () => {
@@ -66,10 +67,10 @@ describe("queue lease state goes through the store (#99, fake store)", () => {
     const q = new SwarmQueue(store, LEASE);
     q.registerAgent("B", policy);
     const st = q.enqueueSubtask(subtask());
-    await flush();
+    await q.writesSettled();
     expect(q.leaseExpiredFor(st.id, "A")).toBe(true);
     expect(q.claim("B")?.id).toBe(st.id);
-    await flush();
+    await q.writesSettled();
     expect(calls[0]).toEqual(["claimed", st.id, "B", 1_000_000, 3]);
     // Third attempt expires: the cap (3) is hit, so the subtask fails instead of being requeued.
     vi.setSystemTime(Date.now() + LEASE.livenessMs + 1);
@@ -81,16 +82,82 @@ describe("queue lease state goes through the store (#99, fake store)", () => {
     const q = new SwarmQueue(store, LEASE);
     q.registerAgent("A", policy);
     const st = q.enqueueSubtask(subtask());
-    await flush();
+    await q.writesSettled();
     q.claim("A");
     q.requeue(st.id);
-    await flush();
+    await q.writesSettled();
     expect(calls[1]).toEqual(["released", st.id, 0]);
     q.claim("A");
     vi.setSystemTime(Date.now() + LEASE.livenessMs + 1);
     expect(q.expireLeases().requeued).toEqual([st.id]);
-    await flush();
+    await q.writesSettled();
     expect(calls[3]).toEqual(["released", st.id, 1, { agentId: "A", atMs: Date.now() }]);
+  });
+});
+
+describe("a re-enqueued subtask is claimable only once its persisted lease state is merged (#99)", () => {
+  // The race behind the credits-pg flake ("expected 2 to be 3"): enqueueSubtask read the stored
+  // attempts and expired holders asynchronously, and a claim in between counted as attempt 1; the
+  // merge then raised it only to the stored 2, so the retry cap allowed one attempt too many.
+  function slowStore(state: { attempts: number; expiredHolders: string[] }) {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const claimed: unknown[][] = [];
+    const store = {
+      persistSubtask: async () => undefined,
+      getSubtaskLeaseState: async () => { await gate; return state; },
+      markSubtaskClaimed: async (...a: unknown[]) => void claimed.push(a),
+      markSubtaskReleased: async () => undefined,
+      persistResult: async () => undefined,
+      isExpiredLeaseHolder: async (_s: string, agent: string) => state.expiredHolders.includes(agent),
+      upsertAgent: async () => undefined
+    };
+    return { store: store as unknown as PostgresStore, release, claimed };
+  }
+
+  it("no claim before the merge; afterwards the count continues and the expired holder is still marked", async () => {
+    const { store, release, claimed } = slowStore({ attempts: 2, expiredHolders: ["A"] });
+    const ready: string[] = [];
+    const q = new SwarmQueue(store, LEASE, { leaseStateWaitMs: 60_000 });
+    q.onClaimable((s) => ready.push(s.id));
+    q.registerAgent("A", policy);
+    q.registerAgent("C", policy);
+    const st = q.enqueueSubtask(subtask());
+    expect(q.claim("A")).toBeUndefined();
+    expect(q.claim("C")).toBeUndefined();
+    expect(ready).toEqual([]);
+    release();
+    await q.writesSettled();
+    expect(ready).toEqual([st.id]);
+    expect(q.leaseExpiredFor(st.id, "A")).toBe(true);
+    expect(q.claim("C")?.id).toBe(st.id); // attempt 3, not 1
+    await q.writesSettled();
+    expect(claimed.at(-1)?.[1]).toBe("C");
+    expect(claimed.at(-1)?.[3]).toBe(3);
+    // Third attempt expires: the cap is hit.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + LEASE.livenessMs + 1);
+      expect(q.expireLeases()).toEqual({ requeued: [], failed: [st.id] });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a fresh subtask (no id given) is claimable at once; a store that never answers holds it only LEASE_STATE_WAIT_MS", async () => {
+    const { store, release } = slowStore({ attempts: 0, expiredHolders: [] });
+    const q = new SwarmQueue(store, LEASE, { leaseStateWaitMs: 20 });
+    q.registerAgent("A", policy);
+    const { id: _omit, ...fresh } = subtask();
+    const a = q.enqueueSubtask(fresh);
+    expect(q.claim("A")?.id).toBe(a.id);
+    q.registerAgent("B", policy);
+    const b = q.enqueueSubtask(subtask());
+    expect(q.claim("B")).toBeUndefined();
+    await new Promise((r) => setTimeout(r, 40));
+    expect(q.claim("B")?.id).toBe(b.id);
+    release();
+    await q.writesSettled();
   });
 });
 
@@ -135,12 +202,12 @@ describe.skipIf(!PG_URL)("replay after restart / on a second coordinator, real P
       q1.registerAgent("A", policy);
       q1.registerAgent("B", policy);
       q1.enqueueSubtask(st);
-      await flush();
+      await q1.writesSettled();
       expect(q1.claim("A")?.id).toBe(st.id);
       vi.setSystemTime(Date.now() + LEASE.livenessMs + 1); // A goes silent; lease expires
       expect(q1.expireLeases().requeued).toEqual([st.id]);
       expect(q1.claim("B")?.id).toBe(st.id); // attempt 2
-      await flush();
+      await q1.writesSettled();
       expect(await db.a.getSubtaskLeaseState(st.id)).toEqual({ attempts: 2, expiredHolders: ["A"] });
 
       // Restart (or the subtask lands on coordinator B): the in-memory queue starts empty.
@@ -150,10 +217,10 @@ describe.skipIf(!PG_URL)("replay after restart / on a second coordinator, real P
       expect(await lateResultRejectionDurable(q2, st.id, "A")).toEqual({ statusCode: 409, body: { error: "lease_expired" } });
       expect(await lateResultRejectionDurable(q2, st.id, "B")).toBeNull();
       q2.enqueueSubtask(st);
-      await flush();
+      await q2.writesSettled();
       expect(q2.leaseExpiredFor(st.id, "A")).toBe(true);
       expect(q2.claim("C")?.id).toBe(st.id); // attempt 3, not 1
-      await flush();
+      await q2.writesSettled();
       expect((await db.b.getSubtaskLeaseState(st.id)).attempts).toBe(3);
       vi.setSystemTime(Date.now() + LEASE.livenessMs + 1);
       expect(q2.expireLeases()).toEqual({ requeued: [], failed: [st.id] });
@@ -164,18 +231,18 @@ describe.skipIf(!PG_URL)("replay after restart / on a second coordinator, real P
       const q = new SwarmQueue(db.a, LEASE);
       q.registerAgent("A", policy);
       q.enqueueSubtask(st);
-      await flush();
+      await q.writesSettled();
       q.claim("A");
       vi.setSystemTime(Date.now() + LEASE.livenessMs + 1);
       q.expireLeases();
-      await flush();
+      await q.writesSettled();
       expect(await db.b.isExpiredLeaseHolder(st.id, "A")).toBe(true);
       expect(q.claim("A")?.id).toBe(st.id);
-      await flush();
+      await q.writesSettled();
       expect(await db.b.isExpiredLeaseHolder(st.id, "A")).toBe(false);
       expect(await lateResultRejectionDurable(q, st.id, "A")).toBeNull();
       q.complete({ subtaskId: st.id, taskId: st.taskId, agentId: "A", ok: true, output: "1", durationMs: 5 });
-      await flush();
+      await q.writesSettled();
       expect((await db.a.getSubtaskLeaseState(st.id)).expiredHolders).toEqual([]);
     });
   });
