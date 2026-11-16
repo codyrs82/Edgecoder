@@ -73,6 +73,11 @@ export interface ChecklistItem {
   optional?: boolean;
   /** Only on this surface. */
   surface?: Surface;
+  /**
+   * The step's own input answers it (the goal or routing choice): it counts toward completion but
+   * isn't listed, since the list would repeat the question right under the choices.
+   */
+  input?: boolean;
 }
 
 /**
@@ -204,7 +209,7 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
     id: "welcome",
     title: "Welcome to EdgeCoder",
     body: "EdgeCoder runs AI models on your own machines for free, or on the network for cSats. What do you want to do?",
-    checklist: [{ id: "goal", label: "Choose what you want to do" }],
+    checklist: [{ id: "goal", label: "Choose what you want to do", input: true }],
     actions: [],
     skip: null,
     goals: [],
@@ -261,7 +266,7 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
     id: "models",
     title: "Choose models and where they run",
     body: "Auto suits most people. Agents (Code, bots) need tool-capable models; the app only gives them those.",
-    checklist: [{ id: "routing", label: "Choose where things run" }],
+    checklist: [{ id: "routing", label: "Choose where things run", input: true }],
     actions: [
       { id: "models", label: "Manage models", desktop: "settings:models", web: "/portal/settings/nodes" },
       { id: "frontier", label: "Add your own frontier key", desktop: "settings:general" },
@@ -384,6 +389,11 @@ export function checklistFor(step: OnboardingStep, surface: Surface): ChecklistI
   return step.checklist.filter((c) => !c.surface || c.surface === surface);
 }
 
+/** The checklist rows shown under a step: its items on this surface, less the ones its input answers. */
+export function shownChecklist(step: OnboardingStep, surface: Surface): ChecklistItem[] {
+  return checklistFor(step, surface).filter((c) => !c.input);
+}
+
 /** Whether one checklist item is done: true, false, or null when this surface can't tell. */
 export function itemDone(itemId: string, signals: OnboardingSignals, state: OnboardingState): boolean | null {
   const atLeast = (n: number | null, min: number): boolean | null => (n === null ? null : n >= min);
@@ -434,10 +444,12 @@ export interface StepProgress {
   id: StepId;
   complete: boolean;
   skipped: boolean;
+  /** The person moved past it (Next or Skip). A complete step they haven't reached reads quieter. */
+  visited: boolean;
 }
 
 export function progressFor(state: OnboardingState, signals: OnboardingSignals, surface: Surface): { steps: StepProgress[]; completed: number; total: number; index: number } {
-  const steps = stepsFor(state.goal).map((s) => ({ id: s.id, complete: stepComplete(s, signals, state, surface), skipped: state.skipped.indexOf(s.id) >= 0 }));
+  const steps = stepsFor(state.goal).map((s) => ({ id: s.id, complete: stepComplete(s, signals, state, surface), skipped: state.skipped.indexOf(s.id) >= 0, visited: state.done.indexOf(s.id) >= 0 || state.skipped.indexOf(s.id) >= 0 }));
   const index = Math.max(0, steps.findIndex((s) => s.id === state.current));
   return { steps, completed: steps.filter((s) => s.complete).length, total: steps.length, index };
 }
