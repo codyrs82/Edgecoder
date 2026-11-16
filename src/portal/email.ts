@@ -126,6 +126,45 @@ export function createPortalMailer(cfg: PortalMailerConfig, log: { warn: (msg: s
     await sendResendEmail(email, "Signing in to EdgeCoder", html, "password_reset_sso_email");
   }
 
+  /** Confirm connecting a sign-in provider to the account (oauth-pending-link.ts). The link works once, for 15 minutes. */
+  async function sendOauthLinkConfirmEmail(input: { email: string; providerLabel: string; token: string; ttlMinutes: number }): Promise<boolean> {
+    const link = `${cfg.portalPublicUrl}/auth/oauth-link/confirm?token=${encodeURIComponent(input.token)}`;
+    const p = escapeHtml(input.providerLabel);
+    const html = `
+      <p>Someone just tried to sign in to EdgeCoder with ${p} using this email address.</p>
+      <p>If it was you, confirm connecting ${p} to your EdgeCoder account:</p>
+      <p><a href="${link}">${link}</a></p>
+      <p>This link works once and expires in ${input.ttlMinutes} minutes. Open it in the browser you signed in from, or continue with ${p} again when it asks.</p>
+      <p>If it was not you, ignore this email: nothing is connected unless the link is used. You can review your sign-in methods under <a href="${cfg.portalPublicUrl}/portal/settings#profile">Settings</a>.</p>
+    `;
+    return sendResendEmail(input.email, `Confirm connecting ${input.providerLabel} to your EdgeCoder account`, html, "oauth_link_confirm_email");
+  }
+
+  /** Security notice after a provider was connected to the account. */
+  async function sendOauthConnectedEmail(input: { email: string; providerLabel: string; identity?: string }): Promise<boolean> {
+    const p = escapeHtml(input.providerLabel);
+    const settings = `${cfg.portalPublicUrl}/portal/settings#profile`;
+    const html = `
+      <p>${p}${input.identity ? ` (${escapeHtml(input.identity)})` : ""} was connected to your EdgeCoder account. You can now sign in with it.</p>
+      <p>Review or remove it under Connected sign-ins: <a href="${settings}">${settings}</a></p>
+      <p>If this was not you, remove it there and reset your password: <a href="${cfg.portalPublicUrl}/portal/reset-password">${cfg.portalPublicUrl}/portal/reset-password</a></p>
+    `;
+    return sendResendEmail(input.email, `${input.providerLabel} was connected to your EdgeCoder account`, html, "oauth_connected_email");
+  }
+
+  /** A provider sign-in matched an account whose address was never verified: nothing was connected. */
+  async function sendOauthLinkClaimNoticeEmail(input: { email: string; providerLabel: string }): Promise<boolean> {
+    const p = escapeHtml(input.providerLabel);
+    const html = `
+      <p>Someone just tried to sign in to EdgeCoder with ${p} using this email address.</p>
+      <p>An EdgeCoder account with this address exists, but the address has not been verified yet, so ${p} was not connected.</p>
+      <p>If the account is yours, reset its password (the link comes to this address and removes every other way in):
+      <a href="${cfg.portalPublicUrl}/portal/reset-password">${cfg.portalPublicUrl}/portal/reset-password</a>. Then sign in and connect ${p} under Settings, Connected sign-ins.</p>
+      <p>If it was not you, you can ignore this email.</p>
+    `;
+    return sendResendEmail(input.email, `Connecting ${input.providerLabel} to your EdgeCoder account`, html, "oauth_link_claim_email");
+  }
+
   /** One-time code to confirm changing where payouts go (routes/payout-destination.ts). */
   async function sendPayoutDestinationCodeEmail(input: { email: string; code: string; destination: string }): Promise<void> {
     if (!cfg.resendApiKey || !cfg.resendFromEmail) throw new Error("email_mfa_not_configured");
@@ -224,5 +263,5 @@ export function createPortalMailer(cfg: PortalMailerConfig, log: { warn: (msg: s
     return sendResendEmail(input.email, "Your EdgeCoder host request is approved", html, "host_approved_email");
   }
 
-  return { sendHostRequestAdminEmail, sendHostApprovedEmail, sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail, sendWithdrawCodeEmail, sendPayoutCallbackChangedEmail, sendPayoutCallbackCodeEmail };
+  return { sendOauthLinkConfirmEmail, sendOauthConnectedEmail, sendOauthLinkClaimNoticeEmail, sendHostRequestAdminEmail, sendHostApprovedEmail, sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail, sendWithdrawCodeEmail, sendPayoutCallbackChangedEmail, sendPayoutCallbackCodeEmail };
 }

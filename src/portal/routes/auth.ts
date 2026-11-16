@@ -3,7 +3,7 @@
 
 import { desktopOriginOf } from "../../common/desktop-origins.js";
 import type { FastifyInstance } from "fastify";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { request } from "undici";
 import { z } from "zod";
 import {
@@ -18,7 +18,20 @@ import {
 } from "../oauth-state-cookie.js";
 import type { AuthRoutesDeps, ProviderName } from "../server.js";
 import { isAgentPlaceholderEmail } from "../store.js";
-import { decideUnlinkedOauthLogin, oauthErrorMessage, oauthErrorPage, oauthProfileFrom, type GithubEmail } from "../oauth-identity.js";
+import { OAUTH_PROVIDER_LABEL, decideUnlinkedOauthLogin, microsoftUpnOnVerifiedDomain, oauthErrorMessage, oauthErrorPage, oauthProfileFrom, type GithubEmail } from "../oauth-identity.js";
+import {
+  LINK_BROWSER_COOKIE,
+  LINK_MAX_PER_ACCOUNT,
+  LINK_MAX_PER_IP,
+  LINK_RATE_WINDOW_MS,
+  LINK_TOKEN_TTL_MS,
+  linkBrowserClearCookie,
+  linkBrowserSetCookie,
+  linkCheckEmailPage,
+  linkConfirmPage,
+  maskLinkEmail,
+  newLinkSecret
+} from "../oauth-pending-link.js";
 import { PASSWORD_MAX_LENGTH, passwordSchema, registerPasswordResetRoutes } from "./password-reset.js";
 import { verifyEmailPage } from "../pages/verify-email.js";
 import { APP_CHALLENGE_RE, APP_VERIFIER_RE, appVerifierMatches } from "../native-app-auth.js";
@@ -28,6 +41,15 @@ import { TERMS_VERSION } from "../../common/legal-notices.js";
 /** Shown when an OAuth sign-in would create an account and the soft launch needs an invite. */
 const OAUTH_INVITE_REQUIRED = "EdgeCoder is in early access: creating an account needs an invite code. Enter yours under Create account, then continue with single sign-on.";
 const OAUTH_INVITE_INVALID = "That invite code is not valid: it may be mistyped, expired, revoked or used up.";
+const OAUTH_LINK_INVALID = "This link has expired or was already used. Sign in again to get a new one, or sign in with your password instead.";
+/** Graph: the signed-in user's tenant with its verified domains (proves a Microsoft UPN's domain). */
+export const MICROSOFT_GRAPH_ORGANIZATION_URL = "https://graph.microsoft.com/v1.0/organization?$select=id,verifiedDomains";
+
+const hexEqual = (a: string, b: string) => {
+  const x = Buffer.from(a, "utf8");
+  const y = Buffer.from(b, "utf8");
+  return x.length === y.length && timingSafeEqual(x, y);
+};
 
 /** Verification emails per account per window (signup's own email counts); on top of the per-IP route limit. */
 export const EMAIL_VERIFY_MAX_PER_WINDOW = 4;
@@ -39,7 +61,7 @@ export const RESEND_VERIFICATION_RESPONSE = {
 } as const;
 
 /** #16: Email/password and OAuth sign-in, GitHub link (/auth/*, /portal/api/github/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
-export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, decodeJwtPayload, ensureCreditAccountForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sha256Hex, store, verifyPassword }: AuthRoutesDeps): void {
+export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, decodeJwtPayload, ensureCreditAccountForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sendOauthLinkConfirmEmail, sendOauthConnectedEmail, sendOauthLinkClaimNoticeEmail, sha256Hex, store, verifyPassword, clientIp }: AuthRoutesDeps): void {
   registerPasswordResetRoutes(app, { store, hashPassword, normalizeEmail, sha256Hex, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail });
   // #88: HMAC key for the browser-bound OAuth state cookie (OAUTH_STATE_SECRET, or per process).
   const oauthStateHmacKey = oauthStateKey();
@@ -233,7 +255,7 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
 
   // Shared by sign-in (/start) and connect-from-Settings (/connect): for a connect the state row
   // carries the signed-in user, and the callback checks that the same session finishes it.
-  async function beginOauth(providerName: ProviderName, reply: any, opts: { nativeRedirect?: string | null; linkUserId?: string; appChallenge?: string; inviteCodeHash?: string; termsVersion?: string }) {
+  async function beginOauth(providerName: ProviderName, reply: any, opts: { nativeRedirect?: string | null; linkUserId?: string; appChallenge?: string; inviteCodeHash?: string; termsVersion?: string; pendingLinkHash?: string }) {
     const portalStore = store!;
     const provider = oauthProviders[providerName];
     if (!provider.clientId || !provider.clientSecret) {
@@ -250,6 +272,7 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
       ...(opts.linkUserId ? { linkUserId: opts.linkUserId } : {}),
       ...(opts.inviteCodeHash ? { inviteCodeHash: opts.inviteCodeHash } : {}),
       ...(opts.termsVersion ? { termsVersion: opts.termsVersion } : {}),
+      ...(opts.pendingLinkHash ? { pendingLinkHash: opts.pendingLinkHash } : {}),
       // Only meaningful for a hand-off to a native app.
       ...(opts.nativeRedirect && opts.appChallenge ? { appChallenge: opts.appChallenge } : {})
     });
@@ -266,8 +289,11 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
       authorize.searchParams.set("prompt", OAUTH_MICROSOFT_PROMPT);
     }
     appendSetCookie(reply, oauthStateSetCookie(oauthStateHmacKey, providerName, state));
-    // Connect is started by the Settings page with fetch(); it navigates to the URL itself.
+    // Connect (Settings) and confirming an emailed link are started with fetch(); the page navigates itself.
     if (opts.linkUserId) return reply.send({ ok: true, authorizeUrl: authorize.toString() });
+    if (opts.pendingLinkHash) {
+      return reply.send({ ok: true, status: "reauth_required", provider: providerName, providerLabel: OAUTH_PROVIDER_LABEL[providerName], authorizeUrl: authorize.toString() });
+    }
     return reply.redirect(authorize.toString());
   }
 
@@ -300,6 +326,104 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
     return beginOauth(params.provider, reply, { linkUserId: user.userId });
   });
 
+  /**
+   * Completes an emailed link (oauth-pending-link.ts): uses the token up, links the provider
+   * identity stored on it to the account, sends the security notice and signs in. The caller has
+   * already proven the browser (cookie) or the provider identity (callback subject check).
+   */
+  async function completePendingLink(tokenHash: string, reply: any): Promise<{ ok: true; userId: string; provider: ProviderName } | { ok: false; status: number; error: string }> {
+    const portalStore = store!;
+    const pending = await portalStore.consumeOauthPendingLink(tokenHash);
+    if (!pending) return { ok: false, status: 400, error: "oauth_link_invalid" };
+    const provider = pending.provider as ProviderName;
+    const user = await portalStore.getUserById(pending.userId);
+    // The account must still hold the address the link was sent to, verified.
+    if (!user || !user.emailVerified || normalizeEmail(user.email) !== normalizeEmail(pending.email)) return { ok: false, status: 400, error: "oauth_link_invalid" };
+    const existing = await portalStore.findOauthIdentity(provider, pending.providerSubject);
+    if (existing && existing.userId !== user.userId) return { ok: false, status: 409, error: "oauth_identity_linked_elsewhere" };
+    if (!existing) {
+      await portalStore.linkOauthIdentity({ provider, providerSubject: pending.providerSubject, userId: user.userId, emailSnapshot: pending.email, ...(pending.tenantId ? { tenantId: pending.tenantId } : {}) });
+      await notifyConnected(user.email, provider);
+    }
+    appendSetCookie(reply, linkBrowserClearCookie());
+    await createSessionForUser(user.userId, reply);
+    return { ok: true, userId: user.userId, provider };
+  }
+
+  async function notifyConnected(email: string, provider: ProviderName): Promise<void> {
+    try {
+      await sendOauthConnectedEmail({ email, providerLabel: OAUTH_PROVIDER_LABEL[provider] });
+    } catch (err) {
+      app.log.error({ err }, "oauth connected notice failed");
+    }
+  }
+
+  // The emailed link only opens a page: a GET (or a mail scanner prefetching it) changes nothing.
+  app.get("/auth/oauth-link/confirm", async (_req, reply) => {
+    return reply.header("cache-control", "no-store").type("text/html").send(linkConfirmPage());
+  });
+
+  app.post("/auth/oauth-link/confirm", async (req, reply) => {
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    const parsed = z.object({ token: z.string().min(20).max(200) }).safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "oauth_link_invalid" });
+    const tokenHash = sha256Hex(parsed.data.token);
+    const pending = await store.findOauthPendingLink(tokenHash);
+    if (!pending) return reply.code(400).send({ error: "oauth_link_invalid" });
+    const provider = pending.provider as ProviderName;
+    const cookies = parseCookies(typeof req.headers.cookie === "string" ? req.headers.cookie : undefined);
+    // Exact __Host- name only.
+    const nonce = cookies[LINK_BROWSER_COOKIE];
+    const sameBrowser = Boolean(nonce && pending.browserHash && hexEqual(sha256Hex(nonce), pending.browserHash));
+    // Another browser or device: prove the provider identity again; the callback checks the subject.
+    if (!sameBrowser) return beginOauth(provider, reply, { pendingLinkHash: tokenHash });
+    const done = await completePendingLink(tokenHash, reply);
+    if (!done.ok) return reply.code(done.status).send({ error: done.error });
+    return reply.send({ ok: true, status: "linked", provider: done.provider, next: `/portal/dashboard?sso_connected=${done.provider}` });
+  });
+
+  // --- Connected sign-ins (Settings) ---
+  const linkIdOf = (provider: string, subject: string) => sha256Hex(`${provider}|${subject}`).slice(0, 32);
+
+  app.get("/portal/api/sign-ins", async (req, reply) => {
+    const current = await getCurrentUser(req as any);
+    if (!current) return reply.code(401).send({ error: "not_authenticated" });
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    const user = await store.getUserById(current.userId);
+    const links = await store.listOauthLinksForUser(current.userId);
+    const passkeys = (await store.listPasskeysByUserId(current.userId)).length;
+    return reply.header("cache-control", "no-store").send({
+      password: Boolean(user?.passwordHash),
+      passkeys,
+      providers: links.map((l) => ({
+        provider: l.provider,
+        label: OAUTH_PROVIDER_LABEL[l.provider as ProviderName] ?? l.provider,
+        linkId: linkIdOf(l.provider, l.providerSubject),
+        email: l.emailSnapshot ?? null,
+        createdAtMs: l.createdAtMs
+      }))
+    });
+  });
+
+  app.delete("/portal/api/sign-ins/:provider/:linkId", async (req, reply) => {
+    const current = await getCurrentUser(req as any);
+    if (!current) return reply.code(401).send({ error: "not_authenticated" });
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    const params = z.object({ provider: z.string().max(32), linkId: z.string().max(64) }).parse(req.params);
+    const user = await store.getUserById(current.userId);
+    const links = await store.listOauthLinksForUser(current.userId);
+    const target = links.find((l) => l.provider === params.provider && linkIdOf(l.provider, l.providerSubject) === params.linkId);
+    if (!target) return reply.code(404).send({ error: "sign_in_not_found" });
+    const passkeys = (await store.listPasskeysByUserId(current.userId)).length;
+    const methods = (user?.passwordHash ? 1 : 0) + passkeys + links.length;
+    // Never leave the account without a way in.
+    if (methods <= 1) {
+      return reply.code(409).send({ error: "last_sign_in_method", detail: "This is your only way to sign in. Set a password (Forgot password) or add a passkey or another provider first." });
+    }
+    await store.deleteOauthLink(current.userId, target.provider, target.providerSubject);
+    return reply.send({ ok: true });
+  });
+
   app.get("/auth/oauth/:provider/callback", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const params = z.object({ provider: z.enum(["google", "microsoft", "github"]) }).parse(req.params);
@@ -327,7 +451,7 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
     providerName: ProviderName,
     code: string,
     stateId: string,
-    req: { headers: Record<string, unknown> },
+    req: { headers: Record<string, unknown>; ip?: string },
     reply: any
   ) {
     const portalStore = store;
@@ -390,10 +514,29 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
     if (!profile.email || isAgentPlaceholderEmail(profile.email)) return reply.code(400).send({ error: "oauth_email_missing" });
     const email = normalizeEmail(profile.email);
 
+    // Re-authentication that completes an emailed link: only the identity the link was made for.
+    if (state.pendingLinkHash) {
+      const pending = await portalStore.findOauthPendingLink(state.pendingLinkHash);
+      if (!pending) return refuse(400, "oauth_link_invalid", OAUTH_LINK_INVALID);
+      if (pending.provider !== providerName || pending.providerSubject !== subject) {
+        return refuse(403, "oauth_link_wrong_identity", oauthErrorMessage("link_wrong_identity", providerName));
+      }
+      const done = await completePendingLink(state.pendingLinkHash, reply);
+      if (!done.ok) return refuse(done.status, done.error, done.error === "oauth_identity_linked_elsewhere" ? oauthErrorMessage("already_linked", providerName) : OAUTH_LINK_INVALID);
+      return reply.redirect(`/portal/dashboard?sso_connected=${providerName}`);
+    }
+
     let linked = await portalStore.findOauthIdentity(providerName, subject);
     // Microsoft links made before (tid, oid) keying used the per-app `sub`; they are re-keyed below.
     if (!linked && profile.legacySubject && profile.legacySubject !== subject) {
       linked = await portalStore.findOauthIdentity(providerName, profile.legacySubject);
+    }
+    // Microsoft work/school account without `xms_edov`: its UPN is proven when the UPN's domain is
+    // a verified domain of the token's tenant (Graph /organization). Not determinable (no answer,
+    // no permission) means not proven. Only needed for an identity that is not linked yet.
+    if (!linked && providerName === "microsoft" && !profile.emailVerified && profile.microsoftDomainCandidate && profile.tenantId && accessToken && normalizeEmail(profile.microsoftDomainCandidate) === email) {
+      const organization = await fetchProviderJson(MICROSOFT_GRAPH_ORGANIZATION_URL, accessToken).catch(() => null);
+      if (microsoftUpnOnVerifiedDomain(profile.microsoftDomainCandidate, profile.tenantId, organization)) profile.emailVerified = true;
     }
     const linkTo = (userId: string) =>
       portalStore.linkOauthIdentity({
@@ -428,13 +571,16 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
     }
 
     let user = linked ? await portalStore.getUserById(linked.userId) : null;
+    let autoLinked = false;
     if (!user) {
       const existing = await portalStore.getUserByEmail(email);
       const decision = decideUnlinkedOauthLogin(profile, existing);
-      if (decision.kind === "account_exists") return refuse(409, "oauth_account_exists", oauthErrorMessage("account_exists", providerName));
-      if (decision.kind === "account_unclaimed") return refuse(409, "oauth_account_unverified", oauthErrorMessage("account_unclaimed", providerName));
+      if ((decision.kind === "confirm_by_email" || decision.kind === "account_unclaimed") && existing) {
+        return startEmailConfirmation(decision.kind, existing, providerName, subject, profile.tenantId, req, reply, refuse, nativeRedirect);
+      }
       if (decision.kind === "use_existing") {
         user = existing;
+        autoLinked = true;
       } else {
         const newUserId = randomUUID();
         if (LAUNCH_MODE === "invite") {
@@ -452,6 +598,8 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
     await linkTo(user.userId);
     await saveGithubToken(user.userId);
     if (user.emailVerified) await ensureCreditAccountForUser(user);
+    // Both sides verified the same address: linked automatically, and the account is told.
+    if (autoLinked) await notifyConnected(user.email, providerName);
 
     await createSessionForUser(user.userId, reply);
     if (nativeRedirect) {
@@ -460,9 +608,75 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
       redirect.searchParams.set("status", "ok");
       redirect.searchParams.set("provider", providerName);
       redirect.searchParams.set("mobile_token", mobileToken);
+      if (autoLinked) redirect.searchParams.set("linked", "1");
       return reply.redirect(redirect.toString());
     }
-    return reply.redirect("/portal/dashboard");
+    return reply.redirect(autoLinked ? `/portal/dashboard?sso_connected=${providerName}` : "/portal/dashboard");
+  }
+
+  /**
+   * The OAuth identity matched an existing account by email, without proof that may sign in to it.
+   * Nothing is signed in. A verified account gets a confirmation link (oauth-pending-link.ts); an
+   * account whose address was never verified gets a notice on how to claim it (Forgot password),
+   * since linking would share it with whoever registered it. Both show the same "check your
+   * email" state, so the screen reveals no more than the old "account exists" error did.
+   */
+  async function startEmailConfirmation(
+    kind: "confirm_by_email" | "account_unclaimed",
+    account: { userId: string; email: string },
+    providerName: ProviderName,
+    subject: string,
+    tenantId: string | undefined,
+    req: { headers: Record<string, unknown>; ip?: string },
+    reply: any,
+    refuse: (status: number, error: string, message: string) => unknown,
+    nativeRedirect: string | undefined
+  ) {
+    const portalStore = store!;
+    const masked = maskLinkEmail(account.email);
+    const ip = clientIp ? clientIp(req as any) : (req.ip ?? "unknown");
+    const ipHash = sha256Hex(`oauth-link-ip:${ip}`);
+    const since = Date.now() - LINK_RATE_WINDOW_MS;
+    if (
+      (await portalStore.countRecentOauthPendingLinksForUser(account.userId, since)) >= LINK_MAX_PER_ACCOUNT ||
+      (await portalStore.countRecentOauthPendingLinksFromIp(ipHash, since)) >= LINK_MAX_PER_IP
+    ) {
+      return refuse(429, "oauth_link_rate_limited", oauthErrorMessage("link_rate_limited", providerName));
+    }
+    const token = newLinkSecret();
+    const nonce = newLinkSecret();
+    await portalStore.createOauthPendingLink({
+      tokenHash: sha256Hex(token),
+      kind: kind === "confirm_by_email" ? "link" : "claim_notice",
+      userId: account.userId,
+      provider: providerName,
+      providerSubject: subject,
+      ...(tenantId ? { tenantId } : {}),
+      email: normalizeEmail(account.email),
+      browserHash: sha256Hex(nonce),
+      ipHash,
+      expiresAtMs: Date.now() + LINK_TOKEN_TTL_MS
+    });
+    const providerLabel = OAUTH_PROVIDER_LABEL[providerName];
+    let sent = false;
+    try {
+      sent =
+        kind === "confirm_by_email"
+          ? await sendOauthLinkConfirmEmail({ email: account.email, providerLabel, token, ttlMinutes: Math.round(LINK_TOKEN_TTL_MS / 60000) })
+          : await sendOauthLinkClaimNoticeEmail({ email: account.email, providerLabel });
+    } catch (err) {
+      app.log.error({ err }, "oauth link email failed");
+    }
+    if (!sent) return refuse(503, "oauth_link_email_failed", oauthErrorMessage("link_email_failed", providerName));
+    appendSetCookie(reply, linkBrowserSetCookie(nonce));
+    if (nativeRedirect) {
+      const redirect = new URL(nativeRedirect);
+      redirect.searchParams.set("status", "link_pending");
+      redirect.searchParams.set("provider", providerName);
+      redirect.searchParams.set("email_hint", masked);
+      return reply.redirect(redirect.toString());
+    }
+    return reply.code(200).header("cache-control", "no-store").type("text/html").send(linkCheckEmailPage(providerName, masked));
   }
 
   // --- GitHub integration API endpoints ---

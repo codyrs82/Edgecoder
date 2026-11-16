@@ -108,6 +108,18 @@ export type PortalMessage = {
   createdAtMs: number;
 };
 
+export type OauthPendingLink = { userId: string; provider: string; providerSubject: string; tenantId?: string; email: string; browserHash?: string };
+function pendingLinkFromRow(row: Record<string, unknown>): OauthPendingLink {
+  return {
+    userId: String(row.user_id),
+    provider: String(row.provider),
+    providerSubject: String(row.provider_subject),
+    ...(row.tenant_id ? { tenantId: String(row.tenant_id) } : {}),
+    email: String(row.email),
+    ...(row.browser_hash ? { browserHash: String(row.browser_hash) } : {})
+  };
+}
+
 /** Agent accounts have no email; the NOT NULL UNIQUE column holds `agent-<userId>@agents.invalid` (RFC 2606, never delivered). */
 export const AGENT_EMAIL_DOMAIN = "agents.invalid";
 export const isAgentPlaceholderEmail = (email: string | undefined | null) => (email ?? "").toLowerCase().endsWith(`@${AGENT_EMAIL_DOMAIN}`);
@@ -329,6 +341,17 @@ export class PortalStore {
     await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_passkey_challenges_expires_idx ON portal_passkey_challenges (expires_at_ms)`);
     await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_email_verifications_expires_idx ON portal_email_verifications (expires_at_ms)`);
     await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_email_verifications_user_idx ON portal_email_verifications (user_id, created_at_ms)`);
+    // Connecting a sign-in provider by email confirmation (oauth-pending-link.ts): only the token's
+    // SHA-256 is kept; single use; bound to provider + subject + email (+ the starting browser).
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_oauth_pending_links (
+         token_hash TEXT PRIMARY KEY, kind TEXT NOT NULL, user_id TEXT NOT NULL, provider TEXT NOT NULL,
+         provider_subject TEXT NOT NULL, tenant_id TEXT, email TEXT NOT NULL, browser_hash TEXT, ip_hash TEXT,
+         expires_at_ms BIGINT NOT NULL, consumed_at_ms BIGINT, created_at_ms BIGINT NOT NULL)`
+    );
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_oauth_pending_links_user_idx ON portal_oauth_pending_links (user_id, created_at_ms)`);
+    await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_oauth_pending_links_ip_idx ON portal_oauth_pending_links (ip_hash, created_at_ms)`);
+    await this.pool.query(`ALTER TABLE portal_oauth_states ADD COLUMN IF NOT EXISTS pending_link_hash TEXT`);
     await this.pool.query(
       `UPDATE portal_node_enrollments
        SET device_id = regexp_replace(lower(node_id), '^(ios-|iphone-)', '')
@@ -1214,6 +1237,88 @@ export class PortalStore {
     );
   }
 
+  /** The sign-in providers connected to a user (Settings, Connected sign-ins). */
+  async listOauthLinksForUser(userId: string): Promise<Array<{ provider: string; providerSubject: string; emailSnapshot?: string; tenantId?: string; createdAtMs: number }>> {
+    const result = await this.pool.query(
+      `SELECT provider, provider_subject, email_snapshot, tenant_id, created_at_ms FROM portal_oauth_links WHERE user_id = $1 ORDER BY created_at_ms`,
+      [userId]
+    );
+    return result.rows.map((row) => ({
+      provider: row.provider,
+      providerSubject: row.provider_subject,
+      ...(row.email_snapshot ? { emailSnapshot: row.email_snapshot } : {}),
+      ...(row.tenant_id ? { tenantId: row.tenant_id } : {}),
+      createdAtMs: Number(row.created_at_ms)
+    }));
+  }
+
+  /** Remove one connected provider of this user; false when there was no such link. */
+  async deleteOauthLink(userId: string, provider: string, providerSubject: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `DELETE FROM portal_oauth_links WHERE user_id = $1 AND provider = $2 AND provider_subject = $3`,
+      [userId, provider, providerSubject]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  async createOauthPendingLink(input: {
+    tokenHash: string;
+    kind: "link" | "claim_notice";
+    userId: string;
+    provider: string;
+    providerSubject: string;
+    tenantId?: string;
+    email: string;
+    browserHash?: string;
+    ipHash?: string;
+    expiresAtMs: number;
+  }): Promise<void> {
+    // Kept a day past expiry so the hourly per-account / per-address counts still see them.
+    await this.pool.query(`DELETE FROM portal_oauth_pending_links WHERE expires_at_ms < $1`, [Date.now() - 24 * 60 * 60 * 1000]);
+    await this.pool.query(
+      `INSERT INTO portal_oauth_pending_links (token_hash, kind, user_id, provider, provider_subject, tenant_id, email, browser_hash, ip_hash, expires_at_ms, created_at_ms)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [input.tokenHash, input.kind, input.userId, input.provider, input.providerSubject, input.tenantId ?? null, input.email, input.browserHash ?? null, input.ipHash ?? null, input.expiresAtMs, Date.now()]
+    );
+  }
+
+  async countRecentOauthPendingLinksForUser(userId: string, sinceMs: number): Promise<number> {
+    const result = await this.pool.query(`SELECT COUNT(*)::int AS n FROM portal_oauth_pending_links WHERE user_id = $1 AND created_at_ms >= $2`, [userId, sinceMs]);
+    return Number(result.rows[0]?.n ?? 0);
+  }
+
+  async countRecentOauthPendingLinksFromIp(ipHash: string, sinceMs: number): Promise<number> {
+    const result = await this.pool.query(`SELECT COUNT(*)::int AS n FROM portal_oauth_pending_links WHERE ip_hash = $1 AND created_at_ms >= $2`, [ipHash, sinceMs]);
+    return Number(result.rows[0]?.n ?? 0);
+  }
+
+  /** An unused, unexpired confirmation link (kind "link"), without using it up. */
+  async findOauthPendingLink(tokenHash: string): Promise<OauthPendingLink | null> {
+    const result = await this.pool.query(
+      `SELECT user_id, provider, provider_subject, tenant_id, email, browser_hash FROM portal_oauth_pending_links
+       WHERE token_hash = $1 AND kind = 'link' AND consumed_at_ms IS NULL AND expires_at_ms > $2`,
+      [tokenHash, Date.now()]
+    );
+    return result.rows[0] ? pendingLinkFromRow(result.rows[0]) : null;
+  }
+
+  /** Uses the link up: atomic, so it completes at most once across instances. */
+  async consumeOauthPendingLink(tokenHash: string): Promise<OauthPendingLink | null> {
+    const now = Date.now();
+    const result = await this.pool.query(
+      `UPDATE portal_oauth_pending_links SET consumed_at_ms = $2
+       WHERE token_hash = $1 AND kind = 'link' AND consumed_at_ms IS NULL AND expires_at_ms > $2
+       RETURNING user_id, provider, provider_subject, tenant_id, email, browser_hash`,
+      [tokenHash, now]
+    );
+    return result.rows[0] ? pendingLinkFromRow(result.rows[0]) : null;
+  }
+
+  /** Password reset revokes every other way in, including links still waiting for confirmation. */
+  async deleteOauthPendingLinksForUser(userId: string): Promise<void> {
+    await this.pool.query(`UPDATE portal_oauth_pending_links SET consumed_at_ms = $2 WHERE user_id = $1 AND consumed_at_ms IS NULL`, [userId, Date.now()]);
+  }
+
   /** Remove every OAuth identity linked to a user. */
   async deleteOauthLinksForUser(userId: string): Promise<void> {
     await this.pool.query(`DELETE FROM portal_oauth_links WHERE user_id = $1`, [userId]);
@@ -1401,21 +1506,23 @@ export class PortalStore {
     inviteCodeHash?: string;
     /** The Terms version the person accepted on the Create account form, recorded if the callback creates the account. */
     termsVersion?: string;
+    /** Re-authentication that completes an emailed link (oauth-pending-link.ts): the link token's hash. */
+    pendingLinkHash?: string;
   }): Promise<void> {
     await this.pruneExpired("portal_oauth_states");
     await this.pool.query(
-      `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms, native_redirect, link_user_id, app_challenge, invite_code_hash, terms_version)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [input.stateId, input.provider, input.redirectUri, input.expiresAtMs, Date.now(), input.nativeRedirect ?? null, input.linkUserId ?? null, input.appChallenge ?? null, input.inviteCodeHash ?? null, input.termsVersion ?? null]
+      `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms, native_redirect, link_user_id, app_challenge, invite_code_hash, terms_version, pending_link_hash)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [input.stateId, input.provider, input.redirectUri, input.expiresAtMs, Date.now(), input.nativeRedirect ?? null, input.linkUserId ?? null, input.appChallenge ?? null, input.inviteCodeHash ?? null, input.termsVersion ?? null, input.pendingLinkHash ?? null]
     );
   }
 
-  async consumeOauthState(stateId: string): Promise<{ provider: string; redirectUri: string; nativeRedirect?: string; linkUserId?: string; appChallenge?: string; inviteCodeHash?: string; termsVersion?: string } | null> {
+  async consumeOauthState(stateId: string): Promise<{ provider: string; redirectUri: string; nativeRedirect?: string; linkUserId?: string; appChallenge?: string; inviteCodeHash?: string; termsVersion?: string; pendingLinkHash?: string } | null> {
     const now = Date.now();
     const result = await this.pool.query(
       `DELETE FROM portal_oauth_states
        WHERE state_id = $1 AND expires_at_ms > $2
-       RETURNING provider, redirect_uri, native_redirect, link_user_id, app_challenge, invite_code_hash, terms_version`,
+       RETURNING provider, redirect_uri, native_redirect, link_user_id, app_challenge, invite_code_hash, terms_version, pending_link_hash`,
       [stateId, now]
     );
     const row = result.rows[0];
@@ -1427,7 +1534,8 @@ export class PortalStore {
       ...(row.link_user_id ? { linkUserId: row.link_user_id } : {}),
       ...(row.app_challenge ? { appChallenge: row.app_challenge } : {}),
       ...(row.invite_code_hash ? { inviteCodeHash: row.invite_code_hash } : {}),
-      ...(row.terms_version ? { termsVersion: row.terms_version } : {})
+      ...(row.terms_version ? { termsVersion: row.terms_version } : {}),
+      ...(row.pending_link_hash ? { pendingLinkHash: row.pending_link_hash } : {})
     };
   }
 

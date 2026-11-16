@@ -110,6 +110,8 @@ const PUBLIC: Record<string, string> = {
   "GET /auth/oauth/apple/callback": "provider redirect",
   "POST /auth/oauth/apple/callback": "provider form post",
   "POST /auth/oauth/mobile/complete": "exchanges a one-time code for the session",
+  "GET /auth/oauth-link/confirm": "emailed link (page only; changes nothing)",
+  "POST /auth/oauth-link/confirm": "emailed link; proven by the token plus this browser or the provider identity",
   "POST /auth/passkey/login/options": "starts passkey sign-in",
   "POST /auth/passkey/login/verify": "finishes passkey sign-in",
   "POST /agents/challenge": "agent signup, proven by a key signature",
