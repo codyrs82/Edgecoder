@@ -4,6 +4,9 @@
   // distance set by the coordinator's measured round trip to them. Other people's machines are
   // masked (an OS family and a short hash); yours are named. "Latency to you" is an estimate:
   // your round trip to the machine's coordinator plus the coordinator's round trip to the machine.
+  // Your own machines on the same local network are measured directly by this computer's IDE
+  // provider (src/apps/ide/network-world.ts) and sit beside "You" with a "Same network" badge.
+  // A failed refresh is quiet (lib/refresh-quiet.ts): the last view stays, retried on a backoff.
   import { backendReady, isRemoteMode, networkWorld, type WorldView } from "../lib/api";
   import ErrorBanner from "../components/ErrorBanner.svelte";
   import Skeleton from "../components/Skeleton.svelte";
@@ -14,7 +17,8 @@
     filterRows,
     formatMs,
     hostOf,
-    nearestPeers,
+    nearestText,
+    nearestToYou,
     nearness,
     regionText,
     rowsFor,
@@ -24,6 +28,7 @@
     type SortKey,
     type WorldRow,
   } from "../lib/world-view";
+  import { initialRefreshState, refreshFailed, refreshSucceeded, retryDelayMs, showBanner, staleNote } from "../lib/refresh-quiet";
 
   interface Props {
     /** Polling interval in ms (default 15 000). */
@@ -34,8 +39,12 @@
   let view = $state<WorldView | null>(null);
   let offline = $state<string | null>(null);
   let loading = $state(true);
-  let error = $state("");
   let noLocalAgent = $state(false);
+  let refreshState = $state(initialRefreshState());
+  let now = $state(Date.now());
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let error = $derived(showBanner(refreshState, now) ? (view ? "Couldn't refresh the network view. Showing the last one." : "Couldn't load the network. Is your agent running?") : "");
+  let quietNote = $derived(view ? staleNote(refreshState, now) : null);
 
   let mode: "graph" | "cards" = $state("graph");
   let scope: "all" | "mine" = $state("all");
@@ -46,7 +55,7 @@
   let rows = $derived(view ? rowsFor(view) : []);
   let visible = $derived(sortRows(filterRows(rows, { scope, model }), sortKey, sortDir));
   let layout = $derived(view ? worldLayout(view, visible) : null);
-  let nearest = $derived(nearestPeers(rows));
+  let nearest = $derived(nearestToYou(rows, view?.selfAgentId));
   let coordById = $derived(new Map((view?.coordinators ?? []).map((c) => [c.id, c])));
   let hubById = $derived(new Map((layout?.hubs ?? []).map((h) => [h.id, h])));
   let modelOptions = $derived((view?.models ?? []).filter((m) => m.online > 0 || m.model === model));
@@ -71,6 +80,10 @@
       return;
     }
     noLocalAgent = false;
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
     try {
       const r = await networkWorld();
       if (r.connected) {
@@ -79,12 +92,17 @@
       } else {
         offline = r.reason ?? "not_connected";
       }
-      error = "";
+      refreshState = refreshSucceeded(refreshState, Date.now());
     } catch (e) {
       const status = (e as { status?: number }).status;
       // A rate limit only delays the next refresh; the last view stays up.
-      if (status !== 429) error = view ? "Couldn't refresh the network view. Showing the last one." : "Couldn't load the network. Is your agent running?";
+      if (status !== 429) {
+        refreshState = refreshFailed(refreshState, Date.now(), status);
+        // Retry soon (2 s, 5 s, then 15 s) rather than waiting out the poll interval.
+        if (!refreshState.authError) retryTimer = setTimeout(refresh, retryDelayMs(refreshState.failures));
+      }
     } finally {
+      now = Date.now();
       loading = false;
     }
   }
@@ -92,7 +110,13 @@
   $effect(() => {
     void refresh();
     const t = setInterval(refresh, pollInterval);
-    return () => clearInterval(t);
+    // Keeps "Updated 40 s ago" and the banner's 60 s rule current between refreshes.
+    const tick = setInterval(() => (now = Date.now()), 5_000);
+    return () => {
+      clearInterval(t);
+      clearInterval(tick);
+      if (retryTimer) clearTimeout(retryTimer);
+    };
   });
 
   function setSort(key: SortKey): void {
@@ -110,7 +134,7 @@
   function nodeLabel(r: WorldRow): string {
     const a = r.agent;
     const who = a.mine ? `Your machine ${displayName(a, view?.selfAgentId)}` : `Machine ${a.label}`;
-    const lat = r.estimateMs === null ? "latency unknown" : `about ${r.estimateMs} ms from you`;
+    const lat = r.estimateMs === null ? "latency unknown" : r.sameNetwork ? `on your network, ${formatMs(r.estimateMs)} from you` : `about ${r.estimateMs} ms from you`;
     return `${who}, ${statusText(a.status).toLowerCase()}, ${regionText(a)}, ${a.models.length} model${a.models.length === 1 ? "" : "s"}, ${lat}`;
   }
 
@@ -147,6 +171,8 @@
     <div class="sp-card"><div class="sp-row"><span class="sp-muted">No local agent is running. Start the EdgeCoder agent on this computer to see the network.</span></div></div>
   {:else if error}
     <ErrorBanner message={error} onRetry={refresh} />
+  {:else if quietNote}
+    <p class="sp-muted quiet-note" role="status">{quietNote}</p>
   {/if}
 
   {#if loading && !view}
@@ -186,8 +212,8 @@
       <div class="sp-card stat">
         <span class="sp-desc">Nearest to you</span>
         {#if nearest.length}
-          <span class="sp-big">{formatMs(nearest[0].estimateMs, true)}</span>
-          <span class="sp-desc">{nearest.map((r) => `${r.agent.label} ${r.agent.region ?? r.agent.country ?? ""}`.trim()).join(" · ")}</span>
+          <span class="sp-big">{formatMs(nearest[0].estimateMs, !nearest[0].sameNetwork)}</span>
+          <span class="sp-desc" title={nearest.map((r) => nearestText(r, view?.selfAgentId)).join(" · ")}>{nearest.map((r) => nearestText(r, view?.selfAgentId)).join(" · ")}</span>
         {:else}
           <span class="sp-big">—</span>
           <span class="sp-desc">No latency measured yet</span>
@@ -249,6 +275,10 @@
                 {/if}
               {/each}
               {#if layout.you}
+                {#each layout.agents.filter((n) => n.lan) as node (node.id)}
+                  <line class="lan-link" x1={layout.you.x} y1={layout.you.y} x2={node.x} y2={node.y} aria-hidden="true" />
+                  <text class="lan-link-label" x={(layout.you.x + node.x) / 2} y={layout.you.y - 8} text-anchor="middle" aria-hidden="true">{formatMs(node.row.estimateMs)}</text>
+                {/each}
                 {#each layout.hubs as hub (hub.id)}
                   {#if typeof hub.coordinator.myRttMs === "number"}
                     <line class="you-link" x1={layout.you.x} y1={layout.you.y} x2={hub.x} y2={hub.y} aria-hidden="true" />
@@ -274,6 +304,7 @@
                   data-node
                   class="node st-{a.status}"
                   class:mine={a.mine}
+                  class:lan={node.lan}
                   class:selected={selectedId === a.id}
                   transform="translate({node.x} {node.y})"
                   role="button"
@@ -305,6 +336,7 @@
               <span><i class="dot busy"></i>Busy</span>
               <span><i class="dot stale"></i>Not seen lately</span>
               <span><i class="dot mine"></i>Yours</span>
+              {#if layout.agents.some((n) => n.lan)}<span>Beside You: your machines on the same network, measured directly.</span>{/if}
               <span>Distance from a coordinator: its round trip to the machine. Size: model slots.</span>
             </div>
           </div>
@@ -315,9 +347,14 @@
               <span class="badges">
                 <span class="sp-pill st-{a.status}">{statusText(a.status)}</span>
                 {#if a.mine}<span class="sp-pill yours">Yours</span>{/if}
+                {#if detail.sameNetwork}<span class="sp-pill lan">Same network</span>{/if}
               </span>
               <dl>
-                <dt>Latency to you</dt><dd>{formatMs(detail.estimateMs, true)} <span class="est">estimate</span></dd>
+                {#if detail.sameNetwork}
+                  <dt>Latency to you</dt><dd>{formatMs(detail.estimateMs)} <span class="est">measured directly on your local network</span></dd>
+                {:else}
+                  <dt>Latency to you</dt><dd>{formatMs(detail.estimateMs, true)} <span class="est">estimate</span></dd>
+                {/if}
                 <dt>Region</dt><dd>{regionText(a)}{a.continent ? ` · ${continentName(a.continent)}` : ""}</dd>
                 <dt>Class</dt><dd>{a.computeClass}{a.tier ? ` · ${a.tier}` : ""}{a.vramGb ? ` · ${a.vramGb} GB` : ""}</dd>
                 <dt>Load</dt><dd>{a.slotsUsed} of {a.slots} slot{a.slots === 1 ? "" : "s"} in use</dd>
@@ -346,7 +383,12 @@
                   <span class="dot {a.status}" aria-hidden="true"></span>
                   <span class="wname" class:masked={!a.mine}>{displayName(a, view.selfAgentId)}</span>
                   {#if a.mine}<span class="sp-pill yours">Yours</span>{/if}
-                  <span class="lat near-{nearness(r.estimateMs)}" title="Estimated: your round trip to its coordinator plus the coordinator's to the machine">{formatMs(r.estimateMs, true)}</span>
+                  {#if r.sameNetwork}<span class="sp-pill lan">Same network</span>{/if}
+                  {#if r.sameNetwork}
+                    <span class="lat near-near" title="Measured directly from this computer over your local network">{formatMs(r.estimateMs)}</span>
+                  {:else}
+                    <span class="lat near-{nearness(r.estimateMs)}" title="Estimated: your round trip to its coordinator plus the coordinator's to the machine">{formatMs(r.estimateMs, true)}</span>
+                  {/if}
                 </div>
                 <div class="wmeta">
                   <span>{statusText(a.status)} · {a.slotsUsed}/{a.slots} slots</span>
@@ -387,7 +429,7 @@
           </div>
         {/each}
       </div>
-      <p class="sp-muted footnote">Latency to a machine is an estimate: your round trip to its coordinator (measured from this computer) plus the coordinator's round trip to the machine (measured on its connection). Regions come from where a machine is hosted or was enrolled; no location lookups are made.</p>
+      <p class="sp-muted footnote">Latency to a machine is an estimate: your round trip to its coordinator (measured from this computer) plus the coordinator's round trip to the machine (measured on its connection). Your own machines on the same local network are pinged directly from this computer and marked "Same network"; other people's machines are never probed. Regions come from where a machine is hosted or was enrolled; no location lookups are made.</p>
     </section>
   {/if}
 </div>
@@ -418,6 +460,10 @@
   .ring-label { fill: var(--text-muted); font-size: 10px; }
   .clink { stroke: var(--accent-secondary); stroke-width: 2.5; opacity: 0.7; }
   .clink-label, .you-link-label { fill: var(--text-secondary); font-size: 11px; }
+  .lan-link { stroke: var(--green); stroke-width: 1.5; stroke-dasharray: 3 3; }
+  .lan-link-label { fill: var(--green); font-size: 10.5px; font-weight: 600; }
+  .sp-pill.lan { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
+  .quiet-note { margin: 0; font-size: var(--fs-xs); }
   .you-link { stroke: var(--text-muted); stroke-width: 1.2; stroke-dasharray: 5 5; }
   .spoke { stroke: var(--border-strong); stroke-width: 1; }
   .spoke-on { stroke: var(--accent); stroke-width: 2; }

@@ -95,6 +95,11 @@ export const registerSchema = z.object({
   clientType: z.string().min(1).max(64).default("edgecoder-native"),
   /** Hosting region code the agent runs in (FLY_REGION or AGENT_REGION), shown coarsely in GET /network/world. */
   region: z.string().regex(/^[a-z0-9-]{2,24}$/).optional().catch(undefined),
+  /**
+   * The agent's private IPv4 addresses with prefix ("192.168.1.23/24"), for LAN proximity between
+   * the owner's own machines (src/swarm/lan-proximity.ts). Shared only with the owner's desktop app.
+   */
+  lanAddresses: z.array(z.string().max(18)).max(16).optional().catch(undefined),
   maxConcurrentTasks: z.number().int().min(1).max(64).default(1),
   powerTelemetry: z
     .object({

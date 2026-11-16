@@ -101,6 +101,8 @@ export const agentCapabilities = new Map<
     connectedPeers: Set<string>;
     ownerEmail?: string;
     sourceIp?: string;
+    /** Private IPv4 addresses the agent reported (sanitized; src/swarm/lan-proximity.ts). Owner-only. */
+    lanAddresses?: string[];
     countryCode?: string;
     /** Self-reported hosting region code (e.g. a Fly region such as "sin"); display only. */
     region?: string;

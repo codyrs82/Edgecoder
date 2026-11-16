@@ -46,8 +46,8 @@ beforeAll(async () => {
   route = await import("../../src/swarm/coordinator/routes/network-world.js");
   meshRoutes = await import("../../src/swarm/coordinator/routes/mesh.js");
   await app.ready();
-  addAgent(caller);
-  addAgent(stranger, { os: "linux", computeClass: "gpu", region: "sin", countryCode: "SG", ownerEmail: "stranger@private.example" });
+  addAgent(caller, { lanAddresses: ["192.168.1.40/24"] });
+  addAgent(stranger, { os: "linux", computeClass: "gpu", region: "sin", countryCode: "SG", ownerEmail: "stranger@private.example", lanAddresses: ["192.168.1.77/24"] });
   meshRoutes.meshRtt.record(stranger.peerId, 180, Date.now());
 }, 60_000);
 
@@ -86,7 +86,7 @@ describe("GET /network/world: what it shows", () => {
   test("other people's machines are masked: no ids, e-mails or IPs in the serialized answer", async () => {
     const res = await get("/network/world", signedHeaders(caller, "/network/world"));
     const text = res.body as string;
-    for (const secret of [stranger.peerId, "stranger", "gpu-box", "private.example", "198.51.100.77", "ownerTag", "lastSeenMs", "agentId", "publicKeyPem", "sourceIp"]) {
+    for (const secret of [stranger.peerId, "stranger", "gpu-box", "private.example", "198.51.100.77", "ownerTag", "lastSeenMs", "agentId", "publicKeyPem", "sourceIp", "192.168.1.77", "netTag"]) {
       expect(text).not.toContain(secret);
     }
     const body = res.json();
@@ -103,6 +103,11 @@ describe("GET /network/world: what it shows", () => {
     expect(mine).toHaveLength(1);
     expect(mine[0].name).toBe(caller.peerId);
     expect(body.totals.mine).toBe(1);
+    // LAN facts about your own machine, for your desktop app only (it connects from another address here).
+    expect(mine[0].lan).toEqual({ samePublicNetwork: false, addresses: ["192.168.1.40/24"] });
+    expect(body.agents.find((a: any) => !a.mine).lan).toBeUndefined();
+    const portalMine = (await get(`/network/world?accountId=${caller.peerId}`, { "x-portal-service-token": PORTAL })).body as string;
+    expect(portalMine).not.toMatch(/192\.168|"lan"/);
     // The portal names the account; without one nothing is anyone's.
     const portal = (await get("/network/world", { "x-portal-service-token": PORTAL })).json();
     expect(portal.agents.every((a: any) => !a.mine && a.name === undefined)).toBe(true);

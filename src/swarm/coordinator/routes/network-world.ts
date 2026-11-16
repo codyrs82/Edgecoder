@@ -22,7 +22,8 @@
 import { request } from "undici";
 import { z } from "zod";
 import type { CoordinatorApp } from "../app.js";
-import { identity, coordinatorKeys, mesh, MESH_AUTH_TOKEN, CC, queue } from "../context.js";
+import { identity, coordinatorKeys, mesh, MESH_AUTH_TOKEN, CC, queue, requestOrigin } from "../context.js";
+import { networkTag } from "../../lan-proximity.js";
 import { agentCapabilities, activeBlacklistRecord, AGENT_CONNECTED_WINDOW_MS } from "../agent-state.js";
 import { agentAccount, agentSignatureAtGate, hasMeshToken, hasPortalServiceToken, requireMeshToken } from "../auth.js";
 import { agentLoadReport } from "../dispatch.js";
@@ -132,7 +133,9 @@ export async function buildLocalWorld(nowMs = Date.now()): Promise<LocalWorld> {
       claims: claims.get(agentId)?.all ?? 0,
       slots: agentLoadReport(agentId)?.slots ?? cap.maxConcurrentTasks ?? 1,
       lastSeenMs: cap.lastSeenMs,
-      rttMs: meshRtt.rttMs(agentId, nowMs)
+      rttMs: meshRtt.rttMs(agentId, nowMs),
+      sourceIp: cap.sourceIp ?? null,
+      lanAddresses: cap.lanAddresses ?? null
     });
     // For peers' best-fit routing (stripped from every public answer).
     return { ...agent, perf: agentPerf(agentId, claims) };
@@ -202,14 +205,15 @@ function fetchPeerWorld(peer: { peerId: string; url: string }, nowMs: number): P
 }
 
 /** The public world view for one caller (null account: nothing is marked as theirs). */
-export async function worldView(callerAccountId: string | null, nowMs = Date.now()): Promise<PublicWorld> {
+export async function worldView(callerAccountId: string | null, nowMs = Date.now(), lanFor?: { callerNetTag: string | null }): Promise<PublicWorld> {
   const peers = peerCoordinators();
   const [self, ...views] = await Promise.all([cachedLocalWorld(nowMs), ...peers.map((p) => fetchPeerWorld(p, nowMs))]);
   return toPublicWorld(
     self,
     peers.map((p, i) => ({ url: p.url, id: p.peerId, world: views[i], rttMs: linkRtt(p.peerId, nowMs) })),
     callerAccountId,
-    nowMs
+    nowMs,
+    lanFor
   );
 }
 
@@ -260,6 +264,8 @@ export function registerNetworkWorldRoutes(app: CoordinatorApp): void {
     const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
     let account: string | null;
     let callerKey: string;
+    // LAN facts about the caller's own machines go only to a signed agent (the desktop app).
+    let lanFor: { callerNetTag: string | null } | undefined;
     if (headers["x-portal-service-token"] !== undefined && hasPortalServiceToken(headers)) {
       const q = portalQuery.safeParse(req.query ?? {});
       if (!q.success) return reply.code(400).send({ error: "invalid_account" });
@@ -270,6 +276,8 @@ export function registerNetworkWorldRoutes(app: CoordinatorApp): void {
       if (!signer) return reply.code(401).send({ error: "agent_signature_required" });
       account = await agentAccount(signer);
       callerKey = `agent:${signer}`;
+      // The address this request came from; else the one the signer registered from.
+      lanFor = { callerNetTag: networkTag(requestOrigin(req).clientIp) ?? networkTag(agentCapabilities.get(signer)?.sourceIp) };
     } else if (hasMeshToken(headers)) {
       account = null;
       callerKey = "mesh";
@@ -279,6 +287,6 @@ export function registerNetworkWorldRoutes(app: CoordinatorApp): void {
     const wait = worldRateLimiter.take(callerKey, Date.now());
     if (wait > 0) return reply.code(429).header("retry-after", String(wait)).send({ error: "rate_limited", retryAfterSec: wait });
     reply.header("cache-control", "no-store");
-    return worldView(account);
+    return worldView(account, Date.now(), account ? lanFor : undefined);
   });
 }

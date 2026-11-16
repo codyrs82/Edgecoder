@@ -29,7 +29,8 @@ import { syncReservations } from "../../../economy/reservations.js";
 import { agentHasModel, routableModels } from "../../model-catalog.js";
 import { rawBodyOf } from "../../../security/request-signing.js";
 import { app as coordinatorApp, type CoordinatorApp } from "../app.js";
-import { CC, FALLBACK_BTC_USD, claimedTradePrice, reservations, taskBilling, settledBilling, usagePending, queue, identity, securityLog } from "../context.js";
+import { CC, FALLBACK_BTC_USD, claimedTradePrice, reservations, taskBilling, settledBilling, usagePending, queue, identity, securityLog, requestOrigin } from "../context.js";
+import { pickSameNetworkAgent } from "../../lan-proximity.js";
 import { mutable } from "../mutable-state.js";
 import { agentCapabilities, activeBlacklistRecord, autoBlacklister } from "../agent-state.js";
 import { agentSignatureAtGate, hasPortalServiceToken, resolveSubmitterAccount, verifyAgentRequest } from "../auth.js";
@@ -426,6 +427,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     // Unbilled targets: a lease you already paid for, or your own machines.
     let onlyAccountId: string | undefined;
     let reservationId: string | undefined;
+    const ownHolders: string[] = [];
     if (body.reservationId) {
       if (reservations.get(body.reservationId)?.status !== "active") await syncReservations(reservations, pgStore).catch((err) => req.log.warn({ err }, "reservation_sync_failed"));
       const lease = reservations.get(body.reservationId);
@@ -440,6 +442,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       for (const [id] of holders) {
         if ((await rewardAccountForAgent(id)) !== accountId) continue;
         own++;
+        ownHolders.push(id);
         if (restrictedTier && agentMayHostTier(id, restrictedTier, accountId)) approved++;
       }
       if (own === 0) return reply.code(409).send({ error: "no_own_agent_has_model", model: body.model });
@@ -516,6 +519,17 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       // (never the requester's own machines: excludeAccounts above, as in best-fit).
       if (routed.result.chosen?.local) preferAgent(subtask.id, routed.result.chosen.agentId, bestFitConfig.preferMs);
       recordDecision(body.taskId, subtask.id, routed.job, routed.result);
+    }
+    if (onlyAccountId && !reservationId && !hasPortalServiceToken((req as any).headers ?? {})) {
+      // "My machines" from the desktop app: a soft preference for the requester's own machine on the
+      // same local network (same public address), so the reply comes from the nearest one. Any own
+      // machine may still take it once the preference lapses (src/swarm/lan-proximity.ts).
+      const claims = queue.activeClaims();
+      const near = pickSameNetworkAgent(
+        ownHolders.map((id) => ({ agentId: id, sourceIp: agentCapabilities.get(id)?.sourceIp ?? null, freeSlots: freeModelSlots(id, claims) })),
+        requestOrigin(req).clientIp
+      );
+      if (near) preferAgent(subtask.id, near, bestFitConfig.preferMs);
     }
     if (restrictedTier) {
       admitRestrictedCall({

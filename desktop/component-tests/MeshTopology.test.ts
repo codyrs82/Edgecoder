@@ -119,6 +119,46 @@ describe("Network page: the world view", () => {
     expect(text).not.toMatch(/agentId|ownerTag/);
   });
 
+  it("your machine on the same local network: nearest to you, with a Same network badge and the measured ms", async () => {
+    const w = structuredClone(WORLD);
+    const air = w.agents.find((a) => a.name === "codys-macbook-air")!;
+    (air as typeof air & { lan?: unknown }).lan = { sameNetwork: true, rttMs: 2.2 };
+    api.networkWorld.mockResolvedValue(w);
+    render(MeshTopology);
+    const summary = await screen.findByRole("region", { name: /network summary/i });
+    const tile = within(summary).getByText("Nearest to you").parentElement!;
+    expect(within(tile).getByText("2 ms")).toBeTruthy();
+    expect(tile.textContent).toContain("codys-macbook-air (same network)");
+    // Graph: a dashed link from You with the measured round trip; the node says so.
+    const { nodes } = await graphNodes();
+    expect(nodes.find((n) => n.getAttribute("aria-label")?.startsWith("Your machine codys-macbook-air"))!.getAttribute("aria-label")).toContain("on your network, 2 ms from you");
+    // Cards: the badge and the measured ms (no "~": it is not an estimate).
+    await fireEvent.click(screen.getByRole("button", { name: "Cards" }));
+    const card = within(screen.getByRole("list", { name: /machines/i })).getAllByRole("listitem").find((li) => li.textContent?.includes("codys-macbook-air"))!;
+    expect(within(card).getByText("Same network")).toBeTruthy();
+    expect(within(card).getByText("2 ms")).toBeTruthy();
+    expect(card.textContent).not.toContain("~");
+    // Nobody else is ever marked same network, and other people's machines stay masked.
+    expect(screen.getAllByText("Same network")).toHaveLength(1);
+    expect(document.body.textContent).not.toMatch(/192\.168/);
+  });
+
+  it("a single failed refresh is quiet: the last view stays with a muted note, no red banner", async () => {
+    api.networkWorld.mockResolvedValueOnce(structuredClone(WORLD)).mockRejectedValue(Object.assign(new Error("bad gateway"), { status: 502 }));
+    render(MeshTopology, { props: { pollInterval: 60 } });
+    await screen.findByRole("region", { name: /network summary/i });
+    await waitFor(() => expect(screen.getByText(/reconnecting…/)).toBeTruthy());
+    expect(screen.queryByText(/couldn't refresh/i)).toBeNull();
+    expect(screen.getByRole("region", { name: /network summary/i })).toBeTruthy();
+  });
+
+  it("an auth error shows the banner at once", async () => {
+    api.networkWorld.mockResolvedValueOnce(structuredClone(WORLD)).mockRejectedValue(Object.assign(new Error("unauthorized"), { status: 401 }));
+    render(MeshTopology, { props: { pollInterval: 60 } });
+    await screen.findByRole("region", { name: /network summary/i });
+    expect(await screen.findByText(/couldn't refresh the network view/i)).toBeTruthy();
+  });
+
   it("says when this computer is not enrolled, instead of an empty graph", async () => {
     api.networkWorld.mockResolvedValue({ connected: false, reason: "not_enrolled" });
     render(MeshTopology);

@@ -48,6 +48,7 @@ import { MeshPeer } from "../mesh/mesh-peer.js";
 import { MeshTaskQueue } from "../mesh/mesh-task-queue.js";
 import { MeshHttpServer } from "../mesh/mesh-http-server.js";
 import { getLocalIpAddress } from "../mesh/network-utils.js";
+import { localLanAddresses } from "./lan-proximity.js";
 import { collectDesktopTelemetry } from "./desktop-telemetry.js";
 import { detectPlatform, getConfigDir, getLogDir, type PlatformInfo } from "../common/platform.js";
 import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from "../security/release-integrity.js";
@@ -1437,6 +1438,8 @@ async function loop(): Promise<void> {
       ...(OPENAI_ENGINE ? { inferenceEngine: OPENAI_ENGINE.preset, ...(engineStatus?.ok && engineStatus.model ? { engineModel: engineStatus.model.id.slice(0, 200) } : {}) } : {}),
       clientType: AGENT_CLIENT_TYPE,
       ...(AGENT_REGION ? { region: AGENT_REGION } : {}),
+      // Private addresses, for the owner's own LAN proximity view only (src/swarm/lan-proximity.ts).
+      ...(W.AGENT_LAN_HINTS ? (() => { const lan = localLanAddresses(); return lan.length ? { lanAddresses: lan } : {}; })() : {}),
       maxConcurrentTasks: MAX_CONCURRENT_TASKS,
       sandboxMode: SANDBOX_MODE,
       powerTelemetry,

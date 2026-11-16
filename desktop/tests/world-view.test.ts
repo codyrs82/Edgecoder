@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { WORLD } from "../a11y/world-fixture";
-import { RING_MAX, RING_MIN, displayName, estimateMs, filterRows, nearestPeers, nearness, regionText, ringRadius, rowsFor, sortRows, worldLayout } from "../src/lib/world-view";
+import { RING_MAX, RING_MIN, displayName, estimateMs, filterRows, formatMs, lanDistance, lanMs, nearestPeers, nearestText, nearestToYou, nearness, regionText, ringRadius, rowsFor, sortRows, worldLayout } from "../src/lib/world-view";
 
 const coords = new Map(WORLD.coordinators.map((c) => [c.id, c]));
 const byLabel = (l: string) => WORLD.agents.find((a) => a.label.endsWith(l))!;
@@ -63,5 +63,62 @@ describe("graph layout", () => {
     expect(ringRadius(3)).toBeLessThan(ringRadius(60));
     expect(ringRadius(60)).toBeLessThan(ringRadius(300));
     expect(ringRadius(null)).toBe(RING_MAX);
+  });
+});
+
+describe("your machines on the same local network", () => {
+  // codys-macbook-air answered a direct ping from this computer (codys-mac-studio) in 2 ms.
+  const lanWorld = () => ({
+    ...WORLD,
+    agents: WORLD.agents.map((a) => (a.name === "codys-macbook-air" ? { ...a, lan: { sameNetwork: true, rttMs: 2.2 } } : a))
+  });
+
+  it("uses the measured round trip, not the coordinator estimate", () => {
+    const rows = rowsFor(lanWorld());
+    const air = rows.find((r) => r.agent.name === "codys-macbook-air")!;
+    expect(air.estimateMs).toBe(2.2);
+    expect(air.sameNetwork).toBe(true);
+    expect(rows.filter((r) => r.sameNetwork)).toHaveLength(1);
+  });
+
+  it("only your own machines count, and only when the probe answered", () => {
+    const other = WORLD.agents.find((a) => !a.mine)!;
+    expect(lanMs({ ...other, lan: { sameNetwork: true, rttMs: 1 } })).toBeNull();
+    const air = WORLD.agents.find((a) => a.name === "codys-macbook-air")!;
+    expect(lanMs({ ...air, lan: { sameNetwork: false, rttMs: null } })).toBeNull();
+  });
+
+  it("nearest to you: the LAN machine first, labelled same network; others stay masked", () => {
+    const rows = rowsFor(lanWorld());
+    const near = nearestToYou(rows, WORLD.selfAgentId);
+    expect(near[0].agent.name).toBe("codys-macbook-air");
+    expect(nearestText(near[0], WORLD.selfAgentId)).toBe("codys-macbook-air (same network)");
+    expect(formatMs(near[0].estimateMs)).toBe("2 ms");
+    for (const r of near.slice(1)) {
+      expect(r.agent.mine).toBe(false);
+      expect(nearestText(r)).toMatch(/^[a-z]{3}-•••[0-9a-f]{4}/);
+    }
+    // Without LAN facts it is the old answer: other people's machines by the estimate.
+    expect(nearestToYou(rowsFor(WORLD), WORLD.selfAgentId).map((r) => r.agent.id)).toEqual(nearestPeers(rowsFor(WORLD)).map((r) => r.agent.id));
+  });
+
+  it("this computer is never its own nearest", () => {
+    const w = { ...WORLD, agents: WORLD.agents.map((a) => (a.mine ? { ...a, lan: { sameNetwork: true, rttMs: 0.1 } } : a)) };
+    expect(nearestToYou(rowsFor(w), WORLD.selfAgentId)[0].agent.name).toBe("codys-macbook-air");
+  });
+
+  it("graph: LAN machines sit beside You, nearer for a shorter round trip", () => {
+    const w = lanWorld();
+    const layout = worldLayout(w, rowsFor(w));
+    const node = layout.agents.find((n) => n.row.agent.name === "codys-macbook-air")!;
+    expect(node.lan).toBe(true);
+    expect(node.y).toBe(layout.you!.y);
+    expect(Math.abs(node.x - layout.you!.x)).toBeCloseTo(lanDistance(2.2), 1);
+    expect(lanDistance(1)).toBeLessThan(lanDistance(15));
+    expect(layout.agents).toHaveLength(w.agents.length);
+  });
+
+  it("formats sub-millisecond round trips", () => {
+    expect(formatMs(0.4)).toBe("<1 ms");
   });
 });

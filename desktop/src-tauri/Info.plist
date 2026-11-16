@@ -6,5 +6,9 @@
        Without this, macOS stops any process in the app that touches Bluetooth. -->
   <key>NSBluetoothAlwaysUsageDescription</key>
   <string>EdgeCoder uses Bluetooth to find your other EdgeCoder machines nearby and share compute with them when there is no internet.</string>
+  <!-- The Network page pings your own EdgeCoder machines on the same local network (ICMP echo, no
+       ports opened) to show their real round trip. macOS asks once before an app reaches the LAN. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>EdgeCoder measures how close your own EdgeCoder machines on this network are, so it can show them and prefer the nearest one. It never contacts other people's devices.</string>
 </dict>
 </plist>

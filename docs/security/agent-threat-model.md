@@ -78,6 +78,7 @@ Listeners on an agent install:
 | Listener | Bind | Auth |
 |---|---|---|
 | Agent mesh HTTP server (random port) | `AGENT_MESH_HOST`: 127.0.0.1 by default, including in the Docker image; set 0.0.0.0 to opt in to LAN gossip | `/identity` open. `/mesh/ingest` accepts only messages from trusted peers (the verified coordinator and the peers it listed), signed by the key on file; an operator-configured token is also checked if set. `/mesh/peers` and `/mesh/register-peer` need an operator-configured token. |
+| (none for LAN proximity) | — | The Network page's "same network" round trips are ICMP echoes from the owner's own computer to the owner's own machines; nothing new listens. See `lan-proximity.md`. |
 | Local forwarder (`LOCAL_FORWARD_PORT`) | 127.0.0.1 | IDE token; browser (Origin) requests refused |
 | IDE provider 4304 | 127.0.0.1 unless `IDE_PROVIDER_HOST` (then a token is required) | token, CORS, Host allowlist |
 | All-in-one / desktop 4301, 4302, 4303 | `LISTEN_HOST` (127.0.0.1 in the desktop app) | coordinator global hook, `INFERENCE_AUTH_TOKEN`, `ADMIN_API_TOKEN` |
