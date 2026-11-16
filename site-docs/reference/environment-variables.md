@@ -75,6 +75,23 @@ Consolidated reference for all environment controls. The primary config file on 
 | `LAUNCH_MAX_BALANCE_SATS` | `200000` | Invite mode only: a purchase may not bring the account's cSats (balance plus open invoices plus the new one) above this. Earnings are not capped. `0` = no cap. |
 | `LAUNCH_MAX_PAYOUT_SATS_PER_DAY` | `50000` | Invite mode only: layered under `PAYOUT_MAX_ACCOUNT_DAILY_SATS` (the lower applies) for every account's withdrawals and automatic payouts, the fee pool's included. `0` = no extra cap. |
 
+### Direct payments (coordinator, prototype; none set on live coordinators)
+
+Hybrid payments, docs/design/noncustodial-payments.md. The prepaid cSats wallet stays the default for spot compute.
+
+| Variable | Default | Description |
+|---|---|---|
+| `PAYMENTS_PREPAID` | on | The closed-loop prepaid cSats wallet (Buy cSats, reserve and settle per call). |
+| `PAYMENTS_DIRECT_RESERVATIONS` | off (on under `NODE_ENV=test`) | Reservations, blocks and server commitments paid buyer → host directly (Lightning, on-chain BTC, Zcash). |
+| `PAYMENTS_NWC` | off | Optional pay-as-you-go from the buyer's own wallet over Nostr Wallet Connect (a tally settled to hosts). |
+| `SETTLE_MIN_SATS`, `MAX_UNSETTLED_SATS`, `SETTLE_INTERVAL_MS`, `SETTLE_MAX_FAILURES` | 200, 500, 3600000, 3 | NWC tally: settle a (buyer, payee) pair at this many sats or after this interval; a buyer's unsettled cap; failures before the buyer is paused. |
+| `NONCUSTODIAL_SECRET_KEY` | unset (per-process key outside production) | 32 bytes (hex or base64) sealing NWC connection strings at rest (AES-256-GCM). Required in production when a direct path is on. |
+| `EDGECODER_FEE_LIGHTNING_ADDRESS`, `EDGECODER_FEE_BTC_ADDRESS`, `EDGECODER_FEE_ZCASH_ADDRESS`, `EDGECODER_FEE_ZCASH_VIEWING_KEY` | unset | EdgeCoder's own receiving addresses for the 5 % fee on direct payments (and its Zcash incoming viewing key, read-only). |
+| `DIRECT_PAY_RECEIPT_KEY_PEM` | generated per process | Ed25519 private key (PEM) signing settlement receipts. |
+| `DIRECT_PAY_ESPLORA_URL`, `DIRECT_PAY_ONCHAIN_MIN_CONF` | mutinynet.com/api on signet, mempool.space on mainnet; 1 | Esplora API for on-chain txid + output checks, and the confirmations required. |
+| `DIRECT_PAY_DEV_HTTP`, `DIRECT_PAY_ALLOW_UNCOMMITTED` | unset | Test harness only, refused on mainnet: allow `http://127.0.0.1` LNURL endpoints, and invoices without the LNURL metadata hash (faucet-minted). |
+| `ZCASH_NETWORK`, `ZCASHD_RPC_URL`, `ZCASHD_RPC_USER`, `ZCASHD_RPC_PASSWORD`, `ZCASH_MIN_CONFIRMATIONS`, `ZEC_USD` | `test`, unset, unset, unset, 3, unset | Zcash viewing-key verifier: a zcashd-compatible JSON-RPC wallet node, confirmations, and the ZEC/USD price used for quotes (no ZEC oracle yet). |
+
 ### On-chain Bitcoin (coordinator, LND only)
 
 Fund with Bitcoin (deposit addresses from the coordinator's LND wallet, credited after confirmations) and batched on-chain payouts (LND `SendMany`). See docs/economy-math.md "On-chain" and docs/going-to-mainnet.md. The LND macaroon also needs `address:write`, `onchain:read` and `onchain:write`.

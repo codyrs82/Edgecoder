@@ -119,6 +119,17 @@ in, 130 out) on a 30B model is about 2.8 cSats.
 - During the invite launch, purchases have a daily cap, shown in the Wallet.
 - Bots have a daily budget, so a bot never spends more than you allow.
 
+The step offers three choices, by what you want to do:
+
+- **Buy cSats for on-demand compute** (the default): prepaid credit for EdgeCoder compute only,
+  drawn down per call. It can't be cashed out; failed work is credited back.
+- **Connect a wallet to pay hosts directly for reservations**: reservations, blocks of time and
+  whole-server commitments are paid from your own wallet straight to the host (Lightning, Bitcoin
+  on-chain or Zcash), plus EdgeCoder's 5 % to EdgeCoder's own address. Shown when the coordinator
+  turns direct payments on ([design](../design/noncustodial-payments.md)).
+- **Hosting? Set your payout addresses**: a Lightning address, a Bitcoin address or xpub, and a
+  Zcash address with its incoming viewing key, so buyers can pay you directly.
+
 Skip this step if you only use your own machines.
 
 ## 7. Connect your tools

@@ -9,7 +9,7 @@
   import { open as openUrl } from "@tauri-apps/plugin-shell";
   import { Zap, Copy, Check, Clock, ExternalLink, Bitcoin, Coins, TriangleAlert, Wallet } from "@lucide/svelte";
   import {
-    computeOverview, computeBuy, computeIntent, portalWebUrl, getWalletOverview, withdrawToInvoice,
+    computeOverview, computeBuy, computeIntent, portalWebUrl, getWalletOverview, withdrawToInvoice, getPaymentPaths, type PaymentPaths,
     getPayoutDestination, savePayoutDestination, getWalletSendRequests, getOnchainAddress, getOnchainDeposits,
     type ComputeOverview, type WalletOverview, type PayoutDestinationView, type WalletSendRequest, type OnchainFunding, type OnchainPolicyView,
   } from "../lib/api";
@@ -119,7 +119,10 @@
       destError = (e as Error).message;
     }
   }
+  // Direct (non-custodial) payment paths: shown only when the coordinator turns them on.
+  let paths = $state<PaymentPaths>({ prepaid: true, directReservations: false, nwc: false });
   onMount(() => {
+    void getPaymentPaths().then((p) => (paths = p));
     void load();
     void loadPayoutDestination();
     tick = setInterval(() => (now = Date.now()), 1000);
@@ -275,7 +278,7 @@
 
     <div class="wl-grid">
       <section class="wl-card wl-balance" aria-labelledby="wl-balance-label">
-        <div class="wl-eyebrow" id="wl-balance-label"><Wallet size={14} /> Balance</div>
+        <div class="wl-eyebrow" id="wl-balance-label"><Wallet size={14} /> On-demand balance (cSats)</div>
         <div class="wl-amount"><span class="big">{balance === null ? "–" : fmtNum(balance)}</span><span class="unit">cSats</span></div>
         <div class="wl-sub">{balance !== null && btcUsd ? `${fmtUsd(balance, btcUsd)} · BTC $${fmtSats(btcUsd)}${wallet?.rateStale ? " (rate is stale)" : ""}` : " "}</div>
         <div class="wl-mini">
@@ -432,6 +435,22 @@
         <span><i class="net"></i>{pct(netFeeBps)} kept by EdgeCoder (the network fee)</span>
       </div>
     </section>
+
+    {#if paths.directReservations || paths.nwc}
+      <h2 class="wl-section" id="wallet-direct">Reservations &amp; commitments (pay directly)</h2>
+      <p class="wl-faint wl-lead">Reserved machines, blocks of time and whole-server commitments are paid from your own wallet straight to the host (Lightning, Bitcoin on-chain or Zcash), plus {pct(netFeeBps)} to EdgeCoder's own address. EdgeCoder never holds this money.</p>
+      <section class="wl-card" aria-labelledby="wl-direct-h">
+        <h2 class="wl-h" id="wl-direct-h">Connect your wallet · Reserve a host</h2>
+        <p class="wl-faint">Connect a wallet with Nostr Wallet Connect, then reserve a host and pay it directly.</p>
+        <button type="button" onclick={() => openUrl(portalWebUrl("/portal/settings/plan#reservations-direct"))}><ExternalLink size={14} /> Open in the web wallet</button>
+      </section>
+      <h2 class="wl-section" id="wallet-payout-addresses">Payout addresses</h2>
+      <section class="wl-card" aria-labelledby="wl-payaddr-h">
+        <h2 class="wl-h" id="wl-payaddr-h">Hosting? Where buyers pay you</h2>
+        <p class="wl-faint">A Lightning address; a Bitcoin address or xpub; a Zcash address with its incoming viewing key (read-only: it confirms payments, it can't spend).</p>
+        <button type="button" onclick={() => openUrl(portalWebUrl("/portal/settings/plan#payout-addresses"))}><ExternalLink size={14} /> Set payout addresses</button>
+      </section>
+    {/if}
 
     <h2 class="wl-section" id="wallet-earnings">Earnings &amp; withdrawals</h2>
     <p class="wl-faint wl-lead">What your machines earned: {pct(10000 - netFeeBps)} of what their work was paid (EdgeCoder keeps {pct(netFeeBps)}). Purchased cSats can be spent but not withdrawn.</p>

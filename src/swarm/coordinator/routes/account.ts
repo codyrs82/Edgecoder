@@ -35,6 +35,7 @@ import { agentCapabilities, activeBlacklistRecord } from "../agent-state.js";
 import { callerAccount } from "../auth.js";
 import { effectiveHardware, hardwareVerifier, NETWORK_FEE_BPS, classRefMsatPerCredit } from "../economy.js";
 import { ownerVerificationView } from "../../hardware-verification.js";
+import { directQuoteHolds } from "../direct-holds.js";
 
 // ── Reserved capacity (src/economy/reservations.ts) ──
 
@@ -51,11 +52,12 @@ const reserveSchema = z.object({
 const reservingAgents = new Set<string>();
 
 /** Agents that could be reserved now for an account: online, of the class, not held, not its own. */
-async function reservableAgents(accountId: string, cls: ComputeClassId, model?: string, minVramGb?: number) {
+export async function reservableAgents(accountId: string, cls: ComputeClassId, model?: string, minVramGb?: number) {
   const now = Date.now();
+  const quoted = directQuoteHolds.agentIds();
   const out: Array<{ agentId: string; ownerAccountId: string; tier?: string; creditsPerSecond: number; vramGb?: number; models: string[] }> = [];
   for (const [id, cap] of agentCapabilities) {
-    if (activeBlacklistRecord(id) || now - cap.lastSeenMs > 60_000 || reservations.isHeld(id, now)) continue;
+    if (activeBlacklistRecord(id) || now - cap.lastSeenMs > 60_000 || reservations.isHeld(id, now) || quoted.has(id)) continue;
     // Not an approved host: its machines work only for their owner (src/portal/host-requests.ts).
     if (cap.hostApproved === false) continue;
     const eff = effectiveHardware(id, cap);
@@ -70,12 +72,12 @@ async function reservableAgents(accountId: string, cls: ComputeClassId, model?: 
   return out.sort((a, b) => a.creditsPerSecond - b.creditsPerSecond || (hardwareVerifier.reliability(b.agentId) ?? 0) - (hardwareVerifier.reliability(a.agentId) ?? 0));
 }
 
-function publicReservation(r: Reservation) {
+export function publicReservation(r: Reservation) {
   const cSats = (msat: number | undefined) => (msat === undefined ? undefined : msatToCSats(msat));
   return {
     id: r.id, computeClass: r.computeClass, tier: r.tier, model: r.model, agentId: r.agentId, startMs: r.startMs, endMs: r.endMs,
     status: r.status, endReason: r.endReason, cSatsPerSecond: cSats(r.ratePerSecondMsat), prepaidCSats: cSats(r.prepaidMsat),
-    usedCSats: cSats(r.usedMsat), refundCSats: cSats(r.refundMsat), models: [...(agentCapabilities.get(r.agentId)?.localModelCatalog ?? [])].filter((m) => m && m !== "edgecoder-default"),
+    usedCSats: cSats(r.usedMsat), refundCSats: cSats(r.refundMsat), ...(r.direct ? { paidDirect: r.direct.rail, receiptIds: r.direct.receiptIds } : {}), models: [...(agentCapabilities.get(r.agentId)?.localModelCatalog ?? [])].filter((m) => m && m !== "edgecoder-default"),
   };
 }
 
@@ -91,6 +93,12 @@ async function endReservation(id: string, reason: ReservationEndReason, atMs = D
     return undefined;
   }
   if (!r) return undefined;
+  if (r.direct) {
+    // Paid buyer → host directly: no cSats move. Unused time after a host went offline is the
+    // host's to refund (refundMsat is shown to both sides).
+    app.log.info({ reservationId: r.id, reason, rail: r.direct.rail, usedMsat: r.usedMsat, hostOwesRefundMsat: reason === "agent_offline" ? r.refundMsat : 0 }, "direct_reservation_ended");
+    return r;
+  }
   const used = r.usedMsat ?? 0;
   const { agentMsat, feeMsat } = splitJobCost(used, NETWORK_FEE_BPS);
   const heldSeconds = Math.max(0, ((r.endedAtMs ?? atMs) - r.startMs) / 1000);

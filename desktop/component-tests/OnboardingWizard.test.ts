@@ -136,7 +136,7 @@ describe("Getting started (desktop wizard)", () => {
     const p = props();
     render(OnboardingWizard, p);
     await waitFor(() => expect(heading().textContent).toBe("Fund your account"));
-    await fireEvent.click(screen.getByRole("button", { name: "Buy cSats" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Buy cSats for on-demand compute" }));
     expect(p.onClose).toHaveBeenCalled();
     expect(p.onOpenSettings).toHaveBeenCalledWith("plan");
 

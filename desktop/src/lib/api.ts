@@ -975,6 +975,23 @@ export async function getWalletOverview(): Promise<WalletOverview> {
   return res.json();
 }
 
+/** Which payment paths the coordinator has on (docs/design/noncustodial-payments.md); all-off when unknown. */
+export interface PaymentPaths {
+  prepaid: boolean;
+  directReservations: boolean;
+  nwc: boolean;
+}
+export async function getPaymentPaths(): Promise<PaymentPaths> {
+  try {
+    const res = await fetch(`${portalBase()}/portal/api/payments/paths`, { headers: { ...authHeaders() }, credentials: "include" });
+    if (!res.ok) return { prepaid: true, directReservations: false, nwc: false };
+    const j = (await res.json()) as Partial<PaymentPaths>;
+    return { prepaid: j.prepaid !== false, directReservations: j.directReservations === true, nwc: j.nwc === true };
+  } catch {
+    return { prepaid: true, directReservations: false, nwc: false };
+  }
+}
+
 export type WithdrawResult =
   | { status: "paid"; amountMsat: number }
   | { status: "verification_required"; challengeId: string; amountMsat: number; detail: string }

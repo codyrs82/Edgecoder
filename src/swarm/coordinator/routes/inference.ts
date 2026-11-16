@@ -4,6 +4,7 @@
 /**
  * Inference routes: model list, submit, chunk upload and streaming.
  */
+import { nwcSpotBuyer, nwcTally } from "../direct-payments.js";
 import { z } from "zod";
 import type { ResourceClass, Subtask } from "../../../common/types.js";
 import { DuplicateDebitError, rewardAccountForAgent, spendCredits } from "../../../credits/store.js";
@@ -566,7 +567,13 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const maxCSats = cleanHints(body.routing).maxCSats ?? routed?.job.maxCSats;
     const sized = billed ? inferenceCallReserve({ model: body.model, taskClass, timeoutMs: body.timeoutMs, inputBytes: Buffer.byteLength(input, "utf8"), maxTokens, ...(maxCSats !== undefined ? { maxCSats } : {}) }) : undefined;
     const reserve = sized?.reserveMsat ?? 0;
-    if (reserve > 0) {
+    // Optional "pay from your own wallet" (PAYMENTS_NWC): no debit; the reserve bounds the call's
+    // cost against the buyer's exposure cap (unsettled tallies), and the cost goes on the tally.
+    const nwcSpot = billed && nwcSpotBuyer(accountId);
+    if (nwcSpot) {
+      const admit = nwcTally.admit(accountId, reserve);
+      if (!admit.ok) return reply.code(402).send({ error: admit.error === "settle_first" ? "settle_first" : admit.error === "paused" ? "payments_paused" : "no_wallet", ...(admit.reason ? { reason: admit.reason } : {}), ...(admit.unsettledSats !== undefined ? { unsettledCSats: admit.unsettledSats, capCSats: admit.capSats } : {}) });
+    } else if (reserve > 0) {
       // Durable billing (stress finding 2): a restart refunds what this call did not use.
       await pgStore?.insertTaskBilling({ taskId: body.taskId, coordinatorId: identity.peerId, accountId, kind: "inference", perSubtaskReserveMsat: reserve, createdAtMs: Date.now() })
         .catch((err) => req.log.warn({ err, taskId: body.taskId }, "task_billing_persist_failed"));
@@ -580,7 +587,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         return reply.code(500).send({ error: "credit_debit_failed" });
       }
     }
-    taskBilling.set(body.taskId, { accountId, reservedMsat: reserve, perSubtaskReserveMsat: reserve, costMsat: 0, refunded: false, submittedAtMs: Date.now() });
+    taskBilling.set(body.taskId, { accountId, reservedMsat: reserve, perSubtaskReserveMsat: reserve, costMsat: 0, refunded: false, submittedAtMs: Date.now(), ...(nwcSpot ? { nwc: true } : {}) });
     usagePending.set(body.taskId, {
       id: body.taskId, accountId, atMs: Date.now(), kind: "inference", placement: reservationId ? "reserved" : onlyAccountId ? "mine" : "network",
       model: body.model, ...(taskClass !== "any" ? { computeClass: taskClass } : {}), ok: false, durationMs: 0, costMsat: 0, ...(body.source ? { source: body.source } : {}),

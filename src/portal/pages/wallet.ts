@@ -17,6 +17,7 @@
 import { CSP_NONCE } from "../csp-nonce.js";
 import { icon } from "./design-system.js";
 import { SETTINGS_HELPERS_SCRIPT } from "./settings-shell.js";
+import { WALLET_DIRECT_CONTENT, WALLET_DIRECT_SCRIPT } from "./wallet-direct.js";
 
 /** Styles shared by the Wallet page and the Compute page's price board. */
 export const WALLET_CSS = `
@@ -176,11 +177,11 @@ export const WALLET_CONTENT = `
       <h2 class="set-title">Wallet</h2>
       <span class="net-badge" id="netBadge" title="Which Bitcoin network this coordinator settles on"><span class="dot"></span><span id="netBadgeText">Checking network…</span></span>
     </div>
-    <p class="set-lead">cSats pay for compute on the network. 1 cSat = 1 sat. Buy cSats with Lightning, see what the network keeps, and withdraw what your machines earn.</p>
+    <p class="set-lead">cSats pay for on-demand compute on the network. 1 cSat = 1 sat. Buy cSats with Lightning, see what the network keeps, and withdraw what your machines earn. Purchased cSats are prepaid credit for EdgeCoder compute only: they can't be cashed out.</p>
 
     <div class="wl-grid">
       <div class="wl-card wl-balance" aria-labelledby="balanceLabel">
-        <div class="wl-eyebrow" id="balanceLabel">${icon("wallet", 14)}Balance</div>
+        <div class="wl-eyebrow" id="balanceLabel">${icon("wallet", 14)}On-demand balance (cSats)</div>
         <div class="wl-amount"><span class="big" id="balanceValue"><span class="wl-skel">00,000</span></span><span class="unit">cSats</span></div>
         <div class="wl-sub" id="balanceUsd">&nbsp;</div>
         <div class="wl-mini">
@@ -319,6 +320,7 @@ export const WALLET_CONTENT = `
       <div class="wl-faint u-mt-8">Work on your own machines costs nothing. Failed work is not charged.</div>
     </div>
 
+${WALLET_DIRECT_CONTENT}
     <h2 class="wl-section-title" id="earnings">Earnings &amp; withdrawals</h2>
     <p class="set-lead">What your machines earned: 95 % of what their work was paid (EdgeCoder keeps 5 %). Purchased cSats can be spent but not withdrawn.</p>
     <div class="wl-banner danger hidden" id="payoutPausedBanner" role="alert">${icon("alert", 16)}<span>Withdrawals are paused on this coordinator while it is checked. Your earnings are safe and keep counting; buying cSats still works.</span></div>
@@ -924,6 +926,7 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
     $("payoutDestSaveBtn").addEventListener("click", () => savePayoutDest(false).catch((e) => payoutDestMessage("error", String(e.message || e))));
     $("payoutDestConfirmBtn").addEventListener("click", () => savePayoutDest(true).catch((e) => payoutDestMessage("error", String(e.message || e))));
 
+${WALLET_DIRECT_SCRIPT}
     renderBreakdown();
     if (/[?&]topup=1/.test(location.search)) setTimeout(() => $("addFundsBtn").click(), 50);
     requireAuth().then((me) => {
@@ -931,6 +934,7 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
       loadOverview().then(loadIntents).catch(() => undefined);
       loadPayoutDestination().catch(() => undefined);
       loadSendRequests().catch(() => undefined);
+      loadDirect().catch(() => undefined);
     }).catch(() => undefined);
     // Keep the balance and earnings fresh while the page is open (not while an invoice is polling).
     setInterval(() => { if (!state.poll && !document.hidden) loadOverview().catch(() => undefined); }, 60000);
