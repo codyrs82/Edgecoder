@@ -36,7 +36,7 @@ import { fetchAccountBalances, startUnverifiedPurge } from "./account-admin.js";
 import { registerWalletApiRoutes } from "./routes/wallet-api.js";
 import { registerConversationRoutes } from "./routes/conversations.js";
 import { registerLegalRoutes } from "./routes/legal.js";
-import { registerEscalationRoutes } from "./routes/escalations.js";
+import { registerEscalationRoutes } from "./routes/escalations.js"; import { registerOnboardingRoutes } from "./routes/onboarding.js";
 // Kept for existing importers (tests/portal/download-page.test.ts).
 export { detectOS } from "./pages/account.js";
 import cors from "@fastify/cors";
@@ -950,7 +950,7 @@ registerNetworkAdminRoutes(app, {
 const allowlistedCoordinatorUrls = async () =>
   [...COORDINATOR_DISCOVERY_URLS, ...(await controlPlaneCoordinatorUrls())].filter((url) => coordinatorUrlAllowed(url, COORDINATOR_URL_POLICY));
 const accountBalanceDeps = { coordinatorUrls: allowlistedCoordinatorUrls, serviceToken: PORTAL_SERVICE_TOKEN, timeoutMs: EXTERNAL_HTTP_TIMEOUT_MS };
-registerAdminUserRoutes(app, { store, getCurrentUser, buildAccessContext, balances: accountBalanceDeps });
+registerAdminUserRoutes(app, { store, getCurrentUser, buildAccessContext, balances: accountBalanceDeps }); registerOnboardingRoutes(app, { store, getCurrentUser, balances: accountBalanceDeps, hostApproved: hostApprovedFor }); // Getting started (/portal/welcome, the desktop wizard)
 // PORTAL_PURGE_UNVERIFIED_AFTER_DAYS (unset = off): the daily cleanup, under the same checks.
 startUnverifiedPurge(
   store

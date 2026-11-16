@@ -346,6 +346,43 @@ export class PortalStore {
     await this.migrateAccountAdmin();
     await this.migrateLegalAcceptance();
     await this.migrateSecurityResearch();
+    await this.migrateOnboarding();
+  }
+
+  /**
+   * Getting started (src/common/onboarding.ts): one row per account with the wizard's progress,
+   * stored as the normalised JSON state.
+   */
+  async migrateOnboarding(): Promise<void> {
+    await this.pool.query(
+      `CREATE TABLE IF NOT EXISTS portal_onboarding (
+         user_id TEXT PRIMARY KEY, state_json TEXT NOT NULL, updated_at_ms BIGINT NOT NULL)`
+    );
+  }
+
+  async getOnboardingState(userId: string): Promise<unknown | null> {
+    const r = await this.pool.query(`SELECT state_json FROM portal_onboarding WHERE user_id = $1`, [userId]);
+    const raw = r.rows[0]?.state_json;
+    if (typeof raw !== "string") return null;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  }
+
+  async saveOnboardingState(userId: string, state: unknown, nowMs: number): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO portal_onboarding (user_id, state_json, updated_at_ms) VALUES ($1, $2, $3)
+       ON CONFLICT (user_id) DO UPDATE SET state_json = EXCLUDED.state_json, updated_at_ms = EXCLUDED.updated_at_ms`,
+      [userId, JSON.stringify(state), nowMs]
+    );
+  }
+
+  /** Whether a host request was sent from this email (any status). */
+  async hasHostRequestFrom(email: string): Promise<boolean> {
+    const r = await this.pool.query(`SELECT 1 FROM portal_host_requests WHERE lower(email) = lower($1) LIMIT 1`, [email]);
+    return r.rows.length > 0;
   }
 
   /**

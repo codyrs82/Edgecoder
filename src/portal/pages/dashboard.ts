@@ -380,6 +380,16 @@ app.get("/portal/dashboard", async (_req, reply) => {
         showToast(message, true);
       }
     }
+    // Getting started: a new account (or one with no machines and no funds) lands in the guide once per browser session.
+    (async () => {
+      await requireAuth();
+      let seen = null;
+      try { seen = sessionStorage.getItem("edgecoder-welcome-offered"); } catch {}
+      if (seen) return;
+      const o = await api("/portal/api/onboarding", { method: "GET", headers: {} });
+      try { sessionStorage.setItem("edgecoder-welcome-offered", "1"); } catch {}
+      if (o && o.show) window.location.href = o.state && o.state.current ? "/portal/welcome/" + encodeURIComponent(o.state.current) : "/portal/welcome";
+    })().catch(() => undefined);
     (async () => {
       const me = await requireAuth();
       const roles = (me.user || {}).roles || {};

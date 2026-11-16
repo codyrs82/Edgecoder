@@ -38,11 +38,16 @@
   import BotForm from "./components/BotForm.svelte";
   import { bots, activeBotId, pollBots, refreshBots } from "./lib/bots-store";
   import type { Bot as BotRecord } from "./lib/bots";
+  import OnboardingWizard from "./components/OnboardingWizard.svelte";
+  import { stepFromRoute, type StepId } from "./lib/onboarding";
+  import { guideToOpen } from "./lib/onboarding-launch";
+  import { getOnboarding, saveOnboarding } from "./lib/api";
 
   let activeTab = $state<"chat" | "editor">("chat");
   let settingsOpen = $state(false);
   let settingsSection: string | undefined = $state(undefined);
   function openSettings(section?: string) {
+    if (section === "guide") return openGuide();
     settingsSection = section;
     settingsOpen = true;
   }
@@ -51,6 +56,67 @@
     user = null;
     settingsOpen = false;
   }
+  // Getting started (components/OnboardingWizard.svelte): opens by itself on first sign-in (the
+  // portal says when), from #/welcome/<step>, from Settings → Getting started and the profile menu.
+  let guideOpen = $state(false);
+  let guideStep = $state<StepId | null>(null);
+  /** Asked to open by itself; waits until the first-run local setup screen is gone. */
+  let guidePending = $state<StepId | "saved" | null>(null);
+  function openGuide(step: StepId | null = null) {
+    settingsOpen = false;
+    guideStep = step;
+    guideOpen = true;
+  }
+  $effect(() => {
+    if (!user) return;
+    let ended = false;
+    backendReady.then(async () => {
+      const open = await guideToOpen(location.hash, getOnboarding);
+      if (!ended && open) guidePending = open;
+    });
+    const onHash = () => {
+      const id = stepFromRoute(location.hash);
+      if (id && !guideOpen) openGuide(id);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => {
+      ended = true;
+      window.removeEventListener("hashchange", onHash);
+    };
+  });
+  $effect(() => {
+    if (guidePending && !showComputeSetup && !guideOpen) {
+      const step = guidePending === "saved" ? null : guidePending;
+      guidePending = null;
+      openGuide(step);
+    }
+  });
+  // The guide's "first task": the first chat reply that finishes after sign-in is reported once.
+  let sawStreaming = false;
+  let firstTaskSent = false;
+  $effect(() => {
+    if (chatStreaming) sawStreaming = true;
+    else if (sawStreaming && user && !firstTaskSent) {
+      firstTaskSent = true;
+      void saveOnboarding({ firstTask: true }).catch(() => (firstTaskSent = false));
+    }
+  });
+  const TRY_PROMPT = "In three short bullet points, what can EdgeCoder do for me?";
+  async function runGuideAction(action: string) {
+    if (action === "try-chat") {
+      activeBotId.set(null);
+      activeTab = "chat";
+      chatView?.newChat();
+      await tick();
+      void handleSend(TRY_PROMPT);
+    } else if (action === "open-code") {
+      activeTab = "editor";
+    } else if (action === "new-bot") {
+      activeTab = "chat";
+      botForm = "new";
+    }
+  }
+
   let historyOpen = $state(true);
   let chatView: ChatView | undefined = $state(undefined);
   let editorView: EditorView | undefined = $state(undefined);
@@ -627,6 +693,16 @@
         initialSection={settingsSection}
         onUserChange={(u) => (user = u)}
         onLogout={logout}
+        onOpenGuide={() => openGuide()}
+      />
+    {/if}
+
+    {#if guideOpen}
+      <OnboardingWizard
+        initialStep={guideStep}
+        onClose={() => (guideOpen = false)}
+        onOpenSettings={(s) => openSettings(s)}
+        onRun={(a) => void runGuideAction(a)}
       />
     {/if}
 

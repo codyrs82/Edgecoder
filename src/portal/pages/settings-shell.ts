@@ -13,12 +13,13 @@ import { CSP_NONCE } from "../csp-nonce.js";
  * the account and the economy. General, Profile, Usage and Connect your tools live on
  * /portal/settings (one shown at a time, chosen by #hash); Plan & usage (the wallet), Compute (the
  * market and reservations), Nodes, Install agent and Admin have their own URLs under
- * /portal/settings/; Network (settings-world.ts) is the world view for everyone. Admin is revealed client-side for system admins only; its APIs enforce
+ * /portal/settings/; Getting started is the guide at /portal/welcome (welcome.ts); Network (settings-world.ts) is the world view for everyone. Admin is revealed client-side for system admins only; its APIs enforce
  * authorization server-side.
  */
-export type SettingsSection = "general" | "profile" | "plan" | "usage" | "compute" | "tools" | "nodes" | "install" | "admin" | "revenue" | "network" | "world";
+export type SettingsSection = "welcome" | "general" | "profile" | "plan" | "usage" | "compute" | "tools" | "nodes" | "install" | "admin" | "revenue" | "network" | "world";
 
 export const SETTINGS_NAV: Array<{ key: SettingsSection; label: string; icon: string; href: string; adminOnly?: boolean }> = [
+  { key: "welcome", label: "Getting started", icon: "check", href: "/portal/welcome" },
   { key: "general", label: "General", icon: "layers", href: "/portal/settings#general" },
   { key: "profile", label: "Profile", icon: "user", href: "/portal/settings#profile" },
   { key: "plan", label: "Wallet", icon: "wallet", href: "/portal/settings/plan" },

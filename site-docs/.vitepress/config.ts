@@ -25,6 +25,7 @@ export default withMermaid(defineConfig({
         text: "Guide",
         items: [
           { text: "Welcome", link: "/" },
+          { text: "Getting Started", link: "/guide/getting-started" },
           { text: "System Overview and Benefits", link: "/guide/system-overview-benefits" },
           { text: "How EdgeCoder Works", link: "/guide/how-edgecoder-works" },
           { text: "IDE Integration (VS Code, Cursor, Windsurf)", link: "/guide/ide-integration" },

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ArrowLeft, Search, Settings2, UserRound, BarChart3, Cpu, Plug, Boxes, Github, Network, LayoutDashboard, Activity, ListChecks, Wallet, ScrollText } from "@lucide/svelte";
+  import { ArrowLeft, Search, Compass, Settings2, UserRound, BarChart3, Cpu, Plug, Boxes, Github, Network, LayoutDashboard, Activity, ListChecks, Wallet, ScrollText } from "@lucide/svelte";
   import "../styles/settings-page.css";
   import Account from "../pages/Account.svelte";
   import Integrations from "../pages/Integrations.svelte";
@@ -13,6 +13,7 @@
   import Connections from "../pages/Connections.svelte";
   import TaskQueue from "../pages/TaskQueue.svelte";
   import Settings from "../pages/Settings.svelte";
+  import GettingStarted from "../pages/GettingStarted.svelte";
   import LogViewer from "../pages/LogViewer.svelte";
   import ProfileMenu from "./ProfileMenu.svelte";
   import type { AuthUser } from "../lib/api";
@@ -27,11 +28,14 @@
     /** Section to open on (profile, plan, compute, connect, ...); General when unset. */
     initialSection?: string;
     onUserChange?: (user: AuthUser) => void;
+    /** Opens the Getting started guide (Settings closes first). */
+    onOpenGuide?: () => void;
   }
-  let { onClose, user, onLogout, initialSection, onUserChange }: Props = $props();
+  let { onClose, user, onLogout, initialSection, onUserChange, onOpenGuide }: Props = $props();
 
   // Grouped like Cursor's settings; keywords make the search find a section by what's in it.
   const sections = [
+    { id: "getting-started", label: "Getting started", icon: Compass, group: 0, keywords: "guide welcome setup onboarding tutorial start wizard" },
     { id: "general", label: "General", icon: Settings2, group: 0, keywords: "preferences theme appearance editor network bluetooth ble mesh startup legal terms privacy acceptable use host agreement" },
     { id: "profile", label: "Profile", icon: UserRound, group: 0, keywords: "account name email sign out" },
     { id: "plan", label: "Wallet", icon: Wallet, group: 1, keywords: "csats buy add funds top up balance lightning invoice billing activity sats earnings withdraw payout" },
@@ -61,7 +65,13 @@
       : sections,
   );
 
+  function openGuide() {
+    onClose();
+    onOpenGuide?.();
+  }
+
   function go(id?: string) {
+    if (id === "guide") return openGuide();
     activeSectionId = id && sections.some((s) => s.id === id) ? id : LEGACY[id ?? ""] ?? "general";
   }
 </script>
@@ -119,7 +129,9 @@
 </Dialog>
 
 {#snippet page()}
-    {#if activeSectionId === "profile"}
+    {#if activeSectionId === "getting-started"}
+      <GettingStarted onOpenGuide={openGuide} />
+    {:else if activeSectionId === "profile"}
       <Account {user} {onLogout} {onUserChange} />
     {:else if activeSectionId === "plan"}
       <PlanUsage />

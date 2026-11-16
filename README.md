@@ -54,6 +54,10 @@ Lightning (on request or automatically to a Lightning address); on-chain funding
 on-chain payouts are behind `ONCHAIN_ENABLED`. Value sits with the coordinator between a purchase
 and a payout (custodial).
 
+New here? [docs/getting-started.md](docs/getting-started.md) takes you from zero to taking part:
+your machines, models, funds and tools (the same steps as the Getting started guide in the app
+and at `/portal/welcome`).
+
 To use compute from the desktop app or point Claude Code, Cursor and other tools at it, see
 [docs/using-compute.md](docs/using-compute.md). AI agents can sign up and use compute through the
 MCP server ([docs/mcp.md](docs/mcp.md), [packages/mcp-server](packages/mcp-server/README.md)).

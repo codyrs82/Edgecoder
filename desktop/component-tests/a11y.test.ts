@@ -88,6 +88,8 @@ import BotView from "../src/pages/BotView.svelte";
 import EditorView from "../src/pages/EditorView.svelte";
 import DiffModal from "../src/components/DiffModal.svelte";
 import SettingsOverlay from "../src/components/SettingsOverlay.svelte";
+import OnboardingWizard from "../src/components/OnboardingWizard.svelte";
+import GettingStarted from "../src/pages/GettingStarted.svelte";
 import BotForm from "../src/components/BotForm.svelte";
 import QuickOpen from "../src/components/QuickOpen.svelte";
 import ComputePicker from "../src/components/ComputePicker.svelte";
@@ -158,6 +160,7 @@ const noop = () => {};
 const PAGES: Case[] = [
   ["Login", "Sign In", LoginScreen, { onLogin: noop }],
   ["Chat", "What would you like to build?", ChatView, {}],
+  ["Settings: Getting started", SECTION_SHOWS["Getting started"], GettingStarted, { onOpenGuide: noop }],
   ["Settings: General", SECTION_SHOWS["General"], Settings, {}],
   ["Settings: Profile", SECTION_SHOWS["Profile"], Account, { user: USER, onLogout: noop }],
   ["Settings: Wallet", SECTION_SHOWS["Wallet"], PlanUsage, {}],
@@ -180,6 +183,7 @@ const PAGES: Case[] = [
 
 const OVERLAYS: Case[] = [
   ["Settings dialog", SECTION_SHOWS["General"], SettingsOverlay, { user: USER, onClose: noop, onLogout: noop }],
+  ["Getting started guide", "Choose models and where they run", OnboardingWizard, { onClose: noop, onOpenSettings: noop, onRun: noop }],
   ["Bot form", "New bot", BotForm, { onClose: noop, onSaved: noop }],
   ["Quick open", "Type to search the project", QuickOpen, { onOpen: noop, onClose: noop }],
   ["Diff", "Undo this file", DiffModal, { path: "src/app.ts", before: "let a = 1;\n", after: "let a = 2;\n", onClose: noop, onUndo: noop }],
