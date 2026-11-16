@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { botCompute, botInitial, botStatusLine, readableSummary, botTitle, budgetText, computeText, failureNotice, foldBotReply, folderName, formatCSats, groupsOf, relativeTime, scheduleText, statusChip, toolsFor, type Bot } from "../src/lib/bots";
+import { autoStatus, checksIn, routineText, botCompute, botInitial, botStatusLine, readableSummary, botTitle, budgetText, computeText, failureNotice, foldBotReply, folderName, formatCSats, groupsOf, relativeTime, scheduleText, statusChip, toolsFor, type Bot } from "../src/lib/bots";
 
 describe("bot header helpers", () => {
   it("status chip, folder name and compute text", () => {
@@ -68,12 +68,40 @@ describe("bots helpers", () => {
     expect(botStatusLine(bot({ lastRun }))).toBe("Fixed 2 tests.");
     expect(botStatusLine(bot({ status: "paused", lastRun }))).toBe("Paused · Fixed 2 tests.");
     expect(botStatusLine(bot({ nextRunAtMs: now + 30 * 60_000 }), now)).toBe("First run in 30 min");
-    expect(botStatusLine(bot())).toBe("Message it or press Run now");
+    expect(botStatusLine(bot())).toBe("Message it to get it started");
+    expect(botStatusLine(bot({ nextRun: { kind: "start", atMs: now } }), now)).toBe("Starting work…");
     // Raw tool-call JSON from an older run never shows in the sidebar.
     const jsonRun = { ...lastRun, summary: '{"name": "git_status", "argumen' };
     expect(botStatusLine(bot({ lastRun: jsonRun }))).toBe("Ran git status");
     expect(readableSummary('```json\n[{"name": "read_file"}, {"name": "git_diff"}]')).toBe("Ran read file, git diff");
     expect(readableSummary("{plain braces}")).toBe("{plain braces}");
+  });
+
+  it("the header says what it's doing or when it next works on its own (no Run now)", () => {
+    const now = 1_000_000;
+    expect(autoStatus(bot({ status: "running" }), now)).toEqual({ text: "Working…", tone: "accent" });
+    expect(autoStatus(bot({ status: "running", activity: "Using read_file" }), now).text).toBe("Working: Using read_file");
+    expect(autoStatus(bot({ status: "needs_approval" }), now).text).toBe("Waiting for your approval");
+    expect(autoStatus(bot({ enabled: false, status: "paused", nextRun: { kind: "heartbeat", atMs: now + 60_000 } }), now).text).toBe("Paused");
+    expect(autoStatus(bot({ nextRun: { kind: "heartbeat", atMs: now + 12 * 60_000 } }), now).text).toBe("Next check in 12 min");
+    expect(autoStatus(bot({ nextRun: { kind: "schedule", atMs: now + 2 * 3_600_000 } }), now).text).toBe("Next run in 2 h");
+    expect(autoStatus(bot({ nextRun: { kind: "follow_up", atMs: now + 2 * 60_000 } }), now).text).toBe("Continuing in 2 min");
+    expect(autoStatus(bot({ nextRun: { kind: "start", atMs: now } }), now)).toEqual({ text: "Starting…", tone: "accent" });
+    expect(autoStatus(bot({ held: "run_cap", maxRunsPerDay: 48 }), now)).toEqual({ text: "Daily limit of 48 runs reached · resumes tomorrow", tone: "warn" });
+    expect(autoStatus(bot({ status: "over_budget" }), now).text).toBe("Budget spent · resumes tomorrow");
+    expect(autoStatus(bot(), now).text).toBe("Waiting for a message");
+    expect(autoStatus(bot({ status: "error", nextRun: { kind: "heartbeat", atMs: now + 30 * 60_000 } }), now)).toEqual({ text: "Last run failed · Next check in 30 min", tone: "err" });
+  });
+
+  it("check-ins: a bot with a job and no schedule checks in every 30 minutes by default", () => {
+    expect(checksIn(bot({ role: "Lead Developer" }))).toBe(true);
+    expect(checksIn(bot({ role: "" }))).toBe(false);
+    expect(checksIn(bot({ role: "Dev", heartbeatMinutes: null }))).toBe(false);
+    expect(checksIn(bot({ role: "Dev", schedule: "hourly" }))).toBe(false);
+    expect(routineText(bot({ role: "Dev" }))).toBe("Checks in every 30 minutes");
+    expect(routineText(bot({ role: "Dev", heartbeatMinutes: 120 }))).toBe("Checks in every 2 hours");
+    expect(routineText(bot({ role: "Dev", schedule: "hourly" }))).toBe("Every hour");
+    expect(routineText(bot({ role: "" }))).toBe("Works when you message it");
   });
 
   it("schedule, time and budget text", () => {

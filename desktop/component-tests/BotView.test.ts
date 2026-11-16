@@ -66,26 +66,56 @@ function setup(bot = harry()) {
 }
 
 describe("BotView header", () => {
-  it("is compact: name, status chip, one metadata line, Run now and a menu; no error text in it", () => {
+  it("is compact: name, status chip, one metadata line, what it's doing next and Pause; no Run now; no error text in it", () => {
     setup();
     expect(screen.getByRole("heading", { name: /Harry · Lead Developer/ })).toBeTruthy();
     expect(screen.getByTestId("bot-status-chip").textContent).toBe("Failed");
     const meta = screen.getByTestId("bot-meta").textContent ?? "";
-    expect(meta).toMatch(/Every 30 minutes · next in 30 min/);
+    expect(meta).toMatch(/Every 30 minutes/);
     expect(meta).toMatch(/12 \/ 100 cSats today/);
     expect(meta).toMatch(/Local first/);
     expect(meta).toMatch(/Harry the Engineer/);
     expect(meta).not.toMatch(/CloudStorage/);
     expect(screen.getByTitle("/Users/me/Library/CloudStorage/Dropbox/Agents/Harry the Engineer")).toBeTruthy();
-    expect(screen.getByRole("button", { name: /Run now/ })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /^Pause/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Run now/ })).toBeNull();
+    expect(document.querySelector(".bot-head button.primary")).toBeNull();
+    expect(screen.getByRole("button", { name: "Pause Harry" })).toBeTruthy();
     expect(document.querySelector(".bot-head")?.textContent).not.toMatch(/Not enough cSats/);
   });
 
-  it("puts Pause, Edit and Delete in the overflow menu", async () => {
-    const p = setup();
+  it("shows when it next works on its own", () => {
+    setup(harry({ status: "idle", lastRun: undefined, schedule: "", nextRun: { kind: "heartbeat", atMs: Date.now() + 12 * 60_000 } }));
+    const st = screen.getByTestId("bot-auto-status");
+    expect(st.getAttribute("role")).toBe("status");
+    expect(st.textContent).toBe("Next check in 12 min");
+    expect(screen.getByTestId("bot-meta").textContent).toMatch(/Checks in every 30 minutes/);
+  });
+
+  it("shows Working… and Stop while it runs", () => {
+    setup(harry({ status: "running", lastRun: undefined }));
+    expect(screen.getByTestId("bot-auto-status").textContent).toBe("Working…");
+    expect(screen.getByRole("button", { name: /Stop/ })).toBeTruthy();
+  });
+
+  it("Pause and Resume toggle the bot", async () => {
+    setup(harry({ status: "idle", lastRun: undefined }));
+    await fireEvent.click(screen.getByRole("button", { name: "Pause Harry" }));
+    expect(api.updateBot).toHaveBeenCalledWith("bot_h", { enabled: false });
+    cleanup();
+    setup(harry({ status: "paused", enabled: false, lastRun: undefined }));
+    expect(screen.getByTestId("bot-auto-status").textContent).toBe("Paused");
+    await fireEvent.click(screen.getByRole("button", { name: "Resume Harry" }));
+    expect(api.updateBot).toHaveBeenCalledWith("bot_h", { enabled: true });
+  });
+
+  it("keeps a manual nudge, Edit and Delete in the overflow menu", async () => {
+    const p = setup(harry({ status: "idle", lastRun: undefined }));
+    api.runBot.mockResolvedValue({ started: true });
     await fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    expect(screen.getByRole("menuitem", { name: /Pause schedule/ })).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /Pause/ })).toBeNull();
+    await fireEvent.click(screen.getByRole("menuitem", { name: /Check now/ }));
+    expect(api.runBot).toHaveBeenCalledWith("bot_h");
+    await fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     await fireEvent.click(screen.getByRole("menuitem", { name: /Edit/ }));
     expect(p.onEdit).toHaveBeenCalled();
   });

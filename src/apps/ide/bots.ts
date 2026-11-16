@@ -7,8 +7,19 @@
  * it can append to, the tools it may use, a daily cSat budget and a history of its runs.
  *
  * A run is one agent turn in the bot's project (the same loop as the IDE chat, on the bot's compute policy: Local first by default).
- * Runs start on the bot's schedule, on "Run now", or when you message it; never two at once for
- * one bot. A tool call that needs approval pauses the run ("Needs approval") until you answer.
+ * Bots work on their own; nobody has to press a button:
+ *   - start: a bot with a job (a role or instructions) starts working when it's created or resumed;
+ *   - message: you message it;
+ *   - schedule: its schedule, when it has one; otherwise
+ *   - heartbeat: a check-in every `heartbeatMinutes` (30 by default), backing off (×2 up to 8 h)
+ *     while nothing in its project changes;
+ *   - github: its GitHub triggers;
+ *   - follow_up: a run that ends with more to do (the follow_up tool, or a reply that only says
+ *     what it will do next) gets another run soon, at most MAX_FOLLOW_UPS_IN_A_ROW in a row;
+ *   - manual: "Check now" in the bot's menu.
+ * Never two runs at once for one bot; the runs it starts on its own stop at `maxRunsPerDay` and
+ * all of them at the daily cSat budget; pausing (enabled: false) stops everything but your
+ * messages. A tool call that needs approval pauses the run ("Needs approval") until you answer.
  *
  * A bot can have a Repository (owner/repo): it's cloned or updated into the projects folder on
  * save and before each run, and runs work there. Its Home folder keeps its own notes and files;
@@ -19,19 +30,22 @@
  * conversation.json, and memory.md for bots without a repository (0600, directory 0700).
  */
 
-import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { backendChat, makeToolRunner, runAgentLoop, toolSchemas, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
+import { announcesWork, backendChat, makeToolRunner, runAgentLoop, toolSchemas, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
 import { READ_TOOLS, TOOL_DEFINITIONS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
 import {
   CI_SCOPES, TRIGGER_KINDS, TRIGGER_POLL_MS, ghApiCli, parseGitHubRepo, pollTrigger, untrustedEventBlock,
   type BotGitHubTrigger, type GhApi, type TriggerCursor, type TriggerEvent,
 } from "./bot-triggers.js";
 import { normalizeRemoteUrl } from "./git-setup.js";
+import { gitExecEnv } from "./git-safe.js";
 import { ensureRepo as realEnsureRepo } from "./repo-connect.js";
 import { COMPUTE_POLICIES, FALLBACK_NOTE, routeLabel, type ComputePolicy, type PlanOptions, type Route } from "../../inference-api/auto-route.js";
 import type { ChatBackend } from "../../inference-api/types.js";
@@ -172,6 +186,19 @@ const MAX_TRIGGERS = 10;
 const MAX_QUEUED_EVENTS = 10;
 const ALL_TOOLS = TOOL_DEFINITIONS.map((t) => t.name) as [ToolName, ...ToolName[]];
 export const DEFAULT_BUDGET_CSATS_PER_DAY = 100;
+/** A bot with a job and no schedule checks in this often (minutes) unless set otherwise. */
+export const DEFAULT_HEARTBEAT_MINUTES = 30;
+/** Runs a bot may start on its own a day (start, schedule, check-ins, follow-ups, GitHub). */
+export const DEFAULT_MAX_RUNS_PER_DAY = 48;
+/** Check-ins back off ×2 per quiet check, up to this long between them. */
+export const IDLE_BACKOFF_CAP_MS = 8 * 60 * 60_000;
+const MAX_IDLE_STEPS = 8;
+/** A run that ends with more to do continues this soon. */
+export const FOLLOW_UP_DELAY_MS = 2 * 60_000;
+/** Follow-ups in a row before the bot waits for you (or its next check-in). */
+export const MAX_FOLLOW_UPS_IN_A_ROW = 5;
+/** Runs the bot starts on its own (they count against maxRunsPerDay). */
+export const AUTO_TRIGGERS: readonly BotTrigger[] = ["start", "schedule", "heartbeat", "follow_up", "github"];
 const MAX_RUNS = 50;
 const MAX_MESSAGES = 200;
 const CONTEXT_MESSAGES = 20;
@@ -198,10 +225,16 @@ export interface BotConfig {
   triggers: BotGitHubTrigger[];
   /** At most this many trigger-started runs an hour. */
   maxTriggerRunsPerHour: number;
-  /** false pauses the schedule and the triggers; "Run now" and messages still work. */
+  /** false pauses everything it does on its own (start, schedule, check-ins, triggers, follow-ups); your messages still get answers. */
   enabled: boolean;
-  /** See parseSchedule; "" = no schedule. */
+  /** See parseSchedule; "" = no fixed schedule (the heartbeat runs it). */
   schedule: string;
+  /** Without a schedule: check in this often (minutes, backing off while nothing changes); null = never. */
+  heartbeatMinutes: number | null;
+  /** At most this many runs a day that it starts on its own. */
+  maxRunsPerDay: number;
+  /** What it does on its own next, and how quiet the project has been. */
+  auto?: BotAutoState;
   /** Stop once this much was spent today (cSats, local day); null = no limit. */
   budgetCSatsPerDay: number | null;
   allowedTools: ToolName[];
@@ -214,7 +247,21 @@ export interface BotConfig {
   avatarShape?: BotAvatarShape;
   createdAtMs: number;
   updatedAtMs: number;
+  /** The next scheduled run or check-in. */
   nextRunAtMs?: number;
+}
+
+export interface BotAutoState {
+  /** A run due soon: starting work, or continuing the last one. */
+  due?: { atMs: number; kind: "start" | "follow_up"; reason?: string };
+  /** Quiet check-ins in a row (nothing changed): the next one waits heartbeat × 2^idleStreak. */
+  idleStreak: number;
+  /** The project's fingerprint after the last run or check-in. */
+  fingerprint?: string;
+  /** Follow-up runs in a row. */
+  followUps: number;
+  /** The local day a "limit reached" note was last added (one note a day). */
+  capNotedDay?: number;
 }
 
 /** A bot's compute policy; `model` (a model id like "qwen3.5:9b" or "network/x@gpu") only for "model". */
@@ -228,7 +275,7 @@ export const DEFAULT_BOT_COMPUTE: BotCompute = { policy: "local_first" };
 /** What bots saved before compute policies existed keep doing. */
 export const LEGACY_BOT_COMPUTE: BotCompute = { policy: "auto" };
 
-export type BotTrigger = "schedule" | "manual" | "message" | "github";
+export type BotTrigger = "schedule" | "manual" | "message" | "github" | "start" | "heartbeat" | "follow_up";
 export type BotRunStatus = "running" | "needs_approval" | "done" | "failed" | "budget" | "cancelled" | "interrupted";
 
 export interface BotPullRequest {
@@ -275,6 +322,12 @@ export interface BotMessage {
 
 export type BotStatus = "idle" | "running" | "needs_approval" | "paused" | "over_budget" | "error";
 
+/** What it runs next on its own: kind and when (absent: nothing until a message or GitHub event). */
+export interface BotNextRun {
+  kind: "start" | "follow_up" | "schedule" | "heartbeat";
+  atMs: number;
+}
+
 export interface BotView extends BotConfig {
   status: BotStatus;
   spentTodayCSats: number;
@@ -289,6 +342,74 @@ export interface BotView extends BotConfig {
   repo?: { state: "cloning" | "ready" | "error"; message: string };
   /** Per trigger: when it last checked GitHub, and any error or backoff. */
   triggerStatus: Record<string, { lastCheckedAtMs?: number; error?: string; backoffUntilMs?: number }>;
+  /** Runs it started on its own today (against maxRunsPerDay). */
+  runsToday: number;
+  /** All runs on record. */
+  runCount: number;
+  nextRun?: BotNextRun;
+  /** Why it isn't starting runs on its own now, when that's a limit: today's runs or budget. */
+  held?: "run_cap" | "budget";
+}
+
+/** A job to do: a role or instructions. Bots without one wait to be messaged. */
+export function hasGoal(bot: Pick<BotConfig, "role" | "instructions">): boolean {
+  return !!(bot.role?.trim() || bot.instructions?.trim());
+}
+
+/** The check-in interval after `idleStreak` quiet check-ins: heartbeat × 2^streak, at most 8 h (or the heartbeat). */
+export function heartbeatInterval(minutes: number, idleStreak: number): number {
+  const base = minutes * MINUTE;
+  return Math.min(base * 2 ** Math.max(0, Math.min(idleStreak, MAX_IDLE_STEPS)), Math.max(base, IDLE_BACKOFF_CAP_MS));
+}
+
+/** Directories a fingerprint of a folder that isn't a git checkout skips. */
+const FINGERPRINT_SKIP = new Set(["node_modules", ".git", "dist", "build", "out", ".next", "target", "__pycache__", ".venv", "venv", ".cache", "coverage"]);
+
+function gitOut(root: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("git", ["-C", root, ...args], { env: gitExecEnv({ GIT_OPTIONAL_LOCKS: "0" }), timeout: 15_000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+  });
+}
+
+/**
+ * What a project looks like now, as a short hash: a git checkout's HEAD, its changed files and
+ * their times; any other folder's files and times (up to a few thousand, build folders skipped).
+ * Equal fingerprints mean nothing changed. null when it can't tell.
+ */
+export async function projectFingerprint(root: string): Promise<string | null> {
+  const h = createHash("sha256");
+  try {
+    if (existsSync(join(root, ".git"))) {
+      const head = await gitOut(root, ["rev-parse", "HEAD"]).catch(() => "no-head");
+      const status = await gitOut(root, ["status", "--porcelain=v1", "-uall", "--no-renames"]);
+      h.update(`git\n${head.trim()}\n${status}`);
+      for (const line of status.split("\n").slice(0, 500)) {
+        const path = line.slice(3).trim();
+        if (!path) continue;
+        const st = await stat(join(root, path)).catch(() => null);
+        h.update(`${path}:${st ? `${st.mtimeMs}:${st.size}` : "gone"}\n`);
+      }
+      return h.digest("hex").slice(0, 32);
+    }
+    let left = 3_000;
+    const walk = async (dir: string, rel: string, depth: number): Promise<void> => {
+      if (left <= 0 || depth > 5) return;
+      const entries = (await readdir(dir, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
+      for (const e of entries) {
+        if (left-- <= 0) return;
+        if (e.isDirectory()) {
+          if (!FINGERPRINT_SKIP.has(e.name)) await walk(join(dir, e.name), `${rel}${e.name}/`, depth + 1);
+        } else if (e.isFile()) {
+          const st = await stat(join(dir, e.name)).catch(() => null);
+          if (st) h.update(`${rel}${e.name}:${st.mtimeMs}:${st.size}\n`);
+        }
+      }
+    };
+    await walk(root, "", 0);
+    return h.digest("hex").slice(0, 32);
+  } catch {
+    return null;
+  }
 }
 
 /** The folder a bot's runs work in: its repository checkout, or its home folder. */
@@ -316,6 +437,8 @@ export interface BotRunContext {
   /** Pauses the run until the user answers (resolves false on reject, cancel or timeout). */
   waitForApproval: ToolRunnerDeps["waitForApproval"];
   remember: (note: string) => void;
+  /** Ask for another run in `minutes` to continue (the follow_up tool). */
+  followUp: (minutes: number, reason: string) => void;
   /** cSats left in today's budget (null: no limit); the network never gets more than this. */
   budgetLeft: () => number | null;
 }
@@ -394,8 +517,9 @@ export function botSystemPrompt(bot: BotConfig, memory: string): string {
   return [
     `--- Persistent bot ---`,
     bot.repository && bot.repoPath
-      ? `You are "${bot.name}"${bot.role ? `, ${bot.role}` : ""}: a persistent bot that owns a job in the repository ${bot.repository}, checked out at ${bot.repoPath} (your tools work there). Your home folder ${bot.projectRoot} keeps your own notes. You run on a schedule, on GitHub events, when asked to run, or when the user messages you; each run starts fresh except for your memory below and the recent conversation.`
-      : `You are "${bot.name}"${bot.role ? `, ${bot.role}` : ""}: a persistent bot that owns a job in the project at ${bot.projectRoot}. You run on a schedule, when asked to run, or when the user messages you; each run starts fresh except for your memory below and the recent conversation.`,
+      ? `You are "${bot.name}"${bot.role ? `, ${bot.role}` : ""}: a persistent bot that owns a job in the repository ${bot.repository}, checked out at ${bot.repoPath} (your tools work there). Your home folder ${bot.projectRoot} keeps your own notes. You work on your own: when you're set up, on regular check-ins, on GitHub events and when the user messages you; nobody has to tell you to start. Each run starts fresh except for your memory below and the recent conversation.`
+      : `You are "${bot.name}"${bot.role ? `, ${bot.role}` : ""}: a persistent bot that owns a job in the project at ${bot.projectRoot}. You work on your own: when you're set up, on regular check-ins and when the user messages you; nobody has to tell you to start. Each run starts fresh except for your memory below and the recent conversation.`,
+    `Do the work in this run with your tools; don't stop after saying what you'll do. If there's more to do than fits in one run, call \`follow_up\` with {"in_minutes": 2, "reason": "..."} and you'll get another run to continue.`,
     bot.instructions.trim() ? `Your instructions:\n${bot.instructions.trim()}` : "",
     `Your memory (notes you saved on earlier runs):\n${memory.trim() || "(empty)"}`,
     `To save a short note for future runs (what you did, what to check next time), call the \`remember\` tool with {"note": "..."}. Keep notes brief.`,
@@ -407,12 +531,45 @@ export function botSystemPrompt(bot: BotConfig, memory: string): string {
   ].filter(Boolean).join("\n\n");
 }
 
+/** The conversation label and the prompt for a run nobody typed. */
+export function runPrompt(trigger: Exclude<BotTrigger, "message" | "github">, reason?: string): { label: string; text: string } {
+  const end = "When you're done, reply with a short summary of what you did and anything that needs my attention.";
+  switch (trigger) {
+    case "start":
+      return { label: "Started work", text: `You're starting work (just set up or resumed). Look at the project, decide what your job needs first, and start on it now with your tools; don't just describe what you'll do. ${end}` };
+    case "heartbeat":
+      return { label: "Check-in", text: `Check the project for work your job covers: what changed since your last run, failing tests, open issues, TODOs. If there's something to do, do it now with your tools. If there's nothing to do, reply in one line saying so. ${end}` };
+    case "follow_up":
+      return { label: "Follow-up", text: `Continue where your last run left off${reason ? ` (you said: ${JSON.stringify(reason.slice(0, 300))})` : ""}. Do it now with your tools. ${end}` };
+    case "schedule":
+      return { label: "Scheduled run", text: `Do your job as described in your instructions. ${end}` };
+    default:
+      return { label: "Check now", text: `You were asked to check in now. Do your job as described in your instructions. ${end}` };
+  }
+}
+
 const REMEMBER_TOOL: ToolSchema = {
   type: "function",
   function: {
     name: "remember",
     description: "Save a short note to your memory for future runs.",
     parameters: { type: "object", properties: { note: { type: "string", description: "The note (one or two sentences)." } }, required: ["note"] },
+  },
+};
+
+const FOLLOW_UP_TOOL: ToolSchema = {
+  type: "function",
+  function: {
+    name: "follow_up",
+    description: "Ask for another run soon to continue this work (when it doesn't fit in this run).",
+    parameters: {
+      type: "object",
+      properties: {
+        in_minutes: { type: "number", description: "How soon to continue, in minutes (1 to 1440; usually 2)." },
+        reason: { type: "string", description: "What the next run should continue with (one sentence)." },
+      },
+      required: ["reason"],
+    },
   },
 };
 
@@ -427,6 +584,8 @@ export interface BotInput {
   maxTriggerRunsPerHour?: number;
   enabled?: boolean;
   schedule?: string;
+  heartbeatMinutes?: number | null;
+  maxRunsPerDay?: number;
   budgetCSatsPerDay?: number | null;
   allowedTools?: ToolName[];
   autoApproveEdits?: boolean;
@@ -446,6 +605,10 @@ interface ActiveRun {
   activity?: string;
   /** callId → tool, to tell which results came from open_pull_request. */
   tools: Map<string, { tool: string; args: Record<string, unknown> }>;
+  /** The follow_up tool's request, if it was called. */
+  followUp?: { minutes: number; reason: string };
+  /** The project's fingerprint when the run started (check-ins: did the run change anything?). */
+  fingerprintBefore?: string | null;
   done: Promise<void>;
 }
 
@@ -472,6 +635,10 @@ export class BotManager {
   private readonly approvals: Map<string, ApprovalEntry>;
   private readonly repoInfo = new Map<string, { at: number; defaultBranch: string | null }>();
   private loginCache: { at: number; login: string | null } | null = null;
+  /** Check-ins in progress (they fingerprint the project first). */
+  private checks = new Map<string, Promise<unknown>>();
+  /** Fingerprints being taken as runs end. */
+  private ending = new Set<Promise<unknown>>();
 
   constructor(
     private readonly deps: {
@@ -485,6 +652,8 @@ export class BotManager {
       ensureRepo?: EnsureRepoFn;
       /** GitHub's API through gh (ghApiCli). */
       gh?: GhApi;
+      /** What the bot's work folder looks like now (projectFingerprint); equal = nothing changed. */
+      fingerprint?: (root: string) => Promise<string | null>;
     },
   ) {
     this.approvals = deps.approvals ?? new Map();
@@ -501,6 +670,9 @@ export class BotManager {
   }
   private get gh(): GhApi {
     return this.deps.gh ?? ghApiCli();
+  }
+  private fingerprintOf(bot: BotConfig): Promise<string | null> {
+    return (this.deps.fingerprint ?? projectFingerprint)(botWorkRoot(bot)).catch(() => null);
   }
 
   // --- persistence ---
@@ -526,6 +698,21 @@ export class BotManager {
         }
         if (!(Number.isInteger(b.maxTriggerRunsPerHour) && b.maxTriggerRunsPerHour > 0)) {
           b.maxTriggerRunsPerHour = DEFAULT_TRIGGER_RUNS_PER_HOUR;
+          changed = true;
+        }
+        // Bots saved before they worked on their own: the default check-in and daily run limit, and
+        // a first run for a bot with a job that never ran (it was waiting for "Run now").
+        if (b.heartbeatMinutes === undefined || !(b.heartbeatMinutes === null || (Number.isInteger(b.heartbeatMinutes) && b.heartbeatMinutes >= 5))) {
+          b.heartbeatMinutes = DEFAULT_HEARTBEAT_MINUTES;
+          changed = true;
+        }
+        if (!(Number.isInteger(b.maxRunsPerDay) && b.maxRunsPerDay > 0)) {
+          b.maxRunsPerDay = DEFAULT_MAX_RUNS_PER_DAY;
+          changed = true;
+        }
+        if (!b.auto || typeof b.auto !== "object") {
+          b.auto = { idleStreak: 0, followUps: 0 };
+          if (b.enabled && hasGoal(b) && !(data.runs?.[b.id]?.length)) b.auto.due = { atMs: this.now(), kind: "start" };
           changed = true;
         }
         if (typeof b.repository === "string" && !b.repository.trim()) {
@@ -641,6 +828,8 @@ export class BotManager {
   start(intervalMs = 30_000, pollMs = TRIGGER_POLL_MS): void {
     this.stop();
     this.timer = setInterval(() => this.tick(), intervalMs);
+    // Bots due now (a first run after an update, a check-in missed while the app was closed) go now.
+    this.kick();
     this.timer.unref?.();
     this.pollTimer = setInterval(() => void this.pollTriggers().catch((err) => this.deps.log?.("bot_trigger_poll_failed", err)), pollMs);
     this.pollTimer.unref?.();
@@ -653,35 +842,154 @@ export class BotManager {
     this.pollTimer = undefined;
   }
 
-  /** Start the runs that are due; returns the ids of the bots started. */
+  /** Run tick soon (after a create or resume), when the scheduler is running. */
+  private kick(): void {
+    if (!this.timer) return;
+    const t = setTimeout(() => this.tick(), 0);
+    t.unref?.();
+  }
+
+  /** Runs it started on its own today (local day). */
+  autoRunsToday(id: string, now = this.now()): number {
+    const t0 = startOfDay(now);
+    return (this.runs.get(id) ?? []).filter((r) => r.startedAtMs >= t0 && AUTO_TRIGGERS.includes(r.trigger)).length;
+  }
+
+  /** Why the bot can't start a run on its own now (null: it can). */
+  private autoHold(bot: BotConfig, now = this.now()): "paused" | "busy" | "budget" | "run_cap" | null {
+    if (!bot.enabled) return "paused";
+    if (this.active.has(bot.id)) return "busy";
+    if (this.overBudget(bot)) return "budget";
+    if (this.autoRunsToday(bot.id, now) >= bot.maxRunsPerDay) return "run_cap";
+    return null;
+  }
+
+  /** Say once a day that a limit is holding the bot back. */
+  private noteHold(bot: BotConfig, hold: "budget" | "run_cap", what: string, now = this.now()): void {
+    const auto = (bot.auto ??= { idleStreak: 0, followUps: 0 });
+    const day = startOfDay(now);
+    if (auto.capNotedDay === day) return;
+    auto.capNotedDay = day;
+    this.note(bot.id, hold === "budget" ? `Skipped ${what}: today's budget is spent` : `Skipped ${what}: it has started ${bot.maxRunsPerDay} runs on its own today (the daily limit)`);
+  }
+
+  /** Check-ins apply: it has a job, a heartbeat and no fixed schedule. */
+  private heartbeatOn(bot: BotConfig): boolean {
+    return !!bot.heartbeatMinutes && hasGoal(bot) && !bot.schedule.trim();
+  }
+
+  /**
+   * Start the runs that are due: a start or follow-up, the schedule, or a check-in (which first
+   * looks at whether the project changed; see checkIn). Returns the ids of the bots started now.
+   */
   tick(now = this.now()): string[] {
     const started: string[] = [];
     let changed = false;
     for (const bot of this.bots) {
       if (!bot.enabled) continue;
+      const auto = (bot.auto ??= { idleStreak: 0, followUps: 0 });
+      // Starting work, or continuing the last run.
+      if (auto.due && auto.due.atMs <= now) {
+        const hold = this.autoHold(bot, now);
+        if (hold === "busy") continue; // after this run
+        const due = auto.due;
+        delete auto.due;
+        changed = true;
+        if (hold === "budget" || hold === "run_cap") {
+          this.noteHold(bot, hold, due.kind === "start" ? "starting work" : "a follow-up", now);
+          continue;
+        }
+        if (this.runNow(bot.id, due.kind, undefined, due.reason).started) started.push(bot.id);
+        continue;
+      }
       let sched: Schedule | null;
       try {
         sched = parseSchedule(bot.schedule);
       } catch {
         continue;
       }
-      if (!sched) continue;
-      if (bot.nextRunAtMs === undefined) {
+      if (sched) {
+        if (bot.nextRunAtMs === undefined) {
+          bot.nextRunAtMs = nextRunAt(sched, now) ?? undefined;
+          changed = true;
+          continue;
+        }
+        if (bot.nextRunAtMs > now) continue;
+        // Due: run unless one is going or a limit is reached; either way, wait for the next slot.
+        const hold = this.autoHold(bot, now);
+        if (!hold) {
+          const r = this.runNow(bot.id, "schedule");
+          if (r.started) started.push(bot.id);
+        } else if (hold === "budget" || hold === "run_cap") this.noteHold(bot, hold, "a scheduled run", now);
         bot.nextRunAtMs = nextRunAt(sched, now) ?? undefined;
         changed = true;
         continue;
       }
-      if (bot.nextRunAtMs > now) continue;
-      // Due: run unless one is going or today's budget is spent; either way, wait for the next slot.
-      if (!this.active.has(bot.id) && !this.overBudget(bot)) {
-        const r = this.runNow(bot.id, "schedule");
-        if (r.started) started.push(bot.id);
+      if (!this.heartbeatOn(bot)) continue;
+      if (bot.nextRunAtMs === undefined) {
+        bot.nextRunAtMs = now + heartbeatInterval(bot.heartbeatMinutes!, auto.idleStreak);
+        changed = true;
+        continue;
       }
-      bot.nextRunAtMs = nextRunAt(sched, now) ?? undefined;
-      changed = true;
+      if (bot.nextRunAtMs > now || this.active.has(bot.id) || this.checks.has(bot.id)) continue;
+      const job = this.checkIn(bot.id, now)
+        .catch((err) => this.deps.log?.("bot_check_in_failed", { id: bot.id, err: String(err) }))
+        .finally(() => this.checks.delete(bot.id));
+      this.checks.set(bot.id, job);
     }
     if (changed) this.save();
     return started;
+  }
+
+  /**
+   * A check-in: update the repository, then run if the project changed since the last run or
+   * check-in. Quiet check-ins back off (30 min, 1 h, 2 h … 8 h); after the longest wait it runs
+   * anyway. Returns what happened.
+   */
+  async checkIn(id: string, now = this.now()): Promise<"started" | "quiet" | "paused" | "busy" | "budget" | "run_cap" | "gone"> {
+    const bot = this.bots.find((b) => b.id === id);
+    if (!bot) return "gone";
+    const hold = this.autoHold(bot, now);
+    if (hold) {
+      if (hold === "budget" || hold === "run_cap") {
+        // Try again after the usual wait (the budget and the run count reset at midnight).
+        bot.nextRunAtMs = now + heartbeatInterval(bot.heartbeatMinutes ?? DEFAULT_HEARTBEAT_MINUTES, 0);
+        this.noteHold(bot, hold, "a check-in", now);
+        this.save();
+      }
+      return hold;
+    }
+    if (bot.repository) await this.syncRepository(id);
+    const fp = await this.fingerprintOf(bot);
+    const live = this.bots.find((b) => b.id === id);
+    if (!live) return "gone";
+    const again = this.autoHold(live, now);
+    if (again) return again;
+    const auto = (live.auto ??= { idleStreak: 0, followUps: 0 });
+    const minutes = live.heartbeatMinutes ?? DEFAULT_HEARTBEAT_MINUTES;
+    if (fp && fp === auto.fingerprint && heartbeatInterval(minutes, auto.idleStreak) < heartbeatInterval(minutes, MAX_IDLE_STEPS)) {
+      auto.idleStreak += 1;
+      live.nextRunAtMs = now + heartbeatInterval(minutes, auto.idleStreak);
+      this.save();
+      return "quiet";
+    }
+    if (fp !== auto.fingerprint) auto.idleStreak = 0;
+    if (fp) auto.fingerprint = fp;
+    live.nextRunAtMs = undefined;
+    const r = this.runNow(id, "heartbeat");
+    if (!r.started) {
+      live.nextRunAtMs = now + heartbeatInterval(minutes, auto.idleStreak);
+      this.save();
+      return r.reason ?? "busy";
+    }
+    const act = this.active.get(id);
+    if (act) act.fingerprintBefore = fp;
+    return "started";
+  }
+
+  /** Check-ins in progress settle (tests). */
+  async settled(): Promise<void> {
+    while (this.checks.size || this.ending.size) await Promise.all([...this.checks.values(), ...this.ending]);
   }
 
   // --- GitHub triggers ---
@@ -758,7 +1066,7 @@ export class BotManager {
    * A GitHub event for one of the bot's triggers: a run now, or after the current one. Paused bots
    * and off triggers ignore it; over the hourly limit or the daily budget it's skipped (and said so).
    */
-  fireTrigger(id: string, ev: TriggerEvent, now = this.now()): "started" | "queued" | "paused" | "off" | "rate_limited" | "budget" | "busy" {
+  fireTrigger(id: string, ev: TriggerEvent, now = this.now()): "started" | "queued" | "paused" | "off" | "rate_limited" | "budget" | "run_cap" | "busy" {
     const bot = this.bots.find((b) => b.id === id);
     if (!bot || !bot.enabled) return "paused";
     if (!bot.triggers.some((t) => t.id === ev.triggerId && t.enabled)) return "off";
@@ -771,6 +1079,10 @@ export class BotManager {
     if (this.overBudget(bot)) {
       this.note(id, `Skipped ${ev.source}: today's budget is spent`);
       return "budget";
+    }
+    if (this.autoRunsToday(id, now) + queue.length >= bot.maxRunsPerDay) {
+      this.note(id, `Skipped ${ev.source}: it has started ${bot.maxRunsPerDay} runs on its own today (the daily limit)`);
+      return "run_cap";
     }
     if (this.active.has(id)) {
       if (queue.length >= MAX_QUEUED_EVENTS) return "busy";
@@ -848,6 +1160,12 @@ export class BotManager {
       }
     }
     if (input.budgetCSatsPerDay != null && !(input.budgetCSatsPerDay > 0)) throw new BotError("The budget must be more than 0 cSats a day (or no limit)");
+    if (input.heartbeatMinutes != null && !(Number.isInteger(input.heartbeatMinutes) && input.heartbeatMinutes >= 5 && input.heartbeatMinutes <= 1440)) {
+      throw new BotError("Check-ins must be every 5 to 1440 minutes (or off)");
+    }
+    if (input.maxRunsPerDay !== undefined && !(Number.isInteger(input.maxRunsPerDay) && input.maxRunsPerDay >= 1 && input.maxRunsPerDay <= 500)) {
+      throw new BotError("Runs a day must be a whole number from 1 to 500");
+    }
     if (input.compute !== undefined) {
       if (!COMPUTE_POLICIES.includes(input.compute.policy)) throw new BotError(`Unknown compute policy "${input.compute.policy}"`);
       if (input.compute.policy === "model" && !input.compute.model?.trim()) throw new BotError("Pick the model this bot runs on (or choose another compute option)");
@@ -897,6 +1215,9 @@ export class BotManager {
       maxTriggerRunsPerHour: input.maxTriggerRunsPerHour ?? DEFAULT_TRIGGER_RUNS_PER_HOUR,
       enabled: input.enabled ?? true,
       schedule: (input.schedule ?? "").trim(),
+      heartbeatMinutes: input.heartbeatMinutes === undefined ? DEFAULT_HEARTBEAT_MINUTES : input.heartbeatMinutes,
+      maxRunsPerDay: input.maxRunsPerDay ?? DEFAULT_MAX_RUNS_PER_DAY,
+      auto: { idleStreak: 0, followUps: 0 },
       budgetCSatsPerDay: input.budgetCSatsPerDay === undefined ? DEFAULT_BUDGET_CSATS_PER_DAY : input.budgetCSatsPerDay,
       allowedTools: input.allowedTools ?? [...DEFAULT_BOT_TOOLS],
       autoApproveEdits: input.autoApproveEdits ?? true,
@@ -907,10 +1228,13 @@ export class BotManager {
       updatedAtMs: now,
     };
     bot.nextRunAtMs = this.nextFor(bot);
+    // A bot with a job starts on it right away; nobody has to press anything.
+    if (bot.enabled && hasGoal(bot)) bot.auto!.due = { atMs: now, kind: "start" };
     this.bots.push(bot);
     this.runs.set(bot.id, []);
     this.save();
     if (repository) void this.syncRepository(bot.id);
+    this.kick();
     return this.view(bot);
   }
 
@@ -921,6 +1245,8 @@ export class BotManager {
     const scheduleChanged = fields.schedule !== undefined && fields.schedule.trim() !== bot.schedule;
     const resumed = fields.enabled === true && !bot.enabled;
     const paused = fields.enabled === false && bot.enabled;
+    const hadGoal = hasGoal(bot);
+    const heartbeatChanged = fields.heartbeatMinutes !== undefined && fields.heartbeatMinutes !== bot.heartbeatMinutes;
     // Keep the memory where it is when the repository (and so its place) changes.
     const memoryBefore = repository !== undefined && memory === undefined ? this.memory(id) : undefined;
     Object.assign(bot, Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)));
@@ -952,13 +1278,26 @@ export class BotManager {
       }
       this.cursors[id] = kept;
     }
-    if (scheduleChanged || resumed) bot.nextRunAtMs = this.nextFor(bot);
-    if (paused) this.queuedEvents.delete(id);
+    const auto = (bot.auto ??= { idleStreak: 0, followUps: 0 });
+    if (scheduleChanged || resumed || heartbeatChanged) {
+      bot.nextRunAtMs = this.nextFor(bot);
+      auto.idleStreak = 0;
+    }
+    if (paused) {
+      this.queuedEvents.delete(id);
+      delete auto.due;
+    }
+    // Resumed, or just given a job: start working now.
+    if (bot.enabled && hasGoal(bot) && (resumed || !hadGoal)) {
+      auto.due = { atMs: this.now(), kind: "start" };
+      auto.followUps = 0;
+    }
     bot.updatedAtMs = this.now();
     if (memory !== undefined) this.setMemory(id, memory);
     else if (memoryBefore !== undefined && memoryBefore) this.setMemory(id, memoryBefore);
     this.save();
     if (repoChanged && bot.repository) void this.syncRepository(id);
+    if (auto.due) this.kick();
     return this.view(bot);
   }
 
@@ -1014,6 +1353,15 @@ export class BotManager {
             : "idle";
     const repo = this.repoState.get(bot.id);
     const cursors = this.cursors[bot.id] ?? {};
+    const now = this.now();
+    const hold = this.autoHold(bot, now);
+    const nextRun: BotNextRun | undefined = !bot.enabled
+      ? undefined
+      : bot.auto?.due
+        ? { kind: bot.auto.due.kind, atMs: bot.auto.due.atMs }
+        : bot.nextRunAtMs !== undefined && (bot.schedule.trim() || this.heartbeatOn(bot))
+          ? { kind: bot.schedule.trim() ? "schedule" : "heartbeat", atMs: bot.nextRunAtMs }
+          : undefined;
     return {
       ...bot,
       triggers: bot.triggers.map((t) => ({ ...t })),
@@ -1025,6 +1373,11 @@ export class BotManager {
       queuedEvents: this.queuedEvents.get(bot.id)?.length ?? 0,
       ...(act?.activity ? { activity: act.activity } : {}),
       ...(bot.repository && repo ? { repo: { ...repo } } : {}),
+      ...(bot.auto ? { auto: { ...bot.auto, ...(bot.auto.due ? { due: { ...bot.auto.due } } : {}) } } : {}),
+      runsToday: this.autoRunsToday(bot.id, now),
+      runCount: runs.length,
+      ...(nextRun ? { nextRun } : {}),
+      ...(hold === "budget" || hold === "run_cap" ? { held: hold } : {}),
       triggerStatus: Object.fromEntries(
         bot.triggers.map((t) => {
           const c = cursors[t.id] ?? {};
@@ -1078,7 +1431,7 @@ export class BotManager {
     return { ...r, queued: false };
   }
 
-  runNow(id: string, trigger: BotTrigger = "manual", event?: TriggerEvent): { started: boolean; runId?: string; reason?: "busy" | "budget" } {
+  runNow(id: string, trigger: BotTrigger = "manual", event?: TriggerEvent, reason?: string): { started: boolean; runId?: string; reason?: "busy" | "budget" } {
     const bot = this.find(id);
     if (this.active.has(id)) return { started: false, reason: "busy" };
     if (this.overBudget(bot)) return { started: false, reason: "budget" };
@@ -1095,13 +1448,12 @@ export class BotManager {
       conv.push({ id: randomUUID(), role: "event", content: `GitHub: ${event.source}`, atMs: now });
       context.push({ role: "user", content: untrustedEventBlock(event, now) });
     } else if (trigger !== "message") {
-      const label = trigger === "schedule" ? "Scheduled run" : "Run now";
-      conv.push({ id: randomUUID(), role: "event", content: label, atMs: now });
-      context.push({
-        role: "user",
-        content: `[${label} · ${new Date(now).toISOString()}] Do your job as described in your instructions. When you're done, reply with a short summary of what you did and anything that needs my attention.`,
-      });
+      const p = runPrompt(trigger === "github" ? "manual" : trigger, reason);
+      conv.push({ id: randomUUID(), role: "event", content: p.label, atMs: now });
+      context.push({ role: "user", content: `[${p.label} · ${new Date(now).toISOString()}] ${p.text}` });
     }
+    const auto = (bot.auto ??= { idleStreak: 0, followUps: 0 });
+    auto.followUps = trigger === "follow_up" ? auto.followUps + 1 : 0;
     const run: BotRun = {
       id: `run_${randomUUID().slice(0, 8)}`,
       trigger,
@@ -1221,6 +1573,10 @@ export class BotManager {
         isCancelled: () => act.cancelReason !== undefined,
         waitForApproval,
         remember: (note) => this.remember(id, note),
+        followUp: (minutes, why) => {
+          const m = Number.isFinite(minutes) ? Math.min(1440, Math.max(1, Math.round(minutes))) : FOLLOW_UP_DELAY_MS / MINUTE;
+          act.followUp = { minutes: m, reason: why.replace(/\s+/g, " ").trim().slice(0, 300) };
+        },
         budgetLeft: () => {
           const cap = (this.bots.find((b) => b.id === id) ?? bot).budgetCSatsPerDay;
           return cap == null ? null : Math.max(0, cap - this.spentToday(id));
@@ -1252,6 +1608,11 @@ export class BotManager {
       act.reply.content += `${act.reply.content ? "\n\n" : ""}_${run.summary}_`;
       act.reply.events!.push({ type: "text", content: `${act.reply.events!.length ? "\n\n" : ""}_${run.summary}_` });
     }
+    // Before the next run may start: what it should do on its own next (check-in clock, follow-up).
+    const ending = this.afterRun(id, act, text).catch((err) => this.deps.log?.("bot_after_run_failed", { id, err: String(err) }));
+    this.ending.add(ending);
+    await ending;
+    this.ending.delete(ending);
     this.active.delete(id);
     if (!this.bots.some((b) => b.id === id)) return;
     this.save();
@@ -1285,6 +1646,35 @@ export class BotManager {
     }
   }
 
+  /**
+   * After a run: a check-in that changed nothing makes the next one wait longer; any other change
+   * resets the wait. The check-in clock restarts from now. A run that ends with more to do (the
+   * follow_up tool, or a reply that only says what it'll do next) gets a follow-up soon, at most
+   * MAX_FOLLOW_UPS_IN_A_ROW in a row.
+   */
+  private async afterRun(id: string, act: ActiveRun, text: string): Promise<void> {
+    const bot = this.bots.find((b) => b.id === id);
+    if (!bot) return;
+    const auto = (bot.auto ??= { idleStreak: 0, followUps: 0 });
+    const run = act.run;
+    const now = this.now();
+    if (this.heartbeatOn(bot)) {
+      const fp = await this.fingerprintOf(bot);
+      if (run.trigger === "heartbeat" && fp && act.fingerprintBefore && fp === act.fingerprintBefore) auto.idleStreak = Math.min(MAX_IDLE_STEPS, auto.idleStreak + 1);
+      else if (fp && fp !== auto.fingerprint) auto.idleStreak = 0;
+      if (fp) auto.fingerprint = fp;
+      bot.nextRunAtMs = now + heartbeatInterval(bot.heartbeatMinutes!, auto.idleStreak);
+    }
+    if (run.status !== "done" || !bot.enabled) return;
+    const wants = act.followUp ?? (announcesWork(text) ? { minutes: FOLLOW_UP_DELAY_MS / MINUTE, reason: summarize(text) } : undefined);
+    if (!wants) return;
+    if (run.trigger === "follow_up" && auto.followUps >= MAX_FOLLOW_UPS_IN_A_ROW) {
+      this.note(id, `Stopped following up after ${MAX_FOLLOW_UPS_IN_A_ROW} runs in a row; message ${bot.name} to continue`);
+      return;
+    }
+    auto.due = { atMs: now + wants.minutes * MINUTE, kind: "follow_up", reason: wants.reason };
+  }
+
   /** Stop the bot's current run (pending approvals are rejected). */
   cancel(id: string): boolean {
     this.find(id);
@@ -1309,6 +1699,7 @@ export class BotManager {
     for (const id of [...this.active.keys()]) this.cancel(id);
     await Promise.all([...this.active.values()].map((a) => a.done.catch(() => undefined)));
     await this.polling?.catch(() => undefined);
+    await this.settled().catch(() => undefined);
     await Promise.all([...this.repoJobs.values()].map((j) => j.catch(() => undefined)));
     for (const [id, t] of this.saveTimers) {
       clearTimeout(t);
@@ -1369,7 +1760,7 @@ export function agentBotRunner(d: {
     d.checkpoints?.begin(turnId, botWorkRoot(ctx.bot));
     ctx.sendEvent({ type: "turn", id: turnId });
     const allowed = new Set<string>(ctx.bot.allowedTools);
-    const tools = [...toolSchemas().filter((t) => allowed.has(t.function.name)), REMEMBER_TOOL];
+    const tools = [...toolSchemas().filter((t) => allowed.has(t.function.name)), REMEMBER_TOOL, FOLLOW_UP_TOOL];
     const inner = makeToolRunner({
       execute: d.execute(ctx.bot),
       sendEvent: ctx.sendEvent,
@@ -1387,7 +1778,17 @@ export function agentBotRunner(d: {
       sendEvent: ctx.sendEvent,
       isCancelled: ctx.isCancelled,
       tools,
+      // Nobody is watching to say "go on": a reply that only announces work gets one "go ahead".
+      continueOnIntent: true,
       runTool: async (tool, args) => {
+        if ((tool as string) === "follow_up") {
+          const callId = `tc_${randomUUID().slice(0, 8)}`;
+          ctx.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: false });
+          ctx.followUp(Number(args.in_minutes ?? FOLLOW_UP_DELAY_MS / MINUTE), String(args.reason ?? ""));
+          const result = "A follow-up run is scheduled; finish this run with a short summary.";
+          ctx.sendEvent({ type: "tool_result", id: callId, result });
+          return result;
+        }
         if ((tool as string) === "remember") {
           const callId = `tc_${randomUUID().slice(0, 8)}`;
           ctx.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: false });
@@ -1414,6 +1815,8 @@ const botFields = {
   projectRoot: z.string().min(1).max(1_000),
   enabled: z.boolean(),
   schedule: z.string().max(100),
+  heartbeatMinutes: z.number().int().min(5).max(1440).nullable(),
+  maxRunsPerDay: z.number().int().min(1).max(500),
   budgetCSatsPerDay: z.number().positive().max(1e9).nullable(),
   allowedTools: z.array(toolEnum).max(ALL_TOOLS.length),
   autoApproveEdits: z.boolean(),

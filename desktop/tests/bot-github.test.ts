@@ -24,7 +24,10 @@ describe("bot GitHub helpers", () => {
   it("names run sources and triggers in plain words", () => {
     expect(runSourceText({ trigger: "github", source: "PR #12 updated" })).toBe("PR #12 updated");
     expect(runSourceText({ trigger: "schedule" })).toBe("Schedule");
-    expect(runSourceText({ trigger: "manual" })).toBe("Run now");
+    expect(runSourceText({ trigger: "manual" })).toBe("Check now");
+    expect(runSourceText({ trigger: "start" })).toBe("Started work");
+    expect(runSourceText({ trigger: "heartbeat" })).toBe("Check-in");
+    expect(runSourceText({ trigger: "follow_up" })).toBe("Follow-up");
     expect(triggerText({ kind: "pr", onlyOthers: true, label: "needs-review" })).toBe("PR opened or updated by others with label needs-review");
     expect(triggerText({ kind: "ci_failed", scope: "default" })).toBe("CI failed on the default branch");
     expect(triggerText({ kind: "issue_labeled", label: "bug" })).toBe("Issue labeled bug");

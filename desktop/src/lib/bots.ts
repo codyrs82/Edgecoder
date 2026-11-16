@@ -5,6 +5,14 @@ import type { IdeStreamEvent } from "./api";
 
 export type BotStatus = "idle" | "running" | "needs_approval" | "paused" | "over_budget" | "error";
 export type BotRunStatus = "running" | "needs_approval" | "done" | "failed" | "budget" | "cancelled" | "interrupted";
+/** What started a run: the ones it starts on its own, your message, or "Check now" (manual). */
+export type BotTriggerKind = "schedule" | "manual" | "message" | "github" | "start" | "heartbeat" | "follow_up";
+
+/** What it runs next on its own (the server's BotNextRun). */
+export interface BotNextRun {
+  kind: "start" | "follow_up" | "schedule" | "heartbeat";
+  atMs: number;
+}
 
 export interface BotPullRequest {
   url: string;
@@ -15,7 +23,7 @@ export interface BotPullRequest {
 
 export interface BotRun {
   id: string;
-  trigger: "schedule" | "manual" | "message" | "github";
+  trigger: BotTriggerKind;
   /** github runs: what fired it ("PR #12 updated", "CI failed on main"). */
   source?: string;
   /** Pull requests the run opened. */
@@ -67,6 +75,16 @@ export interface Bot {
   queuedEvents?: number;
   enabled: boolean;
   schedule: string;
+  /** Without a schedule: check in this often (minutes); null = never. Older servers: unset. */
+  heartbeatMinutes?: number | null;
+  /** Runs it may start on its own a day. */
+  maxRunsPerDay?: number;
+  auto?: { idleStreak: number; followUps: number; due?: { atMs: number; kind: "start" | "follow_up"; reason?: string } };
+  runsToday?: number;
+  runCount?: number;
+  nextRun?: BotNextRun;
+  /** A limit holding back the runs it starts on its own. */
+  held?: "run_cap" | "budget";
   budgetCSatsPerDay: number | null;
   allowedTools: string[];
   autoApproveEdits: boolean;
@@ -105,6 +123,8 @@ export interface BotInput {
   maxTriggerRunsPerHour?: number;
   enabled?: boolean;
   schedule?: string;
+  heartbeatMinutes?: number | null;
+  maxRunsPerDay?: number;
   budgetCSatsPerDay?: number | null;
   allowedTools?: string[];
   autoApproveEdits?: boolean;
@@ -188,13 +208,66 @@ export function groupsOf(tools: string[]): Record<string, boolean> {
 }
 
 export const SCHEDULE_PRESETS: Array<{ value: string; label: string }> = [
-  { value: "", label: "No schedule (run when asked)" },
+  { value: "", label: "No fixed schedule (check-ins)" },
   { value: "every 30 minutes", label: "Every 30 minutes" },
   { value: "hourly", label: "Every hour" },
   { value: "every 6 hours", label: "Every 6 hours" },
   { value: "daily at 09:00", label: "Daily at 09:00" },
   { value: "0 9 * * 1-5", label: "Weekdays at 09:00" },
 ];
+
+/** How often a bot without a fixed schedule checks in on its project ("" = never). */
+export const HEARTBEAT_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: "15", label: "Every 15 minutes" },
+  { value: "30", label: "Every 30 minutes" },
+  { value: "60", label: "Every hour" },
+  { value: "240", label: "Every 4 hours" },
+  { value: "", label: "Never (only messages and triggers)" },
+];
+export const DEFAULT_HEARTBEAT_MINUTES = 30;
+export const DEFAULT_MAX_RUNS_PER_DAY = 48;
+
+/** Check-ins apply: a job (role or instructions), a heartbeat and no fixed schedule. */
+export function checksIn(bot: Pick<Bot, "role" | "instructions" | "schedule" | "heartbeatMinutes">): boolean {
+  const minutes = bot.heartbeatMinutes === undefined ? DEFAULT_HEARTBEAT_MINUTES : bot.heartbeatMinutes;
+  return !!minutes && !bot.schedule.trim() && !!(bot.role.trim() || bot.instructions.trim());
+}
+
+/** Its routine in words: the schedule, "Checks in every 30 minutes", or "Works when you message it". */
+export function routineText(bot: Pick<Bot, "role" | "instructions" | "schedule" | "heartbeatMinutes">): string {
+  if (bot.schedule.trim()) return scheduleText(bot.schedule);
+  if (!checksIn(bot)) return "Works when you message it";
+  const m = bot.heartbeatMinutes ?? DEFAULT_HEARTBEAT_MINUTES;
+  const every = HEARTBEAT_OPTIONS.find((o) => o.value === String(m))?.label.toLowerCase() ?? (m % 60 === 0 ? `every ${m / 60} hours` : `every ${m} minutes`);
+  return `Checks in ${every}`;
+}
+
+/** "in 12 min" → "12 min"; "in less than a minute" → "less than a minute". */
+function untilText(ms: number, now: number): string {
+  return relativeTime(ms, now).replace(/^in /, "");
+}
+
+/**
+ * The header status: what the bot is doing now or when it next works on its own, instead of a
+ * "Run now" button ("Working…", "Next check in 12 min", "Paused").
+ */
+export function autoStatus(bot: Pick<Bot, "status" | "enabled" | "nextRun" | "held" | "activity" | "maxRunsPerDay" | "lastRun">, now = Date.now()): { text: string; tone: "muted" | "accent" | "warn" | "err" } {
+  if (bot.status === "running") return { text: bot.activity && !/^(Auto|Compute): /.test(bot.activity) ? `Working: ${bot.activity}` : "Working…", tone: "accent" };
+  if (bot.status === "needs_approval") return { text: "Waiting for your approval", tone: "warn" };
+  if (!bot.enabled) return { text: "Paused", tone: "muted" };
+  if (bot.status === "over_budget" || bot.held === "budget") return { text: "Budget spent · resumes tomorrow", tone: "warn" };
+  if (bot.held === "run_cap") return { text: `Daily limit of ${bot.maxRunsPerDay ?? DEFAULT_MAX_RUNS_PER_DAY} runs reached · resumes tomorrow`, tone: "warn" };
+  const n = bot.nextRun;
+  const failed = bot.status === "error" ? "Last run failed · " : "";
+  const tone = bot.status === "error" ? "err" : "muted";
+  if (n) {
+    if (n.atMs <= now + 30_000) return { text: n.kind === "start" ? "Starting…" : `${failed}Continuing…`, tone: bot.status === "error" ? "err" : "accent" };
+    const when = untilText(n.atMs, now);
+    const text = n.kind === "follow_up" ? `Continuing in ${when}` : n.kind === "start" ? `Starting in ${when}` : n.kind === "schedule" ? `Next run in ${when}` : `Next check in ${when}`;
+    return { text: failed + text, tone };
+  }
+  return { text: `${failed}Waiting for a message`, tone };
+}
 
 /** The bot's compute, as the server treats it (bots from older servers run on Auto). */
 export function botCompute(bot: Pick<Bot, "compute">): BotCompute {
@@ -345,8 +418,9 @@ export function botStatusLine(bot: Bot, now = Date.now()): string {
       return readableSummary(bot.lastRun?.summary) || "Last run failed";
     default:
       if (bot.lastRun?.summary) return readableSummary(bot.lastRun.summary);
+      if (bot.nextRun) return bot.nextRun.atMs <= now + 30_000 ? "Starting work…" : `First run ${relativeTime(bot.nextRun.atMs, now)}`;
       if (bot.nextRunAtMs) return `First run ${relativeTime(bot.nextRunAtMs, now)}`;
-      return "Message it or press Run now";
+      return "Message it to get it started";
   }
 }
 
@@ -388,10 +462,20 @@ export function prCards(events: Array<{ type: string; id?: string; tool?: string
   return out;
 }
 
-/** The runs table's trigger column: "Schedule", "Run now", "Message" or the GitHub event. */
+const RUN_SOURCE_TEXT: Record<BotTriggerKind, string> = {
+  schedule: "Schedule",
+  message: "Message",
+  manual: "Check now",
+  start: "Started work",
+  heartbeat: "Check-in",
+  follow_up: "Follow-up",
+  github: "GitHub",
+};
+
+/** The runs table's trigger column: "Check-in", "Follow-up", "Message", the GitHub event… */
 export function runSourceText(r: Pick<BotRun, "trigger" | "source">): string {
   if (r.trigger === "github") return r.source ?? "GitHub";
-  return r.trigger === "schedule" ? "Schedule" : r.trigger === "message" ? "Message" : "Run now";
+  return RUN_SOURCE_TEXT[r.trigger] ?? "Check now";
 }
 
 export const TRIGGER_KIND_OPTIONS: Array<{ value: TriggerKind; label: string }> = [
