@@ -7,7 +7,9 @@
   import { Radio, Users } from "@lucide/svelte";
   import ChatMessage from "./ChatMessage.svelte";
   import ChatInput from "./ChatInput.svelte";
-  import { DESKTOP_CLIENT, followSession, getSession, sessionApprove, sessionCancel, sessionSend, sessionUnqueue } from "../lib/api";
+  import { DESKTOP_CLIENT, followSession, getSession, sessionApprove, sessionCancel, sessionSend, sessionTentacles, sessionUnqueue, tentacleCancel, tentacleMerge } from "../lib/api";
+  import TentacleTree from "./TentacleTree.svelte";
+  import { applyTentacleEvent, emptyTentacles, type TentacleState } from "../lib/tentacles";
   import { applySessionEvent, presenceText, viewFromSnapshot, type LiveView } from "../lib/live-session";
   import { markApproval } from "../lib/agent-events";
   import { projectName, tildePath } from "../lib/projects";
@@ -26,6 +28,8 @@
   let error = $state<string | null>(null);
   let scroller: HTMLDivElement | undefined = $state();
   let abort: AbortController | null = null;
+  // Tentacles hook: the session's helper agents (TentacleTree).
+  let tentacles = $state<TentacleState>(emptyTentacles());
 
   const presence = $derived(view ? presenceText(view, DESKTOP_CLIENT) : "");
   const lastNote = $derived(view?.notes.at(-1) ?? null);
@@ -40,9 +44,13 @@
       if (ctl.signal.aborted) return;
       view = viewFromSnapshot(snap);
       scrollDown();
+      void sessionTentacles(id).then((r) => {
+        if (!ctl.signal.aborted) tentacles = { items: r.tentacles, spentCSats: r.spentCSats, enabled: r.config.enabled };
+      }).catch(() => undefined);
       void followSession(id, snap.seq, (e) => {
         if (!view || ctl.signal.aborted) return;
         view = applySessionEvent(view, e);
+        if (e.type.startsWith("tentacle_")) tentacles = applyTentacleEvent(tentacles, e);
         if (e.type === "agent" && (e.event as { type?: string }).type === "file_change") onFilesChanged?.();
         if (view.needsResync) void load(id);
         scrollDown();
@@ -95,6 +103,8 @@
       {#if lastNote}<span class="note-inline">{lastNote}</span>{/if}
     </div>
   {/if}
+
+  <TentacleTree tree={tentacles} canAct={true} onCancel={(tid) => void act(() => tentacleCancel(sessionId, tid))} onMerge={(tid, ok) => void act(() => tentacleMerge(sessionId, tid, ok))} />
 
   <div class="messages-scroll" bind:this={scroller}>
     {#if error}<p class="error" role="alert">{error}</p>{/if}
