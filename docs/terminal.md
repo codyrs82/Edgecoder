@@ -8,8 +8,20 @@ in the desktop app.
 
 ## Install
 
-`edgecoder` comes with the EdgeCoder app and the agent installer (`docs/install.md`). From a
-checkout of this repository:
+`edgecoder` comes with the EdgeCoder app and the agent installer (`docs/install.md`).
+
+**With the desktop app:** Settings → General → Command line → **Install command-line tool**. It
+writes a small launcher that runs the agent bundled in the app with the app's own Node
+(`<app>/Resources/agent/node/node <app>/Resources/agent/dist/cli/edgecoder.js`):
+
+- macOS and Linux: `~/.local/bin/edgecoder` (a `/bin/sh` script).
+- Windows: `%LOCALAPPDATA%\EdgeCoder\bin\edgecoder.cmd`.
+
+It says whether that folder is on your `PATH`; if not, add it (on macOS and Linux:
+`export PATH="$HOME/.local/bin:$PATH"` in `~/.zshrc` or `~/.bashrc`) and open a new terminal.
+An existing EdgeCoder launcher there is replaced; any other file with that name is left alone.
+
+From a checkout of this repository:
 
 ```sh
 npm ci && npm run build
@@ -25,7 +37,7 @@ edgecoder code --repo codyrs82/Edgecoder --model network/qwen3-coder:30b --remot
 edgecoder code --resume <session-id>                          # continue a saved session (--list shows them)
 ```
 
-The first time, it asks once whether to trust the folder. A trusted folder may run its own
+The first time in a folder, it asks once whether to trust it. A trusted folder may run its own
 tooling, such as type checkers and linters, by itself. The agent's own commands always ask first,
 whatever you answer. `--trust` answers yes without asking. Headless (no TTY), the folder stays
 untrusted unless you pass `--trust`.
@@ -36,7 +48,8 @@ untrusted unless you pass `--trust`.
 | `--model <id>` | A local Ollama tag, `network/<model>[@cpu\|apple\|gpu\|gpu.dc]`, `mine/<model>`, or `auto` (the default). |
 | `--compute local\|network\|mine\|auto` | Where the model runs. A default model is picked for that place. |
 | `--remote` | Show the session live in the app from the start. |
-| `--auto-edits` | Apply file edits without asking. Every turn stays undoable, and commands still ask. |
+| `--mode ask\|auto-edits\|auto` | How much it asks first (below). Default: `auto-edits` in a git repository with a clean working tree (the checkpoint and git both keep the originals), else `ask`. |
+| `--auto-edits` | Same as `--mode auto-edits`. |
 | `--resume <id>`, `--list` | Continue a saved session, or list them. |
 | `--provider <url>`, `--standalone`, `--port <n>` | Which provider to use (next section). |
 | `--api-key-file <path>` | An `eck_` API key for network models without the app. |
@@ -45,25 +58,56 @@ While it runs:
 
 - **Replies stream** as the model writes them.
 - **Tool calls** print as one line each: `● read_file(src/x.ts)`, then `⎿ 120 lines`.
+- **You can type at any time.** While a reply runs, Enter queues your message (`/queue` lists,
+  `/unqueue` removes); it runs when the reply ends. **Esc** (or `/stop`, or Ctrl+C) stops the reply,
+  and the queue runs next. What it already wrote stays, and `/undo` reverts it.
 - **Approvals**: before an edit or write, the diff prints; before a command, the command prints.
-  Then it asks `Allow …? [y]es / [n]o / [a]lways`:
-  - **always** on an edit applies later edits in this session without asking. Edits to files that
-    tooling runs (`.git`, `.husky`, …) still ask.
-  - **always** on a command covers that program name, such as `npm`, for plain commands with no
-    shell syntax.
-  - Commits, pushes and pull requests ask every time.
-- **Ctrl+C** stops the reply that is running. What it already wrote stays, and `/undo` reverts it.
+  Then it asks `Allow …? [Y/n/a]`. **Enter means yes.**
+  - **a** (always) on an edit applies later edits without asking (the session moves to
+    auto-edits, and new sessions in this project start there).
+  - **a** on a command covers that program name, such as `npm`, for plain commands, in this
+    project from now on. It never covers a risky command (below).
+  - Slash commands work at an approval prompt too: `/remote` publishes and the approval keeps waiting.
+  - "Always" answers are kept per project in `~/.edgecoder/permissions.json` (0600).
+- **Where it ran**: each turn ends with one dim line, for example
+  `qwen3-coder:30b · Datacenter GPU 2×A16 · Chicago · read 24.8k tok in 81 s · wrote 312 tok in 6.5 s · 3.4 cSats`.
+  The machine is named by its masked label (`lin-•••3f2a`), or as yours when it is your own;
+  local runs say `This computer (Apple M1 Max)`. `/status` shows the last call in detail.
+
+### Permission modes
+
+The prompt line shows the mode (`[auto-edits] ›`); **Shift+Tab** cycles it, `/mode` sets it.
+
+| Mode | Edits | Commands |
+| --- | --- | --- |
+| `ask` | ask | ask |
+| `auto-edits` | apply (each turn stays undoable) | ask |
+| `auto` | apply | apply, except risky ones |
+
+In every mode:
+
+- **Read-only commands never ask:** `grep`, `rg`, `ls`, `cat`, `head`, `tail`, `wc`, `find` (without
+  `-exec`/`-delete`), `git status`/`diff`/`log`/`show`, and the like, with pipes between them. A
+  redirection, command substitution, a write flag or a path outside the project makes it not
+  read-only.
+- **Risky commands always ask:** anything touching a path outside the project or a protected path
+  (`.git`, hooks, files tooling runs); `rm` and similar; `git push`, `git reset --hard`,
+  `git clean`; `curl … | sh`; package installs (`npm install`, `pip install`, `brew install`, `npx`, …);
+  network fetches (`curl`, `wget`, `ssh`, …); shell syntax that can't be checked.
+- Pushes and pull requests (the git tools) ask every time; commits ask as before.
 
 | Command | Does |
 | --- | --- |
 | `/model [name]` | Show or set the model. A bare name keeps the current place (`network/` stays network). |
 | `/compute [local\|network\|mine\|auto]` | Where the model runs. |
+| `/mode [ask\|auto-edits\|auto]` | How much it asks first (Shift+Tab cycles). |
+| `/stop` | Stop the reply (Esc). Queued messages run next. |
+| `/queue`, `/unqueue [n]` | List queued messages; remove one (default the last). |
 | `/undo` | Revert the files the last reply changed (the turn's checkpoint). |
 | `/clear` | Start the conversation over (same session and settings). |
-| `/status` | Session, project and branch, model, who is in control, who is watching, the provider. |
+| `/status` | Session, project and branch, model, mode, where the last call ran, who is connected, the queue, the provider. |
 | `/cost` | cSats this session has spent. |
 | `/remote [off]` | Continue this session in the app, or stop showing it there. |
-| `/take` | Take control back from the app. |
 | `/github` | Sign in to GitHub with a one-time code (below). |
 | `/help`, `/exit` | Help, and leave. The session is kept. |
 
@@ -108,17 +152,35 @@ over Server-Sent Events (`GET /v1/ide/sessions/:id/events?since=N`). A client th
 resumes after the last event it saw. If the provider no longer has those events, it says `resync`
 and the client fetches the snapshot again.
 
-**One writer at a time.** The client in control sends messages, answers approvals and changes
-settings. The others watch, and a write from them is refused with `not_in_control`. **Take
-control** (`POST …/control`) hands the session over, including an approval that is already
-waiting. When the terminal exits, it releases control so the app can carry on.
+**Co-editing.** Every attached client (the terminal, the app) may send, answer approvals and change
+settings at any time; nobody has to take control.
+
+- A message sent while a turn runs is **queued** (in order, labelled with its client; `queued` /
+  `unqueued` events). Any client can remove one (`POST …/unqueue`). When the turn ends, the next
+  turn starts with all queued messages. **Stop** (`POST …/cancel`) from either client ends the turn
+  so the queue runs now.
+- **Approvals: the first answer wins.** The `approval` event names who answered (`by`, `label`), so
+  the other client's prompt closes and says "approved in the terminal / app". A later answer
+  returns `applied: false` and changes nothing.
+- **Settings** (model, mode) from either client are broadcast with who changed what, and each
+  client shows a short note.
+- `POST …/control` and `/take` are kept as no-ops for older clients.
+
+Model context: each turn keeps a running token estimate against the model's context window (the
+coordinator's `/inference/models` reports the smallest window an agent serves a model with; local:
+`AGENT_CONTEXT_WINDOW` or 32k). Before a call would pass ~85% of it, older tool results are replaced
+by one-line summaries, then the older part by a summary from a cheap model call (or truncation),
+keeping the request, recent messages and the exact file paths used. A `context_too_long` answer
+compacts and retries once. `read_file` returns at most 400 lines per call and says how to read on.
+Transient network failures (a lost stream, a proxy's 502 page, `not_requester`, an empty reply, a
+timeout before any output) are retried twice with backoff.
 
 | Route (all on the provider, IDE token) | |
 | --- | --- |
 | `GET /v1/ide/sessions[?published=1&projectRoot=]` | Summaries: `live` means published and a client is attached or a turn is running. |
-| `POST /v1/ide/sessions` | Create one (`projectRoot`, `model`, `autoApprove`). The creator is in control. |
+| `POST /v1/ide/sessions` | Create one (`projectRoot`, `model`, `mode`). Without `mode`: auto-edits in a clean git repository, else ask. |
 | `GET /v1/ide/sessions/:id`, `…/events?since=` | Snapshot, and the event stream. |
-| `POST …/messages`, `…/approve`, `…/control`, `…/settings`, `…/publish`, `…/trust`, `…/cancel`, `…/undo`, `…/clear`, `…/delete` | Writes. Each names the client (`clientId`, `kind`, `label`). |
+| `POST …/messages`, `…/unqueue`, `…/approve`, `…/settings`, `…/publish`, `…/trust`, `…/cancel`, `…/undo`, `…/clear`, `…/delete` | Writes, from any client. Each names the client (`clientId`, `kind`, `label`). |
 
 Desktop chats you start in the app are still kept in the app (IndexedDB). Sessions started in a
 terminal live in the provider, and the Code view shows the published ones next to them.
@@ -129,16 +191,13 @@ terminal live in the provider, and the Code view shows the published ones next t
 project in the sidebar, marked **Live** while the terminal (or a turn) is attached. Opening it shows
 the conversation and the reply streaming now.
 
-The app watches until you press **Take control**. After that it can send messages and approve or
-reject tool calls, and the terminal mirrors everything:
-
-- the message (`› [desktop] …`);
-- the tool calls and their diffs;
-- "waiting for the app to approve";
-- the outcome.
-
-Typing in the terminal then says the app is in control; `/take` takes it back. `/remote off` stops
-showing the session in the app.
+Both work on it at once. The header shows who is connected ("Terminal and EdgeCoder app
+connected"). From either side you can send a message (during a reply it is queued, shown as
+**Queued** and removable), stop the reply (**Stop** next to Send, or Esc), approve or reject a tool
+call (the first answer wins; the other side's prompt closes and says where it was answered), and
+change the model or mode (the other side shows a note). The terminal prints the app's messages as
+`› [from EdgeCoder app] …`. Each reply's footer says where it ran; hovering lists every model call.
+`/remote off` stops showing the session in the app.
 
 ### Security
 
@@ -164,7 +223,7 @@ connections from outside. The design:
 3. **End-to-end relay.** Session events and writes are relayed through the coordinator as
    encrypted frames (`ChaCha20-Poly1305`, keyed from the exchange). The coordinator sees only
    ciphertext, sizes and the account. The local provider applies a remote write exactly like a
-   local client's: the same one-writer rule, and the same approvals.
+   local client's: the same queue, and the same approvals.
 4. **Revocable.** `/remote off` or closing the session ends the pairing. Pairings never outlive the
    session, and every attach is shown in the terminal.
 
