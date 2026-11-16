@@ -135,7 +135,8 @@ export const MODEL_CATALOG: CatalogModel[] = [
     minMemoryGb: 16,
     contextTokens: 131_072,
     license: "MIT",
-    capabilities: ["tools", "thinking"]
+    // Ollama's template takes tool definitions, but the model answers with plans, not tool calls.
+    capabilities: ["thinking"]
   },
   {
     modelId: "qwen3.5:27b",

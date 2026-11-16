@@ -49,7 +49,7 @@ import {
 import { normalizeRemoteUrl } from "./git-setup.js";
 import { gitExecEnv } from "./git-safe.js";
 import { ensureRepo as realEnsureRepo } from "./repo-connect.js";
-import { COMPUTE_POLICIES, FALLBACK_NOTE, routeLabel, type ComputePolicy, type PlanOptions, type Route } from "../../inference-api/auto-route.js";
+import { COMPUTE_POLICIES, FALLBACK_NOTE, routeLabel, routeModelId, type ComputePolicy, type PlanOptions, type Route } from "../../inference-api/auto-route.js";
 import type { ChatBackend } from "../../inference-api/types.js";
 
 // ---------------------------------------------------------------------------
@@ -293,9 +293,11 @@ export type BotAvatarShape = (typeof BOT_AVATAR_SHAPES)[number];
 export const DEFAULT_BOT_COMPUTE: BotCompute = { policy: "auto" };
 /**
  * On Local first and Auto, a bot's agent steps want a model at least this big (billions of
- * parameters): your free machines when one has it, else the network within the daily budget, and
- * only then the biggest model on this computer. "This computer only", "My machines only" and a
- * specific model are left as chosen.
+ * parameters) that calls tools (model/tool-support.ts: deepseek-r1:14b is big enough but only
+ * writes plans): your free machines when one has it, else the network's best fit within the daily
+ * budget, and only then the biggest tool-capable model on this computer. A model that can't call
+ * tools never does an agent step. "This computer only", "My machines only" and a specific model
+ * are left as chosen (still only tool-capable models for agent steps).
  */
 export const BOT_AGENT_MIN_PARAMS_B = 14;
 /** What bots saved before compute policies existed keep doing. */
@@ -1593,6 +1595,7 @@ export class BotManager {
     } else if (event.type === "status") {
       act.activity = event.message;
       if (COMPUTE_STATUS.test(event.message) && event.message.includes(FALLBACK_NOTE)) act.run.note = FALLBACK_NOTE;
+      if (event.note) act.run.note = event.note;
     } else if (event.type === "tool_call") {
       act.activity = `Using ${event.tool}`;
       act.tools.set(event.id, { tool: event.tool, args: event.args });
@@ -1810,32 +1813,66 @@ export class BotManager {
 /** The status line a run's route announces ("Compute: this computer (free) · qwen3.5:9b …"). */
 const COMPUTE_STATUS = /^(Auto|Compute): /;
 
+/** A bot's model calls, and the switch to the next model in the ranking (see AgentLoopDeps.escalate). */
+export type BotChatFn = ChatFn & { escalate?: () => boolean };
+
+/** "Auto → qwen3.5:9b on this computer (tools needed; local deepseek-r1:14b has no tool support)". */
+export function routeChoiceNote(r: Route, policy: ComputePolicy, why = r.why): string | undefined {
+  if (!why) return undefined;
+  const on = r.bestFit ? "network best fit" :
+    `${r.model} ${r.placement === "local" ? "on this computer" : r.placement === "mine" ? "on your machines" : r.placement === "reserved" ? "on your reserved machine" : "on the network"}`;
+  return `${policy === "local_first" ? "Local first" : policy === "auto" ? "Auto" : "Compute"} → ${on} (${why})`;
+}
+
 /**
  * A bot's model calls on its compute policy. `auto` builds the routed backend (autoBackend in the
  * IDE server); each call gets the budget left today, so the network never gets more than that or
- * the balance. Usage events say where each call ran and what it cost.
+ * the balance. Usage events say where each call ran and what it cost. `escalate` leaves the route
+ * the last call ran on out of later calls (once a model has answered an agent step with only a
+ * plan), so the next place in the ranking takes over.
  */
 export function botComputeChat(
   ctx: Pick<BotRunContext, "bot" | "sendEvent" | "signal" | "budgetLeft">,
   auto: (policy: ComputePolicy, plan: () => PlanOptions, onRoute: (r: Route) => void) => ChatBackend,
-): ChatFn {
+): BotChatFn {
   const compute = ctx.bot.compute ?? LEGACY_BOT_COMPUTE;
   let where = "";
+  let last: Route | undefined;
+  const exclude: string[] = [];
   const backend = auto(
     compute.policy,
     () => {
       const left = ctx.budgetLeft();
       const capable = compute.policy === "local_first" || compute.policy === "auto";
-      return { ...(left === null ? {} : { allowanceCSats: left }), ...(compute.model ? { model: compute.model } : {}), ...(capable ? { agentMinParamsB: BOT_AGENT_MIN_PARAMS_B } : {}) };
+      return {
+        ...(left === null ? {} : { allowanceCSats: left }),
+        ...(compute.model ? { model: compute.model } : {}),
+        ...(capable ? { agentMinParamsB: BOT_AGENT_MIN_PARAMS_B } : {}),
+        ...(exclude.length ? { exclude: [...exclude] } : {}),
+      };
     },
     (r) => {
+      const skipped = last && exclude.includes(routeModelId(last)) && routeModelId(last) !== routeModelId(r) ? last : undefined;
+      last = r;
       where = routeLabel(r);
-      ctx.sendEvent({ type: "status", message: `Compute: ${r.reason}` });
+      const why = skipped ? `${skipped.bestFit ? "the network's pick" : skipped.model} answered with a plan and no tool calls` : r.why;
+      const note = routeChoiceNote(r, compute.policy, why);
+      ctx.sendEvent({ type: "status", message: `Compute: ${r.reason}${why ? ` (${why})` : ""}`, ...(note ? { note } : {}) });
     },
   );
   // Tell the network's best fit this is agent work, so it picks a model that handles tools well.
   const agentic: ChatBackend = (req, signal) => backend(req.tools?.length ? { ...req, hints: { job: "agentic", needsTools: true, ...req.hints } } : req, signal);
-  return backendChat(agentic, (cSats) => ctx.sendEvent({ type: "usage", cSats, where }), ctx.signal);
+  const chat: BotChatFn = backendChat(agentic, (cSats) => ctx.sendEvent({ type: "usage", cSats, where }), ctx.signal);
+  // A pinned model has nowhere else to go.
+  if (compute.policy !== "model") {
+    chat.escalate = () => {
+      if (!last) return false;
+      const id = routeModelId(last);
+      if (!exclude.includes(id)) exclude.push(id);
+      return true;
+    };
+  }
+  return chat;
 }
 
 // ---------------------------------------------------------------------------
@@ -1844,7 +1881,7 @@ export function botComputeChat(
 
 export function agentBotRunner(d: {
   /** The model calls for a run (Auto compute in the IDE server). */
-  chat: (ctx: BotRunContext) => ChatFn;
+  chat: (ctx: BotRunContext) => BotChatFn;
   execute: (bot: BotConfig) => ToolRunnerDeps["execute"];
   /** Resolve a call's arguments before approval (open_pull_request's branch, base and diffstat). */
   prepare?: (bot: BotConfig) => NonNullable<ToolRunnerDeps["prepare"]>;
@@ -1869,8 +1906,10 @@ export function agentBotRunner(d: {
       allowShellAutoApprove: false,
       ...(d.prepare ? { prepare: d.prepare(ctx.bot) } : {}),
     });
+    const chat: BotChatFn = d.chat(ctx);
     await runAgentLoop({
-      chat: d.chat(ctx),
+      chat,
+      ...(chat.escalate ? { escalate: chat.escalate } : {}),
       systemPrompt: (format) => [basePrompt(format), ctx.systemAddition].filter(Boolean).join("\n\n"),
       messages: ctx.messages,
       sendEvent: ctx.sendEvent,

@@ -1,6 +1,7 @@
 // Copyright (c) 2025 EdgeCoder, LLC
 // SPDX-License-Identifier: BUSL-1.1
 
+import { refreshOllamaCapabilities } from "../../model/tool-support.js";
 import { writeSseHead } from "../../common/sse.js";
 import Fastify, { type FastifyReply } from "fastify";
 import { exposeRequestId, serviceLoggerOptions } from "../../common/http-logging.js";
@@ -193,6 +194,8 @@ let routeCache: { at: number; inputs: RouteInputs } | null = null;
 async function routeInputsHere(): Promise<RouteInputs> {
   if (routeCache && Date.now() - routeCache.at < 15_000) return routeCache.inputs;
   const localModels = await ollamaTags().then((t) => t.models.map((m) => m.name)).catch(() => [] as string[]);
+  // What each local model can do (Ollama /api/show "capabilities"), so agent steps skip models without tools.
+  await refreshOllamaCapabilities(localModels, { host: process.env.OLLAMA_HOST || "http://127.0.0.1:11434" });
   const [ov, leases] = networkDeps
     ? await Promise.all([
         computeOverview(networkDeps).catch(() => null),
