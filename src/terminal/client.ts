@@ -7,7 +7,8 @@
  * reconnects that resume after the last event seen.
  */
 
-import type { ClientRef, SessionEvent, SessionSnapshot, SessionSummary } from "../apps/ide/sessions.js";
+import type { PermissionMode } from "../apps/ide/permissions.js";
+import type { ClientRef, QueuedMessage, SessionEvent, SessionSnapshot, SessionSummary } from "../apps/ide/sessions.js";
 
 export class ProviderError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly body: Record<string, unknown> = {}) {
@@ -89,7 +90,7 @@ export class ProviderClient {
     }
   }
 
-  createSession(input: { projectRoot: string; model?: string; autoApprove?: "none" | "edits"; published?: boolean }): Promise<Snapshot> {
+  createSession(input: { projectRoot: string; model?: string; autoApprove?: "none" | "edits"; mode?: PermissionMode; published?: boolean }): Promise<Snapshot> {
     return this.req("POST", "/v1/ide/sessions", input);
   }
   snapshot(id: string): Promise<Snapshot> {
@@ -98,10 +99,15 @@ export class ProviderClient {
   async listSessions(query = ""): Promise<SessionSummary[]> {
     return (await this.req<{ sessions: SessionSummary[] }>("GET", `/v1/ide/sessions${query}`)).sessions;
   }
-  send(id: string, text: string): Promise<{ turnId: string }> {
+  /** Starts a turn, or queues the message while one runs (turnId null). */
+  send(id: string, text: string): Promise<{ turnId: string | null; queued?: QueuedMessage }> {
     return this.req("POST", `/v1/ide/sessions/${id}/messages`, { text });
   }
-  approve(id: string, callId: string, approved: boolean, always = false): Promise<unknown> {
+  unqueue(id: string, queuedId: string): Promise<{ removed: boolean }> {
+    return this.req("POST", `/v1/ide/sessions/${id}/unqueue`, { queuedId });
+  }
+  /** `applied` false: another client answered first. */
+  approve(id: string, callId: string, approved: boolean, always = false): Promise<{ ok: boolean; applied?: boolean }> {
     return this.req("POST", `/v1/ide/sessions/${id}/approve`, { callId, approved, always });
   }
   takeControl(id: string): Promise<unknown> {
@@ -110,7 +116,7 @@ export class ProviderClient {
   releaseControl(id: string): Promise<unknown> {
     return this.req("POST", `/v1/ide/sessions/${id}/control`, { release: true });
   }
-  settings(id: string, patch: { model?: string; title?: string; autoApprove?: "none" | "edits" }): Promise<unknown> {
+  settings(id: string, patch: { model?: string; title?: string; autoApprove?: "none" | "edits"; mode?: PermissionMode }): Promise<unknown> {
     return this.req("POST", `/v1/ide/sessions/${id}/settings`, patch);
   }
   publish(id: string, published: boolean): Promise<unknown> {

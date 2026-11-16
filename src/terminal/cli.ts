@@ -34,7 +34,13 @@ Options:
   --remote                 show the session live in the EdgeCoder app from the start (same as /remote)
   --resume <session-id>    continue a saved session
   --trust                  trust the folder without asking (the project's own tooling may then run)
-  --auto-edits             apply file edits without asking (each turn stays undoable); commands still ask
+  --mode <mode>            ask, auto-edits or auto (default: auto-edits in a git repository with a
+                           clean working tree, else ask). Shift+Tab or /mode changes it later.
+                             ask         edits and commands ask
+                             auto-edits  edits apply without asking (each turn stays undoable)
+                             auto        edits and commands apply; risky commands still ask
+                           Read-only commands (grep, ls, cat, git status/diff/log…) never ask.
+  --auto-edits             same as --mode auto-edits
   --provider <url>         the IDE provider to use (default http://127.0.0.1:4304, or IDE_PROVIDER_URL)
   --standalone             always start the provider in this process
   --port <n>               port for an in-process provider (default 4304)
@@ -52,6 +58,7 @@ interface Args {
   resume?: string;
   trust: boolean;
   autoEdits: boolean;
+  mode?: "ask" | "auto-edits" | "auto";
   provider?: string;
   standalone: boolean;
   port?: number;
@@ -73,6 +80,7 @@ export function parseCodeArgs(argv: string[]): Args | { error: string } {
         resume: { type: "string" },
         trust: { type: "boolean", default: false },
         "auto-edits": { type: "boolean", default: false },
+        mode: { type: "string" },
         provider: { type: "string" },
         standalone: { type: "boolean", default: false },
         port: { type: "string" },
@@ -82,6 +90,7 @@ export function parseCodeArgs(argv: string[]): Args | { error: string } {
       },
     });
     if (positionals.length > 1) return { error: "Give at most one folder." };
+    if (values.mode && !["ask", "auto-edits", "auto"].includes(values.mode)) return { error: "--mode is ask, auto-edits or auto." };
     if (values.compute && !["local", "network", "auto", "mine"].includes(values.compute)) return { error: "--compute is local, network, mine or auto." };
     const port = values.port ? Number(values.port) : undefined;
     if (port !== undefined && !(Number.isInteger(port) && port > 0 && port < 65536)) return { error: "--port must be a port number." };
@@ -94,6 +103,7 @@ export function parseCodeArgs(argv: string[]): Args | { error: string } {
       resume: values.resume,
       trust: values.trust ?? false,
       autoEdits: values["auto-edits"] ?? false,
+      ...(values.mode ? { mode: values.mode as "ask" | "auto-edits" | "auto" } : values["auto-edits"] ? { mode: "auto-edits" as const } : {}),
       provider: values.provider,
       standalone: values.standalone ?? false,
       port,
@@ -115,10 +125,21 @@ export function initialModel(a: Pick<Args, "model" | "compute">, env: NodeJS.Pro
   return "auto";
 }
 
-/** Lines from a terminal (readline) or a pipe; output written so a prompt being typed survives. */
+/**
+ * Lines from a terminal (readline) or a pipe. The REPL always has a line being read, so whatever
+ * arrives meanwhile (the reply streaming, a tool call, the app's messages) is printed above the
+ * prompt and what you were typing is redrawn below it. Esc and Shift+Tab are reported as keys.
+ */
 export function terminalIO(): ReplIO {
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: tty });
+  const slash = ["/help", "/model", "/compute", "/mode", "/remote", "/stop", "/queue", "/unqueue", "/undo", "/clear", "/status", "/cost", "/github", "/exit"];
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: tty,
+    // Tab completes slash commands (and keeps Shift+Tab from inserting anything).
+    completer: (line: string) => [line.startsWith("/") ? slash.filter((c) => c.startsWith(line)) : [], line] as [string[], string],
+  });
   const lines: string[] = [];
   const waiters: Array<(l: string | null) => void> = [];
   let ended = false;
@@ -135,36 +156,64 @@ export function terminalIO(): ReplIO {
     for (const w of waiters.splice(0)) w(null);
   });
   let interrupt: (() => void) | null = null;
-  if (tty) rl.on("SIGINT", () => interrupt?.());
-  else process.on("SIGINT", () => interrupt?.());
+  let onKey: ((k: "escape" | "shift-tab") => void) | null = null;
+  if (tty) {
+    rl.on("SIGINT", () => interrupt?.());
+    // Bracketed paste stays off: a terminal that sends its markers would leave "[200~" on screen.
+    process.stdout.write("\x1b[?2004l");
+    process.stdin.on("keypress", (_s: string | undefined, key: { name?: string; shift?: boolean; ctrl?: boolean; meta?: boolean } | undefined) => {
+      if (!key) return;
+      if (key.name === "escape" && !key.meta) onKey?.("escape");
+      else if (key.name === "tab" && key.shift) onKey?.("shift-tab");
+    });
+  } else process.on("SIGINT", () => interrupt?.());
+  const width = () => Math.max(20, process.stdout.columns || 80);
+  /** Print text above the prompt and redraw the prompt with what was typed. */
+  const above = (text: string) => {
+    readline.clearLine(process.stdout, 0);
+    readline.cursorTo(process.stdout, 0);
+    process.stdout.write(text);
+    rl.prompt(true);
+  };
   return {
     readLine(prompt) {
       if (lines.length) return Promise.resolve(lines.shift()!);
       if (ended) return Promise.resolve(null);
       if (tty) {
         rl.setPrompt(prompt);
-        rl.prompt();
+        rl.prompt(true);
         prompting = true;
       } else process.stdout.write(prompt);
       return new Promise((r) => waiters.push(r));
+    },
+    setPrompt(prompt) {
+      if (!tty) return;
+      rl.setPrompt(prompt);
+      if (prompting) above("");
     },
     write(text) {
       if (!(tty && prompting)) {
         process.stdout.write(text);
         return;
       }
-      // Something arrived while you are typing: print whole lines above the prompt.
+      // Whole lines go above the prompt; a partial line waits for its end (or for a full row,
+      // so a long streamed line still shows up).
       held += text;
       const cut = held.lastIndexOf("\n");
-      if (cut < 0) return;
-      readline.clearLine(process.stdout, 0);
-      readline.cursorTo(process.stdout, 0);
-      process.stdout.write(held.slice(0, cut + 1));
-      held = held.slice(cut + 1);
-      rl.prompt(true);
+      if (cut >= 0) {
+        above(held.slice(0, cut + 1));
+        held = held.slice(cut + 1);
+      }
+      if (held.length >= width()) {
+        above(`${held}\n`);
+        held = "";
+      }
     },
     onInterrupt(fn) {
       interrupt = fn;
+    },
+    onKey(fn) {
+      onKey = fn;
     },
     close() {
       rl.close();
@@ -237,7 +286,7 @@ export async function runCode(argv: string[]): Promise<number> {
     if (a.resume) {
       const snap = await client.snapshot(a.resume);
       sessionId = snap.session.id;
-      await client.takeControl(sessionId);
+      if (a.mode) await client.settings(sessionId, { mode: a.mode });
     } else {
       let projectRoot: string;
       if (a.repo) {
@@ -256,7 +305,8 @@ export async function runCode(argv: string[]): Promise<number> {
           return 1;
         }
       }
-      const snap = await client.createSession({ projectRoot, model: initialModel(a), autoApprove: a.autoEdits ? "edits" : "none" });
+      // No --mode: the provider picks (auto-edits in a clean git repository, else ask).
+      const snap = await client.createSession({ projectRoot, model: initialModel(a), ...(a.mode ? { mode: a.mode } : {}) });
       sessionId = snap.session.id;
       if (!snap.trusted) {
         let trust = a.trust;

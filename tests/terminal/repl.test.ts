@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ClientRef } from "../../src/apps/ide/sessions.js";
 import { ProviderClient } from "../../src/terminal/client.js";
 import { initialModel, parseCodeArgs } from "../../src/terminal/cli.js";
-import { lineDiff, makeStyle } from "../../src/terminal/render.js";
+import { clean, lineDiff, makeStyle, usageLine } from "../../src/terminal/render.js";
 import { placeModel, Repl, withPlacement, type ReplIO } from "../../src/terminal/repl.js";
 import { makeHub, sessionServer, until, type Reply } from "../helpers/sessions.js";
 
@@ -18,19 +18,32 @@ function testIO() {
   const prompts: string[] = [];
   const queued: Array<string | null> = [];
   const waiters: Array<(l: string | null) => void> = [];
+  let key: ((k: "escape" | "shift-tab") => void) | null = null;
+  let current = "";
   const io: ReplIO = {
     readLine(prompt) {
       prompts.push(prompt);
+      current = prompt;
       if (queued.length) return Promise.resolve(queued.shift()!);
       return new Promise((r) => waiters.push(r));
     },
+    setPrompt(prompt) {
+      if (prompt !== current) prompts.push(prompt);
+      current = prompt;
+    },
     write(t) {
       output += t;
+    },
+    onKey(fn) {
+      key = fn;
     },
   };
   return {
     io,
     prompts,
+    /** The prompt shown right now. */
+    prompt: () => current,
+    press: (k: "escape" | "shift-tab") => key?.(k),
     out: () => output,
     feed(line: string | null) {
       const w = waiters.shift();
@@ -93,11 +106,12 @@ describe("the terminal REPL (scripted model)", () => {
     ]);
     const done = repl.run();
     t.feed("change world to EdgeCoder in hello.txt");
-    await until(() => t.prompts.some((p) => p.includes("Allow edit_file(hello.txt)")), 5000, "approval prompt");
+    await until(() => t.prompt().includes("Allow edit_file(hello.txt)? [Y/n/a]"), 5000, "approval prompt");
     expect(t.out()).toContain("● edit_file(hello.txt)");
     expect(t.out()).toContain("-world");
     expect(t.out()).toContain("+EdgeCoder");
-    t.feed("y");
+    // Enter means yes.
+    t.feed("");
     await until(() => t.out().includes("Done: hello.txt now greets EdgeCoder."), 5000, "reply");
     await until(() => t.out().includes("changed hello.txt (/undo reverts)"), 5000, "footer");
     expect(readFileSync(join(root, "hello.txt"), "utf8")).toBe("hello\nEdgeCoder\n");
@@ -107,7 +121,6 @@ describe("the terminal REPL (scripted model)", () => {
     expect(readFileSync(join(root, "hello.txt"), "utf8")).toBe("hello\nworld\n");
     t.feed(null);
     expect(await done).toBe(0);
-    // leaving hands control back
     expect(hub.snapshot(id).controller).toBeNull();
   });
 
@@ -124,8 +137,11 @@ describe("the terminal REPL (scripted model)", () => {
     await until(() => t.prompts.some((p) => p.includes("write_file(x.txt)")));
     expect(t.out()).toContain("+x");
     t.feed("maybe");
+    t.feed("perhaps");
     t.feed("n");
     await until(() => t.out().includes("Rejected, fine."));
+    // The hint for an answer that isn't one is shown once.
+    expect(t.out().split("Enter or y = yes, n = no, a = always.").length - 1).toBe(1);
     t.feed("write y and z");
     await until(() => t.prompts.some((p) => p.includes("write_file(y.txt)")));
     t.feed("a");
@@ -142,8 +158,8 @@ describe("the terminal REPL (scripted model)", () => {
     expect(out).toContain("▸ compute: local · model: qwen2.5-coder:latest");
     expect(out).toContain("▸ compute: auto · model: auto");
     expect(out).toContain("This session has spent 0 cSats.");
-    expect(out).toMatch(/control {2}you/);
-    expect(out).toContain("Remote control on.");
+    expect(out).toMatch(/mode {5}auto-edits/);
+    expect(out).toContain("Remote on.");
     expect(hub.snapshot(id).session.published).toBe(true);
     expect(hub.snapshot(id).session.model).toBe("auto");
     t.feed("/clear");
@@ -153,60 +169,136 @@ describe("the terminal REPL (scripted model)", () => {
   });
 });
 
-describe("remote control: the desktop attaches to a terminal session", () => {
-  it("sees it live, takes control, sends and approves; the terminal mirrors it and can take control back", async () => {
-    const { t, repl, url, id } = await setup([
-      { content: "From the terminal.", toolCalls: [] },
-      { content: "Writing from the app's request.", toolCalls: [{ name: "write_file", arguments: { path: "app.txt", content: "app\n" } }] },
-      { content: "All done.", toolCalls: [] },
-      { content: "Back in the terminal.", toolCalls: [] },
+describe("slash commands at an approval prompt", () => {
+  it("/remote publishes and the approval keeps waiting; then Enter approves", async () => {
+    const { t, repl, hub, id } = await setup([
+      { content: "", toolCalls: [{ name: "write_file", arguments: { path: "w.txt", content: "w\n" } }] },
+      { content: "Wrote it.", toolCalls: [] },
     ]);
     const done = repl.run();
-    t.feed("hello");
-    await until(() => t.out().includes("From the terminal."));
+    t.feed("/mode ask");
+    t.feed("write w");
+    await until(() => t.prompt().includes("Allow write_file(w.txt)"), 5000, "approval");
     t.feed("/remote");
-    await until(() => t.out().includes("Remote control on."));
+    await until(() => t.out().includes("Remote on."), 5000, "remote");
+    expect(hub.snapshot(id).session.published).toBe(true);
+    expect(hub.snapshot(id).pending).toHaveLength(1);
+    expect(t.prompt()).toContain("Allow write_file(w.txt)");
+    expect(t.out()).not.toContain("Enter or y = yes");
+    t.feed("");
+    await until(() => t.out().includes("Wrote it."), 5000, "reply");
+    expect(readFileSync(join(root, "w.txt"), "utf8")).toBe("w\n");
+    t.feed("/exit");
+    await done;
+  });
 
-    // The desktop app: list live sessions, follow one, take control.
+  it("Shift+Tab cycles the mode and the prompt shows it; Esc stops a running reply", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { t, repl, hub, id } = await setup([
+      async () => {
+        await gate;
+        return { content: "late", toolCalls: [] };
+      },
+    ]);
+    const done = repl.run();
+    await until(() => t.prompt().includes("["), 5000, "prompt");
+    const start = hub.snapshot(id).session.mode;
+    t.press("shift-tab");
+    await until(() => hub.snapshot(id).session.mode !== start, 5000, "mode change");
+    expect(t.prompt()).toContain(`[${hub.snapshot(id).session.mode}]`);
+    t.feed("something slow");
+    await until(() => t.prompt().includes("running"), 5000, "running");
+    t.press("escape");
+    await until(() => t.out().includes("Stopping…"), 5000, "stop");
+    release();
+    await hub.idle(id);
+    t.feed("/exit");
+    await done;
+  });
+});
+
+describe("co-editing: the desktop and the terminal on one session", () => {
+  it("both send at once (queued, labelled), the first answer to an approval wins and the other prompt closes, settings are mirrored", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const { t, repl, url, id, hub } = await setup([
+      async () => {
+        await gate;
+        return { content: "From the terminal.", toolCalls: [] };
+      },
+      { content: "Writing app.txt.", toolCalls: [{ name: "write_file", arguments: { path: "app.txt", content: "app\n" } }] },
+      { content: "All done.", toolCalls: [] },
+    ]);
+    const done = repl.run();
+    t.feed("/mode ask");
+    await until(() => hub.snapshot(id).session.mode === "ask", 5000, "mode");
+    t.feed("hello");
+    await until(() => t.prompt().includes("running"), 5000, "running");
+
     const desk = new ProviderClient(url, "unused", DESK);
-    const live = await desk.listSessions("?published=1");
-    expect(live).toHaveLength(1);
-    expect(live[0]).toMatchObject({ id, projectRoot: root, live: true, published: true, origin: "terminal" });
     const snap = await desk.snapshot(id);
-    expect(snap.session.transcript.map((e) => e.content)).toEqual(["hello", "From the terminal."]);
     const seen: Array<{ type: string; [k: string]: unknown }> = [];
     const follow = desk.follow(id, snap.seq, (e) => seen.push(e));
     cleanup.push(() => follow.close());
-    await until(() => t.out().includes("EdgeCoder app is following this session."), 5000, "presence");
+    await until(() => t.out().includes("Connected: this terminal and EdgeCoder app"), 5000, "presence");
 
-    // The terminal can't be overtaken silently: the app must take control first.
-    await expect(desk.send(id, "nope")).rejects.toThrow(/in control/);
-    await desk.takeControl(id);
-    await until(() => t.out().includes("EdgeCoder app took control"), 5000, "control notice");
+    // The app sends while the terminal's turn runs: queued and labelled in the terminal; no take-control.
+    const r = await desk.send(id, "write app.txt");
+    expect(r.turnId).toBeNull();
+    await until(() => t.out().includes("Queued from EdgeCoder app: write app.txt"), 5000, "queued notice");
+    // The terminal types too: queued behind it.
+    t.feed("and then this");
+    await until(() => t.out().includes("Queued (#2)"), 5000, "own queue");
+    // The app removes the terminal's queued message (anyone may).
+    const q = (await desk.snapshot(id)).queue;
+    expect(q.map((x) => x.by)).toEqual(["desktop", "terminal"]);
+    await desk.unqueue(id, q[1].id);
+    release();
 
-    await desk.send(id, "write app.txt");
-    await until(() => seen.some((e) => e.type === "agent" && (e.event as { type: string; requires_approval?: boolean }).requires_approval === true), 5000, "approval event");
-    // The terminal shows the request and the diff, and waits for the app.
-    await until(() => t.out().includes("waiting for EdgeCoder app to approve"), 5000, "mirror");
-    expect(t.out()).toContain("› [desktop] write app.txt");
-    expect(t.out()).toContain("+app");
+    await until(() => t.prompt().includes("Allow write_file(app.txt)"), 5000, "terminal approval prompt");
+    expect(t.out()).toContain("› [from EdgeCoder app] write app.txt");
     const pending = (await desk.snapshot(id)).pending;
-    await desk.approve(id, pending[0].id, true);
-    await until(() => t.out().includes("All done."), 5000, "mirrored reply");
-    expect(t.out()).toContain("✓ approved (desktop)");
+    expect((await desk.approve(id, pending[0].id, true)).applied).toBe(true);
+    // The terminal's prompt closes itself and says who answered.
+    await until(() => !t.prompt().includes("Allow"), 5000, "prompt closes");
+    await until(() => t.out().includes("✓ approved in EdgeCoder app"), 5000, "who answered");
+    // A late answer from the terminal changes nothing.
+    expect((await new ProviderClient(url, "unused", TERM).approve(id, pending[0].id, false)).applied).toBe(false);
+    await until(() => t.out().includes("All done."), 5000, "reply");
     expect(readFileSync(join(root, "app.txt"), "utf8")).toBe("app\n");
-    const streamed = seen.filter((e) => e.type === "agent" && (e.event as { type: string }).type === "text").map((e) => (e.event as { content: string }).content).join("");
-    expect(streamed).toContain("All done.");
 
-    // Typing in the terminal while the app is in control is refused with a hint; /take takes it back.
-    t.feed("are you there?");
-    await until(() => t.out().includes("/take to take it back"));
+    // Settings from the app show up in the terminal.
+    await desk.settings(id, { model: "network/qwen2.5-coder:32b", mode: "auto" });
+    await until(() => t.out().includes("EdgeCoder app changed model → network/qwen2.5-coder:32b, mode → auto"), 5000, "settings note");
+    expect(t.prompt()).toContain("[auto]");
     t.feed("/take");
-    await until(() => seen.some((e) => e.type === "control" && (e.controller as ClientRef | null)?.clientId === TERM.clientId), 5000, "take back");
-    t.feed("and now?");
-    await until(() => t.out().includes("Back in the terminal."));
-    expect(seen.some((e) => e.type === "message" && (e.entry as { content: string }).content === "and now?")).toBe(true);
+    await until(() => t.out().includes("Nothing to take"), 5000, "take is a no-op");
     t.feed("/exit");
     await done;
+    expect(seen.some((e) => e.type === "control")).toBe(false);
+  });
+});
+
+describe("rendering", () => {
+  it("strips escape sequences, half sequences, paste markers and carriage returns that left [ and ] at line edges", () => {
+    expect(clean("\x1b[31mred\x1b[39m done")).toBe("red done");
+    expect(clean("cut here \x1b[3")).toBe("cut here ");
+    expect(clean("\x1b[200~pasted\x1b[201~")).toBe("pasted");
+    expect(clean("[200~pasted[201~")).toBe("pasted");
+    expect(clean("progress 10%\rprogress 100%\r\n")).toBe("progress 10%\nprogress 100%\n");
+    expect(clean("\x1b]0;title\x07text")).toBe("text");
+    expect(clean("a\u0000b\u0007c")).toBe("abc");
+    // Ordinary brackets stay.
+    expect(clean("arr[0] = [1, 2]")).toBe("arr[0] = [1, 2]");
+  });
+
+  it("a turn's usage line says the model, the hardware, where, tokens, time and cost", () => {
+    const line = usageLine([
+      { cSats: 1.4, where: "network", model: "qwen3-coder:30b", served: { label: "lin-•••3f2a", own: false, computeClass: "gpu.dc", tier: "gpu.dc40", hardware: "Datacenter GPU (gpu.dc40)", gpu: "2× NVIDIA A16", region: "ord", city: "Chicago", country: "US", promptTokens: 20_000, outputTokens: 200, promptMs: 60_000, genMs: 4_000 } },
+      { cSats: 2, where: "network", model: "qwen3-coder:30b", served: { label: "lin-•••3f2a", own: false, computeClass: "gpu.dc", tier: "gpu.dc40", hardware: "Datacenter GPU (gpu.dc40)", gpu: "2× NVIDIA A16", region: "ord", city: "Chicago", country: "US", promptTokens: 4_800, outputTokens: 112, promptMs: 21_000, genMs: 2_500 } },
+    ]);
+    expect(line).toBe("qwen3-coder:30b · Datacenter GPU 2×A16 · Chicago · read 24.8k tok in 81 s · wrote 312 tok in 6.5 s · 2 calls · 3.4 cSats");
+    expect(usageLine([{ cSats: 0, where: "x", model: "qwen3.5:9b", served: { label: "This computer", own: true, computeClass: "local", tier: null, hardware: "This computer (Apple M1 Max)", region: null, country: null, outputTokens: 50, genMs: 2_000 } }])).toBe("qwen3.5:9b · This computer (Apple M1 Max) · wrote 50 tok in 2.0 s · 0 cSats");
   });
 });
