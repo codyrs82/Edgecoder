@@ -50,6 +50,30 @@ describe("claim leases (#51)", () => {
     expect(q.claim("B")?.id).toBe(st.id);
   });
 
+  it("renewClaim (a streamed piece) keeps one lease alive like a heartbeat, only for its holder and never past the hard deadline", () => {
+    const { q, st } = setup(60_000);
+    q.claim("A");
+    expect(q.renewClaim(st.id, "B")).toBe(false);
+    // 57 s of pieces, past the 20 s liveness three times over.
+    for (let i = 0; i < 3; i += 1) {
+      vi.advanceTimersByTime(LEASE.livenessMs - 1_000);
+      expect(q.renewClaim(st.id, "A")).toBe(true);
+      expect(q.expireLeases().requeued).toEqual([]);
+    }
+    // 71 s after the claim: past timeout (60 s) + grace (10 s); a piece no longer renews it.
+    vi.advanceTimersByTime(14_000);
+    expect(q.renewClaim(st.id, "A")).toBe(false);
+    expect(q.getClaim(st.id)?.claimedBy).toBeUndefined();
+  });
+
+  it("renewClaim does not revive a lease that already lapsed", () => {
+    const { q, st } = setup(120_000);
+    q.claim("A");
+    vi.advanceTimersByTime(LEASE.livenessMs + 1);
+    expect(q.renewClaim(st.id, "A")).toBe(false);
+    expect(q.expireLeases().requeued).toEqual([st.id]);
+  });
+
   it("heartbeats can't extend a lease beyond timeoutMs + grace", () => {
     const { q, st } = setup(30_000);
     q.claim("A");
