@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { request } from "undici";
+import { listEngineModels, openAiEngineChat, type OpenAiEngine } from "../inference-api/openai-engine.js";
 
 export type ModelProviderKind =
   | "edgecoder-local"
@@ -170,6 +171,35 @@ export class OllamaLocalProvider implements ModelProvider {
   }
 }
 
+/**
+ * The agent's local model on vLLM or MLX (EDGECODER_ENGINE) for code tasks (plan, write, reflect).
+ * It takes the "ollama-local" place in the registry: to the coordinator it is the same thing, a
+ * machine running a catalog model locally. `model()` is the served id, read at each call because
+ * the agent learns it from the engine (src/swarm/engine-probe.ts).
+ */
+export class OpenAiEngineProvider implements ModelProvider {
+  readonly kind: ModelProviderKind = "ollama-local";
+  constructor(private readonly engine: OpenAiEngine, private readonly model: () => string | undefined) {}
+
+  async generate(req: GenerateRequest): Promise<GenerateResponse> {
+    const model = this.model();
+    if (!model) throw new Error(`${this.engine.preset}: no model served yet`);
+    let text = "";
+    for await (const p of openAiEngineChat(this.engine, { model, messages: [{ role: "user", content: req.prompt }], ...(req.maxTokens ? { maxTokens: req.maxTokens } : {}) })) {
+      if ("delta" in p) text += p.delta;
+    }
+    return { text, provider: this.kind };
+  }
+
+  async health(): Promise<boolean> {
+    try {
+      return (await listEngineModels(this.engine, 3_000)).length > 0;
+    } catch {
+      return false;
+    }
+  }
+}
+
 const DEFAULT_EDGE_MODEL = process.env.OLLAMA_EDGE_MODEL ?? "qwen3.5:9b";
 const DEFAULT_COORDINATOR_MODEL = process.env.OLLAMA_COORDINATOR_MODEL ?? "qwen3.5:9b";
 
@@ -178,8 +208,8 @@ export class ProviderRegistry {
   private readonly providers: Map<ModelProviderKind, ModelProvider>;
 
   constructor(
-    edgecoder = new EdgeCoderLocalProvider(),
-    ollama = new OllamaLocalProvider(),
+    edgecoder: ModelProvider = new EdgeCoderLocalProvider(),
+    ollama: ModelProvider = new OllamaLocalProvider(),
     ollamaEdge = new OllamaLocalProvider(undefined, DEFAULT_EDGE_MODEL),
     ollamaCoordinator = new OllamaLocalProvider(undefined, DEFAULT_COORDINATOR_MODEL)
   ) {

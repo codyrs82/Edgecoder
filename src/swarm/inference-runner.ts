@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 /**
- * Agent side of network inference: run a chat completion on this machine's Ollama with the model
- * the requester asked for, and send the reply to the coordinator in pieces as it is generated
+ * Agent side of network inference: run a chat completion on this machine's Ollama (or its vLLM /
+ * MLX engine, deps.chat) with the model the requester asked for, and send the reply to the coordinator in pieces as it is generated
  * (POST /inference/chunks), so the requester sees it stream. The full reply is the subtask result,
  * which is what gets billed (measured seconds × the hardware tier's rate).
  */
 
 import type { Subtask, SubtaskResult } from "../common/types.js";
-import { contextNeeded, ollamaChat } from "../inference-api/ollama.js";
+import { contextNeeded, ollamaChat, type OllamaPiece } from "../inference-api/ollama.js";
+import { EngineError } from "../inference-api/openai-engine.js";
 import type { ChatMessage, ToolCall, ToolSpec } from "../inference-api/types.js";
 import { isFrontierModelId } from "../inference-api/frontier-models.js";
 
@@ -42,6 +43,11 @@ export async function runInferenceSubtask(
     contextWindow?: number;
     /** Signed POST to the coordinator. */
     post: (path: string, body: unknown) => Promise<unknown>;
+    /**
+     * Run the call on another engine than Ollama (vLLM / MLX: src/inference-api/openai-engine.ts).
+     * `model` is the requested catalog tag; the engine maps it to the id it serves. Unset = Ollama.
+     */
+    chat?: (model: string, req: { messages: ChatMessage[]; tools?: ToolSpec[]; maxTokens?: number; temperature?: number }, signal: AbortSignal, timeoutMs: number) => AsyncIterable<OllamaPiece>;
   },
 ): Promise<SubtaskResult> {
   const started = Date.now();
@@ -96,7 +102,10 @@ export async function runInferenceSubtask(
   const deadlineMs = Math.max(5_000, st.timeoutMs);
   const timer = setTimeout(() => abort.abort(), deadlineMs);
   try {
-    for await (const piece of ollamaChat(deps.ollamaHost, { model, messages: input.messages, tools: input.tools, maxTokens: input.maxTokens, temperature: input.temperature, keepAlive: deps.keepAlive, numCtx: deps.contextWindow }, abort.signal, deadlineMs + 1_000)) {
+    const pieces = deps.chat
+      ? deps.chat(model, { messages: input.messages, tools: input.tools, maxTokens: input.maxTokens, temperature: input.temperature }, abort.signal, deadlineMs + 1_000)
+      : ollamaChat(deps.ollamaHost, { model, messages: input.messages, tools: input.tools, maxTokens: input.maxTokens, temperature: input.temperature, keepAlive: deps.keepAlive, numCtx: deps.contextWindow }, abort.signal, deadlineMs + 1_000);
+    for await (const piece of pieces) {
       if ("toolCalls" in piece) toolCalls.push(...piece.toolCalls);
       else if ("doneReason" in piece) tokens = { promptTokens: piece.promptTokens, outputTokens: piece.outputTokens, ...(piece.loadMs !== undefined ? { loadMs: piece.loadMs } : {}), ...(piece.promptMs !== undefined ? { promptMs: piece.promptMs } : {}), ...(piece.genMs !== undefined ? { genMs: piece.genMs } : {}) };
       else if ("delta" in piece) {
@@ -114,7 +123,10 @@ export async function runInferenceSubtask(
     await flush(true);
     return { ...base, ok: true, output: full, durationMs: Date.now() - started };
   } catch (err) {
-    const msg = abort.signal.aborted ? `timed out after ${Math.round(st.timeoutMs / 1000)} s` : (err as Error).message;
+    // The engine's own context check (vLLM counts exact tokens; the estimate above is rough): another
+    // agent with a bigger window may serve it, as with the check above.
+    const overflow = err instanceof EngineError && err.contextOverflow && !full && toolCalls.length === 0;
+    const msg = abort.signal.aborted ? `timed out after ${Math.round(st.timeoutMs / 1000)} s` : overflow ? `${CONTEXT_TOO_LONG_ERROR}: ${(err as Error).message}` : (err as Error).message;
     // Nothing reached the requester yet: leave the stream open, so the call can be retried elsewhere
     // (the failed result tells the coordinator, which ends the stream when it does not retry).
     if (full || toolCalls.length) await flush(true, msg);

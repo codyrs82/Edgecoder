@@ -7,7 +7,11 @@ import { randomUUID, createHash } from "node:crypto";
 import { cpus, hostname, totalmem } from "node:os";
 import { parallelInferenceFor, servedContextWindow } from "./parallelism.js";
 import { paramsB } from "../inference-api/auto-route.js";
-import { ProviderRegistry } from "../model/providers.js";
+import { OpenAiEngineProvider, ProviderRegistry } from "../model/providers.js";
+import { ENGINE_PRESETS, openAiEngineChat, resolveEngine, type EngineConfig } from "../inference-api/openai-engine.js";
+import type { ChatMessage, ToolSpec } from "../inference-api/types.js";
+import { parseModelAliases } from "../model/engine-models.js";
+import { engineServing, probeEngine, type EngineStatus } from "./engine-probe.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
 import { Subtask, SubtaskResult, BLETaskRequest, Language, MeshMessage, SandboxMode } from "../common/types.js";
 import { execFileSync } from "node:child_process";
@@ -98,7 +102,26 @@ const COORDINATOR_DISCOVERY_URL =
 const AGENT_ID = W.AGENT_ID ?? `worker-${hostname().replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 16) || "1"}`;
 const MODE = W.AGENT_MODE;
 const OS = (W.AGENT_OS ?? platformInfo.os) as "debian" | "ubuntu" | "windows" | "macos" | "ios";
-const PROVIDER = W.LOCAL_MODEL_PROVIDER;
+/*
+ * The engine that runs the model: Ollama (default), or vLLM / MLX (EDGECODER_ENGINE), which are
+ * started on their own and only health-checked here (src/swarm/engine-probe.ts). With vLLM or MLX
+ * the agent is a local-model agent ("ollama-local" to the coordinator), its model is whatever
+ * catalog model the engine serves, and nothing Ollama-specific (pull, warm, keep_alive, remote
+ * model changes) runs.
+ */
+const ENGINE: EngineConfig = (() => {
+  try {
+    return resolveEngine(process.env);
+  } catch (e) {
+    console.error(`[worker] ${(e as Error).message}`);
+    process.exit(1);
+  }
+})();
+const OPENAI_ENGINE = ENGINE.kind === "ollama" ? undefined : ENGINE;
+const ENGINE_LABEL = OPENAI_ENGINE ? ENGINE_PRESETS[OPENAI_ENGINE.preset].label : "Ollama";
+const ENGINE_ALIASES = parseModelAliases(W.ENGINE_MODEL_ALIASES);
+if (OPENAI_ENGINE && W.LOCAL_MODEL_PROVIDER !== "ollama-local") console.log(`[worker] EDGECODER_ENGINE=${OPENAI_ENGINE.preset}: serving the local model (LOCAL_MODEL_PROVIDER=ollama-local implied)`);
+const PROVIDER = OPENAI_ENGINE ? "ollama-local" : W.LOCAL_MODEL_PROVIDER;
 const OLLAMA_HOST = W.OLLAMA_HOST;
 const OLLAMA_AUTO_INSTALL = W.OLLAMA_AUTO_INSTALL;
 /*
@@ -233,6 +256,8 @@ let MODEL_KEEP_ALIVE = modelSettings.keepAlive;
  * stopped Ollama only logs, and the agent goes on (the call then fails and is retried elsewhere).
  */
 async function warmNetworkModel(model: string, why: string): Promise<void> {
+  // vLLM / MLX load their model at start: check that it is up and serving instead.
+  if (OPENAI_ENGINE) return refreshEngine(why);
   const host = OLLAMA_HOST ?? "http://127.0.0.1:11434";
   const started = Date.now();
   try {
@@ -243,6 +268,54 @@ async function warmNetworkModel(model: string, why: string): Promise<void> {
   } catch (e) {
     console.warn(`[agent:${AGENT_ID}] could not load model ${model} (${why}): ${String(e).slice(0, 200)}`);
   }
+}
+/** Last vLLM / MLX probe (undefined with Ollama, or before the first probe). */
+let engineStatus: EngineStatus | undefined;
+let engineLogKey = "";
+/**
+ * Probe the vLLM / MLX engine and take what it serves: the model (its catalog tag becomes this
+ * agent's model), the context window and the slots (engine-probe.ts engineServing). Logged when
+ * the state changes; a down engine leaves the last model in place but no free slot (the pull
+ * reports 0), so no call is handed to an agent that cannot run it.
+ */
+async function refreshEngine(why: string): Promise<void> {
+  if (!OPENAI_ENGINE) return;
+  const s = await probeEngine(OPENAI_ENGINE, ENGINE_ALIASES);
+  engineStatus = s;
+  if (s.ok && s.model) {
+    const ctxRaw = ENV_MODEL_SETTINGS.contextWindow !== undefined ? Number(ENV_MODEL_SETTINGS.contextWindow) : undefined;
+    const plan = engineServing({ preset: OPENAI_ENGINE.preset, status: s, maxSlots: OPENAI_ENGINE.maxSlots, parallelOverride: ENV_MODEL_SETTINGS.parallel, contextOverride: ctxRaw, totalMemBytes: totalmem() });
+    if (OLLAMA_MODEL !== s.model.tag || CONTEXT_WINDOW !== plan.contextWindow) lastRegisteredAtMs = 0; // re-register with the served model
+    OLLAMA_MODEL = s.model.tag;
+    MAX_PARALLEL_INFERENCE = plan.slots;
+    CONTEXT_WINDOW = plan.contextWindow;
+    installedModelsCache = { models: [s.model.tag], atMs: Date.now() };
+  } else installedModelsCache = { models: [], atMs: Date.now() };
+  const key = s.ok ? `ok:${s.model?.id}:${CONTEXT_WINDOW}:${MAX_PARALLEL_INFERENCE}` : `down:${s.problem}`;
+  if (key === engineLogKey) return;
+  engineLogKey = key;
+  if (s.ok && s.model) {
+    console.log(`[agent:${AGENT_ID}] ${ENGINE_LABEL} at ${OPENAI_ENGINE.url} serves ${s.model.id} as ${s.model.tag} (${why}): context ${CONTEXT_WINDOW}${s.model.maxModelLen ? ` (max_model_len ${s.model.maxModelLen})` : ""}, ${MAX_PARALLEL_INFERENCE} slot(s)${s.kvCacheTokens ? `, KV cache ${s.kvCacheTokens} tokens` : ""}`);
+  } else {
+    console.warn(`[agent:${AGENT_ID}] ${ENGINE_LABEL} not serving (${why}): ${s.problem}; taking no model calls until it is`);
+  }
+}
+/**
+ * The served id for a requested catalog tag: only the model the agent serves with (an MLX server
+ * would otherwise load another cached model on demand, swapping out the one it serves).
+ */
+function servedEngineModel(tag: string): string | undefined {
+  return engineStatus?.ok && engineStatus.model?.tag === tag ? engineStatus.model.id : undefined;
+}
+/** A network model call on the vLLM / MLX engine (inference-runner deps.chat). */
+async function* engineChat(model: string, req: { messages: ChatMessage[]; tools?: ToolSpec[]; maxTokens?: number; temperature?: number }, signal: AbortSignal, timeoutMs: number) {
+  const id = servedEngineModel(model);
+  if (!OPENAI_ENGINE || !id) throw new Error(`model_unavailable: ${ENGINE_LABEL} here serves ${engineStatus?.model?.tag ?? "no model"}, not ${model}`);
+  yield* openAiEngineChat(OPENAI_ENGINE, { model: id, ...req }, signal, timeoutMs);
+}
+/** The engine is up and serving (always true with Ollama, whose failures show per call). */
+function engineReady(): boolean {
+  return !OPENAI_ENGINE || engineStatus?.ok === true;
 }
 let warnedNoSandbox = false;
 const AGENT_REGISTRATION_TOKEN = W.AGENT_REGISTRATION_TOKEN ?? "";
@@ -446,6 +519,10 @@ if (LOCAL_FORWARD_PORT > 0) {
 
 /** Models in this machine's Ollama (embedding-only models left out); [] when it can't be reached. */
 async function listInstalledModels(): Promise<string[]> {
+  if (OPENAI_ENGINE) {
+    await refreshEngine("refresh");
+    return engineStatus?.ok && engineStatus.model ? [engineStatus.model.tag] : [];
+  }
   try {
     const res = await request(`${OLLAMA_HOST ?? "http://127.0.0.1:11434"}/api/tags`, { method: "GET", headersTimeout: 3000, bodyTimeout: 3000 });
     const body = (await res.body.json()) as { models?: Array<{ name: string }> };
@@ -491,7 +568,9 @@ async function applyModelSettings(): Promise<void> {
 }
 const modelControl = new ModelControlAgent({
   agentId: AGENT_ID,
-  enabled: remoteControlEnabled(W.AGENT_REMOTE_CONTROL),
+  // vLLM / MLX serve the model they were started with: model changes are made on the host.
+  enabled: remoteControlEnabled(W.AGENT_REMOTE_CONTROL) && !OPENAI_ENGINE,
+  extraNotes: () => (OPENAI_ENGINE ? [`The model is served by ${ENGINE_LABEL} (EDGECODER_ENGINE=${OPENAI_ENGINE.preset}) at ${OPENAI_ENGINE.url}: change it on the host; remote model control is view only`] : []),
   allowlist: resolveAllowlist(W.AGENT_MODEL_ALLOWLIST),
   ollama: ollamaAdmin,
   overridesFile: MODEL_OVERRIDES_FILE,
@@ -1043,16 +1122,19 @@ async function loop(): Promise<void> {
   console.log(`[agent:${AGENT_ID}] coordinator selected (${discoveredAtStartup && !steeredByRegistry() ? discoveredAtStartup.source : coordinatorSelection.source}): ${coordinator.url}`);
 
   await ensureOllamaModelInstalled({
-    enabled: PROVIDER === "ollama-local",
+    enabled: PROVIDER === "ollama-local" && !OPENAI_ENGINE,
     autoInstall: OLLAMA_AUTO_INSTALL,
     model: OLLAMA_MODEL,
     role: "agent",
     host: OLLAMA_HOST
   });
   // Before the first pull (registration waits a few seconds at most): the network model is loaded.
-  if (PULLS_FROM_COORDINATOR && (PROVIDER === "ollama-local" || INFERENCE_ONLY)) await warmNetworkModel(OLLAMA_MODEL, "startup");
+  if (OPENAI_ENGINE) await refreshEngine("startup");
+  else if (PULLS_FROM_COORDINATOR && (PROVIDER === "ollama-local" || INFERENCE_ONLY)) await warmNetworkModel(OLLAMA_MODEL, "startup");
 
-  const providers = new ProviderRegistry();
+  const providers = OPENAI_ENGINE
+    ? new ProviderRegistry(undefined, new OpenAiEngineProvider(OPENAI_ENGINE, () => (engineStatus?.ok ? engineStatus.model?.id : undefined)))
+    : new ProviderRegistry();
   let currentProvider = PROVIDER;
   providers.use(currentProvider);
   const worker = new SwarmWorkerAgent(providers.current());
@@ -1352,6 +1434,7 @@ async function loop(): Promise<void> {
       mode: effectiveMode,
       registrationToken: AGENT_REGISTRATION_TOKEN,
       localModelProvider: currentProvider,
+      ...(OPENAI_ENGINE ? { inferenceEngine: OPENAI_ENGINE.preset, ...(engineStatus?.ok && engineStatus.model ? { engineModel: engineStatus.model.id.slice(0, 200) } : {}) } : {}),
       clientType: AGENT_CLIENT_TYPE,
       ...(AGENT_REGION ? { region: AGENT_REGION } : {}),
       maxConcurrentTasks: MAX_CONCURRENT_TASKS,
@@ -1421,7 +1504,12 @@ async function loop(): Promise<void> {
           if (BENCHMARK_ENABLED && Date.now() >= benchmarkDueAtMs) {
             benchmarkDueAtMs = Date.now() + BENCHMARK_INTERVAL_MS;
             try {
-              lastBenchmark = await runLocalBenchmark({ ollama: currentProvider === "ollama-local" ? { host: OLLAMA_HOST, model: OLLAMA_MODEL, numCtx: CONTEXT_WINDOW } : undefined });
+              const served = OPENAI_ENGINE && engineStatus?.ok ? engineStatus.model : undefined;
+              lastBenchmark = await runLocalBenchmark(
+                OPENAI_ENGINE
+                  ? { engine: served ? { engine: OPENAI_ENGINE, model: served.id, tag: served.tag } : undefined }
+                  : { ollama: currentProvider === "ollama-local" ? { host: OLLAMA_HOST, model: OLLAMA_MODEL, numCtx: CONTEXT_WINDOW } : undefined }
+              );
               benchmarkUnreported = true;
               console.log(`[agent:${AGENT_ID}] benchmark: cpu=${lastBenchmark.cpu?.workUnitsPerSec ?? "-"} units/s gpu=${lastBenchmark.gpu ? `${lastBenchmark.gpu.tokensPerSec} tok/s (${lastBenchmark.gpu.bandwidthGbps ?? "?"} GB/s)` : "-"} in ${lastBenchmark.durationMs} ms${lastBenchmark.errors?.length ? ` (${lastBenchmark.errors.join("; ")})` : ""}`);
             } catch (e) {
@@ -1462,7 +1550,7 @@ async function loop(): Promise<void> {
           }
           // Coordinator benchmark challenge: answer now, before pulling work (its clock is running).
           if (hb.benchmarkChallenge && challengeAcceptable(hb.benchmarkChallenge)) {
-            const answer = await answerChallenge(hb.benchmarkChallenge, { ollamaHost: OLLAMA_HOST, numCtx: CONTEXT_WINDOW });
+            const answer = await answerChallenge(hb.benchmarkChallenge, { ollamaHost: OLLAMA_HOST, numCtx: CONTEXT_WINDOW, ...(OPENAI_ENGINE ? { engine: { engine: OPENAI_ENGINE, servedModelFor: servedEngineModel } } : {}) });
             const answerBody = { agentId: AGENT_ID, ...answer };
             try {
               const res = (await post("/benchmark/response", answerBody, { retries: 0, signed: true })) as {
@@ -1525,6 +1613,8 @@ async function loop(): Promise<void> {
             try {
               await reportStatus("starting", "Preparing to switch model…");
               const switchModel = hb.orchestration.model ?? OLLAMA_MODEL;
+              // vLLM / MLX serve the model they were started with: only "keep the current one" can be done here.
+              if (OPENAI_ENGINE && (switchModel !== OLLAMA_MODEL || hb.orchestration.provider !== "ollama-local")) throw new Error(`orchestration_engine_managed: ${ENGINE_LABEL} serves ${OLLAMA_MODEL}; change its model on the host`);
               // A coordinator may only name Ollama library models, and never installs the binary.
               if (!isOllamaLibraryModelName(switchModel)) throw new Error("orchestration_model_rejected");
               // The same host policy as the owner's commands: AGENT_REMOTE_CONTROL and the allowlist.
@@ -1532,7 +1622,7 @@ async function loop(): Promise<void> {
               if (refusal) throw new Error(`orchestration_${refusal}`);
               await ensureOllamaModelInstalled(
                 {
-                  enabled: hb.orchestration.provider === "ollama-local",
+                  enabled: hb.orchestration.provider === "ollama-local" && !OPENAI_ENGINE,
                   autoInstall: hb.orchestration.autoInstall,
                   model: switchModel,
                   role: "agent",
@@ -1570,7 +1660,8 @@ async function loop(): Promise<void> {
         }
 
         // Our model slots (the coordinator hands a call only to an agent with one free) and that we take nudges.
-        const freeInferenceSlots = Math.max(0, MAX_PARALLEL_INFERENCE - inflightInference.size);
+        // A vLLM / MLX engine that is down or serves no catalog model: no free slot (no model call is handed to us).
+        const freeInferenceSlots = engineReady() ? Math.max(0, MAX_PARALLEL_INFERENCE - inflightInference.size) : 0;
         // AGENT_ALLOW_RESTRICTED_MODELS: the owner lets this machine take restricted-model calls (security
         // research tier; the coordinator also needs the owner's admin-approved host entitlement).
         const pullBody = { agentId: AGENT_ID, inferenceSlots: MAX_PARALLEL_INFERENCE, freeInferenceSlots, contextWindow: CONTEXT_WINDOW, wake: true, ...(W.AGENT_ALLOW_RESTRICTED_MODELS ? { allowRestrictedModels: true } : {}) };
@@ -1660,7 +1751,7 @@ async function loop(): Promise<void> {
             // #51: keep the coordinator's claim lease alive while the subtask runs.
             const stopLeaseHeartbeat = startLeaseHeartbeat();
             const run = st.kind === "inference"
-              ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: MODEL_KEEP_ALIVE, contextWindow: CONTEXT_WINDOW, post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }) })
+              ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: MODEL_KEEP_ALIVE, contextWindow: CONTEXT_WINDOW, post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }), ...(OPENAI_ENGINE ? { chat: engineChat } : {}) })
               : runPolicedSubtask(st, { quiet: true });
             if (st.kind === "inference") console.log(`[agent:${AGENT_ID}] running inference ${st.id} on ${st.requestedModel}`);
             const result = await run.finally(stopLeaseHeartbeat);
@@ -1737,7 +1828,7 @@ async function loop(): Promise<void> {
               console.warn(`[agent:${AGENT_ID}] result buffered for retry: ${result.subtaskId}`);
             }
           };
-          // Model calls run side by side (Ollama serves several at once); code jobs one at a time.
+          // Model calls run side by side (Ollama, vLLM and MLX serve several at once); code jobs one at a time.
           if (st.kind === "inference" && MAX_PARALLEL_INFERENCE > 1) {
             while (inflightInference.size >= MAX_PARALLEL_INFERENCE) await Promise.race(inflightInference);
             const job: Promise<void> = runAndReport()

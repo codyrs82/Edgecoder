@@ -138,6 +138,16 @@ first card's model with the pool's summed VRAM and a `count`. The installer does
 `AGENT_GPU_*`: those override detection inside containers, and an overridden profile re-proves its
 tier every session.
 
+### vLLM instead of Ollama on a GPU server
+
+The installer sets every instance up with Ollama. On a datacenter GPU host whose model slots are
+the bottleneck, an instance can run its model on **vLLM** instead (continuous batching: several
+calls at once on the same cards): `scripts/linux/vllm/install-vllm.sh` installs vLLM and an
+`edgecoder-vllm@<n>` unit next to the instance, and `EDGECODER_ENGINE=vllm` in `agent-<n>.env`
+points the agent at it. Sizing for 2× A16 and A100 80 GB, the variables, and the way back to
+Ollama: [docs/inference-engines.md](inference-engines.md). Apple silicon's equivalent is MLX
+(`EDGECODER_ENGINE=mlx`), described there too.
+
 ## Service accounts
 
 No service runs as root or SYSTEM.

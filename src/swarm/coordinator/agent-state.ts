@@ -115,6 +115,10 @@ export const agentCapabilities = new Map<
     powerTelemetry?: AgentPowerTelemetry;
     activeModel?: string;
     activeModelParamSize?: number;
+    /** Engine running the model (register's inferenceEngine); undefined = Ollama. GPU witnesses match on it. */
+    inferenceEngine?: "ollama" | "vllm" | "mlx";
+    /** vLLM / MLX: the served weights behind activeModel (register's engineModel). */
+    engineModel?: string;
     modelSwapInProgress?: boolean;
     publicKeyPem?: string;
     x25519PublicKey?: string;

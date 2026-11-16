@@ -73,4 +73,29 @@ describe("pickBenchmarkWitness", () => {
     state.agentCapabilities.get(p("ok"))!.lastSeenMs = now - 10 * 60_000;
     expect(pickAll([p("v6-a")])).toEqual([]);
   });
+  test("witnesses run the subject's engine and, on vLLM / MLX, the same weights: other quantizations are not compared", () => {
+    const now = Date.now();
+    const p = (id: string) => `we-${id}`;
+    agent(p("subject-ollama"), { ip: "198.18.1.10", owner: "s1@example.com", nowMs: now });
+    agent(p("subject-vllm"), { ip: "198.18.2.10", owner: "s2@example.com", nowMs: now });
+    Object.assign(state.agentCapabilities.get(p("subject-vllm"))!, { inferenceEngine: "vllm", engineModel: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ" });
+    agent(p("ollama-w"), { ip: "198.18.3.10", verified: true, nowMs: now });
+    agent(p("vllm-w"), { ip: "198.18.4.10", verified: true, nowMs: now });
+    Object.assign(state.agentCapabilities.get(p("vllm-w"))!, { inferenceEngine: "vllm", engineModel: "quanttrio/qwen3-coder-30b-a3b-instruct-awq" });
+    agent(p("vllm-fp8-w"), { ip: "198.18.6.10", verified: true, nowMs: now });
+    Object.assign(state.agentCapabilities.get(p("vllm-fp8-w"))!, { inferenceEngine: "vllm", engineModel: "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8" });
+    agent(p("mlx-w"), { ip: "198.18.5.10", verified: true, nowMs: now });
+    state.agentCapabilities.get(p("mlx-w"))!.inferenceEngine = "mlx";
+    const pickAll = (subject: string) => {
+      const all = new Set<string>();
+      for (let i = 0; i < 64; i++) {
+        const w = economy.pickBenchmarkWitness(subject, MODEL, now + 20_000, [], (n) => i % n);
+        if (w?.startsWith("we-")) all.add(w);
+      }
+      return [...all].sort();
+    };
+    expect(pickAll(p("subject-ollama"))).toEqual([p("ollama-w")]);
+    expect(pickAll(p("subject-vllm"))).toEqual([p("vllm-w")]);
+    for (const id of ["subject-ollama", "subject-vllm", "ollama-w", "vllm-w", "vllm-fp8-w", "mlx-w"]) state.agentCapabilities.delete(p(id));
+  });
 });

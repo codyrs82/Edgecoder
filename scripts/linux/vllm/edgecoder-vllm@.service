@@ -1,0 +1,53 @@
+# vLLM OpenAI-compatible server for an EdgeCoder agent (EDGECODER_ENGINE=vllm).
+# Instance %i pairs with agent instance %i: /etc/edgecoder/vllm-%i.env holds the model, the GPUs
+# and the serve flags (scripts/linux/vllm/vllm.env.example). Installed by
+# scripts/linux/vllm/install-vllm.sh; see docs/inference-engines.md.
+#
+# The agent never starts or stops this unit: it only checks /v1/models and reports what is served.
+# vLLM listens on loopback only; nothing outside the host needs to reach it.
+
+[Unit]
+Description=EdgeCoder vLLM server %i
+After=network-online.target
+Wants=network-online.target
+# Never run next to the same instance's Ollama with a model loaded: both want the GPUs' memory.
+# install-vllm.sh --start stops and masks edgecoder-ollama-%i (no Conflicts= here: the agent unit
+# Wants= its Ollama, and restarting the agent would then stop vLLM).
+
+[Service]
+Type=simple
+User=edgecoder
+Group=edgecoder
+EnvironmentFile=/etc/edgecoder/vllm-%i.env
+Environment="HOME=/var/lib/edgecoder/vllm"
+Environment="HF_HOME=/var/lib/edgecoder/hf"
+Environment="XDG_CACHE_HOME=/var/lib/edgecoder/vllm/cache"
+Environment="VLLM_CACHE_ROOT=/var/lib/edgecoder/vllm/cache/vllm"
+Environment="VLLM_NO_USAGE_STATS=1"
+Environment="DO_NOT_TRACK=1"
+# ${VLLM_MODEL_ID} is one word; $VLLM_ARGS is split on whitespace into flags.
+ExecStart=/opt/edgecoder/vllm/venv/bin/vllm serve ${VLLM_MODEL_ID} --host 127.0.0.1 --port ${VLLM_PORT} $VLLM_ARGS
+Restart=on-failure
+RestartSec=15
+# Loading and compiling (CUDA graphs, torch.compile) takes minutes on a first start.
+TimeoutStartSec=0
+TimeoutStopSec=90
+KillSignal=SIGINT
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/edgecoder/vllm /var/lib/edgecoder/hf
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+UMask=0027
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=edgecoder-vllm-%i
+
+[Install]
+WantedBy=multi-user.target

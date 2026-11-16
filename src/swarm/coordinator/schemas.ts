@@ -88,6 +88,10 @@ export const registerSchema = z.object({
   /** Models installed in the agent's Ollama (network inference runs only on agents that have the model). */
   installedModels: z.array(z.string().min(1).max(200)).max(200).optional(),
   activeModel: z.string().min(1).max(200).optional(),
+  /** The engine that runs the agent's model (src/inference-api/openai-engine.ts); unset = Ollama. Unknown values are dropped. */
+  inferenceEngine: z.enum(["ollama", "vllm", "mlx"]).optional().catch(undefined),
+  /** vLLM / MLX: the served weights (HF repo id) behind activeModel, e.g. an AWQ or 4-bit MLX quant. */
+  engineModel: z.string().min(1).max(200).optional().catch(undefined),
   clientType: z.string().min(1).max(64).default("edgecoder-native"),
   /** Hosting region code the agent runs in (FLY_REGION or AGENT_REGION), shown coarsely in GET /network/world. */
   region: z.string().regex(/^[a-z0-9-]{2,24}$/).optional().catch(undefined),
