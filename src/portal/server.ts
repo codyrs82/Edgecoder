@@ -988,7 +988,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       if (!store) throw new Error("PORTAL_DATABASE_URL is required for portal service.");
       await store.migrate();
     })
-    .then(() => app.listen({ port: 4310, host: LISTEN_HOST }))
+    .then(() => app.listen({ port: 4310, host: LISTEN_HOST }).then(async () => (await import("./shutdown.js")).installGracefulShutdown(app))) // a deploy drains streamed calls
     .catch((error) => {
       app.log.error(error);
       process.exit(1);

@@ -43,8 +43,13 @@ export const pcts = (h) => ({ p50: histPct(h, 50), p90: histPct(h, 90), p99: his
  * timeout_over_capacity (a model asked for beyond its slots; the planner backs that model off),
  * gaps (no machine holds the model or class), which say nothing about load.
  */
-export const FAILURES = new Set(["timeout", "network_error", "no_capacity", "rate_limited", "stream_error", "auth_error", "insufficient_funds"]);
-export const isFailure = (e) => !!e && (FAILURES.has(e) || /^http_5/.test(e));
+export const FAILURES = new Set([
+  "timeout", "network_error", "no_capacity", "rate_limited", "auth_error", "insufficient_funds",
+  // What used to be one "stream_error" (classifyCall below); kept for results from older runs.
+  "stream_error", "stream_cut_before_tokens", "stream_cut_after_tokens", "stream_idle_timeout", "stream_truncated",
+  "no_response_timeout", "timeout_after_tokens", "agent_error", "agent_lost_mid_reply", "relay_error", "relay_timeout", "server_restarting", "inband_error",
+]);
+export const isFailure = (e) => !!e && (FAILURES.has(e) || /^(http|upstream)_5/.test(e));
 
 /** Error type of a finished call (null = success). */
 export function classifyError(status, body) {
@@ -63,6 +68,53 @@ export function classifyError(status, body) {
   if (typeof status === "number" && status >= 500) return `http_${status}`;
   if (typeof status === "number" && status !== 200) return `http_${status}`;
   return t ? "stream_error" : null;
+}
+
+/** A body that is not the API's JSON (an edge proxy's HTML error page: Cloudflare, Fly). */
+const notJson = (body) => {
+  const t = String(body ?? "").trim();
+  if (!t) return true;
+  try { JSON.parse(t); return false; } catch { return true; }
+};
+
+/**
+ * Error type of a streamed call from how it ended (null = success). "stream_error" used to cover
+ * every one of these; each now says which hop failed and when:
+ *
+ * - failure "timeout" (the client's own deadline): `timeout` before any token (the planner turns it
+ *   into timeout_over_capacity at a model's share), `timeout_after_tokens` once text was arriving;
+ * - failure "idle" (no byte, keepalive comments included, for the idle bound: the relay's 15 s
+ *   keepalives stopped): `stream_idle_timeout` after the response head, `no_response_timeout` before;
+ * - failure "network" (the connection closed under the client: undici's "terminated"):
+ *   `network_error` before the response head, else `stream_cut_before_tokens` / `stream_cut_after_tokens`;
+ * - a non-200 status with a non-JSON body (Cloudflare's or Fly's error page): `upstream_<status>`;
+ *   the portal's own JSON errors keep classifyError's names (`http_502` = the portal said 502);
+ * - an error event inside the stream: classifyError's names for capacity and the like, else
+ *   `agent_error` (the machine reported a failure), `agent_lost_mid_reply` (it vanished after part of
+ *   the reply), `server_restarting` (the portal drained the stream for a restart), `relay_error` /
+ *   `relay_timeout` (the portal's relay from the coordinator), `inband_error` for anything else;
+ * - a 200 stream that ended with no error and no [DONE]: `stream_truncated` (counted as a success before).
+ */
+export function classifyCall({ status, errBody = "", failure = null, gotHeaders = false, tokens = false, sawDone = false, inband = false }) {
+  if (failure === "timeout") return tokens ? "timeout_after_tokens" : "timeout";
+  if (failure === "idle") return gotHeaders ? "stream_idle_timeout" : "no_response_timeout";
+  if (failure === "network") return !gotHeaders ? "network_error" : tokens ? "stream_cut_after_tokens" : "stream_cut_before_tokens";
+  if (status !== 200) {
+    if (typeof status === "number" && status >= 500 && notJson(errBody)) return `upstream_${status}`;
+    return classifyError(status, errBody) ?? `http_${status}`;
+  }
+  if (inband) {
+    const c = classifyError(200, errBody);
+    if (c !== "stream_error") return c;
+    const t = String(errBody).toLowerCase();
+    if (t.includes("agent_lost_mid_reply") || t.includes("stopped responding")) return "agent_lost_mid_reply";
+    if (t.includes("server_restarting") || t.includes("restarting")) return "server_restarting";
+    if (t.includes("reported:")) return "agent_error";
+    if (t.includes("didn't finish within")) return "relay_timeout";
+    if (t.includes("network stream failed") || t.includes("network request failed")) return "relay_error";
+    return "inband_error";
+  }
+  return sawDone ? null : "stream_truncated";
 }
 
 function emptyGroup() {

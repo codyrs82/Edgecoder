@@ -264,10 +264,43 @@ function armClaimDeadline(taskId: string, subtaskId: string, ms: number): void {
  * cancelled now (refunded in full: nothing was charged for the lost run).
  */
 export function onInferenceClaimable(subtask: Subtask, nowMs = Date.now()): void {
-  if (subtask.kind !== "inference" || claimDeadlines.has(subtask.id)) return;
+  if (subtask.kind !== "inference") return;
+  // Back on the queue after part of the reply reached the requester (its holder's lease lapsed, or
+  // it went offline): another agent would start the reply again under the text already sent (its
+  // first pieces dropped as duplicates, the rest appended: two replies spliced together), so the
+  // call ends here with a clear error instead. After this listener returns: the queue is mid-update.
+  if (inferenceStreams.hasContent(subtask.id) && !inferenceStreams.isDone(subtask.id)) {
+    queueMicrotask(() => void endInferenceLostMidReply(subtask).catch((err) => coordinatorApp.log.error({ err, subtaskId: subtask.id }, "inference_lost_mid_reply_end_failed")));
+    return;
+  }
+  if (claimDeadlines.has(subtask.id)) return;
   const submittedAtMs = usagePending.get(subtask.taskId)?.atMs;
   if (submittedAtMs === undefined) return;
   armClaimDeadline(subtask.taskId, subtask.id, Math.min(INFERENCE_CLAIM_TIMEOUT_MS, submittedAtMs + subtask.timeoutMs - nowMs));
+}
+
+/** What the requester is told when the machine running its call vanished after part of the reply. */
+export const AGENT_LOST_MID_REPLY = "agent_lost_mid_reply: the machine running this call stopped responding after part of the reply; nothing was charged. Send the request again.";
+
+/**
+ * End a model call whose holder was lost after the requester got part of the reply: settled as
+ * failed, the requester's stream ends with AGENT_LOST_MID_REPLY, and the reserve is refunded in full
+ * (accrueResultCredits pays successes only; the lost holder's later pieces and result are refused,
+ * its claim is gone). Does nothing when an agent claimed it again in between.
+ */
+export async function endInferenceLostMidReply(subtask: Subtask): Promise<boolean> {
+  const timer = claimDeadlines.get(subtask.id);
+  if (timer) clearTimeout(timer);
+  claimDeadlines.delete(subtask.id);
+  if (!queue.markRemoteClaimed(subtask.id)) return false;
+  queue.complete({ subtaskId: subtask.id, taskId: subtask.taskId, agentId: "coordinator", ok: false, output: "", error: "agent_lost_mid_reply", durationMs: 0 });
+  inferenceStreams.finish(subtask.id, AGENT_LOST_MID_REPLY);
+  restrictedCalls.ended(subtask.id, "failed");
+  claimedTradePrice.delete(subtask.id);
+  orderBook.removeBid(subtask.taskId);
+  await refundTaskSubmit(subtask.taskId);
+  coordinatorApp.log.warn({ taskId: subtask.taskId, subtaskId: subtask.id, replyBytes: inferenceStreams.replyBytes(subtask.id) }, "inference_lost_mid_reply");
+  return true;
 }
 
 function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: string) => { send: (b: unknown) => unknown } } }, c?: { reason: "busy" | "none_in_class"; computeClass?: string; model?: string }) {
@@ -597,6 +630,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       .parse(req.body);
     const claim = queue.getClaim(body.subtaskId);
     if (claim?.claimedBy !== verified.agentId) return reply.code(403).send({ error: "not_claimant" });
+    // A holder posting pieces is alive: its lease is renewed like a heartbeat's, so a heartbeat that is
+    // late (rate limited, a busy machine) cannot lapse a call while its reply is streaming.
+    queue.renewClaim(body.subtaskId, verified.agentId);
     const r = inferenceStreams.append(body.subtaskId, body.seq, body.delta, body.done, body.error, body.toolCalls);
     // Security research tier: the call log records how a restricted call ended (prompts only if configured).
     if (r === "ok" && body.done && restrictedCalls.get(body.subtaskId)) {

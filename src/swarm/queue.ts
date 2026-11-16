@@ -517,6 +517,18 @@ export class SwarmQueue {
     return Math.min(hard, live);
   }
 
+  /**
+   * The claimant of one subtask showed it is alive (it posted part of a streamed reply): renew that
+   * lease like a heartbeat does. Never past the hard deadline (claimedAt + timeout + grace), and not
+   * for a lease that already lapsed. Returns whether it was renewed.
+   */
+  renewClaim(subtaskId: string, agentId: string, nowMs = Date.now()): boolean {
+    const item = this.tasks.find((t) => t.subtask.id === subtaskId);
+    if (!item || item.claimedBy !== agentId || nowMs > this.leaseDeadline(item)) return false;
+    item.leaseRenewedAt = nowMs;
+    return true;
+  }
+
   /** #51: heartbeat from a claimant keeps its (unexpired) leases alive. */
   private renewLeases(agentId: string, now: number): void {
     this.expireLeases(now);

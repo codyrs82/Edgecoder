@@ -56,6 +56,40 @@ describe("streamNetworkCompletion", () => {
     expect((submitted.messages as Array<{ role: string }>).map((m) => m.role)).toEqual(["user", "user"]);
   });
 
+  it("a stream read that fails on the way (an edge 502, a reset connection) is read again; nothing is lost or doubled", async () => {
+    const reads: number[] = [];
+    let failures = 0;
+    server = createServer((req, res) => {
+      let raw = "";
+      req.on("data", (c) => (raw += c));
+      req.on("end", () => {
+        const body = raw ? JSON.parse(raw) : {};
+        if (req.url === "/forward/inference/submit") return res.end(JSON.stringify({ taskId: body.taskId, subtaskId: "st-r", reservedCSats: 1 }));
+        reads.push(body.after);
+        if (body.after === 2 && failures === 0) { failures++; res.statusCode = 502; return res.end("<!DOCTYPE html><title>502: Bad gateway</title>"); }
+        if (body.after === 2 && failures === 1) { failures++; return req.socket.destroy(); }
+        res.end(JSON.stringify(body.after === 0 ? { chunks: ["Hel", "lo"], next: 2, done: false } : { chunks: [" there"], next: 3, done: true }));
+      });
+    });
+    await new Promise<void>((r) => server!.listen(0, "127.0.0.1", r));
+    const deps: NetworkDeps = { forwarder: `http://127.0.0.1:${(server.address() as { port: number }).port}`, token: () => "tok", agentId: "agent-1" };
+    const out = [];
+    for await (const p of streamNetworkCompletion(deps, { model: "m", computeClass: "any", messages: [{ role: "user", content: "hi" }] })) out.push(p);
+    expect(out).toEqual([{ delta: "Hel" }, { delta: "lo" }, { delta: " there" }, { done: true }]);
+    expect(reads).toEqual([0, 2, 2, 2]);
+  });
+
+  it("what the coordinator answered about the stream itself is not retried", async () => {
+    let reads = 0;
+    const deps = await fakeForwarder((path, body) => {
+      if (path === "/forward/inference/submit") return { json: { taskId: body.taskId, subtaskId: "st-gone", reservedCSats: 1 } };
+      reads++;
+      return { status: 404, json: { error: "unknown_stream" } };
+    });
+    await expect(streamNetworkCompletion(deps, { model: "m", computeClass: "any", messages: [{ role: "user", content: "hi" }] }).next()).rejects.toThrow(/unknown_stream/);
+    expect(reads).toBe(1);
+  });
+
   it("a call the coordinator cancelled for lack of capacity is a 503 with when to retry", async () => {
     const deps = await fakeForwarder((path, body) =>
       path === "/forward/inference/submit"

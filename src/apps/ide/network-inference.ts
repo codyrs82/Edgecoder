@@ -184,6 +184,31 @@ function noCapacityError(json: Record<string, unknown>, model: string): NetworkI
   return new NetworkInferenceError(`Every machine that runs ${model} is busy and none could start this request in time. Nothing was charged; try again in ${retryAfterSec} s.`, 503, retryAfterSec);
 }
 
+/**
+ * A stream read that failed on the way (the connection reset, an edge proxy's 502/504 page, the
+ * coordinator briefly unreachable) is read again after a short wait: a read only returns pieces
+ * after `after`, so repeating it loses and duplicates nothing. What the coordinator itself answered
+ * (no_capacity, unknown_stream, not_requester) is not retried. Without this, one dropped long poll
+ * ended a reply that was still being generated.
+ */
+export const STREAM_READ_RETRY_DELAYS_MS = [250, 1_000, 3_000];
+
+const transientRead = (status: number, json: Record<string, unknown>) =>
+  status === 502 || status === 504 || status === 520 || status === 522 || status === 524 || (status === 503 && json.error !== "no_capacity") || json.error === "coordinator_bad_response";
+
+async function readStream(d: NetworkDeps, body: { taskId: string; subtaskId: string; after: number }, signal?: AbortSignal) {
+  for (let attempt = 0; ; attempt++) {
+    const last = attempt >= STREAM_READ_RETRY_DELAYS_MS.length;
+    try {
+      const r = await call(d, "POST", "/inference/stream", { ...body, waitMs: 15_000 }, signal);
+      if (last || signal?.aborted || !transientRead(r.status, r.json)) return r;
+    } catch (err) {
+      if (last || signal?.aborted) throw err;
+    }
+    await new Promise((res) => setTimeout(res, STREAM_READ_RETRY_DELAYS_MS[attempt]));
+  }
+}
+
 /** Run a chat on the network and yield the reply as it streams. */
 export async function* streamNetworkCompletion(
   d: NetworkDeps,
@@ -239,7 +264,7 @@ export async function* streamNetworkCompletion(
   const deadline = Date.now() + 6 * 60_000;
   while (Date.now() < deadline) {
     if (signal?.aborted) return;
-    const r = await call(d, "POST", "/inference/stream", { taskId, subtaskId, after, waitMs: 15_000 }, signal);
+    const r = await readStream(d, { taskId, subtaskId, after }, signal);
     if (r.status === 503 && r.json.error === "no_capacity") throw noCapacityError(r.json, req.model);
     if (r.status !== 200) throw new NetworkInferenceError(`Network stream failed: ${String(r.json.error ?? r.status)}`, 502);
     const chunks = (r.json.chunks as string[]) ?? [];

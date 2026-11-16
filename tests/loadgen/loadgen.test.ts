@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 // @ts-expect-error plain .mjs script without type declarations
 import { HARD_MAX_RATE, PROFILES, buildSchedule, parseDuration } from "../../scripts/loadgen/profiles.mjs";
 // @ts-expect-error plain .mjs script without type declarations
-import { StageStats, classifyError, digestStage, histAdd, histPct, isFailure, mergeStage } from "../../scripts/loadgen/stats.mjs";
+import { StageStats, classifyCall, classifyError, digestStage, histAdd, histPct, isFailure, mergeStage } from "../../scripts/loadgen/stats.mjs";
 // @ts-expect-error plain .mjs script without type declarations
 import { CapacityPlanner, parseModelId, shareOf } from "../../scripts/loadgen/planner.mjs";
 // @ts-expect-error plain .mjs script without type declarations
@@ -80,6 +80,36 @@ describe("stats", () => {
     expect(isFailure("over_capacity")).toBe(false);
     expect(isFailure("timeout_over_capacity")).toBe(false);
     expect(isFailure("no_agent_in_class")).toBe(false);
+  });
+
+  it("says how a streamed call ended instead of one stream_error", () => {
+    const cf502 = '<!DOCTYPE html>\n<!--[if lt IE 7]> <html class="no-js ie6 oldie" lang="en-US"> <![endif]-->';
+    // The connection closed under the client (undici "terminated"): before or after the first token.
+    expect(classifyCall({ status: 200, errBody: "terminated", failure: "network", gotHeaders: true, tokens: true })).toBe("stream_cut_after_tokens");
+    expect(classifyCall({ status: 200, errBody: "terminated", failure: "network", gotHeaders: true, tokens: false })).toBe("stream_cut_before_tokens");
+    expect(classifyCall({ status: 0, errBody: "ECONNRESET", failure: "network", gotHeaders: false })).toBe("network_error");
+    // The client's own bounds: the deadline (before / after tokens) and no byte, keepalives included.
+    expect(classifyCall({ status: 0, failure: "timeout" })).toBe("timeout");
+    expect(classifyCall({ status: 200, failure: "timeout", gotHeaders: true, tokens: true })).toBe("timeout_after_tokens");
+    expect(classifyCall({ status: 200, failure: "idle", gotHeaders: true })).toBe("stream_idle_timeout");
+    expect(classifyCall({ status: 0, failure: "idle", gotHeaders: false })).toBe("no_response_timeout");
+    // An edge proxy's page vs the portal's own JSON error.
+    expect(classifyCall({ status: 502, errBody: cf502, gotHeaders: true })).toBe("upstream_502");
+    expect(classifyCall({ status: 502, errBody: "", gotHeaders: true })).toBe("upstream_502");
+    expect(classifyCall({ status: 502, errBody: '{"error":{"message":"Network request failed: x","type":"api_error","code":502}}', gotHeaders: true })).toBe("http_502");
+    // Error events inside the stream.
+    const ev = (message: string, type = "api_error", code = 502) => JSON.stringify({ message, type, code });
+    expect(classifyCall({ status: 200, gotHeaders: true, inband: true, errBody: ev("The machine running qwen2.5-coder:1.5b reported: timed out after 180 s") })).toBe("agent_error");
+    expect(classifyCall({ status: 200, gotHeaders: true, inband: true, tokens: true, errBody: ev("The machine running qwen3.5:9b reported: agent_lost_mid_reply: the machine stopped responding") })).toBe("agent_lost_mid_reply");
+    expect(classifyCall({ status: 200, gotHeaders: true, inband: true, errBody: ev("EdgeCoder is restarting; retry the request.", "server_restarting", 503) })).toBe("server_restarting");
+    expect(classifyCall({ status: 200, gotHeaders: true, inband: true, errBody: ev("Network stream failed: unknown_stream") })).toBe("relay_error");
+    expect(classifyCall({ status: 200, gotHeaders: true, inband: true, errBody: ev("The network didn't finish within 6 minutes.", "api_error", 504) })).toBe("relay_timeout");
+    expect(classifyCall({ status: 200, gotHeaders: true, inband: true, errBody: ev("No agent could take this call", "no_capacity", 503) })).toBe("no_capacity");
+    expect(classifyCall({ status: 200, gotHeaders: true, inband: true, errBody: ev("something else") })).toBe("inband_error");
+    // A clean end, and a 200 stream that just stopped without [DONE] (was counted as a success).
+    expect(classifyCall({ status: 200, gotHeaders: true, tokens: true, sawDone: true })).toBeNull();
+    expect(classifyCall({ status: 200, gotHeaders: true, tokens: true, sawDone: false })).toBe("stream_truncated");
+    for (const e of ["stream_cut_after_tokens", "stream_cut_before_tokens", "stream_idle_timeout", "upstream_502", "agent_lost_mid_reply", "server_restarting", "stream_truncated"]) expect(isFailure(e)).toBe(true);
   });
 
   it("digests a stage by model, class and behaviour", () => {

@@ -1,5 +1,9 @@
 app = "edgecoder-portal"
 primary_region = "ord"
+# A deploy or restart lets streamed model calls finish (up to 90 s, src/portal/server.ts) and ends
+# the rest with a retryable error instead of cutting them; Fly kills the process after this.
+kill_signal = "SIGTERM"
+kill_timeout = 100
 
 [build]
   dockerfile = "../docker/Dockerfile.server"

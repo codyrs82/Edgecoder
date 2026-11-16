@@ -7,7 +7,9 @@
 #   scripts/loadgen/fly.sh create                       app + LOADGEN_KEYS secret (from the account files; never printed)
 #   scripts/loadgen/fly.sh run <profile> [opts]          deploy and start a run (opts below)
 #   scripts/loadgen/fly.sh watch                         sample the coordinators' per-model slots every 15 s until
-#                                                        the run ends (run it alongside; report.mjs uses it)
+#                                                        the run ends (run it alongside; report.mjs uses it), and
+#                                                        keep the run's loadgen/portal/seed log lines that matter
+#                                                        (logs-<run>-<app>.txt: errors, model-call events, restarts)
 #   scripts/loadgen/fly.sh status | logs                 machines / live JSON lines
 #   scripts/loadgen/fly.sh report [--out file.json]      merge every machine's results + coordinator series, and the
 #                                                        money report (ledger snapshot taken at `run` vs now)
@@ -144,6 +146,17 @@ TOML
   watch)
     . "$DIR/last-run.env"
     echo "sampling capacity for $RUN_ID until $(date -r $(( (END_AT + 300000) / 1000 )) 2>/dev/null) into $DIR/samples-$RUN_ID.jsonl"
+    # `fly logs --no-tail` keeps only the last ~100 lines, so a run's server side is gone by the time
+    # it is read: keep the load generator's lines and the servers' warnings, errors, model-call events
+    # and machine restarts (OOM, exits, deploys) for the run, to match LOADGEN_ERR ids and times.
+    tails=()
+    for a in "$APP" edgecoder-portal edgecoder-seed edgecoder-seed-eu; do
+      fly logs -a "$a" 2>/dev/null \
+        | grep --line-buffered -E 'LOADGEN_|"level":(40|50|60)|inference_|portal_st|Out of memory|oom|exited|Main child|Starting init|Configuring|reboot|restart' \
+        > "$DIR/logs-$RUN_ID-$a.txt" &
+      tails+=($!)
+    done
+    trap 'kill "${tails[@]}" 2>/dev/null' EXIT
     node "$HERE/capacity.mjs" --sample "$DIR/samples-$RUN_ID.jsonl" --until $(( END_AT + 300000 )) ;;
   status) fly machines list -a "$APP" ;;
   logs) fly logs -a "$APP" "$@" ;;
