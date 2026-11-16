@@ -112,6 +112,16 @@ describe("portal network admin API", () => {
     expect(r.series.points).toHaveLength(240);
   });
 
+  it("passes the 7 d range through to every coordinator; an unknown range falls back to 1 h", async () => {
+    const res = await build().inject({ url: "/portal/api/admin/network?range=7d" });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().range).toBe("7d");
+    expect(seen.every((s) => s.url === "/admin/network?range=7d")).toBe(true);
+    seen.length = 0;
+    expect((await build().inject({ url: "/portal/api/admin/network?range=30d" })).json().range).toBe("1h");
+    expect(seen.every((s) => s.url === "/admin/network?range=1h")).toBe(true);
+  });
+
   it("reports a coordinator that refuses or does not answer, and still shows the others", async () => {
     const res = await build({ urls: [bases[0]!, "http://127.0.0.1:1"] }).inject({ url: "/portal/api/admin/network" });
     expect(res.statusCode).toBe(200);

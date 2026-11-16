@@ -15,8 +15,8 @@ const logger = moduleLogger("portal-network-admin");
  * (agent node enrollment -> owner; account acct-<userId> -> portal user).
  */
 
-export type SeriesRange = "1h" | "6h" | "24h";
-const RANGES: readonly SeriesRange[] = ["1h", "6h", "24h"];
+export type SeriesRange = "1h" | "6h" | "24h" | "7d";
+const RANGES: readonly SeriesRange[] = ["1h", "6h", "24h", "7d"];
 /** A coordinator (or region) with fewer connected agents than this is shown as a gap. */
 export const FEW_AGENTS = 2;
 

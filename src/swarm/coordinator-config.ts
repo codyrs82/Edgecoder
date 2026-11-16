@@ -76,6 +76,8 @@ export const coordinatorConfigSchema = z.object({
   QUEUE_DATA_KEY: str(),
   /** Days a completed subtask's payload and output stay in Postgres; 0 keeps them. */
   QUEUE_RETENTION_DAYS: envNumber(30, { min: 0 }),
+  // Days the admin Network page's 15 s samples stay in Postgres (src/swarm/network-history.ts).
+  NETWORK_HISTORY_DAYS: envNumber(7, { min: 1, max: 90 }),
   // Tokens: required in production by requireProdEnv() in coordinator/context.ts (#5).
   MESH_AUTH_TOKEN: str(),
   ADMIN_API_TOKEN: str(),

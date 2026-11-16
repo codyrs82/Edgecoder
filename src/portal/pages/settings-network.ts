@@ -17,6 +17,32 @@ import { SETTINGS_HELPERS_SCRIPT, settingsPage } from "./settings-shell.js";
  */
 export const NETWORK_REFRESH_MS = 15_000;
 
+/** Chart ranges (the coordinator's SERIES_RANGES), in ms. */
+export const NETWORK_RANGES_MS = { "1h": 3_600_000, "6h": 21_600_000, "24h": 86_400_000, "7d": 604_800_000 } as const;
+
+/**
+ * Page-script helper (plain JS, tested on its own): the spans of [t0, t1] with no samples, where a
+ * coordinator was down or had not started. Points are bucket starts, oldest first; a jump of more
+ * than 2.5 buckets between them is a gap, and so is the time before the first point and after the
+ * last one. The chart shades these and breaks its lines there instead of drawing zeros.
+ */
+export const SERIES_GAPS_SCRIPT = `
+    function seriesGaps(points, bucketMs, t0, t1) {
+      const limit = bucketMs * 2.5;
+      const gaps = [];
+      // prevEnd: covered up to here. Between points this matches the chart's line break (start to
+      // start more than 2.5 buckets apart).
+      let prevEnd = t0;
+      for (const p of points) {
+        if (p.atMs + bucketMs <= t0) continue;
+        if (p.atMs - prevEnd > limit - bucketMs) gaps.push({ fromMs: prevEnd, toMs: p.atMs });
+        prevEnd = Math.max(prevEnd, p.atMs + bucketMs);
+      }
+      if (t1 - prevEnd > limit) gaps.push({ fromMs: prevEnd, toMs: t1 });
+      return gaps;
+    }
+`;
+
 export function networkPageContent(): string {
   return `
     <style nonce="${CSP_NONCE}">
@@ -55,6 +81,8 @@ export function networkPageContent(): string {
       .net-chart .cross { stroke:var(--text-secondary); stroke-width:1; }
       .net-chart .hdot { stroke:var(--card); stroke-width:2; }
       .net-chart .empty { fill:var(--muted); font-size:12px; }
+      .net-chart .gapband { fill:var(--muted); opacity:0.12; }
+      .net-chart .gaplabel { fill:var(--muted); font-size:10px; }
       .net-tip { position:absolute; pointer-events:none; z-index:5; background:var(--bg-elevated); border:1px solid var(--card-border); border-radius:var(--radius-sm); box-shadow:var(--shadow-2); padding:6px 8px; font-size:11.5px; line-height:1.45; white-space:nowrap; font-variant-numeric:tabular-nums; }
       .net-tip .t { color:var(--muted); margin-bottom:2px; }
       .net-tip .v { font-family:var(--font-mono); color:var(--text); }
@@ -96,7 +124,7 @@ export function networkPageContent(): string {
       </div>
       <div class="net-controls">
         <div class="net-seg" role="group" aria-label="Chart range">
-          <button type="button" data-range="1h" aria-pressed="true">1 h</button><button type="button" data-range="6h" aria-pressed="false">6 h</button><button type="button" data-range="24h" aria-pressed="false">24 h</button>
+          <button type="button" data-range="1h" aria-pressed="true">1 h</button><button type="button" data-range="6h" aria-pressed="false">6 h</button><button type="button" data-range="24h" aria-pressed="false">24 h</button><button type="button" data-range="7d" aria-pressed="false">7 d</button>
         </div>
         <span class="net-updated" id="netUpdated">Loading...</span>
       </div>
@@ -176,7 +204,9 @@ export function networkPageContent(): string {
 export function networkPageScript(): string {
   return `
     ${SETTINGS_HELPERS_SCRIPT}
+    ${SERIES_GAPS_SCRIPT}
     const REFRESH_MS = ${NETWORK_REFRESH_MS};
+    const RANGE_MS = ${JSON.stringify(NETWORK_RANGES_MS)};
     const SVGNS = "http://www.w3.org/2000/svg";
     let range = "1h";
     let data = null;
@@ -187,7 +217,7 @@ export function networkPageScript(): string {
     function svg(tag, attrs) { const e = document.createElementNS(SVGNS, tag); for (const k in (attrs || {})) e.setAttribute(k, attrs[k]); return e; }
     function fmtMs(ms) { if (ms === null || ms === undefined) return "-"; ms = Number(ms); return ms >= 10000 ? (ms / 1000).toFixed(1) + " s" : ms >= 1000 ? (ms / 1000).toFixed(2) + " s" : Math.round(ms) + " ms"; }
     function ago(ms) { if (!ms) return "never"; const s = Math.max(0, Math.round((Date.now() - ms) / 1000)); return s < 60 ? s + " s ago" : s < 3600 ? Math.floor(s / 60) + " min ago" : s < 86400 ? Math.floor(s / 3600) + " h ago" : Math.floor(s / 86400) + " d ago"; }
-    function clock(ms) { return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+    function clock(ms) { return range === "7d" ? new Date(ms).toLocaleDateString([], { month: "short", day: "numeric" }) : new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
     function plural(n, word) { return fmtNum(n, 0) + " " + word + (Number(n) === 1 ? "" : "s"); }
     function setText(id, text) { $(id).textContent = text; }
     function showError(text) { const e = $("netError"); e.textContent = text; e.classList.remove("hidden"); }
@@ -215,10 +245,18 @@ export function networkPageScript(): string {
         return;
       }
       const ymax = opts.max || niceMax(Math.max.apply(null, vals));
-      const t0 = Date.now() - ({ "1h": 3600e3, "6h": 21600e3, "24h": 86400e3 })[range];
       const t1 = Date.now();
-      const x = (t) => L + ((t - t0) / (t1 - t0)) * (W - L - R);
+      const t0 = t1 - RANGE_MS[range];
+      const x = (t) => L + ((Math.max(t0, Math.min(t1, t)) - t0) / (t1 - t0)) * (W - L - R);
       const y = (v) => T + (1 - v / ymax) * (H - T - B);
+      // Spans with no samples (coordinator down): shaded and left empty, never drawn as zeros.
+      const bucketMs = (data && data.series && data.series.bucketMs) || 15000;
+      const gaps = seriesGaps(points, bucketMs, t0, t1);
+      for (const g of gaps) {
+        const gx = x(g.fromMs), gw = Math.max(1, x(g.toMs) - gx);
+        plot.appendChild(svg("rect", { x: gx.toFixed(1), y: String(T), width: gw.toFixed(1), height: String(H - T - B), class: "gapband" }));
+        if (gw > 48) { const gl = svg("text", { x: (gx + gw / 2).toFixed(1), y: String(T + 12), "text-anchor": "middle", class: "gaplabel" }); gl.textContent = "no data"; plot.appendChild(gl); }
+      }
       for (let i = 0; i <= 4; i++) {
         const v = (ymax / 4) * i;
         plot.appendChild(svg("line", { x1: String(L), x2: String(W - R), y1: String(y(v)), y2: String(y(v)), class: "grid" }));
@@ -229,7 +267,7 @@ export function networkPageScript(): string {
         const t = t0 + ((t1 - t0) / xt) * i;
         const lab = svg("text", { x: String(x(t)), y: String(H - 4), "text-anchor": i === 0 ? "start" : i === xt ? "end" : "middle", class: "axis" }); lab.textContent = clock(t); plot.appendChild(lab);
       }
-      const gap = (data && data.series && data.series.bucketMs) ? data.series.bucketMs * 2.5 : 60000;
+      const gap = bucketMs * 2.5;
       for (const s of series) {
         let d = "", prevT = null, area = "", runStart = null, lastX = null;
         for (const p of points) {
@@ -256,6 +294,23 @@ export function networkPageScript(): string {
       hit.addEventListener("mousemove", (ev) => {
         const rect = plot.getBoundingClientRect();
         const vx = ((ev.clientX - rect.left) / rect.width) * W;
+        const vt = t0 + ((vx - L) / (W - L - R)) * (t1 - t0);
+        const inGap = gaps.find((g) => vt >= g.fromMs && vt < g.toMs);
+        if (inGap) {
+          hide();
+          cross.setAttribute("x1", String(vx)); cross.setAttribute("x2", String(vx)); cross.classList.remove("hidden");
+          tip.textContent = "";
+          const fmt = (t) => new Date(t).toLocaleString([], { hour: "2-digit", minute: "2-digit", month: "short", day: "numeric" });
+          tip.appendChild(el("div", { class: "t" }, fmt(inGap.fromMs) + " to " + fmt(inGap.toMs)));
+          tip.appendChild(el("div", {}, "No samples: coordinator down or not yet started"));
+          tip.classList.remove("hidden");
+          const boxRect0 = box.getBoundingClientRect();
+          let left0 = ev.clientX - boxRect0.left + 12;
+          if (left0 + tip.offsetWidth > boxRect0.width - 4) left0 = ev.clientX - boxRect0.left - tip.offsetWidth - 12;
+          tip.style.left = Math.max(4, left0) + "px";
+          tip.style.top = (rect.top - boxRect0.top + 8) + "px";
+          return;
+        }
         let best = null, bestD = Infinity;
         for (const p of points) { const dd = Math.abs(x(p.atMs) - vx); if (dd < bestD) { bestD = dd; best = p; } }
         if (!best) return hide();

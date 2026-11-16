@@ -47,7 +47,7 @@ describe("GET /admin/network", () => {
     expect((await get("/admin/network", { "x-admin-token": "wrong" })).statusCode).toBe(401);
     expect((await get("/admin/network", { "x-mesh-token": MESH })).statusCode).toBe(401);
     expect((await get("/admin/network", { "x-portal-service-token": PORTAL })).statusCode).toBe(401);
-    expect((await get("/admin/network?range=7d", { "x-admin-token": ADMIN })).statusCode).toBe(400);
+    expect((await get("/admin/network?range=30d", { "x-admin-token": ADMIN })).statusCode).toBe(400);
   });
 
   test("reports agents, queue, models, gaps, latency and the series", async () => {
@@ -101,5 +101,20 @@ describe("GET /admin/network", () => {
     const last = r.series.points.at(-1);
     expect(last).toMatchObject({ connectedAgents: 1, totalSlots: 2, freeSlots: 2, waitingInference: 1, started: 1, completed: 1, noAgentHasModel: 1, ttftP50: 500 });
     expect(r.coordinator).toMatchObject({ sampleIntervalMs: 15_000, generatedAtMs: expect.any(Number) });
+  });
+
+  test("serves a 7 d range in 30 min buckets", async () => {
+    net.takeNetworkSample(Date.now());
+    const res = await get("/admin/network?range=7d", { "x-admin-token": ADMIN });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json().series).toMatchObject({ range: "7d", bucketMs: 30 * 60_000 });
+    expect(res.json().series.points.length).toBeGreaterThan(0);
+  });
+
+  test("without a database the series stays in memory and nothing is queued for writing", () => {
+    expect(net.networkHistory.enabled).toBe(false);
+    net.takeNetworkSample(Date.now());
+    expect(net.networkHistory.pendingCount).toBe(0);
+    expect(net.networkSamples.size).toBeGreaterThan(0);
   });
 });
