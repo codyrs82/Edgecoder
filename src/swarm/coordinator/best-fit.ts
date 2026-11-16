@@ -73,6 +73,8 @@ export interface AgentView {
   /** Round trip this coordinator <-> the agent's coordinator (peers only). */
   linkRttMs?: number | null;
   stale: boolean;
+  /** worldOwnerTag of the owner account, when known (a requester's own agents are left out of auto). */
+  ownerTag?: string | null;
 }
 
 export interface NetworkView {

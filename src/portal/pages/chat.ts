@@ -382,6 +382,8 @@ app.get("/portal/chat", async (_req, reply) => {
         var computeUsed = selectedCompute;
         if (computeUsed) chatBody.compute = { target: computeUsed.target, model: computeUsed.model, computeClass: computeUsed.computeClass, reservationId: computeUsed.reservationId };
         else if (selectedModel) chatBody.model = selectedModel;
+        // Auto (nothing picked): the network's best fit; the server falls back to EdgeCoder's own chat (free) when it can't run there.
+        else chatBody.compute = { target: "auto" };
         var response = await fetch("/portal/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -544,7 +546,7 @@ app.get("/portal/chat", async (_req, reply) => {
         if (match(o.label + " " + o.detail) && groups[o.group]) groups[o.group].push(optionHtml(key, o.label, o.detail, key === cur));
       }
       var dflt = [];
-      if (match("auto default edgecoder")) dflt.push(optionHtml("auto", "Auto", "EdgeCoder's default route", cur === "auto"));
+      if (match("auto default edgecoder best fit")) dflt.push(optionHtml("auto", "Auto", "Network best fit (the coordinator picks model and machine); free default chat when it can't", cur === "auto"));
       optionByKey["auto"] = { compute: null, model: null };
       for (var j = 0; j < (portalModels.local || []).length; j++) {
         var m = portalModels.local[j];

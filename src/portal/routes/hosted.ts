@@ -27,7 +27,7 @@ import {
   type NetworkDeps,
 } from "../../apps/ide/network-inference.js";
 import { autoBackend, coordinatorAutoBackend, networkBackend } from "../../inference-api/backends.js";
-import { AUTO_MODEL_ID, planRoutes, routeInputsFrom, sizeWorkload } from "../../inference-api/auto-route.js";
+import { AUTO_MODEL_ID, isUnpinnedModel, planRoutes, routeInputsFrom, sizeWorkload } from "../../inference-api/auto-route.js";
 import { apiKeyOf, registerCompatRoutes } from "../../inference-api/routes.js";
 import type { PortalStore } from "../store.js";
 import { withInvoiceQr } from "../invoice-qr.js";
@@ -106,8 +106,9 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
       return [AUTO_MODEL_ID, ...all.flatMap((m) => [`${NETWORK_PREFIX}${m.model}`, ...m.classes.map((c) => `${NETWORK_PREFIX}${m.model}@${c}`)])];
     },
     resolve: async (ctx, model) => {
-      // "auto": the cheapest place that fits each request: a reservation you hold, your own machines (free), then the network.
-      if (model === AUTO_MODEL_ID) {
+      // "auto" (also no model, or "default"): the cheapest place that fits each request: a reservation
+      // you hold, your own machines (free), then the network's best fit (the coordinator picks).
+      if (isUnpinnedModel(model)) {
         const d = networkFor(ctx.accountId);
         const inputs = async () => {
           const [ov, leases] = await Promise.all([computeOverview(d).catch(() => null), listReservations(d).then((r) => (r.status === 200 ? ((r.json.reservations as never[]) ?? []) : [])).catch(() => [])]);
@@ -140,7 +141,7 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
         return { backend, model: AUTO_MODEL_ID };
       }
       const target = hostedTarget(model);
-      if (!target) return { status: 400, error: "Name a model: auto (cheapest place that fits), network/<model>[@cpu|apple|gpu|gpu.dc], mine/<model> or reserved/<reservation>/<model>. GET /v1/models lists them." };
+      if (!target) return { status: 400, error: "Unknown model. Leave it out (or auto) for the cheapest place that fits, or name one: network/<model>[@cpu|apple|gpu|gpu.dc], mine/<model> or reserved/<reservation>/<model>. GET /v1/models lists them." };
       return { backend: networkBackend(await networkForCall(ctx.accountId, target), target), model: model! };
     },
   });

@@ -104,7 +104,9 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
     userId: string,
     conversationId: string,
     compute: ChatCompute,
-    messages: Array<{ role: "user" | "assistant" | "system"; content: string }>
+    messages: Array<{ role: "user" | "assistant" | "system"; content: string }>,
+    /** Auto only: where the chat goes when the network turns it down before any reply (the coordinator's own chat, free). */
+    fallback?: () => Promise<unknown>
   ) {
     const ac = new AbortController();
     reply.raw.on("close", () => ac.abort());
@@ -118,9 +120,16 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
     // it) the chat stays there: a second submit could bill twice. When no coordinator lists the
     // model, a reachable one is still asked, so the user gets its exact refusal.
     while (!first && tried.length < CHAT_MAX_COORDINATOR_ATTEMPTS) {
-      const { url, known } = await capacity.pick({ kind: "network", model: compute.model, computeClass: compute.target === "network" ? compute.computeClass : undefined }, tried);
+      // Best fit: the coordinator with the most room asks its routing (one coordinator; it may place on peers' agents itself).
+      const { url, known } =
+        compute.target === "auto"
+          ? tried.length > 0
+            ? { url: null, known: 1 }
+            : await capacity.pickAuto().then((u) => ({ url: u, known: u ? 1 : 0 }), () => ({ url: null, known: 0 }))
+          : await capacity.pick({ kind: "network", model: compute.model, computeClass: compute.target === "network" ? compute.computeClass : undefined }, tried);
       if (!url) {
         if (tried.length > 0) break;
+        if (fallback) return fallback();
         if (known === 0) return reply.code(502).send({ error: "no_coordinators_available", compute: computeLabel(compute) });
         return reply.code(503).send({ ...NO_COMPUTE_BODY, compute: computeLabel(compute) });
       }
@@ -157,6 +166,11 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
       }
     }
     if (!first || !pieces) {
+      // Auto: nothing ran and nothing was charged, so the coordinator's own chat answers instead.
+      if (fallback && !ac.signal.aborted) {
+        req.log.info({ reason: (refusal as Error | undefined)?.message?.slice(0, 200) }, "portal_auto_chat_fallback");
+        return fallback();
+      }
       const status = refusal instanceof ChatBackendError ? refusal.status : 502;
       return reply.code(status >= 400 && status < 600 ? status : 502).send({ error: (refusal as Error | undefined)?.message ?? "all_coordinators_failed", compute: computeLabel(compute) });
     }
@@ -307,11 +321,19 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
     const history = boundChatHistory(await store.getConversationMessages(body.conversationId, CHAT_HISTORY_MAX_MESSAGES));
     const messages = history.map((m) => ({ role: m.role, content: m.content }));
 
-    if (body.compute) return runOnNetwork(req, reply, user.userId, body.conversationId, body.compute, messages);
-
     const chatPayload: Record<string, unknown> = { messages };
     if (body.model) chatPayload.model = body.model;
+    // Auto (the page's default): the network's best fit, else the coordinator's own chat.
+    if (body.compute?.target === "auto") {
+      return runOnNetwork(req, reply, user.userId, body.conversationId, body.compute, messages, () => runDefaultChat(req, reply, body.conversationId, chatPayload));
+    }
+    if (body.compute) return runOnNetwork(req, reply, user.userId, body.conversationId, body.compute, messages);
+    return runDefaultChat(req, reply, body.conversationId, chatPayload);
+  });
 
+  /** The coordinator's own chat (POST /portal/chat): a named model there, or its default. */
+  async function runDefaultChat(req: FastifyRequest, reply: FastifyReply, conversationId: string, chatPayload: Record<string, unknown>) {
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const ac = new AbortController();
     reply.raw.on("close", () => ac.abort());
 
@@ -371,7 +393,7 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
     if (fullContent.length > 0) {
       await store.addMessage({
         messageId: randomUUID(),
-        conversationId: body.conversationId,
+        conversationId,
         role: "assistant",
         content: fullContent
       });
@@ -379,5 +401,6 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
 
     reply.raw.write("data: [DONE]\n\n");
     reply.raw.end();
-  });
+    return reply;
+  }
 }

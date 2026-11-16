@@ -71,6 +71,8 @@ const CLASS_LABELS: Record<string, string> = { cpu: "CPU", apple: "Apple", gpu: 
 export const classLabel = (cls: string | undefined) => (cls && cls !== "any" ? CLASS_LABELS[cls] ?? cls : "Any machine");
 
 export const chatComputeSchema = z.discriminatedUnion("target", [
+  // The network's best fit: the coordinator picks the model, the class and the machine (model "auto").
+  z.object({ target: z.literal("auto") }),
   z.object({ target: z.literal("network"), model: z.string().min(1).max(200), computeClass: z.enum(["any", ...COMPUTE_CLASSES]).optional() }),
   z.object({ target: z.literal("mine"), model: z.string().min(1).max(200) }),
   z.object({ target: z.literal("reserved"), model: z.string().min(1).max(200), reservationId: z.string().min(1).max(100), computeClass: z.enum(COMPUTE_CLASSES).optional() }),
@@ -81,11 +83,13 @@ export type ChatCompute = z.infer<typeof chatComputeSchema>;
 export function networkTargetFor(c: ChatCompute): { model: string; computeClass?: string } & NetworkTarget {
   if (c.target === "mine") return { model: c.model, target: "mine" };
   if (c.target === "reserved") return { model: c.model, reservationId: c.reservationId };
+  if (c.target === "auto") return { model: "auto", computeClass: "any" };
   return { model: c.model, computeClass: c.computeClass ?? "any" };
 }
 
 /** "Network · qwen3.5:9b · GPU", "My machines · qwen2.5-coder:7b", "Reserved GPU · qwen2.5-coder:32b". */
 export function computeLabel(c: ChatCompute): string {
+  if (c.target === "auto") return "Network · best fit";
   if (c.target === "mine") return `My machines · ${c.model}`;
   if (c.target === "reserved") return `Reserved ${c.computeClass ? classLabel(c.computeClass) : "machine"} · ${c.model}`;
   return c.computeClass && c.computeClass !== "any" ? `Network · ${c.model} · ${classLabel(c.computeClass)}` : `Network · ${c.model}`;
@@ -104,7 +108,9 @@ const fmtRate = (n: number) => (n >= 1 ? n.toFixed(2) : n >= 0.01 ? n.toFixed(3)
 /** restricted: a security research tier model (listed only to entitled accounts); never offered as a network call. */
 export interface NetworkModelEntry { model: string; agents: number; classes: string[]; restricted?: string }
 export interface ReservationEntry { id: string; computeClass: string; model?: string; status: string; endMs: number; cSatsPerSecond?: number; models?: string[] }
-export interface ComputeOption { id: string; group: "network" | "mine" | "reserved"; label: string; detail: string; compute: ChatCompute }
+/** A pinned compute (the picker's rows): everything but Auto. */
+export type PinnedChatCompute = Exclude<ChatCompute, { target: "auto" }>;
+export interface ComputeOption { id: string; group: "network" | "mine" | "reserved"; label: string; detail: string; compute: PinnedChatCompute }
 
 /** The compute picker's options: active leases first, then the network per model (any class and each class), then your own machines. */
 export function computeOptions(
@@ -114,7 +120,7 @@ export function computeOptions(
   nowMs: number,
 ): ComputeOption[] {
   const out: ComputeOption[] = [];
-  const add = (group: ComputeOption["group"], compute: ChatCompute, detail: string) =>
+  const add = (group: ComputeOption["group"], compute: PinnedChatCompute, detail: string) =>
     out.push({ id: `${group}:${compute.model}:${"computeClass" in compute ? compute.computeClass ?? "any" : ""}:${"reservationId" in compute ? compute.reservationId : ""}`, group, label: computeLabel(compute), detail, compute });
   for (const r of reservations) {
     if (r.status !== "active" || r.endMs <= nowMs) continue;

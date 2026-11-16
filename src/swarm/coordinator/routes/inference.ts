@@ -409,7 +409,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     if (body.model === AUTO_MODEL_ID) {
       if (body.reservationId || body.target === "mine") return reply.code(400).send({ error: "auto_network_only", detail: "model auto routes network calls; name a model for your own machines or a reservation" });
       const job = describeJob({ messages: body.messages as ChatMessage[], tools: body.tools, maxTokens: body.maxTokens }, cleanHints(body.routing), complexityWeights);
-      const { result, elsewhere } = await resolveAuto(job, { peers: body.routeRedirect, ...(body.computeClass !== "any" ? { computeClass: body.computeClass } : {}) });
+      const { result, elsewhere } = await resolveAuto(job, { peers: body.routeRedirect, requesterAccountId: accountId, ...(body.computeClass !== "any" ? { computeClass: body.computeClass } : {}) });
       const summary = routingSummary(job, result);
       if (!result.chosen) return reply.code(409).send({ error: "no_route_fits", detail: result.rejected ?? result.reason, routing: summary });
       if (elsewhere) return reply.code(409).send({ error: "route_elsewhere", coordinatorId: elsewhere.coordinatorId, coordinatorUrl: elsewhere.url, routing: summary });
@@ -510,9 +510,10 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         ...(onlyAccountId ? { onlyAccountId } : {}),
         ...(reservationId ? { reservationId } : {}),
       },
-    });
+    }, routed ? { excludeAccounts: [accountId] } : undefined);
     if (routed) {
-      // A soft preference: the chosen agent gets the call for a moment, then anyone eligible may take it.
+      // A soft preference: the chosen agent gets the call for a moment, then anyone eligible may take it
+      // (never the requester's own machines: excludeAccounts above, as in best-fit).
       if (routed.result.chosen?.local) preferAgent(subtask.id, routed.result.chosen.agentId, bestFitConfig.preferMs);
       recordDecision(body.taskId, subtask.id, routed.job, routed.result);
     }

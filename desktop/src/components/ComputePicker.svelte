@@ -129,7 +129,7 @@
               <Command.Item class="ui-command-item row {current.where === 'anywhere' ? 'current' : ''}" value="auto-anywhere" onSelect={() => pick("auto")}>
                 <Zap size={14} />
                 <span class="name">Auto</span>
-                <span class="meta">Cheapest place that fits each request: yours first, GPUs for heavy work</span>
+                <span class="meta">Your machines first (free), then the network's best fit: the coordinator picks the model and machine</span>
                 {#if current.where === "anywhere"}{@render currentMark()}{/if}
               </Command.Item>
               <Command.Item class="ui-command-item row {current.where === 'auto' ? 'current' : ''}" value="auto-local" onSelect={() => pick(undefined)}>

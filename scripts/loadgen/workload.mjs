@@ -153,14 +153,15 @@ export const SMALL_MODEL_WEIGHT = { chat: 0.6, burst: 1, coding: 0.05, codegen: 
  * The model mix for a behaviour from a capacity snapshot (capacity.mjs): every chat model the
  * network holds, 7b and up at weight 1 and small ones at SMALL_MODEL_WEIGHT. The planner then
  * multiplies each weight by the model's free in-flight allowance, so 7b/9b/14b/30b calls are spread
- * in proportion to their free slots. `fallback` (profiles.mjs MODELS) without a snapshot.
+ * in proportion to their free slots. `fallback` (profiles.mjs MODELS) without a snapshot. Model
+ * "auto" is drawn separately (planner.mjs pickWithAutoShare, --auto-share).
  */
 export function modelMix(capacity, behaviour, fallback = {}) {
   const models = Object.entries(capacity?.models ?? {}).filter(([k, m]) => (m?.slots ?? 0) > 0 && !NOT_CHAT.test(k));
   if (!models.length) return { ...fallback };
   const out = {};
   for (const [k] of models) out[`network/${k}`] = paramsB(k) >= 6 ? 1 : SMALL_MODEL_WEIGHT[behaviour] ?? 0.5;
-  if (behaviour === "chat" || behaviour === "burst") out.auto = 0.3;
+  // "auto" is not weighed here: --auto-share decides how many calls leave the model to the network.
   return out;
 }
 

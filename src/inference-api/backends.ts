@@ -8,8 +8,9 @@ import type { ServedBy } from "../swarm/served-by.js";
 import { AutoUnsupportedError, NetworkInferenceError, RouteElsewhereError, streamNetworkCompletion, type NetworkDeps, type NetworkTarget } from "../apps/ide/network-inference.js";
 import { contextWindowFor, ollamaChat, type OllamaPiece } from "./ollama.js";
 import { ENGINE_PRESETS, EngineError, openAiEngineChat, type OpenAiEngine } from "./openai-engine.js";
-import { noRouteMessage, planRoutes, sizeWorkload, type ComputePolicy, type PlanOptions, type QualityFloor, type Route, type RouteInputs } from "./auto-route.js";
+import { BEST_FIT_ROUTE, networkAllowance, noRouteMessage, planRoutes, sizeWorkload, type ComputePolicy, type PlanOptions, type QualityFloor, type Route, type RouteInputs } from "./auto-route.js";
 import { ChatBackendError, type ChatBackend, type ChatPiece } from "./types.js";
+import type { RoutingHints } from "./job-descriptor.js";
 
 /** "This computer (Apple M1 Max)": a call that ran on this machine's Ollama. */
 export function thisComputer(t: { promptMs?: number; genMs?: number; promptTokens?: number; outputTokens?: number } = {}): ServedBy {
@@ -162,18 +163,31 @@ export function autoBackend(opts: {
   plan?: () => PlanOptions;
   /** The smallest model Auto picks for chat and for agent work (default: the env, else 7B / 7B). */
   floor?: QualityFloor;
+  /**
+   * Network best fit: when set, the plan's network leg goes to the coordinator first as model
+   * "auto" (its best-fit routing picks the model, class and machine), with the client's hints and
+   * what may be spent as the price ceiling. The client-side network routes stay behind it, so an
+   * older coordinator or a refusal still lands somewhere. Not used for the "model" policy (a pin).
+   */
+  networkBestFit?: (routing: RoutingHints) => ChatBackend;
 }): ChatBackend {
   return async function* (req, signal) {
     const inputs = await opts.inputs();
     const policy = opts.policy ?? "auto";
     const planOpts = opts.plan?.() ?? {};
-    const routes = planRoutes(sizeWorkload(req, opts.floor), inputs, policy, planOpts);
+    const planned = planRoutes(sizeWorkload(req, opts.floor), inputs, policy, planOpts);
+    const routes = opts.networkBestFit && policy !== "model" ? withBestFit(planned) : planned;
     if (!routes.length) throw new ChatBackendError(noRouteMessage(policy, inputs, planOpts), 404);
-    // The small free fallback is always tried, whatever maxTries cuts.
-    const main = routes.filter((r) => !r.fallback).slice(0, opts.maxTries ?? 4);
+    const allowance = networkAllowance(inputs, planOpts);
+    const bestFitHints = (): RoutingHints => {
+      const ceiling = Number.isFinite(allowance) ? Math.min(req.hints?.maxCSats ?? Infinity, allowance) : req.hints?.maxCSats;
+      return { ...req.hints, ...(ceiling !== undefined && Number.isFinite(ceiling) ? { maxCSats: Math.max(0.001, ceiling) } : {}) };
+    };
+    // The small free fallback is always tried, whatever maxTries cuts (the best-fit leg does not count).
+    const main = routes.filter((r) => !r.fallback).slice(0, (opts.maxTries ?? 4) + (routes.some((r) => r.bestFit) ? 1 : 0));
     let lastErr: unknown;
     for (const r of [...main, ...routes.filter((r) => r.fallback)]) {
-      const it = opts.run(r)(req, signal);
+      const it = (r.bestFit && opts.networkBestFit ? opts.networkBestFit(bestFitHints()) : opts.run(r))(req, signal);
       let first: IteratorResult<ChatPiece>;
       try {
         first = await it.next();
@@ -183,7 +197,8 @@ export function autoBackend(opts: {
       }
       opts.onRoute?.(r);
       for (let n = first; !n.done; n = await it.next()) {
-        yield "done" in n.value ? { ...n.value, where: r.reason } : n.value;
+        // Best fit: the coordinator's own line says where it ran.
+        yield "done" in n.value ? { ...n.value, where: r.bestFit && n.value.where ? n.value.where : r.reason } : n.value;
       }
       return;
     }
@@ -192,4 +207,15 @@ export function autoBackend(opts: {
     }
     throw lastErr instanceof ChatBackendError ? lastErr :new ChatBackendError((lastErr as Error)?.message ?? "Auto couldn't start anywhere", 502);
   };
+}
+
+/**
+ * The plan with the network's best fit in front of its network routes: placed where the first
+ * network route was (after the free places the policy prefers), and only when the plan has a network
+ * route at all (the network is allowed and affordable).
+ */
+export function withBestFit(routes: Route[]): Route[] {
+  const i = routes.findIndex((r) => r.placement === "network" && !r.fallback);
+  if (i < 0) return routes;
+  return [...routes.slice(0, i), BEST_FIT_ROUTE, ...routes.slice(i)];
 }

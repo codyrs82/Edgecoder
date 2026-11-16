@@ -96,7 +96,8 @@ function indexNames(...snaps) {
 
 /**
  * Buyers for a run and, per buyer, the models it must not ask for (its own agents hold them, so
- * the network could route its call to itself; "auto" too when it hosts anything).
+ * the network could route its call to itself). "auto" is never avoided: best-fit routing leaves the
+ * requester's own agents out (src/swarm/coordinator/routing.ts withoutRequesterAgents).
  * Default buyers: keyed accounts that host nothing and hold at least minBalance. When every
  * account hosts something, all keyed accounts with minBalance, each avoiding its own models.
  */
@@ -119,7 +120,7 @@ export function chooseBuyers(snapshot, { buyers = [], minBalance = 0 } = {}) {
     const h = hostedBy(n);
     if (!h?.connected) continue;
     hosting[n] = { agents: h.connected, classes: h.classes, models: h.models };
-    avoid[n] = [...h.models, "auto"];
+    avoid[n] = [...h.models];
   }
   return { buyers: chosen, avoid, hosting, reason, hostsKnown: !!snapshot?.hosts };
 }
@@ -204,7 +205,7 @@ export function moneyReport({ before, after, charges = {}, buyers = [], feeBps =
     } else debit = charged;
     // Self-dealing: exact when replies said so, else charges on models its own agents hold.
     const own = hosts ? hostModels(id) : [];
-    const risk = c ? Object.entries(c.byModel ?? {}).filter(([m]) => m === "auto" ? hosts : own.includes(modelKey(m))).reduce((a, [, g]) => a + g.cSats, 0) : 0;
+    const risk = c ? Object.entries(c.byModel ?? {}).filter(([m]) => m !== "auto" && own.includes(modelKey(m))).reduce((a, [, g]) => a + g.cSats, 0) : 0;
     const exact = (c?.servedSeen ?? 0) > 0 && (c?.servedSeen ?? 0) >= (c?.ok ?? 0);
     const selfDealt = r3(exact ? c.ownCSats : risk);
     if (reserveGap !== null && reserveGap > tol) flags.push({ kind: "buyer_debit_exceeds_charges", name, gap: reserveGap, note: "reserves still held (unsettled calls) or spending outside the run" });
