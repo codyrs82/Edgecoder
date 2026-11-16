@@ -52,6 +52,7 @@ import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, res
 import { loadConfigOrExit } from "../../common/config.js";
 import { ideProviderConfigSchema } from "../../config/ide-provider.js";
 import { SessionHub, type SessionData } from "./sessions.js";
+import { cliStatus, installCli } from "./cli-install.js";
 import { registerSessionRoutes } from "./session-routes.js";
 import { hostedBackend, hostedConfigFromEnv } from "./hosted-backend.js";
 import { GitHubDeviceLogins } from "./github-device.js";
@@ -718,6 +719,13 @@ app.post("/v1/ide/github/login/:id/cancel", async (req, reply) => {
   const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
   const l = githubLogins.cancel(id);
   return l ? reply.send(l) : reply.status(404).send({ error: "not_found" });
+});
+
+// Settings > Install command-line tool (cli-install.ts): an `edgecoder` launcher on the PATH.
+app.get("/v1/ide/settings/cli", async (_req, reply) => reply.send(cliStatus()));
+app.post("/v1/ide/settings/cli/install", async (_req, reply) => {
+  const r = installCli();
+  return reply.status(r.ok ? 200 : r.state === "exists_other" ? 409 : 404).send(r);
 });
 
 // The projects folder (default ~/EdgeCoder) and connecting a repository into it (repo-connect.ts).

@@ -1400,6 +1400,11 @@ export interface ProjectsFolder {
 }
 export const getProjectsFolder = () => fsCall<ProjectsFolder>("GET", "/v1/ide/settings/projects-folder");
 export const setProjectsFolder = (path: string) => fsCall<ProjectsFolder>("POST", "/v1/ide/settings/projects-folder", { path });
+/** The `edgecoder` command-line launcher (~/.local/bin/edgecoder, or edgecoder.cmd on Windows). */
+export interface CliStatus { path: string; dir: string; installed: boolean; ours: boolean; onPath: boolean }
+export const getCliStatus = () => fsCall<CliStatus>("GET", "/v1/ide/settings/cli");
+/** Writes the launcher; the message says where and whether its folder is on PATH. Throws with the reason when it can't. */
+export const installCliTool = () => fsCall<{ ok: boolean; path: string; dir: string; state: string; onPath: boolean; message: string }>("POST", "/v1/ide/settings/cli/install", {});
 /** gh's sign-in and, when signed in, the user's 20 most recent repositories (owner/name). */
 export const recentRepos = () => fsCall<GitHubCliStatus & { repos: string[] }>("GET", "/v1/ide/repos/recent");
 export interface RepoConnection {

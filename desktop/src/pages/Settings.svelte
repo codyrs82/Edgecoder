@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { computeOverview, getIdentity, getDashboardOverview, getModelList, backendReady, isRemoteMode, getProjectsFolder, setProjectsFolder, portalWebUrl, type ProjectsFolder } from "../lib/api";
+  import { computeOverview, getIdentity, getDashboardOverview, getModelList, backendReady, isRemoteMode, getProjectsFolder, setProjectsFolder, portalWebUrl, getCliStatus, installCliTool, type CliStatus, type ProjectsFolder } from "../lib/api";
   import { loadSettings, saveSetting } from "../lib/stores";
   import { coordinatorUrl as currentCoordinatorUrl, portalUrl as currentPortalUrl, setEndpoint, resetEndpoints, syncEndpointsToShell, testEndpoint, validateEndpointUrl, defaultEndpoints, type EndpointKind } from "../lib/endpoints";
   import { checkForUpdate, onUpdateStatus, downloadAndInstall, type UpdateStatus } from "../lib/updater";
@@ -248,6 +248,25 @@
       projectsFolderMsg = { ok: false, text: (e as Error).message };
     }
   }
+  // Command-line tool: `edgecoder code` in any terminal, run with the app's own Node.
+  let cli = $state<CliStatus | null>(null);
+  let cliMsg = $state<{ ok: boolean; text: string } | null>(null);
+  let cliBusy = $state(false);
+  backendReady.then(() => getCliStatus()).then((s) => (cli = s)).catch(() => {});
+  async function installCli() {
+    cliBusy = true;
+    cliMsg = null;
+    try {
+      const r = await installCliTool();
+      cliMsg = { ok: true, text: r.message };
+      cli = await getCliStatus().catch(() => cli);
+    } catch (e) {
+      cliMsg = { ok: false, text: (e as Error).message };
+    } finally {
+      cliBusy = false;
+    }
+  }
+
   async function chooseProjectsFolder() {
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
@@ -304,6 +323,23 @@
           <button onclick={() => void chooseProjectsFolder()} disabled={projectsFolder?.source === "env"}>Choose…</button>
           {#if projectsFolderMsg}<span class={projectsFolderMsg.ok ? "sp-ok" : "sp-err"}>{projectsFolderMsg.ok ? projectsFolderMsg.text : "Not saved"}</span>{/if}
         </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sp-group" aria-labelledby="gen-cli">
+    <h2 class="sp-group-title" id="gen-cli">Command line</h2>
+    <div class="sp-card">
+      <div class="sp-row">
+        <div class="sp-text">
+          <span class="sp-title">Install command-line tool</span>
+          <span class="sp-desc">
+            {#if cliMsg}<span class={cliMsg.ok ? "" : "sp-err"} role="status">{cliMsg.text}</span>
+            {:else if cli?.installed && cli.ours}<code>edgecoder</code> is installed at {cli.path}{cli.onPath ? "." : `; ${cli.dir} is not on your PATH yet.`}
+            {:else}Adds <code>edgecoder</code> (run <code>edgecoder code</code> in a project folder) at {cli?.path ?? "~/.local/bin/edgecoder"}, using the Node inside this app.{/if}
+          </span>
+        </div>
+        <div class="sp-controls"><button onclick={() => void installCli()} disabled={cliBusy}>{cliBusy ? "Installing…" : cli?.installed && cli.ours ? "Reinstall" : "Install command-line tool"}</button></div>
       </div>
     </div>
   </section>
