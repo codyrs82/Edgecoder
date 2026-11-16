@@ -22,7 +22,7 @@ These run as their own processes, outside the unified agent:
 |---|---|---|
 | **IDE Provider** | 4304 | Local IDE inference API for dev-machine agents |
 | **Portal** | 4310 | User identity, node enrollment, wallet/credits, download page |
-| **Anchor Proxy** | 4311 | Edge-network ingress proxy |
+| **Anchor Proxy** | 4311 | Bitcoin OP_RETURN broadcast proxy: coordinators send ledger checkpoint hashes to it and it broadcasts them through bitcoind (`src/economy/anchor-proxy-service.ts`). Not deployed; anchoring is off in production and planned for mainnet. |
 
 ## Standard Local Setup (docker-compose)
 
@@ -107,6 +107,8 @@ For production workloads that exceed a single node, EdgeCoder supports federatio
 | Coordinator (EU, `edgecoder-seed-eu`) | `https://coordinator-eu.edgecoder.io` |
 
 The control plane runs inside each all-in-one seed, so it has no host of its own.
+
+The full list of Fly.io apps (Postgres, the Lightning nodes, test agents, load generator and probe) is in [docs/DEPLOYMENT.md](https://github.com/codyrs82/Edgecoder/blob/main/docs/DEPLOYMENT.md#flyio-deployment). The anchor proxy has a config (`deploy/fly/fly.anchor-proxy.toml`) but is not deployed.
 
 ### Fly-Oriented Topology Pattern
 

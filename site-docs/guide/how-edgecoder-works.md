@@ -4,15 +4,18 @@ This page describes the EdgeCoder runtime architecture end to end: from node sta
 
 ## Unified Agent Architecture
 
-Every EdgeCoder node runs as a **unified agent** -- a single process that embeds both a coordinator and a worker. There is no separate coordinator deployment. When a node boots:
+EdgeCoder has two kinds of node:
+
+- **Coordinators** hold the task queue, the credit engine, the ledger and the peer mesh. The `all-in-one` runtime (what `npm run dev` and the Fly.io seeds run) puts a coordinator, the inference service and the control plane in one process, with an embedded worker in development (the Fly.io seeds disable it, `DISABLE_SELF_AGENT=1`). On the public network the coordinators are EdgeCoder's seeds: `edgecoder-seed` (US, coordinator-only) and `edgecoder-seed-eu` (EU, also runs Ollama).
+- **Agents** (the desktop app, installed hosts, iOS) register with a coordinator, pull subtasks and run them on local models. An agent runs its owner's work for free; it takes other people's work only once its owner is an approved host.
+
+When an `all-in-one` process boots:
 
 1. The coordinator starts on **port 4301** and initializes the task queue, credit engine, ledger, and peer mesh.
-2. A worker process is forked automatically. Every node contributes compute to the mesh.
+2. An embedded worker starts, unless `DISABLE_SELF_AGENT` is set.
 3. The inference service binds to **port 4302** (local Ollama).
 4. The control plane binds to **port 4303**.
-5. An OpenAI-compatible endpoint starts on **port 4304** for external IDE connections.
-
-This means any machine running EdgeCoder is simultaneously coordinating work and performing work.
+5. The OpenAI-compatible IDE provider runs as its own process on **port 4304** (`npm run dev:ide`).
 
 ## Gossip Mesh
 
@@ -23,7 +26,7 @@ Nodes discover and communicate with each other via a gossip mesh. Each node broa
 - Claim coordination with gossip claim delay to prevent duplicate execution
 - Ledger synchronization
 
-No central server or registry is required. The network is fully peer-to-peer.
+The gossip mesh connects coordinators, and agents connect to a coordinator; it is not a serverless peer-to-peer network. On the public network the coordinators are EdgeCoder-operated, and the portal (accounts, host approval, wallet) is EdgeCoder-hosted. Agents can also make direct work offers to each other through the coordinator (agent-mesh), and nearby devices can reach each other over BLE.
 
 ## System Components
 
@@ -39,7 +42,7 @@ No central server or registry is required. The network is fully peer-to-peer.
 
 ### Desktop App (Tauri + Svelte)
 
-Chat-first IDE with Monaco editor, conversation history, model management, mesh topology view, task queue, and credits dashboard. This is the primary surface for interacting with EdgeCoder.
+Chat-first IDE with Monaco editor, conversation history, model management, mesh topology view, task queue, and usage dashboard. This is the primary surface for interacting with EdgeCoder.
 
 ### External IDEs
 
@@ -56,7 +59,7 @@ Mobile agent running llama.cpp for on-device inference. Connects to the local me
 3. **Broadcast** -- The gossip mesh broadcasts task availability to peer coordinators.
 4. **Claiming** -- An available worker (local or on a remote peer) claims the task. A gossip claim delay prevents duplicate claims across the mesh.
 5. **Execution** -- The worker runs a plan, code, test, iterate loop against its local model.
-6. **Result return** -- Results flow back to the originating coordinator. Credits are accrued to the agent that contributed compute.
+6. **Result return** -- Results flow back to the originating coordinator. The host that ran the work is paid in cSats: what the requester paid, less the 5 % network fee.
 
 ```mermaid
 flowchart LR
@@ -70,7 +73,7 @@ flowchart LR
   control[Control Plane :4303]
   ideport[IDE Endpoint :4304]
   mesh[Gossip Mesh]
-  ledger[Ledger + Credits]
+  ledger[Ledger + cSats]
 
   user --> desktop
   user --> ide
@@ -88,12 +91,12 @@ flowchart LR
 
 ## Economy
 
-EdgeCoder uses a credit-based economy to incentivize compute contribution:
+Compute is priced in **cSats** (1 cSat = 1 sat). The canonical, current model is [economy-math.md](https://github.com/codyrs82/Edgecoder/blob/main/docs/economy-math.md).
 
-- **Earning credits**: Nodes earn credits by executing tasks for other peers. The credit engine records verified work against the ledger.
-- **Spending credits**: Submitting a task to the mesh costs credits proportional to the compute required.
-- **Bitcoin anchoring**: Ledger checkpoints are anchored to Bitcoin via `OP_RETURN` transactions, providing tamper-evident proof of the ledger state.
-- **Lightning Network**: Real-time settlement between peers uses Lightning for low-latency, low-fee payments.
+- **Earning sats**: Approved hosts earn for work they run for others: 95 % of each compute payment goes to the host and 5 % is the network fee (`NETWORK_FEE_BPS`). The coordinator measures the work and records it on the ledger.
+- **Spending cSats**: Model calls are priced per token by model size (with a power floor per compute class); code jobs and reservations per second by compute class. Work on your own machines is free.
+- **Payouts**: earned sats are withdrawn over Lightning, on request or automatically to a Lightning address. Funding with Bitcoin on-chain is behind `ONCHAIN_ENABLED`.
+- **Bitcoin anchoring**: OP_RETURN anchoring of ledger checkpoints is implemented but off in production; it is planned for mainnet.
 
 ## Runtime Modes
 
@@ -103,7 +106,7 @@ All tasks execute on the local node. The gossip mesh is inactive or restricted. 
 
 ### Mesh (Default)
 
-The node participates in the peer mesh. Tasks can overflow to remote peers when local capacity is saturated, and the node accepts inbound tasks from the mesh to earn credits.
+The node participates in the mesh. Tasks can overflow to network capacity when local capacity is saturated, and, if its owner is an approved host, the node accepts other people's tasks and earns sats for them.
 
 ## Trust Boundaries
 

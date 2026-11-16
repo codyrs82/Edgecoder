@@ -1,9 +1,10 @@
 # Economy math: cSats, sats, tokens
 
-> **Bitcoin settlement is being redesigned.** Today value sits with the coordinator between a
-> purchase and a payout (custodial). The target, pay-per-use settlement in sats over Lightning, is
-> proposed in PR #195 (`docs/design/bitcoin-settlement.md` once merged). This page describes what
-> the code does now.
+> **Settlement today.** cSats are bought with sats over Lightning, and hosts' earned sats are paid
+> out over Lightning, on request or automatically to a Lightning address (section 5). Funding with
+> Bitcoin on-chain and batched on-chain payouts are implemented behind `ONCHAIN_ENABLED`. Value sits
+> with the coordinator between a purchase and a payout (custodial). This page describes what the
+> code does now.
 
 This is the arithmetic the coordinator actually runs today, with the source of each formula,
 worked examples, and the places where the numbers or the wiring do not hold up. Design

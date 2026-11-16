@@ -3,6 +3,36 @@
 What is shipped, what is next, and the design direction behind the larger items. Dates are when an
 item was added or finished.
 
+## Shipped (2026-11-16)
+
+- **Hosts earn sats.** 1 cSat = 1 sat; on every compute payment the host gets 95 % and the network
+  fee is 5 % (`NETWORK_FEE_BPS` 500). Earned sats are paid out over Lightning, on request or
+  automatically to a Lightning address; stuck-payout settlement and a durable auto-payout schedule
+  (#303). See docs/economy-math.md.
+- **On-chain Bitcoin, behind a flag.** Fund with Bitcoin (confirmed deposits) and batched on-chain
+  payouts, both behind `ONCHAIN_ENABLED` (#300).
+- **Signet Lightning node** (`edgecoder-lnd-signet`, Mutinynet) for pre-mainnet testing (#301).
+- **Hosting by request.** A Host with us page and request form at `/host`, admin Host requests,
+  and a host approval gate (`HOST_APPROVAL_REQUIRED`, on by default) (#304).
+- **Invite launch.** `LAUNCH_MODE=invite`: sign-up by invite code and low per-account caps on
+  purchases, balances and payouts (#299).
+- **Best-fit routing** for model auto: job type, complexity score, load, speed, price and session
+  affinity (#311).
+- **`edgecoder code`** terminal agent, with shared sessions and `/remote` co-editing with the
+  desktop app (#310, #321). See docs/terminal.md.
+- **Bring your own frontier key** (Claude/OpenAI), owner-only: the lead runs on the user's key,
+  workers on the network (#323). See docs/frontier-keys.md.
+- **Security research tier gating:** entitlements, restricted models, reserved-only routing and
+  logging; no model listed yet (#306). See docs/security-research-tier.md.
+- **Legal drafts**, pending counsel (#305). See docs/legal/.
+- **Datacenter GPU class** (`gpu.dc`, base tier `gpu.dc40`) with hardware verification of tiers;
+  datacenter cards are no longer demoted to consumer tiers (#297).
+- **Admin Network dashboard:** agents and their accounts, load, queues, latency, models and gaps
+  (#293, #296).
+- **Desktop auto-update** that restarts to finish an update when nothing is in progress (#318,
+  #319).
+- **Hardware class kept across coordinator restarts** (#322).
+
 ## Shipped (2026-11-02)
 
 - **Compute you can buy and point tools at.**

@@ -119,7 +119,7 @@ describe("public site: hosting is by request", () => {
     expect(html).not.toContain('href="/portal/settings/install"');
     expect(html).toContain('<a href="/host">Host with us</a>');
     expect(html).toContain('href="/host#request">Request to host</a>');
-    expect(html).toContain("early-access hosts are paid");
+    expect(html).toContain("Approved hosts earn 95%");
     expect(html).toContain('href="/portal#signup">Create account</a>');
   });
 

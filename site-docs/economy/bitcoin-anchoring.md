@@ -4,6 +4,8 @@ EdgeCoder coordinators anchor checkpoint and issuance epoch hashes to the Bitcoi
 
 Anchoring is off by default. It needs a provider with a funded wallet (`BITCOIN_ANCHOR_PROVIDER=anchor-proxy` or `bitcoind`). Without one the coordinator broadcasts nothing, records no anchors, and reports `anchoring.mode: "disabled"` on its status endpoints; checkpoints stop at `soft_finalized`.
 
+**Production status:** anchoring is off on EdgeCoder's coordinators and the `edgecoder-anchor-proxy` app is not deployed. Anchoring is planned for mainnet.
+
 ## Architecture
 
 ```mermaid

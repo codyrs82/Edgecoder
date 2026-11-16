@@ -122,8 +122,30 @@ The flow works as follows:
    key and the ephemeral public key, derives the same symmetric key, and
    decrypts the payload.
 
-Implementation lives in `src/security/envelope.ts`. Envelope encryption is
-currently staged for activation in the task pipeline.
+Implementation lives in `src/security/envelope.ts`.
+
+### What it covers today
+
+Envelope encryption is on by default; there is no flag. It protects the hop
+between the coordinator and the agent that runs a subtask:
+
+- At registration the agent sends an X25519 public key
+  (`src/swarm/worker-runner.ts`).
+- When that agent pulls a subtask, the coordinator encrypts the task input and
+  snapshot reference to that key and keeps the shared key for the subtask
+  (`src/swarm/coordinator/routes/tasks.ts`, `/pull`).
+- The agent decrypts the task, runs it, and encrypts its result with the same
+  shared key; the coordinator decrypts the result in `/result`.
+
+What it does **not** cover:
+
+- **It is not end to end.** The coordinator decrypts every result and sees the
+  task in plaintext. Queue payloads are stored in Postgres unencrypted.
+- **iOS agents do not use it yet.** An agent that registers no X25519 key gets
+  the subtask in plaintext (over TLS), and so does any pull where encryption
+  fails (the coordinator logs `envelope_encryption_failed_falling_back`).
+- It does not hide the routing metadata (task id, resource class, priority,
+  language, timeout, model) that travels with the envelope.
 
 ## Runtime Safety Controls
 

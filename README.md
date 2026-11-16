@@ -1,8 +1,8 @@
 # EdgeCoder
 
-Decentralized AI coding platform -- a peer-to-peer swarm of local LLMs that collaboratively write, test, and refine code.
+AI coding platform built on local LLMs: your own machines first, and a mesh of approved hosts behind EdgeCoder's coordinators when you need more.
 
-EdgeCoder is a privacy-first coding assistant that runs on your own machines. It helps write and test code without sending your source to a cloud service. When a task exceeds local capacity it can be split across trusted peers or escalated to a larger model.
+EdgeCoder is a coding assistant that runs models on your own machines with Ollama or llama.cpp, so local work never leaves them. When a task exceeds local capacity you can send it to the network: it goes through a coordinator (on the public network, EdgeCoder's seeds on Fly.io) to agents on approved hosts, who earn sats for running it. The coordinator sees network work in plaintext; see [Security](#security). Frontier models are used only with your own API key ([docs/frontier-keys.md](docs/frontier-keys.md)).
 
 ## Architecture
 
@@ -46,11 +46,33 @@ Compute is priced in **cSats**: 1 cSat = 1 sat. Model calls are priced per token
 with a power floor per compute class so a machine's owner never runs at a loss, converted at a
 live BTC price. Code jobs and reservations are priced per second by compute class. Agents earn
 what requesters pay, minus the network fee. The maths is in
-[docs/economy-math.md](docs/economy-math.md). Bitcoin settlement is being redesigned (PR #195).
+[docs/economy-math.md](docs/economy-math.md), the canonical, current model.
+
+Hosts earn sats: on every compute payment the host gets 95 % and EdgeCoder keeps 5 % as the
+network fee (`NETWORK_FEE_BPS`, default 500). Buying cSats is free. Earned sats are paid out over
+Lightning (on request or automatically to a Lightning address); on-chain funding and batched
+on-chain payouts are behind `ONCHAIN_ENABLED`. Value sits with the coordinator between a purchase
+and a payout (custodial).
 
 To use compute from the desktop app or point Claude Code, Cursor and other tools at it, see
 [docs/using-compute.md](docs/using-compute.md). AI agents can sign up and use compute through the
 MCP server ([docs/mcp.md](docs/mcp.md), [packages/mcp-server](packages/mcp-server/README.md)).
+
+## Hosting by request
+
+Anyone signed in can run their own work on their own machines for free. Running other people's
+work, and earning for it, needs an approved host (`HOST_APPROVAL_REQUIRED`, on by default,
+`src/portal/host-requests.ts`): apply at `/host` on the portal, and a system admin approves the
+request in Settings > Admin > Host requests. Until then a coordinator gives your agents only your
+own work.
+
+## Invite launch
+
+The network is in early access with `LAUNCH_MODE=invite` (`src/economy/launch-gate.ts`): a new
+account needs an invite code (admins create them in Settings > Admin > Early access), and the
+coordinators apply low per-account caps on purchases, balances and payouts. In invite mode new
+users sign up on the web portal; the desktop and iOS apps have no invite field yet. See
+[docs/going-to-mainnet.md](docs/going-to-mainnet.md#soft-launch).
 
 ## Quick Start
 
@@ -139,7 +161,7 @@ Key environment variables (see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the 
 | `AGENT_OS` | auto-detected | Operating system (`macos`, `linux`, `windows`, `ios`) |
 | `SANDBOX_MODE` | `docker` | Sandbox mode (`docker`, `none`, `vm`). Anything else is treated as `none` (node registers but pulls no swarm tasks). |
 | `DATABASE_URL` | | PostgreSQL connection string |
-| `BITCOIN_NETWORK` | `testnet` | Bitcoin network (`bitcoin`, `testnet`, `signet`) |
+| `BITCOIN_NETWORK` | `testnet` | Bitcoin network (`bitcoin`, `testnet`, `signet`, `regtest`) |
 
 ## Components
 
@@ -156,7 +178,6 @@ User-facing web application serving the signup/login flow, chat interface, code 
 - Human escalation handling for tasks that exceed swarm capacity
 - Node enrollment and token issuance
 - cSat wallet with BTC/Lightning purchase intents
-- Wallet seed backup acknowledgement flow
 - User-selectable themes (Midnight, Emerald, Light Pro)
 - Coordinator operations dashboard (node approval, model rollouts, diagnostics)
 - iOS dashboard with contribution and network aggregate views
@@ -174,7 +195,7 @@ Central task queue and swarm orchestrator. Manages agent registration, task subm
 - Agent-mesh direct work offers for lightweight peer collaboration
 - cSat economy: per-token and per-second pricing, payment intents, Lightning settlement
 - Issuance system: daily token pool, load-curve allocation, quorum voting
-- Treasury policy management and Bitcoin anchoring
+- Treasury policy management; Bitcoin OP_RETURN anchoring (implemented, off in production, planned for mainnet)
 - Tamper-evident ordering chain (hash-chain ledger)
 - Blacklist propagation and security audit log
 - Power policy enforcement (iOS battery, desktop thermal)
@@ -217,7 +238,7 @@ Swarm agent process that registers with a coordinator, enters a poll loop, pulls
 - Agent-mesh HTTP server for direct peer-to-peer work
 - Power-aware scheduling (battery, thermal, AC power detection)
 - Model swap via Ollama integration
-- Request signing (Ed25519) and task envelope encryption (X25519 + AES-256-GCM)
+- Request signing (Ed25519) and task envelope encryption (X25519 + AES-256-GCM) between the coordinator and this agent
 
 ### Desktop App
 
@@ -238,9 +259,13 @@ Fly.io configurations in `deploy/fly/`:
 | `fly.seed-node.toml` | `edgecoder-seed` | US all-in-one node (coordinator + inference + control-plane) |
 | `fly.seed-eu.toml` | `edgecoder-seed-eu` | EU all-in-one node |
 | `fly.portal.toml` | `edgecoder-portal` | Centralized portal (web UI, auth, wallet) |
-| `fly.anchor-proxy.toml` | `edgecoder-anchor-proxy` | Bitcoin anchoring proxy |
+| `fly.anchor-proxy.toml` | `edgecoder-anchor-proxy` | Bitcoin OP_RETURN broadcast proxy. **Not deployed**; anchoring is off in production. |
 
-Each seed node runs coordinator, inference, and control-plane in a single process via `EDGE_RUNTIME_MODE=all-in-one`. The portal is the only centralized service; everything else is decentralized.
+Each seed runs `node dist/cli/edgecoder.js all-in-one` (coordinator, inference and control plane in one process); the portal runs `node dist/cli/edgecoder.js portal`. `edgecoder-seed` (`ord`) is coordinator-only (`SKIP_OLLAMA`); `edgecoder-seed-eu` (`cdg`) also runs Ollama.
+
+Other Fly apps: `edgecoder-pg` (Postgres, postgres-flex 18.1, one node), the Lightning nodes `edgecoder-lnd-test` (regtest), `edgecoder-lnd-signet` and `edgecoder-lnd` (mainnet, not live) from `deploy/lnd-*/`, and `edgecoder-agents` (test agents), `edgecoder-loadgen` and `edgecoder-probe`.
+
+EdgeCoder operates the portal, both coordinators, the database and the Lightning nodes, so the public network depends on EdgeCoder-run services today. Agents run on hosts' own machines, and anyone can run their own coordinator.
 
 Deploy with:
 
@@ -271,13 +296,13 @@ This installs Node.js, clones the repo, builds, and installs a systemd service. 
 - **OAuth 2.0 SSO** via Google, Microsoft and GitHub, with `state` bound to the browser by a signed `__Host-` cookie (PKCE is tracked in #137)
 - **Mesh authentication** via shared `MESH_AUTH_TOKEN` on all coordinator routes
 - **Request signing** (Ed25519) on agent-to-coordinator communication with nonce and timestamp validation
-- **Task envelope encryption** (X25519 ECDH + AES-256-GCM) for subtask payloads
+- **Task envelope encryption** (X25519 ECDH + AES-256-GCM), on by default, between the coordinator and the agent that runs a subtask. Not end to end: the coordinator decrypts and sees the task and stores queue payloads in Postgres, and iOS agents don't use it yet ([details](site-docs/security/trust-and-security.md#envelope-encryption))
 - **Sandbox enforcement** -- Docker isolation (default and required for swarm workers); remote tasks are never executed on the host
 - **Blacklist propagation** with evidence hashing, reporter signature verification, and gossip broadcast
-- **Tamper-evident audit ledger** (hash-chain) with Bitcoin anchoring for integrity verification
+- **Tamper-evident audit ledger** (hash-chain), checked by `/ledger/verify`. Bitcoin OP_RETURN anchoring is implemented but off in production (planned for mainnet)
 - **Rate limiting** per agent with configurable window
 - **Admin access control** via API tokens and IP allowlists
-- **Portal node approval** -- agents must be enrolled and approved before participating
+- **Portal node approval** -- agents must be enrolled and approved before participating; running other people's work also needs an approved host ([Hosting by request](#hosting-by-request))
 - **IDE mode** requires a locally running authenticated agent (no direct public model access)
 
 ## Testing
@@ -358,31 +383,45 @@ xcodebuild -project "ios/EdgeCoderIOS/EdgeCoderIOS.xcodeproj" \
 ```
 src/
   agent/          - interactive and worker agent loops
-  executor/       - safe code execution (sandbox, Docker, AST validation)
-  swarm/          - coordinator, queue, worker runner, power policy
-  inference/      - decomposition and escalation service
-  control-plane/  - admin APIs, rollouts, dashboard
-  portal/         - user-facing auth, chat, reviews, wallet
   apps/ide/       - IDE provider endpoint (OpenAI-compatible)
-  mesh/           - peer registration, gossip, BLE mesh
-  mesh/ble/       - Bluetooth Low Energy transport and routing
-  security/       - blacklist, envelope encryption, request signing, rate limiting
-  credits/        - credit engine, pricing, store
-  economy/        - dynamic pricing, issuance, Lightning, treasury, Bitcoin RPC
-  ledger/         - hash-chain ordering, verification, quorum
-  escalation/     - escalation resolver, human escalation store
-  model/          - Ollama installer, model router, prompts, swap
-  db/             - PostgreSQL and SQLite stores
+  audit/          - ledger verifier, security event log, pruning
+  bluetooth/      - Swift BLE proxy
   bootstrap/      - coordinator bootstrap and audit verification
-  common/         - shared types, logger, platform detection
+  cli/            - `edgecoder` dispatcher (agent, coordinator, all-in-one, portal, code, ...)
+  common/         - shared types, logger, platform detection, legal notices
+  config/         - per-role config schemas
+  control-plane/  - admin APIs, rollouts, dashboard
+  credits/        - credit engine, pricing, store, BLE offline transactions
+  db/             - PostgreSQL and SQLite stores
+  discovery/      - coordinator discovery (registry, DNS, Nostr)
+  economy/        - rate oracle, order book, job pricing, issuance, Lightning, payouts, on-chain, launch gate
+  escalation/     - escalation resolver, human escalation store
+  executor/       - safe code execution (sandbox, Docker, AST validation)
   handshake/      - cloud review handshake protocol
+  inference/      - decomposition and escalation service
+  inference-api/  - hosted /v1 API, auto-routing, frontier keys
+  install/        - `edgecoder-install` (hardware detection, services, Ollama pins)
+  ledger/         - hash-chain ordering, verification, quorum
+  mesh/           - peer registration, gossip, model transfer
+  mesh/ble/       - Bluetooth Low Energy transport and routing
+  model/          - Ollama installer, model router, prompts, swap
+  portal/         - user-facing auth, chat, reviews, wallet, host requests, invites
+  receipts/       - signed work receipts and epochs
+  security/       - blacklist, envelope encryption, request signing, rate limiting
+  swarm/          - coordinator, queue, worker runner, hardware verification, power policy
+  terminal/       - `edgecoder code` terminal agent
+  trust/          - identity challenges, pinned keys, response signing
 deploy/
-  fly/            - Fly.io deployment configs
+  docker/         - agent and server images
+  fly/            - Fly.io configs (seeds, portal, anchor proxy)
+  gpu-agent/      - GPU host runbook and images
+  infra/          - infrastructure host compose (bitcoind, LND, electrs, Postgres)
   linux/          - Linux host bootstrap script
-scripts/
-  macos/          - macOS .pkg installer and launchd wrapper
-  linux/          - .deb builder and systemd units
-  windows/        - .msi builder (WiX)
+  lnd-test/ lnd-signet/ lnd-mainnet/ - Lightning nodes on Fly.io
+  install.sh install.ps1 - one-line agent installers
+scripts/          - installers (macos, linux, windows), release, Fly bootstrap, e2e, loadgen
+packages/         - MCP server and design tokens
+extensions/vscode/ - VS Code extension
 desktop/          - Tauri + Svelte desktop app
 ios/              - native Swift iOS app
 docs/             - operational docs
@@ -395,6 +434,12 @@ tests/            - test suites
 - **Using compute (connections, Auto, reservations, bots):** [docs/using-compute.md](docs/using-compute.md)
 - **API reference:** [docs/API.md](docs/API.md)
 - **Economy maths:** [docs/economy-math.md](docs/economy-math.md)
+- **Installing agents:** [docs/install.md](docs/install.md)
+- **Terminal (`edgecoder code`):** [docs/terminal.md](docs/terminal.md)
+- **Bring your own frontier key:** [docs/frontier-keys.md](docs/frontier-keys.md)
+- **Security research tier:** [docs/security-research-tier.md](docs/security-research-tier.md)
+- **Going to mainnet:** [docs/going-to-mainnet.md](docs/going-to-mainnet.md)
+- **Legal drafts (pending counsel):** [docs/legal/](docs/legal/)
 - **MCP server for AI agents:** [docs/mcp.md](docs/mcp.md) · [packages/mcp-server](packages/mcp-server/README.md)
 - **Packages:** [docs/packages.md](docs/packages.md)
 - **Architecture:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)

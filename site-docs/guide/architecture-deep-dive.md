@@ -156,14 +156,16 @@ All security primitives are shipped and active unless noted otherwise.
 - **Per-agent sliding window rate limiting** -- prevents any single agent from overwhelming the coordinator or inference service.
 - **Blacklist audit chain** -- blacklist entries include evidence hashing to produce a tamper-evident record of abuse actions.
 - **Manifest verification** -- deployment manifests for model packages are signature-checked before execution.
-- **Envelope encryption (X25519 + AES-256-GCM)** -- implemented and staged for activation; provides end-to-end encryption for sensitive payloads between nodes.
+- **Envelope encryption (X25519 + AES-256-GCM)** -- active by default: the coordinator encrypts each subtask to the X25519 key the agent registered and decrypts the agent's encrypted result. It covers the coordinator-to-agent hop only; the coordinator sees plaintext and stores queue payloads in Postgres, and iOS agents do not use it yet (they get plaintext over TLS). See [Trust and Security](/security/trust-and-security#envelope-encryption).
 
 ## Economy
 
-- **Credit engine** -- supports four transaction types: `earn`, `spend`, `adjust`, and `held`. Balances are tracked per agent in the ledger.
-- **Dynamic pricing** -- task cost scales with current system load and the resource class of the executing node.
-- **Bitcoin anchoring** -- the anchor proxy on port 4311 writes ledger state hashes to Bitcoin via `OP_RETURN` outputs, providing an external tamper-evident checkpoint.
-- **Lightning Network settlement** -- integrates with LND for fast credit settlement between nodes.
+The canonical, current model is [docs/economy-math.md](https://github.com/codyrs82/Edgecoder/blob/main/docs/economy-math.md). In short:
+
+- **cSats** -- prepaid compute balance, 1 cSat = 1 sat. Model calls are priced per token by model size with a power floor per compute class; code jobs and reservations are priced per second by compute class. The code still calls ledger rows "credits".
+- **Network fee** -- on every compute payment the host gets 95 % and EdgeCoder keeps 5 % (`NETWORK_FEE_BPS`, default 500). Buying cSats is free.
+- **Payouts** -- hosts withdraw earned sats over Lightning (LND or CLN). Funding with Bitcoin on-chain is behind `ONCHAIN_ENABLED`.
+- **Bitcoin anchoring** -- the coordinator can write ledger checkpoint hashes to Bitcoin via `OP_RETURN` (directly through bitcoind, or through the anchor proxy on port 4311). It is off in production and planned for mainnet; the anchor proxy is not deployed.
 
 ## Source Layout
 

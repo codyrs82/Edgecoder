@@ -175,13 +175,13 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
           <div class="section-head">
             <div class="eyebrow">How it works</div>
             <h2>Measured work, market price, Lightning settlement.</h2>
-            <p>No tokens to speculate on. One credit is one server-measured second of work on a known hardware class, and its sats value is locked the moment it is earned.</p>
+            <p>No tokens to speculate on. Compute is paid in cSats, and 1 cSat = 1 sat. Model calls are priced per token by model size, never below a power floor for the hardware class; code jobs and reservations are priced per server-measured second on a known hardware class. The sats value of every earning is locked the moment it is earned.</p>
           </div>
           <div class="steps">
-            <div class="step"><h3>Buy or host</h3><p>Fund with Lightning (Bitcoin on-chain coming soon) at the day's market rate. Hosting capacity for others is by invitation during early access.</p></div>
-            <div class="step"><h3>Match on the book</h3><p>Agents post an ask per hardware class, tasks carry a bid. A task is claimed only when the ask clears the bid, and it trades at the ask.</p></div>
-            <div class="step"><h3>Verify and pay</h3><p>The coordinator measures run time itself, samples results for redundant verification, and credits the worker at the agreed price.</p></div>
-            <div class="step"><h3>Withdraw in sats</h3><p>Hosts' earned sats are paid to their Lightning wallet on request or automatically to a Lightning address. Infrastructure hosts are paid from the network fee pool.</p></div>
+            <div class="step"><h3>Buy or host</h3><p>Buy cSats with Lightning, 1 sat for 1 cSat with no purchase fee (Bitcoin on-chain is behind a flag and not yet open). Hosting capacity for others is by request during early access.</p></div>
+            <div class="step"><h3>Match on the book</h3><p>Agents post an ask per hardware class, tasks carry a bid, both in msat per credit (one second on the class's base tier). A task is claimed only when the ask clears the bid, and it trades at the ask, kept within a band around the class reference.</p></div>
+            <div class="step"><h3>Verify and pay</h3><p>The coordinator measures run time and token counts itself and samples results for redundant verification. The host gets 95% of what the requester pays; 5% is the network fee.</p></div>
+            <div class="step"><h3>Withdraw in sats</h3><p>Hosts' earned sats are paid to their Lightning wallet on request or automatically to a Lightning address.</p></div>
           </div>
         </section>
 
@@ -189,7 +189,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
           <div class="section-head">
             <div class="eyebrow">Pricing</div>
             <h2>Four capability classes, one pair each, priced in sats.</h2>
-            <p>Each class has one flat price per credit, converted from public market rates for compute and Bitcoin, recalibrated daily with outlier rejection and a daily move cap, then discovered on the order book. Faster hardware in a class earns more credits per second: a 24 GB GPU-hour is 3.5 GPU credit-hours.</p>
+            <p>Model calls are priced per token by model size, converted at the live BTC price, with a power floor per class so a host never runs at a loss. Code jobs and reservations are priced per second: each class has one flat price per credit (one second on its base tier), converted from public market rates for compute and Bitcoin, recalibrated daily with outlier rejection and a daily move cap, then traded on the order book. Faster hardware in a class earns more credits per second: a 24 GB GPU-hour is 3.5 GPU credit-hours.</p>
           </div>
           <div class="split">
             <div class="formula">
@@ -197,8 +197,10 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
               <div><b>satsPerCreditHour</b> = usdPerHour(class) / btcUsd × 1e8 × (1 + markup)</div>
               <div><b>satsPerCredit</b> = satsPerCreditHour / 3600 <span class="u-muted">(flat within a class)</span></div>
               <div><b>credits</b> = seconds × weight(tier) <span class="u-muted">(base tier 1)</span></div>
-              <div class="u-mt-8 u-muted">× model size (≤3B 1.0 … &gt;35B 4.0) × modality (vision, thinking) × scarcity</div>
-              <div class="u-mt-8"><b>trade</b> = agent ask ≤ task bid → priced at the ask, locked on the ledger</div>
+              <div><b>job cost</b> = seconds × weight(tier) × price per credit <span class="u-muted">(code jobs at the traded price; reservations at the class reference)</span></div>
+              <div class="u-mt-8"><b>trade</b> = agent ask ≤ task bid → priced at the ask (within 0.25×–4× the class reference), locked on the ledger</div>
+              <div class="u-mt-8"><b>model call</b> = max(tokens × USD per million by model size, power floor(class) × seconds) <span class="u-muted">(≤2B $0.01 in / $0.03 out … &gt;80B $0.60 / $1.50 per million tokens)</span></div>
+              <div class="u-mt-8"><b>host</b> = 95% of the cost · <b>network fee</b> = 5% · 1 cSat = 1 sat</div>
             </div>
             <div class="classes">
               <table>
@@ -215,10 +217,10 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
           <div class="section-head">
             <div class="eyebrow">Infrastructure hosts · by invitation</div>
             <h2>Hosting is by request during early access.</h2>
-            <p>We are adding hosts one at a time while the network is in early access. A share of every settled task and every purchase goes to a fee pool; early-access hosts are paid from it by uptime and by what they run, including hosting a Bitcoin node for the network. <a href="/host">Request to host</a>.</p>
+            <p>We are adding hosts one at a time while the network is in early access. Approved hosts earn 95% of what the work they run is paid, in sats over Lightning; the other 5% is the network fee. <a href="/host">Request to host</a>.</p>
           </div>
           <div class="host-tiers">
-            <div class="tier"><div class="wl">Weight</div><div class="w">1.0×</div><h3>Coordinator</h3><ul><li>Schedules tasks, runs the order book</li><li>Anchors ledger checkpoints</li><li>Serves local inference for chat</li></ul></div>
+            <div class="tier"><div class="wl">Weight</div><div class="w">1.0×</div><h3>Coordinator</h3><ul><li>Schedules tasks, runs the order book</li><li>Keeps the hash-chained ledger</li><li>Serves local inference for chat</li></ul></div>
             <div class="tier"><div class="wl">Weight</div><div class="w">+1.0×</div><h3>Bitcoin node</h3><ul><li>Bitcoin Core or Knots</li><li>Anchoring and fee estimation for the mesh</li><li>Block data for wallets and peers</li></ul></div>
             <div class="tier"><div class="wl">Weight</div><div class="w">+1.0×</div><h3>Lightning node</h3><ul><li>LND or Core Lightning</li><li>Settles purchases and payouts</li><li>Earns routing fees on top</li></ul></div>
           </div>
@@ -231,8 +233,8 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
           </div>
           <div class="features">
             <div class="feature"><div class="ic">${icon("shield", 16)}</div><h3>Private policy boundaries</h3><p>Decide what stays on your machines, what may cross into public capacity, and which nodes are eligible to take it.</p></div>
-            <div class="feature"><div class="ic">${icon("key", 16)}</div><h3>Signed everything</h3><p>Agents and coordinators hold Ed25519 keys. Requests, results, and ledger records are signed; task payloads are encrypted end to end.</p></div>
-            <div class="feature"><div class="ic">${icon("layers", 16)}</div><h3>Anchored ledger</h3><p>A hash-chained ledger of claims, results and earnings, with periodic OP_RETURN checkpoints on Bitcoin for third-party verification.</p></div>
+            <div class="feature"><div class="ic">${icon("key", 16)}</div><h3>Signed everything</h3><p>Agents and coordinators hold Ed25519 keys. Requests, results, and ledger records are signed; task payloads are encrypted between coordinator and agent.</p></div>
+            <div class="feature"><div class="ic">${icon("layers", 16)}</div><h3>Hash-chained ledger</h3><p>A hash-chained ledger of claims, results and earnings, verified by the coordinator's ledger check (/ledger/verify). Bitcoin anchoring is planned for mainnet.</p></div>
             <div class="feature"><div class="ic">${icon("cpu", 16)}</div><h3>Sandboxed execution</h3><p>Remote code runs in Docker with no network, read-only filesystem and resource limits. No sandbox, no swarm work.</p></div>
             <div class="feature"><div class="ic">${icon("globe", 16)}</div><h3>One mesh, many devices</h3><p>macOS, Linux, Windows, iOS, Docker and VS Code agents; coordinators federate and gossip tasks across regions. Offline Macs and iPhones can also reach nearby devices over <a href="/bluetooth">Bluetooth</a> (early).</p></div>
             <div class="feature"><div class="ic">${icon("user", 16)}</div><h3>Operational access control</h3><p>Passkeys, SSO, node enrollment tokens, operator approval of every host and admin tooling for managed deployments.</p></div>
@@ -249,7 +251,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
           <div class="shell footer-inner">
             <div>
               <div class="brand">${brandMark(24)}<span>EdgeCoder</span> <span class="status-badge ok u-ml-8">online</span></div>
-              <div class="footer-note">A compute network settled in Bitcoin: agents sell measured seconds of CPU and GPU time, requesters buy them with sats, and every ledger checkpoint is anchored on-chain.</div>
+              <div class="footer-note">A compute network settled in Bitcoin: agents sell measured seconds of CPU and GPU time, requesters buy them with sats, and every claim, result and earning is on a hash-chained ledger (Bitcoin anchoring planned for mainnet).</div>
               <div class="footer-legal">${footerLegalLinks()}</div>
             </div>
             <a class="btn primary" href="/portal">Open the portal</a>
@@ -339,7 +341,7 @@ function publicDocumentPage(opts: { title: string; description: string; banner?:
         <div class="shell footer-inner">
           <div>
             <div class="brand">${brandMark(24)}<span>EdgeCoder</span></div>
-            <div class="footer-note">A compute network settled in Bitcoin: agents sell measured seconds of CPU and GPU time, requesters buy them with sats, and every ledger checkpoint is anchored on-chain.</div>
+            <div class="footer-note">A compute network settled in Bitcoin: agents sell measured seconds of CPU and GPU time, requesters buy them with sats, and every claim, result and earning is on a hash-chained ledger (Bitcoin anchoring planned for mainnet).</div>
             <div class="footer-legal">${footerLegalLinks()}</div>
           </div>
           <a class="btn primary" href="/portal">Open the portal</a>

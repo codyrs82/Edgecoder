@@ -5,6 +5,7 @@ This document covers deploying EdgeCoder services across Fly.io, Docker, systemd
 ## Table of Contents
 
 - [Fly.io Deployment](#flyio-deployment)
+  - [Database: current state](#database-current-state)
 - [Docker Deployment](#docker-deployment)
 - [Self-Hosted Linux (systemd)](#self-hosted-linux-systemd)
 - [macOS Installer](#macos-installer)
@@ -17,19 +18,48 @@ This document covers deploying EdgeCoder services across Fly.io, Docker, systemd
 
 ## Fly.io Deployment
 
-Fly.io configuration files are in `deploy/fly/`. Each service has its own TOML config. There are
-four apps; there is no separate coordinator, inference or control-plane app any more (#33): the
-seed runs `EDGE_RUNTIME_MODE=all-in-one`, so the seed *is* the coordinator, inference service and
+Fly.io configuration files are in `deploy/fly/` (seeds, portal, anchor proxy) and `deploy/lnd-*/`
+(Lightning nodes). There is no separate coordinator, inference or control-plane app any more (#33):
+the seeds run `EDGE_RUNTIME_MODE=all-in-one`, so a seed *is* the coordinator, inference service and
 control plane.
 
 ### Services
 
 | Config File | App Name | Region | Entrypoint | Port | VM |
 |-------------|----------|--------|------------|------|-----|
-| `fly.seed-node.toml` | `edgecoder-seed` | `ord` | `node dist/index.js` (coordinator-only, no model) | 4301 | 16 GB, 2 perf CPUs |
-| `fly.seed-eu.toml` | `edgecoder-seed-eu` | `cdg` | `node dist/index.js` (+ Ollama via the agent image entrypoint) | 4301 | 8 GB, 2 perf CPUs |
-| `fly.portal.toml` | `edgecoder-portal` | `ord` | `node dist/portal/server.js` | 4310 | 1 GB, shared |
+| `fly.seed-node.toml` | `edgecoder-seed` | `ord` | `node dist/cli/edgecoder.js all-in-one` (coordinator-only, `SKIP_OLLAMA`) | 4301 | 16 GB, 2 perf CPUs |
+| `fly.seed-eu.toml` | `edgecoder-seed-eu` | `cdg` | `node dist/cli/edgecoder.js all-in-one` (+ Ollama via the agent image entrypoint) | 4301 | 8 GB, 2 perf CPUs |
+| `fly.portal.toml` | `edgecoder-portal` | `ord` | `node dist/cli/edgecoder.js portal` | 4310 | 1 GB, shared |
 | `fly.anchor-proxy.toml` | `edgecoder-anchor-proxy` | `ord` | `node dist/economy/anchor-proxy-service.js` | 4311 | 256 MB, shared |
+
+**The anchor proxy is not deployed.** It is the Bitcoin OP_RETURN broadcast proxy; anchoring is off
+in production and planned for mainnet (see [Going to mainnet](going-to-mainnet.md#ledger-anchoring)).
+
+Other apps in the production org:
+
+| App | Config | What it is |
+|-----|--------|------------|
+| `edgecoder-pg` | created by `fly postgres create` (see [Database: current state](#database-current-state)) | Postgres (postgres-flex 18.1), one node |
+| `edgecoder-lnd-test` | `deploy/lnd-test/fly.toml` | LND on regtest, for the payout end-to-end tests |
+| `edgecoder-lnd-signet` | `deploy/lnd-signet/fly.toml` | LND on signet ([README](../deploy/lnd-signet/README.md)) |
+| `edgecoder-lnd` | `deploy/lnd-mainnet/fly.toml` | LND on mainnet; **not live** ([README](../deploy/lnd-mainnet/README.md)) |
+| `edgecoder-agents` | none in this repo | test agents |
+| `edgecoder-loadgen` | `scripts/loadgen/fly.sh` | load generator ([load testing](load-testing.md)) |
+| `edgecoder-probe` | none in this repo | probe |
+
+### Database: current state
+
+Production runs one Fly Postgres app, `edgecoder-pg` (postgres-flex 18.1), shared by the seeds
+(`DATABASE_URL`) and the portal (`PORTAL_DATABASE_URL`):
+
+- **A single node, no replicas.** If its machine or volume fails, the coordinators and the portal
+  are down until it is restored.
+- **Daily volume snapshots, kept 5 days** (Fly's default). That is the only backup.
+- **No backups or point-in-time recovery beyond that.** Fly Postgres backups / PITR are not enabled,
+  so up to a day of ledger, wallet and payout data can be lost.
+
+**Known gap before mainnet:** add a replica and enable backups with point-in-time recovery before
+real Bitcoin flows through the ledger.
 
 Both seeds set `DISABLE_SELF_AGENT=1` (#39): Fly machines have no Docker, so the embedded worker
 could never pass the `SANDBOX_MODE=docker` check. Swarm compute comes from enrolled agents.
@@ -196,7 +226,7 @@ docker compose up --build
 
 This starts:
 
-1. **postgres** -- PostgreSQL 16 with `edgecoder` database.
+1. **postgres** -- PostgreSQL 16 with `edgecoder` database (local stack only; production runs postgres-flex 18.1 on Fly, see [Database: current state](#database-current-state)).
 2. **seed-node** -- all-in-one EdgeCoder process (coordinator + inference + control plane + worker).
 3. **ide-provider** -- IDE provider endpoint.
 
