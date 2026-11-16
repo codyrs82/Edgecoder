@@ -617,3 +617,16 @@ describe("tentacles served lines and totals (5)", () => {
     expect(tentacleTotals([]).line).toBe("0 helpers · 0 calls · 0 in / 0 out tok · 0.0 cSats");
   });
 });
+
+describe("tentacles and announce-only replies", () => {
+  it("a helper that only announces its work gets one go-ahead, like a bot run", async () => {
+    const { tentacles, s, worker } = setup({
+      script: ({ call }) =>
+        call === 0 ? { text: "I'll start by writing n.ts." } : call === 1 ? { tool: ["write_file", { path: "n.ts", content: "n\n" }] } : { text: "Wrote n.ts." },
+    });
+    const v = tentacles.delegate(s.id, { task: "Add n", kind: "code_edit", files: [], instructions: "n" });
+    await tentacles.idle(s.id);
+    expect(tentacles.get(s.id, v.id)!.status).toBe("passed");
+    expect(worker.requests.length).toBe(3);
+  });
+});

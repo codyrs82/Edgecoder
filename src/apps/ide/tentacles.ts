@@ -793,6 +793,8 @@ export class TentacleManager {
           messages: [{ role: "user", content: prompt }],
           native: true,
           maxIterations: this.d.maxIterations ?? 12,
+          // Like a bot run, nobody is there to say "go on" after a reply that only announces work.
+          continueOnIntent: true,
           tools: schemasFor(toolNames),
           isCancelled: () => t.abort.signal.aborted,
           sendEvent: (e: IdeStreamEvent) => {
