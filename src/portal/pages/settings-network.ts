@@ -43,6 +43,75 @@ export const SERIES_GAPS_SCRIPT = `
     }
 `;
 
+/**
+ * Page-script helpers for the Gaps charts (#336; plain JS, tested on their own). The series carry
+ * keyed maps per point (unmetByModel, modelSlots, agentsByRegion); a chart shows the GAP_KEYS keys
+ * largest over the range, in the categorical slots c1..c4, and folds the rest into "Other".
+ *
+ * - topKeys: the largest keys over the points (the coordinators' "(other)" is never one of them).
+ * - assignSlots: a color slot per key that stays with the key across refreshes and ranges (color
+ *   follows the entity, not its rank); a key that drops out frees its slot.
+ * - keyedSeries: chart series for those keys, plus "Other" when anything else is in the maps.
+ * - gapSummaries: the one-line current state under each chart, from the snapshot's gaps.
+ */
+export const GAP_CHARTS_SCRIPT = `
+    const GAP_KEYS = 4;
+    const OTHER_KEY = "(other)";
+    function topKeys(points, field, size, n) {
+      const tot = {};
+      for (const p of points) { const m = p[field]; if (!m) continue; for (const k in m) tot[k] = (tot[k] || 0) + size(m[k]); }
+      const named = Object.keys(tot).filter((k) => k !== OTHER_KEY).sort((a, b) => tot[b] - tot[a] || (a < b ? -1 : 1));
+      return { keys: named.slice(0, n), rest: named.length > n || OTHER_KEY in tot };
+    }
+    const slotMemo = {};
+    function assignSlots(chartId, keys) {
+      const memo = slotMemo[chartId] || (slotMemo[chartId] = {});
+      for (const k of Object.keys(memo)) if (keys.indexOf(k) < 0) delete memo[k];
+      const used = Object.values(memo);
+      for (const k of keys) {
+        if (memo[k]) continue;
+        for (let i = 1; i <= GAP_KEYS; i++) if (used.indexOf(i) < 0) { memo[k] = i; used.push(i); break; }
+      }
+      return memo;
+    }
+    function keyedSeries(chartId, points, field, size, pick, withOther) {
+      const top = topKeys(points, field, size, GAP_KEYS);
+      const slots = assignSlots(chartId, top.keys);
+      const keys = top.keys.slice().sort((a, b) => slots[a] - slots[b]);
+      const out = keys.map((k) => ({ key: k, label: k, cls: "s-c" + slots[k], value: (p) => (p[field] ? pick(p[field][k]) : null) }));
+      if (withOther && top.rest) out.push({ key: OTHER_KEY, label: "Other", cls: "s-other", value: (p) => { const m = p[field]; if (!m) return null; let t = 0; for (const k in m) if (keys.indexOf(k) < 0) t += pick(m[k]); return t; } });
+      return out;
+    }
+    function gapAgo(ms, nowMs) { const s = Math.max(0, Math.round((nowMs - ms) / 1000)); return s < 60 ? s + " s ago" : s < 3600 ? Math.floor(s / 60) + " min ago" : s < 86400 ? Math.floor(s / 3600) + " h ago" : Math.floor(s / 86400) + " d ago"; }
+    function gapSummaries(d, nowMs) {
+      const g = d.gaps || {};
+      const n = (v, w) => v + " " + w + (v === 1 ? "" : "s");
+      const more = (list, shown) => (list.length > shown ? " and " + (list.length - shown) + " more" : "");
+      const missing = g.missingModels || [];
+      const unmet = missing.length
+        ? "Last hour: " + missing.slice(0, 3).map((m) => m.model + " " + [m.noAgentHasModel ? m.noAgentHasModel + " refused (no agent has it)" : "", m.noCapacity ? m.noCapacity + " cancelled (no free slot)" : ""].filter(Boolean).join(", ")).join(" · ") + more(missing, 3) + "."
+        : "None in the last hour.";
+      const sat = g.saturatedModels || [];
+      const saturation = sat.length
+        ? "Saturated now: " + sat.slice(0, 4).map((m) => m.model + " (" + n(m.agents, "agent") + (m.waiting ? ", " + m.waiting + " waiting" : "") + ")").join(", ") + more(sat, 4) + "."
+        : "Every model has a free slot.";
+      const st = g.staleAgents || [];
+      const stale = st.length
+        ? st.length + " stale now: " + st.slice(0, 3).map((a) => a.agentId + " (" + gapAgo(a.lastSeenMs, nowMs) + ")").join(", ") + more(st, 3) + "."
+        : "No stale agents.";
+      const regs = g.regions || [];
+      const reported = regs.reduce((a, r) => a + (r.reported || 0), 0);
+      let regions = regs.length
+        ? "Online now: " + regs.map((r) => r.region + " " + r.agents).join(" · ") + ". " + (reported ? reported + " reported their own region; the rest" : "Agents report no region of their own, so they") + " count under their coordinator's."
+        : "No agents online.";
+      const thin = g.thinCoordinators || [];
+      if (thin.length) regions += " Few agents: " + thin.map((c) => c.connected + " on " + c.coordinator.split(".")[0] + (c.region ? " (" + c.region + ")" : "")).join(", ") + ".";
+      const down = g.unreachableCoordinators || [];
+      if (down.length) regions += " Not answering: " + down.map((u) => u.replace(/^https?:\\/\\//, "")).join(", ") + ".";
+      return { unmet, saturation, stale, regions };
+    }
+`;
+
 export function networkPageContent(): string {
   return `
     <style nonce="${CSP_NONCE}">
@@ -100,20 +169,27 @@ export function networkPageContent(): string {
       .net-table-wrap .mono { font-family:var(--font-mono); font-size:12px; }
       .net-table-wrap .nowrap { white-space:nowrap; }
       .net-models-list { color:var(--text-secondary); max-width:260px; white-space:normal; }
-      .net-gaps { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:12px; }
-      .net-gap h4 { font-size:12px; font-weight:600; color:var(--text-secondary); margin:0 0 6px; }
-      .net-gap ul { margin:0; padding:0; list-style:none; font-size:12.5px; }
-      .net-gap li { display:flex; justify-content:space-between; gap:8px; padding:4px 0; border-bottom:1px solid var(--card-border); }
-      .net-gap li:last-child { border-bottom:0; }
-      .net-gap li .n { font-family:var(--font-mono); font-variant-numeric:tabular-nums; color:var(--text-secondary); white-space:nowrap; }
-      .net-gap .none { color:var(--muted); font-size:12.5px; }
+      /* Gaps charts: categorical slots (dataviz reference palette, validated adjacent-pair for CVD in
+         both themes), stepped for the dark surface; "Other" is neutral ink. */
+      #netBody { --net-c1:#2a78d6; --net-c2:#eb6834; --net-c3:#1baf7a; --net-c4:#eda100; --net-other:var(--text-muted); }
+      @media (prefers-color-scheme: dark) { :root:not([data-theme=light]) #netBody { --net-c1:#3987e5; --net-c2:#d95926; --net-c3:#199e70; --net-c4:#c98500; } }
+      [data-theme=dark] #netBody { --net-c1:#3987e5; --net-c2:#d95926; --net-c3:#199e70; --net-c4:#c98500; }
+      .s-c1 { stroke:var(--net-c1); } .f-c1 { fill:var(--net-c1); } .a-c1 { fill:var(--net-c1); opacity:0.3; }
+      .s-c2 { stroke:var(--net-c2); } .f-c2 { fill:var(--net-c2); } .a-c2 { fill:var(--net-c2); opacity:0.3; }
+      .s-c3 { stroke:var(--net-c3); } .f-c3 { fill:var(--net-c3); } .a-c3 { fill:var(--net-c3); opacity:0.3; }
+      .s-c4 { stroke:var(--net-c4); } .f-c4 { fill:var(--net-c4); } .a-c4 { fill:var(--net-c4); opacity:0.3; }
+      .s-other { stroke:var(--net-other); } .f-other { fill:var(--net-other); } .a-other { fill:var(--net-other); opacity:0.22; }
+      .net-section-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin:0 0 8px; }
+      .net-section-head h3 { font-size:13px; font-weight:600; margin:0; }
+      .net-section-head .hint { font-size:11.5px; color:var(--muted); }
+      .net-chart .net-sum { font-size:12px; color:var(--text-secondary); margin:6px 0 0; line-height:1.45; }
       .net-ble summary { cursor:pointer; display:flex; gap:10px; align-items:baseline; flex-wrap:wrap; list-style:none; }
       .net-ble summary h3 { margin:0; }
       .net-ble ul { margin:10px 0 0; padding-left:18px; color:var(--text-secondary); font-size:13px; line-height:1.6; }
       .net-ble li { margin-bottom:6px; }
       .net-ble a { color:var(--brand-2); }
       @media (max-width: 900px) {
-        .net-charts, .net-gaps { grid-template-columns:minmax(0, 1fr); }
+        .net-charts { grid-template-columns:minmax(0, 1fr); }
         .net-kpi .value { font-size:19px; }
       }
     </style>
@@ -189,15 +265,15 @@ export function networkPageContent(): string {
         </div>
         <div class="muted" id="routingWeights"></div>
       </div>
-      <div class="net-card">
-        <h3>Gaps</h3>
-        <div class="net-gaps">
-          <div class="net-gap"><h4>Requested with no capacity (1 h)</h4><ul id="gapMissing"></ul></div>
-          <div class="net-gap"><h4>Saturated models (no free slot)</h4><ul id="gapSaturated"></ul></div>
-          <div class="net-gap"><h4>Stale agents (not seen for 2 min)</h4><ul id="gapStale"></ul></div>
-          <div class="net-gap"><h4>Coordinators and regions</h4><ul id="gapCoverage"></ul></div>
+      <section aria-labelledby="netGapsTitle">
+        <div class="net-section-head"><h3 id="netGapsTitle">Gaps</h3><span class="hint">Where the network falls short, over the chart range; the line under each chart is the state now.</span></div>
+        <div class="net-charts" id="netGaps">
+          <div class="net-chart" id="chartUnmet"><h3>Unmet demand</h3><div class="hint">Requests per minute with no capacity: no agent has the model, or no free slot. By model</div><div class="net-legend"></div><p class="net-sum" id="gapMissing"></p></div>
+          <div class="net-chart" id="chartSaturation"><h3>Saturation</h3><div class="hint">Free slots per model on live agents (the models with the most slots); 0 is saturated</div><div class="net-legend"></div><p class="net-sum" id="gapSaturated"></p></div>
+          <div class="net-chart" id="chartStale"><h3>Stale agents</h3><div class="hint">Agents not seen for 2 min</div><div class="net-legend"></div><p class="net-sum" id="gapStale"></p></div>
+          <div class="net-chart" id="chartRegions"><h3>Agents by region</h3><div class="hint">Agents online, stacked by hosting region</div><div class="net-legend"></div><p class="net-sum" id="gapCoverage"></p></div>
         </div>
-      </div>
+      </section>
     </div>`;
 }
 
@@ -205,6 +281,7 @@ export function networkPageScript(): string {
   return `
     ${SETTINGS_HELPERS_SCRIPT}
     ${SERIES_GAPS_SCRIPT}
+    ${GAP_CHARTS_SCRIPT}
     const REFRESH_MS = ${NETWORK_REFRESH_MS};
     const RANGE_MS = ${JSON.stringify(NETWORK_RANGES_MS)};
     const SVGNS = "http://www.w3.org/2000/svg";
@@ -231,15 +308,22 @@ export function networkPageScript(): string {
       const box = $(id);
       const legend = box.querySelector(".net-legend");
       legend.textContent = "";
-      if (series.length > 1) for (const s of series) { const item = el("span"); item.appendChild(legendSwatch(s.cls, s.dashed)); item.appendChild(document.createTextNode(s.label)); legend.appendChild(item); }
+      // A legend for two or more series, or when the series are named keys (a model, a region).
+      if (series.length > 1 || opts.legend) for (const s of series) { const item = el("span"); item.appendChild(legendSwatch(s.cls, s.dashed)); item.appendChild(document.createTextNode(s.label)); legend.appendChild(item); }
       const old = box.querySelector("svg.plot"); if (old) old.remove();
       const oldTip = box.querySelector(".net-tip"); if (oldTip) oldTip.remove();
       // The viewBox is the drawn size, so text is never stretched; redrawn on resize.
       const W = Math.max(240, Math.round(box.clientWidth - 24)), H = 170, L = 44, R = 8, T = 8, B = 20;
-      const plot = svg("svg", { class: "plot", viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": box.querySelector("h3").textContent });
-      box.appendChild(plot);
+      const title = box.querySelector("h3").textContent;
+      const plot = svg("svg", { class: "plot", viewBox: "0 0 " + W + " " + H, role: "img", "aria-label": opts.desc ? title + ". " + opts.desc : title });
+      // Above the one-line summary when the chart has one.
+      box.insertBefore(plot, box.querySelector(".net-sum"));
+      // Each series' plotted height per point: its value, or with opts.stacked the running total.
+      const isNum = (v) => v !== null && v !== undefined && isFinite(v);
+      const base = points.map(() => 0);
+      const tops = series.map((s) => points.map((p, k) => { const v = s.value(p); if (!isNum(v)) return null; if (!opts.stacked) return v; base[k] += v; return base[k]; }));
       const vals = [];
-      for (const p of points) for (const s of series) { const v = s.value(p); if (v !== null && v !== undefined && isFinite(v)) vals.push(v); }
+      for (const col of tops) for (const v of col) if (v !== null) vals.push(v);
       if (!points.length || !vals.length) {
         const t = svg("text", { x: String(W / 2), y: String(H / 2), "text-anchor": "middle", class: "empty" }); t.textContent = points.length ? "Nothing measured in this range yet" : "Collecting samples (one every 15 s)"; plot.appendChild(t);
         return;
@@ -268,20 +352,31 @@ export function networkPageScript(): string {
         const lab = svg("text", { x: String(x(t)), y: String(H - 4), "text-anchor": i === 0 ? "start" : i === xt ? "end" : "middle", class: "axis" }); lab.textContent = clock(t); plot.appendChild(lab);
       }
       const gap = bucketMs * 2.5;
-      for (const s of series) {
-        let d = "", prevT = null, area = "", runStart = null, lastX = null;
-        for (const p of points) {
-          const v = s.value(p);
-          if (v === null || v === undefined || !isFinite(v)) { prevT = null; continue; }
-          const px = x(p.atMs).toFixed(1), py = y(v).toFixed(1);
+      const lines = [];
+      series.forEach((s, i) => {
+        // Runs of joined points; a run is a line along the tops and, for an area, a band down to the
+        // series below (stacked) or to zero.
+        const runs = [];
+        let run = null, prevT = null;
+        points.forEach((p, k) => {
+          const top = tops[i][k];
+          if (top === null) { prevT = null; return; }
           const join = prevT !== null && p.atMs - prevT <= gap;
-          d += (join ? " L" : " M") + px + " " + py;
-          if (s.area) { if (!join) { if (runStart !== null) area += " L" + lastX + " " + y(0) + " Z"; area += " M" + px + " " + y(0) + " L" + px + " " + py; runStart = px; } else area += " L" + px + " " + py; lastX = px; }
+          if (!join || !run) { run = []; runs.push(run); }
+          run.push({ x: x(p.atMs).toFixed(1), top: y(top).toFixed(1), low: y(opts.stacked && i > 0 ? (tops[i - 1][k] || 0) : 0).toFixed(1) });
           prevT = p.atMs;
+        });
+        const fill = opts.stacked ? "a-" + s.cls.replace("s-", "") : s.area ? "a-brand" : null;
+        if (fill) {
+          let area = "";
+          for (const r of runs) area += " M" + r.map((q) => q.x + " " + q.top).join(" L") + " L" + r.slice().reverse().map((q) => q.x + " " + q.low).join(" L") + " Z";
+          if (area) plot.appendChild(svg("path", { d: area.trim(), class: "area " + fill }));
         }
-        if (s.area && runStart !== null) { area += " L" + lastX + " " + y(0) + " Z"; plot.appendChild(svg("path", { d: area, class: "area a-brand" })); }
-        plot.appendChild(svg("path", { d: d.trim(), class: "line " + s.cls + (s.dashed ? " dash" : "") }));
-      }
+        let d = "";
+        for (const r of runs) d += " M" + r.map((q) => q.x + " " + q.top).join(" L");
+        lines.push(svg("path", { d: d.trim(), class: "line " + s.cls + (s.dashed ? " dash" : "") }));
+      });
+      for (const l of lines) plot.appendChild(l);
       // Hover layer.
       const cross = svg("line", { y1: String(T), y2: String(H - B), class: "cross hidden" });
       plot.appendChild(cross);
@@ -311,8 +406,8 @@ export function networkPageScript(): string {
           tip.style.top = (rect.top - boxRect0.top + 8) + "px";
           return;
         }
-        let best = null, bestD = Infinity;
-        for (const p of points) { const dd = Math.abs(x(p.atMs) - vx); if (dd < bestD) { bestD = dd; best = p; } }
+        let best = null, bestK = -1, bestD = Infinity;
+        points.forEach((p, k) => { const dd = Math.abs(x(p.atMs) - vx); if (dd < bestD) { bestD = dd; best = p; bestK = k; } });
         if (!best) return hide();
         const bx = x(best.atMs);
         cross.setAttribute("x1", String(bx)); cross.setAttribute("x2", String(bx)); cross.classList.remove("hidden");
@@ -322,7 +417,8 @@ export function networkPageScript(): string {
           const v = s.value(best);
           const row = el("div"); row.appendChild(legendSwatch(s.cls, s.dashed)); row.appendChild(document.createTextNode(" " + s.label + " ")); row.appendChild(el("span", { class: "v" }, v === null || v === undefined || !isFinite(v) ? "-" : opts.fmt(v)));
           tip.appendChild(row);
-          if (v === null || v === undefined || !isFinite(v)) dots[i].classList.add("hidden"); else { dots[i].setAttribute("cx", String(bx)); dots[i].setAttribute("cy", String(y(v))); dots[i].classList.remove("hidden"); }
+          const top = tops[i][bestK];
+          if (top === null) dots[i].classList.add("hidden"); else { dots[i].setAttribute("cx", String(bx)); dots[i].setAttribute("cy", String(y(top))); dots[i].classList.remove("hidden"); }
         });
         tip.classList.remove("hidden");
         const boxRect = box.getBoundingClientRect();
@@ -353,6 +449,22 @@ export function networkPageScript(): string {
         { label: "TTFT p90", cls: "s-info", value: (p) => n(p.ttftP90) },
         { label: "TTFT p50", cls: "s-info", dashed: true, value: (p) => n(p.ttftP50) }
       ], { fmt: (v, axis) => (axis && v >= 1000 ? (v / 1000) + " s" : fmtMs(v)) });
+      drawGapCharts(pts, perMin);
+    }
+    function drawGapCharts(pts, perMin) {
+      const sum = gapSummaries(data, Date.now());
+      setText("gapMissing", sum.unmet); setText("gapSaturated", sum.saturation); setText("gapStale", sum.stale); setText("gapCoverage", sum.regions);
+      const count = (v) => Number(v) || 0;
+      // Nothing unmet in the whole range: a zero line rather than an empty legend.
+      let unmet = keyedSeries("chartUnmet", pts, "unmetByModel", count, (v) => count(v) * perMin, true);
+      if (!unmet.length) unmet = [{ label: "All models", cls: "s-c1", value: (p) => (p.unmetByModel ? 0 : null) }];
+      drawChart("chartUnmet", pts, unmet, { stacked: true, legend: true, fmt: (v) => fmtNum(v, 1), desc: sum.unmet });
+      const slots = keyedSeries("chartSaturation", pts, "modelSlots", (v) => (v ? count(v.total) : 0), (v) => (v ? count(v.free) : 0), false);
+      drawChart("chartSaturation", pts, slots, { legend: true, fmt: (v) => fmtNum(v, 1), desc: sum.saturation });
+      drawChart("chartStale", pts, [{ label: "Stale agents", cls: "s-brand", area: true, value: (p) => (p.staleAgents === undefined ? null : Number(p.staleAgents)) }], { fmt: (v) => fmtNum(v, 1), desc: sum.stale });
+      let regions = keyedSeries("chartRegions", pts, "agentsByRegion", count, count, true);
+      if (!regions.length) regions = [{ label: "No agents online", cls: "s-c1", value: (p) => (p.agentsByRegion ? 0 : null) }];
+      drawChart("chartRegions", pts, regions, { stacked: true, legend: true, fmt: (v) => fmtNum(v, 1), desc: sum.regions });
     }
 
     // ── Tables and panels ──
@@ -447,26 +559,10 @@ export function networkPageScript(): string {
       const w = r.config && r.config.weights;
       setText("routingWeights", w ? "Base weights: quality " + w.quality + " · latency " + w.latency + " · price " + w.price + " · reliability " + w.reliability + " · complexity shift " + r.config.complexityShift + " · preference " + r.config.preferMs + " ms" : "");
     }
-    function list(id, items, empty) {
-      const ul = $(id); ul.textContent = "";
-      for (const [label, n] of items) { const li = el("li"); li.appendChild(el("span", {}, label)); li.appendChild(el("span", { class: "n" }, n)); ul.appendChild(li); }
-      if (!items.length) ul.appendChild(el("li", { class: "none" }, empty));
-    }
-    function renderGaps() {
-      const g = data.gaps;
-      list("gapMissing", g.missingModels.map((m) => [m.model + (m.holders ? "" : " (no holder)"), m.noAgentHasModel + " refused · " + m.noCapacity + " no capacity"]), "None in the last hour.");
-      list("gapSaturated", g.saturatedModels.map((m) => [m.model, plural(m.agents, "agent") + " · " + m.waiting + " waiting"]), "Every model has a free slot.");
-      list("gapStale", g.staleAgents.slice(0, 12).map((a) => [a.agentId + (a.email ? " (" + a.email + ")" : ""), ago(a.lastSeenMs)]), "No stale agents.");
-      const cov = [];
-      for (const u of g.unreachableCoordinators) cov.push([u.replace(/^https?:\\/\\//, ""), "unreachable"]);
-      for (const c of g.thinCoordinators) cov.push([c.coordinator + (c.region ? " (" + c.region + ")" : ""), plural(c.connected, "agent") + " online"]);
-      for (const r of g.regions) cov.push(["Region " + r.country, plural(r.agents, "agent") + " online"]);
-      list("gapCoverage", cov, "No coordinator data.");
-    }
     function render() {
       $("netError").classList.add("hidden");
       $("netBody").classList.remove("hidden");
-      renderKpis(); renderCoordinators(); renderAgents(); renderModels(); renderRouting(); renderGaps(); drawCharts();
+      renderKpis(); renderCoordinators(); renderAgents(); renderModels(); renderRouting(); drawCharts();
       const down = data.coordinators.filter((c) => !c.ok).length;
       setText("netUpdated", "Updated " + new Date(data.generatedAtMs).toLocaleTimeString() + " · every " + (REFRESH_MS / 1000) + " s" + (down ? " · " + down + " coordinator(s) not answering" : ""));
     }

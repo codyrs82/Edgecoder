@@ -176,7 +176,11 @@ export interface IntervalCounts {
   failed: number;
   noCapacity: number;
   noAgentHasModel: number;
+  /** Requests not served this interval, by model: refused (no agent holds it) plus cancelled (no free slot). */
+  unmetByModel: Record<string, number>;
 }
+
+const EMPTY_INTERVAL = (): IntervalCounts => ({ started: 0, completed: 0, failed: 0, noCapacity: 0, noAgentHasModel: 0, unmetByModel: {} });
 
 /**
  * Model calls as the coordinator sees them: submitted, first piece accepted, done. TTFT is submit
@@ -188,7 +192,7 @@ export class InferenceTracker {
   readonly duration = new TimedSamples(2_000);
   readonly models = new ModelEventCounter();
   private readonly calls = new Map<string, FollowedCall>();
-  private interval: IntervalCounts = { started: 0, completed: 0, failed: 0, noCapacity: 0, noAgentHasModel: 0 };
+  private interval: IntervalCounts = EMPTY_INTERVAL();
 
   get following(): number {
     return this.calls.size;
@@ -208,6 +212,7 @@ export class InferenceTracker {
   refusedNoModel(model: string, atMs = Date.now()): void {
     this.models.record(model, "noAgentHasModel", atMs);
     this.interval.noAgentHasModel++;
+    this.unmet(model);
   }
 
   /** A piece of the reply was accepted. `done` ends the call (`error` set: it failed). */
@@ -233,8 +238,17 @@ export class InferenceTracker {
   /** Counts since the last call, then reset. */
   takeInterval(): IntervalCounts {
     const out = this.interval;
-    this.interval = { started: 0, completed: 0, failed: 0, noCapacity: 0, noAgentHasModel: 0 };
+    this.interval = EMPTY_INTERVAL();
+    out.unmetByModel = capKeys(out.unmetByModel, MAX_SERIES_KEYS);
     return out;
+  }
+
+  private unmet(model: string): void {
+    const name = String(model || "(none)").slice(0, 200);
+    const m = this.interval.unmetByModel;
+    // Bounded like ModelEventCounter: past the cap, new names count under OTHER_MODEL.
+    const key = name in m || Object.keys(m).length < MAX_MODELS_PER_BUCKET ? name : OTHER_MODEL;
+    m[key] = (m[key] ?? 0) + 1;
   }
 
   private end(subtaskId: string, call: FollowedCall, outcome: Exclude<CallOutcome, undefined>, atMs: number): void {
@@ -242,6 +256,7 @@ export class InferenceTracker {
     if (outcome === "no_capacity") {
       this.models.record(call.model, "noCapacity", atMs);
       this.interval.noCapacity++;
+      this.unmet(call.model);
       return;
     }
     this.models.record(call.model, outcome === "ok" ? "completed" : "failed", atMs);
@@ -273,6 +288,44 @@ export interface NetworkSample {
   pickupP90: number | null;
   ttftP50: number | null;
   ttftP90: number | null;
+  /*
+   * Gaps over time (#336). Optional: samples stored before these existed lack them, and the page
+   * draws no line there. Keyed maps keep at most MAX_SERIES_KEYS names plus OTHER_MODEL.
+   */
+  /** Requests not served this interval for lack of capacity (no holder, or no free slot), by model. */
+  unmetByModel?: Record<string, number>;
+  /** Models held by a live agent with no free slot. */
+  saturatedModels?: number;
+  /** Free and total slots per model on live agents (the models with the most slots). */
+  modelSlots?: Record<string, SlotCount>;
+  /** Agents known to this coordinator but not seen within the connected window (status "stale"). */
+  staleAgents?: number;
+  /** Live agents by hosting region: the agent's own (AGENT_REGION / FLY_REGION), else this coordinator's. */
+  agentsByRegion?: Record<string, number>;
+}
+
+export interface SlotCount {
+  free: number;
+  total: number;
+}
+
+/**
+ * Names kept per keyed field of a sample; the rest are summed under OTHER_MODEL. Small on purpose:
+ * the ring holds 40 320 samples, and the page charts the 4 largest keys over the range.
+ */
+export const MAX_SERIES_KEYS = 6;
+
+/** Keep the `n` largest entries (by `size`) and sum the rest under OTHER_MODEL. */
+export function capKeys<V>(record: Record<string, V>, n: number, size: (v: V) => number = (v) => v as unknown as number, add: (a: V, b: V) => V = (a, b) => ((a as unknown as number) + (b as unknown as number)) as unknown as V): Record<string, V> {
+  const entries = Object.entries(record);
+  if (entries.length <= n) return record;
+  const named = entries.filter(([k]) => k !== OTHER_MODEL).sort((a, b) => size(b[1]) - size(a[1]) || a[0].localeCompare(b[0]));
+  const out: Record<string, V> = {};
+  for (const [k, v] of named.slice(0, n)) out[k] = v;
+  let other: V | undefined = record[OTHER_MODEL];
+  for (const [, v] of named.slice(n)) other = other === undefined ? v : add(other, v);
+  if (other !== undefined) out[OTHER_MODEL] = other;
+  return out;
 }
 
 export const SAMPLE_INTERVAL_MS = 15_000;
@@ -304,7 +357,7 @@ const P90S = ["pickupP90", "ttftP90"] as const;
  * coordinators' buckets line up): gauges are averaged and rounded to 0.1, per-interval counts
  * summed, p50s averaged and p90s the bucket's worst. `atMs` is the bucket start. A bucket with
  * no samples (the coordinator was down) is left out, never filled with zeros, so the page draws a
- * gap there.
+ * gap there. The gap fields (#336) are merged by downsampleGaps.
  */
 export function downsample(samples: readonly NetworkSample[], range: SeriesRange, nowMs = Date.now()): NetworkSample[] {
   const width = seriesBucketMs(range);
@@ -326,6 +379,7 @@ export function downsample(samples: readonly NetworkSample[], range: SeriesRange
       const vals = group.map((x) => x[p]).filter((x): x is number => x !== null);
       s[p] = vals.length ? Math.max(...vals) : null;
     }
+    downsampleGaps(group, s);
     out.push(s);
     group = [];
   };
@@ -340,4 +394,49 @@ export function downsample(samples: readonly NetworkSample[], range: SeriesRange
   }
   flush();
   return out;
+}
+
+const round1 = (v: number) => Math.round(v * 10) / 10;
+
+/**
+ * The gap fields of one bucket (#336), set only when a sample in it has them: unmet requests are
+ * summed per model; saturated and stale counts averaged; slots and agents per key averaged over the
+ * samples that carry the field (a key missing from one of them counts 0 there). Then capped.
+ */
+function downsampleGaps(group: readonly NetworkSample[], s: NetworkSample): void {
+  const avg = (k: "saturatedModels" | "staleAgents") => {
+    const vals = group.map((x) => x[k]).filter((v): v is number => typeof v === "number");
+    if (vals.length) s[k] = round1(vals.reduce((a, b) => a + b, 0) / vals.length);
+  };
+  avg("saturatedModels");
+  avg("staleAgents");
+  const unmet = group.filter((x) => x.unmetByModel);
+  if (unmet.length) {
+    const sum: Record<string, number> = {};
+    for (const x of unmet) for (const [k, v] of Object.entries(x.unmetByModel!)) sum[k] = (sum[k] ?? 0) + v;
+    s.unmetByModel = capKeys(sum, MAX_SERIES_KEYS);
+  }
+  const regions = group.filter((x) => x.agentsByRegion);
+  if (regions.length) {
+    const sum: Record<string, number> = {};
+    for (const x of regions) for (const [k, v] of Object.entries(x.agentsByRegion!)) sum[k] = (sum[k] ?? 0) + v;
+    for (const k of Object.keys(sum)) sum[k] = round1(sum[k]! / regions.length);
+    s.agentsByRegion = capKeys(sum, MAX_SERIES_KEYS);
+  }
+  const slots = group.filter((x) => x.modelSlots);
+  if (slots.length) {
+    const sum: Record<string, SlotCount> = {};
+    for (const x of slots) {
+      for (const [k, v] of Object.entries(x.modelSlots!)) {
+        const e = (sum[k] ??= { free: 0, total: 0 });
+        e.free += v.free;
+        e.total += v.total;
+      }
+    }
+    for (const v of Object.values(sum)) {
+      v.free = round1(v.free / slots.length);
+      v.total = round1(v.total / slots.length);
+    }
+    s.modelSlots = capKeys(sum, MAX_SERIES_KEYS, (v) => v.total, (a, b) => ({ free: round1(a.free + b.free), total: round1(a.total + b.total) }));
+  }
 }

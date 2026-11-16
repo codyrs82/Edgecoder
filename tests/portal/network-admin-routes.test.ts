@@ -107,7 +107,19 @@ describe("portal network admin API", () => {
     expect(r.gaps.missingModels[0]).toEqual({ model: "deepseek-r1:70b", noAgentHasModel: 13, noCapacity: 0, holders: 0 });
     expect(r.gaps.staleAgents.map((a: { agentId: string }) => a.agentId)).toEqual(["old-laptop-9"]);
     expect(r.gaps.thinCoordinators).toEqual([{ coordinator: bases[1]!.replace("http://", ""), region: "ams", connected: 1 }]);
-    expect(r.gaps.regions).toEqual(expect.arrayContaining([{ country: "US", agents: 2 }, { country: "CA", agents: 1 }, { country: "DE", agents: 1 }]));
+    // Regions: the agent's own where it reported one (sin), else its coordinator's (iad, ams); never
+    // "unknown" because the portal had no country for it.
+    expect(r.gaps.regions).toEqual([{ region: "iad", agents: 2, reported: 0 }, { region: "ams", agents: 1, reported: 0 }, { region: "sin", agents: 1, reported: 1 }]);
+    expect(r.gaps.coordinators).toEqual([
+      { coordinator: bases[0]!.replace("http://", ""), region: "iad", connected: 3 },
+      { coordinator: bases[1]!.replace("http://", ""), region: "ams", connected: 1 }
+    ]);
+    // The gap series: maps merged per key, agents per coordinator added from each list.
+    const p = r.series.points.at(-1);
+    expect(Object.keys(p.agentsByRegion).sort()).toEqual(["ams", "iad", "sin"]);
+    expect(Object.keys(p.agentsByCoordinator).sort()).toEqual([bases[0]!.replace("http://", "") + " · iad", bases[1]!.replace("http://", "") + " · ams"].sort());
+    expect(p.modelSlots["llama3.1:8b"]).toEqual({ free: expect.any(Number), total: expect.any(Number) });
+    expect(typeof p.staleAgents).toBe("number");
     // Series: bucket starts line up, so the merged series has the longer list's length.
     expect(r.series.points).toHaveLength(240);
   });
@@ -150,6 +162,25 @@ describe("portal network admin API", () => {
     const r = mergeNetworkSnapshots([{ url: "https://c", ok: false, error: "admin_token_rejected", status: 401 }], { nodeOwners: new Map(), userEmails: new Map() }, "1h");
     expect(r.kpis.agentsOnline).toBe(0);
     expect(r.coordinators[0]).toMatchObject({ ok: false, error: "admin_token_rejected" });
+  });
+
+  it("merges the gap series: keyed maps add per key, saturation is counted again, agents per coordinator", () => {
+    const a = [{ atMs: 0, connectedAgents: 3, staleAgents: 1, saturatedModels: 1, unmetByModel: { llama: 2 }, agentsByRegion: { ord: 3 }, modelSlots: { llama: { free: 0, total: 4 }, qwen: { free: 1, total: 2 } } }];
+    const b = [{ atMs: 0, connectedAgents: 2, staleAgents: 0, saturatedModels: 2, unmetByModel: { llama: 1, qwen: 4 }, agentsByRegion: { cdg: 2 }, modelSlots: { llama: { free: 0, total: 2 }, qwen: { free: 0, total: 2 } } }];
+    expect(mergeSeries([a, b], ["coordinator · ord", "coordinator-eu · cdg"])).toEqual([
+      {
+        atMs: 0, connectedAgents: 5, staleAgents: 1,
+        // llama is full on both coordinators: one saturated model, not two (qwen has a free slot on one).
+        saturatedModels: 1,
+        unmetByModel: { llama: 3, qwen: 4 },
+        agentsByRegion: { ord: 3, cdg: 2 },
+        agentsByCoordinator: { "coordinator · ord": 3, "coordinator-eu · cdg": 2 },
+        modelSlots: { llama: { free: 0, total: 6 }, qwen: { free: 1, total: 4 } },
+        pickupP50: null, pickupP90: null, ttftP50: null, ttftP90: null
+      }
+    ]);
+    // Older coordinators send none of these: nothing is added.
+    expect(mergeSeries([[{ atMs: 0, queued: 1 }]])[0]).toEqual({ atMs: 0, queued: 1, pickupP50: null, pickupP90: null, ttftP50: null, ttftP90: null });
   });
 
   it("merges series: sums counts and gauges, averages p50, takes the worst p90", () => {
