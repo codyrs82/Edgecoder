@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from "svelte";
+  import { setBusy as setRestartBusy, clearBusy as clearRestartBusy } from "../lib/auto-restart";
   import { Popover, Tabs } from "bits-ui";
   import { Settings2, PanelRight, PanelLeft, Globe, Columns2, SquareTerminal, Sparkles, TriangleAlert, GitBranch, X, RotateCw } from "@lucide/svelte";
   import { notify } from "../lib/toast";
@@ -48,6 +49,11 @@
   const viewStates = new Map<string, unknown>();
 
   let files: EditorFile[] = $state([]);
+  const restartKey = `editor:${Math.random().toString(36).slice(2)}`;
+  $effect(() => {
+    setRestartBusy(restartKey, files.some((f) => f.dirty) && "unsaved");
+    return () => clearRestartBusy(restartKey);
+  });
   let activeFilePath: string | null = $state(null);
   let gitBranch: string | null = $state(null);
   let gitFiles: Record<string, string> = $state({});

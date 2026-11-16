@@ -20,6 +20,9 @@
   import UpdateBanner from "./components/UpdateBanner.svelte";
   import EndpointBanner from "./components/EndpointBanner.svelte";
   import { startPeriodicCheck, stopPeriodicCheck } from "./lib/updater";
+  import UpdateCountdown from "./components/UpdateCountdown.svelte";
+  import { autoRestart, startAutoRestart } from "./lib/auto-restart-app";
+  import { setBusy, takeUpdatedTo } from "./lib/auto-restart";
   import ComputePicker from "./components/ComputePicker.svelte";
   import { computeChoice } from "./lib/compute-choice";
   import { Settings as SettingsIcon, Plus, SquarePen, FolderPlus, FolderOpen, FolderGit2, Folder, Bot, PanelLeft } from "@lucide/svelte";
@@ -95,12 +98,21 @@
   $effect(() => {
     // Updates run whether or not anyone is signed in, so a broken sign-in can be fixed by an update.
     startPeriodicCheck();
+    const stopAutoRestart = startAutoRestart();
+    void import("@tauri-apps/api/app").then(({ getVersion }) => getVersion()).then((v) => {
+      const updated = takeUpdatedTo(v);
+      if (updated) notify(`Updated to EdgeCoder ${updated}`, "success", "updated-to");
+    }).catch(() => {});
     getMe()
       .then((u) => { user = u; })
       .catch(() => { user = null; })
       .finally(() => { authChecked = true; });
-    return () => stopPeriodicCheck();
+    return () => { stopPeriodicCheck(); stopAutoRestart(); };
   });
+
+  // Auto-restart waits for these (lib/auto-restart.ts).
+  $effect(() => setBusy("app:chat-stream", chatStreaming && "streaming"));
+  $effect(() => setBusy("app:local-compute-install", needsSetupScreen(computeStatus) && computeStatus?.state !== "error" && "install"));
 
   // Join this machine to the network once someone is signed in (no-op when already enrolled).
   $effect(() => {
@@ -456,6 +468,7 @@
 
 <EndpointBanner />
 <Toaster />
+<UpdateCountdown controller={autoRestart} />
 
 {#if !authChecked}
   <div class="loading-screen">

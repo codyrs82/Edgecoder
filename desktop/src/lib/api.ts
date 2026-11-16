@@ -1819,6 +1819,8 @@ const sessionPost = <T>(id: string, action: string, body: Record<string, unknown
 
 /** Sessions shown live in the app (published from a terminal). */
 export const listPublishedSessions = () => fsCall<{ sessions: SessionSummary[] }>("GET", "/v1/ide/sessions?published=1").then((r) => r.sessions);
+/** Every session on the IDE server (auto-restart checks for running turns); older servers may 404. */
+export const listAllSessions = () => fsCall<{ sessions: SessionSummary[] }>("GET", "/v1/ide/sessions").then((r) => r.sessions ?? []);
 export const getSession = (id: string) => fsCall<SessionSnapshotView>("GET", `/v1/ide/sessions/${id}`);
 export const sessionSend = (id: string, text: string) => sessionPost<{ turnId: string }>(id, "messages", { text });
 export const sessionApprove = (id: string, callId: string, approved: boolean, always = false) => sessionPost(id, "approve", { callId, approved, always });

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { applyAgentEvent, markApproval } from "../lib/agent-events";
+  import { setBusy as setRestartBusy, clearBusy as clearRestartBusy } from "../lib/auto-restart";
   import { expandMentions } from "../lib/mentions";
   import { autoApplyEdits } from "../lib/project-mode";
   import { onMount, onDestroy } from "svelte";
@@ -92,6 +93,11 @@
 
   /** IDE agent streaming tool events */
   let streamingToolEvents: ToolEvent[] = $state([]);
+  const restartKey = `chat:${Math.random().toString(36).slice(2)}`;
+  $effect(() => {
+    setRestartBusy(`${restartKey}:approval`, streamingToolEvents.some((e) => e.type === "tool_call" && e.approval_status === "pending") && "approval");
+    return () => clearRestartBusy(`${restartKey}:approval`);
+  });
   let streamingTurnId: string | undefined = $state(undefined);
   let streamingUsage: ReplyUsage | undefined = $state(undefined);
   let streamingChanged: string[] = $state([]);

@@ -2,7 +2,9 @@
   import { computeOverview, getIdentity, getDashboardOverview, getModelList, backendReady, isRemoteMode, getProjectsFolder, setProjectsFolder, portalWebUrl, type ProjectsFolder } from "../lib/api";
   import { loadSettings, saveSetting } from "../lib/stores";
   import { coordinatorUrl as currentCoordinatorUrl, portalUrl as currentPortalUrl, setEndpoint, resetEndpoints, syncEndpointsToShell, testEndpoint, validateEndpointUrl, defaultEndpoints, type EndpointKind } from "../lib/endpoints";
-  import { checkForUpdate, onUpdateStatus, downloadAndInstall, type UpdateStatus } from "../lib/updater";
+  import { checkForUpdate, onUpdateStatus, downloadAndInstall, autoUpdateEnabled, type UpdateStatus } from "../lib/updater";
+  import { autoRestartEnabled, setAutoRestartEnabled } from "../lib/auto-restart";
+  import { autoRestart } from "../lib/auto-restart-app";
   import type { NodeIdentity } from "../lib/types";
   import { getThemePreference, setTheme, type ThemePreference } from "../lib/theme";
   import Select from "../components/ui/Select.svelte";
@@ -33,6 +35,13 @@
 
   // Update state
   let updateStatus: UpdateStatus = $state({ state: "idle" });
+  const updatesOn = autoUpdateEnabled();
+  let restartAuto = $state(autoRestartEnabled());
+  function toggleAutoRestart() {
+    restartAuto = !restartAuto;
+    setAutoRestartEnabled(restartAuto);
+    void autoRestart.evaluate();
+  }
 
   $effect(() => {
     return onUpdateStatus((s) => { updateStatus = s; });
@@ -511,6 +520,17 @@
           {/if}
         </div>
       </div>
+      {#if updatesOn}
+        <div class="sp-row">
+          <div class="sp-text">
+            <span class="sp-title">Restart automatically to finish updates</span>
+            <span class="sp-desc">Only when nothing is running: no reply streaming, no approval waiting, no unsaved files, no network job or download. You get a 60-second notice.</span>
+          </div>
+          <div class="sp-controls">
+            <button class="sp-switch" role="switch" aria-checked={restartAuto} aria-label="Restart automatically to finish updates" onclick={toggleAutoRestart}></button>
+          </div>
+        </div>
+      {/if}
     </div>
   </section>
 </div>

@@ -2,6 +2,7 @@
   // First run: download one small model automatically (see lib/starter-model.ts). A small card in
   // the corner shows progress; Skip stops it and doesn't ask again.
   import { onDestroy } from "svelte";
+  import { setBusy as setRestartBusy, clearBusy as clearRestartBusy } from "../lib/auto-restart";
   import { STARTER_MODEL, installedChatModels, pullWithProgress, skipStarter, starterSkipped, type PullProgress } from "../lib/starter-model";
 
   interface Props {
@@ -12,6 +13,11 @@
   let { ollamaBase, onOpenModels }: Props = $props();
 
   let phase = $state<"idle" | "pulling" | "done" | "error">("idle");
+  const restartKey = `starter-model:${Math.random().toString(36).slice(2)}`;
+  $effect(() => {
+    setRestartBusy(restartKey, phase === "pulling" && "model-pull");
+    return () => clearRestartBusy(restartKey);
+  });
   let progress = $state<PullProgress>({ status: "", percent: null });
   let error = $state("");
   let abort: AbortController | null = null;
