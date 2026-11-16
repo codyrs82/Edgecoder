@@ -64,7 +64,7 @@
     margin: 2px 0 0;
     font-family: var(--font-mono, monospace);
     font-size: var(--fs-xs);
-    color: var(--text-tertiary, var(--text-secondary));
+    color: var(--text-muted);
     overflow-wrap: anywhere;
   }
   .tentacles {
@@ -150,6 +150,6 @@
     max-height: 240px;
     overflow: auto;
     font-size: var(--fs-2xs);
-    background: var(--bg-subtle, transparent);
+    background: var(--bg-soft);
   }
 </style>
