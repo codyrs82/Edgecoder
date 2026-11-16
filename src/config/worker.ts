@@ -63,6 +63,12 @@ export const workerConfigSchema = z.object({
    * coordinator, so nothing on the LAN needs to reach it. Set 0.0.0.0 only to opt in to LAN gossip.
    */
   AGENT_MESH_HOST: z.string().trim().min(1).default("127.0.0.1"),
+  /**
+   * Report this machine's private IPv4 addresses to its coordinator (signed /register), so the
+   * owner's desktop app can find their own machines on the same network (src/swarm/lan-proximity.ts).
+   * They are shown only to the machine's owner. Default on; off/0/false turns it off.
+   */
+  AGENT_LAN_HINTS: envFlag({ off: ["off", "0", "false"], ci: true }),
   /** Loopback port for the IDE's swarm forwarder; unset or 0 = off. */
   LOCAL_FORWARD_PORT: envPort(undefined),
 

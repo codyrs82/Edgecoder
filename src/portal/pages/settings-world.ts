@@ -34,6 +34,7 @@ export const WORLD_VIEW_BROWSER_LIB = [
   `var CONTINENT_X = ${JSON.stringify(W.CONTINENT_X)};`,
   `var RING_MIN = ${W.RING_MIN}, RING_MAX = ${W.RING_MAX}, CELL = ${W.CELL}, MS_LO = ${W.MS_LO}, MS_HI = ${W.MS_HI};`,
   ...[
+    W.lanMs,
     W.estimateMs,
     W.nearness,
     W.formatMs,
@@ -45,7 +46,10 @@ export const WORLD_VIEW_BROWSER_LIB = [
     W.sortRows,
     W.filterRows,
     W.nearestPeers,
+    W.nearestToYou,
+    W.nearestText,
     W.ringRadius,
+    W.lanDistance,
     W.nodeRadius,
     W.worldLayout,
     W.hostOf

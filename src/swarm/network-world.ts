@@ -13,11 +13,17 @@
  *
  * Each coordinator builds the view of its own agents (`LocalWorld`, coordinator-to-coordinator
  * only, mesh token); the one asked merges its peers' views into the public answer. The internal
- * fields (`agentId`, `ownerTag`, `lastSeenMs`) never leave `toPublicWorld`.
+ * fields (`agentId`, `ownerTag`, `lastSeenMs`, `netTag`, `lan`) never leave `toPublicWorld`.
+ *
+ * LAN proximity (src/swarm/lan-proximity.ts). A machine's private LAN addresses and whether it
+ * connects from the same public network as the caller are shared only with the machine's owner,
+ * and only when the caller is a signed agent (the desktop app, which probes them itself): never
+ * with another account, never with the portal.
  *
  * Pure functions; the route (coordinator/routes/network-world.ts) supplies the live state.
  */
 import { createHash, createHmac } from "node:crypto";
+import { networkTag, sanitizeLanAddresses } from "./lan-proximity.js";
 
 export type WorldStatus = "idle" | "busy" | "stale";
 
@@ -29,6 +35,10 @@ export interface LocalWorldAgent {
   ownerTag: string | null;
   /** Internal. */
   lastSeenMs: number;
+  /** Internal: tag of the public network the machine connects from (lan-proximity.ts networkTag). */
+  netTag?: string | null;
+  /** Internal: the machine's private IPv4 addresses with prefix, for its owner only. */
+  lan?: string[];
   /** Opaque stable id for UI keys (keyed hash, not reversible). */
   id: string;
   label: string;
@@ -91,7 +101,25 @@ export interface LocalWorld {
   generatedAtMs: number;
 }
 
-export type PublicWorldAgent = Omit<LocalWorldAgent, "agentId" | "ownerTag" | "lastSeenMs" | "perf"> & { mine: boolean; name?: string };
+/** Owner-only LAN facts about one of the caller's machines (signed-agent callers only). */
+export interface WorldAgentLan {
+  /** It connects from the same public address (IPv4, or IPv6 /64) as the caller: likely the same network. */
+  samePublicNetwork: boolean;
+  /** Its private IPv4 addresses with prefix ("192.168.1.23/24"), for the desktop app to probe. */
+  addresses: string[];
+}
+
+export type PublicWorldAgent = Omit<LocalWorldAgent, "agentId" | "ownerTag" | "lastSeenMs" | "perf" | "netTag" | "lan"> & {
+  mine: boolean;
+  name?: string;
+  lan?: WorldAgentLan;
+  /**
+   * Your machines only (desktop and portal): machines with the same `lanGroup` connect from the same
+   * public network (likely one LAN). An opaque per-answer id ("n1"), set only when two or more of
+   * your machines share it. Carries no address.
+   */
+  lanGroup?: string;
+};
 
 export interface PublicWorld {
   generatedAtMs: number;
@@ -204,6 +232,10 @@ export interface AgentFacts {
   slots: number;
   lastSeenMs: number;
   rttMs: number | null;
+  /** The public address the agent connects from (never sent anywhere; only its tag is compared). */
+  sourceIp?: string | null;
+  /** Private IPv4 addresses the agent reported. */
+  lanAddresses?: readonly string[] | null;
 }
 
 export function localWorldAgent(key: Buffer, coordinatorId: string, a: AgentFacts): LocalWorldAgent {
@@ -217,6 +249,8 @@ export function localWorldAgent(key: Buffer, coordinatorId: string, a: AgentFact
     agentId: a.agentId,
     ownerTag: worldOwnerTag(a.ownerAccountId ?? a.agentId),
     lastSeenMs: a.lastSeenMs,
+    netTag: networkTag(a.sourceIp),
+    lan: sanitizeLanAddresses(a.lanAddresses ?? []),
     id,
     label: maskedLabel(family, id),
     os: family,
@@ -245,7 +279,12 @@ export function toPublicWorld(
   self: LocalWorld,
   peers: Array<{ url: string; id?: string; world: LocalWorld | null; rttMs: number | null }>,
   callerAccountId: string | null,
-  nowMs: number
+  nowMs: number,
+  /**
+   * Set only for a signed agent caller (the desktop app): the caller's own machines then carry
+   * `lan` (their private addresses and the same-public-network hint against `callerNetTag`).
+   */
+  lanFor?: { callerNetTag: string | null }
 ): PublicWorld {
   const callerTag = callerAccountId ? worldOwnerTag(callerAccountId) : null;
   const coordinators: WorldCoordinator[] = [{ ...self.coordinator, reachable: true, self: true }];
@@ -294,9 +333,23 @@ export function toPublicWorld(
       x.a.id.localeCompare(y.a.id)
   );
   const kept = all.slice(0, WORLD_MAX_AGENTS);
+  // Your machines that share a public network, numbered per answer (no tag or address leaves here).
+  const tagCount = new Map<string, number>();
+  for (const { a, mine } of kept) if (mine && a.netTag) tagCount.set(a.netTag, (tagCount.get(a.netTag) ?? 0) + 1);
+  const groupOf = new Map<string, string>();
+  for (const [tag, n] of tagCount) if (n >= 2) groupOf.set(tag, `n${groupOf.size + 1}`);
   const agents: PublicWorldAgent[] = kept.map(({ a, mine }) => {
-    const { agentId, ownerTag: _tag, lastSeenMs: _seen, perf: _perf, ...rest } = a;
-    return mine ? { ...rest, mine: true, name: agentId } : { ...rest, mine: false };
+    const { agentId, ownerTag: _tag, lastSeenMs: _seen, perf: _perf, netTag, lan, ...rest } = a;
+    if (!mine) return { ...rest, mine: false };
+    const out: PublicWorldAgent = { ...rest, mine: true, name: agentId };
+    const group = netTag ? groupOf.get(netTag) : undefined;
+    if (group) out.lanGroup = group;
+    if (lanFor) {
+      const samePublicNetwork = !!lanFor.callerNetTag && netTag === lanFor.callerNetTag;
+      const addresses = sanitizeLanAddresses(lan ?? []);
+      if (samePublicNetwork || addresses.length) out.lan = { samePublicNetwork, addresses };
+    }
+    return out;
   });
 
   // Counts per coordinator and per model are over every agent, not only the ones kept.
@@ -399,6 +452,8 @@ export function parseLocalWorld(raw: unknown): LocalWorld | null {
       agentId: a.agentId.slice(0, 128),
       ownerTag: str(a.ownerTag, 64),
       lastSeenMs: num(a.lastSeenMs) ?? 0,
+      netTag: typeof a.netTag === "string" && /^[0-9a-f]{32}$/.test(a.netTag) ? a.netTag : null,
+      lan: sanitizeLanAddresses(a.lan),
       id: a.id,
       label,
       os,

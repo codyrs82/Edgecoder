@@ -65,6 +65,7 @@ import { diagnosticsByAgentId } from "../services.js";
 import { persistStatsLedgerRecord } from "../stats-ledger.js";
 import { validatePortalNode } from "../enrollment.js";
 import { attestAgentSigningKey } from "../attested-keys.js";
+import { sanitizeLanAddresses } from "../../lan-proximity.js";
 import {
   registerSchema,
   defaultPolicy,
@@ -168,6 +169,8 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       connectedPeers: previous?.connectedPeers ?? new Set<string>(),
       ownerEmail: activation.ownerEmail,
       sourceIp: activation.sourceIp ?? sourceIp,
+      // A body without them (older agents, AGENT_LAN_HINTS=off) reports none.
+      ...(body.lanAddresses && sanitizeLanAddresses(body.lanAddresses).length ? { lanAddresses: sanitizeLanAddresses(body.lanAddresses) } : {}),
       countryCode: activation.countryCode,
       // Self-reported hosting region (FLY_REGION or AGENT_REGION): coarse display only (GET /network/world).
       ...(body.region ? { region: body.region } : {}),

@@ -41,6 +41,16 @@ export interface WorldAgent {
   coordinatorId: string;
   /** The coordinator's measured round trip to this machine (WebSocket pings), ms. */
   rttMs: number | null;
+  /**
+   * Your machines only, desktop app only: this computer pinged it directly over the local network
+   * (it connects from the same public address and sits in one of this computer's subnets).
+   */
+  lan?: { sameNetwork: boolean; rttMs: number | null };
+  /**
+   * Your machines only (desktop and portal): the same id means they connect from the same public
+   * network, likely one LAN (an opaque per-answer id, no address).
+   */
+  lanGroup?: string;
 }
 export interface WorldCoordinator {
   id: string;
@@ -72,13 +82,21 @@ export interface WorldView {
 
 // ── Estimates, sorting, filtering ──
 
+/** One of your machines this computer reached directly over the local network, with its measured round trip. */
+export function lanMs(agent: WorldAgent): number | null {
+  return agent.mine && agent.lan?.sameNetwork && typeof agent.lan.rttMs === "number" ? agent.lan.rttMs : null;
+}
+
 /**
- * Estimated round trip from this computer to a machine: this computer's measured round trip to
+ * Round trip from this computer to a machine. Your own machines on the same local network are
+ * measured directly (`lan`). Otherwise an estimate: this computer's measured round trip to
  * the machine's coordinator plus the coordinator's measured round trip to the machine. Null when
  * either half is unknown. It is an estimate: work to the machine takes that path, but the two
  * halves are measured at different moments.
  */
 export function estimateMs(agent: WorldAgent, coordinators: ReadonlyMap<string, WorldCoordinator>): number | null {
+  const lan = lanMs(agent);
+  if (lan !== null) return Math.max(0, Math.round(lan * 10) / 10);
   const mine = coordinators.get(agent.coordinatorId)?.myRttMs;
   if (typeof mine !== "number" || typeof agent.rttMs !== "number") return null;
   return Math.round(mine + agent.rttMs);
@@ -92,6 +110,8 @@ export function nearness(ms: number | null): Nearness {
 
 export function formatMs(ms: number | null | undefined, estimate = false): string {
   if (typeof ms !== "number") return "—";
+  // A LAN round trip can be under a millisecond.
+  if (ms < 1) return `${estimate ? "~" : ""}<1 ms`;
   return `${estimate ? "~" : ""}${Math.round(ms)} ms`;
 }
 
@@ -118,11 +138,13 @@ export const STATUS_ORDER: Record<WorldStatus, number> = { busy: 0, idle: 1, sta
 export interface WorldRow {
   agent: WorldAgent;
   estimateMs: number | null;
+  /** Your machine on the same local network: `estimateMs` was measured directly, not estimated. */
+  sameNetwork: boolean;
 }
 
 export function rowsFor(view: Pick<WorldView, "agents" | "coordinators">): WorldRow[] {
   const coords = new Map(view.coordinators.map((c) => [c.id, c]));
-  return view.agents.map((agent) => ({ agent, estimateMs: estimateMs(agent, coords) }));
+  return view.agents.map((agent) => ({ agent, estimateMs: estimateMs(agent, coords), sameNetwork: lanMs(agent) !== null }));
 }
 
 export function primaryModel(a: WorldAgent): string {
@@ -170,6 +192,23 @@ export function nearestPeers(rows: readonly WorldRow[], n = 3): WorldRow[] {
     .slice(0, n);
 }
 
+/**
+ * "Nearest to you": your own machines on the same local network first (measured directly, this
+ * computer left out), then other people's machines by the estimate. Up to `n`, online only.
+ */
+export function nearestToYou(rows: readonly WorldRow[], selfAgentId?: string, n = 3): WorldRow[] {
+  const lan = rows
+    .filter((r) => r.sameNetwork && r.agent.status !== "stale" && r.agent.name !== selfAgentId)
+    .sort((x, y) => (x.estimateMs as number) - (y.estimateMs as number));
+  return [...lan, ...nearestPeers(rows, n)].slice(0, n);
+}
+
+/** How a "Nearest to you" entry reads: "MacBook-Pro (same network)" or "lin-•••4e08 iad". */
+export function nearestText(r: WorldRow, selfAgentId?: string): string {
+  if (r.sameNetwork) return `${displayName(r.agent, selfAgentId)} (same network)`;
+  return `${r.agent.label} ${r.agent.region ?? r.agent.country ?? ""}`.trim();
+}
+
 // ── Graph layout ──
 
 export interface HubNode {
@@ -185,6 +224,8 @@ export interface AgentNode {
   r: number;
   hubId: string;
   row: WorldRow;
+  /** Placed beside "You" (your machine on the same local network), not around its coordinator. */
+  lan?: boolean;
 }
 export interface WorldLayout {
   width: number;
@@ -234,7 +275,9 @@ export function worldLayout(view: Pick<WorldView, "coordinators">, rows: readonl
   const hubById = new Map(hubs.map((h) => [h.id, h]));
   const agents: AgentNode[] = [];
   const byHub = new Map<string, WorldRow[]>();
+  const lanRows = rows.filter((r) => r.sameNetwork);
   for (const r of rows) {
+    if (r.sameNetwork) continue;
     if (!hubById.has(r.agent.coordinatorId)) continue;
     const list = byHub.get(r.agent.coordinatorId) ?? [];
     list.push(r);
@@ -256,8 +299,31 @@ export function worldLayout(view: Pick<WorldView, "coordinators">, rows: readonl
   const rowsCount = Math.ceil(hubs.length / perRow);
   const anyMine = view.coordinators.some((c) => typeof c.myRttMs === "number");
   const width = Math.max(CELL, perRow * CELL);
-  const you = anyMine ? { x: width / 2, y: rowsCount * CELL + 26 } : null;
+  const you = anyMine || lanRows.length ? { x: width / 2, y: rowsCount * CELL + 26 } : null;
+  // Your machines on the same local network sit beside "You", alternately left and right, closer
+  // for a shorter round trip.
+  if (you) {
+    const sorted = [...lanRows].sort((x, y) => (x.estimateMs ?? 0) - (y.estimateMs ?? 0) || x.agent.id.localeCompare(y.agent.id));
+    sorted.forEach((row, i) => {
+      const side = i % 2 === 0 ? -1 : 1;
+      const d = lanDistance(row.estimateMs) + Math.floor(i / 2) * 64;
+      const x = Math.min(width - 12, Math.max(12, you.x + side * d));
+      agents.push({ id: row.agent.id, x: +x.toFixed(1), y: you.y, r: +nodeRadius(row.agent).toFixed(1), hubId: "", row, lan: true });
+    });
+  } else {
+    // No "You" to sit beside: around their coordinators like any machine.
+    for (const row of lanRows) {
+      const hub = hubById.get(row.agent.coordinatorId);
+      if (hub) agents.push({ id: row.agent.id, x: hub.x, y: +(hub.y + ringRadius(row.agent.rttMs)).toFixed(1), r: +nodeRadius(row.agent).toFixed(1), hubId: hub.id, row });
+    }
+  }
   return { width, height: rowsCount * CELL + (you ? 64 : 0), hubs, agents, rings, you };
+}
+
+/** Distance from "You" for a LAN round trip: 46 px at 1 ms or less, up to 90 px at 20 ms or more. */
+export function lanDistance(ms: number | null): number {
+  const m = Math.min(20, Math.max(1, ms ?? 20));
+  return +(46 + (44 * Math.log(m)) / Math.log(20)).toFixed(1);
 }
 
 /** Short host for a coordinator URL. */
