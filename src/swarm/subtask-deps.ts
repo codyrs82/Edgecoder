@@ -12,7 +12,7 @@ import type { Subtask } from "../common/types.js";
 export interface PendingDependentSubtask {
   subtask: Omit<Subtask, "id"> & { id: string };
   dependsOn: string[];
-  enqueueOpts?: { claimDelayMs?: number };
+  enqueueOpts?: { claimDelayMs?: number; freshId?: boolean };
 }
 
 /**
@@ -98,7 +98,7 @@ export class SubtaskDepTracker {
   recordCompletionAndRelease(
     completedSubtaskId: string,
     output: string,
-    enqueueFn: (subtask: Omit<Subtask, "id"> & { id: string }, opts?: { claimDelayMs?: number }) => Subtask
+    enqueueFn: (subtask: Omit<Subtask, "id"> & { id: string }, opts?: { claimDelayMs?: number; freshId?: boolean }) => Subtask
   ): Subtask[] {
     this.completedOutputs.set(completedSubtaskId, output);
 

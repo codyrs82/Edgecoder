@@ -312,7 +312,9 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       );
     }
 
-    const enqueueOpts = hasMeshPeers ? { claimDelayMs: GOSSIP_CLAIM_DELAY_MS } : undefined;
+    // The ids were minted above, so no lease state can be stored under them: claimable at once
+    // (without freshId every job subtask waited on two Postgres round trips before a pull saw it).
+    const enqueueOpts = { freshId: true, ...(hasMeshPeers ? { claimDelayMs: GOSSIP_CLAIM_DELAY_MS } : {}) };
     const created: Subtask[] = [];
     const deferred: string[] = [];
 

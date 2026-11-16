@@ -203,10 +203,14 @@ describe("slash commands at an approval prompt", () => {
     ]);
     const done = repl.run();
     await until(() => t.prompt().includes("["), 5000, "prompt");
-    const start = hub.snapshot(id).session.mode;
+    const order = ["ask", "auto-edits", "auto"];
+    const start = hub.snapshot(id).session.mode ?? "ask";
+    const next = order[(order.indexOf(start) + 1) % order.length];
     t.press("shift-tab");
-    await until(() => hub.snapshot(id).session.mode !== start, 5000, "mode change");
-    expect(t.prompt()).toContain(`[${hub.snapshot(id).session.mode}]`);
+    // Wait on the terminal, not the hub: the hub applies the mode before its answer reaches the
+    // REPL, and the REPL redraws the prompt only once that answer is back.
+    await until(() => t.prompt().includes(`[${next}]`), 5000, "prompt shows the next mode");
+    expect(hub.snapshot(id).session.mode).toBe(next);
     t.feed("something slow");
     await until(() => t.prompt().includes("running"), 5000, "running");
     t.press("escape");

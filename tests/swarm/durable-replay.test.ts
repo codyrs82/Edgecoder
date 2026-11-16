@@ -159,6 +159,16 @@ describe("a re-enqueued subtask is claimable only once its persisted lease state
     release();
     await q.writesSettled();
   });
+
+  it("an id the caller just minted (freshId, as /submit does) is claimable at once, before the store answers", async () => {
+    const { store, release } = slowStore({ attempts: 0, expiredHolders: [] });
+    const q = new SwarmQueue(store, LEASE, { leaseStateWaitMs: 60_000 });
+    q.registerAgent("A", policy);
+    const st = q.enqueueSubtask(subtask(), { freshId: true });
+    expect(q.claim("A")?.id).toBe(st.id);
+    release();
+    await q.writesSettled();
+  });
 });
 
 describe.skipIf(!PG_URL)("replay after restart / on a second coordinator, real Postgres (#55, #99)", () => {

@@ -139,12 +139,18 @@ describe("password reset (/auth/password/*)", () => {
   });
 
   it("stores only the SHA-256 of a 32-byte token, expiring in 30 minutes", async () => {
+    // A fixed clock: the route and the store each read Date.now(), and a millisecond tick between
+    // the two reads made the stored lifetime 1799999 ms.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.UTC(2026, 10, 16, 12, 0, 0);
+    vi.setSystemTime(t0);
     const token = await requestToken();
     expect(Buffer.from(token, "base64url").length).toBeGreaterThanOrEqual(32);
     expect(db.resets.has(token)).toBe(false);
     const row = db.resets.get(sha256Hex(token));
     expect(row).toBeDefined();
-    expect(row!.expiresAtMs - row!.createdAtMs).toBe(PASSWORD_RESET_TTL_MS);
+    expect(row!.createdAtMs).toBe(t0);
+    expect(row!.expiresAtMs).toBe(t0 + PASSWORD_RESET_TTL_MS);
   });
 
   it("sets the password, revokes every session, verifies the email, and is single use", async () => {

@@ -206,7 +206,16 @@ export class SwarmQueue {
 
   enqueueSubtask(
     subtask: Omit<Subtask, "id"> & { id?: string },
-    opts?: { claimDelayMs?: number; excludeAgents?: string[]; excludeAccounts?: string[] }
+    opts?: {
+      claimDelayMs?: number;
+      excludeAgents?: string[];
+      excludeAccounts?: string[];
+      /**
+       * The caller minted `subtask.id` just now (e.g. /submit's randomUUID), so nothing can be
+       * persisted under it: claimable at once, like a subtask enqueued without an id.
+       */
+      freshId?: boolean;
+    }
   ): Subtask {
     const materialized: Subtask = { ...subtask, id: subtask.id ?? randomUUID() };
     // Deduplicate — prevent same subtask from being enqueued twice via mesh gossip
@@ -220,8 +229,9 @@ export class SwarmQueue {
     // #99: a subtask enqueued under an id it already had (a peer's gossip, a re-enqueue after a
     // restart) may have attempts and expired holders in Postgres. It is not claimable until they
     // are merged: a claim in between counted as attempt 1 (the retry cap reset) and let an expired
-    // holder take it back. A fresh id has no persisted state and is claimable at once.
-    const gate = Boolean(this.store) && subtask.id !== undefined;
+    // holder take it back. A fresh id (none given, or one the caller just minted) has no persisted
+    // state and is claimable at once.
+    const gate = Boolean(this.store) && subtask.id !== undefined && !opts?.freshId;
     let open: () => void = () => undefined;
     if (gate) {
       item.leaseStatePending = true;
