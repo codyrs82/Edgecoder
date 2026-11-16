@@ -1977,6 +1977,8 @@ const botFields = {
 };
 const createSchema = z.object(botFields).partial().required({ name: true, projectRoot: true });
 const patchSchema = z.object({ ...botFields, memory: z.string().max(MAX_MEMORY_BYTES) }).partial();
+/** The desktop form's validation of a change (also applied to changes from the web: bot-remote.ts). */
+export const botPatchSchema = patchSchema;
 const idParams = z.object({ id: z.string().min(1).max(100) });
 
 export function registerBotRoutes(app: FastifyInstance, bots: BotManager): void {

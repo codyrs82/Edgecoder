@@ -6,6 +6,7 @@ import { htmlOpenTag, themeHeadTags, themeToggleButton } from "../assets.js";
 import { DOCS_SITE_URL } from "./urls.js";
 import { CSP_NONCE } from "../csp-nonce.js";
 import { CLIENT_ESCAPE_JS } from "./escape.js";
+import { CLIENT_BOT_HELPERS_JS } from "./bot-helpers.js";
 
 /** Account menu entries (the popup above the avatar row), in the desktop app's order. */
 export const ACCOUNT_MENU_ITEMS: Array<{ href: string; label: string; icon: string; external?: boolean; adminOnly?: boolean; separatorBefore?: boolean }> = [
@@ -47,7 +48,7 @@ export const PRIMARY_NAV_ITEMS: Array<{ key: string; href: string; label: string
  */
 export function portalAuthedPageHtml(input: {
   title: string;
-  activeTab: "chat" | "dashboard" | "wallet" | "market" | "settings" | "download" | "reviews";
+  activeTab: "chat" | "dashboard" | "wallet" | "market" | "settings" | "download" | "reviews" | "bots";
   heading: string;
   subtitle: string;
   content: string;
@@ -134,6 +135,28 @@ export function portalAuthedPageHtml(input: {
         .nav-link.active::before { content: ""; position: absolute; left: -10px; top: 7px; bottom: 7px; width: 3px; border-radius: 0 2px 2px 0; background: var(--brand); }
         .nav-link .icon { flex: none; opacity: 0.9; }
         .nav-link .nav-ext { margin-left: auto; opacity: 0.5; }
+        /* ── Bots: the bots on your desktop machines (pages/bots.ts) ── */
+        .nav-group-link { display: flex; align-items: center; gap: 6px; border-radius: var(--radius-sm); }
+        .nav-group-link:hover, .nav-group-link.active { color: var(--text); background: var(--bg-elevated); }
+        .bot-nav-list { display: flex; flex-direction: column; }
+        .bot-nav-item {
+          display: flex; align-items: center; gap: 8px; padding: 5px 10px; margin: 1px 0; border-radius: var(--radius-sm);
+          color: var(--text-secondary); font-size: 13px; min-width: 0;
+        }
+        .bot-nav-item:hover, .bot-nav-item.active { background: var(--bg-elevated); color: var(--text); }
+        .bot-nav-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+        .bot-nav-name, .bot-nav-sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .bot-nav-sub { font-size: 11px; color: var(--muted); }
+        .bot-ava {
+          --bot-color: var(--brand);
+          flex: none; width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+          background: color-mix(in srgb, var(--bot-color) 22%, var(--bg-surface)); color: var(--text); border: 1.5px solid var(--bot-color);
+          font-size: 11px; font-weight: 700; position: relative; user-select: none;
+        }
+        .bot-ava.shape-block { border-radius: 6px; } .bot-ava.shape-hex { border-radius: 30%; } .bot-ava.shape-robot { border-radius: 8px 8px 50% 50%; }
+        .bot-ava .bot-dot { position: absolute; right: -2px; bottom: -2px; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--bg-soft); background: var(--muted); }
+        .bot-dot.tone-accent { background: var(--brand); } .bot-dot.tone-warn { background: var(--yellow); } .bot-dot.tone-err { background: var(--danger); } .bot-dot.tone-ok { background: var(--ok); }
+        .bot-dot.offline { background: var(--bg-elevated); border-color: var(--muted); }
         .nav-badge {
           margin-left: auto; background: var(--brand); color: var(--on-accent); font-size: 10px; font-weight: 700;
           min-width: 18px; height: 18px; border-radius: 999px; display: inline-flex; align-items: center; justify-content: center; padding: 0 5px;
@@ -213,6 +236,10 @@ export function portalAuthedPageHtml(input: {
               <div class="sidebar-search" id="sidebarSearch" hidden><input id="convSearch" type="search" placeholder="Search chats" aria-label="Search chats" autocomplete="off" /></div>
             </div>
             <div class="nav-group">${primaryHtml}</div>
+            <div class="nav-group bots-nav" role="group" aria-labelledby="botsNavLabel">
+              <a class="nav-group-label nav-group-link${input.activeTab === "bots" ? " active" : ""}" id="botsNavLabel" href="/portal/bots"${input.activeTab === "bots" ? ' aria-current="page"' : ""}>${icon("bot", 14)}<span>Bots</span></a>
+              <div class="bot-nav-list" id="botNavList"></div>
+            </div>
             <div class="nav-group" aria-label="Recent chats">
               <div class="conv-list" id="convList"></div>
             </div>
@@ -437,6 +464,26 @@ export function portalAuthedPageHtml(input: {
             }
           } catch { /* noop */ }
         }
+        /* ── Bots in the sidebar: the bots on your desktop machines (pages/bots.ts) ── */
+        ${CLIENT_BOT_HELPERS_JS}
+        async function loadBotsNav() {
+          var list = document.getElementById("botNavList");
+          if (!list) return;
+          try {
+            var res = await api("/portal/api/bots", { method: "GET", headers: {} });
+            var bots = (res && res.bots) || [];
+            window.edgecoderBots = res;
+            var here = new URLSearchParams(location.search);
+            list.innerHTML = bots.length ? bots.map(function(b) {
+              var active = location.pathname === "/portal/bots" && here.get("m") === b.machine.agentId && here.get("b") === b.id;
+              var sub = (b.machine.online ? botStatusChip(b).text : "offline") + " · " + b.machine.machineName;
+              return '<a class="bot-nav-item' + (active ? " active" : "") + '" href="' + botHref(b.machine.agentId, b.id) + '"' + (active ? ' aria-current="page"' : "") + ' title="' + escapeHtml(botTitle(b) + " · on " + b.machine.machineName + (b.machine.online ? "" : " · offline")) + '">' +
+                botAvatarHtml(b, b.machine.online) +
+                '<span class="bot-nav-text"><span class="bot-nav-name">' + escapeHtml(b.name) + '</span><span class="bot-nav-sub">' + escapeHtml(sub) + "</span></span></a>";
+            }).join("") : '<div class="conv-empty">Bots on your desktop show here</div>';
+            paintBotAvatars(list);
+          } catch { /* signed out, or no machines yet */ }
+        }
         document.getElementById("logoutBtn").addEventListener("click", async (e) => {
           e.preventDefault();
           try {
@@ -447,6 +494,7 @@ export function portalAuthedPageHtml(input: {
         });
         loadTopTicker();
         loadReviewsBadge();
+        if (document.getElementById("botNavList")) { loadBotsNav(); setInterval(function() { if (!document.hidden) loadBotsNav(); }, 30000); }
       </script>
       <script nonce="${CSP_NONCE}">
         ${input.script}

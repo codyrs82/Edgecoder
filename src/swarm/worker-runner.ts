@@ -69,6 +69,8 @@ import { ModelControlAgent, type CurrentModelSettings } from "../model/remote-co
 import { createOllamaAdmin, diskSpace, ollamaModelsDir, registryModelSize } from "../model/remote-control/ollama-admin.js";
 import { remoteControlEnabled, resolveAllowlist } from "../model/remote-control/policy.js";
 import { MODEL_CONTROL_FRAME_TYPE } from "../model/remote-control/protocol.js";
+import { BOT_CONTROL_FRAME_TYPE, botRelayMode } from "../common/bot-relay.js";
+import { BotRelayAgent, httpProviderClient } from "./bot-relay-agent.js";
 
 // #15: validated once; a malformed value exits here with a message naming the variable.
 const W = loadConfigOrExit("worker", workerConfigSchema);
@@ -734,6 +736,29 @@ const modelControl = new ModelControlAgent({
   localUi: process.env.EDGE_RUNTIME_MODE === "all-in-one",
   ollamaNumParallel: Number.isInteger(Number(process.env.OLLAMA_NUM_PARALLEL)) && Number(process.env.OLLAMA_NUM_PARALLEL) > 0 ? Number(process.env.OLLAMA_NUM_PARALLEL) : undefined
 });
+// Bots on the web (src/common/bot-relay.ts): with the desktop's IDE provider on this machine (it
+// routes its swarm work through this agent), its bots are published to the owner's portal and the
+// owner's signed commands are handed to it.
+const botRelay: BotRelayAgent | null = LOCAL_FORWARD_PORT > 0
+  ? new BotRelayAgent({
+      agentId: AGENT_ID,
+      mode: botRelayMode(W.AGENT_BOT_RELAY, remoteControlEnabled(W.AGENT_REMOTE_CONTROL)),
+      machineName: hostname().replace(/\.local$/i, ""),
+      provider: httpProviderClient({
+        baseUrl: `http://127.0.0.1:${W.IDE_PROVIDER_PORT ?? 4304}`,
+        token: (() => {
+          let t: string | undefined;
+          return () => (t ??= resolveIdeToken());
+        })(),
+        request
+      }),
+      report: async (body) => {
+        if (!registeredWithUrl) throw new Error("not registered yet");
+        await post(`/agent-control/agents/${encodeURIComponent(AGENT_ID)}/bots/report`, body, { retries: 0, timeoutMs: 10_000, signed: true });
+      },
+      log: (m) => console.log(`[agent:${AGENT_ID}] ${m}`)
+    })
+  : null;
 const MODEL_STATE_REPORT_MS = 10 * 60_000;
 let lastModelStateReportMs = 0;
 /** Sends this machine's model state to the coordinator (the portal's view). */
@@ -1186,6 +1211,12 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
       reconnectDelay = 1000;
       // The portal's view of this machine's models (also refreshed every MODEL_STATE_REPORT_MS).
       void reportModelState();
+      // And of its bots: send them again now, then on change and on the heartbeat.
+      if (botRelay) {
+        botRelay.invalidate();
+        botRelay.start();
+        void botRelay.publish(true);
+      }
     });
 
     ws.on("message", async (data) => {
@@ -1208,6 +1239,18 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
           void modelControl.handleFrame(message, verified).then(() => {
             installedModelsCache = undefined;
           });
+          return;
+        }
+        // Bots on the web: the same checks (pinned coordinator key, target, lifetime, replay), then
+        // the host policy, then the desktop app's own (account, validation, the bot's rules).
+        if (message && typeof message === "object" && message.type === BOT_CONTROL_FRAME_TYPE) {
+          let verified: { peerId: string; publicKeyPem: string } | null = null;
+          try {
+            verified = coordinator.url === coordinatorUrl ? coordinator.requireVerifiedIdentity().identity : null;
+          } catch {
+            verified = null;
+          }
+          if (botRelay) void botRelay.handleFrame(message, verified);
           return;
         }
         const peer = getMeshPeer();

@@ -18,6 +18,7 @@ import { request } from "undici";
 import { z } from "zod";
 import { MODEL_CATALOG } from "../../model/catalog.js";
 import { modelControlRequestSchema, MODEL_CONTROL_ACTIONS } from "../../model/remote-control/protocol.js";
+import { registerBotRoutes } from "./bots.js";
 
 export interface MachineRoutesDeps {
   PORTAL_SERVICE_TOKEN: string;
@@ -40,6 +41,8 @@ interface CoordinatorMachine {
 const MAX_COORDINATORS = 8;
 
 export function registerMachineRoutes(app: FastifyInstance, deps: MachineRoutesDeps): void {
+  // The same machines' bots, shown and driven from the web (Bots in the sidebar), with the same owner checks.
+  registerBotRoutes(app, deps);
   const headers = (): Record<string, string> => ({
     "content-type": "application/json",
     ...(deps.PORTAL_SERVICE_TOKEN ? { "x-portal-service-token": deps.PORTAL_SERVICE_TOKEN } : {})

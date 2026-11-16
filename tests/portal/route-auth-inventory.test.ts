@@ -77,6 +77,7 @@ const PUBLIC: Record<string, string> = {
   "GET /portal/chat": "page shell",
   "GET /portal/dashboard": "page shell",
   "GET /portal/reviews": "page shell",
+  "GET /portal/bots": "page shell (the bots APIs it calls need a session and the machine's verified owner)",
   "GET /portal/settings": "page shell",
   "GET /portal/settings/plan": "page shell",
   "GET /portal/settings/install": "page shell",
