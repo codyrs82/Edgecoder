@@ -116,6 +116,22 @@ interface TaskBilling {
   loadMs?: number;
 }
 export const taskBilling = new Map<string, TaskBilling>();
+/**
+ * Billing entries of tasks that settled, kept a while for the requester's last reads. A model call's
+ * result settles (and drops) its billing entry as soon as it lands; a requester whose next
+ * /inference/stream poll arrived just after that was refused as not_requester although the call had
+ * finished (seen from the terminal agent, 2026-11-15). The owner, cost and token counts stay here
+ * for SETTLED_KEEP_MS so that read still gets the reply's end.
+ */
+export const settledBilling = new Map<string, TaskBilling & { settledAtMs: number }>();
+export const SETTLED_KEEP_MS = 10 * 60_000;
+export function rememberSettled(taskId: string, b: TaskBilling, nowMs = Date.now()): void {
+  for (const [id, e] of settledBilling) {
+    if (nowMs - e.settledAtMs <= SETTLED_KEEP_MS && settledBilling.size < 20_000) break;
+    settledBilling.delete(id);
+  }
+  settledBilling.set(taskId, { ...b, settledAtMs: nowMs });
+}
 /** Usage records being filled in (keyed by task) until the task settles; then saved. */
 export const usagePending = new Map<string, UsageRecord>();
 export const memoryUsage = new MemoryUsageStore();

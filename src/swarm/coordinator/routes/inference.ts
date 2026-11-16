@@ -29,7 +29,7 @@ import { syncReservations } from "../../../economy/reservations.js";
 import { agentHasModel, routableModels } from "../../model-catalog.js";
 import { rawBodyOf } from "../../../security/request-signing.js";
 import { app as coordinatorApp, type CoordinatorApp } from "../app.js";
-import { CC, FALLBACK_BTC_USD, claimedTradePrice, reservations, taskBilling, usagePending, queue, identity, securityLog } from "../context.js";
+import { CC, FALLBACK_BTC_USD, claimedTradePrice, reservations, taskBilling, settledBilling, usagePending, queue, identity, securityLog } from "../context.js";
 import { mutable } from "../mutable-state.js";
 import { agentCapabilities, activeBlacklistRecord, autoBlacklister } from "../agent-state.js";
 import { agentSignatureAtGate, hasPortalServiceToken, resolveSubmitterAccount, verifyAgentRequest } from "../auth.js";
@@ -572,7 +572,8 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
   /** The requester reads the reply as it streams (long poll; signed by the requester's own agent). */
   app.post("/inference/stream", async (req, reply) => {
     const body = z.object({ taskId: z.string().min(1), subtaskId: z.string().min(1), after: z.number().int().min(0).default(0), waitMs: z.number().int().min(0).max(25_000).default(15_000) }).parse(req.body);
-    const billing = taskBilling.get(body.taskId);
+    // A call whose result already settled it is read from the settled entry (its last poll can land just after).
+    const billing = taskBilling.get(body.taskId) ?? settledBilling.get(body.taskId);
     // A call cancelled for lack of capacity was refunded (its billing entry is gone): its owner is kept with the cancellation.
     const owner = billing?.accountId ?? noCapacity.get(body.taskId)?.accountId ?? restrictedCancelled.get(body.taskId)?.accountId;
     const reader = await resolveSubmitterAccount(req as any, owner ?? "", "/inference/stream");
