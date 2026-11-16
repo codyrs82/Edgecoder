@@ -51,6 +51,8 @@ describe("LiveSessionPanel", () => {
 
     const input = screen.getByPlaceholderText(/Message this session/) as HTMLTextAreaElement;
     expect(input.disabled).toBe(false);
+    // The shared slim composer.
+    expect(screen.getByTestId("composer-box").contains(input)).toBe(true);
     await fireEvent.input(input, { target: { value: "add a header too" } });
     await fireEvent.keyDown(input, { key: "Enter" });
     await waitFor(() => expect(api.sessionSend).toHaveBeenCalledWith("s1", "add a header too"));

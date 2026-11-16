@@ -502,14 +502,6 @@
         <NoProjectPrompt compact onPick={(r) => onPickProject?.(r)} onNewProject={() => onNewProject?.()} onOpenFolder={() => onOpenFolder?.()} onClone={() => onClone?.()} />
       {/if}
     {:else}
-      {#if !usePortalChat}
-        <div class="run-on">
-          <label class="auto-apply" title="Apply the agent's file edits without asking. Each reply's changes stay reviewable and undoable; commands still ask.">
-            <input type="checkbox" checked={autoApply} onchange={(e) => { autoApply = (e.target as HTMLInputElement).checked; if (projectRoot) setAutoApplyEdits(projectRoot, autoApply); }} />
-            Auto-apply edits
-          </label>
-        </div>
-      {/if}
       <ChatInput
         onSend={handleSend}
         placeholder="Ask the agent to change {projectName(projectRoot)}… (@ to add a file)"
@@ -517,8 +509,14 @@
         onStop={stop}
         mentions={(q) => mentionSuggestions(q, (x) => fsFind(x, 8))}
       >
-        {#snippet toolbar()}
+        {#snippet controls()}
           <ComputePicker selected={$computeChoice} onSelect={(id) => computeChoice.set(id)} />
+          {#if !usePortalChat}
+            <label class="auto-apply" title="Apply the agent's file edits without asking. Each reply's changes stay reviewable and undoable; commands still ask.">
+              <input type="checkbox" checked={autoApply} onchange={(e) => { autoApply = (e.target as HTMLInputElement).checked; if (projectRoot) setAutoApplyEdits(projectRoot, autoApply); }} />
+              Auto-apply edits
+            </label>
+          {/if}
         {/snippet}
       </ChatInput>
     {/if}
@@ -667,16 +665,7 @@
     --prose-size: var(--fs-base);
   }
 
-  .run-on {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    margin-bottom: 6px;
-    font-size: var(--fs-xs);
-    color: var(--text-secondary);
-  }
   .auto-apply {
-    margin-left: auto;
     display: flex;
     align-items: center;
     gap: 4px;

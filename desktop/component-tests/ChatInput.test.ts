@@ -65,3 +65,93 @@ describe("ChatInput while a reply runs", () => {
     expect(onSend).toHaveBeenCalledWith("hello");
   });
 });
+
+// jsdom does no layout: give textareas a scrollHeight of 22 px a line plus 10 px of padding.
+function fakeLayout() {
+  const proto = HTMLTextAreaElement.prototype;
+  const original = Object.getOwnPropertyDescriptor(proto, "scrollHeight");
+  Object.defineProperty(proto, "scrollHeight", {
+    configurable: true,
+    get(this: HTMLTextAreaElement) {
+      return this.value.split("\n").length * 22 + 10;
+    },
+  });
+  return () => {
+    if (original) Object.defineProperty(proto, "scrollHeight", original);
+    else delete (proto as unknown as Record<string, unknown>).scrollHeight;
+  };
+}
+
+describe("ChatInput: a slim box that grows with the text", () => {
+  let restore: () => void = () => {};
+  afterEach(() => restore());
+
+  const px = (el: HTMLElement) => parseInt(el.style.height, 10);
+  const lines = (n: number) => Array.from({ length: n }, (_, i) => `line ${i + 1}`).join("\n");
+
+  it("starts as one line, grows with each line, and stops at 40% of the window, then scrolls inside", async () => {
+    restore = fakeLayout();
+    render(ChatInput, { onSend: vi.fn() });
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await waitFor(() => expect(px(box)).toBe(32));
+    expect(box.getAttribute("rows")).toBe("1");
+
+    await fireEvent.input(box, { target: { value: lines(3) } });
+    const three = px(box);
+    expect(three).toBe(3 * 22 + 10);
+    expect(box.style.overflowY).toBe("hidden");
+
+    await fireEvent.input(box, { target: { value: lines(5) } });
+    expect(px(box)).toBeGreaterThan(three);
+
+    const cap = Math.floor(window.innerHeight * 0.4);
+    await fireEvent.input(box, { target: { value: lines(60) } });
+    expect(px(box)).toBe(cap);
+    expect(box.style.overflowY).toBe("auto");
+  });
+
+  it("shrinks back to one line after sending, and keeps focus where it was", async () => {
+    restore = fakeLayout();
+    const onSend = vi.fn();
+    render(ChatInput, { onSend });
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    box.focus();
+    await fireEvent.input(box, { target: { value: lines(4) } });
+    expect(px(box)).toBe(4 * 22 + 10);
+    await fireEvent.keyDown(box, { key: "Enter" });
+    expect(onSend).toHaveBeenCalledWith(lines(4));
+    expect(box.value).toBe("");
+    await waitFor(() => expect(px(box)).toBe(32));
+    expect(document.activeElement).toBe(box);
+  });
+
+  it("Enter sends, Shift+Enter does not (it adds a newline), Enter mid-IME-composition does not", async () => {
+    const onSend = vi.fn();
+    render(ChatInput, { onSend });
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: "first line" } });
+    const shift = await fireEvent.keyDown(box, { key: "Enter", shiftKey: true });
+    expect(shift).toBe(true); // not prevented: the browser inserts the newline
+    await fireEvent.keyDown(box, { key: "Enter", isComposing: true });
+    expect(onSend).not.toHaveBeenCalled();
+    await fireEvent.keyDown(box, { key: "Enter" });
+    expect(onSend).toHaveBeenCalledWith("first line");
+  });
+
+  it("has a labelled textarea, named buttons, + only with an attach action, and the controls row under the box", async () => {
+    const { unmount } = render(ChatInput, { onSend: vi.fn(), placeholder: "Message Harry" });
+    expect(screen.getByRole("textbox", { name: "Message Harry" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Add a file or folder" })).toBeNull();
+    expect(screen.queryByTestId("composer-controls")).toBeNull();
+    unmount();
+
+    render(ChatInput, { onSend: vi.fn(), streaming: true, onStop: vi.fn(), mentions: async () => [] });
+    const pill = screen.getByTestId("composer-box");
+    // + on the left, then the text, then Stop and Send on the right.
+    const order = [...pill.children].map((el) => el.getAttribute("aria-label") ?? el.tagName.toLowerCase());
+    expect(order).toEqual(["Add a file or folder", "Message EdgeCoder...", "Stop", "Send message"]);
+    const controls = screen.getByTestId("composer-controls");
+    expect(pill.compareDocumentPosition(controls) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(controls.textContent).toContain("Working");
+  });
+});

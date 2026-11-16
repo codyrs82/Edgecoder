@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, fireEvent, cleanup } from "@testing-library/svelte";
+import { render, screen, fireEvent, cleanup, within } from "@testing-library/svelte";
 
 const api = vi.hoisted(() => ({
   botMessages: vi.fn(),
@@ -91,6 +91,13 @@ describe("BotView header", () => {
     expect(st.getAttribute("role")).toBe("status");
     expect(st.textContent).toBe("Next check in 12 min");
     expect(screen.getByTestId("bot-meta").textContent).toMatch(/Checks in every 30 minutes/);
+  });
+
+  it("messages go through the shared slim composer, with the working placeholder while it runs", () => {
+    setup(harry({ status: "running", lastRun: undefined }));
+    const pill = screen.getByTestId("composer-box");
+    expect(within(pill).getByRole("textbox", { name: "Harry is working; your message goes next…" })).toBeTruthy();
+    expect(within(pill).getByRole("button", { name: "Send message" })).toBeTruthy();
   });
 
   it("shows Working… and Stop while it runs", () => {

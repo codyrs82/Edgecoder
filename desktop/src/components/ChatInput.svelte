@@ -20,10 +20,10 @@
     onUnqueue?: (id: string) => void;
     /** Project path search; when set, typing @ offers files and folders to mention. */
     mentions?: (query: string) => Promise<Array<{ path: string; kind: "file" | "dir" | "codebase" }>>;
-    /** Controls on the bottom-right of the box, before Send (the compute picker). */
-    toolbar?: Snippet;
+    /** The quiet row under the box: the compute picker, Auto-apply edits and the like. */
+    controls?: Snippet;
   }
-  let { onSend, placeholder = "Message EdgeCoder...", disabled = false, streaming = false, onStop, mentions, toolbar, queue, onUnqueue }: Props = $props();
+  let { onSend, placeholder = "Message EdgeCoder...", disabled = false, streaming = false, onStop, mentions, controls, queue, onUnqueue }: Props = $props();
 
   // Messages typed while a reply streams, sent in order when it ends (unless the queue is external).
   let localQueue = $state<Array<{ id: string; text: string }>>([]);
@@ -135,7 +135,8 @@
     if (streaming && !queue) localQueue = [...localQueue, { id: `q${++queueSeq}`, text: trimmed }];
     else onSend(trimmed);
     text = "";
-    if (textareaEl) textareaEl.style.height = "auto";
+    // Back to one line once the box is empty (the value is written on the next tick).
+    void tick().then(resize);
   }
 
   /** The + button: start an @-mention, which offers the project's files and folders. */
@@ -152,15 +153,46 @@
     void updateMention();
   }
 
-  function autoResize(e: Event) {
-    const ta = e.target as HTMLTextAreaElement;
+  /** One line of text plus its padding: the box is then about 44 px tall. */
+  const MIN_HEIGHT = 32;
+  /** The tallest the text grows before it scrolls inside: 40% of the window. */
+  function maxComposerHeight(): number {
+    return Math.max(MIN_HEIGHT, Math.floor(window.innerHeight * 0.4));
+  }
+
+  /**
+   * Fit the textarea to its content: one line when empty, growing with each line up to 40% of the
+   * window, then scrolling inside. Only the height changes: no focus or scroll calls, so typing
+   * never moves the conversation or the caret.
+   */
+  function resize() {
+    const ta = textareaEl;
+    if (!ta) return;
     ta.style.height = "auto";
-    ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
+    const max = maxComposerHeight();
+    const h = Math.min(Math.max(ta.scrollHeight, MIN_HEIGHT), max);
+    ta.style.height = `${h}px`;
+    ta.style.overflowY = ta.scrollHeight > max ? "auto" : "hidden";
+  }
+
+  function onInput() {
+    resize();
     void updateMention();
   }
+
+  // Programmatic changes (an @-mention picked, + pressed) refit too; so does a window resize.
+  $effect(() => {
+    void text;
+    void tick().then(resize);
+  });
+  $effect(() => {
+    const onWin = () => resize();
+    window.addEventListener("resize", onWin);
+    return () => window.removeEventListener("resize", onWin);
+  });
 </script>
 
-<div class="input-bar">
+<div class="composer-root">
   {#if shownQueue.length > 0}
     <ol class="queued" aria-label="Queued messages">
       {#each shownQueue as q, i (q.id)}
@@ -175,53 +207,62 @@
       {/each}
     </ol>
   {/if}
-  {#if mention && matches.length > 0}
-    <div class="mentions" role="listbox" aria-label="Mention a file">
-      {#each matches as m, i (m.path)}
-        <button
-          type="button"
-          role="option"
-          aria-selected={i === picked}
-          class:picked={i === picked}
-          onmousedown={(e) => { e.preventDefault(); void choose(i); }}
-        >
-          {#if m.kind === "codebase"}
-            <span class="kind">⌕</span>
-            <span class="mpath">@codebase</span><span class="hint">search the project by meaning</span>
-          {:else}
-            <span class="kind">{m.kind === "dir" ? "▸" : "·"}</span>
-            <span class="mpath">{m.path}{m.kind === "dir" ? "/" : ""}</span>
-          {/if}
-        </button>
-      {/each}
+  <!-- One slim row: + on the left, the text inline, Stop and Send on the right. It grows with the text. -->
+  <div class="composer-box" data-testid="composer-box">
+    {#if mention && matches.length > 0}
+      <div class="mentions" role="listbox" aria-label="Mention a file">
+        {#each matches as m, i (m.path)}
+          <button
+            type="button"
+            role="option"
+            aria-selected={i === picked}
+            class:picked={i === picked}
+            onmousedown={(e) => { e.preventDefault(); void choose(i); }}
+          >
+            {#if m.kind === "codebase"}
+              <span class="kind">⌕</span>
+              <span class="mpath">@codebase</span><span class="hint">search the project by meaning</span>
+            {:else}
+              <span class="kind">{m.kind === "dir" ? "▸" : "·"}</span>
+              <span class="mpath">{m.path}{m.kind === "dir" ? "/" : ""}</span>
+            {/if}
+          </button>
+        {/each}
+      </div>
+    {/if}
+    {#if mentions}
+      <button type="button" class="round-btn add" title="Add a file or folder (@)" aria-label="Add a file or folder" onclick={() => void addContext()}>
+        <Plus size={16} />
+      </button>
+    {/if}
+    <textarea
+      bind:this={textareaEl}
+      bind:value={text}
+      {placeholder}
+      aria-label={placeholder || "Message"}
+      {disabled}
+      rows="1"
+      onkeydown={handleKeydown}
+      oninput={onInput}
+    ></textarea>
+    {#if streaming && onStop}
+      <button type="button" class="round-btn send-btn stop" aria-label="Stop" onclick={onStop} title="Stop the reply (Esc)">
+        <Square size={12} fill="currentColor" />
+      </button>
+    {/if}
+    <button type="button" class="round-btn send-btn" aria-label="Send message" onclick={send} disabled={!text.trim() || disabled} title={streaming ? "Queue: sent when the reply ends (Enter)" : "Send (Enter)"}>
+      <ArrowUp size={16} strokeWidth={2.25} />
+    </button>
+  </div>
+  {#if controls || streaming}
+    <div class="controls" data-testid="composer-controls">
+      {@render controls?.()}
+      {#if streaming}
+        <!-- A glanceable cue only: the reply itself carries the announced progress. -->
+        <span class="working" data-testid="composer-working"><span class="ring" aria-hidden="true"></span>Working</span>
+      {/if}
     </div>
   {/if}
-  <textarea
-    bind:this={textareaEl}
-    bind:value={text}
-    {placeholder}
-    aria-label={placeholder || "Message"}
-    {disabled}
-    rows="1"
-    onkeydown={handleKeydown}
-    oninput={autoResize}
-  ></textarea>
-  <div class="bottom-row">
-  {#if mentions}
-    <button type="button" class="icon-btn" title="Add a file or folder (@)" aria-label="Add a file or folder" onclick={() => void addContext()}>
-      <Plus size={16} />
-    </button>
-  {/if}
-  <div class="toolbar">{@render toolbar?.()}</div>
-  {#if streaming && onStop}
-    <button type="button" class="send-btn stop" aria-label="Stop" onclick={onStop} title="Stop the reply (Esc)">
-      <Square size={12} fill="currentColor" />
-    </button>
-  {/if}
-  <button type="button" class="send-btn" aria-label="Send message" onclick={send} disabled={!text.trim() || disabled} title={streaming ? "Queue: sent when the reply ends (Enter)" : "Send (Enter)"}>
-    <ArrowUp size={16} strokeWidth={2.25} />
-  </button>
-  </div>
 </div>
 
 <style>
@@ -270,67 +311,78 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  /* Claude-style composer: a roomy box, + on the left, the model chip and Send on the right. */
-  .input-bar {
+  /* A slim pill: one ~44 px row that grows with the text (see resize()), up to 40% of the window. */
+  .composer-root {
     position: relative;
     display: flex;
     flex-direction: column;
+    flex: 1;
+    min-width: 0;
+  }
+  .composer-box {
+    position: relative;
+    display: flex;
+    align-items: flex-end;
     gap: 4px;
+    min-height: 44px;
+    box-sizing: border-box;
+    padding: 5px 6px;
     background: var(--bg-surface);
     border: 0.5px solid var(--border-control);
-    border-radius: 18px;
-    padding: 12px 8px 8px;
-    flex: 1;
+    border-radius: 22px;
     box-shadow: var(--shadow-sm);
     transition: border-color 0.15s;
   }
-  .input-bar:focus-within {
-    border-color: var(--text-muted);
-  }
-  .bottom-row {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    min-height: var(--control-md);
-  }
-  .toolbar {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 4px;
+  /* The textarea draws no outline of its own; the whole pill carries the focus ring. */
+  .composer-box:has(textarea:focus-visible) {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 1px;
   }
   textarea {
     flex: 1;
-    min-height: 44px;
-    padding: 0 8px;
+    min-width: 0;
+    box-sizing: border-box;
+    height: 32px;
+    min-height: 32px;
+    max-height: 40vh;
+    padding: 5px 6px;
+    margin: 0;
     border: none;
     background: none;
     color: var(--text-primary);
     font-family: inherit;
     font-size: var(--prose-size, var(--fs-md));
-    line-height: 1.5;
+    line-height: 22px;
     resize: none;
     outline: none;
-    max-height: 200px;
+    overflow-y: hidden;
   }
   textarea::placeholder {
     color: var(--text-muted);
   }
-  .send-btn {
-    width: var(--control-md);
-    height: var(--control-md);
+  .round-btn {
+    width: 32px;
+    height: 32px;
     border-radius: 50%;
     border: none;
-    background: var(--accent);
-    color: var(--on-accent);
-    cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    cursor: pointer;
     transition: background 0.15s, color 0.15s;
+  }
+  .add {
+    background: none;
+    color: var(--text-secondary);
+  }
+  .add:hover {
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+  }
+  .send-btn {
+    background: var(--accent);
+    color: var(--on-accent);
   }
   .send-btn:hover:not(:disabled) {
     background: var(--accent-hover);
@@ -344,6 +396,42 @@
   .send-btn.stop {
     background: var(--text-primary);
     color: var(--bg-surface);
+  }
+  /* The quiet row under the box: small, muted controls. */
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 8px;
+    min-height: var(--control-sm);
+    padding: 4px 8px 0;
+    font-size: var(--fs-xs);
+    color: var(--text-secondary);
+  }
+  .working {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+    color: var(--text-secondary);
+  }
+  .ring {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    border: 1.5px solid var(--border-control);
+    border-top-color: var(--accent);
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ring {
+      animation: none;
+    }
   }
   .queued {
     list-style: none;
