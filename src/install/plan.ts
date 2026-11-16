@@ -12,6 +12,7 @@ import { parallelInferenceFor } from "../swarm/parallelism.js";
 import { paramsB } from "../inference-api/auto-route.js";
 import type { GpuInfo, HostHardware } from "./hardware.js";
 import { renderTuning, TUNING_ENV_KEY, type InstallOptions } from "./options.js";
+import { engineEnvLines, resolveInstanceEngine, type InstanceEngine } from "./engine.js";
 
 export const OLLAMA_BASE_PORT = 11434;
 
@@ -27,6 +28,8 @@ export interface AgentInstance {
   /** Memory the model choice was based on (GPU VRAM, or RAM / unified memory). */
   memoryGb: number;
   env: Record<string, string>;
+  /** The engine serving the model (engine.ts); Ollama when unset. */
+  engine?: InstanceEngine;
 }
 
 export interface InstallPlan {
@@ -103,6 +106,9 @@ export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvaila
     if (opts.keepAlive !== undefined) env.AGENT_MODEL_KEEP_ALIVE = opts.keepAlive;
     const tuning = renderTuning(opts);
     if (tuning) env[TUNING_ENV_KEY] = tuning;
+    // vLLM / MLX (engine.ts): EDGECODER_ENGINE and its VLLM_* / MLX_* lines; none for Ollama.
+    const engine = opts.instanceEngines?.[index] ?? resolveInstanceEngine(index, opts);
+    Object.assign(env, engineEnvLines(engine));
     // On the edgecoder.io network the agent trusts only the seeds' published keys, as the desktop app does.
     if (isEdgecoderNetworkUrl(opts.coordinatorUrl)) {
       env.EDGECODER_TRUST_MODE = "strict";
@@ -118,7 +124,7 @@ export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvaila
       env.EDGECODER_GPU_INDEX = String(gpu.index);
     }
     if (!env.AGENT_REGISTRATION_TOKEN) warnings.push(`${agentId}: no registration token; enrol this node id in the portal and re-run with --token ${agentId}=<token>`);
-    return { index, agentId, gpu, gpus: group, ollamaPort, model, memoryGb, env };
+    return { index, agentId, gpu, gpus: group, ollamaPort, model, memoryGb, env, engine };
   });
   return { hostname: hw.hostname, platform: hw.platform, sandboxMode, instances, warnings };
 }

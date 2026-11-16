@@ -11,8 +11,9 @@ Description=EdgeCoder vLLM server %i
 After=network-online.target
 Wants=network-online.target
 # Never run next to the same instance's Ollama with a model loaded: both want the GPUs' memory.
-# install-vllm.sh --start stops and masks edgecoder-ollama-%i (no Conflicts= here: the agent unit
-# Wants= its Ollama, and restarting the agent would then stop vLLM).
+# edgecoder-install --engine vllm (and install-vllm.sh --start) hold edgecoder-ollama-%i off with
+# /etc/edgecoder/vllm-%i.active and a ConditionPathExists=! drop-in (no Conflicts= here: the agent
+# unit Wants= its Ollama, and restarting the agent would then stop vLLM).
 
 [Service]
 Type=simple

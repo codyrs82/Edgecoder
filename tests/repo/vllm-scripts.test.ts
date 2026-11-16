@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { VLLM_PROFILES, vllmDropInPath, vllmMarkerPath } from "../../src/install/engine.js";
 
 // scripts/linux/vllm: the vLLM installer and its systemd unit (docs/inference-engines.md).
 const root = resolve(__dirname, "../..");
@@ -47,13 +48,29 @@ describe("edgecoder-vllm@.service", () => {
     expect(unit).toMatch(/^EnvironmentFile=\/etc\/edgecoder\/vllm-%i\.env$/m);
     expect(unit).toMatch(/^ExecStart=\/opt\/edgecoder\/vllm\/venv\/bin\/vllm serve \$\{VLLM_MODEL_ID\} --host 127\.0\.0\.1 --port \$\{VLLM_PORT\} \$VLLM_ARGS$/m);
   });
-  it("is sandboxed like the Ollama unit; --start stops and masks that instance's Ollama first (no Conflicts=: the agent unit Wants= it)", () => {
+  it("is sandboxed like the Ollama unit; --start holds that instance's Ollama off first, with edgecoder-install's marker and drop-in, never a mask (no Conflicts=: the agent unit Wants= it)", () => {
     expect(unit).not.toMatch(/^Conflicts=/m);
     const src = code(INSTALL);
-    expect(src.indexOf('systemctl mask "edgecoder-ollama-$instance.service"')).toBeGreaterThan(0);
-    expect(src.indexOf('systemctl mask "edgecoder-ollama-$instance.service"')).toBeLessThan(src.indexOf('systemctl restart "edgecoder-vllm@$instance.service"'));
+    // A mask is lifted by the next edgecoder-install run (it rewrites the unit file): marker + ConditionPathExists instead.
+    expect(src).not.toMatch(/systemctl mask/);
+    expect(src).toContain('marker="$ETC/vllm-$instance.active"');
+    expect(src).toContain('dropin="/etc/systemd/system/edgecoder-ollama-$instance.service.d/vllm-switch.conf"');
+    expect(src).toContain("ConditionPathExists=!%s");
+    const off = src.indexOf('systemctl disable --now "edgecoder-ollama-$instance.service"');
+    expect(off).toBeGreaterThan(0);
+    expect(off).toBeLessThan(src.indexOf('systemctl restart "edgecoder-vllm@$instance.service"'));
     for (const k of ["NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=yes", "PrivateTmp=yes"]) expect(unit).toContain(k);
     expect(unit).toMatch(/^ReadWritePaths=\/var\/lib\/edgecoder\/vllm \/var\/lib\/edgecoder\/hf$/m);
+  });
+  it("edgecoder-install's vLLM profiles and switch files match the script's", () => {
+    const src = read(INSTALL);
+    for (const [name, p] of Object.entries(VLLM_PROFILES)) {
+      const block = new RegExp(`\\n  ${name.replace("-", "\\-")}\\)\\n([\\s\\S]*?);;`).exec(src)?.[1] ?? "";
+      expect(block, name).toContain(`model="\${model:-${p.model}}"`);
+      expect(block, name).toMatch(new RegExp(`^\\s*slots=${p.slots}$`, "m"));
+    }
+    expect(vllmMarkerPath("/etc/edgecoder", 0)).toBe("/etc/edgecoder/vllm-0.active");
+    expect(vllmDropInPath(0)).toBe("/etc/systemd/system/edgecoder-ollama-0.service.d/vllm-switch.conf");
   });
   it("the env example matches the installer's a16x2 profile", () => {
     const env = read(ENV);

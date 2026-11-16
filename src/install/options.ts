@@ -8,6 +8,8 @@
  * that the platform entry points and docs/install.md stay in step).
  */
 
+import { checkEngine, checkVllmModel, checkVllmProfile, checkVllmSlots, checkVllmUrl, VLLM_PROFILES, type EngineKind, type InstanceEngine } from "./engine.js";
+
 export interface InstallOptions {
   command: "detect" | "plan" | "apply" | "status" | "remove" | "help";
   coordinatorUrl: string;
@@ -25,6 +27,16 @@ export interface InstallOptions {
   parallel?: number;
   /** Tuning: how long Ollama keeps the model loaded (AGENT_MODEL_KEEP_ALIVE and OLLAMA_KEEP_ALIVE). */
   keepAlive?: string;
+  /** Engine for every instance (engine.ts). Unset: each instance keeps the engine it runs now (Ollama on a first install). */
+  engine?: EngineKind;
+  /** vLLM: the served Hugging Face id (VLLM_MODEL), model calls at once (VLLM_MAX_SLOTS), the server URL (VLLM_URL). */
+  vllmModel?: string;
+  vllmSlots?: number;
+  vllmUrl?: string;
+  /** vLLM: install-vllm.sh profile used when vLLM is not installed for an instance yet. */
+  vllmProfile?: string;
+  /** Resolved per instance index by the CLI (flags, then what each instance runs now); planInstall reads it. */
+  instanceEngines?: Record<number, InstanceEngine>;
   perGpu: boolean;
   /** GPU layout: per-gpu (one model per card), mixed (half per card, half in pairs), single (all cards pooled). Default: mixed on 4+ cards of 40 GB+, else per-gpu. */
   layout?: "per-gpu" | "mixed" | "single";
@@ -72,6 +84,11 @@ export const INSTALL_OPTIONS: OptionSpec[] = [
   { flag: "--context-window", arg: "N", description: "Context window (tokens, 2048-131072) every network call is served with (AGENT_CONTEXT_WINDOW). Default: sized by memory and model." },
   { flag: "--parallel", arg: "N", description: "Parallel model calls per instance, 1-16 (AGENT_PARALLEL_INFERENCE and the instance's OLLAMA_NUM_PARALLEL). Default: sized by VRAM and model." },
   { flag: "--keep-alive", arg: "DUR", description: "How long Ollama keeps the model loaded after a call: a duration (30m, 1h30m), seconds, or -1 for always (AGENT_MODEL_KEEP_ALIVE and OLLAMA_KEEP_ALIVE). Default 30m." },
+  { flag: "--engine", arg: "ollama|vllm|mlx", description: "Engine that serves each instance's model (docs/inference-engines.md). vllm: Linux NVIDIA hosts, edgecoder-vllm@<n> serves the model and the instance's Ollama stays off. mlx: Apple silicon, you run mlx_lm.server. Default: each instance keeps the engine it runs now (Ollama on a first install), so re-runs and upgrades never switch engines." },
+  { flag: "--vllm-model", arg: "ORG/REPO", description: "vLLM: the Hugging Face model id vLLM serves (VLLM_MODEL). Implies --engine vllm. Default: the one already set, else vllm-<n>.env's VLLM_MODEL_ID." },
+  { flag: "--vllm-slots", arg: "N", description: "vLLM: model calls at once, 1-16 (VLLM_MAX_SLOTS). Implies --engine vllm. Default: the one already set, else derived from vLLM's KV cache." },
+  { flag: "--vllm-url", arg: "URL", description: "vLLM: the server URL (VLLM_URL). Implies --engine vllm. Default http://127.0.0.1:<8000+n>." },
+  { flag: "--vllm-profile", arg: `${Object.keys(VLLM_PROFILES).join("|")}`, description: "vLLM: when vLLM is not installed for an instance yet, run scripts/linux/vllm/install-vllm.sh with this profile (model, serve flags, slots) and download the weights. Implies --engine vllm." },
   { flag: "--layout", arg: "per-gpu|mixed|single", description: "How GPUs are used. per-gpu: one model per card (most parallel work). mixed: half the cards one per card, the rest in pairs for a bigger model (default on 4+ cards of 40 GB+). single: every card pooled for the biggest model." },
   { flag: "--gpus-per-instance", arg: "N", description: "Pool N GPUs per instance (overrides --layout), e.g. 2 for qwen3-coder-next on 48 GB cards, 8 for qwen3-coder:480b." },
   { flag: "--per-gpu", description: "Same as --layout per-gpu." },
@@ -145,6 +162,11 @@ export function parseInstallArgs(argv: string[], env: NodeJS.ProcessEnv = {}): I
       case "--context-window": o.contextWindow = checkContextWindow(val()); break;
       case "--parallel": o.parallel = checkParallel(val()); break;
       case "--keep-alive": o.keepAlive = checkKeepAlive(val()); break;
+      case "--engine": o.engine = checkEngine(val()); break;
+      case "--vllm-model": o.vllmModel = checkVllmModel(val()); break;
+      case "--vllm-slots": o.vllmSlots = checkVllmSlots(val()); break;
+      case "--vllm-url": o.vllmUrl = checkVllmUrl(val()); break;
+      case "--vllm-profile": o.vllmProfile = checkVllmProfile(val()); break;
       case "--per-gpu": o.perGpu = true; o.layout = "per-gpu"; break;
       case "--single": o.perGpu = false; o.layout = "single"; break;
       case "--layout": {
@@ -169,6 +191,11 @@ export function parseInstallArgs(argv: string[], env: NodeJS.ProcessEnv = {}): I
       case "--help": case "-h": o.command = "help"; break;
       default: throw new Error(`unknown option: ${flag}`);
     }
+  }
+  const vllmFlags = o.vllmModel !== undefined || o.vllmSlots !== undefined || o.vllmUrl !== undefined || o.vllmProfile !== undefined;
+  if (vllmFlags) {
+    if (o.engine && o.engine !== "vllm") throw new Error(`--vllm-model, --vllm-slots, --vllm-url and --vllm-profile go with --engine vllm, not --engine ${o.engine}`);
+    o.engine = "vllm";
   }
   return o;
 }

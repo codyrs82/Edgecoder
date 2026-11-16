@@ -142,9 +142,24 @@ tier every session.
 
 The installer sets every instance up with Ollama. On a datacenter GPU host whose model slots are
 the bottleneck, an instance can run its model on **vLLM** instead (continuous batching: several
-calls at once on the same cards): `scripts/linux/vllm/install-vllm.sh` installs vLLM and an
-`edgecoder-vllm@<n>` unit next to the instance, and `EDGECODER_ENGINE=vllm` in `agent-<n>.env`
-points the agent at it. Sizing for 2× A16 and A100 80 GB, the variables, and the way back to
+calls at once on the same cards):
+
+```bash
+sudo edgecoder-install apply --engine vllm --vllm-profile a16x2     # installs vLLM if needed
+sudo edgecoder-install apply --engine vllm --vllm-model QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ --vllm-slots 2
+sudo edgecoder-install apply --engine ollama                        # back to Ollama
+```
+
+`--engine vllm` writes `EDGECODER_ENGINE=vllm`, `VLLM_URL`, `VLLM_MODEL` and `VLLM_MAX_SLOTS` into
+`agent-<n>.env`, creates `/etc/edgecoder/vllm-<n>.active` and the drop-in
+`edgecoder-ollama-<n>.service.d/vllm-switch.conf` (`ConditionPathExists=!` that marker, so the
+instance's Ollama cannot start, not even through the agent unit's `Wants=`), enables and starts
+`edgecoder-vllm@<n>` (installing it with `scripts/linux/vllm/install-vllm.sh` when
+`--vllm-profile` is given and it is missing), stops Ollama and restarts the agent. A running vLLM is
+never restarted by a re-run. **Every later run without `--engine`** (a package upgrade, a re-run
+with new tokens) reads the engine back from `agent-<n>.env` and the marker and keeps it, settings
+included. `--engine ollama` stops vLLM, removes the marker, the drop-in and the engine lines, and
+starts Ollama again; `vllm-<n>.env`, the venv and the weights stay for the next switch. Sizing for 2× A16 and A100 80 GB, the variables, and the way back to
 Ollama: [docs/inference-engines.md](inference-engines.md). Apple silicon's equivalent is MLX
 (`EDGECODER_ENGINE=mlx`), described there too.
 
@@ -313,6 +328,11 @@ sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" bash install.sh --mesh-token "$MESH"
 | `--context-window N` | Context window (tokens, 2048 to 131072) every network call is served with: `AGENT_CONTEXT_WINDOW`. Default: sized by memory and model. |
 | `--parallel N` | Parallel model calls per instance, 1 to 16: the agent's `AGENT_PARALLEL_INFERENCE` and the instance's Ollama `OLLAMA_NUM_PARALLEL`. Default: sized by VRAM and model. |
 | `--keep-alive DUR` | How long Ollama keeps the model loaded after a call: a duration (`30m`, `1h30m`), seconds, or `-1` to never unload. Written as the agent's `AGENT_MODEL_KEEP_ALIVE` and the instance's Ollama `OLLAMA_KEEP_ALIVE`. Default `30m`. |
+| `--engine ollama\|vllm\|mlx` | Engine that serves each instance's model ([inference engines](inference-engines.md)). `vllm` (Linux, NVIDIA): `edgecoder-vllm@<n>` serves it and the instance's Ollama stays off. `mlx` (Apple silicon): you run `mlx_lm.server`. Default: every instance keeps the engine it runs now (Ollama on a first install), so re-runs and upgrades never switch engines. |
+| `--vllm-model ORG/REPO` | vLLM: the Hugging Face id it serves (`VLLM_MODEL`). Implies `--engine vllm`. Default: the value already set, else `VLLM_MODEL_ID` from `vllm-<n>.env`. |
+| `--vllm-slots N` | vLLM: model calls at once, 1 to 16 (`VLLM_MAX_SLOTS`). Implies `--engine vllm`. Default: the value already set, else derived from vLLM's KV cache. |
+| `--vllm-url URL` | vLLM: the server (`VLLM_URL`). Implies `--engine vllm`. Default `http://127.0.0.1:<8000+n>`. |
+| `--vllm-profile a16x2\|a100-80` | vLLM: when it is not installed for an instance yet, run `scripts/linux/vllm/install-vllm.sh` with this profile (serve flags, model, slots) and download the weights. Implies `--engine vllm`. |
 | `--layout per-gpu\|mixed\|single` | How GPUs become instances. `per-gpu`: one model per card (the most parallel work). `mixed`: half the cards one per card, the rest in pairs for a bigger model (default on 4+ cards of 40 GB or more). `single`: every card pooled for the biggest model. |
 | `--gpus-per-instance N` | Pool N GPUs per instance (overrides `--layout`): e.g. 2 for `qwen3-coder-next` on 48 GB cards, 4 for `qwen3:235b`, 8 for `qwen3-coder:480b`. |
 | `--per-gpu` | Same as `--layout per-gpu`. |

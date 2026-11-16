@@ -17,6 +17,7 @@
 import { ollamaMemorySafetyEnv } from "../swarm/memory-budget.js";
 import type { AgentInstance, InstallPlan } from "./plan.js";
 import { renderEnvFile } from "./plan.js";
+import { legacyVllmMarkerPath, vllmDropIn, vllmDropInPath, vllmMarker, vllmMarkerPath } from "./engine.js";
 
 export interface Host {
   platform: NodeJS.Platform;
@@ -158,10 +159,13 @@ WantedBy=multi-user.target
 }
 
 export function systemdAgentUnit(p: ServicePaths, inst: AgentInstance): string {
+  // On vLLM the agent also orders after its vLLM unit. Its Ollama stays in Wants=: the switch
+  // drop-in's ConditionPathExists keeps it from starting, and --engine ollama needs nothing here.
+  const vllm = inst.engine?.kind === "vllm" ? ` edgecoder-vllm@${inst.index}.service` : "";
   return `[Unit]
 Description=EdgeCoder agent ${inst.agentId}
-After=network-online.target edgecoder-ollama-${inst.index}.service docker.service
-Wants=network-online.target edgecoder-ollama-${inst.index}.service
+After=network-online.target edgecoder-ollama-${inst.index}.service${vllm} docker.service
+Wants=network-online.target edgecoder-ollama-${inst.index}.service${vllm}
 
 [Service]
 Type=simple
@@ -409,16 +413,58 @@ export function applyPlan(plan: InstallPlan, host: Host, p: ServicePaths, dryRun
   for (const inst of plan.instances) write(envFilePath(p, inst), renderEnvFile(inst.env), 0o600);
 
   if (host.platform === "linux") {
+    const remove = (path: string) => {
+      result.commands.push(`rm -f ${path}`);
+      if (!dryRun) host.removeFile(path);
+    };
+    // Engine per instance (engine.ts): vLLM instances keep their Ollama off with the switch
+    // drop-in and marker; an instance going back to Ollama loses both.
+    const vllm = plan.instances.filter((i) => i.engine?.kind === "vllm");
+    const leaving = plan.instances.filter((i) => i.engine?.kind !== "vllm" && i.engine?.previous === "vllm");
+    const restart: string[] = [];
     for (const inst of plan.instances) {
-      write(`/etc/systemd/system/edgecoder-ollama-${inst.index}.service`, systemdOllamaUnit(p, inst), 0o644);
-      write(`/etc/systemd/system/edgecoder-agent-${inst.index}.service`, systemdAgentUnit(p, inst), 0o644);
-      result.services.push(`edgecoder-ollama-${inst.index}.service`, `edgecoder-agent-${inst.index}.service`);
+      const ollama = `edgecoder-ollama-${inst.index}.service`;
+      const agent = `edgecoder-agent-${inst.index}.service`;
+      write(`/etc/systemd/system/${ollama}`, systemdOllamaUnit(p, inst), 0o644);
+      write(`/etc/systemd/system/${agent}`, systemdAgentUnit(p, inst), 0o644);
+      if (inst.engine?.kind === "vllm") {
+        // The marker first, then the drop-in that reads it: Ollama is never startable in between.
+        const marker = vllmMarkerPath(p.configDir, inst.index);
+        write(marker, vllmMarker(inst.index), 0o644);
+        write(vllmDropInPath(inst.index), vllmDropIn(marker), 0o644);
+        result.services.push(agent, `edgecoder-vllm@${inst.index}.service`);
+        restart.push(agent);
+      } else {
+        if (inst.engine?.previous === "vllm") {
+          remove(vllmDropInPath(inst.index));
+          remove(vllmMarkerPath(p.configDir, inst.index));
+          if (inst.index === 0) remove(legacyVllmMarkerPath(p.configDir));
+        }
+        result.services.push(ollama, agent);
+        restart.push(ollama, agent);
+      }
     }
+    // vLLM not installed for an instance yet: install-vllm.sh (venv, vllm-<n>.env, unit, weights).
+    for (const inst of vllm) if (inst.engine?.installArgs) run("bash", inst.engine.installArgs);
     run("systemctl", ["daemon-reload"]);
+    // The hand-made switch's marker, once systemd reads the drop-in that names the new one.
+    if (vllm.some((i) => i.index === 0) && host.exists(legacyVllmMarkerPath(p.configDir))) remove(legacyVllmMarkerPath(p.configDir));
+    // Back to Ollama: vLLM lets go of the GPUs before Ollama starts; a mask from an older
+    // install-vllm.sh --start is lifted.
+    for (const inst of leaving) {
+      run("systemctl", ["disable", "--now", `edgecoder-vllm@${inst.index}.service`]);
+      run("systemctl", ["unmask", `edgecoder-ollama-${inst.index}.service`]);
+    }
     // enable --now does not restart a running unit, so a re-run with tokens would not take
     // effect; restart (which also starts) picks up the rewritten env files and units.
     run("systemctl", ["enable", ...result.services]);
-    run("systemctl", ["restart", ...result.services]);
+    // On vLLM: Ollama off (it would hold the GPUs' memory), vLLM started but never restarted
+    // here (a running server keeps serving through a re-run; its first start takes minutes).
+    for (const inst of vllm) {
+      run("systemctl", ["disable", "--now", `edgecoder-ollama-${inst.index}.service`]);
+      run("systemctl", ["start", `edgecoder-vllm@${inst.index}.service`]);
+    }
+    run("systemctl", ["restart", ...restart]);
   } else if (host.platform === "darwin") {
     for (const inst of plan.instances) {
       // The agent plist carries MESH_AUTH_TOKEN and AGENT_REGISTRATION_TOKEN: root-only (launchd reads it as root).
@@ -464,6 +510,14 @@ export function removeServices(host: Host, p: ServicePaths, maxInstances = 32): 
         host.removeFile(`/etc/systemd/system/${svc}`);
         removed.push(svc);
       }
+      // vLLM (engine.ts): its unit stops; the venv, weights and vllm-<n>.env stay, like the models.
+      const markers = [vllmMarkerPath(p.configDir, i), ...(i === 0 ? [legacyVllmMarkerPath(p.configDir)] : [])];
+      if (markers.some((m) => host.exists(m))) {
+        host.run("systemctl", ["disable", "--now", `edgecoder-vllm@${i}.service`]);
+        removed.push(`edgecoder-vllm@${i}.service`);
+      }
+      for (const m of markers) host.removeFile(m);
+      host.removeFile(vllmDropInPath(i));
     } else if (host.platform === "darwin") {
       for (const label of [`io.edgecoder.agent.${i}`, `io.edgecoder.ollama.${i}`]) {
         const path = `/Library/LaunchDaemons/${label}.plist`;
@@ -490,7 +544,8 @@ export function serviceStatus(host: Host, p: ServicePaths, maxInstances = 32): A
   for (let i = 0; i < maxInstances; i++) {
     if (!host.exists(envFilePath(p, { index: i } as AgentInstance))) continue;
     if (host.platform === "linux") {
-      for (const svc of [`edgecoder-ollama-${i}.service`, `edgecoder-agent-${i}.service`]) out.push({ name: svc, state: host.run("systemctl", ["is-active", svc]).stdout.trim() || "unknown" });
+      const vllm = host.exists(vllmMarkerPath(p.configDir, i)) || (i === 0 && host.exists(legacyVllmMarkerPath(p.configDir)));
+      for (const svc of [vllm ? `edgecoder-vllm@${i}.service` : `edgecoder-ollama-${i}.service`, `edgecoder-agent-${i}.service`]) out.push({ name: svc, state: host.run("systemctl", ["is-active", svc]).stdout.trim() || "unknown" });
     } else if (host.platform === "darwin") {
       for (const label of [`io.edgecoder.ollama.${i}`, `io.edgecoder.agent.${i}`]) out.push({ name: label, state: host.run("launchctl", ["print", `system/${label}`]).code === 0 ? "running" : "stopped" });
     } else if (host.platform === "win32") {

@@ -15,6 +15,7 @@ import { helpText, inheritTuning, parseInstallArgs, parseTokensFile, TOKEN_PATTE
 import { planInstall, type AgentInstance, type InstallPlan } from "./plan.js";
 import { HOST_AGREEMENT_VERSION } from "../common/legal-notices.js";
 import { appDirProblems, planBinary, stageBinary, type BinFs, type StagePlan } from "./binaries.js";
+import { engineProblems, legacyVllmMarkerPath, resolveInstanceEngine, VLLM_PROFILES, vllmEnvPath, vllmInstalledPaths, vllmMarkerPath, type InstanceEngine } from "./engine.js";
 import { applyPlan, defaultPaths, envFilePath, lockConfigDir, removeServices, serviceStatus, windowsDirOwnerProblems, type Host, type ServicePaths } from "./services.js";
 
 export const probe: Probe = (cmd, args) => {
@@ -201,7 +202,9 @@ export function pullModels(host: Host, ollamaBin: string, instances: AgentInstan
   return failed;
 }
 
-const SECRET_ENV = ["AGENT_REGISTRATION_TOKEN", "MESH_AUTH_TOKEN"];
+const SECRET_ENV = ["AGENT_REGISTRATION_TOKEN", "MESH_AUTH_TOKEN", "VLLM_API_KEY"];
+
+const redactEnv = (env: Record<string, string>) => Object.fromEntries(Object.entries(env).map(([k, v]) => [k, SECRET_ENV.includes(k) && v ? "<redacted>" : v]));
 
 /** The plan for --json output, token values replaced so logs and CI captures do not keep them. */
 export function redactPlan(plan: InstallPlan): InstallPlan {
@@ -209,7 +212,8 @@ export function redactPlan(plan: InstallPlan): InstallPlan {
     ...plan,
     instances: plan.instances.map((i) => ({
       ...i,
-      env: Object.fromEntries(Object.entries(i.env).map(([k, v]) => [k, SECRET_ENV.includes(k) && v ? "<redacted>" : v]))
+      env: redactEnv(i.env),
+      ...(i.engine ? { engine: { ...i.engine, env: redactEnv(i.engine.env) } } : {})
     }))
   };
 }
@@ -224,7 +228,10 @@ function describeHardware(hw: HostHardware): string {
 function describePlan(plan: InstallPlan, p: ServicePaths): string {
   const lines = [`Sandbox: ${plan.sandboxMode}`, `Instances (${plan.instances.length}):`];
   for (const i of plan.instances) {
-    lines.push(`  ${i.agentId}: ${i.gpu ? `${i.gpu.model} (${i.gpu.vramGb} GB)` : "CPU"} -> ollama :${i.ollamaPort} model ${i.model}${i.env.AGENT_REGISTRATION_TOKEN ? "" : "  [no registration token]"}`);
+    const serves = i.engine?.kind === "vllm" ? `vllm ${i.env.VLLM_URL} model ${i.env.VLLM_MODEL ?? "(whatever it serves)"}${i.env.VLLM_MAX_SLOTS ? `, ${i.env.VLLM_MAX_SLOTS} slots` : ""}`
+      : i.engine?.kind === "mlx" ? `mlx ${i.env.MLX_URL ?? "http://127.0.0.1:8080"}` : `ollama :${i.ollamaPort} model ${i.model}`;
+    const switched = i.engine?.previous && i.engine.previous !== i.engine.kind ? `  [switching from ${i.engine.previous}]` : "";
+    lines.push(`  ${i.agentId}: ${i.gpu ? `${i.gpu.model} (${i.gpu.vramGb} GB)` : "CPU"} -> ${serves}${switched}${i.engine?.installArgs ? "  [installs vLLM]" : ""}${i.env.AGENT_REGISTRATION_TOKEN ? "" : "  [no registration token]"}`);
   }
   lines.push(`Config dir: ${p.configDir}   App dir: ${p.appDir}   Node: ${p.nodeBin}   Ollama: ${p.ollamaBin}`);
   for (const w of plan.warnings) lines.push(`warning: ${w}`);
@@ -237,6 +244,46 @@ function readIfPresent(path: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Each instance's engine for this run (engine.ts): --engine and the --vllm-* flags, else what the
+ * instance runs now (its env file, its vLLM marker), so a re-run or upgrade never switches engines.
+ */
+export function resolveEngines(opts: InstallOptions, plan: InstallPlan, p: ServicePaths, read: (path: string) => string | undefined = readIfPresent, exists: (path: string) => boolean = existsSync): Record<number, InstanceEngine> {
+  const out: Record<number, InstanceEngine> = {};
+  for (const inst of plan.instances) {
+    const n = inst.index;
+    const markerExists = exists(vllmMarkerPath(p.configDir, n)) || (n === 0 && exists(legacyVllmMarkerPath(p.configDir)));
+    out[n] = resolveInstanceEngine(n, opts, { agentEnv: read(envFilePath(p, inst)), vllmEnv: read(vllmEnvPath(p.configDir, n)), markerExists });
+  }
+  return out;
+}
+
+/**
+ * Linux vLLM instances whose vLLM is not installed yet get install-vllm.sh arguments (with
+ * --vllm-profile); without a profile that is an error, returned before anything is written.
+ */
+export function planVllmInstalls(opts: InstallOptions, plan: InstallPlan, p: ServicePaths, exists: (path: string) => boolean): string[] {
+  const problems: string[] = [];
+  for (const inst of plan.instances) {
+    if (inst.engine?.kind !== "vllm") continue;
+    if (vllmInstalledPaths(p.configDir, inst.index).every((f) => exists(f))) continue;
+    if (!opts.vllmProfile) {
+      problems.push(`vLLM is not installed for instance ${inst.index} (${inst.agentId}): pass --vllm-profile ${Object.keys(VLLM_PROFILES).join("|")} to install it, or run scripts/linux/vllm/install-vllm.sh --instance ${inst.index} with --model, --gpus and --args first`);
+      continue;
+    }
+    const gpus = inst.gpus.map((g) => g.index).join(",");
+    inst.engine.installArgs = [
+      `${p.appDir}/scripts/linux/vllm/install-vllm.sh`,
+      "--profile", opts.vllmProfile,
+      "--instance", String(inst.index),
+      ...(gpus ? ["--gpus", gpus] : []),
+      ...(inst.env.VLLM_MODEL ? ["--model", inst.env.VLLM_MODEL] : []),
+      "--download"
+    ];
+  }
+  return problems;
 }
 
 export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = process.env, host: Host = realHost, post: HttpPost = fetchPost, binFs: BinFs = realBinFs): Promise<number> {
@@ -254,7 +301,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
   }
   if (opts.tokensFile) Object.assign(opts.tokens, parseTokensFile(readFileSync(opts.tokensFile, "utf8")));
   if (opts.command === "plan" || opts.command === "apply") {
-    const errors = validateInstallOptions(opts);
+    const errors = [...validateInstallOptions(opts), ...engineProblems(opts.engine, host.platform)];
     if (errors.length) {
       for (const e of errors) console.error(`error: ${e}`);
       return 2;
@@ -295,6 +342,24 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
   opts = inheritTuning(opts, readIfPresent(envFilePath(p, { index: 0 } as AgentInstance)));
   const dockerPresent = opts.sandbox === "docker" ? true : dockerAvailable();
   let plan = planInstall(hw, opts, dockerPresent);
+  // Engines per instance index, from the flags and what each instance runs now; then the real plan.
+  opts.instanceEngines = resolveEngines(opts, plan, p);
+  for (const e of Object.values(opts.instanceEngines)) {
+    const problems = engineProblems(e.kind, host.platform);
+    if (problems.length && !opts.engine) {
+      for (const msg of problems) console.error(`error: ${msg} (an existing env file says EDGECODER_ENGINE=${e.kind}; pass --engine to change it)`);
+      return 2;
+    }
+  }
+  plan = planInstall(hw, opts, dockerPresent);
+  if (host.platform === "linux") {
+    const problems = planVllmInstalls(opts, plan, p, (f) => host.exists(f));
+    if (problems.length && opts.command === "plan") plan.warnings.push(...problems);
+    else if (problems.length) {
+      for (const msg of problems) console.error(`error: ${msg}`);
+      return 1;
+    }
+  }
   if (opts.command === "plan") {
     console.log(opts.json ? JSON.stringify({ hardware: hw, plan: redactPlan(plan), paths: p }, null, 2) : `${describeHardware(hw)}\n${describePlan(plan, p)}`);
     return 0;
@@ -305,7 +370,8 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     console.error(`app dir ${appDir} has no dist/swarm/worker-runner.js (build the project or pass --app-dir)`);
     return 1;
   }
-  if (!opts.dryRun && !existsSync(p.ollamaBin) && !opts.fromPackage) {
+  const needsOllama = plan.instances.some((i) => i.engine?.kind !== "vllm");
+  if (needsOllama && !opts.dryRun && !existsSync(p.ollamaBin) && !opts.fromPackage) {
     console.error(`ollama not found at ${p.ollamaBin}; install it (https://ollama.com/download) or pass --ollama-bin`);
     return 1;
   }
@@ -319,6 +385,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
       }
       // Re-plan so the env files and warnings reflect the registration tokens just applied.
       plan = planInstall(hw, opts, dockerPresent);
+      if (host.platform === "linux") planVllmInstalls(opts, plan, p, (f) => host.exists(f));
     }
   }
   if (host.platform === "win32" && (!p.user || /^(SYSTEM|.*\$)$/i.test(p.user.split("\\").pop() ?? ""))) {

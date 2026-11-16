@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { HostMemoryManager, type MemoryOllama } from "../../src/swarm/memory-manager.js";
 import { memoryBudgetBytes } from "../../src/swarm/memory-budget.js";
+import { memoryAdmits, noteAgentMemory, resetMemoryAdmission } from "../../src/swarm/coordinator/memory-admission.js";
 import type { MemorySnapshot, PressureLevel } from "../../src/swarm/memory-pressure.js";
 
 const GB = 1024 ** 3;
@@ -121,5 +122,69 @@ describe("host memory manager", () => {
     nowMs = 40_000;
     await m.refresh();
     expect(m.canPull()).toBe(true);
+  });
+});
+
+describe("host memory manager with vLLM / MLX (the engine holds its model)", () => {
+  // The Chicago VM: 2x A16 pooled (30 GB), vLLM serving qwen3-coder:30b with 2 slots from its KV cache.
+  const budget = memoryBudgetBytes(120 * GB, 60, 30 * GB);
+  function engineManager(served: () => { model: string; bytes: number } | undefined, level: () => PressureLevel = () => "normal") {
+    const ollama = { list: vi.fn(async () => []), loaded: vi.fn(async () => []), unload: vi.fn(async () => undefined) };
+    const m = new HostMemoryManager({
+      ollama,
+      engine: served,
+      readPressure: (): MemorySnapshot => ({ level: level(), totalBytes: 120 * GB, availableBytes: 60 * GB, detail: "test" }),
+      budgetBytes: budget,
+      settings: () => ({ primary: "qwen3-coder:30b", contextWindow: 65536, slots: 2, kvSlots: 2 }),
+      guardEnabled: true,
+      recoverMs: 30_000,
+    });
+    return { m, ollama };
+  }
+
+  it("reports the served model as loaded, filling the budget, with the engine's slots; never asks Ollama", async () => {
+    const { m, ollama } = engineManager(() => ({ model: "qwen3-coder:30b", bytes: budget }));
+    await m.refresh();
+    const t = m.telemetry()!;
+    expect(t.loadedModels).toEqual([{ name: "qwen3-coder:30b", bytes: budget }]);
+    expect(t.usedBytes).toBe(budget);
+    expect(t.models).toEqual([{ name: "qwen3-coder:30b", bytes: budget, contextWindow: 65536, slots: 2 }]);
+    expect(m.advertised(["qwen3-coder:30b"])).toEqual(["qwen3-coder:30b"]);
+    expect(m.canPull()).toBe(true);
+    expect(ollama.loaded).not.toHaveBeenCalled();
+    expect(ollama.list).not.toHaveBeenCalled();
+
+    // The coordinator: calls for the served model up to its slots, no other model on "free" headroom.
+    resetMemoryAdmission();
+    noteAgentMemory("chi", t, 1_000);
+    expect(memoryAdmits("chi", "qwen3-coder:30b", 0, 1_000)).toBe(true);
+    expect(memoryAdmits("chi", "qwen3-coder:30b", 1, 1_000)).toBe(true);
+    expect(memoryAdmits("chi", "qwen3-coder:30b", 2, 1_000)).toBe(false);
+    expect(memoryAdmits("chi", "qwen2.5-coder:7b", 0, 1_000)).toBe(false);
+  });
+
+  it("admits only the served model and unloads nothing under pressure", async () => {
+    let level: PressureLevel = "normal";
+    const { m, ollama } = engineManager(() => ({ model: "qwen3-coder:30b", bytes: budget }), () => level);
+    await m.refresh();
+    const a = await m.admit("qwen3-coder:30b");
+    expect(a.ok).toBe(true);
+    if (a.ok) a.release();
+    const b = await m.admit("qwen3.5:9b");
+    expect(b.ok).toBe(false);
+    if (!b.ok) expect(b.error).toMatch(/^memory_model_not_served/);
+    level = "critical";
+    await m.refresh();
+    expect(ollama.unload).not.toHaveBeenCalled();
+    expect(m.telemetry()!.loadedModels.map((l) => l.name)).toEqual(["qwen3-coder:30b"]);
+    expect(m.canPull()).toBe(false);
+  });
+
+  it("while the engine is down or loading: nothing loaded, nothing served", async () => {
+    const { m } = engineManager(() => undefined);
+    await m.refresh();
+    expect(m.telemetry()!.loadedModels).toEqual([]);
+    expect(m.telemetry()!.models).toEqual([]);
+    expect((await m.admit("qwen3-coder:30b")).ok).toBe(false);
   });
 });
