@@ -666,6 +666,8 @@ These are not service configuration, so no schema lists them and the docs test s
 | Variable | Read by | Description |
 |---|---|---|
 | `FLY_APP_NAME`, `FLY_REGION` | coordinator, portal | Set by the Fly runtime. |
+| `GIT_ASKPASS`, `SSH_ASKPASS` | IDE provider (src/apps/ide/github-auth.ts) | Read only to clear them for the read-only `git credential fill` lookup, so no password prompt can appear. |
+| `EDGECODER_GITHUB_API_URL` | IDE provider (src/apps/ide/github-auth.ts) | GitHub API base URL for the agent's GitHub tools (default `https://api.github.com`). For tests and GitHub Enterprise. |
 | `EDGECODER_TENTACLES`, `EDGECODER_TENTACLES_MAX`, `EDGECODER_TENTACLES_BUDGET_CSATS`, `EDGECODER_TENTACLE_CSATS`, `EDGECODER_TENTACLES_WORKER`, `EDGECODER_TENTACLE_CONTEXT_CHARS` | IDE provider (src/apps/ide/tentacles.ts) | Tentacles (helper agents a session's lead delegates to; docs/tentacles.md): `1` turns them on for every session; the parallel cap (default 4); the session budget in cSats (100); the per-tentacle budget (25); the worker model when the session's is auto (default `auto`; never a frontier model); how many characters of files a helper's prompt may carry (36000). |
 | `EDGECODER_CONTEXT_GRADUATION`, `EDGECODER_LEAD_CANDIDATES` | IDE provider (src/apps/ide/provider-server.ts) | Context graduation: `1` lets a network lead whose conversation outgrew its window move up for that turn, among the candidates (`network/<model>[@class]=<window tokens>`, comma-separated). Never onto a frontier model. |
 | `EDGECODER_PERMISSIONS_FILE` | IDE provider (src/apps/ide/permissions.ts) | Where the terminal and app keep per-project "always" approvals (default `~/.edgecoder/permissions.json`, or beside `EDGECODER_SESSIONS_DIR`). For tests and second profiles. |
