@@ -167,6 +167,25 @@ describe("Getting started (desktop wizard)", () => {
     expect(shell.open).toHaveBeenCalledWith("https://edgecoder.io/host");
   });
 
+  it("Add your other machines: a server in four numbered steps, the commands, and the full guide on the docs site; passes axe", async () => {
+    current = saved({ current: "machines", goal: "both" });
+    render(OnboardingWizard, props());
+    await waitFor(() => expect(heading().textContent).toBe("Add your other machines"));
+    const steps = document.querySelectorAll("ol.wz-howto > li");
+    expect(steps).toHaveLength(4);
+    expect(steps[0].textContent).toContain("Settings → Connect your tools → API keys");
+    expect(steps[1].textContent).toMatch(/Terminal.*PowerShell/);
+    expect(screen.getByLabelText("SSH command").textContent).toBe("ssh ubuntu@your-server-ip");
+    expect(screen.getByLabelText("Installer command").textContent).toBe("curl -fsSLo install.sh https://edgecoder.io/install.sh && sudo EDGECODER_API_KEY=YOUR_INSTALL_KEY bash install.sh --pull-models");
+    expect(screen.getByLabelText("vLLM command").textContent).toBe("sudo edgecoder-install apply --vllm-profile auto");
+    await fireEvent.click(screen.getByRole("button", { name: "Create an install key" }));
+    expect(shell.open).toHaveBeenCalledWith("https://edgecoder.io/portal/settings#tools");
+    await fireEvent.click(screen.getByRole("button", { name: "Run EdgeCoder on a cloud GPU or Linux server" }));
+    expect(shell.open).toHaveBeenCalledWith("https://codyrs82.github.io/Edgecoder/guide/cloud-gpu-server");
+    const results = await axe.run(document.body, { rules: { "color-contrast": { enabled: false }, region: { enabled: false } } });
+    expect(results.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target).join(", ")}`)).toEqual([]);
+  });
+
   it("finishing marks it complete", async () => {
     current = saved({ current: "done" });
     const p = props();

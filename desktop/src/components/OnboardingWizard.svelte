@@ -349,9 +349,26 @@
               <button class="wz-btn" onclick={() => runAction("@windows")}>Download for Windows</button>
             </div>
             <h3 class="wz-sub">Linux and GPU servers</h3>
-            <p>Get a token from Settings → Nodes on the web, then run:</p>
-            {@render code(O.installCommand(portalWebUrl(""), "YOUR_TOKEN"), "Installer command")}
-            <p class="wz-muted">One agent per GPU, with a model sized to its memory. Each machine's models: Settings → Nodes on the web.</p>
+            <ol class="wz-howto">
+              <li>
+                <strong>Create an install key</strong> on the web: Settings → Connect your tools → API keys → Create key. Keep it private: it acts as your account.
+                <div class="wz-actions"><button class="wz-btn" onclick={() => runAction("/portal/settings#tools")}>Create an install key</button></div>
+              </li>
+              <li>
+                <strong>Connect to the server with SSH.</strong> On a Mac or Linux open Terminal; on Windows open PowerShell. Put in your server's IP address; most GPU clouds log in as <code>ubuntu</code>, some as <code>root</code>.
+                {@render code(O.SERVER_SETUP.sshCommand, "SSH command")}
+              </li>
+              <li>
+                <strong>Paste the install command</strong> into the server, with your key in place of {O.SERVER_SETUP.keyPlaceholder}. It takes 5 to 15 minutes and starts one agent per GPU.
+                {@render code(O.serverInstallCommand(portalWebUrl(""), O.SERVER_SETUP.keyPlaceholder), "Installer command")}
+              </li>
+              <li>
+                <strong>NVIDIA GPU with 24 GB or more? Switch to vLLM</strong>, which serves several calls at once. It picks the settings for your GPU:
+                {@render code(O.SERVER_SETUP.vllmCommand, "vLLM command")}
+              </li>
+            </ol>
+            <p>Full guide: <button class="wz-link" onclick={() => runAction("@serverGuide")}>{O.SERVER_SETUP.guideTitle}</button>. SSH keys, providers and GPU sizes, checks, and troubleshooting.</p>
+            <p class="wz-muted">Each machine's models: Settings → Nodes on the web.</p>
             <p class="wz-note">{O.LOCAL_NETWORK_NOTE}</p>
           {:else if step.id === "models"}
             <fieldset class="wz-choices">
@@ -516,6 +533,7 @@
   .wz-body { margin: 0 0 16px; color: var(--text-secondary); }
   .wz-sub { margin-top: 18px !important; }
   .wz-muted { color: var(--text-muted); font-size: var(--fs-xs); }
+  .wz-howto { margin: 8px 0 12px; padding-left: 22px; display: flex; flex-direction: column; gap: 12px; line-height: 1.5; }
   .wz-err { color: var(--danger); }
   .wz-note { padding: 10px 12px; border: 0.5px solid var(--border); border-radius: var(--radius-md); background: var(--bg-surface); }
   .wz-note p { margin: 0 0 4px; }

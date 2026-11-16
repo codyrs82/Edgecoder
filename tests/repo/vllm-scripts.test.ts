@@ -72,6 +72,28 @@ describe("edgecoder-vllm@.service", () => {
     expect(vllmMarkerPath("/etc/edgecoder", 0)).toBe("/etc/edgecoder/vllm-0.active");
     expect(vllmDropInPath(0)).toBe("/etc/systemd/system/edgecoder-ollama-0.service.d/vllm-switch.conf");
   });
+  it("single-card profiles are tensor parallel 1 on GPU 0, and their KV cache fits a full-length call with headroom", () => {
+    // Qwen3-Coder-30B-A3B: KV 96 KiB per token at bf16 (48 layers x 4 KV heads x 128 x 2 x 2 bytes).
+    const KV_BYTES_PER_TOKEN = 48 * 4 * 128 * 2 * 2;
+    const WEIGHTS_GB: Record<string, number> = { "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ": 17, "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8": 31 };
+    // The smallest card --vllm-profile auto gives each profile (nvidia-smi GiB), and ~3 GB for activations and CUDA graphs.
+    const SMALLEST_CARD_GB: Record<string, number> = { "gpu-24gb": 22.5 * 1.074, "a100-40": 40, "gpu-48gb": 45 * 1.074, "a100-80": 80 };
+    const OVERHEAD_GB = 3;
+    const src = read(INSTALL);
+    for (const [name, card] of Object.entries(SMALLEST_CARD_GB)) {
+      const block = new RegExp(`\\n  ${name.replace("-", "\\-")}\\)\\n([\\s\\S]*?);;`).exec(src)?.[1] ?? "";
+      expect(block, name).toContain('gpus="${gpus:-0}"');
+      expect(block, name).not.toContain("--tensor-parallel-size");
+      const util = Number(/--gpu-memory-utilization ([\d.]+)/.exec(block)?.[1]);
+      const maxLen = Number(/--max-model-len (\d+)/.exec(block)?.[1]);
+      const kvGb = card * util - WEIGHTS_GB[VLLM_PROFILES[name].model] - OVERHEAD_GB;
+      const kvTokens = (kvGb * 1e9) / KV_BYTES_PER_TOKEN;
+      expect(kvTokens, name).toBeGreaterThan(maxLen * 1.5);
+      // Slots: never more than ~2x the full-length calls the cache holds (vLLM preempts past that).
+      expect(VLLM_PROFILES[name].slots, name).toBeLessThanOrEqual(Math.max(1, Math.ceil((2 * kvTokens) / maxLen)));
+    }
+  });
+
   it("the env example matches the installer's a16x2 profile", () => {
     const env = read(ENV);
     const args = /^VLLM_ARGS="([^"]+)"$/m.exec(env)?.[1];

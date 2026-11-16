@@ -2,8 +2,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { planVllmInstalls, resolveEngines, runInstaller } from "../../src/install/cli.js";
-import { engineProblems, legacyVllmMarkerPath, parseEnvFile, previousEngine, resolveInstanceEngine, VLLM_UNIT_PATH, vllmDropInPath, vllmMarkerPath } from "../../src/install/engine.js";
+import { keepRegistrationTokens, planVllmInstalls, resolveEngines, runInstaller } from "../../src/install/cli.js";
+import { autoVllmProfile, engineProblems, legacyVllmMarkerPath, parseEnvFile, previousEngine, resolveInstanceEngine, VLLM_PROFILES, VLLM_UNIT_PATH, vllmDropInPath, vllmMarkerPath } from "../../src/install/engine.js";
 import { detectHardware } from "../../src/install/hardware.js";
 import { parseInstallArgs, type InstallOptions } from "../../src/install/options.js";
 import { planInstall, renderEnvFile, type InstallPlan } from "../../src/install/plan.js";
@@ -238,7 +238,7 @@ describe("applying the engine on Linux", () => {
     let plan = planInstall(hw, opts, true);
     opts.instanceEngines = resolveEngines(opts, plan, p, () => undefined, () => false);
     plan = planInstall(hw, opts, true);
-    expect(planVllmInstalls(opts, plan, p, h.host.exists)[0]).toMatch(/--vllm-profile a16x2\|a100-80/);
+    expect(planVllmInstalls(opts, plan, p, h.host.exists)[0]).toMatch(/--vllm-profile auto\|a16x2\|a100-80\|a100-40/);
 
     const o2 = parseInstallArgs(["apply", "--single", "--vllm-profile", "a16x2"]);
     let plan2 = planInstall(hw, o2, true);
@@ -326,4 +326,101 @@ it("the env file path helper agrees with the engine module's paths", () => {
   const p = paths();
   expect(envFilePath(p, { index: 0 } as never)).toBe("/etc/edgecoder/agent-0.env");
   expect(vllmMarkerPath(p.configDir, 0)).toBe("/etc/edgecoder/vllm-0.active");
+});
+
+describe("--vllm-profile auto (picks the profile from nvidia-smi)", () => {
+  /** A host whose nvidia-smi prints `smi` (index, name, memory.total in MiB). */
+  const gpuHost = (smi: string) => detectHardware({ probe: (cmd) => (cmd === "nvidia-smi" ? smi : null), platform: "linux", arch: "x64", ramGb: 200, cpuModel: "EPYC", cpuCores: 30, hostname: "gpu-box" });
+  const one = (name: string, mib: number) => `0, ${name}, ${mib}\n`;
+  const FP8 = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8";
+
+  it("maps each common card to its profile by memory", () => {
+    const cases: Array<[string, number, string | undefined]> = [
+      ["NVIDIA A10", 23028, "gpu-24gb"],
+      ["NVIDIA L4", 23034, "gpu-24gb"],
+      ["NVIDIA GeForce RTX 4090", 24564, "gpu-24gb"],
+      ["NVIDIA A100-SXM4-40GB", 40960, "a100-40"],
+      ["NVIDIA L40S", 46068, "gpu-48gb"],
+      ["NVIDIA RTX A6000", 49140, "gpu-48gb"],
+      ["NVIDIA A100-SXM4-80GB", 81920, "a100-80"],
+      ["NVIDIA H100 80GB HBM3", 81559, "a100-80"],
+      ["NVIDIA H200", 143771, "a100-80"],
+      ["Tesla T4", 15360, undefined],
+      ["NVIDIA A16", 15356, undefined]
+    ];
+    for (const [name, mib, profile] of cases) expect(autoVllmProfile(gpuHost(one(name, mib)).gpus).profile, name).toBe(profile);
+    expect(autoVllmProfile(gpuHost(one("NVIDIA A16", 15356)).gpus).reason).toMatch(/--single/);
+    expect(autoVllmProfile(gpuHost(A16X2).gpus).profile).toBe("a16x2");
+    expect(autoVllmProfile([]).reason).toMatch(/NVIDIA/);
+    expect(autoVllmProfile([{ vendor: "amd", vramGb: 192 }]).profile).toBeUndefined();
+    for (const p of ["gpu-24gb", "a100-40", "gpu-48gb", "a100-80", "a16x2"]) expect(VLLM_PROFILES[p], p).toBeDefined();
+  });
+
+  it("parses auto and implies --engine vllm", () => {
+    expect(parseInstallArgs(["apply", "--vllm-profile", "auto"])).toMatchObject({ engine: "vllm", vllmProfile: "auto" });
+    expect(() => parseInstallArgs(["apply", "--vllm-profile", "AUTO"])).toThrow(/auto, a16x2/);
+  });
+
+  /** One installer plan with auto on a host, as the CLI makes it. */
+  function autoPlan(smi: string, argv: string[] = []) {
+    const p = paths();
+    const host = gpuHost(smi);
+    const opts = parseInstallArgs(["apply", "--vllm-profile", "auto", ...argv]);
+    let plan = planInstall(host, opts, true);
+    opts.instanceEngines = resolveEngines(opts, plan, p, () => undefined, () => false);
+    plan = planInstall(host, opts, true);
+    return { plan, problems: planVllmInstalls(opts, plan, p, () => false) };
+  }
+
+  it("a Lambda 1x A100 40 GB: installs vLLM with a100-40, AWQ, 4 slots", () => {
+    const { plan, problems } = autoPlan(one("NVIDIA A100-SXM4-40GB", 40536));
+    expect(problems).toEqual([]);
+    expect(plan.instances).toHaveLength(1);
+    expect(plan.instances[0].env).toMatchObject({ EDGECODER_ENGINE: "vllm", VLLM_MODEL: AWQ, VLLM_MAX_SLOTS: "4", VLLM_URL: "http://127.0.0.1:8000" });
+    expect(plan.instances[0].engine?.installArgs).toEqual(["/opt/edgecoder/app/scripts/linux/vllm/install-vllm.sh", "--profile", "a100-40", "--instance", "0", "--gpus", "0", "--model", AWQ, "--download"]);
+  });
+
+  it("an H100: FP8 with 12 slots; 4x L40S: one vLLM per card", () => {
+    const h100 = autoPlan(one("NVIDIA H100 80GB HBM3", 81559));
+    expect(h100.plan.instances[0].env).toMatchObject({ VLLM_MODEL: FP8, VLLM_MAX_SLOTS: "12" });
+    const smi = [0, 1, 2, 3].map((i) => `${i}, NVIDIA L40S, 46068`).join("\n");
+    const l40s = autoPlan(smi, ["--per-gpu"]);
+    expect(l40s.problems).toEqual([]);
+    expect(l40s.plan.instances.map((i) => i.engine?.installArgs?.slice(2, 8))).toEqual([0, 1, 2, 3].map((i) => ["gpu-48gb", "--instance", String(i), "--gpus", String(i), "--model"]));
+    expect(l40s.plan.instances.map((i) => i.env.VLLM_URL)).toEqual(["http://127.0.0.1:8000", "http://127.0.0.1:8001", "http://127.0.0.1:8002", "http://127.0.0.1:8003"]);
+  });
+
+  it("2x A16: with --single, a16x2; one card per instance gets an error that says to pass --single; a T4 is refused", () => {
+    const single = autoPlan(A16X2, ["--single"]);
+    expect(single.problems).toEqual([]);
+    expect(single.plan.instances[0].engine?.installArgs).toContain("a16x2");
+    expect(autoPlan(A16X2).problems[0]).toMatch(/--single/);
+    expect(autoPlan(one("Tesla T4", 15360)).problems[0]).toMatch(/auto found no vLLM profile .*stay on Ollama/);
+  });
+});
+
+describe("re-runs keep each instance's registration token", () => {
+  const p = paths();
+  const opts = (argv: string[] = []) => parseInstallArgs(["apply", "--single", ...argv]);
+  const prev = (agentId: string, token: string) => (f: string) => (f === "/etc/edgecoder/agent-0.env" ? renderEnvFile({ AGENT_ID: agentId, AGENT_REGISTRATION_TOKEN: token }) : undefined);
+
+  it("from agent-<n>.env when it is for the same agent id", () => {
+    const o = opts(["--engine", "vllm"]);
+    const plan = planInstall(hw, o, true);
+    const id = plan.instances[0].agentId;
+    expect(keepRegistrationTokens(o, plan, p, prev(id, "tok.kept"))).toEqual([id]);
+    expect(planInstall(hw, o, true).instances[0].env.AGENT_REGISTRATION_TOKEN).toBe("tok.kept");
+  });
+
+  it("never another agent's token, a malformed one, or over a --token given now", () => {
+    const o1 = opts();
+    expect(keepRegistrationTokens(o1, planInstall(hw, o1, true), p, prev("someone-else-gpu0", "tok"))).toEqual([]);
+    const o2 = opts();
+    const plan2 = planInstall(hw, o2, true);
+    expect(keepRegistrationTokens(o2, plan2, p, prev(plan2.instances[0].agentId, "bad token"))).toEqual([]);
+    const o3 = opts(["--token", "new.token"]);
+    const plan3 = planInstall(hw, o3, true);
+    expect(keepRegistrationTokens(o3, plan3, p, prev(plan3.instances[0].agentId, "old"))).toEqual([]);
+    expect(planInstall(hw, o3, true).instances[0].env.AGENT_REGISTRATION_TOKEN).toBe("new.token");
+  });
 });

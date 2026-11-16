@@ -3,6 +3,7 @@
 #
 #   sudo scripts/linux/vllm/install-vllm.sh --profile a16x2 [--instance 0] [--download] [--start]
 #   sudo scripts/linux/vllm/install-vllm.sh --profile a100-80 --download --start
+#   profiles: a16x2, a100-80, a100-40, gpu-48gb, gpu-24gb (edgecoder-install --vllm-profile auto picks one)
 #   sudo scripts/linux/vllm/install-vllm.sh --model Org/Repo --gpus 0 --args "--max-model-len 32768 ..."
 #
 # What it does (re-runnable):
@@ -39,7 +40,7 @@ download=0
 start=0
 
 die() { echo "install-vllm: $*" >&2; exit 1; }
-usage() { sed -n '2,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,9p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -68,16 +69,43 @@ case "$profile" in
     slots=2
     ;;
   a100-80)
+    # One 80 GB card (A100 80 GB, H100; more KV cache on bigger cards). FP8 weights ~31 GB;
+    # 0.92 x 80 = 73.6 GB - 31 - ~4 (activations, CUDA graphs) = ~38 GB KV, ~400K tokens.
     model="${model:-Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8}"
     gpus="${gpus:-0}"
     args="${args:---max-model-len 65536 --gpu-memory-utilization 0.92 --max-num-seqs 32 --enable-prefix-caching --enable-auto-tool-choice --tool-call-parser qwen3_xml}"
     slots=12
     ;;
+  a100-40)
+    # One A100 40 GB. AWQ ~17 GB (FP8's 31 GB would leave ~3 GB of KV cache):
+    # 0.92 x 40 = 36.8 GB - 17 - ~3 = ~17 GB KV at 96 KiB/token, ~170K tokens: 2.6 full 64K calls.
+    model="${model:-QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ}"
+    gpus="${gpus:-0}"
+    args="${args:---max-model-len 65536 --gpu-memory-utilization 0.92 --max-num-seqs 8 --enable-prefix-caching --enable-auto-tool-choice --tool-call-parser qwen3_xml}"
+    slots=4
+    ;;
+  gpu-48gb)
+    # One 44-48 GB card (RTX A6000, L40S, A40, RTX 6000 Ada). AWQ ~17 GB:
+    # 0.92 x 45-48 = 41-44 GB - 17 - ~3 = ~21-24 GB KV, ~215-245K tokens: 3.3-3.7 full 64K calls.
+    model="${model:-QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ}"
+    gpus="${gpus:-0}"
+    args="${args:---max-model-len 65536 --gpu-memory-utilization 0.92 --max-num-seqs 12 --enable-prefix-caching --enable-auto-tool-choice --tool-call-parser qwen3_xml}"
+    slots=6
+    ;;
+  gpu-24gb)
+    # One 22-37 GB card (A10, L4, RTX 3090/4090/5090): tight. AWQ ~17 GB; 0.95 x 24 = 22.8 GB - 17
+    # - ~2.5 (small batches: --max-num-batched-tokens 2048) = ~3 GB KV, ~30K tokens: 16K context,
+    # one call at a time (a second short one fits).
+    model="${model:-QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ}"
+    gpus="${gpus:-0}"
+    args="${args:---max-model-len 16384 --gpu-memory-utilization 0.95 --max-num-seqs 2 --max-num-batched-tokens 2048 --enable-prefix-caching --enable-auto-tool-choice --tool-call-parser qwen3_xml}"
+    slots=1
+    ;;
   "")
-    [ -n "$model" ] && [ -n "$gpus" ] && [ -n "$args" ] || die "give --profile a16x2|a100-80, or all of --model, --gpus and --args"
+    [ -n "$model" ] && [ -n "$gpus" ] && [ -n "$args" ] || die "give --profile a16x2|a100-80|a100-40|gpu-48gb|gpu-24gb, or all of --model, --gpus and --args"
     slots=""
     ;;
-  *) die "unknown profile: $profile (a16x2, a100-80)" ;;
+  *) die "unknown profile: $profile (a16x2, a100-80, a100-40, gpu-48gb, gpu-24gb)" ;;
 esac
 [[ "$model" =~ ^[A-Za-z0-9._/-]+$ ]] || die "--model must be a Hugging Face repo id or a path"
 [[ "$gpus" =~ ^[0-9]+(,[0-9]+)*$ ]] || die "--gpus must be a list such as 0,1"

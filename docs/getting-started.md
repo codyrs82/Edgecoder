@@ -76,12 +76,24 @@ More models: Settings → Models.
 Every machine you own adds free compute for you.
 
 - **Mac and Windows:** install the desktop app and sign in with the same account.
-- **Linux and GPU servers:** get a token from Settings → Nodes on the web, then run the installer
-  ([install.md](install.md); vLLM for big GPUs: [inference-engines.md](inference-engines.md)):
+- **Linux and GPU servers, including rented cloud GPUs:** step by step, from making an SSH key to
+  terminating the server, in
+  [Run EdgeCoder on a cloud GPU or Linux server](https://docs.edgecoder.io/guide/cloud-gpu-server).
+  In short:
+  1. **Create an install key**: the **Create install key** button on this step (it fills in the
+     command below), or Settings → Connect your tools → API keys.
+  2. **Connect with SSH** (Terminal on a Mac or Linux, PowerShell on Windows):
+     `ssh ubuntu@your-server-ip`.
+  3. **Paste the install command** on the server:
 
-  ```sh
-  curl -fsSLo install.sh https://edgecoder.io/install.sh && sudo bash install.sh --token <token>
-  ```
+     ```sh
+     curl -fsSLo install.sh https://edgecoder.io/install.sh && sudo EDGECODER_API_KEY=YOUR_INSTALL_KEY bash install.sh --pull-models
+     ```
+
+  4. **NVIDIA GPU with 24 GB or more:** switch to vLLM with the settings for that GPU
+     (`sudo edgecoder-install apply --vllm-profile auto`; [inference-engines.md](inference-engines.md)).
+
+  More options: [install.md](install.md).
 
 On a Mac, allow **Local Network** access when macOS asks. EdgeCoder uses it to find your other
 machines on the same network and reach them directly. You can change it in System Settings →

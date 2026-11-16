@@ -91,7 +91,7 @@ installs one), Python 3.10-3.14, ~15 GB of disk for vLLM and its CUDA libraries 
 
 ```bash
 # on the GPU host, from a checkout of this repository
-sudo scripts/linux/vllm/install-vllm.sh --profile a16x2 --download --start   # or --profile a100-80
+sudo scripts/linux/vllm/install-vllm.sh --profile a16x2 --download --start   # or a100-80, a100-40, gpu-48gb, gpu-24gb
 journalctl -fu edgecoder-vllm@0            # first start: load + compile, a few minutes
 curl -s http://127.0.0.1:8000/v1/models    # -> the model and its max_model_len
 ```
@@ -208,6 +208,29 @@ network's estimate) means ~455 tok/s on one call: a single-stream MoE is overhea
 that, so a 30B-A3B A100 will most likely settle at `gpu.dc40`. A dense model (e.g. AWQ
 `Qwen2.5-Coder-32B-Instruct`, `qwen2.5-coder:32b`) is the way to prove `gpu.dc80`, and needs a
 second vLLM agent on the same weights as witness.
+
+### Sizing: single-card profiles and `--vllm-profile auto`
+
+`sudo edgecoder-install apply --vllm-profile auto` picks one of these per instance from
+`nvidia-smi` (src/install/engine.ts `autoVllmProfile`; the serve flags are in
+`scripts/linux/vllm/install-vllm.sh`). All are tensor parallel 1 on the instance's first card.
+Qwen3-Coder-30B-A3B's KV cache is 96 KiB per token at fp16 (48 layers × 4 KV heads × 128 × 2 × 2
+bytes); "overhead" is activations and CUDA graphs, ~3 GB.
+
+| Profile | Cards (`auto`) | Weights | KV budget | Context | Slots (`--max-num-seqs`) |
+| --- | --- | --- | --- | --- | --- |
+| `a100-80` | 76 GB and up: A100 80 GB, H100, H200 | FP8, 31 GB | 0.92 × 80 − 31 − 3 ≈ 39 GB ≈ 400K tokens | 64K | 12 (32) |
+| `gpu-48gb` | 44-75 GB: L40S, RTX A6000, A40, RTX 6000 Ada | AWQ, 17 GB | 0.92 × 45-48 − 17 − 3 ≈ 21-24 GB ≈ 215-245K tokens | 64K | 6 (12) |
+| `a100-40` | 38-43 GB: A100 40 GB | AWQ, 17 GB (FP8 would leave ~3 GB of cache) | 0.92 × 40 − 17 − 3 ≈ 17 GB ≈ 170K tokens | 64K | 4 (8) |
+| `gpu-24gb` | 22-37 GB: A10, L4, RTX 3090/4090/5090 | AWQ, 17 GB | 0.95 × 24 − 17 − 3 ≈ 3 GB ≈ 30K tokens | **16K** | 1 (2), `--max-num-batched-tokens 2048` |
+| `a16x2` | two 15-21 GB cards pooled (`--single`) | AWQ over both (TP 2) | see above | 64K | 2 (8) |
+
+`gpu-24gb` is the floor: one 16K call at a time. On those cards Ollama with `qwen3-coder:30b` does
+about as well. Under 22 GB (a T4, one A16) `auto` refuses and the instance stays on Ollama. vLLM's
+AWQ and FP8 kernels need compute capability 8.0 or newer (Ampere and later). A profile is written
+into `vllm-<n>.env` once; to change it, switch to Ollama, delete that file and apply the new
+profile. The step-by-step guide for a rented GPU is
+[Run EdgeCoder on a cloud GPU or Linux server](https://docs.edgecoder.io/guide/cloud-gpu-server).
 
 ## MLX on a Mac
 

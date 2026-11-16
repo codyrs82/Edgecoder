@@ -15,7 +15,7 @@ import { helpText, inheritTuning, parseInstallArgs, parseTokensFile, TOKEN_PATTE
 import { planInstall, type AgentInstance, type InstallPlan } from "./plan.js";
 import { HOST_AGREEMENT_VERSION } from "../common/legal-notices.js";
 import { appDirProblems, planBinary, stageBinary, type BinFs, type StagePlan } from "./binaries.js";
-import { engineProblems, legacyVllmMarkerPath, resolveInstanceEngine, VLLM_PROFILES, vllmEnvPath, vllmInstalledPaths, vllmMarkerPath, type InstanceEngine } from "./engine.js";
+import { engineProblems, instanceVllmProfile, legacyVllmMarkerPath, parseEnvFile, resolveInstanceEngine, VLLM_PROFILE_AUTO, vllmEnvPath, vllmInstalledPaths, vllmMarkerPath, vllmProfileChoices, type InstanceEngine } from "./engine.js";
 import { applyPlan, defaultPaths, envFilePath, lockConfigDir, removeServices, serviceStatus, windowsDirOwnerProblems, type Host, type ServicePaths } from "./services.js";
 
 export const probe: Probe = (cmd, args) => {
@@ -231,7 +231,7 @@ function describePlan(plan: InstallPlan, p: ServicePaths): string {
     const serves = i.engine?.kind === "vllm" ? `vllm ${i.env.VLLM_URL} model ${i.env.VLLM_MODEL ?? "(whatever it serves)"}${i.env.VLLM_MAX_SLOTS ? `, ${i.env.VLLM_MAX_SLOTS} slots` : ""}`
       : i.engine?.kind === "mlx" ? `mlx ${i.env.MLX_URL ?? "http://127.0.0.1:8080"}` : `ollama :${i.ollamaPort} model ${i.model}`;
     const switched = i.engine?.previous && i.engine.previous !== i.engine.kind ? `  [switching from ${i.engine.previous}]` : "";
-    lines.push(`  ${i.agentId}: ${i.gpu ? `${i.gpu.model} (${i.gpu.vramGb} GB)` : "CPU"} -> ${serves}${switched}${i.engine?.installArgs ? "  [installs vLLM]" : ""}${i.env.AGENT_REGISTRATION_TOKEN ? "" : "  [no registration token]"}`);
+    lines.push(`  ${i.agentId}: ${i.gpu ? `${i.gpu.model} (${i.gpu.vramGb} GB)` : "CPU"} -> ${serves}${switched}${i.engine?.installArgs ? `  [installs vLLM, profile ${i.engine.installArgs[i.engine.installArgs.indexOf("--profile") + 1]}]` : ""}${i.env.AGENT_REGISTRATION_TOKEN ? "" : "  [no registration token]"}`);
   }
   lines.push(`Config dir: ${p.configDir}   App dir: ${p.appDir}   Node: ${p.nodeBin}   Ollama: ${p.ollamaBin}`);
   for (const w of plan.warnings) lines.push(`warning: ${w}`);
@@ -255,9 +255,31 @@ export function resolveEngines(opts: InstallOptions, plan: InstallPlan, p: Servi
   for (const inst of plan.instances) {
     const n = inst.index;
     const markerExists = exists(vllmMarkerPath(p.configDir, n)) || (n === 0 && exists(legacyVllmMarkerPath(p.configDir)));
-    out[n] = resolveInstanceEngine(n, opts, { agentEnv: read(envFilePath(p, inst)), vllmEnv: read(vllmEnvPath(p.configDir, n)), markerExists });
+    // --vllm-profile auto names a profile per instance, from that instance's GPUs.
+    const flags = opts.vllmProfile === VLLM_PROFILE_AUTO ? { ...opts, vllmProfile: instanceVllmProfile(opts.vllmProfile, inst.gpus).profile } : opts;
+    out[n] = resolveInstanceEngine(n, flags, { agentEnv: read(envFilePath(p, inst)), vllmEnv: read(vllmEnvPath(p.configDir, n)), markerExists });
   }
   return out;
+}
+
+/**
+ * A re-run without --token (switching to vLLM, an update with install.sh, a package upgrade) keeps
+ * each instance's registration token from its env file, when that file is for the same agent id:
+ * otherwise the rewritten env file would have none and the agent could not sign in. Returns the
+ * agent ids whose token was kept.
+ */
+export function keepRegistrationTokens(opts: InstallOptions, plan: InstallPlan, p: ServicePaths, read: (path: string) => string | undefined = readIfPresent): string[] {
+  const kept: string[] = [];
+  if (opts.tokens["*"]) return kept;
+  for (const inst of plan.instances) {
+    if (opts.tokens[inst.agentId]) continue;
+    const old = parseEnvFile(read(envFilePath(p, inst)) ?? "");
+    const token = old.AGENT_REGISTRATION_TOKEN;
+    if (old.AGENT_ID !== inst.agentId || !token || !TOKEN_PATTERN.test(token)) continue;
+    opts.tokens[inst.agentId] = token;
+    kept.push(inst.agentId);
+  }
+  return kept;
 }
 
 /**
@@ -270,13 +292,18 @@ export function planVllmInstalls(opts: InstallOptions, plan: InstallPlan, p: Ser
     if (inst.engine?.kind !== "vllm") continue;
     if (vllmInstalledPaths(p.configDir, inst.index).every((f) => exists(f))) continue;
     if (!opts.vllmProfile) {
-      problems.push(`vLLM is not installed for instance ${inst.index} (${inst.agentId}): pass --vllm-profile ${Object.keys(VLLM_PROFILES).join("|")} to install it, or run scripts/linux/vllm/install-vllm.sh --instance ${inst.index} with --model, --gpus and --args first`);
+      problems.push(`vLLM is not installed for instance ${inst.index} (${inst.agentId}): pass --vllm-profile ${vllmProfileChoices().join("|")} to install it, or run scripts/linux/vllm/install-vllm.sh --instance ${inst.index} with --model, --gpus and --args first`);
+      continue;
+    }
+    const picked = instanceVllmProfile(opts.vllmProfile, inst.gpus);
+    if (!picked.profile) {
+      problems.push(`--vllm-profile auto found no vLLM profile for instance ${inst.index} (${inst.agentId}): ${picked.reason}`);
       continue;
     }
     const gpus = inst.gpus.map((g) => g.index).join(",");
     inst.engine.installArgs = [
       `${p.appDir}/scripts/linux/vllm/install-vllm.sh`,
-      "--profile", opts.vllmProfile,
+      "--profile", picked.profile,
       "--instance", String(inst.index),
       ...(gpus ? ["--gpus", gpus] : []),
       ...(inst.env.VLLM_MODEL ? ["--model", inst.env.VLLM_MODEL] : []),
@@ -342,6 +369,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
   opts = inheritTuning(opts, readIfPresent(envFilePath(p, { index: 0 } as AgentInstance)));
   const dockerPresent = opts.sandbox === "docker" ? true : dockerAvailable();
   let plan = planInstall(hw, opts, dockerPresent);
+  keepRegistrationTokens(opts, plan, p);
   // Engines per instance index, from the flags and what each instance runs now; then the real plan.
   opts.instanceEngines = resolveEngines(opts, plan, p);
   for (const e of Object.values(opts.instanceEngines)) {

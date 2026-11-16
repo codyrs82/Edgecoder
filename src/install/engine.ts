@@ -29,11 +29,25 @@ export const ENGINE_KINDS: readonly EngineKind[] = ["ollama", "vllm", "mlx"];
 export const VLLM_BASE_PORT = 8000;
 export const VLLM_SLOTS_RANGE = [1, 16] as const;
 
-/** install-vllm.sh profiles: the model and slots each one serves (the script holds the serve flags). */
+/**
+ * install-vllm.sh profiles: the model and slots each one serves (the script holds the serve flags).
+ * Qwen3-Coder-30B-A3B: AWQ weights ~17 GB, FP8 ~31 GB; KV cache 96 KiB per token at bf16 (48 layers
+ * x 4 KV heads x 128 x 2 x 2 bytes). Every single-card profile is tensor parallel 1.
+ */
 export const VLLM_PROFILES: Record<string, { model: string; slots: number }> = {
+  /** 2x A16 16 GB, tensor parallel 2 (needs --single so one instance owns both cards). */
   a16x2: { model: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ", slots: 2 },
-  "a100-80": { model: "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8", slots: 12 }
+  /** One 80 GB card (A100 80 GB, H100, and bigger: H200). FP8. */
+  "a100-80": { model: "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8", slots: 12 },
+  /** One A100 40 GB. AWQ: FP8 (31 GB) would leave ~3 GB of KV cache. */
+  "a100-40": { model: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ", slots: 4 },
+  /** One 44-48 GB card (RTX A6000, L40S, A40, RTX 6000 Ada). AWQ. */
+  "gpu-48gb": { model: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ", slots: 6 },
+  /** One 22-37 GB card (A10, L4, RTX 3090/4090/5090). AWQ at 16K context, one call at a time. */
+  "gpu-24gb": { model: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ", slots: 1 }
 };
+/** --vllm-profile auto: pick the profile from each instance's GPUs (autoVllmProfile). */
+export const VLLM_PROFILE_AUTO = "auto";
 
 /** Agent env lines that belong to the engine: written for vLLM / MLX, removed for Ollama. */
 export const ENGINE_ENV_KEYS = ["EDGECODER_ENGINE", "VLLM_URL", "VLLM_MODEL", "VLLM_MAX_SLOTS", "VLLM_API_KEY", "MLX_URL", "MLX_MODEL", "MLX_MAX_SLOTS", "ENGINE_MODEL_ALIASES"] as const;
@@ -98,8 +112,39 @@ export function checkVllmUrl(v: string): string {
   return v.replace(/\/+$/, "");
 }
 export function checkVllmProfile(v: string): string {
-  if (!Object.prototype.hasOwnProperty.call(VLLM_PROFILES, v)) throw new Error(`--vllm-profile must be one of ${Object.keys(VLLM_PROFILES).join(", ")}`);
+  if (v !== VLLM_PROFILE_AUTO && !Object.prototype.hasOwnProperty.call(VLLM_PROFILES, v)) throw new Error(`--vllm-profile must be one of ${vllmProfileChoices().join(", ")}`);
   return v;
+}
+/** Every --vllm-profile value: auto first, then the profiles. */
+export function vllmProfileChoices(): string[] {
+  return [VLLM_PROFILE_AUTO, ...Object.keys(VLLM_PROFILES)];
+}
+
+/**
+ * --vllm-profile auto: the profile for an instance's GPUs (from nvidia-smi, hardware.ts), or why
+ * none fits. One card: by its memory (nvidia-smi's MiB / 1024, rounded: an A10 or L4 reads 22,
+ * an L40S 45, an A100 40 GB 40). Two 15-21 GB cards pooled in one instance (--single): a16x2.
+ * Several bigger cards pooled: the smallest card's single-card profile (vLLM then uses the first
+ * card; run --per-gpu for one vLLM per card).
+ */
+export function autoVllmProfile(gpus: ReadonlyArray<{ vendor: string; vramGb: number }>): { profile?: string; reason: string } {
+  const nv = gpus.filter((g) => g.vendor === "nvidia");
+  if (nv.length === 0 || nv.length !== gpus.length) return { reason: "vLLM needs NVIDIA GPUs, and nvidia-smi found none for this instance" };
+  const min = Math.min(...nv.map((g) => g.vramGb));
+  const what = `${nv.length > 1 ? `${nv.length}x ` : ""}${min} GB`;
+  if (nv.length === 2 && min >= 15 && min < 22) return { profile: "a16x2", reason: `${what}: AWQ over both cards` };
+  if (min >= 76) return { profile: "a100-80", reason: `${what}: FP8, 64K context, 12 slots` };
+  if (min >= 44) return { profile: "gpu-48gb", reason: `${what}: AWQ, 64K context, 6 slots` };
+  if (min >= 38) return { profile: "a100-40", reason: `${what}: AWQ, 64K context, 4 slots` };
+  if (min >= 22) return { profile: "gpu-24gb", reason: `${what}: AWQ, 16K context, 1 slot` };
+  if (nv.length === 1 && min >= 15) return { reason: `${what}: too small for vLLM's 30B model on its own; with two such cards, re-run with --single (profile a16x2), else stay on Ollama` };
+  return { reason: `${what}: too small for vLLM's 30B model (needs a 22 GB card or more); stay on Ollama` };
+}
+
+/** The concrete profile an instance installs with: --vllm-profile, with auto resolved from its GPUs. */
+export function instanceVllmProfile(profile: string | undefined, gpus: ReadonlyArray<{ vendor: string; vramGb: number }>): { profile?: string; reason?: string } {
+  if (profile !== VLLM_PROFILE_AUTO) return { profile };
+  return autoVllmProfile(gpus);
 }
 
 /** A value kept from an old env file: dropped unless it passes the same check as the flag. */

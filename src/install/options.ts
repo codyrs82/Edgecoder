@@ -8,7 +8,7 @@
  * that the platform entry points and docs/install.md stay in step).
  */
 
-import { checkEngine, checkVllmModel, checkVllmProfile, checkVllmSlots, checkVllmUrl, VLLM_PROFILES, type EngineKind, type InstanceEngine } from "./engine.js";
+import { checkEngine, checkVllmModel, checkVllmProfile, checkVllmSlots, checkVllmUrl, vllmProfileChoices, type EngineKind, type InstanceEngine } from "./engine.js";
 
 export interface InstallOptions {
   command: "detect" | "plan" | "apply" | "status" | "remove" | "help";
@@ -88,7 +88,7 @@ export const INSTALL_OPTIONS: OptionSpec[] = [
   { flag: "--vllm-model", arg: "ORG/REPO", description: "vLLM: the Hugging Face model id vLLM serves (VLLM_MODEL). Implies --engine vllm. Default: the one already set, else vllm-<n>.env's VLLM_MODEL_ID." },
   { flag: "--vllm-slots", arg: "N", description: "vLLM: model calls at once, 1-16 (VLLM_MAX_SLOTS). Implies --engine vllm. Default: the one already set, else derived from vLLM's KV cache." },
   { flag: "--vllm-url", arg: "URL", description: "vLLM: the server URL (VLLM_URL). Implies --engine vllm. Default http://127.0.0.1:<8000+n>." },
-  { flag: "--vllm-profile", arg: `${Object.keys(VLLM_PROFILES).join("|")}`, description: "vLLM: when vLLM is not installed for an instance yet, run scripts/linux/vllm/install-vllm.sh with this profile (model, serve flags, slots) and download the weights. Implies --engine vllm." },
+  { flag: "--vllm-profile", arg: `${vllmProfileChoices().join("|")}`, description: "vLLM: when vLLM is not installed for an instance yet, run scripts/linux/vllm/install-vllm.sh with this profile (model, serve flags, slots) and download the weights. auto picks the profile from each instance's GPUs (nvidia-smi). Implies --engine vllm." },
   { flag: "--layout", arg: "per-gpu|mixed|single", description: "How GPUs are used. per-gpu: one model per card (most parallel work). mixed: half the cards one per card, the rest in pairs for a bigger model (default on 4+ cards of 40 GB+). single: every card pooled for the biggest model." },
   { flag: "--gpus-per-instance", arg: "N", description: "Pool N GPUs per instance (overrides --layout), e.g. 2 for qwen3-coder-next on 48 GB cards, 8 for qwen3-coder:480b." },
   { flag: "--per-gpu", description: "Same as --layout per-gpu." },
