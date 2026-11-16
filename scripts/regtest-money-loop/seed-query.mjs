@@ -4,7 +4,7 @@
 //   ledger-totals                      row and sum checks over the whole ledger
 //   payouts <sinceMs>                  payout rows created since
 //   transfer <from> <runId> <json [[accountId, sats], ...]> <feeBps>
-//                                      regtest-only test earnings, balanced: a spend on <from> and,
+//                                      test-network-only (regtest/signet) test earnings, balanced: a spend on <from> and,
 //                                      per host, an earn (95 %) plus a network-fee earn on the pool
 //   owners                             agent -> account
 //   records <taskId,...>               ordering ledger records (coordinator that billed them)
@@ -73,6 +73,8 @@ try {
     out(rows.map((r) => ({ id: r.payout_id, account: r.account_id, coord: r.coordinator_id, kind: r.kind, hash: r.payment_hash, amountMsat: n(r.amount_msat), feeMsat: n(r.fee_msat), maxFeeMsat: n(r.max_fee_msat), status: r.status, error: r.error, destination: r.destination, createdAtMs: n(r.created_at_ms), settledAtMs: r.settled_at_ms === null ? null : n(r.settled_at_ms) })));
   } else if (cmd === "transfer") {
     const [from, runId, json, bps] = a;
+    const net = process.env.BITCOIN_NETWORK;
+    if (net !== "regtest" && net !== "signet") throw new Error(`refusing: transfer is for regtest/signet, this seed is on ${net}`);
     const list = JSON.parse(Buffer.from(json, "base64").toString("utf8"));
     const feeBps = Number(bps);
     const now = Date.now();
@@ -84,7 +86,7 @@ try {
       const c = await pool.connect();
       try {
         await c.query("BEGIN");
-        const reason = `regtest_e2e_test:${runId}`;
+        const reason = `${net}_e2e_test:${runId}`; // regtest_e2e_test / signet_e2e_test
         await c.query(`INSERT INTO credit_transactions (tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms, msat) VALUES ($1,$2,'spend',$3,$4,NULL,$5,NULL)`, [randomUUID(), from, total, reason, now]);
         const rows = [];
         for (const [acct, sats] of list) {

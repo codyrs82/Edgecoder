@@ -9,7 +9,14 @@ export const HERE = dirname(fileURLToPath(import.meta.url));
 export const PORTAL = process.env.ML_PORTAL ?? "https://edgecoder.io";
 export const COORDS = { us: process.env.ML_COORD_US ?? "https://coordinator.edgecoder.io", eu: process.env.ML_COORD_EU ?? "https://coordinator-eu.edgecoder.io" };
 export const SEEDS = { us: "edgecoder-seed", eu: "edgecoder-seed-eu" };
-export const LND_APP = "edgecoder-lnd-test";
+// ML_NETWORK=signet runs the loop against Mutinynet: the coordinators' node is edgecoder-lnd-signet
+// (one machine, `lnc` wrapper) and the outside payer / payee is the Mutinynet faucet, called from
+// inside that machine (deploy/lnd-signet/README.md, "Prove routing"). Default: regtest.
+export const NETWORK = process.env.ML_NETWORK ?? "regtest";
+if (!["regtest", "signet"].includes(NETWORK)) throw new Error(`ML_NETWORK must be regtest or signet, not ${NETWORK}`);
+export const LND_APP = NETWORK === "signet" ? "edgecoder-lnd-signet" : "edgecoder-lnd-test";
+/** Invoice prefix for this network (refuse anything else: it could be real money). */
+export const INVOICE_RE = NETWORK === "signet" ? /^lntbs\d/i : /^lnbcrt\d/i;
 export const LNURL_APP = process.env.ML_LNURL_APP ?? "edgecoder-regtest-lnurl";
 export const LNURL_HOST = `${LNURL_APP}.fly.dev`;
 const CFG = join(homedir(), ".config/edgecoder");
@@ -64,11 +71,36 @@ export async function lndMachine(group) {
   if (!m) throw new Error(`no ${group} machine`);
   return (machineCache[group] = m.id);
 }
-/** lncli on the regtest hub or payee node (edgecoder-lnd-test). */
+/** lncli on the regtest hub or payee node (edgecoder-lnd-test), or on signet the coordinators' node. */
 export async function lncli(group, cmd) {
+  if (NETWORK === "signet") {
+    if (group !== "hub") throw new Error("signet has no payee node; the faucet pays and is paid (faucetPay / faucetInvoice)");
+    return signetSh(`lnc ${cmd}`);
+  }
   const m = await lndMachine(group);
   const outp = await fly(["ssh", "console", "-a", LND_APP, "--machine", m, "-q", "-C", `lncli --lnddir=/data --network=regtest ${cmd}`], { timeoutMs: 180_000 });
   return outp.split("\n").filter((l) => !l.startsWith("Connecting")).join("\n");
+}
+
+/** A command inside the signet node's machine (where the faucet calls run, as the README does). */
+export async function signetSh(cmd) {
+  if (NETWORK !== "signet") throw new Error("signet only");
+  const outp = await fly(["ssh", "console", "-a", LND_APP, "-q", "-C", `sh -c '${cmd.replace(/'/g, "")}'`], { timeoutMs: 180_000 });
+  return outp.split("\n").filter((l) => !l.startsWith("Connecting")).join("\n");
+}
+/** Signet: the Mutinynet faucet pays <bolt11> through its LNURL-withdraw (an outside payer). */
+export async function faucetPay(bolt11) {
+  if (!/^lntbs\d+[a-z0-9]+$/i.test(bolt11)) throw new Error("refusing to hand the faucet a non-signet invoice");
+  const r = await signetSh(`k1=$(curl -sf https://faucet.mutinynet.com/api/lnurlw | jq -r .k1) && curl -sf "https://faucet.mutinynet.com/api/lnurlw/callback?k1=$k1&pr=${bolt11}"`);
+  return lastJson(r);
+}
+/** Signet: an invoice from the Mutinynet faucet (an outside payee) for <sats>. */
+export async function faucetInvoice(sats) {
+  const r = await signetSh(`curl -sf -X POST https://faucet.mutinynet.com/api/bolt11 -H content-type:application/json -d {\\"amount_sats\\":${Math.floor(Number(sats))}}`);
+  const bolt11 = lastJson(r).bolt11;
+  if (!INVOICE_RE.test(bolt11 ?? "")) throw new Error("faucet returned no signet invoice");
+  const d = JSON.parse(await lncli("hub", `decodepayreq ${bolt11}`));
+  return { bolt11, hash: d.payment_hash };
 }
 
 export async function http(url, { method = "GET", headers = {}, body, timeoutMs = 120_000 } = {}) {

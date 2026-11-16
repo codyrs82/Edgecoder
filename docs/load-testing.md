@@ -67,7 +67,7 @@ inference-only (`SANDBOX_MODE=none`), so jobs would never run.
   aside up to ~750 cSats up front, refunded after); a `402` pauses that user for a minute; each
   machine stops after its share of `--budget` cSats (default 2000 for the run).
 - This tool generates no agents (the owner's limit is ≤ 60 agents on the network).
-- Regtest only: top-ups refuse any invoice that is not `lnbcrt…`.
+- Regtest by default: top-ups refuse any invoice that is not `lnbcrt…`. With `budget.mjs topup --network signet` (after the coordinators moved to signet) they accept only `lntbs…` invoices, paid by the Mutinynet faucet from inside `edgecoder-lnd-signet`.
 
 ## Profiles
 

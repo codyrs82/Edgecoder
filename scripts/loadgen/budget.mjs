@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 /**
- * Pre-run budget for the load test accounts (REGTEST ONLY). Runs on the operator's machine.
+ * Pre-run budget for the load test accounts (REGTEST, or SIGNET with --network signet). Runs on the
+ * operator's machine.
  *
  *   node scripts/loadgen/budget.mjs check [--users st1,st2]
  *   node scripts/loadgen/budget.mjs topup --min 200 --to 1000 --max-total 5000 [--users ...] [--dry-run]
@@ -22,7 +23,9 @@
  * topup buys cSats for every account below --min, up to --to, through the public API
  * (POST /v1/account/topup), and pays the invoice from the regtest payee node
  * (fly ssh into edgecoder-lnd-test, process group "payee"), as scripts in the e2e kit do.
- * Refuses any invoice that is not a regtest invoice (lnbcrt...), so it cannot spend real funds,
+ * With --network signet the invoice is paid by the Mutinynet faucet's LNURL-withdraw, called from
+ * inside edgecoder-lnd-signet (deploy/lnd-signet/README.md), and only signet invoices (lntbs...)
+ * are accepted. Refuses any invoice that is not for the chosen test network, so it cannot spend real funds,
  * and never spends more than --max-total sats in one call. Keys come from the account files and
  * are never printed. Needs FLY_API_TOKEN (or ~/.config/edgecoder/fly.token) for the payee.
  */
@@ -38,7 +41,9 @@ const cmd = argv[0];
 const flag = (n, d) => { const i = argv.indexOf(`--${n}`); return i < 0 ? d : argv[i + 1] === undefined || argv[i + 1].startsWith("--") ? "true" : argv[i + 1]; };
 const URL_ = flag("url", "https://edgecoder.io");
 const DIR = flag("keys-dir", join(homedir(), ".config/edgecoder/e2e/accounts"));
-const LND_APP = flag("lnd-app", "edgecoder-lnd-test");
+const NETWORK = flag("network", "regtest");
+if (!["regtest", "signet"].includes(NETWORK)) throw new Error("--network must be regtest or signet");
+const LND_APP = flag("lnd-app", NETWORK === "signet" ? "edgecoder-lnd-signet" : "edgecoder-lnd-test");
 const UA = "edgecoder-loadgen/1.0 (budget)";
 const only = (flag("users", "") || "").split(",").filter(Boolean);
 
@@ -67,9 +72,16 @@ function flyEnv() {
 }
 let payeeId;
 function payInvoice(invoice) {
+  const e = flyEnv();
+  if (NETWORK === "signet") {
+    // Signet invoices start with lntbs; anything else could be real money.
+    if (!/^lntbs\d+[a-z0-9]+$/i.test(invoice)) throw new Error("refusing to pay a non-signet invoice");
+    const sh = `k1=$(curl -sf https://faucet.mutinynet.com/api/lnurlw | jq -r .k1) && curl -sf "https://faucet.mutinynet.com/api/lnurlw/callback?k1=$k1&pr=${invoice}"`;
+    const outp = execFileSync("fly", ["ssh", "console", "-a", LND_APP, "-q", "-C", `sh -c '${sh}'`], { env: e, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 120_000 });
+    return /"status"\s*:\s*"OK"/.test(outp);
+  }
   // Regtest invoices start with lnbcrt; anything else could be real money.
   if (!/^lnbcrt\d/i.test(invoice)) throw new Error("refusing to pay a non-regtest invoice");
-  const e = flyEnv();
   payeeId ??= JSON.parse(execFileSync("fly", ["machines", "list", "-a", LND_APP, "--json"], { env: e, encoding: "utf8" }))
     .find((m) => m.config?.metadata?.fly_process_group === "payee")?.id;
   if (!payeeId) throw new Error(`no payee machine in ${LND_APP}`);
@@ -110,7 +122,7 @@ if (cmd === "check") {
     if (paid) spent += want;
     console.log(`${a.name}: bought ${want} sats, payment ${paid ? "sent" : "not sent"}, intent ${status}; balance now ${(await balance(a))?.toFixed(3)} cSats`);
   }
-  console.log(`${dry ? "would spend" : "spent"} ${spent} regtest sats (limit ${maxTotal})`);
+  console.log(`${dry ? "would spend" : "spent"} ${spent} ${NETWORK} sats (limit ${maxTotal})`);
 } else if (cmd === "ledger" || cmd === "buyers") {
   const token = adminToken();
   const list = (s) => (s && s !== "true" ? s.split(",").map((x) => x.trim()).filter(Boolean) : []);
@@ -147,6 +159,6 @@ if (cmd === "check") {
     console.log(formatMoney(m));
   }
 } else {
-  console.log("usage: budget.mjs check | topup --min N --to N --max-total N [--users a,b] [--dry-run] | ledger [--out f] [--before f [--after f] [--results f ...]] | buyers [--buyers a,b]");
+  console.log("usage: budget.mjs check | topup [--network regtest|signet] --min N --to N --max-total N [--users a,b] [--dry-run] | ledger [--out f] [--before f [--after f] [--results f ...]] | buyers [--buyers a,b]");
   process.exit(2);
 }
