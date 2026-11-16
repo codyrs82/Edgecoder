@@ -30,7 +30,8 @@ describe("Install command-line tool", () => {
       [
         "#!/bin/sh",
         "# EdgeCoder CLI launcher: runs the agent bundled inside the desktop app with the app's own Node.",
-        `APP="${agent}"`,
+        // The shell-quoted path (a Windows temp dir has backslashes, escaped for sh).
+        `APP="${agent.replace(/(["\\$`])/g, "\\$1")}"`,
         `[ -x "$APP/node/node" ] || { echo "EdgeCoder app not found at ${agent}" >&2; exit 1; }`,
         'exec "$APP/node/node" "$APP/dist/cli/edgecoder.js" "$@"',
         "",

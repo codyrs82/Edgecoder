@@ -75,6 +75,7 @@ describe("nothing pipes downloaded content into a shell", () => {
   // Hostile-input fixtures: tests that feed \`curl … | sh\` to the app to check it is escaped or refused.
   const FIXTURES = new Set([
     "tests/ide/bot-github.test.ts",
+    "tests/ide/permissions.test.ts",
     "tests/portal/output-escaping.test.ts",
     "tests/repo/dockerfiles.test.ts",
     "tests/trust/response-signing.test.ts"

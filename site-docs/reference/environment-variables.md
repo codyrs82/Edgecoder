@@ -643,7 +643,8 @@ These are not service configuration, so no schema lists them and the docs test s
 | Variable | Read by | Description |
 |---|---|---|
 | `FLY_APP_NAME`, `FLY_REGION` | coordinator, portal | Set by the Fly runtime. |
-| `PATH`, `SHELL`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `APPDATA`, `LOCALAPPDATA`, `USERNAME`, `USERDOMAIN` | platform helpers, installer | Operating-system environment. |
+| `EDGECODER_PERMISSIONS_FILE` | IDE provider (src/apps/ide/permissions.ts) | Where the terminal and app keep per-project "always" approvals (default `~/.edgecoder/permissions.json`, or beside `EDGECODER_SESSIONS_DIR`). For tests and second profiles. |
+| `PATH`, `HOME`, `SHELL`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `APPDATA`, `LOCALAPPDATA`, `USERNAME`, `USERDOMAIN` | platform helpers, installer | Operating-system environment. |
 | `NO_COLOR`, `GIT_CONFIG_COUNT` | IDE provider, `edgecoder code` | Set by the IDE provider for the child processes it starts. `edgecoder code` prints without colour when `NO_COLOR` is set. |
 | `VITEST` | portal registry | Set by the test runner. |
 | `CUDA_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`, `EDGECODER_GPU_INDEX`, `OLLAMA_NUM_PARALLEL` | installer (`src/install/`), worker | Written into the service units the installer generates; a worker uses them to pick its GPU. |

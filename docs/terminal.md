@@ -92,7 +92,7 @@ In every mode:
   read-only.
 - **Risky commands always ask:** anything touching a path outside the project or a protected path
   (`.git`, hooks, files tooling runs); `rm` and similar; `git push`, `git reset --hard`,
-  `git clean`; `curl … | sh`; package installs (`npm install`, `pip install`, `brew install`, `npx`, …);
+  `git clean`; downloads piped into a shell; package installs (`npm install`, `pip install`, `brew install`, `npx`, …);
   network fetches (`curl`, `wget`, `ssh`, …); shell syntax that can't be checked.
 - Pushes and pull requests (the git tools) ask every time; commits ask as before.
 
