@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { STEP_IDS } from "../../src/common/onboarding.js";
 import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -85,6 +86,8 @@ const PUBLIC: Record<string, string> = {
   "GET /portal/settings/revenue": "page shell (the revenue APIs it calls are system-admin only)",
   "GET /portal/settings/network": "page shell (the network API it calls is system-admin only)",
   "GET /portal/settings/world": "page shell (the world view API it calls needs a session)",
+  "GET /portal/welcome": "page shell (Getting started; the onboarding API it calls needs a session)",
+  ...Object.fromEntries(STEP_IDS.map((id) => [`GET /portal/welcome/${id}`, "page shell (one Getting started step)"])),
   "GET /portal/wallet": "legacy redirect",
   "GET /portal/market": "legacy redirect",
   "GET /portal/download": "legacy redirect",

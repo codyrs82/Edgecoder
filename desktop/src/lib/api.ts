@@ -933,6 +933,45 @@ export interface WalletOverview {
   payouts: { balance: PayoutBalance | null; policy: PayoutPolicyView | null; payouts: PayoutRow[] } | null;
 }
 
+// ---------------------------------------------------------------------------
+// Getting started (portal /portal/api/onboarding): progress per account, shared with the web
+// ---------------------------------------------------------------------------
+
+import type { OnboardingSignals, OnboardingState, OnboardingGoal, RoutingPolicy, StepId } from "./onboarding";
+export interface OnboardingAnswer {
+  state: OnboardingState | null;
+  signals: OnboardingSignals;
+  show: boolean;
+}
+export interface OnboardingPatch {
+  goal?: OnboardingGoal | null;
+  current?: StepId;
+  done?: StepId[];
+  skipped?: StepId[];
+  routing?: RoutingPolicy | null;
+  dismissed?: boolean;
+  completed?: boolean;
+  firstTask?: true;
+  reset?: true;
+}
+
+export async function getOnboarding(): Promise<OnboardingAnswer> {
+  const res = await fetch(`${portalBase()}/portal/api/onboarding`, { headers: { ...authHeaders() }, credentials: "include" });
+  if (!res.ok) throw new Error(`Could not load your progress (${res.status}).`);
+  return res.json();
+}
+
+export async function saveOnboarding(patch: OnboardingPatch): Promise<OnboardingAnswer> {
+  const res = await fetch(`${portalBase()}/portal/api/onboarding`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    credentials: "include",
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error(`Could not save your progress (${res.status}).`);
+  return res.json();
+}
+
 export async function getWalletOverview(): Promise<WalletOverview> {
   const res = await fetch(`${portalBase()}/portal/api/wallet/overview`, { headers: { ...authHeaders() }, credentials: "include" });
   if (res.status === 401) throw new Error("Sign in to see your wallet.");

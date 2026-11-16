@@ -12,6 +12,7 @@ import { registerPublicPages, type PublicPagesDeps } from "./public.js";
 import { registerResetPasswordPage } from "./reset-password.js";
 import { registerReviewsPage } from "./reviews.js";
 import { registerSettingsPages } from "./settings.js";
+import { registerWelcomePages } from "./welcome.js";
 
 /** #16: every server-rendered HTML page of the portal (API routes stay in server.ts for now). */
 export function registerPortalPages(app: FastifyInstance, deps: PublicPagesDeps = {}): void {
@@ -29,5 +30,7 @@ export function registerPortalPages(app: FastifyInstance, deps: PublicPagesDeps 
   registerDashboardPages(app);
   registerAccountPages(app);
   registerSettingsPages(app);
+  // Getting started (/portal/welcome): the same steps as the desktop app's wizard.
+  registerWelcomePages(app);
   registerReviewsPage(app);
 }

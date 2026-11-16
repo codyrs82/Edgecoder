@@ -52,6 +52,7 @@ export const USER_DELETE_PLAN: readonly DeleteStep[] = [
   { table: "portal_wallet_send_mfa_challenges", column: "user_id", by: "userId" },
   { table: "portal_wallet_send_requests", column: "user_id", by: "userId" },
   { table: "portal_wallet_onboarding", column: "user_id", by: "userId" },
+  { table: "portal_onboarding", column: "user_id", by: "userId" },
   { table: "portal_withdraw_challenges", column: "user_id", by: "userId" },
   { table: "portal_payout_destination_challenges", column: "user_id", by: "userId" },
   { table: "portal_payout_destinations", column: "user_id", by: "userId" },

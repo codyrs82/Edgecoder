@@ -10,6 +10,13 @@ const NOW = Date.now();
 const PEER = "12D3KooWA11yPeer0000000000000000000000000000000001";
 
 const FIXTURES: Array<[RegExp, unknown]> = [
+  // Getting started: closed (show: false), so the app shell isn't covered by the guide; the
+  // Settings section and the guide itself still have saved progress to show.
+  [/\/portal\/api\/onboarding$/, {
+    state: { goal: "both", done: ["welcome", "how"], skipped: [], current: "models", routing: null, dismissed: true, completedAtMs: null, firstSeenAtMs: NOW - 3_600_000, firstTaskAtMs: null, updatedAtMs: NOW },
+    signals: { machines: 2, machinesOnline: 1, balanceCSats: 0, apiKeys: 0, github: false, firstTask: false, hostApproved: false, hostRequested: false, newAccount: true, localModels: null, cliInstalled: null },
+    show: false,
+  }],
   [/\/v1\/ide\/network\/world$/, WORLD],
   [/:4301\/health\/runtime/, {
     ok: true,
@@ -165,6 +172,7 @@ export function fixtureFor(url: string): unknown {
  * placeholders or an empty state first, and an audit of those would pass without testing anything.
  */
 export const SECTION_SHOWS: Record<string, string> = {
+  "Getting started": "steps done",
   "General": "us-east",
   "Profile": "a11y@example.org",
   "Usage": "Compute time",
