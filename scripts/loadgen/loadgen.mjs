@@ -40,7 +40,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { HARD_MAX_RATE, PERSONAS, MODELS, buildSchedule, codingContext, parseDuration } from "./profiles.mjs";
-import { StageStats, classifyError, digestStage, isFailure, table } from "./stats.mjs";
+import { StageStats, classifyCall, digestStage, isFailure, table } from "./stats.mjs";
 import { CapacityPlanner, RateGovernor, fatalStop, parseModelId, pickWithAutoShare } from "./planner.mjs";
 import { fetchCapacity } from "./capacity.mjs";
 import { CodingSession, codegenSize, codegenTask, modelMix, pickWeighted, question, rng } from "./workload.mjs";
@@ -70,6 +70,9 @@ const MIN_BALANCE = Number(opt("min-balance", "LOADGEN_MIN_BALANCE", 1000));
 const BUYER_CAP = Number(opt("buyer-cap", "LOADGEN_BUYER_CAP_CSATS", 0));
 const MIN_RATE = Number(opt("min-rate", "LOADGEN_MIN_RATE", 0.02));
 const MAX_INFLIGHT = Number(opt("max-inflight", "LOADGEN_MAX_INFLIGHT", 48));
+// A stream with no byte for this long (the portal sends a keepalive comment every 15 s) is cut by the
+// client and counted as stream_idle_timeout; 0 turns the check off.
+const IDLE_MS = Number(opt("idle-ms", "LOADGEN_IDLE_MS", 60_000));
 const LINGER_SEC = Number(opt("linger", "LOADGEN_LINGER_SEC", 0));
 const RESULTS = opt("results", "LOADGEN_RESULTS", join(tmpdir(), `loadgen-${RUN_ID}-${REGION}.jsonl`));
 const DRY = flag("dry-run") === "true";
@@ -171,11 +174,24 @@ async function balance(u) {
 /**
  * One streamed chat completion. Returns the measured result; never throws.
  * body: OpenAI request (model, messages, tools, max_tokens).
+ *
+ * How a failed call ended is classified by classifyCall (stats.mjs): the client's deadline, an idle
+ * stream (no byte, keepalive comments included, for IDLE_MS: the portal sends one every 15 s), a
+ * connection cut before or after the first token, an edge proxy's error page, or an error event
+ * inside the stream. The response's ids (cf-ray, fly-request-id, x-request-id) and timings go with
+ * the error (`meta`), so LOADGEN_ERR lines can be matched to the portal's and coordinator's logs.
  */
 async function chatCall(u, body, { timeoutMs, sessionId }) {
   const t0 = performance.now();
   let ttft = null, text = "", status = 0, errBody = "", cSats = 0, usage = null, where = null, served = null;
+  let failure = null, gotHeaders = false, sawDone = false, inband = false, keepalives = 0, bytes = 0, lastByte = t0, headersMs = null;
+  const ids = {};
   const toolCalls = [];
+  const ctl = new AbortController();
+  const deadline = setTimeout(() => { failure ??= "timeout"; ctl.abort(); }, timeoutMs);
+  const idle = IDLE_MS > 0
+    ? setInterval(() => { if (performance.now() - lastByte > IDLE_MS) { failure ??= "idle"; ctl.abort(); } }, Math.min(1000, IDLE_MS))
+    : null;
   try {
     const res = await fetch(`${URL_}/v1/chat/completions`, {
       method: "POST",
@@ -188,23 +204,31 @@ async function chatCall(u, body, { timeoutMs, sessionId }) {
         ...(sessionId ? { "x-session-id": sessionId } : {}),
       },
       body: JSON.stringify({ ...body, stream: true, temperature: 0, ...(sessionId ? { user: sessionId } : {}) }),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: ctl.signal,
     });
     status = res.status;
+    gotHeaders = true;
+    lastByte = performance.now();
+    headersMs = Math.round(lastByte - t0);
+    for (const h of ["cf-ray", "fly-request-id", "x-request-id"]) { const v = res.headers.get(h); if (v) ids[h] = v; }
     if (!res.ok || !res.body) errBody = (await res.text().catch(() => "")).slice(0, 300);
     else {
       const dec = new TextDecoder();
       let buf = "";
       for await (const chunk of res.body) {
+        lastByte = performance.now();
+        bytes += chunk.byteLength ?? chunk.length ?? 0;
         buf += dec.decode(chunk, { stream: true });
         let nl;
         while ((nl = buf.indexOf("\n")) >= 0) {
           const line = buf.slice(0, nl).trim();
           buf = buf.slice(nl + 1);
-          if (!line.startsWith("data: ") || line === "data: [DONE]") continue;
+          if (line.startsWith(":")) { keepalives++; continue; }
+          if (line === "data: [DONE]") { sawDone = true; continue; }
+          if (!line.startsWith("data: ")) continue;
           let j;
           try { j = JSON.parse(line.slice(6)); } catch { continue; }
-          if (j.error) errBody = JSON.stringify(j.error).slice(0, 300);
+          if (j.error) { inband = true; errBody = JSON.stringify(j.error).slice(0, 300); }
           const d = j.choices?.[0]?.delta;
           if (d?.content) { if (ttft === null) ttft = performance.now() - t0; text += d.content; }
           if (d?.tool_calls?.length) { if (ttft === null) ttft = performance.now() - t0; toolCalls.push(...d.tool_calls); }
@@ -217,14 +241,20 @@ async function chatCall(u, body, { timeoutMs, sessionId }) {
       }
     }
   } catch (e) {
-    if (e?.name === "TimeoutError") status = "timeout";
-    else if (!status) status = "network";
-    errBody = String(e?.message ?? e).slice(0, 200);
+    failure ??= "network";
+    if (!errBody) errBody = String(e?.cause?.code ?? e?.message ?? e).slice(0, 200);
+  } finally {
+    clearTimeout(deadline);
+    if (idle) clearInterval(idle);
   }
-  const totalMs = Math.round(performance.now() - t0);
-  const error = status === 200 && !errBody ? null : classifyError(status, errBody) ?? `http_${status}`;
+  const now = performance.now();
+  const totalMs = Math.round(now - t0);
+  const error = classifyCall({ status: failure === "timeout" ? "timeout" : status, errBody, failure, gotHeaders, tokens: ttft !== null, sawDone, inband });
+  const meta = error
+    ? { ttftMs: ttft === null ? null : Math.round(ttft), totalMs, headersMs, sinceLastByteMs: Math.round(now - lastByte), keepalives, bytes, ...(Object.keys(ids).length ? { ids } : {}) }
+    : undefined;
   return {
-    status, error, errDetail: error ? errBody.slice(0, 160) : undefined, ttftMs: ttft === null ? null : Math.round(ttft), totalMs, text, toolCalls,
+    status, error, errDetail: error ? errBody.slice(0, 160) : undefined, meta, ttftMs: ttft === null ? null : Math.round(ttft), totalMs, text, toolCalls,
     cSats, where, served, promptTokens: usage?.prompt_tokens ?? 0, outputTokens: usage?.completion_tokens ?? 0,
   };
 }
@@ -288,7 +318,7 @@ function record(stats, u, behaviour, model, r, correct, extra = {}) {
     out("LOADGEN_EVENT", { type: "user_stopped", user: u.name, reason: "buyer_cap", cSats: Math.round(mo.cSats * 1000) / 1000 });
   }
   // Every error while they are few, then every 20th (the stage lines carry the full counts).
-  if (r.error && (process.env.LOADGEN_VERBOSE === "1" || stats.errLogged++ < 30 || stats.errLogged % 20 === 0)) out("LOADGEN_ERR", { user: u.name, behaviour, model, error: r.error, status: r.status, detail: r.errDetail, ...extra });
+  if (r.error && (process.env.LOADGEN_VERBOSE === "1" || stats.errLogged++ < 30 || stats.errLogged % 20 === 0)) out("LOADGEN_ERR", { user: u.name, behaviour, model, error: r.error, status: r.status, detail: r.errDetail, ...(r.meta ?? {}), ...extra });
   if (u.balance !== null && u.balance - u.spent < MIN_BALANCE && !u.stopped) {
     u.stopped = "low_balance";
     out("LOADGEN_EVENT", { type: "user_stopped", user: u.name, reason: "low_balance", balance: Math.round(u.balance - u.spent) });
