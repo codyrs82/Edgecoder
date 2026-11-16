@@ -107,7 +107,7 @@ export interface BestFitConfig {
   /** Total time at which the latency score is 0.5. */
   latencyTargetMs: { interactive: number; batch: number };
   /**
-   * Cost (cSats) at which the price score is 0.5. 9 since the 30B-class price rose ~8.6× (2026-11-16),
+   * Cost (cSats) at which the price score is 0.5. 5 since the 30B-class price rose ~4.7× (2026-11-16),
    * so a 30B call scores on price as it did before and Auto still sends code work to it.
    */
   priceRefCSats: number;
@@ -125,7 +125,7 @@ export const DEFAULT_BEST_FIT_CONFIG: BestFitConfig = {
   weights: { quality: 0.4, latency: 0.3, price: 0.15, reliability: 0.15 },
   complexityShift: 1,
   latencyTargetMs: { interactive: 8_000, batch: 120_000 },
-  priceRefCSats: 9,
+  priceRefCSats: 5,
   preferMs: 400,
   sessionTtlMs: 30 * 60_000,
   oversizePenalty: 0.25,

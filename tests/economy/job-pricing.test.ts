@@ -47,28 +47,28 @@ describe("per-token pricing for model calls", () => {
   it("prices by size", () => {
     expect(tokenPriceUsdPerM(1.5)).toEqual({ input: 0.01, output: 0.03 });
     expect(tokenPriceUsdPerM(9)).toEqual({ input: 0.04, output: 0.1 });
-    expect(tokenPriceUsdPerM(70)).toEqual({ input: 2.6, output: 6.95 });
+    expect(tokenPriceUsdPerM(70)).toEqual({ input: 1.43, output: 3.8 });
     // 9B at $100k BTC: 40 sats in, 100 sats out per million tokens.
     expect(cSatsPerMTokens(9, 100_000)).toEqual({ input: 40, output: 100 });
   });
 
   it("prices qwen3-coder-next (no size in its tag) as the 80B model it is, not the 7B default", () => {
-    expect(tokenPriceUsdPerM(paramsB("qwen3-coder-next:latest"))).toEqual({ input: 2.6, output: 6.95 });
+    expect(tokenPriceUsdPerM(paramsB("qwen3-coder-next:latest"))).toEqual({ input: 1.43, output: 3.8 });
   });
 
-  it("prices for host profit at 50 % utilization (2026-11-16): 30B and up ~8.64x, 16B and below unchanged", () => {
+  it("prices for host profit (2026-11-16): 30B and up ~4.74x (measured vLLM on a 2xA16 at 40 %), 16B and below unchanged", () => {
     expect(HOST_PROFIT_MARGIN).toBe(0.2);
-    expect(tokenPriceUsdPerM(paramsB("qwen3-coder:30b"))).toEqual({ input: 1.05, output: 3.05 });
-    expect(tokenPriceUsdPerM(paramsB("qwen2.5-coder:32b"))).toEqual({ input: 1.05, output: 3.05 });
-    expect(tokenPriceUsdPerM(paramsB("llama3.3:70b"))).toEqual({ input: 2.6, output: 6.95 });
-    expect(tokenPriceUsdPerM(paramsB("deepseek-v3:671b"))).toEqual({ input: 5.2, output: 13 });
+    expect(tokenPriceUsdPerM(paramsB("qwen3-coder:30b"))).toEqual({ input: 0.57, output: 1.66 });
+    expect(tokenPriceUsdPerM(paramsB("qwen2.5-coder:32b"))).toEqual({ input: 0.57, output: 1.66 });
+    expect(tokenPriceUsdPerM(paramsB("llama3.3:70b"))).toEqual({ input: 1.43, output: 3.8 });
+    expect(tokenPriceUsdPerM(paramsB("deepseek-v3:671b"))).toEqual({ input: 2.85, output: 7.11 });
     expect(tokenPriceUsdPerM(paramsB("deepseek-r1:14b"))).toEqual({ input: 0.07, output: 0.2 });
     expect(tokenPriceUsdPerM(paramsB("qwen3.5:9b"))).toEqual({ input: 0.04, output: 0.1 });
     // Measured 2026-11-16: a qwen3-coder:30b call averages 2,841 tokens in, 134 out. At 64,870 USD/BTC
-    // that was 0.61 cSats and is now 5.23 cSats.
+    // that was 0.61 cSats and is now 2.84 cSats.
     const call = { paramsB: 30, btcUsd: 64_870, promptTokens: 2_841, outputTokens: 134, durationMs: 4_000, computeClass: "gpu.dc", tierWeight: 1, perSecondCostMsat: 0 };
-    expect(inferenceCostMsat(call)).toEqual({ costMsat: 5_229, basis: "tokens" });
-    expect(cSatsPerMTokens(30, 100_000)).toEqual({ input: 1_050, output: 3_050 });
+    expect(inferenceCostMsat(call)).toEqual({ costMsat: 2_839, basis: "tokens" });
+    expect(cSatsPerMTokens(30, 100_000)).toEqual({ input: 570, output: 1_660 });
   });
 
   it("CPU and Apple power floors are 0.025 and 0.014 USD per base-tier hour, split over the slots", () => {
@@ -112,7 +112,7 @@ describe("per-token pricing for model calls", () => {
     // Once the floor falls below the tokens, the tokens are charged.
     const gpu = { paramsB: 30, btcUsd: 64_870, promptTokens: 2_841, outputTokens: 134, durationMs: 30_000, computeClass: "gpu.dc", tierWeight: 2.9, perSecondCostMsat: 0 };
     expect(inferenceCostMsat(gpu).basis).toBe("power_floor");
-    expect(inferenceCostMsat({ ...gpu, floorSlots: 12 })).toEqual({ costMsat: 5_229, basis: "tokens" });
+    expect(inferenceCostMsat({ ...gpu, floorSlots: 12 })).toEqual({ costMsat: 2_839, basis: "tokens" });
   });
 
   it("falls back to per-second without token counts", () => {

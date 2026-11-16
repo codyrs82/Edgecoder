@@ -51,15 +51,16 @@ cost (msat)     = usdToMsat(max(tokenUsd, floorUsd), btcUsd)        # usdToMsat 
 | ≤ 4B | 0.02 | 0.05 |
 | ≤ 9B | 0.04 | 0.10 |
 | ≤ 16B | 0.07 | 0.20 |
-| ≤ 35B | 1.05 | 3.05 |
-| ≤ 80B | 2.60 | 6.95 |
-| larger | 5.20 | 13.00 |
+| ≤ 35B | 0.57 | 1.66 |
+| ≤ 80B | 1.43 | 3.80 |
+| larger | 2.85 | 7.11 |
 
 Since 2026-11-16 the prices are set so that every host class makes a profit
-(`HOST_PROFIT_MARGIN`, 20 % over its cost) at 50 % utilization, on measured throughput; see
-"Host break-even and profit" below. Up to 16B they are unchanged since 2026-11-03. The 30B
-class and larger are 8.64× their 2026-11-03 prices (0.12 / 0.35, 0.30 / 0.80, 0.60 / 1.50),
-rounded up to 0.05, which puts them above hosted prices for the same open models. The power floor
+(`HOST_PROFIT_MARGIN`, 20 % over its cost) at 50 % utilization (datacenter GPUs at 40 %), on
+measured throughput; see "Host break-even and profit" below. Up to 16B they are unchanged since
+2026-11-03. The 30B class and larger are 4.74× their 2026-11-03 prices (0.12 / 0.35, 0.30 / 0.80,
+0.60 / 1.50), rounded up to the cent, which puts them above hosted prices for the same open
+models. (They were 8.64× from #331, set on Ollama throughput, until vLLM's was measured.) The power floor
 (`cpu` $0.025/h, `apple` $0.014/h, `gpu` $0.05/h, `gpu.dc` $0.15/h of the base tier, scaled by the
 tier weight; `cpu` was $0.005/h and `apple` $0.01/h) means a machine's owner never earns less than
 the electricity the seconds cost.
@@ -94,10 +95,11 @@ floor applies and the call costs 0.139 cSats.
 `scripts/pricing/break-even.mjs` sets the prices. For each host class it takes the measured
 throughput, the host's hourly cost and the 5 % fee, and finds what a fully busy hour must earn
 for the host to make `PROFIT_MARGIN` (20 %, the same value as `HOST_PROFIT_MARGIN`) at
-`TARGET_UTILIZATION` (50 %, the share of the hour its slots serve calls):
+`TARGET_UTILIZATION` (50 %, the share of the hour its slots serve calls; 40 % for datacenter GPUs,
+`TARGET_UTILIZATION_GPU`, since vLLM serves several calls at once):
 
 ```
-needed(full hour) = (1 + margin) × hostCostUsdPerHour / (0.95 × 0.5)
+needed(full hour) = (1 + margin) × hostCostUsdPerHour / (0.95 × target utilization)
 revenue(full)     ≈ max(tokensPerHour × band price, floor × tierWeight × concurrent calls / slots)
 breakEvenUtil     = hostCostUsdPerHour / (0.95 × revenue(full))
 profitUtil        = (1 + margin) × breakEvenUtil
@@ -106,27 +108,34 @@ profitUtil        = (1 + margin) × breakEvenUtil
 Two levers: the 30B-and-up band prices (one multiplier on their 2026-11-03 prices, set by the
 costliest target host, larger bands scaled alike), and the `cpu` and `apple` power floors (what a
 CPU or Mac host needs from the floor alone; the floor's purpose is electricity). Measured on
-2026-11-16 (60-minute sustained load, iad, 64,870 USD/BTC, Ollama with today's slots):
+2026-11-16 at 64,870 USD/BTC: the 2×A16 under vLLM 0.33 (AWQ 30B, tensor-parallel 2, 64K
+context, prefix caching; closed-loop benchmark of an 8,287-token prompt and 134 tokens out, 3
+rounds per concurrency, no preemptions: 581 calls/h at concurrency 1, 640 at 2, 676 at 4 and 6),
+everything else from a 60-minute sustained load (iad, Ollama with today's slots). Prompt sizes
+differ, so the two GPU runtimes compare on tokens per hour: vLLM with 2 slots handles about 5.30 M
+tokens in and 0.086 M out a fully busy hour, Ollama with one slot 2.14 M in and 0.10 M out (about
+2.5× fewer prompt tokens).
 
-| Host class (cost) | Model, measured | Break-even, old → now | 20 % profit at | Margin at 50 % |
+| Host class (cost) | Model, measured | Break-even, old → now | 20 % profit at | Margin at target |
 |---|---|---|---|---|
-| Vultr 2×A16, 1.00 USD/h | qwen3-coder:30b, 1 slot, 754 calls/h fully busy | never (360 %) → 41 % | 49 % | 21 % |
-| Vultr A100 80GB, 2.397 USD/h | 30B, 1 slot, *assumed 6× the A16* | never (144 %) → 16 % | 20 % | 204 % |
+| Vultr 2×A16, 1.00 USD/h | qwen3-coder:30b, vLLM 2 slots, 640 calls/h | never (158 %) → 33 % | 40 % | 20 % at 40 % |
+| Vultr 2×A16 (reference, not targeted) | qwen3-coder:30b, Ollama 1 slot, 754 calls/h fully busy | never (360 %) → 76 % | 91 % | −47 % at 40 % |
+| Vultr A100 80GB, 2.397 USD/h | 30B, Ollama 1 slot, *assumed 6× the A16 Ollama slot* | never (144 %) → 30 % | 36 % | 32 % at 40 % |
 | Mac Studio M1 Max, ~0.0135 USD/h electricity | qwen3.5:9b, 4 slots | 14 % → 33 % | 39 % | 52 % |
 | Mac Studio | qwen2.5-coder:7b, 4 slots | 14 % → 18 % | 21 % | 181 % |
 | Mac Studio | 14B, *assumed 9B × 9/14* | 14 % → 29 % | 34 % | 74 % |
 | Home CPU, 65 W, ~0.0098 USD/h | qwen2.5-coder:1.5b, 2 slots | never (103 %) → 41 % | 49 % | 22 % |
 
-The 2×A16 sets the large-band multiplier (8.64×); the home CPU sets the `cpu` floor; the Mac
+The Mac and CPU margins are at 50 %. The 2×A16 under vLLM sets the large-band multiplier (4.74×);
+an A16 host still on Ollama now breaks even only at about 76 % and should move to vLLM; the home CPU sets the `cpu` floor; the Mac
 Studio (tier weight 2.5) sets the `apple` floor, though its tokens alone already clear the target
 on the ≤16B bands. Macs are targeted on electricity only; counting depreciation ($2,000 over three
 years, about 0.076 USD/h) none of them breaks even. EdgeCoder's own Fly CPU agents
 (`edgecoder-agents`, ~0.035 USD/h) are a test fleet, not a host business, and are not targeted
 (they do not break even).
 
-vLLM's parallel slots (#329) are not counted: with the same prices a 2×A16 running 5 vLLM slots
-(assumed 3.5× the throughput) would make about 325 % at 50 %. Once vLLM throughput is measured,
-the large-band multiplier should come down by the measured gain (8.64 / gain).
+Running 4 vLLM slots instead of 2 adds only about 6 % (676 against 640 calls/h): the 2×A16 is
+saturated at about 2 concurrent calls of this size.
 
 ### Code jobs: per second
 

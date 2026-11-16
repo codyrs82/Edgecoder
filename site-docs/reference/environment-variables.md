@@ -446,7 +446,7 @@ A request with `model: "auto"` is routed by the coordinator: it describes the jo
 | `BEST_FIT_COMPLEXITY_SHIFT` | `1` | How far job complexity moves weight from latency and price to quality and reliability (0 to 2; 0 turns it off). |
 | `BEST_FIT_LATENCY_TARGET_MS` | `8000` | Interactive calls: the total time at which the latency score is 0.5. |
 | `BEST_FIT_BATCH_LATENCY_TARGET_MS` | `120000` | The same for `latency: batch` calls. |
-| `BEST_FIT_PRICE_REF_CSATS` | `9` | The estimated cost (cSats) at which the price score is 0.5. |
+| `BEST_FIT_PRICE_REF_CSATS` | `5` | The estimated cost (cSats) at which the price score is 0.5. |
 | `BEST_FIT_PREFER_MS` | `400` | How long dispatch keeps a routed call for the chosen agent before any eligible agent may take it (0 to 10000; 0 turns the preference off). |
 | `BEST_FIT_SESSION_TTL_MS` | `1800000` | How long a session remembers the agent of its last turn (session affinity). |
 | `BEST_FIT_OVERSIZE_PENALTY` | `0.25` | Quality taken off a model more than 4x the size the job wants, so big-model slots stay free for jobs that need them (0 to 1). |
