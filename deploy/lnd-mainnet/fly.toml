@@ -1,9 +1,14 @@
 # Mainnet Lightning node for the coordinators (see Dockerfile and README.md). Real funds.
-# Two machines in one app, each with its own volume:
-#   bitcoind  pruned Bitcoin Core; RPC/ZMQ on the private network only
-#   lnd       the coordinators' payout/invoice node; REST (8080) on the private network only,
-#             P2P (9735) public so other nodes can open channels to it
+# External mode (the default): one machine, `lnd`, whose chain backend is the owner's unpruned
+# Bitcoin Core `ocean-node` in Azure, reached over Fly's private network as a WireGuard peer of
+# the edgecoder org. No bitcoind runs in this app. README: "External Bitcoin node".
+#   lnd   the coordinators' payout/invoice node; REST (8080) on the private network only,
+#         P2P (9735) public so other nodes can open channels to it
 # The coordinators reach it at https://lnd.process.edgecoder-lnd.internal:8080 over Fly's 6PN.
+#
+# Fallback: fly.bundled.toml runs the old pruned bitcoind machine next to lnd
+# (`fly deploy -c fly.bundled.toml`). Its `btcdata` volume is not mounted here but is kept, so
+# that fallback does not need a fresh sync; README says how to remove it and what it costs.
 app = "edgecoder-lnd"
 primary_region = "ord" # next to edgecoder-seed and edgecoder-pg
 
@@ -11,20 +16,25 @@ primary_region = "ord" # next to edgecoder-seed and edgecoder-pg
   dockerfile = "Dockerfile"
 
 [processes]
-  bitcoind = "bitcoind"
   lnd = "lnd"
 
 [env]
   LND_ALIAS = "edgecoder"
-  BITCOIN_PRUNE_MB = "50000"   # keeps ~50 GB of blocks; lnd fetches older pruned blocks from peers
-  BITCOIN_DBCACHE_MB = "2000"  # raise to 6000 for the initial sync on the larger VM, then lower
   LND_EXTERNAL_IP = "37.16.0.48" # the app's dedicated IPv4 (README step 1), so peers can find the node
-
-[[mounts]]
-  source = "btcdata"
-  destination = "/data"
-  initial_size = "80gb"
-  processes = ["bitcoind"]
+  BITCOIND_MODE = "external"
+  BITCOIND_LABEL = "ocean-node"  # names the backend in logs only
+  # ocean-node's 6PN address (fdaa:..., brackets optional) or its private DNS name
+  # (<peer name>._peer.internal). Set it from the WireGuard peer before deploying.
+  BITCOIND_HOST = "REPLACE_WITH_OCEAN_NODE_6PN_ADDRESS"
+  BITCOIND_RPC_PORT = "8332"
+  # ZMQ defaults to tcp://[BITCOIND_HOST]:28332 (rawblock) and :28333 (rawtx). Set these only if
+  # ocean-node publishes elsewhere:
+  # BITCOIND_ZMQ_BLOCK = "tcp://[fdaa:...]:28332"
+  # BITCOIND_ZMQ_TX = "tcp://[fdaa:...]:28333"
+  BITCOIND_ESTIMATEMODE = "ECONOMICAL"
+  # Secrets (fly secrets list -a edgecoder-lnd): BITCOIND_RPC_USER, BITCOIND_RPC_PASS (the limited
+  # `lnd-edgecoder` user on ocean-node), LND_WALLET_PASS. BTC_RPC_PASS is used only by
+  # fly.bundled.toml; keep it while that fallback is wanted.
 
 [[mounts]]
   source = "lnddata"
@@ -49,11 +59,10 @@ primary_region = "ord" # next to edgecoder-seed and edgecoder-pg
     grace_period = "60s"
 
 [[vm]]
-  processes = ["bitcoind"]
-  size = "shared-cpu-4x" # README: performance-4x for the initial sync, then back to this
-  memory = "4gb"
-
-[[vm]]
   processes = ["lnd"]
+  # Unchanged for the first external-mode deploy. Without a local bitcoind, lnd alone fits
+  # shared-cpu-1x with 1gb (about $7/month in ord instead of about $14); move down once a week of
+  # `fly machine status` / Grafana memory shows it peaking well under 1 GB (the graph sync after
+  # first start is the high point). If it is OOM-killed, go back to this size.
   size = "shared-cpu-2x"
   memory = "2gb"

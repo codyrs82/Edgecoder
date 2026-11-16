@@ -1,21 +1,30 @@
 # Mainnet Lightning node (`edgecoder-lnd`)
 
-The coordinators' own Lightning node on Fly: pruned Bitcoin Core plus LND, in the `edgecoder`
-org, next to `edgecoder-seed` in Chicago (`ord`). It holds **real funds**. The keys stay with us:
-the wallet seed exists only on paper, and the node runs on machines we control.
+The coordinators' own Lightning node on Fly: LND in the `edgecoder` org, next to `edgecoder-seed`
+in Chicago (`ord`). It holds **real funds**. The keys stay with us: the wallet seed exists only on
+paper, and the node runs on machines we control.
+
+Its chain backend is chosen by `BITCOIND_MODE`:
+
+- **external** (the default, `fly.toml`): the owner's existing, fully synced, unpruned Bitcoin
+  Core `ocean-node` in Azure, reached over the org's private network as a WireGuard peer. No
+  bitcoind runs in this app. See [External Bitcoin node](#external-bitcoin-node-ocean-node-over-wireguard).
+- **bundled** (the fallback, `fly.bundled.toml`): this app's own pruned Bitcoin Core in a second
+  machine, the original layout (steps 3 and [Rollback](#rollback-to-bundled-mode)).
 
 This sets up and funds the node only. The coordinators keep using the regtest node
 (`deploy/lnd-test`) until the mainnet switch in [docs/going-to-mainnet.md](../../docs/going-to-mainnet.md),
 which is where they are pointed at this one (step 8).
 
-| Machine | Size | Volume | Reachable on |
-| --- | --- | --- | --- |
-| `bitcoind` | shared-cpu-4x, 4 GB (performance-4x, 8 GB while syncing) | `btcdata`, 80 GB | private network only |
-| `lnd` | shared-cpu-2x, 2 GB | `lnddata`, 10 GB, 30-day snapshots | REST/gRPC: private network only. P2P 9735: public |
+| Machine | Mode | Size | Volume | Reachable on |
+| --- | --- | --- | --- | --- |
+| `lnd` | both | shared-cpu-2x, 2 GB (shared-cpu-1x, 1 GB proposed for external mode) | `lnddata`, 10 GB, 30-day snapshots | REST/gRPC: private network only. P2P 9735: public |
+| `bitcoind` | bundled only | shared-cpu-4x, 4 GB (performance-4x, 8 GB while syncing) | `btcdata`, 80 GB | private network only |
 
-Cost at Fly's list prices (Chicago is 1.25× Ashburn): about $85/month steady, about $250/month
-for the few days of initial sync on the larger VM, plus $2/month for the dedicated IPv4 and
-about $14/month for volumes.
+Cost at Fly's list prices (Chicago is 1.25× Ashburn), external mode: about $14/month for the lnd
+machine (about $7 at the proposed smaller size), $2/month for the dedicated IPv4 and $1.50/month
+for `lnddata`, plus about $12/month while the unused `btcdata` volume is kept. Bundled mode adds
+the bitcoind machine: about $28/month at shared-cpu-4x, about $155/month at performance-4x.
 
 All commands run from the repo root with `flyctl` signed in to the `edgecoder` org.
 
@@ -41,10 +50,13 @@ fly secrets set -a edgecoder-lnd --stage BTC_RPC_PASS="$(openssl rand -hex 32)" 
   LND_WALLET_PASS="$(cat ~/.config/edgecoder/lnd-wallet-pass)"
 ```
 
-## 3. Deploy and sync the chain
+## 3. Deploy and sync the chain (bundled mode only)
+
+External mode skips this step: follow [External Bitcoin node](#external-bitcoin-node-ocean-node-over-wireguard)
+instead. In bundled mode, deploy with `-c fly.bundled.toml`:
 
 ```bash
-cd deploy/lnd-mainnet && fly deploy && cd -
+cd deploy/lnd-mainnet && fly deploy -c fly.bundled.toml && cd -
 # Initial sync on a bigger VM with a bigger cache (hours to a day or two). This changes the
 # running machine only; the next deploy puts fly.toml's size and cache back.
 B=$(fly machines list -a edgecoder-lnd --json | jq -r '.[] | select(.config.metadata.fly_process_group=="bitcoind") | .id')
@@ -52,6 +64,103 @@ fly machine update "$B" -a edgecoder-lnd --vm-size performance-4x --vm-memory 81
 fly ssh console -a edgecoder-lnd --machine "$B" -C "bitcoin-cli -conf=/tmp/bitcoin.conf -datadir=/data getblockchaininfo"
 #   wait for "initialblockdownload": false, then back to the steady size:
 fly machine update "$B" -a edgecoder-lnd --vm-size shared-cpu-4x --vm-memory 4096 --env BITCOIN_DBCACHE_MB=2000 --yes
+```
+
+## External Bitcoin node (ocean-node over WireGuard)
+
+LND uses `ocean-node` (Bitcoin Core in Azure, fully synced, unpruned) as its backend. `ocean-node`
+is a WireGuard peer of the `edgecoder` org, so it has an `fdaa:` address on Fly's private network
+(6PN) that the lnd machine can reach; nothing about it is public. Because it is unpruned, LND
+needs none of the pruned-node settings (`routing.assumechanvalid` and the like) and does not
+fetch old blocks from peers.
+
+What the entrypoint does in external mode (`entrypoint.sh lnd`): it starts no bitcoind; it waits
+until `ocean-node` answers `getblockchaininfo` with the RPC user (logging
+`waiting for ocean-node RPC at [fdaa:...]:8332 (...)` and why: unreachable, 401, 403), refuses
+to start if the node is not on mainnet, warns if ZMQ is unreachable or the node is pruned; then
+it writes all `bitcoind.*` settings (rpchost, rpcuser, rpcpass, zmqpubrawblock, zmqpubrawtx,
+estimatemode) to `/tmp/lnd.conf` (rootfs, not the volume; the credentials never go on a command
+line or into the logs) and starts LND. The wallet unlocks from `LND_WALLET_PASS` as before.
+
+### Prerequisites
+
+- The WireGuard peer for `ocean-node` is up in the `edgecoder` org, and you have its 6PN
+  address (`fdaa:...`) or name (`<peer name>._peer.internal`).
+- On `ocean-node`, Bitcoin Core binds RPC `8332` and ZMQ `28332` (rawblock) and `28333` (rawtx)
+  on that address, with `rpcallowip` covering the lnd machine's 6PN address (`fdaa::/16` or
+  narrower), and `zmqpubrawblock=tcp://[fdaa:...]:28332`, `zmqpubrawtx=tcp://[fdaa:...]:28333`.
+- The limited RPC user `lnd-edgecoder` exists (`rpcauth`) with an `rpcwhitelist` that covers what
+  LND calls: `getblockchaininfo,getbestblockhash,getblockcount,getblockhash,getblockheader,getblock,getnetworkinfo,estimatesmartfee,getrawtransaction,gettxout,getmempoolentry,getrawmempool,sendrawtransaction,testmempoolaccept,getzmqnotifications`.
+  `check-backend.sh` probes each one (harmlessly) and reports any the whitelist blocks; if LND
+  logs a 403 for a method not listed here, add it to the whitelist.
+- Its credentials are staged on this app (names only shown by `fly secrets list`):
+  `fly secrets set -a edgecoder-lnd --stage BITCOIND_RPC_USER=lnd-edgecoder BITCOIND_RPC_PASS=...`
+  (typed by whoever holds the password, not pasted into a chat). `LND_WALLET_PASS` stays as is;
+  keep `BTC_RPC_PASS` too while the bundled fallback is wanted.
+- `BITCOIND_HOST` in `fly.toml` is set to the address or name (it ships as a placeholder the
+  entrypoint refuses). `BITCOIND_RPC_PORT` is `8332`; the ZMQ URLs default to
+  `tcp://[BITCOIND_HOST]:28332` and `:28333` (override with `BITCOIND_ZMQ_BLOCK` / `BITCOIND_ZMQ_TX`).
+
+### Pre-flight
+
+`check-backend.sh` runs itself inside the lnd machine over `fly ssh console` and checks DNS, the
+RPC port, both ZMQ ports, and (once the secrets are deployed) `getblockchaininfo` and the
+whitelist with the limited user. It never prints the credentials.
+
+```bash
+fly secrets list -a edgecoder-lnd                             # BITCOIND_RPC_USER, BITCOIND_RPC_PASS: Staged
+deploy/lnd-mainnet/check-backend.sh --host fdaa:...           # before the deploy: ports only
+```
+
+### Deploy
+
+```bash
+cd deploy/lnd-mainnet && fly deploy && cd -
+```
+
+This deploys `fly.toml`, which has no `bitcoind` process group: flyctl lists the `bitcoind`
+machine for removal and destroys it. Its `btcdata` volume is not deleted; it stays, detached
+(see below). The lnd machine is replaced with the new image and picks up the staged secrets.
+
+### Verify
+
+```bash
+fly logs -a edgecoder-lnd --no-tail | grep entrypoint
+#   entrypoint: ocean-node RPC at [fdaa:...]:8332 is up: chain=main blocks=... initialblockdownload=false pruned=false
+#   entrypoint: starting lnd with the external backend at [fdaa:...]:8332
+deploy/lnd-mainnet/check-backend.sh                           # now also checks the RPC user: PASS
+fly ssh console -a edgecoder-lnd --select                     # the lnd machine
+lnc state          # NON_EXISTING until the wallet is created (step 4), then RPC_ACTIVE/SERVER_ACTIVE
+lnc getinfo        # once the wallet exists: synced_to_chain: true, block_height = ocean-node's
+```
+
+Compare `block_height` with `bitcoin-cli getblockcount` on `ocean-node` (equal, or one behind
+for a few seconds after a new block). `lnc getinfo` needs the wallet, so on a fresh node this
+check comes right after step 4; before that, the entrypoint log and `check-backend.sh` show the
+backend's height.
+
+Then create the wallet (step 4) as before, by the owner, by hand.
+
+### Rollback to bundled mode
+
+```bash
+cd deploy/lnd-mainnet && fly deploy -c fly.bundled.toml && cd -
+```
+
+This brings back the `bitcoind` process group on the kept `btcdata` volume (resuming its sync
+where it stopped) and sets `BITCOIND_MODE=bundled`; LND then waits for the pruned node to catch
+up. It needs `BTC_RPC_PASS` to still be set. To go back to external mode, `fly deploy` again.
+
+### The old `btcdata` volume
+
+It is not mounted in external mode and costs about $12/month (80 GB at $0.15/GB, plus its
+snapshots). Keeping it makes the rollback quick; deleting it is the owner's call and cannot be
+undone (a later rollback would then sync the chain from scratch on a new volume: days, and the
+performance-4x VM while it runs):
+
+```bash
+fly volumes list -a edgecoder-lnd                 # btcdata, no attached VM
+fly volumes destroy <btcdata volume id> -a edgecoder-lnd
 ```
 
 ## 4. Create the wallet (the operator, by hand)
@@ -72,7 +181,7 @@ them or type them into a computer. Anyone with the words (and passphrase) has th
 From then on the node unlocks itself on every restart from `LND_WALLET_PASS`. Check:
 
 ```bash
-lnc getinfo        # synced_to_chain: true once bitcoind has caught up
+lnc getinfo        # synced_to_chain: true once the backend (ocean-node, or the bundled bitcoind) is caught up
 lnc walletbalance
 ```
 
@@ -130,6 +239,7 @@ node while running on regtest.
 
 ## Versions
 
-- Bitcoin Core 32.1 (official release, SHA-256 checked in the Dockerfile).
+- Bitcoin Core 32.1 for bundled mode (official release, SHA-256 checked in the Dockerfile).
+  External mode uses whatever Bitcoin Core `ocean-node` runs.
 - LND v0.21.8-beta (official image, pinned by digest). The coordinator's LND client uses
   `/v2/router/send` and the `/v1` invoice, payment and balance routes, all still present in 0.21.
