@@ -114,7 +114,29 @@ export type IdeStreamEvent =
   /** The turn wrote this project file (its original is kept under the turn's checkpoint). */
   | { type: "file_change"; turnId: string; path: string }
   /** cSats a model call on the network cost (0 on this computer or your own machines). */
-  | { type: "usage"; cSats: number; where: string }
+  | {
+      type: "usage";
+      cSats: number;
+      where: string;
+      /** The model that answered, and where it ran (machine label, hardware, region, timings and tokens). */
+      model?: string;
+      served?: {
+        label: string;
+        own: boolean;
+        computeClass: string;
+        tier: string | null;
+        hardware: string;
+        gpu?: string;
+        region: string | null;
+        city?: string;
+        country: string | null;
+        pickupMs?: number;
+        promptMs?: number;
+        genMs?: number;
+        promptTokens?: number;
+        outputTokens?: number;
+      };
+    }
   | { type: "done" };
 
 // ---------------------------------------------------------------------------

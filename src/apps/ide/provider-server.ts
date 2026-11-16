@@ -25,7 +25,7 @@ import { ToolExecutor, hasGitHubOrigin, preparePullRequestArgs } from "./tool-ex
 import { MAX_EDITOR_FILE_BYTES, ProjectFs, ProjectFsError, findPaths, readProjectRules } from "./project-fs.js";
 import { CheckpointStore } from "./checkpoints.js";
 import { cleanInlineEdit, inlineEditMessages } from "./inline-edit.js";
-import { backendChat, makeToolRunner, ollamaChat, runAgentLoop, toolSchemas } from "./agent-loop.js";
+import { backendChat, makeToolRunner, ollamaChat, runAgentLoop, toolSchemas, type ChatFn } from "./agent-loop.js";
 import { completeAt } from "./complete.js";
 import { codebaseIndexFor } from "./codebase-index.js";
 import { GitError, GitOps } from "./git-ops.js";
@@ -1072,7 +1072,7 @@ function sessionModelId(compute: NonNullable<z.infer<typeof ideChatSchema>["comp
 /** The agent's model calls, on the compute the chat picked. */
 function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: string, ollamaHost: string, sendEvent: (e: IdeStreamEvent) => void, signal: AbortSignal, source = "EdgeCoder chat") {
   if (compute?.target === "auto" && !networkDeps && hosted) {
-    return backendChat(hostedBackend(hosted, "auto"), (cSats) => sendEvent({ type: "usage", cSats, where: "Auto (hosted)" }), signal);
+    return backendChat(hostedBackend(hosted, "auto"), (cSats, served) => sendEvent({ type: "usage", cSats, where: "Auto (hosted)", ...(served ? { served } : {}) }), signal);
   }
   if (compute?.target === "auto") {
     // Auto picks the model too; each step of the agent may land somewhere else (cheapest that fits).
@@ -1082,14 +1082,23 @@ function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: str
       where = routeLabel(r);
       sendEvent({ type: "status", message: `Auto: ${r.reason}` });
     }, source);
-    return backendChat(backend, (cSats) => sendEvent({ type: "usage", cSats, where }), signal);
+    return backendChat(backend, (cSats, served) => sendEvent({ type: "usage", cSats, where, ...(served ? { served } : {}) }), signal);
   }
   if (compute && compute.target !== "local" && !networkDeps && hosted) {
     // No enrolled agent here, but an API key: the network through the hosted endpoint.
     const id = sessionModelId(compute, model);
-    return backendChat(hostedBackend(hosted, id), (cSats) => sendEvent({ type: "usage", cSats, where: `${id} (hosted)` }), signal);
+    return backendChat(hostedBackend(hosted, id), (cSats, served) => sendEvent({ type: "usage", cSats, where: `${id} (hosted)`, model: id, ...(served ? { served } : {}) }), signal);
   }
-  if (!compute || compute.target === "local" || !networkDeps) return ollamaChat(ollamaHost, model, signal);
+  if (!compute || compute.target === "local" || !networkDeps) {
+    // This computer: free, and the footer says so ("This computer (Apple M1 Max)").
+    const local = ollamaChat(ollamaHost, model, signal);
+    const fn: ChatFn = async (req, onDelta) => {
+      const r = await local(req, onDelta);
+      sendEvent({ type: "usage", cSats: 0, where: r.served?.hardware ?? "This computer", model, ...(r.served ? { served: r.served } : {}) });
+      return r;
+    };
+    return fn;
+  }
   const where = routeLabel({
     placement: compute.target,
     model,
@@ -1104,7 +1113,7 @@ function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: str
     ...(compute.target === "reserved" ? { reservationId: compute.reservationId } : {}),
     source,
   });
-  return backendChat(backend, (cSats) => sendEvent({ type: "usage", cSats, where }), signal);
+  return backendChat(backend, (cSats, served) => sendEvent({ type: "usage", cSats, where, model, ...(served ? { served } : {}) }), signal);
 }
 
 /** What the agent's system prompt says about the models here. */

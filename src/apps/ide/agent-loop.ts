@@ -13,6 +13,7 @@
 import { randomUUID } from "node:crypto";
 import { request } from "undici";
 import type { ChatBackend, ToolSpec } from "../../inference-api/types.js";
+import { thisComputer } from "../../inference-api/backends.js";
 import { READ_TOOLS, TOOL_DEFINITIONS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
 import { protectedToolPath } from "./tool-executor.js";
 import { COMPACT_AT, compactMessages, DEFAULT_CONTEXT_WINDOW, isContextTooLong, isTransient, pathsLine, shouldCompact } from "./context-budget.js";
@@ -32,6 +33,8 @@ export interface ToolSchema {
 export interface ChatResult {
   content: string;
   toolCalls: Array<{ name: string; arguments: Record<string, unknown> }>;
+  /** Where the call ran, when the backend said (tool-types.ts usage.served). */
+  served?: Extract<IdeStreamEvent, { type: "usage" }>["served"];
 }
 
 /** One model call. `onDelta` receives reply text as it streams (native mode only). */
@@ -57,12 +60,13 @@ export function toolSchemas(): ToolSchema[] {
 
 /**
  * A model call through any chat backend (the network, your machines, a reserved machine), in the
- * agent's ChatFn shape. `onSpent` hears what each call cost in cSats.
+ * agent's ChatFn shape. `onSpent` hears what each call cost in cSats and where it ran.
  */
-export function backendChat(backend: ChatBackend, onSpent?: (cSats: number) => void, signal?: AbortSignal): ChatFn {
+export function backendChat(backend: ChatBackend, onSpent?: (cSats: number, served?: ChatResult["served"]) => void, signal?: AbortSignal): ChatFn {
   return async ({ messages, tools }, onDelta) => {
     let content = "";
     const toolCalls: ChatResult["toolCalls"] = [];
+    let served: ChatResult["served"];
     try {
       for await (const p of backend({ messages: messages.map((m) => ({ ...m, role: (["system", "user", "assistant", "tool"].includes(m.role) ? m.role : "user") as "user" })), ...(tools ? { tools: tools as ToolSpec[] } : {}), temperature: 0.3 }, signal)) {
         if ("delta" in p) {
@@ -70,14 +74,17 @@ export function backendChat(backend: ChatBackend, onSpent?: (cSats: number) => v
           onDelta?.(p.delta);
         } else if ("toolCalls" in p) {
           for (const c of p.toolCalls) toolCalls.push({ name: c.function.name, arguments: c.function.arguments ?? {} });
-        } else if (p.cSatsSpent !== undefined) onSpent?.(p.cSatsSpent);
+        } else if ("done" in p) {
+          served = p.served;
+          if (p.cSatsSpent !== undefined || p.served) onSpent?.(p.cSatsSpent ?? 0, p.served);
+        }
       }
     } catch (err) {
       const msg = (err as Error).message ?? String(err);
       if (/does not support tools/i.test(msg)) throw new ToolsUnsupportedError(msg);
       throw err;
     }
-    return { content, toolCalls };
+    return { content, toolCalls, ...(served ? { served } : {}) };
   };
 }
 
@@ -114,15 +121,20 @@ export function ollamaChat(host: string, model: string, signal?: AbortSignal): C
     let content = "";
     const toolCalls: ChatResult["toolCalls"] = [];
     let buffer = "";
+    let stats: { promptTokens?: number; outputTokens?: number; promptMs?: number; genMs?: number } = {};
     const handle = (line: string) => {
       if (!line.trim()) return;
-      let chunk: { message?: { content?: string; tool_calls?: Array<{ function?: { name?: string; arguments?: unknown } }> }; error?: string };
+      let chunk: { message?: { content?: string; tool_calls?: Array<{ function?: { name?: string; arguments?: unknown } }> }; error?: string; done?: boolean; prompt_eval_count?: number; eval_count?: number; prompt_eval_duration?: number; eval_duration?: number };
       try {
         chunk = JSON.parse(line);
       } catch {
         return;
       }
       if (chunk.error) throw new Error(`Ollama: ${chunk.error}`);
+      if (chunk.done) {
+        const ms = (ns: unknown) => (typeof ns === "number" && ns > 0 ? Math.round(ns / 1e6) : undefined);
+        stats = { promptTokens: chunk.prompt_eval_count, outputTokens: chunk.eval_count, promptMs: ms(chunk.prompt_eval_duration), genMs: ms(chunk.eval_duration) };
+      }
       const delta = chunk.message?.content ?? "";
       if (delta) {
         content += delta;
@@ -149,7 +161,7 @@ export function ollamaChat(host: string, model: string, signal?: AbortSignal): C
       for (const line of lines) handle(line);
     }
     handle(buffer);
-    return { content, toolCalls };
+    return { content, toolCalls, served: thisComputer(stats) };
   };
 }
 

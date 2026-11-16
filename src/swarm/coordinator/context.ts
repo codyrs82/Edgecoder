@@ -114,6 +114,12 @@ interface TaskBilling {
   outputTokens?: number;
   /** The agent's model-load time for the call (Ollama load_duration), left out of the power floor. */
   loadMs?: number;
+  /** Where a model call ran, for the requester (served-by.ts): the agent, and how long each part took. */
+  servedAgentId?: string;
+  submittedAtMs?: number;
+  pickupMs?: number;
+  promptMs?: number;
+  genMs?: number;
 }
 export const taskBilling = new Map<string, TaskBilling>();
 /**

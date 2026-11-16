@@ -53,6 +53,7 @@ import {
   MARKET_DEFAULT_BID_PREMIUM_BPS
 } from "../economy.js";
 import { registerRestrictedRoutes } from "./restricted.js";
+import { servedBy } from "../served-by-route.js";
 import { taskIdInUse, accrualsInFlight, settleTaskIfDone, refundTaskSubmit } from "../results.js";
 
 // ── Network inference (chat completions on agents' local models, streamed) ──────────────────
@@ -485,7 +486,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         return reply.code(500).send({ error: "credit_debit_failed" });
       }
     }
-    taskBilling.set(body.taskId, { accountId, reservedMsat: reserve, perSubtaskReserveMsat: reserve, costMsat: 0, refunded: false });
+    taskBilling.set(body.taskId, { accountId, reservedMsat: reserve, perSubtaskReserveMsat: reserve, costMsat: 0, refunded: false, submittedAtMs: Date.now() });
     usagePending.set(body.taskId, {
       id: body.taskId, accountId, atMs: Date.now(), kind: "inference", placement: reservationId ? "reserved" : onlyAccountId ? "mine" : "network",
       model: body.model, ...(taskClass !== "any" ? { computeClass: taskClass } : {}), ok: false, durationMs: 0, costMsat: 0, ...(body.source ? { source: body.source } : {}),
@@ -538,6 +539,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         // The agent's model-load time for this call: left out of the power floor (job-pricing.ts). Only
         // the agent is paid by the floor, so reporting more than it spent only lowers its own pay.
         loadMs: z.number().min(0).max(INFERENCE_MAX_TIMEOUT_MS).optional(),
+        // Reading the prompt and writing the reply (Ollama's durations): shown to the requester, never priced.
+        promptMs: z.number().min(0).max(INFERENCE_MAX_TIMEOUT_MS).optional(),
+        genMs: z.number().min(0).max(INFERENCE_MAX_TIMEOUT_MS).optional(),
       })
       .parse(req.body);
     const claim = queue.getClaim(body.subtaskId);
@@ -567,6 +571,16 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         b.promptTokens = bounded.promptTokens;
         b.outputTokens = bounded.outputTokens;
         if (body.loadMs !== undefined) b.loadMs = Math.round(body.loadMs);
+      }
+    }
+    // Where it ran, for the requester's last read (agent, pickup, prompt and generation time).
+    if (r === "ok" && body.done) {
+      const b = taskBilling.get(claim.subtask.taskId);
+      if (b) {
+        b.servedAgentId = verified.agentId;
+        if (b.submittedAtMs !== undefined && claim.claimedAt !== undefined) b.pickupMs = Math.max(0, claim.claimedAt - b.submittedAtMs);
+        if (body.promptMs !== undefined) b.promptMs = Math.round(body.promptMs);
+        if (body.genMs !== undefined) b.genMs = Math.round(body.genMs);
       }
     }
     return reply.code(r === "ok" || r === "duplicate" ? 200 : 409).send({ status: r });
@@ -603,6 +617,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       ...(billing.outputTokens !== undefined ? { outputTokens: billing.outputTokens } : {})
     };
     if (result) await settleTaskIfDone(body.taskId);
-    return reply.send({ ...r, ...(result ? { creditsSpent: msatToCSats(billing.refunded ? billing.costMsat : billing.reservedMsat), durationMs: result.durationMs, ...tokens } : {}) });
+    const served = r.done && (billing.servedAgentId ?? result?.agentId) ? await servedBy(billing.servedAgentId ?? result!.agentId, owner, billing) : undefined;
+    return reply.send({ ...r, ...(result ? { creditsSpent: msatToCSats(billing.refunded ? billing.costMsat : billing.reservedMsat), durationMs: result.durationMs, ...tokens } : {}), ...(served ? { served } : {}) });
   });
 }
