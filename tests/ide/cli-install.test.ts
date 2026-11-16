@@ -21,7 +21,8 @@ afterEach(() => {
 });
 
 describe("Install command-line tool", () => {
-  it("writes ~/.local/bin/edgecoder (0755) running the app's Node and dist/cli/edgecoder.js, and says whether it is on PATH", () => {
+  // A POSIX launcher with 0755 permissions: Windows has no mode bits, so the "unchanged" re-run check differs there.
+  it.skipIf(process.platform === "win32")("writes ~/.local/bin/edgecoder (0755) running the app's Node and dist/cli/edgecoder.js, and says whether it is on PATH", () => {
     const r = installCli({ platform: "darwin", home, env: { PATH: "/usr/bin:/bin" }, agentDir: agent });
     expect(r).toMatchObject({ ok: true, state: "installed", path: join(home, ".local", "bin", "edgecoder"), onPath: false });
     expect(r.message).toContain("is not on your PATH yet");
