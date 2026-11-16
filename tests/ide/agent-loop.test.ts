@@ -72,7 +72,9 @@ describe("runAgentLoop", () => {
     expect(events.some((e) => e.type === "plan")).toBe(true);
     expect(seen[1].messages.at(-1)?.content).toMatch(/Carry out the plan now/);
     expect(ran).toEqual(["read_file:a.ts"]);
-    expect(seen[2].messages.at(-1)?.content).toBe("[Tool read_file result]: ok");
+    // The ```tool_call block runs as a real call (text-tool-calls.ts) and stays off the screen.
+    expect(seen[2].messages.at(-1)).toMatchObject({ role: "tool", content: "ok", tool_name: "read_file" });
+    expect(events.filter((e) => e.type === "text").map((e) => (e as { content: string }).content).join("")).not.toMatch(/"tool":"read_file"/);
   });
 
   it("native: nudges only once when the model keeps answering with a plan", async () => {

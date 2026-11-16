@@ -174,10 +174,13 @@
       messages = m;
       runs = h;
       loaded = true;
-      const count = m.length + m.reduce((n, x) => n + (x.events?.length ?? 0), 0);
+      // Follow the reply as it grows (new steps and streamed text), unless you scrolled up to read.
+      const count = m.length + m.reduce((n, x) => n + (x.events?.length ?? 0) + x.content.length, 0);
       if (count !== lastCount) {
+        const first = lastCount === 0;
         lastCount = count;
-        queueMicrotask(() => scrollEl?.scrollTo({ top: scrollEl.scrollHeight }));
+        const atBottom = !scrollEl || scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 120;
+        if (first || atBottom) queueMicrotask(() => scrollEl?.scrollTo({ top: scrollEl.scrollHeight }));
       }
     } catch (err) {
       error = botErrorText(err);
@@ -225,7 +228,8 @@
     }
     untrack(reload);
     if (!busy) return;
-    const t = setInterval(reload, 1_500);
+    // While it works, the reply and its steps fill in live (one load at a time; see reload).
+    const t = setInterval(reload, 1_000);
     return () => clearInterval(t);
   });
 
@@ -282,6 +286,8 @@
       <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
       <div class="menu-backdrop" onclick={closeMenu}></div>
       <div class="menu" role="menu" tabindex="-1" bind:this={menuEl} onkeydown={menuKey}>
+        <!-- Pausing is a secondary control: a bot just works on its own. -->
+        <button role="menuitem" onclick={togglePause} title={bot.enabled ? "Stop working on its own (messages still get answers)" : "Start working on its own again"}>{#if bot.enabled}<Pause size={14} /> Pause {bot.name}{:else}<Play size={14} /> Resume {bot.name}{/if}</button>
         <button role="menuitem" onclick={checkNow} disabled={busy || bot.status === "over_budget"} title={bot.status === "over_budget" ? "Today's budget is spent" : `Have ${bot.name} check in now instead of waiting`}><RotateCw size={14} /> Check now</button>
         <button role="menuitem" onclick={() => { closeMenu(); onEdit(bot); }}><Pencil size={14} /> Edit</button>
         <button role="menuitem" class="danger" onclick={remove}><Trash2 size={14} /> {confirmDelete ? "Click again to delete" : "Delete"}</button>
@@ -329,9 +335,6 @@
       {#if busy}
         <button onclick={stop} title="Stop this run"><Square size={14} /> Stop</button>
       {/if}
-      <button onclick={togglePause} aria-label={bot.enabled ? `Pause ${bot.name}` : `Resume ${bot.name}`} title={bot.enabled ? "Stop working on its own (messages still get answers)" : "Start working on its own again"}>
-        {#if bot.enabled}<Pause size={14} /> Pause{:else}<Play size={14} /> Resume{/if}
-      </button>
       {#if !panelOpen}{@render moreMenu()}{/if}
       <button class="icon" class:on={panelOpen} onclick={togglePanel} aria-pressed={panelOpen} aria-label={panelOpen ? "Hide details" : "Show details"} title={panelOpen ? "Hide details" : "Show details"}><PanelRight size={16} /></button>
     </div>
@@ -380,7 +383,7 @@
           {#if bot.lastRun}
             <p data-testid="bot-last-run-note">{bot.name} last worked {relativeTime(bot.lastRun.startedAtMs, now)}{bot.lastRun.summary ? `: ${readableSummary(bot.lastRun.summary)}` : ""}. Its runs are under Runs.</p>
           {/if}
-          <p>{bot.enabled && bot.nextRun ? `${bot.name} works on its own: ${auto.text.toLowerCase()}.` : bot.enabled ? `Message ${bot.name} to get it started.` : `${bot.name} is paused. Resume it, or message it.`} {bot.schedule || checksIn(bot) ? `${routineText(bot)}.` : ""}</p>
+          <p>{bot.enabled && bot.nextRun ? `${bot.name} works on its own: ${auto.text.toLowerCase()}.` : bot.enabled ? `Message ${bot.name} to get it started.` : `${bot.name} is paused. Resume it from the ⋯ menu, or message it.`} {bot.schedule || checksIn(bot) ? `${routineText(bot)}.` : ""}</p>
         </div>
       {/if}
       {#each messages as m (m.id)}
@@ -398,7 +401,7 @@
               <ChatMessage
                 role="assistant"
                 content={shownReplyText(turn.text)}
-                streaming={(run?.status === "running" || run?.status === "needs_approval") && !turn.text && turn.toolEvents.length === 0}
+                streaming={run?.status === "running" || run?.status === "needs_approval"}
                 toolEvents={withoutPendingBars(turn.toolEvents)}
                 turnId={turn.turnId}
                 changedFiles={turn.changedFiles}

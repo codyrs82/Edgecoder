@@ -66,7 +66,7 @@ function setup(bot = harry()) {
 }
 
 describe("BotView header", () => {
-  it("is compact: name, status chip, one metadata line, what it's doing next and Pause; no Run now; no error text in it", () => {
+  it("is compact: name, status chip, one metadata line and what it's doing next; no Pause or Run now; no error text in it", () => {
     setup();
     expect(screen.getByRole("heading", { name: /Harry · Lead Developer/ })).toBeTruthy();
     expect(screen.getByTestId("bot-status-chip").textContent).toBe("Failed");
@@ -79,7 +79,9 @@ describe("BotView header", () => {
     expect(screen.getByTitle("/Users/me/Library/CloudStorage/Dropbox/Agents/Harry the Engineer")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /Run now/ })).toBeNull();
     expect(document.querySelector(".bot-head button.primary")).toBeNull();
-    expect(screen.getByRole("button", { name: "Pause Harry" })).toBeTruthy();
+    // It just works: pausing lives in the ⋯ menu, not the header.
+    expect(screen.queryByRole("button", { name: /Pause/ })).toBeNull();
+    expect(document.querySelector(".bot-head")?.textContent).not.toMatch(/Pause|Resume/);
     expect(document.querySelector(".bot-head")?.textContent).not.toMatch(/Not enough cSats/);
   });
 
@@ -97,14 +99,18 @@ describe("BotView header", () => {
     expect(screen.getByRole("button", { name: /Stop/ })).toBeTruthy();
   });
 
-  it("Pause and Resume toggle the bot", async () => {
+  it("Pause and Resume are in the ⋯ menu and toggle the bot", async () => {
     setup(harry({ status: "idle", lastRun: undefined }));
-    await fireEvent.click(screen.getByRole("button", { name: "Pause Harry" }));
+    await fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: "Pause Harry" }));
     expect(api.updateBot).toHaveBeenCalledWith("bot_h", { enabled: false });
     cleanup();
     setup(harry({ status: "paused", enabled: false, lastRun: undefined }));
+    // A quiet status says so; the header has no button for it.
     expect(screen.getByTestId("bot-auto-status").textContent).toBe("Paused");
-    await fireEvent.click(screen.getByRole("button", { name: "Resume Harry" }));
+    expect(screen.queryByRole("button", { name: /Resume/ })).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: "Resume Harry" }));
     expect(api.updateBot).toHaveBeenCalledWith("bot_h", { enabled: true });
   });
 
@@ -112,12 +118,34 @@ describe("BotView header", () => {
     const p = setup(harry({ status: "idle", lastRun: undefined }));
     api.runBot.mockResolvedValue({ started: true });
     await fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    expect(screen.queryByRole("menuitem", { name: /Pause/ })).toBeNull();
     await fireEvent.click(screen.getByRole("menuitem", { name: /Check now/ }));
     expect(api.runBot).toHaveBeenCalledWith("bot_h");
     await fireEvent.click(screen.getByRole("button", { name: "More actions" }));
     await fireEvent.click(screen.getByRole("menuitem", { name: /Edit/ }));
     expect(p.onEdit).toHaveBeenCalled();
+  });
+});
+
+describe("BotView live run", () => {
+  it("shows the reply and its steps as they arrive, as compact tool rows with the working indicator", async () => {
+    const running = harry({ status: "running", lastRun: { id: "run_5", trigger: "message", startedAtMs: 0, status: "running", summary: "", cSats: 0 } });
+    api.botMessages.mockResolvedValue([
+      { id: "u1", role: "user", content: "read them all", atMs: 0 },
+      { id: "m1", role: "assistant", content: "Listing your folder.", atMs: 0, runId: "run_5", events: [
+        { type: "text", content: "Listing your folder." },
+        { type: "tool_call", id: "t1", tool: "list_directory", args: { path: "." }, requires_approval: false },
+        { type: "tool_result", id: "t1", result: "README.md\nTODO.md" },
+        { type: "tool_call", id: "t2", tool: "read_file", args: { path: "TODO.md" }, requires_approval: false },
+      ] },
+    ]);
+    api.botHistory.mockResolvedValue([running.lastRun]);
+    render(BotView, { bot: running, onEdit: vi.fn(), onDeleted: vi.fn() });
+    expect(await screen.findByText(/Listing your folder/)).toBeTruthy();
+    // Both steps show while it runs (not folded into a summary), and it still looks busy.
+    const rows = document.querySelectorAll(".tool-events > *");
+    expect(rows.length).toBe(2);
+    expect(document.querySelector(".steps-summary")).toBeNull();
+    expect(document.querySelector(".tool-events")?.textContent).toMatch(/TODO\.md/);
   });
 });
 

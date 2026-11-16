@@ -17,9 +17,12 @@ afterEach(async () => {
 });
 
 /** A manager on a clock and a project fingerprint the test controls; each run replies with the next text. */
+/** A run that used a tool before replying. */
+const usedTool = (ctx: BotRunContext) => ctx.sendEvent({ type: "tool_call", id: `tc_${Math.random()}`, tool: "list_directory", args: { path: "." }, requires_approval: false });
+
 function setup(opts: { replies?: string[]; file?: string; gate?: boolean; onRun?: (ctx: BotRunContext) => void } = {}) {
   const clock = { now: new Date(2026, 10, 16, 10, 0).getTime() };
-  const project = { fp: "v1" };
+  const project: { fp: string | null } = { fp: "v1" };
   const calls: BotRunContext[] = [];
   const gates: Array<() => void> = [];
   const replies = [...(opts.replies ?? [])];
@@ -169,9 +172,35 @@ describe("one run at a time", () => {
   });
 });
 
+describe("check-ins that skip are not runs", () => {
+  it("a quiet check-in adds no run; an unreadable folder backs off like a quiet one", async () => {
+    const { m, calls, project, advance } = setup();
+    const bot = m.create({ name: "Harry", role: "Lead Developer", projectRoot: dir() });
+    m.tick();
+    await drain(m, bot.id);
+    expect(m.history(bot.id)).toHaveLength(1);
+    // Nothing changed: check-ins skip without a run, waiting longer each time.
+    for (let i = 0; i < 4; i++) {
+      advance(heartbeatInterval(DEFAULT_HEARTBEAT_MINUTES, 8));
+      m.tick();
+      await drain(m, bot.id);
+    }
+    expect(calls).toHaveLength(1);
+    expect(m.history(bot.id)).toHaveLength(1);
+    // A folder it can't read (no fingerprint) runs once, then counts as unchanged.
+    (project as { fp: string | null }).fp = null;
+    for (let i = 0; i < 4; i++) {
+      advance(heartbeatInterval(DEFAULT_HEARTBEAT_MINUTES, 8));
+      m.tick();
+      await drain(m, bot.id);
+    }
+    expect(calls).toHaveLength(2);
+  });
+});
+
 describe("follow-ups", () => {
   it("a run that ends saying what it'll do next continues in 2 minutes", async () => {
-    const { m, calls, label, advance, clock } = setup({ replies: ["I'll start by checking the current status of the project to see what needs attention."] });
+    const { m, calls, label, advance, clock } = setup({ replies: ["Looked at the project.\n\nNext, I'll check the current status of the tests."], onRun: usedTool });
     const bot = m.create({ name: "Harry", role: "Lead Developer", projectRoot: dir() });
     m.tick();
     await drain(m, bot.id);
@@ -198,6 +227,19 @@ describe("follow-ups", () => {
     }
     expect(calls.filter((c) => /Follow-up/.test(c.messages.at(-1)?.content ?? ""))).toHaveLength(MAX_FOLLOW_UPS_IN_A_ROW);
     expect(m.messages(bot.id).some((x) => x.role === "event" && /Stopped following up after 5 runs/.test(x.content))).toBe(true);
+  });
+
+  it("an announce-only run that did nothing (its go-ahead used up) ends: no follow-up loop", async () => {
+    const { m, calls, advance } = setup({ replies: ["I'll start by listing all the files in the folder.", "I'll start by listing all the files in the folder."] });
+    const bot = m.create({ name: "Harry", role: "Lead Developer", projectRoot: dir() });
+    m.tick();
+    await drain(m, bot.id);
+    expect(m.get(bot.id).nextRun?.kind).toBe("heartbeat");
+    advance(FOLLOW_UP_DELAY_MS * 3);
+    m.tick();
+    await drain(m, bot.id);
+    expect(calls).toHaveLength(1);
+    expect(m.history(bot.id)).toHaveLength(1);
   });
 
   it("no follow-up after a question, a failure or a stop", async () => {
@@ -248,7 +290,7 @@ describe("limits", () => {
 
 describe("pause and resume", () => {
   it("pausing stops everything it does on its own; resuming starts work again", async () => {
-    const { m, calls, label, advance } = setup({ replies: ["Next, I'll fix the lint errors."] });
+    const { m, calls, label, advance } = setup({ replies: ["Next, I'll fix the lint errors."], onRun: usedTool });
     const bot = m.create({ name: "Harry", role: "Lead Developer", projectRoot: dir() });
     m.tick();
     await drain(m, bot.id);

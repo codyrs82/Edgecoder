@@ -8,6 +8,10 @@
  * Native mode (default): tools go to Ollama as function definitions and the reply streams token
  * by token. Models without tool support fall back to text mode, where the model writes fenced
  * ```tool_call blocks that are parsed out of the finished reply.
+ *
+ * Either way, a tool call the model wrote as JSON text instead of calling the tool
+ * (text-tool-calls.ts: `{"name": …, "arguments": …}`, fenced, in <tool_call> tags, several in a
+ * row) is kept off the screen and run as a real call, with the same permission checks.
  */
 
 import { randomUUID } from "node:crypto";
@@ -16,6 +20,7 @@ import type { ChatBackend, ToolSpec } from "../../inference-api/types.js";
 import { thisComputer } from "../../inference-api/backends.js";
 import { READ_TOOLS, TOOL_DEFINITIONS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
 import { protectedToolPath } from "./tool-executor.js";
+import { extractTextToolCalls, TextToolCallFilter } from "./text-tool-calls.js";
 import { COMPACT_AT, compactMessages, DEFAULT_CONTEXT_WINDOW, isContextTooLong, isTransient, pathsLine, shouldCompact } from "./context-budget.js";
 
 export interface ChatMessage {
@@ -403,9 +408,13 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
     needBreak = true;
     if (native) {
       let reply: ChatResult;
+      // Tool calls written as text are held back from the screen while they stream, then run.
+      const filter = new TextToolCallFilter(known);
       try {
-        reply = await callModel(true, say);
+        reply = await callModel(true, (t) => say(filter.push(t)));
+        say(filter.end());
       } catch (err) {
+        say(filter.end());
         if (err instanceof ToolsUnsupportedError) {
           // This model can't take tool definitions: continue in text mode from the same point.
           native = false;
@@ -418,6 +427,11 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
         if (d.isCancelled()) return;
         failed(err);
         return;
+      }
+      if (reply.toolCalls.length === 0) {
+        // A backend that didn't stream gives the whole reply at the end.
+        const written = filter.streamed ? { text: filter.text, calls: filter.calls } : extractTextToolCalls(reply.content, known);
+        if (written.calls.length > 0) reply = { ...reply, content: written.text.trim(), toolCalls: written.calls };
       }
       if (reply.toolCalls.length === 0) {
         // Small models sometimes write ```plan / ```tool_call blocks as text instead of calling tools.
@@ -480,6 +494,24 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
     if (!content.trim()) return;
     const blocks = parseTextBlocks(content);
     if (blocks.length === 0) {
+      // JSON tool calls instead of ```tool_call blocks: run them the same way.
+      const written = extractTextToolCalls(content, known);
+      if (written.calls.length > 0) {
+        say(written.text.trim());
+        const results: string[] = [];
+        const resultLabels: string[] = [];
+        for (const call of written.calls) {
+          if (d.isCancelled()) return;
+          const r = await runTool(call.name as ToolName, call.arguments);
+          results.push(`[Tool ${call.name} result]: ${r.result}`);
+          resultLabels.push(r.label);
+        }
+        messages.push({ role: "assistant", content });
+        const m: ChatMessage = { role: "user", content: results.join("\n\n") };
+        labels.set(m, resultLabels.join("; "));
+        messages.push(m);
+        continue;
+      }
       say(content);
       if (goAhead(content)) continue;
       return;

@@ -167,6 +167,24 @@ describe("compute policies", () => {
     expect(planRoutes(heavy, inp, "auto").map((r) => r.placement)).toEqual(["reserved", "local", "mine", "network"]);
   });
 
+  it("a bot's agent floor (agentMinParamsB) puts a capable model ahead of a 7B on this computer; the 7B stays the last resort", () => {
+    const inp: RouteInputs = { ...base, balanceCSats: 100, localModels: ["qwen2.5-coder:7b"], networkModels: [...net, { model: "qwen3-coder:30b", classes: ["gpu"], cSatsPerMTokens: { input: 100, output: 400 } }] };
+    // Without it, the free 7B wins.
+    expect(where(planRoutes(heavy, inp, "local_first"))[0]).toBe("local:qwen2.5-coder:7b");
+    for (const policy of ["local_first", "auto"] as const) {
+      const routes = where(planRoutes(heavy, inp, policy, { agentMinParamsB: 14, allowanceCSats: 50 }));
+      expect(routes[0]).toMatch(/^network:/);
+      expect(routes.at(-1)).toBe("local:qwen2.5-coder:7b:fallback");
+    }
+    // A capable free model still comes first.
+    expect(where(planRoutes(heavy, { ...inp, myModels: ["qwen2.5-coder:14b"] }, "local_first", { agentMinParamsB: 14 }))[0]).toBe("mine:qwen2.5-coder:14b");
+    // Budget spent: the 7B on this computer does it (its text tool calls still run).
+    expect(where(planRoutes(heavy, inp, "local_first", { agentMinParamsB: 14, allowanceCSats: 0 }))).toEqual(["local:qwen2.5-coder:7b:fallback"]);
+    // Light work and "This computer only" are unaffected.
+    expect(where(planRoutes({ ...heavy, heavy: false, needsTools: false, minParamsB: 7 }, inp, "local_first", { agentMinParamsB: 14 }))[0]).toBe("local:qwen2.5-coder:7b");
+    expect(where(planRoutes(heavy, inp, "local_only", { agentMinParamsB: 14 }))).toEqual(["local:qwen2.5-coder:7b"]);
+  });
+
   it("This computer only never uses the network or your other machines", () => {
     const inp: RouteInputs = { ...harry, balanceCSats: 1_000, myModels: ["qwen2.5-coder:14b"] };
     expect(where(planRoutes(heavy, inp, "local_only"))).toEqual(["local:qwen2.5-coder:1.5b:fallback"]);
