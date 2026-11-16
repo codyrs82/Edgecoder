@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright (c) 2025 EdgeCoder, LLC
+# Copyright (c) 2025 EdgeCoder
 # SPDX-License-Identifier: BUSL-1.1
 #
 # Bootstrap a full EdgeCoder GPU agent on a fresh Ubuntu 24.04 GPU VM (e.g. Vultr). Run as root.
