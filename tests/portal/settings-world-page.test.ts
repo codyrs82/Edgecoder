@@ -4,7 +4,7 @@ import { CLIENT_ESCAPE_JS } from "../../src/portal/pages/escape.js";
 import { registerPortalPages } from "../../src/portal/pages/index.js";
 import { WORLD_RENDER_SCRIPT, WORLD_VIEW_BROWSER_LIB, worldPageScript } from "../../src/portal/pages/settings-world.js";
 import type { WorldView } from "../../src/common/world-view.js";
-import { ACTIVE_WORLD, MY_MACHINE, SERVING, WORLD } from "./fixtures/world-view.js";
+import { ACTIVE_WORLD, MY_MACHINE, OWNER_MINE, OWNER_WORLD, SERVING, WORLD } from "./fixtures/world-view.js";
 import { PULSE_MAX_DOTS } from "../../src/common/world-view.js";
 
 /*
@@ -80,7 +80,8 @@ describe("Settings > Network page (everyone)", () => {
     expect(graph).toContain(">73 ms</text>"); // You -> ord
     expect(graph).toContain(">258 ms</text>"); // You -> cdg
     expect(graph).toContain(">You</text>");
-    expect(graph).toContain(`>${MY_MACHINE}</text>`);
+    expect(graph).toContain(">maw-mb-02</text>"); // your machine, shortened on the map
+    expect(graph).toContain(`<title>${MY_MACHINE}</title>`); // the full name in the tooltip
     expect(graph).toContain(">lin-•••beee</text>");
     expect(graph).toContain(">mac-•••e782</text>");
     for (const l of ["Idle", "Busy", "Not seen lately", "Yours", "Size: model slots."]) expect(graph).toContain(l);
@@ -114,6 +115,40 @@ describe("Settings > Network page (everyone)", () => {
     expect(nodes[1]).toContain("tabindex='0'");
     expect(nodes.filter((n) => n.includes("aria-pressed='true'"))).toHaveLength(1);
     expect(graph).toContain(`aria-label='Your machine ${MY_MACHINE}, idle, iad · US, 1 model, about 103 ms from you'`);
+  });
+
+  it("map words: drawn last with a halo, placed by the shared layout, hidden ones shown on hover or selection", () => {
+    const d = R.wvDerive(OWNER_WORLD, S());
+    const graph = R.wvGraphHtml(OWNER_WORLD, d, S());
+    // Every word sits in one layer after the lines, the hubs, the nodes and You; the nodes carry none.
+    const layer = graph.indexOf("<g class='wv-labels'");
+    expect(layer).toBeGreaterThan(graph.lastIndexOf("<g data-node="));
+    expect(layer).toBeGreaterThan(graph.indexOf("<g class='wv-you'"));
+    for (const n of graph.match(/<g data-node=[\s\S]*?<\/g>/g) ?? []) expect(n).not.toContain("<text");
+    for (const t of [">20 ms</text>", ">99 ms</text>", ">You</text>", ">coordinator.edgecoder.io</text>"]) expect(graph.indexOf(t)).toBeGreaterThan(layer);
+    // Your long desktop names read short on the map, full in the tooltip.
+    expect(graph).toContain(">macbook-pro-crs</text>");
+    for (const name of OWNER_MINE) expect(graph).toContain(`<title>${name}</title>`);
+    expect(graph).not.toContain(`>${OWNER_MINE[0]}</text>`);
+    // Placed where the layout says.
+    for (const l of d.layout.labels.filter((x: any) => x.visible)) expect(graph).toContain(`data-label-for='${l.id}' x='${l.x}' y='${l.y}' text-anchor='${l.anchor}'`);
+    // The page's CSS gives the words a halo in the card's colour.
+    const many = { ...OWNER_WORLD, agents: Array.from({ length: 30 }, (_, i) => ({ ...OWNER_WORLD.agents[i % 12], id: "m" + String(i).padStart(3, "0") })) };
+    const dm = R.wvDerive(many, S());
+    const hidden = dm.layout.labels.find((l: any) => !l.visible && !many.agents.find((a) => a.id === l.id)!.mine);
+    expect(R.wvGraphHtml(many, dm, S())).toContain(`<text class='wv-nlabel off' data-label-for='${hidden.id}'`);
+    expect(R.wvGraphHtml(many, dm, S({ hoverId: hidden.id }))).toContain(`<text class='wv-nlabel off on' data-label-for='${hidden.id}'`);
+    expect(R.wvGraphHtml(many, dm, S({ selectedId: hidden.id }))).toContain(`<text class='wv-nlabel off on' data-label-for='${hidden.id}'`);
+  });
+
+  it("the page CSS draws words over everything with a halo, hidden names only when revealed", async () => {
+    const app = Fastify();
+    registerPortalPages(app);
+    const html = (await app.inject({ url: "/portal/settings/world" })).body;
+    expect(html).toMatch(/\.wv-labels text \{ paint-order: stroke; stroke: var\(--card\);/);
+    expect(html).toContain(".wv-nlabel.off { display: none; }");
+    expect(html).toContain(".wv-nlabel.off.on, .wv-nlabel.off.focus { display: inline;");
+    expect(worldPageScript()).toContain('graph.addEventListener("focusout"');
   });
 
   it("the cards view is the text alternative: every machine, masked unless yours, sortable and filterable", () => {

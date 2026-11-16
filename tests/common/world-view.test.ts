@@ -189,3 +189,93 @@ describe("your path and the words for it", () => {
     expect(lib.pulseBegin({ periodMs: 1400, count: 3 }, 2, 123_456)).toBe(W.pulseBegin({ periodMs: 1400, count: 3 }, 2, 123_456));
   });
 });
+
+describe("map labels: short names, placed without collisions", () => {
+  const { OWNER_WORLD, OWNER_MINE } = FIXTURES;
+  const layout = W.worldLayout(OWNER_WORLD, W.rowsFor(OWNER_WORLD));
+  const shown = layout.labels.filter((l) => l.visible);
+
+  it("shortens your machines' desktop names for the map, keeping the full name; masked labels stay", () => {
+    expect(W.shortMachineName("desktop-macbook-pro-crs-local-51738927")).toBe("macbook-pro-crs");
+    expect(W.shortMachineName("desktop-mac-example-local-a8fba2b6")).toBe("mac-example");
+    expect(W.shortMachineName("codys-mac-studio")).toBe("codys-mac-studio");
+    expect(W.shortMachineName("Codys-MacBook-Air.local")).toBe("Codys-MacBook-Air");
+    expect(W.shortMachineName("desktop-local-1234abcd")).toBe("local-1234abcd");
+    const long = W.shortMachineName("desktop-a-very-long-workstation-name-in-the-lab-local-0011aabb");
+    expect(long.length).toBe(W.LABEL_MAX_CHARS);
+    expect(long.endsWith("…")).toBe(true);
+    const mine = layout.labels.find((l) => l.full === OWNER_MINE[0])!;
+    expect(mine.text).toBe("macbook-pro-crs");
+    const other = OWNER_WORLD.agents.find((a) => !a.mine)!;
+    expect(W.mapLabelText(other)).toBe(other.label);
+    expect(W.mapLabelText({ ...other, name: "leaked" })).toBe(other.label);
+  });
+
+  it("no two shown labels overlap, and none covers a hub, a node, a ring label or the coordinator line", () => {
+    expect(layout.labels).toHaveLength(OWNER_WORLD.agents.length);
+    expect(shown.length).toBeGreaterThanOrEqual(10);
+    for (let i = 0; i < shown.length; i++) for (let j = i + 1; j < shown.length; j++) expect(W.boxesOverlap(shown[i].box, shown[j].box), `${shown[i].text} / ${shown[j].text}`).toBe(false);
+    const [ord, cdg] = layout.hubs;
+    for (const l of shown) {
+      for (const h of layout.hubs) expect(W.boxHitsCircle(l.box, h.x, h.y, W.HUB_R), `${l.text} on ${h.coordinator.region}`).toBe(false);
+      for (const n of layout.agents) if (n.id !== l.id) expect(W.boxHitsCircle(l.box, n.x, n.y, n.r), `${l.text} on a node`).toBe(false);
+      expect(W.boxHitsSegment(l.box, ord.x, ord.y, cdg.x, cdg.y, W.MESH_BAND), `${l.text} on the line`).toBe(false);
+      for (const r of layout.rings) expect(W.boxesOverlap(l.box, W.textBox(r.ms + " ms", r.lx, r.ly, "start", W.RING_FONT)), `${l.text} on ${r.ms} ms`).toBe(false);
+      expect(l.box.x).toBeGreaterThanOrEqual(0);
+      expect(l.box.x + l.box.w).toBeLessThanOrEqual(layout.width);
+    }
+    // Your machines are all named on the map.
+    for (const name of OWNER_MINE) expect(shown.some((l) => l.full === name)).toBe(true);
+  });
+
+  it("no machine sits on the coordinator line or on another machine", () => {
+    const [ord, cdg] = layout.hubs;
+    for (const n of layout.agents) {
+      expect(W.boxHitsSegment({ x: n.x, y: n.y, w: 0, h: 0 }, ord.x, ord.y, cdg.x, cdg.y, n.r + 3), n.row.agent.label).toBe(false);
+      for (const m of layout.agents) if (m !== n) expect(Math.hypot(m.x - n.x, m.y - n.y)).toBeGreaterThan(m.r + n.r);
+    }
+  });
+
+  it("hides the lower-priority name when only one fits: yours, then busy, then the rest", () => {
+    const hub = { id: "h", x: -1000, y: 10, coordinator: OWNER_WORLD.coordinators[0] };
+    const node = (id: string, over: Partial<W.WorldAgent>) => ({ id, x: 20, y: 10, r: 4, hubId: "h", row: { agent: { ...OWNER_WORLD.agents[3], id, label: "lin-•••" + id, ...over }, estimateMs: 50, sameNetwork: false } });
+    // A strip one label tall: only the spot right of the node fits, once.
+    const strip = (agents: ReturnType<typeof node>[]) => W.placeLabels({ width: 120, height: 20, hubs: [hub], agents, rings: [], you: null }, []);
+    const other = node("aaaa", {});
+    const busy = node("bbbb", { status: "busy" });
+    const mine = node("cccc", { mine: true, name: "desktop-x-local-1" });
+    expect(strip([other, busy]).map((l) => [l.id, l.visible])).toEqual([["aaaa", false], ["bbbb", true]]);
+    expect(strip([busy, mine]).map((l) => [l.id, l.visible])).toEqual([["bbbb", false], ["cccc", true]]);
+    // A hidden name keeps a position, for hover and focus.
+    const hidden = strip([other, busy])[0];
+    expect(hidden.text).toBe("lin-•••aaaa");
+    expect(Number.isFinite(hidden.x) && Number.isFinite(hidden.y)).toBe(true);
+  });
+
+  it("names only your machines when the map is crowded", () => {
+    const many = { ...OWNER_WORLD, agents: Array.from({ length: 30 }, (_, i) => ({ ...OWNER_WORLD.agents[i % 12], id: "m" + String(i).padStart(3, "0") })) };
+    const l = W.worldLayout(many, W.rowsFor(many));
+    expect(l.labels.filter((x) => x.visible).every((x) => many.agents.find((a) => a.id === x.id)!.mine)).toBe(true);
+  });
+
+  it("is deterministic: the same answer, in any order, places the same", () => {
+    const again = W.worldLayout(OWNER_WORLD, W.rowsFor(OWNER_WORLD));
+    expect(JSON.stringify(again.labels)).toBe(JSON.stringify(layout.labels));
+    const shuffled = { ...OWNER_WORLD, agents: [...OWNER_WORLD.agents].reverse() };
+    const l2 = W.worldLayout(shuffled, W.rowsFor(shuffled));
+    const byId = (ls: W.MapLabel[]) => Object.fromEntries(ls.map((x) => [x.id, x]));
+    expect(byId(l2.labels)).toEqual(byId(layout.labels));
+    const lib = new Function(`${WORLD_VIEW_BROWSER_LIB}; return { rowsFor, worldLayout };`)() as typeof W;
+    expect(JSON.parse(JSON.stringify(lib.worldLayout(OWNER_WORLD, lib.rowsFor(OWNER_WORLD))))).toEqual(JSON.parse(JSON.stringify(layout)));
+  });
+
+  it("spreads machines evenly over the directions left free", () => {
+    const even = W.spreadAngles(4, []);
+    expect(even.map((a) => +a.toFixed(3))).toEqual([-Math.PI / 2 + Math.PI / 4, Math.PI / 4 - 0, (3 * Math.PI) / 4, (5 * Math.PI) / 4].map((a) => +a.toFixed(3)));
+    const clear = W.spreadAngles(6, [[0, 0.3]]);
+    for (const a of clear) {
+      const off = Math.abs(Math.atan2(Math.sin(a), Math.cos(a)));
+      expect(off).toBeGreaterThanOrEqual(0.3 - 1e-3);
+    }
+  });
+});
