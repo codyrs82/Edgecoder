@@ -58,6 +58,37 @@ export function generateX25519KeyPair(): X25519KeyPair {
   };
 }
 
+/** The public half of a raw X25519 private key. */
+function x25519PublicFromPrivate(privateRaw: Buffer): Buffer {
+  const priv = createPrivateKey({ key: Buffer.concat([X25519_PKCS8_PREFIX, privateRaw]), format: "der", type: "pkcs8" });
+  return createPublicKey(priv).export({ type: "spki", format: "der" }).subarray(-32);
+}
+
+/**
+ * Coordinator-side root for envelope keys, from a key the coordinator keeps across restarts
+ * (COORDINATOR_PRIVATE_KEY_PEM). HKDF with its own label, so nothing derived here can be used as,
+ * or reveals, the signing key.
+ */
+export function envelopeRootSecretFromPem(privateKeyPem: string): Buffer {
+  const der = createPrivateKey(privateKeyPem).export({ type: "pkcs8", format: "der" });
+  return Buffer.from(hkdfSync("sha256", der, "edgecoder-envelope-root", "edgecoder-envelope-root/v1", 32));
+}
+
+/**
+ * The coordinator's ephemeral key pair for one subtask, derived from the root secret and the
+ * subtask id. A restarted coordinator derives the same pair, so it can still open a result for a
+ * subtask claimed before the restart. The agent's side is unchanged (its envelope format is the same).
+ */
+export function deriveEnvelopeEphemeralKeyPair(rootSecret: Buffer, subtaskId: string): X25519KeyPair {
+  const privateKey = Buffer.from(hkdfSync("sha256", rootSecret, subtaskId, "edgecoder-envelope-ephemeral/v1", 32));
+  return { privateKey, publicKey: x25519PublicFromPrivate(privateKey) };
+}
+
+/** Coordinator-side: the symmetric key of a subtask's envelope, re-derived (e.g. after a restart). */
+export function rederiveEnvelopeSharedKey(rootSecret: Buffer, subtaskId: string, agentPublicKey: Buffer): Buffer {
+  return deriveSharedKey(deriveEnvelopeEphemeralKeyPair(rootSecret, subtaskId).privateKey, agentPublicKey, subtaskId);
+}
+
 function deriveSharedKey(
   myPrivateRaw: Buffer,
   theirPublicRaw: Buffer,
@@ -107,9 +138,13 @@ export function createTaskEnvelope(
   task: { input: string; snapshotRef: string; kind: string },
   agentPublicKey: Buffer,
   subtaskId: string,
-  metadata: EnvelopeMetadata = {}
+  metadata: EnvelopeMetadata = {},
+  opts: { rootSecret?: Buffer } = {}
 ): { envelope: TaskEnvelope; sharedKey: Buffer } {
-  const ephemeral = generateX25519KeyPair();
+  // With a root secret the ephemeral key is re-derivable (deriveEnvelopeEphemeralKeyPair); without
+  // one it is random and the shared key exists only in the caller's memory.
+  const ephemeral = opts.rootSecret ? deriveEnvelopeEphemeralKeyPair(opts.rootSecret, subtaskId) : generateX25519KeyPair();
+  if (agentPublicKey.length !== 32) throw new Error("x25519_public_key_invalid_length");
   const symKey = deriveSharedKey(ephemeral.privateKey, agentPublicKey, subtaskId);
   const plaintext = Buffer.from(JSON.stringify(task), "utf8");
   const { ciphertext, nonce, tag } = aesGcmEncrypt(symKey, plaintext);

@@ -379,6 +379,13 @@ Read by agents, coordinators and the portal (`src/discovery/`, `src/portal/coord
 | Variable | Default | Description |
 |---|---|---|
 | `DATABASE_URL` | unset | Postgres connection string. **Required in production.** Unset elsewhere means in-memory state. |
+| `PG_POOL_MAX` | `10` | Coordinator and portal: most Postgres connections in the pool (min 1). |
+| `PG_CONNECT_TIMEOUT_MS` | `5000` | Coordinator and portal: how long to wait for a new Postgres connection before the query fails (`0` waits forever). |
+| `PG_IDLE_TIMEOUT_MS` | `30000` | Coordinator and portal: an idle pooled connection is closed after this long (`0` keeps it). A dropped idle connection is logged (`pg_pool_idle_client_error`) and replaced; it no longer stops the process. |
+| `PG_STATEMENT_TIMEOUT_MS` | `30000` | Coordinator and portal: Postgres `statement_timeout` for every pooled connection. `0` keeps the server's own setting. |
+| `ENVELOPE_REQUIRED` | unset (off) | `1` or `true`: an agent that registered no X25519 envelope key (older builds, the iOS app) may not claim subtasks that carry user data, so task input never leaves the coordinator in plaintext. Off by default so those agents keep working. Agents that did register a key always get envelopes; if one cannot be built the subtask is handed back and `/pull` answers 503 `envelope_encryption_failed` (never plaintext). Plaintext deliveries are logged (`task_delivered_plaintext`) and counted on `/metrics` as `edgecoder_envelope_plaintext_deliveries_total`; turn this on once that stays at 0. Envelope keys are derived from `COORDINATOR_PRIVATE_KEY_PEM`, so results for subtasks claimed before a restart still decrypt when that is set. |
+| `QUEUE_DATA_KEY` | derived from `COORDINATOR_PRIVATE_KEY_PEM` | 32 bytes (64 hex characters or base64) that encrypt `queue_tasks.payload_json` and `queue_results.output` at rest (AES-256-GCM). Set the same value on every coordinator sharing a database. Unset: a key derived from `COORDINATOR_PRIVATE_KEY_PEM` (per coordinator); with neither, rows are stored in plaintext (dev). Rows written before encryption still read. Generate: `openssl rand -hex 32`. |
+| `QUEUE_RETENTION_DAYS` | `30` | Days a finished subtask's input (`queue_tasks`) and output (`queue_results`) stay in Postgres; an hourly sweep deletes older ones. Billing, ledger and receipt rows are kept. `0` keeps them forever. |
 | `PORTAL_SERVICE_URL` | unset | Portal base URL for coordinator and control-plane calls. **Required on a production coordinator.** An http(s) URL. |
 | `COORDINATOR_PEER_ID` | derived from `COORDINATOR_PUBLIC_URL` | This coordinator's mesh peer id. |
 | `COORDINATOR_PUBLIC_KEY_PEM` | derived from the private key | Public half of `COORDINATOR_PRIVATE_KEY_PEM`. |

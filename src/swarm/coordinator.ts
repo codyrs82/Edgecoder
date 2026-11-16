@@ -72,6 +72,7 @@ import { registerNetworkWorldRoutes } from "./coordinator/routes/network-world.j
 import { registerAdminNetworkRoutes } from "./coordinator/routes/admin-network.js";
 import { initCoordinator } from "./coordinator/init.js";
 import { onClaimable, pickupStats } from "./coordinator/dispatch.js";
+import { envelopeStats } from "./envelope-policy.js";
 import { onInferenceClaimable } from "./coordinator/routes/inference.js";
 
 // Read at scrape time.
@@ -80,7 +81,8 @@ registerCoordinatorMetrics(metrics, {
   connectedAgents: () => connectedAgentCount(),
   knownAgents: () => agentCapabilities.size,
   payoutReconcile: () => payoutReconciler.last(),
-  dispatch: () => pickupStats()
+  dispatch: () => pickupStats(),
+  envelope: () => envelopeStats
 });
 
 // Fast dispatch: a subtask that becomes claimable is announced to idle eligible agents (dispatch.ts).

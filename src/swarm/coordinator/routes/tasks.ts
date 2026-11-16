@@ -33,8 +33,11 @@ import { evaluateAgentPowerPolicy } from "../../power-policy.js";
 import {
   createTaskEnvelope,
   decryptResult as decryptEnvelopeResult,
-  type EncryptedResult
+  rederiveEnvelopeSharedKey,
+  type EncryptedResult,
+  type TaskEnvelope
 } from "../../../security/envelope.js";
+import { envelopePolicyAllows, envelopeStats } from "../../envelope-policy.js";
 import { rawBodyOf } from "../../../security/request-signing.js";
 import { lateResultRejectionDurable } from "../../lease-gate.js";
 import type { CoordinatorApp } from "../app.js";
@@ -75,6 +78,8 @@ import {
   behaviorTracker,
   envelopeSharedKeys,
   ENVELOPE_KEY_TTL_MS,
+  ENVELOPE_ROOT_SECRET,
+  ENVELOPE_REQUIRED,
   REQUIRE_SIGNED_AGENT_REQUESTS,
   meshBlacklistReason,
   evaluateAndEnforce,
@@ -402,11 +407,39 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       // The book enforces the bid's class, price and constraints. The subtask's own constraints are
       // checked too, so a task gossiped from a peer (no local bid) still cannot go to an under-spec agent.
       // A model call also needs a free slot, and is left briefly to an idle agent when this one is busy.
-      (subtask) => canTake(subtask) && mayTakeNow(body.agentId, subtask, claims, nowMs),
+      // Task privacy: with ENVELOPE_REQUIRED an agent without an envelope key takes no user data.
+      (subtask) => canTake(subtask) && mayTakeNow(body.agentId, subtask, claims, nowMs) && envelopePolicyAllows(capability, subtask, ENVELOPE_REQUIRED),
       // Claim hoarding: open claims per agent are bounded by what it declared, never below the
       // worker's parallel-inference ceiling (16) and never above the schema's 64.
       Math.max(capability?.maxConcurrentTasks ?? 1, MAX_OPEN_CLAIMS_FLOOR)
     );
+    // Envelope encryption: an agent that registered an X25519 key only ever gets the subtask
+    // encrypted. Built before anything about the claim is recorded, so a failure hands the subtask
+    // straight back (it stays claimable for others) and nothing is sent in plaintext.
+    const agentX25519 = capability?.x25519PublicKey;
+    let envelope: TaskEnvelope | undefined;
+    if (task && agentX25519) {
+      try {
+        const built = createTaskEnvelope(
+          { input: task.input, snapshotRef: task.snapshotRef, kind: task.language },
+          Buffer.from(agentX25519, "base64"),
+          task.id,
+          { taskId: task.taskId, resourceClass: task.projectMeta?.resourceClass, priority: task.projectMeta?.priority, language: task.language, timeoutMs: task.timeoutMs, kind: task.kind, requestedModel: task.requestedModel },
+          { rootSecret: ENVELOPE_ROOT_SECRET }
+        );
+        envelope = built.envelope;
+        envelopeSharedKeys.set(task.id, { key: built.sharedKey, createdAtMs: Date.now() });
+        const now = Date.now();
+        for (const [sid, entry] of envelopeSharedKeys) {
+          if (now - entry.createdAtMs > ENVELOPE_KEY_TTL_MS) envelopeSharedKeys.delete(sid);
+        }
+      } catch (envelopeErr) {
+        envelopeStats.encryptFailed += 1;
+        queue.requeue(task.id);
+        app.log.error({ subtaskId: task.id, agentId: body.agentId, error: String(envelopeErr) }, "envelope_encryption_failed");
+        return reply.code(503).send({ error: "envelope_encryption_failed" });
+      }
+    }
     if (task) noteClaimed(task.id);
     if (task) restrictedCalls.claimed(task.id, body.agentId, pullerAccount);
     if (task) {
@@ -441,30 +474,15 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       await pgStore?.persistLedgerRecord(claimRecord);
       await persistStatsLedgerRecord(claimRecord);
 
-      // Envelope encryption: if agent registered an X25519 key, encrypt the task
-      const agentX25519 = capability?.x25519PublicKey;
-      if (agentX25519) {
-        try {
-          const agentPubKey = Buffer.from(agentX25519, "base64");
-          const { envelope, sharedKey } = createTaskEnvelope(
-            { input: task.input, snapshotRef: task.snapshotRef, kind: task.language },
-            agentPubKey,
-            task.id,
-            { taskId: task.taskId, resourceClass: task.projectMeta?.resourceClass, priority: task.projectMeta?.priority, language: task.language, timeoutMs: task.timeoutMs, kind: task.kind, requestedModel: task.requestedModel }
-          );
-          envelopeSharedKeys.set(task.id, { key: sharedKey, createdAtMs: Date.now() });
-          // Expire stale shared keys
-          const now = Date.now();
-          for (const [sid, entry] of envelopeSharedKeys) {
-            if (now - entry.createdAtMs > ENVELOPE_KEY_TTL_MS) envelopeSharedKeys.delete(sid);
-          }
-          app.log.info({ subtaskId: task.id, agentId: body.agentId }, "task_encrypted_with_envelope");
-          return reply.send({ subtask: null, envelope });
-        } catch (envelopeErr) {
-          app.log.warn({ subtaskId: task.id, error: String(envelopeErr) }, "envelope_encryption_failed_falling_back");
-          // Fall through to plaintext
-        }
+      if (envelope) {
+        envelopeStats.encrypted += 1;
+        app.log.info({ subtaskId: task.id, agentId: body.agentId }, "task_encrypted_with_envelope");
+        return reply.send({ subtask: null, envelope });
       }
+      // No envelope key (older agent builds, the iOS app): plaintext, counted so the operator can
+      // see when ENVELOPE_REQUIRED can be turned on.
+      envelopeStats.plaintext += 1;
+      app.log.info({ subtaskId: task.id, agentId: body.agentId, os: capability?.os }, "task_delivered_plaintext");
     }
     // inferenceOnly tells a sandbox-less agent why it only ever gets inference work.
     return reply.send({ subtask: task ?? null, ...(inferenceOnly ? { inferenceOnly: true } : {}) });
@@ -488,14 +506,36 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     const rawBody = req.body as Record<string, unknown>;
 
     // Check if this is an encrypted envelope result
-    const cachedKey = typeof rawBody.subtaskId === "string" ? envelopeSharedKeys.get(rawBody.subtaskId) : undefined;
+    const isEncrypted = typeof rawBody.subtaskId === "string" && typeof rawBody.encryptedPayload === "string";
+    let sharedKey = isEncrypted ? envelopeSharedKeys.get(rawBody.subtaskId as string)?.key : undefined;
+    if (isEncrypted && !sharedKey) {
+      // Not cached (this coordinator restarted since the claim, or the cache entry expired): the
+      // key is re-derived from the coordinator's envelope root and the agent's registered key. A
+      // restarted coordinator has the agent's key again once it re-registers, which it must do
+      // before its signed result is accepted at all.
+      const agentId = verified ? verified.agentId : typeof rawBody.agentId === "string" ? rawBody.agentId : undefined;
+      const agentX25519 = agentId ? agentCapabilities.get(agentId)?.x25519PublicKey : undefined;
+      if (agentX25519) {
+        try {
+          sharedKey = rederiveEnvelopeSharedKey(ENVELOPE_ROOT_SECRET, rawBody.subtaskId as string, Buffer.from(agentX25519, "base64"));
+          envelopeStats.rederived += 1;
+        } catch {
+          sharedKey = undefined;
+        }
+      }
+    }
     let body: z.infer<typeof resultSchema>;
     let envelopeKey: Buffer | undefined;
-    if (cachedKey && typeof rawBody.encryptedPayload === "string") {
+    if (isEncrypted && !sharedKey) {
+      envelopeStats.decryptFailed += 1;
+      app.log.error({ subtaskId: rawBody.subtaskId }, "envelope_result_key_unavailable");
+      return reply.code(400).send({ error: "envelope_decrypt_failed" });
+    }
+    if (sharedKey && isEncrypted) {
       try {
-        const decrypted = decryptEnvelopeResult(rawBody as unknown as EncryptedResult, cachedKey.key);
+        const decrypted = decryptEnvelopeResult(rawBody as unknown as EncryptedResult, sharedKey);
         envelopeSharedKeys.delete(rawBody.subtaskId as string);
-        envelopeKey = cachedKey.key;
+        envelopeKey = sharedKey;
         body = resultSchema.parse({
           ...decrypted,
           subtaskId: rawBody.subtaskId,
@@ -508,6 +548,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         });
         app.log.info({ subtaskId: body.subtaskId }, "result_decrypted_from_envelope");
       } catch (decryptErr) {
+        envelopeStats.decryptFailed += 1;
         app.log.error({ subtaskId: rawBody.subtaskId, error: String(decryptErr) }, "envelope_result_decrypt_failed");
         return reply.code(400).send({ error: "envelope_decrypt_failed" });
       }

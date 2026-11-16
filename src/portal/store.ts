@@ -4,7 +4,8 @@
 import type { InviteRecord } from "./invites.js";
 import type { HostApprovalRecord, HostApprovalSource, HostKind, HostRequestRecord, HostRequestStatus, ComputeHardware } from "./host-requests.js";
 import type { SecurityResearchEntitlement } from "./security-research.js";
-import { Pool } from "pg";
+import type { Pool } from "pg";
+import { createPgPool } from "../db/pool.js";
 import { RATE_LIMIT_SCHEMA_SQL } from "./rate-limit-store.js";
 import { randomUUID } from "node:crypto";
 import {
@@ -277,7 +278,7 @@ export class PortalStore {
   static fromEnv(): PortalStore | null {
     const url = process.env.PORTAL_DATABASE_URL;
     if (!url) return null;
-    return new PortalStore(new Pool({ connectionString: url }));
+    return new PortalStore(createPgPool(url, "portal"));
   }
 
   async migrate(): Promise<void> {

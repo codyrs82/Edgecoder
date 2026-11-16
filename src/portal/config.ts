@@ -3,7 +3,7 @@
 
 import { z } from "zod";
 import { envEnum, envEnumCi, envFlag, envInt, envNumber, envUrl } from "../common/config.js";
-import { computeClassEnv, discoveryEnv, launchEnv, observabilityEnv, onchainEnv, serviceUrlsEnv } from "../config/shared.js";
+import { computeClassEnv, discoveryEnv, launchEnv, observabilityEnv, onchainEnv, postgresPoolEnv, serviceUrlsEnv } from "../config/shared.js";
 
 /*
  * #15: portal (port 4310) configuration, validated once at startup. Field-level checks
@@ -111,6 +111,7 @@ export const portalConfigSchema = z.object({
   /** HMAC key for the OAuth state cookie; required in production (assertOauthStateSecret). */
   OAUTH_STATE_SECRET: optStr,
   PORTAL_DATABASE_URL: optStr,
+  ...postgresPoolEnv,
   AGENT_SIGNUPS_PER_HOUR: envNumber(undefined, { min: 0 }),
   SUPPORT_EMAIL: optStr,
   IOS_APP_TEAM_ID: optStr,

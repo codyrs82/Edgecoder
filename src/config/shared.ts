@@ -295,6 +295,15 @@ export const leaseEnv = {
   CLAIM_MAX_TIMEOUT_MS: amount()
 };
 
+/** Postgres connection pools (src/db/pool.ts): coordinator and portal. */
+export const postgresPoolEnv = {
+  PG_POOL_MAX: envInt(undefined, { min: 1 }),
+  PG_CONNECT_TIMEOUT_MS: count(),
+  PG_IDLE_TIMEOUT_MS: count(),
+  /** 0 keeps the server's own statement_timeout. */
+  PG_STATEMENT_TIMEOUT_MS: count()
+};
+
 /** Escalating a task to a parent coordinator or to cloud inference (src/escalation/server.ts). */
 export const escalationEnv = {
   PARENT_COORDINATOR_URL: envUrl(),

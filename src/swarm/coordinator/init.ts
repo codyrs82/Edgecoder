@@ -208,6 +208,17 @@ export async function initCoordinator(): Promise<void> {
           void runLedgerVerifyTick().catch((error) => app.log.warn({ error: String(error) }, "ledger_verify_failed"));
         }, Math.min(LEDGER_VERIFY_INTERVAL_MS, 15 * 60_000)).unref?.();
       }
+      // Retention: finished subtasks' input and output leave Postgres after QUEUE_RETENTION_DAYS.
+      if (pgStore && CC.QUEUE_RETENTION_DAYS > 0) {
+        const store = pgStore;
+        const sweep = () =>
+          void store
+            .sweepQueueRetention(Date.now() - CC.QUEUE_RETENTION_DAYS * 86_400_000)
+            .then((removed) => { if (removed > 0) app.log.info({ removed, days: CC.QUEUE_RETENTION_DAYS }, "queue_retention_swept"); })
+            .catch((error) => app.log.warn({ error: String(error) }, "queue_retention_sweep_failed"));
+        setTimeout(sweep, 60_000).unref?.();
+        setInterval(sweep, 60 * 60_000).unref?.();
+      }
       // Ledger vs Lightning node; a mismatch pauses payouts (payout-reconcile.ts).
       if (ECONOMY_PAYMENTS_ENABLED && payoutReconcileConfig.intervalMs > 0) {
         // Then settle payouts stuck in pending from the node's payment record (nothing is sent).

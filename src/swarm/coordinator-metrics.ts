@@ -19,6 +19,8 @@ export interface CoordinatorMetricSources {
   payoutReconcile: () => ReconcileResult | null;
   /** Fast dispatch: pickup time (claimable to claimed) over recent claims, and nudges sent. */
   dispatch?: () => { count: number; p50: number; p90: number; nudges: number };
+  /** Task privacy (src/swarm/envelope-policy.ts): envelope deliveries since start. */
+  envelope?: () => { encrypted: number; plaintext: number; encryptFailed: number; rederived: number; decryptFailed: number };
 }
 
 /** ReconcileResult["status"], plus "never_run" until the first run completes. */
@@ -34,6 +36,15 @@ export function registerCoordinatorMetrics(metrics: ServiceMetrics, sources: Coo
     metrics.gauge("edgecoder_dispatch_pickup_p50_ms", "Median time from a subtask becoming claimable to an agent claiming it, recent claims (ms).", () => d().p50);
     metrics.gauge("edgecoder_dispatch_pickup_p90_ms", "90th percentile time from a subtask becoming claimable to an agent claiming it, recent claims (ms).", () => d().p90);
     metrics.gauge("edgecoder_dispatch_nudges_sent", "work_available nudges sent to agents since start.", () => d().nudges);
+  }
+  if (sources.envelope) {
+    const e = sources.envelope;
+    // Counts since start (gauges read from in-memory counters, like the dispatch nudges above).
+    metrics.gauge("edgecoder_envelope_encrypted_deliveries_total", "Subtasks sent to agents as encrypted envelopes since start.", () => e().encrypted);
+    metrics.gauge("edgecoder_envelope_plaintext_deliveries_total", "Subtasks sent in plaintext to agents without an envelope key since start (ENVELOPE_REQUIRED off).", () => e().plaintext);
+    metrics.gauge("edgecoder_envelope_encrypt_failures_total", "Envelope builds that failed since start; the subtask was handed back, nothing sent.", () => e().encryptFailed);
+    metrics.gauge("edgecoder_envelope_key_rederived_total", "Encrypted results opened with a re-derived key (e.g. after a coordinator restart) since start.", () => e().rederived);
+    metrics.gauge("edgecoder_envelope_decrypt_failures_total", "Encrypted results that could not be opened since start.", () => e().decryptFailed);
   }
   metrics.stateGauge(
     "edgecoder_payout_reconcile_status",
