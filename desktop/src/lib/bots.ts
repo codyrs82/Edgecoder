@@ -181,15 +181,15 @@ export interface BotCompute {
   model?: string;
 }
 
-/** The form's choices, in order; new bots start on Local first. */
+/** The form's choices, in order; new bots start on Auto. */
 export const COMPUTE_POLICY_OPTIONS: Array<{ value: ComputePolicy; title: string; desc: string }> = [
-  { value: "local_first", title: "Local first", desc: "This computer, then your machines, then the network's best fit (the coordinator picks the model and machine) within the daily budget." },
-  { value: "auto", title: "Auto", desc: "Each step where it fits best: your machines when one fits (free), else the network's best fit, within the budget." },
+  { value: "auto", title: "Auto", desc: "Recommended. A capable model for each step: your machines when one has a 14B or larger model (free), else the network's best fit, within the daily budget." },
+  { value: "local_first", title: "Local first", desc: "This computer first when it has a 14B or larger model, then your machines, then the network's best fit within the daily budget." },
   { value: "local_only", title: "This computer only", desc: "Never leaves this computer. Free." },
   { value: "mine_only", title: "My machines only", desc: "This computer and your other machines. Free, never the network." },
   { value: "model", title: "Specific model", desc: "Always the model you pick below." },
 ];
-export const DEFAULT_COMPUTE: BotCompute = { policy: "local_first" };
+export const DEFAULT_COMPUTE: BotCompute = { policy: "auto" };
 
 /** Read-only tools every bot has; the form toggles the rest. */
 export const BOT_READ_TOOLS = ["read_file", "list_directory", "search_files", "search_codebase", "git_status", "git_diff", "git_log", "git_fetch", "github_list_prs", "github_list_issues"];

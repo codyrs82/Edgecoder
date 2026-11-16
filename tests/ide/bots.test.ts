@@ -4,7 +4,7 @@ import { join } from "node:path";
 import Fastify from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import { FALLBACK_NOTE } from "../../src/inference-api/auto-route.js";
-import { BotManager, MAX_REPLY_TEXT, REPLY_TRIMMED, agentBotRunner, botComputeChat, nextRunAt, parseSchedule, registerBotRoutes, summarize, type BotRunContext, type BotRunner } from "../../src/apps/ide/bots.js";
+import { BOT_AGENT_MIN_PARAMS_B, BotManager, DEFAULT_BOT_COMPUTE, botSystemPrompt, orientation, toolsLine, type BotConfig, MAX_REPLY_TEXT, REPLY_TRIMMED, agentBotRunner, botComputeChat, nextRunAt, parseSchedule, registerBotRoutes, summarize, type BotRunContext, type BotRunner } from "../../src/apps/ide/bots.js";
 import type { ChatFn } from "../../src/apps/ide/agent-loop.js";
 
 const dir = () => mkdtempSync(join(tmpdir(), "bots-"));
@@ -345,18 +345,18 @@ describe("/v1/ide/bots routes", () => {
 });
 
 describe("bot compute policy", () => {
-  it("new bots default to Local first; the policy saves and loads; old bots become Auto", () => {
+  it("new bots default to Auto; the policy saves and loads; old bots become Auto", () => {
     const file = join(dir(), "bots.json");
     const m = manager(gatedRunner().runner, { file });
     const a = m.create({ name: "Harry", projectRoot: dir() });
-    expect(a.compute).toEqual({ policy: "local_first" });
+    expect(a.compute).toEqual({ policy: "auto" });
     const b = m.create({ name: "Pinned", projectRoot: dir(), compute: { policy: "model", model: " network/qwen3.5:9b@gpu " } });
     expect(b.compute).toEqual({ policy: "model", model: "network/qwen3.5:9b@gpu" });
     // Switching away from a specific model drops the model.
     expect(m.update(b.id, { compute: { policy: "local_only", model: "x" } }).compute).toEqual({ policy: "local_only" });
     const m2 = manager(gatedRunner().runner, { file });
     m2.load();
-    expect(m2.get(a.id).compute).toEqual({ policy: "local_first" });
+    expect(m2.get(a.id).compute).toEqual({ policy: "auto" });
     expect(m2.get(b.id).compute).toEqual({ policy: "local_only" });
 
     // A bots.json from before compute policies: those bots keep Auto (and the file is migrated).
@@ -393,6 +393,7 @@ describe("bot compute policy", () => {
     const runner: BotRunner = async (ctx) => {
       const chat = botComputeChat(ctx, (policy, plan, onRoute) => async function* () {
         seen.push({ policy, allowance: plan().allowanceCSats });
+        expect(plan().agentMinParamsB).toBe(BOT_AGENT_MIN_PARAMS_B);
         const fallback = seen.length === 2;
         onRoute({ placement: "local", model: "qwen2.5-coder:1.5b", cSatsPerSecond: 0, fallback, reason: fallback ? `this computer · qwen2.5-coder:1.5b · ${FALLBACK_NOTE}` : "network gpu" });
         yield { delta: "ok" };
@@ -405,8 +406,43 @@ describe("bot compute policy", () => {
     const bot = m.create({ name: "Harry", projectRoot: dir(), budgetCSatsPerDay: 10 });
     m.runNow(bot.id);
     await m.idle(bot.id);
-    expect(seen).toEqual([{ policy: "local_first", allowance: 10 }, { policy: "local_first", allowance: 7 }]);
+    expect(seen).toEqual([{ policy: "auto", allowance: 10 }, { policy: "auto", allowance: 7 }]);
     const [run] = m.history(bot.id);
     expect(run).toMatchObject({ status: "done", cSats: 3, where: "This computer · qwen2.5-coder:1.5b", note: FALLBACK_NOTE });
+  });
+});
+
+describe("botSystemPrompt: knows its folder and tools, orients itself", () => {
+  const bot = (over: Partial<BotConfig> = {}): BotConfig => ({
+    id: "bot_h", name: "Harry", role: "Lead Developer", instructions: "", projectRoot: "/Users/cody.smith/Library/CloudStorage/Dropbox/Agents/Harry the Engineer",
+    triggers: [], maxTriggerRunsPerHour: 6, enabled: true, schedule: "", heartbeatMinutes: 30, maxRunsPerDay: 48, budgetCSatsPerDay: 100,
+    allowedTools: ["read_file", "list_directory", "search_codebase", "write_file"], autoApproveEdits: true, compute: { policy: "auto" }, color: "#0090ff", createdAtMs: 0, updatedAtMs: 0, ...over,
+  });
+
+  it("states its folder path and its file tools, and that it never claims it can't access files", () => {
+    const p = botSystemPrompt(bot(), "");
+    expect(p).toContain("Your folder: /Users/cody.smith/Library/CloudStorage/Dropbox/Agents/Harry the Engineer");
+    expect(p).toMatch(/You have tools and you can use them now: read_file, list_directory, search_codebase, write_file, remember, follow_up/);
+    expect(p).toMatch(/Never say you can't access, browse or read files/);
+  });
+
+  it("on the first run (empty memory) it must explore, read task files and remember; asked about tasks it looks", () => {
+    const first = botSystemPrompt(bot(), "");
+    expect(first).toMatch(/This is your first run[\s\S]*don't ask the user what to do/);
+    expect(first).toMatch(/list_directory[\s\S]*README, TODO[\s\S]*`remember`/);
+    expect(first).toMatch(/What open tasks do you have\?[\s\S]*look before you answer/);
+    const later = botSystemPrompt(bot(), "- Tasks are in TODO.md");
+    expect(later).not.toMatch(/This is your first run/);
+    expect(later).toMatch(/look before you answer/);
+  });
+
+  it("with a repository, it checks the repo's open issues too", () => {
+    const p = orientation(bot({ repository: "codyrs82/Edgecoder", repoPath: "/tmp/r", allowedTools: ["github_list_issues"] }), "");
+    expect(p).toMatch(/open issues on codyrs82\/Edgecoder \(github_list_issues\)/);
+    expect(toolsLine(bot({ repository: "codyrs82/Edgecoder", repoPath: "/tmp/r" }))).toMatch(/^Your folder: \/tmp\/r \(your home folder for notes:/);
+  });
+
+  it("new bots run on Auto (the network's best fit within the budget)", () => {
+    expect(DEFAULT_BOT_COMPUTE).toEqual({ policy: "auto" });
   });
 });

@@ -6,7 +6,9 @@
  * Engineer", a billing bot, a security reviewer). Each keeps its instructions, a short memory file
  * it can append to, the tools it may use, a daily cSat budget and a history of its runs.
  *
- * A run is one agent turn in the bot's project (the same loop as the IDE chat, on the bot's compute policy: Local first by default).
+ * A run is one agent turn in the bot's project (the same loop as the IDE chat, on the bot's compute
+ * policy: Auto by default, so a capable model (BOT_AGENT_MIN_PARAMS_B on your machines, else the
+ * network's best fit within the daily budget) does its steps; "This computer only" stays local).
  * Bots work on their own; nobody has to press a button:
  *   - start: a bot with a job (a role or instructions) starts working when it's created or resumed;
  *   - message: you message it;
@@ -193,6 +195,8 @@ export const DEFAULT_MAX_RUNS_PER_DAY = 48;
 /** Check-ins back off ×2 per quiet check, up to this long between them. */
 export const IDLE_BACKOFF_CAP_MS = 8 * 60 * 60_000;
 const MAX_IDLE_STEPS = 8;
+/** The fingerprint of a work folder that can't be read. */
+const UNREADABLE_FINGERPRINT = "unreadable";
 /** A run that ends with more to do continues this soon. */
 export const FOLLOW_UP_DELAY_MS = 2 * 60_000;
 /** Follow-ups in a row before the bot waits for you (or its next check-in). */
@@ -250,7 +254,7 @@ export interface BotConfig {
   allowedTools: ToolName[];
   /** Apply write_file / edit_file without asking (each run's checkpoint keeps them undoable). */
   autoApproveEdits: boolean;
-  /** Where its model calls run. New bots: Local first; bots saved before this existed: Auto. */
+  /** Where its model calls run. New bots and bots saved before this existed: Auto. */
   compute: BotCompute;
   color: string;
   /** The avatar character's shape (the app picks one from the name when unset). */
@@ -281,7 +285,19 @@ export interface BotCompute {
 }
 export const BOT_AVATAR_SHAPES = ["robot", "orb", "hex", "block"] as const;
 export type BotAvatarShape = (typeof BOT_AVATAR_SHAPES)[number];
-export const DEFAULT_BOT_COMPUTE: BotCompute = { policy: "local_first" };
+/**
+ * New bots run on Auto: free places with a capable model first, else the network's best fit (the
+ * coordinator picks the model and machine, a 30B for agent work) within the bot's daily budget.
+ * It was Local first, which put every step on this computer's 7B model, too weak to work alone.
+ */
+export const DEFAULT_BOT_COMPUTE: BotCompute = { policy: "auto" };
+/**
+ * On Local first and Auto, a bot's agent steps want a model at least this big (billions of
+ * parameters): your free machines when one has it, else the network within the daily budget, and
+ * only then the biggest model on this computer. "This computer only", "My machines only" and a
+ * specific model are left as chosen.
+ */
+export const BOT_AGENT_MIN_PARAMS_B = 14;
 /** What bots saved before compute policies existed keep doing. */
 export const LEGACY_BOT_COMPUTE: BotCompute = { policy: "auto" };
 
@@ -548,7 +564,9 @@ export function botSystemPrompt(bot: BotConfig, memory: string): string {
     bot.repository && bot.repoPath
       ? `You are "${bot.name}"${bot.role ? `, ${bot.role}` : ""}: a persistent bot that owns a job in the repository ${bot.repository}, checked out at ${bot.repoPath} (your tools work there). Your home folder ${bot.projectRoot} keeps your own notes. You work on your own: when you're set up, on regular check-ins, on GitHub events and when the user messages you; nobody has to tell you to start. Each run starts fresh except for your memory below and the recent conversation.`
       : `You are "${bot.name}"${bot.role ? `, ${bot.role}` : ""}: a persistent bot that owns a job in the project at ${bot.projectRoot}. You work on your own: when you're set up, on regular check-ins and when the user messages you; nobody has to tell you to start. Each run starts fresh except for your memory below and the recent conversation.`,
+    toolsLine(bot),
     `Do the work in this run with your tools; don't stop after saying what you'll do. If there's more to do than fits in one run, call \`follow_up\` with {"in_minutes": 2, "reason": "..."} and you'll get another run to continue.`,
+    orientation(bot, memory),
     bot.instructions.trim() ? `Your instructions:\n${bot.instructions.trim()}` : "",
     `Your memory (notes you saved on earlier runs):\n${memory.trim() || "(empty)"}`,
     `To save a short note for future runs (what you did, what to check next time), call the \`remember\` tool with {"note": "..."}. Keep notes brief.`,
@@ -560,12 +578,45 @@ export function botSystemPrompt(bot: BotConfig, memory: string): string {
   ].filter(Boolean).join("\n\n");
 }
 
+/**
+ * Where the bot's files are and that it can reach them: a small model otherwise answered "As an AI,
+ * I don't have the capability to browse or access files" with its folder right there.
+ */
+export function toolsLine(bot: Pick<BotConfig, "projectRoot" | "repository" | "repoPath" | "allowedTools">): string {
+  const folder = botWorkRoot(bot);
+  const tools = [...bot.allowedTools, "remember", "follow_up"];
+  const fileTools = tools.filter((t) => ["list_directory", "read_file", "search_files", "search_codebase", "write_file", "edit_file"].includes(t));
+  return [
+    `Your folder: ${folder}${folder !== bot.projectRoot ? ` (your home folder for notes: ${bot.projectRoot})` : ""}. Paths in tool calls are relative to it ("." is the folder itself).`,
+    `You have tools and you can use them now: ${tools.join(", ")}.${fileTools.length ? ` With ${fileTools.join(", ")} you can see and read${fileTools.some((t) => t === "write_file" || t === "edit_file") ? " and change" : ""} the files in your folder.` : ""} Never say you can't access, browse or read files: you can, with these tools. To use a tool, call it; don't write the call out as text for the user.`,
+  ].join("\n");
+}
+
+/**
+ * How a bot finds out what its job is: by looking, never by asking. On its first run (empty memory)
+ * it must explore before anything else; on any run, a question about its tasks, files or work is
+ * answered from what it finds with its tools, not from guesswork.
+ */
+export function orientation(bot: Pick<BotConfig, "projectRoot" | "repository" | "repoPath" | "allowedTools">, memory: string): string {
+  const where = bot.repository && bot.repoPath ? "the repository checkout" : "your folder";
+  const issues = bot.repository && bot.allowedTools.includes("github_list_issues") ? ` and the open issues on ${bot.repository} (github_list_issues)` : "";
+  const steps =
+    `1. list_directory on ${where} (path ".") to see what's there.\n` +
+    `2. read_file the files that say what the work is: README, TODO, ISSUES, NOTES, CHANGELOG, task lists, anything named like tasks, plan or backlog (and the same in docs/ or tasks/ folders)${issues}.\n` +
+    `3. Call \`remember\` with a short summary of what you learned: what the project is, your open tasks, what to do next.`;
+  const first = !memory.trim()
+    ? `This is your first run (your memory is empty): before anything else, orient yourself with your tools; don't ask the user what to do and don't answer from guesswork:\n${steps}\nThen start on the most important task.`
+    : "";
+  const asked = `Whenever you're asked about your tasks, your files or what you're working on ("What open tasks do you have?", "Did you read your files?"), look before you answer: check your memory below, list and read the files in ${where}${issues}, then answer from what you found. Never say you haven't looked or ask the user to tell you; go look. If your memory doesn't describe your tasks yet, follow these steps:\n${steps}`;
+  return [first, asked].filter(Boolean).join("\n\n");
+}
+
 /** The conversation label and the prompt for a run nobody typed. */
 export function runPrompt(trigger: Exclude<BotTrigger, "message" | "github">, reason?: string): { label: string; text: string } {
   const end = "When you're done, reply with a short summary of what you did and anything that needs my attention.";
   switch (trigger) {
     case "start":
-      return { label: "Started work", text: `You're starting work (just set up or resumed). Look at the project, decide what your job needs first, and start on it now with your tools; don't just describe what you'll do. ${end}` };
+      return { label: "Started work", text: `You're starting work (just set up or resumed). First orient yourself with your tools: list your folder, read its README, TODO and task files (and open issues if you have a repository), and save what you learned with \`remember\`. Then decide what your job needs first and start on it now with your tools; don't just describe what you'll do and don't ask me what to do. ${end}` };
     case "heartbeat":
       return { label: "Check-in", text: `Check the project for work your job covers: what changed since your last run, failing tests, open issues, TODOs. If there's something to do, do it now with your tools. If there's nothing to do, reply in one line saying so. ${end}` };
     case "follow_up":
@@ -700,8 +751,15 @@ export class BotManager {
   private get gh(): GhApi {
     return this.deps.gh ?? ghApiCli();
   }
-  private fingerprintOf(bot: BotConfig): Promise<string | null> {
-    return (this.deps.fingerprint ?? projectFingerprint)(botWorkRoot(bot)).catch(() => null);
+  /**
+   * The work folder's fingerprint. A folder it can't read (a cloud-storage folder without access,
+   * say) gets a fixed one, so check-ins there back off like a quiet project instead of starting a
+   * run every time.
+   */
+  private fingerprintOf(bot: BotConfig): Promise<string> {
+    return (this.deps.fingerprint ?? projectFingerprint)(botWorkRoot(bot))
+      .catch(() => null)
+      .then((fp) => fp ?? UNREADABLE_FINGERPRINT);
   }
 
   // --- persistence ---
@@ -1682,8 +1740,8 @@ export class BotManager {
   /**
    * After a run: a check-in that changed nothing makes the next one wait longer; any other change
    * resets the wait. The check-in clock restarts from now. A run that ends with more to do (the
-   * follow_up tool, or a reply that only says what it'll do next) gets a follow-up soon, at most
-   * MAX_FOLLOW_UPS_IN_A_ROW in a row.
+   * follow_up tool, or a reply that only says what it'll do next after using its tools) gets a
+   * follow-up soon, at most MAX_FOLLOW_UPS_IN_A_ROW in a row.
    */
   private async afterRun(id: string, act: ActiveRun, text: string): Promise<void> {
     const bot = this.bots.find((b) => b.id === id);
@@ -1699,7 +1757,11 @@ export class BotManager {
       bot.nextRunAtMs = now + heartbeatInterval(bot.heartbeatMinutes!, auto.idleStreak);
     }
     if (run.status !== "done" || !bot.enabled) return;
-    const wants = act.followUp ?? (announcesWork(text) ? { minutes: FOLLOW_UP_DELAY_MS / MINUTE, reason: summarize(text) } : undefined);
+    // A reply that only says what it'll do next continues soon, but only when the run did something:
+    // one that announced work, got its go-ahead and still called no tool would just do it again
+    // (a small model looping on "I'll start by…" filled the runs list).
+    const announced = act.tools.size > 0 && announcesWork(text);
+    const wants = act.followUp ?? (announced ? { minutes: FOLLOW_UP_DELAY_MS / MINUTE, reason: summarize(text) } : undefined);
     if (!wants) return;
     if (run.trigger === "follow_up" && auto.followUps >= MAX_FOLLOW_UPS_IN_A_ROW) {
       this.note(id, `Stopped following up after ${MAX_FOLLOW_UPS_IN_A_ROW} runs in a row; message ${bot.name} to continue`);
@@ -1763,14 +1825,17 @@ export function botComputeChat(
     compute.policy,
     () => {
       const left = ctx.budgetLeft();
-      return { ...(left === null ? {} : { allowanceCSats: left }), ...(compute.model ? { model: compute.model } : {}) };
+      const capable = compute.policy === "local_first" || compute.policy === "auto";
+      return { ...(left === null ? {} : { allowanceCSats: left }), ...(compute.model ? { model: compute.model } : {}), ...(capable ? { agentMinParamsB: BOT_AGENT_MIN_PARAMS_B } : {}) };
     },
     (r) => {
       where = routeLabel(r);
       ctx.sendEvent({ type: "status", message: `Compute: ${r.reason}` });
     },
   );
-  return backendChat(backend, (cSats) => ctx.sendEvent({ type: "usage", cSats, where }), ctx.signal);
+  // Tell the network's best fit this is agent work, so it picks a model that handles tools well.
+  const agentic: ChatBackend = (req, signal) => backend(req.tools?.length ? { ...req, hints: { job: "agentic", needsTools: true, ...req.hints } } : req, signal);
+  return backendChat(agentic, (cSats) => ctx.sendEvent({ type: "usage", cSats, where }), ctx.signal);
 }
 
 // ---------------------------------------------------------------------------

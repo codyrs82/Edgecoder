@@ -565,7 +565,7 @@ Requests carrying a browser `Origin` that is not the portal's own get `403 cross
   | Portal chat | Auto → network best fit | when the network can't take it (no cSats, nothing fits) the coordinator's own chat answers, free |
   | App chat and Code view (ComputePicker) | "Auto · This computer only" (local, free) | the "Auto" row: free places first, then coordinator best fit |
   | `edgecoder code` and IDE sessions | `auto` | free places first, then coordinator best fit (hosted `auto` without an enrolled agent) |
-  | Bots | Local first (Auto is a choice) | the network step of Local first / Auto is coordinator best fit, within the bot's daily budget (sent as the `maxCSats` ceiling); "This computer only" and "My machines only" never use the network |
+  | Bots | Auto (Local first is a choice) | agent steps want a 14B or larger model: free places that have one first, else coordinator best fit (sent as job `agentic`), within the bot's daily budget (sent as the `maxCSats` ceiling); "This computer only" and "My machines only" never use the network |
   | Tentacle helpers | `auto` | coordinator best fit |
 
   These calls are what fill Settings → Network → "Routing decisions" (kept across restarts for `NETWORK_HISTORY_DAYS`).

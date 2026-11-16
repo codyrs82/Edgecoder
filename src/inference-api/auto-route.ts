@@ -281,6 +281,13 @@ export interface PlanOptions {
   allowanceCSats?: number;
   /** The model id for the "model" policy. */
   model?: string;
+  /**
+   * The smallest model (billions of parameters) for agent work (tools or a long context) under
+   * local_first and auto, when it's above the usual floor. Bots set it: a 7B model on this computer
+   * doesn't follow tool calls well enough to work on its own, so a capable model on your machines or
+   * the network (within the budget) comes first. The biggest free model is still the last resort.
+   */
+  agentMinParamsB?: number;
 }
 
 /** What the network may cost this request: the lower of the balance and the allowance. */
@@ -316,6 +323,7 @@ export function planRoutes(w: Workload, inp: RouteInputs, policy: ComputePolicy 
     const fit = rankRoutes(w, { ...inp, leases: [], networkModels: [] });
     return fit.length ? fit : fallbackRoutes(inp, ["local", "mine"]);
   }
+  if (w.heavy && opts.agentMinParamsB && opts.agentMinParamsB > (w.minParamsB ?? 0)) w = { ...w, minParamsB: opts.agentMinParamsB };
   const ranked = rankRoutes(w, inp);
   const order: Placement[] = policy === "local_first" ? ["local", "mine", "reserved"] : ["reserved", "local", "mine"];
   const free = order.flatMap((p) => ranked.filter((r) => r.placement === p));
