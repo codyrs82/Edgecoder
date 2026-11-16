@@ -44,9 +44,9 @@ export const SERIES_GAPS_SCRIPT = `
 `;
 
 /**
- * Page-script helpers for the Gaps charts (#336; plain JS, tested on their own). The series carry
+ * Page-script helpers for the Gaps charts (PR 336; plain JS, tested on their own). The series carry
  * keyed maps per point (unmetByModel, modelSlots, agentsByRegion); a chart shows the GAP_KEYS keys
- * largest over the range, in the categorical slots c1..c4, and folds the rest into "Other".
+ * largest over the range, in the categorical slots c1..c4 (--chart-1..4), and folds the rest into "Other".
  *
  * - topKeys: the largest keys over the points (the coordinators' "(other)" is never one of them).
  * - assignSlots: a color slot per key that stays with the key across refreshes and ranges (color
@@ -169,16 +169,13 @@ export function networkPageContent(): string {
       .net-table-wrap .mono { font-family:var(--font-mono); font-size:12px; }
       .net-table-wrap .nowrap { white-space:nowrap; }
       .net-models-list { color:var(--text-secondary); max-width:260px; white-space:normal; }
-      /* Gaps charts: categorical slots (dataviz reference palette, validated adjacent-pair for CVD in
-         both themes), stepped for the dark surface; "Other" is neutral ink. */
-      #netBody { --net-c1:#2a78d6; --net-c2:#eb6834; --net-c3:#1baf7a; --net-c4:#eda100; --net-other:var(--text-muted); }
-      @media (prefers-color-scheme: dark) { :root:not([data-theme=light]) #netBody { --net-c1:#3987e5; --net-c2:#d95926; --net-c3:#199e70; --net-c4:#c98500; } }
-      [data-theme=dark] #netBody { --net-c1:#3987e5; --net-c2:#d95926; --net-c3:#199e70; --net-c4:#c98500; }
-      .s-c1 { stroke:var(--net-c1); } .f-c1 { fill:var(--net-c1); } .a-c1 { fill:var(--net-c1); opacity:0.3; }
-      .s-c2 { stroke:var(--net-c2); } .f-c2 { fill:var(--net-c2); } .a-c2 { fill:var(--net-c2); opacity:0.3; }
-      .s-c3 { stroke:var(--net-c3); } .f-c3 { fill:var(--net-c3); } .a-c3 { fill:var(--net-c3); opacity:0.3; }
-      .s-c4 { stroke:var(--net-c4); } .f-c4 { fill:var(--net-c4); } .a-c4 { fill:var(--net-c4); opacity:0.3; }
-      .s-other { stroke:var(--net-other); } .f-other { fill:var(--net-other); } .a-other { fill:var(--net-other); opacity:0.22; }
+      /* Gaps charts: the shared categorical chart tokens (--chart-1..4, light and dark in
+         @edgecoder/tokens), taken in order; "Other" is neutral ink. */
+      .s-c1 { stroke:var(--chart-1); } .f-c1 { fill:var(--chart-1); } .a-c1 { fill:var(--chart-1); opacity:0.3; }
+      .s-c2 { stroke:var(--chart-2); } .f-c2 { fill:var(--chart-2); } .a-c2 { fill:var(--chart-2); opacity:0.3; }
+      .s-c3 { stroke:var(--chart-3); } .f-c3 { fill:var(--chart-3); } .a-c3 { fill:var(--chart-3); opacity:0.3; }
+      .s-c4 { stroke:var(--chart-4); } .f-c4 { fill:var(--chart-4); } .a-c4 { fill:var(--chart-4); opacity:0.3; }
+      .s-other { stroke:var(--text-muted); } .f-other { fill:var(--text-muted); } .a-other { fill:var(--text-muted); opacity:0.22; }
       .net-section-head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin:0 0 8px; }
       .net-section-head h3 { font-size:13px; font-weight:600; margin:0; }
       .net-section-head .hint { font-size:11.5px; color:var(--muted); }

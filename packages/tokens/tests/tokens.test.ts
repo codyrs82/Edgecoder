@@ -44,6 +44,19 @@ describe("@edgecoder/tokens (#23)", () => {
     for (const name of Object.keys(tokens.color)) expect(css).toContain(`--${name}:`);
   });
 
+  it("chart series colours (--chart-1..4) have light and dark values in every theme block", () => {
+    const css = buildCss(tokens);
+    expect(Object.keys(tokens.chart)).toEqual(["1", "2", "3", "4"]);
+    for (const [k, v] of Object.entries<{ light: string; dark: string }>(tokens.chart)) {
+      expect(v.light).toMatch(/^#[0-9a-f]{6}$/);
+      expect(v.dark).toMatch(/^#[0-9a-f]{6}$/);
+      expect(css).toContain(`--chart-${k}: ${v.light};`);
+      // explicit dark and prefers-color-scheme dark
+      expect(css.split(`--chart-${k}: ${v.dark};`)).toHaveLength(3);
+      expect(buildTheme(tokens)).toContain(`--color-chart-${k}: var(--chart-${k});`);
+    }
+  });
+
   it("elevation (shadows and the modal scrim) is generated once, outside the per-theme blocks", () => {
     const css = buildCss(tokens);
     for (const k of Object.keys(tokens.shadow)) expect(css).toContain(`--shadow-${k}: ${tokens.shadow[k]};`);
