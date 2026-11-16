@@ -277,4 +277,41 @@ describe("Network page: pulses", () => {
     expect(graph.querySelectorAll("circle.pulse").length).toBe(4);
     expect(document.getElementById("world-activity")?.textContent).toBe("4 machines busy.");
   });
+  it("map words: in one layer over the lines and nodes, your long names short, hidden names shown on hover and focus", async () => {
+    const long = "desktop-macbook-pro-crs-local-51738927";
+    const base = structuredClone(WORLD);
+    base.agents[1].name = long;
+    // 30 machines: crowded, so only your own are named on the map until you point at one.
+    const extra = Array.from({ length: 30 - base.agents.length }, (_, i) => ({ ...structuredClone(base.agents[3]), id: `x${String(i).padStart(3, "0")}`, label: `lin-•••${(0xa000 + i).toString(16)}` }));
+    const w = { ...base, agents: [...base.agents, ...extra] };
+    api.networkWorld.mockResolvedValue(w);
+    render(MeshTopology);
+    const graph = await screen.findByRole("group", { name: /network graph/i });
+    await waitFor(() => expect(within(graph).getAllByRole("button")).toHaveLength(30));
+    const layer = graph.querySelector("g.labels")!;
+    // The layer is drawn last; nodes carry no words of their own.
+    expect(graph.lastElementChild).toBe(layer);
+    for (const n of graph.querySelectorAll("g[data-node]")) expect(n.querySelector("text")).toBeNull();
+    for (const t of ["20 ms", "You", "coordinator.edgecoder.io"]) expect([...layer.querySelectorAll("text")].some((x) => x.textContent === t)).toBe(true);
+    // Your long desktop name is short on the map, full in the tooltip and the accessible name.
+    const mineNode = within(graph).getAllByRole("button").find((n) => n.getAttribute("aria-label")?.includes(long))!;
+    expect(mineNode.querySelector("title")?.textContent).toBe(long);
+    const mineLabel = layer.querySelector(`[data-label-for="${w.agents[1].id}"]`)!;
+    expect(mineLabel.textContent).toBe("macbook-pro-crs");
+    expect(mineLabel.classList.contains("off")).toBe(false);
+    // Someone else's name is hidden on the crowded map, and shows on hover and on focus.
+    const otherId = extra[0].id;
+    const label = () => layer.querySelector(`[data-label-for="${otherId}"]`)!;
+    expect(label().classList.contains("off")).toBe(true);
+    expect(label().classList.contains("on")).toBe(false);
+    const node = graph.querySelector(`g[data-node][aria-label*="${extra[0].label}"]`) as SVGGElement;
+    await fireEvent.mouseEnter(node);
+    expect(label().classList.contains("on")).toBe(true);
+    await fireEvent.mouseLeave(node);
+    expect(label().classList.contains("on")).toBe(false);
+    await fireEvent.focus(node);
+    expect(label().classList.contains("on")).toBe(true);
+    await fireEvent.blur(node);
+    expect(label().classList.contains("on")).toBe(false);
+  });
 });

@@ -269,9 +269,11 @@ export interface WorldLayout {
   height: number;
   hubs: HubNode[];
   agents: AgentNode[];
-  /** Guide rings around each hub: radius and the round trip it stands for. */
-  rings: Array<{ hubId: string; r: number; ms: number }>;
+  /** Guide rings around each hub: radius, the round trip it stands for, and where its label sits (lx, ly). */
+  rings: Array<{ hubId: string; r: number; ms: number; lx: number; ly: number }>;
   you: { x: number; y: number } | null;
+  /** Each machine's name on the map, in `agents` order (placeLabels). */
+  labels: MapLabel[];
 }
 
 /** West to east, so the hubs sit roughly where they are. */
@@ -299,8 +301,13 @@ export function nodeRadius(a: WorldAgent): number {
  * Coordinators as hubs (west to east, three to a row), each machine on a ring around its
  * coordinator at a distance set by the coordinator's round trip to it, spread evenly by region.
  * "You" sits under the hubs when this computer's round trip to any coordinator is known.
+ *
+ * The machines around a hub keep clear of its lines (to the other coordinators and to "You") and
+ * of its ring labels: spreadAngles leaves a gap around each, so no machine sits on a line. Then
+ * placeLabels places every machine's name where it does not cover another name, a node, a hub or
+ * a coordinator line (`labels`). All of it is deterministic: the same answer lays out the same.
  */
-export function worldLayout(view: Pick<WorldView, "coordinators">, rows: readonly WorldRow[]): WorldLayout {
+export function worldLayout(view: Pick<WorldView, "coordinators"> & Partial<Pick<WorldView, "links">>, rows: readonly WorldRow[]): WorldLayout {
   const coords = [...view.coordinators].sort((a, b) => (CONTINENT_X[a.continent ?? ""] ?? 9) - (CONTINENT_X[b.continent ?? ""] ?? 9) || a.id.localeCompare(b.id));
   const perRow = Math.max(1, Math.min(3, coords.length));
   const hubs: HubNode[] = coords.map((c, i) => ({
@@ -310,9 +317,14 @@ export function worldLayout(view: Pick<WorldView, "coordinators">, rows: readonl
     coordinator: c
   }));
   const hubById = new Map(hubs.map((h) => [h.id, h]));
+  const links = (view.links ?? []).filter((l) => hubById.has(l.from) && hubById.has(l.to) && l.from !== l.to);
+  const rowsCount = Math.ceil(hubs.length / perRow);
+  const anyMine = view.coordinators.some((c) => typeof c.myRttMs === "number");
+  const width = Math.max(CELL, perRow * CELL);
+  const lanRows = rows.filter((r) => r.sameNetwork);
+  const you = anyMine || lanRows.length ? { x: width / 2, y: rowsCount * CELL + 26 } : null;
   const agents: AgentNode[] = [];
   const byHub = new Map<string, WorldRow[]>();
-  const lanRows = rows.filter((r) => r.sameNetwork);
   for (const r of rows) {
     if (r.sameNetwork) continue;
     if (!hubById.has(r.agent.coordinatorId)) continue;
@@ -325,18 +337,26 @@ export function worldLayout(view: Pick<WorldView, "coordinators">, rows: readonl
     const sorted = [...list].sort(
       (x, y) => (x.agent.continent ?? "~").localeCompare(y.agent.continent ?? "~") || (x.agent.region ?? "~").localeCompare(y.agent.region ?? "~") || x.agent.id.localeCompare(y.agent.id)
     );
+    // Directions to keep clear: the ring labels (top, a little right), each coordinator line, the line to "You".
+    const blocked: Array<[number, number]> = [[-Math.PI / 2 + 0.2, 0.26]];
+    for (const l of links) {
+      const other = l.from === hubId ? hubById.get(l.to) : l.to === hubId ? hubById.get(l.from) : undefined;
+      if (other) blocked.push([Math.atan2(other.y - hub.y, other.x - hub.x), LINE_CLEAR]);
+    }
+    if (you && typeof hub.coordinator.myRttMs === "number") blocked.push([Math.atan2(you.y - hub.y, you.x - hub.x), LINE_CLEAR]);
+    const angles = spreadAngles(sorted.length, blocked);
     sorted.forEach((row, i) => {
-      // Half a step off the top, so no machine sits on the ring labels or on a hub-to-hub line.
-      const a = -Math.PI / 2 + (2 * Math.PI * (i + 0.5)) / sorted.length + (sorted.length % 2 ? Math.PI / 12 : 0);
+      const a = angles[i];
       const d = ringRadius(row.agent.rttMs);
       agents.push({ id: row.agent.id, x: +(hub.x + d * Math.cos(a)).toFixed(1), y: +(hub.y + d * Math.sin(a)).toFixed(1), r: +nodeRadius(row.agent).toFixed(1), hubId, row });
     });
   }
-  const rings = hubs.flatMap((h) => [20, 100].map((ms) => ({ hubId: h.id, r: ringRadius(ms), ms })));
-  const rowsCount = Math.ceil(hubs.length / perRow);
-  const anyMine = view.coordinators.some((c) => typeof c.myRttMs === "number");
-  const width = Math.max(CELL, perRow * CELL);
-  const you = anyMine || lanRows.length ? { x: width / 2, y: rowsCount * CELL + 26 } : null;
+  const rings = hubs.flatMap((h) =>
+    [20, 100].map((ms) => {
+      const r = ringRadius(ms);
+      return { hubId: h.id, r, ms, lx: h.x + 4, ly: +(h.y - r - 3).toFixed(1) };
+    })
+  );
   // Your machines on the same local network sit beside "You", alternately left and right, closer
   // for a shorter round trip.
   if (you) {
@@ -354,13 +374,255 @@ export function worldLayout(view: Pick<WorldView, "coordinators">, rows: readonl
       if (hub) agents.push({ id: row.agent.id, x: hub.x, y: +(hub.y + ringRadius(row.agent.rttMs)).toFixed(1), r: +nodeRadius(row.agent).toFixed(1), hubId: hub.id, row });
     }
   }
-  return { width, height: rowsCount * CELL + (you ? 64 : 0), hubs, agents, rings, you };
+  const layout: WorldLayout = { width, height: rowsCount * CELL + (you ? 64 : 0), hubs, agents, rings, you, labels: [] };
+  layout.labels = placeLabels(layout, links);
+  return layout;
 }
 
 /** Distance from "You" for a LAN round trip: 46 px at 1 ms or less, up to 90 px at 20 ms or more. */
 export function lanDistance(ms: number | null): number {
   const m = Math.min(20, Math.max(1, ms ?? 20));
   return +(46 + (44 * Math.log(m)) / Math.log(20)).toFixed(1);
+}
+
+// ── Map labels: short names, placed so they do not collide ──
+
+/** Font sizes on the map (px in the graph's viewBox), as the renderers' CSS sets them. */
+export const LABEL_FONT = 10.5;
+export const SMALL_FONT = 11;
+export const RING_FONT = 10;
+/** Average glyph width as a share of the font size: a deterministic estimate, no DOM measuring. */
+export const LABEL_CHAR_EM = 0.6;
+/** A map label longer than this is cut with "…" (the full name is in the tooltip and the panel). */
+export const LABEL_MAX_CHARS = 22;
+/** Above this many machines only your own are named on the map; the rest show on hover or focus. */
+export const LABEL_ALL_MAX = 24;
+/** The hub circle's radius. */
+export const HUB_R = 26;
+/** Half-width of the band along a coordinator-to-coordinator line that no machine name may cross. */
+export const MESH_BAND = 5;
+/** Angle (radians, each side) a hub keeps free of machines around each of its lines. */
+export const LINE_CLEAR = 0.26;
+/** Smallest angle between two machines around a hub before the gaps around its lines shrink. */
+export const MIN_STEP = 0.16;
+/** Where a name may go around its node, most preferred first before the outward sort: right, left, below, above, then diagonals. */
+export const LABEL_DIRS: Array<[number, number]> = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]];
+
+export interface LabelBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+export interface MapLabel {
+  /** The machine's id (its node's). */
+  id: string;
+  /** What the map shows: your machine's short name, or the masked label. */
+  text: string;
+  /** The full name, for the tooltip. */
+  full: string;
+  /** Text anchor point and baseline (SVG x, y, text-anchor). */
+  x: number;
+  y: number;
+  anchor: "start" | "middle" | "end";
+  box: LabelBox;
+  /** False: it would cover something, or the map is crowded; shown only on hover, focus or selection. */
+  visible: boolean;
+  /** Placement order: 0 your machines, 1 busy machines, 2 the rest (lower places first and hides last). */
+  tier: number;
+}
+
+/**
+ * Your machine's name, short enough for the map: "desktop-macbook-pro-crs-local-51738927" reads
+ * "macbook-pro-crs" (the app's "desktop-" prefix and "-local-<hash>" suffix go), and anything
+ * still longer than LABEL_MAX_CHARS is cut with "…".
+ */
+export function shortMachineName(name: string): string {
+  let s = name.replace(/^desktop-/i, "").replace(/-local-[0-9a-z]+$/i, "").replace(/\.local$/i, "");
+  if (!s) s = name;
+  return s.length > LABEL_MAX_CHARS ? s.slice(0, LABEL_MAX_CHARS - 1) + "…" : s;
+}
+
+/** A machine's name on the map: yours shortened, everyone else's masked label as it is. */
+export function mapLabelText(a: WorldAgent): string {
+  return a.mine && a.name ? shortMachineName(a.name) : a.label;
+}
+
+/** Estimated box of a line of text at (x, baseline y). */
+export function textBox(text: string, x: number, y: number, anchor: "start" | "middle" | "end", font: number): LabelBox {
+  const w = Math.max(1, text.length) * font * LABEL_CHAR_EM + 2;
+  const h = font * 1.1;
+  const left = anchor === "start" ? x - 1 : anchor === "end" ? x - w + 1 : x - w / 2;
+  return { x: +left.toFixed(1), y: +(y - font * 0.82).toFixed(1), w: +w.toFixed(1), h: +h.toFixed(1) };
+}
+
+export function boxesOverlap(a: LabelBox, b: LabelBox, pad = 0): boolean {
+  return a.x < b.x + b.w + pad && b.x < a.x + a.w + pad && a.y < b.y + b.h + pad && b.y < a.y + a.h + pad;
+}
+
+export function boxHitsCircle(b: LabelBox, cx: number, cy: number, r: number): boolean {
+  const nx = Math.max(b.x, Math.min(cx, b.x + b.w));
+  const ny = Math.max(b.y, Math.min(cy, b.y + b.h));
+  return (nx - cx) * (nx - cx) + (ny - cy) * (ny - cy) < r * r;
+}
+
+/** Does the segment, `half` px thick each side, cross the box? (Clip against the box grown by `half`.) */
+export function boxHitsSegment(b: LabelBox, x1: number, y1: number, x2: number, y2: number, half: number): boolean {
+  const xmin = b.x - half, xmax = b.x + b.w + half, ymin = b.y - half, ymax = b.y + b.h + half;
+  const dx = x2 - x1, dy = y2 - y1;
+  let t0 = 0, t1 = 1;
+  const p = [-dx, dx, -dy, dy];
+  const q = [x1 - xmin, xmax - x1, y1 - ymin, ymax - y1];
+  for (let i = 0; i < 4; i++) {
+    if (p[i] === 0) {
+      if (q[i] < 0) return false;
+    } else {
+      const t = q[i] / p[i];
+      if (p[i] < 0) t0 = Math.max(t0, t);
+      else t1 = Math.min(t1, t);
+      if (t0 > t1) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * `n` angles around a hub, spread evenly from the top (clockwise) over the directions left free
+ * by `blocked` ([centre, half-width] in radians). When the machines would sit closer than
+ * MIN_STEP the gaps shrink, down to none (an even spread all round).
+ */
+export function spreadAngles(n: number, blocked: ReadonlyArray<[number, number]>): number[] {
+  if (n <= 0) return [];
+  const TAU = 2 * Math.PI;
+  const total = blocked.reduce((s, b) => s + 2 * b[1], 0);
+  const k = total > 0 ? Math.max(0, Math.min(1, (TAU - n * MIN_STEP) / total)) : 0;
+  // Blocked intervals as offsets from the top, clockwise, in [0, TAU).
+  const iv: Array<[number, number]> = [];
+  for (const b of blocked) {
+    const w = b[1] * k;
+    if (!(w > 0)) continue;
+    const lo = (((b[0] - w + Math.PI / 2) % TAU) + TAU) % TAU;
+    const hi = lo + 2 * w;
+    if (hi > TAU) {
+      iv.push([lo, TAU]);
+      iv.push([0, hi - TAU]);
+    } else iv.push([lo, hi]);
+  }
+  iv.sort((x, y) => x[0] - y[0] || x[1] - y[1]);
+  const free: Array<[number, number]> = [];
+  let at = 0;
+  for (const v of iv) {
+    if (v[0] > at) free.push([at, v[0]]);
+    at = Math.max(at, v[1]);
+  }
+  if (at < TAU) free.push([at, TAU]);
+  const len = free.reduce((s, f) => s + f[1] - f[0], 0);
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) {
+    let t = len > 0 ? ((i + 0.5) * len) / n : ((i + 0.5) * TAU) / n;
+    let a = -Math.PI / 2 + t;
+    if (len > 0) {
+      for (const f of free) {
+        const span = f[1] - f[0];
+        if (t <= span) {
+          a = -Math.PI / 2 + f[0] + t;
+          break;
+        }
+        t -= span;
+      }
+    }
+    out.push(+a.toFixed(4));
+  }
+  return out;
+}
+
+/**
+ * Where each machine's name goes. Fixed first: the hubs, the coordinator names under them, the
+ * ring labels, the coordinator lines and their round trips, "You". Then the machines in order (your
+ * own, then busy ones, then the rest; nearer first, then by id), each trying the spots around its
+ * node (LABEL_DIRS, those facing away from its hub first) and taking the first whose box covers no
+ * name already placed, no node, no hub, no ring label, no coordinator line and stays on the map.
+ * A name with no free spot is hidden (`visible: false`, at its first spot for hover and focus), so
+ * lower-priority names hide first. Above LABEL_ALL_MAX machines only yours are placed.
+ */
+export function placeLabels(layout: Pick<WorldLayout, "width" | "height" | "hubs" | "agents" | "rings" | "you">, links: ReadonlyArray<Pick<WorldLink, "from" | "to" | "rttMs">>): MapLabel[] {
+  const hubById: Record<string, HubNode> = {};
+  layout.hubs.forEach((h) => (hubById[h.id] = h));
+  const fixed: LabelBox[] = [];
+  const circles: Array<[number, number, number, string]> = [];
+  const segs: Array<[number, number, number, number]> = [];
+  for (const ring of layout.rings) fixed.push(textBox(ring.ms + " ms", ring.lx, ring.ly, "start", RING_FONT));
+  for (const h of layout.hubs) {
+    circles.push([h.x, h.y, HUB_R + 2, ""]);
+    fixed.push(textBox(hostOf(h.coordinator.url), h.x, h.y + RING_MAX + 22, "middle", SMALL_FONT));
+  }
+  for (const l of links) {
+    const a = hubById[l.from], b = hubById[l.to];
+    if (!a || !b) continue;
+    segs.push([a.x, a.y, b.x, b.y]);
+    fixed.push(textBox(formatMs(l.rttMs), (a.x + b.x) / 2, (a.y + b.y) / 2 - 8, "middle", SMALL_FONT));
+  }
+  const you = layout.you;
+  if (you) {
+    circles.push([you.x, you.y, 12, ""]);
+    fixed.push(textBox("You", you.x, you.y + 26, "middle", SMALL_FONT));
+    for (const h of layout.hubs) {
+      if (typeof h.coordinator.myRttMs === "number") fixed.push(textBox(formatMs(h.coordinator.myRttMs), (you.x + h.x) / 2 + 6, (you.y + h.y) / 2 + 40, "start", SMALL_FONT));
+    }
+    for (const n of layout.agents) if (n.lan) fixed.push(textBox(formatMs(n.row.estimateMs), (you.x + n.x) / 2, you.y - 8, "middle", LABEL_FONT));
+  }
+  for (const n of layout.agents) circles.push([n.x, n.y, n.r + (n.row.agent.mine ? 4 : 0) + 1, n.id]);
+
+  const tierOf = (a: WorldAgent) => (a.mine ? 0 : a.status === "busy" || activityOf(a).callsNow > 0 ? 1 : 2);
+  const order = layout.agents.slice().sort((x, y) => {
+    const ex = x.row.estimateMs, ey = y.row.estimateMs;
+    return (
+      tierOf(x.row.agent) - tierOf(y.row.agent) ||
+      (ex === null ? Infinity : ex) - (ey === null ? Infinity : ey) ||
+      (x.id < y.id ? -1 : x.id > y.id ? 1 : 0)
+    );
+  });
+  const crowded = layout.agents.length > LABEL_ALL_MAX;
+  const placed: LabelBox[] = [];
+  const byId: Record<string, MapLabel> = {};
+  for (const n of order) {
+    const a = n.row.agent;
+    const text = mapLabelText(a);
+    const tier = tierOf(a);
+    const outer = n.r + (a.mine ? 4 : 0) + 3;
+    // Away from the hub (or from "You") first; ties keep LABEL_DIRS order.
+    const from = n.lan && you ? you : hubById[n.hubId];
+    const ox = from ? n.x - from.x : 0, oy = from ? n.y - from.y : 0;
+    const olen = Math.hypot(ox, oy);
+    const dirs = LABEL_DIRS.map((d, i) => {
+      const dl = Math.hypot(d[0], d[1]);
+      const score = olen > 0 ? -Math.round(((d[0] * ox + d[1] * oy) / (dl * olen)) * 1000) : 0;
+      return { d, i, score };
+    }).sort((p, q) => p.score - q.score || p.i - q.i);
+    const font = LABEL_FONT;
+    const cands = dirs.map(({ d }) => {
+      const k = d[0] !== 0 && d[1] !== 0 ? 0.72 : 1;
+      const cx = n.x + d[0] * outer * k, cy = n.y + d[1] * outer * k;
+      const anchor: "start" | "middle" | "end" = d[0] > 0 ? "start" : d[0] < 0 ? "end" : "middle";
+      const h = font * 1.1;
+      const top = d[1] === 0 ? cy - h / 2 : d[1] > 0 ? cy : cy - h;
+      const y = +(top + font * 0.82).toFixed(1);
+      const x = +cx.toFixed(1);
+      return { x, y, anchor, box: textBox(text, x, y, anchor, font) };
+    });
+    const free = (b: LabelBox) =>
+      b.x >= 0 && b.y >= 0 && b.x + b.w <= layout.width && b.y + b.h <= layout.height &&
+      !placed.some((p) => boxesOverlap(b, p, 2)) &&
+      !fixed.some((p) => boxesOverlap(b, p, 1)) &&
+      !circles.some((c) => c[3] !== n.id && boxHitsCircle(b, c[0], c[1], c[2])) &&
+      !segs.some((s) => boxHitsSegment(b, s[0], s[1], s[2], s[3], MESH_BAND));
+    let pick = null as (typeof cands)[number] | null;
+    if (!crowded || a.mine) for (const c of cands) if (free(c.box)) { pick = c; break; }
+    const at = pick || cands[0];
+    if (pick) placed.push(pick.box);
+    byId[n.id] = { id: n.id, text, full: a.mine && a.name ? a.name : a.label, x: at.x, y: at.y, anchor: at.anchor, box: at.box, visible: !!pick, tier };
+  }
+  return layout.agents.map((n) => byId[n.id]);
 }
 
 /** Short host for a coordinator URL. */

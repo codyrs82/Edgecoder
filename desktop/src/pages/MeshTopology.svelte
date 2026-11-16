@@ -37,6 +37,7 @@
     pulseLanes,
     yourPath,
     HEARTBEAT_MS,
+    HUB_R,
     RING_MAX,
     type PulseLane,
     type SortKey,
@@ -73,7 +74,6 @@
   let coordById = $derived(new Map((view?.coordinators ?? []).map((c) => [c.id, c])));
   let hubById = $derived(new Map((layout?.hubs ?? []).map((h) => [h.id, h])));
   let modelOptions = $derived((view?.models ?? []).filter((m) => m.online > 0 || m.model === model));
-  let showLabels = $derived(visible.length <= 24);
   let lanes = $derived(view && layout ? pulseLanes(view, layout) : []);
   let laneById = $derived(new Map(lanes.map((l) => [l.id, l])));
   let path = $derived(view ? yourPath(view) : null);
@@ -114,6 +114,12 @@
   // Graph selection: hover shows a machine, click (or Enter) pins it.
   let selectedId: string | null = $state(null);
   let hoverId: string | null = $state(null);
+  /** The machine with keyboard focus: its name shows on the map even where it is hidden. */
+  let focusedId: string | null = $state(null);
+  let labelById = $derived(new Map((layout?.labels ?? []).map((l) => [l.id, l])));
+  /** Map names, the placed ones first, so a revealed hidden one draws over them. */
+  let labelOrder = $derived([...(layout?.labels ?? []).filter((l) => l.visible), ...(layout?.labels ?? []).filter((l) => !l.visible)]);
+  let mineIds = $derived(new Set(visible.filter((r) => r.agent.mine).map((r) => r.agent.id)));
   let focusIndex = $state(0);
   let safeFocus = $derived(clampIndex(focusIndex, layout?.agents.length ?? 0));
   let graphEl: SVGSVGElement | undefined = $state(undefined);
@@ -317,7 +323,6 @@
                 {@const hub = hubById.get(ring.hubId)}
                 {#if hub}
                   <circle class="ring" cx={hub.x} cy={hub.y} r={ring.r} aria-hidden="true" />
-                  <text class="ring-label" x={hub.x + 4} y={hub.y - ring.r - 3} aria-hidden="true">{ring.ms} ms</text>
                 {/if}
               {/each}
               {#each view.links as link (link.from + link.to)}
@@ -331,13 +336,11 @@
                       <animate attributeName="stroke-opacity" values="0;0.5;0;0" keyTimes="0;0.08;0.22;1" dur="{HEARTBEAT_MS}ms" begin={heartbeatBegin(svgBornMs)} repeatCount="indefinite" />
                     </line>
                   {/if}
-                  <text class="clink-label" x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - 8} text-anchor="middle" aria-hidden="true">{formatMs(link.rttMs)}</text>
                 {/if}
               {/each}
               {#if layout.you}
                 {#each layout.agents.filter((n) => n.lan) as node (node.id)}
                   <line class="lan-link" x1={layout.you.x} y1={layout.you.y} x2={node.x} y2={node.y} aria-hidden="true" />
-                  <text class="lan-link-label" x={(layout.you.x + node.x) / 2} y={layout.you.y - 8} text-anchor="middle" aria-hidden="true">{formatMs(node.row.estimateMs)}</text>
                 {/each}
                 {#each layout.hubs as hub (hub.id)}
                   {@const lane = laneById.get(`you:${hub.id}`)}
@@ -347,9 +350,6 @@
                       <line class="beat" x1={layout.you.x} y1={layout.you.y} x2={hub.x} y2={hub.y} aria-hidden="true">
                         <animate attributeName="stroke-opacity" values="0;0.35;0;0" keyTimes="0;0.08;0.22;1" dur="{HEARTBEAT_MS}ms" begin={heartbeatBegin(svgBornMs + HEARTBEAT_MS / 2)} repeatCount="indefinite" />
                       </line>
-                    {/if}
-                    {#if typeof hub.coordinator.myRttMs === "number"}
-                      <text class="you-link-label" x={(layout.you.x + hub.x) / 2 + 6} y={(layout.you.y + hub.y) / 2 + 40} aria-hidden="true">{formatMs(hub.coordinator.myRttMs)}</text>
                     {/if}
                   {/if}
                 {/each}
@@ -378,9 +378,8 @@
               {#each layout.hubs as hub (hub.id)}
                 <g class="hub" class:hub-down={!hub.coordinator.reachable} transform="translate({hub.x} {hub.y})">
                   <title>{hostOf(hub.coordinator.url)} · {hub.coordinator.agentsOnline} machines online{hub.coordinator.reachable ? "" : " · not reachable"}</title>
-                  <circle r="26" />
+                  <circle r={HUB_R} />
                   <text class="hub-region" y="4" text-anchor="middle">{(hub.coordinator.region ?? "?").toUpperCase()}</text>
-                  <text class="hub-host" y={RING_MAX + 22} text-anchor="middle">{hostOf(hub.coordinator.url)}</text>
                 </g>
               {/each}
               {#each layout.agents as node, i (node.id)}
@@ -400,22 +399,58 @@
                   onkeydown={(e) => onNodeKey(e, i, a.id)}
                   onmouseenter={() => (hoverId = a.id)}
                   onmouseleave={() => (hoverId = null)}
-                  onfocus={() => (focusIndex = i)}
+                  onfocus={() => { focusIndex = i; focusedId = a.id; }}
+                  onblur={() => { if (focusedId === a.id) focusedId = null; }}
                 >
+                  <title>{labelById.get(a.id)?.full ?? a.label}</title>
                   <circle r={node.r} />
                   {#if a.mine}<circle class="mine-ring" r={node.r + 4} />{/if}
                   {#if path?.machines.includes(a.id)}<circle class="serving-ring" r={node.r + (a.mine ? 8 : 5)} />{/if}
-                  {#if a.mine || showLabels}
-                    <text y={node.r + 13} text-anchor="middle" aria-hidden="true">{a.mine ? displayName(a) : a.label}</text>
-                  {/if}
                 </g>
               {/each}
               {#if layout.you}
                 <g class="you" transform="translate({layout.you.x} {layout.you.y})" aria-hidden="true">
                   <circle r="10" />
-                  <text y="26" text-anchor="middle">You</text>
                 </g>
               {/if}
+              <!-- Every word last, over the lines and the nodes, each with a halo in the card's colour.
+                   Machine names come placed by placeLabels (lib/world-view.ts); a hidden one shows
+                   while its machine is hovered, focused or selected. -->
+              <g class="labels" aria-hidden="true">
+                {#each layout.rings as ring (ring.hubId + ring.ms)}
+                  <text class="ring-label" x={ring.lx} y={ring.ly}>{ring.ms} ms</text>
+                {/each}
+                {#each view.links as link (link.from + link.to)}
+                  {@const a = hubById.get(link.from)}
+                  {@const b = hubById.get(link.to)}
+                  {#if a && b}<text class="clink-label" x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - 8} text-anchor="middle">{formatMs(link.rttMs)}</text>{/if}
+                {/each}
+                {#if layout.you}
+                  {#each layout.agents.filter((n) => n.lan) as node (node.id)}
+                    <text class="lan-link-label" x={(layout.you.x + node.x) / 2} y={layout.you.y - 8} text-anchor="middle">{formatMs(node.row.estimateMs)}</text>
+                  {/each}
+                  {#each layout.hubs as hub (hub.id)}
+                    {#if laneById.get(`you:${hub.id}`) && typeof hub.coordinator.myRttMs === "number"}
+                      <text class="you-link-label" x={(layout.you.x + hub.x) / 2 + 6} y={(layout.you.y + hub.y) / 2 + 40}>{formatMs(hub.coordinator.myRttMs)}</text>
+                    {/if}
+                  {/each}
+                  <text class="you-label" x={layout.you.x} y={layout.you.y + 26} text-anchor="middle">You</text>
+                {/if}
+                {#each layout.hubs as hub (hub.id)}
+                  <text class="hub-host" x={hub.x} y={hub.y + RING_MAX + 22} text-anchor="middle">{hostOf(hub.coordinator.url)}</text>
+                {/each}
+                {#each labelOrder as l (l.id)}
+                  <text
+                    class="node-label"
+                    class:mine={mineIds.has(l.id)}
+                    class:off={!l.visible}
+                    class:on={l.id === hoverId || l.id === selectedId || l.id === focusedId}
+                    data-label-for={l.id}
+                    x={l.x}
+                    y={l.y}
+                    text-anchor={l.anchor}>{l.text}</text>
+                {/each}
+              </g>
             </svg>
             <p class="vh" id="world-activity">{summary}</p>
             <div class="legend" aria-hidden="true">
@@ -550,6 +585,11 @@
   .graph { display: block; width: 100%; height: auto; max-height: 70vh; }
   .ring { fill: none; stroke: var(--border); stroke-dasharray: 2 4; }
   .ring-label { fill: var(--text-muted); font-size: 10px; }
+  .labels text { paint-order: stroke; stroke: var(--bg-surface); stroke-width: 3px; stroke-linejoin: round; pointer-events: none; }
+  .node-label { fill: var(--text-secondary); font-size: 10.5px; }
+  .node-label.mine { fill: var(--text-primary); font-weight: 600; }
+  .node-label.off { display: none; }
+  .node-label.off.on { display: inline; fill: var(--text-primary); stroke-width: 4px; }
   .clink { stroke: var(--accent-secondary); stroke-width: 2.5; opacity: 0.7; }
   .clink-label, .you-link-label { fill: var(--text-secondary); font-size: 11px; }
   .lan-link { stroke: var(--green); stroke-width: 1.5; stroke-dasharray: 3 3; }
@@ -587,11 +627,9 @@
   .node.st-busy circle { fill: var(--yellow); }
   .node.st-stale circle { fill: var(--text-muted); }
   .node .mine-ring { fill: none; stroke: var(--text-primary); stroke-width: 2; }
-  .node text { fill: var(--text-secondary); font-size: 10.5px; pointer-events: none; }
-  .node.mine text { fill: var(--text-primary); font-weight: 600; }
   .node.selected circle:first-child, .node:focus-visible circle:first-child { stroke: var(--text-primary); stroke-width: 3; }
   .you circle { fill: var(--text-primary); stroke: var(--bg-surface); stroke-width: 3; }
-  .you text { fill: var(--text-primary); font-size: 11px; font-weight: 600; }
+  .you-label { fill: var(--text-primary); font-size: 11px; font-weight: 600; }
   .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 6px 8px 2px; font-size: var(--fs-2xs); color: var(--text-secondary); }
   .legend span { display: inline-flex; align-items: center; gap: 5px; }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-muted); }

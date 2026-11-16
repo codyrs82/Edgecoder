@@ -72,3 +72,34 @@ export const ACTIVE_WORLD: WorldView = {
   yourRequests: [{ coordinator: ORD, machineKey: WORLD.agents[1].id, state: "streaming" }],
   totals: { ...WORLD.totals, busy: 2, slotsUsed: 3 }
 };
+
+/**
+ * The owner's Nov 2026 screenshot, crowded: ten machines on ord (three of them yours, with the
+ * desktop app's long names), two on cdg, You below. The map labels collided here.
+ */
+export const OWNER_MINE = ["desktop-macbook-pro-crs-local-51738927", "desktop-mac-example-local-a8fba2b6", "desktop-mac-mini-studio-local-0c1d2e3f"];
+export const OWNER_WORLD: WorldView = (() => {
+  const ord = (label: string, rttMs: number | null, over: Partial<WorldAgent> = {}) => agent({ label, coordinatorId: ORD, region: "ord", rttMs, ...over });
+  const cdg = (label: string, rttMs: number | null, over: Partial<WorldAgent> = {}) => agent({ label, coordinatorId: CDG, region: "cdg", country: "FR", continent: "EU", rttMs, ...over });
+  const agents = [
+    ord("mac-•••5173", 14, { os: "macos", mine: true, name: OWNER_MINE[0], computeClass: "apple", slots: 4 }),
+    ord("mac-•••a8fb", 9, { os: "macos", mine: true, name: OWNER_MINE[1], computeClass: "apple" }),
+    ord("mac-•••0c1d", 95, { os: "macos", mine: true, name: OWNER_MINE[2], computeClass: "apple" }),
+    ord("lin-•••4c08", 3),
+    ord("lin-•••f468", 4, { status: "busy", slotsUsed: 1, activity: { callsNow: 1, streaming: 1, callsPerMin: 6 } }),
+    ord("mac-•••e782", 120, { os: "macos", computeClass: "apple", models: ["deepseek-r1:7b", "qwen2.5-coder:1.5b"], modelsTotal: 2 }),
+    ord("lin-•••91aa", 22, { computeClass: "gpu", tier: "gpu.24gb", vramGb: 24, slots: 6 }),
+    ord("win-•••77c2", 35, { os: "windows" }),
+    ord("lin-•••a1b8", 18),
+    ord("lin-•••d00d", 100, { status: "busy", slotsUsed: 2, activity: { callsNow: 2, streaming: 0, callsPerMin: 12 } }),
+    cdg("lin-•••beee", 8),
+    cdg("lin-•••0d4e", null, { status: "stale" })
+  ];
+  return {
+    ...WORLD,
+    links: [{ from: ORD, to: CDG, rttMs: 99, workPerMin: 12, gossipPerMin: 30 }],
+    coordinators: WORLD.coordinators.map((c) => ({ ...c, agents: c.id === ORD ? 10 : 2, agentsOnline: c.id === ORD ? 10 : 1 })),
+    agents,
+    totals: { coordinators: 2, agents: 12, online: 11, busy: 2, mine: 3, models: 2, slots: 30, slotsUsed: 3 }
+  };
+})();

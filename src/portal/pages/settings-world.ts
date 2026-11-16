@@ -42,6 +42,9 @@ export const WORLD_VIEW_BROWSER_LIB = [
   `var RING_MIN = ${W.RING_MIN}, RING_MAX = ${W.RING_MAX}, CELL = ${W.CELL}, MS_LO = ${W.MS_LO}, MS_HI = ${W.MS_HI};`,
   `var PULSE_MAX_DOTS = ${W.PULSE_MAX_DOTS}, PULSE_MAX_PER_LANE = ${W.PULSE_MAX_PER_LANE}, HEARTBEAT_MS = ${W.HEARTBEAT_MS};`,
   `var PULSE_PERIODS = ${JSON.stringify(W.PULSE_PERIODS)};`,
+  `var LABEL_FONT = ${W.LABEL_FONT}, SMALL_FONT = ${W.SMALL_FONT}, RING_FONT = ${W.RING_FONT}, LABEL_CHAR_EM = ${W.LABEL_CHAR_EM}, LABEL_MAX_CHARS = ${W.LABEL_MAX_CHARS}, LABEL_ALL_MAX = ${W.LABEL_ALL_MAX};`,
+  `var HUB_R = ${W.HUB_R}, MESH_BAND = ${W.MESH_BAND}, LINE_CLEAR = ${W.LINE_CLEAR}, MIN_STEP = ${W.MIN_STEP};`,
+  `var LABEL_DIRS = ${JSON.stringify(W.LABEL_DIRS)};`,
   ...[
     W.lanMs,
     W.estimateMs,
@@ -61,6 +64,14 @@ export const WORLD_VIEW_BROWSER_LIB = [
     W.lanDistance,
     W.nodeRadius,
     W.worldLayout,
+    W.shortMachineName,
+    W.mapLabelText,
+    W.textBox,
+    W.boxesOverlap,
+    W.boxHitsCircle,
+    W.boxHitsSegment,
+    W.spreadAngles,
+    W.placeLabels,
     W.hostOf,
     W.activityOf,
     W.pulsePeriod,
@@ -182,7 +193,6 @@ export const WORLD_RENDER_SCRIPT = `
       var hubById = {};
       L.hubs.forEach(function (h) { hubById[h.id] = h; });
       var detailId = s.hoverId || s.selectedId;
-      var showLabels = d.visible.length <= 24;
       var focus = Math.min(Math.max(0, s.focusIndex), Math.max(0, L.agents.length - 1));
       var out = [];
       var still = !!s.reducedMotion;
@@ -193,7 +203,6 @@ export const WORLD_RENDER_SCRIPT = `
         var hub = hubById[ring.hubId];
         if (!hub) return;
         out.push("<circle class='wv-ring' cx='" + hub.x + "' cy='" + hub.y + "' r='" + ring.r + "' aria-hidden='true'/>");
-        out.push("<text class='wv-ring-label' x='" + (hub.x + 4) + "' y='" + (hub.y - ring.r - 3) + "' aria-hidden='true'>" + ring.ms + " ms</text>");
       });
       view.links.forEach(function (link) {
         var a = hubById[link.from], b = hubById[link.to];
@@ -201,7 +210,6 @@ export const WORLD_RENDER_SCRIPT = `
         var mesh = wvLaneOf(d, "mesh:" + [link.from, link.to].sort().join("|"));
         out.push("<line class='wv-clink" + wvLvl(mesh) + "' x1='" + a.x + "' y1='" + a.y + "' x2='" + b.x + "' y2='" + b.y + "' aria-hidden='true'/>");
         if (mesh && mesh.heartbeat && !still) out.push("<line class='wv-beat' x1='" + a.x + "' y1='" + a.y + "' x2='" + b.x + "' y2='" + b.y + "' aria-hidden='true'><animate attributeName='stroke-opacity' values='0;0.5;0;0' keyTimes='0;0.08;0.22;1' dur='" + HEARTBEAT_MS + "ms' begin='" + heartbeatBegin(clockMs) + "' repeatCount='indefinite'/></line>");
-        out.push("<text class='wv-clink-label' x='" + (a.x + b.x) / 2 + "' y='" + ((a.y + b.y) / 2 - 8) + "' text-anchor='middle' aria-hidden='true'>" + escapeHtml(formatMs(link.rttMs)) + "</text>");
       });
       if (L.you) {
         L.hubs.forEach(function (hub) {
@@ -209,7 +217,6 @@ export const WORLD_RENDER_SCRIPT = `
           if (!lane) return;
           out.push("<line class='wv-you-link" + (lane.yours ? " yours" : "") + "' x1='" + L.you.x + "' y1='" + L.you.y + "' x2='" + hub.x + "' y2='" + hub.y + "' aria-hidden='true'/>");
           if (lane.heartbeat && !still) out.push("<line class='wv-beat' x1='" + L.you.x + "' y1='" + L.you.y + "' x2='" + hub.x + "' y2='" + hub.y + "' aria-hidden='true'><animate attributeName='stroke-opacity' values='0;0.35;0;0' keyTimes='0;0.08;0.22;1' dur='" + HEARTBEAT_MS + "ms' begin='" + heartbeatBegin(clockMs + HEARTBEAT_MS / 2) + "' repeatCount='indefinite'/></line>");
-          if (typeof hub.coordinator.myRttMs === "number") out.push("<text class='wv-you-link-label' x='" + ((L.you.x + hub.x) / 2 + 6) + "' y='" + ((L.you.y + hub.y) / 2 + 40) + "' aria-hidden='true'>" + escapeHtml(formatMs(hub.coordinator.myRttMs)) + "</text>");
         });
       }
       L.agents.forEach(function (node) {
@@ -230,19 +237,42 @@ export const WORLD_RENDER_SCRIPT = `
         var c = hub.coordinator;
         out.push("<g class='wv-hub" + (c.reachable ? "" : " down") + "' transform='translate(" + hub.x + " " + hub.y + ")'>" +
           "<title>" + escapeHtml(hostOf(c.url) + " · " + c.agentsOnline + " machines online" + (c.reachable ? "" : " · not reachable")) + "</title>" +
-          "<circle r='26'/><text class='wv-hub-region' y='4' text-anchor='middle'>" + escapeHtml(String(c.region || "?").toUpperCase()) + "</text>" +
-          "<text class='wv-hub-host' y='" + (RING_MAX + 22) + "' text-anchor='middle'>" + escapeHtml(hostOf(c.url)) + "</text></g>");
+          "<circle r='" + HUB_R + "'/><text class='wv-hub-region' y='4' text-anchor='middle'>" + escapeHtml(String(c.region || "?").toUpperCase()) + "</text></g>");
       });
       L.agents.forEach(function (node, i) {
         var a = node.row.agent;
+        var lbl = L.labels[i];
         var sel = s.selectedId === a.id;
         out.push("<g data-node='" + escapeHtml(a.id) + "' data-index='" + i + "' class='wv-node st-" + escapeHtml(a.status) + (a.mine ? " mine" : "") + (sel ? " selected" : "") +
           "' transform='translate(" + node.x + " " + node.y + ")' role='button' tabindex='" + (i === focus ? "0" : "-1") + "' aria-pressed='" + sel + "' aria-label='" + escapeHtml(wvNodeLabel(node.row)) + "'>" +
-          "<circle r='" + node.r + "'/>" + (a.mine ? "<circle class='wv-mine-ring' r='" + (node.r + 4) + "'/>" : "") +
+          "<title>" + escapeHtml(lbl.full) + "</title><circle r='" + node.r + "'/>" + (a.mine ? "<circle class='wv-mine-ring' r='" + (node.r + 4) + "'/>" : "") +
           (path.machines.indexOf(a.id) >= 0 ? "<circle class='wv-serving-ring' r='" + (node.r + (a.mine ? 8 : 5)) + "'/>" : "") +
-          (a.mine || showLabels ? "<text y='" + (node.r + 13) + "' text-anchor='middle' aria-hidden='true'>" + escapeHtml(a.mine ? displayName(a) : a.label) + "</text>" : "") + "</g>");
+          "</g>");
       });
-      if (L.you) out.push("<g class='wv-you' transform='translate(" + L.you.x + " " + L.you.y + ")' aria-hidden='true'><circle r='10'/><text y='26' text-anchor='middle'>You</text></g>");
+      if (L.you) out.push("<g class='wv-you' transform='translate(" + L.you.x + " " + L.you.y + ")' aria-hidden='true'><circle r='10'/></g>");
+      // Every word last, over the lines and the nodes, each with a halo in the card's colour.
+      // Machine names come placed by placeLabels; a hidden one shows while its machine is hovered,
+      // focused or selected.
+      out.push("<g class='wv-labels' aria-hidden='true'>");
+      L.rings.forEach(function (ring) { out.push("<text class='wv-ring-label' x='" + ring.lx + "' y='" + ring.ly + "'>" + ring.ms + " ms</text>"); });
+      view.links.forEach(function (link) {
+        var a = hubById[link.from], b = hubById[link.to];
+        if (a && b) out.push("<text class='wv-clink-label' x='" + (a.x + b.x) / 2 + "' y='" + ((a.y + b.y) / 2 - 8) + "' text-anchor='middle'>" + escapeHtml(formatMs(link.rttMs)) + "</text>");
+      });
+      if (L.you) {
+        L.hubs.forEach(function (hub) {
+          if (wvLaneOf(d, "you:" + hub.id) && typeof hub.coordinator.myRttMs === "number") out.push("<text class='wv-you-link-label' x='" + ((L.you.x + hub.x) / 2 + 6) + "' y='" + ((L.you.y + hub.y) / 2 + 40) + "'>" + escapeHtml(formatMs(hub.coordinator.myRttMs)) + "</text>");
+        });
+        out.push("<text class='wv-you-label' x='" + L.you.x + "' y='" + (L.you.y + 26) + "' text-anchor='middle'>You</text>");
+      }
+      L.hubs.forEach(function (hub) { out.push("<text class='wv-hub-host' x='" + hub.x + "' y='" + (hub.y + RING_MAX + 22) + "' text-anchor='middle'>" + escapeHtml(hostOf(hub.coordinator.url)) + "</text>"); });
+      var shown = L.labels.filter(function (l) { return l.visible; }).concat(L.labels.filter(function (l) { return !l.visible; }));
+      shown.forEach(function (l) {
+        var mine = L.agents.some(function (n) { return n.id === l.id && n.row.agent.mine; });
+        var on = l.id === s.hoverId || l.id === s.selectedId;
+        out.push("<text class='wv-nlabel" + (mine ? " mine" : "") + (l.visible ? "" : " off") + (on ? " on" : "") + "' data-label-for='" + escapeHtml(l.id) + "' x='" + l.x + "' y='" + l.y + "' text-anchor='" + l.anchor + "'>" + escapeHtml(l.text) + "</text>");
+      });
+      out.push("</g>");
       out.push("</svg>");
       out.push("<p class='wv-vh' id='wvActivity'>" + escapeHtml(activitySummary(view)) + "</p>");
       out.push("<div class='wv-legend' aria-hidden='true'>" + (still ? "<span class='wv-live'><i class='wv-dot idle'></i>Live</span>" : "") +
@@ -344,6 +374,11 @@ export function worldPageContent(): string {
       .wv-graph { display: block; width: 100%; height: auto; max-height: 70vh; }
       .wv-ring { fill: none; stroke: var(--border-strong); stroke-dasharray: 2 4; }
       .wv-ring-label { fill: var(--muted); font-size: 10px; }
+      .wv-labels text { paint-order: stroke; stroke: var(--card); stroke-width: 3px; stroke-linejoin: round; pointer-events: none; }
+      .wv-nlabel { fill: var(--text-secondary); font-size: 10.5px; }
+      .wv-nlabel.mine { fill: var(--text); font-weight: 600; }
+      .wv-nlabel.off { display: none; }
+      .wv-nlabel.off.on, .wv-nlabel.off.focus { display: inline; fill: var(--text); stroke-width: 4px; }
       .wv-clink { stroke: var(--accent-secondary); stroke-width: 2.5; opacity: 0.7; }
       .wv-clink-label, .wv-you-link-label { fill: var(--text-secondary); font-size: 11px; }
       .wv-you-link { stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 5 5; }
@@ -374,12 +409,10 @@ export function worldPageContent(): string {
       .wv-node.st-busy circle { fill: var(--yellow); }
       .wv-node.st-stale circle { fill: var(--muted); }
       .wv-node .wv-mine-ring { fill: none; stroke: var(--text); stroke-width: 2; }
-      .wv-node text { fill: var(--text-secondary); font-size: 10.5px; pointer-events: none; }
-      .wv-node.mine text { fill: var(--text); font-weight: 600; }
       .wv-node.selected circle:first-child, .wv-node:focus-visible circle:first-child { stroke: var(--text); stroke-width: 3; }
       .wv-node:focus-visible circle:first-child { stroke: var(--focus-ring); }
       .wv-you circle { fill: var(--text); stroke: var(--bg-surface); stroke-width: 3; }
-      .wv-you text { fill: var(--text); font-size: 11px; font-weight: 600; }
+      .wv-you-label { fill: var(--text); font-size: 11px; font-weight: 600; }
       .wv-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 6px 8px 2px; font-size: var(--fs-2xs); color: var(--text-secondary); }
       .wv-legend span { display: inline-flex; align-items: center; gap: 5px; }
       .wv-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--muted); }
@@ -614,7 +647,10 @@ export function worldPageScript(): string {
       graph.addEventListener("click", function (e) { var n = nodeOf(e.target); if (n) { toggle(n); var again = graph.querySelector("[data-index='" + s.focusIndex + "']"); if (again) again.focus(); } });
       graph.addEventListener("mouseover", function (e) { var n = nodeOf(e.target); var id = n ? n.getAttribute("data-node") : null; if (id !== s.hoverId) { s.hoverId = id; render(); } });
       graph.addEventListener("mouseleave", function () { if (s.hoverId) { s.hoverId = null; render(); } });
-      graph.addEventListener("focusin", function (e) { var n = nodeOf(e.target); if (n) s.focusIndex = Number(n.getAttribute("data-index")) || 0; });
+      // A machine whose name is hidden on the map (it would cover something) shows it while focused.
+      function focusLabel(n, on) { var l = n && graph.querySelector("[data-label-for='" + CSS.escape(n.getAttribute("data-node")) + "']"); if (l) l.classList.toggle("focus", on); }
+      graph.addEventListener("focusin", function (e) { var n = nodeOf(e.target); if (n) { s.focusIndex = Number(n.getAttribute("data-index")) || 0; focusLabel(n, true); } });
+      graph.addEventListener("focusout", function (e) { focusLabel(nodeOf(e.target), false); });
       graph.addEventListener("keydown", function (e) {
         var n = nodeOf(e.target);
         if (!n) return;
