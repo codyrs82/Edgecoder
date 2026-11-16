@@ -5,7 +5,7 @@
  * GET /admin/network: the live state of this coordinator's part of the network for the portal's
  * admin page (Settings > Network): agents with their account, models, slots and claims; the queue;
  * dispatch and model-call latency; gaps (models asked for that nobody holds, models with no free
- * slot, agents gone quiet); and a 24 h time series sampled every 15 s.
+ * slot, agents gone quiet); and a time series sampled every 15 s, served over 1 h, 6 h, 24 h or 7 d.
  *
  * Gate: the admin token (x-admin-token, authorizeAdmin), exactly like /admin/revenue. The route is
  * registered in its own plugin with the same onRequest check, so it cannot be reached without it
@@ -13,12 +13,16 @@
  *
  * Observation is additive: an onSend hook watches /inference/submit and /inference/chunks answers
  * (it never changes them), and a 15 s sampler reads state the coordinator already keeps. All of it
- * is in memory and bounded (src/swarm/network-observer.ts).
+ * is in memory and bounded (src/swarm/network-observer.ts). The time series is also written to
+ * Postgres once a minute and read back at start, so a deploy does not empty the graphs
+ * (src/swarm/network-history.ts); without a database it is memory only.
  */
 import { z } from "zod";
-import type { CoordinatorApp } from "../app.js";
+import { app, type CoordinatorApp } from "../app.js";
 import { queue, reservations, identity, CC } from "../context.js";
 import { pgStore } from "../../../db/store.js";
+import { PostgresNetworkHistoryStore } from "../../../db/network-history-store.js";
+import { NetworkHistory } from "../../network-history.js";
 import { agentCapabilities, activeBlacklistRecord, AGENT_CONNECTED_WINDOW_MS } from "../agent-state.js";
 import { authorizeAdmin } from "../auth.js";
 import { agentContextWindow, agentLoadReport, agentSocketConnected, freeModelSlots, pickupStats } from "../dispatch.js";
@@ -48,6 +52,14 @@ const ACCOUNT_TTL_MS = 60_000;
 
 export const inferenceTracker = new InferenceTracker();
 export const networkSamples = new RingBuffer<NetworkSample>(SAMPLE_CAPACITY);
+/** Persists networkSamples to the coordinator's Postgres (memory only without DATABASE_URL). */
+export const networkHistory = new NetworkHistory({
+  store: pgStore ? pgStore.withPool((pool) => new PostgresNetworkHistoryStore(pool)) : null,
+  coordinatorId: identity.peerId,
+  ring: networkSamples,
+  retentionDays: CC.NETWORK_HISTORY_DAYS,
+  log: { info: (o, m) => app.log.info(o, m), warn: (o, m) => app.log.warn(o, m) }
+});
 
 type Capability = NonNullable<ReturnType<typeof agentCapabilities.get>>;
 
@@ -109,6 +121,7 @@ export function takeNetworkSample(nowMs = Date.now()): NetworkSample {
     ttftP90: ttft.count ? ttft.p90 : null
   };
   networkSamples.push(sample);
+  networkHistory.record(sample);
   return sample;
 }
 
@@ -309,7 +322,7 @@ export function observeInference(url: string | undefined, status: number, body: 
   noteRoutedChunk(b.subtaskId, queue.getClaim(b.subtaskId)?.claimedBy, b.done === true, error, nowMs);
 }
 
-const querySchema = z.object({ range: z.enum(["1h", "6h", "24h"]).default("1h") });
+const querySchema = z.object({ range: z.enum(Object.keys(SERIES_RANGES) as [SeriesRange, ...SeriesRange[]]).default("1h") });
 
 export function registerAdminNetworkRoutes(app: CoordinatorApp): void {
   app.addHook("onSend", async (req, reply, payload) => {
@@ -329,7 +342,11 @@ export function registerAdminNetworkRoutes(app: CoordinatorApp): void {
     }
   }, SAMPLE_INTERVAL_MS);
   timer.unref?.();
-  app.addHook("onClose", async () => clearInterval(timer));
+  networkHistory.start();
+  app.addHook("onClose", async () => {
+    clearInterval(timer);
+    await networkHistory.stop();
+  });
 
   // Its own plugin with the admin gate, like routes/admin.ts (coordinator.ts lets /admin/* past the mesh check).
   app.register(async (admin) => {

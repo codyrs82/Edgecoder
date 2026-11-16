@@ -26,8 +26,8 @@ describe("network observer", () => {
     expect(() => new RingBuffer(0)).toThrow();
   });
 
-  test("the series ring holds exactly 24 h of 15 s samples and never more", () => {
-    expect(SAMPLE_CAPACITY).toBe(5760);
+  test("the series ring holds exactly 7 days of 15 s samples and never more", () => {
+    expect(SAMPLE_CAPACITY).toBe(40_320);
     const ring = new RingBuffer<number>(SAMPLE_CAPACITY);
     for (let i = 0; i < SAMPLE_CAPACITY * 2 + 17; i++) ring.push(i);
     expect(ring.size).toBe(SAMPLE_CAPACITY);
@@ -107,5 +107,38 @@ describe("network observer", () => {
     expect(out[0]).toMatchObject({ atMs: start, busyAgents: 1.5, started: 2, pickupP50: 100, pickupP90: 900, ttftP50: 50, ttftP90: 80 });
     expect(out[1]).toMatchObject({ atMs: start + width, ttftP50: null });
     expect(seriesBucketMs("1h")).toBe(15_000);
+  });
+
+  test("7 d range: 30 min clock-aligned buckets, nothing older than 7 days", () => {
+    const now = Date.UTC(2026, 10, 15, 12, 7);
+    const base = (atMs: number, over: Partial<NetworkSample> = {}): NetworkSample => ({
+      atMs, connectedAgents: 2, busyAgents: 1, totalSlots: 4, freeSlots: 2, queued: 0, claimed: 1, waitingInference: 0,
+      started: 1, completed: 1, failed: 0, noCapacity: 0, noAgentHasModel: 0, pickupP50: 100, pickupP90: 200, ttftP50: null, ttftP90: null, ...over
+    });
+    const width = seriesBucketMs("7d");
+    expect(width).toBe(30 * 60_000);
+    const samples: NetworkSample[] = [base(now - 8 * 86_400_000)];
+    for (let t = now - 7 * 86_400_000 + 1_000; t <= now; t += 15_000) samples.push(base(t));
+    const out = downsample(samples, "7d", now);
+    expect(out.length).toBeGreaterThanOrEqual(336);
+    expect(out.length).toBeLessThanOrEqual(337);
+    expect(out.every((p) => p.atMs % width === 0)).toBe(true);
+    // A full bucket sums its 120 samples' counts.
+    expect(out[5]).toMatchObject({ connectedAgents: 2, started: 120 });
+  });
+
+  test("buckets with no samples (coordinator down) are left out, not filled with zeros", () => {
+    const now = 10 * 3_600_000;
+    const s = (atMs: number): NetworkSample => ({
+      atMs, connectedAgents: 3, busyAgents: 1, totalSlots: 4, freeSlots: 2, queued: 0, claimed: 1, waitingInference: 0,
+      started: 1, completed: 1, failed: 0, noCapacity: 0, noAgentHasModel: 0, pickupP50: null, pickupP90: null, ttftP50: null, ttftP90: null
+    });
+    // Up for 10 min, down 20 min, up again for 10 min.
+    const samples: NetworkSample[] = [];
+    for (let t = now - 40 * 60_000; t < now - 30 * 60_000; t += 15_000) samples.push(s(t));
+    for (let t = now - 10 * 60_000; t <= now; t += 15_000) samples.push(s(t));
+    const out = downsample(samples, "1h", now);
+    expect(out.every((p) => p.connectedAgents === 3)).toBe(true);
+    expect(out.some((p) => p.atMs >= now - 30 * 60_000 && p.atMs < now - 10 * 60_000)).toBe(false);
   });
 });

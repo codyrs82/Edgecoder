@@ -4,12 +4,13 @@
 /**
  * In-memory observations for the admin network view (GET /admin/network): model-call latency
  * (submit to first piece, submit to done), events by model (calls, refusals for lack of a model,
- * no-capacity cancellations) and a time series sampled every 15 s for 24 h.
+ * no-capacity cancellations) and a time series sampled every 15 s for 7 days.
  *
  * Everything here is bounded: a fixed-size ring for the time series, a capped list of latency
  * samples, per-minute buckets for at most 24 h with a cap on distinct models per bucket, and a cap
- * on calls followed at once. Nothing is persisted; a restart starts empty. No coordinator state is
- * imported, so this module is tested on its own.
+ * on calls followed at once. The time series is also written to Postgres when the coordinator has
+ * one and read back at start (src/swarm/network-history.ts); everything else starts empty after a
+ * restart. No coordinator state is imported, so this module is tested on its own.
  */
 
 /** A fixed-capacity ring: pushing past capacity drops the oldest entry. */
@@ -46,6 +47,12 @@ export class RingBuffer<T> {
 
   last(): T | undefined {
     return this.count ? this.items[(this.start + this.count - 1) % this.capacity] : undefined;
+  }
+
+  clear(): void {
+    this.items.fill(undefined);
+    this.start = 0;
+    this.count = 0;
   }
 }
 
@@ -269,15 +276,21 @@ export interface NetworkSample {
 }
 
 export const SAMPLE_INTERVAL_MS = 15_000;
-/** 24 h of 15 s samples. */
-export const SAMPLE_CAPACITY = (24 * 60 * 60_000) / SAMPLE_INTERVAL_MS;
 
-/** Time ranges the series is served in, and the bucket width each is served at (240 points). */
-export const SERIES_RANGES = { "1h": 60 * 60_000, "6h": 6 * 60 * 60_000, "24h": 24 * 60 * 60_000 } as const;
+/** Time ranges the series is served in. */
+export const SERIES_RANGES = { "1h": 60 * 60_000, "6h": 6 * 60 * 60_000, "24h": 24 * 60 * 60_000, "7d": 7 * 24 * 60 * 60_000 } as const;
 export type SeriesRange = keyof typeof SERIES_RANGES;
 export const SERIES_POINTS = 240;
+/** The longest range: the ring keeps this much (7 days of 15 s samples, 40 320). */
+export const MAX_SERIES_RANGE_MS = SERIES_RANGES["7d"];
+export const SAMPLE_CAPACITY = MAX_SERIES_RANGE_MS / SAMPLE_INTERVAL_MS;
 
+/**
+ * Bucket width per range: 1 h, 6 h and 24 h at 240 points (15 s, 90 s, 6 min); 7 d at 30 min
+ * (336 points), a width that divides an hour so buckets line up with the clock.
+ */
 export function seriesBucketMs(range: SeriesRange): number {
+  if (range === "7d") return 30 * 60_000;
   return Math.max(SAMPLE_INTERVAL_MS, Math.round(SERIES_RANGES[range] / SERIES_POINTS));
 }
 
@@ -289,7 +302,9 @@ const P90S = ["pickupP90", "ttftP90"] as const;
 /**
  * Samples in the last `range`, merged into wall-clock buckets of seriesBucketMs(range) (so two
  * coordinators' buckets line up): gauges are averaged and rounded to 0.1, per-interval counts
- * summed, p50s averaged and p90s the bucket's worst. `atMs` is the bucket start.
+ * summed, p50s averaged and p90s the bucket's worst. `atMs` is the bucket start. A bucket with
+ * no samples (the coordinator was down) is left out, never filled with zeros, so the page draws a
+ * gap there.
  */
 export function downsample(samples: readonly NetworkSample[], range: SeriesRange, nowMs = Date.now()): NetworkSample[] {
   const width = seriesBucketMs(range);
