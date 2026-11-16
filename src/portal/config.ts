@@ -57,6 +57,10 @@ export const portalConfigSchema = z.object({
   // #39: read by chatCapacityOptionsFromEnv (src/portal/chat-capacity.ts); declared here so a bad value stops startup.
   PORTAL_CHAT_CAPACITY_TIMEOUT_MS: envInt(2_000, { min: 100, max: 30_000 }),
   PORTAL_CHAT_CAPACITY_TTL_MS: envInt(15_000, { min: 0, max: 600_000 }),
+  // Latency-aware coordinator choice; read by latencyPolicyFromEnv (src/portal/coordinator-latency.ts).
+  PORTAL_COORD_LATENCY_ROUTING: z.enum(["on", "off", "true", "false", "1", "0"], { message: "must be on or off" }).default("on"),
+  PORTAL_COORD_LATENCY_MARGIN_MS: envInt(30, { min: 0, max: 10_000 }),
+  PORTAL_COORD_LATENCY_MARGIN_PCT: envInt(15, { min: 0, max: 100 }),
   /** Agents one account may enrol (read by maxAgentsPerAccount in routes/account.ts). */
   PORTAL_MAX_AGENTS_PER_ACCOUNT: envInt(25, { min: 1 }),
   OAUTH_MICROSOFT_PROMPT: z.string().default("select_account"),

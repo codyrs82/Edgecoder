@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import { request } from "undici";
 import type { ChatMessage, ToolCall, ToolSpec } from "../../inference-api/types.js";
 import type { RoutingHints } from "../../inference-api/job-descriptor.js";
+import type { CoordinatorChoice } from "../../common/coordinator-choice.js";
 
 export const NETWORK_PREFIX = "network/";
 const CLASSES = new Set(["cpu", "apple", "gpu", "gpu.dc"]);
@@ -146,6 +147,8 @@ export interface NetworkTarget {
   routing?: RoutingHints;
   /** model "auto": the coordinator may answer route_elsewhere when a peer is the best fit. */
   routeRedirect?: boolean;
+  /** The portal's coordinator choice for this call (kept on its routing decision; portal service token only). */
+  coordinatorChoice?: CoordinatorChoice;
 }
 
 export class NetworkInferenceError extends Error {
@@ -207,6 +210,7 @@ export async function* streamNetworkCompletion(
     ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
     ...(req.model === "auto" && req.routing && Object.keys(req.routing).length ? { routing: req.routing } : {}),
     ...(req.model === "auto" && req.routeRedirect ? { routeRedirect: true } : {}),
+    ...(req.coordinatorChoice ? { coordinatorChoice: req.coordinatorChoice } : {}),
   }, signal);
   if (sub.status !== 200) {
     const err = String(sub.json.error ?? `HTTP ${sub.status}`);

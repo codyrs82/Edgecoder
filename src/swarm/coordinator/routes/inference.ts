@@ -15,7 +15,8 @@ import { agentContextWindow, freeModelSlots, preferAgent } from "../dispatch.js"
 import { AUTO_MODEL_ID } from "../../../inference-api/auto-route.js";
 import { cleanHints, describeJob, type JobDescriptor } from "../../../inference-api/job-descriptor.js";
 import type { BestFitResult } from "../best-fit.js";
-import { bestFitConfig, complexityWeights, recordDecision, resolveAuto, routingSummary, type RoutingSummary } from "../routing.js";
+import { agentRttMs, bestFitConfig, complexityWeights, coordinatorLoadSignals, recordDecision, recordPlacement, resolveAuto, routingSummary, type RoutingSummary } from "../routing.js";
+import { sanitizeCoordinatorChoice } from "../../../common/coordinator-choice.js";
 import { InferenceStreams, boundTokenCounts, maxTokensOf } from "../../inference-streams.js";
 import { DegenerateReplyTracker, billableFraction, detectDegenerateOutput, type DegeneracyVerdict } from "../../inference-degeneracy.js";
 import { pgStore } from "../../../db/store.js";
@@ -348,7 +349,17 @@ const inferenceSubmitSchema = z.object({
   routing: z.record(z.string(), z.unknown()).optional(),
   /** model "auto": the caller can resubmit to a peer coordinator when the best fit is there (route_elsewhere). */
   routeRedirect: z.boolean().default(false),
+  /** The portal's latency-aware coordinator choice (common/coordinator-choice.ts); kept only from the portal. */
+  coordinatorChoice: z.record(z.string(), z.unknown()).optional(),
 });
+
+/** Median of the known round trips (ms), null when none is known. */
+function medianRtt(values: number[]): number | null {
+  if (!values.length) return null;
+  const s = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return Math.round(s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2);
+}
 
 export function registerInferenceRoutes(app: CoordinatorApp): void {
   // Security research tier: entitlement pushes from the portal and the admin view (routes/restricted.ts).
@@ -358,7 +369,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const now = Date.now();
     // Security research tier: a restricted model is listed only to an account entitled to it.
     const viewer = restrictedCatalog.size > 0 ? await modelViewerAccount(req) : undefined;
-    const byModel = new Map<string, { agents: number; idle: number; free: number; classes: Set<ComputeClassId>; ctx?: number }>();
+    const byModel = new Map<string, { agents: number; idle: number; free: number; classes: Set<ComputeClassId>; ctx?: number; rtts: number[]; freeRtts: number[] }>();
     const claims = queue.activeClaims();
     for (const [id, cap] of agentCapabilities) {
       if (activeBlacklistRecord(id) || (cap.lastSeenMs !== undefined && now - cap.lastSeenMs > 3 * 60_000)) continue;
@@ -367,10 +378,17 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       for (const m of new Set(routableModels(cap))) {
         const tier = restrictedCatalog.tierOf(m);
         if (tier && !accountHoldsTier(viewer, tier, now)) continue;
-        const e = byModel.get(m) ?? { agents: 0, idle: 0, free: 0, classes: new Set<ComputeClassId>() };
+        const e = byModel.get(m) ?? { agents: 0, idle: 0, free: 0, classes: new Set<ComputeClassId>(), rtts: [], freeRtts: [] };
         e.agents++;
         if (queue.agentClaims(id) === 0) e.idle++;
-        e.free += freeModelSlots(id, claims);
+        const free = freeModelSlots(id, claims);
+        e.free += free;
+        // Coordinator <-> agent round trip (the portal adds it to a coordinator's expected latency).
+        const rtt = agentRttMs(id);
+        if (rtt !== null && Number.isFinite(rtt)) {
+          e.rtts.push(rtt);
+          if (free > 0) e.freeRtts.push(rtt);
+        }
         e.classes.add(cls);
         // The smallest window an agent serves the model with: what a caller can count on (agent loops compact to it).
         const ctx = agentContextWindow(id);
@@ -390,10 +408,14 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         .map(([model, e]) => {
           const restricted = restrictedCatalog.tierOf(model);
           // restricted: runs only on your own machines or a lease you hold, never as a network call.
-          return { model, agents: e.agents, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD), ...(e.ctx ? { contextWindow: e.ctx } : {}), ...(restricted ? { restricted } : {}) };
+          // agentRttMs: median round trip to the agents with a free slot for it (else to all that hold it).
+          const agentRtt = medianRtt(e.freeRtts.length ? e.freeRtts : e.rtts);
+          return { model, agents: e.agents, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD), ...(e.ctx ? { contextWindow: e.ctx } : {}), ...(restricted ? { restricted } : {}), ...(agentRtt !== null ? { agentRttMs: agentRtt } : {}) };
         })
         .sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model)),
       classes,
+      // Queueing here, for the portal's latency-aware coordinator choice: pickup p90 and call p50 (ms; null when no recent calls).
+      load: coordinatorLoadSignals(),
     };
   });
 
@@ -405,6 +427,8 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     if ("error" in submitter) return reply.code(submitter.status).send({ error: submitter.error });
     if (submitter.accountId === "anonymous") return reply.code(403).send({ error: "account_required" });
     const accountId = submitter.accountId;
+    // The portal's coordinator choice is believed only from the portal (service token).
+    const portalChoice = body.coordinatorChoice && hasPortalServiceToken((req as any).headers ?? {}) ? sanitizeCoordinatorChoice(body.coordinatorChoice) : undefined;
     // model "auto": best-fit routing picks the model, the class and a preferred agent (routing.ts).
     let routed: { job: JobDescriptor; result: BestFitResult; summary: RoutingSummary } | undefined;
     if (body.model === AUTO_MODEL_ID) {
@@ -518,7 +542,10 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       // A soft preference: the chosen agent gets the call for a moment, then anyone eligible may take it
       // (never the requester's own machines: excludeAccounts above, as in best-fit).
       if (routed.result.chosen?.local) preferAgent(subtask.id, routed.result.chosen.agentId, bestFitConfig.preferMs);
-      recordDecision(body.taskId, subtask.id, routed.job, routed.result);
+      recordDecision(body.taskId, subtask.id, routed.job, routed.result, Date.now(), portalChoice);
+    } else if (portalChoice && billed) {
+      // A named model the portal placed here: log which coordinator and why (Network page, routing decisions).
+      recordPlacement(body.taskId, subtask.id, { model: body.model, computeClass: taskClass === "any" ? null : taskClass }, portalChoice);
     }
     if (onlyAccountId && !reservationId && !hasPortalServiceToken((req as any).headers ?? {})) {
       // "My machines" from the desktop app: a soft preference for the requester's own machine on the

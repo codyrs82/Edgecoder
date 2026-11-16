@@ -275,10 +275,14 @@ describe("httpCapacityProbe against a coordinator", () => {
 
   it("reads the models agents can run from /inference/models, as the portal", async () => {
     const co = await coordinator({ models: { models: [{ model: "a", agents: 2 }, { model: "gone", agents: 0 }, { model: 7, agents: 1 }, null] } });
-    expect(await probe(co.url, "network")).toEqual({ reachable: true, agentModels: ["a"] });
+    // rttMs: the portal <-> coordinator round trip of this probe (latency-aware choice).
+    expect(await probe(co.url, "network")).toEqual({ reachable: true, rttMs: expect.any(Number), agentModels: ["a"] });
     expect(co.seen).toEqual([{ path: "/inference/models", token: "svc" }]);
     expect(await probe((await coordinator({ models: 401 })).url, "network")).toEqual({ reachable: true });
-    expect(await probe((await coordinator({ models: { nope: true } })).url, "network")).toEqual({ reachable: true });
+    expect(await probe((await coordinator({ models: { nope: true } })).url, "network")).toEqual({ reachable: true, rttMs: expect.any(Number) });
+    // Newer coordinators: queueing signals and the round trip to agents holding the model.
+    const loaded = await coordinator({ models: { models: [{ model: "a", agents: 2, idleAgents: 1, freeSlots: 3, waiting: 1, agentRttMs: 41 }], load: { pickupP90Ms: 350, callP50Ms: null } } });
+    expect(await probe(loaded.url, "network")).toEqual({ reachable: true, rttMs: expect.any(Number), agentModels: ["a"], modelLoad: { a: { agents: 2, idle: 1, free: 3, waiting: 1, agentRttMs: 41 } }, pickupP90Ms: 350 });
     expect(await probe((await coordinator({ models: 503 })).url, "network")).toEqual({ reachable: false });
   });
 
@@ -297,9 +301,10 @@ describe("httpCapacityProbe against a coordinator", () => {
 
 describe("chatCapacityOptionsFromEnv", () => {
   it("defaults, reads and clamps the two settings", () => {
-    expect(chatCapacityOptionsFromEnv({})).toEqual({ timeoutMs: CHAT_CAPACITY_DEFAULT_TIMEOUT_MS, ttlMs: CHAT_CAPACITY_DEFAULT_TTL_MS });
-    expect(chatCapacityOptionsFromEnv({ PORTAL_CHAT_CAPACITY_TIMEOUT_MS: "750", PORTAL_CHAT_CAPACITY_TTL_MS: "0" })).toEqual({ timeoutMs: 750, ttlMs: 0 });
-    expect(chatCapacityOptionsFromEnv({ PORTAL_CHAT_CAPACITY_TIMEOUT_MS: "1", PORTAL_CHAT_CAPACITY_TTL_MS: "99999999" })).toEqual({ timeoutMs: 100, ttlMs: 600_000 });
-    expect(chatCapacityOptionsFromEnv({ PORTAL_CHAT_CAPACITY_TIMEOUT_MS: "soon", PORTAL_CHAT_CAPACITY_TTL_MS: " " })).toEqual({ timeoutMs: CHAT_CAPACITY_DEFAULT_TIMEOUT_MS, ttlMs: CHAT_CAPACITY_DEFAULT_TTL_MS });
+    expect(chatCapacityOptionsFromEnv({})).toEqual({ timeoutMs: CHAT_CAPACITY_DEFAULT_TIMEOUT_MS, ttlMs: CHAT_CAPACITY_DEFAULT_TTL_MS, portalRegion: null });
+    expect(chatCapacityOptionsFromEnv({ PORTAL_CHAT_CAPACITY_TIMEOUT_MS: "750", PORTAL_CHAT_CAPACITY_TTL_MS: "0" })).toEqual({ timeoutMs: 750, ttlMs: 0, portalRegion: null });
+    expect(chatCapacityOptionsFromEnv({ FLY_REGION: "cdg" }).portalRegion).toBe("cdg");
+    expect(chatCapacityOptionsFromEnv({ PORTAL_CHAT_CAPACITY_TIMEOUT_MS: "1", PORTAL_CHAT_CAPACITY_TTL_MS: "99999999" })).toEqual({ timeoutMs: 100, ttlMs: 600_000, portalRegion: null });
+    expect(chatCapacityOptionsFromEnv({ PORTAL_CHAT_CAPACITY_TIMEOUT_MS: "soon", PORTAL_CHAT_CAPACITY_TTL_MS: " " })).toEqual({ timeoutMs: CHAT_CAPACITY_DEFAULT_TIMEOUT_MS, ttlMs: CHAT_CAPACITY_DEFAULT_TTL_MS, portalRegion: null });
   });
 });

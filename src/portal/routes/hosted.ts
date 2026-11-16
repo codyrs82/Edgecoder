@@ -13,6 +13,7 @@
  */
 
 import { createChatCapacityDirectory, type ChatCapacityDirectory } from "../chat-capacity.js";
+import { clientRegionOf, type CoordinatorChoice } from "../../common/coordinator-choice.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -70,11 +71,18 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
    * (chat-capacity.ts); inference runs where it is submitted, so this is what spreads API traffic
    * across seeds. Calls on your own machines or a lease stay with the default coordinator.
    */
-  const networkForCall = async (accountId: string, target: { model: string; computeClass?: string; target?: "mine"; reservationId?: string }): Promise<NetworkDeps> => {
-    if (target.target === "mine" || target.reservationId) return networkFor(accountId);
-    // A classed call (network/<model>@<class>) goes to a coordinator with an agent of that class.
-    const { url } = await capacity.pick({ kind: "network", model: target.model, computeClass: target.computeClass }).catch(() => ({ url: null }));
-    return url ? portalNetworkDeps({ PORTAL_SERVICE_TOKEN: deps.PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, accountId) : networkFor(accountId);
+  const networkForCall = async (
+    accountId: string,
+    target: { model: string; computeClass?: string; target?: "mine"; reservationId?: string },
+    clientRegion: string | null,
+  ): Promise<{ deps: NetworkDeps; choice?: CoordinatorChoice }> => {
+    if (target.target === "mine" || target.reservationId) return { deps: networkFor(accountId) };
+    // A classed call (network/<model>@<class>) goes to a coordinator with an agent of that class;
+    // among those, the latency-aware choice (coordinator-latency.ts), recorded with the call.
+    const { url, choice } = await capacity.pick({ kind: "network", model: target.model, computeClass: target.computeClass }, [], { clientRegion }).catch(() => ({ url: null, choice: undefined }));
+    return url
+      ? { deps: portalNetworkDeps({ PORTAL_SERVICE_TOKEN: deps.PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, accountId), ...(choice ? { choice } : {}) }
+      : { deps: networkFor(accountId) };
   };
   // Balance, reservations and the chat compute picker for signed-in users.
   registerComputeRoutes(app, deps);
@@ -92,7 +100,7 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
     const key = apiKeyOf(req);
     if (!store || !key.startsWith(API_KEY_PREFIX)) return null;
     const userId = await store.userForApiKeyHash(hashApiKey(key));
-    return userId ? { accountId: `acct-${userId}` } : null;
+    return userId ? { accountId: `acct-${userId}`, clientRegion: clientRegionOf(req.headers as Record<string, unknown>) } : null;
   };
 
   // ── The endpoint ──
@@ -127,22 +135,34 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
             }),
         });
         // Network calls: the coordinator picks model, class and agent (best-fit routing).
+        let autoChoice: CoordinatorChoice | undefined;
         const backend = coordinatorAutoBackend({
           useClientSide: async (req) => {
             const first = planRoutes(sizeWorkload(req), await inputs(), "auto")[0];
             return !!first && first.placement !== "network";
           },
           clientSide,
-          pick: async () => (await capacity.pickAuto?.()) ?? null,
+          pick: async () => {
+            const r = capacity.pickAutoChoice ? await capacity.pickAutoChoice({ clientRegion: ctx.clientRegion }) : { url: (await capacity.pickAuto?.()) ?? null, choice: undefined };
+            autoChoice = r.choice;
+            return r.url;
+          },
           allowed: (url) => capacity.isKnown(url),
           run: (url, routeRedirect) =>
-            networkBackend(portalNetworkDeps({ PORTAL_SERVICE_TOKEN: deps.PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, ctx.accountId), { model: AUTO_MODEL_ID, computeClass: "any", routeRedirect }),
+            networkBackend(portalNetworkDeps({ PORTAL_SERVICE_TOKEN: deps.PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, ctx.accountId), {
+              model: AUTO_MODEL_ID,
+              computeClass: "any",
+              routeRedirect,
+              // The portal's choice goes with the call it made (not with a route_elsewhere follow-up).
+              ...(autoChoice && routeRedirect ? { coordinatorChoice: autoChoice } : {}),
+            }),
         });
         return { backend, model: AUTO_MODEL_ID };
       }
       const target = hostedTarget(model);
       if (!target) return { status: 400, error: "Unknown model. Leave it out (or auto) for the cheapest place that fits, or name one: network/<model>[@cpu|apple|gpu|gpu.dc], mine/<model> or reserved/<reservation>/<model>. GET /v1/models lists them." };
-      return { backend: networkBackend(await networkForCall(ctx.accountId, target), target), model: model! };
+      const placed = await networkForCall(ctx.accountId, target, ctx.clientRegion);
+      return { backend: networkBackend(placed.deps, { ...target, ...(placed.choice ? { coordinatorChoice: placed.choice } : {}) }), model: model! };
     },
   });
 

@@ -12,6 +12,7 @@ import { ChatBackendError, type ChatPiece } from "../../inference-api/types.js";
 import type { Transport } from "../../apps/ide/network-inference.js";
 import { accountIdFor, chatComputeSchema, computeLabel, networkTargetFor, portalNetworkDeps, type ChatCompute } from "./compute.js";
 import { createChatCapacityDirectory, type ChatCapacityDirectory } from "../chat-capacity.js";
+import { clientRegionOf, type CoordinatorChoice } from "../../common/coordinator-choice.js";
 import { moduleLogger } from "../../common/logger.js";
 
 const logger = moduleLogger("portal-chat");
@@ -121,12 +122,19 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
     // model, a reachable one is still asked, so the user gets its exact refusal.
     while (!first && tried.length < CHAT_MAX_COORDINATOR_ATTEMPTS) {
       // Best fit: the coordinator with the most room asks its routing (one coordinator; it may place on peers' agents itself).
-      const { url, known } =
+      // Latency-aware among the coordinators with room (coordinator-latency.ts); the choice goes with the call.
+      const where = { clientRegion: clientRegionOf(req.headers as Record<string, unknown>) };
+      const { url, known, choice }: { url: string | null; known: number; choice?: CoordinatorChoice } =
         compute.target === "auto"
           ? tried.length > 0
             ? { url: null, known: 1 }
-            : await capacity.pickAuto().then((u) => ({ url: u, known: u ? 1 : 0 }), () => ({ url: null, known: 0 }))
-          : await capacity.pick({ kind: "network", model: compute.model, computeClass: compute.target === "network" ? compute.computeClass : undefined }, tried);
+            : await (capacity.pickAutoChoice ? capacity.pickAutoChoice(where) : capacity.pickAuto().then((url) => ({ url, choice: undefined }))).then(
+                (r) => ({ url: r.url, known: r.url ? 1 : 0, choice: r.choice }),
+                () => ({ url: null, known: 0 }),
+              )
+          : compute.target === "network"
+            ? await capacity.pick({ kind: "network", model: compute.model, computeClass: compute.computeClass }, tried, where)
+            : await capacity.pick({ kind: "network", model: compute.model }, tried).then((r) => ({ url: r.url, known: r.known }));
       if (!url) {
         if (tried.length > 0) break;
         if (fallback) return fallback();
@@ -150,7 +158,7 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
           throw err;
         }
       };
-      pieces = networkBackend({ ...pinned, transport }, networkTargetFor(compute))({ messages }, ac.signal);
+      pieces = networkBackend({ ...pinned, transport }, { ...networkTargetFor(compute), ...(choice ? { coordinatorChoice: choice } : {}) })({ messages }, ac.signal);
       // Wait for the first piece so a refusal (no machine, not enough cSats, lease ended) is a plain HTTP error.
       try {
         first = await pieces.next();

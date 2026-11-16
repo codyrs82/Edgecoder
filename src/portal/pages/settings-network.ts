@@ -256,9 +256,9 @@ export function networkPageContent(): string {
       </div>
       <div class="net-card">
         <h3>Routing decisions</h3>
-        <div class="hint muted">Network requests that leave the model to the network (model "auto"): the default for the API without a model, portal chat on Auto, the app's Auto and bots when a step goes to the network, <code>edgecoder code</code> and tentacle helpers. A pinned model skips routing and is not listed. Each row: the job and its complexity, what best-fit routing chose and why, the score breakdown (quality · latency · price · reliability), and the estimate against what happened. Kept across restarts for NETWORK_HISTORY_DAYS.</div>
+        <div class="hint muted">Network requests that leave the model to the network (model "auto"): the default for the API without a model, portal chat on Auto, the app's Auto and bots when a step goes to the network, <code>edgecoder code</code> and tentacle helpers. A pinned model skips best-fit routing; it is listed only when the portal chose its coordinator. Each row: the job and its complexity, what best-fit routing chose and why, the score breakdown (quality · latency · price · reliability), and the estimate against what happened. Coordinator: where the portal sent the call and why (latency-aware choice: expected latency = the portal's round trip + queueing + the coordinator's round trip to the agent; a nearer coordinator wins only with a free slot and by the margin, or when the load pick has no free slot). Kept across restarts for NETWORK_HISTORY_DAYS.</div>
         <div class="net-table-wrap">
-          <table><thead><tr><th>When</th><th>Job</th><th>Complexity</th><th>Chosen</th><th>Score (Q · L · P · R)</th><th class="num">Est. wait / TTFT / total</th><th class="num">Actual TTFT / total</th><th class="num">Est. / actual cSats</th><th>Why</th></tr></thead><tbody id="routingBody"></tbody></table>
+          <table><thead><tr><th>When</th><th>Coordinator</th><th>Job</th><th>Complexity</th><th>Chosen</th><th>Score (Q · L · P · R)</th><th class="num">Est. wait / TTFT / total</th><th class="num">Actual TTFT / total</th><th class="num">Est. / actual cSats</th><th>Why</th></tr></thead><tbody id="routingBody"></tbody></table>
         </div>
         <div class="muted" id="routingWeights"></div>
       </div>
@@ -537,7 +537,12 @@ export function networkPageScript(): string {
       for (const d of r.decisions || []) {
         const tr = el("tr");
         tr.appendChild(el("td", {}, ago(d.atMs)));
-        tr.appendChild(el("td", {}, String(d.job || "-").replace("_", " ") + (d.jobInferred ? "" : " (sent)") + (d.quality && d.quality !== "balanced" ? " · " + d.quality : "")));
+        const cc = d.coordinatorChoice;
+        const short = (h) => String(h || "-").split(".")[0];
+        const ccTitle = cc ? [cc.reason, "client " + (cc.clientRegion || "?") + " · portal " + (cc.portalRegion || "?")].concat((cc.candidates || []).map((c) => c.coordinator + ": expected " + fmtMs(c.expectedMs) + " = rtt " + fmtMs(c.rttMs) + " + queue " + fmtMs(c.queueMs) + " + agent " + fmtMs(c.agentRttMs) + " · free " + c.free + " · waiting " + c.waiting + (c.stale ? " · stale" : ""))).join("\\n") : "";
+        const mine = cc ? (cc.candidates || []).find((c) => c.coordinator === cc.chosen) : null;
+        tr.appendChild(el("td", { class: "mono", title: ccTitle }, short(d.coordinator) + (cc ? " · " + cc.rule + (mine && mine.expectedMs !== null && mine.expectedMs !== undefined ? " " + fmtMs(mine.expectedMs) : "") + (cc.clientRegion ? " · from " + cc.clientRegion : "") : "")));
+        tr.appendChild(el("td", {}, d.pinned ? "named model" : String(d.job || "-").replace("_", " ") + (d.jobInferred ? "" : " (sent)") + (d.quality && d.quality !== "balanced" ? " · " + d.quality : "")));
         const cx = d.complexity || {};
         const sig = (cx.signals || []).filter((s) => s.contribution > 0).slice(0, 3).map((s) => s.detail).join(", ");
         tr.appendChild(el("td", { title: (cx.signals || []).map((s) => s.name + " " + two(s.value) + " (" + (s.contribution >= 0 ? "+" : "") + two(s.contribution) + ")").join("\\n") }, String(cx.level || "-").replace("_", " ") + " " + two(cx.score) + (sig ? " · " + sig : "") + (cx.hinted !== undefined ? " · hint" : "")));
@@ -552,7 +557,7 @@ export function networkPageScript(): string {
         tr.appendChild(el("td", {}, String(d.reason || "") + (d.affinity && d.affinity.status === "broken" ? " · affinity broken: " + d.affinity.reason : "")));
         body.appendChild(tr);
       }
-      if (!(r.decisions || []).length) { const tr = el("tr"); tr.appendChild(el("td", { colspan: "9" }, 'No routed requests on this coordinator yet. A row appears for each network request that leaves the model to the network (no model, or "auto"). Calls that name a model, and Auto steps that ran free on the caller’s own machines, are not routed here.')); body.appendChild(tr); }
+      if (!(r.decisions || []).length) { const tr = el("tr"); tr.appendChild(el("td", { colspan: "10" }, 'No routed requests on this coordinator yet. A row appears for each network request that leaves the model to the network (no model, or "auto"). Calls that name a model, and Auto steps that ran free on the caller’s own machines, are not routed here.')); body.appendChild(tr); }
       const w = r.config && r.config.weights;
       setText("routingWeights", w ? "Base weights: quality " + w.quality + " · latency " + w.latency + " · price " + w.price + " · reliability " + w.reliability + " · complexity shift " + r.config.complexityShift + " · preference " + r.config.preferMs + " ms" : "");
     }
