@@ -443,7 +443,7 @@ tests/            - test suites
 - **Bring your own frontier key:** [docs/frontier-keys.md](docs/frontier-keys.md)
 - **Security research tier:** [docs/security-research-tier.md](docs/security-research-tier.md)
 - **Going to mainnet:** [docs/going-to-mainnet.md](docs/going-to-mainnet.md)
-- **Legal drafts (pending counsel):** [docs/legal/](docs/legal/)
+- **Legal documents** (Terms of Service, Privacy Policy, Acceptable Use Policy, Host Agreement): [docs/legal/](docs/legal/)
 - **MCP server for AI agents:** [docs/mcp.md](docs/mcp.md) · [packages/mcp-server](packages/mcp-server/README.md)
 - **Packages:** [docs/packages.md](docs/packages.md)
 - **Architecture:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)

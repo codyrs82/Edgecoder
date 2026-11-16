@@ -10,7 +10,7 @@ import { HERO_CLASSES, formatSats, formatUsd, referencePricing, type PublicPrici
 import { DOCS_SITE_URL, GITHUB_REPO_URL } from "./urls.js";
 import { escapeHtml } from "./escape.js";
 import { CSP_NONCE } from "../csp-nonce.js";
-import { LEGAL_LINKS, NOTICES } from "../../common/legal-notices.js";
+import { legalLinksHtml } from "./legal-footer.js";
 import { PUBLIC_DOCUMENTS } from "../legal/documents.js";
 import { renderMarkdown } from "../legal/markdown.js";
 
@@ -262,13 +262,13 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
   </html>`;
 }
 
-/** Footer links on every public page (the legal drafts and the Bluetooth explainer). */
+/** Footer links on every public page (the legal documents and the Bluetooth explainer). */
 export function footerLegalLinks(): string {
-  return `<span>&copy; 2025 EdgeCoder</span>${LEGAL_LINKS.map((l) => `<a href="${l.href}">${escapeHtml(l.label.replace(/ of Service| Policy/g, ""))}</a>`).join("")}<a href="/bluetooth">Bluetooth mesh</a><a href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">Source (BUSL-1.1)</a>`;
+  return `<span>&copy; 2026 EdgeCoder</span>${legalLinksHtml()}<a href="/bluetooth">Bluetooth mesh</a><a href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">Source (BUSL-1.1)</a>`;
 }
 
-/** Nav, footer and document styling shared by the public document pages (legal drafts, Bluetooth). */
-function publicDocumentPage(opts: { title: string; description: string; banner?: string; body: string }): string {
+/** Nav, footer and document styling shared by the public document pages (legal documents, Bluetooth). */
+function publicDocumentPage(opts: { title: string; description: string; lead?: string; body: string }): string {
   return `<!doctype html>
   ${htmlOpenTag()}
     <head>
@@ -307,9 +307,7 @@ function publicDocumentPage(opts: { title: string; description: string; banner?:
         .content blockquote { margin: 0 0 18px; padding: 12px 16px; border: 1px solid var(--card-border); border-left: 3px solid var(--warn); border-radius: var(--radius-sm); background: var(--bg-soft); }
         .content blockquote p:last-child { margin-bottom: 0; }
         .content mark.placeholder { background: var(--brand-soft); color: var(--text); border-radius: 3px; padding: 0 3px; }
-        .draft-banner { max-width: 760px; margin: 24px auto 0; padding: 12px 16px; border: 1px solid var(--warn); border-radius: var(--radius-md); background: var(--bg-soft); color: var(--text); font-size: 13px; line-height: 1.5; }
-        .draft-banner strong { color: var(--warn); }
-        .doc-nav { max-width: 760px; margin: 16px auto 0; display: flex; gap: 6px 14px; flex-wrap: wrap; font-size: 13px; }
+        .doc-nav { max-width: 760px; margin: 24px auto 0; display: flex; gap: 6px 14px; flex-wrap: wrap; font-size: 13px; }
         .doc-nav a { color: var(--text-secondary); } .doc-nav a[aria-current="page"] { color: var(--text); font-weight: 600; }
       </style>
     </head>
@@ -332,7 +330,7 @@ function publicDocumentPage(opts: { title: string; description: string; banner?:
         </div>
       </nav>
       <main class="shell">
-        ${opts.banner ?? ""}
+        ${opts.lead ?? ""}
         <article class="content">
           ${opts.body}
         </article>
@@ -353,19 +351,18 @@ function publicDocumentPage(opts: { title: string; description: string; banner?:
 
 /** The legal pages: path, page title and description. The text is docs/legal/<key>.md. */
 export const LEGAL_PAGES = {
-  terms: { path: "/terms", title: "Terms of Service", description: "EdgeCoder Terms of Service (draft pending legal review)." },
-  privacy: { path: "/privacy", title: "Privacy Policy", description: "EdgeCoder Privacy Policy (draft pending legal review): what we collect, how hosts see your prompts, retention and your rights." },
-  "acceptable-use": { path: "/acceptable-use", title: "Acceptable Use Policy", description: "EdgeCoder Acceptable Use Policy (draft pending legal review)." },
-  "host-agreement": { path: "/host-agreement", title: "Host Agreement", description: "EdgeCoder Host Agreement for people who run the agent (draft pending legal review)." }
+  terms: { path: "/terms", title: "Terms of Service", description: "EdgeCoder Terms of Service." },
+  privacy: { path: "/privacy", title: "Privacy Policy", description: "EdgeCoder Privacy Policy: what we collect, how hosts see your prompts, retention and your rights." },
+  "acceptable-use": { path: "/acceptable-use", title: "Acceptable Use Policy", description: "EdgeCoder Acceptable Use Policy." },
+  "host-agreement": { path: "/host-agreement", title: "Host Agreement", description: "EdgeCoder Host Agreement for people who run the agent." }
 } as const;
 export type LegalPageKey = keyof typeof LEGAL_PAGES;
 
-/** A legal page: the visible DRAFT banner, links between the four documents, then the Markdown. */
+/** A legal page: links between the four documents, then the Markdown (its first lines give the version and dates). */
 export function legalPageHtml(key: LegalPageKey): string {
   const page = LEGAL_PAGES[key];
-  const banner = `<div class="draft-banner" role="note" data-legal-draft="true"><strong>DRAFT — pending legal review.</strong> ${escapeHtml(NOTICES.draft.replace(/^DRAFT — pending legal review\. /, ""))}</div>
-        <nav class="doc-nav" aria-label="Legal documents">${(Object.keys(LEGAL_PAGES) as LegalPageKey[]).map((k) => `<a href="${LEGAL_PAGES[k].path}"${k === key ? ' aria-current="page"' : ""}>${escapeHtml(LEGAL_PAGES[k].title)}</a>`).join("")}</nav>`;
-  return publicDocumentPage({ title: page.title, description: page.description, banner, body: renderMarkdown(PUBLIC_DOCUMENTS[key]) });
+  const lead = `<nav class="doc-nav" aria-label="Legal documents">${(Object.keys(LEGAL_PAGES) as LegalPageKey[]).map((k) => `<a href="${LEGAL_PAGES[k].path}"${k === key ? ' aria-current="page"' : ""}>${escapeHtml(LEGAL_PAGES[k].title)}</a>`).join("")}</nav>`;
+  return publicDocumentPage({ title: page.title, description: page.description, lead, body: renderMarkdown(PUBLIC_DOCUMENTS[key]) });
 }
 
 export const privacyPolicyHtml = (): string => legalPageHtml("privacy");
@@ -392,7 +389,7 @@ app.get("/", async (_req, reply) => {
   const pricing = deps.getPricing ? await deps.getPricing().catch(() => referencePricing()) : referencePricing();
   return reply.type("text/html").send(marketingHomeHtml(pricing));
 });
-// The legal drafts (docs/legal/*.md) and the Bluetooth explainer (docs/bluetooth-mesh.md).
+// The legal documents (docs/legal/*.md) and the Bluetooth explainer (docs/bluetooth-mesh.md).
 for (const key of Object.keys(LEGAL_PAGES) as LegalPageKey[]) {
   app.get(LEGAL_PAGES[key].path, async (_req, reply) => reply.type("text/html").send(legalPageHtml(key)));
 }

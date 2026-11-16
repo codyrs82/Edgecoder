@@ -204,10 +204,10 @@ app.get("/portal/settings/install", async (req, reply) => {
       </div>
     </div>
 
-    <!-- ── Host Agreement (DRAFT pending legal review): accepted before the install steps ── -->
-    <div class="host-ack" id="hostAck" data-legal-draft="true">
+    <!-- ── Host Agreement: accepted before the install steps ── -->
+    <div class="host-ack" id="hostAck">
       <h3>Before you install: the Host Agreement</h3>
-      <p>${escapeHtml(NOTICES.hosting)} The <a href="/host-agreement" target="_blank" rel="noopener">Host Agreement</a> (a draft pending legal review) explains resources used, payouts and holds.</p>
+      <p>${escapeHtml(NOTICES.hosting)} The <a href="/host-agreement" target="_blank" rel="noopener">Host Agreement</a> explains resources used, payouts and holds.</p>
       <label for="hostAckBox"><input id="hostAckBox" type="checkbox" /><span>I agree to the <a href="/host-agreement" target="_blank" rel="noopener">Host Agreement</a> for every machine I install EdgeCoder on.</span></label>
       <div class="ack-state" id="hostAckState">Accept to see the install steps.</div>
     </div>

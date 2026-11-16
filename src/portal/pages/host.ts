@@ -14,6 +14,7 @@ import { htmlOpenTag, themeHeadTags, themeToggleButton } from "../assets.js";
 import { DOCS_SITE_URL, GITHUB_REPO_URL, supportEmail } from "./urls.js";
 import { escapeHtml } from "./escape.js";
 import { CSP_NONCE } from "../csp-nonce.js";
+import { legalLinksHtml } from "./legal-footer.js";
 import { COMPUTE_HARDWARE, COMPUTE_HARDWARE_LABELS, HONEYPOT_FIELD, HOST_KINDS, HOST_KIND_LABELS, HOST_REQUEST_FIELD_HINTS } from "../host-requests.js";
 
 export type HostFormState =
@@ -179,7 +180,7 @@ export function hostPageHtml(state: HostFormState = { kind: "blank" }): string {
             ${formHtml(state)}
           </section>
         </div>
-        <div class="foot"><span>&copy; 2025 EdgeCoder</span><a href="/">Home</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="/acceptable-use">Acceptable Use</a><a href="/host-agreement">Host Agreement</a></div>
+        <div class="foot"><span>&copy; 2026 EdgeCoder</span><a href="/">Home</a>${legalLinksHtml()}</div>
       </main>
     </body>
   </html>`;

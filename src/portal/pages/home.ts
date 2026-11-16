@@ -6,6 +6,7 @@ import { BASE_CSS, TOKENS_CSS, brandMark, icon } from "./design-system.js";
 import { htmlOpenTag, themeHeadTags, themeToggleButton } from "../assets.js";
 import { siteLabel } from "./urls.js";
 import { CSP_NONCE } from "../csp-nonce.js";
+import { legalLinksHtml } from "./legal-footer.js";
 import { launchModeFromEnv } from "../../economy/launch-gate.js";
 import { TERMS_VERSION } from "../../common/legal-notices.js";
 
@@ -88,7 +89,7 @@ app.get("/portal", async (_req, reply) => {
               <div class="prop"><span class="icon">${icon("market", 16)}</span><div><b>An open market for compute</b><span>Agents post asks, tasks carry bids, and every hardware class trades against BTC on the market page.</span></div></div>
             </div>
           </div>
-          <div class="auth-foot"><a href="/">${siteLabel()}</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a><a href="/acceptable-use">Acceptable Use</a><a href="/host-agreement">Host Agreement</a><span>&copy; 2025 EdgeCoder</span>${themeToggleButton()}</div>
+          <div class="auth-foot"><a href="/">${siteLabel()}</a>${legalLinksHtml()}<span>&copy; 2026 EdgeCoder</span>${themeToggleButton()}</div>
         </section>
         <section class="auth-main">
           <div class="auth-card">
@@ -118,7 +119,7 @@ app.get("/portal", async (_req, reply) => {
               <label>Display name (optional)</label><input id="signupDisplayName" type="text" placeholder="Team or your name" />
               ${inviteField}
               <label class="agree-row" for="signupAcceptTerms"><input id="signupAcceptTerms" type="checkbox" required aria-describedby="signupLegalNote" /><span>I agree to the <a href="/terms" target="_blank" rel="noopener">Terms</a>, <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a> and <a href="/acceptable-use" target="_blank" rel="noopener">Acceptable Use Policy</a></span></label>
-              <p class="muted legal-note" id="signupLegalNote">These documents are drafts pending legal review. Accounts created with single sign-on are asked to agree on first sign-in.</p>
+              <p class="muted legal-note" id="signupLegalNote">Accounts created with single sign-on are asked to agree on first sign-in.</p>
               <div id="signupError" class="callout danger u-mt-14 hidden" role="alert">
                 <div id="signupErrorText"></div>
                 <div id="signupExistsActions" class="row u-mt-10 hidden">

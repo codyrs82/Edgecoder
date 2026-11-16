@@ -1,8 +1,6 @@
 # AI and disclaimer notices for the UI
 
-> **DRAFT — pending legal review.** Short notices for the product UI, prepared for review by counsel. Not final and not legal advice.
-
-Version: 2026-11-15-draft
+Version: 2026-11-16 · Last updated: 16 November 2026
 
 These strings are used in the apps. Keep them in sync with `src/common/legal-notices.ts` and `desktop/src/lib/legal-notices.ts`.
 

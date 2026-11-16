@@ -3,15 +3,17 @@
 
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { HOST_AGREEMENT_VERSION, TERMS_VERSION } from "../../common/legal-notices.js";
+import { HOST_AGREEMENT_VERSION, TERMS_VERSION, hostAgreementVersionIsCurrent, termsVersionIsCurrent } from "../../common/legal-notices.js";
 import type { PortalRouteDeps } from "./deps.js";
 
 /**
- * Legal acceptance per account (docs/legal/, DRAFT pending legal review):
+ * Legal acceptance per account (docs/legal/):
  *   GET  /portal/api/legal         current versions and what this account accepted
  *   POST /portal/api/legal/accept  { document: "terms" | "host-agreement", version }
  * Sign-up records the Terms (routes/auth.ts); this is for accounts created without the checkbox
  * (single sign-on from an app, older accounts) and for the Host Agreement on the Install agent page.
+ * An acceptance of an equivalent earlier version (same text, e.g. the "2026-11-15-draft" label)
+ * counts as current, so relabelling a version doesn't ask everyone to accept again.
  */
 export function registerLegalRoutes(app: FastifyInstance, { store, getCurrentUser }: PortalRouteDeps): void {
   app.get("/portal/api/legal", async (req, reply) => {
@@ -22,8 +24,8 @@ export function registerLegalRoutes(app: FastifyInstance, { store, getCurrentUse
     return reply.send({
       current: { terms: TERMS_VERSION, hostAgreement: HOST_AGREEMENT_VERSION },
       accepted,
-      termsCurrent: accepted?.termsVersion === TERMS_VERSION,
-      hostAgreementCurrent: accepted?.hostAgreementVersion === HOST_AGREEMENT_VERSION
+      termsCurrent: termsVersionIsCurrent(accepted?.termsVersion),
+      hostAgreementCurrent: hostAgreementVersionIsCurrent(accepted?.hostAgreementVersion)
     });
   });
 
@@ -35,8 +37,10 @@ export function registerLegalRoutes(app: FastifyInstance, { store, getCurrentUse
     if (!parsed.success) return reply.code(400).send({ error: "invalid_request" });
     const { document, version } = parsed.data;
     const current = document === "terms" ? TERMS_VERSION : HOST_AGREEMENT_VERSION;
-    // Only the version on the page today can be accepted: an old tab can't record a stale one.
-    if (version !== current) return reply.code(409).send({ error: "version_outdated", current });
+    const isCurrent = document === "terms" ? termsVersionIsCurrent : hostAgreementVersionIsCurrent;
+    // Only the version on the page today (or one with the same text) can be accepted: an old tab
+    // can't record a stale one. The current version id is what gets recorded.
+    if (!isCurrent(version)) return reply.code(409).send({ error: "version_outdated", current });
     const now = Date.now();
     if (document === "terms") await store.recordTermsAcceptance(user.userId, current, now);
     else await store.recordHostAgreementAcceptance(user.userId, current, now);

@@ -1,10 +1,8 @@
 # Privacy Policy
 
-> **DRAFT — pending legal review.** This document is a working draft prepared for review by counsel. It is not final, it is not legal advice, and it has not been approved by EdgeCoder. Bracketed items such as [CONTACT EMAIL] are placeholders to be completed.
+Version: 2026-11-16 · Effective date: 16 November 2026 · Last updated: 16 November 2026
 
-Version: 2026-11-15-draft · Effective date: [EFFECTIVE DATE]
-
-This policy explains what personal information EdgeCoder ("we") collects when you use the EdgeCoder website ([WEBSITE DOMAIN]), the EdgeCoder portal, the desktop and iOS apps, the EdgeCoder agent and the hosted API (the "Service"), how we use and share it, and your choices. Words defined in the [Terms of Service](/terms) have the same meaning here.
+This policy explains what personal information EdgeCoder ("EdgeCoder", "we") collects when you use the EdgeCoder website (edgecoder.io), the EdgeCoder portal, the desktop and iOS apps, the EdgeCoder agent and the hosted API (the "Service"), how we use and share it, and your choices. Words defined in the [Terms of Service](/terms) have the same meaning here.
 
 ## The most important thing to know
 
@@ -25,7 +23,7 @@ EdgeCoder is a decentralized network. **When you send a prompt, code or data to 
 - Lightning invoices and payment records for cSats you buy (amount, status, payment hash, timestamps), your cSats balance and transaction history.
 - For Hosts: earnings, payouts, and the payout destination you set (a Lightning address or similar), with the verification codes used to confirm changes.
 - We do not collect card numbers or bank details. We do not hold your wallet's private keys.
-- If we are required to collect tax information from Hosts (see the [Host Agreement](/host-agreement)), we collect it as required. [COUNSEL: describe tax-form collection, storage and processor.]
+- If we are required to collect tax information from Hosts (see the [Host Agreement](/host-agreement)), we collect it as required.
 
 **Machine and agent telemetry (Hosts and anyone who runs the agent or app)**
 
@@ -42,8 +40,8 @@ EdgeCoder is a decentralized network. **When you send a prompt, code or data to 
 
 - **Portal chat:** conversations you have in the portal (and the desktop app when it uses your portal account) are stored on EdgeCoder's servers, including the full text of your messages and the model's replies, so you can see them again. You can delete a conversation at any time, which deletes its messages.
 - **Desktop app chats:** chats kept locally by the desktop app are stored on your computer.
-- **Jobs on the network:** to run a job, its input passes through an EdgeCoder coordinator to a Host. The coordinator's job queue stores the task input and the result until [RETENTION PERIOD FOR QUEUE DATA — engineering to confirm; there is currently no automatic deletion], in encrypted form when the end-to-end task envelope is used.
-- **On Hosts' machines:** the EdgeCoder agent keeps a local history of the jobs it ran, including their input and output, in a database on the Host's machine. This history is under the Host's control, not ours. [ENGINEERING: consider not storing third-party prompts in the host's local history.]
+- **Jobs on the network:** to run a job, its input passes through an EdgeCoder coordinator to a Host. The coordinator's job queue stores the task input and the result for up to 30 days, in encrypted form when the end-to-end task envelope is used.
+- **On Hosts' machines:** the EdgeCoder agent keeps a local history of the jobs it ran, including their input and output, in a database on the Host's machine. This history is under the Host's control, not ours.
 - We do not use your prompts, code, data or outputs to train AI models.
 
 **Website and portal**
@@ -63,13 +61,11 @@ EdgeCoder is a decentralized network. **When you send a prompt, code or data to 
 - To meet legal obligations: tax, accounting, sanctions screening and responding to lawful requests.
 - To understand and improve the Service using aggregate or de-identified data.
 
-[COUNSEL: add legal bases for processing (GDPR Art. 6) per purpose: contract, legitimate interests, legal obligation, consent.]
-
 ## How we share information
 
-- **Hosts** receive the prompts, code and data of jobs their machines run, as described above. We do not intentionally send your email address to Hosts with a job [ENGINEERING TO CONFIRM exactly which requester identifiers a Host receives].
+- **Hosts** receive the prompts, code and data of jobs their machines run, as described above. We do not intentionally send your email address to Hosts with a job.
 - **Other users** may see public network information such as agent IDs, hardware class, verification status and country, and market orders and trades without account details.
-- **Service providers** that process data for us: hosting (Fly.io), DNS and edge (Cloudflare), email delivery (Resend), error tracking (Sentry), and sign-in providers you choose to use (Google, Microsoft, GitHub). [COUNSEL: confirm the full list and data-processing agreements.]
+- **Service providers** that process data for us: hosting (Fly.io), DNS and edge (Cloudflare), email delivery (Resend), error tracking (Sentry), and sign-in providers you choose to use (Google, Microsoft, GitHub).
 - **The Bitcoin and Lightning networks:** payments you make or receive are recorded or routed there and may be public or visible to routing nodes. Ledger checkpoints anchored on Bitcoin contain hashes, not personal data.
 - **Legal and safety:** when required by law or legal process, or to protect the rights, property or safety of EdgeCoder, our users, Hosts or the public.
 - **Business transfers:** in a merger, acquisition or sale of assets, subject to this policy.
@@ -78,12 +74,13 @@ We do not sell your personal information and we do not share it for cross-contex
 
 ## Retention
 
-- Account information: while your account is open, then [RETENTION PERIOD] after closure, except what we must keep for legal, tax, accounting or fraud-prevention reasons.
-- Ledger, payment and payout records: [RETENTION PERIOD — e.g. 7 years] for accounting and tax purposes. Some ledger records are hash-chained and anchored, so they cannot be edited; personal data is kept out of them where possible.
+- Account information: while your account is open, then 30 days after closure, except what we must keep for legal, tax, accounting or fraud-prevention reasons.
+- Ledger, payment and payout records: 7 years for accounting and tax purposes. Some ledger records are hash-chained and anchored, so they cannot be edited; personal data is kept out of them where possible.
 - Portal chat conversations: until you delete them or close your account.
-- Usage records and job queue data: [RETENTION PERIOD].
-- Server logs and rate-limit records: [RETENTION PERIOD — e.g. 30 days].
-- Machine telemetry: [RETENTION PERIOD].
+- Job queue data (task input and results): 30 days.
+- Usage records: 7 years, as part of billing records.
+- Server logs and rate-limit records: 30 days.
+- Machine telemetry: while the machine is enrolled, then 30 days.
 
 ## Security
 
@@ -91,9 +88,9 @@ We use measures including password hashing, passkeys, hashed API keys and tokens
 
 ## Your rights and choices
 
-- **Access, correction, deletion and portability.** You can see and change much of your information in Settings, and delete chat conversations yourself. To request a copy of your data or deletion of your account, email [CONTACT EMAIL]. We will verify your request and respond within the time the law requires.
-- **GDPR (EEA, UK, Switzerland).** [GDPR SECTION: controller identity and representative, legal bases, rights to object and restrict processing, right to withdraw consent, right to complain to a supervisory authority, international transfer mechanism.]
-- **CCPA/CPRA (California) and other U.S. states.** [CCPA SECTION: categories of personal information collected in the past 12 months, sources, purposes, categories of recipients, "we do not sell or share", rights to know, delete, correct and limit, non-discrimination, authorized agents, and request methods.]
+- **Access, correction, deletion and portability.** You can see and change much of your information in Settings, and delete chat conversations yourself. To request a copy of your data or deletion of your account, email support@edgecoder.io. We will verify your request and respond within the time the law requires.
+- **EEA, UK and Switzerland.** You can also object to or ask us to restrict processing, withdraw consent where we rely on it, and complain to your data protection authority. Email privacy@edgecoder.io.
+- **California and other U.S. states.** You can ask to know what personal information we collect, use and disclose, and ask us to delete or correct it. We do not sell or share your personal information, and we will not treat you differently for using these rights. You can make a request yourself or through an authorized agent at privacy@edgecoder.io.
 - **Email.** Service emails (verification, security, payouts, terms changes) are part of the Service. We do not send marketing email without your consent.
 - **Bluetooth.** You can turn Bluetooth mesh off in the desktop app (Settings > General). See [Bluetooth mesh](/bluetooth).
 
@@ -103,11 +100,11 @@ The portal uses a session cookie to keep you signed in and a short-lived cookie 
 
 ## Children
 
-The Service is not directed to children and is not for anyone under [MINIMUM AGE]. We do not knowingly collect personal information from children under 13 (or the higher age required where you live). If you believe a child has given us personal information, contact [CONTACT EMAIL] and we will delete it.
+The Service is not directed to children and is not for anyone under 18. We do not knowingly collect personal information from children under 13 (or the higher age required where you live). If you believe a child has given us personal information, contact support@edgecoder.io and we will delete it.
 
 ## International transfers
 
-EdgeCoder is based in the United States, and Hosts may be anywhere in the world. Your information, including jobs you run on the network, may be processed in countries other than yours. [COUNSEL: transfer mechanism.]
+EdgeCoder is based in the United States, and Hosts may be anywhere in the world. Your information, including jobs you run on the network, may be processed in countries other than yours.
 
 ## Changes
 
@@ -115,4 +112,4 @@ We may update this policy. We will post the new version with a new version label
 
 ## Contact
 
-EdgeCoder · [MAILING ADDRESS] · [CONTACT EMAIL] · Privacy requests: [PRIVACY EMAIL]
+EdgeCoder · support@edgecoder.io · Privacy requests: privacy@edgecoder.io

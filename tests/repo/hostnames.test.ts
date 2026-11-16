@@ -28,7 +28,11 @@ function walk(dir: string): string[] {
 describe("configurable hostnames (#22)", () => {
   it("src/ only uses EdgeCoder hostnames as overridable defaults", () => {
     const offenders: string[] = [];
+    // The published legal documents (generated from docs/legal by scripts/sync-legal-docs.mjs) are
+    // legal text naming EdgeCoder's contact addresses and website, not hostname configuration.
+    const LEGAL_TEXT = "src/portal/legal/documents.ts";
     for (const file of walk("src")) {
+      if (file.replace(/\\/g, "/") === LEGAL_TEXT) continue;
       readFileSync(file, "utf8").split(/\r?\n/).forEach((line, i) => {
         if (!HOST.test(line)) return;
         const t = line.trim();

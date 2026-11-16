@@ -159,4 +159,26 @@ describe("/portal/api/legal", () => {
     expect(typeof status.accepted.hostAgreementAcceptedAtMs).toBe("number");
     expect((await ctx.app.inject({ method: "POST", url: "/portal/api/legal/accept", payload: { document: "cookies", version: "x" } })).statusCode).toBe(400);
   });
+
+  it("an account that accepted the 2026-11-15-draft documents (same text) is current and isn't asked again", async () => {
+    expect(TERMS_VERSION).toBe("2026-11-16");
+    expect(HOST_AGREEMENT_VERSION).toBe("2026-11-16");
+    idp.claims = { sub: "g-4", email: "early@example.test", email_verified: true };
+    await oauth(ctx);
+    const user = [...ctx.users.values()].find((u) => u.email === "early@example.test")!;
+    Object.assign(user, { termsVersion: "2026-11-15-draft", termsAcceptedAtMs: 1, hostAgreementVersion: "2026-11-15-draft", hostAgreementAcceptedAtMs: 1 });
+    ctx.signIn(user.userId);
+    const status = (await ctx.app.inject({ url: "/portal/api/legal" })).json();
+    expect(status).toMatchObject({ termsCurrent: true, hostAgreementCurrent: true, accepted: { termsVersion: "2026-11-15-draft" } });
+
+    // A page cached before the relabel still records an acceptance, under the current version id.
+    const res = await ctx.app.inject({ method: "POST", url: "/portal/api/legal/accept", payload: { document: "host-agreement", version: "2026-11-15-draft" } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().version).toBe(HOST_AGREEMENT_VERSION);
+    expect(user.hostAgreementVersion).toBe(HOST_AGREEMENT_VERSION);
+
+    idp.claims = { sub: "g-5", email: "cached@example.test", email_verified: true };
+    await oauth(ctx, "?terms=2026-11-15-draft");
+    expect([...ctx.users.values()].find((u) => u.email === "cached@example.test")!.termsVersion).toBe(TERMS_VERSION);
+  });
 });

@@ -36,7 +36,7 @@ import { PASSWORD_MAX_LENGTH, passwordSchema, registerPasswordResetRoutes } from
 import { verifyEmailPage } from "../pages/verify-email.js";
 import { APP_CHALLENGE_RE, APP_VERIFIER_RE, appVerifierMatches } from "../native-app-auth.js";
 import { inviteCodeHash, inviteCodeUsable, redeemInviteForNewAccount } from "../invites.js";
-import { TERMS_VERSION } from "../../common/legal-notices.js";
+import { TERMS_VERSION, termsVersionIsCurrent } from "../../common/legal-notices.js";
 
 /** Shown when an OAuth sign-in would create an account and the soft launch needs an invite. */
 const OAUTH_INVITE_REQUIRED = "EdgeCoder is in early access: creating an account needs an invite code. Enter yours under Create account, then continue with single sign-on.";
@@ -336,7 +336,8 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
     // The Create account form passes the Terms version its checkbox accepted (?terms=); recorded
     // only if the callback creates a new account. Accounts created without it (sign-in from an app)
     // are asked to accept on the dashboard (GET /portal/api/legal).
-    const termsVersion = query.terms === TERMS_VERSION ? TERMS_VERSION : undefined;
+    // A form cached before a relabel (same text) still counts; the current version id is recorded.
+    const termsVersion = termsVersionIsCurrent(query.terms) ? TERMS_VERSION : undefined;
     return beginOauth(params.provider, reply, { nativeRedirect: normalizeNativeOauthRedirect(query.appRedirect), appChallenge: query.appChallenge, inviteCodeHash: invite, termsVersion });
   });
 

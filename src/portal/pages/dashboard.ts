@@ -80,9 +80,9 @@ app.get("/portal/dashboard", async (_req, reply) => {
     </div>
     <div id="adminOpsSection" class="hidden">
     </div>
-    <div id="termsCard" class="callout warn hidden" data-legal-draft="true">
+    <div id="termsCard" class="callout warn hidden">
       <h3>Please review and accept our terms</h3>
-      <div class="muted">Your account was created without accepting the current Terms, or they have changed. The documents are drafts pending legal review.</div>
+      <div class="muted">Your account was created without accepting the current Terms, or they have changed.</div>
       <style nonce="${CSP_NONCE}">.agree-row{display:flex;gap:8px;align-items:flex-start;font-size:13px;margin-top:10px;cursor:pointer}.agree-row input{width:auto;min-height:0;margin:2px 0 0;flex:none}.agree-row a{color:var(--brand-2);text-decoration:underline}</style>
       <label class="agree-row" for="termsAcceptBox"><input id="termsAcceptBox" type="checkbox" /><span>I agree to the <a href="/terms" target="_blank" rel="noopener">Terms</a>, <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a> and <a href="/acceptable-use" target="_blank" rel="noopener">Acceptable Use Policy</a></span></label>
       <div class="row u-mt-10"><button class="primary" id="termsAcceptBtn" disabled>Accept</button></div>
