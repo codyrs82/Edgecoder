@@ -102,7 +102,7 @@ describe("GET /admin/network", () => {
     const last = r.series.points.at(-1);
     expect(last).toMatchObject({ connectedAgents: 1, totalSlots: 2, freeSlots: 2, waitingInference: 1, started: 1, completed: 1, noAgentHasModel: 1, ttftP50: 500 });
     expect(r.coordinator).toMatchObject({ sampleIntervalMs: 15_000, generatedAtMs: expect.any(Number) });
-    // Gaps over time (#336): unmet by model, slots per model, saturated and stale counts, agents by region.
+    // Gaps over time (#340): unmet by model, slots per model, saturated and stale counts, agents by region.
     expect(last).toMatchObject({
       unmetByModel: { "mistral:7b": 1 },
       modelSlots: { "llama3:8b": { free: 2, total: 2 }, "qwen2.5:7b": { free: 2, total: 2 } },

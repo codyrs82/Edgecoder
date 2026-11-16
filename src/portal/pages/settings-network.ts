@@ -44,7 +44,7 @@ export const SERIES_GAPS_SCRIPT = `
 `;
 
 /**
- * Page-script helpers for the Gaps charts (PR 336; plain JS, tested on their own). The series carry
+ * Page-script helpers for the Gaps charts (PR 340; plain JS, tested on their own). The series carry
  * keyed maps per point (unmetByModel, modelSlots, agentsByRegion); a chart shows the GAP_KEYS keys
  * largest over the range, in the categorical slots c1..c4 (--chart-1..4), and folds the rest into "Other".
  *

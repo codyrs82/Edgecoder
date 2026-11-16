@@ -289,7 +289,7 @@ export interface NetworkSample {
   ttftP50: number | null;
   ttftP90: number | null;
   /*
-   * Gaps over time (#336). Optional: samples stored before these existed lack them, and the page
+   * Gaps over time (#340). Optional: samples stored before these existed lack them, and the page
    * draws no line there. Keyed maps keep at most MAX_SERIES_KEYS names plus OTHER_MODEL.
    */
   /** Requests not served this interval for lack of capacity (no holder, or no free slot), by model. */
@@ -357,7 +357,7 @@ const P90S = ["pickupP90", "ttftP90"] as const;
  * coordinators' buckets line up): gauges are averaged and rounded to 0.1, per-interval counts
  * summed, p50s averaged and p90s the bucket's worst. `atMs` is the bucket start. A bucket with
  * no samples (the coordinator was down) is left out, never filled with zeros, so the page draws a
- * gap there. The gap fields (#336) are merged by downsampleGaps.
+ * gap there. The gap fields (#340) are merged by downsampleGaps.
  */
 export function downsample(samples: readonly NetworkSample[], range: SeriesRange, nowMs = Date.now()): NetworkSample[] {
   const width = seriesBucketMs(range);
@@ -399,7 +399,7 @@ export function downsample(samples: readonly NetworkSample[], range: SeriesRange
 const round1 = (v: number) => Math.round(v * 10) / 10;
 
 /**
- * The gap fields of one bucket (#336), set only when a sample in it has them: unmet requests are
+ * The gap fields of one bucket (#340), set only when a sample in it has them: unmet requests are
  * summed per model; saturated and stale counts averaged; slots and agents per key averaged over the
  * samples that carry the field (a key missing from one of them counts 0 there). Then capped.
  */

@@ -27,7 +27,7 @@ function series(nowMs: number, bucketMs: number, n: number, scale: number, seed:
       queued: Math.round(3 * w2 * scale), claimed: busy, waitingInference: Math.round(1.5 * w2 * w * scale), started: Math.round(5 * w * scale), completed: Math.round(4.6 * w * scale),
       failed: 0, noCapacity: w2 > 0.95 ? 1 : 0, noAgentHasModel: 0,
       pickupP50: Math.round(180 + 220 * w2), pickupP90: Math.round(600 + 900 * w2 * w), ttftP50: Math.round(700 + 500 * w), ttftP90: Math.round(1600 + 1400 * w * w2),
-      // Gaps over time (#336).
+      // Gaps over time (#340).
       unmetByModel: w2 > 0.8 ? { "deepseek-r1:70b": Math.round(3 * w2), ...(w > 0.7 ? { "llama3.1:8b": 1 } : {}) } : {},
       modelSlots: { "llama3.1:8b": { free: total - busy, total }, "qwen2.5-coder:7b": { free: Math.max(0, Math.round(2 * scale) - (w > 0.6 ? 2 : 0)), total: Math.round(2 * scale) } },
       saturatedModels: (total - busy === 0 ? 1 : 0) + (w > 0.6 ? 1 : 0),

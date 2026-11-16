@@ -22,7 +22,7 @@ export const FEW_AGENTS = 2;
 
 type Pct = { count: number; p50: number; p90: number };
 type SlotCount = { free: number; total: number };
-/** A series point: numbers, plus (#336) keyed maps of counts or of slots. */
+/** A series point: numbers, plus (#340) keyed maps of counts or of slots. */
 type SampleValue = number | null | Record<string, number> | Record<string, SlotCount>;
 type Sample = { atMs: number } & Record<string, SampleValue>;
 
@@ -94,7 +94,7 @@ const round1 = (v: number) => Math.round(v * 10) / 10;
 
 /**
  * Merge series by bucket start: counts and gauges add up, p50s average, p90s take the worst. Keyed
- * maps (#336: unmet requests by model, slots by model, agents by region) add up per key, and
+ * maps (#340: unmet requests by model, slots by model, agents by region) add up per key, and
  * saturatedModels is counted again from the merged slots (a model full on both coordinators is one
  * model). With `labels` (one per list), each point also gets agentsByCoordinator: that list's
  * connectedAgents under its label.

@@ -6,7 +6,7 @@
  * admin page (Settings > Network): agents with their account, models, slots and claims; the queue;
  * dispatch and model-call latency; gaps (models asked for that nobody holds, models with no free
  * slot, agents gone quiet); and a time series sampled every 15 s, served over 1 h, 6 h, 24 h or 7 d.
- * The series carries the gaps too (#336): unmet requests and free slots per model, saturated models,
+ * The series carries the gaps too (#340): unmet requests and free slots per model, saturated models,
  * stale agents and live agents by region, so the page charts them over time.
  *
  * Gate: the admin token (x-admin-token, authorizeAdmin), exactly like /admin/revenue. The route is
@@ -132,7 +132,7 @@ function gauges(nowMs: number) {
   return { claims, connectedAgents: liveAgents(nowMs).length, busyAgents, totalSlots, freeSlots, queued: queue.status().queued, claimed, waitingInference };
 }
 
-/** The gap gauges each sample records (#336): slots per model, saturated models, stale agents, agents per region. */
+/** The gap gauges each sample records (#340): slots per model, saturated models, stale agents, agents per region. */
 function gapGauges(nowMs: number, claims: ReturnType<typeof queue.activeClaims>) {
   const slots: Record<string, SlotCount> = {};
   const regions: Record<string, number> = {};
