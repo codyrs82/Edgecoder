@@ -15,6 +15,7 @@ import type { IdeStreamEvent } from "../apps/ide/tool-types.js";
 import { ProviderError, type ProviderClient, type Snapshot } from "./client.js";
 import { formatUsd, frontierLabel, isFrontierModelId } from "../inference-api/frontier-models.js";
 import { clean, formatCSats, formatDiff, outputTail, proposedDiff, resultSummary, servedDetail, toolSummary, usageLine, type CallUsage, type Style } from "./render.js";
+import { TentacleTracker, TENTACLES_HELP } from "./tentacles.js";
 
 export interface ReplIO {
   /** One line of input after showing `prompt`; null at the end of input. */
@@ -56,6 +57,7 @@ export const HELP = `Commands (they work at any prompt, an approval included):
   /status                       session, project, model, mode, where the last call ran, who is connected
   /cost                         what this session has spent (cSats, and USD on your own frontier key)
   /github                       sign in to GitHub (device code)
+${TENTACLES_HELP}
   /help                         this list
   /exit                         leave (the session stays; reopen it in the app or with --resume)
 Modes: ask (edits and commands ask), auto-edits (edits apply, undoable; commands ask),
@@ -99,12 +101,15 @@ export class Repl {
   private exiting = false;
   private interrupts = 0;
   private badAnswerShown: string | null = null;
+  /** Tentacles hook: the session's helper agents (tentacles.ts). */
+  private readonly tentacles: TentacleTracker;
 
   constructor(private readonly o: ReplOptions) {
     this.c = o.client;
     this.io = o.io;
     this.st = o.style;
     this.me = o.client.client;
+    this.tentacles = new TentacleTracker(o.style);
   }
 
   private out(text: string): void {
@@ -133,6 +138,7 @@ export class Repl {
     });
     this.io.onInterrupt?.(() => void this.interrupt());
     this.io.onKey?.((k) => void this.key(k));
+    void this.tentacles.refresh(this.c, this.o.sessionId); // tentacles hook
     if (this.o.remote) await this.command("/remote");
     // A turn already running (resuming, or one the app started): follow it, and its approvals.
     if (this.snap.running) {
@@ -265,6 +271,12 @@ export class Repl {
 
   private onEvent(e: SessionEvent): void {
     const st = this.st;
+    // Tentacles hook: their events print one status line each (tentacles.ts).
+    if (TentacleTracker.handles(e)) {
+      const l = this.tentacles.onEvent(e);
+      if (l) this.line(l);
+      return;
+    }
     switch (e.type) {
       case "agent":
         this.onAgent(e.event as IdeStreamEvent);
@@ -572,6 +584,9 @@ export class Repl {
           return;
         case "/github":
           await this.githubLogin();
+          return;
+        case "/tentacles": // tentacles hook
+          this.line(await this.tentacles.command(arg, this.c, id));
           return;
         default:
           this.line(st.red(`Unknown command ${cmd}. /help lists them.`));
