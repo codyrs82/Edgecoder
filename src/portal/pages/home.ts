@@ -119,10 +119,17 @@ app.get("/portal", async (_req, reply) => {
               ${inviteField}
               <label class="agree-row" for="signupAcceptTerms"><input id="signupAcceptTerms" type="checkbox" required aria-describedby="signupLegalNote" /><span>I agree to the <a href="/terms" target="_blank" rel="noopener">Terms</a>, <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a> and <a href="/acceptable-use" target="_blank" rel="noopener">Acceptable Use Policy</a></span></label>
               <p class="muted legal-note" id="signupLegalNote">These documents are drafts pending legal review. Accounts created with single sign-on are asked to agree on first sign-in.</p>
+              <div id="signupError" class="callout danger u-mt-14 hidden" role="alert">
+                <div id="signupErrorText"></div>
+                <div id="signupExistsActions" class="row u-mt-10 hidden">
+                  <button type="button" class="primary" id="signupGoSignin">Sign in</button>
+                  <a class="link-btn" id="signupForgot" href="/portal/reset-password">Forgot password?</a>
+                </div>
+              </div>
               <div class="row u-mt-14">
                 <button class="primary u-flex-1" id="signupBtn" disabled>Create account</button>
               </div>
-              <p class="muted u-mt-12">We email a verification link. Nodes you enroll activate once the address is verified.</p>
+              <p class="muted u-mt-12">You are signed in as soon as the account is created. We email a verification link: nodes you enroll activate once the address is verified.</p>
             </div>
 
             <div id="sessionBanner" class="callout session-banner hidden">
@@ -221,19 +228,65 @@ app.get("/portal", async (_req, reply) => {
           if (fromLink) { inviteInput.value = fromLink; document.getElementById("tabSignup").click(); }
           inviteInput.addEventListener("input", syncSso);
         }
+        let signupInFlight = false;
         acceptTerms.addEventListener("change", () => {
-          document.getElementById("signupBtn").disabled = !acceptTerms.checked;
+          if (!signupInFlight) document.getElementById("signupBtn").disabled = !acceptTerms.checked;
           syncSso();
         });
         syncSso();
         const SIGNUP_ERRORS = {
           invite_required: "EdgeCoder is in early access: enter your invite code to create an account.",
           invite_invalid: "That invite code is not valid: it may be mistyped, expired, revoked or used up.",
-          email_already_registered: "An account with this email already exists. Sign in instead.",
-          terms_not_accepted: "To create an account, agree to the Terms, Privacy Policy and Acceptable Use Policy."
+          email_already_registered: "An account with this email already exists.",
+          terms_not_accepted: "To create an account, agree to the Terms, Privacy Policy and Acceptable Use Policy.",
+          invalid_request: "Check the email address, and use a password of at least 8 characters."
         };
-        document.getElementById("signupBtn").addEventListener("click", async () => {
-          if (!acceptTerms.checked) { showToast(SIGNUP_ERRORS.terms_not_accepted, true); acceptTerms.focus(); return; }
+        // After sign-in or sign-up: a new account (or one with nothing set up yet) goes to Getting
+        // started, as the dashboard would send it (dashboard.ts); anyone else to the dashboard.
+        async function enterApp() {
+          let target = "/portal/dashboard";
+          try {
+            const o = await api("/portal/api/onboarding", { method: "GET", headers: {} });
+            if (o && o.show) {
+              target = o.state && o.state.current ? "/portal/welcome/" + encodeURIComponent(o.state.current) : "/portal/welcome";
+              try { sessionStorage.setItem("edgecoder-welcome-offered", "1"); } catch {}
+            }
+          } catch {}
+          window.location.href = target;
+        }
+        const signupBtn = document.getElementById("signupBtn");
+        const signupError = document.getElementById("signupError");
+        const signupErrorText = document.getElementById("signupErrorText");
+        const signupExistsActions = document.getElementById("signupExistsActions");
+        function showSignupError(message, exists) {
+          signupErrorText.textContent = message;
+          signupExistsActions.classList.toggle("hidden", !exists);
+          signupError.classList.remove("hidden");
+        }
+        function clearSignupError() {
+          signupError.classList.add("hidden");
+          signupExistsActions.classList.add("hidden");
+        }
+        document.getElementById("signupGoSignin").addEventListener("click", () => {
+          const email = document.getElementById("signupEmail").value;
+          document.getElementById("tabSignin").click();
+          document.getElementById("loginEmail").value = email;
+          document.getElementById("loginPassword").focus();
+        });
+        document.getElementById("signupForgot").addEventListener("click", (e) => {
+          const email = document.getElementById("signupEmail").value.trim();
+          if (email) e.currentTarget.setAttribute("href", "/portal/reset-password?email=" + encodeURIComponent(email));
+        });
+        signupBtn.addEventListener("click", async () => {
+          if (signupInFlight) return;
+          clearSignupError();
+          if (!acceptTerms.checked) { showSignupError(SIGNUP_ERRORS.terms_not_accepted, false); acceptTerms.focus(); return; }
+          // One request at a time: the button stays disabled until this one finishes.
+          signupInFlight = true;
+          signupBtn.disabled = true;
+          signupBtn.setAttribute("aria-busy", "true");
+          signupBtn.innerHTML = '<span class="loading-spinner sm" aria-hidden="true"></span> Creating account\u2026';
+          let entering = false;
           try {
             await api("/auth/signup", {
               method: "POST",
@@ -245,10 +298,19 @@ app.get("/portal", async (_req, reply) => {
                 acceptTerms: acceptTerms.checked
               })
             });
-            showToast("Signup complete. Verify your email, then sign in.");
+            // Signed in (routes/auth.ts sets the session cookie); the verify-email banner shows inside.
+            entering = true;
+            await enterApp();
           } catch (err) {
             const code = String(err.message || err);
-            showToast(SIGNUP_ERRORS[code] || "Signup failed: " + code, true);
+            showSignupError(SIGNUP_ERRORS[code] || "Sign-up failed: " + code, code === "email_already_registered");
+          } finally {
+            if (!entering) {
+              signupInFlight = false;
+              signupBtn.disabled = !acceptTerms.checked;
+              signupBtn.removeAttribute("aria-busy");
+              signupBtn.textContent = "Create account";
+            }
           }
         });
         document.getElementById("loginBtn").addEventListener("click", async () => {

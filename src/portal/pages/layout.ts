@@ -210,6 +210,11 @@ export function portalAuthedPageHtml(input: {
         .scrim { display: none; }
         .shell { width: 100%; max-width: var(--content-max); margin: 0 auto; padding: 20px 24px 40px; }
         .content-stack { min-width: 0; }
+        .verify-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+        .verify-banner[hidden] { display: none; }
+        .verify-banner-text { font-size: 13px; }
+        .verify-banner .link-btn { background: none; border: none; padding: 0; min-height: 0; color: var(--brand-2); text-decoration: underline; font: inherit; cursor: pointer; }
+        .verify-banner-close { flex: none; min-height: 0; padding: 4px; }
         /* ── Mobile ── */
         @media (max-width: 900px) {
           .app { grid-template-columns: 1fr; }
@@ -270,6 +275,10 @@ export function portalAuthedPageHtml(input: {
             <div class="topbar-actions">${input.actions ?? ""}${themeToggleButton()}</div>
           </header>
           <div class="shell">
+            <div id="verifyEmailBanner" class="callout warn verify-banner" role="status" hidden>
+              <div class="verify-banner-text"><strong>Verify your email:</strong> we sent a link to <span id="verifyEmailMasked"></span>. <button type="button" class="link-btn" id="verifyEmailResend">Resend</button></div>
+              <button type="button" class="ghost verify-banner-close" id="verifyEmailDismiss" aria-label="Dismiss">${icon("x", 14)}</button>
+            </div>
             <div class="content-stack">
               ${input.content}
             </div>
@@ -338,6 +347,36 @@ export function portalAuthedPageHtml(input: {
           var email = String((user && user.email) || "");
           return email ? email.split("@")[0] : "Account";
         }
+        /* ── Unverified address: a banner on every page until verified (dismissible for this browser session) ── */
+        function maskEmail(email) {
+          var at = email.lastIndexOf("@");
+          return at > 0 ? email.slice(0, 1) + "\u2026@" + email.slice(at + 1) : "your email address";
+        }
+        function showVerifyEmailBanner(user) {
+          var banner = document.getElementById("verifyEmailBanner");
+          var email = String((user && user.email) || "");
+          // Agent accounts (store.ts AGENT_EMAIL_DOMAIN) have no inbox to verify.
+          if (!banner || !user || user.emailVerified !== false || !email || /@agents\\.invalid$/i.test(email)) return;
+          try { if (sessionStorage.getItem("edgecoder-verify-banner-dismissed") === "1") return; } catch {}
+          document.getElementById("verifyEmailMasked").textContent = maskEmail(email);
+          banner.hidden = false;
+          document.getElementById("verifyEmailDismiss").addEventListener("click", function() {
+            banner.hidden = true;
+            try { sessionStorage.setItem("edgecoder-verify-banner-dismissed", "1"); } catch {}
+          });
+          var resend = document.getElementById("verifyEmailResend");
+          resend.addEventListener("click", async function() {
+            resend.disabled = true;
+            try {
+              await api("/auth/resend-verification", { method: "POST", body: JSON.stringify({ email: email }) });
+              showToast("Verification email sent to " + maskEmail(email) + ". Check your inbox.");
+            } catch (err) {
+              showToast("Could not resend: " + String((err && err.message) || err), true);
+            } finally {
+              setTimeout(function() { resend.disabled = false; }, 30000);
+            }
+          });
+        }
         async function loadTopTicker() {
           var sub = document.getElementById("topTickerCredits");
           try {
@@ -351,6 +390,7 @@ export function portalAuthedPageHtml(input: {
             if (user.roles && user.roles.isSystemAdmin) {
               document.querySelectorAll("[data-admin-only]").forEach(function(e) { e.hidden = false; e.classList.remove("hidden"); });
             }
+            showVerifyEmailBanner(user);
           } catch { return; }
           // The balance lives on the coordinator (cSats); the control plane's credits are a fallback.
           try {

@@ -88,6 +88,13 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
     };
   });
 
+  const authUserJson = (u: { userId: string; email: string; displayName?: string | null; emailVerified: boolean }) => ({
+    userId: u.userId,
+    email: u.email,
+    displayName: u.displayName ?? null,
+    emailVerified: u.emailVerified
+  });
+
   app.post("/auth/signup", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const body = z
@@ -105,7 +112,16 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
     const email = normalizeEmail(body.email);
     if (isAgentPlaceholderEmail(email)) return reply.code(400).send({ error: "email_not_allowed" });
     const existing = await store.getUserByEmail(email);
-    if (existing) return reply.code(409).send({ error: "email_already_registered" });
+    if (existing) {
+      // This browser (or app) is already signed in to that very account, e.g. a second click on
+      // Create account just after the first one succeeded: go straight in. Anyone else is told
+      // the account exists, as before, and is offered Sign in / Forgot password.
+      const current = await getCurrentUser(req as any);
+      if (current && current.userId === existing.userId) {
+        return reply.send({ ok: true, alreadySignedIn: true, userId: existing.userId, user: authUserJson(existing) });
+      }
+      return reply.code(409).send({ error: "email_already_registered" });
+    }
 
     // Soft launch: a new account takes one use of an invite code (no-op in open mode).
     const userId = randomUUID();
@@ -133,9 +149,16 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
     await ensureCreditAccountForUser(user);
     // No wallet is created here: the user sets a payout destination from their own wallet
     // (routes/payout-destination.ts). The server never generates wallet keys.
+    // Signed in straight away, exactly as /auth/login would (same session row and cookie; the
+    // CSRF origin check and the auth rate limit cover this route too, see security.ts). Until the
+    // address is verified the account keeps every unverified-account restriction, and verifying
+    // it later revokes this session along with every other pre-verification credential.
+    const sessionToken = await createSessionForUser(user.userId, reply);
     return reply.send({
       ok: true,
       userId: user.userId,
+      sessionToken,
+      user: authUserJson(user),
       emailVerification: "sent",
       termsVersion: TERMS_VERSION
     });
@@ -155,7 +178,7 @@ export function registerAuthRoutes(app: FastifyInstance, { LAUNCH_MODE, EMAIL_VE
     }
 
     const sessionToken = await createSessionForUser(user.userId, reply);
-    return reply.send({ ok: true, sessionToken, user: { userId: user.userId, email: user.email, displayName: user.displayName ?? null, emailVerified: user.emailVerified } });
+    return reply.send({ ok: true, sessionToken, user: authUserJson(user) });
   });
 
   app.post("/auth/logout", async (req, reply) => {

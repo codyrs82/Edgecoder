@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { login, getOAuthStartUrl, completeOAuthWithToken, pendingOAuthVerifier } from "../lib/api";
+  import { login, signup, signupNeedsInvite, SignupError, getOAuthStartUrl, completeOAuthWithToken, pendingOAuthVerifier } from "../lib/api";
   import type { AuthUser } from "../lib/api";
   import { open } from "@tauri-apps/plugin-shell";
-  import { portalResetPasswordUrl, portalSignupUrl } from "../lib/endpoints";
+  import { portalResetPasswordUrl, portalUrl } from "../lib/endpoints";
+  import { NOTICES } from "../lib/legal-notices";
   import { oauthOutcomeFromUrl } from "../lib/oauth-outcome";
 
   interface Props {
@@ -16,9 +17,26 @@
   // "Check your email" after an SSO sign-in that needs the account's inbox to confirm the link.
   let notice = $state("");
   let submitting = $state(false);
+  // Sign in, or create an account (in the app: a new account is signed in straight away).
+  let mode = $state<"signin" | "signup">("signin");
+  let inviteCode = $state("");
+  let acceptTerms = $state(false);
+  let inviteRequired = $state(false);
+  // Set when sign-up says the address already has an account: offer Sign in / Forgot password.
+  let accountExists = $state(false);
+
+  function setMode(next: "signin" | "signup") {
+    mode = next;
+    error = "";
+    notice = "";
+    accountExists = false;
+    if (next === "signup") signupNeedsInvite().then((v) => (inviteRequired = v));
+  }
 
   async function handleSubmit() {
+    if (submitting) return;
     if (!email.trim() || !password.trim()) return;
+    if (mode === "signup") return handleCreateAccount();
     submitting = true;
     error = "";
 
@@ -29,6 +47,40 @@
       error = (err as Error).message;
     } finally {
       submitting = false;
+    }
+  }
+
+  async function handleCreateAccount() {
+    error = "";
+    accountExists = false;
+    if (!acceptTerms) {
+      error = "To create an account, agree to the Terms, Privacy Policy and Acceptable Use Policy.";
+      return;
+    }
+    submitting = true;
+    try {
+      const user = await signup({ email, password, inviteCode, acceptTerms });
+      onLogin(user);
+    } catch (err) {
+      error = (err as Error).message;
+      accountExists = err instanceof SignupError && err.code === "email_already_registered";
+    } finally {
+      submitting = false;
+    }
+  }
+
+  function signInInstead() {
+    const typed = email;
+    setMode("signin");
+    email = typed;
+    password = "";
+  }
+
+  async function openLegal(path: string) {
+    try {
+      await open(`${portalUrl().replace(/\/+$/, "")}${path}`);
+    } catch {
+      error = "Could not open the browser";
     }
   }
 
@@ -44,16 +96,6 @@
       await open(url);
     } catch (err) {
       error = "Could not open browser for sign-in";
-    }
-  }
-
-  // Sign-up happens on the portal, in the system browser (never inside the webview).
-  async function handleSignup() {
-    error = "";
-    try {
-      await open(portalSignupUrl());
-    } catch {
-      error = "Could not open browser for sign-up";
     }
   }
 
@@ -104,13 +146,21 @@
     </div>
 
     {#if error}
-      <div class="error-msg" id="login-error" role="alert">{error}</div>
+      <div class="error-msg" id="login-error" role="alert">
+        {error}
+        {#if accountExists}
+          <div class="error-actions">
+            <button type="button" class="link-btn" onclick={signInInstead}>Sign in</button>
+            <button type="button" class="link-btn" onclick={handleForgotPassword}>Forgot password? <span class="sr-only">(opens in your browser)</span></button>
+          </div>
+        {/if}
+      </div>
     {/if}
     {#if notice && !error}
       <div class="notice-msg" id="login-notice" role="status">{notice}</div>
     {/if}
 
-    <form class="form" onsubmit={onFormSubmit} aria-label="Sign in with email" novalidate>
+    <form class="form" onsubmit={onFormSubmit} aria-label={mode === "signup" ? "Create an account" : "Sign in with email"} novalidate>
       <label class="sr-only" for="login-email">Email</label>
       <input
         id="login-email"
@@ -127,18 +177,36 @@
       <input
         id="login-password"
         type="password"
-        autocomplete="current-password"
+        autocomplete={mode === "signup" ? "new-password" : "current-password"}
         required
         bind:value={password}
-        placeholder="Password"
+        placeholder={mode === "signup" ? "Password (at least 8 characters)" : "Password"}
         aria-invalid={error ? "true" : undefined}
         aria-describedby={error ? "login-error" : undefined}
         disabled={submitting}
       />
-      <button type="submit" class="btn-primary" disabled={submitting}>
-        {submitting ? "Signing in..." : "Sign In"}
-      </button>
-      <button type="button" class="link-btn forgot-link" onclick={handleForgotPassword}>Forgot password? <span class="sr-only">(opens in your browser)</span></button>
+      {#if mode === "signup"}
+        {#if inviteRequired}
+          <label class="sr-only" for="signup-invite">Invite code</label>
+          <input id="signup-invite" type="text" autocomplete="off" spellcheck="false" maxlength="64" bind:value={inviteCode} placeholder="Invite code (EC-XXXX-XXXX-XXXX-XXXX)" disabled={submitting} />
+        {/if}
+        <label class="agree-row" for="signup-terms">
+          <input id="signup-terms" type="checkbox" bind:checked={acceptTerms} disabled={submitting} />
+          <span>I agree to the
+            <button type="button" class="link-btn" onclick={() => openLegal("/terms")}>Terms</button>,
+            <button type="button" class="link-btn" onclick={() => openLegal("/privacy")}>Privacy Policy</button> and
+            <button type="button" class="link-btn" onclick={() => openLegal("/acceptable-use")}>Acceptable Use Policy</button></span>
+        </label>
+        <p class="legal-note">{NOTICES.draft}</p>
+        <button type="submit" class="btn-primary" disabled={submitting || !acceptTerms} aria-busy={submitting}>
+          {submitting ? "Creating account…" : "Create account"}
+        </button>
+      {:else}
+        <button type="submit" class="btn-primary" disabled={submitting}>
+          {submitting ? "Signing in..." : "Sign In"}
+        </button>
+        <button type="button" class="link-btn forgot-link" onclick={handleForgotPassword}>Forgot password? <span class="sr-only">(opens in your browser)</span></button>
+      {/if}
     </form>
 
     <div class="divider" aria-hidden="true">
@@ -155,7 +223,11 @@
     </div>
 
     <p class="signup-link">
-      Don't have an account? <button type="button" class="link-btn" onclick={handleSignup}>Sign up <span class="sr-only">(opens in your browser)</span></button>
+      {#if mode === "signup"}
+        Already have an account? <button type="button" class="link-btn" onclick={() => setMode("signin")}>Sign in</button>
+      {:else}
+        Don't have an account? <button type="button" class="link-btn" onclick={() => setMode("signup")}>Sign up</button>
+      {/if}
     </p>
   </div>
 </main>
@@ -298,6 +370,29 @@
     cursor: pointer;
     font-size: 13px;
     padding: 0;
+  }
+  .error-actions {
+    display: flex;
+    gap: 16px;
+    margin-top: 6px;
+  }
+  .agree-row {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    text-align: left;
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.45;
+  }
+  .agree-row input {
+    margin-top: 3px;
+  }
+  .legal-note {
+    margin: 0;
+    text-align: left;
+    font-size: 11.5px;
+    color: var(--text-muted);
   }
   .forgot-link {
     align-self: flex-end;

@@ -46,6 +46,9 @@ export function registerResetPasswordPage(app: FastifyInstance): void {
         const requestForm = document.getElementById("requestForm");
         const resetForm = document.getElementById("resetForm");
         (token ? resetForm : requestForm).classList.remove("hidden");
+        // "Forgot password?" from the sign-up form carries the address typed there (home.ts).
+        const prefill = params.get("email");
+        if (!token && prefill) document.getElementById("resetEmail").value = prefill.slice(0, 320);
         requestForm.addEventListener("submit", async (e) => {
           e.preventDefault();
           const r = await post("/auth/password/forgot", { email: document.getElementById("resetEmail").value });

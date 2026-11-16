@@ -436,6 +436,69 @@ export async function login(email: string, password: string): Promise<AuthUser> 
   return data.user;
 }
 
+/** Thrown by signup() with the portal's error code (e.g. "email_already_registered"). */
+export class SignupError extends Error {
+  constructor(public readonly code: string, message: string) {
+    super(message);
+    this.name = "SignupError";
+  }
+}
+
+const SIGNUP_MESSAGES: Record<string, string> = {
+  invite_required: "EdgeCoder is in early access: enter your invite code to create an account.",
+  invite_invalid: "That invite code is not valid: it may be mistyped, expired, revoked or used up.",
+  email_already_registered: "An account with this email already exists.",
+  terms_not_accepted: "To create an account, agree to the Terms, Privacy Policy and Acceptable Use Policy.",
+  email_not_allowed: "That email address can't be used for an account.",
+  invalid_request: "Check the email address, and use a password of at least 8 characters.",
+};
+
+export interface SignupInput {
+  email: string;
+  password: string;
+  inviteCode?: string;
+  acceptTerms: boolean;
+}
+
+/**
+ * Create an account. Like login(), a successful sign-up signs in: the portal returns a session
+ * token, saved the same way. If this app is already signed in to that very account, the portal
+ * answers ok with alreadySignedIn and no new token.
+ */
+export async function signup(input: SignupInput): Promise<AuthUser> {
+  const res = await fetch(`${portalBase()}/auth/signup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({
+      email: input.email,
+      password: input.password,
+      acceptTerms: input.acceptTerms,
+      ...(input.inviteCode?.trim() ? { inviteCode: input.inviteCode.trim() } : {}),
+    }),
+    credentials: "include",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const code = typeof data.error === "string" ? data.error : `signup_failed_${res.status}`;
+    const message = SIGNUP_MESSAGES[code] ?? (res.status === 429 ? "Too many attempts. Wait a minute and try again." : `Sign-up failed: ${code}`);
+    throw new SignupError(code, message);
+  }
+  if (data.sessionToken) saveSessionToken(data.sessionToken);
+  return data.user;
+}
+
+/** Whether a new account needs an invite code (soft launch, LAUNCH_MODE=invite). */
+export async function signupNeedsInvite(): Promise<boolean> {
+  try {
+    const res = await fetch(`${portalBase()}/auth/capabilities`);
+    if (!res.ok) return false;
+    const data = await res.json();
+    return Boolean(data?.launch?.inviteRequired);
+  } catch {
+    return false;
+  }
+}
+
 export async function getMe(): Promise<AuthUser> {
   const res = await fetch(`${portalBase()}/me`, {
     headers: { ...authHeaders() },
