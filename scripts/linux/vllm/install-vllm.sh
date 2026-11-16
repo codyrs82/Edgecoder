@@ -128,12 +128,20 @@ for g in ${gpus//,/ }; do
 done
 
 # ---- Python ----
-command -v python3 >/dev/null || die "python3 not found"
-pyver="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
-python3 -c 'import sys; sys.exit(0 if (3, 10) <= sys.version_info[:2] < (3, 15) else 1)' || die "Python $pyver: vLLM needs 3.10 to 3.14"
+# vLLM needs Python 3.11 to 3.14. Use the newest python3.1x on the machine; Ubuntu 22.04 ships 3.10,
+# so install python3.11 from Ubuntu's archive there.
 export DEBIAN_FRONTEND=noninteractive
+PY=""
+for v in 3.14 3.13 3.12 3.11; do command -v "python$v" >/dev/null && { PY="python$v"; break; }; done
+if [ -z "$PY" ]; then
+  echo "install-vllm: apt-get install python3.11 (vLLM needs Python 3.11 or newer)"
+  apt-get update -q
+  apt-get install -y -q python3.11 python3.11-venv python3.11-dev || die "could not install Python 3.11; vLLM needs Python 3.11 to 3.14"
+  PY=python3.11
+fi
+pyver="$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
 need=()
-python3 -c 'import ensurepip' >/dev/null 2>&1 || need+=("python${pyver}-venv")
+"$PY" -c 'import ensurepip' >/dev/null 2>&1 || need+=("python${pyver}-venv")
 [ -f "/usr/include/python${pyver}/Python.h" ] || need+=("python${pyver}-dev")
 command -v gcc >/dev/null || need+=(gcc)
 if [ "${#need[@]}" -gt 0 ]; then
@@ -149,7 +157,11 @@ install -d -m 0750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE/vllm" "$STATE/v
 install -d -m 0755 "$ETC"
 
 # ---- vLLM in its own venv ----
-if [ ! -x "$PREFIX/venv/bin/python" ]; then python3 -m venv "$PREFIX/venv"; fi
+# A venv from an older Python (e.g. 3.10 on Ubuntu 22.04) can't hold this vLLM: rebuild it.
+if [ -x "$PREFIX/venv/bin/python" ] && ! "$PREFIX/venv/bin/python" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3, 11) else 1)'; then
+  echo "install-vllm: rebuilding the venv with Python $pyver"; rm -rf "$PREFIX/venv"
+fi
+if [ ! -x "$PREFIX/venv/bin/python" ]; then "$PY" -m venv "$PREFIX/venv"; fi
 have="$("$PREFIX/venv/bin/python" -c 'import importlib.metadata as m; print(m.version("vllm"))' 2>/dev/null || true)"
 if [ "$have" != "$VLLM_VERSION" ]; then
   echo "install-vllm: installing vllm==$VLLM_VERSION (several GB: PyTorch and CUDA libraries)"
