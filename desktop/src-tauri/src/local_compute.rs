@@ -209,18 +209,49 @@ impl std::fmt::Display for Version {
     }
 }
 
-/// Parallel request slots for the Ollama the app starts: 4 with 32 GB or more, 2 with 16 GB, else 1
-/// (the agent's parallelInferenceFor without a model). The agent gets the same number as
-/// OLLAMA_NUM_PARALLEL (AgentCompute::env) and never runs more calls at once.
+/// Parallel request slots for the Ollama the app starts: 1 below 15 GB, 2 up to 63 GB, 4 above.
+/// Ollama allocates the KV cache for every slot of every loaded model (num_ctx x slots), so slots
+/// cost memory whether used or not: 2 on a 32-48 GB Mac keeps a 9B model at 32k context near 16 GB
+/// instead of 25 GB. The agent gets the same number as OLLAMA_NUM_PARALLEL (AgentCompute::env),
+/// never runs more calls at once, and sizes its memory budget with it (src/swarm/memory-budget.ts).
 pub fn ollama_parallel_for(total_bytes: u64) -> u32 {
     let gb = total_bytes as f64 / 1_073_741_824.0;
-    if gb >= 31.0 {
+    if gb >= 63.0 {
         4
     } else if gb >= 15.0 {
         2
     } else {
         1
     }
+}
+
+/// Models the app's Ollama keeps loaded at once (OLLAMA_MAX_LOADED_MODELS): 1 up to 32 GB, 2 above.
+/// Ollama's own default (3 per GPU) let network load for many models fill a 48 GB Mac with ten
+/// llama-server processes (2026-11-16). The agent's memory budget decides what actually fits.
+pub fn ollama_max_loaded_for(total_bytes: u64) -> u32 {
+    let gb = total_bytes as f64 / 1_073_741_824.0;
+    if gb > 33.0 {
+        2
+    } else {
+        1
+    }
+}
+
+/// How long the app's Ollama keeps an idle model loaded (OLLAMA_KEEP_ALIVE).
+pub const OLLAMA_KEEP_ALIVE_DEFAULT: &str = "5m";
+
+/// The environment the app starts `ollama serve` with, by physical memory. A value the user set in
+/// the app's own environment wins (start_ollama). Flash attention and a q8_0 KV cache roughly halve
+/// the cache's memory (Ollama 0.5 and newer; the bundled and minimum versions are 0.40.x); a model
+/// whose architecture lacks flash attention falls back to an f16 cache by itself.
+pub fn ollama_server_env(total_bytes: u64) -> Vec<(&'static str, String)> {
+    vec![
+        ("OLLAMA_NUM_PARALLEL", ollama_parallel_for(total_bytes).to_string()),
+        ("OLLAMA_MAX_LOADED_MODELS", ollama_max_loaded_for(total_bytes).to_string()),
+        ("OLLAMA_KEEP_ALIVE", OLLAMA_KEEP_ALIVE_DEFAULT.to_string()),
+        ("OLLAMA_FLASH_ATTENTION", "1".to_string()),
+        ("OLLAMA_KV_CACHE_TYPE", "q8_0".to_string()),
+    ]
 }
 
 /// Physical memory, without extra crates (this module is also tested on its own in CI):
@@ -612,6 +643,9 @@ pub struct AgentCompute {
     /// OLLAMA_NUM_PARALLEL the app starts Ollama with, so the agent never runs more model calls at
     /// once than Ollama serves (src/swarm/parallelism.ts caps its own default at this).
     pub ollama_num_parallel: Option<String>,
+    /// OLLAMA_MAX_LOADED_MODELS the app starts Ollama with: the agent serves at most this many
+    /// distinct models on the network (src/swarm/worker-runner.ts MAX_NETWORK_MODELS).
+    pub ollama_max_loaded_models: Option<String>,
 }
 
 impl AgentCompute {
@@ -629,6 +663,7 @@ impl AgentCompute {
         put("DOCKER_HOST", &self.docker_host);
         put("LOCAL_MODEL_PROVIDER", &self.model_provider.map(str::to_string));
         put("OLLAMA_NUM_PARALLEL", &self.ollama_num_parallel);
+        put("OLLAMA_MAX_LOADED_MODELS", &self.ollama_max_loaded_models);
         out
     }
 }
@@ -861,6 +896,7 @@ impl Manager {
             path_dirs: self.layout.as_ref().map(|l| l.path_dirs()).unwrap_or_default(),
             model_provider: (plan.action != OllamaAction::Missing).then_some("ollama-local"),
             ollama_num_parallel: (plan.action != OllamaAction::Missing).then(|| ollama_parallel_for(total_memory_bytes()).to_string()),
+            ollama_max_loaded_models: (plan.action != OllamaAction::Missing).then(|| ollama_max_loaded_for(total_memory_bytes()).to_string()),
         };
         self.with(|i| i.compute = compute.clone());
         compute
@@ -999,10 +1035,12 @@ impl Manager {
         });
         let mut cmd = Command::new(bin);
         cmd.arg("serve").env("OLLAMA_HOST", format!("127.0.0.1:{port}")).stdin(Stdio::null());
-        // Serve several requests at once (the agent runs as many model calls side by side;
-        // src/swarm/parallelism.ts): more tokens per second, cheaper tokens. A user setting wins.
-        if std::env::var_os("OLLAMA_NUM_PARALLEL").is_none() {
-            cmd.env("OLLAMA_NUM_PARALLEL", ollama_parallel_for(total_memory_bytes()).to_string());
+        // Parallel slots, loaded-model cap, keep-alive and a smaller KV cache, by this machine's
+        // memory (ollama_server_env), so network load can never fill it with models. A user setting wins.
+        for (k, v) in ollama_server_env(total_memory_bytes()) {
+            if std::env::var_os(k).is_none() {
+                cmd.env(k, v);
+            }
         }
         if let Some(f) = log_file("ollama.log") {
             if let Ok(e) = f.try_clone() {
@@ -1393,7 +1431,26 @@ mod tests {
         let gb = 1_073_741_824u64;
         assert_eq!(super::ollama_parallel_for(8 * gb), 1);
         assert_eq!(super::ollama_parallel_for(16 * gb), 2);
-        assert_eq!(super::ollama_parallel_for(32 * gb), 4);
+        assert_eq!(super::ollama_parallel_for(32 * gb), 2);
+        assert_eq!(super::ollama_parallel_for(48 * gb), 2);
+        assert_eq!(super::ollama_parallel_for(64 * gb), 4);
+    }
+
+    #[test]
+    fn ollama_server_env_by_memory() {
+        let gb = 1_073_741_824u64;
+        let env = |n: u64| super::ollama_server_env(n * gb).into_iter().map(|(k, v)| (k.to_string(), v)).collect::<std::collections::HashMap<_, _>>();
+        // (RAM, slots, loaded models)
+        for (ram, slots, loaded) in [(8, "1", "1"), (16, "2", "1"), (32, "2", "1"), (48, "2", "2"), (64, "4", "2"), (128, "4", "2")] {
+            let e = env(ram);
+            assert_eq!(e["OLLAMA_NUM_PARALLEL"], slots, "{ram} GB");
+            assert_eq!(e["OLLAMA_MAX_LOADED_MODELS"], loaded, "{ram} GB");
+            assert_eq!(e["OLLAMA_KEEP_ALIVE"], "5m");
+            assert_eq!(e["OLLAMA_FLASH_ATTENTION"], "1");
+            assert_eq!(e["OLLAMA_KV_CACHE_TYPE"], "q8_0");
+        }
+        // Never more than 2 models, whatever the memory.
+        assert!(super::ollama_max_loaded_for(512 * gb) <= 2);
     }
 
     use super::*;
@@ -1640,6 +1697,7 @@ mod tests {
             path_dirs: vec![],
             model_provider: Some("ollama-local"),
             ollama_num_parallel: Some("2".into()),
+            ollama_max_loaded_models: Some("2".into()),
         };
         let env = c.env(|_| None);
         assert_eq!(
@@ -1649,6 +1707,7 @@ mod tests {
                 ("DOCKER_HOST".to_string(), "unix:///Users/a/.colima/default/docker.sock".to_string()),
                 ("LOCAL_MODEL_PROVIDER".to_string(), "ollama-local".to_string()),
                 ("OLLAMA_NUM_PARALLEL".to_string(), "2".to_string()),
+                ("OLLAMA_MAX_LOADED_MODELS".to_string(), "2".to_string()),
             ]
         );
         // A user's own OLLAMA_NUM_PARALLEL reaches both Ollama and the agent (inherited): not overwritten.

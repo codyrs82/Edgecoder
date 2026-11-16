@@ -300,6 +300,8 @@ export interface NetworkSample {
   modelSlots?: Record<string, SlotCount>;
   /** Agents known to this coordinator but not seen within the connected window (status "stale"). */
   staleAgents?: number;
+  /** Live agents with no capacity for memory (pressure, paused) or an open circuit (coordinator/memory-admission.ts). */
+  memoryLimitedAgents?: number;
   /** Live agents by hosting region: the agent's own (AGENT_REGION / FLY_REGION), else this coordinator's. */
   agentsByRegion?: Record<string, number>;
 }
@@ -404,12 +406,13 @@ const round1 = (v: number) => Math.round(v * 10) / 10;
  * samples that carry the field (a key missing from one of them counts 0 there). Then capped.
  */
 function downsampleGaps(group: readonly NetworkSample[], s: NetworkSample): void {
-  const avg = (k: "saturatedModels" | "staleAgents") => {
+  const avg = (k: "saturatedModels" | "staleAgents" | "memoryLimitedAgents") => {
     const vals = group.map((x) => x[k]).filter((v): v is number => typeof v === "number");
     if (vals.length) s[k] = round1(vals.reduce((a, b) => a + b, 0) / vals.length);
   };
   avg("saturatedModels");
   avg("staleAgents");
+  avg("memoryLimitedAgents");
   const unmet = group.filter((x) => x.unmetByModel);
   if (unmet.length) {
     const sum: Record<string, number> = {};

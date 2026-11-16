@@ -316,12 +316,54 @@ export interface ComputeOverview {
   claims?: number;
   /** The agent stopped taking work ahead of a restart. */
   draining?: boolean;
+  /** This machine's memory: pressure, budget, and the models it serves on the network (src/swarm/memory-manager.ts). */
+  memory?: MemoryOverview;
 }
 
-/** paused / claims / draining from the forwarder's /forward/health (agent-lifecycle.ts). */
-function lifecycleView(raw: Record<string, unknown> | undefined): Pick<ComputeOverview, "paused" | "claims" | "draining"> {
+export interface MemoryOverview {
+  pressure: "normal" | "warning" | "critical";
+  paused: boolean;
+  pausedReason: string | null;
+  totalBytes: number;
+  budgetBytes: number;
+  usedBytes: number;
+  loadedModels: string[];
+  servingModels: string[];
+  localOnlyModels: string[];
+  tooBigModels: string[];
+  contextWindow: number;
+  parallel: number;
+}
+
+const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(0, 50).map((x) => x.slice(0, 200)) : []);
+const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+
+function memoryView(raw: unknown): MemoryOverview | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  if (r.pressure !== "normal" && r.pressure !== "warning" && r.pressure !== "critical") return undefined;
+  return {
+    pressure: r.pressure,
+    paused: r.paused === true,
+    pausedReason: typeof r.pausedReason === "string" ? r.pausedReason.slice(0, 300) : null,
+    totalBytes: num(r.totalBytes),
+    budgetBytes: num(r.budgetBytes),
+    usedBytes: num(r.usedBytes),
+    loadedModels: strings(r.loadedModels),
+    servingModels: strings(r.servingModels),
+    localOnlyModels: strings(r.localOnlyModels),
+    tooBigModels: strings(r.tooBigModels),
+    contextWindow: num(r.contextWindow),
+    parallel: num(r.parallel),
+  };
+}
+
+/** paused / claims / draining / memory from the forwarder's /forward/health (agent-lifecycle.ts). */
+function lifecycleView(raw: Record<string, unknown> | undefined): Pick<ComputeOverview, "paused" | "claims" | "draining" | "memory"> {
   if (!raw) return {};
-  const out: Pick<ComputeOverview, "paused" | "claims" | "draining"> = {};
+  const out: Pick<ComputeOverview, "paused" | "claims" | "draining" | "memory"> = {};
+  const memory = memoryView(raw.memory);
+  if (memory) out.memory = memory;
   const p = raw.paused as { reason?: unknown; sinceMs?: unknown } | null | undefined;
   if (p && typeof p === "object" && typeof p.reason === "string") out.paused = { reason: p.reason.slice(0, 500), sinceMs: typeof p.sinceMs === "number" ? p.sinceMs : 0 };
   if (typeof raw.claims === "number") out.claims = raw.claims;

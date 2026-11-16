@@ -27,6 +27,7 @@ import { PostgresNetworkHistoryStore } from "../../../db/network-history-store.j
 import { NetworkHistory } from "../../network-history.js";
 import { PostgresRoutingDecisionStore } from "../../../db/routing-decision-store.js";
 import { RoutingHistory } from "../../routing-history.js";
+import { agentMemoryRecord, agentUnavailable, circuitState, memoryLimited, MEMORY_FRESH_MS } from "../memory-admission.js";
 import { accountsFor } from "../agent-accounts.js";
 import { agentCapabilities, activeBlacklistRecord, AGENT_CONNECTED_WINDOW_MS } from "../agent-state.js";
 import { authorizeAdmin } from "../auth.js";
@@ -119,6 +120,32 @@ function callOutcome(taskId: string, subtaskId: string): CallOutcome {
   return result.ok ? "ok" : "failed";
 }
 
+/**
+ * An agent's memory as the admin page and load-test reports show it: the latest report (fresh or
+ * not), pressure, budget and loaded models, plus the peaks seen since this coordinator started.
+ */
+function memoryView(agentId: string, nowMs: number) {
+  const r = agentMemoryRecord(agentId);
+  if (!r) return null;
+  const t = r.telemetry;
+  return {
+    pressure: t.pressure,
+    totalBytes: t.totalBytes,
+    availableBytes: t.availableBytes ?? null,
+    budgetBytes: t.budgetBytes,
+    usedBytes: t.usedBytes,
+    loadedModels: t.loadedModels,
+    servedModels: t.models.map((m) => m.name),
+    paused: t.paused === true,
+    reportedAtMs: r.atMs,
+    fresh: nowMs - r.atMs <= MEMORY_FRESH_MS,
+    peakPressure: r.peakPressure,
+    peakUsedBytes: r.peakUsedBytes,
+    overBudget: r.overBudget,
+    incidents: r.incidents
+  };
+}
+
 /** Gauges every sample and the snapshot share. */
 function gauges(nowMs: number) {
   const claims = queue.activeClaims();
@@ -128,7 +155,7 @@ function gauges(nowMs: number) {
   for (const [id] of liveAgents(nowMs)) {
     if ((claims.get(id)?.all ?? 0) > 0) busyAgents++;
     totalSlots += agentLoadReport(id)?.slots ?? 1;
-    freeSlots += freeModelSlots(id, claims);
+    freeSlots += agentUnavailable(id, nowMs) ? 0 : freeModelSlots(id, claims);
   }
   let claimed = 0;
   for (const c of claims.values()) claimed += c.all;
@@ -141,9 +168,13 @@ function gauges(nowMs: number) {
 function gapGauges(nowMs: number, claims: ReturnType<typeof queue.activeClaims>) {
   const slots: Record<string, SlotCount> = {};
   const regions: Record<string, number> = {};
+  let memoryLimitedAgents = 0;
   for (const [id, cap] of liveAgents(nowMs)) {
     const total = agentLoadReport(id)?.slots ?? 1;
-    const free = freeModelSlots(id, claims);
+    // An agent out of memory (or with its circuit open) is saturated: no free slot, counted apart.
+    const unavailable = agentUnavailable(id, nowMs);
+    if (unavailable) memoryLimitedAgents++;
+    const free = unavailable ? 0 : freeModelSlots(id, claims);
     for (const m of new Set(routableModels(cap))) {
       if (!m) continue;
       const e = (slots[m] ??= { free: 0, total: 0 });
@@ -160,6 +191,7 @@ function gapGauges(nowMs: number, claims: ReturnType<typeof queue.activeClaims>)
     saturatedModels,
     modelSlots: capKeys(slots, MAX_SERIES_KEYS, (v) => v.total, (a, b) => ({ free: a.free + b.free, total: a.total + b.total })),
     staleAgents,
+    memoryLimitedAgents,
     agentsByRegion: capKeys(regions, MAX_SERIES_KEYS)
   };
 }
@@ -204,6 +236,7 @@ export async function networkSnapshot(range: SeriesRange = "1h", nowMs = Date.no
     const verification = hardwareVerifier.get(agentId);
     const held = claims.get(agentId);
     const connected = isConnected(cap, nowMs);
+    const unavailable = agentUnavailable(agentId, nowMs);
     return {
       agentId,
       accountId: accounts.get(agentId) ?? null,
@@ -226,7 +259,7 @@ export async function networkSnapshot(range: SeriesRange = "1h", nowMs = Date.no
       activeModel: cap.activeModel ?? null,
       slots: load?.slots ?? 1,
       slotsReported: load !== undefined,
-      freeSlots: connected && !blacklist ? freeModelSlots(agentId, claims) : 0,
+      freeSlots: connected && !blacklist && !unavailable ? freeModelSlots(agentId, claims) : 0,
       contextWindow: agentContextWindow(agentId) ?? null,
       claims: held?.all ?? 0,
       inferenceClaims: held?.inference ?? 0,
@@ -238,6 +271,10 @@ export async function networkSnapshot(range: SeriesRange = "1h", nowMs = Date.no
       reserved: reservations.isHeld(agentId, nowMs),
       blacklisted: Boolean(blacklist),
       blacklistReason: blacklist?.reason ?? null,
+      // Host memory and the circuit breaker (coordinator/memory-admission.ts).
+      memory: memoryView(agentId, nowMs),
+      memoryLimited: memoryLimited(agentId, nowMs),
+      circuit: circuitState(agentId, nowMs),
       status: blacklist ? "blacklisted" : !connected ? "stale" : (held?.all ?? 0) > 0 ? "busy" : "idle"
     };
   });
@@ -285,6 +322,9 @@ export async function networkSnapshot(range: SeriesRange = "1h", nowMs = Date.no
     .map(([model, c]) => ({ model, noAgentHasModel: c.noAgentHasModel, noCapacity: c.noCapacity, holders: byModel.get(model)?.agents ?? 0 }))
     .sort((a, b) => b.noAgentHasModel + b.noCapacity - (a.noAgentHasModel + a.noCapacity));
   const saturatedModels = models.filter((m) => m.agents > 0 && m.freeSlots === 0).map((m) => ({ model: m.model, agents: m.agents, slots: m.slots, waiting: m.waiting }));
+  const memoryLimitedAgents = agents
+    .filter((a) => a.status !== "stale" && !a.blacklisted && (a.memoryLimited || a.circuit.open))
+    .map((a) => ({ agentId: a.agentId, accountId: a.accountId, pressure: a.memory?.pressure ?? null, circuitOpen: a.circuit.open, loadedModels: a.memory?.loadedModels.map((m) => m.name) ?? [] }));
   const staleAgents = agents
     .filter((a) => a.status === "stale")
     .map((a) => ({ agentId: a.agentId, accountId: a.accountId, lastSeenMs: a.lastSeenMs }))
@@ -311,6 +351,7 @@ export async function networkSnapshot(range: SeriesRange = "1h", nowMs = Date.no
       agentsBusy: g.busyAgents,
       agentsStale: staleAgents.length,
       agentsBlacklisted: agents.filter((a) => a.blacklisted).length,
+      agentsMemoryLimited: memoryLimitedAgents.length,
       totalSlots: g.totalSlots,
       freeSlots: g.freeSlots,
       startedPerMin: perMin("started"),
@@ -332,7 +373,7 @@ export async function networkSnapshot(range: SeriesRange = "1h", nowMs = Date.no
       duration: inferenceTracker.duration.percentiles(nowMs - LATENCY_WINDOW_MS)
     },
     models,
-    gaps: { windowMs: GAP_WINDOW_MS, missingModels, saturatedModels, staleAgents },
+    gaps: { windowMs: GAP_WINDOW_MS, missingModels, saturatedModels, staleAgents, memoryLimitedAgents },
     // Best-fit routing (model "auto"): recent decisions, estimate against what happened.
     routing: { decisions: recentDecisions(50), config: bestFitConfig, complexityWeights },
     series: { range, bucketMs: seriesBucketMs(range), points: series }

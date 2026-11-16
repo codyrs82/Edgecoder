@@ -76,6 +76,25 @@ const benchmarkReportSchema = z
 /** Challenge kinds the agent can answer; absent (older agents) = none, so they stay at base tier. */
 const challengeKindsSchema = z.array(z.string().max(16)).max(8).optional().catch(undefined);
 
+/**
+ * The agent's memory (src/swarm/memory-budget.ts MemoryTelemetry), for admission control
+ * (memory-admission.ts). Lenient: a malformed report is dropped, never a rejected heartbeat.
+ */
+export const memoryTelemetrySchema = z
+  .object({
+    totalBytes: z.number().nonnegative(),
+    availableBytes: z.number().nonnegative().optional(),
+    pressure: z.enum(["normal", "warning", "critical"]),
+    budgetBytes: z.number().nonnegative(),
+    usedBytes: z.number().nonnegative(),
+    loadedModels: z.array(z.object({ name: z.string().min(1).max(200), bytes: z.number().nonnegative() })).max(32),
+    models: z.array(z.object({ name: z.string().min(1).max(200), bytes: z.number().nonnegative(), contextWindow: z.number().int().positive(), slots: z.number().int().min(1).max(64) })).max(64),
+    paused: z.boolean().optional(),
+    atMs: z.number()
+  })
+  .optional()
+  .catch(undefined);
+
 export const registerSchema = z.object({
   // Bounded: an agent id is copied into audit records, logs and every registry map.
   agentId: z.string().min(1).max(128).regex(/^[^\u0000-\u001f\u007f]+$/),
@@ -124,6 +143,7 @@ export const registerSchema = z.object({
   askMsatPerCredit: z.number().positive().max(1e9).optional(),
   benchmark: benchmarkReportSchema,
   challengeKinds: challengeKindsSchema,
+  memory: memoryTelemetrySchema,
   binaryIntegrity: z
     .object({
       distHash: z.string(),
@@ -167,7 +187,9 @@ export const heartbeatSchema = z.object({
   /** Update the agent's ask; omit to leave it, 0 to track the class reference again. */
   askMsatPerCredit: z.number().min(0).max(1e9).optional(),
   /** A new self-benchmark (periodic). */
-  benchmark: benchmarkReportSchema
+  benchmark: benchmarkReportSchema,
+  /** Memory, loaded models and budget (admission control). */
+  memory: memoryTelemetrySchema
 });
 /** Answer to a benchmark challenge handed out in a heartbeat response. */
 export const benchmarkResponseSchema = z.object({

@@ -42,6 +42,7 @@ import { agentCapabilities, activeBlacklistRecord } from "./agent-state.js";
 import { askCapabilityOf, orderBook } from "./economy.js";
 import { peerGrantAllowsClaim } from "./grants.js";
 import { restrictedClaimAllowed } from "./restricted.js";
+import { circuitOpen, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
 
 /** Agents nudged per claimable subtask. */
 export const NUDGE_FANOUT = 2;
@@ -199,8 +200,10 @@ function reachable(agentId: string, nowMs: number): boolean {
 }
 
 /** An agent that could run `subtask` now, given what it holds. */
-function hasRoomFor(agentId: string, subtask: Subtask, claims: Claims): boolean {
+function hasRoomFor(agentId: string, subtask: Subtask, claims: Claims, nowMs = Date.now()): boolean {
+  if (circuitOpen(agentId, nowMs)) return false;
   if (subtask.kind === "inference") {
+    if (!memoryAdmits(agentId, subtask.requestedModel, claims.get(agentId)?.inference ?? 0, nowMs)) return false;
     const free = freeSlots(agentId, claims, false);
     return free === undefined ? (claims.get(agentId)?.all ?? 0) === 0 : free > 0;
   }
@@ -214,14 +217,37 @@ function hasRoomFor(agentId: string, subtask: Subtask, claims: Claims): boolean 
  * `claims` is one snapshot for the whole pull.
  */
 export function mayTakeNow(agentId: string, subtask: Subtask, claims: Claims, nowMs = Date.now()): boolean {
+  // Circuit breaker (memory-admission.ts): an agent that keeps failing cools down first.
+  if (circuitOpen(agentId, nowMs)) return false;
   if (subtask.kind !== "inference") return true;
+  // Host memory: the model must be loaded there (with a free slot for it) or fit its budget headroom.
+  if (!memoryAdmits(agentId, subtask.requestedModel, claims.get(agentId)?.inference ?? 0, nowMs)) return false;
   const free = freeSlots(agentId, claims, true);
   if (free !== undefined && free <= 0) return false;
   if (leftForPreferred(agentId, subtask, claims, nowMs)) return false;
-  if ((claims.get(agentId)?.all ?? 0) === 0) return true;
   const ready = readyAt.get(subtask.id);
-  if (ready === undefined || nowMs - ready >= DEFER_MS) return true;
+  const fresh = ready !== undefined && nowMs - ready < DEFER_MS;
+  // Model affinity: an agent that would have to load the model leaves a fresh call briefly to one
+  // that has it loaded (no load / unload thrash).
+  if (fresh && subtask.requestedModel && !modelLoadedOn(agentId, subtask.requestedModel, nowMs) && loadedTakerExists(subtask, claims, nowMs, agentId)) return false;
+  if ((claims.get(agentId)?.all ?? 0) === 0) return true;
+  if (!fresh) return true;
   return !idleTakerExists(subtask, claims, nowMs, agentId);
+}
+
+/** Another live agent has the call's model loaded, room for it, and would be admitted. */
+function loadedTakerExists(subtask: Subtask, claims: Claims, nowMs: number, except: string): boolean {
+  const model = subtask.requestedModel;
+  if (!model) return false;
+  const excluded = queue.excludedAgents(subtask.id);
+  for (const [id, cap] of agentCapabilities) {
+    if (id === except || excluded.includes(id) || !modelLoadedOn(id, model, nowMs)) continue;
+    if (!reachable(id, nowMs) || !liveAgent(id, cap, nowMs)) continue;
+    if (!hasRoomFor(id, subtask, claims, nowMs)) continue;
+    if (subtask.projectMeta.onlyAccountId) continue;
+    if (claimRule(id, cap, undefined, nowMs)(subtask)) return true;
+  }
+  return false;
 }
 
 /** Soft preference: keep `subtaskId` for `agentId` for `ms` (other agents leave it while that agent can take it). */
@@ -243,7 +269,7 @@ function leftForPreferred(agentId: string, subtask: Subtask, claims: Claims, now
   const pref = preferredAgentFor(subtask.id, nowMs);
   if (!pref || pref === agentId) return false;
   if (queue.excludedAgents(subtask.id).includes(pref)) return false;
-  return liveAgent(pref, agentCapabilities.get(pref), nowMs) && hasRoomFor(pref, subtask, claims);
+  return liveAgent(pref, agentCapabilities.get(pref), nowMs) && hasRoomFor(pref, subtask, claims, nowMs);
 }
 
 function idleTakerExists(subtask: Subtask, claims: Claims, nowMs: number, except: string): boolean {
@@ -252,6 +278,7 @@ function idleTakerExists(subtask: Subtask, claims: Claims, nowMs: number, except
     if (id === except || excluded.includes(id) || (claims.get(id)?.all ?? 0) > 0) continue;
     if (!reachable(id, nowMs) || !liveAgent(id, cap, nowMs)) continue;
     if (freeSlots(id, claims, true) === 0) continue;
+    if (!hasRoomFor(id, subtask, claims, nowMs)) continue;
     // Own-machines-only calls: the account check is async (/pull), so they are never deferred.
     if (subtask.projectMeta.onlyAccountId) continue;
     if (claimRule(id, cap, undefined, nowMs)(subtask)) return true;
@@ -279,15 +306,16 @@ export function pickupStats(): { count: number; p50: number; p90: number; nudges
 /** Choose who to nudge for `subtask`: eligible, reachable, with room; least loaded first. */
 export function nudgeTargets(subtask: Subtask, nowMs = Date.now(), claims: Claims = queue.activeClaims()): string[] {
   const excluded = queue.excludedAgents(subtask.id);
-  const candidates: Array<{ id: string; busy: number; free: number; pending: boolean; at: number }> = [];
+  const candidates: Array<{ id: string; busy: number; free: number; pending: boolean; at: number; loaded: boolean }> = [];
   for (const [id, cap] of agentCapabilities) {
     if (excluded.includes(id) || !reachable(id, nowMs) || !liveAgent(id, cap, nowMs)) continue;
-    if (!hasRoomFor(id, subtask, claims)) continue;
+    if (!hasRoomFor(id, subtask, claims, nowMs)) continue;
     if (!claimRule(id, cap, undefined, nowMs)(subtask)) continue;
     const at = nudgedAt.get(id);
-    candidates.push({ id, busy: claims.get(id)?.all ?? 0, free: freeSlots(id, claims, false) ?? 1, pending: at !== undefined && nowMs - at < NUDGE_PENDING_MS, at: at ?? 0 });
+    candidates.push({ id, busy: claims.get(id)?.all ?? 0, free: freeSlots(id, claims, false) ?? 1, pending: at !== undefined && nowMs - at < NUDGE_PENDING_MS, at: at ?? 0, loaded: !!subtask.requestedModel && modelLoadedOn(id, subtask.requestedModel, nowMs) });
   }
-  candidates.sort((a, b) => a.busy - b.busy || Number(a.pending) - Number(b.pending) || b.free - a.free || a.at - b.at);
+  // Agents with the model already loaded first (no load / unload thrash), then the least loaded.
+  candidates.sort((a, b) => Number(b.loaded) - Number(a.loaded) || a.busy - b.busy || Number(a.pending) - Number(b.pending) || b.free - a.free || a.at - b.at);
   // The preferred agent (best-fit routing) is nudged first.
   const pref = preferredAgentFor(subtask.id, nowMs);
   const at = pref ? candidates.findIndex((c) => c.id === pref) : -1;

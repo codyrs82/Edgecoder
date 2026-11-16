@@ -11,7 +11,8 @@ import { cSatsPerMTokens, msatToCSats, ratePerSecondMsat } from "../../../econom
 import { paramsB } from "../../../inference-api/auto-route.js";
 import { contextNeeded } from "../../../inference-api/ollama.js";
 import type { ChatMessage } from "../../../inference-api/types.js";
-import { agentContextWindow, freeModelSlots, preferAgent } from "../dispatch.js";
+import { agentContextWindow, agentLoadReport, freeModelSlots, preferAgent } from "../dispatch.js";
+import { agentUnavailable, memoryAdmits, modelLoadedOn } from "../memory-admission.js";
 import { AUTO_MODEL_ID } from "../../../inference-api/auto-route.js";
 import { cleanHints, describeJob, type JobDescriptor } from "../../../inference-api/job-descriptor.js";
 import type { BestFitResult } from "../best-fit.js";
@@ -304,6 +305,17 @@ export async function endInferenceLostMidReply(subtask: Subtask): Promise<boolea
   return true;
 }
 
+/** Calls that may wait per model: 4 per slot of the (available) agents that hold it, at least 16, at most 512. */
+export const WAITING_PER_SLOT = 4;
+export function waitingBound(holderIds: string[], nowMs = Date.now()): number {
+  let slots = 0;
+  for (const id of holderIds) {
+    if (agentUnavailable(id, nowMs)) continue;
+    slots += agentLoadReport(id)?.slots ?? 1;
+  }
+  return Math.max(16, Math.min(512, slots * WAITING_PER_SLOT));
+}
+
 function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: string) => { send: (b: unknown) => unknown } } }, c?: { reason: "busy" | "none_in_class"; computeClass?: string; model?: string }) {
   const noneInClass = c?.reason === "none_in_class";
   return reply
@@ -409,13 +421,18 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       if (activeBlacklistRecord(id) || (cap.lastSeenMs !== undefined && now - cap.lastSeenMs > 3 * 60_000)) continue;
       const cls = (effectiveHardware(id, cap)?.computeClass ?? "cpu") as ComputeClassId;
       // #54: only models the agent reported (what it can actually be routed).
+      // Host memory (memory-admission.ts): a model the agent can neither load nor has loaded is not
+      // capacity, and an agent under memory pressure or with its circuit open has no free slot.
+      const held = claims.get(id)?.inference ?? 0;
+      const unavailable = agentUnavailable(id, now);
       for (const m of new Set(routableModels(cap))) {
         const tier = restrictedCatalog.tierOf(m);
         if (tier && !accountHoldsTier(viewer, tier, now)) continue;
+        if (!memoryAdmits(id, m, held, now) && !modelLoadedOn(id, m, now) && !unavailable) continue;
         const e = byModel.get(m) ?? { agents: 0, idle: 0, free: 0, classes: new Set<ComputeClassId>(), rtts: [], freeRtts: [] };
         e.agents++;
-        if (queue.agentClaims(id) === 0) e.idle++;
-        const free = freeModelSlots(id, claims);
+        if (queue.agentClaims(id) === 0 && !unavailable) e.idle++;
+        const free = unavailable || !memoryAdmits(id, m, held, now) ? 0 : freeModelSlots(id, claims);
         e.free += free;
         // Coordinator <-> agent round trip (the portal adds it to a coordinator's expected latency).
         const rtt = agentRttMs(id);
@@ -509,6 +526,12 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       onlyAccountId = accountId;
     } else if (!holders.some(([id]) => !reservations.isHeld(id))) {
       return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
+    }
+    // Backpressure: network calls wait for a slot up to a bound (waitingBound); past it the
+    // caller hears no_capacity at once (nothing reserved or charged) instead of piling more onto
+    // the queue every fitting agent is already behind.
+    if (!reservationId && !onlyAccountId && queue.waitingInference(body.model) >= waitingBound(holders.map(([id]) => id))) {
+      return noCapacityReply(reply as any, { reason: "busy", model: body.model });
     }
     // Every call has an output cap: what an agent can bill for a reply is bounded by it.
     const maxTokens = body.maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS;

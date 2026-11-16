@@ -27,6 +27,8 @@ export const EMPTY_REPLY_ERROR = "empty_reply";
 export const CONTEXT_TOO_LONG_ERROR = "context_too_long";
 /** A subtask naming a frontier model (frontier/<provider>/<model>): those run only on their owner's own key, never here. */
 export const FRONTIER_REFUSED_ERROR = "frontier_models_are_not_network_work";
+/** A call the agent cancelled because its host ran critically low on memory (the coordinator gives it to another agent). */
+export const CANCELLED_FOR_MEMORY_ERROR = "memory_pressure: cancelled, this host ran critically low on memory";
 
 /** Send what has arrived at least this often, or sooner once this much has piled up. */
 const FLUSH_MS = 150;
@@ -48,6 +50,8 @@ export async function runInferenceSubtask(
      * `model` is the requested catalog tag; the engine maps it to the id it serves. Unset = Ollama.
      */
     chat?: (model: string, req: { messages: ChatMessage[]; tools?: ToolSpec[]; maxTokens?: number; temperature?: number }, signal: AbortSignal, timeoutMs: number) => AsyncIterable<OllamaPiece>;
+    /** Cancels the call from outside (critical memory pressure): it fails with CANCELLED_FOR_MEMORY_ERROR. */
+    signal?: AbortSignal;
   },
 ): Promise<SubtaskResult> {
   const started = Date.now();
@@ -101,6 +105,13 @@ export async function runInferenceSubtask(
   // cold model load (seconds to minutes on a CPU) is not cut off as a "Headers Timeout Error".
   const deadlineMs = Math.max(5_000, st.timeoutMs);
   const timer = setTimeout(() => abort.abort(), deadlineMs);
+  let cancelled = false;
+  const onCancel = () => {
+    cancelled = true;
+    abort.abort();
+  };
+  if (deps.signal?.aborted) onCancel();
+  else deps.signal?.addEventListener("abort", onCancel, { once: true });
   try {
     const pieces = deps.chat
       ? deps.chat(model, { messages: input.messages, tools: input.tools, maxTokens: input.maxTokens, temperature: input.temperature }, abort.signal, deadlineMs + 1_000)
@@ -126,12 +137,13 @@ export async function runInferenceSubtask(
     // The engine's own context check (vLLM counts exact tokens; the estimate above is rough): another
     // agent with a bigger window may serve it, as with the check above.
     const overflow = err instanceof EngineError && err.contextOverflow && !full && toolCalls.length === 0;
-    const msg = abort.signal.aborted ? `timed out after ${Math.round(st.timeoutMs / 1000)} s` : overflow ? `${CONTEXT_TOO_LONG_ERROR}: ${(err as Error).message}` : (err as Error).message;
+    const msg = cancelled ? CANCELLED_FOR_MEMORY_ERROR : abort.signal.aborted ? `timed out after ${Math.round(st.timeoutMs / 1000)} s` : overflow ? `${CONTEXT_TOO_LONG_ERROR}: ${(err as Error).message}` : (err as Error).message;
     // Nothing reached the requester yet: leave the stream open, so the call can be retried elsewhere
     // (the failed result tells the coordinator, which ends the stream when it does not retry).
     if (full || toolCalls.length) await flush(true, msg);
     return { ...base, ok: false, output: full, error: msg, durationMs: Date.now() - started };
   } finally {
     clearTimeout(timer);
+    deps.signal?.removeEventListener("abort", onCancel);
   }
 }

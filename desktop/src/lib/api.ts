@@ -1620,6 +1620,25 @@ export interface ComputeOverview {
   claims?: number;
   /** The agent stopped taking network work ahead of a restart. */
   draining?: boolean;
+  /** This computer's memory: pressure, budget, and the models it serves on the network. */
+  memory?: MemoryOverview;
+}
+/** The agent's host memory guard (src/swarm/memory-manager.ts MemoryStatusView). */
+export interface MemoryOverview {
+  pressure: "normal" | "warning" | "critical";
+  /** Not taking network work for memory reasons. */
+  paused: boolean;
+  pausedReason: string | null;
+  totalBytes: number;
+  budgetBytes: number;
+  usedBytes: number;
+  loadedModels: string[];
+  /** Served on the network (fit the memory budget); the rest are local-only. */
+  servingModels: string[];
+  localOnlyModels: string[];
+  tooBigModels: string[];
+  contextWindow: number;
+  parallel: number;
 }
 export interface CoordinatorSteering {
   url: string;

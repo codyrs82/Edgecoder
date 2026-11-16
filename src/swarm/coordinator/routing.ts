@@ -26,6 +26,7 @@ import { activeBlacklistRecord, agentCapabilities, AGENT_CONNECTED_WINDOW_MS } f
 import { bestFit, bestFitConfigFromEnv, routedLine, type AgentView, type BestFitConfig, type BestFitResult, type NetworkView, type SessionMemo } from "./best-fit.js";
 import { FALLBACK_BTC_USD, queue, reservations, identity, usageListeners } from "./context.js";
 import { agentContextWindow, agentLoadReport, freeModelSlots, pickupStats } from "./dispatch.js";
+import { agentUnavailable, loadedModelsOf, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
 import { effectiveHardware, hardwareVerifier } from "./economy.js";
 import { mutable } from "./mutable-state.js";
 import { restrictedCatalog } from "./restricted.js";
@@ -77,7 +78,8 @@ export function agentPerf(agentId: string, claims = queue.activeClaims()): Agent
     tokensPerSec: rec?.evidence.tokensPerSec ?? null,
     reliability: hardwareVerifier.reliability(agentId) ?? null,
     verified: rec?.status === "verified" || rec?.status === "base",
-    freeSlots: freeModelSlots(agentId, claims),
+    // No capacity while under memory pressure or with its circuit open (memory-admission.ts).
+    freeSlots: agentUnavailable(agentId) ? 0 : freeModelSlots(agentId, claims),
     failRate: agentFailRate(agentId) ?? null,
     tierWeight: effectiveHardware(agentId, cap)?.creditsPerSecond ?? 1,
   };
@@ -92,9 +94,13 @@ export function localAgentViews(nowMs = Date.now(), rttOf: (agentId: string) => 
   const out: AgentView[] = [];
   for (const [agentId, cap] of agentCapabilities) {
     if (activeBlacklistRecord(agentId) || cap.hostApproved === false || reservations.isHeld(agentId, nowMs)) continue;
-    const models = routableModels(cap);
+    // Host memory (memory-admission.ts): only models it can load or has loaded, and no free slot
+    // while it is under memory pressure or its circuit is open.
+    const held = claims.get(agentId)?.inference ?? 0;
+    const models = routableModels(cap).filter((m) => memoryAdmits(agentId, m, held, nowMs) || modelLoadedOn(agentId, m, nowMs));
     if (!models.length) continue;
     const perf = agentPerf(agentId, claims);
+    const loadedModels = loadedModelsOf(agentId, nowMs);
     const hw = effectiveHardware(agentId, cap);
     out.push({
       agentId,
@@ -105,6 +111,7 @@ export function localAgentViews(nowMs = Date.now(), rttOf: (agentId: string) => 
       tierWeight: perf.tierWeight,
       models,
       activeModel: cap.activeModel ?? null,
+      ...(loadedModels ? { loadedModels } : {}),
       slots: agentLoadReport(agentId)?.slots ?? cap.maxConcurrentTasks ?? 1,
       freeSlots: perf.freeSlots,
       ...(perf.contextWindow !== null ? { contextWindow: perf.contextWindow } : {}),

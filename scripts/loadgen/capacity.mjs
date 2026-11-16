@@ -18,6 +18,7 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { hostsFromSnapshots } from "./memory.mjs";
 
 export const DEFAULT_COORDINATORS = ["https://coordinator.edgecoder.io", "https://coordinator-eu.edgecoder.io"];
 
@@ -41,7 +42,8 @@ export async function fetchSnapshots(token, coordinators = DEFAULT_COORDINATORS)
 }
 
 /**
- * { atMs, models: { "<model>": { slots, freeSlots, agents, classes: [..] } }, classes: { "<class>": { slots, freeSlots, agents } } }
+ * { atMs, models: { "<model>": { slots, freeSlots, agents, classes: [..] } }, classes: { "<class>": { slots, freeSlots, agents } },
+ *   hosts: { "<agentId>": { pressure, usedBytes, budgetBytes, totalBytes, loaded, incidents } } }
  * Only connected, non-blacklisted agents count.
  */
 export function capacityFrom(snapshots, atMs = Date.now()) {
@@ -67,7 +69,8 @@ export function capacityFrom(snapshots, atMs = Date.now()) {
       }
     }
   }
-  return { atMs, models, classes };
+  // Each host's memory (pressure, loaded-model bytes, budget) for report.mjs's host-memory check.
+  return { atMs, models, classes, hosts: hostsFromSnapshots(snapshots) };
 }
 
 export async function fetchCapacity(token = adminToken(), coordinators = DEFAULT_COORDINATORS) {

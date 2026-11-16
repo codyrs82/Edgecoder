@@ -72,6 +72,7 @@ import { registerNetworkWorldRoutes } from "./coordinator/routes/network-world.j
 import { registerAdminNetworkRoutes } from "./coordinator/routes/admin-network.js";
 import { initCoordinator } from "./coordinator/init.js";
 import { onClaimable, pickupStats } from "./coordinator/dispatch.js";
+import { noteAgentOutcome } from "./coordinator/memory-admission.js";
 import { envelopeStats } from "./envelope-policy.js";
 import { onInferenceClaimable } from "./coordinator/routes/inference.js";
 
@@ -100,7 +101,11 @@ queue.onLeaseFailure((result) => {
 });
 
 // BHV006: a lapsed claim is requeued (above) and recorded as abandoned; only a pattern strikes.
-queue.onClaimAbandoned((claim) => recordAbandonedClaim(claim));
+// A lapsed claim is also a timeout for the agent's circuit breaker (coordinator/memory-admission.ts).
+queue.onClaimAbandoned((claim) => {
+  noteAgentOutcome(claim.agentId, false, claim.atMs);
+  recordAbandonedClaim(claim);
+});
 
 // Every response to an agent request (one carrying x-agent-nonce: register, heartbeat, pull, result,
 // agent-mesh, inference, orchestration, errors included) is signed with the identity key, in headers

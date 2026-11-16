@@ -30,6 +30,7 @@ import { join } from "node:path";
 import { digestStage, mergeStage, table } from "./stats.mjs";
 import { chargesFrom, formatMoney, loadAccountKeys, moneyReport, snapshotLedger } from "./money.mjs";
 import { fetchSnapshots } from "./capacity.mjs";
+import { formatHostMemory, hostMemoryReport, hostsFromSnapshots } from "./memory.mjs";
 
 const argv = process.argv.slice(2);
 const flag = (n, d) => { const i = argv.indexOf(`--${n}`); return i < 0 ? d : argv[i + 1]; };
@@ -147,6 +148,10 @@ if (flag("ledger-before") && existsSync(flag("ledger-before"))) {
 }
 const elapsedH = (t1 - t0) / 3_600_000;
 
+// ---- host memory safety: no host may hit critical pressure or load past its budget (memory.mjs)
+const finalHosts = hostsFromSnapshots(await fetchSnapshots(adminToken, COORDS).catch(() => []));
+const hostMemory = hostMemoryReport(samples, finalHosts, t0, t1 + 60_000);
+
 const report = {
   run, regions, machines: summaries.length, stopReasons: summaries.map((s) => `${s.region}:${s.stopReason}`),
   window: { from: new Date(t0).toISOString(), to: new Date(t1).toISOString() },
@@ -155,6 +160,7 @@ const report = {
   charges, money,
   stages: digests.map((d, i) => ({ ...d, server: serverWindow(stages[i].startMs, stages[i].endMs ?? stages[i].startMs), utilization: utilization(stages[i].startMs, stages[i].endMs ?? stages[i].startMs) })),
   serverWholeRun: serverWindow(t0, t1),
+  hostMemory,
 };
 if (flag("out")) writeFileSync(flag("out"), JSON.stringify(report, null, 2));
 console.log(`LOADGEN_REPORT ${JSON.stringify({ run, regions, machines: report.machines, stopReasons: report.stopReasons, window: report.window, cSatsSpent: report.cSatsSpent, cSatsPerHour: report.cSatsPerHour })}`);
@@ -192,3 +198,11 @@ for (const [name, c] of Object.entries(charges)) {
   console.log(`  ${name}: ${c.calls} calls, ${Math.round(c.cSats * 1000) / 1000} cSats${c.servedSeen ? `, own machine ${c.ownCalls} calls ${Math.round(c.ownCSats * 1000) / 1000} cSats` : ""} (${top})`);
 }
 console.log(money ? `\n${formatMoney(money)}` : "\nMoney: no ledger snapshot (--ledger-before; fly.sh run takes one), so only the per-call charges above.");
+
+console.log("\nHost memory (coordinators' view of agent heartbeats; peak over the run):");
+console.log(formatHostMemory(hostMemory));
+if (!hostMemory.ok) {
+  for (const f of hostMemory.flags) console.log(f);
+  console.log("RUN FAILED: network load pushed a host into memory trouble (see FLAGs above).");
+  process.exitCode = 3;
+}

@@ -66,6 +66,7 @@ import { persistStatsLedgerRecord } from "../stats-ledger.js";
 import { validatePortalNode } from "../enrollment.js";
 import { attestAgentSigningKey } from "../attested-keys.js";
 import { sanitizeLanAddresses } from "../../lan-proximity.js";
+import { noteAgentMemory } from "../memory-admission.js";
 import {
   registerSchema,
   defaultPolicy,
@@ -150,6 +151,9 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       localModelEnabled: true
     });
     const reportedModels = normalizeReportedModels(body.installedModels);
+    // Memory, loaded models and budget: admission control (memory-admission.ts). It can only narrow
+    // what the agent is handed, so an unsigned report is as safe to keep as none.
+    noteAgentMemory(body.agentId, body.memory);
     agentCapabilities.set(body.agentId, {
       os: body.os,
       version: body.version,
@@ -389,6 +393,7 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       const cls = existing ? (effectiveHardware(body.agentId, existing)?.computeClass ?? existing.computeClass) : undefined;
       if (existing && cls) orderBook.postAsk(body.agentId, cls, body.askMsatPerCredit > 0 ? body.askMsatPerCredit : undefined, now, askCapabilityOf(body.agentId, existing));
     }
+    if (body.memory) noteAgentMemory(body.agentId, body.memory, now);
     if (body.sandboxMode !== undefined) {
       const existing = agentCapabilities.get(body.agentId);
       if (existing) {
