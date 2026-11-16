@@ -277,6 +277,7 @@
           // Read at send time: connecting GitHub after this panel opened must count.
           await agentGitHubToken().catch(() => null),
           autoApply ? "edits" : "none",
+          "code",
         );
       }
       finishTurn(streamingContent);

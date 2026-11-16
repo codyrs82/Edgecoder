@@ -59,6 +59,7 @@ import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from 
 import { answerChallenge, runLocalBenchmark, type AgentBenchmarkReport, type BenchmarkChallenge } from "./benchmark.js";
 import { appVersion } from "../common/app-version.js";
 import { createLocalForwarder } from "./local-forwarder.js";
+import { ServingJobs } from "./serving-jobs.js";
 import { AgentLifecycle, DEFAULT_DRAIN_MS, announceGoingOffline, blacklistReasonFromError, type GoingOfflineReason } from "./agent-lifecycle.js";
 import { resolveIdeToken } from "../apps/ide/ide-auth.js";
 import { loadConfigOrExit } from "../common/config.js";
@@ -97,6 +98,8 @@ const coordinatorTrust = new CoordinatorTrustGate({
 
 // BHV006: draining before a restart or quit, paused by a blacklist, claims running (agent-lifecycle.ts).
 const lifecycle = new AgentLifecycle();
+// The network jobs running here now, for the app's Settings → Active work (serving-jobs.ts).
+const servingJobs = new ServingJobs();
 let shuttingDown = false;
 /**
  * Stopping (SIGTERM / SIGINT, or the all-in-one parent went away: the desktop app quit or restarted
@@ -582,6 +585,7 @@ if (LOCAL_FORWARD_PORT > 0) {
     coordinatorUrl: () => registeredWithUrl,
     steering: () => steeringStatus,
     lifecycle: () => ({ ...lifecycle.status(), memory: hostMemory.view() }),
+    serving: () => servingJobs.view(MAX_PARALLEL_INFERENCE),
     drain: async (resume) => {
       if (resume) {
         lifecycle.endDrain();
@@ -1672,6 +1676,7 @@ async function loop(): Promise<void> {
             registeredWithUrl = coordinator.url;
             lastRegisteredAtMs = Date.now();
             console.log(registeredLogLine(AGENT_ID, coordinator.url, registerResponse));
+            servingJobs.setGrant(registerResponse?.hardwareVerification?.grantedClass, registerResponse?.hardwareVerification?.grantedTier);
             lifecycle.noteAccepted();
             adoptMeshToken(registerResponse.meshToken);
             adoptRewardAccount(registerResponse.rewardAccountId);
@@ -1910,14 +1915,17 @@ async function loop(): Promise<void> {
             const admission = st.kind === "inference" && MANAGES_OLLAMA_MEMORY && st.requestedModel ? await hostMemory.admit(st.requestedModel) : undefined;
             const callAbort = new AbortController();
             networkCallAborts.add(callAbort);
+            // Active work: the job while it runs (not one handed back for memory).
+            const serving = admission && !admission.ok ? undefined : servingJobs.start(st);
             const run = admission && !admission.ok
               ? Promise.resolve<SubtaskResult>({ subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID, ok: false, output: "", error: admission.error, durationMs: 0, executed: false })
               : st.kind === "inference"
-              ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: keepAliveFor(st.requestedModel), contextWindow: CONTEXT_WINDOW, signal: callAbort.signal, post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }), ...(OPENAI_ENGINE ? { chat: engineChat } : {}) })
+              ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: keepAliveFor(st.requestedModel), contextWindow: CONTEXT_WINDOW, signal: callAbort.signal, onDelta: serving?.delta, post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }), ...(OPENAI_ENGINE ? { chat: engineChat } : {}) })
               : runPolicedSubtask(st, { quiet: true });
             if (admission && !admission.ok) console.warn(`[agent:${AGENT_ID}] handed back inference ${st.id} on ${st.requestedModel}: ${admission.error}`);
             else if (st.kind === "inference") console.log(`[agent:${AGENT_ID}] running inference ${st.id} on ${st.requestedModel}`);
             const result = await run.finally(() => {
+              serving?.end();
               stopLeaseHeartbeat();
               networkCallAborts.delete(callAbort);
               if (admission?.ok) admission.release();

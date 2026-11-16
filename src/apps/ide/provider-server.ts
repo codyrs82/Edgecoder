@@ -35,7 +35,9 @@ import type { CredentialDeps } from "./github-auth.js";
 import { connectRepoUrl, defaultProjectsFolder, getProjectsFolder, recentGitHubRepos, setProjectsFolder } from "./repo-connect.js";
 import { isAbsolute } from "node:path";
 import { NetworkTasks } from "./network-tasks.js";
-import { buyCSats, usageSummary, cancelReservation, computeOverview, contentToText, drainAgent, createReservation, listNetworkModels, listReservations, networkContextWindow, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
+import { buyCSats, usageSummary, cancelReservation, computeOverview, contentToText, drainAgent, createReservation, listNetworkModels, listReservations, networkContextWindow, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, call as networkCall, ownInflightTaskIds, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
+import { ActivityTracker, firstLine } from "./activity.js";
+import { botActivity, networkTaskActivity, registerActivityRoutes, sessionActivity, tentacleActivity } from "./activity-routes.js";
 import { networkWorld } from "./network-world.js";
 import { ConnectionManager } from "./connections.js";
 import { BotManager, agentBotRunner, botBranchPrefix, botComputeChat, botWorkRoot, registerBotRoutes, type ApprovalEntry } from "./bots.js";
@@ -109,6 +111,24 @@ const PKG_VERSION = (() => {
 
 app.get("/health", async () => ({ ok: true, service: "ide-provider", version: PKG_VERSION }));
 
+// Settings → Active work: calls to the OpenAI / Anthropic endpoints while they run. The desktop's own
+// chat (no project open) marks itself with user "edgecoder-desktop-chat".
+app.addHook("preHandler", async (req, reply) => {
+  const path = req.url.split("?")[0];
+  if (req.method !== "POST" || (path !== "/v1/chat/completions" && path !== "/v1/messages")) return;
+  const b = (req.body ?? {}) as { model?: unknown; user?: unknown; messages?: Array<{ role?: unknown; content?: unknown }> };
+  const lastUser = Array.isArray(b.messages) ? [...b.messages].reverse().find((m) => m?.role === "user") : undefined;
+  const text = typeof lastUser?.content === "string" ? lastUser.content : Array.isArray(lastUser?.content) ? contentToText(lastUser.content) : "";
+  const fromChat = b.user === "edgecoder-desktop-chat";
+  const handle = activity.begin({
+    kind: fromChat ? "chat" : "api",
+    title: firstLine(text) || (typeof b.model === "string" ? b.model : "API call"),
+    source: fromChat ? "EdgeCoder chat" : path === "/v1/messages" ? "Anthropic API" : "OpenAI API",
+    ...(typeof b.model === "string" ? { model: b.model } : {}),
+  });
+  reply.raw.on("close", () => handle.end(reply.raw.statusCode >= 400 ? "failed" : reply.raw.writableFinished ? "done" : "cancelled", reply.raw.statusCode >= 400 ? `HTTP ${reply.raw.statusCode}` : undefined));
+});
+
 const providers = new ProviderRegistry();
 
 /**
@@ -146,6 +166,8 @@ const idePullTracker = new PullTracker();
 let activeProjectRoot: string | null = null;
 /** Tool calls waiting for the user, from chat turns and bot runs (`owner` says whose). */
 const pendingApprovals = new Map<string, ApprovalEntry>();
+/** The owner's requests through this provider while they run, then briefly (Settings → Active work / Tasks). */
+const activity = new ActivityTracker();
 
 // --- OpenAI-compatible endpoints ---
 
@@ -1161,6 +1183,8 @@ const ideChatSchema = z.object({
   githubToken: z.string().optional(),
   /** "edits": file writes and edits apply without asking (checkpoints keep them undoable); commands still ask. */
   autoApprove: z.enum(["none", "edits"]).default("none"),
+  /** Which desktop view sent it (Settings → Active work / Tasks). */
+  origin: z.enum(["chat", "code"]).optional(),
   /** Where the model runs: this computer (default), your machines, any network agent (optionally one class), or a reserved machine. */
   compute: z
     .object({
@@ -1310,7 +1334,10 @@ app.post("/v1/ide/chat", async (req, reply) => {
     }
   });
 
+  const lastUser = [...body.messages].reverse().find((m) => m.role === "user");
+  const tracked = activity.begin({ kind: body.origin ?? "code", title: lastUser?.content ?? "", source: body.origin === "chat" ? "EdgeCoder chat" : "Code", model: chatModel });
   function sendEvent(event: IdeStreamEvent): void {
+    tracked.event(event);
     if (clientDisconnected) return;
     reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
   }
@@ -1322,6 +1349,7 @@ app.post("/v1/ide/chat", async (req, reply) => {
   reply.raw.on("close", () => { if (!reply.raw.writableEnded) abort.abort(); });
   // open_pull_request is offered only when the project is a GitHub repository.
   const tools = hasGitHubOrigin(projectRoot) ? toolSchemas() : toolSchemas().filter((t) => t.function.name !== "open_pull_request");
+  reply.raw.on("close", () => tracked.end("cancelled"));
   await runAgentLoop({
     chat: isFrontierModelId(chatModel)
       ? frontierChatFn(chatModel, { sessionKey: `chat:${turnId}` }, sendEvent, abort.signal)
@@ -1361,6 +1389,7 @@ app.post("/v1/ide/chat", async (req, reply) => {
   });
 
   sendEvent({ type: "done" });
+  tracked.end(clientDisconnected ? "cancelled" : undefined);
   reply.raw.end();
 });
 
@@ -1495,6 +1524,21 @@ const sessions: SessionHub = new SessionHub({
 });
 registerSessionRoutes(app, sessions);
 registerTentacleRoutes(app, sessions, tentacles);
+
+// Settings → Active work, Tasks and Logs (activity-routes.ts).
+registerActivityRoutes(app, {
+  tracker: activity,
+  agentHealth: networkDeps && !networkDeps.transport
+    ? () => networkCall(networkDeps, "GET", "/health").then((r) => (r.status === 200 ? r.json : null)).catch(() => null)
+    : null,
+  ownTaskIds: () => new Set([...ownInflightTaskIds, ...networkTasks.list().filter((t) => t.state === "running").map((t) => t.id)]),
+  extra: [
+    () => sessions.list().filter((s) => s.running).map((s) => sessionActivity(s, sessions.snapshot(s.id).running as Parameters<typeof sessionActivity>[1])).filter((x) => x !== null),
+    () => bots.list().map((b) => botActivity(b)).filter((x) => x !== null),
+    () => sessions.list().flatMap((s) => tentacles.list(s.id).tentacles.map((t) => tentacleActivity(t, s.title))).filter((x) => x !== null),
+    () => networkTasks.list().map((t) => networkTaskActivity(t)).filter((x) => x !== null),
+  ],
+});
 app.addHook("onReady", async () => {
   sessions.load();
   void machineAccount();

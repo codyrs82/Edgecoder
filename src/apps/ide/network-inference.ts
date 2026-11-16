@@ -209,6 +209,12 @@ async function readStream(d: NetworkDeps, body: { taskId: string; subtaskId: str
   }
 }
 
+/**
+ * Task ids of the network calls this provider has in flight. When this machine's own agent serves
+ * one of them, Active work says the job is yours; any other job it serves is "someone on the network".
+ */
+export const ownInflightTaskIds = new Set<string>();
+
 /** Run a chat on the network and yield the reply as it streams. */
 export async function* streamNetworkCompletion(
   d: NetworkDeps,
@@ -216,6 +222,20 @@ export async function* streamNetworkCompletion(
   signal?: AbortSignal,
 ): AsyncGenerator<CompletionPiece> {
   const taskId = `inf-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  ownInflightTaskIds.add(taskId);
+  try {
+    yield* streamSubmitted(d, req, taskId, signal);
+  } finally {
+    ownInflightTaskIds.delete(taskId);
+  }
+}
+
+async function* streamSubmitted(
+  d: NetworkDeps,
+  req: Parameters<typeof streamNetworkCompletion>[1],
+  taskId: string,
+  signal?: AbortSignal,
+): AsyncGenerator<CompletionPiece> {
   const sub = await call(d, "POST", "/inference/submit", {
     taskId,
     submitterAccountId: d.agentId,
@@ -338,7 +358,8 @@ export interface MemoryOverview {
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(0, 50).map((x) => x.slice(0, 200)) : []);
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 
-function memoryView(raw: unknown): MemoryOverview | undefined {
+/** The agent's memory guard from /forward/health (also Settings → Active work, activity.ts). */
+export function memoryView(raw: unknown): MemoryOverview | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const r = raw as Record<string, unknown>;
   if (r.pressure !== "normal" && r.pressure !== "warning" && r.pressure !== "critical") return undefined;

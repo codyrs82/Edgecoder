@@ -12,7 +12,6 @@ import type {
   OllamaModel,
   OllamaRunningModel,
   SystemMetrics,
-  TaskSubmission,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -281,9 +280,6 @@ export const getMeshReputation = () =>
 
 export const getIdentity = () =>
   get<NodeIdentity>(agentBase(), "/identity");
-
-export const submitTask = (task: TaskSubmission) =>
-  post<{ taskId: string }>(agentBase(), "/submit", task);
 
 export async function testMeshToken(token: string): Promise<boolean> {
   try {
@@ -1125,6 +1121,8 @@ export async function streamChat(
       stream: true,
       temperature: 0.7,
       max_tokens: 4096,
+      // Settings → Active work lists it as a chat, not an API call (the IDE server only).
+      ...(toLocalIde ? { user: "edgecoder-desktop-chat" } : {}),
     }),
     signal,
   });
@@ -1280,6 +1278,8 @@ export async function streamIdeChat(
   githubToken?: string | null,
   /** "edits": file edits apply without asking (undoable from the reply's changes card). */
   autoApprove: "none" | "edits" = "none",
+  /** Which view sent it, for Settings → Active work and Tasks. */
+  origin?: "chat" | "code",
 ): Promise<void> {
   const base = ideBase();
   const res = await ideFetch(`${base}/v1/ide/chat`, {
@@ -1290,6 +1290,7 @@ export async function streamIdeChat(
       ...computeFields(requestedModel),
       projectRoot,
       autoApprove,
+      ...(origin ? { origin } : {}),
       ...(githubToken ? { githubToken } : {}),
     }),
     signal,
@@ -1944,6 +1945,75 @@ export async function followSession(id: string, since: number, onEvent: (e: Sess
     await new Promise((r) => setTimeout(r, 1000));
   }
 }
+
+// Settings → Active work, Tasks and Logs (:4304 /v1/ide/activity, /v1/ide/logs; activity-routes.ts).
+export type ActivityKind = "chat" | "code" | "bot" | "tentacle" | "api";
+export interface ActivityItem {
+  id: string;
+  kind: ActivityKind;
+  title: string;
+  source?: string;
+  model?: string;
+  startedAtMs: number;
+  endedAtMs?: number;
+  status: "running" | "done" | "failed" | "cancelled";
+  error?: string;
+  cSats: number;
+  calls: import("./served").CallUsage[];
+  steps: string[];
+  progress?: string;
+}
+export interface ServedJob {
+  id: string;
+  kind: "inference" | "code";
+  model: string | null;
+  startedAtMs: number;
+  elapsedMs: number;
+  outputTokens: number;
+  /** "you": your own request; "network": someone else's (never who). */
+  requester: "you" | "network";
+}
+export interface AgentActivity {
+  reachable: boolean;
+  agentId: string | null;
+  coordinatorUrl: string | null;
+  registered: boolean;
+  region: string | null;
+  paused: { reason: string; sinceMs: number } | null;
+  draining: boolean;
+  claims: number;
+  slots: { total: number; busy: number } | null;
+  computeClass: string | null;
+  tier: string | null;
+  jobs: ServedJob[];
+  jobsUnknown: boolean;
+  /** The host memory guard (null: an agent without it). */
+  memory?: MemoryOverview | null;
+}
+export interface ActivitySnapshot {
+  atMs: number;
+  /** null: this computer is not on the network. */
+  agent: AgentActivity | null;
+  mine: ActivityItem[];
+}
+export const getActivity = () => fsCall<ActivitySnapshot>("GET", "/v1/ide/activity");
+export const getRecentActivity = () => fsCall<{ items: ActivityItem[] }>("GET", "/v1/ide/activity/recent").then((r) => r.items);
+
+export interface LogSourceInfo { id: string; label: string; exists: boolean; size: number }
+export interface LogTail {
+  source: string;
+  exists: boolean;
+  size: number;
+  start: number;
+  next: number;
+  lines: string[];
+  truncated: boolean;
+  reset: boolean;
+  sources: LogSourceInfo[];
+}
+/** The end of an app log (the last `maxKb`), or what was appended after byte `after`. */
+export const getLogTail = (source: string, after?: number, maxKb = 256) =>
+  fsCall<LogTail>("GET", `/v1/ide/logs?source=${encodeURIComponent(source)}&maxKb=${maxKb}${after !== undefined ? `&after=${after}` : ""}`);
 
 // Signing in to GitHub from the app (:4304 /v1/ide/github/login): gh's device flow.
 export interface GitHubDeviceLogin {

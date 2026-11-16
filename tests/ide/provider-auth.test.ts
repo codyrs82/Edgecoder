@@ -16,7 +16,10 @@ const ROUTES: Array<{ method: "GET" | "POST"; url: string; payload?: unknown }> 
   { method: "POST", url: "/run", payload: {} },
   { method: "GET", url: "/models" },
   { method: "GET", url: "/v1/ide/project" },
-  { method: "GET", url: "/v1/router/status" }
+  { method: "GET", url: "/v1/router/status" },
+  { method: "GET", url: "/v1/ide/activity" },
+  { method: "GET", url: "/v1/ide/activity/recent" },
+  { method: "GET", url: "/v1/ide/logs" }
 ];
 
 describe("IDE provider server auth (#4)", () => {

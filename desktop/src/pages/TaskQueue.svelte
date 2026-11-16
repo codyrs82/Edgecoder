@@ -1,353 +1,202 @@
 <script lang="ts">
-  import { getStatus, submitTask, backendReady, isRemoteMode } from "../lib/api";
-  import type { TaskSubmission } from "../lib/types";
-  import StatCard from "../components/StatCard.svelte";
-  import ErrorBanner from "../components/ErrorBanner.svelte";
-  import Skeleton from "../components/Skeleton.svelte";
-  import Select from "../components/ui/Select.svelte";
+  // Settings → Tasks: your history on this computer, from the stores that already keep it (the
+  // app's chat and Code conversations, `edgecoder code` sessions, bot runs, helpers, recent API calls
+  // and the network's usage records), merged in lib/task-history.ts.
+  import { onMount } from "svelte";
+  import { Download, RefreshCw } from "@lucide/svelte";
+  import { backendReady, botHistory, getRecentActivity, getSession, getUsage, isRemoteMode, listAllSessions, listBots, sessionTentacles } from "../lib/api";
+  import { listConversations } from "../lib/chat-store";
+  import { filterTasks, KIND_LABEL, mergeTaskHistory, STATUS_LABEL, tasksCsv, type HistorySources, type TaskFilter, type TaskKind, type TaskRow, type TaskStatus } from "../lib/task-history";
+  import { elapsedText } from "../lib/activity-view";
+  import { scrollRegion } from "../lib/scroll-region";
+  import EmptyNote from "../components/EmptyNote.svelte";
+  import StatusPill from "../components/StatusPill.svelte";
 
-  interface Props {
-    /** unused – page component receives no props today */
+  const MAX_SESSIONS = 20;
+  const SHOWN = 300;
+  const RANGES: Array<{ value: string; label: string; ms: number }> = [
+    { value: "1d", label: "Last 24 hours", ms: 86_400_000 },
+    { value: "7d", label: "Last 7 days", ms: 7 * 86_400_000 },
+    { value: "30d", label: "Last 30 days", ms: 30 * 86_400_000 },
+    { value: "all", label: "Any time", ms: 0 },
+  ];
+
+  let rows = $state<TaskRow[]>([]);
+  let loading = $state(true);
+  let unread = $state<string[]>([]);
+  let kind = $state<TaskKind | "all">("all");
+  let status = $state<TaskStatus | "all">("all");
+  let range = $state("30d");
+  let query = $state("");
+  let open = $state<string | null>(null);
+  let loadedAt = $state(Date.now());
+
+  async function settle<T>(name: string, p: Promise<T>, failed: string[]): Promise<T | undefined> {
+    try {
+      return await p;
+    } catch {
+      failed.push(name);
+      return undefined;
+    }
   }
-  let {}: Props = $props();
 
-  // ── poll state ──────────────────────────────────────────────────────
-  let queued   = $state(0);
-  let agents   = $state(0);
-  let results  = $state(0);
-  let loading  = $state(true);
-  let error    = $state("");
-
-  // ── results-per-minute tracking ─────────────────────────────────────
-  let resultSnapshots: { ts: number; value: number }[] = $state([]);
-  let resultsPerMin = $derived(() => {
-    const now = Date.now();
-    const windowMs = 60_000;
-    const recent = resultSnapshots.filter((s) => now - s.ts <= windowMs);
-    if (recent.length < 2) return 0;
-    const oldest = recent[0];
-    const newest = recent[recent.length - 1];
-    const elapsed = (newest.ts - oldest.ts) / 1000; // seconds
-    if (elapsed === 0) return 0;
-    return ((newest.value - oldest.value) / elapsed) * 60;
-  });
-
-  let noLocalAgent = $state(false);
-
-  // ── polling ─────────────────────────────────────────────────────────
-  async function refresh() {
+  async function load() {
+    loading = true;
     await backendReady;
-    if (isRemoteMode()) {
-      noLocalAgent = true;
-      loading = false;
-      return;
-    }
-    noLocalAgent = false;
-    try {
-      const data = await getStatus();
-      queued  = data.queued;
-      agents  = data.agents;
-      results = data.results;
-      error   = "";
-
-      // push snapshot for throughput calc, keep last 60 s
-      const now = Date.now();
-      resultSnapshots = [
-        ...resultSnapshots.filter((s) => now - s.ts <= 60_000),
-        { ts: now, value: data.results },
-      ];
-    } catch (e) {
-      error = e instanceof Error ? e.message : "Failed to load queue status";
-    } finally {
-      loading = false;
-    }
+    const failed: string[] = [];
+    const local = !isRemoteMode();
+    const [conversations, bots, sessions, recent, usage] = await Promise.all([
+      settle("chats", listConversations(), failed),
+      local ? settle("bots", listBots().then((list) => Promise.all(list.map(async (bot) => ({ bot, runs: await botHistory(bot.id).catch(() => []) })))), failed) : undefined,
+      local
+        ? settle("sessions", listAllSessions().then((list) =>
+            Promise.all(
+              list.slice(0, MAX_SESSIONS).map(async (s) => {
+                const [snap, tent] = await Promise.all([getSession(s.id).catch(() => null), sessionTentacles(s.id).catch(() => null)]);
+                return { id: s.id, title: s.title, model: s.model, transcript: snap?.session.transcript ?? [], tentacles: tent?.tentacles ?? [] };
+              }),
+            )), failed)
+        : undefined,
+      local ? settle("recent API calls", getRecentActivity(), failed) : undefined,
+      // Not enrolled answers 409: no network usage to add, not a failure.
+      local ? getUsage(30).then((u) => u.records).catch(() => undefined) : undefined,
+    ]);
+    const src: HistorySources = { conversations, bots, sessions, recent, usage };
+    rows = mergeTaskHistory(src);
+    unread = failed;
+    loadedAt = Date.now();
+    loading = false;
   }
+  onMount(load);
 
-  $effect(() => {
-    refresh();
-    const interval = setInterval(refresh, 5_000);
-    return () => clearInterval(interval);
-  });
+  let filter = $derived<TaskFilter>({ kind, status, query, sinceMs: (() => { const r = RANGES.find((x) => x.value === range); return r && r.ms ? loadedAt - r.ms : 0; })() });
+  let shown = $derived(filterTasks(rows, filter));
 
-  // ── submit form state ───────────────────────────────────────────────
-  let showSubmitForm = $state(false);
-  let prompt        = $state("");
-  let language      = $state<"python" | "javascript">("python");
-  let snapshotRef   = $state("local");
-  let resourceClass = $state<"cpu" | "gpu">("cpu");
-  let priority      = $state(50);
+  const fmt = (n: number, d = 3) => n.toLocaleString(undefined, { maximumFractionDigits: d });
+  const tok = (n: number | null) => (n === null ? "" : n >= 1000 ? `${fmt(n / 1000, 1)}k` : String(n));
+  const when = (ms: number) => new Date(ms).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 
-  let submitting     = $state(false);
-  let submitError    = $state("");
-  let submitSuccess  = $state("");
-
-  async function handleSubmit() {
-    submitError   = "";
-    submitSuccess = "";
-
-    if (!prompt.trim()) {
-      submitError = "Prompt is required.";
-      return;
-    }
-
-    submitting = true;
-    try {
-      const taskId = crypto.randomUUID();
-      const task: TaskSubmission = {
-        taskId,
-        prompt: prompt.trim(),
-        language,
-        snapshotRef,
-        resourceClass,
-        priority,
-      };
-      await submitTask(task);
-      submitSuccess = `Task submitted: ${taskId}`;
-
-      // reset form
-      prompt        = "";
-      language      = "python";
-      snapshotRef   = "local";
-      resourceClass = "cpu";
-      priority      = 50;
-
-      // refresh stats immediately
-      refresh();
-    } catch (e) {
-      submitError = e instanceof Error ? e.message : "Submission failed";
-    } finally {
-      submitting = false;
-    }
+  function exportCsv() {
+    const url = URL.createObjectURL(new Blob([tasksCsv(shown)], { type: "text/csv" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `edgecoder-tasks-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 </script>
 
-<div class="task-queue">
-  <h1>Task Queue</h1>
+<div class="sp">
+  <h1>Tasks</h1>
+  <p class="sp-lead">Everything you ran from this computer: chats, Code turns, bot runs, helper jobs and API calls, with where each ran and what it cost.</p>
 
-  {#if noLocalAgent}
-    <div class="info-banner" role="status">No local agent running. Install and start the EdgeCoder agent to view the task queue.</div>
-  {:else if error}
-    <ErrorBanner message={error} onRetry={refresh} />
-  {/if}
+  <section class="sp-group" aria-labelledby="tq-history">
+    <h2 class="sp-group-title" id="tq-history">
+      History
+      <span class="sp-link actions">
+        <button class="small" onclick={() => void load()} disabled={loading}><RefreshCw size={13} aria-hidden="true" /> Refresh</button>
+        <button class="small" onclick={exportCsv} disabled={!shown.length}><Download size={13} aria-hidden="true" /> CSV</button>
+      </span>
+    </h2>
 
-  <!-- stats row -->
-  {#if loading}
-    <div class="stats-grid">
-      {#each Array(4) as _}
-        <Skeleton lines={2} height="1.4rem" />
-      {/each}
-    </div>
-  {:else}
-    <div class="stats-grid">
-      <StatCard label="Queued"        value={queued}  color="var(--yellow)" />
-      <StatCard label="Active Agents" value={agents}  color="var(--green)" />
-      <StatCard label="Completed"     value={results} color="var(--accent-secondary)" />
-      <StatCard label="Results / min" value={resultsPerMin().toFixed(1)} color="var(--accent)" />
-    </div>
-  {/if}
-
-  <!-- submit toggle -->
-  <button type="button" class="toggle-btn" aria-expanded={showSubmitForm} aria-controls="task-submit-form" onclick={() => (showSubmitForm = !showSubmitForm)}>
-    {showSubmitForm ? "Hide Submit Form" : "Submit New Task"}
-  </button>
-
-  <!-- submit form -->
-  {#if showSubmitForm}
-    <form id="task-submit-form" class="submit-form" aria-label="Submit a task" aria-busy={submitting} onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}>
-
-      {#if submitSuccess}
-        <div class="msg success" role="status">{submitSuccess}</div>
-      {/if}
-      {#if submitError}
-        <div class="msg error" role="alert">{submitError}</div>
-      {/if}
-
-      <label class="field">
-        <span class="field-label">Prompt <span class="req" aria-hidden="true">*</span></span>
-        <textarea rows="4" bind:value={prompt} placeholder="Describe the code-completion task..." required></textarea>
+    <div class="filters" role="group" aria-label="Filter tasks">
+      <div class="sp-seg" role="group" aria-label="Kind">
+        {#each [["all", "All"], ...Object.entries(KIND_LABEL)] as [k, label]}
+          <button aria-pressed={kind === k} class:active={kind === k} onclick={() => (kind = k as TaskKind | "all")}>{label}</button>
+        {/each}
+      </div>
+      <label class="field">Status
+        <select bind:value={status}>
+          <option value="all">Any status</option>
+          {#each Object.entries(STATUS_LABEL) as [v, label]}<option value={v}>{label}</option>{/each}
+        </select>
       </label>
-
-      <div class="row-2col">
-        <div class="field">
-          <span class="field-label" id="tq-language">Language</span>
-          <Select bind:value={language} labelledby="tq-language" options={[{ value: "python", label: "Python" }, { value: "javascript", label: "JavaScript" }]} />
-        </div>
-
-        <label class="field">
-          <span class="field-label">Snapshot Ref</span>
-          <input type="text" bind:value={snapshotRef} placeholder="local" />
-        </label>
-      </div>
-
-      <div class="row-2col">
-        <div class="field">
-          <span class="field-label" id="tq-resource">Resource Class</span>
-          <Select bind:value={resourceClass} labelledby="tq-resource" options={[{ value: "cpu", label: "CPU" }, { value: "gpu", label: "GPU" }]} />
-        </div>
-
-        <label class="field">
-          <span class="field-label">Priority: {priority}</span>
-          <input type="range" min="0" max="100" bind:value={priority} aria-valuetext="Priority {priority} of 100" />
-        </label>
-      </div>
-
-      <button class="submit-btn" type="submit" disabled={submitting}>
-        {submitting ? "Submitting..." : "Submit Task"}
-      </button>
-    </form>
-  {/if}
-
-  <!-- empty state -->
-  {#if !loading && queued === 0 && !showSubmitForm}
-    <div class="empty">
-      <p>No tasks in queue. Use the form above to submit a new task, or tasks will appear here when submitted through the portal or API.</p>
+      <label class="field">Time
+        <select bind:value={range}>
+          {#each RANGES as r}<option value={r.value}>{r.label}</option>{/each}
+        </select>
+      </label>
+      <label class="field grow"><span class="sr-only">Search tasks</span>
+        <input type="search" placeholder="Search what, where, model or error" bind:value={query} />
+      </label>
     </div>
-  {/if}
+
+    {#if unread.length}<p class="sp-warn" role="status">Couldn't read: {unread.join(", ")}. The rest is shown.</p>{/if}
+
+    <div class="sp-card">
+      {#if loading && !rows.length}
+        <div class="sp-row"><span class="sp-muted">Loading…</span></div>
+      {:else if !rows.length}
+        <EmptyNote title="No tasks yet." description="Chats, Code turns, bot runs, helper jobs and API calls you run from this computer show here, with where each ran, its tokens and its cost." />
+      {:else if !shown.length}
+        <EmptyNote title="Nothing matches these filters." description="Try another kind, status or time range, or clear the search." />
+      {:else}
+        <div class="sp-table-scroll" role="group" aria-labelledby="tq-history" use:scrollRegion>
+          <table>
+            <thead><tr><th scope="col">When</th><th scope="col">What</th><th scope="col">Where it ran</th><th scope="col" class="num">Tokens in / out</th><th scope="col" class="num">cSats</th><th scope="col">Status</th><th scope="col" class="num">Time</th></tr></thead>
+            <tbody>
+              {#each shown.slice(0, SHOWN) as r (r.id)}
+                <tr class:failed={r.status === "failed"}>
+                  <td class="sp-muted">{when(r.atMs)}</td>
+                  <td class="what">
+                    <button class="link" aria-expanded={open === r.id} aria-controls="task-{r.id}" onclick={() => (open = open === r.id ? null : r.id)}>
+                      <span class="kind">{KIND_LABEL[r.kind]}</span> {r.title}
+                    </button>
+                    {#if r.context}<div class="sp-muted ctx">{r.context}</div>{/if}
+                  </td>
+                  <td class="where">{r.where ?? "–"}</td>
+                  <td class="num">{r.promptTokens === null && r.outputTokens === null ? "–" : `${tok(r.promptTokens) || "0"} / ${tok(r.outputTokens) || "0"}`}</td>
+                  <td class="num">{r.cSats === null ? "–" : fmt(r.cSats)}{#if r.usd}<div class="sp-muted">${r.usd.toFixed(2)}</div>{/if}</td>
+                  <td><StatusPill status={r.status} />{#if r.error}<div class="sp-err reason">{r.error}</div>{/if}</td>
+                  <td class="num">{r.durationMs === null ? "–" : elapsedText(r.durationMs)}</td>
+                </tr>
+                {#if open === r.id}
+                  <tr class="details" id="task-{r.id}">
+                    <td colspan="7">
+                      <dl>
+                        <dt>Asked</dt><dd>{r.title}</dd>
+                        {#if r.context}<dt>In</dt><dd>{r.context}</dd>{/if}
+                        {#if r.model}<dt>Model</dt><dd>{r.model}</dd>{/if}
+                        <dt>Where</dt><dd>{r.where ?? "Not recorded"}</dd>
+                        {#if r.error}<dt>Error</dt><dd class="sp-err">{r.error}</dd>{/if}
+                      </dl>
+                      {#if r.steps.length}
+                        <p class="sp-muted steps-title">Steps and tool calls ({r.steps.length})</p>
+                        <ol class="steps">{#each r.steps as s}<li><code>{s}</code></li>{/each}</ol>
+                      {:else}
+                        <p class="sp-muted">No tool calls.</p>
+                      {/if}
+                    </td>
+                  </tr>
+                {/if}
+              {/each}
+            </tbody>
+          </table>
+        </div>
+        {#if shown.length > SHOWN}<div class="sp-row"><span class="sp-muted">Showing the newest {SHOWN} of {shown.length}. Narrow the filters or export CSV for all of them.</span></div>{/if}
+      {/if}
+    </div>
+  </section>
 </div>
 
 <style>
-  .task-queue {
-    padding: 1.5rem;
-  }
-
-  h1 {
-    margin: 0 0 1.25rem;
-    font-size: 1.4rem;
-    font-weight: 600;
-  }
-
-  /* ── stats grid ───────────────────────────────────────────── */
-  .stats-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-    gap: 1rem;
-    margin-bottom: 1.5rem;
-  }
-
-  /* ── toggle button ────────────────────────────────────────── */
-  .toggle-btn {
-    background: var(--bg-surface);
-    color: var(--accent);
-    border: 1px solid var(--accent);
-    padding: 0.5rem 1.2rem;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    font-size: 0.9rem;
-    margin-bottom: 1rem;
-    transition: background 0.15s;
-  }
-  .toggle-btn:hover {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-  }
-
-  /* ── submit form ──────────────────────────────────────────── */
-  .submit-form {
-    background: var(--bg-surface);
-    padding: 1.25rem;
-    border-radius: var(--radius-md);
-    margin-bottom: 1.5rem;
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-  }
-
-  .row-2col {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 1rem;
-  }
-
-  .field {
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
-  }
-
-  .field-label {
-    font-size: 0.85rem;
-    color: var(--text-secondary);
-  }
-
-  .req {
-    color: var(--red);
-  }
-
-  textarea,
-  input[type="text"] {
-    background: var(--bg-input);
-    color: var(--text-primary);
-    border: 1px solid var(--border-control);
-    border-radius: var(--radius-sm);
-    padding: 0.55rem 0.7rem;
-    font-size: 0.9rem;
-    font-family: inherit;
-    resize: vertical;
-    transition: border-color 0.15s;
-  }
-  textarea:focus,
-  input[type="text"]:focus {
-    outline: none;
-    border-color: var(--accent);
-  }
-
-  input[type="range"] {
-    accent-color: var(--accent);
-    width: 100%;
-    margin-top: 0.25rem;
-  }
-
-  .submit-btn {
-    align-self: flex-start;
-    background: var(--accent);
-    color: var(--on-accent);
-    border: none;
-    padding: 0.55rem 1.5rem;
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    font-size: 0.9rem;
-    font-weight: 500;
-    transition: opacity 0.15s;
-  }
-  .submit-btn:hover:not(:disabled) {
-    opacity: 0.85;
-  }
-  .submit-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  /* ── inline messages ──────────────────────────────────────── */
-  .msg {
-    padding: 0.6rem 0.85rem;
-    border-radius: var(--radius-sm);
-    font-size: 0.85rem;
-  }
-  .msg.success {
-    background: color-mix(in srgb, var(--green) 12%, transparent);
-    color: var(--green);
-    border: 1px solid color-mix(in srgb, var(--green) 25%, transparent);
-  }
-  .msg.error {
-    background: color-mix(in srgb, var(--red) 12%, transparent);
-    color: var(--red-strong);
-    border: 1px solid color-mix(in srgb, var(--red) 25%, transparent);
-  }
-
-  /* ── empty state ──────────────────────────────────────────── */
-  .empty {
-    background: var(--bg-surface);
-    padding: 1.2rem;
-    border-radius: var(--radius-md);
-    margin-top: 1rem;
-    color: var(--text-secondary);
-  }
-  .empty p {
-    margin: 0;
-  }
-  .info-banner { display: flex; align-items: center; background: color-mix(in srgb, var(--accent-secondary) 10%, transparent); color: var(--accent-secondary); padding: 0.75rem 1rem; border-radius: var(--radius-md); margin-bottom: 1rem; font-size: 0.9rem; }
-
-  button:focus-visible, input:focus-visible, textarea:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-  }
+  .actions { display: inline-flex; gap: 6px; }
+  .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .field { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--text-secondary); }
+  .field.grow { flex: 1 1 200px; }
+  .field.grow input { width: 100%; }
+  .what { max-width: 300px; }
+  .what .link { all: unset; cursor: pointer; color: var(--text-primary); display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; }
+  .what .link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+  .what .kind { font-size: 11px; color: var(--text-secondary); margin-right: 4px; }
+  .ctx { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 300px; }
+  .where { max-width: 260px; }
+  .reason { max-width: 220px; white-space: normal; }
+  tr.details td { background: var(--bg-base); }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0 0 8px; }
+  dt { color: var(--text-secondary); }
+  dd { margin: 0; white-space: normal; overflow-wrap: anywhere; }
+  .steps-title { margin: 8px 0 4px; }
+  .steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 2px; }
+  .steps code { white-space: pre-wrap; overflow-wrap: anywhere; }
 </style>
