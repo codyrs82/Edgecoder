@@ -65,12 +65,25 @@ interface QueueItem {
   excludeAccounts?: string[];
   /** Lease expiries per agent on this item: a second expiry bars that agent from it. */
   leaseExpiries?: Record<string, number>;
+  /**
+   * #99: the persisted lease state (attempts, expired holders) of a re-enqueued subtask is still
+   * being read: nobody may claim it until it is merged (or LEASE_STATE_WAIT_MS passed).
+   */
+  leaseStatePending?: boolean;
 }
+
+/**
+ * #99: the longest a re-enqueued subtask waits for its persisted lease state before it is
+ * claimable anyway (a slow or unreachable database must not stall the queue).
+ */
+export const LEASE_STATE_WAIT_MS = 2_000;
 
 export class SwarmQueue {
   private readonly lease: LeaseConfig;
-  constructor(private readonly store?: PostgresStore | null, lease: Partial<LeaseConfig> = {}) {
+  private readonly leaseStateWaitMs: number;
+  constructor(private readonly store?: PostgresStore | null, lease: Partial<LeaseConfig> = {}, opts: { leaseStateWaitMs?: number } = {}) {
     this.lease = { ...DEFAULT_LEASE, ...lease };
+    this.leaseStateWaitMs = opts.leaseStateWaitMs ?? LEASE_STATE_WAIT_MS;
   }
 
   /**
@@ -175,13 +188,42 @@ export class SwarmQueue {
     const excludeAgents = opts?.excludeAgents?.length ? [...opts.excludeAgents] : undefined;
     const excludeAccounts = opts?.excludeAccounts?.length ? [...opts.excludeAccounts] : undefined;
     const item: QueueItem = { subtask: materialized, claimableAfterMs, excludeAgents, excludeAccounts };
+    // #99: a subtask enqueued under an id it already had (a peer's gossip, a re-enqueue after a
+    // restart) may have attempts and expired holders in Postgres. It is not claimable until they
+    // are merged: a claim in between counted as attempt 1 (the retry cap reset) and let an expired
+    // holder take it back. A fresh id has no persisted state and is claimable at once.
+    const gate = Boolean(this.store) && subtask.id !== undefined;
+    let open: () => void = () => undefined;
+    if (gate) {
+      item.leaseStatePending = true;
+      const timer = setTimeout(() => open(), this.leaseStateWaitMs);
+      timer.unref?.();
+      open = () => {
+        clearTimeout(timer);
+        if (!item.leaseStatePending) return;
+        item.leaseStatePending = false;
+        if (this.tasks.includes(item)) this.notifyClaimable(item);
+      };
+    }
     this.tasks.push(item);
     this.persist(materialized.id, async (store) => {
-      await store.persistSubtask(materialized);
-      this.mergeLeaseState(item, await store.getSubtaskLeaseState(materialized.id));
+      try {
+        await store.persistSubtask(materialized);
+        this.mergeLeaseState(item, await store.getSubtaskLeaseState(materialized.id));
+      } finally {
+        open();
+      }
     });
-    this.notifyClaimable(item);
+    if (!gate) this.notifyClaimable(item);
     return materialized;
+  }
+
+  /**
+   * Resolves once every store write issued so far (and any issued while waiting) has finished,
+   * failed writes included. Writes stay fire-and-forget for callers; this is for shutdown and tests.
+   */
+  async writesSettled(): Promise<void> {
+    while (this.persistTails.size > 0) await Promise.all([...this.persistTails.values()]);
   }
 
   /**
@@ -272,6 +314,7 @@ export class SwarmQueue {
     const unclaimed = this.tasks.filter(
       (task) =>
         !task.claimedBy &&
+        !task.leaseStatePending &&
         (!task.claimableAfterMs || now >= task.claimableAfterMs) &&
         !task.excludeAgents?.includes(agentId) &&
         !task.excludeAccounts?.includes(accountId) &&

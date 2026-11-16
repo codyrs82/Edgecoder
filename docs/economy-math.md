@@ -85,6 +85,58 @@ template and end-of-turn tokens; `boundTokenCounts` in `src/swarm/inference-stre
 (`tokens`, `power_floor` or `per_second`) is recorded on the earnings ledger record.
 `cSatsPerMTokens` gives the per-million-token price in cSats that the apps show.
 
+#### What a model call sets aside (size-aware reserve, 2026-11-16)
+
+Until 2026-11-16 every model call set aside the code-job worst case, 180 s at the top of the
+dearest class band (about 750 cSats), for calls that settle at well under 1 cSat (small models) to
+about 6 cSats (30B). A 1,000-cSat account could run one call at a time, small buyers were refused,
+and concurrent load showed balances falling far more than their charges ("reserves held"). The
+reserve is now an upper bound on the call's own cost (`inferenceReserveMsat` in
+`src/economy/job-pricing.ts`, `inferenceCallReserve` in `src/swarm/coordinator/economy.ts`):
+
+```
+promptMax  = bytes of the queued request (messages, tools, max_tokens) + PROMPT_TOKEN_ALLOWANCE (2048)
+outputMax  = max_tokens (default INFERENCE_DEFAULT_MAX_TOKENS, 4096) + OUTPUT_TOKEN_ALLOWANCE (64)
+tokenBound = price(paramsB) for promptMax in and outputMax out
+floorBound = max over the requested class (every class for "any") of
+             POWER_FLOOR_USD_PER_HOUR[class] × topTierWeight × timeoutMs / 3600 s     # one slot
+reserve    = min(1.5 × usdToMsat(max(tokenBound, floorBound)), maxCSats)
+```
+
+The token bounds are the same caps `/inference/chunks` puts on reported counts, and the billed
+seconds never exceed the call's timeout, so at the same BTC price no settlement can exceed the
+bound; the 1.5× margin (`INFERENCE_RESERVE_MARGIN`) covers the BTC price falling by up to a third
+between submit and settlement. `maxCSats` is the buyer's ceiling (`x-edgecoder-max-csats`, or
+`routing.maxCSats` on `/inference/submit`, for any model, not only `auto`).
+
+At 100,000 USD/BTC with the default 180 s timeout and 4,096-token cap and a short prompt:
+1.5B on `apple` about 2.6 cSats (the floor bounds it), 30B on `apple` about 12 cSats (tokens), any
+model on class `any` at least about 33 cSats (the `gpu.dc` top-tier floor); a 30B call with a
+200,000-character prompt about 180 cSats. A shorter timeout or output cap lowers it.
+
+Settlement still takes at most what is left of the reserve (`takeTaskBudget`). A cost above it
+(BTC fell by more than a third, a reserve capped by `maxCSats`, an agent that reports no token
+counts and is priced per second) is settled at the reserve and logged
+(`job_cost_capped_at_reserve`). Code jobs keep the per-second worst case (`reserveMsat`).
+
+Every way a call ends returns what it did not use: a result (success or failure) settles it
+(`settleTaskIfDone`); no agent claiming it within `INFERENCE_CLAIM_TIMEOUT_MS`, or its holder's
+lease lapsing and nobody taking it again, cancels it with a full refund
+(`cancelUnclaimedInference`); a suspended security-research entitlement cancels it with a full
+refund; a restart resumes or refunds it (`restoreTaskBilling`). Two sweeps catch the rest
+(`src/swarm/billing-sweep.ts`), both every `TASK_BILLING_SWEEP_INTERVAL_MS` (5 min):
+- the #303 sweep: open `task_billing` rows of this coordinator older than
+  `TASK_BILLING_SWEEP_MIN_AGE_MS` (30 min) that no task in this process holds (an outgoing instance
+  left them during a deploy) are resumed or refunded as at startup; needs Postgres, runs under an
+  advisory lock;
+- the idle sweep (2026-11-16): billing this process holds in memory with no open work (nothing
+  queued, running, held behind dependencies, granted to a peer, being paid or held for
+  verification), seen idle on a sweep at least `TASK_BILLING_IDLE_SWEEP_MS` (10 min) earlier and
+  still idle, is settled: the unused part is refunded (`task_billing_idle_swept`). The #303 sweep
+  skipped these because the process still held them, which is how st1 kept a 750-cSat reserve.
+  Runs with or without Postgres; the refund has the task's deterministic tx id, so it is never
+  paid twice.
+
 Example at 100,000 USD/BTC: a 9B model reads 2,000 tokens and writes 500.
 `tokenUsd = (2000 × 0.04 + 500 × 0.10) / 1e6 = 0.00013 USD` = 130 msat = **0.13 cSats**. If it ran
 for 10 s on a base-tier `gpu`, the floor is `0.05 × 10 / 3600 = 0.000139 USD` = 0.139 cSats, so the
@@ -149,7 +201,8 @@ cost (msat)      = seconds × rate
   (`src/swarm/result-integrity.ts`). An agent cannot report more time than the coordinator observed.
 - The matched price is the trade agreed in the order book at claim time (section 2); the band
   stops a self-dealing ask/bid from moving the sats value (audit econ#2).
-- At submit the coordinator sets aside the worst case for one subtask (`reserveMsat`: its time
+- At submit the coordinator sets aside the worst case for one subtask (a model call: its
+  size-aware bound above; a code job: `reserveMsat`, its time
   limit at the top of the band on the class's fastest tier, lowered to the requester's bid ceiling
   when set) as a `task_reserve` row, tops it up once the task is split, and refunds the unused part
   when the task finishes (`task_submit_refund:<task>`). Not enough balance returns 402

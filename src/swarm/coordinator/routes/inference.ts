@@ -50,7 +50,7 @@ import {
   effectiveHardware,
   rateOracleConfig,
   classRefMsatPerCredit,
-  subtaskReserveMsat,
+  inferenceCallReserve,
   orderBook,
   MARKET_DEFAULT_BID_PREMIUM_BPS
 } from "../economy.js";
@@ -501,7 +501,13 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       return reply.code(413).send({ error: "context_too_long", neededTokens: needTokens, largestContextWindow: largest, model: body.model, ...(taskClass !== "any" ? { computeClass: taskClass } : {}) });
     }
     const resourceClass: ResourceClass = taskClass === "cpu" ? "cpu" : "gpu";
-    const reserve = billed ? subtaskReserveMsat(resourceClass, taskClass, body.timeoutMs, resolved.msatPerCredit) : 0;
+    const input = JSON.stringify({ messages: body.messages, tools: body.tools, maxTokens, temperature: body.temperature });
+    // Size-aware reserve (2026-11-16): an upper bound on this call's own cost (its model's token
+    // price for its input and output cap, or the class power floor for its timeout, × 1.5), capped
+    // by the buyer's maxCSats; was 180 s at the top of the dearest band (~750 cSats) for every call.
+    const maxCSats = cleanHints(body.routing).maxCSats ?? routed?.job.maxCSats;
+    const sized = billed ? inferenceCallReserve({ model: body.model, taskClass, timeoutMs: body.timeoutMs, inputBytes: Buffer.byteLength(input, "utf8"), maxTokens, ...(maxCSats !== undefined ? { maxCSats } : {}) }) : undefined;
+    const reserve = sized?.reserveMsat ?? 0;
     if (reserve > 0) {
       // Durable billing (stress finding 2): a restart refunds what this call did not use.
       await pgStore?.insertTaskBilling({ taskId: body.taskId, coordinatorId: identity.peerId, accountId, kind: "inference", perSubtaskReserveMsat: reserve, createdAtMs: Date.now() })
@@ -527,7 +533,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       taskId: body.taskId,
       kind: "inference",
       language: "python",
-      input: JSON.stringify({ messages: body.messages, tools: body.tools, maxTokens, temperature: body.temperature }),
+      input,
       timeoutMs: body.timeoutMs,
       snapshotRef: "inference",
       requestedModel: body.model,
@@ -566,7 +572,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     }
     inferenceStreams.open(subtask.id, body.taskId);
     armClaimDeadline(body.taskId, subtask.id, INFERENCE_CLAIM_TIMEOUT_MS);
-    app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, holders: holders.length }, "inference_submitted");
+    app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, ...(sized ? { reserveTokenMsat: sized.tokenMsat, reserveFloorMsat: sized.floorMsat, reserveCappedByMaxCSats: sized.capped } : {}), holders: holders.length }, "inference_submitted");
     return reply.send({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second", ...(routed ? { routing: routed.summary } : {}) });
   });
 

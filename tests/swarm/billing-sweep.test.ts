@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sweepStaleTaskBilling, TASK_BILLING_SWEEP_MIN_AGE_MS, type BillingSweepStore, type OpenTaskBillingRow } from "../../src/swarm/billing-sweep.js";
+import { idleTaskBilling, sweepStaleTaskBilling, TASK_BILLING_IDLE_SWEEP_MS, TASK_BILLING_SWEEP_MIN_AGE_MS, type BillingSweepStore, type OpenTaskBillingRow } from "../../src/swarm/billing-sweep.js";
 
 // Live regtest finding (2026-11-15): a deploy replaced the US seed while model calls were in
 // flight. Billing is restored only at startup, and calls the outgoing instance had accepted after
@@ -58,5 +58,24 @@ describe("periodic task billing sweep", () => {
     ]);
     expect(restores).toBe(1);
     expect([a.skipped, b.skipped].filter(Boolean)).toEqual(["locked"]);
+  });
+});
+
+// The #303 sweep skips anything this process holds in memory, so a reserve the process itself never
+// settled (st1: a stuck 750-cSat model-call reserve) stayed held. The idle sweep settles those.
+describe("idle in-memory billing sweep", () => {
+  it("returns entries idle on two sweeps at least TASK_BILLING_IDLE_SWEEP_MS apart; busy entries reset", () => {
+    const since = new Map<string, number>();
+    const busy = new Set(["running"]);
+    const run = (ids: string[], nowMs: number) => idleTaskBilling({ taskIds: ids, isBusy: (id) => busy.has(id), idleSince: since, nowMs });
+    expect(run(["orphan", "running", "flaky"], 0)).toEqual([]);
+    busy.add("flaky"); // had work again: its idle clock restarts
+    expect(run(["orphan", "running", "flaky"], TASK_BILLING_IDLE_SWEEP_MS - 1)).toEqual([]);
+    busy.delete("flaky");
+    expect(run(["orphan", "running", "flaky"], TASK_BILLING_IDLE_SWEEP_MS)).toEqual(["orphan"]);
+    expect(run(["orphan", "running", "flaky"], 2 * TASK_BILLING_IDLE_SWEEP_MS)).toEqual(["orphan", "flaky"]);
+    // Settled entries leave the map.
+    expect(run(["running"], 3 * TASK_BILLING_IDLE_SWEEP_MS)).toEqual([]);
+    expect([...since.keys()]).toEqual([]);
   });
 });

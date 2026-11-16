@@ -100,7 +100,7 @@ describe("/inference/chunks token counts", () => {
     const taskId = `inf-${randomUUID()}`;
     const sub = await submitInference(taskId);
     expect(sub.statusCode).toBe(200);
-    const reservedMsat = sub.json().reservedCSats * 10; // 1 cSat = 10 msat
+    const reservedMsat = sub.json().reservedCSats * 1000; // 1 cSat = 1,000 msat
     const st = await pull();
     expect(st?.taskId).toBe(taskId);
     const before = await earnedMsat(worker.peerId);
@@ -259,11 +259,12 @@ describe("/result pricing (#38)", () => {
   });
 
   test("pay is capped at what the requester set aside", async () => {
-    // A 1 msat/credit ceiling makes the reserve tiny (10 s at 1 msat x tier weight), while a long
-    // reply priced per token is worth far more: the agent gets the reserve and no more.
+    // The buyer's maxCSats (2 cSats) caps the reserve below what a long reply priced per token is
+    // worth (the size-aware reserve is otherwise an upper bound on the cost): the agent gets the
+    // reserve and no more.
     const taskId = `inf-${randomUUID()}`;
     const balanceBefore = creditEngine.balance(requester.peerId);
-    const sub = await post("/inference/submit", { taskId, submitterAccountId: requester.peerId, model: MODEL, messages: [{ role: "user", content: "hi" }], timeoutMs: 10_000, maxBidMsatPerCredit: 1, maxTokens: 32_768 }, requester);
+    const sub = await post("/inference/submit", { taskId, submitterAccountId: requester.peerId, model: MODEL, messages: [{ role: "user", content: "hi" }], timeoutMs: 10_000, maxTokens: 32_768, routing: { maxCSats: 2 } }, requester);
     expect(sub.statusCode).toBe(200);
     const reservedMsat = Math.round((balanceBefore - creditEngine.balance(requester.peerId)) * 1000);
     expect(reservedMsat).toBeGreaterThan(0);
@@ -281,7 +282,7 @@ describe("/result pricing (#38)", () => {
     expect(acc.pricingBasis).toBe("tokens");
     // Billed at most the call's 32768-token cap (+64): on a 7B model about 0.0033 USD (3,300 msat at
     // 100k USD/BTC), still far above the reserve.
-    expect(reservedMsat).toBeLessThan(3_000);
+    expect(reservedMsat).toBe(2_000);
     expect(acc.costMsat).toBe(reservedMsat);
     expect(acc.msat + acc.feeMsat).toBe(reservedMsat);
     expect(earned).toBe(acc.msat);

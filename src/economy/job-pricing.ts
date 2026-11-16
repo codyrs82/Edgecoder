@@ -10,8 +10,9 @@
  * requester pays that; the agent earns it minus the network fee, which goes to the fee pool. So
  * what requesters pay and what agents earn are the same number.
  *
- * When a job is submitted the worst case is set aside (its time limit at the top of its class's
- * band on the class's fastest tier) and settled to the actual cost once it ran.
+ * When a code job is submitted the worst case is set aside (its time limit at the top of its class's
+ * band on the class's fastest tier) and settled to the actual cost once it ran. A model call sets
+ * aside an upper bound on its token-priced cost instead (inferenceReserveMsat).
  */
 
 /** Price band around the class reference that a matched price is kept within (audit econ#2). */
@@ -164,6 +165,52 @@ export function inferenceCostMsat(input: {
   const tokenMsat = usdToMsat(tokenUsd, input.btcUsd);
   const floorMsat = usdToMsat(floorUsd, input.btcUsd);
   return tokenMsat >= floorMsat ? { costMsat: Math.round(tokenMsat), basis: "tokens" } : { costMsat: Math.round(floorMsat), basis: "power_floor" };
+}
+
+/**
+ * Safety margin on a model call's reserve (2026-11-16): covers the BTC price moving between submit
+ * and settlement (the cost is converted at the settle-time price) by up to a third.
+ */
+export const INFERENCE_RESERVE_MARGIN = 1.5;
+
+/**
+ * What to set aside at submit for one model call: an upper bound on what inferenceCostMsat can
+ * settle it at, so a buyer's balance is held only for what the call can really cost (it was 180 s
+ * at the top of the dearest class band, ~750 cSats, for calls that settle under 1 to ~6 cSats).
+ *
+ *   reserve = margin × max(token bound, power-floor bound), capped by the buyer's maxCSats
+ *
+ * - token bound: the model's price for `promptTokensMax` in and `outputTokensMax` out. The caller
+ *   passes the same bounds /inference/chunks puts on reported counts (request bytes + allowance,
+ *   max_tokens + allowance), so no accepted count can exceed them;
+ * - power-floor bound: the dearest of `floorClasses`' floor (USD/h × its top tier weight) for
+ *   `maxDurationMs`, the call's timeout, which also caps the duration it is billed on; one slot.
+ *
+ * Settlement never takes more than the reserve (results.ts takeTaskBudget); a cost above it (the BTC
+ * price fell by over a third, a capped maxCSats, an agent that reports no token counts and is priced
+ * per second) is settled at the reserve and logged (job_cost_capped_at_reserve).
+ */
+export function inferenceReserveMsat(input: {
+  paramsB: number;
+  btcUsd: number;
+  promptTokensMax: number;
+  outputTokensMax: number;
+  maxDurationMs: number;
+  floorClasses: Array<{ computeClass: string; maxTierWeight: number }>;
+  margin?: number;
+  /** The buyer's ceiling for the call (maxCSats), msat. */
+  capMsat?: number;
+}): { reserveMsat: number; tokenMsat: number; floorMsat: number; capped: boolean } {
+  const price = tokenPriceUsdPerM(input.paramsB);
+  const tokenUsd = (Math.max(0, input.promptTokensMax) * price.input + Math.max(0, input.outputTokensMax) * price.output) / 1_000_000;
+  const hours = Math.max(0, input.maxDurationMs) / 3_600_000;
+  const floorUsd = Math.max(0, ...input.floorClasses.map((c) => (POWER_FLOOR_USD_PER_HOUR[c.computeClass] ?? POWER_FLOOR_USD_PER_HOUR.cpu) * Math.max(1, c.maxTierWeight) * hours));
+  const tokenMsat = usdToMsat(tokenUsd, input.btcUsd);
+  const floorMsat = usdToMsat(floorUsd, input.btcUsd);
+  const bound = Math.max(1, Math.ceil(Math.max(tokenMsat, floorMsat) * (input.margin ?? INFERENCE_RESERVE_MARGIN)));
+  const cap = input.capMsat !== undefined && Number.isFinite(input.capMsat) && input.capMsat > 0 ? Math.max(1, Math.floor(input.capMsat)) : undefined;
+  const reserveMsat = cap !== undefined ? Math.min(bound, cap) : bound;
+  return { reserveMsat, tokenMsat: Math.ceil(tokenMsat), floorMsat: Math.ceil(floorMsat), capped: reserveMsat < bound };
 }
 
 /** cSats per million tokens (input, output) for a model size at a BTC price: what the UI shows. */

@@ -209,6 +209,8 @@ export async function* streamNetworkCompletion(
     ...(req.maxTokens ? { maxTokens: Math.min(32_768, req.maxTokens) } : {}),
     ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
     ...(req.model === "auto" && req.routing && Object.keys(req.routing).length ? { routing: req.routing } : {}),
+    // A named model still carries the buyer's price ceiling: the coordinator caps the call's reserve at it.
+    ...(req.model !== "auto" && req.routing?.maxCSats !== undefined ? { routing: { maxCSats: req.routing.maxCSats } } : {}),
     ...(req.model === "auto" && req.routeRedirect ? { routeRedirect: true } : {}),
     ...(req.coordinatorChoice ? { coordinatorChoice: req.coordinatorChoice } : {}),
   }, signal);
