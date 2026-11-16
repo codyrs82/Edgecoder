@@ -1,0 +1,230 @@
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
+/**
+ * The lead's tentacle tools (tentacles.ts, docs/tentacles.md):
+ *
+ *   delegate({ task, kind, files[], instructions, acceptance?, complexity?, budgetCSats?, readOnly? })
+ *     → a tentacle id at once; the helper runs in parallel on a cheaper worker model.
+ *   await_tentacles({ ids?, timeoutS? })  → results as they finish (status, merge, summary, patch).
+ *   cancel_tentacle({ id })
+ *
+ * Offered only when the session has tentacles on (a session option, or EDGECODER_TENTACLES=1).
+ * They plug into a session through its TurnEnv: `withTentacleTools` adds the schemas,
+ * `tentacleExecutor` answers the calls and `withTentacleGuidance` adds the system-prompt guidance.
+ */
+
+import type { ToolRunnerDeps, ToolSchema } from "./agent-loop.js";
+import { TentacleError, TENTACLE_KINDS, formatCSatsShort, tentacleCallLine, tentacleTotals, type TentacleManager, type TentacleSpec, type TentacleView } from "./tentacles.js";
+import type { ToolName } from "./tool-types.js";
+import type { AcceptanceKind } from "./tentacle-workspace.js";
+
+const ACCEPTANCE_KINDS: readonly AcceptanceKind[] = ["vitest", "tsc", "grep", "none"];
+
+/** JSON-schema function definitions for the three tools (arrays and objects typed properly). */
+export const TENTACLE_TOOL_SCHEMAS: ToolSchema[] = [
+  {
+    type: "function",
+    function: {
+      name: "delegate",
+      description:
+        "Hand an independent, well-specified piece of work to a helper agent (a tentacle) on a cheaper, slower network model. Returns a tentacle id at once; keep working and collect the result with await_tentacles. The helper sees only the files and instructions you give, works in its own copy of the project, runs the acceptance check, and its patch is merged back when it passes.",
+      parameters: {
+        type: "object",
+        properties: {
+          task: { type: "string", description: "One line: what the helper must do." },
+          kind: { type: "string", description: `One of ${TENTACLE_KINDS.join(", ")}.` },
+          files: { type: "array", description: "Project paths the helper needs, or ranges as path#L10-L40. Keep it small.", items: { type: "string" } } as never,
+          instructions: { type: "string", description: "Everything the helper needs to know: the exact change, names, constraints, style. It can't ask you." },
+          acceptance: {
+            type: "object",
+            description: 'How to verify it: {"kind":"vitest","args":["tests/x.test.ts"]}, {"kind":"tsc"}, {"kind":"grep","args":{"pattern":"foo\\\\(","paths":["src"],"absent":false}} or {"kind":"none"}.',
+          } as never,
+          complexity: { type: "string", description: "low, medium or high (picks the worker tier)." },
+          budgetCSats: { type: "number", description: "Most this helper may spend, in cSats." },
+          readOnly: { type: "boolean", description: "True when it only reads (search, summarize, review): no workspace, no patch." },
+        },
+        required: ["task", "kind", "instructions"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "await_tentacles",
+      description: "Wait for delegated helpers and get their results as they finish (default: every one you haven't seen yet). Returns those finished so far and the ids still running; call again for the rest.",
+      parameters: {
+        type: "object",
+        properties: {
+          ids: { type: "array", description: "Tentacle ids to wait for (default: all not yet reported).", items: { type: "string" } } as never,
+          timeoutS: { type: "number", description: "Seconds to wait at most (default 120, max 600)." },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "cancel_tentacle",
+      description: "Stop a delegated helper that is no longer needed.",
+      parameters: { type: "object", properties: { id: { type: "string", description: "The tentacle id." } }, required: ["id"] },
+    },
+  },
+];
+
+/** The guidance the lead's system prompt gets when tentacles are on. */
+export const TENTACLE_GUIDANCE = `## Tentacles (helper agents)
+You can delegate work to helper agents on cheaper, slower network models with the delegate tool. Use it for independent, well-specified pieces: writing tests for a function, a contained edit to one or two files, a search across the codebase, a summary, docs, a review, one piece of a refactor. Start several at once when they don't depend on each other.
+- Keep planning, design decisions and integration yourself. Don't delegate anything you can't specify completely in the instructions; the helper sees only the files and instructions you give it and can't ask questions.
+- Give each a precise acceptance check (vitest file, tsc, or grep) so its result is verified before it is merged.
+- Helpers run on network models (never your own key), within the session's permission mode: they can't run anything the user would be asked about.
+- Continue your own work, then call await_tentacles. A passed patch that applies cleanly is merged into the project for you (or waits for the user's approval). For a conflict or a failed check you get the patch and the errors: re-delegate with better instructions, fix it yourself, or drop it.
+- End your reply with the helpers' totals line from await_tentacles (sessionTotals) so the user sees what they cost.`;
+
+export class DelegateArgsError extends Error {}
+
+const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+const strList = (v: unknown): string[] => {
+  if (Array.isArray(v)) return v.filter((x): x is string => typeof x === "string" && x.trim() !== "").map((x) => x.trim());
+  if (typeof v === "string" && v.trim()) {
+    // Small models send lists as a JSON string or a comma list.
+    try {
+      const parsed = JSON.parse(v) as unknown;
+      if (Array.isArray(parsed)) return strList(parsed);
+    } catch {
+      // not JSON
+    }
+    return v.split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
+  }
+  return [];
+};
+
+/** delegate's arguments as a spec, or a DelegateArgsError saying what is wrong. */
+export function parseDelegateArgs(args: Record<string, unknown>): TentacleSpec {
+  const task = str(args.task);
+  if (!task) throw new DelegateArgsError("task is required");
+  if (task.length > 500) throw new DelegateArgsError("task is one line (500 characters at most); put details in instructions");
+  const kind = str(args.kind) as TentacleSpec["kind"];
+  if (!TENTACLE_KINDS.includes(kind)) throw new DelegateArgsError(`kind must be one of ${TENTACLE_KINDS.join(", ")}`);
+  const instructions = str(args.instructions);
+  if (instructions.length > 20_000) throw new DelegateArgsError("instructions are too long (20,000 characters at most)");
+  const files = strList(args.files).slice(0, 40);
+  if (files.some((f) => f.startsWith("/") || f.startsWith("~") || f.split(/[\\/]/).includes(".."))) throw new DelegateArgsError("files are project-relative paths");
+  let acceptance: TentacleSpec["acceptance"];
+  let acc: unknown = args.acceptance;
+  if (typeof acc === "string" && acc.trim()) {
+    try {
+      acc = JSON.parse(acc);
+    } catch {
+      acc = { kind: (acc as string).trim() };
+    }
+  }
+  if (acc && typeof acc === "object") {
+    const a = acc as Record<string, unknown>;
+    const k = str(a.kind) as AcceptanceKind;
+    if (!ACCEPTANCE_KINDS.includes(k)) throw new DelegateArgsError(`acceptance.kind must be one of ${ACCEPTANCE_KINDS.join(", ")}`);
+    acceptance = { kind: k, ...(a.args !== undefined ? { args: a.args } : {}) };
+  }
+  const complexity = str(args.complexity);
+  if (complexity && !["low", "medium", "high"].includes(complexity)) throw new DelegateArgsError("complexity is low, medium or high");
+  const budget = args.budgetCSats === undefined || args.budgetCSats === null || args.budgetCSats === "" ? undefined : Number(args.budgetCSats);
+  if (budget !== undefined && !(Number.isFinite(budget) && budget >= 0)) throw new DelegateArgsError("budgetCSats is a number of cSats");
+  const readOnly = args.readOnly === true || args.readOnly === "true";
+  return {
+    task,
+    kind,
+    files,
+    instructions,
+    ...(acceptance ? { acceptance } : {}),
+    ...(complexity ? { complexity: complexity as TentacleSpec["complexity"] } : {}),
+    ...(budget !== undefined ? { budgetCSats: budget } : {}),
+    ...(readOnly ? { readOnly } : {}),
+  };
+}
+
+const cut = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}\n… (${s.length - n} more characters)` : s);
+
+/** One finished (or running) tentacle as the lead reads it. */
+export function describeTentacle(t: TentacleView): Record<string, unknown> {
+  const r = t.result;
+  const merge = t.merge?.state;
+  const out: Record<string, unknown> = { id: t.id, task: t.task, status: t.status };
+  if (merge) out.merge = merge;
+  if (t.status === "queued" || t.status === "running" || t.status === "verifying") {
+    out.progress = t.progress;
+    return out;
+  }
+  if (r) {
+    out.summary = cut(r.summary, 3000);
+    if (r.filesTouched.length) out.filesTouched = r.filesTouched;
+    if (r.checks.length) out.checks = r.checks.map((c) => ({ command: c.command, passed: c.passed, ...(c.passed ? {} : { output: cut(c.output, 2000) }) }));
+    out.ranOn = `${r.model} on ${r.class}`;
+    // Each model call's served line: model · class · host region · tokens · cSats.
+    if (r.calls?.length) out.served = r.calls.map(tentacleCallLine);
+    out.cSats = r.cSats;
+    if (r.unverified) out.unverified = r.unverified;
+    out.attempts = r.attempts;
+    if (r.error) out.error = r.error;
+    // The patch matters when it wasn't merged: the lead decides what to do with it.
+    if (r.patch && merge !== "applied") out.patch = cut(r.patch, 8000);
+  }
+  if (t.merge?.error) out.mergeError = cut(t.merge.error, 2000);
+  if (merge === "applied") out.note = "Merged into the project (undoable with /undo).";
+  if (merge === "awaiting_approval") out.note = "Passed and applies cleanly; waiting for the user to approve merging it.";
+  if (merge === "conflict") out.note = "Doesn't apply to the project as it is now: re-delegate, apply it yourself, or drop it.";
+  if (t.status === "failed") out.note = "Its check failed after a retry on a stronger tier: re-delegate with clearer instructions, fix it yourself, or drop it.";
+  return out;
+}
+
+/** Answer a tentacle tool call for `sessionId`; other tools go to `inner`. */
+export function tentacleExecutor(manager: TentacleManager, sessionId: string, inner: ToolRunnerDeps["execute"]): ToolRunnerDeps["execute"] {
+  return async (tool: ToolName, args, opts) => {
+    if (tool !== "delegate" && tool !== "await_tentacles" && tool !== "cancel_tentacle") return inner(tool, args, opts);
+    try {
+      if (tool === "delegate") {
+        const spec = parseDelegateArgs(args);
+        const v = manager.delegate(sessionId, spec);
+        const cfg = manager.config(sessionId);
+        const left = cfg.budgetCSats - manager.list(sessionId).spentCSats;
+        return { result: JSON.stringify({ id: v.id, status: v.status, note: `Started. ${formatCSatsShort(Math.max(0, left))} of the session's tentacle budget left. Collect it with await_tentacles.` }) };
+      }
+      if (tool === "await_tentacles") {
+        const ids = Array.isArray(args.ids) ? args.ids.filter((x): x is string => typeof x === "string") : typeof args.ids === "string" && args.ids ? args.ids.split(/[,\s]+/).filter(Boolean) : undefined;
+        const timeoutS = Number.isFinite(Number(args.timeoutS)) && args.timeoutS !== undefined ? Number(args.timeoutS) : 120;
+        const r = await manager.awaitResults(sessionId, ids, timeoutS);
+        return {
+          result: JSON.stringify({
+            finished: r.finished.map(describeTentacle),
+            stillRunning: r.pending.map((t) => ({ id: t.id, task: t.task, status: t.status, progress: t.progress })),
+            // Totals for your summary: these results, and the session's helpers so far.
+            ...(r.finished.length ? { totals: tentacleTotals(r.finished).line } : {}),
+            sessionTotals: tentacleTotals(manager.list(sessionId).tentacles).line,
+            ...(r.timedOut ? { timedOut: true } : {}),
+          }),
+        };
+      }
+      const id = String(args.id ?? "");
+      const ok = manager.cancel(sessionId, id);
+      return ok ? { result: `Cancelled ${id}.` } : { error: `No running tentacle ${id}.` };
+    } catch (err) {
+      if (err instanceof DelegateArgsError || err instanceof TentacleError) return { error: `${tool}: ${err.message}` };
+      throw err;
+    }
+  };
+}
+
+/** The session's tools plus the tentacle tools when tentacles are on. */
+export function withTentacleTools(tools: ToolSchema[] | undefined, on: boolean): ToolSchema[] | undefined {
+  if (!on || !tools) return tools;
+  return [...tools.filter((t) => !TENTACLE_TOOL_SCHEMAS.some((x) => x.function.name === t.function.name)), ...TENTACLE_TOOL_SCHEMAS];
+}
+
+/** The system prompt plus the guidance, and what finished since the lead last looked. */
+export function withTentacleGuidance(prompt: (format: "native" | "text") => string, on: boolean, unreported: TentacleView[] = []): (format: "native" | "text") => string {
+  if (!on) return prompt;
+  const status = unreported.length
+    ? `\n\nTentacles that finished since you last checked (call await_tentacles for details): ${unreported.map((t) => `${t.id} "${t.task}" ${t.status}${t.merge ? ` (${t.merge.state})` : ""}`).join("; ")}.`
+    : "";
+  return (format) => `${prompt(format)}\n\n${TENTACLE_GUIDANCE}${status}`;
+}

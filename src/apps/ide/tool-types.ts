@@ -27,7 +27,17 @@ export type ToolName =
   | "github_create_pr"
   | "github_list_prs"
   | "github_list_issues"
-  | "open_pull_request";
+  | "open_pull_request"
+  // Tentacles (delegate.ts): offered only when a session has tentacles on; never in TOOL_DEFINITIONS.
+  | "delegate"
+  | "await_tentacles"
+  | "cancel_tentacle";
+
+/**
+ * The tentacle tools (delegate.ts). They don't ask for approval: delegating runs nothing in the
+ * lead's tree, and a tentacle's patch is applied (or asked about) when it finishes (tentacles.ts).
+ */
+export const TENTACLE_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>(["delegate", "await_tentacles", "cancel_tentacle"]);
 
 /** Tools that only observe the workspace (no approval needed). */
 export const READ_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
@@ -41,6 +51,8 @@ export const READ_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
   "git_fetch",
   "github_list_prs",
   "github_list_issues",
+  // Tentacles: no approval at call time (see TENTACLE_TOOLS).
+  ...TENTACLE_TOOLS,
 ]);
 
 /** Tools that mutate the workspace or execute arbitrary commands. */

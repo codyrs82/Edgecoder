@@ -53,6 +53,10 @@ import { loadConfigOrExit } from "../../common/config.js";
 import { ideProviderConfigSchema } from "../../config/ide-provider.js";
 import { SessionHub, compactionModelOf, modelIdOf, parseModelId as parseModelIdForChat, workerModelOf, type ClientRef, type SessionData } from "./sessions.js";
 import { cliStatus, installCli } from "./cli-install.js";
+import { TentacleManager } from "./tentacles.js";
+import { tentacleExecutor, withTentacleGuidance, withTentacleTools } from "./delegate.js";
+import { registerTentacleRoutes } from "./tentacle-routes.js";
+import { chooseLeadModel, estimateTokens, parseLeadCandidates } from "./lead-model.js";
 import { registerSessionRoutes } from "./session-routes.js";
 import { hostedBackend, hostedConfigFromEnv } from "./hosted-backend.js";
 import { GitHubDeviceLogins } from "./github-device.js";
@@ -1337,21 +1341,72 @@ function sessionChat(s: SessionData, id: string, emit: (e: IdeStreamEvent) => vo
   return chatFnFor({ target: p.compute.target as "local", computeClass: p.compute.computeClass as never, reservationId: p.compute.reservationId }, model, ollamaHost, emit, signal, source, p.compute.target === "auto" && role === "lead" ? who : undefined);
 }
 
-const sessions = new SessionHub({
+// --- Tentacles (tentacles.ts, docs/tentacles.md): helper agents a session's lead delegates to ---
+
+/**
+ * A tentacle's backend: the turn hook's worker role, always on the network or this computer.
+ * `modelId` is the session's worker model (workerModelOf: never a frontier id; one that slips
+ * through becomes auto). "auto" goes to the coordinator's best-fit routing with the tentacle's job
+ * hints (job, complexity score, quality, budget): through this machine's agent, else the hosted
+ * endpoint, else Auto here. None of these paths can reach the user's frontier key.
+ */
+function tentacleWorkerBackend(modelId: string): ChatBackend {
+  const id = workerModelOf({ workerModel: modelId });
+  if (id === AUTO_MODEL_ID) {
+    if (networkDeps) return networkBackend(networkDeps, { model: AUTO_MODEL_ID, computeClass: "any", source: "edgecoder tentacle" });
+    if (hosted) return hostedBackend(hosted, AUTO_MODEL_ID);
+    return autoHere(undefined, "edgecoder tentacle");
+  }
+  const { model, compute } = parseModelIdForChat(id);
+  if (compute.target === "local") return localBackend(process.env.OLLAMA_HOST || "http://127.0.0.1:11434", model);
+  if (!networkDeps && hosted) return hostedBackend(hosted, id);
+  return runRoute({ placement: compute.target === "auto" ? "network" : (compute.target as "network"), model, cSatsPerSecond: 0, reason: "", computeClass: compute.computeClass ?? "any", reservationId: compute.reservationId }, "edgecoder tentacle");
+}
+
+const tentacles: TentacleManager = new TentacleManager({
+  host: {
+    session: (id): SessionData | null => sessions.peek(id),
+    publishEvent: (id, ev) => sessions.publishEvent(id, ev),
+    recordNote: (id, note) => sessions.recordNote(id, note),
+  },
+  workerBackend: (model) => tentacleWorkerBackend(model),
+  // Helpers run what the session's mode runs without asking (the shared classifier), never more.
+  shellAllowed: (s, command) => sessions.allowedWithoutAsking(s, "run_shell", { command }),
+  checkpoints,
+});
+
+/** The lead's model id for this turn: context graduation (lead-model.ts, EDGECODER_CONTEXT_GRADUATION=1) among network leads. */
+function graduatedLead(s: SessionData, emit: (e: IdeStreamEvent) => void): string {
+  const current = modelIdOf(s);
+  // A frontier lead has the biggest window already; graduation never picks a frontier model itself
+  // (that would spend the user's key for whoever sent the message).
+  if (process.env.EDGECODER_CONTEXT_GRADUATION !== "1" || isFrontierModelId(current)) return current;
+  const pick = chooseLeadModel({
+    current,
+    promptTokens: estimateTokens(s.transcript.filter((t) => t.role !== "note"), 12_000),
+    candidates: parseLeadCandidates(process.env.EDGECODER_LEAD_CANDIDATES).filter((c) => !isFrontierModelId(c.id)),
+    frontierLead: null,
+  });
+  if (!pick.changed) return current;
+  emit({ type: "status", message: `Context: ${pick.reason}` });
+  return pick.model;
+}
+
+const sessions: SessionHub = new SessionHub({
   chat: (s: SessionData, emit, signal, ctx) =>
-    sessionChat(s, ctx?.role === "worker" ? workerModelOf(s) : modelIdOf(s), emit, signal, ctx?.client ?? null, ctx?.role ?? "lead"),
+    sessionChat(s, ctx?.role === "worker" ? workerModelOf(s) : graduatedLead(s, emit), emit, signal, ctx?.client ?? null, ctx?.role ?? "lead"),
   owner: () => lastAccount,
   systemPrompt: async (s) => {
     const ctx = await agentPromptContext(s.compute.target === "local" ? s.model : process.env.OLLAMA_MODEL || "qwen3.5:9b");
     const rules = readProjectRules(s.projectRoot);
-    return (format) => buildIdeAgentSystemPrompt(ctx, s.projectRoot, rules, format);
+    return withTentacleGuidance((format) => buildIdeAgentSystemPrompt(ctx, s.projectRoot, rules, format), tentacles.enabled(s.id), tentacles.unreported(s.id));
   },
   executor: (s) => {
     const index = codebaseIndexFor(s.projectRoot, ollamaHostForIndex());
     const executor = new ToolExecutor(s.projectRoot, undefined, index.getStatus().state === "ready" ? async (q) => formatSearchHits(await index.search(q, 6)) : undefined);
-    return { execute: (tool, args, opts) => executor.execute(tool, args, opts), prepare: (tool, args) => preparePullRequestArgs(executor, tool, args) };
+    return { execute: tentacleExecutor(tentacles, s.id, (tool, args, opts) => executor.execute(tool, args, opts)), prepare: (tool, args) => preparePullRequestArgs(executor, tool, args) };
   },
-  tools: (s) => (hasGitHubOrigin(s.projectRoot) ? toolSchemas() : toolSchemas().filter((t) => t.function.name !== "open_pull_request")),
+  tools: (s) => withTentacleTools(hasGitHubOrigin(s.projectRoot) ? toolSchemas() : toolSchemas().filter((t) => t.function.name !== "open_pull_request"), tentacles.enabled(s.id)),
   checkpoints,
   branch: currentBranch,
   contextWindow: async (s) => {
@@ -1381,8 +1436,10 @@ const sessions = new SessionHub({
     });
     return r.content.trim() || null;
   },
+  onSessionStop: (id) => void tentacles.cancelAll(id),
 });
 registerSessionRoutes(app, sessions);
+registerTentacleRoutes(app, sessions, tentacles);
 app.addHook("onReady", async () => {
   sessions.load();
   void machineAccount();

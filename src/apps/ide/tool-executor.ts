@@ -574,6 +574,11 @@ export class ToolExecutor {
           return await this.githubListIssues(args);
         case "open_pull_request":
           return await this.openPullRequest(args, opts.approved === true);
+        case "delegate":
+        case "await_tentacles":
+        case "cancel_tentacle":
+          // Answered by the session's tentacle executor (delegate.ts) before reaching here.
+          return { error: `${tool} isn't available here (tentacles are off for this session).` };
         default: {
           const _exhaustive: never = tool;
           return { error: `Unknown tool: ${_exhaustive}` };
