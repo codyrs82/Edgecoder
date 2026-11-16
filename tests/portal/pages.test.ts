@@ -19,6 +19,7 @@ const PAGES: Record<string, string> = {
   "/portal/settings/nodes": "EdgeCoder Portal | Settings",
   "/portal/settings/admin": "EdgeCoder Portal | Settings",
   "/portal/settings/network": "EdgeCoder Portal | Settings",
+  "/portal/settings/world": "EdgeCoder Portal | Settings",
   "/portal/reviews": "EdgeCoder Portal | Reviews"
 };
 
