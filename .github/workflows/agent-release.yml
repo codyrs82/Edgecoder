@@ -39,7 +39,7 @@ jobs:
         include:
           - { target: linux-x64, os: ubuntu-22.04 }
           - { target: linux-arm64, os: ubuntu-22.04-arm }
-          - { target: darwin-arm64, os: macos-14 }
+          - { target: darwin-arm64, os: macos-15 }
           - { target: darwin-x64, os: macos-15-intel }
           - { target: win-x64, os: windows-latest }
     runs-on: ${{ matrix.os }}
