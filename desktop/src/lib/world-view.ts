@@ -1,6 +1,76 @@
-// The Network page's world view (GET /v1/ide/network/world): latency estimates, sorting,
-// filtering and the hub-and-spoke graph layout. Framework-free, so it is unit-tested directly.
-import type { WorldAgent, WorldCoordinator, WorldStatus, WorldView } from "./api";
+// Copyright (c) 2025 EdgeCoder, LLC
+// SPDX-License-Identifier: BUSL-1.1
+
+/**
+ * The Network page's world view (the coordinator's GET /network/world, anonymized): latency
+ * estimates, sorting, filtering and the hub-and-spoke graph layout. Framework-free and pure.
+ *
+ * Shared by the desktop app (Settings > Network, desktop/src/lib/world-view.ts) and the portal
+ * (Settings > Network, src/portal/pages/settings-world.ts). Kept byte-identical in
+ * src/common/world-view.ts and desktop/src/lib/world-view.ts (the desktop app does not import
+ * from src/); tests/common/world-view.test.ts checks the two match. Self-contained on purpose:
+ * the portal ships these functions to the browser via Function.prototype.toString, so every
+ * function is a declaration and every constant it reads is exported (WORLD_VIEW_BROWSER_SCRIPT
+ * in the portal lists them).
+ */
+
+// ── Types (the answer of /network/world, plus this computer's round trips) ──
+
+export type WorldStatus = "idle" | "busy" | "stale";
+export interface WorldAgent {
+  /** Opaque stable id (a keyed hash), for keys only. */
+  id: string;
+  /** Masked label, e.g. "mac-•••3f2a". */
+  label: string;
+  /** Your machine: `name` is its real name. */
+  mine: boolean;
+  name?: string;
+  os: string;
+  region: string | null;
+  country: string | null;
+  continent: string | null;
+  computeClass: string;
+  tier: string | null;
+  vramGb: number | null;
+  models: string[];
+  modelsTotal: number;
+  activeModel: string | null;
+  status: WorldStatus;
+  slots: number;
+  slotsUsed: number;
+  coordinatorId: string;
+  /** The coordinator's measured round trip to this machine (WebSocket pings), ms. */
+  rttMs: number | null;
+}
+export interface WorldCoordinator {
+  id: string;
+  url: string;
+  region: string | null;
+  country: string | null;
+  continent: string | null;
+  agents: number;
+  agentsOnline: number;
+  reachable: boolean;
+  self: boolean;
+  /** This computer's measured round trip to the coordinator, ms (null: not measured or no answer). */
+  myRttMs?: number | null;
+}
+export interface WorldView {
+  connected: boolean;
+  reason?: string;
+  generatedAtMs: number;
+  servedBy: string;
+  coordinators: WorldCoordinator[];
+  links: Array<{ from: string; to: string; rttMs: number | null }>;
+  agents: WorldAgent[];
+  models: Array<{ model: string; agents: number; online: number }>;
+  totals: { coordinators: number; agents: number; online: number; busy: number; mine: number; models: number; slots: number; slotsUsed: number };
+  truncated: boolean;
+  /** This computer's agent id (its entry is one of `mine`). */
+  selfAgentId?: string;
+}
+
+// ── Estimates, sorting, filtering ──
 
 /**
  * Estimated round trip from this computer to a machine: this computer's measured round trip to
@@ -25,7 +95,7 @@ export function formatMs(ms: number | null | undefined, estimate = false): strin
   return `${estimate ? "~" : ""}${Math.round(ms)} ms`;
 }
 
-const CONTINENTS: Record<string, string> = { NA: "North America", SA: "South America", EU: "Europe", AF: "Africa", AS: "Asia", OC: "Oceania" };
+export const CONTINENTS: Record<string, string> = { NA: "North America", SA: "South America", EU: "Europe", AF: "Africa", AS: "Asia", OC: "Oceania" };
 export function continentName(code: string | null): string {
   return code ? CONTINENTS[code] ?? code : "Unknown";
 }
@@ -43,7 +113,7 @@ export function displayName(a: WorldAgent, selfAgentId?: string): string {
 }
 
 export type SortKey = "latency" | "region" | "model" | "status";
-const STATUS_ORDER: Record<WorldStatus, number> = { busy: 0, idle: 1, stale: 2 };
+export const STATUS_ORDER: Record<WorldStatus, number> = { busy: 0, idle: 1, stale: 2 };
 
 export interface WorldRow {
   agent: WorldAgent;
@@ -55,7 +125,7 @@ export function rowsFor(view: Pick<WorldView, "agents" | "coordinators">): World
   return view.agents.map((agent) => ({ agent, estimateMs: estimateMs(agent, coords) }));
 }
 
-function primaryModel(a: WorldAgent): string {
+export function primaryModel(a: WorldAgent): string {
   return a.activeModel ?? a.models[0] ?? "￿";
 }
 
@@ -127,13 +197,13 @@ export interface WorldLayout {
 }
 
 /** West to east, so the hubs sit roughly where they are. */
-const CONTINENT_X: Record<string, number> = { NA: 0, SA: 1, EU: 2, AF: 3, AS: 4, OC: 5 };
+export const CONTINENT_X: Record<string, number> = { NA: 0, SA: 1, EU: 2, AF: 3, AS: 4, OC: 5 };
 
 export const RING_MIN = 46;
 export const RING_MAX = 138;
-const CELL = 2 * RING_MAX + 64;
-const MS_LO = 5;
-const MS_HI = 400;
+export const CELL = 2 * RING_MAX + 64;
+export const MS_LO = 5;
+export const MS_HI = 400;
 
 /** Distance from the hub for a round trip: log scale from MS_LO (RING_MIN) to MS_HI (RING_MAX); unknown at the edge. */
 export function ringRadius(ms: number | null): number {
