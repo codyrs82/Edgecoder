@@ -3,7 +3,6 @@
   import type { AuthUser } from "../lib/api";
   import { open } from "@tauri-apps/plugin-shell";
   import { portalResetPasswordUrl, portalUrl } from "../lib/endpoints";
-  import { NOTICES } from "../lib/legal-notices";
   import { oauthOutcomeFromUrl } from "../lib/oauth-outcome";
 
   interface Props {
@@ -197,7 +196,6 @@
             <button type="button" class="link-btn" onclick={() => openLegal("/privacy")}>Privacy Policy</button> and
             <button type="button" class="link-btn" onclick={() => openLegal("/acceptable-use")}>Acceptable Use Policy</button></span>
         </label>
-        <p class="legal-note">{NOTICES.draft}</p>
         <button type="submit" class="btn-primary" disabled={submitting || !acceptTerms} aria-busy={submitting}>
           {submitting ? "Creating account…" : "Create account"}
         </button>
