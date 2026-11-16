@@ -30,6 +30,7 @@ import { Worker } from "node:worker_threads";
 import { request } from "undici";
 import { catalogEntryForTag } from "../model/catalog.js";
 import { MIN_CONTEXT_WINDOW } from "../inference-api/ollama.js";
+import { engineGenerate, type OpenAiEngine } from "../inference-api/openai-engine.js";
 
 /** scrypt cost of one CPU work unit. Changing it changes every tier minimum; bump the prefix with it. */
 export const CPU_WORK = { N: 2048, r: 8, p: 1, keylen: 16, prefix: "edgecoder-bench-v1:" } as const;
@@ -397,7 +398,13 @@ export const LOCAL_BENCH_TIMEOUT_MS = 60_000;
  * after a model load can stall for tens of seconds (kernel set-up, a host still busy starting), and
  * timing it, under a 20 s limit, reported a working GPU as having no GPU result at all (gpu=-).
  */
-export async function runLocalBenchmark(opts: { cpuBudgetMs?: number; threads?: number; ollama?: { host?: string; model: string; timeoutMs?: number; warmupTimeoutMs?: number; numCtx?: number } }): Promise<AgentBenchmarkReport> {
+export async function runLocalBenchmark(opts: {
+  cpuBudgetMs?: number;
+  threads?: number;
+  ollama?: { host?: string; model: string; timeoutMs?: number; warmupTimeoutMs?: number; numCtx?: number };
+  /** vLLM / MLX instead of Ollama: `model` is the served id, `tag` its catalog tag (what is reported). */
+  engine?: { engine: OpenAiEngine; model: string; tag: string; timeoutMs?: number; warmupTimeoutMs?: number };
+}): Promise<AgentBenchmarkReport> {
   const t0 = Date.now();
   const errors: string[] = [];
   const report: AgentBenchmarkReport = { version: 1, ranAtMs: t0, durationMs: 0 };
@@ -414,7 +421,20 @@ export async function runLocalBenchmark(opts: { cpuBudgetMs?: number; threads?: 
   } catch (e) {
     errors.push(`cpu:${String(e).slice(0, 80)}`);
   }
-  if (opts.ollama?.model) {
+  if (opts.engine) {
+    const { engine, model, tag } = opts.engine;
+    try {
+      await engineGenerate(engine, { model, prompt: "Say OK.", seed: 7, maxTokens: 4, timeoutMs: opts.engine.warmupTimeoutMs ?? LOCAL_BENCH_WARMUP_TIMEOUT_MS });
+    } catch (e) {
+      errors.push(`gpu_warmup:${String(e).slice(0, 80)}`);
+    }
+    try {
+      const gen = await engineGenerate(engine, { model, prompt: inferencePrompt(LOCAL_BENCH_SEED, 12), seed: 7, maxTokens: 192, timeoutMs: opts.engine.timeoutMs ?? LOCAL_BENCH_TIMEOUT_MS });
+      report.gpu = gpuReport(tag, gen);
+    } catch (e) {
+      errors.push(`gpu:${String(e).slice(0, 80)}`);
+    }
+  } else if (opts.ollama?.model) {
     const { host, model } = opts.ollama;
     try {
       // Warm-up (not timed): loads the model if needed and runs the first generation's set-up.
@@ -424,15 +444,7 @@ export async function runLocalBenchmark(opts: { cpuBudgetMs?: number; threads?: 
     }
     try {
       const gen = await ollamaGenerate({ host, model, prompt: inferencePrompt(LOCAL_BENCH_SEED, 12), seed: 7, numPredict: 192, timeoutMs: opts.ollama.timeoutMs ?? LOCAL_BENCH_TIMEOUT_MS, numCtx: opts.ollama.numCtx });
-      const tokens = estimateTokens(gen.response, gen.evalCount);
-      const tps = gen.evalDurationMs && gen.evalDurationMs > 0 ? (tokens / gen.evalDurationMs) * 1000 : 0;
-      const size = modelWeightsGb(model);
-      report.gpu = {
-        model,
-        tokensPerSec: Number(tps.toFixed(1)),
-        evalTokens: tokens,
-        ...(size ? { weightsGb: size.weightsGb, bandwidthGbps: Number((tps * size.weightsGb).toFixed(1)) } : {})
-      };
+      report.gpu = gpuReport(model, gen);
     } catch (e) {
       errors.push(`gpu:${String(e).slice(0, 80)}`);
     }
@@ -448,14 +460,44 @@ export async function runLocalBenchmark(opts: { cpuBudgetMs?: number; threads?: 
   return report;
 }
 
+/** The self-benchmark's GPU line from one timed generation. */
+function gpuReport(model: string, gen: { response: string; evalCount?: number; evalDurationMs?: number }): NonNullable<AgentBenchmarkReport["gpu"]> {
+  const tokens = estimateTokens(gen.response, gen.evalCount);
+  const tps = gen.evalDurationMs && gen.evalDurationMs > 0 ? (tokens / gen.evalDurationMs) * 1000 : 0;
+  const size = modelWeightsGb(model);
+  return {
+    model,
+    tokensPerSec: Number(tps.toFixed(1)),
+    evalTokens: tokens,
+    ...(size ? { weightsGb: size.weightsGb, bandwidthGbps: Number((tps * size.weightsGb).toFixed(1)) } : {})
+  };
+}
+
 /** Answer a coordinator challenge. Never throws: failures come back as `declined`. */
-export async function answerChallenge(challenge: BenchmarkChallenge, ctx: { ollamaHost?: string; threads?: number; numCtx?: number }): Promise<ChallengeResponse> {
+export async function answerChallenge(
+  challenge: BenchmarkChallenge,
+  ctx: {
+    ollamaHost?: string;
+    threads?: number;
+    numCtx?: number;
+    /** vLLM / MLX instead of Ollama: the served id for the challenge's catalog tag (undefined = not served). */
+    engine?: { engine: OpenAiEngine; servedModelFor: (tag: string) => string | undefined };
+  }
+): Promise<ChallengeResponse> {
   const t0 = Date.now();
   const base = { challengeId: challenge.challengeId, kind: challenge.kind };
   try {
     if (challenge.kind === "cpu") {
       const r = await solveCpuWork(challenge, { threads: ctx.threads });
       return { ...base, solutions: r.solutions, elapsedMs: Date.now() - t0 };
+    }
+    // Answer even when slow: a late answer is still a measurement (it demotes instead of passing).
+    const timeoutMs = Math.min(5 * 60_000, Math.max(30_000, challenge.deadlineMs * 3));
+    if (ctx.engine) {
+      const served = ctx.engine.servedModelFor(challenge.model);
+      if (!served) return { ...base, elapsedMs: Date.now() - t0, declined: "model_unavailable" };
+      const gen = await engineGenerate(ctx.engine.engine, { model: served, prompt: inferencePrompt(challenge.nonce, challenge.lines), seed: challenge.seed, maxTokens: challenge.numPredict, timeoutMs });
+      return { ...base, output: gen.response.slice(0, 16_000), evalCount: gen.evalCount, evalDurationMs: gen.evalDurationMs, elapsedMs: Date.now() - t0 };
     }
     if (!(await ollamaHasModel(ctx.ollamaHost, challenge.model))) return { ...base, elapsedMs: Date.now() - t0, declined: "model_unavailable" };
     const gen = await ollamaGenerate({
@@ -464,8 +506,7 @@ export async function answerChallenge(challenge: BenchmarkChallenge, ctx: { olla
       prompt: inferencePrompt(challenge.nonce, challenge.lines),
       seed: challenge.seed,
       numPredict: challenge.numPredict,
-      // Answer even when slow: a late answer is still a measurement (it demotes instead of passing).
-      timeoutMs: Math.min(5 * 60_000, Math.max(30_000, challenge.deadlineMs * 3)),
+      timeoutMs,
       numCtx: ctx.numCtx
     });
     return { ...base, output: gen.response.slice(0, 16_000), evalCount: gen.evalCount, evalDurationMs: gen.evalDurationMs, elapsedMs: Date.now() - t0 };

@@ -70,6 +70,29 @@ export const workerConfigSchema = z.object({
   LOCAL_MODEL_PROVIDER: envEnum(["edgecoder-local", "ollama-local"]).default("edgecoder-local"),
   OLLAMA_MODEL: z.string().default("qwen3.5:9b"),
   OLLAMA_AUTO_INSTALL: envFlag({ on: ["true"] }),
+  /**
+   * Engine that runs the model (src/inference-api/openai-engine.ts): ollama (default), vllm
+   * (datacenter NVIDIA GPUs) or mlx (mlx_lm.server on Apple silicon). vLLM and MLX are started on
+   * their own (docs/inference-engines.md); the agent checks they are up and serve a catalog model,
+   * and never pulls or switches models in them. Keep LOCAL_MODEL_PROVIDER=ollama-local with them.
+   */
+  EDGECODER_ENGINE: envEnumCi(["ollama", "vllm", "mlx"]),
+  /** vLLM's OpenAI-compatible server. Default http://127.0.0.1:8000. */
+  VLLM_URL: envUrl(),
+  /** vLLM --api-key, when the server was started with one. */
+  VLLM_API_KEY: str(),
+  /** Served model id to use (one of /v1/models); unset = the first served catalog model. */
+  VLLM_MODEL: str(),
+  /** Model calls at once (1-16); unset = derived from vLLM's KV cache (src/swarm/engine-probe.ts). */
+  VLLM_MAX_SLOTS: envInt(undefined, { min: 1, max: 16 }),
+  /** mlx_lm.server. Default http://127.0.0.1:8080. */
+  MLX_URL: envUrl(),
+  /** The MLX model id the server was started with (--model); its /v1/models lists every cached model. */
+  MLX_MODEL: str(),
+  /** Model calls at once (1-16); default 1 (mlx-lm batches only from 0.28.4, and only calls without a seed). */
+  MLX_MAX_SLOTS: envInt(undefined, { min: 1, max: 16 }),
+  /** Served id → catalog tag for names the built-in table does not know: "Org/Repo=qwen3-coder:30b,…". */
+  ENGINE_MODEL_ALIASES: z.string().trim().max(4000).optional(),
   /** 1-16 concurrent model calls; unset or out of range = by installed memory (src/swarm/parallelism.ts). */
   AGENT_PARALLEL_INFERENCE: envInt(undefined, { min: 0 }),
   /**

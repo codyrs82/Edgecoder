@@ -6,7 +6,8 @@
 import { cpus } from "node:os";
 import type { ServedBy } from "../swarm/served-by.js";
 import { AutoUnsupportedError, NetworkInferenceError, RouteElsewhereError, streamNetworkCompletion, type NetworkDeps, type NetworkTarget } from "../apps/ide/network-inference.js";
-import { contextWindowFor, ollamaChat } from "./ollama.js";
+import { contextWindowFor, ollamaChat, type OllamaPiece } from "./ollama.js";
+import { ENGINE_PRESETS, EngineError, openAiEngineChat, type OpenAiEngine } from "./openai-engine.js";
 import { noRouteMessage, planRoutes, sizeWorkload, type ComputePolicy, type PlanOptions, type QualityFloor, type Route, type RouteInputs } from "./auto-route.js";
 import { ChatBackendError, type ChatBackend, type ChatPiece } from "./types.js";
 
@@ -44,6 +45,31 @@ export function localBackend(ollamaHost: string, model: string): ChatBackend {
       throw new ChatBackendError(msg, 502);
     }
     yield { done: true, cSatsSpent: 0, stopReason: stopped === "length" ? "length" : "stop", ...tokens, served: thisComputer({ ...tokens, ...timing }) };
+  };
+}
+
+/**
+ * This machine's vLLM or MLX server (src/inference-api/openai-engine.ts) as a chat backend, the
+ * counterpart of localBackend: `model` is the served id (e.g. an mlx-community repo). Free, like
+ * Ollama. Not wired into the desktop yet (it still manages Ollama).
+ */
+export function localEngineBackend(engine: OpenAiEngine, model: string): ChatBackend {
+  return async function* (req, signal) {
+    const label = ENGINE_PRESETS[engine.preset].label;
+    let end: Extract<OllamaPiece, { doneReason: string }> | undefined;
+    try {
+      for await (const p of openAiEngineChat(engine, { model, messages: req.messages, tools: req.tools, maxTokens: req.maxTokens, temperature: req.temperature }, signal)) {
+        if ("doneReason" in p) end = p;
+        else yield p;
+      }
+    } catch (err) {
+      const msg = (err as Error).message ?? String(err);
+      if (err instanceof EngineError) throw new ChatBackendError(err.contextOverflow ? `context_too_long: ${msg}` : msg, err.contextOverflow ? 413 : err.status === 404 ? 404 : 502);
+      if (/ECONNREFUSED|fetch failed|connect/i.test(msg)) throw new ChatBackendError(`${label} isn't running on this computer (${engine.url}).`, 503);
+      throw new ChatBackendError(msg, 502);
+    }
+    const tokens = { ...(end?.promptTokens !== undefined ? { promptTokens: end.promptTokens } : {}), ...(end?.outputTokens !== undefined ? { outputTokens: end.outputTokens } : {}) };
+    yield { done: true, cSatsSpent: 0, stopReason: end?.doneReason === "length" ? "length" : "stop", ...tokens, served: thisComputer({ ...tokens, promptMs: end?.promptMs, genMs: end?.genMs }) };
   };
 }
 

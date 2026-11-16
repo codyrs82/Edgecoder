@@ -160,6 +160,7 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       localModelCatalog: reportedModels.length ? reportedModels : body.localModelProvider === "ollama-local" ? [OLLAMA_MODEL] : ["edgecoder-default"],
       modelsReported: reportedModels.length > 0,
       ...(body.activeModel || reportedModels.length ? { activeModel: body.activeModel ?? reportedModels[0] } : {}),
+      ...(body.inferenceEngine && body.inferenceEngine !== "ollama" ? { inferenceEngine: body.inferenceEngine, ...(body.engineModel ? { engineModel: body.engineModel } : {}) } : {}),
       clientType: body.clientType,
       swarmEnabled: true,
       ideEnabled: body.mode === "ide-enabled",

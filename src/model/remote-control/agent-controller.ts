@@ -45,6 +45,8 @@ export interface ModelControlAgentDeps {
   localUi?: boolean;
   /** Ollama's server-side OLLAMA_NUM_PARALLEL, when known. */
   ollamaNumParallel?: number;
+  /** Further notes for the portal (e.g. "the model is served by vLLM"). */
+  extraNotes?: () => string[];
   now?: () => number;
   log?: (message: string) => void;
 }
@@ -306,6 +308,7 @@ export class ModelControlAgent {
     if (!this.deps.enabled) notes.push("Remote control is off on this host (AGENT_REMOTE_CONTROL=off): view only");
     if (this.deps.ollamaNumParallel === undefined) notes.push("Parallel slots above Ollama's OLLAMA_NUM_PARALLEL queue inside Ollama; that limit is a server setting (re-run the installer with --parallel N)");
     if (this.deps.localUi) notes.push("This machine's own app owns its settings: a change made there replaces a remote one");
+    notes.push(...(this.deps.extraNotes?.() ?? []));
     return {
       remoteControl: this.deps.enabled ? "on" : "off",
       ollamaVersion: version,

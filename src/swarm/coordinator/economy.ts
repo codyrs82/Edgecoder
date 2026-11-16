@@ -130,7 +130,10 @@ export function benchmarkModelFor(agentId: string): string | undefined {
 }
 /**
  * A witness for a GPU cross-check, picked uniformly at random among the eligible agents:
- * - online, not blacklisted, and running the challenge's model;
+ * - online, not blacklisted, and running the challenge's model on the same engine as the subject
+ *   (Ollama, vLLM or MLX), and on vLLM / MLX the same served weights (engineModel: an AWQ and an
+ *   FP8 build of one model give different greedy text, so comparing them would read an honest
+ *   agent as a mismatch and strike an honest witness);
  * - eligible on its own verification record (hardwareVerifier.canWitness): a passed GPU challenge
  *   and a clean enough witness record (few disagreements, strikes under the threshold);
  * - independent of the subject and of every agent in `exclude` (earlier witnesses of the same
@@ -140,6 +143,12 @@ export function benchmarkModelFor(agentId: string): string | undefined {
  * overrules are struck.
  */
 export function pickBenchmarkWitness(subjectId: string, model: string, nowMs: number, exclude: string[] = [], pick: (n: number) => number = randomInt): string | undefined {
+  const engineOf = (id: string) => {
+    const cap = agentCapabilities.get(id);
+    const engine = cap?.inferenceEngine ?? "ollama";
+    return engine === "ollama" ? engine : `${engine}:${(cap?.engineModel ?? "").toLowerCase()}`;
+  };
+  const subjectEngine = engineOf(subjectId);
   const others = [subjectId, ...exclude].map((id) => {
     const cap = agentCapabilities.get(id);
     return { id, owner: cap?.ownerEmail, net: ipNetworkPrefix(cap?.sourceIp) };
@@ -149,7 +158,7 @@ export function pickBenchmarkWitness(subjectId: string, model: string, nowMs: nu
     if (nowMs - cap.lastSeenMs > 2 * 60_000 || activeBlacklistRecord(id)) continue;
     const net = ipNetworkPrefix(cap.sourceIp);
     if (others.some((o) => o.id === id || (o.owner && cap.ownerEmail === o.owner) || (o.net && net === o.net))) continue;
-    if (benchmarkModelFor(id) !== model || !hardwareVerifier.canWitness(id, nowMs)) continue;
+    if (benchmarkModelFor(id) !== model || engineOf(id) !== subjectEngine || !hardwareVerifier.canWitness(id, nowMs)) continue;
     candidates.push(id);
   }
   return candidates.length ? candidates[pick(candidates.length)] : undefined;
