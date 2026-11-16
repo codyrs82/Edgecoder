@@ -89,7 +89,44 @@ const md = new Marked({
   },
 });
 
+/** How much of one message is rendered as markdown: its start and its latest part. */
+export const MAX_MARKDOWN = 8_000;
+const MARKDOWN_HEAD = 2_000;
+export const TRIMMED_TEXT = "… (earlier output trimmed) …";
+
+/**
+ * A message within MAX_MARKDOWN: its start, the trim marker, and its latest part. marked's
+ * emphasis parsing grows quadratically on some model output (code like `self._x`, a small model
+ * writing whole files as text), and a reply of a few hundred KB pinned the app for minutes.
+ * Text already trimmed (the bots server trims stored replies) keeps its own head.
+ */
+export function capMarkdownSource(text: string, max = MAX_MARKDOWN): string {
+  if (text.length <= max) return text;
+  const cut = text.indexOf(TRIMMED_TEXT);
+  const head = cut >= 0 && cut <= MARKDOWN_HEAD ? text.slice(0, cut).trimEnd() : text.slice(0, MARKDOWN_HEAD);
+  const sep = `\n\n${TRIMMED_TEXT}\n\n`;
+  return head + sep + text.slice(text.length - Math.max(0, max - head.length - sep.length));
+}
+
+/**
+ * Rendered HTML by source text (at most MAX_MARKDOWN long, so keys stay small). Views re-create
+ * message components (switching chats, a stream tick re-rendering the list); an unchanged message
+ * is then never parsed again. Least recently used entries go first.
+ */
+const rendered = new Map<string, string>();
+const MAX_RENDERED = 300;
+
 /** Chat markdown as HTML that is safe to insert into the app. */
 export function renderMarkdown(source: string): string {
-  return md.parse(source, { async: false }) as string;
+  const src = capMarkdownSource(source);
+  const hit = rendered.get(src);
+  if (hit !== undefined) {
+    rendered.delete(src);
+    rendered.set(src, hit);
+    return hit;
+  }
+  const html = md.parse(src, { async: false }) as string;
+  rendered.set(src, html);
+  if (rendered.size > MAX_RENDERED) rendered.delete(rendered.keys().next().value!);
+  return html;
 }

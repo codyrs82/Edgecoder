@@ -448,23 +448,8 @@ export function foldBotReply(events: IdeStreamEvent[] | undefined, pendingCallId
   return turn;
 }
 
-/** How much of one bot reply the page renders as markdown (its start and its latest part). */
-export const MAX_SHOWN_REPLY = 8_000;
-const SHOWN_HEAD = 2_000;
-export const REPLY_TRIMMED_TEXT = "… (earlier output trimmed) …";
-
-/**
- * A reply's text as the page shows it. Markdown parsing grows faster than linearly on some model
- * output (a small model writing whole files as text tool calls), so a reply of hundreds of KB
- * froze the page; the server trims new replies too, this covers ones stored before that.
- */
-export function shownReplyText(text: string, max = MAX_SHOWN_REPLY): string {
-  if (text.length <= max) return text;
-  const cut = text.indexOf(REPLY_TRIMMED_TEXT);
-  const head = cut >= 0 && cut <= SHOWN_HEAD ? text.slice(0, cut).trimEnd() : text.slice(0, SHOWN_HEAD);
-  const sep = `\n\n${REPLY_TRIMMED_TEXT}\n\n`;
-  return head + sep + text.slice(text.length - Math.max(0, max - head.length - sep.length));
-}
+/** How much of one bot reply the page renders as markdown (the same cap as every chat view). */
+export { MAX_MARKDOWN as MAX_SHOWN_REPLY, TRIMMED_TEXT as REPLY_TRIMMED_TEXT, capMarkdownSource as shownReplyText } from "./markdown";
 
 /**
  * The runs list as the page shows it: the history, reconciled with the bot's last run (it comes
