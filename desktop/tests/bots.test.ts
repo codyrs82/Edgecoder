@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { autoStatus, checksIn, routineText, botCompute, botInitial, botStatusLine, readableSummary, botTitle, budgetText, computeText, failureNotice, foldBotReply, folderName, formatCSats, groupsOf, relativeTime, scheduleText, statusChip, toolsFor, type Bot } from "../src/lib/bots";
+import { autoStatus, checksIn, routineText, botCompute, botInitial, botStatusLine, readableSummary, reconcileRuns, shownReplyText, MAX_SHOWN_REPLY, REPLY_TRIMMED_TEXT, botTitle, budgetText, computeText, failureNotice, foldBotReply, folderName, formatCSats, groupsOf, relativeTime, scheduleText, statusChip, toolsFor, type Bot } from "../src/lib/bots";
 
 describe("bot header helpers", () => {
   it("status chip, folder name and compute text", () => {
@@ -140,5 +140,30 @@ describe("bots helpers", () => {
     expect(turn.turnId).toBe("run_1");
     const status = Object.fromEntries(turn.toolEvents.filter((e) => e.type === "tool_call").map((e) => [e.id, e.approval_status]));
     expect(status).toEqual({ a: "approved", b: "approved", c: "pending" });
+  });
+});
+
+describe("the bot page's bounded views", () => {
+  it("shows a long reply as its start and latest part", () => {
+    expect(shownReplyText("short")).toBe("short");
+    const long = "Start." + " self._cache".repeat(10_000) + "\n\nAll done.";
+    const shown = shownReplyText(long);
+    expect(shown.length).toBeLessThanOrEqual(MAX_SHOWN_REPLY);
+    expect(shown.startsWith("Start.")).toBe(true);
+    expect(shown.endsWith("All done.")).toBe(true);
+    expect(shown).toContain(REPLY_TRIMMED_TEXT);
+    // Text the server already trimmed keeps its own head.
+    const serverTrimmed = "Head." + `\n\n${REPLY_TRIMMED_TEXT}\n\n` + "y".repeat(20_000);
+    expect(shownReplyText(serverTrimmed).split(REPLY_TRIMMED_TEXT)).toHaveLength(2);
+    expect(shownReplyText(serverTrimmed).startsWith("Head.")).toBe(true);
+  });
+
+  it("reconciles the runs list with the bot's last run", () => {
+    const run = (id: string, status: "done" | "running" = "done") => ({ id, trigger: "schedule" as const, startedAtMs: 0, status, summary: "", cSats: 0 });
+    expect(reconcileRuns([], undefined)).toEqual([]);
+    expect(reconcileRuns([], run("a")).map((r) => r.id)).toEqual(["a"]);
+    expect(reconcileRuns([run("b")], run("a")).map((r) => r.id)).toEqual(["a", "b"]);
+    const fresher = run("b", "running");
+    expect(reconcileRuns([run("b"), run("c")], fresher)).toEqual([fresher, run("c")]);
   });
 });

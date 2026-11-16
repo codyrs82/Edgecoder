@@ -1,10 +1,10 @@
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Fastify from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import { FALLBACK_NOTE } from "../../src/inference-api/auto-route.js";
-import { BotManager, agentBotRunner, botComputeChat, nextRunAt, parseSchedule, registerBotRoutes, summarize, type BotRunContext, type BotRunner } from "../../src/apps/ide/bots.js";
+import { BotManager, MAX_REPLY_TEXT, REPLY_TRIMMED, agentBotRunner, botComputeChat, nextRunAt, parseSchedule, registerBotRoutes, summarize, type BotRunContext, type BotRunner } from "../../src/apps/ide/bots.js";
 import type { ChatFn } from "../../src/apps/ide/agent-loop.js";
 
 const dir = () => mkdtempSync(join(tmpdir(), "bots-"));
@@ -258,6 +258,44 @@ describe("agentBotRunner", () => {
     expect(JSON.stringify(results)).toContain("ran run_shell approved=true");
     // git_push isn't allowed for this bot: refused without running.
     expect(JSON.stringify(reply.events)).not.toContain("ran git_push");
+  });
+});
+
+describe("bounded replies (the bot page froze rendering a huge one)", () => {
+  it("keeps a streamed reply to its start and its latest part", async () => {
+    const m = manager(async (ctx) => {
+      ctx.sendEvent({ type: "text", content: "I'll start by checking the project." });
+      // A small model writing whole files as text tool calls, token by token.
+      for (let i = 0; i < 20_000; i++) ctx.sendEvent({ type: "text", content: " self._cache" });
+      ctx.sendEvent({ type: "text", content: "\n\nAll done." });
+    });
+    const bot = m.create({ name: "B", projectRoot: dir() });
+    m.runNow(bot.id);
+    await m.idle(bot.id);
+    const reply = m.messages(bot.id).at(-1)!;
+    const text = reply.events!.filter((e) => e.type === "text").map((e) => String(e.content)).join("");
+    expect(text.length).toBeLessThan(MAX_REPLY_TEXT * 2);
+    expect(reply.content.length).toBeLessThan(MAX_REPLY_TEXT * 2);
+    expect(text.startsWith("I'll start by checking the project.")).toBe(true);
+    expect(text).toContain(REPLY_TRIMMED);
+    expect(text.endsWith("All done.")).toBe(true);
+    expect(m.history(bot.id)[0].summary).toBe("All done.");
+  });
+
+  it("trims a conversation saved before the limit when it's read", () => {
+    const file = join(dir(), "bots.json");
+    const m = manager(gatedRunner().runner, { file });
+    const bot = m.create({ name: "Harry", projectRoot: dir() });
+    const big = "x ".repeat(200_000);
+    const botDir = join(file, "..", "bots", bot.id);
+    mkdirSync(botDir, { recursive: true });
+    writeFileSync(join(botDir, "conversation.json"), JSON.stringify({ messages: [{ id: "m1", role: "assistant", content: big, atMs: 0, runId: "r1", events: [{ type: "text", content: big }] }] }));
+    const m2 = manager(gatedRunner().runner, { file });
+    m2.load();
+    const [reply] = m2.messages(bot.id);
+    expect(reply.content.length).toBeLessThanOrEqual(MAX_REPLY_TEXT);
+    expect(String(reply.events![0].content).length).toBeLessThanOrEqual(MAX_REPLY_TEXT);
+    expect(JSON.stringify(m2.messages(bot.id)).length).toBeLessThan(3 * MAX_REPLY_TEXT);
   });
 });
 

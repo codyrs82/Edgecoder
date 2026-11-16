@@ -261,8 +261,13 @@
   $effect(() => {
     if (!user) return;
     let stop: (() => void) | undefined;
-    backendReady.then(() => { stop = pollBots(); });
-    return () => stop?.();
+    let ended = false;
+    // A sign-in change before the backend was ready must not leave a poller running (they stacked).
+    backendReady.then(() => { if (!ended) stop = pollBots(); });
+    return () => {
+      ended = true;
+      stop?.();
+    };
   });
   function openBot(id: string) {
     activeTab = "chat";

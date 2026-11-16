@@ -448,6 +448,35 @@ export function foldBotReply(events: IdeStreamEvent[] | undefined, pendingCallId
   return turn;
 }
 
+/** How much of one bot reply the page renders as markdown (its start and its latest part). */
+export const MAX_SHOWN_REPLY = 8_000;
+const SHOWN_HEAD = 2_000;
+export const REPLY_TRIMMED_TEXT = "… (earlier output trimmed) …";
+
+/**
+ * A reply's text as the page shows it. Markdown parsing grows faster than linearly on some model
+ * output (a small model writing whole files as text tool calls), so a reply of hundreds of KB
+ * froze the page; the server trims new replies too, this covers ones stored before that.
+ */
+export function shownReplyText(text: string, max = MAX_SHOWN_REPLY): string {
+  if (text.length <= max) return text;
+  const cut = text.indexOf(REPLY_TRIMMED_TEXT);
+  const head = cut >= 0 && cut <= SHOWN_HEAD ? text.slice(0, cut).trimEnd() : text.slice(0, SHOWN_HEAD);
+  const sep = `\n\n${REPLY_TRIMMED_TEXT}\n\n`;
+  return head + sep + text.slice(text.length - Math.max(0, max - head.length - sep.length));
+}
+
+/**
+ * The runs list as the page shows it: the history, reconciled with the bot's last run (it comes
+ * with every poll of the bots list, so it is fresher, and it is there before the history loads).
+ */
+export function reconcileRuns(history: BotRun[], lastRun: BotRun | undefined): BotRun[] {
+  if (!lastRun) return history;
+  const i = history.findIndex((r) => r.id === lastRun.id);
+  if (i < 0) return [lastRun, ...history];
+  return history.map((r, k) => (k === i ? lastRun : r));
+}
+
 /** The pull requests a run's tool events opened (for the PR card). */
 export function prCards(events: Array<{ type: string; id?: string; tool?: string; args?: Record<string, unknown>; result?: string; error?: string }>): Array<{ id: string; url: string; number: number; title: string; branch: string; base: string }> {
   const out: Array<{ id: string; url: string; number: number; title: string; branch: string; base: string }> = [];
