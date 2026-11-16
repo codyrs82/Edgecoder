@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { inferenceService } from "./inference/service.js";
-import { coordinatorServer, initCoordinator } from "./swarm/coordinator.js";
+import { coordinatorServer, initCoordinator, startCoordinatorAlerting } from "./swarm/coordinator.js";
 import { controlPlaneServer } from "./control-plane/server.js";
 import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -138,6 +138,7 @@ async function boot(): Promise<void> {
 
   // Initialize coordinator background tasks (intervals, peer mesh bootstrap, etc.)
   await initCoordinator();
+  startCoordinatorAlerting();
 
   // Start embedded worker — every node contributes compute to the mesh
   // Set DISABLE_SELF_AGENT=1 to run coordinator-only (e.g. when the self-agent

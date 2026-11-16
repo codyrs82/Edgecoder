@@ -31,6 +31,7 @@ import { paymentIntents } from "./economy.js";
 import { payoutStore, lightningProvider, launchConfig } from "./payouts.js";
 import { checkLaunchBuy, launchBuyUsage, LAUNCH_WINDOW_MS, type LaunchBuyViolation } from "../../economy/launch-gate.js";
 import { creditEngine } from "../../credits/store.js";
+import { PurchaseSignals } from "../../alerting/monitors.js";
 
 async function allocateIntentPayouts(intent: PaymentIntent): Promise<IssuancePayoutEvent[]> {
   if (!pgStore) return [];
@@ -147,14 +148,24 @@ export function openIntentCount(accountId: string, nowMs = Date.now()): number {
   return n;
 }
 
+/** Invoice creation outcomes for production alerting (src/swarm/coordinator/alerts.ts, purchase failure rate). */
+export const purchaseSignals = new PurchaseSignals();
+
 /** A Lightning invoice that buys cSats for an account: 1 cSat per sat, after the coordinator fee. */
 export async function createPaymentIntent(accountId: string, amountSats: number, walletType: WalletType = "lightning"): Promise<PaymentIntent> {
   const { feeSats, netSats } = computeIntentFee(amountSats, COORDINATOR_FEE_BPS);
-  const invoice = await lightningProvider.createInvoice({
-    amountSats,
-    memo: `edgecoder_credits:${accountId}`,
-    expiresInSeconds: Math.floor(PAYMENT_INTENT_TTL_MS / 1000)
-  });
+  let invoice: Awaited<ReturnType<typeof lightningProvider.createInvoice>>;
+  try {
+    invoice = await lightningProvider.createInvoice({
+      amountSats,
+      memo: `edgecoder_credits:${accountId}`,
+      expiresInSeconds: Math.floor(PAYMENT_INTENT_TTL_MS / 1000)
+    });
+  } catch (error) {
+    purchaseSignals.note(false, Date.now(), error instanceof Error ? error.message : String(error));
+    throw error;
+  }
+  purchaseSignals.note(true);
   const intent: PaymentIntent = {
     intentId: randomUUID(),
     accountId,

@@ -30,7 +30,7 @@ import { registerMachineRoutes } from "./routes/machines.js";
 import { registerNetworkWorldRoutes } from "./routes/network-world.js";
 import { registerPayoutRoutes } from "./routes/payouts.js";
 import { registerRevenueRoutes } from "./routes/revenue.js";
-import { registerNetworkAdminRoutes } from "./routes/network-admin.js";
+import { registerNetworkAdminRoutes } from "./routes/network-admin.js"; import { setupPortalAlerting } from "./alerts.js";
 import { registerAdminUserRoutes } from "./routes/admin-users.js";
 import { fetchAccountBalances, startUnverifiedPurge } from "./account-admin.js";
 import { registerWalletApiRoutes } from "./routes/wallet-api.js";
@@ -930,20 +930,19 @@ registerSecurityResearchForPortal(app, { store, getCurrentUser, buildAccessConte
   coordinatorUrls: async () => [...new Set([...COORDINATOR_DISCOVERY_URLS, ...(await controlPlaneCoordinatorUrls())])].filter((url) => coordinatorUrlAllowed(url, COORDINATOR_URL_POLICY)) });
 
 // Settings > Network for system admins: every coordinator's GET /admin/network, merged, agents joined to accounts.
-registerNetworkAdminRoutes(app, {
+const networkAdminDeps = {
   coordinatorAdminToken: C.COORDINATOR_ADMIN_TOKEN ?? "",
   EXTERNAL_HTTP_TIMEOUT_MS,
   coordinatorUrls: async () => [...COORDINATOR_DISCOVERY_URLS, ...(await controlPlaneCoordinatorUrls())].filter((url) => coordinatorUrlAllowed(url, COORDINATOR_URL_POLICY)),
   getCurrentUser,
   buildAccessContext,
-  lookupOwners: async (agentIds, userIds) => {
+  lookupOwners: async (agentIds: string[], userIds: string[]) => {
     const [nodes, users] = store ? await Promise.all([store.listNodeOwnersByIds(agentIds), store.listUserEmailsByIds(userIds)]) : [[], []];
-    return {
-      nodeOwners: new Map(nodes.map((n) => [n.nodeId, { userId: n.ownerUserId, email: n.ownerEmail }])),
-      userEmails: new Map(users.map((u) => [u.userId, u.email]))
-    };
+    return { nodeOwners: new Map(nodes.map((n) => [n.nodeId, { userId: n.ownerUserId, email: n.ownerEmail }])), userEmails: new Map(users.map((u) => [u.userId, u.email])) };
   }
-});
+};
+registerNetworkAdminRoutes(app, networkAdminDeps);
+const portalAlerting = setupPortalAlerting(app, { ...networkAdminDeps, portalUrl: PORTAL_PUBLIC_URL, pool: store?.pool ?? null, serviceToken: PORTAL_SERVICE_TOKEN }); // Production alerting (src/portal/alerts.ts): Settings > Network's Alerts and the checks
 
 // Settings > Admin > Users: the account list, deleting accounts and the cleanup of abandoned sign-ups
 // (src/portal/account-admin.ts). Balances come from every allowlisted coordinator, with the service token.
@@ -973,7 +972,7 @@ export type InternalRoutesDeps = typeof internalRouteDeps;
 await app.register(async (internal) => {
   registerInternalRoutes(internal, internalRouteDeps);
   registerPayoutCallbackNotifyRoute(internal, { store, client: payoutCallbackClient, sendNotice: sendPayoutCallbackChangedEmail });
-  registerSecurityResearchInternalRoute(internal, { store });
+  registerSecurityResearchInternalRoute(internal, { store }); portalAlerting.registerInternal(internal); // + POST /internal/alerts/backup-report
 }); // end /internal plugin (#40)
 
 registerEscalationRoutes(app, { getCurrentUser, buildAccessContext }); registerPortalRegistry(app, requireCoordinatorOperationsUser); // signed coordinator registry
@@ -989,6 +988,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       await store.migrate();
     })
     .then(() => app.listen({ port: 4310, host: LISTEN_HOST }).then(async () => (await import("./shutdown.js")).installGracefulShutdown(app))) // a deploy drains streamed calls
+    .then(() => portalAlerting.start()) // production alerting checks start once the portal listens
     .catch((error) => {
       app.log.error(error);
       process.exit(1);

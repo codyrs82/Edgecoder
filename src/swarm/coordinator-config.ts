@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { z } from "zod";
+import { alertingEnv } from "../alerting/config.js";
 import { envBool, envEnum, envFlag, envFlagWord, envInt, envNumber, envUrl } from "../common/config.js";
 import {
   anchoringEnv,
@@ -42,6 +43,7 @@ import { parseRestrictedModels } from "./restricted-models.js";
 const str = () => z.string().optional();
 
 export const coordinatorConfigSchema = z.object({
+  ...alertingEnv,
   ...observabilityEnv,
   ...serviceUrlsEnv,
   ...modelEnv,

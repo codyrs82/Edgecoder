@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { z } from "zod";
+import { alertingEnv } from "../alerting/config.js";
 import { envEnum, envEnumCi, envFlag, envInt, envNumber, envUrl } from "../common/config.js";
 import { computeClassEnv, discoveryEnv, launchEnv, observabilityEnv, onchainEnv, postgresPoolEnv, serviceUrlsEnv } from "../config/shared.js";
 
@@ -19,6 +20,7 @@ const optStr = z.string().optional();
 const ttl = (def: number) => envInt(def, { min: 1_000, max: 31 * 24 * 60 * 60 * 1000 });
 
 export const portalConfigSchema = z.object({
+  ...alertingEnv,
   ...observabilityEnv,
   ...serviceUrlsEnv,
   ...discoveryEnv,

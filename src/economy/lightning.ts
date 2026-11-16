@@ -102,6 +102,25 @@ export interface LightningProvider {
   getBalances?(): Promise<NodeBalances | ProviderUnsupported>;
   /** Outgoing payments created since `sinceMs`, for payout reconciliation. Optional: absent means unsupported. */
   listPayments?(input: { sinceMs: number; limit?: number }): Promise<NodePaymentList | ProviderUnsupported>;
+  /** Sync state, channel activity and liquidity, for alerting (src/alerting). Optional: absent means unsupported. */
+  getNodeHealth?(): Promise<LightningNodeHealth | ProviderUnsupported>;
+}
+
+/** What production alerting checks on the node (src/alerting/monitors.ts lightningMonitor). */
+export interface LightningNodeHealth {
+  supported: true;
+  syncedToChain: boolean;
+  syncedToGraph: boolean;
+  blockHeight: number | null;
+  activeChannels: number;
+  inactiveChannels: number;
+  pendingChannels: number;
+  /** Spendable (outbound) sats in active channels. */
+  localSats: number;
+  /** Receivable (inbound) sats in active channels. */
+  remoteSats: number;
+  /** Inactive channels (peer offline), at most 20. */
+  inactive: Array<{ chanId: string; remotePubkey: string; localSats: number }>;
 }
 
 /** A provider (or provider build) that cannot answer a reconciliation query. Never an error. */
@@ -403,6 +422,12 @@ export class LndRestProvider implements LightningProvider {
     return interpretLndBalances(chain as LndWalletBalance, channels as LndChannelBalance);
   }
 
+  /** GET /v1/getinfo + /v1/channels: sync flags, active/inactive channels and the liquidity in active ones. */
+  async getNodeHealth(): Promise<LightningNodeHealth> {
+    const [info, channels] = await Promise.all([this.getJson("/v1/getinfo"), this.getJson("/v1/channels")]);
+    return interpretLndNodeHealth(info as LndGetInfo, channels as { channels?: LndChannel[] });
+  }
+
   /** GET /v1/payments (incomplete included, so in-flight HTLCs are visible). */
   async listPayments(input: { sinceMs: number; limit?: number }): Promise<NodePaymentList> {
     const limit = Math.max(1, Math.min(10_000, Math.floor(input.limit ?? 1000)));
@@ -546,6 +571,54 @@ export function interpretLndBalances(chain: LndWalletBalance, channels: LndChann
     channelLocalSats,
     channelPendingSats,
     totalSats: onchainConfirmedSats + onchainUnconfirmedSats + channelLocalSats + channelPendingSats
+  };
+}
+
+/** Subsets of LND's GetInfoResponse and ListChannelsResponse REST JSON. */
+export interface LndGetInfo {
+  synced_to_chain?: boolean;
+  synced_to_graph?: boolean;
+  block_height?: number;
+  num_active_channels?: number;
+  num_inactive_channels?: number;
+  num_pending_channels?: number;
+}
+export interface LndChannel {
+  active?: boolean;
+  remote_pubkey?: string;
+  chan_id?: string;
+  local_balance?: string;
+  remote_balance?: string;
+}
+
+/** Fails closed on a getinfo without the sync flags (an LND that is not answering properly). */
+export function interpretLndNodeHealth(info: LndGetInfo, body: { channels?: LndChannel[] }): LightningNodeHealth {
+  if (typeof info?.synced_to_chain !== "boolean") throw new Error("getinfo_malformed:synced_to_chain");
+  const channels = Array.isArray(body?.channels) ? body.channels : [];
+  let localSats = 0;
+  let remoteSats = 0;
+  const inactive: LightningNodeHealth["inactive"] = [];
+  for (const c of channels) {
+    const local = optionalSats(c.local_balance, "local_balance");
+    if (c.active) {
+      localSats += local;
+      remoteSats += optionalSats(c.remote_balance, "remote_balance");
+    } else if (inactive.length < 20) {
+      inactive.push({ chanId: String(c.chan_id ?? ""), remotePubkey: String(c.remote_pubkey ?? ""), localSats: local });
+    }
+  }
+  const active = channels.filter((c) => c.active).length;
+  return {
+    supported: true,
+    syncedToChain: info.synced_to_chain,
+    syncedToGraph: info.synced_to_graph === true,
+    blockHeight: typeof info.block_height === "number" ? info.block_height : null,
+    activeChannels: channels.length ? active : Number(info.num_active_channels ?? 0),
+    inactiveChannels: channels.length ? channels.length - active : Number(info.num_inactive_channels ?? 0),
+    pendingChannels: Number(info.num_pending_channels ?? 0),
+    localSats,
+    remoteSats,
+    inactive
   };
 }
 

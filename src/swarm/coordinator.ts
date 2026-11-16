@@ -71,6 +71,8 @@ import { registerPortalRoutes } from "./coordinator/routes/portal.js";
 import { registerAdminRoutes } from "./coordinator/routes/admin.js";
 import { registerNetworkWorldRoutes } from "./coordinator/routes/network-world.js";
 import { registerAdminNetworkRoutes } from "./coordinator/routes/admin-network.js";
+import { startCoordinatorAlerting, stopCoordinatorAlerting } from "./coordinator/alerts.js";
+import { registerAlertRoutes } from "./coordinator/routes/alerts.js";
 import { initCoordinator } from "./coordinator/init.js";
 import { onClaimable, pickupStats } from "./coordinator/dispatch.js";
 import { noteAgentOutcome } from "./coordinator/memory-admission.js";
@@ -240,6 +242,9 @@ registerDebugRoutes(app);
 registerAdminRoutes(app);
 // GET /admin/network (admin token): the live network for the portal's admin page.
 registerAdminNetworkRoutes(app);
+// GET /admin/alerts, POST /admin/alerts/ack and /admin/alerts/test (admin token): production alerting.
+registerAlertRoutes(app);
+app.addHook("onClose", async () => stopCoordinatorAlerting());
 // GET /network/world (signed agent or portal): the anonymized world view for the app's Network page.
 registerNetworkWorldRoutes(app);
 
@@ -247,6 +252,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   (async () => {
     await app.listen({ port: 4301, host: LISTEN_HOST });
     await initCoordinator();
+    startCoordinatorAlerting();
   })().catch((error) => {
     app.log.error(error);
     process.exit(1);
@@ -255,5 +261,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
 export { app as coordinatorServer };
 export { initCoordinator } from "./coordinator/init.js";
+export { startCoordinatorAlerting } from "./coordinator/alerts.js";
 export { runResultVerificationTick } from "./coordinator/results.js";
 export type { CreditQuote } from "./coordinator/economy.js";
