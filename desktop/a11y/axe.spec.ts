@@ -215,7 +215,7 @@ for (const vp of VIEWPORTS) {
       const tabs = dialog.getByRole("tablist", { name: "Settings sections" }).getByRole("tab");
       await expect(tabs.first()).toBeFocused();
       const count = await tabs.count();
-      expect(count).toBe(13);
+      expect(count).toBe(14);
       for (let i = 0; i < count; i++) {
         const tab = tabs.nth(i);
         const name = (await tab.textContent())?.trim() ?? String(i);

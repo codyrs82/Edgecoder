@@ -35,7 +35,6 @@
 
   // Grouped like Cursor's settings; keywords make the search find a section by what's in it.
   const sections = [
-    { id: "getting-started", label: "Getting started", icon: Compass, group: 0, keywords: "guide welcome setup onboarding tutorial start wizard" },
     { id: "general", label: "General", icon: Settings2, group: 0, keywords: "preferences theme appearance editor network bluetooth ble mesh startup legal terms privacy acceptable use host agreement" },
     { id: "profile", label: "Profile", icon: UserRound, group: 0, keywords: "account name email sign out" },
     { id: "plan", label: "Wallet", icon: Wallet, group: 1, keywords: "csats buy add funds top up balance lightning invoice billing activity sats earnings withdraw payout" },
@@ -49,6 +48,7 @@
     { id: "active-work", label: "Active work", icon: Activity, group: 3, keywords: "queue agents jobs" },
     { id: "tasks", label: "Tasks", icon: ListChecks, group: 3, keywords: "task queue" },
     { id: "logs", label: "Logs", icon: ScrollText, group: 4, keywords: "debug log" },
+    { id: "getting-started", label: "Getting started", icon: Compass, group: 5, keywords: "guide welcome setup onboarding tutorial start wizard" },
   ] as const;
 
   const LEGACY: Record<string, string> = { account: "profile", preferences: "general", wallet: "plan" };
