@@ -333,7 +333,7 @@ export const WALLET_CONTENT = `
     <div class="wl-methods" role="list">
       <div class="wl-method active" role="listitem"><div class="t"><span class="wl-asset">${icon("zap", 15)} Lightning</span> <span class="wl-pill ok">Active</span></div><div class="d">BTC. Withdraw now from any Lightning wallet, or get paid automatically to a Lightning address.</div></div>
       <div class="wl-method soon" role="listitem" id="methodOnchain"><div class="t"><span class="wl-asset">${icon("bitcoin", 15)} Bitcoin on-chain</span> <span class="wl-pill soon" id="methodOnchainPill">Coming soon</span></div><div class="d" id="methodOnchainText">BTC. Batched payouts above a minimum, to your own address. Not available yet.</div></div>
-      <div class="wl-method soon" role="listitem"><div class="t"><span class="wl-asset">${icon("layers", 15)} Litecoin on-chain</span> <span class="wl-pill soon">Coming soon</span></div><div class="d">LTC. Batched payouts. Not available yet.</div></div>
+      <div class="wl-method soon" role="listitem"><div class="t"><span class="wl-asset">${icon("layers", 15)} Zcash on-chain</span> <span class="wl-pill soon">Coming soon</span></div><div class="d">ZEC. Batched payouts. Not available yet.</div></div>
     </div>
 
     <div class="wl-two">

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, cleanup, within, waitFor } from "@testing-library/svelte";
 
 // Wallet: Fund with Bitcoin and the Bitcoin on-chain payout method follow the coordinator's
-// policy.onchain; without it both stay "Coming soon" (Litecoin always does).
+// policy.onchain; without it both stay "Coming soon" (Zcash always does).
 const ADDR = "bcrt1pqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqszqgpqyqsxs0cuf";
 const api = vi.hoisted(() => ({
   computeOverview: vi.fn(),
@@ -63,7 +63,7 @@ describe("Wallet: Bitcoin on-chain", () => {
     expect(btc).toHaveProperty("disabled", true);
     expect(btc.textContent).toContain("Coming soon");
     const payoutMethods = screen.getAllByRole("listitem").filter((li) => /on-chain/.test(li.textContent ?? ""));
-    expect(payoutMethods.map((li) => li.textContent)).toEqual([expect.stringMatching(/Bitcoin on-chain.*Coming soon/), expect.stringMatching(/Litecoin on-chain.*Coming soon/)]);
+    expect(payoutMethods.map((li) => li.textContent)).toEqual([expect.stringMatching(/Bitcoin on-chain.*Coming soon/), expect.stringMatching(/Zcash on-chain.*Coming soon/)]);
     expect(screen.getByLabelText("Lightning address")).toBeTruthy();
     expect(api.getOnchainAddress).not.toHaveBeenCalled();
   });
@@ -101,7 +101,7 @@ describe("Wallet: Bitcoin on-chain", () => {
     });
     expect(item.textContent).toMatch(/every 6 h once at least 50,000 sats/);
     expect(item.textContent).toMatch(/network fee comes out of your payout \(at most 4,950 sats/);
-    expect(screen.getAllByRole("listitem").find((x) => /Litecoin/.test(x.textContent ?? ""))?.textContent).toContain("Coming soon");
+    expect(screen.getAllByRole("listitem").find((x) => /Zcash/.test(x.textContent ?? ""))?.textContent).toContain("Coming soon");
     const input = screen.getByLabelText("Lightning address or Bitcoin address") as HTMLInputElement;
     expect(input.placeholder).toContain("bc1");
     // On-chain payouts appear in the history with their txid.
