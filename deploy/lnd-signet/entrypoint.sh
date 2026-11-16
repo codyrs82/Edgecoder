@@ -65,6 +65,11 @@ external=()
 # REST on [::]:8080: Fly's private network (6PN) only, since fly.toml defines no public service
 # for 8080. gRPC on loopback (lnc). P2P 9735 ([::] is dual-stack, so IPv4 too) is public so
 # peers and the faucet can reach us.
+# --routing.assumechanvalid: bitcoind is pruned (BITCOIN_PRUNE_MB), so most Mutinynet channels'
+# funding blocks are gone. Without this, lnd fetches each one from bitcoind's P2P peers to check
+# gossip; those fetches never finish and block the gossiper, so even our own channels never reach
+# the graph and every payment fails with "insufficient local balance". Test network only: never
+# use this on mainnet with a pruned bitcoind (run an unpruned node there instead).
 lnd --lnddir="$LND_DIR" --alias="${LND_ALIAS:-edgecoder-signet}" \
   --bitcoin.signet --bitcoin.node=bitcoind \
   --bitcoind.rpchost=127.0.0.1:38332 --bitcoind.rpccookie="$DATA/bitcoin/signet/.cookie" \
@@ -75,7 +80,7 @@ lnd --lnddir="$LND_DIR" --alias="${LND_ALIAS:-edgecoder-signet}" \
   "${external[@]}" \
   --wallet-unlock-password-file="$SECRETS/wallet.pass" --wallet-unlock-allow-create \
   --protocol.wumbo-channels --protocol.option-scid-alias --accept-keysend \
-  --maxpendingchannels=5 --db.bolt.auto-compact &
+  --maxpendingchannels=5 --db.bolt.auto-compact --routing.assumechanvalid &
 lnd_pid=$!
 pids+=("$lnd_pid")
 
