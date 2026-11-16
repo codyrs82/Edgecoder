@@ -1,0 +1,154 @@
+# Getting started videos
+
+Short explainers (30–90 s) for the steps of the Getting started guide (`/portal/welcome/<step>`
+and the desktop wizard). A synthetic voice reads a script, a scripted screen recording of the real
+step follows it, and the captions come from the same script. Everything is made locally and
+self-hosted: no script or video goes to a third party.
+
+| Step | Video | Script |
+| --- | --- | --- |
+| How EdgeCoder works (`how`) | [how-it-works.mp4](https://edgecoder.io/assets/videos/how-it-works.mp4) ([WebM](https://edgecoder.io/assets/videos/how-it-works.webm), [captions](https://edgecoder.io/assets/videos/how-it-works.vtt)) | [scripts/how-it-works.md](scripts/how-it-works.md) |
+| Set up this computer (`this-machine`) | [this-machine.mp4](https://edgecoder.io/assets/videos/this-machine.mp4) ([WebM](https://edgecoder.io/assets/videos/this-machine.webm), [captions](https://edgecoder.io/assets/videos/this-machine.vtt)) | [scripts/this-machine.md](scripts/this-machine.md) |
+| Add your other machines (`machines`) | [machines.mp4](https://edgecoder.io/assets/videos/machines.mp4) ([WebM](https://edgecoder.io/assets/videos/machines.webm), [captions](https://edgecoder.io/assets/videos/machines.vtt)) | [scripts/machines.md](scripts/machines.md) |
+| Choose models and where they run (`models`) | [models.mp4](https://edgecoder.io/assets/videos/models.mp4) ([WebM](https://edgecoder.io/assets/videos/models.webm), [captions](https://edgecoder.io/assets/videos/models.vtt)) | [scripts/models.md](scripts/models.md) |
+| Fund your account (`fund`) | [fund.mp4](https://edgecoder.io/assets/videos/fund.mp4) ([WebM](https://edgecoder.io/assets/videos/fund.webm), [captions](https://edgecoder.io/assets/videos/fund.vtt)) | [scripts/fund.md](scripts/fund.md) |
+| Connect your tools (`tools`) | [tools.mp4](https://edgecoder.io/assets/videos/tools.mp4) ([WebM](https://edgecoder.io/assets/videos/tools.webm), [captions](https://edgecoder.io/assets/videos/tools.vtt)) | [scripts/tools.md](scripts/tools.md) |
+| Try it (`try`) | [try.mp4](https://edgecoder.io/assets/videos/try.mp4) ([WebM](https://edgecoder.io/assets/videos/try.webm), [captions](https://edgecoder.io/assets/videos/try.vtt)) | [scripts/try.md](scripts/try.md) |
+
+Welcome, Host for the network and You're set have no video. The fund video is kept generic on
+purpose (see its script): how payments work may change.
+
+## Where they live
+
+- **Scripts:** `docs/videos/scripts/<name>.md`, one per step (front matter `step:`, `name:`).
+- **Files:** `src/portal/assets/videos/<name>.{mp4,webm,vtt,jpg}`, served by the portal at
+  `/assets/videos/` (`src/portal/assets.ts`: byte ranges, a one-day cache, CORS for the captions)
+  and copied into the server image by `npm run build` (`scripts/copy-portal-assets.mjs`).
+- **The wizard:** the step's `video` in `src/common/onboarding.ts` (and its identical copy
+  `desktop/src/lib/onboarding.ts`). The web guide plays it in the step's video slot. Videos are
+  web only: the desktop app shows a "Watch the explainer" link that opens the step on the web.
+- **This site:** pages embed the portal's files (see the guide's Getting started page).
+
+## Voice
+
+**Voice in use: Kokoro `af_heart`** (American female, the model card's only grade-A voice),
+approved by the owner on 2026-11-16, at speed 0.85 with 0.35 s between sentences. Every script
+sets `tts: kokoro` and `voice: af_heart`, which are also the pipeline's defaults. Licences and the
+other Kokoro voices: [Kokoro](#kokoro-tts-kokoro) below.
+
+### Piper (`tts: piper`)
+
+[Piper](https://github.com/OHF-Voice/piper1-gpl) (`piper-tts`, GPL-3.0), run as a separate local
+tool; nothing of it ships with EdgeCoder and its licence doesn't reach the audio it makes. The
+owner found its voices not natural enough; it stays as an option. The best of them was
+`en_GB-cori-high` from [rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices)
+(model files: MIT), trained by Bryce Beattie on about 24 hours of [LibriVox](https://librivox.org)
+recordings read by Cori Samuel: **public domain**, safe for commercial use. Model card:
+`en/en_GB/cori/high/MODEL_CARD` (checked 2026-11-16).
+
+Voices checked for commercial use (dataset licence from each MODEL_CARD, 2026-11-16):
+
+| Voice | Dataset licence | Commercial use |
+| --- | --- | --- |
+| en_GB-cori-high (in use) | LibriVox, public domain | yes |
+| en_US-kristin-medium | LibriVox, public domain | yes |
+| en_US-john-medium, en_US-norman-medium, en_US-bryce-medium | LibriVox, public domain | yes |
+| en_US-ljspeech-high | LJ Speech, public domain | yes (the first cut used it) |
+| en_US-joe-medium, en_US-kathleen-medium, en_US-mike-medium | OHF voice-datasets, CC0 | yes |
+| en_US-hifi_tts_92-medium | NVIDIA Hi-Fi TTS, CC BY 4.0 | yes, with attribution |
+| en_US-lessac-* | Blizzard 2013 licence | no (non-commercial research) |
+| en_US-ryan-*, en_US-hfc_female/male, en_GB-semaine | CC BY-NC(-SA) | no |
+| en_US-amy, en_GB-alan, en_GB-jenny_dioco | "see URL" (not verified) | not used |
+
+To switch, set `voice:` in the script's front matter and put the `.onnx` and `.onnx.json` in
+`$VIDEO_WORK_DIR/voices/`. Without Piper, `build.mjs` falls back to macOS `say` (Samantha; set
+`SAY_VOICE`).
+
+**Delivery:** Piper `length_scale` 1.12 (a little slower than the voice's default), 0.35 s between
+sentences, 1 s between segments, and each highlight lands 0.6 s before its narration starts
+(`scripts/videos/lib.mjs`). Keep sentences short: one idea each, no long lists. Spoken forms
+(owner-confirmed): cSats is "see sats", `/remote` is "forward slash remote" (`PRONOUNCE`).
+
+### Kokoro (`tts: kokoro`)
+
+The pipeline's default: [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) through
+[kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx) (onnxruntime, no PyTorch).
+Set `tts: kokoro` and `voice: <id>` in a script's front matter, or try one without editing the
+script: `node scripts/videos/build.mjs how --tts=kokoro --voice=af_heart --tag=kokoro` (writes
+`how-it-works-kokoro.*` in the work folder and leaves the repo alone).
+
+- **Licences (checked 2026-11-16):** the Kokoro-82M weights and its voice packs are **Apache-2.0**
+  (model card: "Apache-licensed weights … deployed in numerous projects and commercial APIs").
+  kokoro-onnx (the runner, which also hosts the converted `kokoro-v1.0.onnx` and
+  `voices-v1.0.bin` in its `model-files-v1.0` release) is MIT. Its espeak-ng comes bundled
+  (`espeakng-loader`, GPL-3.0, a local tool only); no Homebrew install is needed.
+- **Training data** (model card): permissive or public-domain audio, plus synthetic audio from
+  closed commercial TTS models; the only CC BY sets are Japanese and French data, not used here.
+- **Voice grades** (the model card's VOICES.md; overall grade reflects the training data's quality
+  and quantity):
+
+  | Voice | | Grade |
+  | --- | --- | --- |
+  | af_heart | American female | **A** |
+  | af_bella | American female | **A-** |
+  | af_nicole | American female (whispery, "headphones") | B- |
+  | bf_emma | British female | B- |
+  | am_michael | American male | C+ |
+  | am_fenrir | American male | C+ |
+  | bm_george | British male | C |
+
+- **Delivery:** speed 0.85 (`KOKORO_SPEED`), one sentence at a time with 0.35 s between, the same
+  pronunciations (`PRONOUNCE`). Voices starting with `b` use British English phonemes.
+
+## Making a video
+
+One-time setup (about 330 MB, outside the repo):
+
+```sh
+export VIDEO_WORK_DIR=~/edgecoder-videos            # default: $TMPDIR/edgecoder-videos
+brew install ffmpeg
+uv venv --python 3.12 "$VIDEO_WORK_DIR/piper-venv"
+uv pip install --python "$VIDEO_WORK_DIR/piper-venv/bin/python" piper-tts
+mkdir -p "$VIDEO_WORK_DIR/voices" && cd "$VIDEO_WORK_DIR/voices"
+for ext in onnx onnx.json; do
+  curl -fLO "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/cori/high/en_GB-cori-high.$ext"
+done
+npx playwright install chromium                       # if not installed yet
+
+# Kokoro (about 480 MB: 130 MB venv, 325 MB model, 28 MB voices)
+uv venv --python 3.12 "$VIDEO_WORK_DIR/kokoro-venv"
+uv pip install --python "$VIDEO_WORK_DIR/kokoro-venv/bin/python" kokoro-onnx soundfile
+mkdir -p "$VIDEO_WORK_DIR/kokoro" && cd "$VIDEO_WORK_DIR/kokoro"
+for f in kokoro-v1.0.onnx voices-v1.0.bin; do
+  curl -fLO "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/$f"
+done
+```
+
+Then, from the repo:
+
+```sh
+node scripts/videos/build.mjs how                     # --tts=, --voice=, --tag=: try another voice; --no-copy
+```
+
+`build.mjs` speaks each segment, lays them out with short pauses, writes the captions, records the
+step with `scripts/videos/record.mjs` (the real portal pages on 127.0.0.1 with a made-up new
+account, 1280×720, dark theme; nothing reaches a real account), and muxes MP4 (H.264/AAC), WebM
+(VP9/Opus) and a JPEG poster. It waits while the machine's load is over 30 and stops below 10 GB
+of free disk. Piper varies slightly from run to run, so lengths move by a few tenths of a second.
+
+## A new step's video
+
+1. Write `docs/videos/scripts/<name>.md` (copy `how-it-works.md`): `step:` is the wizard step id;
+   each `### segment` has a `focus:` (`title`, `card:<n>`, `more`, `more:<n>`, `next`, or
+   `sel:<CSS selector>` for anything else on the page, e.g. `sel:[data-action=buy]`) and the
+   narration. Check facts against `src/common/onboarding.ts` and the docs it cites. Add spoken
+   forms for new terms to `PRONOUNCE` in `scripts/videos/lib.mjs`.
+2. Steps other than `how` have no cards: point `sel:` focuses at what the step shows (checklist
+   items `[data-item=...]`, buttons `[data-action=...]`, the estimator). `record.mjs` answers every
+   API call with a made-up new account (`FIXTURES`); add to it if a step needs more (for example a
+   connected machine for `machines`).
+3. `node scripts/videos/build.mjs <step>`, watch it, then set the step's `video` in both copies of
+   the onboarding module and the table above.
+
+Voice licences and samples: candidate voices are compared with a short sample each before a
+switch; record the licence of any new voice in the table above.

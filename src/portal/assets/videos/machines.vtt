@@ -1,0 +1,53 @@
+WEBVTT
+
+1
+00:00:01.000 --> 00:00:03.010
+Next, add your other machines.
+
+2
+00:00:03.010 --> 00:00:06.427
+Every machine you own is more free compute for you.
+
+3
+00:00:07.427 --> 00:00:12.142
+This line shows how many machines are on your account, and how many are online.
+
+4
+00:00:13.142 --> 00:00:16.841
+On a Mac or a Windows PC, install the desktop app.
+
+5
+00:00:16.841 --> 00:00:19.060
+Sign in with the same account.
+
+6
+00:00:20.060 --> 00:00:24.878
+For Linux and GPU servers, get an install token from Settings, Nodes.
+
+7
+00:00:24.878 --> 00:00:28.090
+Then run this installer command on the server.
+
+8
+00:00:29.090 --> 00:00:33.890
+Each GPU gets its own agent, with a model sized to its memory.
+
+9
+00:00:34.890 --> 00:00:38.769
+On a Mac, allow Local Network access when macOS asks.
+
+10
+00:00:38.769 --> 00:00:43.965
+EdgeCoder uses it to find your other machines, and reach them directly.
+
+11
+00:00:44.965 --> 00:00:47.568
+When a second machine connects, this checks off.
+
+12
+00:00:48.568 --> 00:00:50.658
+Only have this one computer?
+
+13
+00:00:50.658 --> 00:00:52.374
+You can skip this step.

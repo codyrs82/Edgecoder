@@ -1,0 +1,45 @@
+WEBVTT
+
+1
+00:00:01.000 --> 00:00:03.406
+Connect the tools you already use.
+
+2
+00:00:03.406 --> 00:00:04.891
+Each one is optional.
+
+3
+00:00:05.891 --> 00:00:10.329
+Connect GitHub to clone your repositories, and open pull requests.
+
+4
+00:00:11.329 --> 00:00:15.849
+The hosted API speaks the OpenAI and Anthropic formats.
+
+5
+00:00:15.849 --> 00:00:18.314
+Create an API key in Settings.
+
+6
+00:00:18.314 --> 00:00:22.013
+Then call it from Cursor, servers or scripts.
+
+7
+00:00:23.013 --> 00:00:31.482
+With the desktop app running, editors like Continue, Zed and Claude Code can use its local provider, right on this computer.
+
+8
+00:00:32.482 --> 00:00:37.209
+For the terminal, install the command-line tool from the app's Settings.
+
+9
+00:00:37.209 --> 00:00:38.784
+Then run edgecoder code.
+
+10
+00:00:39.784 --> 00:00:44.200
+Type /remote in a session to keep working on it in the app.
+
+11
+00:00:45.200 --> 00:00:46.757
+Press Next when you're done.

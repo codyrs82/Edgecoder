@@ -69,6 +69,7 @@ const PUBLIC: Record<string, string> = {
   "GET /install.ps1": "installer script",
   "GET /assets/tokens.css": "static asset",
   "GET /assets/theme.js": "static asset",
+  "GET /assets/videos/:file": "static asset (Getting started explainer videos)",
   "GET /portal/vendor/lightweight-charts.js": "static asset",
   // Page shells: static HTML with no user data; the page's script calls the protected APIs.
   "GET /portal": "sign-in page shell",

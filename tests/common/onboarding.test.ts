@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import * as O from "../../src/common/onboarding.js";
 import { TOKEN_PRICE_USD_PER_M, cSatsPerMTokens } from "../../src/economy/job-pricing.js";
@@ -45,13 +46,25 @@ describe("onboarding: one module for the desktop and the portal", () => {
 });
 
 describe("the step model", () => {
-  it("has the ten steps in order, each with a title, short body and a hidden video slot", () => {
+  it("has the ten steps in order, each with a title, short body and a video slot", () => {
     expect(O.ONBOARDING_STEPS.map((s) => s.id)).toEqual(O.STEP_IDS);
     expect(O.STEP_IDS).toEqual(["welcome", "how", "this-machine", "machines", "models", "fund", "tools", "try", "host", "done"]);
     for (const s of O.ONBOARDING_STEPS) {
       expect(s.title.length).toBeGreaterThan(3);
       expect(s.body.length).toBeLessThan(220);
-      expect(s.video).toEqual({ src: null, poster: null, captions: null });
+      // Welcome, hosting and the summary have no explainer: their slot stays hidden.
+      if (["welcome", "host", "done"].includes(s.id)) expect(s.video).toEqual({ src: null, poster: null, captions: null });
+    }
+  });
+
+  it("each step's video, poster and captions are files the portal serves (/assets/videos/)", () => {
+    const withVideo = O.ONBOARDING_STEPS.filter((s) => s.video.src);
+    expect(withVideo.map((s) => s.id)).toEqual(["how", "this-machine", "machines", "models", "fund", "tools", "try"]);
+    for (const s of withVideo) {
+      for (const url of [s.video.src, s.video.poster, s.video.captions]) {
+        expect(url).toMatch(/^\/assets\/videos\/[a-z0-9-]+\.(mp4|jpg|vtt)$/);
+        expect(existsSync(fileURLToPath(new URL(`../../src/portal${url}`, import.meta.url))), url!).toBe(true);
+      }
     }
   });
 

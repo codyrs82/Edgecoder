@@ -15,6 +15,8 @@
  *
  * Videos: every step has a stable route (desktop `#/welcome/<id>`, web `/portal/welcome/<id>`), a
  * `data-video-anchor` hook (`welcome-<id>`) and a video slot that stays hidden until `src` is set.
+ * Video paths are on the portal (/assets/videos/, built by scripts/videos/build.mjs, see
+ * docs/videos/README.md). Only the web plays them; the desktop app links to the step on the web.
  */
 
 // ── Types ──
@@ -143,7 +145,7 @@ export const HOW_MORE: Array<{ title: string; body: string }> = [
   { title: "Bots", body: "Run on a schedule with a daily budget in cSats, so they never overspend." },
   { title: "Code", body: "An agent that reads and edits a project, runs tests and opens pull requests when you allow it." },
   { title: "Tentacles", body: "Helpers on cheap models that take parts of a big task at once." },
-  { title: "Remote co-editing", body: "Type /remote in `edgecoder code` and keep working on the same session in the app." },
+  { title: "Remote co-editing", body: "Type /remote in edgecoder code and keep working on the same session in the app." },
 ];
 
 export const ROUTING_OPTIONS: Array<{ id: RoutingPolicy; title: string; desc: string; recommended?: boolean }> = [
@@ -223,7 +225,7 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
     actions: [],
     skip: null,
     goals: [],
-    video: NO_VIDEO,
+    video: { src: "/assets/videos/how-it-works.mp4", poster: "/assets/videos/how-it-works.jpg", captions: "/assets/videos/how-it-works.vtt" },
   },
   {
     id: "this-machine",
@@ -242,7 +244,7 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
     ],
     skip: "Skip for now",
     goals: [],
-    video: NO_VIDEO,
+    video: { src: "/assets/videos/this-machine.mp4", poster: "/assets/videos/this-machine.jpg", captions: "/assets/videos/this-machine.vtt" },
   },
   {
     id: "machines",
@@ -260,7 +262,7 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
     ],
     skip: "I only have this computer",
     goals: ["own", "both", "host"],
-    video: NO_VIDEO,
+    video: { src: "/assets/videos/machines.mp4", poster: "/assets/videos/machines.jpg", captions: "/assets/videos/machines.vtt" },
   },
   {
     id: "models",
@@ -273,7 +275,7 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
     ],
     skip: "Keep Auto",
     goals: [],
-    video: NO_VIDEO,
+    video: { src: "/assets/videos/models.mp4", poster: "/assets/videos/models.jpg", captions: "/assets/videos/models.vtt" },
   },
   {
     id: "fund",
@@ -283,7 +285,7 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
     actions: [{ id: "buy", label: "Buy cSats", desktop: "settings:plan", web: "/portal/settings/plan", primary: true }],
     skip: "Skip: I'll use my own machines",
     goals: [],
-    video: NO_VIDEO,
+    video: { src: "/assets/videos/fund.mp4", poster: "/assets/videos/fund.jpg", captions: "/assets/videos/fund.vtt" },
   },
   {
     id: "tools",
@@ -302,7 +304,7 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
     ],
     skip: "Skip for now",
     goals: [],
-    video: NO_VIDEO,
+    video: { src: "/assets/videos/tools.mp4", poster: "/assets/videos/tools.jpg", captions: "/assets/videos/tools.vtt" },
   },
   {
     id: "try",
@@ -316,7 +318,7 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
     ],
     skip: "Skip",
     goals: [],
-    video: NO_VIDEO,
+    video: { src: "/assets/videos/try.mp4", poster: "/assets/videos/try.jpg", captions: "/assets/videos/try.vtt" },
   },
   {
     id: "host",

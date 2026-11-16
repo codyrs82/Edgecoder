@@ -55,27 +55,70 @@ describe("/portal/welcome (Getting started on the web)", () => {
     expect(html).toContain("edgecoder-welcome-offered");
   });
 
-  it("each step panel has a heading, the video anchor and a hidden video slot", () => {
+  it("each step panel has a heading, the video anchor and a video slot, hidden until the step has a video", () => {
     for (const id of O.STEP_IDS) {
       const html = R.wzPanel(ctx(id));
       expect(html).toContain(`data-video-anchor='welcome-${id}'`);
-      expect(html).toContain(`<div class='wz-video' data-video-slot='${id}' hidden></div>`);
+      if (O.stepById(id).video.src) expect(html).toContain(`<div class='wz-video' data-video-slot='${id}'><video `);
+      else expect(html).toContain(`<div class='wz-video' data-video-slot='${id}' hidden></div>`);
       expect(html).toContain("<h2 id='wzTitle' tabindex='-1'>");
       expect(html).not.toMatch(/\sstyle\s*=/);
     }
   });
 
+  it("How EdgeCoder works shows its explainer video with a poster and English captions", () => {
+    const html = R.wzPanel(ctx("how"));
+    expect(html).toContain("<div class='wz-video' data-video-slot='how'><video controls preload='none' src='/assets/videos/how-it-works.mp4' poster='/assets/videos/how-it-works.jpg'>");
+    expect(html).toContain("<track kind='captions' srclang='en' label='English' default src='/assets/videos/how-it-works.vtt'>");
+    // The page the browser gets carries the same video settings.
+    expect(ONBOARDING_BROWSER_LIB).toContain('"src":"/assets/videos/how-it-works.mp4"');
+  });
+
   it("shows a video with captions once a step has one", () => {
-    const step = O.stepById("how");
+    const step = O.stepById("tools");
     const saved = step.video;
-    step.video = { src: "/v/how.mp4", poster: "/v/how.jpg", captions: "/v/how.vtt" };
+    step.video = { src: "/v/tools.mp4", poster: "/v/tools.jpg", captions: "/v/tools.vtt" };
     try {
       const R2 = new Function(`${CLIENT_ESCAPE_JS}; ${ONBOARDING_BROWSER_LIB.replace(/var ONBOARDING_STEPS = .*;/, `var ONBOARDING_STEPS = ${JSON.stringify(O.ONBOARDING_STEPS)};`)}; ${WELCOME_RENDER_SCRIPT}; return { wzPanel };`)() as Render;
-      const html = R2.wzPanel(ctx("how"));
-      expect(html).toContain("<video controls preload='none' src='/v/how.mp4' poster='/v/how.jpg'>");
-      expect(html).toContain("<track kind='captions' srclang='en' label='English' default src='/v/how.vtt'>");
+      const html = R2.wzPanel(ctx("tools"));
+      expect(html).toContain("<video controls preload='none' src='/v/tools.mp4' poster='/v/tools.jpg'>");
+      expect(html).toContain("<track kind='captions' srclang='en' label='English' default src='/v/tools.vtt'>");
     } finally {
       step.video = saved;
+    }
+  });
+
+  it("serves the video files: whole, by byte range, and never outside the videos folder", async () => {
+    const app = Fastify();
+    registerPortalPages(app);
+    try {
+      const mp4 = await app.inject({ url: "/assets/videos/how-it-works.mp4" });
+      expect(mp4.statusCode).toBe(200);
+      expect(mp4.headers["content-type"]).toBe("video/mp4");
+      expect(mp4.headers["accept-ranges"]).toBe("bytes");
+      expect(mp4.headers["access-control-allow-origin"]).toBe("*");
+      expect(mp4.rawPayload.subarray(4, 8).toString("ascii")).toBe("ftyp");
+      expect(mp4.rawPayload.length).toBeLessThan(8_000_000);
+
+      const part = await app.inject({ url: "/assets/videos/how-it-works.mp4", headers: { range: "bytes=0-99" } });
+      expect(part.statusCode).toBe(206);
+      expect(part.headers["content-range"]).toBe(`bytes 0-99/${mp4.rawPayload.length}`);
+      expect(part.rawPayload.equals(mp4.rawPayload.subarray(0, 100))).toBe(true);
+      const tail = await app.inject({ url: "/assets/videos/how-it-works.mp4", headers: { range: "bytes=-10" } });
+      expect(tail.rawPayload.equals(mp4.rawPayload.subarray(-10))).toBe(true);
+      expect((await app.inject({ url: "/assets/videos/how-it-works.mp4", headers: { range: `bytes=${mp4.rawPayload.length}-` } })).statusCode).toBe(416);
+
+      const vtt = await app.inject({ url: "/assets/videos/how-it-works.vtt" });
+      expect(vtt.headers["content-type"]).toBe("text/vtt; charset=utf-8");
+      expect(vtt.body.startsWith("WEBVTT")).toBe(true);
+      expect((await app.inject({ url: "/assets/videos/how-it-works.webm" })).headers["content-type"]).toBe("video/webm");
+      expect((await app.inject({ url: "/assets/videos/how-it-works.jpg" })).headers["content-type"]).toBe("image/jpeg");
+
+      for (const bad of ["/assets/videos/nope.mp4", "/assets/videos/..%2Fassets.ts", "/assets/videos/README.md", "/assets/videos/how-it-works.mp4.bak"]) {
+        expect((await app.inject({ url: bad })).statusCode, bad).toBe(404);
+      }
+    } finally {
+      await app.close();
     }
   });
 
