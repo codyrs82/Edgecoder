@@ -41,7 +41,7 @@ infrastructure hosts unless `FEE_POOL_HOST_DISTRIBUTION` is set.
 ```
 price(paramsB)  = TOKEN_PRICE_USD_PER_M row for the model's size (USD per million tokens, input / output)
 tokenUsd        = (promptTokens × input + outputTokens × output) / 1,000,000
-floorUsd        = POWER_FLOOR_USD_PER_HOUR[class] × max(1, tierWeight) × (seconds − loadSeconds) / 3600
+floorUsd        = POWER_FLOOR_USD_PER_HOUR[class] × max(1, tierWeight) × (seconds − loadSeconds) / 3600 / slots
 cost (msat)     = usdToMsat(max(tokenUsd, floorUsd), btcUsd)        # usdToMsat = usd / btcUsd × 1e8 × 1000
 ```
 
@@ -58,6 +58,12 @@ cost (msat)     = usdToMsat(max(tokenUsd, floorUsd), btcUsd)        # usdToMsat 
 The prices are set below typical hosted prices for open models of the same size. The power floor
 (`cpu` $0.005/h, `apple` $0.01/h, `gpu` $0.05/h, `gpu.dc` $0.15/h of the base tier, scaled by the
 tier weight) means a machine's owner never earns less than the electricity the seconds cost.
+The floor is one machine's power, so it is divided by `slots`, the parallel model slots the agent
+reports (`inferenceSlots` with each pull; 1 when it reports none; `floorSlots` in
+`inferenceCostMsat`). Until 2026-11-16 every call running at once paid the whole floor, so an
+Ollama Mac with 4 slots collected up to 4 floors an hour and a 12-slot vLLM GPU up to 12. An
+agent gains nothing by reporting fewer slots than it runs: the coordinator never gives it more
+calls at once than it reports.
 The floor's seconds are the call's measured seconds less `loadSeconds`, the model-load time the
 agent reports with the final piece (Ollama's `load_duration`; `floorExcludeMs` in
 `inferenceCostMsat`). A host that unloaded its model does not bill the buyer for loading it

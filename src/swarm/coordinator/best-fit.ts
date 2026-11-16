@@ -274,7 +274,7 @@ export function estimate(job: JobDescriptor, agent: AgentView, model: string, vi
   const totalMs = ttftMs + decodeMs;
   const cost = inferenceCostMsat({
     promptTokens: job.promptTokens, outputTokens: job.expectedOutputTokens, paramsB: paramsB(model), btcUsd: view.btcUsd,
-    durationMs: prefillMs + decodeMs, computeClass: agent.computeClass, tierWeight: agent.tierWeight, perSecondCostMsat: 0,
+    durationMs: prefillMs + decodeMs, computeClass: agent.computeClass, tierWeight: agent.tierWeight, floorSlots: agent.slots, perSecondCostMsat: 0,
   });
   const r = (n: number) => Math.round(n);
   return { waitMs: r(waitMs), rttMs: r(rttMs), prefillMs: r(prefillMs), decodeMs: r(decodeMs), ttftMs: r(ttftMs), totalMs: r(totalMs), cSats: Math.round(cost.costMsat) / 1000 };

@@ -111,6 +111,12 @@ export const usdToMsat = (usd: number, btcUsd: number) => (btcUsd > 0 ? (usd / b
  * load_duration): a host that unloaded its model (keep_alive) should not bill the buyer for loading
  * it again, so a cold call costs what the same call costs warm. Only the agent is paid by the floor,
  * so it gains nothing by over-reporting load time.
+ *
+ * The floor is the machine's electricity per second, so it is split across the agent's parallel
+ * model slots (`floorSlots`, its reported inferenceSlots; 2026-11-16): an agent running N calls at
+ * once draws one machine's power, not N. Without the split a 4-slot Mac or a 12-slot vLLM GPU
+ * collected the floor up to N times over. Reporting fewer slots than it runs doesn't help an
+ * agent: the coordinator never gives it more calls at once than the slots it reports.
  */
 export function inferenceCostMsat(input: {
   promptTokens?: number;
@@ -120,6 +126,8 @@ export function inferenceCostMsat(input: {
   durationMs: number;
   /** Model-load time inside durationMs, left out of the power floor. */
   floorExcludeMs?: number;
+  /** The agent's parallel model slots; the power floor is divided by them (default 1). */
+  floorSlots?: number;
   computeClass: string;
   tierWeight: number;
   /** The per-second cost, used when there are no token counts. */
@@ -130,7 +138,8 @@ export function inferenceCostMsat(input: {
   const tokenUsd = ((input.promptTokens ?? 0) * price.input + (input.outputTokens ?? 0) * price.output) / 1_000_000;
   const exclude = typeof input.floorExcludeMs === "number" && Number.isFinite(input.floorExcludeMs) ? Math.max(0, input.floorExcludeMs) : 0;
   const floorMs = Math.max(0, input.durationMs - exclude);
-  const floorUsd = ((POWER_FLOOR_USD_PER_HOUR[input.computeClass] ?? POWER_FLOOR_USD_PER_HOUR.cpu) * Math.max(1, input.tierWeight) * floorMs) / 3_600_000;
+  const slots = typeof input.floorSlots === "number" && Number.isFinite(input.floorSlots) ? Math.max(1, Math.floor(input.floorSlots)) : 1;
+  const floorUsd = ((POWER_FLOOR_USD_PER_HOUR[input.computeClass] ?? POWER_FLOOR_USD_PER_HOUR.cpu) * Math.max(1, input.tierWeight) * floorMs) / 3_600_000 / slots;
   const tokenMsat = usdToMsat(tokenUsd, input.btcUsd);
   const floorMsat = usdToMsat(floorUsd, input.btcUsd);
   return tokenMsat >= floorMsat ? { costMsat: Math.round(tokenMsat), basis: "tokens" } : { costMsat: Math.round(floorMsat), basis: "power_floor" };

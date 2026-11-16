@@ -76,6 +76,24 @@ describe("per-token pricing for model calls", () => {
     expect(inferenceCostMsat({ ...call, durationMs: 4_900, floorExcludeMs: Number.NaN })).toEqual(inferenceCostMsat({ ...call, durationMs: 4_900 }));
   });
 
+  it("splits the power floor across the agent's parallel slots: one machine's power, not N", () => {
+    // A tiny reply that ran 60 s on an Apple tier-2.5 machine: the floor applies.
+    const call = { paramsB: 9, btcUsd: 100_000, promptTokens: 10, outputTokens: 5, durationMs: 60_000, computeClass: "apple", tierWeight: 2.5, perSecondCostMsat: 0 };
+    const one = inferenceCostMsat(call);
+    expect(one).toEqual({ costMsat: 417, basis: "power_floor" }); // 0.01 × 2.5 × 60 / 3600 USD
+    // 1 slot (and no report) is unchanged.
+    expect(inferenceCostMsat({ ...call, floorSlots: 1 })).toEqual(one);
+    expect(inferenceCostMsat({ ...call, floorSlots: Number.NaN })).toEqual(one);
+    expect(inferenceCostMsat({ ...call, floorSlots: 0 })).toEqual(one);
+    // A 4-slot Ollama Mac and a 12-slot vLLM host get a quarter and a twelfth.
+    expect(inferenceCostMsat({ ...call, floorSlots: 4 })).toEqual({ costMsat: 104, basis: "power_floor" });
+    expect(inferenceCostMsat({ ...call, floorSlots: 12 })).toEqual({ costMsat: 35, basis: "power_floor" });
+    // Once the floor falls below the tokens, the tokens are charged.
+    const gpu = { paramsB: 30, btcUsd: 64_870, promptTokens: 2_841, outputTokens: 134, durationMs: 30_000, computeClass: "gpu.dc", tierWeight: 2.9, perSecondCostMsat: 0 };
+    expect(inferenceCostMsat(gpu).basis).toBe("power_floor");
+    expect(inferenceCostMsat({ ...gpu, floorSlots: 12 })).toEqual({ costMsat: 598, basis: "tokens" });
+  });
+
   it("falls back to per-second without token counts", () => {
     expect(inferenceCostMsat(base)).toEqual({ costMsat: 1_560, basis: "per_second" });
   });

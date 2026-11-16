@@ -37,6 +37,7 @@ import {
   type VerificationOutcome
 } from "../verification.js";
 import { app } from "./app.js";
+import { agentLoadReport } from "./dispatch.js";
 import {
   rememberSettled,
   queue,
@@ -333,6 +334,8 @@ export function priceExecution(r: ExecutionResult<ResultMeta>) {
           durationMs,
           // The host's model load is not the buyer's: the floor counts the seconds after it.
           floorExcludeMs: taskBilling.get(taskId)?.loadMs,
+          // One machine's power, shared by the calls its slots run at once.
+          floorSlots: agentLoadReport(r.agentId)?.slots,
           computeClass,
           tierWeight: hardwareWeight,
           perSecondCostMsat,

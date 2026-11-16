@@ -289,6 +289,28 @@ describe("/result pricing (#38)", () => {
     expect(balanceBefore - creditEngine.balance(requester.peerId)).toBeCloseTo(reservedMsat / 1000, 6);
   });
 
+  test("the power floor is split across the slots the agent reports", async () => {
+    // A two-token reply that ran 30 s: the floor applies. Same call on 1 slot and on 4 slots.
+    const floorCost = async (inferenceSlots: number) => {
+      const taskId = `inf-${randomUUID()}`;
+      expect((await submitInference(taskId)).statusCode).toBe(200);
+      const res = await post("/pull", { agentId: worker.peerId, inferenceSlots }, worker);
+      const st = res.json().subtask as { id: string; taskId: string };
+      expect(st?.taskId).toBe(taskId);
+      expect((await post("/inference/chunks", { subtaskId: st.id, seq: 0, delta: "ok", done: true, promptTokens: 2, outputTokens: 1 }, worker)).statusCode).toBe(200);
+      expect((await resultAfter(30_000, { subtaskId: st.id, taskId, agentId: worker.peerId, ok: true, output: "ok", durationMs: 30_000 })).statusCode).toBe(200);
+      const [acc] = await accrualsFor(st.id);
+      expect(acc.pricingBasis).toBe("power_floor");
+      return acc.costMsat as number;
+    };
+    const one = await floorCost(1);
+    const four = await floorCost(4);
+    expect(one).toBeGreaterThan(0);
+    expect(four).toBeCloseTo(one / 4, -1);
+    // Back to 1 slot: the whole floor again.
+    expect(await floorCost(1)).toBe(one);
+  });
+
   test("a replayed result earns nothing more", async () => {
     const { taskId, st, balanceBefore } = await submitJob();
     const body = { subtaskId: st.id, taskId, agentId: worker.peerId, ok: true, output: randomUUID(), durationMs: 5_000 };
