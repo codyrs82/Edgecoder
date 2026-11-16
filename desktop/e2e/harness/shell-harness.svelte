@@ -20,7 +20,7 @@
   <div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;padding:16px 20px">
     <div style="width:100%;max-width:820px">
       <ChatInput onSend={() => {}}>
-        {#snippet toolbar()}
+        {#snippet controls()}
           <ComputePicker selected={$computeChoice} onSelect={(id) => computeChoice.set(id)} onOpenSettings={(s) => { section = s; open = true; }} />
         {/snippet}
       </ChatInput>

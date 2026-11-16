@@ -83,6 +83,18 @@ describe("EditorChatPanel and projects", () => {
     expect(screen.getByRole("textbox")).toBeTruthy();
   });
 
+  it("in a project, the shared slim composer has the compute picker and Auto-apply edits in the row under it", async () => {
+    render(EditorChatPanel, { projectRoot: "/Users/me/EdgeCoder/site" });
+    const pill = await screen.findByTestId("composer-box");
+    expect(within(pill).getByRole("textbox")).toBeTruthy();
+    expect(within(pill).getByRole("button", { name: "Add a file or folder" })).toBeTruthy();
+    expect(within(pill).getByRole("button", { name: "Send message" })).toBeTruthy();
+    const controls = screen.getByTestId("composer-controls");
+    expect(within(controls).getByRole("checkbox", { name: "Auto-apply edits" })).toBeTruthy();
+    expect(within(controls).getByRole("button", { name: /Auto/ }).getAttribute("title")).toMatch(/^Choose the model/);
+    expect(within(pill).queryByRole("checkbox")).toBeNull();
+  });
+
   it("in a project, shows project · branch and sends to the agent in that folder", async () => {
     api.streamIdeChat.mockImplementation(async (_msgs: unknown, _root: string, onEvent: (e: unknown) => void) => {
       onEvent({ type: "text", content: "Done." });
