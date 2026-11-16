@@ -217,10 +217,10 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
           <div class="section-head">
             <div class="eyebrow">Infrastructure hosts · by invitation</div>
             <h2>Hosting is by request during early access.</h2>
-            <p>We are adding hosts one at a time while the network is in early access. A share of every settled task and every purchase goes to a fee pool; early-access hosts are paid from it by uptime and by what they run, including hosting a Bitcoin node for the network. <a href="/host">Request to host</a>.</p>
+            <p>We are adding hosts one at a time while the network is in early access. Approved hosts earn 95% of what the work they run is paid, in sats over Lightning; the other 5% is the network fee. <a href="/host">Request to host</a>.</p>
           </div>
           <div class="host-tiers">
-            <div class="tier"><div class="wl">Weight</div><div class="w">1.0×</div><h3>Coordinator</h3><ul><li>Schedules tasks, runs the order book</li><li>Anchors ledger checkpoints</li><li>Serves local inference for chat</li></ul></div>
+            <div class="tier"><div class="wl">Weight</div><div class="w">1.0×</div><h3>Coordinator</h3><ul><li>Schedules tasks, runs the order book</li><li>Keeps the hash-chained ledger</li><li>Serves local inference for chat</li></ul></div>
             <div class="tier"><div class="wl">Weight</div><div class="w">+1.0×</div><h3>Bitcoin node</h3><ul><li>Bitcoin Core or Knots</li><li>Anchoring and fee estimation for the mesh</li><li>Block data for wallets and peers</li></ul></div>
             <div class="tier"><div class="wl">Weight</div><div class="w">+1.0×</div><h3>Lightning node</h3><ul><li>LND or Core Lightning</li><li>Settles purchases and payouts</li><li>Earns routing fees on top</li></ul></div>
           </div>
