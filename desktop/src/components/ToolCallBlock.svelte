@@ -1,6 +1,6 @@
 <script lang="ts">
   import ToolArgs from "./ToolArgs.svelte";
-  import { editDiff, stepLabel } from "../lib/tool-steps";
+  import { editDiff, failureReason, stepLabel, type StepStatus } from "../lib/tool-steps";
 
   interface Props {
     id: string;
@@ -9,7 +9,7 @@
     requiresApproval: boolean;
     result?: string;
     error?: string;
-    status: "pending" | "executing" | "completed" | "rejected";
+    status: StepStatus;
     onApprove?: (id: string) => void;
     onReject?: (id: string) => void;
   }
@@ -42,7 +42,7 @@
   ];
 
   let borderColor = $derived.by(() => {
-    if (status === "rejected") return "var(--red)";
+    if (status === "rejected" || status === "failed") return "var(--red)";
     if (status === "completed") return "var(--green)";
     if (status === "pending" && requiresApproval)
       return "var(--yellow)";
@@ -67,7 +67,7 @@
   });
 
   /** "Read" + "index.html": the step in plain words (the tool's own name is the tooltip). */
-  let label = $derived(stepLabel(tool, args, status !== "executing" && !(status === "pending" && requiresApproval)));
+  let label = $derived(stepLabel(tool, args, status !== "executing" && !(status === "pending" && requiresApproval), status === "failed"));
   /** The lines an edit changes, shown instead of its raw arguments. */
   let diff = $derived(editDiff(tool, args));
 
@@ -103,6 +103,8 @@
         <span class="icon check" role="img" aria-label="Completed">&#10003;</span>
       {:else if status === "rejected"}
         <span class="icon cross" role="img" aria-label="Rejected">&#10007;</span>
+      {:else if status === "failed"}
+        <span class="icon cross" role="img" aria-label="Failed">&#10007;</span>
       {:else}
         <span class="dot" style="background: {borderColor}"></span>
       {/if}
@@ -111,6 +113,9 @@
         <span class="main-arg" title={label.target}>{label.target}</span>
       {:else if mainArg && !asking}
         <span class="main-arg">{mainArg}</span>
+      {/if}
+      {#if status === "failed" && error}
+        <span class="fail-reason" title={error}>{failureReason(error)}</span>
       {/if}
     </span>
     <span class="chevron" class:open={expanded} aria-hidden="true">&#9656;</span>
@@ -254,6 +259,16 @@
   }
   .icon.cross {
     color: var(--red);
+  }
+
+  /* Why a step failed, in its header (the full error is in its details). */
+  .fail-reason {
+    color: var(--red);
+    font-size: 12px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .spinner {

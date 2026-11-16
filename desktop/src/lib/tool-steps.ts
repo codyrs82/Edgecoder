@@ -29,10 +29,31 @@ const VERBS: Record<string, [doing: string, done: string, noun?: string]> = {
 
 const TARGET_KEYS = ["path", "file_path", "command", "pattern", "query", "message", "branch", "title", "url"];
 
-/** "Read" + "index.html" for a finished read_file; "Running" + "npm test" for a running command. */
-export function stepLabel(tool: string, args: Record<string, unknown>, done = true): { verb: string; target: string } {
+export type StepStatus = "pending" | "executing" | "completed" | "failed" | "rejected";
+
+/**
+ * A step's state from its events: a call that came back with an error failed (✗, the reason in its
+ * details), never "completed" (✓) as if it had worked.
+ */
+export function toolStepStatus(e: Pick<ToolEvent, "error" | "result" | "approval_status">): StepStatus {
+  if (e.approval_status === "rejected") return "rejected";
+  if (e.error) return /^Tool call \S+ was rejected by the user\.$/.test(e.error) ? "rejected" : "failed";
+  if (e.result !== undefined) return "completed";
+  if (e.approval_status === "pending") return "pending";
+  return "executing";
+}
+
+/** The first line of a failed step's error, short enough for the step's header. */
+export function failureReason(error: string | undefined, max = 140): string {
+  const line = (error ?? "").trim().split("\n")[0] ?? "";
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+/** "Read" + "index.html" for a finished read_file; "Running" + "npm test" for a running command; "Listing failed" for a failed one. */
+export function stepLabel(tool: string, args: Record<string, unknown>, done = true, failed = false): { verb: string; target: string } {
   const v = VERBS[tool];
-  const verb = v ? (done ? v[1] : v[0]) : tool.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+  const base = tool.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+  const verb = failed ? `${v ? v[0] : base} failed` : v ? (done ? v[1] : v[0]) : base;
   let target = "";
   for (const k of TARGET_KEYS) {
     const val = args[k];
@@ -89,6 +110,8 @@ export function summarizeSteps(events: ToolEvent[]): string {
   if (commands) parts.push(`ran ${plural(commands, "command")}`);
   if (git) parts.push(plural(git, "git step"));
   if (other) parts.push(plural(other, "other step"));
+  const failed = calls.filter((e) => toolStepStatus(e) === "failed").length;
+  if (failed) parts.push(`${failed} failed`);
   const text = parts.join(", ");
   return text ? text.charAt(0).toUpperCase() + text.slice(1) : "No steps";
 }

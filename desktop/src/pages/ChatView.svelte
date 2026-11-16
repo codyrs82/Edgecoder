@@ -17,7 +17,7 @@
     getModelPullProgress,
     isRemoteMode,
     backendReady,
-    getGitHubToken,
+    agentGitHubToken,
     fsGitStatus,
   } from "../lib/api";
   import type { StreamProgress, ModelPullProgress, IdeStreamEvent, RepoConnection } from "../lib/api";
@@ -102,13 +102,10 @@
   let streamingUsage: ReplyUsage | undefined = $state(undefined);
   let streamingChanged: string[] = $state([]);
 
-  /** Cached GitHub token for IDE agent remote operations */
-  let cachedGitHubToken: string | null = $state(null);
-
   $effect(() => {
-    getGitHubToken().then((t) => { cachedGitHubToken = t; }).catch(() => {});
-    // Re-fetch when GitHub is connected via settings
-    const handler = () => { getGitHubToken().then((t) => { cachedGitHubToken = t; }).catch(() => {}); };
+    void agentGitHubToken().catch(() => {});
+    // Re-read when GitHub is connected via settings
+    const handler = () => { void agentGitHubToken(true).catch(() => {}); };
     window.addEventListener("edgecoder:github-connected", handler);
     return () => window.removeEventListener("edgecoder:github-connected", handler);
   });
@@ -229,7 +226,7 @@
           },
           abortController.signal,
           get(computeChoice),
-          cachedGitHubToken,
+          await agentGitHubToken().catch(() => null),
           autoApplyEdits(projectRoot) ? "edits" : "none",
         );
       } else if (usePortalChat) {

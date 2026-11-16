@@ -31,6 +31,7 @@ import { completeAt } from "./complete.js";
 import { codebaseIndexFor } from "./codebase-index.js";
 import { GitError, GitOps } from "./git-ops.js";
 import { GitSetupError, cloneRepo, githubStatus, normalizeRemoteUrl } from "./git-setup.js";
+import type { CredentialDeps } from "./github-auth.js";
 import { connectRepoUrl, defaultProjectsFolder, getProjectsFolder, recentGitHubRepos, setProjectsFolder } from "./repo-connect.js";
 import { isAbsolute } from "node:path";
 import { NetworkTasks } from "./network-tasks.js";
@@ -777,6 +778,22 @@ app.post("/v1/ide/git/clone", async (req, reply) => {
 });
 app.get("/v1/ide/git/github/status", async (_req, reply) => reply.send(await githubStatus()));
 
+// The agent's GitHub connection (Settings → Integrations → GitHub for the agent): the desktop reads
+// the token from the portal with the signed-in user's session and hands it here, so shared sessions
+// (the Code view, `edgecoder code`) and bots use it too, not only requests that carry it. Memory
+// only; null clears it (disconnected). The GitHub tools fall back to gh's sign-in and git's
+// credential helper without it (github-auth.ts).
+let agentGitHub: { token: string | null; why: string } = { token: null, why: "the app hasn't sent it since this server started" };
+const githubCreds: CredentialDeps = {
+  integrationToken: () => agentGitHub.token,
+  integrationMissing: () => agentGitHub.why,
+};
+app.post("/v1/ide/github/agent-token", async (req, reply) => {
+  const body = z.object({ token: z.string().min(1).max(500).regex(/^[\x21-\x7e]+$/).nullable(), reason: z.string().max(200).optional() }).parse(req.body);
+  agentGitHub = body.token ? { token: body.token, why: "" } : { token: null, why: body.reason?.trim() || "not connected" };
+  return reply.send({ ok: true, connected: Boolean(body.token) });
+});
+
 // Sign in to GitHub with the GitHub CLI's device flow (github-device.ts): the code is shown in the
 // app or terminal, the user enters it at github.com/login/device, and the status is polled here.
 const githubLogins = new GitHubDeviceLogins();
@@ -995,11 +1012,11 @@ const bots = new BotManager({
     chat: (ctx) => botComputeChat(ctx, (policy, plan, onRoute) => autoHere(onRoute, `bot ${ctx.bot.name}`, policy, plan)),
     // Runs work in the bot's repository checkout when it has one, else in its home folder.
     execute: (bot) => {
-      const executor = new ToolExecutor(botWorkRoot(bot), null, undefined, { branchPrefix: botBranchPrefix(bot.name) });
+      const executor = new ToolExecutor(botWorkRoot(bot), null, undefined, { branchPrefix: botBranchPrefix(bot.name), github: githubCreds });
       return (tool, args, opts) => executor.execute(tool, args, opts);
     },
     prepare: (bot) => {
-      const executor = new ToolExecutor(botWorkRoot(bot), null, undefined, { branchPrefix: botBranchPrefix(bot.name) });
+      const executor = new ToolExecutor(botWorkRoot(bot), null, undefined, { branchPrefix: botBranchPrefix(bot.name), github: githubCreds });
       return (tool, args) => preparePullRequestArgs(executor, tool, args);
     },
     systemPrompt: async (bot) => {
@@ -1170,8 +1187,11 @@ function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: str
     // Auto picks the model too; each step of the agent may land somewhere else (cheapest that fits).
     // When the network isn't affordable, Auto falls back to the biggest free model (planRoutes).
     let where = "Auto";
+    // The model the route ran ("qwen3.5:9b"), for the footer; the coordinator's best-fit picks its own.
+    let routeModel: string | undefined;
     const auto = autoHere((r) => {
       where = routeLabel(r);
+      routeModel = !r.bestFit && r.model && r.model !== AUTO_MODEL_ID ? r.model : undefined;
       sendEvent({ type: "status", message: `Auto: ${r.reason}` });
     }, source);
     // "Use my frontier key for Auto" (off by default): high-complexity jobs may go to the default lead.
@@ -1185,12 +1205,13 @@ function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: str
           }),
           onPick: (label) => {
             where = label;
+            routeModel = undefined;
             sendEvent({ type: "status", message: `Auto: ${label} (high complexity)` });
           },
         })
       : auto;
     // A frontier call's served line carries its estimated USD (the user's own key, not cSats).
-    return backendChat(backend, (cSats, served) => sendEvent({ type: "usage", cSats, where, ...(served ? { served } : {}), ...(served?.usd !== undefined ? { usd: served.usd } : {}) }), signal);
+    return backendChat(backend, (cSats, served) => sendEvent({ type: "usage", cSats, where, ...(routeModel ? { model: routeModel } : {}), ...(served ? { served } : {}), ...(served?.usd !== undefined ? { usd: served.usd } : {}) }), signal);
   }
   if (compute && compute.target !== "local" && !networkDeps && hosted) {
     // No enrolled agent here, but an API key: the network through the hosted endpoint.
@@ -1255,11 +1276,14 @@ app.post("/v1/ide/chat", async (req, reply) => {
     });
   }
 
+  // The newest agent GitHub connection the app sent also serves sessions and bots.
+  if (body.githubToken) agentGitHub = { token: body.githubToken, why: "" };
   const index = codebaseIndexFor(projectRoot, ollamaHostForIndex());
   const executor = new ToolExecutor(
     projectRoot,
     body.githubToken,
     index.getStatus().state === "ready" ? async (q) => formatSearchHits(await index.search(q, 6)) : undefined,
+    { github: githubCreds },
   );
   const ollamaHost = process.env.OLLAMA_HOST || "http://127.0.0.1:11434";
   const chatModel =
@@ -1434,7 +1458,7 @@ const sessions: SessionHub = new SessionHub({
   },
   executor: (s) => {
     const index = codebaseIndexFor(s.projectRoot, ollamaHostForIndex());
-    const executor = new ToolExecutor(s.projectRoot, undefined, index.getStatus().state === "ready" ? async (q) => formatSearchHits(await index.search(q, 6)) : undefined);
+    const executor = new ToolExecutor(s.projectRoot, undefined, index.getStatus().state === "ready" ? async (q) => formatSearchHits(await index.search(q, 6)) : undefined, { github: githubCreds });
     return { execute: tentacleExecutor(tentacles, s.id, (tool, args, opts) => executor.execute(tool, args, opts)), prepare: (tool, args) => preparePullRequestArgs(executor, tool, args) };
   },
   tools: (s) => withTentacleTools(hasGitHubOrigin(s.projectRoot) ? toolSchemas() : toolSchemas().filter((t) => t.function.name !== "open_pull_request"), tentacles.enabled(s.id)),

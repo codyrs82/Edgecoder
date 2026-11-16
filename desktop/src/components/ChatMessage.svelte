@@ -12,7 +12,7 @@
   import { servedBreakdown, servedLine, type CallUsage } from "../lib/served";
   import type { ToolEvent } from "../lib/types";
   import { ChevronRight } from "@lucide/svelte";
-  import { summarizeSteps } from "../lib/tool-steps";
+  import { summarizeSteps, toolStepStatus } from "../lib/tool-steps";
   import { Copy, Check } from "@lucide/svelte";
 
   interface Props {
@@ -77,7 +77,7 @@
                   requiresApproval={evt.requires_approval ?? false}
                   result={evt.result}
                   error={evt.error}
-                  status={evt.error ? "completed" : evt.result !== undefined ? "completed" : evt.approval_status === "rejected" ? "rejected" : evt.approval_status === "pending" ? "pending" : "executing"}
+                  status={toolStepStatus(evt)}
                   onApprove={(id) => onToolApproval?.(id, true)}
                   onReject={(id) => onToolApproval?.(id, false)}
                 />

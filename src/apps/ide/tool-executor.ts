@@ -15,6 +15,7 @@ import { realpathSync, lstatSync, readFileSync } from "node:fs";
 import type { ToolName } from "./tool-types.js";
 import { gitExecEnv, githubTokenCredentialEnv, hardenedGitArgs, hardenedGitEnv } from "./git-safe.js";
 import { findGh, ghCredentialConfig } from "./git-setup.js";
+import { GitHubToolError, SOURCE_LABEL, githubApiCall, originUrl, parseGitHubRemote, type CredentialDeps, type GitHubTokenSource } from "./github-auth.js";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -473,7 +474,20 @@ export class ToolExecutor {
   /** Search by meaning (the project's codebase index), when available. */
   private readonly codebaseSearch: ((query: string) => Promise<string>) | null;
 
-  constructor(projectRoot: string, githubToken?: string | null, codebaseSearch?: (query: string) => Promise<string>, opts: { branchPrefix?: string } = {}) {
+  /** The agent's GitHub connection when none was passed (the one the desktop last handed the server). */
+  private readonly githubCreds: CredentialDeps;
+
+  /**
+   * `githubToken`: the agent's GitHub connection (Settings → Integrations) for this request, if the
+   * app sent it. The GitHub tools fall back to `opts.github` (the connection the server holds), a
+   * token in the origin URL, gh's sign-in, then git's credential helper (github-auth.ts).
+   */
+  constructor(
+    projectRoot: string,
+    githubToken?: string | null,
+    codebaseSearch?: (query: string) => Promise<string>,
+    opts: { branchPrefix?: string; github?: CredentialDeps } = {},
+  ) {
     this.codebaseSearch = codebaseSearch ?? null;
     this.branchPrefix = opts.branchPrefix ?? "edgecoder";
     this.root = resolve(projectRoot);
@@ -486,6 +500,12 @@ export class ToolExecutor {
     // Captured once: if the root is created later as a symlink, every path is rejected (safe).
     this.rootReal = rootReal;
     this.githubToken = githubToken ?? null;
+    const fallback = opts.github ?? {};
+    this.githubCreds = {
+      ...fallback,
+      integrationToken: () => this.githubToken ?? fallback.integrationToken?.() ?? null,
+      integrationMissing: () => fallback.integrationMissing?.() ?? "the app didn't send it",
+    };
   }
 
   // -----------------------------------------------------------------------
@@ -1105,50 +1125,30 @@ export class ToolExecutor {
   // GitHub API helpers
   // -----------------------------------------------------------------------
 
-  private getGitHubRepo(): { owner: string; repo: string } {
-    const url = execFileSync("git", hardenedGitArgs(["remote", "get-url", "origin"], this.root), {
-        env: gitExecEnv(),
-      cwd: this.root,
-      encoding: "utf-8",
-      timeout: 5_000,
-    }).trim();
-
-    // HTTPS: https://github.com/owner/repo.git
-    const httpsMatch = url.match(/github\.com\/([^/]+)\/([^/.]+)/);
-    if (httpsMatch) return { owner: httpsMatch[1], repo: httpsMatch[2] };
-
-    // SSH: git@github.com:owner/repo.git
-    const sshMatch = url.match(/github\.com:([^/]+)\/([^/.]+)/);
-    if (sshMatch) return { owner: sshMatch[1], repo: sshMatch[2] };
-
-    throw new Error(`Could not parse GitHub owner/repo from remote URL: ${url}`);
+  /** The project's GitHub repository (origin on github.com) and its configured origin URL. */
+  private async getGitHubRepo(): Promise<{ owner: string; repo: string; origin: string }> {
+    const origin = await originUrl(this.root);
+    if (!origin) throw new GitHubToolError("This project has no origin remote, so there's no GitHub repository to ask. Add one (git remote add origin https://github.com/OWNER/REPO.git) or publish the project to GitHub.");
+    const repo = parseGitHubRemote(origin);
+    // Only the scheme and host: the URL may carry a token.
+    if (!repo) throw new GitHubToolError(`This project's origin (${origin.replace(/\/\/[^@/]*@/, "//")}) isn't a github.com repository, so the GitHub tools can't be used with it.`);
+    return { ...repo, origin };
   }
 
+  /** Which credential answered the last GitHub call (shown in tool results). */
+  private githubSource: GitHubTokenSource | null = null;
+
   private async githubApiFetch(
-    path: string,
+    path: (repo: { owner: string; repo: string }) => string,
     options: { method?: string; body?: unknown } = {},
   ): Promise<unknown> {
-    if (!this.githubToken) {
-      throw new Error("GitHub not connected. Connect GitHub in Settings > Integrations.");
-    }
-    const { request: httpRequest } = await import("undici");
-    const res = await httpRequest(`https://api.github.com${path}`, {
-      method: (options.method ?? "GET") as any,
-      headers: {
-        authorization: `Bearer ${this.githubToken}`,
-        accept: "application/vnd.github+json",
-        "user-agent": "EdgeCoder-IDE",
-        "x-github-api-version": "2022-11-28",
-        ...(options.body ? { "content-type": "application/json" } : {}),
-      },
-      body: options.body ? JSON.stringify(options.body) : undefined,
-    });
-    const data = await res.body.json();
-    if (res.statusCode < 200 || res.statusCode >= 300) {
-      const msg = (data as any)?.message ?? `HTTP ${res.statusCode}`;
-      throw new Error(`GitHub API error: ${msg}`);
-    }
-    return data;
+    const { owner, repo, origin } = await this.getGitHubRepo();
+    return githubApiCall({ owner, repo }, path({ owner, repo }), options, this.githubCreds, origin, (s) => (this.githubSource = s));
+  }
+
+  /** "(via your GitHub CLI sign-in (gh))" after a result that used a fallback credential. */
+  private viaNote(): string {
+    return this.githubSource && this.githubSource !== "integration" ? `\n(GitHub access via ${SOURCE_LABEL[this.githubSource]}.)` : "";
   }
 
   // -----------------------------------------------------------------------
@@ -1173,12 +1173,11 @@ export class ToolExecutor {
     }
 
     try {
-      const { owner, repo } = this.getGitHubRepo();
-      const pr = (await this.githubApiFetch(`/repos/${owner}/${repo}/pulls`, {
+      const pr = (await this.githubApiFetch(({ owner, repo }) => `/repos/${owner}/${repo}/pulls`, {
         method: "POST",
         body: { title, body, head, base },
       })) as { number: number; html_url: string; title: string };
-      return { result: `Created PR #${pr.number}: ${pr.title}\n${pr.html_url}` };
+      return { result: `Created PR #${pr.number}: ${pr.title}\n${pr.html_url}${this.viaNote()}` };
     } catch (err) {
       return { error: err instanceof Error ? err.message : "github_create_pr failed" };
     }
@@ -1189,17 +1188,16 @@ export class ToolExecutor {
   // -----------------------------------------------------------------------
 
   private async githubListPrs(args: Record<string, unknown>): Promise<ToolResult> {
-    const state = typeof args.state === "string" ? args.state : "open";
+    const state = typeof args.state === "string" && ["open", "closed", "all"].includes(args.state) ? args.state : "open";
     try {
-      const { owner, repo } = this.getGitHubRepo();
       const prs = (await this.githubApiFetch(
-        `/repos/${owner}/${repo}/pulls?state=${encodeURIComponent(state)}&per_page=30`,
+        ({ owner, repo }) => `/repos/${owner}/${repo}/pulls?state=${encodeURIComponent(state)}&per_page=30`,
       )) as Array<{ number: number; title: string; state: string; user: { login: string }; html_url: string }>;
-      if (prs.length === 0) return { result: `No ${state} pull requests.` };
+      if (prs.length === 0) return { result: `No ${state} pull requests.${this.viaNote()}` };
       const lines = prs.map(
-        (pr) => `#${pr.number} [${pr.state}] ${pr.title} (by @${pr.user.login}) — ${pr.html_url}`,
+        (pr) => `#${pr.number} [${pr.state}] ${pr.title} (by @${pr.user?.login ?? "unknown"}) — ${pr.html_url}`,
       );
-      return { result: lines.join("\n") };
+      return { result: lines.join("\n") + this.viaNote() };
     } catch (err) {
       return { error: err instanceof Error ? err.message : "github_list_prs failed" };
     }
@@ -1210,23 +1208,21 @@ export class ToolExecutor {
   // -----------------------------------------------------------------------
 
   private async githubListIssues(args: Record<string, unknown>): Promise<ToolResult> {
-    const state = typeof args.state === "string" ? args.state : "open";
+    const state = typeof args.state === "string" && ["open", "closed", "all"].includes(args.state) ? args.state : "open";
     const labels = typeof args.labels === "string" ? args.labels : "";
     try {
-      const { owner, repo } = this.getGitHubRepo();
-      let url = `/repos/${owner}/${repo}/issues?state=${encodeURIComponent(state)}&per_page=30`;
-      if (labels) url += `&labels=${encodeURIComponent(labels)}`;
-      const items = (await this.githubApiFetch(url)) as Array<{
+      const items = (await this.githubApiFetch(({ owner, repo }) =>
+        `/repos/${owner}/${repo}/issues?state=${encodeURIComponent(state)}&per_page=30${labels ? `&labels=${encodeURIComponent(labels)}` : ""}`)) as Array<{
         number: number; title: string; state: string; user: { login: string };
         html_url: string; pull_request?: unknown;
       }>;
       // GitHub API returns PRs as issues — filter them out
       const issues = items.filter((i) => !i.pull_request);
-      if (issues.length === 0) return { result: `No ${state} issues.` };
+      if (issues.length === 0) return { result: `No ${state} issues.${this.viaNote()}` };
       const lines = issues.map(
-        (i) => `#${i.number} [${i.state}] ${i.title} (by @${i.user.login}) — ${i.html_url}`,
+        (i) => `#${i.number} [${i.state}] ${i.title} (by @${i.user?.login ?? "unknown"}) — ${i.html_url}`,
       );
-      return { result: lines.join("\n") };
+      return { result: lines.join("\n") + this.viaNote() };
     } catch (err) {
       return { error: err instanceof Error ? err.message : "github_list_issues failed" };
     }
