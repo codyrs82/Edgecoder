@@ -75,24 +75,43 @@ export function cSatsToMsat(cSats: number): number {
 
 /**
  * Model calls are priced per token, tied to the market (2026-11-03): a reference price per
- * million tokens by model size, set below typical hosted prices for open models of that size,
- * with a floor of the electricity the seconds cost so the machine's owner never loses money.
+ * million tokens by model size (set 2026-11-16 so every host class profits at 50 % utilization,
+ * HOST_PROFIT_MARGIN), with a floor of the electricity the seconds cost so the machine's owner never loses money.
  * Code jobs and reservations stay per second.
  */
 
-/** USD per million tokens (input, output) by model size; below hosted list prices for open models. */
+/**
+ * Profit a host makes over its cost at 50 % utilization (the share of the hour its slots serve
+ * calls), after the network fee: the owner's pricing target (2026-11-16, "make everything
+ * profitable"). TOKEN_PRICE_USD_PER_M's 30B-and-up bands and the cpu / apple power floors are
+ * derived from it by scripts/pricing/break-even.mjs (PROFIT_MARGIN there) on measured Ollama
+ * throughput; change both and re-run the script to retune.
+ */
+export const HOST_PROFIT_MARGIN = 0.2;
+
+/**
+ * USD per million tokens (input, output) by model size. Up to 16B: unchanged since 2026-11-03 (a
+ * Mac's tokens already clear HOST_PROFIT_MARGIN at 50 % on them). 30B and up: 8.64× the 2026-11-03
+ * prices, rounded up to 0.05 (2026-11-16): what a Vultr 2×A16 running qwen3-coder:30b under Ollama
+ * (1.00 USD/h, measured) needs for HOST_PROFIT_MARGIN at 50 % utilization; larger bands scale alike.
+ */
 export const TOKEN_PRICE_USD_PER_M: Array<{ maxB: number; input: number; output: number }> = [
   { maxB: 2, input: 0.01, output: 0.03 },
   { maxB: 4, input: 0.02, output: 0.05 },
   { maxB: 9, input: 0.04, output: 0.1 },
   { maxB: 16, input: 0.07, output: 0.2 },
-  { maxB: 35, input: 0.12, output: 0.35 },
-  { maxB: 80, input: 0.3, output: 0.8 },
-  { maxB: Infinity, input: 0.6, output: 1.5 },
+  { maxB: 35, input: 1.05, output: 3.05 },
+  { maxB: 80, input: 2.6, output: 6.95 },
+  { maxB: Infinity, input: 5.2, output: 13.0 },
 ];
 
-/** Electricity floor per class (USD per hour of the base tier; tiers scale by weight). */
-export const POWER_FLOOR_USD_PER_HOUR: Record<string, number> = { cpu: 0.005, apple: 0.01, gpu: 0.05, "gpu.dc": 0.15 };
+/**
+ * Electricity floor per class (USD per hour of the base tier; tiers scale by weight; split across
+ * the agent's slots). `cpu` 0.025 (was 0.005) and `apple` 0.014 (was 0.01) since 2026-11-16: from
+ * the floor alone a 65 W home CPU (~0.01 USD/h) and a Mac Studio (tier weight 2.5, ~90 W, ~0.0135
+ * USD/h) clear HOST_PROFIT_MARGIN over their electricity at 50 % utilization.
+ */
+export const POWER_FLOOR_USD_PER_HOUR: Record<string, number> = { cpu: 0.025, apple: 0.014, gpu: 0.05, "gpu.dc": 0.15 };
 
 export function tokenPriceUsdPerM(paramsB: number): { input: number; output: number } {
   const row = TOKEN_PRICE_USD_PER_M.find((r) => paramsB <= r.maxB) ?? TOKEN_PRICE_USD_PER_M[TOKEN_PRICE_USD_PER_M.length - 1];
@@ -111,6 +130,12 @@ export const usdToMsat = (usd: number, btcUsd: number) => (btcUsd > 0 ? (usd / b
  * load_duration): a host that unloaded its model (keep_alive) should not bill the buyer for loading
  * it again, so a cold call costs what the same call costs warm. Only the agent is paid by the floor,
  * so it gains nothing by over-reporting load time.
+ *
+ * The floor is the machine's electricity per second, so it is split across the agent's parallel
+ * model slots (`floorSlots`, its reported inferenceSlots; 2026-11-16): an agent running N calls at
+ * once draws one machine's power, not N. Without the split a 4-slot Mac or a 12-slot vLLM GPU
+ * collected the floor up to N times over. Reporting fewer slots than it runs doesn't help an
+ * agent: the coordinator never gives it more calls at once than the slots it reports.
  */
 export function inferenceCostMsat(input: {
   promptTokens?: number;
@@ -120,6 +145,8 @@ export function inferenceCostMsat(input: {
   durationMs: number;
   /** Model-load time inside durationMs, left out of the power floor. */
   floorExcludeMs?: number;
+  /** The agent's parallel model slots; the power floor is divided by them (default 1). */
+  floorSlots?: number;
   computeClass: string;
   tierWeight: number;
   /** The per-second cost, used when there are no token counts. */
@@ -130,7 +157,8 @@ export function inferenceCostMsat(input: {
   const tokenUsd = ((input.promptTokens ?? 0) * price.input + (input.outputTokens ?? 0) * price.output) / 1_000_000;
   const exclude = typeof input.floorExcludeMs === "number" && Number.isFinite(input.floorExcludeMs) ? Math.max(0, input.floorExcludeMs) : 0;
   const floorMs = Math.max(0, input.durationMs - exclude);
-  const floorUsd = ((POWER_FLOOR_USD_PER_HOUR[input.computeClass] ?? POWER_FLOOR_USD_PER_HOUR.cpu) * Math.max(1, input.tierWeight) * floorMs) / 3_600_000;
+  const slots = typeof input.floorSlots === "number" && Number.isFinite(input.floorSlots) ? Math.max(1, Math.floor(input.floorSlots)) : 1;
+  const floorUsd = ((POWER_FLOOR_USD_PER_HOUR[input.computeClass] ?? POWER_FLOOR_USD_PER_HOUR.cpu) * Math.max(1, input.tierWeight) * floorMs) / 3_600_000 / slots;
   const tokenMsat = usdToMsat(tokenUsd, input.btcUsd);
   const floorMsat = usdToMsat(floorUsd, input.btcUsd);
   return tokenMsat >= floorMsat ? { costMsat: Math.round(tokenMsat), basis: "tokens" } : { costMsat: Math.round(floorMsat), basis: "power_floor" };

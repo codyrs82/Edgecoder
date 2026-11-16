@@ -104,7 +104,10 @@ export interface BestFitConfig {
   complexityShift: number;
   /** Total time at which the latency score is 0.5. */
   latencyTargetMs: { interactive: number; batch: number };
-  /** Cost (cSats) at which the price score is 0.5. */
+  /**
+   * Cost (cSats) at which the price score is 0.5. 9 since the 30B-class price rose ~8.6× (2026-11-16),
+   * so a 30B call scores on price as it did before and Auto still sends code work to it.
+   */
   priceRefCSats: number;
   /** How long dispatch keeps a call for the chosen agent before anyone eligible may take it. */
   preferMs: number;
@@ -120,7 +123,7 @@ export const DEFAULT_BEST_FIT_CONFIG: BestFitConfig = {
   weights: { quality: 0.4, latency: 0.3, price: 0.15, reliability: 0.15 },
   complexityShift: 1,
   latencyTargetMs: { interactive: 8_000, batch: 120_000 },
-  priceRefCSats: 1,
+  priceRefCSats: 9,
   preferMs: 400,
   sessionTtlMs: 30 * 60_000,
   oversizePenalty: 0.25,
@@ -274,7 +277,7 @@ export function estimate(job: JobDescriptor, agent: AgentView, model: string, vi
   const totalMs = ttftMs + decodeMs;
   const cost = inferenceCostMsat({
     promptTokens: job.promptTokens, outputTokens: job.expectedOutputTokens, paramsB: paramsB(model), btcUsd: view.btcUsd,
-    durationMs: prefillMs + decodeMs, computeClass: agent.computeClass, tierWeight: agent.tierWeight, perSecondCostMsat: 0,
+    durationMs: prefillMs + decodeMs, computeClass: agent.computeClass, tierWeight: agent.tierWeight, floorSlots: agent.slots, perSecondCostMsat: 0,
   });
   const r = (n: number) => Math.round(n);
   return { waitMs: r(waitMs), rttMs: r(rttMs), prefillMs: r(prefillMs), decodeMs: r(decodeMs), ttftMs: r(ttftMs), totalMs: r(totalMs), cSats: Math.round(cost.costMsat) / 1000 };
