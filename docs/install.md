@@ -7,6 +7,12 @@ GPU, writes the env files and the platform services, and starts them. Adding an 
 feature means adding it to `src/install/options.ts`; `tests/install/parity.test.ts` fails if a
 platform entry point or this page falls behind.
 
+**Setting up a rented cloud GPU or another Linux server for the first time?** Follow
+[Run EdgeCoder on a cloud GPU or Linux server](https://docs.edgecoder.io/guide/cloud-gpu-server)
+(source: [site-docs/guide/cloud-gpu-server.md](../site-docs/guide/cloud-gpu-server.md)): SSH keys,
+providers and GPU sizes, the install key, the vLLM switch, checks, removal and troubleshooting,
+step by step. This page is the reference behind it.
+
 ## One line
 
 | Platform | Command |
@@ -145,7 +151,8 @@ the bottleneck, an instance can run its model on **vLLM** instead (continuous ba
 calls at once on the same cards):
 
 ```bash
-sudo edgecoder-install apply --engine vllm --vllm-profile a16x2     # installs vLLM if needed
+sudo edgecoder-install apply --vllm-profile auto                    # picks the profile from nvidia-smi, installs vLLM if needed
+sudo edgecoder-install apply --engine vllm --vllm-profile a16x2     # a named profile
 sudo edgecoder-install apply --engine vllm --vllm-model QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ --vllm-slots 2
 sudo edgecoder-install apply --engine ollama                        # back to Ollama
 ```
@@ -155,7 +162,12 @@ sudo edgecoder-install apply --engine ollama                        # back to Ol
 `edgecoder-ollama-<n>.service.d/vllm-switch.conf` (`ConditionPathExists=!` that marker, so the
 instance's Ollama cannot start, not even through the agent unit's `Wants=`), enables and starts
 `edgecoder-vllm@<n>` (installing it with `scripts/linux/vllm/install-vllm.sh` when
-`--vllm-profile` is given and it is missing), stops Ollama and restarts the agent. A running vLLM is
+`--vllm-profile` is given and it is missing), stops Ollama and restarts the agent.
+`--vllm-profile auto` picks each instance's profile from its GPUs (`nvidia-smi`): one card of 80 GB
+or more `a100-80`, 44 to 48 GB `gpu-48gb`, 38 to 43 GB `a100-40`, 22 to 37 GB `gpu-24gb`, two
+15 to 21 GB cards pooled with `--single` `a16x2`; anything smaller (or not NVIDIA) is refused with
+the reason, before anything changes. `plan --vllm-profile auto` shows the pick
+(`[installs vLLM, profile ...]`). A running vLLM is
 never restarted by a re-run. **Every later run without `--engine`** (a package upgrade, a re-run
 with new tokens) reads the engine back from `agent-<n>.env` and the marker and keeps it, settings
 included. `--engine ollama` stops vLLM, removes the marker, the drop-in and the engine lines, and
@@ -268,10 +280,12 @@ account can reach is set up.
 
 ## Enrolment
 
-Every instance needs a registration token from the portal (Dashboard → Enroll node, node id =
-the agent id the plan prints). Pass them with `--token <agent-id>=<token>` (repeatable), a
+Every instance needs a registration token from the portal (Settings → Nodes → Enroll a node,
+node id = the agent id the plan prints). Pass them with `--token <agent-id>=<token>` (repeatable), a
 `--tokens-file`, or one `--token <token>` for all instances. Running `apply` again with tokens
-rewrites the env files and restarts the services; nothing else changes.
+rewrites the env files and restarts the services; nothing else changes. Running it again
+**without** tokens (an update with `install.sh`, `--vllm-profile`, a package upgrade) keeps each
+instance's token from its `agent-<n>.env`, when that file is for the same agent id.
 
 Tokens (`--token`, `--tokens-file`, `--mesh-token` and the ones the portal returns to `--enroll`)
 may only contain `A-Z a-z 0-9 . _ ~ + / = -`, and `--portal-url` / `--coordinator-url` must be
@@ -332,7 +346,7 @@ sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" bash install.sh --mesh-token "$MESH"
 | `--vllm-model ORG/REPO` | vLLM: the Hugging Face id it serves (`VLLM_MODEL`). Implies `--engine vllm`. Default: the value already set, else `VLLM_MODEL_ID` from `vllm-<n>.env`. |
 | `--vllm-slots N` | vLLM: model calls at once, 1 to 16 (`VLLM_MAX_SLOTS`). Implies `--engine vllm`. Default: the value already set, else derived from vLLM's KV cache. |
 | `--vllm-url URL` | vLLM: the server (`VLLM_URL`). Implies `--engine vllm`. Default `http://127.0.0.1:<8000+n>`. |
-| `--vllm-profile a16x2\|a100-80` | vLLM: when it is not installed for an instance yet, run `scripts/linux/vllm/install-vllm.sh` with this profile (serve flags, model, slots) and download the weights. Implies `--engine vllm`. |
+| `--vllm-profile auto\|a16x2\|a100-80\|a100-40\|gpu-48gb\|gpu-24gb` | vLLM: when it is not installed for an instance yet, run `scripts/linux/vllm/install-vllm.sh` with this profile (serve flags, model, slots) and download the weights. `auto` picks it from each instance's GPUs (`nvidia-smi`). Implies `--engine vllm`. |
 | `--layout per-gpu\|mixed\|single` | How GPUs become instances. `per-gpu`: one model per card (the most parallel work). `mixed`: half the cards one per card, the rest in pairs for a bigger model (default on 4+ cards of 40 GB or more). `single`: every card pooled for the biggest model. |
 | `--gpus-per-instance N` | Pool N GPUs per instance (overrides `--layout`): e.g. 2 for `qwen3-coder-next` on 48 GB cards, 4 for `qwen3:235b`, 8 for `qwen3-coder:480b`. |
 | `--per-gpu` | Same as `--layout per-gpu`. |

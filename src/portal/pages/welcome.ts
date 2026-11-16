@@ -35,6 +35,7 @@ export const ONBOARDING_BROWSER_LIB = [
   `var MODEL_SUGGESTIONS = ${JSON.stringify(O.MODEL_SUGGESTIONS)};`,
   `var INSTALL_LINKS = ${JSON.stringify(O.INSTALL_LINKS)};`,
   `var LOCAL_NETWORK_NOTE = ${JSON.stringify(O.LOCAL_NETWORK_NOTE)};`,
+  `var SERVER_SETUP = ${JSON.stringify(O.SERVER_SETUP)};`,
   `var NEW_ACCOUNT_DAYS = ${O.NEW_ACCOUNT_DAYS};`,
   ...[
     O.emptyOnboardingState,
@@ -59,6 +60,7 @@ export const ONBOARDING_BROWSER_LIB = [
     O.estimateCSats,
     O.groupThousands,
     O.installCommand,
+    O.serverInstallCommand,
     O.localProviderSnippet,
     O.hostedApiSnippet,
     O.actionHref,
@@ -136,6 +138,22 @@ export const WELCOME_RENDER_SCRIPT = `
         "<div class='wz-table'><table><caption class='wz-sr'>Cost per typical call by model size</caption><thead><tr><th>Model size</th><th class='num'>cSats per call</th><th class='num'>Calls per 1,000 cSats</th></tr></thead><tbody>" + rows + "</tbody></table></div>" +
         "<p class='wz-muted'>A typical call: " + groupThousands(TYPICAL_CALL.input) + " tokens in, " + TYPICAL_CALL.output + " out. Live prices from the network.</p></div>";
     }
+    /* A Linux or cloud GPU server in four steps; the install key fills the command once created here. */
+    function wzServerSteps(ctx) {
+      var key = ctx.installKey || "";
+      var guide = "<a href='" + escapeHtml(INSTALL_LINKS.serverGuide) + "' target='_blank' rel='noreferrer'>" + escapeHtml(SERVER_SETUP.guideTitle) + "</a>";
+      return "<ol class='wz-howto'>" +
+        "<li><strong>Create an install key.</strong> " + (key
+          ? "<span class='wz-note'>Done: it's in the command in step 3. It's shown only here, once. Revoke it in Settings → Connect your tools once the server is online.</span>"
+          : "<button type='button' class='wz-btn' id='wzCreateKey'>Create install key</button> <span class='wz-muted'>It fills in the command below. Keep it private: it acts as your account.</span>") + "</li>" +
+        "<li><strong>Connect to the server with SSH.</strong> On a Mac or Linux open Terminal; on Windows open PowerShell. Put in your server's IP address (from your provider's dashboard); most GPU clouds log in as <code>ubuntu</code>, some as <code>root</code>." +
+          wzCode("wzSshCmd", SERVER_SETUP.sshCommand) + "</li>" +
+        "<li><strong>Paste the install command</strong> into the server and press Enter. It takes 5 to 15 minutes and starts one agent per GPU." +
+          wzCode("wzInstallCmd", serverInstallCommand(ctx.origin, key || SERVER_SETUP.keyPlaceholder)) + "</li>" +
+        "<li><strong>NVIDIA GPU with 24 GB or more? Switch to vLLM</strong>, which serves several calls at once. It picks the settings for your GPU:" +
+          wzCode("wzVllmCmd", SERVER_SETUP.vllmCommand) + "</li>" +
+        "</ol><p>Full guide: " + guide + ". SSH keys, providers and GPU sizes, checks, and troubleshooting.</p>";
+    }
     function wzStepBody(step, ctx) {
       var s = ctx.state, sig = ctx.signals;
       if (step.id === "welcome") return wzRadios("wzGoal", GOAL_OPTIONS, s.goal, "What do you want to do?");
@@ -148,9 +166,7 @@ export const WELCOME_RENDER_SCRIPT = `
         var n = sig.machines === null ? "unknown" : String(sig.machines);
         return "<p class='wz-live' aria-live='polite'>Machines on your account: <strong id='wzMachineCount'>" + n + "</strong>" + (sig.machinesOnline !== null ? ", " + sig.machinesOnline + " online" : "") + ".</p>" +
           "<h3 class='wz-sub'>Mac and Windows</h3><p>Install the desktop app and sign in with this account. <a href='" + INSTALL_LINKS.mac + "'>Mac</a> · <a href='" + INSTALL_LINKS.windows + "'>Windows</a></p>" +
-          "<h3 class='wz-sub'>Linux and GPU servers</h3><p>Get a token from <a href='/portal/settings/nodes'>Settings → Nodes</a>, then run:</p>" +
-          wzCode("wzInstallCmd", installCommand(ctx.origin, "YOUR_TOKEN")) +
-          "<p class='wz-muted'>One agent per GPU, a model sized to its memory. For vLLM on big GPUs, see the inference engines guide.</p>" +
+          "<h3 class='wz-sub'>Linux and GPU servers</h3>" + wzServerSteps(ctx) +
           "<p class='wz-note'>" + escapeHtml(LOCAL_NETWORK_NOTE) + "</p>" +
           "<p class='wz-muted'>Each machine's models: Settings → Nodes.</p>";
       }
@@ -233,6 +249,9 @@ const WELCOME_CSS = `
     .wz-head h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.015em; }
     .wz-head p { margin: 0; color: var(--muted); font-size: 13px; }
     .wz-progress { width: 100%; height: 6px; margin: 4px 0 16px; accent-color: var(--brand); }
+    .wz-howto { margin: 8px 0 12px; padding-left: 22px; display: flex; flex-direction: column; gap: 12px; }
+    .wz-howto li { line-height: 1.5; }
+    .wz-howto .wz-code { margin-top: 6px; }
     .wz-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
     /* Badge and label share a 20px line, so a two-line label keeps its badge on the first line. */
     .wz-step-link { display: flex; align-items: flex-start; gap: 10px; padding: 7px 8px; border-radius: var(--radius-sm); color: var(--text-secondary); font-size: 13px; line-height: 20px; }
@@ -325,7 +344,7 @@ export function welcomeScript(): string {
     ${CLIENT_ESCAPE_JS}
     ${ONBOARDING_BROWSER_LIB}
     ${WELCOME_RENDER_SCRIPT}
-    var wzCtx = { state: emptyOnboardingState(Date.now()), signals: { machines: null, machinesOnline: null, balanceCSats: null, apiKeys: null, github: null, firstTask: null, hostApproved: null, hostRequested: null, newAccount: null, localModels: null, cliInstalled: null }, origin: location.origin, wallet: null, onchain: null, calls: 50, classId: "35b" };
+    var wzCtx = { state: emptyOnboardingState(Date.now()), signals: { machines: null, machinesOnline: null, balanceCSats: null, apiKeys: null, github: null, firstTask: null, hostApproved: null, hostRequested: null, newAccount: null, localModels: null, cliInstalled: null }, origin: location.origin, wallet: null, onchain: null, calls: 50, classId: "35b", installKey: "" };
     var wzPoll = null;
     async function wzSave(patch) {
       try {
@@ -396,6 +415,18 @@ export function welcomeScript(): string {
         await wzSave({ dismissed: true }); showToast("Guide closed. Reopen it from Settings → Getting started."); location.href = "/portal/dashboard";
       } else if (t.classList.contains("wz-step-link")) {
         e.preventDefault(); wzGo(t.getAttribute("data-step"), true);
+      } else if (t.id === "wzCreateKey") {
+        t.disabled = true;
+        try {
+          var made = await api("/portal/api/keys", { method: "POST", body: JSON.stringify({ name: "Server install " + new Date().toISOString().slice(0, 10) }) });
+          wzCtx.installKey = made.key;
+          wzRender(false);
+          showToast("Install key created. It's in the install command.");
+        } catch (err) {
+          t.disabled = false;
+          var msg = String((err && err.message) || err);
+          showToast(/email_not_verified/.test(msg) ? "Verify your email first (see the dashboard), then create the key." : "Couldn't create a key: " + msg, true);
+        }
       } else if (t.classList.contains("wz-copy")) {
         var pre = document.getElementById(t.getAttribute("data-copy"));
         try { await navigator.clipboard.writeText(pre.textContent); t.textContent = "Copied"; setTimeout(function () { t.textContent = "Copy"; }, 1500); } catch (err) { showToast("Copy failed: select the text instead.", true); }

@@ -29,7 +29,7 @@ describe("onboarding: one module for the desktop and the portal", () => {
   });
 
   it("the browser copy is self-contained and computes what the module does", () => {
-    const lib = new Function(`${ONBOARDING_BROWSER_LIB}; return { progressFor, classPrice, cSatsPerCall, shouldShowOnboarding, suggestModel, stepFromRoute, installCommand };`)() as typeof O;
+    const lib = new Function(`${ONBOARDING_BROWSER_LIB}; return { progressFor, classPrice, cSatsPerCall, shouldShowOnboarding, suggestModel, stepFromRoute, installCommand, serverInstallCommand };`)() as typeof O;
     const s = state({ goal: "both", done: ["welcome", "how"], current: "machines" });
     expect(lib.progressFor(s, SIGNALS, "web")).toEqual(O.progressFor(s, SIGNALS, "web"));
     const live = { models: [{ model: "qwen3-coder:30b", cSatsPerMTokens: { input: 322.7, output: 939.8 } }], btcUsd: 176_000 };
@@ -38,6 +38,16 @@ describe("onboarding: one module for the desktop and the portal", () => {
     expect(lib.suggestModel({ ramGb: 16, computeClass: "cpu" })).toEqual(O.suggestModel({ ramGb: 16, computeClass: "cpu" }));
     expect(lib.stepFromRoute("/portal/welcome/fund")).toBe("fund");
     expect(lib.installCommand("https://edgecoder.io/", "T")).toBe(O.installCommand("https://edgecoder.io/", "T"));
+    expect(lib.serverInstallCommand("https://edgecoder.io/", "K")).toBe(O.serverInstallCommand("https://edgecoder.io/", "K"));
+  });
+
+  it("a server installs with an install key in the environment (self-enrolment), never on argv; the guide is on the docs site", () => {
+    expect(O.serverInstallCommand("https://edgecoder.io/", "eck_k")).toBe("curl -fsSLo install.sh https://edgecoder.io/install.sh && sudo EDGECODER_API_KEY=eck_k bash install.sh --pull-models");
+    expect(O.SERVER_SETUP.vllmCommand).toBe("sudo edgecoder-install apply --vllm-profile auto");
+    expect(O.INSTALL_LINKS.serverGuide).toBe("https://codyrs82.github.io/Edgecoder/guide/cloud-gpu-server");
+    const actions = O.stepById("machines").actions;
+    expect(actions.find((a) => a.primary)).toMatchObject({ id: "server-guide", web: "@serverGuide", desktop: "@serverGuide" });
+    expect(O.actionHref("@serverGuide")).toBe(O.INSTALL_LINKS.serverGuide);
   });
 
   it("the fallback prices are the coordinator's (src/economy/job-pricing.ts)", () => {

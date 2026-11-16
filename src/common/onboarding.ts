@@ -200,6 +200,16 @@ export const INSTALL_LINKS = {
   apiDoc: "https://github.com/codyrs82/Edgecoder/blob/main/docs/API.md",
   computeDoc: "https://github.com/codyrs82/Edgecoder/blob/main/docs/using-compute.md",
   gettingStartedDoc: "https://github.com/codyrs82/Edgecoder/blob/main/docs/getting-started.md",
+  // The docs site (site-docs/guide/cloud-gpu-server.md); GitHub Pages redirects it to docs.edgecoder.io.
+  serverGuide: "https://codyrs82.github.io/Edgecoder/guide/cloud-gpu-server",
+};
+
+/** "Add your other machines" on a Linux or cloud GPU server: the SSH line and the vLLM switch. */
+export const SERVER_SETUP = {
+  sshCommand: "ssh ubuntu@your-server-ip",
+  vllmCommand: "sudo edgecoder-install apply --vllm-profile auto",
+  keyPlaceholder: "YOUR_INSTALL_KEY",
+  guideTitle: "Run EdgeCoder on a cloud GPU or Linux server",
 };
 
 /** Text for the "add your other machines" step. */
@@ -249,15 +259,14 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
   {
     id: "machines",
     title: "Add your other machines",
-    body: "Every machine you own adds free compute for you. Mac and Windows: install the desktop app and sign in. Linux and GPU servers: run the installer.",
+    body: "Every machine you own adds free compute for you. Mac and Windows: install the desktop app and sign in. Linux and GPU servers, including rented cloud GPUs: connect with SSH and run the installer.",
     checklist: [
       { id: "second-machine", label: "A second machine is connected" },
       { id: "machine-online", label: "At least one machine is online", optional: true },
     ],
     actions: [
-      { id: "nodes", label: "Get an install token", web: "/portal/settings/nodes", desktop: "/portal/settings/nodes", primary: true },
-      { id: "install-doc", label: "Installer guide", web: "@installDoc", desktop: "@installDoc" },
-      { id: "engines-doc", label: "GPU servers (vLLM)", web: "@enginesDoc", desktop: "@enginesDoc" },
+      { id: "server-guide", label: "Full guide: cloud GPU or Linux server", web: "@serverGuide", desktop: "@serverGuide", primary: true },
+      { id: "nodes", label: "Your nodes", web: "/portal/settings/nodes", desktop: "/portal/settings/nodes" },
       { id: "network", label: "See your machines", desktop: "settings:mesh", web: "/portal/settings/world" },
     ],
     skip: "I only have this computer",
@@ -561,6 +570,17 @@ export function groupThousands(n: number): string {
 export function installCommand(portalUrl: string, token: string): string {
   const base = portalUrl.replace(/\/+$/, "");
   return `curl -fsSLo install.sh ${base}/install.sh && sudo bash install.sh --token ${token}`;
+}
+
+/**
+ * The installer line for a server, with an install key (an API key, Settings → Connect your tools):
+ * the installer enrols one node per GPU with it (edgecoder-install --enroll / EDGECODER_API_KEY), so
+ * no node id has to match. The key goes in the environment, not argv (the process list).
+ * --pull-models downloads each agent's Ollama model, so the machine works before any vLLM switch.
+ */
+export function serverInstallCommand(portalUrl: string, apiKey: string): string {
+  const base = portalUrl.replace(/\/+$/, "");
+  return `curl -fsSLo install.sh ${base}/install.sh && sudo EDGECODER_API_KEY=${apiKey} bash install.sh --pull-models`;
 }
 
 /** Editor setup for the app's local provider (this computer only; Cursor uses the hosted API). */

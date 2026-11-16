@@ -124,11 +124,45 @@ describe("/portal/welcome (Getting started on the web)", () => {
 
   it("machines: installer command and download links, not local detection; the Local Network note", () => {
     const html = R.wzPanel(ctx("machines"));
-    expect(html).toContain("curl -fsSLo install.sh https://edgecoder.io/install.sh &amp;&amp; sudo bash install.sh --token YOUR_TOKEN");
+    expect(html).toContain("curl -fsSLo install.sh https://edgecoder.io/install.sh &amp;&amp; sudo EDGECODER_API_KEY=YOUR_INSTALL_KEY bash install.sh --pull-models");
     expect(html).toContain("Local Network");
     expect(html).toContain("Machines on your account: <strong id='wzMachineCount'>1</strong>");
     expect(R.wzPanel(ctx("this-machine"))).toContain("Download for Mac");
     expect(R.wzPanel(ctx("this-machine"))).not.toContain("Download the suggested model");
+  });
+
+  it("machines: a Linux or cloud GPU server in four numbered steps (key, SSH, install, vLLM) and the full guide", () => {
+    const html = R.wzPanel(ctx("machines"));
+    const steps = /<ol class='wz-howto'>([\s\S]*?)<\/ol>/.exec(html)?.[1] ?? "";
+    const items = steps.split("<li>").slice(1);
+    expect(items).toHaveLength(4);
+    expect(items[0]).toContain("Create an install key");
+    expect(items[0]).toContain("<button type='button' class='wz-btn' id='wzCreateKey'>Create install key</button>");
+    expect(items[1]).toMatch(/Terminal.*PowerShell/);
+    expect(items[1]).toContain("<pre id='wzSshCmd'><code>ssh ubuntu@your-server-ip</code></pre>");
+    expect(items[2]).toContain("<pre id='wzInstallCmd'><code>curl -fsSLo install.sh https://edgecoder.io/install.sh &amp;&amp; sudo EDGECODER_API_KEY=YOUR_INSTALL_KEY bash install.sh --pull-models</code></pre>");
+    expect(items[3]).toContain("<pre id='wzVllmCmd'><code>sudo edgecoder-install apply --vllm-profile auto</code></pre>");
+    expect(html).toContain("Full guide: <a href='https://codyrs82.github.io/Edgecoder/guide/cloud-gpu-server' target='_blank' rel='noreferrer'>Run EdgeCoder on a cloud GPU or Linux server</a>");
+    expect(html).toContain("data-action='server-guide' href='https://codyrs82.github.io/Edgecoder/guide/cloud-gpu-server'");
+    expect(html).not.toContain("--token YOUR_TOKEN");
+  });
+
+  it("machines: an install key created on the page fills the command, escaped, and the button gives way to the revoke note", () => {
+    const html = R.wzPanel(ctx("machines", { installKey: "eck_abc<x>" }));
+    expect(html).toContain("sudo EDGECODER_API_KEY=eck_abc&lt;x&gt; bash install.sh");
+    expect(html).not.toContain("YOUR_INSTALL_KEY");
+    expect(html).not.toContain("id='wzCreateKey'");
+    expect(html).toContain("Revoke it in Settings → Connect your tools");
+  });
+
+  it("the Create install key button makes a named API key and keeps it in memory only", async () => {
+    const html = await page("/portal/welcome/machines");
+    expect(html).toContain('t.id === "wzCreateKey"');
+    expect(html).toContain('api("/portal/api/keys", { method: "POST", body: JSON.stringify({ name: "Server install "');
+    expect(html).toContain("wzCtx.installKey = made.key;");
+    expect(html).toContain('installKey: "" };');
+    expect(html).toMatch(/email_not_verified/);
+    expect(html).not.toMatch(/localStorage[^\n]*installKey/);
   });
 
   it("fund: the estimator from live prices, Lightning live and Bitcoin coming soon", () => {
