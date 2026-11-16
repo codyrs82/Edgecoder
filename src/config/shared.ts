@@ -284,7 +284,11 @@ export const bestFitEnv = {
   BEST_FIT_SESSION_TTL_MS: amount(),
   BEST_FIT_OVERSIZE_PENALTY: fraction(),
   BEST_FIT_PEERS: envFlag({ off: ["0", "false"] }),
-  BEST_FIT_COMPLEXITY_WEIGHTS_JSON: envJson()
+  BEST_FIT_COMPLEXITY_WEIGHTS_JSON: envJson(),
+  /** Score added to a host on the requester's own LAN (src/swarm/lan-registry.ts). */
+  BEST_FIT_LAN_BONUS: envNumber(undefined, { min: 0, max: 1 }),
+  /** Issue direct-transfer tickets between LAN neighbours that both opted in (src/swarm/lan-direct.ts). */
+  LAN_DIRECT_TICKETS: envFlag({ off: ["off", "0", "false"], ci: true })
 };
 
 /** Claim leases on queued subtasks (src/swarm/queue.ts). */

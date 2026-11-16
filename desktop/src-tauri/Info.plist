@@ -6,9 +6,17 @@
        Without this, macOS stops any process in the app that touches Bluetooth. -->
   <key>NSBluetoothAlwaysUsageDescription</key>
   <string>EdgeCoder uses Bluetooth to find your other EdgeCoder machines nearby and share compute with them when there is no internet.</string>
-  <!-- The Network page pings your own EdgeCoder machines on the same local network (ICMP echo, no
-       ports opened) to show their real round trip. macOS asks once before an app reaches the LAN. -->
+  <!-- Local network (docs/security/lan-proximity.md). macOS asks once before the app, or the agent
+       it spawns (attributed to the app as its responsible process), reaches the LAN: the Network
+       page pings your own machines (ICMP), the agent announces itself and listens for other
+       EdgeCoder agents over mDNS (multicast 224.0.0.251:5353, TTL 1), times a small UDP echo to
+       them, and, with direct transfer turned on, accepts and makes encrypted TCP connections to them. -->
   <key>NSLocalNetworkUsageDescription</key>
-  <string>EdgeCoder measures how close your own EdgeCoder machines on this network are, so it can show them and prefer the nearest one. It never contacts other people's devices.</string>
+  <string>EdgeCoder finds other EdgeCoder machines on this network and measures how close they are, so work can go to a machine next door instead of across the internet. It announces only a random id that changes every 15 minutes, never your name or account.</string>
+  <!-- The DNS-SD service type the agent announces and browses (src/swarm/lan-mdns.ts). -->
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_edgecoder._tcp</string>
+  </array>
 </dict>
 </plist>

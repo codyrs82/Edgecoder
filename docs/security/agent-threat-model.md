@@ -78,7 +78,9 @@ Listeners on an agent install:
 | Listener | Bind | Auth |
 |---|---|---|
 | Agent mesh HTTP server (random port) | `AGENT_MESH_HOST`: 127.0.0.1 by default, including in the Docker image; set 0.0.0.0 to opt in to LAN gossip | `/identity` open. `/mesh/ingest` accepts only messages from trusted peers (the verified coordinator and the peers it listed), signed by the key on file; an operator-configured token is also checked if set. `/mesh/peers` and `/mesh/register-peer` need an operator-configured token. |
-| (none for LAN proximity) | — | The Network page's "same network" round trips are ICMP echoes from the owner's own computer to the owner's own machines; nothing new listens. See `lan-proximity.md`. |
+| mDNS (UDP 5353, multicast 224.0.0.251, TTL 1) | `AGENT_LAN_DISCOVERY`: on by default | Announces only a rotating LAN id, an HMAC proof, a minute window and two ports; answers queries for `_edgecoder._tcp.local` at most every 200 ms. Malformed packets are dropped. See `lan-proximity.md`. |
+| LAN echo (UDP, ephemeral port) | `AGENT_LAN_DISCOVERY`: on by default | Answers `ECP1 PING <nonce>` from private / link-local sources only with `ECP1 PONG <LAN id> <nonce>`; 5/s per source, 50/s in all. |
+| Direct transfer (TCP, ephemeral port, announced only over mDNS) | `AGENT_LAN_DIRECT`: off by default | One call per connection, only with a valid single-use coordinator ticket for this agent (else closed at once); private / link-local sources only; 8 connections, 2 per source, 30 hellos per source per minute; AES-256-GCM after the hello. See `lan-proximity.md` "Direct transfer". |
 | Local forwarder (`LOCAL_FORWARD_PORT`) | 127.0.0.1 | IDE token; browser (Origin) requests refused |
 | IDE provider 4304 | 127.0.0.1 unless `IDE_PROVIDER_HOST` (then a token is required) | token, CORS, Host allowlist |
 | All-in-one / desktop 4301, 4302, 4303 | `LISTEN_HOST` (127.0.0.1 in the desktop app) | coordinator global hook, `INFERENCE_AUTH_TOKEN`, `ADMIN_API_TOKEN` |

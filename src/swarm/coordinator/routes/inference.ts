@@ -32,6 +32,8 @@ import { rawBodyOf } from "../../../security/request-signing.js";
 import { app as coordinatorApp, type CoordinatorApp } from "../app.js";
 import { CC, FALLBACK_BTC_USD, claimedTradePrice, reservations, taskBilling, settledBilling, usagePending, queue, identity, securityLog, requestOrigin } from "../context.js";
 import { pickSameNetworkAgent } from "../../lan-proximity.js";
+import { LAN_DIRECT_TICKETS_ON, directBarred, issueLanTicket, issuedTicket, judgeLanReceipt, lanNeighboursOf, lanRegistry, nearestLanHost, noteDirectMismatch } from "../lan.js";
+import type { LanTicket } from "../../lan-direct.js";
 import { mutable } from "../mutable-state.js";
 import { agentCapabilities, activeBlacklistRecord, autoBlacklister } from "../agent-state.js";
 import { agentSignatureAtGate, hasPortalServiceToken, resolveSubmitterAccount, verifyAgentRequest } from "../auth.js";
@@ -351,7 +353,15 @@ const inferenceSubmitSchema = z.object({
   routeRedirect: z.boolean().default(false),
   /** The portal's latency-aware coordinator choice (common/coordinator-choice.ts); kept only from the portal. */
   coordinatorChoice: z.record(z.string(), z.unknown()).optional(),
+  /**
+   * Direct LAN transfer (src/swarm/lan-direct.ts): the requester's agent asks for a ticket and sends
+   * the X25519 key it made for this call. Honoured only from a signed agent with direct transfer on.
+   */
+  lanDirect: z.object({ pub: z.string().regex(/^[A-Za-z0-9+/]{43}=$/) }).optional().catch(undefined),
 });
+
+/** How long a call with a direct ticket is kept for its host (it claims it with a signed /pull). */
+export const LAN_DIRECT_PREFER_MS = 2_500;
 
 /** Median of the known round trips (ms), null when none is known. */
 function medianRtt(values: number[]): number | null {
@@ -429,12 +439,16 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const accountId = submitter.accountId;
     // The portal's coordinator choice is believed only from the portal (service token).
     const portalChoice = body.coordinatorChoice && hasPortalServiceToken((req as any).headers ?? {}) ? sanitizeCoordinatorChoice(body.coordinatorChoice) : undefined;
+    // LAN proximity: the requester's own machine (the signing agent: the desktop app's), and the
+    // agents its LAN neighbours are (any account; src/swarm/lan-registry.ts).
+    const requesterAgentId = hasPortalServiceToken((req as any).headers ?? {}) ? null : agentSignatureAtGate((req as any).headers ?? {}, "POST", "/inference/submit");
+    const lanNear = requesterAgentId ? lanNeighboursOf(requesterAgentId) : new Map<string, number>();
     // model "auto": best-fit routing picks the model, the class and a preferred agent (routing.ts).
     let routed: { job: JobDescriptor; result: BestFitResult; summary: RoutingSummary } | undefined;
     if (body.model === AUTO_MODEL_ID) {
       if (body.reservationId || body.target === "mine") return reply.code(400).send({ error: "auto_network_only", detail: "model auto routes network calls; name a model for your own machines or a reservation" });
       const job = describeJob({ messages: body.messages as ChatMessage[], tools: body.tools, maxTokens: body.maxTokens }, cleanHints(body.routing), complexityWeights);
-      const { result, elsewhere } = await resolveAuto(job, { peers: body.routeRedirect, requesterAccountId: accountId, ...(body.computeClass !== "any" ? { computeClass: body.computeClass } : {}) });
+      const { result, elsewhere } = await resolveAuto(job, { peers: body.routeRedirect, requesterAccountId: accountId, lanRtt: lanNear, ...(body.computeClass !== "any" ? { computeClass: body.computeClass } : {}) });
       const summary = routingSummary(job, result);
       if (!result.chosen) return reply.code(409).send({ error: "no_route_fits", detail: result.rejected ?? result.reason, routing: summary });
       if (elsewhere) return reply.code(409).send({ error: "route_elsewhere", coordinatorId: elsewhere.coordinatorId, coordinatorUrl: elsewhere.url, routing: summary });
@@ -544,25 +558,55 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         ...(reservationId ? { reservationId } : {}),
       },
     }, routed ? { excludeAccounts: [accountId] } : undefined);
+    // The host this call prefers because it is on the requester's LAN (a direct ticket may name it).
+    let lanHost: string | null = null;
     if (routed) {
       // A soft preference: the chosen agent gets the call for a moment, then anyone eligible may take it
       // (never the requester's own machines: excludeAccounts above, as in best-fit).
       if (routed.result.chosen?.local) preferAgent(subtask.id, routed.result.chosen.agentId, bestFitConfig.preferMs);
+      if (routed.result.chosen?.local && routed.result.chosen.lanRttMs !== undefined) lanHost = routed.result.chosen.agentId;
       recordDecision(body.taskId, subtask.id, routed.job, routed.result, Date.now(), portalChoice);
     } else if (portalChoice && billed) {
       // A named model the portal placed here: log which coordinator and why (Network page, routing decisions).
       recordPlacement(body.taskId, subtask.id, { model: body.model, computeClass: taskClass === "any" ? null : taskClass }, portalChoice);
     }
+    if (billed && !routed && lanNear.size) {
+      // A named model on the network: a host on the requester's LAN that holds it and has a free slot
+      // is preferred for a moment (billed like any host; never the requester's own machines here).
+      const claims = queue.activeClaims();
+      const near = nearestLanHost(holders.filter(([id]) => !reservations.isHeld(id)).map(([id]) => ({ agentId: id, freeSlots: freeModelSlots(id, claims) })), lanNear);
+      if (near && (await rewardAccountForAgent(near.agentId)) !== accountId) {
+        preferAgent(subtask.id, near.agentId, bestFitConfig.preferMs);
+        lanHost = near.agentId;
+      }
+    }
     if (onlyAccountId && !reservationId && !hasPortalServiceToken((req as any).headers ?? {})) {
       // "My machines" from the desktop app: a soft preference for the requester's own machine on the
-      // same local network (same public address), so the reply comes from the nearest one. Any own
-      // machine may still take it once the preference lapses (src/swarm/lan-proximity.ts).
+      // same local network, so the reply comes from the nearest one: one its agent measured on the
+      // LAN first, else one behind the same public address. Any own machine may still take it once
+      // the preference lapses (src/swarm/lan-proximity.ts, src/swarm/lan-registry.ts).
       const claims = queue.activeClaims();
-      const near = pickSameNetworkAgent(
+      const measured = nearestLanHost(ownHolders.map((id) => ({ agentId: id, freeSlots: freeModelSlots(id, claims) })), lanNear);
+      const near = measured?.agentId ?? pickSameNetworkAgent(
         ownHolders.map((id) => ({ agentId: id, sourceIp: agentCapabilities.get(id)?.sourceIp ?? null, freeSlots: freeModelSlots(id, claims) })),
         requestOrigin(req).clientIp
       );
       if (near) preferAgent(subtask.id, near, bestFitConfig.preferMs);
+      if (measured) lanHost = measured.agentId;
+    }
+    // Direct LAN transfer (opt-in on both machines): a ticket for the LAN host, which then claims
+    // the call (signed /pull) and streams it to the requester directly as well as to here.
+    let lanTicket: LanTicket | null = null;
+    if (body.lanDirect && lanHost && requesterAgentId && !restrictedTier && LAN_DIRECT_TICKETS_ON && !reservationId) {
+      const now = Date.now();
+      const hostPub = agentCapabilities.get(lanHost)?.x25519PublicKey;
+      if (hostPub && lanRegistry.directOn(lanHost, now) && lanRegistry.directOn(requesterAgentId, now) && !directBarred(lanHost, now) && agentCapabilities.get(lanHost)) {
+        lanTicket = issueLanTicket({ taskId: body.taskId, subtaskId: subtask.id, hostAgentId: lanHost, hostPub, requesterAgentId, requesterPub: body.lanDirect.pub, model: body.model, input, timeoutMs: body.timeoutMs }, now);
+        if (lanTicket) {
+          preferAgent(subtask.id, lanHost, Math.max(bestFitConfig.preferMs, LAN_DIRECT_PREFER_MS));
+          app.log.info({ taskId: body.taskId, subtaskId: subtask.id, hostAgentId: lanHost }, "lan_direct_ticket_issued");
+        }
+      }
     }
     if (restrictedTier) {
       admitRestrictedCall({
@@ -573,7 +617,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     inferenceStreams.open(subtask.id, body.taskId);
     armClaimDeadline(body.taskId, subtask.id, INFERENCE_CLAIM_TIMEOUT_MS);
     app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, ...(sized ? { reserveTokenMsat: sized.tokenMsat, reserveFloorMsat: sized.floorMsat, reserveCappedByMaxCSats: sized.capped } : {}), holders: holders.length }, "inference_submitted");
-    return reply.send({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second", ...(routed ? { routing: routed.summary } : {}) });
+    return reply.send({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second", ...(routed ? { routing: routed.summary } : {}), ...(lanTicket ? { lanDirect: { ticket: lanTicket } } : {}) });
   });
 
   app.post("/inference/chunks", async (req, reply) => {
@@ -635,6 +679,41 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       }
     }
     return reply.code(r === "ok" || r === "duplicate" ? 200 : 409).send({ status: r });
+  });
+
+  /**
+   * Direct LAN transfer: the requester's receipt for what it received over the LAN (signed by its
+   * agent, the one the ticket names). Compared with the reply the host streamed here, which is what
+   * was billed; a mismatch is a security event and counts against the host (lan.ts directBarred).
+   */
+  app.post("/inference/lan-receipt", async (req, reply) => {
+    const parsed = z
+      .object({ taskId: z.string().min(1).max(200), subtaskId: z.string().min(1).max(200), tid: z.string().regex(/^[0-9a-f]{32}$/), replySha256: z.string().regex(/^[0-9a-f]{64}$/), replyBytes: z.number().int().min(0).max(100_000_000) })
+      .safeParse(req.body);
+    if (!parsed.success) return reply.code(400).send({ error: "invalid_receipt" });
+    const body = parsed.data;
+    const verified = await verifyAgentRequest((req as any).headers ?? {}, "/inference/lan-receipt", req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
+    if (!verified || verified === "rejected") return reply.code(401).send({ error: "signature_invalid" });
+    const t = issuedTicket(body.subtaskId);
+    if (!t || t.taskId !== body.taskId || t.tid !== body.tid) return reply.code(404).send({ error: "unknown_ticket" });
+    if (verified.agentId !== t.requesterAgentId) return reply.code(403).send({ error: "not_requester" });
+    // The host streams the same reply here; wait (bounded) for its end.
+    for (let i = 0; i < 30 && !inferenceStreams.isDone(body.subtaskId); i++) await inferenceStreams.read(body.subtaskId, Number.MAX_SAFE_INTEGER, 500);
+    if (!inferenceStreams.isDone(body.subtaskId)) return reply.code(409).send({ error: "stream_not_done" });
+    const judged = judgeLanReceipt(body.subtaskId, body, inferenceStreams.replyText(body.subtaskId) ?? "");
+    if (!judged) return reply.code(404).send({ error: "unknown_ticket" });
+    if (!judged.match) {
+      const n = noteDirectMismatch(judged.hostAgentId);
+      securityLog.log({
+        level: securityLog.severity("lan_direct_reply_mismatch"),
+        event: "lan_direct_reply_mismatch",
+        source: { type: "agent", id: judged.hostAgentId },
+        details: { taskId: body.taskId, subtaskId: body.subtaskId, requesterAgentId: t.requesterAgentId, mismatches24h: n },
+        action: n >= 3 ? "direct_tickets_stopped" : "logged",
+        coordinatorId: identity.peerId,
+      });
+    }
+    return reply.send({ ok: true, match: judged.match });
   });
 
   /** The requester reads the reply as it streams (long poll; signed by the requester's own agent). */

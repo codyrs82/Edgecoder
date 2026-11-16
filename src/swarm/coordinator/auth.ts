@@ -73,6 +73,7 @@ const AGENT_POST_ROUTES: ReadonlySet<string> = new Set([
   "/inference/submit",
   "/inference/stream",
   "/inference/chunks",
+  "/inference/lan-receipt",
   "/account/summary",
   "/account/usage",
   "/account/buy",

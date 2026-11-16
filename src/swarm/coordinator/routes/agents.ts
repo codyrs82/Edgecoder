@@ -66,6 +66,7 @@ import { persistStatsLedgerRecord } from "../stats-ledger.js";
 import { validatePortalNode } from "../enrollment.js";
 import { attestAgentSigningKey } from "../attested-keys.js";
 import { sanitizeLanAddresses } from "../../lan-proximity.js";
+import { noteLanHeartbeat } from "../lan.js";
 import {
   registerSchema,
   defaultPolicy,
@@ -346,6 +347,8 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       return reply.send({ ok: true, leaseOnly: true });
     }
     behaviorTracker.recordHeartbeat(body.agentId);
+    // LAN discovery: only a signed heartbeat registers LAN ids or reports neighbours.
+    if (verified && body.lan) noteLanHeartbeat(body.agentId, body.lan, now);
     // A tier claim starts (or resets) hardware verification, so only a signed heartbeat may make one.
     if (body.benchmark && verified) hardwareVerifier.reportBenchmark(body.agentId, body.benchmark, now);
     if (body.powerTelemetry) {

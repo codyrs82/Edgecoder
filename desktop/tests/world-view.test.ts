@@ -81,11 +81,21 @@ describe("your machines on the same local network", () => {
     expect(rows.filter((r) => r.sameNetwork)).toHaveLength(1);
   });
 
-  it("only your own machines count, and only when the probe answered", () => {
+  it("any machine on this network counts (yours or someone else's), only when it was measured", () => {
     const other = WORLD.agents.find((a) => !a.mine)!;
-    expect(lanMs({ ...other, lan: { sameNetwork: true, rttMs: 1 } })).toBeNull();
+    expect(lanMs({ ...other, lan: { sameNetwork: true, rttMs: 1 } })).toBe(1);
+    expect(lanMs(other)).toBeNull();
     const air = WORLD.agents.find((a) => a.name === "codys-macbook-air")!;
     expect(lanMs({ ...air, lan: { sameNetwork: false, rttMs: null } })).toBeNull();
+  });
+
+  it("nearest to you: someone else's machine on this network comes first, masked, and is listed once", () => {
+    const other = WORLD.agents.find((a) => !a.mine && a.status !== "stale")!;
+    const w = { ...WORLD, agents: WORLD.agents.map((a) => (a.id === other.id ? { ...a, lan: { sameNetwork: true, rttMs: 3.4 } } : a)) };
+    const near = nearestToYou(rowsFor(w), WORLD.selfAgentId, 5);
+    expect(near[0].agent.id).toBe(other.id);
+    expect(nearestText(near[0], WORLD.selfAgentId)).toBe(`${other.label} (same network)`);
+    expect(new Set(near.map((r) => r.agent.id)).size).toBe(near.length);
   });
 
   it("nearest to you: the LAN machine first, labelled same network; others stay masked", () => {

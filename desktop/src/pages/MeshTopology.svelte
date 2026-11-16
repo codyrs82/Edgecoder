@@ -4,8 +4,10 @@
   // distance set by the coordinator's measured round trip to them. Other people's machines are
   // masked (an OS family and a short hash); yours are named. "Latency to you" is an estimate:
   // your round trip to the machine's coordinator plus the coordinator's round trip to the machine.
-  // Your own machines on the same local network are measured directly by this computer's IDE
-  // provider (src/apps/ide/network-world.ts) and sit beside "You" with a "Same network" badge.
+  // Machines on the same local network (yours, and other people's, masked) are measured directly:
+  // by this computer's agent over the LAN (docs/security/lan-proximity.md) and, for yours, by a ping
+  // from the IDE provider (src/apps/ide/network-world.ts). They sit beside "You" with a
+  // "Same network · N ms" badge.
   // A failed refresh is quiet (lib/refresh-quiet.ts): the last view stays, retried on a backoff.
   import { backendReady, isRemoteMode, networkWorld, type WorldView } from "../lib/api";
   import ErrorBanner from "../components/ErrorBanner.svelte";
@@ -336,7 +338,7 @@
               <span><i class="dot busy"></i>Busy</span>
               <span><i class="dot stale"></i>Not seen lately</span>
               <span><i class="dot mine"></i>Yours</span>
-              {#if layout.agents.some((n) => n.lan)}<span>Beside You: your machines on the same network, measured directly.</span>{/if}
+              {#if layout.agents.some((n) => n.lan)}<span>Beside You: machines on your local network, measured directly.</span>{/if}
               <span>Distance from a coordinator: its round trip to the machine. Size: model slots.</span>
             </div>
           </div>
@@ -347,7 +349,7 @@
               <span class="badges">
                 <span class="sp-pill st-{a.status}">{statusText(a.status)}</span>
                 {#if a.mine}<span class="sp-pill yours">Yours</span>{/if}
-                {#if detail.sameNetwork}<span class="sp-pill lan">Same network</span>{/if}
+                {#if detail.sameNetwork}<span class="sp-pill lan">Same network · {formatMs(detail.estimateMs)}</span>{/if}
               </span>
               <dl>
                 {#if detail.sameNetwork}
@@ -383,7 +385,7 @@
                   <span class="dot {a.status}" aria-hidden="true"></span>
                   <span class="wname" class:masked={!a.mine}>{displayName(a, view.selfAgentId)}</span>
                   {#if a.mine}<span class="sp-pill yours">Yours</span>{/if}
-                  {#if r.sameNetwork}<span class="sp-pill lan">Same network</span>{/if}
+                  {#if r.sameNetwork}<span class="sp-pill lan">Same network · {formatMs(r.estimateMs)}</span>{/if}
                   {#if r.sameNetwork}
                     <span class="lat near-near" title="Measured directly from this computer over your local network">{formatMs(r.estimateMs)}</span>
                   {:else}
@@ -429,7 +431,7 @@
           </div>
         {/each}
       </div>
-      <p class="sp-muted footnote">Latency to a machine is an estimate: your round trip to its coordinator (measured from this computer) plus the coordinator's round trip to the machine (measured on its connection). Your own machines on the same local network are pinged directly from this computer and marked "Same network"; other people's machines are never probed. Regions come from where a machine is hosted or was enrolled; no location lookups are made.</p>
+      <p class="sp-muted footnote">Latency to a machine is an estimate: your round trip to its coordinator (measured from this computer) plus the coordinator's round trip to the machine (measured on its connection). Machines on your local network are measured directly and marked "Same network": EdgeCoder agents on one network find each other (a rotating id, no account or address) and time a small echo; your own are also pinged from this computer. Nothing about other people's machines is shown beyond the masked label. Regions come from where a machine is hosted or was enrolled; no location lookups are made.</p>
     </section>
   {/if}
 </div>

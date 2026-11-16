@@ -20,6 +20,12 @@
  * and only when the caller is a signed agent (the desktop app, which probes them itself): never
  * with another account, never with the portal.
  *
+ * Cross-account LAN proximity (src/swarm/lan-registry.ts, lan-discovery.ts). Agents measure their
+ * LAN neighbours themselves (any account, rotating LAN ids, no address). A signed agent caller gets
+ * `near: { rttMs }` on every machine its own agent measured on its LAN: its own machines by name,
+ * other people's masked like any other. The ids, proofs and raw reports (`lanProofs`, `lanReports`)
+ * are coordinator-to-coordinator only, so a peer can resolve its agents' neighbours.
+ *
  * Pure functions; the route (coordinator/routes/network-world.ts) supplies the live state.
  */
 import { createHash, createHmac } from "node:crypto";
@@ -39,6 +45,10 @@ export interface LocalWorldAgent {
   netTag?: string | null;
   /** Internal: the machine's private IPv4 addresses with prefix, for its owner only. */
   lan?: string[];
+  /** Internal (mesh only): the agent's current LAN ids and proofs, so peers resolve reports of it. */
+  lanProofs?: Array<{ id: string; p: string[]; w: number }>;
+  /** Internal (mesh only): the LAN neighbours the agent reported (id, proof, window, round trip). */
+  lanReports?: Array<{ id: string; p: string; w: number; rttMs: number }>;
   /** Opaque stable id for UI keys (keyed hash, not reversible). */
   id: string;
   label: string;
@@ -109,7 +119,7 @@ export interface WorldAgentLan {
   addresses: string[];
 }
 
-export type PublicWorldAgent = Omit<LocalWorldAgent, "agentId" | "ownerTag" | "lastSeenMs" | "perf" | "netTag" | "lan"> & {
+export type PublicWorldAgent = Omit<LocalWorldAgent, "agentId" | "ownerTag" | "lastSeenMs" | "perf" | "netTag" | "lan" | "lanProofs" | "lanReports"> & {
   mine: boolean;
   name?: string;
   lan?: WorldAgentLan;
@@ -119,6 +129,11 @@ export type PublicWorldAgent = Omit<LocalWorldAgent, "agentId" | "ownerTag" | "l
    * your machines share it. Carries no address.
    */
   lanGroup?: string;
+  /**
+   * Signed agent callers only (the desktop app): this machine is on the caller's local network, any
+   * account, as the agents measured it (round trip, ms). No address; other people's stay masked.
+   */
+  near?: { rttMs: number };
 };
 
 export interface PublicWorld {
@@ -282,9 +297,10 @@ export function toPublicWorld(
   nowMs: number,
   /**
    * Set only for a signed agent caller (the desktop app): the caller's own machines then carry
-   * `lan` (their private addresses and the same-public-network hint against `callerNetTag`).
+   * `lan` (their private addresses and the same-public-network hint against `callerNetTag`), and
+   * every machine in `near` (agent id -> round trip from the caller's own agent) carries `near`.
    */
-  lanFor?: { callerNetTag: string | null }
+  lanFor?: { callerNetTag: string | null; near?: ReadonlyMap<string, number> }
 ): PublicWorld {
   const callerTag = callerAccountId ? worldOwnerTag(callerAccountId) : null;
   const coordinators: WorldCoordinator[] = [{ ...self.coordinator, reachable: true, self: true }];
@@ -339,9 +355,11 @@ export function toPublicWorld(
   const groupOf = new Map<string, string>();
   for (const [tag, n] of tagCount) if (n >= 2) groupOf.set(tag, `n${groupOf.size + 1}`);
   const agents: PublicWorldAgent[] = kept.map(({ a, mine }) => {
-    const { agentId, ownerTag: _tag, lastSeenMs: _seen, perf: _perf, netTag, lan, ...rest } = a;
-    if (!mine) return { ...rest, mine: false };
-    const out: PublicWorldAgent = { ...rest, mine: true, name: agentId };
+    const { agentId, ownerTag: _tag, lastSeenMs: _seen, perf: _perf, netTag, lan, lanProofs: _proofs, lanReports: _reports, ...rest } = a;
+    const nearMs = lanFor?.near?.get(agentId);
+    const near = typeof nearMs === "number" && Number.isFinite(nearMs) ? { near: { rttMs: Math.round(nearMs * 10) / 10 } } : {};
+    if (!mine) return { ...rest, mine: false, ...near };
+    const out: PublicWorldAgent = { ...rest, mine: true, name: agentId, ...near };
     const group = netTag ? groupOf.get(netTag) : undefined;
     if (group) out.lanGroup = group;
     if (lanFor) {
@@ -417,6 +435,22 @@ function parsePerf(raw: unknown): { perf?: WorldAgentPerf } {
   };
 }
 
+/** A peer's mesh-only LAN facts for one agent, checked field by field (absent when malformed). */
+function parseLanFacts(a: Record<string, unknown>): Pick<LocalWorldAgent, "lanProofs" | "lanReports"> {
+  const hex = (n: number) => (v: unknown): v is string => typeof v === "string" && v.length === n && /^[0-9a-f]+$/.test(v);
+  const proofs = (Array.isArray(a.lanProofs) ? a.lanProofs : [])
+    .slice(0, 2)
+    .map((x) => x as Record<string, unknown>)
+    .filter((x) => hex(16)(x?.id) && Number.isInteger(x.w) && Array.isArray(x.p) && (x.p as unknown[]).every(hex(16)))
+    .map((x) => ({ id: x.id as string, p: (x.p as string[]).slice(0, 3), w: x.w as number }));
+  const reports = (Array.isArray(a.lanReports) ? a.lanReports : [])
+    .slice(0, 16)
+    .map((x) => x as Record<string, unknown>)
+    .filter((x) => hex(16)(x?.id) && hex(16)(x.p) && Number.isInteger(x.w) && typeof x.rttMs === "number" && Number.isFinite(x.rttMs) && x.rttMs >= 0 && x.rttMs <= 50)
+    .map((x) => ({ id: x.id as string, p: x.p as string, w: x.w as number, rttMs: x.rttMs as number }));
+  return { ...(proofs.length ? { lanProofs: proofs } : {}), ...(reports.length ? { lanReports: reports } : {}) };
+}
+
 export function parseLocalWorld(raw: unknown): LocalWorld | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
@@ -471,7 +505,8 @@ export function parseLocalWorld(raw: unknown): LocalWorld | null {
       slotsUsed: Math.max(0, Math.min(slots, Math.floor(num(a.slotsUsed) ?? 0))),
       coordinatorId: coordinator.id,
       rttMs: num(a.rttMs),
-      ...parsePerf(a.perf)
+      ...parsePerf(a.perf),
+      ...parseLanFacts(a)
     });
   }
   return { coordinator, links, agents, generatedAtMs: num(r.generatedAtMs) ?? 0 };

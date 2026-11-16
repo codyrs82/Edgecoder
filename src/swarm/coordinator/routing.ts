@@ -233,6 +233,12 @@ export function withoutRequesterAgents(agents: AgentView[], requesterAccountId: 
   return agents.filter((a) => (a.local ? owners.get(a.agentId) !== requesterAccountId && a.agentId !== requesterAccountId : a.ownerTag !== tag));
 }
 
+/** Mark the agents on the requester's LAN with the measured round trip (best fit's LAN bonus). */
+export function withLanRtt(agents: AgentView[], lanRtt: ReadonlyMap<string, number> | undefined): AgentView[] {
+  if (!lanRtt?.size) return agents;
+  return agents.map((a) => (lanRtt.has(a.agentId) ? { ...a, lanRttMs: lanRtt.get(a.agentId)! } : a));
+}
+
 /** Owner accounts of this coordinator's agents: agent_ownership, cached a minute, waited on at most 300 ms. */
 export type AgentOwnerSource = (agentIds: string[], nowMs: number) => Promise<ReadonlyMap<string, string | null>>;
 let ownerSource: AgentOwnerSource = (ids, nowMs) => accountsFor(ids, nowMs, OWNER_LOOKUP_WAIT_MS);
@@ -250,13 +256,13 @@ export interface Resolution {
 }
 
 /** Score `job` on the live network. `peers`: also consider peer coordinators' agents. */
-export async function resolveAuto(job: JobDescriptor, opts: { peers?: boolean; computeClass?: string; requesterAccountId?: string } = {}, nowMs = Date.now()): Promise<Resolution> {
+export async function resolveAuto(job: JobDescriptor, opts: { peers?: boolean; computeClass?: string; requesterAccountId?: string; lanRtt?: ReadonlyMap<string, number> } = {}, nowMs = Date.now()): Promise<Resolution> {
   const views = opts.peers && bestFitConfig.peers ? await peerViews(nowMs) : [];
   const local = localAgentViews(nowMs, rttSource);
   const owners = opts.requesterAccountId ? await ownerSource(local.map((a) => a.agentId), nowMs).catch(() => new Map<string, string | null>()) : new Map<string, string | null>();
   // Security research tier: a restricted model is never chosen by auto, for anyone (restricted.ts).
   // Never the requester's own machines (self-dealing).
-  const agents = withoutRequesterAgents(withoutRestrictedModels([...local, ...peerAgentViews(views, nowMs)]), opts.requesterAccountId, owners);
+  const agents = withLanRtt(withoutRequesterAgents(withoutRestrictedModels([...local, ...peerAgentViews(views, nowMs)]), opts.requesterAccountId, owners), opts.lanRtt);
   const view: NetworkView = {
     // A class the client named limits the choice to it.
     agents: opts.computeClass ? agents.filter((a) => a.computeClass === opts.computeClass) : agents,

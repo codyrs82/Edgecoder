@@ -19,6 +19,11 @@
  * computer's own subnets are pinged directly (ICMP echo with the OS `ping`: no port is opened, no
  * agent listens on the LAN). A machine that answers is marked `lan.sameNetwork` with its measured
  * round trip; the addresses themselves are not passed on to the page.
+ *
+ * Cross-account LAN proximity (src/swarm/lan-discovery.ts): this computer's agent measures every
+ * EdgeCoder machine it hears on the LAN, of any account, and the coordinator returns those as
+ * `near: { rttMs }` (no address; other people's machines masked). Both sources are merged here into
+ * the one `lan` the page reads, keeping the better measurement.
  */
 import { execFile } from "node:child_process";
 import { request } from "undici";
@@ -148,6 +153,12 @@ export function lanCandidates(agents: ReadonlyArray<Record<string, unknown>>, se
   return out;
 }
 
+/** The coordinator's `near.rttMs` (this computer's agent measured it on the LAN), or null. */
+export function nearRtt(near: unknown): number | null {
+  const ms = (near as { rttMs?: unknown } | undefined)?.rttMs;
+  return typeof ms === "number" && Number.isFinite(ms) && ms >= 0 ? Math.round(ms * 10) / 10 : null;
+}
+
 /**
  * The agents with `lan` replaced by what the page may see: `{ sameNetwork, rttMs }` on the
  * machines probed, nothing on the rest. Private addresses never reach the page.
@@ -162,9 +173,12 @@ export async function withLanProximity(
   const timed = await Promise.all(candidates.map((c) => cachedLanProbe(probe, c.ip, opts.nowMs ?? Date.now())));
   const byIndex = new Map(candidates.map((c, i) => [c.index, timed[i]]));
   return agents.map((a, i) => {
-    const { lan: _lan, ...rest } = a;
-    if (!byIndex.has(i)) return rest;
-    const ms = byIndex.get(i) ?? null;
+    const { lan: _lan, near, ...rest } = a;
+    const nearMs = nearRtt(near);
+    if (!byIndex.has(i) && nearMs === null) return rest;
+    const pinged = byIndex.get(i) ?? null;
+    // Both measured: the better one (the agents' echo and this computer's ping see the same LAN).
+    const ms = pinged === null ? nearMs : nearMs === null ? pinged : Math.min(pinged, nearMs);
     const view: AgentLanView = { sameNetwork: ms !== null, rttMs: ms };
     return { ...rest, lan: view };
   });
@@ -190,7 +204,7 @@ export async function networkWorld(
   );
   // LAN probes only from the user's own computer; a hosted caller drops the LAN facts entirely.
   const rawAgents = Array.isArray(r.json.agents) ? (r.json.agents as Array<Record<string, unknown>>) : [];
-  const agents = measure ? await withLanProximity(rawAgents, d.agentId, { ...lan, nowMs }) : rawAgents.map(({ lan: _lan, ...rest }) => rest);
+  const agents = measure ? await withLanProximity(rawAgents, d.agentId, { ...lan, nowMs }) : rawAgents.map(({ lan: _lan, near: _near, ...rest }) => rest);
   return {
     status: 200,
     json: {

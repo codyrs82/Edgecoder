@@ -105,13 +105,49 @@
   let bleSaving = $state(false);
   let bleNote = $state("");
 
-  // Bluetooth mesh (docs/bluetooth-mesh.md): the app keeps the choice and restarts its agent with it.
+  // Local network (docs/security/lan-proximity.md): discovery on by default, direct transfer off.
+  let lanDiscovery = $state(true);
+  let lanDirect = $state(false);
+  let lanSaving = $state(false);
+  let lanNote = $state("");
+
+  // Bluetooth mesh (docs/bluetooth-mesh.md) and the local network: the app keeps the choices and restarts its agent with them.
   $effect(() => {
     import("@tauri-apps/api/core")
-      .then(({ invoke }) => invoke<{ bleEnabled: boolean }>("get_agent_settings"))
-      .then((s) => (bleEnabled = s.bleEnabled))
-      .catch(() => (bleNote = "Only available in the desktop app."));
+      .then(({ invoke }) => invoke<{ bleEnabled: boolean; lanDiscovery?: boolean; lanDirect?: boolean }>("get_agent_settings"))
+      .then((s) => {
+        bleEnabled = s.bleEnabled;
+        lanDiscovery = s.lanDiscovery ?? true;
+        lanDirect = s.lanDirect ?? false;
+      })
+      .catch(() => {
+        bleNote = "Only available in the desktop app.";
+        lanNote = "Only available in the desktop app.";
+      });
   });
+
+  async function setLan(discovery: boolean, direct: boolean) {
+    lanSaving = true;
+    lanNote = "";
+    const before = { discovery: lanDiscovery, direct: lanDirect };
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const s = await invoke<{ lanDiscovery: boolean; lanDirect: boolean }>("set_agent_lan", { discovery, direct });
+      lanDiscovery = s.lanDiscovery;
+      lanDirect = s.lanDirect;
+      lanNote = !s.lanDiscovery
+        ? "Saved. The agent is restarting without local network discovery."
+        : s.lanDirect
+          ? "Saved. The agent is restarting and will accept work directly from machines on this network (macOS may ask to allow local network access)."
+          : "Saved. The agent is restarting (macOS may ask to allow local network access).";
+    } catch (e) {
+      lanDiscovery = before.discovery;
+      lanDirect = before.direct;
+      lanNote = `Couldn't save: ${(e as Error).message ?? e}`;
+    } finally {
+      lanSaving = false;
+    }
+  }
 
   async function setBle(on: boolean) {
     bleSaving = true;
@@ -473,6 +509,29 @@
         </div>
         <div class="sp-controls">
           <button class="sp-switch" role="switch" aria-checked={bleEnabled} aria-label="Enable Bluetooth mesh" disabled={bleSaving} onclick={() => setBle(!bleEnabled)}></button>
+        </div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-text">
+          <span class="sp-title">Find EdgeCoder machines on my network</span>
+          <span class="sp-desc" data-testid="lan-discovery-description">
+            This Mac announces itself on your local network with a random id that changes every 15 minutes (no name, account or address) and measures how close other EdgeCoder machines here are, so the network can prefer a host next door. Other people's machines stay anonymous, and their addresses never leave this computer.
+          </span>
+        </div>
+        <div class="sp-controls">
+          <button class="sp-switch" role="switch" aria-checked={lanDiscovery} aria-label="Find EdgeCoder machines on my network" disabled={lanSaving} onclick={() => setLan(!lanDiscovery, lanDirect)}></button>
+        </div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-text">
+          <span class="sp-title">Accept work directly from machines on my network</span>
+          <span class="sp-desc" data-testid="lan-direct-description">
+            Calls between this Mac and a nearby EdgeCoder machine go straight over your network, encrypted, instead of out to the internet and back. Each one needs a short-lived ticket from the coordinator, which still records and bills it as usual. Off by default; needs the setting above.
+          </span>
+          {#if lanNote}<span class="sp-desc" role="status">{lanNote}</span>{/if}
+        </div>
+        <div class="sp-controls">
+          <button class="sp-switch" role="switch" aria-checked={lanDirect && lanDiscovery} aria-label="Accept work directly from machines on my network" disabled={lanSaving || !lanDiscovery} onclick={() => setLan(lanDiscovery, !lanDirect)}></button>
         </div>
       </div>
     </div>

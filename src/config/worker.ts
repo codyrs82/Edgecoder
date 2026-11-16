@@ -69,6 +69,18 @@ export const workerConfigSchema = z.object({
    * They are shown only to the machine's owner. Default on; off/0/false turns it off.
    */
   AGENT_LAN_HINTS: envFlag({ off: ["off", "0", "false"], ci: true }),
+  /**
+   * Announce this agent on the local network (mDNS, `_edgecoder._tcp`, a rotating LAN id only) and
+   * measure the round trip to other EdgeCoder agents there, of any account, so the coordinator can
+   * prefer a nearby host (src/swarm/lan-discovery.ts). Default on; off/0/false stops announcing and listening.
+   */
+  AGENT_LAN_DISCOVERY: envFlag({ off: ["off", "0", "false"], ci: true }),
+  /**
+   * Accept model calls directly from machines on this network (and send this machine's own calls
+   * directly to a nearby host), with a coordinator ticket, encrypted (src/swarm/lan-direct.ts).
+   * Default off; on/1/true turns it on. Needs AGENT_LAN_DISCOVERY.
+   */
+  AGENT_LAN_DIRECT: envFlag({ on: ["on", "1", "true"], ci: true }),
   /** Loopback port for the IDE's swarm forwarder; unset or 0 = off. */
   LOCAL_FORWARD_PORT: envPort(undefined),
 

@@ -28,6 +28,13 @@ export interface NetworkDeps {
   agentId: string;
   /** Reach the coordinator some other way (the hosted endpoint: portal service token). Paths are the coordinator's own. */
   transport?: Transport;
+  /**
+   * Ask for direct LAN transfer (src/swarm/lan-direct.ts) when the local agent has it on; the agent
+   * drops the ask otherwise. Default: on through the local forwarder, never with a transport.
+   */
+  lanDirect?: boolean;
+  /** Tests: read the forwarder's NDJSON for /forward/lan/direct. */
+  directLines?: (body: unknown, signal?: AbortSignal) => AsyncIterable<Record<string, unknown>>;
 }
 
 export interface NetworkModel {
@@ -114,6 +121,40 @@ export interface CompletionPiece {
   routed?: string;
   /** Where the call ran (coordinator's served-by: masked machine label, hardware, region, timings). */
   served?: ServedBy;
+  /** The reply came directly from a machine on this LAN (the coordinator still billed it). */
+  direct?: boolean;
+}
+
+/** The local forwarder's NDJSON lines for a direct LAN call. */
+async function* forwarderDirectLines(d: NetworkDeps, body: unknown, signal?: AbortSignal): AsyncGenerator<Record<string, unknown>> {
+  const res = await request(`${d.forwarder}/forward/lan/direct`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${d.token()}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+    headersTimeout: 70_000,
+    bodyTimeout: 70_000,
+    signal,
+  });
+  if (res.statusCode !== 200) {
+    await res.body.text().catch(() => "");
+    yield { t: "fallback", phase: "connect", reason: `http_${res.statusCode}`, chars: 0 };
+    return;
+  }
+  let buf = "";
+  for await (const chunk of res.body) {
+    buf += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      try {
+        yield JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        // not a line we understand
+      }
+    }
+  }
 }
 
 /** A coordinator's `served` object, kept only when it has the expected shape. */
@@ -184,6 +225,19 @@ function noCapacityError(json: Record<string, unknown>, model: string): NetworkI
   return new NetworkInferenceError(`Every machine that runs ${model} is busy and none could start this request in time. Nothing was charged; try again in ${retryAfterSec} s.`, 503, retryAfterSec);
 }
 
+function directWanted(d: NetworkDeps): boolean {
+  return !d.transport && d.lanDirect !== false;
+}
+
+/** The messages as /inference/submit sends them (the direct request must hash the same: lan-direct.ts inputDigest). */
+function submittedMessages(messages: Array<{ role: string; content: string } | ChatMessage>) {
+  return messages.map((m) => {
+    const cm = m as ChatMessage;
+    const role = cm.role === "system" || cm.role === "assistant" || cm.role === "tool" ? cm.role : "user";
+    return { role, content: cm.content, ...(cm.tool_calls?.length ? { tool_calls: cm.tool_calls } : {}), ...(cm.tool_name ? { tool_name: cm.tool_name } : {}) };
+  });
+}
+
 /** Run a chat on the network and yield the reply as it streams. */
 export async function* streamNetworkCompletion(
   d: NetworkDeps,
@@ -196,11 +250,7 @@ export async function* streamNetworkCompletion(
     submitterAccountId: d.agentId,
     model: req.model,
     computeClass: req.computeClass,
-    messages: req.messages.map((m) => {
-      const cm = m as ChatMessage;
-      const role = cm.role === "system" || cm.role === "assistant" || cm.role === "tool" ? cm.role : "user";
-      return { role, content: cm.content, ...(cm.tool_calls?.length ? { tool_calls: cm.tool_calls } : {}), ...(cm.tool_name ? { tool_name: cm.tool_name } : {}) };
-    }),
+    messages: submittedMessages(req.messages),
     ...(req.tools?.length ? { tools: req.tools } : {}),
     ...(req.target ? { target: req.target } : {}),
     ...(req.reservationId ? { reservationId: req.reservationId } : {}),
@@ -213,6 +263,8 @@ export async function* streamNetworkCompletion(
     ...(req.model !== "auto" && req.routing?.maxCSats !== undefined ? { routing: { maxCSats: req.routing.maxCSats } } : {}),
     ...(req.model === "auto" && req.routeRedirect ? { routeRedirect: true } : {}),
     ...(req.coordinatorChoice ? { coordinatorChoice: req.coordinatorChoice } : {}),
+    // The local agent replaces this with a per-call key when it can take a direct LAN ticket.
+    ...(directWanted(d) && !req.reservationId ? { lanDirect: true } : {}),
   }, signal);
   if (sub.status !== 200) {
     const err = String(sub.json.error ?? `HTTP ${sub.status}`);
@@ -236,6 +288,58 @@ export async function* streamNetworkCompletion(
   const subtaskId = String(sub.json.subtaskId);
   const routed = typeof (sub.json.routing as { line?: unknown } | undefined)?.line === "string" ? String((sub.json.routing as { line: string }).line) : undefined;
   let after = 0;
+  // Text already shown from a direct LAN stream that broke: the coordinator's copy is read past it.
+  let skipChars = 0;
+  const ticket = (sub.json.lanDirect as { ticket?: { tid?: unknown } } | undefined)?.ticket;
+  if (ticket && typeof ticket === "object" && directWanted(d)) {
+    const request = { messages: submittedMessages(req.messages), ...(req.tools?.length ? { tools: req.tools } : {}) };
+    let text = "";
+    let doneLine: Record<string, unknown> | null = null;
+    let fallback: Record<string, unknown> | null = null;
+    try {
+      for await (const line of (d.directLines ?? ((b, sg) => forwarderDirectLines(d, b, sg)))({ ticket, request }, signal)) {
+        if (line.t === "chunk" && typeof line.delta === "string") {
+          text += line.delta;
+          if (line.delta) yield { delta: line.delta };
+        } else if (line.t === "done") {
+          doneLine = line;
+          break;
+        } else if (line.t === "fallback") {
+          fallback = line;
+          break;
+        }
+      }
+    } catch (err) {
+      if (signal?.aborted) return;
+      fallback = { phase: text ? "stream" : "connect", reason: (err as Error).message };
+    }
+    if (doneLine) {
+      if (Array.isArray(doneLine.toolCalls) && doneLine.toolCalls.length) yield { toolCalls: doneLine.toolCalls as ToolCall[] };
+      // The receipt (what arrived, against what the host reported to the coordinator) and the
+      // settled cost from the coordinator, which billed the call as any other.
+      const receipt = call(d, "POST", "/inference/lan-receipt", { taskId, subtaskId, tid: ticket.tid, replySha256: doneLine.replySha256, replyBytes: doneLine.replyBytes }, signal).catch(() => null);
+      let summary: Record<string, unknown> = {};
+      for (let i = 0; i < 3; i++) {
+        const r = await call(d, "POST", "/inference/stream", { taskId, subtaskId, after: 1_000_000_000, waitMs: 15_000 }, signal).catch(() => null);
+        if (!r || r.status !== 200) break;
+        summary = r.json;
+        if (r.json.done) break;
+      }
+      await receipt;
+      yield {
+        done: true, direct: true,
+        ...(typeof doneLine.error === "string" ? { error: doneLine.error } : {}),
+        ...(typeof summary.creditsSpent === "number" ? { creditsSpent: summary.creditsSpent } : {}),
+        ...(typeof summary.promptTokens === "number" ? { promptTokens: summary.promptTokens } : typeof doneLine.promptTokens === "number" ? { promptTokens: doneLine.promptTokens } : {}),
+        ...(typeof summary.outputTokens === "number" ? { outputTokens: summary.outputTokens } : typeof doneLine.outputTokens === "number" ? { outputTokens: doneLine.outputTokens } : {}),
+        ...(routed ? { routed } : {}),
+        ...(servedOf(summary.served) ? { served: servedOf(summary.served) } : {}),
+      };
+      return;
+    }
+    // Fallback: the same call through the coordinator, as if the direct path had never been tried.
+    if (fallback?.phase === "stream") skipChars = text.length;
+  }
   const deadline = Date.now() + 6 * 60_000;
   while (Date.now() < deadline) {
     if (signal?.aborted) return;
@@ -243,7 +347,14 @@ export async function* streamNetworkCompletion(
     if (r.status === 503 && r.json.error === "no_capacity") throw noCapacityError(r.json, req.model);
     if (r.status !== 200) throw new NetworkInferenceError(`Network stream failed: ${String(r.json.error ?? r.status)}`, 502);
     const chunks = (r.json.chunks as string[]) ?? [];
-    for (const c of chunks) if (c) yield { delta: c };
+    for (let c of chunks) {
+      if (skipChars > 0) {
+        const cut = Math.min(skipChars, c.length);
+        skipChars -= cut;
+        c = c.slice(cut);
+      }
+      if (c) yield { delta: c };
+    }
     after = Number(r.json.next ?? after + chunks.length);
     if (r.json.done) {
       if (Array.isArray(r.json.toolCalls) && r.json.toolCalls.length) yield { toolCalls: r.json.toolCalls as ToolCall[] };

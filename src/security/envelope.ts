@@ -89,6 +89,13 @@ export function rederiveEnvelopeSharedKey(rootSecret: Buffer, subtaskId: string,
   return deriveSharedKey(deriveEnvelopeEphemeralKeyPair(rootSecret, subtaskId).privateKey, agentPublicKey, subtaskId);
 }
 
+/** Raw X25519 shared secret of a raw private key and a raw public key (LAN direct transfer: src/swarm/lan-direct.ts). */
+export function x25519SharedSecret(myPrivateRaw: Buffer, theirPublicRaw: Buffer): Buffer {
+  const myPrivate = createPrivateKey({ key: Buffer.concat([X25519_PKCS8_PREFIX, myPrivateRaw]), format: "der", type: "pkcs8" });
+  const theirPublic = createPublicKey({ key: Buffer.concat([X25519_SPKI_PREFIX, theirPublicRaw]), format: "der", type: "spki" });
+  return diffieHellman({ publicKey: theirPublic, privateKey: myPrivate });
+}
+
 function deriveSharedKey(
   myPrivateRaw: Buffer,
   theirPublicRaw: Buffer,

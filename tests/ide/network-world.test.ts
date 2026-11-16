@@ -171,6 +171,22 @@ describe("LAN proximity: only your own machines, probed directly from this compu
     expect(parsePingMs("3 packets transmitted, 0 packets received, 100.0% packet loss")).toBeNull();
   });
 
+  it("merges the agents' own LAN measurement (`near`, any account) with the ping, keeping the better one", async () => {
+    const { withLanProximity } = await import("../../src/apps/ide/network-world.js");
+    const list = agents();
+    (list[0] as Record<string, unknown>).near = { rttMs: 1.1 }; // yours: pinged at 2.4, the agents saw 1.1
+    (list[4] as Record<string, unknown>).near = { rttMs: 3.3 }; // someone else's, on this LAN: shown, never pinged
+    const probed: string[] = [];
+    const out = await withLanProximity(list, "mac-1", { localCidrs: LOCAL, probe: async (ip) => (probed.push(ip), 2.4) });
+    expect(probed).toEqual(["192.168.1.40"]);
+    expect(out[0].lan).toEqual({ sameNetwork: true, rttMs: 1.1 });
+    expect(out[4]).toMatchObject({ mine: false, label: "mac-•••beef", lan: { sameNetwork: true, rttMs: 3.3 } });
+    expect(out.every((a) => a.near === undefined)).toBe(true);
+    // The ping wins when it is the faster one.
+    const again = await withLanProximity([{ ...agents()[0], near: { rttMs: 5 } }], "mac-1", { localCidrs: LOCAL, probe: async () => 0.6, nowMs: Date.now() + 120_000 });
+    expect(again[0].lan).toEqual({ sameNetwork: true, rttMs: 0.6 });
+  });
+
   it("the provider strips LAN facts when it is not on the user's computer (hosted transport)", async () => {
     const { networkWorld } = await import("../../src/apps/ide/network-world.js");
     const transport = async () => ({ status: 200, json: { coordinators: [], agents: agents() } });
@@ -180,6 +196,6 @@ describe("LAN proximity: only your own machines, probed directly from this compu
         throw new Error("must not probe");
       }
     });
-    expect(JSON.stringify(r.json)).not.toMatch(/192\.168|"lan"/);
+    expect(JSON.stringify(r.json)).not.toMatch(/192\.168|"lan"|"near"/);
   });
 });

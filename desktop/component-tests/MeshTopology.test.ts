@@ -135,12 +135,28 @@ describe("Network page: the world view", () => {
     // Cards: the badge and the measured ms (no "~": it is not an estimate).
     await fireEvent.click(screen.getByRole("button", { name: "Cards" }));
     const card = within(screen.getByRole("list", { name: /machines/i })).getAllByRole("listitem").find((li) => li.textContent?.includes("codys-macbook-air"))!;
-    expect(within(card).getByText("Same network")).toBeTruthy();
+    expect(within(card).getByText("Same network · 2 ms")).toBeTruthy();
     expect(within(card).getByText("2 ms")).toBeTruthy();
     expect(card.textContent).not.toContain("~");
     // Nobody else is ever marked same network, and other people's machines stay masked.
-    expect(screen.getAllByText("Same network")).toHaveLength(1);
+    expect(screen.getAllByText(/^Same network/)).toHaveLength(1);
     expect(document.body.textContent).not.toMatch(/192\.168/);
+  });
+
+  it("someone else's machine on the same local network: Same network with the ms, still masked", async () => {
+    const w = structuredClone(WORLD);
+    const other = w.agents.find((a) => !a.mine)!;
+    (other as typeof other & { lan?: unknown }).lan = { sameNetwork: true, rttMs: 3.4 };
+    api.networkWorld.mockResolvedValue(w);
+    render(MeshTopology);
+    const summary = await screen.findByRole("region", { name: /network summary/i });
+    const tile = within(summary).getByText("Nearest to you").parentElement!;
+    expect(tile.textContent).toContain(`${other.label} (same network)`);
+    await fireEvent.click(screen.getByRole("button", { name: "Cards" }));
+    const card = within(screen.getByRole("list", { name: /machines/i })).getAllByRole("listitem").find((li) => li.textContent?.includes(other.label))!;
+    expect(within(card).getByText("Same network · 3 ms")).toBeTruthy();
+    expect(card.querySelector(".wname")?.textContent).toBe(other.label);
+    expect(card.textContent).not.toContain("Yours");
   });
 
   it("a single failed refresh is quiet: the last view stays with a muted note, no red banner", async () => {

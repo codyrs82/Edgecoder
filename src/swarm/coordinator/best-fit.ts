@@ -35,6 +35,11 @@
  * the best other agent (prompt tokens / that agent's prefill rate), and broken when it is stale,
  * failing, its context is too small, or the job no longer fits it.
  *
+ * LAN proximity (src/swarm/lan-registry.ts): an agent on the same local network as the requester's
+ * own machine (measured by the agents themselves, any account) gets `lanBonus` added to its score,
+ * so between near equals the host next door wins. It is a bonus, not a filter: a far better fit
+ * elsewhere still wins, and billing is the same as for any other host.
+ *
  * Per (model, class) only the best agent is kept; the answer is the best pair, its agent as a soft
  * preference (dispatch.ts preferAgent), and the ranked alternatives with their score breakdown.
  */
@@ -75,6 +80,8 @@ export interface AgentView {
   stale: boolean;
   /** worldOwnerTag of the owner account, when known (a requester's own agents are left out of auto). */
   ownerTag?: string | null;
+  /** Round trip from the requester's own machine over their LAN, when the two are neighbours. */
+  lanRttMs?: number | null;
 }
 
 export interface NetworkView {
@@ -119,6 +126,8 @@ export interface BestFitConfig {
   oversizePenalty: number;
   /** Also score agents on peer coordinators (the caller may be sent there). */
   peers: boolean;
+  /** Added to the score of a host on the requester's LAN (0: off). */
+  lanBonus: number;
 }
 
 export const DEFAULT_BEST_FIT_CONFIG: BestFitConfig = {
@@ -130,6 +139,7 @@ export const DEFAULT_BEST_FIT_CONFIG: BestFitConfig = {
   sessionTtlMs: 30 * 60_000,
   oversizePenalty: 0.25,
   peers: true,
+  lanBonus: 0.05,
 };
 
 /** The config from BEST_FIT_* variables; a missing or invalid value keeps its default. */
@@ -156,6 +166,7 @@ export function bestFitConfigFromEnv(env: Record<string, string | undefined> = p
     sessionTtlMs: num(env.BEST_FIT_SESSION_TTL_MS, d.sessionTtlMs, 0),
     oversizePenalty: num(env.BEST_FIT_OVERSIZE_PENALTY, d.oversizePenalty, 0, 1),
     peers: !["0", "false"].includes((env.BEST_FIT_PEERS ?? "").trim().toLowerCase()),
+    lanBonus: num(env.BEST_FIT_LAN_BONUS, d.lanBonus, 0, 1),
   };
 }
 
@@ -307,6 +318,8 @@ export interface Candidate {
   estimate: Estimate;
   /** Below the job's minimum size, kept because nothing that meets it is available. */
   belowFloor: boolean;
+  /** On the requester's LAN: the measured round trip (the score includes the LAN bonus). */
+  lanRttMs?: number;
 }
 
 export type AffinityStatus = "none" | "kept" | "broken";
@@ -365,9 +378,11 @@ function evaluate(job: JobDescriptor, view: NetworkView, cfg: BestFitConfig, req
         price: round3(1 / (1 + est.cSats / cfg.priceRefCSats)),
         reliability: round3(reliabilityOf(a)),
       };
+      const lan = typeof a.lanRttMs === "number" && Number.isFinite(a.lanRttMs) ? a.lanRttMs : undefined;
       out.push({
         model, computeClass: a.computeClass, agentId: a.agentId, agentLabel: a.label, coordinatorId: a.coordinatorId, local: a.local,
-        paramsB: paramsB(model), score: scoreOf(parts, w), parts, estimate: est, belowFloor: false,
+        paramsB: paramsB(model), score: round3(scoreOf(parts, w) + (lan !== undefined ? cfg.lanBonus : 0)), parts, estimate: est, belowFloor: false,
+        ...(lan !== undefined ? { lanRttMs: lan } : {}),
         toolsOk: !req.needsTools || callsTools(model),
         contextOk: req.contextTokens <= contextWindowOf(a, model),
         priceOk: job.maxCSats === undefined || est.cSats <= job.maxCSats,
@@ -380,8 +395,10 @@ function evaluate(job: JobDescriptor, view: NetworkView, cfg: BestFitConfig, req
 const fmtS = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);
 
 /** The single biggest reason the chosen candidate beat the runner-up. */
-function whyChosen(c: Candidate, next: Candidate | undefined, w: BestFitWeights, req: Requirements): string {
+function whyChosen(c: Candidate, next: Candidate | undefined, w: BestFitWeights, req: Requirements, lanBonus = 0): string {
   if (!next) return `the only ${c.belowFloor ? "available model" : "model that fits"}`;
+  // Won by the LAN bonus: say so.
+  if (c.lanRttMs !== undefined && next.lanRttMs === undefined && c.score - next.score <= lanBonus) return `on your local network (${fmtS(c.lanRttMs)} away)`;
   const gains: Array<[number, string]> = [
     [w.quality * (c.parts.quality - next.parts.quality), `most capable that fits (${c.paramsB}B, ~${req.enoughParamsB}B wanted)`],
     [w.latency * (c.parts.latency - next.parts.latency), `fastest that fits (est. ${fmtS(c.estimate.totalMs)} vs ${fmtS(next.estimate.totalMs)})`],
@@ -452,7 +469,7 @@ export function bestFit(job: JobDescriptor, view: NetworkView, cfg: BestFitConfi
   }
 
   const next = ranked.find((c) => c !== chosen && !(c.model === chosen.model && c.computeClass === chosen.computeClass));
-  const why = affinity.status === "kept" && affinity.reason ? `session affinity: ${affinity.reason}` : whyChosen(chosen, next, w, req);
+  const why = affinity.status === "kept" && affinity.reason ? `session affinity: ${affinity.reason}` : whyChosen(chosen, next, w, req, cfg.lanBonus);
   const floorNote = chosen.belowFloor ? ` (nothing ≥ ${req.minParamsB}B is available)` : "";
   return {
     chosen,

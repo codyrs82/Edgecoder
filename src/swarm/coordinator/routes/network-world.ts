@@ -34,6 +34,7 @@ import { routableModels } from "../../model-catalog.js";
 import { meshRtt } from "./mesh.js";
 import { accountsFor } from "./admin-network.js";
 import { agentPerf, setPeerWorldSource } from "../routing.js";
+import { lanNeighboursOf, lanRegistry, setPeerLanAgents } from "../lan.js";
 import {
   WORLD_AGENT_TTL_MS,
   WORLD_MAX_COORDINATORS,
@@ -137,8 +138,10 @@ export async function buildLocalWorld(nowMs = Date.now()): Promise<LocalWorld> {
       sourceIp: cap.sourceIp ?? null,
       lanAddresses: cap.lanAddresses ?? null
     });
-    // For peers' best-fit routing (stripped from every public answer).
-    return { ...agent, perf: agentPerf(agentId, claims) };
+    // For peers' best-fit routing and LAN resolution (stripped from every public answer).
+    const lanProofs = lanRegistry.proofsOf(agentId, nowMs);
+    const lanReports = lanRegistry.reportsOf(agentId, nowMs);
+    return { ...agent, perf: agentPerf(agentId, claims), ...(lanProofs.length ? { lanProofs } : {}), ...(lanReports.length ? { lanReports } : {}) };
   });
   const region = regionInfo(coordinatorRegion(), null);
   return {
@@ -204,16 +207,28 @@ function fetchPeerWorld(peer: { peerId: string; url: string }, nowMs: number): P
   return value;
 }
 
-/** The public world view for one caller (null account: nothing is marked as theirs). */
-export async function worldView(callerAccountId: string | null, nowMs = Date.now(), lanFor?: { callerNetTag: string | null }): Promise<PublicWorld> {
+/** Peers' agents' LAN ids, proofs and reports, for resolving neighbours across coordinators (lan.ts). */
+function notePeerLan(views: Array<LocalWorld | null>, nowMs: number): void {
+  setPeerLanAgents(
+    views.flatMap((w) => (w ? w.agents.filter((a) => a.lanProofs || a.lanReports).map((a) => ({ agentId: a.agentId, coordinatorId: w.coordinator.id, lanProofs: a.lanProofs, lanReports: a.lanReports })) : [])),
+    nowMs
+  );
+}
+
+/**
+ * The public world view for one caller (null account: nothing is marked as theirs). A signed agent
+ * caller (`lanFor.callerAgentId`) also gets `near` on the machines on its LAN, of any account.
+ */
+export async function worldView(callerAccountId: string | null, nowMs = Date.now(), lanFor?: { callerNetTag: string | null; callerAgentId?: string }): Promise<PublicWorld> {
   const peers = peerCoordinators();
   const [self, ...views] = await Promise.all([cachedLocalWorld(nowMs), ...peers.map((p) => fetchPeerWorld(p, nowMs))]);
+  notePeerLan(views, nowMs);
   return toPublicWorld(
     self,
     peers.map((p, i) => ({ url: p.url, id: p.peerId, world: views[i], rttMs: linkRtt(p.peerId, nowMs) })),
     callerAccountId,
     nowMs,
-    lanFor
+    lanFor ? { callerNetTag: lanFor.callerNetTag, ...(lanFor.callerAgentId ? { near: lanNeighboursOf(lanFor.callerAgentId, nowMs) } : {}) } : undefined
   );
 }
 
@@ -245,6 +260,7 @@ async function peerWorldsForRouting(nowMs: number): Promise<Array<{ world: Local
   const peers = peerCoordinators();
   const views = await Promise.all(peers.map((p) => fetchPeerWorld(p, nowMs)));
   const out: Array<{ world: LocalWorld; linkRttMs: number | null }> = [];
+  notePeerLan(views, nowMs);
   views.forEach((world, i) => {
     if (world) out.push({ world, linkRttMs: linkRtt(peers[i].peerId, nowMs) });
   });
@@ -265,7 +281,7 @@ export function registerNetworkWorldRoutes(app: CoordinatorApp): void {
     let account: string | null;
     let callerKey: string;
     // LAN facts about the caller's own machines go only to a signed agent (the desktop app).
-    let lanFor: { callerNetTag: string | null } | undefined;
+    let lanFor: { callerNetTag: string | null; callerAgentId?: string } | undefined;
     if (headers["x-portal-service-token"] !== undefined && hasPortalServiceToken(headers)) {
       const q = portalQuery.safeParse(req.query ?? {});
       if (!q.success) return reply.code(400).send({ error: "invalid_account" });
@@ -277,7 +293,7 @@ export function registerNetworkWorldRoutes(app: CoordinatorApp): void {
       account = await agentAccount(signer);
       callerKey = `agent:${signer}`;
       // The address this request came from; else the one the signer registered from.
-      lanFor = { callerNetTag: networkTag(requestOrigin(req).clientIp) ?? networkTag(agentCapabilities.get(signer)?.sourceIp) };
+      lanFor = { callerNetTag: networkTag(requestOrigin(req).clientIp) ?? networkTag(agentCapabilities.get(signer)?.sourceIp), callerAgentId: signer };
     } else if (hasMeshToken(headers)) {
       account = null;
       callerKey = "mesh";

@@ -239,6 +239,20 @@ fn set_agent_ble(enabled: bool, process: tauri::State<'_, AgentProcess>) -> Resu
     Ok(s)
 }
 
+/// Save the LAN choices (discovery on the local network; accepting work directly from machines on
+/// it) and restart the agent so they take effect (the monitor respawns it).
+#[tauri::command]
+fn set_agent_lan(discovery: bool, direct: bool, process: tauri::State<'_, AgentProcess>) -> Result<agent_settings::AgentSettings, String> {
+    let mut s = agent_settings::load();
+    if s.lan_discovery != discovery || s.lan_direct != direct {
+        s.lan_discovery = discovery;
+        s.lan_direct = direct;
+        agent_settings::save(&s)?;
+        restart_agent(&process.0);
+    }
+    Ok(s)
+}
+
 /// First-run local compute (Ollama + the Colima Docker sandbox): progress for the setup screen.
 #[tauri::command]
 fn get_local_compute_status() -> local_compute::ComputeStatus {
@@ -456,7 +470,7 @@ fn spawn_agent_process(agent_dir: &PathBuf, tokens: &AgentTokens) -> Option<Chil
         .env("ADMIN_API_TOKEN", &tokens.admin)
         // OLLAMA_HOST / DOCKER_HOST of the Ollama and Docker sandbox the app sets up (local_compute).
         .envs(local_compute::manager().agent_env())
-        // Settings > General: BLE mesh on or off.
+        // Settings > General: BLE mesh, LAN discovery and direct LAN transfer on or off.
         .envs(agent_settings::load().agent_env())
         // Once the signed-in user has enrolled this machine, its worker joins the network
         // coordinator; read at every spawn, so saving an enrollment takes effect on restart.
@@ -668,6 +682,7 @@ fn main() {
             save_network_enrollment,
             get_local_compute_status,
             get_agent_settings,
+            set_agent_lan,
             set_agent_ble,
             start_local_compute_setup,
             get_ide_token,

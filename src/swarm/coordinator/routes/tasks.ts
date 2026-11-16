@@ -124,6 +124,7 @@ import { inferenceStreams, judgeInferenceReply, retryInferenceElsewhere } from "
 import { EMPTY_REPLY_ERROR } from "../../inference-runner.js";
 import { judgeResult } from "../../result-outcome.js";
 import { claimRule, mayTakeNow, noteAgentPull, noteClaimed } from "../dispatch.js";
+import { issuedTicket } from "../lan.js";
 import { noteRestrictedOptIn, restrictedCalls, restrictedSubmitGate } from "../restricted.js";
 import type { RemoteGrant } from "../../remote-grants.js";
 
@@ -400,6 +401,10 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     const canTake = claimRule(body.agentId, capability, pullerAccount);
     const claims = queue.activeClaims();
     const nowMs = Date.now();
+    // Direct LAN transfer: the host claims the call it holds a ticket for, and only that one (every
+    // other claim rule still applies). A subtask id it holds no ticket for is ignored.
+    const lanOnly = body.lanSubtaskId && issuedTicket(body.lanSubtaskId)?.hostAgentId === body.agentId ? body.lanSubtaskId : undefined;
+    if (body.lanSubtaskId && !lanOnly) return reply.send({ subtask: null, lanClaim: "unavailable" });
     const task = queue.claim(
       body.agentId,
       capability?.activeModel,
@@ -408,7 +413,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       // checked too, so a task gossiped from a peer (no local bid) still cannot go to an under-spec agent.
       // A model call also needs a free slot, and is left briefly to an idle agent when this one is busy.
       // Task privacy: with ENVELOPE_REQUIRED an agent without an envelope key takes no user data.
-      (subtask) => canTake(subtask) && mayTakeNow(body.agentId, subtask, claims, nowMs) && envelopePolicyAllows(capability, subtask, ENVELOPE_REQUIRED),
+      (subtask) => canTake(subtask) && mayTakeNow(body.agentId, subtask, claims, nowMs) && envelopePolicyAllows(capability, subtask, ENVELOPE_REQUIRED) && (!lanOnly || subtask.id === lanOnly),
       // Claim hoarding: open claims per agent are bounded by what it declared, never below the
       // worker's parallel-inference ceiling (16) and never above the schema's 64.
       Math.max(capability?.maxConcurrentTasks ?? 1, MAX_OPEN_CLAIMS_FLOOR)
@@ -440,6 +445,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         return reply.code(503).send({ error: "envelope_encryption_failed" });
       }
     }
+    if (lanOnly && !task) return reply.send({ subtask: null, lanClaim: "unavailable" });
     if (task) noteClaimed(task.id);
     if (task) restrictedCalls.claimed(task.id, body.agentId, pullerAccount);
     if (task) {

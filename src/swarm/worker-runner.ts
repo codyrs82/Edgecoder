@@ -49,6 +49,9 @@ import { MeshTaskQueue } from "../mesh/mesh-task-queue.js";
 import { MeshHttpServer } from "../mesh/mesh-http-server.js";
 import { getLocalIpAddress } from "../mesh/network-utils.js";
 import { localLanAddresses } from "./lan-proximity.js";
+import { LanDiscovery } from "./lan-discovery.js";
+import { inputDigest, LanDirectHost, listenLanDirect, type DirectSession } from "./lan-direct.js";
+import { createLanDirectRequester } from "./lan-direct-requester.js";
 import { collectDesktopTelemetry } from "./desktop-telemetry.js";
 import { detectPlatform, getConfigDir, getLogDir, type PlatformInfo } from "../common/platform.js";
 import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from "../security/release-integrity.js";
@@ -109,6 +112,8 @@ async function shutdownGracefully(reason: GoingOfflineReason, code = 0): Promise
   } catch {
     // stopped before registration state existed
   }
+  // LAN discovery: a goodbye (TTL 0) so neighbours drop this machine now.
+  lanDiscovery?.stop();
   if (registered) {
     const r = await announceGoingOffline((body) => post("/heartbeat", body, { retries: 0, timeoutMs: 2_500, signed: true }), AGENT_ID, reason, 3_000);
     console.log(`[agent:${AGENT_ID}] going offline (${reason})${r.ok ? `: ${r.released} claim(s) handed back` : ": coordinator not told; claims lapse at lease expiry"}`);
@@ -527,6 +532,55 @@ let sandboxDown = false;
 let sandboxImagesReady = SANDBOX_MODE !== "docker";
 let sandboxImagesBuilding = false;
 
+// ── LAN discovery and direct transfer (docs/security/lan-proximity.md) ──
+// Discovery (AGENT_LAN_DISCOVERY, default on): mDNS announce of a rotating LAN id, echo round trips
+// to neighbours, reported in the signed heartbeat. Direct transfer (AGENT_LAN_DIRECT, default off):
+// a TCP listener on an ephemeral port, announced only over mDNS, that takes only coordinator tickets.
+let lanDirectPort: number | null = null;
+/** Set by the main loop once it can run model calls (it owns the engine settings). */
+let directSessionHandler: ((s: DirectSession) => void) | null = null;
+/** Direct calls waiting for their claim: the main loop's own pull may be the one that gets it. */
+const directClaimWaiters = new Map<string, (c: { st: Subtask; envelope?: TaskEnvelope }) => void>();
+const lanDiscovery: LanDiscovery | null = W.AGENT_LAN_DISCOVERY ? new LanDiscovery({ directPort: () => lanDirectPort, log: (m) => console.warn(`[agent:${AGENT_ID}] ${m}`) }) : null;
+const lanDirectHost: LanDirectHost | null =
+  lanDiscovery && W.AGENT_LAN_DIRECT
+    ? new LanDirectHost({
+        selfAgentId: AGENT_ID,
+        keyFor: (id) => lanDiscovery.identity.keyFor(id),
+        envelopePrivateKey: () => envelopeKeys.privateKey,
+        onSession: (session) => {
+          if (directSessionHandler) directSessionHandler(session);
+          else session.send({ t: "err", reason: "not_ready" });
+        },
+        log: (event, details) => console.warn(`[agent:${AGENT_ID}] ${event} ${JSON.stringify(details)}`),
+      })
+    : null;
+const lanRequester = createLanDirectRequester({
+  selfAgentId: AGENT_ID,
+  enabled: () => lanDirectPort !== null && Boolean(lanDiscovery?.isRunning),
+  anyDirectNeighbour: () => lanDiscovery?.anyDirectNeighbour() ?? false,
+  lookup: (lanId) => lanDiscovery?.lookup(lanId) ?? null,
+});
+async function startLan(): Promise<void> {
+  if (!lanDiscovery) return;
+  if (lanDirectHost) {
+    try {
+      const l = await listenLanDirect(lanDirectHost);
+      lanDirectPort = l.port;
+    } catch (e) {
+      console.warn(`[agent:${AGENT_ID}] LAN direct transfer off: ${String(e)}`);
+    }
+  }
+  const ok = await lanDiscovery.start();
+  if (ok) console.log(`[agent:${AGENT_ID}] LAN discovery on (mDNS _edgecoder._tcp${lanDirectPort ? `, direct transfer on port ${lanDirectPort}` : ""})`);
+}
+void startLan();
+/** What the signed heartbeat says about the LAN (no ids: discovery is off, the coordinator forgets them). */
+function lanHeartbeat(): { ids: Array<{ id: string; key: string }>; direct?: boolean; neighbours?: Array<{ id: string; p: string; w: number; rttMs: number }> } {
+  if (!lanDiscovery?.isRunning) return { ids: [] };
+  return { ids: lanDiscovery.identity.registration(), direct: lanDirectPort !== null, neighbours: lanDiscovery.report() };
+}
+
 // The user's IDE / local coding agent sends swarm work here; this agent signs and relays it.
 const LOCAL_FORWARD_PORT = W.LOCAL_FORWARD_PORT ?? 0;
 if (LOCAL_FORWARD_PORT > 0) {
@@ -549,7 +603,10 @@ if (LOCAL_FORWARD_PORT > 0) {
     },
     meshHeaders,
     signedHeaders,
-    agentId: AGENT_ID
+    agentId: AGENT_ID,
+    lan: () => ({ discovery: Boolean(lanDiscovery?.isRunning), direct: lanDirectPort !== null, neighbours: lanDiscovery?.list().length ?? 0 }),
+    rewriteSubmit: (body) => lanRequester.rewriteSubmit(body),
+    lanDirect: (body, writeLine) => lanRequester.run(body, writeLine)
   })
     .on("error", (err) => console.warn(`[agent:${AGENT_ID}] local forwarder unavailable: ${String(err)}`))
     .listen(LOCAL_FORWARD_PORT, "127.0.0.1", () =>
@@ -1153,6 +1210,86 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
   connect();
 }
 
+/**
+ * Record a finished subtask locally and report it to the coordinator: signed report, the envelope
+ * encryption of the result when the task came as one, the model that ran, and the work receipt.
+ * Shared by the pull loop and direct LAN calls (src/swarm/lan-direct.ts).
+ */
+async function reportSubtaskResult(st: Subtask, result: SubtaskResult, envelopeForTask: TaskEnvelope | undefined, ollamaModelRan: boolean): Promise<void> {
+  result.snapshotRef = st.snapshotRef;
+  try {
+    if (result.ok) {
+      localStore.recordTaskComplete(st.id, result.output, result.durationMs);
+    } else {
+      localStore.recordTaskFailed(st.id, result.error ?? "unknown", result.durationMs);
+    }
+  } catch (e) { console.warn(`[db] task result write failed: ${e}`); }
+  const reportNonce = randomUUID();
+  const reportSignature = signPayload(
+    JSON.stringify({
+      subtaskId: result.subtaskId,
+      taskId: result.taskId,
+      agentId: result.agentId,
+      ok: result.ok,
+      durationMs: result.durationMs,
+      reportNonce
+    }),
+    keys.privateKeyPem
+  );
+  result.reportNonce = reportNonce;
+  result.reportSignature = reportSignature;
+
+  // Encrypt result if task was received as an envelope
+  let resultPayload: Record<string, unknown> = { ...result };
+  if (envelopeForTask) {
+    // Fails closed: if the result cannot be encrypted, report a failure without the output.
+    const sealed = envelopeResultPayload(
+      result,
+      envelopeForTask,
+      (r, env) => encryptResult(r, env, envelopeKeys.privateKey),
+      (ok) => {
+        const nonce = randomUUID();
+        return {
+          reportNonce: nonce,
+          reportSignature: signPayload(
+            JSON.stringify({ subtaskId: result.subtaskId, taskId: result.taskId, agentId: result.agentId, ok, durationMs: result.durationMs, reportNonce: nonce }),
+            keys.privateKeyPem
+          )
+        };
+      }
+    );
+    resultPayload = sealed.payload;
+    if (sealed.encrypted) console.log(`[agent:${AGENT_ID}] encrypted result for envelope task: ${result.subtaskId}`);
+    else console.error(`[agent:${AGENT_ID}] result encryption failed for ${result.subtaskId}; reporting failure without output: ${sealed.error}`);
+  }
+  // #54: say which model produced the result (inside the signed request); the coordinator
+  // rejects a result whose model isn't the one the subtask requested.
+  const ranModel = st.kind === "inference" ? st.requestedModel : ollamaModelRan ? OLLAMA_MODEL : undefined;
+  if (ranModel) resultPayload.model = ranModel;
+  // Work receipt claim (architecture step 2): the coordinator countersigns this after accrual.
+  const finishedAtMs = Date.now();
+  resultPayload.receipt = signReceiptAsAgent(
+    {
+      taskId: result.taskId,
+      subtaskId: result.subtaskId,
+      agentId: result.agentId,
+      agentPublicKeyPem: keys.publicKeyPem,
+      startedAtMs: Math.max(0, finishedAtMs - Math.max(0, Math.round(result.durationMs))),
+      finishedAtMs,
+      // The output actually reported ("" when encryption failed and it was withheld).
+      resultHash: hashResultOutput(typeof resultPayload.output === "string" ? resultPayload.output : result.output)
+    },
+    keys.privateKeyPem
+  );
+
+  try {
+    await post("/result", resultPayload, { signed: true });
+  } catch (resultErr) {
+    try { localStore.enqueuePendingResult(result.subtaskId, JSON.stringify(resultPayload)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
+    console.warn(`[agent:${AGENT_ID}] result buffered for retry: ${result.subtaskId}`);
+  }
+}
+
 async function loop(): Promise<void> {
   console.log(`[agent:${AGENT_ID}] platform: os=${platformInfo.os} arch=${platformInfo.arch} docker=${platformInfo.isDocker} wsl=${platformInfo.isWSL} systemd=${platformInfo.hasSystemd} pkg=${platformInfo.packageManager} shell=${platformInfo.shell}`);
   console.log(`[agent:${AGENT_ID}] configDir=${PLATFORM_CONFIG_DIR} logDir=${PLATFORM_LOG_DIR}`);
@@ -1183,6 +1320,120 @@ async function loop(): Promise<void> {
   providers.use(currentProvider);
   const worker = new SwarmWorkerAgent(providers.current());
   const effectiveMode = OS === "ios" ? "swarm-only" : MODE;
+
+  /**
+   * Direct LAN transfer, host side (src/swarm/lan-direct.ts): a requester on this LAN connected
+   * with a valid coordinator ticket and sent the call. It starts at once; meanwhile the call is
+   * claimed with a signed /pull (lanSubtaskId), and nothing reaches the requester until the claim
+   * holds. The reply is streamed to the requester directly and to the coordinator as usual; the
+   * signed result and receipt go to the coordinator, which bills and verifies it as any other call.
+   */
+  directSessionHandler = (session) => {
+    const t = session.ticket;
+    if (!engineReady() || inflightInference.size >= MAX_PARALLEL_INFERENCE || lifecycle.status().paused || shuttingDown) {
+      session.send({ t: "err", reason: "busy" });
+      return;
+    }
+    const st: Subtask = {
+      id: t.subtaskId, taskId: t.taskId, kind: "inference", language: "python", snapshotRef: "inference", requestedModel: t.model, timeoutMs: t.timeoutMs,
+      input: JSON.stringify({ messages: session.request.messages, tools: session.request.tools, maxTokens: t.maxTokens, temperature: t.temperature ?? undefined }),
+      projectMeta: { projectId: "lan-direct", resourceClass: "gpu", priority: 60 },
+    };
+    const abort = new AbortController();
+    let settled = false;
+    const checkClaimed = (claimed: { st: Subtask; envelope?: TaskEnvelope }) => {
+      // What the coordinator queued must be what the requester sent (the ticket's digest says so too).
+      const queued = JSON.parse(claimed.st.input) as { messages?: unknown; tools?: unknown };
+      if (inputDigest({ messages: queued.messages, tools: queued.tools }) !== t.inputSha256) throw new Error("input_mismatch");
+      return claimed;
+    };
+    const byLoop = new Promise<{ st: Subtask; envelope?: TaskEnvelope }>((resolve, reject) =>
+      directClaimWaiters.set(t.subtaskId, (c) => {
+        try {
+          resolve(checkClaimed(c));
+        } catch (e) {
+          reject(e);
+        }
+      })
+    );
+    const byPull = (async (): Promise<{ st: Subtask; envelope?: TaskEnvelope }> => {
+      const deadline = Date.now() + 2_500;
+      while (Date.now() < deadline && !abort.signal.aborted && !settled) {
+        // This call's own slot is counted free: it is the one being claimed.
+        const free = engineReady() ? Math.min(MAX_PARALLEL_INFERENCE, Math.max(0, MAX_PARALLEL_INFERENCE - inflightInference.size) + 1) : 0;
+        const r = (await post("/pull", { agentId: AGENT_ID, inferenceSlots: MAX_PARALLEL_INFERENCE, freeInferenceSlots: free, contextWindow: CONTEXT_WINDOW, wake: true, lanSubtaskId: t.subtaskId, ...(W.AGENT_ALLOW_RESTRICTED_MODELS ? { allowRestrictedModels: true } : {}) }, { retries: 0, timeoutMs: 5_000, signed: true })) as { subtask?: Subtask | null; envelope?: TaskEnvelope; lanClaim?: string };
+        let claimed: { st: Subtask; envelope?: TaskEnvelope } | null = null;
+        if (r.envelope?.subtaskId === t.subtaskId) claimed = { st: { ...st, input: decryptTaskEnvelope(r.envelope, envelopeKeys.privateKey).input }, envelope: r.envelope };
+        else if (r.subtask?.id === t.subtaskId) claimed = { st: r.subtask };
+        if (claimed) return checkClaimed(claimed);
+        if (settled) break;
+        if (r.lanClaim === "unavailable") throw new Error("claim_unavailable");
+        await new Promise((res) => setTimeout(res, 150));
+      }
+      throw new Error("claim_timeout");
+    })();
+    byPull.catch(() => undefined);
+    byLoop.catch(() => undefined);
+    // Whichever pull got it first; a loss of the other is expected (the call is no longer claimable).
+    const claim = new Promise<{ st: Subtask; envelope?: TaskEnvelope }>((resolve, reject) => {
+      byLoop.then(resolve, reject);
+      // "unavailable" may mean the main loop's pull just took it: give that a moment to arrive.
+      byPull.then(resolve, (e) => setTimeout(() => reject(e), 1_000).unref?.());
+    }).finally(() => {
+      settled = true;
+      directClaimWaiters.delete(t.subtaskId);
+    });
+    let claimOk = false;
+    let seq = 0;
+    const held: string[] = [];
+    const sendDelta = (d: string) => {
+      if (d) session.send({ t: "chunk", seq: seq++, delta: d });
+    };
+    claim.then(
+      () => {
+        claimOk = true;
+        for (const d of held.splice(0)) sendDelta(d);
+      },
+      () => abort.abort()
+    );
+    let final: { toolCalls?: unknown[]; promptTokens?: number; outputTokens?: number } = {};
+    console.log(`[agent:${AGENT_ID}] direct LAN call ${t.subtaskId} on ${t.model}`);
+    const job: Promise<void> = (async () => {
+      const stopLeaseHeartbeat = startLeaseHeartbeat();
+      const result = await runInferenceSubtask(st, {
+        agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: MODEL_KEEP_ALIVE, contextWindow: CONTEXT_WINDOW,
+        signal: abort.signal,
+        onDelta: (d) => (claimOk ? sendDelta(d) : held.push(d)),
+        // The coordinator takes pieces only from the claimant: each waits for the claim.
+        post: async (path, body) => {
+          await claim;
+          const b = body as { done?: boolean; toolCalls?: unknown[]; promptTokens?: number; outputTokens?: number };
+          if (b.done) final = { ...(b.toolCalls?.length ? { toolCalls: b.toolCalls } : {}), ...(b.promptTokens !== undefined ? { promptTokens: b.promptTokens } : {}), ...(b.outputTokens !== undefined ? { outputTokens: b.outputTokens } : {}) };
+          return post(path, body, { retries: 0, timeoutMs: 10_000, signed: true });
+        },
+        ...(OPENAI_ENGINE ? { chat: engineChat } : {}),
+      }).finally(stopLeaseHeartbeat);
+      let claimed: { st: Subtask; envelope?: TaskEnvelope };
+      try {
+        claimed = await claim;
+      } catch (e) {
+        // Never handed to us: nothing is reported; the requester reads through the coordinator.
+        session.send({ t: "err", reason: (e as Error).message });
+        console.warn(`[agent:${AGENT_ID}] direct LAN call ${t.subtaskId} not claimed: ${(e as Error).message}`);
+        return;
+      }
+      if (result.ok) session.send({ t: "done", ...final });
+      else if (seq > 0) session.send({ t: "done", ...final, error: result.error ?? "failed" });
+      else session.send({ t: "err", reason: result.error ?? "failed" });
+      await reportSubtaskResult(claimed.st, result, claimed.envelope, false);
+    })()
+      .catch((e) => console.warn(`[agent:${AGENT_ID}] direct LAN call ${t.subtaskId} failed: ${String(e)}`))
+      .finally(() => {
+        inflightInference.delete(job);
+        wakeLoop(false);
+      });
+    inflightInference.add(job);
+  };
 
   /** Every subtask runs through the same execution policy, whatever its source. */
   async function runPolicedSubtask(st: Subtask, opts: { quiet?: boolean } = {}): Promise<SubtaskResult> {
@@ -1581,7 +1832,7 @@ async function loop(): Promise<void> {
           const hbStart = Date.now();
           // #54: the installed-model list rides every heartbeat (cached), so a pulled or removed model is routed correctly.
           const hbModels = currentProvider === "ollama-local" ? await installedModelsCached() : [];
-          const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE, ...(hbModels.length ? { installedModels: hbModels } : {}), ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
+          const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE, ...(hbModels.length ? { installedModels: hbModels } : {}), ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}), lan: lanHeartbeat() };
           hb = (await post("/heartbeat", hbBody, { signed: true })) as HeartbeatReply;
           if ("benchmark" in hbBody) benchmarkUnreported = false;
           try { localStore.recordHeartbeat(coordinator.url, hb.blacklisted ? "blacklisted" : "ok", Date.now() - hbStart); } catch (e) { console.warn(`[db] heartbeat write failed: ${e}`); }
@@ -1758,6 +2009,12 @@ async function loop(): Promise<void> {
           }
         }
 
+        // A call a direct LAN session is waiting for (it runs there, not here).
+        const directWaiter = pulled.subtask ? directClaimWaiters.get(pulled.subtask.id) : undefined;
+        if (pulled.subtask && directWaiter) {
+          directWaiter({ st: pulled.subtask, ...(taskEnvelope ? { envelope: taskEnvelope } : {}) });
+          continue;
+        }
         if (pulled.subtask) {
           const st = pulled.subtask;
 
@@ -1805,78 +2062,7 @@ async function loop(): Promise<void> {
               : runPolicedSubtask(st, { quiet: true });
             if (st.kind === "inference") console.log(`[agent:${AGENT_ID}] running inference ${st.id} on ${st.requestedModel}`);
             const result = await run.finally(stopLeaseHeartbeat);
-            result.snapshotRef = st.snapshotRef;
-            try {
-              if (result.ok) {
-                localStore.recordTaskComplete(st.id, result.output, result.durationMs);
-              } else {
-                localStore.recordTaskFailed(st.id, result.error ?? "unknown", result.durationMs);
-              }
-            } catch (e) { console.warn(`[db] task result write failed: ${e}`); }
-            const reportNonce = randomUUID();
-            const reportSignature = signPayload(
-              JSON.stringify({
-                subtaskId: result.subtaskId,
-                taskId: result.taskId,
-                agentId: result.agentId,
-                ok: result.ok,
-                durationMs: result.durationMs,
-                reportNonce
-              }),
-              keys.privateKeyPem
-            );
-            result.reportNonce = reportNonce;
-            result.reportSignature = reportSignature;
-
-            // Encrypt result if task was received as an envelope
-            let resultPayload: Record<string, unknown> = { ...result };
-            if (envelopeForTask) {
-              // Fails closed: if the result cannot be encrypted, report a failure without the output.
-              const sealed = envelopeResultPayload(
-                result,
-                envelopeForTask,
-                (r, env) => encryptResult(r, env, envelopeKeys.privateKey),
-                (ok) => {
-                  const nonce = randomUUID();
-                  return {
-                    reportNonce: nonce,
-                    reportSignature: signPayload(
-                      JSON.stringify({ subtaskId: result.subtaskId, taskId: result.taskId, agentId: result.agentId, ok, durationMs: result.durationMs, reportNonce: nonce }),
-                      keys.privateKeyPem
-                    )
-                  };
-                }
-              );
-              resultPayload = sealed.payload;
-              if (sealed.encrypted) console.log(`[agent:${AGENT_ID}] encrypted result for envelope task: ${result.subtaskId}`);
-              else console.error(`[agent:${AGENT_ID}] result encryption failed for ${result.subtaskId}; reporting failure without output: ${sealed.error}`);
-            }
-            // #54: say which model produced the result (inside the signed request); the coordinator
-            // rejects a result whose model isn't the one the subtask requested.
-            const ranModel = st.kind === "inference" ? st.requestedModel : currentProvider === "ollama-local" ? OLLAMA_MODEL : undefined;
-            if (ranModel) resultPayload.model = ranModel;
-            // Work receipt claim (architecture step 2): the coordinator countersigns this after accrual.
-            const finishedAtMs = Date.now();
-            resultPayload.receipt = signReceiptAsAgent(
-              {
-                taskId: result.taskId,
-                subtaskId: result.subtaskId,
-                agentId: result.agentId,
-                agentPublicKeyPem: keys.publicKeyPem,
-                startedAtMs: Math.max(0, finishedAtMs - Math.max(0, Math.round(result.durationMs))),
-                finishedAtMs,
-                // The output actually reported ("" when encryption failed and it was withheld).
-                resultHash: hashResultOutput(typeof resultPayload.output === "string" ? resultPayload.output : result.output)
-              },
-              keys.privateKeyPem
-            );
-
-            try {
-              await post("/result", resultPayload, { signed: true });
-            } catch (resultErr) {
-              try { localStore.enqueuePendingResult(result.subtaskId, JSON.stringify(resultPayload)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
-              console.warn(`[agent:${AGENT_ID}] result buffered for retry: ${result.subtaskId}`);
-            }
+            await reportSubtaskResult(st, result, envelopeForTask, currentProvider === "ollama-local");
           };
           // Model calls run side by side (Ollama, vLLM and MLX serve several at once); code jobs one at a time.
           if (st.kind === "inference" && MAX_PARALLEL_INFERENCE > 1) {

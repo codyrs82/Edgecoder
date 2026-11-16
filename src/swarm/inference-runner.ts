@@ -48,6 +48,10 @@ export async function runInferenceSubtask(
      * `model` is the requested catalog tag; the engine maps it to the id it serves. Unset = Ollama.
      */
     chat?: (model: string, req: { messages: ChatMessage[]; tools?: ToolSpec[]; maxTokens?: number; temperature?: number }, signal: AbortSignal, timeoutMs: number) => AsyncIterable<OllamaPiece>;
+    /** Each piece of reply text as the model produces it (direct LAN transfer: src/swarm/lan-direct.ts). */
+    onDelta?: (delta: string) => void;
+    /** Stops the call (the direct claim failed). */
+    signal?: AbortSignal;
   },
 ): Promise<SubtaskResult> {
   const started = Date.now();
@@ -101,6 +105,10 @@ export async function runInferenceSubtask(
   // cold model load (seconds to minutes on a CPU) is not cut off as a "Headers Timeout Error".
   const deadlineMs = Math.max(5_000, st.timeoutMs);
   const timer = setTimeout(() => abort.abort(), deadlineMs);
+  if (deps.signal) {
+    if (deps.signal.aborted) abort.abort();
+    else deps.signal.addEventListener("abort", () => abort.abort(), { once: true });
+  }
   try {
     const pieces = deps.chat
       ? deps.chat(model, { messages: input.messages, tools: input.tools, maxTokens: input.maxTokens, temperature: input.temperature }, abort.signal, deadlineMs + 1_000)
@@ -111,6 +119,7 @@ export async function runInferenceSubtask(
       else if ("delta" in piece) {
         full += piece.delta;
         pending += piece.delta;
+        deps.onDelta?.(piece.delta);
         if (pending.length >= FLUSH_CHARS || Date.now() - lastFlush >= FLUSH_MS) await flush(false);
       }
     }

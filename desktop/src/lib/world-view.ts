@@ -42,8 +42,9 @@ export interface WorldAgent {
   /** The coordinator's measured round trip to this machine (WebSocket pings), ms. */
   rttMs: number | null;
   /**
-   * Your machines only, desktop app only: this computer pinged it directly over the local network
-   * (it connects from the same public address and sits in one of this computer's subnets).
+   * Desktop app only: this machine is on this computer's local network, with the round trip measured
+   * directly: by this computer's agent (any account; docs/security/lan-proximity.md) or, for your own
+   * machines, by a ping from this computer. The better of the two.
    */
   lan?: { sameNetwork: boolean; rttMs: number | null };
   /**
@@ -82,14 +83,14 @@ export interface WorldView {
 
 // ── Estimates, sorting, filtering ──
 
-/** One of your machines this computer reached directly over the local network, with its measured round trip. */
+/** A machine on this computer's local network (yours or anyone's), with its measured round trip. */
 export function lanMs(agent: WorldAgent): number | null {
-  return agent.mine && agent.lan?.sameNetwork && typeof agent.lan.rttMs === "number" ? agent.lan.rttMs : null;
+  return agent.lan?.sameNetwork && typeof agent.lan.rttMs === "number" ? agent.lan.rttMs : null;
 }
 
 /**
- * Round trip from this computer to a machine. Your own machines on the same local network are
- * measured directly (`lan`). Otherwise an estimate: this computer's measured round trip to
+ * Round trip from this computer to a machine. Machines on the same local network are measured
+ * directly (`lan`). Otherwise an estimate: this computer's measured round trip to
  * the machine's coordinator plus the coordinator's measured round trip to the machine. Null when
  * either half is unknown. It is an estimate: work to the machine takes that path, but the two
  * halves are measured at different moments.
@@ -193,17 +194,19 @@ export function nearestPeers(rows: readonly WorldRow[], n = 3): WorldRow[] {
 }
 
 /**
- * "Nearest to you": your own machines on the same local network first (measured directly, this
- * computer left out), then other people's machines by the estimate. Up to `n`, online only.
+ * "Nearest to you": machines on the same local network first (yours and other people's, measured
+ * directly, this computer left out), then other people's machines by the estimate. Up to `n`,
+ * online only, each once.
  */
 export function nearestToYou(rows: readonly WorldRow[], selfAgentId?: string, n = 3): WorldRow[] {
   const lan = rows
     .filter((r) => r.sameNetwork && r.agent.status !== "stale" && r.agent.name !== selfAgentId)
     .sort((x, y) => (x.estimateMs as number) - (y.estimateMs as number));
-  return [...lan, ...nearestPeers(rows, n)].slice(0, n);
+  const seen = new Set(lan.map((r) => r.agent.id));
+  return [...lan, ...nearestPeers(rows, n + lan.length).filter((r) => !seen.has(r.agent.id))].slice(0, n);
 }
 
-/** How a "Nearest to you" entry reads: "MacBook-Pro (same network)" or "lin-•••4e08 iad". */
+/** How a "Nearest to you" entry reads: "MacBook-Pro (same network)", "mac-•••3f2a (same network)" or "lin-•••4e08 iad". */
 export function nearestText(r: WorldRow, selfAgentId?: string): string {
   if (r.sameNetwork) return `${displayName(r.agent, selfAgentId)} (same network)`;
   return `${r.agent.label} ${r.agent.region ?? r.agent.country ?? ""}`.trim();

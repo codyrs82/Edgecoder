@@ -167,7 +167,20 @@ export const heartbeatSchema = z.object({
   /** Update the agent's ask; omit to leave it, 0 to track the class reference again. */
   askMsatPerCredit: z.number().min(0).max(1e9).optional(),
   /** A new self-benchmark (periodic). */
-  benchmark: benchmarkReportSchema
+  benchmark: benchmarkReportSchema,
+  /**
+   * LAN discovery (src/swarm/lan-discovery.ts; signed heartbeats only): the agent's rotating LAN ids
+   * with their keys, whether it accepts direct calls, and the neighbours it measured (LAN id, proof,
+   * window, round trip; never an address). Empty ids: discovery is off. Malformed: ignored.
+   */
+  lan: z
+    .object({
+      ids: z.array(z.object({ id: z.string().max(32), key: z.string().max(64) })).max(2),
+      direct: z.boolean().optional(),
+      neighbours: z.array(z.object({ id: z.string().max(32), p: z.string().max(32), w: z.number().int(), rttMs: z.number().min(0).max(10_000) })).max(16).optional(),
+    })
+    .optional()
+    .catch(undefined)
 });
 /** Answer to a benchmark challenge handed out in a heartbeat response. */
 export const benchmarkResponseSchema = z.object({
@@ -248,7 +261,9 @@ export const pullSchema = z.object({
   /** The agent pulls at once on a work_available frame over its mesh WebSocket (dispatch.ts). */
   wake: z.boolean().optional(),
   /** AGENT_ALLOW_RESTRICTED_MODELS=1: the owner lets this agent take restricted-model calls (counts only signed). */
-  allowRestrictedModels: z.boolean().optional()
+  allowRestrictedModels: z.boolean().optional(),
+  /** Direct LAN transfer: claim this subtask (one the agent holds a ticket for) and nothing else. */
+  lanSubtaskId: z.string().min(1).max(200).optional()
 });
 export const resultSchema = z.object({
   subtaskId: z.string(),

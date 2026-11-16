@@ -45,7 +45,8 @@ export type SecurityEventType =
   | "model_control_not_owner"
   | "restricted_model_call"
   | "restricted_model_refused"
-  | "restricted_access_suspended";
+  | "restricted_access_suspended"
+  | "lan_direct_reply_mismatch";
 
 export interface SecurityEvent {
   timestamp: string;
@@ -104,7 +105,8 @@ const SEVERITY_MAP: Record<SecurityEventType, SecurityLevel> = {
   // Security research tier (docs/security-research-tier.md): every restricted-model call is recorded.
   restricted_model_call: "INFO",
   restricted_model_refused: "WARN",
-  restricted_access_suspended: "HIGH"
+  restricted_access_suspended: "HIGH",
+  lan_direct_reply_mismatch: "WARN"
 };
 
 export class SecurityEventLogger {
