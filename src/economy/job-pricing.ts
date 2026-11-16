@@ -81,28 +81,30 @@ export function cSatsToMsat(cSats: number): number {
  */
 
 /**
- * Profit a host makes over its cost at 50 % utilization (the share of the hour its slots serve
- * calls), after the network fee: the owner's pricing target (2026-11-16, "make everything
- * profitable"). TOKEN_PRICE_USD_PER_M's 30B-and-up bands and the cpu / apple power floors are
- * derived from it by scripts/pricing/break-even.mjs (PROFIT_MARGIN there) on measured Ollama
- * throughput; change both and re-run the script to retune.
+ * Profit a host makes over its cost at its target utilization (the share of the hour its slots
+ * serve calls; 50 %, datacenter GPUs 40 %), after the network fee: the owner's pricing target
+ * (2026-11-16, "make everything profitable"). TOKEN_PRICE_USD_PER_M's 30B-and-up bands and the
+ * cpu / apple power floors are derived from it by scripts/pricing/break-even.mjs (PROFIT_MARGIN,
+ * TARGET_UTILIZATION, TARGET_UTILIZATION_GPU there) on measured throughput; change both and
+ * re-run the script to retune.
  */
 export const HOST_PROFIT_MARGIN = 0.2;
 
 /**
  * USD per million tokens (input, output) by model size. Up to 16B: unchanged since 2026-11-03 (a
- * Mac's tokens already clear HOST_PROFIT_MARGIN at 50 % on them). 30B and up: 8.64× the 2026-11-03
- * prices, rounded up to 0.05 (2026-11-16): what a Vultr 2×A16 running qwen3-coder:30b under Ollama
- * (1.00 USD/h, measured) needs for HOST_PROFIT_MARGIN at 50 % utilization; larger bands scale alike.
+ * Mac's tokens already clear HOST_PROFIT_MARGIN at 50 % on them). 30B and up: 4.74× the 2026-11-03
+ * prices, rounded up to the cent: what a Vultr 2×A16 (1.00 USD/h) running qwen3-coder:30b under
+ * vLLM with 2 slots (measured 2026-11-16: 640 calls/h of 8,287 tokens in, 134 out) needs for
+ * HOST_PROFIT_MARGIN at 40 % utilization; larger bands scale alike. (8.64× under Ollama before.)
  */
 export const TOKEN_PRICE_USD_PER_M: Array<{ maxB: number; input: number; output: number }> = [
   { maxB: 2, input: 0.01, output: 0.03 },
   { maxB: 4, input: 0.02, output: 0.05 },
   { maxB: 9, input: 0.04, output: 0.1 },
   { maxB: 16, input: 0.07, output: 0.2 },
-  { maxB: 35, input: 1.05, output: 3.05 },
-  { maxB: 80, input: 2.6, output: 6.95 },
-  { maxB: Infinity, input: 5.2, output: 13.0 },
+  { maxB: 35, input: 0.57, output: 1.66 },
+  { maxB: 80, input: 1.43, output: 3.8 },
+  { maxB: Infinity, input: 2.85, output: 7.11 },
 ];
 
 /**

@@ -7,10 +7,12 @@
  *   node scripts/pricing/break-even.mjs [--btc-usd 64870] [--out break-even.json]
  *
  * Owner's target (2026-11-16): every real host class makes PROFIT_MARGIN (20 %) over its cost at
- * TARGET_UTILIZATION (50 %), after the network fee (the host keeps 95 %), on MEASURED throughput
- * (Ollama, today's slots), not on assumed vLLM gains.
+ * TARGET_UTILIZATION (50 %; datacenter GPUs at TARGET_UTILIZATION_GPU, 40 %), after the network fee
+ * (the host keeps 95 %), on MEASURED throughput: vLLM for the 2×A16 (measured 2026-11-16), Ollama
+ * with today's slots for Macs and CPUs. Assumed throughput is never targeted except the A100's,
+ * which has no measurement and is marked.
  *
- *   needed revenue of a fully busy hour = (1 + PROFIT_MARGIN) × hostCostUsdPerHour / (0.95 × TARGET_UTILIZATION)
+ *   needed revenue of a fully busy hour = (1 + PROFIT_MARGIN) × hostCostUsdPerHour / (0.95 × target utilization)
  *
  * Utilization = the share of the hour the host's slots serve calls (the coordinator's slot-busy
  * figure); revenue at u = u × the revenue of a fully busy hour. A model call costs
@@ -36,6 +38,11 @@ export const HOST_SHARE = 0.95;
 /** Profit over cost a target host makes at TARGET_UTILIZATION (HOST_PROFIT_MARGIN in job-pricing.ts). */
 export const PROFIT_MARGIN = 0.2;
 export const TARGET_UTILIZATION = 0.5;
+/** Target utilization for datacenter GPU hosts (gpu.dc), which serve many calls at once under vLLM (owner, 2026-11-16). */
+export const TARGET_UTILIZATION_GPU = 0.4;
+/** Large-band prices are rounded up to this many USD. */
+export const PRICE_STEP_USD = 0.01;
+export const targetUtilFor = (s) => (s.computeClass === "gpu.dc" ? TARGET_UTILIZATION_GPU : TARGET_UTILIZATION);
 
 /** Host cost per hour (USD). Edit freely. */
 export const HOST_COSTS = {
@@ -82,9 +89,9 @@ export const PRICES = {
       { maxB: 4, input: 0.02, output: 0.05 },
       { maxB: 9, input: 0.04, output: 0.1 },
       { maxB: 16, input: 0.07, output: 0.2 },
-      { maxB: 35, input: 1.05, output: 3.05 },
-      { maxB: 80, input: 2.6, output: 6.95 },
-      { maxB: Infinity, input: 5.2, output: 13.0 },
+      { maxB: 35, input: 0.57, output: 1.66 },
+      { maxB: 80, input: 1.43, output: 3.8 },
+      { maxB: Infinity, input: 2.85, output: 7.11 },
     ],
     floor: { cpu: 0.025, apple: 0.014, gpu: 0.05, "gpu.dc": 0.15 },
     splitBySlots: true,
@@ -97,6 +104,11 @@ export const LARGE_BAND_MIN_B = 17;
 /** Measured, per model (sustained run lg-202611160219-sustain, iad). Successful calls only. busy = slot-busy share. */
 export const MEASURED = {
   "qwen3-coder:30b": { paramsB: 30, seconds: 3600, calls: 526, prompt: 1_494_390, output: 70_590, cSats: 320.373, hosts: 1, busy: 0.698, note: "2×A16, Ollama, 1 slot, 64K ctx" },
+  // vLLM 0.33 on the same 2×A16 (AWQ 30B, TP2, 64K, prefix caching), 2026-11-16: closed-loop benchmark
+  // of an 8,287-token prompt and 134 tokens out at fixed concurrency, 3 rounds each, no preemptions.
+  // Concurrency 1: 581 calls/h (6.2 s); 2: 640 (11.2 s); 4: 676 (21.3 s); 6: 676 (31.8 s). busy = 1.
+  "qwen3-coder:30b@vllm-c2": { paramsB: 30, seconds: 3600, calls: 640, prompt: 640 * 8_287, output: 640 * 134, hosts: 1, busy: 1, benchmark: true, note: "vLLM, concurrency 2 (the agent's 2 slots)" },
+  "qwen3-coder:30b@vllm-c4": { paramsB: 30, seconds: 3600, calls: 676, prompt: 676 * 8_287, output: 676 * 134, hosts: 1, busy: 1, benchmark: true, note: "vLLM, concurrency 4 (saturated; 6 is the same)" },
   "qwen3.5:9b": { paramsB: 9, seconds: 3600, calls: 406, prompt: 1_064_354, output: 71_628, cSats: 109.035, hosts: 2, busy: 0.576, note: "2 Macs, 4 Ollama slots each" },
   "qwen2.5-coder:7b": { paramsB: 7, seconds: 300, calls: 61, prompt: 134_606, output: 6_151, cSats: 9.557, hosts: 1, busy: 0.9, note: "first 5 min only (the Mac left after); busy 0.9 ASSUMED" },
   "qwen2.5-coder:1.5b": { paramsB: 1.5, seconds: 3600, calls: 49, prompt: 15_519, output: 3_741, cSats: 3.447, hosts: 11, busy: 0.009, note: "CPU fleet nearly idle; seconds per call derived from the power floor billed" },
@@ -108,16 +120,16 @@ export const MEASURED = {
  * = calls running at once when fully busy.
  */
 export const SCENARIOS = [
-  { id: "a16-ollama-1", model: "qwen3-coder:30b", host: "a16x2", runtime: "Ollama", slots: 1, ctx: "64K", speedup: 1, concurrency: 1, computeClass: "gpu.dc", tierWeight: 1, target: true, measured: true },
-  { id: "a100-ollama-1", model: "qwen3-coder:30b", host: "a100", runtime: "Ollama", slots: 1, ctx: "64K", speedup: 6, concurrency: 1, computeClass: "gpu.dc", tierWeight: 2.9, target: true, assumption: "no measured A100 run: one A100 Ollama slot assumed 6× the 2×A16 slot (~10× the memory bandwidth of one A16 GPU)" },
+  { id: "a16-vllm-2", model: "qwen3-coder:30b@vllm-c2", host: "a16x2", runtime: "vLLM", slots: 2, ctx: "64K", speedup: 1, concurrency: 2, computeClass: "gpu.dc", tierWeight: 1, target: true, measured: true },
+  { id: "a100-ollama-1", model: "qwen3-coder:30b", host: "a100", runtime: "Ollama", slots: 1, ctx: "64K", speedup: 6, concurrency: 1, computeClass: "gpu.dc", tierWeight: 2.9, target: true, assumption: "no measured A100 run: one A100 Ollama slot assumed 6× the 2×A16 Ollama slot (~10× the memory bandwidth of one A16 GPU)" },
   { id: "mac-9b", model: "qwen3.5:9b", host: "mac", runtime: "Ollama", slots: 4, ctx: "-", speedup: 1, concurrency: 4, computeClass: "apple", tierWeight: 2.5, target: true, measured: true },
   { id: "mac-7b", model: "qwen2.5-coder:7b", host: "mac", runtime: "Ollama", slots: 4, ctx: "-", speedup: 1, concurrency: 4, computeClass: "apple", tierWeight: 2.5, target: true, measured: true, assumption: "busy share assumed 0.9" },
   { id: "mac-14b", model: "qwen3.5:9b", paramsB: 14, host: "mac", runtime: "Ollama", slots: 4, ctx: "-", speedup: 9 / 14, concurrency: 4, computeClass: "apple", tierWeight: 2.5, target: true, assumption: "no successful 14B call in the run: 9B throughput × 9/14" },
   { id: "home-cpu-1.5b", model: "qwen2.5-coder:1.5b", host: "homeCpu", runtime: "Ollama", slots: 2, ctx: "-", speedup: 1, concurrency: 2, computeClass: "cpu", tierWeight: 1, target: true, measured: true, cpuFloorDerived: true },
-  // Not targeted: assumed vLLM gains (what the same prices pay once vLLM's slots land) ...
-  { id: "a16-vllm-2", model: "qwen3-coder:30b", host: "a16x2", runtime: "vLLM", slots: 2, ctx: "64K", speedup: 1.8, concurrency: 2, computeClass: "gpu.dc", tierWeight: 1, assumption: "2 slots assumed 1.8× aggregate" },
-  { id: "a16-vllm-4", model: "qwen3-coder:30b", host: "a16x2", runtime: "vLLM", slots: 4, ctx: "40K", speedup: 3, concurrency: 4, computeClass: "gpu.dc", tierWeight: 1, assumption: "4 slots assumed 3× aggregate" },
-  { id: "a16-vllm-5", model: "qwen3-coder:30b", host: "a16x2", runtime: "vLLM", slots: 5, ctx: "32K", speedup: 3.5, concurrency: 5, computeClass: "gpu.dc", tierWeight: 1, assumption: "5 slots assumed 3.5× aggregate" },
+  // Not targeted, for reference: the 2×A16 under Ollama (measured in the sustained run), the A16 with
+  // 4 vLLM slots (measured benchmark), the A100 under vLLM (assumed) ...
+  { id: "a16-ollama-1", model: "qwen3-coder:30b", host: "a16x2", runtime: "Ollama", slots: 1, ctx: "64K", speedup: 1, concurrency: 1, computeClass: "gpu.dc", tierWeight: 1, measured: true },
+  { id: "a16-vllm-4", model: "qwen3-coder:30b@vllm-c4", host: "a16x2", runtime: "vLLM", slots: 4, ctx: "64K", speedup: 1, concurrency: 4, computeClass: "gpu.dc", tierWeight: 1, measured: true },
   { id: "a100-vllm-12", model: "qwen3-coder:30b", host: "a100", runtime: "vLLM", slots: 12, ctx: "32K", speedup: 20, concurrency: 12, computeClass: "gpu.dc", tierWeight: 2.9, assumption: "12 vLLM slots assumed 20× the 2×A16 Ollama slot" },
   // ... and EdgeCoder's own Fly test agents (edgecoder-agents), which are not a host business.
   { id: "fly-1.5b", model: "qwen2.5-coder:1.5b", host: "flyCpu", runtime: "Ollama", slots: 2, ctx: "-", speedup: 1, concurrency: 2, computeClass: "cpu", tierWeight: 1, measured: true, cpuFloorDerived: true, excluded: "EdgeCoder's own Fly test fleet, not a host business" },
@@ -182,12 +194,13 @@ export function analyse(s, btcUsd) {
     callsPerHourFull: t.callsPerHourFull,
     tokensPerHourFull: t.tokensPerHourFull,
     perCall: t.perCall,
-    neededFullHourUsd: neededFullHourUsd(cost),
+    targetUtilization: targetUtilFor(s),
+    neededFullHourUsd: neededFullHourUsd(cost, PROFIT_MARGIN, targetUtilFor(s)),
     fullHourRevenueUsd: { before: before.usd, now: now.usd },
     basis: { before: before.basis, now: now.basis },
     breakEvenUtil: { before: utilFor(cost, before.usd), now: utilFor(cost, now.usd) },
     profitUtil: { before: utilFor(cost, before.usd, PROFIT_MARGIN), now: utilFor(cost, now.usd, PROFIT_MARGIN) },
-    marginAtTarget: { before: marginAt(before.usd, TARGET_UTILIZATION), now: marginAt(now.usd, TARGET_UTILIZATION) },
+    marginAtTarget: { before: marginAt(before.usd, targetUtilFor(s)), now: marginAt(now.usd, targetUtilFor(s)) },
     breakEvenUtilWithDepreciation: dep === undefined ? null : utilFor(dep, now.usd),
     assumption: s.assumption ?? null,
     _t: t,
@@ -197,7 +210,7 @@ export function analyse(s, btcUsd) {
 /**
  * The levers that reach the target on every target host:
  * - large bands: one multiplier on the pre-2026-11-16 30B-and-up prices, the largest any target host
- *   on those bands needs from its tokens, each price rounded up to 0.05 USD;
+ *   on those bands needs from its tokens, each price rounded up to PRICE_STEP_USD;
  * - power floors per class (CPU, Mac): what a target host needs from the floor alone, split per
  *   slot, rounded up to 0.001 USD/h. Bands ≤16B keep their prices when the Mac's tokens reach the target.
  */
@@ -207,7 +220,7 @@ export function recommend(btcUsd) {
   const smallBands = [];
   for (const s of SCENARIOS.filter((x) => x.target)) {
     const cost = hostCostUsdPerHour(s.host);
-    const need = neededFullHourUsd(cost);
+    const need = neededFullHourUsd(cost, PROFIT_MARGIN, targetUtilFor(s));
     const t = scenarioThroughput(s, btcUsd);
     const pB = paramsOf(s);
     const oldTok = fullHourRevenueUsd(s, t, PRICES.before).tokenUsd;
@@ -216,11 +229,11 @@ export function recommend(btcUsd) {
       const perFloorUnit = (s.tierWeight * s.concurrency) / Math.max(1, s.slots);
       floors[s.computeClass] = Math.max(floors[s.computeClass] ?? 0, need / perFloorUnit);
       const nowTok = fullHourRevenueUsd(s, t, PRICES.now).tokenUsd;
-      smallBands.push({ id: s.id, paramsB: pB, tokensReachTarget: nowTok >= need, tokenMarginAtTarget: (HOST_SHARE * TARGET_UTILIZATION * nowTok) / cost - 1 });
+      smallBands.push({ id: s.id, paramsB: pB, tokensReachTarget: nowTok >= need, tokenMarginAtTarget: (HOST_SHARE * targetUtilFor(s) * nowTok) / cost - 1 });
     }
   }
   const bands = PRICES.before.bands.map((b) =>
-    b.maxB >= LARGE_BAND_MIN_B ? { maxB: b.maxB, input: Number(ceilTo(b.input * multiplier, 0.05).toFixed(2)), output: Number(ceilTo(b.output * multiplier, 0.05).toFixed(2)) } : { ...b }
+    b.maxB >= LARGE_BAND_MIN_B ? { maxB: b.maxB, input: Number(ceilTo(b.input * multiplier, PRICE_STEP_USD).toFixed(2)), output: Number(ceilTo(b.output * multiplier, PRICE_STEP_USD).toFixed(2)) } : { ...b }
   );
   const floor = { ...PRICES.before.floor };
   for (const [c, v] of Object.entries(floors)) floor[c] = Number(ceilTo(v, 0.001).toFixed(3));
@@ -229,7 +242,7 @@ export function recommend(btcUsd) {
 
 /** What a buyer pays for a typical call of each measured model, before and now, and frontier list prices. */
 export function buyerImpact(btcUsd) {
-  return Object.entries(MEASURED).map(([model, m]) => {
+  return Object.entries(MEASURED).filter(([, m]) => !m.benchmark).map(([model, m]) => {
     const perCall = { prompt: m.prompt / m.calls, output: m.output / m.calls };
     const s = SCENARIOS.find((x) => x.model === model && x.target && !x.paramsB);
     const tok = (bands) => {
@@ -259,9 +272,9 @@ const pct = (u) => (!Number.isFinite(u) ? "never" : u <= 1 ? `${Math.round(u * 1
 
 function printTables(out) {
   const L = (s = "") => console.log(s);
-  L(`BTC/USD ${out.btcUsd} (${out.btcSource}); host keeps ${HOST_SHARE * 100}%; target ${PROFIT_MARGIN * 100}% profit at ${TARGET_UTILIZATION * 100}% utilization`);
+  L(`BTC/USD ${out.btcUsd} (${out.btcSource}); host keeps ${HOST_SHARE * 100}%; target ${PROFIT_MARGIN * 100}% profit at ${TARGET_UTILIZATION * 100}% utilization (datacenter GPUs ${TARGET_UTILIZATION_GPU * 100}%)`);
   L();
-  L("scenario         | target | host $/h | calls/h@100% | revenue/h@100% before -> now | break-even before -> now | profit util now | margin at 50% now");
+  L("scenario         | target | host $/h | calls/h@100% | revenue/h@100% before -> now | break-even before -> now | profit util now | margin at target util now");
   for (const r of out.scenarios) {
     const tag = r.excluded ? "excl." : r.target ? "yes" : "info";
     L(
@@ -273,7 +286,7 @@ function printTables(out) {
   const rec = out.recommended;
   L(`Recommended: large-band multiplier ${f(rec.multiplier, 3)}× on the old 30B-and-up prices; floors ${JSON.stringify(rec.floor)}`);
   for (const b of rec.bands) L(`  ≤${b.maxB === Infinity ? "∞" : b.maxB}B  ${f(b.input)} / ${f(b.output)} USD per M tokens`);
-  for (const sb of rec.smallBands) L(`  ${sb.id} (${sb.paramsB}B band): tokens at today's band price ${sb.tokensReachTarget ? "reach" : "do NOT reach"} the target (margin ${f(sb.tokenMarginAtTarget * 100, 0)}% at 50%)`);
+  for (const sb of rec.smallBands) L(`  ${sb.id} (${sb.paramsB}B band): tokens at today's band price ${sb.tokensReachTarget ? "reach" : "do NOT reach"} the target (margin ${f(sb.tokenMarginAtTarget * 100, 0)}% at the target)`);
   L();
   L("Buyer: sats per typical call and USD per 1,000 calls, before -> now; frontier list prices for the same tokens");
   for (const b of out.buyerImpact) {
@@ -305,6 +318,7 @@ export async function run(argv = process.argv.slice(2)) {
     hostShare: HOST_SHARE,
     profitMargin: PROFIT_MARGIN,
     targetUtilization: TARGET_UTILIZATION,
+    targetUtilizationGpu: TARGET_UTILIZATION_GPU,
     inputs: { HOST_COSTS, PRICES, MEASURED, SCENARIOS },
     scenarios: SCENARIOS.map((s) => {
       const { _t, ...r } = analyse(s, btcUsd);
