@@ -556,6 +556,42 @@ Amounts must be numbers of 0 or more. A value the reader's own limit rejects (no
 | `EDGECODER_AUTO_MIN_CHAT_B` | `7` | Auto's quality floor for questions and chat: the smallest model (billions of parameters) Auto picks. Auto stays the cheapest place among models that meet it. Also read by the hosted endpoint's `auto`. |
 | `EDGECODER_AUTO_MIN_CODING_B` | `7` | The same floor for agent work (tools or a long context). |
 
+## Production alerting (portal and coordinator)
+
+The portal and every coordinator watch the network and tell the owner when something breaks (`src/alerting`). Each alert has a title, what is wrong, since when, who saw it and a link to Settings > Network, where the **Alerts** card lists active alerts and history, has an **Acknowledge** button per alert (no more reminders until it resolves) and **Send test alert**. A resolution notice follows when the alert clears. One incident per alert key; at most one notification per key per `ALERT_RATE_LIMIT_MINUTES`, also across a flapping key; a quiet reminder every `ALERT_RENOTIFY_MINUTES` while active and unacknowledged. State is kept in Postgres (`ops_alerts`, `ops_alert_events`, `ops_alert_state`, created on first use), in memory while the database is down. Payout and ledger alerts are shared by the coordinators on one database, so they notify once.
+
+What is watched: the portal watches every coordinator's `/health/runtime`, network capacity (a model with at least `ALERT_POPULAR_MODEL_MIN_CALLS_24H` requests and no agent online for `ALERT_CAPACITY_GAP_MINUTES`, a host at critical memory pressure for 5 minutes, a no-capacity spike), its database and the backup reports. Each coordinator watches its mesh peers' `/health/runtime` and the portal's `/health` (a service that is down cannot report itself), its Lightning node (unreachable, not synced to chain or graph for 10 minutes, low outbound or inbound liquidity in active channels, channels inactive for 10 minutes), payouts (any failure in the last hour, more than `ALERT_PAYOUT_FAILURES_PER_HOUR`, Lightning payouts pending longer than `ALERT_PAYOUT_PENDING_MINUTES`, the payout kill switch), purchase invoice creation failures, the periodic ledger reconciliation and its own ordering chain, its Postgres pool errors, and security events (integrity events such as `ledger_chain_break` at once; `bot_control_not_owner`, `model_control_not_owner` at once; repeated `failed_auth`, `invalid_signature`, `replay_attempt`; an auto-blacklist of a host with an enrolled owner or verified hardware at once, other auto-blacklists from 5 an hour).
+
+| Variable | Default | Description |
+|---|---|---|
+| `ALERT_ENABLED` | on | `0`, `false`, `off` or `no` stops every alert check on this service. The Alerts card still answers. |
+| `ALERT_EMAILS` | unset | Comma-separated recipients. Email goes through Resend, so the coordinator also needs `RESEND_API_KEY` and `RESEND_FROM_EMAIL` (the portal's own). Unset: no email. |
+| `ALERT_WEBHOOK_URL` | unset | Optional webhook: a Slack incoming webhook, an ntfy topic URL (phone push, e.g. `https://ntfy.sh/<secret-topic>`), a Discord webhook, or any endpoint that takes JSON. |
+| `ALERT_WEBHOOK_FORMAT` | `auto` | `slack` (`{ text }`), `ntfy` (plain body; `Title`, `Priority`, `Tags`, `Click` headers; reminders and resolutions at low priority), `json` (`text`, `content` and the structured alert), or `auto`: `slack` for hooks.slack.com, `ntfy` for ntfy.sh or an `ntfy.` host, else `json`. |
+| `ALERT_CHECK_INTERVAL_MS` | `30000` | How often each check runs (5000 to 3600000). The ordering-chain check runs every 10 minutes. |
+| `ALERT_HEALTH_FAILURES` | `3` | Failed checks in a row before a service (coordinator, portal, Lightning node, database) counts as down: 3 x 30 s by default. |
+| `ALERT_RATE_LIMIT_MINUTES` | `15` | At most one notification per alert key in this time. |
+| `ALERT_RENOTIFY_MINUTES` | `240` | Reminder interval while an alert stays active and unacknowledged; `0` = never. |
+| `ALERT_PORTAL_HEALTH_URL` | `PORTAL_PUBLIC_URL` + `/health` | Coordinator: the portal health URL it watches. |
+| `ALERT_LN_MIN_OUTBOUND_SATS` | `0` (off) | Coordinator: alert when spendable sats in active channels fall below this (payouts at risk). |
+| `ALERT_LN_MIN_INBOUND_SATS` | `0` (off) | Coordinator: alert when receivable sats in active channels fall below this (buyers cannot pay). |
+| `ALERT_PAYOUT_FAILURES_PER_HOUR` | `3` | Coordinator: any failed payout in the last hour is a warning; more than this is critical. Payouts refused while paused are not counted (the pause itself alerts). |
+| `ALERT_PAYOUT_PENDING_MINUTES` | `60` | Coordinator: a Lightning payout pending longer than this is stuck. |
+| `ALERT_PURCHASE_FAILURE_RATE` | `0.5` | Coordinator: share of purchase invoices that failed to be created in the last hour that alerts... |
+| `ALERT_PURCHASE_MIN_ATTEMPTS` | `5` | ...once there were at least this many attempts. |
+| `ALERT_DB_ERRORS_PER_10MIN` | `5` | Postgres pool errors (#328) in 10 minutes that alert; a failed `SELECT 1` `ALERT_HEALTH_FAILURES` times in a row alerts too. |
+| `ALERT_BACKUP_MAX_AGE_HOURS` | `26` | Portal: alert when a database's newest successful backup, as last reported, is older than this. |
+| `ALERT_BACKUP_EXPECTED` | off | Portal: `1` also alerts when the backup check has not reported for `ALERT_BACKUP_MAX_AGE_HOURS` (so a check that stops running is noticed). |
+| `ALERT_POPULAR_MODEL_MIN_CALLS_24H` | `20` | Portal: requests in 24 h that make a model popular enough to alert when no agent serves it. |
+| `ALERT_CAPACITY_GAP_MINUTES` | `10` | Portal: how long a popular model may have no agent online before it alerts. |
+| `ALERT_NO_CAPACITY_RATE` | `0.25` | Portal: share of model calls in the last 15 minutes refused for no capacity that alerts... |
+| `ALERT_NO_CAPACITY_MIN_CALLS` | `20` | ...once there were at least this many calls. |
+| `ALERT_AUTH_FAILURES_PER_10MIN` | `50` | Coordinator: `failed_auth` security events in 10 minutes that alert. |
+
+### Backup check
+
+A coordinator cannot list Fly Postgres backups, so a scheduled job does: `scripts/ops/report-pg-backups.sh` runs `fly postgres backup list` for each app in `PG_APPS` and posts the newest successful backup time to the portal's `POST /internal/alerts/backup-report` (portal service token). Run it every few hours (GitHub Actions schedule, cron on an ops machine or a Fly scheduled machine) with `PORTAL_URL`, `PORTAL_SERVICE_TOKEN`, `PG_APPS` and `FLY_API_TOKEN`; `DRY_RUN=1` prints the reports instead. A failed listing is reported as "no successful backup known", which alerts. Set `ALERT_BACKUP_EXPECTED=1` on the portal once the job is scheduled.
+
 ## Startup validation (#15)
 
 Each service reads its environment once at startup through a zod schema. An invalid value (for example `abc` for a port or an interval, `maybe` for a flag, or a URL without `http(s)://`) stops the service with exit code 1. The error names each variable and what is wrong with it, and lists every problem at once. The value of a secret (a variable whose name contains `TOKEN`, `SECRET`, `PASSWORD`, `PRIVATE_KEY`, `API_KEY` and the like) is never printed. Empty values count as unset, and variables no schema lists are ignored.

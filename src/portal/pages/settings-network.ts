@@ -12,6 +12,9 @@ import { SETTINGS_HELPERS_SCRIPT, settingsPage } from "./settings-shell.js";
  * system admin, asks each coordinator's GET /admin/network with the coordinator admin token
  * server-side, and joins agents to account emails. Refreshes every 15 s while the tab is visible.
  *
+ * The Alerts card (src/portal/alerts.ts) lists active incidents from the portal and every
+ * coordinator, the recent history, an Acknowledge button per incident and "Send test alert".
+ *
  * Charts are inline SVG drawn by the script (no library): colors come from the theme tokens
  * through CSS classes, so light and dark follow the theme toggle.
  */
@@ -160,6 +163,12 @@ export function networkPageContent(): string {
       .net-tip { position:absolute; pointer-events:none; z-index:5; background:var(--bg-elevated); border:1px solid var(--card-border); border-radius:var(--radius-sm); box-shadow:var(--shadow-2); padding:6px 8px; font-size:11.5px; line-height:1.45; white-space:nowrap; font-variant-numeric:tabular-nums; }
       .net-tip .t { color:var(--muted); margin-bottom:2px; }
       .net-tip .v { font-family:var(--font-mono); color:var(--text); }
+      .net-alerts-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:space-between; }
+      .net-alerts-head h3 { margin:0; }
+      .net-alerts-sources { font-size:12px; color:var(--text-secondary); margin:6px 0 10px; line-height:1.5; }
+      .net-alerts-empty { font-size:13px; color:var(--text-secondary); padding:6px 0; }
+      .net-alert-sev { font-weight:600; text-transform:uppercase; font-size:11px; letter-spacing:0.04em; }
+      .net-alerts details summary { cursor:pointer; font-size:13px; font-weight:600; margin-top:10px; }
       .net-card { border:1px solid var(--card-border); border-radius:var(--radius-md); background:var(--card); padding:12px; margin-bottom:14px; min-width:0; }
       .net-card h3 { font-size:13px; font-weight:600; margin:0 0 8px; }
       .net-filter { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
@@ -209,6 +218,23 @@ export function networkPageContent(): string {
     </div>
     <div id="netDenied" class="callout warn hidden"><h3>Admin access required</h3><div class="muted">This section is only available to system administrators.</div></div>
     <div id="netError" class="callout warn hidden"></div>
+    <div class="net-card net-alerts hidden" id="alerts">
+      <div class="net-alerts-head">
+        <h3>Alerts</h3>
+        <div><button type="button" class="btn-secondary" id="alertTestBtn">Send test alert</button></div>
+      </div>
+      <div class="net-alerts-sources" id="alertSources"></div>
+      <div class="muted" id="alertStatus" role="status"></div>
+      <div class="net-table-wrap">
+        <table><thead><tr><th>Severity</th><th>Alert</th><th>What is wrong</th><th class="num">Since</th><th>Seen by</th><th></th></tr></thead><tbody id="alertsBody"></tbody></table>
+      </div>
+      <details id="alertHistory">
+        <summary>History</summary>
+        <div class="net-table-wrap">
+          <table><thead><tr><th class="num">When</th><th>Event</th><th>Alert</th><th>Seen by</th></tr></thead><tbody id="alertHistoryBody"></tbody></table>
+        </div>
+      </details>
+    </div>
     <div id="netBody" class="hidden">
       <div class="net-kpis" id="netKpis">
         <div class="net-kpi"><div class="label">Agents online</div><div class="value" id="kpiOnline">-</div><div class="sub" id="kpiOnlineSub"></div></div>
@@ -627,8 +653,74 @@ export function networkPageScript(): string {
       await loadBlacklist();
     }
     window.__renderBlacklist = (json) => renderBlacklist(json);
+    // ── Alerts (src/portal/alerts.ts): active incidents from the portal and every coordinator ──
+    const ALERT_EVENT_LABEL = { raised: "Raised", notified: "Notified", renotified: "Reminder sent", resolved: "Resolved", acknowledged: "Acknowledged", notify_failed: "Notification failed", test: "Test alert" };
+    function renderAlerts(a) {
+      $("alerts").classList.remove("hidden");
+      const src = (a.sources || []).map((x) => x.reporter + ": " + (!x.ok ? "not answering (" + x.error + ")" : !x.enabled ? "alerting off" : x.channels.length ? x.channels.join(", ") : "no channel set"));
+      setText("alertSources", "Notification channels. " + src.join(" · ") + (a.coordinatorAdminToken === false ? " · coordinators not asked: COORDINATOR_ADMIN_TOKEN is not set on the portal" : ""));
+      const body = $("alertsBody");
+      body.textContent = "";
+      for (const x of a.active || []) {
+        const tr = el("tr");
+        const sev = el("td"); sev.appendChild(badge(x.severity, x.severity === "critical" ? "danger" : "warn")); tr.appendChild(sev);
+        tr.appendChild(el("td", {}, x.title));
+        tr.appendChild(el("td", {}, x.summary));
+        tr.appendChild(el("td", { class: "num", title: new Date(x.firstSeenMs).toLocaleString() }, ago(x.firstSeenMs)));
+        tr.appendChild(el("td", {}, x.reporter || x.origin));
+        const td = el("td");
+        if (x.acknowledgedAtMs) td.appendChild(el("span", { class: "muted" }, "Acknowledged by " + (x.acknowledgedBy || "admin")));
+        else {
+          const btn = el("button", { type: "button", class: "btn-secondary" }, "Acknowledge");
+          btn.addEventListener("click", () => ackAlert(x, btn).catch((err) => setText("alertStatus", "Acknowledge failed: " + String(err.message || err))));
+          td.appendChild(btn);
+        }
+        tr.appendChild(td);
+        body.appendChild(tr);
+      }
+      if (!(a.active || []).length) { const tr = el("tr"); tr.appendChild(el("td", { colspan: "6" }, "No active alerts.")); body.appendChild(tr); }
+      const hist = $("alertHistoryBody");
+      hist.textContent = "";
+      for (const e of (a.history || []).slice(0, 100)) {
+        const tr = el("tr");
+        tr.appendChild(el("td", { class: "num", title: new Date(e.atMs).toLocaleString() }, ago(e.atMs)));
+        tr.appendChild(el("td", {}, ALERT_EVENT_LABEL[e.kind] || e.kind));
+        tr.appendChild(el("td", { title: e.summary }, e.title));
+        tr.appendChild(el("td", {}, e.reporter || e.origin));
+        hist.appendChild(tr);
+      }
+      if (!(a.history || []).length) { const tr = el("tr"); tr.appendChild(el("td", { colspan: "4" }, "Nothing yet.")); hist.appendChild(tr); }
+    }
+    async function loadAlerts() {
+      const r = await call("/portal/api/admin/alerts", { method: "GET", headers: {} });
+      if (!r.ok) { $("alerts").classList.remove("hidden"); setText("alertStatus", "Could not load alerts: " + (r.json.error || r.status)); return; }
+      renderAlerts(r.json);
+    }
+    async function ackAlert(x, btn) {
+      btn.disabled = true;
+      const r = await call("/portal/api/admin/alerts/ack", { method: "POST", body: JSON.stringify({ origin: x.origin, source: x.source, key: x.key }) });
+      setText("alertStatus", r.ok ? "Acknowledged: " + x.title + ". No more reminders until it resolves." : "Acknowledge failed: " + (r.json.error || r.status));
+      await loadAlerts();
+    }
+    async function sendTestAlert() {
+      if (!confirm("Send a test alert to every configured channel (email and webhook) from the portal and each coordinator?")) return;
+      const btn = $("alertTestBtn");
+      btn.disabled = true;
+      setText("alertStatus", "Sending...");
+      try {
+        const r = await call("/portal/api/admin/alerts/test", { method: "POST", body: "{}" });
+        if (!r.ok) { setText("alertStatus", "Test failed: " + (r.json.error || r.status)); return; }
+        const short = (o) => o === "portal" ? "portal" : String(o).replace(/^https?:\\/\\//, "");
+        setText("alertStatus", "Test alert: " + (r.json.results || []).map((x) => short(x.origin) + " " + (x.ok ? "sent (" + x.channels.map((c) => c.channel).join(", ") + ")" : "failed: " + (x.error || x.channels.filter((c) => !c.ok).map((c) => c.channel + " " + c.error).join(", ")))).join(" · "));
+        await loadAlerts();
+      } finally {
+        btn.disabled = false;
+      }
+    }
+    $("alertTestBtn").addEventListener("click", () => sendTestAlert().catch((err) => setText("alertStatus", "Test failed: " + String(err.message || err))));
+    window.__renderAlerts = (json) => renderAlerts(json);
     function stop() { if (timer) clearInterval(timer); timer = null; }
-    function start() { stop(); timer = setInterval(() => { if (!document.hidden) load().catch(() => undefined); }, REFRESH_MS); }
+    function start() { stop(); timer = setInterval(() => { if (!document.hidden) { load().catch(() => undefined); loadAlerts().catch(() => undefined); } }, REFRESH_MS); }
     window.__renderNetwork = (json) => { data = json; render(); };
     for (const b of document.querySelectorAll(".net-seg button")) b.addEventListener("click", () => {
       range = b.dataset.range;
@@ -647,6 +739,8 @@ export function networkPageScript(): string {
       revealSettingsAdminTab(me);
       const user = me.user || {};
       if (!(user.roles && user.roles.isSystemAdmin)) { $("netDenied").classList.remove("hidden"); setText("netUpdated", ""); return; }
+      // Alerts load on their own too: they matter most when the network view cannot load.
+      loadAlerts().catch(() => undefined);
       await load();
       start();
     })().catch((err) => showError("Could not load the network: " + String(err.message || err)));

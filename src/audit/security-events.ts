@@ -111,6 +111,7 @@ const SEVERITY_MAP: Record<SecurityEventType, SecurityLevel> = {
 
 export class SecurityEventLogger {
   private readonly sink: (event: SecurityEvent) => void;
+  private readonly listeners: Array<(event: SecurityEvent) => void> = [];
 
   constructor(sink: (event: SecurityEvent) => void) {
     this.sink = sink;
@@ -120,10 +121,24 @@ export class SecurityEventLogger {
     return SEVERITY_MAP[eventType] ?? "WARN";
   }
 
+  /** Also hand every event to `listener` (production alerting, src/alerting). A listener that throws is ignored. */
+  addListener(listener: (event: SecurityEvent) => void): () => void {
+    this.listeners.push(listener);
+    return () => {
+      const i = this.listeners.indexOf(listener);
+      if (i >= 0) this.listeners.splice(i, 1);
+    };
+  }
+
   log(params: Omit<SecurityEvent, "timestamp">): void {
-    this.sink({
-      ...params,
-      timestamp: new Date().toISOString(),
-    });
+    const event: SecurityEvent = { ...params, timestamp: new Date().toISOString() };
+    this.sink(event);
+    for (const l of this.listeners) {
+      try {
+        l(event);
+      } catch {
+        // Alerting never breaks the security log.
+      }
+    }
   }
 }

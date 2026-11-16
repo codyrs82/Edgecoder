@@ -31,6 +31,12 @@ import { diagnosticsByAgentId } from "../services.js";
 import { agentAccount, agentSignatureAtGate, hasMeshToken, hasPortalServiceToken } from "../auth.js";
 import { isFrontierModelId } from "../../../inference-api/frontier-models.js";
 
+/**
+ * /health/runtime is what the portal, the peer coordinators (production alerting) and Fly probe: a
+ * slow or unreachable local Ollama must not hold the answer past their timeouts.
+ */
+const ollamaProbeLimits = () => ({ headersTimeout: 2_000, bodyTimeout: 2_000, signal: AbortSignal.timeout(2_500) });
+
 export function registerStatusRoutes(app: CoordinatorApp): void {
   app.get("/status", async () => queue.status());
 
@@ -79,7 +85,7 @@ export function registerStatusRoutes(app: CoordinatorApp): void {
     let ollamaError: string | null = null;
 
     try {
-      const versionRes = await request(`${ollamaHost}/api/version`, { method: "GET" });
+      const versionRes = await request(`${ollamaHost}/api/version`, { method: "GET", ...ollamaProbeLimits() });
       if (versionRes.statusCode >= 200 && versionRes.statusCode < 300) {
         const payload = (await versionRes.body.json()) as { version?: string };
         ollamaReachable = true;
@@ -90,7 +96,7 @@ export function registerStatusRoutes(app: CoordinatorApp): void {
     }
 
     try {
-      const tagsRes = await request(`${ollamaHost}/api/tags`, { method: "GET" });
+      const tagsRes = await request(`${ollamaHost}/api/tags`, { method: "GET", ...ollamaProbeLimits() });
       if (tagsRes.statusCode >= 200 && tagsRes.statusCode < 300) {
         const payload = (await tagsRes.body.json()) as { models?: Array<{ name?: string }> };
         ollamaReachable = true;

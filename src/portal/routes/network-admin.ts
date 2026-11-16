@@ -296,7 +296,7 @@ export interface NetworkAdminRoutesDeps {
   lookupOwners: (agentIds: string[], userIds: string[]) => Promise<OwnerDirectory>;
 }
 
-async function fetchSnapshot(url: string, range: SeriesRange, token: string, timeoutMs: number): Promise<CoordinatorResult> {
+export async function fetchSnapshot(url: string, range: SeriesRange, token: string, timeoutMs: number): Promise<CoordinatorResult> {
   const base = url.replace(/\/+$/, "");
   try {
     const res = await request(`${base}/admin/network?range=${range}`, {
@@ -319,6 +319,37 @@ async function fetchSnapshot(url: string, range: SeriesRange, token: string, tim
   }
 }
 
+/**
+ * Every coordinator's snapshot, merged and joined to owners (the page's view; production alerting's
+ * capacity rules read it too, src/portal/alerts.ts). Null when no coordinator is configured.
+ */
+export async function loadMergedNetwork(
+  deps: Pick<NetworkAdminRoutesDeps, "coordinatorUrls" | "coordinatorAdminToken" | "EXTERNAL_HTTP_TIMEOUT_MS" | "lookupOwners">,
+  range: SeriesRange,
+  onOwnerLookupError?: (error: string) => void
+): Promise<MergedNetwork | null> {
+  const urls = [...new Set((await deps.coordinatorUrls()).map((u) => u.replace(/\/+$/, "")))];
+  if (!urls.length) return null;
+  const results = await Promise.all(urls.map((u) => fetchSnapshot(u, range, deps.coordinatorAdminToken, deps.EXTERNAL_HTTP_TIMEOUT_MS)));
+  const agentIds = new Set<string>();
+  const userIds = new Set<string>();
+  for (const r of results) {
+    if (!r.ok) continue;
+    for (const a of r.snapshot.agents) {
+      agentIds.add(a.agentId);
+      const u = userIdOfAccount(a.accountId);
+      if (u) userIds.add(u);
+    }
+  }
+  let owners: OwnerDirectory = { nodeOwners: new Map(), userEmails: new Map() };
+  try {
+    owners = await deps.lookupOwners([...agentIds], [...userIds]);
+  } catch (error) {
+    onOwnerLookupError?.(error instanceof Error ? error.message : String(error));
+  }
+  return mergeNetworkSnapshots(results, owners, range);
+}
+
 export function registerNetworkAdminRoutes(app: FastifyInstance, deps: NetworkAdminRoutesDeps): void {
   app.get("/portal/api/admin/network", async (req, reply) => {
     const user = await deps.getCurrentUser(req as never);
@@ -327,27 +358,10 @@ export function registerNetworkAdminRoutes(app: FastifyInstance, deps: NetworkAd
     if (!deps.coordinatorAdminToken) return reply.code(503).send({ error: "coordinator_admin_token_not_configured", detail: "Set COORDINATOR_ADMIN_TOKEN on the portal (the coordinators' ADMIN_API_TOKEN)." });
     const q = (req.query ?? {}) as { range?: string };
     const range = (RANGES as readonly string[]).includes(q.range ?? "") ? (q.range as SeriesRange) : "1h";
-    const urls = [...new Set((await deps.coordinatorUrls()).map((u) => u.replace(/\/+$/, "")))];
-    if (!urls.length) return reply.code(503).send({ error: "no_coordinator" });
-    const results = await Promise.all(urls.map((u) => fetchSnapshot(u, range, deps.coordinatorAdminToken, deps.EXTERNAL_HTTP_TIMEOUT_MS)));
-    const agentIds = new Set<string>();
-    const userIds = new Set<string>();
-    for (const r of results) {
-      if (!r.ok) continue;
-      for (const a of r.snapshot.agents) {
-        agentIds.add(a.agentId);
-        const u = userIdOfAccount(a.accountId);
-        if (u) userIds.add(u);
-      }
-    }
-    let owners: OwnerDirectory = { nodeOwners: new Map(), userEmails: new Map() };
-    try {
-      owners = await deps.lookupOwners([...agentIds], [...userIds]);
-    } catch (error) {
-      req.log.warn({ error: error instanceof Error ? error.message : String(error) }, "network_owner_lookup_failed");
-    }
+    const merged = await loadMergedNetwork(deps, range, (error) => req.log.warn({ error }, "network_owner_lookup_failed"));
+    if (!merged) return reply.code(503).send({ error: "no_coordinator" });
     reply.header("cache-control", "no-store");
-    return reply.send(mergeNetworkSnapshots(results, owners, range));
+    return reply.send(merged);
   });
 
   // Blacklisted agents across coordinators (an agent that is blacklisted can't register, so it is not
