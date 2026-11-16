@@ -183,7 +183,7 @@ export function networkPageContent(): string {
       </div>
       <div class="net-card">
         <h3>Routing decisions</h3>
-        <div class="hint muted">Requests sent with model "auto": the job and its complexity, what best-fit routing chose and why, the score breakdown (quality · latency · price · reliability), and the estimate against what happened.</div>
+        <div class="hint muted">Network requests that leave the model to the network (model "auto"): the default for the API without a model, portal chat on Auto, the app's Auto and bots when a step goes to the network, <code>edgecoder code</code> and tentacle helpers. A pinned model skips routing and is not listed. Each row: the job and its complexity, what best-fit routing chose and why, the score breakdown (quality · latency · price · reliability), and the estimate against what happened. Kept across restarts for NETWORK_HISTORY_DAYS.</div>
         <div class="net-table-wrap">
           <table><thead><tr><th>When</th><th>Job</th><th>Complexity</th><th>Chosen</th><th>Score (Q · L · P · R)</th><th class="num">Est. wait / TTFT / total</th><th class="num">Actual TTFT / total</th><th class="num">Est. / actual cSats</th><th>Why</th></tr></thead><tbody id="routingBody"></tbody></table>
         </div>
@@ -443,7 +443,7 @@ export function networkPageScript(): string {
         tr.appendChild(el("td", {}, String(d.reason || "") + (d.affinity && d.affinity.status === "broken" ? " · affinity broken: " + d.affinity.reason : "")));
         body.appendChild(tr);
       }
-      if (!(r.decisions || []).length) { const tr = el("tr"); tr.appendChild(el("td", { colspan: "9" }, 'No model "auto" requests yet.')); body.appendChild(tr); }
+      if (!(r.decisions || []).length) { const tr = el("tr"); tr.appendChild(el("td", { colspan: "9" }, 'No routed requests on this coordinator yet. A row appears for each network request that leaves the model to the network (no model, or "auto"). Calls that name a model, and Auto steps that ran free on the caller’s own machines, are not routed here.')); body.appendChild(tr); }
       const w = r.config && r.config.weights;
       setText("routingWeights", w ? "Base weights: quality " + w.quality + " · latency " + w.latency + " · price " + w.price + " · reliability " + w.reliability + " · complexity shift " + r.config.complexityShift + " · preference " + r.config.preferMs + " ms" : "");
     }

@@ -23,6 +23,7 @@
 # which it never asks for, so its calls pay other accounts. A ledger snapshot (balances + who hosts
 # what) is saved before the run for the money report.
 #           --oversub X (bulk models' in-flight cap = slots x X, default 1.5)  --auto-slots N (default 3)
+#           --auto-share F (share of calls sent as model "auto", best-fit routing; default 0.5, 0 = none)
 # Capacity: the run takes a snapshot of slots per model (capacity.mjs, with the admin token on this
 # host) and passes it to the machines as LOADGEN_CAPACITY; the admin token itself is not sent.
 #
@@ -55,13 +56,13 @@ case "$cmd" in
 
   run)
     profile=${1:?profile: smoke|steady|ramp|saturate|soak|sustain}; shift
-    regions=iad,lhr,sin,syd; duration=""; rate=""; max_rate=""; stage_minutes=""; loop=""; budget=2000; min_balance=1500; users=""; start_in=150; oversub=""; auto_slots=""; buyer_cap=""; min_rate=""
+    regions=iad,lhr,sin,syd; duration=""; rate=""; max_rate=""; stage_minutes=""; loop=""; budget=2000; min_balance=1500; users=""; start_in=150; oversub=""; auto_slots=""; auto_share=""; buyer_cap=""; min_rate=""
     while [ $# -gt 0 ]; do case "$1" in
       --regions) regions=$2; shift 2;; --duration) duration=$2; shift 2;; --rate) rate=$2; shift 2;; --max-rate) max_rate=$2; shift 2;;
       --stage-minutes) stage_minutes=$2; shift 2;; --loop) loop=1; shift;; --budget) budget=$2; shift 2;;
       --min-balance) min_balance=$2; shift 2;; --users|--buyers) users=$2; shift 2;; --start-in) start_in=$2; shift 2;;
       --buyer-cap) buyer_cap=$2; shift 2;; --min-rate) min_rate=$2; shift 2;;
-      --oversub) oversub=$2; shift 2;; --auto-slots) auto_slots=$2; shift 2;;
+      --oversub) oversub=$2; shift 2;; --auto-slots) auto_slots=$2; shift 2;; --auto-share) auto_share=$2; shift 2;;
       *) echo "unknown option $1" >&2; exit 2;; esac; done
     IFS=, read -r -a R <<<"$regions"
     run_id="lg-$(date -u +%Y%m%d%H%M)-$profile"
@@ -106,6 +107,7 @@ primary_region = "${R[0]}"
   LOADGEN_AVOID = '$avoid'
 $( [ -n "$oversub" ] && echo "  LOADGEN_OVERSUB = \"$oversub\"" )
 $( [ -n "$auto_slots" ] && echo "  LOADGEN_AUTO_SLOTS = \"$auto_slots\"" )
+$( [ -n "$auto_share" ] && echo "  LOADGEN_AUTO_SHARE = \"$auto_share\"" )
 $( [ -n "$buyer_cap" ] && echo "  LOADGEN_BUYER_CAP_CSATS = \"$buyer_cap\"" )
 $( [ -n "$min_rate" ] && echo "  LOADGEN_MIN_RATE = \"$min_rate\"" )
 $( [ -n "$rate" ] && echo "  LOADGEN_RATE = \"$rate\"" )

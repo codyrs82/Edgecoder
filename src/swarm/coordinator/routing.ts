@@ -10,14 +10,17 @@
  * - Remembers each session's last agent (session affinity), keyed by the job descriptor's session
  *   key, from the first piece of each routed reply.
  * - Keeps the last ROUTING_LOG_SIZE decisions with the estimate and, once known, what happened
- *   (agent, TTFT, total time, cost) for Settings > Network's "Routing decisions" panel.
+ *   (agent, TTFT, total time, cost) for Settings > Network's "Routing decisions" panel. They are
+ *   written to Postgres and read back at start (routing-history.ts), so a deploy keeps the table.
+ * - Leaves the requester's own agents out of every auto call (self-dealing: withoutRequesterAgents).
  */
 
 import type { UsageRecord } from "../../economy/usage.js";
 import type { JobDescriptor } from "../../inference-api/job-descriptor.js";
 import { complexityWeightsFromEnv, type ComplexityWeights } from "../../inference-api/job-complexity.js";
-import type { LocalWorld } from "../network-world.js";
+import { worldOwnerTag, type LocalWorld } from "../network-world.js";
 import { routableModels } from "../model-catalog.js";
+import { accountsFor } from "./agent-accounts.js";
 import { activeBlacklistRecord, agentCapabilities, AGENT_CONNECTED_WINDOW_MS } from "./agent-state.js";
 import { bestFit, bestFitConfigFromEnv, routedLine, type AgentView, type BestFitConfig, type BestFitResult, type NetworkView, type SessionMemo } from "./best-fit.js";
 import { FALLBACK_BTC_USD, queue, reservations, identity, usageListeners } from "./context.js";
@@ -142,6 +145,7 @@ export function peerAgentViews(worlds: Array<{ world: LocalWorld; linkRttMs: num
         rttMs: a.rttMs,
         linkRttMs,
         stale: nowMs - a.lastSeenMs > AGENT_CONNECTED_WINDOW_MS,
+        ownerTag: a.ownerTag ?? null,
       });
     }
   }
@@ -195,6 +199,26 @@ export function withoutRestrictedModels(agents: AgentView[]): AgentView[] {
   return out;
 }
 
+/**
+ * Agents as best-fit may use them for `requesterAccountId`: the requester's own agents are left
+ * out. A call placed on your own machine bills you and pays you back less the fee, so it only costs
+ * the fee (self-dealing); your own machines are for target "mine", which is free. Local agents are
+ * matched by owner account (`owners`), peers' by the owner tag their coordinator reports.
+ */
+export function withoutRequesterAgents(agents: AgentView[], requesterAccountId: string | undefined, owners: ReadonlyMap<string, string | null>): AgentView[] {
+  if (!requesterAccountId) return agents;
+  const tag = worldOwnerTag(requesterAccountId);
+  return agents.filter((a) => (a.local ? owners.get(a.agentId) !== requesterAccountId && a.agentId !== requesterAccountId : a.ownerTag !== tag));
+}
+
+/** Owner accounts of this coordinator's agents: agent_ownership, cached a minute, waited on at most 300 ms. */
+export type AgentOwnerSource = (agentIds: string[], nowMs: number) => Promise<ReadonlyMap<string, string | null>>;
+let ownerSource: AgentOwnerSource = (ids, nowMs) => accountsFor(ids, nowMs, OWNER_LOOKUP_WAIT_MS);
+const OWNER_LOOKUP_WAIT_MS = 300;
+export function setAgentOwnerSource(source: AgentOwnerSource): void {
+  ownerSource = source;
+}
+
 // ── Resolution ───────────────────────────────────────────────────────────────────────────
 
 export interface Resolution {
@@ -204,10 +228,13 @@ export interface Resolution {
 }
 
 /** Score `job` on the live network. `peers`: also consider peer coordinators' agents. */
-export async function resolveAuto(job: JobDescriptor, opts: { peers?: boolean; computeClass?: string } = {}, nowMs = Date.now()): Promise<Resolution> {
+export async function resolveAuto(job: JobDescriptor, opts: { peers?: boolean; computeClass?: string; requesterAccountId?: string } = {}, nowMs = Date.now()): Promise<Resolution> {
   const views = opts.peers && bestFitConfig.peers ? await peerViews(nowMs) : [];
+  const local = localAgentViews(nowMs, rttSource);
+  const owners = opts.requesterAccountId ? await ownerSource(local.map((a) => a.agentId), nowMs).catch(() => new Map<string, string | null>()) : new Map<string, string | null>();
   // Security research tier: a restricted model is never chosen by auto, for anyone (restricted.ts).
-  const agents = withoutRestrictedModels([...localAgentViews(nowMs, rttSource), ...peerAgentViews(views, nowMs)]);
+  // Never the requester's own machines (self-dealing).
+  const agents = withoutRequesterAgents(withoutRestrictedModels([...local, ...peerAgentViews(views, nowMs)]), opts.requesterAccountId, owners);
   const view: NetworkView = {
     // A class the client named limits the choice to it.
     agents: opts.computeClass ? agents.filter((a) => a.computeClass === opts.computeClass) : agents,
@@ -262,13 +289,53 @@ export interface RoutingDecision extends RoutingSummary {
   actual: { agent?: string; ranOnPreferred?: boolean; ttftMs?: number; totalMs?: number; cSats?: number; ok?: boolean };
 }
 
+/** A decision as stored (routing-history.ts) and shown: without the session key and the agent id. */
+export type StoredRoutingDecision = Omit<RoutingDecision, "sessionKey" | "preferredAgentId">;
+
 const decisions: RoutingDecision[] = [];
 const bySubtask = new Map<string, RoutingDecision>();
 const byTask = new Map<string, RoutingDecision>();
 
+/** Told when a decision is made or its outcome changes (routing-history.ts writes it to Postgres). */
+let decisionSink: ((d: RoutingDecision) => void) | undefined;
+export function setDecisionSink(sink: ((d: RoutingDecision) => void) | undefined): void {
+  decisionSink = sink;
+}
+const changed = (d: RoutingDecision) => {
+  try {
+    decisionSink?.(d);
+  } catch {
+    // persistence never breaks routing
+  }
+};
+
+export function storedDecision(d: RoutingDecision): StoredRoutingDecision {
+  const { sessionKey: _s, preferredAgentId: _p, ...rest } = d;
+  return { ...rest, actual: { ...rest.actual } };
+}
+
+/**
+ * Put stored decisions (oldest first) in front of the ones made since start, so the panel shows the
+ * calls before a restart; keeps the newest ROUTING_LOG_SIZE. Their outcomes are final (no session,
+ * no preferred agent). Returns how many were added.
+ */
+export function restoreDecisions(stored: readonly StoredRoutingDecision[]): number {
+  const firstLive = decisions[0]?.atMs ?? Infinity;
+  const known = new Set(decisions.map((d) => d.taskId));
+  const older = stored
+    .filter((d) => d && typeof d.taskId === "string" && Number.isFinite(d.atMs) && d.atMs <= firstLive && !known.has(d.taskId))
+    .map((d): RoutingDecision => ({ ...d, actual: { ...(d.actual ?? {}) }, sessionKey: "", preferredAgentId: null }));
+  const room = Math.max(0, ROUTING_LOG_SIZE - decisions.length);
+  const add = older.slice(-room);
+  if (!add.length) return 0;
+  decisions.unshift(...add);
+  return add.length;
+}
+
 export function recordDecision(taskId: string, subtaskId: string, job: JobDescriptor, r: BestFitResult, nowMs = Date.now()): RoutingDecision {
   const d: RoutingDecision = { ...routingSummary(job, r), atMs: nowMs, taskId, subtaskId, sessionKey: job.sessionKey, preferredAgentId: r.chosen?.agentId ?? null, actual: {} };
   decisions.push(d);
+  changed(d);
   bySubtask.set(subtaskId, d);
   byTask.set(taskId, d);
   while (decisions.length > ROUTING_LOG_SIZE) {
@@ -296,6 +363,7 @@ export function noteRoutedChunk(subtaskId: string, agentId: string | undefined, 
   if (done) {
     d.actual.totalMs = nowMs - d.atMs;
     d.actual.ok = !error;
+    changed(d);
   }
 }
 
@@ -306,15 +374,13 @@ function noteRoutedUsage(r: UsageRecord): void {
   if (!d) return;
   d.actual.cSats = Math.round(r.costMsat) / 1000;
   if (d.actual.ok === undefined) d.actual.ok = r.ok;
+  changed(d);
 }
 usageListeners.push(noteRoutedUsage);
 
 /** Recent decisions, newest first (admin network view). */
-export function recentDecisions(limit = 50): Array<Omit<RoutingDecision, "sessionKey" | "preferredAgentId">> {
-  return decisions
-    .slice(-limit)
-    .reverse()
-    .map(({ sessionKey: _s, preferredAgentId: _p, ...rest }) => ({ ...rest, actual: { ...rest.actual } }));
+export function recentDecisions(limit = 50): StoredRoutingDecision[] {
+  return decisions.slice(-limit).reverse().map(storedDecision);
 }
 
 /** Tests: forget sessions, outcomes and decisions. */

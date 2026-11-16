@@ -333,3 +333,34 @@ describe("sseDataLines", () => {
     expect(await collect([])).toEqual([]);
   });
 });
+
+describe("Auto (the page's default) asks the network's best fit", () => {
+  const auto = { compute: { target: "auto" } };
+
+  it("sends model auto to the coordinator with room and streams its answer", async () => {
+    const us = await coordinator({ name: "us", agentModels: ["m"], ownModels: 1 });
+    const res = await portal([us.url]).chat(auto);
+    expect(res.statusCode).toBe(200);
+    expect(events(res.body)).toEqual([{ content: "us-net" }, { done: true, compute: "Network · best fit", cSatsSpent: 0.5 }]);
+    expect(us.paths("/inference/submit")[0]).toMatchObject({ body: { model: "auto", submitterAccountId: "acct-u1" } });
+    expect(us.paths("/portal/chat")).toHaveLength(0);
+  });
+
+  it("falls back to the coordinator's own chat (free) when the network turns it down", async () => {
+    const us = await coordinator({ name: "us", agentModels: ["m"], ownModels: 1, submit: { status: 402, error: "insufficient_credits" } });
+    const p = portal([us.url]);
+    const res = await p.chat(auto);
+    expect(res.statusCode).toBe(200);
+    expect(text(res.body)).toBe("us-1 us-2");
+    expect(us.paths("/inference/submit")).toHaveLength(1);
+    expect(us.paths("/portal/chat")).toHaveLength(1);
+    expect(p.saved()).toEqual(["us-1 us-2"]);
+  });
+
+  it("falls back as well when no route fits", async () => {
+    const us = await coordinator({ name: "us", agentModels: ["m"], ownModels: 1, submit: { status: 409, error: "no_route_fits" } });
+    const res = await portal([us.url]).chat(auto);
+    expect(res.statusCode).toBe(200);
+    expect(text(res.body)).toBe("us-1 us-2");
+  });
+});

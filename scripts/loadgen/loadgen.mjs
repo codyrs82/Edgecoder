@@ -22,7 +22,10 @@
  *     stops after its share of LOADGEN_BUDGET_CSATS.
  *   - buyers (--buyers / LOADGEN_BUYERS, default every account) and LOADGEN_AVOID (JSON
  *     { buyer: [model, ...] }, from budget.mjs buyers): a buyer never asks for a model its own
- *     agents hold, so its money goes to other accounts (fly.sh fills both).
+ *     agents hold, so its money goes to other accounts (fly.sh fills both). Model "auto" is safe
+ *     for every buyer: best-fit routing never places a call on the requester's own agents.
+ *   - --auto-share (LOADGEN_AUTO_SHARE, default 0.5): the share of calls sent as model "auto"
+ *     (the coordinator's best-fit routing); 0 sends only named models.
  *   - API keys are read from LOADGEN_KEYS (JSON {name: key}) or from account files; never printed.
  *
  * Output: JSON lines on stdout (LOADGEN_START, LOADGEN_TICK, LOADGEN_EVENT, LOADGEN_STAGE,
@@ -38,7 +41,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { HARD_MAX_RATE, PERSONAS, MODELS, buildSchedule, codingContext, parseDuration } from "./profiles.mjs";
 import { StageStats, classifyError, digestStage, isFailure, table } from "./stats.mjs";
-import { CapacityPlanner, RateGovernor, fatalStop, parseModelId } from "./planner.mjs";
+import { CapacityPlanner, RateGovernor, fatalStop, parseModelId, pickWithAutoShare } from "./planner.mjs";
 import { fetchCapacity } from "./capacity.mjs";
 import { CodingSession, codegenSize, codegenTask, modelMix, pickWeighted, question, rng } from "./workload.mjs";
 
@@ -75,6 +78,10 @@ const DRY = flag("dry-run") === "true";
 const ADMIN_TOKEN = env.LOADGEN_ADMIN_TOKEN ?? "";
 const OVERSUB = Number(opt("oversub", "LOADGEN_OVERSUB", 1.5));
 const AUTO_SLOTS = Number(opt("auto-slots", "LOADGEN_AUTO_SLOTS", 3));
+// Share of calls (chat, burst, codegen and new coding sessions) sent as model "auto", so the run
+// exercises the coordinator's best-fit routing and fills Settings > Network's "Routing decisions".
+// 0 = every call names a model. The rest are spread over the model mix as before.
+const AUTO_SHARE = Math.min(1, Math.max(0, Number(opt("auto-share", "LOADGEN_AUTO_SHARE", 0.5)) || 0));
 let initialCapacity = null;
 try { initialCapacity = env.LOADGEN_CAPACITY ? JSON.parse(env.LOADGEN_CAPACITY) : null; } catch { initialCapacity = null; }
 const UA = "edgecoder-loadgen/1.0 (+https://github.com/codyrs82/Edgecoder; regtest load test)";
@@ -138,7 +145,7 @@ const users = names
 const USER_CAP = BUYER_CAP > 0 ? BUYER_CAP / (SHARED ? MACHINES : 1) : Infinity;
 
 out("LOADGEN_START", {
-  profile: PROFILE, url: URL_, machines: MACHINES, index: INDEX, perSecondLimit: PER_SECOND_LIMIT, networkCap: schedule.cap,
+  profile: PROFILE, url: URL_, machines: MACHINES, index: INDEX, perSecondLimit: PER_SECOND_LIMIT, networkCap: schedule.cap, autoShare: AUTO_SHARE,
   startAt: new Date(START_AT).toISOString(), durationSec: schedule.durationSec, loop: schedule.loop,
   stages: schedule.stages.map((s) => ({ i: s.index, rate: s.rate, sec: s.seconds })), breach: schedule.breach,
   users: users.map((u) => ({ name: u.name, persona: u.persona, avoid: [...u.avoid] })), budgetCSats: BUDGET / MACHINES, buyerCapCSats: Number.isFinite(USER_CAP) ? USER_CAP : null, minBalance: MIN_BALANCE, results: RESULTS,
@@ -235,7 +242,7 @@ async function takeSlot() {
 }
 
 // ---------------------------------------------------------------------------- run state
-const planner = new CapacityPlanner({ machines: MACHINES, index: INDEX, oversub: OVERSUB, autoSlots: AUTO_SLOTS, capacity: initialCapacity });
+const planner = new CapacityPlanner({ machines: MACHINES, index: INDEX, oversub: OVERSUB, autoSlots: AUTO_SLOTS, autoShare: AUTO_SHARE, capacity: initialCapacity });
 const rewritten = new Set();
 const R = rng(Number.parseInt(RUN_ID.replace(/\D/g, "").slice(-8) || "1", 10) + INDEX * 7919);
 let current = null; // StageStats of the stage now running
@@ -302,9 +309,9 @@ function weightsFor(behaviour) {
   return w;
 }
 
-/** Pick a model with room (planner) that this buyer's own agents do not hold. */
+/** Pick "auto" (AUTO_SHARE of calls) or a model with room (planner) that this buyer's own agents do not hold. */
 function pickModel(behaviour, u) {
-  const m = planner.pick(weightsFor(behaviour), R, u?.avoid);
+  const m = pickWithAutoShare(planner, weightsFor(behaviour), R, u?.avoid, AUTO_SHARE);
   if (m?.rewrittenFrom && !rewritten.has(m.rewrittenFrom)) {
     rewritten.add(m.rewrittenFrom);
     out("LOADGEN_EVENT", { type: "class_unavailable", asked: m.rewrittenFrom, sent: m.id, note: "no machine holds the model in that class; sent without the class" });

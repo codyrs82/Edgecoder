@@ -39,7 +39,8 @@ import { ConnectionManager } from "./connections.js";
 import { BotManager, agentBotRunner, botBranchPrefix, botComputeChat, botWorkRoot, registerBotRoutes, type ApprovalEntry } from "./bots.js";
 import { autoBackend, localBackend, networkBackend } from "../../inference-api/backends.js";
 import { registerCompatRoutes, respondWith } from "../../inference-api/routes.js";
-import { AUTO_MODEL_ID, routeInputsFrom, routeLabel, type ComputePolicy, type PlanOptions, type Route, type RouteInputs } from "../../inference-api/auto-route.js";
+import type { RoutingHints } from "../../inference-api/job-descriptor.js";
+import { AUTO_MODEL_ID, isUnpinnedModel, routeInputsFrom, routeLabel, type ComputePolicy, type PlanOptions, type Route, type RouteInputs } from "../../inference-api/auto-route.js";
 import { ChatBackendError, type ChatBackend } from "../../inference-api/types.js";
 import { checkProject } from "./diagnostics.js";
 import { isProjectTrusted, setProjectTrusted } from "./workspace-trust.js";
@@ -219,8 +220,22 @@ function runRoute(r: Route, source = "localhost:4304"): ChatBackend {
   });
 }
 
+/**
+ * Auto here: free places first (this computer, your machines, a lease, in the policy's order); the
+ * network leg goes to the coordinator as model "auto", so its best-fit routing picks the model,
+ * class and machine (your own machines are never picked there). The client-side network routes stay
+ * behind it for an older coordinator. Chat and Code view Auto, `edgecoder code` sessions, bots
+ * (Local first / Auto) and connections all run here.
+ */
 const autoHere = (onRoute?: (r: Route) => void, source?: string, policy?: ComputePolicy, plan?: () => PlanOptions) =>
-  autoBackend({ inputs: routeInputsHere, run: (r) => runRoute(r, source), onRoute, policy, plan });
+  autoBackend({
+    inputs: routeInputsHere,
+    run: (r) => runRoute(r, source),
+    onRoute,
+    policy,
+    plan,
+    ...(networkDeps ? { networkBestFit: (routing: RoutingHints) => networkBackend(networkDeps!, { model: AUTO_MODEL_ID, computeClass: "any", routing, source: source ?? "localhost:4304" }) } : {}),
+  });
 
 app.get("/v1/models", async () => {
   // Providers, this machine's Ollama models, and models agents on the network have
@@ -244,7 +259,8 @@ app.get("/v1/models", async () => {
 });
 
 const chatRequestSchema = z.object({
-  model: z.string().default("edgecoder-local"),
+  // No model (or "default"): Auto, like "auto" (isUnpinnedModel). "edgecoder-local" pins this computer.
+  model: z.string().optional().transform((m) => (isUnpinnedModel(m) ? AUTO_MODEL_ID : m!)),
   messages: z.array(z.object({
     role: z.string(),
     // OpenAI clients send a string or a list of content parts.
@@ -1070,8 +1086,8 @@ registerCompatRoutes(
     authenticate: async () => true, // the IDE token hook above already checked the caller
     models: async () => [],
     resolve: async (_ctx, model) => {
-      if (!model) return { status: 400, error: "model is required (auto, a local model, network/<model>[@class] or mine/<model>)" };
-      if (model === AUTO_MODEL_ID) return { backend: autoHere(), model };
+      // No model (or "default"): Auto, the cheapest free place that fits, else the network's best fit.
+      if (!model || isUnpinnedModel(model)) return { backend: autoHere(), model: AUTO_MODEL_ID };
       if (isFrontierModelId(model)) {
         const r = await frontier.resolve(model, { sessionKey: "api" });
         return r.ok ? { backend: r.backend, model } : { status: r.status, error: r.message };

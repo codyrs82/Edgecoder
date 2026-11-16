@@ -183,8 +183,8 @@ export interface BotCompute {
 
 /** The form's choices, in order; new bots start on Local first. */
 export const COMPUTE_POLICY_OPTIONS: Array<{ value: ComputePolicy; title: string; desc: string }> = [
-  { value: "local_first", title: "Local first", desc: "This computer, then your machines, then the network within the daily budget." },
-  { value: "auto", title: "Auto", desc: "The cheapest place that fits each step, network included (within the budget)." },
+  { value: "local_first", title: "Local first", desc: "This computer, then your machines, then the network's best fit (the coordinator picks the model and machine) within the daily budget." },
+  { value: "auto", title: "Auto", desc: "Each step where it fits best: your machines when one fits (free), else the network's best fit, within the budget." },
   { value: "local_only", title: "This computer only", desc: "Never leaves this computer. Free." },
   { value: "mine_only", title: "My machines only", desc: "This computer and your other machines. Free, never the network." },
   { value: "model", title: "Specific model", desc: "Always the model you pick below." },

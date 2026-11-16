@@ -23,13 +23,16 @@ import { queue, reservations, identity, CC } from "../context.js";
 import { pgStore } from "../../../db/store.js";
 import { PostgresNetworkHistoryStore } from "../../../db/network-history-store.js";
 import { NetworkHistory } from "../../network-history.js";
+import { PostgresRoutingDecisionStore } from "../../../db/routing-decision-store.js";
+import { RoutingHistory } from "../../routing-history.js";
+import { accountsFor } from "../agent-accounts.js";
 import { agentCapabilities, activeBlacklistRecord, AGENT_CONNECTED_WINDOW_MS } from "../agent-state.js";
 import { authorizeAdmin } from "../auth.js";
 import { agentContextWindow, agentLoadReport, agentSocketConnected, freeModelSlots, pickupStats } from "../dispatch.js";
 import { effectiveHardware, hardwareVerifier } from "../economy.js";
 import { routableModels } from "../../model-catalog.js";
 import { inferenceCancelledForCapacity } from "./inference.js";
-import { bestFitConfig, complexityWeights, noteRoutedChunk, recentDecisions } from "../routing.js";
+import { bestFitConfig, complexityWeights, noteRoutedChunk, recentDecisions, restoreDecisions, ROUTING_LOG_SIZE, setDecisionSink, storedDecision } from "../routing.js";
 import {
   InferenceTracker,
   RingBuffer,
@@ -48,7 +51,6 @@ export const LATENCY_WINDOW_MS = 15 * 60_000;
 /** Gaps (models asked for with no capacity) are reported over this window. */
 export const GAP_WINDOW_MS = 60 * 60_000;
 /** Account lookups (agent -> owner account) are cached this long. */
-const ACCOUNT_TTL_MS = 60_000;
 
 export const inferenceTracker = new InferenceTracker();
 export const networkSamples = new RingBuffer<NetworkSample>(SAMPLE_CAPACITY);
@@ -60,6 +62,20 @@ export const networkHistory = new NetworkHistory({
   retentionDays: CC.NETWORK_HISTORY_DAYS,
   log: { info: (o, m) => app.log.info(o, m), warn: (o, m) => app.log.warn(o, m) }
 });
+
+/** Persists the "Routing decisions" log the same way (table routing_decisions; memory only without DATABASE_URL). */
+export const routingHistory = new RoutingHistory({
+  store: pgStore ? pgStore.withPool((pool) => new PostgresRoutingDecisionStore(pool)) : null,
+  coordinatorId: identity.peerId,
+  retentionDays: CC.NETWORK_HISTORY_DAYS,
+  restoreLimit: ROUTING_LOG_SIZE,
+  restoreInto: restoreDecisions,
+  serialize: storedDecision,
+  log: { info: (o, m) => app.log.info(o, m), warn: (o, m) => app.log.warn(o, m) }
+});
+
+/** Owner account per agent; moved to agent-accounts.ts (routing needs it too), kept here for importers. */
+export { accountsFor };
 
 type Capability = NonNullable<ReturnType<typeof agentCapabilities.get>>;
 
@@ -123,33 +139,6 @@ export function takeNetworkSample(nowMs = Date.now()): NetworkSample {
   networkSamples.push(sample);
   networkHistory.record(sample);
   return sample;
-}
-
-const accountCache = new Map<string, { accountId: string | null; atMs: number }>();
-
-/** Owner account per agent (agent_ownership), cached; null when not linked or not known here. */
-export async function accountsFor(agentIds: string[], nowMs: number): Promise<Map<string, string | null>> {
-  for (const id of accountCache.keys()) if (!agentCapabilities.has(id)) accountCache.delete(id);
-  const out = new Map<string, string | null>();
-  const misses: string[] = [];
-  for (const id of agentIds) {
-    const hit = accountCache.get(id);
-    if (hit && nowMs - hit.atMs < ACCOUNT_TTL_MS) out.set(id, hit.accountId);
-    else misses.push(id);
-  }
-  if (misses.length && pgStore) {
-    const lookups = Promise.all(
-      misses.map(async (id) => {
-        const accountId = (await pgStore!.getAgentOwnership(id).catch(() => null))?.accountId ?? null;
-        accountCache.set(id, { accountId, atMs: nowMs });
-        out.set(id, accountId);
-      })
-    );
-    // A slow database leaves the rest unknown for this answer rather than holding the page.
-    await Promise.race([lookups, new Promise((r) => setTimeout(r, 2_000).unref?.())]);
-  }
-  for (const id of agentIds) if (!out.has(id)) out.set(id, accountCache.get(id)?.accountId ?? null);
-  return out;
 }
 
 /** The whole snapshot. `range` picks the series window (default 1 h). */
@@ -343,9 +332,13 @@ export function registerAdminNetworkRoutes(app: CoordinatorApp): void {
   }, SAMPLE_INTERVAL_MS);
   timer.unref?.();
   networkHistory.start();
+  setDecisionSink((d) => routingHistory.record(d));
+  routingHistory.start();
   app.addHook("onClose", async () => {
     clearInterval(timer);
     await networkHistory.stop();
+    setDecisionSink(undefined);
+    await routingHistory.stop();
   });
 
   // Its own plugin with the admin gate, like routes/admin.ts (coordinator.ts lets /admin/* past the mesh check).

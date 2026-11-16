@@ -233,8 +233,8 @@ describe("money report", () => {
     const snap = { accounts: { st1: acct("a1", 5000), st11: acct("a11", 5000), st12: acct("a12", 10) }, hosts };
     expect(chooseBuyers(snap, { minBalance: 1000 }).buyers).toEqual(["st11"]);
     const all = chooseBuyers({ accounts: { st1: acct("a1", 5000) }, hosts }, { minBalance: 1000 });
-    expect(all).toMatchObject({ buyers: ["st1"], avoid: { st1: ["m:1.5b", "auto"] } });
-    expect(chooseBuyers(snap, { buyers: ["st1"] }).avoid).toEqual({ st1: ["m:1.5b", "auto"] });
+    expect(all).toMatchObject({ buyers: ["st1"], avoid: { st1: ["m:1.5b"] } });
+    expect(chooseBuyers(snap, { buyers: ["st1"] }).avoid).toEqual({ st1: ["m:1.5b"] });
   });
 });
 

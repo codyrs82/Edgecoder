@@ -44,8 +44,8 @@ export function shareOf(netCap, machines, index, key) {
 }
 
 export class CapacityPlanner {
-  constructor({ machines = 1, index = 0, oversub = 1.5, autoSlots = 3, capacity = null, now = () => Date.now() } = {}) {
-    Object.assign(this, { machines, index, oversub, autoSlots, now });
+  constructor({ machines = 1, index = 0, oversub = 1.5, autoSlots = 3, autoShare = 0, capacity = null, now = () => Date.now() } = {}) {
+    Object.assign(this, { machines, index, oversub, autoSlots, autoShare, now });
     this.inflight = {};
     this.penalty = {};
     this.lastOver = {};
@@ -61,7 +61,9 @@ export class CapacityPlanner {
     for (const [key, m] of Object.entries(models)) {
       this.netCap[key] = m.slots >= BULK_MIN_SLOTS ? Math.ceil(m.slots * this.oversub) : m.slots;
     }
-    this.netCap.auto = this.autoSlots;
+    // "auto" lands on any model: its share of every slot (at least autoSlots).
+    const total = Object.values(models).reduce((a, m) => a + Math.max(0, m.slots ?? 0), 0);
+    this.netCap.auto = Math.max(this.autoSlots, Math.ceil(total * this.oversub * Math.min(1, Math.max(0, this.autoShare))));
   }
 
   /** The model id to send and its capacity key, or null when nobody holds the model. */
@@ -285,4 +287,19 @@ export function fatalStop(window, downTicks = 0, { downTicksToStop = 12 } = {}) 
   const ticks = isDown ? downTicks + 1 : 0;
   // 12 ticks of 10 s: two minutes of nothing but connection failures and 5xx.
   return { stop: ticks >= downTicksToStop ? "coordinator_down" : null, downTicks: ticks };
+}
+
+/**
+ * A pick with an "auto" share: with probability autoShare the call leaves the model to the
+ * network (model "auto": the coordinator's best-fit routing picks model, class and machine), else
+ * it names a model from the mix. When the side drawn has no room the other is tried. A buyer may
+ * use auto even when it hosts agents: best-fit never places a call on the requester's own agents.
+ * weights: { modelId: weight } (an "auto" entry in it is ignored; the share decides).
+ */
+export function pickWithAutoShare(planner, weights, r, avoid = null, autoShare = 0) {
+  const { auto: _ignored, ...named } = weights;
+  const share = Math.min(1, Math.max(0, Number(autoShare) || 0));
+  const auto = () => (share > 0 ? planner.pick({ auto: 1 }, r, avoid) : null);
+  if (share > 0 && r() < share) return auto() ?? planner.pick(named, r, avoid);
+  return planner.pick(named, r, avoid) ?? auto();
 }

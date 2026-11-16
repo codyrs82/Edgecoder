@@ -38,6 +38,8 @@ export interface Route {
   reason: string;
   /** A free model below the size the job wants, used because nothing that fits was available or affordable. */
   fallback?: boolean;
+  /** The network leg handed to the coordinator as model "auto" (best-fit picks model, class and machine). */
+  bestFit?: boolean;
 }
 
 export interface RouteInputs {
@@ -179,6 +181,26 @@ export function routeModelId(r: Route): string {
 
 export const AUTO_MODEL_ID = "auto";
 
+/**
+ * Model names that leave the choice to the network: none, "", "default" or "auto". A client that
+ * gets one of these sends model "auto", so the coordinator's best-fit routing picks the model, the
+ * class and the machine (docs: site-docs, "Default model per client"). Anything else is a pin.
+ */
+export function isUnpinnedModel(model: string | null | undefined): boolean {
+  const m = (model ?? "").trim().toLowerCase();
+  return m === "" || m === "default" || m === AUTO_MODEL_ID;
+}
+
+/** The route for the network's best fit: the coordinator picks the model, the class and the machine. */
+export const BEST_FIT_ROUTE: Route = Object.freeze({
+  placement: "network",
+  model: AUTO_MODEL_ID,
+  computeClass: "any",
+  cSatsPerSecond: 0,
+  reason: "network · best fit (the coordinator picks the model and machine)",
+  bestFit: true,
+}) as Route;
+
 /** The route a model id names (the inverse of routeModelId); "network/<model>" without a class runs on any. */
 export function routeFromModelId(id: string): Route | null {
   const t = id.trim();
@@ -203,6 +225,7 @@ const CLASS_NAMES: Record<string, string> = { any: "", cpu: "CPU", apple: "Apple
 
 /** Where a route ran, for the reply footer and the bot's runs table: "This computer · qwen2.5-coder:1.5b". */
 export function routeLabel(r: Route): string {
+  if (r.bestFit) return "Network · best fit";
   const cls = r.computeClass ? CLASS_NAMES[r.computeClass] ?? r.computeClass : "";
   const where =
     r.placement === "local" ? "This computer" :
