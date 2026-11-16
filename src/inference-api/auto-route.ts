@@ -8,17 +8,26 @@
  *    question? That sets the smallest model that will do it well, never below the quality floor
  *    (QualityFloor: 7B by default for both chat and coding, so "explain this code" is not
  *    answered by a 1.5B model just because it is the cheapest).
- * 2. Rank where it can run, cheapest first: a machine you already reserved (prepaid), this
+ * 2. How hard is it (job-complexity.ts, the same estimate the coordinator's best fit uses)? A
+ *    medium, high or very high step raises the smallest model a free place may use
+ *    (ComplexityFloors: ~14B, ~30B, ~30B and a coder or reasoning model), so a hard agent step
+ *    doesn't land on a 7B model just because it's free. Within a session the hardest of the last
+ *    few steps counts (ComplexityWindow), so steps don't flap between this computer and the network.
+ * 3. Rank where it can run, cheapest first: a machine you already reserved (prepaid), this
  *    computer (free), your other machines (free), then the network. Network model calls are
- *    priced per token (the same on every class), so among classes the fastest comes first.
- * 3. Return the ranked list; the caller tries them in order (a place that can't start falls
- *    through to the next).
+ *    priced per token (the same on every class), so among classes the fastest comes first. When
+ *    no free place meets the step and the network can't take it (not connected, no cSats, the
+ *    budget is spent, or the policy keeps to free machines), the biggest free model does it,
+ *    marked as a fallback with the reason.
+ * 4. Return the ranked list; the caller tries them in order (a place that can't start falls
+ *    through to the next). Every route's `reason` says where and why, with the complexity.
  */
 
 import { catalogEntryForTag } from "../model/catalog.js";
 import { supportsTools } from "../model/tool-support.js";
 import type { ChatRequest } from "./types.js";
 import { isFrontierModelId } from "./frontier-models.js";
+import type { Complexity, ComplexityLevel } from "./job-complexity.js";
 
 /** Whether a model can do an agent step (take tools and call them); see model/tool-support.ts. */
 export function callsTools(model: string): boolean {
@@ -45,6 +54,8 @@ export interface Route {
    * needed; local deepseek-r1:14b has no tool support".
    */
   why?: string;
+  /** The step's complexity as Auto counted it (after hysteresis), when Auto chose. */
+  complexity?: ComplexityLevel;
 }
 
 export interface RouteInputs {
@@ -69,6 +80,85 @@ export interface Workload {
   needsTools: boolean;
   /** The smallest model (billions of parameters) Auto may pick for this job; see QualityFloor. */
   minParamsB?: number;
+  /** How hard the step is and what that asks of a model (sizeWorkload with a complexity); see ComplexityFloors. */
+  complexity?: WorkloadComplexity;
+}
+
+/** A step's complexity (job-complexity.ts) as the size of model it needs. */
+export interface WorkloadComplexity {
+  level: ComplexityLevel;
+  score: number;
+  /** The smallest model (billions of parameters) for this level; none at low (the quality floor applies). */
+  minB?: number;
+  /** Medium agent steps (tools): a coder model this big is enough. */
+  coderMinB?: number;
+  /** Very high: a model the catalog knows must be a coder or a reasoning ("thinking") model. */
+  reasoningCoder?: boolean;
+}
+
+/**
+ * The smallest model (billions of parameters, total for MoE) Auto uses for a step by its complexity,
+ * on top of the quality floor. Low complexity uses the floor alone. Set one to 0 to turn it off.
+ */
+export interface ComplexityFloors {
+  mediumB: number;
+  /** A medium agent step (tools) may run on a coder model this big instead. */
+  mediumCoderB: number;
+  highB: number;
+  /** Very high also wants a coder or a reasoning model when the catalog knows the model. */
+  veryHighB: number;
+}
+
+export const DEFAULT_COMPLEXITY_FLOORS: ComplexityFloors = { mediumB: 14, mediumCoderB: 7, highB: 30, veryHighB: 30 };
+
+const envNumber = (v: string | undefined, d: number) => {
+  const n = Number(v);
+  return v !== undefined && v.trim() !== "" && Number.isFinite(n) && n >= 0 ? n : d;
+};
+
+/** EDGECODER_AUTO_MEDIUM_MIN_B, EDGECODER_AUTO_MEDIUM_CODER_MIN_B, EDGECODER_AUTO_HIGH_MIN_B, EDGECODER_AUTO_VERY_HIGH_MIN_B, else the defaults. */
+export function complexityFloorsFromEnv(env: Record<string, string | undefined> = process.env): ComplexityFloors {
+  const d = DEFAULT_COMPLEXITY_FLOORS;
+  return {
+    mediumB: envNumber(env.EDGECODER_AUTO_MEDIUM_MIN_B, d.mediumB),
+    mediumCoderB: envNumber(env.EDGECODER_AUTO_MEDIUM_CODER_MIN_B, d.mediumCoderB),
+    highB: envNumber(env.EDGECODER_AUTO_HIGH_MIN_B, d.highB),
+    veryHighB: envNumber(env.EDGECODER_AUTO_VERY_HIGH_MIN_B, d.veryHighB),
+  };
+}
+
+/** What a complexity level asks of a model. */
+export function workloadComplexity(c: Pick<Complexity, "level" | "score">, floors: ComplexityFloors = complexityFloorsFromEnv()): WorkloadComplexity {
+  const base = { level: c.level, score: c.score };
+  if (c.level === "medium") return { ...base, minB: floors.mediumB, coderMinB: floors.mediumCoderB };
+  if (c.level === "high") return { ...base, minB: floors.highB };
+  if (c.level === "very_high") return { ...base, minB: floors.veryHighB, reasoningCoder: true };
+  return base;
+}
+
+/** "very high" for "very_high". */
+export const levelText = (l: ComplexityLevel) => l.replace("_", " ");
+
+/** Steps a session remembers for hysteresis (EDGECODER_AUTO_COMPLEXITY_WINDOW, default 3; 1 turns it off). */
+export function complexityWindowFromEnv(env: Record<string, string | undefined> = process.env): number {
+  return Math.max(1, Math.floor(envNumber(env.EDGECODER_AUTO_COMPLEXITY_WINDOW, 3)) || 1);
+}
+
+/**
+ * Hysteresis for one session (an agent turn, a bot run): each step counts as the hardest of the
+ * last `size` steps, so a session that just needed the network for a hard step doesn't drop back to
+ * a small local model on the next easy-looking step and flap back again. A harder step takes effect
+ * at once; an easier one only after `size` steps.
+ */
+export class ComplexityWindow {
+  private recent: Array<Pick<Complexity, "level" | "score">> = [];
+  constructor(readonly size = complexityWindowFromEnv()) {}
+  push(c: Pick<Complexity, "level" | "score">): Pick<Complexity, "level" | "score"> & { held: boolean } {
+    this.recent.push({ level: c.level, score: c.score });
+    while (this.recent.length > Math.max(1, this.size)) this.recent.shift();
+    const top = this.recent.reduce((a, b) => (b.score > a.score ? b : a));
+    return top.score > c.score ? { ...top, held: true } : { level: c.level, score: c.score, held: false };
+  }
 }
 
 /**
@@ -97,12 +187,18 @@ export function qualityFloorFromEnv(env: Record<string, string | undefined> = pr
 }
 
 /** An agent turn (tools) or a long prompt needs a capable model; a short question gets the chat floor. */
-export function sizeWorkload(req: Pick<ChatRequest, "messages" | "tools">, floor: QualityFloor = qualityFloorFromEnv()): Workload {
+export function sizeWorkload(
+  req: Pick<ChatRequest, "messages" | "tools">,
+  floor: QualityFloor = qualityFloorFromEnv(),
+  /** The step's complexity (estimateComplexity, after hysteresis): raises the model size free places must meet. */
+  complexity?: Pick<Complexity, "level" | "score">,
+  floors: ComplexityFloors = complexityFloorsFromEnv(),
+): Workload {
   const chars = req.messages.reduce((n, m) => n + m.content.length, 0) + (req.tools ? JSON.stringify(req.tools).length : 0);
   const promptTokens = Math.ceil(chars / 3.5);
   const needsTools = !!req.tools?.length;
   const heavy = needsTools || promptTokens > 6_000;
-  return { heavy, promptTokens, needsTools, minParamsB: heavy ? floor.codingB : floor.chatB };
+  return { heavy, promptTokens, needsTools, minParamsB: heavy ? floor.codingB : floor.chatB, ...(complexity ? { complexity: workloadComplexity(complexity, floors) } : {}) };
 }
 
 /**
@@ -119,6 +215,21 @@ export function paramsB(model: string): number {
 
 const isEmbedding = (m: string) => /embed/i.test(m);
 const isCoder = (m: string) => /coder|devstral|codestral|deepseek-coder/i.test(m);
+/** A coder or a reasoning ("thinking") model, as far as the catalog knows; unknown models pass. */
+const reasonsAboutCode = (m: string) => {
+  const e = catalogEntryForTag(m);
+  return !e || isCoder(m) || e.capabilities.includes("thinking");
+};
+
+/** Whether a model is big enough (and the right kind) for the step's complexity. */
+export function meetsComplexity(model: string, w: Workload): boolean {
+  const cx = w.complexity;
+  if (!cx || cx.minB === undefined) return true;
+  if (cx.reasoningCoder && !reasonsAboutCode(model)) return false;
+  const b = paramsB(model);
+  if (b >= cx.minB) return true;
+  return w.needsTools && cx.coderMinB !== undefined && isCoder(model) && b >= cx.coderMinB;
+}
 
 /**
  * How well a model fits the job (higher is better), or -1 when it shouldn't be used. Nothing below
@@ -131,6 +242,7 @@ export function fitScore(model: string, w: Workload): number {
   const b = paramsB(model);
   const floor = w.minParamsB ?? (w.heavy ? 6 : 1);
   if (b < floor) return -1;
+  if (!meetsComplexity(model, w)) return -1;
   if (w.heavy) return 100 - Math.abs(b - 14) + (isCoder(model) ? 15 : 0);
   return 100 - b * 2 + (isCoder(model) ? 3 : 0);
 }
@@ -149,17 +261,20 @@ function bestModel(models: string[], w: Workload): string | undefined {
 export function rankRoutes(w: Workload, inp: RouteInputs): Route[] {
   const out: Route[] = [];
   const sizeNote = w.heavy ? "agent work" : "quick task";
+  // "— medium complexity, fits locally": every route says how hard the step is.
+  const cx = w.complexity ? levelText(w.complexity.level) : "";
+  const fits = (where: string) => (cx ? ` — ${cx} complexity, fits ${where}` : "");
 
   // An agent step (tools) only goes to a model that calls tools, wherever it runs.
   const usable = (models: string[]) => (w.needsTools ? models.filter(callsTools) : models);
   for (const l of inp.leases) {
     const model = bestModel(usable(l.models), w);
-    if (model) out.push({ placement: "reserved", model, reservationId: l.id, computeClass: l.computeClass, cSatsPerSecond: 0, reason: `your reserved ${l.computeClass} machine (already paid) · ${model}` });
+    if (model) out.push({ placement: "reserved", model, reservationId: l.id, computeClass: l.computeClass, cSatsPerSecond: 0, reason: `your reserved ${l.computeClass} machine (already paid) · ${model}${fits("your reserved machine")}` });
   }
   const local = bestModel(usable(inp.localModels), w);
-  if (local) out.push({ placement: "local", model: local, cSatsPerSecond: 0, reason: `this computer (free) · ${local} for ${sizeNote}` });
+  if (local) out.push({ placement: "local", model: local, cSatsPerSecond: 0, reason: `this computer (free) · ${local} for ${sizeNote}${fits("locally")}` });
   const mine = bestModel(usable(inp.myModels), w);
-  if (mine) out.push({ placement: "mine", model: mine, cSatsPerSecond: 0, reason: `your machines (free) · ${mine} for ${sizeNote}` });
+  if (mine) out.push({ placement: "mine", model: mine, cSatsPerSecond: 0, reason: `your machines (free) · ${mine} for ${sizeNote}${fits("on your machines")}` });
 
   const net: Array<Route & { cost: number }> = [];
   for (const cls of Object.keys(CLASS_SPEED)) {
@@ -171,7 +286,7 @@ export function rankRoutes(w: Workload, inp: RouteInputs): Route[] {
     if (!model) continue;
     // Same token price on every class: the faster one finishes sooner for the same cSats.
     const cost = 1 / CLASS_SPEED[cls];
-    net.push({ placement: "network", model, computeClass: cls, cSatsPerSecond: price, cost, reason: `network ${cls} (per-token price, fastest available) · ${model}` });
+    net.push({ placement: "network", model, computeClass: cls, cSatsPerSecond: price, cost, reason: `network ${cls} (per-token price, fastest available) · ${model}${cx ? ` — ${cx} complexity` : ""}` });
   }
   net.sort((a, b) => a.cost - b.cost);
   for (const { cost: _c, ...r } of net) out.push(r);
@@ -230,6 +345,36 @@ export function routeFromModelId(id: string): Route | null {
 
 const CLASS_NAMES: Record<string, string> = { any: "", cpu: "CPU", apple: "Apple", gpu: "GPU", "gpu.dc": "Datacenter GPU" };
 
+/**
+ * What Auto decided for one model call, for status events (`route`) and the UI: where it runs, the
+ * short reason (with the complexity), why it skipped the obvious free model, and whether it is a
+ * smaller free model used as a fallback.
+ */
+export interface RouteSummary {
+  /** "This computer · qwen3-coder:30b", "Network · best fit". */
+  label: string;
+  placement: Placement;
+  model: string;
+  /** "this computer (free) · qwen3-coder:30b for agent work — medium complexity, fits locally". */
+  reason: string;
+  /** "high complexity, needs ≥30B; this computer has ≤14B", "high-complexity step; a larger model wasn't available (balance 0)". */
+  why?: string;
+  complexity?: ComplexityLevel;
+  fallback?: boolean;
+}
+
+export function routeSummary(r: Route): RouteSummary {
+  return {
+    label: routeLabel(r),
+    placement: r.placement,
+    model: r.model,
+    reason: r.reason,
+    ...(r.why ? { why: r.why } : {}),
+    ...(r.complexity ? { complexity: r.complexity } : {}),
+    ...(r.fallback ? { fallback: true } : {}),
+  };
+}
+
 /** Where a route ran, for the reply footer and the bot's runs table: "This computer · qwen2.5-coder:1.5b". */
 export function routeLabel(r: Route): string {
   if (r.bestFit) return "Network · best fit";
@@ -257,6 +402,20 @@ export function routeLabel(r: Route): string {
 export type ComputePolicy = "local_first" | "auto" | "local_only" | "mine_only" | "model";
 export const COMPUTE_POLICIES: readonly ComputePolicy[] = ["local_first", "auto", "local_only", "mine_only", "model"];
 
+/** Policies chat, Code and API clients may run Auto on ("model" is a pin, not Auto). */
+export const AUTO_POLICIES = ["auto", "local_first", "local_only", "mine_only"] as const;
+export type AutoPolicy = (typeof AUTO_POLICIES)[number];
+
+/**
+ * The policy chat, Code, `edgecoder code` and API Auto run on here: EDGECODER_AUTO_POLICY, default
+ * "auto". "mine_only" is free machines only (this computer and your machines, never the network):
+ * a hard step that needs a bigger model then runs on the biggest free one, marked as a fallback.
+ */
+export function autoPolicyFromEnv(env: Record<string, string | undefined> = process.env): AutoPolicy {
+  const v = (env.EDGECODER_AUTO_POLICY ?? "").trim().toLowerCase().replace(/-/g, "_");
+  return (AUTO_POLICIES as readonly string[]).includes(v) ? (v as AutoPolicy) : "auto";
+}
+
 /** Output tokens a network call may set aside, for the affordability estimate. */
 const EST_OUTPUT_TOKENS = 2_048;
 
@@ -282,7 +441,8 @@ function fallbackRoutes(inp: RouteInputs, places: Array<"local" | "mine">, needs
     const model = biggestUsable(needsTools ? models.filter(callsTools) : models);
     if (model) out.push({ placement: p, model, cSatsPerSecond: 0, fallback: true, reason: `${p === "local" ? "this computer" : "your machines"} · ${model} · ${FALLBACK_NOTE}` });
   }
-  return out;
+  // The biggest first (a stable sort: this computer wins a tie).
+  return out.sort((a, b) => paramsB(b.model) - paramsB(a.model));
 }
 
 export interface PlanOptions {
@@ -330,21 +490,78 @@ export function planRoutes(w: Workload, inp: RouteInputs, policy: ComputePolicy 
     const r = opts.model ? routeFromModelId(opts.model) : null;
     return r && ok(r) ? [r] : [];
   }
-  if (policy === "local_only") {
-    const fit = rankRoutes(w, { ...inp, myModels: [], leases: [], networkModels: [] });
-    return withWhy(fit.length ? fit : fallbackRoutes(inp, ["local"], w.needsTools), toolSkipNote(w, { ...inp, myModels: [] }));
-  }
-  if (policy === "mine_only") {
-    const fit = rankRoutes(w, { ...inp, leases: [], networkModels: [] });
-    return withWhy(fit.length ? fit : fallbackRoutes(inp, ["local", "mine"], w.needsTools), toolSkipNote(w, inp));
+  if (policy === "local_only" || policy === "mine_only") {
+    // Free machines only: never the network, whatever the step needs.
+    const freeInp: RouteInputs = { ...inp, ...(policy === "local_only" ? { myModels: [] } : {}), leases: [], networkModels: [] };
+    const toolWhy = toolSkipNote(w, freeInp);
+    const fit = rankRoutes(w, freeInp);
+    if (fit.length) return withWhy(fit, toolWhy);
+    const cxWhy = complexityFallbackNote(w, freeInp, policy === "local_only" ? "this computer only" : "free machines only");
+    return withWhy(fallbackRoutes(inp, policy === "local_only" ? ["local"] : ["local", "mine"], w.needsTools), joinWhy(cxWhy, toolWhy));
   }
   if (w.heavy && opts.agentMinParamsB && opts.agentMinParamsB > (w.minParamsB ?? 0)) w = { ...w, minParamsB: opts.agentMinParamsB };
   const ranked = rankRoutes(w, inp);
   const order: Placement[] = policy === "local_first" ? ["local", "mine", "reserved"] : ["reserved", "local", "mine"];
   const free = order.flatMap((p) => ranked.filter((r) => r.placement === p));
   const net = ranked.filter((r) => r.placement === "network" && ok(r));
-  return withWhy([...free, ...net, ...(free.length ? [] : fallbackRoutes(inp, ["local", "mine"], w.needsTools))], toolSkipNote(w, inp));
+  const toolWhy = toolSkipNote(w, inp);
+  if (free.length) return withWhy([...free, ...net], toolWhy);
+  // Nothing free meets the step: the network when it can take it, then the biggest free model.
+  const needWhy = complexityNeedNote(w, inp);
+  const blocked = net.length ? "the network couldn't take it" : networkBlockedReason(inp, opts, ranked);
+  return [
+    ...withWhy(net, joinWhy(needWhy, toolWhy)),
+    ...withWhy(fallbackRoutes(inp, ["local", "mine"], w.needsTools), joinWhy(needWhy ? complexityFallbackNote(w, { ...inp, networkModels: [] }, blocked) : undefined, toolWhy)),
+  ];
 }
+
+/** The workload without its complexity: what the free places would have done before it. */
+const withoutComplexity = (w: Workload): Workload => {
+  const { complexity: _c, ...rest } = w;
+  return rest;
+};
+
+/** Whether the step's complexity (not the quality floor or tools) is what kept the free places out. */
+function complexityKeptFreeOut(w: Workload, freeInp: RouteInputs): boolean {
+  if (w.complexity?.minB === undefined) return false;
+  const places = (rs: Route[]) => rs.filter((r) => r.placement !== "network");
+  return places(rankRoutes(w, freeInp)).length === 0 && places(rankRoutes(withoutComplexity(w), freeInp)).length > 0;
+}
+
+/** "this computer has ≤14B": the biggest free model a step could use, and where it is. */
+function biggestFree(w: Workload, inp: Pick<RouteInputs, "localModels" | "myModels">): string | undefined {
+  const usable = (ms: string[]) => (w.needsTools ? ms.filter(callsTools) : ms).filter((m) => !isEmbedding(m));
+  const top = (ms: string[]) => Math.max(0, ...usable(ms).map(paramsB));
+  const local = top(inp.localModels);
+  const mine = top(inp.myModels);
+  if (!local && !mine) return undefined;
+  return local >= mine ? `this computer has ≤${local}B` : `your machines have ≤${mine}B`;
+}
+
+/** Why the step went past the free places: "high complexity, needs ≥30B; this computer has ≤14B". */
+export function complexityNeedNote(w: Workload, inp: RouteInputs): string | undefined {
+  if (!complexityKeptFreeOut(w, { ...inp, networkModels: [] })) return undefined;
+  const cx = w.complexity!;
+  const has = biggestFree(w, inp);
+  return `${levelText(cx.level)} complexity, needs ≥${cx.minB}B${cx.reasoningCoder ? " coder or reasoning model" : ""}${has ? `; ${has}` : ""}`;
+}
+
+/** Why a hard step ran on a smaller free model: "high-complexity step; a larger model wasn't available (balance 0)". */
+function complexityFallbackNote(w: Workload, freeInp: RouteInputs, blocked: string): string | undefined {
+  if (!complexityKeptFreeOut(w, freeInp)) return undefined;
+  return `${levelText(w.complexity!.level).replace(" ", "-")}-complexity step; a larger model wasn't available (${blocked})`;
+}
+
+/** Why the network can't take a request, in a few words. */
+export function networkBlockedReason(inp: RouteInputs, opts: PlanOptions, ranked: Route[]): string {
+  if (!inp.networkModels.length && inp.balanceCSats === undefined) return "not connected to the network";
+  if (inp.balanceCSats !== undefined && inp.balanceCSats <= 0) return "balance 0";
+  if (opts.allowanceCSats !== undefined && opts.allowanceCSats <= 0) return "today's budget is spent";
+  if (!ranked.some((r) => r.placement === "network")) return "no network model that size";
+  return "it would cost more than you can spend";
+}
+
+const joinWhy = (...parts: Array<string | undefined>) => parts.filter(Boolean).join("; ") || undefined;
 
 /**
  * Why an agent step skipped a free model it would otherwise have used: the biggest model on this
@@ -360,7 +577,7 @@ export function toolSkipNote(w: Workload, inp: Pick<RouteInputs, "localModels" |
 }
 
 function withWhy(routes: Route[], why: string | undefined): Route[] {
-  return why ? routes.map((r) => ({ ...r, why })) : routes;
+  return why ? routes.map((r) => ({ ...r, why: joinWhy(r.why, why) })) : routes;
 }
 
 /** Why a policy found nowhere to run, in plain words. */

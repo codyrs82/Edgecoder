@@ -8,7 +8,8 @@ import type { ServedBy } from "../swarm/served-by.js";
 import { AutoUnsupportedError, NetworkInferenceError, RouteElsewhereError, streamNetworkCompletion, type NetworkDeps, type NetworkTarget } from "../apps/ide/network-inference.js";
 import { contextWindowFor, ollamaChat, type OllamaPiece } from "./ollama.js";
 import { ENGINE_PRESETS, EngineError, openAiEngineChat, type OpenAiEngine } from "./openai-engine.js";
-import { BEST_FIT_ROUTE, networkAllowance, noRouteMessage, planRoutes, routeModelId, sizeWorkload, type ComputePolicy, type PlanOptions, type QualityFloor, type Route, type RouteInputs } from "./auto-route.js";
+import { BEST_FIT_ROUTE, ComplexityWindow, networkAllowance, noRouteMessage, planRoutes, routeModelId, sizeWorkload, type ComplexityFloors, type ComputePolicy, type PlanOptions, type QualityFloor, type Route, type RouteInputs } from "./auto-route.js";
+import { complexityWeightsFromEnv, estimateComplexity } from "./job-complexity.js";
 import { ChatBackendError, type ChatBackend, type ChatPiece } from "./types.js";
 import type { RoutingHints } from "./job-descriptor.js";
 
@@ -147,10 +148,19 @@ export function coordinatorAutoBackend(opts: {
   };
 }
 
+/** Sessions a backend keeps a complexity window for (hysteresis), the oldest dropped first. */
+const MAX_COMPLEXITY_SESSIONS = 200;
+
 /**
  * Auto: run each request at the cheapest place that fits it (auto-route.ts), trying the next
  * place when one can't start (no machine has the model, not enough cSats, offline). The last
  * piece says where it ran.
+ *
+ * Each request's complexity is estimated once (estimateComplexity, the coordinator's scorer; a
+ * caller that already did sets `req.complexity`) and counted as the hardest of the session's last
+ * few steps (ComplexityWindow; the session is `hints.sessionId`, else this backend, which is one
+ * agent turn or bot run). It sizes the free places and goes to the network's best fit as the
+ * `complexity` hint, so the coordinator doesn't estimate it differently.
  */
 export function autoBackend(opts: {
   inputs: () => Promise<RouteInputs>;
@@ -170,12 +180,35 @@ export function autoBackend(opts: {
    * older coordinator or a refusal still lands somewhere. Not used for the "model" policy (a pin).
    */
   networkBestFit?: (routing: RoutingHints) => ChatBackend;
+  /** Model sizes by complexity (default: the env, else 14B / 30B / 30B); see ComplexityFloors. */
+  complexityFloors?: ComplexityFloors;
+  /** Steps of hysteresis (default: EDGECODER_AUTO_COMPLEXITY_WINDOW, else 3). */
+  complexityWindow?: number;
+  /**
+   * Whose steps share a hysteresis window: "backend" (default: one agent turn or bot run per
+   * backend; requests with a `hints.sessionId` get their own), or "session" (a long-lived backend
+   * many clients share: only requests with a session id are remembered).
+   */
+  hysteresis?: "backend" | "session";
 }): ChatBackend {
+  const windows = new Map<string, ComplexityWindow>();
+  const windowFor = (key: string) => {
+    let w = windows.get(key);
+    if (!w) {
+      w = new ComplexityWindow(opts.complexityWindow);
+      windows.set(key, w);
+      if (windows.size > MAX_COMPLEXITY_SESSIONS) windows.delete(windows.keys().next().value!);
+    }
+    return w;
+  };
   return async function* (req, signal) {
     const inputs = await opts.inputs();
     const policy = opts.policy ?? "auto";
     const planOpts = opts.plan?.() ?? {};
-    const planned = planRoutes(sizeWorkload(req, opts.floor), inputs, policy, planOpts);
+    const estimated = req.complexity ?? estimateComplexity({ messages: req.messages, tools: req.tools, maxTokens: req.maxTokens }, req.hints?.complexity, complexityWeightsFromEnv());
+    const session = req.hints?.sessionId ?? (opts.hysteresis === "session" ? undefined : "");
+    const complexity = session === undefined ? { level: estimated.level, score: estimated.score, held: false } : windowFor(session).push(estimated);
+    const planned = planRoutes(sizeWorkload(req, opts.floor, complexity, opts.complexityFloors), inputs, policy, planOpts).map((r) => ({ ...r, complexity: complexity.level }));
     const all = opts.networkBestFit && policy !== "model" ? withBestFit(planned) : planned;
     // A bot escalating past a model that only described its plan: the next place, when there is one.
     const skip = new Set(planOpts.exclude ?? []);
@@ -185,7 +218,7 @@ export function autoBackend(opts: {
     const allowance = networkAllowance(inputs, planOpts);
     const bestFitHints = (): RoutingHints => {
       const ceiling = Number.isFinite(allowance) ? Math.min(req.hints?.maxCSats ?? Infinity, allowance) : req.hints?.maxCSats;
-      return { ...req.hints, ...(ceiling !== undefined && Number.isFinite(ceiling) ? { maxCSats: Math.max(0.001, ceiling) } : {}) };
+      return { ...req.hints, complexity: complexity.score, ...(ceiling !== undefined && Number.isFinite(ceiling) ? { maxCSats: Math.max(0.001, ceiling) } : {}) };
     };
     // The small free fallback is always tried, whatever maxTries cuts (the best-fit leg does not count).
     const main = routes.filter((r) => !r.fallback).slice(0, (opts.maxTries ?? 4) + (routes.some((r) => r.bestFit) ? 1 : 0));
@@ -227,6 +260,7 @@ export function autoBackend(opts: {
 export function withBestFit(routes: Route[]): Route[] {
   const i = routes.findIndex((r) => r.placement === "network" && !r.fallback);
   if (i < 0) return routes;
-  const why = routes[i].why;
-  return [...routes.slice(0, i), why ? { ...BEST_FIT_ROUTE, why } : BEST_FIT_ROUTE, ...routes.slice(i)];
+  const { why, complexity } = routes[i];
+  const cx = complexity ? { complexity, reason: `${BEST_FIT_ROUTE.reason} — ${complexity.replace("_", " ")} complexity` } : {};
+  return [...routes.slice(0, i), why || complexity ? { ...BEST_FIT_ROUTE, ...cx, ...(why ? { why } : {}) } : BEST_FIT_ROUTE, ...routes.slice(i)];
 }

@@ -49,7 +49,7 @@ import {
 import { normalizeRemoteUrl } from "./git-setup.js";
 import { gitExecEnv } from "./git-safe.js";
 import { ensureRepo as realEnsureRepo } from "./repo-connect.js";
-import { COMPUTE_POLICIES, FALLBACK_NOTE, routeLabel, routeModelId, type ComputePolicy, type PlanOptions, type Route } from "../../inference-api/auto-route.js";
+import { COMPUTE_POLICIES, FALLBACK_NOTE, routeLabel, routeModelId, routeSummary, type ComputePolicy, type PlanOptions, type Route } from "../../inference-api/auto-route.js";
 import type { ChatBackend } from "../../inference-api/types.js";
 
 // ---------------------------------------------------------------------------
@@ -1816,7 +1816,11 @@ const COMPUTE_STATUS = /^(Auto|Compute): /;
 /** A bot's model calls, and the switch to the next model in the ranking (see AgentLoopDeps.escalate). */
 export type BotChatFn = ChatFn & { escalate?: () => boolean };
 
-/** "Auto → qwen3.5:9b on this computer (tools needed; local deepseek-r1:14b has no tool support)". */
+/**
+ * "Auto → qwen3.5:9b on this computer (tools needed; local deepseek-r1:14b has no tool support)",
+ * "Auto → network best fit (high complexity, needs ≥30B; this computer has ≤14B)", "Auto →
+ * qwen2.5-coder:14b on this computer (high-complexity step; a larger model wasn't available (balance 0))".
+ */
 export function routeChoiceNote(r: Route, policy: ComputePolicy, why = r.why): string | undefined {
   if (!why) return undefined;
   const on = r.bestFit ? "network best fit" :
@@ -1837,6 +1841,7 @@ export function botComputeChat(
 ): BotChatFn {
   const compute = ctx.bot.compute ?? LEGACY_BOT_COMPUTE;
   let where = "";
+  let reason = "";
   let last: Route | undefined;
   const exclude: string[] = [];
   const backend = auto(
@@ -1857,12 +1862,14 @@ export function botComputeChat(
       where = routeLabel(r);
       const why = skipped ? `${skipped.bestFit ? "the network's pick" : skipped.model} answered with a plan and no tool calls` : r.why;
       const note = routeChoiceNote(r, compute.policy, why);
-      ctx.sendEvent({ type: "status", message: `Compute: ${r.reason}${why ? ` (${why})` : ""}`, ...(note ? { note } : {}) });
+      reason = `${r.reason}${why ? ` (${why})` : ""}`;
+      // `route`: where this step runs and why, with its complexity (the bot view's "Running on" and per-step lines).
+      ctx.sendEvent({ type: "status", message: `Compute: ${reason}`, ...(note ? { note } : {}), route: routeSummary(why === r.why ? r : { ...r, why }) });
     },
   );
   // Tell the network's best fit this is agent work, so it picks a model that handles tools well.
   const agentic: ChatBackend = (req, signal) => backend(req.tools?.length ? { ...req, hints: { job: "agentic", needsTools: true, ...req.hints } } : req, signal);
-  const chat: BotChatFn = backendChat(agentic, (cSats) => ctx.sendEvent({ type: "usage", cSats, where }), ctx.signal);
+  const chat: BotChatFn = backendChat(agentic, (cSats) => ctx.sendEvent({ type: "usage", cSats, where, ...(reason ? { reason } : {}) }), ctx.signal);
   // A pinned model has nowhere else to go.
   if (compute.policy !== "model") {
     chat.escalate = () => {

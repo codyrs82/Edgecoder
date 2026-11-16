@@ -25,6 +25,8 @@ type UsageEvent = Extract<IdeStreamEvent, { type: "usage" }>;
 export interface ActivityCall {
   cSats: number;
   where?: string;
+  /** Auto: why it ran there, with the step's complexity. */
+  reason?: string;
   model?: string;
   served?: UsageEvent["served"];
   usd?: number;
@@ -107,7 +109,7 @@ export class ActivityTracker {
           const u = ev as unknown as UsageEvent;
           const cSats = Number.isFinite(u.cSats) ? u.cSats : 0;
           item.cSats += cSats;
-          if (item.calls.length < MAX_CALLS) item.calls.push({ cSats, ...(u.where ? { where: u.where } : {}), ...(u.model ? { model: u.model } : {}), ...(u.served ? { served: u.served } : {}), ...(u.usd ? { usd: u.usd } : {}) });
+          if (item.calls.length < MAX_CALLS) item.calls.push({ cSats, ...(u.where ? { where: u.where } : {}), ...(u.reason ? { reason: u.reason } : {}), ...(u.model ? { model: u.model } : {}), ...(u.served ? { served: u.served } : {}), ...(u.usd ? { usd: u.usd } : {}) });
           if (u.model) item.model = u.model;
         } else if (ev.type === "tool_call" && typeof ev.tool === "string") {
           item.steps.push(stepText(ev.tool, ev.args));

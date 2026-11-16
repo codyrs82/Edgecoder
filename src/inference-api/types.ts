@@ -9,6 +9,7 @@
 
 import type { ServedBy } from "../swarm/served-by.js";
 import type { RoutingHints } from "./job-descriptor.js";
+import type { Complexity } from "./job-complexity.js";
 
 export interface ToolCall {
   function: { name: string; arguments: Record<string, unknown> };
@@ -35,6 +36,8 @@ export interface ChatRequest {
   temperature?: number;
   /** For model "auto": what the client said about the job (body `edgecoder`, x-edgecoder-* headers, session). */
   hints?: RoutingHints;
+  /** For Auto: the step's complexity when a caller already estimated it (so it isn't estimated twice). */
+  complexity?: Complexity;
 }
 
 /** What a backend yields: text as it is generated, the tool calls, then the end. */

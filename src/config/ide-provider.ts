@@ -70,7 +70,16 @@ export const ideProviderConfigSchema = z.object({
   IDE_PROVIDER_URL: envUrl(),
   /** Auto's quality floor in billions of parameters (src/inference-api/auto-route.ts): chat and agent work. */
   EDGECODER_AUTO_MIN_CHAT_B: envNumber(undefined, { min: 0 }),
-  EDGECODER_AUTO_MIN_CODING_B: envNumber(undefined, { min: 0 })
+  EDGECODER_AUTO_MIN_CODING_B: envNumber(undefined, { min: 0 }),
+  /** Complexity-aware Auto: the smallest model (billions) free places must have per complexity level (0 turns a level off). */
+  EDGECODER_AUTO_MEDIUM_MIN_B: envNumber(undefined, { min: 0 }),
+  EDGECODER_AUTO_MEDIUM_CODER_MIN_B: envNumber(undefined, { min: 0 }),
+  EDGECODER_AUTO_HIGH_MIN_B: envNumber(undefined, { min: 0 }),
+  EDGECODER_AUTO_VERY_HIGH_MIN_B: envNumber(undefined, { min: 0 }),
+  /** Steps of hysteresis: each step counts as the hardest of the session's last N (1: off). */
+  EDGECODER_AUTO_COMPLEXITY_WINDOW: envNumber(undefined, { min: 0 }),
+  /** Where chat, Code and API Auto may run: auto | local_first | local_only | mine_only (free machines only). */
+  EDGECODER_AUTO_POLICY: str()
 });
 
 export type IdeProviderConfig = z.infer<typeof ideProviderConfigSchema>;

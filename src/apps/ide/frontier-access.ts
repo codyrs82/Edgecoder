@@ -20,7 +20,7 @@ import { ANTHROPIC_MODELS, frontierDisplayName, frontierModelId, parseFrontierMo
 import { FrontierKeyError, type FrontierKeyStore, type FrontierProvider } from "../../inference-api/frontier-keys.js";
 import { frontierBackend, testFrontierKey, withSpendControls, type FrontierTarget } from "../../inference-api/frontier.js";
 import type { FrontierSpend } from "../../inference-api/frontier-usage.js";
-import { estimateComplexity } from "../../inference-api/job-complexity.js";
+import { complexityWeightsFromEnv, estimateComplexity } from "../../inference-api/job-complexity.js";
 import { ChatBackendError, type ChatBackend } from "../../inference-api/types.js";
 import { backendChat, type ChatFn } from "./agent-loop.js";
 import type { IdeStreamEvent } from "./tool-types.js";
@@ -192,7 +192,7 @@ export function autoWithFrontier(o: { auto: ChatBackend; access: FrontierAccess;
   return async function* (req, signal) {
     const settings = o.access.store.settings();
     if (settings.useForAuto) {
-      const c = estimateComplexity({ messages: req.messages, tools: req.tools, maxTokens: req.maxTokens }, req.hints?.complexity);
+      const c = req.complexity ?? estimateComplexity({ messages: req.messages, tools: req.tools, maxTokens: req.maxTokens }, req.hints?.complexity, complexityWeightsFromEnv());
       if (c.level === "high" || c.level === "very_high") {
         const r = await o.access.resolve(settings.defaultLead, o.request()).catch(() => null);
         if (r?.ok) {
@@ -200,6 +200,8 @@ export function autoWithFrontier(o: { auto: ChatBackend; access: FrontierAccess;
           return yield* r.backend(req, signal);
         }
       }
+      // Auto sizes the step with the same estimate (estimated once per request).
+      return yield* o.auto({ ...req, complexity: c }, signal);
     }
     return yield* o.auto(req, signal);
   };
