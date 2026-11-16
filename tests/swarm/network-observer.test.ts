@@ -3,12 +3,14 @@ import {
   FOLLOW_MAX_MS,
   InferenceTracker,
   MAX_FOLLOWED_CALLS,
+  MAX_SERIES_KEYS,
   MAX_MODELS_PER_BUCKET,
   ModelEventCounter,
   OTHER_MODEL,
   RingBuffer,
   SAMPLE_CAPACITY,
   TimedSamples,
+  capKeys,
   downsample,
   seriesBucketMs,
   type NetworkSample
@@ -75,8 +77,9 @@ describe("network observer", () => {
     tr.sweep((taskId) => (taskId === "t3" ? "no_capacity" : undefined), 50_000);
     expect(tr.ttft.percentiles()).toEqual({ count: 1, p50: 400, p90: 400 });
     expect(tr.duration.percentiles()).toEqual({ count: 1, p50: 2000, p90: 2000 });
-    expect(tr.takeInterval()).toEqual({ started: 3, completed: 1, failed: 1, noCapacity: 1, noAgentHasModel: 1 });
-    expect(tr.takeInterval()).toEqual({ started: 0, completed: 0, failed: 0, noCapacity: 0, noAgentHasModel: 0 });
+    // Unmet by model: the refusal (no holder) and the no-capacity cancellation.
+    expect(tr.takeInterval()).toEqual({ started: 3, completed: 1, failed: 1, noCapacity: 1, noAgentHasModel: 1, unmetByModel: { missing: 1, qwen: 1 } });
+    expect(tr.takeInterval()).toEqual({ started: 0, completed: 0, failed: 0, noCapacity: 0, noAgentHasModel: 0, unmetByModel: {} });
     expect(tr.following).toBe(0);
     const counts = tr.models.counts(0);
     expect(counts.get("missing")?.noAgentHasModel).toBe(1);
@@ -140,5 +143,54 @@ describe("network observer", () => {
     const out = downsample(samples, "1h", now);
     expect(out.every((p) => p.connectedAgents === 3)).toBe(true);
     expect(out.some((p) => p.atMs >= now - 30 * 60_000 && p.atMs < now - 10 * 60_000)).toBe(false);
+  });
+
+  test("unmet requests per interval are kept per model, at most MAX_SERIES_KEYS names plus (other)", () => {
+    const tr = new InferenceTracker();
+    for (let i = 0; i < 12; i++) for (let j = 0; j <= i; j++) tr.refusedNoModel(`m${i}`, 1_000);
+    const unmet = tr.takeInterval().unmetByModel;
+    expect(Object.keys(unmet)).toHaveLength(MAX_SERIES_KEYS + 1);
+    expect(unmet.m11).toBe(12);
+    expect(unmet.m6).toBe(7);
+    expect(unmet).not.toHaveProperty("m5");
+    // m0..m5 (1 + 2 + ... + 6) fold into (other).
+    expect(unmet[OTHER_MODEL]).toBe(21);
+  });
+
+  test("capKeys keeps the largest keys and sums the rest, with any (other) already there", () => {
+    expect(capKeys({ a: 1, b: 2 }, 3)).toEqual({ a: 1, b: 2 });
+    expect(capKeys({ a: 1, b: 5, c: 3, [OTHER_MODEL]: 2 }, 2)).toEqual({ b: 5, c: 3, [OTHER_MODEL]: 3 });
+    const slots = capKeys({ a: { free: 1, total: 2 }, b: { free: 0, total: 8 }, c: { free: 3, total: 4 } }, 1, (v) => v.total, (x, y) => ({ free: x.free + y.free, total: x.total + y.total }));
+    expect(slots).toEqual({ b: { free: 0, total: 8 }, [OTHER_MODEL]: { free: 4, total: 6 } });
+  });
+
+  test("downsamples the gap fields: unmet summed, counts and per-key gauges averaged, old samples without them left alone", () => {
+    const now = 10 * 3_600_000;
+    const base = (atMs: number, over: Partial<NetworkSample> = {}): NetworkSample => ({
+      atMs, connectedAgents: 3, busyAgents: 1, totalSlots: 4, freeSlots: 2, queued: 0, claimed: 1, waitingInference: 0,
+      started: 0, completed: 0, failed: 0, noCapacity: 0, noAgentHasModel: 0, pickupP50: null, pickupP90: null, ttftP50: null, ttftP90: null, ...over
+    });
+    const width = seriesBucketMs("6h");
+    const t = Math.floor((now - 30 * 60_000) / width) * width;
+    const out = downsample(
+      [
+        // A sample stored before the gap fields existed.
+        base(t - width),
+        base(t, { unmetByModel: { llama: 2 }, saturatedModels: 1, staleAgents: 2, modelSlots: { llama: { free: 0, total: 4 }, qwen: { free: 2, total: 2 } }, agentsByRegion: { ord: 2, cdg: 1 } }),
+        base(t + 15_000, { unmetByModel: { llama: 1, qwen: 3 }, saturatedModels: 0, staleAgents: 1, modelSlots: { llama: { free: 2, total: 4 } }, agentsByRegion: { ord: 3 } })
+      ],
+      "6h",
+      now
+    );
+    expect(out).toHaveLength(2);
+    expect(out[0]).not.toHaveProperty("unmetByModel");
+    expect(out[0]).not.toHaveProperty("staleAgents");
+    expect(out[1]).toMatchObject({
+      unmetByModel: { llama: 3, qwen: 3 },
+      saturatedModels: 0.5,
+      staleAgents: 1.5,
+      modelSlots: { llama: { free: 1, total: 4 }, qwen: { free: 1, total: 1 } },
+      agentsByRegion: { ord: 2.5, cdg: 0.5 }
+    });
   });
 });

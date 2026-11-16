@@ -130,6 +130,7 @@ policy `never`), so a forgotten app costs at most that.
 - **Queue / waiting inference** rising and not draining between ticks means arrivals exceed
   service; the saturation point is the stage where client throughput stops tracking offered rate.
 - **Pickup p90** is dispatch latency (queued → claimed); client TTFT minus pickup is model time.
-- **Gaps** list models asked for with no holder or no free slot: expect `qwen2.5-coder:7b` (apple)
-  when the Macs are offline or registered as `cpu`.
+- **Gaps** chart unmet demand per model (asked for with no holder or no free slot), free slots per
+  model, stale agents and agents by region over the chart range, each with a line on the state now:
+  expect `qwen2.5-coder:7b` (apple) in unmet demand when the Macs are offline or registered as `cpu`.
 - Coding sessions land on the GPU (`qwen3-coder:30b`, one slot): it saturates first.

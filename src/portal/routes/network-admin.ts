@@ -21,7 +21,10 @@ const RANGES: readonly SeriesRange[] = ["1h", "6h", "24h", "7d"];
 export const FEW_AGENTS = 2;
 
 type Pct = { count: number; p50: number; p90: number };
-type Sample = Record<string, number | null> & { atMs: number };
+type SlotCount = { free: number; total: number };
+/** A series point: numbers, plus (#340) keyed maps of counts or of slots. */
+type SampleValue = number | null | Record<string, number> | Record<string, SlotCount>;
+type Sample = { atMs: number } & Record<string, SampleValue>;
 
 /** What one coordinator's GET /admin/network returns (src/swarm/coordinator/routes/admin-network.ts), loosely. */
 export interface CoordinatorSnapshot {
@@ -32,6 +35,8 @@ export interface CoordinatorSnapshot {
     accountId: string | null;
     ownerEmail?: string | null;
     countryCode?: string | null;
+    /** Hosting region the agent reported (newer coordinators); null or absent: unknown. */
+    region?: string | null;
     status: string;
     connected: boolean;
     blacklisted: boolean;
@@ -84,30 +89,68 @@ function combinePct(parts: Pct[]): Pct {
 const P50_KEYS = new Set(["pickupP50", "ttftP50"]);
 const P90_KEYS = new Set(["pickupP90", "ttftP90"]);
 
-/** Merge series by bucket start: counts and gauges add up, p50s average, p90s take the worst. */
-export function mergeSeries(seriesList: Sample[][]): Sample[] {
-  const byAt = new Map<number, { sum: Record<string, number>; p50: Record<string, number[]>; p90: Record<string, number> }>();
-  for (const points of seriesList) {
+const isSlot = (v: unknown): v is SlotCount => typeof v === "object" && v !== null && typeof (v as SlotCount).free === "number" && typeof (v as SlotCount).total === "number";
+const round1 = (v: number) => Math.round(v * 10) / 10;
+
+/**
+ * Merge series by bucket start: counts and gauges add up, p50s average, p90s take the worst. Keyed
+ * maps (#340: unmet requests by model, slots by model, agents by region) add up per key, and
+ * saturatedModels is counted again from the merged slots (a model full on both coordinators is one
+ * model). With `labels` (one per list), each point also gets agentsByCoordinator: that list's
+ * connectedAgents under its label.
+ */
+export function mergeSeries(seriesList: Sample[][], labels?: string[]): Sample[] {
+  type Acc = { sum: Record<string, number>; p50: Record<string, number[]>; p90: Record<string, number>; maps: Record<string, Record<string, number>>; slots: Record<string, Record<string, SlotCount>> };
+  const byAt = new Map<number, Acc>();
+  seriesList.forEach((points, i) => {
     for (const p of points) {
-      const e = byAt.get(p.atMs) ?? { sum: {}, p50: {}, p90: {} };
+      const e = byAt.get(p.atMs) ?? { sum: {}, p50: {}, p90: {}, maps: {}, slots: {} };
       for (const [k, v] of Object.entries(p)) {
-        if (k === "atMs" || v === null || typeof v !== "number") continue;
+        if (k === "atMs" || v === null || v === undefined) continue;
+        if (typeof v === "object") {
+          for (const [key, x] of Object.entries(v)) {
+            if (typeof x === "number") {
+              const m = (e.maps[k] ??= {});
+              m[key] = round1((m[key] ?? 0) + x);
+            } else if (isSlot(x)) {
+              const m = (e.slots[k] ??= {});
+              const t = (m[key] ??= { free: 0, total: 0 });
+              t.free = round1(t.free + x.free);
+              t.total = round1(t.total + x.total);
+            }
+          }
+          if (!Object.keys(v).length) e.maps[k] ??= {};
+          continue;
+        }
+        if (typeof v !== "number") continue;
         if (P50_KEYS.has(k)) (e.p50[k] ??= []).push(v);
         else if (P90_KEYS.has(k)) e.p90[k] = Math.max(e.p90[k] ?? 0, v);
         else e.sum[k] = (e.sum[k] ?? 0) + v;
       }
+      const label = labels?.[i];
+      if (label !== undefined && typeof p.connectedAgents === "number") {
+        const m = (e.maps.agentsByCoordinator ??= {});
+        m[label] = (m[label] ?? 0) + p.connectedAgents;
+      }
       byAt.set(p.atMs, e);
     }
-  }
+  });
   return [...byAt.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([atMs, e]) => {
       const out: Sample = { atMs, ...e.sum };
       for (const k of P50_KEYS) out[k] = e.p50[k]?.length ? Math.round(e.p50[k]!.reduce((a, b) => a + b, 0) / e.p50[k]!.length) : null;
       for (const k of P90_KEYS) out[k] = e.p90[k] ?? null;
+      for (const [k, m] of Object.entries(e.maps)) out[k] = m;
+      for (const [k, m] of Object.entries(e.slots)) out[k] = m;
+      const slots = e.slots.modelSlots;
+      if (slots) out.saturatedModels = Object.entries(slots).filter(([m, v]) => m !== OTHER_KEY && v.total > 0 && v.free === 0).length;
       return out;
     });
 }
+
+/** The coordinators' name for "every other model" in a capped map (network-observer.ts OTHER_MODEL). */
+const OTHER_KEY = "(other)";
 
 /** One view of the network from every coordinator's snapshot, with agents joined to accounts. */
 export function mergeNetworkSnapshots(results: CoordinatorResult[], owners: OwnerDirectory, range: SeriesRange, nowMs = Date.now()) {
@@ -164,8 +207,17 @@ export function mergeNetworkSnapshots(results: CoordinatorResult[], owners: Owne
     }
   }
   const byCoordinator = snapshots.map((r) => ({ coordinator: label(r), region: r.snapshot.coordinator.region ?? null, connected: live.filter((a) => a.coordinator === label(r)).length }));
-  const byCountry = new Map<string, number>();
-  for (const a of live) byCountry.set(a.countryCode ?? "unknown", (byCountry.get(a.countryCode ?? "unknown") ?? 0) + 1);
+  // Regions: where the agent says it runs (AGENT_REGION / FLY_REGION), else its coordinator's region
+  // (ord, cdg). Country codes stay in the agents table; they come from the portal's IP lookup and are
+  // often missing, which is what showed as "Region unknown".
+  const byRegion = new Map<string, { region: string; agents: number; reported: number }>();
+  for (const a of live) {
+    const region = a.region || a.coordinatorRegion || "unknown";
+    const e = byRegion.get(region) ?? { region, agents: 0, reported: 0 };
+    e.agents++;
+    if (a.region) e.reported++;
+    byRegion.set(region, e);
+  }
 
   const sum = (f: (s: CoordinatorSnapshot) => number) => snapshots.reduce((acc, r) => acc + (f(r.snapshot) || 0), 0);
   const pickup = combinePct(snapshots.map((r) => r.snapshot.latency.pickup));
@@ -206,12 +258,19 @@ export function mergeNetworkSnapshots(results: CoordinatorResult[], owners: Owne
       saturatedModels: modelList.filter((m) => m.agents > 0 && m.freeSlots === 0).map((m) => ({ model: m.model, agents: m.agents, slots: m.slots, waiting: m.waiting })),
       staleAgents: agentList.filter((a) => a.status === "stale").map((a) => ({ agentId: a.agentId, email: a.email, coordinator: a.coordinator, lastSeenMs: a.lastSeenMs })),
       thinCoordinators: byCoordinator.filter((c) => c.connected < FEW_AGENTS),
+      coordinators: byCoordinator,
       unreachableCoordinators: results.filter((r) => !r.ok).map((r) => r.url),
-      regions: [...byCountry.entries()].map(([country, agents]) => ({ country, agents })).sort((a, b) => b.agents - a.agents)
+      regions: [...byRegion.values()].sort((a, b) => b.agents - a.agents || a.region.localeCompare(b.region))
     },
-    series: { range, bucketMs: snapshots[0]?.snapshot.series.bucketMs ?? null, points: mergeSeries(snapshots.map((r) => r.snapshot.series.points ?? [])) },
+    series: { range, bucketMs: snapshots[0]?.snapshot.series.bucketMs ?? null, points: mergeSeries(snapshots.map((r) => r.snapshot.series.points ?? []), snapshots.map((r) => coordinatorKey(label(r), r.snapshot.coordinator.region))) },
     routing: { decisions: mergeRoutingDecisions(snapshots), config: snapshots.find((r) => r.snapshot.routing?.config)?.snapshot.routing?.config ?? null }
   };
+}
+
+/** A coordinator's key in agentsByCoordinator: its host's first label, with its region ("coordinator · ord"). */
+function coordinatorKey(label: string, region: string | null | undefined): string {
+  const host = /^[0-9[]/.test(label) ? label : (label.split(".")[0] ?? label);
+  return region ? `${host} · ${region}` : host;
 }
 
 export type MergedNetwork = ReturnType<typeof mergeNetworkSnapshots>;

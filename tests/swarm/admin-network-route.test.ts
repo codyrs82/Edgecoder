@@ -15,7 +15,7 @@ let dispatch: typeof import("../../src/swarm/coordinator/dispatch.js");
 let net: typeof import("../../src/swarm/coordinator/routes/admin-network.js");
 
 beforeAll(async () => {
-  Object.assign(process.env, { ADMIN_API_TOKEN: ADMIN, MESH_AUTH_TOKEN: MESH, PORTAL_SERVICE_TOKEN: PORTAL, BITCOIN_NETWORK: "signet", LIGHTNING_PROVIDER: "mock" });
+  Object.assign(process.env, { ADMIN_API_TOKEN: ADMIN, MESH_AUTH_TOKEN: MESH, PORTAL_SERVICE_TOKEN: PORTAL, BITCOIN_NETWORK: "signet", LIGHTNING_PROVIDER: "mock", FLY_REGION: "ord" });
   delete process.env.DATABASE_URL;
   app = (await import("../../src/swarm/coordinator.js")).coordinatorServer;
   state = await import("../../src/swarm/coordinator/agent-state.js");
@@ -28,16 +28,17 @@ beforeAll(async () => {
 afterAll(async () => {
   await app?.close();
   delete process.env.ADMIN_API_TOKEN;
+  delete process.env.FLY_REGION;
 });
 
 const get = (url: string, headers: Record<string, string>) => app.inject({ method: "GET", url, headers });
 
-function addAgent(agentId: string, models: string[], lastSeenMs: number) {
+function addAgent(agentId: string, models: string[], lastSeenMs: number, region?: string) {
   state.agentCapabilities.set(agentId, {
     os: "macos", version: "1.2.3", mode: "swarm-only", localModelEnabled: true, localModelProvider: "ollama-local",
     localModelCatalog: models, modelsReported: true, clientType: "desktop", swarmEnabled: true, ideEnabled: false,
     maxConcurrentTasks: 2, connectedPeers: new Set(), ownerEmail: "owner@example.com", countryCode: "US",
-    sandboxMode: "none", lastSeenMs, computeClass: "apple"
+    sandboxMode: "none", lastSeenMs, computeClass: "apple", ...(region ? { region } : {})
   });
 }
 
@@ -101,6 +102,32 @@ describe("GET /admin/network", () => {
     const last = r.series.points.at(-1);
     expect(last).toMatchObject({ connectedAgents: 1, totalSlots: 2, freeSlots: 2, waitingInference: 1, started: 1, completed: 1, noAgentHasModel: 1, ttftP50: 500 });
     expect(r.coordinator).toMatchObject({ sampleIntervalMs: 15_000, generatedAtMs: expect.any(Number) });
+    // Gaps over time (#340): unmet by model, slots per model, saturated and stale counts, agents by region.
+    expect(last).toMatchObject({
+      unmetByModel: { "mistral:7b": 1 },
+      modelSlots: { "llama3:8b": { free: 2, total: 2 }, "qwen2.5:7b": { free: 2, total: 2 } },
+      saturatedModels: 0,
+      staleAgents: 1,
+      // agent-live reports no region of its own: it counts under this coordinator's (FLY_REGION).
+      agentsByRegion: { ord: 1 }
+    });
+  });
+
+  test("the coordinator's region comes from FLY_REGION, and an agent's own region is used where it reported one", async () => {
+    const now = Date.now();
+    addAgent("agent-sin", ["llama3:8b"], now, "sin");
+    // agent-sin's two slots are full: llama3:8b now has free slots only on agent-live; qwen is fine.
+    dispatch.noteAgentPull("agent-sin", { inferenceSlots: 2, freeInferenceSlots: 0 });
+    const sample = net.takeNetworkSample(now);
+    expect(sample.agentsByRegion).toEqual({ ord: 1, sin: 1 });
+    expect(sample.modelSlots!["llama3:8b"]).toEqual({ free: 2, total: 4 });
+    const r = (await get("/admin/network?range=1h", { "x-admin-token": ADMIN })).json();
+    expect(r.coordinator.region).toBe("ord");
+    expect(r.agents.find((a: { agentId: string }) => a.agentId === "agent-sin")).toMatchObject({ region: "sin" });
+    expect(r.agents.find((a: { agentId: string }) => a.agentId === "agent-live")).toMatchObject({ region: null });
+    // The served point averages the samples in its 15 s bucket.
+    expect(Object.keys(r.series.points.at(-1).agentsByRegion).sort()).toEqual(["ord", "sin"]);
+    state.agentCapabilities.delete("agent-sin");
   });
 
   test("serves a 7 d range in 30 min buckets", async () => {

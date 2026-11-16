@@ -71,6 +71,10 @@
   --on-accent: #ffffff;
   --card: rgba(255, 255, 255, 0.96);
   --selection: #fce4c4;
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  --chart-4: #eda100;
 }
 [data-theme=dark] {
   color-scheme: dark;
@@ -95,6 +99,10 @@
   --on-accent: #0d1014;
   --card: rgba(18, 22, 28, 0.96);
   --selection: #2a2114;
+  --chart-1: #3987e5;
+  --chart-2: #d95926;
+  --chart-3: #199e70;
+  --chart-4: #c98500;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme=light]) {
@@ -120,5 +128,9 @@
     --on-accent: #0d1014;
     --card: rgba(18, 22, 28, 0.96);
     --selection: #2a2114;
+    --chart-1: #3987e5;
+    --chart-2: #d95926;
+    --chart-3: #199e70;
+    --chart-4: #c98500;
   }
 }

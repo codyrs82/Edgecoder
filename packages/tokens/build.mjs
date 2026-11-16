@@ -9,7 +9,12 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 export function buildCss(tokens) {
   const mode = (m) =>
-    Object.entries(tokens.color).map(([k, v]) => `  --${k}: ${v[m]};`).join("\n");
+    [
+      ...Object.entries(tokens.color).map(([k, v]) => `  --${k}: ${v[m]};`),
+      // Categorical chart series (--chart-1..4), in this order: stepped per theme and checked as a
+      // set for colour-blind separation of neighbours, so a chart takes them in order, never cycled.
+      ...Object.entries(tokens.chart ?? {}).map(([k, v]) => `  --chart-${k}: ${v[m]};`)
+    ].join("\n");
   const shared = [
     ...Object.entries(tokens.space).map(([k, v]) => `  --space-${k}: ${v};`),
     ...Object.entries(tokens.radius).map(([k, v]) => `  --radius-${k}: ${v};`),
@@ -55,6 +60,7 @@ export function buildTheme(tokens) {
   const lines = [
     ...Object.keys(tokens.color).map((k) => `  --color-${k}: var(--${k});`),
     ...Object.keys(tokens.derived).map((k) => `  --color-${k}: var(--${k});`),
+    ...Object.keys(tokens.chart ?? {}).map((k) => `  --color-chart-${k}: var(--chart-${k});`),
     "  --color-scrim: var(--scrim);",
     ...Object.keys(tokens.space).map((k) => `  --spacing-${k}: var(--space-${k});`),
     ...Object.entries(tokens.radius).map(([k, v]) => `  --radius-${k}: ${v};`),

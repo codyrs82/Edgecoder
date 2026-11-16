@@ -22,6 +22,10 @@
   --color-card: var(--card);
   --color-selection: var(--selection);
   --color-red-strong: var(--red-strong);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
   --color-scrim: var(--scrim);
   --spacing-1: var(--space-1);
   --spacing-2: var(--space-2);

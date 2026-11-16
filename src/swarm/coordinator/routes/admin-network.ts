@@ -6,6 +6,8 @@
  * admin page (Settings > Network): agents with their account, models, slots and claims; the queue;
  * dispatch and model-call latency; gaps (models asked for that nobody holds, models with no free
  * slot, agents gone quiet); and a time series sampled every 15 s, served over 1 h, 6 h, 24 h or 7 d.
+ * The series carries the gaps too (#340): unmet requests and free slots per model, saturated models,
+ * stale agents and live agents by region, so the page charts them over time.
  *
  * Gate: the admin token (x-admin-token, authorizeAdmin), exactly like /admin/revenue. The route is
  * registered in its own plugin with the same onRequest check, so it cannot be reached without it
@@ -35,15 +37,18 @@ import { inferenceCancelledForCapacity } from "./inference.js";
 import { bestFitConfig, complexityWeights, noteRoutedChunk, recentDecisions, restoreDecisions, ROUTING_LOG_SIZE, setDecisionSink, storedDecision } from "../routing.js";
 import {
   InferenceTracker,
+  MAX_SERIES_KEYS,
   RingBuffer,
   SAMPLE_CAPACITY,
   SAMPLE_INTERVAL_MS,
   SERIES_RANGES,
+  capKeys,
   downsample,
   seriesBucketMs,
   type CallOutcome,
   type NetworkSample,
-  type SeriesRange
+  type SeriesRange,
+  type SlotCount
 } from "../../network-observer.js";
 
 /** Latency and model counts are reported over this recent window. */
@@ -83,6 +88,19 @@ function isConnected(cap: Capability, nowMs: number): boolean {
   return nowMs - cap.lastSeenMs < AGENT_CONNECTED_WINDOW_MS;
 }
 
+/**
+ * This coordinator's hosting region (e.g. "ord", "cdg"): INFRA_HOST_REGION, COORDINATOR_REGION, then
+ * Fly's own FLY_REGION, as in GET /network/world.
+ */
+export function coordinatorRegion(): string | null {
+  return CC.INFRA_HOST_REGION || process.env.COORDINATOR_REGION || process.env.FLY_REGION || null;
+}
+
+/** Where an agent runs: the region it reported (AGENT_REGION / FLY_REGION), else its coordinator's. */
+export function agentRegion(cap: Pick<Capability, "region">): string {
+  return cap.region || coordinatorRegion() || "unknown";
+}
+
 /** Live, routable agents: connected and not blacklisted. */
 function liveAgents(nowMs: number): Array<[string, Capability]> {
   return [...agentCapabilities.entries()].filter(([id, cap]) => isConnected(cap, nowMs) && !activeBlacklistRecord(id));
@@ -114,6 +132,33 @@ function gauges(nowMs: number) {
   return { claims, connectedAgents: liveAgents(nowMs).length, busyAgents, totalSlots, freeSlots, queued: queue.status().queued, claimed, waitingInference };
 }
 
+/** The gap gauges each sample records (#340): slots per model, saturated models, stale agents, agents per region. */
+function gapGauges(nowMs: number, claims: ReturnType<typeof queue.activeClaims>) {
+  const slots: Record<string, SlotCount> = {};
+  const regions: Record<string, number> = {};
+  for (const [id, cap] of liveAgents(nowMs)) {
+    const total = agentLoadReport(id)?.slots ?? 1;
+    const free = freeModelSlots(id, claims);
+    for (const m of new Set(routableModels(cap))) {
+      if (!m) continue;
+      const e = (slots[m] ??= { free: 0, total: 0 });
+      e.free += free;
+      e.total += total;
+    }
+    const r = agentRegion(cap);
+    regions[r] = (regions[r] ?? 0) + 1;
+  }
+  let staleAgents = 0;
+  for (const [id, cap] of agentCapabilities) if (!isConnected(cap, nowMs) && !activeBlacklistRecord(id)) staleAgents++;
+  const saturatedModels = Object.values(slots).filter((v) => v.total > 0 && v.free === 0).length;
+  return {
+    saturatedModels,
+    modelSlots: capKeys(slots, MAX_SERIES_KEYS, (v) => v.total, (a, b) => ({ free: a.free + b.free, total: a.total + b.total })),
+    staleAgents,
+    agentsByRegion: capKeys(regions, MAX_SERIES_KEYS)
+  };
+}
+
 /** Take one sample: settle calls that ended, read gauges and the interval's counts. */
 export function takeNetworkSample(nowMs = Date.now()): NetworkSample {
   inferenceTracker.sweep(callOutcome, nowMs);
@@ -134,7 +179,8 @@ export function takeNetworkSample(nowMs = Date.now()): NetworkSample {
     pickupP50: pickup.count ? pickup.p50 : null,
     pickupP90: pickup.count ? pickup.p90 : null,
     ttftP50: ttft.count ? ttft.p50 : null,
-    ttftP90: ttft.count ? ttft.p90 : null
+    ttftP90: ttft.count ? ttft.p90 : null,
+    ...gapGauges(nowMs, g.claims)
   };
   networkSamples.push(sample);
   networkHistory.record(sample);
@@ -163,6 +209,8 @@ export async function networkSnapshot(range: SeriesRange = "1h", nowMs = Date.no
       mode: cap.mode,
       provider: cap.localModelProvider,
       countryCode: cap.countryCode ?? null,
+      // Hosting region the agent reported (null: unknown; the page then uses its coordinator's).
+      region: cap.region ?? null,
       vpnDetected: cap.vpnDetected ?? null,
       computeClass: hw?.computeClass ?? cap.computeClass,
       tier: hw?.tier ?? null,
@@ -246,7 +294,7 @@ export async function networkSnapshot(range: SeriesRange = "1h", nowMs = Date.no
     coordinator: {
       peerId: identity.peerId,
       url: CC.COORDINATOR_PUBLIC_URL,
-      region: CC.INFRA_HOST_REGION || process.env.FLY_REGION || null,
+      region: coordinatorRegion(),
       uptimeSeconds: Math.floor(process.uptime()),
       generatedAtMs: nowMs,
       sampleIntervalMs: SAMPLE_INTERVAL_MS,
