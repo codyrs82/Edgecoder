@@ -33,7 +33,7 @@ import { GitSetupError, cloneRepo, githubStatus, normalizeRemoteUrl } from "./gi
 import { connectRepoUrl, defaultProjectsFolder, getProjectsFolder, recentGitHubRepos, setProjectsFolder } from "./repo-connect.js";
 import { isAbsolute } from "node:path";
 import { NetworkTasks } from "./network-tasks.js";
-import { buyCSats, usageSummary, cancelReservation, computeOverview, contentToText, createReservation, listNetworkModels, listReservations, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
+import { buyCSats, usageSummary, cancelReservation, computeOverview, contentToText, createReservation, listNetworkModels, listReservations, networkContextWindow, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
 import { networkWorld } from "./network-world.js";
 import { ConnectionManager } from "./connections.js";
 import { BotManager, agentBotRunner, botBranchPrefix, botComputeChat, botWorkRoot, registerBotRoutes, type ApprovalEntry } from "./bots.js";
@@ -1256,6 +1256,27 @@ const sessions = new SessionHub({
   tools: (s) => (hasGitHubOrigin(s.projectRoot) ? toolSchemas() : toolSchemas().filter((t) => t.function.name !== "open_pull_request")),
   checkpoints,
   branch: currentBranch,
+  contextWindow: async (s) => {
+    const fixed = Number(process.env.AGENT_CONTEXT_WINDOW);
+    if (s.compute.target === "local") return Number.isInteger(fixed) && fixed >= 2048 ? fixed : 32_768;
+    // auto may land anywhere: the default (conservative) window.
+    if (s.compute.target === "auto" || !networkDeps) return undefined;
+    return networkContextWindow(networkDeps, s.model).catch(() => undefined);
+  },
+  summarize: (s, emit, signal) => async (text) => {
+    // A cheap call: auto on the network (it picks a small model for a short job), else the local model.
+    const cheap = networkDeps || hosted ? { target: "auto" as const } : { target: "local" as const };
+    const model = cheap.target === "local" ? (s.compute.target === "local" ? s.model : process.env.OLLAMA_MODEL || "qwen3.5:9b") : "auto";
+    const sig = AbortSignal.any([signal, AbortSignal.timeout(60_000)]);
+    const chat = chatFnFor(cheap, model, process.env.OLLAMA_HOST || "http://127.0.0.1:11434", emit, sig, "edgecoder compaction");
+    const r = await chat({
+      messages: [
+        { role: "system", content: "Summarize this coding-agent conversation for the agent itself, in at most 200 words: what was asked, what was found and changed (with exact file paths and line numbers), and what is left to do. No preamble." },
+        { role: "user", content: text },
+      ],
+    });
+    return r.content.trim() || null;
+  },
 });
 registerSessionRoutes(app, sessions);
 app.addHook("onReady", async () => {

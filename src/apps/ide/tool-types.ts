@@ -136,7 +136,7 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   {
     name: "read_file",
     description:
-      "Read the contents of a file at the given path. Returns the full text of the file.",
+      "Read a file at the given path, with line numbers. Returns at most 400 lines per call (800 with limit); a longer file ends with a note giving the offset to read on from. Use search_files to find the part you need in a large file.",
     parameters: {
       path: {
         type: "string",
@@ -145,11 +145,11 @@ export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       },
       offset: {
         type: "number",
-        description: "Optional 1-based line number to start reading from.",
+        description: "Optional 1-based line number to start reading from (default 1).",
       },
       limit: {
         type: "number",
-        description: "Optional maximum number of lines to return.",
+        description: "Optional number of lines to return (default 400, at most 800).",
       },
     },
   },

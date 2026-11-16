@@ -133,6 +133,10 @@ export interface TurnEnv {
   checkpoints: CheckpointStore;
   /** The project's current branch (null outside git). */
   branch?: (projectRoot: string) => string | null;
+  /** The session model's context window in tokens (the loop compacts to fit it); undefined: a conservative default. */
+  contextWindow?: (s: SessionData) => Promise<number | undefined>;
+  /** A cheap model call that summarizes older messages when the loop compacts. */
+  summarize?: (s: SessionData, emit: (e: IdeStreamEvent) => void, signal: AbortSignal) => (text: string) => Promise<string | null>;
 }
 
 export class SessionError extends Error {
@@ -461,6 +465,8 @@ export class SessionHub {
         sendEvent,
         isCancelled: () => r.abort.signal.aborted,
         tools: this.env.tools?.(s),
+        ...(this.env.contextWindow ? { contextWindow: () => this.env.contextWindow!(s) } : {}),
+        ...(this.env.summarize ? { summarize: this.env.summarize(s, (e) => e.type === "usage" && sendEvent(e), r.abort.signal) } : {}),
         runTool: makeToolRunner({
           prepare: exec.prepare,
           execute: exec.execute,

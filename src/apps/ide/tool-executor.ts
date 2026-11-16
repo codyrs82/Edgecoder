@@ -48,6 +48,10 @@ const HIDDEN_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u00ad\u061c\u115f
 const INLINE_EVAL_FLAGS = new Set(["-e", "--eval", "-p", "--print", "-c", "-i", "--interactive", "-r", "--require", "--import", "--loader", "-m"]);
 const INTERPRETERS = /^(node|python\d*(\.\d+)?|deno|bun|ruby|perl|php)$/;
 
+/** read_file: lines returned when no limit is given, and the most one call returns. */
+export const READ_FILE_DEFAULT_LINES = 400;
+export const READ_FILE_MAX_LINES = 800;
+
 export function shellAllowlist(env: NodeJS.ProcessEnv = process.env): Set<string> {
   const raw = env.IDE_SHELL_ALLOW?.trim();
   const list = raw ? raw.split(",").map((s) => s.trim()).filter(Boolean) : DEFAULT_SHELL_ALLOW;
@@ -594,17 +598,25 @@ export class ToolExecutor {
     // model add a blank line to old_string and miss on edit_file).
     const allLines = (raw.endsWith("\n") ? raw.slice(0, -1) : raw).split("\n");
 
-    const offset = typeof args.offset === "number" ? args.offset : 1;
-    const limit =
-      typeof args.limit === "number" ? args.limit : allLines.length;
+    const num = (v: unknown) => (typeof v === "number" ? v : typeof v === "string" && /^\d+$/.test(v.trim()) ? Number(v) : undefined);
+    const offset = Math.max(1, Math.floor(num(args.offset) ?? 1));
+    // A whole large file would fill the model's context (a 2,000-line file ended a turn with
+    // context_too_long): at most READ_FILE_MAX_LINES per call, with a note on how to read on.
+    const limit = Math.max(1, Math.min(READ_FILE_MAX_LINES, Math.floor(num(args.limit) ?? READ_FILE_DEFAULT_LINES)));
 
     // offset is 1-based per the tool definition
-    const startIdx = Math.max(0, offset - 1);
+    const startIdx = offset - 1;
     const slice = allLines.slice(startIdx, startIdx + limit);
 
     const numbered = slice.map(
       (line, i) => `${String(startIdx + i + 1).padStart(6, " ")}  ${line}`,
     );
+    const end = startIdx + slice.length;
+    if (end < allLines.length) {
+      numbered.push(`… lines ${startIdx + 1}-${end} of ${allLines.length}. To read more call read_file with offset ${end + 1} (and limit up to ${READ_FILE_MAX_LINES}), or search_files for what you need.`);
+    } else if (startIdx >= allLines.length && allLines.length > 0) {
+      numbered.push(`(the file has ${allLines.length} lines; offset ${offset} is past the end)`);
+    }
     return { result: numbered.join("\n") };
   }
 

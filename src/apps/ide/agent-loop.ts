@@ -15,6 +15,7 @@ import { request } from "undici";
 import type { ChatBackend, ToolSpec } from "../../inference-api/types.js";
 import { READ_TOOLS, TOOL_DEFINITIONS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
 import { protectedToolPath } from "./tool-executor.js";
+import { COMPACT_AT, compactMessages, DEFAULT_CONTEXT_WINDOW, isContextTooLong, isTransient, pathsLine, shouldCompact } from "./context-budget.js";
 
 export interface ChatMessage {
   role: string;
@@ -233,6 +234,32 @@ export interface AgentLoopDeps {
   maxIterations?: number;
   /** The tools offered to the model (default: every IDE tool). Calls to others are refused. */
   tools?: ToolSchema[];
+  /**
+   * The target model's context window in tokens (the coordinator's /inference/models, the network
+   * world, or the local runtime), asked once per turn; unknown: DEFAULT_CONTEXT_WINDOW.
+   */
+  contextWindow?: number | (() => Promise<number | undefined> | number | undefined);
+  /** A cheap model call (a small or auto model) that summarizes older messages when compacting. */
+  summarize?: (text: string) => Promise<string | null>;
+  /** Waits before retrying a transient model-call failure (default 1.5 s, then 4 s). */
+  retryDelaysMs?: number[];
+}
+
+/** Sleeps that stop early when the turn is cancelled. */
+function pause(ms: number, cancelled: () => boolean): Promise<void> {
+  return new Promise((resolve) => {
+    const end = Date.now() + ms;
+    const tick = () => (cancelled() || Date.now() >= end ? resolve() : setTimeout(tick, Math.min(100, end - Date.now())));
+    tick();
+  });
+}
+
+/** "read_file(src/a.ts)": a tool call in a few words, for summaries of compacted results. */
+function callLabel(tool: string, args: Record<string, unknown>, result: string): string {
+  const main = args.path ?? args.command ?? args.pattern ?? args.query ?? "";
+  const lines = result ? result.split("\n").length : 0;
+  const what = result.startsWith("[Error]") || result.startsWith("[Rejected]") ? result.split("\n")[0].slice(0, 120) : `${lines} line${lines === 1 ? "" : "s"}`;
+  return `${tool}(${String(main).slice(0, 120)}): ${what}`;
 }
 
 const KNOWN_TOOLS = new Set<string>(TOOL_DEFINITIONS.map((t) => t.name));
@@ -247,6 +274,77 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
   };
   let messages = history(native ? "native" : "text");
   const maxIterations = d.maxIterations ?? 20;
+  // Context: the request being worked on stays whole; tool results get a label for summaries.
+  const pinned = (msgs: ChatMessage[]) => [...msgs].reverse().find((m) => m.role === "user" && !m.content.startsWith("[Tool "));
+  let request = pinned(messages);
+  const labels = new WeakMap<ChatMessage, string>();
+  const paths: string[] = [];
+  let window = DEFAULT_CONTEXT_WINDOW;
+  try {
+    const w = typeof d.contextWindow === "function" ? await d.contextWindow() : d.contextWindow;
+    if (typeof w === "number" && Number.isFinite(w) && w >= 2048) window = w;
+  } catch {
+    // keep the default
+  }
+  const runTool = async (tool: ToolName, args: Record<string, unknown>): Promise<{ result: string; label: string }> => {
+    for (const k of ["path", "file"]) {
+      const p = args[k];
+      if (typeof p === "string" && p.trim()) {
+        const i = paths.indexOf(p.trim());
+        if (i >= 0) paths.splice(i, 1);
+        paths.push(p.trim());
+        if (paths.length > 30) paths.shift();
+      }
+    }
+    const result = await d.runTool(tool, args);
+    return { result, label: callLabel(tool, args, result) };
+  };
+  const compact = async (share: number) => {
+    const before = messages.length;
+    const r = await compactMessages(messages, { budget: window * share, tools: native ? tools : undefined, pinned: request, labels, paths, summarize: d.summarize });
+    messages.splice(0, messages.length, ...r.messages);
+    d.sendEvent({ type: "status", message: `Compacted the conversation to fit the model's ${Math.round(window / 1024)}k context (${r.summarized ? "summarized" : "shortened"} ${Math.max(r.dropped, before - messages.length) || "older"} messages; recent ones and file paths kept).` });
+  };
+  /** One model call: compacts first when needed, compacts and retries once on context_too_long, retries transient failures. */
+  const callModel = async (withTools: boolean, onDelta?: (t: string) => void): Promise<ChatResult> => {
+    let compactedForError = false;
+    let transient = 0;
+    const delays = d.retryDelaysMs ?? [1_500, 4_000];
+    for (;;) {
+      if (shouldCompact(messages, withTools ? tools : undefined, window)) await compact(COMPACT_AT - 0.15);
+      let streamed = false;
+      try {
+        return await d.chat(withTools ? { messages, tools } : { messages }, onDelta ? (t) => {
+          if (t) streamed = true;
+          onDelta(t);
+        } : undefined);
+      } catch (err) {
+        if (err instanceof ToolsUnsupportedError || d.isCancelled()) throw err;
+        if (isContextTooLong(err) && !compactedForError) {
+          compactedForError = true;
+          // The model's window is smaller than assumed: take the coordinator's figure when it gave one.
+          const m = /serves (\d+)|largestContextWindow\D+(\d+)/.exec((err as Error).message ?? "");
+          const reported = m ? Number(m[1] ?? m[2]) : NaN;
+          if (Number.isFinite(reported) && reported >= 2048 && reported < window) window = reported;
+          await compact(0.6);
+          continue;
+        }
+        if (isTransient(err) && !streamed && transient < 2) {
+          transient++;
+          const wait = delays[Math.min(transient - 1, delays.length - 1)] ?? 0;
+          d.sendEvent({ type: "status", message: `The model call failed (${((err as Error).message ?? String(err)).split("\n")[0].slice(0, 120)}); retrying (${transient}/2)…` });
+          await pause(wait, d.isCancelled);
+          if (d.isCancelled()) throw err;
+          continue;
+        }
+        throw err;
+      }
+    }
+  };
+  const failed = (err: unknown) => {
+    const where = pathsLine(paths);
+    say(`Error contacting model: ${(err as Error).message}${where ? `\n\n(${where}.)` : ""}`);
+  };
   // Separate replies (and text-mode segments) with a blank line instead of running them together.
   let emitted = false;
   let needBreak = false;
@@ -263,16 +361,19 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
     if (native) {
       let reply: ChatResult;
       try {
-        reply = await d.chat({ messages, tools }, say);
+        reply = await callModel(true, say);
       } catch (err) {
         if (err instanceof ToolsUnsupportedError) {
           // This model can't take tool definitions: continue in text mode from the same point.
           native = false;
-          messages = [...history("text"), ...messages.filter((m) => m.role !== "system").slice(d.messages.length)];
+          const sys = history("text").filter((m) => m.role === "system");
+          messages = [...sys, ...messages.filter((m) => m.role !== "system")];
+          request = pinned(messages);
           i--;
           continue;
         }
-        say(`Error contacting model: ${(err as Error).message}`);
+        if (d.isCancelled()) return;
+        failed(err);
         return;
       }
       if (reply.toolCalls.length === 0) {
@@ -281,6 +382,7 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
         const blocks = parseTextBlocks(reply.content);
         if (blocks.length === 0) return;
         const results: string[] = [];
+        const resultLabels: string[] = [];
         for (const b of blocks) {
           if (d.isCancelled()) return;
           if (b.kind === "plan") {
@@ -290,12 +392,15 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
           }
           const call = parseToolCallBlock(b.body);
           if (!call) continue;
-          const result = known.has(call.tool) ? await d.runTool(call.tool as ToolName, call.args) : `[Error]: unknown tool ${call.tool}`;
-          results.push(`[Tool ${call.tool} result]: ${result}`);
+          const r = known.has(call.tool) ? await runTool(call.tool as ToolName, call.args) : { result: `[Error]: unknown tool ${call.tool}`, label: `${call.tool}: unknown tool` };
+          results.push(`[Tool ${call.tool} result]: ${r.result}`);
+          resultLabels.push(r.label);
         }
         messages.push({ role: "assistant", content: reply.content });
         if (results.length > 0) {
-          messages.push({ role: "user", content: results.join("\n\n") });
+          const m: ChatMessage = { role: "user", content: results.join("\n\n") };
+          labels.set(m, resultLabels.join("; "));
+          messages.push(m);
         } else {
           // Only a plan: ask once for the first step as a real tool call.
           if (nudged) return;
@@ -307,10 +412,12 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
       messages.push({ role: "assistant", content: reply.content, tool_calls: reply.toolCalls.map((c) => ({ function: { name: c.name, arguments: c.arguments } })) });
       for (const call of reply.toolCalls) {
         if (d.isCancelled()) return;
-        const result = known.has(call.name)
-          ? await d.runTool(call.name as ToolName, call.arguments)
-          : `[Error]: unknown tool ${call.name}`;
-        messages.push({ role: "tool", content: result, tool_name: call.name });
+        const r = known.has(call.name)
+          ? await runTool(call.name as ToolName, call.arguments)
+          : { result: `[Error]: unknown tool ${call.name}`, label: `${call.name}: unknown tool` };
+        const m: ChatMessage = { role: "tool", content: r.result, tool_name: call.name };
+        labels.set(m, r.label);
+        messages.push(m);
       }
       continue;
     }
@@ -318,9 +425,10 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
     // Text mode: the whole reply, then its fenced blocks.
     let content: string;
     try {
-      content = (await d.chat({ messages })).content;
+      content = (await callModel(false)).content;
     } catch (err) {
-      say(`Error contacting model: ${(err as Error).message}`);
+      if (d.isCancelled()) return;
+      failed(err);
       return;
     }
     if (!content.trim()) return;
@@ -332,6 +440,7 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
     let cursor = 0;
     let hadToolCall = false;
     const results: string[] = [];
+    const resultLabels: string[] = [];
     for (const b of blocks) {
       const before = content.slice(cursor, b.start).trim();
       if (before) {
@@ -353,8 +462,9 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
       hadToolCall = true;
       if (d.isCancelled()) return;
       const name = call.tool;
-      const result = known.has(name) ? await d.runTool(name as ToolName, call.args) : `[Error]: unknown tool ${name}`;
-      results.push(`[Tool ${name} result]: ${result}`);
+      const r = known.has(name) ? await runTool(name as ToolName, call.args) : { result: `[Error]: unknown tool ${name}`, label: `${name}: unknown tool` };
+      results.push(`[Tool ${name} result]: ${r.result}`);
+      resultLabels.push(r.label);
     }
     const trailing = content.slice(cursor).trim();
     if (trailing) {
@@ -362,7 +472,11 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
       say(trailing);
     }
     messages.push({ role: "assistant", content });
-    if (results.length > 0) messages.push({ role: "user", content: results.join("\n\n") });
+    if (results.length > 0) {
+      const m: ChatMessage = { role: "user", content: results.join("\n\n") };
+      labels.set(m, resultLabels.join("; "));
+      messages.push(m);
+    }
     if (!hadToolCall) return;
   }
 }

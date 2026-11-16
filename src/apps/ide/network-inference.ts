@@ -89,6 +89,17 @@ export async function listNetworkModels(d: NetworkDeps): Promise<NetworkModel[]>
   return out;
 }
 
+/**
+ * The context window (tokens) a network model can be counted on to serve: the coordinator's
+ * /inference/models figure (the smallest any agent serves it with), else undefined.
+ */
+export async function networkContextWindow(d: NetworkDeps, model: string): Promise<number | undefined> {
+  const { status, json } = await call(d, "GET", "/inference/models");
+  if (status !== 200) return undefined;
+  const m = ((json.models as Array<{ model: string; contextWindow?: unknown }>) ?? []).find((x) => x.model === model);
+  return typeof m?.contextWindow === "number" && m.contextWindow >= 2048 ? m.contextWindow : undefined;
+}
+
 export interface CompletionPiece {
   delta?: string;
   toolCalls?: ToolCall[];

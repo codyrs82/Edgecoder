@@ -355,7 +355,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const now = Date.now();
     // Security research tier: a restricted model is listed only to an account entitled to it.
     const viewer = restrictedCatalog.size > 0 ? await modelViewerAccount(req) : undefined;
-    const byModel = new Map<string, { agents: number; idle: number; free: number; classes: Set<ComputeClassId> }>();
+    const byModel = new Map<string, { agents: number; idle: number; free: number; classes: Set<ComputeClassId>; ctx?: number }>();
     const claims = queue.activeClaims();
     for (const [id, cap] of agentCapabilities) {
       if (activeBlacklistRecord(id) || (cap.lastSeenMs !== undefined && now - cap.lastSeenMs > 3 * 60_000)) continue;
@@ -369,6 +369,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         if (queue.agentClaims(id) === 0) e.idle++;
         e.free += freeModelSlots(id, claims);
         e.classes.add(cls);
+        // The smallest window an agent serves the model with: what a caller can count on (agent loops compact to it).
+        const ctx = agentContextWindow(id);
+        if (ctx) e.ctx = e.ctx === undefined ? ctx : Math.min(e.ctx, ctx);
         byModel.set(m, e);
       }
     }
@@ -384,7 +387,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         .map(([model, e]) => {
           const restricted = restrictedCatalog.tierOf(model);
           // restricted: runs only on your own machines or a lease you hold, never as a network call.
-          return { model, agents: e.agents, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD), ...(restricted ? { restricted } : {}) };
+          return { model, agents: e.agents, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD), ...(e.ctx ? { contextWindow: e.ctx } : {}), ...(restricted ? { restricted } : {}) };
         })
         .sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model)),
       classes,
