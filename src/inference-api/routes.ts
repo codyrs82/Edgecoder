@@ -42,18 +42,44 @@ function openAiErrorType(status: number): string {
   return status === 401 ? "invalid_api_key" : status === 503 ? "no_capacity" : status === 429 ? "rate_limit_exceeded" : "api_error";
 }
 
-function sendError(reply: FastifyReply, format: Format, status: number, message: string, retryAfterSec?: number) {
+function sendError(reply: FastifyReply, format: Format, status: number, message: string, retryAfterSec?: number, openAiType?: string) {
   if (retryAfterSec !== undefined && (status === 429 || status === 503)) reply.header("retry-after", String(Math.max(1, Math.ceil(retryAfterSec))));
   return format === "anthropic"
     ? reply.code(status).send({ type: "error", error: { type: anthropicErrorType(status), message } })
-    : reply.code(status).send({ error: { message, type: openAiErrorType(status), code: status } });
+    : reply.code(status).send({ error: { message, type: openAiType ?? openAiErrorType(status), code: status } });
 }
 
 /** An error inside a stream that has already started (status 200 sent): the format's error event. */
-function streamError(format: Format, status: number, message: string): string {
+function streamError(format: Format, status: number, message: string, openAiType?: string): string {
   return format === "anthropic"
     ? `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: anthropicErrorType(status), message } })}\n\n`
-    : `data: ${JSON.stringify({ error: { message, type: openAiErrorType(status), code: status } })}\n\ndata: [DONE]\n\n`;
+    : `data: ${JSON.stringify({ error: { message, type: openAiType ?? openAiErrorType(status), code: status } })}\n\ndata: [DONE]\n\n`;
+}
+
+/** What a request still open when the server stops is told (the client may send it again). */
+export const RESTARTING_MESSAGE = "EdgeCoder is restarting and could not finish this request; send it again.";
+const RESTART_RETRY_AFTER_SEC = 5;
+
+/** Requests being answered now; drainOpenRequests ends them cleanly when the server stops. */
+const openRequests = new Set<{ stop: () => void }>();
+
+/** How many compatible-API requests are being answered now. */
+export function openRequestCount(): number {
+  return openRequests.size;
+}
+
+/**
+ * Stopping the server (a deploy, a restart): wait up to `graceMs` for the requests being answered
+ * to finish, then end the rest with an error the client can act on (a 503 with retry-after when
+ * nothing was sent yet, else the format's error event and, for OpenAI, [DONE]) instead of the
+ * connection being cut under them ("terminated" with no error). Returns how many were ended early.
+ */
+export async function drainOpenRequests(graceMs: number, pollMs = 250): Promise<number> {
+  const until = Date.now() + Math.max(0, graceMs);
+  while (openRequests.size > 0 && Date.now() < until) await new Promise((r) => setTimeout(r, Math.min(pollMs, Math.max(1, until - Date.now()))));
+  const left = [...openRequests];
+  for (const r of left) r.stop();
+  return left.length;
 }
 
 const statusOf = (err: unknown) => (err instanceof ChatBackendError ? err.status : typeof (err as { status?: unknown })?.status === "number" ? (err as { status: number }).status : 502);
@@ -84,25 +110,49 @@ export async function respondWith(req: FastifyRequest, reply: FastifyReply, form
   const keepaliveMs = Math.max(10, opts.keepaliveMs ?? STREAM_KEEPALIVE_MS);
   // Streams only: the event stream is started early (keepalive) when the first piece is slow.
   let streaming = false;
+  // Answered (or cut short by a drain): nothing more is written.
+  let finished = false;
   let lastWriteMs = Date.now();
   const write = (chunk: string) => {
+    if (finished || reply.raw.writableEnded || reply.raw.destroyed) return;
     lastWriteMs = Date.now();
     reply.raw.write(chunk);
   };
+  const end = () => {
+    if (finished) return;
+    finished = true;
+    if (!reply.raw.writableEnded) reply.raw.end();
+  };
   const startStream = () => {
-    if (streaming) return;
+    if (streaming || finished) return;
     streaming = true;
     writeSseHead(reply);
     reply.hijack();
   };
   const keepalive = body.stream
     ? setInterval(() => {
-        if (reply.raw.writableEnded || Date.now() - lastWriteMs < keepaliveMs) return;
+        if (finished || reply.raw.writableEnded || Date.now() - lastWriteMs < keepaliveMs) return;
         startStream();
         write(": keepalive\n\n");
       }, Math.max(5, Math.floor(keepaliveMs / 3)))
     : undefined;
   keepalive?.unref?.();
+  // The server is stopping: end this request with an error the client can act on, then stop the backend.
+  const open = {
+    stop: () => {
+      openRequests.delete(open);
+      if (finished) return;
+      if (streaming) {
+        write(streamError(format, 503, RESTARTING_MESSAGE, "server_restarting"));
+        end();
+      } else {
+        finished = true;
+        sendError(reply, format, 503, RESTARTING_MESSAGE, RESTART_RETRY_AFTER_SEC, "server_restarting");
+      }
+      abort.abort();
+    },
+  };
+  openRequests.add(open);
   try {
     // The first piece decides the status: a request that can't start is an HTTP error, not a broken stream
     // (unless a slow start already opened the stream for keepalives).
@@ -110,11 +160,16 @@ export async function respondWith(req: FastifyRequest, reply: FastifyReply, form
     try {
       first = await iter.next();
     } catch (err) {
-      if (!streaming) return sendError(reply, format, statusOf(err), (err as Error).message, retryAfterOf(err));
+      if (finished) return reply;
+      if (!streaming) {
+        finished = true;
+        return sendError(reply, format, statusOf(err), (err as Error).message, retryAfterOf(err));
+      }
       write(streamError(format, statusOf(err), (err as Error).message));
-      reply.raw.end();
+      end();
       return reply;
     }
+    if (finished) return reply;
     async function* all(): AsyncGenerator<ChatPiece> {
       if (!first.done) yield first.value;
       for (;;) {
@@ -124,21 +179,31 @@ export async function respondWith(req: FastifyRequest, reply: FastifyReply, form
       }
     }
     if (!body.stream) {
+      let answer: unknown;
       try {
-        return reply.send(format === "anthropic" ? await anthropicResponse(all(), model) : await openAiResponse(all(), model));
+        answer = format === "anthropic" ? await anthropicResponse(all(), model) : await openAiResponse(all(), model);
       } catch (err) {
+        if (finished) return reply;
+        finished = true;
         return sendError(reply, format, statusOf(err), (err as Error).message, retryAfterOf(err));
       }
+      if (finished) return reply;
+      finished = true;
+      return reply.send(answer);
     }
     startStream();
     try {
-      for await (const line of format === "anthropic" ? anthropicStream(all(), model) : openAiStream(all(), model)) write(line);
+      for await (const line of format === "anthropic" ? anthropicStream(all(), model) : openAiStream(all(), model)) {
+        if (finished) break;
+        write(line);
+      }
     } catch (err) {
       write(streamError(format, statusOf(err), (err as Error).message));
     }
-    reply.raw.end();
+    end();
     return reply;
   } finally {
+    openRequests.delete(open);
     if (keepalive) clearInterval(keepalive);
   }
 }

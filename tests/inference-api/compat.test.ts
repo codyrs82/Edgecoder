@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { fromAnthropic, anthropicStream } from "../../src/inference-api/anthropic.js";
 import { fromOpenAi, openAiResponse } from "../../src/inference-api/openai.js";
 import { contextWindowFor } from "../../src/inference-api/ollama.js";
-import { registerCompatRoutes } from "../../src/inference-api/routes.js";
+import { RESTARTING_MESSAGE, drainOpenRequests, openRequestCount, registerCompatRoutes } from "../../src/inference-api/routes.js";
 import { ChatBackendError, type ChatBackend, type ChatPiece } from "../../src/inference-api/types.js";
 
 async function* pieces(...ps: ChatPiece[]) {
@@ -149,6 +149,53 @@ describe("compatible routes", () => {
       expect(a.body).toContain(": keepalive\n\n");
       expect(a.body).toContain("event: error");
       expect(a.body).toContain('"overloaded_error"');
+    });
+
+    describe("server stopping (drain)", () => {
+      /** Sends one piece, then waits until aborted (a long reply still being generated). */
+      const slowReply = (firstAfterMs = 0): ChatBackend =>
+        async function* (_req, signal) {
+          if (firstAfterMs) await new Promise((r) => setTimeout(r, firstAfterMs));
+          yield { delta: "partial " };
+          await new Promise<void>((r) => (signal.aborted ? r() : signal.addEventListener("abort", () => r(), { once: true })));
+        };
+      const waitOpen = async (n: number) => {
+        for (let i = 0; i < 200 && openRequestCount() < n; i++) await new Promise((r) => setTimeout(r, 5));
+      };
+
+      it("a stream still open at the drain bound ends with server_restarting and [DONE], not a cut", async () => {
+        const app = makeWith(slowReply(), 40);
+        const pending = app.inject({ method: "POST", url: "/v1/chat/completions", headers: { authorization: "Bearer k" }, payload: { stream: true, messages: [{ role: "user", content: "x" }] } });
+        await waitOpen(1);
+        expect(await drainOpenRequests(30, 5)).toBe(1);
+        const o = await pending;
+        expect(o.statusCode).toBe(200);
+        expect(o.body).toContain('"content":"partial "');
+        expect(o.body).toContain('"type":"server_restarting"');
+        expect(o.body).toContain(RESTARTING_MESSAGE);
+        expect(o.body.trim().endsWith("data: [DONE]")).toBe(true);
+        expect(openRequestCount()).toBe(0);
+      });
+
+      it("a request that has sent nothing yet gets a 503 with Retry-After", async () => {
+        const app = makeWith(slowReply(10_000), 60_000);
+        const pending = app.inject({ method: "POST", url: "/v1/chat/completions", headers: { authorization: "Bearer k" }, payload: { stream: true, messages: [{ role: "user", content: "x" }] } });
+        await waitOpen(1);
+        expect(await drainOpenRequests(0)).toBe(1);
+        const o = await pending;
+        expect(o.statusCode).toBe(503);
+        expect(o.headers["retry-after"]).toBe("5");
+        expect(o.json().error).toMatchObject({ type: "server_restarting", code: 503 });
+      });
+
+      it("requests that finish within the grace are left alone", async () => {
+        const app = makeWith(backend, 40);
+        const pending = app.inject({ method: "POST", url: "/v1/chat/completions", headers: { authorization: "Bearer k" }, payload: { stream: true, messages: [{ role: "user", content: "yo" }] } });
+        expect(await drainOpenRequests(2_000, 5)).toBe(0);
+        const o = await pending;
+        expect(o.body).toContain('"content":"echo:yo"');
+        expect(o.body).not.toContain("server_restarting");
+      });
     });
 
     it("a fast streamed call sends no keepalive", async () => {
