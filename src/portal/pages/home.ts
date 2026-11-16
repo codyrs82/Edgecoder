@@ -112,7 +112,7 @@ app.get("/portal", async (_req, reply) => {
 
             <div class="pane" id="paneSignup">
               <h2>Create your account</h2>
-              <div class="sub">Enroll nodes, buy or earn credits, and manage your wallet.</div>
+              <div class="sub">Enroll nodes, buy cSats or earn sats, and manage your wallet.</div>
               <label>Email</label><input id="signupEmail" type="email" placeholder="you@company.com" autocomplete="email" />
               <label>Password</label><input id="signupPassword" type="password" placeholder="At least 8 characters" autocomplete="new-password" />
               <label>Display name (optional)</label><input id="signupDisplayName" type="text" placeholder="Team or your name" />

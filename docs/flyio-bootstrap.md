@@ -1,10 +1,16 @@
 # Fly.io Bootstrap
 
-The Fly layout is four apps (#33): two all-in-one seeds (`edgecoder-seed` in `ord`,
-`edgecoder-seed-eu` in `cdg`), the portal (`edgecoder-portal`) and, when a bitcoind is available,
-the anchor proxy (`edgecoder-anchor-proxy`). The separate coordinator, inference and control-plane
-apps described in earlier versions of this document no longer exist: the seed runs
-`EDGE_RUNTIME_MODE=all-in-one`.
+The bootstrap script creates the core layout (#33): two all-in-one seeds (`edgecoder-seed` in `ord`,
+coordinator-only with `SKIP_OLLAMA`, and `edgecoder-seed-eu` in `cdg`, which also runs Ollama), the
+portal (`edgecoder-portal`), a Fly Postgres cluster (`<prefix>-pg`) and, only when a bitcoind is
+available, the anchor proxy (`edgecoder-anchor-proxy`, the Bitcoin OP_RETURN broadcast proxy). The
+seeds run `node dist/cli/edgecoder.js all-in-one` and the portal `node dist/cli/edgecoder.js portal`.
+The separate coordinator, inference and control-plane apps described in earlier versions of this
+document no longer exist.
+
+Production has more apps than the script creates (the Lightning nodes, test agents, load generator
+and probe), and its anchor proxy is not deployed: anchoring is off in production. The full list
+and the database's current state are in [DEPLOYMENT.md](DEPLOYMENT.md#flyio-deployment).
 
 ## Bootstrap a fresh organization
 

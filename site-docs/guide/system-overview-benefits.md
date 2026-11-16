@@ -4,15 +4,15 @@ This page covers what EdgeCoder is, what it ships today, and why it matters.
 
 ## What EdgeCoder Is
 
-EdgeCoder is a decentralized mesh network where every device contributes compute to run AI models at the edge. There is no central server. Every node is a **unified agent** -- running coordinator, worker, and inference in a single process. Nodes discover each other via a gossip mesh and distribute tasks based on capability and availability.
+EdgeCoder is an AI coding network built on local models. Your own machines run models locally. Work you choose to share is queued on a coordinator and runs on agents of approved hosts; coordinators gossip with each other to share tasks. On the public network the coordinators are EdgeCoder's seeds on Fly.io and the portal is EdgeCoder-hosted, so the network today is a set of operated coordinators with a mesh of agents behind them, not a serverless peer-to-peer network. Anyone can also run their own coordinator.
 
-No cloud accounts. No API keys to a hosted service. Every participating device is both a provider and a consumer of AI compute.
+You sign in to the EdgeCoder portal (invite-only during early access, `LAUNCH_MODE=invite`). Running your own work on your own machines is free. Using other people's machines is paid in cSats (1 cSat = 1 sat), and hosting other people's work is by request and earns sats. Frontier models are used only with your own API key ([frontier keys](https://github.com/codyrs82/Edgecoder/blob/main/docs/frontier-keys.md)).
 
 ## Shipped Features
 
 ### Unified Agent
 
-Every node runs coordinator + worker + inference in one process. There is no separate service deployment, no multi-container orchestration, and no control plane to stand up. A single binary joins the mesh and is immediately productive.
+The `all-in-one` runtime runs coordinator, inference, control plane and an embedded worker in one process; it is what `npm run dev` and the Fly.io seeds run. Installed agents (the desktop app, `edgecoder-install`) run the agent role and connect to a coordinator.
 
 ### Chat-First Desktop App
 
@@ -24,15 +24,15 @@ HTTP-based peer discovery and task broadcasting. Nodes announce themselves and r
 
 ### Local AI Inference
 
-Every node runs model inference locally via Ollama. iOS nodes use llama.cpp for on-device inference. No inference request ever leaves the executing node's hardware.
+Agents run model inference locally via Ollama. iOS nodes use llama.cpp for on-device inference. A request you run on your own machine stays there; a request you send to the network runs on the host that claims it, after passing through a coordinator.
 
 ### BLE Local Mesh
 
 Bluetooth Low Energy enables offline peer-to-peer task routing between nearby devices. This provides a connectivity layer that works without any network infrastructure -- useful for field deployments, air-gapped environments, and mobile-to-mobile coordination.
 
-### Credit Economy
+### cSat Economy
 
-Nodes earn credits by contributing compute and spend credits to submit tasks. The ledger is an append-only ordering chain anchored to Bitcoin, with Lightning Network settlement for real-time payouts.
+Compute is priced in cSats (1 cSat = 1 sat). Approved hosts earn sats for the work they run: 95 % of each compute payment goes to the host and 5 % is the network fee. Earned sats are paid out over Lightning; funding with Bitcoin on-chain is behind `ONCHAIN_ENABLED`. Every claim, result and earning is recorded in an append-only hash chain. The canonical model is [economy-math.md](https://github.com/codyrs82/Edgecoder/blob/main/docs/economy-math.md).
 
 ### External IDE Support
 
@@ -40,25 +40,25 @@ VS Code, Cursor, and Windsurf connect to any EdgeCoder node through an OpenAI-co
 
 ### Security
 
-Ed25519 request signing authenticates every inter-node message. Nonce-based replay prevention, per-node rate limiting, and a blacklist audit chain provide defense in depth. Envelope encryption for task payloads is staged for a future release.
+Ed25519 request signing authenticates every inter-node message. Nonce-based replay prevention, per-node rate limiting, and a blacklist audit chain provide defense in depth. Envelope encryption (X25519 + AES-256-GCM) is on by default for the coordinator-to-agent hop: the coordinator encrypts each subtask to the agent that runs it and decrypts the result. It is not end to end (the coordinator sees plaintext), and iOS agents do not use it yet.
 
 ## Benefits
 
-### No cloud dependency
+### Your hardware first
 
-All inference runs locally on commodity hardware. There is no hosted backend, no metered API, and no third-party data processor in the loop.
+Inference runs on commodity hardware: your own, or an approved host's. EdgeCoder does run hosted services (the portal and the coordinators on Fly.io), and network compute is metered in cSats, but work on your own machines is free and never needs to leave them.
 
-### Permissionless mesh
+### Open mesh, invited hosts
 
-Any device can join the network and begin contributing compute or submitting tasks. There is no enrollment approval gate and no vendor lock-in.
+Any signed-in device can run its owner's work. Hosting other people's work is by request: apply at `/host` on the portal and an admin approves you (`HOST_APPROVAL_REQUIRED`, on by default). Sign-up is invite-only during early access. The code is source-available, and you can run your own coordinator.
 
 ### Cryptographically auditable
 
-Every credit transaction is recorded in an append-only ordering chain anchored to Bitcoin. The full history is independently verifiable by any participant.
+Every credit transaction is recorded in an append-only, hash-chained ordering chain that `/ledger/verify` checks. Bitcoin OP_RETURN anchoring of checkpoints is implemented but off in production; it is planned for mainnet.
 
-### Privacy-preserving
+### Private by choice
 
-Task data stays on the executing node. Prompts, code context, and model outputs are never transmitted to a central service or stored outside the device that ran the inference.
+Work you run locally stays on your machine. Work you send to the network passes through a coordinator, which sees it in plaintext and stores the queue in Postgres, and runs on the host that claims it; the coordinator-to-agent hop is envelope-encrypted. Keep private code on your own machines, or use your own coordinator.
 
 ## When EdgeCoder Is a Strong Fit
 

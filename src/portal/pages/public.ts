@@ -231,7 +231,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
           </div>
           <div class="features">
             <div class="feature"><div class="ic">${icon("shield", 16)}</div><h3>Private policy boundaries</h3><p>Decide what stays on your machines, what may cross into public capacity, and which nodes are eligible to take it.</p></div>
-            <div class="feature"><div class="ic">${icon("key", 16)}</div><h3>Signed everything</h3><p>Agents and coordinators hold Ed25519 keys. Requests, results, and ledger records are signed; task payloads are encrypted end to end.</p></div>
+            <div class="feature"><div class="ic">${icon("key", 16)}</div><h3>Signed everything</h3><p>Agents and coordinators hold Ed25519 keys. Requests, results, and ledger records are signed; task payloads are encrypted between coordinator and agent.</p></div>
             <div class="feature"><div class="ic">${icon("layers", 16)}</div><h3>Anchored ledger</h3><p>A hash-chained ledger of claims, results and earnings, with periodic OP_RETURN checkpoints on Bitcoin for third-party verification.</p></div>
             <div class="feature"><div class="ic">${icon("cpu", 16)}</div><h3>Sandboxed execution</h3><p>Remote code runs in Docker with no network, read-only filesystem and resource limits. No sandbox, no swarm work.</p></div>
             <div class="feature"><div class="ic">${icon("globe", 16)}</div><h3>One mesh, many devices</h3><p>macOS, Linux, Windows, iOS, Docker and VS Code agents; coordinators federate and gossip tasks across regions. Offline Macs and iPhones can also reach nearby devices over <a href="/bluetooth">Bluetooth</a> (early).</p></div>

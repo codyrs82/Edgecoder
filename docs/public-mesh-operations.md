@@ -14,7 +14,7 @@ Examples use placeholders. Replace them with your deployment's hosts:
 
 - Coordinator operations home: `portal` at `GET /portal/coordinator-ops`
 - First coordinator runtime: an all-in-one seed app on Fly.io (`<prefix>-seed`, see `scripts/fly-bootstrap-org.sh`)
-- SQL backend for coordinator/control-plane state: Fly Postgres (PostgreSQL 16) via `DATABASE_URL`
+- SQL backend for coordinator/control-plane state: Fly Postgres (postgres-flex 18.1, one node; see [DEPLOYMENT.md](DEPLOYMENT.md#database-current-state)) via `DATABASE_URL`
 - Deployment defaults endpoint: `GET /deployment/plan`
 - Fly bootstrap guide: `docs/flyio-bootstrap.md`
 

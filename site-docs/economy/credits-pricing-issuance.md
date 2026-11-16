@@ -1,66 +1,73 @@
 # Credits, Pricing, and Issuance
 
-This page summarizes the economic model from `docs/public-mesh-operations.md`,
-`README.md`, and architecture planning material.
+A summary of how compute is priced and paid for. The canonical, current model, with every formula,
+its source file and worked examples, is
+[docs/economy-math.md](https://github.com/codyrs82/Edgecoder/blob/main/docs/economy-math.md); if
+this page and that one disagree, that one is right.
 
-## Two-Layer Model
+## Units
 
-- **Settlement layer**: bitcoin/lightning denomination and payment settlement.
-- **Runtime layer**: internal credits used for workload accounting and allocation.
+| Unit | What it is |
+|---|---|
+| **cSat** | Prepaid compute balance. **1 cSat = 1 sat.** Bought with sats, spent on model calls, jobs and reservations, earned by running them. The code still calls ledger rows "credits". |
+| **sat** | Bitcoin: paid in over Lightning for cSats, paid out to hosts. |
+| **credit** (order book) | A unit of work: one server-measured second on a compute class's base tier. Its price is quoted in msat per credit. |
+| **token** | Issuance accounting unit from the daily pool. Recorded, not credited or paid out. |
 
-## Pricing and Quotes
+## Who pays and who earns
 
-- Dynamic epoch pricing tracks network conditions.
-- Credit-to-sats quote endpoints expose conversion for account workflows.
-- Coordinator peers can propose and converge pricing via consensus mechanics.
+- Buying cSats is free (`COORDINATOR_FEE_BPS` = 0): 1 sat buys 1 cSat.
+- On every compute payment (model call, job, reservation) the host gets **95 %** and EdgeCoder keeps
+  **5 %** as the network fee (`NETWORK_FEE_BPS`, default 500).
+- Work on your own machines is not charged.
+- Earning for other people's work needs an approved host: hosting is by request
+  (`HOST_APPROVAL_REQUIRED`, on by default; apply at `/host` on the portal).
+- Earned sats are paid out over Lightning; on-chain funding and payouts are behind
+  `ONCHAIN_ENABLED`. See [Settlement Lifecycle](/economy/settlement-lifecycle).
 
-## Payment Intents and Credit Minting
+## Pricing
 
-- Payment intents represent pending settlement operations.
-- Confirmation and reconciliation paths move intents into settled state.
-- Settled intents mint credits into account context.
+- **Model calls: per token, by model size.** A USD price per million input and output tokens for
+  each model-size band, converted to sats at the live BTC price, with a power floor per compute
+  class so a host never earns less than the electricity the seconds cost.
+- **Code jobs and reservations: per second, by compute class.** Four classes (`cpu`, `apple`,
+  `gpu`, `gpu.dc`), each with one reference price recalibrated daily from public BTC quotes and a
+  per-class USD/hour reference. Faster tiers inside a class (for example `gpu.c24`, `gpu.dc80`) earn
+  more credits per second, and a tier above the class base is paid only after the agent passes the
+  coordinator's hardware verification.
+- **Order book.** Agents post an ask per class, tasks carry a bid; a task is claimed only when the
+  ask clears the bid, and it trades at the ask, clamped to a band around the class reference.
 
-## Contribution and Issuance
+## Token issuance
 
-- Issuance is recomputed on rolling windows (non-cumulative lifetime allocation).
-- Contribution quality and recent availability drive relative share.
-- Capacity that drops out naturally rolls off from future windows.
+The coordinator computes a daily token pool from network load and allocates it hourly by each
+account's weighted contribution over the last 24 hours. Allocations are written to
+`issuance_allocations` and shown on the portal dashboard, but **no code converts them into cSats or
+any balance yet**. Issuance parameters are in [Issuance Parameters](/reference/issuance-economy-params).
 
-## Ledger and Integrity
+## Ledger and integrity
 
-- Hash-chain and verification flows provide tamper-evident history checks.
-- Stats/anchor workflows support stronger finality checkpoints over time.
-- Economy state and issuance history remain inspectable through dedicated endpoints.
+- Every claim, result and earning is an append-only, hash-chained ledger record; `/ledger/verify`
+  checks the chain.
+- Bitcoin OP_RETURN anchoring of checkpoints is implemented but off in production; it is planned
+  for mainnet. See [Bitcoin Anchoring](/economy/bitcoin-anchoring).
 
-## Coordinator fee and treasury policy
+## BLE offline credits
 
-- Coordinator fee basis points can be configured for operational economics.
-- Treasury/custody policy endpoints support operator-level governance.
+When agents work over the BLE mesh (offline), each transaction is recorded locally with both
+parties' signatures and synced to the coordinator via `POST /credits/ble-sync` on reconnection.
+A BLE task is worth its CPU seconds (1 credit per second) times a model quality multiplier
+(`src/credits/ble-tx-v3.ts`):
 
-## Related references
-
-- [Public Mesh Operations Economy Section](https://github.com/codyrs82/Edgecoder/blob/main/docs/public-mesh-operations.md)
-- [Developer Guide Economy Endpoints](https://github.com/codyrs82/Edgecoder/blob/main/README.md#developer-guide)
-
-## Model Quality Multiplier
-
-Credit earnings from compute contributions are scaled by the model being used:
-
-- 7B+ parameters: 1.0x (full rate)
+- 7B+ parameters: 1.0x
 - 3B-7B: 0.7x
 - 1.5B-3B: 0.5x
 - < 1.5B: 0.3x
 
-This incentivizes running capable models while still allowing participation with smaller hardware.
+This multiplier applies only to BLE offline credits, not to network pricing.
 
-## BLE Offline Credits
+## Related references
 
-When agents operate in BLE mesh mode (offline), credit transactions are recorded locally with dual signatures. On reconnection, transactions sync to the coordinator via `POST /credits/ble-sync` and enter the ordering chain.
-
-## Model Seed Credits
-
-Agents that distribute models to peers earn seed credits:
-
-- Base: 0.5 credits per GB transferred
-- Rarity bonus: `1 / seederCount` multiplier (fewer seeders = more reward)
-- Incentivizes keeping popular models available for the network
+- [Economy math](https://github.com/codyrs82/Edgecoder/blob/main/docs/economy-math.md) (canonical)
+- [Going to mainnet](https://github.com/codyrs82/Edgecoder/blob/main/docs/going-to-mainnet.md)
+- [Public Mesh Operations](/operations/public-mesh-operations)

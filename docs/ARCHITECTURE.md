@@ -200,24 +200,24 @@ Workers can also form direct connections via HTTP for lightweight collaboration:
 
 ## Credit Economy
 
-EdgeCoder uses an internal credit system backed by Bitcoin/Lightning:
+Compute is priced in **cSats** (1 cSat = 1 sat), bought with sats and paid out to hosts in sats over
+Lightning. The canonical, current model, with every formula and its source, is
+[economy-math.md](economy-math.md); the formulas that used to be here (base rates, a load
+multiplier, a 30/120-sat base price) no longer describe how hosts are paid.
 
-### Credit Engine (`src/credits/engine.ts`)
+### How work is priced and paid (`src/economy/job-pricing.ts`)
 
-In-memory ledger that tracks earn and spend transactions per account.
-
-- **Earn:** workers earn credits for compute contributions. Credits = `computeSeconds * baseRate * qualityMultiplier * loadMultiplier`.
-- **Spend:** users spend credits to submit tasks. Cost scales with model parameter count.
-- **Base rates:** CPU = 1.0 credits/sec, GPU = 4.0 credits/sec.
-- **Load multiplier:** scales from 0.8x (low demand) to 1.6x (high demand) based on queue pressure.
-
-### Dynamic Pricing (`src/economy/pricing.ts`)
-
-Sats-per-compute-unit price adjusts dynamically based on supply and demand:
-
-- Base price: 30 sats (CPU), 120 sats (GPU).
-- Scarcity multiplier: `demand / capacity`, clamped between 0.35x and 4.0x.
-- Coordinators propose prices; consensus is reached via weighted-median voting across peers.
+- **Model calls:** per token by model size, with a power floor per compute class, converted at a
+  live BTC price.
+- **Code jobs and reservations:** per second by compute class (`cpu`, `apple`, `gpu`, `gpu.dc`),
+  seconds measured by the coordinator, priced on the order book (`src/economy/order-book.ts`)
+  within a band around the daily rate-oracle reference (`src/economy/rate-oracle.ts`).
+- **Split:** the host gets what the requester paid minus the network fee: 95 % to the host, 5 % to
+  EdgeCoder (`NETWORK_FEE_BPS`, default 500).
+- **Ledger:** the credit engine (`src/credits/engine.ts`, Postgres `credit_transactions` in
+  production) records earn, spend, adjust and held rows; the code still calls them "credits".
+- `src/economy/pricing.ts` keeps the legacy per-compute-unit base prices only for the mesh
+  price-consensus protocol.
 
 ### Issuance System
 
@@ -227,7 +227,8 @@ Daily token pool distributed to contributors:
 - Hourly allocations based on each account's contribution share.
 - Coordinator share: 5%, reserve share: 5%.
 - Quorum voting on epoch records across peer coordinators.
-- Bitcoin anchoring of issuance epochs for auditability.
+- Bitcoin anchoring of issuance epochs (implemented, off in production, planned for mainnet).
+- Allocations are recorded only: no code converts tokens into cSats yet ([economy-math.md](economy-math.md), section 4).
 
 ### Payment Flow
 
@@ -235,7 +236,8 @@ Daily token pool distributed to contributors:
 2. Lightning invoice is generated via the configured provider (`mock`, `lnd`, `cln`).
 3. User pays the invoice.
 4. Settlement is confirmed (`POST /economy/payments/intents/:intentId/confirm`).
-5. Credits are minted to the user's account after coordinator fee deduction.
+5. cSats are granted to the user's account once the Lightning node reports the invoice settled, after the coordinator fee (`COORDINATOR_FEE_BPS`, default 0: 1 sat buys 1 cSat).
+6. Hosts withdraw earned sats over Lightning (`POST /economy/payouts/withdraw`, or automatically to a Lightning address); on-chain deposits and payouts are behind `ONCHAIN_ENABLED`.
 
 ### Treasury
 

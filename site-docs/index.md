@@ -4,16 +4,16 @@ This docs site covers the full EdgeCoder system: a decentralized mesh network fo
 
 ## What EdgeCoder Is
 
-EdgeCoder turns every device into a unified agent that contributes compute to a peer-to-peer mesh. Each node runs a coordinator, worker, and inference service in a single process. Nodes discover each other via gossip mesh and distribute tasks based on capability and availability.
+EdgeCoder is an AI coding network built on local models. Your own machines run models locally; work you choose to share goes through a coordinator to agents on approved hosts. A coordinator, worker and inference service can run in one process (`all-in-one`), and coordinators gossip with each other to share tasks. On the public network the coordinators are EdgeCoder's seeds on Fly.io (see [Deployment Topology](/operations/deployment-topology)).
 
-Users interact through a chat-first desktop app (Tauri + Svelte with Monaco editor), external IDEs via an OpenAI-compatible endpoint, or the iOS app with on-device llama.cpp inference and BLE local mesh.
+Users interact through a chat-first desktop app (Tauri + Svelte with Monaco editor), the `edgecoder code` terminal, external IDEs via an OpenAI-compatible endpoint, or the iOS app with on-device llama.cpp inference and BLE local mesh.
 
 ### Why EdgeCoder
 
-- **No cloud dependency** -- all inference runs locally on commodity hardware using Ollama or llama.cpp.
-- **Open mesh, invited hosts** -- any signed-in device can run its owner's own work for free; taking other people's work (and earning for it) is by invitation during early access (`HOST_APPROVAL_REQUIRED`, see [environment variables](/reference/environment-variables)). Request to host at `/host` on the portal.
-- **Cryptographically auditable** -- every transaction is recorded in an append-only ordering chain anchored to Bitcoin via OP_RETURN.
-- **Privacy-preserving** -- task data stays on the executing node; envelope encryption is staged for activation.
+- **Runs on your hardware first** -- models run locally with Ollama or llama.cpp; work you share goes to approved hosts through EdgeCoder's coordinators. Frontier models are used only with your own API key.
+- **Open mesh, invited hosts** -- any signed-in device can run its owner's own work for free. Approved hosts contribute compute for other people and earn sats over Lightning: 1 cSat = 1 sat, the host gets 95 % of each compute payment and 5 % is the network fee. Hosting is by request (`HOST_APPROVAL_REQUIRED`, on by default, see [environment variables](/reference/environment-variables)): apply at `/host` on the portal and an admin approves you. Sign-up is invite-only during early access (`LAUNCH_MODE=invite`).
+- **Hash-chained ledger** -- every claim, result and earning is recorded in an append-only hash chain that `/ledger/verify` checks. Bitcoin OP_RETURN anchoring of checkpoints is implemented but off in production; it will be enabled at mainnet.
+- **Encrypted task delivery** -- task payloads are encrypted from the coordinator to the agent that runs them (X25519 + AES-256-GCM), and results are encrypted on the way back. This is not end to end: the coordinator decrypts and sees the task, and iOS agents do not use it yet. See [Trust and Security](/security/trust-and-security#envelope-encryption).
 
 ## Start Here
 
