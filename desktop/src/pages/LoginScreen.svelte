@@ -3,6 +3,7 @@
   import type { AuthUser } from "../lib/api";
   import { open } from "@tauri-apps/plugin-shell";
   import { portalResetPasswordUrl, portalSignupUrl } from "../lib/endpoints";
+  import { oauthOutcomeFromUrl } from "../lib/oauth-outcome";
 
   interface Props {
     onLogin: (user: AuthUser) => void;
@@ -12,6 +13,8 @@
   let email = $state("");
   let password = $state("");
   let error = $state("");
+  // "Check your email" after an SSO sign-in that needs the account's inbox to confirm the link.
+  let notice = $state("");
   let submitting = $state(false);
 
   async function handleSubmit() {
@@ -64,25 +67,6 @@
     }
   }
 
-  // The portal names why it refused (routes/auth.ts refuse(); messages as in portal oauth-identity.ts).
-  function oauthFailureMessage(code: string | null, provider: string | null): string {
-    const p = provider === "microsoft" ? "Microsoft" : provider === "google" ? "Google" : provider === "github" ? "GitHub" : "this provider";
-    switch (code) {
-      case "oauth_account_exists":
-        return `An account with this email already exists. Sign in with your email and password, then connect ${p} from Settings on the portal.`;
-      case "oauth_account_unverified":
-        return `An account with this email exists but its email is not verified. Verify it (or use Forgot password), sign in, then connect ${p} from Settings.`;
-      case "oauth_identity_linked_elsewhere":
-        return `This ${p} account is already connected to a different EdgeCoder account.`;
-      case "email_not_verified":
-        return `Verify your email address before connecting ${p}.`;
-      case "oauth_connect_session_mismatch":
-        return `Your session changed while connecting ${p}. Sign in again and retry.`;
-      default:
-        return code ? `${p} sign-in was not completed (${code}).` : "OAuth sign-in was not completed";
-    }
-  }
-
   // Handle deep link callback from OAuth (edgecoder://oauth-callback?mobile_token=...)
   (window as any).__handleDeepLink = async (urlStr: string) => {
     // Only a callback for a sign-in this app started.
@@ -91,15 +75,19 @@
       const raw = typeof urlStr === "string" ? urlStr : String(urlStr);
       // Deep link payload may be JSON-encoded or a raw URL
       const cleaned = raw.startsWith('"') ? JSON.parse(raw) : raw;
-      const url = new URL(cleaned);
-      const token = url.searchParams.get("mobile_token");
-      const status = url.searchParams.get("status");
-      if (status !== "ok" || !token) {
-        error = oauthFailureMessage(url.searchParams.get("error"), url.searchParams.get("provider"));
+      const outcome = oauthOutcomeFromUrl(new URL(cleaned));
+      if (outcome.kind === "check_email") {
+        error = "";
+        notice = outcome.message;
+        return;
+      }
+      if (outcome.kind === "error") {
+        notice = "";
+        error = outcome.message;
         return;
       }
       submitting = true;
-      const user = await completeOAuthWithToken(token);
+      const user = await completeOAuthWithToken(outcome.token);
       onLogin(user);
     } catch (err) {
       error = (err as Error).message || "OAuth sign-in failed";
@@ -117,6 +105,9 @@
 
     {#if error}
       <div class="error-msg" id="login-error" role="alert">{error}</div>
+    {/if}
+    {#if notice && !error}
+      <div class="notice-msg" id="login-notice" role="status">{notice}</div>
     {/if}
 
     <form class="form" onsubmit={onFormSubmit} aria-label="Sign in with email" novalidate>
@@ -186,6 +177,14 @@
     font-size: 1.6rem;
     margin: 0 0 32px;
     color: var(--text-primary);
+  }
+  .notice-msg {
+    background: color-mix(in srgb, var(--accent, var(--text-primary)) 10%, transparent);
+    color: var(--text-primary);
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    margin-bottom: 16px;
   }
   .error-msg {
     background: color-mix(in srgb, var(--red) 10%, transparent);

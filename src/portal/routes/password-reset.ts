@@ -36,6 +36,8 @@ export interface PasswordResetStore {
   deletePasskeysForUser(userId: string): Promise<void>;
   deleteOauthLinksForUser(userId: string): Promise<void>;
   deleteGitHubToken(userId: string): Promise<void>;
+  /** Sign-in providers still waiting for email confirmation (oauth-pending-link.ts). */
+  deleteOauthPendingLinksForUser?(userId: string): Promise<void>;
 }
 
 export interface PasswordResetDeps {
@@ -104,6 +106,7 @@ export function registerPasswordResetRoutes(app: FastifyInstance, deps: Password
     }
     await store.setUserPassword(consumed.userId, hashPassword(password.data));
     await store.invalidatePasswordResets(consumed.userId);
+    await store.deleteOauthPendingLinksForUser?.(consumed.userId);
     await store.deleteSessionsForUser(consumed.userId);
     // The link was delivered to the inbox, so the address is proven.
     await store.markUserEmailVerified(consumed.userId);

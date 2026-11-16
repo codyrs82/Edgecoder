@@ -54,7 +54,13 @@ const PROFILE = section(
     card(
       settingRow("Passkey", "Enroll a passkey for passwordless sign-in on future visits.", `<button class="primary" id="passkeyEnrollBtn">Enroll passkey</button>`, { keywords: "passkey security login password webauthn" }) +
         settingRow(
-          "Connected sign-in",
+          "Connected sign-ins",
+          "Google, Microsoft or GitHub accounts that sign in to this account. Your only way to sign in cannot be removed.",
+          `<div id="signInsList" class="set-value">Loading…</div>`,
+          { keywords: "google microsoft github sso oauth connected sign-ins disconnect remove" }
+        ) +
+        settingRow(
+          "Connect a sign-in",
           "Connect a Google, Microsoft or GitHub account so you can sign in to this account with it.",
           ["google", "microsoft", "github"]
             .map((p) => `<button type="button" data-oauth-connect="${p}">Connect ${p === "github" ? "GitHub" : p[0].toUpperCase() + p.slice(1)}</button>`)
@@ -190,6 +196,7 @@ const SCRIPT = SETTINGS_HELPERS_SCRIPT + `
       for (const e of document.querySelectorAll(".portal-origin")) e.textContent = location.origin;
       loadKeys();
       loadUsage();
+      loadSignIns();
     }
     function renderAvatar() {
       const user = (me && me.user) || {};
@@ -318,6 +325,31 @@ const SCRIPT = SETTINGS_HELPERS_SCRIPT + `
         showToast("Passkey enrollment failed: " + String(err.message || err), true);
       }
     });
+
+    /* ── Connected sign-ins: list and disconnect (the server refuses to remove the last way in) ── */
+    async function loadSignIns() {
+      const box = document.getElementById("signInsList");
+      const r = await call("/portal/api/sign-ins");
+      box.textContent = "";
+      if (!r.ok) { box.textContent = "Could not load connected sign-ins."; return; }
+      const providers = r.json.providers || [];
+      const total = (r.json.password ? 1 : 0) + (r.json.passkeys || 0) + providers.length;
+      if (!providers.length) { box.textContent = "None connected."; return; }
+      for (const p of providers) {
+        const row = el("div", { class: "row" });
+        row.appendChild(el("span", {}, p.label + (p.email ? " · " + p.email : "")));
+        const btn = el("button", { class: "sm", type: "button" }, "Disconnect");
+        if (total <= 1) { btn.disabled = true; btn.title = "This is your only way to sign in. Add a password, passkey or another provider first."; }
+        btn.addEventListener("click", async () => {
+          if (!confirm("Disconnect " + p.label + "? You will no longer be able to sign in with it.")) return;
+          const res = await call("/portal/api/sign-ins/" + encodeURIComponent(p.provider) + "/" + encodeURIComponent(p.linkId), { method: "DELETE", body: "{}" });
+          if (res.ok) { showToast(p.label + " disconnected."); loadSignIns(); }
+          else showToast(res.json.detail || "Could not disconnect.", true);
+        });
+        row.appendChild(btn);
+        box.appendChild(row);
+      }
+    }
 
     /* ── Connected sign-in (OAuth connect while signed in) ── */
     document.querySelectorAll("[data-oauth-connect]").forEach((btn) => {

@@ -339,6 +339,17 @@ app.get("/portal/dashboard", async (_req, reply) => {
       showToast("Could not load dashboard: " + String(err.message || err), true);
     });
 
+    /* ── A sign-in provider was just connected (automatic or emailed link; routes/auth.ts) ── */
+    (() => {
+      const params = new URLSearchParams(location.search);
+      const p = params.get("sso_connected");
+      const label = { google: "Google", microsoft: "Microsoft", github: "GitHub" }[p || ""];
+      if (!label) return;
+      showToast(label + " was connected to your EdgeCoder account. Review it under Settings, Connected sign-ins.");
+      params.delete("sso_connected");
+      history.replaceState(null, "", location.pathname + (params.toString() ? "?" + params.toString() : "") + location.hash);
+    })();
+
     /* ── Legal acceptance: accounts without the current Terms (SSO from an app, older accounts) ── */
     (async () => {
       const legal = await api("/portal/api/legal", { method: "GET", headers: {} });

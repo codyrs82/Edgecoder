@@ -79,6 +79,8 @@ const AUTH_ROUTES: RegExp[] = [
   /^\/auth\/verify-email$/,
   /^\/auth\/passkey\//,
   /^\/auth\/oauth\/[^/]+\/(start|callback|connect)$/,
+  // Confirming an emailed link that connects a sign-in provider (oauth-pending-link.ts).
+  /^\/auth\/oauth-link\/confirm$/,
   // Logout needs no credential and runs a delete per token sent; limit it like sign-in.
   /^\/auth\/logout$/,
   /^\/auth\/oauth\/mobile\/complete$/,

@@ -115,7 +115,7 @@ async function runPage(html: string, responses: Record<string, unknown>) {
     return { ok: Boolean(key), status: key ? 200 : 404, json: async () => data };
   };
   const ctx: Record<string, unknown> = {
-    document, fetch, console, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
+    document, fetch, console, URLSearchParams, setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
     location: { href: "", hash: "", search: "", pathname: "/", origin: "https://edgecoder.io" },
     history: { replaceState() {} }, navigator: { clipboard: { writeText: async () => {} } },
     localStorage: { getItem: () => null, setItem() {} }, getComputedStyle: () => ({ getPropertyValue: () => "" }),
