@@ -7,6 +7,17 @@
  *
  *   node scripts/loadgen/budget.mjs check [--users st1,st2]
  *   node scripts/loadgen/budget.mjs topup --min 200 --to 1000 --max-total 5000 [--users ...] [--dry-run]
+ *   node scripts/loadgen/budget.mjs ledger [--out before.json]
+ *       every test account's balance and earnings, and which agents (models, classes) each hosts
+ *       (/admin/network, admin token); --out saves the snapshot for a later comparison
+ *   node scripts/loadgen/budget.mjs ledger --before before.json [--after after.json] [--results a.jsonl ...] [--buyers st9,st10]
+ *       the money report (money.mjs) between two snapshots (--after defaults to now): per-buyer
+ *       spend, per-host earnings, the 5% network fee, self-dealing and the conservation check;
+ *       --results adds the load generator's per-call charges (needed to split an account that both
+ *       buys and hosts)
+ *   node scripts/loadgen/budget.mjs buyers [--buyers st9,st10] [--min-balance N]
+ *       one JSON line { buyers, avoid, hosting, reason } for fly.sh: default buyers host nothing;
+ *       each buyer avoids the models its own agents hold
  *
  * topup buys cSats for every account below --min, up to --to, through the public API
  * (POST /v1/account/topup), and pays the invoice from the regtest payee node
@@ -16,7 +27,9 @@
  * are never printed. Needs FLY_API_TOKEN (or ~/.config/edgecoder/fly.token) for the payee.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { adminToken, fetchSnapshots } from "./capacity.mjs";
+import { chargesFrom, chooseBuyers, formatMoney, moneyReport, shortId, snapshotLedger } from "./money.mjs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -98,7 +111,42 @@ if (cmd === "check") {
     console.log(`${a.name}: bought ${want} sats, payment ${paid ? "sent" : "not sent"}, intent ${status}; balance now ${(await balance(a))?.toFixed(3)} cSats`);
   }
   console.log(`${dry ? "would spend" : "spent"} ${spent} regtest sats (limit ${maxTotal})`);
+} else if (cmd === "ledger" || cmd === "buyers") {
+  const token = adminToken();
+  const list = (s) => (s && s !== "true" ? s.split(",").map((x) => x.trim()).filter(Boolean) : []);
+  const readJson = (f) => JSON.parse(readFileSync(f, "utf8"));
+  const snapNow = () => snapshotLedger({ url: URL_, accounts, fetchSnapshots, adminToken: token });
+  if (cmd === "buyers") {
+    const snap = await snapNow();
+    const pick = chooseBuyers(snap, { buyers: list(flag("buyers", "")), minBalance: Number(flag("min-balance", 0)) });
+    console.log(JSON.stringify(pick));
+  } else if (!flag("before")) {
+    const snap = await snapNow();
+    if (flag("out")) writeFileSync(flag("out"), JSON.stringify(snap));
+    const ids = {};
+    for (const [name, a] of Object.entries(snap.accounts)) if (a.accountId) ids[a.accountId] = name;
+    const byName = Object.entries(snap.accounts).sort(([a], [b]) => a.localeCompare(b, "en", { numeric: true }));
+    for (const [name, a] of byName) {
+      const h = snap.hosts?.[a.accountId];
+      console.log(`${name.padEnd(5)} ${a.error ? a.error.padStart(14) : a.cSats.toFixed(3).padStart(14)} cSats  earned ${String(a.earnedSats ?? "-").padStart(8)} sats  ${h?.connected ? `hosts ${h.connected} agent(s) ${h.classes.join("/")}: ${h.models.join(", ")}` : snap.hosts ? "hosts nothing" : "hosting unknown (no admin token)"}`);
+    }
+    for (const [id, h] of Object.entries(snap.hosts ?? {})) if (!ids[id] && h.connected) console.log(`${shortId(id)} (no key: balance not readable)  hosts ${h.connected} agent(s) ${h.classes.join("/")}: ${h.models.join(", ")}`);
+    if (flag("out")) console.log(`snapshot saved to ${flag("out")}`);
+  } else {
+    const before = readJson(flag("before"));
+    const after = flag("after") ? readJson(flag("after")) : await snapNow();
+    const ri = argv.indexOf("--results");
+    const rest = ri < 0 ? [] : argv.slice(ri + 1);
+    const resultFiles = rest.findIndex((a) => a.startsWith("--")) < 0 ? rest : rest.slice(0, rest.findIndex((a) => a.startsWith("--")));
+    const recs = resultFiles.flatMap((f) => readFileSync(f, "utf8").split("\n")).filter((l) => l.trim().startsWith("{")).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    const runs = [...new Set(recs.map((r) => r.run))];
+    const run = flag("run", runs[runs.length - 1]);
+    const charges = chargesFrom(recs.filter((r) => r.type === "summary" && r.run === run));
+    const m = moneyReport({ before, after, charges, buyers: list(flag("buyers", "")) });
+    if (flag("out")) writeFileSync(flag("out"), JSON.stringify(m, null, 2));
+    console.log(formatMoney(m));
+  }
 } else {
-  console.log("usage: budget.mjs check | topup --min N --to N --max-total N [--users a,b] [--dry-run]");
+  console.log("usage: budget.mjs check | topup --min N --to N --max-total N [--users a,b] [--dry-run] | ledger [--out f] [--before f [--after f] [--results f ...]] | buyers [--buyers a,b]");
   process.exit(2);
 }

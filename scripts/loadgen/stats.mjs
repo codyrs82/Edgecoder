@@ -126,7 +126,7 @@ export class StageStats {
     this.droppedBy[reason] = (this.droppedBy[reason] ?? 0) + 1;
   }
   toJSON() {
-    return { stage: this.stage, rate: this.rate, startMs: this.startMs, endMs: this.endMs, dropped: this.dropped, droppedBy: this.droppedBy, all: this.all, byModel: this.byModel, byClass: this.byClass, byBehaviour: this.byBehaviour, where: this.where };
+    return { stage: this.stage, rate: this.rate, startMs: this.startMs, endMs: this.endMs, utilSum: this.utilSum ?? 0, utilN: this.utilN ?? 0, dropped: this.dropped, droppedBy: this.droppedBy, all: this.all, byModel: this.byModel, byClass: this.byClass, byBehaviour: this.byBehaviour, where: this.where };
   }
 }
 
@@ -135,6 +135,8 @@ export function mergeStage(a, b) {
   a.startMs = Math.min(a.startMs, b.startMs);
   a.endMs = Math.max(a.endMs ?? 0, b.endMs ?? 0) || null;
   a.rate += b.rate;
+  a.utilSum = (a.utilSum ?? 0) + (b.utilSum ?? 0);
+  a.utilN = (a.utilN ?? 0) + (b.utilN ?? 0);
   a.dropped += b.dropped ?? 0;
   a.droppedBy ??= {};
   for (const [k, n] of Object.entries(b.droppedBy ?? {})) a.droppedBy[k] = (a.droppedBy[k] ?? 0) + n;
@@ -165,7 +167,7 @@ export function digest(g, seconds) {
 export function digestStage(s) {
   const seconds = s.endMs && s.startMs ? (s.endMs - s.startMs) / 1000 : null;
   const map = (o) => Object.fromEntries(Object.entries(o).map(([k, g]) => [k, digest(g, seconds)]));
-  return { stage: s.stage, offeredRate: r1(s.rate), seconds: seconds && Math.round(seconds), dropped: s.dropped, droppedBy: s.droppedBy ?? {}, ...digest(s.all, seconds), byModel: map(s.byModel), byClass: map(s.byClass), byBehaviour: map(s.byBehaviour), where: s.where };
+  return { stage: s.stage, offeredRate: r1(s.rate), seconds: seconds && Math.round(seconds), utilPct: s.utilN ? r1((100 * s.utilSum) / s.utilN) : null, dropped: s.dropped, droppedBy: s.droppedBy ?? {}, ...digest(s.all, seconds), byModel: map(s.byModel), byClass: map(s.byClass), byBehaviour: map(s.byBehaviour), where: s.where };
 }
 
 /** Plain-text table of stage digests. */

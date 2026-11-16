@@ -9,7 +9,11 @@
  *           edit_file, answer), then turn after turn of source files pasted as context with a
  *           "what does this function return" question. The conversation grows from ~2K to
  *           ~20K tokens, so long context and (later) session stickiness are exercised.
+ *   codegen one call: a module pasted as context (~1-3K tokens) and "write this function plus two
+ *           tests" (a few hundred tokens out), checked by the reply naming the new function and
+ *           the one it must call. This is the realistic, money-moving call of a coding tool.
  */
+import { paramsB } from "./profiles.mjs";
 
 /** Small deterministic PRNG (xorshift32). */
 export function rng(seed) {
@@ -137,4 +141,59 @@ export class CodingSession {
     if (approxTokens(this.messages) >= this.targetTokens || this.turn >= this.maxTurns) this.done = true;
     return correct;
   }
+}
+
+/** Models a load test should not ask for: embeddings and other non-chat models. */
+const NOT_CHAT = /embed|whisper|vision|-vl\b|rerank/i;
+
+/** Weight of a small (< 6B) model relative to a 7b+ one, per behaviour. */
+export const SMALL_MODEL_WEIGHT = { chat: 0.6, burst: 1, coding: 0.05, codegen: 0.05 };
+
+/**
+ * The model mix for a behaviour from a capacity snapshot (capacity.mjs): every chat model the
+ * network holds, 7b and up at weight 1 and small ones at SMALL_MODEL_WEIGHT. The planner then
+ * multiplies each weight by the model's free in-flight allowance, so 7b/9b/14b/30b calls are spread
+ * in proportion to their free slots. `fallback` (profiles.mjs MODELS) without a snapshot.
+ */
+export function modelMix(capacity, behaviour, fallback = {}) {
+  const models = Object.entries(capacity?.models ?? {}).filter(([k, m]) => (m?.slots ?? 0) > 0 && !NOT_CHAT.test(k));
+  if (!models.length) return { ...fallback };
+  const out = {};
+  for (const [k] of models) out[`network/${k}`] = paramsB(k) >= 6 ? 1 : SMALL_MODEL_WEIGHT[behaviour] ?? 0.5;
+  if (behaviour === "chat" || behaviour === "burst") out.auto = 0.3;
+  return out;
+}
+
+/** Whether only CPU machines hold the model (slow: shorter prompts and replies). */
+export function cpuOnly(capacity, key) {
+  const cls = capacity?.models?.[key]?.classes ?? [];
+  return cls.length > 0 && cls.every((c) => c === "cpu");
+}
+
+/**
+ * Size of a codegen call on a model: { contextTokens, maxTokens }. Small or CPU-only models get a
+ * shorter module and reply (a CPU agent gives up after 180 s); 7b+ elsewhere a realistic one.
+ */
+export function codegenSize(key, capacity, scale = 1) {
+  const b = key === "auto" ? 7 : paramsB(key);
+  const slow = b < 6 || cpuOnly(capacity, key);
+  const contextTokens = Math.round((slow ? 800 : b >= 12 ? 3_000 : 2_000) * scale);
+  const maxTokens = slow ? 256 : b >= 12 ? 640 : 512;
+  return { contextTokens: Math.max(300, contextTokens), maxTokens };
+}
+
+/** One codegen request: messages and a check of the reply. */
+export function codegenTask(r, n, contextTokens) {
+  const f = sourceFile(r, contextTokens, n);
+  const noun = f.path.split("/")[1];
+  const name = `${VERBS[Math.floor(r() * VERBS.length)]}${noun[0].toUpperCase()}${noun.slice(1)}Batch${n % 1000}`;
+  const content = `Here is ${f.path}:\n\n\`\`\`ts\n${f.text}\n\`\`\`\n\nAdd an exported function \`${name}(items: Array<Record<string, number>>, limit: number): number[]\` to this module. It calls \`${f.needle.name}\` on every item and returns the results that are below \`limit\`, sorted ascending. Reply with the complete new function in one \`\`\`ts code block with a JSDoc comment, followed by two short unit tests that use node:assert.`;
+  return {
+    messages: [
+      { role: "system", content: "You are a senior TypeScript engineer. Write complete, compilable code." },
+      { role: "user", content },
+    ],
+    contextTokens: approxTokens([{ content }]),
+    ok: (t) => t.includes(name) && t.includes(f.needle.name),
+  };
 }

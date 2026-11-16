@@ -17,16 +17,25 @@
  * samples inside the run window and reports per stage: utilization (busy slots / slots), queue and
  * waiting-inference peaks, dispatch pickup p90, server TTFT p90, started/completed/failed and
  * no-capacity counts. The samples are in coordinator memory: a coordinator restart loses them.
+ *
+ * Money (money.mjs): --ledger-before before.json [--ledger-after after.json] adds where the cSats
+ * went: per-buyer spend, per-host earnings, the network fee, self-dealing and a conservation check
+ * (buyer debits = host credits + fee). Without --ledger-after the "after" balances are read now
+ * from the account files' API keys (never printed). fly.sh run/report take both snapshots.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { digestStage, mergeStage, table } from "./stats.mjs";
+import { chargesFrom, formatMoney, loadAccountKeys, moneyReport, snapshotLedger } from "./money.mjs";
+import { fetchSnapshots } from "./capacity.mjs";
 
 const argv = process.argv.slice(2);
 const flag = (n, d) => { const i = argv.indexOf(`--${n}`); return i < 0 ? d : argv[i + 1]; };
-const files = argv.includes("--files") ? argv.slice(argv.indexOf("--files") + 1).filter((a) => !a.startsWith("--")) : [];
+/** The values after --name up to the next flag. */
+const listAfter = (n) => { const i = argv.indexOf(`--${n}`); if (i < 0) return []; const rest = argv.slice(i + 1); const j = rest.findIndex((a) => a.startsWith("--")); return j < 0 ? rest : rest.slice(0, j); };
+const files = listAfter("files");
 const SAMPLES = flag("samples");
 const APP = flag("app");
 const COORDS = (flag("coordinators", "https://coordinator.edgecoder.io,https://coordinator-eu.edgecoder.io")).split(",");
@@ -124,15 +133,31 @@ function utilization(from, to) {
   return { samples: pts.length, byClass: agg((p) => p.classes), byModel: agg((p) => p.models) };
 }
 
+// ---- money: balances before and after, per-call charges from the machines' summaries
+const charges = chargesFrom(summaries);
+let money = null;
+if (flag("ledger-before") && existsSync(flag("ledger-before"))) {
+  const before = JSON.parse(readFileSync(flag("ledger-before"), "utf8"));
+  let after = flag("ledger-after") && existsSync(flag("ledger-after")) ? JSON.parse(readFileSync(flag("ledger-after"), "utf8")) : null;
+  if (!after) {
+    const accounts = loadAccountKeys(flag("keys-dir", join(homedir(), ".config/edgecoder/e2e/accounts")));
+    after = await snapshotLedger({ url: before.url ?? "https://edgecoder.io", accounts, fetchSnapshots, adminToken });
+  }
+  money = moneyReport({ before, after, charges });
+}
+const elapsedH = (t1 - t0) / 3_600_000;
+
 const report = {
   run, regions, machines: summaries.length, stopReasons: summaries.map((s) => `${s.region}:${s.stopReason}`),
   window: { from: new Date(t0).toISOString(), to: new Date(t1).toISOString() },
   cSatsSpent: Math.round(1000 * summaries.reduce((a, s) => a + (s.cSatsSpent ?? 0), 0)) / 1000,
+  cSatsPerHour: elapsedH > 0 ? Math.round(summaries.reduce((a, s) => a + (s.cSatsSpent ?? 0), 0) / elapsedH) : null,
+  charges, money,
   stages: digests.map((d, i) => ({ ...d, server: serverWindow(stages[i].startMs, stages[i].endMs ?? stages[i].startMs), utilization: utilization(stages[i].startMs, stages[i].endMs ?? stages[i].startMs) })),
   serverWholeRun: serverWindow(t0, t1),
 };
 if (flag("out")) writeFileSync(flag("out"), JSON.stringify(report, null, 2));
-console.log(`LOADGEN_REPORT ${JSON.stringify({ run, regions, machines: report.machines, stopReasons: report.stopReasons, window: report.window, cSatsSpent: report.cSatsSpent })}`);
+console.log(`LOADGEN_REPORT ${JSON.stringify({ run, regions, machines: report.machines, stopReasons: report.stopReasons, window: report.window, cSatsSpent: report.cSatsSpent, cSatsPerHour: report.cSatsPerHour })}`);
 console.log(`\nClient side, all regions (run ${run}):\n${table(digests)}`);
 const rows = [];
 for (const d of digests) for (const [k, g] of Object.entries(d.byModel)) rows.push({ ...g, stage: `${d.stage} ${k}`, offeredRate: "" });
@@ -141,7 +166,7 @@ console.log(`\nBy model:\n${table(rows)}`);
 console.log("\nOffered vs achieved per model (calls/s):");
 for (const s of report.stages) {
   const parts = Object.entries(s.byModel).map(([k, g]) => `${k.replace("network/", "")} ${g.offeredPerSec}->${g.throughputPerSec}${g.errors.over_capacity ? ` (over capacity ${g.errors.over_capacity})` : ""}`);
-  console.log(`  stage ${s.stage} (offered ${s.offeredRate}/s, sent ${s.offeredPerSec}/s, shed ${JSON.stringify(s.droppedBy)}): ${parts.join("; ")}`);
+  console.log(`  stage ${s.stage} (offered ${s.offeredRate}/s${s.utilPct !== null && s.utilPct !== undefined ? `, slot util ${s.utilPct}%` : ""}, sent ${s.offeredPerSec}/s, shed ${JSON.stringify(s.droppedBy)}): ${parts.join("; ")}`);
 }
 const crow = [];
 for (const d of digests) for (const [k, g] of Object.entries(d.byClass)) crow.push({ ...g, stage: `${d.stage} ${k}`, offeredRate: "" });
@@ -160,3 +185,10 @@ console.log("\nServer side (coordinators' /admin/network samples in each stage's
 for (const s of report.stages) for (const [c, v] of Object.entries(s.server)) {
   console.log(`  stage ${s.stage} ${c.replace("https://", "")}: ${v.samples ? `util avg ${v.utilizationPct.avg}% peak ${v.utilizationPct.peak}%, busy agents peak ${v.slots.busyAgentsPeak}/${v.slots.connectedAgents}, queue peak ${v.queuePeak}, waiting inference peak ${v.waitingInferencePeak}, pickup p90 max ${v.pickupP90MsMax} ms, server ttft p90 max ${v.ttftP90MsMax} ms, started ${v.started} completed ${v.completed} failed ${v.failed} no_capacity ${v.noCapacity} no_agent_has_model ${v.noAgentHasModel}` : v.note}`);
 }
+
+console.log("\nSpend per buyer (per-call charges, all machines):");
+for (const [name, c] of Object.entries(charges)) {
+  const top = Object.entries(c.byModel).sort((a, b) => b[1].cSats - a[1].cSats).map(([m, g]) => `${m.replace("network/", "")} ${g.calls} calls ${Math.round(g.cSats * 1000) / 1000}`).join("; ");
+  console.log(`  ${name}: ${c.calls} calls, ${Math.round(c.cSats * 1000) / 1000} cSats${c.servedSeen ? `, own machine ${c.ownCalls} calls ${Math.round(c.ownCSats * 1000) / 1000} cSats` : ""} (${top})`);
+}
+console.log(money ? `\n${formatMoney(money)}` : "\nMoney: no ledger snapshot (--ledger-before; fly.sh run takes one), so only the per-call charges above.");
