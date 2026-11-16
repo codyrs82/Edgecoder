@@ -67,7 +67,7 @@ describe("masking", () => {
     const other = view.agents.find((a) => !a.mine)!;
     expect(other.name).toBeUndefined();
     expect(Object.keys(other).sort()).toEqual(
-      ["activeModel", "computeClass", "continent", "coordinatorId", "country", "id", "label", "mine", "models", "modelsTotal", "os", "region", "rttMs", "slots", "slotsUsed", "status", "tier", "vramGb"].sort()
+      ["activeModel", "activity", "computeClass", "continent", "coordinatorId", "country", "id", "label", "mine", "models", "modelsTotal", "os", "region", "rttMs", "slots", "slotsUsed", "status", "tier", "vramGb"].sort()
     );
   });
 });
@@ -145,9 +145,9 @@ describe("coordinators and links", () => {
       ["coord-ap", false, false, 0]
     ]);
     // One link per pair; the measured figure kept.
-    expect(v.links).toContainEqual({ from: "coord-us", to: "coord-eu", rttMs: 89 });
+    expect(v.links).toContainEqual({ from: "coord-us", to: "coord-eu", rttMs: 89, workPerMin: 0, gossipPerMin: 0 });
     expect(v.links.filter((l) => [l.from, l.to].includes("coord-eu"))).toHaveLength(1);
-    expect(v.links).toContainEqual({ from: "coord-us", to: "coord-ap", rttMs: null });
+    expect(v.links).toContainEqual({ from: "coord-us", to: "coord-ap", rttMs: null, workPerMin: 0, gossipPerMin: 0 });
     expect(v.agents.filter((a) => a.coordinatorId === "coord-eu")).toHaveLength(2);
   });
 

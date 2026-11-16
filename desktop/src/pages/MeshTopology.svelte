@@ -7,6 +7,11 @@
   // Your own machines on the same local network are measured directly by this computer's IDE
   // provider (src/apps/ide/network-world.ts) and sit beside "You" with a "Same network" badge.
   // A failed refresh is quiet (lib/refresh-quiet.ts): the last view stays, retried on a backoff.
+  // Pulses (lib/world-view.ts pulseLanes): dots travel along the lines while calls are in flight,
+  // machine → coordinator while a reply streams; your own requests light You → coordinator →
+  // machine in the accent. SVG animations keyed per dot, so a refresh leaves them running; each
+  // dot's begin is on the wall clock (pulseBegin). Reduced motion: no dots, line weight and a "Live"
+  // badge. A hidden window pauses them.
   import { backendReady, isRemoteMode, networkWorld, type WorldView } from "../lib/api";
   import ErrorBanner from "../components/ErrorBanner.svelte";
   import Skeleton from "../components/Skeleton.svelte";
@@ -24,7 +29,16 @@
     rowsFor,
     sortRows,
     worldLayout,
+    activityOf,
+    activitySummary,
+    activityText,
+    heartbeatBegin,
+    pulseBegin,
+    pulseLanes,
+    yourPath,
+    HEARTBEAT_MS,
     RING_MAX,
+    type PulseLane,
     type SortKey,
     type WorldRow,
   } from "../lib/world-view";
@@ -60,6 +74,42 @@
   let hubById = $derived(new Map((layout?.hubs ?? []).map((h) => [h.id, h])));
   let modelOptions = $derived((view?.models ?? []).filter((m) => m.online > 0 || m.model === model));
   let showLabels = $derived(visible.length <= 24);
+  let lanes = $derived(view && layout ? pulseLanes(view, layout) : []);
+  let laneById = $derived(new Map(lanes.map((l) => [l.id, l])));
+  let path = $derived(view ? yourPath(view) : null);
+  let summary = $derived(view ? activitySummary(view, view.selfAgentId) : "");
+
+  // Motion: off for reduced motion; paused while the window is hidden.
+  const motionQuery = typeof window !== "undefined" && window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
+  let reducedMotion = $state(!!motionQuery?.matches);
+  let paused = $state(typeof document !== "undefined" && document.hidden);
+  /** When the graph's SVG (and its animation timeline) started: dots are placed on the wall clock from it. */
+  let svgBornMs = $state(Date.now());
+  function svgClock(_node: SVGSVGElement): void {
+    svgBornMs = Date.now();
+  }
+  $effect(() => {
+    const onVisibility = () => (paused = document.hidden);
+    const onMotion = () => (reducedMotion = !!motionQuery?.matches);
+    document.addEventListener("visibilitychange", onVisibility);
+    motionQuery?.addEventListener?.("change", onMotion);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      motionQuery?.removeEventListener?.("change", onMotion);
+    };
+  });
+  $effect(() => {
+    const svg = graphEl as (SVGSVGElement & { pauseAnimations?: () => void; unpauseAnimations?: () => void }) | undefined;
+    if (!svg) return;
+    if (paused) svg.pauseAnimations?.();
+    else svg.unpauseAnimations?.();
+  });
+  function lvl(lane: PulseLane | undefined): string {
+    return lane && lane.level ? `lvl-${lane.level}` : "";
+  }
+  function dotPath(lane: PulseLane, i: number): string {
+    return lane.twoWay && i % 2 === 1 ? `M${lane.x2} ${lane.y2} L${lane.x1} ${lane.y1}` : `M${lane.x1} ${lane.y1} L${lane.x2} ${lane.y2}`;
+  }
 
   // Graph selection: hover shows a machine, click (or Enter) pins it.
   let selectedId: string | null = $state(null);
@@ -254,9 +304,13 @@
           <div class="sp-card graph-card">
             <svg
               bind:this={graphEl}
+              use:svgClock
               class="graph"
+              class:still={reducedMotion}
+              class:paused
               viewBox="0 0 {layout.width} {layout.height}"
               role="group"
+              aria-describedby="world-activity"
               aria-label="Network graph: {layout.hubs.length} coordinators and {layout.agents.length} machines. Arrow keys move between machines, Enter pins a machine's details."
             >
               {#each layout.rings as ring (ring.hubId + ring.ms)}
@@ -269,8 +323,14 @@
               {#each view.links as link (link.from + link.to)}
                 {@const a = hubById.get(link.from)}
                 {@const b = hubById.get(link.to)}
+                {@const mesh = laneById.get(`mesh:${[link.from, link.to].sort().join("|")}`)}
                 {#if a && b}
-                  <line class="clink" x1={a.x} y1={a.y} x2={b.x} y2={b.y} aria-hidden="true" />
+                  <line class="clink {lvl(mesh)}" x1={a.x} y1={a.y} x2={b.x} y2={b.y} aria-hidden="true" />
+                  {#if mesh?.heartbeat && !reducedMotion}
+                    <line class="beat" x1={a.x} y1={a.y} x2={b.x} y2={b.y} aria-hidden="true">
+                      <animate attributeName="stroke-opacity" values="0;0.5;0;0" keyTimes="0;0.08;0.22;1" dur="{HEARTBEAT_MS}ms" begin={heartbeatBegin(svgBornMs)} repeatCount="indefinite" />
+                    </line>
+                  {/if}
                   <text class="clink-label" x={(a.x + b.x) / 2} y={(a.y + b.y) / 2 - 8} text-anchor="middle" aria-hidden="true">{formatMs(link.rttMs)}</text>
                 {/if}
               {/each}
@@ -280,16 +340,41 @@
                   <text class="lan-link-label" x={(layout.you.x + node.x) / 2} y={layout.you.y - 8} text-anchor="middle" aria-hidden="true">{formatMs(node.row.estimateMs)}</text>
                 {/each}
                 {#each layout.hubs as hub (hub.id)}
-                  {#if typeof hub.coordinator.myRttMs === "number"}
-                    <line class="you-link" x1={layout.you.x} y1={layout.you.y} x2={hub.x} y2={hub.y} aria-hidden="true" />
-                    <text class="you-link-label" x={(layout.you.x + hub.x) / 2 + 6} y={(layout.you.y + hub.y) / 2 + 40} aria-hidden="true">{formatMs(hub.coordinator.myRttMs)}</text>
+                  {@const lane = laneById.get(`you:${hub.id}`)}
+                  {#if lane}
+                    <line class="you-link" class:yours={lane.yours} x1={layout.you.x} y1={layout.you.y} x2={hub.x} y2={hub.y} aria-hidden="true" />
+                    {#if lane.heartbeat && !reducedMotion}
+                      <line class="beat" x1={layout.you.x} y1={layout.you.y} x2={hub.x} y2={hub.y} aria-hidden="true">
+                        <animate attributeName="stroke-opacity" values="0;0.35;0;0" keyTimes="0;0.08;0.22;1" dur="{HEARTBEAT_MS}ms" begin={heartbeatBegin(svgBornMs + HEARTBEAT_MS / 2)} repeatCount="indefinite" />
+                      </line>
+                    {/if}
+                    {#if typeof hub.coordinator.myRttMs === "number"}
+                      <text class="you-link-label" x={(layout.you.x + hub.x) / 2 + 6} y={(layout.you.y + hub.y) / 2 + 40} aria-hidden="true">{formatMs(hub.coordinator.myRttMs)}</text>
+                    {/if}
                   {/if}
                 {/each}
               {/if}
               {#each layout.agents as node (node.id)}
                 {@const hub = hubById.get(node.hubId)}
-                {#if hub}<line class="spoke" class:spoke-on={detail?.agent.id === node.id} x1={hub.x} y1={hub.y} x2={node.x} y2={node.y} aria-hidden="true" />{/if}
+                {@const lane = laneById.get(`spoke:${node.id}`)}
+                {#if hub}<line class="spoke {lvl(lane)}" class:yours={lane?.yours} class:spoke-on={detail?.agent.id === node.id} x1={hub.x} y1={hub.y} x2={node.x} y2={node.y} aria-hidden="true" />{/if}
               {/each}
+              <!-- Busy machines glow softly (static). -->
+              {#each layout.agents.filter((n) => activityOf(n.row.agent).callsNow > 0) as node (node.id)}
+                <circle class="glow" cx={node.x} cy={node.y} r={node.r + 7} aria-hidden="true" />
+              {/each}
+              {#if !reducedMotion}
+                <g class="pulses" aria-hidden="true">
+                  {#each lanes as lane (lane.id)}
+                    {#each Array.from({ length: lane.count }, (_, i) => i) as i (`${lane.id}:${i}`)}
+                      <circle class="pulse k-{lane.kind}" class:yours={lane.yours} class:faint={lane.faint} r={lane.kind === "mesh" ? 3.5 : 2.8} opacity="0">
+                        <animateMotion dur="{lane.periodMs}ms" begin={pulseBegin(lane, i, svgBornMs)} repeatCount="indefinite" path={dotPath(lane, i)} />
+                        <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.12;0.82;1" dur="{lane.periodMs}ms" begin={pulseBegin(lane, i, svgBornMs)} repeatCount="indefinite" />
+                      </circle>
+                    {/each}
+                  {/each}
+                </g>
+              {/if}
               {#each layout.hubs as hub (hub.id)}
                 <g class="hub" class:hub-down={!hub.coordinator.reachable} transform="translate({hub.x} {hub.y})">
                   <title>{hostOf(hub.coordinator.url)} · {hub.coordinator.agentsOnline} machines online{hub.coordinator.reachable ? "" : " · not reachable"}</title>
@@ -319,6 +404,7 @@
                 >
                   <circle r={node.r} />
                   {#if a.mine}<circle class="mine-ring" r={node.r + 4} />{/if}
+                  {#if path?.machines.includes(a.id)}<circle class="serving-ring" r={node.r + (a.mine ? 8 : 5)} />{/if}
                   {#if a.mine || showLabels}
                     <text y={node.r + 13} text-anchor="middle" aria-hidden="true">{a.mine ? displayName(a) : a.label}</text>
                   {/if}
@@ -331,11 +417,15 @@
                 </g>
               {/if}
             </svg>
+            <p class="vh" id="world-activity">{summary}</p>
             <div class="legend" aria-hidden="true">
+              {#if reducedMotion}<span class="live"><i class="dot idle"></i>Live</span>{/if}
               <span><i class="dot idle"></i>Idle</span>
               <span><i class="dot busy"></i>Busy</span>
               <span><i class="dot stale"></i>Not seen lately</span>
               <span><i class="dot mine"></i>Yours</span>
+              <span><i class="dot pulse"></i>{reducedMotion ? "Thicker line: more calls" : "Moving dots: calls in flight"}</span>
+              <span><i class="dot path"></i>Your request</span>
               {#if layout.agents.some((n) => n.lan)}<span>Beside You: your machines on the same network, measured directly.</span>{/if}
               <span>Distance from a coordinator: its round trip to the machine. Size: model slots.</span>
             </div>
@@ -348,7 +438,9 @@
                 <span class="sp-pill st-{a.status}">{statusText(a.status)}</span>
                 {#if a.mine}<span class="sp-pill yours">Yours</span>{/if}
                 {#if detail.sameNetwork}<span class="sp-pill lan">Same network</span>{/if}
+                {#if path?.machines.includes(a.id)}<span class="sp-pill yours">Serving you</span>{/if}
               </span>
+              <p class="activity">{activityText(a)}</p>
               <dl>
                 {#if detail.sameNetwork}
                   <dt>Latency to you</dt><dd>{formatMs(detail.estimateMs)} <span class="est">measured directly on your local network</span></dd>
@@ -466,7 +558,25 @@
   .quiet-note { margin: 0; font-size: var(--fs-xs); }
   .you-link { stroke: var(--text-muted); stroke-width: 1.2; stroke-dasharray: 5 5; }
   .spoke { stroke: var(--border-strong); stroke-width: 1; }
+  .spoke.lvl-1 { stroke: var(--accent-secondary); stroke-opacity: 0.5; stroke-width: 1.5; }
+  .spoke.lvl-2 { stroke: var(--accent-secondary); stroke-opacity: 0.65; stroke-width: 2.25; }
+  .spoke.lvl-3 { stroke: var(--accent-secondary); stroke-opacity: 0.8; stroke-width: 3; }
+  .clink.lvl-1 { opacity: 0.8; stroke-width: 3; }
+  .clink.lvl-2 { opacity: 0.9; stroke-width: 3.75; }
+  .clink.lvl-3 { opacity: 1; stroke-width: 4.5; }
+  .spoke.yours, .you-link.yours { stroke: var(--accent); stroke-opacity: 1; stroke-width: 2.5; stroke-dasharray: none; }
   .spoke-on { stroke: var(--accent); stroke-width: 2; }
+  .beat { stroke: var(--accent-secondary); stroke-width: 5; stroke-opacity: 0; stroke-linecap: round; }
+  .glow { fill: color-mix(in srgb, var(--accent-secondary) 16%, transparent); stroke: color-mix(in srgb, var(--accent-secondary) 35%, transparent); stroke-width: 1; }
+  .pulse { fill: var(--accent-secondary); stroke: var(--bg-surface); stroke-width: 1; }
+  .pulse.yours { fill: var(--accent); }
+  .pulse.faint { fill-opacity: 0.45; stroke-opacity: 0.45; }
+  .node .serving-ring { fill: none; stroke: var(--accent); stroke-width: 2; stroke-dasharray: 3 2; }
+  @media (prefers-reduced-motion: reduce) { .pulses, .beat { display: none; } }
+  .dot.pulse { width: 6px; height: 6px; background: var(--accent-secondary); }
+  .dot.path { width: 14px; height: 3px; border-radius: 2px; background: var(--accent); }
+  .live { font-weight: 600; color: var(--text-primary); }
+  .activity { font-size: var(--fs-xs); color: var(--text-primary); }
   .hub circle { fill: var(--accent-secondary); stroke: var(--bg-surface); stroke-width: 3; }
   .hub-down circle { fill: var(--text-muted); }
   .hub-region { fill: var(--on-accent); font-size: 12px; font-weight: 700; letter-spacing: 0.04em; }

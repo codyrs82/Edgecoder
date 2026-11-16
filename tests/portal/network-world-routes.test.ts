@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import Fastify from "fastify";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { cleanWorld, pingUrlFor, registerNetworkWorldRoutes } from "../../src/portal/routes/network-world.js";
-import { CDG, MY_MACHINE, ORD, WORLD } from "./fixtures/world-view.js";
+import { ACTIVE_WORLD, CDG, MY_MACHINE, ORD, SERVING, WORLD } from "./fixtures/world-view.js";
 
 /*
  * Settings > Network (everyone): GET /portal/api/network/world asks a coordinator's /network/world
@@ -26,7 +26,11 @@ function coordinatorAnswer(accountId: string): unknown {
         ? { ...a, agentId: a.name, ownerTag: "tag-u1" }
         : { ...a, mine: false, name: undefined, ...(a.label === "lin-•••4e08" ? { name: "someone-elses-box", agentId: "someone-elses-box", sourceIp: "198.51.100.77", email: "stranger@example.com", ownerAccountId: "acct-u2" } : {}) }
     ),
-    totals: { ...WORLD.totals, mine: accountId === "acct-u1" ? 1 : 0 }
+    totals: { ...WORLD.totals, mine: accountId === "acct-u1" ? 1 : 0 },
+    // u1's own request (the coordinator filters per account); a coordinator that leaked everyone's
+    // requests and who is served by what must not get them past the portal.
+    yourRequests: accountId === "acct-u1" ? [{ coordinator: ORD, machineKey: WORLD.agents[1].id, state: "streaming", accountId: "acct-u1", prompt: "secret prompt" }] : [],
+    requests: [{ tag: "tag-u2", account: "acct-u2", machine: WORLD.agents[1].id, state: "starting" }]
   };
 }
 
@@ -106,7 +110,7 @@ describe("GET /portal/api/network/world", () => {
     expect(body.coordinators.map((c: any) => c.id).sort()).toEqual([CDG, ORD].sort());
     const ord = body.coordinators.find((c: any) => c.id === ORD);
     expect(ord).toMatchObject({ region: "ord", reachable: true, self: true, myRttMs: null, pingUrl: "https://coordinator.edgecoder.io/identity" });
-    expect(body.links).toEqual([{ from: ORD, to: CDG, rttMs: 99 }]);
+    expect(body.links).toEqual([{ from: ORD, to: CDG, rttMs: 99, workPerMin: 0, gossipPerMin: 0 }]);
     expect(body.models[0]).toEqual({ model: "qwen2.5-coder:1.5b", agents: 6, online: 5 });
     expect(body.totals).toMatchObject({ coordinators: 2, online: 5, busy: 1, slots: 12, slotsUsed: 1 });
   });
@@ -121,6 +125,69 @@ describe("GET /portal/api/network/world", () => {
     const down = await get("u1");
     expect(down.statusCode).toBe(502);
     expect(down.json()).toEqual({ connected: false, reason: "coordinator_unreachable" });
+  });
+});
+
+describe("activity through the portal", () => {
+  it("passes your own request, and no one else's", async () => {
+    const u1 = await get("u1");
+    expect(u1.json().yourRequests).toEqual([{ coordinator: ORD, machineKey: WORLD.agents[1].id, state: "streaming" }]);
+    const u2 = await get("u2");
+    expect(u2.json().yourRequests).toEqual([]);
+    for (const res of [u1, u2]) {
+      for (const leak of ["acct-u2", "tag-u2", "secret prompt", '"requests"', '"accountId"', '"tag"']) expect(res.body).not.toContain(leak);
+    }
+  });
+
+  it("keeps a machine's counts only, bounded, and drops anything else in them", () => {
+    const w = cleanWorld({
+      coordinators: [{ id: ORD, url: "https://a.example" }],
+      agents: [
+        { id: "aa01", coordinatorId: ORD, label: "lin-•••aa01", status: "busy", activity: { callsNow: 999, streaming: 5, callsPerMin: 1e9, servingAccount: "acct-u2", requesters: ["tag-u2"] } },
+        { id: "aa02", coordinatorId: ORD, label: "lin-•••aa02", status: "stale", activity: { callsNow: 3, streaming: 3, callsPerMin: 2 } },
+        { id: "aa03", coordinatorId: ORD, label: "lin-•••aa03", status: "idle" }
+      ]
+    });
+    const agents = w.agents as Array<Record<string, unknown>>;
+    expect(agents[0].activity).toEqual({ callsNow: 64, streaming: 5, callsPerMin: 10_000 });
+    expect(agents[1].activity).toEqual({ callsNow: 0, streaming: 0, callsPerMin: 2 });
+    expect(agents[2].activity).toEqual({ callsNow: 0, streaming: 0, callsPerMin: 0 });
+    expect(JSON.stringify(w)).not.toMatch(/acct-u2|tag-u2|servingAccount|requesters/);
+  });
+
+  it("your requests: known coordinators, masked machine ids, three states, at most 20, nothing else", () => {
+    const w = cleanWorld({
+      coordinators: [{ id: ORD, url: "https://a.example" }],
+      yourRequests: [
+        { coordinator: ORD, machineKey: "abcdef0123", state: "streaming", agentId: "someone-elses-box", accountId: "acct-u2" },
+        { coordinator: "ghost", machineKey: "abcdef0123", state: "streaming" },
+        { coordinator: ORD, machineKey: "someone-elses-box", state: "starting" },
+        { coordinator: ORD, machineKey: "abcdef0123", state: "queued" },
+        { coordinator: ORD, machineKey: "abcdef0123", state: "exfiltrating" },
+        ...Array.from({ length: 40 }, () => ({ coordinator: ORD, machineKey: "abcdef0123", state: "starting" }))
+      ]
+    });
+    const mine = w.yourRequests as unknown[];
+    expect(mine[0]).toEqual({ coordinator: ORD, machineKey: "abcdef0123", state: "streaming" });
+    expect(mine[1]).toEqual({ coordinator: ORD, machineKey: null, state: "starting" });
+    expect(mine[2]).toEqual({ coordinator: ORD, machineKey: null, state: "queued" });
+    expect(mine.length).toBeLessThanOrEqual(20);
+    expect(JSON.stringify(w)).not.toMatch(/someone-elses-box|acct-u2|ghost|exfiltrating/);
+    expect(cleanWorld({ coordinators: [], yourRequests: "lots" }).yourRequests).toEqual([]);
+  });
+
+  it("mesh links carry work and gossip per minute, bounded", () => {
+    const w = cleanWorld({
+      coordinators: [{ id: ORD, url: "https://a.example" }, { id: CDG, url: "https://b.example" }],
+      links: [{ from: ORD, to: CDG, rttMs: 9, workPerMin: 12, gossipPerMin: 1e12, peers: ["x"] }]
+    });
+    expect(w.links).toEqual([{ from: ORD, to: CDG, rttMs: 9, workPerMin: 12, gossipPerMin: 100_000 }]);
+  });
+
+  it("the busy fixture survives the allowlist unchanged where it matters", () => {
+    const w = cleanWorld(ACTIVE_WORLD) as any;
+    expect(w.yourRequests).toEqual([{ coordinator: ORD, machineKey: SERVING, state: "streaming" }]);
+    expect(w.agents.find((a: any) => a.id === SERVING).activity).toEqual({ callsNow: 2, streaming: 2, callsPerMin: 14 });
   });
 });
 

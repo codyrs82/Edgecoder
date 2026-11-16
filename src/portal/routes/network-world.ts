@@ -16,6 +16,11 @@
  * coordinator adds later reaches the browser unreviewed; a machine not marked `mine` never carries
  * a name, and its label must look masked or it is replaced.
  *
+ * Activity (the graph's pulses) is allowlisted the same way: each machine's counts (`activity`: calls
+ * now, streaming, calls in the last minute), each mesh link's work and gossip per minute, and
+ * `yourRequests`, the signed-in account's own calls in flight (coordinator, masked machine id,
+ * state). Nothing else about requests passes: no account, no other user's call.
+ *
  * "Your round trip" is measured by the browser itself (the coordinators' CORS allows only the
  * desktop app's origins, and the portal's connect-src is 'self'): each coordinator gets a
  * `pingUrl`, its public /identity on an https origin, which the page loads as an image and times
@@ -38,6 +43,10 @@ const MAX_AGENTS = 500;
 const MAX_COORDINATORS = 16;
 const MAX_MODELS = 64;
 const MAX_MODELS_PER_AGENT = 12;
+const MAX_YOUR_REQUESTS = 20;
+const MAX_CALLS_PER_MIN = 10_000;
+const MAX_LINK_PER_MIN = 100_000;
+const MASKED_ID_RE = /^[0-9a-f]{4,32}$/;
 
 type Json = Record<string, unknown>;
 
@@ -47,6 +56,7 @@ const count = (v: unknown): number => {
   const n = num(v);
   return n !== null && n >= 0 ? Math.round(n) : 0;
 };
+const capped = (v: unknown, max: number): number => Math.min(max, count(v));
 const obj = (v: unknown): Json => (v && typeof v === "object" && !Array.isArray(v) ? (v as Json) : {});
 const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 
@@ -91,11 +101,33 @@ function cleanAgent(raw: unknown): Json | null {
     slots: Math.max(1, count(a.slots)),
     slotsUsed: count(a.slotsUsed),
     coordinatorId,
-    rttMs: num(a.rttMs)
+    rttMs: num(a.rttMs),
+    activity: cleanActivity(a.activity, status)
   };
   if (mine) {
     const name = str(a.name, 128);
     if (name) out.name = name;
+  }
+  return out;
+}
+
+/** A machine's counts only; a machine not seen lately is doing nothing. */
+function cleanActivity(raw: unknown, status: string): Json {
+  const v = obj(raw);
+  const callsNow = status === "stale" ? 0 : capped(v.callsNow, 64);
+  return { callsNow, streaming: Math.min(callsNow, capped(v.streaming, 64)), callsPerMin: capped(v.callsPerMin, MAX_CALLS_PER_MIN) };
+}
+
+/** The signed-in account's own calls in flight: a known coordinator, a masked machine id, a state. */
+function cleanYourRequests(raw: unknown, coordinatorIds: ReadonlySet<string>): Json[] {
+  const out: Json[] = [];
+  for (const item of arr(raw).slice(0, MAX_YOUR_REQUESTS)) {
+    const r = obj(item);
+    const coordinator = str(r.coordinator);
+    const state = r.state === "queued" || r.state === "starting" || r.state === "streaming" ? r.state : null;
+    if (!coordinator || !coordinatorIds.has(coordinator) || !state) continue;
+    const key = str(r.machineKey, 32);
+    out.push({ coordinator, machineKey: state !== "queued" && key && MASKED_ID_RE.test(key) ? key : null, state });
   }
   return out;
 }
@@ -128,7 +160,7 @@ export function cleanWorld(raw: unknown): Json {
   const ids = new Set(coordinators.map((c) => c.id as string));
   const links = arr(w.links)
     .map(obj)
-    .map((l) => ({ from: str(l.from), to: str(l.to), rttMs: num(l.rttMs) }))
+    .map((l) => ({ from: str(l.from), to: str(l.to), rttMs: num(l.rttMs), workPerMin: capped(l.workPerMin, MAX_LINK_PER_MIN), gossipPerMin: capped(l.gossipPerMin, MAX_LINK_PER_MIN) }))
     .filter((l) => l.from && l.to && ids.has(l.from) && ids.has(l.to))
     .slice(0, MAX_COORDINATORS * MAX_COORDINATORS);
   const models = arr(w.models)
@@ -155,6 +187,7 @@ export function cleanWorld(raw: unknown): Json {
       slots: count(t.slots),
       slotsUsed: count(t.slotsUsed)
     },
+    yourRequests: cleanYourRequests(w.yourRequests, ids),
     truncated: w.truncated === true
   };
 }

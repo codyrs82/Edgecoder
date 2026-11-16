@@ -16,6 +16,11 @@
  * WORLD_PEER_CACHE_MS) rather than the app asking every coordinator: an agent's signature is known
  * only to the coordinator it registered with, and the coordinators already trust each other.
  *
+ * Activity (the graph's pulses): each machine's calls now, streaming and taken in the last minute
+ * (world-activity.ts counts claims), each mesh link's work and gossip in the last minute, and the
+ * model calls queued or running here tagged by requester, which only the merge sees: the public
+ * answer carries the caller's own (`yourRequests`) and no one else's.
+ *
  * Bounded and rate-limited: at most WORLD_MAX_AGENTS agents and WORLD_MAX_COORDINATORS
  * coordinators per answer, WORLD_RATE_PER_MIN answers per caller per minute.
  */
@@ -34,15 +39,21 @@ import { routableModels } from "../../model-catalog.js";
 import { meshRtt } from "./mesh.js";
 import { accountsFor } from "./admin-network.js";
 import { agentPerf, setPeerWorldSource } from "../routing.js";
+import { inferenceStreams } from "./inference.js";
+import { agentCalls, meshGossip, meshWork } from "../world-activity.js";
 import {
   WORLD_AGENT_TTL_MS,
   WORLD_MAX_COORDINATORS,
+  WORLD_MAX_LOCAL_REQUESTS,
   localWorldAgent,
+  maskedId,
   parseLocalWorld,
+  worldOwnerTag,
   regionInfo,
   toPublicWorld,
   worldMaskKey,
   type LocalWorld,
+  type LocalWorldRequest,
   type PublicWorld
 } from "../../network-world.js";
 
@@ -115,6 +126,21 @@ export async function buildLocalWorld(nowMs = Date.now()): Promise<LocalWorld> {
   const claims = queue.activeClaims();
   const entries = [...agentCapabilities.entries()].filter(([id, cap]) => !activeBlacklistRecord(id) && nowMs - cap.lastSeenMs <= WORLD_AGENT_TTL_MS);
   const owners = await accountsFor(entries.map(([id]) => id), nowMs);
+  // Model calls queued or running here: who asked (as a tag) and on which machine, and how many each
+  // machine is streaming a reply for now.
+  const streamingBy = new Map<string, number>();
+  const requests: LocalWorldRequest[] = [];
+  for (const c of queue.inferenceCalls()) {
+    const streaming = c.claimedBy !== null && inferenceStreams.hasContent(c.subtaskId) && !inferenceStreams.isDone(c.subtaskId);
+    if (streaming) streamingBy.set(c.claimedBy!, (streamingBy.get(c.claimedBy!) ?? 0) + 1);
+    const account = c.projectId.startsWith("inference:") ? c.projectId.slice("inference:".length) : "";
+    if (!account || requests.length >= WORLD_MAX_LOCAL_REQUESTS) continue;
+    requests.push({
+      tag: worldOwnerTag(account),
+      machine: c.claimedBy ? maskedId(maskKey, c.claimedBy) : null,
+      state: c.claimedBy === null ? "queued" : streaming ? "streaming" : "starting"
+    });
+  }
   const agents = entries.map(([agentId, cap]) => {
     const hw = effectiveHardware(agentId, cap);
     const agent = localWorldAgent(maskKey, identity.peerId, {
@@ -135,7 +161,9 @@ export async function buildLocalWorld(nowMs = Date.now()): Promise<LocalWorld> {
       lastSeenMs: cap.lastSeenMs,
       rttMs: meshRtt.rttMs(agentId, nowMs),
       sourceIp: cap.sourceIp ?? null,
-      lanAddresses: cap.lanAddresses ?? null
+      lanAddresses: cap.lanAddresses ?? null,
+      streaming: streamingBy.get(agentId) ?? 0,
+      callsPerMin: agentCalls.count(agentId, nowMs)
     });
     // For peers' best-fit routing (stripped from every public answer).
     return { ...agent, perf: agentPerf(agentId, claims) };
@@ -149,10 +177,22 @@ export async function buildLocalWorld(nowMs = Date.now()): Promise<LocalWorld> {
       agents: agents.length,
       agentsOnline: agents.filter((a) => a.status !== "stale").length
     },
-    links: peerCoordinators().map((p) => ({ from: identity.peerId, to: p.peerId, rttMs: linkRtt(p.peerId, nowMs) })),
+    links: peerCoordinators().map((p) => ({
+      from: identity.peerId,
+      to: p.peerId,
+      rttMs: linkRtt(p.peerId, nowMs),
+      workPerMin: meshWork.count(p.peerId, nowMs),
+      gossipPerMin: meshGossip.count(p.peerId, nowMs)
+    })),
     agents,
+    requests,
     generatedAtMs: nowMs
   };
+}
+
+/** Tests: rebuild this coordinator's view on the next ask. */
+export function clearWorldLocalCache(): void {
+  localCache = null;
 }
 
 function cachedLocalWorld(nowMs: number): Promise<LocalWorld> {
@@ -253,6 +293,7 @@ async function peerWorldsForRouting(nowMs: number): Promise<Array<{ world: Local
 
 export function registerNetworkWorldRoutes(app: CoordinatorApp): void {
   setPeerWorldSource(peerWorldsForRouting, (agentId) => meshRtt.rttMs(agentId, Date.now()));
+  queue.onClaimed((agentId) => agentCalls.record(agentId));
 
   app.get("/network/world/local", async (req, reply) => {
     if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });

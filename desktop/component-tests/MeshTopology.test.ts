@@ -166,3 +166,115 @@ describe("Network page: the world view", () => {
     expect(screen.getByText(/Settings › Compute/)).toBeTruthy();
   });
 });
+
+describe("Network page: pulses", () => {
+  /** WORLD, busy: lin-•••3f2a streams your reply and two others, work crosses the mesh. */
+  function busyWorld() {
+    const w = structuredClone(WORLD);
+    const gpu = w.agents.find((a) => a.label === "lin-•••3f2a")!;
+    for (const a of w.agents) a.activity = { callsNow: a.status === "busy" ? a.slotsUsed : 0, streaming: 0, callsPerMin: a.status === "stale" ? 0 : 1 };
+    gpu.activity = { callsNow: 4, streaming: 3, callsPerMin: 14 };
+    w.links = w.links.map((l) => ({ ...l, workPerMin: 12, gossipPerMin: 20 }));
+    w.yourRequests = [{ coordinator: gpu.coordinatorId, machineKey: gpu.id, state: "streaming" }];
+    return { w, gpu };
+  }
+  function setReducedMotion(on: boolean) {
+    window.matchMedia = ((query: string) => ({
+      matches: on && query.includes("prefers-reduced-motion"), media: query, onchange: null,
+      addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+  }
+  const original = window.matchMedia;
+  afterEach(() => {
+    window.matchMedia = original;
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
+  });
+
+  it("dots travel the busy lines; your path is highlighted; idle lines have none", async () => {
+    const { w, gpu } = busyWorld();
+    api.networkWorld.mockResolvedValue(w);
+    render(MeshTopology);
+    const { graph } = await graphNodes();
+    const dots = graph.querySelectorAll("circle.pulse");
+    // gpu: 3 streaming; three busy machines 1 each; your reply to you (1); mesh work (2).
+    expect(dots.length).toBe(9);
+    expect(graph.querySelectorAll("circle.pulse.yours").length).toBe(4);
+    expect(graph.querySelectorAll("animateMotion").length).toBe(9);
+    expect(graph.querySelectorAll("line.spoke.yours").length).toBe(1);
+    expect(graph.querySelectorAll("line.you-link.yours").length).toBe(1);
+    expect(graph.querySelectorAll("circle.glow").length).toBe(4);
+    expect(graph.querySelectorAll(".serving-ring").length).toBe(1);
+    // Screen readers get a summary of who is busy and where your request runs.
+    const describedBy = graph.getAttribute("aria-describedby")!;
+    expect(document.getElementById(describedBy)?.textContent).toBe(`4 machines busy; your request is running on ${gpu.label}; 12 calls a minute crossing between coordinators.`);
+  });
+
+  it("a refresh keeps the running dots (no restart)", async () => {
+    const { w } = busyWorld();
+    api.networkWorld.mockResolvedValue(w);
+    render(MeshTopology, { props: { pollInterval: 40 } });
+    const { graph } = await graphNodes();
+    const first = graph.querySelector("circle.pulse.yours");
+    expect(first).toBeTruthy();
+    await new Promise((r) => setTimeout(r, 120));
+    await waitFor(() => expect(api.networkWorld.mock.calls.length).toBeGreaterThan(2));
+    expect(graph.querySelector("circle.pulse.yours")).toBe(first);
+  });
+
+  it("the details panel says what a machine is doing and that it serves you", async () => {
+    const { w } = busyWorld();
+    api.networkWorld.mockResolvedValue(w);
+    render(MeshTopology);
+    const { nodes } = await graphNodes();
+    const gpu = nodes.find((n) => (n.getAttribute("aria-label") ?? "").includes("3f2a"))!;
+    gpu.focus();
+    await fireEvent.keyDown(gpu, { key: "Enter" });
+    expect(within(details()).getByText("Serving 4 calls now · 14 calls in the last minute")).toBeTruthy();
+    expect(within(details()).getByText("Serving you")).toBeTruthy();
+  });
+
+  it("reduced motion: no animated elements, a Live badge, line weight for load", async () => {
+    setReducedMotion(true);
+    const { w } = busyWorld();
+    api.networkWorld.mockResolvedValue(w);
+    render(MeshTopology);
+    const { graph } = await graphNodes();
+    expect(graph.querySelectorAll("circle.pulse, animate, animateMotion, line.beat").length).toBe(0);
+    expect(graph.classList.contains("still")).toBe(true);
+    expect(graph.querySelectorAll("line.spoke.lvl-3").length).toBe(1);
+    expect(screen.getByText("Live")).toBeTruthy();
+  });
+
+  it("a hidden window pauses the animations and resumes when shown", async () => {
+    const pause = vi.fn();
+    const unpause = vi.fn();
+    const proto = SVGSVGElement.prototype as unknown as { pauseAnimations?: () => void; unpauseAnimations?: () => void };
+    const saved = { p: proto.pauseAnimations, u: proto.unpauseAnimations };
+    proto.pauseAnimations = pause;
+    proto.unpauseAnimations = unpause;
+    try {
+      api.networkWorld.mockResolvedValue(busyWorld().w);
+      render(MeshTopology);
+      const { graph } = await graphNodes();
+      Object.defineProperty(document, "hidden", { configurable: true, get: () => true });
+      document.dispatchEvent(new Event("visibilitychange"));
+      await waitFor(() => expect(graph.classList.contains("paused")).toBe(true));
+      expect(pause).toHaveBeenCalled();
+      Object.defineProperty(document, "hidden", { configurable: true, get: () => false });
+      document.dispatchEvent(new Event("visibilitychange"));
+      await waitFor(() => expect(graph.classList.contains("paused")).toBe(false));
+      expect(unpause).toHaveBeenCalled();
+    } finally {
+      proto.pauseAnimations = saved.p;
+      proto.unpauseAnimations = saved.u;
+    }
+  });
+
+  it("an older coordinator's answer (no activity) still draws: busy machines pulse gently, no path", async () => {
+    render(MeshTopology);
+    const { graph } = await graphNodes();
+    expect(graph.querySelectorAll("circle.pulse.yours").length).toBe(0);
+    expect(graph.querySelectorAll("circle.pulse").length).toBe(4);
+    expect(document.getElementById("world-activity")?.textContent).toBe("4 machines busy.");
+  });
+});

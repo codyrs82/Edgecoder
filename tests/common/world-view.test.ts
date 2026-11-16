@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import * as W from "../../src/common/world-view.js";
 import { WORLD_VIEW_BROWSER_LIB } from "../../src/portal/pages/settings-world.js";
+import * as FIXTURES from "../portal/fixtures/world-view.js";
 import { WORLD } from "../portal/fixtures/world-view.js";
 
 /*
@@ -80,5 +81,111 @@ describe("world-view layout helper", () => {
     expect(near.length).toBeGreaterThan(0);
     const coords = new Map(WORLD.coordinators.map((c) => [c.id, c]));
     expect(near[0].estimateMs).toBe((coords.get(near[0].agent.coordinatorId)!.myRttMs as number) + (near[0].agent.rttMs as number));
+  });
+});
+
+describe("pulses: activity to dots", () => {
+  const { ACTIVE_WORLD, SERVING } = FIXTURES;
+  const coords = ACTIVE_WORLD.coordinators.map((c) => ({ ...c, myRttMs: c.myRttMs ?? null }));
+  const view = { ...ACTIVE_WORLD, coordinators: coords };
+  const layout = W.worldLayout(view, W.rowsFor(view));
+
+  it("speeds come from a few fixed steps, faster for busier lines", () => {
+    expect([0, 4, 5, 19, 20, 59, 60, 10_000, Number.NaN].map(W.pulsePeriod)).toEqual([3000, 3000, 2000, 2000, 1400, 1400, 900, 900, 3000]);
+    for (const p of [0, 3, 12, 40, 500]) expect(W.PULSE_PERIODS).toContain(W.pulsePeriod(p));
+  });
+
+  it("a machine gets a dot per reply streaming, one for a call starting, none when idle; capped per line", () => {
+    expect(W.machinePulseCount({ callsNow: 0, streaming: 0, callsPerMin: 50 })).toBe(0);
+    expect(W.machinePulseCount({ callsNow: 1, streaming: 0, callsPerMin: 0 })).toBe(1);
+    expect(W.machinePulseCount({ callsNow: 2, streaming: 2, callsPerMin: 0 })).toBe(2);
+    expect(W.machinePulseCount({ callsNow: 3, streaming: 3, callsPerMin: 30 })).toBe(4);
+    expect(W.machinePulseCount({ callsNow: 64, streaming: 64, callsPerMin: 9_999 })).toBe(W.PULSE_MAX_PER_LANE);
+    expect(W.meshPulseCount(0)).toBe(0);
+    expect(W.meshPulseCount(1)).toBe(1);
+    expect(W.meshPulseCount(12)).toBe(2);
+    expect(W.meshPulseCount(1e6)).toBe(W.PULSE_MAX_PER_LANE);
+    expect([W.pulseLevel(0, 100), W.pulseLevel(1, 0), W.pulseLevel(2, 0), W.pulseLevel(1, 60)]).toEqual([0, 1, 2, 3]);
+  });
+
+  it("streaming replies travel machine → coordinator; your path is You → ord → the serving machine", () => {
+    const lanes = W.pulseLanes(view, layout);
+    const node = layout.agents.find((n) => n.id === SERVING)!;
+    const hub = layout.hubs.find((h) => h.id === FIXTURES.ORD)!;
+    const spoke = lanes.find((l) => l.id === `spoke:${SERVING}`)!;
+    expect(spoke).toMatchObject({ x1: node.x, y1: node.y, x2: hub.x, y2: hub.y, count: 2, periodMs: 2000, yours: true });
+    // A call starting (no tokens yet) is one slow dot toward the machine.
+    const cdgBusy = lanes.find((l) => l.id === `spoke:${ACTIVE_WORLD.agents[4].id}`)!;
+    expect(cdgBusy).toMatchObject({ count: 1, periodMs: 3000, yours: false });
+    expect(cdgBusy.x2).toBe(layout.agents.find((n) => n.id === ACTIVE_WORLD.agents[4].id)!.x);
+    // Idle machines have no lane at all.
+    expect(lanes.filter((l) => l.kind === "spoke")).toHaveLength(2);
+    // Your reply streams from ord to you; the cdg line is quiet and only breathes.
+    const youOrd = lanes.find((l) => l.id === `you:${FIXTURES.ORD}`)!;
+    expect(youOrd).toMatchObject({ x1: hub.x, y1: hub.y, x2: layout.you!.x, y2: layout.you!.y, count: 1, yours: true, heartbeat: false });
+    expect(lanes.find((l) => l.id === `you:${FIXTURES.CDG}`)).toMatchObject({ count: 0, yours: false, heartbeat: true });
+    // Work across the mesh goes both ways.
+    expect(lanes.find((l) => l.kind === "mesh")).toMatchObject({ count: 2, twoWay: true, faint: false, heartbeat: false, periodMs: 2000 });
+  });
+
+  it("a quiet network is calm: no dots, the lines only breathe", () => {
+    const quiet = { ...view, links: view.links.map((l) => ({ ...l, workPerMin: 0, gossipPerMin: 0 })), agents: view.agents.map((a) => ({ ...a, status: a.status === "busy" ? ("idle" as const) : a.status, activity: { callsNow: 0, streaming: 0, callsPerMin: 0 } })), yourRequests: [] };
+    const lanes = W.pulseLanes(quiet, W.worldLayout(quiet, W.rowsFor(quiet)));
+    expect(W.pulseDotCount(lanes)).toBe(0);
+    expect(lanes.filter((l) => l.heartbeat).map((l) => l.kind).sort()).toEqual(["mesh", "you", "you"]);
+    // Gossip alone is one faint dot, not work.
+    const gossip = { ...quiet, links: quiet.links.map((l) => ({ ...l, gossipPerMin: 20 })) };
+    expect(W.pulseLanes(gossip, W.worldLayout(gossip, W.rowsFor(gossip))).find((l) => l.kind === "mesh")).toMatchObject({ count: 1, faint: true, heartbeat: false, level: 0 });
+  });
+
+  it("caps the dots on the whole graph, your own lines first", () => {
+    const agents = Array.from({ length: 80 }, (_, i) => ({ ...ACTIVE_WORLD.agents[0], id: `b${String(i).padStart(9, "0")}`, label: `lin-•••${String(i).padStart(4, "0")}`, status: "busy" as const, activity: { callsNow: 4, streaming: 4, callsPerMin: 60 } }));
+    const busy = { ...view, agents, yourRequests: [{ coordinator: FIXTURES.ORD, machineKey: agents[79].id, state: "streaming" as const }] };
+    const lanes = W.pulseLanes(busy, W.worldLayout(busy, W.rowsFor(busy)));
+    expect(W.pulseDotCount(lanes)).toBe(W.PULSE_MAX_DOTS);
+    expect(lanes.find((l) => l.id === `spoke:${agents[79].id}`)!.count).toBe(W.PULSE_MAX_PER_LANE);
+    expect(lanes.find((l) => l.id === `you:${FIXTURES.ORD}`)!.count).toBe(1);
+    expect(W.pulseDotCount(W.pulseLanes(busy, W.worldLayout(busy, W.rowsFor(busy)), 10))).toBe(10);
+  });
+
+  it("dots keep their place on the wall clock across redraws", () => {
+    const lane = { periodMs: 2000, count: 4 };
+    expect(W.pulseBegin(lane, 0, 0)).toBe("-0.000s");
+    expect(W.pulseBegin(lane, 1, 0)).toBe("-0.500s");
+    expect(W.pulseBegin(lane, 0, 1_800_000_000_750)).toBe("-0.750s");
+    // A redraw one period later starts every dot at the same phase.
+    expect(W.pulseBegin(lane, 3, 1_800_000_002_750)).toBe(W.pulseBegin(lane, 3, 1_800_000_000_750));
+    expect(W.heartbeatBegin(W.HEARTBEAT_MS * 3 + 1500)).toBe("-1.500s");
+  });
+});
+
+describe("your path and the words for it", () => {
+  const { ACTIVE_WORLD, SERVING } = FIXTURES;
+
+  it("yourPath: the coordinator and machine of each of your requests; unknown ones left out", () => {
+    const p = W.yourPath({ ...ACTIVE_WORLD, yourRequests: [...ACTIVE_WORLD.yourRequests!, { coordinator: "ghost", machineKey: SERVING, state: "streaming" }, { coordinator: FIXTURES.CDG, machineKey: "not-in-view", state: "starting" }, { coordinator: FIXTURES.CDG, machineKey: null, state: "queued" }] });
+    expect(p.machines).toEqual([SERVING]);
+    expect(p.coordinators).toEqual({ [FIXTURES.ORD]: { count: 1, streaming: true }, [FIXTURES.CDG]: { count: 2, streaming: false } });
+    expect(p.requests).toHaveLength(3);
+    expect(W.yourPath(WORLD)).toEqual({ requests: [], coordinators: {}, machines: [] });
+  });
+
+  it("the details line and the screen-reader summary", () => {
+    const serving = ACTIVE_WORLD.agents[1];
+    expect(W.activityText(serving)).toBe("Serving 2 calls now · 14 calls in the last minute");
+    expect(W.activityText(ACTIVE_WORLD.agents[0])).toBe("Not serving any calls now · 1 call in the last minute");
+    expect(W.activityText({ ...WORLD.agents[0], activity: undefined })).toBe("Not serving any calls now · none in the last minute");
+    expect(W.activitySummary(ACTIVE_WORLD)).toBe("2 machines busy; your request is running on lin-•••f468; 12 calls a minute crossing between coordinators.");
+    expect(W.activitySummary({ ...ACTIVE_WORLD, yourRequests: [{ coordinator: FIXTURES.ORD, machineKey: null, state: "queued" }], links: [] })).toBe("2 machines busy; your request is waiting for a machine.");
+    expect(W.activitySummary(WORLD)).toBe("1 machine busy.");
+  });
+
+  it("the browser copy computes the same pulses", () => {
+    const lib = new Function(`${WORLD_VIEW_BROWSER_LIB}; return { rowsFor, worldLayout, pulseLanes, activitySummary, activityText, pulseBegin };`)() as typeof W;
+    const layout = W.worldLayout(ACTIVE_WORLD, W.rowsFor(ACTIVE_WORLD));
+    expect(JSON.parse(JSON.stringify(lib.pulseLanes(ACTIVE_WORLD, lib.worldLayout(ACTIVE_WORLD, lib.rowsFor(ACTIVE_WORLD)))))).toEqual(JSON.parse(JSON.stringify(W.pulseLanes(ACTIVE_WORLD, layout))));
+    expect(lib.activitySummary(ACTIVE_WORLD)).toBe(W.activitySummary(ACTIVE_WORLD));
+    expect(lib.activityText(ACTIVE_WORLD.agents[1])).toBe(W.activityText(ACTIVE_WORLD.agents[1]));
+    expect(lib.pulseBegin({ periodMs: 1400, count: 3 }, 2, 123_456)).toBe(W.pulseBegin({ periodMs: 1400, count: 3 }, 2, 123_456));
   });
 });

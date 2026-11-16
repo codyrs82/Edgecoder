@@ -128,6 +128,13 @@ export class SwarmQueue {
    */
   private readyListener?: (subtask: Subtask, claimableAtMs: number) => void;
 
+  /** Called on every successful claim (the Network page counts calls per agent per minute). */
+  private claimedListener?: (agentId: string, subtask: Subtask) => void;
+
+  onClaimed(listener: (agentId: string, subtask: Subtask) => void): void {
+    this.claimedListener = listener;
+  }
+
   onClaimable(listener: (subtask: Subtask, claimableAtMs: number) => void): void {
     this.readyListener = listener;
   }
@@ -376,6 +383,11 @@ export class SwarmQueue {
     this.agentClaimCount.set(agentId, (this.agentClaimCount.get(agentId) ?? 0) + 1);
     const { claimedAt, attempts } = item;
     this.persist(item.subtask.id, (store) => store.markSubtaskClaimed(item.subtask.id, agentId, claimedAt, attempts));
+    try {
+      this.claimedListener?.(agentId, item.subtask);
+    } catch {
+      // A listener never fails a claim.
+    }
     return item.subtask;
   }
 
@@ -649,6 +661,20 @@ export class SwarmQueue {
 
   agentClaims(agentId: string): number {
     return this.agentClaimCount.get(agentId) ?? 0;
+  }
+
+  /**
+   * Model calls queued or running, with who asked (the `inference:<account>` project id) and the
+   * agent holding each: the Network page's own-request path. One pass, at most `max` entries.
+   */
+  inferenceCalls(max = 2_000): Array<{ subtaskId: string; projectId: string; claimedBy: string | null }> {
+    const out: Array<{ subtaskId: string; projectId: string; claimedBy: string | null }> = [];
+    for (const t of this.tasks) {
+      if (t.subtask.kind !== "inference") continue;
+      out.push({ subtaskId: t.subtask.id, projectId: t.subtask.projectMeta.projectId, claimedBy: t.claimedBy ?? null });
+      if (out.length >= max) break;
+    }
+    return out;
   }
 
   /** Unclaimed inference subtasks waiting for `model`: load the portal weighs when routing new calls. */
