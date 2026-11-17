@@ -91,7 +91,8 @@ describe("ranking for a bot's agent step (Auto / Local first, BOT_AGENT_MIN_PARA
     for (const policy of ["auto", "local_first"] as const) {
       const routes = planRoutes(agentStep, base, policy, opts({ allowanceCSats: 0 }));
       expect(where(routes)).toEqual(["local:qwen3.5:9b:fallback"]);
-      expect(routes[0].why).toBe("tools needed; local deepseek-r1:14b has no tool support");
+      // Why the 9B: nothing that big that calls tools could take it, and the 14B on this computer can't call tools.
+      expect(routes[0].why).toBe("agent work wants ≥14B; this computer has ≤9B; a larger model wasn't available (not connected to the network); tools needed; local deepseek-r1:14b has no tool support");
     }
   });
 

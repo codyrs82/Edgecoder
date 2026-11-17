@@ -14,6 +14,16 @@ describe("bot header helpers", () => {
     expect(computeText({ policy: "model", model: "network/x@gpu" }, () => ({ model: "x", where: "Network GPU" }))).toBe("x · Network GPU");
   });
 
+  it("a stuck bot: chip, header status and sidebar line say so; a plain pause doesn't", () => {
+    const stuck = { atMs: 5, problem: "npm test: package.json not found", runs: 3 };
+    const b = bot({ status: "paused", enabled: false, stuck });
+    expect(statusChip(b)).toEqual({ text: "Stuck", tone: "warn" });
+    expect(autoStatus(b)).toEqual({ text: "Paused: Harry kept hitting the same problem (npm test: package.json not found). Tell it what to do, or resume.", tone: "warn" });
+    expect(botStatusLine(b)).toBe("Stuck: same result 3 runs in a row");
+    expect(statusChip(bot({ status: "paused", enabled: false })).text).toBe("Paused");
+    expect(autoStatus(bot({ status: "paused", enabled: false })).text).toBe("Paused");
+  });
+
   it("turns a cSats failure into a plain notice with actions", () => {
     const error = "Not enough cSats for this request (it sets aside up to 91.8 cSats; unused cSats come back).";
     const failed = bot({ status: "error", lastRun: { id: "run_9", trigger: "schedule", startedAtMs: 0, status: "failed", summary: `Failed: ${error}`, cSats: 0, error } });

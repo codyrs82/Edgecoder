@@ -86,3 +86,16 @@ describe("BotForm: Network only cards", () => {
     expect((await screen.findByRole("alert")).textContent).toBe("compute.model: Required");
   });
 });
+
+describe("BotForm: the project folder", () => {
+  it("says the project folder isn't set when there's no repository, and where it is when there is", async () => {
+    open(harry({ projectRoot: "/Users/me/Dropbox/Agents/Harry the Engineer" }));
+    const line = screen.getByTestId("bot-project-folder");
+    expect(line.textContent).toMatch(/^Project folder: not set\./);
+    await fireEvent.input(screen.getByLabelText("Repository"), { target: { value: "codyrs82/Edgecoder" } });
+    expect(line.textContent).toBe("Project folder: cloned when you save");
+    cleanup();
+    open(harry({ repository: "codyrs82/Edgecoder", repoPath: "/Users/me/Projects/Edgecoder" }));
+    expect(screen.getByTestId("bot-project-folder").textContent).toBe("Project folder: /Users/me/Projects/Edgecoder");
+  });
+});

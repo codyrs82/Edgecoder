@@ -30,6 +30,14 @@
   // svelte-ignore state_referenced_locally
   let projectRoot = $state(initial?.projectRoot ?? defaultProject ?? "");
   let repository = $state(initial?.repository ?? "");
+  /** Where its code commands (npm, git, tests) run: the repository's checkout, else nothing set (it works in the home folder). */
+  const projectFolderText = $derived(
+    repository.trim()
+      ? initial?.repoPath && repository.trim() === (initial.repository ?? "")
+        ? `Project folder: ${initial.repoPath}`
+        : "Project folder: cloned when you save"
+      : "Project folder: not set. Code commands (npm, git, tests) run in the home folder, which needs to be a code project for them to work.",
+  );
   let triggers = $state<BotTriggerConfig[]>(initial?.triggers?.map((t) => ({ ...t })) ?? []);
   let maxRunsText = $state(String(initial?.maxTriggerRunsPerHour ?? 6));
   function addTrigger(kind: TriggerKind) {
@@ -207,7 +215,7 @@
           </div>
         </div>
         <label class="sp-row" data-testid="bot-repository-slot">
-          <span class="sp-text"><span class="sp-title">Repository</span><span class="sp-desc">A GitHub repository (owner/repo) it works in. Cloned into your projects folder when you save, and updated before each run.</span></span>
+          <span class="sp-text"><span class="sp-title">Repository</span><span class="sp-desc">A GitHub repository (owner/repo) it works in. Cloned into your projects folder when you save, and updated before each run.</span><span class="sp-desc bf-project" data-testid="bot-project-folder">{projectFolderText}</span></span>
           <input type="text" class="bf-path" bind:value={repository} placeholder="owner/repo" maxlength="500" spellcheck="false" autocomplete="off" aria-label="Repository" />
         </label>
         <div class="sp-row">

@@ -85,6 +85,27 @@ describe("BotView header", () => {
     expect(document.querySelector(".bot-head")?.textContent).not.toMatch(/Not enough cSats/);
   });
 
+  it("stuck: the header says it paused itself and why; the sidebar line and chip say Stuck; no Run now or Pause buttons", async () => {
+    const stuck = { atMs: Date.now(), problem: "npm test: package.json not found", runs: 3 };
+    setup(harry({ status: "paused", enabled: false, stuck, nextRun: undefined, lastRun: { id: "run_3", trigger: "heartbeat", startedAtMs: 0, endedAtMs: 1, status: "done", summary: "I am ready to create package.json.", cSats: 0 } }));
+    const st = screen.getByTestId("bot-auto-status");
+    expect(st.textContent).toBe("Paused: Harry kept hitting the same problem (npm test: package.json not found). Tell it what to do, or resume.");
+    expect(st.className).toMatch(/warn/);
+    expect(screen.getByTestId("bot-status-chip").textContent).toBe("Stuck");
+    expect(screen.queryByRole("button", { name: /Run now/ })).toBeNull();
+    expect(within(document.querySelector(".bot-head") as HTMLElement).queryByRole("button", { name: /Pause|Resume/ })).toBeNull();
+    // The ⋯ menu resumes it.
+    await fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    await fireEvent.click(screen.getByRole("menuitem", { name: /Resume Harry/ }));
+    expect(api.updateBot).toHaveBeenCalledWith("bot_h", { enabled: true });
+  });
+
+  it("stuck with the details panel open: the status line reads Stuck: same result 3 runs in a row", () => {
+    localStorage.setItem("edgecoder-bot-panel", "open");
+    setup(harry({ status: "paused", enabled: false, stuck: { atMs: 1, problem: "npm test: package.json not found", runs: 3 }, nextRun: undefined }));
+    expect(document.querySelector(".status-line")?.textContent).toBe("Stuck: same result 3 runs in a row");
+  });
+
   it("shows when it next works on its own", () => {
     setup(harry({ status: "idle", lastRun: undefined, schedule: "", nextRun: { kind: "heartbeat", atMs: Date.now() + 12 * 60_000 } }));
     const st = screen.getByTestId("bot-auto-status");
