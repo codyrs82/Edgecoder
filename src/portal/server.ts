@@ -15,8 +15,7 @@ import { coordinatorPricingSource } from "./public-pricing.js"; import { coordin
 import { registerWellKnownRoutes } from "./routes/well-known.js";
 import { startDnsStaleSweep } from "./dns-sweep.js";
 import { createPortalMailer } from "./email.js";
-import { registerInternalRoutes } from "./routes/internal.js";
-import { QUIET_ROUTE } from "./quiet-routes.js";
+import { QUIET_ROUTE, registerInternalRoutes } from "./routes/internal.js";
 import { registerAccountApiRoutes } from "./routes/account.js";
 import { registerPasskeyRoutes } from "./routes/passkey.js";
 import { registerAuthRoutes } from "./routes/auth.js";
@@ -834,8 +833,7 @@ async function loadNetworkInsightsForUser(): Promise<{
   }
 }
 
-// Health checks: no request lines (QUIET_ROUTE), only warnings and errors.
-app.get("/health", QUIET_ROUTE, async () => ({ ok: true, portalDb: Boolean(store) }));
+app.get("/health", QUIET_ROUTE /* no request lines, only warnings and errors */, async () => ({ ok: true, portalDb: Boolean(store) }));
 
 // Apple App Site Association for passkey webcredentials (iOS app ↔ domain link)
 registerWellKnownRoutes(app);

@@ -8,6 +8,8 @@ import { dnsLabelConflicts } from "../dns-manager.js";
 import { moduleLogger } from "../../common/logger.js";
 import { QUIET_ROUTE, logQuietRouteRefusals } from "../quiet-routes.js";
 
+export { QUIET_ROUTE };
+
 const logger = moduleLogger("portal-internal");
 
 /** #16: Service-to-service /internal/* routes (#40); registered inside the token-checked plugin. Moved unchanged from server.ts; server.ts passes in what it needs. */
