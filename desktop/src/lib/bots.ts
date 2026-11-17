@@ -1,11 +1,12 @@
 // Persistent bots (:4304 /v1/ide/bots): types mirroring src/apps/ide/bots.ts and the pure helpers
 // the sidebar and the bot page use (avatar, status line, schedule text, folding a run's events).
+import { FAILURE_STATUS, failureKind, type FailureKind } from "./failures";
 import { applyAgentEvent, type AgentTurn } from "./agent-events";
 import type { IdeStreamEvent } from "./api";
 import { frontierName } from "./compute-choice";
 import { hardwareShort, type Served } from "./served";
 
-export type BotStatus = "idle" | "running" | "needs_approval" | "paused" | "over_budget" | "error";
+export type BotStatus = "idle" | "running" | "needs_approval" | "paused" | "over_budget" | "out_of_csats" | "error";
 export type BotRunStatus = "running" | "needs_approval" | "done" | "failed" | "budget" | "cancelled" | "interrupted";
 /** What started a run: the ones it starts on its own, your message, or "Check now" (manual). */
 export type BotTriggerKind = "schedule" | "manual" | "message" | "github" | "start" | "heartbeat" | "follow_up";
@@ -209,7 +210,7 @@ export const COMPUTE_POLICY_OPTIONS: Array<{ value: ComputeChoice; title: string
   { value: "local_only", title: "This computer only", desc: "Never leaves this computer. Free." },
   { value: "mine_only", title: "My machines only", desc: "This computer and your other machines. Free, never the network." },
   { value: "network_only", title: "Network only", desc: "Always the network's best fit, paid within the daily budget. Never this computer or your machines." },
-  { value: "network_only:gpu", title: "Network GPU only", desc: "The network's GPU machines only, within the daily budget. Never this computer or your machines." },
+  { value: "network_only:gpu", title: "Network GPU only", desc: "Any GPU on the network, consumer or datacenter, within the daily budget. Never this computer or your machines." },
   { value: "network_only:apple", title: "Network Apple only", desc: "The network's Apple silicon Macs only, within the daily budget. Never this computer or your machines." },
   { value: "network_only:cpu", title: "Network CPU only", desc: "The network's CPU machines only: cheapest power floor, slowest. Within the daily budget." },
   { value: "network_only:gpu.dc", title: "Network Datacenter GPU only", desc: "The network's datacenter GPUs only: fastest, within the daily budget. Never this computer or your machines." },
@@ -307,15 +308,17 @@ function untilText(ms: number, now: number): string {
 export function autoStatus(bot: Pick<Bot, "status" | "enabled" | "nextRun" | "held" | "activity" | "maxRunsPerDay" | "lastRun"> & Partial<Pick<Bot, "name" | "stuck">>, now = Date.now()): { text: string; tone: "muted" | "accent" | "warn" | "err" } {
   if (bot.status === "running") return { text: bot.activity && !/^(Auto|Compute): /.test(bot.activity) ? `Working: ${bot.activity}` : "Working…", tone: "accent" };
   if (bot.status === "needs_approval") return { text: "Waiting for your approval", tone: "warn" };
-  if (!bot.enabled && bot.stuck) return { text: stuckText(bot.name ?? "It", bot.stuck), tone: "warn" };
+  // The banner has the full story of a failure or a stuck pause; the header only says what's next.
+  if (!bot.enabled && bot.stuck) return { text: "Paused · stuck", tone: "muted" };
   if (!bot.enabled) return { text: "Paused", tone: "muted" };
+  if (bot.status === "out_of_csats") return { text: "Paused · resumes after top-up", tone: "muted" };
   if (bot.status === "over_budget" || bot.held === "budget") return { text: "Budget spent · resumes tomorrow", tone: "warn" };
   if (bot.held === "run_cap") return { text: `Daily limit of ${bot.maxRunsPerDay ?? DEFAULT_MAX_RUNS_PER_DAY} runs reached · resumes tomorrow`, tone: "warn" };
   const n = bot.nextRun;
-  const failed = bot.status === "error" ? "Last run failed · " : "";
-  const tone = bot.status === "error" ? "err" : "muted";
+  const failed = "";
+  const tone = "muted";
   if (n) {
-    if (n.atMs <= now + 30_000) return { text: n.kind === "start" ? "Starting…" : `${failed}Continuing…`, tone: bot.status === "error" ? "err" : "accent" };
+    if (n.atMs <= now + 30_000) return { text: n.kind === "start" ? "Starting…" : `${failed}Continuing…`, tone: "accent" };
     const when = untilText(n.atMs, now);
     const text = n.kind === "follow_up" ? `Continuing in ${when}` : n.kind === "start" ? `Starting in ${when}` : n.kind === "schedule" ? `Next run in ${when}` : `Next check in ${when}`;
     return { text: failed + text, tone };
@@ -359,6 +362,8 @@ export function statusChip(bot: Pick<Bot, "status"> & Partial<Pick<Bot, "stuck">
       return { text: "Paused", tone: "muted" };
     case "over_budget":
       return { text: "Budget spent", tone: "warn" };
+    case "out_of_csats":
+      return { text: "Out of cSats", tone: "warn" };
     default:
       return { text: "Idle", tone: "muted" };
   }
@@ -370,38 +375,54 @@ export function folderName(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
-export type NoticeAction = "buy" | "local_only" | "edit";
+export type NoticeAction = "buy" | "budget" | "local_only" | "edit";
 export interface FailureNotice {
+  /** What dismissing it remembers (a run id, or the stuck pause). */
   runId: string;
+  kind: FailureKind | "stuck";
   title: string;
   detail: string;
+  /** The first is the primary (highlighted) action. */
   actions: NoticeAction[];
 }
 
-/** The last run's failure in plain words, with what the user can do about it; null when it didn't fail. */
-export function failureNotice(bot: Pick<Bot, "name" | "lastRun" | "compute">): FailureNotice | null {
+/**
+ * The bot's one failure banner: what went wrong (title), one sentence, and what to do (the first
+ * action is primary). Null when the last run didn't fail and it isn't stuck. The header, the
+ * sidebar and the conversation only say the short status.
+ */
+export function failureNotice(bot: Pick<Bot, "name" | "lastRun" | "compute"> & Partial<Pick<Bot, "stuck" | "enabled" | "status">>): FailureNotice | null {
+  if (bot.stuck && bot.enabled === false) {
+    return { runId: `stuck-${bot.stuck.atMs}`, kind: "stuck", title: "Stuck", detail: stuckText(bot.name, bot.stuck), actions: ["edit"] };
+  }
   const r = bot.lastRun;
   if (!r || r.status !== "failed") return null;
-  const err = (r.error ?? r.summary ?? "").replace(/^Failed:\s*/, "").trim();
+  const err = (r.error ?? r.summary ?? "").replace(/^Failed:\s*/, "").replace(/^Error contacting model:\s*/, "").trim();
   const onlyHere = botCompute(bot).policy === "local_only";
-  const base = { runId: r.id, title: `${bot.name}'s last run didn't finish` };
-  if (/not enough cSats|no cSats|insufficient|budget is spent/i.test(err)) {
-    return {
-      ...base,
-      detail: "It needed the network, and there weren't enough cSats for it. Buy cSats, or keep it on this computer (free).",
-      actions: onlyHere ? ["buy", "edit"] : ["buy", "local_only"],
-    };
+  const kind = failureKind(err);
+  const base = { runId: r.id, kind };
+  switch (kind) {
+    case "csats": {
+      // "Not enough cSats: your balance is 0.01 cSats (…). This step needs about 0.4 cSats on a Datacenter GPU."
+      const sentence = /^Not enough cSats:\s*/i.test(err) ? err.replace(/^Not enough cSats:\s*/i, "") : "It needed the network, and there weren't enough cSats for it.";
+      return { ...base, title: "Out of cSats", detail: sentence.charAt(0).toUpperCase() + sentence.slice(1), actions: ["buy", "budget"] };
+    }
+    case "budget":
+      return { ...base, title: "Budget spent", detail: `${bot.name} spent today's budget. It resumes tomorrow, or raise the budget.`, actions: ["budget"] };
+    case "class": {
+      const cls = /^No (.+?) machines? online/.exec(err)?.[1];
+      return { ...base, title: cls ? `No ${cls} machines online` : "No machines online", detail: err.replace(/^No .+? machines? online[^.]*\.\s*/, "") || err, actions: ["edit"] };
+    }
+    case "offline":
+      return { ...base, title: "Offline", detail: err, actions: onlyHere ? ["edit"] : ["local_only", "edit"] };
+    case "model":
+      return { ...base, title: "No model available", detail: err, actions: ["edit"] };
+    default:
+      return { ...base, title: `${bot.name}'s last run didn't finish`, detail: err || "It stopped with an error.", actions: ["edit"] };
   }
-  if (/isn't installed|no model is installed|no model is available|no model fits|isn't running/i.test(err)) {
-    return { ...base, detail: err, actions: ["edit"] };
-  }
-  if (/isn't connected|not connected|offline/i.test(err)) {
-    return { ...base, detail: err, actions: onlyHere ? ["edit"] : ["local_only", "edit"] };
-  }
-  return { ...base, detail: err || "It stopped with an error.", actions: ["edit"] };
 }
 
-export const NOTICE_ACTION_TEXT: Record<NoticeAction, string> = { buy: "Buy cSats", local_only: "Switch to This computer", edit: "Edit compute" };
+export const NOTICE_ACTION_TEXT: Record<NoticeAction, string> = { buy: "Buy cSats", budget: "Edit budget", local_only: "Switch to This computer", edit: "Edit compute" };
 
 /** The avatar letter: the first letter or digit of the name. */
 export function botInitial(name: string): string {
@@ -473,18 +494,32 @@ export function botStatusLine(bot: Bot, now = Date.now()): string {
     case "running":
       return bot.activity && !/^(Auto|Compute): /.test(bot.activity) ? `Working: ${bot.activity}` : "Working…";
     case "over_budget":
-      return "Paused: today's budget is spent";
+      return "Budget spent";
+    case "out_of_csats":
+      return "Out of cSats";
     case "paused":
-      if (bot.stuck) return `Stuck: same result ${bot.stuck.runs} runs in a row`;
+      if (bot.stuck) return "Stuck";
+      // A paused bot whose last run failed: the short status, never the error sentence.
+      if (bot.lastRun?.status === "failed") return "Paused";
       return bot.lastRun?.summary ? `Paused · ${readableSummary(bot.lastRun.summary)}` : "Paused";
     case "error":
-      return readableSummary(bot.lastRun?.summary) || "Last run failed";
+      // Short and neutral: the banner in the bot's view has the full message and what to do.
+      return FAILURE_STATUS[failureKind(bot.lastRun?.error ?? bot.lastRun?.summary)];
     default:
       if (bot.lastRun?.summary) return readableSummary(bot.lastRun.summary);
       if (bot.nextRun) return bot.nextRun.atMs <= now + 30_000 ? "Starting work…" : `First run ${relativeTime(bot.nextRun.atMs, now)}`;
       if (bot.nextRunAtMs) return `First run ${relativeTime(bot.nextRunAtMs, now)}`;
       return "Message it to get it started";
   }
+}
+
+/**
+ * The line under the name in the bot's header: its routine (the normal description), never the
+ * error text (the banner has that).
+ */
+export function botSubtitle(bot: Bot, now = Date.now()): string {
+  if (bot.status === "error" || bot.status === "out_of_csats" || bot.stuck || bot.lastRun?.status === "failed") return routineText(bot);
+  return botStatusLine(bot, now);
 }
 
 export const RUN_STATUS_TEXT: Record<BotRunStatus, string> = {

@@ -6,6 +6,8 @@
   // Balance and buying go through this computer's agent (/v1/ide/compute*); the network, the BTC/USD
   // rate, both fees and the payout figures come from the portal (/portal/api/wallet/overview).
   import { onMount, onDestroy } from "svelte";
+  import { get } from "svelte/store";
+  import { buyRequest } from "../lib/buy-csats";
   import { open as openUrl } from "@tauri-apps/plugin-shell";
   import { Zap, Copy, Check, Clock, ExternalLink, Bitcoin, Coins, TriangleAlert, Wallet } from "@lucide/svelte";
   import {
@@ -28,8 +30,16 @@
 
   // Add funds
   const PRESETS = [5_000, 20_000, 100_000];
-  let preset = $state<number | "custom">(20_000);
-  let custom = $state(20_000);
+  interface Props {
+    /** After paying for a Buy cSats request: back to the bot or chat it came from (closes Settings). */
+    onReturn?: () => void;
+  }
+  let { onReturn }: Props = $props();
+  // A Buy cSats button (a failure, a low balance) asked for this amount, and where to go back to.
+  const request = get(buyRequest);
+  let returnTo = $state<string | null>(request?.returnTo ?? null);
+  let preset = $state<number | "custom">(request ? ((PRESETS as readonly number[]).includes(request.amountSats) ? request.amountSats : "custom") : 20_000);
+  let custom = $state(request && !(PRESETS as readonly number[]).includes(request.amountSats) ? request.amountSats : 20_000);
   let amount = $derived(preset === "custom" ? Math.round(Number(custom)) : preset);
   let step = $state<"amount" | "onchain" | "invoice" | "paid" | "expired">("amount");
   // Fund with Bitcoin (on-chain)
@@ -129,6 +139,10 @@
     void load();
     void loadPayoutDestination();
     tick = setInterval(() => (now = Date.now()), 1000);
+    if (request) {
+      buyRequest.set(null);
+      queueMicrotask(scrollToFunds);
+    }
   });
   onDestroy(() => { clearInterval(pollTimer); clearInterval(tick); clearInterval(onchainTimer); });
 
@@ -183,6 +197,8 @@
         paidCSats = s.cSats ?? invoice.cSats;
         step = "paid";
         await load();
+        // Back where the Buy cSats button was, after a moment to see it went through.
+        if (returnTo && onReturn) setTimeout(() => onReturn?.(), 3000);
       } else if (s.status === "expired" || Date.now() > expiresAt + 15_000) {
         clearInterval(pollTimer);
         step = "expired";
@@ -410,7 +426,12 @@
               <div class="get"><dt>Added to your balance</dt><dd>{fmtNum(paidCSats, 3)} cSats</dd></div>
               <div><dt>New balance</dt><dd>{balance === null ? "–" : `${fmtNum(balance)} cSats`}</dd></div>
             </dl>
-            <button class="primary wl-wide" onclick={backToAmount}>Done</button>
+            {#if returnTo && onReturn}
+              <!-- Came from a Buy cSats button: straight back to the bot or chat (it resumes on its own). -->
+              <button class="primary wl-wide" data-testid="wallet-return" onclick={() => onReturn?.()}>Back to {returnTo}</button>
+            {:else}
+              <button class="primary wl-wide" onclick={backToAmount}>Done</button>
+            {/if}
           </div>
         {:else}
           <div class="wl-done" role="status">

@@ -8,7 +8,7 @@ import type { ServedBy } from "../swarm/served-by.js";
 import { AutoUnsupportedError, NetworkInferenceError, RouteElsewhereError, streamNetworkCompletion, type NetworkDeps, type NetworkTarget } from "../apps/ide/network-inference.js";
 import { contextWindowFor, ollamaChat, type OllamaPiece } from "./ollama.js";
 import { ENGINE_PRESETS, EngineError, openAiEngineChat, type OpenAiEngine } from "./openai-engine.js";
-import { BEST_FIT_ROUTE, ComplexityWindow, bestFitRoute, networkAllowance, noRouteMessage, planRoutes, routeModelId, sizeWorkload, type ComplexityFloors, type ComputePolicy, type PlanOptions, type QualityFloor, type Route, type RouteInputs } from "./auto-route.js";
+import { BEST_FIT_ROUTE, ComplexityWindow, bestFitRoute, cheapestNetworkEstimate, classOnline, classUnavailableMessage, networkAllowance, noRouteMessage, notEnoughCSatsMessage, planRoutes, routeModelId, sizeWorkload, type ComplexityFloors, type ComputePolicy, type PlanOptions, type QualityFloor, type Route, type RouteInputs } from "./auto-route.js";
 import { complexityWeightsFromEnv, contentComplexity, estimateComplexity } from "./job-complexity.js";
 import { ChatBackendError, type ChatBackend, type ChatPiece } from "./types.js";
 import type { RoutingHints } from "./job-descriptor.js";
@@ -91,7 +91,7 @@ export function networkBackend(deps: NetworkDeps, target: { model: string; compu
       if (err instanceof ChatBackendError) throw err;
       if (err instanceof RouteElsewhereError) throw new RouteElsewhere(err.message, err.url);
       if (err instanceof AutoUnsupportedError) throw new AutoUnsupported(err.message);
-      if (err instanceof NetworkInferenceError) throw new ChatBackendError(err.message, err.status, err.retryAfterSec);
+      if (err instanceof NetworkInferenceError) throw new ChatBackendError(err.message, err.status, err.retryAfterSec, err.info);
       throw new ChatBackendError((err as Error).message, 502);
     }
   };
@@ -211,7 +211,8 @@ export function autoBackend(opts: {
     const session = req.hints?.sessionId ?? (opts.hysteresis === "session" ? undefined : "");
     const local = contentComplexity(estimated);
     const complexity = session === undefined ? { ...local, held: false } : windowFor(session).push(local);
-    const planned = planRoutes(sizeWorkload(req, opts.floor, complexity, opts.complexityFloors), inputs, policy, planOpts).map((r) => ({ ...r, complexity: complexity.level }));
+    const workload = sizeWorkload(req, opts.floor, complexity, opts.complexityFloors);
+    const planned = planRoutes(workload, inputs, policy, planOpts).map((r) => ({ ...r, complexity: complexity.level }));
     // Network only with no model chosen: the coordinator's best fit (in its class) leads, even when
     // this side doesn't know the network's models, as long as something may be spent.
     const networkOnlyBestFit = policy === "network_only" && !planOpts.model && !!opts.networkBestFit && networkAllowance(inputs, planOpts) > 0;
@@ -223,7 +224,7 @@ export function autoBackend(opts: {
     const skip = new Set(planOpts.exclude ?? []);
     const kept = skip.size ? all.filter((r) => !skip.has(routeModelId(r))) : all;
     const routes = kept.length ? kept : all;
-    if (!routes.length) throw new ChatBackendError(noRouteMessage(policy, inputs, planOpts), 404);
+    if (!routes.length) throw noRouteError(noRouteMessage(policy, inputs, planOpts, workload), planOpts.computeClass);
     const allowance = networkAllowance(inputs, planOpts);
     const bestFitHints = (): RoutingHints => {
       const ceiling = Number.isFinite(allowance) ? Math.min(req.hints?.maxCSats ?? Infinity, allowance) : req.hints?.maxCSats;
@@ -233,6 +234,7 @@ export function autoBackend(opts: {
     // The small free fallback is always tried, whatever maxTries cuts (the best-fit leg does not count).
     const main = routes.filter((r) => !r.fallback).slice(0, (opts.maxTries ?? 4) + (routes.some((r) => r.bestFit) ? 1 : 0));
     let lastErr: unknown;
+    const errs: unknown[] = [];
     for (const r of [...main, ...routes.filter((r) => r.fallback)]) {
       const it = (r.bestFit && opts.networkBestFit ? opts.networkBestFit(bestFitHints()) : opts.run(r))(req, signal);
       let first: IteratorResult<ChatPiece>;
@@ -240,6 +242,7 @@ export function autoBackend(opts: {
         first = await it.next();
       } catch (err) {
         lastErr = err;
+        errs.push(err);
         continue;
       }
       opts.onRoute?.(r);
@@ -255,11 +258,29 @@ export function autoBackend(opts: {
       }
       return;
     }
-    if (lastErr instanceof ChatBackendError && lastErr.status === 402 && routes.every((r) => r.placement === "network") && policy !== "network_only") {
-      throw new ChatBackendError(`${lastErr.message} No model on this computer or your machines can take it instead: install one in Settings > Models, or buy cSats.`, 402);
+    // One clear failure instead of the last route's: a class with no machine, else money.
+    const cls = policy === "network_only" && planOpts.computeClass && planOpts.computeClass !== "any" ? planOpts.computeClass : undefined;
+    const pinned = planOpts.model ? planned.find((r) => r.placement === "network")?.model : undefined;
+    const classGone = errs.some((e) => e instanceof ChatBackendError && (e.info?.code === "no_agent_in_class" || (e.info?.code === "no_route_fits" && e.info.reason === "none")));
+    if (cls && (classGone || classOnline(inputs, cls, pinned) === false)) {
+      throw new ChatBackendError(classUnavailableMessage(cls, inputs, pinned), 404, undefined, { code: "class_unavailable", computeClass: cls });
+    }
+    const money = errs.find((e): e is ChatBackendError => e instanceof ChatBackendError && (e.info?.code === "insufficient_credits" || (e.info?.code === "no_route_fits" && e.info.reason === "price") || e.status === 402));
+    if (money && (policy === "network_only" || policy === "model" || routes.every((r) => r.placement === "network"))) {
+      const est = money.info?.neededCSats !== undefined ? { cSats: money.info.neededCSats, computeClass: money.info.computeClass } : cheapestNetworkEstimate(workload, inputs, cls);
+      const msg = notEnoughCSatsMessage(inputs, planOpts, est ? { ...est, computeClass: cls ?? est.computeClass } : undefined);
+      const tail = policy === "network_only" || policy === "model" ? "" : " No model on this computer or your machines can take it instead: install one in Settings > Models, or buy cSats.";
+      throw new ChatBackendError(msg + tail, 402, undefined, { code: "not_enough_csats", ...(est?.cSats !== undefined ? { neededCSats: est.cSats } : {}), ...(cls ? { computeClass: cls } : {}) });
     }
     throw lastErr instanceof ChatBackendError ? lastErr :new ChatBackendError((lastErr as Error)?.message ?? "Auto couldn't start anywhere", 502);
   };
+}
+
+/** A "nowhere to run" error, with its kind as data (the apps key Buy cSats / Edit compute on it). */
+function noRouteError(message: string, computeClass?: string): ChatBackendError {
+  if (message.startsWith("Not enough cSats")) return new ChatBackendError(message, 402, undefined, { code: "not_enough_csats", ...(computeClass ? { computeClass } : {}) });
+  if (/^No .+ machines online/.test(message)) return new ChatBackendError(message, 404, undefined, { code: "class_unavailable", ...(computeClass ? { computeClass } : {}) });
+  return new ChatBackendError(message, 404);
 }
 
 /**

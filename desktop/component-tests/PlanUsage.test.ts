@@ -127,3 +127,33 @@ describe("Wallet: buying cSats for the first time", () => {
     expect(document.body.textContent).toContain("The code works for 15 minutes; if it runs out, nothing is charged: just make a new one.");
   });
 });
+
+describe("Wallet: from a Buy cSats button", () => {
+  it("preselects the suggested amount, and after payment goes back to the bot", async () => {
+    const { buyRequest } = await import("../src/lib/buy-csats");
+    const { get } = await import("svelte/store");
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      api.computeOverview.mockResolvedValue({ connected: true, models: [] });
+      api.getWalletOverview.mockResolvedValue(overview(null));
+      api.getPayoutDestination.mockResolvedValue(dest(false));
+      api.computeBuy.mockResolvedValue({ intentId: "i2", invoice: "lnbcrt1test", amountSats: 100_000, cSats: 100_000, feeSats: 0, network: "regtest", expiresInSeconds: 900 });
+      api.computeIntent.mockResolvedValue({ status: "settled", cSats: 100_000 });
+      buyRequest.set({ amountSats: 100_000, returnTo: "Harry" });
+      const onReturn = vi.fn();
+      render(PlanUsage, { onReturn });
+      // The request is taken (a later visit starts fresh) and its amount is chosen.
+      expect(get(buyRequest)).toBeNull();
+      const buy = await screen.findByRole("button", { name: /Buy 100,000 cSats with Lightning/ });
+      await waitFor(() => expect((buy as HTMLButtonElement).disabled).toBe(false));
+      await fireEvent.click(buy);
+      await vi.advanceTimersByTimeAsync(3_100);
+      const back = await screen.findByTestId("wallet-return");
+      expect(back.textContent).toBe("Back to Harry");
+      await fireEvent.click(back);
+      expect(onReturn).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

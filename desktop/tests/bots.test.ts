@@ -18,8 +18,10 @@ describe("bot header helpers", () => {
     const stuck = { atMs: 5, problem: "npm test: package.json not found", runs: 3 };
     const b = bot({ status: "paused", enabled: false, stuck });
     expect(statusChip(b)).toEqual({ text: "Stuck", tone: "warn" });
-    expect(autoStatus(b)).toEqual({ text: "Paused: Harry kept hitting the same problem (npm test: package.json not found). Tell it what to do, or resume.", tone: "warn" });
-    expect(botStatusLine(b)).toBe("Stuck: same result 3 runs in a row");
+    // The banner has the full story; the header and the sidebar only the short status.
+    expect(autoStatus(b)).toEqual({ text: "Paused · stuck", tone: "muted" });
+    expect(botStatusLine(b)).toBe("Stuck");
+    expect(failureNotice(b)).toMatchObject({ kind: "stuck", title: "Stuck", detail: "Paused: Harry kept hitting the same problem (npm test: package.json not found). Tell it what to do, or resume.", actions: ["edit"] });
     expect(statusChip(bot({ status: "paused", enabled: false })).text).toBe("Paused");
     expect(autoStatus(bot({ status: "paused", enabled: false })).text).toBe("Paused");
   });
@@ -30,8 +32,19 @@ describe("bot header helpers", () => {
     const n = failureNotice(failed)!;
     expect(n.runId).toBe("run_9");
     expect(n.detail).not.toMatch(/91\.8/);
-    expect(n.actions).toEqual(["buy", "local_only"]);
-    expect(failureNotice({ ...failed, compute: { policy: "local_only" } })!.actions).toEqual(["buy", "edit"]);
+    // Out of cSats: Buy cSats first (the primary action), then Edit budget.
+    expect(n).toMatchObject({ kind: "csats", title: "Out of cSats" });
+    expect(n.actions).toEqual(["buy", "budget"]);
+    const broke = "Not enough cSats: your balance is 0.01 cSats (Harry's budget has 6 left today). This step needs about 0.4 cSats on a Datacenter GPU.";
+    expect(failureNotice({ ...failed, lastRun: { ...failed.lastRun!, error: broke } })).toMatchObject({
+      title: "Out of cSats",
+      detail: "Your balance is 0.01 cSats (Harry's budget has 6 left today). This step needs about 0.4 cSats on a Datacenter GPU.",
+      actions: ["buy", "budget"],
+    });
+    // No machine of the class: the class in the title, what's online instead, Edit compute.
+    const cls = failureNotice({ ...failed, lastRun: { ...failed.lastRun!, error: "No GPU machines online. Available now: Datacenter GPU (1), Apple (2), CPU (9). Choose another compute option, or try again when one is back." } })!;
+    expect(cls).toMatchObject({ kind: "class", title: "No GPU machines online", actions: ["edit"] });
+    expect(cls.detail).toMatch(/^Available now: Datacenter GPU \(1\), Apple \(2\), CPU \(9\)\./);
     expect(failureNotice(bot())).toBeNull();
     expect(failureNotice(bot({ lastRun: { ...failed.lastRun!, error: "No model is installed on this computer." } }))!.actions).toEqual(["edit"]);
   });
@@ -73,7 +86,13 @@ describe("bots helpers", () => {
     expect(botStatusLine(bot({ status: "needs_approval", pending: [{ callId: "c", tool: "git_push", args: {} }] }))).toBe("Needs approval: git push");
     expect(botStatusLine(bot({ status: "running", activity: "Using read_file" }))).toBe("Working: Using read_file");
     expect(botStatusLine(bot({ status: "running", activity: "Auto: this computer" }))).toBe("Working…");
-    expect(botStatusLine(bot({ status: "over_budget" }))).toBe("Paused: today's budget is spent");
+    expect(botStatusLine(bot({ status: "over_budget" }))).toBe("Budget spent");
+    expect(botStatusLine(bot({ status: "out_of_csats" }))).toBe("Out of cSats");
+    // A failure: a short neutral status, never the error sentence.
+    const failedRun = { id: "f", trigger: "schedule" as const, startedAtMs: 0, status: "failed" as const, cSats: 0, summary: "Failed: No model on the network fits this request: no agent with a model is online.", error: "No model on the network fits this request: no agent with a model is online." };
+    expect(botStatusLine(bot({ status: "error", lastRun: failedRun }))).toBe("No machines of its class online");
+    expect(botStatusLine(bot({ status: "error", lastRun: { ...failedRun, error: "Not enough cSats: your balance is 0 cSats." } }))).toBe("Out of cSats");
+    expect(botStatusLine(bot({ status: "error", lastRun: { ...failedRun, error: "boom" } }))).toBe("Last run failed");
     const lastRun = { id: "r", trigger: "manual" as const, startedAtMs: 0, status: "done" as const, summary: "Fixed 2 tests.", cSats: 0 };
     expect(botStatusLine(bot({ lastRun }))).toBe("Fixed 2 tests.");
     expect(botStatusLine(bot({ status: "paused", lastRun }))).toBe("Paused · Fixed 2 tests.");
@@ -100,7 +119,10 @@ describe("bots helpers", () => {
     expect(autoStatus(bot({ held: "run_cap", maxRunsPerDay: 48 }), now)).toEqual({ text: "Daily limit of 48 runs reached · resumes tomorrow", tone: "warn" });
     expect(autoStatus(bot({ status: "over_budget" }), now).text).toBe("Budget spent · resumes tomorrow");
     expect(autoStatus(bot(), now).text).toBe("Waiting for a message");
-    expect(autoStatus(bot({ status: "error", nextRun: { kind: "heartbeat", atMs: now + 30 * 60_000 } }), now)).toEqual({ text: "Last run failed · Next check in 30 min", tone: "err" });
+    // A failure is the banner's to tell: the header just says what's next.
+    expect(autoStatus(bot({ status: "error", nextRun: { kind: "heartbeat", atMs: now + 30 * 60_000 } }), now)).toEqual({ text: "Next check in 30 min", tone: "muted" });
+    expect(autoStatus(bot({ status: "out_of_csats" }), now)).toEqual({ text: "Paused · resumes after top-up", tone: "muted" });
+    expect(statusChip(bot({ status: "out_of_csats" }))).toEqual({ text: "Out of cSats", tone: "warn" });
   });
 
   it("check-ins: a bot with a job and no schedule checks in every 30 minutes by default", () => {

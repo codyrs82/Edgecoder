@@ -18,6 +18,7 @@
 import type { UsageRecord } from "../../economy/usage.js";
 import type { JobDescriptor } from "../../inference-api/job-descriptor.js";
 import type { CoordinatorChoice } from "../../common/coordinator-choice.js";
+import { classFamily } from "../../inference-api/auto-route.js";
 import { complexityWeightsFromEnv, type ComplexityWeights } from "../../inference-api/job-complexity.js";
 import { worldOwnerTag, type LocalWorld } from "../network-world.js";
 import { routableModels } from "../model-catalog.js";
@@ -265,8 +266,8 @@ export async function resolveAuto(job: JobDescriptor, opts: { peers?: boolean; c
   // Never the requester's own machines (self-dealing).
   const agents = withoutRequesterAgents(withoutRestrictedModels([...local, ...peerAgentViews(views, nowMs)]), opts.requesterAccountId, owners);
   const view: NetworkView = {
-    // A class the client named limits the choice to it.
-    agents: opts.computeClass ? agents.filter((a) => a.computeClass === opts.computeClass) : agents,
+    // A class the client named limits the choice to it ("gpu" is the GPU family: gpu and gpu.dc).
+    agents: opts.computeClass ? agents.filter((a) => classFamily(opts.computeClass!).includes(a.computeClass)) : agents,
     pickupP50Ms: pickupStats().p50,
     waitingByModel: Object.fromEntries(queue.waitingInferenceByModel()),
     btcUsd: mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD,

@@ -151,10 +151,37 @@ export interface NetworkTarget {
   coordinatorChoice?: CoordinatorChoice;
 }
 
+/**
+ * Why a network call couldn't start, as data (the apps word it): `code` the coordinator's error
+ * ("no_route_fits", "insufficient_credits"), `reason` for no_route_fits ("none": no machine,
+ * "price": nothing within what may be spent), `neededCSats` about what the step needs.
+ */
+export interface NetworkFailureInfo {
+  code: string;
+  reason?: string;
+  neededCSats?: number;
+  computeClass?: string;
+}
+
 export class NetworkInferenceError extends Error {
-  constructor(message: string, readonly status: number, readonly retryAfterSec?: number) {
+  constructor(message: string, readonly status: number, readonly retryAfterSec?: number, readonly info?: NetworkFailureInfo) {
     super(message);
   }
+}
+
+/** no_route_fits from the coordinator as data; older coordinators only send the detail text. */
+export function noRouteInfo(json: Record<string, unknown>): NetworkFailureInfo {
+  const detail = String(json.detail ?? "");
+  const reason =
+    typeof json.reason === "string" ? json.reason :
+    /costs more than the .* cSats ceiling/.test(detail) ? "price" :
+    /no agent with a model is online/.test(detail) ? "none" : undefined;
+  return {
+    code: "no_route_fits",
+    ...(reason ? { reason } : {}),
+    ...(typeof json.neededCSats === "number" ? { neededCSats: json.neededCSats } : {}),
+    ...(typeof json.computeClass === "string" ? { computeClass: json.computeClass } : {}),
+  };
 }
 
 /** model "auto": the coordinator's best fit is on a peer coordinator; resubmit there. */
@@ -265,7 +292,7 @@ async function* streamSubmitted(
       if (err === "route_elsewhere" && typeof sub.json.coordinatorUrl === "string") throw new RouteElsewhereError(sub.json.coordinatorUrl, sub.json.routing as Record<string, unknown> | undefined);
       // An older coordinator looks for a model called "auto"; one that routes says no_route_fits.
       if (err === "no_agent_has_model") throw new AutoUnsupportedError();
-      if (err === "no_route_fits") throw new NetworkInferenceError(`No model on the network fits this request: ${String(sub.json.detail ?? "nothing is available")}.`, 404);
+      if (err === "no_route_fits") throw new NetworkInferenceError(`No model on the network fits this request: ${String(sub.json.detail ?? "nothing is available")}.`, 404, undefined, noRouteInfo(sub.json));
     }
     const msg =
       err === "no_agent_has_model" ? `No machine on the network has ${req.model} right now.` :
@@ -278,7 +305,11 @@ async function* streamSubmitted(
       `Network request failed: ${err}`;
     // 404 (reservation_not_active) stays a 404: as a 502 the edge (Cloudflare) swaps the body for its
     // own error page, so an API caller never sees why.
-    throw new NetworkInferenceError(msg, sub.status === 402 ? 402 : sub.status === 409 || sub.status === 404 ? 404 : 502);
+    const info: NetworkFailureInfo | undefined =
+      err === "insufficient_credits" ? { code: err, ...(typeof sub.json.neededCSats === "number" ? { neededCSats: sub.json.neededCSats } : {}), ...(req.computeClass && req.computeClass !== "any" ? { computeClass: req.computeClass } : {}) } :
+      err === "no_agent_in_class" || err === "no_agent_has_model" ? { code: err, ...(req.computeClass && req.computeClass !== "any" ? { computeClass: req.computeClass } : {}) } :
+      undefined;
+    throw new NetworkInferenceError(msg, sub.status === 402 ? 402 : sub.status === 409 || sub.status === 404 ? 404 : 502, undefined, info);
   }
   const subtaskId = String(sub.json.subtaskId);
   const routed = typeof (sub.json.routing as { line?: unknown } | undefined)?.line === "string" ? String((sub.json.routing as { line: string }).line) : undefined;
@@ -325,8 +356,10 @@ export interface ComputeOverview {
     networkAgents?: number;
     coordinator?: { peerId: string; url: string };
   };
-  classes?: Record<string, { label: string; cSatsPerSecondBaseTier: number }>;
-  models?: Array<{ model: string; agents: number; classes: string[]; cSatsPerMTokens?: { input: number; output: number }; restricted?: string }>;
+  /** agents: machines online in the class with a model (newer coordinators). */
+  classes?: Record<string, { label: string; cSatsPerSecondBaseTier: number; agents?: number }>;
+  /** agentsByClass: machines per class with the model (newer coordinators). */
+  models?: Array<{ model: string; agents: number; agentsByClass?: Record<string, number>; classes: string[]; cSatsPerMTokens?: { input: number; output: number }; restricted?: string }>;
   /** How this machine's agent chose its coordinator (signed registry + latency), from /forward/health. */
   steering?: CoordinatorSteeringView | null;
   /**

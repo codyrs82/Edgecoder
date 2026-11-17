@@ -81,6 +81,9 @@ describe("best fit on the current network (9 CPU 1.5b, a 1-slot GPU 30b, Macs 7b
     const none = pick(SINGLE_EDIT, currentNetwork(), { maxCSats: 0.000001 });
     expect(none.chosen).toBeNull();
     expect(none.rejected).toMatch(/cSats ceiling/);
+    // A money problem, as data: what the cheapest fitting step would have cost.
+    expect(none.rejectedCode).toBe("price");
+    expect(none.cheapestCSats).toBeGreaterThan(0.000001);
   });
 
   it("context fit: a call bigger than every window is refused with the reason; a client's minContext counts", () => {

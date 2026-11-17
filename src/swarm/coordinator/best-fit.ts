@@ -332,6 +332,13 @@ export interface BestFitResult {
   reason: string;
   /** Why nothing fits, when chosen is null. */
   rejected?: string;
+  /**
+   * The same as a code: "none" (no agent with a model), "tools", "context", or "price" (every
+   * fitting model costs more than job.maxCSats: a money problem, not capacity).
+   */
+  rejectedCode?: "none" | "tools" | "context" | "price";
+  /** "price": the cheapest fitting estimate (cSats), so the caller can say what the step needs. */
+  cheapestCSats?: number;
 }
 
 const round3 = (n: number) => Math.round(n * 1000) / 1000;
@@ -411,12 +418,16 @@ export function bestFit(job: JobDescriptor, view: NetworkView, cfg: BestFitConfi
   const fits = all.filter((c) => c.toolsOk && c.contextOk && c.priceOk);
   const header = `${job.job.replace("_", " ")} · complexity ${describeComplexity(job.complexity, 2)}`;
   if (fits.length === 0) {
+    const rejectedCode: NonNullable<BestFitResult["rejectedCode"]> =
+      all.length === 0 ? "none" : !all.some((c) => c.toolsOk) ? "tools" : !all.some((c) => c.toolsOk && c.contextOk) ? "context" : "price";
     const rejected =
-      all.length === 0 ? "no agent with a model is online" :
-      !all.some((c) => c.toolsOk) ? "no available model calls tools" :
-      !all.some((c) => c.toolsOk && c.contextOk) ? `no agent's context window holds ${req.contextTokens} tokens` :
+      rejectedCode === "none" ? "no agent with a model is online" :
+      rejectedCode === "tools" ? "no available model calls tools" :
+      rejectedCode === "context" ? `no agent's context window holds ${req.contextTokens} tokens` :
       `every fitting model costs more than the ${job.maxCSats} cSats ceiling`;
-    return { chosen: null, candidates: [], requirements: req, weights: w, affinity: { status: "none" }, reason: `${header}: nothing fits (${rejected})`, rejected };
+    const fitting = all.filter((c) => c.toolsOk && c.contextOk);
+    const cheapest = rejectedCode === "price" && fitting.length ? round3(Math.min(...fitting.map((c) => c.estimate.cSats))) : undefined;
+    return { chosen: null, candidates: [], requirements: req, weights: w, affinity: { status: "none" }, reason: `${header}: nothing fits (${rejected})`, rejected, rejectedCode, ...(cheapest !== undefined ? { cheapestCSats: cheapest } : {}) };
   }
   let pool: Candidate[] = fits.filter((c) => c.paramsB >= req.minParamsB);
   if (pool.length === 0) {

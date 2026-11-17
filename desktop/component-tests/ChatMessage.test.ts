@@ -32,3 +32,30 @@ describe("ChatMessage with a huge assistant reply", () => {
     expect(performance.now() - t).toBeLessThan(4_000);
   });
 });
+
+describe("ChatMessage: a failed reply", () => {
+  it("out of cSats: one compact notice with Buy cSats, not a raw error bubble", async () => {
+    const { get } = await import("svelte/store");
+    const { buyRequest, openWalletRequest } = await import("../src/lib/buy-csats");
+    const { fireEvent, screen } = await import("@testing-library/svelte");
+    const err = "Not enough cSats: your balance is 0.01 cSats. This step needs about 0.4 cSats on the network.";
+    render(ChatMessage, { role: "assistant", content: `Error: ${err}` });
+    const note = screen.getByTestId("reply-failure");
+    expect(note.textContent).toMatch(/^Couldn't run: out of cSats · your balance is 0\.01 cSats\./);
+    expect(document.body.textContent).not.toMatch(/Error:/);
+    expect(document.body.textContent!.split("your balance is 0.01 cSats").length - 1).toBe(1);
+    const before = get(openWalletRequest);
+    await fireEvent.click(screen.getByRole("button", { name: "Buy cSats" }));
+    expect(get(openWalletRequest)).toBe(before + 1);
+    expect(get(buyRequest)).toMatchObject({ returnTo: "the chat", amountSats: 5_000 });
+    buyRequest.set(null);
+  });
+
+  it("keeps the reply's text above the notice; other failures have no Buy button", async () => {
+    const { screen } = await import("@testing-library/svelte");
+    render(ChatMessage, { role: "assistant", content: "I read the file.\n\nError contacting model: No GPU machines online. Available now: CPU (9)." });
+    expect(document.body.textContent).toMatch(/I read the file\./);
+    expect(screen.getByTestId("reply-failure").textContent).toMatch(/Couldn't run: no machines of that class online · No GPU machines online/);
+    expect(screen.queryByRole("button", { name: "Buy cSats" })).toBeNull();
+  });
+});

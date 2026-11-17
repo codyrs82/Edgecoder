@@ -114,3 +114,23 @@ describe("ConversationSidebar (#161)", () => {
     expect(store.renameConversation).not.toHaveBeenCalled();
   });
 });
+
+describe("ConversationSidebar: bot status lines", () => {
+  it("a failed bot shows a short neutral status, never the error sentence", async () => {
+    const { bots } = await import("../src/lib/bots-store");
+    const err = "Not enough cSats: your balance is 0.01 cSats (Harry's budget has 6 left today). This step needs about 0.4 cSats on a Datacenter GPU.";
+    const base = { role: "Engineer", instructions: "", projectRoot: "/p", enabled: true, schedule: "", budgetCSatsPerDay: 100, allowedTools: [], autoApproveEdits: true, color: "#0090ff", createdAtMs: 0, updatedAtMs: 0, spentTodayCSats: 0, pending: [], queuedMessages: 0 };
+    const lastRun = (error: string) => ({ id: "r", trigger: "heartbeat" as const, startedAtMs: 0, status: "failed" as const, summary: `Failed: ${error}`, cSats: 0, error });
+    bots.set([
+      { ...base, id: "b1", name: "Harry", status: "out_of_csats", lastRun: lastRun(err) },
+      { ...base, id: "b2", name: "Sally", status: "error", lastRun: lastRun("No model on the network fits this request: no agent with a model is online.") },
+    ]);
+    store.listConversationsBySource.mockResolvedValue([]);
+    render(ConversationSidebar, { props: { open: true, inline: true, onClose: vi.fn(), onSelectConversation: vi.fn(), onNewChat: vi.fn(), activeConversationId: null, onSelectBot: vi.fn() } });
+    const statuses = [...document.querySelectorAll(".bot-status")].map((e) => e.textContent);
+    expect(statuses).toEqual(["Out of cSats", "No machines of its class online"]);
+    expect(document.body.textContent).not.toMatch(/Not enough cSats|No model on the network/);
+    expect(document.querySelector(".bot-status.err")).toBeNull();
+    bots.set([]);
+  });
+});

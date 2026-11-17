@@ -2,7 +2,8 @@
   import "../styles/settings-page.css";
   import Dialog from "./ui/Dialog.svelte";
   import Select from "./ui/Select.svelte";
-  import { createBot, updateBot, getBot, botErrorText } from "../lib/api";
+  import { createBot, updateBot, getBot, botErrorText, computeOverview, type ComputeOverview } from "../lib/api";
+  import { availabilityLine, classAvailability, modelsInClass, unavailableTitle, unavailableWarning, type ClassAvailability } from "../lib/compute-availability";
   import { RESTARTING_TEXT, localServiceRestarting } from "../lib/local-service";
   import ComputePicker from "./ComputePicker.svelte";
   import BotAvatar from "./BotAvatar.svelte";
@@ -64,6 +65,21 @@
   // Network only (any class or one): the Model selector is optional; empty means the network's best fit.
   let networkModel = $state<string | undefined>(initialCompute.policy === "network_only" ? initialCompute.model : undefined);
   const networkOnly = $derived(policy.startsWith("network_only"));
+
+  // What the network has now, per class: each network card says it, an empty class can't be
+  // picked, and the Model list under a per-class card lists only what that class serves.
+  let overview = $state<ComputeOverview | null>(null);
+  $effect(() => {
+    computeOverview().then((ov) => (overview = ov)).catch(() => (overview = null));
+  });
+  const classOf = (choice: string): string | undefined => (choice.startsWith("network_only:") ? choice.split(":")[1] : undefined);
+  /** A network card's availability (with the chosen model, when one is chosen); null for the other cards. */
+  function availabilityOf(choice: string): ClassAvailability | null {
+    if (!choice.startsWith("network_only")) return null;
+    return classAvailability(overview, classOf(choice), networkModel);
+  }
+  const selectedAvailability = $derived(availabilityOf(policy));
+  const pickerClasses = $derived(modelsInClass(overview, classOf(policy)));
 
   // The picker's own Auto rows map onto the matching policies.
   function pickModel(id: string | undefined) {
@@ -289,13 +305,23 @@
           <span class="sp-text"><span class="sp-title">Where it runs</span><span class="sp-desc">{networkOnly ? "Network only never falls back to this computer or your machines: with no cSats left today it stops and says so." : "When the network can't be paid for, it uses the best model on this computer or your machines instead."}</span></span>
           <div class="bf-policies" role="radiogroup" aria-label="Where it runs">
             {#each COMPUTE_POLICY_OPTIONS as o (o.value)}
-              <label class="bf-policy" class:active={policy === o.value}>
-                <input type="radio" name="bot-compute" value={o.value} bind:group={policy} />
+              {@const avail = availabilityOf(o.value)}
+              {@const cls = classOf(o.value)}
+              <!-- An empty class can't be picked; a saved choice stays selected (with a warning below). -->
+              {@const off = avail?.state === "none" && policy !== o.value}
+              <label class="bf-policy" class:active={policy === o.value} class:off aria-disabled={off ? "true" : undefined} title={off ? unavailableTitle(cls ?? "network", networkModel) : undefined}>
+                <input type="radio" name="bot-compute" value={o.value} bind:group={policy} disabled={off} />
                 <span class="bf-policy-title">{o.title}</span>
                 <span class="bf-policy-desc">{o.desc}</span>
+                {#if avail}
+                  <span class="bf-policy-live" class:none={avail.state === "none"} data-testid="compute-availability">{availabilityLine(avail)}</span>
+                {/if}
               </label>
             {/each}
           </div>
+          {#if selectedAvailability?.state === "none"}
+            <p class="bf-warn" role="alert" data-testid="compute-unavailable-warning">{classOf(policy) ? unavailableWarning(classOf(policy)!, networkModel) : `No machines online on the network${networkModel ? " with that model" : ""}: runs will fail until one is back. Choose another option.`}</p>
+          {/if}
         </div>
         {#if policy === "model"}
           <div class="sp-row">
@@ -308,7 +334,7 @@
           <div class="sp-row">
             <span class="sp-text"><span class="sp-title">Model</span><span class="sp-desc">{networkModel ? "Every step runs on this model, on the network." : "Best fit: the network picks the model for each step."}</span></span>
             <div class="bf-picker">
-              <ComputePicker selected={networkModel ?? "auto"} onSelect={pickNetworkModel} up={false} />
+              <ComputePicker selected={networkModel ?? "auto"} onSelect={pickNetworkModel} up={false} networkModels={pickerClasses} networkClass={classOf(policy)} />
               {#if networkModel}<button type="button" class="small" onclick={() => (networkModel = undefined)}>Use best fit</button>{/if}
             </div>
           </div>
@@ -465,6 +491,26 @@
   .bf-policy:focus-within {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
+  }
+  .bf-policy.off {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .bf-policy.off:hover {
+    border-color: var(--border-strong);
+  }
+  .bf-policy-live {
+    font-size: 11.5px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+  .bf-policy-live.none {
+    color: var(--yellow);
+  }
+  .bf-warn {
+    margin: 8px 0 0;
+    font-size: 12px;
+    color: var(--yellow);
   }
   .bf-policy input {
     position: absolute;

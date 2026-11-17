@@ -50,6 +50,28 @@ describe("ComputePicker (#24/#26 searchable model combobox)", () => {
     expect(screen.getByRole("option", { name: /This computer only.*current choice/ })).toBeTruthy();
   });
 
+  it("under a bot's Network <class> only card: only the models that class serves, network only", async () => {
+    api.computeOverview.mockResolvedValue({
+      connected: true,
+      models: [
+        { model: "deepseek-r1:32b", agents: 2, agentsByClass: { gpu: 2 }, classes: ["gpu"] },
+        { model: "qwen2.5-coder:7b", agents: 9, agentsByClass: { cpu: 9 }, classes: ["cpu"] },
+      ],
+    });
+    await openPicker({ networkModels: ["qwen2.5-coder:7b"], networkClass: "cpu", selected: "auto" });
+    await waitFor(() => expect(screen.getByRole("option", { name: "qwen2.5-coder:7b, Any" })).toBeTruthy());
+    expect(screen.queryByRole("option", { name: /deepseek/ })).toBeNull();
+    // Nothing on this computer or your machines under a network-only card.
+    expect(screen.queryByRole("option", { name: /llama3\.2:3b/ })).toBeNull();
+  });
+
+  it("the class chips say how many machines of that class have the model", async () => {
+    api.computeOverview.mockResolvedValue({ connected: true, models: [{ model: "deepseek-r1:32b", agents: 3, agentsByClass: { gpu: 2, "gpu.dc": 1 }, classes: ["gpu", "gpu.dc"] }] });
+    await openPicker();
+    const chip = await screen.findByRole("option", { name: "deepseek-r1:32b, GPU" });
+    expect(chip.getAttribute("title")).toMatch(/Only GPU machines \(2 online\)/);
+  });
+
   it("filters as you type and Enter picks the first match", async () => {
     const { onSelect, input } = await openPicker();
     await waitFor(() => expect(screen.getByRole("option", { name: /llama3\.2:3b/ })).toBeTruthy());

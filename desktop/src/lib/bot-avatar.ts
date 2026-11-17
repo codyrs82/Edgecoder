@@ -40,6 +40,7 @@ export function moodFor(status: BotStatus): Mood {
       return "failed";
     case "paused":
     case "over_budget":
+    case "out_of_csats":
       return "asleep";
     default:
       return "idle";

@@ -1057,6 +1057,8 @@ app.addHook("onClose", async () => {
 const bots = new BotManager({
   approvals: pendingApprovals,
   permissions: permissionStore,
+  // Bots paused out of cSats resume after a top-up.
+  balance: async () => (networkDeps ? (await computeOverview(networkDeps).catch(() => null))?.account?.cSats : undefined),
   log: (msg, extra) => app.log.warn({ extra }, msg),
   runner: agentBotRunner({
     // Each step on the bot's compute policy (Local first by default), within its budget and your balance.

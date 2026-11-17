@@ -416,7 +416,8 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const now = Date.now();
     // Security research tier: a restricted model is listed only to an account entitled to it.
     const viewer = restrictedCatalog.size > 0 ? await modelViewerAccount(req) : undefined;
-    const byModel = new Map<string, { agents: number; idle: number; free: number; classes: Set<ComputeClassId>; ctx?: number; rtts: number[]; freeRtts: number[] }>();
+    const byModel = new Map<string, { agents: number; idle: number; free: number; classes: Set<ComputeClassId>; byClass: Partial<Record<ComputeClassId, number>>; ctx?: number; rtts: number[]; freeRtts: number[] }>();
+    const classAgents: Partial<Record<ComputeClassId, Set<string>>> = {};
     const claims = queue.activeClaims();
     for (const [id, cap] of agentCapabilities) {
       if (activeBlacklistRecord(id) || (cap.lastSeenMs !== undefined && now - cap.lastSeenMs > 3 * 60_000)) continue;
@@ -430,8 +431,10 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         const tier = restrictedCatalog.tierOf(m);
         if (tier && !accountHoldsTier(viewer, tier, now)) continue;
         if (!memoryAdmits(id, m, held, now) && !modelLoadedOn(id, m, now) && !unavailable) continue;
-        const e = byModel.get(m) ?? { agents: 0, idle: 0, free: 0, classes: new Set<ComputeClassId>(), rtts: [], freeRtts: [] };
+        const e = byModel.get(m) ?? { agents: 0, idle: 0, free: 0, classes: new Set<ComputeClassId>(), byClass: {}, rtts: [], freeRtts: [] };
         e.agents++;
+        e.byClass[cls] = (e.byClass[cls] ?? 0) + 1;
+        (classAgents[cls] ??= new Set()).add(id);
         if (queue.agentClaims(id) === 0 && !unavailable) e.idle++;
         const free = unavailable || !memoryAdmits(id, m, held, now) ? 0 : freeModelSlots(id, claims);
         e.free += free;
@@ -448,8 +451,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         byModel.set(m, e);
       }
     }
+    // agents: machines online in the class with a model (the apps' "2 online" and "Available now: …").
     const classes = Object.fromEntries(
-      (Object.keys(rateOracleConfig.computeClasses) as ComputeClassId[]).map((c) => [c, { label: rateOracleConfig.computeClasses[c].label, cSatsPerSecondBaseTier: msatToCSats(ratePerSecondMsat(classRefMsatPerCredit(c), 1)) }])
+      (Object.keys(rateOracleConfig.computeClasses) as ComputeClassId[]).map((c) => [c, { label: rateOracleConfig.computeClasses[c].label, cSatsPerSecondBaseTier: msatToCSats(ratePerSecondMsat(classRefMsatPerCredit(c), 1)), agents: classAgents[c]?.size ?? 0 }])
     );
     return {
       // Model calls are priced per token: cSats per million tokens in and out, by model size.
@@ -462,7 +466,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
           // restricted: runs only on your own machines or a lease you hold, never as a network call.
           // agentRttMs: median round trip to the agents with a free slot for it (else to all that hold it).
           const agentRtt = medianRtt(e.freeRtts.length ? e.freeRtts : e.rtts);
-          return { model, agents: e.agents, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD), ...(e.ctx ? { contextWindow: e.ctx } : {}), ...(restricted ? { restricted } : {}), ...(agentRtt !== null ? { agentRttMs: agentRtt } : {}) };
+          return { model, agents: e.agents, agentsByClass: e.byClass, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD), ...(e.ctx ? { contextWindow: e.ctx } : {}), ...(restricted ? { restricted } : {}), ...(agentRtt !== null ? { agentRttMs: agentRtt } : {}) };
         })
         .sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model)),
       classes,
@@ -491,7 +495,10 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       const onlyClass = body.computeClass !== "any" ? body.computeClass : hints.computeClass;
       const { result, elsewhere } = await resolveAuto(job, { peers: body.routeRedirect, requesterAccountId: accountId, ...(onlyClass ? { computeClass: onlyClass } : {}) });
       const summary = routingSummary(job, result);
-      if (!result.chosen) return reply.code(409).send({ error: "no_route_fits", detail: result.rejected ?? result.reason, routing: summary });
+      if (!result.chosen) {
+        // reason: "price" is a money problem (the ceiling is what the caller may spend), not capacity.
+        return reply.code(409).send({ error: "no_route_fits", detail: result.rejected ?? result.reason, ...(result.rejectedCode ? { reason: result.rejectedCode } : {}), ...(result.cheapestCSats !== undefined ? { neededCSats: result.cheapestCSats } : {}), ...(onlyClass ? { computeClass: onlyClass } : {}), routing: summary });
+      }
       if (elsewhere) recordMeshWork(elsewhere.coordinatorId);
       if (elsewhere) return reply.code(409).send({ error: "route_elsewhere", coordinatorId: elsewhere.coordinatorId, coordinatorUrl: elsewhere.url, routing: summary });
       const chosen = result.chosen;

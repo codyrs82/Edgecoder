@@ -4,6 +4,7 @@
   import { ACCEPT, MAX_ATTACHMENTS, MESSAGE_MAX_BYTES, chipLabel, formatBytes, readAttachment, toPayload, visionNote, type Attachment, type AttachmentPayload, type Vision } from "../lib/attachments";
   import { menu } from "../lib/menu";
   import { insertQuoteText } from "../lib/quote-selection";
+  import { balanceState, requestBuy, suggestedTopUpSats } from "../lib/buy-csats";
 
   interface Props {
     /** `attachments`: files attached in the box (only when `attach` is set). */
@@ -362,6 +363,10 @@
       {#if attachError}<p class="att-error" role="alert">{attachError}</p>{/if}
     </div>
   {/if}
+  {#if $balanceState.low}
+    <!-- A gentle heads-up before the network work stops for lack of cSats. -->
+    <p class="running-low" data-testid="composer-running-low">Running low on cSats · <button type="button" class="link-btn" onclick={() => requestBuy({ amountSats: suggestedTopUpSats() })}>Buy cSats</button></p>
+  {/if}
   <!-- One slim row: + on the left, the text inline, Send (or Stop while working) on the right. It grows with the text. -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="composer-box" class:dragging data-testid="composer-box" ondragover={onDragOver} ondragleave={() => (dragging = false)} ondrop={onDrop}>
@@ -439,6 +444,9 @@
 </div>
 
 <style>
+  .running-low { margin: 0 4px 6px; font-size: 12px; color: var(--text-secondary); }
+  .link-btn { border: none; background: none; padding: 0; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; }
+  .link-btn:hover { text-decoration: underline; }
   .mentions {
     position: absolute;
     left: 0;
