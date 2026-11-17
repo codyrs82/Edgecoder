@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Fastify from "fastify";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BotManager, type BotRunner } from "../../src/apps/ide/bots.js";
 import { botsSnapshot, registerRemoteBotRoutes, runRemoteBotCommand } from "../../src/apps/ide/bot-remote.js";
 import { MAX_SNAPSHOT_BYTES, SNAPSHOT_MESSAGE_CHARS, SNAPSHOT_TAIL_MESSAGES } from "../../src/common/bot-relay.js";
@@ -66,16 +66,32 @@ describe("commands from the web", () => {
   });
 
   it("older messages come in pages", async () => {
-    const m = manager();
-    const bot = m.create({ name: "P", projectRoot: dir(), enabled: false });
-    for (let i = 0; i < 5; i++) {
-      m.message(bot.id, `m${i}`);
-      await m.idle(bot.id);
+    // Every message in the same millisecond, as on a fast CI machine: the cursor must still page by message.
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    try {
+      const m = manager();
+      const bot = m.create({ name: "P", projectRoot: dir(), enabled: false });
+      for (let i = 0; i < 5; i++) {
+        m.message(bot.id, `m${i}`);
+        await m.idle(bot.id);
+      }
+      const all = m.messages(bot.id);
+      const page = runRemoteBotCommand(m, bot.id, { action: "messages", args: { beforeMs: all[all.length - 2].atMs, beforeId: all[all.length - 2].id, limit: 3 } }, "on").data as { items: Array<{ id: string }>; more: boolean };
+      expect(page.items.map((x) => x.id)).toEqual(all.slice(-5, -2).map((x) => x.id));
+      expect(page.more).toBe(all.length > 5);
+      // Walking back page by page sees every message exactly once.
+      const seen: string[] = [];
+      let cursor: { beforeMs?: number; beforeId?: string; limit: number } = { limit: 2 };
+      for (;;) {
+        const p = runRemoteBotCommand(m, bot.id, { action: "messages", args: cursor }, "on").data as { items: Array<{ id: string; atMs: number }>; more: boolean };
+        seen.unshift(...p.items.map((x) => x.id));
+        if (!p.more) break;
+        cursor = { beforeMs: p.items[0].atMs, beforeId: p.items[0].id, limit: 2 };
+      }
+      expect(seen).toEqual(all.map((x) => x.id));
+    } finally {
+      now.mockRestore();
     }
-    const all = m.messages(bot.id);
-    const page = runRemoteBotCommand(m, bot.id, { action: "messages", args: { beforeMs: all[all.length - 2].atMs + 0, limit: 3 } }, "on").data as { items: Array<{ content: string }>; more: boolean };
-    expect(page.items.length).toBeLessThanOrEqual(3);
-    expect(page.more).toBe(true);
   });
 
   it("settings: the desktop form's validation, and never the folder, repository, tools or auto-approval", async () => {

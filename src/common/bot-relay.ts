@@ -270,7 +270,7 @@ export const botControlRequestSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("approve"), args: z.object({ callId: z.string().min(1).max(100), approved: z.boolean() }).strict() }),
   z.object({
     action: z.literal("messages"),
-    args: z.object({ beforeMs: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(MAX_PAGE_MESSAGES).default(20) }).strict().default({ limit: 20 })
+    args: z.object({ beforeMs: z.number().int().nonnegative().optional(), beforeId: z.string().min(1).max(200).optional(), limit: z.number().int().min(1).max(MAX_PAGE_MESSAGES).default(20) }).strict().default({ limit: 20 })
   }),
   z.object({ action: z.literal("history"), args: none }),
   z.object({ action: z.literal("memory"), args: none })
