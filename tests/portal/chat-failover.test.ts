@@ -115,7 +115,7 @@ function portal(
   const chat = (extra: Record<string, unknown> = {}) => app.inject({ method: "POST", url: "/portal/api/chat", payload: { conversationId: "c1", message: "hi", ...extra } });
   const saved = () => store.addMessage.mock.calls.map(([m]) => m).filter((m) => m.role === "assistant").map((m) => m.content);
   const savedUser = () => store.addMessage.mock.calls.map(([m]) => m).filter((m) => m.role === "user").map((m) => m.content);
-  return { app, chat, saved, savedUser };
+  return { app, chat, saved, savedUser, store };
 }
 
 /** The JSON events of an SSE answer. */
@@ -544,6 +544,14 @@ describe("every chat path forwards the reply's usage", () => {
       expect(d.usage).toMatchObject({ cSats: 0, where: "EdgeCoder's model", calls: [{ model: "qwen3.5:9b", served: { computeClass: "edgecoder", promptTokens: 420, outputTokens: 12 } }] });
       expect(servedLine(d.usage.calls)).toBe("qwen3.5:9b · EdgeCoder's model · read 420 tok in 0.3 s · wrote 12 tok in 0.9 s · free");
     }
+  });
+
+  it("saves the same usage with the reply, so the footer survives a reload", async () => {
+    const co = await coordinator({ name: "net", agentModels: ["m"] });
+    const p = portal([co.url]);
+    const d = done((await p.chat(network())).body);
+    const saved = p.store.addMessage.mock.calls.map(([m]) => m as { role: string; usageMeta?: unknown }).find((m) => m.role === "assistant");
+    expect(saved?.usageMeta).toEqual(d.usage);
   });
 });
 

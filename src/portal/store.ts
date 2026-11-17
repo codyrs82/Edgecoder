@@ -7,6 +7,7 @@ import type { SecurityResearchEntitlement } from "./security-research.js";
 import type { Pool } from "pg";
 import { createPgPool } from "../db/pool.js";
 import { RATE_LIMIT_SCHEMA_SQL } from "./rate-limit-store.js";
+import { compactReplyUsage, type ReplyUsage } from "./reply-usage.js";
 import { randomUUID } from "node:crypto";
 import {
   USER_DELETE_PLAN,
@@ -106,6 +107,8 @@ export type PortalMessage = {
   tokensUsed: number;
   creditsSpent: number;
   createdAtMs: number;
+  /** The reply footer's usage (where it ran, model, tokens, timings, per-call cSats); absent on older messages. */
+  usageMeta?: ReplyUsage;
 };
 
 export type OauthPendingLink = { userId: string; provider: string; providerSubject: string; tenantId?: string; email: string; browserHash?: string };
@@ -362,6 +365,8 @@ export class PortalStore {
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_status TEXT`);
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_ip TEXT`);
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_last_updated_ms BIGINT`);
+    // Owner-approved 2026-11-17: the web chat reply footer survives a reload (nullable; old rows show cost only).
+    await this.pool.query(`ALTER TABLE portal_messages ADD COLUMN IF NOT EXISTS usage_meta JSONB`);
     await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_node_enrollments_token_idx ON portal_node_enrollments (registration_token_hash)`);
     await this.migrateInviteCodes();
     await this.migratePayoutDestinations();
@@ -2311,7 +2316,7 @@ export class PortalStore {
   async getConversationMessages(conversationId: string, limit: number): Promise<PortalMessage[]> {
     const result = await this.pool.query(
       `SELECT * FROM (
-         SELECT message_id, conversation_id, role, content, tokens_used, credits_spent, created_at_ms
+         SELECT message_id, conversation_id, role, content, tokens_used, credits_spent, created_at_ms, usage_meta
          FROM portal_messages WHERE conversation_id = $1
          ORDER BY created_at_ms DESC LIMIT $2
        ) recent ORDER BY created_at_ms ASC`,
@@ -2324,7 +2329,8 @@ export class PortalStore {
       content: r.content,
       tokensUsed: Number(r.tokens_used),
       creditsSpent: Number(r.credits_spent),
-      createdAtMs: Number(r.created_at_ms)
+      createdAtMs: Number(r.created_at_ms),
+      ...(r.usage_meta ? { usageMeta: compactReplyUsage(r.usage_meta) } : {})
     }));
   }
 
@@ -2335,12 +2341,14 @@ export class PortalStore {
     content: string;
     tokensUsed?: number;
     creditsSpent?: number;
+    usageMeta?: ReplyUsage;
   }): Promise<void> {
     const now = Date.now();
+    const usage = input.role === "assistant" ? compactReplyUsage(input.usageMeta) : undefined;
     await this.pool.query(
-      `INSERT INTO portal_messages (message_id, conversation_id, role, content, tokens_used, credits_spent, created_at_ms)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [input.messageId, input.conversationId, input.role, input.content, wholeNumber(input.tokensUsed), wholeNumber(input.creditsSpent), now]
+      `INSERT INTO portal_messages (message_id, conversation_id, role, content, tokens_used, credits_spent, created_at_ms, usage_meta)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [input.messageId, input.conversationId, input.role, input.content, wholeNumber(input.tokensUsed), wholeNumber(input.creditsSpent), now, usage ? JSON.stringify(usage) : null]
     );
     await this.pool.query(
       `UPDATE portal_conversations SET updated_at_ms = $1 WHERE conversation_id = $2`,
