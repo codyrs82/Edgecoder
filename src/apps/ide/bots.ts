@@ -41,7 +41,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { announcesWork, backendChat, makeToolRunner, runAgentLoop, toolSchemas, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
-import { ATTACHMENT_BODY_LIMIT, attachedLine, attachmentsSchema, saveAttachments, savedAttachmentsText, type AttachmentInput, type SavedAttachment } from "./attachments.js";
+import { ATTACHMENT_BODY_LIMIT, AttachmentError, attachedLine, attachmentsSchema, saveAttachments, savedAttachmentsText, type AttachmentInput, type SavedAttachment } from "./attachments.js";
 import { READ_TOOLS, TENTACLE_TOOLS, TOOL_DEFINITIONS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
 import {
   CI_SCOPES, TRIGGER_KINDS, TRIGGER_POLL_MS, ghApiCli, parseGitHubRepo, pollTrigger, untrustedEventBlock,
@@ -1519,6 +1519,7 @@ export class BotManager {
       try {
         saved = saveAttachments(botWorkRoot(bot), attachments, this.now());
       } catch (err) {
+        if (err instanceof AttachmentError) throw new BotError(err.message, 400);
         throw new BotError(`Couldn't save the attached files in ${bot.name}'s folder: ${(err as Error).message}`, 400);
       }
     }
