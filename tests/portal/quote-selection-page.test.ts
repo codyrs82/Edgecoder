@@ -27,3 +27,16 @@ describe("Add to chat on the portal's Chat and Bots pages", () => {
     });
   }
 });
+
+describe("the reply footer on the portal's Chat page", () => {
+  it("ships the desktop's formatter and a Copy button under each reply", async () => {
+    const html = await page("/portal/chat");
+    expect(html).toContain("function servedLine(");
+    expect(html).toContain("function hardwareShort(");
+    expect(html).toContain("function appendReplyFooter(");
+    expect(html).toContain("data-copy-reply");
+    expect(html).toContain('"Copy reply"');
+    expect(html).toContain(".reply-footer {");
+    for (const m of html.matchAll(/<script nonce="[^"]*">([\s\S]*?)<\/script>/g)) expect(() => new Function(m[1])).not.toThrow();
+  });
+});
