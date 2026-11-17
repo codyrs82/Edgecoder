@@ -81,8 +81,11 @@ Fly's private network (6PN) that the lnd machine can reach; nothing about it is 
 | | |
 | --- | --- |
 | RPC | `[fdaa:ec:ae3e:a7b:9016:7eba:d6ac:1b02]:8332` |
-| ZMQ rawblock | `tcp://[fdaa:ec:ae3e:a7b:9016:7eba:d6ac:1b02]:28332` |
-| ZMQ rawtx | `tcp://[fdaa:ec:ae3e:a7b:9016:7eba:d6ac:1b02]:28333` |
+| ZMQ rawblock | `tcp://ocean-node-lnd._peer.internal:28332` |
+| ZMQ rawtx | `tcp://ocean-node-lnd._peer.internal:28333` |
+
+ZMQ uses the peer's 6PN DNS name (it resolves to the address above) because LND v0.21.8's ZMQ
+client cannot parse a bracketed IPv6 URL: it exits with `dial tcp: address [fdaa:... missing ']' in address`.
 
 If it is unpruned, LND needs none of the pruned-node settings (`routing.assumechanvalid` and the
 like) and does not fetch old blocks from peers; the entrypoint warns if it is pruned.
@@ -129,7 +132,8 @@ line or into the logs) and starts LND. The wallet unlocks from `LND_WALLET_PASS`
 - `BITCOIND_HOST` in `fly.toml` is ocean-node's 6PN address (the entrypoint refuses a
   `REPLACE...` placeholder and adds the IPv6 brackets). `BITCOIND_RPC_PORT` is `8332`;
   `BITCOIND_ZMQ_BLOCK` / `BITCOIND_ZMQ_TX` are set to the `28332` / `28333` URLs (without them they
-  default to `tcp://[BITCOIND_HOST]:28332` and `:28333`).
+  default to `tcp://[BITCOIND_HOST]:28332` and `:28333`, which LND cannot dial for an IPv6 host, so
+  set them to a DNS name such as `ocean-node-lnd._peer.internal`).
 
 ### Pre-flight
 
