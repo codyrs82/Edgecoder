@@ -72,7 +72,7 @@ import {
 } from "./stats-ledger.js";
 import { selfInfraHeartbeat } from "./infra-hosts.js";
 import { runIssuanceTick, maybeAnchorLatestFinalizedEpoch } from "./issuance.js";
-import { reconcileIntent } from "./payments.js";
+import { LATE_SETTLEMENT_RECOVERY_INTERVAL_MS, reconcileIntent, recoverLateSettlements } from "./payments.js";
 import { startOnchainTimers } from "./onchain.js";
 import { restorePendingVerifications, runResultVerificationTick } from "./results.js";
 import { LEDGER_VERIFY_INTERVAL_MS, runLedgerVerifyTick } from "./ledger-verify.js";
@@ -190,6 +190,15 @@ export async function initCoordinator(): Promise<void> {
           app.log.warn({ error }, "payment_reconcile_tick_failed");
         }
       }, 30_000);
+      // Late-settlement recovery: purchases marked expired in the last 7 days that the node reports
+      // paid after all are credited (once each).
+      setInterval(() => {
+        void recoverLateSettlements()
+          .then((r) => {
+            if (r.recovered > 0 || r.stoppedOnError) app.log.warn(r, "payment_late_settlement_recovery");
+          })
+          .catch((error) => app.log.warn({ error: String(error) }, "payment_late_settlement_recovery_failed"));
+      }, LATE_SETTLEMENT_RECOVERY_INTERVAL_MS).unref?.();
       setInterval(() => {
         void runIssuanceTick().catch((error) => app.log.warn({ error }, "issuance_tick_failed"));
       }, ISSUANCE_RECALC_MS);

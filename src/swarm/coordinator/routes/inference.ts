@@ -7,7 +7,7 @@
 import { nwcSpotBuyer, nwcTally } from "../direct-payments.js";
 import { z } from "zod";
 import type { ResourceClass, Subtask } from "../../../common/types.js";
-import { DuplicateDebitError, rewardAccountForAgent, spendCredits } from "../../../credits/store.js";
+import { DuplicateDebitError, rewardAccountForAgent, spendCredits, taskReserveKey } from "../../../credits/store.js";
 import { cSatsPerMTokens, msatToCSats, ratePerSecondMsat } from "../../../economy/job-pricing.js";
 import { paramsB } from "../../../inference-api/auto-route.js";
 import { contextNeeded } from "../../../inference-api/ollama.js";
@@ -585,10 +585,14 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       if (!admit.ok) return reply.code(402).send({ error: admit.error === "settle_first" ? "settle_first" : admit.error === "paused" ? "payments_paused" : "no_wallet", ...(admit.reason ? { reason: admit.reason } : {}), ...(admit.unsettledSats !== undefined ? { unsettledCSats: admit.unsettledSats, capCSats: admit.capSats } : {}) });
     } else if (reserve > 0) {
       // Durable billing (stress finding 2): a restart refunds what this call did not use.
-      await pgStore?.insertTaskBilling({ taskId: body.taskId, coordinatorId: identity.peerId, accountId, kind: "inference", perSubtaskReserveMsat: reserve, createdAtMs: Date.now() })
-        .catch((err) => req.log.warn({ err, taskId: body.taskId }, "task_billing_persist_failed"));
+      // The task id's one billing row network-wide: an id billed on the other seed, or by another
+      // account or kind, is refused before anything is debited.
       try {
-        await spendCredits(accountId, msatToCSats(reserve), "inference_reserve", body.taskId, { idempotencyKey: `inference_reserve:${body.taskId}` });
+        if (pgStore) {
+          const billingRow = await pgStore.insertTaskBilling({ taskId: body.taskId, coordinatorId: identity.peerId, accountId, kind: "inference", perSubtaskReserveMsat: reserve, createdAtMs: Date.now() });
+          if (billingRow === "conflict") return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
+        }
+        await spendCredits(accountId, msatToCSats(reserve), "inference_reserve", body.taskId, { idempotencyKey: taskReserveKey(body.taskId) });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (err instanceof DuplicateDebitError) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });

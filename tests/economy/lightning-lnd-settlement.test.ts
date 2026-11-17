@@ -25,6 +25,15 @@ describe("interpretLndInvoice (#47)", () => {
     expect(interpretLndInvoice(fx.accepted_hold, HASH).settled).toBe(false);
   });
 
+  test("an unpaid invoice reports the node's definitive state (only for the invoice asked about)", () => {
+    expect(interpretLndInvoice(fx.open, HASH).invoiceState).toBe("open");
+    expect(interpretLndInvoice(fx.canceled, HASH).invoiceState).toBe("canceled");
+    expect(interpretLndInvoice(fx.accepted_hold, HASH).invoiceState).toBe("accepted");
+    expect(interpretLndInvoice(fx.canceled, "b2".repeat(32)).invoiceState).toBeUndefined();
+    const { r_hash: _h, ...noHash } = fx.canceled;
+    expect(interpretLndInvoice(noHash, HASH).invoiceState).toBeUndefined();
+  });
+
   test("state is authoritative over the deprecated settled flag", () => {
     expect(interpretLndInvoice({ ...fx.open, settled: true }, HASH).settled).toBe(false);
     const { state: _s, ...legacy } = fx.settled;
@@ -82,9 +91,11 @@ describe("LndRestProvider.checkSettlement over HTTP (#47)", () => {
     expect(s).toMatchObject({ settled: true, paymentHash: HASH, preimage: fx.preimage_hex });
   });
 
-  test("404 / 5xx from LND is not settled", async () => {
+  test("404 / 5xx from LND is a lookup failure, never \"unpaid\" (a paid intent must not be expired on it)", async () => {
     agent.get(BASE).intercept({ path: `/v1/invoice/${HASH}`, method: "GET" }).reply(404, { code: 5, message: "unable to locate invoice" });
+    agent.get(BASE).intercept({ path: `/v1/invoice/${HASH}`, method: "GET" }).reply(503, "starting");
     const p = new LndRestProvider(BASE, "mac");
-    expect(await p.checkSettlement("lnbc", HASH)).toEqual({ settled: false });
+    await expect(p.checkSettlement("lnbc", HASH)).rejects.toThrow(/lnd_invoice_lookup_404/);
+    await expect(p.checkSettlement("lnbc", HASH)).rejects.toThrow(/lnd_invoice_lookup_503/);
   });
 });

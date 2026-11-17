@@ -26,6 +26,10 @@ describe("interpretClnInvoices", () => {
   test("unpaid / expired are not settled, and another invoice being paid does not count", () => {
     expect(interpretClnInvoices([{ ...paid, status: "unpaid" }], { hashHex: HASH }).settled).toBe(false);
     expect(interpretClnInvoices([{ ...paid, status: "expired" }], { hashHex: HASH }).settled).toBe(false);
+    // The node's definitive state is reported, so only "expired" lets an intent be expired.
+    expect(interpretClnInvoices([{ ...paid, status: "unpaid" }], { hashHex: HASH }).invoiceState).toBe("open");
+    expect(interpretClnInvoices([{ ...paid, status: "expired" }], { hashHex: HASH }).invoiceState).toBe("expired");
+    expect(interpretClnInvoices([{ ...paid, status: "weird" }], { hashHex: HASH }).invoiceState).toBeUndefined();
     const other = { ...paid, payment_hash: "ab".repeat(32), bolt11: "lnbc1other" };
     expect(interpretClnInvoices([other], { hashHex: HASH }).settled).toBe(false);
     expect(interpretClnInvoices([other], { bolt11: BOLT11 }).settled).toBe(false);
@@ -81,12 +85,12 @@ describe("ClnRestProvider.checkSettlement over HTTP", () => {
     expect(await p.checkSettlement(BOLT11, HASH)).toMatchObject({ settled: true, paymentHash: HASH, preimage });
   });
 
-  test("falls back to invstring without a hash; node errors are not settled", async () => {
+  test("falls back to invstring without a hash; node errors are lookup failures, not \"unpaid\"", async () => {
     const pool = agent.get(BASE);
     pool.intercept({ path: `/v1/invoice/listInvoices?invstring=${encodeURIComponent(BOLT11)}`, method: "GET" }).reply(200, { invoices: [paid] });
     pool.intercept({ path: `/v1/invoice/listInvoices?payment_hash=${HASH}`, method: "GET" }).reply(500, { error: "boom" });
     const p = createLightningProviderFromEnv();
     expect((await p.checkSettlement(BOLT11)).settled).toBe(true);
-    expect(await p.checkSettlement(BOLT11, HASH)).toEqual({ settled: false });
+    await expect(p.checkSettlement(BOLT11, HASH)).rejects.toThrow(/cln_invoice_lookup_500/);
   });
 });

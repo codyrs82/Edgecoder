@@ -104,6 +104,8 @@ export const LEDGER_VERIFY_LOCK_NAMESPACE = 0x45430006;
 export const LEDGER_VERIFY_LOCK_KEY = 1;
 /** Periodic task-billing sweep (swarm/billing-sweep.ts): one instance per coordinator id at a time; key = hashtext(coordinator id). */
 export const TASK_BILLING_SWEEP_LOCK_NAMESPACE = 0x45430007;
+/** Credit purchases: one account's cap check and invoice creation at a time, across coordinators; key = hashtext(account id). */
+export const PURCHASE_LOCK_NAMESPACE = 0x45430010;
 /** Read-side dedupe bucket for issuance epochs when the caller does not pass its recalc interval. */
 export const DEFAULT_ISSUANCE_BUCKET_MS = 3_600_000;
 /** Event types that sign the stats ledger rather than record work; never a checkpoint target. */
@@ -116,6 +118,12 @@ const OUTFLOW_SQL = `amount_msat + CASE WHEN status = 'pending' THEN GREATEST(fe
  * earnRowMatured (src/economy/payouts.ts); cutoff from earningsMaturityCutoffMs.
  */
 export const EARN_MATURED_SQL = (param: string): string => `(${param}::bigint IS NULL OR timestamp_ms <= ${param}::bigint)`;
+/** The spend reason of a task billing row's reserve debit, by its kind. */
+export function reserveReasonForKind(kind: string): string {
+  return kind === "job" ? "task_reserve" : "inference_reserve";
+}
+/** cSats on earn rows (with msat) still inside the hold: the credit balance they inflate is not withdrawable yet. */
+const HELD_EARN_CREDITS_SQL = `SELECT COALESCE(SUM(credits), 0)::text AS credits FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn' AND msat > 0 AND NOT ${EARN_MATURED_SQL("$2")}`;
 const EARNED_MSAT_SQL = `SELECT COALESCE(SUM(msat), 0) AS msat FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn' AND ${EARN_MATURED_SQL("$2")}`;
 
 export const SCHEMA_SQL = `
@@ -1438,7 +1446,8 @@ export class PostgresStore {
     const r = await this.pool.query(
       `SELECT COALESCE(SUM(msat), 0) AS total_msat,
               COALESCE(SUM(msat) FILTER (WHERE ${matured}), 0) AS matured_msat,
-              MIN(timestamp_ms) FILTER (WHERE NOT ${matured} AND msat > 0) AS oldest_held_ms
+              MIN(timestamp_ms) FILTER (WHERE NOT ${matured} AND msat > 0) AS oldest_held_ms,
+              COALESCE(SUM(credits) FILTER (WHERE NOT ${matured} AND msat > 0), 0)::text AS held_credits
          FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn'`,
       [accountId, maturedAtOrBeforeMs ?? null]
     );
@@ -1446,7 +1455,8 @@ export class PostgresStore {
     return {
       totalMsat: Number(row.total_msat ?? 0),
       maturedMsat: Number(row.matured_msat ?? 0),
-      oldestHeldAtMs: row.oldest_held_ms === null || row.oldest_held_ms === undefined ? null : Number(row.oldest_held_ms)
+      oldestHeldAtMs: row.oldest_held_ms === null || row.oldest_held_ms === undefined ? null : Number(row.oldest_held_ms),
+      heldCredits: Number(row.held_credits ?? 0)
     };
   }
 
@@ -2752,12 +2762,15 @@ export class PostgresStore {
    * #42: atomic settle. Status CAS (created -> settled) and the
    * `credit_purchase:<intentId>` credit row are written in one transaction, so
    * concurrent webhook/reconcile/confirm calls (or a replay after restart)
-   * credit at most once.
+   * credit at most once. `fromExpired` (late-settlement recovery) also moves an intent marked
+   * expired whose invoice the node reports paid: still once, as the status CAS, the unique payment
+   * hash per intent and the unique credit_purchase reason all hold.
    */
   async settlePaymentIntentAtomic(
     intentId: string,
     txRef: string,
-    paymentHash?: string
+    paymentHash?: string,
+    opts?: { fromExpired?: boolean }
   ): Promise<{ status: "settled" | "already"; intent?: PaymentIntent }> {
     const client = await this.pool.connect();
     const now = Date.now();
@@ -2766,9 +2779,9 @@ export class PostgresStore {
       const upd = await client.query(
         `UPDATE payment_intents
             SET status = 'settled', settled_at_ms = $2, tx_ref = $3, payment_hash = COALESCE(payment_hash, $4)
-          WHERE intent_id = $1 AND status = 'created'
+          WHERE intent_id = $1 AND (status = 'created' OR ($5::boolean AND status = 'expired'))
           RETURNING account_id, quoted_credits`,
-        [intentId, now, txRef, paymentHash ?? null]
+        [intentId, now, txRef, paymentHash ?? null, opts?.fromExpired === true]
       );
       if ((upd.rowCount ?? 0) === 0) {
         await client.query("COMMIT");
@@ -2953,7 +2966,8 @@ export class PostgresStore {
       const earned = await client.query(EARNED_MSAT_SQL, [payout.accountId, maturedAtOrBeforeMs ?? null]);
       const spent = await client.query(`SELECT COALESCE(SUM(${OUTFLOW_SQL}), 0) AS msat FROM payouts WHERE account_id = $1 AND status IN ('paid','pending')`, [payout.accountId]);
       const bal = await client.query(BALANCE_CHECK_SQL, [payout.accountId, "0"]);
-      const payable = withdrawableMsat(Number(earned.rows[0]?.msat ?? 0), Number(spent.rows[0]?.msat ?? 0), Number(bal.rows[0]?.balance ?? 0));
+      const held = await client.query(HELD_EARN_CREDITS_SQL, [payout.accountId, maturedAtOrBeforeMs ?? null]);
+      const payable = withdrawableMsat(Number(earned.rows[0]?.msat ?? 0), Number(spent.rows[0]?.msat ?? 0), Number(bal.rows[0]?.balance ?? 0), Number(held.rows[0]?.credits ?? 0));
       // Amount and the routing-fee cap both come out of payable, as the debit row below takes both.
       if (payout.amountMsat + payout.maxFeeMsat > payable) {
         await client.query("ROLLBACK");
@@ -3611,20 +3625,36 @@ export class PostgresStore {
   }
 
   // ── Task billing (stress finding 2) ──
-  async insertTaskBilling(row: { taskId: string; coordinatorId: string; accountId: string; kind: "job" | "inference"; perSubtaskReserveMsat: number; createdAtMs: number }): Promise<void> {
-    await this.pool.query(
+  /**
+   * The task id's one billing row, network-wide (task_id is the primary key, shared by both seeds).
+   * "inserted": this call wrote it. "same": a row for this task id already exists with the same
+   * coordinator, account and kind (a retry here; the reserve debit's idempotency key decides).
+   * "conflict": the id is billed elsewhere (another seed, account or kind): the caller must refuse
+   * the task before debiting anything, or one task id would hold two reserves.
+   */
+  async insertTaskBilling(row: { taskId: string; coordinatorId: string; accountId: string; kind: "job" | "inference"; perSubtaskReserveMsat: number; createdAtMs: number }): Promise<"inserted" | "same" | "conflict"> {
+    const ins = await this.pool.query(
       `INSERT INTO task_billing (task_id, coordinator_id, account_id, kind, per_subtask_reserve_msat, created_at_ms)
-       VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (task_id) DO NOTHING`,
+       VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (task_id) DO NOTHING RETURNING task_id`,
       [row.taskId, row.coordinatorId, row.accountId, row.kind, Math.round(row.perSubtaskReserveMsat), row.createdAtMs]
     );
+    if ((ins.rowCount ?? 0) > 0) return "inserted";
+    const existing = await this.pool.query(`SELECT coordinator_id, account_id, kind FROM task_billing WHERE task_id = $1`, [row.taskId]);
+    const e = existing.rows[0];
+    if (!e) return "conflict"; // deleted between the two statements: refuse rather than guess
+    return e.coordinator_id === row.coordinatorId && e.account_id === row.accountId && e.kind === row.kind ? "same" : "conflict";
   }
 
   async setTaskBillingSubtasks(taskId: string, subtaskIds: string[]): Promise<void> {
     await this.pool.query(`UPDATE task_billing SET subtask_ids = $2 WHERE task_id = $1`, [taskId, JSON.stringify(subtaskIds)]);
   }
 
-  async markTaskBillingSettled(taskId: string, atMs: number): Promise<void> {
-    await this.pool.query(`UPDATE task_billing SET settled_at_ms = $2 WHERE task_id = $1 AND settled_at_ms IS NULL`, [taskId, atMs]);
+  /** With `coordinatorId`, only that coordinator's row (a seed never settles the other seed's billing). */
+  async markTaskBillingSettled(taskId: string, atMs: number, coordinatorId?: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE task_billing SET settled_at_ms = $2 WHERE task_id = $1 AND settled_at_ms IS NULL AND ($3::text IS NULL OR coordinator_id = $3)`,
+      [taskId, atMs, coordinatorId ?? null]
+    );
   }
 
   async listOpenTaskBilling(coordinatorId: string): Promise<Array<{ taskId: string; accountId: string; kind: string; perSubtaskReserveMsat: number; subtaskIds: string[] | null; createdAtMs: number }>> {
@@ -3644,21 +3674,24 @@ export class PostgresStore {
   }
 
   /**
-   * Per task, from the ledger (msat): what its requester set aside (task_reserve / inference_reserve
-   * spends), what was paid for its work (compute_contribution + network fee earns) and refunded
-   * (the one refund row, by its deterministic tx id).
+   * Per task, from the ledger (msat): what its requester set aside (the reserve spends of the
+   * billing row's own account and kind: task_reserve for a job, inference_reserve for a model
+   * call), what was paid for its work (compute_contribution + network fee earns) and refunded (the
+   * one refund row, by its deterministic tx id, to that account). Filtering by account and kind
+   * means a reserve some other account or kind wrote under the same task id is never counted (or
+   * refunded) here.
    */
-  async taskLedgerTotals(tasks: Array<{ taskId: string; refundTxId: string }>): Promise<Map<string, { reservedMsat: number; paidMsat: number; refundedMsat: number }>> {
+  async taskLedgerTotals(tasks: Array<{ taskId: string; refundTxId: string; accountId: string; kind: string }>): Promise<Map<string, { reservedMsat: number; paidMsat: number; refundedMsat: number }>> {
     const out = new Map<string, { reservedMsat: number; paidMsat: number; refundedMsat: number }>();
     if (tasks.length === 0) return out;
     for (const t of tasks) out.set(t.taskId, { reservedMsat: 0, paidMsat: 0, refundedMsat: 0 });
-    const ids = tasks.map((t) => t.taskId);
     const r = await this.pool.query(
-      `SELECT related_task_id AS task_id,
-              COALESCE(SUM(credits) FILTER (WHERE tx_type = 'spend' AND reason IN ('task_reserve', 'inference_reserve')), 0)::text AS reserved,
-              COALESCE(SUM(credits) FILTER (WHERE tx_type = 'earn' AND (reason = 'compute_contribution' OR reason = 'network_fee:' || related_task_id)), 0)::text AS paid
-         FROM credit_transactions WHERE related_task_id = ANY($1::text[]) GROUP BY related_task_id`,
-      [ids]
+      `WITH t(task_id, account_id, reserve_reason) AS (SELECT * FROM unnest($1::text[], $2::text[], $3::text[]))
+       SELECT t.task_id,
+              COALESCE(SUM(c.credits) FILTER (WHERE c.tx_type = 'spend' AND c.account_id = t.account_id AND c.reason = t.reserve_reason), 0)::text AS reserved,
+              COALESCE(SUM(c.credits) FILTER (WHERE c.tx_type = 'earn' AND (c.reason = 'compute_contribution' OR c.reason = 'network_fee:' || t.task_id)), 0)::text AS paid
+         FROM t JOIN credit_transactions c ON c.related_task_id = t.task_id GROUP BY t.task_id`,
+      [tasks.map((t) => t.taskId), tasks.map((t) => t.accountId), tasks.map((t) => reserveReasonForKind(t.kind))]
     );
     for (const row of r.rows) {
       const e = out.get(row.task_id);
@@ -3667,10 +3700,12 @@ export class PostgresStore {
         e.paidMsat = Math.round(Number(row.paid) * 1000);
       }
     }
-    const refunds = await this.pool.query(`SELECT tx_id, credits::text AS credits FROM credit_transactions WHERE tx_id = ANY($1::text[]) AND tx_type = 'earn'`, [tasks.map((t) => t.refundTxId)]);
-    const byTx = new Map(tasks.map((t) => [t.refundTxId, t.taskId]));
+    const refunds = await this.pool.query(`SELECT tx_id, account_id, credits::text AS credits FROM credit_transactions WHERE tx_id = ANY($1::text[]) AND tx_type = 'earn'`, [tasks.map((t) => t.refundTxId)]);
+    const byTx = new Map(tasks.map((t) => [t.refundTxId, t]));
     for (const row of refunds.rows) {
-      const e = out.get(byTx.get(row.tx_id) ?? "");
+      const t = byTx.get(row.tx_id);
+      if (!t || t.accountId !== row.account_id) continue;
+      const e = out.get(t.taskId);
       if (e) e.refundedMsat += Math.round(Number(row.credits) * 1000);
     }
     return out;
@@ -3859,6 +3894,66 @@ export class PostgresStore {
       status: row.status,
       createdAtMs: Number(row.created_at_ms)
     }));
+  }
+
+  /**
+   * Intents marked expired that were created at or after `sinceMs` (late-settlement recovery),
+   * oldest first, one page after the (createdAtMs, intentId) cursor.
+   */
+  async listExpiredPaymentIntentsSince(sinceMs: number, limit = 500, after?: { createdAtMs: number; intentId: string }): Promise<PaymentIntent[]> {
+    const result = await this.pool.query(
+      `SELECT intent_id, account_id, coordinator_id, wallet_type, network, invoice_ref, amount_sats,
+              coordinator_fee_bps, coordinator_fee_sats, net_sats, quoted_credits, status, created_at_ms,
+              settled_at_ms, tx_ref, payment_hash
+       FROM payment_intents
+       WHERE status = 'expired' AND created_at_ms >= $1
+         AND ($3::bigint IS NULL OR (created_at_ms, intent_id) > ($3::bigint, $4::text))
+       ORDER BY created_at_ms ASC, intent_id ASC
+       LIMIT $2`,
+      [sinceMs, limit, after?.createdAtMs ?? null, after?.intentId ?? null]
+    );
+    return result.rows.map((row) => ({
+      intentId: row.intent_id,
+      accountId: row.account_id,
+      coordinatorId: row.coordinator_id,
+      walletType: row.wallet_type,
+      network: row.network,
+      invoiceRef: row.invoice_ref,
+      amountSats: Number(row.amount_sats),
+      coordinatorFeeBps: Number(row.coordinator_fee_bps),
+      coordinatorFeeSats: Number(row.coordinator_fee_sats),
+      netSats: Number(row.net_sats),
+      quotedCredits: Number(row.quoted_credits),
+      status: row.status,
+      createdAtMs: Number(row.created_at_ms),
+      settledAtMs: row.settled_at_ms ? Number(row.settled_at_ms) : undefined,
+      txRef: row.tx_ref ?? undefined,
+      paymentHash: row.payment_hash ?? undefined
+    }));
+  }
+
+  /**
+   * Run `fn` holding one account's purchase lock across every coordinator on this database, so a
+   * buy's cap check and invoice creation are serialised network-wide (both seeds). Waits up to
+   * `waitMs` for the lock, then throws `purchase_lock_busy`.
+   */
+  async withAccountPurchaseLock<T>(accountId: string, fn: () => Promise<T>, waitMs = 20_000): Promise<T> {
+    const client = await this.pool.connect();
+    let held = false;
+    try {
+      const deadline = Date.now() + waitMs;
+      for (;;) {
+        const r = await client.query("SELECT pg_try_advisory_lock($1, hashtext($2)) AS got", [PURCHASE_LOCK_NAMESPACE, accountId]);
+        held = r.rows[0]?.got === true;
+        if (held) break;
+        if (Date.now() >= deadline) throw new Error("purchase_lock_busy");
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      return await fn();
+    } finally {
+      if (held) await client.query("SELECT pg_advisory_unlock($1, hashtext($2))", [PURCHASE_LOCK_NAMESPACE, accountId]).catch(() => undefined);
+      client.release();
+    }
   }
 
   async listPendingPaymentIntents(limit = 200): Promise<PaymentIntent[]> {

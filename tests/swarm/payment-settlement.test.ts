@@ -4,6 +4,7 @@ import type { LightningProvider, SettlementResult } from "../../src/economy/ligh
 import {
   assertPaymentWebhookSecret,
   createPaymentSettler,
+  mayExpireIntent,
   reconcilePaymentIntent,
   signPaymentWebhookBody,
   verifyPaymentWebhookSignature,
@@ -50,9 +51,9 @@ class FakeDb implements AtomicSettleStore {
   async getPaymentIntent(intentId: string) {
     return this.intents.get(intentId) ?? null;
   }
-  async settlePaymentIntentAtomic(intentId: string, txRef: string) {
+  async settlePaymentIntentAtomic(intentId: string, txRef: string, _hash?: string, opts?: { fromExpired?: boolean }) {
     const row = this.intents.get(intentId);
-    if (!row || row.status !== "created") return { status: "already" as const, intent: row };
+    if (!row || !(row.status === "created" || (opts?.fromExpired && row.status === "expired"))) return { status: "already" as const, intent: row };
     const settled = { ...row, status: "settled" as const, settledAtMs: Date.now(), txRef };
     this.intents.set(intentId, settled);
     // Like Postgres (#155): credit the stored row's account and amount.
@@ -180,11 +181,68 @@ describe("payment settlement (#42)", () => {
     expect(granted).toEqual(["credit_purchase:intent-1"]);
   });
 
-  test("reconcile expires only unpaid intents", async () => {
+  test("reconcile expires only intents the node definitively reports unpaid", async () => {
     const stale = { ...makeIntent(), createdAtMs: 0 };
+    const withState = (r: SettlementResult): LightningProvider => ({ ...stubProvider(false), checkSettlement: async () => r });
+    const seen: Array<string | undefined> = [];
+    const expire = async (_i: PaymentIntent, state: SettlementResult["invoiceState"]) => { seen.push(state); return true; };
+    const canceled = memorySettler(withState({ settled: false, invoiceState: "canceled" }), new Map([["intent-1", stale]]));
+    expect(await reconcilePaymentIntent(stale, canceled.settle, expire)).toBe("expired");
+    expect(seen).toEqual(["canceled"]);
+    // No definitive state in the answer: pending, expire is never asked.
+    const vague = memorySettler(stubProvider(false), new Map([["intent-1", stale]]));
+    expect(await reconcilePaymentIntent(stale, vague.settle, expire)).toBe("pending");
+    expect(seen).toEqual(["canceled"]);
+  });
+
+  test("a failed node lookup is unknown, never unpaid, and never expires a (possibly paid) intent", async () => {
+    const stale = { ...makeIntent(), createdAtMs: 0 };
+    const down: LightningProvider = { ...stubProvider(false), checkSettlement: async () => { throw new Error("lnd_invoice_lookup_503"); } };
     const intents = new Map([["intent-1", stale]]);
-    const { settle } = memorySettler(stubProvider(false), intents);
-    expect(await reconcilePaymentIntent(stale, settle, async () => true)).toBe("expired");
+    const { settle, granted } = memorySettler(down, intents);
+    expect(await settle(stale)).toEqual({ status: "unknown", error: "lnd_invoice_lookup_503" });
+    let asked = false;
+    expect(await reconcilePaymentIntent(stale, settle, async () => { asked = true; return true; })).toBe("pending");
+    expect(asked).toBe(false);
+    expect(granted).toHaveLength(0);
+    expect(intents.get("intent-1")!.status).toBe("created");
+  });
+
+  test("mayExpireIntent: canceled/expired past TTL + grace; open only well past it; accepted or unknown never", () => {
+    const TTL = 900_000, GRACE = 120_000, MARGIN = 600_000;
+    expect(mayExpireIntent("canceled", TTL + GRACE, TTL, GRACE, MARGIN)).toBe(false);
+    expect(mayExpireIntent("canceled", TTL + GRACE + 1, TTL, GRACE, MARGIN)).toBe(true);
+    expect(mayExpireIntent("expired", TTL + GRACE + 1, TTL, GRACE, MARGIN)).toBe(true);
+    expect(mayExpireIntent("open", TTL + GRACE + 1, TTL, GRACE, MARGIN)).toBe(false);
+    expect(mayExpireIntent("open", TTL + GRACE + MARGIN + 1, TTL, GRACE, MARGIN)).toBe(true);
+    expect(mayExpireIntent("accepted", 10 * TTL, TTL, GRACE, MARGIN)).toBe(false);
+    expect(mayExpireIntent(undefined, 10 * TTL, TTL, GRACE, MARGIN)).toBe(false);
+  });
+
+  test("late settlement: an intent marked expired that the node reports paid is credited once, only when asked to recover", async () => {
+    const expired = { ...makeIntent(), status: "expired" as const, createdAtMs: 0 };
+    // In memory.
+    const intents = new Map([["intent-1", expired]]);
+    const mem = memorySettler(stubProvider(true), intents);
+    expect((await mem.settle(expired)).status).toBe("already");
+    expect(mem.granted).toEqual([]);
+    expect((await mem.settle(expired, { allowExpired: true })).status).toBe("settled");
+    expect((await mem.settle(expired, { allowExpired: true })).status).toBe("already");
+    expect(mem.granted).toEqual(["credit_purchase:intent-1"]);
+    // Atomic store, concurrent recoveries.
+    const db = new FakeDb();
+    db.intents.set("intent-1", expired);
+    const settle = createPaymentSettler({ provider: stubProvider(true), store: db, getIntent: () => undefined, saveIntent: () => undefined, grantCredits: async () => undefined });
+    const out = await Promise.all([1, 2, 3].map(() => settle(expired, { allowExpired: true })));
+    expect(out.filter((o) => o.status === "settled")).toHaveLength(1);
+    expect(db.credits).toEqual([{ accountId: "acct-1", credits: 32, reason: "credit_purchase:intent-1" }]);
+    // Still unpaid at the node: stays expired, nothing credited.
+    const db2 = new FakeDb();
+    db2.intents.set("intent-1", expired);
+    const unpaid = createPaymentSettler({ provider: stubProvider(false), store: db2, getIntent: () => undefined, saveIntent: () => undefined, grantCredits: async () => undefined });
+    expect((await unpaid(expired, { allowExpired: true })).status).toBe("unpaid");
+    expect(db2.intents.get("intent-1")!.status).toBe("expired");
+    expect(db2.credits).toEqual([]);
   });
 
   test("provider receives the stored payment hash", async () => {

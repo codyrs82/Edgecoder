@@ -4,6 +4,9 @@
 import type { PayoutRecord } from "../common/types.js";
 import type { LightningProvider, NodeBalances, NodePayment } from "./lightning.js";
 
+/** Node payments one reconciliation pages through (was one page of 1,000; a busier node was cut off). */
+export const RECONCILE_PAYMENTS_LIMIT = 50_000;
+
 /**
  * Payout reconciliation: the ledger (payouts table, purchases, earned balances) against what the
  * Lightning node itself reports (balances, outgoing payments). Runs every PAYOUT_RECONCILE_MS.
@@ -314,7 +317,7 @@ export class PayoutReconciler {
       const sinceMs = Math.max(0, Math.min(now, this.previous?.atMs ?? now - this.d.config.lookbackMs) - 60 * 60 * 1000);
       const onchain = this.d.onchain;
       if (onchain?.beforeRun) await onchain.beforeRun().catch((err) => this.d.log?.warn({ error: err instanceof Error ? err.message : String(err) }, "payout_reconcile_onchain_refresh_failed"));
-      const [balances, list] = await Promise.all([p.getBalances(), p.listPayments({ sinceMs, limit: 1000 })]);
+      const [balances, list] = await Promise.all([p.getBalances(), p.listPayments({ sinceMs, limit: RECONCILE_PAYMENTS_LIMIT })]);
       if (!balances.supported || !list.supported) {
         return this.finish({ atMs: now, status: "unsupported", checks: [], error: !balances.supported ? balances.reason : !list.supported ? list.reason : undefined });
       }
@@ -340,7 +343,8 @@ export class PayoutReconciler {
       const tripped = checks.some((c) => !c.ok && c.pauses);
       result = {
         atMs: now,
-        status: tripped ? "tripped" : checks.some((c) => !c.ok) ? "alert" : "ok",
+        // A payment list still cut off at the limit is incomplete: alert rather than report "ok".
+        status: tripped ? "tripped" : checks.some((c) => !c.ok) || list.truncated ? "alert" : "ok",
         checks,
         node: {
           totalSats: balances.totalSats,

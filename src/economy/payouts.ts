@@ -128,14 +128,19 @@ export function msatToCredits(msat: number): number {
 }
 
 /**
- * What an account may withdraw: earned sats not yet paid out, never more than its credit balance.
+ * What an account may withdraw: matured earned sats not yet paid out, never more than its credit
+ * balance less the cSats of earnings still under the hold (`heldCredits`).
  * Earnings are also spendable cSats. A withdrawal debits the credit balance and a spend lowers it,
  * so capping by the balance keeps one sat from leaving twice (once paid out, once spent as cSats
  * that become someone else's earnings). Purchased cSats raise the balance but not the earned sats,
  * so they stay non-withdrawable.
  */
-export function withdrawableMsat(earnedMsat: number, paidOrPendingMsat: number, creditBalance: number): number {
-  return Math.min(payableMsat(earnedMsat, paidOrPendingMsat), creditsToMsat(creditBalance));
+export function withdrawableMsat(earnedMsat: number, paidOrPendingMsat: number, creditBalance: number, heldCredits = 0): number {
+  // Earnings still inside the hold are in the credit balance too: the balance cap counts only what
+  // is left without them, so a fresh (unreviewed) earning never frees headroom left by matured
+  // earnings that were spent. withdrawable = min(matured earned − paid, balance − held).
+  const held = Number.isFinite(heldCredits) ? Math.max(0, heldCredits) : 0;
+  return Math.min(payableMsat(earnedMsat, paidOrPendingMsat), creditsToMsat(creditBalance - held));
 }
 
 /** Spend row written with the reservation: amount + routing-fee cap, taken from the credit balance. */

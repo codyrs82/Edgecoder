@@ -50,6 +50,14 @@ export class CreditEngine {
     );
   }
 
+  /** cSats on earn rows (with msat) not yet matured at the cutoff (earnings hold); no cutoff: none. */
+  heldEarnCredits(accountId: string, maturedAtOrBeforeMs?: number): number {
+    return (this.txByAccount.get(accountId) ?? []).reduce(
+      (sum, tx) => sum + (tx.type === "earn" && (tx.msat ?? 0) > 0 && !earnRowMatured(tx.timestampMs, maturedAtOrBeforeMs) ? tx.credits : 0),
+      0
+    );
+  }
+
   /** Mark a contribution report as recorded; false when it already was (#44 idempotency). */
   claimReport(reportId: string): boolean {
     if (this.seenReports.has(reportId)) return false;

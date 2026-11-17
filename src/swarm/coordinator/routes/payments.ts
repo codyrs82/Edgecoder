@@ -13,7 +13,7 @@ import { PAYMENT_INTENT_TTL_MS, PAYMENT_WEBHOOK_SECRET } from "../context.js";
 import { authorizeAdmin, callerAccount, requireMeshToken } from "../auth.js";
 import { paymentIntents } from "../economy.js";
 import { ECONOMY_PAYMENTS_ENABLED } from "../payouts.js";
-import { createPaymentIntent, createPaymentIntentWithinLaunchCaps, reconcileIntent, settleIfPaid, openIntentCount, MAX_OPEN_INTENTS_PER_ACCOUNT } from "../payments.js";
+import { createPaymentIntent, createPaymentIntentWithinLaunchCaps, reconcileIntent, settleIfPaid, openIntentCountFor, MAX_OPEN_INTENTS_PER_ACCOUNT, LATE_SETTLEMENT_LOOKBACK_MS } from "../payments.js";
 
 export function registerPaymentRoutes(app: CoordinatorApp): void {
   app.post("/economy/payments/intents", async (req, reply) => {
@@ -36,7 +36,7 @@ export function registerPaymentRoutes(app: CoordinatorApp): void {
     if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
     if (!ECONOMY_PAYMENTS_ENABLED) return reply.code(503).send({ error: "payments_disabled" });
     const accountId = caller.accountId;
-    if (openIntentCount(accountId) >= MAX_OPEN_INTENTS_PER_ACCOUNT) return reply.code(429).send({ error: "too_many_open_invoices" });
+    if ((await openIntentCountFor(accountId)) >= MAX_OPEN_INTENTS_PER_ACCOUNT) return reply.code(429).send({ error: "too_many_open_invoices" });
     // Soft launch (LAUNCH_MODE=invite): every purchase path ends here, so the caps hold for all of them.
     const created = await createPaymentIntentWithinLaunchCaps(accountId, amountSats);
     if ("violation" in created) return reply.code(429).send(created.violation);
@@ -53,6 +53,8 @@ export function registerPaymentRoutes(app: CoordinatorApp): void {
     const intent = paymentIntents.get(intentId) ?? (await pgStore?.getPaymentIntent(intentId)) ?? undefined;
     if (!intent || intent.accountId !== accountId) return reply.code(404).send({ error: "unknown_intent" });
     if (intent.status === "created") await reconcileIntent(intent);
+    // A purchase marked expired (recently) is asked about again: paid late, it is credited now.
+    else if (intent.status === "expired" && Date.now() - intent.createdAtMs <= LATE_SETTLEMENT_LOOKBACK_MS) await settleIfPaid(intent, { allowExpired: true });
     const now = paymentIntents.get(intentId) ?? (await pgStore?.getPaymentIntent(intentId)) ?? intent;
     return reply.send({ intentId, status: now.status, cSats: now.quotedCredits });
   });
@@ -74,8 +76,10 @@ export function registerPaymentRoutes(app: CoordinatorApp): void {
     const intent = paymentIntents.get(params.intentId) ?? (await pgStore?.getPaymentIntent(params.intentId));
     if (!intent) return reply.code(404).send({ error: "intent_not_found" });
     if (intent.status === "settled") return { ok: true, intent };
-    if (intent.status === "expired") return reply.code(409).send({ error: "intent_expired" });
-    const outcome = await settleIfPaid(intent);
+    // An intent marked expired is still checked with the node: if it was paid, it is credited now.
+    const outcome = await settleIfPaid(intent, { allowExpired: true });
+    if (outcome.status === "unknown") return reply.code(503).send({ error: "lightning_lookup_failed", detail: outcome.error });
+    if (outcome.status === "unpaid" && intent.status === "expired") return reply.code(409).send({ error: "intent_expired" });
     if (outcome.status === "unpaid") return reply.code(402).send({ error: "invoice_unpaid", status: "unpaid" });
     return { ok: true, status: outcome.status, intent: outcome.intent };
   });
@@ -113,7 +117,7 @@ export function registerPaymentRoutes(app: CoordinatorApp): void {
       if (!match) return reply.code(404).send({ error: "intent_not_found" });
       if (match.status === "settled") return reply.send({ ok: true, alreadySettled: true });
       const outcome = await settleIfPaid(match);
-      if (outcome.status === "unpaid") return reply.send({ ok: true, ignored: true, status: "unpaid" });
+      if (outcome.status === "unpaid" || outcome.status === "unknown") return reply.send({ ok: true, ignored: true, status: outcome.status });
       if (outcome.status === "already") return reply.send({ ok: true, alreadySettled: true });
       return reply.send({ ok: true, intent: outcome.intent });
     });
