@@ -13,6 +13,7 @@ import { join, resolve, relative, dirname, isAbsolute, sep } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { realpathSync, lstatSync, readFileSync } from "node:fs";
 import type { ToolName } from "./tool-types.js";
+import { cloudFetchMessage, displayPath, findPathVariant, isCloudFetchError, notFoundMessage } from "./path-hints.js";
 import { gitExecEnv, githubTokenCredentialEnv, hardenedGitArgs, hardenedGitEnv } from "./git-safe.js";
 import { findGh, ghCredentialConfig } from "./git-setup.js";
 import { GitHubToolError, SOURCE_LABEL, githubApiCall, originUrl, parseGitHubRemote, type CredentialDeps, type GitHubTokenSource } from "./github-auth.js";
@@ -610,6 +611,38 @@ export class ToolExecutor {
     }
   }
 
+  /**
+   * Run `open` on `abs`; when it isn't there, retry once on the entry it most likely means (another
+   * Unicode normalization or letter case of a real name, or a path that repeats the root's folder
+   * name), and otherwise fail with a short, project-relative message that names the closest real
+   * entries. Online-only cloud files that couldn't download get their own message.
+   */
+  private async openExisting<T>(abs: string, what: "File" | "Folder", open: (p: string) => Promise<T>): Promise<T> {
+    const shown = displayPath(this.root, abs);
+    const explain = (err: unknown): Error => {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "ENOENT" || code === "ENOTDIR") return new Error(notFoundMessage(this.root, abs, what));
+      if (code === "EISDIR") return new Error(`${shown} is a folder, not a file.\nCall list_directory on ${shown} to see what is in it.`);
+      if (isCloudFetchError(code)) return new Error(cloudFetchMessage(shown, code!));
+      if (code) return new Error(`Couldn't open ${shown} (${code}).`);
+      return err instanceof Error ? err : new Error(String(err));
+    };
+    try {
+      return await open(abs);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw explain(err);
+      const alt = findPathVariant(this.root, abs);
+      if (!alt) throw explain(err);
+      const safe = this.resolvePath(relative(this.root, alt));
+      try {
+        return await open(safe);
+      } catch (err2) {
+        throw explain(err2);
+      }
+    }
+  }
+
   // -----------------------------------------------------------------------
   // read_file
   // -----------------------------------------------------------------------
@@ -618,7 +651,7 @@ export class ToolExecutor {
     args: Record<string, unknown>,
   ): Promise<ToolResult> {
     const filePath = this.resolvePath(String(args.path ?? ""));
-    const raw = await readFile(filePath, "utf-8");
+    const raw = await this.openExisting(filePath, "File", (p) => readFile(p, "utf-8"));
     // A final newline ends the last line; it is not an extra empty line (numbering one made the
     // model add a blank line to old_string and miss on edit_file).
     const allLines = (raw.endsWith("\n") ? raw.slice(0, -1) : raw).split("\n");
@@ -652,8 +685,12 @@ export class ToolExecutor {
   private async listDirectory(
     args: Record<string, unknown>,
   ): Promise<ToolResult> {
-    const dirPath = this.resolvePath(String(args.path ?? "."));
-    const entries = await readdir(dirPath, { withFileTypes: true });
+    let dirPath = this.resolvePath(String(args.path ?? "."));
+    const entries = await this.openExisting(dirPath, "Folder", async (p) => {
+      const list = await readdir(p, { withFileTypes: true });
+      dirPath = p;
+      return list;
+    });
 
     const lines: string[] = [];
     for (const entry of entries) {

@@ -89,7 +89,8 @@ describe("EditorChatPanel and projects", () => {
     render(EditorChatPanel, { projectRoot: "/Users/me/EdgeCoder/site" });
     const pill = await screen.findByTestId("composer-box");
     expect(within(pill).getByRole("textbox")).toBeTruthy();
-    expect(within(pill).getByRole("button", { name: "Add a file or folder" })).toBeTruthy();
+    // + offers attaching files or mentioning a project file.
+    expect(within(pill).getByRole("button", { name: "Add files" })).toBeTruthy();
     expect(within(pill).getByRole("button", { name: "Send message" })).toBeTruthy();
     const controls = screen.getByTestId("composer-controls");
     expect(within(controls).getByRole("checkbox", { name: "Auto-apply edits" })).toBeTruthy();

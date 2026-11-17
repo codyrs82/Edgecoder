@@ -1,4 +1,5 @@
 import { localAgentUsable, parseAgentStatus, shouldDropToken, statusFromTokenError, type LocalAgentStatus } from "./agent-status";
+import type { AttachmentPayload } from "./attachments";
 import { fetchLocalService } from "./local-service";
 import { coordinatorUrl, defaultEndpoints, fetchEndpoint, portalUrl, type EndpointKind } from "./endpoints";
 import type {
@@ -1366,6 +1367,8 @@ export async function streamIdeChat(
   autoApprove: "none" | "edits" = "none",
   /** Which view sent it, for Settings → Active work and Tasks. */
   origin?: "chat" | "code",
+  /** Files attached to the last message (images/PDFs reach only a model that can see them). */
+  attachments?: AttachmentPayload[],
 ): Promise<void> {
   const base = ideBase();
   const res = await ideFetch(`${base}/v1/ide/chat`, {
@@ -1378,6 +1381,7 @@ export async function streamIdeChat(
       autoApprove,
       ...(origin ? { origin } : {}),
       ...(githubToken ? { githubToken } : {}),
+      ...(attachments?.length ? { attachments } : {}),
     }),
     signal,
   });
@@ -1901,7 +1905,9 @@ export const deleteBot = (id: string) => fsCall<{ ok: boolean }>("DELETE", botPa
 export const runBot = (id: string) => fsCall<{ started: boolean; runId?: string; bot: Bot }>("POST", botPath(id, "/run"), {});
 export const cancelBotRun = (id: string) => fsCall<{ cancelled: boolean }>("POST", botPath(id, "/cancel"), {});
 export const botMessages = (id: string) => fsCall<{ messages: BotMessage[] }>("GET", botPath(id, "/messages")).then((r) => r.messages);
-export const sendBotMessage = (id: string, content: string) => fsCall<{ started: boolean; queued: boolean; bot: Bot }>("POST", botPath(id, "/messages"), { content });
+/** `attachments`: files from the composer; the bot saves them in its folder (src/apps/ide/attachments.ts). */
+export const sendBotMessage = (id: string, content: string, attachments?: AttachmentPayload[]) =>
+  fsCall<{ started: boolean; queued: boolean; bot: Bot }>("POST", botPath(id, "/messages"), { content, ...(attachments?.length ? { attachments } : {}) });
 export const botHistory = (id: string) => fsCall<{ runs: BotRun[] }>("GET", botPath(id, "/history")).then((r) => r.runs);
 /** Clone or update the bot's repository now (it also happens on save and before each run). */
 export const syncBotRepository = (id: string) => fsCall<{ bot: Bot }>("POST", botPath(id, "/repository/sync"), {}).then((r) => r.bot);

@@ -5,10 +5,10 @@
   import ChatInput from "../components/ChatInput.svelte";
   import BotAvatar from "../components/BotAvatar.svelte";
   import ToolArgs from "../components/ToolArgs.svelte";
-  import { Play, Pause, Square, RotateCw, Pencil, Trash2, History, MessageSquare, Ellipsis, CircleAlert, X, CalendarClock, Cpu, Folder, PanelRight, Copy, FolderOpen, GitPullRequest, GitBranch, Zap, RefreshCw } from "@lucide/svelte";
+  import { Play, Pause, RotateCw, Pencil, Trash2, History, MessageSquare, Ellipsis, CircleAlert, X, CalendarClock, Cpu, Folder, PanelRight, Copy, FolderOpen, GitPullRequest, GitBranch, Zap, RefreshCw } from "@lucide/svelte";
   import { approveBotCall, botHistory, botMessages, cancelBotRun, deleteBot, getBot, runBot, sendBotMessage, syncBotRepository, updateBot, botErrorText } from "../lib/api";
   import {
-    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, autoStatus, botCompute, checksIn, routineText, botStatusLine, computeText, failureNotice, foldBotReply, folderName, formatCSats, prCards, readableSummary, reconcileRuns, relativeTime, runSourceText, shownReplyText, scheduleText, statusChip,
+    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, autoStatus, botCompute, botPlacement, checksIn, routineText, botStatusLine, computeText, failureNotice, foldBotReply, folderName, formatCSats, prCards, readableSummary, reconcileRuns, relativeTime, runSourceText, shownReplyText, scheduleText, statusChip,
     triggerStatusText, triggerText,
     type Bot, type BotMessage, type BotRun, type NoticeAction,
   } from "../lib/bots";
@@ -22,6 +22,7 @@
   import type { ToolEvent } from "../lib/types";
   import { choiceLabel } from "../lib/compute-choice";
   import { refreshBots } from "../lib/bots-store";
+  import { NO_VISION, type AttachmentPayload } from "../lib/attachments";
 
   interface Props {
     bot: Bot;
@@ -122,6 +123,12 @@
   const notice = $derived.by(() => {
     const n = failureNotice(bot);
     return n && !dismissed.includes(n.runId) ? n : null;
+  });
+  // Where the current (or last) run's model calls run: this computer, your machines, the network or your key.
+  const placement = $derived.by(() => {
+    const runId = bot.lastRun?.id;
+    const reply = runId ? [...messages].reverse().find((m) => m.role === "assistant" && m.runId === runId) : undefined;
+    return reply ? botPlacement(reply.events, bot.lastRun?.cSats ?? 0) : null;
   });
   const budgetPct = $derived(bot.budgetCSatsPerDay ? Math.min(100, (bot.spentTodayCSats / bot.budgetCSatsPerDay) * 100) : 0);
 
@@ -257,7 +264,7 @@
   const toggleTrigger = (id: string | undefined) =>
     act(() => updateBot(bot.id, { triggers: (bot.triggers ?? []).map((t) => (t.id === id ? { ...t, enabled: !t.enabled } : t)) }));
   const retryRepo = () => act(() => syncBotRepository(bot.id));
-  const send = (text: string) => act(() => sendBotMessage(bot.id, text));
+  const send = (text: string, attachments?: AttachmentPayload[]) => act(() => sendBotMessage(bot.id, text, attachments));
   const approve = (callId: string, approved: boolean) => act(() => approveBotCall(bot.id, callId, approved));
   async function remove() {
     if (!confirmDelete) {
@@ -321,6 +328,10 @@
         </span>
         <span class="sep" aria-hidden="true">·</span>
         <span class="m" title="Compute: where its model calls run (change it in Edit)"><Cpu size={12} />{computeLabel}</span>
+        {#if placement}
+          <span class="sep" aria-hidden="true">·</span>
+          <span class="m placement" data-testid="bot-placement" title={placement}><span class="placement-text">{busy ? "Running on" : "Last ran on"}: {placement}</span></span>
+        {/if}
         <span class="sep" aria-hidden="true">·</span>
         {#if bot.repository}
           <span class="m folder" title={bot.repoPath ?? bot.repository}><GitBranch size={12} /><span class="folder-name">{bot.repository}</span></span>
@@ -332,9 +343,6 @@
     </div>
     <div class="actions">
       <span class="auto-status {auto.tone}" role="status" aria-live="polite" data-testid="bot-auto-status">{auto.text}</span>
-      {#if busy}
-        <button onclick={stop} title="Stop this run"><Square size={14} /> Stop</button>
-      {/if}
       {#if !panelOpen}{@render moreMenu()}{/if}
       <button class="icon" class:on={panelOpen} onclick={togglePanel} aria-pressed={panelOpen} aria-label={panelOpen ? "Hide details" : "Show details"} title={panelOpen ? "Hide details" : "Show details"}><PanelRight size={16} /></button>
     </div>
@@ -405,7 +413,7 @@
                 toolEvents={withoutPendingBars(turn.toolEvents)}
                 turnId={turn.turnId}
                 changedFiles={turn.changedFiles}
-                usage={run ? { cSats: run.cSats, where: run.where } : turn.usage}
+                usage={run ? { cSats: run.cSats, where: run.where, ...(turn.usage?.calls ? { calls: turn.usage.calls } : {}) } : turn.usage}
                 onToolApproval={approve}
                 {onOpenPath}
                 {onPreview}
@@ -489,7 +497,17 @@
   </Tabs.Root>
 
   <div class="composer">
-    <ChatInput onSend={send} placeholder={busy ? `${bot.name} is working; your message goes next…` : `Message ${bot.name}`} />
+    <!-- Working: the send arrow is Stop (no Stop in the header); Enter still sends, and the bot takes it next.
+         queue={[]}: the bot keeps its own queue, so messages go to it at once. Bots never use a
+         frontier key, so they can't see images or PDFs: those are saved in its folder by name. -->
+    <ChatInput
+      onSend={send}
+      streaming={busy}
+      onStop={stop}
+      queue={[]}
+      attach={{ vision: NO_VISION, who: bot.name, savedToFolder: true }}
+      placeholder={busy ? `${bot.name} is working; your message goes next…` : `Message ${bot.name}`}
+    />
   </div>
  </div>
 
@@ -1161,6 +1179,14 @@
   .folder-name {
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .placement {
+    min-width: 0;
+  }
+  .placement-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .meta .sep {
     flex-shrink: 0;

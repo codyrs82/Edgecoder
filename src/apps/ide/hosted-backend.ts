@@ -56,6 +56,12 @@ export function toOpenAiMessages(messages: ChatMessage[]): Array<Record<string, 
       out.push(call ? { role: "tool", tool_call_id: call.id, content: m.content } : { role: "user", content: `[Tool ${m.tool_name ?? ""} result]: ${m.content}` });
       return;
     }
+    const images = (m.media ?? []).filter((md) => md.kind === "image");
+    if (m.role === "user" && images.length) {
+      // OpenAI content parts: the text, then each image as a data URL (PDFs aren't sent here).
+      out.push({ role: "user", content: [...(m.content ? [{ type: "text", text: m.content }] : []), ...images.map((md) => ({ type: "image_url", image_url: { url: `data:${md.mediaType};base64,${md.data}` } }))] });
+      return;
+    }
     out.push({ role: m.role, content: m.content });
   });
   return out;

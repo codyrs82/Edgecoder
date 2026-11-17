@@ -64,7 +64,7 @@ export function servedLine(calls: CallUsage[] | undefined): string | null {
   if (calls.length > 1) bits.push(`${calls.length} calls`);
   const total = calls.reduce((n, c) => n + (Number.isFinite(c.cSats) ? c.cSats : 0), 0);
   const anyFrontier = calls.some((c) => c.served?.computeClass === "frontier");
-  if (!anyFrontier || total > 0) bits.push(s.computeClass === "local" && total === 0 ? "free" : cost(total));
+  if (!anyFrontier || total > 0) bits.push((s.computeClass === "local" || s.own) && total === 0 ? "free" : cost(total));
   if (anyFrontier) {
     const usd = calls.reduce((n, c) => n + (c.served?.usd ?? 0), 0);
     bits.push(usd > 0 && usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`);

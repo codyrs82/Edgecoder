@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { NO_VISION, attachmentLabel, attachmentsText, visionFor, type AttachmentPayload } from "../lib/attachments";
   import { ChevronDown, Plus, PanelRight } from "@lucide/svelte";
   import { setBusy as setRestartBusy, clearBusy as clearRestartBusy } from "../lib/auto-restart";
   import { menu } from "../lib/menu";
@@ -213,7 +214,11 @@
     return portalId;
   }
 
-  export async function sendMessage(text: string) {
+  export async function sendMessage(typed: string, attachments: AttachmentPayload[] = []) {
+    // The conversation keeps the typed text and the attached names; the files go with this request only.
+    const text = [typed, attachmentLabel(attachments)].filter(Boolean).join("\n\n");
+    // Without the agent (portal / plain chat) text files go inline and images/PDFs as a note.
+    const inlineText = attachments.length ? [text, attachmentsText(attachments, NO_VISION)].filter(Boolean).join("\n\n") : text;
     if (isStreaming) return;
     // Coding chats belong to a project; with none open the prompt to pick one shows instead.
     if (!projectRoot) return;
@@ -235,7 +240,7 @@
         const portalConvId = await ensurePortalConversation();
         await streamPortalChat(
           portalConvId,
-          text,
+          inlineText,
           (chunk) => {
             streamingContent += chunk;
             scrollToBottom();
@@ -278,6 +283,7 @@
           await agentGitHubToken().catch(() => null),
           autoApply ? "edits" : "none",
           "code",
+          attachments,
         );
       }
       finishTurn(streamingContent);
@@ -375,8 +381,8 @@
     return conversation.id;
   }
 
-  function handleSend(text: string) {
-    sendMessage(text);
+  function handleSend(text: string, attachments?: AttachmentPayload[]) {
+    sendMessage(text, attachments);
   }
 
   function formatTime(ts: number): string {
@@ -508,6 +514,7 @@
         placeholder="Ask the agent to change {projectName(projectRoot)}… (@ to add a file)"
         streaming={isStreaming}
         onStop={stop}
+        attach={{ vision: usePortalChat ? NO_VISION : visionFor($computeChoice), who: "This model" }}
         mentions={(q) => mentionSuggestions(q, (x) => fsFind(x, 8))}
       >
         {#snippet controls()}

@@ -138,6 +138,7 @@
       onStop={() => void stop()}
       queue={view?.queue ?? []}
       onUnqueue={(id) => void unqueue(id)}
+      sendWhileWorking
     />
   </div>
 </div>

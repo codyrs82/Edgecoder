@@ -2,6 +2,8 @@
 // the sidebar and the bot page use (avatar, status line, schedule text, folding a run's events).
 import { applyAgentEvent, type AgentTurn } from "./agent-events";
 import type { IdeStreamEvent } from "./api";
+import { frontierName } from "./compute-choice";
+import { hardwareShort, type Served } from "./served";
 
 export type BotStatus = "idle" | "running" | "needs_approval" | "paused" | "over_budget" | "error";
 export type BotRunStatus = "running" | "needs_approval" | "done" | "failed" | "budget" | "cancelled" | "interrupted";
@@ -516,4 +518,37 @@ export function triggerStatusText(st: { lastCheckedAtMs?: number; error?: string
   if (st?.error) return st.backoffUntilMs && st.backoffUntilMs > now ? `${st.error} Next check ${relativeTime(st.backoffUntilMs, now)}.` : st.error;
   if (st?.lastCheckedAtMs) return `Checked ${relativeTime(st.lastCheckedAtMs, now)}`;
   return "Checks GitHub every 2 minutes";
+}
+
+/**
+ * Where a bot's model calls run, from its reply's events (the same served-by data the Tasks page's
+ * "Where it ran" uses): "This computer (Apple M1 Max) · qwen3.5:9b · free", "Your machine (Mac) ·
+ * Apple · qwen3-coder:30b · free", "Network · Datacenter GPU 2×A16 · qwen3-coder:30b · 3.4 cSats",
+ * "Claude Opus 5.5 · your key". Before the first call answers, the route Auto picked
+ * ("Compute: this computer · qwen3.5:9b …"). Null when nothing says yet.
+ */
+export function botPlacement(events: IdeStreamEvent[] | undefined, runCSats = 0): string | null {
+  const list = events ?? [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const e = list[i] as { type: string; served?: Served; model?: string; where?: string; message?: string };
+    if (e.type === "usage" && e.served) return placementText(e.served, e.model, runCSats);
+    if (e.type === "usage" && e.where) return `${e.where}${runCSats > 0 ? ` · ${fmtCSats(runCSats)}` : ""}`;
+    if (e.type === "status" && typeof e.message === "string" && /^Compute: /.test(e.message)) {
+      // "Compute: this computer · qwen3.5:9b · ran on a smaller local model (no cSats) (why)" -> place and model.
+      const text = e.message.replace(/^Compute: /, "").replace(/\s*\([^)]*\)\s*$/, "");
+      const [place, model] = text.split(" · ");
+      return [place.replace(/^\w/, (c) => c.toUpperCase()), model].filter(Boolean).join(" · ");
+    }
+  }
+  return null;
+}
+
+const fmtCSats = (n: number) => `${n.toLocaleString(undefined, { maximumFractionDigits: 3 })} cSats`;
+
+function placementText(s: Served, model: string | undefined, runCSats: number): string {
+  if (s.computeClass === "frontier") return `${model ? frontierName(model) : s.hardware.split(" · ")[0]} · your key`;
+  const m = model && model !== "auto" ? model.replace(/^(network|mine)\//, "").replace(/^reserved\/[^/]+\//, "").replace(/@[\w.]+$/, "") : "";
+  if (s.computeClass === "local") return [s.hardware, m, "free"].filter(Boolean).join(" · ");
+  if (s.own) return [s.label.replace(/^your/, "Your"), hardwareShort(s).replace(/ · your machine$/, ""), m, "free"].filter(Boolean).join(" · ");
+  return ["Network", hardwareShort(s), m, runCSats > 0 ? fmtCSats(runCSats) : "cSats"].filter(Boolean).join(" · ");
 }

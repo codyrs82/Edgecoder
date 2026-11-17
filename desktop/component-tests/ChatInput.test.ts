@@ -11,13 +11,20 @@ async function type(text: string) {
 }
 
 describe("ChatInput while a reply runs", () => {
-  it("keeps Send next to a separate Stop; Enter queues (shown as Queued, removable) and queued messages go out in order when the reply ends", async () => {
+  it("the send arrow becomes Stop; Enter queues (shown as Queued, removable) and queued messages go out in order when the reply ends", async () => {
     const onSend = vi.fn();
     const onStop = vi.fn();
     const { rerender } = render(ChatInput, { onSend, onStop, streaming: true });
-    // Both controls: Stop never replaces Send.
+    // Working: Stop takes the send arrow's place.
     expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Send message" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Send message" })).toBeNull();
+    // Typing shows the "Enter to queue" hint, tied to the box.
+    const box = screen.getByRole("textbox");
+    expect(screen.queryByText("Enter to queue")).toBeNull();
+    await fireEvent.input(box, { target: { value: "x" } });
+    expect(screen.getByText("Enter to queue")).toBeTruthy();
+    expect(box.getAttribute("aria-describedby")).toBe("composer-queue-hint");
+    await fireEvent.input(box, { target: { value: "" } });
 
     await type("ping your default gateway");
     await type("then traceroute it");
@@ -43,6 +50,9 @@ describe("ChatInput while a reply runs", () => {
     await waitFor(() => expect(onSend).toHaveBeenLastCalledWith("then traceroute it"));
     expect(onSend).toHaveBeenCalledTimes(2);
     expect(screen.queryByText(/^Queued/)).toBeNull();
+    // Idle again: the normal send arrow.
+    expect(screen.getByRole("button", { name: "Send message" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
   });
 
   it("with an external queue (a shared session) sends at once and shows the session's queue", async () => {
@@ -55,6 +65,24 @@ describe("ChatInput while a reply runs", () => {
     expect(screen.getByText("from the terminal")).toBeTruthy();
     await fireEvent.click(screen.getByRole("button", { name: "Remove queued message: run the tests" }));
     expect(onUnqueue).toHaveBeenCalledWith("q1");
+  });
+
+  it("co-editing a live session (sendWhileWorking): Send stays next to Stop and sends at once", async () => {
+    const onSend = vi.fn();
+    render(ChatInput, { onSend, onStop: vi.fn(), streaming: true, queue: [], sendWhileWorking: true });
+    const pill = screen.getByTestId("composer-box");
+    const order = [...pill.children].map((el) => el.getAttribute("aria-label") ?? el.tagName.toLowerCase());
+    expect(order).toEqual(["Message EdgeCoder...", "Stop", "Send message"]);
+    await fireEvent.input(screen.getByRole("textbox"), { target: { value: "run the tests" } });
+    expect(screen.queryByText("Enter to queue")).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    expect(onSend).toHaveBeenCalledWith("run the tests");
+  });
+
+  it("streaming without a stop action keeps the send arrow (it queues)", async () => {
+    render(ChatInput, { onSend: vi.fn(), streaming: true });
+    expect(screen.getByRole("button", { name: "Send message" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
   });
 
   it("not streaming: no Stop, Enter sends", async () => {
@@ -147,11 +175,90 @@ describe("ChatInput: a slim box that grows with the text", () => {
 
     render(ChatInput, { onSend: vi.fn(), streaming: true, onStop: vi.fn(), mentions: async () => [] });
     const pill = screen.getByTestId("composer-box");
-    // + on the left, then the text, then Stop and Send on the right.
+    // + on the left, then the text, then Stop (in the send arrow's place) on the right.
     const order = [...pill.children].map((el) => el.getAttribute("aria-label") ?? el.tagName.toLowerCase());
-    expect(order).toEqual(["Add a file or folder", "Message EdgeCoder...", "Stop", "Send message"]);
+    expect(order).toEqual(["Add a file or folder", "Message EdgeCoder...", "Stop"]);
     const controls = screen.getByTestId("composer-controls");
     expect(pill.compareDocumentPosition(controls) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(controls.textContent).toContain("Working");
+  });
+});
+
+describe("ChatInput attachments", () => {
+  const NO = { images: false, pdf: false };
+  const YES = { images: true, pdf: true };
+  const file = (name: string, type: string, body = "hello") => new File([body], name, { type });
+
+  it("+ attaches picked files as chips with remove, and sends them with the message", async () => {
+    const onSend = vi.fn();
+    render(ChatInput, { onSend, attach: { vision: YES } });
+    const plus = screen.getByRole("button", { name: "Attach files" });
+    expect(plus).toBeTruthy();
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    Object.defineProperty(input, "files", { configurable: true, value: [file("notes.md", "text/markdown", "# hi"), file("shot.png", "image/png", "PNG")] });
+    await fireEvent.change(input);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Remove shot.png" })).toBeTruthy());
+    expect(screen.getByRole("list", { name: "Attached files" }).children).toHaveLength(2);
+    await fireEvent.click(screen.getByRole("button", { name: "Remove shot.png" }));
+    expect(screen.queryByText("shot.png")).toBeNull();
+    // Attachments alone can be sent.
+    expect((screen.getByRole("button", { name: "Send message" }) as HTMLButtonElement).disabled).toBe(false);
+    await fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    expect(onSend).toHaveBeenCalledWith("", [expect.objectContaining({ name: "notes.md", kind: "text", text: "# hi" })]);
+    expect(screen.queryByRole("list", { name: "Attached files" })).toBeNull();
+  });
+
+  it("pasting an image attaches it; pasting text does not", async () => {
+    render(ChatInput, { onSend: vi.fn(), attach: { vision: NO, who: "Cyber SIMP", savedToFolder: true } });
+    const box = screen.getByRole("textbox");
+    await fireEvent.paste(box, { clipboardData: { files: [], types: ["text/plain"] } });
+    expect(screen.queryByRole("list", { name: "Attached files" })).toBeNull();
+    await fireEvent.paste(box, { clipboardData: { files: [file("", "image/png", "PNG")], types: ["Files"] } });
+    await waitFor(() => expect(screen.getByText("pasted-image.png")).toBeTruthy());
+    // The model can't see images: said before sending, not dropped silently.
+    expect(screen.getByTestId("attach-note").textContent).toBe("Cyber SIMP can't see images; it gets the file name and the path where it's saved in its folder instead.");
+  });
+
+  it("drops files onto the box", async () => {
+    render(ChatInput, { onSend: vi.fn(), attach: { vision: YES } });
+    const pill = screen.getByTestId("composer-box");
+    await fireEvent.drop(pill, { dataTransfer: { files: [file("a.ts", "", "let a = 1")], types: ["Files"] } });
+    await waitFor(() => expect(screen.getByText("a.ts")).toBeTruthy());
+    expect(screen.queryByTestId("attach-note")).toBeNull();
+  });
+
+  it("refuses unsupported and oversized files with a short message", async () => {
+    render(ChatInput, { onSend: vi.fn(), attach: { vision: YES } });
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    Object.defineProperty(input, "files", { configurable: true, value: [file("app.exe", "application/octet-stream")] });
+    await fireEvent.change(input);
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(/only images .* text or code files and PDFs/));
+    Object.defineProperty(input, "files", { configurable: true, value: [file("big.txt", "text/plain", "x".repeat(300 * 1024))] });
+    await fireEvent.change(input);
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(/big.txt is 300 KB/));
+  });
+
+  it("with mentions too, + opens a menu: Attach files… and Mention a project file", async () => {
+    render(ChatInput, { onSend: vi.fn(), attach: { vision: YES }, mentions: async () => [] });
+    const plus = screen.getByRole("button", { name: "Add files" });
+    expect(plus.getAttribute("aria-haspopup")).toBe("menu");
+    await fireEvent.click(plus);
+    expect(screen.getByRole("menuitem", { name: /Attach files/ })).toBeTruthy();
+    await fireEvent.click(screen.getByRole("menuitem", { name: /Mention a project file/ }));
+    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("@");
+  });
+
+  it("a message typed while working is queued with its attachments", async () => {
+    const onSend = vi.fn();
+    const { rerender } = render(ChatInput, { onSend, onStop: vi.fn(), streaming: true, attach: { vision: YES } });
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    Object.defineProperty(input, "files", { configurable: true, value: [file("x.csv", "text/csv", "a,b")] });
+    await fireEvent.change(input);
+    await waitFor(() => expect(screen.getByText("x.csv")).toBeTruthy());
+    await type("look at this");
+    expect(onSend).not.toHaveBeenCalled();
+    expect(screen.getByText(/look at this \(\+1 file\)/)).toBeTruthy();
+    await rerender({ onSend, onStop: vi.fn(), streaming: false, attach: { vision: YES } });
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("look at this", [expect.objectContaining({ name: "x.csv" })]));
   });
 });

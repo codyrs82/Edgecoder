@@ -16,7 +16,7 @@
 
 import { randomUUID } from "node:crypto";
 import { request } from "undici";
-import type { ChatBackend, ToolSpec } from "../../inference-api/types.js";
+import type { ChatBackend, ChatMedia, ToolSpec } from "../../inference-api/types.js";
 import { thisComputer } from "../../inference-api/backends.js";
 import { READ_TOOLS, TOOL_DEFINITIONS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
 import { protectedToolPath } from "./tool-executor.js";
@@ -28,6 +28,8 @@ export interface ChatMessage {
   content: string;
   tool_calls?: Array<{ function: { name: string; arguments: Record<string, unknown> } }>;
   tool_name?: string;
+  /** Images / PDFs on a user message: set only when the model takes them (attachments.ts). */
+  media?: ChatMedia[];
 }
 
 export interface ToolSchema {
@@ -241,7 +243,7 @@ export interface AgentLoopDeps {
   /** System prompt for the tool format in use. */
   systemPrompt: (format: "native" | "text") => string;
   /** The conversation so far (user and assistant turns). */
-  messages: Array<{ role: string; content: string }>;
+  messages: Array<{ role: string; content: string; media?: ChatMedia[] }>;
   sendEvent: (event: IdeStreamEvent) => void;
   isCancelled: () => boolean;
   /** Run one tool call (approval, checkpoint, events) and return the text the model sees. */

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { NO_VISION, attachmentLabel, attachmentsText, type AttachmentPayload } from "../lib/attachments";
   import { applyAgentEvent, markApproval } from "../lib/agent-events";
   import { setBusy as setRestartBusy, clearBusy as clearRestartBusy } from "../lib/auto-restart";
   import { expandMentions } from "../lib/mentions";
@@ -180,7 +181,11 @@
     streamingToolEvents = markApproval(streamingToolEvents, id, approved);
   }
 
-  export async function sendMessage(text: string) {
+  export async function sendMessage(typed: string, attachments: AttachmentPayload[] = []) {
+    // The conversation keeps the typed text and the attached names; the files go with this request only.
+    const text = [typed, attachmentLabel(attachments)].filter(Boolean).join("\n\n");
+    // Without the agent (portal / plain chat) text files go inline and images/PDFs as a note.
+    const inlineText = attachments.length ? [text, attachmentsText(attachments, NO_VISION)].filter(Boolean).join("\n\n") : text;
     if (isStreaming) return;
 
     addMessage(conversation, "user", text);
@@ -229,6 +234,7 @@
           await agentGitHubToken().catch(() => null),
           autoApplyEdits(projectRoot) ? "edits" : "none",
           "chat",
+          attachments,
         );
       } else if (usePortalChat) {
         // Stream through the portal API (server persists messages)
@@ -236,7 +242,7 @@
 
         await streamPortalChat(
           portalConvId,
-          text,
+          inlineText,
           (chunk) => {
             streamingContent += chunk;
             scrollToBottom();
@@ -253,6 +259,7 @@
           role: m.role,
           content: m.content,
         }));
+        if (inlineText !== text) apiMessages[apiMessages.length - 1] = { role: "user", content: inlineText };
 
         await streamChat(
           apiMessages,
