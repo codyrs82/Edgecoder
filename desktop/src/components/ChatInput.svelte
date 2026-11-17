@@ -32,8 +32,13 @@
      * see an attached image or PDF.
      */
     attach?: { vision: Vision; who?: string; savedToFolder?: boolean };
+    /**
+     * Co-editing a live session: a message goes to the session at once even while it works, so a
+     * visible Send stays next to Stop (and no "Enter to queue" hint).
+     */
+    sendWhileWorking?: boolean;
   }
-  let { onSend, placeholder = "Message EdgeCoder...", disabled = false, streaming = false, onStop, mentions, controls, queue, onUnqueue, attach }: Props = $props();
+  let { onSend, placeholder = "Message EdgeCoder...", disabled = false, streaming = false, onStop, mentions, controls, queue, onUnqueue, attach, sendWhileWorking = false }: Props = $props();
 
   // Messages typed while a reply streams, sent in order when it ends (unless the queue is external).
   let localQueue = $state<Array<{ id: string; text: string; attachments?: AttachmentPayload[] }>>([]);
@@ -372,19 +377,20 @@
       aria-label={placeholder || "Message"}
       {disabled}
       rows="1"
-      aria-describedby={streaming && onStop && canSend ? "composer-queue-hint" : undefined}
+      aria-describedby={streaming && onStop && canSend && !sendWhileWorking ? "composer-queue-hint" : undefined}
       onkeydown={handleKeydown}
       oninput={onInput}
       onpaste={onPaste}
     ></textarea>
     {#if streaming && onStop}
       <!-- Working: the send arrow becomes Stop; Enter queues what is typed for when the work ends. -->
-      {#if canSend}<span class="queue-hint" id="composer-queue-hint">Enter to queue</span>{/if}
-      <button type="button" class="round-btn send-btn stop" aria-label="Stop" onclick={onStop} title="Stop (Esc). Enter queues your message for when this ends.">
+      {#if canSend && !sendWhileWorking}<span class="queue-hint" id="composer-queue-hint">Enter to queue</span>{/if}
+      <button type="button" class="round-btn send-btn stop" aria-label="Stop" onclick={onStop} title={sendWhileWorking ? "Stop the reply (Esc)" : "Stop (Esc). Enter queues your message for when this ends."}>
         <Square size={12} fill="currentColor" />
       </button>
-    {:else}
-      <button type="button" class="round-btn send-btn" aria-label="Send message" onclick={send} disabled={!canSend} title={streaming ? "Queue: sent when the reply ends (Enter)" : "Send (Enter)"}>
+    {/if}
+    {#if !(streaming && onStop) || sendWhileWorking}
+      <button type="button" class="round-btn send-btn" aria-label="Send message" onclick={send} disabled={!canSend} title={streaming && sendWhileWorking && queue ? "Send now: the session takes it next (Enter)" : streaming ? "Queue: sent when the reply ends (Enter)" : "Send (Enter)"}>
         <ArrowUp size={16} strokeWidth={2.25} />
       </button>
     {/if}

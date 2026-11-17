@@ -67,6 +67,18 @@ describe("ChatInput while a reply runs", () => {
     expect(onUnqueue).toHaveBeenCalledWith("q1");
   });
 
+  it("co-editing a live session (sendWhileWorking): Send stays next to Stop and sends at once", async () => {
+    const onSend = vi.fn();
+    render(ChatInput, { onSend, onStop: vi.fn(), streaming: true, queue: [], sendWhileWorking: true });
+    const pill = screen.getByTestId("composer-box");
+    const order = [...pill.children].map((el) => el.getAttribute("aria-label") ?? el.tagName.toLowerCase());
+    expect(order).toEqual(["Message EdgeCoder...", "Stop", "Send message"]);
+    await fireEvent.input(screen.getByRole("textbox"), { target: { value: "run the tests" } });
+    expect(screen.queryByText("Enter to queue")).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    expect(onSend).toHaveBeenCalledWith("run the tests");
+  });
+
   it("streaming without a stop action keeps the send arrow (it queues)", async () => {
     render(ChatInput, { onSend: vi.fn(), streaming: true });
     expect(screen.getByRole("button", { name: "Send message" })).toBeTruthy();
