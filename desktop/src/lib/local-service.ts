@@ -9,6 +9,7 @@
  */
 
 import { writable } from "svelte/store";
+import { noteServiceNetworkFailure } from "./service-status";
 
 export const RESTARTING_TEXT = "EdgeCoder's local service is restarting, trying again…";
 export const UNREACHABLE_SAVE_TEXT = "Couldn't reach EdgeCoder's local service. Your changes weren't saved. Try again.";
@@ -88,6 +89,8 @@ export async function fetchLocalService(
         return await send();
       } catch (e) {
         if (!isNetworkFailure(e) || opts.signal?.aborted) throw e;
+        // The shared service status (service-status.ts) looks at /health now.
+        if (i === 0) noteServiceNetworkFailure();
         const write = (opts.method ?? "GET").toUpperCase() !== "GET";
         if (i === 0 && opts.probe && (await opts.probe().catch(() => false))) {
           throw new LocalServiceUnreachableError(write ? BLOCKED_SAVE_TEXT : BLOCKED_TEXT);

@@ -9,6 +9,8 @@
   import { livePoll } from "../lib/live-poll";
   import { scrollRegion } from "../lib/scroll-region";
   import EmptyNote from "../components/EmptyNote.svelte";
+  import ServiceNotice from "../components/ServiceNotice.svelte";
+  import { onServiceReady, serviceStatus } from "../lib/service-status";
 
   let { pollMs = 2000 }: { pollMs?: number } = $props();
 
@@ -41,6 +43,11 @@
     await backendReady;
     if (isRemoteMode()) {
       remote = true;
+      loading = false;
+      return;
+    }
+    // Read through the local service: while it starts or restarts, ServiceNotice says so instead.
+    if ($serviceStatus.phase !== "ready") {
       loading = false;
       return;
     }
@@ -79,7 +86,11 @@
     if (!follow) return;
     void source;
     const poll = livePoll(fetchMore, pollMs);
-    return () => poll.stop();
+    const offReady = onServiceReady(() => void poll.now());
+    return () => {
+      poll.stop();
+      offReady();
+    };
   });
 
   function switchSource(id: string) {
@@ -155,7 +166,9 @@
       <button class="small" onclick={copyForSupport} disabled={!rows.length}><Copy size={13} aria-hidden="true" /> Copy for support</button>
     </div>
     {#if copied}<p class="sp-muted" role="status">{copied}</p>{/if}
-    {#if error}<p class="sp-err" role="alert">Couldn't read the log: {error}</p>{/if}
+    {#if $serviceStatus.phase !== "ready"}
+      <ServiceNotice />
+    {:else if error}<p class="sp-err" role="alert">Couldn't read the log: {error}</p>{/if}
 
     <div class="sp-card">
       {#if loading && !rows.length}

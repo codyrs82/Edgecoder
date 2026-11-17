@@ -6,6 +6,8 @@
   import { addFrontierKey, getFrontierStatus, getMe, removeFrontierKey, testFrontierKey, updateFrontierSettings, type FrontierStatusView } from "../lib/api";
   import { formatUsd, frontierName } from "../lib/compute-choice";
   import { onDestroy } from "svelte";
+  import ServiceNotice from "./ServiceNotice.svelte";
+  import { onServiceReady, serviceStatus } from "../lib/service-status";
 
   let status = $state<FrontierStatusView | null>(null);
   let loadError = $state("");
@@ -90,6 +92,8 @@
     loadError = "";
     void load();
   }
+  // EdgeCoder's local service came back (or finished starting): load the keys again.
+  onDestroy(onServiceReady(retry));
 
   $effect(() => {
     void load();
@@ -176,7 +180,9 @@
       </div>
     </div>
 
-    {#if loadError && !status}
+    {#if $serviceStatus.phase !== "ready" && !status}
+      <div class="sp-row"><ServiceNotice /></div>
+    {:else if loadError && !status}
       <div class="sp-row">
         <p class="sp-desc" role="status" data-testid="frontier-load-error">Couldn't load your keys right now ({loadError}).</p>
         <div class="sp-controls"><button onclick={retry}>Try again</button></div>

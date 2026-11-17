@@ -26,6 +26,8 @@
   } from "../lib/api";
   import type { StreamProgress, ModelPullProgress, IdeStreamEvent, RepoConnection } from "../lib/api";
   import ConnectRepo from "../components/ConnectRepo.svelte";
+  import ServiceNotice from "../components/ServiceNotice.svelte";
+  import { onServiceReady, serviceStatus, whenServiceReady } from "../lib/service-status";
   import {
     createConversation,
     addMessage,
@@ -146,7 +148,9 @@
   onMount(async () => {
     // Use portal chat when no local agent is running
     await backendReady;
-    if (isRemoteMode()) {
+    // While EdgeCoder's local service is still starting, wait for it rather than fall back to the
+    // portal (onServiceReady below decides again once it answers).
+    if (isRemoteMode() && get(serviceStatus).phase === "ready") {
       usePortalChat = true;
     }
 
@@ -171,6 +175,9 @@
       pullProgress = await getModelPullProgress();
     }, 3000);
   });
+
+  // The local service came back (or finished starting): use it.
+  onDestroy(onServiceReady(() => (usePortalChat = isRemoteMode())));
 
   // Save current conversation when component unmounts (tab switch)
   onDestroy(() => {
@@ -219,6 +226,11 @@
     streamProgress = undefined;
     meshWarning = null;
     abortController = new AbortController();
+    // Sent while the local service starts or restarts: wait for it (the notice above says so), up
+    // to a minute, instead of failing with "couldn't reach".
+    if (!usePortalChat && get(serviceStatus).phase !== "ready" && get(serviceStatus).phase !== "failed") {
+      await Promise.race([whenServiceReady(), new Promise((r) => setTimeout(r, 60_000))]);
+    }
     const sentMode: EngineMode = mode;
     let planned = false;
     if (projectRoot && !conversation.permissionMode) conversation.permissionMode = sentMode;
@@ -426,6 +438,7 @@
 </script>
 
 <div class="chat-view" bind:this={scrollContainer}>
+  {#if !usePortalChat && $serviceStatus.phase !== "ready"}<div class="service-notice"><ServiceNotice /></div>{/if}
   {#if meshWarning}
     <div class="mesh-warning">
       <span class="mesh-warning-icon">&#9888;</span>
@@ -549,6 +562,7 @@
     padding: 24px 24px 16px;
     box-sizing: border-box;
   }
+  .service-notice { padding: 0.75rem 1rem 0; }
   .mesh-warning {
     display: flex;
     align-items: center;

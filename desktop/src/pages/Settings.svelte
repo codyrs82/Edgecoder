@@ -157,8 +157,8 @@
 
     backendReady.then(() => {
       if (isRemoteMode()) {
-        identityError = "No local agent running — identity requires a running agent.";
-        ollamaStatus = "No local agent";
+        identityError = "This computer's identity shows once EdgeCoder's local service is up.";
+        ollamaStatus = "Waiting for EdgeCoder's local service";
         return;
       }
       getIdentity()

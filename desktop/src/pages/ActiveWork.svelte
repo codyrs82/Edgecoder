@@ -13,6 +13,8 @@
   import MemoryNotice from "../components/MemoryNotice.svelte";
   import EmptyNote from "../components/EmptyNote.svelte";
   import StatusPill from "../components/StatusPill.svelte";
+  import ServiceNotice from "../components/ServiceNotice.svelte";
+  import { inDesktopShell, onServiceReady, serviceStatus } from "../lib/service-status";
 
   let { pollMs = 2000 }: { pollMs?: number } = $props();
 
@@ -25,8 +27,14 @@
 
   async function refresh() {
     await backendReady;
-    if (isRemoteMode()) {
-      remote = true;
+    if (isRemoteMode() && $serviceStatus.phase === "ready") {
+      remote = !inDesktopShell();
+      loading = false;
+      return;
+    }
+    remote = false;
+    // Starting or restarting: ServiceNotice says so; this loads once the service answers.
+    if ($serviceStatus.phase !== "ready") {
       loading = false;
       return;
     }
@@ -43,7 +51,11 @@
 
   $effect(() => {
     const poll = livePoll(refresh, pollMs);
-    return () => poll.stop();
+    const offReady = onServiceReady(() => void poll.now());
+    return () => {
+      poll.stop();
+      offReady();
+    };
   });
 
   let agent = $derived(snap?.agent ?? null);
@@ -62,7 +74,9 @@
   {#if remote}
     <div class="sp-card"><EmptyNote title="Not available in the web app" description="Active work shows the desktop app's own agent and requests. Open it in the EdgeCoder app on the computer you want to watch." /></div>
   {:else}
-    {#if error}<p class="sp-err" role="alert">Couldn't read this computer's activity: {error}</p>{/if}
+    {#if $serviceStatus.phase !== "ready"}
+      <ServiceNotice />
+    {:else if error}<p class="sp-err" role="alert">Couldn't read this computer's activity: {error}</p>{/if}
 
     {#if agent?.paused}
       <AgentPausedNotice reason={agent.paused.reason} agentId={agent.agentId ?? undefined} onRetry={refresh} />

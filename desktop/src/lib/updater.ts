@@ -120,9 +120,29 @@ export async function downloadAndInstall(): Promise<void> {
     setStatus({ state: "installing" });
     rememberUpdatingTo(update.version);
     await update.install();
-    await relaunch();
+    // Stop the old version's local service first (and keep the shell from restarting it), so the
+    // relaunched app starts its own with the new agent code instead of finding the old one.
+    const stopped = await shellCommand("stop_local_service_for_update");
+    try {
+      await relaunch();
+    } catch (err) {
+      // No relaunch: bring the service back rather than leave it stopped.
+      if (stopped) await shellCommand("restart_local_service");
+      throw err;
+    }
   } catch (err) {
     setStatus({ state: "error", message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+/** Run a desktop-shell command; false outside the shell or when it fails (never blocks an update). */
+async function shellCommand(cmd: string): Promise<boolean> {
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke(cmd);
+    return true;
+  } catch {
+    return false;
   }
 }
 

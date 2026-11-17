@@ -6,6 +6,8 @@
   import QuoteSelection from "../components/QuoteSelection.svelte";
   import BotAvatar from "../components/BotAvatar.svelte";
   import ToolArgs from "../components/ToolArgs.svelte";
+  import ServiceNotice from "../components/ServiceNotice.svelte";
+  import { onServiceReady, serviceStatus } from "../lib/service-status";
   import { Play, Pause, RotateCw, Pencil, Trash2, History, MessageSquare, Ellipsis, CircleAlert, X, CalendarClock, Cpu, Folder, PanelRight, Copy, FolderOpen, GitPullRequest, GitBranch, Zap, RefreshCw } from "@lucide/svelte";
   import { approveBotCall, botHistory, botMessages, cancelBotRun, deleteBot, getBot, runBot, sendBotMessage, syncBotRepository, updateBot, botErrorText } from "../lib/api";
   import {
@@ -202,6 +204,8 @@
   const pendingIds = $derived(bot.pending.map((p) => p.callId));
 
   async function load(id: string) {
+    // Starting or restarting: ServiceNotice says so; this loads again once the service answers.
+    if ($serviceStatus.phase !== "ready") return;
     try {
       const [m, h] = await Promise.all([botMessages(id), botHistory(id)]);
       if (id !== bot.id) return;
@@ -266,6 +270,11 @@
     const t = setInterval(reload, 1_000);
     return () => clearInterval(t);
   });
+
+  $effect(() => onServiceReady(() => {
+    error = null;
+    reload();
+  }));
 
   async function act(fn: () => Promise<unknown>) {
     error = null;
@@ -404,7 +413,9 @@
     {/snippet}
   </Tabs.List>
 
-  {#if error}<div class="error" role="alert">{error}</div>{/if}
+  {#if $serviceStatus.phase !== "ready"}
+    <ServiceNotice />
+  {:else if error}<div class="error" role="alert">{error}</div>{/if}
 
   {#if view === "chat" && notice}
     <div class="notice" role="status" data-testid="bot-failure-notice">

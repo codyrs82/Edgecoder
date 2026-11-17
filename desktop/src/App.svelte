@@ -46,6 +46,8 @@
   import { stepFromRoute, type StepId } from "./lib/onboarding";
   import { guideToOpen } from "./lib/onboarding-launch";
   import { getOnboarding, saveOnboarding } from "./lib/api";
+  import { probeLocalService, restartLocalService, serviceCameBack } from "./lib/api";
+  import { inDesktopShell, startServiceMonitor, stopServiceMonitor } from "./lib/service-status";
 
   let activeTab = $state<"chat" | "editor">("chat");
   let settingsOpen = $state(false);
@@ -174,6 +176,9 @@
     // Updates run whether or not anyone is signed in, so a broken sign-in can be fixed by an update.
     startPeriodicCheck();
     const stopAutoRestart = startAutoRestart();
+    // The desktop app owns its local service: watch it, so pages say "Starting…" and wait for it
+    // instead of asking whether it runs (lib/service-status.ts; the shell restarts it by itself).
+    if (inDesktopShell()) startServiceMonitor({ probe: probeLocalService, restart: restartLocalService, onReady: serviceCameBack });
     void import("@tauri-apps/api/app").then(({ getVersion }) => getVersion()).then((v) => {
       const updated = takeUpdatedTo(v);
       if (updated) notify(`Updated to EdgeCoder ${updated}`, "success", "updated-to");
@@ -182,7 +187,7 @@
       .then((u) => { user = u; })
       .catch(() => { user = null; })
       .finally(() => { authChecked = true; });
-    return () => { stopPeriodicCheck(); stopAutoRestart(); };
+    return () => { stopPeriodicCheck(); stopAutoRestart(); stopServiceMonitor(); };
   });
 
   // Auto-restart waits for these (lib/auto-restart.ts).
