@@ -17,6 +17,8 @@ export interface LiveMessage {
   turnId?: string;
   changedFiles?: string[];
   usage?: { cSats: number; where?: string; calls?: import("./served").CallUsage[]; usd?: number };
+  /** A plan written in Plan mode. */
+  plan?: boolean;
 }
 
 export interface QueuedView {
@@ -31,7 +33,7 @@ export interface LiveView {
   title: string;
   projectRoot: string;
   model: string;
-  /** ask | auto-edits | auto. */
+  /** ask | auto-edits | auto | plan. */
   mode: string;
   /** The lead's full id when it runs on your own frontier key ("frontier/anthropic/claude-opus-5-5"). */
   frontierModel?: string;
@@ -93,7 +95,14 @@ function messageOf(t: SessionEntry): LiveMessage | null {
     toolEvents: settle(turn.toolEvents),
     ...(t.turnId && t.changedFiles?.length && !t.undone ? { turnId: t.turnId, changedFiles: t.changedFiles } : {}),
     ...(t.usage ? { usage: t.usage } : {}),
+    ...(t.plan ? { plan: true } : {}),
   };
+}
+
+/** The plan waiting for approval: the last message is a plan, the session is still in Plan mode and idle. */
+export function pendingPlan(v: LiveView): LiveMessage | null {
+  const last = v.messages.at(-1);
+  return v.mode === "plan" && !v.streaming && last?.role === "assistant" && last.plan ? last : null;
 }
 
 export function viewFromSnapshot(s: SessionSnapshotView): LiveView {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup } from "@testing-library/svelte";
+import { render, screen, cleanup, fireEvent } from "@testing-library/svelte";
 import ToolCallBlock from "../src/components/ToolCallBlock.svelte";
 
 afterEach(cleanup);
@@ -33,5 +33,22 @@ describe("ToolCallBlock approval", () => {
   it("does not show the approval details once the call is decided", () => {
     render(ToolCallBlock, { id: "c4", tool: "run_shell", args: { command: "ls" }, requiresApproval: true, status: "completed", result: "ok" });
     expect(screen.queryByTestId("approval-details")).toBeNull();
+  });
+
+  it("offers Always allow for the call's rule, and answers with it", async () => {
+    const onAlways = vi.fn();
+    const onApprove = vi.fn();
+    render(ToolCallBlock, { id: "c5", tool: "run_shell", args: { command: "npm test src/swarm/worker-runner.ts" }, requiresApproval: true, status: "pending", onApprove, onReject: vi.fn(), allowRule: "npm test:*", onAlways });
+    const always = screen.getByRole("button", { name: /Always allow npm test … in this project/ });
+    await fireEvent.click(always);
+    expect(onAlways).toHaveBeenCalledWith("c5");
+    expect(onApprove).not.toHaveBeenCalled();
+  });
+
+  it("has no Always allow when the call offers no rule (a command that must always ask)", () => {
+    render(ToolCallBlock, { id: "c6", tool: "run_shell", args: { command: "git push" }, requiresApproval: true, status: "pending", onApprove: vi.fn(), onReject: vi.fn(), onAlways: vi.fn() });
+    expect(screen.queryByRole("button", { name: /Always allow/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Allow" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
   });
 });

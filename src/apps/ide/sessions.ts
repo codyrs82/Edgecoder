@@ -22,8 +22,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { ALWAYS_ASK_TOOLS, makeToolRunner, runAgentLoop, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
 import type { CheckpointStore } from "./checkpoints.js";
-import { defaultMode, defaultPermissionsFile, isReadOnlyCommand, PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
-import { protectedToolPath } from "./tool-executor.js";
+import { defaultMode, defaultPermissionsFile, EXECUTION_MODES, PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
+import { decideToolCall, suggestRule, type Decision } from "./permission-policy.js";
 import { redactApiKeys } from "../../common/redaction.js";
 import { parseFrontierModelId } from "../../inference-api/frontier-models.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
@@ -66,6 +66,8 @@ export interface TranscriptEntry {
   undone?: boolean;
   /** A note recorded by a tentacle (tentacles.ts): what ran where, its outcome and patch. */
   tentacle?: Record<string, unknown>;
+  /** Assistant: a reply written in plan mode (the plan the user approves or revises). */
+  plan?: boolean;
 }
 
 /** What a turn's model calls cost, where the last ran, and each call (model, machine, timings). */
@@ -89,7 +91,10 @@ export interface SessionData {
   mode: PermissionMode;
   /** Older clients' view of mode: "edits" for auto-edits and auto. */
   autoApprove: "none" | "edits";
-  /** Command names the user approved "always" for this session (`npm`, `git`); no shell metacharacters. */
+  /**
+   * "Always allow" answers given in this session: rules (`npm test:*`, permission-policy.ts) and,
+   * from older sessions, command names (`npm`). The project keeps them too (PermissionStore).
+   */
   alwaysShell: string[];
   origin: ClientKind;
   /** Shown live in the desktop app (remote control). */
@@ -229,6 +234,9 @@ const MAX_RESULT_CHARS = 2000;
 const SHELL_META = /[;&|`$<>(){}\\\n]/;
 const ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+/** The message that starts carrying out an approved plan. */
+export const PLAN_APPROVED = "The plan is approved. Carry it out now, step by step, using the tools. When you're done, reply with a short summary of what changed and how you checked it.";
+
 export function defaultSessionsDir(env: NodeJS.ProcessEnv = process.env): string {
   return env.EDGECODER_SESSIONS_DIR || join(homedir(), ".edgecoder", "sessions");
 }
@@ -309,12 +317,12 @@ export class SessionHub {
   private readonly approvalTimeoutMs: number;
   readonly permissions: PermissionStore;
 
-  constructor(private readonly env: TurnEnv, opts: { dir?: string | null; approvalTimeoutMs?: number; permissionsFile?: string | null } = {}) {
+  constructor(private readonly env: TurnEnv, opts: { dir?: string | null; approvalTimeoutMs?: number; permissionsFile?: string | null; permissions?: PermissionStore } = {}) {
     this.dir = opts.dir === undefined ? defaultSessionsDir() : opts.dir;
     this.approvalTimeoutMs = opts.approvalTimeoutMs ?? 30 * 60_000;
     // The default sessions folder keeps "always" answers in ~/.edgecoder/permissions.json; any
     // other setup (tests) keeps them in memory unless given a file.
-    this.permissions = new PermissionStore(opts.permissionsFile !== undefined ? opts.permissionsFile : opts.dir === undefined ? defaultPermissionsFile() : null);
+    this.permissions = opts.permissions ?? new PermissionStore(opts.permissionsFile !== undefined ? opts.permissionsFile : opts.dir === undefined ? defaultPermissionsFile() : null);
   }
 
   /** Read the saved sessions (once, at startup). */
@@ -403,7 +411,7 @@ export class SessionHub {
       model: parsed.model,
       compute: parsed.compute,
       mode,
-      autoApprove: mode === "ask" ? "none" : "edits",
+      autoApprove: mode === "auto-edits" || mode === "auto" ? "edits" : "none",
       alwaysShell: [],
       origin: input.client.kind,
       published: false,
@@ -582,6 +590,8 @@ export class SessionHub {
         tools: this.env.tools?.(s),
         ...(this.env.contextWindow ? { contextWindow: () => this.env.contextWindow!(s) } : {}),
         ...(this.env.summarize ? { summarize: this.env.summarize(s, (e) => e.type === "usage" && sendEvent(e), r.abort.signal, { client: r.by ?? null }) } : {}),
+        // Plan mode is read when the turn starts: approving the plan starts the next turn.
+        plan: s.mode === "plan",
         runTool: makeToolRunner({
           prepare: exec.prepare,
           execute: exec.execute,
@@ -589,8 +599,7 @@ export class SessionHub {
           waitForApproval: (callId, tool, args) => this.waitForApproval(s, l, r, callId, tool, args),
           captureBeforeWrite: (path) => this.env.checkpoints.capture(r.turnId, path),
           turnId: r.turnId,
-          autoApproveEdits: () => s.mode !== "ask",
-          alwaysAllowed: (tool, args) => this.allowedWithoutAsking(s, tool, args),
+          decide: (tool, args) => this.decide(s, tool, args),
         }),
       });
     } catch (err) {
@@ -602,6 +611,7 @@ export class SessionHub {
       }
       l.pending.clear();
       const stopped = r.abort.signal.aborted;
+      const planned = s.mode === "plan" && !stopped && r.text.trim().length > 0;
       const entry: TranscriptEntry = {
         id: randomUUID(),
         role: "assistant",
@@ -611,6 +621,7 @@ export class SessionHub {
         turnId: r.turnId,
         ...(r.changed.length ? { changedFiles: [...r.changed] } : {}),
         ...(r.usage ? { usage: r.usage } : {}),
+        ...(planned ? { plan: true } : {}),
       };
       s.transcript.push(entry);
       try {
@@ -621,6 +632,7 @@ export class SessionHub {
       l.running = null;
       this.save(s);
       this.emit(id, { type: "turn_end", entry, stopped, cSats: s.cSats, branch: s.branch });
+      if (planned) this.emit(id, { type: "plan_ready", entryId: entry.id });
       // Messages queued meanwhile start the next turn (together, in order).
       if (l.queue.length && this.sessions.has(id)) {
         // One turn per requesting account: a run of messages from the same account starts the
@@ -635,30 +647,33 @@ export class SessionHub {
     }
   }
 
-  /**
-   * A call that runs without asking (it counts as approved): a read-only command in any mode, a
-   * command name approved "always" for the session or the project, or any command that isn't
-   * risky in auto mode. Risky commands (permissions.ts riskOf) always ask.
-   */
+  /** The session's verdict on a call (permission-policy.ts): its mode, then the project's and session's "always" answers. */
+  decide(s: SessionData, tool: ToolName, args: Record<string, unknown>): Decision {
+    const project = this.permissions.get(s.projectRoot);
+    return decideToolCall(
+      tool,
+      args,
+      {
+        mode: s.mode,
+        root: s.projectRoot,
+        rules: [...(project.rules ?? []), ...s.alwaysShell],
+        legacyNames: [...project.shell, ...s.alwaysShell],
+        branch: () => this.env.branch?.(s.projectRoot) ?? s.branch,
+      },
+      (c) => riskOf(c, s.projectRoot),
+    );
+  }
+
+  /** A call that runs without asking in the session's mode (kept for callers that only need yes/no). */
   allowedWithoutAsking(s: SessionData, tool: ToolName, args: Record<string, unknown>): boolean {
-    if (tool !== "run_shell") return false;
-    if (isReadOnlyCommand(args.command, s.projectRoot)) return true;
-    if (riskOf(args.command, s.projectRoot) !== null) return false;
-    if (s.mode === "auto") return true;
-    const prefix = shellPrefix(args.command);
-    return prefix !== null && (s.alwaysShell.includes(prefix) || this.permissions.get(s.projectRoot).shell.includes(prefix));
+    return this.decide(s, tool, args).action === "run";
   }
 
   private waitForApproval(s: SessionData, l: Live, r: Running, callId: string, tool: ToolName, args: Record<string, unknown>): Promise<boolean> {
     // The mode or an "always" answer given meanwhile (never for the tools that always ask).
-    if (!ALWAYS_ASK_TOOLS.has(tool)) {
-      const always =
-        this.allowedWithoutAsking(s, tool, args) ||
-        ((tool === "write_file" || tool === "edit_file") && s.mode !== "ask" && protectedToolPath(args.path) === null);
-      if (always) {
-        this.emit(s.id, { type: "approval", id: callId, approved: true, by: "always" });
-        return Promise.resolve(true);
-      }
+    if (!ALWAYS_ASK_TOOLS.has(tool) && this.decide(s, tool, args).action === "run") {
+      this.emit(s.id, { type: "approval", id: callId, approved: true, by: "always" });
+      return Promise.resolve(true);
     }
     if (r.abort.signal.aborted) return Promise.resolve(false);
     return new Promise<boolean>((resolve) => {
@@ -687,13 +702,14 @@ export class SessionHub {
         if (s.mode === "ask") s.mode = "auto-edits";
         this.permissions.allowEdits(s.projectRoot);
       }
-      if (p.tool === "run_shell" && riskOf(p.args.command, s.projectRoot) === null) {
-        // "Always" for a command name, kept for the project; never for a risky command.
-        const prefix = shellPrefix(p.args.command);
-        if (prefix && !s.alwaysShell.includes(prefix)) s.alwaysShell.push(prefix);
-        if (prefix) this.permissions.allowShell(s.projectRoot, prefix);
+      if (p.tool === "run_shell") {
+        // "Always allow" keeps a rule (`npm test:*`) for the project; never for a refused or
+        // always-ask command (suggestRule returns null for those).
+        const rule = suggestRule(p.args.command, { root: s.projectRoot });
+        if (rule && !s.alwaysShell.includes(rule)) s.alwaysShell.push(rule);
+        if (rule) this.permissions.addRule(s.projectRoot, rule);
       }
-      s.autoApprove = s.mode === "ask" ? "none" : "edits";
+      s.autoApprove = s.mode === "auto-edits" || s.mode === "auto" ? "edits" : "none";
       this.save(s);
       this.emit(id, { type: "settings", mode: s.mode, autoApprove: s.autoApprove, alwaysShell: [...s.alwaysShell], by: client.kind, ...(client.label ? { label: client.label } : {}) });
     }
@@ -738,8 +754,19 @@ export class SessionHub {
     if (patch.title?.trim()) s.title = patch.title.trim().slice(0, 120);
     if (patch.mode) s.mode = patch.mode;
     else if (patch.autoApprove) s.mode = patch.autoApprove === "edits" ? (s.mode === "auto" ? "auto" : "auto-edits") : "ask";
-    s.autoApprove = s.mode === "ask" ? "none" : "edits";
+    s.autoApprove = s.mode === "auto-edits" || s.mode === "auto" ? "edits" : "none";
     this.save(s);
+    // Calls waiting for an answer that the new mode runs without asking go ahead now.
+    if (patch.mode) {
+      const l = this.liveOf(id);
+      for (const [callId, p] of [...l.pending]) {
+        if (ALWAYS_ASK_TOOLS.has(p.tool) || this.decide(s, p.tool, p.args).action !== "run") continue;
+        l.pending.delete(callId);
+        clearTimeout(p.timer);
+        this.emit(id, { type: "approval", id: callId, approved: true, by: "always" });
+        p.resolve(true);
+      }
+    }
     this.emit(id, {
       type: "settings",
       model: modelIdOf(s),
@@ -754,6 +781,22 @@ export class SessionHub {
       ...(client.label ? { label: client.label } : {}),
     });
     return plain(s);
+  }
+
+  /**
+   * Approve the plan the last plan-mode turn wrote: the session switches to `mode` (default
+   * auto-edits) and a message starts the turn that carries the plan out.
+   */
+  approvePlan(id: string, client: ClientRef, mode: PermissionMode = "auto-edits"): { turnId: string | null } {
+    const s = this.need(id);
+    const l = this.liveOf(id);
+    if (s.mode !== "plan") throw new SessionError("invalid", "The session isn't in plan mode.");
+    if (l.running) throw new SessionError("busy", "Wait for the plan to finish first.");
+    if (!EXECUTION_MODES.includes(mode)) throw new SessionError("invalid", "Approve the plan into ask, auto-edits or auto.");
+    const last = [...s.transcript].reverse().find((t) => t.role === "assistant");
+    if (!last?.plan) throw new SessionError("invalid", "There's no plan to approve yet.");
+    this.update(id, { mode }, client);
+    return this.send(id, PLAN_APPROVED, client);
   }
 
   publish(id: string, published: boolean, client: ClientRef): void {

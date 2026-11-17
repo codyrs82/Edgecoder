@@ -119,6 +119,9 @@ export class ProviderClient {
   settings(id: string, patch: { model?: string; leadModel?: string; workerModel?: string; title?: string; autoApprove?: "none" | "edits"; mode?: PermissionMode }): Promise<unknown> {
     return this.req("POST", `/v1/ide/sessions/${id}/settings`, patch);
   }
+  approvePlan(id: string, mode: PermissionMode = "auto-edits"): Promise<{ turnId: string | null }> {
+    return this.req("POST", `/v1/ide/sessions/${id}/plan`, { mode });
+  }
   publish(id: string, published: boolean): Promise<unknown> {
     return this.req("POST", `/v1/ide/sessions/${id}/publish`, { published });
   }

@@ -16,9 +16,13 @@
  *   POST /v1/ide/sessions/:id/approve    {callId, approved, always?}   first answer wins
  *   POST /v1/ide/sessions/:id/control    {release?}    no-op, kept for older clients
  *   POST /v1/ide/sessions/:id/settings   {model? (= leadModel), leadModel?, workerModel?, title?, mode?, autoApprove?}
+ *   POST /v1/ide/sessions/:id/plan       {mode?}       approve the plan (plan mode) and carry it out in mode (default auto-edits)
  *   POST /v1/ide/sessions/:id/publish    {published}   show it live in the desktop app
  *   POST /v1/ide/sessions/:id/trust      {trusted}     trust the session's project folder (workspace-trust.ts)
  *   POST /v1/ide/sessions/:id/cancel | /undo {turnId?} | /clear | /delete
+ *
+ *   GET  /v1/ide/permissions                           every project's "always allow" rules (Settings → Permissions)
+ *   POST /v1/ide/permissions/remove {projectRoot, rule}   remove one ("edits" removes the edits answer)
  */
 
 import type { FastifyInstance, FastifyReply } from "fastify";
@@ -76,7 +80,7 @@ export function registerSessionRoutes(app: FastifyInstance, hub: SessionHub): vo
           workerModel: z.string().min(1).max(200).optional(),
           title: z.string().max(120).optional(),
           autoApprove: z.enum(["none", "edits"]).optional(),
-          mode: z.enum(["ask", "auto-edits", "auto"]).optional(),
+          mode: z.enum(["ask", "auto-edits", "auto", "plan"]).optional(),
           published: z.boolean().optional(),
         })
         .parse(req.body ?? {});
@@ -158,9 +162,24 @@ export function registerSessionRoutes(app: FastifyInstance, hub: SessionHub): vo
   app.post("/v1/ide/sessions/:id/settings", (req, reply) =>
     handle(reply, () => {
       const { id } = idParams.parse(req.params);
-      const b = z.object({ ...client, model: z.string().min(1).max(200).optional(), leadModel: z.string().min(1).max(200).optional(), workerModel: z.string().min(1).max(200).optional(), title: z.string().max(120).optional(), autoApprove: z.enum(["none", "edits"]).optional(), mode: z.enum(["ask", "auto-edits", "auto"]).optional() }).parse(req.body ?? {});
+      const b = z.object({ ...client, model: z.string().min(1).max(200).optional(), leadModel: z.string().min(1).max(200).optional(), workerModel: z.string().min(1).max(200).optional(), title: z.string().max(120).optional(), autoApprove: z.enum(["none", "edits"]).optional(), mode: z.enum(["ask", "auto-edits", "auto", "plan"]).optional() }).parse(req.body ?? {});
       const s = hub.update(id, { model: b.model, leadModel: b.leadModel, workerModel: b.workerModel, title: b.title, autoApprove: b.autoApprove, mode: b.mode }, refOf(b));
       return { session: s };
+    }));
+
+  app.post("/v1/ide/sessions/:id/plan", (req, reply) =>
+    handle(reply, () => {
+      const { id } = idParams.parse(req.params);
+      const b = z.object({ ...client, mode: z.enum(["ask", "auto-edits", "auto"]).default("auto-edits") }).parse(req.body ?? {});
+      return hub.approvePlan(id, refOf(b), b.mode);
+    }));
+
+  app.get("/v1/ide/permissions", (_req, reply) => handle(reply, () => ({ projects: hub.permissions.all() })));
+
+  app.post("/v1/ide/permissions/remove", (req, reply) =>
+    handle(reply, () => {
+      const b = z.object({ projectRoot: z.string().min(1).max(4096), rule: z.string().min(1).max(200) }).parse(req.body ?? {});
+      return { removed: hub.permissions.removeRule(b.projectRoot, b.rule) };
     }));
 
   app.post("/v1/ide/sessions/:id/publish", (req, reply) =>

@@ -215,7 +215,7 @@ describe("agentBotRunner", () => {
     const replies: Array<Awaited<ReturnType<ChatFn>>> = [
       { content: "", toolCalls: [{ name: "read_file", arguments: { path: "notes.txt" } }] },
       { content: "", toolCalls: [{ name: "remember", arguments: { note: "notes.txt says hello" } }] },
-      { content: "", toolCalls: [{ name: "run_shell", arguments: { command: "ls" } }] },
+      { content: "", toolCalls: [{ name: "run_shell", arguments: { command: "node scripts/tidy.js" } }] },
       { content: "", toolCalls: [{ name: "git_push", arguments: {} }] },
       { content: "Read the notes.\n\nAll good: notes.txt says hello.", toolCalls: [] },
     ];
@@ -239,7 +239,7 @@ describe("agentBotRunner", () => {
     const bot = m.create({ name: "Harry", projectRoot: project, instructions: "Keep the notes tidy.", allowedTools: ["read_file", "run_shell"] });
     m.runNow(bot.id);
     await new Promise((r) => setTimeout(r, 20));
-    // run_shell needs approval: the run is paused.
+    // run_shell needs approval (not read-only, and the bot isn't in Auto): the run is paused.
     const v = m.get(bot.id);
     expect(v.status).toBe("needs_approval");
     expect(v.pending[0].tool).toBe("run_shell");

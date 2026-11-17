@@ -3,7 +3,9 @@
   import { applyAgentEvent, markApproval } from "../lib/agent-events";
   import { setBusy as setRestartBusy, clearBusy as clearRestartBusy } from "../lib/auto-restart";
   import { expandMentions } from "../lib/mentions";
-  import { autoApplyEdits } from "../lib/project-mode";
+  import { autoApplySetting } from "../lib/project-mode";
+  import PlanApproval from "../components/PlanApproval.svelte";
+  import { chatMode, PLAN_APPROVED_MESSAGE, type EngineMode } from "../lib/permission-modes";
   import { onMount, onDestroy } from "svelte";
   import ChatMessage from "../components/ChatMessage.svelte";
   import QuoteSelection from "../components/QuoteSelection.svelte";
@@ -47,8 +49,12 @@
     onHeaderChange?: (h: { title: string; detail: string | null }) => void;
     /** "Add to chat": text selected in a message, as a Markdown quote for the page's composer. */
     onQuote?: (block: string) => void;
+    /** This chat's permission mode, for the composer's picker (it changes it with setMode). */
+    onModeChange?: (mode: EngineMode) => void;
+    /** Plan's "Revise": put the cursor in the page's composer. */
+    onFocusComposer?: () => void;
   }
-  let { onOpenInEditor, projectRoot = null, onStreamingChange, onOpenPath, onPreview, onRepoConnected, onHeaderChange, onQuote }: Props = $props();
+  let { onOpenInEditor, projectRoot = null, onStreamingChange, onOpenPath, onPreview, onRepoConnected, onHeaderChange, onQuote, onModeChange, onFocusComposer }: Props = $props();
 
   let connectRepoBox: ConnectRepo | undefined = $state(undefined);
   /** The open project's folder name and branch, for the header. */
@@ -85,6 +91,17 @@
     const detail = usePortalChat ? "Synced" : projectName ? `${projectName}${projectBranch ? ` · ${projectBranch}` : ""}` : null;
     onHeaderChange?.({ title, detail });
   });
+  /** This chat's permission mode (kept with the chat; new chats start in Settings' default). */
+  const mode = $derived<EngineMode>(chatMode(conversation.permissionMode, autoApplySetting(conversation.projectRoot ?? projectRoot)));
+  $effect(() => {
+    onModeChange?.(mode);
+  });
+  /** The composer's picker changed the mode. */
+  export function setMode(m: EngineMode) {
+    conversation.permissionMode = m;
+    conversation = conversation;
+    if (conversation.messages.length > 0) void saveConversation(conversation);
+  }
   let streamingContent = $state("");
   let isStreaming = $state(false);
   let streamProgress: StreamProgress | undefined = $state(undefined);
@@ -179,8 +196,8 @@
     return portalId;
   }
 
-  function handleToolApproval(id: string, approved: boolean) {
-    ideSendToolApproval(id, approved);
+  function handleToolApproval(id: string, approved: boolean, always = false) {
+    ideSendToolApproval(id, approved, always);
     streamingToolEvents = markApproval(streamingToolEvents, id, approved);
   }
 
@@ -202,6 +219,9 @@
     streamProgress = undefined;
     meshWarning = null;
     abortController = new AbortController();
+    const sentMode: EngineMode = mode;
+    let planned = false;
+    if (projectRoot && !conversation.permissionMode) conversation.permissionMode = sentMode;
 
     try {
       if (projectRoot && !usePortalChat) {
@@ -216,6 +236,7 @@
         streamingTurnId = undefined;
         streamingUsage = undefined;
         streamingChanged = [];
+        planned = sentMode === "plan";
 
         await streamIdeChat(
           apiMessages,
@@ -235,7 +256,7 @@
           abortController.signal,
           get(computeChoice),
           await agentGitHubToken().catch(() => null),
-          autoApplyEdits(projectRoot) ? "edits" : "none",
+          sentMode,
           "chat",
           attachments,
         );
@@ -280,6 +301,7 @@
 
       addMessage(conversation, "assistant", streamingContent);
       attachTurn();
+      if (planned && streamingContent.trim()) conversation.messages[conversation.messages.length - 1].plan = true;
       conversation = conversation;
       await saveConversation(conversation);
       localStorage.setItem("edgecoder-last-chat-id", conversation.id);
@@ -391,6 +413,13 @@
     return conversation.id;
   }
 
+  /** The last reply is a plan waiting for approval (the chat is still in Plan mode). */
+  const pendingPlan = $derived(!isStreaming && !!projectRoot && mode === "plan" && conversation.messages.at(-1)?.role === "assistant" && conversation.messages.at(-1)?.plan === true);
+  function approvePlan(next: EngineMode) {
+    setMode(next);
+    void sendMessage(PLAN_APPROVED_MESSAGE);
+  }
+
   function handleQuickAction(prompt: string) {
     sendMessage(prompt);
   }
@@ -437,7 +466,10 @@
         <ChatMessage role={msg.role as "user" | "assistant"} content={msg.content} toolEvents={msg.toolEvents} turnId={msg.turnId} changedFiles={msg.changedFiles} usage={msg.usage} {onOpenPath} {onPreview} {onOpenInEditor} onToolApproval={handleToolApproval} />
       {/each}
       {#if isStreaming && (streamingContent || streamingToolEvents.length > 0)}
-        <ChatMessage role="assistant" content={streamingContent} streaming={true} {streamProgress} toolEvents={streamingToolEvents} {onOpenInEditor} onToolApproval={handleToolApproval} />
+        <ChatMessage role="assistant" content={streamingContent} streaming={true} {streamProgress} toolEvents={streamingToolEvents} {onOpenInEditor} onToolApproval={handleToolApproval} onToolAlways={(id) => handleToolApproval(id, true, true)} />
+      {/if}
+      {#if pendingPlan}
+        <PlanApproval onApprove={approvePlan} onRevise={() => onFocusComposer?.()} />
       {/if}
     </div>
   {/if}

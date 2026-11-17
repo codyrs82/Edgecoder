@@ -12,6 +12,9 @@
     status: StepStatus;
     onApprove?: (id: string) => void;
     onReject?: (id: string) => void;
+    /** "Always allow `rule` in this project": shown when the call offers a rule and this is set. */
+    allowRule?: string;
+    onAlways?: (id: string) => void;
   }
   let {
     id,
@@ -23,6 +26,8 @@
     status,
     onApprove,
     onReject,
+    allowRule,
+    onAlways,
   }: Props = $props();
 
   let expanded = $state(false);
@@ -88,6 +93,11 @@
     onApprove?.(id);
   }
 
+  function handleAlways(e: MouseEvent) {
+    e.stopPropagation();
+    onAlways?.(id);
+  }
+
   function handleReject(e: MouseEvent) {
     e.stopPropagation();
     onReject?.(id);
@@ -133,6 +143,11 @@
         <button class="btn allow" onclick={handleApprove} type="button"
           >Allow</button
         >
+        {#if allowRule && onAlways}
+          <button class="btn always" onclick={handleAlways} type="button" title="Commands starting with this run without asking in this project. Remove it in Settings → General → Always-allowed commands."
+            >Always allow <code>{allowRule.replace(/:\*$/, " …")}</code> in this project</button
+          >
+        {/if}
         <button class="btn deny" onclick={handleReject} type="button"
           >Deny</button
         >
@@ -316,6 +331,8 @@
 
   .approval-bar {
     display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
     align-items: center;
     justify-content: space-between;
     padding: 6px 12px;
@@ -329,7 +346,9 @@
   }
   .approval-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
+    min-width: 0;
   }
 
   .btn {
@@ -351,6 +370,19 @@
   .btn.deny {
     background: var(--red);
     color: var(--bg-deep);
+  }
+  .btn.always {
+    background: transparent;
+    color: var(--text-primary);
+    border: 0.5px solid var(--border-strong);
+    font-weight: 400;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .btn.always code {
+    font-size: 11px;
   }
 
   .body {

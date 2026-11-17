@@ -1,4 +1,5 @@
 import { localAgentUsable, parseAgentStatus, shouldDropToken, statusFromTokenError, type LocalAgentStatus } from "./agent-status";
+import type { EngineMode } from "./permission-modes";
 import type { AttachmentPayload } from "./attachments";
 import { fetchLocalService } from "./local-service";
 import { coordinatorUrl, defaultEndpoints, fetchEndpoint, portalUrl, type EndpointKind } from "./endpoints";
@@ -1326,9 +1327,20 @@ export async function ideGetProject(): Promise<string | null> {
   }
 }
 
-export async function ideSendToolApproval(id: string, approved: boolean): Promise<void> {
-  await withIdeRetry((h) => post(ideBase(), "/v1/ide/tool-approval", { id, approved }, h));
+/** Answer a chat or bot tool call; `always` also keeps the call's "Always allow" rule for its project. */
+export async function ideSendToolApproval(id: string, approved: boolean, always = false): Promise<void> {
+  await withIdeRetry((h) => post(ideBase(), "/v1/ide/tool-approval", { id, approved, ...(always ? { always: true } : {}) }, h));
 }
+
+/** Every project's "always allow" answers (Settings → General). */
+export interface ProjectPermissionsView {
+  shell: string[];
+  rules?: string[];
+  edits?: boolean;
+}
+export const listPermissions = () => fsCall<{ projects: Record<string, ProjectPermissionsView> }>("GET", "/v1/ide/permissions").then((r) => r.projects ?? {});
+/** Remove one rule (`npm test:*`), an older command name, or "edits". */
+export const removePermission = (projectRoot: string, rule: string) => fsCall<{ removed: boolean }>("POST", "/v1/ide/permissions/remove", { projectRoot, rule });
 
 export interface IdeStreamEvent {
   type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "usage" | "done";
@@ -1363,8 +1375,11 @@ export async function streamIdeChat(
   signal?: AbortSignal,
   requestedModel?: string,
   githubToken?: string | null,
-  /** "edits": file edits apply without asking (undoable from the reply's changes card). */
-  autoApprove: "none" | "edits" = "none",
+  /**
+   * The permission mode (ask, auto-edits, auto, plan; permission-modes.ts). The older values
+   * "none" / "edits" still work.
+   */
+  permission: "none" | "edits" | EngineMode = "none",
   /** Which view sent it, for Settings → Active work and Tasks. */
   origin?: "chat" | "code",
   /** Files attached to the last message (images/PDFs reach only a model that can see them). */
@@ -1378,7 +1393,9 @@ export async function streamIdeChat(
       messages,
       ...computeFields(requestedModel),
       projectRoot,
-      autoApprove,
+      ...(permission === "none" || permission === "edits"
+        ? { autoApprove: permission }
+        : { mode: permission, autoApprove: permission === "auto-edits" || permission === "auto" ? "edits" : "none" }),
       ...(origin ? { origin } : {}),
       ...(githubToken ? { githubToken } : {}),
       ...(attachments?.length ? { attachments } : {}),
@@ -1911,7 +1928,7 @@ export const sendBotMessage = (id: string, content: string, attachments?: Attach
 export const botHistory = (id: string) => fsCall<{ runs: BotRun[] }>("GET", botPath(id, "/history")).then((r) => r.runs);
 /** Clone or update the bot's repository now (it also happens on save and before each run). */
 export const syncBotRepository = (id: string) => fsCall<{ bot: Bot }>("POST", botPath(id, "/repository/sync"), {}).then((r) => r.bot);
-export const approveBotCall =(id: string, callId: string, approved: boolean) => fsCall<{ ok: boolean; bot: Bot }>("POST", botPath(id, "/approve"), { callId, approved });
+export const approveBotCall = (id: string, callId: string, approved: boolean, always = false) => fsCall<{ ok: boolean; bot: Bot }>("POST", botPath(id, "/approve"), { callId, approved, ...(always ? { always: true } : {}) });
 /** The server's message for a failed bot call (its `error` field). */
 export const botErrorText = (err: unknown) => (err instanceof FsError ? err.code : (err as Error)?.message ?? String(err));
 
@@ -1953,6 +1970,8 @@ export interface SessionEntry {
   changedFiles?: string[];
   usage?: { cSats: number; where?: string; calls?: import("./served").CallUsage[]; usd?: number };
   undone?: boolean;
+  /** A plan written in Plan mode (Approve plan / Revise). */
+  plan?: boolean;
 }
 export interface SessionQueued {
   id: string;
@@ -1962,7 +1981,7 @@ export interface SessionQueued {
   at: number;
 }
 export interface SessionSnapshotView {
-  session: { id: string; title: string; projectRoot: string; branch: string | null; model: string; compute: { target: string; provider?: string }; published: boolean; cSats: number; transcript: SessionEntry[]; mode?: "ask" | "auto-edits" | "auto"; autoApprove?: "none" | "edits"; workerModel?: string; frontierUsd?: number };
+  session: { id: string; title: string; projectRoot: string; branch: string | null; model: string; compute: { target: string; provider?: string }; published: boolean; cSats: number; transcript: SessionEntry[]; mode?: EngineMode; autoApprove?: "none" | "edits"; workerModel?: string; frontierUsd?: number };
   seq: number;
   controller: SessionClientRef | null;
   clients: SessionClientRef[];
@@ -1992,7 +2011,9 @@ export const sessionSend = (id: string, text: string) => sessionPost<{ turnId: s
 export const sessionUnqueue = (id: string, queuedId: string) => sessionPost<{ removed: boolean }>(id, "unqueue", { queuedId });
 /** `applied` false: the terminal answered first. */
 export const sessionApprove = (id: string, callId: string, approved: boolean, always = false) => sessionPost<{ ok: boolean; applied?: boolean }>(id, "approve", { callId, approved, always });
-export const sessionSettings = (id: string, patch: { model?: string; mode?: "ask" | "auto-edits" | "auto" }) => sessionPost(id, "settings", patch);
+export const sessionSettings = (id: string, patch: { model?: string; mode?: EngineMode }) => sessionPost(id, "settings", patch);
+/** Approve the session's plan (Plan mode) and carry it out in `mode`. */
+export const sessionApprovePlan = (id: string, mode: EngineMode = "auto-edits") => sessionPost<{ turnId: string | null }>(id, "plan", { mode });
 export const sessionCancel = (id: string) => sessionPost(id, "cancel");
 export const sessionUndo = (id: string) => sessionPost<{ reverted: string[] }>(id, "undo");
 // Tentacles (helper agents; docs/tentacles.md): the session's tree, cancel, merge or drop a waiting patch.

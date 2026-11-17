@@ -13,6 +13,17 @@ export function autoApplyEdits(projectRoot: string | null): boolean {
   }
 }
 
+/** The older per-project switch: true / false when it was set, null when never. */
+export function autoApplySetting(projectRoot: string | null): boolean | null {
+  if (!projectRoot) return null;
+  try {
+    const v = localStorage.getItem(AUTO_APPLY + projectRoot);
+    return v === "on" ? true : v === "off" ? false : null;
+  } catch {
+    return null;
+  }
+}
+
 export function setAutoApplyEdits(projectRoot: string, on: boolean): void {
   try {
     localStorage.setItem(AUTO_APPLY + projectRoot, on ? "on" : "off");

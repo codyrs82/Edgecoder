@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 // The slim composer: every place a message is typed uses the one shared ChatInput, and its
-// controls (compute picker, Auto-apply edits) sit in the row under the box, not around it.
+// controls (compute picker, permission mode picker) sit in the row under the box, not around it.
 const read = (f: string) => readFileSync(new URL(`../src/${f}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
 const VIEWS = ["App.svelte", "components/EditorChatPanel.svelte", "pages/BotView.svelte", "components/LiveSessionPanel.svelte"];
@@ -23,11 +23,23 @@ describe("one shared composer", () => {
       const block = src.slice(src.indexOf("<ChatInput"), src.indexOf("</ChatInput>"));
       expect(block).toContain("{#snippet controls()}");
       expect(block).toContain("<ComputePicker");
+      // The same permission mode control (Auto, Manual, Accept edits, Plan) in both views.
+      expect(block).toContain("<PermissionModePicker");
+      expect(src).toMatch(/import PermissionModePicker from "\.\.?\/(components\/)?PermissionModePicker\.svelte"/);
     }
     const editor = read("components/EditorChatPanel.svelte");
-    const block = editor.slice(editor.indexOf("<ChatInput"), editor.indexOf("</ChatInput>"));
-    expect(block).toContain("Auto-apply edits");
+    // The older per-project "Auto-apply edits" checkbox is replaced by the mode picker.
+    expect(editor).not.toContain("Auto-apply edits");
     expect(editor).not.toContain('class="run-on"');
+  });
+
+  it("bot conversations and live sessions have the same mode control under the box", () => {
+    for (const f of ["pages/BotView.svelte", "components/LiveSessionPanel.svelte"]) {
+      const src = read(f);
+      const block = src.slice(src.indexOf("<ChatInput"), src.indexOf("</ChatInput>"));
+      expect(block).toContain("{#snippet controls()}");
+      expect(block).toContain("<PermissionModePicker");
+    }
   });
 
   it("the box starts at one line, grows to 40% of the window, and has a token focus ring", () => {

@@ -8,10 +8,13 @@
   import ChatMessage from "./ChatMessage.svelte";
   import ChatInput from "./ChatInput.svelte";
   import QuoteSelection from "./QuoteSelection.svelte";
-  import { DESKTOP_CLIENT, followSession, getSession, sessionApprove, sessionCancel, sessionSend, sessionTentacles, sessionUnqueue, tentacleCancel, tentacleMerge } from "../lib/api";
+  import { DESKTOP_CLIENT, followSession, getSession, sessionApprove, sessionApprovePlan, sessionCancel, sessionSend, sessionSettings, sessionTentacles, sessionUnqueue, tentacleCancel, tentacleMerge } from "../lib/api";
+  import PermissionModePicker from "./PermissionModePicker.svelte";
+  import PlanApproval from "./PlanApproval.svelte";
+  import { modeOption, isEngineMode, type EngineMode } from "../lib/permission-modes";
   import TentacleTree from "./TentacleTree.svelte";
   import { applyTentacleEvent, emptyTentacles, type TentacleState } from "../lib/tentacles";
-  import { applySessionEvent, presenceText, viewFromSnapshot, type LiveView } from "../lib/live-session";
+  import { applySessionEvent, pendingPlan, presenceText, viewFromSnapshot, type LiveView } from "../lib/live-session";
   import { markApproval } from "../lib/agent-events";
   import { projectName, tildePath } from "../lib/projects";
   import { frontierFooter } from "../lib/compute-choice";
@@ -91,10 +94,17 @@
   const send = (text: string) => act(() => sessionSend(sessionId, text));
   const stop = () => act(() => sessionCancel(sessionId));
   const unqueue = (id: string) => act(() => sessionUnqueue(sessionId, id));
-  function approve(id: string, approved: boolean) {
+  function approve(id: string, approved: boolean, always = false) {
     if (view?.streaming) view = { ...view, streaming: { ...view.streaming, toolEvents: markApproval(view.streaming.toolEvents, id, approved) } };
-    void act(() => sessionApprove(sessionId, id, approved));
+    void act(() => (always ? sessionApprove(sessionId, id, approved, true) : sessionApprove(sessionId, id, approved)));
   }
+  // The mode is the session's own (persisted by the provider; the terminal sees changes too).
+  const mode = $derived<EngineMode>(isEngineMode(view?.mode) ? (view!.mode as EngineMode) : "ask");
+  function setMode(m: EngineMode) {
+    if (view) view = { ...view, mode: m };
+    void act(() => sessionSettings(sessionId, { mode: m }));
+  }
+  const plan = $derived(view ? pendingPlan(view) : null);
 </script>
 
 <div class="live-panel" aria-label="Live session">
@@ -102,7 +112,7 @@
     <div class="live-header">
       <span class="live-badge" title="Shared with the terminal"><Radio size={12} /> Live</span>
       <span class="live-title" title={view.title}>{view.title}</span>
-      <span class="live-meta" title={tildePath(view.projectRoot)}>{projectName(view.projectRoot)} · {view.frontierModel ? frontierFooter(view.frontierModel, view.frontierUsd ?? 0) : view.model} · {view.mode}</span>
+      <span class="live-meta" title={tildePath(view.projectRoot)}>{projectName(view.projectRoot)} · {view.frontierModel ? frontierFooter(view.frontierModel, view.frontierUsd ?? 0) : view.model} · {modeOption(view.mode).title}</span>
     </div>
     <div class="presence-bar" role="status">
       <span><Users size={13} /> {presence}</span>
@@ -123,7 +133,10 @@
           <ChatMessage role={m.role} content={m.content} toolEvents={m.toolEvents} turnId={m.turnId} changedFiles={m.changedFiles} usage={m.usage} onFilesReverted={onFilesChanged} {onOpenPath} {onPreview} />
         {/each}
         {#if view.streaming}
-          <ChatMessage role="assistant" content={view.streaming.text} streaming={true} toolEvents={view.streaming.toolEvents} usage={view.streaming.usage} onToolApproval={approve} />
+          <ChatMessage role="assistant" content={view.streaming.text} streaming={true} toolEvents={view.streaming.toolEvents} usage={view.streaming.usage} onToolApproval={approve} onToolAlways={(id) => approve(id, true, true)} />
+        {/if}
+        {#if plan}
+          <PlanApproval onApprove={(m) => void act(() => sessionApprovePlan(sessionId, m))} onRevise={() => chatInput?.focus()} />
         {/if}
       </div>
     {:else if !error}
@@ -143,7 +156,11 @@
       queue={view?.queue ?? []}
       onUnqueue={(id) => void unqueue(id)}
       sendWhileWorking
-    />
+    >
+      {#snippet controls()}
+        <PermissionModePicker {mode} onChange={setMode} disabled={!view || view.deleted} />
+      {/snippet}
+    </ChatInput>
   </div>
 </div>
 

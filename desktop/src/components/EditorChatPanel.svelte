@@ -17,7 +17,10 @@
   import type { StreamProgress, ModelPullProgress, IdeStreamEvent } from "../lib/api";
   import { applyAgentEvent, markApproval } from "../lib/agent-events";
   import { expandMentions, mentionSuggestions } from "../lib/mentions";
-  import { autoApplyEdits, setAutoApplyEdits } from "../lib/project-mode";
+  import { autoApplySetting } from "../lib/project-mode";
+  import PermissionModePicker from "./PermissionModePicker.svelte";
+  import PlanApproval from "./PlanApproval.svelte";
+  import { chatMode, modeOption, PLAN_APPROVED_MESSAGE, type EngineMode } from "../lib/permission-modes";
   import { fsFind } from "../lib/api";
   import {
     createConversation,
@@ -69,11 +72,6 @@
 
   let streamingToolEvents: ToolEvent[] = $state([]);
   /** Where a message goes: the local agent, or a background job on the network. */
-  /** Apply the agent's file edits without asking, in this project (commands still ask). */
-  let autoApply = $state(false);
-  $effect(() => {
-    autoApply = autoApplyEdits(projectRoot);
-  });
   let streamingTurnId: string | undefined = $state(undefined);
   let streamingUsage: ReplyUsage | undefined = $state(undefined);
   let streamingChanged: string[] = $state([]);
@@ -90,6 +88,13 @@
   $effect(() => {
     onConversationChange?.(conversation.id);
   });
+  /** This chat's permission mode (kept with the chat; new chats start in Settings' default). */
+  const mode = $derived<EngineMode>(chatMode(conversation.permissionMode, autoApplySetting(conversation.projectRoot ?? projectRoot)));
+  function setMode(m: EngineMode) {
+    conversation.permissionMode = m;
+    conversation = conversation;
+    if (conversation.messages.length > 0) void persist();
+  }
 
   /** Save the chat and remember it as its project's last one. */
   async function persist() {
@@ -134,6 +139,12 @@
   }
   let streamingContent = $state("");
   let isStreaming = $state(false);
+  /** The last reply is a plan waiting for approval (the chat is still in Plan mode). */
+  const pendingPlan = $derived(!isStreaming && mode === "plan" && conversation.messages.at(-1)?.role === "assistant" && conversation.messages.at(-1)?.plan === true);
+  function approvePlan(next: EngineMode) {
+    setMode(next);
+    void sendMessage(PLAN_APPROVED_MESSAGE);
+  }
   const restartKey = `editor-chat:${Math.random().toString(36).slice(2)}`;
   $effect(() => {
     setRestartBusy(restartKey, isStreaming && "streaming");
@@ -235,6 +246,8 @@
     streamingContent = "";
     streamProgress = undefined;
     abortController = new AbortController();
+    const sentMode: EngineMode = mode;
+    if (!conversation.permissionMode) conversation.permissionMode = sentMode;
 
     try {
       if (usePortalChat) {
@@ -283,12 +296,12 @@
           get(computeChoice),
           // Read at send time: connecting GitHub after this panel opened must count.
           await agentGitHubToken().catch(() => null),
-          autoApply ? "edits" : "none",
+          sentMode,
           "code",
           attachments,
         );
       }
-      finishTurn(streamingContent);
+      finishTurn(streamingContent, !usePortalChat && sentMode === "plan");
       await persist();
       await refreshConversationList();
     } catch (err) {
@@ -311,9 +324,10 @@
     }
   }
 
-  function finishTurn(content: string) {
+  function finishTurn(content: string, plan = false) {
     addMessage(conversation, "assistant", content);
     const last = conversation.messages[conversation.messages.length - 1];
+    if (last && plan && content.trim()) last.plan = true;
     if (last && streamingToolEvents.length > 0) last.toolEvents = [...streamingToolEvents];
     const usage = streamingUsage ?? freeReplyUsage(get(computeChoice));
     if (last && usage) last.usage = usage;
@@ -336,8 +350,8 @@
     abortController?.abort();
   }
 
-  function handleToolApproval(id: string, approved: boolean) {
-    void ideSendToolApproval(id, approved);
+  function handleToolApproval(id: string, approved: boolean, always = false) {
+    void ideSendToolApproval(id, approved, always);
     streamingToolEvents = markApproval(streamingToolEvents, id, approved);
   }
 
@@ -469,7 +483,7 @@
         {#if !projectRoot}
           <NoProjectPrompt onPick={(r) => onPickProject?.(r)} onNewProject={() => onNewProject?.()} onOpenFolder={() => onOpenFolder?.()} onClone={() => onClone?.()} />
         {:else}
-          <p>The agent can read, search and edit files in this project and run commands. Edits and commands ask for your approval first.</p>
+          <p>The agent can read, search and edit files in this project and run commands. Mode: <strong>{modeOption(mode).title}</strong>, {modeOption(mode).desc.charAt(0).toLowerCase() + modeOption(mode).desc.slice(1)}</p>
           <p class="hint">It sees the open file and your selection. Type @ to add a file.</p>
         {/if}
       </div>
@@ -499,7 +513,11 @@
             toolEvents={streamingToolEvents}
             onOpenInEditor={onApplyCode}
             onToolApproval={handleToolApproval}
+            onToolAlways={(id) => handleToolApproval(id, true, true)}
           />
+        {/if}
+        {#if pendingPlan}
+          <PlanApproval onApprove={approvePlan} onRevise={() => chatInput?.focus()} />
         {/if}
       </div>
     {/if}
@@ -524,10 +542,7 @@
         {#snippet controls()}
           <ComputePicker selected={$computeChoice} onSelect={(id) => computeChoice.set(id)} />
           {#if !usePortalChat}
-            <label class="auto-apply" title="Apply the agent's file edits without asking. Each reply's changes stay reviewable and undoable; commands still ask.">
-              <input type="checkbox" checked={autoApply} onchange={(e) => { autoApply = (e.target as HTMLInputElement).checked; if (projectRoot) setAutoApplyEdits(projectRoot, autoApply); }} />
-              Auto-apply edits
-            </label>
+            <PermissionModePicker {mode} onChange={setMode} />
           {/if}
         {/snippet}
       </ChatInput>
@@ -677,12 +692,6 @@
     --prose-size: var(--fs-base);
   }
 
-  .auto-apply {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    cursor: pointer;
-  }
   .panel-input {
     padding: 4px 12px 12px;
     flex-shrink: 0;

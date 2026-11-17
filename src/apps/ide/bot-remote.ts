@@ -122,8 +122,9 @@ export function runRemoteBotCommand(bots: BotManager, botId: string, request: Bo
         // The desktop form's validation, then BotManager's own checks (schedule, compute, triggers).
         const patch = botPatchSchema.safeParse(request.args);
         if (!patch.success) return { status: "refused", error: "invalid_settings", message: patch.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ").slice(0, 300) };
-        const { projectRoot, repository, allowedTools, autoApproveEdits, ...safe } = patch.data;
-        if (projectRoot !== undefined || repository !== undefined || allowedTools !== undefined || autoApproveEdits !== undefined) {
+        // Permissions (tools, auto-approval, the permission mode) change on the Mac only.
+        const { projectRoot, repository, allowedTools, autoApproveEdits, mode, ...safe } = patch.data;
+        if (projectRoot !== undefined || repository !== undefined || allowedTools !== undefined || autoApproveEdits !== undefined || mode !== undefined) {
           return { status: "refused", error: "change_on_mac", message: "The folder, repository, tools and auto-approval are changed on the Mac." };
         }
         bots.update(botId, safe);

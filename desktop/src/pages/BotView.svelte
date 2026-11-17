@@ -9,7 +9,7 @@
   import { Play, Pause, RotateCw, Pencil, Trash2, History, MessageSquare, Ellipsis, CircleAlert, X, CalendarClock, Cpu, Folder, PanelRight, Copy, FolderOpen, GitPullRequest, GitBranch, Zap, RefreshCw } from "@lucide/svelte";
   import { approveBotCall, botHistory, botMessages, cancelBotRun, deleteBot, getBot, runBot, sendBotMessage, syncBotRepository, updateBot, botErrorText } from "../lib/api";
   import {
-    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, autoStatus, botCompute, botPlacement, checksIn, routineText, botStatusLine, computeText, failureNotice, foldBotReply, folderName, formatCSats, prCards, readableSummary, reconcileRuns, relativeTime, runSourceText, shownReplyText, scheduleText, statusChip,
+    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, botModeOf, autoStatus, botCompute, botPlacement, checksIn, routineText, botStatusLine, computeText, failureNotice, foldBotReply, folderName, formatCSats, prCards, readableSummary, reconcileRuns, relativeTime, runSourceText, shownReplyText, scheduleText, statusChip,
     triggerStatusText, triggerText,
     type Bot, type BotMessage, type BotRun, type NoticeAction,
   } from "../lib/bots";
@@ -24,6 +24,9 @@
   import { choiceLabel } from "../lib/compute-choice";
   import { refreshBots } from "../lib/bots-store";
   import { NO_VISION, type AttachmentPayload } from "../lib/attachments";
+  import PermissionModePicker from "../components/PermissionModePicker.svelte";
+  import PlanApproval from "../components/PlanApproval.svelte";
+  import { PLAN_APPROVED_MESSAGE, type EngineMode } from "../lib/permission-modes";
 
   interface Props {
     bot: Bot;
@@ -267,7 +270,25 @@
     act(() => updateBot(bot.id, { triggers: (bot.triggers ?? []).map((t) => (t.id === id ? { ...t, enabled: !t.enabled } : t)) }));
   const retryRepo = () => act(() => syncBotRepository(bot.id));
   const send = (text: string, attachments?: AttachmentPayload[]) => act(() => sendBotMessage(bot.id, text, attachments));
-  const approve = (callId: string, approved: boolean) => act(() => approveBotCall(bot.id, callId, approved));
+  const approve = (callId: string, approved: boolean, always = false) => act(() => (always ? approveBotCall(bot.id, callId, approved, true) : approveBotCall(bot.id, callId, approved)));
+  // Its permission mode, kept with the bot (shown live: a change applies to its next call).
+  let modeOverride = $state<{ id: string; mode: EngineMode } | null>(null);
+  const mode = $derived<EngineMode>(modeOverride && modeOverride.id === bot.id ? modeOverride.mode : botModeOf(bot));
+  $effect(() => {
+    // The bot's own value caught up: drop the optimistic one.
+    if (modeOverride && modeOverride.id === bot.id && botModeOf(bot) === modeOverride.mode) modeOverride = null;
+  });
+  const setMode = (m: EngineMode) => {
+    modeOverride = { id: bot.id, mode: m };
+    return act(() => updateBot(bot.id, { mode: m }));
+  };
+  /** Its last reply is a plan waiting for approval (still in Plan mode, not working). */
+  const lastSaid = $derived([...messages].reverse().find((m) => m.role !== "event"));
+  const pendingPlan = $derived(!busy && mode === "plan" && lastSaid?.role === "assistant" && (lastSaid.content ?? "").trim() !== "");
+  async function approvePlan(next: EngineMode) {
+    await setMode(next);
+    await send(PLAN_APPROVED_MESSAGE);
+  }
   async function remove() {
     if (!confirmDelete) {
       confirmDelete = true;
@@ -441,6 +462,9 @@
                   {:else}
                     <div class="ask-choices">
                       <button class="primary" onclick={() => approve(c.id, true)}>Allow</button>
+                      {#if c.rule}
+                        <button class="always" onclick={() => approve(c.id, true, true)} title="Commands starting with this run without asking in this project. Remove it in Settings → General → Always-allowed commands.">Always allow <code>{c.rule.replace(/:\*$/, " …")}</code> in this project</button>
+                      {/if}
                       <button onclick={() => approve(c.id, false)}>Deny</button>
                     </div>
                   {/if}
@@ -460,6 +484,9 @@
           </div>
         {/if}
       {/each}
+      {#if pendingPlan}
+        <PlanApproval onApprove={(m) => void approvePlan(m)} onRevise={() => botInput?.focus()} />
+      {/if}
       <QuoteSelection scope={scrollEl} onQuote={(b) => void botInput?.insertQuote(b)} />
     </div>
     {/snippet}
@@ -511,7 +538,11 @@
       queue={[]}
       attach={{ vision: NO_VISION, who: bot.name, savedToFolder: true }}
       placeholder={busy ? `${bot.name} is working; your message goes next…` : `Message ${bot.name}`}
-    />
+    >
+      {#snippet controls()}
+        <PermissionModePicker {mode} onChange={(m) => void setMode(m)} />
+      {/snippet}
+    </ChatInput>
   </div>
  </div>
 
@@ -738,6 +769,9 @@
     color: var(--text-primary);
     font-size: 12.5px;
     cursor: pointer;
+  }
+  .ask-choices button.always code {
+    font-size: 11.5px;
   }
   .ask-choices button.primary {
     background: var(--accent);

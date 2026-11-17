@@ -90,6 +90,8 @@ export interface Bot {
   budgetCSatsPerDay: number | null;
   allowedTools: string[];
   autoApproveEdits: boolean;
+  /** Its permission mode (ask, auto-edits, auto, plan); older servers don't send it (see botModeOf). */
+  mode?: import("./permission-modes").EngineMode;
   /** Where its model calls run (older servers don't send it: Auto). */
   compute?: BotCompute;
   color: string;
@@ -130,6 +132,7 @@ export interface BotInput {
   budgetCSatsPerDay?: number | null;
   allowedTools?: string[];
   autoApproveEdits?: boolean;
+  mode?: import("./permission-modes").EngineMode;
   compute?: BotCompute;
   color?: string;
   avatarShape?: string;
@@ -144,12 +147,19 @@ export interface AskCard {
   call?: { tool: string; args: Record<string, unknown> };
   /** null while it waits for you. */
   answer: "Allowed" | "Denied" | null;
+  /** The "Always allow" rule this command may keep for the project (`npm test:*`). */
+  rule?: string;
   /** open_pull_request: what the PR will be. */
   pr?: { title: string; body: string; branch: string; base: string; diffstat: string; commits?: number; uncommitted?: number };
 }
 
 /** The approvals in a run's tool events, as cards: waiting ones have no answer yet. */
-export function askCards(events: Array<{ type: string; id?: string; tool?: string; args?: Record<string, unknown>; requires_approval?: boolean; approval_status?: string }>, botName: string): AskCard[] {
+/** A bot's permission mode (older servers: from autoApproveEdits). */
+export function botModeOf(bot: Pick<Bot, "mode" | "autoApproveEdits">): import("./permission-modes").EngineMode {
+  return bot.mode ?? (bot.autoApproveEdits ? "auto-edits" : "ask");
+}
+
+export function askCards(events: Array<{ type: string; id?: string; tool?: string; args?: Record<string, unknown>; requires_approval?: boolean; approval_status?: string; allow_rule?: string }>, botName: string): AskCard[] {
   return events
     .filter((e) => e.type === "tool_call" && e.requires_approval && e.id)
     .map((e) => {
@@ -172,7 +182,7 @@ export function askCards(events: Array<{ type: string; id?: string; tool?: strin
         const pr = { title: s("title"), body: s("body"), branch: s("branch"), base: s("base"), diffstat: s("diffstat"), commits: n("commits"), uncommitted: n("uncommitted") };
         return { id: e.id!, question, answer, pr };
       }
-      return { id: e.id!, question, ...(detail ? { detail } : {}), ...(answer === null ? { call: { tool, args } } : {}), answer };
+      return { id: e.id!, question, ...(detail ? { detail } : {}), ...(answer === null ? { call: { tool, args } } : {}), ...(answer === null && e.allow_rule ? { rule: e.allow_rule } : {}), answer };
     });
 }
 

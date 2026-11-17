@@ -18,7 +18,8 @@ import { randomUUID } from "node:crypto";
 import { request } from "undici";
 import type { ChatBackend, ChatMedia, ToolSpec } from "../../inference-api/types.js";
 import { thisComputer } from "../../inference-api/backends.js";
-import { READ_TOOLS, TOOL_DEFINITIONS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
+import { READ_TOOLS, TENTACLE_TOOLS, TOOL_DEFINITIONS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
+import { PLAN_REFUSAL, type Decision } from "./permission-policy.js";
 import { protectedToolPath } from "./tool-executor.js";
 import { extractTextToolCalls, TextToolCallFilter } from "./text-tool-calls.js";
 import { COMPACT_AT, compactMessages, DEFAULT_CONTEXT_WINDOW, isContextTooLong, isTransient, pathsLine, shouldCompact } from "./context-budget.js";
@@ -273,6 +274,25 @@ export interface AgentLoopDeps {
    * a model that only describes work); false when there's nowhere else to go, and the turn ends.
    */
   escalate?: () => boolean;
+  /**
+   * Plan mode: only read-only tools are offered (and other calls are refused here and by the tool
+   * runner's decide), the system prompt asks for a plan, and no "go ahead" nudges fire: the turn
+   * ends with the plan for the user to approve.
+   */
+  plan?: boolean;
+}
+
+/** Added to the system prompt in plan mode. */
+export const PLAN_PROMPT = [
+  "PLAN MODE: the user wants a plan before any change is made.",
+  "Investigate with read-only tools only (read_file, list_directory, search_files, search_codebase, git_status, git_diff, git_log, and read-only shell commands such as ls, cat, grep, git status).",
+  "Do not write or edit files, run tests, install anything, commit or push: those calls are refused until the user approves the plan.",
+  "When you understand the task, reply with the plan: a short summary, then numbered steps naming the files you'll change and how you'll verify the work. End there; the user will approve it or ask for changes.",
+].join(" ");
+
+/** Tools plan mode offers: the read-only ones and run_shell (read-only commands only). */
+export function planTools(tools: ToolSchema[]): ToolSchema[] {
+  return tools.filter((t) => READ_TOOLS.has(t.function.name as ToolName) && !TENTACLE_TOOLS.has(t.function.name as ToolName) || t.function.name === "run_shell");
 }
 
 /** What the model hears when it announced work and stopped. */
@@ -334,10 +354,13 @@ const KNOWN_TOOLS = new Set<string>(TOOL_DEFINITIONS.map((t) => t.name));
 
 export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
   let native = d.native ?? process.env.IDE_NATIVE_TOOLS !== "0";
-  const tools = d.tools ?? toolSchemas();
+  const allTools = d.tools ?? toolSchemas();
+  const tools = d.plan ? planTools(allTools) : allTools;
+  // Calls to tools plan mode doesn't offer still reach runTool, which refuses them with a reason.
   const known = d.tools ? new Set(d.tools.map((t) => t.function.name)) : KNOWN_TOOLS;
   const history = (format: "native" | "text"): ChatMessage[] => {
-    const sys = d.systemPrompt(format);
+    const base = d.systemPrompt(format);
+    const sys = d.plan ? [base, PLAN_PROMPT].filter(Boolean).join("\n\n") : base;
     return [...(sys ? [{ role: "system", content: sys }] : []), ...d.messages];
   };
   let messages = history(native ? "native" : "text");
@@ -363,6 +386,13 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
         paths.push(p.trim());
         if (paths.length > 30) paths.shift();
       }
+    }
+    // Plan mode, first gate: nothing but read tools and (read-only, checked by the runner) commands.
+    if (d.plan && !(READ_TOOLS.has(tool) && !TENTACLE_TOOLS.has(tool)) && tool !== "run_shell") {
+      const callId = `tc_${randomUUID().slice(0, 8)}`;
+      d.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: false });
+      d.sendEvent({ type: "tool_result", id: callId, error: PLAN_REFUSAL });
+      return { result: `[Refused]: ${PLAN_REFUSAL}`, label: `${tool}: refused (plan mode)` };
     }
     const result = await d.runTool(tool, args);
     return { result, label: callLabel(tool, args, result) };
@@ -426,7 +456,7 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
    * the go-ahead is again only a plan, the step is retried once on the next model (escalate).
    */
   const goAhead = (content: string): boolean => {
-    if (!d.continueOnIntent || !describesWork(content)) return false;
+    if (d.plan || !d.continueOnIntent || !describesWork(content)) return false;
     if (!intentNudged) {
       intentNudged = true;
       messages.push({ role: "assistant", content });
@@ -504,8 +534,8 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
           labels.set(m, resultLabels.join("; "));
           messages.push(m);
         } else {
-          // Only a plan: ask once for the first step as a real tool call.
-          if (nudged) return;
+          // Only a plan: ask once for the first step as a real tool call (not in plan mode: the plan is the answer).
+          if (nudged || d.plan) return;
           nudged = true;
           messages.push({ role: "user", content: "Carry out the plan now: call the tools for the first step (don't describe it, call it)." });
         }
@@ -624,6 +654,12 @@ export interface ToolRunnerDeps {
    * approval card shows). What the user approves is exactly what runs. A throw refuses the call.
    */
   prepare?: (tool: ToolName, args: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
+  /**
+   * The permission mode's verdict per call (permission-policy.ts decideToolCall): run, ask or
+   * refuse. When set it replaces autoApproveEdits and alwaysAllowed. An "ask" may carry the
+   * "Always allow" rule the approval card offers.
+   */
+  decide?: (tool: ToolName, args: Record<string, unknown>) => Decision;
 }
 
 /** Tools that ask every time, whatever auto-approve settings say. */
@@ -659,11 +695,28 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
     const shellAutoApprove = d.allowShellAutoApprove !== false && tool === "run_shell" && process.env.IDE_SHELL_AUTO_APPROVE === "1";
     // Edits to the git directory or to files tooling executes (.gitmodules, .husky/, ...) are never
     // auto-approved; the executor refuses .git outright and the rest without an explicit approval.
-    const autoEdits = typeof d.autoApproveEdits === "function" ? d.autoApproveEdits() : d.autoApproveEdits === true;
-    const editAutoApprove = autoEdits && (tool === "write_file" || tool === "edit_file") && protectedToolPath(args.path) === null;
-    const always = !ALWAYS_ASK_TOOLS.has(tool) && !READ_TOOLS.has(tool) && d.alwaysAllowed?.(tool, args) === true;
-    const requiresApproval = ALWAYS_ASK_TOOLS.has(tool) || (!READ_TOOLS.has(tool) && !shellAutoApprove && !editAutoApprove && !always);
-    d.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: requiresApproval });
+    let requiresApproval: boolean;
+    let always: boolean;
+    let allowRule: string | undefined;
+    if (d.decide) {
+      const verdict = d.decide(tool, args);
+      if (verdict.action === "refuse") {
+        d.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: false });
+        d.sendEvent({ type: "tool_result", id: callId, error: verdict.reason });
+        return `[Refused]: ${verdict.reason}`;
+      }
+      requiresApproval = verdict.action === "ask" && !(shellAutoApprove && !ALWAYS_ASK_TOOLS.has(tool));
+      // A command the mode lets run counts as approved for the executor's shell policy; edits never
+      // do (the executor still guards protected paths for them).
+      always = !requiresApproval && tool === "run_shell";
+      allowRule = requiresApproval ? verdict.rule : undefined;
+    } else {
+      const autoEdits = typeof d.autoApproveEdits === "function" ? d.autoApproveEdits() : d.autoApproveEdits === true;
+      const editAutoApprove = autoEdits && (tool === "write_file" || tool === "edit_file") && protectedToolPath(args.path) === null;
+      always = !ALWAYS_ASK_TOOLS.has(tool) && !READ_TOOLS.has(tool) && d.alwaysAllowed?.(tool, args) === true;
+      requiresApproval = ALWAYS_ASK_TOOLS.has(tool) || (!READ_TOOLS.has(tool) && !shellAutoApprove && !editAutoApprove && !always);
+    }
+    d.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: requiresApproval, ...(allowRule ? { allow_rule: allowRule } : {}) });
     if (requiresApproval && !(await d.waitForApproval(callId, tool, args))) {
       const msg = `Tool call ${tool} was rejected by the user.`;
       d.sendEvent({ type: "tool_result", id: callId, error: msg });

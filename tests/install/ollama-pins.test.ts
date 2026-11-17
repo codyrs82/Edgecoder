@@ -76,6 +76,7 @@ describe("nothing pipes downloaded content into a shell", () => {
   const FIXTURES = new Set([
     "tests/ide/bot-github.test.ts",
     "tests/ide/permissions.test.ts",
+    "tests/ide/permission-policy.test.ts",
     "tests/portal/output-escaping.test.ts",
     "tests/repo/dockerfiles.test.ts",
     "tests/trust/response-signing.test.ts"

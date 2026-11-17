@@ -9,6 +9,8 @@
   import EditorView from "./pages/EditorView.svelte";
   import { mentionSuggestions } from "./lib/mentions";
   import { isBuildRequest, setAutoApplyEdits } from "./lib/project-mode";
+  import PermissionModePicker from "./components/PermissionModePicker.svelte";
+  import { defaultMode as defaultPermissionMode, type EngineMode } from "./lib/permission-modes";
   import { tick } from "svelte";
   import SettingsOverlay from "./components/SettingsOverlay.svelte";
   import ConversationSidebar from "./components/ConversationSidebar.svelte";
@@ -17,7 +19,7 @@
   import StarterModel from "./components/StarterModel.svelte";
   import { getLocalComputeStatus, needsSetupScreen, ollamaBaseFor, startLocalComputeSetup, type ComputeStatus } from "./lib/local-compute";
   import type { AuthUser } from "./lib/api";
-  import { getMe, setOllamaBase, clearSessionToken, ideSetProject, ideGetProject, backendReady, completeOAuthWithToken, pendingOAuthVerifier, fsFind, ideNewProject } from "./lib/api";
+  import { getMe, setOllamaBase, clearSessionToken, ideSetProject, ideGetProject, backendReady, completeOAuthWithToken, pendingOAuthVerifier, fsFind, ideNewProject, isRemoteMode } from "./lib/api";
   import UpdateBanner from "./components/UpdateBanner.svelte";
   import EndpointBanner from "./components/EndpointBanner.svelte";
   import { startPeriodicCheck, stopPeriodicCheck } from "./lib/updater";
@@ -120,6 +122,8 @@
 
   let historyOpen = $state(true);
   let chatView: ChatView | undefined = $state(undefined);
+  /** The Chat view's permission mode (its picker sits in this page's composer). */
+  let chatPermissionMode = $state<EngineMode>(defaultPermissionMode());
   let chatInput: ChatInput | undefined = $state(undefined);
   let editorView: EditorView | undefined = $state(undefined);
 
@@ -628,11 +632,14 @@
           </div>
         {/if}
         <div class="chat-main" class:hidden={!!activeBot}>
-          <ChatView bind:this={chatView} onHeaderChange={(h) => (chatHeader = h)} onOpenInEditor={handleOpenInEditor} {projectRoot} onRepoConnected={(r) => void repoConnected(r)} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} onPreview={previewInEditor} onQuote={(b) => void chatInput?.insertQuote(b)} />
+          <ChatView bind:this={chatView} onModeChange={(m) => (chatPermissionMode = m)} onFocusComposer={() => chatInput?.focus()} onHeaderChange={(h) => (chatHeader = h)} onOpenInEditor={handleOpenInEditor} {projectRoot} onRepoConnected={(r) => void repoConnected(r)} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} onPreview={previewInEditor} onQuote={(b) => void chatInput?.insertQuote(b)} />
           <div class="composer">
             <ChatInput bind:this={chatInput} onSend={handleSend} streaming={chatStreaming} onStop={() => chatView?.stop()} attach={{ vision: projectRoot ? visionFor($computeChoice) : NO_VISION, who: "This model" }} mentions={projectRoot ? (q) => mentionSuggestions(q, (x) => fsFind(x, 8)) : undefined}>
               {#snippet controls()}
                 <ComputePicker selected={$computeChoice} onSelect={(id) => computeChoice.set(id)} onOpenSettings={openSettings} />
+                {#if projectRoot && !isRemoteMode()}
+                  <PermissionModePicker mode={chatPermissionMode} onChange={(m) => { chatPermissionMode = m; chatView?.setMode(m); }} />
+                {/if}
               {/snippet}
             </ChatInput>
           </div>
