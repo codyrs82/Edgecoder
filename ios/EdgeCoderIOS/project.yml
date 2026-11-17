@@ -8,7 +8,7 @@ settings:
     PRODUCT_NAME: EdgeCoder
     SWIFT_VERSION: "5.0"
     # Bump CURRENT_PROJECT_VERSION for every TestFlight upload (App Store Connect refuses a repeat).
-    CURRENT_PROJECT_VERSION: 9
+    CURRENT_PROJECT_VERSION: 10
     MARKETING_VERSION: 1.0.0
 targets:
   EdgeCoderIOS:
