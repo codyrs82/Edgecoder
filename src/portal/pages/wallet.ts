@@ -24,15 +24,6 @@ import { WALLET_DIRECT_CONTENT, WALLET_DIRECT_SCRIPT } from "./wallet-direct.js"
 export const WALLET_CSS = `
   <style nonce="${CSP_NONCE}">
     .wl { --wl-gap: 16px; }
-    .wl-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
-    .wl-head .set-title { margin: 0; }
-    .net-badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
-      border: 1px solid var(--border-strong); color: var(--text-secondary); background: var(--bg-elevated); }
-    .net-badge .dot { width: 7px; height: 7px; }
-    .net-badge.test { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 45%, transparent); background: color-mix(in srgb, var(--yellow) 10%, transparent); }
-    .net-badge.test .dot { background: var(--yellow); }
-    .net-badge.main { color: var(--brand-2); border-color: var(--brand-border); background: var(--brand-soft); }
-    .net-badge.main .dot { background: var(--brand); }
     .wl-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: var(--wl-gap); align-items: stretch; margin-bottom: var(--wl-gap); }
     @media (max-width: 1000px) { .wl-grid { grid-template-columns: 1fr; } }
     .wl-card { border: 1px solid var(--card-border); border-radius: 14px; background: var(--card); padding: 22px; min-width: 0; }
@@ -43,7 +34,6 @@ export const WALLET_CSS = `
     .wl-amount .big { font-size: 44px; font-weight: 650; letter-spacing: -0.03em; line-height: 1.05; }
     .wl-amount .unit { font-size: 16px; font-weight: 600; color: var(--text-secondary); }
     .wl-sub { color: var(--text-secondary); font-size: 13px; }
-    .wl-faint { color: var(--muted); font-size: 12.5px; line-height: 1.5; }
     .wl-mini { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 14px 0 16px; }
     .wl-mini > div { border: 1px solid var(--card-border); border-radius: 10px; padding: 10px 12px; background: var(--bg-surface); }
     .wl-mini .k { font-size: 12px; color: var(--muted); }

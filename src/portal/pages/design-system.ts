@@ -170,6 +170,17 @@ tbody tr:hover td.sticky-actions { background: var(--bg-elevated); }
 .status-badge.info { color: var(--info); border-color: color-mix(in srgb, var(--info) 40%, transparent); background: color-mix(in srgb, var(--info) 10%, transparent); }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
 .dot.green { background: var(--ok); } .dot.yellow { background: var(--yellow); } .dot.red { background: var(--danger); } .dot.gray { background: var(--muted); }
+/* Network badge and its header row, shared by the Wallet and Compute pages. */
+.wl-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+.wl-head .set-title { margin: 0; }
+.net-badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+border: 1px solid var(--border-strong); color: var(--text-secondary); background: var(--bg-elevated); }
+.net-badge .dot { width: 7px; height: 7px; }
+.net-badge.test { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 45%, transparent); background: color-mix(in srgb, var(--yellow) 10%, transparent); }
+.net-badge.test .dot { background: var(--yellow); }
+.net-badge.main { color: var(--brand-2); border-color: var(--brand-border); background: var(--brand-soft); }
+.net-badge.main .dot { background: var(--brand); }
+.wl-faint { color: var(--muted); font-size: 12.5px; line-height: 1.5; }
 
 /* Brand mark (brandMark()) and the theme toggle (assets.ts themeToggleButton()) */
 .mark { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 28px; height: 28px; border-radius: 6px; background: var(--brand); color: var(--on-accent); }
