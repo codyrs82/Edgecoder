@@ -6,13 +6,14 @@
  *
  *   POST /agent-control/bots                           portal service token; { accountId, agentIds? }
  *   POST /agent-control/agents/:agentId/bot-commands   portal service token; { accountId, botId, action, args }
+ *                                                      ("create": botId must be webBotId(accountId, args.requestId))
  *   POST /agent-control/bot-commands/:commandId        portal service token; { accountId } -> the result
  *   POST /agent-control/agents/:agentId/bots/report    the agent itself (signed); { snapshot? , result? }
  */
 
 import { z } from "zod";
 import { pgStore } from "../../../db/store.js";
-import { BOT_CONTROL_ACTIONS, MAX_SNAPSHOT_BYTES, botControlRequestSchema, botIdSchema, type BotsSnapshot } from "../../../common/bot-relay.js";
+import { BOT_CONTROL_ACTIONS, MAX_SNAPSHOT_BYTES, botControlRequestSchema, botIdSchema, webBotId, type BotsSnapshot } from "../../../common/bot-relay.js";
 import type { CoordinatorApp } from "../app.js";
 import { identity, coordinatorKeys, securityLog } from "../context.js";
 import { requireAgentSelf, requirePortalServiceToken } from "../auth.js";
@@ -28,6 +29,7 @@ const snapshotSchema = z
     v: z.literal(1),
     machineName: z.string().max(80),
     controls: z.enum(["on", "view"]),
+    features: z.array(z.string().max(30).regex(/^[a-z_]+$/)).max(10).optional(),
     generatedAtMs: z.number().int().nonnegative(),
     bots: z.array(z.object({ id: botIdSchema, name: z.string().max(60) }).passthrough()).max(30)
   })
@@ -80,6 +82,8 @@ export function registerBotRelayRoutes(app: CoordinatorApp): void {
     if (!body.success) return reply.code(400).send({ error: "invalid_command" });
     const request = botControlRequestSchema.safeParse({ action: body.data.action, args: body.data.args ?? {} });
     if (!request.success) return reply.code(400).send({ error: "invalid_command", detail: request.error.issues[0]?.message });
+    // A new bot's id is fixed by the account and its request id (the agent checks this again).
+    if (request.data.action === "create" && body.data.botId !== webBotId(body.data.accountId, request.data.args.requestId)) return reply.code(400).send({ error: "invalid_command", detail: "bot id" });
     const decision = sendBotCommand({
       agentId,
       botId: body.data.botId,

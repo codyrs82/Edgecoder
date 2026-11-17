@@ -25,6 +25,8 @@ export const BOT_HEARTBEAT_MS = 2 * 60_000;
 /** Commands this agent runs per window (reads count separately). */
 export const AGENT_BOT_COMMANDS_PER_WINDOW = 30;
 export const AGENT_BOT_READS_PER_WINDOW = 120;
+/** New bots from the web this agent makes per window (they count as commands too). */
+export const AGENT_BOT_CREATES_PER_WINDOW = 10;
 const WINDOW_MS = 10 * 60_000;
 
 export interface ProviderClient {
@@ -49,7 +51,9 @@ export class BotRelayAgent {
   private lastSentMs = 0;
   private timer: NodeJS.Timeout | undefined;
   private polling: Promise<void> | null = null;
-  private readonly recent = { change: [] as number[], read: [] as number[] };
+  private readonly recent = { change: [] as number[], read: [] as number[], create: [] as number[] };
+  /** The coordinator refused a snapshot that names features (an older coordinator): send without. */
+  private plainSnapshots = false;
 
   constructor(private readonly deps: BotRelayAgentDeps) {}
 
@@ -96,11 +100,27 @@ export class BotRelayAgent {
       const hash = createHash("sha256").update(text).digest("hex");
       const now = this.now();
       if (!force && hash === this.lastHash && now - this.lastSentMs < BOT_HEARTBEAT_MS) return;
+      const plain = (s: BotsSnapshot): BotsSnapshot => {
+        const { features: _f, ...rest } = s;
+        return rest;
+      };
       try {
-        await this.deps.report({ snapshot: snap });
+        await this.deps.report({ snapshot: this.plainSnapshots ? plain(snap) : snap });
         this.lastHash = hash;
         this.lastSentMs = now;
       } catch (e) {
+        // An older coordinator takes no `features`: the bots still show there (without "create").
+        if (!this.plainSnapshots && snap.features && /\b400\b|invalid_report/.test(String(e))) {
+          try {
+            await this.deps.report({ snapshot: plain(snap) });
+            this.plainSnapshots = true;
+            this.lastHash = hash;
+            this.lastSentMs = now;
+            return;
+          } catch {
+            /* reported below */
+          }
+        }
         this.log(`bots report failed: ${String(e).slice(0, 160)}`);
       }
     })().finally(() => {
@@ -109,12 +129,16 @@ export class BotRelayAgent {
     return this.polling;
   }
 
-  private limited(kind: "change" | "read"): boolean {
+  private limited(kind: "change" | "read" | "create"): boolean {
     const now = this.now();
-    const list = this.recent[kind];
-    while (list.length && now - list[0] > WINDOW_MS) list.shift();
-    if (list.length >= (kind === "read" ? AGENT_BOT_READS_PER_WINDOW : AGENT_BOT_COMMANDS_PER_WINDOW)) return true;
-    list.push(now);
+    const max = { read: AGENT_BOT_READS_PER_WINDOW, change: AGENT_BOT_COMMANDS_PER_WINDOW, create: AGENT_BOT_CREATES_PER_WINDOW };
+    const kinds = kind === "create" ? (["create", "change"] as const) : ([kind] as const);
+    for (const k of kinds) {
+      const list = this.recent[k];
+      while (list.length && now - list[0] > WINDOW_MS) list.shift();
+      if (list.length >= max[k]) return true;
+    }
+    for (const k of kinds) this.recent[k].push(now);
     return false;
   }
 
@@ -144,7 +168,7 @@ export class BotRelayAgent {
     if (this.deps.mode === "off") return finish({ status: "refused", error: "relay_off" });
     const read = BOT_READ_ACTIONS.has(request.action);
     if (!read && this.controls !== "on") return finish({ status: "refused", error: "view_only", message: "This Mac shows its bots on the web read-only (AGENT_BOT_RELAY=view or AGENT_REMOTE_CONTROL=off)." });
-    if (this.limited(read ? "read" : "change")) return finish({ status: "refused", error: "agent_rate_limited" });
+    if (this.limited(read ? "read" : request.action === "create" ? "create" : "change")) return finish({ status: "refused", error: "agent_rate_limited" });
     this.log(`bot ${command.botId}: ${request.action} for ${command.requestedBy} (command ${command.id})`);
     try {
       const r = await this.deps.provider.command({ requestedBy: command.requestedBy, botId: command.botId, action: request.action, args: request.args, controls: this.controls });

@@ -28,6 +28,9 @@ const logger = moduleLogger("portal-account-admin");
  * tests/portal/admin-users-delete.test.ts checks that every user/email/account column created by
  * PortalStore.migrate() is either here or in RETAINED_USER_COLUMNS, so a new table cannot be missed.
  */
+/** portal_onboarding rows keyed by this prefix + user id hold the account's new bots waiting for a Mac (routes/bots.ts). */
+export const PENDING_BOTS_KEY_PREFIX = "bots-pending:";
+
 export type DeleteStep =
   | { table: string; column: string; by: "userId" | "email"; /** Keyed rows: the column holds `<keyPrefix><userId>`. */ keyPrefix?: string }
   | { table: string; column: string; via: { table: string; column: string } };
@@ -58,6 +61,7 @@ export const USER_DELETE_PLAN: readonly DeleteStep[] = [
   { table: "portal_onboarding", column: "user_id", by: "userId" },
   // Account security (2FA secret, pending payout destination, lock): src/portal/account-security.ts.
   { table: "portal_onboarding", column: "user_id", by: "userId", keyPrefix: "acctsec:" },
+  { table: "portal_onboarding", column: "user_id", by: "userId", keyPrefix: PENDING_BOTS_KEY_PREFIX },
   { table: "portal_withdraw_challenges", column: "user_id", by: "userId" },
   { table: "portal_payout_destination_challenges", column: "user_id", by: "userId" },
   { table: "portal_payout_destinations", column: "user_id", by: "userId" },

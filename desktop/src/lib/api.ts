@@ -2009,6 +2009,9 @@ export const sendBotMessage = (id: string, content: string, attachments?: Attach
   fsCall<{ started: boolean; queued: boolean; bot: Bot }>("POST", botPath(id, "/messages"), { content, ...(attachments?.length ? { attachments } : {}) });
 export const botHistory = (id: string) => fsCall<{ runs: BotRun[] }>("GET", botPath(id, "/history")).then((r) => r.runs);
 /** Clone or update the bot's repository now (it also happens on save and before each run). */
+/** A web-made bot's folder, chosen here: "default" (~/EdgeCoder/Bots/<name>) or an existing folder. */
+export const setupBotFolder = (id: string, body: { choice: "default"; allowAuto?: boolean } | { choice: "path"; path: string; allowAuto?: boolean }) =>
+  fsCall<{ bot: Bot }>("POST", botPath(id, "/folder"), body).then((r) => r.bot);
 export const syncBotRepository = (id: string) => fsCall<{ bot: Bot }>("POST", botPath(id, "/repository/sync"), {}).then((r) => r.bot);
 export const approveBotCall = (id: string, callId: string, approved: boolean, always = false) => fsCall<{ ok: boolean; bot: Bot }>("POST", botPath(id, "/approve"), { callId, approved, ...(always ? { always: true } : {}) });
 /** The server's message for a failed bot call (its `error` field). */

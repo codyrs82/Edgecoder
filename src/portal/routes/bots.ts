@@ -8,6 +8,16 @@
  *   GET  /portal/api/bots/:agentId/:botId                     one bot, with its latest messages
  *   POST /portal/api/bots/:agentId/:botId/commands            { action, args } for one of the account's machines
  *   GET  /portal/api/bots/:agentId/commands/:commandId        that command's result (polled)
+ *   POST /portal/api/bots/new                                 { requestId, agentId|null, bot } a new bot (#409)
+ *   DELETE /portal/api/bots/pending/:requestId                drop a new bot that hasn't reached a Mac
+ *
+ * New bots from the web: the request is kept (pending) in the portal database until a Mac made it.
+ * It is sent as the relay's signed "create" command to the machine picked ("Runs on"), or to the
+ * first of the account's machines that is online with an app that can take it. The Mac makes it
+ * without a folder ("Needs folder") and someone there picks the folder. The request id makes it
+ * idempotent end to end: the same entry here, the same command at the coordinator, one bot on the Mac.
+ * Pending requests are checked on each list poll and by a sweep every minute (any portal machine;
+ * a duplicate send is harmless for that reason).
  *
  * The account is always acct-<session user> (never from the request). The portal asks only about
  * the user's enrolled agent nodes; each coordinator checks the agent's verified ownership row again
@@ -17,14 +27,51 @@
 import type { FastifyInstance } from "fastify";
 import { request } from "undici";
 import { z } from "zod";
-import { BOT_CONTROL_ACTIONS, botControlRequestSchema, botIdSchema, type BotsSnapshot, type RemoteBotSummary } from "../../common/bot-relay.js";
+import { BOT_CONTROL_ACTIONS, botControlRequestSchema, botIdSchema, botRequestIdSchema, remoteBotCreateSchema, webBotId, type BotsSnapshot, type RemoteBotCreate, type RemoteBotSummary } from "../../common/bot-relay.js";
+
+/** A new bot from the web that no Mac has made yet (stored per account: PendingBotStore). */
+export interface PendingBot {
+  requestId: string;
+  /** The id it gets on the Mac (webBotId). */
+  botId: string;
+  /** The machine picked in "Runs on"; null: the first of the account's machines that can take it. */
+  target: string | null;
+  spec: RemoteBotCreate;
+  state: "waiting" | "sent" | "failed";
+  agentId?: string;
+  commandId?: string;
+  sentAtMs?: number;
+  /** The Mac said done; dropped once its snapshot shows the bot. */
+  doneAtMs?: number;
+  error?: string;
+  message?: string;
+  createdAtMs: number;
+}
+
+/** Where pending new bots live (PortalStore: a row per account in an existing table; no migration). */
+export interface PendingBotStore {
+  getPendingBots(userId: string): Promise<{ list: PendingBot[]; version: number }>;
+  /** Only when the stored version is still `version` (another portal machine may have saved meanwhile). */
+  savePendingBots(userId: string, list: PendingBot[], version: number, nowMs: number): Promise<boolean>;
+  listPendingBotOwners(limit: number): Promise<string[]>;
+}
+
+/** New bots one account may have waiting for a Mac. */
+export const MAX_PENDING_BOTS = 10;
+/** A done create is dropped after this long even if no snapshot showed it yet. */
+const DONE_KEEP_MS = 10 * 60_000;
+/** A sent create the coordinator lost track of is sent again after this long. */
+const SENT_RETRY_MS = 2 * 60_000;
 
 export interface BotRoutesDeps {
   PORTAL_SERVICE_TOKEN: string;
   EXTERNAL_HTTP_TIMEOUT_MS: number;
   discoverCoordinatorUrlsForPortal: () => Promise<string[]>;
   getCurrentUser: (req: { headers: Record<string, unknown> }) => Promise<{ userId: string } | null | undefined>;
-  store: { listNodesByOwner(userId: string): Promise<Array<{ nodeId: string; nodeKind: string; active?: boolean; lastSeenMs?: number }>> } | null | undefined;
+  store: ({ listNodesByOwner(userId: string): Promise<Array<{ nodeId: string; nodeKind: string; active?: boolean; lastSeenMs?: number }>> } & Partial<PendingBotStore>) | null | undefined;
+  /** How often pending new bots are retried without anyone on the page (0: never; default 60 s). */
+  pendingSweepMs?: number;
+  now?: () => number;
 }
 
 interface CoordinatorBotMachine {
@@ -47,6 +94,8 @@ export interface MachineInfo {
   /** "on": commands and approvals from the web; "view": read-only (approve on the Mac). Offline is always read-only. */
   controls: "on" | "view";
   reportedAtMs: number | null;
+  /** Online, takes changes from the web, and its app can make new bots ("create"). */
+  canCreate: boolean;
 }
 
 /** One entry per machine from every coordinator's answer: a connected one wins, else the latest report. */
@@ -63,7 +112,14 @@ export function mergeMachines(answers: CoordinatorBotMachine[][], nowMs = Date.n
       const s = m.snapshot!;
       const online = m.connected && m.reportedAtMs !== null && nowMs - m.reportedAtMs < BOTS_STALE_MS;
       return {
-        machine: { agentId: m.agentId, machineName: String(s.machineName || m.agentId), online, controls: online && s.controls === "on" ? "on" : "view", reportedAtMs: m.reportedAtMs },
+        machine: {
+          agentId: m.agentId,
+          machineName: String(s.machineName || m.agentId),
+          online,
+          controls: online && s.controls === "on" ? "on" : "view",
+          reportedAtMs: m.reportedAtMs,
+          canCreate: online && s.controls === "on" && Array.isArray(s.features) && s.features.includes("create"),
+        },
         bots: s.bots,
       };
     });
@@ -104,15 +160,196 @@ export function registerBotRoutes(app: FastifyInstance, deps: BotRoutesDeps): vo
     return mergeMachines(answers.map((list) => list.filter((m) => mine.has(m.agentId))));
   }
 
+  /** One command to the coordinator holding the machine's connection (each is tried in turn). */
+  async function sendCommand(agentId: string, body: Record<string, unknown>): Promise<{ status: number; body: any }> {
+    let last: { status: number; body: any } = { status: 409, body: { error: "agent_not_connected" } };
+    for (const base of await coordinators()) {
+      try {
+        const r = await postJson(`${base}/agent-control/agents/${encodeURIComponent(agentId)}/bot-commands`, body);
+        // Another coordinator may hold the machine's connection.
+        if (r.status === 409 && r.body?.error === "agent_not_connected") {
+          last = r;
+          continue;
+        }
+        return r;
+      } catch {
+        last = { status: 502, body: { error: "coordinator_unreachable" } };
+      }
+    }
+    return last;
+  }
+  async function commandState(accountId: string, agentId: string, commandId: string): Promise<any | null> {
+    for (const base of await coordinators()) {
+      try {
+        const r = await postJson(`${base}/agent-control/bot-commands/${encodeURIComponent(commandId)}`, { accountId });
+        // The coordinator answers only the account that sent it.
+        if (r.status === 200 && r.body?.agentId === agentId) return r.body;
+      } catch {
+        /* try the next coordinator */
+      }
+    }
+    return null;
+  }
+
+  // ---- New bots from the web (#409) ----
+  const now = () => deps.now?.() ?? Date.now();
+  const pendingStore = (): PendingBotStore | null =>
+    deps.store && typeof deps.store.getPendingBots === "function" && typeof deps.store.savePendingBots === "function" && typeof deps.store.listPendingBotOwners === "function"
+      ? (deps.store as unknown as PendingBotStore)
+      : null;
+
+  /** What the page shows of a pending new bot (no instructions or other settings). */
+  function pendingView(p: PendingBot, machines: MachineInfo[]) {
+    const target = p.target ?? p.agentId ?? null;
+    const m = machines.find((x) => x.agentId === target);
+    return {
+      requestId: p.requestId,
+      botId: p.botId,
+      name: p.spec.name,
+      role: p.spec.role ?? "",
+      color: p.spec.color ?? "#6e56cf",
+      state: p.state,
+      target: p.target,
+      machineName: m?.machineName ?? null,
+      ...(p.error ? { error: p.error } : {}),
+      ...(p.message ? { message: p.message } : {}),
+      createdAtMs: p.createdAtMs,
+    };
+  }
+
+  /**
+   * Moves each of the account's pending new bots on: dropped once a Mac shows it, sent to the
+   * machine it waits for (or the first that can take it), settled from the command's result.
+   */
+  async function reconcile(userId: string, known?: Array<{ machine: MachineInfo; bots: RemoteBotSummary[] }>): Promise<PendingBot[]> {
+    const store = pendingStore();
+    if (!store) return [];
+    const { list, version } = await store.getPendingBots(userId);
+    if (!list.length) return [];
+    const accountId = `acct-${userId}`;
+    const machines = known ?? (await machinesFor(userId));
+    const made = new Set(machines.flatMap((m) => m.bots.map((b) => b.id)));
+    const t = now();
+    let changed = false;
+    const next: PendingBot[] = [];
+    for (const p0 of list) {
+      let p = p0;
+      // A Mac has it: it shows in the list as a bot now.
+      if (made.has(p.botId)) {
+        changed = true;
+        continue;
+      }
+      if (p.state === "sent" && p.commandId && p.agentId) {
+        const st = await commandState(accountId, p.agentId, p.commandId);
+        const r = st?.result;
+        if (r?.status === "done") {
+          if (!p.doneAtMs) p = { ...p, doneAtMs: t };
+        } else if (r && (r.status === "refused" || r.status === "failed") && r.error !== "agent_rate_limited" && r.error !== "provider_unreachable") {
+          p = { ...p, state: "failed", error: String(r.error ?? "failed").slice(0, 80), message: String(r.message ?? "").slice(0, 300) };
+        } else if (r || st?.status === "expired" || (!st && t - (p.sentAtMs ?? 0) > SENT_RETRY_MS)) {
+          // Not answered, lost, or worth another try: wait for a machine again.
+          const { agentId: _a, commandId: _c, sentAtMs: _s, ...rest } = p;
+          p = { ...rest, state: "waiting" };
+        }
+        if (p.doneAtMs && t - p.doneAtMs > DONE_KEEP_MS) {
+          changed = true;
+          continue;
+        }
+      }
+      if (p.state === "waiting") {
+        const m = machines.find((x) => x.machine.canCreate && (p.target ? x.machine.agentId === p.target : true));
+        if (m) {
+          const r = await sendCommand(m.machine.agentId, { accountId, botId: p.botId, action: "create", args: p.spec });
+          if (r.status === 200 && typeof r.body?.commandId === "string") p = { ...p, state: "sent", agentId: m.machine.agentId, commandId: r.body.commandId, sentAtMs: t };
+          else if (r.status === 400 || r.status === 403) p = { ...p, state: "failed", error: String(r.body?.error ?? "refused").slice(0, 80), message: String(r.body?.detail ?? r.body?.message ?? "").slice(0, 300) };
+        }
+      }
+      if (p !== p0) changed = true;
+      next.push(p);
+    }
+    if (changed) await store.savePendingBots(userId, next, version, t).catch(() => false);
+    return next;
+  }
+
+  if (pendingStore() && (deps.pendingSweepMs ?? 60_000) > 0) {
+    let sweeping = false;
+    const timer = setInterval(() => {
+      const store = pendingStore();
+      if (sweeping || !store) return;
+      sweeping = true;
+      void (async () => {
+        for (const userId of await store.listPendingBotOwners(200)) await reconcile(userId).catch(() => undefined);
+      })()
+        .catch(() => undefined)
+        .finally(() => (sweeping = false));
+    }, deps.pendingSweepMs ?? 60_000);
+    timer.unref?.();
+    app.addHook("onClose", async () => clearInterval(timer));
+  }
+
+  /** "Runs on": every enrolled machine, with whether it can take a new bot now. */
+  async function targetsFor(userId: string, machines: Array<{ machine: MachineInfo }>) {
+    const seenIds = new Set(machines.map((m) => m.machine.agentId));
+    const others = (await agentNodes(userId)).filter((id) => !seenIds.has(id)).map((id) => ({ agentId: id, machineName: id, online: false, canCreate: false }));
+    return [...machines.map((m) => ({ agentId: m.machine.agentId, machineName: m.machine.machineName, online: m.machine.online, canCreate: m.machine.canCreate })), ...others];
+  }
+
   app.get("/portal/api/bots", { config: { rateLimit: { max: 240, timeWindow: "1 minute" } } }, async (req, reply) => {
     const user = await deps.getCurrentUser(req as never);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
     const machines = await machinesFor(user.userId);
+    const pending = await reconcile(user.userId, machines).catch(() => [] as PendingBot[]);
     reply.header("cache-control", "no-store");
     return reply.send({
       machines: machines.map((m) => m.machine),
       bots: machines.flatMap((m) => m.bots.map(({ tail: _tail, instructions: _i, ...b }) => ({ ...b, machine: m.machine }))),
+      pending: pending.map((p) => pendingView(p, machines.map((m) => m.machine))),
+      targets: await targetsFor(user.userId, machines),
+      canCreate: !!pendingStore(),
     });
+  });
+
+  app.post("/portal/api/bots/new", { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } }, async (req, reply) => {
+    const user = await deps.getCurrentUser(req as never);
+    if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    const store = pendingStore();
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    const body = z.object({ requestId: botRequestIdSchema, agentId: agentIdSchema.nullable().default(null), bot: z.record(z.string(), z.unknown()) }).strict().safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: "invalid_bot" });
+    const spec = remoteBotCreateSchema.safeParse({ ...body.data.bot, requestId: body.data.requestId });
+    if (!spec.success) return reply.code(400).send({ error: "invalid_bot", detail: spec.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ").slice(0, 300) });
+    // Only the session's own enrolled machines (the coordinator checks the verified owner again).
+    if (body.data.agentId && !(await agentNodes(user.userId)).includes(body.data.agentId)) return reply.code(403).send({ error: "not_your_machine" });
+    const accountId = `acct-${user.userId}`;
+    const botId = webBotId(accountId, body.data.requestId);
+    const { list, version } = await store.getPendingBots(user.userId);
+    const same = list.find((p) => p.requestId === body.data.requestId);
+    if (!same) {
+      // Already made (a retry after it arrived): nothing new.
+      const machines = await machinesFor(user.userId);
+      const made = machines.find((m) => m.bots.some((b) => b.id === botId));
+      if (made) return reply.send({ ok: true, botId, agentId: made.machine.agentId, state: "created" });
+      if (list.length >= MAX_PENDING_BOTS) return reply.code(429).send({ error: "too_many_pending", message: `At most ${MAX_PENDING_BOTS} new bots can wait for a Mac.` });
+      const entry: PendingBot = { requestId: body.data.requestId, botId, target: body.data.agentId, spec: spec.data, state: "waiting", createdAtMs: now() };
+      if (!(await store.savePendingBots(user.userId, [...list, entry], version, now()))) return reply.code(409).send({ error: "busy", message: "Try again." });
+      const after = await reconcile(user.userId, machines);
+      const p = after.find((x) => x.requestId === body.data.requestId) ?? entry;
+      return reply.send({ ok: true, botId, state: p.state, pending: pendingView(p, machines.map((m) => m.machine)) });
+    }
+    return reply.send({ ok: true, botId, state: same.state, pending: pendingView(same, []) });
+  });
+
+  app.delete("/portal/api/bots/pending/:requestId", { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } }, async (req, reply) => {
+    const user = await deps.getCurrentUser(req as never);
+    if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    const store = pendingStore();
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    const p = z.object({ requestId: botRequestIdSchema }).safeParse(req.params);
+    if (!p.success) return reply.code(400).send({ error: "invalid_request" });
+    const { list, version } = await store.getPendingBots(user.userId);
+    if (!list.some((x) => x.requestId === p.data.requestId)) return reply.code(404).send({ error: "not_found" });
+    if (!(await store.savePendingBots(user.userId, list.filter((x) => x.requestId !== p.data.requestId), version, now()))) return reply.code(409).send({ error: "busy", message: "Try again." });
+    return reply.send({ ok: true });
   });
 
   app.get("/portal/api/bots/:agentId/:botId", { config: { rateLimit: { max: 240, timeWindow: "1 minute" } } }, async (req, reply) => {
@@ -134,28 +371,16 @@ export function registerBotRoutes(app: FastifyInstance, deps: BotRoutesDeps): vo
     const p = z.object({ agentId: agentIdSchema, botId: botIdSchema }).safeParse(req.params);
     if (!p.success) return reply.code(400).send({ error: "invalid_bot" });
     const body = z.object({ action: z.enum(BOT_CONTROL_ACTIONS), args: z.record(z.string(), z.unknown()).optional() }).safeParse(req.body ?? {});
-    if (!body.success) return reply.code(400).send({ error: "invalid_command" });
+    // New bots go through /portal/api/bots/new (kept until a Mac made them).
+    if (!body.success || body.data.action === "create") return reply.code(400).send({ error: "invalid_command" });
     const parsed = botControlRequestSchema.safeParse({ action: body.data.action, args: body.data.args ?? {} });
     if (!parsed.success) return reply.code(400).send({ error: "invalid_command", detail: parsed.error.issues[0]?.message });
     // First check here (enrolled to this user); the coordinator checks the verified ownership row again.
     if (!(await agentNodes(user.userId)).includes(p.data.agentId)) return reply.code(403).send({ error: "not_your_machine" });
     const accountId = `acct-${user.userId}`;
-    let last: { status: number; body: any } = { status: 409, body: { error: "agent_not_connected" } };
-    for (const base of await coordinators()) {
-      try {
-        const r = await postJson(`${base}/agent-control/agents/${encodeURIComponent(p.data.agentId)}/bot-commands`, { accountId, botId: p.data.botId, ...parsed.data });
-        // Another coordinator may hold the machine's connection.
-        if (r.status === 409 && r.body?.error === "agent_not_connected") {
-          last = r;
-          continue;
-        }
-        if (r.status !== 200) return reply.code(r.status).send({ error: r.body?.error ?? "command_failed", message: r.body?.message });
-        return reply.send({ ok: true, commandId: r.body.commandId });
-      } catch {
-        last = { status: 502, body: { error: "coordinator_unreachable" } };
-      }
-    }
-    return reply.code(last.status).send({ error: last.body?.error ?? "agent_not_connected" });
+    const r = await sendCommand(p.data.agentId, { accountId, botId: p.data.botId, ...parsed.data });
+    if (r.status !== 200) return reply.code(r.status).send({ error: r.body?.error ?? "command_failed", message: r.body?.message });
+    return reply.send({ ok: true, commandId: r.body.commandId });
   });
 
   app.get("/portal/api/bots/:agentId/commands/:commandId", { config: { rateLimit: { max: 600, timeWindow: "1 minute" } } }, async (req, reply) => {
@@ -163,17 +388,8 @@ export function registerBotRoutes(app: FastifyInstance, deps: BotRoutesDeps): vo
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
     const p = z.object({ agentId: agentIdSchema, commandId: z.string().min(8).max(64).regex(/^[A-Za-z0-9-]+$/) }).safeParse(req.params);
     if (!p.success) return reply.code(400).send({ error: "invalid_command" });
-    const accountId = `acct-${user.userId}`;
     reply.header("cache-control", "no-store");
-    for (const base of await coordinators()) {
-      try {
-        const r = await postJson(`${base}/agent-control/bot-commands/${encodeURIComponent(p.data.commandId)}`, { accountId });
-        // The coordinator answers only the account that sent it.
-        if (r.status === 200 && r.body?.agentId === p.data.agentId) return reply.send(r.body);
-      } catch {
-        /* try the next coordinator */
-      }
-    }
-    return reply.code(404).send({ error: "unknown_command" });
+    const state = await commandState(`acct-${user.userId}`, p.data.agentId, p.data.commandId);
+    return state ? reply.send(state) : reply.code(404).send({ error: "unknown_command" });
   });
 }

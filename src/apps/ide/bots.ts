@@ -196,6 +196,8 @@ export const DEFAULT_BUDGET_CSATS_PER_DAY = 100;
 export const DEFAULT_HEARTBEAT_MINUTES = 30;
 /** Runs a bot may start on its own a day (start, schedule, check-ins, follow-ups, GitHub). */
 export const DEFAULT_MAX_RUNS_PER_DAY = 48;
+/** Bots one computer takes from the web (the web shows at most SNAPSHOT_MAX_BOTS of a machine's bots). */
+export const MAX_BOTS = 30;
 /** Check-ins back off ×2 per quiet check, up to this long between them. */
 export const IDLE_BACKOFF_CAP_MS = 8 * 60 * 60_000;
 const MAX_IDLE_STEPS = 8;
@@ -274,7 +276,44 @@ export interface BotConfig {
   updatedAtMs: number;
   /** The next scheduled run or check-in. */
   nextRunAtMs?: number;
+  /**
+   * Made on the web and waiting for its folder (#409): projectRoot is "" and it does nothing on its
+   * own until someone at this computer picks the folder (setupFolder). The web can only suggest one.
+   */
+  setup?: BotSetup;
 }
+
+/** A bot made from the web that is waiting for this computer to give it a folder. */
+export interface BotSetup {
+  source: "web";
+  /** The web's request id and the account that asked (the bot's id is derived from both: webBotId). */
+  requestId: string;
+  requestedBy: string;
+  requestedAtMs: number;
+  /** The web's suggestion, shown on the Mac; never created or used unless the Mac confirms it. */
+  suggestedFolder?: string;
+  /** The web asked for Auto: the bot runs on Accept edits unless the Mac confirms Auto. */
+  requestedMode?: "auto";
+}
+
+/** Where "Use default" puts a web-made bot's folder: ~/EdgeCoder/Bots/<name>. */
+export function defaultBotsHome(): string {
+  return join(homedir(), "EdgeCoder", "Bots");
+}
+
+/** A folder name from a bot's name (no separators, dots or control characters; never empty). */
+export function botFolderName(name: string): string {
+  const clean = name
+    .replace(/[\u0000-\u001f\u007f/\\:*?"<>|]+/g, " ")
+    .replace(/^[.\s]+|[.\s]+$/g, "")
+    .replace(/\s+/g, " ")
+    .slice(0, 60)
+    .trim();
+  return clean || "Bot";
+}
+
+/** How the Mac sets a web-made bot's folder (only from this computer: /v1/ide/bots/:id/folder). */
+export type FolderChoice = { kind: "default" } | { kind: "path"; path: string };
 
 export interface BotAutoState {
   /** A run due soon: starting work, or continuing the last one. */
@@ -394,7 +433,7 @@ export interface BotMessage {
   attachments?: SavedAttachment[];
 }
 
-export type BotStatus = "idle" | "running" | "needs_approval" | "paused" | "over_budget" | "out_of_csats" | "error";
+export type BotStatus = "idle" | "running" | "needs_approval" | "paused" | "over_budget" | "out_of_csats" | "error" | "needs_folder";
 
 /** What it runs next on its own: kind and when (absent: nothing until a message or GitHub event). */
 export interface BotNextRun {
@@ -747,6 +786,14 @@ function branchOf(root: string): string | null {
 
 export type BotPatch = Partial<BotInput> & { memory?: string };
 
+/** A bot from the web (bot-remote.ts): no folder, no tools list; the id comes from the request (webBotId). */
+export interface WebBotInput extends Omit<BotInput, "projectRoot" | "allowedTools" | "autoApproveEdits"> {
+  id: string;
+  requestId: string;
+  requestedBy: string;
+  suggestedFolder?: string;
+}
+
 interface ActiveRun {
   run: BotRun;
   abort: AbortController;
@@ -811,6 +858,8 @@ export class BotManager {
       permissions?: PermissionStore;
       /** Your cSat balance now (undefined: unknown), to resume bots paused out of cSats after a top-up. */
       balance?: () => Promise<number | undefined>;
+      /** Where "Use default" makes a web-made bot's folder (default ~/EdgeCoder/Bots). */
+      botsHome?: () => string;
     },
   ) {
     this.approvals = deps.approvals ?? new Map();
@@ -1037,7 +1086,8 @@ export class BotManager {
   }
 
   /** Why the bot can't start a run on its own now (null: it can). */
-  private autoHold(bot: BotConfig, now = this.now()): "paused" | "busy" | "budget" | "run_cap" | "csats" | null {
+  private autoHold(bot: BotConfig, now = this.now()): "paused" | "busy" | "budget" | "run_cap" | "csats" | "needs_folder" | null {
+    if (bot.setup) return "needs_folder";
     if (!bot.enabled) return "paused";
     if (this.active.has(bot.id)) return "busy";
     if (this.overBudget(bot)) return "budget";
@@ -1073,7 +1123,8 @@ export class BotManager {
     let changed = false;
     this.checkTopUp(now);
     for (const bot of this.bots) {
-      if (!bot.enabled) continue;
+      // Paused, or made on the web and still waiting for its folder.
+      if (!bot.enabled || bot.setup) continue;
       const auto = (bot.auto ??= { idleStreak: 0, followUps: 0 });
       // Starting work, or continuing the last run.
       if (auto.due && auto.due.atMs <= now) {
@@ -1086,7 +1137,7 @@ export class BotManager {
           this.noteHold(bot, hold, due.kind === "start" ? "starting work" : "a follow-up", now);
           continue;
         }
-        if (hold === "csats") continue;
+        if (hold === "csats" || hold === "needs_folder") continue;
         if (this.runNow(bot.id, due.kind, undefined, due.reason).started) started.push(bot.id);
         continue;
       }
@@ -1171,7 +1222,7 @@ export class BotManager {
    * check-in. Quiet check-ins back off (30 min, 1 h, 2 h … 8 h); after the longest wait it runs
    * anyway. Returns what happened.
    */
-  async checkIn(id: string, now = this.now()): Promise<"started" | "quiet" | "paused" | "busy" | "budget" | "run_cap" | "csats" | "gone"> {
+  async checkIn(id: string, now = this.now()): Promise<"started" | "quiet" | "paused" | "busy" | "budget" | "run_cap" | "csats" | "gone" | "needs_folder"> {
     const bot = this.bots.find((b) => b.id === id);
     if (!bot) return "gone";
     const hold = this.autoHold(bot, now);
@@ -1246,7 +1297,7 @@ export class BotManager {
     if (this.polling) return this.polling;
     this.polling = (async () => {
       for (const bot of [...this.bots]) {
-        if (!bot.enabled || !bot.triggers?.length) continue;
+        if (!bot.enabled || bot.setup || !bot.triggers?.length) continue;
         const repo = parseGitHubRepo(bot.repository);
         for (const t of bot.triggers) {
           if (!t.enabled) continue;
@@ -1326,7 +1377,8 @@ export class BotManager {
     if (running) return running;
     const bot = this.find(id);
     const repository = bot.repository;
-    if (!repository) return Promise.resolve();
+    // A web-made bot clones nothing until this computer has confirmed its folder.
+    if (!repository || bot.setup) return Promise.resolve();
     this.repoState.set(id, { state: "cloning", message: bot.repoPath ? `Updating ${repository}…` : `Cloning ${repository}…` });
     const job = (this.deps.ensureRepo ?? ((r: string) => realEnsureRepo(r)))(repository)
       .then((r) => {
@@ -1468,9 +1520,110 @@ export class BotManager {
     return this.view(bot);
   }
 
+  /**
+   * A bot made on the web (bot-remote.ts, the relay's "create"). Idempotent: the id comes from the
+   * request (webBotId), so a retry returns the bot it made. It arrives without a folder ("Needs
+   * folder") and does nothing on its own, clones nothing and takes no messages until someone at this
+   * computer sets the folder (setupFolder). The web's folder is only a suggestion; Auto only a request.
+   */
+  createFromWeb(input: WebBotInput): { bot: BotView; created: boolean } {
+    const existing = this.bots.find((b) => b.id === input.id);
+    if (existing) {
+      if (existing.setup?.requestedBy !== undefined && existing.setup.requestedBy !== input.requestedBy) throw new BotError("No bot with that id", 404);
+      return { bot: this.view(existing), created: false };
+    }
+    if (!/^bot_w[0-9a-f]{12}$/.test(input.id)) throw new BotError("Bad bot id");
+    if (this.bots.length >= MAX_BOTS) throw new BotError(`At most ${MAX_BOTS} bots on one computer`, 409);
+    const { id, requestId, requestedBy, suggestedFolder, mode, ...fields } = input;
+    this.validate({ ...fields, projectRoot: undefined });
+    const now = this.now();
+    const repository = fields.repository?.trim() || undefined;
+    // Auto runs commands without asking: only this computer can turn it on.
+    const safeMode: PermissionMode = mode === "auto" || mode === undefined ? "auto-edits" : mode;
+    const bot: BotConfig = {
+      id,
+      name: fields.name.trim(),
+      role: (fields.role ?? "").trim(),
+      instructions: fields.instructions ?? "",
+      projectRoot: "",
+      ...(repository ? { repository } : {}),
+      triggers: BotManager.triggers(fields.triggers ?? []),
+      maxTriggerRunsPerHour: fields.maxTriggerRunsPerHour ?? DEFAULT_TRIGGER_RUNS_PER_HOUR,
+      enabled: fields.enabled ?? true,
+      schedule: (fields.schedule ?? "").trim(),
+      heartbeatMinutes: fields.heartbeatMinutes === undefined ? DEFAULT_HEARTBEAT_MINUTES : fields.heartbeatMinutes,
+      maxRunsPerDay: fields.maxRunsPerDay ?? DEFAULT_MAX_RUNS_PER_DAY,
+      auto: { idleStreak: 0, followUps: 0 },
+      budgetCSatsPerDay: fields.budgetCSatsPerDay === undefined ? DEFAULT_BUDGET_CSATS_PER_DAY : fields.budgetCSatsPerDay,
+      allowedTools: [...DEFAULT_BOT_TOOLS],
+      autoApproveEdits: safeMode === "auto-edits",
+      mode: safeMode,
+      compute: fields.compute ? BotManager.compute(fields.compute) : { ...DEFAULT_BOT_COMPUTE },
+      color: fields.color ?? COLORS[this.bots.length % COLORS.length],
+      ...(fields.avatarShape ? { avatarShape: fields.avatarShape } : {}),
+      createdAtMs: now,
+      updatedAtMs: now,
+      setup: {
+        source: "web",
+        requestId,
+        requestedBy,
+        requestedAtMs: now,
+        ...(suggestedFolder?.trim() ? { suggestedFolder: suggestedFolder.trim().slice(0, 1_000) } : {}),
+        ...(mode === "auto" ? { requestedMode: "auto" as const } : {}),
+      },
+    };
+    this.bots.push(bot);
+    this.runs.set(bot.id, []);
+    this.save();
+    return { bot: this.view(bot), created: true };
+  }
+
+  /**
+   * Gives a web-made bot its folder: called only from this computer (the desktop's folder card, or
+   * its form). "default" makes ~/EdgeCoder/Bots/<name>; a path must be an existing folder. Then it
+   * starts like a bot made here (clones its repository, starts on its job). `allowAuto` is the Mac's
+   * confirmation of an Auto mode the web asked for; without it the bot stays on Accept edits.
+   */
+  setupFolder(id: string, choice: FolderChoice, opts: { allowAuto?: boolean } = {}): BotView {
+    const bot = this.find(id);
+    if (!bot.setup) throw new BotError(`${bot.name} already has a folder. Change it in its settings.`, 409);
+    let root: string;
+    if (choice.kind === "default") {
+      root = join((this.deps.botsHome ?? defaultBotsHome)(), botFolderName(bot.name));
+      try {
+        mkdirSync(root, { recursive: true });
+      } catch (err) {
+        throw new BotError(`Couldn't make ${root}: ${(err as Error).message}`);
+      }
+    } else {
+      root = choice.path.trim();
+    }
+    this.validate({ projectRoot: root });
+    const requested = bot.setup.requestedMode;
+    delete bot.setup;
+    bot.projectRoot = root;
+    if (requested === "auto" && opts.allowAuto) {
+      bot.mode = "auto";
+      bot.autoApproveEdits = true;
+    }
+    bot.nextRunAtMs = this.nextFor(bot);
+    if (bot.enabled && hasGoal(bot)) (bot.auto ??= { idleStreak: 0, followUps: 0 }).due = { atMs: this.now(), kind: "start" };
+    bot.updatedAtMs = this.now();
+    this.save();
+    if (bot.repository) void this.syncRepository(id);
+    this.kick();
+    return this.view(bot);
+  }
+
   update(id: string, patch: BotPatch): BotView {
     const bot = this.find(id);
     this.validate(patch);
+    // A folder set from this computer's form (the web can't send one: bot-remote.ts) is the confirmation.
+    if (bot.setup && patch.projectRoot !== undefined) {
+      const { projectRoot, ...rest } = patch;
+      this.setupFolder(id, { kind: "path", path: projectRoot }, { allowAuto: patch.mode === "auto" });
+      return Object.keys(rest).length ? this.update(id, rest) : this.view(bot);
+    }
     const { memory, repository, triggers, ...fields } = patch;
     // The mode and the older autoApproveEdits switch stay in step.
     const modeBefore = botMode(bot);
@@ -1587,6 +1740,8 @@ export class BotManager {
       ? act.pending.size > 0
         ? "needs_approval"
         : "running"
+      : bot.setup
+        ? "needs_folder"
       : this.overBudget(bot)
         ? "over_budget"
         : bot.enabled && bot.auto?.outOfCSats
@@ -1600,7 +1755,7 @@ export class BotManager {
     const cursors = this.cursors[bot.id] ?? {};
     const now = this.now();
     const hold = this.autoHold(bot, now);
-    const nextRun: BotNextRun | undefined = !bot.enabled
+    const nextRun: BotNextRun | undefined = !bot.enabled || bot.setup
       ? undefined
       : bot.auto?.due
         ? { kind: bot.auto.due.kind, atMs: bot.auto.due.atMs }
@@ -1625,6 +1780,7 @@ export class BotManager {
       ...(nextRun ? { nextRun } : {}),
       ...(hold === "budget" || hold === "run_cap" ? { held: hold } : {}),
       ...(bot.auto?.stuck && !bot.enabled ? { stuck: { ...bot.auto.stuck } } : {}),
+      ...(bot.setup ? { setup: { ...bot.setup } } : {}),
       triggerStatus: Object.fromEntries(
         bot.triggers.map((t) => {
           const c = cursors[t.id] ?? {};
@@ -1666,6 +1822,7 @@ export class BotManager {
   /** Message the bot: it answers in a run now, or right after the current one. */
   message(id: string, text: string, attachments: AttachmentInput[] = []): { started: boolean; queued: boolean; runId?: string; reason?: string } {
     const bot = this.find(id);
+    if (bot.setup) throw new BotError(`Set up ${bot.name}'s folder in the EdgeCoder app first.`, 409);
     const typed = text.trim();
     if (!typed && attachments.length === 0) throw new BotError("Empty message");
     let saved: SavedAttachment[] = [];
@@ -1698,8 +1855,9 @@ export class BotManager {
     return { ...r, queued: false };
   }
 
-  runNow(id: string, trigger: BotTrigger = "manual", event?: TriggerEvent, reason?: string): { started: boolean; runId?: string; reason?: "busy" | "budget" } {
+  runNow(id: string, trigger: BotTrigger = "manual", event?: TriggerEvent, reason?: string): { started: boolean; runId?: string; reason?: "busy" | "budget" | "needs_folder" } {
     const bot = this.find(id);
+    if (bot.setup) return { started: false, reason: "needs_folder" };
     if (this.active.has(id)) return { started: false, reason: "busy" };
     if (this.overBudget(bot)) return { started: false, reason: "budget" };
     const now = this.now();
@@ -2322,6 +2480,21 @@ export function registerBotRoutes(app: FastifyInstance, bots: BotManager): void 
       // Runs in the background; the bot's `repo` says cloning, ready or what went wrong.
       void bots.syncRepository(id);
       return { bot: bots.get(id) };
+    }),
+  );
+  // A web-made bot's folder, chosen at this computer (the desktop's "Set up the folder" card). The
+  // relay never reaches this route: the agent only calls /v1/ide/bots/remote/*, and those never set a folder.
+  app.post("/v1/ide/bots/:id/folder", (req, reply) =>
+    handle(reply, () => {
+      const id = idParams.parse(req.params).id;
+      const body = z
+        .union([
+          z.object({ choice: z.literal("default"), allowAuto: z.boolean().default(false) }).strict(),
+          z.object({ choice: z.literal("path"), path: z.string().trim().min(1).max(1_000), allowAuto: z.boolean().default(false) }).strict(),
+        ])
+        .parse(req.body ?? {});
+      const choice: FolderChoice = body.choice === "default" ? { kind: "default" } : { kind: "path", path: body.path };
+      return { bot: bots.setupFolder(id, choice, { allowAuto: body.allowAuto }) };
     }),
   );
   app.post("/v1/ide/bots/:id/cancel", (req, reply) => handle(reply, () => ({ cancelled: bots.cancel(idParams.parse(req.params).id) })));

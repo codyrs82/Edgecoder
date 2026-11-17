@@ -5,6 +5,7 @@
   import ChatInput from "../components/ChatInput.svelte";
   import QuoteSelection from "../components/QuoteSelection.svelte";
   import BotAvatar from "../components/BotAvatar.svelte";
+  import BotFolderSetup from "../components/BotFolderSetup.svelte";
   import ToolArgs from "../components/ToolArgs.svelte";
   import ServiceNotice from "../components/ServiceNotice.svelte";
   import { connectivity } from "../lib/connectivity";
@@ -420,6 +421,11 @@
     <ServiceNotice />
   {:else if error}<div class="error" role="alert">{error}</div>{/if}
 
+  {#if bot.setup}
+    <!-- Made on the web: nothing runs until a folder is chosen here (#409). -->
+    <BotFolderSetup {bot} onDone={() => void refreshBots()} />
+  {/if}
+
   {#if view === "chat" && notice}
     <div class="notice" role="status" data-testid="bot-failure-notice">
       <CircleAlert size={15} />
@@ -566,6 +572,7 @@
   {/if}
   </Tabs.Root>
 
+  {#if !bot.setup}
   <div class="composer">
     <!-- Working: the send arrow is Stop (no Stop in the header); Enter still sends, and the bot takes it next.
          queue={[]}: the bot keeps its own queue, so messages go to it at once. Bots never use a
@@ -584,6 +591,7 @@
       {/snippet}
     </ChatInput>
   </div>
+  {/if}
  </div>
 
  {#if panelOpen}

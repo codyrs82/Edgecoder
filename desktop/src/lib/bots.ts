@@ -6,7 +6,30 @@ import type { IdeStreamEvent } from "./api";
 import { frontierName } from "./compute-choice";
 import { hardwareShort, type Served } from "./served";
 
-export type BotStatus = "idle" | "running" | "needs_approval" | "paused" | "over_budget" | "out_of_csats" | "error";
+export type BotStatus = "idle" | "running" | "needs_approval" | "paused" | "over_budget" | "out_of_csats" | "error" | "needs_folder";
+
+/** A bot made on the web that waits for this computer to choose its folder (the server's BotSetup). */
+export interface BotSetup {
+  source: "web";
+  requestId: string;
+  requestedBy: string;
+  requestedAtMs: number;
+  /** The web's suggestion: shown, never used unless you pick it here. */
+  suggestedFolder?: string;
+  /** The web asked for Auto: it stays on Accept edits unless you confirm Auto here. */
+  requestedMode?: "auto";
+}
+
+/** "~/EdgeCoder/Bots/Harry": where "Use default" puts a web-made bot's folder (the server's botFolderName). */
+export function defaultBotFolder(name: string): string {
+  const clean = name
+    .replace(/[\u0000-\u001f\u007f/\\:*?"<>|]+/g, " ")
+    .replace(/^[.\s]+|[.\s]+$/g, "")
+    .replace(/\s+/g, " ")
+    .slice(0, 60)
+    .trim();
+  return `~/EdgeCoder/Bots/${clean || "Bot"}`;
+}
 export type BotRunStatus = "running" | "needs_approval" | "done" | "failed" | "budget" | "cancelled" | "interrupted";
 /** What started a run: the ones it starts on its own, your message, or "Check now" (manual). */
 export type BotTriggerKind = "schedule" | "manual" | "message" | "github" | "start" | "heartbeat" | "follow_up";
@@ -109,6 +132,8 @@ export interface Bot {
   pending: BotPendingCall[];
   queuedMessages: number;
   activity?: string;
+  /** Made on the web and waiting for its folder (status "needs_folder"). */
+  setup?: BotSetup;
 }
 
 export interface BotMessage {
@@ -308,6 +333,7 @@ function untilText(ms: number, now: number): string {
 export function autoStatus(bot: Pick<Bot, "status" | "enabled" | "nextRun" | "held" | "activity" | "maxRunsPerDay" | "lastRun"> & Partial<Pick<Bot, "name" | "stuck">>, now = Date.now()): { text: string; tone: "muted" | "accent" | "warn" | "err" } {
   if (bot.status === "running") return { text: bot.activity && !/^(Auto|Compute): /.test(bot.activity) ? `Working: ${bot.activity}` : "Working…", tone: "accent" };
   if (bot.status === "needs_approval") return { text: "Waiting for your approval", tone: "warn" };
+  if (bot.status === "needs_folder") return { text: "Choose its folder to start", tone: "warn" };
   // The banner has the full story of a failure or a stuck pause; the header only says what's next.
   if (!bot.enabled && bot.stuck) return { text: "Paused · stuck", tone: "muted" };
   if (!bot.enabled) return { text: "Paused", tone: "muted" };
@@ -364,6 +390,8 @@ export function statusChip(bot: Pick<Bot, "status"> & Partial<Pick<Bot, "stuck">
       return { text: "Budget spent", tone: "warn" };
     case "out_of_csats":
       return { text: "Out of cSats", tone: "warn" };
+    case "needs_folder":
+      return { text: "Needs folder", tone: "warn" };
     default:
       return { text: "Idle", tone: "muted" };
   }
@@ -497,6 +525,8 @@ export function botStatusLine(bot: Bot, now = Date.now()): string {
       return "Budget spent";
     case "out_of_csats":
       return "Out of cSats";
+    case "needs_folder":
+      return "Needs folder: made on the web";
     case "paused":
       if (bot.stuck) return "Stuck";
       // A paused bot whose last run failed: the short status, never the error sentence.
