@@ -515,8 +515,15 @@ export function registerChatApiRoutes(
     if (body.model) chatPayload.model = body.model;
     // From here a slow first token keeps the browser's request alive (heartbeats after a short grace).
     const out = chatResponse(reply, deps.chatKeepalive ?? CHAT_KEEPALIVE);
+    // The Web toggle's decision, one line per chat with web set (portal_web_decision): which compute,
+    // which of your machines' models, whether the tools were offered and which path answered. Names
+    // and reasons only, never message content.
+    const webDecision: Record<string, unknown> | null = body.web ? { userId: user.userId, target: body.compute?.target ?? null, model: body.compute && "model" in body.compute ? body.compute.model : null } : null;
+    const decided = (path: "web_loop" | "runAuto" | "runOnNetwork" | "default_chat") => {
+      if (webDecision) req.log.info({ ...webDecision, path }, "portal_web_decision");
+    };
     try {
-      if (body.web && body.compute) {
+      if (body.web && body.compute && webDecision) {
         // Web (docs/web-tool.md): offered by default, the model decides when to search. An agent loop
         // with only the web tool, on the chat's compute (Auto: your own machines first, then the
         // network's best fit), for a model that calls tools and an account that can pay for a search.
@@ -524,18 +531,37 @@ export function registerChatApiRoutes(
         const ownTools = own.find((m) => modelCallsTools(m));
         // Your own machine answers Auto for free; when its model can't call tools it answers without the web.
         const compute: ChatCompute | null = body.compute.target === "auto" ? (ownTools ? { target: "mine", model: ownTools } : own.length ? null : body.compute) : modelCallsTools(body.compute.model ?? "") ? body.compute : null;
+        Object.assign(webDecision, {
+          ownModels: own.slice(0, 10),
+          ownTools: ownTools ?? null,
+          compute: compute ? { target: compute.target, model: "model" in compute ? compute.model : null } : null,
+          computeNullReason: compute ? null : body.compute.target === "auto" ? "own_models_cannot_call_tools" : "model_cannot_call_tools",
+        });
         if (compute) {
           const accountId = accountIdFor(user.userId);
           const transport = portalCoordinatorTransport({ PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }, accountId);
           const avail = await webAvailability((path, payload, signal) => transport("POST", path, { ...payload, accountId }, signal), accountId);
-          if (avail.offer) return await runWebChat(req, reply, out, user.userId, body.conversationId, compute, messages);
+          Object.assign(webDecision, { availOffer: avail.offer, availReason: avail.reason });
+          if (avail.offer) {
+            decided("web_loop");
+            return await runWebChat(req, reply, out, user.userId, body.conversationId, compute, messages);
+          }
           // No cSats (or the hour's searches used): the tools aren't offered and the chat answers
           // without the web; the page says so once, quietly.
           if (avail.reason === "needs_csats" || avail.reason === "rate_limited") out.send({ webOff: { reason: avail.reason, message: avail.message ?? "" } });
         }
+      } else if (webDecision) {
+        webDecision.computeNullReason = "no_compute_in_request";
       }
-      if (body.compute?.target === "auto") return await runAuto(req, reply, out, user.userId, body.conversationId, body.compute, messages, chatPayload);
-      if (body.compute) return await runOnNetwork(req, reply, out, user.userId, body.conversationId, body.compute, messages);
+      if (body.compute?.target === "auto") {
+        decided("runAuto");
+        return await runAuto(req, reply, out, user.userId, body.conversationId, body.compute, messages, chatPayload);
+      }
+      if (body.compute) {
+        decided("runOnNetwork");
+        return await runOnNetwork(req, reply, out, user.userId, body.conversationId, body.compute, messages);
+      }
+      decided("default_chat");
       return await runDefaultChat(req, reply, out, body.conversationId, chatPayload);
     } catch (err) {
       // Every path ends with a terminator: an unexpected error is an error event and [DONE], never
@@ -596,17 +622,40 @@ export function registerChatApiRoutes(
       }
     };
     const web = new WebToolSession({ call, emit: sendEvent, signal: ac.signal });
+    // What the agent loop did (portal_web_loop): model turns, the tools it called (names only),
+    // whether the model ever answered with a tool call, and for the first model call whether the
+    // tool definitions went with it and how it ended.
+    const loop = { turns: 0, toolCalls: [] as string[], modelReturnedToolCall: false, first: null as null | { toolsSent: number; toolCallsReturned: number; finishReason: string | null } };
+    const chatFn = backendChat(
+      async function* (r, signal) {
+        loop.turns++;
+        let finishReason: string | null = null;
+        let returned = 0;
+        for await (const p of backend(r, signal)) {
+          if ("toolCalls" in p) returned += p.toolCalls.length;
+          if ("done" in p) finishReason = returned ? "tool_calls" : (p as { stopReason?: string }).stopReason ?? null;
+          yield p;
+        }
+        if (returned) loop.modelReturnedToolCall = true;
+        loop.first ??= { toolsSent: r.tools?.length ?? 0, toolCallsReturned: returned, finishReason };
+      },
+      (cSats) => sendEvent({ type: "usage", cSats, where: computeLabel(compute) }),
+      ac.signal,
+    );
     out.status("Thinking...");
     try {
       await runAgentLoop({
-        chat: backendChat(backend, (cSats) => sendEvent({ type: "usage", cSats, where: computeLabel(compute) }), ac.signal),
+        chat: chatFn,
         systemPrompt: () => WEB_SYSTEM_NOTE,
         messages,
         sendEvent,
         isCancelled: () => ac.signal.aborted,
         tools: webToolSchemas(),
         runTool: makeToolRunner({
-          execute: (tool, args) => (isWebTool(tool) ? web.run(tool, args) : Promise.resolve({ error: `${tool} isn't available in this chat.` })),
+          execute: (tool, args) => {
+            if (loop.toolCalls.length < 20) loop.toolCalls.push(String(tool).slice(0, 40));
+            return isWebTool(tool) ? web.run(tool, args) : Promise.resolve({ error: `${tool} isn't available in this chat.` });
+          },
           sendEvent,
           waitForApproval: async () => false,
           captureBeforeWrite: () => null,
@@ -618,6 +667,7 @@ export function registerChatApiRoutes(
       req.log.warn({ err }, "portal_web_chat_failed");
       failedText ||= (err as Error).message || "stream_interrupted";
     }
+    req.log.info({ userId, compute: { target: compute.target, model: "model" in compute ? compute.model : null }, ...loop, failed: Boolean(failedText), aborted: ac.signal.aborted }, "portal_web_loop");
     if (ac.signal.aborted) return reply;
     const usage = web.usage();
     const sources = citedSources(fullContent, usage.sources);
