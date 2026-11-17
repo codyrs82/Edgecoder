@@ -650,6 +650,12 @@ The schemas are collected in `src/config/index.ts`. `tests/common/env-docs.test.
 | `WALLET_SEND_MFA_TTL_MS` | integer ms, 1000 to 31 days | `600000` |
 | `PORTAL_WITHDRAW_DAILY_CAP_SATS` | integer sats ≥ 0 (0 = no portal cap) | `500000` |
 | `MOBILE_OAUTH_TOKEN_TTL_MS` | integer ms, 1000 to 31 days | `300000` |
+| `PAYOUT_DEST_COOLDOWN_HOURS` | number of hours, 0 to 720: after a payout destination change is confirmed by email, how long before payouts go to it. Meanwhile the old destination keeps its automatic payouts, manual withdrawals are refused, and the owner is emailed a cancel link (docs/security/account-security.md) | `24` |
+| `PAYOUT_DEST_FIRST_COOLDOWN_HOURS` | number of hours, 0 to 720: the same for an account's first payout destination | `1` |
+| `PAYOUT_DEST_CONFIRM_TTL_MINUTES` | integer minutes, 5 to 1440: how long the emailed payout destination confirmation link (and code) works | `30` |
+| `ADMIN_2FA_GRACE_DAYS` | number of days, 0 to 365: a system admin without two-factor authentication can make admin changes for this long (counted from the first time the portal sees them), then gets `two_factor_enrollment_required` until they enable it | `7` |
+| `TWO_FACTOR_STEP_UP_MINUTES` | integer minutes, 1 to 60: after a second factor is given, protected actions (withdrawals, payout destination changes, API keys, admin changes) in that session need no new code for this long | `10` |
+| `PORTAL_2FA_KEY` | 32 bytes as 64 hex characters or base64: encrypts TOTP secrets at rest (AES-256-GCM). Unset: a key derived from `OAUTH_STATE_SECRET`; with neither, TOTP cannot be enrolled. Setting it later keeps existing secrets readable while `OAUTH_STATE_SECRET` is unchanged | unset |
 | `PORTAL_PURGE_UNVERIFIED_AFTER_DAYS` | integer days, 1 to 3650: once a day, delete unverified email accounts older than this with no enrolled machines, no API keys, no activity in that window, and no cSats balance or pending payout on any coordinator (each coordinator is asked; one that does not answer skips the account). Agent-key accounts and admins are never purged. Each deletion is recorded in the admin audit log | unset (off) |
 | `OAUTH_MICROSOFT_PROMPT` | string | `select_account` |
 | `PASSKEY_ALLOWED_ORIGINS` | string | unset |

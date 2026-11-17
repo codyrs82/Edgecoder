@@ -4,6 +4,8 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { registerPayoutCallbackNotifyRoute, registerPayoutCallbackRoutes, type CallbackChange, type PayoutCallbackClient } from "../../src/portal/routes/payout-callback.js";
 import { registerPayoutDestinationRoutes, type PayoutDestinationStore } from "../../src/portal/routes/payout-destination.js";
 import { rateLimitFor, WALLET_RATE_LIMIT } from "../../src/portal/security.js";
+import { createSecondFactorGate } from "../../src/portal/routes/account-security.js";
+import { testSecurity } from "./fixtures/account-security-memory.js";
 import type { PayoutDestinationChallenge, PayoutDestinationRecord } from "../../src/portal/store.js";
 
 const sha256Hex = (v: string) => createHash("sha256").update(v).digest("hex");
@@ -77,8 +79,11 @@ describe("payment server change: Plan & usage state and the emailed-code confirm
     let n = 200000;
     const common = { store: mem.store, getCurrentUser: async () => user, codeTtlMs: 600_000, emailConfigured: true, generateSixDigitCode: () => String(n++), sha256Hex, secureCompare };
     registerPayoutCallbackRoutes(app, { ...common, client: coord.client, sendCode: async (i) => { codes.push(i); } });
+    const security = testSecurity().security;
     registerPayoutDestinationRoutes(app, {
-      ...common, network: "signet", sendCode: async () => undefined,
+      store: mem.store, getCurrentUser: async () => user, emailConfigured: true, network: "signet",
+      security, secondFactor: createSecondFactorGate(security, { listPasskeysByUserId: async () => [] }),
+      sendConfirm: async () => undefined, sendAdded: async () => undefined,
       register: async () => ({ controlPlane: "ok", coordinator: "ok" }),
       callbackChange: (a, d) => coord.client.pendingChange(a, d)
     });

@@ -402,6 +402,55 @@ export class PortalStore {
     );
   }
 
+  /**
+   * Keyed JSON rows in portal_onboarding (no schema change): account security state
+   * (src/portal/account-security.ts) lives under `acctsec:<userId>`. updated_at_ms is the row's
+   * version for an optimistic compare-and-set, so two concurrent writers cannot both win.
+   */
+  async getKeyedRow(key: string): Promise<{ state: unknown; version: number } | null> {
+    const r = await this.pool.query(`SELECT state_json, updated_at_ms FROM portal_onboarding WHERE user_id = $1`, [key]);
+    const row = r.rows[0];
+    if (!row || typeof row.state_json !== "string") return null;
+    try {
+      return { state: JSON.parse(row.state_json), version: Number(row.updated_at_ms) };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Writes the row only if its version is still `expectedVersion` (null: only if absent). Returns the new version, or null on a conflict. */
+  async compareAndSetKeyedRow(key: string, expectedVersion: number | null, state: unknown, nowMs: number): Promise<number | null> {
+    const version = expectedVersion === null ? nowMs : Math.max(nowMs, expectedVersion + 1);
+    const r =
+      expectedVersion === null
+        ? await this.pool.query(
+            `INSERT INTO portal_onboarding (user_id, state_json, updated_at_ms) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO NOTHING RETURNING updated_at_ms`,
+            [key, JSON.stringify(state), version]
+          )
+        : await this.pool.query(
+            `UPDATE portal_onboarding SET state_json = $2, updated_at_ms = $3 WHERE user_id = $1 AND updated_at_ms = $4 RETURNING updated_at_ms`,
+            [key, JSON.stringify(state), version, expectedVersion]
+          );
+    return r.rows[0] ? Number(r.rows[0].updated_at_ms) : null;
+  }
+
+  /** Keyed rows whose key starts with `prefix` (the sweeps that activate payout destinations and list locked accounts). */
+  async listKeyedRows(prefix: string, limit = 5000): Promise<Array<{ key: string; state: unknown; version: number }>> {
+    const r = await this.pool.query(
+      `SELECT user_id, state_json, updated_at_ms FROM portal_onboarding WHERE user_id LIKE $1 ORDER BY updated_at_ms DESC LIMIT $2`,
+      [`${prefix.replace(/[\\%_]/g, (c) => `\\${c}`)}%`, limit]
+    );
+    const out: Array<{ key: string; state: unknown; version: number }> = [];
+    for (const row of r.rows) {
+      try {
+        out.push({ key: row.user_id, state: JSON.parse(row.state_json), version: Number(row.updated_at_ms) });
+      } catch {
+        // skip a row that is not JSON
+      }
+    }
+    return out;
+  }
+
   /** Whether a host request was sent from this email (any status). */
   async hasHostRequestFrom(email: string): Promise<boolean> {
     const r = await this.pool.query(`SELECT 1 FROM portal_host_requests WHERE lower(email) = lower($1) LIMIT 1`, [email]);

@@ -8,6 +8,7 @@ import { z } from "zod";
 import { decodeBolt11 } from "../../economy/bolt11.js";
 import { moduleLogger } from "../../common/logger.js";
 import type { WithdrawStepUpDeps } from "./payouts.js";
+import { maskDestination } from "../account-security.js";
 
 const logger = moduleLogger("portal-revenue");
 
@@ -120,6 +121,15 @@ export function registerRevenueRoutes(app: FastifyInstance, deps: RevenueRoutesD
     }
     const r = await coordinator("POST", "/admin/revenue/withdraw", { bolt11, actor: user.email });
     req.log.info({ userId: user.userId, amountMsat, status: r.status }, "revenue_withdraw_confirmed");
+    // A receipt to the admin who withdrew, with the lock link (2FA for this route: the admin hook in routes/account-security.ts).
+    if (r.status < 300 && step.security && step.sendReceipt) {
+      const security = step.security;
+      const sendReceipt = step.sendReceipt;
+      await (async () => {
+        const lockToken = await security.issueLockToken(user.userId);
+        await sendReceipt({ email: user.email, amountSats: Math.ceil(amountMsat / 1000), destination: maskDestination(bolt11), atMs: Date.now(), lockToken, status: "sent (EdgeCoder revenue)" });
+      })().catch((error) => logger.warn({ error: String(error) }, "revenue_withdrawal_receipt_failed"));
+    }
     return reply.code(r.status).type("application/json").send(r.text || "{}");
   });
 }

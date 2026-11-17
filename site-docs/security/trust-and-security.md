@@ -178,3 +178,10 @@ What it does **not** cover:
 - [Security Baseline](https://github.com/codyrs82/Edgecoder/blob/main/docs/security-baseline.md)
 - [Public Mesh Operations](https://github.com/codyrs82/Edgecoder/blob/main/docs/public-mesh-operations.md)
 - [Developer Guide Security Notes](https://github.com/codyrs82/Edgecoder/blob/main/README.md#developer-guide)
+
+## Your account and your payouts
+
+- **Two-factor authentication** (Settings, Profile): an authenticator app with recovery codes, or a passkey. With it on, withdrawals, payout address changes, new API keys and admin changes ask for it. Admins must turn it on.
+- **New payout addresses** are confirmed from your email, then wait 24 hours (1 hour for your first address) before payouts go there. You get an email with a link to cancel, and withdrawals pause meanwhile.
+- **Every withdrawal emails you a receipt** with a "not you? lock your account" link. Locking pauses payouts and signs out every session; support unlocks it after checking with you.
+

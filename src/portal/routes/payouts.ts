@@ -9,6 +9,8 @@ import { decodeBolt11 } from "../../economy/bolt11.js";
 import type { MarketRoutesDeps } from "../server.js";
 import type { WithdrawChallenge } from "../store.js";
 import { moduleLogger } from "../../common/logger.js";
+import { maskDestination, type AccountSecurity } from "../account-security.js";
+import type { SecondFactorGate } from "./account-security.js";
 
 const logger = moduleLogger("portal-payouts");
 
@@ -36,13 +38,48 @@ export interface WithdrawStepUpDeps {
   generateSixDigitCode: () => string;
   sha256Hex: (v: string) => string;
   secureCompare: (a: string, b: string) => boolean;
+  /** Lock and payout-destination cooling-off (src/portal/account-security.ts); also issues receipt lock links. */
+  security?: AccountSecurity | null;
+  /** With 2FA on, both withdraw steps need the second factor. */
+  secondFactor?: SecondFactorGate;
+  /** The receipt sent after every withdrawal the coordinator accepted. */
+  sendReceipt?: (input: { email: string; amountSats: number; destination: string; atMs: number; lockToken: string; status: string }) => Promise<unknown>;
 }
 
 const withdrawBody = z.object({
   bolt11: z.string().min(20).max(4096),
   challengeId: z.string().min(10).max(64).optional(),
-  emailCode: z.string().min(6).max(8).optional()
+  emailCode: z.string().min(6).max(8).optional(),
+  twoFactorCode: z.string().max(32).optional()
 });
+
+/**
+ * Refuses a withdrawal while the account is locked, or while a confirmed payout destination change
+ * is cooling off: an invoice cannot be tied to a destination, so every manual withdrawal waits for
+ * the new destination's cooling-off (the old destination keeps its automatic payouts). Returns the
+ * reply body, or null to go ahead.
+ */
+export async function withdrawalHold(security: AccountSecurity | null | undefined, userId: string): Promise<{ status: number; body: Record<string, unknown> } | null> {
+  if (!security) return null;
+  const state = await security.load(userId);
+  if (state.lock) {
+    return { status: 423, body: { ok: false, code: "account_locked", detail: "This account is locked: payouts are paused. Contact support to unlock it." } };
+  }
+  const cooling = security.coolingOff(state);
+  if (cooling) {
+    const at = new Date(cooling.activatesAtMs!).toUTCString();
+    return {
+      status: 423,
+      body: {
+        ok: false,
+        code: "payout_destination_cooling_off",
+        unlocksAtMs: cooling.activatesAtMs,
+        detail: `A new payout address was added, so withdrawals are paused until ${at}. If you did not add it, cancel it from the link in the email we sent.`
+      }
+    };
+  }
+  return null;
+}
 
 /**
  * Sats payouts for the logged-in user (docs/economy-math.md "Payouts"): balance and history,
@@ -102,6 +139,12 @@ export function registerPayoutRoutes(
     const parsed = withdrawBody.safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: "invalid_request", detail: "Send { bolt11 } as JSON." });
     const body = parsed.data;
+    const hold = await withdrawalHold(step.security, user.userId);
+    if (hold) return reply.code(hold.status).send(hold.body);
+    if (step.secondFactor) {
+      const check = await step.secondFactor(req, user);
+      if (!check.ok) return reply.code(check.status).send(check.body);
+    }
     const bolt11 = body.bolt11.trim();
     let amountMsat: number | undefined;
     try {
@@ -147,6 +190,15 @@ export function registerPayoutRoutes(
     // Refused outright (not 2xx, so not the 202 "unconfirmed" either): it no longer counts against the cap.
     if ("error" in r || r.status >= 300) await store.releaseWithdrawChallenge(challenge.challengeId).catch(() => undefined);
     req.log.info({ accountId, amountMsat: amount, status: "error" in r ? r.error.status : r.status }, "payout_withdraw_confirmed");
+    if (!("error" in r) && r.status < 300 && step.security && step.sendReceipt) {
+      // The receipt, with a link that locks the account. A failure to send never fails the withdrawal.
+      const security = step.security;
+      const sendReceipt = step.sendReceipt;
+      await (async () => {
+        const lockToken = await security.issueLockToken(user.userId);
+        await sendReceipt({ email: user.email, amountSats: Math.ceil(amount / 1000), destination: maskDestination(bolt11), atMs: Date.now(), lockToken, status: r.status === 202 ? "sent, waiting for confirmation" : "sent" });
+      })().catch((error) => logger.warn({ error: String(error), accountId }, "withdrawal_receipt_failed"));
+    }
     if ("error" in r) return reply.code(r.error.status).send(r.error.body);
     reply.code(r.status).type("application/json");
     return r.text || "{}";

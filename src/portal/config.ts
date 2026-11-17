@@ -52,6 +52,19 @@ export const portalConfigSchema = z.object({
   /** Most sats one account can withdraw to invoices per rolling 24 h through the portal; 0 = no portal cap. */
   PORTAL_WITHDRAW_DAILY_CAP_SATS: envInt(500_000, { min: 0, max: 2_100_000_000_000_000 }),
   MOBILE_OAUTH_TOKEN_TTL_MS: ttl(300_000),
+  // ---- account security (src/portal/account-security.ts, docs/security/account-security.md) ----
+  /** Cooling-off after a payout destination change is confirmed, before payouts go to it. */
+  PAYOUT_DEST_COOLDOWN_HOURS: envNumber(24, { min: 0, max: 720 }),
+  /** Cooling-off for an account's first payout destination. */
+  PAYOUT_DEST_FIRST_COOLDOWN_HOURS: envNumber(1, { min: 0, max: 720 }),
+  /** How long the emailed payout destination confirmation link (and code) works. */
+  PAYOUT_DEST_CONFIRM_TTL_MINUTES: envInt(30, { min: 5, max: 1440 }),
+  /** System admins without 2FA can make admin changes for this many days (from first seen), then must enable it. */
+  ADMIN_2FA_GRACE_DAYS: envNumber(7, { min: 0, max: 365 }),
+  /** After a second factor is given, protected actions in that session need no new code for this long. */
+  TWO_FACTOR_STEP_UP_MINUTES: envInt(10, { min: 1, max: 60 }),
+  /** 32 bytes (64 hex or base64): encrypts TOTP secrets at rest. Unset: a key derived from OAUTH_STATE_SECRET. */
+  PORTAL_2FA_KEY: optStr,
   /**
    * Daily deletion of unverified accounts older than this many days with no machines, API keys,
    * balance, pending payouts or activity (src/portal/account-admin.ts). Unset: off.

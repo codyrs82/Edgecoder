@@ -261,6 +261,14 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       </div>
     </div>
     <div class="card">
+      <h3 class="u-mt-0">Locked accounts</h3>
+      <p class="muted">Locked from the link in a withdrawal receipt: payouts are paused and sessions were signed out. Unlock after checking with the owner (it registers their payout address again).</p>
+      <div class="table-scroll wide"><table>
+        <thead><tr><th>Email</th><th>Locked</th><th>By</th><th></th></tr></thead>
+        <tbody id="lockedBody"><tr><td colspan="4" class="muted">Loading…</td></tr></tbody>
+      </table></div>
+    </div>
+    <div class="card">
       <h3 class="u-mt-0">Clean up abandoned sign-ups</h3>
       <p class="muted">Lists unverified accounts older than N days with no machines, API keys, recent activity, balance or pending payout. Nothing is deleted until you confirm the list.</p>
       <div class="row">
@@ -670,6 +678,24 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       if (!res.ok) throw new Error(payload ? String(payload.error || res.status) + (payload.detail ? ": " + payload.detail : "") : String(res.status));
       return payload;
     }
+    /* ── Locked accounts (routes/account-security.ts) ── */
+    async function loadLockedAccounts() {
+      const body = document.getElementById("lockedBody");
+      try {
+        const data = await api("/portal/api/admin/security/locked", { method: "GET", headers: {} });
+        const rows = (data.accounts || []).map((a) => "<tr><td>" + escapeHtml(a.email || a.userId) + "</td><td>" + escapeHtml(new Date(a.lockedAtMs).toLocaleString()) + "</td><td>" + escapeHtml(a.source === "admin" ? "Admin" : "Owner (receipt link)") + "</td><td><button data-unlock='" + escapeHtml(a.userId) + "'>Unlock</button></td></tr>");
+        body.innerHTML = rows.length ? rows.join("") : "<tr><td colspan='4' class='muted'>No locked accounts.</td></tr>";
+      } catch (err) {
+        body.innerHTML = "<tr><td colspan='4' class='muted'>Could not load: " + escapeHtml(String(err.message || err)) + "</td></tr>";
+      }
+    }
+    document.getElementById("lockedBody").addEventListener("click", async (e) => {
+      const uid = e.target && e.target.getAttribute && e.target.getAttribute("data-unlock");
+      if (!uid || !window.confirm("Unlock this account? Payouts resume to its saved address.")) return;
+      try { await apiDetail("/portal/api/admin/security/" + encodeURIComponent(uid) + "/unlock", { method: "POST", body: "{}" }); showToast("Unlocked."); }
+      catch (err) { showToast("Unlock failed: " + String(err.message || err), true); }
+      loadLockedAccounts();
+    });
     function userStatusBadge(u) { return statusBadge(u.labelText || u.label, STATUS_TONE[u.label] || "neutral"); }
     async function loadUserManagement() {
       try {
@@ -820,6 +846,7 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       document.getElementById("userMgmtSection").classList.remove("hidden");
       document.getElementById("adminNodeApprovalSection").classList.remove("hidden");
       loadUserManagement();
+      loadLockedAccounts();
       await refreshApprovalsSafe();
       setInterval(refreshApprovalsSafe, 15000);
     })().catch((err) => {

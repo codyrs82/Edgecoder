@@ -83,7 +83,7 @@ function seed(extra: (tables: Map<string, Row[]>) => void = () => undefined) {
       else if (step.table === "portal_conversations") add(step.table, { user_id: uid, conversation_id: `conv-${uid}` });
       else if (step.table === "portal_node_enrollments") continue; // a machine would block the delete
       else if (step.by === "email") add(step.table, { [step.column]: email.toUpperCase(), user_id: null });
-      else add(step.table, { [step.column]: uid });
+      else add(step.table, { [step.column]: `${step.keyPrefix ?? ""}${uid}` });
     }
   }
   add("portal_node_enrollments", { owner_user_id: "u-keep", node_id: "n1" });
@@ -104,7 +104,7 @@ const input = (over: Partial<Parameters<PortalStore["deleteUserAccount"]>[0]> = 
 });
 
 const mentions = (r: Row, uid: string, email: string) =>
-  Object.values(r).some((v) => v === uid || v === `pk-${uid}` || v === `conv-${uid}` || (typeof v === "string" && v.toLowerCase() === email.toLowerCase()));
+  Object.values(r).some((v) => v === uid || v === `pk-${uid}` || v === `acctsec:${uid}` || v === `conv-${uid}` || (typeof v === "string" && v.toLowerCase() === email.toLowerCase()));
 
 describe("PortalStore.deleteUserAccount", () => {
   it("removes the account's rows from every table, leaves other accounts alone, and writes tombstone and audit", async () => {

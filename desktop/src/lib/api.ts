@@ -875,11 +875,35 @@ export interface PayoutDestinationView {
   registration?: { controlPlane: string; coordinator: string };
   /** The wallet's payment server changed; payouts are held until confirmed in the portal with an email code. */
   callbackChange?: { previousOrigin: string; newOrigin: string; changedAtMs: number | null } | null;
+  /** A requested change: waiting for the emailed link/code, or confirmed and cooling off until activatesAtMs. */
+  pendingDestination?: { kind: string; destination: string; first: boolean; confirmed: boolean; confirmExpiresAtMs: number; activatesAtMs: number | null } | null;
+  cooldownHours?: number;
+  firstCooldownHours?: number;
+  /** The account is locked (receipt link): payouts and destination changes are paused. */
+  locked?: boolean;
+}
+
+/**
+ * The portal asked for a second factor (two-factor authentication is on for the account). With an
+ * authenticator app, the app asks for the code and sends it again; with only a passkey, the action
+ * has to be finished on the web (`webOnly`).
+ */
+export type TwoFactorRequired = { status: "two_factor_required"; methods: string[]; webOnly: boolean; detail: string; invalidCode: boolean };
+
+/** The header the portal reads an inline second-factor code from (routes/account-security.ts). */
+export const TWO_FACTOR_HEADER = "x-edgecoder-2fa-code";
+
+function twoFactorResult(res: Response, body: Record<string, unknown>): TwoFactorRequired | null {
+  const error = String(body.error ?? "");
+  if (!((res.status === 403 && error === "two_factor_required") || (res.status === 401 && error === "two_factor_code_invalid"))) return null;
+  const methods = Array.isArray(body.methods) ? body.methods.map(String) : [];
+  return { status: "two_factor_required", methods, webOnly: !methods.includes("totp"), detail: String(body.detail ?? "Enter the code from your authenticator app."), invalidCode: error === "two_factor_code_invalid" };
 }
 
 export type PayoutDestinationSaveResult =
   | { status: "saved"; view: PayoutDestinationView }
   | { status: "verification_required"; challengeId: string; detail: string }
+  | TwoFactorRequired
   | { status: "error"; error: string; detail: string };
 
 export interface WalletSendRequest {
@@ -901,21 +925,29 @@ export async function getPayoutDestination(): Promise<PayoutDestinationView> {
   return res.json();
 }
 
-/** Save (or change) the payout destination. A change returns verification_required until the emailed code is sent back. */
-export async function savePayoutDestination(input: { destination: string; challengeId?: string; emailCode?: string }): Promise<PayoutDestinationSaveResult> {
+/**
+ * Save (or change) the payout destination. It returns verification_required until the change is
+ * confirmed from the email (its link, or its code sent back here); a confirmed change then waits out
+ * the cooling-off (view.pendingDestination). With 2FA on, it may first return two_factor_required:
+ * call again with `twoFactorCode`.
+ */
+export async function savePayoutDestination(input: { destination: string; challengeId?: string; emailCode?: string; twoFactorCode?: string }): Promise<PayoutDestinationSaveResult> {
   let res: Response;
+  const { twoFactorCode, ...payload } = input;
   try {
     res = await fetch(`${portalBase()}/wallet/payout-destination`, {
       method: "PUT",
-      headers: { "content-type": "application/json", ...authHeaders() },
+      headers: { "content-type": "application/json", ...authHeaders(), ...(twoFactorCode ? { [TWO_FACTOR_HEADER]: twoFactorCode } : {}) },
       credentials: "include",
-      body: JSON.stringify(input),
+      body: JSON.stringify(payload),
     });
   } catch {
     return { status: "error", error: "network", detail: "Could not reach EdgeCoder. Check your connection and try again." };
   }
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
   if (res.status === 200) return { status: "saved", view: body as unknown as PayoutDestinationView };
+  const tf = twoFactorResult(res, body);
+  if (tf) return tf;
   if (res.status === 202 && body.verificationRequired) {
     return { status: "verification_required", challengeId: String(body.challengeId), detail: String(body.detail ?? "We emailed you a code.") };
   }
@@ -1092,27 +1124,40 @@ export async function getPaymentPaths(): Promise<PaymentPaths> {
 export type WithdrawResult =
   | { status: "paid"; amountMsat: number }
   | { status: "verification_required"; challengeId: string; amountMsat: number; detail: string }
-  | { status: "error"; code: string; detail: string };
+  | TwoFactorRequired
+  | { status: "error"; code: string; detail: string; unlocksAtMs?: number };
 
-/** Withdraw to a BOLT11 invoice through the portal (an emailed code confirms it: first call returns verification_required). */
-export async function withdrawToInvoice(input: { bolt11: string; challengeId?: string; emailCode?: string }): Promise<WithdrawResult> {
+/**
+ * Withdraw to a BOLT11 invoice through the portal (an emailed code confirms it: first call returns
+ * verification_required). With 2FA on, either call may return two_factor_required: call again with
+ * `twoFactorCode`. While a new payout address cools off, it returns code payout_destination_cooling_off.
+ */
+export async function withdrawToInvoice(input: { bolt11: string; challengeId?: string; emailCode?: string; twoFactorCode?: string }): Promise<WithdrawResult> {
   let res: Response;
+  const { twoFactorCode, ...payload } = input;
   try {
     res = await fetch(`${portalBase()}/wallet/payouts/withdraw`, {
       method: "POST",
-      headers: { "content-type": "application/json", ...authHeaders() },
+      headers: { "content-type": "application/json", ...authHeaders(), ...(twoFactorCode ? { [TWO_FACTOR_HEADER]: twoFactorCode } : {}) },
       credentials: "include",
-      body: JSON.stringify(input),
+      body: JSON.stringify(payload),
     });
   } catch {
     return { status: "error", code: "network", detail: "Could not reach EdgeCoder. Check your connection and try again." };
   }
   const body = (await res.json().catch(() => ({}))) as Record<string, any>;
+  const tf = twoFactorResult(res, body);
+  if (tf) return tf;
   if (res.status === 202 && body.verificationRequired) {
     return { status: "verification_required", challengeId: String(body.challengeId), amountMsat: Number(body.amountMsat ?? 0), detail: String(body.detail ?? "We emailed you a code.") };
   }
   if (res.ok && body.ok) return { status: "paid", amountMsat: Number(body.payout?.amountMsat ?? 0) };
-  return { status: "error", code: String(body.code ?? body.error ?? res.status), detail: String(body.detail ?? `Withdrawal failed (${body.code ?? body.error ?? res.status}).`) };
+  return {
+    status: "error",
+    code: String(body.code ?? body.error ?? res.status),
+    detail: String(body.detail ?? `Withdrawal failed (${body.code ?? body.error ?? res.status}).`),
+    ...(typeof body.unlocksAtMs === "number" ? { unlocksAtMs: body.unlocksAtMs } : {}),
+  };
 }
 
 export async function getWalletSendRequests(): Promise<WalletSendRequest[]> {

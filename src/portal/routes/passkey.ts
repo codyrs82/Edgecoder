@@ -8,13 +8,16 @@ import { z } from "zod";
 import type { PasskeyRoutesDeps } from "../server.js";
 
 /** #16: Passkey registration and login (/auth/passkey/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
-export function registerPasskeyRoutes(app: FastifyInstance, { PASSKEY_ALLOWED_ORIGINS, PASSKEY_CHALLENGE_TTL_MS, PASSKEY_RP_ID, PASSKEY_RP_NAME, base64UrlFromBuffer, createSessionForUser, deriveCredentialIdFromVerifyBody, generateAuthenticationOptions, generateRegistrationOptions, getCurrentUser, normalizeEmail, normalizePasskeyResponsePayload, store, uint8ArrayFromBase64Url, verifyAuthenticationResponse, verifyRegistrationResponse }: PasskeyRoutesDeps): void {
+export function registerPasskeyRoutes(app: FastifyInstance, { PASSKEY_ALLOWED_ORIGINS, PASSKEY_CHALLENGE_TTL_MS, PASSKEY_RP_ID, PASSKEY_RP_NAME, base64UrlFromBuffer, createSessionForUser, deriveCredentialIdFromVerifyBody, generateAuthenticationOptions, generateRegistrationOptions, getCurrentUser, normalizeEmail, normalizePasskeyResponsePayload, secondFactor, store, uint8ArrayFromBase64Url, verifyAuthenticationResponse, verifyRegistrationResponse }: PasskeyRoutesDeps): void {
   app.post("/auth/passkey/register/options", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const user = await getCurrentUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
     // An unverified account holds no long-lived credentials (routes/auth.ts, verify-email).
     if (user.emailVerified === false) return reply.code(403).send({ error: "email_not_verified" });
+    // With 2FA on, adding a passkey (itself a second factor) needs the existing one.
+    const check = secondFactor ? await secondFactor(req as any, user) : null;
+    if (check && !check.ok) return reply.code(check.status).send(check.body);
     const existing = await store.listPasskeysByUserId(user.userId);
     const webauthnUserId = createHash("sha256").update(user.userId).digest().subarray(0, 16);
     const options = await generateRegistrationOptions({

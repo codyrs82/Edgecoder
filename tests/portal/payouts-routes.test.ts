@@ -5,6 +5,9 @@ import { registerPayoutRoutes, WITHDRAW_CODES_PER_HOUR, type WithdrawStepUpDeps,
 import { rateLimitFor, registerPortalSecurity, WALLET_RATE_LIMIT } from "../../src/portal/security.js";
 import type { WithdrawChallenge } from "../../src/portal/store.js";
 import { encodeTestBolt11 } from "../economy/helpers/bolt11-encode.js";
+import { createSecondFactorGate } from "../../src/portal/routes/account-security.js";
+import { base32Decode, hotp, totpStep } from "../../src/portal/totp.js";
+import { HOUR, testSecurity } from "./fixtures/account-security-memory.js";
 
 const sha256Hex = (v: string) => createHash("sha256").update(v).digest("hex");
 const secureCompare = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -231,5 +234,103 @@ describe("portal payout routes", () => {
     expect(codes.slice(0, WALLET_RATE_LIMIT.max).every((c) => c === 202)).toBe(true);
     expect(codes[WALLET_RATE_LIMIT.max]).toBe(429);
     await limited.close();
+  });
+
+  describe("account security (src/portal/account-security.ts)", () => {
+    const receipts: Array<{ email: string; amountSats: number; destination: string; atMs: number; lockToken: string; status: string }> = [];
+    let t: ReturnType<typeof testSecurity>;
+    let passkeys = 0;
+    let app: FastifyInstance;
+    beforeEach(async () => {
+      receipts.length = 0;
+      passkeys = 0;
+      t = testSecurity();
+      app = await build({
+        security: t.security,
+        secondFactor: createSecondFactorGate(t.security, { listPasskeysByUserId: async () => Array.from({ length: passkeys }, () => ({ credentialId: "c" })) }),
+        sendReceipt: async (i) => void receipts.push(i)
+      });
+    });
+    const w = (payload: Record<string, unknown>, headers: Record<string, string> = {}) =>
+      app.inject({ method: "POST", url: "/wallet/payouts/withdraw", payload, headers: { cookie: "edgecoder_portal_session=s1", ...headers } });
+
+    it("every withdrawal sends a receipt: amount, masked destination, time and a lock link", async () => {
+      const bolt11 = invoice(2_000_000);
+      const { challengeId } = (await w({ bolt11 })).json();
+      expect(receipts).toHaveLength(0);
+      expect((await w({ bolt11, challengeId, emailCode: "100000" })).statusCode).toBe(200);
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]).toMatchObject({ email: "u@example.test", amountSats: 2000, status: "sent" });
+      expect(receipts[0].destination).toContain("…");
+      expect(receipts[0].destination.length).toBeLessThan(20);
+      expect(bolt11).not.toBe(receipts[0].destination);
+      expect(typeof receipts[0].atMs).toBe("number");
+      // The lock link in it locks the account.
+      expect(await t.security.lockByToken(receipts[0].lockToken)).toBe("u1");
+    });
+
+    it("no receipt when the coordinator refuses the payout", async () => {
+      coordinatorStatus = 400;
+      const bolt11 = invoice(2_000_000);
+      const { challengeId } = (await w({ bolt11 })).json();
+      await w({ bolt11, challengeId, emailCode: "100000" });
+      expect(receipts).toHaveLength(0);
+    });
+
+    it("refuses withdrawals while a new payout destination cools off, saying when they unlock", async () => {
+      const r = await t.security.requestDestination("u1", { kind: "lightning_address", destination: "new@getalby.com", network: "signet", first: false });
+      // An unconfirmed request does not hold withdrawals (it may never be confirmed).
+      expect((await w({ bolt11: invoice(1_000) })).statusCode).toBe(202);
+      await t.security.confirmDestinationByToken(r.token);
+      const held = await w({ bolt11: invoice(1_000) });
+      expect(held.statusCode).toBe(423);
+      expect(held.json()).toMatchObject({ ok: false, code: "payout_destination_cooling_off", unlocksAtMs: t.clock.now + 24 * HOUR });
+      expect(held.json().detail).toMatch(/withdrawals are paused until/);
+      t.clock.now += 25 * HOUR;
+      expect((await w({ bolt11: invoice(1_000) })).statusCode).toBe(202);
+    });
+
+    it("refuses withdrawals from a locked account (both steps)", async () => {
+      const bolt11 = invoice(2_000_000);
+      const { challengeId } = (await w({ bolt11 })).json();
+      await t.security.lock("u1", "receipt_link");
+      const r = await w({ bolt11, challengeId, emailCode: "100000" });
+      expect(r.statusCode).toBe(423);
+      expect(r.json().code).toBe("account_locked");
+      expect(coordinatorWithdrawals()).toHaveLength(0);
+      await t.security.unlock("u1", "admin");
+      expect((await w({ bolt11: invoice(1_000) })).statusCode).toBe(202);
+    });
+
+    it("with 2FA on, both steps need the second factor; a code given once covers the session's next step", async () => {
+      const setup = await t.security.startTotp("u1", "u@example.test");
+      if (!setup.ok) throw new Error("setup");
+      const secret = base32Decode(setup.secret);
+      await t.security.enableTotp("u1", hotp(secret, totpStep(t.clock.now)));
+      t.clock.now += 60_000;
+      const bolt11 = invoice(2_000_000);
+      const refused = await w({ bolt11 });
+      expect(refused.statusCode).toBe(403);
+      expect(refused.json()).toMatchObject({ error: "two_factor_required" });
+      expect(sent).toHaveLength(0);
+      const start = await w({ bolt11, twoFactorCode: hotp(secret, totpStep(t.clock.now)) });
+      expect(start.statusCode).toBe(202);
+      // Another session has no step-up.
+      expect((await w({ bolt11, challengeId: start.json().challengeId, emailCode: "100000" }, { cookie: "edgecoder_portal_session=other" })).statusCode).toBe(403);
+      const ok = await w({ bolt11, challengeId: start.json().challengeId, emailCode: "100000" });
+      expect(ok.statusCode).toBe(200);
+      // After the step-up expires, a code is needed again.
+      t.clock.now += 11 * 60 * 1000;
+      expect((await w({ bolt11: invoice(1_000) })).statusCode).toBe(403);
+    });
+
+    it("with only a passkey, the second factor is the passkey step-up", async () => {
+      passkeys = 1;
+      const r = await w({ bolt11: invoice(1_000) });
+      expect(r.statusCode).toBe(403);
+      expect(r.json().methods).toEqual(["passkey"]);
+      await t.security.grantStepUp("u1", createHash("sha256").update("s1").digest("hex"));
+      expect((await w({ bolt11: invoice(1_000) })).statusCode).toBe(202);
+    });
   });
 });
