@@ -1,3 +1,10 @@
+// Copyright (c) 2025 EdgeCoder
+// SPDX-License-Identifier: BUSL-1.1
+
+// Shared by the desktop app (desktop/src/lib/served.ts) and the portal's web chat
+// (src/common/served.ts, shipped to the page via Function.prototype.toString, so every helper is a
+// plain function declaration). Keep both copies byte-identical (tests/common/served.test.ts).
+//
 // Where a reply's model calls ran (the coordinator's served-by, or "This computer (…)"), as the
 // footer under a reply shows it, and the per-call breakdown its tooltip shows. The terminal prints
 // the same line (src/terminal/render.ts usageLine).
@@ -28,9 +35,15 @@ export interface CallUsage {
   served?: Served;
 }
 
-const tok = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 100_000 ? 0 : 1).replace(/\.0$/, "")}k` : String(n));
-const secs = (ms: number) => (ms >= 10_000 ? `${Math.round(ms / 1000)} s` : `${(ms / 1000).toFixed(1)} s`);
-const cost = (n: number) => `${n.toLocaleString(undefined, { maximumFractionDigits: 3 })} cSats`;
+export function servedTok(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(n >= 100000 ? 0 : 1).replace(/\.0$/, "")}k` : String(n);
+}
+export function servedSecs(ms: number): string {
+  return ms >= 10000 ? `${Math.round(ms / 1000)} s` : `${(ms / 1000).toFixed(1)} s`;
+}
+export function servedCost(n: number): string {
+  return `${n.toLocaleString(undefined, { maximumFractionDigits: 3 })} cSats`;
+}
 
 /** "Datacenter GPU 2×A16", or "This computer (Apple M1 Max)". */
 export function hardwareShort(s: Served): string {
@@ -58,13 +71,15 @@ export function servedLine(calls: CallUsage[] | undefined): string | null {
   }
   const machines = new Set(withServed.map((c) => c.served!.label));
   if (machines.size > 1) bits.push(`${machines.size} machines`);
-  const sum = (k: "promptTokens" | "outputTokens" | "promptMs" | "genMs") => calls.reduce((n, c) => n + (c.served?.[k] ?? 0), 0);
-  if (sum("promptTokens")) bits.push(`read ${tok(sum("promptTokens"))} tok${sum("promptMs") ? ` in ${secs(sum("promptMs"))}` : ""}`);
-  if (sum("outputTokens")) bits.push(`wrote ${tok(sum("outputTokens"))} tok${sum("genMs") ? ` in ${secs(sum("genMs"))}` : ""}`);
+  const sum = function (k: "promptTokens" | "outputTokens" | "promptMs" | "genMs"): number {
+    return calls.reduce((n, c) => n + (c.served?.[k] ?? 0), 0);
+  };
+  if (sum("promptTokens")) bits.push(`read ${servedTok(sum("promptTokens"))} tok${sum("promptMs") ? ` in ${servedSecs(sum("promptMs"))}` : ""}`);
+  if (sum("outputTokens")) bits.push(`wrote ${servedTok(sum("outputTokens"))} tok${sum("genMs") ? ` in ${servedSecs(sum("genMs"))}` : ""}`);
   if (calls.length > 1) bits.push(`${calls.length} calls`);
   const total = calls.reduce((n, c) => n + (Number.isFinite(c.cSats) ? c.cSats : 0), 0);
   const anyFrontier = calls.some((c) => c.served?.computeClass === "frontier");
-  if (!anyFrontier || total > 0) bits.push((s.computeClass === "local" || s.own) && total === 0 ? "free" : cost(total));
+  if (!anyFrontier || total > 0) bits.push((s.computeClass === "local" || s.computeClass === "edgecoder" || s.own) && total === 0 ? "free" : servedCost(total));
   if (anyFrontier) {
     const usd = calls.reduce((n, c) => n + (c.served?.usd ?? 0), 0);
     bits.push(usd > 0 && usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`);
@@ -77,13 +92,13 @@ export function servedBreakdown(calls: CallUsage[] | undefined): string {
   return (calls ?? [])
     .map((c, i) => {
       const s = c.served;
-      if (!s) return `${i + 1}. ${c.where ?? "unknown"} · ${cost(c.cSats)}`;
+      if (!s) return `${i + 1}. ${c.where ?? "unknown"} · ${servedCost(c.cSats)}`;
       const t = [
-        s.pickupMs !== undefined ? `pickup ${secs(s.pickupMs)}` : "",
-        s.promptTokens !== undefined ? `read ${tok(s.promptTokens)} tok${s.promptMs !== undefined ? ` in ${secs(s.promptMs)}` : ""}` : "",
-        s.outputTokens !== undefined ? `wrote ${tok(s.outputTokens)} tok${s.genMs !== undefined ? ` in ${secs(s.genMs)}` : ""}` : "",
+        s.pickupMs !== undefined ? `pickup ${servedSecs(s.pickupMs)}` : "",
+        s.promptTokens !== undefined ? `read ${servedTok(s.promptTokens)} tok${s.promptMs !== undefined ? ` in ${servedSecs(s.promptMs)}` : ""}` : "",
+        s.outputTokens !== undefined ? `wrote ${servedTok(s.outputTokens)} tok${s.genMs !== undefined ? ` in ${servedSecs(s.genMs)}` : ""}` : "",
       ].filter(Boolean);
-      return `${i + 1}. ${[c.model?.replace(/^network\//, ""), s.label, s.hardware, s.gpu, [s.city, s.region].filter(Boolean).join(" ")].filter(Boolean).join(" · ")}${t.length ? ` (${t.join(", ")})` : ""} · ${cost(c.cSats)}`;
+      return `${i + 1}. ${[c.model?.replace(/^network\//, ""), s.label, s.hardware, s.gpu, [s.city, s.region].filter(Boolean).join(" ")].filter(Boolean).join(" · ")}${t.length ? ` (${t.join(", ")})` : ""} · ${servedCost(c.cSats)}`;
     })
     .join("\n");
 }

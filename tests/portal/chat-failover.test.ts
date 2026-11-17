@@ -2,6 +2,7 @@ import Fastify from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createChatCapacityDirectory } from "../../src/portal/chat-capacity.js";
 import { coordinatorUrlAllowed, coordinatorUrlPolicyFromEnv } from "../../src/portal/coordinator-url-policy.js";
+import { servedLine } from "../../src/common/served.js";
 import { CHAT_MAX_COORDINATOR_ATTEMPTS, NO_COMPUTE_BODY, registerChatApiRoutes, sseDataLines } from "../../src/portal/routes/chat.js";
 
 // #39: /portal/api/chat runs on a coordinator that has capacity and fails over once, before any token.
@@ -58,7 +59,8 @@ async function coordinator(b: Behaviour = {}) {
       setTimeout(() => reply.raw.destroy(), 20);
       return reply;
     }
-    reply.raw.end(`data: ${JSON.stringify({ content: `${name}-2` })}\n\ndata: [DONE]\n\n`);
+    const usage = { model: "qwen3.5:9b", promptTokens: 420, outputTokens: 12, promptMs: 300, genMs: 900 };
+    reply.raw.end(`data: ${JSON.stringify({ content: `${name}-2` })}\n\ndata: ${JSON.stringify({ usage })}\n\ndata: [DONE]\n\n`);
     return reply;
   });
   co.get("/inference/models", async (req) => (note(req), { models: (b.agentModels ?? []).map((model) => ({ model, agents: 1, classes: ["gpu"] })) }));
@@ -70,7 +72,11 @@ async function coordinator(b: Behaviour = {}) {
   co.post("/inference/stream", async (req, reply) => {
     note(req);
     if (b.streamStatus) return reply.code(b.streamStatus).send({ error: "agent_lost" });
-    return { chunks: [`${name}-net`], next: 1, done: true, creditsSpent: 0.5 };
+    const target = (seen.filter((x) => x.path === "/inference/submit").at(-1)?.body as { target?: string } | undefined)?.target;
+    const served = target === "mine"
+      ? { label: "your machine (mac)", own: true, computeClass: "apple", tier: null, hardware: "Apple Silicon", gpu: "Apple M5 Max", region: null, country: null, promptMs: 1100, genMs: 1200, promptTokens: 13600, outputTokens: 156 }
+      : { label: "lin-•••3f2a", own: false, computeClass: "gpu.dc", tier: "gpu.dc40", hardware: "Datacenter GPU (gpu.dc40)", gpu: "NVIDIA A100-SXM4-40GB", region: null, country: null, promptMs: 1100, genMs: 1200, promptTokens: 13600, outputTokens: 156 };
+    return { chunks: [`${name}-net`], next: 1, done: true, creditsSpent: 0.5, served };
   });
   await co.listen({ port: 0, host: "127.0.0.1" });
   servers.push(co);
@@ -114,6 +120,8 @@ function portal(
 
 /** The JSON events of an SSE answer. */
 const events = (body: string) => body.split("\n").filter((l) => l.startsWith("data: ") && l !== "data: [DONE]").map((l) => JSON.parse(l.slice(6)));
+/** The events without the reply footer's usage (checked on its own below). */
+const bare = (body: string) => events(body).map(({ usage: _usage, ...e }) => e);
 const text = (body: string) => events(body).map((e) => e.content ?? "").join("");
 const network = (model = "m") => ({ compute: { target: "network", model } });
 
@@ -186,7 +194,7 @@ describe("default chat fails over before any token", () => {
     const p = portal([us.url, eu.url]);
     const res = await p.chat();
     expect(res.statusCode).toBe(200);
-    expect(events(res.body)).toEqual([{ content: "us-1 " }, { error: "stream_interrupted" }, { done: true }]);
+    expect(bare(res.body)).toEqual([{ content: "us-1 " }, { error: "stream_interrupted" }, { done: true }]);
     expect(eu.paths("/portal/chat")).toHaveLength(0);
     expect(p.saved()).toEqual(["us-1 "]);
   });
@@ -272,7 +280,7 @@ describe("network chat picks and fails over", () => {
     const eu = await coordinator({ name: "eu", agentModels: ["m"] });
     const res = await portal([us.url, eu.url]).chat(network());
     expect(res.statusCode).toBe(200);
-    expect(events(res.body)).toEqual([{ content: "eu-net" }, { done: true, compute: "Network · m", cSatsSpent: 0.5 }]);
+    expect(bare(res.body)).toEqual([{ content: "eu-net" }, { done: true, compute: "Network · m", cSatsSpent: 0.5 }]);
     expect(us.paths("/inference/submit")).toHaveLength(0);
     expect(eu.paths("/inference/submit")[0]).toMatchObject({ token: "svc", body: { model: "m", submitterAccountId: "acct-u1" } });
     // Submit and stream of one chat go to the same coordinator.
@@ -361,7 +369,7 @@ describe("Auto (the page's default) asks the network's best fit", () => {
     const us = await coordinator({ name: "us", agentModels: ["m"], ownModels: 1 });
     const res = await portal([us.url]).chat(auto);
     expect(res.statusCode).toBe(200);
-    expect(events(res.body)).toEqual([{ content: "us-net" }, { done: true, compute: "Network · best fit", cSatsSpent: 0.5 }]);
+    expect(bare(res.body)).toEqual([{ content: "us-net" }, { done: true, compute: "Network · best fit", cSatsSpent: 0.5 }]);
     expect(us.paths("/inference/submit")[0]).toMatchObject({ body: { model: "auto", submitterAccountId: "acct-u1" } });
     expect(us.paths("/portal/chat")).toHaveLength(0);
   });
@@ -381,7 +389,7 @@ describe("Auto (the page's default) asks the network's best fit", () => {
     const us = await coordinator({ name: "us", agentModels: ["mine-m"], submit: { status: 402, error: "insufficient_credits" }, submitMine: "ok" });
     const res = await portal([us.url], { ownModels: ["mine-m"] }).chat(auto);
     expect(res.statusCode).toBe(200);
-    expect(events(res.body)).toEqual([{ content: "us-net" }, { done: true, compute: "My machines · mine-m", cSatsSpent: 0.5 }]);
+    expect(bare(res.body)).toEqual([{ content: "us-net" }, { done: true, compute: "My machines · mine-m", cSatsSpent: 0.5 }]);
     expect(us.paths("/inference/submit")).toHaveLength(1);
     expect(us.paths("/inference/submit")[0]).toMatchObject({ body: { model: "mine-m", target: "mine" } });
   });
@@ -427,7 +435,7 @@ describe("a slow first token keeps the browser's request alive (iOS Safari 'Load
     const eu = await coordinator({ name: "eu", ownModels: 1, chat: "no_models" });
     const res = await portal([us.url, eu.url], { keepalive: { graceMs: 0, intervalMs: 1_000 } }).chat();
     expect(res.statusCode).toBe(200);
-    expect(events(res.body)).toEqual([{ error: "all_coordinators_failed", triedCount: 2, httpStatus: 502 }]);
+    expect(bare(res.body)).toEqual([{ error: "all_coordinators_failed", triedCount: 2, httpStatus: 502 }]);
     expect(res.body.trimEnd().endsWith("data: [DONE]")).toBe(true);
   });
 
@@ -507,5 +515,42 @@ describe("every chat path ends with its terminator", () => {
     expect(res.statusCode).toBe(200);
     expect(text(res.body)).toBe("slow-1 slow-2");
     ends(res.body);
+  });
+});
+
+// The reply footer (src/common/served.ts servedLine): every path's done event carries what the
+// reply ran on, its tokens and timings, and its cost, as the desktop app shows them.
+describe("every chat path forwards the reply's usage", () => {
+  const done = (body: string) => events(body).find((e) => e.done === true);
+
+  it("a network compute: the serving machine's class, hardware, tokens, timings and cSats", async () => {
+    const co = await coordinator({ name: "net", agentModels: ["m"] });
+    const d = done((await portal([co.url]).chat(network())).body);
+    expect(d.usage).toMatchObject({ cSats: 0.5, calls: [{ cSats: 0.5, model: "m", served: { computeClass: "gpu.dc", gpu: "NVIDIA A100-SXM4-40GB", promptTokens: 13600, outputTokens: 156, promptMs: 1100, genMs: 1200 } }] });
+    expect(servedLine(d.usage.calls)).toBe("m · Datacenter GPU A100-SXM4-40GB · read 13.6k tok in 1.1 s · wrote 156 tok in 1.2 s · 0.5 cSats");
+  });
+
+  it("Auto on your own machine", async () => {
+    const co = await coordinator({ name: "own", agentModels: ["qwen3-coder:30b"] });
+    const d = done((await portal([co.url], { ownModels: ["qwen3-coder:30b"] }).chat({ compute: { target: "auto" } })).body);
+    expect(d.usage.calls[0]).toMatchObject({ model: "qwen3-coder:30b", served: { own: true } });
+    expect(servedLine(d.usage.calls)).toContain("your machine");
+  });
+
+  it("the coordinator's own chat, and Auto falling back to it: EdgeCoder's model, free", async () => {
+    for (const extra of [{}, { compute: { target: "auto" } }]) {
+      const co = await coordinator({ name: "eu", ownModels: 1, submit: { status: 409, error: "no_route_fits" } });
+      const d = done((await portal([co.url]).chat(extra)).body);
+      expect(d.usage).toMatchObject({ cSats: 0, where: "EdgeCoder's model", calls: [{ model: "qwen3.5:9b", served: { computeClass: "edgecoder", promptTokens: 420, outputTokens: 12 } }] });
+      expect(servedLine(d.usage.calls)).toBe("qwen3.5:9b · EdgeCoder's model · read 420 tok in 0.3 s · wrote 12 tok in 0.9 s · free");
+    }
+  });
+});
+
+describe("the coordinator's own chat reports Ollama's counts and timings", () => {
+  it("turns Ollama's final line into the usage event (nanoseconds to ms)", async () => {
+    const { ollamaDoneUsage } = await import("../../src/swarm/coordinator/routes/portal.js");
+    expect(ollamaDoneUsage("qwen3.5:9b", { prompt_eval_count: 420, eval_count: 12, prompt_eval_duration: 300_000_000, eval_duration: 900_000_000 })).toEqual({ model: "qwen3.5:9b", promptTokens: 420, outputTokens: 12, promptMs: 300, genMs: 900 });
+    expect(ollamaDoneUsage("m", {})).toEqual({ model: "m", promptTokens: undefined, outputTokens: undefined, promptMs: undefined, genMs: undefined });
   });
 });

@@ -253,11 +253,20 @@ export function registerPortalRoutes(app: CoordinatorApp): void {
       for (const line of text.split("\n")) {
         if (!line.trim()) continue;
         try {
-          const parsed = JSON.parse(line) as { message?: { content?: string }; done?: boolean };
+          const parsed = JSON.parse(line) as {
+            message?: { content?: string };
+            done?: boolean;
+            prompt_eval_count?: number;
+            eval_count?: number;
+            prompt_eval_duration?: number;
+            eval_duration?: number;
+          };
           if (parsed.message?.content) {
             reply.raw.write(`data: ${JSON.stringify({ content: parsed.message.content })}\n\n`);
           }
           if (parsed.done) {
+            // The reply footer on the web chat: model, tokens read/written and how long each took.
+            reply.raw.write(`data: ${JSON.stringify({ usage: ollamaDoneUsage(chatModel, parsed) })}\n\n`);
             reply.raw.write("data: [DONE]\n\n");
           }
         } catch {
@@ -274,4 +283,14 @@ export function registerPortalRoutes(app: CoordinatorApp): void {
     const progress = coordinatorPullTracker.getProgress();
     return reply.send(progress ?? { status: "idle" });
   });
+}
+
+/** Ollama's final chat line as the portal chat's usage event (durations are nanoseconds). */
+export function ollamaDoneUsage(
+  model: string,
+  d: { prompt_eval_count?: number; eval_count?: number; prompt_eval_duration?: number; eval_duration?: number },
+): { model: string; promptTokens?: number; outputTokens?: number; promptMs?: number; genMs?: number } {
+  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined);
+  const ms = (v: unknown) => (n(v) === undefined ? undefined : Math.round((v as number) / 1e6));
+  return { model, promptTokens: n(d.prompt_eval_count), outputTokens: n(d.eval_count), promptMs: ms(d.prompt_eval_duration), genMs: ms(d.eval_duration) };
 }

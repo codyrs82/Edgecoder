@@ -14,6 +14,7 @@ import { accountIdFor, chatComputeSchema, computeLabel, networkTargetFor, portal
 import { createChatCapacityDirectory, type ChatCapacityDirectory } from "../chat-capacity.js";
 import { clientRegionOf, type CoordinatorChoice } from "../../common/coordinator-choice.js";
 import { moduleLogger } from "../../common/logger.js";
+import type { CallUsage, Served } from "../../common/served.js";
 
 const logger = moduleLogger("portal-chat");
 
@@ -131,7 +132,64 @@ export const OUT_OF_CSATS_CODE = "out_of_csats";
 /** #39: sent when no coordinator can serve the chat. The chat page shows `error` as it is. */
 export const NO_COMPUTE_BODY = { error: "No compute is available right now. Try again in a moment.", code: "no_compute_available" } as const;
 
-type DefaultChatEvent = { content?: string; warning?: string };
+/** The coordinator's own chat reports its model, token counts and timings once, at the end. */
+export interface DefaultChatUsage {
+  model?: string;
+  promptTokens?: number;
+  outputTokens?: number;
+  promptMs?: number;
+  genMs?: number;
+}
+type DefaultChatEvent = { content?: string; warning?: string; usage?: DefaultChatUsage };
+
+/**
+ * What a reply ran on and cost, as the page's footer reads it (src/common/served.ts servedLine,
+ * the same line the desktop app shows): sent with the final `done` event on every path.
+ */
+export interface ReplyUsage {
+  cSats: number;
+  where?: string;
+  calls: CallUsage[];
+}
+
+/** A network / own-machine / reserved reply's usage from the backend's final piece. */
+export function networkReplyUsage(compute: ChatCompute, done: Extract<ChatPiece, { done: true }> | undefined): ReplyUsage {
+  const cSats = done?.cSatsSpent ?? 0;
+  const where = done?.where ?? computeLabel(compute);
+  const served = done?.served
+    ? {
+        ...done.served,
+        ...(done.served.promptTokens === undefined && done.promptTokens !== undefined ? { promptTokens: done.promptTokens } : {}),
+        ...(done.served.outputTokens === undefined && done.outputTokens !== undefined ? { outputTokens: done.outputTokens } : {}),
+      }
+    : undefined;
+  const model = done?.servedBy ?? ("model" in compute && compute.model ? compute.model : undefined);
+  return { cSats, where, calls: [{ cSats, where, ...(model ? { model } : {}), ...(served ? { served } : {}) }] };
+}
+
+/** The coordinator's own chat (free): "EdgeCoder's model" with its counts and timings. */
+export function defaultReplyUsage(u: DefaultChatUsage | undefined): ReplyUsage {
+  const where = "EdgeCoder's model";
+  const served: Served = {
+    label: "EdgeCoder",
+    own: false,
+    computeClass: "edgecoder",
+    tier: null,
+    hardware: where,
+    region: null,
+    country: null,
+    ...(u?.promptTokens !== undefined ? { promptTokens: u.promptTokens } : {}),
+    ...(u?.outputTokens !== undefined ? { outputTokens: u.outputTokens } : {}),
+    ...(u?.promptMs !== undefined ? { promptMs: u.promptMs } : {}),
+    ...(u?.genMs !== undefined ? { genMs: u.genMs } : {}),
+  };
+  return { cSats: 0, where, calls: [{ cSats: 0, where, ...(u?.model ? { model: u.model } : {}), served }] };
+}
+
+function usageNumber(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
+}
+
 interface OpenedDefaultChat {
   first: DefaultChatEvent;
   events: AsyncGenerator<DefaultChatEvent>;
@@ -169,6 +227,16 @@ async function* defaultChatEvents(body: AsyncIterable<Buffer | string>): AsyncGe
     const content = typeof parsed.content === "string" && parsed.content ? parsed.content : undefined;
     const warning = typeof parsed.warning === "string" && parsed.warning ? parsed.warning : undefined;
     if (content || warning) yield { ...(warning ? { warning } : {}), ...(content ? { content } : {}) };
+    const u = parsed.usage as Record<string, unknown> | undefined;
+    if (u && typeof u === "object") {
+      const usage: DefaultChatUsage = {};
+      if (typeof u.model === "string" && u.model) usage.model = u.model.slice(0, 200);
+      for (const k of ["promptTokens", "outputTokens", "promptMs", "genMs"] as const) {
+        const v = usageNumber(u[k]);
+        if (v !== undefined) usage[k] = v;
+      }
+      yield { usage };
+    }
   }
 }
 
@@ -294,11 +362,15 @@ export function registerChatApiRoutes(
     const send = out.send;
     let fullContent = "";
     let cSatsSpent: number | undefined;
+    let donePiece: Extract<ChatPiece, { done: true }> | undefined;
     const take = (p: ChatPiece) => {
       if ("delta" in p && p.delta) {
         fullContent += p.delta;
         send({ content: p.delta });
-      } else if ("done" in p) cSatsSpent = p.cSatsSpent;
+      } else if ("done" in p) {
+        cSatsSpent = p.cSatsSpent;
+        donePiece = p;
+      }
     };
     try {
       if (!first.done) take(first.value);
@@ -308,7 +380,7 @@ export function registerChatApiRoutes(
       send({ error: (err as Error).message || "stream_interrupted" });
     }
     await saveReply(req, conversationId, fullContent, cSatsSpent);
-    send({ done: true, compute: computeLabel(compute), ...(cSatsSpent !== undefined ? { cSatsSpent } : {}) });
+    send({ done: true, compute: computeLabel(compute), ...(cSatsSpent !== undefined ? { cSatsSpent } : {}), usage: networkReplyUsage(compute, donePiece) });
     return out.end();
   }
   /** POST /portal/chat on one coordinator, held until its first event so a dead end can still be retried elsewhere. */
@@ -525,7 +597,9 @@ export function registerChatApiRoutes(
 
     // Stream SSE response from coordinator to browser
     let fullContent = "";
+    let usage: DefaultChatUsage | undefined;
     const relay = (e: DefaultChatEvent) => {
+      if (e.usage) usage = e.usage;
       if (e.warning) out.send({ warning: e.warning });
       if (e.content) {
         fullContent += e.content;
@@ -541,7 +615,7 @@ export function registerChatApiRoutes(
     }
 
     await saveReply(req, conversationId, fullContent);
-    out.send({ done: true });
+    out.send({ done: true, usage: defaultReplyUsage(usage) });
     return out.end();
   }
 }

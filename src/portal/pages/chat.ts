@@ -7,6 +7,7 @@ import { icon } from "./design-system.js";
 import { CSP_NONCE } from "../csp-nonce.js";
 import { escapeHtml } from "./escape.js";
 import { NOTICES } from "../../common/legal-notices.js";
+import { SERVED_BROWSER_LIB } from "./served.js";
 import { QUOTE_SELECTION_BROWSER_LIB, QUOTE_SELECTION_CSS, quoteSelectionScript } from "./quote-selection.js";
 import { CHAT_FAILURES_BROWSER_LIB } from "../../common/chat-failures.js";
 
@@ -133,6 +134,10 @@ app.get("/portal/chat", async (_req, reply) => {
       .model-option[aria-selected="true"] .opt-check { visibility:visible; }
       .model-empty { padding:12px 10px; font-size:12px; color:var(--muted); text-align:center; }
       .msg-meta { margin-top:8px; font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums; }
+      .reply-footer { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+      .reply-copy { display:inline-flex; align-items:center; justify-content:center; height:24px; min-height:0; padding:0 8px; border:1px solid var(--card-border); border-radius:6px; background:transparent; color:var(--muted); font:inherit; font-size:11.5px; cursor:pointer; }
+      .reply-copy:hover { color:var(--text); background:var(--bg-surface); }
+      .reply-usage { overflow-wrap:anywhere; }
       .msg-error { color:var(--danger); }
       .msg-failure { margin-top:4px; font-size:13.5px; }
       .msg-failure .msg-failure-line { color:var(--danger); font-weight:600; }
@@ -351,7 +356,54 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
     document.addEventListener("click", function(e) {
       var btn = e.target && e.target.closest ? e.target.closest("[data-copy-block]") : null;
       if (btn) copyCodeBlock(btn.getAttribute("data-copy-block"));
+      var replyBtn = e.target && e.target.closest ? e.target.closest("[data-copy-reply]") : null;
+      if (replyBtn) copyReply(replyBtn);
     });
+    // The reply footer, as the desktop app shows it (src/common/served.ts servedLine): model, where it
+    // ran (machine class and hardware, your machine, the network or EdgeCoder's model), tokens read and
+    // written with their times, and the cost ("free" on your own machines), plus Copy.
+    function replyFooterLine(usage, computeText) {
+      if (!usage) return "";
+      var line = servedLine(usage.calls);
+      if (line) return line;
+      var cSats = Number(usage.cSats) || 0;
+      return [usage.where || computeText || "", cSats > 0 ? formatCSats(cSats) : ""].filter(Boolean).join(" \u00B7 ");
+    }
+    function appendReplyFooter(bubble, text, usage, computeText) {
+      bubble._replyText = text;
+      var footer = document.createElement("div");
+      footer.className = "msg-meta reply-footer";
+      footer.setAttribute("data-testid", "reply-footer");
+      var copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "reply-copy";
+      copy.setAttribute("data-copy-reply", "");
+      copy.title = "Copy reply";
+      copy.setAttribute("aria-label", "Copy reply");
+      copy.textContent = "Copy";
+      footer.appendChild(copy);
+      var line = replyFooterLine(usage, computeText);
+      if (line) {
+        var span = document.createElement("span");
+        span.className = "reply-usage";
+        span.textContent = line;
+        span.title = usage && usage.calls && usage.calls.length ? "Where this reply ran:\\n" + servedBreakdown(usage.calls) : "What this reply cost";
+        footer.appendChild(span);
+      }
+      bubble.appendChild(footer);
+    }
+    function copyReply(btn) {
+      var bubble = btn.closest(".chat-msg");
+      if (!bubble) return;
+      var body = bubble.querySelector(".msg-body");
+      var text = typeof bubble._replyText === "string" ? bubble._replyText : (body ? body.innerText : "");
+      if (!navigator.clipboard) return;
+      navigator.clipboard.writeText(text).then(function() {
+        btn.textContent = "Copied";
+        btn.setAttribute("aria-label", "Copied");
+        setTimeout(function() { btn.textContent = "Copy"; btn.setAttribute("aria-label", "Copy reply"); }, 1500);
+      }, function() {});
+    }
     function copyCodeBlock(id) {
       var el = document.getElementById(id);
       if (!el) return;
@@ -395,10 +447,16 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
         var role = m.role === "user" ? "user" : "assistant";
         var label = m.role === "user" ? "You" : "EdgeCoder";
         var timeStr = m.createdAt || m.timestamp ? formatMsgTime(m.createdAt || m.timestamp) : "";
-        var cost = role === "assistant" && Number(m.creditsSpent) > 0 ? "<div class=\\"msg-meta\\">" + formatCSats(m.creditsSpent) + "</div>" : "";
-        html += "<div class=\\"chat-msg " + role + "\\"><div class=\\"msg-header\\"><div class=\\"msg-role\\">" + label + "</div>" + (timeStr ? "<div class=\\"msg-time\\">" + timeStr + "</div>" : "") + "</div><div class=\\"msg-body\\" data-quotable>" + renderMarkdown(m.content || "") + "</div>" + cost + "</div>";
+        html += "<div class=\\"chat-msg " + role + "\\"><div class=\\"msg-header\\"><div class=\\"msg-role\\">" + label + "</div>" + (timeStr ? "<div class=\\"msg-time\\">" + timeStr + "</div>" : "") + "</div><div class=\\"msg-body\\" data-quotable>" + renderMarkdown(m.content || "") + "</div></div>";
       }
       container.innerHTML = html;
+      // Each saved reply: Copy, and what it cost (where it ran is only known for replies of this session).
+      var bubbles = container.querySelectorAll(".chat-msg");
+      for (var bi = 0; bi < bubbles.length && bi < messages.length; bi++) {
+        if (messages[bi].role === "user") continue;
+        var saved = messages[bi];
+        appendReplyFooter(bubbles[bi], saved.content || "", Number(saved.creditsSpent) > 0 ? { cSats: Number(saved.creditsSpent), calls: [] } : null);
+      }
       scrollParent.scrollTop = scrollParent.scrollHeight;
     }
 
@@ -520,6 +578,8 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
       var assistantBody = assistantBubble.querySelector(".msg-body");
 
       var fullContent = "";
+      var doneUsage = null;
+      var doneCompute = "";
       var ac = new AbortController();
       abortController = ac;
       // Never an endless "Thinking...": no bytes for CHAT_IDLE_TIMEOUT_MS (heartbeats count), or no
@@ -611,10 +671,8 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
                 if (parsed.error) fail(parsed.error, { code: parsed.code, httpStatus: parsed.httpStatus });
                 if (parsed.done) {
                   gotDone = true;
-                  var meta = document.createElement("div");
-                  meta.className = "msg-meta";
-                  meta.textContent = [typeof parsed.cSatsSpent === "number" ? formatCSats(parsed.cSatsSpent) : "", parsed.compute || ""].filter(Boolean).join(" \u00B7 ");
-                  if (meta.textContent) assistantBubble.appendChild(meta);
+                  doneUsage = parsed.usage || (typeof parsed.cSatsSpent === "number" ? { cSats: parsed.cSatsSpent, calls: [] } : null);
+                  doneCompute = parsed.compute || "";
                   if (typeof parsed.cSatsSpent === "number" && parsed.cSatsSpent > 0) loadTopTicker();
                 }
                 if (parsed.content) {
@@ -635,6 +693,7 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
           else if (!failed && !fullContent) fail("The model returned an empty reply.");
           // Text, then the stream closed without the terminator: finished (noted only if it stops mid-sentence).
           else if (!failed && !gotDone && looksTruncated(fullContent)) showCutShort(assistantBubble, text);
+          if (!failed && fullContent) appendReplyFooter(assistantBubble, fullContent, doneUsage, doneCompute);
         }
       } catch (err) {
         if (timedOut === "idle") fail("No response from EdgeCoder for " + Math.round(CHAT_IDLE_TIMEOUT_MS / 1000) + " seconds.");
@@ -843,6 +902,9 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
 
     // "Add to chat": quote selected message text in the composer (pages/quote-selection.ts).
     ${QUOTE_SELECTION_BROWSER_LIB}
+
+    // Reply footer formatter, shared with the desktop app (src/common/served.ts).
+    ${SERVED_BROWSER_LIB}
     ${quoteSelectionScript("chatScroll", "chatInput")}
 
     // Init
