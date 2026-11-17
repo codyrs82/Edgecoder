@@ -180,6 +180,14 @@ describe.skipIf(!canRunScripts)("deploy/lnd-mainnet entrypoint", () => {
     expect(r.conf).toContain("bitcoind.zmqpubrawtx=tcp://[::1]:28333\n");
   });
 
+  it("accepts DNS names in the ZMQ URLs and writes them unchanged", async () => {
+    const p = await serve("127.0.0.1");
+    const r = await run("lnd", external("127.0.0.1", p, "localhost"));
+    expect(r.code, r.log).toBe(0);
+    expect(r.conf).toContain(`bitcoind.zmqpubrawblock=tcp://localhost:${p.zb}\n`);
+    expect(r.conf).toContain(`bitcoind.zmqpubrawtx=tcp://localhost:${p.zt}\n`);
+  });
+
   it("waits for the RPC with a clear log, never logging credentials", async () => {
     // Nothing listens on this port at first; the RPC appears after ~2 s.
     const probe = createTcpServer();
@@ -346,13 +354,15 @@ describe("deploy/lnd-mainnet fly config", () => {
   const ext = read("fly.toml");
   const host = "fdaa:ec:ae3e:a7b:9016:7eba:d6ac:1b02";
 
-  it("is external mode against ocean-node's 6PN address, with IPv6 brackets in the ZMQ URLs", () => {
+  it("is external mode against ocean-node's 6PN address, with ZMQ by the peer's DNS name (no IPv6 brackets)", () => {
     expect(ext).toMatch(/^app = "edgecoder-lnd"$/m);
     expect(ext).toMatch(/^\s*BITCOIND_MODE = "external"$/m);
     expect(ext).toContain(`BITCOIND_HOST = "${host}"`);
     expect(ext).toMatch(/^\s*BITCOIND_RPC_PORT = "8332"$/m);
-    expect(ext).toContain(`BITCOIND_ZMQ_BLOCK = "tcp://[${host}]:28332"`);
-    expect(ext).toContain(`BITCOIND_ZMQ_TX = "tcp://[${host}]:28333"`);
+    expect(ext).toContain(`BITCOIND_ZMQ_BLOCK = "tcp://ocean-node-lnd._peer.internal:28332"`);
+    expect(ext).toContain(`BITCOIND_ZMQ_TX = "tcp://ocean-node-lnd._peer.internal:28333"`);
+    // lnd v0.21.8 fails on a bracketed IPv6 ZMQ URL ("missing ']' in address").
+    expect(ext).not.toMatch(/BITCOIND_ZMQ_(BLOCK|TX) = "tcp:\/\/\[/);
     expect(ext).toMatch(/^\s*BITCOIND_ESTIMATEMODE = "ECONOMICAL"$/m);
     expect(ext).not.toMatch(/REPLACE_WITH/);
   });
