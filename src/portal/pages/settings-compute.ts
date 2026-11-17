@@ -126,7 +126,7 @@ const SCRIPT = SETTINGS_HELPERS_SCRIPT + PRICE_BOARD_SCRIPT + `
         text.appendChild(label);
         const parts = active
           ? [timeLeft(r.endMs), r.cSatsPerSecond !== undefined ? fmtRate(r.cSatsPerSecond) + " cSats/s" : "", r.prepaidCSats !== undefined ? fmtNum(r.prepaidCSats, 1) + " cSats prepaid" : ""]
-          : ["Ended " + fmtDate(r.endMs), r.usedCSats !== undefined ? fmtNum(r.usedCSats, 1) + " cSats used" : "", r.refundCSats ? fmtNum(r.refundCSats, 1) + " refunded" : ""];
+          : ["Ended " + fmtDate(r.endedAtMs || r.endMs), r.usedCSats !== undefined ? fmtNum(r.usedCSats, 1) + " cSats used" : "", r.refundCSats ? fmtNum(r.refundCSats, 1) + " refunded" : ""];
         text.appendChild(el("div", { class: "set-desc" }, parts.filter(Boolean).join(" · ")));
         row.appendChild(text);
         const ctl = el("div", { class: "set-control" });

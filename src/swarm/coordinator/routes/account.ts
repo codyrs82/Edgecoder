@@ -76,7 +76,7 @@ export function publicReservation(r: Reservation) {
   const cSats = (msat: number | undefined) => (msat === undefined ? undefined : msatToCSats(msat));
   return {
     id: r.id, computeClass: r.computeClass, tier: r.tier, model: r.model, agentId: r.agentId, startMs: r.startMs, endMs: r.endMs,
-    status: r.status, endReason: r.endReason, cSatsPerSecond: cSats(r.ratePerSecondMsat), prepaidCSats: cSats(r.prepaidMsat),
+    status: r.status, ...(r.endedAtMs !== undefined ? { endedAtMs: r.endedAtMs } : {}), endReason: r.endReason, cSatsPerSecond: cSats(r.ratePerSecondMsat), prepaidCSats: cSats(r.prepaidMsat),
     usedCSats: cSats(r.usedMsat), refundCSats: cSats(r.refundMsat), ...(r.direct ? { paidDirect: r.direct.rail, receiptIds: r.direct.receiptIds } : {}), models: [...(agentCapabilities.get(r.agentId)?.localModelCatalog ?? [])].filter((m) => m && m !== "edgecoder-default"),
   };
 }
