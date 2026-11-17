@@ -26,6 +26,21 @@ describe("web chat failures", () => {
     for (const m of html.matchAll(/<script nonce="[^"]*">([\s\S]*?)<\/script>/g)) expect(() => new Function(m[1])).not.toThrow();
   });
 
+  it("out of cSats: our words, not the coordinator's sentence, and which account is signed in; never a toast", async () => {
+    const html = await chatPage();
+    expect(html).not.toContain("Chat error");
+    const detailSrc = /function csatsDetail\(message\) \{[\s\S]*?\n    \}/.exec(html)![0];
+    const csatsDetail = new Function(`${detailSrc}; return csatsDetail;`)() as (m: string) => string;
+    expect(csatsDetail("Not enough cSats for this request (it sets aside up to 4.034 cSats; unused cSats come back).")).toBe("This chat sets aside up to 4.034 cSats; unused cSats come back.");
+    expect(csatsDetail("Not enough cSats: your balance is 0")).toBe("");
+    const whoSrc = /function signedInLine\(\) \{[\s\S]*?\n    \}/.exec(html)![0];
+    const els: Record<string, { textContent: string }> = { accountMenuEmail: { textContent: "me@example.com" }, topTickerCredits: { textContent: "0 cSats" } };
+    const signedInLine = new Function("document", `${whoSrc}; return signedInLine;`)({ getElementById: (id: string) => els[id] ?? null }) as () => string;
+    expect(signedInLine()).toBe("Signed in as me@example.com \u00B7 0 cSats");
+    els.topTickerCredits.textContent = "Balance unavailable";
+    expect(signedInLine()).toBe("Signed in as me@example.com");
+  });
+
   it("turns browser network errors and server codes into words", async () => {
     const html = await chatPage();
     const src = /function chatErrorText\(message\) \{[\s\S]*?\n    \}/.exec(html)![0];

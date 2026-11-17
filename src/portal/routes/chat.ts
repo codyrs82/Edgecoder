@@ -458,6 +458,8 @@ export function registerChatApiRoutes(
         return runDefaultChat(req, reply, out, conversationId, chatPayload);
       });
     const own = deps.ownMachineModels ? await deps.ownMachineModels(userId).catch(() => [] as string[]) : [];
+    // Which way Auto went (your own machine's model, or none found): the log answers "why not mine?".
+    req.log.info({ ownModels: own.slice(0, 5) }, "portal_auto_chat_own_machines");
     if (own.length === 0) return network();
     return runOnNetwork(req, reply, out, userId, conversationId, { target: "mine", model: own[0] }, messages, network);
   }

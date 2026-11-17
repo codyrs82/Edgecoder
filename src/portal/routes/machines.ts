@@ -36,6 +36,9 @@ interface CoordinatorMachine {
   lastSeenMs: number | null;
   coordinatorId: string;
   audit: Array<{ commandId: string; requestedAtMs: number } & Record<string, unknown>>;
+  /** Newer coordinators: the models a `target: "mine"` call can run on this machine there, and its active model. */
+  models?: unknown;
+  activeModel?: unknown;
 }
 
 const MAX_COORDINATORS = 8;
@@ -44,8 +47,17 @@ const MAX_COORDINATORS = 8;
 const OWN_MODELS_TIMEOUT_MS = 3_000;
 
 /**
- * Models on the signed-in account's connected machines, best first: loaded (warm) before the
- * configured active model. Auto in the web chat runs on these first, free (routes/chat.ts).
+ * Models on the signed-in account's connected machines, best first: loaded (warm), then the
+ * configured active model, then the rest the machine serves. Auto in the web chat runs on these
+ * first, free (routes/chat.ts).
+ *
+ * A coordinator lists `models` per machine: what it would route a `target: "mine"` call to there
+ * (the machine's reported catalog). That is the answer when present. The machine's own state is
+ * Ollama's view, so a vLLM or MLX host (the Lambda A100) reports `ollamaReachable: false` and no
+ * installed models while serving its active model; it used to be skipped, and Auto went to the
+ * paid network instead. Without `models` (an older coordinator), such a machine's active model
+ * is still offered, last: the coordinator refuses a `mine` call it can't place before anything
+ * runs, and Auto then moves on.
  */
 export async function ownMachineModels(deps: Omit<MachineRoutesDeps, "getCurrentUser">, userId: string): Promise<string[]> {
   if (!deps.store) return [];
@@ -70,17 +82,35 @@ export async function ownMachineModels(deps: Omit<MachineRoutesDeps, "getCurrent
       }
     }),
   );
+  const names = (xs: unknown): string[] =>
+    Array.isArray(xs) ? xs.map((x) => (typeof x === "string" ? x : (x as { name?: unknown } | null)?.name)).filter((n): n is string => typeof n === "string" && n.length > 0) : [];
   const loaded: string[] = [];
   const active: string[] = [];
+  const rest: string[] = [];
+  const unreachableActive: string[] = [];
   for (const m of answers.flat()) {
-    if (!m?.connected || !m.state) continue;
-    const st = m.state as { ollamaReachable?: unknown; activeModel?: unknown; loaded?: unknown; installed?: unknown };
-    if (st.ollamaReachable === false) continue;
-    const installed = Array.isArray(st.installed) ? (st.installed as Array<{ name?: unknown }>).map((x) => x?.name).filter((n): n is string => typeof n === "string") : [];
-    if (Array.isArray(st.loaded)) for (const x of st.loaded as Array<{ name?: unknown }>) if (typeof x?.name === "string") loaded.push(x.name);
-    if (typeof st.activeModel === "string" && st.activeModel && (installed.length === 0 || installed.includes(st.activeModel))) active.push(st.activeModel);
+    if (!m?.connected) continue;
+    const st = (m.state ?? {}) as { ollamaReachable?: unknown; activeModel?: unknown; loaded?: unknown; installed?: unknown };
+    const warm = names(st.loaded);
+    const activeModel = typeof m.activeModel === "string" && m.activeModel ? m.activeModel : typeof st.activeModel === "string" && st.activeModel ? st.activeModel : undefined;
+    if (Array.isArray(m.models)) {
+      // The coordinator's routable list: exactly what a `mine` call can run on this machine.
+      const serves = names(m.models);
+      loaded.push(...warm.filter((n) => serves.includes(n)));
+      if (activeModel && serves.includes(activeModel)) active.push(activeModel);
+      rest.push(...serves);
+      continue;
+    }
+    if (!m.state) continue;
+    if (st.ollamaReachable === false) {
+      if (activeModel) unreachableActive.push(activeModel);
+      continue;
+    }
+    const installed = names(st.installed);
+    loaded.push(...warm);
+    if (activeModel && (installed.length === 0 || installed.includes(activeModel))) active.push(activeModel);
   }
-  return [...new Set([...loaded, ...active])];
+  return [...new Set([...loaded, ...active, ...rest, ...unreachableActive])];
 }
 
 export function registerMachineRoutes(app: FastifyInstance, deps: MachineRoutesDeps): void {

@@ -134,6 +134,8 @@ describe("only the owning account can control a machine", () => {
     const res = await portalPost("/agent-control/machines", { accountId: "acct-owner", agentIds: [mine.peerId, theirs.peerId, unowned.peerId] });
     expect(res.statusCode).toBe(200);
     expect(res.json().machines.map((m: any) => m.agentId)).toEqual([mine.peerId]);
+    // What a target "mine" call could run there (the portal's web chat Auto reads it): nothing reported yet.
+    expect(res.json().machines[0].models).toEqual([]);
   });
 });
 

@@ -222,6 +222,22 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
       return m || "Something went wrong.";
     }
 
+    /** The out-of-cSats detail in our words (the coordinator's sentence is not shown): what the chat sets aside. */
+    function csatsDetail(message) {
+      var m = /up to ([0-9][0-9.,]*) cSats/i.exec(String(message || ""));
+      return m ? "This chat sets aside up to " + m[1] + " cSats; unused cSats come back." : "";
+    }
+
+    /** "Signed in as you@example.com · 0 cSats", from the account menu the app shell fills in. */
+    function signedInLine() {
+      var emailEl = document.getElementById("accountMenuEmail");
+      var email = emailEl ? String(emailEl.textContent || "").trim() : "";
+      if (!email) return "";
+      var balEl = document.getElementById("topTickerCredits");
+      var bal = balEl ? String(balEl.textContent || "").trim() : "";
+      return "Signed in as " + email + (/cSats$/.test(bal) ? " \u00B7 " + bal : "");
+    }
+
     /** One compact failure under a reply: the shared line, the detail, and Buy cSats or Retry. */
     function showChatFailure(bubble, message, opts) {
       opts = opts || {};
@@ -230,7 +246,7 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
       box.className = "msg-failure";
       var line = document.createElement("div");
       line.className = "msg-failure-line";
-      var detailText = chatErrorText(message);
+      var detailText = kind === "csats" ? csatsDetail(message) : chatErrorText(message);
       line.textContent = kind === "other" ? detailText : FAILURE_LINE[kind];
       box.appendChild(line);
       if (kind !== "other" && detailText) {
@@ -238,6 +254,16 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
         detail.className = "msg-failure-detail";
         detail.textContent = detailText;
         box.appendChild(detail);
+      }
+      // Which account is short: cSats belong to one account, and the same person may have several.
+      if (kind === "csats" || kind === "budget") {
+        var who = signedInLine();
+        if (who) {
+          var acct = document.createElement("div");
+          acct.className = "msg-failure-detail";
+          acct.textContent = who;
+          box.appendChild(acct);
+        }
       }
       var actions = document.createElement("div");
       actions.className = "msg-failure-actions";
