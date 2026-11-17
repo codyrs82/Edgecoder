@@ -324,6 +324,20 @@ function hasMarker(dir: string, markers: string[], stopAt: string | null): boole
 }
 
 /**
+ * A command segment with its program written plainly: PowerShell's call operator (`& npm`), a
+ * quoted program, a Windows extension (npm.cmd, git.exe) and the case of the name don't matter.
+ */
+function programName(seg: string): string {
+  const s = seg.replace(/^&\s+/, "");
+  const m = /^("([^"]+)"|'([^']+)'|(\S+))(.*)$/s.exec(s);
+  if (!m) return s;
+  const prog = (m[2] ?? m[3] ?? m[4]).replace(/\.(cmd|exe|bat|ps1)$/i, "");
+  // A path to the program (C:\nodejs\npm.cmd, /usr/bin/git) is the program; ./gradlew stays as it is.
+  const base = /^\.[\\/]/.test(prog) ? prog.replace(/\\/g, "/") : (prog.split(/[\\/]/).pop() ?? prog);
+  return `${/^\.\//.test(base) ? base : base.toLowerCase()}${m[5]}`;
+}
+
+/**
  * Whether a shell command that needs a code project (npm, git, pytest, cargo, go, make …) is run
  * in a folder that has one. Null when it's fine (or not such a command); else the tool result to
  * give instead of running it: "This folder isn't a code project (no package.json). Your working folder is …".
@@ -333,9 +347,9 @@ function hasMarker(dir: string, markers: string[], stopAt: string | null): boole
 export function projectCheck(command: string, root: string): string | null {
   let cwd = resolve(root);
   for (const raw of command.split(/&&|\|\||;|\|/)) {
-    const seg = raw.trim().replace(/^(\w+=("[^"]*"|'[^']*'|\S*)\s+)+/, "");
+    const seg = programName(raw.trim().replace(/^(\w+=("[^"]*"|'[^']*'|\S*)\s+)+/, ""));
     if (!seg) continue;
-    const cd = /^cd\s+("([^"]+)"|'([^']+)'|(\S+))\s*$/.exec(seg);
+    const cd = /^(?:cd|chdir|set-location)(?:\s+\/d)?\s+("([^"]+)"|'([^']+)'|(\S+))\s*$/i.exec(seg);
     if (cd) {
       const to = cd[2] ?? cd[3] ?? cd[4];
       if (to.startsWith("~") || to.startsWith("$")) return null; // can't tell where that is

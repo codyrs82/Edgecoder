@@ -76,7 +76,11 @@ async function run(m: BotManager, id: string, trigger: "heartbeat" | "message" =
   return asked;
 }
 
-const results = (m: BotManager, id: string) => JSON.stringify(m.messages(id).filter((x) => x.role === "assistant").at(-1)?.events ?? []);
+/** The last reply's tool results and errors as plain text (not JSON: a Windows path's backslashes would be escaped). */
+const results = (m: BotManager, id: string) =>
+  (m.messages(id).filter((x) => x.role === "assistant").at(-1)?.events ?? [])
+    .map((e) => (e.type === "tool_result" ? `${e.result ?? ""}\n${e.error ?? ""}` : ""))
+    .join("\n");
 
 describe("working folder sanity", () => {
   it("refuses npm, git, pytest and cargo in a folder that isn't a project, and lets them run in one", () => {
@@ -94,6 +98,11 @@ describe("working folder sanity", () => {
     expect(projectCheck("npm install -g typescript", notes)).toBeNull();
     expect(projectCheck("git clone https://github.com/a/b", notes)).toBeNull();
     expect(projectCheck("ls -la && cat notes.md", notes)).toBeNull();
+    // Windows: npm.cmd, PowerShell's call operator, cmd's cd /d, any case.
+    expect(projectCheck("npm.cmd test", notes)).toMatch(/no package\.json/);
+    expect(projectCheck("& npm run test", notes)).toMatch(/no package\.json/);
+    expect(projectCheck("NPM test", notes)).toMatch(/no package\.json/);
+    expect(projectCheck("git.exe status", notes)).toMatch(/no \.git/);
 
     const proj = dir();
     writeFileSync(join(proj, "package.json"), "{}");
@@ -106,6 +115,8 @@ describe("working folder sanity", () => {
     writeFileSync(join(outer, "app", "package.json"), "{}");
     expect(projectCheck("npm test", outer)).toMatch(/no package\.json/);
     expect(projectCheck("cd app && npm test", outer)).toBeNull();
+    expect(projectCheck(`cd /d "${join(outer, "app")}" && npm.cmd test`, outer)).toBeNull();
+    expect(projectCheck("cd app; npm test", outer)).toBeNull();
   });
 
   it("a bot's npm test in its notes folder isn't run or asked about; the tool result says why", async () => {
