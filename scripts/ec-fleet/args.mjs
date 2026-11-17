@@ -7,7 +7,8 @@
 
 import { parseArgs } from "node:util";
 
-export const DEFAULT_LEAD = "frontier/anthropic/claude-opus-5-5";
+/** The network's strongest coder (the GPU hosts' qwen3-coder 30B). The fleet runs on the EdgeCoder network, not a frontier key. */
+export const DEFAULT_LEAD = "network/qwen3-coder:30b";
 export const DEFAULT_WORKER = "auto";
 export const DEFAULT_MODE = "auto-edits";
 export const DEFAULT_PROVIDER = "http://127.0.0.1:4304";
@@ -19,14 +20,15 @@ export const USAGE = `ec-fleet: drive EdgeCoder coding sessions (one worktree + 
 
   ec-fleet start --task <file.md|text> --branch ec/<slug> [--repo <path>] [--lead <id>] [--worker <id>]
                  [--mode ask|auto-edits|auto] [--title <t>] [--base origin/main] [--node-modules <dir>]
-                 [--trailer "<line>"]... [--max-concurrent 2] [--dry-run]
+                 [--trailer "<line>"]... [--max-concurrent 2] [--allow-frontier] [--dry-run]
   ec-fleet watch <slug> [--approve] [--since N] [--timeout <minutes>] [--verbose]
   ec-fleet approve <slug> [--all-safe] [--call <id> [--deny]]
   ec-fleet send <slug> "<notes>"
   ec-fleet status [<slug>] [--json]
   ec-fleet stop <slug> [--cleanup]
 
-Defaults: --lead ${DEFAULT_LEAD} (your own key, this account only), --worker ${DEFAULT_WORKER}, --mode ${DEFAULT_MODE}.
+Defaults: --lead ${DEFAULT_LEAD} (the EdgeCoder network), --worker ${DEFAULT_WORKER}, --mode ${DEFAULT_MODE}.
+A frontier lead (your own key, this account only) needs --allow-frontier.
 Provider: $EC_FLEET_PROVIDER or ${DEFAULT_PROVIDER}; token: $IDE_PROVIDER_TOKEN or ~/.edgecoder/ide-token (never printed).
 watch exits 0 when the session is idle, 3 when an approval needs a human, 4 on timeout, 5 if the session
 was deleted, 6 when the turn ended on a model error (no key, no balance, no route).
@@ -57,7 +59,7 @@ export function parseCli(argv) {
   if (!command || command === "help" || command === "--help" || command === "-h") return { command: "help" };
   if (!COMMANDS.includes(command)) throw new UsageError(`Unknown command "${command}". Commands: ${COMMANDS.join(", ")}.`);
   const specs = {
-    start: { task: { type: "string" }, repo: { type: "string" }, branch: { type: "string" }, lead: { type: "string" }, worker: { type: "string" }, mode: { type: "string" }, title: { type: "string" }, base: { type: "string" }, "node-modules": { type: "string" }, trailer: { type: "string", multiple: true }, "max-concurrent": { type: "string" }, "dry-run": { type: "boolean" } },
+    start: { task: { type: "string" }, repo: { type: "string" }, branch: { type: "string" }, lead: { type: "string" }, worker: { type: "string" }, mode: { type: "string" }, title: { type: "string" }, base: { type: "string" }, "node-modules": { type: "string" }, trailer: { type: "string", multiple: true }, "max-concurrent": { type: "string" }, "allow-frontier": { type: "boolean" }, "dry-run": { type: "boolean" } },
     watch: { approve: { type: "boolean" }, since: { type: "string" }, timeout: { type: "string" }, verbose: { type: "boolean" }, repo: { type: "string" } },
     approve: { "all-safe": { type: "boolean" }, call: { type: "string" }, deny: { type: "boolean" }, repo: { type: "string" } },
     send: { repo: { type: "string" } },
@@ -81,11 +83,13 @@ export function parseCli(argv) {
     if (!String(v.branch).startsWith("ec/")) throw new UsageError("--branch must be ec/<slug>.");
     const mode = v.mode ?? DEFAULT_MODE;
     if (!MODES.includes(mode)) throw new UsageError(`--mode must be one of ${MODES.join(", ")}.`);
+    const lead = v.lead ?? DEFAULT_LEAD;
+    if (lead.toLowerCase().startsWith("frontier/") && !v["allow-frontier"]) throw new UsageError("--lead is a frontier model: the fleet runs on the EdgeCoder network. Pass --allow-frontier to use your own key.");
     const worker = v.worker ?? DEFAULT_WORKER;
     if (worker.toLowerCase().startsWith("frontier/")) throw new UsageError("--worker can't be a frontier model (helpers run on auto, the network or this computer).");
     Object.assign(out, {
       task: v.task,
-      lead: v.lead ?? DEFAULT_LEAD,
+      lead,
       worker,
       mode,
       title: (v.title ?? `ec-fleet: ${out.slug}`).slice(0, 120),

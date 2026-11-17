@@ -246,7 +246,8 @@ export function placements(session) {
   const out = {};
   for (const t of session.transcript ?? []) {
     for (const c of t.usage?.calls ?? []) {
-      const k = c.served?.computeClass === "frontier" ? "frontier" : (c.where ?? "?");
+      // Placement, compute class and machine: "network gpu.dc lin-•••ab12", "frontier".
+      const k = c.served?.computeClass === "frontier" ? "frontier" : [c.where ?? "?", c.served?.computeClass, c.served?.label].filter(Boolean).join(" ");
       out[k] = (out[k] ?? 0) + 1;
     }
   }
@@ -358,7 +359,7 @@ async function cmdStart(o, log) {
   st.status = "running";
   st.turns = 1;
   saveState(root, st);
-  log(`session ${st.sessionId} (published; watch it in the app) · lead ${snap.session.compute?.target === "frontier" ? o.lead : `${o.lead} -> ${snap.session.compute?.target}`} · worker ${o.worker} · turn ${sent.turnId ?? "queued"}`);
+  log(`session ${st.sessionId} (published; watch it in the app) · lead ${o.lead} (${snap.session.compute?.target ?? "?"}) · worker ${o.worker} · turn ${sent.turnId ?? "queued"}`);
   log(`next: ec-fleet watch ${o.slug} --approve`);
   return 0;
 }
@@ -556,7 +557,7 @@ async function cmdStatus(o, log) {
   if (o.json) log(JSON.stringify(rows, null, 2));
   else
     for (const r of rows) {
-      const where = Object.entries(r.where).map(([k, n]) => `${k}×${n}`).join(" ") || "-";
+      const where = Object.entries(r.where).map(([k, n]) => `${k} ×${n}`).join(", ") || "-";
       log(`${r.slug.padEnd(24)} ${r.state.padEnd(20)} ${r.branch.padEnd(30)} ${r.cSats === null ? "-" : `${r.cSats.toFixed(3)} cSats`}${r.frontierUsd ? ` +$${r.frontierUsd.toFixed(3)} own key` : ""}  [${where}]  ${r.turns} turns  ${r.elapsed}  ${r.pr ?? "no PR"}`);
     }
   return 0;
