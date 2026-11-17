@@ -17,6 +17,7 @@ import { clientRegionOf, type CoordinatorChoice } from "../../common/coordinator
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { RESERVATION_MAX_MINUTES, RESERVATION_MIN_MINUTES } from "../../economy/reservations.js";
 import {
   cancelReservation,
   computeOverview,
@@ -229,7 +230,7 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
     const ctx = await keyAccount(req, reply);
     if (!ctx) return reply;
     const parsed = z
-      .object({ computeClass: z.enum(COMPUTE_CLASSES), minutes: z.number().int().min(1).max(24 * 60), model: z.string().trim().min(1).max(200).optional() })
+      .object({ computeClass: z.enum(COMPUTE_CLASSES), minutes: z.number().int().min(RESERVATION_MIN_MINUTES).max(RESERVATION_MAX_MINUTES), model: z.string().trim().min(1).max(200).optional() })
       .safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: "invalid_reservation" });
     return relay(reply, await createReservation(networkFor(ctx.accountId), parsed.data).catch(unreachable));

@@ -363,4 +363,10 @@ describe("reserved-capacity leases", () => {
     ]);
     expect([a.statusCode, b.statusCode].sort()).toEqual([200, 409]);
   });
+
+  test("a lease shorter than the minimum is a 400, not a 500", async () => {
+    const r = await post("/account/reservations", { computeClass: "cpu", minutes: 2, model: MODEL }, requester);
+    expect(r.statusCode).toBe(400);
+    expect(r.json()).toMatchObject({ error: "invalid_reservation", minMinutes: 5 });
+  });
 });
