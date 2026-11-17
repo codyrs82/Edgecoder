@@ -140,19 +140,27 @@ describe("Network only: routing", () => {
     expect(rs.some((r) => r.computeClass === "cpu")).toBe(false);
   });
 
-  it("each class choice keeps to its class (CPU too, when asked for)", () => {
-    for (const cls of ["gpu", "apple", "cpu", "gpu.dc"]) {
+  it("each class choice keeps to its class (CPU too, when asked for); GPU means any GPU", () => {
+    for (const cls of ["apple", "cpu", "gpu.dc"]) {
       const rs = planRoutes(heavy, rich, "network_only", { allowanceCSats: 100, computeClass: cls });
       expect(rs.length).toBe(1);
       expect(rs[0]).toMatchObject({ placement: "network", computeClass: cls });
     }
+    // Network GPU only: consumer and datacenter GPUs, fastest first; never Apple or CPU.
+    expect(where(planRoutes(heavy, rich, "network_only", { allowanceCSats: 100, computeClass: "gpu" }))).toEqual(["network:gpu.dc:qwen3-coder:30b", "network:gpu:qwen3-coder:30b"]);
+    // Only a datacenter GPU online (the A100): GPU only still finds it.
+    const a100: RouteInputs = { ...rich, networkModels: [{ model: "qwen3-coder:30b", classes: ["gpu.dc", "cpu"], cSatsPerMTokens: price }] };
+    expect(where(planRoutes(heavy, a100, "network_only", { allowanceCSats: 100, computeClass: "gpu" }))).toEqual(["network:gpu.dc:qwen3-coder:30b"]);
+    // Datacenter GPU only stays datacenter only.
+    expect(planRoutes(heavy, { ...rich, networkModels: [{ model: "qwen3-coder:30b", classes: ["gpu"], cSatsPerMTokens: price }] }, "network_only", { allowanceCSats: 100, computeClass: "gpu.dc" })).toEqual([]);
     // A class nobody on the network has: nothing, not a local model.
     expect(planRoutes(heavy, { ...rich, networkModels: [{ model: "qwen3-coder:30b", classes: ["gpu"], cSatsPerMTokens: price }] }, "network_only", { computeClass: "apple" })).toEqual([]);
   });
 
   it("with the Model selector set, that model on the network (in the chosen class)", () => {
     expect(where(planRoutes(heavy, rich, "network_only", { model: "network/qwen3-coder:30b" }))).toEqual(["network:any:qwen3-coder:30b"]);
-    expect(where(planRoutes(heavy, rich, "network_only", { model: "network/qwen3-coder:30b@apple", computeClass: "gpu" }))).toEqual(["network:gpu:qwen3-coder:30b"]);
+    expect(where(planRoutes(heavy, rich, "network_only", { model: "network/qwen3-coder:30b@apple", computeClass: "gpu" }))).toEqual(["network:gpu.dc:qwen3-coder:30b", "network:gpu:qwen3-coder:30b"]);
+    expect(where(planRoutes(heavy, rich, "network_only", { model: "network/qwen3-coder:30b", computeClass: "gpu.dc" }))).toEqual(["network:gpu.dc:qwen3-coder:30b"]);
     // A local pick still runs on the network, never here.
     expect(where(planRoutes(heavy, rich, "network_only", { model: "mine/qwen3-coder:30b", computeClass: "cpu" }))).toEqual(["network:cpu:qwen3-coder:30b"]);
   });
@@ -163,7 +171,7 @@ describe("Network only: routing", () => {
     expect(planRoutes(heavy, { ...rich, balanceCSats: 0 }, "network_only", { computeClass: "gpu" })).toEqual([]);
     expect(noRouteMessage("network_only", rich, opts)).toMatch(/^Network only: no cSats left today \(budget 100\)/);
     expect(noRouteMessage("network_only", rich, { ...opts, computeClass: "gpu" })).toMatch(/^Network GPU only: no cSats left today \(budget 100\)/);
-    expect(noRouteMessage("network_only", { ...rich, balanceCSats: 0 }, {})).toMatch(/^Network only: no cSats left \(balance 0\)/);
+    expect(noRouteMessage("network_only", { ...rich, balanceCSats: 0 }, {})).toMatch(/^Not enough cSats: your balance is 0 cSats\./);
   });
 
   it("Local first and My machines only keep their meaning", () => {
@@ -203,7 +211,8 @@ describe("Network only: the routed backend", () => {
           throw new ChatBackendError("No apple machine is free.", 503);
         },
     });
-    await expect(collect(b)).rejects.toThrow("Not enough cSats for this request.");
+    // The money problem in plain words, with what the step needs where it was going to run.
+    await expect(collect(b)).rejects.toThrow(/^Not enough cSats: your balance is 500 cSats \(today's budget has 50 left today\)\. This step needs about [0-9.]+ cSats on an Apple\.$/);
     expect(tried).toEqual(["bestfit", "network:apple"]);
     expect(hints[0]).toMatchObject({ computeClass: "apple", maxCSats: 50 });
   });

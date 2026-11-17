@@ -9,7 +9,7 @@
   import { Play, Pause, RotateCw, Pencil, Trash2, History, MessageSquare, Ellipsis, CircleAlert, X, CalendarClock, Cpu, Folder, PanelRight, Copy, FolderOpen, GitPullRequest, GitBranch, Zap, RefreshCw } from "@lucide/svelte";
   import { approveBotCall, botHistory, botMessages, cancelBotRun, deleteBot, getBot, runBot, sendBotMessage, syncBotRepository, updateBot, botErrorText } from "../lib/api";
   import {
-    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, botModeOf, autoStatus, botCompute, botPlacement, checksIn, routineText, botStatusLine, computeText, failureNotice, foldBotReply, folderName, formatCSats, prCards, readableSummary, reconcileRuns, relativeTime, runSourceText, shownReplyText, scheduleText, statusChip,
+    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, botModeOf, autoStatus, botCompute, botPlacement, checksIn, routineText, botSubtitle, computeText, failureNotice, foldBotReply, folderName, formatCSats, prCards, readableSummary, reconcileRuns, relativeTime, runSourceText, shownReplyText, scheduleText, statusChip,
     triggerStatusText, triggerText,
     type Bot, type BotMessage, type BotRun, type NoticeAction,
   } from "../lib/bots";
@@ -21,6 +21,8 @@
     openShell(url).catch(() => window.open(url, "_blank", "noopener"));
   }
   import type { ToolEvent } from "../lib/types";
+  import { FAILURE_LINE, collapseFailures, splitModelError } from "../lib/failures";
+  import { balanceState, neededCSatsIn, requestBuy, suggestedTopUpSats } from "../lib/buy-csats";
   import { choiceLabel } from "../lib/compute-choice";
   import { refreshBots } from "../lib/bots-store";
   import { NO_VISION, type AttachmentPayload } from "../lib/attachments";
@@ -136,9 +138,13 @@
   });
   const budgetPct = $derived(bot.budgetCSatsPerDay ? Math.min(100, (bot.spentTodayCSats / bot.budgetCSatsPerDay) * 100) : 0);
 
+  function buy() {
+    requestBuy({ amountSats: suggestedTopUpSats({ budgetCSatsPerDay: bot.budgetCSatsPerDay, stepCSats: neededCSatsIn(bot.lastRun?.error) }), returnTo: bot.name });
+    onOpenSettings?.("plan");
+  }
   function noticeAction(a: NoticeAction) {
-    if (a === "buy") onOpenSettings?.("plan");
-    else if (a === "edit") onEdit(bot);
+    if (a === "buy") buy();
+    else if (a === "edit" || a === "budget") onEdit(bot);
     else void act(() => updateBot(bot.id, { compute: { policy: "local_only" } }));
   }
 
@@ -167,6 +173,22 @@
   let runs = $state<BotRun[]>([]);
   /** The history as shown: it agrees with the details panel's Last run, and shows it before the history loads. */
   const shownRuns = $derived(reconcileRuns(runs, bot.lastRun));
+  /**
+   * The conversation as shown: a reply that is only a model error is a compact line, and the same
+   * failure run after run is one line with a count, not a bubble per attempt.
+   */
+  const shownMessages = $derived(
+    collapseFailures(
+      messages,
+      (m) => {
+        if (m.role !== "assistant") return null;
+        const turn = foldBotReply(m.events, []);
+        const { text, error } = splitModelError(turn.text || m.content);
+        return error && !text.trim() && !turn.toolEvents.length ? { id: m.id, error } : null;
+      },
+      (m) => m.role === "event",
+    ),
+  );
   /** The conversation and history have loaded once for this bot (until then there's no empty state). */
   let loaded = $state(false);
   let view = $state<"chat" | "history">("chat");
@@ -336,7 +358,7 @@
         <span class="chip {chip.tone}" data-testid="bot-status-chip" title={bot.activity ?? chip.text}>{chip.text}</span>
       </div>
       {#if panelOpen}
-        <div class="meta status-line" title={botStatusLine(bot)}>{botStatusLine(bot)}</div>
+        <div class="meta status-line" data-testid="bot-subtitle" title={botSubtitle(bot)}>{botSubtitle(bot)}</div>
       {:else}
       <div class="meta" data-testid="bot-meta">
         <span class="m" title="Routine"><CalendarClock size={12} />{routineText(bot)}{!bot.enabled && (bot.schedule || checksIn(bot)) ? " · paused" : ""}</span>
@@ -392,10 +414,8 @@
         <div class="notice-detail">{notice.detail}</div>
       </div>
       <div class="notice-actions">
-        {#each notice.actions as a (a)}
-          {#if a !== "buy" || onOpenSettings}
-            <button onclick={() => noticeAction(a)}>{NOTICE_ACTION_TEXT[a]}</button>
-          {/if}
+        {#each notice.actions.filter((a) => a !== "buy" || onOpenSettings) as a, i (a)}
+          <button class:primary={i === 0 && a === "buy"} onclick={() => noticeAction(a)}>{NOTICE_ACTION_TEXT[a]}</button>
         {/each}
       </div>
       <button class="notice-close" onclick={() => dismiss(notice.runId)} aria-label="Dismiss" title="Dismiss"><X size={14} /></button>
@@ -417,7 +437,12 @@
           <p>{bot.enabled && bot.nextRun ? `${bot.name} works on its own: ${auto.text.toLowerCase()}.` : bot.enabled ? `Message ${bot.name} to get it started.` : `${bot.name} is paused. Resume it from the ⋯ menu, or message it.`} {bot.schedule || checksIn(bot) ? `${routineText(bot)}.` : ""}</p>
         </div>
       {/if}
-      {#each messages as m (m.id)}
+      {#each shownMessages as row (row.kind === "item" ? row.item.id : `failure-${row.id}`)}
+        {#if row.kind === "failure"}
+          <!-- A failed run: one compact line (repeats collapsed); the banner above has the story and the action. -->
+          <div class="failure-line" data-testid="bot-failure-line" title={row.error}>{FAILURE_LINE[row.failure]}{#if row.count > 1}{" "}<span class="times">×{row.count}</span>{/if}</div>
+        {:else}
+        {@const m = row.item}
         {#if m.role === "event"}
           <div class="event">{m.content} · {when(m.atMs)}</div>
         {:else if m.role === "user"}
@@ -431,7 +456,7 @@
             <div class="bot-turn-body">
               <ChatMessage
                 role="assistant"
-                content={shownReplyText(turn.text)}
+                content={shownReplyText(splitModelError(turn.text).text)}
                 streaming={run?.status === "running" || run?.status === "needs_approval"}
                 toolEvents={withoutPendingBars(turn.toolEvents)}
                 turnId={turn.turnId}
@@ -482,6 +507,7 @@
               {/each}
             </div>
           </div>
+        {/if}
         {/if}
       {/each}
       {#if pendingPlan}
@@ -632,6 +658,12 @@
           <div class="d-label">Compute</div>
           <div class="d-row"><Cpu size={14} /><span class="d-val">{computeLabel}</span><button class="link" onclick={() => onEdit(bot)}>Change</button></div>
         </div>
+        {#if $balanceState.low && onOpenSettings}
+          <div class="d-section low" data-testid="bot-running-low">
+            <span>Running low: {formatCSats($balanceState.cSats ?? 0)} cSats left.</span>
+            <button class="link" onclick={buy}>Buy cSats</button>
+          </div>
+        {/if}
         <div class="d-section">
           <div class="d-label">Budget today</div>
           {#if bot.budgetCSatsPerDay != null}
@@ -1376,6 +1408,27 @@
   }
   .notice-actions button:hover {
     border-color: var(--text-secondary);
+  }
+  .notice-actions button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--on-accent);
+  }
+  .failure-line {
+    text-align: center;
+    font-size: 11.5px;
+    color: var(--text-muted);
+    padding: 6px 0;
+  }
+  .failure-line .times {
+    font-variant-numeric: tabular-nums;
+  }
+  .d-section.low {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
   }
   .notice-close {
     border: none;

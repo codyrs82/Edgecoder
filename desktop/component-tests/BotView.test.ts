@@ -20,6 +20,8 @@ vi.mock("../src/lib/bots-store", () => ({ refreshBots: vi.fn().mockResolvedValue
 Element.prototype.scrollTo ??= function () {};
 
 import BotView from "../src/pages/BotView.svelte";
+import { get } from "svelte/store";
+import { balanceState, buyRequest } from "../src/lib/buy-csats";
 import type { Bot } from "../src/lib/bots";
 
 const error = "Not enough cSats for this request (it sets aside up to 91.8 cSats; unused cSats come back).";
@@ -85,13 +87,15 @@ describe("BotView header", () => {
     expect(document.querySelector(".bot-head")?.textContent).not.toMatch(/Not enough cSats/);
   });
 
-  it("stuck: the header says it paused itself and why; the sidebar line and chip say Stuck; no Run now or Pause buttons", async () => {
+  it("stuck: the chip says Stuck, the header just Paused · stuck, the banner why; no Run now or Pause buttons", async () => {
     const stuck = { atMs: Date.now(), problem: "npm test: package.json not found", runs: 3 };
     setup(harry({ status: "paused", enabled: false, stuck, nextRun: undefined, lastRun: { id: "run_3", trigger: "heartbeat", startedAtMs: 0, endedAtMs: 1, status: "done", summary: "I am ready to create package.json.", cSats: 0 } }));
     const st = screen.getByTestId("bot-auto-status");
-    expect(st.textContent).toBe("Paused: Harry kept hitting the same problem (npm test: package.json not found). Tell it what to do, or resume.");
-    expect(st.className).toMatch(/warn/);
+    expect(st.textContent).toBe("Paused · stuck");
     expect(screen.getByTestId("bot-status-chip").textContent).toBe("Stuck");
+    // The full story is in the banner, once.
+    expect(screen.getByTestId("bot-failure-notice").textContent).toMatch(/Harry kept hitting the same problem \(npm test: package\.json not found\)/);
+    expect(document.body.textContent!.split("kept hitting the same problem").length - 1).toBe(1);
     expect(screen.queryByRole("button", { name: /Run now/ })).toBeNull();
     expect(within(document.querySelector(".bot-head") as HTMLElement).queryByRole("button", { name: /Pause|Resume/ })).toBeNull();
     // The ⋯ menu resumes it.
@@ -100,10 +104,10 @@ describe("BotView header", () => {
     expect(api.updateBot).toHaveBeenCalledWith("bot_h", { enabled: true });
   });
 
-  it("stuck with the details panel open: the status line reads Stuck: same result 3 runs in a row", () => {
+  it("stuck with the details panel open: the subtitle is its routine, not the problem", () => {
     localStorage.setItem("edgecoder-bot-panel", "open");
     setup(harry({ status: "paused", enabled: false, stuck: { atMs: 1, problem: "npm test: package.json not found", runs: 3 }, nextRun: undefined }));
-    expect(document.querySelector(".status-line")?.textContent).toBe("Stuck: same result 3 runs in a row");
+    expect(document.querySelector(".status-line")?.textContent).toBe("Every 30 minutes");
   });
 
   it("shows when it next works on its own", () => {
@@ -216,14 +220,74 @@ describe("BotView failure notice", () => {
   it("explains the failure in plain words with actions, and can be dismissed", async () => {
     const p = setup();
     const notice = screen.getByTestId("bot-failure-notice");
+    expect(notice.textContent).toMatch(/Out of cSats/);
     expect(notice.textContent).toMatch(/weren't enough cSats/);
     expect(notice.textContent).not.toMatch(/91\.8/);
-    await fireEvent.click(screen.getByRole("button", { name: "Buy cSats" }));
+    // Buy cSats is the primary action; Edit budget the other.
+    const buy = screen.getByRole("button", { name: "Buy cSats" });
+    expect(buy.className).toMatch(/primary/);
+    await fireEvent.click(buy);
     expect(p.onOpenSettings).toHaveBeenCalledWith("plan");
-    await fireEvent.click(screen.getByRole("button", { name: "Switch to This computer" }));
-    expect(api.updateBot).toHaveBeenCalledWith("bot_h", { compute: { policy: "local_only" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Edit budget" }));
+    expect(p.onEdit).toHaveBeenCalled();
     await fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByTestId("bot-failure-notice")).toBeNull();
+  });
+
+  it("one error, one place: out of cSats shows the full message only in the banner", async () => {
+    localStorage.setItem("edgecoder-bot-panel", "open");
+    const broke = "Not enough cSats: your balance is 0.01 cSats (Harry's budget has 6 left today). This step needs about 0.4 cSats on a Datacenter GPU.";
+    const run = (id: string) => ({ id, trigger: "heartbeat" as const, startedAtMs: 0, endedAtMs: 1, status: "failed" as const, summary: `Failed: ${broke}`, cSats: 0, error: broke });
+    const msgs = ["r1", "r2", "r3"].flatMap((id, i) => [
+      { id: `e${i}`, role: "event", content: "Check-in", atMs: i },
+      { id: `a${i}`, role: "assistant", content: `Error contacting model: ${broke}`, atMs: i, runId: id, events: [{ type: "text", content: `Error contacting model: ${broke}` }] },
+    ]);
+    api.botMessages.mockResolvedValue(msgs);
+    api.botHistory.mockResolvedValue([run("r1"), run("r2"), run("r3")]);
+    const bot = harry({ status: "out_of_csats", compute: { policy: "network_only", computeClass: "gpu.dc" }, lastRun: run("r3") });
+    api.updateBot.mockResolvedValue(bot);
+    render(BotView, { bot, onEdit: vi.fn(), onDeleted: vi.fn(), onOpenSettings: vi.fn() });
+    await screen.findByText(/Couldn't run: out of cSats/);
+    // The banner: Out of cSats, one sentence, Buy cSats (primary) and Edit budget.
+    const notice = screen.getByTestId("bot-failure-notice");
+    expect(notice.textContent).toMatch(/Out of cSats/);
+    expect(notice.textContent).toMatch(/Your balance is 0\.01 cSats \(Harry's budget has 6 left today\)/);
+    // The full text appears exactly once on the page.
+    expect(document.body.textContent!.split("your balance is 0.01 cSats").length - 1 + document.body.textContent!.split("Your balance is 0.01 cSats").length - 1).toBe(1);
+    // The header: the chip, and what's next; no error text, no "Last run failed".
+    expect(screen.getByTestId("bot-status-chip").textContent).toBe("Out of cSats");
+    expect(screen.getByTestId("bot-auto-status").textContent).toBe("Paused · resumes after top-up");
+    expect(screen.getByTestId("bot-subtitle").textContent).toBe("Every 30 minutes");
+    expect(document.querySelector(".bot-head")?.textContent).not.toMatch(/Not enough|Last run failed|No model on the network/);
+    // The conversation: one compact line, repeats collapsed, no raw error bubbles.
+    const lines = screen.getAllByTestId("bot-failure-line");
+    expect(lines).toHaveLength(1);
+    expect(lines[0].textContent).toBe("Couldn't run: out of cSats ×3");
+    expect(document.body.textContent).not.toMatch(/Error contacting model/);
+  });
+
+  it("a class with no machines: the banner names it and offers Edit compute", async () => {
+    const err = "No GPU machines online. Available now: Datacenter GPU (1), Apple (2), CPU (9). Choose another compute option, or try again when one is back.";
+    const p = setup(harry({ compute: { policy: "network_only", computeClass: "gpu" }, lastRun: { id: "run_2", trigger: "schedule", startedAtMs: 0, endedAtMs: 1, status: "failed", summary: `Failed: ${err}`, cSats: 0, error: err } }));
+    const notice = screen.getByTestId("bot-failure-notice");
+    expect(notice.textContent).toMatch(/No GPU machines online/);
+    expect(notice.textContent).toMatch(/Available now: Datacenter GPU \(1\), Apple \(2\), CPU \(9\)/);
+    expect(screen.queryByRole("button", { name: "Buy cSats" })).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "Edit compute" }));
+    expect(p.onEdit).toHaveBeenCalled();
+  });
+
+  it("running low: a gentle Buy cSats in the details panel", async () => {
+    localStorage.setItem("edgecoder-bot-panel", "open");
+    balanceState.set({ cSats: 0.4, low: true });
+    const p = setup(harry({ status: "idle", lastRun: undefined }));
+    const low = screen.getByTestId("bot-running-low");
+    expect(low.textContent).toMatch(/Running low: 0\.4 cSats left/);
+    await fireEvent.click(within(low).getByRole("button", { name: "Buy cSats" }));
+    expect(p.onOpenSettings).toHaveBeenCalledWith("plan");
+    expect(get(buyRequest)).toMatchObject({ returnTo: "Harry", amountSats: 5_000 });
+    balanceState.set({ cSats: null, low: false });
+    buyRequest.set(null);
   });
 
   it("shows no notice when the last run didn't fail", () => {

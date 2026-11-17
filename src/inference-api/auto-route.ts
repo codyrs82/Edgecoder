@@ -72,6 +72,12 @@ export interface RouteInputs {
   classPrice: Record<string, number>;
   /** Your cSat balance, when known (undefined: not connected or not reported). */
   balanceCSats?: number;
+  /**
+   * Machines online per class that have a model (the coordinator's /inference/models
+   * classes[c].agents), when the coordinator reports it: for "No GPU machines online. Available
+   * now: Datacenter GPU (1), CPU (9)".
+   */
+  classAgents?: Record<string, number>;
 }
 
 export interface Workload {
@@ -282,14 +288,24 @@ export function rankRoutes(w: Workload, inp: RouteInputs): Route[] {
 }
 
 /**
- * The network's places for a job, fastest class first. `only`: that class alone (Network GPU only,
- * …), even CPU for agent work, which Auto otherwise skips as too slow.
+ * The classes a "Network <class> only" choice runs on: "gpu" is the GPU family (consumer and
+ * datacenter GPUs alike, what people mean by "GPU only"); every other class is itself
+ * ("gpu.dc" stays datacenter GPUs only). The coordinator's best fit filters the same way
+ * (src/swarm/coordinator/routing.ts).
+ */
+export function classFamily(cls: string): string[] {
+  return cls === "gpu" ? ["gpu", "gpu.dc"] : [cls];
+}
+
+/**
+ * The network's places for a job, fastest class first. `only`: that class (its family: "gpu" is
+ * any GPU) alone (Network GPU only, …), even CPU for agent work, which Auto otherwise skips as too slow.
  */
 export function networkRoutes(w: Workload, inp: RouteInputs, only?: string): Route[] {
   const cx = w.complexity ? levelText(w.complexity.level) : "";
   const usable = (models: string[]) => (w.needsTools ? models.filter(callsTools) : models);
   const net: Array<Route & { cost: number }> = [];
-  for (const cls of only ? [only] : Object.keys(CLASS_SPEED)) {
+  for (const cls of only ? classFamily(only) : Object.keys(CLASS_SPEED)) {
     // Heavy work on CPU is too slow to be worth it, whatever the price (unless CPU was asked for).
     if (!only && w.heavy && cls === "cpu") continue;
     const price = inp.classPrice[cls];
@@ -361,7 +377,7 @@ export function routeFromModelId(id: string): Route | null {
   return { placement: "local", model: t, cSatsPerSecond: 0, reason: `this computer (free) · ${t}` };
 }
 
-const CLASS_NAMES: Record<string, string> = { any: "", cpu: "CPU", apple: "Apple", gpu: "GPU", "gpu.dc": "Datacenter GPU" };
+export const CLASS_NAMES: Record<string, string> = { any: "", cpu: "CPU", apple: "Apple", gpu: "GPU", "gpu.dc": "Datacenter GPU" };
 
 /**
  * What Auto decided for one model call, for status events (`route`) and the UI: where it runs, the
@@ -477,10 +493,12 @@ export interface PlanOptions {
   allowanceCSats?: number;
   /** The model id for the "model" policy (and network_only's chosen model). */
   model?: string;
-  /** network_only: the one class it may run on (undefined: any class). */
+  /** network_only: the one class it may run on ("gpu" is the GPU family: gpu and gpu.dc; undefined: any class). */
   computeClass?: string;
   /** network_only: the bot's daily budget, for the message when it's spent. */
   budgetCSats?: number | null;
+  /** Whose budget allowanceCSats is (a bot's name), for "Harry's budget has 6 left today". */
+  budgetOwner?: string;
   /**
    * Routes to leave out (routeModelId form, "network/auto@any" for the network's best fit): a bot
    * whose model answered an agent step with a plan and no tool call tries the next place once.
@@ -528,8 +546,14 @@ export function planRoutes(w: Workload, inp: RouteInputs, policy: ComputePolicy 
       const named = routeFromModelId(opts.model);
       if (!named) return [];
       const pinnedCls = cls ?? (named.placement === "network" ? named.computeClass ?? "any" : "any");
-      const r: Route = { placement: "network", model: named.model, computeClass: pinnedCls, cSatsPerSecond: 0, reason: `network ${pinnedCls === "any" ? "" : `${pinnedCls} `}only · ${named.model}` };
-      return ok(r) ? [r] : [];
+      // A family ("gpu": any GPU): each of its classes that has the model, fastest first; when the
+      // network's models aren't known, the class itself.
+      const offered = inp.networkModels.find((m) => m.model === named.model)?.classes;
+      const family = pinnedCls === "any" ? ["any"] : classFamily(pinnedCls);
+      const classes = family.length > 1 && offered ? family.filter((c) => offered.includes(c)).sort((a, b) => (CLASS_SPEED[b] ?? 0) - (CLASS_SPEED[a] ?? 0)) : [pinnedCls];
+      return (classes.length ? classes : [pinnedCls])
+        .map((c): Route => ({ placement: "network", model: named.model, computeClass: c, cSatsPerSecond: 0, reason: `network ${pinnedCls === "any" ? "" : `${pinnedCls} `}only · ${named.model}` }))
+        .filter(ok);
     }
     const sized = w.heavy && opts.agentMinParamsB && opts.agentMinParamsB > (w.minParamsB ?? 0) ? { ...w, minParamsB: opts.agentMinParamsB } : w;
     return networkRoutes(sized, inp, cls).filter(ok);
@@ -629,8 +653,91 @@ function withWhy(routes: Route[], why: string | undefined): Route[] {
   return why ? routes.map((r) => ({ ...r, why: joinWhy(r.why, why) })) : routes;
 }
 
-/** Why a policy found nowhere to run, in plain words. */
-export function noRouteMessage(policy: ComputePolicy, inp: RouteInputs, opts: PlanOptions = {}): string {
+/** cSats in a few significant digits: 0.012, 0.4, 6, 94. */
+export function fmtCSats(n: number): string {
+  if (!Number.isFinite(n)) return "?";
+  if (n >= 10) return String(Math.round(n));
+  return String(Number(n.toPrecision(2)));
+}
+
+/** "GPU", "Datacenter GPU": a class's name for messages. */
+export const className = (cls: string): string => CLASS_NAMES[cls] || cls;
+
+/**
+ * Machines online per class with a model: the coordinator's counts when it reports them, else
+ * the classes that have a model (count unknown, as -1).
+ */
+function onlineByClass(inp: RouteInputs, model?: string): Record<string, number> {
+  const out: Record<string, number> = {};
+  const offered = new Set((model ? inp.networkModels.filter((m) => m.model === model) : inp.networkModels).flatMap((m) => m.classes));
+  for (const cls of NETWORK_CLASSES) {
+    const known = inp.classAgents?.[cls];
+    // A pinned model: the class has it or not (the per-class count is for any model).
+    out[cls] = model ? (offered.has(cls) ? -1 : 0) : known !== undefined ? known : offered.has(cls) ? -1 : 0;
+  }
+  return out;
+}
+
+/**
+ * Whether the network has a machine of this class (its family: "gpu" is any GPU) with a model
+ * (`model`: that model); undefined when the network's models aren't known.
+ */
+export function classOnline(inp: RouteInputs, cls: string, model?: string): boolean | undefined {
+  if (!inp.networkModels.length && !inp.classAgents) return undefined;
+  const by = onlineByClass(inp, model);
+  return classFamily(cls).some((c) => by[c] !== 0);
+}
+
+/**
+ * Why a "Network <class> only" request found no machine, and what is there instead:
+ * "No GPU machines online. Available now: Datacenter GPU (1), Apple (2), CPU (9)."
+ */
+export function classUnavailableMessage(cls: string, inp: RouteInputs, model?: string): string {
+  const family = classFamily(cls);
+  const by = onlineByClass(inp, model);
+  const others = NETWORK_CLASSES.filter((c) => !family.includes(c) && by[c] !== 0)
+    .sort((a, b) => (CLASS_SPEED[b] ?? 0) - (CLASS_SPEED[a] ?? 0))
+    .map((c) => (by[c] > 0 ? `${className(c)} (${by[c]})` : className(c)));
+  const what = model ? `No ${className(cls)} machines online with ${model.replace(/^network\//, "")}.` : `No ${className(cls)} machines online.`;
+  return `${what} ${others.length ? `Available now: ${others.join(", ")}.` : "Nothing else is online on the network right now either."} Choose another compute option, or try again when one is back.`;
+}
+
+/**
+ * The out-of-cSats message: what may be spent (the balance, and a bot's budget left today), and
+ * about what the step needs where it was going to run. "Not enough cSats: your balance is 0.01
+ * cSats (Harry's budget has 6 left today). This step needs about 0.4 cSats on a Datacenter GPU."
+ * Every one starts "Not enough cSats" (the apps key their Buy cSats action on it).
+ */
+export function notEnoughCSatsMessage(inp: RouteInputs, opts: PlanOptions = {}, need?: { cSats?: number; computeClass?: string }): string {
+  const parts: string[] = [];
+  const bal = inp.balanceCSats;
+  const left = opts.allowanceCSats;
+  const budget = left !== undefined && Number.isFinite(left) ? `${opts.budgetOwner ? `${opts.budgetOwner}'s` : "today's"} budget has ${fmtCSats(Math.max(0, left))} left today` : "";
+  if (bal !== undefined) parts.push(`your balance is ${fmtCSats(Math.max(0, bal))} cSats${budget ? ` (${budget})` : ""}.`);
+  else if (budget) parts.push(`${budget}.`);
+  else parts.push("there aren't enough cSats for this step.");
+  const where = need?.computeClass && need.computeClass !== "any" ? ` on a${/^[AEIOU]/i.test(className(need.computeClass)) ? "n" : ""} ${className(need.computeClass)}` : " on the network";
+  if (need?.cSats !== undefined && need.cSats > 0) parts.push(`This step needs about ${fmtCSats(need.cSats)} cSats${where}.`);
+  return `Not enough cSats: ${parts.join(" ")}`;
+}
+
+/** The cheapest estimate for this step on the network (in `cls`'s family, when set), when prices are known. */
+export function cheapestNetworkEstimate(w: Workload, inp: RouteInputs, cls?: string): { cSats: number; computeClass?: string } | undefined {
+  const fam = cls && cls !== "any" ? classFamily(cls) : undefined;
+  let best: { cSats: number; computeClass?: string } | undefined;
+  for (const m of inp.networkModels) {
+    if (!m.cSatsPerMTokens || isEmbedding(m.model) || (w.needsTools && !callsTools(m.model))) continue;
+    if (fitScore(m.model, w) < 0) continue;
+    const classes = fam ? m.classes.filter((c) => fam.includes(c)) : m.classes;
+    if (!classes.length) continue;
+    const cSats = estimateNetworkCSats(w, m.cSatsPerMTokens);
+    if (!best || cSats < best.cSats) best = { cSats, computeClass: cls && cls !== "any" ? cls : classes.length === 1 ? classes[0] : undefined };
+  }
+  return best;
+}
+
+/** Why a policy found nowhere to run, in plain words. `w`: the step, for the cost estimate. */
+export function noRouteMessage(policy: ComputePolicy, inp: RouteInputs, opts: PlanOptions = {}, w?: Workload): string {
   const broke = networkAllowance(inp, opts) <= 0;
   const why =
     inp.balanceCSats !== undefined && inp.balanceCSats <= 0 ? "you have no cSats" :
@@ -642,34 +749,53 @@ export function noRouteMessage(policy: ComputePolicy, inp: RouteInputs, opts: Pl
     case "mine_only":
       return "No model is available on this computer or your machines. Install one in Settings > Models, or bring one of your machines online.";
     case "network_only": {
-      const cls = opts.computeClass && opts.computeClass !== "any" ? ` ${CLASS_NAMES[opts.computeClass] ?? opts.computeClass}` : "";
+      const clsId = opts.computeClass && opts.computeClass !== "any" ? opts.computeClass : undefined;
+      const cls = clsId ? ` ${className(clsId)}` : "";
       if (opts.allowanceCSats !== undefined && opts.allowanceCSats <= 0) {
         return `Network${cls} only: no cSats left today${opts.budgetCSats != null ? ` (budget ${opts.budgetCSats})` : ""}. It never runs on this computer or your machines; it resumes tomorrow, or raise the daily budget.`;
       }
-      if (inp.balanceCSats !== undefined && inp.balanceCSats <= 0) return `Network${cls} only: no cSats left (balance 0). Buy cSats on Plan & usage.`;
-      if (broke) return `Network${cls} only: ${why}.`;
-      if (!inp.networkModels.length && inp.balanceCSats === undefined) return `Network${cls} only: this computer isn't connected to the network. Sign in and let the agent start.`;
-      return `Network${cls} only: no network${cls} machine has a model for this step right now${opts.model ? ` (${opts.model.replace(/^network\//, "")})` : ""}. Try again later or choose another class.`;
+      if (!inp.networkModels.length && inp.balanceCSats === undefined && !inp.classAgents) return `Network${cls} only: this computer isn't connected to the network. Sign in and let the agent start.`;
+      const model = opts.model ? routeFromModelId(opts.model)?.model : undefined;
+      // No machine of the class: that, and what is there instead (before any money question).
+      if (clsId && classOnline(inp, clsId, model) === false) return classUnavailableMessage(clsId, inp, model);
+      const est = w ? cheapestNetworkEstimate(w, inp, clsId) : undefined;
+      if (broke || (est && est.cSats > networkAllowance(inp, opts))) return notEnoughCSatsMessage(inp, opts, est ? { ...est, computeClass: clsId ?? est.computeClass } : undefined);
+      return `Network${cls} only: no network${cls} machine has a model for this step right now${model ? ` (${model})` : ""}. Try again later or choose another class.`;
     }
     case "model":
-      return opts.model?.startsWith("network/")
-        ? `Can't run ${opts.model.slice(8)} on the network: ${why}. Buy cSats, or pick a model on this computer.`
-        : `The chosen model (${opts.model ?? "none"}) isn't available right now.`;
-    default:
+      if (opts.model?.startsWith("network/")) {
+        // planRoutes leaves a network pin out only when it can't be paid for.
+        const r = routeFromModelId(opts.model);
+        const price = inp.networkModels.find((m) => m.model === r?.model)?.cSatsPerMTokens;
+        return notEnoughCSatsMessage(inp, opts, w && price ? { cSats: estimateNetworkCSats(w, price), computeClass: r?.computeClass } : undefined);
+      }
+      return `The chosen model (${opts.model ?? "none"}) isn't available right now.`;
+    default: {
+      // The network has a model for it, but it costs more than may be spent: a money problem.
+      const est = w && !broke ? cheapestNetworkEstimate(w, inp) : undefined;
+      if (est && est.cSats > networkAllowance(inp, opts)) {
+        return `${notEnoughCSatsMessage(inp, opts, est)} No model on this computer or your machines can take it instead: install one in Settings > Models, or buy cSats.`;
+      }
       return broke
         ? `Nothing to run on: no model is installed on this computer or your machines, and the network can't be used because ${why}. Install a model in Settings > Models, or buy cSats.`
         : "No model fits this request: install a coder model that calls tools (7B or larger, e.g. qwen2.5-coder:7b or qwen3.5:9b) on one of your machines, or try again when the network has one.";
+    }
   }
+}
+
+/** A machine's class as the four classes ("gpu.dc40" → "gpu.dc", "apple.m" → "apple"). */
+function baseClassOf(c: string): string {
+  return c.startsWith("gpu.dc") ? "gpu.dc" : c.startsWith("gpu") ? "gpu" : c.startsWith("apple") ? "apple" : "cpu";
 }
 
 /** Route inputs from the compute overview, your reservations and this computer's models. */
 export function routeInputsFrom(input: {
   localModels: string[];
   selfAgentId?: string;
-  machines?: Array<{ agentId: string; online: boolean; models: string[] }>;
+  machines?: Array<{ agentId: string; online: boolean; models: string[]; computeClass?: string }>;
   networkModels?: Array<{ model: string; classes: string[]; cSatsPerMTokens?: { input: number; output: number } }>;
   balanceCSats?: number;
-  classes?: Record<string, { cSatsPerSecondBaseTier: number }>;
+  classes?: Record<string, { cSatsPerSecondBaseTier: number; agents?: number }>;
   leases?: Array<{ id: string; computeClass: string; status: string; endMs: number; models: string[] }>;
   now?: number;
 }): RouteInputs {
@@ -681,5 +807,15 @@ export function routeInputsFrom(input: {
     networkModels: input.networkModels ?? [],
     classPrice: Object.fromEntries(Object.entries(input.classes ?? {}).map(([k, v]) => [k, v.cSatsPerSecondBaseTier])),
     ...(typeof input.balanceCSats === "number" ? { balanceCSats: input.balanceCSats } : {}),
+    ...(Object.values(input.classes ?? {}).some((v) => typeof v.agents === "number")
+      ? {
+          // Other people's machines: the coordinator counts yours too, but the network leg never runs there.
+          classAgents: Object.fromEntries(
+            Object.entries(input.classes ?? {})
+              .filter(([, v]) => typeof v.agents === "number")
+              .map(([k, v]) => [k, Math.max(0, (v.agents as number) - (input.machines ?? []).filter((m) => m.online && m.models.length > 0 && m.computeClass && baseClassOf(m.computeClass) === k).length)]),
+          ),
+        }
+      : {}),
   };
 }

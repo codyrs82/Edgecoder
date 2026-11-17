@@ -14,6 +14,8 @@
   import { ChevronRight } from "@lucide/svelte";
   import { summarizeSteps, toolStepStatus } from "../lib/tool-steps";
   import { Copy, Check } from "@lucide/svelte";
+  import { FAILURE_LINE, failureKind, splitModelError } from "../lib/failures";
+  import { neededCSatsIn, requestBuy, suggestedTopUpSats } from "../lib/buy-csats";
 
   interface Props {
     role: "user" | "assistant";
@@ -41,6 +43,13 @@
   }
 
   let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, onToolAlways, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview, usage }: Props = $props();
+
+  /** A failed reply: its text, and the error as one compact notice (with Buy cSats when it's money). */
+  let failed = $derived(role === "assistant" && !streaming ? splitModelError(content) : { text: content, error: undefined });
+  let failure = $derived(failed.error ? failureKind(failed.error) : null);
+  function buy() {
+    requestBuy({ amountSats: suggestedTopUpSats({ stepCSats: neededCSatsIn(failed.error) }), returnTo: "the chat" });
+  }
 
   /** A finished turn's steps start folded into their summary line. */
   let stepsOpen = $state(false);
@@ -112,7 +121,16 @@
         {/if}
       {/if}
       <!-- data-quotable: selected text here can be added to the chat as a quote (QuoteSelection). -->
-      <div data-quotable><MarkdownRenderer source={content} {onOpenInEditor} /></div>
+      {#if failed.text.trim() || !failed.error}
+        <div data-quotable><MarkdownRenderer source={failed.text} {onOpenInEditor} /></div>
+      {/if}
+      {#if failed.error && failure}
+        <!-- One compact notice instead of a raw error bubble; money problems lead to Buy cSats. -->
+        <div class="reply-failure" role="note" data-testid="reply-failure">
+          <span class="rf-text"><span class="rf-title">{FAILURE_LINE[failure]}</span>{#if failure === "csats" || failure === "class"}{" "}<span class="rf-detail">· {failed.error.replace(/^Not enough cSats:\s*/i, "")}</span>{/if}</span>
+          {#if failure === "csats"}<button type="button" class="rf-buy" onclick={buy}>Buy cSats</button>{/if}
+        </div>
+      {/if}
       {#if networkTaskId}
         <NetworkTaskCard taskId={networkTaskId} />
       {/if}
@@ -139,6 +157,10 @@
 </div>
 
 <style>
+  .reply-failure { display: flex; align-items: center; gap: 10px; margin-top: 4px; padding: 6px 10px; border-radius: 8px; background: var(--bg-surface); font-size: 12.5px; color: var(--text-secondary); }
+  .rf-text { flex: 1; min-width: 0; }
+  .rf-title { color: var(--text-primary); font-weight: 500; }
+  .rf-buy { flex-shrink: 0; border: 1px solid var(--accent); background: var(--accent); color: var(--on-accent); border-radius: 6px; padding: 3px 10px; font-size: 12px; font-weight: 600; cursor: pointer; }
   .message {
     display: flex;
     min-width: 0;

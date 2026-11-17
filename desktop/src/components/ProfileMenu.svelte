@@ -3,6 +3,7 @@
   import { open as openUrl } from "@tauri-apps/plugin-shell";
   import { computeOverview, portalWebUrl, type AuthUser } from "../lib/api";
   import { onUpdateStatus, downloadAndInstall, type UpdateStatus } from "../lib/updater";
+  import { balanceState, lowBalance, requestBuy, suggestedTopUpSats } from "../lib/buy-csats";
 
   interface Props {
     user: AuthUser;
@@ -13,6 +14,7 @@
 
   let menuOpen = $state(false);
   let cSats: number | null = $state(null);
+  let low = $state(false);
   let update: UpdateStatus = $state({ state: "idle" });
   let rowEl: HTMLDivElement | undefined = $state();
   let firstItem: HTMLButtonElement | undefined = $state();
@@ -24,9 +26,12 @@
     try {
       const ov = await computeOverview();
       cSats = ov.account?.cSats ?? null;
+      low = lowBalance(cSats, { models: ov.models ?? [] });
     } catch {
       cSats = null;
+      low = false;
     }
+    balanceState.set({ cSats, low });
   }
 
   $effect(() => {
@@ -112,6 +117,10 @@
         <span class="sub">{cSats === null ? "EdgeCoder" : `${fmt(cSats)} cSats`}</span>
       </span>
     </button>
+    {#if low}
+      <!-- Running low: one small way to top up, next to the balance. -->
+      <button class="buy-link" data-testid="balance-buy" onclick={() => requestBuy({ amountSats: suggestedTopUpSats() })} title="Your balance is running low: buy cSats">Buy</button>
+    {/if}
     <button class="gear" onclick={() => onOpenSettings()} title="Settings" aria-label="Settings"><Settings size={16} /></button>
   </div>
 </div>
@@ -123,6 +132,8 @@
     background: var(--bg-surface); color: var(--text-primary); font-size: 12.5px; cursor: pointer; text-align: left;
   }
   .row { display: flex; align-items: center; gap: 4px; }
+  .buy-link { border: none; background: none; color: var(--accent); font-size: 12px; font-weight: 600; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
+  .buy-link:hover { background: var(--bg-surface); }
   .who {
     flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; padding: 6px; border: none; border-radius: 8px;
     background: none; color: var(--text-primary); cursor: pointer; text-align: left;

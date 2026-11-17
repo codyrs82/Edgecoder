@@ -1,6 +1,7 @@
 <script lang="ts">
   import { NO_VISION, visionFor, type AttachmentPayload } from "./lib/attachments";
   import { ensureNetworkEnrollment } from "./lib/network-enrollment";
+  import { openWalletRequest } from "./lib/buy-csats";
   import TabSwitcher from "./components/TabSwitcher.svelte";
   import { menu } from "./lib/menu";
   import Toaster from "./components/ui/Toaster.svelte";
@@ -49,6 +50,8 @@
   let activeTab = $state<"chat" | "editor">("chat");
   let settingsOpen = $state(false);
   let settingsSection: string | undefined = $state(undefined);
+  // A Buy cSats button anywhere (a failure banner, a chat notice, the balance): the Wallet page.
+  $effect(() => openWalletRequest.subscribe((n) => { if (n) openSettings("plan"); }));
   function openSettings(section?: string) {
     if (section === "guide") return openGuide();
     settingsSection = section;

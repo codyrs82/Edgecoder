@@ -5,6 +5,7 @@
   import { Command, Popover } from "bits-ui";
   import { ChevronDown, Check, Laptop, Server, Globe, Lock, Search, Plus, Zap, KeyRound } from "@lucide/svelte";
   import { computeOverview, getFrontierStatus, getOllamaTags, listReservations, type ComputeOverview, type Reservation } from "../lib/api";
+  import { classFamily } from "../lib/compute-availability";
   import { CLASS_LABELS, choiceId, choiceLabel, frontierName, parseChoice, shortModel } from "../lib/compute-choice";
 
   interface Props {
@@ -14,8 +15,15 @@
     onOpenSettings?: (section: string) => void;
     /** Open upward (the picker sits at the bottom of the window). */
     up?: boolean;
+    /**
+     * Network only (a bot's "Network <class> only"): list just these network models (what the
+     * class serves now) and no local, own, reserved or frontier rows; null/undefined: everything.
+     */
+    networkModels?: string[] | null;
+    /** With networkModels: the class whose chips to offer ("gpu" means any GPU). */
+    networkClass?: string;
   }
-  let { selected, onSelect, onOpenSettings, up = true }: Props = $props();
+  let { selected, onSelect, onOpenSettings, up = true, networkModels: onlyModels = null, networkClass }: Props = $props();
 
   let open = $state(false);
   let loading = $state(false);
@@ -34,6 +42,9 @@
   let current = $derived(parseChoice(selected));
 
   const CLASSES = ["any", "cpu", "apple", "gpu", "gpu.dc"];
+  const family = $derived(networkClass ? classFamily(networkClass) : null);
+  /** The class chips a network model offers (only its own classes; under a class card only that family's). */
+  const chipsFor = (classes: string[]) => (family ? ["any"] : CLASSES.filter((c) => c === "any" || classes.includes(c)));
 
   async function refresh() {
     loading = true;
@@ -76,17 +87,18 @@
   let myModels = $derived.by(() => {
     const counts = new Map<string, number>();
     // Your other machines: this computer's own models are listed above.
+    if (onlyModels) return [];
     for (const m of overview?.account?.machines ?? []) if (m.online && m.agentId !== overview?.selfAgentId) for (const model of m.models) counts.set(model, (counts.get(model) ?? 0) + 1);
     return [...counts.entries()].map(([model, machines]) => ({ model, machines })).filter((x) => match(x.model));
   });
   // Restricted (security research) models run only on your own or reserved machines: never offered as network compute.
-  let networkModels = $derived((overview?.models ?? []).filter((m) => !m.restricted && match(m.model)));
-  let localMatches = $derived(localModels.filter(match));
+  let networkModels = $derived((overview?.models ?? []).filter((m) => !m.restricted && match(m.model) && (!onlyModels || onlyModels.includes(m.model))));
+  let localMatches = $derived(onlyModels ? [] : localModels.filter(match));
   let leaseModels = $derived(
-    leases.flatMap((r) => (r.models.length ? r.models : r.model ? [r.model] : []).filter(match).map((model) => ({ r, model, id: choiceId({ where: "reserved", reservationId: r.id, model }) }))),
+    (onlyModels ? [] : leases).flatMap((r) => (r.models.length ? r.models : r.model ? [r.model] : []).filter(match).map((model) => ({ r, model, id: choiceId({ where: "reserved", reservationId: r.id, model }) }))),
   );
   // While searching, the two Auto rows show only if they match, so Enter picks the first model found.
-  let frontierMatches = $derived(frontierModels.filter((id) => match(id) || match(frontierName(id))));
+  let frontierMatches = $derived((onlyModels ? [] : frontierModels).filter((id) => match(id) || match(frontierName(id))));
   let showAuto = $derived(match("auto"));
   let nothing = $derived(!showAuto && !frontierMatches.length && !localMatches.length && !myModels.length && !leaseModels.length && !networkModels.length);
 </script>
@@ -211,14 +223,14 @@
                     <span class="meta">{m.agents} machine{m.agents === 1 ? "" : "s"}{#if m.cSatsPerMTokens} · {m.cSatsPerMTokens.input} in / {m.cSatsPerMTokens.output} out{/if}</span>
                   </Command.GroupHeading>
                   <Command.GroupItems class="chips">
-                    {#each CLASSES.filter((c) => c === "any" || m.classes.includes(c)) as cls (cls)}
+                    {#each chipsFor(m.classes) as cls (cls)}
                       {@const id = choiceId({ where: "network", model: m.model, computeClass: cls })}
                       <Command.Item
                         class="chip {selected === id ? 'current' : ''}"
                         value={id}
                         onSelect={() => pick(id)}
                         aria-label="{shortModel(m.model)}, {CLASS_LABELS[cls]}{selected === id ? ', current choice' : ''}"
-                        title={cls === "any" ? "Any machine that has it (the fastest free one)" : `Only ${CLASS_LABELS[cls]} machines; same price per token, different speed`}
+                        title={cls === "any" ? "Any machine that has it (the fastest free one)" : `Only ${CLASS_LABELS[cls]} machines${m.agentsByClass?.[cls] ? ` (${m.agentsByClass[cls]} online)` : ""}; same price per token, different speed`}
                       >
                         {CLASS_LABELS[cls]}
                       </Command.Item>

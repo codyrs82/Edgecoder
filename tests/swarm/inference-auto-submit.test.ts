@@ -157,6 +157,8 @@ describe("/inference/submit with model auto", () => {
     const capped = await submitAuto({ messages: [{ role: "user", content: "hello there" }], routing: { maxCSats: 0.0000001 } });
     expect(capped.r.statusCode).toBe(409);
     expect(capped.r.json()).toMatchObject({ error: "no_route_fits", detail: expect.stringMatching(/cSats ceiling/), routing: { model: null } });
+    // reason "price": a money problem (the apps say "Not enough cSats"), with what the step needs.
+    expect(capped.r.json()).toMatchObject({ reason: "price", neededCSats: expect.any(Number) });
     const mine = await submitAuto({ messages: [{ role: "user", content: "hello" }], target: "mine" });
     expect(mine.r.statusCode).toBe(400);
     expect(mine.r.json().error).toBe("auto_network_only");
@@ -166,6 +168,8 @@ describe("/inference/submit with model auto", () => {
     const r = await submitAuto({ messages: [{ role: "user", content: "hello" }], computeClass: "gpu" });
     expect(r.r.statusCode).toBe(409);
     expect(r.r.json().error).toBe("no_route_fits");
+    // No GPU of either kind here (every agent is CPU): no machine, not money, and which class.
+    expect(r.r.json()).toMatchObject({ reason: "none", computeClass: "gpu" });
   });
 });
 
@@ -187,6 +191,11 @@ describe("the portal's coordinator choice is kept on the routing decision", () =
     const res = await app.inject({ method: "GET", url: "/inference/models", remoteAddress: REMOTE, headers: { "x-mesh-token": MESH } });
     expect(res.statusCode, res.body).toBe(200);
     expect(res.json().load).toEqual({ pickupP90Ms: expect.anything(), callP50Ms: expect.anything() });
+    // Machines online per class (the apps' "2 online" and "Available now: …"), and per model.
+    const body = res.json();
+    expect(body.classes.cpu.agents).toBeGreaterThanOrEqual(3);
+    expect(body.classes["gpu.dc"].agents).toBe(0);
+    expect(body.models.find((m: { model: string }) => m.model === "qwen2.5-coder:7b").agentsByClass).toEqual({ cpu: 2 });
   });
 
   test("a named-model call the portal placed is logged with which coordinator and why", async () => {

@@ -299,3 +299,21 @@ describe("ChatInput attachments", () => {
     await waitFor(() => expect(onSend).toHaveBeenCalledWith("look at this", [expect.objectContaining({ name: "x.csv" })]));
   });
 });
+
+describe("ChatInput: running low", () => {
+  it("shows a gentle Buy cSats only when the balance is low", async () => {
+    const { balanceState, openWalletRequest } = await import("../src/lib/buy-csats");
+    const { get } = await import("svelte/store");
+    balanceState.set({ cSats: 0.3, low: true });
+    render(ChatInput, { onSend: vi.fn() });
+    const low = screen.getByTestId("composer-running-low");
+    expect(low.textContent).toMatch(/Running low on cSats/);
+    const before = get(openWalletRequest);
+    await fireEvent.click(screen.getByRole("button", { name: "Buy cSats" }));
+    expect(get(openWalletRequest)).toBe(before + 1);
+    cleanup();
+    balanceState.set({ cSats: 500, low: false });
+    render(ChatInput, { onSend: vi.fn() });
+    expect(screen.queryByTestId("composer-running-low")).toBeNull();
+  });
+});

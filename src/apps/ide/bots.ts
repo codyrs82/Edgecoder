@@ -296,6 +296,23 @@ export interface BotAutoState {
   stuckClearedAtMs?: number;
   /** Commands not to ask about again on its own: they failed after you allowed them, or you said no. */
   blocked?: KnownBlock[];
+  /**
+   * Network only, and a run failed for lack of cSats: it starts nothing on its own (status "Out of
+   * cSats") until the balance goes up (a top-up), the day turns (the budget resets), or you edit,
+   * resume or message it. The balance it saw then, when known.
+   */
+  outOfCSats?: { atMs: number; day: number; balanceCSats?: number };
+}
+
+/** A run's failure for lack of cSats (auto-route.ts notEnoughCSatsMessage). */
+export function isOutOfCSatsError(error: string | undefined): boolean {
+  return !!error && /^(Error contacting model: )?Not enough cSats\b/.test(error.trim());
+}
+
+/** "your balance is 0.01 cSats" → 0.01. */
+function balanceIn(error: string): number | undefined {
+  const m = /your balance is ([0-9.]+) cSats/.exec(error);
+  return m ? Number(m[1]) : undefined;
 }
 
 /**
@@ -377,7 +394,7 @@ export interface BotMessage {
   attachments?: SavedAttachment[];
 }
 
-export type BotStatus = "idle" | "running" | "needs_approval" | "paused" | "over_budget" | "error";
+export type BotStatus = "idle" | "running" | "needs_approval" | "paused" | "over_budget" | "out_of_csats" | "error";
 
 /** What it runs next on its own: kind and when (absent: nothing until a message or GitHub event). */
 export interface BotNextRun {
@@ -792,6 +809,8 @@ export class BotManager {
       fingerprint?: (root: string) => Promise<string | null>;
       /** "Always allow" rules per project (shared with chat and sessions); default: in memory. */
       permissions?: PermissionStore;
+      /** Your cSat balance now (undefined: unknown), to resume bots paused out of cSats after a top-up. */
+      balance?: () => Promise<number | undefined>;
     },
   ) {
     this.approvals = deps.approvals ?? new Map();
@@ -1018,10 +1037,15 @@ export class BotManager {
   }
 
   /** Why the bot can't start a run on its own now (null: it can). */
-  private autoHold(bot: BotConfig, now = this.now()): "paused" | "busy" | "budget" | "run_cap" | null {
+  private autoHold(bot: BotConfig, now = this.now()): "paused" | "busy" | "budget" | "run_cap" | "csats" | null {
     if (!bot.enabled) return "paused";
     if (this.active.has(bot.id)) return "busy";
     if (this.overBudget(bot)) return "budget";
+    if (bot.auto?.outOfCSats) {
+      // A new day resets the budget: worth one more try.
+      if (bot.auto.outOfCSats.day !== startOfDay(now)) delete bot.auto.outOfCSats;
+      else return "csats";
+    }
     if (this.autoRunsToday(bot.id, now) >= bot.maxRunsPerDay) return "run_cap";
     return null;
   }
@@ -1047,6 +1071,7 @@ export class BotManager {
   tick(now = this.now()): string[] {
     const started: string[] = [];
     let changed = false;
+    this.checkTopUp(now);
     for (const bot of this.bots) {
       if (!bot.enabled) continue;
       const auto = (bot.auto ??= { idleStreak: 0, followUps: 0 });
@@ -1061,6 +1086,7 @@ export class BotManager {
           this.noteHold(bot, hold, due.kind === "start" ? "starting work" : "a follow-up", now);
           continue;
         }
+        if (hold === "csats") continue;
         if (this.runNow(bot.id, due.kind, undefined, due.reason).started) started.push(bot.id);
         continue;
       }
@@ -1103,20 +1129,57 @@ export class BotManager {
     return started;
   }
 
+  private lastTopUpCheckMs = 0;
+  private topUpCheck: Promise<void> | null = null;
+
+  /**
+   * Bots paused out of cSats: once a minute, look at the balance; when it went up (a top-up),
+   * they work on their own again, starting now.
+   */
+  checkTopUp(now = this.now()): Promise<void> | null {
+    if (!this.deps.balance || this.topUpCheck || now - this.lastTopUpCheckMs < MINUTE) return this.topUpCheck;
+    const waiting = this.bots.filter((b) => b.auto?.outOfCSats);
+    if (!waiting.length) return null;
+    this.lastTopUpCheckMs = now;
+    this.topUpCheck = this.deps
+      .balance()
+      .then((bal) => {
+        if (bal === undefined) return;
+        let resumed = false;
+        for (const b of this.bots) {
+          const o = b.auto?.outOfCSats;
+          if (!o || !(bal > (o.balanceCSats ?? 0))) continue;
+          delete b.auto!.outOfCSats;
+          if (b.enabled && hasGoal(b)) b.auto!.due = { atMs: this.now(), kind: "start" };
+          this.note(b.id, `Resumed: your balance is ${Number(bal.toPrecision(3))} cSats`);
+          resumed = true;
+        }
+        if (resumed) {
+          this.save();
+          this.kick();
+        }
+      })
+      .catch((err) => this.deps.log?.("bot_topup_check_failed", { err: String(err) }))
+      .finally(() => {
+        this.topUpCheck = null;
+      });
+    return this.topUpCheck;
+  }
+
   /**
    * A check-in: update the repository, then run if the project changed since the last run or
    * check-in. Quiet check-ins back off (30 min, 1 h, 2 h … 8 h); after the longest wait it runs
    * anyway. Returns what happened.
    */
-  async checkIn(id: string, now = this.now()): Promise<"started" | "quiet" | "paused" | "busy" | "budget" | "run_cap" | "gone"> {
+  async checkIn(id: string, now = this.now()): Promise<"started" | "quiet" | "paused" | "busy" | "budget" | "run_cap" | "csats" | "gone"> {
     const bot = this.bots.find((b) => b.id === id);
     if (!bot) return "gone";
     const hold = this.autoHold(bot, now);
     if (hold) {
-      if (hold === "budget" || hold === "run_cap") {
+      if (hold === "budget" || hold === "run_cap" || hold === "csats") {
         // Try again after the usual wait (the budget and the run count reset at midnight).
         bot.nextRunAtMs = now + heartbeatInterval(bot.heartbeatMinutes ?? DEFAULT_HEARTBEAT_MINUTES, 0);
-        this.noteHold(bot, hold, "a check-in", now);
+        if (hold !== "csats") this.noteHold(bot, hold, "a check-in", now);
         this.save();
       }
       return hold;
@@ -1457,6 +1520,8 @@ export class BotManager {
     }
     const auto = (bot.auto ??= { idleStreak: 0, followUps: 0 });
     if (resumed) this.unstick(bot);
+    // Edited (a bigger budget, other compute) or resumed: try again rather than wait for a top-up.
+    delete auto.outOfCSats;
     if (scheduleChanged || resumed || heartbeatChanged) {
       bot.nextRunAtMs = this.nextFor(bot);
       auto.idleStreak = 0;
@@ -1524,7 +1589,9 @@ export class BotManager {
         : "running"
       : this.overBudget(bot)
         ? "over_budget"
-        : !bot.enabled
+        : bot.enabled && bot.auto?.outOfCSats
+          ? "out_of_csats"
+          : !bot.enabled
           ? "paused"
           : lastRun?.status === "failed"
             ? "error"
@@ -1614,6 +1681,8 @@ export class BotManager {
     const content = [typed, attachedLine(saved)].filter(Boolean).join("\n\n");
     this.conversation(id).push({ id: randomUUID(), role: "user", content, atMs: this.now(), ...(saved.length ? { attachments: saved } : {}) });
     this.saveConversation(id);
+    // Out of cSats: your message is a try now (it pauses again if it still can't pay).
+    if (bot.auto?.outOfCSats) delete bot.auto.outOfCSats;
     // Paused because it was stuck: your message is what it was waiting for; it works on its own again.
     if (bot.auto?.stuck) {
       this.unstick(bot);
@@ -1927,6 +1996,13 @@ export class BotManager {
       if (fp) auto.fingerprint = fp;
       bot.nextRunAtMs = now + heartbeatInterval(bot.heartbeatMinutes!, auto.idleStreak);
     }
+    // Network only and out of cSats: no more runs on its own (every 30 minutes, each failing) until a top-up.
+    if (run.status === "failed" && (bot.compute ?? LEGACY_BOT_COMPUTE).policy === "network_only" && isOutOfCSatsError(run.error)) {
+      const bal = balanceIn(run.error!);
+      auto.outOfCSats = { atMs: now, day: startOfDay(now), ...(bal !== undefined ? { balanceCSats: bal } : {}) };
+      delete auto.due;
+      return;
+    }
     if (this.pauseIfStuck(bot, run)) return;
     if (run.status !== "done" || !bot.enabled) return;
     // A reply that only says what it'll do next continues soon, but only when the run did something:
@@ -2056,7 +2132,7 @@ export function botComputeChat(
       const left = ctx.budgetLeft();
       const capable = compute.policy === "local_first" || compute.policy === "auto" || compute.policy === "network_only";
       return {
-        ...(left === null ? {} : { allowanceCSats: left }),
+        ...(left === null ? {} : { allowanceCSats: left, budgetOwner: ctx.bot.name }),
         ...(compute.model ? { model: compute.model } : {}),
         ...(compute.policy === "network_only" ? { budgetCSats: ctx.bot.budgetCSatsPerDay ?? null, ...(compute.computeClass ? { computeClass: compute.computeClass } : {}) } : {}),
         ...(capable ? { agentMinParamsB: BOT_AGENT_MIN_PARAMS_B } : {}),

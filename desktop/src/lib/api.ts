@@ -1725,10 +1725,12 @@ export interface ComputeOverview {
     networkAgents?: number;
     coordinator?: { peerId: string; url: string };
   };
-  classes?: Record<string, { label: string; cSatsPerSecondBaseTier: number }>;
+  /** agents: machines online in the class with a model (newer coordinators). */
+  classes?: Record<string, { label: string; cSatsPerSecondBaseTier: number; agents?: number }>;
   /** Network models; model calls are priced per token (cSats per million tokens in / out). */
   /** restricted: a security research tier model, listed only to entitled accounts; never a network call. */
-  models?: Array<{ model: string; agents: number; classes: string[]; cSatsPerMTokens?: { input: number; output: number }; restricted?: string }>;
+  /** agentsByClass: machines per class with the model (newer coordinators). */
+  models?: Array<{ model: string; agents: number; agentsByClass?: Record<string, number>; classes: string[]; cSatsPerMTokens?: { input: number; output: number }; restricted?: string }>;
   /** How this computer's agent chose its coordinator: from the signed registry by latency, or the fallback URL. */
   steering?: CoordinatorSteering | null;
   /** The network refused this computer's agent (its safety check blacklisted it), with the reason. */

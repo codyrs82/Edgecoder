@@ -134,7 +134,7 @@
     {:else if activeSectionId === "profile"}
       <Account {user} {onLogout} {onUserChange} />
     {:else if activeSectionId === "plan"}
-      <PlanUsage />
+      <PlanUsage onReturn={onClose} />
     {:else if activeSectionId === "usage"}
       <Usage />
     {:else if activeSectionId === "compute"}

@@ -74,8 +74,11 @@ export type ChatPiece =
     };
 
 export class ChatBackendError extends Error {
-  /** `retryAfterSec`: when a 429/503 should be tried again (sent as Retry-After). */
-  constructor(message: string, readonly status: number, readonly retryAfterSec?: number) {
+  /**
+   * `retryAfterSec`: when a 429/503 should be tried again (sent as Retry-After). `info`: a network
+   * failure as data (network-inference.ts NetworkFailureInfo), so Auto can word it.
+   */
+  constructor(message: string, readonly status: number, readonly retryAfterSec?: number, readonly info?: { code: string; reason?: string; neededCSats?: number; computeClass?: string }) {
     super(message);
   }
 }
