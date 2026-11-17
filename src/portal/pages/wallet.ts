@@ -14,6 +14,7 @@
  *
  * Under the CSP: styles in one nonce'd block, no style attributes, no inline handlers.
  */
+import * as O from "../../common/onboarding.js";
 import { CSP_NONCE } from "../csp-nonce.js";
 import { icon } from "./design-system.js";
 import { SETTINGS_HELPERS_SCRIPT } from "./settings-shell.js";
@@ -203,6 +204,7 @@ export const WALLET_CONTENT = `
         </div>
         <div class="wl-step" id="stepAmount">
           <div class="wl-faint">Pay from any Lightning wallet. Your cSats arrive the moment the payment lands.</div>
+          <div class="wl-faint u-mt-6" id="noWalletHelp"><strong>No Lightning wallet?</strong> Any Lightning wallet works: for example Cash App, Strike, Wallet of Satoshi, Phoenix, or an exchange that can send over Lightning. <a href="${O.INSTALL_LINKS.fundGuide}" target="_blank" rel="noreferrer">How to buy cSats</a></div>
           <div class="wl-testnote hidden" id="launchNote" role="note">${icon("alert", 14)}<span id="launchNoteText"></span></div>
           <div class="wl-presets" role="radiogroup" aria-label="Amount in sats">
             ${presets.map((p, i) => `<button type="button" role="radio" aria-checked="${i === 1 ? "true" : "false"}" data-amount="${p}">${p.toLocaleString("en-US")}<small>sats</small></button>`).join("")}
@@ -218,6 +220,7 @@ export const WALLET_CONTENT = `
             <div class="get"><dt>You get</dt><dd id="bdGet">20,000 cSats</dd></div>
           </dl>
           <div class="wl-faint u-mb-10" id="bdFreeNote">No purchase fee: 1 sat buys 1 cSat.</div>
+          <div class="wl-faint u-mb-10 hidden" id="bdCalls" aria-live="polite"></div>
           <button class="primary wl-primary" id="topupBtn">Fund with Lightning</button>
           <div class="wl-err hidden" id="topupError" role="alert"></div>
           <div class="wl-testnote hidden" id="topupTestNote">${icon("alert", 14)}<span id="topupTestNoteText"></span></div>
@@ -271,6 +274,7 @@ export const WALLET_CONTENT = `
             <span class="grow" id="invoiceStatus">Waiting for payment…</span>
             <span class="wl-count" id="invoiceCountdown"></span>
           </div>
+          <div class="wl-faint u-mt-6">Your balance updates by itself a few seconds after you pay. The code works for <span id="invoiceTtl">15 minutes</span>; if it runs out, nothing is charged: just make a new one.</div>
           <div class="u-mt-10"><button class="ghost sm" id="invoiceBackBtn">Choose another amount</button></div>
         </div>
 
@@ -473,7 +477,17 @@ export const WALLET_HELPERS_SCRIPT = `
     }
 `;
 
-export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
+/** The shared price helpers (src/common/onboarding.ts) as browser JS: "about N calls" for an amount. */
+export const WALLET_PRICE_LIB = [
+  "var __name = function (f) { return f; };",
+  `var MODEL_CLASSES = ${JSON.stringify(O.MODEL_CLASSES)};`,
+  `var FALLBACK_TOKEN_PRICES = ${JSON.stringify(O.FALLBACK_TOKEN_PRICES)};`,
+  `var TYPICAL_CALL = ${JSON.stringify(O.TYPICAL_CALL)};`,
+  `var FUND_EXAMPLE_CLASS = ${JSON.stringify(O.FUND_EXAMPLE_CLASS)};`,
+  ...[O.paramsFromModel, O.usdPerMToCSats, O.classPrice, O.cSatsPerCall, O.callsForCSats, O.isTestNetwork, O.testNetworkNote].map((f) => f.toString())
+].join("\n");
+
+export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + WALLET_PRICE_LIB + `
     const $ = (id) => document.getElementById(id);
     const state = { overview: null, destView: null, amount: 20000, intent: null, poll: null, tick: null, expiresAt: 0, net: null, feeBps: null };
     function fmtTime(ms) { return ms ? new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "–"; }
@@ -509,6 +523,11 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
       $("flowFeeDesc").textContent = charged ? "Set by this coordinator and kept by it" : "Buying cSats costs nothing";
       $("flowFee").textContent = valid ? fmtSats(p.fee) + " sats" : "–";
       $("flowGet").textContent = valid ? fmtSats(p.get) + " cSats" : "–";
+      // What the amount buys on a 30B coder, from live network prices (hidden without prices).
+      const o = state.overview || {};
+      const calls = valid ? callsForCSats(p.get, FUND_EXAMPLE_CLASS, { models: o.models || [], btcUsd: o.btcUsd || null }) : null;
+      $("bdCalls").classList.toggle("hidden", calls === null);
+      $("bdCalls").textContent = calls === null ? "" : "About " + fmtSats(calls) + " calls on a 30B coder model.";
       $("topupBtn").disabled = !valid;
       $("topupBtn").textContent = valid ? "Buy " + fmtSats(a) + " cSats with Lightning" : "Enter 100 to 1,000,000 sats";
     }
@@ -559,6 +578,8 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
       if (!r.ok || !r.json.invoice) { topupError((/^launch_/.test(r.json.error || "") && r.json.detail) || TOPUP_ERRORS[r.json.error] || "Could not start the payment (" + (r.json.error || r.status || "network error") + ")."); return; }
       state.intent = r.json;
       state.expiresAt = Date.now() + Number(r.json.expiresInSeconds || 0) * 1000;
+      const ttlMin = Math.round(Number(r.json.expiresInSeconds || 0) / 60);
+      $("invoiceTtl").textContent = ttlMin >= 1 ? ttlMin + (ttlMin === 1 ? " minute" : " minutes") : "a few minutes";
       const net = networkInfo(r.json.network);
       $("invoiceNet").textContent = net.test ? net.short + " · test sats" : "Lightning · mainnet";
       $("invoiceNet").className = "wl-pill" + (net.test ? "" : " ok");
@@ -715,7 +736,8 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
       state.feeBps = o.fees && o.fees.purchaseFeeBps !== null && o.fees.purchaseFeeBps !== undefined ? o.fees.purchaseFeeBps : null;
       const net = renderNetBadge(o.network);
       $("topupTestNote").classList.toggle("hidden", !net.test);
-      $("topupTestNoteText").textContent = net.test ? "This coordinator runs on " + net.short + ". Pay with a " + net.short + " wallet; these sats have no value." : "";
+      $("topupTestNoteText").textContent = net.test ? "This coordinator runs on " + net.short + ". Pay with a " + net.short + " wallet; these sats have no value." + (o.network === "signet" ? " " + testNetworkNote(o.network) : "") : "";
+      renderBreakdown();
       renderLaunch(o.launch);
       if (o.connected && o.cSats !== null) {
         $("balanceValue").textContent = fmtNum(o.cSats);

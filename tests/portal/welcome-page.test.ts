@@ -175,6 +175,44 @@ describe("/portal/welcome (Getting started on the web)", () => {
     expect(R.wzPanel(ctx("fund", { onchain: true }))).toContain("<a class='wz-btn' href='/portal/settings/plan'>Fund with Bitcoin</a>");
   });
 
+  it("fund: what 1,000 cSats buys, four numbered steps, and a pointer to reservations", () => {
+    const html = R.wzPanel(ctx("fund"));
+    expect(html).toMatch(/1,000 cSats ≈ <strong>3\d\d calls<\/strong> on a 30B coder model/);
+    expect(html).toContain("<ol class='wz-howto' data-testid='wz-fund-steps'>");
+    expect(html.match(/<li><strong>/g)?.length).toBeGreaterThanOrEqual(4);
+    expect(html).toContain("No bitcoin yet?");
+    expect(html).toContain("Any Lightning wallet works");
+    expect(html).toContain("href='/portal/settings/compute#sec-reservations'");
+    expect(html).toContain("data-action='reserve'");
+    expect(html).toContain("href='https://codyrs82.github.io/Edgecoder/guide/buy-csats'");
+    // The fund video's script focuses the button row right after the estimator.
+    expect(html).toMatch(/<\/table><\/div><p class='wz-muted'>A typical call[^<]*<\/p><\/div><div class='wz-actions'><a class='wz-btn primary' href='\/portal\/settings\/plan'>Fund with Lightning/);
+    // Without live prices the "what it buys" line is left out.
+    expect(R.wzPanel(ctx("fund", { wallet: { models: [], btcUsd: null } }))).not.toContain("data-testid='wz-buys'");
+  });
+
+  it("fund: the direct-wallet button only while PAYMENTS_DIRECT_RESERVATIONS is on", () => {
+    const launch = R.wzPanel(ctx("fund", { paths: { prepaid: true, directReservations: false, nwc: false } }));
+    expect(launch).not.toContain("data-action='direct'");
+    expect(launch).not.toMatch(/pay hosts directly|your own wallet/i);
+    expect(R.wzPanel(ctx("fund"))).not.toContain("data-action='direct'"); // paths not loaded yet
+    expect(R.wzPanel(ctx("fund", { paths: { prepaid: true, directReservations: true, nwc: false } }))).toContain("data-action='direct'");
+  });
+
+  it("fund: a test-network note off mainnet, gone on mainnet", () => {
+    const wallet = (network: string) => ({ models: [], btcUsd: 100_000, network });
+    const signet = R.wzPanel(ctx("fund", { wallet: wallet("signet") }));
+    expect(signet).toContain("data-testid='wz-test-network'");
+    expect(signet).toContain("Test network: use free test sats from faucet.mutinynet.com");
+    expect(R.wzPanel(ctx("fund", { wallet: wallet("bitcoin") }))).not.toContain("wz-test-network");
+  });
+
+  it("the page loads the payment paths for the fund step", async () => {
+    const html = await page("/portal/welcome/fund");
+    expect(html).toContain('api("/portal/api/payments/paths"');
+    expect(html).toContain("paths: null");
+  });
+
   it("checklists say done or not yet in words, and the step list marks the current step", () => {
     const html = R.wzPanel(ctx("this-machine"));
     expect(html).toContain("<span class='wz-sr'>: Done</span>");

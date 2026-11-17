@@ -12,7 +12,7 @@
   import type { OnboardingSignals, OnboardingState, StepId } from "../lib/onboarding";
   import {
     computeOverview, getCliStatus, getModelPullProgress, getOllamaTags, getOnboarding, getOnchainDeposits, getSystemMetrics,
-    getWalletOverview, installCliTool, portalWebUrl, pullModel, saveOnboarding, type OnboardingPatch,
+    getPaymentPaths, getWalletOverview, installCliTool, portalWebUrl, pullModel, saveOnboarding, type OnboardingPatch, type PaymentPaths,
   } from "../lib/api";
   import { computeChoice } from "../lib/compute-choice";
 
@@ -42,6 +42,9 @@
   let models = $state<Array<{ model: string; cSatsPerMTokens?: { input: number; output: number } }>>([]);
   let btcUsd = $state<number | null>(null);
   let onchain = $state<boolean | null>(null);
+  let network = $state<string | null>(null);
+  // Direct-payment buttons (reservations paid buyer to host) show only while that path is on.
+  let paths = $state<PaymentPaths | null>(null);
   let calls = $state(50);
   let classId = $state("35b");
   let pull = $state<{ model: string; pct: number | null; status: string; error: string } | null>(null);
@@ -55,7 +58,7 @@
   const next = $derived(O.nextStepId(ob.current, ob.goal));
   const prev = $derived(O.prevStepId(ob.current, ob.goal));
   const suggestion = $derived(O.suggestModel(hw));
-  const actions = $derived(step.actions.filter((a) => a.desktop));
+  const actions = $derived(O.actionsFor(step, "desktop", paths));
   // Rows the step's own choices don't already answer (Welcome's goal, Models' routing aren't repeated).
   const checklist = $derived(O.shownChecklist(step, "desktop"));
 
@@ -120,8 +123,11 @@
 
   async function loadWallet() {
     if (btcUsd !== null) return;
+    void getPaymentPaths().then((p) => (paths = p)).catch(() => undefined);
     try {
-      btcUsd = (await getWalletOverview()).btcUsd;
+      const w = await getWalletOverview();
+      btcUsd = w.btcUsd;
+      network = w.network ?? null;
     } catch {
       btcUsd = null;
     }
@@ -255,6 +261,8 @@
       return { ...c, per, calls: per ? O.callsPerThousand(per) : null };
     }),
   );
+  const fundBuys = $derived(O.callsForCSats(1000, O.FUND_EXAMPLE_CLASS, { models, btcUsd }));
+  const testNote = $derived(O.testNetworkNote(network));
   const selected = $derived(priceRows.find((r) => r.id === classId) ?? null);
   const statusText = (v: boolean | null) => (v === true ? "Done" : v === false ? "Not yet" : "Can't check here");
 </script>
@@ -385,6 +393,14 @@
             <p>Add your own Anthropic or OpenAI-compatible key to lead with a frontier model. Only your account uses it, and the provider bills you.</p>
           {:else if step.id === "fund"}
             {#if O.fundingOptional(ob.goal)}<p class="wz-note">You chose your own machines: they're free, so you can skip this.</p>{/if}
+            {#if fundBuys !== null}<p data-testid="wz-buys">1,000 cSats ≈ <strong>{O.groupThousands(fundBuys)} calls</strong> on a 30B coder model (about 1,000 sats).</p>{/if}
+            <h3 class="wz-sub">How to buy cSats</h3>
+            <ol class="wz-howto" data-testid="wz-fund-steps">
+              {#each O.FUND_STEPS as f (f.title)}<li><strong>{f.title}</strong> {f.body}</li>{/each}
+            </ol>
+            {#if testNote}<p class="wz-note" data-testid="wz-test-network">{testNote}</p>{/if}
+            <h3 class="wz-sub">Reserve a machine</h3>
+            <p>To hold a machine for your jobs only, use Settings → Compute. It's paid from the same cSats balance; unused time comes back when you cancel.</p>
             <div class="wz-est">
               <h3>Estimate your cost</h3>
               <label for="wz-calls">Calls per day: <strong>{calls}</strong></label>

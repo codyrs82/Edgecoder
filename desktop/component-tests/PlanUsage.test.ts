@@ -109,3 +109,21 @@ describe("Wallet: Bitcoin on-chain", () => {
     expect(screen.getByText(/On-chain · abababab/)).toBeTruthy();
   });
 });
+
+describe("Wallet: buying cSats for the first time", () => {
+  it("helps without a wallet, says what the amount buys, warns on signet with the faucet, and explains expiry", async () => {
+    api.computeOverview.mockResolvedValue({ connected: true, models: [{ model: "qwen3-coder:30b", agents: 1, classes: [], cSatsPerMTokens: { input: 322.7, output: 939.8 } }] });
+    api.getWalletOverview.mockResolvedValue({ ...overview(null), network: "signet" });
+    api.getPayoutDestination.mockResolvedValue(dest(false));
+    api.computeBuy.mockResolvedValue({ intentId: "i1", invoice: "lntbs1test", amountSats: 20_000, cSats: 20_000, feeSats: 0, network: "signet", expiresInSeconds: 900 });
+    api.computeIntent.mockResolvedValue({ status: "pending" });
+    render(PlanUsage);
+    const help = await screen.findByTestId("no-wallet-help");
+    expect(help.textContent).toMatch(/No Lightning wallet\?.*Any Lightning wallet works/);
+    await waitFor(() => expect(screen.getByTestId("buy-calls").textContent).toMatch(/^About 7,\d{3} calls on a 30B coder model\.$/));
+    await waitFor(() => expect(document.body.textContent).toContain("faucet.mutinynet.com"));
+    await fireEvent.click(screen.getByRole("button", { name: /Buy 20,000 cSats with Lightning/ }));
+    await screen.findByText("Waiting for payment…");
+    expect(document.body.textContent).toContain("The code works for 15 minutes; if it runs out, nothing is charged: just make a new one.");
+  });
+});
