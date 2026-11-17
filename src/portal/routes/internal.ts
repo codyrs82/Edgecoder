@@ -10,7 +10,7 @@ import { moduleLogger } from "../../common/logger.js";
 const logger = moduleLogger("portal-internal");
 
 /** #16: Service-to-service /internal/* routes (#40); registered inside the token-checked plugin. Moved unchanged from server.ts; server.ts passes in what it needs. */
-export function registerInternalRoutes(internal: FastifyInstance, { deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, hostApprovedFor, isDnsConfigured, requireControlPlaneAdmin, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns }: InternalRoutesDeps): void {
+export function registerInternalRoutes(internal: FastifyInstance, { autoRequestHost, deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, hostApprovedFor, isDnsConfigured, requireControlPlaneAdmin, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns }: InternalRoutesDeps): void {
   internal.addHook("onRequest", async (req, reply) => {
     if (!requireInternalToken(req as any, reply)) return reply;
   });
@@ -89,6 +89,9 @@ export function registerInternalRoutes(internal: FastifyInstance, { deleteDnsRec
           ? "ok"
           : "node_inactive";
 
+    const hostApproved = await hostApprovedFor(refreshed.ownerEmail);
+    // First connect of a machine whose owner is not a host: file a pending host request (deduped per email).
+    if (!hostApproved && !node.lastSeenMs && autoRequestHost) void autoRequestHost({ nodeId: refreshed.nodeId, nodeKind: refreshed.nodeKind, ownerEmail: refreshed.ownerEmail, lastCountryCode: refreshed.lastCountryCode });
     return reply.send({
       allowed: refreshed.active,
       reason,
@@ -101,7 +104,7 @@ export function registerInternalRoutes(internal: FastifyInstance, { deleteDnsRec
         emailVerified: refreshed.emailVerified,
         nodeApproved: refreshed.nodeApproved,
         // Host approval (src/portal/host-requests.ts): false = this node runs only its owner's own work.
-        hostApproved: await hostApprovedFor(refreshed.ownerEmail),
+        hostApproved,
         active: refreshed.active,
         sourceIp: refreshed.lastIp,
         countryCode: refreshed.lastCountryCode,

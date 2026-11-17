@@ -156,4 +156,26 @@ describe("admin blacklist listing and lift (admin token)", () => {
     const again = await app.inject({ method: "POST", url: `/admin/security/blacklist/${target}/lift`, headers: { "x-admin-token": ADMIN, "content-type": "application/json" }, payload: "{}" });
     expect(again.statusCode).toBe(404);
   });
+
 });
+
+describe("POST /admin/nodes/:nodeId/dismiss (ownerless enrollment requests)", () => {
+  test("needs the admin token", async () => {
+    const res = await app.inject({ method: "POST", url: "/admin/nodes/lambda-a100-gpu/dismiss", headers: { "x-mesh-token": MESH, "content-type": "application/json" }, payload: "{}" });
+    expect(res.statusCode).toBe(401);
+  });
+
+  test("dismisses and, with blockDays, blacklists the agent id for that long", async () => {
+    const agentId = `ownerless-${randomUUID()}`;
+    const res = await app.inject({ method: "POST", url: `/admin/nodes/${agentId}/dismiss`, headers: { "x-admin-token": ADMIN, "content-type": "application/json" }, payload: JSON.stringify({ nodeKind: "agent", blockDays: 3, reason: "rejected by admin@x.io" }) });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, nodeId: agentId, blacklisted: true });
+    const listed = await app.inject({ method: "GET", url: "/admin/security/blacklist", headers: { "x-admin-token": ADMIN } });
+    const row = listed.json().records.find((r: { agentId: string }) => r.agentId === agentId);
+    expect(row).toMatchObject({ agentId, reasonCode: "manual_review", automatic: false });
+    expect(row.expiresInMs).toBeGreaterThan(2.9 * 86_400_000);
+    const noBlock = await app.inject({ method: "POST", url: `/admin/nodes/other-${agentId}/dismiss`, headers: { "x-admin-token": ADMIN, "content-type": "application/json" }, payload: "{}" });
+    expect(noBlock.json()).toMatchObject({ ok: true, blacklisted: false });
+  });
+});
+

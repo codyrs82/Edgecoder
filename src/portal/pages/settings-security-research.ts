@@ -29,10 +29,10 @@ export const securityResearchSectionHtml = `
         <textarea id="srNotes" maxlength="4000" rows="3" placeholder="Verification notes: how the organisation and signatory were verified" aria-label="Verification notes"></textarea>
         <button class="primary" id="srGrantBtn">Grant access</button>
       </div>
-      <table>
+      <div class="table-scroll"><table>
         <thead><tr><th>Account</th><th>Kind</th><th>Organisation</th><th>Agreement</th><th>Expires</th><th>Status</th><th>Granted by</th><th>Actions</th></tr></thead>
         <tbody id="srBody"></tbody>
-      </table>
+      </table></div>
     </div>
     </div>`;
 

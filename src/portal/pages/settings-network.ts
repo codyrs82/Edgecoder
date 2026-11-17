@@ -4,6 +4,7 @@
 import type { FastifyInstance } from "fastify";
 import { CSP_NONCE } from "../csp-nonce.js";
 import { SETTINGS_HELPERS_SCRIPT, settingsPage } from "./settings-shell.js";
+import { HOST_ADMIN_JS } from "./host-admin.js";
 
 /**
  * Settings > Network (/portal/settings/network), system admins only: the live state of the network
@@ -318,6 +319,7 @@ export function networkPageScript(): string {
     ${SETTINGS_HELPERS_SCRIPT}
     ${SERIES_GAPS_SCRIPT}
     ${GAP_CHARTS_SCRIPT}
+    ${HOST_ADMIN_JS}
     const REFRESH_MS = ${NETWORK_REFRESH_MS};
     const RANGE_MS = ${JSON.stringify(NETWORK_RANGES_MS)};
     const SVGNS = "http://www.w3.org/2000/svg";
@@ -546,7 +548,7 @@ export function networkPageScript(): string {
       for (const a of rows) {
         const tr = el("tr");
         const idCell = el("td"); idCell.appendChild(el("div", { class: "mono nowrap" }, a.agentId)); idCell.appendChild(el("div", { class: "muted" }, [a.os, a.clientType, a.version ? "v" + a.version : ""].filter(Boolean).join(" · "))); tr.appendChild(idCell);
-        const acct = el("td"); acct.appendChild(el("div", { class: "nowrap" }, a.email || "-")); acct.appendChild(el("div", { class: "muted mono" }, a.accountId || "not linked")); tr.appendChild(acct);
+        const acct = el("td"); acct.appendChild(el("div", { class: "nowrap" }, a.email || "-")); acct.appendChild(el("div", { class: "muted mono" }, a.accountId || "not linked")); if (a.email && hostAdmin.enabled) { const h = el("div", { class: "nowrap" }); h.innerHTML = hostBadge(a.email) + (isHostEmail(a.email) ? "" : " " + hostButton(a.email, "Approve owner as host")); acct.appendChild(h); } tr.appendChild(acct);
         const co = el("td", { class: "nowrap", title: a.coordinator }, a.coordinator.split(".")[0] + (a.coordinatorRegion ? " · " + a.coordinatorRegion : "")); tr.appendChild(co);
         tr.appendChild(el("td", {}, (a.countryCode || "-") + (a.vpnDetected ? " (VPN)" : "")));
         const cls = el("td"); cls.appendChild(el("div", {}, classLabel(a.computeClass || "-") + (a.tier ? " · " + a.tier : ""))); cls.appendChild(el("div", { class: "muted" }, a.verification ? "hw " + a.verification : "hw unverified")); tr.appendChild(cls);
@@ -741,6 +743,9 @@ export function networkPageScript(): string {
       if (!(user.roles && user.roles.isSystemAdmin)) { $("netDenied").classList.remove("hidden"); setText("netUpdated", ""); return; }
       // Alerts load on their own too: they matter most when the network view cannot load.
       loadAlerts().catch(() => undefined);
+      // Whether each agent's owner is a host, with one-click approval (host-admin.ts).
+      await loadHostDirectory();
+      onHostDirectoryChange(function() { if (data) render(); });
       await load();
       start();
     })().catch((err) => showError("Could not load the network: " + String(err.message || err)));

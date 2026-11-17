@@ -1275,6 +1275,15 @@ export class PostgresStore {
     );
   }
 
+  /** Drops a not-approved node from the status projection (admin dismissed its enrollment request). */
+  async deleteUnapprovedNodeStatusProjection(nodeId: string): Promise<number> {
+    const result = await this.pool.query(
+      "DELETE FROM node_status_projection WHERE node_id = $1 AND node_approved IS NOT TRUE",
+      [nodeId]
+    );
+    return result.rowCount ?? 0;
+  }
+
   async listNodeStatusProjection(ownerEmail?: string): Promise<
     Array<{
       nodeId: string;

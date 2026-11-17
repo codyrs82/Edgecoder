@@ -79,7 +79,7 @@ import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls, regis
 import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinatorDns } from "./dns-manager.js";
 import { nativeRedirectMatches } from "./native-app-auth.js";
 import { registerInviteAdminRoutes } from "./invites.js";
-import { hostApprovalPolicyFromEnv, isApprovedHost, registerHostRequestRoutes } from "./host-requests.js";
+import { autoRequestHosting, autoRequestHostingSafe, hostApprovalPolicyFromEnv, isApprovedHost, registerHostRequestRoutes } from "./host-requests.js";
 import { renderHostFormResult } from "./pages/host.js";
 import { registerSecurityResearchForPortal, registerSecurityResearchInternalRoute } from "./security-research.js";
 import { launchModeFromEnv } from "../economy/launch-gate.js";
@@ -862,9 +862,9 @@ registerPayoutDestinationRoutes(app, {
 const accountRouteDeps = { discoverCoordinatorUrlsForPortal, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store };
 export type AccountApiRoutesDeps = typeof accountRouteDeps;
 registerAccountApiRoutes(app, accountRouteDeps);
-const coordinatorOpsRouteDeps = { CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, controlPlaneHeaders, discoverCoordinatorUrlsForPortal, fetchCoordinatorFederatedSummary, requireCoordinatorOperationsUser, store };
-export type CoordinatorOpsRoutesDeps = typeof coordinatorOpsRouteDeps;
-registerCoordinatorOpsRoutes(app, coordinatorOpsRouteDeps);
+function autoRequestHost(node: Parameters<typeof autoRequestHosting>[1]) { return autoRequestHostingSafe({ store, policy: HOST_APPROVAL_POLICY, log: app.log }, node); }
+const coordinatorOpsRouteDeps = { autoRequestHost, COORDINATOR_ADMIN_TOKEN: C.COORDINATOR_ADMIN_TOKEN ?? "", CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, controlPlaneHeaders, discoverCoordinatorUrlsForPortal, fetchCoordinatorFederatedSummary, requireCoordinatorOperationsUser, store };
+export type CoordinatorOpsRoutesDeps = typeof coordinatorOpsRouteDeps; registerCoordinatorOpsRoutes(app, coordinatorOpsRouteDeps);
 
 // Chat API — conversations CRUD + streaming chat
 registerConversationRoutes(app, { store, getCurrentUser });
@@ -967,7 +967,7 @@ startUnverifiedPurge(
 registerPortalPages(app, { getPricing: coordinatorPricingSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }), getReserves: coordinatorReservesSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }) });
 
 // #40: every /internal/* route lives in this plugin, so new internal routes inherit the token check.
-const internalRouteDeps = { deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, hostApprovedFor, isDnsConfigured, requireControlPlaneAdmin, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns };
+const internalRouteDeps = { autoRequestHost, deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, hostApprovedFor, isDnsConfigured, requireControlPlaneAdmin, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns };
 export type InternalRoutesDeps = typeof internalRouteDeps;
 await app.register(async (internal) => {
   registerInternalRoutes(internal, internalRouteDeps);

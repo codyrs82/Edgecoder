@@ -7,7 +7,7 @@ import { z } from "zod";
 import type { CoordinatorOpsRoutesDeps } from "../server.js";
 
 /** #16: Coordinator operations API (/coordinator/ops/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
-export function registerCoordinatorOpsRoutes(app: FastifyInstance, { CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, controlPlaneHeaders, discoverCoordinatorUrlsForPortal, fetchCoordinatorFederatedSummary, requireCoordinatorOperationsUser, store }: CoordinatorOpsRoutesDeps): void {
+export function registerCoordinatorOpsRoutes(app: FastifyInstance, { autoRequestHost, COORDINATOR_ADMIN_TOKEN, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, controlPlaneHeaders, discoverCoordinatorUrlsForPortal, fetchCoordinatorFederatedSummary, requireCoordinatorOperationsUser, store }: CoordinatorOpsRoutesDeps): void {
   app.get("/coordinator/ops/summary", async (req, reply) => {
     const principal = await requireCoordinatorOperationsUser(req as any, reply);
     if (!principal) return;
@@ -382,13 +382,17 @@ export function registerCoordinatorOpsRoutes(app: FastifyInstance, { CONTROL_PLA
       })
       .parse(req.body);
     const existing = await store.getNodeEnrollment(body.nodeId);
-    if (!existing) return reply.code(404).send({ error: "node_not_found" });
+    // No portal enrollment means no owner account: such a node is never approved here. Rejecting it is
+    // /coordinator/ops/node-dismiss, which removes it from the coordinators' pending lists.
+    if (!existing) return reply.code(body.approved ? 409 : 404).send({ error: body.approved ? "node_has_no_owner" : "node_not_found" });
     // The portal's enrollment record is what coordinators validate against, so it is written first.
     // "Reject" on a pending request removes it from the enrollment queue.
     if (!body.approved && existing.nodeApproved !== true) {
       await store.deleteNodeEnrollment(body.nodeId);
     } else {
       await store.setNodeApproval(body.nodeId, body.approved);
+      // An approved machine whose owner is not a host yet: file a pending host request for the owner.
+      if (body.approved && autoRequestHost) await autoRequestHost({ nodeId: existing.nodeId, nodeKind: existing.nodeKind, ownerEmail: existing.ownerEmail, lastCountryCode: existing.lastCountryCode });
     }
     // Mirror to a separately run control plane when one is configured; its failure does not undo
     // the portal decision.
@@ -408,6 +412,62 @@ export function registerCoordinatorOpsRoutes(app: FastifyInstance, { CONTROL_PLA
       }
     }
     return reply.send({ ok: true, nodeId: body.nodeId, approved: body.approved, controlPlane });
+  });
+
+  // Reject or dismiss a pending request from a node with no portal enrollment (owner "unknown": an agent
+  // a coordinator saw try /register without a token). Removes it from every coordinator's pending list
+  // and, with blockDays, blacklists the agent id there for that long. System admins only; audited.
+  app.post("/coordinator/ops/node-dismiss", async (req, reply) => {
+    const principal = await requireCoordinatorOperationsUser(req as any, reply);
+    if (!principal) return;
+    const { user, access } = principal;
+    if (!access.isSystemAdmin || !access.canManageCoordinatorOps) {
+      return reply.code(403).send({ error: "coordinator_operations_forbidden" });
+    }
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    const body = z
+      .object({
+        nodeId: z.string().min(1).max(200).regex(/^[A-Za-z0-9._:@-]+$/),
+        nodeKind: z.enum(["agent", "coordinator"]),
+        blockDays: z.number().int().min(0).max(365).default(0)
+      })
+      .parse(req.body);
+    // An enrolled node has an owner: it goes through node-approval, not here.
+    if (await store.getNodeEnrollment(body.nodeId)) return reply.code(409).send({ error: "node_is_enrolled" });
+    if (!COORDINATOR_ADMIN_TOKEN) {
+      return reply.code(503).send({ error: "coordinator_admin_token_not_configured", detail: "Set COORDINATOR_ADMIN_TOKEN on the portal (the coordinators' ADMIN_API_TOKEN)." });
+    }
+    const urls = [...new Set((await discoverCoordinatorUrlsForPortal()).map((u: string) => u.replace(/\/+$/, "")))];
+    if (urls.length === 0) return reply.code(503).send({ error: "no_coordinator" });
+    const reason = `rejected by ${user.email} from the portal`;
+    const coordinators = await Promise.all(
+      urls.map(async (url) => {
+        try {
+          const res = await request(`${url}/admin/nodes/${encodeURIComponent(body.nodeId)}/dismiss`, {
+            method: "POST",
+            headers: { "x-admin-token": COORDINATOR_ADMIN_TOKEN, "content-type": "application/json" },
+            body: JSON.stringify({ nodeKind: body.nodeKind, blockDays: body.blockDays, reason }),
+            headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+            bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS
+          });
+          await res.body.dump().catch(() => undefined);
+          return { url, status: res.statusCode };
+        } catch {
+          return { url, status: 0 };
+        }
+      })
+    );
+    const dismissed = coordinators.filter((c) => c.status >= 200 && c.status < 300).length;
+    await store.appendAdminAudit({
+      actorUserId: user.userId,
+      actorEmail: user.email,
+      action: "node.dismiss",
+      targetUserId: null,
+      targetEmailHint: null,
+      detail: { nodeId: body.nodeId, nodeKind: body.nodeKind, blockDays: body.blockDays, dismissed, coordinators: coordinators.length }
+    });
+    req.log.info({ nodeId: body.nodeId, by: user.email, dismissed, blockDays: body.blockDays }, "admin_node_dismiss");
+    return reply.code(dismissed > 0 ? 200 : 502).send({ ok: dismissed > 0, nodeId: body.nodeId, dismissed, blockDays: body.blockDays, coordinators });
   });
 
   app.post("/coordinator/ops/coordinator-ollama", async (req, reply) => {
