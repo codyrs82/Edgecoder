@@ -13,6 +13,8 @@ import { CSP_NONCE } from "../csp-nonce.js";
 import { legalLinksHtml } from "./legal-footer.js";
 import { PUBLIC_DOCUMENTS } from "../legal/documents.js";
 import { renderMarkdown } from "../legal/markdown.js";
+import type { ProofOfReservesReport } from "../../economy/proof-of-reserves.js";
+import { portalNetworkName, unavailableReservesReport } from "../reserves.js";
 
 /** Sats-per-hour cell with the USD conversion underneath (reference mode: USD only). */
 function priceCell(c: { satsPerHour?: number; usdPerHour: number }): string {
@@ -264,7 +266,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
 
 /** Footer links on every public page (the legal documents and the Bluetooth explainer). */
 export function footerLegalLinks(): string {
-  return `<span>&copy; 2026 EdgeCoder</span>${legalLinksHtml()}<a href="/bluetooth">Bluetooth mesh</a><a href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">Source (BUSL-1.1)</a>`;
+  return `<span>&copy; 2026 EdgeCoder</span>${legalLinksHtml()}<a href="/reserves">Proof of reserves</a><a href="/bluetooth">Bluetooth mesh</a><a href="${GITHUB_REPO_URL}" target="_blank" rel="noreferrer">Source (BUSL-1.1)</a>`;
 }
 
 /** Nav, footer and document styling shared by the public document pages (legal documents, Bluetooth). */
@@ -379,9 +381,83 @@ export function bluetoothPageHtml(): string {
   });
 }
 
+const satsText = (n: number): string => `${n.toLocaleString("en-US")} sats`;
+const UNAVAILABLE_TEXT: Record<string, string> = {
+  node_unreachable: "the Lightning node did not answer",
+  node_balances_unsupported: "the Lightning node can't report balances",
+  node_balances_malformed: "the Lightning node's answer could not be read",
+  ledger_unreachable: "the ledger could not be read",
+  ledger_totals_unsupported: "this coordinator has no database to total",
+  ledger_malformed: "the ledger totals could not be read",
+  coordinator_unreachable: "no coordinator answered",
+  coordinator_report_invalid: "the coordinator's report did not check out"
+};
+const unavailableRow = (label: string, reason: string): string =>
+  `<tr><th scope="row">${escapeHtml(label)}</th><td><span class="status-badge warn">unavailable</span> ${escapeHtml(UNAVAILABLE_TEXT[reason] ?? "not available right now")}</td></tr>`;
+const row = (label: string, value: string, note = ""): string =>
+  `<tr><th scope="row">${escapeHtml(label)}</th><td>${escapeHtml(value)}${note ? ` <span class="muted">${escapeHtml(note)}</span>` : ""}</td></tr>`;
+
+/** /reserves: aggregate liabilities next to the node's balances, and what that does and doesn't prove. */
+export function reservesPageHtml(r: ProofOfReservesReport): string {
+  const l = r.liabilities;
+  const res = r.reserves;
+  const liabilityRows = l.available
+    ? row("Account balances", satsText(l.accountBalancesSats), "customers' prepaid cSats and hosts' unpaid earnings") +
+      row("Network fee pool", satsText(l.feePoolSats), "not yet distributed") +
+      row("Held for running jobs", satsText(l.heldForJobsSats)) +
+      `<tr><th scope="row">Total owed</th><td><strong>${escapeHtml(satsText(l.totalSats))}</strong></td></tr>`
+    : unavailableRow("Total owed", l.reason);
+  const reserveRows = res.available
+    ? row("Lightning channels", satsText(res.channelLocalSats), "spendable local balance") +
+      row("On-chain wallet", satsText(res.onchainConfirmedSats), "confirmed") +
+      `<tr><th scope="row">Total held</th><td><strong>${escapeHtml(satsText(res.totalSats))}</strong></td></tr>` +
+      (res.pendingSats > 0 ? row("Pending, not counted", satsText(res.pendingSats), "unconfirmed, opening channels or payments in flight") : "")
+    : unavailableRow("Total held", res.reason);
+  const ratio =
+    r.ratio !== null
+      ? `<span class="status-badge ${r.ratio >= 1 ? "ok" : "danger"}">${escapeHtml((r.ratio * 100).toFixed(2))}%</span> of what is owed is held`
+      : l.available && res.available && l.totalSats === 0
+        ? "Nothing is owed right now."
+        : `<span class="status-badge warn">unavailable</span> both sides are needed for a ratio`;
+  const anchor = r.anchor
+    ? `<p>Latest Bitcoin anchor of the ledger: checkpoint <code>${escapeHtml(r.anchor.checkpointHash.slice(0, 16))}…</code> in transaction <a href="https://mempool.space/${r.network === "mainnet" ? "" : escapeHtml(r.network) + "/"}tx/${escapeHtml(r.anchor.txid)}" rel="noreferrer" target="_blank"><code>${escapeHtml(r.anchor.txid)}</code></a> (${escapeHtml(String(r.anchor.confirmations))} confirmations).</p>`
+    : `<p>Bitcoin anchoring of the ledger is ${r.anchoring === "enabled" ? "on, but no checkpoint has been anchored yet" : "not on yet"}. Once it is, the latest anchor transaction is shown here.</p>`;
+  const body = `
+    <h1>Proof of reserves</h1>
+    <p><span class="status-badge info">${escapeHtml(r.network)}</span> As of ${escapeHtml(r.asOf.replace("T", " ").slice(0, 19))} UTC. Refreshed at most every ${escapeHtml(String(r.cacheSeconds))} seconds. Totals only: nothing about any single account is shown.</p>
+    <h2>What EdgeCoder owes</h2>
+    <table><tbody>${liabilityRows}</tbody></table>
+    <h2>What EdgeCoder holds</h2>
+    <table><tbody>${reserveRows}</tbody></table>
+    <h2>Ratio</h2>
+    <p>${ratio}</p>
+    ${anchor}
+    <h2>What this shows</h2>
+    <ul>
+      <li>The totals EdgeCoder's ledger says it owes: every account's cSat balance (1 cSat = 1 sat), the network fee pool and cSats set aside for jobs still running.</li>
+      <li>What EdgeCoder's Lightning node says it holds: spendable channel balance and confirmed on-chain balance, read from the node when this page was built.</li>
+      <li>Whether the second covers the first, at that moment.</li>
+    </ul>
+    <h2>What it does not prove</h2>
+    <ul>
+      <li>It is not a cryptographic proof. Both numbers are self-reported: the node could misreport its balance and the ledger could leave an account out. Nobody outside EdgeCoder can check either one from this page alone.</li>
+      <li>It doesn't show that your own balance is in the total. A later step publishes a liabilities Merkle sum tree, so each account can check its balance is included without seeing anyone else's.</li>
+      <li>It doesn't show the sats can't move after the snapshot, or that they belong only to EdgeCoder's customers.</li>
+      <li>Once the ledger is anchored to Bitcoin, anyone with the anchor transactions can check that the ledger's history was not rewritten afterwards.</li>
+    </ul>
+    <p>Machine-readable: <a href="/reserves.json"><code>/reserves.json</code></a>. How EdgeCoder plans to reduce the trust this needs (shared custody, payments that don't sit with EdgeCoder) is in <a href="${GITHUB_REPO_URL}/blob/main/docs/decentralization.md" target="_blank" rel="noreferrer">docs/decentralization.md</a>.</p>`;
+  return publicDocumentPage({
+    title: "Proof of reserves",
+    description: "What EdgeCoder owes its customers and hosts, next to what its Lightning node holds, with what that does and doesn't prove.",
+    body
+  });
+}
+
 export interface PublicPagesDeps {
   /** Current public pricing (src/portal/public-pricing.ts); omitted = reference prices. */
   getPricing?: () => Promise<PublicPricing>;
+  /** Proof of reserves (src/portal/reserves.ts); omitted = reported unavailable. */
+  getReserves?: () => Promise<ProofOfReservesReport>;
 }
 
 export function registerPublicPages(app: FastifyInstance, deps: PublicPagesDeps = {}): void {
@@ -394,6 +470,11 @@ for (const key of Object.keys(LEGAL_PAGES) as LegalPageKey[]) {
   app.get(LEGAL_PAGES[key].path, async (_req, reply) => reply.type("text/html").send(legalPageHtml(key)));
 }
 app.get("/bluetooth", async (_req, reply) => reply.type("text/html").send(bluetoothPageHtml()));
+// Proof of reserves: aggregate totals from the coordinator's public /economy/reserves (cached).
+const reserves = async (): Promise<ProofOfReservesReport> =>
+  deps.getReserves ? deps.getReserves().catch(() => unavailableReservesReport("coordinator_unreachable", portalNetworkName(), Date.now())) : unavailableReservesReport("coordinator_unreachable", portalNetworkName(), Date.now());
+app.get("/reserves", async (_req, reply) => reply.type("text/html").header("cache-control", "public, max-age=60").send(reservesPageHtml(await reserves())));
+app.get("/reserves.json", async (_req, reply) => reply.header("cache-control", "public, max-age=60").header("access-control-allow-origin", "*").send(await reserves()));
 // One-line installers (docs/install.md): served from the image's deploy/ copy, else from GitHub.
 for (const name of ["install.sh", "install.ps1"] as const) {
   app.get(`/${name}`, async (_req, reply) => {
