@@ -58,6 +58,30 @@ export async function retryLocalAgent(): Promise<LocalAgentStatus> {
   return _agentStatus;
 }
 
+/** "Restart now": the shell stops EdgeCoder's local service and starts it at once. */
+export async function restartLocalService(): Promise<void> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  _localToken = null;
+  resetIdeToken();
+  setAgentStatus(parseAgentStatus(await invoke<string>("restart_local_service")));
+}
+
+/** "View log": the last lines of ~/.edgecoder/agent.log, read by the shell (works with the service down). */
+export async function readServiceLog(): Promise<string> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<string>("read_service_log");
+}
+
+/**
+ * The service came back (service-status.ts): forget tokens from before the restart and detect the
+ * local backend again, so pages that fell back to remote mode at launch use it.
+ */
+export async function serviceCameBack(): Promise<void> {
+  _localToken = null;
+  resetIdeToken();
+  await detectBackend();
+}
+
 async function tryLocalHealth(): Promise<boolean> {
   // #72: never treat an unverified :4301 listener as our agent.
   if (!localAgentUsable(await localAgentStatus())) return false;
@@ -1149,7 +1173,7 @@ async function ideFetch(url: string, init: RequestInit): Promise<Response> {
   const send = async () =>
     fetchLocalService(
       async () => fetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), ...(await ideHeaders()) } }),
-      { method: init.method, signal: init.signal, probe: probeIde },
+      { method: init.method, signal: init.signal, probe: probeLocalService },
     );
   let res = await send();
   if (res.status === 401) {
@@ -1160,7 +1184,7 @@ async function ideFetch(url: string, init: RequestInit): Promise<Response> {
 }
 
 /** Whether the local IDE server answers at all (a public GET: no preflight). */
-async function probeIde(): Promise<boolean> {
+export async function probeLocalService(): Promise<boolean> {
   try {
     return (await fetch(`${ideBase()}/health`, { signal: AbortSignal.timeout(2_000) })).ok;
   } catch {

@@ -14,6 +14,10 @@
   // badge. A hidden window pauses them.
   import { backendReady, isRemoteMode, networkWorld, type WorldView } from "../lib/api";
   import ErrorBanner from "../components/ErrorBanner.svelte";
+  import ServiceNotice from "../components/ServiceNotice.svelte";
+  import OfflinePlaceholder from "../components/OfflinePlaceholder.svelte";
+  import { connectivity, onBackOnline } from "../lib/connectivity";
+  import { inDesktopShell, noteServiceNetworkFailure, onServiceReady, serviceStatus } from "../lib/service-status";
   import Skeleton from "../components/Skeleton.svelte";
   import { clampIndex, nextNodeIndex } from "../lib/mesh-layout";
   import {
@@ -58,7 +62,12 @@
   let refreshState = $state(initialRefreshState());
   let now = $state(Date.now());
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
-  let error = $derived(showBanner(refreshState, now) ? (view ? "Couldn't refresh the network view. Showing the last one." : "Couldn't load the network. Is your agent running?") : "");
+  /** The last failure's own text (the server's message, or "blocked" when /health answers). */
+  let lastError = $state("");
+  // The local service being down is never this page's error: ServiceNotice says it's starting.
+  let serviceDown = $derived($serviceStatus.phase !== "ready");
+  let offlineNow = $derived($connectivity.state === "offline");
+  let error = $derived(!serviceDown && showBanner(refreshState, now) ? (view ? "Couldn't refresh the network view. Showing the last one." : `Couldn't load the network${lastError ? `: ${lastError}` : "."}`) : "");
   let quietNote = $derived(view ? staleNote(refreshState, now) : null);
 
   let mode: "graph" | "cards" = $state("graph");
@@ -130,9 +139,16 @@
 
   async function refresh(): Promise<void> {
     await backendReady;
+    // Not ready yet: nothing to load; onServiceReady below loads it the moment it answers.
+    if ($serviceStatus.phase !== "ready") {
+      loading = false;
+      return;
+    }
     if (isRemoteMode()) {
       noLocalAgent = true;
       loading = false;
+      // In the desktop app the local service is ours: have the status look again.
+      if (inDesktopShell()) noteServiceNetworkFailure();
       return;
     }
     noLocalAgent = false;
@@ -149,8 +165,10 @@
         offline = r.reason ?? "not_connected";
       }
       refreshState = refreshSucceeded(refreshState, Date.now());
+      lastError = "";
     } catch (e) {
       const status = (e as { status?: number }).status;
+      lastError = e instanceof Error ? e.message : "";
       // A rate limit only delays the next refresh; the last view stays up.
       if (status !== 429) {
         refreshState = refreshFailed(refreshState, Date.now(), status);
@@ -168,7 +186,16 @@
     const t = setInterval(refresh, pollInterval);
     // Keeps "Updated 40 s ago" and the banner's 60 s rule current between refreshes.
     const tick = setInterval(() => (now = Date.now()), 5_000);
+    // Back from starting / restarting, or back online: load at once, with a clean failure count.
+    const reload = () => {
+      refreshState = initialRefreshState();
+      void refresh();
+    };
+    const offReady = onServiceReady(reload);
+    const offOnline = onBackOnline(reload);
     return () => {
+      offReady();
+      offOnline();
       clearInterval(t);
       clearInterval(tick);
       if (retryTimer) clearTimeout(retryTimer);
@@ -223,15 +250,21 @@
   <h1>Network</h1>
   <p class="sp-lead">Every EdgeCoder machine online, worldwide, and the coordinators that connect them. Other people's machines are masked; yours are named.</p>
 
-  {#if noLocalAgent}
-    <div class="sp-card"><div class="sp-row"><span class="sp-muted">No local agent is running. Start the EdgeCoder agent on this computer to see the network.</span></div></div>
+  {#if offlineNow}
+    <OfflinePlaceholder detail="The network view needs a connection to the EdgeCoder network." />
+  {:else if serviceDown || (noLocalAgent && inDesktopShell())}
+    <ServiceNotice starting={noLocalAgent} />
+  {:else if noLocalAgent}
+    <div class="sp-card"><div class="sp-row"><span class="sp-muted">The network view comes from EdgeCoder on your computer. Open it in the EdgeCoder desktop app.</span></div></div>
   {:else if error}
     <ErrorBanner message={error} onRetry={refresh} />
   {:else if quietNote}
     <p class="sp-muted quiet-note" role="status">{quietNote}</p>
   {/if}
 
-  {#if loading && !view}
+  {#if offlineNow}
+    <!-- Offline: the placeholder above; the last view is not shown as if it were current. -->
+  {:else if loading && !view}
     <div class="stats" aria-busy="true">
       {#each Array(4) as _}<div class="sp-card stat"><Skeleton lines={2} height="1rem" /></div>{/each}
     </div>

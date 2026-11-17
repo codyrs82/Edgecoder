@@ -11,6 +11,8 @@
   import { scrollRegion } from "../lib/scroll-region";
   import EmptyNote from "../components/EmptyNote.svelte";
   import StatusPill from "../components/StatusPill.svelte";
+  import ServiceNotice from "../components/ServiceNotice.svelte";
+  import { onServiceReady, serviceStatus } from "../lib/service-status";
 
   const MAX_SESSIONS = 20;
   const SHOWN = 300;
@@ -44,7 +46,10 @@
     loading = true;
     await backendReady;
     const failed: string[] = [];
-    const local = !isRemoteMode();
+    // While the local service starts or restarts its parts aren't "couldn't read": the notice says
+    // it's starting, and the page loads again once it answers.
+    const serviceUp = $serviceStatus.phase === "ready";
+    const local = !isRemoteMode() && serviceUp;
     const [conversations, bots, sessions, recent, usage] = await Promise.all([
       settle("chats", listConversations(), failed),
       local ? settle("bots", listBots().then((list) => Promise.all(list.map(async (bot) => ({ bot, runs: await botHistory(bot.id).catch(() => []) })))), failed) : undefined,
@@ -67,7 +72,10 @@
     loadedAt = Date.now();
     loading = false;
   }
-  onMount(load);
+  onMount(() => {
+    void load();
+    return onServiceReady(() => void load());
+  });
 
   let filter = $derived<TaskFilter>({ kind, status, query, sinceMs: (() => { const r = RANGES.find((x) => x.value === range); return r && r.ms ? loadedAt - r.ms : 0; })() });
   let shown = $derived(filterTasks(rows, filter));
@@ -121,6 +129,7 @@
       </label>
     </div>
 
+    {#if $serviceStatus.phase !== "ready"}<ServiceNotice />{/if}
     {#if unread.length}<p class="sp-warn" role="status">Couldn't read: {unread.join(", ")}. The rest is shown.</p>{/if}
 
     <div class="sp-card">

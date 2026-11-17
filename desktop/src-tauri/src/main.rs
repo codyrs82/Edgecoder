@@ -5,9 +5,9 @@ use std::fs;
 use std::io::Write as IoWrite;
 use std::path::PathBuf;
 use std::process::{Command, Child};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::Manager;
 use tauri_plugin_deep_link::DeepLinkExt;
 use sysinfo::{System, Disks};
@@ -21,13 +21,20 @@ mod local_compute;
 mod navigation;
 mod remote_hosts;
 mod network_enrollment;
+mod service_supervisor;
 mod terminal;
 mod token;
 use agent_guard::{port_in_use, reclaim_stale_agent, AgentEvent, AgentGuard, AgentOwnership, AGENT_ADDR};
 use token::generate_local_token;
 use network_enrollment::{NetworkEnrollment, NetworkEnrollmentSummary};
+use service_supervisor::{Action as ServiceAction, Supervisor};
 
 struct AgentProcess(Arc<Mutex<Option<Child>>>);
+/// The self-healing state for the local service (service_supervisor.rs), shared by the monitor
+/// thread and the "Restart now" / update commands.
+struct ServiceSupervisor(Arc<Mutex<Supervisor>>);
+/// This build's version (tauri.conf.json), recorded next to the agent it starts.
+static APP_VERSION: OnceLock<String> = OnceLock::new();
 struct LocalToken(String);
 /// #72: whether the agent on :4301 is ours, plus what's needed to retry a spawn.
 struct AgentControl {
@@ -194,22 +201,132 @@ fn retry_local_agent(
     if !alive {
         control.guard.apply(AgentEvent::Exited);
     }
+    // The monitor thread (started at launch whenever an agent dir exists) watches what starts here.
+    start_service(&process.0, control.agent_dir.as_ref(), &control.tokens, &control.guard);
+    control.guard.get().as_str().to_string()
+}
+
+/// Start our agent (and with it the IDE provider on :4304) unless one of ours is already there.
+/// Returns true when our agent is running afterwards. Shared by Retry, "Restart now" and the
+/// monitor's automatic restarts.
+fn start_service(
+    agent: &Arc<Mutex<Option<Child>>>,
+    agent_dir: Option<&PathBuf>,
+    tokens: &AgentTokens,
+    guard: &AgentGuard,
+) -> bool {
+    if let Ok(mut slot) = agent.lock() {
+        if child_alive(&mut slot) {
+            return true; // a Retry or the monitor started one meanwhile
+        }
+    }
     if port_in_use(AGENT_ADDR) {
         // #147: reuse it only when it proves it holds our admin token.
-        if verify_existing_agent(&control.tokens) {
-            return control.guard.apply(AgentEvent::Verified).as_str().to_string();
+        if verify_existing_agent(tokens) {
+            guard.apply(AgentEvent::Verified);
+            return true;
         }
         if !reclaim_stale_agent(AGENT_ADDR) {
-            return control.guard.apply(AgentEvent::PortBusy).as_str().to_string();
+            guard.apply(AgentEvent::PortBusy);
+            log_service("Another process holds port 4301, so EdgeCoder's local service can't start; trying again later");
+            return false;
         }
     }
-    let child = control.agent_dir.as_ref().and_then(|dir| spawn_agent_process(dir, &control.tokens));
-    let event = if child.is_some() { AgentEvent::SpawnOk } else { AgentEvent::SpawnFailed };
-    // The monitor thread (started at launch whenever an agent dir exists) watches this child.
-    if let Ok(mut guard) = process.0.lock() {
-        *guard = child;
+    let Some(dir) = agent_dir else {
+        guard.apply(AgentEvent::SpawnFailed);
+        return false;
+    };
+    let Ok(mut slot) = agent.lock() else { return false };
+    if child_alive(&mut slot) {
+        return true;
     }
-    control.guard.apply(event).as_str().to_string()
+    let child = spawn_agent_process(dir, tokens);
+    let ok = child.is_some();
+    guard.apply(if ok { AgentEvent::SpawnOk } else { AgentEvent::SpawnFailed });
+    *slot = child;
+    ok
+}
+
+/// Stop our agent and wait for it to exit (its IDE provider exits with it). A reused agent from an
+/// earlier launch (#147) has no child here; it is stopped through reclaim_stale_agent.
+fn stop_service(agent: &Arc<Mutex<Option<Child>>>, guard: &AgentGuard) {
+    let had_child = match agent.lock() {
+        Ok(mut slot) => match slot.take() {
+            Some(mut child) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                true
+            }
+            None => false,
+        },
+        Err(_) => false,
+    };
+    if !had_child && guard.get() == AgentOwnership::Verified && port_in_use(AGENT_ADDR) {
+        reclaim_stale_agent(AGENT_ADDR);
+    }
+    guard.apply(AgentEvent::Exited);
+}
+
+/// Write a line about the service to ~/.edgecoder/agent.log (and stderr), so "View log" and
+/// Settings → Logs show every automatic restart.
+fn log_service(msg: &str) {
+    eprintln!("[service] {msg}");
+    let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else { return };
+    let dir = PathBuf::from(home).join(".edgecoder");
+    let _ = fs::create_dir_all(&dir);
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(dir.join("agent.log")) {
+        let _ = writeln!(f, "{}", service_supervisor::log_line(msg));
+    }
+}
+
+/// "Restart now" (shown once automatic restarts have failed for about a minute): stop whatever is
+/// left of the service and start it at once, with the backoff from the beginning.
+#[tauri::command]
+fn restart_local_service(
+    control: tauri::State<'_, AgentControl>,
+    process: tauri::State<'_, AgentProcess>,
+    supervisor: tauri::State<'_, ServiceSupervisor>,
+) -> String {
+    log_service("Restart now: restarting EdgeCoder's local service");
+    stop_service(&process.0, &control.guard);
+    let ok = start_service(&process.0, control.agent_dir.as_ref(), &control.tokens, &control.guard);
+    if let Ok(mut s) = supervisor.0.lock() {
+        s.manual_restart(Instant::now(), ok);
+    }
+    control.guard.get().as_str().to_string()
+}
+
+/// Before the updater relaunches the app: stop the service (so the new version starts its own,
+/// with the new agent code) and keep the monitor from starting the old one again meanwhile.
+/// `restart_local_service` undoes it if the relaunch doesn't happen.
+#[tauri::command]
+fn stop_local_service_for_update(
+    control: tauri::State<'_, AgentControl>,
+    process: tauri::State<'_, AgentProcess>,
+    supervisor: tauri::State<'_, ServiceSupervisor>,
+) {
+    if let Ok(mut s) = supervisor.0.lock() {
+        s.pause();
+    }
+    log_service("Stopping EdgeCoder's local service to install an update");
+    stop_service(&process.0, &control.guard);
+}
+
+/// The last lines of ~/.edgecoder/agent.log, for "View log".
+#[tauri::command]
+fn read_service_log() -> Result<String, String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).ok_or("home directory not found")?;
+    let path = PathBuf::from(home).join(".edgecoder").join("agent.log");
+    let mut f = fs::File::open(&path).map_err(|_| "No log yet (~/.edgecoder/agent.log).".to_string())?;
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    const MAX: u64 = 64 * 1024;
+    if len > MAX {
+        let _ = f.seek(SeekFrom::Start(len - MAX));
+    }
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    Ok(service_supervisor::tail_lines(&String::from_utf8_lossy(&buf), 200))
 }
 
 /// Kill the agent so the monitor thread respawns it with the current local-compute env.
@@ -445,7 +562,7 @@ fn spawn_agent_process(agent_dir: &PathBuf, tokens: &AgentTokens) -> Option<Chil
             cmd.stdout(f).stderr(err);
         }
     }
-    cmd.arg("dist/index.js")
+    let child = cmd.arg("dist/index.js")
         .current_dir(agent_dir)
         .env("EDGE_RUNTIME_MODE", "all-in-one")
         .env("PATH", agent_path())
@@ -462,7 +579,18 @@ fn spawn_agent_process(agent_dir: &PathBuf, tokens: &AgentTokens) -> Option<Chil
         // coordinator; read at every spawn, so saving an enrollment takes effect on restart.
         .envs(network_enrollment::load().map(|e| e.agent_env()).unwrap_or_default())
         .spawn()
-        .ok()
+        .ok();
+    if child.is_some() {
+        remember_agent_version();
+    }
+    child
+}
+
+/// Record which app version started the agent, so a later launch reuses it only when it is the
+/// same version (after an update the old agent is replaced; see may_reuse_agent).
+fn remember_agent_version() {
+    let (Some(p), Some(v)) = (service_supervisor::agent_version_path(), APP_VERSION.get()) else { return };
+    let _ = fs::write(p, v);
 }
 
 /// ~/.edgecoder/agent.log, truncated at each spawn once it passes 5 MB.
@@ -526,84 +654,75 @@ fn start_agent(app: &tauri::App, tokens: &AgentTokens, guard: &AgentGuard, reuse
     (child, Some(dir))
 }
 
+/// Self-healing (service_supervisor.rs): every 2 s, is our agent alive and does the service answer
+/// /health on :4304? A dead agent is started again on a backoff (1 s, 2 s, 5 s, 10 s, then every
+/// 30 s, never giving up); a running one whose service is stuck is stopped and started again. Each
+/// restart is logged to ~/.edgecoder/agent.log. Agents started by Retry / "Restart now" are watched
+/// too.
 fn monitor_agent(
     agent_mutex: Arc<Mutex<Option<Child>>>,
     agent_dir: PathBuf,
     tokens: AgentTokens,
     agent_guard: Arc<AgentGuard>,
+    supervisor: Arc<Mutex<Supervisor>>,
 ) {
-    thread::spawn(move || {
-        let mut restarts = 0u32;
-        const MAX_RESTARTS: u32 = 5;
-
-        // #72: keeps watching after MAX_RESTARTS (and with no child yet), so an agent started
-        // later by Retry is watched too; only auto-restart stops.
-        loop {
-            thread::sleep(Duration::from_secs(2));
-
-            let needs_restart = {
-                let mut guard: std::sync::MutexGuard<'_, Option<Child>> =
-                    match agent_mutex.lock() {
-                        Ok(g) => g,
-                        Err(_) => continue,
-                    };
-                match guard.as_mut() {
-                    Some(child) => match child.try_wait() {
-                        Ok(Some(status)) => {
-                            eprintln!("Agent process exited with: {status}");
-                            *guard = None;
-                            // #72: stop handing out the token until our agent is back.
-                            agent_guard.apply(AgentEvent::Exited);
-                            true
-                        }
-                        Ok(None) => false, // still running
-                        Err(e) => {
-                            eprintln!("Error checking agent process: {e}");
-                            agent_guard.apply(AgentEvent::Exited);
-                            false
-                        }
-                    },
-                    None => false,
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_secs(2));
+        let alive = monitored_agent_alive(&agent_mutex, &agent_guard);
+        let healthy = alive && service_supervisor::service_healthy();
+        let action = match supervisor.lock() {
+            Ok(mut s) => s.observe(Instant::now(), alive, healthy),
+            Err(_) => continue,
+        };
+        match action {
+            ServiceAction::Wait => {}
+            ServiceAction::Stop => {
+                log_service(&format!(
+                    "EdgeCoder's local service hasn't answered on :4304 for {} s; restarting it",
+                    service_supervisor::UNHEALTHY_LIMIT.as_secs()
+                ));
+                stop_service(&agent_mutex, &agent_guard);
+                if let Ok(mut s) = supervisor.lock() {
+                    s.stopped(Instant::now());
                 }
-            };
-
-            if needs_restart {
-                if restarts >= MAX_RESTARTS {
-                    eprintln!(
-                        "Agent has restarted {MAX_RESTARTS} times — no more auto-restarts (Retry still works)"
-                    );
-                    continue;
+            }
+            ServiceAction::Start => {
+                let attempt = supervisor.lock().map(|s| s.attempts() + 1).unwrap_or(1);
+                log_service(&format!("EdgeCoder's local service isn't running; starting it again (restart {attempt})"));
+                let ok = start_service(&agent_mutex, Some(&agent_dir), &tokens, &agent_guard);
+                if !ok {
+                    let next = service_supervisor::backoff(attempt).as_secs();
+                    log_service(&format!("EdgeCoder's local service didn't start (restart {attempt}); next try in {next} s"));
                 }
-
-                eprintln!(
-                    "Restarting agent in 3s (restart {}/{})",
-                    restarts + 1,
-                    MAX_RESTARTS
-                );
-                thread::sleep(Duration::from_secs(3));
-
-                if port_in_use(AGENT_ADDR) {
-                    if verify_existing_agent(&tokens) {
-                        agent_guard.apply(AgentEvent::Verified);
-                    } else {
-                        eprintln!("Agent port taken by another process — skipping respawn, token withheld");
-                        agent_guard.apply(AgentEvent::PortBusy);
-                    }
-                    continue;
+                if let Ok(mut s) = supervisor.lock() {
+                    s.restarted(Instant::now(), ok);
                 }
-
-                if let Ok(mut guard) = agent_mutex.lock() {
-                    // A Retry may have started an agent during the 3 s wait; keep that one.
-                    if guard.is_none() {
-                        let new_child = spawn_agent_process(&agent_dir, &tokens);
-                        agent_guard.apply(if new_child.is_some() { AgentEvent::SpawnOk } else { AgentEvent::SpawnFailed });
-                        *guard = new_child;
-                    }
-                }
-                restarts += 1;
             }
         }
     });
+}
+
+/// Whether our agent process is there: the child we spawned is running, or (#147) the reused one
+/// still holds the port. An exit is logged and revokes the tokens (#72) until it is back.
+fn monitored_agent_alive(agent: &Arc<Mutex<Option<Child>>>, guard: &AgentGuard) -> bool {
+    let Ok(mut slot) = agent.lock() else { return false };
+    match slot.as_mut() {
+        Some(child) => match child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(status)) => {
+                log_service(&format!("EdgeCoder's local service exited ({status})"));
+                *slot = None;
+                guard.apply(AgentEvent::Exited);
+                false
+            }
+            Err(e) => {
+                eprintln!("Error checking agent process: {e}");
+                guard.apply(AgentEvent::Exited);
+                false
+            }
+        },
+        None => guard.get() == AgentOwnership::Verified && port_in_use(AGENT_ADDR),
+    }
 }
 
 fn main() {
@@ -612,7 +731,16 @@ fn main() {
     // with the spawned agent process.
     // #147: if :4301 is taken, reuse it only when it proves (fresh nonce, HMAC with the admin
     // token) that it is the agent an earlier launch started with the saved tokens.
-    let reused_tokens = if port_in_use(AGENT_ADDR) {
+    // After an update the agent left by the old version is never reused: the new version starts
+    // its own (start_agent stops the old one), so the service runs the new code.
+    let mut context = tauri::generate_context!();
+    let app_version = context.package_info().version.to_string();
+    let _ = APP_VERSION.set(app_version.clone());
+    let same_version = service_supervisor::may_reuse_agent(
+        service_supervisor::agent_version_path().and_then(|p| fs::read_to_string(p).ok()).as_deref(),
+        &app_version,
+    );
+    let reused_tokens = if port_in_use(AGENT_ADDR) && same_version {
         agent_attest::tokens_path()
             .and_then(|p| agent_attest::load_tokens(&p))
             .map(|t| AgentTokens { inference: t.inference, admin: t.admin })
@@ -629,7 +757,6 @@ fn main() {
 
     // #138: hosts changed in Settings after the build get their exact origins added to the
     // release CSP connect-src (Tauri applies the CSP from this runtime config).
-    let mut context = tauri::generate_context!();
     let saved_hosts = remote_hosts::load();
     remote_hosts::apply_to_config(context.config_mut(), &saved_hosts);
     let applied_hosts = remote_hosts::AppliedHosts(remote_hosts::connect_src_sources(context.config()));
@@ -672,6 +799,9 @@ fn main() {
             start_local_compute_setup,
             get_ide_token,
             set_remote_hosts,
+            restart_local_service,
+            stop_local_service_for_update,
+            read_service_log,
         ])
         .setup(move |app| {
             #[cfg(desktop)]
@@ -684,6 +814,10 @@ fn main() {
 
             let agent_guard = Arc::new(AgentGuard::new());
             let (child, agent_dir) = start_agent(app, &tokens, &agent_guard, reused);
+            let supervisor = Arc::new(Mutex::new(Supervisor::new()));
+            if let Ok(mut s) = supervisor.lock() {
+                s.launched(Instant::now(), child.is_some() || reused);
+            }
             let agent_mutex = Arc::new(Mutex::new(child));
 
             let agent_for_compute = Arc::clone(&agent_mutex);
@@ -693,6 +827,7 @@ fn main() {
                 compute.watchdog();
             });
             app.manage(AgentProcess(Arc::clone(&agent_mutex)));
+            app.manage(ServiceSupervisor(Arc::clone(&supervisor)));
             app.manage(AgentControl {
                 guard: Arc::clone(&agent_guard),
                 agent_dir: agent_dir.clone(),
@@ -700,7 +835,7 @@ fn main() {
             });
 
             if let Some(dir) = agent_dir {
-                monitor_agent(Arc::clone(&agent_mutex), dir, tokens.clone(), Arc::clone(&agent_guard));
+                monitor_agent(Arc::clone(&agent_mutex), dir, tokens.clone(), Arc::clone(&agent_guard), supervisor);
             }
 
             // Listen for deep link events (edgecoder://oauth-callback?...)

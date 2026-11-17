@@ -6,10 +6,14 @@
   import QuoteSelection from "../components/QuoteSelection.svelte";
   import BotAvatar from "../components/BotAvatar.svelte";
   import ToolArgs from "../components/ToolArgs.svelte";
+  import ServiceNotice from "../components/ServiceNotice.svelte";
+  import { connectivity } from "../lib/connectivity";
+  import { botStatusChip, offlinePausedIds } from "../lib/offline-bots";
+  import { onServiceReady, serviceStatus } from "../lib/service-status";
   import { Play, Pause, RotateCw, Pencil, Trash2, History, MessageSquare, Ellipsis, CircleAlert, X, CalendarClock, Cpu, Folder, PanelRight, Copy, FolderOpen, GitPullRequest, GitBranch, Zap, RefreshCw } from "@lucide/svelte";
   import { approveBotCall, botHistory, botMessages, cancelBotRun, deleteBot, getBot, runBot, sendBotMessage, syncBotRepository, updateBot, botErrorText } from "../lib/api";
   import {
-    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, botModeOf, autoStatus, botCompute, botPlacement, checksIn, routineText, botSubtitle, computeText, failureNotice, foldBotReply, folderName, formatCSats, prCards, readableSummary, reconcileRuns, relativeTime, runSourceText, shownReplyText, scheduleText, statusChip,
+    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, botModeOf, autoStatus, botCompute, botPlacement, checksIn, routineText, botSubtitle, computeText, failureNotice, foldBotReply, folderName, formatCSats, prCards, readableSummary, reconcileRuns, relativeTime, runSourceText, shownReplyText, scheduleText,
     triggerStatusText, triggerText,
     type Bot, type BotMessage, type BotRun, type NoticeAction,
   } from "../lib/bots";
@@ -116,7 +120,8 @@
     }
   }
 
-  const chip = $derived(statusChip(bot));
+  // Offline: a network-only bot says "Offline" (paused until the connection is back), not "Failed".
+  const chip = $derived(botStatusChip(bot, $connectivity.state === "offline", offlinePausedIds()));
   // The header says what it's doing or when it next works on its own; the clock keeps "in 12 min" fresh.
   let now = $state(Date.now());
   $effect(() => {
@@ -202,6 +207,8 @@
   const pendingIds = $derived(bot.pending.map((p) => p.callId));
 
   async function load(id: string) {
+    // Starting or restarting: ServiceNotice says so; this loads again once the service answers.
+    if ($serviceStatus.phase !== "ready") return;
     try {
       const [m, h] = await Promise.all([botMessages(id), botHistory(id)]);
       if (id !== bot.id) return;
@@ -266,6 +273,11 @@
     const t = setInterval(reload, 1_000);
     return () => clearInterval(t);
   });
+
+  $effect(() => onServiceReady(() => {
+    error = null;
+    reload();
+  }));
 
   async function act(fn: () => Promise<unknown>) {
     error = null;
@@ -404,7 +416,9 @@
     {/snippet}
   </Tabs.List>
 
-  {#if error}<div class="error" role="alert">{error}</div>{/if}
+  {#if $serviceStatus.phase !== "ready"}
+    <ServiceNotice />
+  {:else if error}<div class="error" role="alert">{error}</div>{/if}
 
   {#if view === "chat" && notice}
     <div class="notice" role="status" data-testid="bot-failure-notice">

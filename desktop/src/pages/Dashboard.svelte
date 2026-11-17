@@ -13,6 +13,8 @@
   import { formatUptime } from "../lib/format";
   import StatCard from "../components/StatCard.svelte";
   import ErrorBanner from "../components/ErrorBanner.svelte";
+  import ServiceNotice from "../components/ServiceNotice.svelte";
+  import { inDesktopShell, serviceStatus } from "../lib/service-status";
   import Skeleton from "../components/Skeleton.svelte";
   import Sparkline from "../components/Sparkline.svelte";
   import { counterDeltas, pushSample } from "../lib/charts";
@@ -184,8 +186,11 @@
 <div class="dashboard" aria-busy={loading}>
   <h1 class="page-title">Dashboard</h1>
 
-  {#if noLocalAgent}
-    <div class="info-banner" role="status">No local agent running. Install and start the EdgeCoder agent to see dashboard metrics.</div>
+  {#if $serviceStatus.phase !== "ready" || (noLocalAgent && inDesktopShell())}
+    <!-- The desktop app starts (and restarts) its own local service: never ask whether it runs. -->
+    <ServiceNotice starting={noLocalAgent} />
+  {:else if noLocalAgent}
+    <div class="info-banner" role="status">Dashboard metrics come from EdgeCoder on your computer. Open this page in the EdgeCoder desktop app.</div>
   {:else if error}
     <ErrorBanner message={error} onRetry={refreshCoreData} />
   {/if}

@@ -16,6 +16,8 @@
   import { MODEL_CATALOG, CATEGORY_LABELS, type CatalogModel } from "../lib/models";
   import type { ModelInfo, OllamaModel, OllamaRunningModel } from "../lib/types";
   import ErrorBanner from "../components/ErrorBanner.svelte";
+  import ServiceNotice from "../components/ServiceNotice.svelte";
+  import { inDesktopShell, onServiceReady, serviceStatus } from "../lib/service-status";
   import MemoryNotice from "../components/MemoryNotice.svelte";
   import Skeleton from "../components/Skeleton.svelte";
 
@@ -224,6 +226,8 @@
 
   $effect(() => {
     refresh();
+    // Load again once EdgeCoder's local service is up (after a start or a restart).
+    return onServiceReady(() => void refresh());
   });
 
   // ---- Pull with streaming progress ----
@@ -339,8 +343,11 @@
 <div class="model-manager">
   <h1 class="page-title">Model Manager</h1>
 
-  {#if noLocalAgent}
-    <div class="info-banner">No local agent running. Install and start the EdgeCoder agent to manage models.</div>
+  {#if $serviceStatus.phase !== "ready" || (noLocalAgent && inDesktopShell())}
+    <!-- The desktop app starts (and restarts) its own local service: never ask whether it runs. -->
+    <ServiceNotice starting={noLocalAgent} />
+  {:else if noLocalAgent}
+    <div class="info-banner">Models are managed by EdgeCoder on your computer. Open this page in the EdgeCoder desktop app.</div>
   {/if}
   {#if !noLocalAgent}<MemoryNotice showServing />{/if}
   {#if error}
