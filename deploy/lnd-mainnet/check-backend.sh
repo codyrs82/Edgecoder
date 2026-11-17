@@ -108,7 +108,8 @@ else
     # why each is needed). Each probe is harmless: read-only, or given an invalid argument so the
     # node rejects it after the whitelist check (HTTP 500, not 403). getinfo no longer exists in
     # Bitcoin Core, so an allowed getinfo answers 404 (method not found), which is what lnd needs.
-    # Response bodies (getpeerinfo lists the node's peers) stay in $dir and are never printed.
+    # Response bodies stay in $dir and are never printed. getpeerinfo is not probed: it stays
+    # blocked on ocean-node (it would expose the node's peers) and lnd does not need it.
     genesis=000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f
     zero=0000000000000000000000000000000000000000000000000000000000000000
     echo "rpcwhitelist (403 = blocked):"
@@ -118,8 +119,8 @@ else
       "getrawtransaction [\"$zero\"]" "gettxout [\"$zero\",0]" "getmempoolentry [\"$zero\"]" \
       "sendrawtransaction [\"00\"]" "testmempoolaccept [[\"00\"]]" "getzmqnotifications []" \
       "getrawmempool []" \
-      "getinfo []" "getdeploymentinfo []" "getmempoolinfo []" "uptime []" "getpeerinfo []" \
-      "gettxspendingprevout [[]]"; do
+      "getinfo []" "getdeploymentinfo []" "getmempoolinfo []" "gettxspendingprevout [[]]" \
+      "uptime []"; do
       m=${probe%% *}; code=$(call "$m" "${probe#* }")
       case "$code" in
         200 | 404 | 500) ok "$m" ;;

@@ -213,11 +213,11 @@ describe.skipIf(!canRunScripts)("deploy/lnd-mainnet entrypoint", () => {
   });
 
   it("waits (does not start lnd) while the rpcwhitelist blocks methods lnd needs, naming them", async () => {
-    const p = await serve("127.0.0.1", { forbid: ["getinfo", "getdeploymentinfo", "getmempoolinfo", "uptime", "getpeerinfo", "gettxspendingprevout"] });
+    const p = await serve("127.0.0.1", { forbid: ["getinfo", "getdeploymentinfo", "getmempoolinfo", "gettxspendingprevout", "uptime"] });
     const r = await run("lnd", external("127.0.0.1", p), 3500);
     expect(r.code).not.toBe(0); // killed by the test while still waiting
     expect(r.args).toEqual([]);
-    expect(r.log).toMatch(/rpcwhitelist blocks methods lnd needs: getinfo getdeploymentinfo getmempoolinfo uptime getpeerinfo gettxspendingprevout/);
+    expect(r.log).toMatch(/rpcwhitelist blocks methods lnd needs: getinfo getdeploymentinfo getmempoolinfo gettxspendingprevout uptime/);
     expect(r.log).not.toContain(PASS);
   });
 
@@ -226,6 +226,14 @@ describe.skipIf(!canRunScripts)("deploy/lnd-mainnet entrypoint", () => {
     const r = await run("lnd", external("127.0.0.1", p));
     expect(r.code, r.log).toBe(0);
     expect(r.log).not.toMatch(/rpcwhitelist blocks/);
+  });
+
+  it("starts lnd while getpeerinfo stays blocked, with the chain-backend health check off", async () => {
+    const p = await serve("127.0.0.1", { forbid: ["getpeerinfo", "getwalletinfo", "getblocktemplate"] });
+    const r = await run("lnd", external("127.0.0.1", p));
+    expect(r.code, r.log).toBe(0);
+    expect(r.log).not.toMatch(/rpcwhitelist blocks/);
+    expect(r.args).toContain("--healthcheck.chainbackend.attempts=0");
   });
 
   it("refuses a backend that is not on mainnet", async () => {
@@ -273,7 +281,7 @@ describe.skipIf(!canRunScripts)("deploy/lnd-mainnet entrypoint", () => {
     expect(out.code, out.log).toBe(0);
     expect(out.log).toMatch(/ok {4}getblockchaininfo: chain=main blocks=900000/);
     expect(out.log).toMatch(/ok {4}sendrawtransaction/);
-    for (const m of ["getinfo", "getdeploymentinfo", "getmempoolinfo", "uptime", "getpeerinfo", "gettxspendingprevout"]) {
+    for (const m of ["getinfo", "getdeploymentinfo", "getmempoolinfo", "gettxspendingprevout", "uptime"]) {
       expect(out.log).toMatch(new RegExp(`ok {4}${m}$`, "m"));
     }
     expect(out.log).toMatch(/PASS$/m);

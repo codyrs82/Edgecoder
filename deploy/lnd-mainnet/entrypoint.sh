@@ -91,16 +91,19 @@ rpc() {
 #                         gettxspendingprevout all fail inside lnd.
 #   getdeploymentinfo     startup taproot check (chainreg/taproot_check.go): fatal if blocked.
 #   getmempoolinfo        fee estimator start (chainfee BitcoindEstimator): fatal if blocked.
-#   uptime, getpeerinfo   lnd's chain-backend health check, every minute: lnd shuts itself down
-#                         after 3 failures.
+#   uptime                lnd's chain-backend health check. External mode turns that check off
+#                         (--healthcheck.chainbackend.attempts=0), so lnd never calls uptime or
+#                         getpeerinfo for health; uptime stays whitelisted on ocean-node anyway.
 #   gettxspendingprevout  mempool spend lookups (sweeper, contract resolution): silently "not
 #                         found" if blocked, with no local fallback on Core >= 24.
+# getpeerinfo is deliberately NOT here: it would expose ocean-node's peer addresses, so it stays
+# blocked (403). Its only other caller, lnd's fee-filter manager, logs the error and carries on.
 # The entrypoint refuses to start lnd until every one is allowed, instead of crash-looping.
-LND_BITCOIND_RPCS=${LND_BITCOIND_RPCS:-"getblockchaininfo getbestblockhash getblockcount getblockhash getblockheader getblock getnetworkinfo estimatesmartfee getrawtransaction gettxout getmempoolentry getrawmempool sendrawtransaction testmempoolaccept getzmqnotifications getinfo getdeploymentinfo getmempoolinfo uptime getpeerinfo gettxspendingprevout"}
+LND_BITCOIND_RPCS=${LND_BITCOIND_RPCS:-"getblockchaininfo getbestblockhash getblockcount getblockhash getblockheader getblock getnetworkinfo estimatesmartfee getrawtransaction gettxout getmempoolentry getrawmempool sendrawtransaction testmempoolaccept getzmqnotifications getinfo getdeploymentinfo getmempoolinfo gettxspendingprevout uptime"}
 
 # rpc_allowed method: does the whitelist let this method through? Called with no params, so
 # methods that need arguments fail validation (HTTP 500) after the whitelist check, and nothing is
-# read or sent. The body (getpeerinfo lists the node's peers) is discarded, never logged.
+# read or sent. The body is discarded, never logged.
 rpc_allowed() {
   local code
   code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -K "$RUN/curl-rpc.conf" \
@@ -240,8 +243,10 @@ case "${1:-}" in
     rm -f "$RUN/curl-rpc.conf"
     log "starting lnd with the external backend at $RPC_HOSTPORT"
     # An unpruned backend serves every historical block, so none of the pruned-node settings
-    # (routing.assumechanvalid and the like) are set.
-    exec lnd --configfile="$RUN/lnd.conf" "${lnd_common[@]}" "${LND_TAIL[@]}"
+    # (routing.assumechanvalid and the like) are set. The chain-backend health check is off: it
+    # calls getpeerinfo, which ocean-node's rpcwhitelist blocks on purpose, and three failures
+    # would make lnd shut itself down.
+    exec lnd --configfile="$RUN/lnd.conf" "${lnd_common[@]}" --healthcheck.chainbackend.attempts=0 "${LND_TAIL[@]}"
     ;;
   *) echo "usage: $0 lnd | bitcoind" >&2; exit 2 ;;
 esac

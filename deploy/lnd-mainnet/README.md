@@ -106,18 +106,19 @@ line or into the logs) and starts LND. The wallet unlocks from `LND_WALLET_PASS`
 - The limited RPC user `lnd-edgecoder` exists (`rpcauth`) with an `rpcwhitelist` that covers what
   LND v0.21.8 calls (read from its source and its btcwallet/btcd dependencies):
   `getblockchaininfo,getbestblockhash,getblockcount,getblockhash,getblockheader,getblock,getnetworkinfo,estimatesmartfee,getrawtransaction,gettxout,getmempoolentry,getrawmempool,sendrawtransaction,testmempoolaccept,getzmqnotifications`
-  **plus** `getinfo,getdeploymentinfo,getmempoolinfo,uptime,getpeerinfo,gettxspendingprevout`:
+  **plus** `getinfo,getdeploymentinfo,getmempoolinfo,gettxspendingprevout,uptime` (20 methods; `getpeerinfo` stays blocked):
 
   | Method | Why LND needs it | If blocked |
   | --- | --- | --- |
   | `getinfo` | rpcclient detects the backend version by asking `getinfo` first; Core removed it in 0.16, so an allowed `getinfo` answers "method not found" and the client falls back to `getnetworkinfo` | a 403 is not "method not found": `getblockchaininfo`, `sendrawtransaction`, `testmempoolaccept` and `gettxspendingprevout` all fail inside LND |
   | `getdeploymentinfo` | startup taproot check (Core 23+ dropped `softforks` from `getblockchaininfo`) | LND exits: "node backend does not support taproot" |
   | `getmempoolinfo` | fee estimator's minimum mempool fee, at startup and then periodically | LND exits at startup |
-  | `uptime`, `getpeerinfo` | chain-backend health check, every minute (and the fee filter) | LND shuts itself down after 3 failed checks |
+  | `uptime` | chain-backend health check | external mode runs LND with `--healthcheck.chainbackend.attempts=0`, so the check (which also calls `getpeerinfo`) never runs; `uptime` is whitelisted anyway |
   | `gettxspendingprevout` | mempool spend lookups (sweeper, contract resolution) on Core 24+ | silently "not found"; no local fallback |
 
-  `getinfo` and `uptime` reveal nothing; `getpeerinfo` shows the node's peer addresses to this
-  user. `submitpackage` is only needed for the optional `lncli wallet` package-submit command.
+  `getinfo` and `uptime` reveal nothing. `getpeerinfo` is deliberately **not** whitelisted: it would
+  show ocean-node's peer addresses to this user. With the health check off, LND's only other use of it
+  is the fee-filter manager, which logs the 403 and keeps going. `submitpackage` is only needed for the optional `lncli wallet` package-submit command.
   Changing the whitelist needs a bitcoind restart on `ocean-node`. Until it allows all of these,
   the entrypoint waits (it does not start LND) and logs the blocked methods; `check-backend.sh`
   probes each one (harmlessly) too.
