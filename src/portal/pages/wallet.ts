@@ -14,6 +14,7 @@
  *
  * Under the CSP: styles in one nonce'd block, no style attributes, no inline handlers.
  */
+import * as BL from "../../common/buy-limits.js";
 import * as O from "../../common/onboarding.js";
 import { CSP_NONCE } from "../csp-nonce.js";
 import { icon } from "./design-system.js";
@@ -198,12 +199,13 @@ export const WALLET_CONTENT = `
           <div class="wl-testnote hidden" id="launchNote" role="note">${icon("alert", 14)}<span id="launchNoteText"></span></div>
           <div class="wl-presets" role="radiogroup" aria-label="Amount in sats">
             ${presets.map((p, i) => `<button type="button" role="radio" aria-checked="${i === 1 ? "true" : "false"}" data-amount="${p}">${p.toLocaleString("en-US")}<small>sats</small></button>`).join("")}
-            <button type="button" role="radio" aria-checked="false" data-amount="custom">Custom<small>100 to 1M</small></button>
+            <button type="button" role="radio" aria-checked="false" data-amount="custom">Custom<small id="customRange">100 to 1M</small></button>
           </div>
           <div class="wl-custom" id="customWrap">
             <label for="topupAmount">Amount in sats</label>
-            <input id="topupAmount" type="number" inputmode="numeric" min="100" max="1000000" step="1" value="20000" />
+            <input id="topupAmount" type="number" inputmode="numeric" min="100" max="1000000" step="1" value="20000" aria-describedby="overLimit" />
           </div>
+          <div class="wl-err hidden" id="overLimit"></div>
           <dl class="wl-break" id="breakdown">
             <div><dt>You pay</dt><dd><span id="bdPay">20,000 sats</span><small id="bdPayUsd"></small></dd></div>
             <div class="fee hidden" id="bdFeeRow"><dt id="bdFeeLabel">Purchase fee</dt><dd id="bdFee"></dd></div>
@@ -474,7 +476,9 @@ export const WALLET_PRICE_LIB = [
   `var FALLBACK_TOKEN_PRICES = ${JSON.stringify(O.FALLBACK_TOKEN_PRICES)};`,
   `var TYPICAL_CALL = ${JSON.stringify(O.TYPICAL_CALL)};`,
   `var FUND_EXAMPLE_CLASS = ${JSON.stringify(O.FUND_EXAMPLE_CLASS)};`,
-  ...[O.paramsFromModel, O.usdPerMToCSats, O.classPrice, O.cSatsPerCall, O.callsForCSats, O.isTestNetwork, O.testNetworkNote].map((f) => f.toString())
+  ...[O.paramsFromModel, O.usdPerMToCSats, O.classPrice, O.cSatsPerCall, O.callsForCSats, O.isTestNetwork, O.testNetworkNote].map((f) => f.toString()),
+  // Early-access limits and purchase error text (src/common/buy-limits.ts), shared with the desktop app.
+  ...[BL.buyLimit, BL.clampBuyAmount, BL.buyAmountFits, BL.buyRangeLabel, BL.buyLimitText, BL.buyErrorText].map((f) => f.toString())
 ].join("\n");
 
 export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + WALLET_PRICE_LIB + `
@@ -497,10 +501,25 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + W
     function btc() { return state.overview && state.overview.btcUsd; }
     function renderBreakdown() {
       const a = state.amount;
-      const valid = Number.isInteger(a) && a >= 100 && a <= 1000000;
+      const lim = currentLimit();
+      const valid = buyAmountFits(a, lim);
+      const range = buyRangeLabel(lim);
+      const over = buyLimitText(a, lim);
+      $("overLimit").textContent = over;
+      $("overLimit").classList.toggle("hidden", !over);
+      $("customRange").textContent = range;
+      $("topupAmount").setAttribute("min", String(lim.minSats));
+      $("topupAmount").setAttribute("max", String(Math.max(lim.minSats, lim.maxSats)));
+      for (const b of document.querySelectorAll(".wl-presets button")) {
+        const v = b.getAttribute("data-amount");
+        if (v === "custom") continue;
+        const off = Number(v) > lim.maxSats;
+        b.disabled = off;
+        if (off) b.setAttribute("title", buyLimitText(Number(v), lim)); else b.removeAttribute("title");
+      }
       const p = preview(valid ? a : 0);
       const approx = state.feeBps === null ? "≈ " : "";
-      $("bdPay").textContent = valid ? fmtSats(a) + " sats" : "100 to 1,000,000 sats";
+      $("bdPay").textContent = valid ? fmtSats(a) + " sats" : fmtSats(lim.minSats) + " to " + fmtSats(Math.max(lim.minSats, lim.maxSats)) + " sats";
       $("bdPayUsd").textContent = valid ? fmtUsd(a, btc()) : "";
       const charged = feeBps() > 0;
       $("bdFeeRow").classList.toggle("hidden", !charged);
@@ -519,7 +538,13 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + W
       $("bdCalls").classList.toggle("hidden", calls === null);
       $("bdCalls").textContent = calls === null ? "" : "About " + fmtSats(calls) + " calls on a 30B coder model.";
       $("topupBtn").disabled = !valid;
-      $("topupBtn").textContent = valid ? "Buy " + fmtSats(a) + " cSats with Lightning" : "Enter 100 to 1,000,000 sats";
+      $("topupBtn").textContent = valid ? "Buy " + fmtSats(a) + " cSats with Lightning" : lim.maxSats < lim.minSats ? "Early-access limit reached" : "Enter " + fmtSats(lim.minSats) + " to " + fmtSats(lim.maxSats) + " sats";
+    }
+    /** The most one purchase can be now (early-access caps, balance, 100 to 1M). */
+    function currentLimit() {
+      const o = state.overview || {};
+      const t = o.topup || {};
+      return buyLimit({ launch: o.launch || null, balanceCSats: o.connected ? o.cSats : null, feeBps: feeBps(), globalMin: t.minSats || 100, globalMax: t.maxSats || 1000000 });
     }
     function pickAmount(btn) {
       for (const b of document.querySelectorAll(".wl-presets button")) b.setAttribute("aria-checked", b === btn ? "true" : "false");
@@ -535,7 +560,10 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + W
       b.addEventListener("keydown", (e) => {
         const all = [...document.querySelectorAll(".wl-presets button")];
         const i = all.indexOf(b);
-        const next = e.key === "ArrowRight" || e.key === "ArrowDown" ? all[(i + 1) % all.length] : e.key === "ArrowLeft" || e.key === "ArrowUp" ? all[(i - 1 + all.length) % all.length] : null;
+        const d = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
+        let j = (i + d + all.length) % all.length;
+        while (d && all[j].disabled) j = (j + d + all.length) % all.length;
+        const next = d ? all[j] : null;
         if (next) { e.preventDefault(); next.focus(); pickAmount(next); }
       });
     }
@@ -552,20 +580,14 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + W
     }
     function stopPolling() { clearInterval(state.poll); clearInterval(state.tick); state.poll = null; state.tick = null; }
     function topupError(text) { const e = $("topupError"); e.textContent = text || ""; e.classList.toggle("hidden", !text); }
-    const TOPUP_ERRORS = {
-      payments_disabled: "Buying cSats is turned off on this coordinator.", invalid_amount: "Enter whole sats from 100 to 1,000,000.",
-      launch_buy_daily_cap: "Early access: you reached today's purchase limit.", launch_balance_cap: "Early access: that would take your balance over the early-access limit.",
-      no_coordinator: "No coordinator is reachable right now. Try again in a minute.", coordinator_unreachable: "No coordinator is reachable right now. Try again in a minute.",
-      not_authenticated: "Your session ended. Sign in again."
-    };
     async function createInvoice() {
       topupError("");
       const btn = $("topupBtn");
       btn.disabled = true; btn.textContent = "Preparing payment…";
       const r = await call("/portal/api/wallet/topup", { method: "POST", body: JSON.stringify({ amountSats: state.amount }) }).catch(() => ({ ok: false, json: {} }));
       renderBreakdown();
-      // A soft-launch refusal carries its own sentence (with the sats still allowed).
-      if (!r.ok || !r.json.invoice) { topupError((/^launch_/.test(r.json.error || "") && r.json.detail) || TOPUP_ERRORS[r.json.error] || "Could not start the payment (" + (r.json.error || r.status || "network error") + ")."); return; }
+      // Plain text for every refusal (src/common/buy-limits.ts); a soft-launch one carries the sats still allowed.
+      if (!r.ok || !r.json.invoice) { topupError(buyErrorText(r.json.error || (r.status === 401 ? "not_authenticated" : ""), r.json)); if (/^launch_/.test(r.json.error || "")) loadOverview(); return; }
       state.intent = r.json;
       state.expiresAt = Date.now() + Number(r.json.expiresInSeconds || 0) * 1000;
       const ttlMin = Math.round(Number(r.json.expiresInSeconds || 0) / 60);
@@ -727,6 +749,15 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + W
       const net = renderNetBadge(o.network);
       $("topupTestNote").classList.toggle("hidden", !net.test);
       $("topupTestNoteText").textContent = net.test ? "This coordinator runs on " + net.short + ". Pay with a " + net.short + " wallet; these sats have no value." + (o.network === "signet" ? " " + testNetworkNote(o.network) : "") : "";
+      // A selected amount over the early-access limit comes down to it (the custom field holds it).
+      const lim = currentLimit();
+      if (state.amount > lim.maxSats && lim.maxSats >= lim.minSats) {
+        const custom = document.querySelector('.wl-presets button[data-amount="custom"]');
+        $("topupAmount").value = String(lim.maxSats);
+        for (const b of document.querySelectorAll(".wl-presets button")) b.setAttribute("aria-checked", b === custom ? "true" : "false");
+        $("customWrap").classList.add("show");
+        state.amount = lim.maxSats;
+      }
       renderBreakdown();
       renderLaunch(o.launch);
       if (o.connected && o.cSats !== null) {

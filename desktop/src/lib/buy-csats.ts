@@ -1,7 +1,9 @@
 // "Buy cSats" from a failure: which amount to suggest, the request the Wallet page picks up
 // (preselected amount, then back to the bot or chat after payment), and when a balance is low.
 import { writable } from "svelte/store";
+import { get } from "svelte/store";
 import { callsForCSats, FUND_EXAMPLE_CLASS } from "./onboarding";
+import { clampBuyAmount, type BuyLimit } from "./buy-limits";
 
 /** The Wallet page's amounts (sats; a sat buys about a cSat before fees). */
 export const TOP_UP_PRESETS = [5_000, 20_000, 100_000] as const;
@@ -10,10 +12,16 @@ export const TOP_UP_PRESETS = [5_000, 20_000, 100_000] as const;
  * The amount to suggest: about a day of the bot's budget, or the step's estimate × 20, whichever
  * is more, rounded up to a Wallet preset (5k, 20k, 100k). 5k when nothing is known.
  */
-export function suggestedTopUpSats(opts: { budgetCSatsPerDay?: number | null; stepCSats?: number | null } = {}): number {
+export function suggestedTopUpSats(opts: { budgetCSatsPerDay?: number | null; stepCSats?: number | null; limit?: BuyLimit | null } = {}): number {
   const need = Math.max(opts.budgetCSatsPerDay ?? 0, (opts.stepCSats ?? 0) * 20);
-  return TOP_UP_PRESETS.find((p) => p >= need) ?? TOP_UP_PRESETS[TOP_UP_PRESETS.length - 1];
+  const pick = TOP_UP_PRESETS.find((p) => p >= need) ?? TOP_UP_PRESETS[TOP_UP_PRESETS.length - 1];
+  // Never more than can be bought now (early-access caps): the Wallet would only refuse it.
+  const limit = opts.limit === undefined ? get(buyLimitState) : opts.limit;
+  return limit && limit.maxSats >= limit.minSats ? clampBuyAmount(pick, limit) : pick;
 }
+
+/** The Wallet page's effective purchase limit, once it has loaded the caps (null until then). */
+export const buyLimitState = writable<BuyLimit | null>(null);
 
 /** "This step needs about 0.4 cSats" → 0.4. */
 export function neededCSatsIn(error: string | undefined): number | undefined {

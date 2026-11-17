@@ -997,6 +997,8 @@ export interface WalletOverview {
   rateStale: boolean;
   fees: { purchaseFeeBps: number | null; networkFeeBps: number | null };
   topup: { minSats: number; maxSats: number };
+  /** Early-access caps (LAUNCH_MODE=invite on the coordinator); null or absent when open. */
+  launch?: { mode: "invite"; maxBuySatsPerDay: number; maxBalanceSats: number; maxPayoutSatsPerDay: number; boughtWindowSats: number } | null;
   payouts: { balance: PayoutBalance | null; policy: PayoutPolicyView | null; payouts: PayoutRow[] } | null;
 }
 
@@ -1463,7 +1465,7 @@ export interface FsFile {
 
 /** A failed file operation; `code` is the server's (conflict, exists, not_found, binary, too_large, ...). */
 export class FsError extends Error {
-  constructor(readonly code: string, message: string, readonly status: number) {
+  constructor(readonly code: string, message: string, readonly status: number, readonly data?: Record<string, unknown>) {
     super(message);
   }
 }
@@ -1475,7 +1477,7 @@ async function fsCall<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: stri
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
-  if (!res.ok) throw new FsError(data.error ?? "error", serviceErrorText(res.status, data), res.status);
+  if (!res.ok) throw new FsError(data.error ?? "error", serviceErrorText(res.status, data), res.status, data as Record<string, unknown>);
   return data as T;
 }
 

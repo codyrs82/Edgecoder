@@ -185,3 +185,22 @@ describe("wallet page: early access", () => {
     expect(WALLET_SCRIPT).toContain("renderLaunch(o.launch)");
   });
 });
+
+describe("wallet page: purchase limits", () => {
+  it("ships the shared limit and error helpers to the browser, and uses them for presets, the custom range and refusals", async () => {
+    const { WALLET_PRICE_LIB, WALLET_SCRIPT, WALLET_CONTENT } = await import("../../src/portal/pages/wallet.js");
+    const lib = new Function(`${WALLET_PRICE_LIB}; return { buyLimit, buyRangeLabel, buyLimitText, buyErrorText, buyAmountFits };`)();
+    const l = lib.buyLimit({ launch: { mode: "invite", maxBuySatsPerDay: 50000, maxBalanceSats: 200000, boughtWindowSats: 5000 }, balanceCSats: 1000, feeBps: 0 });
+    expect(l.maxSats).toBe(45000);
+    expect(lib.buyRangeLabel(l)).toBe("100 to 45,000 today");
+    expect(lib.buyAmountFits(500000, l)).toBe(false);
+    expect(lib.buyLimitText(500000, l)).toBe("Early access: up to 50,000 sats per day (45,000 left today).");
+    expect(lib.buyErrorText("launch_buy_daily_cap", { remainingSats: 45000 })).toBe("That's over today's early-access limit. You can buy up to 45,000 sats more today.");
+    // Presets over the limit are disabled with a tooltip; the custom label and input follow the limit.
+    expect(WALLET_SCRIPT).toContain("b.disabled = off");
+    expect(WALLET_SCRIPT).toContain('$("customRange").textContent = range');
+    expect(WALLET_SCRIPT).toContain("buyErrorText(");
+    expect(WALLET_SCRIPT).not.toContain("Could not start the payment (");
+    expect(WALLET_CONTENT).toContain('id="overLimit"');
+  });
+});
