@@ -179,3 +179,37 @@ describe("POST /admin/nodes/:nodeId/dismiss (ownerless enrollment requests)", ()
   });
 });
 
+
+describe("POST /admin/nodes/:nodeId/remove (an approved machine that is gone)", () => {
+  const post = (id: string, payload: unknown, token = ADMIN) =>
+    app.inject({ method: "POST", url: `/admin/nodes/${id}/remove`, headers: { "x-admin-token": token, "content-type": "application/json" }, payload: JSON.stringify(payload) });
+
+  test("needs the admin token", async () => {
+    expect((await post("ec-st10-chi-gpu0-1", {}, "wrong")).statusCode).toBe(401);
+  });
+
+  test("refuses while it holds a reservation lease unless forced, then drops it from the registry", async () => {
+    const agentId = `gone-${randomUUID()}`;
+    state.agentCapabilities.set(agentId, { os: "linux" } as never);
+    const now = Date.now();
+    ctx.reservations.add({ id: `r-${agentId}`, accountId: "buyer", agentId, agentAccountId: "host", computeClass: "gpu.dc", creditsPerSecond: 1, startMs: now, endMs: now + 3_600_000, ratePerSecondMsat: 1, prepaidMsat: 1, status: "active" });
+    const blocked = await post(agentId, {});
+    expect(blocked.statusCode).toBe(409);
+    expect(blocked.json()).toMatchObject({ error: "active_reservation", reservationId: `r-${agentId}` });
+    expect((await post(agentId, { dryRun: true })).statusCode).toBe(409);
+    expect(state.agentCapabilities.has(agentId)).toBe(true);
+    const forced = await post(agentId, { force: true });
+    expect(forced.statusCode, forced.body).toBe(200);
+    expect(forced.json()).toMatchObject({ ok: true, registered: true, forced: true });
+    expect(state.agentCapabilities.has(agentId)).toBe(false);
+  });
+
+  test("an idle machine is removed without force; dryRun changes nothing", async () => {
+    const agentId = `idle-${randomUUID()}`;
+    state.agentCapabilities.set(agentId, { os: "linux" } as never);
+    expect((await post(agentId, { dryRun: true })).json()).toMatchObject({ ok: true, dryRun: true });
+    expect(state.agentCapabilities.has(agentId)).toBe(true);
+    expect((await post(agentId, {})).json()).toMatchObject({ ok: true, registered: true, forced: false });
+    expect(state.agentCapabilities.has(agentId)).toBe(false);
+  });
+});

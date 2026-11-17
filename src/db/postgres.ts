@@ -1284,6 +1284,12 @@ export class PostgresStore {
     return result.rowCount ?? 0;
   }
 
+  /** Drops a node from the status projection whatever its approval (admin removed the machine). */
+  async deleteNodeStatusProjection(nodeId: string): Promise<number> {
+    const result = await this.pool.query("DELETE FROM node_status_projection WHERE node_id = $1", [nodeId]);
+    return result.rowCount ?? 0;
+  }
+
   async listNodeStatusProjection(ownerEmail?: string): Promise<
     Array<{
       nodeId: string;
