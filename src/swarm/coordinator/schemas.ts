@@ -90,6 +90,8 @@ export const memoryTelemetrySchema = z
     loadedModels: z.array(z.object({ name: z.string().min(1).max(200), bytes: z.number().nonnegative() })).max(32),
     models: z.array(z.object({ name: z.string().min(1).max(200), bytes: z.number().nonnegative(), contextWindow: z.number().int().positive(), slots: z.number().int().min(1).max(64) })).max(64),
     paused: z.boolean().optional(),
+    /** Installed models not served on the network (owner-only), with their estimated bytes. */
+    ownerModels: z.array(z.object({ name: z.string().min(1).max(200), bytes: z.number().nonnegative() })).max(64).optional().catch(undefined),
     atMs: z.number()
   })
   .optional()
@@ -106,6 +108,8 @@ export const registerSchema = z.object({
   localModelProvider: z.enum(["edgecoder-local", "ollama-local"]).default("edgecoder-local"),
   /** Models installed in the agent's Ollama (network inference runs only on agents that have the model). */
   installedModels: z.array(z.string().min(1).max(200)).max(200).optional(),
+  /** Installed models this host keeps off the network (too big for its memory budget): only its owner's own calls run them. */
+  ownerModels: z.array(z.string().min(1).max(200)).max(200).optional().catch(undefined),
   activeModel: z.string().min(1).max(200).optional(),
   /** The engine that runs the agent's model (src/inference-api/openai-engine.ts); unset = Ollama. Unknown values are dropped. */
   inferenceEngine: z.enum(["ollama", "vllm", "mlx"]).optional().catch(undefined),
@@ -182,6 +186,8 @@ export const heartbeatSchema = z.object({
   activeModelParamSize: z.number().optional(),
   /** #54: models in the agent's Ollama (/api/tags); refreshes the catalog. Signed heartbeats only. */
   installedModels: z.array(z.string().min(1).max(200)).max(200).optional(),
+  /** Installed models kept off the network: only the owner's own calls run them. Signed heartbeats only. */
+  ownerModels: z.array(z.string().min(1).max(200)).max(200).optional().catch(undefined),
   modelSwapInProgress: z.boolean().optional(),
   sandboxMode: z.enum(["none", "docker", "vm"]).optional(),
   /** Update the agent's ask; omit to leave it, 0 to track the class reference again. */

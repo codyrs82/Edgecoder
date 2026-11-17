@@ -179,11 +179,14 @@ function refused(agentId: string, model: string, nowMs: number): boolean {
 /**
  * May a call for `model` go to this agent now, by memory? `heldInference` = model calls it holds.
  * No fresh telemetry: yes (older agents), unless it refused the model recently.
+ * `ownerOnly`: the owner's own call on a model the agent keeps off the network (too big for its
+ * budget): the owner chose to run it there, so no headroom check; critical pressure still refuses.
  */
-export function memoryAdmits(agentId: string, model: string | undefined, heldInference: number, nowMs = Date.now()): boolean {
+export function memoryAdmits(agentId: string, model: string | undefined, heldInference: number, nowMs = Date.now(), opts: { ownerOnly?: boolean } = {}): boolean {
   if (model && refused(agentId, model, nowMs)) return false;
   const t = agentMemory(agentId, nowMs);
   if (!t) return true;
+  if (opts.ownerOnly) return t.pressure !== "critical";
   if (t.pressure !== "normal" || t.paused) return false;
   if (!model) return true;
   const served = t.models.find((m) => m.name === model);

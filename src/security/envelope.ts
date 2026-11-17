@@ -28,6 +28,8 @@ export interface EnvelopeMetadata {
   priority?: number;
   language?: string;
   timeoutMs?: number;
+  /** The owner's own call ("My machines"): runs only on an agent of this account. Older agents ignore it. */
+  onlyAccountId?: string;
 }
 
 export interface TaskEnvelope {

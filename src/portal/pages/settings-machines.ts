@@ -8,6 +8,30 @@
  * pull progress is a <progress> element.
  */
 
+/**
+ * The note under an installed model this machine does not share on the network (newer
+ * coordinators say which it serves: `networkModels`, `ownerModels`, `memory`). Empty when it is
+ * served, or when the coordinator does not say. Serialised into the page script with toString(),
+ * so it stays self-contained.
+ */
+export function modelShareNote(
+  name: string,
+  m: { networkModels?: string[]; ownerModels?: string[]; memory?: { budgetBytes: number; models: Array<{ name: string; bytes: number }> } },
+): string {
+  if (!m || !Array.isArray(m.networkModels) || m.networkModels.indexOf(name) >= 0 || /embed/i.test(name)) return "";
+  const gbOf = function (n: number): string {
+    return (n / (1024 * 1024 * 1024)).toFixed(1).replace(/\.0$/, "") + " GB";
+  };
+  const est = m.memory && Array.isArray(m.memory.models) ? m.memory.models.find(function (x) { return x.name === name; }) : undefined;
+  const budget = m.memory && m.memory.budgetBytes > 0 ? m.memory.budgetBytes : 0;
+  const nums = est && est.bytes > 0 && budget ? " (needs ~" + gbOf(est.bytes) + "; budget " + gbOf(budget) + ")" : "";
+  if (Array.isArray(m.ownerModels) && m.ownerModels.indexOf(name) >= 0) {
+    if (est && budget && est.bytes <= budget) return "Runs for you only: this machine shares as many models on the network as its memory budget holds together" + nums;
+    return "Runs for you only: too big to share on the network from this machine" + nums;
+  }
+  return "Not shared on the network from this machine" + nums + ". Update its agent to run it for you only.";
+}
+
 export function machinesSectionHtml(): string {
   return `
       <div class="set-group" id="machinesGroup">Your machines' models</div>
@@ -29,6 +53,7 @@ export function machinesPageScript(): string {
   return `
     /* ── Machines: remote model control ── */
     let machinesData = { machines: [], catalog: [] };
+    ${modelShareNote.toString()}
     let machinesTimer = null;
     function fmtBytes(n) {
       if (n === null || n === undefined || !isFinite(Number(n))) return "n/a";
@@ -61,6 +86,7 @@ export function machinesPageScript(): string {
       const rows = (st.installed || []).map((im) => {
         const active = im.name === st.activeModel;
         return "<tr><td>" + escapeHtml(im.name) + (active ? " " + statusBadge("ACTIVE", "ok") : "") + (loaded.has(im.name) ? " " + statusBadge("LOADED", "info") : "") +
+          (function () { const note = modelShareNote(im.name, m); return note ? "<div class='muted'>" + escapeHtml(note) + "</div>" : ""; })() +
           "</td><td>" + fmtBytes(im.sizeBytes) + "</td><td>" +
           (active ? "" : "<button class='mcBtn' data-action='set_model' data-agent='" + id + "' data-model='" + attr(im.name) + "'" + dis + ">Use</button> ") +
           (active ? "" : "<button class='mcBtn' data-action='remove' data-agent='" + id + "' data-model='" + attr(im.name) + "'" + dis + ">Remove</button>") +

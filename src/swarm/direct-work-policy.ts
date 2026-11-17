@@ -43,3 +43,13 @@ export function workerAcceptsDirectWorkOffer(
   if (offer.fromAccountId !== ownAccountId) return { ok: false, reason: "cross_account" };
   return { ok: true };
 }
+
+/**
+ * Worker side: a pulled call is the owner's own ("My machines": the coordinator's onlyAccountId)
+ * when it names this agent's account, the one the coordinator named in its signed /register
+ * response (the same account direct work is checked against). The owner may run a model on their
+ * own machine that the machine keeps off the network (memory-manager.ts admit with `own`).
+ */
+export function isOwnAccountCall(onlyAccountId: string | undefined, ownAccountId: string | undefined): boolean {
+  return !!onlyAccountId && !!ownAccountId && onlyAccountId === ownAccountId;
+}

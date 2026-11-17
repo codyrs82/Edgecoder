@@ -17,7 +17,8 @@ import { identity, coordinatorKeys, securityLog } from "../context.js";
 import { requireAgentSelf, requirePortalServiceToken } from "../auth.js";
 import { verifiedAccountOf } from "../agent-accounts.js";
 import { agentCapabilities } from "../agent-state.js";
-import { routableModels } from "../../model-catalog.js";
+import { ownerOnlyModels, routableModels } from "../../model-catalog.js";
+import { agentMemory } from "../memory-admission.js";
 import { acceptModelControlReport, machineView, sendModelControlCommand } from "../model-control.js";
 
 const accountId = z.string().min(1).max(160).regex(/^acct-[A-Za-z0-9_-]+$/);
@@ -89,6 +90,9 @@ export function registerModelControlRoutes(app: CoordinatorApp): void {
       if ((await verifiedAccountOf(agentId)) !== body.data.accountId) continue;
       const view = await machineView(agentId);
       const cap = agentCapabilities.get(agentId);
+      const network = routableModels(cap);
+      const ownerOnly = ownerOnlyModels(cap);
+      const mem = agentMemory(agentId);
       machines.push({
         ...view,
         audit: view.audit.filter((e) => e.accountId === body.data.accountId),
@@ -96,8 +100,14 @@ export function registerModelControlRoutes(app: CoordinatorApp): void {
         // What a `target: "mine"` call can run here: the models this machine reported to this
         // coordinator (Ollama tags, or a vLLM / MLX host's served model, whose state says Ollama
         // is unreachable). The portal's web chat Auto picks your own machine's model from this.
+        // The machine's owner may also run the models it keeps off the network (ownerModels).
         activeModel: cap?.activeModel ?? null,
-        models: routableModels(cap),
+        models: [...network, ...ownerOnly],
+        // Served on the network vs for you only (too big to share from this machine), and the
+        // memory figures behind it, for Settings → "Your machines' models".
+        networkModels: network,
+        ownerModels: ownerOnly,
+        ...(mem ? { memory: { budgetBytes: mem.budgetBytes, ownerModels: mem.ownerModels ?? [], models: mem.models.map((m) => ({ name: m.name, bytes: m.bytes })) } } : {}),
         coordinatorId: identity.peerId
       });
     }

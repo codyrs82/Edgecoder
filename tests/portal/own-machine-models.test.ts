@@ -1,6 +1,8 @@
 import Fastify from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
-import { ownMachineModels } from "../../src/portal/routes/machines.js";
+import { machineMemory, ownMachineModels } from "../../src/portal/routes/machines.js";
+import { modelShareNote } from "../../src/portal/pages/settings-machines.js";
+import { computeOptions } from "../../src/portal/routes/compute.js";
 
 const servers: Array<{ close: () => Promise<unknown> }> = [];
 afterEach(async () => {
@@ -54,10 +56,56 @@ describe("ownMachineModels (web chat Auto asks your own machines first)", () => 
     expect(await ownMachineModels({ PORTAL_SERVICE_TOKEN: "svc", EXTERNAL_HTTP_TIMEOUT_MS: 5_000, discoverCoordinatorUrlsForPortal: async () => [co.url], store }, "u1")).toEqual(["qwen3.5:4b", "qwen3-coder:30b", "qwen3.5:9b"]);
   });
 
+  it("includes the models a machine runs only for you (kept off the network: too big to share there)", async () => {
+    // The 8 GB laptop (2026-11-17): its budget serves qwen3.5:4b; qwen3.5:9b is installed and active, for its owner only.
+    const co = await coordinator([
+      { agentId: "nvidia-1-gpu", connected: true, activeModel: "qwen3.5:4b", models: ["qwen3.5:4b"], networkModels: ["qwen3.5:4b"], ownerModels: ["qwen3.5:9b"], state: state("qwen3.5:9b", ["qwen3.5:4b"]) },
+    ]);
+    const store = { listNodesByOwner: async () => [{ nodeId: "nvidia-1-gpu", nodeKind: "agent" }] };
+    expect(await ownMachineModels({ PORTAL_SERVICE_TOKEN: "svc", EXTERNAL_HTTP_TIMEOUT_MS: 5_000, discoverCoordinatorUrlsForPortal: async () => [co.url], store }, "u1")).toEqual(["qwen3.5:4b", "qwen3.5:9b"]);
+  });
+
   it("asks nobody when the account has no machines", async () => {
     const co = await coordinator([]);
     const store = { listNodesByOwner: async () => [] };
     expect(await ownMachineModels({ PORTAL_SERVICE_TOKEN: "", EXTERNAL_HTTP_TIMEOUT_MS: 5_000, discoverCoordinatorUrlsForPortal: async () => [co.url], store }, "u1")).toEqual([]);
     expect(co.seen).toHaveLength(0);
+  });
+});
+
+describe("Your machines' models: a model that runs for you only", () => {
+  const GB = 1024 ** 3;
+  const machine = { networkModels: ["qwen3.5:4b"], ownerModels: ["qwen3.5:9b", "qwen2.5-coder:1.5b"], memory: { budgetBytes: 5 * GB, models: [{ name: "qwen3.5:9b", bytes: 8.2 * GB }, { name: "qwen2.5-coder:1.5b", bytes: 1.5 * GB }, { name: "qwen3.5:4b", bytes: 4 * GB }] } };
+
+  it("says why, with the agent's numbers when it reports them", () => {
+    expect(modelShareNote("qwen3.5:9b", machine)).toBe("Runs for you only: too big to share on the network from this machine (needs ~8.2 GB; budget 5 GB)");
+    expect(modelShareNote("qwen3.5:9b", { networkModels: ["qwen3.5:4b"], ownerModels: ["qwen3.5:9b"] })).toBe("Runs for you only: too big to share on the network from this machine");
+    expect(modelShareNote("qwen2.5-coder:1.5b", machine)).toMatch(/^Runs for you only: this machine shares as many models/);
+    // Served on the network, or a coordinator that does not say: no note.
+    expect(modelShareNote("qwen3.5:4b", machine)).toBe("");
+    expect(modelShareNote("qwen3.5:9b", {})).toBe("");
+    // An older agent: kept off the network and not offered to its owner either.
+    expect(modelShareNote("qwen3.5:9b", { networkModels: ["qwen3.5:4b"], ownerModels: [] })).toBe("Not shared on the network from this machine. Update its agent to run it for you only.");
+  });
+
+  it("the page script carries the note function", async () => {
+    const { machinesPageScript } = await import("../../src/portal/pages/settings-machines.js");
+    const script = machinesPageScript();
+    expect(script).toContain("function modelShareNote(");
+    expect(script).toContain("modelShareNote(im.name, m)");
+    // It parses as browser JavaScript (no TypeScript left in it).
+    expect(() => new Function("escapeHtml", "statusBadge", "api", "showToast", "document", "window", script)).not.toThrow();
+  });
+
+  it("machineMemory keeps only well-formed numbers", () => {
+    expect(machineMemory({ budgetBytes: 5, ownerModels: [{ name: "a", bytes: 9 }, { name: 3 }], models: [{ name: "b", bytes: 2 }] })).toEqual({ budgetBytes: 5, models: [{ name: "a", bytes: 9 }, { name: "b", bytes: 2 }] });
+    expect(machineMemory({ budgetBytes: "x" })).toBeUndefined();
+    expect(machineMemory(undefined)).toBeUndefined();
+  });
+
+  it("the compute picker lists your machines' own models the network does not", () => {
+    const opts = computeOptions([{ model: "qwen3.5:4b", agents: 3, classes: ["gpu"] }], {}, [], Date.now(), ["qwen3.5:4b", "qwen3.5:9b"]);
+    const mine = opts.filter((o) => o.group === "mine").map((o) => [o.compute.model, o.detail]);
+    expect(mine).toEqual([["qwen3.5:4b", "Free · runs only on your own machines"], ["qwen3.5:9b", "Free · on your machine only (not shared on the network)"]]);
   });
 });

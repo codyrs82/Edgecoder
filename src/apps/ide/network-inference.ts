@@ -296,6 +296,8 @@ async function* streamSubmitted(
     }
     const msg =
       err === "no_agent_has_model" ? `No machine on the network has ${req.model} right now.` :
+      err === "no_own_agent_has_model" && sub.json.reason === "local_only"
+        ? `${req.model} is installed on your machine ${((sub.json.localOnlyOn as string[] | undefined) ?? []).slice(0, 3).join(", ") || "(one of yours)"}, but it is too big for that machine to share on the network, and its agent is too old to run it for you only. Update the agent there, or pick a model it serves.` :
       err === "no_own_agent_has_model" ? `None of your own machines has ${req.model} (or none is online).` :
       err === "no_agent_in_class" ? `No ${String(sub.json.computeClass ?? req.computeClass)} machine runs ${req.model} right now; it runs on: ${((sub.json.availableClasses as string[]) ?? []).join(", ") || "no class"}. Nothing was charged.` :
       err === "reservation_not_active" ? "That reservation isn't active: it ended, or it belongs to another account. Reserve again on the Compute page." :
@@ -384,6 +386,8 @@ export interface MemoryOverview {
   usedBytes: number;
   loadedModels: string[];
   servingModels: string[];
+  /** Newer agents: installed models not served on the network (they run for the owner only), with estimated bytes. */
+  ownerModels?: Array<{ name: string; bytes: number }>;
   localOnlyModels: string[];
   tooBigModels: string[];
   contextWindow: number;
@@ -409,6 +413,9 @@ export function memoryView(raw: unknown): MemoryOverview | undefined {
     servingModels: strings(r.servingModels),
     localOnlyModels: strings(r.localOnlyModels),
     tooBigModels: strings(r.tooBigModels),
+    ...(Array.isArray(r.ownerModels)
+      ? { ownerModels: (r.ownerModels as unknown[]).filter((x): x is { name: string; bytes: number } => typeof (x as { name?: unknown })?.name === "string" && typeof (x as { bytes?: unknown })?.bytes === "number").slice(0, 50).map((x) => ({ name: x.name.slice(0, 200), bytes: num(x.bytes) })) }
+      : {}),
     contextWindow: num(r.contextWindow),
     parallel: num(r.parallel),
   };

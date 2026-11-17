@@ -18,6 +18,8 @@ export interface ModelCapability {
   localModelCatalog?: string[];
   /** True once the agent reported its installed models in a signed request. */
   modelsReported?: boolean;
+  /** Installed models the agent keeps off the network: its owner's own calls only. */
+  ownerModels?: string[];
 }
 
 /** Placeholder catalog entry for agents without a local Ollama; never a routable model. */
@@ -47,6 +49,21 @@ export function agentHasModel(cap: ModelCapability | undefined, model: string | 
 }
 
 /**
+ * Installed models only the agent's owner may run there ("My machines"): the agent keeps them off
+ * the network (too big for its memory budget). Never routable for another account's work.
+ */
+export function ownerOnlyModels(cap: ModelCapability | undefined): string[] {
+  const network = new Set(routableModels(cap));
+  return (cap?.ownerModels ?? []).filter((m) => m && m !== DEFAULT_CATALOG_ENTRY && !isFrontierModelId(m) && !network.has(m));
+}
+
+/** The owner's own call ("My machines") may run `model` there: served on the network, or owner-only. */
+export function agentHasModelForOwner(cap: ModelCapability | undefined, model: string | undefined): boolean {
+  if (!model) return false;
+  return agentHasModel(cap, model) || ownerOnlyModels(cap).includes(model);
+}
+
+/**
  * The agent runs `model` for a code subtask: code work runs on the agent's active model, so it must
  * be that model, and installed.
  */
@@ -54,10 +71,15 @@ export function agentRunsModel(cap: ModelCapability | undefined, model: string |
   return Boolean(model) && cap?.activeModel === model && agentHasModel(cap, model);
 }
 
-/** Claim gate: a subtask that names a model goes only to an agent that has (inference) or runs (code) it. */
-export function subtaskModelEligible(cap: ModelCapability | undefined, subtask: { kind?: string; requestedModel?: string }): boolean {
+/**
+ * Claim gate: a subtask that names a model goes only to an agent that has (inference) or runs (code) it.
+ * `owner`: the call is the agent owner's own (onlyAccountId matching it), which may also run an
+ * owner-only model; the caller checks the account.
+ */
+export function subtaskModelEligible(cap: ModelCapability | undefined, subtask: { kind?: string; requestedModel?: string }, opts: { owner?: boolean } = {}): boolean {
   if (!subtask.requestedModel) return true;
-  return subtask.kind === "inference" ? agentHasModel(cap, subtask.requestedModel) : agentRunsModel(cap, subtask.requestedModel);
+  if (subtask.kind !== "inference") return agentRunsModel(cap, subtask.requestedModel);
+  return opts.owner ? agentHasModelForOwner(cap, subtask.requestedModel) : agentHasModel(cap, subtask.requestedModel);
 }
 
 /**

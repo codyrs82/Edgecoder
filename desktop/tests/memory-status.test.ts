@@ -22,6 +22,8 @@ describe("memory status text", () => {
     expect(servingLine(mem())).toBe("Serving on the network: qwen3.5:9b");
     expect(servingLine(mem({ servingModels: [] }))).toBe("Serving on the network: none");
     expect(budgetLine(mem())).toBe("memory budget 29 GB of 48 GB · 14 GB loaded · 32k context × 2 parallel");
-    expect(localOnlyLine(mem())).toBe("local only (past this machine's network model limit): deepseek-r1:14b; local only (too big for the memory budget): qwen3-coder:30b");
+    expect(localOnlyLine(mem())).toBe("Runs for you only, too big to share on the network from this machine (budget 29 GB): qwen3-coder:30b; Runs for you only, past this machine's network model limit: deepseek-r1:14b");
+    // Newer agents say what each one needs.
+    expect(localOnlyLine(mem({ ownerModels: [{ name: "qwen3-coder:30b", bytes: 40 * GB }] }))).toContain("qwen3-coder:30b (needs ~40 GB)");
   });
 });

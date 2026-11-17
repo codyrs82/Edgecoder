@@ -112,6 +112,14 @@ describe("streamNetworkCompletion", () => {
     await expect(streamNetworkCompletion(deps, { model: "x", computeClass: "any", messages: [{ role: "user", content: "hi" }] }).next()).rejects.toThrow(/No machine on the network has x/);
   });
 
+  it("says when your machine has the model but keeps it off the network and its agent can't run it for you", async () => {
+    const deps = await fakeForwarder(() => ({ status: 409, json: { error: "no_own_agent_has_model", reason: "local_only", localOnlyOn: ["nvidia-1-gpu"] } }));
+    const err = await streamNetworkCompletion(deps, { model: "qwen3.5:9b", computeClass: "any", target: "mine", messages: [{ role: "user", content: "hi" }] }).next().catch((e: Error) => e);
+    expect(String((err as Error).message)).toMatch(/qwen3.5:9b is installed on your machine nvidia-1-gpu, but it is too big for that machine to share on the network, and its agent is too old/);
+    const plain = await fakeForwarder(() => ({ status: 409, json: { error: "no_own_agent_has_model" } }));
+    await expect(streamNetworkCompletion(plain, { model: "x", computeClass: "any", target: "mine", messages: [{ role: "user", content: "hi" }] }).next()).rejects.toThrow(/None of your own machines has x/);
+  });
+
   it("a lease that ended (or isn't the caller's) is a 404 that says so, not a 502", async () => {
     const deps = await fakeForwarder(() => ({ status: 404, json: { error: "reservation_not_active" } }));
     const err = await streamNetworkCompletion(deps, { model: "m", computeClass: "any", reservationId: "res-1", messages: [{ role: "user", content: "hi" }] })

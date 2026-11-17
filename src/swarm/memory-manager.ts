@@ -14,6 +14,11 @@
  *    /api/ps), after unloading idle network models if needed (keep_alive 0). Models the agent did
  *    not load (the owner's own chats) are never unloaded to make room: the owner comes first.
  *    Otherwise the call is refused with a `memory_` error, which hands it back to the coordinator.
+ *  - The owner's own calls ("My machines", the coordinator's onlyAccountId matching this agent's
+ *    account) may also run an installed model that is not served on the network (too big for the
+ *    budget, or past the model limit): `admit(model, { own: true })` skips the budget refusal
+ *    (idle network models are still unloaded to make room) but refuses under critical pressure,
+ *    and the model is the owner's, so network work never unloads it.
  *  - Pressure: on warning the agent takes no new network work and unloads its idle models; on
  *    critical it also cancels its running network calls and hands its claims back (onCritical),
  *    and unloads everything but the owner's active model. It resumes once the pressure has been
@@ -85,6 +90,8 @@ export interface MemoryStatusView {
   usedBytes: number;
   loadedModels: string[];
   servingModels: string[];
+  /** Installed but not served on the network: run only for the owner (with estimated bytes). */
+  ownerModels: Array<{ name: string; bytes: number; reason: "too_big" | "model_limit" }>;
   localOnlyModels: string[];
   tooBigModels: string[];
   contextWindow: number;
@@ -177,7 +184,7 @@ export class HostMemoryManager {
   private replan(): void {
     if (this.d.engine) {
       const e = this.loaded[0];
-      this.plan = e ? { serving: [{ model: e.name, bytes: e.sizeBytes, loaded: true }], localOnly: [], tooBig: [] } : undefined;
+      this.plan = e ? { serving: [{ model: e.name, bytes: e.sizeBytes, loaded: true }], localOnly: [], tooBig: [], ownerOnly: [] } : undefined;
       return;
     }
     const s = this.d.settings();
@@ -193,6 +200,17 @@ export class HostMemoryManager {
     if (!this.plan) return installed;
     const serving = new Set(this.plan.serving.map((m) => m.model));
     return installed.filter((m) => serving.has(m));
+  }
+
+  /**
+   * The installed models only the owner's own calls may run here (not served on the network);
+   * none before the first plan. Reported apart from the served list (register / heartbeat
+   * `ownerModels`), so the coordinator never routes another account's work to them.
+   */
+  ownerOnlyModels(installed: string[]): string[] {
+    if (!this.plan) return [];
+    const owner = new Set(this.plan.ownerOnly.map((m) => m.model));
+    return installed.filter((m) => owner.has(m));
   }
 
   /** The model to report as active: a served model already loaded, else the first served one. */
@@ -237,10 +255,42 @@ export class HostMemoryManager {
    * Before a network call on `model` runs (or the agent warms it): may it load here? Unloads idle
    * network models first when that makes it fit. On ok, call `release()` when the call ends.
    */
-  admit(model: string): Promise<Admission> {
-    const run = this.lock.then(() => this.admitNow(model));
+  admit(model: string, opts: { own?: boolean } = {}): Promise<Admission> {
+    const run = this.lock.then(() => (opts.own && this.isOwnerOnly(model) ? this.admitOwnerNow(model) : this.admitNow(model)));
     this.lock = run.catch(() => undefined);
     return run;
+  }
+
+  private isOwnerOnly(model: string): boolean {
+    return !this.d.engine && !!this.plan && this.plan.ownerOnly.some((m) => m.model === model);
+  }
+
+  /**
+   * The owner's own call on a model this host does not serve on the network: no budget refusal
+   * (the owner chose to run it here), but none under critical pressure. Idle network models are
+   * unloaded first when they stand in its way; the owner's other models are not.
+   */
+  private async admitOwnerNow(model: string): Promise<Admission> {
+    if (this.pressure() === "critical") return { ok: false, error: `memory_pressure: this host is critically low on memory; not starting ${model}` };
+    try {
+      this.loaded = (await this.d.ollama.loaded()).map((m) => ({ name: m.name, sizeBytes: m.sizeBytes, expiresAt: m.expiresAt }));
+    } catch {
+      // Ollama unreachable: the last view
+    }
+    if (!this.loaded.some((m) => m.name === model)) {
+      const need = this.estimate(model);
+      const busy = this.busy();
+      const plan = planLoad({ model, needBytes: need, budgetBytes: this.d.budgetBytes, loaded: this.loaded, busy, protectedModels: this.ownerModels() });
+      // Fits after unloading some idle network models: just those. Otherwise every idle network model goes.
+      const unload = plan.ok ? plan.unload : this.loaded.filter((m) => this.networkUsed.has(m.name) && !busy.has(m.name)).map((m) => m.name);
+      for (const m of unload) await this.unload(m, `to make room for the owner's ${model}: needs ${fmtGb(need)}`);
+    }
+    return this.track(model, true);
+  }
+
+  private estimate(name: string): number {
+    const s = this.d.settings();
+    return estimateModelBytes(name, { sizeBytes: this.installed.find((m) => m.name === name)?.sizeBytes, numCtx: s.contextWindow, slots: s.kvSlots }).totalBytes;
   }
 
   private async admitNow(model: string): Promise<Admission> {
@@ -273,9 +323,11 @@ export class HostMemoryManager {
     return this.track(model);
   }
 
-  private track(model: string): Admission {
+  /** `owner`: the owner's own call; the model stays the owner's (network work never unloads it). */
+  private track(model: string, owner = false): Admission {
     this.inflight.set(model, (this.inflight.get(model) ?? 0) + 1);
-    this.networkUsed.set(model, this.now());
+    if (owner) this.networkUsed.delete(model);
+    else this.networkUsed.set(model, this.now());
     let released = false;
     return {
       ok: true,
@@ -283,7 +335,7 @@ export class HostMemoryManager {
         if (released) return;
         released = true;
         this.inflight.set(model, Math.max(0, (this.inflight.get(model) ?? 1) - 1));
-        this.networkUsed.set(model, this.now());
+        if (!owner) this.networkUsed.set(model, this.now());
       },
     };
   }
@@ -312,6 +364,7 @@ export class HostMemoryManager {
       loadedModels: this.loaded.slice(0, 16).map((m) => ({ name: m.name, bytes: m.sizeBytes })),
       models: (this.plan?.serving ?? []).slice(0, 16).map((m) => ({ name: m.model, bytes: m.bytes, contextWindow: s.contextWindow, slots: s.slots })),
       paused: !this.canPull(),
+      ...(this.plan?.ownerOnly.length ? { ownerModels: this.plan.ownerOnly.slice(0, 32).map((m) => ({ name: m.model, bytes: m.bytes })) } : {}),
       atMs: this.now(),
     };
   }
@@ -328,6 +381,7 @@ export class HostMemoryManager {
       usedBytes: this.usedBytes(),
       loadedModels: this.loaded.map((m) => m.name),
       servingModels: (this.plan?.serving ?? []).map((m) => m.model),
+      ownerModels: (this.plan?.ownerOnly ?? []).map((m) => ({ name: m.model, bytes: m.bytes, reason: m.reason })),
       localOnlyModels: this.plan?.localOnly ?? [],
       tooBigModels: this.plan?.tooBig ?? [],
       contextWindow: s.contextWindow,

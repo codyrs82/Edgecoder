@@ -33,10 +33,12 @@ export function budgetLine(m: MemoryOverview): string {
   return parts.join(" · ");
 }
 
-/** Installed models kept for local use only, and why. */
+/** Installed models kept off the network, and why: they still run for you (your chats, "My machines"). */
 export function localOnlyLine(m: MemoryOverview): string | null {
+  const need = new Map((m.ownerModels ?? []).map((x) => [x.name, x.bytes] as const));
+  const named = (n: string) => (need.get(n) ? `${n} (needs ~${gb(need.get(n)!)})` : n);
   const parts: string[] = [];
-  if (m.localOnlyModels.length) parts.push(`local only (past this machine's network model limit): ${m.localOnlyModels.join(", ")}`);
-  if (m.tooBigModels.length) parts.push(`local only (too big for the memory budget): ${m.tooBigModels.join(", ")}`);
+  if (m.tooBigModels.length) parts.push(`Runs for you only, too big to share on the network from this machine (budget ${gb(m.budgetBytes)}): ${m.tooBigModels.map(named).join(", ")}`);
+  if (m.localOnlyModels.length) parts.push(`Runs for you only, past this machine's network model limit: ${m.localOnlyModels.join(", ")}`);
   return parts.length ? parts.join("; ") : null;
 }

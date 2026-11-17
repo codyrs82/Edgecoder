@@ -128,6 +128,12 @@ export interface ServingPlan {
   localOnly: string[];
   /** Do not fit the budget even on their own (at the served window and slots): local use only. */
   tooBig: string[];
+  /**
+   * Every installed model that is not served on the network (localOnly and tooBig), with its
+   * estimated footprint: the owner may still run it on this machine ("My machines"), never
+   * another account (memory-manager.ts admit with `own`).
+   */
+  ownerOnly: Array<{ model: string; bytes: number; reason: "too_big" | "model_limit" }>;
 }
 
 /**
@@ -159,18 +165,22 @@ export function planServing(opts: {
     .sort((a, b) => rank(a.m) - rank(b.m) || (rank(a.m) === 0 ? opts.loaded.findIndex((l) => l.name === a.m.name) - opts.loaded.findIndex((l) => l.name === b.m.name) : a.i - b.i))
     .map((x) => x.m);
   const cap = opts.maxModels && opts.maxModels > 0 ? Math.floor(opts.maxModels) : Number.POSITIVE_INFINITY;
-  const plan: ServingPlan = { serving: [], localOnly: [], tooBig: [] };
+  const plan: ServingPlan = { serving: [], localOnly: [], tooBig: [], ownerOnly: [] };
   let used = 0;
   for (const m of ordered) {
     const bytes = cost(m);
     if (bytes > opts.budgetBytes) {
       plan.tooBig.push(m.name);
+      plan.ownerOnly.push({ model: m.name, bytes, reason: "too_big" });
       continue;
     }
     if (plan.serving.length < cap && used + bytes <= opts.budgetBytes) {
       plan.serving.push({ model: m.name, bytes, loaded: loaded.has(m.name) });
       used += bytes;
-    } else plan.localOnly.push(m.name);
+    } else {
+      plan.localOnly.push(m.name);
+      plan.ownerOnly.push({ model: m.name, bytes, reason: "model_limit" });
+    }
   }
   return plan;
 }
@@ -239,6 +249,12 @@ export interface MemoryTelemetry {
   models: Array<{ name: string; bytes: number; contextWindow: number; slots: number }>;
   /** The agent stopped taking network work for memory (pressure or nothing fits). */
   paused?: boolean;
+  /**
+   * Installed models not served on the network (too big for the budget, or past the per-host
+   * model limit), with their estimated footprint: only the owner's own calls run them. Older
+   * agents leave it out; older coordinators drop it.
+   */
+  ownerModels?: Array<{ name: string; bytes: number }>;
   atMs: number;
 }
 

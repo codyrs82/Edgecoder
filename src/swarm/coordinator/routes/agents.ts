@@ -165,6 +165,7 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       // model is assumed for display, but an assumed catalog never makes them eligible for a named model (#54).
       localModelCatalog: reportedModels.length ? reportedModels : body.localModelProvider === "ollama-local" ? [OLLAMA_MODEL] : ["edgecoder-default"],
       modelsReported: reportedModels.length > 0,
+      ...(body.ownerModels !== undefined ? { ownerModels: normalizeReportedModels(body.ownerModels).filter((m) => !reportedModels.includes(m)) } : previous?.ownerModels ? { ownerModels: previous.ownerModels } : {}),
       ...(body.activeModel || reportedModels.length ? { activeModel: body.activeModel ?? reportedModels[0] } : {}),
       ...(body.inferenceEngine && body.inferenceEngine !== "ollama" ? { inferenceEngine: body.inferenceEngine, ...(body.engineModel ? { engineModel: body.engineModel } : {}) } : {}),
       clientType: body.clientType,
@@ -380,6 +381,11 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
         existing.modelsReported = true;
         if (!existing.activeModel || !models.includes(existing.activeModel)) existing.activeModel = models[0];
       }
+    }
+    // Owner-only models (kept off the network by the agent's memory budget): a signed heartbeat replaces them.
+    if (body.ownerModels !== undefined && verified) {
+      const existing = agentCapabilities.get(body.agentId);
+      if (existing) existing.ownerModels = normalizeReportedModels(body.ownerModels).filter((m) => !existing.localModelCatalog.includes(m));
     }
     if (body.activeModel !== undefined) {
       const existing = agentCapabilities.get(body.agentId);

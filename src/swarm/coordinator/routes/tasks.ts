@@ -431,7 +431,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
           { input: task.input, snapshotRef: task.snapshotRef, kind: task.language },
           Buffer.from(agentX25519, "base64"),
           task.id,
-          { taskId: task.taskId, resourceClass: task.projectMeta?.resourceClass, priority: task.projectMeta?.priority, language: task.language, timeoutMs: task.timeoutMs, kind: task.kind, requestedModel: task.requestedModel },
+          { taskId: task.taskId, resourceClass: task.projectMeta?.resourceClass, priority: task.projectMeta?.priority, language: task.language, timeoutMs: task.timeoutMs, kind: task.kind, requestedModel: task.requestedModel, ...(task.projectMeta?.onlyAccountId ? { onlyAccountId: task.projectMeta.onlyAccountId } : {}) },
           { rootSecret: ENVELOPE_ROOT_SECRET }
         );
         envelope = built.envelope;

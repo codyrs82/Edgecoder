@@ -1912,6 +1912,8 @@ export interface MemoryOverview {
   loadedModels: string[];
   /** Served on the network (fit the memory budget); the rest are local-only. */
   servingModels: string[];
+  /** Newer agents: the installed models not served on the network, with their estimated bytes. */
+  ownerModels?: Array<{ name: string; bytes: number }>;
   localOnlyModels: string[];
   tooBigModels: string[];
   contextWindow: number;
