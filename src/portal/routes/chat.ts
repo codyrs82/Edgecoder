@@ -18,7 +18,7 @@ import type { Served } from "../../common/served.js";
 import type { ReplyUsage } from "../reply-usage.js";
 import { backendChat, runAgentLoop, makeToolRunner } from "../../apps/ide/agent-loop.js";
 import type { IdeStreamEvent } from "../../apps/ide/tool-types.js";
-import { WEB_SYSTEM_NOTE, WebToolSession, citedSources, forgetWebAvailability, isWebTool, sourcesMarkdown, webAvailability, webFooter, webReplyLimitsFromEnv, webToolSchemas, type WebToolCall } from "../../web-tool/tools.js";
+import { FREE_USED_NOTE, WEB_SYSTEM_NOTE, WebToolSession, citedSources, forgetWebAvailability, isWebTool, sourcesMarkdown, webAvailability, webFooter, webReplyLimitsFromEnv, webStatusReason, webToolSchemas, type WebToolCall } from "../../web-tool/tools.js";
 import { modelCallsTools } from "../../web-tool/model-support.js";
 import { portalCoordinatorTransport } from "./compute.js";
 
@@ -540,15 +540,17 @@ export function registerChatApiRoutes(
         if (compute) {
           const accountId = accountIdFor(user.userId);
           const transport = portalCoordinatorTransport({ PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }, accountId);
-          const avail = await webAvailability((path, payload, signal) => transport("POST", path, { ...payload, accountId }, signal), accountId);
-          Object.assign(webDecision, { availOffer: avail.offer, availReason: avail.reason });
+          // On your own machine (resolved here, never taken from the request) the web is free.
+          const ownMachine = compute.target === "mine";
+          const avail = await webAvailability((path, payload, signal) => transport("POST", path, { ...payload, accountId }, signal), accountId, { ownMachine });
+          Object.assign(webDecision, { availOffer: avail.offer, availReason: avail.reason, ownMachine });
           if (avail.offer) {
             decided("web_loop");
             return await runWebChat(req, reply, out, user.userId, body.conversationId, compute, messages);
           }
           // No cSats (or the hour's searches used): the tools aren't offered and the chat answers
           // without the web; the page says so once, quietly.
-          if (avail.reason === "needs_csats" || avail.reason === "rate_limited") out.send({ webOff: { reason: avail.reason, message: avail.message ?? "" } });
+          if (avail.reason === "needs_csats" || avail.reason === "free_used" || avail.reason === "rate_limited") out.send({ webOff: { reason: avail.reason, message: avail.message ?? "" } });
         }
       } else if (webDecision) {
         webDecision.computeNullReason = "no_compute_in_request";
@@ -602,6 +604,9 @@ export function registerChatApiRoutes(
     const backend = networkBackend(pinned, { ...networkTargetFor(compute), ...(picked.choice ? { coordinatorChoice: picked.choice } : {}) });
     const coordinator = portalCoordinatorTransport({ PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, accountId);
     const call: WebToolCall = (path, payload, signal) => coordinator("POST", path, { ...payload, accountId }, signal);
+    // The chat runs on the user's own machine ("My machines", or Auto resolved to it): searches and
+    // page reads are free (within the coordinator's daily free caps; past them they're paid).
+    const ownMachine = compute.target === "mine";
     let modelCSats = 0;
     let fullContent = "";
     let failedText = "";
@@ -616,12 +621,12 @@ export function registerChatApiRoutes(
       } else if (e.type === "status") {
         out.send({ status: e.message });
       } else if (e.type === "web") {
-        out.send({ web: { searches: e.searches, pages: e.pages, cSats: e.cSats, sources: e.sources } });
+        out.send({ web: { searches: e.searches, pages: e.pages, cSats: e.cSats, sources: e.sources, ...(e.free ? { free: true } : {}) } });
       } else if (e.type === "usage") {
         modelCSats += Number.isFinite(e.cSats) ? e.cSats : 0;
       }
     };
-    const web = new WebToolSession({ call, emit: sendEvent, signal: ac.signal });
+    const web = new WebToolSession({ call, emit: sendEvent, signal: ac.signal, ownMachine });
     // What the agent loop did (portal_web_loop): model turns, the tools it called (names only),
     // whether the model ever answered with a tool call, and for the first model call whether the
     // tool definitions went with it and how it ended.
@@ -680,7 +685,7 @@ export function registerChatApiRoutes(
       await store!.addMessage({ messageId: randomUUID(), conversationId, role: "assistant", content: fullContent + sourcesMarkdown(sources), ...(cSatsSpent > 0 ? { creditsSpent: cSatsSpent } : {}) });
     }
     const footer = webFooter(usage);
-    out.send({ done: true, compute: computeLabel(compute), cSatsSpent, ...(footer ? { web: { searches: usage.searches, pages: usage.pages, cSats: usage.cSats, sources, footer } } : {}) });
+    out.send({ done: true, compute: computeLabel(compute), cSatsSpent, ...(footer ? { web: { searches: usage.searches, pages: usage.pages, cSats: usage.cSats, sources, footer, ...(usage.free ? { free: true } : {}) } } : {}) });
     return out.end();
   }
 
@@ -694,15 +699,19 @@ export function registerChatApiRoutes(
     // The coordinator's own chat (no compute) has no tool loop; a named model must call tools.
     const toolsSupported = target === "default" ? false : target === "auto" || !model ? true : modelCallsTools(model);
     const accountId = accountIdFor(user.userId);
+    // Own machine: "My machines", or Auto when one of your machines has a model that calls tools
+    // (the chat's web branch picks it then). The query only names the target; the portal checks.
+    const ownMachine =
+      target === "mine" || (target === "auto" && !!deps.ownMachineModels && (await deps.ownMachineModels(user.userId).catch(() => [] as string[])).some((m) => modelCallsTools(m)));
     // A fresh look (the page asks after a web reply and when the chat changes): the next reply asks again too.
     forgetWebAvailability(accountId);
-    const r = await portalCoordinatorTransport({ PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }, accountId)("POST", "/v1/tools/web/status", { accountId }).catch(() => ({ status: 502, json: {} as Record<string, unknown> }));
+    const r = await portalCoordinatorTransport({ PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }, accountId)("POST", "/v1/tools/web/status", { accountId, ...(ownMachine ? { ownMachine: true } : {}) }).catch(() => ({ status: 502, json: {} as Record<string, unknown> }));
     if (r.status !== 200) return reply.send({ available: false, configured: false, toolsSupported, reason: "unreachable", message: "Couldn't reach EdgeCoder to check web search." });
-    const st = r.json as { configured?: boolean; canAfford?: boolean; message?: string; searchesLeftThisHour?: number };
+    const st = r.json as { configured?: boolean; free?: boolean; message?: string };
     const configured = st.configured === true;
-    const reason = !configured ? "not_configured" : !toolsSupported ? "no_tools" : st.canAfford === false ? "needs_csats" : st.searchesLeftThisHour === 0 ? "rate_limited" : null;
+    const reason = webStatusReason(r.json, toolsSupported);
     const limits = webReplyLimitsFromEnv();
-    return reply.send({ ...st, configured, toolsSupported, available: reason === null, reason, maxSearchesPerReply: limits.searches, maxReadsPerReply: limits.reads });
+    return reply.send({ ...st, configured, free: ownMachine && st.free === true, ownMachine, toolsSupported, available: reason === null, reason, ...(reason === "free_used" ? { message: FREE_USED_NOTE } : {}), maxSearchesPerReply: limits.searches, maxReadsPerReply: limits.reads });
   });
 
   /**

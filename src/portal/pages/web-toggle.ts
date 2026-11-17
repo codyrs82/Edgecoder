@@ -78,12 +78,15 @@ export const WEB_TOGGLE_SCRIPT = `    // ── Web: automatic by default (the m
       btn.classList.toggle("off", !unavailable && webMode === "off");
       btn.setAttribute("aria-disabled", unavailable ? "true" : "false");
       label.textContent = unavailable ? "Web" : webMode === "off" ? "Web: Off" : "Web: Auto";
-      note.textContent = reason === "needs_csats" && webMode === "auto" ? "needs cSats" : "";
+      // "needs cSats" only for chats on the network: on your own machine the web is free (a daily allowance).
+      var free = webState.free === true;
+      note.textContent = reason === "needs_csats" && !free && webMode === "auto" ? "needs cSats" : "";
       var prices = webState.searchCSats !== undefined ? " (" + webState.searchCSats + " cSats a search, " + webState.readCSats + " a page)" : "";
       if (unavailable) btn.title = "${WEB_UNAVAILABLE_TITLE}";
       else if (webMode === "off") btn.title = "Web is off for this chat. Click to change.";
-      else if (reason === "needs_csats") btn.title = "${WEB_NEEDS_CSATS}" + prices + ". This chat answers without the web until you top up.";
+      else if (reason === "needs_csats" && !free) btn.title = "${WEB_NEEDS_CSATS}" + prices + ". This chat answers without the web until you top up.";
       else if (reason) btn.title = webState.message || "Web search isn't available right now.";
+      else if (free) btn.title = "Web: Auto. The model searches the web when a question needs fresh information, and cites its sources. Free on your machine" + (typeof webState.freeSearchesLeftToday === "number" ? " (" + webState.freeSearchesLeftToday + " free searches left today)" : "") + ".";
       else btn.title = "Web: Auto. The model searches the web when a question needs fresh information, and cites its sources" + prices + ".";
       var items = document.querySelectorAll("#webMenu [data-web-mode]");
       for (var i = 0; i < items.length; i++) items[i].setAttribute("aria-checked", items[i].getAttribute("data-web-mode") === webMode ? "true" : "false");

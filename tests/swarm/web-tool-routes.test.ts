@@ -78,6 +78,19 @@ describe("POST /v1/tools/web/* on the coordinator", () => {
     expect(res.json().configured).toBe(false);
   });
 
+  test("free on your own machine: the portal's claim stands; an agent linked to no account can't claim it", async () => {
+    const portalRes = await app.inject({ method: "POST", url: "/v1/tools/web/status", remoteAddress: REMOTE, headers: { "content-type": "application/json", "x-portal-service-token": PORTAL }, payload: JSON.stringify({ accountId: "acct-u1", ownMachine: true }) });
+    expect(portalRes.json()).toMatchObject({ free: true, canAfford: true, freeSearchesLeftToday: 100, freeReadsLeftToday: 200 });
+    // This agent is registered but not linked to an account (no owner): its claim is ignored.
+    const agentRes = await signedPost("/v1/tools/web/status", { ownMachine: true });
+    expect(agentRes.statusCode).toBe(200);
+    expect(agentRes.json().free).toBe(false);
+    expect(agentRes.json()).not.toHaveProperty("freeSearchesLeftToday");
+    // No claim, no free (a network chat).
+    const plain = await app.inject({ method: "POST", url: "/v1/tools/web/status", remoteAddress: REMOTE, headers: { "content-type": "application/json", "x-portal-service-token": PORTAL }, payload: JSON.stringify({ accountId: "acct-u1" }) });
+    expect(plain.json().free).toBe(false);
+  });
+
   test("anyone else is refused", async () => {
     const res = await app.inject({ method: "POST", url: "/v1/tools/web/search", remoteAddress: REMOTE, headers: { "content-type": "application/json" }, payload: JSON.stringify({ query: "x" }) });
     expect(res.statusCode).toBe(401);

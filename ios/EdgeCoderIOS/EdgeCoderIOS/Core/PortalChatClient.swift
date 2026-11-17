@@ -44,26 +44,35 @@ struct PortalWebSource: Codable, Equatable, Identifiable {
 }
 
 /// The web tool's running total for one reply (`{web: {...}}`), and on `done` the cited sources and
-/// the footer "2 searches · 1 page · 1.2 cSats" (docs/web-tool.md).
+/// the footer "2 searches · 1 page · 1.2 cSats", or "2 searches · free (your machine)" when the chat
+/// ran on the user's own machine (`free: true`; docs/web-tool.md).
 struct PortalWebUsage: Codable, Equatable {
     var searches: Int
     var pages: Int
     var cSats: Double
     var sources: [PortalWebSource]
     var footer: String?
+    /// Every web call was free: the chat ran on your own machine (the server's `free: true`).
+    var free: Bool? = nil
+
+    static let freeOnYourMachine = "free (your machine)"
 
     /// The server's footer, else the same line built here (src/web-tool/tools.ts webFooter).
     var footerLine: String {
         if let footer, !footer.isEmpty { return footer }
-        return Self.footer(searches: searches, pages: pages, cSats: cSats)
+        return Self.footer(searches: searches, pages: pages, cSats: cSats, free: free == true)
     }
 
-    /// "2 searches · 1 page · 1.2 cSats"; "" when the web wasn't used.
-    static func footer(searches: Int, pages: Int, cSats: Double) -> String {
+    /// "2 searches · 1 page · 1.2 cSats", or "… · free (your machine)"; "" when the web wasn't used.
+    static func footer(searches: Int, pages: Int, cSats: Double, free: Bool = false) -> String {
         var parts: [String] = []
         if searches > 0 { parts.append("\(searches) search\(searches == 1 ? "" : "es")") }
         if pages > 0 { parts.append("\(pages) page\(pages == 1 ? "" : "s")") }
         if parts.isEmpty { return "" }
+        if free && cSats == 0 {
+            parts.append(freeOnYourMachine)
+            return parts.joined(separator: " \u{00B7} ")
+        }
         // JS `Number(x.toFixed(2))`: at most two decimals, no trailing zeros.
         let rounded = (cSats * 100).rounded() / 100
         let f = NumberFormatter()
@@ -87,7 +96,8 @@ struct PortalWebUsage: Codable, Equatable {
         return PortalWebUsage(searches: (obj["searches"] as? NSNumber)?.intValue ?? 0,
                               pages: (obj["pages"] as? NSNumber)?.intValue ?? 0,
                               cSats: (obj["cSats"] as? NSNumber)?.doubleValue ?? 0,
-                              sources: sources, footer: footer)
+                              sources: sources, footer: footer,
+                              free: (obj["free"] as? Bool) == true ? true : nil)
     }
 }
 
@@ -240,6 +250,8 @@ enum WebSearchPreference {
     /// The web chat's words (src/portal/pages/web-toggle.ts).
     static let needsCSatsNote = "Web search needs cSats"
     static let rateLimitedNote = "Web search's hourly limit is used up; it's back within the hour."
+    /// A chat on your own machine (web free) after today's free searches (src/web-tool/tools.ts FREE_USED_NOTE).
+    static let freeUsedNote = "Today's free web searches on your machine are used up"
 
     /// A chat's choice: "auto" or "off"; nil follows the Settings default.
     static func enabled(chatMode: String?, defaultOn: Bool) -> Bool {
@@ -261,6 +273,7 @@ enum WebSearchPreference {
         switch reason {
         case "needs_csats": return message.isEmpty ? needsCSatsNote : message
         case "rate_limited": return message.isEmpty ? rateLimitedNote : message
+        case "free_used": return message.isEmpty ? freeUsedNote : message
         default: return nil
         }
     }
