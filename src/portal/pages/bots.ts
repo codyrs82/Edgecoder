@@ -432,7 +432,7 @@ const BOTS_PAGE_JS = String.raw`
       var btn = document.getElementById("bpOlder");
       btn.disabled = true;
       try {
-        var data = await command("messages", { beforeMs: first ? first.atMs : undefined, limit: 30 });
+        var data = await command("messages", { beforeMs: first ? first.atMs : undefined, beforeId: first ? first.id : undefined, limit: 30 });
         var scroll = document.getElementById("bpScroll"), before = scroll.scrollHeight;
         state.older = (data.items || []).concat(state.older);
         state.more = !!data.more;

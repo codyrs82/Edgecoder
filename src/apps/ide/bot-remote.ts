@@ -136,8 +136,11 @@ export function runRemoteBotCommand(bots: BotManager, botId: string, request: Bo
       }
       case "messages": {
         const all = bots.messages(botId);
-        const before = request.args.beforeMs;
-        const older = before === undefined ? all : all.filter((m) => m.atMs < before);
+        // Messages are kept in the order they were added, and several can share a millisecond, so the
+        // cursor is the oldest message the caller has (its id): a time alone would skip messages from that same ms.
+        const { beforeId, beforeMs } = request.args;
+        const cut = beforeId === undefined ? -1 : all.findIndex((m) => m.id === beforeId);
+        const older = cut >= 0 ? all.slice(0, cut) : beforeMs === undefined ? all : all.filter((m) => m.atMs < beforeMs);
         const limit = Math.min(request.args.limit ?? 20, MAX_PAGE_MESSAGES);
         const page = older.slice(-limit);
         const pendingIds = new Set(bot.pending.map((p) => p.callId));
