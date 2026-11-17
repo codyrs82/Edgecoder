@@ -17,6 +17,8 @@ struct ChatView: View {
     @EnvironmentObject private var purchasePolicy: PurchasePolicy
     @EnvironmentObject private var networkStatus: NetworkStatusStore
     @Environment(\.openURL) private var openURL
+    /// Settings > Chat "Search the web automatically" (on by default).
+    @AppStorage(WebSearchPreference.storageKey) private var webAutoDefault = true
 
     @FocusState private var inputFocused: Bool
 
@@ -190,33 +192,36 @@ struct ChatView: View {
     // MARK: - Input Bar
 
     private var inputBar: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            TextField("Message...", text: $inputText, axis: .vertical)
-                .focused($inputFocused)
-                .textFieldStyle(.plain)
-                .font(.body)
-                .foregroundColor(Theme.textPrimary)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(Theme.bgInput)
-                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .stroke(Theme.borderStrong, lineWidth: 0.5)
-                )
-                .lineLimit(1...6)
-                .onSubmit {
-                    sendMessage()
-                }
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .bottom, spacing: 10) {
+                TextField("Message...", text: $inputText, axis: .vertical)
+                    .focused($inputFocused)
+                    .textFieldStyle(.plain)
+                    .font(.body)
+                    .foregroundColor(Theme.textPrimary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(Theme.bgInput)
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .stroke(Theme.borderStrong, lineWidth: 0.5)
+                    )
+                    .lineLimit(1...6)
+                    .onSubmit {
+                        sendMessage()
+                    }
 
-            Button {
-                sendMessage()
-            } label: {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 32))
-                    .foregroundColor(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isStreaming ? Theme.textMuted : Theme.accent)
+                Button {
+                    sendMessage()
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.system(size: 32))
+                        .foregroundColor(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isStreaming ? Theme.textMuted : Theme.accent)
+                }
+                .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isStreaming)
             }
-            .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isStreaming)
+            if usesPortal { webMenu }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -226,6 +231,42 @@ struct ChatView: View {
                 .fill(Theme.border)
                 .frame(height: 0.5)
         }
+    }
+
+    /// Web search for this chat (on unless turned off here or in Settings).
+    private var webOn: Bool {
+        WebSearchPreference.enabled(chatMode: conversation.webMode, defaultOn: webAutoDefault)
+    }
+
+    /// The quiet "Web: Auto" indicator under the message box, with Auto / Off for this chat
+    /// (src/portal/pages/chat.ts #webMenu).
+    private var webMenu: some View {
+        Menu {
+            Button {
+                conversation.webMode = WebSearchPreference.chatMode(on: true, defaultOn: webAutoDefault)
+            } label: {
+                if webOn { Image(systemName: "checkmark") }
+                Text("Auto")
+                Text("Searches when a question needs fresh information, and cites sources.")
+            }
+            Button {
+                conversation.webMode = WebSearchPreference.chatMode(on: false, defaultOn: webAutoDefault)
+            } label: {
+                if !webOn { Image(systemName: "checkmark") }
+                Text("Off for this chat")
+                Text("Answers from the model alone.")
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "globe").font(.caption2)
+                Text(webOn ? "Web: Auto" : "Web: Off").font(.caption)
+            }
+            .foregroundColor(Theme.textMuted)
+            .opacity(webOn ? 1 : 0.7)
+            .padding(.leading, 6)
+        }
+        .accessibilityLabel(webOn ? "Web: Auto" : "Web: Off")
+        .accessibilityHint("Choose whether this chat searches the web")
     }
 
     // MARK: - Actions
@@ -295,6 +336,9 @@ struct ChatView: View {
         var failure: ChatFailureInfo?
         var footer: String?
         var gotDone = false
+        let web = webOn
+        var doneWeb: PortalWebUsage?
+        var webOff: (reason: String, message: String)?
         do {
             let convId: String
             if let id = conversation.portalConversationId {
@@ -305,12 +349,20 @@ struct ChatView: View {
             }
             let compute: PortalChatCompute = conversation.selectedModel.map { .network(model: $0) } ?? .auto
             streamProgress = StreamProgress(route: .swarm, routeLabel: compute == .auto ? "your machines, then the network" : "network")
-            for try await event in PortalChatClient.shared.send(conversationId: convId, message: text, compute: compute, resend: resend) {
+            for try await event in PortalChatClient.shared.send(conversationId: convId, message: text, compute: compute, resend: resend, web: web) {
                 switch event {
                 case .content(let c):
                     streamingContent += c
+                    streamStatus = ""
                 case .status(let s):
-                    if streamingContent.isEmpty { streamStatus = s }
+                    // "Searching the web…", "Reading example.com…" may come between parts of an answer too.
+                    streamStatus = s
+                case .web(let w):
+                    var p = streamProgress ?? StreamProgress()
+                    p.webLine = w.footerLine
+                    streamProgress = p
+                case .webOff(let reason, let message):
+                    webOff = (reason, message)
                 case .warning(let w):
                     streamStatus = w
                 case .error(let message, let code, let httpStatus):
@@ -318,8 +370,9 @@ struct ChatView: View {
                     if streamingContent.isEmpty && failure == nil {
                         failure = ChatFailureInfo(message: message, code: code, httpStatus: httpStatus, retryText: text)
                     }
-                case .done(let cSatsSpent, let computeLabel, let calls):
+                case .done(let cSatsSpent, let computeLabel, let calls, let w):
                     gotDone = true
+                    doneWeb = w
                     footer = ServedFormatter.servedLine(calls) ?? ChatFailures.replyFooter(cSatsSpent: cSatsSpent, compute: computeLabel)
                     if (cSatsSpent ?? 0) > 0 { NotificationCenter.default.post(name: .edgeCoderBalanceChanged, object: nil) }
                 case .end:
@@ -345,6 +398,19 @@ struct ChatView: View {
         } else {
             let cut = !gotDone && ChatFailures.looksTruncated(streamingContent)
             conversation.addMessage(role: .assistant, content: streamingContent, footer: footer, cutShort: cut ? true : nil)
+            let last = conversation.messages.count - 1
+            if let doneWeb {
+                let sources = doneWeb.sources.filter { $0.link != nil }
+                if !sources.isEmpty { conversation.messages[last].webSources = sources }
+                let line = doneWeb.footerLine
+                if !line.isEmpty { conversation.messages[last].webFooter = line }
+            }
+            // No cSats (or the hour's searches used): noted once per chat, quietly, under the reply.
+            if web, let webOff, let note = WebSearchPreference.offNote(reason: webOff.reason, message: webOff.message),
+               !(conversation.webNotedReasons ?? []).contains(webOff.reason) {
+                conversation.messages[last].webNote = note
+                conversation.webNotedReasons = (conversation.webNotedReasons ?? []) + [webOff.reason]
+            }
         }
     }
 

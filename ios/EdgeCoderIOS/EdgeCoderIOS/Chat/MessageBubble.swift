@@ -27,11 +27,23 @@ struct MessageBubble: View {
                     if !message.content.isEmpty { assistantContent }
                     if let f = message.failure { failureView(f) }
                     if message.cutShort == true { cutShortView }
+                    if let sources = message.webSources, !sources.isEmpty, !streaming { sourcesView(sources) }
+                    if let webFooter = message.webFooter, !streaming {
+                        Text(webFooter)
+                            .font(.caption2)
+                            .foregroundColor(Theme.textMuted)
+                            .accessibilityLabel("Web: \(webFooter)")
+                    }
                     if let footer = message.footer, !streaming {
                         Text(footer)
                             .font(.caption2)
                             .foregroundColor(Theme.textMuted)
                             .accessibilityLabel("Ran on: \(footer)")
+                    }
+                    if let note = message.webNote, !streaming {
+                        Text(note)
+                            .font(.caption2)
+                            .foregroundColor(Theme.textMuted)
                     }
                 } else {
                     Text(message.content)
@@ -73,7 +85,7 @@ struct MessageBubble: View {
                 }
 
             // Verb (or the portal's note, e.g. "Answering with EdgeCoder's own model (free, slower)...")
-            Text(statusText.isEmpty || !message.content.isEmpty ? "\(verb)…" : statusText)
+            Text(statusText.isEmpty ? "\(verb)…" : statusText)
                 .font(.caption)
                 .foregroundColor(Theme.textMuted)
 
@@ -106,6 +118,12 @@ struct MessageBubble: View {
                         .foregroundColor(Theme.textMuted)
                 }
 
+                if let webLine = p.webLine, !webLine.isEmpty {
+                    Text("· \(webLine)")
+                        .font(.caption)
+                        .foregroundColor(Theme.textMuted)
+                }
+
                 if let credits = p.creditsSpent {
                     Text("· \(String(format: "%.1f", credits)) cr")
                         .font(.caption)
@@ -114,6 +132,34 @@ struct MessageBubble: View {
             }
         }
         .padding(.top, 4)
+    }
+
+    // MARK: - Web sources (src/portal/pages/web-toggle.ts renderWebSources)
+
+    private func sourcesView(_ sources: [PortalWebSource]) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("SOURCES")
+                .font(.caption2.weight(.bold))
+                .foregroundColor(Theme.textMuted)
+            ForEach(sources) { src in
+                if let url = src.link {
+                    Link(destination: url) {
+                        HStack(alignment: .firstTextBaseline, spacing: 4) {
+                            Text("\(src.n).").foregroundColor(Theme.textMuted)
+                            Text(src.title.isEmpty ? src.url : src.title)
+                                .foregroundColor(Theme.accent)
+                                .multilineTextAlignment(.leading)
+                            if !src.host.isEmpty {
+                                Text(src.host).foregroundColor(Theme.textMuted).lineLimit(1)
+                            }
+                        }
+                        .font(.caption)
+                    }
+                    .accessibilityLabel("Source \(src.n): \(src.title.isEmpty ? src.url : src.title), \(src.host)")
+                }
+            }
+        }
+        .padding(.top, 6)
     }
 
     // MARK: - Failure (src/portal/pages/chat.ts showChatFailure)

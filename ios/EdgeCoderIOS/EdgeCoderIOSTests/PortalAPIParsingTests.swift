@@ -10,7 +10,7 @@ final class PortalAPIParsingTests: XCTestCase {
         XCTAssertEqual(PortalChatParser.events(fromLine: #"data: {"status":"Answering with EdgeCoder's own model (free, slower)..."}"#),
                        [.status("Answering with EdgeCoder's own model (free, slower)...")])
         XCTAssertEqual(PortalChatParser.events(fromLine: #"data: {"done":true,"compute":"Network · best fit","cSatsSpent":3.4}"#),
-                       [.done(cSatsSpent: 3.4, compute: "Network · best fit", calls: nil)])
+                       [.done(cSatsSpent: 3.4, compute: "Network · best fit", calls: nil, web: nil)])
         XCTAssertEqual(PortalChatParser.events(fromLine: #"data: {"error":"Not enough cSats","code":"out_of_csats","httpStatus":402}"#),
                        [.error(message: "Not enough cSats", code: "out_of_csats", httpStatus: 402)])
         XCTAssertEqual(PortalChatParser.events(fromLine: "data: not json"), [])
@@ -21,6 +21,91 @@ final class PortalAPIParsingTests: XCTestCase {
         XCTAssertEqual(PortalChatParser.refusal(status: 402, body: body), .error(message: "Not enough cSats: up to 8 cSats", code: "out_of_csats", httpStatus: 402))
         XCTAssertEqual(PortalChatParser.refusal(status: 502, body: Data("Bad gateway".utf8)), .error(message: "Bad gateway", code: nil, httpStatus: 502))
         XCTAssertEqual(PortalChatParser.refusal(status: 500, body: Data()), .error(message: "Chat request failed: 500", code: nil, httpStatus: 500))
+    }
+
+    // MARK: Web search (docs/web-tool.md, src/portal/routes/chat.ts)
+
+    func testChatBodyWebFlag() {
+        let on = PortalChatClient.chatBody(conversationId: "c1", message: "What's new?", compute: .auto, web: true)
+        XCTAssertEqual(on["web"] as? Bool, true)
+        XCTAssertEqual(on["conversationId"] as? String, "c1")
+        XCTAssertEqual(on["message"] as? String, "What's new?")
+        XCTAssertEqual(on["compute"] as? [String: String], ["target": "auto"])
+        XCTAssertNil(on["resend"])
+
+        let off = PortalChatClient.chatBody(conversationId: "c1", message: "hi", compute: .network(model: "qwen3-coder:30b"), resend: true, web: false)
+        XCTAssertNil(off["web"], "Off omits the flag, as the web page does")
+        XCTAssertEqual(off["resend"] as? Bool, true)
+        XCTAssertEqual(off["compute"] as? [String: String], ["target": "network", "model": "qwen3-coder:30b"])
+
+        // It serialises to the JSON the portal's schema takes.
+        let data = try! JSONSerialization.data(withJSONObject: on)
+        let back = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        XCTAssertEqual(back["web"] as? Bool, true)
+    }
+
+    func testWebPreference() {
+        XCTAssertTrue(WebSearchPreference.enabled(chatMode: nil, defaultOn: true))
+        XCTAssertFalse(WebSearchPreference.enabled(chatMode: nil, defaultOn: false))
+        XCTAssertFalse(WebSearchPreference.enabled(chatMode: "off", defaultOn: true))
+        XCTAssertTrue(WebSearchPreference.enabled(chatMode: "auto", defaultOn: false))
+        XCTAssertNil(WebSearchPreference.chatMode(on: true, defaultOn: true))
+        XCTAssertEqual(WebSearchPreference.chatMode(on: false, defaultOn: true), "off")
+        XCTAssertEqual(WebSearchPreference.chatMode(on: true, defaultOn: false), "auto")
+        XCTAssertEqual(WebSearchPreference.storageKey, "edgecoder.web.auto")
+    }
+
+    func testWebProgressEvents() {
+        XCTAssertEqual(PortalChatParser.events(fromLine: #"data: {"status":"Searching the web…"}"#), [.status("Searching the web…")])
+        let line = #"data: {"web":{"searches":1,"pages":0,"cSats":0.5,"sources":[{"n":1,"title":"Box office","url":"https://www.example.com/film"}]}}"#
+        XCTAssertEqual(PortalChatParser.events(fromLine: line),
+                       [.web(PortalWebUsage(searches: 1, pages: 0, cSats: 0.5, sources: [PortalWebSource(n: 1, title: "Box office", url: "https://www.example.com/film")], footer: nil))])
+        guard case let .web(w)? = PortalChatParser.events(fromLine: line).first else { return XCTFail("no web") }
+        XCTAssertEqual(w.footerLine, "1 search · 0.5 cSats")
+        XCTAssertEqual(w.sources.first?.host, "example.com")
+    }
+
+    func testWebOffEvent() {
+        XCTAssertEqual(PortalChatParser.events(fromLine: #"data: {"webOff":{"reason":"needs_csats","message":"Web search needs cSats"}}"#),
+                       [.webOff(reason: "needs_csats", message: "Web search needs cSats")])
+        XCTAssertEqual(PortalChatParser.events(fromLine: #"data: {"webOff":{"reason":"rate_limited","message":""}}"#),
+                       [.webOff(reason: "rate_limited", message: "")])
+        XCTAssertEqual(WebSearchPreference.offNote(reason: "needs_csats", message: ""), "Web search needs cSats")
+        XCTAssertEqual(WebSearchPreference.offNote(reason: "rate_limited", message: ""), "Web search's hourly limit is used up; it's back within the hour.")
+        XCTAssertNil(WebSearchPreference.offNote(reason: "not_configured", message: "Web search isn't set up yet"))
+    }
+
+    func testDoneEventCarriesWebSourcesAndFooter() {
+        let line = #"data: {"done":true,"compute":"Your machine","cSatsSpent":1.2,"web":{"searches":2,"pages":1,"cSats":1.2,"sources":[{"n":1,"title":"A","url":"https://a.example/x"},{"n":3,"title":"C","url":"http://c.example/"},{"n":4,"title":"Bad","url":"javascript:alert(1)"}],"footer":"2 searches · 1 page · 1.2 cSats"}}"#
+        let events = PortalChatParser.events(fromLine: line)
+        XCTAssertEqual(events.count, 1, "the done's web is not also a progress event")
+        guard case let .done(cSats, compute, _, web)? = events.first, let web else { return XCTFail("no done web") }
+        XCTAssertEqual(cSats, 1.2)
+        XCTAssertEqual(compute, "Your machine")
+        XCTAssertEqual(web.footerLine, "2 searches · 1 page · 1.2 cSats")
+        XCTAssertEqual(web.sources.map(\.n), [1, 3, 4])
+        XCTAssertEqual(web.sources.compactMap(\.link).map(\.absoluteString), ["https://a.example/x", "http://c.example/"], "only http(s) sources are links")
+        // A done without the web: no web.
+        guard case let .done(_, _, _, none)? = PortalChatParser.events(fromLine: #"data: {"done":true,"cSatsSpent":0}"#).first else { return XCTFail("no done") }
+        XCTAssertNil(none)
+    }
+
+    func testWebFooterMatchesPortal() {
+        XCTAssertEqual(PortalWebUsage.footer(searches: 0, pages: 0, cSats: 0), "")
+        XCTAssertEqual(PortalWebUsage.footer(searches: 1, pages: 0, cSats: 0.5), "1 search · 0.5 cSats")
+        XCTAssertEqual(PortalWebUsage.footer(searches: 2, pages: 1, cSats: 1.2), "2 searches · 1 page · 1.2 cSats")
+        XCTAssertEqual(PortalWebUsage.footer(searches: 3, pages: 4, cSats: 2.3000000000000003), "3 searches · 4 pages · 2.3 cSats")
+        XCTAssertEqual(PortalWebUsage.footer(searches: 2, pages: 0, cSats: 1), "2 searches · 1 cSats")
+        XCTAssertEqual(PortalWebUsage.footer(searches: 0, pages: 1, cSats: 0.2), "1 page · 0.2 cSats")
+    }
+
+    func testOlderSavedMessagesDecodeWithoutWebFields() throws {
+        let msg = ChatMessage(role: .assistant, content: "hi", footer: "free")
+        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(msg)) as! [String: Any]
+        json.removeValue(forKey: "webSources")
+        let back = try JSONDecoder().decode(ChatMessage.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertNil(back.webSources)
+        XCTAssertEqual(back.content, "hi")
     }
 
     func testComputeJSON() {
@@ -81,7 +166,7 @@ final class PortalAPIParsingTests: XCTestCase {
 
     func testDoneEventCarriesUsageCalls() {
         let line = #"data: {"done":true,"compute":"Network · best fit","cSatsSpent":3.4,"usage":{"cSats":3.4,"where":"Network · best fit","calls":[{"cSats":3.4,"model":"network/qwen3-coder:30b","served":{"label":"m1","own":false,"computeClass":"gpu","tier":null,"hardware":"Datacenter GPU (x)","gpu":"2× NVIDIA A16","region":"us-central","city":"Chicago","country":"US","promptTokens":24800,"promptMs":81000,"outputTokens":312,"genMs":6500}}]}}"#
-        guard case let .done(cSats, compute, calls)? = PortalChatParser.events(fromLine: line).first else { return XCTFail("no done") }
+        guard case let .done(cSats, compute, calls, _)? = PortalChatParser.events(fromLine: line).first else { return XCTFail("no done") }
         XCTAssertEqual(cSats, 3.4)
         XCTAssertEqual(compute, "Network · best fit")
         XCTAssertEqual(ServedFormatter.servedLine(calls), "qwen3-coder:30b · Datacenter GPU 2×A16 · Chicago · read 24.8k tok in 81 s · wrote 312 tok in 6.5 s · 3.4 cSats")
