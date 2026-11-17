@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		00789199D2C244B6DA388176 /* PasskeyProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0BDF006DD7B1DA4499F2BAD /* PasskeyProtocol.swift */; };
+		01BC7C365F6EBAA90DFC0EC7 /* NetworkWorldTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 408BFDE15434F4E2581718CC /* NetworkWorldTests.swift */; };
 		0397B8513B3338CA33349848 /* NetworkBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6AF428A5BAF919E6D2B895D /* NetworkBadge.swift */; };
 		0643A36B95A8598DC4E919F9 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0CE2074D38918B8392965A /* Theme.swift */; };
 		0EF1E3CE7517360A0AFB8E33 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD280B14C422C854EB8D18DF /* AppDelegate.swift */; };
@@ -18,6 +19,7 @@
 		19DD56837B15699DEC3346B4 /* EdgeCoderIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAD6A52065D67AE6D4BF8759 /* EdgeCoderIOSApp.swift */; };
 		1B16A10E05AC8CDDE469EA28 /* PasskeyProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0BDF006DD7B1DA4499F2BAD /* PasskeyProtocol.swift */; };
 		1CE07F590B5A0845215A777A /* ConversationSidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93A41FCCF2A95E5E965C2D11 /* ConversationSidebar.swift */; };
+		1E09C7F220B7A6C24796C651 /* NetworkModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B99B7461C5CAB9383A1C8A8 /* NetworkModels.swift */; };
 		1F40F905FD15E3E19FDE6F1C /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 779E2AB1376A5FBD38731F04 /* Models.swift */; };
 		203438BEAE6C9BCCC282FB95 /* BLETxV3VectorsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DF4D40DF7A0CFB63D97BE0B /* BLETxV3VectorsTests.swift */; };
 		207E9E023FFD7C566EE5C8D8 /* BLEChunkedTransfer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D5D94D596BEEE9EB5B7D731 /* BLEChunkedTransfer.swift */; };
@@ -32,13 +34,16 @@
 		3381CB6037EDCAA1DBB3F53A /* PortalChatClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EE04C29E6C1D9B6FBF14683 /* PortalChatClient.swift */; };
 		3F322F9325ABFE8CB4F165DA /* ServedFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79C4FFDBBCE508D92678FA57 /* ServedFormatter.swift */; };
 		408B7BBCEA51523CAF6D6831 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 30D16E261FFA98D17D4DACEA /* LaunchScreen.storyboard */; };
+		4245630B297660739989B403 /* NetworkFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F7B1A41CDD28D58727A081E /* NetworkFixture.swift */; };
 		46B6E029E58D411799FA3F9E /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFBBA5E0D5A24AB740C7769D /* ChatView.swift */; };
 		54FABEFDD2AF6B9E97B6AF1A /* BotsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3B78A3B23F283C27C578B68 /* BotsView.swift */; };
 		5ADB52218B258D73E1DEAB68 /* ModelPickerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F41193CEB26AC72290E0717 /* ModelPickerView.swift */; };
 		5EF5FED6550C7D897958BDDB /* BLEMeshRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0055D366ED584BB845EE40A5 /* BLEMeshRouter.swift */; };
 		5F4E1B6FEB2F6BB2F92F2470 /* ServedFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79C4FFDBBCE508D92678FA57 /* ServedFormatter.swift */; };
+		6ABFF96CA814EBD50E9F3A8F /* NetworkFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F7B1A41CDD28D58727A081E /* NetworkFixture.swift */; };
 		6D94E4336CA624DB6CE14431 /* AuthViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EE6B7CD227619BCFDEE13ED /* AuthViewModel.swift */; };
 		78335723CC75738D3ADB081D /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = AC2F277CCD3AC0F03C5B6459 /* PrivacyInfo.xcprivacy */; };
+		7A124B047CC2AA07DB1D0C56 /* NetworkModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B99B7461C5CAB9383A1C8A8 /* NetworkModels.swift */; };
 		7E423092ADCA6E6D683CC0BB /* SessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC9A2FF9401D82989E5176F5 /* SessionStore.swift */; };
 		8654DC9A4B0E363B6265D48D /* RealLlamaContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C0676973CD654A6BD253A66 /* RealLlamaContext.swift */; };
 		89088AFA12BF751F0F4B4831 /* LocalModelManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2733B6A0674685579153C996 /* LocalModelManager.swift */; };
@@ -75,6 +80,7 @@
 		DBB6DA1C38F94E939183AD59 /* SwarmRuntimeController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87ED038C5B5374809650FFBF /* SwarmRuntimeController.swift */; };
 		DC4DAE8FEC805D793A73C252 /* ModelLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AA5F805294A0BC4927CEB4F /* ModelLibraryView.swift */; };
 		DE86938A5DFE7E6AC333B896 /* ChatRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 560511050BF96086720ED32E /* ChatRouter.swift */; };
+		E5462A99E8D054EEC8753F5C /* NetworkView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33DBE81C547DC218A3D7A47F /* NetworkView.swift */; };
 		E700BAB29852EFE2EB0E7712 /* BuyLimits.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A85EE2204D379E8381A0ED3 /* BuyLimits.swift */; };
 		EAD0E0A47F4D49F94EBC2E1B /* BuyLimitsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A736286E7E0FBDBE10BEC4AB /* BuyLimitsTests.swift */; };
 		EBFE08F6FB2BABEF42CC528A /* SwarmView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29F9EA12DD9A5B2CCE2A292D /* SwarmView.swift */; };
@@ -104,8 +110,10 @@
 		29F9EA12DD9A5B2CCE2A292D /* SwarmView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwarmView.swift; sourceTree = "<group>"; };
 		2F41193CEB26AC72290E0717 /* ModelPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerView.swift; sourceTree = "<group>"; };
 		30D16E261FFA98D17D4DACEA /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
+		33DBE81C547DC218A3D7A47F /* NetworkView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkView.swift; sourceTree = "<group>"; };
 		3AA5F805294A0BC4927CEB4F /* ModelLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelLibraryView.swift; sourceTree = "<group>"; };
 		3B3FE43571559418C65CAD0D /* RequestSigningVectorCheck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestSigningVectorCheck.swift; sourceTree = "<group>"; };
+		408BFDE15434F4E2581718CC /* NetworkWorldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkWorldTests.swift; sourceTree = "<group>"; };
 		44A7CA4F071392F4801C6C60 /* AuthView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthView.swift; sourceTree = "<group>"; };
 		4AE20F58B769C14A15DC8BB1 /* EdgeCoderIOSTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = EdgeCoderIOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		560511050BF96086720ED32E /* ChatRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatRouter.swift; sourceTree = "<group>"; };
@@ -113,6 +121,7 @@
 		629D161DC2E412DA32706681 /* ChatFailures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatFailures.swift; sourceTree = "<group>"; };
 		6A85EE2204D379E8381A0ED3 /* BuyLimits.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuyLimits.swift; sourceTree = "<group>"; };
 		6B2D03BEBEB092AA1E44BC0A /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
+		6B99B7461C5CAB9383A1C8A8 /* NetworkModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkModels.swift; sourceTree = "<group>"; };
 		779E2AB1376A5FBD38731F04 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		79C4FFDBBCE508D92678FA57 /* ServedFormatter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServedFormatter.swift; sourceTree = "<group>"; };
 		85A1812030202071FFC1D3AA /* ServedFormatterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServedFormatterTests.swift; sourceTree = "<group>"; };
@@ -120,6 +129,7 @@
 		886F776460D1ACBCEEE0FF3E /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
 		8D772FF8CC80706B636E1B73 /* ChatModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatModels.swift; sourceTree = "<group>"; };
 		8EE6B7CD227619BCFDEE13ED /* AuthViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthViewModel.swift; sourceTree = "<group>"; };
+		8F7B1A41CDD28D58727A081E /* NetworkFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkFixture.swift; sourceTree = "<group>"; };
 		93A41FCCF2A95E5E965C2D11 /* ConversationSidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSidebar.swift; sourceTree = "<group>"; };
 		9580DF0E7DDEB1B61CF0A59F /* MachinesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MachinesTests.swift; sourceTree = "<group>"; };
 		98D672F44064782C1EF76D7E /* PasskeyProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasskeyProtocolTests.swift; sourceTree = "<group>"; };
@@ -185,6 +195,7 @@
 				6451C09B95E2059D4B254A54 /* IDE */,
 				48C31AE385C5C30F306C8FF6 /* Machines */,
 				EE48DC7510333863D73E4E40 /* Mesh */,
+				A48008D34212B0E9C204E608 /* Network */,
 				739D77BFC58772D88BAC5717 /* Security */,
 				BFD567845246254C2BD775EA /* Settings */,
 				52DB63257A4399AEAEA84C73 /* Shared */,
@@ -318,6 +329,16 @@
 			);
 			sourceTree = "<group>";
 		};
+		A48008D34212B0E9C204E608 /* Network */ = {
+			isa = PBXGroup;
+			children = (
+				8F7B1A41CDD28D58727A081E /* NetworkFixture.swift */,
+				6B99B7461C5CAB9383A1C8A8 /* NetworkModels.swift */,
+				33DBE81C547DC218A3D7A47F /* NetworkView.swift */,
+			);
+			path = Network;
+			sourceTree = "<group>";
+		};
 		B1D93ED233A1E1A631A81538 /* EdgeCoderIOSTests */ = {
 			isa = PBXGroup;
 			children = (
@@ -326,6 +347,7 @@
 				A736286E7E0FBDBE10BEC4AB /* BuyLimitsTests.swift */,
 				9F1EE875627693EE65332B98 /* ChatFailuresTests.swift */,
 				9580DF0E7DDEB1B61CF0A59F /* MachinesTests.swift */,
+				408BFDE15434F4E2581718CC /* NetworkWorldTests.swift */,
 				98D672F44064782C1EF76D7E /* PasskeyProtocolTests.swift */,
 				DCB9CAB8B8D310AAB40A33C4 /* PortalAPIParsingTests.swift */,
 				3B3FE43571559418C65CAD0D /* RequestSigningVectorCheck.swift */,
@@ -476,6 +498,9 @@
 				AA145690549577ED9B597A8B /* MachinesTests.swift in Sources */,
 				14CAA0AE958AD1BB645F2BC2 /* Models.swift in Sources */,
 				232E7810E67615DE4F56A7D1 /* NetworkBadge.swift in Sources */,
+				4245630B297660739989B403 /* NetworkFixture.swift in Sources */,
+				7A124B047CC2AA07DB1D0C56 /* NetworkModels.swift in Sources */,
+				01BC7C365F6EBAA90DFC0EC7 /* NetworkWorldTests.swift in Sources */,
 				2BD84785A17B9AC75C851554 /* OfflineLedger.swift in Sources */,
 				00789199D2C244B6DA388176 /* PasskeyProtocol.swift in Sources */,
 				9D82EE43AD5850CF1793B9ED /* PasskeyProtocolTests.swift in Sources */,
@@ -528,6 +553,9 @@
 				29F4BB744A068253C499D3B8 /* ModelStatusBanner.swift in Sources */,
 				1F40F905FD15E3E19FDE6F1C /* Models.swift in Sources */,
 				0397B8513B3338CA33349848 /* NetworkBadge.swift in Sources */,
+				6ABFF96CA814EBD50E9F3A8F /* NetworkFixture.swift in Sources */,
+				1E09C7F220B7A6C24796C651 /* NetworkModels.swift in Sources */,
+				E5462A99E8D054EEC8753F5C /* NetworkView.swift in Sources */,
 				13DB69C311266D33430FF5F9 /* OfflineLedger.swift in Sources */,
 				FEEA557C596670F697B2639D /* PasskeyManager.swift in Sources */,
 				1B16A10E05AC8CDDE469EA28 /* PasskeyProtocol.swift in Sources */,

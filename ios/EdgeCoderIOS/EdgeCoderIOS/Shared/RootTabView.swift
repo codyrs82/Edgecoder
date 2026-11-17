@@ -37,9 +37,20 @@ struct RootTabView: View {
                 .tabItem {
                     Label("Machines", systemImage: "server.rack")
                 }
+
+            NetworkView()
+                .tag(AppTab.network)
+                .tabItem {
+                    Label("Network", systemImage: "point.3.connected.trianglepath.dotted")
+                }
         }
         .tint(Theme.accent)
         .task {
+            // Debug screenshots: open on the Network tab with its sample data, no sign-in.
+            if NetworkFixture.isEnabled {
+                selectedTab = .network
+                return
+            }
             await purchasePolicy.refreshStorefront()
             if swarmRuntime.isLocalCoordinator {
                 await swarmRuntime.autoStartIfReady()
@@ -89,6 +100,7 @@ private enum AppTab {
     case bots
     case wallet
     case machines
+    case network
 }
 
 // MARK: - Login Sheet (replaces Auth tab)

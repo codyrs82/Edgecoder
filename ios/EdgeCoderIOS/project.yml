@@ -105,6 +105,8 @@ targets:
       - path: EdgeCoderIOS/Shared/NetworkBadge.swift
       - path: EdgeCoderIOS/Bots/BotsModels.swift
       - path: EdgeCoderIOS/Machines/MachinesModels.swift
+      - path: EdgeCoderIOS/Network/NetworkModels.swift
+      - path: EdgeCoderIOS/Network/NetworkFixture.swift
       - path: EdgeCoderIOS/Chat/ChatModels.swift
     settings:
       base:
