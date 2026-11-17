@@ -25,6 +25,7 @@
 set -euo pipefail
 
 VLLM_VERSION="${VLLM_VERSION:-0.33.0}"
+UV_VERSION="${UV_VERSION:-0.8.0}"   # only used when the system has no usable Python
 PREFIX=/opt/edgecoder/vllm
 STATE=/var/lib/edgecoder
 ETC=/etc/edgecoder
@@ -128,21 +129,36 @@ for g in ${gpus//,/ }; do
 done
 
 # ---- Python ----
-# vLLM needs Python 3.11 to 3.14. Use the newest python3.1x on the machine; Ubuntu 22.04 ships 3.10,
-# so install python3.11 from Ubuntu's archive there.
+# vLLM needs a final Python 3.11.4+ (up to 3.14). Ubuntu 22.04 ships 3.10, and its "python3.11"
+# package is a pre-release (3.11.0rc1) that PyTorch can't run on. Use a good system Python when
+# there is one; otherwise a standalone CPython 3.12 managed by uv under $PREFIX (no system change).
 export DEBIAN_FRONTEND=noninteractive
+py_ok() { "$1" -c 'import sys; v=sys.version_info; sys.exit(0 if v.releaselevel == "final" and (3, 11, 4) <= v[:3] and v[:2] < (3, 15) else 1)' 2>/dev/null; }
 PY=""
-for v in 3.14 3.13 3.12 3.11; do command -v "python$v" >/dev/null && { PY="python$v"; break; }; done
+for v in 3.14 3.13 3.12 3.11; do command -v "python$v" >/dev/null && py_ok "python$v" && { PY="$(command -v "python$v")"; break; }; done
+STANDALONE=0
 if [ -z "$PY" ]; then
-  echo "install-vllm: apt-get install python3.11 (vLLM needs Python 3.11 or newer)"
-  apt-get update -q
-  apt-get install -y -q python3.11 python3.11-venv python3.11-dev || die "could not install Python 3.11; vLLM needs Python 3.11 to 3.14"
-  PY=python3.11
+  # uv (a pinned version from PyPI, in its own venv on the system Python) fetches the standalone Python.
+  export UV_PYTHON_INSTALL_DIR="$PREFIX/python"
+  install -d -m 0755 "$PREFIX"
+  if [ ! -x "$PREFIX/uv/bin/uv" ]; then
+    echo "install-vllm: installing uv $UV_VERSION (Python manager) in $PREFIX/uv"
+    python3 -c 'import ensurepip' >/dev/null 2>&1 || { apt-get update -q; apt-get install -y -q python3-venv; }
+    python3 -m venv "$PREFIX/uv"
+    "$PREFIX/uv/bin/pip" install -q "uv==$UV_VERSION" || die "could not install uv $UV_VERSION"
+  fi
+  echo "install-vllm: installing a standalone Python 3.12 in $PREFIX/python"
+  "$PREFIX/uv/bin/uv" python install 3.12 >/dev/null || die "could not install Python 3.12; vLLM needs Python 3.11.4 to 3.14"
+  PY="$("$PREFIX/uv/bin/uv" python find 3.12)"
+  py_ok "$PY" || die "Python at $PY is not usable for vLLM"
+  STANDALONE=1
 fi
 pyver="$("$PY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
 need=()
-"$PY" -c 'import ensurepip' >/dev/null 2>&1 || need+=("python${pyver}-venv")
-[ -f "/usr/include/python${pyver}/Python.h" ] || need+=("python${pyver}-dev")
+if [ "$STANDALONE" = 0 ]; then
+  "$PY" -c 'import ensurepip' >/dev/null 2>&1 || need+=("python${pyver}-venv")
+  [ -f "/usr/include/python${pyver}/Python.h" ] || need+=("python${pyver}-dev")
+fi
 command -v gcc >/dev/null || need+=(gcc)
 if [ "${#need[@]}" -gt 0 ]; then
   echo "install-vllm: apt-get install ${need[*]}"
@@ -158,7 +174,7 @@ install -d -m 0755 "$ETC"
 
 # ---- vLLM in its own venv ----
 # A venv from an older Python (e.g. 3.10 on Ubuntu 22.04) can't hold this vLLM: rebuild it.
-if [ -x "$PREFIX/venv/bin/python" ] && ! "$PREFIX/venv/bin/python" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3, 11) else 1)'; then
+if [ -x "$PREFIX/venv/bin/python" ] && ! py_ok "$PREFIX/venv/bin/python"; then
   echo "install-vllm: rebuilding the venv with Python $pyver"; rm -rf "$PREFIX/venv"
 fi
 if [ ! -x "$PREFIX/venv/bin/python" ]; then "$PY" -m venv "$PREFIX/venv"; fi
