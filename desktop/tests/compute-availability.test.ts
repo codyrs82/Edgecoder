@@ -47,6 +47,25 @@ describe("class availability", () => {
     expect(modelsInClass(ov, undefined)).toBeNull();
   });
 
+  it("your own machines never count (Network only never runs on them)", () => {
+    const machine = (agentId: string, computeClass: string, models: string[], online = true) => ({ agentId, online, lastSeenMs: 0, computeClass, tier: null, activeModel: null, models, reservedUntilMs: null });
+    // The only consumer GPU online is yours: GPU only still has the A100, but a class of only yours is none.
+    const withMine: ComputeOverview = {
+      ...ov,
+      account: { accountId: "a", cSats: 1, earnedSats: 0, recent: [], machines: [machine("m1", "apple", ["qwen3-coder:30b"]), machine("m2", "apple.m", ["qwen3-coder:30b"])] },
+    };
+    expect(classAvailability(withMine, "apple")).toEqual({ state: "none" });
+    expect(classAvailability(withMine, "apple", "network/qwen3-coder:30b")).toEqual({ state: "none" });
+    expect(classAvailability(withMine, "gpu.dc")).toEqual({ state: "available", online: 1, models: ["qwen3-coder:30b"] });
+    expect(modelsInClass(withMine, "apple")).toEqual([]);
+    // An offline machine of yours changes nothing.
+    const offline: ComputeOverview = { ...ov, account: { accountId: "a", cSats: 1, earnedSats: 0, recent: [], machines: [machine("m1", "apple", ["qwen3-coder:30b"], false)] } };
+    expect(classAvailability(offline, "apple")).toMatchObject({ state: "available", online: 2 });
+    // An older coordinator (no per-class counts): a model only your machines serve is gone.
+    const old: ComputeOverview = { connected: true, account: { accountId: "a", cSats: 1, earnedSats: 0, recent: [], machines: [machine("m1", "gpu", ["llama3:8b"])] }, models: [{ model: "llama3:8b", agents: 1, classes: ["gpu"] }] };
+    expect(classAvailability(old, "gpu")).toEqual({ state: "none" });
+  });
+
   it("offline, not signed in or no answer: unknown, never 'none'", () => {
     expect(classAvailability(null, "gpu")).toEqual({ state: "unknown" });
     expect(classAvailability({ connected: false }, "gpu")).toEqual({ state: "unknown" });

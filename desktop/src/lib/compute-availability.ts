@@ -28,12 +28,55 @@ function bareModel(model: string): string {
   return model.replace(/^network\//, "").replace(/@[^@/]+$/, "");
 }
 
+/** A machine's class as the four classes ("gpu.dc40" → "gpu.dc", "apple.m" → "apple"). */
+function baseClass(c: string): string {
+  if (c.startsWith("gpu.dc")) return "gpu.dc";
+  if (c.startsWith("gpu")) return "gpu";
+  if (c.startsWith("apple")) return "apple";
+  return "cpu";
+}
+
 /**
- * What a class (its family) has now; `model`: only machines serving that model. Unknown when the
- * overview is missing, not connected, or lists no models at all (the network didn't answer).
+ * The network as Network only sees it: the coordinator counts every machine, yours too, but a
+ * Network only run never runs on this computer or your machines. Your online machines (the
+ * overview's account.machines) come off the per-class and per-model counts; a model only your
+ * machines serve leaves the list.
  */
-export function classAvailability(ov: ComputeOverview | null | undefined, cls: string | undefined, model?: string): ClassAvailability {
-  if (!ov || !ov.connected || !ov.models) return { state: "unknown" };
+export function othersView(ov: ComputeOverview): ComputeOverview {
+  const mine = (ov.account?.machines ?? []).filter((m) => m.online).map((m) => ({ cls: baseClass(m.computeClass), models: new Set(m.models) }));
+  if (!mine.length) return ov;
+  const classes = ov.classes
+    ? Object.fromEntries(
+        Object.entries(ov.classes).map(([c, v]) => [
+          c,
+          typeof v.agents === "number" ? { ...v, agents: Math.max(0, v.agents - mine.filter((m) => m.cls === c && m.models.size > 0).length) } : v,
+        ]),
+      )
+    : undefined;
+  const models = (ov.models ?? [])
+    .map((m) => {
+      const holders = mine.filter((x) => x.models.has(m.model));
+      if (!holders.length) return m;
+      const agents = Math.max(0, m.agents - holders.length);
+      if (m.agentsByClass) {
+        const agentsByClass = Object.fromEntries(Object.entries(m.agentsByClass).map(([c, n]) => [c, Math.max(0, n - holders.filter((x) => x.cls === c).length)]));
+        return { ...m, agents, agentsByClass, classes: m.classes.filter((c) => (agentsByClass[c] ?? 0) > 0) };
+      }
+      // An older coordinator (no per-class counts): gone when every holder is yours.
+      return { ...m, agents, classes: agents > 0 ? m.classes : [] };
+    })
+    .filter((m) => m.agents > 0 && m.classes.length > 0);
+  return { ...ov, ...(classes ? { classes } : {}), models };
+}
+
+/**
+ * What a class (its family) has now for a Network only run (other people's machines: yours never
+ * count); `model`: only machines serving that model. Unknown when the overview is missing, not
+ * connected, or lists no models at all (the network didn't answer).
+ */
+export function classAvailability(raw: ComputeOverview | null | undefined, cls: string | undefined, model?: string): ClassAvailability {
+  if (!raw || !raw.connected || !raw.models) return { state: "unknown" };
+  const ov = othersView(raw);
   const family = cls ? classFamily(cls) : ["cpu", "apple", "gpu", "gpu.dc"];
   const want = model ? bareModel(model) : undefined;
   const models = callable(ov).filter((m) => (!want || m.model === want) && m.classes.some((c) => family.includes(c)));
@@ -74,8 +117,8 @@ export function unavailableWarning(cls: string, model?: string): string {
 }
 
 /** Network models a class (its family) serves now, for the Model list under a per-class card; null: don't filter. */
-export function modelsInClass(ov: ComputeOverview | null | undefined, cls: string | undefined): string[] | null {
-  if (!ov || !ov.connected || !ov.models || !cls) return null;
+export function modelsInClass(raw: ComputeOverview | null | undefined, cls: string | undefined): string[] | null {
+  if (!raw || !raw.connected || !raw.models || !cls) return null;
   const family = classFamily(cls);
-  return callable(ov).filter((m) => m.classes.some((c) => family.includes(c))).map((m) => m.model);
+  return callable(othersView(raw)).filter((m) => m.classes.some((c) => family.includes(c))).map((m) => m.model);
 }

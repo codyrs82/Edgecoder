@@ -129,6 +129,19 @@ describe("BotForm: what the network has now", () => {
     expect(card("Network CPU only").disabled).toBe(false);
   });
 
+  it("a class whose only machines are yours is disabled (Network only never runs on them)", async () => {
+    const own = (agentId: string) => ({ agentId, online: true, lastSeenMs: 0, computeClass: "cpu", tier: null, activeModel: null, models: ["qwen2.5-coder:7b"], reservedUntilMs: null });
+    // The coordinator counts two CPU machines with qwen2.5-coder:7b, and both are this account's.
+    api.computeOverview.mockResolvedValue({ ...network({ cpu: 2 }), account: { accountId: "a", cSats: 50, earnedSats: 0, recent: [], machines: [own("m1"), own("m2")] } });
+    open(harry());
+    await waitFor(() => expect(card("Network CPU only").disabled).toBe(true));
+    expect(cardLabel("Network CPU only").textContent).toMatch(/None online/);
+    expect(cardLabel("Network CPU only").getAttribute("title")).toBe("No CPU machines on the network right now");
+    // Other people's machines in other classes still count.
+    expect(card("Network Apple only").disabled).toBe(false);
+    expect(cardLabel("Network only").textContent).toMatch(/3 online/);
+  });
+
   it("a saved choice whose class is empty now stays selected, with a warning, and saves unchanged", async () => {
     api.computeOverview.mockResolvedValue(network({ "gpu.dc": 0 }));
     const onSaved = open(harry({ compute: { policy: "network_only", computeClass: "gpu.dc" } }));

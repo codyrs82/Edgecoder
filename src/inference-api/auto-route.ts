@@ -783,11 +783,16 @@ export function noRouteMessage(policy: ComputePolicy, inp: RouteInputs, opts: Pl
   }
 }
 
+/** A machine's class as the four classes ("gpu.dc40" → "gpu.dc", "apple.m" → "apple"). */
+function baseClassOf(c: string): string {
+  return c.startsWith("gpu.dc") ? "gpu.dc" : c.startsWith("gpu") ? "gpu" : c.startsWith("apple") ? "apple" : "cpu";
+}
+
 /** Route inputs from the compute overview, your reservations and this computer's models. */
 export function routeInputsFrom(input: {
   localModels: string[];
   selfAgentId?: string;
-  machines?: Array<{ agentId: string; online: boolean; models: string[] }>;
+  machines?: Array<{ agentId: string; online: boolean; models: string[]; computeClass?: string }>;
   networkModels?: Array<{ model: string; classes: string[]; cSatsPerMTokens?: { input: number; output: number } }>;
   balanceCSats?: number;
   classes?: Record<string, { cSatsPerSecondBaseTier: number; agents?: number }>;
@@ -803,7 +808,14 @@ export function routeInputsFrom(input: {
     classPrice: Object.fromEntries(Object.entries(input.classes ?? {}).map(([k, v]) => [k, v.cSatsPerSecondBaseTier])),
     ...(typeof input.balanceCSats === "number" ? { balanceCSats: input.balanceCSats } : {}),
     ...(Object.values(input.classes ?? {}).some((v) => typeof v.agents === "number")
-      ? { classAgents: Object.fromEntries(Object.entries(input.classes ?? {}).filter(([, v]) => typeof v.agents === "number").map(([k, v]) => [k, v.agents as number])) }
+      ? {
+          // Other people's machines: the coordinator counts yours too, but the network leg never runs there.
+          classAgents: Object.fromEntries(
+            Object.entries(input.classes ?? {})
+              .filter(([, v]) => typeof v.agents === "number")
+              .map(([k, v]) => [k, Math.max(0, (v.agents as number) - (input.machines ?? []).filter((m) => m.online && m.models.length > 0 && m.computeClass && baseClassOf(m.computeClass) === k).length)]),
+          ),
+        }
       : {}),
   };
 }

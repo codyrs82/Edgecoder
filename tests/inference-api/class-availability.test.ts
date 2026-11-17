@@ -45,6 +45,9 @@ describe("the GPU family", () => {
   it("the coordinator's machine counts come through the compute overview", () => {
     const inp = routeInputsFrom({ localModels: [], classes: { cpu: { cSatsPerSecondBaseTier: 1, agents: 9 }, gpu: { cSatsPerSecondBaseTier: 4, agents: 0 } } });
     expect(inp.classAgents).toEqual({ cpu: 9, gpu: 0 });
+    // Your own machines don't count: the network leg never runs on them.
+    const own = routeInputsFrom({ localModels: [], machines: [{ agentId: "mine", online: true, models: ["qwen3-coder:30b"], computeClass: "gpu" }, { agentId: "off", online: false, models: ["x"], computeClass: "cpu" }], classes: { cpu: { cSatsPerSecondBaseTier: 1, agents: 9 }, gpu: { cSatsPerSecondBaseTier: 4, agents: 1 } } });
+    expect(own.classAgents).toEqual({ cpu: 9, gpu: 0 });
     // An older coordinator: no counts.
     expect(routeInputsFrom({ localModels: [], classes: { cpu: { cSatsPerSecondBaseTier: 1 } } }).classAgents).toBeUndefined();
   });
