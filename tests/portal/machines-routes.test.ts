@@ -25,7 +25,7 @@ function fakeCoordinator(name: string, connectedAgents: string[]): Server {
       seen.push({ coord: name, url: req.url ?? "", token: req.headers["x-portal-service-token"], body });
       if (req.url === "/agent-control/machines") {
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ machines: (body.agentIds as string[]).map((agentId) => ({ agentId, connected: connectedAgents.includes(agentId), state: connectedAgents.includes(agentId) ? { activeModel: "qwen3.5:9b", from: name } : null, stateAtMs: connectedAgents.includes(agentId) ? 2 : null, lastSeenMs: 1, coordinatorId: name, audit: [{ commandId: `${name}-c1`, requestedAtMs: 5, accountId: body.accountId }] })) }));
+        res.end(JSON.stringify({ machines: (body.agentIds as string[]).map((agentId) => ({ agentId, connected: connectedAgents.includes(agentId), state: connectedAgents.includes(agentId) ? { activeModel: "qwen3.5:9b", from: name } : null, stateAtMs: connectedAgents.includes(agentId) ? 2 : null, lastSeenMs: 1, ...(connectedAgents.includes(agentId) ? { version: "1.2.0" } : {}), coordinatorId: name, audit: [{ commandId: `${name}-c1`, requestedAtMs: 5, accountId: body.accountId }] })) }));
         return;
       }
       const m = /^\/agent-control\/agents\/([^/]+)\/commands$/.exec(req.url ?? "");
@@ -55,7 +55,8 @@ beforeAll(async () => {
     store: {
       listNodesByOwner: async (userId) =>
         userId === "u1" ? [{ nodeId: "mac-1", nodeKind: "agent" }, { nodeId: "gpu-1", nodeKind: "agent" }, { nodeId: "coord-x", nodeKind: "coordinator" }] : [{ nodeId: "other-1", nodeKind: "agent" }]
-    }
+    },
+    latestAgentVersion: () => "1.3.0"
   });
   await app.ready();
 });
@@ -78,7 +79,9 @@ describe("portal machine routes", () => {
     expect(body.accountId).toBe("acct-u1");
     expect(body.machines.map((m: any) => m.agentId).sort()).toEqual(["gpu-1", "mac-1"]);
     const mac = body.machines.find((m: any) => m.agentId === "mac-1");
-    expect(mac).toMatchObject({ connected: true, state: { from: "B" } });
+    expect(mac).toMatchObject({ connected: true, state: { from: "B" }, version: "1.2.0", updateAvailable: true });
+    expect(body.latestAgentVersion).toBe("1.3.0");
+    expect(body.machines.find((m: any) => m.agentId === "gpu-1")).toMatchObject({ version: null, updateAvailable: false });
     expect(mac.audit.map((e: any) => e.commandId).sort()).toEqual(["A-c1", "B-c1"]);
     expect(body.catalog.length).toBeGreaterThan(5);
     // The account comes from the session and the service token goes along; coordinators are not listed.

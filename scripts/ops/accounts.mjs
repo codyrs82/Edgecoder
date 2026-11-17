@@ -406,7 +406,38 @@ function truncate(s, n) {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
 
-export function formatAccount(a, nowMs = Date.now()) {
+/** "1.2.3" from "1.2.3" or "agent-v1.2.3"; null otherwise (prereleases and package versions of old agents included). */
+function releaseParts(v) {
+  const m = /^(?:agent-v)?(\d+)\.(\d+)\.(\d+)$/.exec(String(v ?? ""));
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+/** "1.2.0", "1.2.0 (update: 1.3.0)" when behind the newest agent release, or "-". */
+export function fmtVersion(version, latest) {
+  if (!version) return "-";
+  const v = releaseParts(version);
+  const l = releaseParts(latest);
+  if (!v || !l) return String(version);
+  for (let i = 0; i < 3; i++) if (v[i] !== l[i]) return v[i] < l[i] ? `${version} (update: ${latest})` : String(version);
+  return String(version);
+}
+
+/** The newest published, non-prerelease agent-vX.Y.Z (what edgecoder-install update installs), or null. */
+export async function fetchLatestAgentVersion(fetchImpl = fetch) {
+  try {
+    const res = await fetchImpl("https://api.github.com/repos/codyrs82/Edgecoder/releases?per_page=100", { headers: { "user-agent": "edgecoder-ops" }, signal: AbortSignal.timeout(8000) });
+    if (res.status !== 200) return null;
+    const best = (await res.json())
+      .filter((r) => r && !r.draft && !r.prerelease && /^agent-v\d+\.\d+\.\d+$/.test(r.tag_name))
+      .map((r) => releaseParts(r.tag_name))
+      .sort((a, b) => b[0] - a[0] || b[1] - a[1] || b[2] - a[2])[0];
+    return best ? best.join(".") : null;
+  } catch {
+    return null;
+  }
+}
+
+export function formatAccount(a, nowMs = Date.now(), latestAgentVersion = null) {
   const head = [
     shortId(a.userId),
     a.email ?? "(no email)",
@@ -425,11 +456,12 @@ export function formatAccount(a, nowMs = Date.now()) {
   } else {
     const online = a.machines.filter((m) => m.online).length;
     lines.push(`  machines (${a.machines.length}, ${online} online):`);
-    const rows = [["AGENT", "STATE", "CLASS/TIER", "ENGINE", "MODELS", "NODE OK", "HOST ROLE", "COORDINATOR"]];
+    const rows = [["AGENT", "STATE", "VERSION", "CLASS/TIER", "ENGINE", "MODELS", "NODE OK", "HOST ROLE", "COORDINATOR"]];
     for (const m of a.machines) {
       rows.push([
         truncate(m.agentId, 36),
         `${m.online ? "online" : "offline"} ${fmtAgo(m.lastSeenMs, nowMs)}${m.blacklisted ? " BLACKLISTED" : ""}`,
+        fmtVersion(m.version, latestAgentVersion),
         m.computeClass ? `${m.computeClass}/${m.tier ?? "?"}` : "-",
         m.engine ?? "-",
         m.models.length ? truncate(m.models.join(","), 40) : "-",
@@ -448,8 +480,9 @@ export function formatReport(accounts, meta = {}, nowMs = Date.now()) {
   const online = accounts.reduce((n, a) => n + a.machines.filter((m) => m.online).length, 0);
   const out = [`${accounts.length} accounts, ${machines} machines (${online} online) as of ${fmtDate(nowMs)}`];
   for (const w of meta.warnings ?? []) out.push(`warning: ${w}`);
+  if (meta.latestAgentVersion) out.push(`newest agent release: ${meta.latestAgentVersion}`);
   if (meta.timings) out.push(`sources: ${Object.entries(meta.timings).map(([k, v]) => `${k} ${(v / 1000).toFixed(1)}s`).join(", ")}`);
-  for (const a of accounts) out.push("", formatAccount(a, nowMs));
+  for (const a of accounts) out.push("", formatAccount(a, nowMs, meta.latestAgentVersion ?? null));
   return out.join("\n");
 }
 
@@ -499,10 +532,11 @@ async function main() {
     return;
   }
   const nowMs = Date.now();
-  const { accounts, warnings, timings } = await collect({ nowMs });
+  const [{ accounts, warnings, timings }, latestAgentVersion] = await Promise.all([collect({ nowMs }), fetchLatestAgentVersion()]);
+  if (!latestAgentVersion) warnings.push("could not read the newest agent release from GitHub; no update hints");
   const shown = redact(applyFilters(accounts, opts));
-  if (opts.json) console.log(JSON.stringify({ asOf: new Date(nowMs).toISOString(), warnings, timings, accounts: shown }, null, 2));
-  else console.log(formatReport(shown, { warnings, timings }, nowMs));
+  if (opts.json) console.log(JSON.stringify({ asOf: new Date(nowMs).toISOString(), latestAgentVersion, warnings, timings, accounts: shown }, null, 2));
+  else console.log(formatReport(shown, { warnings, timings, latestAgentVersion }, nowMs));
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

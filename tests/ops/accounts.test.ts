@@ -4,7 +4,7 @@ import * as ops from "../../scripts/ops/accounts.mjs";
 
 const {
   assertSelectOnly, PORTAL_QUERIES, LEDGER_QUERIES, parseArgs, applyFilters, matchesFilter, mergeAccounts,
-  formatAccount, formatReport, redact, buildRemoteProgram, flyArgs, parseRemoteOutput, collect, utcDayStartMs
+  formatAccount, formatReport, fmtVersion, fetchLatestAgentVersion, redact, buildRemoteProgram, flyArgs, parseRemoteOutput, collect, utcDayStartMs
 } = ops as any;
 
 const NOW = Date.UTC(2026, 10, 17, 12, 0, 0);
@@ -150,11 +150,23 @@ describe("output", () => {
     expect(text).toContain("5f7e7900  owner@proton.me");
     expect(text).toContain("host-approved yes (admin)");
     expect(text).toContain("machines (1, 1 online):");
-    expect(text).toMatch(/lambda-a100-gpu0\s+online 1s ago\s+gpu\.dc\/gpu\.dc40\s+vllm\s+qwen3-coder:30b\s+yes\s+serves network\s+edgecoder-seed/);
+    expect(text).toMatch(/lambda-a100-gpu0\s+online 1s ago\s+\S+\s+gpu\.dc\/gpu\.dc40\s+vllm\s+qwen3-coder:30b\s+yes\s+serves network\s+edgecoder-seed/);
     const report = formatReport(accounts, { warnings: ["x down"], timings: { portal: 1800 } }, NOW);
     expect(report).toMatch(/^3 accounts, 2 machines \(1 online\)/);
     expect(report).toContain("warning: x down");
     expect(report).toContain("balance 5,000 cSats | spent today 12.5");
+  });
+  it("shows each machine's version and when it is behind the newest agent release", async () => {
+    expect(fmtVersion("1.2.0", "1.3.0")).toBe("1.2.0 (update: 1.3.0)");
+    expect(fmtVersion("1.3.0", "1.3.0")).toBe("1.3.0");
+    expect(fmtVersion("1.0", "1.3.0")).toBe("1.0");
+    expect(fmtVersion(null, "1.3.0")).toBe("-");
+    const report = formatReport(accounts, { latestAgentVersion: "9.0.0" }, NOW);
+    expect(report).toContain("newest agent release: 9.0.0");
+    expect(report).toMatch(/AGENT\s+STATE\s+VERSION/);
+    const fake = async () => ({ status: 200, json: async () => [{ tag_name: "agent-v1.9.0" }, { tag_name: "agent-v1.10.0" }, { tag_name: "agent-v2.0.0", prerelease: true }, { tag_name: "v3.0.0" }] });
+    expect(await fetchLatestAgentVersion(fake)).toBe("1.10.0");
+    expect(await fetchLatestAgentVersion(async () => { throw new Error("offline"); })).toBeNull();
   });
   it("redacts secret-looking fields but keeps payout set/not set", () => {
     const r = redact({ email: "a@b", token_hash: "x", password_hash: "y", nested: [{ apiKeyValue: "k", registration_token_hash: "z", ok: 1 }], payoutDestination: "set", destination: "lnbc1..." });

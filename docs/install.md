@@ -286,6 +286,70 @@ On macOS, Docker Desktop's socket belongs to the logged-in user and `_edgecoder`
 the plan warns, and the agents register but take no swarm tasks until a Docker daemon the
 account can reach is set up.
 
+## Updates
+
+Hosts installed with `install.sh` (Linux, and macOS without the `.pkg`) **update themselves**:
+nobody has to re-run the installer for a fix. Every 6 hours (plus a random delay of up to an hour,
+so a fleet does not restart at once) the host runs `edgecoder-install update`, which:
+
+1. asks GitHub for the newest published, non-prerelease `agent-v*` release and stops if it is not
+   newer than the installed one (it never downgrades);
+2. downloads its tarball, `SHA256SUMS` and `SHA256SUMS.minisig` over HTTPS into a root-only (0700)
+   staging directory beside `/opt/edgecoder/app`, and checks them exactly as `install.sh` does,
+   against the release key pinned in the installed app (`src/install/release-key.ts`, the same key
+   as in "Release public key" below; never one downloaded with the release). Nothing is unpacked
+   before that check passes;
+3. asks the new version's `plan --keep-config` whether it would run the same agents; if not (a new
+   layout or naming), it stops and leaves the change to you;
+4. asks each agent to stop taking new work and waits up to 10 minutes for running work to finish.
+   Still busy: the agents take work again and the update waits for the next run;
+5. moves `/opt/edgecoder/app` to `/opt/edgecoder/app.prev`, puts the new release in its place and
+   runs its `apply --from-package --keep-config`, which keeps everything this host was set up with
+   (env files, node ids, tokens, coordinator and portal URLs, mesh token, engines, tuning, models,
+   `AGENT_REMOTE_CONTROL` / `AGENT_MODEL_ALLOWLIST`) and restarts the services;
+6. checks that every agent service is running again and that each agent registered before the
+   update registers again within 3 minutes. If not, it **rolls back** to `app.prev`, restarts that,
+   and skips that release on later scheduled runs (`sudo edgecoder-install update` tries it again).
+
+One previous version is kept in `/opt/edgecoder/app.prev`. Each run logs one line
+(`edgecoder-update: updated agent-v1.2.0 -> agent-v1.3.0 ...`; Linux: `journalctl -u
+edgecoder-update`, macOS: `/var/log/edgecoder/io.edgecoder.update.log`) and records the result in
+`/etc/edgecoder/update-state.json`. `edgecoder-install status` shows the version, whether automatic
+updates are on, and the last check with its result:
+
+```
+version: 1.3.0 (agent-v1.3.0, linux-x64)
+auto-update: on (default; ...), edgecoder-update.timer active, next run Tue 2026-11-17 18:41:07 UTC
+last update check: 2026-11-17T12:22:40.118Z: updated: updated agent-v1.2.0 -> agent-v1.3.0 (signature verified, agents healthy); ...
+```
+
+**Update now:** `sudo edgecoder-install update` (`--check` only reports whether a newer release
+exists). **Turn automatic updates off:** `sudo edgecoder-install apply --auto-update off` (writes
+`EDGECODER_AUTO_UPDATE=off` to `/etc/edgecoder/auto-update.env`, which every later run keeps, and
+disables the timer); `--auto-update on` turns them back on. `EDGECODER_AUTO_UPDATE=off` in any
+`/etc/edgecoder/*.env` also stops scheduled runs.
+
+| Platform | Schedule |
+| --- | --- |
+| Linux | `edgecoder-update.timer` (every 6 h, `RandomizedDelaySec=1h`, `Persistent=true`) starts `edgecoder-update.service`, a root oneshot. |
+| macOS | `/Library/LaunchDaemons/io.edgecoder.update.plist` (root, every 6 h, up to 1 h of jitter inside the run). |
+| Windows | Not yet: the agents are scheduled tasks of the installing user and the app lives in `C:\Program Files`. Re-run `install.ps1` to update. |
+| `.deb`, `.pkg`, `.msi`, `--from-source` | No schedule: update them the way they were installed. |
+
+How the agent is asked to finish its work: an installed agent writes `agent-status.json` in its
+own state directory (`/var/lib/edgecoder/agent-<n>`: registered, draining, running work) and handles
+`SIGUSR2` (take no new work; lapses by itself after 15 minutes) and `SIGHUP` (take work again). No
+port is opened for this. An agent that does not write the file (one from before this feature) is
+restarted as before, handing its claims back on `SIGTERM`.
+
+**Hosts installed before automatic updates** need one last manual run of the install command, with
+the options they were installed with (it records the layout and model flags in each env file as
+`EDGECODER_INSTALL_ARGS`, so later updates plan the same agents):
+
+```bash
+curl -fsSLo install.sh https://edgecoder.io/install.sh && sudo bash install.sh --mesh-token <token> [the options you installed with]
+```
+
 ## Enrolment
 
 Every instance needs a registration token from the portal (Settings → Nodes → Enroll a node).
@@ -349,6 +413,7 @@ sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" bash install.sh --mesh-token "$MESH"
 | `apply` | Write env files and services for every instance, enable and start them. |
 | `status` | Show the state of every EdgeCoder service on this host. |
 | `remove` | Stop and remove the EdgeCoder services and env files (keeps models). |
+| `update` | Update to the newest signed agent release (Linux, macOS): verify, wait for idle agents, swap, re-apply, health-check, roll back on failure ([Updates](#updates)). |
 | `help` | Show the options. |
 
 ## Options (identical on every platform)
@@ -385,6 +450,11 @@ sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" bash install.sh --mesh-token "$MESH"
 | `--app-dir DIR` | Installed app directory containing `dist/`. |
 | `--node-bin PATH` | Node binary for the services. |
 | `--ollama-bin PATH` | Ollama binary. |
+| `--auto-update on\|off` | Scheduled updates to new signed releases (Linux, macOS; default `on`). Kept in `/etc/edgecoder/auto-update.env`, so later runs keep it ([Updates](#updates)). |
+| `--keep-config` | Re-run with this host's configuration from its env files: coordinator and portal URLs, mesh token, the recorded layout and model flags (`EDGECODER_INSTALL_ARGS`), each instance's model and `MAX_CONCURRENT_TASKS`. Flags given now still win. `update` runs `apply --from-package --keep-config`. |
+| `--check` | `update` only: report whether a newer release exists, change nothing. |
+| `--scheduled` | `update` only: the timer's run. Does nothing when automatic updates are off; skips a release that already failed its health check here. |
+| `--jitter SECONDS` | `update` only: wait a random time up to `SECONDS` first (the macOS schedule uses 3600). |
 
 The tuning flags (`--context-window`, `--parallel`, `--keep-alive`) are recorded in each instance's
 env file (`EDGECODER_INSTALL_TUNING`). A later run without them, such as a package upgrade's

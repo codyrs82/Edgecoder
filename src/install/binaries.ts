@@ -42,7 +42,10 @@ export function nonRootWritable(fs: BinFs, path: string): string | null {
       if (st.mode & 0o022) return `${p} is writable by group or others (mode ${(st.mode & 0o7777).toString(8)})`;
     }
     if (p === "/") return null;
-    p = posix.dirname(p);
+    const up = posix.dirname(p);
+    // A relative or non-POSIX path ("." / "C:\\x") has no parent to climb to: say so rather than loop.
+    if (up === p) return `${p} is not an absolute POSIX path`;
+    p = up;
   }
 }
 

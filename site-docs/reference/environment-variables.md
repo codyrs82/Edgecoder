@@ -768,6 +768,8 @@ These are not service configuration, so no schema lists them and the docs test s
 | Variable | Read by | Description |
 |---|---|---|
 | `FLY_APP_NAME`, `FLY_REGION` | coordinator, portal | Set by the Fly runtime. |
+| `EDGECODER_INSTANCE` | agent (src/swarm/worker-runner.ts) | Written by `edgecoder-install` into each `agent-<n>.env`; when set, the agent writes `agent-status.json` in its HOME and handles the `SIGUSR2` / `SIGHUP` update drain (src/swarm/update-drain.ts). |
+| `EDGECODER_UPDATE_RUN` | `edgecoder-install apply` (src/install/cli.ts) | Set by `edgecoder-install update` for the `apply` it runs, so macOS does not unload the update job it is running in. |
 | `GIT_ASKPASS`, `SSH_ASKPASS` | IDE provider (src/apps/ide/github-auth.ts) | Read only to clear them for the read-only `git credential fill` lookup, so no password prompt can appear. |
 | `EDGECODER_GITHUB_API_URL` | IDE provider (src/apps/ide/github-auth.ts) | GitHub API base URL for the agent's GitHub tools (default `https://api.github.com`). For tests and GitHub Enterprise. |
 | `EDGECODER_TENTACLES`, `EDGECODER_TENTACLES_MAX`, `EDGECODER_TENTACLES_BUDGET_CSATS`, `EDGECODER_TENTACLE_CSATS`, `EDGECODER_TENTACLES_WORKER`, `EDGECODER_TENTACLE_CONTEXT_CHARS` | IDE provider (src/apps/ide/tentacles.ts) | Tentacles (helper agents a session's lead delegates to; docs/tentacles.md): `1` turns them on for every session; the parallel cap (default 4); the session budget in cSats (100); the per-tentacle budget (25); the worker model when the session's is auto (default `auto`; never a frontier model); how many characters of files a helper's prompt may carry (36000). |

@@ -108,6 +108,8 @@ export function registerModelControlRoutes(app: CoordinatorApp): void {
         networkModels: network,
         ownerModels: ownerOnly,
         ...(mem ? { memory: { budgetBytes: mem.budgetBytes, ownerModels: mem.ownerModels ?? [], models: mem.models.map((m) => ({ name: m.name, bytes: m.bytes })) } } : {}),
+        // The agent's software version from its last /register (release installs report their tag).
+        version: typeof cap?.version === "string" && cap.version !== "mesh-peer" ? cap.version.slice(0, 40) : null,
         coordinatorId: identity.peerId
       });
     }

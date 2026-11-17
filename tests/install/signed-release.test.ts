@@ -214,11 +214,11 @@ describe("installers: pinned and verified dependencies, no piped scripts", () =>
     expect(installSh).not.toMatch(/RELEASE_PUBKEY="\$\{EDGECODER_/);
   });
 
-  it("set-release-signing-key.sh pins a new key in all three places", () => {
+  it("set-release-signing-key.sh pins a new key in all four places", () => {
     const script = readFileSync(join(root, "scripts/set-release-signing-key.sh"), "utf8");
     const pinJs = /<<'NODE'\n([\s\S]*?)\nNODE\n/.exec(script)![1];
     const copy = join(work, "pin-root");
-    for (const rel of ["deploy/install.sh", "deploy/install.ps1", "docs/install.md"]) {
+    for (const rel of ["deploy/install.sh", "deploy/install.ps1", "src/install/release-key.ts", "docs/install.md"]) {
       mkdirSync(join(copy, rel, ".."), { recursive: true });
       const text = readFileSync(join(root, rel), "utf8");
       // install.ps1 is checked out with CRLF (.gitattributes) on every OS.
@@ -230,6 +230,7 @@ describe("installers: pinned and verified dependencies, no piped scripts", () =>
     const sh = readFileSync(join(copy, "deploy/install.sh"), "utf8");
     expect(pinnedPublicKey(sh)).toBe(k.publicKey);
     expect(readFileSync(join(copy, "deploy/install.ps1"), "utf8")).toContain(`$ReleasePubKey = '${k.publicKey}' # release-pubkey\r\n`);
+    expect(readFileSync(join(copy, "src/install/release-key.ts"), "utf8")).toContain(`export const RELEASE_PUBKEY = "${k.publicKey}"; // release-pubkey\n`);
     expect(readFileSync(join(copy, "docs/install.md"), "utf8")).toContain(`untrusted comment: minisign public key ${k.keyId}\n${k.publicKey}`);
     // The script never writes the private key anywhere but the secret (and an explicit --backup).
     expect(script).toMatch(/field secretKeyPem \| gh secret set "\$SECRET"/);
