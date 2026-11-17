@@ -234,11 +234,11 @@ export const COMPUTE_POLICY_OPTIONS: Array<{ value: ComputeChoice; title: string
   { value: "local_first", title: "Local first", desc: "This computer first when it has a 14B or larger model, then your machines, then the network's best fit within the daily budget." },
   { value: "local_only", title: "This computer only", desc: "Never leaves this computer. Free." },
   { value: "mine_only", title: "My machines only", desc: "This computer and your other machines. Free, never the network." },
-  { value: "network_only", title: "Network only", desc: "Always the network's best fit, paid within the daily budget. Never this computer or your machines." },
-  { value: "network_only:gpu", title: "Network GPU only", desc: "Any GPU on the network, consumer or datacenter, within the daily budget. Never this computer or your machines." },
-  { value: "network_only:apple", title: "Network Apple only", desc: "The network's Apple silicon Macs only, within the daily budget. Never this computer or your machines." },
+  { value: "network_only", title: "Network only", desc: "Always the network's best fit, paid within the daily budget. Never this machine or your other machines." },
+  { value: "network_only:gpu", title: "Network GPU only", desc: "Any GPU on the network, consumer or datacenter, within the daily budget. Never this machine or your other machines." },
+  { value: "network_only:apple", title: "Network Apple only", desc: "The network's Apple silicon Macs only, within the daily budget. Never this machine or your other machines." },
   { value: "network_only:cpu", title: "Network CPU only", desc: "The network's CPU machines only: cheapest power floor, slowest. Within the daily budget." },
-  { value: "network_only:gpu.dc", title: "Network Datacenter GPU only", desc: "The network's datacenter GPUs only: fastest, within the daily budget. Never this computer or your machines." },
+  { value: "network_only:gpu.dc", title: "Network Datacenter GPU only", desc: "The network's datacenter GPUs only: fastest, within the daily budget. Never this machine or your other machines." },
   { value: "model", title: "Specific model", desc: "Always the model you pick below." },
 ];
 

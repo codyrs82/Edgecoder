@@ -302,7 +302,7 @@
       <div class="sp-group-title">Model and compute</div>
       <div class="sp-card">
         <div class="sp-row stack">
-          <span class="sp-text"><span class="sp-title">Where it runs</span><span class="sp-desc">{networkOnly ? "Network only never falls back to this computer or your machines: with no cSats left today it stops and says so." : "When the network can't be paid for, it uses the best model on this computer or your machines instead."}</span></span>
+          <span class="sp-text"><span class="sp-title">Where it runs</span><span class="sp-desc">{networkOnly ? "Network only never falls back to this machine or your other machines: with no cSats left today it stops and says so." : "When the network can't be paid for, it uses the best model on this machine or your other machines instead."}</span></span>
           <div class="bf-policies" role="radiogroup" aria-label="Where it runs">
             {#each COMPUTE_POLICY_OPTIONS as o (o.value)}
               {@const avail = availabilityOf(o.value)}
@@ -340,7 +340,7 @@
           </div>
         {/if}
         <label class="sp-row">
-          <span class="sp-text"><span class="sp-title">Daily budget</span><span class="sp-desc">cSats a day for the network. A run stops when it's spent, and the network is never asked for more than what's left. Empty: no limit (your balance still caps it). This computer and your machines are free.</span></span>
+          <span class="sp-text"><span class="sp-title">Daily budget</span><span class="sp-desc">cSats a day for the network. A run stops when it's spent, and the network is never asked for more than what's left. Empty: no limit (your balance still caps it). This machine and your other machines are free.</span></span>
           <input type="number" min="0" step="any" bind:value={budgetText} placeholder="No limit" class="bf-num" />
         </label>
       </div>
