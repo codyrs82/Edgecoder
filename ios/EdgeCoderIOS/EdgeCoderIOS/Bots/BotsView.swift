@@ -163,7 +163,7 @@ struct BotDetailView: View {
                         }
                         .disabled(sending)
                     } else {
-                        Text(machine?.online == false ? "This machine is offline. You can read, but not control, its bots." : "View only: approve and control this bot on the Mac.")
+                        Text(machine?.online == false ? "This machine is offline. You can read, but not control, its bots." : "View only: approve and control this bot on its machine.")
                             .font(.footnote).foregroundColor(Theme.textSecondary)
                     }
                 }
@@ -305,8 +305,8 @@ extension Color {
     }
 }
 
-/// Create a bot from the phone (#414): it waits on the portal until one of your Macs takes it, and
-/// its folder is picked on the Mac.
+/// Create a bot from the phone (#414): it waits on the portal until one of your machines takes it, and
+/// its folder is picked on that machine.
 private struct NewBotSheet: View {
     let targets: [BotTarget]
     let onCreated: () -> Void
@@ -331,13 +331,13 @@ private struct NewBotSheet: View {
                 }
                 Section {
                     Picker("Machine", selection: $target) {
-                        Text("First Mac available").tag(String?.none)
+                        Text("First machine available").tag(String?.none)
                         ForEach(targets) { t in
                             Text(t.machineName + (t.online ? "" : " (offline)")).tag(Optional(t.agentId))
                         }
                     }
                 } footer: {
-                    Text("The bot is created on that Mac the next time EdgeCoder runs there. You pick its project folder on the Mac.")
+                    Text("The bot is created on that machine the next time EdgeCoder runs there. You pick its project folder on that machine.")
                 }
                 if !error.isEmpty { Text(error).foregroundColor(Theme.red) }
             }

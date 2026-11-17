@@ -8,7 +8,7 @@ struct BotMachine: Decodable, Equatable, Identifiable {
     let agentId: String
     let machineName: String
     let online: Bool
-    /// "on": message, pause and approve from here; "view": read-only (approve on the Mac).
+    /// "on": message, pause and approve from here; "view": read-only (approve on the machine).
     let controls: String
     let reportedAtMs: Double?
 
@@ -82,7 +82,7 @@ struct BotSummary: Decodable, Equatable, Identifiable {
     var isPaused: Bool { !enabled || status == "paused" || held != nil }
 }
 
-/// A bot made on the web (#414) that has not reached a Mac yet.
+/// A bot made on the web (#414) that has not reached a machine yet.
 struct PendingBot: Decodable, Equatable, Identifiable {
     var id: String { requestId }
     let requestId: String
@@ -108,11 +108,11 @@ struct BotsListResponse: Decodable {
     let bots: [BotSummary]
     let pending: [PendingBot]?
     let targets: [BotTarget]?
-    /// The portal can hold new bots for a Mac (#414).
+    /// The portal can hold new bots for a machine (#414).
     let canCreate: Bool?
 }
 
-/// POST /portal/api/bots/new: the desktop form's basics; the folder is picked on the Mac.
+/// POST /portal/api/bots/new: the desktop form's basics; the folder is picked on the machine.
 struct NewBotRequest: Encodable {
     struct Spec: Encodable {
         let name: String
@@ -121,7 +121,7 @@ struct NewBotRequest: Encodable {
     }
     /// One per "Create bot"; a retry sends the same one.
     let requestId: String
-    /// nil: the first of your Macs that can take it.
+    /// nil: the first of your machines that can take it.
     let agentId: String?
     let bot: Spec
 
@@ -154,10 +154,10 @@ enum BotsFormat {
         case "not_your_machine": return "That machine isn't on this account."
         case "no_such_bot": return "That bot isn't on this machine anymore."
         case "coordinator_unreachable": return "Couldn't reach the EdgeCoder network. Try again in a moment."
-        case "relay_view_only", "view_only": return "This machine is view-only from the web. Change it on the Mac."
+        case "relay_view_only", "view_only": return "This machine is view-only from the web. Change it on the machine itself."
         case "not_authenticated": return "Your session ended. Sign in again."
         case "invalid_command", "invalid_bot": return message ?? "That wasn't accepted."
-        case "too_many_pending": return message ?? "Too many new bots are waiting for a Mac."
+        case "too_many_pending": return message ?? "Too many new bots are waiting for a machine."
         case "busy": return "Try again."
         case nil: return message ?? "The command didn't go through."
         default: return message ?? "The command didn't go through (\(code!))."
@@ -168,9 +168,9 @@ enum BotsFormat {
     static func pendingState(_ p: PendingBot) -> String {
         if let e = p.error ?? p.message, !e.isEmpty, p.state == "failed" { return "Couldn't create: \(e)" }
         switch p.state {
-        case "waiting": return "Waiting for \(p.machineName ?? "a Mac") to come online"
-        case "sent", "delivered": return "Sent to \(p.machineName ?? "your Mac"); pick its folder on the Mac"
-        case "needs_folder": return "Pick its folder on \(p.machineName ?? "the Mac")"
+        case "waiting": return "Waiting for \(p.machineName ?? "a machine") to come online"
+        case "sent", "delivered": return "Sent to \(p.machineName ?? "your machine"); pick its folder on that machine"
+        case "needs_folder": return "Pick its folder on \(p.machineName ?? "the machine")"
         case "created": return "Created"
         default: return p.state.replacingOccurrences(of: "_", with: " ")
         }

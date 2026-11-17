@@ -8,7 +8,7 @@ settings:
     PRODUCT_NAME: EdgeCoder
     SWIFT_VERSION: "5.0"
     # Bump CURRENT_PROJECT_VERSION for every TestFlight upload (App Store Connect refuses a repeat).
-    CURRENT_PROJECT_VERSION: 33
+    CURRENT_PROJECT_VERSION: 34
     MARKETING_VERSION: 1.0.0
 targets:
   EdgeCoderIOS:
@@ -41,7 +41,7 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleIconName: AppIcon
         EdgeCoderPurchaseMode: $(EDGECODER_PURCHASE_MODE)
-        NSBluetoothAlwaysUsageDescription: EdgeCoder uses Bluetooth to share your device's AI compute with nearby Mac nodes when internet is unavailable, enabling local AI task execution without a coordinator.
+        NSBluetoothAlwaysUsageDescription: EdgeCoder uses Bluetooth to share your device's AI compute with nearby machines when internet is unavailable, enabling local AI task execution without a coordinator.
         NSBluetoothPeripheralUsageDescription: EdgeCoder advertises as a Bluetooth peripheral to allow nearby devices to discover and route tasks.
         NSLocalNetworkUsageDescription: EdgeCoder runs a local HTTP server and connects to mesh peers on your network for P2P task routing and execution.
         BGTaskSchedulerPermittedIdentifiers:
@@ -104,6 +104,7 @@ targets:
       - path: EdgeCoderIOS/Core/Theme.swift
       - path: EdgeCoderIOS/Shared/NetworkBadge.swift
       - path: EdgeCoderIOS/Bots/BotsModels.swift
+      - path: EdgeCoderIOS/Machines/MachinesModels.swift
       - path: EdgeCoderIOS/Chat/ChatModels.swift
     settings:
       base:
