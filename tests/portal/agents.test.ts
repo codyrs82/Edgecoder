@@ -210,6 +210,7 @@ describe("account routes for API keys (/v1/account)", () => {
     const made = await app.inject({ method: "POST", url: "/v1/account/reservations", headers: auth, payload: { computeClass: "gpu", minutes: 30 } });
     expect(made.json().reservation.id).toBe("res-2");
     expect((await app.inject({ method: "POST", url: "/v1/account/reservations", headers: auth, payload: { computeClass: "tpu", minutes: 30 } })).statusCode).toBe(400);
+    expect((await app.inject({ method: "POST", url: "/v1/account/reservations", headers: auth, payload: { computeClass: "gpu", minutes: 2 } })).statusCode).toBe(400);
     const cancel = await app.inject({ method: "POST", url: "/v1/account/reservations/cancel", headers: auth, payload: { reservationId: "res-2" } });
     expect(cancel.json().ok).toBe(true);
     expect(c.seen.every((s) => s.token === "svc-token" && s.body.accountId === accountId)).toBe(true);

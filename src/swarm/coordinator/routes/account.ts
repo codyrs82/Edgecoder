@@ -218,7 +218,9 @@ export function registerAccountRoutes(app: CoordinatorApp): void {
 
   /** Reserve one agent of a class for some minutes, paid now in cSats (unused time comes back). */
   app.post("/account/reservations", async (req, reply) => {
-    const body = reserveSchema.parse(req.body);
+    const parsed = reserveSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return reply.code(400).send({ error: "invalid_reservation", minMinutes: RESERVATION_MIN_MINUTES, maxMinutes: RESERVATION_MAX_MINUTES });
+    const body = parsed.data;
     const caller = await callerAccount(req, "/account/reservations", body.accountId);
     if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
     const accountId = caller.accountId;

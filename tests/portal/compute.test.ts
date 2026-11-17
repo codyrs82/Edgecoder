@@ -126,6 +126,8 @@ describe("portal compute routes", () => {
     expect(broke.statusCode).toBe(402);
     expect(broke.json()).toEqual({ error: "insufficient_credits", neededCSats: 1800 });
     expect((await app.inject({ method: "POST", url: "/portal/api/compute/reservations", headers: auth, payload: { computeClass: "tpu", minutes: 30 } })).statusCode).toBe(400);
+    // Below the coordinator's 5-minute minimum: refused here, not a 500 from the coordinator.
+    expect((await app.inject({ method: "POST", url: "/portal/api/compute/reservations", headers: auth, payload: { computeClass: "gpu", minutes: 2 } })).statusCode).toBe(400);
     const cancelled = await app.inject({ method: "POST", url: "/portal/api/compute/reservations/cancel", headers: auth, payload: { reservationId: "res-1" } });
     expect(cancelled.json().reservation.refundCSats).toBe(3);
     expect(coord.seen.filter((s) => s.path === "/account/reservations/cancel").at(-1)!.body).toEqual({ reservationId: "res-1", accountId: "acct-u1" });
