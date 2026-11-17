@@ -3,6 +3,9 @@
 // live REGTEST network (portal edgecoder.io, seeds edgecoder-seed / -eu, LND edgecoder-lnd-test).
 // See docs/going-to-mainnet.md ("Regtest money loop"). Refuses to run when a seed reports a network
 // other than regtest. Prints ids, amounts, hashes and statuses only; never tokens, keys or macaroons.
+// ML_NETWORK=signet runs buy / spend / transfer / withdraw / payouts / check against the signet
+// coordinators instead: their node is edgecoder-lnd-signet and the Mutinynet faucet is the outside
+// payer (buy) and payee (withdraw, revenue). lnurl-up and the payee-node commands stay regtest only.
 //
 //   node scripts/regtest-money-loop.mjs <command> [args]       (run dir: .money-loop/<runId>/)
 //   preflight                          networks, pause, reconciliation, nodes, LNURL app
@@ -30,7 +33,7 @@ import { mkdirSync, writeFileSync, appendFileSync, readFileSync, existsSync } fr
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
-import { HERE, COORDS, SEEDS, LNURL_APP, LNURL_HOST, admin, api, portal, seed, lncli, lndMachine, fly, log, sleep, http, lnurlAdmin, hookUrl } from "./regtest-money-loop/lib.mjs";
+import { HERE, COORDS, SEEDS, LNURL_APP, LNURL_HOST, NETWORK, INVOICE_RE, admin, api, portal, seed, lncli, lndMachine, fly, log, sleep, http, lnurlAdmin, hookUrl, faucetPay, faucetInvoice } from "./regtest-money-loop/lib.mjs";
 
 const [cmd, ...args] = process.argv.slice(2);
 const RUNS = join(HERE, "..", "..", ".money-loop");
@@ -44,16 +47,29 @@ async function assertRegtest() {
   for (const w of ["us", "eu"]) {
     const r = await http(COORDS[w] + "/health/runtime").catch(() => null);
     const net = r?.json?.bitcoinNetwork ?? r?.json?.network ?? r?.json?.economy?.network;
-    if (net && net !== "regtest") throw new Error(`${w} coordinator reports ${net}; this script is regtest only`);
+    if (net && net !== NETWORK) throw new Error(`${w} coordinator reports ${net}; this run is ${NETWORK} only`);
   }
   const info = JSON.parse(await lncli("hub", "getinfo"));
-  if (!info.chains?.some((c) => c.network === "regtest")) throw new Error("hub node is not on regtest");
+  if (!info.chains?.some((c) => c.network === NETWORK)) throw new Error(`hub node is not on ${NETWORK}`);
   return info;
 }
+const regtestOnly = (what) => { if (NETWORK !== "regtest") throw new Error(`${what} is regtest only`); };
 
 async function payeeInvoice(sats, memo) {
+  if (NETWORK === "signet") return faucetInvoice(sats);
   const r = JSON.parse(await lncli("payee", `addinvoice --amt ${Math.floor(sats)} --memo ${memo}`));
   return { bolt11: r.payment_request, hash: r.r_hash };
+}
+
+/** Pay a coordinator invoice from outside: the regtest payee node, or on signet the faucet. */
+async function payFromOutside(bolt11) {
+  if (!INVOICE_RE.test(bolt11 ?? "")) throw new Error(`refusing to pay a non-${NETWORK} invoice`);
+  if (NETWORK === "signet") {
+    const r = await faucetPay(bolt11);
+    return { status: r.status === "OK" ? "SENT_BY_FAUCET" : r.status, reason: r.reason };
+  }
+  const pay = await lncli("payee", `payinvoice --force --json ${bolt11}`).catch((e) => e.stdout ?? String(e));
+  try { return JSON.parse(pay.slice(pay.indexOf("{"))); } catch { return {}; /* lncli prints progress lines */ }
 }
 
 const MODELS = [
@@ -75,9 +91,12 @@ const commands = {
   async preflight() {
     const hub = await assertRegtest();
     const out = { hub: { alias: hub.alias, synced: hub.synced_to_chain, height: hub.block_height, channels: hub.num_active_channels } };
+    if (NETWORK === "signet") out.hubChannels = JSON.parse(await lncli("hub", "listchannels")).channels.map((c) => ({ capacity: +c.capacity, local: +c.local_balance, remote: +c.remote_balance, active: c.active }));
+    else {
     const payee = JSON.parse(await lncli("payee", "getinfo"));
     out.payee = { alias: payee.alias, synced: payee.synced_to_chain, channels: payee.num_active_channels };
     out.payeeChannels = JSON.parse(await lncli("payee", "listchannels")).channels.map((c) => ({ capacity: +c.capacity, local: +c.local_balance, remote: +c.remote_balance, active: c.active }));
+    }
     for (const w of ["us", "eu"]) {
       const p = await admin(w, "/admin/payouts/pause");
       const rc = await admin(w, "/admin/payouts/reconciliation");
@@ -90,6 +109,7 @@ const commands = {
   async "lnurl-up"(org = "edgecoder") {
     // Regtest Lightning-address server + webhook catcher (scripts/regtest-money-loop/lnurl). The payee's
     // invoice macaroon and TLS cert go from the payee machine straight into Fly secrets.
+    regtestOnly("lnurl-up");
     await assertRegtest();
     const apps = JSON.parse(await fly(["apps", "list", "--json"]));
     if (!apps.some((a) => (a.Name ?? a.name) === LNURL_APP)) await fly(["apps", "create", LNURL_APP, "-o", org]);
@@ -160,9 +180,7 @@ const commands = {
     if (!t.json?.intentId) throw new Error(`topup failed: ${t.status} ${JSON.stringify(t.json)}`);
     const id = t.json.intentId;
     log("intent", id, "status", (await api(buyer, `/v1/account/topup/${id}`)).json?.status);
-    const pay = await lncli("payee", `payinvoice --force --json ${t.json.invoice}`).catch((e) => e.stdout ?? String(e));
-    let payJ = {};
-    try { payJ = JSON.parse(pay.slice(pay.indexOf("{"))); } catch { /* lncli prints progress lines */ }
+    const payJ = await payFromOutside(t.json.invoice);
     let st;
     for (let i = 0; i < 30; i++) {
       st = (await api(buyer, `/v1/account/topup/${id}`)).json;
@@ -170,7 +188,7 @@ const commands = {
       await sleep(3000);
     }
     const after = (await api(buyer, "/v1/account")).json;
-    const ev = { buyer, accountId: after.accountId, intentId: id, amountSats: Number(sats), intent: st, payee: { status: payJ.status, paymentHash: payJ.payment_hash, feeMsat: payJ.fee_msat }, cSatsBefore: before.cSats, cSatsAfter: after.cSats, purchaseRow: after.recent?.find((r) => String(r.reason ?? "").includes(id)) };
+    const ev = { network: NETWORK, buyer, accountId: after.accountId, intentId: id, amountSats: Number(sats), intent: st, payer: { status: payJ.status, reason: payJ.reason, paymentHash: payJ.payment_hash, feeMsat: payJ.fee_msat }, cSatsBefore: before.cSats, cSatsAfter: after.cSats, purchaseRow: after.recent?.find((r) => String(r.reason ?? "").includes(id)) };
     save(`buy-${id}`, "buy.json", ev);
     print(ev);
   },

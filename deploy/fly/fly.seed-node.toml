@@ -14,13 +14,13 @@ primary_region = "ord"
   # Re-execute a sample of deterministic (code) results so fake work is caught and not paid.
   RESULT_VERIFICATION_RATE = "0.05"
   # #43: production requires LIGHTNING_PROVIDER=lnd|cln (+ LND_*/CLN_* via fly secrets).
-  # Regtest phase: payouts run against the test Lightning hub (deploy/lnd-test) over Fly 6PN.
-  # LND_MACAROON_HEX and LND_TLS_CERT_BASE64 are Fly secrets (deploy/lnd-test/connect-seeds.sh).
+  # Signet phase: payouts run against the Mutinynet node (deploy/lnd-signet) over Fly 6PN.
+  # LND_MACAROON_HEX and LND_TLS_CERT_BASE64 are Fly secrets (deploy/lnd-signet/connect-seeds.sh).
   # Before mainnet follow docs/going-to-mainnet.md: this URL, the secrets and BITCOIN_NETWORK all change.
   ECONOMY_PAYMENTS_ENABLED = "true"
   LIGHTNING_PROVIDER = "lnd"
-  LND_REST_URL = "https://hub.process.edgecoder-lnd-test.internal:8080"
-  BITCOIN_NETWORK = "regtest"
+  LND_REST_URL = "https://edgecoder-lnd-signet.internal:8080"
+  BITCOIN_NETWORK = "signet"
   PAYOUT_MAX_SINGLE_SATS = "100000"
   PAYOUT_MAX_ACCOUNT_DAILY_SATS = "500000"
   PAYOUT_MAX_GLOBAL_DAILY_SATS = "2000000"
@@ -38,8 +38,8 @@ primary_region = "ord"
   # Every agent build since 1.4.7 signs its /mesh/ws bind; unsigned binds are refused.
   MESH_WS_REQUIRE_SIGNED = "true"
   # Fee-pool payouts for this seed's infrastructure go to the Lightning node it pays out from.
-  # Regtest: the edgecoder-lnd-test hub. Changes with LND_REST_URL at mainnet (docs/going-to-mainnet.md).
-  INFRA_HOST_LIGHTNING_NODE_ID = "03787c6d8d1b0a4b2abb79f4ba18cf89e333f59911cc84c69e06132b78c3f19878"
+  # Signet: the edgecoder-lnd-signet node. Changes with LND_REST_URL at mainnet (docs/going-to-mainnet.md).
+  INFRA_HOST_LIGHTNING_NODE_ID = "02e8922fa5b8252f70e983fba2aa34a20347fd9fc9fc151203267478189d2863ce"
 
 [http_service]
   internal_port = 4301
