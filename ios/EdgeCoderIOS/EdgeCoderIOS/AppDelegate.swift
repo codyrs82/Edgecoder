@@ -50,7 +50,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         let runtimeTask = Task {
             // Keep heartbeating until iOS cancels the background task.
             while !Task.isCancelled {
-                if await controller.state == .running {
+                if controller.state == .running {
                     // Heartbeat is sent inside the runtime loop; just keep alive.
                 }
                 try? await Task.sleep(nanoseconds: 15_000_000_000)
@@ -73,7 +73,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
 
         let controller = SwarmRuntimeController.shared
         let heartbeatTask = Task {
-            if await controller.state == .running {
+            if controller.state == .running {
                 // Heartbeat is handled by the runtime loop.
             }
         }

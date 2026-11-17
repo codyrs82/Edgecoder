@@ -1,7 +1,7 @@
 import Foundation
 
 /// Where a reply's model calls ran, as the footer under a reply shows it: a Swift port of
-/// desktop/src/lib/served.ts (the terminal prints the same line, src/terminal/render.ts). Used when
+/// src/common/served.ts (= desktop/src/lib/served.ts; the terminal prints the same line). Used when
 /// a chat's done event carries per-call `calls`; otherwise the footer is ChatFailures.replyFooter.
 struct ServedInfo: Codable, Equatable {
     var label: String

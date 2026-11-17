@@ -234,7 +234,6 @@ struct SettingsView: View {
         case .running: return Theme.green
         case .paused: return Theme.yellow
         case .stopped: return Theme.textMuted
-        default: return Theme.textMuted
         }
     }
 

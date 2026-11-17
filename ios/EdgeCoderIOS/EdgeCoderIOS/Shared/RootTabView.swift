@@ -108,7 +108,7 @@ private struct LoginSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    Text("Sign in to access swarm network, wallet, and stats.")
+                    Text("Sign in to chat on your machines and the EdgeCoder network, and to see your bots and wallet.")
                         .font(.subheadline)
                         .foregroundColor(Theme.textSecondary)
                 }

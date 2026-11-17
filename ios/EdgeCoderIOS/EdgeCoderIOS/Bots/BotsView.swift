@@ -9,6 +9,10 @@ struct BotsView: View {
     @State private var loading = false
     @State private var error = ""
     @State private var loaded = false
+    @State private var pending: [PendingBot] = []
+    @State private var targets: [BotTarget] = []
+    @State private var canCreate = false
+    @State private var showNew = false
 
     private var portal: URL { APIClient.shared.config.portalBaseURL }
 
@@ -26,6 +30,16 @@ struct BotsView: View {
                              ? "Bots run on the EdgeCoder desktop app. Sign in there with this account and they show up here."
                              : "Create a bot in the EdgeCoder desktop app on one of your machines and it shows up here.")
                             .font(.footnote).foregroundColor(Theme.textSecondary)
+                    }
+                }
+                if !pending.isEmpty {
+                    Section("New bots") {
+                        ForEach(pending) { p in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(p.name).font(.subheadline.weight(.medium)).foregroundColor(Theme.textPrimary)
+                                Text(BotsFormat.pendingState(p)).font(.caption).foregroundColor(p.state == "failed" ? Theme.red : Theme.textSecondary)
+                            }
+                        }
                     }
                 }
                 ForEach(machines) { m in
@@ -52,6 +66,17 @@ struct BotsView: View {
             }
             .overlay { if loading && !loaded { ProgressView() } }
             .navigationTitle("Bots")
+            .toolbar {
+                if sessionStore.isAuthenticated && canCreate && !targets.isEmpty {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button { showNew = true } label: { Image(systemName: "plus") }
+                            .accessibilityLabel("New bot")
+                    }
+                }
+            }
+            .sheet(isPresented: $showNew) {
+                NewBotSheet(targets: targets) { Task { await load() } }
+            }
             .refreshable { await load() }
             .task(id: sessionStore.isAuthenticated) { await load() }
         }
@@ -65,6 +90,9 @@ struct BotsView: View {
             let r: BotsListResponse = try await APIClient.shared.request(baseURL: portal, path: "/portal/api/bots")
             machines = r.machines.sorted { ($0.online ? 0 : 1, $0.machineName) < ($1.online ? 0 : 1, $1.machineName) }
             bots = r.bots
+            pending = r.pending ?? []
+            targets = r.targets ?? []
+            canCreate = r.canCreate ?? false
             error = ""
         } catch {
             self.error = "Couldn't load your bots: \(error.localizedDescription)"
@@ -274,5 +302,73 @@ extension Color {
     init?(hex: String?) {
         guard let hex, hex.hasPrefix("#"), hex.count == 7, let v = UInt32(hex.dropFirst(), radix: 16) else { return nil }
         self.init(red: Double((v >> 16) & 0xff) / 255, green: Double((v >> 8) & 0xff) / 255, blue: Double(v & 0xff) / 255)
+    }
+}
+
+/// Create a bot from the phone (#414): it waits on the portal until one of your Macs takes it, and
+/// its folder is picked on the Mac.
+private struct NewBotSheet: View {
+    let targets: [BotTarget]
+    let onCreated: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var role = ""
+    @State private var instructions = ""
+    @State private var target: String?
+    @State private var requestId = UUID().uuidString
+    @State private var saving = false
+    @State private var error = ""
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Name", text: $name)
+                    TextField("Role (optional)", text: $role)
+                }
+                Section("Instructions") {
+                    TextField("What should this bot do?", text: $instructions, axis: .vertical).lineLimit(4...10)
+                }
+                Section {
+                    Picker("Machine", selection: $target) {
+                        Text("First Mac available").tag(String?.none)
+                        ForEach(targets) { t in
+                            Text(t.machineName + (t.online ? "" : " (offline)")).tag(Optional(t.agentId))
+                        }
+                    }
+                } footer: {
+                    Text("The bot is created on that Mac the next time EdgeCoder runs there. You pick its project folder on the Mac.")
+                }
+                if !error.isEmpty { Text(error).foregroundColor(Theme.red) }
+            }
+            .navigationTitle("New bot")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(saving ? "Creating…" : "Create") { Task { await create() } }
+                        .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || saving)
+                }
+            }
+        }
+    }
+
+    private func create() async {
+        saving = true
+        defer { saving = false }
+        let body = NewBotRequest(requestId: requestId, agentId: target,
+                                 bot: .init(name: String(name.trimmingCharacters(in: .whitespaces).prefix(60)), role: String(role.prefix(80)), instructions: String(instructions.prefix(8_000))))
+        do {
+            let r = try await APIClient.shared.requestRaw(baseURL: APIClient.shared.config.portalBaseURL, path: "/portal/api/bots/new", method: "POST", body: body)
+            let res = try? JSONDecoder().decode(BotCommandResponse.self, from: r.data)
+            guard r.status == 200, res?.ok == true else {
+                error = BotsFormat.commandError(res?.error, message: res?.message)
+                return
+            }
+            onCreated()
+            dismiss()
+        } catch {
+            self.error = "Couldn't create the bot: \(error.localizedDescription)"
+        }
     }
 }

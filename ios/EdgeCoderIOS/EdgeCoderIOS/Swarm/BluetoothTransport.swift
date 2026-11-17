@@ -163,7 +163,7 @@ final class BluetoothTransport: NSObject, ObservableObject {
             appendBtEvent("BT: malformed request received.")
             return
         }
-        let maxTokens = json["maxTokens"] as? Int ?? 512
+        // json["maxTokens"] is not used: the local model has its own limit.
         appendBtEvent("BT: inference request \(requestId.prefix(8))…")
 
         // Track the incoming task so the IDE view can show it immediately
@@ -178,7 +178,7 @@ final class BluetoothTransport: NSObject, ObservableObject {
                 if let data = try? JSONSerialization.data(withJSONObject: errResponse) {
                     await self.sendResponse(requestId: requestId, data: data)
                 }
-                await self.completeIDETask(id: requestId, output: "[no model loaded]", ok: false, durationMs: 0)
+                self.completeIDETask(id: requestId, output: "[no model loaded]", ok: false, durationMs: 0)
                 return
             }
             await mm.runInference(prompt: prompt)
@@ -195,14 +195,14 @@ final class BluetoothTransport: NSObject, ObservableObject {
             if let responseData = try? JSONSerialization.data(withJSONObject: response) {
                 await self.sendResponse(requestId: requestId, data: responseData)
             }
-            await self.completeIDETask(
+            self.completeIDETask(
                 id: requestId,
                 output: output,
                 ok: ok,
                 durationMs: durationMs
             )
-            await self.inFlightTasks.removeValue(forKey: requestId)
-            await self.appendBtEvent("BT: request \(requestId.prefix(8))… complete (\(durationMs)ms).")
+            self.inFlightTasks.removeValue(forKey: requestId)
+            self.appendBtEvent("BT: request \(requestId.prefix(8))… complete (\(durationMs)ms).")
         }
         inFlightTasks[requestId] = task
     }

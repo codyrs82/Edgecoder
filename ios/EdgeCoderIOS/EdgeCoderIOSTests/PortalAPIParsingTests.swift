@@ -78,4 +78,31 @@ final class PortalAPIParsingTests: XCTestCase {
         XCTAssertEqual(PurchasePolicy.effective(mode: .linkOutUS, storefrontCountry: nil), .none)
         XCTAssertEqual(PurchasePolicy.effective(mode: .none, storefrontCountry: "USA"), .none)
     }
+
+    func testDoneEventCarriesUsageCalls() {
+        let line = #"data: {"done":true,"compute":"Network · best fit","cSatsSpent":3.4,"usage":{"cSats":3.4,"where":"Network · best fit","calls":[{"cSats":3.4,"model":"network/qwen3-coder:30b","served":{"label":"m1","own":false,"computeClass":"gpu","tier":null,"hardware":"Datacenter GPU (x)","gpu":"2× NVIDIA A16","region":"us-central","city":"Chicago","country":"US","promptTokens":24800,"promptMs":81000,"outputTokens":312,"genMs":6500}}]}}"#
+        guard case let .done(cSats, compute, calls)? = PortalChatParser.events(fromLine: line).first else { return XCTFail("no done") }
+        XCTAssertEqual(cSats, 3.4)
+        XCTAssertEqual(compute, "Network · best fit")
+        XCTAssertEqual(ServedFormatter.servedLine(calls), "qwen3-coder:30b · Datacenter GPU 2×A16 · Chicago · read 24.8k tok in 81 s · wrote 312 tok in 6.5 s · 3.4 cSats")
+    }
+
+    func testWithdrawSteps() throws {
+        func w(_ json: String) throws -> WithdrawResponse { try JSONDecoder().decode(WithdrawResponse.self, from: Data(json.utf8)) }
+        XCTAssertEqual(WithdrawStep.classify(status: 403, response: try w(#"{"error":"two_factor_required","detail":"Enter the code from your authenticator app (or a recovery code) to continue.","methods":["totp","passkey"]}"#)),
+                       .twoFactorCode("Enter the code from your authenticator app (or a recovery code) to continue."))
+        XCTAssertEqual(WithdrawStep.classify(status: 403, response: try w(#"{"error":"two_factor_required","detail":"Confirm with your passkey to continue.","methods":["passkey"]}"#)), .passkeyOnWeb)
+        XCTAssertEqual(WithdrawStep.classify(status: 423, response: try w(#"{"ok":false,"code":"payout_destination_cooling_off","unlocksAtMs":1,"detail":"A new payout address was added."}"#)), .held("A new payout address was added."))
+        XCTAssertEqual(WithdrawStep.classify(status: 202, response: try w(#"{"verificationRequired":true,"challengeId":"c1","amountMsat":1000}"#)), .other)
+    }
+
+    func testBotsListWithPendingAndNewBotBody() throws {
+        let json = ##"{"machines":[],"bots":[],"pending":[{"requestId":"req-12345678","botId":"web-1","name":"Docs","role":"","color":"#6e56cf","state":"waiting","target":null,"machineName":null,"createdAtMs":1}],"targets":[{"agentId":"a1","machineName":"Mac","online":true,"canCreate":true}],"canCreate":true}"##
+        let r = try JSONDecoder().decode(BotsListResponse.self, from: Data(json.utf8))
+        XCTAssertEqual(r.pending?.first.map(BotsFormat.pendingState), "Waiting for a Mac to come online")
+        XCTAssertEqual(r.targets?.first?.agentId, "a1")
+        let body = try JSONSerialization.jsonObject(with: JSONEncoder().encode(NewBotRequest(requestId: "req-12345678", agentId: nil, bot: .init(name: "Docs", role: "", instructions: "")))) as? [String: Any]
+        XCTAssertTrue(body?["agentId"] is NSNull)
+        XCTAssertEqual((body?["bot"] as? [String: Any])?["name"] as? String, "Docs")
+    }
 }

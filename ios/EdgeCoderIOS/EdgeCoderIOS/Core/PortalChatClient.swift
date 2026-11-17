@@ -49,11 +49,14 @@ enum PortalChatParser {
             out.append(.error(message: e, code: obj["code"] as? String, httpStatus: (obj["httpStatus"] as? NSNumber)?.intValue))
         }
         if obj["done"] as? Bool == true {
+            // #415/#416: the per-call usage rides in `usage.calls` (src/portal/reply-usage.ts).
             var calls: [CallUsage]?
-            if let raw = obj["calls"], let d = try? JSONSerialization.data(withJSONObject: raw) {
+            let usage = obj["usage"] as? [String: Any]
+            if let raw = usage?["calls"] ?? obj["calls"], let d = try? JSONSerialization.data(withJSONObject: raw) {
                 calls = try? JSONDecoder().decode([CallUsage].self, from: d)
             }
-            out.append(.done(cSatsSpent: (obj["cSatsSpent"] as? NSNumber)?.doubleValue, compute: obj["compute"] as? String, calls: calls))
+            out.append(.done(cSatsSpent: (obj["cSatsSpent"] as? NSNumber)?.doubleValue ?? (usage?["cSats"] as? NSNumber)?.doubleValue,
+                             compute: (obj["compute"] as? String) ?? (usage?["where"] as? String), calls: calls))
         }
         if let c = obj["content"] as? String, !c.isEmpty { out.append(.content(c)) }
         return out

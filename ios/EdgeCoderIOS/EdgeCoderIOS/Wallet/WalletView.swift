@@ -112,6 +112,9 @@ struct WalletView: View {
     @State private var challengeDetail = ""
     @State private var withdrawMessage: (ok: Bool, text: String)?
     @State private var withdrawing = false
+    /// Two-factor step-up (#420): asked for when the portal answers two_factor_required.
+    @State private var needsTwoFactor = false
+    @State private var twoFactorCode = ""
 
     enum Step { case amount, onchain, invoice, paid, expired }
 
@@ -630,6 +633,14 @@ struct WalletView: View {
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
                 .textFieldStyle(.roundedBorder)
                 .accessibilityLabel("Lightning payment code")
+            if needsTwoFactor {
+                TextField("Authenticator code", text: $twoFactorCode)
+                    .keyboardType(.numbersAndPunctuation).textContentType(.oneTimeCode).textFieldStyle(.roundedBorder)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .accessibilityLabel("Two-factor code")
+                Text("Two-factor authentication is on: enter the current code from your authenticator app, or a recovery code.")
+                    .font(.caption).foregroundColor(Theme.textSecondary)
+            }
             if challengeId != nil {
                 Text(challengeDetail).font(.footnote).foregroundColor(Theme.textSecondary)
                 HStack {
@@ -911,11 +922,31 @@ struct WalletView: View {
             body["challengeId"] = id
             body["emailCode"] = withdrawCode.trimmingCharacters(in: .whitespaces)
         }
+        let tfa = twoFactorCode.trimmingCharacters(in: .whitespaces)
+        if needsTwoFactor {
+            guard !tfa.isEmpty else { withdrawMessage = (false, "Enter the code from your authenticator app."); return }
+            body["twoFactorCode"] = tfa
+        }
         withdrawing = true
         defer { withdrawing = false }
         do {
             let r = try await APIClient.shared.requestRaw(baseURL: portal, path: "/wallet/payouts/withdraw", method: "POST", body: body)
             let w = try? JSONDecoder().decode(WithdrawResponse.self, from: r.data)
+            switch WithdrawStep.classify(status: r.status, response: w) {
+            case .twoFactorCode(let detail):
+                needsTwoFactor = true
+                withdrawMessage = (false, detail)
+                return
+            case .passkeyOnWeb:
+                withdrawMessage = (false, "This account confirms withdrawals with a passkey. Withdraw on edgecoder.io (Settings > Wallet) for now.")
+                return
+            case .held(let detail):
+                challengeId = nil
+                withdrawMessage = (false, detail)
+                return
+            case .other:
+                break
+            }
             if r.status == 202, w?.verificationRequired == true {
                 challengeId = w?.challengeId
                 challengeDetail = "\(w?.detail ?? "We emailed you a code.") Amount: \(WalletFormat.msat(w?.amountMsat ?? 0)) sats."
@@ -924,8 +955,10 @@ struct WalletView: View {
             }
             challengeId = nil
             if (200...299).contains(r.status), w?.ok == true {
-                withdrawMessage = (true, "Paid \(WalletFormat.msat(w?.payout?.amountMsat ?? 0)) sats to your wallet.")
+                withdrawMessage = (true, "Paid \(WalletFormat.msat(w?.payout?.amountMsat ?? 0)) sats to your wallet. A receipt is on its way by email.")
                 bolt11 = ""
+                twoFactorCode = ""
+                needsTwoFactor = false
             } else {
                 withdrawMessage = (false, w?.detail ?? "Withdrawal failed (\(w?.code ?? w?.error ?? "status \(r.status)")).")
             }
@@ -935,3 +968,4 @@ struct WalletView: View {
         }
     }
 }
+

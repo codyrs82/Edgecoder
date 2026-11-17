@@ -140,10 +140,11 @@ Core smoke checklist (signed in to a mainnet account with a desktop machine onli
   network (footer "N cSats · Network · best fit"); an account with 0 cSats shows "Couldn't run: out of cSats",
   the set-aside detail and "Signed in as ...", with Retry; no Buy button in a Release build.
 - Network badge: "mainnet" in the chat header and "Bitcoin mainnet · real sats" in the wallet.
-- Bots: list by machine, open a bot, message it, Pause / Resume, approve or deny a pending call; a view-only or
-  offline machine is read-only.
-- Wallet: balance, activity, prices, earnings; withdraw asks for the emailed code and shows the coordinator's
-  limits (including the early-access daily payout cap). Debug builds also show Buy cSats with the early-access
+- Bots: list by machine, New bot (+) waits for a Mac (#414), open a bot, message it, Pause / Resume, approve or deny
+  a pending call; a view-only or offline machine is read-only.
+- Wallet: balance, activity, prices, earnings; withdraw asks for the emailed code, and with 2FA on (#420) for the
+  authenticator code (passkey-only 2FA points to the web); a locked account or a cooling-off payout address shows
+  the portal's reason; the coordinator's limits (including the early-access daily payout cap) are shown. Debug builds also show Buy cSats with the early-access
   limits and the Lightning invoice (QR, copy, "Open in wallet" `lightning:` link).
 - Settings: Delete account... opens a prefilled deletion request to support@edgecoder.io.
 - On-device runtime / BLE mesh: start, pause, stop; nearby Mac discovery (physical devices only).
@@ -171,7 +172,8 @@ See step 0.5 (archive, export with `ExportOptions.plist`, upload) and 0.6 (TestF
 
 ## 7) Known v1 constraints (deferred from the first TestFlight)
 
-- Creating bots from the phone (the web create from #414 is not on main yet); bot settings edits; bot history and memory views.
+- Bot settings edits; bot history and memory views (create, message, pause/resume and approvals are in).
+- Passkey-only two-factor step-up and payout-address changes: the app sends those to edgecoder.io (TOTP step-up works in the app).
 - Picking a specific network compute class or a reserved machine in chat (Auto and a named network model only).
 - Syncing the portal's conversation list into the app (the app keeps its own history; replies still use the
   portal conversation for context).

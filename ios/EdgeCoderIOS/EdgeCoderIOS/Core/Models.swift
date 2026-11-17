@@ -343,10 +343,39 @@ struct WithdrawResponse: Decodable {
     let code: String?
     let error: String?
     let payout: Payout?
+    /// Two-factor step-up (#420): the methods the account can use ("totp", "passkey").
+    let methods: [String]?
+    /// Account locked or payout destination cooling off: when withdrawals open again.
+    let unlocksAtMs: Double?
 }
 
 struct PayoutDestinationView: Decodable {
     struct Destination: Decodable { let kind: String; let destination: String }
     let network: String
     let destination: Destination?
+}
+
+/// What a withdrawal answer asks for next (src/portal/routes/payouts.ts, account-security.ts #420).
+enum WithdrawStep: Equatable {
+    /// 2FA is on with an authenticator: ask for the code and send it with both withdraw steps.
+    case twoFactorCode(String)
+    /// The account's second factor is passkey-only: the web does the step-up.
+    case passkeyOnWeb
+    /// Locked, or a new payout address is cooling off.
+    case held(String)
+    case other
+
+    static func classify(status: Int, response w: WithdrawResponse?) -> WithdrawStep {
+        let code = w?.error ?? w?.code
+        switch code {
+        case "two_factor_required", "two_factor_code_invalid", "two_factor_rate_limited":
+            let methods = w?.methods ?? ["totp"]
+            if !methods.contains("totp") { return .passkeyOnWeb }
+            return .twoFactorCode(w?.detail ?? "Enter the code from your authenticator app to continue.")
+        case "account_locked", "payout_destination_cooling_off":
+            return .held(w?.detail ?? "Withdrawals are paused on this account right now.")
+        default:
+            return status == 423 ? .held(w?.detail ?? "Withdrawals are paused on this account right now.") : .other
+        }
+    }
 }
