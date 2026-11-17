@@ -20,8 +20,8 @@ primary_region = "cdg"
   # Before mainnet follow docs/going-to-mainnet.md: this URL, the secrets and BITCOIN_NETWORK all change.
   ECONOMY_PAYMENTS_ENABLED = "true"
   LIGHTNING_PROVIDER = "lnd"
-  LND_REST_URL = "https://edgecoder-lnd-signet.internal:8080"
-  BITCOIN_NETWORK = "signet"
+  LND_REST_URL = "https://lnd.process.edgecoder-lnd.internal:8080"
+  BITCOIN_NETWORK = "bitcoin"
   PAYOUT_MAX_SINGLE_SATS = "100000"
   PAYOUT_MAX_ACCOUNT_DAILY_SATS = "500000"
   PAYOUT_MAX_GLOBAL_DAILY_SATS = "2000000"
@@ -39,7 +39,7 @@ primary_region = "cdg"
   MESH_WS_REQUIRE_SIGNED = "true"
   # Fee-pool payouts for this seed's infrastructure go to the Lightning node it pays out from.
   # Signet: the edgecoder-lnd-signet node. Changes with LND_REST_URL at mainnet (docs/going-to-mainnet.md).
-  INFRA_HOST_LIGHTNING_NODE_ID = "02e8922fa5b8252f70e983fba2aa34a20347fd9fc9fc151203267478189d2863ce"
+  INFRA_HOST_LIGHTNING_NODE_ID = "0206e2ae0952bdbb38d4478eb0bb570ab9019eca0256a77438c6322c9df4d8b75c"
 
 [http_service]
   internal_port = 4301
