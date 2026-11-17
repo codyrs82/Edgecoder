@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/svelte";
 import ChatInput from "../src/components/ChatInput.svelte";
+import { makeZip } from "../../tests/helpers/make-zip";
 
 afterEach(() => cleanup());
 
@@ -232,10 +233,46 @@ describe("ChatInput attachments", () => {
     const input = document.querySelector('input[type="file"]') as HTMLInputElement;
     Object.defineProperty(input, "files", { configurable: true, value: [file("app.exe", "application/octet-stream")] });
     await fireEvent.change(input);
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(/only images .* text or code files and PDFs/));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("app.exe can't be attached. You can attach images (PNG, JPEG, GIF, WebP), PDFs, text, code and data files (CSV, Markdown, JSON, XML, HTML, logs…), Word, Excel and PowerPoint files, and .zip archives."));
     Object.defineProperty(input, "files", { configurable: true, value: [file("big.txt", "text/plain", "x".repeat(300 * 1024))] });
     await fireEvent.change(input);
     await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(/big.txt is 300 KB/));
+  });
+
+  it("accepts zips and Office documents; a zip's chip says how many files it holds and what will be left out", async () => {
+    const onSend = vi.fn();
+    render(ChatInput, { onSend, attach: { vision: NO, who: "Harry", savedToFolder: true } });
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    for (const e of [".zip", ".docx", ".xlsx", ".pptx", ".csv", ".md", ".json", ".rtf", ".html", ".log"]) expect(input.accept.split(",")).toContain(e);
+    const zip = makeZip([
+      ...Array.from({ length: 14 }, (_, i) => ({ name: `Ozarks/Lease ${i + 1}.pdf`, data: "x" })),
+      { name: "Ozarks/link", data: "/etc", symlink: true },
+      { name: "__MACOSX/Ozarks/._Lease 1.pdf", data: "x" },
+    ]);
+    Object.defineProperty(input, "files", {
+      configurable: true,
+      value: [new File([new Uint8Array(zip)], "Ozarks_Leases_and_ESAs.zip", { type: "application/zip" }), file("Lease.docx", "")],
+    });
+    await fireEvent.change(input);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Remove Lease.docx" })).toBeTruthy());
+    const chips = screen.getByRole("list", { name: "Attached files" });
+    expect(chips.children[0].textContent?.replace(/\s+/g, " ").trim()).toBe("Ozarks_Leases_and_ESAs.zip· 14 files");
+    expect(screen.getByTestId("attach-skipped").textContent).toBe("Ozarks_Leases_and_ESAs.zip: 1 entry will be left out (Ozarks/link: a symbolic link, left out).");
+    await fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
+    expect(onSend).toHaveBeenCalledWith("", [
+      expect.objectContaining({ name: "Ozarks_Leases_and_ESAs.zip", kind: "archive", fileCount: 14 }),
+      expect.objectContaining({ name: "Lease.docx", kind: "document" }),
+    ]);
+    expect(onSend.mock.calls[0][1][0]).not.toHaveProperty("notes");
+  });
+
+  it("refuses an encrypted zip before sending", async () => {
+    render(ChatInput, { onSend: vi.fn(), attach: { vision: YES } });
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const zip = makeZip([{ name: "secret.pdf", data: "x", encrypted: true }]);
+    Object.defineProperty(input, "files", { configurable: true, value: [new File([new Uint8Array(zip)], "s.zip", { type: "application/zip" })] });
+    await fireEvent.change(input);
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(/^s\.zip can't be attached: it is password-protected/));
   });
 
   it("with mentions too, + opens a menu: Attach files… and Mention a project file", async () => {

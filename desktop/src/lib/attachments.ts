@@ -2,8 +2,13 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 /*
- * Files attached in the composer (the + button, paste, drag and drop): images, text/code files and
- * PDFs, read in the browser and sent with the message.
+ * Files attached in the composer (the + button, paste, drag and drop): images, text/code/data files
+ * (CSV, Markdown, JSON, XML, HTML, logs…), PDFs, Word/Excel/PowerPoint documents and .zip archives,
+ * read in the browser and sent with the message.
+ *
+ * Archives and Office files are opened by the local provider (src/apps/ide/attachments.ts, with
+ * the defensive reader in src/common/zip.ts), never here: the composer only reads a zip's directory
+ * to show how many files it holds and to refuse an encrypted or ZIP64 one before sending.
  *
  * What a model gets depends on what it can take:
  *   - text/code files: always inlined into the message (fenced, with the file name);
@@ -13,7 +18,7 @@
  *     silent drop. The composer says so before you send.
  */
 
-export type AttachmentKind = "image" | "text" | "pdf";
+export type AttachmentKind = "image" | "text" | "pdf" | "archive" | "document";
 
 export interface Attachment {
   id: string;
@@ -28,10 +33,14 @@ export interface Attachment {
   text?: string;
   /** An object URL for an image's thumbnail (revoke when removed). */
   previewUrl?: string;
+  /** A zip: how many files it holds (folders and macOS junk not counted). */
+  fileCount?: number;
+  /** A zip: entries that will be left out, and why (e.g. "link: a symbolic link"). */
+  notes?: string[];
 }
 
 /** What goes over the wire with a message (no preview URL). */
-export type AttachmentPayload = Omit<Attachment, "id" | "previewUrl">;
+export type AttachmentPayload = Omit<Attachment, "id" | "previewUrl" | "notes">;
 
 export const MAX_ATTACHMENTS = 5;
 /** Per text/code file: more than this is a file for the agent to read, not to paste in. */
@@ -41,19 +50,45 @@ export const IMAGE_MAX_BYTES = 3_700_000;
 /** An image file larger than this isn't even scaled down. */
 export const IMAGE_SOURCE_MAX_BYTES = 25 * 1024 * 1024;
 export const PDF_MAX_BYTES = 10 * 1024 * 1024;
+/** A .zip (what's inside: up to 2,000 files, 25 MB each, 100 MB in all; checked by the provider). */
+export const ARCHIVE_MAX_BYTES = 50 * 1024 * 1024;
+/** A Word/Excel/PowerPoint file. */
+export const DOCUMENT_MAX_BYTES = 25 * 1024 * 1024;
+/** All of one message's attachments together. */
+export const MESSAGE_MAX_BYTES = 60 * 1024 * 1024;
 /** Images are scaled so their long edge is at most this (what vision models use anyway). */
 export const IMAGE_MAX_EDGE = 2000;
 
 const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+/** Read as text (keep in step with TEXT_EXT in src/apps/ide/attachments.ts). */
 const TEXT_EXT = new Set([
-  "txt", "md", "markdown", "csv", "tsv", "json", "jsonl", "yaml", "yml", "toml", "ini", "cfg", "conf", "env.example", "xml", "html", "htm", "css", "scss",
+  "txt", "text", "md", "markdown", "rst", "adoc", "csv", "tsv", "json", "jsonl", "ndjson", "yaml", "yml", "toml", "ini", "cfg", "conf", "properties",
+  "xml", "html", "htm", "xhtml", "css", "scss", "less", "rtf", "tex", "bib", "srt", "vtt", "ics", "vcf", "eml",
   "js", "mjs", "cjs", "jsx", "ts", "tsx", "svelte", "vue", "py", "rb", "go", "rs", "java", "kt", "swift", "c", "h", "cc", "cpp", "hpp", "cs", "php",
-  "sh", "bash", "zsh", "fish", "ps1", "sql", "graphql", "proto", "lua", "pl", "r", "dart", "scala", "ex", "exs", "erl", "hs", "ml", "tf", "hcl",
-  "log", "diff", "patch", "gitignore", "dockerfile", "makefile", "lock",
+  "sh", "bash", "zsh", "fish", "ps1", "bat", "cmd", "sql", "graphql", "proto", "lua", "pl", "r", "dart", "scala", "ex", "exs", "erl", "hs", "ml", "tf", "hcl",
+  "log", "out", "diff", "patch", "gitignore", "dockerfile", "makefile", "lock",
 ]);
+const TEXT_TYPES = new Set(["application/json", "application/xml", "application/rtf", "text/rtf", "application/x-ndjson", "application/xhtml+xml", "application/yaml", "application/x-yaml", "application/sql"]);
+/** Word, Excel and PowerPoint (the new formats are read as text; the old binary ones only saved). */
+const DOCUMENT_EXT = new Set(["docx", "docm", "xlsx", "xlsm", "pptx", "pptm", "doc", "xls", "ppt"]);
+const DOCUMENT_TYPES = new Set([
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/msword",
+  "application/vnd.ms-excel",
+  "application/vnd.ms-powerpoint",
+]);
+const ZIP_TYPES = new Set(["application/zip", "application/x-zip-compressed", "application/x-zip"]);
 
 /** The file picker's accept list. */
-export const ACCEPT = ["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/*", ...[...TEXT_EXT].map((e) => `.${e}`)].join(",");
+export const ACCEPT = [
+  "image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf", "text/*", ...TEXT_TYPES, ...DOCUMENT_TYPES, ...ZIP_TYPES,
+  ...[...TEXT_EXT, ...DOCUMENT_EXT, "zip"].map((e) => `.${e}`),
+].join(",");
+
+/** What the composer takes, for the message when a file isn't one of them. */
+export const SUPPORTED_TYPES = "images (PNG, JPEG, GIF, WebP), PDFs, text, code and data files (CSV, Markdown, JSON, XML, HTML, logs…), Word, Excel and PowerPoint files, and .zip archives";
 
 function ext(name: string): string {
   const lower = name.toLowerCase();
@@ -67,7 +102,9 @@ function ext(name: string): string {
 export function classify(file: { name: string; type: string }): AttachmentKind | null {
   if (IMAGE_TYPES.has(file.type)) return "image";
   if (file.type === "application/pdf" || ext(file.name) === "pdf") return "pdf";
-  if (file.type.startsWith("text/") || TEXT_EXT.has(ext(file.name)) || file.type === "application/json" || file.type === "application/xml") return "text";
+  if (ZIP_TYPES.has(file.type) || ext(file.name) === "zip") return "archive";
+  if (DOCUMENT_TYPES.has(file.type) || DOCUMENT_EXT.has(ext(file.name))) return "document";
+  if (file.type.startsWith("text/") || TEXT_EXT.has(ext(file.name)) || TEXT_TYPES.has(file.type)) return "text";
   if (!file.type && /\.(png|jpe?g|gif|webp)$/i.test(file.name)) return "image";
   return null;
 }
@@ -125,11 +162,67 @@ export function attachmentsText(list: AttachmentPayload[], vision: Vision, saved
     if (a.kind === "text") {
       const f = fence(a.text ?? "");
       parts.push(`Attached file ${a.name}${saved}:\n${f}\n${a.text ?? ""}\n${f}`);
+    } else if (a.kind === "archive") {
+      parts.push(`[Attached zip ${a.name}${a.fileCount !== undefined ? ` (${a.fileCount} files)` : ""}${saved}. Its contents can't be opened in this chat; say so if the request depends on them, and suggest opening a project or messaging a bot instead.]`);
+    } else if (a.kind === "document") {
+      parts.push(`[Attached document ${a.name}${saved}. It can't be read in this chat; say so if the request depends on it, and suggest opening a project or pasting the text.]`);
     } else if ((a.kind === "image" && !vision.images) || (a.kind === "pdf" && !vision.pdf)) {
       parts.push(`[Attached ${a.kind === "image" ? "image" : "PDF"} ${a.name}, ${formatBytes(a.size)}${saved}. You can't see its contents; say so if the request depends on them.]`);
     }
   }
   return parts.join("\n\n");
+}
+
+/**
+ * What's in a zip, from its central directory only (no inflating; the provider extracts it): the
+ * number of files (folders, `__MACOSX/` and `.DS_Store` not counted) and notes on entries that will
+ * be left out, or an error when it can't be opened at all (encrypted, ZIP64, not a zip).
+ */
+export function scanZip(buf: ArrayBuffer): { fileCount: number; notes: string[] } | { error: string } {
+  const v = new DataView(buf);
+  const len = buf.byteLength;
+  let eocd = -1;
+  for (let i = len - 22; i >= Math.max(0, len - 22 - 0xffff); i--) {
+    if (v.getUint32(i, true) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) return { error: "it isn't a zip file, or it is damaged" };
+  const count = v.getUint16(eocd + 10, true);
+  const cdOffset = v.getUint32(eocd + 16, true);
+  if ((eocd >= 20 && v.getUint32(eocd - 20, true) === 0x07064b50) || count === 0xffff || cdOffset === 0xffffffff) {
+    return { error: "it is a ZIP64 archive (over 4 GB or 65,535 entries), which isn't supported; split it into smaller zips" };
+  }
+  if (count > 2000) return { error: `it has ${count.toLocaleString("en-US")} entries; archives can have up to 2,000` };
+  const bytes = new Uint8Array(buf);
+  const notes: string[] = [];
+  let fileCount = 0;
+  let p = cdOffset;
+  for (let n = 0; n < count; n++) {
+    if (p + 46 > eocd || v.getUint32(p, true) !== 0x02014b50) return { error: "it is damaged (a bad central directory)" };
+    const madeBy = v.getUint16(p + 4, true);
+    const flags = v.getUint16(p + 8, true);
+    const method = v.getUint16(p + 10, true);
+    const nameLen = v.getUint16(p + 28, true);
+    const external = v.getUint32(p + 38, true);
+    const name = new TextDecoder().decode(bytes.subarray(p + 46, p + 46 + nameLen)).replace(/\\/g, "/");
+    p += 46 + nameLen + v.getUint16(p + 30, true) + v.getUint16(p + 32, true);
+    if (flags & 1) return { error: "it is password-protected (encrypted); unzip it yourself and attach the files, or zip them again without a password" };
+    const parts = name.split("/").filter(Boolean);
+    if (!parts.length || parts[0] === "__MACOSX" || parts[parts.length - 1] === ".DS_Store") continue;
+    const mode = madeBy >> 8 === 3 ? external >>> 16 : 0;
+    if ((mode & 0o170000) === 0o120000) notes.push(`${name}: a symbolic link, left out`);
+    else if (name.endsWith("/") || (mode & 0o170000) === 0o040000) continue;
+    else if (method !== 0 && method !== 8) notes.push(`${name}: compressed in a way EdgeCoder can't read, left out`);
+    else fileCount++;
+  }
+  return { fileCount, notes };
+}
+
+/** The name on an attachment's chip: a zip also says how many files it holds. */
+export function chipLabel(a: Pick<Attachment, "name" | "fileCount">): string {
+  return a.fileCount === undefined ? a.name : `${a.name} · ${a.fileCount} file${a.fileCount === 1 ? "" : "s"}`;
 }
 
 /** The short line the conversation keeps for a sent attachment (the chat history stores text only). */
@@ -191,7 +284,18 @@ export async function readAttachment(file: File): Promise<Attachment | { error: 
   const kind = classify(file);
   const name = file.name || (kind === "image" ? `pasted-image.${(file.type.split("/")[1] ?? "png").replace("jpeg", "jpg")}` : "attachment");
   const id = `att${++seq}`;
-  if (!kind) return { error: `${name}: only images (PNG, JPEG, GIF, WebP), text or code files and PDFs can be attached.` };
+  if (!kind) return { error: `${name} can't be attached. You can attach ${SUPPORTED_TYPES}.` };
+  if (kind === "archive") {
+    if (file.size > ARCHIVE_MAX_BYTES) return { error: `${name} is ${formatBytes(file.size)}; zips can be up to ${formatBytes(ARCHIVE_MAX_BYTES)}.` };
+    const buf = await readBlob(file, "buffer");
+    const scan = scanZip(buf);
+    if ("error" in scan) return { error: `${name} can't be attached: ${scan.error}.` };
+    return { id, name, kind, mediaType: file.type || "application/zip", size: file.size, data: toBase64(buf), fileCount: scan.fileCount, ...(scan.notes.length ? { notes: scan.notes } : {}) };
+  }
+  if (kind === "document") {
+    if (file.size > DOCUMENT_MAX_BYTES) return { error: `${name} is ${formatBytes(file.size)}; documents can be up to ${formatBytes(DOCUMENT_MAX_BYTES)}.` };
+    return { id, name, kind, mediaType: file.type, size: file.size, data: toBase64(await readBlob(file, "buffer")) };
+  }
   if (kind === "text") {
     if (file.size > TEXT_MAX_BYTES) return { error: `${name} is ${formatBytes(file.size)}; text files can be up to ${formatBytes(TEXT_MAX_BYTES)}. Put it in the project and mention it with @ instead.` };
     const text = await readBlob(file, "text");
@@ -219,6 +323,6 @@ export async function readAttachment(file: File): Promise<Attachment | { error: 
 }
 
 export function toPayload(a: Attachment): AttachmentPayload {
-  const { id: _id, previewUrl: _p, ...rest } = a;
+  const { id: _id, previewUrl: _p, notes: _n, ...rest } = a;
   return rest;
 }

@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { Square, ArrowUp, Plus, X, FileText, Paperclip, AtSign } from "@lucide/svelte";
+  import { Square, ArrowUp, Plus, X, FileText, FileArchive, Paperclip, AtSign } from "@lucide/svelte";
   import { tick, type Snippet } from "svelte";
-  import { ACCEPT, MAX_ATTACHMENTS, formatBytes, readAttachment, toPayload, visionNote, type Attachment, type AttachmentPayload, type Vision } from "../lib/attachments";
+  import { ACCEPT, MAX_ATTACHMENTS, MESSAGE_MAX_BYTES, chipLabel, formatBytes, readAttachment, toPayload, visionNote, type Attachment, type AttachmentPayload, type Vision } from "../lib/attachments";
   import { menu } from "../lib/menu";
   import { insertQuoteText } from "../lib/quote-selection";
 
@@ -195,14 +195,17 @@
     attachError = null;
     for (const f of files) {
       if (attached.length + reading >= MAX_ATTACHMENTS) {
-        attachError = `Up to ${MAX_ATTACHMENTS} files per message.`;
+        attachError = `Up to ${MAX_ATTACHMENTS} files per message (a zip counts as one).`;
         break;
       }
       reading++;
       try {
         const r = await readAttachment(f);
         if ("error" in r) attachError = r.error;
-        else attached = [...attached, r];
+        else if (attached.reduce((n, a) => n + a.size, 0) + r.size > MESSAGE_MAX_BYTES) {
+          attachError = `${r.name}: attachments can be up to ${formatBytes(MESSAGE_MAX_BYTES)} per message in all.`;
+          if (r.previewUrl) URL.revokeObjectURL?.(r.previewUrl);
+        } else attached = [...attached, r];
       } catch {
         attachError = `${f.name || "That file"} couldn't be read.`;
       } finally {
@@ -334,19 +337,22 @@
       {#if attached.length > 0 || reading > 0}
         <ul class="att-list" aria-label="Attached files">
           {#each attached as a (a.id)}
-            <li class="att" title="{a.name} · {formatBytes(a.size)}">
+            <li class="att" title="{chipLabel(a)} · {formatBytes(a.size)}">
               {#if a.kind === "image" && a.previewUrl}
                 <img class="thumb" src={a.previewUrl} alt="" />
               {:else}
-                <span class="att-icon" aria-hidden="true"><FileText size={14} /></span>
+                <span class="att-icon" aria-hidden="true">{#if a.kind === "archive"}<FileArchive size={14} />{:else}<FileText size={14} />{/if}</span>
               {/if}
-              <span class="att-name">{a.name}</span>
+              <span class="att-name">{a.name}</span>{#if a.fileCount !== undefined}<span class="att-count">· {a.fileCount} file{a.fileCount === 1 ? "" : "s"}</span>{/if}
               <button type="button" class="icon-btn icon-btn--sm" aria-label={`Remove ${a.name}`} title="Remove" onclick={() => removeAttachment(a.id)}><X size={12} /></button>
             </li>
           {/each}
           {#if reading > 0}<li class="att reading" aria-live="polite">Reading…</li>{/if}
         </ul>
       {/if}
+      {#each attached.filter((a) => a.notes?.length) as a (a.id)}
+        <p class="att-note" data-testid="attach-skipped">{a.name}: {a.notes!.length} {a.notes!.length === 1 ? "entry" : "entries"} will be left out ({a.notes!.slice(0, 3).join("; ")}{a.notes!.length > 3 ? "; …" : ""}).</p>
+      {/each}
       {#if note}<p class="att-note" data-testid="attach-note">{note}</p>{/if}
       {#if attachError}<p class="att-error" role="alert">{attachError}</p>{/if}
     </div>
@@ -659,7 +665,7 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    max-width: 220px;
+    max-width: 280px;
     padding: 3px 4px 3px 4px;
     border: 0.5px solid var(--border-control);
     border-radius: var(--radius-md);
@@ -687,6 +693,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .att-count {
+    flex-shrink: 0;
+    white-space: nowrap;
+    color: var(--text-muted);
   }
   .att-note,
   .att-error {
