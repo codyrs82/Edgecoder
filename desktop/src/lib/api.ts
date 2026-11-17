@@ -1,7 +1,7 @@
 import { localAgentUsable, parseAgentStatus, shouldDropToken, statusFromTokenError, type LocalAgentStatus } from "./agent-status";
 import type { EngineMode } from "./permission-modes";
 import type { AttachmentPayload } from "./attachments";
-import { fetchLocalService } from "./local-service";
+import { fetchLocalService, serviceErrorText } from "./local-service";
 import { coordinatorUrl, defaultEndpoints, fetchEndpoint, portalUrl, type EndpointKind } from "./endpoints";
 import type {
   HealthRuntime,
@@ -1147,7 +1147,7 @@ async function ideFetch(url: string, init: RequestInit): Promise<Response> {
   const send = async () =>
     fetchLocalService(
       async () => fetch(url, { ...init, headers: { ...(init.headers as Record<string, string> | undefined), ...(await ideHeaders()) } }),
-      { method: init.method, signal: init.signal },
+      { method: init.method, signal: init.signal, probe: probeIde },
     );
   let res = await send();
   if (res.status === 401) {
@@ -1155,6 +1155,15 @@ async function ideFetch(url: string, init: RequestInit): Promise<Response> {
     res = await send();
   }
   return res;
+}
+
+/** Whether the local IDE server answers at all (a public GET: no preflight). */
+async function probeIde(): Promise<boolean> {
+  try {
+    return (await fetch(`${ideBase()}/health`, { signal: AbortSignal.timeout(2_000) })).ok;
+  } catch {
+    return false;
+  }
 }
 
 /** Same stale-token handling for the get()/post() helpers, which throw on non-2xx. */
@@ -1466,7 +1475,7 @@ async function fsCall<T>(method: "GET" | "POST" | "PATCH" | "DELETE", path: stri
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
-  if (!res.ok) throw new FsError(data.error ?? "error", data.message ?? `${path}: ${res.status}`, res.status);
+  if (!res.ok) throw new FsError(data.error ?? "error", serviceErrorText(res.status, data), res.status);
   return data as T;
 }
 
@@ -1930,7 +1939,11 @@ export const botHistory = (id: string) => fsCall<{ runs: BotRun[] }>("GET", botP
 export const syncBotRepository = (id: string) => fsCall<{ bot: Bot }>("POST", botPath(id, "/repository/sync"), {}).then((r) => r.bot);
 export const approveBotCall = (id: string, callId: string, approved: boolean, always = false) => fsCall<{ ok: boolean; bot: Bot }>("POST", botPath(id, "/approve"), { callId, approved, ...(always ? { always: true } : {}) });
 /** The server's message for a failed bot call (its `error` field). */
-export const botErrorText = (err: unknown) => (err instanceof FsError ? err.code : (err as Error)?.message ?? String(err));
+/**
+ * The server's message for a failed bot call: its own text for a 4xx or 5xx (serviceErrorText),
+ * "couldn't reach" only when nothing answered (LocalServiceUnreachableError).
+ */
+export const botErrorText = (err: unknown) => (err instanceof FsError ? err.message : (err as Error)?.message ?? String(err));
 
 // ---------------------------------------------------------------------------
 // Shared coding sessions (:4304 /v1/ide/sessions): sessions the terminal (`edgecoder code`)

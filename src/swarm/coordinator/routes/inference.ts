@@ -485,8 +485,11 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     let routed: { job: JobDescriptor; result: BestFitResult; summary: RoutingSummary } | undefined;
     if (body.model === AUTO_MODEL_ID) {
       if (body.reservationId || body.target === "mine") return reply.code(400).send({ error: "auto_network_only", detail: "model auto routes network calls; name a model for your own machines or a reservation" });
-      const job = describeJob({ messages: body.messages as ChatMessage[], tools: body.tools, maxTokens: body.maxTokens }, cleanHints(body.routing), complexityWeights);
-      const { result, elsewhere } = await resolveAuto(job, { peers: body.routeRedirect, requesterAccountId: accountId, ...(body.computeClass !== "any" ? { computeClass: body.computeClass } : {}) });
+      const hints = cleanHints(body.routing);
+      const job = describeJob({ messages: body.messages as ChatMessage[], tools: body.tools, maxTokens: body.maxTokens }, hints, complexityWeights);
+      // A class named on the submit, else in the hints (a bot on "Network GPU only"), limits best fit to it.
+      const onlyClass = body.computeClass !== "any" ? body.computeClass : hints.computeClass;
+      const { result, elsewhere } = await resolveAuto(job, { peers: body.routeRedirect, requesterAccountId: accountId, ...(onlyClass ? { computeClass: onlyClass } : {}) });
       const summary = routingSummary(job, result);
       if (!result.chosen) return reply.code(409).send({ error: "no_route_fits", detail: result.rejected ?? result.reason, routing: summary });
       if (elsewhere) recordMeshWork(elsewhere.coordinatorId);

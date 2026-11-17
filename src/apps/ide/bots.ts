@@ -52,7 +52,7 @@ import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
 import { decideToolCall, suggestRule, type Decision } from "./permission-policy.js";
 import { ensureRepo as realEnsureRepo } from "./repo-connect.js";
-import { COMPUTE_POLICIES, FALLBACK_NOTE, routeLabel, routeModelId, routeSummary, type ComputePolicy, type PlanOptions, type Route } from "../../inference-api/auto-route.js";
+import { COMPUTE_POLICIES, FALLBACK_NOTE, NETWORK_CLASSES, isNetworkClass, type NetworkClass, routeLabel, routeModelId, routeSummary, type ComputePolicy, type PlanOptions, type Route } from "../../inference-api/auto-route.js";
 import type { ChatBackend } from "../../inference-api/types.js";
 
 // ---------------------------------------------------------------------------
@@ -288,10 +288,15 @@ export interface BotAutoState {
   capNotedDay?: number;
 }
 
-/** A bot's compute policy; `model` (a model id like "qwen3.5:9b" or "network/x@gpu") only for "model". */
+/**
+ * A bot's compute policy; `model` (a model id like "qwen3.5:9b" or "network/x@gpu") for "model",
+ * and optionally for "network_only" (else the network's best fit picks). `computeClass` only for
+ * "network_only": Network GPU / Apple / CPU / Datacenter GPU only.
+ */
 export interface BotCompute {
   policy: ComputePolicy;
   model?: string;
+  computeClass?: NetworkClass;
 }
 export const BOT_AVATAR_SHAPES = ["robot", "orb", "hex", "block"] as const;
 export type BotAvatarShape = (typeof BOT_AVATAR_SHAPES)[number];
@@ -1305,11 +1310,16 @@ export class BotManager {
     if (input.compute !== undefined) {
       if (!COMPUTE_POLICIES.includes(input.compute.policy)) throw new BotError(`Unknown compute policy "${input.compute.policy}"`);
       if (input.compute.policy === "model" && !input.compute.model?.trim()) throw new BotError("Pick the model this bot runs on (or choose another compute option)");
+      if (input.compute.computeClass !== undefined && !isNetworkClass(input.compute.computeClass)) throw new BotError(`Unknown compute class "${input.compute.computeClass}" (one of ${NETWORK_CLASSES.join(", ")})`);
     }
   }
 
   private static compute(c: BotCompute): BotCompute {
-    return c.policy === "model" ? { policy: "model", model: c.model!.trim() } : { policy: c.policy };
+    if (c.policy === "model") return { policy: "model", model: c.model!.trim() };
+    if (c.policy === "network_only") {
+      return { policy: "network_only", ...(c.model?.trim() ? { model: c.model.trim() } : {}), ...(isNetworkClass(c.computeClass) ? { computeClass: c.computeClass } : {}) };
+    }
+    return { policy: c.policy };
   }
 
   /** Triggers as stored: ids kept (or made), fields trimmed to what each kind uses. */
@@ -1907,7 +1917,7 @@ export function routeChoiceNote(r: Route, policy: ComputePolicy, why = r.why): s
   if (!why) return undefined;
   const on = r.bestFit ? "network best fit" :
     `${r.model} ${r.placement === "local" ? "on this computer" : r.placement === "mine" ? "on your machines" : r.placement === "reserved" ? "on your reserved machine" : "on the network"}`;
-  return `${policy === "local_first" ? "Local first" : policy === "auto" ? "Auto" : "Compute"} → ${on} (${why})`;
+  return `${policy === "local_first" ? "Local first" : policy === "auto" ? "Auto" : policy === "network_only" ? "Network only" : "Compute"} → ${on} (${why})`;
 }
 
 /**
@@ -1930,10 +1940,11 @@ export function botComputeChat(
     compute.policy,
     () => {
       const left = ctx.budgetLeft();
-      const capable = compute.policy === "local_first" || compute.policy === "auto";
+      const capable = compute.policy === "local_first" || compute.policy === "auto" || compute.policy === "network_only";
       return {
         ...(left === null ? {} : { allowanceCSats: left }),
         ...(compute.model ? { model: compute.model } : {}),
+        ...(compute.policy === "network_only" ? { budgetCSats: ctx.bot.budgetCSatsPerDay ?? null, ...(compute.computeClass ? { computeClass: compute.computeClass } : {}) } : {}),
         ...(capable ? { agentMinParamsB: BOT_AGENT_MIN_PARAMS_B } : {}),
         ...(exclude.length ? { exclude: [...exclude] } : {}),
       };
@@ -2058,7 +2069,11 @@ const botFields = {
   allowedTools: z.array(toolEnum).max(ALL_TOOLS.length),
   autoApproveEdits: z.boolean(),
   mode: z.enum(["ask", "auto-edits", "auto", "plan"]),
-  compute: z.object({ policy: z.enum(COMPUTE_POLICIES as [ComputePolicy, ...ComputePolicy[]]), model: z.string().trim().min(1).max(300).optional() }),
+  compute: z.object({
+    policy: z.enum(COMPUTE_POLICIES as [ComputePolicy, ...ComputePolicy[]]),
+    model: z.string().trim().min(1).max(300).optional(),
+    computeClass: z.enum(NETWORK_CLASSES).optional(),
+  }),
   color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
   avatarShape: z.enum(BOT_AVATAR_SHAPES),
   repository: z.string().trim().max(500),

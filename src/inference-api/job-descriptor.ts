@@ -16,6 +16,8 @@
  *   minContext  tokens                                     (x-edgecoder-min-context)
  *   complexity  0..1 or low | medium | high | very_high    (x-edgecoder-complexity)
  *   sessionId   conversation id                            (x-session-id; else the OpenAI `user`)
+ *   computeClass  gpu | apple | cpu | gpu.dc: only this class (x-edgecoder-compute-class);
+ *               a bot on "Network GPU only" sends it. The submit's own computeClass wins.
  *
  * Whatever is not said is inferred from the request: tools mean an agent turn, the prompt's size,
  * and cues in the system prompt and the last user turn. Pure: no I/O.
@@ -41,6 +43,8 @@ export interface RoutingHints {
   minContext?: number;
   complexity?: number | string;
   sessionId?: string;
+  /** Only machines of this class (Network GPU only, …). */
+  computeClass?: string;
 }
 
 export interface JobDescriptor {
@@ -102,6 +106,9 @@ export function cleanHints(raw: unknown): RoutingHints {
   if (hintScore(c) !== undefined) out.complexity = typeof c === "number" ? c : String(c);
   const sessionId = str(o.sessionId ?? o.session_id, 200);
   if (sessionId) out.sessionId = sessionId;
+  const cls = o.computeClass ?? o.compute_class;
+  const computeClass = typeof cls === "string" ? cls.trim().toLowerCase().replace(/[-_]/g, ".") : "";
+  if (["gpu", "apple", "cpu", "gpu.dc"].includes(computeClass)) out.computeClass = computeClass;
   return out;
 }
 
@@ -118,7 +125,7 @@ export function routingHintsFrom(body: unknown, headers: Record<string, unknown>
   };
   const fromHeaders = cleanHints({
     job: h("x-edgecoder-job"), quality: h("x-edgecoder-quality"), maxCSats: h("x-edgecoder-max-csats"), latency: h("x-edgecoder-latency"),
-    needsTools: h("x-edgecoder-needs-tools"), minContext: h("x-edgecoder-min-context"), complexity: h("x-edgecoder-complexity"), sessionId: h("x-session-id"),
+    needsTools: h("x-edgecoder-needs-tools"), minContext: h("x-edgecoder-min-context"), complexity: h("x-edgecoder-complexity"), sessionId: h("x-session-id"), computeClass: h("x-edgecoder-compute-class"),
   });
   const fromBody = cleanHints(b.edgecoder);
   const out: RoutingHints = { ...fromHeaders, ...fromBody };

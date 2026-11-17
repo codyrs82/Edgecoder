@@ -8,7 +8,7 @@ import type { ServedBy } from "../swarm/served-by.js";
 import { AutoUnsupportedError, NetworkInferenceError, RouteElsewhereError, streamNetworkCompletion, type NetworkDeps, type NetworkTarget } from "../apps/ide/network-inference.js";
 import { contextWindowFor, ollamaChat, type OllamaPiece } from "./ollama.js";
 import { ENGINE_PRESETS, EngineError, openAiEngineChat, type OpenAiEngine } from "./openai-engine.js";
-import { BEST_FIT_ROUTE, ComplexityWindow, networkAllowance, noRouteMessage, planRoutes, routeModelId, sizeWorkload, type ComplexityFloors, type ComputePolicy, type PlanOptions, type QualityFloor, type Route, type RouteInputs } from "./auto-route.js";
+import { BEST_FIT_ROUTE, ComplexityWindow, bestFitRoute, networkAllowance, noRouteMessage, planRoutes, routeModelId, sizeWorkload, type ComplexityFloors, type ComputePolicy, type PlanOptions, type QualityFloor, type Route, type RouteInputs } from "./auto-route.js";
 import { complexityWeightsFromEnv, contentComplexity, estimateComplexity } from "./job-complexity.js";
 import { ChatBackendError, type ChatBackend, type ChatPiece } from "./types.js";
 import type { RoutingHints } from "./job-descriptor.js";
@@ -212,7 +212,13 @@ export function autoBackend(opts: {
     const local = contentComplexity(estimated);
     const complexity = session === undefined ? { ...local, held: false } : windowFor(session).push(local);
     const planned = planRoutes(sizeWorkload(req, opts.floor, complexity, opts.complexityFloors), inputs, policy, planOpts).map((r) => ({ ...r, complexity: complexity.level }));
-    const all = opts.networkBestFit && policy !== "model" ? withBestFit(planned) : planned;
+    // Network only with no model chosen: the coordinator's best fit (in its class) leads, even when
+    // this side doesn't know the network's models, as long as something may be spent.
+    const networkOnlyBestFit = policy === "network_only" && !planOpts.model && !!opts.networkBestFit && networkAllowance(inputs, planOpts) > 0;
+    const all =
+      networkOnlyBestFit ? [bestFitRoute(planOpts.computeClass), ...planned] :
+      opts.networkBestFit && policy !== "model" && policy !== "network_only" ? withBestFit(planned) :
+      planned;
     // A bot escalating past a model that only described its plan: the next place, when there is one.
     const skip = new Set(planOpts.exclude ?? []);
     const kept = skip.size ? all.filter((r) => !skip.has(routeModelId(r))) : all;
@@ -221,7 +227,8 @@ export function autoBackend(opts: {
     const allowance = networkAllowance(inputs, planOpts);
     const bestFitHints = (): RoutingHints => {
       const ceiling = Number.isFinite(allowance) ? Math.min(req.hints?.maxCSats ?? Infinity, allowance) : req.hints?.maxCSats;
-      return { ...req.hints, complexity: estimated.score, ...(ceiling !== undefined && Number.isFinite(ceiling) ? { maxCSats: Math.max(0.001, ceiling) } : {}) };
+      const cls = policy === "network_only" && planOpts.computeClass && planOpts.computeClass !== "any" ? { computeClass: planOpts.computeClass } : {};
+      return { ...req.hints, complexity: estimated.score, ...cls, ...(ceiling !== undefined && Number.isFinite(ceiling) ? { maxCSats: Math.max(0.001, ceiling) } : {}) };
     };
     // The small free fallback is always tried, whatever maxTries cuts (the best-fit leg does not count).
     const main = routes.filter((r) => !r.fallback).slice(0, (opts.maxTries ?? 4) + (routes.some((r) => r.bestFit) ? 1 : 0));
@@ -248,7 +255,7 @@ export function autoBackend(opts: {
       }
       return;
     }
-    if (lastErr instanceof ChatBackendError && lastErr.status === 402 && routes.every((r) => r.placement === "network")) {
+    if (lastErr instanceof ChatBackendError && lastErr.status === 402 && routes.every((r) => r.placement === "network") && policy !== "network_only") {
       throw new ChatBackendError(`${lastErr.message} No model on this computer or your machines can take it instead: install one in Settings > Models, or buy cSats.`, 402);
     }
     throw lastErr instanceof ChatBackendError ? lastErr :new ChatBackendError((lastErr as Error)?.message ?? "Auto couldn't start anywhere", 502);

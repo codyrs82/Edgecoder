@@ -285,7 +285,7 @@ const autoHere = (onRoute?: (r: Route) => void, source?: string, policy?: Comput
     policy: policy ?? autoPolicyFromEnv(),
     plan,
     ...(hysteresis ? { hysteresis } : {}),
-    ...(networkDeps ? { networkBestFit: (routing: RoutingHints) => networkBackend(networkDeps!, { model: AUTO_MODEL_ID, computeClass: "any", routing, source: source ?? "localhost:4304" }) } : {}),
+    ...(networkDeps ? { networkBestFit: (routing: RoutingHints) => networkBackend(networkDeps!, { model: AUTO_MODEL_ID, computeClass: routing.computeClass ?? "any", routing, source: source ?? "localhost:4304" }) } : {}),
   });
 
 /** Auto for API clients (OpenAI and Anthropic routes): one backend, so a client's session id keeps its complexity window. */
@@ -575,7 +575,7 @@ app.get("/v1/ide/project", async (_req, reply) => {
 
 // ---------------------------------------------------------------------------
 // Project files for the editor and file tree, confined to the open project (project-fs.ts).
-// Mutations are POST: the desktop's CORS allows GET and POST only.
+// Mutations are POST (the desktop's CORS also allows PUT, PATCH and DELETE: ide-auth.ts IDE_CORS_METHODS).
 // ---------------------------------------------------------------------------
 
 const FS_ERROR_STATUS: Record<ProjectFsError["code"], number> = {

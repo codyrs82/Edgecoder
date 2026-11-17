@@ -186,21 +186,60 @@ export function askCards(events: Array<{ type: string; id?: string; tool?: strin
     });
 }
 
-export type ComputePolicy = "local_first" | "auto" | "local_only" | "mine_only" | "model";
+export type ComputePolicy = "local_first" | "auto" | "local_only" | "mine_only" | "model" | "network_only";
+/** The classes "Network only" may be limited to (src/inference-api/auto-route.ts NETWORK_CLASSES). */
+export type NetworkClass = "gpu" | "apple" | "cpu" | "gpu.dc";
 export interface BotCompute {
   policy: ComputePolicy;
-  /** Only for "model": a ComputePicker id ("qwen3.5:9b", "mine/...", "network/...@gpu", "reserved/<id>/..."). */
+  /** "model": a ComputePicker id ("qwen3.5:9b", "mine/...", "network/...@gpu", "reserved/<id>/..."); "network_only": optional, a "network/..." id (else best fit). */
   model?: string;
+  /** Only for "network_only": the one class it runs on. */
+  computeClass?: NetworkClass;
 }
 
+/** A card in the form: a policy, and for the per-class network cards its class ("network_only:gpu"). */
+export type ComputeChoice = Exclude<ComputePolicy, "network_only"> | "network_only" | `network_only:${NetworkClass}`;
+
 /** The form's choices, in order; new bots start on Auto. */
-export const COMPUTE_POLICY_OPTIONS: Array<{ value: ComputePolicy; title: string; desc: string }> = [
+export const COMPUTE_POLICY_OPTIONS: Array<{ value: ComputeChoice; title: string; desc: string }> = [
   { value: "auto", title: "Auto", desc: "Recommended. A capable model for each step: your machines when one has a 14B or larger model (free), else the network's best fit, within the daily budget." },
   { value: "local_first", title: "Local first", desc: "This computer first when it has a 14B or larger model, then your machines, then the network's best fit within the daily budget." },
   { value: "local_only", title: "This computer only", desc: "Never leaves this computer. Free." },
   { value: "mine_only", title: "My machines only", desc: "This computer and your other machines. Free, never the network." },
+  { value: "network_only", title: "Network only", desc: "Always the network's best fit, paid within the daily budget. Never this computer or your machines." },
+  { value: "network_only:gpu", title: "Network GPU only", desc: "The network's GPU machines only, within the daily budget. Never this computer or your machines." },
+  { value: "network_only:apple", title: "Network Apple only", desc: "The network's Apple silicon Macs only, within the daily budget. Never this computer or your machines." },
+  { value: "network_only:cpu", title: "Network CPU only", desc: "The network's CPU machines only: cheapest power floor, slowest. Within the daily budget." },
+  { value: "network_only:gpu.dc", title: "Network Datacenter GPU only", desc: "The network's datacenter GPUs only: fastest, within the daily budget. Never this computer or your machines." },
   { value: "model", title: "Specific model", desc: "Always the model you pick below." },
 ];
+
+/** The card a bot's compute shows as. */
+export function computeChoiceOf(c: BotCompute): ComputeChoice {
+  if (c.policy === "network_only") return c.computeClass ? `network_only:${c.computeClass}` : "network_only";
+  return c.policy;
+}
+
+/** The compute a card (and the Model selector) saves: per-class cards are network_only with a class. */
+export function computeFromChoice(choice: ComputeChoice, model?: string): BotCompute {
+  if (choice === "model") return { policy: "model", ...(model ? { model } : {}) };
+  if (choice.startsWith("network_only")) {
+    const cls = choice.split(":")[1] as NetworkClass | undefined;
+    const net = model ? networkModelId(model) : undefined;
+    return { policy: "network_only", ...(net ? { model: net } : {}), ...(cls ? { computeClass: cls } : {}) };
+  }
+  return { policy: choice as ComputePolicy };
+}
+
+/** A picker id as a network model id: "qwen3:30b", "mine/qwen3:30b" → "network/qwen3:30b" (the class comes from the card). */
+export function networkModelId(id: string): string | undefined {
+  const t = id.trim();
+  if (!t || t === "auto" || t.startsWith("frontier/")) return undefined;
+  if (t.startsWith("network/")) return t.replace(/@[^@/]+$/, "");
+  const reserved = /^reserved\/[^/]+\/(.+)$/.exec(t);
+  return `network/${reserved ? reserved[1] : t.replace(/^mine\//, "")}`;
+}
+
 export const DEFAULT_COMPUTE: BotCompute = { policy: "auto" };
 
 /** Read-only tools every bot has; the form toggles the rest. */
@@ -293,7 +332,8 @@ export function computeText(c: BotCompute, label?: (id: string) => { model: stri
     const l = label?.(c.model);
     return l ? `${l.model} · ${l.where}` : c.model;
   }
-  return COMPUTE_POLICY_OPTIONS.find((o) => o.value === c.policy)?.title ?? "Auto";
+  const title = COMPUTE_POLICY_OPTIONS.find((o) => o.value === computeChoiceOf(c))?.title ?? "Auto";
+  return c.policy === "network_only" && c.model ? `${title} · ${c.model.replace(/^network\//, "")}` : title;
 }
 
 /** The status chip in the bot header. */

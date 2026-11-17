@@ -8,8 +8,8 @@
   import BotAvatar from "./BotAvatar.svelte";
   import { AVATAR_COLORS, AVATAR_SHAPES, AVATAR_SHAPE_LABELS, colorFromName, shapeFor, type AvatarShape } from "../lib/bot-avatar";
   import {
-    BOT_TOOL_GROUPS, CI_SCOPE_OPTIONS, COMPUTE_POLICY_OPTIONS, DEFAULT_COMPUTE, DEFAULT_HEARTBEAT_MINUTES, DEFAULT_MAX_RUNS_PER_DAY, HEARTBEAT_OPTIONS, SCHEDULE_PRESETS, TRIGGER_KIND_OPTIONS, botCompute, groupsOf, toolsFor,
-    type Bot, type BotTriggerConfig, type ComputePolicy, type TriggerKind,
+    BOT_TOOL_GROUPS, CI_SCOPE_OPTIONS, COMPUTE_POLICY_OPTIONS, DEFAULT_COMPUTE, DEFAULT_HEARTBEAT_MINUTES, DEFAULT_MAX_RUNS_PER_DAY, HEARTBEAT_OPTIONS, SCHEDULE_PRESETS, TRIGGER_KIND_OPTIONS, botCompute, computeChoiceOf, computeFromChoice, groupsOf, networkModelId, toolsFor,
+    type Bot, type BotTriggerConfig, type ComputeChoice, type TriggerKind,
   } from "../lib/bots";
 
   interface Props {
@@ -51,14 +51,21 @@
   let groups = $state<Record<string, boolean>>(initial ? groupsOf(initial.allowedTools) : { edit: true, shell: true, git: true });
   let autoApproveEdits = $state(initial?.autoApproveEdits ?? true);
   const initialCompute = initial ? botCompute(initial) : DEFAULT_COMPUTE;
-  let policy = $state<ComputePolicy>(initialCompute.policy);
+  let policy = $state<ComputeChoice>(computeChoiceOf(initialCompute));
   let computeModel = $state<string | undefined>(initialCompute.model);
+  // Network only (any class or one): the Model selector is optional; empty means the network's best fit.
+  let networkModel = $state<string | undefined>(initialCompute.policy === "network_only" ? initialCompute.model : undefined);
+  const networkOnly = $derived(policy.startsWith("network_only"));
 
   // The picker's own Auto rows map onto the matching policies.
   function pickModel(id: string | undefined) {
     if (id === "auto") policy = "auto";
     else if (id === undefined) policy = "local_only";
     else computeModel = id;
+  }
+  // Under Network only every pick is a network model; its Auto row means best fit.
+  function pickNetworkModel(id: string | undefined) {
+    networkModel = id === undefined ? undefined : networkModelId(id);
   }
   // The avatar: follows the name until you pick a color or shape.
   let pickedColor = $state<string | null>(initial?.color ?? null);
@@ -127,7 +134,7 @@
       budgetCSatsPerDay: budget,
       allowedTools: toolsFor(groups),
       autoApproveEdits,
-      compute: policy === "model" ? { policy, model: computeModel } : { policy },
+      compute: computeFromChoice(policy, policy === "model" ? computeModel : networkOnly ? networkModel : undefined),
       color: avatarColor,
       avatarShape,
     };
@@ -271,7 +278,7 @@
       <div class="sp-group-title">Model and compute</div>
       <div class="sp-card">
         <div class="sp-row stack">
-          <span class="sp-text"><span class="sp-title">Where it runs</span><span class="sp-desc">When the network can't be paid for, it uses the best model on this computer or your machines instead.</span></span>
+          <span class="sp-text"><span class="sp-title">Where it runs</span><span class="sp-desc">{networkOnly ? "Network only never falls back to this computer or your machines: with no cSats left today it stops and says so." : "When the network can't be paid for, it uses the best model on this computer or your machines instead."}</span></span>
           <div class="bf-policies" role="radiogroup" aria-label="Where it runs">
             {#each COMPUTE_POLICY_OPTIONS as o (o.value)}
               <label class="bf-policy" class:active={policy === o.value}>
@@ -287,6 +294,14 @@
             <span class="sp-text"><span class="sp-title">Model</span><span class="sp-desc">Every step runs on this model, wherever it is.</span></span>
             <div class="bf-picker">
               <ComputePicker selected={computeModel} onSelect={pickModel} up={false} />
+            </div>
+          </div>
+        {:else if networkOnly}
+          <div class="sp-row">
+            <span class="sp-text"><span class="sp-title">Model</span><span class="sp-desc">{networkModel ? "Every step runs on this model, on the network." : "Best fit: the network picks the model for each step."}</span></span>
+            <div class="bf-picker">
+              <ComputePicker selected={networkModel ?? "auto"} onSelect={pickNetworkModel} up={false} />
+              {#if networkModel}<button type="button" class="small" onclick={() => (networkModel = undefined)}>Use best fit</button>{/if}
             </div>
           </div>
         {/if}
