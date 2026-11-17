@@ -16,6 +16,7 @@ import { planInstall, type AgentInstance, type InstallPlan } from "./plan.js";
 import { HOST_AGREEMENT_VERSION } from "../common/legal-notices.js";
 import { appDirProblems, planBinary, stageBinary, type BinFs, type StagePlan } from "./binaries.js";
 import { engineProblems, instanceVllmProfile, legacyVllmMarkerPath, parseEnvFile, resolveInstanceEngine, VLLM_PROFILE_AUTO, vllmEnvPath, vllmInstalledPaths, vllmMarkerPath, vllmProfileChoices, type InstanceEngine } from "./engine.js";
+import { allocateOllamaPorts, portOwner } from "./ports.js";
 import { applyPlan, defaultPaths, envFilePath, lockConfigDir, removeServices, serviceStatus, windowsDirOwnerProblems, type Host, type ServicePaths } from "./services.js";
 
 export const probe: Probe = (cmd, args) => {
@@ -66,12 +67,12 @@ const realHost: Host = {
   removeFile(path) {
     try { unlinkSync(path); } catch { /* already gone */ }
   },
-  run(cmd, args) {
+  run(cmd, args, env) {
     // win32 goes through cmd.exe (icacls/schtasks take pre-quoted args); quote the rest, such as
     // an ollama path under a profile with a space in it.
     const r = process.platform === "win32"
-      ? spawnSync(cmdQuote(cmd), args.map(cmdQuote), { encoding: "utf8", shell: true })
-      : spawnSync(cmd, args, { encoding: "utf8" });
+      ? spawnSync(cmdQuote(cmd), args.map(cmdQuote), { encoding: "utf8", shell: true, ...(env ? { env: { ...process.env, ...env } } : {}) })
+      : spawnSync(cmd, args, { encoding: "utf8", ...(env ? { env: { ...process.env, ...env } } : {}) });
     return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
   },
   exists: (path) => existsSync(path)
@@ -261,6 +262,30 @@ export async function resolveTokenNodeId(opts: InstallOptions, plan: InstallPlan
 }
 
 /**
+ * After apply with an install key or tokens: for each agent, whether the portal has it enrolled
+ * under exactly its id with the token written to its env file ("Enrolled as <id> ✓"), or why not.
+ */
+export async function enrollmentConfirmation(portalUrl: string, instances: AgentInstance[], enrollFailed: string[], get: HttpGet = fetchGet): Promise<string[]> {
+  const lines: string[] = [];
+  for (const inst of instances) {
+    const token = inst.env.AGENT_REGISTRATION_TOKEN;
+    if (enrollFailed.includes(inst.agentId)) {
+      lines.push(`Not enrolled: ${inst.agentId} (enrolment with the install key failed; see the warning above)`);
+      continue;
+    }
+    if (!token) {
+      lines.push(`Not enrolled: ${inst.agentId} (no registration token)`);
+      continue;
+    }
+    const found = await lookupTokenNode(portalUrl, token, get);
+    if (!found) lines.push(`Not confirmed: ${inst.agentId} (${portalUrl} did not recognise its registration token, or could not be reached; the agent's log says whether it registers)`);
+    else if (found.nodeId !== inst.agentId) lines.push(`Not enrolled: ${inst.agentId} (its token is for "${found.nodeId}"; re-run with --token ${inst.agentId}=<token for ${inst.agentId}>)`);
+    else lines.push(`Enrolled as ${inst.agentId} ✓`);
+  }
+  return lines;
+}
+
+/**
  * A re-run with no token and no install key (an update with install.sh, a package upgrade) on a
  * one-agent host keeps the node id the previous install used (agent-0.env), with its token: the
  * agent may have been named after its token's enrolment rather than the hostname. Returns that id.
@@ -279,21 +304,24 @@ export function keepEnrolledAgentId(opts: InstallOptions, plan: InstallPlan, p: 
 const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 /**
- * Pull each distinct model once (the model store is shared by every instance). `ollama pull`
- * talks to the default 127.0.0.1:11434, which is instance 0's server; it was just (re)started, so
- * a pull is retried until that server is listening. Returns the models that could not be pulled.
+ * Pull each distinct model once (the model store is shared by every instance), through the Ollama
+ * server of the first instance that runs it (OLLAMA_HOST: its port may not be 11434, ports.ts). It
+ * was just (re)started, so a pull is retried until that server is listening. Returns the models
+ * that could not be pulled.
  */
 export function pullModels(host: Host, ollamaBin: string, instances: AgentInstance[], attempts = 10, sleep: (ms: number) => void = sleepSync): string[] {
   const failed: string[] = [];
-  for (const model of [...new Set(instances.map((i) => i.model))]) {
+  const ollamaInstances = instances.filter((i) => !i.engine || i.engine.kind === "ollama");
+  for (const model of [...new Set(ollamaInstances.map((i) => i.model))]) {
+    const inst = ollamaInstances.find((i) => i.model === model)!;
     console.log(`pulling ${model}`);
     let ok = false;
     for (let a = 0; a < attempts && !ok; a++) {
       if (a > 0) sleep(3000);
-      ok = host.run(ollamaBin, ["pull", model]).code === 0;
+      ok = host.run(ollamaBin, ["pull", model], { OLLAMA_HOST: `127.0.0.1:${inst.ollamaPort}` }).code === 0;
     }
     if (!ok) {
-      console.error(`warning: could not pull ${model}; run \`ollama pull ${model}\` once the services are up`);
+      console.error(`warning: could not pull ${model}; run \`OLLAMA_HOST=127.0.0.1:${inst.ollamaPort} ollama pull ${model}\` once the services are up`);
       failed.push(model);
     }
   }
@@ -452,8 +480,8 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     return 0;
   }
   if (opts.command === "status") {
-    const s = serviceStatus(host, p);
-    console.log(opts.json ? JSON.stringify(s, null, 2) : s.map((x) => `${x.name}: ${x.state}`).join("\n") || "no EdgeCoder services installed");
+    const s = serviceStatus(host, p, 32, readIfPresent);
+    console.log(opts.json ? JSON.stringify(s, null, 2) : s.map((x) => `${x.name}: ${x.state}${x.reason ? ` (${x.reason})` : ""}`).join("\n") || "no EdgeCoder services installed");
     return 0;
   }
   if (opts.command === "remove") {
@@ -488,6 +516,12 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
       return 2;
     }
   }
+  // Ollama ports another program holds (a stock ollama.service on 11434) are skipped (ports.ts).
+  if (host.platform === "linux" || host.platform === "darwin") {
+    const { ports, notes } = allocateOllamaPorts(plan.instances.length, (port) => portOwner(host, port, readIfPresent));
+    opts.ollamaPorts = ports;
+    for (const line of notes) say(`note: ${line}`);
+  }
   plan = planInstall(hw, opts, dockerPresent);
   if (naming.error) plan.warnings.push(naming.error);
   if (host.platform === "linux") {
@@ -513,10 +547,12 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     console.error(`ollama not found at ${p.ollamaBin}; install it (https://ollama.com/download) or pass --ollama-bin`);
     return 1;
   }
+  let enrollFailed: string[] = [];
   if (opts.enrollToken && !opts.dryRun) {
     const candidates = plan.instances.filter((i) => !opts.tokens[i.agentId] && !opts.tokens["*"]);
     if (candidates.length) {
       const { enrolled, failed } = await enrollNodes(opts, candidates, post);
+      enrollFailed = failed;
       if (enrolled.length === 0) {
         console.error(`enrolment failed for all ${failed.length} node(s) at ${opts.portalUrl}; check the --enroll API key (or EDGECODER_API_KEY) and portal URL`);
         return 1;
@@ -567,6 +603,9 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     console.log(`${describeHardware(hw)}\n${describePlan(plan, p)}`);
     console.log(`${opts.dryRun ? "Would write" : "Wrote"} ${result.files.length} files; services: ${result.services.join(", ")}`);
     if (opts.dryRun) console.log(result.commands.map((c) => `  $ ${c}`).join("\n"));
+    if (!opts.dryRun && (opts.enrollToken || Object.keys(opts.tokens).length > 0)) {
+      for (const line of await enrollmentConfirmation(opts.portalUrl, plan.instances, enrollFailed, get)) console.log(line);
+    }
     console.log(hostAgreementLine(opts.portalUrl));
     const missing = plan.instances.filter((i) => !i.env.AGENT_REGISTRATION_TOKEN).map((i) => i.agentId);
     if (missing.length) {

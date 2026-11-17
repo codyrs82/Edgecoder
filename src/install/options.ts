@@ -51,6 +51,8 @@ export interface InstallOptions {
    * exactly the enrolled name. Ignored when the host runs several instances.
    */
   agentIdOverride?: string;
+  /** Each instance's Ollama port, set by the CLI around ports other programs hold (ports.ts); unset: 11434 + index. */
+  ollamaPorts?: Record<number, number>;
   pullModels: boolean;
   dryRun: boolean;
   json: boolean;

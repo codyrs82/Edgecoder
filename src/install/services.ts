@@ -16,14 +16,16 @@
  */
 import { ollamaMemorySafetyEnv } from "../swarm/memory-budget.js";
 import type { AgentInstance, InstallPlan } from "./plan.js";
-import { renderEnvFile } from "./plan.js";
+import { OLLAMA_BASE_PORT, renderEnvFile } from "./plan.js";
+import { describeOwner, portOwner, type ReadText } from "./ports.js";
 import { legacyVllmMarkerPath, vllmDropIn, vllmDropInPath, vllmMarker, vllmMarkerPath } from "./engine.js";
 
 export interface Host {
   platform: NodeJS.Platform;
   writeFile(path: string, content: string, mode?: number): void;
   removeFile(path: string): void;
-  run(cmd: string, args: string[]): { code: number; stdout: string; stderr: string };
+  /** env: extra variables for this command (e.g. OLLAMA_HOST for `ollama pull`). */
+  run(cmd: string, args: string[], env?: Record<string, string>): { code: number; stdout: string; stderr: string };
   exists(path: string): boolean;
 }
 
@@ -539,15 +541,30 @@ export function removeServices(host: Host, p: ServicePaths, maxInstances = 32): 
   return removed;
 }
 
-export function serviceStatus(host: Host, p: ServicePaths, maxInstances = 32): Array<{ name: string; state: string }> {
-  const out: Array<{ name: string; state: string }> = [];
+export function serviceStatus(host: Host, p: ServicePaths, maxInstances = 32, read: ReadText = () => undefined): Array<{ name: string; state: string; reason?: string }> {
+  const out: Array<{ name: string; state: string; reason?: string }> = [];
+  // An Ollama server that isn't up: say who holds its port (ports.ts), the usual reason it can't start.
+  const portReason = (i: number, ours: string): string | undefined => {
+    const port = Number(/^OLLAMA_HOST=\S*:(\d+)\s*$/m.exec(read(envFilePath(p, { index: i } as AgentInstance)) ?? "")?.[1] ?? OLLAMA_BASE_PORT + i);
+    const owner = portOwner(host, port, read);
+    if (!owner || owner.unit === ours) return undefined;
+    return `port ${port} in use by ${describeOwner(owner)}${owner.unit === "ollama.service" ? ": sudo systemctl disable --now ollama, then run edgecoder-install apply again" : ""}`;
+  };
   for (let i = 0; i < maxInstances; i++) {
     if (!host.exists(envFilePath(p, { index: i } as AgentInstance))) continue;
     if (host.platform === "linux") {
       const vllm = host.exists(vllmMarkerPath(p.configDir, i)) || (i === 0 && host.exists(legacyVllmMarkerPath(p.configDir)));
-      for (const svc of [vllm ? `edgecoder-vllm@${i}.service` : `edgecoder-ollama-${i}.service`, `edgecoder-agent-${i}.service`]) out.push({ name: svc, state: host.run("systemctl", ["is-active", svc]).stdout.trim() || "unknown" });
+      for (const svc of [vllm ? `edgecoder-vllm@${i}.service` : `edgecoder-ollama-${i}.service`, `edgecoder-agent-${i}.service`]) {
+        const state = host.run("systemctl", ["is-active", svc]).stdout.trim() || "unknown";
+        const reason = !vllm && svc.startsWith("edgecoder-ollama-") && state !== "active" ? portReason(i, svc) : undefined;
+        out.push({ name: svc, state, ...(reason ? { reason } : {}) });
+      }
     } else if (host.platform === "darwin") {
-      for (const label of [`io.edgecoder.ollama.${i}`, `io.edgecoder.agent.${i}`]) out.push({ name: label, state: host.run("launchctl", ["print", `system/${label}`]).code === 0 ? "running" : "stopped" });
+      for (const label of [`io.edgecoder.ollama.${i}`, `io.edgecoder.agent.${i}`]) {
+        const state = host.run("launchctl", ["print", `system/${label}`]).code === 0 ? "running" : "stopped";
+        const reason = label.startsWith("io.edgecoder.ollama.") && state !== "running" ? portReason(i, label) : undefined;
+        out.push({ name: label, state, ...(reason ? { reason } : {}) });
+      }
     } else if (host.platform === "win32") {
       for (const name of [`EdgeCoder\\ollama-${i}`, `EdgeCoder\\agent-${i}`]) {
         const r = host.run("schtasks", ["/Query", "/TN", name, "/FO", "LIST"]);

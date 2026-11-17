@@ -125,8 +125,16 @@ For a host with N discrete GPUs, N instances; otherwise one:
 
 | Instance | Linux (systemd) | macOS (launchd) | Windows (scheduled tasks) |
 | --- | --- | --- | --- |
-| Ollama server n, bound to `127.0.0.1:1143(4+n)`, pinned with `CUDA_VISIBLE_DEVICES=n` | `edgecoder-ollama-n.service` | `io.edgecoder.ollama.n` | `EdgeCoder\ollama-n` |
+| Ollama server n, bound to `127.0.0.1:1143(4+n)` (or the next free port), pinned with `CUDA_VISIBLE_DEVICES=n` | `edgecoder-ollama-n.service` | `io.edgecoder.ollama.n` | `EdgeCoder\ollama-n` |
 | Agent n (`AGENT_ID=<host>-gpu<n>`), env in `agent-n.env` | `edgecoder-agent-n.service` | `io.edgecoder.agent.n` | `EdgeCoder\agent-n` |
+
+A port another program already holds (the distribution's own `ollama.service`, the Ollama app) is
+skipped: on Linux and macOS `plan`/`apply` check who listens on each port (`ss` / `lsof`) and give
+that instance the next free one, with a note naming the holder (`sudo systemctl disable --now
+ollama` frees 11434 for the next run). `edgecoder-install status` shows the holder next to an Ollama
+service that isn't running, e.g. `edgecoder-ollama-0.service: activating (port 11434 in use by
+ollama.service ...)`. After an `apply` with tokens or an install key, each agent gets a line
+`Enrolled as <id> ✓`, or why it isn't (no token, a token for another node id, key enrolment failed).
 
 Env files live in `/etc/edgecoder` (Windows `C:\ProgramData\EdgeCoder`); models are shared in
 `/var/lib/edgecoder/ollama` so each model downloads once. The model per instance is the best

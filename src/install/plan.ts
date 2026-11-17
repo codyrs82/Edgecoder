@@ -93,7 +93,7 @@ export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvaila
     const agentId = slots.length === 1
       ? opts.agentIdOverride ?? `${base}-${gpu ? (group.length > 1 ? gpuTag : "gpu") : "cpu"}`
       : `${base}-${gpuTag}`;
-    const ollamaPort = OLLAMA_BASE_PORT + index;
+    const ollamaPort = opts.ollamaPorts?.[index] ?? OLLAMA_BASE_PORT + index;
     const engine = opts.instanceEngines?.[index] ?? resolveInstanceEngine(index, opts);
     const env: Record<string, string> = {
       EDGE_RUNTIME_MODE: "worker",
