@@ -7,7 +7,8 @@
   // rate, both fees and the payout figures come from the portal (/portal/api/wallet/overview).
   import { onMount, onDestroy } from "svelte";
   import { get } from "svelte/store";
-  import { buyRequest } from "../lib/buy-csats";
+  import { buyRequest, buyLimitState } from "../lib/buy-csats";
+  import { buyAmountFits, buyErrorText, buyLimit, buyLimitText, buyRangeLabel, clampBuyAmount } from "../lib/buy-limits";
   import { open as openUrl } from "@tauri-apps/plugin-shell";
   import { Zap, Copy, Check, Clock, ExternalLink, Bitcoin, Coins, TriangleAlert, Wallet } from "@lucide/svelte";
   import {
@@ -82,7 +83,38 @@
   let charged = $derived(feeBps > 0);
   let feeKnown = $derived(wallet?.fees.purchaseFeeBps != null);
   let netFeeBps = $derived(wallet?.fees.networkFeeBps ?? 500);
-  let valid = $derived(Number.isInteger(amount) && amount >= 100 && amount <= 1_000_000);
+  // The most one purchase can be now: early-access caps (daily, balance) and the 100 to 1M range.
+  let limit = $derived(buyLimit({
+    launch: wallet?.launch ?? null,
+    balanceCSats: local?.connected && local.account ? local.account.cSats : wallet?.cSats ?? null,
+    feeBps: wallet?.fees.purchaseFeeBps ?? 0,
+    globalMin: wallet?.topup?.minSats ?? 100,
+    globalMax: wallet?.topup?.maxSats ?? 1_000_000,
+  }));
+  let valid = $derived(buyAmountFits(amount, limit));
+  let overText = $derived(buyLimitText(amount, limit));
+  let rangeText = $derived(buyRangeLabel(limit));
+  let launchLine = $derived.by(() => {
+    const l = wallet?.launch;
+    if (!l || l.mode !== "invite") return "";
+    const parts: string[] = [];
+    if (l.maxBuySatsPerDay > 0) parts.push(`up to ${fmtSats(l.maxBuySatsPerDay)} sats per day${l.boughtWindowSats ? ` (${fmtSats(Math.max(0, l.maxBuySatsPerDay - l.boughtWindowSats))} left today)` : ""}`);
+    if (l.maxBalanceSats > 0) parts.push(`a balance of up to ${fmtSats(l.maxBalanceSats)} cSats`);
+    if (l.maxPayoutSatsPerDay > 0) parts.push(`withdrawals of up to ${fmtSats(l.maxPayoutSatsPerDay)} sats per day`);
+    return parts.length ? `Early access: ${parts.join(", ")}.` : "";
+  });
+  // Buy cSats suggestions elsewhere clamp to this; a requested amount over it comes down once the caps are known.
+  let clampedRequest = false;
+  $effect(() => {
+    buyLimitState.set(wallet ? limit : null);
+    if (!wallet || clampedRequest) return;
+    clampedRequest = true;
+    const wanted = preset === "custom" ? Math.round(Number(custom)) : preset;
+    if (wanted > limit.maxSats && limit.maxSats >= limit.minSats) {
+      const c = clampBuyAmount(wanted, limit);
+      if ((PRESETS as readonly number[]).includes(c)) preset = c; else { preset = "custom"; custom = c; }
+    }
+  });
   let previewed = $derived(purchasePreview(valid ? amount : 0, feeBps));
   // What the amount buys on a 30B coder, from live network prices (hidden without prices).
   let buysCalls = $derived(valid ? callsForCSats(previewed.get, FUND_EXAMPLE_CLASS, { models: local?.models ?? [], btcUsd }) : null);
@@ -182,8 +214,10 @@
       clearInterval(pollTimer);
       pollTimer = setInterval(checkInvoice, 3000);
     } catch (e) {
-      const m = (e as Error).message;
-      topupError = /payments_disabled/.test(m) ? "Buying cSats is turned off on this coordinator." : `Couldn't start the payment: ${m}`;
+      const err = e as { code?: string; data?: { remainingSats?: number; limitSats?: number } };
+      topupError = buyErrorText(err.code, err.data ?? null);
+      // The caps moved since the page loaded (another purchase): refresh them.
+      if (/^launch_/.test(err.code ?? "")) void load();
     } finally {
       creating = false;
     }
@@ -273,7 +307,9 @@
     const d = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
     if (!d) return;
     e.preventDefault();
-    const next = (i + d + all.length) % all.length;
+    let next = (i + d + all.length) % all.length;
+    // Skip presets over the limit (they are disabled).
+    while (all[next] !== "custom" && (all[next] as number) > limit.maxSats) next = (next + d + all.length) % all.length;
     preset = all[next];
     (document.getElementById(`wallet-preset-${next}`) as HTMLElement | null)?.focus();
   }
@@ -367,27 +403,31 @@
         {:else if step === "amount"}
           <p class="wl-faint">Pay from any Lightning wallet. Your cSats arrive the moment the payment lands.</p>
           <p class="wl-faint" data-testid="no-wallet-help"><strong>No Lightning wallet?</strong> Any Lightning wallet works: for example Cash App, Strike, Wallet of Satoshi, Phoenix, or an exchange that can send over Lightning. <button type="button" class="wl-link" onclick={() => openUrl(INSTALL_LINKS.fundGuide)}>How to buy cSats</button></p>
+          {#if launchLine}<p class="wl-faint" data-testid="launch-note">{launchLine}</p>{/if}
           <div class="wl-presets" role="radiogroup" aria-label="Amount in sats">
             {#each [...PRESETS, "custom" as const] as p, i}
+              {@const over = p !== "custom" && p > limit.maxSats}
               <button id="wallet-preset-{i}" type="button" role="radio" aria-checked={preset === p} tabindex={preset === p ? 0 : -1}
+                disabled={over} title={over ? buyLimitText(p, limit) : undefined}
                 onclick={() => (preset = p)} onkeydown={(e) => presetKey(e, i)}>
-                {p === "custom" ? "Custom" : fmtSats(p)}<small>{p === "custom" ? "100 to 1M" : "sats"}</small>
+                {p === "custom" ? "Custom" : fmtSats(p)}<small>{p === "custom" ? rangeText : "sats"}</small>
               </button>
             {/each}
           </div>
           {#if preset === "custom"}
             <label class="wl-label" for="wallet-custom">Amount in sats</label>
-            <input id="wallet-custom" class="wl-input" type="number" inputmode="numeric" min="100" max="1000000" step="1" bind:value={custom} />
+            <input id="wallet-custom" class="wl-input" type="number" inputmode="numeric" min={limit.minSats} max={Math.max(limit.minSats, limit.maxSats)} step="1" bind:value={custom} aria-describedby={overText ? "wallet-over" : undefined} />
           {/if}
+          {#if overText}<p class="sp-err" id="wallet-over" data-testid="buy-over-limit">{overText}</p>{/if}
           <dl class="wl-break">
-            <div><dt>You pay</dt><dd>{valid ? `${fmtSats(amount)} sats` : "100 to 1,000,000 sats"}<small>{valid ? fmtUsd(amount, btcUsd) : ""}</small></dd></div>
+            <div><dt>You pay</dt><dd>{valid ? `${fmtSats(amount)} sats` : `${fmtSats(limit.minSats)} to ${fmtSats(Math.max(limit.minSats, limit.maxSats))} sats`}<small>{valid ? fmtUsd(amount, btcUsd) : ""}</small></dd></div>
             {#if charged}<div class="fee"><dt>Purchase fee ({pct(feeBps)})</dt><dd>{valid ? `− ${feeKnown ? "" : "≈ "}${fmtSats(previewed.fee)} sats` : "–"}</dd></div>{/if}
             <div class="get"><dt>You get</dt><dd>{valid ? `${charged && !feeKnown ? "≈ " : ""}${fmtSats(previewed.get)} cSats` : "–"}</dd></div>
           </dl>
           {#if !charged}<p class="wl-faint">No purchase fee: 1 sat buys 1 cSat.</p>{/if}
           {#if buysCalls !== null}<p class="wl-faint" aria-live="polite" data-testid="buy-calls">About {fmtSats(buysCalls)} calls on a 30B coder model.</p>{/if}
           <button class="primary wl-wide" disabled={!valid || creating || !local?.connected} onclick={createInvoice}>
-            {creating ? "Preparing payment…" : valid ? `Buy ${fmtSats(amount)} cSats with Lightning` : "Enter 100 to 1,000,000 sats"}
+            {creating ? "Preparing payment…" : valid ? `Buy ${fmtSats(amount)} cSats with Lightning` : limit.maxSats < limit.minSats ? "Early-access limit reached" : `Enter ${fmtSats(limit.minSats)} to ${fmtSats(limit.maxSats)} sats`}
           </button>
           {#if topupError}<p class="sp-err" role="alert">{topupError}</p>{/if}
           {#if net.test && wallet}<p class="wl-test"><TriangleAlert size={14} /> This coordinator runs on {net.short}. Pay with a {net.short} wallet; these sats have no value.{wallet.network === "signet" ? ` ${testNetworkNote(wallet.network)}` : ""}</p>{/if}
