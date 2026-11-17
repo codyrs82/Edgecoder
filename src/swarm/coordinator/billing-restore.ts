@@ -49,10 +49,20 @@ export async function restoreTaskBilling(store: PostgresStore, nowMs = Date.now(
 export async function restoreTaskBillingRows(store: PostgresStore, rows: OpenTaskBillingRow[], nowMs = Date.now()): Promise<BillingRestoreSummary> {
   const summary: BillingRestoreSummary = { resumed: 0, refunded: 0, subtasksRestored: 0 };
   if (rows.length === 0) return summary;
-  const totals = await store.taskLedgerTotals(rows.map((r) => ({ taskId: r.taskId, refundTxId: refundTxId(r.taskId) })));
+  // Totals of this row's own account and kind only: a reserve written under the same task id by
+  // another account or kind (e.g. on the other seed) is never restored or refunded here.
+  const totals = await store.taskLedgerTotals(rows.map((r) => ({ taskId: r.taskId, refundTxId: refundTxId(r.taskId), accountId: r.accountId, kind: r.kind })));
   for (const row of rows) {
     if (taskBilling.has(row.taskId)) continue;
     const t = totals.get(row.taskId) ?? { reservedMsat: 0, paidMsat: 0, refundedMsat: 0 };
+    // Already refunded (the process died between the refund row and marking the row settled):
+    // the task is over. Settle the row; never resume or refund it again.
+    if (t.refundedMsat > 0) {
+      await store.markTaskBillingSettled(row.taskId, nowMs, identity.peerId);
+      summary.refunded++;
+      app.log.warn({ taskId: row.taskId, kind: row.kind, reservedMsat: t.reservedMsat, refundedBeforeMsat: t.refundedMsat }, "task_billing_restored_already_refunded");
+      continue;
+    }
     // Restored billing: the refund that settles it is reserve − paid (a refund row already written,
     // e.g. the process died before marking the row settled, is the same tx id and is not repeated).
     taskBilling.set(row.taskId, {

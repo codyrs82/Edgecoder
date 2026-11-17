@@ -105,7 +105,50 @@ async function holdScenario(store: PayoutStore, record: (rows: CreditTransaction
   expect(later.payableMsat).toBe(50_000_000 - 25_000_000); // minus the paid payout (routing fee 0)
 }
 
+/**
+ * Matured earnings spent as cSats leave "earned − paid" high but the balance low; a fresh earning
+ * then raises the balance. It is still under the hold, so it must not become withdrawable through
+ * the balance cap: withdrawable = min(matured earned − paid, balance − held), in the balance (what
+ * auto payouts use too) and in the reservation.
+ */
+async function spentThenFreshScenario(store: PayoutStore, record: (rows: CreditTransaction[]) => Promise<void>, acct: string) {
+  const clock = { now: T0 };
+  const svc = scenario(store, clock);
+  await record([
+    earn(acct, 30_000, T0 - 25 * HOUR),
+    { txId: randomUUID(), accountId: acct, type: "spend", credits: 29_000, reason: "task_reserve", timestampMs: T0 - 24 * HOUR },
+    earn(acct, 20_000, T0 - HOUR)
+  ]);
+  const bal = await svc.balance(acct);
+  // Before: min(30k − 0, balance 21k) = 21k, of which 20k was the held earning.
+  expect(bal).toMatchObject({ earnedMsat: 50_000_000, heldMsat: 20_000_000, payableMsat: 1_000_000 });
+  expect(await svc.withdraw(acct, invoice(5_000_000).bolt11)).toMatchObject({ ok: false, code: "insufficient_payable" });
+  const p: PayoutRecord = { payoutId: randomUUID(), accountId: acct, coordinatorId: "c", kind: "withdraw", bolt11: "lntest", paymentHash: randomBytes(32).toString("hex"), amountMsat: 5_000_000, feeMsat: 0, maxFeeMsat: 0, status: "pending", createdAtMs: T0 };
+  expect(await store.reservePayout(p, () => 1e15, undefined, T0 - HOLD)).toMatchObject({ ok: false, code: "insufficient_payable", payableMsat: 1_000_000 });
+  // Once it matures, it is withdrawable like any earning.
+  clock.now = T0 + HOLD;
+  expect((await svc.balance(acct)).payableMsat).toBe(21_000_000);
+}
+
 describe("earnings hold (memory store)", () => {
+  it("a held earning does not free balance-cap headroom left by spent matured earnings", async () => {
+    const store = new MemoryPayoutStore(() => 0);
+    store.received = 1e12;
+    await spentThenFreshScenario(store, async (rows) => store.recordCreditTransactions(rows), "acct-spent");
+  });
+
+  it("engine-held earnings count as held through the store's callback", async () => {
+    const engine = new CreditEngine();
+    const tx = engine.accrue(
+      { reportId: "r-held", agentId: "eng", taskId: "t", resourceClass: "cpu", cpuSeconds: 100, gpuSeconds: 0, success: true, qualityScore: 1, timestampMs: Date.now() } as never,
+      { queuedTasks: 0, activeAgents: 1 } as never,
+      { msatPerCredit: 1000 }
+    );
+    expect(engine.heldEarnCredits("eng", tx.timestampMs - 1)).toBe(tx.credits);
+    expect(engine.heldEarnCredits("eng", tx.timestampMs)).toBe(0);
+    expect(engine.heldEarnCredits("eng", undefined)).toBe(0);
+  });
+
   it("holds recent earnings out of payable until they mature", async () => {
     const store = new MemoryPayoutStore(() => 0);
     store.received = 1e12;
@@ -159,13 +202,17 @@ describe.skipIf(!PG_URL)("earnings hold (Postgres)", () => {
     await holdScenario(db.a, async (rows) => db.a.recordCreditTransactions(rows), "network:fee_pool");
   });
 
+  it("a held earning does not free balance-cap headroom left by spent matured earnings", async () => {
+    await spentThenFreshScenario(db.a, async (rows) => db.a.recordCreditTransactions(rows), `spent-${randomUUID()}`);
+  });
+
   it("earnedMsat and earnings use the same maturity rule; reservation rechecks it in the transaction", async () => {
     const acct = `hold-${randomUUID()}`;
     await db.a.recordCreditTransactions([earn(acct, 10_000, T0 - HOLD), earn(acct, 5_000, T0 - HOLD + 1)]);
     expect(await db.a.earnedMsat(acct)).toBe(15_000_000);
     expect(await db.a.earnedMsat(acct, T0 - HOLD)).toBe(10_000_000);
-    expect(await db.b.earnings(acct, T0 - HOLD)).toEqual({ totalMsat: 15_000_000, maturedMsat: 10_000_000, oldestHeldAtMs: T0 - HOLD + 1 });
-    expect(await db.b.earnings(acct, undefined)).toEqual({ totalMsat: 15_000_000, maturedMsat: 15_000_000, oldestHeldAtMs: null });
+    expect(await db.b.earnings(acct, T0 - HOLD)).toEqual({ totalMsat: 15_000_000, maturedMsat: 10_000_000, oldestHeldAtMs: T0 - HOLD + 1, heldCredits: 5_000 });
+    expect(await db.b.earnings(acct, undefined)).toEqual({ totalMsat: 15_000_000, maturedMsat: 15_000_000, oldestHeldAtMs: null, heldCredits: 0 });
     const p: PayoutRecord = { payoutId: randomUUID(), accountId: acct, coordinatorId: "c", kind: "withdraw", bolt11: "lntest", paymentHash: randomBytes(32).toString("hex"), amountMsat: 12_000_000, feeMsat: 0, maxFeeMsat: 10_000, status: "pending", createdAtMs: T0 };
     expect(await db.b.reservePayout(p, () => 1e15, undefined, T0 - HOLD)).toMatchObject({ ok: false, code: "insufficient_payable", payableMsat: 10_000_000 });
     expect(await db.b.reservePayout(p, () => 1e15, undefined, T0 - HOLD + 1)).toEqual({ ok: true });

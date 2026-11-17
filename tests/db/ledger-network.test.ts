@@ -185,6 +185,9 @@ describe("coordinator wiring (source)", () => {
 
   it("the in-memory payout store applies the earnings hold cutoff", async () => {
     const { readFileSync } = await import("node:fs");
-    expect(readFileSync("src/swarm/coordinator/payouts.ts", "utf8")).toContain("super((accountId, cutoff) => creditEngine.earnedMsat(accountId, cutoff));");
+    const src = readFileSync("src/swarm/coordinator/payouts.ts", "utf8");
+    expect(src).toContain("(accountId, cutoff) => creditEngine.earnedMsat(accountId, cutoff),");
+    // Held earnings stay out of the withdrawable balance cap in memory mode too.
+    expect(src).toContain("(accountId, cutoff) => creditEngine.heldEarnCredits(accountId, cutoff)");
   });
 });

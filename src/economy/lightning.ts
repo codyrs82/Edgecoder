@@ -27,6 +27,13 @@ export interface SettlementResult {
   paymentHash?: string;
   /** Preimage reported by the node, when available. */
   preimage?: string;
+  /**
+   * For an unpaid invoice, what the node definitively said about it: "open" (still payable until
+   * its expiry), "accepted" (a held HTLC, not final), "canceled" or "expired" (can never be paid).
+   * Absent = unknown (the answer was missing or inconsistent): never grounds to expire an intent.
+   * A lookup that fails (node unreachable, non-2xx) throws instead of returning.
+   */
+  invoiceState?: "open" | "accepted" | "canceled" | "expired";
 }
 
 export interface PayInvoiceInput {
@@ -258,6 +265,10 @@ export function lndDispatcher(certBase64: string | undefined): Dispatcher | unde
  */
 export const LIGHTNING_RPC_TIMEOUT_MS = 15_000;
 
+/** LND payment listing: rows per request, and the most one listing pages through. */
+const LND_PAYMENTS_PAGE = 1000;
+const LND_PAYMENTS_MAX = 100_000;
+
 export class LndRestProvider implements LightningProvider {
   constructor(
     private readonly baseUrl: string,
@@ -428,13 +439,27 @@ export class LndRestProvider implements LightningProvider {
     return interpretLndNodeHealth(info as LndGetInfo, channels as { channels?: LndChannel[] });
   }
 
-  /** GET /v1/payments (incomplete included, so in-flight HTLCs are visible). */
+  /**
+   * GET /v1/payments (incomplete included, so in-flight HTLCs are visible), paged by index_offset
+   * up to `limit` rows in all; `truncated` only when more remain past that.
+   */
   async listPayments(input: { sinceMs: number; limit?: number }): Promise<NodePaymentList> {
-    const limit = Math.max(1, Math.min(10_000, Math.floor(input.limit ?? 1000)));
+    const limit = Math.max(1, Math.min(LND_PAYMENTS_MAX, Math.floor(input.limit ?? 1000)));
+    const pageSize = Math.min(limit, LND_PAYMENTS_PAGE);
     const start = Math.max(0, Math.floor(input.sinceMs / 1000));
-    const body = (await this.getJson(`/v1/payments?include_incomplete=true&max_payments=${limit}&creation_date_start=${start}`)) as { payments?: LndPayment[] };
-    const payments = interpretLndPayments(body);
-    return { supported: true, payments, truncated: payments.length >= limit };
+    const payments: NodePayment[] = [];
+    let offset = "0";
+    for (;;) {
+      const body = (await this.getJson(`/v1/payments?include_incomplete=true&max_payments=${pageSize}&creation_date_start=${start}&index_offset=${offset}`)) as { payments?: LndPayment[]; last_index_offset?: string };
+      const page = interpretLndPayments(body);
+      payments.push(...page);
+      if (page.length < pageSize) return { supported: true, payments, truncated: false };
+      if (payments.length >= limit) return { supported: true, payments: payments.slice(0, limit), truncated: true };
+      const next = typeof body.last_index_offset === "string" && /^\d+$/.test(body.last_index_offset) ? body.last_index_offset : undefined;
+      // A full page without a usable, advancing cursor: report the list as incomplete.
+      if (!next || BigInt(next) <= BigInt(offset)) return { supported: true, payments, truncated: true };
+      offset = next;
+    }
   }
 
   private async getJson(path: string): Promise<unknown> {
@@ -466,7 +491,10 @@ export class LndRestProvider implements LightningProvider {
       bodyTimeout: this.rpcTimeoutMs
     });
     if (res.statusCode < 200 || res.statusCode >= 300) {
-      return { settled: false };
+      // Not an answer about the invoice (node restarting, proxy error): the caller must not treat
+      // it as "unpaid", or a paid intent could be expired and never credited.
+      await res.body.dump();
+      throw new Error(`lnd_invoice_lookup_${res.statusCode}`);
     }
     const body = (await res.body.json()) as LndInvoice;
     return interpretLndInvoice(body, hashHex);
@@ -499,7 +527,12 @@ export interface LndInvoice {
  */
 export function interpretLndInvoice(body: LndInvoice, hashHex: string): SettlementResult {
   const settled = body.state !== undefined ? body.state === "SETTLED" : body.settled === true;
-  if (!settled) return { settled: false };
+  if (!settled) {
+    // Only an invoice that is ours (the hash we asked for) says anything definitive about the intent.
+    const ours = body.r_hash !== undefined && lndHashToHex(body.r_hash) === hashHex;
+    const state = body.state === "OPEN" ? "open" : body.state === "ACCEPTED" ? "accepted" : body.state === "CANCELED" ? "canceled" : undefined;
+    return ours && state ? { settled: false, invoiceState: state } : { settled: false };
+  }
   if (!body.r_hash || !body.r_preimage || body.value_msat === undefined || body.amt_paid_msat === undefined) {
     return { settled: false };
   }
@@ -824,7 +857,7 @@ export class ClnRestProvider implements LightningProvider {
     });
     if (res.statusCode < 200 || res.statusCode >= 300) {
       await res.body.dump();
-      return { settled: false };
+      throw new Error(`cln_invoice_lookup_${res.statusCode}`);
     }
     const body = (await res.body.json()) as { invoices?: ClnInvoice[] };
     return interpretClnInvoices(body.invoices ?? [], { hashHex, bolt11: invoiceRef });
@@ -862,7 +895,11 @@ export function interpretClnInvoices(
     if (expected.hashHex) return h === expected.hashHex;
     return Boolean(expected.bolt11) && i.bolt11 === expected.bolt11;
   });
-  if (!match || match.status !== "paid") return { settled: false };
+  if (!match) return { settled: false };
+  if (match.status !== "paid") {
+    const state = match.status === "unpaid" ? "open" : match.status === "expired" ? "expired" : undefined;
+    return state ? { settled: false, invoiceState: state } : { settled: false };
+  }
   const hashHex = match.payment_hash?.toLowerCase();
   if (!hashHex || !/^[0-9a-f]{64}$/.test(hashHex)) return { settled: false };
   const preimage = match.payment_preimage?.toLowerCase();

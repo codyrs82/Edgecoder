@@ -78,7 +78,11 @@ export const payoutPolicy = payoutPolicyFromEnv(BITCOIN_NETWORK);
 }
 class EnginePayoutStore extends MemoryPayoutStore {
   constructor() {
-    super((accountId, cutoff) => creditEngine.earnedMsat(accountId, cutoff));
+    super(
+      (accountId, cutoff) => creditEngine.earnedMsat(accountId, cutoff),
+      () => 0,
+      (accountId, cutoff) => creditEngine.heldEarnCredits(accountId, cutoff)
+    );
   }
   override async creditBalance(accountId: string): Promise<number> {
     return creditEngine.balance(accountId) + (await super.creditBalance(accountId));

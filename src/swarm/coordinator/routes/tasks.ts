@@ -13,7 +13,7 @@ import type { ResourceClass, Subtask } from "../../../common/types.js";
 import { signPayload } from "../../../mesh/peer.js";
 import { verifyForwardedResult } from "../../../mesh/peer-trust.js";
 import { buildAgentEnvelope, verifyForwardedAgentEnvelope } from "../../../mesh/forwarded-agent-envelope.js";
-import { DuplicateDebitError, rewardAccountForAgent, spendCredits } from "../../../credits/store.js";
+import { DuplicateDebitError, rewardAccountForAgent, spendCredits, taskReserveKey } from "../../../credits/store.js";
 import { msatToCSats } from "../../../economy/job-pricing.js";
 import { pgStore } from "../../../db/store.js";
 import { resolveRequestedClass, type ComputeClassId } from "../../../economy/compute-classes.js";
@@ -179,10 +179,14 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         const perSubtask = subtaskReserveMsat(body.resourceClass as ResourceClass, (early.computeClass ?? "any") as ComputeClassId | "any", SUBTASK_RESERVE_TIMEOUT_MS, early.msatPerCredit);
         // Durable billing first (stress finding 2): a restart resumes or refunds the task. Amounts
         // are read back from the ledger, so a row whose debit never happened refunds nothing.
-        await pgStore?.insertTaskBilling({ taskId: body.taskId, coordinatorId: identity.peerId, accountId: body.submitterAccountId, kind: "job", perSubtaskReserveMsat: perSubtask, createdAtMs: Date.now() })
-          .catch((err) => req.log.warn({ err, taskId: body.taskId }, "task_billing_persist_failed"));
-        // One charge per task id network-wide: the same task sent again (retry, or to the other seed) is refused.
-        await spendCredits(body.submitterAccountId, msatToCSats(perSubtask), "task_reserve", body.taskId, { idempotencyKey: `task_reserve:${body.taskId}` });
+        // The row is also the task id's one billing record network-wide: an id already billed on
+        // the other seed, or by another account or kind, is refused before anything is debited.
+        if (pgStore) {
+          const billingRow = await pgStore.insertTaskBilling({ taskId: body.taskId, coordinatorId: identity.peerId, accountId: body.submitterAccountId, kind: "job", perSubtaskReserveMsat: perSubtask, createdAtMs: Date.now() });
+          if (billingRow === "conflict") return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
+        }
+        // One charge per task id network-wide: one reserve key per task id, whatever its kind.
+        await spendCredits(body.submitterAccountId, msatToCSats(perSubtask), "task_reserve", body.taskId, { idempotencyKey: taskReserveKey(body.taskId) });
         taskBilling.set(body.taskId, { accountId: body.submitterAccountId, reservedMsat: perSubtask, perSubtaskReserveMsat: perSubtask, costMsat: 0, refunded: false });
         usagePending.set(body.taskId, { id: body.taskId, accountId: body.submitterAccountId, atMs: Date.now(), kind: "job", placement: "network", computeClass: early.computeClass ?? undefined, ok: false, durationMs: 0, costMsat: 0, ...(body.source ? { source: body.source } : {}) });
       } catch (err) {

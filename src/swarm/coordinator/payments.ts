@@ -15,7 +15,9 @@ import type {
 } from "../../common/types.js";
 import { NETWORK_FEE_POOL_ACCOUNT, grantCredits } from "../../credits/store.js";
 import { pgStore } from "../../db/store.js";
-import { createPaymentSettler, reconcilePaymentIntent } from "../../economy/payment-settlement.js";
+import { createPaymentSettler, mayExpireIntent, reconcilePaymentIntent } from "../../economy/payment-settlement.js";
+import type { SettlementResult } from "../../economy/lightning.js";
+import { app } from "./app.js";
 import {
   ISSUANCE_RECALC_MS,
   ISSUANCE_COORDINATOR_SHARE,
@@ -123,29 +125,78 @@ export const settleIfPaid = createPaymentSettler({
 });
 
 // Grace on top of the TTL so a payment made just before expiry is still picked up.
-const PAYMENT_INTENT_EXPIRY_GRACE_MS = CC.PAYMENT_INTENT_EXPIRY_GRACE_MS;
+export const PAYMENT_INTENT_EXPIRY_GRACE_MS = CC.PAYMENT_INTENT_EXPIRY_GRACE_MS;
+/** An invoice the node still calls "open" this long after TTL + grace is expired too (the node refuses payment past expiry). */
+const OPEN_INVOICE_EXPIRY_MARGIN_MS = 10 * 60_000;
 
-/** #42 review: always ask the node first; expire only an unpaid intent past TTL + grace. */
+/** #42 review: always ask the node first; expire only on the node's definitive unpaid state, past TTL + grace. */
 export function reconcileIntent(intent: PaymentIntent): Promise<"settled" | "expired" | "pending"> {
   return reconcilePaymentIntent(intent, settleIfPaid, expireIntentIfStale);
 }
 
-async function expireIntentIfStale(intent: PaymentIntent): Promise<boolean> {
-  if (Date.now() - intent.createdAtMs <= PAYMENT_INTENT_TTL_MS + PAYMENT_INTENT_EXPIRY_GRACE_MS) return false;
+async function expireIntentIfStale(intent: PaymentIntent, invoiceState: SettlementResult["invoiceState"]): Promise<boolean> {
+  if (!mayExpireIntent(invoiceState, Date.now() - intent.createdAtMs, PAYMENT_INTENT_TTL_MS, PAYMENT_INTENT_EXPIRY_GRACE_MS, OPEN_INVOICE_EXPIRY_MARGIN_MS)) return false;
   const expired: PaymentIntent = { ...intent, status: "expired" };
   paymentIntents.set(expired.intentId, expired);
   await pgStore?.upsertPaymentIntent(expired);
   return true;
 }
 
+/** How far back late-settlement recovery re-checks intents marked expired. */
+export const LATE_SETTLEMENT_LOOKBACK_MS = 7 * 24 * 60 * 60_000;
+/** Late-settlement recovery cadence. */
+export const LATE_SETTLEMENT_RECOVERY_INTERVAL_MS = 10 * 60_000;
+const LATE_SETTLEMENT_PAGE = 200;
+const LATE_SETTLEMENT_MAX_PER_RUN = 5_000;
+
+/**
+ * Late-settlement recovery (M4): intents marked expired in the last LATE_SETTLEMENT_LOOKBACK_MS are
+ * asked about again; any the node reports paid are credited (expired -> settled, once per intent
+ * and payment hash: the same atomic settle as every other path). Stops at the first failed lookup
+ * (the node is down; the next run retries).
+ */
+export async function recoverLateSettlements(nowMs = Date.now()): Promise<{ scanned: number; recovered: number; stoppedOnError?: string }> {
+  const sinceMs = nowMs - LATE_SETTLEMENT_LOOKBACK_MS;
+  let scanned = 0;
+  let recovered = 0;
+  let after: { createdAtMs: number; intentId: string } | undefined;
+  for (;;) {
+    const page = pgStore
+      ? await pgStore.listExpiredPaymentIntentsSince(sinceMs, LATE_SETTLEMENT_PAGE, after)
+      : after ? [] : [...paymentIntents.values()].filter((i) => i.status === "expired" && i.createdAtMs >= sinceMs);
+    if (page.length === 0) break;
+    for (const intent of page) {
+      scanned += 1;
+      const outcome = await settleIfPaid(intent, { allowExpired: true });
+      if (outcome.status === "unknown") return { scanned, recovered, stoppedOnError: outcome.error };
+      if (outcome.status === "settled") {
+        recovered += 1;
+        app.log.warn({ intentId: intent.intentId, accountId: intent.accountId, amountSats: intent.amountSats, createdAtMs: intent.createdAtMs }, "payment_intent_late_settlement_recovered");
+      }
+      if (scanned >= LATE_SETTLEMENT_MAX_PER_RUN) return { scanned, recovered };
+    }
+    if (!pgStore || page.length < LATE_SETTLEMENT_PAGE) break;
+    const last = page[page.length - 1]!;
+    after = { createdAtMs: last.createdAtMs, intentId: last.intentId };
+  }
+  return { scanned, recovered };
+}
+
 /** Unpaid, unexpired invoices one account may hold (an invoice flood starves the reconcile loop). */
 export const MAX_OPEN_INTENTS_PER_ACCOUNT = 5;
+/** In-memory count (memory mode); openIntentCountFor reads the shared database when there is one. */
 export function openIntentCount(accountId: string, nowMs = Date.now()): number {
   let n = 0;
   for (const intent of paymentIntents.values()) {
-    if (intent.accountId === accountId && intent.status === "created" && nowMs - intent.createdAtMs <= PAYMENT_INTENT_TTL_MS) n += 1;
+    if (intent.accountId === accountId && intent.status === "created" && nowMs - intent.createdAtMs <= PAYMENT_INTENT_TTL_MS + PAYMENT_INTENT_EXPIRY_GRACE_MS) n += 1;
   }
   return n;
+}
+/** Open invoices of one account across every coordinator sharing the database (both seeds). */
+export async function openIntentCountFor(accountId: string, nowMs = Date.now()): Promise<number> {
+  if (!pgStore) return openIntentCount(accountId, nowMs);
+  const rows = await pgStore.listPaymentIntentsForAccountSince(accountId, nowMs - PAYMENT_INTENT_TTL_MS - PAYMENT_INTENT_EXPIRY_GRACE_MS);
+  return rows.filter((i) => i.status === "created").length;
 }
 
 /** Invoice creation outcomes for production alerting (src/swarm/coordinator/alerts.ts, purchase failure rate). */
@@ -191,11 +242,12 @@ export async function createPaymentIntent(accountId: string, amountSats: number,
 /** Paid and payable purchases of one account in the soft-launch window (Postgres when shared, else memory). */
 export async function launchUsageFor(accountId: string, nowMs = Date.now()): Promise<{ boughtWindowSats: number; openCreditsSats: number }> {
   const rows = pgStore ? await pgStore.listPaymentIntentsForAccountSince(accountId, nowMs - LAUNCH_WINDOW_MS) : paymentIntents.values();
-  return launchBuyUsage(rows, accountId, nowMs, PAYMENT_INTENT_TTL_MS);
+  // An invoice can still be paid (and credited) until TTL + grace: it counts against the cap until then.
+  return launchBuyUsage(rows, accountId, nowMs, PAYMENT_INTENT_TTL_MS + PAYMENT_INTENT_EXPIRY_GRACE_MS);
 }
 
-// One purchase check-and-create at a time per account on this instance, so two concurrent buys
-// cannot both pass the caps. (Instances sharing a database can each let one through.)
+// One purchase check-and-create at a time per account: across every coordinator on the shared
+// database (a Postgres advisory lock), and in this process when there is none.
 const launchBuyLocks = new Map<string, Promise<unknown>>();
 
 /**
@@ -204,15 +256,17 @@ const launchBuyLocks = new Map<string, Promise<unknown>>();
  */
 export async function createPaymentIntentWithinLaunchCaps(accountId: string, amountSats: number): Promise<{ intent: PaymentIntent } | { violation: LaunchBuyViolation }> {
   if (launchConfig.mode !== "invite") return { intent: await createPaymentIntent(accountId, amountSats) };
-  const previous = launchBuyLocks.get(accountId) ?? Promise.resolve();
-  const run = previous.catch(() => undefined).then(async () => {
+  const checkAndCreate = async (): Promise<{ intent: PaymentIntent } | { violation: LaunchBuyViolation }> => {
     const usage = await launchUsageFor(accountId);
     const balanceSats = pgStore ? await pgStore.creditBalance(accountId) : creditEngine.balance(accountId);
     const { netSats } = computeIntentFee(amountSats, COORDINATOR_FEE_BPS);
     const violation = checkLaunchBuy({ amountSats, newCreditsSats: netSats, balanceSats, ...usage }, launchConfig);
     if (violation) return { violation };
     return { intent: await createPaymentIntent(accountId, amountSats) };
-  });
+  };
+  const previous = launchBuyLocks.get(accountId) ?? Promise.resolve();
+  const store = pgStore;
+  const run = previous.catch(() => undefined).then(() => (store ? store.withAccountPurchaseLock(accountId, checkAndCreate) : checkAndCreate()));
   launchBuyLocks.set(accountId, run);
   try {
     return await run;

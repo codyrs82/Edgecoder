@@ -258,6 +258,24 @@ describe("provider reconciliation reads", () => {
       await expect(p.getBalances()).rejects.toThrow(/lnd_http_500/);
     });
 
+    it("LND: pages /v1/payments by index_offset past one page; truncated only beyond the limit", async () => {
+      const lnd = agent.get("https://lnd.test:8080");
+      const pay = (i: number) => ({ payment_hash: i.toString(16).padStart(64, "0"), status: "SUCCEEDED", value_msat: "1000", fee_msat: "0", creation_date: "1700000000" });
+      const page = (from: number, n: number) => Array.from({ length: n }, (_, k) => pay(from + k));
+      const at = (offset: string) => (p: string) => p.startsWith("/v1/payments?") && p.includes(`index_offset=${offset}`) && p.includes("max_payments=1000");
+      lnd.intercept({ path: at("0"), method: "GET" }).reply(200, { payments: page(1, 1000), last_index_offset: "1000" });
+      lnd.intercept({ path: at("1000"), method: "GET" }).reply(200, { payments: page(1001, 1000), last_index_offset: "2000" });
+      lnd.intercept({ path: at("2000"), method: "GET" }).reply(200, { payments: page(2001, 5), last_index_offset: "2005" });
+      const p = new LndRestProvider("https://lnd.test:8080", "mac");
+      const all = await p.listPayments({ sinceMs: 0, limit: 50_000 });
+      expect(all.supported && all.payments.length).toBe(2005);
+      expect(all.supported && all.truncated).toBe(false);
+      // Cut off at the limit: reported as truncated.
+      lnd.intercept({ path: at("0"), method: "GET" }).reply(200, { payments: page(1, 1000), last_index_offset: "1000" });
+      const cut = await p.listPayments({ sinceMs: 0, limit: 1000 });
+      expect(cut.supported && cut.truncated).toBe(true);
+    });
+
     it("CLN: c-lightning-REST balance and listPays", async () => {
       const cln = agent.get("https://cln.test:3001");
       cln.intercept({ path: "/v1/getBalance", method: "GET" }).reply(200, { confBalance: 10, unconfBalance: 0 });

@@ -273,6 +273,14 @@ export async function grantCreditsIdempotent(accountId: string, credits: number,
   return creditEngine.addIfAbsent(tx);
 }
 
+/**
+ * Idempotency key of a task's reserve debit: one per task id whatever its kind (a code job's
+ * task_reserve or a model call's inference_reserve), so the same id can never be reserved twice.
+ */
+export function taskReserveKey(taskId: string): string {
+  return `reserve:${taskId}`;
+}
+
 /** Deterministic tx id for the one-time refund of a task's submit charge (#160). */
 export function refundTxId(taskId: string): string {
   return `task_submit_refund:${createHash("sha256").update(taskId).digest("hex").slice(0, 32)}`;
