@@ -25,6 +25,7 @@
 set -euo pipefail
 
 VLLM_VERSION="${VLLM_VERSION:-0.33.0}"
+UV_VERSION="${UV_VERSION:-0.8.0}"   # only used when the system has no usable Python
 PREFIX=/opt/edgecoder/vllm
 STATE=/var/lib/edgecoder
 ETC=/etc/edgecoder
@@ -137,13 +138,18 @@ PY=""
 for v in 3.14 3.13 3.12 3.11; do command -v "python$v" >/dev/null && py_ok "python$v" && { PY="$(command -v "python$v")"; break; }; done
 STANDALONE=0
 if [ -z "$PY" ]; then
-  command -v curl >/dev/null || { apt-get update -q; apt-get install -y -q curl; }
-  export UV_INSTALL_DIR="$PREFIX/uv" UV_PYTHON_INSTALL_DIR="$PREFIX/python" UV_NO_MODIFY_PATH=1
+  # uv (a pinned version from PyPI, in its own venv on the system Python) fetches the standalone Python.
+  export UV_PYTHON_INSTALL_DIR="$PREFIX/python"
   install -d -m 0755 "$PREFIX"
-  [ -x "$PREFIX/uv/uv" ] || { echo "install-vllm: installing uv (Python manager) in $PREFIX/uv"; curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null; }
+  if [ ! -x "$PREFIX/uv/bin/uv" ]; then
+    echo "install-vllm: installing uv $UV_VERSION (Python manager) in $PREFIX/uv"
+    python3 -c 'import ensurepip' >/dev/null 2>&1 || { apt-get update -q; apt-get install -y -q python3-venv; }
+    python3 -m venv "$PREFIX/uv"
+    "$PREFIX/uv/bin/pip" install -q "uv==$UV_VERSION" || die "could not install uv $UV_VERSION"
+  fi
   echo "install-vllm: installing a standalone Python 3.12 in $PREFIX/python"
-  "$PREFIX/uv/uv" python install 3.12 >/dev/null || die "could not install Python 3.12; vLLM needs Python 3.11.4 to 3.14"
-  PY="$("$PREFIX/uv/uv" python find 3.12)"
+  "$PREFIX/uv/bin/uv" python install 3.12 >/dev/null || die "could not install Python 3.12; vLLM needs Python 3.11.4 to 3.14"
+  PY="$("$PREFIX/uv/bin/uv" python find 3.12)"
   py_ok "$PY" || die "Python at $PY is not usable for vLLM"
   STANDALONE=1
 fi
