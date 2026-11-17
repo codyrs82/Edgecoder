@@ -7,7 +7,6 @@ struct RootTabView: View {
     @EnvironmentObject private var chatRouter: ChatRouter
     @EnvironmentObject private var purchasePolicy: PurchasePolicy
     @EnvironmentObject private var networkStatus: NetworkStatusStore
-    @StateObject private var bt = BluetoothTransport.shared
     @State private var selectedTab: AppTab = .chat
     @State private var showLoginSheet = false
 
@@ -33,12 +32,11 @@ struct RootTabView: View {
                     Label("Wallet", systemImage: "wallet.pass")
                 }
 
-            IDEView()
-                .tag(AppTab.edgecoder)
+            MachinesView()
+                .tag(AppTab.machines)
                 .tabItem {
-                    Label("EdgeCoder", systemImage: "laptopcomputer.and.iphone")
+                    Label("Machines", systemImage: "server.rack")
                 }
-                .badge(runningTaskCount > 0 ? runningTaskCount : 0)
         }
         .tint(Theme.accent)
         .task {
@@ -84,17 +82,13 @@ struct RootTabView: View {
                 .environmentObject(sessionStore)
         }
     }
-
-    private var runningTaskCount: Int {
-        bt.ideTasks.filter { $0.status == .running }.count
-    }
 }
 
 private enum AppTab {
     case chat
     case bots
     case wallet
-    case edgecoder
+    case machines
 }
 
 // MARK: - Login Sheet (replaces Auth tab)

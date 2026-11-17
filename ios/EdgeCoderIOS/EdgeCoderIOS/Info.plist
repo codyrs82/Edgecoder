@@ -54,7 +54,7 @@
 		<true/>
 	</dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>EdgeCoder uses Bluetooth to share your device's AI compute with nearby Mac nodes when internet is unavailable, enabling local AI task execution without a coordinator.</string>
+	<string>EdgeCoder uses Bluetooth to share your device's AI compute with nearby machines when internet is unavailable, enabling local AI task execution without a coordinator.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>EdgeCoder advertises as a Bluetooth peripheral to allow nearby devices to discover and route tasks.</string>
 	<key>NSLocalNetworkUsageDescription</key>

@@ -99,7 +99,7 @@ final class PortalAPIParsingTests: XCTestCase {
     func testBotsListWithPendingAndNewBotBody() throws {
         let json = ##"{"machines":[],"bots":[],"pending":[{"requestId":"req-12345678","botId":"web-1","name":"Docs","role":"","color":"#6e56cf","state":"waiting","target":null,"machineName":null,"createdAtMs":1}],"targets":[{"agentId":"a1","machineName":"Mac","online":true,"canCreate":true}],"canCreate":true}"##
         let r = try JSONDecoder().decode(BotsListResponse.self, from: Data(json.utf8))
-        XCTAssertEqual(r.pending?.first.map(BotsFormat.pendingState), "Waiting for a Mac to come online")
+        XCTAssertEqual(r.pending?.first.map(BotsFormat.pendingState), "Waiting for a machine to come online")
         XCTAssertEqual(r.targets?.first?.agentId, "a1")
         let body = try JSONSerialization.jsonObject(with: JSONEncoder().encode(NewBotRequest(requestId: "req-12345678", agentId: nil, bot: .init(name: "Docs", role: "", instructions: "")))) as? [String: Any]
         XCTAssertTrue(body?["agentId"] is NSNull)

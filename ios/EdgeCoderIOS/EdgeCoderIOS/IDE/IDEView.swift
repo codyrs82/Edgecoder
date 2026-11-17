@@ -1,10 +1,13 @@
 /**
- * IDEView — shows IDE tasks that have been offloaded from a nearby Mac
+ * IDEView — shows IDE tasks that have been offloaded from a nearby machine
  * to this iPhone over Bluetooth Local.
  *
- * When a Mac running the EdgeCoder IDE connects via BLE and sends an
+ * Not in the tab bar (the Machines tab replaced it): nothing in the app starts
+ * BluetoothTransport's peripheral, so this view is kept compiled but unreachable.
+ *
+ * When a machine running the EdgeCoder IDE connects via BLE and sends an
  * inference request, it appears here in real-time. The user can see:
- *  - The prompt sent from the Mac
+ *  - The prompt sent from the machine
  *  - Whether the task is still running or complete
  *  - The generated output
  *  - How long the phone took (durationMs)
@@ -51,23 +54,11 @@ struct IDEView: View {
             Text("No IDE Tasks Yet")
                 .font(.title2.bold())
 
-            Text("When a Mac running the EdgeCoder IDE sends a task over Bluetooth Local, it will appear here.")
+            Text("When a nearby machine running the EdgeCoder IDE sends a task over Bluetooth Local, it will appear here.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 40)
-
-            if !bt.isAdvertising {
-                VStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .foregroundStyle(.orange)
-                    Text("Go to Swarm → set mode to Bluetooth Local to start accepting tasks.")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 40)
-                }
-            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -89,7 +80,7 @@ struct IDEView: View {
     @ViewBuilder
     private var connectionBadge: some View {
         if bt.connectedCentralCount > 0 {
-            Label("\(bt.connectedCentralCount) Mac", systemImage: "laptopcomputer")
+            Label(bt.connectedCentralCount == 1 ? "1 machine" : "\(bt.connectedCentralCount) machines", systemImage: "laptopcomputer")
                 .font(.caption)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
