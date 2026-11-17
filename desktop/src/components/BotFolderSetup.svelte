@@ -1,6 +1,6 @@
 <script lang="ts">
   // "Set up Harry's folder": a bot made on the web arrives here without a folder and doesn't run
-  // until someone at this computer picks one (#409). The web's folder is only a suggestion, and an
+  // until someone at this machine picks one (#409). The web's folder is only a suggestion, and an
   // Auto mode asked for on the web is only turned on when it's confirmed here. The provider enforces
   // both (BotManager.setupFolder is reached only from this app).
   import { untrack } from "svelte";
@@ -72,7 +72,7 @@
     <h3 id="folder-setup-title">Set up {bot.name}'s folder</h3>
   </div>
   <p class="fs-lead">
-    {bot.name} was made on the web. It keeps its notes and files in a folder on this computer, and doesn't run until you choose one.
+    {bot.name} was made on the web. It keeps its notes and files in a folder on this machine, and doesn't run until you choose one.
     {#if bot.repository}Then {bot.repository} is cloned into your projects folder.{/if}
   </p>
   {#if bot.setup?.suggestedFolder}

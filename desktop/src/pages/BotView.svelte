@@ -136,7 +136,7 @@
     const n = failureNotice(bot);
     return n && !dismissed.includes(n.runId) ? n : null;
   });
-  // Where the current (or last) run's model calls run: this computer, your machines, the network or your key.
+  // Where the current (or last) run's model calls run: this machine, your other machines, the network or your key.
   const placement = $derived.by(() => {
     const runId = bot.lastRun?.id;
     const reply = runId ? [...messages].reverse().find((m) => m.role === "assistant" && m.runId === runId) : undefined;

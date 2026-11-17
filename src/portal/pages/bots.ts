@@ -19,11 +19,11 @@ import { QUOTE_SELECTION_BROWSER_LIB, QUOTE_SELECTION_CSS, quoteSelectionScript 
  *
  *   New bot (web create)             a dialog with the desktop form's fields plus "Runs on" (one of your
  *                                 machines, or the first that connects). It waits as "pending" until a
- *                                 Mac made it, then shows as "Needs folder" until someone at that Mac
+ *                                 machine made it, then shows as "Needs folder" until someone at that machine
  *                                 picks its folder (the web can only suggest one).
  *
- * The bots keep running on their Mac; everything here goes through /portal/api/bots (the owner's
- * session; the coordinator checks the machine's verified owner). When the Mac is offline the page
+ * The bots keep running on their machine; everything here goes through /portal/api/bots (the owner's
+ * session; the coordinator checks the machine's verified owner). When the machine is offline the page
  * is read-only with the last conversation it published. Updates are polled (faster while the bot
  * works). Bot values reach innerHTML only through escapeHtml.
  */
@@ -155,7 +155,11 @@ export function registerBotsPage(app: FastifyInstance): void {
       .bot-edit label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--text-secondary); }
       .bot-edit .row2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
       .bot-edit textarea { min-height:90px; resize:vertical; }
-      .bot-edit .trig { flex-direction:row; align-items:center; gap:8px; font-size:13px; color:var(--text); }
+      .bot-edit .trig { flex-direction:row; align-items:center; gap:8px; margin:0; font-size:13px; font-weight:400; letter-spacing:normal; text-transform:none; color:var(--text); }
+      .bot-edit .trig input[type="checkbox"] { width:auto; min-height:0; margin:0; padding:0; flex:none; }
+      .bot-edit .trig input.trig-label { width:120px; min-height:0; padding:2px 6px; font-size:12px; }
+      .bot-edit fieldset legend { font-size:12px; color:var(--text-secondary); padding:0 4px; }
+      .bot-edit fieldset:disabled .trig { color:var(--muted); }
       .bot-edit .foot { display:flex; justify-content:flex-end; gap:8px; }
       .bots-toolbar { display:flex; justify-content:flex-end; margin-bottom:12px; }
       .bot-card.pending { border-style:dashed; }
@@ -185,7 +189,7 @@ export function registerBotsPage(app: FastifyInstance): void {
       <dialog class="bot-edit" id="bnDialog" aria-labelledby="bnTitle">
         <form id="bnForm" method="dialog" novalidate>
           <h3 id="bnTitle" class="u-m-0">New bot</h3>
-          <p class="muted u-fs-12 u-m-0">It runs on one of your Macs. When it gets there, the EdgeCoder app asks for its folder; it starts once you pick one there.</p>
+          <p class="muted u-fs-12 u-m-0">It runs on one of your machines. When it gets there, the EdgeCoder app asks for its folder; it starts once you pick one there.</p>
           <label>Start from<select name="template" id="bnTemplate"></select></label>
           <div class="row2">
             <label>Name<input name="name" maxlength="60" required placeholder="Harry" /></label>
@@ -206,13 +210,13 @@ export function registerBotsPage(app: FastifyInstance): void {
             <label id="bnClassWrap" hidden>Network class<select name="computeClass" id="bnClass"></select></label>
           </div>
           <label>Permissions<select name="mode" id="bnMode"></select><span class="hint" id="bnModeHint"></span></label>
-          <label>GitHub repository (optional)<input name="repository" maxlength="500" placeholder="owner/repo" autocomplete="off" /><span class="hint">Cloned into your projects folder on the Mac once its folder is set.</span></label>
-          <fieldset class="u-m-0" id="bnTriggers"><legend class="u-fs-12">GitHub triggers (need a repository)</legend>
-            <label class="trig"><input type="checkbox" name="trigPr" /> PR opened or updated by others</label>
-            <label class="trig"><input type="checkbox" name="trigCi" /> CI failed on the default branch or a PR</label>
-            <label class="trig"><input type="checkbox" name="trigIssue" /> Issue labeled <input name="trigIssueLabel" maxlength="100" placeholder="bot" class="u-fs-12" /></label>
+          <label>GitHub repository (optional)<input name="repository" maxlength="500" placeholder="owner/repo" autocomplete="off" /><span class="hint">Cloned on the machine that runs the bot, once its folder is set.</span></label>
+          <fieldset class="u-m-0" id="bnTriggers" disabled><legend>GitHub triggers</legend>
+            <span class="hint" id="bnTriggersHint">Add a repository to use triggers</span>
+            <label class="trig"><input type="checkbox" name="trigPr" />PR opened or updated by others</label>
+            <label class="trig"><input type="checkbox" name="trigCi" />CI failed on the default branch or a PR</label>
+            <label class="trig"><input type="checkbox" name="trigIssue" />Issue labeled<input name="trigIssueLabel" class="trig-label" maxlength="100" placeholder="bot" aria-label="Issue label" /></label>
           </fieldset>
-          <label>Folder on the Mac (suggestion)<input name="suggestedFolder" maxlength="1000" placeholder="~/EdgeCoder/Bots/Harry" autocomplete="off" /><span class="hint">Only a suggestion: the Mac asks before it uses or creates any folder.</span></label>
           <div id="bnError" class="callout danger u-m-0" role="alert" hidden></div>
           <div class="foot"><button type="button" id="bnCancel">Cancel</button><button type="submit" class="primary" id="bnSave">Create bot</button></div>
         </form>
@@ -285,7 +289,7 @@ export function registerBotsPage(app: FastifyInstance): void {
           </div>
           <label>Compute<select name="computePolicy" id="bpEditCompute"></select></label>
           <fieldset class="u-m-0" id="bpEditTriggers"><legend class="u-fs-12">GitHub triggers</legend></fieldset>
-          <p class="muted u-fs-12 u-m-0">Its folder, repository, tools and auto-approval are changed on the Mac.</p>
+          <p class="muted u-fs-12 u-m-0">Its folder, repository, tools and auto-approval are changed on the machine.</p>
           <div id="bpEditError" class="callout danger u-m-0" role="alert" hidden></div>
           <div class="foot"><button type="button" id="bpEditCancel">Cancel</button><button type="submit" class="primary" id="bpEditSave">Save</button></div>
         </form>
@@ -330,7 +334,7 @@ const BOTS_PAGE_JS = String.raw`
     function when(ms) { return new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); }
     function setText(id, text) { var el = document.getElementById(id); if (el) el.textContent = text; }
 
-    /* Commands go to the bot's Mac through the coordinator; the answer is polled. */
+    /* Commands go to the bot's machine through the coordinator; the answer is polled. */
     async function command(action, args) {
       var r = await api("/portal/api/bots/" + encodeURIComponent(agentId) + "/" + encodeURIComponent(botId) + "/commands", { method: "POST", body: JSON.stringify({ action: action, args: args || {} }) });
       var id = r.commandId, end = Date.now() + 25000, wait = 400;
@@ -339,17 +343,17 @@ const BOTS_PAGE_JS = String.raw`
         wait = Math.min(1500, wait + 200);
         var s = await api("/portal/api/bots/" + encodeURIComponent(agentId) + "/commands/" + encodeURIComponent(id), { method: "GET", headers: {} }).catch(function() { return null; });
         if (!s) continue;
-        if (s.status === "expired") throw new Error("Your Mac didn't answer. Is the EdgeCoder app running?");
+        if (s.status === "expired") throw new Error("Your machine didn't answer. Is the EdgeCoder app running?");
         if (s.result) {
           if (s.result.status !== "done") throw new Error(s.result.message || s.result.error || "Refused");
           return s.result.data;
         }
       }
-      throw new Error("Your Mac didn't answer in time.");
+      throw new Error("Your machine didn't answer in time.");
     }
     function commandError(err) {
       var m = String((err && err.message) || err);
-      var words = { agent_not_connected: "Your Mac is offline.", not_your_machine: "That bot isn't on one of your machines.", rate_limited: "Too many changes at once; try again in a minute.", view_only: "This Mac shows its bots read-only." };
+      var words = { agent_not_connected: "Your machine is offline.", not_your_machine: "That bot isn't on one of your machines.", rate_limited: "Too many changes at once; try again in a minute.", view_only: "This machine shows its bots read-only." };
       showToast(words[m] || m, true);
     }
 
@@ -357,8 +361,8 @@ const BOTS_PAGE_JS = String.raw`
     var listState = { targets: [], pending: [], timer: null };
     function pendingLine(p) {
       if (p.state === "failed") return "Couldn't create it" + (p.message ? ": " + p.message : p.error ? " (" + p.error + ")" : "");
-      if (p.state === "sent") return "Sending to " + (p.machineName || "your Mac") + "…";
-      return p.target ? "Waiting for " + (p.machineName || p.target) + " to come online" : "Waiting for one of your Macs to come online";
+      if (p.state === "sent") return "Sending to " + (p.machineName || "your machine") + "…";
+      return p.target ? "Waiting for " + (p.machineName || p.target) + " to come online" : "Waiting for one of your machines to come online";
     }
     async function showList() {
       document.getElementById("botList").hidden = false;
@@ -369,7 +373,7 @@ const BOTS_PAGE_JS = String.raw`
         listState.targets = res.targets || [];
         listState.pending = pending;
         document.getElementById("bnOpen").hidden = !res.canCreate;
-        // Pending new bots move on as Macs answer: look again soon while any wait.
+        // Pending new bots move on as machines answer: look again soon while any wait.
         clearTimeout(listState.timer);
         if (pending.length) listState.timer = setTimeout(showList, 8000);
         if (!bots.length && !pending.length) {
@@ -392,7 +396,7 @@ const BOTS_PAGE_JS = String.raw`
       }
     }
 
-    /* ── New bot: the desktop form's fields, sent to a Mac through the relay (kept until one makes it) ── */
+    /* ── New bot: the desktop form's fields, sent to a machine through the relay (kept until one makes it) ── */
     var BOT_TEMPLATES = [
       ["", "Blank", "", ""],
       ["engineer", "Engineer", "Engineer", "Own the repository's open issues: pick one, fix it on a branch, run the tests, and open a pull request. Keep notes of what you tried."],
@@ -400,7 +404,7 @@ const BOTS_PAGE_JS = String.raw`
       ["docs", "Docs writer", "Docs writer", "Keep the README and docs in step with the code: find what's out of date and update it in small pull requests."],
       ["ci", "CI fixer", "CI fixer", "When CI fails, find the cause, fix it on a branch, and open a pull request with the fix and what broke."]
     ];
-    var BOT_MODES = [["auto-edits", "Accept edits (asks before commands)"], ["ask", "Manual (asks before every change)"], ["plan", "Plan (plans first, asks to go ahead)"], ["auto", "Auto (confirm on the Mac)"]];
+    var BOT_MODES = [["auto-edits", "Accept edits (asks before commands)"], ["ask", "Manual (asks before every change)"], ["plan", "Plan (plans first, asks to go ahead)"], ["auto", "Auto (confirm on the machine)"]];
     var newRequestId = null;
     function uuid() {
       if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
@@ -419,7 +423,7 @@ const BOTS_PAGE_JS = String.raw`
       document.getElementById("bnClass").innerHTML = '<option value="">Any class</option>' + Object.keys(BOT_CLASS_NAMES).map(function(k) { return '<option value="' + escapeHtml(k) + '">' + escapeHtml(BOT_CLASS_NAMES[k]) + "</option>"; }).join("");
       document.getElementById("bnMode").innerHTML = opts(BOT_MODES, "auto-edits");
       var ready = listState.targets.filter(function(t) { return t.canCreate; });
-      document.getElementById("bnTarget").innerHTML = '<option value="">' + escapeHtml(ready.length ? "First available: " + ready[0].machineName : "The first of my Macs that comes online") + "</option>" +
+      document.getElementById("bnTarget").innerHTML = '<option value="">' + escapeHtml(ready.length ? "First available: " + ready[0].machineName : "The first of my machines that comes online") + "</option>" +
         listState.targets.map(function(t) { return '<option value="' + escapeHtml(t.agentId) + '">' + escapeHtml(t.machineName + (t.canCreate ? "" : t.online ? " (update the app to create bots)" : " (offline: waits for it)")) + "</option>"; }).join("");
       newFormChanged();
       document.getElementById("bnError").hidden = true;
@@ -429,9 +433,12 @@ const BOTS_PAGE_JS = String.raw`
     function newFormChanged() {
       var f = document.getElementById("bnForm");
       document.getElementById("bnClassWrap").hidden = f.computePolicy.value !== "network_only";
+      var hasRepo = !!f.repository.value.trim();
+      document.getElementById("bnTriggers").disabled = !hasRepo;
+      document.getElementById("bnTriggersHint").hidden = hasRepo;
       setText("bnModeHint", f.mode.value === "auto" ? "Auto runs commands without asking. It starts on Accept edits until you confirm Auto in the EdgeCoder app." : "");
       var t = listState.targets.find(function(x) { return x.agentId === f.agentId.value; });
-      setText("bnTargetHint", !f.agentId.value ? "Sent to the first of your Macs that can take it." : t && t.canCreate ? "Sent now." : "Saved here and sent when " + (t ? t.machineName : "it") + " comes online.");
+      setText("bnTargetHint", !f.agentId.value ? "Sent to the first of your machines that can take it." : t && t.canCreate ? "Sent now." : "Saved here and sent when " + (t ? t.machineName : "it") + " comes online.");
     }
     function applyTemplate() {
       var f = document.getElementById("bnForm"), t = BOT_TEMPLATES.find(function(x) { return x[0] === f.template.value; });
@@ -455,7 +462,6 @@ const BOTS_PAGE_JS = String.raw`
         if (f.trigIssue.checked) tr.push({ kind: "issue_labeled", enabled: true, label: f.trigIssueLabel.value.trim() || "bot" });
         if (tr.length) bot.triggers = tr;
       }
-      if (f.suggestedFolder.value.trim()) bot.suggestedFolder = f.suggestedFolder.value.trim();
       return bot;
     }
     async function saveNew(e) {
@@ -475,7 +481,7 @@ const BOTS_PAGE_JS = String.raw`
           throw new Error((words[j && j.error] || "") + ((j && (j.detail || j.message)) || (j && j.error) || res.status));
         }
         document.getElementById("bnDialog").close();
-        showToast(j.state === "created" ? "It's already on your Mac" : j.state === "sent" ? "Sent to your Mac: choose its folder there" : "Saved: it's created when your Mac comes online");
+        showToast(j.state === "created" ? "It's already on your machine" : j.state === "sent" ? "Sent to your machine: choose its folder there" : "Saved: it's created when your machine comes online");
         await showList();
       } catch (e2) {
         err.hidden = false;
@@ -494,6 +500,7 @@ const BOTS_PAGE_JS = String.raw`
       document.getElementById("bnCancel").addEventListener("click", function() { document.getElementById("bnDialog").close(); });
       var f = document.getElementById("bnForm");
       f.addEventListener("submit", saveNew);
+      f.repository.addEventListener("input", newFormChanged);
       f.addEventListener("change", function(e) { if (e.target && e.target.name === "template") applyTemplate(); newFormChanged(); });
       document.getElementById("botCards").addEventListener("click", function(e) {
         var b = e.target.closest && e.target.closest("[data-cancel-pending]");
@@ -522,7 +529,7 @@ const BOTS_PAGE_JS = String.raw`
         '<span class="m" title="Routine">' + BOT_ICONS.clock + escapeHtml(botRoutineText(b) + (!b.enabled && (b.schedule || botChecksIn(b)) ? " · paused" : "")) + "</span><span aria-hidden=\"true\">·</span>" +
         '<span class="m" title="cSats spent today against the daily budget">' + (b.budgetCSatsPerDay != null ? '<span class="meter" role="meter" aria-label="Daily budget used" aria-valuemin="0" aria-valuemax="' + escapeHtml(b.budgetCSatsPerDay) + '" aria-valuenow="' + escapeHtml(b.spentTodayCSats) + '"><span id="bpMeterFill"></span></span> ' + escapeHtml(botCSats(b.spentTodayCSats) + " / " + botCSats(b.budgetCSatsPerDay)) : escapeHtml(botCSats(b.spentTodayCSats) + " cSats · no limit")) + "</span><span aria-hidden=\"true\">·</span>" +
         '<span class="m" title="Compute: where its model calls run">' + BOT_ICONS.cpu + escapeHtml(botComputeText(b.compute)) + "</span><span aria-hidden=\"true\">·</span>" +
-        '<span class="m" title="Its folder on the Mac">' + BOT_ICONS.file + escapeHtml(b.repository || b.folderName || "No folder yet") + "</span>";
+        '<span class="m" title="Its folder on the machine">' + BOT_ICONS.file + escapeHtml(b.repository || b.folderName || "No folder yet") + "</span>";
       var fill = document.getElementById("bpMeterFill");
       if (fill) fill.style.width = pct + "%";
       var autoEl = document.getElementById("bpAuto");
@@ -532,24 +539,24 @@ const BOTS_PAGE_JS = String.raw`
       var pause = document.getElementById("bpPause");
       pause.innerHTML = (b.enabled ? BOT_ICONS.pause + "<span>Pause</span>" : BOT_ICONS.play + "<span>Resume</span>");
       pause.setAttribute("aria-label", b.enabled ? "Pause " + b.name : "Resume " + b.name);
-      // Read-only (offline, or a view-only Mac): no controls at all, rather than dead buttons.
+      // Read-only (offline, or a view-only machine): no controls at all, rather than dead buttons.
       ["bpCheck", "bpPause", "bpEdit", "bpStop"].forEach(function(id) { var el = document.getElementById(id); el.disabled = state.busy; el.hidden = !ctl; });
       if (ctl) { document.getElementById("bpCheck").hidden = busy; document.getElementById("bpStop").hidden = !busy; }
       var note = document.getElementById("bpOffline");
       if (!online()) {
         note.hidden = false;
-        note.textContent = b.name + " · on " + m.machineName + " · offline. This is the last conversation it shared; it carries on when the Mac is back.";
+        note.textContent = b.name + " · on " + m.machineName + " · offline. This is the last conversation it shared; it carries on when the machine is back.";
       } else if (b.status === "needs_folder") {
         note.hidden = false;
         note.textContent = "Needs folder: open the EdgeCoder app on " + m.machineName + " and choose " + b.name + "'s folder. It doesn't run until then." + (b.setup && b.setup.autoRequested ? " Auto mode is confirmed there too." : "");
       } else if (m.controls !== "on") {
         note.hidden = false;
-        note.textContent = m.machineName + " shows its bots on the web read-only. Message, approve and change it on the Mac.";
+        note.textContent = m.machineName + " shows its bots on the web read-only. Message, approve and change it on the machine.";
       } else note.hidden = true;
       var input = document.getElementById("bpInput"), send = document.getElementById("bpSend");
       var noFolder = b.status === "needs_folder";
       input.disabled = !ctl || noFolder; send.disabled = !ctl || noFolder;
-      input.placeholder = noFolder ? "Choose its folder on the Mac first" : ctl ? "Message " + b.name + "…" : online() ? "Read-only: message it on the Mac" : "Offline: message it when the Mac is back";
+      input.placeholder = noFolder ? "Choose its folder on the machine first" : ctl ? "Message " + b.name + "…" : online() ? "Read-only: message it on the machine" : "Offline: message it when the machine is back";
       setText("bpWorking", busy && online() ? botAutoStatus(b).text : "");
       // The details panel header.
       document.getElementById("bpDAva").innerHTML = botAvatarHtml(b, online(), "md");
@@ -575,7 +582,7 @@ const BOTS_PAGE_JS = String.raw`
         var q = p.tool === "run_shell" ? "Run this command?" : p.tool === "git_commit" ? "Commit?" : p.tool === "git_push" ? "Push?" : p.tool === "open_pull_request" ? "Open this pull request?" : "Allow " + p.tool.replace(/_/g, " ") + "?";
         var choices = canControl()
           ? '<button type="button" class="primary sm" data-approve="' + escapeHtml(p.callId) + '">Approve</button><button type="button" class="sm danger" data-deny="' + escapeHtml(p.callId) + '">Deny</button>'
-          : '<span class="on-mac">Approve on your Mac' + (online() ? "" : " (it's offline)") + "</span>";
+          : '<span class="on-mac">Approve on your machine' + (online() ? "" : " (it's offline)") + "</span>";
         return '<div class="ask-card" role="group" aria-label="' + escapeHtml(b.name + " asks: " + q) + '"><div class="ask-q">' + escapeHtml(b.name + " asks: " + q) + "</div>" + (p.detail ? "<code>" + escapeHtml(p.detail) + "</code>" : "") + '<div class="ask-choices">' + choices + "</div></div>";
       }).join("");
     }
@@ -594,7 +601,7 @@ const BOTS_PAGE_JS = String.raw`
       var hasMore = state.more !== null ? state.more : (b.messageCount || 0) > tail.length;
       olderBtn.hidden = !hasMore;
       olderBtn.disabled = !online();
-      olderBtn.textContent = online() ? "Load earlier messages" : "Earlier messages stay on the Mac";
+      olderBtn.textContent = online() ? "Load earlier messages" : "Earlier messages stay on the machine";
       if (sig === state.lastSig) return;
       state.lastSig = sig;
       var scroll = document.getElementById("bpScroll");
@@ -626,7 +633,7 @@ const BOTS_PAGE_JS = String.raw`
       var box = document.getElementById("bpRuns"), b = state.bot;
       var runs = state.runs || (b.lastRun ? [b.lastRun] : []);
       if (!runs.length) { box.innerHTML = '<div class="bots-empty"><p>No runs yet.</p></div>'; return; }
-      box.innerHTML = (state.runs ? "" : '<p class="muted u-fs-12">' + escapeHtml(online() ? "Loading the run history…" : "The last run; the full history stays on the Mac while it's offline.") + "</p>") +
+      box.innerHTML = (state.runs ? "" : '<p class="muted u-fs-12">' + escapeHtml(online() ? "Loading the run history…" : "The last run; the full history stays on the machine while it's offline.") + "</p>") +
         '<table class="runs-table"><caption class="visually-hidden">Runs</caption><thead><tr><th scope="col">Started</th><th scope="col">Trigger</th><th scope="col">Status</th><th scope="col">Summary</th><th scope="col" class="num">cSats</th><th scope="col" class="opt">Ran on</th></tr></thead><tbody>' +
         runs.map(function(r) {
           var prs = (r.pullRequests || []).map(function(p) { return /^https:\/\//.test(p.url) ? ' <a href="' + escapeHtml(p.url) + '" target="_blank" rel="noreferrer noopener">PR #' + escapeHtml(p.number || "") + "</a>" : ""; }).join("");
@@ -644,7 +651,7 @@ const BOTS_PAGE_JS = String.raw`
       var b = state.bot, body = document.getElementById("bpDBody"), ctl = canControl();
       if (state.dtab === "memory") {
         body.innerHTML = '<div class="d-section"><div class="d-label">Notes it saved for itself</div>' +
-          (state.memory === null ? '<div class="d-sub muted">' + (online() ? "Loading…" : "Its memory stays on the Mac while it's offline.") + "</div>"
+          (state.memory === null ? '<div class="d-sub muted">' + (online() ? "Loading…" : "Its memory stays on the machine while it's offline.") + "</div>"
             : state.memory.trim() ? '<pre class="memory" tabindex="0" aria-label="Bot memory">' + escapeHtml(state.memory) + "</pre>"
             : '<div class="d-sub muted">Nothing yet. It saves notes with its remember tool as it works.</div>') + "</div>";
         return;
@@ -660,7 +667,7 @@ const BOTS_PAGE_JS = String.raw`
             var sub = !t.enabled ? "Off" : !b.enabled ? "Paused with the bot" : st.error ? st.error : st.lastCheckedAtMs ? "Checked " + botRelative(st.lastCheckedAtMs) : "Checks GitHub every 2 minutes";
             return '<div class="routine"><div class="routine-text"><div class="routine-title">' + escapeHtml(botTriggerText(t)) + '</div><div class="routine-sub">' + escapeHtml(sub) + '</div></div><button type="button" class="switch" role="switch" data-toggle-trigger="' + escapeHtml(t.id) + '" aria-checked="' + (t.enabled ? "true" : "false") + '" aria-label="' + escapeHtml("Trigger: " + botTriggerText(t)) + '"' + (ctl ? "" : " disabled") + "></button></div>";
           }).join("")
-        : '<div class="routine-sub">' + (b.repository ? "No triggers: add one on the Mac to run on PRs, CI failures or labeled issues." : "Set a repository on the Mac to run on GitHub events.") + "</div>";
+        : '<div class="routine-sub">' + (b.repository ? "No triggers: add one on the machine to run on PRs, CI failures or labeled issues." : "Set a repository on the machine to run on GitHub events.") + "</div>";
       var pct = b.budgetCSatsPerDay ? Math.min(100, (b.spentTodayCSats / b.budgetCSatsPerDay) * 100) : 0;
       var lr = b.lastRun;
       body.innerHTML =
@@ -819,7 +826,7 @@ const BOTS_PAGE_JS = String.raw`
       if (!text || !canControl()) return;
       input.value = "";
       grow();
-      // Shown right away; the Mac's conversation replaces it on the next refresh.
+      // Shown right away; the machine's conversation replaces it on the next refresh.
       state.bot.tail = (state.bot.tail || []).concat([{ id: "local-" + Date.now(), role: "user", content: text, atMs: Date.now() }]);
       renderConversation();
       try {

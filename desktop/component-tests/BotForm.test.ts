@@ -63,7 +63,7 @@ describe("BotForm: Network only cards", () => {
     const onSaved = open(harry());
     api.updateBot.mockImplementation(async (_id: string, patch: Partial<Bot>) => harry(patch));
     await fireEvent.click(screen.getByRole("radio", { name: /^Network GPU only/ }));
-    expect(screen.getByText(/never falls back to this computer or your machines/)).toBeTruthy();
+    expect(screen.getByText(/never falls back to this machine or your other machines/)).toBeTruthy();
     expect(screen.getByText(/Best fit: the network picks the model/)).toBeTruthy();
     await fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(onSaved).toHaveBeenCalled());

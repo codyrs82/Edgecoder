@@ -246,9 +246,25 @@ describe("the page", () => {
     const html = (await a.inject({ url: "/portal/bots" })).body;
     await a.close();
     for (const id of ["bnOpen", "bnDialog", "bnForm", "bnTemplate", "bnTarget", "bnSchedule", "bnHeartbeat", "bnCompute", "bnClass", "bnMode", "bnTriggers", "bnSave"]) expect(html, id).toContain(`id="${id}"`);
-    for (const name of ["name", "role", "instructions", "maxRunsPerDay", "budgetCSatsPerDay", "repository", "suggestedFolder"]) expect(html, name).toContain(`name="${name}"`);
-    expect(html).toContain("Only a suggestion: the Mac asks before it uses or creates any folder.");
-    expect(html).toContain("Auto (confirm on the Mac)");
+    for (const name of ["name", "role", "instructions", "maxRunsPerDay", "budgetCSatsPerDay", "repository", "trigPr", "trigCi", "trigIssue", "trigIssueLabel"]) expect(html, name).toContain(`name="${name}"`);
+    // No folder field: the machine that runs the bot asks for its folder.
+    expect(html).not.toContain('name="suggestedFolder"');
+    expect(html).not.toContain("Folder on the Mac");
+    expect(html).not.toContain("suggestedFolder");
+    // Triggers: one row each, sentence case, the whole group off until a repository is entered.
+    expect(html).toMatch(/<fieldset[^>]*id="bnTriggers"[^>]*disabled/);
+    expect(html).toContain("Add a repository to use triggers");
+    expect(html).toContain('<label class="trig"><input type="checkbox" name="trigPr" />PR opened or updated by others</label>');
+    expect(html).toContain('<label class="trig"><input type="checkbox" name="trigCi" />CI failed on the default branch or a PR</label>');
+    expect(html).toMatch(/<label class="trig"><input type="checkbox" name="trigIssue" \/>Issue labeled<input name="trigIssueLabel"/);
+    expect(html).toContain(".bot-edit .trig { flex-direction:row;");
+    expect(html).toContain("text-transform:none");
+    // Machines, not Macs or computers.
+    expect(html).toContain("The first of my machines that comes online");
+    expect(html).toContain("Cloned on the machine that runs the bot, once its folder is set.");
+    expect(html).toContain("Auto (confirm on the machine)");
+    const dialog = html.slice(html.indexOf('id="bnDialog"'), html.indexOf("</dialog>", html.indexOf('id="bnDialog"')));
+    expect(dialog).not.toMatch(/\bMacs?\b|computer/);
     expect(html).toContain("/portal/api/bots/new");
     expect(html).toContain("data-cancel-pending");
     expect(html).toContain("Needs folder: open the EdgeCoder app on");
