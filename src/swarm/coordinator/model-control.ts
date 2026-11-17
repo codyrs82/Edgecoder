@@ -74,6 +74,17 @@ const windows = new Map<string, number[]>();
 const lastRefresh = new Map<string, number>();
 const states = new Map<string, { state: ModelControlState; atMs: number }>();
 
+/**
+ * Agents whose last model report lists `model` as installed (Ollama tags, whatever the agent
+ * serves on the network). The "My machines" refusal uses it to tell "none of your machines has it"
+ * from "it is installed, but kept off the network and that agent can't run it for you only".
+ */
+export function agentsReportingInstalled(model: string): string[] {
+  const out: string[] = [];
+  for (const [agentId, s] of states) if ((s.state.installed ?? []).some((m) => m?.name === model)) out.push(agentId);
+  return out;
+}
+
 function hits(key: string, nowMs: number): number[] {
   const list = (windows.get(key) ?? []).filter((t) => nowMs - t < COMMAND_WINDOW_MS);
   windows.set(key, list);

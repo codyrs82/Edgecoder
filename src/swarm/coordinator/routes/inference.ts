@@ -29,7 +29,8 @@ import {
   type ComputeClassId
 } from "../../../economy/compute-classes.js";
 import { syncReservations } from "../../../economy/reservations.js";
-import { agentHasModel, routableModels } from "../../model-catalog.js";
+import { agentHasModel, agentHasModelForOwner, routableModels } from "../../model-catalog.js";
+import { agentsReportingInstalled } from "../model-control.js";
 import { rawBodyOf } from "../../../security/request-signing.js";
 import { app as coordinatorApp, type CoordinatorApp } from "../app.js";
 import { CC, FALLBACK_BTC_USD, claimedTradePrice, reservations, taskBilling, settledBilling, usagePending, queue, identity, securityLog, requestOrigin } from "../context.js";
@@ -229,7 +230,9 @@ export async function retryInferenceElsewhere(subtask: Subtask, agentId: string,
   const excluded = new Set([agentId, ...queue.excludedAgents(subtask.id)]);
   let other = false;
   for (const [id, cap] of agentCapabilities) {
-    if (excluded.has(id) || activeBlacklistRecord(id) || !agentHasModel(cap, subtask.requestedModel ?? "")) continue;
+    // The owner's own call may also go to an owner-only model (kept off the network) on another of their machines.
+    const has = subtask.projectMeta.onlyAccountId ? agentHasModelForOwner(cap, subtask.requestedModel) : agentHasModel(cap, subtask.requestedModel ?? "");
+    if (excluded.has(id) || activeBlacklistRecord(id) || !has) continue;
     if (nowMs - cap.lastSeenMs > 3 * 60_000) continue;
     if (cap.hostApproved === false && !subtask.projectMeta.onlyAccountId) continue;
     if (subtask.projectMeta.onlyAccountId && (await rewardAccountForAgent(id)) !== subtask.projectMeta.onlyAccountId) continue;
@@ -526,13 +529,26 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     } else if (body.target === "mine") {
       let own = 0;
       let approved = 0;
-      for (const [id] of holders) {
+      // Your own machines may also run a model they keep off the network (too big for their memory
+      // budget to share): reported apart as ownerModels, routed only for the owning account.
+      const ownCandidates = [...agentCapabilities.entries()].filter(([id, cap]) => agentHasModelForOwner(cap, body.model) && !activeBlacklistRecord(id));
+      for (const [id] of ownCandidates) {
         if ((await rewardAccountForAgent(id)) !== accountId) continue;
         own++;
         ownHolders.push(id);
         if (restrictedTier && agentMayHostTier(id, restrictedTier, accountId)) approved++;
       }
-      if (own === 0) return reply.code(409).send({ error: "no_own_agent_has_model", model: body.model });
+      if (own === 0) {
+        // Installed on one of your machines but not offered to you: it is kept off the network
+        // there and that agent predates running such a model for its owner (no ownerModels).
+        const localOnlyOn: string[] = [];
+        for (const id of agentsReportingInstalled(body.model).slice(0, 20)) {
+          const cap = agentCapabilities.get(id);
+          if (!cap || agentHasModelForOwner(cap, body.model)) continue;
+          if ((await rewardAccountForAgent(id)) === accountId) localOnlyOn.push(id);
+        }
+        return reply.code(409).send({ error: "no_own_agent_has_model", model: body.model, ...(localOnlyOn.length ? { reason: "local_only", localOnlyOn: localOnlyOn.slice(0, 5) } : {}) });
+      }
       if (restrictedTier && approved === 0) return reply.code(409).send({ error: "no_restricted_host", model: body.model, reason: "no_own_agent_approved_to_host" });
       onlyAccountId = accountId;
     } else if (!holders.some(([id]) => !reservations.isHeld(id))) {

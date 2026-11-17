@@ -39,6 +39,11 @@ interface CoordinatorMachine {
   /** Newer coordinators: the models a `target: "mine"` call can run on this machine there, and its active model. */
   models?: unknown;
   activeModel?: unknown;
+  /** Newer coordinators: served on the network vs only for the owner (kept off the network: too big to share). */
+  networkModels?: unknown;
+  ownerModels?: unknown;
+  /** Newer coordinators: the agent's memory budget and the estimated bytes of its models. */
+  memory?: unknown;
 }
 
 const MAX_COORDINATORS = 8;
@@ -58,6 +63,9 @@ const OWN_MODELS_TIMEOUT_MS = 3_000;
  * paid network instead. Without `models` (an older coordinator), such a machine's active model
  * is still offered, last: the coordinator refuses a `mine` call it can't place before anything
  * runs, and Auto then moves on.
+ *
+ * A machine's `ownerModels` (newer coordinators) are installed models it keeps off the network
+ * (too big for its memory budget to share): a `mine` call still runs them, so they are listed too.
  */
 export async function ownMachineModels(deps: Omit<MachineRoutesDeps, "getCurrentUser">, userId: string): Promise<string[]> {
   if (!deps.store) return [];
@@ -95,7 +103,7 @@ export async function ownMachineModels(deps: Omit<MachineRoutesDeps, "getCurrent
     const activeModel = typeof m.activeModel === "string" && m.activeModel ? m.activeModel : typeof st.activeModel === "string" && st.activeModel ? st.activeModel : undefined;
     if (Array.isArray(m.models)) {
       // The coordinator's routable list: exactly what a `mine` call can run on this machine.
-      const serves = names(m.models);
+      const serves = [...new Set([...names(m.models), ...names(m.ownerModels)])];
       loaded.push(...warm.filter((n) => serves.includes(n)));
       if (activeModel && serves.includes(activeModel)) active.push(activeModel);
       rest.push(...serves);
@@ -111,6 +119,18 @@ export async function ownMachineModels(deps: Omit<MachineRoutesDeps, "getCurrent
     if (activeModel && (installed.length === 0 || installed.includes(activeModel))) active.push(activeModel);
   }
   return [...new Set([...loaded, ...active, ...rest, ...unreachableActive])];
+}
+
+/** The memory figures a coordinator reports for a machine, checked (agent-supplied numbers). */
+export function machineMemory(raw: unknown): { budgetBytes: number; models: Array<{ name: string; bytes: number }> } | undefined {
+  const r = raw as { budgetBytes?: unknown; ownerModels?: unknown; models?: unknown } | null | undefined;
+  if (!r || typeof r.budgetBytes !== "number" || !Number.isFinite(r.budgetBytes) || r.budgetBytes <= 0) return undefined;
+  const list = (xs: unknown) =>
+    (Array.isArray(xs) ? xs : [])
+      .filter((x): x is { name: string; bytes: number } => typeof x?.name === "string" && typeof x?.bytes === "number" && Number.isFinite(x.bytes) && x.bytes >= 0)
+      .slice(0, 64)
+      .map((x) => ({ name: x.name.slice(0, 200), bytes: x.bytes }));
+  return { budgetBytes: r.budgetBytes, models: [...list(r.ownerModels), ...list(r.models)] };
 }
 
 export function registerMachineRoutes(app: FastifyInstance, deps: MachineRoutesDeps): void {
@@ -176,6 +196,10 @@ export function registerMachineRoutes(app: FastifyInstance, deps: MachineRoutesD
         state: m?.state ?? null,
         stateAtMs: m?.stateAtMs ?? null,
         lastSeenMs: m?.lastSeenMs ?? node?.lastSeenMs ?? null,
+        // Newer coordinators: which models are shared on the network and which run for you only.
+        ...(Array.isArray(m?.networkModels) ? { networkModels: (m!.networkModels as unknown[]).filter((x): x is string => typeof x === "string").slice(0, 200) } : {}),
+        ...(Array.isArray(m?.ownerModels) ? { ownerModels: (m!.ownerModels as unknown[]).filter((x): x is string => typeof x === "string").slice(0, 200) } : {}),
+        ...(machineMemory(m?.memory) ? { memory: machineMemory(m?.memory) } : {}),
         audit: [...(audits.get(agentId)?.values() ?? [])].sort((x, y) => y.requestedAtMs - x.requestedAtMs).slice(0, 25)
       };
     });

@@ -95,6 +95,12 @@ export const agentCapabilities = new Map<
     localModelCatalog: string[];
     /** #54: localModelCatalog came from the agent's signed /api/tags report (not assumed or gossiped). */
     modelsReported?: boolean;
+    /**
+     * Installed models the agent keeps off the network (too big for its memory budget, or past its
+     * model limit), from its signed /register or /heartbeat. Only its owner's own calls
+     * (onlyAccountId, "My machines") are routed to them; never another account's work.
+     */
+    ownerModels?: string[];
     clientType: string;
     swarmEnabled: boolean;
     ideEnabled: boolean;

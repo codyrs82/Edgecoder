@@ -35,7 +35,7 @@ import type { Subtask } from "../../common/types.js";
 import { meetsCapability } from "../../economy/order-book.js";
 import { contextNeeded } from "../../inference-api/ollama.js";
 import type { ChatMessage } from "../../inference-api/types.js";
-import { subtaskModelEligible } from "../model-catalog.js";
+import { ownerOnlyModels, subtaskModelEligible } from "../model-catalog.js";
 import { agentMayClaim } from "../sandbox-enforcement.js";
 import { queue, reservations } from "./context.js";
 import { agentCapabilities, activeBlacklistRecord } from "./agent-state.js";
@@ -133,15 +133,18 @@ export function claimRule(agentId: string, capability: Capability | undefined, p
     if (!peerGrantAllowsClaim(subtask, nowMs)) return false;
     // #54: a job that names a model goes only to an agent that reported it (inference: installed;
     // code: its active model, which is what code work runs on).
-    const hasModel = subtaskModelEligible(capability, subtask);
     const meta = subtask.projectMeta;
+    const hasModel = subtaskModelEligible(capability, subtask);
+    // The owner's own call ("My machines") may also run a model the agent keeps off the network
+    // (too big for its memory budget); only for the account that owns it, checked below.
+    const ownerHasModel = hasModel || (Boolean(meta.onlyAccountId) && !meta.reservationId && subtaskModelEligible(capability, subtask, { owner: true }));
     // Host approval (src/portal/host-requests.ts): an agent whose owner is not an approved host
     // runs only its owner's own work ("My machines"): no other account's job, no lease.
-    if (capability?.hostApproved === false) return Boolean(meta.onlyAccountId) && !meta.reservationId && (pullerAccount === undefined || meta.onlyAccountId === pullerAccount) && hasModel;
+    if (capability?.hostApproved === false) return Boolean(meta.onlyAccountId) && !meta.reservationId && (pullerAccount === undefined || meta.onlyAccountId === pullerAccount) && ownerHasModel;
     // A reserved agent takes only its lease's jobs; a job for a lease or for its owner's own machines goes nowhere else.
     if (lease) return meta.reservationId === lease.id && hasModel;
     if (meta.reservationId) return false;
-    if (meta.onlyAccountId) return (pullerAccount === undefined || meta.onlyAccountId === pullerAccount) && hasModel;
+    if (meta.onlyAccountId) return (pullerAccount === undefined || meta.onlyAccountId === pullerAccount) && ownerHasModel;
     return orderBook.canMatch(agentId, subtask.taskId).ok && meetsCapability(askCapabilityOf(agentId, capability), meta) && hasModel;
   };
 }
@@ -199,11 +202,20 @@ function reachable(agentId: string, nowMs: number): boolean {
   return !!load && load.wake && nowMs - load.atMs <= LOAD_FRESH_MS && !!transport?.connected(agentId);
 }
 
+/**
+ * The owner's own call on a model this agent keeps off the network (claimRule has checked the
+ * account): memory admission skips the budget headroom for it (memoryAdmits ownerOnly).
+ */
+export function ownerOnlyCall(agentId: string, subtask: Subtask): boolean {
+  const meta = subtask.projectMeta;
+  return subtask.kind === "inference" && Boolean(meta?.onlyAccountId) && !meta?.reservationId && Boolean(subtask.requestedModel) && ownerOnlyModels(agentCapabilities.get(agentId)).includes(subtask.requestedModel!);
+}
+
 /** An agent that could run `subtask` now, given what it holds. */
 function hasRoomFor(agentId: string, subtask: Subtask, claims: Claims, nowMs = Date.now()): boolean {
   if (circuitOpen(agentId, nowMs)) return false;
   if (subtask.kind === "inference") {
-    if (!memoryAdmits(agentId, subtask.requestedModel, claims.get(agentId)?.inference ?? 0, nowMs)) return false;
+    if (!memoryAdmits(agentId, subtask.requestedModel, claims.get(agentId)?.inference ?? 0, nowMs, { ownerOnly: ownerOnlyCall(agentId, subtask) })) return false;
     const free = freeSlots(agentId, claims, false);
     return free === undefined ? (claims.get(agentId)?.all ?? 0) === 0 : free > 0;
   }
@@ -220,8 +232,9 @@ export function mayTakeNow(agentId: string, subtask: Subtask, claims: Claims, no
   // Circuit breaker (memory-admission.ts): an agent that keeps failing cools down first.
   if (circuitOpen(agentId, nowMs)) return false;
   if (subtask.kind !== "inference") return true;
-  // Host memory: the model must be loaded there (with a free slot for it) or fit its budget headroom.
-  if (!memoryAdmits(agentId, subtask.requestedModel, claims.get(agentId)?.inference ?? 0, nowMs)) return false;
+  // Host memory: the model must be loaded there (with a free slot for it) or fit its budget headroom
+  // (not for the owner's own call on a model the agent keeps off the network: only pressure counts).
+  if (!memoryAdmits(agentId, subtask.requestedModel, claims.get(agentId)?.inference ?? 0, nowMs, { ownerOnly: ownerOnlyCall(agentId, subtask) })) return false;
   const free = freeSlots(agentId, claims, true);
   if (free !== undefined && free <= 0) return false;
   if (leftForPreferred(agentId, subtask, claims, nowMs)) return false;

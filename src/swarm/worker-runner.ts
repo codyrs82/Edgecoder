@@ -34,7 +34,7 @@ import { ActiveCoordinator, meshWsUrl } from "./active-coordinator.js";
 import { createCoordinatorClient, CoordinatorResponseRejectedError } from "./coordinator-client.js";
 import { ResponseVerifier, responseSigningPolicyFromEnv } from "../trust/response-signing.js";
 import { checkSnapshotPolicy, envelopeResultPayload, parseSnapshotEnforcement } from "./execution-policy.js";
-import { DIRECT_WORK_MARKET_HINT, workerAcceptsDirectWorkOffer } from "./direct-work-policy.js";
+import { DIRECT_WORK_MARKET_HINT, isOwnAccountCall, workerAcceptsDirectWorkOffer } from "./direct-work-policy.js";
 import { BleRequestGuard, bleRequestProof } from "../mesh/ble/ble-request-guard.js";
 import { selectCoordinatorFromEnv } from "../discovery/index.js";
 import { createCoordinatorSteering, registryUrlsFor, type SteeringResult } from "../discovery/steering.js";
@@ -1619,10 +1619,13 @@ async function loop(): Promise<void> {
   const buildRegisterBody = async (powerTelemetry: ReturnType<typeof readAgentPowerTelemetry>): Promise<Record<string, unknown>> => {
     if (currentProvider === "ollama-local") installedModelsCache = undefined; // register reads them fresh
     // Only the models this host serves on the network (they fit its memory budget; memory-manager.ts).
-    const installedModels = currentProvider === "ollama-local" ? hostMemory.advertised(await installedModelsCached()) : [];
+    const installed = currentProvider === "ollama-local" ? await installedModelsCached() : [];
+    const installedModels = currentProvider === "ollama-local" ? hostMemory.advertised(installed) : [];
     const memoryActive = hostMemory.activeModel();
     return {
       ...(installedModels.length ? { installedModels, activeModel: memoryActive && installedModels.includes(memoryActive) ? memoryActive : installedModels.includes(OLLAMA_MODEL) ? OLLAMA_MODEL : installedModels[0] } : {}),
+      // Installed but not served on the network: only this machine's owner's own calls run them.
+      ...(currentProvider === "ollama-local" && MANAGES_OLLAMA_MEMORY ? { ownerModels: hostMemory.ownerOnlyModels(installed) } : {}),
       ...(hostMemory.telemetry() ? { memory: hostMemory.telemetry() } : {}),
       agentId: AGENT_ID,
       ...(AGENT_DEVICE_ID ? { deviceId: AGENT_DEVICE_ID } : {}),
@@ -1736,11 +1739,14 @@ async function loop(): Promise<void> {
 
           const hbStart = Date.now();
           // #54: the installed-model list rides every heartbeat (cached), so a pulled or removed model is routed correctly.
-          const hbModels = currentProvider === "ollama-local" ? hostMemory.advertised(await installedModelsCached()) : [];
+          const hbInstalled = currentProvider === "ollama-local" ? await installedModelsCached() : [];
+          const hbModels = currentProvider === "ollama-local" ? hostMemory.advertised(hbInstalled) : [];
+          // Installed but not served on the network: the owner's own calls only (sent every time, so a change clears).
+          const hbOwnerModels = currentProvider === "ollama-local" && MANAGES_OLLAMA_MEMORY ? hostMemory.ownerOnlyModels(hbInstalled) : undefined;
           // The model already in memory, so the coordinator sends calls for it here first (affinity).
           const hbActive = currentProvider === "ollama-local" ? hostMemory.activeModel() : undefined;
           const hbMemory = hostMemory.telemetry();
-          const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE, ...(hbModels.length ? { installedModels: hbModels } : {}), ...(hbActive && hbModels.includes(hbActive) ? { activeModel: hbActive, activeModelParamSize: paramsB(hbActive) } : {}), ...(hbMemory ? { memory: hbMemory } : {}), ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
+          const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE, ...(hbModels.length ? { installedModels: hbModels } : {}), ...(hbOwnerModels ? { ownerModels: hbOwnerModels } : {}), ...(hbActive && hbModels.includes(hbActive) ? { activeModel: hbActive, activeModelParamSize: paramsB(hbActive) } : {}), ...(hbMemory ? { memory: hbMemory } : {}), ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
           hb = (await post("/heartbeat", hbBody, { signed: true })) as HeartbeatReply;
           if ("benchmark" in hbBody) benchmarkUnreported = false;
           try { localStore.recordHeartbeat(coordinator.url, hb.blacklisted ? "blacklisted" : "ok", Date.now() - hbStart); } catch (e) { console.warn(`[db] heartbeat write failed: ${e}`); }
@@ -1910,6 +1916,8 @@ async function loop(): Promise<void> {
                 projectId: "default",
                 resourceClass: (pulled.envelope.metadata.resourceClass as "cpu" | "gpu") ?? "cpu",
                 priority: pulled.envelope.metadata.priority ?? 50,
+                // The owner's own call ("My machines"): newer coordinators say so in the envelope.
+                ...(typeof pulled.envelope.metadata.onlyAccountId === "string" ? { onlyAccountId: pulled.envelope.metadata.onlyAccountId } : {}),
               },
             };
             taskEnvelope = pulled.envelope;
@@ -1964,7 +1972,10 @@ async function loop(): Promise<void> {
             // Host memory: the model must fit this host's budget next to what is loaded (idle network
             // models are unloaded first); otherwise the call is handed back with a memory_ error and
             // the coordinator gives it to another agent (memory-manager.ts).
-            const admission = st.kind === "inference" && MANAGES_OLLAMA_MEMORY && st.requestedModel ? await hostMemory.admit(st.requestedModel) : undefined;
+            // The owner's own call ("My machines", for this agent's own account) may also run a model this
+            // host keeps off the network (too big for its budget): no budget refusal, pressure still applies.
+            const ownCall = isOwnAccountCall(st.projectMeta?.onlyAccountId, rewardAccountId);
+            const admission = st.kind === "inference" && MANAGES_OLLAMA_MEMORY && st.requestedModel ? await hostMemory.admit(st.requestedModel, { own: ownCall }) : undefined;
             const callAbort = new AbortController();
             networkCallAborts.add(callAbort);
             // Active work: the job while it runs (not one handed back for memory).

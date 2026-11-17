@@ -21,6 +21,7 @@ import {
   type Transport,
 } from "../../apps/ide/network-inference.js";
 import type { PortalStore } from "../store.js";
+import { ownMachineModels } from "./machines.js";
 import { moduleLogger } from "../../common/logger.js";
 
 const logger = moduleLogger("portal-compute");
@@ -30,6 +31,7 @@ export interface ComputeRoutesDeps {
   getCurrentUser: (req: { headers: Record<string, unknown> }) => Promise<{ userId: string } | null>;
   PORTAL_SERVICE_TOKEN: string | undefined;
   discoverCoordinatorUrlsForPortal: () => Promise<string[]>;
+  EXTERNAL_HTTP_TIMEOUT_MS?: number;
 }
 
 export const accountIdFor = (userId: string) => `acct-${userId}`;
@@ -119,6 +121,8 @@ export function computeOptions(
   classes: Record<string, { label?: string; cSatsPerSecondBaseTier?: number }>,
   reservations: ReservationEntry[],
   nowMs: number,
+  /** Models your own machines run for you (routes/machines.ts ownMachineModels), including ones they keep off the network. */
+  ownModels: string[] = [],
 ): ComputeOption[] {
   const out: ComputeOption[] = [];
   const add = (group: ComputeOption["group"], compute: PinnedChatCompute, detail: string) =>
@@ -143,6 +147,13 @@ export function computeOptions(
     }
   }
   for (const m of models) add("mine", { target: "mine", model: m.model }, m.restricted ? "Security research · runs only on your own approved machines" : "Free · runs only on your own machines");
+  // Your machines' own models the network does not list (kept off it: too big to share from there).
+  const listed = new Set(models.map((m) => m.model));
+  for (const model of ownModels) {
+    if (listed.has(model)) continue;
+    listed.add(model);
+    add("mine", { target: "mine", model }, "Free · on your machine only (not shared on the network)");
+  }
   return out;
 }
 
@@ -199,13 +210,15 @@ export function registerComputeRoutes(app: FastifyInstance, deps: ComputeRoutesD
     if (!user) return reply;
     const d = net(user.userId);
     const t = d.transport!;
-    const [cat, leases] = await Promise.all([
+    const [cat, leases, own] = await Promise.all([
       t("GET", "/inference/models").catch(() => ({ status: 0, json: {} as Record<string, unknown> })),
       t("POST", "/account/reservations/list", {}).catch(() => ({ status: 0, json: {} as Record<string, unknown> })),
+      // Your own machines' models, so one they run only for you (too big to share) can be picked too.
+      store ? ownMachineModels({ PORTAL_SERVICE_TOKEN: deps.PORTAL_SERVICE_TOKEN ?? "", EXTERNAL_HTTP_TIMEOUT_MS: deps.EXTERNAL_HTTP_TIMEOUT_MS ?? 5_000, discoverCoordinatorUrlsForPortal: deps.discoverCoordinatorUrlsForPortal, store }, user.userId).catch(() => [] as string[]) : Promise.resolve([] as string[]),
     ]);
     const models = cat.status === 200 ? ((cat.json.models as NetworkModelEntry[]) ?? []) : [];
     const classes = cat.status === 200 ? ((cat.json.classes as Record<string, { cSatsPerSecondBaseTier?: number }>) ?? {}) : {};
     const reservations = leases.status === 200 ? ((leases.json.reservations as ReservationEntry[]) ?? []) : [];
-    return reply.send({ connected: cat.status === 200, options: computeOptions(models, classes, reservations, Date.now()) });
+    return reply.send({ connected: cat.status === 200, options: computeOptions(models, classes, reservations, Date.now(), own) });
   });
 }
