@@ -40,6 +40,49 @@ interface CoordinatorMachine {
 
 const MAX_COORDINATORS = 8;
 
+/** The longest the chat waits to learn which models your own machines have (Auto asks them first). */
+const OWN_MODELS_TIMEOUT_MS = 3_000;
+
+/**
+ * Models on the signed-in account's connected machines, best first: loaded (warm) before the
+ * configured active model. Auto in the web chat runs on these first, free (routes/chat.ts).
+ */
+export async function ownMachineModels(deps: Omit<MachineRoutesDeps, "getCurrentUser">, userId: string): Promise<string[]> {
+  if (!deps.store) return [];
+  const agentIds = (await deps.store.listNodesByOwner(userId)).filter((n) => n.nodeKind === "agent").map((n) => n.nodeId).slice(0, 100);
+  if (agentIds.length === 0) return [];
+  const timeout = Math.min(deps.EXTERNAL_HTTP_TIMEOUT_MS, OWN_MODELS_TIMEOUT_MS);
+  const urls = [...new Set((await deps.discoverCoordinatorUrlsForPortal()).map((u) => u.replace(/\/$/, "")))].slice(0, MAX_COORDINATORS);
+  const answers = await Promise.all(
+    urls.map(async (base) => {
+      try {
+        const res = await request(`${base}/agent-control/machines`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...(deps.PORTAL_SERVICE_TOKEN ? { "x-portal-service-token": deps.PORTAL_SERVICE_TOKEN } : {}) },
+          body: JSON.stringify({ accountId: `acct-${userId}`, agentIds }),
+          headersTimeout: timeout,
+          bodyTimeout: timeout,
+        });
+        const body = (await res.body.json().catch(() => ({}))) as { machines?: CoordinatorMachine[] };
+        return res.statusCode === 200 && Array.isArray(body.machines) ? body.machines : [];
+      } catch {
+        return [];
+      }
+    }),
+  );
+  const loaded: string[] = [];
+  const active: string[] = [];
+  for (const m of answers.flat()) {
+    if (!m?.connected || !m.state) continue;
+    const st = m.state as { ollamaReachable?: unknown; activeModel?: unknown; loaded?: unknown; installed?: unknown };
+    if (st.ollamaReachable === false) continue;
+    const installed = Array.isArray(st.installed) ? (st.installed as Array<{ name?: unknown }>).map((x) => x?.name).filter((n): n is string => typeof n === "string") : [];
+    if (Array.isArray(st.loaded)) for (const x of st.loaded as Array<{ name?: unknown }>) if (typeof x?.name === "string") loaded.push(x.name);
+    if (typeof st.activeModel === "string" && st.activeModel && (installed.length === 0 || installed.includes(st.activeModel))) active.push(st.activeModel);
+  }
+  return [...new Set([...loaded, ...active])];
+}
+
 export function registerMachineRoutes(app: FastifyInstance, deps: MachineRoutesDeps): void {
   // The same machines' bots, shown and driven from the web (Bots in the sidebar), with the same owner checks.
   registerBotRoutes(app, deps);

@@ -26,7 +26,7 @@ import { createPayoutCallbackClient, registerPayoutCallbackNotifyRoute, register
 import { registerChatApiRoutes } from "./routes/chat.js";
 import { registerReviewRoutes } from "./routes/reviews.js";
 import { registerMarketRoutes } from "./routes/market.js";
-import { registerMachineRoutes } from "./routes/machines.js";
+import { ownMachineModels, registerMachineRoutes } from "./routes/machines.js";
 import { registerNetworkWorldRoutes } from "./routes/network-world.js";
 import { registerPayoutRoutes } from "./routes/payouts.js";
 import { registerRevenueRoutes } from "./routes/revenue.js";
@@ -878,7 +878,7 @@ const chatCapacity = createChatCapacityDirectory({
   serviceToken: PORTAL_SERVICE_TOKEN,
   ...chatCapacityOptionsFromEnv(),
 });
-const chatRouteDeps = { PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store, chatCapacity };
+const chatRouteDeps = { PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store, chatCapacity, ownMachineModels: (userId: string) => ownMachineModels({ PORTAL_SERVICE_TOKEN, EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal, store }, userId) };
 export type ChatApiRoutesDeps = typeof chatRouteDeps;
 registerChatApiRoutes(app, chatRouteDeps);
 

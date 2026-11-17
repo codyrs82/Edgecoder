@@ -39,6 +39,90 @@ export function boundChatHistory<T extends { content: string }>(messages: T[], m
 /** #39: a chat is tried on at most this many coordinators (the pick, then one retry). */
 export const CHAT_MAX_COORDINATOR_ATTEMPTS = 2;
 
+/**
+ * How long a chat may stay silent before the browser gets the SSE head and a first heartbeat, and
+ * how often a heartbeat (an SSE comment) follows. A refusal inside the grace keeps its HTTP status.
+ * Without this, a reply whose first token took over a minute (the coordinator's own CPU model after
+ * a restart) sent the browser nothing at all, and iOS Safari gave up with "Load failed".
+ */
+export const CHAT_KEEPALIVE = { graceMs: 4_000, intervalMs: 15_000 };
+
+/** The reply to one /portal/api/chat: an HTTP error while nothing was sent, then SSE with heartbeats. */
+export interface ChatResponse {
+  /** Whether the SSE head went out (errors are then events, not statuses). */
+  readonly streaming: boolean;
+  /** A data event (sends the head first if needed). */
+  send(o: unknown): void;
+  /** A note for the page's "Thinking..." line (sent with the SSE head, when that goes out). */
+  status(text: string): void;
+  /** A failure before any reply: an HTTP status while nothing was sent, else an error event and the end. */
+  fail(status: number, body: Record<string, unknown>): FastifyReply;
+  /** [DONE] and the end of the stream. */
+  end(): FastifyReply;
+}
+
+export function chatResponse(reply: FastifyReply, timing: { graceMs: number; intervalMs: number } = CHAT_KEEPALIVE): ChatResponse {
+  let streaming = false;
+  let interval: NodeJS.Timeout | undefined;
+  let pendingStatus: string | undefined;
+  const open = () => !reply.raw.writableEnded && !reply.raw.destroyed;
+  const head = () => {
+    if (streaming) return;
+    streaming = true;
+    writeSseHead(reply);
+    if (pendingStatus !== undefined && open()) reply.raw.write(`data: ${JSON.stringify({ status: pendingStatus })}\n\n`);
+  };
+  const ping = () => {
+    if (open()) reply.raw.write(": keepalive\n\n");
+  };
+  const grace = setTimeout(() => {
+    if (!open()) return;
+    head();
+    ping();
+    interval = setInterval(ping, timing.intervalMs);
+  }, timing.graceMs);
+  const stop = () => {
+    clearTimeout(grace);
+    if (interval) clearInterval(interval);
+  };
+  reply.raw.on("close", stop);
+  const send = (o: unknown) => {
+    head();
+    if (open()) reply.raw.write(`data: ${JSON.stringify(o)}\n\n`);
+  };
+  const end = () => {
+    stop();
+    head();
+    if (open()) {
+      reply.raw.write("data: [DONE]\n\n");
+      reply.raw.end();
+    }
+    return reply;
+  };
+  return {
+    get streaming() {
+      return streaming;
+    },
+    send,
+    status(text) {
+      if (streaming) send({ status: text });
+      else pendingStatus = text;
+    },
+    fail(status, body) {
+      if (!streaming) {
+        stop();
+        return reply.code(status).send(body);
+      }
+      send({ ...body, httpStatus: status });
+      return end();
+    },
+    end,
+  };
+}
+
+/** The out-of-cSats answer for Auto (#405 wording on the page: "Couldn't run: out of cSats", Buy cSats). */
+export const OUT_OF_CSATS_CODE = "out_of_csats";
+
 /** #39: sent when no coordinator can serve the chat. The chat page shows `error` as it is. */
 export const NO_COMPUTE_BODY = { error: "No compute is available right now. Try again in a moment.", code: "no_compute_available" } as const;
 
@@ -90,7 +174,15 @@ function failedBeforeSend(err: unknown): boolean {
 }
 
 /** #16: Chat API: model list and streaming chat (/portal/api/models, /portal/api/chat). Moved unchanged from server.ts; server.ts passes in what it needs. */
-export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesDeps): void {
+export function registerChatApiRoutes(
+  app: FastifyInstance,
+  deps: Omit<ChatApiRoutesDeps, "ownMachineModels"> & {
+    /** Models on the user's own online machines, best first (Auto tries them first, free). */
+    ownMachineModels?: (userId: string) => Promise<string[]>;
+    /** Tests: shorter heartbeat timing. */
+    chatKeepalive?: { graceMs: number; intervalMs: number };
+  },
+): void {
   const { PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store } = deps;
   // #39: server.ts passes the directory. Without one (tests), build it over the discovered list,
   // which the caller has already put through the coordinator URL policy.
@@ -102,12 +194,13 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
   async function runOnNetwork(
     req: FastifyRequest,
     reply: FastifyReply,
+    out: ChatResponse,
     userId: string,
     conversationId: string,
     compute: ChatCompute,
     messages: Array<{ role: "user" | "assistant" | "system"; content: string }>,
-    /** Auto only: where the chat goes when the network turns it down before any reply (the coordinator's own chat, free). */
-    fallback?: () => Promise<unknown>
+    /** Auto only: where the chat goes when this compute turns it down before any reply (given the refusal, if any). */
+    fallback?: (refusal: unknown) => Promise<unknown>
   ) {
     const ac = new AbortController();
     reply.raw.on("close", () => ac.abort());
@@ -137,9 +230,9 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
             : await capacity.pick({ kind: "network", model: compute.model }, tried).then((r) => ({ url: r.url, known: r.known }));
       if (!url) {
         if (tried.length > 0) break;
-        if (fallback) return fallback();
-        if (known === 0) return reply.code(502).send({ error: "no_coordinators_available", compute: computeLabel(compute) });
-        return reply.code(503).send({ ...NO_COMPUTE_BODY, compute: computeLabel(compute) });
+        if (fallback) return fallback(undefined);
+        if (known === 0) return out.fail(502, { error: "no_coordinators_available", compute: computeLabel(compute) });
+        return out.fail(503, { ...NO_COMPUTE_BODY, compute: computeLabel(compute) });
       }
       tried.push(url);
       // Every call of this chat goes to the chosen coordinator.
@@ -174,16 +267,16 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
       }
     }
     if (!first || !pieces) {
-      // Auto: nothing ran and nothing was charged, so the coordinator's own chat answers instead.
-      if (fallback && !ac.signal.aborted) {
-        req.log.info({ reason: (refusal as Error | undefined)?.message?.slice(0, 200) }, "portal_auto_chat_fallback");
-        return fallback();
+      if (ac.signal.aborted) return reply; // the browser went away
+      // Auto: nothing ran and nothing was charged, so the next place in line is asked.
+      if (fallback) {
+        req.log.info({ compute: computeLabel(compute), reason: (refusal as Error | undefined)?.message?.slice(0, 200) }, "portal_auto_chat_fallback");
+        return fallback(refusal);
       }
       const status = refusal instanceof ChatBackendError ? refusal.status : 502;
-      return reply.code(status >= 400 && status < 600 ? status : 502).send({ error: (refusal as Error | undefined)?.message ?? "all_coordinators_failed", compute: computeLabel(compute) });
+      return out.fail(status >= 400 && status < 600 ? status : 502, { error: (refusal as Error | undefined)?.message ?? "all_coordinators_failed", compute: computeLabel(compute) });
     }
-    writeSseHead(reply);
-    const send = (o: unknown) => reply.raw.write(`data: ${JSON.stringify(o)}\n\n`);
+    const send = out.send;
     let fullContent = "";
     let cSatsSpent: number | undefined;
     const take = (p: ChatPiece) => {
@@ -203,9 +296,7 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
       await store!.addMessage({ messageId: randomUUID(), conversationId, role: "assistant", content: fullContent, ...(cSatsSpent !== undefined ? { creditsSpent: cSatsSpent } : {}) });
     }
     send({ done: true, compute: computeLabel(compute), ...(cSatsSpent !== undefined ? { cSatsSpent } : {}) });
-    reply.raw.write("data: [DONE]\n\n");
-    reply.raw.end();
-    return reply;
+    return out.end();
   }
   /** POST /portal/chat on one coordinator, held until its first event so a dead end can still be retried elsewhere. */
   async function openDefaultChat(url: string, payload: Record<string, unknown>, signal: AbortSignal): Promise<OpenedDefaultChat | { reason: string; retry: boolean }> {
@@ -304,6 +395,8 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
       model: z.string().max(200).optional(),
       /** Run on the network for this account (billed in cSats), your own machines, or a lease; omitted: the coordinator's default chat. */
       compute: chatComputeSchema.optional(),
+      /** The page's Retry: the same message again; it is not saved a second time when it is already the last one. */
+      resend: z.boolean().optional(),
     }).safeParse(req.body);
     if (!parsedBody.success) return reply.code(400).send({ error: "invalid_chat_request" });
     const body = parsedBody.data;
@@ -316,13 +409,16 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
       return reply.code(404).send({ error: "conversation_not_found" });
     }
 
-    // Save user message
-    await store.addMessage({
-      messageId: randomUUID(),
-      conversationId: body.conversationId,
-      role: "user",
-      content: body.message
-    });
+    // Save user message (a Retry of the last one is not saved twice)
+    const last = body.resend ? (await store.getConversationMessages(body.conversationId, 1)).at(-1) : undefined;
+    if (!(last && last.role === "user" && last.content === body.message)) {
+      await store.addMessage({
+        messageId: randomUUID(),
+        conversationId: body.conversationId,
+        role: "user",
+        content: body.message
+      });
+    }
 
     // Build message history from conversation
     // Only a bounded tail of the conversation is loaded and sent upstream.
@@ -331,17 +427,44 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
 
     const chatPayload: Record<string, unknown> = { messages };
     if (body.model) chatPayload.model = body.model;
-    // Auto (the page's default): the network's best fit, else the coordinator's own chat.
-    if (body.compute?.target === "auto") {
-      return runOnNetwork(req, reply, user.userId, body.conversationId, body.compute, messages, () => runDefaultChat(req, reply, body.conversationId, chatPayload));
-    }
-    if (body.compute) return runOnNetwork(req, reply, user.userId, body.conversationId, body.compute, messages);
-    return runDefaultChat(req, reply, body.conversationId, chatPayload);
+    // From here a slow first token keeps the browser's request alive (heartbeats after a short grace).
+    const out = chatResponse(reply, deps.chatKeepalive ?? CHAT_KEEPALIVE);
+    if (body.compute?.target === "auto") return runAuto(req, reply, out, user.userId, body.conversationId, body.compute, messages, chatPayload);
+    if (body.compute) return runOnNetwork(req, reply, out, user.userId, body.conversationId, body.compute, messages);
+    return runDefaultChat(req, reply, out, body.conversationId, chatPayload);
   });
 
+  /**
+   * Auto (the page's default): your own online machines first (free), then the network's best fit.
+   * When the network turns it down for cSats the answer is that, in words the page turns into
+   * "Couldn't run: out of cSats" with Buy cSats; any other refusal goes to the coordinator's own chat.
+   */
+  async function runAuto(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    out: ChatResponse,
+    userId: string,
+    conversationId: string,
+    compute: ChatCompute,
+    messages: Array<{ role: "user" | "assistant" | "system"; content: string }>,
+    chatPayload: Record<string, unknown>,
+  ) {
+    const network = () =>
+      runOnNetwork(req, reply, out, userId, conversationId, compute, messages, async (refusal) => {
+        if (refusal instanceof ChatBackendError && refusal.status === 402) {
+          return out.fail(402, { error: refusal.message, code: OUT_OF_CSATS_CODE, compute: computeLabel(compute) });
+        }
+        out.status("Answering with EdgeCoder's own model (free, slower)...");
+        return runDefaultChat(req, reply, out, conversationId, chatPayload);
+      });
+    const own = deps.ownMachineModels ? await deps.ownMachineModels(userId).catch(() => [] as string[]) : [];
+    if (own.length === 0) return network();
+    return runOnNetwork(req, reply, out, userId, conversationId, { target: "mine", model: own[0] }, messages, network);
+  }
+
   /** The coordinator's own chat (POST /portal/chat): a named model there, or its default. */
-  async function runDefaultChat(req: FastifyRequest, reply: FastifyReply, conversationId: string, chatPayload: Record<string, unknown>) {
-    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+  async function runDefaultChat(req: FastifyRequest, reply: FastifyReply, out: ChatResponse, conversationId: string, chatPayload: Record<string, unknown>) {
+    if (!store) return out.fail(503, { error: "portal_database_not_configured" });
     const ac = new AbortController();
     reply.raw.on("close", () => ac.abort());
 
@@ -354,8 +477,8 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
       const { url, known } = await capacity.pick({ kind: "chat" }, tried);
       if (!url) {
         if (tried.length > 0) break;
-        if (known === 0) return reply.code(502).send({ error: "no_coordinators_available" });
-        return reply.code(503).send(NO_COMPUTE_BODY);
+        if (known === 0) return out.fail(502, { error: "no_coordinators_available" });
+        return out.fail(503, { ...NO_COMPUTE_BODY });
       }
       tried.push(url);
       const opened = await openDefaultChat(url, chatPayload, ac.signal);
@@ -372,21 +495,19 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
     if (!stream) {
       // Upstream error text stays in the log; the client gets a fixed error.
       logger.warn({ coordinators: tried.length, lastError: lastError.slice(0, 500) }, "chat: all coordinators failed");
-      return reply.code(502).send({
+      return out.fail(502, {
         error: "all_coordinators_failed",
         triedCount: tried.length,
       });
     }
 
     // Stream SSE response from coordinator to browser
-    writeSseHead(reply);
-
     let fullContent = "";
     const relay = (e: DefaultChatEvent) => {
-      if (e.warning) reply.raw.write(`data: ${JSON.stringify({ warning: e.warning })}\n\n`);
+      if (e.warning) out.send({ warning: e.warning });
       if (e.content) {
         fullContent += e.content;
-        reply.raw.write(`data: ${JSON.stringify({ content: e.content })}\n\n`);
+        out.send({ content: e.content });
       }
     };
     try {
@@ -394,7 +515,7 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
       for await (const e of stream.events) relay(e);
     } catch {
       // Tokens already reached the browser, so this is not retried on another coordinator.
-      reply.raw.write(`data: ${JSON.stringify({ error: "stream_interrupted" })}\n\n`);
+      out.send({ error: "stream_interrupted" });
     }
 
     // Save assistant message
@@ -407,8 +528,6 @@ export function registerChatApiRoutes(app: FastifyInstance, deps: ChatApiRoutesD
       });
     }
 
-    reply.raw.write("data: [DONE]\n\n");
-    reply.raw.end();
-    return reply;
+    return out.end();
   }
 }
