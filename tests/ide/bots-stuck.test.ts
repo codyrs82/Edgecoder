@@ -152,6 +152,30 @@ describe("no re-asking", () => {
   });
 });
 
+describe("no re-asking goes through the bot's permission policy", () => {
+  it("an Always allow rule still runs a command that failed before (it never asks, so nothing is held back)", async () => {
+    const root = dir();
+    writeFileSync(join(root, "package.json"), "{}");
+    const { m, id, executed } = setup({ root, shell: { stdout: "", stderr: 'npm error Missing script: "test"', exit_code: 1 } });
+    m.permissions.addRule(root, "npm test:*");
+    expect(m.decide(id, "run_shell", { command: NPM }).action).toBe("run");
+    expect(await run(m, id)).toBe(false);
+    expect(await run(m, id)).toBe(false);
+    expect(executed).toEqual([NPM, NPM]);
+  });
+
+  it("decide refuses a repo command outside a project in every mode, with the reason the bot sees", () => {
+    const { m, id, root } = setup();
+    for (const mode of ["ask", "auto-edits", "auto"] as const) {
+      m.update(id, { mode });
+      const d = m.decide(id, "run_shell", { command: NPM });
+      expect(d.action).toBe("refuse");
+      expect(d.reason).toContain(`isn't a code project (no package.json). Your working folder is ${root}`);
+    }
+    expect(m.decide(id, "run_shell", { command: "ls" }).action).toBe("run");
+  });
+});
+
 describe("stuck-loop detection", () => {
   it("pauses after the same problem 3 runs in a row, says so, and a message clears it", async () => {
     const root = dir();

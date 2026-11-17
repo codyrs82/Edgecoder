@@ -502,11 +502,6 @@ export interface BotRunContext {
   followUp: (minutes: number, reason: string) => void;
   /** cSats left in today's budget (null: no limit); the network never gets more than this. */
   budgetLeft: () => number | null;
-  /**
-   * Why a call shouldn't run or be asked about (a command that already failed or that you said
-   * no to; a repo command in a folder that isn't a project): the tool result to give instead, or null.
-   */
-  heldBack?: (tool: string, args: Record<string, unknown>) => string | null;
 }
 
 export type BotRunner = (ctx: BotRunContext) => Promise<void>;
@@ -811,7 +806,11 @@ export class BotManager {
     if (!bot) return { action: "ask", reason: "the bot is gone" };
     const root = botWorkRoot(bot);
     const p = this.permissions.get(root);
-    return decideToolCall(tool, args, { mode: botMode(bot), root, rules: p.rules ?? [], legacyNames: p.shell, branch: () => branchOf(root) }, (c) => riskOf(c, root));
+    const verdict = decideToolCall(tool, args, { mode: botMode(bot), root, rules: p.rules ?? [], legacyNames: p.shell, branch: () => branchOf(root) }, (c) => riskOf(c, root));
+    if (verdict.action === "refuse") return verdict;
+    // A repo command in a folder that isn't a project, or a question it already had the answer to: refused with why.
+    const held = this.heldBack(bot, this.active.get(id), tool, args, verdict.action);
+    return held ? { action: "refuse", reason: held } : verdict;
   }
 
   private get file() {
@@ -1750,18 +1749,21 @@ export class BotManager {
   }
 
   /**
-   * Why a call of this run shouldn't run or be asked about: a repo command in a folder that isn't a
-   * project; a command (same command, same folder) that failed after you allowed it or that you
-   * said no to. Runs it starts on its own never ask for those again; a run answering your message
-   * may (you're there to say), except for what you already answered in this run.
+   * Why a call of this run shouldn't run or be asked about (decide refuses it with this):
+   *   - a repo command (npm, git, pytest, cargo …) in a folder that isn't a code project, whatever the mode;
+   *   - a call its mode would ask about (`verdict` "ask") whose answer it already has: the same
+   *     command in the same folder failed after you allowed it, or you said no. Runs it starts on
+   *     its own never ask for those again; a run answering your message may (you're there to say),
+   *     except for what you already answered in this run. "Always allow" rules and modes that run
+   *     the command without asking are left alone.
    */
-  private heldBack(bot: BotConfig, act: ActiveRun, tool: string, args: Record<string, unknown>): string | null {
+  private heldBack(bot: BotConfig, act: ActiveRun | undefined, tool: string, args: Record<string, unknown>, verdict: "run" | "ask"): string | null {
     const root = botWorkRoot(bot);
     if (tool === "run_shell" && typeof args.command === "string") {
       const notProject = projectCheck(args.command, root);
       if (notProject) return notProject;
     }
-    if (!bot.allowedTools.includes(tool as ToolName)) return null;
+    if (verdict !== "ask" || !act) return null;
     const key = actionKey(tool, args, root);
     const live = this.bots.find((b) => b.id === bot.id) ?? bot;
     const actions = outcomeOf({ events: act.reply.events ?? [], decisions: act.decisions, cwd: root, reply: "" }).actions;
@@ -1831,7 +1833,6 @@ export class BotManager {
           const cap = (this.bots.find((b) => b.id === id) ?? bot).budgetCSatsPerDay;
           return cap == null ? null : Math.max(0, cap - this.spentToday(id));
         },
-        heldBack: (tool, args) => this.heldBack(bot, act, tool, args),
       });
     } catch (err) {
       error = (err as Error).message ?? String(err);
@@ -2158,15 +2159,6 @@ export function agentBotRunner(d: {
           return "Saved to memory.";
         }
         if (!allowed.has(tool)) return `[Error]: ${tool} isn't allowed for this bot. Ask the user to allow it in the bot's settings.`;
-        // Not run and not asked about: a repo command outside a project, a command that already
-        // failed or that the user said no to (the result says why, so it does something else).
-        const held = ctx.heldBack?.(tool, args);
-        if (held) {
-          const callId = `tc_${randomUUID().slice(0, 8)}`;
-          ctx.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: false });
-          ctx.sendEvent({ type: "tool_result", id: callId, error: held });
-          return `[Error]: ${held}`;
-        }
         return inner(tool, args);
       },
     });
