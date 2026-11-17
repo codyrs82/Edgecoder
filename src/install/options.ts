@@ -45,6 +45,12 @@ export interface InstallOptions {
   instances?: number;
   sandbox: "auto" | "docker" | "none";
   agentIdPrefix?: string;
+  /**
+   * The node id of a one-agent install, set by the CLI (not a flag) from the registration token's
+   * enrolment (cli.ts resolveTokenNodeId) or the previous install's env file, so the agent's id is
+   * exactly the enrolled name. Ignored when the host runs several instances.
+   */
+  agentIdOverride?: string;
   pullModels: boolean;
   dryRun: boolean;
   json: boolean;
@@ -77,7 +83,7 @@ export const INSTALL_OPTIONS: OptionSpec[] = [
   { flag: "--coordinator-url", arg: "URL", description: `Coordinator to join (default ${DEFAULT_COORDINATOR_URL}).` },
   { flag: "--portal-url", arg: "URL", description: `Portal for node enrolment and discovery (default ${DEFAULT_PORTAL_URL}).` },
   { flag: "--mesh-token", arg: "TOKEN", description: "Mesh auth token for the coordinator (MESH_AUTH_TOKEN)." },
-  { flag: "--token", arg: "[AGENT_ID=]TOKEN", description: "Registration token from the portal Nodes page; repeatable. Without AGENT_ID= it applies to every instance." },
+  { flag: "--token", arg: "[AGENT_ID=]TOKEN", description: "Registration token from the portal Nodes page; repeatable. A one-agent host names its agent after the node id the token was issued for; several agents need one AGENT_ID=TOKEN each." },
   { flag: "--tokens-file", arg: "PATH", description: "File of AGENT_ID=TOKEN lines (one per instance)." },
   { flag: "--enroll", arg: "API_KEY", description: "Portal API key (eck_..., Settings → API keys; or a portal session token; or set EDGECODER_API_KEY): self-enrol each un-tokened instance with the portal and apply the registration token it returns." },
   { flag: "--model", arg: "TAG", description: "Ollama model for every instance (default: the strongest that fits each instance's VRAM: 30B coder per 48 GB card, qwen3-coder-next on 80 GB+, qwen3:235b on 160 GB+, qwen3-coder:480b on 320 GB+)." },

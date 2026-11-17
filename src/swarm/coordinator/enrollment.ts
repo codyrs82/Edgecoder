@@ -57,6 +57,14 @@ export function portalBindDecision(input: {
   return { ok: true };
 }
 
+/** The portal's tokenNode on a node_not_enrolled answer, when both fields are well formed. */
+export function rejectedAttemptTokenNode(raw: unknown): { nodeId: string; ownerEmail: string } | undefined {
+  const t = raw as { nodeId?: unknown; ownerEmail?: unknown } | null | undefined;
+  if (!t || typeof t.nodeId !== "string" || typeof t.ownerEmail !== "string") return undefined;
+  if (!/^[A-Za-z0-9._-]{3,128}$/.test(t.nodeId) || !/^[^\s@]+@[^\s@]+$/.test(t.ownerEmail)) return undefined;
+  return { nodeId: t.nodeId, ownerEmail: t.ownerEmail };
+}
+
 export async function validatePortalNode(input: {
   nodeId: string;
   nodeKind: "agent" | "coordinator";
@@ -80,6 +88,8 @@ export async function validatePortalNode(input: {
   vpnDetected?: boolean;
   /** The portal's host approval for the node's owner; undefined when the portal did not say. */
   hostApproved?: boolean;
+  /** node_not_enrolled: the node id the presented registration token was issued for. */
+  tokenNodeId?: string;
 }> {
   const appendValidationEvent = async (outcome: { allowed: boolean; reason?: string; ownerEmail?: string }) => {
     try {
@@ -171,6 +181,8 @@ export async function validatePortalNode(input: {
     const payload = (await res.body.json()) as {
       allowed?: boolean;
       reason?: string;
+      /** node_not_enrolled with a token that belongs to another enrolment (portal /internal/nodes/validate). */
+      tokenNode?: { nodeId?: string; ownerEmail?: string };
       node?: {
         nodeId?: string;
         ownerUserId?: string;
@@ -182,14 +194,14 @@ export async function validatePortalNode(input: {
       };
     };
     if (res.statusCode < 200 || res.statusCode >= 300) {
-      await appendValidationEvent({
-        allowed: false,
-        reason: payload.reason ?? `portal_validation_failed_${res.statusCode}`
-      });
-      return {
-        allowed: false,
-        reason: payload.reason ?? `portal_validation_failed_${res.statusCode}`
-      };
+      const reason = payload.reason ?? `portal_validation_failed_${res.statusCode}`;
+      // The machine presented a token of another node id (it named itself differently from the
+      // enrolment): the attempt is recorded under the token owner's email, so their Nodes page can
+      // say "a machine named X tried to connect" (node_status_projection). Only a token's own
+      // owner is ever named: the portal matched the token's hash.
+      const tokenNode = reason === "node_not_enrolled" ? rejectedAttemptTokenNode(payload.tokenNode) : undefined;
+      await appendValidationEvent({ allowed: false, reason, ...(tokenNode ? { ownerEmail: tokenNode.ownerEmail } : {}) });
+      return { allowed: false, reason, ...(tokenNode ? { tokenNodeId: tokenNode.nodeId } : {}) };
     }
     await appendValidationEvent({
       allowed: payload.allowed === true,

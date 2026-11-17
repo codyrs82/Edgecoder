@@ -178,6 +178,104 @@ export async function enrollNodes(opts: InstallOptions, instances: AgentInstance
   return { enrolled, failed };
 }
 
+/** A GET to the portal (the token's node id); injected so tests run without a network. */
+export type HttpGet = (url: string, init: { headers: Record<string, string> }) => Promise<{ status: number; json: () => Promise<unknown> }>;
+
+const fetchGet: HttpGet = async (url, init) => {
+  const res = await fetch(url, { method: "GET", headers: init.headers, signal: AbortSignal.timeout(10_000) });
+  return { status: res.status, json: () => res.json() };
+};
+
+/** Node ids the portal accepts (pages/escape.ts NODE_ID_PATTERN); also safe in an env file. */
+export const NODE_ID_PATTERN = /^[A-Za-z0-9._-]{3,128}$/;
+
+/**
+ * The node id and kind a registration token was issued for (portal GET /nodes/token-node, which
+ * only the token's holder can ask), or null when the portal can't say (older portal, offline,
+ * unknown token).
+ */
+export async function lookupTokenNode(portalUrl: string, token: string, get: HttpGet = fetchGet): Promise<{ nodeId: string; nodeKind: string } | null> {
+  try {
+    const res = await get(`${portalUrl.replace(/\/+$/, "")}/nodes/token-node`, { headers: { authorization: `Bearer ${token}` } });
+    if (res.status !== 200) return null;
+    const body = (await res.json()) as { nodeId?: unknown; nodeKind?: unknown };
+    if (typeof body.nodeId !== "string" || !NODE_ID_PATTERN.test(body.nodeId)) return null;
+    return { nodeId: body.nodeId, nodeKind: typeof body.nodeKind === "string" ? body.nodeKind : "agent" };
+  } catch {
+    return null;
+  }
+}
+
+export interface TokenNodeResolution {
+  /** Refuse to go on (apply); plan prints it as a warning. */
+  error?: string;
+  /** Lines to print: which name the agent gets and why. */
+  notes: string[];
+}
+
+/**
+ * A registration token belongs to one node id, and the coordinator refuses an agent whose id is not
+ * that one (node_not_enrolled), so the agent id must be the enrolled name, not the one computed
+ * from the hostname. On a one-agent host the agent takes the token's node id: from the portal when
+ * it answers, else the AGENT_ID of --token AGENT_ID=TOKEN. Several agents need one token each, so a
+ * bare token is refused there. Sets opts.agentIdOverride and opts.tokens[<id>].
+ */
+export async function resolveTokenNodeId(opts: InstallOptions, plan: InstallPlan, get: HttpGet = fetchGet): Promise<TokenNodeResolution> {
+  const notes: string[] = [];
+  const keyed = Object.entries(opts.tokens).filter(([id]) => id !== "*");
+  if (plan.instances.length > 1) {
+    const ids = plan.instances.map((i) => i.agentId);
+    if (opts.tokens["*"]) {
+      return {
+        notes,
+        error: `a registration token belongs to one node id, but this host runs ${ids.length} agents (${ids.join(", ")}). Enrol each id on ${opts.portalUrl} → Settings → Nodes and pass --token <id>=<token> for each (or --tokens-file), or install with an install key (EDGECODER_API_KEY=eck_...), which enrols every GPU with the right name.`
+      };
+    }
+    for (const [id] of keyed) if (!ids.includes(id)) notes.push(`warning: the token for "${id}" matches none of this host's agents (${ids.join(", ")}); it is not used.`);
+    return { notes };
+  }
+  const inst = plan.instances[0];
+  if (!inst) return { notes };
+  const computed = inst.agentId;
+  const [fromKey, token] = opts.tokens[computed] !== undefined ? [computed, opts.tokens[computed]]
+    : opts.tokens["*"] !== undefined ? ["*", opts.tokens["*"]]
+    : keyed.length === 1 ? keyed[0] : [undefined, undefined];
+  if (!token) {
+    if (keyed.length > 1) notes.push(`warning: none of the ${keyed.length} tokens is for this machine's id "${computed}".`);
+    return { notes };
+  }
+  const found = await lookupTokenNode(opts.portalUrl, token, get);
+  if (found && found.nodeKind !== "agent") {
+    return { notes, error: `this registration token is for the ${found.nodeKind} node "${found.nodeId}", not an agent. Enrol an Agent node on ${opts.portalUrl} → Settings → Nodes.` };
+  }
+  let target = found?.nodeId ?? (fromKey && fromKey !== "*" ? fromKey : computed);
+  if (!NODE_ID_PATTERN.test(target)) target = computed;
+  if (!found) notes.push(`note: could not check with ${opts.portalUrl} which node id this token was issued for; the agent is named "${target}", which must be exactly the enrolled node id.`);
+  if (target !== computed) {
+    notes.push(`This machine's own id would be "${computed}", but its registration token was issued for "${target}": the agent is named "${target}".`);
+    opts.agentIdOverride = target;
+  }
+  if (fromKey && fromKey !== "*" && fromKey !== target) notes.push(`note: --token ${fromKey}=... was issued for "${target}"; using "${target}".`);
+  opts.tokens[target] = token;
+  return { notes };
+}
+
+/**
+ * A re-run with no token and no install key (an update with install.sh, a package upgrade) on a
+ * one-agent host keeps the node id the previous install used (agent-0.env), with its token: the
+ * agent may have been named after its token's enrolment rather than the hostname. Returns that id.
+ */
+export function keepEnrolledAgentId(opts: InstallOptions, plan: InstallPlan, p: ServicePaths, read: (path: string) => string | undefined = readIfPresent): string | undefined {
+  if (plan.instances.length !== 1 || Object.keys(opts.tokens).length > 0 || opts.enrollToken) return undefined;
+  const inst = plan.instances[0];
+  const old = parseEnvFile(read(envFilePath(p, inst)) ?? "");
+  const id = old.AGENT_ID;
+  const token = old.AGENT_REGISTRATION_TOKEN;
+  if (!id || id === inst.agentId || !NODE_ID_PATTERN.test(id) || !token || !TOKEN_PATTERN.test(token)) return undefined;
+  opts.agentIdOverride = id;
+  return id;
+}
+
 const sleepSync = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 
 /**
@@ -313,7 +411,7 @@ export function planVllmInstalls(opts: InstallOptions, plan: InstallPlan, p: Ser
   return problems;
 }
 
-export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = process.env, host: Host = realHost, post: HttpPost = fetchPost, binFs: BinFs = realBinFs): Promise<number> {
+export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = process.env, host: Host = realHost, post: HttpPost = fetchPost, binFs: BinFs = realBinFs, get: HttpGet = fetchGet): Promise<number> {
   let opts: InstallOptions;
   try {
     opts = parseInstallArgs(argv, env);
@@ -369,6 +467,17 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
   opts = inheritTuning(opts, readIfPresent(envFilePath(p, { index: 0 } as AgentInstance)));
   const dockerPresent = opts.sandbox === "docker" ? true : dockerAvailable();
   let plan = planInstall(hw, opts, dockerPresent);
+  // The agent id must be the node id its token was enrolled as (or the one a previous install used).
+  const naming = await resolveTokenNodeId(opts, plan, get);
+  const say = (line: string) => { if (opts.json) console.error(line); else console.log(line); };
+  if (naming.error && opts.command === "apply") {
+    console.error(`error: ${naming.error}`);
+    return 2;
+  }
+  for (const line of naming.notes) say(line);
+  const keptId = keepEnrolledAgentId(opts, plan, p);
+  if (keptId) say(`Keeping the node id "${keptId}" of the previous install (its registration token is for that id).`);
+  if (opts.agentIdOverride) plan = planInstall(hw, opts, dockerPresent);
   keepRegistrationTokens(opts, plan, p);
   // Engines per instance index, from the flags and what each instance runs now; then the real plan.
   opts.instanceEngines = resolveEngines(opts, plan, p);
@@ -380,6 +489,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     }
   }
   plan = planInstall(hw, opts, dockerPresent);
+  if (naming.error) plan.warnings.push(naming.error);
   if (host.platform === "linux") {
     const problems = planVllmInstalls(opts, plan, p, (f) => host.exists(f));
     if (problems.length && opts.command === "plan") plan.warnings.push(...problems);
@@ -460,7 +570,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     console.log(hostAgreementLine(opts.portalUrl));
     const missing = plan.instances.filter((i) => !i.env.AGENT_REGISTRATION_TOKEN).map((i) => i.agentId);
     if (missing.length) {
-      console.log(`\nEnrol these node ids on ${opts.portalUrl}/portal/dashboard (Enroll node), then re-run:\n  edgecoder-install apply ${missing.map((id) => `--token ${id}=<token>`).join(" ")}`);
+      console.log(`\nEnrol these node ids, exactly as written, on ${opts.portalUrl}/portal/settings/nodes (Enroll a node), then re-run:\n  edgecoder-install apply ${missing.map((id) => `--token ${id}=<token>`).join(" ")}\nOr re-run with an install key (EDGECODER_API_KEY=eck_...), which enrols them for you.`);
     }
   }
   return 0;

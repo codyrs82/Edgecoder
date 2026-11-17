@@ -54,7 +54,8 @@ describe("installer host: secret files and command lines", () => {
     const out: string[] = [];
     const log = vi.spyOn(console, "log").mockImplementation((m: unknown) => { out.push(String(m)); });
     try {
-      expect(await runInstaller(["plan", "--json", "--sandbox", "docker", "--token", "secret-reg", "--mesh-token", "secret-mesh"], {}, host)).toBe(0);
+      const noPortal = async () => ({ status: 503, json: async () => ({}) });
+      expect(await runInstaller(["plan", "--json", "--sandbox", "docker", "--token", "secret-reg", "--mesh-token", "secret-mesh"], {}, host, undefined, undefined, noPortal)).toBe(0);
     } finally {
       log.mockRestore();
     }

@@ -230,7 +230,8 @@ export function registerCoordinatorOpsRoutes(app: FastifyInstance, { autoRequest
         };
       });
       const approvedNodeIds = new Set(approvedNodes.map((n) => n.nodeId));
-      const pendingNodes = [...pendingByNodeId.values()].filter((pendingNode) => {
+      const pendingStoreIds = new Set(pendingFromStore.map((n) => n.nodeId));
+      const pendingNodes = await Promise.all([...pendingByNodeId.values()].filter((pendingNode) => {
         if (approvedNodeIds.has(pendingNode.nodeId)) return false;
         return !approvedNodes.some((approvedNode) =>
           looksLikeIosAlias(
@@ -238,7 +239,14 @@ export function registerCoordinatorOpsRoutes(app: FastifyInstance, { autoRequest
             { nodeId: approvedNode.nodeId, nodeKind: approvedNode.nodeKind }
           )
         );
-      });
+      }).map(async (pendingNode) => {
+        // A coordinator-only row (an agent refused at /register) may carry the email of the account
+        // whose token it presented under another name (swarm/coordinator/enrollment.ts): it is still
+        // not enrolled, so it can't be approved, only dismissed.
+        if (pendingStoreIds.has(pendingNode.nodeId) || !pendingNode.ownerEmail) return pendingNode;
+        const enrolled = Boolean(await store?.getNodeEnrollment(pendingNode.nodeId).catch(() => null));
+        return enrolled ? pendingNode : { ...pendingNode, enrolled: false };
+      }));
       const finalityState =
         federated.finalityStates.length === 1 ? federated.finalityStates[0] : federated.stale ? "stale_federation" : "unknown";
       const anchorTxRef = federated.anchorTxRefs.length === 1 ? federated.anchorTxRefs[0] : undefined;

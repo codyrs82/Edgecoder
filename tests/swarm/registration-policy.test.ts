@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_REGISTER_REFRESH_MS,
+  ENROLLMENT_LOG_REPEAT_MS,
+  enrollmentBackoffMs,
+  enrollmentRefusalFromError,
+  enrollmentRefusalKey,
+  enrollmentRefusalMessage,
   isAgentNotRegisteredError,
+  shouldLogEnrollmentRefusal,
   registeredLogLine,
   registerRefreshMsFromEnv,
   shouldRegister
@@ -80,5 +86,38 @@ describe("registeredLogLine", () => {
   it("still logs a registration when the response carries no hardware verdict", () => {
     expect(registeredLogLine("a1", "http://127.0.0.1:4301", { accepted: true })).toBe("[agent:a1] registered with http://127.0.0.1:4301");
     expect(registeredLogLine("a1", "http://127.0.0.1:4301", undefined)).toBe("[agent:a1] registered with http://127.0.0.1:4301");
+  });
+});
+
+describe("enrolment refusals: one clear line and a long back-off", () => {
+  const refused = (body: unknown) => Object.assign(new Error(`POST /register failed (403): ${JSON.stringify(body)}`), { statusCode: 403 });
+
+  it("recognises the enrolment reasons of a 403 node_not_activated, nothing else", () => {
+    expect(enrollmentRefusalFromError(refused({ error: "node_not_activated", reason: "node_not_enrolled", tokenNodeId: "RTXA2000-Laptop" }))).toEqual({ reason: "node_not_enrolled", tokenNodeId: "RTXA2000-Laptop" });
+    expect(enrollmentRefusalFromError(refused({ error: "node_not_activated", reason: "registration_token_required" }))).toEqual({ reason: "registration_token_required" });
+    expect(enrollmentRefusalFromError(refused({ error: "node_not_activated", reason: "node_not_enrolled", tokenNodeId: "bad id\nx" }))).toEqual({ reason: "node_not_enrolled" });
+    expect(enrollmentRefusalFromError(refused({ error: "node_not_activated", reason: "portal_validation_unreachable" }))).toBeNull();
+    expect(enrollmentRefusalFromError(refused({ error: "agent_blacklisted", reason: "x" }))).toBeNull();
+    expect(enrollmentRefusalFromError(Object.assign(new Error("POST /register failed (500): {}"), { statusCode: 500 }))).toBeNull();
+    expect(enrollmentRefusalFromError(null)).toBeNull();
+  });
+
+  it("says which name to enrol, and the token's name when it differs", () => {
+    const line = enrollmentRefusalMessage("nvidia-1-gpu", { reason: "node_not_enrolled", tokenNodeId: "RTXA2000-Laptop" }, 60_000);
+    expect(line).toContain(`This machine's id "nvidia-1-gpu" isn't enrolled. Enroll it on edgecoder.io → Settings → Nodes with exactly this name, or re-run the installer with an install key`);
+    expect(line).toContain(`issued for "RTXA2000-Laptop"`);
+    expect(line).toContain("Retrying in 60s.");
+    expect(line.split("\n")).toHaveLength(1);
+    expect(enrollmentRefusalMessage("box-gpu", { reason: "registration_token_required" }, 1000)).toContain("--token box-gpu=<token>");
+  });
+
+  it("backs off 1, 2, 4 ... minutes up to 15, and logs a refusal once an hour unless it changes", () => {
+    expect([1, 2, 3, 4, 5, 6, 20].map(enrollmentBackoffMs)).toEqual([60_000, 120_000, 240_000, 480_000, 900_000, 900_000, 900_000]);
+    const r = { reason: "node_not_enrolled" as const, tokenNodeId: "a-node" };
+    expect(shouldLogEnrollmentRefusal(null, r, 0)).toBe(true);
+    const last = { key: enrollmentRefusalKey(r), atMs: 0 };
+    expect(shouldLogEnrollmentRefusal(last, r, 59 * 60_000)).toBe(false);
+    expect(shouldLogEnrollmentRefusal(last, r, ENROLLMENT_LOG_REPEAT_MS)).toBe(true);
+    expect(shouldLogEnrollmentRefusal(last, { reason: "registration_token_invalid" }, 1)).toBe(true);
   });
 });

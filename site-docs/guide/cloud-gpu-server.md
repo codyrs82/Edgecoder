@@ -184,11 +184,18 @@ Keep the key private:
 
 ::: details Advanced: a node token instead of an install key
 **Settings → Nodes → Enroll a node** makes a registration token for one node id (the
-**Generate node token** button; the token is shown once and doesn't expire). It only works if the
-node id matches the id the installer gives that GPU, `<server-name>-gpu0` (or `<server-name>-cpu`
-without a GPU), so you'd install with
-`sudo bash install.sh --agent-id-prefix <server-name> --token <token>`. A server with several GPUs
-needs one token per GPU. The install key avoids all of that.
+**Generate node token** button; the token is shown once and doesn't expire). A token belongs to
+exactly one node id, and the agent must use **exactly that name**
+([why](#node-names)). The page shows the install command with both filled in:
+
+```bash
+curl -fsSLo install.sh https://edgecoder.io/install.sh && sudo bash install.sh --token <node-id>=<token>
+```
+
+On a one-GPU (or CPU-only) machine the installer names the agent after the token's node id. A
+server with several GPUs runs one agent per GPU, so it needs one enrolled node id and one
+`--token <node-id>=<token>` per GPU, with the ids the installer gives them (`sudo edgecoder-install
+plan` lists them). The install key avoids all of that.
 :::
 
 ## 4. Connect to the server {#4-connect-to-the-server}
@@ -261,8 +268,9 @@ It takes 5 to 15 minutes. What it does:
 - downloads each agent's model (`--pull-models`).
 
 It ends with a summary of the agents, `Wrote ... files; services: ...` and a line about the Host
-Agreement. Each agent is named after the server: `<server-name>-gpu0`, `<server-name>-gpu1`, … (or
-`<server-name>-cpu`).
+Agreement. Each agent is named after the server: `<server-name>-gpu` on a one-GPU server,
+`<server-name>-gpu0`, `<server-name>-gpu1`, … with several GPUs, or `<server-name>-cpu` without
+one. With the install key you don't need to know: it enrols each agent under the name it uses.
 
 ::: tip If other people can log in to this server
 A key on the command line ends up in your shell history. To keep it out, type the key at a hidden
@@ -364,7 +372,7 @@ prints `registered with https://coordinator.edgecoder.io` once the agent has sig
 
 On [edgecoder.io](https://edgecoder.io):
 
-- **Settings → Nodes**, under **Your nodes**: each agent (`<server-name>-gpu0`, …) is listed with
+- **Settings → Nodes**, under **Your nodes**: each agent (`<server-name>-gpu`, …) is listed with
   **VERIFIED**, **APPROVED** and **ACTIVE**, and a recent **Last seen**. Under **Your machines'
   models** you can see and change each machine's model.
 - **Settings → Getting started → Add your other machines**: **Machines on your account** counts it
@@ -425,6 +433,29 @@ the install command again. Running it again is always safe.
 Run `sudo edgecoder-install status`: every service should be `active`. If one isn't, look at its
 log, for example `journalctl -u edgecoder-agent-0 -n 100 --no-pager`. Check your email is verified
 (Settings → Nodes shows **UNVERIFIED** otherwise). A new agent can take a minute or two to show up.
+
+### The node shows offline or `n/a` last seen, and the agent log says `isn't enrolled` {#node-names}
+
+Every agent signs in under its **node id**, and the network accepts it only if that exact name is
+enrolled on your account (Settings → Nodes) and its registration token is that name's token.
+Names are case-sensitive, and `lambda-a100-gpu0` is not `lambda-a100-gpu`. When they don't match,
+the agent's service runs (`active`) but every sign-in is refused, so the node you enrolled never
+comes online. The agent's log says so:
+
+```text
+[agent:nvidia-1-gpu] This machine's id "nvidia-1-gpu" isn't enrolled. Enroll it on edgecoder.io → Settings → Nodes with exactly this name, ...
+```
+
+and Settings → Nodes shows **A machine named `nvidia-1-gpu` tried to connect but isn't enrolled
+under that name**. To fix it, pick one:
+
+- **Use an install key** (step 3) and run the install command again: it enrols every agent under
+  the name it uses.
+- **Re-run the installer with your token:**
+  `curl -fsSLo install.sh https://edgecoder.io/install.sh && sudo bash install.sh --token <node-id>=<token>`.
+  On a one-GPU machine the installer names the agent after the token's node id.
+- **Enroll the name the agent uses**: click **Enroll it** next to the message (or type the name
+  from the log), **Generate node token**, and run the install command the page shows.
 
 ### `nvidia-smi: command not found` {#nvidia-smi-command-not-found}
 

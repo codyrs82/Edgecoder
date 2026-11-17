@@ -859,7 +859,7 @@ registerPayoutDestinationRoutes(app, {
   store, getCurrentUser, network: WALLET_DEFAULT_NETWORK, onchainEnabled: C.ONCHAIN_ENABLED, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), register: payoutRegistrar,
   security: accountSecurity, secondFactor, sendConfirm: sendPayoutDestinationConfirmEmail, sendAdded: sendPayoutDestinationAddedEmail, callbackChange: (a, dest) => payoutCallbackClient.pendingChange(a, dest)
 });
-const accountRouteDeps = { discoverCoordinatorUrlsForPortal, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store };
+const accountRouteDeps = { discoverCoordinatorUrlsForPortal, fetchCoordinatorFederatedSummary, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store };
 export type AccountApiRoutesDeps = typeof accountRouteDeps;
 registerAccountApiRoutes(app, accountRouteDeps);
 function autoRequestHost(node: Parameters<typeof autoRequestHosting>[1]) { return autoRequestHostingSafe({ store, policy: HOST_APPROVAL_POLICY, log: app.log }, node); }

@@ -136,7 +136,8 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
     if (!activation.allowed) {
       if (!origin.loopback) preAuthFailures.record(failureKey);
       app.log.warn({ agentId: body.agentId, reason: activation.reason }, "register_denied");
-      return reply.code(403).send({ error: "node_not_activated", reason: activation.reason });
+      // tokenNodeId: the agent's own token's node id (it named itself differently), so its log can say which name to use.
+      return reply.code(403).send({ error: "node_not_activated", reason: activation.reason, ...(activation.tokenNodeId ? { tokenNodeId: activation.tokenNodeId } : {}) });
     }
     app.log.info({ agentId: body.agentId, reason: activation.reason }, "register_allowed");
     agentRateLimiter.reset(body.agentId);

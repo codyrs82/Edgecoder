@@ -280,12 +280,27 @@ account can reach is set up.
 
 ## Enrolment
 
-Every instance needs a registration token from the portal (Settings → Nodes → Enroll a node,
-node id = the agent id the plan prints). Pass them with `--token <agent-id>=<token>` (repeatable), a
-`--tokens-file`, or one `--token <token>` for all instances. Running `apply` again with tokens
-rewrites the env files and restarts the services; nothing else changes. Running it again
-**without** tokens (an update with `install.sh`, `--vllm-profile`, a package upgrade) keeps each
-instance's token from its `agent-<n>.env`, when that file is for the same agent id.
+Every instance needs a registration token from the portal (Settings → Nodes → Enroll a node).
+A token belongs to one node id, and a coordinator refuses an agent whose id is not exactly that
+enrolled name (`node_not_enrolled`), so the agent id must match the enrolment:
+
+- **One instance** (one GPU, `--single`, or CPU only): the agent takes the node id the token was
+  issued for. `apply` asks the portal (`GET /nodes/token-node`, authenticated with the token itself)
+  and names the agent after the answer, printing a note when that differs from the id it would
+  compute from the hostname. When the portal can't be reached, `--token <node-id>=<token>` names it.
+  The Nodes page prints the install command with both filled in.
+- **Several instances**: pass one `--token <agent-id>=<token>` per instance (repeatable) or a
+  `--tokens-file`, with the agent ids `plan` prints. A bare `--token <token>` is refused there (one
+  token can't be several node ids); a token for an id the host doesn't run is ignored with a warning.
+
+Running `apply` again with tokens rewrites the env files and restarts the services; nothing else
+changes. Running it again **without** tokens (an update with `install.sh`, `--vllm-profile`, a
+package upgrade) keeps each instance's token from its `agent-<n>.env`, when that file is for the
+same agent id; a one-instance host also keeps the node id its `agent-0.env` was written with.
+
+An agent whose id isn't enrolled logs one line saying so (`This machine's id "<id>" isn't
+enrolled ...`) and retries after 1, 2, 4 ... up to 15 minutes, and the owner's Settings → Nodes
+lists the refused name when the agent presented one of the owner's tokens.
 
 Tokens (`--token`, `--tokens-file`, `--mesh-token` and the ones the portal returns to `--enroll`)
 may only contain `A-Z a-z 0-9 . _ ~ + / = -`, and `--portal-url` / `--coordinator-url` must be
@@ -335,7 +350,7 @@ sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" bash install.sh --mesh-token "$MESH"
 | `--coordinator-url URL` | Coordinator to join (default `https://coordinator.edgecoder.io`). |
 | `--portal-url URL` | Portal for enrolment and discovery (default `https://edgecoder.io`). |
 | `--mesh-token TOKEN` | Mesh auth token for the coordinator. |
-| `--token [AGENT_ID=]TOKEN` | Registration token; repeatable. Without `AGENT_ID=` it applies to every instance. |
+| `--token [AGENT_ID=]TOKEN` | Registration token; repeatable. On a one-instance host the agent takes the token's node id; several instances need `AGENT_ID=` per token. |
 | `--tokens-file PATH` | File of `AGENT_ID=TOKEN` lines. |
 | `--enroll API_KEY` | Portal API key (`eck_...`) or session token; `EDGECODER_API_KEY` is the same without the flag. Self-enrol each un-tokened instance and apply the registration token the portal returns, so install and enrolment happen in one run. |
 | `--model TAG` | Ollama model for every instance (default: the strongest that fits each instance's VRAM, see the table below; on a Mac or CPU host the recommended model for its memory). |

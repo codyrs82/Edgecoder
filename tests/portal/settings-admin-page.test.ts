@@ -74,6 +74,10 @@ describe("Settings > Admin enrollment requests", () => {
     const owned = h.pendingActions({ nodeId: "n1", nodeKind: "agent", ownerEmail: "a@b.io" });
     expect(owned).toContain("data-approved='true'>Approve</button>");
     expect(owned).toContain("data-owned='true'>Reject</button>");
+    // Refused at /register under an unenrolled name: the email is its token's owner, still not approvable.
+    const unenrolled = h.pendingActions({ nodeId: "nvidia-1-gpu", nodeKind: "agent", ownerEmail: "p@b.io", enrolled: false });
+    expect(unenrolled).not.toContain("data-approved='true'");
+    expect(unenrolled).toContain("data-approved='false' data-owned='false'>Reject</button>");
   });
 
   it("names the action in its toast", async () => {
