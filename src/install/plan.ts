@@ -55,6 +55,19 @@ function agentOs(platform: NodeJS.Platform): string {
   return platform === "darwin" ? "macos" : platform === "win32" ? "windows" : "linux";
 }
 
+/**
+ * The worker's LOCAL_MODEL_PROVIDER for an instance. Every instance the installer plans has a model
+ * on a real engine: its own Ollama server (GPU or CPU), or vLLM / MLX. The worker only reports
+ * installed models, takes the GPU benchmark and runs real work as "ollama-local" (worker-runner.ts;
+ * with EDGECODER_ENGINE=vllm|mlx it implies "ollama-local" too, written here so the env file says
+ * what the agent does). "edgecoder-local" is the built-in stub that only echoes the task, so it is
+ * kept for an instance with no model only.
+ */
+export function localModelProvider(engine: InstanceEngine | undefined, model: string | undefined): "ollama-local" | "edgecoder-local" {
+  if (engine && engine.kind !== "ollama") return "ollama-local";
+  return model && model.trim() ? "ollama-local" : "edgecoder-local";
+}
+
 export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvailable: boolean): InstallPlan {
   const warnings: string[] = [];
   const sandboxMode: "docker" | "none" = opts.sandbox === "none" ? "none" : dockerAvailable ? "docker" : "none";
@@ -79,6 +92,7 @@ export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvaila
     const gpuTag = group.length > 1 ? `gpu${group[0].index}-${group[group.length - 1].index}` : `gpu${gpu?.index ?? index}`;
     const agentId = slots.length === 1 ? `${base}-${gpu ? (group.length > 1 ? gpuTag : "gpu") : "cpu"}` : `${base}-${gpuTag}`;
     const ollamaPort = OLLAMA_BASE_PORT + index;
+    const engine = opts.instanceEngines?.[index] ?? resolveInstanceEngine(index, opts);
     const env: Record<string, string> = {
       EDGE_RUNTIME_MODE: "worker",
       AGENT_ID: agentId,
@@ -90,7 +104,7 @@ export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvaila
       MESH_AUTH_TOKEN: opts.meshToken ?? "",
       PORTAL_URL: opts.portalUrl,
       AGENT_REGISTRATION_TOKEN: opts.tokens[agentId] ?? opts.tokens["*"] ?? "",
-      LOCAL_MODEL_PROVIDER: "edgecoder-local",
+      LOCAL_MODEL_PROVIDER: localModelProvider(engine, model),
       OLLAMA_HOST: `http://127.0.0.1:${ollamaPort}`,
       OLLAMA_MODEL: model,
       MAX_CONCURRENT_TASKS: "1",
@@ -107,7 +121,6 @@ export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvaila
     const tuning = renderTuning(opts);
     if (tuning) env[TUNING_ENV_KEY] = tuning;
     // vLLM / MLX (engine.ts): EDGECODER_ENGINE and its VLLM_* / MLX_* lines; none for Ollama.
-    const engine = opts.instanceEngines?.[index] ?? resolveInstanceEngine(index, opts);
     Object.assign(env, engineEnvLines(engine));
     // On the edgecoder.io network the agent trusts only the seeds' published keys, as the desktop app does.
     if (isEdgecoderNetworkUrl(opts.coordinatorUrl)) {

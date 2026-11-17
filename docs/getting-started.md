@@ -91,7 +91,8 @@ Every machine you own adds free compute for you.
      ```
 
   4. **NVIDIA GPU with 24 GB or more:** switch to vLLM with the settings for that GPU
-     (`sudo edgecoder-install apply --vllm-profile auto`; [inference-engines.md](inference-engines.md)).
+     (`sudo edgecoder-install apply --vllm-profile auto`, which needs agent 1.2.0 or later;
+     [inference-engines.md](inference-engines.md)).
 
   More options: [install.md](install.md).
 

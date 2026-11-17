@@ -289,6 +289,13 @@ which is what a datacenter GPU is for. One command picks the settings for your G
 sudo edgecoder-install apply --vllm-profile auto
 ```
 
+`--vllm-profile` needs EdgeCoder agent 1.2.0 or later (`edgecoder-install help` lists it). On an
+older install, update first; the agents keep their enrolment, so no install key is needed:
+
+```bash
+curl -fsSLo install.sh https://edgecoder.io/install.sh && sudo bash install.sh
+```
+
 `auto` reads the GPUs with `nvidia-smi` and picks the profile from the
 [table above](#which-gpu-to-rent) (a 1× A100 40 GB gets `a100-40`). It then installs vLLM, downloads
 the model (17 GB, or 31 GB on 80 GB cards), turns that GPU's Ollama off and starts vLLM. Allow 10
