@@ -28,7 +28,8 @@ export const USAGE = `ec-fleet: drive EdgeCoder coding sessions (one worktree + 
 
 Defaults: --lead ${DEFAULT_LEAD} (your own key, this account only), --worker ${DEFAULT_WORKER}, --mode ${DEFAULT_MODE}.
 Provider: $EC_FLEET_PROVIDER or ${DEFAULT_PROVIDER}; token: $IDE_PROVIDER_TOKEN or ~/.edgecoder/ide-token (never printed).
-watch exits 0 when the session is idle, 3 when an approval needs a human, 4 on timeout.
+watch exits 0 when the session is idle, 3 when an approval needs a human, 4 on timeout, 5 if the session
+was deleted, 6 when the turn ended on a model error (no key, no balance, no route).
 `;
 
 export class UsageError extends Error {}

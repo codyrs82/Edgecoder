@@ -462,6 +462,12 @@ async function cmdWatch(o, log) {
         const u = ev.entry?.usage;
         log(`── turn end${ev.stopped ? " (stopped)" : ""} · this turn ${Number(u?.cSats ?? 0).toFixed(3)} cSats @ ${u?.where ?? "?"} · session ${Number(ev.cSats ?? 0).toFixed(3)} cSats · branch ${ev.branch ?? "?"}${ev.entry?.changedFiles?.length ? ` · changed ${ev.entry.changedFiles.join(", ")}` : ""}`);
         notePr(ev.entry?.content);
+        // A failed model call ends the turn with an error as its text (no key, no balance, no route).
+        const err = /(?:^|\n)\s*Error(?: contacting model)?: ([^\n]+)\s*$/.exec(String(ev.entry?.content ?? ""));
+        if (err && !ev.entry?.changedFiles?.length && !(ev.entry?.usage?.calls ?? []).length) {
+          log(`model error: ${short(err[1], 300)}`);
+          exitCode = 6;
+        }
         const snap = await p.snapshot(st.sessionId);
         if (!snap.running && !snap.queue.length) return "stop";
       }
