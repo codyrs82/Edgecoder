@@ -123,6 +123,19 @@ private struct LoginSheet: View {
                         Label("Sign in with Passkey", systemImage: "faceid")
                     }
                     .disabled(viewModel.isLoading)
+                    if viewModel.isLoading {
+                        ProgressView()
+                    }
+                }
+
+                // Shown right under the buttons so a failed sign-in is never silent.
+                if !viewModel.statusMessage.isEmpty {
+                    Section {
+                        Text(viewModel.statusMessage)
+                            .font(.footnote)
+                            .foregroundColor(Theme.textPrimary)
+                            .accessibilityIdentifier("signInStatus")
+                    }
                 }
 
                 Section("Credentials") {
@@ -150,13 +163,6 @@ private struct LoginSheet: View {
                         .foregroundColor(Theme.textSecondary)
                 }
 
-                if !viewModel.statusMessage.isEmpty {
-                    Section {
-                        Text(viewModel.statusMessage)
-                            .font(.caption)
-                            .foregroundColor(Theme.textSecondary)
-                    }
-                }
             }
             .navigationTitle("Sign In")
             .navigationBarTitleDisplayMode(.inline)

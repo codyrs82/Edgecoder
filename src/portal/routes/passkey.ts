@@ -146,7 +146,16 @@ export function registerPasskeyRoutes(app: FastifyInstance, { PASSKEY_ALLOWED_OR
     const credentialId = deriveCredentialIdFromVerifyBody(body);
     if (!credentialId) return reply.code(400).send({ error: "passkey_credential_id_missing" });
     const credential = await store.findPasskeyByCredentialId(credentialId);
-    if (!credential) return reply.code(404).send({ error: "passkey_credential_not_found" });
+    if (!credential) {
+      // A passkey the device still holds but the portal has no row for (enrolled on another account,
+      // or removed when the email was verified). Only an id prefix is logged.
+      req.log.warn({ credentialIdPrefix: credentialId.slice(0, 6), discoverable: !challenge.userId }, "passkey login: credential not registered");
+      return reply.code(404).send({ error: "passkey_credential_not_found" });
+    }
+    // Options asked for by email list only that account's passkeys; hold the answer to the same account.
+    if (challenge.userId && credential.userId !== challenge.userId) {
+      return reply.code(401).send({ error: "passkey_account_mismatch" });
+    }
     const normalizedResponse = normalizePasskeyResponsePayload(body.response);
     const verification = await verifyAuthenticationResponse({
       response: normalizedResponse as any,

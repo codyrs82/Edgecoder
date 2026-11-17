@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		00789199D2C244B6DA388176 /* PasskeyProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0BDF006DD7B1DA4499F2BAD /* PasskeyProtocol.swift */; };
 		0397B8513B3338CA33349848 /* NetworkBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6AF428A5BAF919E6D2B895D /* NetworkBadge.swift */; };
 		0643A36B95A8598DC4E919F9 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F0CE2074D38918B8392965A /* Theme.swift */; };
 		0EF1E3CE7517360A0AFB8E33 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD280B14C422C854EB8D18DF /* AppDelegate.swift */; };
@@ -15,6 +16,7 @@
 		13ED689E127B2952CBA018B1 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B2D03BEBEB092AA1E44BC0A /* AppConfig.swift */; };
 		14CAA0AE958AD1BB645F2BC2 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 779E2AB1376A5FBD38731F04 /* Models.swift */; };
 		19DD56837B15699DEC3346B4 /* EdgeCoderIOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AAD6A52065D67AE6D4BF8759 /* EdgeCoderIOSApp.swift */; };
+		1B16A10E05AC8CDDE469EA28 /* PasskeyProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0BDF006DD7B1DA4499F2BAD /* PasskeyProtocol.swift */; };
 		1CE07F590B5A0845215A777A /* ConversationSidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93A41FCCF2A95E5E965C2D11 /* ConversationSidebar.swift */; };
 		1F40F905FD15E3E19FDE6F1C /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 779E2AB1376A5FBD38731F04 /* Models.swift */; };
 		203438BEAE6C9BCCC282FB95 /* BLETxV3VectorsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DF4D40DF7A0CFB63D97BE0B /* BLETxV3VectorsTests.swift */; };
@@ -45,6 +47,7 @@
 		97BC8F55EB908435C2E283CB /* BluetoothTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB3AD26514C723A4A5787814 /* BluetoothTransport.swift */; };
 		98E91FF0AA64ED55D9BCEC55 /* PurchasePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEB62ACFC126AF64173557A3 /* PurchasePolicy.swift */; };
 		9A40EE412DF1CFA36AF49A19 /* ChatFailures.swift in Sources */ = {isa = PBXBuildFile; fileRef = 629D161DC2E412DA32706681 /* ChatFailures.swift */; };
+		9D82EE43AD5850CF1793B9ED /* PasskeyProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98D672F44064782C1EF76D7E /* PasskeyProtocolTests.swift */; };
 		9FA18C38A68D8D3A77B3EB35 /* PortalAPIParsingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DCB9CAB8B8D310AAB40A33C4 /* PortalAPIParsingTests.swift */; };
 		A4248FD2324E321704E6515C /* PortalChatClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EE04C29E6C1D9B6FBF14683 /* PortalChatClient.swift */; };
 		A69559089EB93E913A667E3C /* SwiftLlama in Frameworks */ = {isa = PBXBuildFile; productRef = ABC117DD8331E0871A208404 /* SwiftLlama */; };
@@ -113,6 +116,7 @@
 		8D772FF8CC80706B636E1B73 /* ChatModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatModels.swift; sourceTree = "<group>"; };
 		8EE6B7CD227619BCFDEE13ED /* AuthViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthViewModel.swift; sourceTree = "<group>"; };
 		93A41FCCF2A95E5E965C2D11 /* ConversationSidebar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConversationSidebar.swift; sourceTree = "<group>"; };
+		98D672F44064782C1EF76D7E /* PasskeyProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasskeyProtocolTests.swift; sourceTree = "<group>"; };
 		9C0676973CD654A6BD253A66 /* RealLlamaContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealLlamaContext.swift; sourceTree = "<group>"; };
 		9D5D94D596BEEE9EB5B7D731 /* BLEChunkedTransfer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLEChunkedTransfer.swift; sourceTree = "<group>"; };
 		9DF4D40DF7A0CFB63D97BE0B /* BLETxV3VectorsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLETxV3VectorsTests.swift; sourceTree = "<group>"; };
@@ -127,6 +131,7 @@
 		ACA085B3ABEE3CF3DAF7D8C4 /* KeychainEd25519.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainEd25519.swift; sourceTree = "<group>"; };
 		AD280B14C422C854EB8D18DF /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		AEB62ACFC126AF64173557A3 /* PurchasePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PurchasePolicy.swift; sourceTree = "<group>"; };
+		B0BDF006DD7B1DA4499F2BAD /* PasskeyProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasskeyProtocol.swift; sourceTree = "<group>"; };
 		B10DAC1310BC95E99485B1D2 /* OfflineLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineLedger.swift; sourceTree = "<group>"; };
 		B7C2233E12CF05A6453ECFE4 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
 		BE8E161A0ADC90132E5B3989 /* EdgeCoderIOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = EdgeCoderIOS.entitlements; sourceTree = "<group>"; };
@@ -303,6 +308,7 @@
 				9DF4D40DF7A0CFB63D97BE0B /* BLETxV3VectorsTests.swift */,
 				A736286E7E0FBDBE10BEC4AB /* BuyLimitsTests.swift */,
 				9F1EE875627693EE65332B98 /* ChatFailuresTests.swift */,
+				98D672F44064782C1EF76D7E /* PasskeyProtocolTests.swift */,
 				DCB9CAB8B8D310AAB40A33C4 /* PortalAPIParsingTests.swift */,
 				3B3FE43571559418C65CAD0D /* RequestSigningVectorCheck.swift */,
 				09E3886017E14BF423BA6139 /* RequestSigningVectorsTests.swift */,
@@ -337,6 +343,7 @@
 				44A7CA4F071392F4801C6C60 /* AuthView.swift */,
 				8EE6B7CD227619BCFDEE13ED /* AuthViewModel.swift */,
 				23F37DFB88500BCAC235C0B6 /* PasskeyManager.swift */,
+				B0BDF006DD7B1DA4499F2BAD /* PasskeyProtocol.swift */,
 			);
 			path = Auth;
 			sourceTree = "<group>";
@@ -450,6 +457,8 @@
 				14CAA0AE958AD1BB645F2BC2 /* Models.swift in Sources */,
 				232E7810E67615DE4F56A7D1 /* NetworkBadge.swift in Sources */,
 				2BD84785A17B9AC75C851554 /* OfflineLedger.swift in Sources */,
+				00789199D2C244B6DA388176 /* PasskeyProtocol.swift in Sources */,
+				9D82EE43AD5850CF1793B9ED /* PasskeyProtocolTests.swift in Sources */,
 				9FA18C38A68D8D3A77B3EB35 /* PortalAPIParsingTests.swift in Sources */,
 				3381CB6037EDCAA1DBB3F53A /* PortalChatClient.swift in Sources */,
 				98E91FF0AA64ED55D9BCEC55 /* PurchasePolicy.swift in Sources */,
@@ -499,6 +508,7 @@
 				0397B8513B3338CA33349848 /* NetworkBadge.swift in Sources */,
 				13DB69C311266D33430FF5F9 /* OfflineLedger.swift in Sources */,
 				FEEA557C596670F697B2639D /* PasskeyManager.swift in Sources */,
+				1B16A10E05AC8CDDE469EA28 /* PasskeyProtocol.swift in Sources */,
 				A4248FD2324E321704E6515C /* PortalChatClient.swift in Sources */,
 				CE01A6B3D458A3A0C7C483C4 /* PurchasePolicy.swift in Sources */,
 				8654DC9A4B0E363B6265D48D /* RealLlamaContext.swift in Sources */,
@@ -624,7 +634,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 33;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -689,7 +699,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 33;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

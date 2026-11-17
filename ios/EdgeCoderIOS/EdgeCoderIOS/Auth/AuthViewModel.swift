@@ -27,6 +27,9 @@ final class AuthViewModel: ObservableObject {
     private let callbackScheme = "edgecoder"
 
     private func displayMessage(for error: Error) -> String {
+        if let passkey = error as? PasskeyError {
+            return passkey.errorDescription ?? "Passkey request failed."
+        }
         let raw = error.localizedDescription
         if raw.contains("passkey_not_registered") { return "No passkey is enrolled for this email yet." }
         if raw.contains("user_not_found") { return "No account found for that email." }
@@ -146,14 +149,9 @@ final class AuthViewModel: ObservableObject {
     func enrollPasskey() async {
         isLoading = true
         defer { isLoading = false }
+        statusMessage = ""
         do {
-            let response: PasskeyOptionsResponse = try await api.request(
-                baseURL: api.config.portalBaseURL,
-                path: "/auth/passkey/register/options",
-                method: "POST",
-                body: [String: String]()
-            )
-            try await PasskeyManager.shared.performRegistration(options: response)
+            try await PasskeyManager.shared.enroll()
             statusMessage = "Passkey enrolled."
         } catch {
             statusMessage = displayMessage(for: error)
@@ -163,24 +161,22 @@ final class AuthViewModel: ObservableObject {
     func loginWithPasskey(sessionStore: SessionStore) async {
         isLoading = true
         defer { isLoading = false }
+        statusMessage = ""
         do {
             let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
             let knownEmail = sessionStore.user?.email.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let effectiveEmail = trimmedEmail.isEmpty ? knownEmail : trimmedEmail
-            let body: [String: String] = effectiveEmail.isEmpty ? [:] : ["email": effectiveEmail]
-            let response: PasskeyOptionsResponse = try await api.request(
-                baseURL: api.config.portalBaseURL,
-                path: "/auth/passkey/login/options",
-                method: "POST",
-                body: body
-            )
-            try await PasskeyManager.shared.performAssertion(options: response)
+            try await PasskeyManager.shared.signIn(email: effectiveEmail.isEmpty ? nil : effectiveEmail)
             await sessionStore.refreshSession()
             statusMessage = sessionStore.isAuthenticated
                 ? "Logged in with passkey."
                 : "Passkey accepted, but app session was not established. Try again."
         } catch {
+            PasskeyLog.logger.error("passkey sign-in failed: \(String(describing: error), privacy: .public)")
             statusMessage = displayMessage(for: error)
+        }
+        if statusMessage.isEmpty {
+            statusMessage = "Passkey sign-in did not complete. Try again."
         }
     }
 
