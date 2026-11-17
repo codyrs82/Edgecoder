@@ -437,3 +437,16 @@ describe("BotView settles (it froze the app on a bot with a last run)", () => {
     expect(text.length).toBeLessThan(9_000);
   });
 });
+
+describe("BotView: a bot made on the web (#409)", () => {
+  it("shows the folder card and no composer until its folder is set", () => {
+    setup(harry({ projectRoot: "", status: "needs_folder", setup: { source: "web", requestId: "r", requestedBy: "acct-u1", requestedAtMs: 0 } }));
+    expect(screen.getByTestId("bot-folder-setup")).toBeTruthy();
+    expect(screen.getByTestId("bot-status-chip").textContent).toBe("Needs folder");
+    expect(screen.queryByPlaceholderText(/Message Harry/)).toBeNull();
+  });
+  it("a bot with a folder has no card", () => {
+    setup();
+    expect(screen.queryByTestId("bot-folder-setup")).toBeNull();
+  });
+});

@@ -301,7 +301,7 @@
             <BotAvatar name={bot.name} color={bot.color} shape={bot.avatarShape} status={bot.status} size={26} decorative />
             <span class="bot-text">
               <span class="bot-name">{bot.name}{#if bot.role}<span class="bot-role"> · {bot.role}</span>{/if}</span>
-              <span class="bot-status" class:warn={bot.status === "needs_approval" || bot.status === "over_budget" || bot.status === "out_of_csats" || !!bot.stuck}>{botStatusLine(bot)}</span>
+              <span class="bot-status" class:warn={bot.status === "needs_approval" || bot.status === "over_budget" || bot.status === "out_of_csats" || bot.status === "needs_folder" || !!bot.stuck}>{botStatusLine(bot)}</span>
             </span>
           </button>
         {/each}

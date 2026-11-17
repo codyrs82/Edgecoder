@@ -11,17 +11,22 @@
  * only caller (it verified the coordinator's signed frame first). A command is refused unless the
  * account signed in on this computer is the account that asked, and runs through the same
  * BotManager calls and validation as the desktop app: the bot's own permission rules still apply.
+ *
+ * "create" (#409) makes a bot through BotManager.createFromWeb: without a folder ("Needs folder"),
+ * on Accept edits (Auto only as a request), with the id fixed by the account and request id so a
+ * retry makes no second bot. Nothing from the web can set or create a folder: that is
+ * BotManager.setupFolder, reached only from the desktop app (/v1/ide/bots/:id/folder).
  */
 
 import { basename } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
-  BOT_READ_ACTIONS, MAX_PAGE_MESSAGES, MAX_RESULT_BYTES, PAGE_MESSAGE_CHARS, SNAPSHOT_MAX_BOTS, SNAPSHOT_MESSAGE_CHARS, SNAPSHOT_TAIL_MESSAGES,
-  botControlRequestSchema, botIdSchema, capMessage, fitSnapshot, toolCallDetail, toolSteps,
+  BOT_READ_ACTIONS, BOT_RELAY_FEATURES, MAX_PAGE_MESSAGES, MAX_RESULT_BYTES, PAGE_MESSAGE_CHARS, SNAPSHOT_MAX_BOTS, SNAPSHOT_MESSAGE_CHARS, SNAPSHOT_TAIL_MESSAGES,
+  botControlRequestSchema, botIdSchema, capMessage, fitSnapshot, isFrontierModel, toolCallDetail, toolSteps, webBotId,
   type BotControlRequest, type BotControlResult, type BotsSnapshot, type RelayControls, type RemoteBotMessage, type RemoteBotRun, type RemoteBotSummary,
 } from "../../common/bot-relay.js";
-import { BotError, botPatchSchema, type BotManager, type BotMessage, type BotRun, type BotView } from "./bots.js";
+import { BotError, botPatchSchema, type BotInput, type BotManager, type BotMessage, type BotRun, type BotView } from "./bots.js";
 
 function remoteRun(r: BotRun): RemoteBotRun {
   return {
@@ -57,7 +62,8 @@ export function remoteSummary(b: BotView, messages: BotMessage[]): RemoteBotSumm
     ...(b.activity ? { activity: b.activity.slice(0, 200) } : {}),
     enabled: b.enabled,
     instructions: b.instructions.slice(0, 8_000),
-    folderName: basename(b.projectRoot) || b.projectRoot.slice(-60),
+    folderName: b.projectRoot ? basename(b.projectRoot) || b.projectRoot.slice(-60) : "",
+    ...(b.setup ? { setup: { autoRequested: b.setup.requestedMode === "auto" } } : {}),
     ...(b.repository ? { repository: b.repository } : {}),
     ...(b.repo ? { repo: { state: b.repo.state, message: b.repo.message.slice(0, 300) } } : {}),
     schedule: b.schedule,
@@ -85,7 +91,7 @@ export function remoteSummary(b: BotView, messages: BotMessage[]): RemoteBotSumm
 
 export function botsSnapshot(bots: BotManager, machineName: string, controls: RelayControls, now = Date.now()): BotsSnapshot {
   const list = bots.list().slice(0, SNAPSHOT_MAX_BOTS);
-  return fitSnapshot({ v: 1, machineName: machineName.slice(0, 80), controls, generatedAtMs: now, bots: list.map((b) => remoteSummary(b, bots.messages(b.id))) });
+  return fitSnapshot({ v: 1, machineName: machineName.slice(0, 80), controls, features: [...BOT_RELAY_FEATURES], generatedAtMs: now, bots: list.map((b) => remoteSummary(b, bots.messages(b.id))) });
 }
 
 /** Keeps a read's data within MAX_RESULT_BYTES (drops the oldest items first). */
@@ -98,9 +104,10 @@ function fitList<T>(items: T[], extra: Record<string, unknown> = {}): Record<str
 type Outcome = Omit<BotControlResult, "commandId">;
 
 /** Carries out one verified command from the web on this computer's bots. */
-export function runRemoteBotCommand(bots: BotManager, botId: string, request: BotControlRequest, controls: RelayControls): Outcome {
+export function runRemoteBotCommand(bots: BotManager, botId: string, request: BotControlRequest, controls: RelayControls, ctx: { requestedBy?: string } = {}): Outcome {
   if (controls !== "on" && !BOT_READ_ACTIONS.has(request.action)) return { status: "refused", error: "view_only", message: "This Mac shows its bots on the web read-only. Change it on the Mac." };
   try {
+    if (request.action === "create") return createFromWeb(bots, botId, request.args, ctx.requestedBy);
     const bot = bots.get(botId);
     switch (request.action) {
       case "message":
@@ -152,6 +159,7 @@ export function runRemoteBotCommand(bots: BotManager, botId: string, request: Bo
       case "memory":
         return { status: "done", data: { memory: bots.memory(botId).slice(0, 8_000) } };
     }
+    return { status: "refused", error: "invalid_request" };
   } catch (err) {
     if (err instanceof BotError) {
       if (err.status === 404) return { status: "refused", error: "no_such_bot", message: err.message.slice(0, 300) };
@@ -160,6 +168,21 @@ export function runRemoteBotCommand(bots: BotManager, botId: string, request: Bo
     if (err instanceof z.ZodError) return { status: "refused", error: "invalid_settings", message: err.issues.map((i) => i.message).join("; ").slice(0, 300) };
     return { status: "failed", error: "bot_error", message: String((err as Error)?.message ?? err).slice(0, 300) };
   }
+}
+
+/** "create": a new bot from the web, made the way a local create is, minus the folder (see the header). */
+function createFromWeb(bots: BotManager, botId: string, args: Extract<BotControlRequest, { action: "create" }>["args"], requestedBy: string | undefined): Outcome {
+  if (!requestedBy) return { status: "refused", error: "not_this_account" };
+  // One bot per request and account, whatever the retries; a frame naming another id is refused.
+  if (botId !== webBotId(requestedBy, args.requestId)) return { status: "refused", error: "bad_bot_id" };
+  if (isFrontierModel(args.compute?.model)) return { status: "refused", error: "invalid_settings", message: "Bots never use a frontier key." };
+  // The desktop form's validation of every field (a folder is never part of a web create).
+  const { requestId, suggestedFolder, ...fields } = args;
+  const checked = botPatchSchema.safeParse(fields);
+  if (!checked.success) return { status: "refused", error: "invalid_settings", message: checked.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ").slice(0, 300) };
+  const { projectRoot: _p, allowedTools: _t, autoApproveEdits: _a, memory: _m, ...safe } = checked.data;
+  const r = bots.createFromWeb({ ...(safe as Omit<BotInput, "projectRoot">), name: args.name, id: botId, requestId, requestedBy, ...(suggestedFolder ? { suggestedFolder } : {}) });
+  return { status: "done", data: { botId: r.bot.id, created: r.created, status: r.bot.status } };
 }
 
 const commandBody = z.object({ requestedBy: z.string().min(1).max(160), botId: botIdSchema, action: z.string(), args: z.unknown().optional(), controls: z.enum(["on", "view"]).default("on") });
@@ -182,6 +205,6 @@ export function registerRemoteBotRoutes(app: FastifyInstance, bots: BotManager, 
     // Defense in depth: the coordinator checked ownership; the Mac checks its own signed-in account too.
     const account = await deps.account().catch(() => null);
     if (!account || account !== body.data.requestedBy) return reply.status(403).send({ status: "refused", error: "not_this_account", message: "The account signed in on this Mac didn't ask for this." });
-    return runRemoteBotCommand(bots, body.data.botId, request.data, body.data.controls);
+    return runRemoteBotCommand(bots, body.data.botId, request.data, body.data.controls, { requestedBy: account });
   });
 }

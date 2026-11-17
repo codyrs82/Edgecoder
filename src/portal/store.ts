@@ -11,6 +11,7 @@ import { compactReplyUsage, type ReplyUsage } from "./reply-usage.js";
 import { randomUUID } from "node:crypto";
 import {
   USER_DELETE_PLAN,
+  PENDING_BOTS_KEY_PREFIX,
   deleteStatement,
   emailHash,
   maskEmail,
@@ -397,6 +398,46 @@ export class PortalStore {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * New bots from the web that no Mac has made yet (routes/bots.ts PendingBot). Kept in
+   * portal_onboarding under the key PENDING_BOTS_KEY_PREFIX + userId (no new table or migration);
+   * the onboarding code reads only rows keyed by a bare user id, and an account delete removes this
+   * row too (USER_DELETE_PLAN). The row's updated_at_ms is its version: a save names the version it
+   * read and is refused when another portal machine saved since.
+   */
+  async getPendingBots(userId: string): Promise<{ list: any[]; version: number }> {
+    const r = await this.pool.query(`SELECT state_json, updated_at_ms FROM portal_onboarding WHERE user_id = $1`, [PENDING_BOTS_KEY_PREFIX + userId]);
+    const row = r.rows[0];
+    if (!row) return { list: [], version: 0 };
+    try {
+      const parsed = JSON.parse(String(row.state_json));
+      return { list: Array.isArray(parsed?.pending) ? parsed.pending : [], version: Number(row.updated_at_ms) };
+    } catch {
+      return { list: [], version: Number(row.updated_at_ms) };
+    }
+  }
+
+  async savePendingBots(userId: string, list: unknown[], version: number, nowMs: number): Promise<boolean> {
+    const key = PENDING_BOTS_KEY_PREFIX + userId;
+    if (!list.length) {
+      const r = await this.pool.query(`DELETE FROM portal_onboarding WHERE user_id = $1 AND updated_at_ms = $2`, [key, version]);
+      return (r.rowCount ?? 0) > 0 || version === 0;
+    }
+    const next = Math.max(nowMs, version + 1);
+    const json = JSON.stringify({ v: 1, pending: list });
+    if (version === 0) {
+      const r = await this.pool.query(`INSERT INTO portal_onboarding (user_id, state_json, updated_at_ms) VALUES ($1, $2, $3) ON CONFLICT (user_id) DO NOTHING`, [key, json, next]);
+      return (r.rowCount ?? 0) > 0;
+    }
+    const r = await this.pool.query(`UPDATE portal_onboarding SET state_json = $2, updated_at_ms = $3 WHERE user_id = $1 AND updated_at_ms = $4`, [key, json, next, version]);
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  async listPendingBotOwners(limit: number): Promise<string[]> {
+    const r = await this.pool.query(`SELECT user_id FROM portal_onboarding WHERE user_id LIKE $1 ORDER BY updated_at_ms LIMIT $2`, [`${PENDING_BOTS_KEY_PREFIX}%`, limit]);
+    return r.rows.map((row) => String(row.user_id).slice(PENDING_BOTS_KEY_PREFIX.length)).filter(Boolean);
   }
 
   async saveOnboardingState(userId: string, state: unknown, nowMs: number): Promise<void> {

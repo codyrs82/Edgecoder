@@ -22,11 +22,13 @@
  *
  * No new privileges: a remote settings change cannot touch the bot's folder, repository, tools or
  * auto-approval (change those on the Mac), and approvals answer only calls the bot itself asked
- * about. AGENT_BOT_RELAY=view (or AGENT_REMOTE_CONTROL=off) makes the web read-only; off publishes
+ * about. A bot made from the web ("create", #409) arrives without a folder and with the default
+ * tools on Accept edits; someone at the Mac picks its folder (and confirms Auto, if the web asked)
+ * before it runs. Its id is webBotId(account, request id), so a retried create makes one bot. AGENT_BOT_RELAY=view (or AGENT_REMOTE_CONTROL=off) makes the web read-only; off publishes
  * nothing.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { signPayload, verifyPayload } from "../mesh/peer.js";
 import { canonicalJson, CommandReplayGuard } from "../model/remote-control/protocol.js";
@@ -109,8 +111,10 @@ export interface RemoteBotSummary {
   activity?: string;
   enabled: boolean;
   instructions: string;
-  /** The home folder's name only (the full path stays on the Mac). */
+  /** The home folder's name only (the full path stays on the Mac); "" while a web-made bot waits for one. */
   folderName: string;
+  /** Made on the web and waiting for the Mac to set its folder (status "needs_folder"). */
+  setup?: { autoRequested: boolean };
   repository?: string;
   repo?: { state: string; message: string };
   schedule: string;
@@ -136,8 +140,13 @@ export interface RemoteBotSummary {
   updatedAtMs: number;
 }
 
+/** What this Mac's app can do from the web beyond the original commands ("create": new bots from the web). */
+export const BOT_RELAY_FEATURES = ["create"] as const;
+
 export interface BotsSnapshot {
   v: 1;
+  /** Newer apps only (older coordinators drop the snapshot with it; the agent then resends without). */
+  features?: string[];
   /** The Mac's name as its owner sees it ("MAW-MB-02"). */
   machineName: string;
   /** on: the web may message, pause, edit and approve; view: read-only ("Approve on your Mac"). */
@@ -213,7 +222,7 @@ export function fitSnapshot(s: BotsSnapshot, maxBytes = MAX_SNAPSHOT_BYTES): Bot
 
 // ---- Commands ----
 
-export const BOT_CONTROL_ACTIONS = ["message", "pause", "resume", "check_now", "stop", "update_settings", "approve", "messages", "history", "memory"] as const;
+export const BOT_CONTROL_ACTIONS = ["message", "pause", "resume", "check_now", "stop", "update_settings", "approve", "messages", "history", "memory", "create"] as const;
 export type BotControlAction = (typeof BOT_CONTROL_ACTIONS)[number];
 /** Actions that only read (their own, larger rate limit; allowed in view-only mode). */
 export const BOT_READ_ACTIONS: ReadonlySet<BotControlAction> = new Set(["messages", "history", "memory"]);
@@ -259,6 +268,63 @@ export const remoteBotSettingsSchema = z
   .refine((p) => Object.keys(p).length > 0, "at least one setting");
 export type RemoteBotSettings = z.infer<typeof remoteBotSettingsSchema>;
 
+/** A client request id: the web makes one per "Create bot", and every retry sends the same one. */
+export const botRequestIdSchema = z.string().min(8).max(64).regex(/^[A-Za-z0-9-]+$/);
+
+/** A model id that would use a frontier key (bots never do, wherever they were made). */
+export function isFrontierModel(id: string | undefined): boolean {
+  return !!id && /^\s*frontier\//i.test(id);
+}
+
+/**
+ * A new bot from the web (#409): the desktop form's fields and bounds, without anything that makes
+ * the Mac touch a place on disk. `suggestedFolder` is only shown on the Mac as a suggestion; the
+ * provider never creates or uses it until someone at the Mac confirms a folder (BotManager.setupFolder).
+ * The permission mode defaults to Accept edits; Auto is kept as a request the Mac must confirm.
+ */
+export const remoteBotCreateSchema = z
+  .object({
+    requestId: botRequestIdSchema,
+    name: z.string().trim().min(1).max(60),
+    role: z.string().max(80).default(""),
+    instructions: z.string().max(8_000).default(""),
+    enabled: z.boolean().default(true),
+    schedule: z.string().max(100).default(""),
+    heartbeatMinutes: z.number().int().min(5).max(1440).nullable().optional(),
+    maxRunsPerDay: z.number().int().min(1).max(500).optional(),
+    budgetCSatsPerDay: z.number().positive().max(1e9).nullable().optional(),
+    compute: z
+      .object({ policy: enumLike, model: z.string().trim().min(1).max(300).optional(), computeClass: z.string().trim().min(1).max(20).regex(/^[a-z.]+$/).optional() })
+      .strict()
+      .refine((c) => !isFrontierModel(c.model), "bots never use a frontier key")
+      .optional(),
+    mode: z.enum(["ask", "auto-edits", "plan", "auto"]).default("auto-edits"),
+    repository: z.string().trim().max(500).optional(),
+    triggers: z
+      .array(
+        z
+          .object({ kind: enumLike, enabled: z.boolean().default(true), label: z.string().trim().max(100).optional(), onlyOthers: z.boolean().optional(), scope: enumLike.optional() })
+          .strict()
+      )
+      .max(10)
+      .optional(),
+    maxTriggerRunsPerHour: z.number().int().min(1).max(60).optional(),
+    color: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+    avatarShape: enumLike.optional(),
+    /** Shown on the Mac as a suggestion only (never created or used without the Mac's confirmation). */
+    suggestedFolder: z.string().trim().max(1_000).optional()
+  })
+  .strict();
+export type RemoteBotCreate = z.infer<typeof remoteBotCreateSchema>;
+
+/**
+ * The id a bot made from the web gets on the Mac: the same for every retry of one request by one
+ * account, so a create that is sent twice (a retry, another portal machine) makes one bot.
+ */
+export function webBotId(requestedBy: string, requestId: string): string {
+  return `bot_w${createHash("sha256").update(`${requestedBy}\n${requestId}`).digest("hex").slice(0, 12)}`;
+}
+
 const none = z.object({}).strict().default({});
 export const botControlRequestSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("message"), args: z.object({ content: z.string().trim().min(1).max(20_000) }).strict() }),
@@ -273,7 +339,8 @@ export const botControlRequestSchema = z.discriminatedUnion("action", [
     args: z.object({ beforeMs: z.number().int().nonnegative().optional(), beforeId: z.string().min(1).max(200).optional(), limit: z.number().int().min(1).max(MAX_PAGE_MESSAGES).default(20) }).strict().default({ limit: 20 })
   }),
   z.object({ action: z.literal("history"), args: none }),
-  z.object({ action: z.literal("memory"), args: none })
+  z.object({ action: z.literal("memory"), args: none }),
+  z.object({ action: z.literal("create"), args: remoteBotCreateSchema })
 ]);
 export type BotControlRequest = z.infer<typeof botControlRequestSchema>;
 
@@ -368,6 +435,8 @@ export function verifyBotControlFrame(
   if (now > command.expiresAtMs) return { ok: false, reason: "expired" };
   const request = botControlRequestSchema.safeParse({ action: command.action, args: command.args });
   if (!request.success) return { ok: false, reason: "invalid_request" };
+  // A new bot's id is fixed by who asked and the request id (one bot per request, whatever retries).
+  if (request.data.action === "create" && command.botId !== webBotId(command.requestedBy, request.data.args.requestId)) return { ok: false, reason: "invalid_request" };
   const fresh = ctx.replay.accept(command.id, command.expiresAtMs, now);
   if (fresh === "full") return { ok: false, reason: "replay_cache_full" };
   if (!fresh) return { ok: false, reason: "replayed" };

@@ -9,6 +9,9 @@
  *   - Commands: only the owning account (portal service token + accountId, checked against the
  *     verified ownership row), rate limited per account and per agent, signed with this
  *     coordinator's identity key and sent only down the agent's authenticated mesh WebSocket.
+ *   - New bots from the web ("create", #409): also limited per account (ACCOUNT_BOT_CREATES_PER_WINDOW)
+ *     and idempotent on the request id: a retry while the first is in flight, or after it was done,
+ *     gets the first command back instead of a second one (the Mac also makes one bot per request).
  *   - Results: the agent's signed report settles a command this coordinator sent to that agent;
  *     the portal reads it with the same account that asked. Kept a few minutes.
  */
@@ -22,6 +25,8 @@ export const AGENT_BOT_COMMANDS_PER_WINDOW = 30;
 /** Reads (older messages, runs, memory) per account per window. */
 export const ACCOUNT_BOT_READS_PER_WINDOW = 120;
 export const BOT_COMMAND_WINDOW_MS = 10 * 60_000;
+/** New bots from the web an account may send per window (they count as changes too). */
+export const ACCOUNT_BOT_CREATES_PER_WINDOW = 10;
 /** A result is kept this long for the portal to read. */
 const RESULT_TTL_MS = 5 * 60_000;
 /** A command the agent never answered is reported as expired after this long. */
@@ -42,6 +47,8 @@ interface Entry {
 const snapshots = new Map<string, { snapshot: BotsSnapshot; atMs: number }>();
 const commands = new Map<string, Entry>();
 const windows = new Map<string, number[]>();
+/** account + request id -> the create command sent for it (while that command is kept). */
+const creates = new Map<string, string>();
 
 function hits(key: string, nowMs: number): number[] {
   const list = (windows.get(key) ?? []).filter((t) => nowMs - t < BOT_COMMAND_WINDOW_MS);
@@ -57,6 +64,7 @@ function sweep(nowMs: number): void {
   for (const [id, e] of commands) {
     if (nowMs - (e.settledAtMs ?? e.sentAtMs) > RESULT_TTL_MS) commands.delete(id);
   }
+  for (const [key, id] of creates) if (!commands.has(id)) creates.delete(key);
 }
 
 /** The agent's own report (its signed request proved it is `agentId`). */
@@ -100,6 +108,18 @@ export function sendBotCommand(input: {
   if (!input.ownerAccountId || input.ownerAccountId !== input.accountId) return { ok: false, status: 403, error: "not_your_machine" };
   sweep(nowMs);
   const read = BOT_READ_ACTIONS.has(input.request.action);
+  const createKey = input.request.action === "create" ? `${input.accountId}\n${input.request.args.requestId}` : null;
+  if (createKey) {
+    // The same request again: the command already sent for it (in flight or done), never a second one.
+    const prior = commands.get(creates.get(createKey) ?? "");
+    if (prior && prior.agentId === input.agentId) {
+      const answered = prior.result;
+      const lost = !answered && nowMs - prior.sentAtMs > ANSWER_TIMEOUT_MS;
+      const failed = answered && answered.status !== "done";
+      if (!lost && !failed) return { ok: true, commandId: prior.commandId };
+    }
+    if (hits(`create:${input.accountId}`, nowMs).length >= ACCOUNT_BOT_CREATES_PER_WINDOW) return { ok: false, status: 429, error: "rate_limited", message: "too many new bots; try again in a few minutes" };
+  }
   if (read) {
     if (hits(`read:${input.accountId}`, nowMs).length >= ACCOUNT_BOT_READS_PER_WINDOW) return { ok: false, status: 429, error: "rate_limited", message: "too many requests; try again in a few minutes" };
   } else if (hits(`acct:${input.accountId}`, nowMs).length >= ACCOUNT_BOT_COMMANDS_PER_WINDOW || hits(`agent:${input.agentId}`, nowMs).length >= AGENT_BOT_COMMANDS_PER_WINDOW) {
@@ -113,6 +133,10 @@ export function sendBotCommand(input: {
   else {
     record(`acct:${input.accountId}`, nowMs);
     record(`agent:${input.agentId}`, nowMs);
+  }
+  if (createKey) {
+    record(`create:${input.accountId}`, nowMs);
+    creates.set(createKey, frame.command.id);
   }
   commands.set(frame.command.id, { commandId: frame.command.id, agentId: input.agentId, accountId: input.accountId, botId: input.botId, action: input.request.action, sentAtMs: nowMs });
   return { ok: true, commandId: frame.command.id };
@@ -131,4 +155,5 @@ export function resetBotRelayForTests(): void {
   snapshots.clear();
   commands.clear();
   windows.clear();
+  creates.clear();
 }
