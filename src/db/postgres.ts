@@ -1563,7 +1563,7 @@ export class PostgresStore {
   async creditContributionStats(accountId: string): Promise<{ earned: number; spent: number; purchased: number }> {
     const result = await this.pool.query(
       `SELECT
-         COALESCE(SUM(CASE WHEN tx_type = 'earn' AND reason = 'compute_contribution' THEN credits ELSE 0 END), 0) AS earned,
+         COALESCE(SUM(CASE WHEN tx_type = 'earn' AND (reason = 'compute_contribution' OR reason LIKE 'reservation\\_backfill\\_host:%') THEN credits ELSE 0 END), 0) AS earned,
          COALESCE(SUM(CASE WHEN tx_type = 'spend' AND reason = 'task_submit' THEN credits ELSE 0 END), 0) AS spent,
          COALESCE(SUM(CASE WHEN tx_type = 'earn' AND reason LIKE 'credit_purchase:%' THEN credits ELSE 0 END), 0) AS purchased
        FROM credit_transactions
@@ -1621,7 +1621,9 @@ export class PostgresStore {
       weightedContribution: number;
     },
     tx: CreditTransaction,
-    feeTx?: CreditTransaction
+    feeTx?: CreditTransaction,
+    /** More earn rows of the same accrual (reservation backfill: the lease holder's share). */
+    extra: CreditTransaction[] = []
   ): Promise<boolean> {
     const client = await this.pool.connect();
     try {
@@ -1651,7 +1653,7 @@ export class PostgresStore {
         await client.query("ROLLBACK");
         return false;
       }
-      for (const row of [tx, ...(feeTx ? [feeTx] : [])]) {
+      for (const row of [tx, ...extra, ...(feeTx ? [feeTx] : [])]) {
         if (row.credits <= 0) continue;
         await client.query(
           `INSERT INTO credit_transactions (
@@ -3174,7 +3176,14 @@ export class PostgresStore {
         `SELECT account_id, related_task_id, COUNT(*)::int AS rows, SUM(credits)::text AS credits,
                 SUM(msat)::text AS msat, COUNT(msat)::int AS msat_rows
            FROM credit_transactions
-          WHERE tx_type = 'earn' AND reason = 'compute_contribution'
+          WHERE tx_type = 'earn' AND (reason = 'compute_contribution' OR reason LIKE 'reservation\\_backfill\\_host:%')
+          GROUP BY account_id, related_task_id`
+      );
+      // Reservation backfill: the lease holder's share of a backfill call (src/economy/reservation-backfill.ts).
+      const holderRows = await client.query(
+        `SELECT account_id, related_task_id, COUNT(*)::int AS rows, SUM(credits)::text AS credits, SUM(msat)::text AS msat
+           FROM credit_transactions
+          WHERE tx_type = 'earn' AND reason LIKE 'reservation\\_backfill\\_holder:%'
           GROUP BY account_id, related_task_id`
       );
       const fees = await client.query(
@@ -3192,7 +3201,7 @@ export class PostgresStore {
             WHERE tx_type = 'spend' AND reason IN ('task_reserve', 'inference_reserve') AND related_task_id IS NOT NULL GROUP BY 1),
          work AS (
            SELECT COALESCE(related_task_id, substring(reason FROM 13)) AS task_id, SUM(credits) AS paid FROM credit_transactions
-            WHERE tx_type = 'earn' AND (reason = 'compute_contribution' OR reason LIKE 'network\\_fee:%') GROUP BY 1),
+            WHERE tx_type = 'earn' AND (reason = 'compute_contribution' OR reason LIKE 'network\\_fee:%' OR reason LIKE 'reservation\\_backfill\\_%') GROUP BY 1),
          refund AS (
            SELECT substring(reason FROM 20) AS task_id, SUM(credits) AS refunded FROM credit_transactions
             WHERE tx_type = 'earn' AND reason LIKE 'task\\_submit\\_refund:%' GROUP BY 1)
@@ -3229,6 +3238,7 @@ export class PostgresStore {
           payload: r.payload_json && typeof r.payload_json === "object" ? (r.payload_json as Record<string, unknown>) : null
         })),
         earnRows: earn.rows.map((r) => ({ accountId: r.account_id, taskId: r.related_task_id ?? null, rows: r.rows, credits: r.credits, msat: r.msat ?? null, msatRows: r.msat_rows })),
+        backfillHolderRows: holderRows.rows.map((r) => ({ accountId: r.account_id, taskId: r.related_task_id ?? null, rows: r.rows, credits: r.credits, msat: r.msat ?? null })),
         feeRows: fees.rows.map((r) => ({ taskId: r.task_id, rows: r.rows, msat: r.msat ?? null })),
         taskReserves: taskReserves.rows.map((r) => ({ taskId: r.task_id, reserved: r.reserved, paid: r.paid, refunded: r.refunded })),
         projections: projections.rows.map((r) => ({ accountId: r.account_id, totalCredits: r.total_credits })),
@@ -3594,7 +3604,7 @@ export class PostgresStore {
 
   /**
    * Per task, from the ledger (msat): what its requester set aside (task_reserve / inference_reserve
-   * spends), what was paid for its work (compute_contribution + network fee earns) and refunded
+   * spends), what was paid for its work (compute_contribution, reservation backfill and network fee earns) and refunded
    * (the one refund row, by its deterministic tx id).
    */
   async taskLedgerTotals(tasks: Array<{ taskId: string; refundTxId: string }>): Promise<Map<string, { reservedMsat: number; paidMsat: number; refundedMsat: number }>> {
@@ -3605,7 +3615,7 @@ export class PostgresStore {
     const r = await this.pool.query(
       `SELECT related_task_id AS task_id,
               COALESCE(SUM(credits) FILTER (WHERE tx_type = 'spend' AND reason IN ('task_reserve', 'inference_reserve')), 0)::text AS reserved,
-              COALESCE(SUM(credits) FILTER (WHERE tx_type = 'earn' AND (reason = 'compute_contribution' OR reason = 'network_fee:' || related_task_id)), 0)::text AS paid
+              COALESCE(SUM(credits) FILTER (WHERE tx_type = 'earn' AND (reason = 'compute_contribution' OR reason = 'network_fee:' || related_task_id OR reason LIKE 'reservation\\_backfill\\_%')), 0)::text AS paid
          FROM credit_transactions WHERE related_task_id = ANY($1::text[]) GROUP BY related_task_id`,
       [ids]
     );
@@ -3741,6 +3751,23 @@ export class PostgresStore {
       [ended.id, ended.accountId, JSON.stringify(ended), Date.now()]
     );
     return (r.rowCount ?? 0) > 0;
+  }
+
+  /**
+   * Reservation backfill: turn "let the network use my idle time" on or off on a lease, only while
+   * the stored lease is active (an ended lease is never rewritten). Returns the stored lease after
+   * the change, or null when it is not active (or unknown).
+   */
+  async setReservationBackfillIfActive(id: string, on: boolean): Promise<Reservation | null> {
+    const r = await this.pool.query(
+      `UPDATE compute_reservations SET record_json = jsonb_set(record_json, '{backfill}', to_jsonb($2::boolean)), updated_at_ms = $3
+        WHERE reservation_id = $1 AND record_json->>'status' = 'active'
+        RETURNING record_json`,
+      [id, on, Date.now()]
+    );
+    const row = r.rows[0];
+    if (!row) return null;
+    return (typeof row.record_json === "string" ? JSON.parse(row.record_json) : row.record_json) as Reservation;
   }
 
   /** Newest heartbeat any coordinator on this database recorded per agent (agent_registry). */

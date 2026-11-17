@@ -40,6 +40,7 @@ const SIGNED_POSTS: Record<string, string> = {
   "/forward/account/reservations": "/account/reservations",
   "/forward/account/reservations/list": "/account/reservations/list",
   "/forward/account/reservations/cancel": "/account/reservations/cancel",
+  "/forward/account/reservations/backfill": "/account/reservations/backfill",
   "/forward/account/usage": "/account/usage",
 };
 /** GET routes relayed to the coordinator, signed by this agent (no query string). */

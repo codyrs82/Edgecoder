@@ -178,7 +178,7 @@ export function registerComputeRoutes(app: FastifyInstance, deps: ComputeRoutesD
     const user = await userOf(req, reply);
     if (!user) return reply;
     const parsed = z
-      .object({ computeClass: z.enum(COMPUTE_CLASSES), minutes: z.number().int().min(1).max(24 * 60), model: z.string().trim().min(1).max(200).optional() })
+      .object({ computeClass: z.enum(COMPUTE_CLASSES), minutes: z.number().int().min(1).max(24 * 60), model: z.string().trim().min(1).max(200).optional(), backfill: z.boolean().optional() })
       .safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: "invalid_reservation" });
     return relay(reply, await createReservation(net(user.userId), parsed.data).catch(() => ({ status: 502, json: { error: "coordinator_unreachable" } })));

@@ -30,6 +30,13 @@ export const FRONTIER_REFUSED_ERROR = "frontier_models_are_not_network_work";
 /** A call the agent cancelled because its host ran critically low on memory (the coordinator gives it to another agent). */
 export const CANCELLED_FOR_MEMORY_ERROR = "memory_pressure: cancelled, this host ran critically low on memory";
 
+/**
+ * The coordinator no longer gives this agent the call (its pieces are refused as not_claimant): it
+ * was handed to another agent (a reserved machine's backfill call preempted for its holder's job, or
+ * a lapsed lease). The run stops at once so the slot is free; its result would be refused anyway.
+ */
+export const CLAIM_REVOKED_ERROR = "claim_revoked: the coordinator gave this call to another agent";
+
 /** Send what has arrived at least this often, or sooner once this much has piled up. */
 const FLUSH_MS = 150;
 const FLUSH_CHARS = 400;
@@ -85,6 +92,8 @@ export async function runInferenceSubtask(
   let full = "";
   const toolCalls: ToolCall[] = [];
   // Token counts, and the model-load time of a cold call (the power floor leaves it out: job-pricing.ts).
+  const abort = new AbortController();
+  let revoked = false;
   let tokens: { promptTokens?: number; outputTokens?: number; loadMs?: number; promptMs?: number; genMs?: number } = {};
   const flush = async (done: boolean, error?: string) => {
     if (!pending && !done) return;
@@ -94,7 +103,12 @@ export async function runInferenceSubtask(
     try {
       await deps.post("/inference/chunks", { subtaskId: st.id, seq, delta, done, ...(error ? { error } : {}), ...(done && toolCalls.length ? { toolCalls } : {}), ...(done ? tokens : {}) });
       seq++;
-    } catch {
+    } catch (err) {
+      if ((err as { statusCode?: number }).statusCode === 403 && /not_claimant/.test(String((err as Error).message))) {
+        revoked = true;
+        abort.abort();
+        return;
+      }
       // Keep the piece and its number: the next flush sends it again with what came after, so one
       // lost post does not make every later piece a gap. (The coordinator also fills a stream in
       // from the final result, which carries the whole reply.)
@@ -102,7 +116,6 @@ export async function runInferenceSubtask(
     }
   };
 
-  const abort = new AbortController();
   // The subtask's own deadline bounds the call; the HTTP client's timeouts sit just past it, so a
   // cold model load (seconds to minutes on a CPU) is not cut off as a "Headers Timeout Error".
   const deadlineMs = Math.max(5_000, st.timeoutMs);
@@ -128,6 +141,7 @@ export async function runInferenceSubtask(
         if (pending.length >= FLUSH_CHARS || Date.now() - lastFlush >= FLUSH_MS) await flush(false);
       }
     }
+    if (revoked) return { ...base, ok: false, output: full, error: CLAIM_REVOKED_ERROR, durationMs: Date.now() - started };
     if (!full.trim() && toolCalls.length === 0) {
       // No text and no tool call is not an answer. It is reported as a failure without a final
       // piece, so the requester's stream stays open and the coordinator can give the call to
@@ -140,10 +154,10 @@ export async function runInferenceSubtask(
     // The engine's own context check (vLLM counts exact tokens; the estimate above is rough): another
     // agent with a bigger window may serve it, as with the check above.
     const overflow = err instanceof EngineError && err.contextOverflow && !full && toolCalls.length === 0;
-    const msg = cancelled ? CANCELLED_FOR_MEMORY_ERROR : abort.signal.aborted ? `timed out after ${Math.round(st.timeoutMs / 1000)} s` : overflow ? `${CONTEXT_TOO_LONG_ERROR}: ${(err as Error).message}` : (err as Error).message;
+    const msg = revoked ? CLAIM_REVOKED_ERROR : cancelled ? CANCELLED_FOR_MEMORY_ERROR : abort.signal.aborted ? `timed out after ${Math.round(st.timeoutMs / 1000)} s` : overflow ? `${CONTEXT_TOO_LONG_ERROR}: ${(err as Error).message}` : (err as Error).message;
     // Nothing reached the requester yet: leave the stream open, so the call can be retried elsewhere
     // (the failed result tells the coordinator, which ends the stream when it does not retry).
-    if (full || toolCalls.length) await flush(true, msg);
+    if (!revoked && (full || toolCalls.length)) await flush(true, msg);
     return { ...base, ok: false, output: full, error: msg, durationMs: Date.now() - started };
   } finally {
     clearTimeout(timer);

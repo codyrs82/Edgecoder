@@ -23,6 +23,12 @@
  *    (row count = report count, credits and msat sums); per task the network-fee rows must match
  *    the accruals' feeMsat. Reservation leases (report `reservation:<id>`, no ledger record) must
  *    have paid agent + fee = the lease's usedMsat.
+ *  - Reservation backfill (src/economy/reservation-backfill.ts): an accrual whose payload has
+ *    `backfill` paid its agentMsat as two rows, the host's (reservation_backfill_host:<lease>,
+ *    counted with the compute_contribution rows above: msat/credits in the payload are the host's)
+ *    and the lease holder's (reservation_backfill_holder:<lease>). Host + holder must equal the
+ *    recomputed agentMsat, the holder's part must be the recorded share, and per (holder, task)
+ *    the holder rows must match the accruals.
  *  - Task reserves: per task with a reserve (task_reserve / inference_reserve spends), what it paid
  *    out (compute_contribution + network_fee:<task> earns) plus what was refunded to the requester
  *    (task_submit_refund:<task>) must not exceed the reserve. More would be cSats created from
@@ -47,6 +53,8 @@ export interface ReconcileInput {
   accrualRecords: Array<{ id: string; subtaskId: string | null; taskId: string; actorId: string; coordinatorId: string | null; payload: Record<string, unknown> | null }>;
   /** compute_contribution earn rows grouped by (account, task). */
   earnRows: Array<{ accountId: string; taskId: string | null; rows: number; credits: string | number; msat: string | number | null; msatRows: number }>;
+  /** Reservation backfill holder earn rows (reservation_backfill_holder:*) grouped by (account, task). */
+  backfillHolderRows?: Array<{ accountId: string; taskId: string | null; rows: number; credits: string | number; msat: string | number | null }>;
   /** Fee-pool earn rows grouped by reason (network_fee:<taskId>). */
   feeRows: Array<{ taskId: string; rows: number; msat: string | number | null }>;
   /** coordinator_earnings_projection. */
@@ -78,6 +86,7 @@ export type DiscrepancyKind =
   | "duplicate_credit_rows"
   | "credit_amount_mismatch"
   | "fee_mismatch"
+  | "backfill_split_mismatch"
   | "reservation_settlement_mismatch"
   | "task_overpaid"
   | "ledger_chain_fork"
@@ -168,6 +177,8 @@ export function reconcileLedger(input: ReconcileInput, opts: { maxDiscrepancies?
   /** Tasks whose fee rows can't be compared: a legacy, unrecorded or unpriced accrual among them. */
   const feeIncomparable = new Set<string>();
   const reportSubtasks = new Set<string>();
+  /** Reservation backfill: expected holder rows per (holder, task). */
+  const holderExpected = new Map<string, { reports: number; msat: number }>();
   let accrualsChecked = 0;
   let accrualsRecomputed = 0;
   let legacyAccruals = 0;
@@ -225,9 +236,28 @@ export function reconcileLedger(input: ReconcileInput, opts: { maxDiscrepancies?
     const problems: Record<string, unknown> = {};
     // Accruals from before the fee was rounded to the nearest msat carry no feeRounding (floor).
     const split = splitJobCost(costMsat, feeBps, p.feeRounding === "nearest" ? "nearest" : "floor");
-    if (msat !== split.agentMsat) problems.msat = { recorded: msat ?? null, recomputed: split.agentMsat };
+    const bf = p.backfill && typeof p.backfill === "object" ? (p.backfill as Record<string, unknown>) : undefined;
+    let holderMsat = 0;
+    if (bf) {
+      holderMsat = num(bf.holderMsat) ?? 0;
+      const holder = typeof bf.holderAccountId === "string" ? bf.holderAccountId : "";
+      const shareBps = num(bf.holderShareBps);
+      const expectedHolder = shareBps === undefined ? undefined : Math.floor((split.agentMsat * Math.max(0, Math.min(10_000, Math.floor(shareBps)))) / 10_000);
+      if (!holder || num(bf.hostMsat) !== msat || (expectedHolder !== undefined && expectedHolder !== holderMsat)) {
+        flag({ kind: "backfill_split_mismatch", accountId: rep.accountId, taskId: rep.taskId, reportId: rep.reportId, detail: { hostMsat: msat ?? null, holderMsat, recordedHostMsat: bf.hostMsat ?? null, expectedHolderMsat: expectedHolder ?? null, holderAccountId: holder || null } });
+      }
+      if (holder && holderMsat > 0) {
+        const hk = key(holder, rep.taskId);
+        const h = holderExpected.get(hk) ?? { reports: 0, msat: 0 };
+        h.reports++;
+        h.msat += holderMsat;
+        holderExpected.set(hk, h);
+      }
+    }
+    if ((msat ?? 0) + holderMsat !== split.agentMsat) problems.msat = { recorded: msat ?? null, ...(bf ? { holderMsat } : {}), recomputed: split.agentMsat };
     if (num(p.feeMsat) !== split.feeMsat) problems.feeMsat = { recorded: p.feeMsat ?? null, recomputed: split.feeMsat };
-    if (Math.round(credits * 1_000_000) !== roundCreditsMicro(split.agentMsat)) problems.credits = { recorded: credits, recomputed: roundCreditsMicro(split.agentMsat) / 1e6 };
+    // The host's credits: with backfill, what is left of agentMsat after the holder's share.
+    if (Math.round(credits * 1_000_000) !== roundCreditsMicro(split.agentMsat - holderMsat)) problems.credits = { recorded: credits, recomputed: roundCreditsMicro(split.agentMsat - holderMsat) / 1e6 };
     if (p.pricingBasis === "per_second") {
       const rate = num(p.ratePerSecondMsat);
       const durationMs = num(p.durationMs);
@@ -284,6 +314,26 @@ export function reconcileLedger(input: ReconcileInput, opts: { maxDiscrepancies?
     if (seen.has(k) || !e.comparable || e.credits <= 0) continue;
     const [accountId, taskId] = k.split("\u0000");
     flag({ kind: "accrual_without_credit", accountId, taskId, detail: { reports: e.reports, credits: e.credits / 1e6 } });
+  }
+
+  // ── Reservation backfill: holder rows vs accruals ──
+  const holderSeen = new Set<string>();
+  for (const g of input.backfillHolderRows ?? []) {
+    const taskId = g.taskId ?? "";
+    const k = key(g.accountId, taskId);
+    holderSeen.add(k);
+    const e = holderExpected.get(k);
+    const rowsMsat = Number(g.msat ?? 0);
+    if (!e || g.rows > e.reports || rowsMsat !== e.msat || micro(g.credits) !== roundCreditsMicro(e.msat)) {
+      flag({ kind: "backfill_split_mismatch", accountId: g.accountId, taskId, detail: { rows: g.rows, rowsMsat, accrualsMsat: e?.msat ?? null, accruals: e?.reports ?? 0 } });
+    }
+  }
+  if (input.backfillHolderRows) {
+    for (const [k, e] of holderExpected) {
+      if (holderSeen.has(k)) continue;
+      const [accountId, taskId] = k.split("\u0000");
+      flag({ kind: "backfill_split_mismatch", accountId, taskId, detail: { rows: 0, rowsMsat: null, accrualsMsat: e.msat, accruals: e.reports } });
+    }
   }
 
   // ── Network fee rows vs accruals ──

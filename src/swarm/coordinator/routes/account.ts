@@ -36,6 +36,7 @@ import { callerAccount } from "../auth.js";
 import { effectiveHardware, hardwareVerifier, NETWORK_FEE_BPS, classRefMsatPerCredit } from "../economy.js";
 import { ownerVerificationView } from "../../hardware-verification.js";
 import { directQuoteHolds } from "../direct-holds.js";
+import { backfillConfig, backfillStats } from "../backfill.js";
 
 // ── Reserved capacity (src/economy/reservations.ts) ──
 
@@ -46,6 +47,8 @@ const reserveSchema = z.object({
   /** Only an agent that has this model installed. */
   model: z.string().min(1).max(200).optional(),
   minVramGb: z.number().min(0).max(1024).optional(),
+  /** "Let the network use my idle time" (docs/reservation-backfill.md); unset = RESERVATION_BACKFILL_DEFAULT. */
+  backfill: z.boolean().optional(),
 });
 
 /** Agents a lease is being made for right now (between choosing the agent and recording the lease). */
@@ -72,12 +75,23 @@ export async function reservableAgents(accountId: string, cls: ComputeClassId, m
   return out.sort((a, b) => a.creditsPerSecond - b.creditsPerSecond || (hardwareVerifier.reliability(b.agentId) ?? 0) - (hardwareVerifier.reliability(a.agentId) ?? 0));
 }
 
+/** A lease with its backfill stats (jobs and cSats credited to the holder; the holder's measured extra wait). */
+export async function publicReservationWithBackfill(r: Reservation) {
+  const base = publicReservation(r);
+  try {
+    const st = await backfillStats(r);
+    return { ...base, backfillStats: { jobs: st.jobs, earnedCSats: msatToCSats(st.holderMsat), holderShare: st.holderShare, preempted: st.preempted, holderWait: st.holderWait, active: st.enabled && r.status === "active" } };
+  } catch {
+    return base;
+  }
+}
+
 export function publicReservation(r: Reservation) {
   const cSats = (msat: number | undefined) => (msat === undefined ? undefined : msatToCSats(msat));
   return {
     id: r.id, computeClass: r.computeClass, tier: r.tier, model: r.model, agentId: r.agentId, startMs: r.startMs, endMs: r.endMs,
     status: r.status, endReason: r.endReason, cSatsPerSecond: cSats(r.ratePerSecondMsat), prepaidCSats: cSats(r.prepaidMsat),
-    usedCSats: cSats(r.usedMsat), refundCSats: cSats(r.refundMsat), ...(r.direct ? { paidDirect: r.direct.rail, receiptIds: r.direct.receiptIds } : {}), models: [...(agentCapabilities.get(r.agentId)?.localModelCatalog ?? [])].filter((m) => m && m !== "edgecoder-default"),
+    usedCSats: cSats(r.usedMsat), refundCSats: cSats(r.refundMsat), backfill: r.backfill === true, ...(r.direct ? { paidDirect: r.direct.rail, receiptIds: r.direct.receiptIds } : {}), models: [...(agentCapabilities.get(r.agentId)?.localModelCatalog ?? [])].filter((m) => m && m !== "edgecoder-default"),
   };
 }
 
@@ -213,7 +227,7 @@ export function registerAccountRoutes(app: CoordinatorApp): void {
         models: [...new Set(free.flatMap((a) => a.models))].sort(),
       };
     }
-    return reply.send({ reservations: reservations.listForAccount(caller.accountId).map(publicReservation), options, minMinutes: RESERVATION_MIN_MINUTES, maxMinutes: RESERVATION_MAX_MINUTES });
+    return reply.send({ reservations: await Promise.all(reservations.listForAccount(caller.accountId).map(publicReservationWithBackfill)), backfillShare: backfillConfig.holderShareBps / 10_000, backfillDefault: backfillConfig.enabled && backfillConfig.defaultOn, options, minMinutes: RESERVATION_MIN_MINUTES, maxMinutes: RESERVATION_MAX_MINUTES });
   });
 
   /** Reserve one agent of a class for some minutes, paid now in cSats (unused time comes back). */
@@ -243,15 +257,36 @@ export function registerAccountRoutes(app: CoordinatorApp): void {
       const r: Reservation = {
         id, accountId, agentId: agent.agentId, agentAccountId: agent.ownerAccountId, computeClass: body.computeClass, tier: agent.tier,
         creditsPerSecond: agent.creditsPerSecond, ...(body.model ? { model: body.model } : {}), startMs: now, endMs: now + body.minutes * 60_000,
-        ratePerSecondMsat: rate, prepaidMsat: prepaid, status: "active",
+        ratePerSecondMsat: rate, prepaidMsat: prepaid, status: "active", backfill: body.backfill ?? backfillConfig.defaultOn,
       };
       reservations.add(r);
       await pgStore?.upsertReservation(r).catch((err) => req.log.error({ err }, "reservation_persist_failed"));
       app.log.info({ reservationId: id, agentId: agent.agentId, computeClass: body.computeClass, minutes: body.minutes, prepaidMsat: prepaid }, "reservation_created");
-      return reply.send({ reservation: publicReservation(r) });
+      return reply.send({ reservation: await publicReservationWithBackfill(r) });
     } finally {
       reservingAgents.delete(agent.agentId);
     }
+  });
+
+  /** "Let the network use my idle time" on or off for an active lease (docs/reservation-backfill.md). */
+  app.post("/account/reservations/backfill", async (req, reply) => {
+    const body = z.object({ reservationId: z.string().min(1).max(100), enabled: z.boolean(), accountId: z.string().max(200).optional() }).parse(req.body);
+    const caller = await callerAccount(req, "/account/reservations/backfill", body.accountId);
+    if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
+    if (!reservations.get(body.reservationId)) await syncReservations(reservations, pgStore).catch((err) => req.log.warn({ err }, "reservation_sync_failed"));
+    const r = reservations.get(body.reservationId);
+    if (!r || r.accountId !== caller.accountId) return reply.code(404).send({ error: "unknown_reservation" });
+    if (r.status !== "active" || Date.now() >= r.endMs) return reply.code(409).send({ error: "reservation_not_active" });
+    let updated: Reservation | null = { ...r, backfill: body.enabled };
+    // Only while the stored lease is still active: never rewrites one another coordinator ended.
+    if (pgStore) updated = await pgStore.setReservationBackfillIfActive(r.id, body.enabled);
+    if (!updated) {
+      await syncReservations(reservations, pgStore).catch(() => undefined);
+      return reply.code(409).send({ error: "reservation_not_active" });
+    }
+    reservations.put(updated);
+    app.log.info({ reservationId: r.id, backfill: body.enabled }, "reservation_backfill_set");
+    return reply.send({ reservation: await publicReservationWithBackfill(updated) });
   });
 
   /** End a lease early; the unused time is refunded. */

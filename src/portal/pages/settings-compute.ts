@@ -128,6 +128,8 @@ const SCRIPT = SETTINGS_HELPERS_SCRIPT + PRICE_BOARD_SCRIPT + `
           ? [timeLeft(r.endMs), r.cSatsPerSecond !== undefined ? fmtRate(r.cSatsPerSecond) + " cSats/s" : "", r.prepaidCSats !== undefined ? fmtNum(r.prepaidCSats, 1) + " cSats prepaid" : ""]
           : ["Ended " + fmtDate(r.endMs), r.usedCSats !== undefined ? fmtNum(r.usedCSats, 1) + " cSats used" : "", r.refundCSats ? fmtNum(r.refundCSats, 1) + " refunded" : ""];
         text.appendChild(el("div", { class: "set-desc" }, parts.filter(Boolean).join(" · ")));
+        // Reservation backfill: small network jobs ran while the machine was idle; part of their pay is yours.
+        if (r.backfill || (r.backfillStats && r.backfillStats.jobs)) text.appendChild(el("div", { class: "set-desc" }, "Idle time shared with the network · " + ((r.backfillStats && r.backfillStats.jobs) || 0) + " jobs · " + fmtNum((r.backfillStats && r.backfillStats.earnedCSats) || 0, 1) + " cSats to you"));
         row.appendChild(text);
         const ctl = el("div", { class: "set-control" });
         if (active) {

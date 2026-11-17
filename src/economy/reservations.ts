@@ -3,8 +3,12 @@
 
 /**
  * Reserved capacity: an account holds one agent of a compute class for a set time, paid up front
- * in cSats. While the lease runs the agent takes only that account's jobs (and those jobs aren't
- * billed per second: the lease covers them). When it ends (time up, cancelled, or the agent went
+ * in cSats. While the lease runs the agent takes that account's jobs first (and those jobs aren't
+ * billed per second: the lease covers them). A lease that opted in to backfill (`backfill`) lets
+ * the agent take small network calls while the holder has none queued or running; those are billed
+ * to their submitters and the host-side earnings are split with the holder
+ * (src/economy/reservation-backfill.ts, docs/reservation-backfill.md). Otherwise the agent takes
+ * only the lease's jobs. When it ends (time up, cancelled, or the agent went
  * offline) the agent is paid for the time it was held, minus the network fee, and the rest is
  * refunded to the account.
  *
@@ -39,6 +43,12 @@ export interface Reservation {
    * of unused time (host offline) is owed by the host. Absent on prepaid leases.
    */
   direct?: { rail: "lightning" | "onchain" | "zcash"; receiptIds: string[] };
+  /**
+   * "Let the network use my idle time": while the holder has no lease job queued or running, the
+   * agent may take small network calls (docs/reservation-backfill.md). Absent on leases made
+   * before backfill existed: off.
+   */
+  backfill?: boolean;
 }
 
 export const RESERVATION_MIN_MINUTES = 5;

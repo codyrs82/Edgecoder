@@ -54,6 +54,7 @@ import {
   INFERENCE_URL,
   mesh,
   queue,
+  reservations,
   protocol,
   COORDINATOR_PUBLIC_URL,
   IOS_BATTERY_PULL_MIN_INTERVAL_MS,
@@ -124,7 +125,8 @@ import { inferenceStreams, judgeInferenceReply, retryInferenceElsewhere } from "
 import { isMemoryRefusal, noteAgentResult, noteDispatched } from "../memory-admission.js";
 import { EMPTY_REPLY_ERROR } from "../../inference-runner.js";
 import { judgeResult } from "../../result-outcome.js";
-import { claimRule, mayTakeNow, noteAgentPull, noteClaimed } from "../dispatch.js";
+import { claimRule, mayTakeNow, noteAgentPull, noteClaimed, readySinceMs } from "../dispatch.js";
+import { noteBackfillClaim, noteLeaseJobClaim } from "../backfill.js";
 import { noteRestrictedOptIn, restrictedCalls, restrictedSubmitGate } from "../restricted.js";
 import type { RemoteGrant } from "../../remote-grants.js";
 
@@ -443,7 +445,14 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         return reply.code(503).send({ error: "envelope_encryption_failed" });
       }
     }
-    if (task) noteClaimed(task.id);
+    if (task) {
+      // Reservation backfill: a reserved agent's claim is either its lease's job (its wait behind any
+      // backfill is measured) or a network call it took as backfill (billed with the holder's share).
+      const lease = reservations.activeForAgent(body.agentId, nowMs);
+      if (lease && task.projectMeta.reservationId === lease.id) noteLeaseJobClaim(lease, readySinceMs(task.id), nowMs);
+      else if (lease && !task.projectMeta.reservationId && !task.projectMeta.onlyAccountId) noteBackfillClaim(task, lease, body.agentId, nowMs);
+      noteClaimed(task.id);
+    }
     // Host memory: a call for a model not loaded there counts against the agent's headroom until it shows as loaded.
     if (task?.kind === "inference") noteDispatched(body.agentId, task.requestedModel, nowMs);
     if (task) restrictedCalls.claimed(task.id, body.agentId, pullerAccount);

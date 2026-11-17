@@ -118,4 +118,48 @@ describe("#115 reconcileLedger", () => {
     expect(r.discrepancies[0]).toMatchObject({ kind: "task_overpaid", taskId: "t-over", detail: { over: 0.007 } });
     expect(r.tasksChecked).toBe(3);
   });
+
+  describe("reservation backfill", () => {
+    // A backfill call: cost 10 000 msat, fee 10 % -> agentMsat 9 000, split 50/50 holder/host.
+    function backfillSnapshot(over: { holderMsat?: number; hostMsat?: number; holderRowMsat?: number; holderRows?: boolean } = {}): ReconcileInput {
+      const { agentMsat, feeMsat } = splitJobCost(10_000, 1000);
+      const holderMsat = over.holderMsat ?? Math.floor(agentMsat / 2);
+      const hostMsat = over.hostMsat ?? agentMsat - holderMsat;
+      const record = {
+        id: "rec-b1", subtaskId: "b1", taskId: "tb", actorId: "host", coordinatorId: "coord-a",
+        payload: { accountId: "host", credits: hostMsat / 1000, msat: hostMsat, costMsat: 10_000, feeMsat, networkFeeBps: 1000, pricingBasis: "tokens", backfill: { reservationId: "r1", holderAccountId: "holder", holderMsat, hostMsat, holderShareBps: 5000 } },
+      };
+      const rowMsat = over.holderRowMsat ?? holderMsat;
+      return {
+        balances: [{ accountId: "host", earned: hostMsat / 1000, spent: 0, rows: 1 }, { accountId: "holder", earned: rowMsat / 1000, spent: 0, rows: 1 }],
+        reports: [{ reportId: "result:b1", accountId: "host", taskId: "tb" }],
+        accrualRecords: [record],
+        earnRows: [{ accountId: "host", taskId: "tb", rows: 1, credits: String(hostMsat / 1000), msat: String(hostMsat), msatRows: 1 }],
+        backfillHolderRows: over.holderRows === false ? [] : [{ accountId: "holder", taskId: "tb", rows: 1, credits: String(rowMsat / 1000), msat: String(rowMsat) }],
+        feeRows: [{ taskId: "tb", rows: 1, msat: String(feeMsat) }],
+        projections: [{ accountId: "host", totalCredits: hostMsat / 1000 }],
+        reservations: [],
+        chain: emptyChain,
+      };
+    }
+
+    it("a split accrual (host + holder + fee = cost) reconciles", () => {
+      expect(run(backfillSnapshot())).toMatchObject({ ok: true, mismatches: 0, accrualsRecomputed: 1 });
+    });
+
+    it("a holder row that doesn't match, or is missing, is flagged", () => {
+      expect(run(backfillSnapshot({ holderRowMsat: 4_501 })).byKind).toEqual({ backfill_split_mismatch: 1 });
+      expect(run(backfillSnapshot({ holderRows: false })).byKind).toEqual({ backfill_split_mismatch: 1 });
+    });
+
+    it("a split that is not the recorded share, or loses or creates msat, is flagged", () => {
+      expect(run(backfillSnapshot({ holderMsat: 5_000, hostMsat: 4_000 })).byKind).toEqual({ backfill_split_mismatch: 1 });
+      expect(run(backfillSnapshot({ holderMsat: 4_500, hostMsat: 4_501 })).byKind).toMatchObject({ accrual_pricing_mismatch: 1 });
+    });
+
+    it("a holder row with no accrual behind it is flagged", () => {
+      const s = snapshot({ backfillHolderRows: [{ accountId: "holder", taskId: "t1", rows: 1, credits: "1", msat: "1000" }] });
+      expect(run(s).byKind).toEqual({ backfill_split_mismatch: 1 });
+    });
+  });
 });

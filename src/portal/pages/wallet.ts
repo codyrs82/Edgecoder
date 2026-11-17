@@ -481,7 +481,8 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + `
     const REASONS = {
       credit_purchase: "Bought cSats", inference_reserve: "Model call (set aside)", inference: "Model call", task_submit: "Code job (set aside)",
       task_submit_refund: "Unused set-aside returned", compute_reservation: "Reserved a machine", reservation_refund: "Reservation time returned",
-      compute_contribution: "Earned running jobs", reservation_earning: "Earned from a reservation", payout: "Withdrawal",
+      compute_contribution: "Earned running jobs", reservation_earning: "Earned from a reservation",
+      reservation_backfill_holder: "Your reserved machine's idle time (network jobs)", reservation_backfill_host: "Earned running jobs (reserved machine's idle time)", payout: "Withdrawal",
       payout_refund: "Withdrawal returned", payout_fee_excess: "Withdrawal routing fee", fee_pool_distribution: "Infrastructure host share", faucet: "Test sats grant"
     };
     function reasonText(r) { if (/^credit_purchase:onchain:/.test(String(r || ""))) return "Bitcoin deposit"; const base = String(r || "").replace(/:.*/, ""); return REASONS[base] || base.replace(/_/g, " ") || "–"; }

@@ -4,6 +4,7 @@
 /**
  * Inference routes: model list, submit, chunk upload and streaming.
  */
+import { setBackfillRetry } from "../backfill.js";
 import { nwcSpotBuyer, nwcTally } from "../direct-payments.js";
 import { z } from "zod";
 import type { ResourceClass, Subtask } from "../../../common/types.js";
@@ -247,6 +248,9 @@ export async function retryInferenceElsewhere(subtask: Subtask, agentId: string,
   coordinatorApp.log.warn({ taskId: subtask.taskId, subtaskId: subtask.id, agentId, error }, "inference_retry_elsewhere");
   return true;
 }
+
+// Reservation backfill: a backfill call past its cap while a lease job waits is handed elsewhere the same way.
+setBackfillRetry(retryInferenceElsewhere);
 
 /** Cancel (and refund) the call if nobody claims it within `ms`; replaces an earlier bound. */
 function armClaimDeadline(taskId: string, subtaskId: string, ms: number): void {

@@ -32,23 +32,47 @@ export interface AccrualValuation {
  * both in cSats (1 cSat = 1 sat, credits column) with their msat value. Idempotent on
  * `report.reportId` like accrueCredits. Returns the agent's row, or null when already recorded or
  * there is nothing to pay.
+ *
+ * Reservation backfill (src/economy/reservation-backfill.ts): with `backfill`, `agentMsat` is split
+ * into the host's row (reason reservation_backfill_host:<lease>, `hostMsat`) and the lease
+ * holder's row (reservation_backfill_holder:<lease>, `holderMsat`), written in the same
+ * transaction as the report and the fee row. hostMsat + holderMsat must equal agentMsat. The
+ * returned row is still the host's.
  */
 export async function accruePricedJob(
   report: ComputeContributionReport,
-  priced: { agentMsat: number; feeMsat: number }
+  priced: { agentMsat: number; feeMsat: number },
+  backfill?: { reservationId: string; holderAccountId: string; holderMsat: number; hostMsat: number }
 ): Promise<CreditTransaction | null> {
   if (!(priced.agentMsat > 0)) return null;
+  if (backfill && (backfill.holderMsat < 0 || backfill.hostMsat < 0 || backfill.holderMsat + backfill.hostMsat !== Math.round(priced.agentMsat))) {
+    throw new Error("backfill_split_mismatch");
+  }
   const now = Date.now();
+  const hostMsat = backfill ? backfill.hostMsat : Math.round(priced.agentMsat);
   const tx: CreditTransaction = {
     txId: randomUUID(),
     accountId: report.agentId,
     type: "earn",
-    credits: roundCredits(priced.agentMsat / 1000),
-    reason: "compute_contribution",
+    credits: roundCredits(hostMsat / 1000),
+    reason: backfill ? `reservation_backfill_host:${backfill.reservationId}` : "compute_contribution",
     relatedTaskId: report.taskId,
     timestampMs: now,
-    msat: Math.round(priced.agentMsat),
+    msat: hostMsat,
   };
+  const holderTx: CreditTransaction | undefined =
+    backfill && backfill.holderMsat > 0
+      ? {
+          txId: randomUUID(),
+          accountId: backfill.holderAccountId,
+          type: "earn",
+          credits: roundCredits(backfill.holderMsat / 1000),
+          reason: `reservation_backfill_holder:${backfill.reservationId}`,
+          relatedTaskId: report.taskId,
+          timestampMs: now,
+          msat: backfill.holderMsat,
+        }
+      : undefined;
   const feeTx: CreditTransaction | undefined =
     priced.feeMsat > 0
       ? {
@@ -73,12 +97,14 @@ export async function accruePricedJob(
         weightedContribution: Number((seconds * (report.hardwareWeight ?? 1)).toFixed(6)),
       },
       tx,
-      feeTx
+      feeTx,
+      holderTx ? [holderTx] : []
     );
     return inserted ? tx : null;
   }
   if (!creditEngine.claimReport(report.reportId)) return null;
-  creditEngine.record(tx);
+  if (!backfill || tx.credits > 0) creditEngine.record(tx);
+  if (holderTx) creditEngine.record(holderTx);
   if (feeTx) creditEngine.record(feeTx);
   return tx;
 }

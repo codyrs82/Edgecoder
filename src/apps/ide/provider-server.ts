@@ -1134,7 +1134,7 @@ app.get("/v1/ide/reservations", async (_req, reply) => {
 
 app.post("/v1/ide/reservations", async (req, reply) => {
   if (!networkDeps) return reply.status(409).send({ error: "not_enrolled" });
-  const body = z.object({ computeClass: z.enum(["cpu", "apple", "gpu", "gpu.dc"]), minutes: z.number().int().min(1).max(1440), model: z.string().max(200).optional(), minVramGb: z.number().min(0).max(1024).optional() }).parse(req.body);
+  const body = z.object({ computeClass: z.enum(["cpu", "apple", "gpu", "gpu.dc"]), minutes: z.number().int().min(1).max(1440), model: z.string().max(200).optional(), minVramGb: z.number().min(0).max(1024).optional(), backfill: z.boolean().optional() }).parse(req.body);
   const r = await createReservation(networkDeps, body);
   return reply.status(r.status === 200 ? 200 : r.status || 502).send(r.json);
 });

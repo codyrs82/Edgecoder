@@ -478,6 +478,19 @@ A request with `model: "auto"` is routed by the coordinator: it describes the jo
 | `BEST_FIT_PEERS` | on | `0` or `false` scores only this coordinator's agents (no `route_elsewhere` to a peer). |
 | `BEST_FIT_COMPLEXITY_WEIGHTS_JSON` | built-in table | JSON object of complexity signal weights (0 to 1 each), for example `{"reasoning": 0.25, "files": 0.15}`. Signals: `length`, `turns`, `code`, `files`, `languages`, `diff`, `trace`, `tools`, `agentSteps`, `reasoning`, `output`, `simple` (subtracted). |
 
+## Coordinator: reservation backfill
+
+While a lease holder has no job queued or running on the machine they reserved, the machine may take small network model calls (docs/reservation-backfill.md). The lease is unchanged; each backfill call is billed to its submitter at the normal network price, and its host-side earnings (after `NETWORK_FEE_BPS`) are split between the holder and the host. The holder's jobs always go first. A value outside the reader's range uses the default.
+
+| Variable | Default | Description |
+|---|---|---|
+| `RESERVATION_BACKFILL` | on | `0`, `false`, `no` or `off` turns backfill off for every lease (kill switch). |
+| `RESERVATION_BACKFILL_DEFAULT` | on | Whether a new lease lets the network use its idle time when its request does not say (`backfill` on `POST /account/reservations`). |
+| `RESERVATION_BACKFILL_HOLDER_SHARE` | `0.5` | The lease holder's share (0 to 1) of a backfill call's host-side earnings after the network fee; the host keeps the rest. |
+| `RESERVATION_BACKFILL_MAX_TOKENS` | `8192` | Largest call taken as backfill: prompt plus reply room, in tokens (256 to 1000000). |
+| `RESERVATION_BACKFILL_MAX_SECONDS` | `15` | Longest expected run of a backfill call on the agent (prefill plus expected reply at its measured speed), and the run time after which a backfill call is handed to another agent when a lease job waits and its requester has seen nothing yet (1 to 600). |
+| `RESERVATION_BACKFILL_SLOT_FRACTION` | `0.5` | Share of the agent's model slots backfill may hold at once (0 to 1; at least 1 slot, and on agents with 2 or more slots at least one always stays free; 0 turns backfill off). |
+
 ## Coordinator: pricing, payout and anchoring limits
 
 Amounts must be numbers of 0 or more. A value the reader's own limit rejects (noted per row) uses the default.
