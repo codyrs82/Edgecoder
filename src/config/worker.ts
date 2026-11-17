@@ -3,7 +3,7 @@
 
 import { z } from "zod";
 import { envEnum, envEnumCi, envFlag, envFlagWord, envInt, envNumber, envPort, envUrl } from "../common/config.js";
-import { computeClassEnv, discoveryEnv, modelEnv, releaseEnv, sandboxEnv, serviceUrlsEnv, trustEnv } from "./shared.js";
+import { computeClassEnv, discoveryEnv, modelEnv, releaseEnv, sandboxEnv, serviceUrlsEnv, trustEnv, webReplyEnv } from "./shared.js";
 
 const str = () => z.string().optional();
 const amount = () => envNumber(undefined, { min: 0 });
@@ -23,6 +23,7 @@ export const workerConfigSchema = z.object({
   ...trustEnv,
   ...discoveryEnv,
   ...computeClassEnv,
+  ...webReplyEnv,
   NODE_ENV: str(),
   HOST: str(),
 

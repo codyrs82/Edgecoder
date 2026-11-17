@@ -643,7 +643,7 @@ export async function streamPortalChat(
    * The chat's Web toggle: the portal runs the web tool (Auto compute, which can call tools) and
    * sends status lines ("Searching the web…") and the web tool's total with the numbered sources.
    */
-  web?: { onStatus?: (message: string) => void; onWeb?: (event: Record<string, unknown>) => void },
+  web?: { onStatus?: (message: string) => void; onWeb?: (event: Record<string, unknown>) => void; onWebOff?: (off: { reason: string; message: string }) => void },
 ): Promise<void> {
   const streamStart = Date.now();
   let tokenCount = 0;
@@ -694,6 +694,7 @@ export async function streamPortalChat(
         }
         if (typeof chunk.status === "string") web?.onStatus?.(chunk.status);
         if (chunk.web && typeof chunk.web === "object") web?.onWeb?.(chunk.web);
+        if (chunk.webOff && typeof chunk.webOff === "object") web?.onWebOff?.({ reason: String(chunk.webOff.reason ?? ""), message: String(chunk.webOff.message ?? "") });
 
         if (chunk.content) {
           tokenCount++;
@@ -1431,7 +1432,7 @@ export const listPermissions = () => fsCall<{ projects: Record<string, ProjectPe
 export const removePermission = (projectRoot: string, rule: string) => fsCall<{ removed: boolean }>("POST", "/v1/ide/permissions/remove", { projectRoot, rule });
 
 export interface IdeStreamEvent {
-  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "usage" | "web" | "done";
+  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "usage" | "web" | "web_off" | "done";
   [key: string]: unknown;
 }
 
@@ -1551,8 +1552,16 @@ async function readIdeEvents(res: Response, onEvent: (event: IdeStreamEvent) => 
   }
 }
 
+/** /v1/ide/web-chat turned the web down for this reply ("needs_csats", "no_tools", "rate_limited"…). */
+export class WebOffError extends Error {
+  constructor(readonly reason: string, message: string) {
+    super(message || "Web search isn't available for this reply.");
+    this.name = "WebOffError";
+  }
+}
+
 /**
- * A chat without a project with the Web toggle on (/v1/ide/web-chat): the model with only
+ * A chat without a project with Web on (/v1/ide/web-chat): the model with only
  * web_search and read_page, on the chat's compute. Same events as streamIdeChat.
  */
 export async function streamIdeWebChat(
@@ -1568,7 +1577,9 @@ export async function streamIdeWebChat(
     signal,
   });
   if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { message?: string };
+    const body = (await res.json().catch(() => ({}))) as { message?: string; error?: string; reason?: string };
+    // Web isn't offered for this reply (no cSats, a model without tools): the caller answers without it.
+    if (res.status === 409 && body.error === "web_off") throw new WebOffError(body.reason ?? "", body.message ?? "");
     throw new Error(body.message ?? `Web chat request failed: ${res.status}`);
   }
   await readIdeEvents(res, onEvent);

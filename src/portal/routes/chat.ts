@@ -18,7 +18,7 @@ import type { Served } from "../../common/served.js";
 import type { ReplyUsage } from "../reply-usage.js";
 import { backendChat, runAgentLoop, makeToolRunner } from "../../apps/ide/agent-loop.js";
 import type { IdeStreamEvent } from "../../apps/ide/tool-types.js";
-import { WEB_SYSTEM_NOTE, WebToolSession, citedSources, isWebTool, sourcesMarkdown, webFooter, webToolSchemas, type WebToolCall } from "../../web-tool/tools.js";
+import { WEB_SYSTEM_NOTE, WebToolSession, citedSources, forgetWebAvailability, isWebTool, sourcesMarkdown, webAvailability, webFooter, webReplyLimitsFromEnv, webToolSchemas, type WebToolCall } from "../../web-tool/tools.js";
 import { modelCallsTools } from "../../web-tool/model-support.js";
 import { portalCoordinatorTransport } from "./compute.js";
 
@@ -517,12 +517,23 @@ export function registerChatApiRoutes(
     const out = chatResponse(reply, deps.chatKeepalive ?? CHAT_KEEPALIVE);
     try {
       if (body.web && body.compute) {
-        // Web: an agent loop with only the web tool, on the chat's compute (Auto: your own machines first, then the network's best fit).
+        // Web (docs/web-tool.md): offered by default, the model decides when to search. An agent loop
+        // with only the web tool, on the chat's compute (Auto: your own machines first, then the
+        // network's best fit), for a model that calls tools and an account that can pay for a search.
         const own = body.compute.target === "auto" && deps.ownMachineModels ? await deps.ownMachineModels(user.userId).catch(() => [] as string[]) : [];
-        const compute: ChatCompute = body.compute.target === "auto" && own[0] ? { target: "mine", model: own[0] } : body.compute;
-        return await runWebChat(req, reply, out, user.userId, body.conversationId, compute, messages);
+        const ownTools = own.find((m) => modelCallsTools(m));
+        // Your own machine answers Auto for free; when its model can't call tools it answers without the web.
+        const compute: ChatCompute | null = body.compute.target === "auto" ? (ownTools ? { target: "mine", model: ownTools } : own.length ? null : body.compute) : modelCallsTools(body.compute.model ?? "") ? body.compute : null;
+        if (compute) {
+          const accountId = accountIdFor(user.userId);
+          const transport = portalCoordinatorTransport({ PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }, accountId);
+          const avail = await webAvailability((path, payload, signal) => transport("POST", path, { ...payload, accountId }, signal), accountId);
+          if (avail.offer) return await runWebChat(req, reply, out, user.userId, body.conversationId, compute, messages);
+          // No cSats (or the hour's searches used): the tools aren't offered and the chat answers
+          // without the web; the page says so once, quietly.
+          if (avail.reason === "needs_csats" || avail.reason === "rate_limited") out.send({ webOff: { reason: avail.reason, message: avail.message ?? "" } });
+        }
       }
-      if (body.web) out.send({ warning: "Web needs a model that can use tools; this one answered without it." });
       if (body.compute?.target === "auto") return await runAuto(req, reply, out, user.userId, body.conversationId, body.compute, messages, chatPayload);
       if (body.compute) return await runOnNetwork(req, reply, out, user.userId, body.conversationId, body.compute, messages);
       return await runDefaultChat(req, reply, out, body.conversationId, chatPayload);
@@ -633,12 +644,15 @@ export function registerChatApiRoutes(
     // The coordinator's own chat (no compute) has no tool loop; a named model must call tools.
     const toolsSupported = target === "default" ? false : target === "auto" || !model ? true : modelCallsTools(model);
     const accountId = accountIdFor(user.userId);
+    // A fresh look (the page asks after a web reply and when the chat changes): the next reply asks again too.
+    forgetWebAvailability(accountId);
     const r = await portalCoordinatorTransport({ PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }, accountId)("POST", "/v1/tools/web/status", { accountId }).catch(() => ({ status: 502, json: {} as Record<string, unknown> }));
     if (r.status !== 200) return reply.send({ available: false, configured: false, toolsSupported, reason: "unreachable", message: "Couldn't reach EdgeCoder to check web search." });
-    const st = r.json as { configured?: boolean; canAfford?: boolean; message?: string };
+    const st = r.json as { configured?: boolean; canAfford?: boolean; message?: string; searchesLeftThisHour?: number };
     const configured = st.configured === true;
-    const reason = !configured ? "not_configured" : !toolsSupported ? "no_tools" : st.canAfford === false ? "needs_csats" : null;
-    return reply.send({ ...st, configured, toolsSupported, available: reason === null, reason });
+    const reason = !configured ? "not_configured" : !toolsSupported ? "no_tools" : st.canAfford === false ? "needs_csats" : st.searchesLeftThisHour === 0 ? "rate_limited" : null;
+    const limits = webReplyLimitsFromEnv();
+    return reply.send({ ...st, configured, toolsSupported, available: reason === null, reason, maxSearchesPerReply: limits.searches, maxReadsPerReply: limits.reads });
   });
 
   /**

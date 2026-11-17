@@ -353,3 +353,13 @@ export const rotationEnv = {
 export const adminOriginEnv = {
   ADMIN_ALLOWED_CIDRS: checked(allowedCidrsProblem)
 };
+
+/**
+ * The web tool's per-reply limits (docs/web-tool.md), read where the web tools are offered: the
+ * IDE provider (desktop app, bots) and the portal's web chat. src/web-tool/tools.ts
+ * webReplyLimitsFromEnv reads them per reply; out-of-range values fall back to the defaults there.
+ */
+export const webReplyEnv = {
+  WEB_MAX_SEARCHES_PER_REPLY: envInt(3, { min: 0, max: 50 }),
+  WEB_MAX_READS_PER_REPLY: envInt(4, { min: 0, max: 50 }),
+};

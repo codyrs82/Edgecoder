@@ -44,15 +44,17 @@ Consolidated reference for all environment controls. The primary config file on 
 
 ## Web tool (coordinator)
 
-The chat's **Web** toggle and a bot's **Search the web** permission ([web tool](https://github.com/codyrs82/Edgecoder/blob/main/docs/web-tool.md)): `web_search` and `read_page` run on the coordinator (`POST /v1/tools/web/search`, `/read`, `/status`), never on a host's machine, and are billed to the caller's account per call.
+Web search in chats (automatic, **Web: Auto**) and a bot's **Search the web** permission ([web tool](https://github.com/codyrs82/Edgecoder/blob/main/docs/web-tool.md)): `web_search` and `read_page` run on the coordinator (`POST /v1/tools/web/search`, `/read`, `/status`), never on a host's machine, and are billed to the caller's account per call.
 
 | Variable | Purpose |
 |---|---|
-| `BRAVE_SEARCH_API_KEY` | Secret. The Brave Search API subscription token. Unset (the default): the web tool is off everywhere ("Web search isn't set up yet") and the apps hide their Web toggle. Set it with `fly secrets set BRAVE_SEARCH_API_KEY=… -a <coordinator app>` on each coordinator; it never leaves the coordinator. |
+| `BRAVE_SEARCH_API_KEY` | Secret. The Brave Search API subscription token. Unset (the default): the web tool is off everywhere ("Web search isn't set up yet") and the apps hide their Web indicator. Set it with `fly secrets set BRAVE_SEARCH_API_KEY=… -a <coordinator app>` on each coordinator; it never leaves the coordinator. |
 | `WEB_SEARCH_CSATS` | cSats charged per search (number ≥ 0, default `0.5`). Debited before the call (ledger reason `tool:web_search`), refunded when it fails. |
 | `WEB_READ_CSATS` | cSats charged per page read (number ≥ 0, default `0.2`; reason `tool:read_page`). |
 | `WEB_SEARCH_PER_HOUR` | Searches per account per hour on one coordinator (default `60`). |
 | `WEB_READ_PER_HOUR` | Page reads per account per hour on one coordinator (default `120`). |
+| `WEB_MAX_SEARCHES_PER_REPLY` | Desktop IDE server and portal (not the coordinator). Searches one chat reply or bot run may make (integer 0 to 50, default `3`); past it the call is refused before it costs anything. |
+| `WEB_MAX_READS_PER_REPLY` | Desktop IDE server and portal (not the coordinator). Page reads one chat reply or bot run may make (integer 0 to 50, default `4`). |
 
 ## Economy, payouts and receipts (coordinator)
 

@@ -57,7 +57,7 @@
   let runsPerDayText = $state(String(initial?.maxRunsPerDay ?? DEFAULT_MAX_RUNS_PER_DAY));
   let customSchedule = $state(!!initial?.schedule && !SCHEDULE_PRESETS.some((p) => p.value === initial.schedule));
   let budgetText = $state(initial ? (initial.budgetCSatsPerDay == null ? "" : String(initial.budgetCSatsPerDay)) : "100");
-  let groups = $state<Record<string, boolean>>(initial ? groupsOf(initial.allowedTools) : { edit: true, shell: true, git: true });
+  let groups = $state<Record<string, boolean>>(initial ? groupsOf(initial.allowedTools) : { edit: true, shell: true, git: true, web: true });
   let autoApproveEdits = $state(initial?.autoApproveEdits ?? true);
   const initialCompute = initial ? botCompute(initial) : DEFAULT_COMPUTE;
   let policy = $state<ComputeChoice>(computeChoiceOf(initialCompute));

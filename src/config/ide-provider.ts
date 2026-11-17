@@ -3,7 +3,7 @@
 
 import { z } from "zod";
 import { envFlag, envNumber, envPort, envUrl } from "../common/config.js";
-import { modelEnv, observabilityEnv, sandboxEnv, serviceUrlsEnv } from "./shared.js";
+import { modelEnv, observabilityEnv, sandboxEnv, serviceUrlsEnv, webReplyEnv } from "./shared.js";
 
 const str = () => z.string().optional();
 const credits = () => envNumber(undefined, { min: 0 });
@@ -19,6 +19,7 @@ export const ideProviderConfigSchema = z.object({
   ...serviceUrlsEnv,
   ...modelEnv,
   ...sandboxEnv,
+  ...webReplyEnv,
   /** Loopback unless IDE_PROVIDER_TOKEN is set (src/apps/ide/ide-auth.ts). */
   IDE_PROVIDER_HOST: z.string().default("127.0.0.1"),
   IDE_PROVIDER_PORT: envPort(4304),

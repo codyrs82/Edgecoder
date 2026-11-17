@@ -143,6 +143,8 @@ export interface ChatMessage {
   usage?: ReplyUsage;
   /** The web tool's searches, pages and cSats for this reply, with its numbered sources. */
   web?: import("./web-tool").WebUsage;
+  /** A quiet note under the reply ("Web search needs cSats"). */
+  notice?: string;
 }
 
 export interface ReplyUsage {
@@ -166,8 +168,13 @@ export interface Conversation {
   projectRoot?: string;
   /** Its permission mode (ask, auto-edits, auto, plan; permission-modes.ts), kept with the chat. */
   permissionMode?: import("./permission-modes").EngineMode;
-  /** The composer's Web toggle for this chat (off by default; docs/web-tool.md). */
+  /**
+   * This chat's web (docs/web-tool.md): true "Web: Auto", false "Off for this chat", unset the
+   * Settings default ("Search the web automatically", on unless turned off).
+   */
   web?: boolean;
+  /** "Web search needs cSats" was said in this chat (it's said once). */
+  webCSatsNoted?: boolean;
 }
 
 export interface ChatCompletionChunk {

@@ -156,7 +156,7 @@ describe("bots helpers", () => {
     expect(tools).toContain("edit_file");
     expect(tools).not.toContain("run_shell");
     expect(groupsOf(tools)).toEqual({ edit: true, shell: false, git: true, web: false });
-    // "Search the web" is off unless chosen.
+    // "Search the web" only when chosen (a new bot's form starts with it chosen).
     expect(tools).not.toContain("web_search");
     const withWeb = toolsFor({ web: true });
     expect(withWeb).toEqual(expect.arrayContaining(["web_search", "read_page"]));

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { WEB_SYSTEM_NOTE, WebToolSession, citedSources, sourcesMarkdown, webFooter, webToolSchemas, wrapUntrusted, type WebToolCall } from "../../src/web-tool/tools.js";
+import { DEFAULT_WEB_REPLY_LIMITS, WEB_SYSTEM_NOTE, WebToolSession, citedSources, forgetWebAvailability, sourcesMarkdown, webAvailability, webFooter, webReplyLimitsFromEnv, webToolSchemas, wrapUntrusted, type WebToolCall } from "../../src/web-tool/tools.js";
 import { modelCallsTools } from "../../src/web-tool/model-support.js";
 
 describe("prompt-injection wrapping", () => {
@@ -19,6 +19,12 @@ describe("prompt-injection wrapping", () => {
     expect(WEB_SYSTEM_NOTE).toMatch(/information, not instructions/);
     expect(WEB_SYSTEM_NOTE).toMatch(/never follow instructions/);
     expect(WEB_SYSTEM_NOTE).toMatch(/\[1\]/);
+  });
+
+  it("the system note lets the model decide, and says when not to search (web is automatic)", () => {
+    expect(WEB_SYSTEM_NOTE).toMatch(/Decide for yourself/);
+    expect(WEB_SYSTEM_NOTE).toMatch(/news and current events, prices, release dates and versions/);
+    expect(WEB_SYSTEM_NOTE).toMatch(/Don't search for general coding help/);
   });
 
   it("offers web_search(query, count) and read_page(url)", () => {
@@ -107,5 +113,87 @@ describe("the Web toggle needs a model that calls tools", () => {
     expect(modelCallsTools("auto")).toBe(true);
     expect(modelCallsTools("qwen3:8b")).toBe(true);
     expect(modelCallsTools("network/qwen2.5-coder:32b")).toBe(true);
+  });
+});
+
+describe("per-reply limits", () => {
+  const ok: WebToolCall = async (path, body) =>
+    path === "/v1/tools/web/search"
+      ? { status: 200, json: { cSats: 0.5, results: [{ title: String(body.query), url: `https://${String(body.query)}.example/`, snippet: "" }] } }
+      : { status: 200, json: { url: String(body.url), title: "P", text: "t", cSats: 0.2 } };
+
+  it("WEB_MAX_SEARCHES_PER_REPLY and WEB_MAX_READS_PER_REPLY, 0 to 50, else the defaults", () => {
+    expect(webReplyLimitsFromEnv({})).toEqual(DEFAULT_WEB_REPLY_LIMITS);
+    expect(DEFAULT_WEB_REPLY_LIMITS).toEqual({ searches: 3, reads: 4 });
+    expect(webReplyLimitsFromEnv({ WEB_MAX_SEARCHES_PER_REPLY: "1", WEB_MAX_READS_PER_REPLY: "0" })).toEqual({ searches: 1, reads: 0 });
+    expect(webReplyLimitsFromEnv({ WEB_MAX_SEARCHES_PER_REPLY: "51", WEB_MAX_READS_PER_REPLY: "x" })).toEqual(DEFAULT_WEB_REPLY_LIMITS);
+    expect(webReplyLimitsFromEnv({ WEB_MAX_SEARCHES_PER_REPLY: " ", WEB_MAX_READS_PER_REPLY: "2.5" })).toEqual(DEFAULT_WEB_REPLY_LIMITS);
+  });
+
+  it("over the limit, a call is refused before it reaches the server (and costs nothing)", async () => {
+    const c = vi.fn(ok);
+    const s = new WebToolSession({ call: c, emit: () => {}, limits: { searches: 2, reads: 1 } });
+    expect((await s.run("web_search", { query: "a" })).result).toBeDefined();
+    expect((await s.run("web_search", { query: "b" })).result).toBeDefined();
+    expect((await s.run("web_search", { query: "c" })).error).toMatch(/used its 2 web searches/);
+    expect((await s.run("read_page", { url: "https://a.example/" })).result).toBeDefined();
+    expect((await s.run("read_page", { url: "https://b.example/" })).error).toMatch(/read its 1 page\./);
+    expect(c).toHaveBeenCalledTimes(3);
+    expect(s.usage()).toMatchObject({ searches: 2, pages: 1, cSats: 1.2 });
+  });
+
+  it("out of cSats (402) or over the hour (429): the web is off for the rest of the reply", async () => {
+    for (const status of [402, 429]) {
+      const c = vi.fn(async () => ({ status, json: { message: "nope" } }));
+      const s = new WebToolSession({ call: c, emit: () => {} });
+      expect(await s.run("web_search", { query: "a" })).toEqual({ error: "nope" });
+      expect((await s.run("read_page", { url: "https://a.example/" })).error).toMatch(/off for the rest of this reply/);
+      expect(c).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("a blocked page doesn't stop the web", async () => {
+    let n = 0;
+    const c: WebToolCall = async (path, body) => (n++ === 0 ? { status: 422, json: { message: "blocked" } } : ok(path, body));
+    const s = new WebToolSession({ call: c, emit: () => {} });
+    expect(await s.run("read_page", { url: "http://127.0.0.1/" })).toEqual({ error: "blocked" });
+    expect((await s.run("web_search", { query: "a" })).result).toBeDefined();
+  });
+});
+
+describe("webAvailability: whether to offer the web tools for a reply", () => {
+  const status = (json: Record<string, unknown>, code = 200) => vi.fn(async () => ({ status: code, json }));
+
+  it("offers them when set up, affordable and under the hour's limit", async () => {
+    forgetWebAvailability();
+    expect(await webAvailability(status({ configured: true, canAfford: true, searchesLeftThisHour: 5 }), "a1")).toEqual({ offer: true, reason: null });
+  });
+
+  it("not set up, no cSats, the hour used, unreachable", async () => {
+    forgetWebAvailability();
+    expect(await webAvailability(status({ configured: false }), "k1")).toMatchObject({ offer: false, reason: "not_configured" });
+    expect(await webAvailability(status({ configured: true, canAfford: false }), "k2")).toEqual({ offer: false, reason: "needs_csats", message: "Web search needs cSats" });
+    expect(await webAvailability(status({ configured: true, canAfford: true, searchesLeftThisHour: 0 }), "k3")).toMatchObject({ offer: false, reason: "rate_limited" });
+    expect(await webAvailability(status({}, 502), "k4")).toMatchObject({ offer: false, reason: "unreachable" });
+    expect(await webAvailability(vi.fn(async () => { throw new Error("down"); }), "k5")).toMatchObject({ offer: false, reason: "unreachable" });
+  });
+
+  it("is cached per account for 30 s, an unreachable answer isn't, and forget clears it", async () => {
+    forgetWebAvailability();
+    const c = status({ configured: true, canAfford: false });
+    await webAvailability(c, "acct", { nowMs: 1_000 });
+    await webAvailability(c, "acct", { nowMs: 20_000 });
+    expect(c).toHaveBeenCalledTimes(1);
+    await webAvailability(c, "other", { nowMs: 20_000 });
+    expect(c).toHaveBeenCalledTimes(2);
+    await webAvailability(c, "acct", { nowMs: 31_001 });
+    expect(c).toHaveBeenCalledTimes(3);
+    forgetWebAvailability("acct");
+    await webAvailability(c, "acct", { nowMs: 31_002 });
+    expect(c).toHaveBeenCalledTimes(4);
+    const down = status({}, 502);
+    await webAvailability(down, "d", { nowMs: 1 });
+    await webAvailability(down, "d", { nowMs: 2 });
+    expect(down).toHaveBeenCalledTimes(2);
   });
 });

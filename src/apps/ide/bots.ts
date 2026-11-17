@@ -185,13 +185,17 @@ export function nextRunAt(schedule: Schedule, fromMs: number): number | null {
 // Bots
 // ---------------------------------------------------------------------------
 
-/** Read tools, file edits, shell commands and commit/push. Edits apply on their own; commands and git writes ask. */
-export const DEFAULT_BOT_TOOLS: ToolName[] = [...[...READ_TOOLS].filter((t) => !TENTACLE_TOOLS.has(t)), "write_file", "edit_file", "run_shell", "git_commit", "git_push", "open_pull_request"];
+/**
+ * A new bot's tools: read tools, file edits, shell commands, commit/push, and "Search the web"
+ * (web_search, read_page; docs/web-tool.md). Edits apply on their own; commands and git writes ask;
+ * web calls follow the bot's permission mode (Manual asks). Existing bots keep what they were given.
+ */
+export const DEFAULT_BOT_TOOLS: ToolName[] = [...[...READ_TOOLS].filter((t) => !TENTACLE_TOOLS.has(t)), "write_file", "edit_file", "run_shell", "git_commit", "git_push", "open_pull_request", ...WEB_TOOLS];
 /** Runs GitHub triggers may start per bot per hour, unless the bot sets its own limit. */
 export const DEFAULT_TRIGGER_RUNS_PER_HOUR = 6;
 const MAX_TRIGGERS = 10;
 const MAX_QUEUED_EVENTS = 10;
-/** Everything a bot may be allowed, the web tool included ("Search the web": web_search and read_page, off by default). */
+/** Everything a bot may be allowed, the web tool included ("Search the web": web_search and read_page, on for new bots). */
 const ALL_TOOLS = [...TOOL_DEFINITIONS.map((t) => t.name), ...WEB_TOOLS] as [ToolName, ...ToolName[]];
 export const DEFAULT_BUDGET_CSATS_PER_DAY = 100;
 /** A bot with a job and no schedule checks in this often (minutes) unless set otherwise. */

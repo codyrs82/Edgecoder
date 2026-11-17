@@ -11,18 +11,30 @@ async function chatPage(): Promise<string> {
   return res.body;
 }
 
-describe("the web chat's Web toggle and sources (docs/web-tool.md)", () => {
-  it("has a Web toggle in the composer, hidden until the status says web search is set up", async () => {
+describe("the web chat's Web indicator and sources (docs/web-tool.md)", () => {
+  it("has a quiet Web indicator with an Auto / Off for this chat menu, hidden until web search is set up", async () => {
     const html = await chatPage();
-    expect(html).toMatch(/<button type="button" class="web-toggle hidden" id="webToggle" aria-pressed="false"/);
+    expect(html).toMatch(/<button type="button" class="web-toggle hidden" id="webToggle" aria-haspopup="menu" aria-expanded="false"/);
+    expect(html).toContain('id="webMenu" role="menu"');
+    expect(html).toContain('data-web-mode="auto"');
+    expect(html).toContain('data-web-mode="off"');
+    expect(html).toContain(">Off for this chat<");
     expect(html).toContain('fetch("/portal/api/chat"');
     expect(html).toContain('api("/portal/api/web/status?" + webStatusQuery())');
-    // Sent only when on and available; kept per chat.
-    expect(html).toContain("if (webOn && webState && webState.available) chatBody.web = true;");
+    // Automatic: offered when the chat is on Auto and the status says it can be used; kept per chat.
+    expect(html).toContain('var webMode = "auto";');
+    expect(html).toContain("if (webWanted()) chatBody.web = true;");
+    expect(html).toContain('return webMode === "auto" && !!webState && webState.available === true;');
     expect(html).toContain('var WEB_KEY = "edgecoder.chat.web.";');
-    // Disabled with a reason: a model that can't call tools, or no cSats.
-    expect(html).toContain("Web needs a model that can use tools. Pick another model.");
+    // The Settings default, and the old toggle's "1" still reads as on.
+    expect(html).toContain('var WEB_AUTO_KEY = "edgecoder.web.auto";');
+    expect(html).toContain('saved === "auto" || saved === "1"');
+    // Unavailable with a model that can't call tools; "needs cSats" noted, once per chat under a reply.
+    expect(html).toContain("Web: unavailable with this model");
     expect(html).toContain('"needs cSats"');
+    expect(html).toContain("function noteWebOffOnce(bubble, message)");
+    expect(html).toContain("if (parsed.webOff) { webOff = parsed.webOff; refreshWebStatus(); }");
+    expect(html).not.toContain("aria-pressed");
     for (const m of html.matchAll(/<script nonce="[^"]*">([\s\S]*?)<\/script>/g)) expect(() => new Function(m[1])).not.toThrow();
   });
 

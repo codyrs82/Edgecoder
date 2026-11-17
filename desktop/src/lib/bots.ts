@@ -276,8 +276,9 @@ export const BOT_TOOL_GROUPS: Array<{ id: string; title: string; desc: string; t
   { id: "edit", title: "Edit files", desc: "Write and edit files inside its project folder.", tools: ["write_file", "edit_file"] },
   { id: "shell", title: "Run commands", desc: "Tests, builds, scripts. Each command asks you first.", tools: ["run_shell"] },
   { id: "git", title: "Commit, push and open pull requests", desc: "Commits, pushes and pull requests ask you first. Pull requests never go to the default branch.", tools: ["git_commit", "git_push", "open_pull_request"] },
-  // docs/web-tool.md: off by default. Network access: it's the allowance, so Auto and Accept edits run
-  // searches without asking (Manual asks each time); after it reads a page, edits and commands ask first.
+  // docs/web-tool.md: on for new bots (existing bots keep theirs). Network access: it's the allowance, so
+  // Auto and Accept edits run searches without asking (Manual asks each time); after it reads a page,
+  // edits and commands ask first.
   { id: "web", title: "Search the web", desc: "Search the web and read pages through EdgeCoder, citing sources. Each search and page costs a little cSats (part of its daily budget). After it reads a page, its edits and commands ask you first.", tools: ["web_search", "read_page"] },
 ];
 

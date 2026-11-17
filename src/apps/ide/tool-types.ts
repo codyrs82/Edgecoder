@@ -191,6 +191,11 @@ export type IdeStreamEvent =
    * all; `addedCSats` for this call) and the numbered sources the answer cites as [n].
    */
   | { type: "web"; searches: number; pages: number; cSats: number; addedCSats: number; sources: Array<{ n: number; title: string; url: string }> }
+  /**
+   * Web was wanted (the chat's "Web: Auto") but not offered for this reply: no cSats ("Web search
+   * needs cSats"), the hour's searches used, or EdgeCoder unreachable. The reply goes on without it.
+   */
+  | { type: "web_off"; reason: string; message: string }
   | { type: "done" };
 
 // ---------------------------------------------------------------------------
