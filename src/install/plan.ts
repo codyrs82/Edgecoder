@@ -11,7 +11,7 @@ import { gpuModelForVram, MODEL_CATALOG, type CatalogModel } from "../model/cata
 import { parallelInferenceFor } from "../swarm/parallelism.js";
 import { paramsB } from "../inference-api/auto-route.js";
 import type { GpuInfo, HostHardware } from "./hardware.js";
-import { renderTuning, TUNING_ENV_KEY, type InstallOptions } from "./options.js";
+import { INSTALL_ARGS_ENV_KEY, renderInstallArgs, renderTuning, TUNING_ENV_KEY, type InstallOptions } from "./options.js";
 import { engineEnvLines, resolveInstanceEngine, type InstanceEngine } from "./engine.js";
 
 export const OLLAMA_BASE_PORT = 11434;
@@ -88,7 +88,7 @@ export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvaila
     const discreteGpu = !!gpu && gpu.vendor !== "apple";
     // A pooled instance's model can use every card's VRAM.
     const memoryGb = discreteGpu ? group.reduce((n, g) => n + g.vramGb, 0) : hw.ramGb;
-    const model = opts.model ?? (discreteGpu ? gpuModelForVram(memoryGb) : pickModel(memoryGb));
+    const model = opts.model ?? opts.instanceModels?.[index] ?? (discreteGpu ? gpuModelForVram(memoryGb) : pickModel(memoryGb));
     const gpuTag = group.length > 1 ? `gpu${group[0].index}-${group[group.length - 1].index}` : `gpu${gpu?.index ?? index}`;
     const agentId = slots.length === 1
       ? opts.agentIdOverride ?? `${base}-${gpu ? (group.length > 1 ? gpuTag : "gpu") : "cpu"}`
@@ -122,6 +122,8 @@ export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvaila
     if (opts.keepAlive !== undefined) env.AGENT_MODEL_KEEP_ALIVE = opts.keepAlive;
     const tuning = renderTuning(opts);
     if (tuning) env[TUNING_ENV_KEY] = tuning;
+    const recorded = renderInstallArgs(opts);
+    if (recorded) env[INSTALL_ARGS_ENV_KEY] = recorded;
     // vLLM / MLX (engine.ts): EDGECODER_ENGINE and its VLLM_* / MLX_* lines; none for Ollama.
     Object.assign(env, engineEnvLines(engine));
     // On the edgecoder.io network the agent trusts only the seeds' published keys, as the desktop app does.
@@ -138,6 +140,8 @@ export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvaila
       env.HIP_VISIBLE_DEVICES = visible;
       env.EDGECODER_GPU_INDEX = String(gpu.index);
     }
+    // Lines the host set in its env file and a re-run keeps (cli.ts keptEnvLines), for this same agent id.
+    Object.assign(env, opts.keepEnv?.[index] ?? {});
     if (!env.AGENT_REGISTRATION_TOKEN) warnings.push(`${agentId}: no registration token; enrol this node id in the portal and re-run with --token ${agentId}=<token>`);
     return { index, agentId, gpu, gpus: group, ollamaPort, model, memoryGb, env, engine };
   });

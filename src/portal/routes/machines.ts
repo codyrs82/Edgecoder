@@ -19,6 +19,8 @@ import { z } from "zod";
 import { MODEL_CATALOG } from "../../model/catalog.js";
 import { modelControlRequestSchema, MODEL_CONTROL_ACTIONS } from "../../model/remote-control/protocol.js";
 import { registerBotRoutes } from "./bots.js";
+import { agentUpdateAvailable } from "../agent-release.js";
+export { createLatestAgentVersion } from "../agent-release.js";
 
 export interface MachineRoutesDeps {
   PORTAL_SERVICE_TOKEN: string;
@@ -26,6 +28,8 @@ export interface MachineRoutesDeps {
   discoverCoordinatorUrlsForPortal: () => Promise<string[]>;
   getCurrentUser: (req: { headers: Record<string, unknown> }) => Promise<{ userId: string } | null | undefined>;
   store: { listNodesByOwner(userId: string): Promise<Array<{ nodeId: string; nodeKind: string; active?: boolean; lastSeenMs?: number }>> } | null | undefined;
+  /** The newest agent release version (agent-release.ts), or null when unknown. */
+  latestAgentVersion?: () => string | null;
 }
 
 interface CoordinatorMachine {
@@ -44,6 +48,8 @@ interface CoordinatorMachine {
   ownerModels?: unknown;
   /** Newer coordinators: the agent's memory budget and the estimated bytes of its models. */
   memory?: unknown;
+  /** Newer coordinators: the agent's software version from its last registration. */
+  version?: unknown;
 }
 
 const MAX_COORDINATORS = 8;
@@ -186,6 +192,7 @@ export function registerMachineRoutes(app: FastifyInstance, deps: MachineRoutesD
       audits.set(m.agentId, a);
     }
     const ids = new Set([...agentIds, ...merged.keys()]);
+    const latestAgentVersion = deps.latestAgentVersion?.() ?? null;
     const machines = [...ids].map((agentId) => {
       const m = merged.get(agentId);
       const node = nodes.find((n) => n.nodeId === agentId);
@@ -200,11 +207,14 @@ export function registerMachineRoutes(app: FastifyInstance, deps: MachineRoutesD
         ...(Array.isArray(m?.networkModels) ? { networkModels: (m!.networkModels as unknown[]).filter((x): x is string => typeof x === "string").slice(0, 200) } : {}),
         ...(Array.isArray(m?.ownerModels) ? { ownerModels: (m!.ownerModels as unknown[]).filter((x): x is string => typeof x === "string").slice(0, 200) } : {}),
         ...(machineMemory(m?.memory) ? { memory: machineMemory(m?.memory) } : {}),
+        version: typeof m?.version === "string" ? m.version.slice(0, 40) : null,
+        updateAvailable: agentUpdateAvailable(m?.version, latestAgentVersion),
         audit: [...(audits.get(agentId)?.values() ?? [])].sort((x, y) => y.requestedAtMs - x.requestedAtMs).slice(0, 25)
       };
     });
     return reply.send({
       accountId,
+      latestAgentVersion,
       machines,
       actions: MODEL_CONTROL_ACTIONS,
       catalog: MODEL_CATALOG.map((m) => ({ modelId: m.modelId, name: m.name, diskSize: m.diskSize, minMemoryGb: m.minMemoryGb, category: m.category }))

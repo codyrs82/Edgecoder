@@ -7,16 +7,19 @@
  * (or one per host), writes env files and services, starts them.
  */
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, cpSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectHardware, type HostHardware, type Probe } from "./hardware.js";
-import { helpText, inheritTuning, parseInstallArgs, parseTokensFile, TOKEN_PATTERN, validateInstallOptions, type InstallOptions } from "./options.js";
+import { helpText, inheritConfig, inheritTuning, parseInstallArgs, parseTokensFile, TOKEN_PATTERN, validateInstallOptions, type InstallOptions } from "./options.js";
 import { planInstall, type AgentInstance, type InstallPlan } from "./plan.js";
 import { HOST_AGREEMENT_VERSION } from "../common/legal-notices.js";
 import { appDirProblems, planBinary, stageBinary, type BinFs, type StagePlan } from "./binaries.js";
 import { engineProblems, instanceVllmProfile, legacyVllmMarkerPath, parseEnvFile, resolveInstanceEngine, VLLM_PROFILE_AUTO, vllmEnvPath, vllmInstalledPaths, vllmMarkerPath, vllmProfileChoices, type InstanceEngine } from "./engine.js";
 import { allocateOllamaPorts, portOwner } from "./ports.js";
+import { RELEASE_INFO_FILE, runUpdate, updateStatusLines } from "./update.js";
+import { realUpdateDeps } from "./update-host.js";
+import { applyUpdateSchedule, removeUpdateSchedule, timerStatus } from "./update-schedule.js";
 import { applyPlan, defaultPaths, envFilePath, lockConfigDir, removeServices, serviceStatus, windowsDirOwnerProblems, type Host, type ServicePaths } from "./services.js";
 
 export const probe: Probe = (cmd, args) => {
@@ -328,6 +331,30 @@ export function pullModels(host: Host, ollamaBin: string, instances: AgentInstan
   return failed;
 }
 
+/** Env lines the host sets by hand in agent-<n>.env (docs/install.md "Host controls"): every re-run keeps them. */
+export const HOST_CONTROL_ENV = ["AGENT_REMOTE_CONTROL", "AGENT_MODEL_ALLOWLIST"];
+const SAFE_KEPT_VALUE = /^[A-Za-z0-9._:/,@+-]{1,512}$/;
+
+/**
+ * Per instance whose env file is for the same agent id: the host controls (always), and under
+ * --keep-config its model (unless --model is given) and MAX_CONCURRENT_TASKS, so an update changes
+ * nothing the host chose. Sets opts.keepEnv and opts.instanceModels.
+ */
+export function keptEnvLines(opts: InstallOptions, plan: InstallPlan, p: ServicePaths, read: (path: string) => string | undefined = readIfPresent): void {
+  const keepEnv: Record<number, Record<string, string>> = {};
+  const models: Record<number, string> = {};
+  const modelGiven = (opts.given ?? []).includes("--model");
+  for (const inst of plan.instances) {
+    const old = parseEnvFile(read(envFilePath(p, inst)) ?? "");
+    if (old.AGENT_ID !== inst.agentId) continue;
+    const keys = [...HOST_CONTROL_ENV, ...(opts.keepConfig ? ["MAX_CONCURRENT_TASKS"] : [])];
+    for (const k of keys) if (old[k] !== undefined && SAFE_KEPT_VALUE.test(old[k])) (keepEnv[inst.index] ??= {})[k] = old[k];
+    if (opts.keepConfig && !modelGiven && old.OLLAMA_MODEL && SAFE_KEPT_VALUE.test(old.OLLAMA_MODEL)) models[inst.index] = old.OLLAMA_MODEL;
+  }
+  opts.keepEnv = keepEnv;
+  if (Object.keys(models).length) opts.instanceModels = models;
+}
+
 const SECRET_ENV = ["AGENT_REGISTRATION_TOKEN", "MESH_AUTH_TOKEN", "VLLM_API_KEY"];
 
 const redactEnv = (env: Record<string, string>) => Object.fromEntries(Object.entries(env).map(([k, v]) => [k, SECRET_ENV.includes(k) && v ? "<redacted>" : v]));
@@ -362,6 +389,14 @@ function describePlan(plan: InstallPlan, p: ServicePaths): string {
   lines.push(`Config dir: ${p.configDir}   App dir: ${p.appDir}   Node: ${p.nodeBin}   Ollama: ${p.ollamaBin}`);
   for (const w of plan.warnings) lines.push(`warning: ${w}`);
   return lines.join("\n");
+}
+
+function listDirOrEmpty(dir: string): string[] {
+  try {
+    return readdirSync(dir);
+  } catch {
+    return [];
+  }
 }
 
 function readIfPresent(path: string): string | undefined {
@@ -473,6 +508,12 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     const found = findOllama(host.platform);
     if (found) p.ollamaBin = found;
   }
+  if (opts.command === "update") {
+    const deps = realUpdateDeps({ binFs, writeText: (path, text, mode) => writeFileFresh(path, text, mode), stateDir: p.stateDir, ...(opts.json ? { log: (line: string) => console.error(line) } : {}) });
+    const out = await runUpdate({ check: !!opts.check, scheduled: !!opts.scheduled, ...(opts.jitterSec !== undefined ? { jitterSec: opts.jitterSec } : {}) }, { appDir, configDir: p.configDir, nodeBin: opts.nodeBin ?? process.execPath }, deps);
+    if (opts.json) console.log(JSON.stringify(out, null, 2));
+    return out.code;
+  }
   const hw = detectHardware({ probe, platform: host.platform });
 
   if (opts.command === "detect") {
@@ -481,11 +522,12 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
   }
   if (opts.command === "status") {
     const s = serviceStatus(host, p, 32, readIfPresent);
-    console.log(opts.json ? JSON.stringify(s, null, 2) : s.map((x) => `${x.name}: ${x.state}${x.reason ? ` (${x.reason})` : ""}`).join("\n") || "no EdgeCoder services installed");
+    const update = updateStatusLines(readIfPresent, listDirOrEmpty, { appDir, configDir: p.configDir }, timerStatus(host));
+    console.log(opts.json ? JSON.stringify({ services: s, update }, null, 2) : [s.map((x) => `${x.name}: ${x.state}${x.reason ? ` (${x.reason})` : ""}`).join("\n") || "no EdgeCoder services installed", ...update].join("\n"));
     return 0;
   }
   if (opts.command === "remove") {
-    const removed = opts.dryRun ? [] : removeServices(host, p);
+    const removed = opts.dryRun ? [] : [...removeServices(host, p), ...removeUpdateSchedule(host)];
     console.log(opts.json ? JSON.stringify({ removed }) : `removed ${removed.length} services`);
     return 0;
   }
@@ -493,6 +535,15 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
   // A re-run without the tuning flags (a package upgrade's apply --from-package) keeps the values
   // the previous run recorded in the first instance's env file.
   opts = inheritTuning(opts, readIfPresent(envFilePath(p, { index: 0 } as AgentInstance)));
+  // --keep-config (update): URLs, mesh token and the recorded plan flags of the previous run.
+  opts = inheritConfig(opts, readIfPresent(envFilePath(p, { index: 0 } as AgentInstance)));
+  if (opts.keepConfig) {
+    const errors = validateInstallOptions(opts);
+    if (errors.length) {
+      for (const e of errors) console.error(`error: ${e}`);
+      return 2;
+    }
+  }
   const dockerPresent = opts.sandbox === "docker" ? true : dockerAvailable();
   let plan = planInstall(hw, opts, dockerPresent);
   // The agent id must be the node id its token was enrolled as (or the one a previous install used).
@@ -507,6 +558,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
   if (keptId) say(`Keeping the node id "${keptId}" of the previous install (its registration token is for that id).`);
   if (opts.agentIdOverride) plan = planInstall(hw, opts, dockerPresent);
   keepRegistrationTokens(opts, plan, p);
+  keptEnvLines(opts, plan, p);
   // Engines per instance index, from the flags and what each instance runs now; then the real plan.
   opts.instanceEngines = resolveEngines(opts, plan, p);
   for (const e of Object.values(opts.instanceEngines)) {
@@ -596,6 +648,9 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     return 1;
   }
   const result = applyPlan(plan, host, p, opts.dryRun);
+  const schedule = applyUpdateSchedule(host, p, { ...(opts.autoUpdate !== undefined ? { flag: opts.autoUpdate } : {}), releaseInstall: existsSync(resolve(appDir, RELEASE_INFO_FILE)), dryRun: opts.dryRun, insideUpdate: env.EDGECODER_UPDATE_RUN === "1", read: readIfPresent, listDir: listDirOrEmpty });
+  result.files.push(...schedule.files);
+  result.commands.push(...schedule.commands);
   if (opts.pullModels && !opts.dryRun) pullModels(host, p.ollamaBin, plan.instances);
   if (opts.json) {
     console.log(JSON.stringify({ hardware: hw, plan: redactPlan(plan), paths: p, result }, null, 2));
@@ -606,6 +661,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     if (!opts.dryRun && (opts.enrollToken || Object.keys(opts.tokens).length > 0)) {
       for (const line of await enrollmentConfirmation(opts.portalUrl, plan.instances, enrollFailed, get)) console.log(line);
     }
+    console.log(schedule.summary);
     console.log(hostAgreementLine(opts.portalUrl));
     const missing = plan.instances.filter((i) => !i.env.AGENT_REGISTRATION_TOKEN).map((i) => i.agentId);
     if (missing.length) {

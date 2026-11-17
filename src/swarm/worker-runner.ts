@@ -58,6 +58,7 @@ import { detectPlatform, getConfigDir, getLogDir, type PlatformInfo } from "../c
 import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from "../security/release-integrity.js";
 import { answerChallenge, runLocalBenchmark, type AgentBenchmarkReport, type BenchmarkChallenge } from "./benchmark.js";
 import { appVersion } from "../common/app-version.js";
+import { startUpdateDrain } from "./update-drain.js";
 import { createLocalForwarder } from "./local-forwarder.js";
 import { ServingJobs } from "./serving-jobs.js";
 import { AgentLifecycle, DEFAULT_DRAIN_MS, announceGoingOffline, blacklistReasonFromError, type GoingOfflineReason } from "./agent-lifecycle.js";
@@ -611,6 +612,23 @@ if (LOCAL_FORWARD_PORT > 0) {
       console.log(`[agent:${AGENT_ID}] local forwarder on 127.0.0.1:${LOCAL_FORWARD_PORT}`)
     );
 }
+
+// Installed headless agents (edgecoder-install writes EDGECODER_INSTANCE): agent-status.json in the
+// agent's HOME and the SIGUSR2/SIGHUP update drain, so `edgecoder-install update` restarts it only
+// when no work is running (src/swarm/update-drain.ts). Not on desktop runs, where SIGHUP must still end the process.
+const updateDrain = process.env.EDGECODER_INSTANCE !== undefined && process.platform !== "win32" && process.env.HOME
+  ? startUpdateDrain({
+      home: process.env.HOME,
+      version: appVersion(),
+      status: () => {
+        const st = lifecycle.status();
+        return { registered: Boolean(registeredWithUrl), draining: st.draining, busy: st.claims + servingJobs.view(MAX_PARALLEL_INFERENCE).jobs.length + inflightInference.size };
+      },
+      startDrain: (ms) => lifecycle.startDrain(ms),
+      endDrain: () => lifecycle.endDrain(),
+      log: (line) => console.log(`[agent:${AGENT_ID}] ${line}`)
+    })
+  : null;
 
 /** Models in this machine's Ollama (embedding-only models left out); [] when it can't be reached. */
 async function listInstalledModels(): Promise<string[]> {
@@ -1729,6 +1747,7 @@ async function loop(): Promise<void> {
             registeredWithUrl = coordinator.url;
             lastRegisteredAtMs = Date.now();
             console.log(registeredLogLine(AGENT_ID, coordinator.url, registerResponse));
+            updateDrain?.write();
             enrollmentRefusals = 0;
             lastEnrollmentLog = null;
             servingJobs.setGrant(registerResponse?.hardwareVerification?.grantedClass, registerResponse?.hardwareVerification?.grantedTier);

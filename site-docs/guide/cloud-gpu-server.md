@@ -389,15 +389,38 @@ Now revoke the install key if you haven't (Settings → Connect your tools → R
   or close your laptop. You don't need `tmux`, `screen` or `nohup`.
 - **Reboots are fine.** The services start by themselves when the server boots. To check:
   `sudo reboot`, wait a minute, connect again and run `sudo edgecoder-install status`.
-- **Updates.** Run the install command again, without a key: it installs the newest signed release
-  and keeps each agent's enrolment, its engine (vLLM stays vLLM) and settings:
+- **Updates are automatic:** see [Updates](#updates) below.
+- **Logs** live in the system journal: `journalctl -u edgecoder-agent-0 -f` (the agent),
+  `journalctl -u edgecoder-vllm@0 -f` (vLLM), `journalctl -u edgecoder-ollama-0 -f` (Ollama).
+
+## Updates {#updates}
+
+The server updates EdgeCoder by itself. Every 6 hours it checks for a new signed release. When
+there is one, it:
+
+1. downloads it and checks its signature against EdgeCoder's release key (the same check the install
+   command does), installing nothing that fails it;
+2. waits until the agents have finished the work they are running (up to 10 minutes; if they are
+   still busy it tries again at the next check);
+3. installs it, keeping every setting: enrolment, node names, engine (vLLM stays vLLM), models and
+   tuning;
+4. checks the agents come back online. If they don't, it puts the previous version back by itself.
+
+- **Update now:** `sudo edgecoder-install update` (add `--check` to only see whether one is out).
+- **See what happened:** `sudo edgecoder-install status` shows the version, whether automatic
+  updates are on, and the last check with its result; `journalctl -u edgecoder-update` has the
+  details. The portal's machine list shows each machine's version and **UPDATE AVAILABLE** when it
+  is behind.
+- **Turn automatic updates off:** `sudo edgecoder-install apply --auto-update off`. Turn them back on
+  with `--auto-update on`.
+- **Installed before automatic updates existed?** Run the install command one more time, with the
+  options you installed with; from then on the server updates itself:
 
   ```bash
   curl -fsSLo install.sh https://edgecoder.io/install.sh && sudo bash install.sh
   ```
 
-- **Logs** live in the system journal: `journalctl -u edgecoder-agent-0 -f` (the agent),
-  `journalctl -u edgecoder-vllm@0 -f` (vLLM), `journalctl -u edgecoder-ollama-0 -f` (Ollama).
+The reference: [Updates in the installer docs](https://github.com/codyrs82/Edgecoder/blob/main/docs/install.md#updates).
 
 ## Stop and remove it
 

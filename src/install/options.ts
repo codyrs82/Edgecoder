@@ -11,7 +11,7 @@
 import { checkEngine, checkVllmModel, checkVllmProfile, checkVllmSlots, checkVllmUrl, vllmProfileChoices, type EngineKind, type InstanceEngine } from "./engine.js";
 
 export interface InstallOptions {
-  command: "detect" | "plan" | "apply" | "status" | "remove" | "help";
+  command: "detect" | "plan" | "apply" | "status" | "remove" | "update" | "help";
   coordinatorUrl: string;
   portalUrl: string;
   meshToken?: string;
@@ -61,6 +61,25 @@ export interface InstallOptions {
   appDir?: string;
   nodeBin?: string;
   ollamaBin?: string;
+  /** apply: --auto-update on|off (auto-update.env); unset keeps the host's setting (default on). */
+  autoUpdate?: boolean;
+  /**
+   * --keep-config (what `update` runs): a re-run that keeps the host's configuration from its env
+   * files: coordinator and portal URLs, mesh token, the recorded plan flags (EDGECODER_INSTALL_ARGS),
+   * and each instance's model and MAX_CONCURRENT_TASKS. Flags given now still win.
+   */
+  keepConfig?: boolean;
+  /** update: report only. */
+  check?: boolean;
+  /** update: the timer's run (honours the opt-out, skips a tag that failed here before). */
+  scheduled?: boolean;
+  /** update: sleep up to N seconds first (launchd has no randomized delay). */
+  jitterSec?: number;
+  /** Set by the CLI under --keep-config: per instance index, the model and env lines to keep. */
+  instanceModels?: Record<number, string>;
+  keepEnv?: Record<number, Record<string, string>>;
+  /** The flags (and EDGECODER_* variables, as their flag) given on this run. */
+  given?: string[];
 }
 
 export interface OptionSpec {
@@ -78,6 +97,7 @@ export const INSTALL_COMMANDS: Array<{ name: InstallOptions["command"]; descript
   { name: "apply", description: "Write env files and services for every instance, enable and start them." },
   { name: "status", description: "Show the state of every EdgeCoder service on this host." },
   { name: "remove", description: "Stop and remove the EdgeCoder services and env files (keeps models)." },
+  { name: "update", description: "Update to the newest signed agent release (Linux, macOS): verify, wait for idle agents, swap, re-apply, health-check, roll back on failure." },
   { name: "help", description: "Show this help." }
 ];
 
@@ -111,7 +131,12 @@ export const INSTALL_OPTIONS: OptionSpec[] = [
   { flag: "--config-dir", arg: "DIR", description: "Config directory (default /etc/edgecoder, Windows C:\\ProgramData\\EdgeCoder)." },
   { flag: "--app-dir", arg: "DIR", description: "Installed app directory containing dist/ (default: where this installer lives)." },
   { flag: "--node-bin", arg: "PATH", description: "Node binary for the services (default: the one running the installer)." },
-  { flag: "--ollama-bin", arg: "PATH", description: "Ollama binary (default: found on PATH or the platform install location)." }
+  { flag: "--ollama-bin", arg: "PATH", description: "Ollama binary (default: found on PATH or the platform install location)." },
+  { flag: "--auto-update", arg: "on|off", description: "Scheduled updates to new signed releases (Linux, macOS; default on). Kept in /etc/edgecoder/auto-update.env, so later runs keep it." },
+  { flag: "--keep-config", description: "Re-run with this host's configuration from its env files (URLs, mesh token, layout and model flags, models); what update runs." },
+  { flag: "--check", description: "update: only report whether a newer release exists." },
+  { flag: "--scheduled", description: "update: the timer's run; does nothing when auto-update is off, skips a release that already failed here." },
+  { flag: "--jitter", arg: "SECONDS", description: "update: wait a random time up to SECONDS first." }
 ];
 
 export function defaultOptions(): InstallOptions {
@@ -131,9 +156,11 @@ export function defaultOptions(): InstallOptions {
 
 export function parseInstallArgs(argv: string[], env: NodeJS.ProcessEnv = {}): InstallOptions {
   const o = defaultOptions();
-  if (env.EDGECODER_COORDINATOR_URL) o.coordinatorUrl = env.EDGECODER_COORDINATOR_URL;
-  if (env.EDGECODER_PORTAL_URL) o.portalUrl = env.EDGECODER_PORTAL_URL;
-  if (env.EDGECODER_MESH_TOKEN) o.meshToken = env.EDGECODER_MESH_TOKEN;
+  const given: string[] = [];
+  o.given = given;
+  if (env.EDGECODER_COORDINATOR_URL) { o.coordinatorUrl = env.EDGECODER_COORDINATOR_URL; given.push("--coordinator-url"); }
+  if (env.EDGECODER_PORTAL_URL) { o.portalUrl = env.EDGECODER_PORTAL_URL; given.push("--portal-url"); }
+  if (env.EDGECODER_MESH_TOKEN) { o.meshToken = env.EDGECODER_MESH_TOKEN; given.push("--mesh-token"); }
   if (env.EDGECODER_REGISTRATION_TOKEN) o.tokens["*"] = env.EDGECODER_REGISTRATION_TOKEN;
   if (env.EDGECODER_ENROLL_TOKEN) o.enrollToken = env.EDGECODER_ENROLL_TOKEN;
   if (env.EDGECODER_API_KEY) o.enrollToken = env.EDGECODER_API_KEY;
@@ -153,6 +180,7 @@ export function parseInstallArgs(argv: string[], env: NodeJS.ProcessEnv = {}): I
     }
     const [flag, inline] = a.includes("=") && !a.startsWith("--token=") ? a.split(/=(.*)/s) : [a, undefined];
     const val = () => (inline !== undefined ? inline : next(flag));
+    given.push(flag === "--token=" ? "--token" : flag);
     switch (flag) {
       case "--coordinator-url": o.coordinatorUrl = val(); break;
       case "--portal-url": o.portalUrl = val(); break;
@@ -196,6 +224,11 @@ export function parseInstallArgs(argv: string[], env: NodeJS.ProcessEnv = {}): I
       case "--app-dir": o.appDir = val(); break;
       case "--node-bin": o.nodeBin = val(); break;
       case "--ollama-bin": o.ollamaBin = val(); break;
+      case "--auto-update": { const v = val(); if (v !== "on" && v !== "off") throw new Error("--auto-update must be on or off"); o.autoUpdate = v === "on"; break; }
+      case "--keep-config": o.keepConfig = true; break;
+      case "--check": o.check = true; break;
+      case "--scheduled": o.scheduled = true; break;
+      case "--jitter": { const n = Number(val()); if (!Number.isInteger(n) || n < 0 || n > 86_400) throw new Error("--jitter must be 0 to 86400 seconds"); o.jitterSec = n; break; }
       case "--help": case "-h": o.command = "help"; break;
       default: throw new Error(`unknown option: ${flag}`);
     }
@@ -278,6 +311,87 @@ export function inheritTuning(o: InstallOptions, previousEnvFile: string | undef
   };
 }
 
+/**
+ * The plan-shaping flags of a run, recorded in each env file (EDGECODER_INSTALL_ARGS) so an
+ * `update` (apply --keep-config) plans the same agents: model, layout, pooling, instance count,
+ * sandbox, id prefix and the Ollama binary.
+ */
+export const INSTALL_ARGS_ENV_KEY = "EDGECODER_INSTALL_ARGS";
+
+export type RecordedArgs = Partial<Pick<InstallOptions, "model" | "layout" | "gpusPerInstance" | "instances" | "sandbox" | "agentIdPrefix" | "ollamaBin">>;
+
+const RECORD_VALUE = /^[A-Za-z0-9._:/@+-]{1,256}$/;
+
+/** "model:qwen3-coder:30b,layout:mixed" for the flags given on this run; undefined when none was. */
+export function renderInstallArgs(o: InstallOptions): string | undefined {
+  const given = new Set(o.given ?? []);
+  const parts: string[] = [];
+  const add = (k: string, v: string | number | undefined) => {
+    if (v === undefined || !RECORD_VALUE.test(String(v))) return;
+    parts.push(`${k}:${v}`);
+  };
+  if (o.model !== undefined) add("model", o.model);
+  if (o.layout !== undefined) add("layout", o.layout);
+  if (o.gpusPerInstance !== undefined) add("gpus-per-instance", o.gpusPerInstance);
+  if (o.instances !== undefined) add("instances", o.instances);
+  if (o.sandbox !== "auto" && (given.has("--sandbox") || o.keepConfig)) add("sandbox", o.sandbox);
+  if (o.agentIdPrefix !== undefined) add("agent-id-prefix", o.agentIdPrefix);
+  if (o.ollamaBin !== undefined) add("ollama-bin", o.ollamaBin);
+  return parts.length ? parts.join(",") : undefined;
+}
+
+/** The recorded flags, each through its flag's own check (a tampered value is dropped). */
+export function installArgsFromEnvFile(text: string): RecordedArgs {
+  const line = text.split(/\r?\n/).find((l) => l.startsWith(`${INSTALL_ARGS_ENV_KEY}=`));
+  const out: RecordedArgs = {};
+  if (!line) return out;
+  for (const part of line.slice(INSTALL_ARGS_ENV_KEY.length + 1).split(",")) {
+    const i = part.indexOf(":");
+    if (i < 0) continue;
+    const [k, v] = [part.slice(0, i), part.slice(i + 1)];
+    if (!RECORD_VALUE.test(v)) continue;
+    const n = Number(v);
+    if (k === "model") out.model = v;
+    else if (k === "layout" && (v === "per-gpu" || v === "mixed" || v === "single")) out.layout = v;
+    else if (k === "gpus-per-instance" && Number.isInteger(n) && n >= 1) out.gpusPerInstance = n;
+    else if (k === "instances" && Number.isInteger(n) && n >= 1) out.instances = n;
+    else if (k === "sandbox" && (v === "docker" || v === "none")) out.sandbox = v;
+    else if (k === "agent-id-prefix") out.agentIdPrefix = v;
+    else if (k === "ollama-bin" && v.startsWith("/")) out.ollamaBin = v;
+  }
+  return out;
+}
+
+/**
+ * --keep-config: the previous run's configuration from the first instance's env file, for every
+ * setting not given on this run: coordinator / portal URL, mesh token and the recorded flags.
+ */
+export function inheritConfig(o: InstallOptions, previousEnvFile: string | undefined): InstallOptions {
+  if (!o.keepConfig || !previousEnvFile) return o;
+  const given = new Set(o.given ?? []);
+  const env: Record<string, string> = {};
+  for (const l of previousEnvFile.split(/\r?\n/)) {
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(l);
+    if (m) env[m[1]] = m[2];
+  }
+  const rec = installArgsFromEnvFile(previousEnvFile);
+  const out: InstallOptions = { ...o };
+  if (!given.has("--coordinator-url") && env.COORDINATOR_URL && !checkServiceUrl("COORDINATOR_URL", env.COORDINATOR_URL)) out.coordinatorUrl = env.COORDINATOR_URL;
+  if (!given.has("--portal-url") && env.PORTAL_URL && !checkServiceUrl("PORTAL_URL", env.PORTAL_URL)) out.portalUrl = env.PORTAL_URL;
+  if (!given.has("--mesh-token") && env.MESH_AUTH_TOKEN && TOKEN_PATTERN.test(env.MESH_AUTH_TOKEN)) out.meshToken = env.MESH_AUTH_TOKEN;
+  const layoutGiven = ["--layout", "--per-gpu", "--single", "--gpus-per-instance", "--instances"].some((f) => given.has(f));
+  if (!given.has("--model") && rec.model) out.model = rec.model;
+  if (!layoutGiven) {
+    if (rec.layout) { out.layout = rec.layout; out.perGpu = rec.layout !== "single"; }
+    if (rec.gpusPerInstance) out.gpusPerInstance = rec.gpusPerInstance;
+    if (rec.instances) out.instances = rec.instances;
+  }
+  if (!given.has("--sandbox") && rec.sandbox) out.sandbox = rec.sandbox;
+  if (!given.has("--agent-id-prefix") && rec.agentIdPrefix) out.agentIdPrefix = rec.agentIdPrefix;
+  if (!given.has("--ollama-bin") && rec.ollamaBin) out.ollamaBin = rec.ollamaBin;
+  return out;
+}
+
 export function parseTokensFile(text: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const line of text.split(/\r?\n/)) {
@@ -334,6 +448,7 @@ export function helpText(): string {
   for (const c of INSTALL_COMMANDS) lines.push(`  ${c.name.padEnd(10)} ${c.description}`);
   lines.push("", "Options (identical on macOS, Linux and Windows):");
   for (const o of INSTALL_OPTIONS) lines.push(`  ${(o.flag + (o.arg ? " " + o.arg : "")).padEnd(34)} ${o.description}`);
+  lines.push("", "Updates (Linux, macOS release installs): a timer runs `update --scheduled` every 6 hours; `sudo edgecoder-install update` updates now; `apply --auto-update off` turns the timer off.");
   lines.push("", "Environment: EDGECODER_COORDINATOR_URL, EDGECODER_PORTAL_URL, EDGECODER_MESH_TOKEN, EDGECODER_REGISTRATION_TOKEN, EDGECODER_ENROLL_TOKEN, EDGECODER_API_KEY (same as --enroll, kept out of shell history) set the defaults.");
   return lines.join("\n");
 }

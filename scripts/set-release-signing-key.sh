@@ -13,7 +13,7 @@
 # replaced with --rotate, and installers from before the rotation stop accepting new releases.
 #
 # Then: review and commit the files it changed (deploy/install.sh, deploy/install.ps1,
-# docs/install.md), merge, and tag a release: git tag agent-v1.0.0 && git push origin agent-v1.0.0
+# src/install/release-key.ts, docs/install.md), merge, and tag a release: git tag agent-v1.0.0 && git push origin agent-v1.0.0
 # (.github/workflows/agent-release.yml builds, signs and publishes it). See docs/install.md.
 # Needs: node 22+, and `gh` signed in with admin access to the repo.
 set -euo pipefail
@@ -56,7 +56,7 @@ if [ -n "$BACKUP" ]; then
 fi
 unset KEY_JSON
 
-# Pin the public key in both installers and the docs.
+# Pin the public key in both installers, the updater and the docs.
 node - "$ROOT" "$PUBKEY" "$KEY_ID" <<'NODE'
 const fs = require("fs"), path = require("path");
 const [root, pub, id] = process.argv.slice(2);
@@ -64,6 +64,8 @@ const edits = [
   ["deploy/install.sh", /^RELEASE_PUBKEY="[^"]*" # release-pubkey(?=\r?$)/m, `RELEASE_PUBKEY="${pub}" # release-pubkey`],
   // install.ps1 is checked out with CRLF line endings (.gitattributes); the lookahead keeps the \r.
   ["deploy/install.ps1", /^\$ReleasePubKey = '[^']*' # release-pubkey(?=\r?$)/m, `$ReleasePubKey = '${pub}' # release-pubkey`],
+  // What `edgecoder-install update` checks releases against (shipped in the agent tarball).
+  ["src/install/release-key.ts", /^export const RELEASE_PUBKEY = "[^"]*"; \/\/ release-pubkey(?=\r?$)/m, `export const RELEASE_PUBKEY = "${pub}"; // release-pubkey`],
   ["docs/install.md", /<!-- release-pubkey -->[\s\S]*?<!-- \/release-pubkey -->/, `<!-- release-pubkey -->\n\`\`\`\nuntrusted comment: minisign public key ${id}\n${pub}\n\`\`\`\n\nKey ID: \`${id}\`\n<!-- /release-pubkey -->`]
 ];
 for (const [rel, re, text] of edits) {
