@@ -8,6 +8,12 @@ import { CSP_NONCE } from "../csp-nonce.js";
 import { escapeHtml } from "./escape.js";
 import { NOTICES } from "../../common/legal-notices.js";
 import { QUOTE_SELECTION_BROWSER_LIB, QUOTE_SELECTION_CSS, quoteSelectionScript } from "./quote-selection.js";
+import { CHAT_FAILURES_BROWSER_LIB } from "../../common/chat-failures.js";
+
+/** No bytes at all for this long (the server sends a heartbeat every 15 s): the request is dead. */
+export const CHAT_IDLE_TIMEOUT_MS = 45_000;
+/** No answer text after this long: stop "Thinking..." and offer Retry. */
+export const CHAT_FIRST_REPLY_TIMEOUT_MS = 180_000;
 
 // #16: moved verbatim from src/portal/server.ts (split from home-chat.ts to leave room for #27).
 export function registerChatPage(app: FastifyInstance): void {
@@ -128,6 +134,15 @@ app.get("/portal/chat", async (_req, reply) => {
       .model-empty { padding:12px 10px; font-size:12px; color:var(--muted); text-align:center; }
       .msg-meta { margin-top:8px; font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums; }
       .msg-error { color:var(--danger); }
+      .msg-failure { margin-top:4px; font-size:13.5px; }
+      .msg-failure .msg-failure-line { color:var(--danger); font-weight:600; }
+      .msg-failure .msg-failure-detail { margin-top:2px; font-size:12px; color:var(--muted); }
+      .msg-failure .msg-failure-actions { margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; }
+      .msg-failure .msg-failure-actions a, .msg-failure .msg-failure-actions button {
+        font:inherit; font-size:12.5px; padding:5px 12px; border-radius:var(--radius-sm); cursor:pointer;
+        border:1px solid var(--card-border); background:var(--bg-surface); color:var(--text); text-decoration:none;
+      }
+      .msg-failure .msg-failure-actions .primary { background:var(--brand); border-color:var(--brand); color:var(--on-accent); font-weight:600; }
       .spinner { width:14px; height:14px; border:2px solid var(--muted); border-top-color:var(--brand); border-radius:50%; animation:spin 0.8s linear infinite; display:inline-block; }
       @keyframes spin { to { transform:rotate(360deg); } }
       /* Empty thread and the streaming status line */
@@ -189,6 +204,64 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
     var portalModels = { local: [], swarm: [] };
     var computeOptions = [];
     var COMPUTE_KEY = "edgecoder.chat.compute.";
+    var CHAT_IDLE_TIMEOUT_MS = ${CHAT_IDLE_TIMEOUT_MS};
+    var CHAT_FIRST_REPLY_TIMEOUT_MS = ${CHAT_FIRST_REPLY_TIMEOUT_MS};
+
+    // failureKind, FAILURE_LINE, BUY_CSATS_URL: the desktop app's wording (src/common/chat-failures.ts).
+    ${CHAT_FAILURES_BROWSER_LIB}
+
+    /** Plain words for the server's error codes and the browser's network errors. */
+    function chatErrorText(message) {
+      var m = String(message || "");
+      if (m === "all_coordinators_failed") return "EdgeCoder's model didn't answer. Try again in a moment.";
+      if (m === "no_coordinators_available") return "Couldn't reach the EdgeCoder network. Try again in a moment.";
+      if (m === "stream_interrupted") return "The reply was cut off.";
+      if (m === "portal_database_not_configured") return "Chat is unavailable right now.";
+      // Safari "Load failed", Chrome "Failed to fetch", Firefox "NetworkError ...": the connection dropped.
+      if (/^(Load failed|Failed to fetch|NetworkError|network error|The network connection was lost)/i.test(m)) return "The connection to EdgeCoder dropped before the reply arrived.";
+      return m || "Something went wrong.";
+    }
+
+    /** One compact failure under a reply: the shared line, the detail, and Buy cSats or Retry. */
+    function showChatFailure(bubble, message, opts) {
+      opts = opts || {};
+      var kind = opts.code === "out_of_csats" || opts.httpStatus === 402 ? "csats" : failureKind(message);
+      var box = document.createElement("div");
+      box.className = "msg-failure";
+      var line = document.createElement("div");
+      line.className = "msg-failure-line";
+      var detailText = chatErrorText(message);
+      line.textContent = kind === "other" ? detailText : FAILURE_LINE[kind];
+      box.appendChild(line);
+      if (kind !== "other" && detailText) {
+        var detail = document.createElement("div");
+        detail.className = "msg-failure-detail";
+        detail.textContent = detailText;
+        box.appendChild(detail);
+      }
+      var actions = document.createElement("div");
+      actions.className = "msg-failure-actions";
+      if (kind === "csats" || kind === "budget") {
+        var buy = document.createElement("a");
+        buy.className = "primary";
+        buy.href = BUY_CSATS_URL;
+        buy.textContent = "Buy cSats";
+        actions.appendChild(buy);
+      }
+      if (opts.retryText) {
+        var retry = document.createElement("button");
+        retry.type = "button";
+        retry.textContent = "Retry";
+        retry.addEventListener("click", function() {
+          if (isStreaming) return;
+          bubble.remove();
+          sendMessage(opts.retryText);
+        });
+        actions.appendChild(retry);
+      }
+      if (actions.childNodes.length) box.appendChild(actions);
+      bubble.appendChild(box);
+    }
 
     // escapeHtml comes from the app shell (pages/escape.ts).
     function renderMarkdown(text) {
@@ -323,12 +396,16 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
       }
     }
 
-    async function sendMessage() {
+    async function sendMessage(retryText) {
+      // retryText: the page's Retry (the same message again, its bubble is already shown).
+      var isRetry = typeof retryText === "string";
       var input = document.getElementById("chatInput");
-      var text = input.value.trim();
+      var text = isRetry ? retryText : input.value.trim();
       if (!text || isStreaming) return;
-      input.value = "";
-      input.style.height = "auto";
+      if (!isRetry) {
+        input.value = "";
+        input.style.height = "auto";
+      }
 
       // If no active conversation, create one first
       if (!activeConvId) {
@@ -352,11 +429,13 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
       var scrollParent = chatMessages.parentElement;
       var emptyMsg = chatMessages.querySelector(".muted");
       if (emptyMsg) emptyMsg.remove();
-      var userBubble = document.createElement("div");
-      userBubble.className = "chat-msg user";
-      var nowTime = formatMsgTime(Date.now());
-      userBubble.innerHTML = "<div class=\\"msg-header\\"><div class=\\"msg-role\\">You</div><div class=\\"msg-time\\">" + nowTime + "</div></div><div class=\\"msg-body\\" data-quotable>" + renderMarkdown(text) + "</div>";
-      chatMessages.appendChild(userBubble);
+      if (!isRetry) {
+        var userBubble = document.createElement("div");
+        userBubble.className = "chat-msg user";
+        var nowTime = formatMsgTime(Date.now());
+        userBubble.innerHTML = "<div class=\\"msg-header\\"><div class=\\"msg-role\\">You</div><div class=\\"msg-time\\">" + nowTime + "</div></div><div class=\\"msg-body\\" data-quotable>" + renderMarkdown(text) + "</div>";
+        chatMessages.appendChild(userBubble);
+      }
       scrollParent.scrollTop = scrollParent.scrollHeight;
 
       // Start streaming
@@ -376,91 +455,121 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
       var assistantBody = assistantBubble.querySelector(".msg-body");
 
       var fullContent = "";
-      abortController = new AbortController();
+      var ac = new AbortController();
+      abortController = ac;
+      // Never an endless "Thinking...": no bytes for CHAT_IDLE_TIMEOUT_MS (heartbeats count), or no
+      // answer text after CHAT_FIRST_REPLY_TIMEOUT_MS, stops the request and offers Retry.
+      var timedOut = null;
+      var idleTimer = null;
+      var thinkingStatus = "Thinking...";
+      function armIdle() {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(function() { timedOut = "idle"; ac.abort(); }, CHAT_IDLE_TIMEOUT_MS);
+      }
+      var firstReplyTimer = setTimeout(function() { if (!fullContent) { timedOut = "slow"; ac.abort(); } }, CHAT_FIRST_REPLY_TIMEOUT_MS);
+      var elapsedTimer = setInterval(function() {
+        if (fullContent) return;
+        var s = Math.round((Date.now() - startTime) / 1000);
+        document.getElementById("streamStatus").textContent = s >= 10 ? thinkingStatus + " " + s + "s" : thinkingStatus;
+      }, 1000);
+      var failed = false;
+      var gotDone = false;
+      function fail(message, opts) {
+        failed = true;
+        opts = opts || {};
+        opts.retryText = text;
+        showChatFailure(assistantBubble, message, opts);
+      }
+      armIdle();
 
       try {
         var chatBody = { conversationId: activeConvId, message: text };
+        if (isRetry) chatBody.resend = true;
         var computeUsed = selectedCompute;
         if (computeUsed) chatBody.compute = { target: computeUsed.target, model: computeUsed.model, computeClass: computeUsed.computeClass, reservationId: computeUsed.reservationId };
         else if (selectedModel) chatBody.model = selectedModel;
-        // Auto (nothing picked): the network's best fit; the server falls back to EdgeCoder's own chat (free) when it can't run there.
+        // Auto (nothing picked): your own machines first (free), then the network's best fit.
         else chatBody.compute = { target: "auto" };
         var response = await fetch("/portal/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(chatBody),
-          signal: abortController.signal,
+          signal: ac.signal,
           credentials: "same-origin"
         });
+        armIdle();
 
         if (!response.ok) {
           var errBody = await response.text();
           var errMsg = errBody;
-          try { var ej = JSON.parse(errBody); errMsg = ej.error || errBody; } catch (e) {}
-          if (response.status === 402) errMsg += " Buy cSats on the Wallet page.";
-          throw new Error(errMsg || ("Chat request failed: " + response.status));
-        }
+          var errCode;
+          try { var ej = JSON.parse(errBody); errMsg = ej.error || errBody; errCode = ej.code; } catch (e) {}
+          fail(errMsg || ("Chat request failed: " + response.status), { code: errCode, httpStatus: response.status });
+        } else {
+          var reader = response.body.getReader();
+          var decoder = new TextDecoder();
+          var buffer = "";
 
-        var reader = response.body.getReader();
-        var decoder = new TextDecoder();
-        var buffer = "";
+          while (true) {
+            var result = await reader.read();
+            if (result.done) break;
+            armIdle();
+            buffer += decoder.decode(result.value, { stream: true });
 
-        while (true) {
-          var result = await reader.read();
-          if (result.done) break;
-          buffer += decoder.decode(result.value, { stream: true });
+            var lines = buffer.split("\\n");
+            buffer = lines.pop() || "";
 
-          var lines = buffer.split("\\n");
-          buffer = lines.pop() || "";
-
-          for (var li = 0; li < lines.length; li++) {
-            var line = lines[li].trim();
-            if (!line.startsWith("data: ")) continue;
-            var payload = line.substring(6);
-            if (payload === "[DONE]") continue;
-            try {
-              var parsed = JSON.parse(payload);
-              if (parsed.warning) {
-                var warnBanner = document.createElement("div");
-                warnBanner.style.cssText = "padding:8px 16px;font-size:12px;color:var(--yellow);background:color-mix(in srgb, var(--yellow) 8%, transparent);border:1px solid color-mix(in srgb, var(--yellow) 20%, transparent);border-radius:6px;margin-bottom:8px;";
-                warnBanner.textContent = parsed.warning;
-                assistantBubble.insertBefore(warnBanner, assistantBody);
+            for (var li = 0; li < lines.length; li++) {
+              var line = lines[li].trim();
+              if (!line.startsWith("data: ")) continue; // ": keepalive" heartbeats and blank lines
+              var payload = line.substring(6);
+              if (payload === "[DONE]") continue;
+              try {
+                var parsed = JSON.parse(payload);
+                if (parsed.status && !fullContent) {
+                  thinkingStatus = parsed.status;
+                  document.getElementById("streamStatus").textContent = thinkingStatus;
+                }
+                if (parsed.warning) {
+                  var warnBanner = document.createElement("div");
+                  warnBanner.style.cssText = "padding:8px 16px;font-size:12px;color:var(--yellow);background:color-mix(in srgb, var(--yellow) 8%, transparent);border:1px solid color-mix(in srgb, var(--yellow) 20%, transparent);border-radius:6px;margin-bottom:8px;";
+                  warnBanner.textContent = parsed.warning;
+                  assistantBubble.insertBefore(warnBanner, assistantBody);
+                }
+                if (parsed.error) fail(parsed.error, { code: parsed.code, httpStatus: parsed.httpStatus });
+                if (parsed.done) {
+                  gotDone = true;
+                  var meta = document.createElement("div");
+                  meta.className = "msg-meta";
+                  meta.textContent = [typeof parsed.cSatsSpent === "number" ? formatCSats(parsed.cSatsSpent) : "", parsed.compute || ""].filter(Boolean).join(" \u00B7 ");
+                  if (meta.textContent) assistantBubble.appendChild(meta);
+                  if (typeof parsed.cSatsSpent === "number" && parsed.cSatsSpent > 0) loadTopTicker();
+                }
+                if (parsed.content) {
+                  fullContent += parsed.content;
+                  tokenCount++;
+                  assistantBody.innerHTML = renderMarkdown(fullContent);
+                  scrollParent.scrollTop = scrollParent.scrollHeight;
+                  var elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                  document.getElementById("streamStatus").textContent = "Streaming...";
+                  document.getElementById("streamTokens").textContent = tokenCount + " chunks, " + elapsed + "s";
+                }
+              } catch (parseErr) {
+                // skip unparseable lines
               }
-              if (parsed.error) {
-                var errLine = document.createElement("div");
-                errLine.className = "msg-meta msg-error";
-                errLine.textContent = parsed.error;
-                assistantBubble.appendChild(errLine);
-              }
-              if (parsed.done) {
-                var meta = document.createElement("div");
-                meta.className = "msg-meta";
-                meta.textContent = [typeof parsed.cSatsSpent === "number" ? formatCSats(parsed.cSatsSpent) : "", parsed.compute || ""].filter(Boolean).join(" \u00B7 ");
-                if (meta.textContent) assistantBubble.appendChild(meta);
-                if (typeof parsed.cSatsSpent === "number" && parsed.cSatsSpent > 0) loadTopTicker();
-              }
-              if (parsed.content) {
-                fullContent += parsed.content;
-                tokenCount++;
-                assistantBody.innerHTML = renderMarkdown(fullContent);
-                scrollParent.scrollTop = scrollParent.scrollHeight;
-                var elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-                document.getElementById("streamStatus").textContent = "Streaming...";
-                document.getElementById("streamTokens").textContent = tokenCount + " chunks, " + elapsed + "s";
-              }
-            } catch (parseErr) {
-              // skip unparseable lines
             }
           }
+          if (!failed && !fullContent && !gotDone) fail("No reply came back.");
+          else if (!failed && !fullContent) fail("The model returned an empty reply.");
         }
       } catch (err) {
-        if (err.name !== "AbortError") {
-          showToast("Chat error: " + String(err.message || err), true);
-          if (!fullContent) {
-            assistantBody.innerHTML = "<span class=\\"msg-error\\">" + escapeHtml(String(err.message || err)) + "</span>";
-          }
-        }
+        if (timedOut === "idle") fail("No response from EdgeCoder for " + Math.round(CHAT_IDLE_TIMEOUT_MS / 1000) + " seconds.");
+        else if (timedOut === "slow") fail("No answer after " + Math.round(CHAT_FIRST_REPLY_TIMEOUT_MS / 60000) + " minutes. The machines may be busy or starting up.");
+        else if (!err || err.name !== "AbortError") fail(String((err && err.message) || err));
       }
+      clearTimeout(idleTimer);
+      clearTimeout(firstReplyTimer);
+      clearInterval(elapsedTimer);
 
       // Done streaming
       isStreaming = false;

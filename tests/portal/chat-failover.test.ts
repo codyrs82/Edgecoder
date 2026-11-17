@@ -6,7 +6,7 @@ import { CHAT_MAX_COORDINATOR_ATTEMPTS, NO_COMPUTE_BODY, registerChatApiRoutes, 
 
 // #39: /portal/api/chat runs on a coordinator that has capacity and fails over once, before any token.
 
-type ChatMode = "ok" | "no_models" | "bad_request" | "empty" | "drop_after_first" | "hang";
+type ChatMode = "ok" | "no_models" | "bad_request" | "empty" | "drop_after_first" | "hang" | "slow";
 interface Behaviour {
   /** The coordinator's own model server, as /health/runtime reports it. "hang" never answers. */
   ownModels?: number | "hang";
@@ -15,6 +15,10 @@ interface Behaviour {
   agentModels?: string[];
   /** What /inference/submit answers; "ok" accepts the job. */
   submit?: "ok" | { status: number; error: string };
+  /** What /inference/submit answers for target "mine" (your own machines); default as submit. */
+  submitMine?: "ok" | { status: number; error: string };
+  /** "slow" chat: ms before the first token. */
+  delayMs?: number;
   /** Status of /inference/stream. */
   streamStatus?: number;
   name?: string;
@@ -43,6 +47,7 @@ async function coordinator(b: Behaviour = {}) {
     if (mode === "no_models") return reply.code(502).send({ error: "no_models_available" });
     if (mode === "bad_request") return reply.code(400).send({ error: "invalid_chat" });
     if (mode === "hang") return new Promise(() => undefined);
+    if (mode === "slow") await new Promise((r) => setTimeout(r, b.delayMs ?? 300));
     reply.raw.writeHead(200, { "content-type": "text/event-stream" });
     if (mode === "empty") {
       reply.raw.end("data: [DONE]\n\n");
@@ -59,7 +64,7 @@ async function coordinator(b: Behaviour = {}) {
   co.get("/inference/models", async (req) => (note(req), { models: (b.agentModels ?? []).map((model) => ({ model, agents: 1, classes: ["gpu"] })) }));
   co.post("/inference/submit", async (req, reply) => {
     note(req);
-    const s = b.submit ?? "ok";
+    const s = ((req.body as { target?: string } | undefined)?.target === "mine" ? b.submitMine : undefined) ?? b.submit ?? "ok";
     return s === "ok" ? { subtaskId: "sub-1" } : reply.code(s.status).send({ error: s.error, neededCSats: 9 });
   });
   co.post("/inference/stream", async (req, reply) => {
@@ -75,21 +80,33 @@ async function coordinator(b: Behaviour = {}) {
 }
 
 /** The portal's chat route over the given coordinators, in priority order. */
-function portal(urls: string[], opts: { allowed?: (u: string) => boolean; timeoutMs?: number; own?: boolean } = {}) {
+function portal(
+  urls: string[],
+  opts: { allowed?: (u: string) => boolean; timeoutMs?: number; own?: boolean; ownModels?: string[]; keepalive?: { graceMs: number; intervalMs: number }; lastMessage?: { role: "user" | "assistant"; content: string } } = {},
+) {
   const store = {
     getConversationOwner: vi.fn(async () => "u1"),
     addMessage: vi.fn(async (_m: { role: string; content: string }) => undefined),
-    getConversationMessages: vi.fn(async () => [{ role: "user" as const, content: "hi" }]),
+    getConversationMessages: vi.fn(async () => [opts.lastMessage ?? { role: "user" as const, content: "hi" }]),
   };
   const app = Fastify();
   const chatCapacity = opts.own
     ? undefined
     : createChatCapacityDirectory({ candidates: async () => urls, allowed: opts.allowed ?? (() => true), serviceToken: "svc", timeoutMs: opts.timeoutMs ?? 500 });
-  registerChatApiRoutes(app, { store, getCurrentUser: async () => ({ userId: "u1" }), PORTAL_SERVICE_TOKEN: "svc", discoverCoordinatorUrlsForPortal: async () => urls, chatCapacity } as never);
+  registerChatApiRoutes(app, {
+    store,
+    getCurrentUser: async () => ({ userId: "u1" }),
+    PORTAL_SERVICE_TOKEN: "svc",
+    discoverCoordinatorUrlsForPortal: async () => urls,
+    chatCapacity,
+    ...(opts.ownModels ? { ownMachineModels: async () => opts.ownModels } : {}),
+    chatKeepalive: opts.keepalive ?? { graceMs: 60_000, intervalMs: 60_000 },
+  } as never);
   servers.push(app);
   const chat = (extra: Record<string, unknown> = {}) => app.inject({ method: "POST", url: "/portal/api/chat", payload: { conversationId: "c1", message: "hi", ...extra } });
   const saved = () => store.addMessage.mock.calls.map(([m]) => m).filter((m) => m.role === "assistant").map((m) => m.content);
-  return { app, chat, saved };
+  const savedUser = () => store.addMessage.mock.calls.map(([m]) => m).filter((m) => m.role === "user").map((m) => m.content);
+  return { app, chat, saved, savedUser };
 }
 
 /** The JSON events of an SSE answer. */
@@ -346,21 +363,86 @@ describe("Auto (the page's default) asks the network's best fit", () => {
     expect(us.paths("/portal/chat")).toHaveLength(0);
   });
 
-  it("falls back to the coordinator's own chat (free) when the network turns it down", async () => {
+  it("says out of cSats (no slow free fallback) when the network turns it down for cSats", async () => {
     const us = await coordinator({ name: "us", agentModels: ["m"], ownModels: 1, submit: { status: 402, error: "insufficient_credits" } });
+    const p = portal([us.url]);
+    const res = await p.chat(auto);
+    expect(res.statusCode).toBe(402);
+    expect(res.json()).toMatchObject({ code: "out_of_csats", compute: "Network · best fit" });
+    expect(res.json().error).toMatch(/Not enough cSats/);
+    expect(us.paths("/portal/chat")).toHaveLength(0);
+    expect(p.saved()).toEqual([]);
+  });
+
+  it("runs on your own online machines first, free, before the network", async () => {
+    const us = await coordinator({ name: "us", agentModels: ["mine-m"], submit: { status: 402, error: "insufficient_credits" }, submitMine: "ok" });
+    const res = await portal([us.url], { ownModels: ["mine-m"] }).chat(auto);
+    expect(res.statusCode).toBe(200);
+    expect(events(res.body)).toEqual([{ content: "us-net" }, { done: true, compute: "My machines · mine-m", cSatsSpent: 0.5 }]);
+    expect(us.paths("/inference/submit")).toHaveLength(1);
+    expect(us.paths("/inference/submit")[0]).toMatchObject({ body: { model: "mine-m", target: "mine" } });
+  });
+
+  it("goes on to the network when your own machines turn it down", async () => {
+    const us = await coordinator({ name: "us", agentModels: ["mine-m"], submitMine: { status: 409, error: "no_own_agent_has_model" } });
+    const res = await portal([us.url], { ownModels: ["mine-m"] }).chat(auto);
+    expect(res.statusCode).toBe(200);
+    expect(events(res.body).at(-1)).toMatchObject({ done: true, compute: "Network · best fit" });
+    expect(us.paths("/inference/submit")[0]).toMatchObject({ body: { model: "mine-m", target: "mine" } });
+    expect(us.paths("/inference/submit").at(-1)).toMatchObject({ body: { model: "auto" } });
+  });
+
+  it("falls back to the coordinator's own chat (free) when no route fits", async () => {
+    const us = await coordinator({ name: "us", agentModels: ["m"], ownModels: 1, submit: { status: 409, error: "no_route_fits" } });
     const p = portal([us.url]);
     const res = await p.chat(auto);
     expect(res.statusCode).toBe(200);
     expect(text(res.body)).toBe("us-1 us-2");
-    expect(us.paths("/inference/submit")).toHaveLength(1);
     expect(us.paths("/portal/chat")).toHaveLength(1);
     expect(p.saved()).toEqual(["us-1 us-2"]);
   });
+});
 
-  it("falls back as well when no route fits", async () => {
-    const us = await coordinator({ name: "us", agentModels: ["m"], ownModels: 1, submit: { status: 409, error: "no_route_fits" } });
-    const res = await portal([us.url]).chat(auto);
+describe("a slow first token keeps the browser's request alive (iOS Safari 'Load failed')", () => {
+  const auto = { compute: { target: "auto" } };
+
+  it("sends the SSE head and heartbeats while the coordinator's own model is still thinking", async () => {
+    const us = await coordinator({ name: "us", agentModels: ["m"], ownModels: 1, chat: "slow", delayMs: 300, submit: { status: 409, error: "no_route_fits" } });
+    const res = await portal([us.url], { keepalive: { graceMs: 20, intervalMs: 50 } }).chat(auto);
     expect(res.statusCode).toBe(200);
+    expect(res.headers["content-type"]).toMatch(/text\/event-stream/);
+    expect(res.body.indexOf(": keepalive")).toBeGreaterThanOrEqual(0);
+    expect(res.body.match(/: keepalive/g)!.length).toBeGreaterThan(1);
+    expect(res.body.indexOf(": keepalive")).toBeLessThan(res.body.indexOf('"content"'));
+    expect(events(res.body)[0]).toEqual({ status: "Answering with EdgeCoder's own model (free, slower)..." });
     expect(text(res.body)).toBe("us-1 us-2");
+  });
+
+  it("a failure after the head went out is an error event, not a broken stream", async () => {
+    // Both coordinators fail after the head went out: the browser gets the failure as an event.
+    const us = await coordinator({ name: "us", ownModels: 1, chat: "no_models" });
+    const eu = await coordinator({ name: "eu", ownModels: 1, chat: "no_models" });
+    const res = await portal([us.url, eu.url], { keepalive: { graceMs: 0, intervalMs: 1_000 } }).chat();
+    expect(res.statusCode).toBe(200);
+    expect(events(res.body)).toEqual([{ error: "all_coordinators_failed", triedCount: 2, httpStatus: 502 }]);
+    expect(res.body.trimEnd().endsWith("data: [DONE]")).toBe(true);
+  });
+
+  it("a refusal inside the grace keeps its HTTP status", async () => {
+    const us = await coordinator({ name: "us", agentModels: ["m"], submit: { status: 402, error: "insufficient_credits" } });
+    const res = await portal([us.url], { keepalive: { graceMs: 5_000, intervalMs: 5_000 } }).chat(auto);
+    expect(res.statusCode).toBe(402);
+    expect(res.headers["content-type"]).toMatch(/json/);
+  });
+});
+
+describe("Retry (resend)", () => {
+  it("does not save the same message twice", async () => {
+    const us = await coordinator({ name: "us", ownModels: 1 });
+    const p = portal([us.url], { lastMessage: { role: "user", content: "hi" } });
+    await p.chat({ resend: true });
+    expect(p.savedUser()).toEqual([]);
+    await p.chat();
+    expect(p.savedUser()).toEqual(["hi"]);
   });
 });
