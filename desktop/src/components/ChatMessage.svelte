@@ -53,7 +53,7 @@
 
 <div class="message {role}">
   {#if role === "user"}
-    <div class="bubble user-bubble">{content}</div>
+    <div class="bubble user-bubble" data-quotable>{content}</div>
   {:else}
     <div class="bubble assistant-bubble">
       {#if toolEvents && toolEvents.length > 0}
@@ -107,7 +107,8 @@
         </div>
         {/if}
       {/if}
-      <MarkdownRenderer source={content} {onOpenInEditor} />
+      <!-- data-quotable: selected text here can be added to the chat as a quote (QuoteSelection). -->
+      <div data-quotable><MarkdownRenderer source={content} {onOpenInEditor} /></div>
       {#if networkTaskId}
         <NetworkTaskCard taskId={networkTaskId} />
       {/if}

@@ -3,6 +3,7 @@
   import { tick, type Snippet } from "svelte";
   import { ACCEPT, MAX_ATTACHMENTS, formatBytes, readAttachment, toPayload, visionNote, type Attachment, type AttachmentPayload, type Vision } from "../lib/attachments";
   import { menu } from "../lib/menu";
+  import { insertQuoteText } from "../lib/quote-selection";
 
   interface Props {
     /** `attachments`: files attached in the box (only when `attach` is set). */
@@ -156,6 +157,26 @@
     clearAttachments();
     // Back to one line once the box is empty (the value is written on the next tick).
     void tick().then(resize);
+  }
+
+  /**
+   * "Add to chat": put a quote (Markdown from lib/quote-selection.ts) into the box at the caret,
+   * keeping what is typed and attached; the caret lands on the line after it, ready for the reply.
+   */
+  export async function insertQuote(block: string) {
+    const caret = textareaEl ? (textareaEl.selectionEnd ?? text.length) : text.length;
+    const next = insertQuoteText(text, caret, block);
+    text = next.value;
+    mention = null;
+    matches = [];
+    await tick();
+    if (!textareaEl) return;
+    textareaEl.focus();
+    textareaEl.setSelectionRange(next.caret, next.caret);
+    resize();
+    // Keep the caret in view when the box scrolls inside.
+    const line = text.slice(0, next.caret).split("\n").length;
+    textareaEl.scrollTop = Math.max(0, line * 22 - textareaEl.clientHeight + 10);
   }
 
   // --- Attachments ---

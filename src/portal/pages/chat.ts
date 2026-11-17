@@ -7,6 +7,7 @@ import { icon } from "./design-system.js";
 import { CSP_NONCE } from "../csp-nonce.js";
 import { escapeHtml } from "./escape.js";
 import { NOTICES } from "../../common/legal-notices.js";
+import { QUOTE_SELECTION_BROWSER_LIB, QUOTE_SELECTION_CSS, quoteSelectionScript } from "./quote-selection.js";
 
 // #16: moved verbatim from src/portal/server.ts (split from home-chat.ts to leave room for #27).
 export function registerChatPage(app: FastifyInstance): void {
@@ -133,7 +134,7 @@ app.get("/portal/chat", async (_req, reply) => {
       .chat-empty { padding:60px 0; text-align:center; }
       .chat-empty-icon { display:inline-flex; width:44px; height:44px; border-radius:var(--radius-md); border:1px solid var(--card-border); background:var(--bg-surface); align-items:center; justify-content:center; color:var(--brand-2); margin-bottom:12px; }
       .chat-empty .chat-empty-title { margin:0 0 6px; font-size:18px; color:var(--text); }
-      .stream-indicator { max-width:768px; margin:0 auto; display:flex; align-items:center; gap:8px; padding:6px 24px; color:var(--muted); font-size:12px; }
+${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; display:flex; align-items:center; gap:8px; padding:6px 24px; color:var(--muted); font-size:12px; }
     </style>
     <div class="chat-layout">
       <!-- Conversations (New chat, Search, recent chats) live in the shell's sidebar. -->
@@ -257,7 +258,7 @@ app.get("/portal/chat", async (_req, reply) => {
         var label = m.role === "user" ? "You" : "EdgeCoder";
         var timeStr = m.createdAt || m.timestamp ? formatMsgTime(m.createdAt || m.timestamp) : "";
         var cost = role === "assistant" && Number(m.creditsSpent) > 0 ? "<div class=\\"msg-meta\\">" + formatCSats(m.creditsSpent) + "</div>" : "";
-        html += "<div class=\\"chat-msg " + role + "\\"><div class=\\"msg-header\\"><div class=\\"msg-role\\">" + label + "</div>" + (timeStr ? "<div class=\\"msg-time\\">" + timeStr + "</div>" : "") + "</div><div class=\\"msg-body\\">" + renderMarkdown(m.content || "") + "</div>" + cost + "</div>";
+        html += "<div class=\\"chat-msg " + role + "\\"><div class=\\"msg-header\\"><div class=\\"msg-role\\">" + label + "</div>" + (timeStr ? "<div class=\\"msg-time\\">" + timeStr + "</div>" : "") + "</div><div class=\\"msg-body\\" data-quotable>" + renderMarkdown(m.content || "") + "</div>" + cost + "</div>";
       }
       container.innerHTML = html;
       scrollParent.scrollTop = scrollParent.scrollHeight;
@@ -354,7 +355,7 @@ app.get("/portal/chat", async (_req, reply) => {
       var userBubble = document.createElement("div");
       userBubble.className = "chat-msg user";
       var nowTime = formatMsgTime(Date.now());
-      userBubble.innerHTML = "<div class=\\"msg-header\\"><div class=\\"msg-role\\">You</div><div class=\\"msg-time\\">" + nowTime + "</div></div><div class=\\"msg-body\\">" + renderMarkdown(text) + "</div>";
+      userBubble.innerHTML = "<div class=\\"msg-header\\"><div class=\\"msg-role\\">You</div><div class=\\"msg-time\\">" + nowTime + "</div></div><div class=\\"msg-body\\" data-quotable>" + renderMarkdown(text) + "</div>";
       chatMessages.appendChild(userBubble);
       scrollParent.scrollTop = scrollParent.scrollHeight;
 
@@ -370,7 +371,7 @@ app.get("/portal/chat", async (_req, reply) => {
       // Create assistant message block
       var assistantBubble = document.createElement("div");
       assistantBubble.className = "chat-msg assistant";
-      assistantBubble.innerHTML = "<div class=\\"msg-header\\"><div class=\\"msg-role\\">EdgeCoder</div><div class=\\"msg-time\\">" + formatMsgTime(Date.now()) + "</div></div><div class=\\"msg-body\\"></div>";
+      assistantBubble.innerHTML = "<div class=\\"msg-header\\"><div class=\\"msg-role\\">EdgeCoder</div><div class=\\"msg-time\\">" + formatMsgTime(Date.now()) + "</div></div><div class=\\"msg-body\\" data-quotable></div>";
       chatMessages.appendChild(assistantBubble);
       var assistantBody = assistantBubble.querySelector(".msg-body");
 
@@ -656,6 +657,10 @@ app.get("/portal/chat", async (_req, reply) => {
     document.getElementById("convSearch").addEventListener("input", function() {
       renderConversations();
     });
+
+    // "Add to chat": quote selected message text in the composer (pages/quote-selection.ts).
+    ${QUOTE_SELECTION_BROWSER_LIB}
+    ${quoteSelectionScript("chatScroll", "chatInput")}
 
     // Init
     (async function() {

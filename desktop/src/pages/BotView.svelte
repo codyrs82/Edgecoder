@@ -3,6 +3,7 @@
   import { Tabs } from "bits-ui";
   import ChatMessage from "../components/ChatMessage.svelte";
   import ChatInput from "../components/ChatInput.svelte";
+  import QuoteSelection from "../components/QuoteSelection.svelte";
   import BotAvatar from "../components/BotAvatar.svelte";
   import ToolArgs from "../components/ToolArgs.svelte";
   import { Play, Pause, RotateCw, Pencil, Trash2, History, MessageSquare, Ellipsis, CircleAlert, X, CalendarClock, Cpu, Folder, PanelRight, Copy, FolderOpen, GitPullRequest, GitBranch, Zap, RefreshCw } from "@lucide/svelte";
@@ -169,6 +170,7 @@
   let error = $state<string | null>(null);
   let confirmDelete = $state(false);
   let scrollEl: HTMLDivElement | undefined = $state();
+  let botInput: ChatInput | undefined = $state();
   let lastCount = 0;
 
   const busy = $derived(bot.status === "running" || bot.status === "needs_approval");
@@ -458,6 +460,7 @@
           </div>
         {/if}
       {/each}
+      <QuoteSelection scope={scrollEl} onQuote={(b) => void botInput?.insertQuote(b)} />
     </div>
     {/snippet}
     </Tabs.Content>
@@ -501,6 +504,7 @@
          queue={[]}: the bot keeps its own queue, so messages go to it at once. Bots never use a
          frontier key, so they can't see images or PDFs: those are saved in its folder by name. -->
     <ChatInput
+      bind:this={botInput}
       onSend={send}
       streaming={busy}
       onStop={stop}
