@@ -7,6 +7,7 @@
   import { Radio, Users } from "@lucide/svelte";
   import ChatMessage from "./ChatMessage.svelte";
   import ChatInput from "./ChatInput.svelte";
+  import QuoteSelection from "./QuoteSelection.svelte";
   import { DESKTOP_CLIENT, followSession, getSession, sessionApprove, sessionCancel, sessionSend, sessionTentacles, sessionUnqueue, tentacleCancel, tentacleMerge } from "../lib/api";
   import TentacleTree from "./TentacleTree.svelte";
   import { applyTentacleEvent, emptyTentacles, type TentacleState } from "../lib/tentacles";
@@ -27,6 +28,7 @@
   let view = $state<LiveView | null>(null);
   let error = $state<string | null>(null);
   let scroller: HTMLDivElement | undefined = $state();
+  let chatInput: ChatInput | undefined = $state();
   let abort: AbortController | null = null;
   // Tentacles hook: the session's helper agents (TentacleTree).
   let tentacles = $state<TentacleState>(emptyTentacles());
@@ -127,10 +129,12 @@
     {:else if !error}
       <p class="note">Loading the session…</p>
     {/if}
+    <QuoteSelection scope={scroller} onQuote={(b) => void chatInput?.insertQuote(b)} />
   </div>
 
   <div class="panel-input">
     <ChatInput
+      bind:this={chatInput}
       onSend={(t) => void send(t)}
       placeholder={view?.streaming ? "Type the next message: it runs when this reply ends (Esc stops the reply)" : "Message this session (the terminal sees it too)…"}
       disabled={!view || view.deleted}

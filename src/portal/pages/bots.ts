@@ -6,6 +6,7 @@ import { portalAuthedPageHtml } from "./layout.js";
 import { icon } from "./design-system.js";
 import { CSP_NONCE } from "../csp-nonce.js";
 import { CLIENT_MARKDOWN_CAP_JS } from "../../common/markdown-cap.js";
+import { QUOTE_SELECTION_BROWSER_LIB, QUOTE_SELECTION_CSS, quoteSelectionScript } from "./quote-selection.js";
 
 /**
  * Bots: the bots that live on your desktop machines, on the web (src/common/bot-relay.ts).
@@ -57,8 +58,7 @@ export function registerBotsPage(app: FastifyInstance): void {
 
       /* ── One bot (the desktop's BotView layout) ── */
       .bot-view { display:flex; height:calc(100vh - var(--topbar-h)); min-height:0; }
-      .bot-main { flex:1; min-width:0; display:flex; flex-direction:column; }
-      .bot-head { display:flex; gap:12px; align-items:flex-start; padding:14px 20px; border-bottom:1px solid var(--card-border); }
+      .bot-main { flex:1; min-width:0; display:flex; flex-direction:column; }${QUOTE_SELECTION_CSS}      .bot-head { display:flex; gap:12px; align-items:flex-start; padding:14px 20px; border-bottom:1px solid var(--card-border); }
       .bot-head .who { flex:1; min-width:0; }
       .bot-head .line1 { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
       .bot-head h2 { font-size:16px; margin:0; }
@@ -249,6 +249,8 @@ export function registerBotsPage(app: FastifyInstance): void {
     ${CLIENT_MARKDOWN_CAP_JS}
     var BOT_ICONS = ${JSON.stringify(icons)};
     ${BOTS_PAGE_JS}
+    ${QUOTE_SELECTION_BROWSER_LIB}
+    ${quoteSelectionScript("bpScroll", "bpInput")}
     `;
     return reply.type("text/html").send(
       portalAuthedPageHtml({
@@ -403,7 +405,7 @@ const BOTS_PAGE_JS = String.raw`
     function messageHtml(m) {
       if (m.role === "event") return '<div class="msg event">' + escapeHtml(m.content) + " · " + escapeHtml(when(m.atMs)) + "</div>";
       var who = m.role === "user" ? "You" : state.bot.name;
-      return '<article class="msg ' + escapeHtml(m.role) + '"><div class="msg-head"><span class="msg-who">' + escapeHtml(who) + "</span><time>" + escapeHtml(when(m.atMs)) + '</time></div><div class="msg-body">' + renderMarkdown(m.content || "") + "</div>" + stepsHtml(m.steps) + "</article>";
+      return '<article class="msg ' + escapeHtml(m.role) + '"><div class="msg-head"><span class="msg-who">' + escapeHtml(who) + "</span><time>" + escapeHtml(when(m.atMs)) + '</time></div><div class="msg-body" data-quotable>' + renderMarkdown(m.content || "") + "</div>" + stepsHtml(m.steps) + "</article>";
     }
     function renderConversation() {
       var b = state.bot, tail = b.tail || [];

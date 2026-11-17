@@ -9,6 +9,7 @@
   import { chatsChanged, lastChatFor, projectName, setLastChatFor } from "../lib/projects";
   import ChatMessage from "./ChatMessage.svelte";
   import ChatInput from "./ChatInput.svelte";
+  import QuoteSelection from "./QuoteSelection.svelte";
   import ComputePicker from "./ComputePicker.svelte";
   import { computeChoice, freeReplyUsage } from "../lib/compute-choice";
   import { get } from "svelte/store";
@@ -141,6 +142,7 @@
   let streamProgress: StreamProgress | undefined = $state(undefined);
   let abortController: AbortController | null = $state(null);
   let scrollContainer: HTMLDivElement | undefined = $state(undefined);
+  let chatInput: ChatInput | undefined = $state(undefined);
 
   let recentConversations: Conversation[] = $state([]);
   let showPicker = $state(false);
@@ -501,6 +503,7 @@
         {/if}
       </div>
     {/if}
+    {#if projectRoot}<QuoteSelection scope={scrollContainer} onQuote={(b) => void chatInput?.insertQuote(b)} />{/if}
   </div>
 
   <div class="panel-input">
@@ -510,6 +513,7 @@
       {/if}
     {:else}
       <ChatInput
+        bind:this={chatInput}
         onSend={handleSend}
         placeholder="Ask the agent to change {projectName(projectRoot)}… (@ to add a file)"
         streaming={isStreaming}

@@ -6,6 +6,7 @@
   import { autoApplyEdits } from "../lib/project-mode";
   import { onMount, onDestroy } from "svelte";
   import ChatMessage from "../components/ChatMessage.svelte";
+  import QuoteSelection from "../components/QuoteSelection.svelte";
   import { computeChoice, freeReplyUsage } from "../lib/compute-choice";
   import { get } from "svelte/store";
   import {
@@ -44,8 +45,10 @@
     onRepoConnected?: (r: RepoConnection) => void;
     /** The title bar's text: this chat's title and its project (and branch) or "Synced". */
     onHeaderChange?: (h: { title: string; detail: string | null }) => void;
+    /** "Add to chat": text selected in a message, as a Markdown quote for the page's composer. */
+    onQuote?: (block: string) => void;
   }
-  let { onOpenInEditor, projectRoot = null, onStreamingChange, onOpenPath, onPreview, onRepoConnected, onHeaderChange }: Props = $props();
+  let { onOpenInEditor, projectRoot = null, onStreamingChange, onOpenPath, onPreview, onRepoConnected, onHeaderChange, onQuote }: Props = $props();
 
   let connectRepoBox: ConnectRepo | undefined = $state(undefined);
   /** The open project's folder name and branch, for the header. */
@@ -438,6 +441,7 @@
       {/if}
     </div>
   {/if}
+  {#if onQuote}<QuoteSelection scope={scrollContainer} {onQuote} />{/if}
 </div>
 
 <style>
