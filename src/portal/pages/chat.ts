@@ -142,6 +142,8 @@ app.get("/portal/chat", async (_req, reply) => {
         font:inherit; font-size:12.5px; padding:5px 12px; border-radius:var(--radius-sm); cursor:pointer;
         border:1px solid var(--card-border); background:var(--bg-surface); color:var(--text); text-decoration:none;
       }
+      .msg-cut-short { margin-top:6px; font-size:12px; color:var(--muted); display:flex; align-items:center; gap:6px; }
+      .msg-cut-short button { background:none; border:none; padding:0; color:var(--muted); text-decoration:underline; cursor:pointer; font:inherit; }
       .msg-failure .msg-failure-actions .primary { background:var(--brand); border-color:var(--brand); color:var(--on-accent); font-weight:600; }
       .spinner { width:14px; height:14px; border:2px solid var(--muted); border-top-color:var(--brand); border-radius:50%; animation:spin 0.8s linear infinite; display:inline-block; }
       @keyframes spin { to { transform:rotate(360deg); } }
@@ -222,6 +224,59 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
       return m || "Something went wrong.";
     }
 
+    /** The out-of-cSats detail in our words (the coordinator's sentence is not shown): what the chat sets aside. */
+    function csatsDetail(message) {
+      var m = /up to ([0-9][0-9.,]*) cSats/i.exec(String(message || ""));
+      return m ? "This chat sets aside up to " + m[1] + " cSats; unused cSats come back." : "";
+    }
+
+    /** "Signed in as you@example.com · 0 cSats", from the account menu the app shell fills in. */
+    function signedInLine() {
+      var emailEl = document.getElementById("accountMenuEmail");
+      var email = emailEl ? String(emailEl.textContent || "").trim() : "";
+      if (!email) return "";
+      var balEl = document.getElementById("topTickerCredits");
+      var bal = balEl ? String(balEl.textContent || "").trim() : "";
+      return "Signed in as " + email + (/cSats$/.test(bal) ? " \u00B7 " + bal : "");
+    }
+
+    /**
+     * A reply whose text stops mid-sentence (no closing punctuation, or an unclosed code block).
+     * Only then does an answer that ended without the server's terminator get a note.
+     */
+    function looksTruncated(text) {
+      var t = String(text || "").replace(/\\s+$/, "");
+      if (!t) return false;
+      var fences = t.split("\u0060\u0060\u0060").length - 1;
+      if (fences % 2 === 1) return true;
+      return !/[.!?:;)\\]}"'\u0060*_>|\u2026\u3002\uFF01\uFF1F]$/.test(t);
+    }
+
+    /** The subtle grey note under a reply that may be incomplete: "Reply may be cut short · Retry". */
+    function showCutShort(bubble, retryText) {
+      if (bubble.querySelector(".msg-cut-short")) return;
+      var note = document.createElement("div");
+      note.className = "msg-cut-short";
+      var label = document.createElement("span");
+      label.textContent = "Reply may be cut short";
+      note.appendChild(label);
+      if (retryText) {
+        var dot = document.createElement("span");
+        dot.textContent = "\u00B7";
+        note.appendChild(dot);
+        var retry = document.createElement("button");
+        retry.type = "button";
+        retry.textContent = "Retry";
+        retry.addEventListener("click", function() {
+          if (isStreaming) return;
+          bubble.remove();
+          sendMessage(retryText);
+        });
+        note.appendChild(retry);
+      }
+      bubble.appendChild(note);
+    }
+
     /** One compact failure under a reply: the shared line, the detail, and Buy cSats or Retry. */
     function showChatFailure(bubble, message, opts) {
       opts = opts || {};
@@ -230,7 +285,7 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
       box.className = "msg-failure";
       var line = document.createElement("div");
       line.className = "msg-failure-line";
-      var detailText = chatErrorText(message);
+      var detailText = kind === "csats" ? csatsDetail(message) : chatErrorText(message);
       line.textContent = kind === "other" ? detailText : FAILURE_LINE[kind];
       box.appendChild(line);
       if (kind !== "other" && detailText) {
@@ -238,6 +293,16 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
         detail.className = "msg-failure-detail";
         detail.textContent = detailText;
         box.appendChild(detail);
+      }
+      // Which account is short: cSats belong to one account, and the same person may have several.
+      if (kind === "csats" || kind === "budget") {
+        var who = signedInLine();
+        if (who) {
+          var acct = document.createElement("div");
+          acct.className = "msg-failure-detail";
+          acct.textContent = who;
+          box.appendChild(acct);
+        }
       }
       var actions = document.createElement("div");
       actions.className = "msg-failure-actions";
@@ -474,8 +539,15 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
       }, 1000);
       var failed = false;
       var gotDone = false;
+      // The red failure is only for no answer at all. Once answer text has arrived, the stream
+      // ending (a dropped connection, a timeout, an error event after the text) finishes the reply,
+      // with a grey "Reply may be cut short" only when the text stops mid-sentence.
       function fail(message, opts) {
         failed = true;
+        if (fullContent) {
+          if (looksTruncated(fullContent)) showCutShort(assistantBubble, text);
+          return;
+        }
         opts = opts || {};
         opts.retryText = text;
         showChatFailure(assistantBubble, message, opts);
@@ -561,6 +633,8 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
           }
           if (!failed && !fullContent && !gotDone) fail("No reply came back.");
           else if (!failed && !fullContent) fail("The model returned an empty reply.");
+          // Text, then the stream closed without the terminator: finished (noted only if it stops mid-sentence).
+          else if (!failed && !gotDone && looksTruncated(fullContent)) showCutShort(assistantBubble, text);
         }
       } catch (err) {
         if (timedOut === "idle") fail("No response from EdgeCoder for " + Math.round(CHAT_IDLE_TIMEOUT_MS / 1000) + " seconds.");

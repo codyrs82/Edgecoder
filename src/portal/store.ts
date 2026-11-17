@@ -2340,7 +2340,7 @@ export class PortalStore {
     await this.pool.query(
       `INSERT INTO portal_messages (message_id, conversation_id, role, content, tokens_used, credits_spent, created_at_ms)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [input.messageId, input.conversationId, input.role, input.content, input.tokensUsed ?? 0, input.creditsSpent ?? 0, now]
+      [input.messageId, input.conversationId, input.role, input.content, wholeNumber(input.tokensUsed), wholeNumber(input.creditsSpent), now]
     );
     await this.pool.query(
       `UPDATE portal_conversations SET updated_at_ms = $1 WHERE conversation_id = $2`,
@@ -2432,3 +2432,11 @@ export class PortalStore {
   }
 }
 
+/**
+ * portal_messages.tokens_used and credits_spent are INTEGER columns; a network chat reports a
+ * fractional cSats cost (0.434). Rounded here (the coordinator's ledger keeps the exact amount):
+ * the fraction made the insert throw after the reply had streamed (2026-11-17).
+ */
+export function wholeNumber(n: number | undefined): number {
+  return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
+}

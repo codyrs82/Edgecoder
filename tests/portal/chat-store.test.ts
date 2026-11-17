@@ -37,3 +37,14 @@ describe("chat store types", () => {
     expect(roles).toContain("system");
   });
 });
+
+describe("wholeNumber (portal_messages' integer columns)", () => {
+  it("rounds a fractional cSats cost instead of failing the insert", async () => {
+    const { wholeNumber } = await import("../../src/portal/store.js");
+    expect(wholeNumber(0.434)).toBe(0);
+    expect(wholeNumber(4.6)).toBe(5);
+    expect(wholeNumber(undefined)).toBe(0);
+    expect(wholeNumber(Number.NaN)).toBe(0);
+    expect(wholeNumber(-2)).toBe(0);
+  });
+});

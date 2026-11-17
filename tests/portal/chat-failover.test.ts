@@ -82,11 +82,14 @@ async function coordinator(b: Behaviour = {}) {
 /** The portal's chat route over the given coordinators, in priority order. */
 function portal(
   urls: string[],
-  opts: { allowed?: (u: string) => boolean; timeoutMs?: number; own?: boolean; ownModels?: string[]; keepalive?: { graceMs: number; intervalMs: number }; lastMessage?: { role: "user" | "assistant"; content: string } } = {},
+  opts: { allowed?: (u: string) => boolean; timeoutMs?: number; own?: boolean; saveFails?: boolean; ownModels?: string[]; keepalive?: { graceMs: number; intervalMs: number }; lastMessage?: { role: "user" | "assistant"; content: string } } = {},
 ) {
   const store = {
     getConversationOwner: vi.fn(async () => "u1"),
-    addMessage: vi.fn(async (_m: { role: string; content: string }) => undefined),
+    addMessage: vi.fn(async (m: { role: string; content: string }) => {
+      // Like production on 2026-11-17: the assistant's save throws after the reply streamed.
+      if (opts.saveFails && m.role === "assistant") throw new Error('invalid input syntax for type integer: "0.434"');
+    }),
     getConversationMessages: vi.fn(async () => [opts.lastMessage ?? { role: "user" as const, content: "hi" }]),
   };
   const app = Fastify();
@@ -183,7 +186,7 @@ describe("default chat fails over before any token", () => {
     const p = portal([us.url, eu.url]);
     const res = await p.chat();
     expect(res.statusCode).toBe(200);
-    expect(events(res.body)).toEqual([{ content: "us-1 " }, { error: "stream_interrupted" }]);
+    expect(events(res.body)).toEqual([{ content: "us-1 " }, { error: "stream_interrupted" }, { done: true }]);
     expect(eu.paths("/portal/chat")).toHaveLength(0);
     expect(p.saved()).toEqual(["us-1 "]);
   });
@@ -444,5 +447,65 @@ describe("Retry (resend)", () => {
     expect(p.savedUser()).toEqual([]);
     await p.chat();
     expect(p.savedUser()).toEqual(["hi"]);
+  });
+});
+
+// 2026-11-17: a full answer, then the page said "The connection to EdgeCoder dropped". The save
+// after the stream threw (a fractional cSats cost into an integer column), Fastify's error handler
+// wrote headers on the open stream and the process went down. Every path now ends with a done
+// event and [DONE], whatever happens after the text.
+describe("every chat path ends with its terminator", () => {
+  const ends = (body: string) => {
+    expect(body.trimEnd().endsWith("data: [DONE]")).toBe(true);
+    expect(events(body).some((e) => e.done === true)).toBe(true);
+  };
+
+  it("the coordinator's own chat", async () => {
+    const co = await coordinator({ name: "eu", ownModels: 1 });
+    const res = await portal([co.url]).chat();
+    expect(res.statusCode).toBe(200);
+    expect(text(res.body)).toBe("eu-1 eu-2");
+    ends(res.body);
+  });
+
+  it("a network compute", async () => {
+    const co = await coordinator({ name: "net", agentModels: ["m"] });
+    const res = await portal([co.url]).chat(network());
+    expect(text(res.body)).toBe("net-net");
+    ends(res.body);
+  });
+
+  it("Auto on your own machine", async () => {
+    const co = await coordinator({ name: "own", agentModels: ["qwen3-coder:30b"] });
+    const res = await portal([co.url], { ownModels: ["qwen3-coder:30b"] }).chat({ compute: { target: "auto" } });
+    expect(text(res.body)).toBe("own-net");
+    expect(co.paths("/inference/submit")[0].body.target).toBe("mine");
+    ends(res.body);
+  });
+
+  it("Auto falling back to the coordinator's own chat", async () => {
+    const co = await coordinator({ name: "eu", ownModels: 1, submit: { status: 409, error: "no_route_fits" } });
+    const res = await portal([co.url]).chat({ compute: { target: "auto" } });
+    expect(text(res.body)).toContain("eu-1");
+    ends(res.body);
+  });
+
+  it("a failed save after the reply: the text and the terminator still arrive", async () => {
+    for (const extra of [{}, network(), { compute: { target: "auto" } }]) {
+      const co = await coordinator({ name: "x", ownModels: 1, agentModels: ["m"] });
+      const res = await portal([co.url], { saveFails: true }).chat(extra);
+      expect(res.statusCode).toBe(200);
+      expect(text(res.body).length).toBeGreaterThan(0);
+      expect(events(res.body).some((e) => e.error)).toBe(false);
+      ends(res.body);
+    }
+  });
+
+  it("a failed save once the heartbeat head went out: same", async () => {
+    const co = await coordinator({ name: "slow", ownModels: 1, chat: "slow", delayMs: 120 });
+    const res = await portal([co.url], { saveFails: true, keepalive: { graceMs: 20, intervalMs: 30 } }).chat();
+    expect(res.statusCode).toBe(200);
+    expect(text(res.body)).toBe("slow-1 slow-2");
+    ends(res.body);
   });
 });

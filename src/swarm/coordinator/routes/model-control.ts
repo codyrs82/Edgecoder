@@ -17,6 +17,7 @@ import { identity, coordinatorKeys, securityLog } from "../context.js";
 import { requireAgentSelf, requirePortalServiceToken } from "../auth.js";
 import { verifiedAccountOf } from "../agent-accounts.js";
 import { agentCapabilities } from "../agent-state.js";
+import { routableModels } from "../../model-catalog.js";
 import { acceptModelControlReport, machineView, sendModelControlCommand } from "../model-control.js";
 
 const accountId = z.string().min(1).max(160).regex(/^acct-[A-Za-z0-9_-]+$/);
@@ -92,6 +93,11 @@ export function registerModelControlRoutes(app: CoordinatorApp): void {
         ...view,
         audit: view.audit.filter((e) => e.accountId === body.data.accountId),
         lastSeenMs: cap?.lastSeenMs ?? null,
+        // What a `target: "mine"` call can run here: the models this machine reported to this
+        // coordinator (Ollama tags, or a vLLM / MLX host's served model, whose state says Ollama
+        // is unreachable). The portal's web chat Auto picks your own machine's model from this.
+        activeModel: cap?.activeModel ?? null,
+        models: routableModels(cap),
         coordinatorId: identity.peerId
       });
     }
