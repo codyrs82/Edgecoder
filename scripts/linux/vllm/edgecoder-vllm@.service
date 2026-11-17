@@ -26,6 +26,8 @@ Environment="XDG_CACHE_HOME=/var/lib/edgecoder/vllm/cache"
 Environment="VLLM_CACHE_ROOT=/var/lib/edgecoder/vllm/cache/vllm"
 Environment="VLLM_NO_USAGE_STATS=1"
 Environment="DO_NOT_TRACK=1"
+# The venv first: vLLM and FlashInfer JIT-compile kernels with the venv's ninja at startup.
+Environment="PATH=/opt/edgecoder/vllm/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 # ${VLLM_MODEL_ID} is one word; $VLLM_ARGS is split on whitespace into flags.
 ExecStart=/opt/edgecoder/vllm/venv/bin/vllm serve ${VLLM_MODEL_ID} --host 127.0.0.1 --port ${VLLM_PORT} $VLLM_ARGS
 Restart=on-failure
