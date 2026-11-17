@@ -100,6 +100,45 @@ describe("the step model", () => {
     expect(O.ROUTING_OPTIONS.filter((r) => r.recommended).map((r) => r.id)).toEqual(["auto"]);
   });
 
+  it("fund: prepaid only by default; the direct-wallet button returns only with PAYMENTS_DIRECT_RESERVATIONS", () => {
+    const fund = O.stepById("fund");
+    expect(fund.body).toMatch(/own machines are free/);
+    expect(fund.body).toContain("1 cSat = 1 sat");
+    expect(fund.body).toMatch(/Reserving a machine comes out of the same balance/);
+    expect(fund.body).not.toMatch(/directly|your own wallet/);
+    const ids = (paths: O.PaymentPathFlags | null, surface: O.Surface = "web") => O.actionsFor(fund, surface, paths).map((a) => a.id);
+    // Launch config: prepaid on, direct reservations and NWC off; unknown paths hide it too.
+    expect(ids({ prepaid: true, directReservations: false, nwc: false })).toEqual(["buy", "reserve", "payout", "fund-guide"]);
+    expect(ids(null, "desktop")).not.toContain("direct");
+    expect(ids({ prepaid: true, directReservations: true, nwc: false })).toContain("direct");
+    expect(fund.actions.find((a) => a.id === "reserve")).toMatchObject({ desktop: "settings:compute", web: "/portal/settings/compute#sec-reservations" });
+    expect(O.actionHref("@fundGuide")).toBe("https://codyrs82.github.io/Edgecoder/guide/buy-csats");
+    // Other steps' buttons are unaffected by the paths.
+    expect(O.actionsFor(O.stepById("try"), "desktop", null).map((a) => a.id)).toEqual(["chat", "code", "bot"]);
+  });
+
+  it("fund: four numbered steps in plain words, a neutral wallet list, no 'invoice'", () => {
+    expect(O.FUND_STEPS.map((f) => f.title)).toEqual(["Choose an amount.", "Pay with Lightning.", "No bitcoin yet?", "Wait a few seconds."]);
+    const text = JSON.stringify(O.FUND_STEPS);
+    expect(text.toLowerCase()).not.toContain("invoice");
+    expect(text).toContain("Any Lightning wallet works");
+    for (const w of ["Cash App", "Strike", "Wallet of Satoshi", "Phoenix"]) expect(text).toContain(w);
+    expect(text).not.toMatch(/https?:|recommend|best/i);
+    expect(text).toContain("15 minutes");
+    expect(text).toContain("Your balance is above zero");
+  });
+
+  it("fund: the test-network note shows off mainnet only", () => {
+    expect(O.isTestNetwork("signet")).toBe(true);
+    expect(O.isTestNetwork("bitcoin")).toBe(false);
+    expect(O.isTestNetwork(null)).toBeNull();
+    expect(O.testNetworkNote("signet")).toMatch(/^Test network: use free test sats from faucet\.mutinynet\.com/);
+    expect(O.testNetworkNote("regtest")).toMatch(/^Test network \(regtest\)/);
+    expect(O.testNetworkNote("bitcoin")).toBeNull();
+    expect(O.testNetworkNote("mainnet")).toBeNull();
+    expect(O.testNetworkNote(undefined)).toBeNull();
+  });
+
   it("has stable routes per step on both surfaces", () => {
     for (const id of O.STEP_IDS) {
       expect(O.stepFromRoute(O.stepRoute(id, "web"))).toBe(id);
@@ -211,5 +250,15 @@ describe("model suggestion and the cost estimator", () => {
     expect(O.groupThousands(1234567)).toBe("1,234,567");
     expect(O.paramsFromModel("qwen3-coder:30b")).toBe(30);
     expect(O.paramsFromModel("gemma4:e4b")).toBeNull();
+  });
+
+  it("says what an amount buys on a 30B coder (1,000 cSats ≈ N calls)", () => {
+    const live = { models: [{ model: "qwen3-coder:30b", cSatsPerMTokens: { input: 322.7, output: 939.8 } }] };
+    const n = O.callsForCSats(1000, O.FUND_EXAMPLE_CLASS, live)!;
+    expect(n).toBe(O.callsPerThousand(O.cSatsPerCall(O.classPrice("35b", live)!)));
+    expect(n).toBeGreaterThan(300);
+    expect(n).toBeLessThan(400);
+    expect(O.callsForCSats(20_000, "35b", live)).toBeGreaterThan(n * 19);
+    expect(O.callsForCSats(1000, "35b", { models: [], btcUsd: null })).toBeNull();
   });
 });

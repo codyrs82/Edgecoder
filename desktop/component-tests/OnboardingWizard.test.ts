@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   getOnchainDeposits: vi.fn(),
   getSystemMetrics: vi.fn(),
   getWalletOverview: vi.fn(),
+  getPaymentPaths: vi.fn(async () => ({ prepaid: true, directReservations: false, nwc: false })),
   installCliTool: vi.fn(),
   pullModel: vi.fn(),
   portalWebUrl: (p = "") => `https://edgecoder.io${p}`,
@@ -249,6 +250,35 @@ describe("Getting started (desktop wizard)", () => {
       await waitFor(() => expect(heading().textContent).toBe("Choose models and where they run"));
       expect(document.querySelector("[data-item='routing']")).toBeNull();
       expect(screen.queryByRole("list", { name: "Checklist" })).toBeNull();
+    });
+
+    it("fund: what 1,000 cSats buys, the four steps, reservations from cSats, and no direct-wallet button at launch", async () => {
+      current = saved({ current: "fund", goal: "both" });
+      render(OnboardingWizard, props());
+      await waitFor(() => expect(heading().textContent).toBe("Fund your account"));
+      await waitFor(() => expect(screen.getByTestId("wz-buys").textContent).toMatch(/^1,000 cSats ≈ 3\d\d calls on a 30B coder model/));
+      const steps = screen.getByTestId("wz-fund-steps");
+      expect(steps.querySelectorAll("li")).toHaveLength(4);
+      expect(steps.textContent).toContain("No bitcoin yet?");
+      expect(document.body.textContent).toContain("Reserving a machine comes out of the same balance.");
+      expect(screen.getByRole("button", { name: "Reserve a machine" })).toBeTruthy();
+      await waitFor(() => expect(api.getPaymentPaths).toHaveBeenCalled());
+      expect(screen.queryByRole("button", { name: /pay hosts directly/ })).toBeNull();
+      expect(document.body.textContent).not.toMatch(/pay the host directly/);
+      // Network not reported (or mainnet): no test-network note.
+      expect(screen.queryByTestId("wz-test-network")).toBeNull();
+    });
+
+    it("fund: the direct-wallet button returns when the coordinator turns direct reservations on; signet shows the faucet note", async () => {
+      api.getPaymentPaths.mockResolvedValueOnce({ prepaid: true, directReservations: true, nwc: false });
+      api.getWalletOverview.mockResolvedValueOnce({ btcUsd: 176600, network: "signet" });
+      current = saved({ current: "fund", goal: "both" });
+      const p = props();
+      render(OnboardingWizard, p);
+      await waitFor(() => expect(screen.getByRole("button", { name: "Connect a wallet to pay hosts directly for reservations" })).toBeTruthy());
+      expect(screen.getByTestId("wz-test-network").textContent).toContain("Test network: use free test sats from faucet.mutinynet.com");
+      await fireEvent.click(screen.getByRole("button", { name: "Reserve a machine" }));
+      expect(p.onOpenSettings).toHaveBeenCalledWith("compute");
     });
 
     it("keeps checklists that read real state", async () => {

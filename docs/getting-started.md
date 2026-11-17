@@ -120,27 +120,43 @@ model. Only your account uses it and the provider bills you ([frontier-keys.md](
 
 ## 6. Fund your account
 
-Your own machines (and a machine you leased) are free. Network calls cost cSats per token, by
-model size. The guide estimates your cost from the live prices: pick calls per day and a model
-size, and it shows about how many calls 1,000 cSats buys. A typical agent call (about 8,300 tokens
-in, 130 out) on a 30B model is about 2.8 cSats.
+Your own machines (and a machine you leased) are free. Network calls and reservations use cSats:
+prepaid credit, spent per token by model size (1 cSat = 1 sat). Reserving a machine (Settings →
+Compute) comes out of the same balance. The step shows what 1,000 cSats buys on a 30B coder from
+the live prices, and the estimator below it shows a daily and monthly cost for the calls per day
+and model size you pick. A typical agent call (about 8,300 tokens in, 130 out) on a 30B model is
+about 2.8 cSats.
 
-- **Buy cSats → Fund with Lightning:** live.
+It then walks through buying, in four steps:
+
+1. **Choose an amount** in Settings → Wallet (5,000, 20,000 or 100,000 sats, or your own).
+2. **Pay with Lightning:** scan the QR code or copy the payment code. A code works for 15 minutes
+   (`PAYMENT_INTENT_TTL_MS`); if it runs out, nothing is charged: make a new one.
+3. **No bitcoin yet?** Any Lightning wallet works (examples only, no endorsement: Cash App,
+   Strike, Wallet of Satoshi, Phoenix, an exchange that can send over Lightning).
+4. **Wait a few seconds:** the balance updates by itself and "Your balance is above zero" ticks.
+
+While the coordinator is not on Bitcoin mainnet, the step shows a test-network note (on signet:
+free test sats from faucet.mutinynet.com). It reads the network from the wallet overview and
+disappears on mainnet.
+
 - **Fund with Bitcoin** (on-chain): shown as "Coming soon" until it is turned on
   (`ONCHAIN_ENABLED`).
 - During the invite launch, purchases have a daily cap, shown in the Wallet.
 - Bots have a daily budget, so a bot never spends more than you allow.
 
-The step offers three choices, by what you want to do:
+The step's buttons:
 
 - **Buy cSats for on-demand compute** (the default): prepaid credit for EdgeCoder compute only,
   drawn down per call. It can't be cashed out; failed work is credited back.
-- **Connect a wallet to pay hosts directly for reservations**: reservations, blocks of time and
-  whole-server commitments are paid from your own wallet straight to the host (Lightning, Bitcoin
-  on-chain or Zcash), plus EdgeCoder's 5 % to EdgeCoder's own address. Shown when the coordinator
-  turns direct payments on ([design](../design/noncustodial-payments.md)).
-- **Hosting? Set your payout addresses**: a Lightning address, a Bitcoin address or xpub, and a
-  Zcash address with its incoming viewing key, so buyers can pay you directly.
+- **Reserve a machine:** Settings → Compute. Paid now from your cSats; unused time comes back
+  when you cancel.
+- **Connect a wallet to pay hosts directly for reservations**: shown only while the coordinator
+  has direct payments on (`PAYMENTS_DIRECT_RESERVATIONS`, read from `/portal/api/payments/paths`;
+  [design](../design/noncustodial-payments.md)). Reservations, blocks of time and whole-server
+  commitments are then paid from your own wallet straight to the host. Off at launch.
+- **Hosting? Set your payout addresses**: where your earnings are paid.
+- **Guide: buy cSats**: the [step-by-step guide](https://codyrs82.github.io/Edgecoder/guide/buy-csats).
 
 Skip this step if you only use your own machines.
 

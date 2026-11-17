@@ -36,6 +36,8 @@ export const ONBOARDING_BROWSER_LIB = [
   `var INSTALL_LINKS = ${JSON.stringify(O.INSTALL_LINKS)};`,
   `var LOCAL_NETWORK_NOTE = ${JSON.stringify(O.LOCAL_NETWORK_NOTE)};`,
   `var SERVER_SETUP = ${JSON.stringify(O.SERVER_SETUP)};`,
+  `var FUND_STEPS = ${JSON.stringify(O.FUND_STEPS)};`,
+  `var FUND_EXAMPLE_CLASS = ${JSON.stringify(O.FUND_EXAMPLE_CLASS)};`,
   `var NEW_ACCOUNT_DAYS = ${O.NEW_ACCOUNT_DAYS};`,
   ...[
     O.emptyOnboardingState,
@@ -51,12 +53,16 @@ export const ONBOARDING_BROWSER_LIB = [
     O.prevStepId,
     O.shouldShowOnboarding,
     O.fundingOptional,
+    O.actionsFor,
+    O.isTestNetwork,
+    O.testNetworkNote,
     O.suggestModel,
     O.paramsFromModel,
     O.usdPerMToCSats,
     O.classPrice,
     O.cSatsPerCall,
     O.callsPerThousand,
+    O.callsForCSats,
     O.estimateCSats,
     O.groupThousands,
     O.installCommand,
@@ -71,8 +77,8 @@ export const ONBOARDING_BROWSER_LIB = [
 
 /**
  * Pure HTML builders on top of ONBOARDING_BROWSER_LIB and escapeHtml. `ctx` is
- * { state, signals, origin, wallet: { models, btcUsd, launch } | null, onchain: boolean | null,
- *   calls, classId }.
+ * { state, signals, origin, wallet: { models, btcUsd, launch, network } | null, onchain: boolean | null,
+ *   paths: { prepaid, directReservations, nwc } | null, calls, classId }.
  */
 export const WELCOME_RENDER_SCRIPT = `
     function wzCode(id, text) {
@@ -91,8 +97,8 @@ export const WELCOME_RENDER_SCRIPT = `
           "</span><span class='wz-sr'>: " + wzStatusText(v) + "</span></li>";
       }).join("") + "</ul>";
     }
-    function wzActions(step) {
-      var acts = step.actions.filter(function (a) { return a.web; });
+    function wzActions(step, ctx) {
+      var acts = actionsFor(step, "web", ctx.paths || null);
       if (!acts.length) return "";
       return "<div class='wz-actions'>" + acts.map(function (a) {
         var href = actionHref(a.web);
@@ -181,7 +187,14 @@ export const WELCOME_RENDER_SCRIPT = `
         var chain = ctx.onchain === true
           ? "<a class='wz-btn' href='/portal/settings/plan'>Fund with Bitcoin</a>"
           : "<button type='button' class='wz-btn' disabled aria-describedby='wzOnchainSoon'>Fund with Bitcoin</button> <span id='wzOnchainSoon' class='wz-muted'>Coming soon</span>";
+        var buys = callsForCSats(1000, FUND_EXAMPLE_CLASS, { models: w.models || [], btcUsd: w.btcUsd || null });
+        var testNote = testNetworkNote(w.network);
         return (fundingOptional(s.goal) ? "<p class='wz-note'>You chose your own machines: they're free, so you can skip this.</p>" : "") +
+          (buys !== null ? "<p class='wz-buys' data-testid='wz-buys'>1,000 cSats ≈ <strong>" + groupThousands(buys) + " calls</strong> on a 30B coder model (about 1,000 sats).</p>" : "") +
+          "<h3 class='wz-sub'>How to buy cSats</h3><ol class='wz-howto' data-testid='wz-fund-steps'>" + FUND_STEPS.map(function (f) { return "<li><strong>" + escapeHtml(f.title) + "</strong> " + escapeHtml(f.body) + "</li>"; }).join("") + "</ol>" +
+          (testNote ? "<p class='wz-note' data-testid='wz-test-network'>" + escapeHtml(testNote) + "</p>" : "") +
+          "<h3 class='wz-sub'>Reserve a machine</h3><p>To hold a machine for your jobs only, use Settings → <a href='/portal/settings/compute#sec-reservations'>Compute</a>. It's paid from the same cSats balance; unused time comes back when you cancel.</p>" +
+          // The estimator stays right before the buttons: the fund video's script focuses ".wz-estimator + .wz-actions".
           wzEstimator(ctx) + "<div class='wz-actions'><a class='wz-btn primary' href='/portal/settings/plan'>Fund with Lightning</a>" + chain + "</div>" + cap +
           "<p class='wz-muted'>Bots have a daily budget, so a bot never spends more than you allow.</p>";
       }
@@ -234,7 +247,7 @@ export const WELCOME_RENDER_SCRIPT = `
       return "<section class='wz-panel' data-video-anchor='welcome-" + step.id + "' data-step='" + step.id + "' aria-labelledby='wzTitle'>" +
         "<p class='wz-count'>Step " + (prog.index + 1) + " of " + prog.total + "</p>" +
         "<h2 id='wzTitle' tabindex='-1'>" + escapeHtml(step.title) + "</h2><p class='wz-body'>" + escapeHtml(step.body) + "</p>" +
-        wzVideo(step) + wzStepBody(step, ctx) + wzChecklist(step, ctx) + wzActions(step) +
+        wzVideo(step) + wzStepBody(step, ctx) + wzChecklist(step, ctx) + wzActions(step, ctx) +
         "<div class='wz-footer'>" + (prev ? "<button type='button' class='wz-btn' id='wzBack'>Back</button>" : "<span></span>") +
         "<div class='wz-footer-right'>" + skip + "<button type='button' class='wz-btn primary' id='wzNext'>" + (next ? "Next" : "Finish") + "</button></div></div></section>";
     }
@@ -344,7 +357,7 @@ export function welcomeScript(): string {
     ${CLIENT_ESCAPE_JS}
     ${ONBOARDING_BROWSER_LIB}
     ${WELCOME_RENDER_SCRIPT}
-    var wzCtx = { state: emptyOnboardingState(Date.now()), signals: { machines: null, machinesOnline: null, balanceCSats: null, apiKeys: null, github: null, firstTask: null, hostApproved: null, hostRequested: null, newAccount: null, localModels: null, cliInstalled: null }, origin: location.origin, wallet: null, onchain: null, calls: 50, classId: "35b", installKey: "" };
+    var wzCtx = { state: emptyOnboardingState(Date.now()), signals: { machines: null, machinesOnline: null, balanceCSats: null, apiKeys: null, github: null, firstTask: null, hostApproved: null, hostRequested: null, newAccount: null, localModels: null, cliInstalled: null }, origin: location.origin, wallet: null, onchain: null, paths: null, calls: 50, classId: "35b", installKey: "" };
     var wzPoll = null;
     async function wzSave(patch) {
       try {
@@ -363,6 +376,8 @@ export function welcomeScript(): string {
     async function wzLoadWallet() {
       try { wzCtx.wallet = await api("/portal/api/wallet/overview", { method: "GET", headers: {} }); } catch (e) { wzCtx.wallet = null; }
       try { var oc = await api("/portal/api/wallet/onchain", { method: "GET", headers: {} }); wzCtx.onchain = oc && oc.enabled === true; } catch (e) { wzCtx.onchain = false; }
+      // Direct-payment buttons (reservations paid host-to-buyer) show only while that path is on.
+      try { var pp = await api("/portal/api/payments/paths", { method: "GET", headers: {} }); wzCtx.paths = { prepaid: pp.prepaid !== false, directReservations: pp.directReservations === true, nwc: pp.nwc === true }; } catch (e) { wzCtx.paths = null; }
     }
     function wzRender(focusTitle) {
       var prog = progressFor(wzCtx.state, wzCtx.signals, "web");

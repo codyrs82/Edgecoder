@@ -18,7 +18,7 @@ Getting started.
 3. **Set up this computer:** the desktop app bundles the agent and Ollama and suggests a model for your memory and GPU.
 4. **Add your other machines:** the desktop app on Mac and Windows; on Linux and GPU servers, an install key, SSH and one install command ([Run EdgeCoder on a cloud GPU or Linux server](/guide/cloud-gpu-server)). Allow Local Network access on a Mac.
 5. **Choose models and where they run:** Auto (recommended), Local first, This computer only, My machines only, or a specific model.
-6. **Fund your account:** estimate your cost from live prices, then Buy cSats with Lightning. Skip it if you only use your own machines.
+6. **Fund your account:** see what 1,000 cSats buys, then Buy cSats with Lightning ([Buy cSats](/guide/buy-csats)). Reservations come out of the same balance. Skip it if you only use your own machines.
 7. **Connect your tools:** GitHub, the hosted API, editors on `localhost:4304/v1`, and `edgecoder code` with `/remote`.
 8. **Try it:** a first task, with where it ran and what it cost.
 9. **Host for the network:** by request, approved by an admin.

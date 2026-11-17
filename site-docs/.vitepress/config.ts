@@ -27,6 +27,7 @@ export default withMermaid(defineConfig({
           { text: "Welcome", link: "/" },
           { text: "Getting Started", link: "/guide/getting-started" },
           { text: "Run on a Cloud GPU or Linux Server", link: "/guide/cloud-gpu-server" },
+          { text: "Buy cSats (pay for network compute)", link: "/guide/buy-csats" },
           { text: "System Overview and Benefits", link: "/guide/system-overview-benefits" },
           { text: "How EdgeCoder Works", link: "/guide/how-edgecoder-works" },
           { text: "IDE Integration (VS Code, Cursor, Windsurf)", link: "/guide/ide-integration" },

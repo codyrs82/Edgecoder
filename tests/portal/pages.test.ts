@@ -112,6 +112,16 @@ describe("portal pages module (#16)", () => {
     expect(plan).toContain("kept by EdgeCoder");
     expect(plan).not.toMatch(/paid to the hosts that run coordinators/);
     expect(plan).toContain("prefers-reduced-motion: reduce");
+    // Buying help for a first-time buyer: no wallet yet, what the amount buys, and expiry explained.
+    expect(plan).toContain("<strong>No Lightning wallet?</strong> Any Lightning wallet works");
+    expect(plan).toContain('href="https://codyrs82.github.io/Edgecoder/guide/buy-csats"');
+    expect(plan).toContain('id="bdCalls"');
+    expect(plan).toContain("calls on a 30B coder model.");
+    expect(plan).toContain("function callsForCSats(");
+    expect(plan).toContain('if it runs out, nothing is charged: just make a new one.');
+    expect(plan).toContain('id="invoiceTtl"');
+    expect(plan).toContain("Waiting for payment…");
+    expect(plan).toContain("Payment received");
 
     // Install agent: no inline handlers, and a malformed token falls back to the placeholder.
     const install = (await app.inject({ url: "/portal/settings/install?token=%3Cb%3E", headers: { "user-agent": "Macintosh" } })).body;

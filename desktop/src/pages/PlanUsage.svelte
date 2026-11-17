@@ -14,6 +14,7 @@
     type ComputeOverview, type WalletOverview, type PayoutDestinationView, type WalletSendRequest, type OnchainFunding, type OnchainPolicyView,
   } from "../lib/api";
   import { scrollRegion } from "../lib/scroll-region";
+  import { callsForCSats, FUND_EXAMPLE_CLASS, INSTALL_LINKS, testNetworkNote } from "../lib/onboarding";
   import { addressQr, invoiceQr, QR_DARK, QR_LIGHT, QR_QUIET } from "../lib/qr";
   import { countdown, fmtMsat, fmtNum, fmtSats, fmtUsd, networkInfo, pct, purchasePreview, reasonText } from "../lib/wallet-format";
 
@@ -73,6 +74,8 @@
   let netFeeBps = $derived(wallet?.fees.networkFeeBps ?? 500);
   let valid = $derived(Number.isInteger(amount) && amount >= 100 && amount <= 1_000_000);
   let previewed = $derived(purchasePreview(valid ? amount : 0, feeBps));
+  // What the amount buys on a 30B coder, from live network prices (hidden without prices).
+  let buysCalls = $derived(valid ? callsForCSats(previewed.get, FUND_EXAMPLE_CLASS, { models: local?.models ?? [], btcUsd }) : null);
   let balance = $derived(local?.connected && local.account ? local.account.cSats : wallet?.cSats ?? null);
   let earned = $derived(local?.account?.earnedSats ?? wallet?.earnedSats ?? null);
   let pb = $derived(wallet?.payouts?.balance ?? null);
@@ -347,6 +350,7 @@
           {/if}
         {:else if step === "amount"}
           <p class="wl-faint">Pay from any Lightning wallet. Your cSats arrive the moment the payment lands.</p>
+          <p class="wl-faint" data-testid="no-wallet-help"><strong>No Lightning wallet?</strong> Any Lightning wallet works: for example Cash App, Strike, Wallet of Satoshi, Phoenix, or an exchange that can send over Lightning. <button type="button" class="wl-link" onclick={() => openUrl(INSTALL_LINKS.fundGuide)}>How to buy cSats</button></p>
           <div class="wl-presets" role="radiogroup" aria-label="Amount in sats">
             {#each [...PRESETS, "custom" as const] as p, i}
               <button id="wallet-preset-{i}" type="button" role="radio" aria-checked={preset === p} tabindex={preset === p ? 0 : -1}
@@ -365,11 +369,12 @@
             <div class="get"><dt>You get</dt><dd>{valid ? `${charged && !feeKnown ? "≈ " : ""}${fmtSats(previewed.get)} cSats` : "–"}</dd></div>
           </dl>
           {#if !charged}<p class="wl-faint">No purchase fee: 1 sat buys 1 cSat.</p>{/if}
+          {#if buysCalls !== null}<p class="wl-faint" aria-live="polite" data-testid="buy-calls">About {fmtSats(buysCalls)} calls on a 30B coder model.</p>{/if}
           <button class="primary wl-wide" disabled={!valid || creating || !local?.connected} onclick={createInvoice}>
             {creating ? "Preparing payment…" : valid ? `Buy ${fmtSats(amount)} cSats with Lightning` : "Enter 100 to 1,000,000 sats"}
           </button>
           {#if topupError}<p class="sp-err" role="alert">{topupError}</p>{/if}
-          {#if net.test && wallet}<p class="wl-test"><TriangleAlert size={14} /> This coordinator runs on {net.short}. Pay with a {net.short} wallet; these sats have no value.</p>{/if}
+          {#if net.test && wallet}<p class="wl-test"><TriangleAlert size={14} /> This coordinator runs on {net.short}. Pay with a {net.short} wallet; these sats have no value.{wallet.network === "signet" ? ` ${testNetworkNote(wallet.network)}` : ""}</p>{/if}
         {:else if step === "invoice" && invoice}
           <h2 class="wl-h" id="wl-funds-title">Scan to pay <span class="wl-pill">{networkInfo(invoice.network).test ? `${networkInfo(invoice.network).short} · test sats` : "Lightning · mainnet"}</span></h2>
           <p class="wl-faint">Pay {fmtSats(invoice.amountSats)} sats{fmtUsd(invoice.amountSats, btcUsd) ? ` (${fmtUsd(invoice.amountSats, btcUsd)})` : ""}. You get {fmtNum(invoice.cSats, 3)} cSats{invoice.feeSats > 0 ? ` after the ${fmtSats(invoice.feeSats)} sat purchase fee.` : "; there is no purchase fee."}</p>
@@ -392,6 +397,7 @@
             <span class="grow">Waiting for payment…</span>
             <span class="wl-count">{countdown(expiresAt - now)}</span>
           </div>
+          <p class="wl-faint">Your balance updates by itself a few seconds after you pay. The code works for {Math.max(1, Math.round(invoice.expiresInSeconds / 60))} minutes; if it runs out, nothing is charged: just make a new one.</p>
           <button class="ghost small" onclick={backToAmount}>Choose another amount</button>
         {:else if step === "paid" && invoice}
           <div class="wl-done" role="status">
@@ -624,6 +630,7 @@
   .wl-amount .unit { font-size: 15px; font-weight: 600; color: var(--text-secondary); }
   .wl-sub { color: var(--text-secondary); font-size: 12.5px; }
   .wl-faint { color: var(--text-secondary); font-size: 12.5px; line-height: 1.5; margin: 0; }
+  .wl-link { border: none; background: none; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-decoration: underline; height: auto; }
   .wl-lead { margin-top: -12px; }
   .wl-mini { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 10px 0 12px; }
   .wl-mini > div { border: 0.5px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--bg-base); }

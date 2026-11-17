@@ -95,6 +95,18 @@ export interface StepAction {
   desktop?: string;
   web?: string;
   primary?: boolean;
+  /**
+   * Shown only while the coordinator has this payment path on (GET /portal/api/payments/paths,
+   * PAYMENTS_DIRECT_RESERVATIONS / PAYMENTS_NWC). Hidden while the paths are unknown.
+   */
+  needs?: "directReservations" | "nwc";
+}
+
+/** Which payment paths the coordinator has on (the payments/paths route); null: not known yet. */
+export interface PaymentPathFlags {
+  prepaid?: boolean;
+  directReservations?: boolean;
+  nwc?: boolean;
 }
 
 export interface StepVideo {
@@ -202,7 +214,22 @@ export const INSTALL_LINKS = {
   gettingStartedDoc: "https://github.com/codyrs82/Edgecoder/blob/main/docs/getting-started.md",
   // The docs site (site-docs/guide/cloud-gpu-server.md); GitHub Pages redirects it to docs.edgecoder.io.
   serverGuide: "https://codyrs82.github.io/Edgecoder/guide/cloud-gpu-server",
+  fundGuide: "https://codyrs82.github.io/Edgecoder/guide/buy-csats",
 };
+
+/**
+ * "Fund your account": how to buy cSats, in order. No word "invoice": the Wallet page calls it a
+ * payment code. The wallet list is examples only (no links, no endorsement).
+ */
+export const FUND_STEPS: Array<{ title: string; body: string }> = [
+  { title: "Choose an amount.", body: "Open Settings → Wallet and pick 5,000, 20,000 or 100,000 sats, or type your own (100 to 1,000,000). The page shows about how many calls it buys." },
+  { title: "Pay with Lightning.", body: "Scan the QR code with your wallet, or press Copy payment code and paste it into your wallet. A code works for 15 minutes; if it runs out, nothing is charged: just make a new one." },
+  { title: "No bitcoin yet?", body: "Any Lightning wallet works. For example Cash App, Strike, Wallet of Satoshi, Phoenix, or an exchange that can send over Lightning: buy a small amount of bitcoin there, then pay from it." },
+  { title: "Wait a few seconds.", body: "Your balance updates by itself once the payment lands, and “Your balance is above zero” below ticks." },
+];
+
+/** The model class the "what 1,000 cSats buys" line uses (a 30B coder). */
+export const FUND_EXAMPLE_CLASS = "35b";
 
 /** "Add your other machines" on a Linux or cloud GPU server: the SSH line and the vLLM switch. */
 export const SERVER_SETUP = {
@@ -289,12 +316,14 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
   {
     id: "fund",
     title: "Fund your account",
-    body: "Your own machines are free. For on-demand calls, buy cSats: prepaid credit spent per token (1 cSat = 1 sat). To reserve a host for longer, pay the host directly from your own wallet.",
+    body: "Your own machines are free. Calls on the network use cSats: prepaid credit, spent per token (1 cSat = 1 sat). Reserving a machine comes out of the same balance.",
     checklist: [{ id: "funded", label: "Your balance is above zero" }],
     actions: [
       { id: "buy", label: "Buy cSats for on-demand compute", desktop: "settings:plan", web: "/portal/settings/plan", primary: true },
-      { id: "direct", label: "Connect a wallet to pay hosts directly for reservations", desktop: "settings:plan", web: "/portal/settings/plan#reservations-direct" },
+      { id: "reserve", label: "Reserve a machine", desktop: "settings:compute", web: "/portal/settings/compute#sec-reservations" },
+      { id: "direct", label: "Connect a wallet to pay hosts directly for reservations", desktop: "settings:plan", web: "/portal/settings/plan#reservations-direct", needs: "directReservations" },
       { id: "payout", label: "Hosting? Set your payout addresses", desktop: "settings:plan", web: "/portal/settings/plan#payout-addresses" },
+      { id: "fund-guide", label: "Guide: buy cSats", desktop: "@fundGuide", web: "@fundGuide" },
     ],
     skip: "Skip: I'll use my own machines",
     goals: [],
@@ -491,6 +520,32 @@ export function shouldShowOnboarding(state: OnboardingState | null, signals: Onb
   if (state && state.firstSeenAtMs !== null) return true;
   if (signals.newAccount === true) return true;
   return (signals.machines ?? 0) === 0 && (signals.balanceCSats ?? 0) <= 0;
+}
+
+/** A step's buttons on a surface, without those whose payment path is off (or not known yet). */
+export function actionsFor(step: OnboardingStep, surface: Surface, paths: PaymentPathFlags | null): StepAction[] {
+  return step.actions.filter((a) => !!(surface === "web" ? a.web : a.desktop) && (!a.needs || (!!paths && paths[a.needs] === true)));
+}
+
+/** Whether a Bitcoin network name is a test network: true / false, or null when not known. */
+export function isTestNetwork(network: string | null | undefined): boolean | null {
+  if (!network) return null;
+  return !(network === "bitcoin" || network === "mainnet");
+}
+
+/** The fund step's test-network note, or null on mainnet (or while the network is not known). */
+export function testNetworkNote(network: string | null | undefined): string | null {
+  if (isTestNetwork(network) !== true) return null;
+  if (network === "signet") return "Test network: use free test sats from faucet.mutinynet.com. Paste the payment code there; real bitcoin wallets can't pay it.";
+  return "Test network (" + network + "): pay with test sats. They have no value.";
+}
+
+/** About how many typical calls an amount of cSats buys on a model class; null without prices. */
+export function callsForCSats(cSats: number, classId: string, live: { models?: Array<{ model: string; cSatsPerMTokens?: { input: number; output: number } }> | null; btcUsd?: number | null }): number | null {
+  const p = classPrice(classId, live);
+  if (!p) return null;
+  const per = cSatsPerCall(p);
+  return per > 0 ? Math.floor(Math.max(0, cSats) / per) : null;
 }
 
 /** The suggested Skip for the fund step: people who use only their own machines pay nothing. */
