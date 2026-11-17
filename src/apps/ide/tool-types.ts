@@ -96,10 +96,26 @@ export interface PlanStep {
 // SSE event protocol (discriminated union on `type`)
 // ---------------------------------------------------------------------------
 
+/**
+ * What Auto decided for a model call (RouteSummary in src/inference-api/auto-route.ts): the label
+ * ("This computer · qwen3-coder:30b"), the reason with the step's complexity, why it skipped the
+ * obvious free model, and whether a smaller free model ran as a fallback.
+ */
+export interface StatusRoute {
+  label: string;
+  placement: "reserved" | "local" | "mine" | "network";
+  model: string;
+  reason: string;
+  why?: string;
+  complexity?: "low" | "medium" | "high" | "very_high";
+  fallback?: boolean;
+}
+
 export type IdeStreamEvent =
   | { type: "text"; content: string }
   /** `note`: why compute went where it did, for the run details ("Auto → … (tools needed; …)"). */
-  | { type: "status"; message: string; note?: string }
+  /** `route`: what Auto decided for the model call that follows (where, why, the step's complexity). */
+  | { type: "status"; message: string; note?: string; route?: StatusRoute }
   | {
       type: "tool_call";
       id: string;
@@ -131,6 +147,8 @@ export type IdeStreamEvent =
       type: "usage";
       cSats: number;
       where: string;
+      /** Auto: why it ran there ("… — high complexity, needs ≥30B; this computer has ≤14B"). */
+      reason?: string;
       /** The model that answered, and where it ran (machine label, hardware, region, timings and tokens). */
       model?: string;
       /** Frontier calls on the user's own key: estimated USD (billed by the provider, not in cSats). */

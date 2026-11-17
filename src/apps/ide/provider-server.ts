@@ -45,7 +45,7 @@ import { BotManager, agentBotRunner, botBranchPrefix, botComputeChat, botWorkRoo
 import { autoBackend, localBackend, networkBackend } from "../../inference-api/backends.js";
 import { registerCompatRoutes, respondWith } from "../../inference-api/routes.js";
 import type { RoutingHints } from "../../inference-api/job-descriptor.js";
-import { AUTO_MODEL_ID, isUnpinnedModel, routeInputsFrom, routeLabel, type ComputePolicy, type PlanOptions, type Route, type RouteInputs } from "../../inference-api/auto-route.js";
+import { AUTO_MODEL_ID, AUTO_POLICIES, autoPolicyFromEnv, isUnpinnedModel, routeInputsFrom, routeLabel, routeSummary, type ComputePolicy, type PlanOptions, type Route, type RouteInputs } from "../../inference-api/auto-route.js";
 import { ChatBackendError, type ChatBackend } from "../../inference-api/types.js";
 import { checkProject } from "./diagnostics.js";
 import { isProjectTrusted, setProjectTrusted } from "./workspace-trust.js";
@@ -262,17 +262,23 @@ function runRoute(r: Route, source = "localhost:4304"): ChatBackend {
  * network leg goes to the coordinator as model "auto", so its best-fit routing picks the model,
  * class and machine (your own machines are never picked there). The client-side network routes stay
  * behind it for an older coordinator. Chat and Code view Auto, `edgecoder code` sessions, bots
- * (Local first / Auto) and connections all run here.
+ * (Local first / Auto) and connections all run here. Without a policy it is EDGECODER_AUTO_POLICY
+ * (default "auto"; "mine_only" keeps chat and API Auto on free machines). Each step's complexity
+ * sizes the free places (auto-route.ts); `hysteresis` "session" is for a backend many clients share.
  */
-const autoHere = (onRoute?: (r: Route) => void, source?: string, policy?: ComputePolicy, plan?: () => PlanOptions) =>
+const autoHere = (onRoute?: (r: Route) => void, source?: string, policy?: ComputePolicy, plan?: () => PlanOptions, hysteresis?: "backend" | "session") =>
   autoBackend({
     inputs: routeInputsHere,
     run: (r) => runRoute(r, source),
     onRoute,
-    policy,
+    policy: policy ?? autoPolicyFromEnv(),
     plan,
+    ...(hysteresis ? { hysteresis } : {}),
     ...(networkDeps ? { networkBestFit: (routing: RoutingHints) => networkBackend(networkDeps!, { model: AUTO_MODEL_ID, computeClass: "any", routing, source: source ?? "localhost:4304" }) } : {}),
   });
+
+/** Auto for API clients (OpenAI and Anthropic routes): one backend, so a client's session id keeps its complexity window. */
+const apiAuto = autoHere(undefined, undefined, undefined, undefined, "session");
 
 app.get("/v1/models", async () => {
   // Providers, this machine's Ollama models, and models agents on the network have
@@ -312,7 +318,7 @@ app.post("/v1/chat/completions", async (req, reply) => {
   const body = chatRequestSchema.parse(req.body);
   const requestId = `chatcmpl-${randomUUID()}`;
   // "auto": the cheapest place that fits this request (tools and all, so through the shared writer).
-  if (body.model === AUTO_MODEL_ID) return respondWith(req, reply, "openai", autoHere(), AUTO_MODEL_ID);
+  if (body.model === AUTO_MODEL_ID) return respondWith(req, reply, "openai", apiAuto, AUTO_MODEL_ID);
   // "frontier/<provider>/<model>": the signed-in account's own key, straight to the provider.
   if (isFrontierModelId(body.model)) {
     const r = await frontier.resolve(body.model, { sessionKey: "api" });
@@ -1024,7 +1030,7 @@ app.post("/v1/ide/compute/intent", async (req, reply) => {
 const connections = new ConnectionManager({
   ollamaHost: process.env.OLLAMA_HOST || "http://127.0.0.1:11434",
   network: networkDeps ?? undefined,
-  auto: (source) => autoHere(undefined, source),
+  auto: (source) => autoHere(undefined, source, undefined, undefined, "session"),
   log: (msg, extra) => app.log.warn({ extra }, msg),
 });
 app.addHook("onReady", async () => {
@@ -1154,7 +1160,7 @@ registerCompatRoutes(
     models: async () => [],
     resolve: async (_ctx, model) => {
       // No model (or "default"): Auto, the cheapest free place that fits, else the network's best fit.
-      if (!model || isUnpinnedModel(model)) return { backend: autoHere(), model: AUTO_MODEL_ID };
+      if (!model || isUnpinnedModel(model)) return { backend: apiAuto, model: AUTO_MODEL_ID };
       if (isFrontierModelId(model)) {
         const r = await frontier.resolve(model, { sessionKey: "api" });
         return r.ok ? { backend: r.backend, model } : { status: r.status, error: r.message };
@@ -1204,6 +1210,8 @@ const ideChatSchema = z.object({
       target: z.enum(["local", "mine", "network", "reserved", "auto"]),
       computeClass: z.enum(["any", "cpu", "apple", "gpu", "gpu.dc"]).optional(),
       reservationId: z.string().max(100).optional(),
+      /** Auto only: where it may run (default EDGECODER_AUTO_POLICY, else "auto"); "mine_only" is free machines only, never the network. */
+      policy: z.enum(AUTO_POLICIES).optional(),
     })
     .optional(),
 });
@@ -1226,11 +1234,14 @@ function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: str
     let where = "Auto";
     // The model the route ran ("qwen3.5:9b"), for the footer; the coordinator's best-fit picks its own.
     let routeModel: string | undefined;
+    let reason: string | undefined;
     const auto = autoHere((r) => {
       where = routeLabel(r);
       routeModel = !r.bestFit && r.model && r.model !== AUTO_MODEL_ID ? r.model : undefined;
-      sendEvent({ type: "status", message: `Auto: ${r.reason}` });
-    }, source);
+      reason = r.why ? `${r.reason} (${r.why})` : r.reason;
+      // `route`: where this step runs and why, with its complexity (the UI's "Running on" and per-step lines).
+      sendEvent({ type: "status", message: `Auto: ${reason}`, route: routeSummary(r) });
+    }, source, compute.policy);
     // "Use my frontier key for Auto" (off by default): high-complexity jobs may go to the default lead.
     const backend = frontierAuto
       ? autoWithFrontier({
@@ -1243,12 +1254,13 @@ function chatFnFor(compute: z.infer<typeof ideChatSchema>["compute"], model: str
           onPick: (label) => {
             where = label;
             routeModel = undefined;
+            reason = `${label} (high complexity, your frontier key)`;
             sendEvent({ type: "status", message: `Auto: ${label} (high complexity)` });
           },
         })
       : auto;
     // A frontier call's served line carries its estimated USD (the user's own key, not cSats).
-    return backendChat(backend, (cSats, served) => sendEvent({ type: "usage", cSats, where, ...(routeModel ? { model: routeModel } : {}), ...(served ? { served } : {}), ...(served?.usd !== undefined ? { usd: served.usd } : {}) }), signal);
+    return backendChat(backend, (cSats, served) => sendEvent({ type: "usage", cSats, where, ...(reason ? { reason } : {}), ...(routeModel ? { model: routeModel } : {}), ...(served ? { served } : {}), ...(served?.usd !== undefined ? { usd: served.usd } : {}) }), signal);
   }
   if (compute && compute.target !== "local" && !networkDeps && hosted) {
     // No enrolled agent here, but an API key: the network through the hosted endpoint.

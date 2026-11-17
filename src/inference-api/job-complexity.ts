@@ -273,6 +273,36 @@ export function estimateComplexity(input: ComplexityInput, hint?: unknown, weigh
   return { score, level: levelOf(score), estimated, floor, ...(hinted !== undefined ? { hinted } : {}), signals };
 }
 
+/** Signals that measure how deep an agent loop is rather than what the task is. */
+const STEP_SIGNALS: ReadonlySet<keyof ComplexityWeights> = new Set(["agentSteps", "turns"]);
+
+/**
+ * The complexity Auto's local-first sizing uses (src/inference-api/auto-route.ts): the same
+ * estimate, but the task's content decides the level. The floor that an agent loop several steps
+ * in keeps (COMPLEX_FLOOR from step count alone) doesn't apply, and step depth (agent steps,
+ * turns) adds its small weight but never lifts a step into high on its own: a simple task stays
+ * low or medium however many steps it takes, so it stays on a free model. Content that is clearly
+ * complex (many files, a diff across files, reasoning over a lot of code) keeps the floor. A
+ * client's hint still counts. Pure: derived from `c` without measuring again. The coordinator's
+ * best fit is unchanged (it uses estimateComplexity).
+ */
+export function contentComplexity(c: Complexity): Pick<Complexity, "level" | "score"> {
+  const value = (n: keyof ComplexityWeights) => c.signals.find((s) => s.name === n)?.value ?? 0;
+  const sum = (steps: boolean) => c.signals.filter((s) => STEP_SIGNALS.has(s.name) === steps).reduce((n, s) => n + s.contribution, 0);
+  const clearlyComplex = value("files") >= 0.6 || (value("reasoning") >= 0.66 && value("code") >= 0.5) || (value("diff") > 0 && value("files") >= 0.4);
+  const floor = clearlyComplex ? COMPLEX_FLOOR : 0;
+  let score: number;
+  if (c.hinted !== undefined) score = Math.max(c.hinted, floor);
+  else {
+    const content = clamp01(sum(false));
+    const withSteps = clamp01(content + sum(true));
+    // Step depth alone never crosses into high.
+    score = Math.max(content < 0.5 ? Math.min(withSteps, 0.49) : withSteps, floor);
+  }
+  score = round3(score);
+  return { score, level: levelOf(score) };
+}
+
 /** "high (0.68): 4 files, refactor, cross-file" for explanations. */
 export function describeComplexity(c: Complexity, maxSignals = 3): string {
   const top = c.signals.filter((s) => s.contribution > 0).slice(0, maxSignals).map((s) => s.detail);

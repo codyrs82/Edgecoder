@@ -100,7 +100,7 @@ export function registerActivityRoutes(app: FastifyInstance, deps: ActivityRoute
 // Running work kept by the provider's other stores, as activity items
 // ---------------------------------------------------------------------------
 
-interface CallLike { cSats: number; where?: string; model?: string; served?: ActivityItem["calls"][number]["served"] }
+interface CallLike { cSats: number; where?: string; reason?: string; model?: string; served?: ActivityItem["calls"][number]["served"] }
 
 /** A running session turn (`edgecoder code` and other session clients). */
 export function sessionActivity(s: { id: string; title: string; model: string; origin: string; updatedAt: number }, running: { turnId: string; text: string; events: Array<Record<string, unknown> & { type: string }> } | null): ActivityItem | null {
@@ -109,7 +109,7 @@ export function sessionActivity(s: { id: string; title: string; model: string; o
   const steps: string[] = [];
   let progress: string | undefined;
   for (const e of running.events ?? []) {
-    if (e.type === "usage") calls.push({ cSats: Number(e.cSats) || 0, ...(typeof e.where === "string" ? { where: e.where } : {}), ...(typeof e.model === "string" ? { model: e.model } : {}), ...(e.served ? { served: e.served as CallLike["served"] } : {}) });
+    if (e.type === "usage") calls.push({ cSats: Number(e.cSats) || 0, ...(typeof e.where === "string" ? { where: e.where } : {}), ...(typeof e.reason === "string" ? { reason: e.reason } : {}), ...(typeof e.model === "string" ? { model: e.model } : {}), ...(e.served ? { served: e.served as CallLike["served"] } : {}) });
     else if (e.type === "tool_call" && typeof e.tool === "string") steps.push(firstLine(`${e.tool}`, 120));
     else if (e.type === "status" && typeof e.message === "string") progress = firstLine(e.message, 160);
   }
@@ -158,7 +158,7 @@ export function tentacleActivity(t: { id: string; task: string; status: string; 
     startedAtMs: t.startedAt ?? t.createdAt,
     status: "running",
     cSats: t.cSats,
-    calls: (t.calls ?? []).map((c) => ({ cSats: c.cSats, ...(c.where ? { where: c.where } : {}), ...(c.model ? { model: c.model } : {}), ...(c.served ? { served: c.served } : {}) })),
+    calls: (t.calls ?? []).map((c) => ({ cSats: c.cSats, ...(c.where ? { where: c.where } : {}), ...(c.reason ? { reason: c.reason } : {}), ...(c.model ? { model: c.model } : {}), ...(c.served ? { served: c.served } : {}) })),
     steps: [],
     progress: t.status === "queued" ? "Waiting for a free helper slot" : firstLine(t.progress, 160),
   };

@@ -572,6 +572,12 @@ Amounts must be numbers of 0 or more. A value the reader's own limit rejects (no
 | `IDE_PROVIDER_URL` | `http://127.0.0.1:4304` | Where `edgecoder code` looks for a running provider before starting one in its own process. |
 | `EDGECODER_AUTO_MIN_CHAT_B` | `7` | Auto's quality floor for questions and chat: the smallest model (billions of parameters) Auto picks. Auto stays the cheapest place among models that meet it. Also read by the hosted endpoint's `auto`. |
 | `EDGECODER_AUTO_MIN_CODING_B` | `7` | The same floor for agent work (tools or a long context). |
+| `EDGECODER_AUTO_MEDIUM_MIN_B` | `14` | Complexity-aware Auto: the smallest model (billions of parameters, total for mixture-of-experts) a free place (this computer, your machines, a reservation) must have for a medium-complexity step (the coordinator's complexity estimate, with the level taken from the task's content: how many steps an agent turn has taken never makes a step high on its own). When no free place has one, the step goes to the network's best fit, else to the biggest free model, marked as a fallback with the reason. `0` turns the level off. |
+| `EDGECODER_AUTO_MEDIUM_CODER_MIN_B` | `7` | A medium-complexity agent step (tools) may instead run on a coder model this big. |
+| `EDGECODER_AUTO_HIGH_MIN_B` | `30` | The same for a high-complexity step. |
+| `EDGECODER_AUTO_VERY_HIGH_MIN_B` | `30` | The same for a very-high-complexity step, which also needs a coder or reasoning ("thinking") model when the catalog knows the model. |
+| `EDGECODER_AUTO_COMPLEXITY_WINDOW` | `3` | Hysteresis: Auto counts each step as the hardest of the session's last this many steps, so an agent turn doesn't flap between this computer and the network. `1` turns it off. |
+| `EDGECODER_AUTO_POLICY` | `auto` | Where chat, Code, `edgecoder code` and API Auto may run: `auto`, `local_first`, `local_only` (this computer only) or `mine_only` (free machines only: this computer and your machines, never the network; a hard step runs on the biggest free model). A chat request's `compute.policy` overrides it; bots keep their own compute policy. |
 
 ## Production alerting (portal and coordinator)
 
