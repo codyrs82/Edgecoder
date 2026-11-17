@@ -287,6 +287,8 @@ struct WalletOverview: Decodable {
     let rateStale: Bool?
     let fees: Fees
     let topup: Topup
+    /// The coordinator's early-access caps (LAUNCH_MODE=invite), null when open.
+    let launch: LaunchCaps?
     let classes: [String: ClassPrice]
     let models: [ModelPrice]
     let payouts: Payouts?

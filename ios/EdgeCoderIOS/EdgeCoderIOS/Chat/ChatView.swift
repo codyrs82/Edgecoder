@@ -13,6 +13,10 @@ struct ChatView: View {
     @State private var showHistory = false
     @State private var showSettings = false
     @State private var showModelPicker = false
+    @State private var streamStatus = ""
+    @EnvironmentObject private var purchasePolicy: PurchasePolicy
+    @EnvironmentObject private var networkStatus: NetworkStatusStore
+    @Environment(\.openURL) private var openURL
 
     @FocusState private var inputFocused: Bool
 
@@ -30,15 +34,21 @@ struct ChatView: View {
                         }
 
                         ForEach(conversation.messages) { msg in
-                            MessageBubble(message: msg)
-                                .id(msg.id)
+                            MessageBubble(
+                                message: msg,
+                                buyAction: purchaseAction,
+                                retryAction: msg.failure != nil || msg.cutShort == true ? { retry(msg) } : nil,
+                                signedInLine: signedInLine
+                            )
+                            .id(msg.id)
                         }
 
-                        if isStreaming && !streamingContent.isEmpty {
+                        if isStreaming {
                             MessageBubble(
                                 message: ChatMessage(role: .assistant, content: streamingContent),
                                 streaming: true,
-                                progress: streamProgress
+                                progress: streamProgress,
+                                statusText: streamStatus
                             )
                             .id("streaming")
                         }
@@ -126,6 +136,7 @@ struct ChatView: View {
             Spacer()
 
             HStack(spacing: 16) {
+                NetworkBadge(network: networkStatus.network, compact: true)
                 Button {
                     newChat()
                 } label: {
@@ -164,7 +175,9 @@ struct ChatView: View {
             Text("Start a conversation")
                 .font(.headline)
                 .foregroundColor(Theme.textSecondary)
-            Text("Messages are routed through your local model, nearby peers, or the swarm network.")
+            Text(sessionStore.isAuthenticated
+                 ? "Replies run on your own machines first (free), then on the EdgeCoder network."
+                 : "Sign in to chat on your machines and the EdgeCoder network. Without an account, a model on this iPhone or a nearby device answers.")
                 .font(.caption)
                 .foregroundColor(Theme.textMuted)
                 .multilineTextAlignment(.center)
@@ -217,40 +230,159 @@ struct ChatView: View {
 
     // MARK: - Actions
 
-    private func sendMessage() {
-        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// Signed in, and not a model on this phone or a nearby device: the web chat API (Auto: your
+    /// own machines first, then the network), as the web and desktop chats do.
+    private var usesPortal: Bool {
+        guard sessionStore.isAuthenticated else { return false }
+        guard let m = conversation.selectedModel else { return true }
+        if chatRouter.modelManager.installedModels.contains(where: { $0.modelId == m }) { return false }
+        if chatRouter.bleMeshManager.discoveredPeers.contains(where: { $0.model == m }) { return false }
+        return true
+    }
+
+    private func sendMessage(retrying: String? = nil) {
+        let text = (retrying ?? inputText).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isStreaming else { return }
 
-        inputText = ""
-        conversation.addMessage(role: .user, content: text)
+        if retrying == nil { inputText = "" }
+        let isRetry = retrying != nil && conversation.messages.last(where: { $0.role == .user })?.content == text
+        if !isRetry { conversation.addMessage(role: .user, content: text) }
 
         isStreaming = true
         streamingContent = ""
         streamProgress = nil
+        streamStatus = ""
 
         Task {
-            let session = chatRouter.routeChatStreaming(
-                messages: conversation.messages,
-                requestedModel: conversation.selectedModel
-            )
-            // Update progress immediately with route info
-            streamProgress = session.getProgress()
-            do {
-                for try await chunk in session.tokens {
-                    streamingContent += chunk
-                    streamProgress = session.getProgress()
-                }
-                conversation.addMessage(role: .assistant, content: streamingContent)
-                conversationStore.save(conversation)
-                conversationStore.saveLastId(conversation.id, source: .chat)
-            } catch {
-                conversation.addMessage(role: .assistant, content: "Error: \(error.localizedDescription)")
-                conversationStore.save(conversation)
+            if usesPortal {
+                await sendViaPortal(text, resend: isRetry)
+            } else {
+                await sendOnDevice()
             }
+            conversationStore.save(conversation)
+            conversationStore.saveLastId(conversation.id, source: .chat)
             streamingContent = ""
             streamProgress = nil
+            streamStatus = ""
             isStreaming = false
         }
+    }
+
+    /// Local model, a nearby device, or the offline note (ChatRouter).
+    private func sendOnDevice() async {
+        let session = chatRouter.routeChatStreaming(
+            messages: conversation.messages,
+            requestedModel: conversation.selectedModel
+        )
+        streamProgress = session.getProgress()
+        do {
+            for try await chunk in session.tokens {
+                streamingContent += chunk
+                streamProgress = session.getProgress()
+            }
+            let p = session.getProgress()
+            let footer = p.routeLabel.isEmpty ? nil : [p.model.isEmpty ? nil : p.model, p.routeLabel, p.route == .local || p.route == .blePeer ? "free" : nil].compactMap { $0 }.joined(separator: " \u{00B7} ")
+            conversation.addMessage(role: .assistant, content: streamingContent, footer: footer)
+        } catch {
+            conversation.addMessage(role: .assistant, content: "", failure: ChatFailureInfo(message: error.localizedDescription, retryText: lastUserText))
+        }
+    }
+
+    /// The web chat API: the reply streams in, then its footer (cSats spent and where it ran), or
+    /// the shared failure line with Buy cSats / Retry (src/portal/pages/chat.ts).
+    private func sendViaPortal(_ text: String, resend: Bool) async {
+        let started = Date()
+        var failure: ChatFailureInfo?
+        var footer: String?
+        var gotDone = false
+        do {
+            let convId: String
+            if let id = conversation.portalConversationId {
+                convId = id
+            } else {
+                convId = try await PortalChatClient.shared.createConversation(title: String(text.prefix(60)))
+                conversation.portalConversationId = convId
+            }
+            let compute: PortalChatCompute = conversation.selectedModel.map { .network(model: $0) } ?? .auto
+            streamProgress = StreamProgress(route: .swarm, routeLabel: compute == .auto ? "your machines, then the network" : "network")
+            for try await event in PortalChatClient.shared.send(conversationId: convId, message: text, compute: compute, resend: resend) {
+                switch event {
+                case .content(let c):
+                    streamingContent += c
+                case .status(let s):
+                    if streamingContent.isEmpty { streamStatus = s }
+                case .warning(let w):
+                    streamStatus = w
+                case .error(let message, let code, let httpStatus):
+                    // Once text has arrived, an error finishes the reply (the web chat's rule).
+                    if streamingContent.isEmpty && failure == nil {
+                        failure = ChatFailureInfo(message: message, code: code, httpStatus: httpStatus, retryText: text)
+                    }
+                case .done(let cSatsSpent, let computeLabel, let calls):
+                    gotDone = true
+                    footer = ServedFormatter.servedLine(calls) ?? ChatFailures.replyFooter(cSatsSpent: cSatsSpent, compute: computeLabel)
+                    if (cSatsSpent ?? 0) > 0 { NotificationCenter.default.post(name: .edgeCoderBalanceChanged, object: nil) }
+                case .end:
+                    break
+                }
+                var p = streamProgress ?? StreamProgress()
+                p.tokenCount += event.isContent ? 1 : 0
+                p.elapsedMs = Int(Date().timeIntervalSince(started) * 1000)
+                streamProgress = p
+            }
+        } catch {
+            if streamingContent.isEmpty {
+                if (error as? APIClientError).map({ if case .serverError("not_authenticated") = $0 { return true } else { return false } }) == true {
+                    await sessionStore.refreshSession()
+                }
+                failure = ChatFailureInfo(message: Self.connectionMessage(error), retryText: text)
+            }
+        }
+        if let failure, streamingContent.isEmpty {
+            conversation.addMessage(role: .assistant, content: "", failure: failure)
+        } else if streamingContent.isEmpty {
+            conversation.addMessage(role: .assistant, content: "", failure: ChatFailureInfo(message: gotDone ? "The model returned an empty reply." : "No reply came back.", retryText: text))
+        } else {
+            let cut = !gotDone && ChatFailures.looksTruncated(streamingContent)
+            conversation.addMessage(role: .assistant, content: streamingContent, footer: footer, cutShort: cut ? true : nil)
+        }
+    }
+
+    /// A dropped connection in the web chat's words ("Load failed" and friends map to it).
+    static func connectionMessage(_ error: Error) -> String {
+        if let u = error as? URLError {
+            switch u.code {
+            case .timedOut: return "No response from EdgeCoder for 120 seconds."
+            case .notConnectedToInternet: return "You're offline."
+            default: return "The network connection was lost."
+            }
+        }
+        return error.localizedDescription
+    }
+
+    private var lastUserText: String? {
+        conversation.messages.last(where: { $0.role == .user })?.content
+    }
+
+    private func retry(_ message: ChatMessage) {
+        guard let text = message.failure?.retryText ?? lastUserText, !isStreaming else { return }
+        conversation.messages.removeAll { $0.id == message.id }
+        sendMessage(retrying: text)
+    }
+
+    /// Buy cSats under an out-of-cSats reply: only where the App Store rules allow (PurchasePolicy).
+    private var purchaseAction: (() -> Void)? {
+        if purchasePolicy.canLinkOut {
+            let url = purchasePolicy.webBuyURL
+            return { openURL(url) }
+        }
+        return nil
+    }
+
+    /// "Signed in as you@example.com · 12 cSats" under an out-of-cSats reply (which account is short).
+    private var signedInLine: String? {
+        guard let email = sessionStore.user?.email else { return nil }
+        return "Signed in as \(email)" + (networkStatus.cSats.map { " \u{00B7} " + ChatFailures.formatCSats($0) } ?? "")
     }
 
     private func newChat() {

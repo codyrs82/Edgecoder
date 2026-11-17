@@ -2,10 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>EdgeCoder uses Bluetooth to share your device's AI compute with nearby Mac nodes when internet is unavailable, enabling local AI task execution without a coordinator.</string>
-	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>EdgeCoder advertises as a Bluetooth peripheral to allow nearby devices to discover and route tasks.</string>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>io.edgecoder.ble-mesh</string>
+		<string>io.edgecoder.inference</string>
+		<string>io.edgecoder.ios.runtime</string>
+		<string>io.edgecoder.ios.heartbeat</string>
+	</array>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>
@@ -23,7 +26,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -37,26 +40,12 @@
 			</array>
 		</dict>
 	</array>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>bluetooth-central</string>
-		<string>bluetooth-peripheral</string>
-		<string>processing</string>
-		<string>fetch</string>
-	</array>
-	<key>BGTaskSchedulerPermittedIdentifiers</key>
-	<array>
-		<string>io.edgecoder.ble-mesh</string>
-		<string>io.edgecoder.inference</string>
-		<string>io.edgecoder.ios.runtime</string>
-		<string>io.edgecoder.ios.heartbeat</string>
-	</array>
 	<key>CFBundleVersion</key>
-	<string>8</string>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>EdgeCoderPurchaseMode</key>
+	<string>$(EDGECODER_PURCHASE_MODE)</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>EdgeCoder runs a local HTTP server and connects to mesh peers on your network for P2P task routing and execution.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
@@ -64,11 +53,24 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>EdgeCoder uses Bluetooth to share your device's AI compute with nearby Mac nodes when internet is unavailable, enabling local AI task execution without a coordinator.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>EdgeCoder advertises as a Bluetooth peripheral to allow nearby devices to discover and route tasks.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>EdgeCoder runs a local HTTP server and connects to mesh peers on your network for P2P task routing and execution.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
 		<false/>
 	</dict>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>fetch</string>
+		<string>processing</string>
+		<string>bluetooth-central</string>
+		<string>bluetooth-peripheral</string>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UISupportedInterfaceOrientations</key>
