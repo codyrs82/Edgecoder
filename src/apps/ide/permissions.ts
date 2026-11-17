@@ -8,7 +8,10 @@
  * Modes:
  *   ask         edits and commands ask (read-only commands never do)
  *   auto-edits  edits apply without asking (each turn's checkpoint keeps them undoable); commands ask
- *   auto        edits and commands apply without asking, except risky commands (riskOf)
+ *   auto        safe commands and edits apply; risky ones ask; dangerous ones are refused
+ *   plan        read-only tools only, until the user approves the agent's plan
+ *
+ * permission-policy.ts decides each call (decideToolCall); docs/permission-modes.md has the tables.
  *
  * Whatever the mode: pushes and pull requests ask, edits to protected paths (the git directory,
  * hooks, files tooling executes) ask, and the executor's own refusals still apply.
@@ -19,9 +22,12 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { classifyRelativePath, isWithin, parseArgv, realPathEscape } from "./tool-executor.js";
+import { isValidRule } from "./permission-policy.js";
 
-export type PermissionMode = "ask" | "auto-edits" | "auto";
-export const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "auto-edits", "auto"];
+export type PermissionMode = "ask" | "auto-edits" | "auto" | "plan";
+export const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "auto-edits", "auto", "plan"];
+/** The modes a plan can be approved into. */
+export const EXECUTION_MODES: readonly PermissionMode[] = ["ask", "auto-edits", "auto"];
 
 export function isPermissionMode(v: unknown): v is PermissionMode {
   return typeof v === "string" && (PERMISSION_MODES as readonly string[]).includes(v);
@@ -274,8 +280,10 @@ export function riskOf(command: unknown, root: string): string | null {
 // ---------------------------------------------------------------------------
 
 export interface ProjectPermissions {
-  /** Command names approved "always" (npm, make); never covers a risky command. */
+  /** Older "always" answers: command names (npm, make); never cover a risky command. */
   shell: string[];
+  /** "Always allow" rules (`npm test:*`, permission-policy.ts); never cover a refused or always-ask command. */
+  rules?: string[];
   /** Edits were approved "always": new sessions here start in auto-edits. */
   edits?: boolean;
 }
@@ -299,7 +307,8 @@ export class PermissionStore {
       const raw = JSON.parse(readFileSync(this.file, "utf8")) as Record<string, ProjectPermissions>;
       for (const [root, p] of Object.entries(raw ?? {})) {
         if (!p || typeof p !== "object") continue;
-        this.data[root] = { shell: Array.isArray(p.shell) ? p.shell.filter((s) => typeof s === "string" && /^[A-Za-z0-9._\-/]{1,64}$/.test(s)) : [], ...(p.edits ? { edits: true } : {}) };
+        const rules = Array.isArray(p.rules) ? p.rules.filter((r): r is string => isValidRule(r)).slice(0, 200) : [];
+        this.data[root] = { shell: Array.isArray(p.shell) ? p.shell.filter((s) => typeof s === "string" && /^[A-Za-z0-9._\-/]{1,64}$/.test(s)) : [], ...(rules.length ? { rules } : {}), ...(p.edits ? { edits: true } : {}) };
       }
     } catch {
       // a damaged file is ignored
@@ -329,6 +338,46 @@ export class PermissionStore {
     const p = (this.data[root] ??= { shell: [] });
     if (!p.shell.includes(prefix)) p.shell.push(prefix);
     this.save();
+  }
+
+  /** Every project's "always" answers (Settings → Permissions). */
+  all(): Record<string, ProjectPermissions> {
+    this.load();
+    return JSON.parse(JSON.stringify(this.data)) as Record<string, ProjectPermissions>;
+  }
+
+  /** Keep an "always allow" rule for the project; false when it isn't a valid rule. */
+  addRule(root: string, rule: string): boolean {
+    if (!isValidRule(rule)) return false;
+    this.load();
+    const p = (this.data[root] ??= { shell: [] });
+    const rules = (p.rules ??= []);
+    if (!rules.includes(rule)) rules.push(rule);
+    this.save();
+    return true;
+  }
+
+  /** Remove a rule, an older command-name entry or the edits answer ("edits"); true when something was removed. */
+  removeRule(root: string, rule: string): boolean {
+    this.load();
+    const p = this.data[root];
+    if (!p) return false;
+    let removed = false;
+    if (p.rules?.includes(rule)) {
+      p.rules = p.rules.filter((r) => r !== rule);
+      removed = true;
+    }
+    if (p.shell.includes(rule)) {
+      p.shell = p.shell.filter((r) => r !== rule);
+      removed = true;
+    }
+    if (rule === "edits" && p.edits) {
+      delete p.edits;
+      removed = true;
+    }
+    if (!p.shell.length && !p.rules?.length && !p.edits) delete this.data[root];
+    if (removed) this.save();
+    return removed;
   }
 
   allowEdits(root: string): void {

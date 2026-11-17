@@ -235,6 +235,28 @@ describe("BotView avatar, ask cards and details panel", () => {
     expect(api.approveBotCall).toHaveBeenCalledWith("bot_h", "c1", true);
   });
 
+  it("offers Always allow for the command's rule and answers with it", async () => {
+    const waiting = harry({ status: "needs_approval", lastRun: { id: "run_2", trigger: "manual", startedAtMs: 0, status: "needs_approval", summary: "", cSats: 0 }, pending: [{ callId: "c1", tool: "run_shell", args: { command: "npm test src/swarm/worker-runner.ts" } }] });
+    api.botMessages.mockResolvedValue([
+      { id: "m1", role: "assistant", content: "", atMs: 0, runId: "run_2", events: [{ type: "tool_call", id: "c1", tool: "run_shell", args: { command: "npm test src/swarm/worker-runner.ts" }, requires_approval: true, allow_rule: "npm test:*" }] },
+    ]);
+    api.botHistory.mockResolvedValue([waiting.lastRun]);
+    api.approveBotCall.mockResolvedValue({ ok: true });
+    render(BotView, { bot: waiting, onEdit: vi.fn(), onDeleted: vi.fn() });
+    const always = await screen.findByRole("button", { name: /Always allow npm test … in this project/ });
+    await fireEvent.click(always);
+    expect(api.approveBotCall).toHaveBeenCalledWith("bot_h", "c1", true, true);
+  });
+
+  it("has a permission mode picker under the message box that changes the bot's mode", async () => {
+    api.updateBot.mockResolvedValue(harry({ mode: "auto" }));
+    render(BotView, { bot: harry({ mode: "ask" }), onEdit: vi.fn(), onDeleted: vi.fn() });
+    await fireEvent.click(await screen.findByRole("button", { name: "Manual" }));
+    await fireEvent.keyDown(screen.getByRole("listbox"), { key: "1" });
+    expect(api.updateBot).toHaveBeenCalledWith("bot_h", { mode: "auto" });
+    expect(screen.getByRole("button", { name: "Auto" })).toBeTruthy();
+  });
+
   it("shows an answered card with the answer", async () => {
     api.botMessages.mockResolvedValue([
       { id: "m1", role: "assistant", content: "Done.", atMs: 0, runId: "run_3", events: [{ type: "tool_call", id: "c9", tool: "git_push", args: {}, requires_approval: true }, { type: "tool_result", id: "c9", result: "ok" }, { type: "text", content: "Done." }] },

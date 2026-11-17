@@ -122,6 +122,8 @@ export type IdeStreamEvent =
       tool: ToolName;
       args: Record<string, unknown>;
       requires_approval: boolean;
+      /** An approval the user may answer "Always allow" with: the rule kept for the project (`npm test:*`). */
+      allow_rule?: string;
     }
   | { type: "tool_result"; id: string; result?: string; error?: string }
   | { type: "diff"; file: string; hunks: DiffHunk[]; id: string }

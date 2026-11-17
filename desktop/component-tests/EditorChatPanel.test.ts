@@ -85,7 +85,7 @@ describe("EditorChatPanel and projects", () => {
     expect(screen.getByRole("textbox")).toBeTruthy();
   });
 
-  it("in a project, the shared slim composer has the compute picker and Auto-apply edits in the row under it", async () => {
+  it("in a project, the shared slim composer has the compute picker and the permission mode picker in the row under it", async () => {
     render(EditorChatPanel, { projectRoot: "/Users/me/EdgeCoder/site" });
     const pill = await screen.findByTestId("composer-box");
     expect(within(pill).getByRole("textbox")).toBeTruthy();
@@ -93,7 +93,8 @@ describe("EditorChatPanel and projects", () => {
     expect(within(pill).getByRole("button", { name: "Add files" })).toBeTruthy();
     expect(within(pill).getByRole("button", { name: "Send message" })).toBeTruthy();
     const controls = screen.getByTestId("composer-controls");
-    expect(within(controls).getByRole("checkbox", { name: "Auto-apply edits" })).toBeTruthy();
+    // New chats start in Settings' default (Accept edits).
+    expect(within(controls).getByRole("button", { name: "Accept edits" }).getAttribute("aria-haspopup")).toBe("listbox");
     expect(within(controls).getByRole("button", { name: /Auto/ }).getAttribute("title")).toMatch(/^Choose the model/);
     expect(within(pill).queryByRole("checkbox")).toBeNull();
   });
@@ -123,5 +124,32 @@ describe("EditorChatPanel and projects", () => {
     expect(await screen.findByText("In site")).toBeTruthy();
     await rerender({ projectRoot: "/p/api" });
     expect(await screen.findByText("In api")).toBeTruthy();
+  });
+
+  it("Plan mode: the chat keeps its mode, the plan gets Approve plan, and approving carries it out in Accept edits", async () => {
+    api.streamIdeChat.mockImplementation(async (_msgs: unknown, _root: string, onEvent: (e: unknown) => void) => {
+      onEvent({ type: "text", content: "Plan:\n1. Add footer.html\n2. Link it" });
+    });
+    render(EditorChatPanel, { projectRoot: "/Users/me/EdgeCoder/site" });
+    await fireEvent.click(await screen.findByRole("button", { name: "Accept edits" }));
+    await fireEvent.keyDown(screen.getByRole("listbox"), { key: "4" });
+    expect(screen.getByRole("button", { name: "Plan" })).toBeTruthy();
+    const box = screen.getByRole("textbox");
+    await fireEvent.input(box, { target: { value: "Add a footer" } });
+    await fireEvent.keyDown(box, { key: "Enter" });
+    await vi.waitFor(() => expect(api.streamIdeChat).toHaveBeenCalledTimes(1));
+    expect(api.streamIdeChat.mock.calls[0][6]).toBe("plan");
+    await vi.waitFor(() => expect(db.saved.at(-1)).toMatchObject({ permissionMode: "plan" }));
+    expect(db.saved.at(-1)!.messages.at(-1)).toMatchObject({ role: "assistant", plan: true });
+    api.streamIdeChat.mockImplementation(async (_msgs: unknown, _root: string, onEvent: (e: unknown) => void) => {
+      onEvent({ type: "text", content: "Done." });
+    });
+    await fireEvent.click(await screen.findByRole("button", { name: "Approve plan" }));
+    await vi.waitFor(() => expect(api.streamIdeChat).toHaveBeenCalledTimes(2));
+    expect(api.streamIdeChat.mock.calls[1][6]).toBe("auto-edits");
+    const sent = api.streamIdeChat.mock.calls[1][0] as Array<{ role: string; content: string }>;
+    expect(sent.at(-1)!.content).toMatch(/plan is approved/i);
+    await vi.waitFor(() => expect(db.saved.at(-1)).toMatchObject({ permissionMode: "auto-edits" }));
+    expect(screen.queryByTestId("plan-approval")).toBeNull();
   });
 });

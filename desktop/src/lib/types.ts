@@ -109,6 +109,8 @@ export interface ToolEvent {
   tool?: string;
   args?: Record<string, unknown>;
   requires_approval?: boolean;
+  /** The "Always allow" rule this approval may keep for the project (`npm test:*`). */
+  allow_rule?: string;
   result?: string;
   error?: string;
   command?: string;
@@ -134,6 +136,8 @@ export interface ChatMessage {
   changedFiles?: string[];
   /** A background job sent to the network from this message (its card shows progress and output). */
   networkTaskId?: string;
+  /** An assistant reply written in Plan mode: the plan to approve or revise. */
+  plan?: boolean;
   toolEvents?: ToolEvent[];
   /** What the reply cost and where it ran ("Network GPU · qwen3.5:9b", 0.42 cSats). */
   usage?: ReplyUsage;
@@ -158,6 +162,8 @@ export interface Conversation {
   portalConversationId?: string;
   /** The project folder the chat works in (a connected repo or an opened folder). */
   projectRoot?: string;
+  /** Its permission mode (ask, auto-edits, auto, plan; permission-modes.ts), kept with the chat. */
+  permissionMode?: import("./permission-modes").EngineMode;
 }
 
 export interface ChatCompletionChunk {

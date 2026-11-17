@@ -53,6 +53,8 @@ import { isProjectTrusted, setProjectTrusted } from "./workspace-trust.js";
 import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
 import { NewProjectError, PROJECT_TEMPLATES, createNewProject } from "./new-project.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
+import { defaultPermissionsFile, PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
+import { decideToolCall, suggestRule, type Decision } from "./permission-policy.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
@@ -168,6 +170,14 @@ const idePullTracker = new PullTracker();
 let activeProjectRoot: string | null = null;
 /** Tool calls waiting for the user, from chat turns and bot runs (`owner` says whose). */
 const pendingApprovals = new Map<string, ApprovalEntry>();
+/** "Always allow" answers per project (~/.edgecoder/permissions.json), shared by chat, sessions and bots. */
+const permissionStore = new PermissionStore(defaultPermissionsFile());
+
+/** The verdict on a call in a chat turn or bot run (permission-policy.ts): the mode, then the project's rules. */
+function decideFor(mode: PermissionMode, root: string, tool: ToolName, args: Record<string, unknown>): Decision {
+  const p = permissionStore.get(root);
+  return decideToolCall(tool, args, { mode, root, rules: p.rules ?? [], legacyNames: p.shell, branch: () => currentBranch(root) }, (c) => riskOf(c, root));
+}
 /** The owner's requests through this provider while they run, then briefly (Settings → Active work / Tasks). */
 const activity = new ActivityTracker();
 
@@ -1046,6 +1056,7 @@ app.addHook("onClose", async () => {
 
 const bots = new BotManager({
   approvals: pendingApprovals,
+  permissions: permissionStore,
   log: (msg, extra) => app.log.warn({ extra }, msg),
   runner: agentBotRunner({
     // Each step on the bot's compute policy (Local first by default), within its budget and your balance.
@@ -1181,6 +1192,8 @@ registerCompatRoutes(
 const toolApprovalSchema = z.object({
   id: z.string().min(1),
   approved: z.boolean(),
+  /** "Always allow" this command in the project: keeps the call's suggested rule (never for refused or always-ask commands). */
+  always: z.boolean().default(false),
 });
 
 app.post("/v1/ide/tool-approval", async (req, reply) => {
@@ -1189,9 +1202,14 @@ app.post("/v1/ide/tool-approval", async (req, reply) => {
   if (!entry) {
     return reply.status(404).send({ error: "No pending approval with that id" });
   }
+  let rule: string | null = null;
+  if (body.approved && body.always && entry.tool === "run_shell" && entry.projectRoot) {
+    rule = suggestRule(entry.args.command, { root: entry.projectRoot });
+    if (rule) permissionStore.addRule(entry.projectRoot, rule);
+  }
   entry.resolve(body.approved);
   pendingApprovals.delete(body.id);
-  return reply.send({ ok: true });
+  return reply.send({ ok: true, ...(rule ? { rule } : {}) });
 });
 
 const ideChatSchema = z.object({
@@ -1201,8 +1219,10 @@ const ideChatSchema = z.object({
   model: z.string().optional(),
   projectRoot: z.string().optional(),
   githubToken: z.string().optional(),
-  /** "edits": file writes and edits apply without asking (checkpoints keep them undoable); commands still ask. */
+  /** Older clients: "edits" = mode auto-edits. */
   autoApprove: z.enum(["none", "edits"]).default("none"),
+  /** The permission mode (permission-policy.ts): ask, auto-edits, auto or plan. Wins over autoApprove. */
+  mode: z.enum(["ask", "auto-edits", "auto", "plan"]).optional(),
   /** Which desktop view sent it (Settings → Active work / Tasks). */
   origin: z.enum(["chat", "code"]).optional(),
   /** Files attached to the last user message in the composer (attachments.ts). */
@@ -1345,6 +1365,8 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
   const projectRules = readProjectRules(projectRoot);
   const messages = withAttachments(body.messages, body.attachments ?? [], chatModel);
 
+  const chatMode: PermissionMode = body.mode ?? (body.autoApprove === "edits" ? "auto-edits" : "ask");
+
   // SSE setup
   writeSseHead(reply);
 
@@ -1409,12 +1431,14 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
             tool,
             args,
             owner: turnId,
+            projectRoot,
           });
         }),
       captureBeforeWrite: (path) => checkpoints.capture(turnId, path),
       turnId,
-      autoApproveEdits: body.autoApprove === "edits",
+      decide: (tool, args) => decideFor(chatMode, projectRoot, tool, args),
     }),
+    plan: chatMode === "plan",
   });
 
   sendEvent({ type: "done" });
@@ -1550,7 +1574,7 @@ const sessions: SessionHub = new SessionHub({
     return r.content.trim() || null;
   },
   onSessionStop: (id) => void tentacles.cancelAll(id),
-});
+}, { permissions: permissionStore });
 registerSessionRoutes(app, sessions);
 registerTentacleRoutes(app, sessions, tentacles);
 

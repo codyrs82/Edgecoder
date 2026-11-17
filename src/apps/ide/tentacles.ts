@@ -30,8 +30,9 @@ import { join, relative } from "node:path";
 import { runAgentLoop, type ChatFn, type ChatResult, type ToolSchema } from "./agent-loop.js";
 import type { CheckpointStore } from "./checkpoints.js";
 import { ProjectFs } from "./project-fs.js";
-import { shellPrefix, workerModelOf, type SessionData, type TranscriptEntry } from "./sessions.js";
-import { isReadOnlyCommand, riskOf } from "./permissions.js";
+import { workerModelOf, type SessionData, type TranscriptEntry } from "./sessions.js";
+import { isReadOnlyCommand, riskOf, type PermissionMode } from "./permissions.js";
+import { decideToolCall } from "./permission-policy.js";
 import { evaluateShellCommand, parseArgv, protectedToolPath, ToolExecutor } from "./tool-executor.js";
 import { TOOL_DEFINITIONS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
 import {
@@ -278,7 +279,7 @@ export const TENTACLE_SHELL_ALLOW: readonly string[][] = [
 ];
 
 /** The session's permission mode (older sessions: from autoApprove). */
-export function modeOf(s: Pick<SessionData, "mode" | "autoApprove">): "ask" | "auto-edits" | "auto" {
+export function modeOf(s: Pick<SessionData, "mode" | "autoApprove">): PermissionMode {
   return s.mode ?? (s.autoApprove === "edits" ? "auto-edits" : "ask");
 }
 
@@ -288,7 +289,8 @@ export function modeOf(s: Pick<SessionData, "mode" | "autoApprove">): "ask" | "a
  * waits for the user's approval.
  */
 export function canAutoApply(s: Pick<SessionData, "mode" | "autoApprove">, files: string[]): boolean {
-  return modeOf(s) !== "ask" && files.every((f) => protectedToolPath(f) === null);
+  const m = modeOf(s);
+  return (m === "auto-edits" || m === "auto") && files.every((f) => protectedToolPath(f) === null);
 }
 
 /**
@@ -298,10 +300,10 @@ export function canAutoApply(s: Pick<SessionData, "mode" | "autoApprove">, files
  */
 export function sessionAllowsShell(s: Pick<SessionData, "mode" | "autoApprove" | "alwaysShell">, command: string, root: string): boolean {
   if (isReadOnlyCommand(command, root)) return true;
+  // A helper can't ask: anything risky never runs, whatever the mode or rules say.
   if (riskOf(command, root) !== null) return false;
-  if (modeOf(s) === "auto") return true;
-  const prefix = shellPrefix(command);
-  return prefix !== null && (s.alwaysShell ?? []).includes(prefix);
+  const always = s.alwaysShell ?? [];
+  return decideToolCall("run_shell", { command }, { mode: modeOf(s), root, rules: always, legacyNames: always }, (c) => riskOf(c, root)).action === "run";
 }
 
 /**

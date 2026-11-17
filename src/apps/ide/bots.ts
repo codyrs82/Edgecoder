@@ -32,7 +32,7 @@
  * conversation.json, and memory.md for bots without a repository (0600, directory 0700).
  */
 
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
@@ -48,7 +48,9 @@ import {
   type BotGitHubTrigger, type GhApi, type TriggerCursor, type TriggerEvent,
 } from "./bot-triggers.js";
 import { normalizeRemoteUrl } from "./git-setup.js";
-import { gitExecEnv } from "./git-safe.js";
+import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
+import { PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
+import { decideToolCall, suggestRule, type Decision } from "./permission-policy.js";
 import { ensureRepo as realEnsureRepo } from "./repo-connect.js";
 import { COMPUTE_POLICIES, FALLBACK_NOTE, routeLabel, routeModelId, routeSummary, type ComputePolicy, type PlanOptions, type Route } from "../../inference-api/auto-route.js";
 import type { ChatBackend } from "../../inference-api/types.js";
@@ -253,8 +255,15 @@ export interface BotConfig {
   /** Stop once this much was spent today (cSats, local day); null = no limit. */
   budgetCSatsPerDay: number | null;
   allowedTools: ToolName[];
-  /** Apply write_file / edit_file without asking (each run's checkpoint keeps them undoable). */
+  /** Apply write_file / edit_file without asking (each run's checkpoint keeps them undoable). Kept in step with mode. */
   autoApproveEdits: boolean;
+  /**
+   * Its permission mode (permission-policy.ts): ask, auto-edits, auto or plan. Unset (older bots):
+   * auto-edits when autoApproveEdits, else ask. Whatever the mode, a call that asks while nobody is
+   * watching waits as "Needs approval" (APPROVAL_TIMEOUT_MS, then it is denied); it never blocks the
+   * bot's other work beyond that run.
+   */
+  mode?: PermissionMode;
   /** Where its model calls run. New bots and bots saved before this existed: Auto. */
   compute: BotCompute;
   color: string;
@@ -467,6 +476,8 @@ export interface BotRunContext {
   isCancelled: () => boolean;
   /** Pauses the run until the user answers (resolves false on reject, cancel or timeout). */
   waitForApproval: ToolRunnerDeps["waitForApproval"];
+  /** The bot's permission mode's verdict per call (permission-policy.ts); unset: the older autoApproveEdits rule. */
+  decide?: ToolRunnerDeps["decide"];
   remember: (note: string) => void;
   /** Ask for another run in `minutes` to continue (the follow_up tool). */
   followUp: (minutes: number, reason: string) => void;
@@ -477,6 +488,8 @@ export interface BotRunContext {
 export type BotRunner = (ctx: BotRunContext) => Promise<void>;
 
 export interface ApprovalEntry {
+  /** The project the call runs in ("Always allow" keeps its rule there). */
+  projectRoot?: string;
   resolve: (approved: boolean) => void;
   tool: ToolName;
   args: Record<string, unknown>;
@@ -674,9 +687,25 @@ export interface BotInput {
   budgetCSatsPerDay?: number | null;
   allowedTools?: ToolName[];
   autoApproveEdits?: boolean;
+  mode?: PermissionMode;
   compute?: BotCompute;
   color?: string;
   avatarShape?: BotAvatarShape;
+}
+
+/** A bot's permission mode (older bots: from autoApproveEdits). */
+export function botMode(bot: Pick<BotConfig, "mode" | "autoApproveEdits">): PermissionMode {
+  return bot.mode ?? (bot.autoApproveEdits ? "auto-edits" : "ask");
+}
+
+/** The current branch of a work folder (null outside git or on a detached HEAD). */
+function branchOf(root: string): string | null {
+  try {
+    const b = execFileSync("git", hardenedGitArgs(["-C", root, "rev-parse", "--abbrev-ref", "HEAD"], root), { env: gitExecEnv(), encoding: "utf8", timeout: 3_000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+    return b && b !== "HEAD" ? b : null;
+  } catch {
+    return null;
+  }
 }
 
 export type BotPatch = Partial<BotInput> & { memory?: string };
@@ -739,9 +768,23 @@ export class BotManager {
       gh?: GhApi;
       /** What the bot's work folder looks like now (projectFingerprint); equal = nothing changed. */
       fingerprint?: (root: string) => Promise<string | null>;
+      /** "Always allow" rules per project (shared with chat and sessions); default: in memory. */
+      permissions?: PermissionStore;
     },
   ) {
     this.approvals = deps.approvals ?? new Map();
+    this.permissions = deps.permissions ?? new PermissionStore(null);
+  }
+
+  readonly permissions: PermissionStore;
+
+  /** The bot's verdict on a call: its mode (read live, so a change applies to the next call), then the project's rules. */
+  decide(id: string, tool: ToolName, args: Record<string, unknown>): Decision {
+    const bot = this.bots.find((b) => b.id === id);
+    if (!bot) return { action: "ask", reason: "the bot is gone" };
+    const root = botWorkRoot(bot);
+    const p = this.permissions.get(root);
+    return decideToolCall(tool, args, { mode: botMode(bot), root, rules: p.rules ?? [], legacyNames: p.shell, branch: () => branchOf(root) }, (c) => riskOf(c, root));
   }
 
   private get file() {
@@ -1335,6 +1378,10 @@ export class BotManager {
     const bot = this.find(id);
     this.validate(patch);
     const { memory, repository, triggers, ...fields } = patch;
+    // The mode and the older autoApproveEdits switch stay in step.
+    const modeBefore = botMode(bot);
+    if (fields.mode !== undefined) fields.autoApproveEdits = fields.mode === "auto-edits" || fields.mode === "auto";
+    else if (fields.autoApproveEdits !== undefined) fields.mode = fields.autoApproveEdits ? (modeBefore === "auto" ? "auto" : "auto-edits") : modeBefore === "plan" ? "plan" : "ask";
     const scheduleChanged = fields.schedule !== undefined && fields.schedule.trim() !== bot.schedule;
     const resumed = fields.enabled === true && !bot.enabled;
     const paused = fields.enabled === false && bot.enabled;
@@ -1370,6 +1417,12 @@ export class BotManager {
         if (old && old.kind === t.kind && old.label === t.label && old.scope === t.scope && cur[t.id]) kept[t.id] = cur[t.id];
       }
       this.cursors[id] = kept;
+    }
+    if (fields.mode !== undefined && fields.mode !== modeBefore) {
+      // Calls waiting for an answer that the new mode runs without asking go ahead now.
+      for (const p of [...(this.active.get(id)?.pending.values() ?? [])]) {
+        if (this.decide(id, p.tool as ToolName, p.args).action === "run") p.finish(true);
+      }
     }
     const auto = (bot.auto ??= { idleStreak: 0, followUps: 0 });
     if (scheduleChanged || resumed || heartbeatChanged) {
@@ -1457,6 +1510,7 @@ export class BotManager {
           : undefined;
     return {
       ...bot,
+      mode: botMode(bot),
       triggers: bot.triggers.map((t) => ({ ...t })),
       status,
       spentTodayCSats: Number(this.spentToday(bot.id).toFixed(6)),
@@ -1660,7 +1714,7 @@ export class BotManager {
         const timer = setTimeout(() => finish(false), APPROVAL_TIMEOUT_MS);
         timer.unref?.();
         act.pending.set(callId, { callId, tool, args, finish });
-        this.approvals.set(callId, { resolve: finish, tool, args, owner });
+        this.approvals.set(callId, { resolve: finish, tool, args, owner, projectRoot: botWorkRoot(bot) });
         act.run.status = "needs_approval";
         act.activity = `Needs approval: ${tool}`;
         this.save();
@@ -1687,6 +1741,7 @@ export class BotManager {
         signal: act.abort.signal,
         isCancelled: () => act.cancelReason !== undefined,
         waitForApproval,
+        decide: (tool, args) => this.decide(id, tool, args),
         remember: (note) => this.remember(id, note),
         followUp: (minutes, why) => {
           const m = Number.isFinite(minutes) ? Math.min(1440, Math.max(1, Math.round(minutes))) : FOLLOW_UP_DELAY_MS / MINUTE;
@@ -1805,10 +1860,16 @@ export class BotManager {
   }
 
   /** Answer one of the bot's pending tool calls. */
-  approve(id: string, callId: string, approved: boolean): boolean {
-    this.find(id);
+  approve(id: string, callId: string, approved: boolean, always = false): boolean {
+    const bot = this.find(id);
     const p = this.active.get(id)?.pending.get(callId);
     if (!p) return false;
+    if (approved && always && p.tool === "run_shell") {
+      // "Always allow" keeps the command's rule for the bot's project (never a refused or always-ask command).
+      const root = botWorkRoot(bot);
+      const rule = suggestRule(p.args.command, { root });
+      if (rule) this.permissions.addRule(root, rule);
+    }
     p.finish(approved);
     return true;
   }
@@ -1939,9 +2000,11 @@ export function agentBotRunner(d: {
       turnId,
       autoApproveEdits: ctx.bot.autoApproveEdits,
       allowShellAutoApprove: false,
+      ...(ctx.decide ? { decide: ctx.decide } : {}),
       ...(d.prepare ? { prepare: d.prepare(ctx.bot) } : {}),
     });
     const chat: BotChatFn = d.chat(ctx);
+    const planning = botMode(ctx.bot) === "plan";
     await runAgentLoop({
       chat,
       ...(chat.escalate ? { escalate: chat.escalate } : {}),
@@ -1950,8 +2013,10 @@ export function agentBotRunner(d: {
       sendEvent: ctx.sendEvent,
       isCancelled: ctx.isCancelled,
       tools,
-      // Nobody is watching to say "go on": a reply that only announces work gets one "go ahead".
-      continueOnIntent: true,
+      // Nobody is watching to say "go on": a reply that only announces work gets one "go ahead"
+      // (not in plan mode, where the plan is the answer).
+      continueOnIntent: !planning,
+      plan: planning,
       runTool: async (tool, args) => {
         if ((tool as string) === "follow_up") {
           const callId = `tc_${randomUUID().slice(0, 8)}`;
@@ -1992,6 +2057,7 @@ const botFields = {
   budgetCSatsPerDay: z.number().positive().max(1e9).nullable(),
   allowedTools: z.array(toolEnum).max(ALL_TOOLS.length),
   autoApproveEdits: z.boolean(),
+  mode: z.enum(["ask", "auto-edits", "auto", "plan"]),
   compute: z.object({ policy: z.enum(COMPUTE_POLICIES as [ComputePolicy, ...ComputePolicy[]]), model: z.string().trim().min(1).max(300).optional() }),
   color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
   avatarShape: z.enum(BOT_AVATAR_SHAPES),
@@ -2069,8 +2135,8 @@ export function registerBotRoutes(app: FastifyInstance, bots: BotManager): void 
   app.post("/v1/ide/bots/:id/approve", (req, reply) =>
     handle(reply, () => {
       const id = idParams.parse(req.params).id;
-      const { callId, approved } = z.object({ callId: z.string().min(1).max(100), approved: z.boolean() }).parse(req.body ?? {});
-      if (!bots.approve(id, callId, approved)) return reply.status(404).send({ error: "No pending approval with that id" });
+      const { callId, approved, always } = z.object({ callId: z.string().min(1).max(100), approved: z.boolean(), always: z.boolean().default(false) }).parse(req.body ?? {});
+      if (!bots.approve(id, callId, approved, always)) return reply.status(404).send({ error: "No pending approval with that id" });
       return { ok: true, bot: bots.get(id) };
     }),
   );

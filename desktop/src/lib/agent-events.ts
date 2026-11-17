@@ -39,6 +39,7 @@ export function applyAgentEvent(turn: AgentTurn, event: IdeStreamEvent): { turn:
               tool: event.tool as string,
               args: event.args as Record<string, unknown>,
               requires_approval: event.requires_approval as boolean,
+              ...(typeof event.allow_rule === "string" ? { allow_rule: event.allow_rule } : {}),
               approval_status: (event.requires_approval ? "pending" : "approved") as "pending" | "approved",
             },
           ],

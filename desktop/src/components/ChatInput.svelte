@@ -159,6 +159,11 @@
     void tick().then(resize);
   }
 
+  /** Put the cursor in the box (Plan's "Revise"). */
+  export function focus() {
+    textareaEl?.focus();
+  }
+
   /**
    * "Add to chat": put a quote (Markdown from lib/quote-selection.ts) into the box at the caret,
    * keeping what is typed and attached; the caret lands on the line after it, ready for the reply.

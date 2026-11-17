@@ -48,7 +48,8 @@ export const HELP = `Commands (they work at any prompt, an approval included):
   /lead [id]                    show or set the lead model, e.g. frontier/anthropic/claude-opus-5-5 (your own key)
   /worker [id]                  show or set the worker model for helpers and delegated work (default auto)
   /compute [local|network|mine|auto]   where the model runs
-  /mode [ask|auto-edits|auto]   how much to ask first (Shift+Tab cycles)
+  /mode [ask|auto-edits|auto|plan]   how much to ask first (Shift+Tab cycles)
+  /approve [ask|auto-edits|auto]     approve the plan and carry it out (default auto-edits)
   /remote [off]                 show this session live in the EdgeCoder app (Code view), or stop
   /stop                         stop the reply (Esc does the same); queued messages run next
   /queue                        list queued messages; /unqueue [n] removes one (default: the last)
@@ -61,8 +62,10 @@ ${TENTACLES_HELP}
   /help                         this list
   /exit                         leave (the session stays; reopen it in the app or with --resume)
 Modes: ask (edits and commands ask), auto-edits (edits apply, undoable; commands ask),
-       auto (edits and commands apply; risky ones still ask). Read-only commands never ask.
-Approvals: Enter or y = yes, n = no, a = always (edits: this project; a command name: this project).
+       auto (safe commands and edits apply; risky ones ask; dangerous ones are refused),
+       plan (read-only until you approve the plan with /approve). Read-only commands never ask.
+Approvals: Enter or y = yes, n = no, a = always (edits: this project; a command: a rule such as
+           \`npm test:*\` for this project).
 Type while a reply runs: Enter queues the message for the next turn.`;
 
 interface Pending {
@@ -71,7 +74,7 @@ interface Pending {
   args: Record<string, unknown>;
 }
 
-const MODE_LABEL: Record<PermissionMode, string> = { ask: "ask", "auto-edits": "auto-edits", auto: "auto" };
+const MODE_LABEL: Record<PermissionMode, string> = { ask: "ask", "auto-edits": "auto-edits", auto: "auto", plan: "plan" };
 const KIND_LABEL: Record<string, string> = { terminal: "the terminal", desktop: "the EdgeCoder app", api: "a script" };
 
 export class Repl {
@@ -428,7 +431,7 @@ export class Repl {
       if (this.running) await this.command("/stop");
       return;
     }
-    const order: PermissionMode[] = ["ask", "auto-edits", "auto"];
+    const order: PermissionMode[] = ["ask", "auto-edits", "auto", "plan"];
     await this.command(`/mode ${order[(order.indexOf(this.mode) + 1) % order.length]}`);
     this.refreshPrompt();
   }
@@ -478,16 +481,28 @@ export class Repl {
         case "/mode": {
           const m = arg.toLowerCase();
           if (!m) {
-            this.line(`mode: ${this.mode} ${st.dim("(ask, auto-edits or auto; Shift+Tab cycles)")}`);
+            this.line(`mode: ${this.mode} ${st.dim("(ask, auto-edits, auto or plan; Shift+Tab cycles)")}`);
             return;
           }
-          if (!["ask", "auto-edits", "auto"].includes(m)) {
-            this.line(st.red("Use /mode ask, auto-edits or auto."));
+          if (!["ask", "auto-edits", "auto", "plan"].includes(m)) {
+            this.line(st.red("Use /mode ask, auto-edits, auto or plan."));
             return;
           }
           await this.c.settings(id, { mode: m as PermissionMode });
           this.mode = m as PermissionMode;
-          this.line(st.dim(`▸ mode: ${m}${m === "auto" ? " (edits and commands apply without asking; risky commands still ask)" : m === "auto-edits" ? " (edits apply without asking, undoable; commands ask)" : " (edits and commands ask)"}`));
+          this.line(st.dim(`▸ mode: ${m}${m === "auto" ? " (safe commands and edits apply; risky ones ask; dangerous ones are refused)" : m === "plan" ? " (read-only until you approve the plan: /approve)" : m === "auto-edits" ? " (edits apply without asking, undoable; commands ask)" : " (edits and commands ask)"}`));
+          return;
+        }
+        case "/approve": {
+          const m = (arg.toLowerCase() || "auto-edits") as PermissionMode;
+          if (!["ask", "auto-edits", "auto"].includes(m)) {
+            this.line(st.red("Use /approve, /approve auto-edits, /approve auto or /approve ask."));
+            return;
+          }
+          await this.c.approvePlan(id, m);
+          this.mode = m;
+          this.line(st.dim(`▸ plan approved · mode: ${m}`));
+          this.refreshPrompt();
           return;
         }
         case "/stop": {

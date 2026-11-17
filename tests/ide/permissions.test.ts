@@ -80,10 +80,11 @@ describe("risky commands (ask in every mode)", () => {
 });
 
 describe("modes", () => {
-  it("cycles ask → auto-edits → auto → ask", () => {
+  it("cycles ask → auto-edits → auto → plan → ask", () => {
     expect(nextMode("ask")).toBe("auto-edits");
     expect(nextMode("auto-edits")).toBe("auto");
-    expect(nextMode("auto")).toBe("ask");
+    expect(nextMode("auto")).toBe("plan");
+    expect(nextMode("plan")).toBe("ask");
   });
 
   it("defaults to auto-edits in a git repository with a clean tree, else ask", () => {
@@ -117,10 +118,10 @@ describe("modes", () => {
     expect(out.stdout).toContain("src/a.ts");
   });
 
-  it("auto: edits and plain commands apply without asking, risky commands still ask", async () => {
+  it("auto: edits and safe commands apply without asking, risky commands still ask", async () => {
     const { hub } = makeHub([
       { content: "", toolCalls: [{ name: "write_file", arguments: { path: "src/b.ts", content: "b\n" } }] },
-      { content: "", toolCalls: [{ name: "run_shell", arguments: { command: "node -e 1" } }] },
+      { content: "", toolCalls: [{ name: "run_shell", arguments: { command: "make -v" } }] },
       { content: "", toolCalls: [{ name: "run_shell", arguments: { command: "rm -rf src" } }] },
       { content: "ok", toolCalls: [] },
     ]);
@@ -135,7 +136,7 @@ describe("modes", () => {
     expect(ev.filter((e) => e.type === "tool_call").map((e) => (e as { requires_approval: boolean }).requires_approval)).toEqual([false, false, true]);
   });
 
-  it("'always' answers persist per project, never for risky commands", async () => {
+  it("'always' answers keep a rule per project", async () => {
     const file = join(root, "..", `perm-${Date.now()}.json`);
     const run = async (command: string) => {
       const { hub } = makeHub([{ content: "", toolCalls: [{ name: "run_shell", arguments: { command } }] }, { content: "ok", toolCalls: [] }], { permissionsFile: file });
@@ -147,10 +148,53 @@ describe("modes", () => {
       return asked;
     };
     expect(await run("node -v")).toBe(true);
-    expect(JSON.parse(readFileSync(file, "utf8"))[root].shell).toEqual(["node"]);
+    expect(JSON.parse(readFileSync(file, "utf8"))[root].rules).toEqual(["node:*"]);
     // A new provider (a new hub) remembers it for this project.
     expect(await run("node --version")).toBe(false);
-    expect(new PermissionStore(file).get(root).shell).toEqual(["node"]);
+    expect(new PermissionStore(file).get(root).rules).toEqual(["node:*"]);
+    // Never for a command that must always ask (network): no rule is kept, and it asks again.
+    expect(await run("git push")).toBe(true);
+    expect(await run("git push")).toBe(true);
+    expect(new PermissionStore(file).get(root).rules).toEqual(["node:*"]);
     rmSync(file, { force: true });
+  });
+
+  it("plan: read-only until the plan is approved, then carries it out in the chosen mode", async () => {
+    const { hub, model } = makeHub([
+      { content: "", toolCalls: [{ name: "write_file", arguments: { path: "src/b.ts", content: "early\n" } }] },
+      { content: "Plan:\n1. Add src/b.ts\n2. Run the tests", toolCalls: [] },
+      { content: "", toolCalls: [{ name: "write_file", arguments: { path: "src/b.ts", content: "b\n" } }] },
+      { content: "Done.", toolCalls: [] },
+    ]);
+    const s = hub.create({ projectRoot: root, client: TERM, mode: "plan" });
+    const events: SessionEvent[] = [];
+    hub.subscribe(s.id, TERM, 0, (e) => events.push(e));
+    expect(() => hub.approvePlan(s.id, TERM)).toThrow(/no plan/);
+    hub.send(s.id, "add b.ts", TERM);
+    await hub.idle(s.id);
+    expect(() => readFileSync(join(root, "src", "b.ts"), "utf8")).toThrow();
+    const planned = hub.snapshot(s.id).session.transcript.at(-1)!;
+    expect(planned.plan).toBe(true);
+    expect(events.some((e) => e.type === "plan_ready")).toBe(true);
+    expect(model.requests[0].tools?.map((t) => t.function.name)).not.toContain("write_file");
+    hub.approvePlan(s.id, TERM, "auto-edits");
+    expect(hub.snapshot(s.id).session.mode).toBe("auto-edits");
+    await hub.idle(s.id);
+    expect(readFileSync(join(root, "src", "b.ts"), "utf8")).toBe("b\n");
+    expect(() => hub.approvePlan(s.id, TERM)).toThrow(/plan mode/);
+  });
+
+  it("switching to auto lets a waiting call that auto runs go ahead", async () => {
+    const { hub } = makeHub([
+      { content: "", toolCalls: [{ name: "run_shell", arguments: { command: "make -v" } }] },
+      { content: "ok", toolCalls: [] },
+    ]);
+    const s = hub.create({ projectRoot: root, client: TERM, mode: "ask" });
+    hub.send(s.id, "go", TERM);
+    await until(() => hub.snapshot(s.id).pending.length === 1, 5000, "the command to ask");
+    hub.update(s.id, { mode: "auto" }, TERM);
+    await hub.idle(s.id);
+    expect(hub.snapshot(s.id).pending).toHaveLength(0);
+    expect(JSON.stringify(hub.snapshot(s.id).session.transcript.at(-1)!.events)).toContain("shell_output");
   });
 });

@@ -23,6 +23,8 @@
     onOpenInEditor?: (code: string, language: string) => void;
     toolEvents?: ToolEvent[];
     onToolApproval?: (id: string, approved: boolean) => void;
+    /** "Always allow" on an approval card: approve and keep the call's rule for the project. */
+    onToolAlways?: (id: string) => void;
     /** Agent turn checkpoint and the files it wrote: shows the review / undo card. */
     turnId?: string;
     changedFiles?: string[];
@@ -38,7 +40,7 @@
     return u.calls?.length ? `Where this reply ran:\n${servedBreakdown(u.calls)}` : "Where this reply ran and what it cost";
   }
 
-  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview, usage }: Props = $props();
+  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, onToolAlways, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview, usage }: Props = $props();
 
   /** A finished turn's steps start folded into their summary line. */
   let stepsOpen = $state(false);
@@ -80,6 +82,8 @@
                   status={toolStepStatus(evt)}
                   onApprove={(id) => onToolApproval?.(id, true)}
                   onReject={(id) => onToolApproval?.(id, false)}
+                  allowRule={evt.allow_rule}
+                  onAlways={onToolAlways}
                 />
               {:else if evt.type === "shell_output"}
                 <ShellBlock

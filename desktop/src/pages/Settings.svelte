@@ -11,6 +11,7 @@
   import Select from "../components/ui/Select.svelte";
   import { notify } from "../lib/toast";
   import FrontierKeys from "../components/FrontierKeys.svelte";
+  import PermissionSettings from "../components/PermissionSettings.svelte";
 
   /** Open a portal page (the Bluetooth explainer) in the browser. */
   async function openPortalPage(path: string) {
@@ -338,6 +339,8 @@
       </div>
     </div>
   </section>
+
+  <PermissionSettings />
 
   <FrontierKeys />
 

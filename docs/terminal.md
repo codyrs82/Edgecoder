@@ -50,7 +50,7 @@ untrusted unless you pass `--trust`.
 | `--worker <id>` | The worker model, for helpers and delegated work. The default is `auto`. It can't be a frontier model. |
 | `--compute local\|network\|mine\|auto` | Where the model runs. A default model is picked for that place. |
 | `--remote` | Show the session live in the app from the start. |
-| `--mode ask\|auto-edits\|auto` | How much it asks first (below). Default: `auto-edits` in a git repository with a clean working tree (the checkpoint and git both keep the originals), else `ask`. |
+| `--mode ask\|auto-edits\|auto\|plan` | How much it asks first (below). Default: `auto-edits` in a git repository with a clean working tree (the checkpoint and git both keep the originals), else `ask`. |
 | `--auto-edits` | Same as `--mode auto-edits`. |
 | `--resume <id>`, `--list` | Continue a saved session, or list them. |
 | `--provider <url>`, `--standalone`, `--port <n>` | Which provider to use (next section). |
@@ -67,8 +67,9 @@ While it runs:
   Then it asks `Allow …? [Y/n/a]`. **Enter means yes.**
   - **a** (always) on an edit applies later edits without asking (the session moves to
     auto-edits, and new sessions in this project start there).
-  - **a** on a command covers that program name, such as `npm`, for plain commands, in this
-    project from now on. It never covers a risky command (below).
+  - **a** on a command keeps a rule such as `npm test:*` for this project from now on. It never
+    covers a refused command or one that must always ask (network, push, deletes, paths outside
+    the project); see [Permission modes](permission-modes.md).
   - Slash commands work at an approval prompt too: `/remote` publishes and the approval keeps waiting.
   - "Always" answers are kept per project in `~/.edgecoder/permissions.json` (0600).
 - **Where it ran**: each turn ends with one dim line, for example
@@ -78,31 +79,26 @@ While it runs:
 
 ### Permission modes
 
-The prompt line shows the mode (`[auto-edits] ›`); **Shift+Tab** cycles it, `/mode` sets it.
+The prompt line shows the mode (`[auto-edits] ›`); **Shift+Tab** cycles it, `/mode` sets it. The
+app's Code view shows the same mode with a picker under the message box.
 
 | Mode | Edits | Commands |
 | --- | --- | --- |
-| `ask` | ask | ask |
-| `auto-edits` | apply (each turn stays undoable) | ask |
-| `auto` | apply | apply, except risky ones |
+| `ask` (Manual) | ask | ask |
+| `auto-edits` (Accept edits) | apply (each turn stays undoable) | ask |
+| `auto` | apply | safe ones run (tests, lint, build, git add/commit on a work branch); risky ones ask; dangerous ones are refused |
+| `plan` | refused | read-only only, until you approve the plan with `/approve [mode]` |
 
-In every mode:
-
-- **Read-only commands never ask:** `grep`, `rg`, `ls`, `cat`, `head`, `tail`, `wc`, `find` (without
-  `-exec`/`-delete`), `git status`/`diff`/`log`/`show`, and the like, with pipes between them. A
-  redirection, command substitution, a write flag or a path outside the project makes it not
-  read-only.
-- **Risky commands always ask:** anything touching a path outside the project or a protected path
-  (`.git`, hooks, files tooling runs); `rm` and similar; `git push`, `git reset --hard`,
-  `git clean`; downloads piped into a shell; package installs (`npm install`, `pip install`, `brew install`, `npx`, …);
-  network fetches (`curl`, `wget`, `ssh`, …); shell syntax that can't be checked.
-- Pushes and pull requests (the git tools) ask every time; commits ask as before.
+Read-only commands never ask, pushes and pull requests always ask, and "always" answers keep a
+rule such as `npm test:*` for the project. [Permission modes](permission-modes.md) has the full
+run / ask / refuse tables and the rules for "always".
 
 | Command | Does |
 | --- | --- |
 | `/model [name]` | Show or set the model. A bare name keeps the current place (`network/` stays network). |
 | `/compute [local\|network\|mine\|auto]` | Where the model runs. |
-| `/mode [ask\|auto-edits\|auto]` | How much it asks first (Shift+Tab cycles). |
+| `/mode [ask\|auto-edits\|auto\|plan]` | How much it asks first (Shift+Tab cycles). |
+| `/approve [ask\|auto-edits\|auto]` | In plan mode: approve the plan and carry it out (default auto-edits). |
 | `/stop` | Stop the reply (Esc). Queued messages run next. |
 | `/queue`, `/unqueue [n]` | List queued messages; remove one (default the last). |
 | `/undo` | Revert the files the last reply changed (the turn's checkpoint). |
@@ -281,7 +277,8 @@ session sends sub-jobs to cheaper network tiers. That exists now as tentacles
   wait.
 - **`ToolRunnerDeps`** (`agent-loop.ts`):
   - `prepare` resolves arguments before approval;
-  - `alwaysAllowed` and `autoApproveEdits` (a value or a function per call) decide what asks;
+  - `decide` (permission-policy.ts `decideToolCall`: run, ask or refuse per call) decides what asks;
+    without it, `alwaysAllowed` and `autoApproveEdits` (a value or a function per call) do;
   - `waitForApproval` decides how an answer arrives;
   - `captureBeforeWrite` keeps each write undoable.
 - **Session events** are plain objects with a `type`, so a new kind (for example `delegate_status`)
