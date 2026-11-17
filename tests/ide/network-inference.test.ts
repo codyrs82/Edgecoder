@@ -112,6 +112,15 @@ describe("streamNetworkCompletion", () => {
     await expect(streamNetworkCompletion(deps, { model: "x", computeClass: "any", messages: [{ role: "user", content: "hi" }] }).next()).rejects.toThrow(/No machine on the network has x/);
   });
 
+  it("a lease that ended (or isn't the caller's) is a 404 that says so, not a 502", async () => {
+    const deps = await fakeForwarder(() => ({ status: 404, json: { error: "reservation_not_active" } }));
+    const err = await streamNetworkCompletion(deps, { model: "m", computeClass: "any", reservationId: "res-1", messages: [{ role: "user", content: "hi" }] })
+      .next()
+      .catch((e) => e as { status: number; message: string });
+    expect(err).toMatchObject({ status: 404 });
+    expect((err as { message: string }).message).toMatch(/reservation isn't active/);
+  });
+
   it("no machine of the requested class is not called busy", async () => {
     // At submit: holders exist, none in the class (the 2x A16 demoted to cpu, an @gpu.dc call).
     const atSubmit = await fakeForwarder(() => ({ status: 409, json: { error: "no_agent_in_class", model: "qwen3-coder:30b", computeClass: "gpu.dc", availableClasses: ["cpu"] } }));
