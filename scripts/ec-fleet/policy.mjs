@@ -17,7 +17,10 @@
  * what the orchestrator answers, and it is deliberately narrower: unknown means pending.
  */
 
-import { isAbsolute, normalize, resolve, sep } from "node:path";
+import { posix, win32 } from "node:path";
+
+/** Path rules follow the worktree's own form (POSIX "/…" or Windows "C:\\…"), not the OS running the policy. */
+const flavor = (worktree) => (String(worktree).startsWith("/") ? posix : win32);
 
 export const DEFAULT_BRANCHES = new Set(["main", "master"]);
 
@@ -28,7 +31,7 @@ const LOCKFILES = new Set(["package-lock.json", "npm-shrinkwrap.json", "yarn.loc
 /** Why a repo-relative path is protected, or null. */
 export function protectedPathReason(rel) {
   if (typeof rel !== "string" || !rel) return null;
-  const segs = normalize(rel).split(/[\\/]+/).filter((s) => s && s !== ".");
+  const segs = posix.normalize(rel.replace(/\\/g, "/")).split(/[\\/]+/).filter((s) => s && s !== ".");
   if (!segs.length) return null;
   const lower = segs.map((s) => s.toLowerCase());
   const name = lower[lower.length - 1];
@@ -48,11 +51,13 @@ export function protectedPathReason(rel) {
 export function inWorktree(path, worktree, cwd = worktree) {
   if (typeof path !== "string" || !path) return null;
   if (path.startsWith("~") || path.includes("$")) return null;
-  const abs = isAbsolute(path) ? normalize(path) : resolve(cwd, path);
-  const root = normalize(worktree).replace(/[\\/]+$/, "");
+  const P = flavor(worktree);
+  const abs = P.isAbsolute(path) ? P.normalize(path) : P.resolve(cwd, path);
+  const root = P.normalize(worktree).replace(/[\\/]+$/, "");
   if (abs === root) return ".";
-  if (!abs.startsWith(root + sep)) return null;
-  return abs.slice(root.length + 1);
+  if (!abs.startsWith(root + P.sep)) return null;
+  // Repo-relative paths always use "/".
+  return abs.slice(root.length + 1).split(P.sep).join("/");
 }
 
 const approve = (reason) => ({ decision: "approve", reason });
@@ -445,7 +450,7 @@ function segmentVerdict(segment, ctx, state) {
     const rel = inWorktree(target, ctx.worktree, state.cwd);
     if (rel === null) v = pending(`cd outside the worktree (${target})`);
     else {
-      state.cwd = resolve(state.cwd, target);
+      state.cwd = flavor(ctx.worktree).resolve(state.cwd, target);
       v = approve("cd inside the worktree");
     }
   } else if (READ_BINS.has(bin)) {
@@ -522,7 +527,7 @@ export function classifyApproval(call, ctx) {
     if (rel === null || rel === ".") return refuse(`${tool} outside the worktree (${args.path})`);
     const why = protectedPathReason(rel);
     if (why) return refuse(`${tool} on ${why} (${rel})`);
-    if (rel === "node_modules" || rel.startsWith(`node_modules${sep}`)) return refuse(`${tool} inside node_modules (shared install)`);
+    if (rel === "node_modules" || rel.startsWith("node_modules/")) return refuse(`${tool} inside node_modules (shared install)`);
     return approve(`${tool} ${rel}`);
   }
   if (tool === "run_shell") return shellVerdict(args.command, ctx);
