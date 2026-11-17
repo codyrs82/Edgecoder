@@ -543,7 +543,8 @@ export function planRoutes(w: Workload, inp: RouteInputs, policy: ComputePolicy 
     const cxWhy = complexityFallbackNote(w, freeInp, policy === "local_only" ? "this computer only" : "free machines only");
     return withWhy(fallbackRoutes(inp, policy === "local_only" ? ["local"] : ["local", "mine"], w.needsTools), joinWhy(cxWhy, toolWhy));
   }
-  if (w.heavy && opts.agentMinParamsB && opts.agentMinParamsB > (w.minParamsB ?? 0)) w = { ...w, minParamsB: opts.agentMinParamsB };
+  const agentFloor = w.heavy && opts.agentMinParamsB && opts.agentMinParamsB > (w.minParamsB ?? 0) ? opts.agentMinParamsB : undefined;
+  if (agentFloor) w = { ...w, minParamsB: agentFloor };
   const ranked = rankRoutes(w, inp);
   const order: Placement[] = policy === "local_first" ? ["local", "mine", "reserved"] : ["reserved", "local", "mine"];
   const free = order.flatMap((p) => ranked.filter((r) => r.placement === p));
@@ -553,9 +554,13 @@ export function planRoutes(w: Workload, inp: RouteInputs, policy: ComputePolicy 
   // Nothing free meets the step: the network when it can take it, then the biggest free model.
   const needWhy = complexityNeedNote(w, inp);
   const blocked = net.length ? "the network couldn't take it" : networkBlockedReason(inp, opts, ranked);
+  // A bot's agent step (agentMinParamsB) with nothing that big: say why it ran on the smaller model
+  // ("agent work wants ≥14B; this computer has ≤7B; a larger model wasn't available (balance 0)").
+  const has = agentFloor && !needWhy ? biggestFree(w, inp) : undefined;
+  const floorWhy = agentFloor && !needWhy ? `agent work wants ≥${agentFloor}B${has ? `; ${has}` : ""}; a larger model wasn't available (${blocked})` : undefined;
   return [
     ...withWhy(net, joinWhy(needWhy, toolWhy)),
-    ...withWhy(fallbackRoutes(inp, ["local", "mine"], w.needsTools), joinWhy(needWhy ? complexityFallbackNote(w, { ...inp, networkModels: [] }, blocked) : undefined, toolWhy)),
+    ...withWhy(fallbackRoutes(inp, ["local", "mine"], w.needsTools), joinWhy(needWhy ? complexityFallbackNote(w, { ...inp, networkModels: [] }, blocked) : floorWhy, toolWhy)),
   ];
 }
 

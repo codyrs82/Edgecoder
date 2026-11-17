@@ -185,6 +185,16 @@ describe("compute policies", () => {
     expect(where(planRoutes(heavy, inp, "local_only", { agentMinParamsB: 14 }))).toEqual(["local:qwen2.5-coder:7b"]);
   });
 
+  it("a bot's agent step on the 7B fallback says why the bigger model wasn't used (balance 0, no network model that size)", () => {
+    // Harry's case: Auto, 0 cSats, the network's biggest model is 9B; the bot's 7B ran with no reason given.
+    const inp: RouteInputs = { ...base, balanceCSats: 0, localModels: ["qwen2.5-coder:7b"], networkModels: net };
+    const [r] = planRoutes(heavy, inp, "auto", { agentMinParamsB: 14, allowanceCSats: 100 });
+    expect(r).toMatchObject({ model: "qwen2.5-coder:7b", fallback: true });
+    expect(r.why).toBe("agent work wants ≥14B; this computer has ≤7B; a larger model wasn't available (balance 0)");
+    const [spent] = planRoutes(heavy, { ...inp, balanceCSats: 500 }, "auto", { agentMinParamsB: 14, allowanceCSats: 0 });
+    expect(spent.why).toMatch(/a larger model wasn't available \((today's budget is spent|no network model that size)\)$/);
+  });
+
   it("This computer only never uses the network or your other machines", () => {
     const inp: RouteInputs = { ...harry, balanceCSats: 1_000, myModels: ["qwen2.5-coder:14b"] };
     expect(where(planRoutes(heavy, inp, "local_only"))).toEqual(["local:qwen2.5-coder:1.5b:fallback"]);

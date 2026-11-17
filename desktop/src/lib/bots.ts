@@ -87,6 +87,8 @@ export interface Bot {
   nextRun?: BotNextRun;
   /** A limit holding back the runs it starts on its own. */
   held?: "run_cap" | "budget";
+  /** Paused because its last runs kept hitting the same problem; your message or resuming clears it. */
+  stuck?: { atMs: number; problem: string; runs: number };
   budgetCSatsPerDay: number | null;
   allowedTools: string[];
   autoApproveEdits: boolean;
@@ -302,9 +304,10 @@ function untilText(ms: number, now: number): string {
  * The header status: what the bot is doing now or when it next works on its own, instead of a
  * "Run now" button ("Working…", "Next check in 12 min", "Paused").
  */
-export function autoStatus(bot: Pick<Bot, "status" | "enabled" | "nextRun" | "held" | "activity" | "maxRunsPerDay" | "lastRun">, now = Date.now()): { text: string; tone: "muted" | "accent" | "warn" | "err" } {
+export function autoStatus(bot: Pick<Bot, "status" | "enabled" | "nextRun" | "held" | "activity" | "maxRunsPerDay" | "lastRun"> & Partial<Pick<Bot, "name" | "stuck">>, now = Date.now()): { text: string; tone: "muted" | "accent" | "warn" | "err" } {
   if (bot.status === "running") return { text: bot.activity && !/^(Auto|Compute): /.test(bot.activity) ? `Working: ${bot.activity}` : "Working…", tone: "accent" };
   if (bot.status === "needs_approval") return { text: "Waiting for your approval", tone: "warn" };
+  if (!bot.enabled && bot.stuck) return { text: stuckText(bot.name ?? "It", bot.stuck), tone: "warn" };
   if (!bot.enabled) return { text: "Paused", tone: "muted" };
   if (bot.status === "over_budget" || bot.held === "budget") return { text: "Budget spent · resumes tomorrow", tone: "warn" };
   if (bot.held === "run_cap") return { text: `Daily limit of ${bot.maxRunsPerDay ?? DEFAULT_MAX_RUNS_PER_DAY} runs reached · resumes tomorrow`, tone: "warn" };
@@ -318,6 +321,12 @@ export function autoStatus(bot: Pick<Bot, "status" | "enabled" | "nextRun" | "he
     return { text: failed + text, tone };
   }
   return { text: `${failed}Waiting for a message`, tone };
+}
+
+/** "Paused: Harry kept hitting the same problem (npm test: package.json not found). Tell it what to do, or resume." */
+export function stuckText(name: string, stuck: NonNullable<Bot["stuck"]>): string {
+  const problem = stuck.problem.length > 120 ? `${stuck.problem.slice(0, 119)}…` : stuck.problem;
+  return `Paused: ${name} kept hitting the same problem (${problem}). Tell it what to do, or resume.`;
 }
 
 /** The bot's compute, as the server treats it (bots from older servers run on Auto). */
@@ -337,7 +346,8 @@ export function computeText(c: BotCompute, label?: (id: string) => { model: stri
 }
 
 /** The status chip in the bot header. */
-export function statusChip(bot: Pick<Bot, "status">): { text: string; tone: "muted" | "accent" | "warn" | "err" } {
+export function statusChip(bot: Pick<Bot, "status"> & Partial<Pick<Bot, "stuck">>): { text: string; tone: "muted" | "accent" | "warn" | "err" } {
+  if (bot.status === "paused" && bot.stuck) return { text: "Stuck", tone: "warn" };
   switch (bot.status) {
     case "running":
       return { text: "Running", tone: "accent" };
@@ -465,6 +475,7 @@ export function botStatusLine(bot: Bot, now = Date.now()): string {
     case "over_budget":
       return "Paused: today's budget is spent";
     case "paused":
+      if (bot.stuck) return `Stuck: same result ${bot.stuck.runs} runs in a row`;
       return bot.lastRun?.summary ? `Paused · ${readableSummary(bot.lastRun.summary)}` : "Paused";
     case "error":
       return readableSummary(bot.lastRun?.summary) || "Last run failed";

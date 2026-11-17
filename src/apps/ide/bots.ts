@@ -47,6 +47,7 @@ import {
   CI_SCOPES, TRIGGER_KINDS, TRIGGER_POLL_MS, ghApiCli, parseGitHubRepo, pollTrigger, untrustedEventBlock,
   type BotGitHubTrigger, type GhApi, type TriggerCursor, type TriggerEvent,
 } from "./bot-triggers.js";
+import { blockedResult, outcomeOf, projectCheck, runsDigest, stuckProblem, updateBlocks, actionKey, STUCK_RUNS, type KnownBlock, type RunOutcome } from "./bot-outcomes.js";
 import { normalizeRemoteUrl } from "./git-setup.js";
 import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
@@ -286,6 +287,15 @@ export interface BotAutoState {
   followUps: number;
   /** The local day a "limit reached" note was last added (one note a day). */
   capNotedDay?: number;
+  /**
+   * Paused because its last runs came to the same problem (STUCK_RUNS in a row): what it kept
+   * hitting. Your message or resuming clears it.
+   */
+  stuck?: { atMs: number; problem: string; runs: number };
+  /** When it was last un-stuck: earlier runs don't count toward the next streak. */
+  stuckClearedAtMs?: number;
+  /** Commands not to ask about again on its own: they failed after you allowed them, or you said no. */
+  blocked?: KnownBlock[];
 }
 
 /**
@@ -345,6 +355,8 @@ export interface BotRun {
   /** Something worth knowing about how it ran, e.g. "ran on a smaller local model (no cSats)". */
   note?: string;
   error?: string;
+  /** What it tried, what failed and what you answered, and how it ended (bot-outcomes.ts). */
+  outcome?: RunOutcome;
 }
 
 export interface PendingCall {
@@ -394,6 +406,8 @@ export interface BotView extends BotConfig {
   nextRun?: BotNextRun;
   /** Why it isn't starting runs on its own now, when that's a limit: today's runs or budget. */
   held?: "run_cap" | "budget";
+  /** Paused because it kept hitting the same problem (see BotAutoState.stuck). */
+  stuck?: { atMs: number; problem: string; runs: number };
 }
 
 /** A job to do: a role or instructions. Bots without one wait to be messaged. */
@@ -488,6 +502,11 @@ export interface BotRunContext {
   followUp: (minutes: number, reason: string) => void;
   /** cSats left in today's budget (null: no limit); the network never gets more than this. */
   budgetLeft: () => number | null;
+  /**
+   * Why a call shouldn't run or be asked about (a command that already failed or that you said
+   * no to; a repo command in a folder that isn't a project): the tool result to give instead, or null.
+   */
+  heldBack?: (tool: string, args: Record<string, unknown>) => string | null;
 }
 
 export type BotRunner = (ctx: BotRunContext) => Promise<void>;
@@ -581,7 +600,7 @@ export function summarize(text: string): string {
   return flat.length > 240 ? `${flat.slice(0, 237)}…` : flat;
 }
 
-export function botSystemPrompt(bot: BotConfig, memory: string): string {
+export function botSystemPrompt(bot: BotConfig, memory: string, digest = ""): string {
   return [
     `--- Persistent bot ---`,
     bot.repository && bot.repoPath
@@ -592,6 +611,7 @@ export function botSystemPrompt(bot: BotConfig, memory: string): string {
     orientation(bot, memory),
     bot.instructions.trim() ? `Your instructions:\n${bot.instructions.trim()}` : "",
     `Your memory (notes you saved on earlier runs):\n${memory.trim() || "(empty)"}`,
+    digest,
     `To save a short note for future runs (what you did, what to check next time), call the \`remember\` tool with {"note": "..."}. Keep notes brief.`,
     `Work only inside the project folder. Shell commands, commits, pushes and pull requests need the user's approval: ask only when needed. End every run with a short summary of what you did and anything that needs the user's attention.`,
     bot.allowedTools.includes("open_pull_request")
@@ -719,7 +739,7 @@ interface ActiveRun {
   run: BotRun;
   abort: AbortController;
   cancelReason?: "cancelled" | "budget";
-  pending: Map<string, PendingCall & { finish: (approved: boolean) => void }>;
+  pending: Map<string, PendingCall & { finish: (approved: boolean, how?: "timeout" | "cancelled") => void }>;
   reply: BotMessage;
   activity?: string;
   /** callId → tool, to tell which results came from open_pull_request. */
@@ -728,6 +748,8 @@ interface ActiveRun {
   followUp?: { minutes: number; reason: string };
   /** The project's fingerprint when the run started (check-ins: did the run change anything?). */
   fingerprintBefore?: string | null;
+  /** callId → what happened to its approval. */
+  decisions: Map<string, "approved" | "denied" | "unanswered">;
   done: Promise<void>;
 }
 
@@ -1435,6 +1457,7 @@ export class BotManager {
       }
     }
     const auto = (bot.auto ??= { idleStreak: 0, followUps: 0 });
+    if (resumed) this.unstick(bot);
     if (scheduleChanged || resumed || heartbeatChanged) {
       bot.nextRunAtMs = this.nextFor(bot);
       auto.idleStreak = 0;
@@ -1535,6 +1558,7 @@ export class BotManager {
       runCount: runs.length,
       ...(nextRun ? { nextRun } : {}),
       ...(hold === "budget" || hold === "run_cap" ? { held: hold } : {}),
+      ...(bot.auto?.stuck && !bot.enabled ? { stuck: { ...bot.auto.stuck } } : {}),
       triggerStatus: Object.fromEntries(
         bot.triggers.map((t) => {
           const c = cursors[t.id] ?? {};
@@ -1591,6 +1615,13 @@ export class BotManager {
     const content = [typed, attachedLine(saved)].filter(Boolean).join("\n\n");
     this.conversation(id).push({ id: randomUUID(), role: "user", content, atMs: this.now(), ...(saved.length ? { attachments: saved } : {}) });
     this.saveConversation(id);
+    // Paused because it was stuck: your message is what it was waiting for; it works on its own again.
+    if (bot.auto?.stuck) {
+      this.unstick(bot);
+      bot.enabled = true;
+      bot.nextRunAtMs = this.nextFor(bot);
+      this.save();
+    }
     if (this.active.has(id)) {
       this.queued.set(id, (this.queued.get(id) ?? 0) + 1);
       return { started: false, queued: true };
@@ -1605,6 +1636,8 @@ export class BotManager {
     if (this.overBudget(bot)) return { started: false, reason: "budget" };
     const now = this.now();
     const memory = this.memory(id);
+    // What its last runs tried and came to, before this one is added.
+    const digest = this.digest(bot);
     const conv = this.conversation(id);
     // Text files attached to messages it hasn't answered yet are inlined; older ones are paths.
     const answered = conv.map((m) => m.role).lastIndexOf("assistant");
@@ -1644,11 +1677,11 @@ export class BotManager {
     this.runs.set(id, list);
     const reply: BotMessage = { id: randomUUID(), role: "assistant", content: "", atMs: now, runId: run.id, events: [] };
     conv.push(reply);
-    const act: ActiveRun = { run, abort: new AbortController(), pending: new Map(), reply, tools: new Map(), done: Promise.resolve() };
+    const act: ActiveRun = { run, abort: new AbortController(), pending: new Map(), reply, tools: new Map(), decisions: new Map(), done: Promise.resolve() };
     this.active.set(id, act);
     this.save();
     this.saveConversation(id);
-    act.done = this.execute(bot, act, memory, context);
+    act.done = this.execute(bot, act, memory, context, digest);
     return { started: true, runId: run.id };
   }
 
@@ -1703,17 +1736,54 @@ export class BotManager {
 
   private abortRun(act: ActiveRun): void {
     act.abort.abort();
-    for (const p of [...act.pending.values()]) p.finish(false);
+    for (const p of [...act.pending.values()]) p.finish(false, "cancelled");
   }
 
-  private async execute(bot: BotConfig, act: ActiveRun, memory: string, messages: Array<{ role: string; content: string }>): Promise<void> {
+  /** The "last runs" block for its next run's prompt (bot-outcomes.ts). */
+  digest(bot: BotConfig): string {
+    const fmt = (ms: number) => {
+      const d = new Date(ms);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    };
+    const runs = (this.runs.get(bot.id) ?? []).filter((r) => r.status !== "running" && r.status !== "needs_approval");
+    return runsDigest(runs, bot.auto?.blocked ?? [], fmt);
+  }
+
+  /**
+   * Why a call of this run shouldn't run or be asked about: a repo command in a folder that isn't a
+   * project; a command (same command, same folder) that failed after you allowed it or that you
+   * said no to. Runs it starts on its own never ask for those again; a run answering your message
+   * may (you're there to say), except for what you already answered in this run.
+   */
+  private heldBack(bot: BotConfig, act: ActiveRun, tool: string, args: Record<string, unknown>): string | null {
+    const root = botWorkRoot(bot);
+    if (tool === "run_shell" && typeof args.command === "string") {
+      const notProject = projectCheck(args.command, root);
+      if (notProject) return notProject;
+    }
+    if (!bot.allowedTools.includes(tool as ToolName)) return null;
+    const key = actionKey(tool, args, root);
+    const live = this.bots.find((b) => b.id === bot.id) ?? bot;
+    const actions = outcomeOf({ events: act.reply.events ?? [], decisions: act.decisions, cwd: root, reply: "" }).actions;
+    const now = this.now();
+    // Answered earlier in this run: never asked twice in one run.
+    const inRun = updateBlocks([], actions, now).find((x) => x.key === key);
+    // From earlier runs (unless this run's answers cleared it): only runs it starts on its own hold back.
+    const before = AUTO_TRIGGERS.includes(act.run.trigger) ? updateBlocks(live.auto?.blocked ?? [], actions, now).find((x) => x.key === key) : undefined;
+    const b = inRun ?? before;
+    if (!b) return null;
+    return blockedResult(b, inRun ? "earlier in this run" : `on ${new Date(b.atMs).toISOString().slice(0, 16).replace("T", " ")}`);
+  }
+
+  private async execute(bot: BotConfig, act: ActiveRun, memory: string, messages: Array<{ role: string; content: string }>, digest = ""): Promise<void> {
     const id = bot.id;
     const owner = `bot:${id}`;
     const waitForApproval: BotRunContext["waitForApproval"] = (callId, tool, args) =>
       new Promise<boolean>((resolve) => {
         if (act.cancelReason) return resolve(false);
-        const finish = (approved: boolean) => {
+        const finish = (approved: boolean, how?: "timeout" | "cancelled") => {
           if (!act.pending.has(callId)) return;
+          act.decisions.set(callId, how ? "unanswered" : approved ? "approved" : "denied");
           clearTimeout(timer);
           act.pending.delete(callId);
           this.approvals.delete(callId);
@@ -1721,7 +1791,7 @@ export class BotManager {
           this.save();
           resolve(approved);
         };
-        const timer = setTimeout(() => finish(false), APPROVAL_TIMEOUT_MS);
+        const timer = setTimeout(() => finish(false, "timeout"), APPROVAL_TIMEOUT_MS);
         timer.unref?.();
         act.pending.set(callId, { callId, tool, args, finish });
         this.approvals.set(callId, { resolve: finish, tool, args, owner, projectRoot: botWorkRoot(bot) });
@@ -1746,7 +1816,7 @@ export class BotManager {
         runId: act.run.id,
         memory,
         messages,
-        systemAddition: botSystemPrompt(bot, memory),
+        systemAddition: botSystemPrompt(bot, memory, digest),
         sendEvent: (e) => this.record(id, act, e),
         signal: act.abort.signal,
         isCancelled: () => act.cancelReason !== undefined,
@@ -1761,11 +1831,12 @@ export class BotManager {
           const cap = (this.bots.find((b) => b.id === id) ?? bot).budgetCSatsPerDay;
           return cap == null ? null : Math.max(0, cap - this.spentToday(id));
         },
+        heldBack: (tool, args) => this.heldBack(bot, act, tool, args),
       });
     } catch (err) {
       error = (err as Error).message ?? String(err);
     }
-    for (const p of [...act.pending.values()]) p.finish(false);
+    for (const p of [...act.pending.values()]) p.finish(false, "cancelled");
     const text = act.reply.content;
     const modelError = /(^|\n)Error contacting model: (.*)$/.exec(text.trim());
     const run = act.run;
@@ -1783,6 +1854,16 @@ export class BotManager {
     } else {
       run.status = "done";
       run.summary = summarize(text) || "Finished with no reply.";
+    }
+    if (run.status === "done" || run.status === "failed") {
+      run.outcome = outcomeOf({ events: act.reply.events ?? [], decisions: act.decisions, cwd: botWorkRoot(bot), reply: text, ...(run.status === "failed" ? { runError: run.error } : {}) });
+      const live = this.bots.find((b) => b.id === id);
+      if (live) {
+        const auto = (live.auto ??= { idleStreak: 0, followUps: 0 });
+        const blocked = updateBlocks(auto.blocked ?? [], run.outcome.actions, run.endedAtMs);
+        if (blocked.length) auto.blocked = blocked;
+        else delete auto.blocked;
+      }
     }
     if (run.status !== "done" && run.status !== "failed") {
       act.reply.content += `${act.reply.content ? "\n\n" : ""}_${run.summary}_`;
@@ -1845,6 +1926,7 @@ export class BotManager {
       if (fp) auto.fingerprint = fp;
       bot.nextRunAtMs = now + heartbeatInterval(bot.heartbeatMinutes!, auto.idleStreak);
     }
+    if (this.pauseIfStuck(bot, run)) return;
     if (run.status !== "done" || !bot.enabled) return;
     // A reply that only says what it'll do next continues soon, but only when the run did something:
     // one that announced work, got its go-ahead and still called no tool would just do it again
@@ -1857,6 +1939,37 @@ export class BotManager {
       return;
     }
     auto.due = { atMs: now + wants.minutes * MINUTE, kind: "follow_up", reason: wants.reason };
+  }
+
+  /**
+   * The same problem STUCK_RUNS runs in a row (runs it started on its own: the same failing action,
+   * the same failure, a near-identical final message): pause it and say so, so it doesn't spend the
+   * day asking the same thing. Your message or resuming clears it. Returns whether it paused.
+   */
+  private pauseIfStuck(bot: BotConfig, run: BotRun): boolean {
+    if (!bot.enabled || !run.outcome || !AUTO_TRIGGERS.includes(run.trigger)) return false;
+    const auto = (bot.auto ??= { idleStreak: 0, followUps: 0 });
+    const since = auto.stuckClearedAtMs ?? 0;
+    const recent = (this.runs.get(bot.id) ?? []).filter((r) => r.startedAtMs >= since).slice(-STUCK_RUNS);
+    if (recent.length < STUCK_RUNS || !recent.every((r) => AUTO_TRIGGERS.includes(r.trigger) && r.outcome)) return false;
+    const problem = stuckProblem(recent.map((r) => r.outcome!));
+    if (!problem) return false;
+    bot.enabled = false;
+    auto.stuck = { atMs: this.now(), problem, runs: STUCK_RUNS };
+    delete auto.due;
+    this.queuedEvents.delete(bot.id);
+    this.note(bot.id, `Paused: ${bot.name} kept hitting the same problem ${STUCK_RUNS} runs in a row (${problem}). Tell it what to do, or resume it.`);
+    this.deps.log?.("bot_stuck_paused", { id: bot.id, problem });
+    return true;
+  }
+
+  /** Clear a stuck pause (your message or resume): it works on its own again, and older runs don't count. */
+  private unstick(bot: BotConfig): void {
+    const auto = bot.auto;
+    if (!auto?.stuck) return;
+    delete auto.stuck;
+    auto.stuckClearedAtMs = this.now();
+    auto.idleStreak = 0;
   }
 
   /** Stop the bot's current run (pending approvals are rejected). */
@@ -2045,6 +2158,15 @@ export function agentBotRunner(d: {
           return "Saved to memory.";
         }
         if (!allowed.has(tool)) return `[Error]: ${tool} isn't allowed for this bot. Ask the user to allow it in the bot's settings.`;
+        // Not run and not asked about: a repo command outside a project, a command that already
+        // failed or that the user said no to (the result says why, so it does something else).
+        const held = ctx.heldBack?.(tool, args);
+        if (held) {
+          const callId = `tc_${randomUUID().slice(0, 8)}`;
+          ctx.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: false });
+          ctx.sendEvent({ type: "tool_result", id: callId, error: held });
+          return `[Error]: ${held}`;
+        }
         return inner(tool, args);
       },
     });
