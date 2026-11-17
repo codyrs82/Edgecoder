@@ -4,10 +4,10 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_LEAD, UsageError, buildPrompt, parseCli, slugAndBranch } from "../../scripts/ec-fleet/args.mjs";
 
 describe("parseCli", () => {
-  it("start: defaults to the owner's frontier lead, auto worker, auto-edits", () => {
+  it("start: defaults to the network lead, auto worker, auto-edits", () => {
     const o = parseCli(["start", "--task", "fix it", "--branch", "ec/fix-fee"]);
     expect(o).toMatchObject({ command: "start", slug: "fix-fee", branch: "ec/fix-fee", task: "fix it", lead: DEFAULT_LEAD, worker: "auto", mode: "auto-edits", base: "origin/main", maxConcurrent: 2, dryRun: false, trailers: [] });
-    expect(DEFAULT_LEAD).toBe("frontier/anthropic/claude-opus-5-5");
+    expect(DEFAULT_LEAD).toBe("network/qwen3-coder:30b");
   });
 
   it("start: options", () => {
@@ -24,6 +24,7 @@ describe("parseCli", () => {
     [["start", "--task", "x", "--branch", "ec/x", "--mode", "yolo"], /--mode/],
     [["start", "--task", "x", "--branch", "ec/x", "--worker", "frontier/anthropic/claude-opus-5-5"], /frontier/],
     [["start", "--task", "x", "--branch", "ec/x", "--max-concurrent", "0"], /max-concurrent/],
+    [["start", "--task", "x", "--branch", "ec/x", "--lead", "frontier/anthropic/claude-opus-5-5"], /allow-frontier/],
     [["start", "--task", "x", "--branch", "ec/x", "--bogus"], /bogus/],
     [["start", "--task", "x", "--branch", "ec/x", "extra"], /positional/],
     [["deploy"], /Unknown command/],
@@ -35,6 +36,11 @@ describe("parseCli", () => {
   ])("%j is a usage error", (argv, msg) => {
     expect(() => parseCli(argv)).toThrow(UsageError);
     expect(() => parseCli(argv)).toThrow(msg);
+  });
+
+  it("a frontier lead only with --allow-frontier; --lead stays overridable", () => {
+    expect(parseCli(["start", "--task", "x", "--branch", "ec/x", "--lead", "frontier/anthropic/claude-opus-5-5", "--allow-frontier"])).toMatchObject({ lead: "frontier/anthropic/claude-opus-5-5" });
+    expect(parseCli(["start", "--task", "x", "--branch", "ec/x", "--lead", "network/qwen3.5:9b@apple"])).toMatchObject({ lead: "network/qwen3.5:9b@apple" });
   });
 
   it("watch / approve / send / status / stop", () => {
