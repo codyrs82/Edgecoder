@@ -17,7 +17,7 @@ export const QUOTE_SELECTION_BROWSER_LIB = [Q.quoteMarkdown, Q.insertQuoteText, 
 
 /** The chip's style, for the page's own nonce'd style block. */
 export const QUOTE_SELECTION_CSS = `
-      .quote-chip { position:fixed; z-index:60; display:inline-flex; align-items:center; gap:6px; height:28px; min-height:0; padding:0 10px 0 12px; border:1px solid var(--card-border); border-radius:999px; background:var(--bg-elevated); color:var(--text); box-shadow:0 4px 14px rgba(0,0,0,.18); font:inherit; font-size:12px; white-space:nowrap; cursor:pointer; }
+      .quote-chip { position:fixed; z-index:60; display:inline-flex; align-items:center; gap:6px; height:28px; min-height:0; padding:0 10px 0 12px; border:1px solid var(--card-border); border-radius:999px; background:var(--bg-elevated); color:var(--text); box-shadow:var(--shadow-2); font:inherit; font-size:12px; white-space:nowrap; cursor:pointer; }
       .quote-chip[hidden] { display:none; }
       .quote-chip:hover { background:var(--bg-surface); }
       .quote-chip kbd { font:inherit; color:var(--muted); background:none; border:none; padding:0; }
