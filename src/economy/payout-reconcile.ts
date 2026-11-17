@@ -1,6 +1,7 @@
 // Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 
+import { isMainnetNetwork } from "./faucet-policy.js";
 import type { PayoutRecord } from "../common/types.js";
 import type { LightningProvider, NodeBalances, NodePayment } from "./lightning.js";
 
@@ -81,6 +82,12 @@ export interface PayoutReconcileConfig {
   lookbackMs: number;
   /** Known solvency gap tolerated on top of toleranceSats (a historical gap awaiting a data fix). */
   solvencyAllowanceSats?: number;
+  /**
+   * Whether faucet grants count as backing in the solvency check. Off on mainnet (BITCOIN_NETWORK
+   * bitcoin/mainnet): a grant has no sats behind it, so on real money it must show up as a gap.
+   * On test networks grants stay counted, so a test ledger seeded with the faucet does not pause.
+   */
+  countGrantsAsBacking?: boolean;
 }
 
 export function payoutReconcileConfigFromEnv(env: NodeJS.ProcessEnv = process.env): PayoutReconcileConfig {
@@ -97,7 +104,8 @@ export function payoutReconcileConfigFromEnv(env: NodeJS.ProcessEnv = process.en
     toleranceSats: num("PAYOUT_RECONCILE_TOLERANCE_SATS", 1_000),
     // How far back the first run after a start reads node payments (later runs continue from the previous one).
     lookbackMs: num("PAYOUT_RECONCILE_LOOKBACK_MS", 86_400_000, 60_000),
-    solvencyAllowanceSats: num("PAYOUT_SOLVENCY_ALLOWANCE_SATS", 0)
+    solvencyAllowanceSats: num("PAYOUT_SOLVENCY_ALLOWANCE_SATS", 0),
+    countGrantsAsBacking: !isMainnetNetwork(env.BITCOIN_NETWORK)
   };
 }
 
@@ -140,6 +148,8 @@ export function evaluateReconciliation(input: {
   liabilitiesMsat?: number;
   solvency?: SolvencyInputs;
   solvencyAllowanceSats?: number;
+  /** Default false: faucet grants are not backing (see PayoutReconcileConfig.countGrantsAsBacking). */
+  countGrantsAsBacking?: boolean;
   previous?: ReconcileSnapshot | null;
   toleranceSats: number;
   /** On-chain deposits in the node not credited yet (msat): received, for balance_drop only. */
@@ -224,14 +234,17 @@ export function evaluateReconciliation(input: {
   // The allowance absorbs a known historical gap (payouts made before withdrawals debited credits)
   // until the owner corrects the data.
   if (input.solvency) {
-    const backingMsat = input.receivedMsat - input.outflowMsat + input.solvency.grantedMsat;
+    const grantsMsat = input.countGrantsAsBacking ? input.solvency.grantedMsat : 0;
+    const backingMsat = input.receivedMsat - input.outflowMsat + grantsMsat;
     const gap = input.solvency.outstandingMsat - backingMsat;
     const allowance = (input.solvencyAllowanceSats ?? 0) * 1000;
     checks.push({
       name: "solvency",
       ok: gap <= tol + allowance,
       pauses: true,
-      detail: `cSats outstanding ${input.solvency.outstandingMsat} msat; received - paid out + granted = ${backingMsat} msat${allowance ? ` (allowance ${allowance} msat)` : ""}`,
+      detail: input.countGrantsAsBacking
+        ? `cSats outstanding ${input.solvency.outstandingMsat} msat; received - paid out + granted = ${backingMsat} msat${allowance ? ` (allowance ${allowance} msat)` : ""}`
+        : `cSats outstanding ${input.solvency.outstandingMsat} msat; received - paid out = ${backingMsat} msat (faucet grants ${input.solvency.grantedMsat} msat not counted)${allowance ? ` (allowance ${allowance} msat)` : ""}`,
       msat: Math.max(0, gap)
     });
   }
@@ -329,7 +342,7 @@ export class PayoutReconciler {
         onchain ? onchain.inFlight() : Promise.resolve(false)
       ]);
       const outflowMsat = payoutOutflowMsat + onchainFeeMsat;
-      const { checks, snapshot } = evaluateReconciliation({ nowMs: now, balances, payments: list.payments, ledgerRows, outflowMsat, receivedMsat, liabilitiesMsat, solvency, solvencyAllowanceSats: this.d.config.solvencyAllowanceSats, previous: this.previous, toleranceSats: this.d.config.toleranceSats, onchainUncreditedMsat, skipBalanceDrop: inFlight });
+      const { checks, snapshot } = evaluateReconciliation({ nowMs: now, balances, payments: list.payments, ledgerRows, outflowMsat, receivedMsat, liabilitiesMsat, solvency, solvencyAllowanceSats: this.d.config.solvencyAllowanceSats, countGrantsAsBacking: this.d.config.countGrantsAsBacking ?? false, previous: this.previous, toleranceSats: this.d.config.toleranceSats, onchainUncreditedMsat, skipBalanceDrop: inFlight });
       // While an on-chain send is unrecorded the node balance is mid-move: keep the old baseline.
       if (!inFlight) {
         this.previous = snapshot;
@@ -350,7 +363,7 @@ export class PayoutReconciler {
           payments: list.payments.length,
           truncated: list.truncated
         },
-        ledger: { outflowMsat, receivedMsat, liabilitiesMsat, outstandingMsat: solvency?.outstandingMsat, grantedMsat: solvency?.grantedMsat, solvencyGapMsat: solvency ? solvency.outstandingMsat - (receivedMsat - outflowMsat + solvency.grantedMsat) : undefined }
+        ledger: { outflowMsat, receivedMsat, liabilitiesMsat, outstandingMsat: solvency?.outstandingMsat, grantedMsat: solvency?.grantedMsat, solvencyGapMsat: solvency ? solvency.outstandingMsat - (receivedMsat - outflowMsat + (this.d.config.countGrantsAsBacking ? solvency.grantedMsat : 0)) : undefined }
       };
     } catch (err) {
       result = { atMs: now, status: "error", checks: [], error: err instanceof Error ? err.message : String(err) };

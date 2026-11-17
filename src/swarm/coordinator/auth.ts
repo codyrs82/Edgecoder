@@ -6,23 +6,29 @@
  * and the admin token.
  */
 import {
-  safeTokenEqual,
   readHeaderValue,
   extractClientIp,
   isLoopbackSocket,
   submitterAccountDecision
 } from "../coordinator-utils.js";
 import { pgStore } from "../../db/store.js";
-import { checkSharedToken } from "../../common/env-guard.js";
+import { checkTokenSet } from "../../common/env-guard.js";
+import { matchesTokenSet } from "../../common/token-rotation.js";
+import { adminOriginDecision, socketAddressOf } from "../../common/admin-origin.js";
+import { PORTAL_ACTION_HEADER, verifyPortalAction, type PortalAction } from "../../security/portal-action.js";
 import { unsignedRequestDecision } from "../result-integrity.js";
 import { rawBodyOf, verifySignedRequest, type SignedHeaders } from "../../security/request-signing.js";
 import { verifyNonce } from "../../security/nonce-verifier.js";
 import { AgentRateLimitedError } from "../../security/agent-rate-limiter.js";
 import type { SecurityEventType } from "../../audit/security-events.js";
 import {
-  MESH_AUTH_TOKEN,
+  MESH_AUTH_TOKENS,
   IS_PROD,
-  PORTAL_SERVICE_TOKEN,
+  PORTAL_SERVICE_TOKENS,
+  ADMIN_API_TOKENS,
+  ADMIN_ORIGIN_POLICY,
+  PORTAL_ACTION_KEYS,
+  REQUIRE_PORTAL_ACTION_SIGNATURE,
   CLIENT_IP_TRUST,
   preAuthFailures,
   securityLog,
@@ -37,18 +43,18 @@ import { REQUIRE_SIGNED_AGENT_REQUESTS, agentCapabilities, behaviorTracker } fro
 
 // #5: an empty token means "open" only outside production; in production it is 503/denied.
 export function requireMeshToken(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => any }) {
-  const result = checkSharedToken(MESH_AUTH_TOKEN, req.headers["x-mesh-token"], IS_PROD);
+  const result = checkTokenSet(MESH_AUTH_TOKENS, req.headers["x-mesh-token"], IS_PROD);
   if (result === "ok") return true;
   reply.code(result === "not_configured" ? 503 : 401);
   return false;
 }
 
 export function hasMeshToken(headers: Record<string, unknown>): boolean {
-  return checkSharedToken(MESH_AUTH_TOKEN, headers["x-mesh-token"], IS_PROD) === "ok";
+  return checkTokenSet(MESH_AUTH_TOKENS, headers["x-mesh-token"], IS_PROD) === "ok";
 }
 
 export function hasPortalServiceToken(headers: Record<string, unknown>): boolean {
-  return checkSharedToken(PORTAL_SERVICE_TOKEN, headers["x-portal-service-token"], IS_PROD) === "ok";
+  return checkTokenSet(PORTAL_SERVICE_TOKENS, headers["x-portal-service-token"], IS_PROD) === "ok";
 }
 
 /*
@@ -367,16 +373,80 @@ export async function callerAccount(req: any, routePath: string, requested?: str
 }
 
 /* ── Admin dashboard (token-gated) ── */
-export const ADMIN_API_TOKEN = CC.ADMIN_API_TOKEN ?? "";
+export const ADMIN_API_TOKEN = ADMIN_API_TOKENS.current;
 
+/**
+ * Operator routes: the request must come from inside (loopback, Fly's private network, or
+ * ADMIN_ALLOWED_CIDRS, decided from the socket; never through the public edge proxy) and carry the
+ * admin token (current, or the previous one during a rotation). See src/common/admin-origin.ts.
+ */
 export function authorizeAdmin(req: any, reply: any): boolean {
-  if (!ADMIN_API_TOKEN) {
+  if (!ADMIN_API_TOKENS.current) {
     reply.code(503).send({ error: "admin_dashboard_not_configured" });
     return false;
   }
-  const headerToken = readHeaderValue(req.headers, "x-admin-token");
-  if (!headerToken || !safeTokenEqual(headerToken, ADMIN_API_TOKEN)) {
+  const origin = adminOriginDecision(socketAddressOf(req), (req.headers ?? {}) as Record<string, unknown>, ADMIN_ORIGIN_POLICY);
+  if (!origin.ok) {
+    reply.code(403).send({ error: "admin_internal_only", reason: origin.reason });
+    return false;
+  }
+  const headerToken = readHeaderValue(req.headers ?? {}, "x-admin-token");
+  if (!headerToken || !matchesTokenSet(headerToken, ADMIN_API_TOKENS)) {
     reply.code(401).send({ error: "invalid_admin_token" });
+    return false;
+  }
+  return true;
+}
+
+/** authorizeAdmin without a reply: true only for an internal request with a valid admin token. */
+export function isAdminRequest(req: any): boolean {
+  if (!ADMIN_API_TOKENS.current) return false;
+  if (!adminOriginDecision(socketAddressOf(req), (req.headers ?? {}) as Record<string, unknown>, ADMIN_ORIGIN_POLICY).ok) return false;
+  return matchesTokenSet(readHeaderValue(req.headers ?? {}, "x-admin-token"), ADMIN_API_TOKENS);
+}
+
+/**
+ * Money routes the portal calls for a logged-in user (withdraw, payout destinations, callback
+ * confirmation). The service token is required; on top of it, a portal action assertion
+ * (src/security/portal-action.ts) binds the request to the account, the action and its
+ * parameters. An assertion that is present is always checked. Without one the request is refused
+ * when REQUIRE_PORTAL_ACTION_SIGNATURE is on, and accepted (logged) during the transition.
+ * Sends the refusal and returns false.
+ */
+export async function requirePortalMoneyAction(
+  req: any,
+  reply: any,
+  expected: { accountId: string; action: PortalAction; body: Record<string, unknown> },
+  opts: { require?: boolean; keys?: typeof PORTAL_ACTION_KEYS } = {}
+): Promise<boolean> {
+  const required = opts.require ?? REQUIRE_PORTAL_ACTION_SIGNATURE;
+  const keys = opts.keys ?? PORTAL_ACTION_KEYS;
+  const header = readHeaderValue(req.headers ?? {}, PORTAL_ACTION_HEADER);
+  const log = (req as { log?: { warn: (o: unknown, m: string) => void; info: (o: unknown, m: string) => void } }).log;
+  if (!header) {
+    if (!required) {
+      log?.info({ action: expected.action, accountId: expected.accountId }, "portal_action_unsigned_accepted");
+      return true;
+    }
+    reply.code(401).send({ ok: false, error: "portal_action_signature_required" });
+    return false;
+  }
+  if (keys.length === 0) {
+    reply.code(503).send({ ok: false, error: "portal_action_keys_not_configured" });
+    return false;
+  }
+  const result = await verifyPortalAction(header, expected, {
+    keys,
+    nonceOnce: async (nonce, expiresAtMs) => {
+      if (nonceStore.insertIfAbsent) return nonceStore.insertIfAbsent(nonce, "portal", expiresAtMs);
+      if (await nonceStore.exists(nonce)) return false;
+      await nonceStore.insert(nonce, "portal", expiresAtMs);
+      return true;
+    }
+  });
+  if (!result.ok) {
+    log?.warn({ action: expected.action, accountId: expected.accountId, reason: result.reason }, "portal_action_refused");
+    reply.code(401).send({ ok: false, error: "portal_action_invalid", reason: result.reason });
     return false;
   }
   return true;

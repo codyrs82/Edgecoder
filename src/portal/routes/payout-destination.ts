@@ -1,6 +1,7 @@
 // Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 
+import { portalActionHeaders } from "../portal-action-signer.js";
 import type { FastifyInstance } from "fastify";
 import { request } from "undici";
 import { z } from "zod";
@@ -128,8 +129,8 @@ export function createPayoutRegistrar(cfg: {
       const base = urls[0].replace(/\/$/, "");
       const headers = { "x-portal-service-token": cfg.portalServiceToken };
       return kind === "onchain"
-        ? post(`${base}/economy/payouts/onchain-address`, headers, { accountId, address: destination })
-        : post(`${base}/economy/payouts/address`, headers, { accountId, lightningAddress: destination });
+        ? post(`${base}/economy/payouts/onchain-address`, { ...headers, ...portalActionHeaders(accountId, "payout.onchain_address", { address: destination }) }, { accountId, address: destination })
+        : post(`${base}/economy/payouts/address`, { ...headers, ...portalActionHeaders(accountId, "payout.lightning_address", { lightningAddress: destination }) }, { accountId, lightningAddress: destination });
     })();
     return { controlPlane: await controlPlane, coordinator: await coordinator };
   };
@@ -145,8 +146,8 @@ export function createPayoutRegistrar(cfg: {
     const base = urls[0].replace(/\/$/, "");
     const headers = { "x-portal-service-token": cfg.portalServiceToken };
     const [ln, chain] = await Promise.all([
-      post(`${base}/economy/payouts/address`, headers, { accountId, lightningAddress: null }),
-      post(`${base}/economy/payouts/onchain-address`, headers, { accountId, address: null })
+      post(`${base}/economy/payouts/address`, { ...headers, ...portalActionHeaders(accountId, "payout.lightning_address", { lightningAddress: null }) }, { accountId, lightningAddress: null }),
+      post(`${base}/economy/payouts/onchain-address`, { ...headers, ...portalActionHeaders(accountId, "payout.onchain_address", { address: null }) }, { accountId, address: null })
     ]);
     return ln === "ok" && chain === "ok" ? "ok" : "failed";
   };

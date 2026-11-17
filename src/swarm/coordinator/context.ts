@@ -5,6 +5,9 @@
  * Coordinator configuration, the swarm queue, the mesh, identity keys and the shared
  * in-memory maps that the rest of the coordinator reads.
  */
+import { tokenSet, type TokenSet } from "../../common/token-rotation.js";
+import { adminOriginPolicyFromEnv, type AdminOriginPolicy } from "../../common/admin-origin.js";
+import { parseVerifyKeys } from "../../security/portal-action.js";
 import { loadConfigOrExit } from "../../common/config.js";
 import { coordinatorConfigSchema } from "../coordinator-config.js";
 import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
@@ -214,6 +217,17 @@ export function requestOrigin(req: unknown): { clientIp?: string; loopback: bool
   };
 }
 export const PORTAL_SERVICE_TOKEN = CC.PORTAL_SERVICE_TOKEN ?? "";
+// Rotation (docs/security/rotation.md): each verifier accepts the current value and, until
+// TOKEN_PREVIOUS_UNTIL, the previous one. Senders always send the current value.
+export const MESH_AUTH_TOKENS: TokenSet = tokenSet(CC.MESH_AUTH_TOKEN, CC.MESH_AUTH_TOKEN_PREVIOUS, CC.TOKEN_PREVIOUS_UNTIL);
+export const PORTAL_SERVICE_TOKENS: TokenSet = tokenSet(CC.PORTAL_SERVICE_TOKEN, CC.PORTAL_SERVICE_TOKEN_PREVIOUS, CC.TOKEN_PREVIOUS_UNTIL);
+export const ADMIN_API_TOKENS: TokenSet = tokenSet(CC.ADMIN_API_TOKEN, CC.ADMIN_API_TOKEN_PREVIOUS, CC.TOKEN_PREVIOUS_UNTIL);
+/** Socket origins allowed to use admin-token routes (src/common/admin-origin.ts). */
+export const ADMIN_ORIGIN_POLICY: AdminOriginPolicy = adminOriginPolicyFromEnv(process.env);
+/** Portal action assertions (src/security/portal-action.ts): the portal's public keys. */
+export const PORTAL_ACTION_KEYS = parseVerifyKeys(CC.PORTAL_ACTION_VERIFY_KEYS);
+/** true: withdraw / payout destination routes refuse the service token without a portal assertion. */
+export const REQUIRE_PORTAL_ACTION_SIGNATURE = CC.REQUIRE_PORTAL_ACTION_SIGNATURE;
 // What this coordinator presents to the portal's read/validate /internal routes. Defaults to
 // PORTAL_SERVICE_TOKEN; once PORTAL_COORDINATOR_TOKEN is set here and on the portal, coordinators
 // no longer need the portal's own service token for those calls.

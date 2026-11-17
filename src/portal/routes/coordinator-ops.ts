@@ -7,7 +7,7 @@ import { z } from "zod";
 import type { CoordinatorOpsRoutesDeps } from "../server.js";
 
 /** #16: Coordinator operations API (/coordinator/ops/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
-export function registerCoordinatorOpsRoutes(app: FastifyInstance, { autoRequestHost, COORDINATOR_ADMIN_TOKEN, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, controlPlaneHeaders, discoverCoordinatorUrlsForPortal, fetchCoordinatorFederatedSummary, requireCoordinatorOperationsUser, store }: CoordinatorOpsRoutesDeps): void {
+export function registerCoordinatorOpsRoutes(app: FastifyInstance, { autoRequestHost, coordinatorAdminUrls, COORDINATOR_ADMIN_TOKEN, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, controlPlaneHeaders, discoverCoordinatorUrlsForPortal, fetchCoordinatorFederatedSummary, requireCoordinatorOperationsUser, store }: CoordinatorOpsRoutesDeps): void {
   app.get("/coordinator/ops/summary", async (req, reply) => {
     const principal = await requireCoordinatorOperationsUser(req as any, reply);
     if (!principal) return;
@@ -437,7 +437,8 @@ export function registerCoordinatorOpsRoutes(app: FastifyInstance, { autoRequest
     if (!COORDINATOR_ADMIN_TOKEN) {
       return reply.code(503).send({ error: "coordinator_admin_token_not_configured", detail: "Set COORDINATOR_ADMIN_TOKEN on the portal (the coordinators' ADMIN_API_TOKEN)." });
     }
-    const urls = [...new Set((await discoverCoordinatorUrlsForPortal()).map((u: string) => u.replace(/\/+$/, "")))];
+    // Admin-token calls: the coordinators' internal addresses when COORDINATOR_ADMIN_URLS is set.
+    const urls = [...new Set((await (coordinatorAdminUrls ?? discoverCoordinatorUrlsForPortal)()).map((u: string) => u.replace(/\/+$/, "")))];
     if (urls.length === 0) return reply.code(503).send({ error: "no_coordinator" });
     const reason = `rejected by ${user.email} from the portal`;
     const coordinators = await Promise.all(
@@ -492,7 +493,7 @@ export function registerCoordinatorOpsRoutes(app: FastifyInstance, { autoRequest
     if (!COORDINATOR_ADMIN_TOKEN) {
       return reply.code(503).send({ error: "coordinator_admin_token_not_configured", detail: "Set COORDINATOR_ADMIN_TOKEN on the portal (the coordinators' ADMIN_API_TOKEN)." });
     }
-    const urls = [...new Set((await discoverCoordinatorUrlsForPortal()).map((u: string) => u.replace(/\/+$/, "")))];
+    const urls = [...new Set((await (coordinatorAdminUrls ?? discoverCoordinatorUrlsForPortal)()).map((u: string) => u.replace(/\/+$/, "")))];
     const callAll = (payload: { force: boolean; dryRun: boolean }) =>
       Promise.all(
         urls.map(async (url) => {

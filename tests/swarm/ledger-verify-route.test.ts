@@ -24,6 +24,7 @@ afterAll(async () => {
 });
 
 const get = (headers: Record<string, string>, url = "/ledger/verify") => app.inject({ method: "GET", url, remoteAddress: "203.0.113.115", headers });
+const getInternal = (headers: Record<string, string>, url = "/ledger/verify") => app.inject({ method: "GET", url, remoteAddress: "127.0.0.1", headers });
 
 describe("/ledger/verify", () => {
   test("mesh token only: the ordering-chain status, as before; no token: refused", async () => {
@@ -34,10 +35,12 @@ describe("/ledger/verify", () => {
     expect(res.json()).toEqual({ ok: true });
   });
 
-  test("the reconciliation is admin-only", async () => {
-    expect((await get({ "x-mesh-token": MESH, "x-admin-token": "wrong" })).statusCode).toBe(401);
-    expect((await get({ "x-mesh-token": MESH, "x-admin-token": ADMIN }, "/ledger/verify?max=0")).statusCode).toBe(400);
-    const res = await get({ "x-mesh-token": MESH, "x-admin-token": ADMIN });
+  test("the reconciliation is admin-only, and internal-only", async () => {
+    // From a public address the admin token is refused before it is checked.
+    expect((await get({ "x-mesh-token": MESH, "x-admin-token": ADMIN })).statusCode).toBe(403);
+    expect((await getInternal({ "x-mesh-token": MESH, "x-admin-token": "wrong" })).statusCode).toBe(401);
+    expect((await getInternal({ "x-mesh-token": MESH, "x-admin-token": ADMIN }, "/ledger/verify?max=0")).statusCode).toBe(400);
+    const res = await getInternal({ "x-mesh-token": MESH, "x-admin-token": ADMIN });
     expect(res.statusCode).toBe(503);
     expect(res.json().error).toBe("ledger_verify_requires_postgres");
   });

@@ -3,8 +3,10 @@
 
 import { z } from "zod";
 import { alertingEnv } from "../alerting/config.js";
-import { envBool, envEnum, envFlag, envFlagWord, envInt, envNumber, envUrl } from "../common/config.js";
+import { envBool, envEnum, envFlag, envFlagWord, envInt, envNumber, envPort, envUrl } from "../common/config.js";
 import {
+  adminOriginEnv,
+  rotationEnv,
   anchoringEnv,
   announceEnv,
   bitcoindEnv,
@@ -32,6 +34,7 @@ import {
   verificationEnv
 } from "../config/shared.js";
 import { parseRestrictedModels } from "./restricted-models.js";
+import { parseVerifyKeys } from "../security/portal-action.js";
 
 /*
  * #15: coordinator (port 4301) configuration. Every numeric, boolean, enum and URL setting the
@@ -89,6 +92,28 @@ export const coordinatorConfigSchema = z.object({
   PORTAL_SERVICE_TOKEN: str(),
   PORTAL_COORDINATOR_TOKEN: str(),
   COORDINATOR_REGISTRATION_TOKEN: str(),
+  // Rotation (src/common/token-rotation.ts, docs/security/rotation.md): the previous value of a
+  // token, accepted next to the current one until TOKEN_PREVIOUS_UNTIL (at most 7 days ahead).
+  ADMIN_API_TOKEN_PREVIOUS: str(),
+  MESH_AUTH_TOKEN_PREVIOUS: str(),
+  PORTAL_SERVICE_TOKEN_PREVIOUS: str(),
+  ...rotationEnv,
+  ...adminOriginEnv,
+  /** Optional internal-only listener for operator calls over Fly's private network (0 = off). */
+  ADMIN_LISTEN_PORT: envPort(0),
+  ADMIN_LISTEN_HOST: z.string().default("::"),
+  // Portal action assertions on money routes (src/security/portal-action.ts).
+  PORTAL_ACTION_VERIFY_KEYS: z
+    .string()
+    .optional()
+    .superRefine((v, ctx) => {
+      try {
+        parseVerifyKeys(v);
+      } catch (e) {
+        ctx.addIssue({ code: "custom", message: e instanceof Error ? e.message : String(e) });
+      }
+    }),
+  REQUIRE_PORTAL_ACTION_SIGNATURE: envBool(false),
   // HMAC key and identity keys: validated as present/absent only and read byte-for-byte where used.
   PAYMENT_WEBHOOK_SECRET: str(),
   COORDINATOR_PRIVATE_KEY_PEM: str(),

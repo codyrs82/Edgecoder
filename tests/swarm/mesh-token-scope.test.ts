@@ -50,6 +50,9 @@ beforeAll(async () => {
   process.env.MESH_PEER_ALLOWLIST = `coord-allowed:${publicKeyFingerprint(peerKey.publicKeyPem)}@https://peer.invalid`;
   delete process.env.COORDINATOR_TRUST_PROXY;
   delete process.env.FLY_APP_NAME;
+  // These tests are about which token a route takes; the caller's address is "operator" here
+  // (tests/swarm/admin-origin-route.test.ts covers the origin check itself).
+  process.env.ADMIN_ALLOWED_CIDRS = `${REMOTE}/32`;
   ({ coordinatorServer: app } = await import("../../src/swarm/coordinator.js"));
   await app.ready();
   for (const keys of [agentA, agentB]) {
@@ -61,6 +64,7 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
+  delete process.env.ADMIN_ALLOWED_CIDRS;
   await app?.close();
   await new Promise<void>((resolve) => portal.close(() => resolve()));
   delete process.env.MESH_PEER_ALLOWLIST;

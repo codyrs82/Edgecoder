@@ -1,6 +1,7 @@
 // Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 
+import { portalActionHeaders } from "../portal-action-signer.js";
 import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { request } from "undici";
@@ -101,13 +102,13 @@ export function registerPayoutRoutes(
     const urls = await discoverCoordinatorUrlsForPortal();
     return urls.length ? urls[0].replace(/\/$/, "") : null;
   }
-  async function forward(method: "GET" | "POST", path: string, body?: unknown): Promise<{ status: number; text: string } | { error: { status: number; body: unknown } }> {
+  async function forward(method: "GET" | "POST", path: string, body?: unknown, extraHeaders: Record<string, string> = {}): Promise<{ status: number; text: string } | { error: { status: number; body: unknown } }> {
     const base = await coordinator();
     if (!base) return { error: { status: 503, body: { error: "no_coordinator" } } };
     try {
       const res = await request(`${base}${path}`, {
         method,
-        headers: headers(),
+        headers: { ...headers(), ...extraHeaders },
         body: body === undefined ? undefined : JSON.stringify(body),
         headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
         bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS
@@ -186,7 +187,8 @@ export function registerPayoutRoutes(
     if (!(await store.approveWithdrawChallenge({ challengeId: challenge.challengeId, userId: user.userId, capMsat, sinceMs }))) return capReply();
 
     const accountId = `acct-${user.userId}`;
-    const r = await forward("POST", "/economy/payouts/withdraw", { accountId, bolt11 });
+    // The user-bound assertion (src/security/portal-action.ts): this account, this invoice, once.
+    const r = await forward("POST", "/economy/payouts/withdraw", { accountId, bolt11 }, portalActionHeaders(accountId, "payout.withdraw", { bolt11 }));
     // Refused outright (not 2xx, so not the 202 "unconfirmed" either): it no longer counts against the cap.
     if ("error" in r || r.status >= 300) await store.releaseWithdrawChallenge(challenge.challengeId).catch(() => undefined);
     req.log.info({ accountId, amountMsat: amount, status: "error" in r ? r.error.status : r.status }, "payout_withdraw_confirmed");

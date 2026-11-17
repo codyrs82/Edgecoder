@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { safeTokenEqual } from "./crypto-utils.js";
+import { matchesTokenSet, type TokenSet } from "./token-rotation.js";
 
 /**
  * #5: bind to localhost unless HOST is set explicitly (Fly/Docker set HOST=0.0.0.0).
@@ -59,6 +60,15 @@ export function checkSharedToken(
 ): SharedTokenCheck {
   if (!configured) return isProd ? "not_configured" : "ok";
   return typeof provided === "string" && safeTokenEqual(provided, configured) ? "ok" : "unauthorized";
+}
+
+/**
+ * checkSharedToken for a rotating secret (src/common/token-rotation.ts): "configured" is decided by
+ * the current value; the previous one is also accepted inside its window.
+ */
+export function checkTokenSet(set: TokenSet, provided: unknown, isProd: boolean = isProduction()): SharedTokenCheck {
+  if (!set.current) return isProd ? "not_configured" : "ok";
+  return matchesTokenSet(provided, set) ? "ok" : "unauthorized";
 }
 
 /**

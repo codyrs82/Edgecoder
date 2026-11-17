@@ -4,8 +4,9 @@
 /**
  * Mesh routes: identity, peer registration, gossip ingest and relay, and the mesh WebSocket.
  */
+import { matchesTokenSet } from "../../../common/token-rotation.js";
 import { z } from "zod";
-import { safeTokenEqual, readHeaderValue, mayRelayOverWs } from "../../coordinator-utils.js";
+import { readHeaderValue, mayRelayOverWs } from "../../coordinator-utils.js";
 import { createRegistryMirror } from "../../../discovery/registry-mirror.js";
 import type {
   MeshPeerIdentity,
@@ -38,6 +39,7 @@ import {
   PORTAL_SERVICE_URL,
   CC,
   MESH_AUTH_TOKEN,
+  MESH_AUTH_TOKENS,
   MESH_PEER_ALLOWLIST,
   peerScore,
   PEER_ALLOWLIST_ENFORCED,
@@ -640,7 +642,7 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
     // Header first; the query parameter is kept for agents that predate it (it can end up in logs).
     const token = readHeaderValue(req.headers as Record<string, unknown>, "x-mesh-token") || url.searchParams.get("token");
     const peerId = url.searchParams.get("peerId");
-    const tokenValid = !MESH_AUTH_TOKEN || (Boolean(token) && safeTokenEqual(String(token), MESH_AUTH_TOKEN));
+    const tokenValid = !MESH_AUTH_TOKEN || (Boolean(token) && matchesTokenSet(String(token), MESH_AUTH_TOKENS));
     // Agents hold no mesh token: a registered agent connects with a signed bind by its own key.
     // A coordinator peer's id binds with that peer's key only, never with an agent key registered
     // under the same id (an agent named like a coordinator would otherwise take its gossip).

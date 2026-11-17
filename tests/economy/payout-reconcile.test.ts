@@ -68,9 +68,9 @@ describe("evaluateReconciliation", () => {
     expect(checks.find((c) => c.name === "liability_shortfall")).toMatchObject({ ok: false, pauses: false, msat: 400_000 });
   });
 
-  it("solvency: cSats outstanding beyond received − paid out + grants pauses; grants and the allowance are backing", () => {
-    const run = (solvency: { outstandingMsat: number; grantedMsat: number }, solvencyAllowanceSats?: number) =>
-      evaluateReconciliation({ ...base, balances: bal(100), payments: [], ledgerRows: new Map(), receivedMsat: 10_000_000, outflowMsat: 2_000_000, solvency, solvencyAllowanceSats }).checks.find((c) => c.name === "solvency");
+  it("solvency: cSats outstanding beyond received − paid out + grants pauses; grants (test networks) and the allowance are backing", () => {
+    const run = (solvency: { outstandingMsat: number; grantedMsat: number }, solvencyAllowanceSats?: number, countGrantsAsBacking = true) =>
+      evaluateReconciliation({ ...base, balances: bal(100), payments: [], ledgerRows: new Map(), receivedMsat: 10_000_000, outflowMsat: 2_000_000, solvency, solvencyAllowanceSats, countGrantsAsBacking }).checks.find((c) => c.name === "solvency");
     expect(run({ outstandingMsat: 8_000_000, grantedMsat: 0 })).toMatchObject({ ok: true, pauses: true, msat: 0 });
     expect(run({ outstandingMsat: 9_500_000, grantedMsat: 0 })).toMatchObject({ ok: false, pauses: true, msat: 1_500_000 });
     expect(run({ outstandingMsat: 9_500_000, grantedMsat: 1_500_000 })?.ok).toBe(true);
@@ -78,6 +78,18 @@ describe("evaluateReconciliation", () => {
     expect(run({ outstandingMsat: 9_500_000, grantedMsat: 0 }, 1_000)?.ok).toBe(false);
     // A store that cannot total it: no check.
     expect(evaluateReconciliation({ ...base, balances: bal(100), payments: [], ledgerRows: new Map() }).checks.some((c) => c.name === "solvency")).toBe(false);
+  });
+
+  it("solvency on mainnet: faucet grants are not backing, so a faucet mint shows up as a gap and pauses", () => {
+    const input = { ...base, balances: bal(100), payments: [], ledgerRows: new Map(), receivedMsat: 10_000_000, outflowMsat: 2_000_000, solvency: { outstandingMsat: 9_500_000, grantedMsat: 1_500_000 } };
+    const off = evaluateReconciliation({ ...input, countGrantsAsBacking: false }).checks.find((c) => c.name === "solvency");
+    expect(off).toMatchObject({ ok: false, pauses: true, msat: 1_500_000 });
+    expect(off?.detail).toContain("not counted");
+    // The default is the safe one.
+    expect(evaluateReconciliation(input).checks.find((c) => c.name === "solvency")?.ok).toBe(false);
+    expect(payoutReconcileConfigFromEnv({ BITCOIN_NETWORK: "bitcoin" }).countGrantsAsBacking).toBe(false);
+    expect(payoutReconcileConfigFromEnv({ BITCOIN_NETWORK: "mainnet" }).countGrantsAsBacking).toBe(false);
+    expect(payoutReconcileConfigFromEnv({ BITCOIN_NETWORK: "signet" }).countGrantsAsBacking).toBe(true);
   });
 });
 
@@ -182,7 +194,7 @@ describe("PayoutReconciler", () => {
   });
 
   it("config: defaults, minimum interval, 0 disables", () => {
-    expect(payoutReconcileConfigFromEnv({})).toEqual({ intervalMs: 600_000, toleranceSats: 1_000, lookbackMs: 86_400_000, solvencyAllowanceSats: 0 });
+    expect(payoutReconcileConfigFromEnv({})).toEqual({ intervalMs: 600_000, toleranceSats: 1_000, lookbackMs: 86_400_000, solvencyAllowanceSats: 0, countGrantsAsBacking: true });
     expect(payoutReconcileConfigFromEnv({ PAYOUT_RECONCILE_MS: "5" }).intervalMs).toBe(60_000);
     expect(payoutReconcileConfigFromEnv({ PAYOUT_RECONCILE_MS: "0" }).intervalMs).toBe(0);
     expect(() => payoutReconcileConfigFromEnv({ PAYOUT_RECONCILE_TOLERANCE_SATS: "x" })).toThrow();
