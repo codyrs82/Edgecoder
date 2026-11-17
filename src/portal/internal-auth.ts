@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { safeTokenEqual } from "../common/crypto-utils.js";
-import { checkInternalServiceToken } from "../common/env-guard.js";
+import { checkTokenSet } from "../common/env-guard.js";
+import { matchesTokenSet, tokenSet } from "../common/token-rotation.js";
 
 /*
  * Who may call the portal's /internal/* routes.
@@ -23,6 +24,10 @@ export interface InternalAuthConfig {
   adminToken: string;
   /** PORTAL_ALLOW_OPEN_INTERNAL=1 outside production: an unset token is open. */
   allowOpenWhenUnset: boolean;
+  /** Rotation (docs/security/rotation.md): previous values, accepted until previousUntil. */
+  serviceTokenPrevious?: string;
+  adminTokenPrevious?: string;
+  previousUntil?: string;
 }
 
 type Reply = { code: (n: number) => { send: (b: unknown) => unknown } };
@@ -37,12 +42,14 @@ function header(headers: Record<string, unknown>, name: string): string | undefi
 
 export function createInternalAuth(cfg: InternalAuthConfig) {
   const coordinatorToken = (cfg.coordinatorToken ?? "").trim();
+  const serviceTokens = tokenSet(cfg.serviceToken, cfg.serviceTokenPrevious, cfg.previousUntil);
+  const adminTokens = tokenSet(cfg.adminToken, cfg.adminTokenPrevious, cfg.previousUntil);
 
   /** Read/validate access: the service token or the coordinator token. */
   function requireInternalToken(req: Req, reply: Reply): boolean {
     const provided = header(req.headers, "x-portal-service-token");
     if (coordinatorToken && typeof provided === "string" && safeTokenEqual(provided, coordinatorToken)) return true;
-    const result = checkInternalServiceToken(cfg.serviceToken, provided, { allowOpenWhenUnset: cfg.allowOpenWhenUnset });
+    const result = checkTokenSet(serviceTokens, provided, !cfg.allowOpenWhenUnset);
     if (result === "ok") return true;
     if (result === "not_configured" && !coordinatorToken) {
       reply.code(503).send({ error: "internal_auth_not_configured" });
@@ -61,7 +68,7 @@ export function createInternalAuth(cfg: InternalAuthConfig) {
     }
     const bearer = header(req.headers, "authorization");
     const provided = header(req.headers, "x-admin-token") ?? (bearer?.startsWith("Bearer ") ? bearer.slice(7).trim() : undefined);
-    if (provided && safeTokenEqual(provided, cfg.adminToken)) return true;
+    if (provided && matchesTokenSet(provided, adminTokens)) return true;
     reply.code(403).send({ error: "control_plane_admin_required" });
     return false;
   }

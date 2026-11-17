@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { inferenceService } from "./inference/service.js";
-import { coordinatorServer, initCoordinator, startCoordinatorAlerting } from "./swarm/coordinator.js";
+import { coordinatorServer, initCoordinator, startCoordinatorAlerting, startCoordinatorAdminListener } from "./swarm/coordinator.js";
 import { controlPlaneServer } from "./control-plane/server.js";
 import { fork } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -135,6 +135,8 @@ async function boot(): Promise<void> {
   }
 
   logger.info({ coordinator: COORDINATOR_PORT, inference: INFERENCE_PORT, controlPlane: CONTROL_PLANE_PORT }, "services listening");
+  // Internal-only operator listener when ADMIN_LISTEN_PORT is set (src/swarm/coordinator/admin-listener.ts).
+  await startCoordinatorAdminListener();
 
   // Initialize coordinator background tasks (intervals, peer mesh bootstrap, etc.)
   await initCoordinator();

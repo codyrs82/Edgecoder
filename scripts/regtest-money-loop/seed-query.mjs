@@ -14,6 +14,10 @@
 //   ledger-verify                      the coordinator's #115 ledger reconciliation (/ledger/verify)
 //   balance <accountId>                payout balance, payouts and policy (coordinator route)
 //   resolve-pending                    (fixed builds only) settle stuck pending payouts from the node's record
+//   admin <METHOD> <path> [b64 json]   an admin-token route on this coordinator, over loopback
+//
+// withdraw / address use the portal service token without a portal action assertion: they work
+// only while REQUIRE_PORTAL_ACTION_SIGNATURE is off (test networks). With it on, go through the portal.
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 const require = createRequire("/app/package.json");
@@ -137,6 +141,13 @@ try {
     const r = await call("GET", "/ledger/verify?max=20");
     const b = r.body ?? {};
     out({ status: r.status, ok: b.ok, mismatches: b.mismatches, byKind: b.byKind, accountsChecked: b.accountsChecked, accrualsChecked: b.accrualsChecked, accrualsRecomputed: b.accrualsRecomputed, notRecomputable: b.notRecomputable, orderingChain: b.orderingChain, discrepancies: (b.discrepancies ?? []).slice(0, 10), error: b.error });
+  }
+  else if (cmd === "admin") {
+    // An operator route on this machine's own coordinator (loopback): the coordinators refuse
+    // admin-token calls that come through the public edge. <method> <path> [base64 JSON body]
+    const body = a[2] ? JSON.parse(Buffer.from(a[2], "base64").toString("utf8")) : undefined;
+    if (!/^\/(admin|ledger|economy|security)\//.test(a[1] ?? "")) throw new Error("admin: path must be an operator route");
+    out(await call(String(a[0]).toUpperCase(), a[1], body));
   }
   else if (cmd === "withdraw") out(await call("POST", "/economy/payouts/withdraw", { accountId: a[0], bolt11: a[1] }));
   else if (cmd === "balance") out(await call("GET", `/economy/payouts/${encodeURIComponent(a[0])}`));

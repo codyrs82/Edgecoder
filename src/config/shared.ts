@@ -3,6 +3,8 @@
 
 import { z } from "zod";
 import { envEnum, envEnumCi, envFlag, envInt, envJson, envNumber, envUrl } from "../common/config.js";
+import { previousUntilProblem } from "../common/token-rotation.js";
+import { allowedCidrsProblem } from "../common/admin-origin.js";
 
 /*
  * #15: variables that more than one service reads, grouped by the library that reads them. A
@@ -327,4 +329,27 @@ export const escalationEnv = {
 export const bleSyncEnv = {
   BLE_SYNC_MAX_CREDITS_PER_TX: amount(),
   BLE_SYNC_ALLOW_V1: envFlag({ on: ["1"] })
+};
+
+const checked = (problem: (v: string | undefined) => string | null) =>
+  z
+    .string()
+    .optional()
+    .superRefine((v, ctx) => {
+      const p = problem(v);
+      if (p) ctx.addIssue({ code: "custom", message: p });
+    });
+
+/**
+ * Secret rotation (src/common/token-rotation.ts, docs/security/rotation.md): until this time the
+ * `<NAME>_PREVIOUS` values are accepted next to the current ones. ISO 8601 or epoch ms, at most 7
+ * days ahead; unset means no previous value is accepted.
+ */
+export const rotationEnv = {
+  TOKEN_PREVIOUS_UNTIL: checked((v) => previousUntilProblem(v))
+};
+
+/** Extra socket CIDRs allowed to use admin-token routes (src/common/admin-origin.ts). */
+export const adminOriginEnv = {
+  ADMIN_ALLOWED_CIDRS: checked(allowedCidrsProblem)
 };

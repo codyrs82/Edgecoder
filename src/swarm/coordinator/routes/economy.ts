@@ -28,7 +28,7 @@ import {
 } from "../context.js";
 import { mutable } from "../mutable-state.js";
 import { ordering } from "../agent-state.js";
-import { requireMeshToken, requireMeshOrPortalToken, requirePortalServiceToken, authorizeAdmin } from "../auth.js";
+import { requireMeshToken, requireMeshOrPortalToken, requirePortalServiceToken, requirePortalMoneyAction, authorizeAdmin } from "../auth.js";
 import {
   latestPriceEpochByResource,
   quoteSatsPerCredit,
@@ -121,6 +121,7 @@ export function registerEconomyRoutes(app: CoordinatorApp): void {
     const parsed = z.object({ accountId: z.string().min(1), bolt11: z.string().min(20).max(4096) }).safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ ok: false, code: "invalid_request", detail: parsed.error.issues.map((i) => i.message).join("; ") });
     const body = parsed.data;
+    if (!(await requirePortalMoneyAction(req, reply, { accountId: body.accountId, action: "payout.withdraw", body }))) return;
     const result = await payoutService.withdraw(body.accountId, body.bolt11.trim());
     if (!result.ok) return reply.code(result.code === "payout_unconfirmed" ? 202 : result.code === "payouts_paused" ? 503 : 400).send(result);
     return result;
@@ -130,6 +131,7 @@ export function registerEconomyRoutes(app: CoordinatorApp): void {
     const parsedAddr = z.object({ accountId: z.string().min(1), lightningAddress: z.string().max(256).nullable() }).safeParse(req.body ?? {});
     if (!parsedAddr.success) return reply.code(400).send({ error: "invalid_request" });
     const body = parsedAddr.data;
+    if (!(await requirePortalMoneyAction(req, reply, { accountId: body.accountId, action: "payout.lightning_address", body }))) return;
     const address = body.lightningAddress?.trim() || null;
     if (address && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(address) && !/^https:\/\//i.test(address) && !/^lnurl1/i.test(address)) {
       return reply.code(400).send({ error: "invalid_lightning_address" });
@@ -158,6 +160,7 @@ export function registerEconomyRoutes(app: CoordinatorApp): void {
     const parsed = z.object({ accountId: z.string().min(1).max(128), destination: z.string().min(3).max(512), newOrigin: z.string().min(8).max(300) }).safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ ok: false, error: "invalid_request" });
     const { accountId, destination, newOrigin } = parsed.data;
+    if (!(await requirePortalMoneyAction(req, reply, { accountId, action: "payout.callback_confirm", body: parsed.data }))) return;
     const ok = await callbackPins.confirmCallbackChange(accountId, destination, newOrigin, Date.now());
     if (!ok) return reply.code(409).send({ ok: false, error: "callback_change_not_pending" });
     app.log.info({ accountId, destination, newOrigin }, "payout_callback_change_confirmed");

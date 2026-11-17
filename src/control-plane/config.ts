@@ -3,7 +3,7 @@
 
 import { z } from "zod";
 import { envBool, envUrl } from "../common/config.js";
-import { modelEnv, observabilityEnv, serviceUrlsEnv } from "../config/shared.js";
+import { modelEnv, observabilityEnv, rotationEnv, serviceUrlsEnv } from "../config/shared.js";
 
 /** Minimum ADMIN_API_TOKEN length when NODE_ENV=production (same floor as INFERENCE_AUTH_TOKEN). */
 export const ADMIN_PROD_MIN_TOKEN_LENGTH = 32;
@@ -19,11 +19,15 @@ export const controlPlaneConfigSchema = z.object({
   ...serviceUrlsEnv,
   ...modelEnv,
   NODE_ENV: z.string().default("development"),
-  /** Comma-separated client IPs allowed to call admin routes / load the UI; unset = no IP restriction. */
+  /** Comma-separated client IPs (the TCP peer address, never a forwarded header) allowed to call admin routes / load the UI; unset = no IP restriction. */
   ALLOWED_ADMIN_IPS: z.string().optional(),
   ALLOWED_UI_IPS: z.string().optional(),
   COORDINATOR_URL: envUrl("http://127.0.0.1:4301"),
   ADMIN_API_TOKEN: z.string({ message: "is required" }),
+  /** Rotation (docs/security/rotation.md): accepted next to the current value until TOKEN_PREVIOUS_UNTIL. */
+  ADMIN_API_TOKEN_PREVIOUS: z.string().optional(),
+  PORTAL_SERVICE_TOKEN_PREVIOUS: z.string().optional(),
+  ...rotationEnv,
   COORDINATOR_MESH_TOKEN: z.string().optional(),
   MESH_AUTH_TOKEN: z.string().optional(),
   PORTAL_SERVICE_URL: envUrl(),

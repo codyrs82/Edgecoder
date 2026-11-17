@@ -694,37 +694,40 @@ describe("Admin API authentication -- IP allowlist", () => {
     expect(res.json().error).toBe("admin_ip_forbidden");
   });
 
-  test("allows request from allowlisted IP via x-forwarded-for", async () => {
+  test("allows a request whose socket address is allowlisted", async () => {
     process.env.ALLOWED_ADMIN_IPS = "10.0.0.1,10.0.0.2";
     const res = await app.inject({
       method: "GET",
       url: "/agents",
-      headers: adminHeaders({ "x-forwarded-for": "10.0.0.1" }),
+      remoteAddress: "10.0.0.1",
+      headers: adminHeaders(),
     });
     expect(res.statusCode).toBe(200);
   });
 
-  test("extracts first IP from multi-value x-forwarded-for", async () => {
+  test("x-forwarded-for cannot claim an allowlisted address (socket only)", async () => {
     process.env.ALLOWED_ADMIN_IPS = "10.0.0.1";
     const res = await app.inject({
       method: "GET",
       url: "/agents",
+      remoteAddress: "192.168.1.100",
       headers: adminHeaders({ "x-forwarded-for": "10.0.0.1, 172.16.0.1" }),
     });
-    expect(res.statusCode).toBe(200);
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error).toBe("admin_ip_forbidden");
   });
 
-  test("prefers fly-client-ip over x-forwarded-for", async () => {
+  test("fly-client-ip cannot claim an allowlisted address (socket only)", async () => {
     process.env.ALLOWED_ADMIN_IPS = "10.0.0.1";
     const res = await app.inject({
       method: "GET",
       url: "/agents",
-      headers: adminHeaders({
-        "fly-client-ip": "10.0.0.1",
-        "x-forwarded-for": "192.168.1.100",
-      }),
+      remoteAddress: "192.168.1.100",
+      headers: adminHeaders({ "fly-client-ip": "10.0.0.1" }),
     });
-    expect(res.statusCode).toBe(200);
+    expect(res.statusCode).toBe(403);
+    const ok = await app.inject({ method: "GET", url: "/agents", remoteAddress: "10.0.0.1", headers: adminHeaders({ "fly-client-ip": "198.51.100.9" }) });
+    expect(ok.statusCode).toBe(200);
   });
 
   test("IP check runs before token check", async () => {
@@ -888,6 +891,26 @@ describe("Credits endpoints (in-memory)", () => {
       payload: { credits: 10001 },
     });
     expect(res.statusCode).toBeGreaterThanOrEqual(400);
+  });
+
+  test("POST /credits/:accountId/faucet is refused on mainnet, whatever else is set", async () => {
+    const { adjustCredits } = await import("../../src/credits/store.js");
+    const saved = process.env.BITCOIN_NETWORK;
+    try {
+      for (const network of ["bitcoin", "mainnet", "Bitcoin"]) {
+        process.env.BITCOIN_NETWORK = network;
+        vi.mocked(adjustCredits).mockClear();
+        const res = await app.inject({ method: "POST", url: "/credits/mint-acct/faucet", headers: adminHeaders(), payload: { credits: 10000 } });
+        expect(res.statusCode, network).toBe(403);
+        expect(res.json().error).toBe("faucet_disabled_on_mainnet");
+        expect(adjustCredits).not.toHaveBeenCalled();
+      }
+      process.env.BITCOIN_NETWORK = "signet";
+      expect((await app.inject({ method: "POST", url: "/credits/mint-acct/faucet", headers: adminHeaders(), payload: { credits: 10 } })).statusCode).toBe(200);
+    } finally {
+      if (saved === undefined) delete process.env.BITCOIN_NETWORK;
+      else process.env.BITCOIN_NETWORK = saved;
+    }
   });
 });
 

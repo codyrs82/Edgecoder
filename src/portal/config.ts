@@ -4,7 +4,8 @@
 import { z } from "zod";
 import { alertingEnv } from "../alerting/config.js";
 import { envEnum, envEnumCi, envFlag, envInt, envNumber, envUrl } from "../common/config.js";
-import { computeClassEnv, discoveryEnv, launchEnv, reservesEnv, observabilityEnv, onchainEnv, postgresPoolEnv, serviceUrlsEnv } from "../config/shared.js";
+import { computeClassEnv, discoveryEnv, launchEnv, reservesEnv, observabilityEnv, onchainEnv, postgresPoolEnv, rotationEnv, serviceUrlsEnv } from "../config/shared.js";
+import { parseSigningKey } from "../security/portal-action.js";
 
 /*
  * #15: portal (port 4310) configuration, validated once at startup. Field-level checks
@@ -45,6 +46,32 @@ export const portalConfigSchema = z.object({
    * Unset: the page says it is not configured.
    */
   COORDINATOR_ADMIN_TOKEN: optStr,
+  /**
+   * Where the portal sends admin-token calls (revenue, network, alerts, node dismiss/remove):
+   * comma-separated internal coordinator URLs, e.g. http://edgecoder-seed.internal:4311. The
+   * coordinators refuse admin calls that arrive through the public edge (src/common/admin-origin.ts).
+   * Unset: the discovered (public) coordinator URLs, as before.
+   */
+  COORDINATOR_ADMIN_URLS: optStr,
+  /**
+   * Ed25519 private key the portal signs withdraw / payout-destination requests with
+   * (src/security/portal-action.ts); the coordinators hold the public key (PORTAL_ACTION_VERIFY_KEYS).
+   */
+  PORTAL_ACTION_SIGNING_KEY: z
+    .string()
+    .optional()
+    .superRefine((v, ctx) => {
+      if (!v?.trim()) return;
+      try {
+        parseSigningKey(v);
+      } catch (e) {
+        ctx.addIssue({ code: "custom", message: e instanceof Error ? e.message : String(e) });
+      }
+    }),
+  /** Rotation (docs/security/rotation.md): accepted next to the current value until TOKEN_PREVIOUS_UNTIL. */
+  PORTAL_SERVICE_TOKEN_PREVIOUS: optStr,
+  CONTROL_PLANE_ADMIN_TOKEN_PREVIOUS: optStr,
+  ...rotationEnv,
   PORTAL_SESSION_TTL_MS: ttl(1000 * 60 * 60 * 24 * 7),
   PORTAL_EMAIL_VERIFY_TTL_MS: ttl(1000 * 60 * 60 * 24),
   PASSKEY_CHALLENGE_TTL_MS: ttl(300_000),

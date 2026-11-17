@@ -6,7 +6,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { safeTokenEqual, readHeaderValue } from "../../coordinator-utils.js";
+import { readHeaderValue } from "../../coordinator-utils.js";
 import type { BlacklistRecord, BlacklistReasonCode } from "../../../common/types.js";
 import { signPayload } from "../../../mesh/peer.js";
 import {
@@ -30,7 +30,7 @@ import {
   agentCapabilities
 } from "../agent-state.js";
 import { nodeRemovalBlocker } from "../node-removal.js";
-import { requireMeshToken, ADMIN_API_TOKEN, authorizeAdmin } from "../auth.js";
+import { requireMeshToken, authorizeAdmin, isAdminRequest } from "../auth.js";
 
 export function registerSecurityRoutes(app: CoordinatorApp): void {
   app.get("/mesh/reputation", async () => ({
@@ -54,7 +54,7 @@ export function registerSecurityRoutes(app: CoordinatorApp): void {
       .parse(req.query);
     // The work's input and result belong to the two agents; other mesh members see the record only.
     const headerToken = readHeaderValue((req as any).headers ?? {}, "x-admin-token");
-    const admin = Boolean(ADMIN_API_TOKEN && headerToken && safeTokenEqual(headerToken, ADMIN_API_TOKEN));
+    const admin = Boolean(headerToken) && isAdminRequest(req);
     const events = [...directWorkById.values()]
       .sort((a, b) => b.createdAtMs - a.createdAtMs)
       .slice(0, limit.limit)

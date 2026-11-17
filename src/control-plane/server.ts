@@ -1,6 +1,10 @@
 // Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 
+import { tokenSet, matchesTokenSet } from "../common/token-rotation.js";
+import { socketAddressOf } from "../common/admin-origin.js";
+import { faucetAllowed } from "../economy/faucet-policy.js";
+import { normalizeIpCandidate } from "../swarm/coordinator-utils.js";
 import { DESKTOP_APP_ORIGINS } from "../common/desktop-origins.js";
 import { loadConfigOrExit } from "../common/config.js";
 import { controlPlaneConfigSchema } from "./config.js";
@@ -18,7 +22,6 @@ import { defaultDeploymentPlan } from "./deployment.js";
 import { pgStore } from "../db/store.js";
 import { ensureOllamaModelInstalled } from "../model/ollama-installer.js";
 import { buildAdminDashboardRoutes } from "./dashboard.js";
-import { safeTokenEqual } from "../common/crypto-utils.js";
 import { LISTEN_HOST, requireProdEnv } from "../common/env-guard.js";
 import { upstreamPathSegment } from "./path-segment.js";
 
@@ -38,6 +41,9 @@ const ADMIN_API_TOKEN: string = CP.ADMIN_API_TOKEN;
 const COORDINATOR_MESH_TOKEN = CP.COORDINATOR_MESH_TOKEN ?? CP.MESH_AUTH_TOKEN ?? "";
 const PORTAL_SERVICE_URL = CP.PORTAL_SERVICE_URL ?? "";
 const PORTAL_SERVICE_TOKEN = CP.PORTAL_SERVICE_TOKEN ?? "";
+// Rotation (docs/security/rotation.md): the previous values are accepted until TOKEN_PREVIOUS_UNTIL.
+const ADMIN_API_TOKENS = tokenSet(ADMIN_API_TOKEN, CP.ADMIN_API_TOKEN_PREVIOUS, CP.TOKEN_PREVIOUS_UNTIL);
+const PORTAL_SERVICE_TOKENS = tokenSet(PORTAL_SERVICE_TOKEN, CP.PORTAL_SERVICE_TOKEN_PREVIOUS, CP.TOKEN_PREVIOUS_UNTIL);
 const UI_RETIRE_REDIRECT_URL =
   CP.UI_RETIRE_REDIRECT_URL ??
   (PORTAL_SERVICE_URL ? `${PORTAL_SERVICE_URL.replace(/\/$/, "")}/portal/coordinator-ops` : "/");
@@ -52,16 +58,13 @@ function parseAllowedIps(raw: string | undefined): Set<string> {
   );
 }
 
-function extractClientIp(headers: Record<string, unknown>, fallbackIp: string): string {
-  const flyClientIp = headers["fly-client-ip"];
-  if (typeof flyClientIp === "string" && flyClientIp.length > 0) {
-    return flyClientIp.trim();
-  }
-  const forwarded = headers["x-forwarded-for"];
-  if (typeof forwarded === "string" && forwarded.length > 0) {
-    return forwarded.split(",")[0].trim();
-  }
-  return fallbackIp;
+/**
+ * The client address for ALLOWED_ADMIN_IPS / ALLOWED_UI_IPS: the TCP peer, never a header.
+ * Fly-Client-IP and X-Forwarded-For can be sent by anyone who reaches this port (every machine on
+ * the private network), so they cannot decide an IP allowlist.
+ */
+function socketClientIp(req: unknown): string {
+  return normalizeIpCandidate(socketAddressOf(req) ?? "") ?? "";
 }
 
 function extractAdminToken(headers: Record<string, unknown>): string | undefined {
@@ -76,8 +79,7 @@ function extractAdminToken(headers: Record<string, unknown>): string | undefined
 
 function isPortalInternalRequest(headers: Record<string, unknown>): boolean {
   if (!PORTAL_SERVICE_TOKEN) return false;
-  const token = headers["x-portal-service-token"];
-  return typeof token === "string" && safeTokenEqual(token, PORTAL_SERVICE_TOKEN);
+  return matchesTokenSet(headers["x-portal-service-token"], PORTAL_SERVICE_TOKENS);
 }
 
 function authorizeAdmin(req: { headers: Record<string, unknown>; ip: string; method?: string }, reply: any): boolean {
@@ -90,14 +92,14 @@ function authorizeAdmin(req: { headers: Record<string, unknown>; ip: string; met
   }
   const allowedIps = parseAllowedIps(process.env.ALLOWED_ADMIN_IPS);
   if (allowedIps.size > 0) {
-    const ip = extractClientIp(req.headers, req.ip);
+    const ip = socketClientIp(req);
     if (!allowedIps.has(ip)) {
       reply.code(403).send({ error: "admin_ip_forbidden" });
       return false;
     }
   }
   const token = extractAdminToken(req.headers);
-  if (!token || !safeTokenEqual(token, ADMIN_API_TOKEN)) {
+  if (!token || !matchesTokenSet(token, ADMIN_API_TOKENS)) {
     reply.code(401).send({ error: "admin_token_required" });
     return false;
   }
@@ -107,7 +109,7 @@ function authorizeAdmin(req: { headers: Record<string, unknown>; ip: string; met
 function authorizeUi(req: { headers: Record<string, unknown>; ip: string }, reply: any): boolean {
   const allowedUiIps = parseAllowedIps(process.env.ALLOWED_UI_IPS);
   if (allowedUiIps.size > 0) {
-    const ip = extractClientIp(req.headers, req.ip);
+    const ip = socketClientIp(req);
     if (!allowedUiIps.has(ip)) {
       reply.code(403).type("text/plain").send("forbidden");
       return false;
@@ -605,6 +607,7 @@ app.get("/credits/:accountId/history", async (req, reply) => {
 
 app.post("/credits/:accountId/faucet", async (req, reply) => {
   if (!authorizeAdmin(req as any, reply)) return;
+  if (!faucetAllowed(process.env.BITCOIN_NETWORK)) return reply.code(403).send({ error: "faucet_disabled_on_mainnet" });
   const params = z.object({ accountId: z.string() }).parse(req.params);
   const body = z.object({ credits: z.number().positive().max(10000).default(100) }).parse(req.body);
   const tx = await adjustCredits(params.accountId, body.credits, "faucet");

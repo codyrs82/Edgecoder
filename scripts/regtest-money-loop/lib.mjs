@@ -110,7 +110,17 @@ export async function http(url, { method = "GET", headers = {}, body, timeoutMs 
   try { json = JSON.parse(text); } catch { /* not json */ }
   return { status: r.status, json, text: json ? undefined : text.slice(0, 300) };
 }
-export const admin = (which, path, opts = {}) => http(COORDS[which] + path, { ...opts, headers: { "x-admin-token": adminToken(), ...(opts.headers ?? {}) } });
+/**
+ * An admin-token route on a coordinator. The coordinators refuse admin calls that arrive through the
+ * public edge (src/common/admin-origin.ts), so the call runs inside the seed machine over loopback
+ * (seed-query.mjs `admin`) with the machine's own ADMIN_API_TOKEN; no token leaves the machine.
+ * Same { status, json } shape as http().
+ */
+export async function admin(which, path, opts = {}) {
+  const body = opts.body === undefined ? [] : [Buffer.from(JSON.stringify(opts.body)).toString("base64")];
+  const r = await seed(which, "admin", opts.method ?? "GET", path, ...body);
+  return { status: r.status, json: r.body ?? null };
+}
 export const api = (name, path, opts = {}) => http(PORTAL + path, { ...opts, headers: { authorization: `Bearer ${account(name).apiKey}`, ...(opts.headers ?? {}) } });
 
 const sessions = {};

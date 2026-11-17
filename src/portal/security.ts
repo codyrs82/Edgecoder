@@ -1,5 +1,6 @@
 // #10: portal security headers (helmet), CSRF origin checks and per-route rate limits.
 // Kept separate from server.ts so it can be tested with a small Fastify app.
+import { matchesTokenSet, tokenSet } from "../common/token-rotation.js";
 import { timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
 import helmet from "@fastify/helmet";
@@ -193,6 +194,9 @@ export interface PortalSecurityOptions {
   originLockToken?: string;
   /** PORTAL_SERVICE_TOKEN: callers presenting it bypass the origin lock (coordinators). */
   serviceToken?: string;
+  /** PORTAL_SERVICE_TOKEN_PREVIOUS during a rotation, accepted until previousUntil (TOKEN_PREVIOUS_UNTIL). */
+  serviceTokenPrevious?: string;
+  previousUntil?: string;
   /** PORTAL_COORDINATOR_TOKEN: coordinators calling /internal/* directly also pass the origin lock. */
   coordinatorToken?: string;
   /**
@@ -245,11 +249,15 @@ export async function registerPortalSecurity(app: FastifyInstance, opts: PortalS
   }
   if (opts.originLockToken) {
     const lock = opts.originLockToken;
+    // Rotation: the previous service token (only inside its window) also passes the lock.
+    const prev = tokenSet("", opts.serviceTokenPrevious, opts.previousUntil);
+    const previousServiceTokens = prev.previous ? { current: "", previous: prev.previous, previousUntilMs: prev.previousUntilMs } : null;
     app.addHook("onRequest", async (req, reply) => {
       const path = (req.raw.url ?? "").split("?")[0];
       if (ORIGIN_LOCK_EXEMPT_PATHS.has(path)) return;
       if (cameThroughEdge(req, lock)) return;
       if (opts.serviceToken && headerEquals(req.headers["x-portal-service-token"], opts.serviceToken)) return;
+      if (previousServiceTokens && matchesTokenSet(req.headers["x-portal-service-token"], previousServiceTokens)) return;
       if (opts.coordinatorToken && headerEquals(req.headers["x-portal-service-token"], opts.coordinatorToken)) return;
       return reply.code(403).send({ error: "origin_locked", detail: "This portal is only reachable through its public domain." });
     });

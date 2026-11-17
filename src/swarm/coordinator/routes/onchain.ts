@@ -11,7 +11,7 @@ import { bitcoinUri, onchainPolicyView, validateOnchainPayoutAddress } from "../
 import { depositView } from "../../../economy/onchain-deposits.js";
 import { batchView } from "../../../economy/onchain-payouts.js";
 import type { CoordinatorApp } from "../app.js";
-import { authorizeAdmin, callerAccount, requirePortalServiceToken } from "../auth.js";
+import { authorizeAdmin, callerAccount, requirePortalServiceToken, requirePortalMoneyAction } from "../auth.js";
 import { BITCOIN_NETWORK } from "../context.js";
 import { callbackPins, memoryPayoutStore } from "../payouts.js";
 import { ONCHAIN_ENABLED, depositWatcher, onchainConfig, onchainDepositStore, onchainPayoutStore, onchainPayouts } from "../onchain.js";
@@ -66,6 +66,7 @@ export function registerOnchainRoutes(app: CoordinatorApp): void {
     const parsed = z.object({ accountId: z.string().min(1).max(200), address: z.string().max(128).nullable() }).safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: "invalid_request" });
     const { accountId } = parsed.data;
+    if (!(await requirePortalMoneyAction(req, reply, { accountId, action: "payout.onchain_address", body: parsed.data }))) return reply;
     const raw = parsed.data.address?.trim() || null;
     if (raw === null) {
       await onchainPayoutStore.setOnchainDestination(accountId, null, BITCOIN_NETWORK);

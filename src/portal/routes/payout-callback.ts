@@ -1,6 +1,7 @@
 // Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 
+import { portalActionHeaders } from "../portal-action-signer.js";
 import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { request } from "undici";
@@ -32,14 +33,14 @@ type PinStatus = { destination: string; origin: string; state: string; changedOr
 
 /** Talks to the coordinator that runs payouts (same discovery and token as the destination registrar). */
 export function createPayoutCallbackClient(cfg: { portalServiceToken?: string; timeoutMs: number; discoverCoordinatorUrls: () => Promise<string[]> }): PayoutCallbackClient {
-  async function call(method: "GET" | "POST", path: string, body?: unknown): Promise<{ status: number; json: any } | null> {
+  async function call(method: "GET" | "POST", path: string, body?: unknown, extraHeaders: Record<string, string> = {}): Promise<{ status: number; json: any } | null> {
     if (!cfg.portalServiceToken) return null;
     const urls = await cfg.discoverCoordinatorUrls().catch(() => [] as string[]);
     if (!urls.length) return null;
     try {
       const res = await request(`${urls[0].replace(/\/$/, "")}${path}`, {
         method,
-        headers: { "x-portal-service-token": cfg.portalServiceToken, ...(body ? { "content-type": "application/json" } : {}) },
+        headers: { "x-portal-service-token": cfg.portalServiceToken, ...(body ? { "content-type": "application/json" } : {}), ...extraHeaders },
         body: body ? JSON.stringify(body) : undefined,
         headersTimeout: cfg.timeoutMs,
         bodyTimeout: cfg.timeoutMs
@@ -59,7 +60,7 @@ export function createPayoutCallbackClient(cfg: { portalServiceToken?: string; t
       return p ? { destination, previousOrigin: p.origin, newOrigin: p.changedOrigin!, changedAtMs: p.changedAtMs } : null;
     },
     async confirm(accountId, destination, newOrigin) {
-      const r = await call("POST", "/economy/payouts/callback/confirm", { accountId, destination, newOrigin });
+      const r = await call("POST", "/economy/payouts/callback/confirm", { accountId, destination, newOrigin }, portalActionHeaders(accountId, "payout.callback_confirm", { destination, newOrigin }));
       if (!r) return "failed";
       if (r.status === 409) return "not_pending";
       return r.status >= 200 && r.status < 300 ? "ok" : "failed";

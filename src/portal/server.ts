@@ -1,7 +1,7 @@
 // Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 
-import { DESKTOP_APP_ORIGINS } from "../common/desktop-origins.js";
+import { DESKTOP_APP_ORIGINS } from "../common/desktop-origins.js"; import { createCoordinatorAdminUrls } from "./coordinator-admin-urls.js";
 import { loadConfigOrExit } from "../common/config.js";
 import { portalConfigSchema, portalProductionProblems } from "./config.js";
 import Fastify, { type FastifyRequest } from "fastify";
@@ -121,13 +121,13 @@ await registerPortalSecurity(app, {
   // Cloudflare in front (docs/edge-and-redundancy.md): real client IPs + origin lock.
   edge: C.PORTAL_EDGE,
   originLockToken: C.PORTAL_ORIGIN_LOCK_TOKEN,
-  serviceToken: C.PORTAL_SERVICE_TOKEN,
+  serviceToken: C.PORTAL_SERVICE_TOKEN, serviceTokenPrevious: C.PORTAL_SERVICE_TOKEN_PREVIOUS, previousUntil: C.TOKEN_PREVIOUS_UNTIL,
   coordinatorToken: C.PORTAL_COORDINATOR_TOKEN,
   // Shared Postgres rate-limit counters across portal machines (memory store without a database).
   rateLimitPool: store?.pool,
 });
 
-const PORTAL_SERVICE_TOKEN = C.PORTAL_SERVICE_TOKEN ?? "";
+const PORTAL_SERVICE_TOKEN = C.PORTAL_SERVICE_TOKEN ?? ""; const coordinatorAdminUrls = createCoordinatorAdminUrls(C.COORDINATOR_ADMIN_URLS, discoverCoordinatorUrlsForPortal); // admin-token calls go to internal URLs
 const EXTERNAL_HTTP_TIMEOUT_MS = C.PORTAL_EXTERNAL_HTTP_TIMEOUT_MS;
 const RESEND_API_KEY = C.RESEND_API_KEY ?? "";
 const RESEND_FROM_EMAIL = C.RESEND_FROM_EMAIL ?? "";
@@ -345,7 +345,7 @@ const { requireInternalToken, requireControlPlaneAdmin } = createInternalAuth({
   serviceToken: PORTAL_SERVICE_TOKEN,
   coordinatorToken: C.PORTAL_COORDINATOR_TOKEN,
   adminToken: CONTROL_PLANE_ADMIN_TOKEN,
-  allowOpenWhenUnset: PORTAL_ALLOW_OPEN_INTERNAL
+  allowOpenWhenUnset: PORTAL_ALLOW_OPEN_INTERNAL, serviceTokenPrevious: C.PORTAL_SERVICE_TOKEN_PREVIOUS, adminTokenPrevious: C.CONTROL_PLANE_ADMIN_TOKEN_PREVIOUS, previousUntil: C.TOKEN_PREVIOUS_UNTIL // rotation
 });
 
 async function resolveIpIntelligence(sourceIp?: string): Promise<{ countryCode?: string; vpnDetected?: boolean }> {
@@ -863,7 +863,7 @@ const accountRouteDeps = { discoverCoordinatorUrlsForPortal, CONTROL_PLANE_ADMIN
 export type AccountApiRoutesDeps = typeof accountRouteDeps;
 registerAccountApiRoutes(app, accountRouteDeps);
 function autoRequestHost(node: Parameters<typeof autoRequestHosting>[1]) { return autoRequestHostingSafe({ store, policy: HOST_APPROVAL_POLICY, log: app.log }, node); }
-const coordinatorOpsRouteDeps = { autoRequestHost, COORDINATOR_ADMIN_TOKEN: C.COORDINATOR_ADMIN_TOKEN ?? "", CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, controlPlaneHeaders, discoverCoordinatorUrlsForPortal, fetchCoordinatorFederatedSummary, requireCoordinatorOperationsUser, store };
+const coordinatorOpsRouteDeps = { autoRequestHost, coordinatorAdminUrls: (() => coordinatorAdminUrls()) as (() => Promise<string[]>) | undefined, COORDINATOR_ADMIN_TOKEN: C.COORDINATOR_ADMIN_TOKEN ?? "", CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, controlPlaneHeaders, discoverCoordinatorUrlsForPortal, fetchCoordinatorFederatedSummary, requireCoordinatorOperationsUser, store };
 export type CoordinatorOpsRoutesDeps = typeof coordinatorOpsRouteDeps; registerCoordinatorOpsRoutes(app, coordinatorOpsRouteDeps);
 
 // Chat API — conversations CRUD + streaming chat
@@ -902,7 +902,7 @@ registerPayoutRoutes(app, marketRouteDeps, {
 // EdgeCoder's revenue (the network fee pool) for system admins: report and withdraw, through the coordinator's admin routes.
 registerRevenueRoutes(
   app,
-  { coordinatorAdminToken: C.COORDINATOR_ADMIN_TOKEN ?? "", EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal, getCurrentUser, buildAccessContext },
+  { coordinatorAdminToken: C.COORDINATOR_ADMIN_TOKEN ?? "", EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal: () => coordinatorAdminUrls(), getCurrentUser, buildAccessContext },
   { store, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), codeTtlMs: WALLET_SEND_MFA_TTL_MS, sendCode: sendWithdrawCodeEmail, generateSixDigitCode, sha256Hex, secureCompare, security: accountSecurity, sendReceipt: sendWithdrawalReceiptEmail }
 );
 
@@ -933,7 +933,7 @@ registerSecurityResearchForPortal(app, { store, getCurrentUser, buildAccessConte
 const networkAdminDeps = {
   coordinatorAdminToken: C.COORDINATOR_ADMIN_TOKEN ?? "",
   EXTERNAL_HTTP_TIMEOUT_MS,
-  coordinatorUrls: async () => [...COORDINATOR_DISCOVERY_URLS, ...(await controlPlaneCoordinatorUrls())].filter((url) => coordinatorUrlAllowed(url, COORDINATOR_URL_POLICY)),
+  coordinatorUrls: () => coordinatorAdminUrls(async () => [...COORDINATOR_DISCOVERY_URLS, ...(await controlPlaneCoordinatorUrls())].filter((url) => coordinatorUrlAllowed(url, COORDINATOR_URL_POLICY))),
   getCurrentUser,
   buildAccessContext,
   lookupOwners: async (agentIds: string[], userIds: string[]) => {

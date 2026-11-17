@@ -30,6 +30,7 @@ import { registerReceiptRoutes, startReceiptReplication } from "../receipts/repl
 import { anchorEpoch, closeEpoch } from "../receipts/epochs.js";
 import { app, metrics } from "./coordinator/app.js";
 import { queue, identity, coordinatorKeys, CC, mesh, MESH_AUTH_TOKEN } from "./coordinator/context.js";
+import { startAdminListener } from "./coordinator/admin-listener.js";
 import "./coordinator/mutable-state.js";
 import { agentCapabilities, connectedAgentCount, recordAbandonedClaim } from "./coordinator/agent-state.js";
 import { hasMeshToken, hasPortalServiceToken, requireMeshToken, isAgentGateRoute, agentSignatureAtGate } from "./coordinator/auth.js";
@@ -258,9 +259,15 @@ app.addHook("onClose", async () => stopCoordinatorAlerting());
 // GET /network/world (signed agent or portal): the anonymized world view for the app's Network page.
 registerNetworkWorldRoutes(app);
 
+/** ADMIN_LISTEN_PORT: the internal-only operator listener (coordinator/admin-listener.ts); a no-op when unset. */
+export async function startCoordinatorAdminListener(): Promise<void> {
+  await startAdminListener(app, CC.ADMIN_LISTEN_PORT, CC.ADMIN_LISTEN_HOST);
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   (async () => {
     await app.listen({ port: 4301, host: LISTEN_HOST });
+    await startCoordinatorAdminListener();
     await initCoordinator();
     startCoordinatorAlerting();
   })().catch((error) => {
