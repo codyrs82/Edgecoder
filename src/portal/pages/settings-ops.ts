@@ -6,6 +6,7 @@ import { settingRow, settingsPage } from "./settings-shell.js";
 import { HOST_ADMIN_JS } from "./host-admin.js";
 import { machinesPageScript, machinesSectionHtml } from "./settings-machines.js";
 import { securityResearchScript, securityResearchSectionHtml } from "./settings-security-research.js";
+import { INSTALL_LINKS, serverInstallCommand } from "../../common/onboarding.js";
 
 /** Settings > Nodes (/portal/settings/nodes) and Settings > Admin (/portal/settings/admin). */
 /**
@@ -23,6 +24,34 @@ export function formatAdminDate(ms: number | null | undefined): string {
   return "<time class='nowrap' datetime='" + iso + "' title='" + iso + "'>" + label + "</time>";
 }
 
+/**
+ * The installer line for one node enrolled on Settings > Nodes: the node id goes with the token
+ * (--token <nodeId>=<token>), so the agent is named exactly as it was enrolled (edgecoder-install
+ * also takes the token's node id itself, src/install/cli.ts resolveTokenNodeId). Serialised into
+ * the page script with toString(), so it must stay self-contained.
+ */
+export function nodeInstallCommand(portalUrl: string, nodeId: string, token: string): string {
+  const base = portalUrl.replace(/\/+$/, "");
+  return "curl -fsSLo install.sh " + base + "/install.sh && sudo bash install.sh --token " + nodeId + "=" + token;
+}
+
+/**
+ * Settings > Nodes: "A machine named X tried to connect but isn't enrolled under that name" for each
+ * attempt /nodes/rejected-attempts returns (src/portal/rejected-attempts.ts), with Enroll it (fills
+ * the node id) and How to fix (the guide). Serialised into the page script with toString(), so it
+ * must stay self-contained apart from the shell's escapeHtml.
+ */
+export function renderRejectedAttempts(attempts: Array<{ nodeId: string; lastAttemptMs?: number }>, guideUrl: string): string {
+  if (!attempts || attempts.length === 0) return "";
+  return attempts.map(function (a) {
+    const when = a.lastAttemptMs ? " (last tried " + new Date(a.lastAttemptMs).toISOString().slice(0, 16).replace("T", " ") + " UTC)" : "";
+    return "<p>A machine named <code>" + escapeHtml(a.nodeId) + "</code> tried to connect with one of your node tokens but isn't enrolled under that name" + when + ". " +
+      "<button type='button' class='enrollAttemptBtn' data-node-id='" + encodeURIComponent(String(a.nodeId)).replace(/'/g, "%27") + "'>Enroll it</button> " +
+      "<a href='" + escapeHtml(guideUrl) + "' target='_blank' rel='noreferrer'>How to fix</a></p>";
+  }).join("") + "<p class='muted'>Or re-run the installer on that machine with the token you were given: a current installer names the agent after the token's node.</p>";
+}
+declare function escapeHtml(value: unknown): string;
+
 export function registerSettingsOpsPages(app: FastifyInstance): void {
 app.get("/portal/settings/nodes", async (_req, reply) => {
   const content = `
@@ -37,12 +66,26 @@ app.get("/portal/settings/nodes", async (_req, reply) => {
         <h3 id="hostStatusTitle">My machines run your own work, free</h3>
         <div class="muted" id="hostStatusText">Hosting for others is by request during early access. <a href="/host#request">Request to host</a>.</div>
       </div>
-      <div class="set-group">Enroll a node</div>
+      <div id="rejectedAttempts" class="callout warn hidden" role="status">
+        <h3>A machine couldn't connect</h3>
+        <div id="rejectedAttemptsList"></div>
+      </div>
+      <div class="callout" id="installKeyNote">
+        <h3>Easiest: an install key</h3>
+        <div class="muted">The installer can enrol every GPU of a server itself, with the right names: create an install key in <a href="/portal/welcome">Getting started</a> (or Settings → Connect your tools) and run <code id="installKeyCmd"></code> on the server. Use a node token below only to name a single machine yourself.</div>
+      </div>
+      <div class="set-group" id="enrollNode">Enroll a node</div>
       <div class="set-card">
-        ${settingRow("Node ID", "A name for the machine, e.g. mac-worker-001.", '<input id="nodeId" type="text" placeholder="mac-worker-001" />')}
+        ${settingRow("Node ID", "The machine's name. The agent must use exactly this name: the install command below sets it.", '<input id="nodeId" type="text" placeholder="mac-worker-001" />')}
         ${settingRow("Node type", "Agents run jobs; coordinators route them.", '<select id="nodeKind"><option value="agent">Agent</option><option value="coordinator">Coordinator</option></select>')}
         ${settingRow("Registration token", "Shown only once. Save it before leaving the page.", '<button class="primary" id="enrollBtn">Generate node token</button>')}
-        <div id="newTokenWrap" class="hidden set-row wide"><div id="newToken" class="token-box"></div></div>
+        <div id="newTokenWrap" class="hidden set-row wide">
+          <div>
+            <div class="muted">Run this on the machine. The installer names the agent <strong id="newTokenNodeId"></strong>, the name this token is for; a machine with another name is refused.</div>
+            <div id="newInstallCmd" class="token-box"></div>
+            <div class="muted">Token only: <span id="newToken"></span></div>
+          </div>
+        </div>
       </div>
       <div class="set-group">Your nodes</div>
       <div class="set-card">
@@ -71,6 +114,10 @@ app.get("/portal/settings/nodes", async (_req, reply) => {
   const script = `
     function fmtTime(ms) { return ms ? new Date(ms).toISOString() : "n/a"; }
     function encodeAttr(v) { return encodeURIComponent(String(v || "")).replace(/'/g, "%27"); }
+    ${nodeInstallCommand.toString()}
+    ${serverInstallCommand.toString()}
+    ${renderRejectedAttempts.toString()}
+    const NAME_FIX_GUIDE = ${JSON.stringify(INSTALL_LINKS.serverGuide + "#node-names")};
     // escapeHtml comes from the app shell (pages/escape.ts); every node, owner and network field
     // below is user- or agent-supplied and goes through it before reaching innerHTML.
     function renderRows(targetId, rowsHtml, colspan, emptyText) {
@@ -116,7 +163,25 @@ app.get("/portal/settings/nodes", async (_req, reply) => {
       const summary = await api("/dashboard/summary", { method: "GET", headers: {} });
       allNodes = summary.nodes || [];
       applyNodeTableView();
+      loadRejectedAttempts();
     }
+    // Machines that presented one of this account's tokens under a name that isn't enrolled.
+    function loadRejectedAttempts() {
+      api("/nodes/rejected-attempts", { method: "GET", headers: {} }).then(function(res) {
+        const html = renderRejectedAttempts((res && res.attempts) || [], NAME_FIX_GUIDE);
+        document.getElementById("rejectedAttemptsList").innerHTML = html;
+        document.getElementById("rejectedAttempts").classList.toggle("hidden", !html);
+      }).catch(function() {});
+    }
+    document.getElementById("rejectedAttemptsList").addEventListener("click", function(event) {
+      const target = event.target;
+      if (!target || !target.classList || !target.classList.contains("enrollAttemptBtn")) return;
+      document.getElementById("nodeId").value = decodeURIComponent(target.getAttribute("data-node-id") || "");
+      document.getElementById("nodeKind").value = "agent";
+      const anchor = document.getElementById("enrollNode");
+      if (anchor && anchor.scrollIntoView) anchor.scrollIntoView({ behavior: "smooth" });
+      showToast("Node ID filled in: click Generate node token, then run the install command it shows on that machine.");
+    });
     document.getElementById("nodesFilterInput").addEventListener("input", applyNodeTableView);
     document.getElementById("nodesStatusFilter").addEventListener("change", applyNodeTableView);
     document.getElementById("nodesSortOrder").addEventListener("change", applyNodeTableView);
@@ -147,6 +212,8 @@ app.get("/portal/settings/nodes", async (_req, reply) => {
         });
         document.getElementById("newTokenWrap").classList.remove("hidden");
         document.getElementById("newToken").textContent = payload.registrationToken;
+        document.getElementById("newTokenNodeId").textContent = payload.nodeId;
+        document.getElementById("newInstallCmd").textContent = nodeInstallCommand(location.origin, payload.nodeId, payload.registrationToken);
         await loadNodes();
         showToast("Node enrollment token generated.");
       } catch (err) {
@@ -155,6 +222,7 @@ app.get("/portal/settings/nodes", async (_req, reply) => {
     });
 
     ${machinesPageScript()}
+    document.getElementById("installKeyCmd").textContent = serverInstallCommand(location.origin, "YOUR_INSTALL_KEY");
     (async () => {
       const me = await requireAuth();
       revealSettingsAdminTab(me);
@@ -373,7 +441,8 @@ app.get("/portal/settings/admin", async (_req, reply) => {
     function pendingActions(n) {
       const id = encodeAttr(n.nodeId);
       const kind = encodeAttr(n.nodeKind);
-      const owned = Boolean(n.ownerEmail);
+      // enrolled: false = refused at /register under a name nobody enrolled (the email is its token's owner).
+      const owned = Boolean(n.ownerEmail) && n.enrolled !== false;
       const approve = owned
         ? "<button class='approveBtn' data-node-id='" + id + "' data-node-kind='" + kind + "' data-approved='true'>Approve</button>"
         : "<button class='approveBtn' disabled title='" + NO_OWNER_TIP + "' aria-label='Approve (unavailable: no owner)'>Approve</button>";

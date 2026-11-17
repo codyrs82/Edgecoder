@@ -33,7 +33,16 @@ export function registerInternalRoutes(internal: FastifyInstance, { autoRequestH
       node = await store.getNodeEnrollmentByDeviceId(requestDeviceId);
     }
     if (!node) {
-      return reply.code(404).send({ allowed: false, reason: "node_not_enrolled" });
+      // The token may belong to another enrolment: the machine named itself differently from the
+      // node id it was enrolled as. Say which, so the coordinator can record the attempt for that
+      // enrolment's owner (their Nodes page shows it) and tell the agent the name its token is for.
+      // Matched by the token's hash only: nobody else's enrolment is ever named.
+      const tokenNode = await Promise.resolve(store.getNodeEnrollmentByRegistrationTokenHash?.(sha256Hex(body.registrationToken))).catch(() => null);
+      return reply.code(404).send({
+        allowed: false,
+        reason: "node_not_enrolled",
+        ...(tokenNode && tokenNode.nodeKind === body.nodeKind ? { tokenNode: { nodeId: tokenNode.nodeId, ownerEmail: tokenNode.ownerEmail } } : {})
+      });
     }
     if (node.nodeKind !== body.nodeKind) {
       return reply.code(403).send({ allowed: false, reason: "node_kind_mismatch" });

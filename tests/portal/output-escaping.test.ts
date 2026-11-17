@@ -154,8 +154,9 @@ describe("pages escape node ids and other user or agent data", () => {
   it("settings nodes page", async () => {
     const app = await pagesApp();
     const html = (await app.inject({ url: "/portal/settings/nodes" })).body;
-    const els = await runPage(html, { "/me": ADMIN_ME, "/dashboard/summary": { nodes: [EVIL_NODE] } });
+    const els = await runPage(html, { "/me": ADMIN_ME, "/dashboard/summary": { nodes: [EVIL_NODE] }, "/nodes/rejected-attempts": { attempts: [{ nodeId: EVIL, lastAttemptMs: 1 }] } });
     expectEscaped(els.get("nodesBody")!.innerHTML);
+    expectEscaped(els.get("rejectedAttemptsList")!.innerHTML);
     await app.close();
   });
 

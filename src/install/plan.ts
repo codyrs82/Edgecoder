@@ -90,8 +90,10 @@ export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvaila
     const memoryGb = discreteGpu ? group.reduce((n, g) => n + g.vramGb, 0) : hw.ramGb;
     const model = opts.model ?? (discreteGpu ? gpuModelForVram(memoryGb) : pickModel(memoryGb));
     const gpuTag = group.length > 1 ? `gpu${group[0].index}-${group[group.length - 1].index}` : `gpu${gpu?.index ?? index}`;
-    const agentId = slots.length === 1 ? `${base}-${gpu ? (group.length > 1 ? gpuTag : "gpu") : "cpu"}` : `${base}-${gpuTag}`;
-    const ollamaPort = OLLAMA_BASE_PORT + index;
+    const agentId = slots.length === 1
+      ? opts.agentIdOverride ?? `${base}-${gpu ? (group.length > 1 ? gpuTag : "gpu") : "cpu"}`
+      : `${base}-${gpuTag}`;
+    const ollamaPort = opts.ollamaPorts?.[index] ?? OLLAMA_BASE_PORT + index;
     const engine = opts.instanceEngines?.[index] ?? resolveInstanceEngine(index, opts);
     const env: Record<string, string> = {
       EDGE_RUNTIME_MODE: "worker",

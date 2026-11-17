@@ -9,6 +9,7 @@ import type { AccountApiRoutesDeps } from "../server.js";
 import { API_KEY_PREFIX, hashApiKey } from "./hosted.js";
 import { NODE_ID_PATTERN } from "../pages/escape.js";
 import { dnsLabelConflicts } from "../dns-manager.js";
+import { rejectedAttemptsForOwner } from "../rejected-attempts.js";
 import { moduleLogger } from "../../common/logger.js";
 
 const logger = moduleLogger("portal-account");
@@ -25,7 +26,7 @@ export function maxAgentsPerAccount(env: NodeJS.ProcessEnv = process.env): numbe
   return Number.isInteger(n) && n >= 1 ? n : 25;
 }
 
-export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordinatorUrlsForPortal, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store }: AccountApiRoutesDeps): void {
+export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordinatorUrlsForPortal, fetchCoordinatorFederatedSummary, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store }: AccountApiRoutesDeps): void {
   app.get("/ios/dashboard", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const user = await getCurrentUser(req as any);
@@ -296,6 +297,39 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
       coordinatorNodeId: selected.nodeId,
       dnsStatus: selected.dnsStatus,
     });
+  });
+
+  // The node id a registration token was issued for, for the token's holder (edgecoder-install
+  // apply --token names the agent after it, so the agent id always matches its enrolment).
+  app.get("/nodes/token-node", async (req, reply) => {
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    const authHeader = req.headers.authorization ?? "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+    if (!token) return reply.code(401).send({ error: "registration_token_required" });
+    const enrollment = await store.getNodeEnrollmentByRegistrationTokenHash(sha256Hex(token));
+    if (!enrollment) return reply.code(401).send({ error: "registration_token_invalid" });
+    return reply.send({ nodeId: enrollment.nodeId, nodeKind: enrollment.nodeKind });
+  });
+
+  // Machines that presented one of this account's registration tokens under a node id that isn't
+  // enrolled (rejected-attempts.ts): shown on Settings > Nodes with how to fix the name.
+  app.get("/nodes/rejected-attempts", async (req, reply) => {
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    const user = await getCurrentUser(req as any);
+    if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    if (!user.email) return reply.send({ attempts: [] });
+    try {
+      const federated = await fetchCoordinatorFederatedSummary({ ownerEmail: user.email });
+      const attempts = await rejectedAttemptsForOwner({
+        ownerEmail: user.email,
+        nodes: federated.nodes,
+        isEnrolled: async (nodeId) => Boolean(await store.getNodeEnrollment(nodeId)),
+        nowMs: Date.now()
+      });
+      return reply.send({ attempts });
+    } catch {
+      return reply.send({ attempts: [] });
+    }
   });
 
   app.get("/nodes/me", async (req, reply) => {

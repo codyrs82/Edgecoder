@@ -136,7 +136,7 @@ type Credential = "session" | "apiKey" | "serviceToken" | "registrationToken" | 
 function credentialFor(route: { method: string; url: string }): Credential {
   if (route.url.startsWith("/v1/")) return "apiKey";
   if (route.url.startsWith("/internal/")) return "serviceToken";
-  if (route.url === "/nodes/discover-coordinator") return "registrationToken";
+  if (route.url === "/nodes/discover-coordinator" || route.url === "/nodes/token-node") return "registrationToken";
   if (route.url === "/metrics") return "metricsToken";
   return "session";
 }

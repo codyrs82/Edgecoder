@@ -24,7 +24,7 @@ import { runInferenceSubtask } from "./inference-runner.js";
 import { warmOllamaModel } from "../inference-api/ollama.js";
 import { detectHardware, hardwareProfileFor, selectGpu, selectGpuPool, type Probe } from "../install/hardware.js";
 import { enforceSandboxPolicy, inferenceOnlyRejection, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
-import { isAgentNotRegisteredError, parseRetryAfterMs, rateLimitWaitMs, registeredLogLine, registerRefreshMsFromEnv, shouldRegister, type RegisterReply } from "./registration-policy.js";
+import { portalLabel, enrollmentBackoffMs, enrollmentRefusalFromError, enrollmentRefusalKey, enrollmentRefusalMessage, isAgentNotRegisteredError, parseRetryAfterMs, rateLimitWaitMs, registeredLogLine, registerRefreshMsFromEnv, shouldLogEnrollmentRefusal, shouldRegister, type RegisterReply } from "./registration-policy.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
 import { signMeshWsBind } from "../mesh/ws-auth.js";
 import { hashResultOutput, signReceiptAsAgent } from "../receipts/receipt.js";
@@ -554,6 +554,9 @@ async function verifyCoordinatorOrThrow(opts: { force?: boolean } = {}): Promise
 
 // ── Offline resilience state ──────────────────────────────────
 let consecutiveFailures = 0;
+/** Consecutive /register refusals for an enrolment problem, and the last one logged (registration-policy.ts). */
+let enrollmentRefusals = 0;
+let lastEnrollmentLog: { key: string; atMs: number } | null = null;
 let coordinatorOnline = true;
 const OFFLINE_THRESHOLD = 3;
 const BACKOFF_BASE_MS = 1500;
@@ -1723,6 +1726,8 @@ async function loop(): Promise<void> {
             registeredWithUrl = coordinator.url;
             lastRegisteredAtMs = Date.now();
             console.log(registeredLogLine(AGENT_ID, coordinator.url, registerResponse));
+            enrollmentRefusals = 0;
+            lastEnrollmentLog = null;
             servingJobs.setGrant(registerResponse?.hardwareVerification?.grantedClass, registerResponse?.hardwareVerification?.grantedTier);
             lifecycle.noteAccepted();
             adoptMeshToken(registerResponse.meshToken);
@@ -2362,6 +2367,21 @@ async function loop(): Promise<void> {
       if (rateLimitWait !== null) {
         console.warn(`[agent:${AGENT_ID}] coordinator rate limit hit; backing off ${rateLimitWait}ms`);
         await new Promise((r) => setTimeout(r, rateLimitWait));
+        continue;
+      }
+      // Not enrolled (or no / a wrong registration token): only the owner can fix it, so say how
+      // once, wait minutes rather than seconds, and keep the coordinator (it answered fine).
+      const refusal = enrollmentRefusalFromError(error);
+      if (refusal) {
+        enrollmentRefusals++;
+        registeredWithUrl = null;
+        const wait = enrollmentBackoffMs(enrollmentRefusals);
+        const now = Date.now();
+        if (shouldLogEnrollmentRefusal(lastEnrollmentLog, refusal, now)) {
+          console.error(enrollmentRefusalMessage(AGENT_ID, refusal, wait, portalLabel(PORTAL_URL)));
+          lastEnrollmentLog = { key: enrollmentRefusalKey(refusal), atMs: now };
+        }
+        await new Promise((r) => setTimeout(r, wait));
         continue;
       }
       const blacklistReason = blacklistReasonFromError(error);
