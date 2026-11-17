@@ -55,7 +55,7 @@ import { decideToolCall, suggestRule, type Decision } from "./permission-policy.
 import { ensureRepo as realEnsureRepo } from "./repo-connect.js";
 import { COMPUTE_POLICIES, FALLBACK_NOTE, NETWORK_CLASSES, isNetworkClass, type NetworkClass, routeLabel, routeModelId, routeSummary, type ComputePolicy, type PlanOptions, type Route } from "../../inference-api/auto-route.js";
 import type { ChatBackend } from "../../inference-api/types.js";
-import { WEB_SYSTEM_NOTE, isWebTool, webToolSchemas, type WebToolSession } from "../../web-tool/tools.js";
+import { webSystemNote, webGrounding, isWebTool, webToolSchemas, type WebToolSession } from "../../web-tool/tools.js";
 
 // ---------------------------------------------------------------------------
 // Schedules: "every 30 minutes", "every 2 hours", "hourly", "daily at 09:00", or 5-field cron
@@ -550,6 +550,8 @@ export interface BotRunContext {
   memory: string;
   /** Conversation context for the turn, ending with the message or trigger prompt. */
   messages: Array<{ role: string; content: string }>;
+  /** What started the run ("message": the owner wrote to it). Web grounding runs only for a message. */
+  trigger?: BotTrigger;
   /** The bot's part of the system prompt: who it is, its instructions and memory. */
   systemAddition: string;
   sendEvent: (event: IdeStreamEvent) => void;
@@ -2059,6 +2061,7 @@ export class BotManager {
         runId: act.run.id,
         memory,
         messages,
+        trigger: act.run.trigger,
         systemAddition: botSystemPrompt(bot, memory, digest),
         sendEvent: (e) => this.record(id, act, e),
         signal: act.abort.signal,
@@ -2390,8 +2393,11 @@ export function agentBotRunner(d: {
     await runAgentLoop({
       chat,
       ...(chat.escalate ? { escalate: chat.escalate } : {}),
-      systemPrompt: (format) => [basePrompt(format), ctx.systemAddition, webTools.length ? WEB_SYSTEM_NOTE : ""].filter(Boolean).join("\n\n"),
+      systemPrompt: (format) => [basePrompt(format), ctx.systemAddition, webTools.length ? webSystemNote() : ""].filter(Boolean).join("\n\n"),
       messages: ctx.messages,
+      // Web grounding for a bot allowed to search, on a message the owner wrote (a schedule's or
+      // GitHub's prompt never becomes a search on its own), and not in Manual, where web calls ask first.
+      ...(web && allowed.has("web_search") ? webGrounding(web, ctx.messages, { skip: botMode(ctx.bot) === "ask" || ctx.trigger !== "message" }) : {}),
       sendEvent: ctx.sendEvent,
       isCancelled: ctx.isCancelled,
       tools,

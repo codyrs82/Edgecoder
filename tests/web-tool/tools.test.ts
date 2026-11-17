@@ -23,7 +23,7 @@ describe("prompt-injection wrapping", () => {
 
   it("the system note lets the model decide, and says when not to search (web is automatic)", () => {
     expect(WEB_SYSTEM_NOTE).toMatch(/Decide for yourself/);
-    expect(WEB_SYSTEM_NOTE).toMatch(/news and current events, prices, release dates and versions/);
+    expect(WEB_SYSTEM_NOTE).toMatch(/current events, today\/latest\/recent\/news, prices, versions, releases/);
     expect(WEB_SYSTEM_NOTE).toMatch(/Don't search for general coding help/);
   });
 

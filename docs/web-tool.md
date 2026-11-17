@@ -8,7 +8,10 @@ and **read a page** (`read_page`), and its answer cites the sources it used.
   when a question needs them: news and current events, prices, release dates and versions of
   software, a specific page or document, or anything you ask it to look up. General coding help,
   explanations, writing and maths are answered directly, without searching (the system note,
-  `WEB_SYSTEM_NOTE` in `src/web-tool/tools.ts`). Answers list their numbered sources under the
+  `webSystemNote()` in `src/web-tool/tools.ts`, which also tells the model it has live web access,
+  gives today's date in UTC and says never to claim it has no internet or real-time access). A
+  question that plainly needs fresh facts is also **searched by the server first** (Grounding,
+  below), because small open models often don't call the tool on their own. Answers list their numbered sources under the
   reply, with links, and a footer such as `2 searches · 1 page · 1.2 cSats`. While it works the
   reply shows "Searching the web…" and "Reading example.com…".
 - **A quiet indicator, not a toggle.** Under the message box the composer shows **Web: Auto**. Its
@@ -38,6 +41,36 @@ and **read a page** (`read_page`), and its answer cites the sources it used.
   page reads (4); past that a call is refused before it reaches EdgeCoder (it costs nothing) and the
   model answers with what it has. A call refused for cSats (402), the hour's limit (429) or setup
   (503) turns the web off for the rest of that reply.
+
+## Grounding (server-side search for time-sensitive questions)
+
+Small and medium open models (qwen2.5/3/3.5, qwen3-coder) don't reliably decide to call a tool, and
+often answer "as an AI I don't have real-time access" with the tool in front of them. So the shared
+web layer (`webGrounding` in `src/web-tool/tools.ts`, used by the portal chat, the desktop app's
+chats and bots) does two things around the agent loop:
+
+- **Search first.** Before the first model turn, `needsFreshInfo` (a cheap, deterministic check of the
+  latest user message) decides whether it needs fresh information. It fires on a URL; on an explicit
+  "search / look up / google / the internet / online"; on plainly current questions (today, tonight,
+  this week, news, what's new, weather, scores, who won, prices, the latest version or release of
+  something, zero-days, CVEs); and on weaker cues (latest, current, recent, now, version, release, a
+  year from 2025 on, a date) unless the message reads like a coding question. Code blocks and
+  inline code are ignored, and a message with code needs an explicit ask or a URL. When it fires,
+  the server runs one `web_search` with the message as the query (code removed, at most 200
+  characters; a bare "search the internet" searches the previous question) and puts it in the
+  conversation as the assistant's own tool call and its result, so the model answers from it and
+  may search or read more. It goes through the same `WebToolSession.run` as a model's call: same
+  billing to the account, same hourly cap, and it counts toward the reply's searches; the reply shows
+  "Searching the web…" and the sources as usual. Not in **Manual** (web calls ask first), and for
+  bots only on a message the owner wrote (a schedule's or GitHub's prompt never becomes a search on
+  its own). Coding questions don't trigger it, so they cost nothing.
+- **Post-check.** Once web results were provided, a sentence such as "I don't have access to
+  real-time data" or "As an AI I can't browse the internet" is dropped from the streamed answer
+  (`DisclaimerFilter`, held back only to the end of the current sentence). Stripping was chosen over
+  a retry turn: no extra model call, cost or wait, it works the same on every backend, and the rest of
+  the answer is kept.
+
+The portal's `portal_web_loop` log line carries `grounded: true` when the server searched first.
 
 ## Where it runs
 

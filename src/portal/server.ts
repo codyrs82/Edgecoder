@@ -16,6 +16,7 @@ import { registerWellKnownRoutes } from "./routes/well-known.js";
 import { startDnsStaleSweep } from "./dns-sweep.js";
 import { createPortalMailer } from "./email.js";
 import { registerInternalRoutes } from "./routes/internal.js";
+import { QUIET_ROUTE } from "./quiet-routes.js";
 import { registerAccountApiRoutes } from "./routes/account.js";
 import { registerPasskeyRoutes } from "./routes/passkey.js";
 import { registerAuthRoutes } from "./routes/auth.js";
@@ -833,7 +834,8 @@ async function loadNetworkInsightsForUser(): Promise<{
   }
 }
 
-app.get("/health", async () => ({ ok: true, portalDb: Boolean(store) }));
+// Health checks: no request lines (QUIET_ROUTE), only warnings and errors.
+app.get("/health", QUIET_ROUTE, async () => ({ ok: true, portalDb: Boolean(store) }));
 
 // Apple App Site Association for passkey webcredentials (iOS app ↔ domain link)
 registerWellKnownRoutes(app);
