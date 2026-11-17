@@ -30,14 +30,14 @@
 <style>
   .plan-approval {
     display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px;
-    margin: 6px 0 2px; padding: 8px 10px; border: 0.5px solid var(--border-strong, var(--border)); border-left: 3px solid var(--accent);
+    margin: 6px 0 2px; padding: 8px 10px; border: 0.5px solid var(--border-strong); border-left: 3px solid var(--accent);
     border-radius: var(--radius-sm); background: var(--bg-surface); font-size: 13px;
   }
   .what { display: inline-flex; align-items: center; gap: 6px; color: var(--text-primary); }
   .actions { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .then { color: var(--text-secondary); font-size: 12px; }
-  select { font: inherit; font-size: 12px; padding: 3px 6px; border-radius: var(--radius-sm); border: 0.5px solid var(--border-control, var(--border)); background: var(--bg-elevated, transparent); color: var(--text-primary); }
-  button { font: inherit; font-size: 12px; padding: 4px 10px; border-radius: var(--radius-sm); border: 0.5px solid var(--border-control, var(--border)); background: transparent; color: var(--text-primary); cursor: pointer; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent, #fff); }
+  select { font: inherit; font-size: 12px; padding: 3px 6px; border-radius: var(--radius-sm); border: 0.5px solid var(--border-control); background: var(--bg-elevated); color: var(--text-primary); }
+  button { font: inherit; font-size: 12px; padding: 4px 10px; border-radius: var(--radius-sm); border: 0.5px solid var(--border-control); background: transparent; color: var(--text-primary); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
   button:disabled, select:disabled { opacity: 0.5; cursor: default; }
 </style>

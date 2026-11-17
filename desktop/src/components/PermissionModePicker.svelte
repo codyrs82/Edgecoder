@@ -139,30 +139,30 @@
 <style>
   .mode-picker { position: relative; display: inline-flex; }
   .trigger {
-    display: inline-flex; align-items: center; gap: 4px; height: var(--control-md, 26px); padding: 0 8px; border: none; border-radius: var(--radius-sm);
-    background: transparent; color: var(--text-secondary); font: inherit; font-size: var(--fs-xs, 12px); line-height: 1; cursor: pointer; white-space: nowrap;
+    display: inline-flex; align-items: center; gap: 4px; height: var(--control-md); padding: 0 8px; border: none; border-radius: var(--radius-sm);
+    background: transparent; color: var(--text-secondary); font: inherit; font-size: var(--fs-xs); line-height: 1; cursor: pointer; white-space: nowrap;
   }
   .trigger:hover, .trigger[aria-expanded="true"] { background: var(--bg-elevated); color: var(--text-primary); }
   .trigger.plan { color: var(--accent); }
   .trigger:disabled { opacity: 0.5; cursor: default; }
   .menu {
     position: absolute; left: 0; z-index: 50; width: min(340px, calc(100vw - 32px)); padding: 6px;
-    background: var(--bg-elevated, var(--bg-surface)); border: 0.5px solid var(--border-strong, var(--border)); border-radius: var(--radius-md, 8px);
-    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.25); outline: none;
+    background: var(--bg-elevated); border: 0.5px solid var(--border-strong); border-radius: var(--radius-md);
+    box-shadow: var(--shadow-md); outline: none;
   }
   .menu.up { bottom: calc(100% + 6px); }
   .menu:not(.up) { top: calc(100% + 6px); }
-  .menu-title { padding: 4px 8px 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted, var(--text-secondary)); }
+  .menu-title { padding: 4px 8px 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
   .option { display: flex; align-items: flex-start; gap: 10px; padding: 8px; border-radius: var(--radius-sm); cursor: pointer; }
   .option.active { background: var(--bg-surface); }
-  .menu:focus-visible .option.active { outline: 2px solid var(--focus-ring, var(--accent)); outline-offset: -2px; }
+  .menu:focus-visible .option.active { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
   .icon { flex: none; margin-top: 1px; color: var(--text-secondary); }
   .text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .title { font-size: 13px; font-weight: 500; color: var(--text-primary); }
   .desc { font-size: 12px; color: var(--text-secondary); line-height: 1.35; }
   .check { flex: none; width: 14px; margin-top: 1px; color: var(--accent); }
   .key {
-    flex: none; min-width: 18px; padding: 1px 5px; border: 0.5px solid var(--border-control, var(--border)); border-radius: 4px;
+    flex: none; min-width: 18px; padding: 1px 5px; border: 0.5px solid var(--border-control); border-radius: 4px;
     font: inherit; font-size: 11px; text-align: center; color: var(--text-secondary);
   }
 </style>

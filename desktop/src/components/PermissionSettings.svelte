@@ -106,7 +106,7 @@
   .project { padding: 6px 0; border-top: 0.5px solid var(--border); }
   .project:first-child { border-top: none; }
   .project-name { display: block; font-size: 13px; font-weight: 500; color: var(--text-primary); margin-bottom: 4px; }
-  .path { font-weight: 400; color: var(--text-muted, var(--text-secondary)); font-size: 12px; margin-left: 6px; }
+  .path { font-weight: 400; color: var(--text-muted); font-size: 12px; margin-left: 6px; }
   .rule { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 0; }
   .rule code { font-size: 12px; overflow-wrap: anywhere; }
   .link { background: none; border: none; padding: 2px 4px; color: var(--accent); font: inherit; font-size: 12px; cursor: pointer; }

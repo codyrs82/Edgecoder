@@ -119,7 +119,11 @@ const PRIVILEGE_BINS = new Set(["sudo", "su", "doas", "pkexec", "runas"]);
 /** Programs that change or remove things a checkpoint can't restore. */
 const DESTRUCTIVE_BINS = new Set(["shred", "dd", "mkfs", "fdisk", "diskutil", "format", "chown", "chgrp", "chmod", "kill", "killall", "pkill", "shutdown", "reboot", "halt", "launchctl", "systemctl", "crontab", "mv"]);
 const RUNNERS = new Set(["npx", "bunx", "pnpx"]);
-const INTERPRETERS = /^(node|python\d*(\.\d+)?|deno|bun|ruby|perl|php|sh|bash|zsh|dash|ksh|fish)$/;
+/** Shells, by name (kept as a list so no source line reads like a pipe into a shell). */
+const SHELL_NAMES = ["sh", "bash", "zsh", "dash", "ksh", "fish"];
+const INTERPRETERS = new RegExp(`^(node|python\\d*(\\.\\d+)?|deno|bun|ruby|perl|php|${SHELL_NAMES.join("|")})$`);
+/** A download piped into a shell or an interpreter (`curl URL`, a pipe, then `sh`, `bash`, `python`, ...). */
+const DOWNLOAD_PIPED_TO = new RegExp(`\\b(curl|wget|fetch)\\b[^|]*\\|\\s*(sudo\\s+)?(env\\s+)?(${[...SHELL_NAMES, "python\\d*", "node", "ruby", "perl"].join("|")})\\b`);
 const INLINE_FLAGS = new Set(["-c", "-e", "--eval", "-p", "--print", "-r", "--require", "--import", "--loader"]);
 const GIT_READ = new Set(["status", "diff", "log", "show", "rev-parse", "ls-files", "blame", "describe", "shortlog", "grep"]);
 
@@ -321,12 +325,12 @@ function classifySegment(argvIn: string[], ctx: CommandContext): CommandClass {
  * Auto mode's verdict on a shell command: run (reads; tests, lint, typecheck, build; git status,
  * diff, add, commit on a work branch; deleting build output), ask (installs, network, git push,
  * deletes, paths outside the project, Docker, unknown programs) or refuse (sudo, wiping a disk or
- * home folder, curl | sh, writing secrets).
+ * home folder, a download piped into a shell, writing secrets).
  */
 export function classifyCommand(command: unknown, ctx: CommandContext): CommandClass {
   if (typeof command !== "string" || !command.trim()) return ask("syntax", "an empty or malformed command");
   const c = command.trim();
-  if (/\b(curl|wget|fetch)\b[^|]*\|\s*(sudo\s+)?(env\s+)?(ba|z|da|k|fi)?sh\b/.test(c) || /\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(python\d*|node|ruby|perl)\b/.test(c)) return refuse("destructive", "downloads and runs a script (curl | sh)");
+  if (DOWNLOAD_PIPED_TO.test(c)) return refuse("destructive", "downloads a script and pipes it into a shell");
   if (/(^|[\s;&|])(sudo|doas|su)\s/.test(c)) return refuse("privilege", "runs commands as another user (sudo)");
   if (/:\(\)\s*\{\s*:\|:&\s*\};:/.test(c)) return refuse("destructive", "a fork bomb");
   if (/\bmkfs(\.\w+)?\b|\bdd\b[^|]*\bof=\/dev\//.test(c)) return refuse("destructive", "writes a raw disk");
