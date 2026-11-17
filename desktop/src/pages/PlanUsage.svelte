@@ -16,7 +16,7 @@
   import {
     computeOverview, computeBuy, computeIntent, portalWebUrl, getWalletOverview, withdrawToInvoice, getPaymentPaths, type PaymentPaths,
     getPayoutDestination, savePayoutDestination, getWalletSendRequests, getOnchainAddress, getOnchainDeposits,
-    type ComputeOverview, type WalletOverview, type PayoutDestinationView, type WalletSendRequest, type OnchainFunding, type OnchainPolicyView,
+    type ComputeOverview, type WalletOverview, type PayoutDestinationView, type WalletSendRequest, type OnchainFunding, type OnchainPolicyView, type TwoFactorRequired,
   } from "../lib/api";
   import { scrollRegion } from "../lib/scroll-region";
   import { callsForCSats, FUND_EXAMPLE_CLASS, INSTALL_LINKS, testNetworkNote } from "../lib/onboarding";
@@ -63,6 +63,11 @@
   // Withdraw
   let bolt11 = $state("");
   let wCode = $state("");
+  // Two-factor authentication (portal routes/account-security.ts): the code goes with the retried request.
+  let wTwoFactor = $state<TwoFactorRequired | null>(null);
+  let wTfCode = $state("");
+  let destTwoFactor = $state<TwoFactorRequired | null>(null);
+  let destTfCode = $state("");
   let wChallenge = $state<{ id: string; bolt11: string; amountMsat: number; detail: string } | null>(null);
   let wBusy = $state(false);
   let wMsg = $state<{ ok: boolean; text: string } | null>(null);
@@ -265,7 +270,16 @@
     if (withCode && (!wChallenge || wChallenge.bolt11 !== inv || !wCode.trim())) { wMsg = { ok: false, text: "Enter the code from the email, or request a new one." }; return; }
     wBusy = true;
     try {
-      const r = await withdrawToInvoice(withCode ? { bolt11: inv, challengeId: wChallenge!.id, emailCode: wCode.trim() } : { bolt11: inv });
+      const twoFactorCode = wTwoFactor && wTfCode.trim() ? wTfCode.trim() : undefined;
+      const r = await withdrawToInvoice(withCode ? { bolt11: inv, challengeId: wChallenge!.id, emailCode: wCode.trim(), twoFactorCode } : { bolt11: inv, twoFactorCode });
+      if (r.status === "two_factor_required") {
+        wTwoFactor = r;
+        wTfCode = "";
+        if (r.invalidCode) wMsg = { ok: false, text: r.detail };
+        return;
+      }
+      wTwoFactor = null;
+      wTfCode = "";
       if (r.status === "verification_required") { wChallenge = { id: r.challengeId, bolt11: inv, amountMsat: r.amountMsat, detail: r.detail }; wCode = ""; return; }
       wChallenge = null;
       if (r.status === "paid") { wMsg = { ok: true, text: `Paid ${fmtMsat(r.amountMsat)} sats to your wallet.` }; bolt11 = ""; }
@@ -284,15 +298,24 @@
     if (withCode && (!destChallenge || !destCode.trim())) { destError = "Enter the code from the email."; return; }
     destSaving = true;
     try {
-      const r = await savePayoutDestination(withCode ? { destination, challengeId: destChallenge!, emailCode: destCode.trim() } : { destination });
+      const twoFactorCode = destTwoFactor && destTfCode.trim() ? destTfCode.trim() : undefined;
+      const r = await savePayoutDestination(withCode ? { destination, challengeId: destChallenge!, emailCode: destCode.trim() } : { destination, twoFactorCode });
+      if (r.status === "two_factor_required") {
+        destTwoFactor = r;
+        destTfCode = "";
+        if (r.invalidCode) destError = r.detail;
+        return;
+      }
+      destTwoFactor = null;
+      destTfCode = "";
       if (r.status === "saved") {
         payout = r.view;
         destChallenge = null;
         destCode = "";
-        const reg = r.view.registration;
-        destInfo = reg && (reg.controlPlane === "ok" || reg.coordinator === "ok")
-          ? `Saved. Payouts will go to ${r.view.destination?.destination}.`
-          : "Saved here, but the payout service could not be reached. Save again later so payouts can reach you.";
+        const p = r.view.pendingDestination;
+        destInfo = p?.confirmed && p.activatesAtMs
+          ? `Confirmed. Payouts go to ${p.destination} from ${when(p.activatesAtMs)}. We emailed you a link to cancel if this wasn't you.`
+          : `Payouts go to ${r.view.destination?.destination ?? "your saved address"}.`;
       } else if (r.status === "verification_required") {
         destChallenge = r.challengeId;
         destInfo = r.detail;
@@ -568,6 +591,18 @@
           {:else}
             <div><button class="primary" disabled={wBusy || paused || policy?.lightningEnabled === false} onclick={() => withdraw(false)}>{wBusy ? "Sending code…" : "Email me a code"}</button></div>
           {/if}
+          {#if wTwoFactor}
+            {#if wTwoFactor.webOnly}
+              <p class="wl-faint">Two-factor authentication is on with a passkey. Finish this withdrawal on the web, where your passkey works.</p>
+              <div><button class="small" onclick={() => openUrl(portalWebUrl("/portal/settings/plan#earnings"))}>Withdraw on the web <ExternalLink size={12} /></button></div>
+            {:else}
+              <label class="wl-label" for="wallet-2fa">Code from your authenticator app (or a recovery code)</label>
+              <div class="wl-inline">
+                <input id="wallet-2fa" class="wl-input" type="text" autocomplete="one-time-code" placeholder="123456" bind:value={wTfCode} />
+                <button class="primary" disabled={wBusy || !wTfCode.trim()} onclick={() => withdraw(Boolean(wChallenge))}>{wBusy ? "Checking…" : "Continue"}</button>
+              </div>
+            {/if}
+          {/if}
           {#if wMsg}<p class={wMsg.ok ? "sp-ok" : "sp-err"} role={wMsg.ok ? "status" : "alert"}>{wMsg.text}</p>{/if}
           <p class="wl-faint">{policyLine}</p>
         </div>
@@ -598,8 +633,33 @@
             <input id="payout-dest" class="wl-input" type="text" autocomplete="off" spellcheck="false" placeholder={payout?.onchainSupported ? "you@wallet.example or bc1…" : "you@wallet.example"} bind:value={destInput} aria-invalid={destError ? "true" : undefined} />
             <button class="primary" onclick={() => saveDestination(false)} disabled={destSaving}>{destSaving && !destChallenge ? "Saving…" : "Save"}</button>
           </div>
+          {#if payout?.locked}
+            <p class="wl-banner" role="alert">This account is locked: payouts and payout address changes are paused. Contact support to unlock it.</p>
+          {/if}
+          {#if payout?.pendingDestination}
+            <p class="wl-banner" role="status">
+              {#if payout.pendingDestination.confirmed && payout.pendingDestination.activatesAtMs}
+                New address <span class="mono">{payout.pendingDestination.destination}</span> is confirmed. Payouts go there from {when(payout.pendingDestination.activatesAtMs)}; until then withdrawals are paused.
+              {:else}
+                Waiting for you to confirm <span class="mono">{payout.pendingDestination.destination}</span> from the link we emailed.
+              {/if}
+              <button class="small" onclick={() => openUrl(portalWebUrl("/portal/settings/plan#payout-addresses"))}>Manage on the web <ExternalLink size={12} /></button>
+            </p>
+          {/if}
+          {#if destTwoFactor}
+            {#if destTwoFactor.webOnly}
+              <p class="wl-faint">Two-factor authentication is on with a passkey. Change the payout address on the web, where your passkey works.</p>
+              <div><button class="small" onclick={() => openUrl(portalWebUrl("/portal/settings/plan#payout-addresses"))}>Change it on the web <ExternalLink size={12} /></button></div>
+            {:else}
+              <label class="wl-label" for="payout-2fa">Code from your authenticator app (or a recovery code)</label>
+              <div class="wl-inline">
+                <input id="payout-2fa" class="wl-input" type="text" autocomplete="one-time-code" placeholder="123456" bind:value={destTfCode} />
+                <button class="primary" onclick={() => saveDestination(false)} disabled={destSaving || !destTfCode.trim()}>{destSaving ? "Checking…" : "Continue"}</button>
+              </div>
+            {/if}
+          {/if}
           {#if destChallenge}
-            <label class="wl-label" for="payout-code">Email code</label>
+            <label class="wl-label" for="payout-code">Code from the email (or click the link in it)</label>
             <div class="wl-inline">
               <input id="payout-code" class="wl-input" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" bind:value={destCode} />
               <button class="primary" onclick={() => saveDestination(true)} disabled={destSaving}>{destSaving ? "Confirming…" : "Confirm change"}</button>

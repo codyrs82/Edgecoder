@@ -28,7 +28,9 @@ const logger = moduleLogger("portal-account-admin");
  * tests/portal/admin-users-delete.test.ts checks that every user/email/account column created by
  * PortalStore.migrate() is either here or in RETAINED_USER_COLUMNS, so a new table cannot be missed.
  */
-export type DeleteStep = { table: string; column: string; by: "userId" | "email" } | { table: string; column: string; via: { table: string; column: string } };
+export type DeleteStep =
+  | { table: string; column: string; by: "userId" | "email"; /** Keyed rows: the column holds `<keyPrefix><userId>`. */ keyPrefix?: string }
+  | { table: string; column: string; via: { table: string; column: string } };
 
 export const USER_DELETE_PLAN: readonly DeleteStep[] = [
   // Access first (they were also cut before the transaction; this catches any created since).
@@ -54,6 +56,8 @@ export const USER_DELETE_PLAN: readonly DeleteStep[] = [
   { table: "portal_wallet_send_requests", column: "user_id", by: "userId" },
   { table: "portal_wallet_onboarding", column: "user_id", by: "userId" },
   { table: "portal_onboarding", column: "user_id", by: "userId" },
+  // Account security (2FA secret, pending payout destination, lock): src/portal/account-security.ts.
+  { table: "portal_onboarding", column: "user_id", by: "userId", keyPrefix: "acctsec:" },
   { table: "portal_withdraw_challenges", column: "user_id", by: "userId" },
   { table: "portal_payout_destination_challenges", column: "user_id", by: "userId" },
   { table: "portal_payout_destinations", column: "user_id", by: "userId" },
@@ -102,7 +106,7 @@ export function deleteStatement(step: DeleteStep, userId: string, email: string)
     return { sql: `DELETE FROM ${step.table} WHERE ${step.column} IN (SELECT ${step.via.column} FROM ${step.via.table} WHERE user_id = $1)`, params: [userId] };
   }
   if (step.by === "email") return { sql: `DELETE FROM ${step.table} WHERE lower(${step.column}) = $1`, params: [email.trim().toLowerCase()] };
-  return { sql: `DELETE FROM ${step.table} WHERE ${step.column} = $1`, params: [userId] };
+  return { sql: `DELETE FROM ${step.table} WHERE ${step.column} = $1`, params: [`${step.keyPrefix ?? ""}${userId}`] };
 }
 
 export const emailHash = (email: string) => createHash("sha256").update(email.trim().toLowerCase()).digest("hex");

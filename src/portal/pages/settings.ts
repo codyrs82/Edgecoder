@@ -50,6 +50,23 @@ const PROFILE = section(
       settingRow("Email", "The address you sign in with.", `<span class="set-value" id="profileEmail"></span><span id="profileEmailBadge"></span>`, { keywords: "email address verified" }) +
       settingRow("User ID", "Your account is <code id=\"profileAccountId\"></code> on the network.", `<span class="set-value" id="profileUserId"></span>`, { keywords: "user id account" })
   ) +
+    group("Two-factor authentication") +
+    card(
+      settingRow(
+        "Status",
+        "With two-factor authentication on, withdrawals, payout address changes, new API keys and admin changes ask for a code from your authenticator app (or your passkey). A passkey counts as a second factor.",
+        `<span class="set-value" id="tfaStatus">Loading…</span>`,
+        { keywords: "two-factor 2fa totp mfa authenticator security passkey" }
+      ) +
+        settingRow(
+          "Authenticator app",
+          "Google Authenticator, 1Password, Authy or any TOTP app. Recovery codes let you in if you lose the phone; each works once.",
+          `<button class="primary" id="tfaSetupBtn" type="button">Set up</button><button id="tfaRecoveryBtn" type="button" class="hidden">New recovery codes</button><button id="tfaDisableBtn" type="button" class="hidden">Turn off</button>`,
+          { keywords: "authenticator totp app recovery codes 2fa" }
+        ) +
+        `<div id="tfaSetupBox" class="hidden set-row wide" data-keywords="authenticator setup qr"><div class="set-text"><div class="set-label">Scan this with your authenticator app</div><div id="tfaQr" class="tfa-qr"></div><div class="set-desc">Or enter this key: <code id="tfaSecret" class="u-break-all"></code></div><div class="row"><input id="tfaCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6-digit code" aria-label="Code from your authenticator app" /><button class="primary" id="tfaEnableBtn" type="button">Turn on</button></div></div></div>` +
+        `<div id="tfaCodesBox" class="hidden set-row wide" data-keywords="recovery codes"><div class="set-text"><strong>Save these recovery codes now. They won't be shown again.</strong><pre id="tfaCodes"></pre><button id="tfaCopyCodesBtn" type="button">Copy</button></div></div>`
+    ) +
     group("Sign-in") +
     card(
       settingRow("Passkey", "Enroll a passkey for passwordless sign-in on future visits.", `<button class="primary" id="passkeyEnrollBtn">Enroll passkey</button>`, { keywords: "passkey security login password webauthn" }) +
@@ -325,6 +342,64 @@ const SCRIPT = SETTINGS_HELPERS_SCRIPT + `
         showToast("Passkey enrollment failed: " + String(err.message || err), true);
       }
     });
+
+    /* ── Two-factor authentication (routes/account-security.ts) ── */
+    async function loadTwoFactor() {
+      const r = await call("/portal/api/security/2fa");
+      const status = document.getElementById("tfaStatus");
+      if (!r.ok) { status.textContent = "Could not load."; return; }
+      const s = r.json;
+      const parts = [];
+      if (s.totpEnabled) parts.push("Authenticator app on (" + s.recoveryCodesRemaining + " recovery codes left)");
+      if (s.passkeys) parts.push(s.passkeys + " passkey" + (s.passkeys === 1 ? "" : "s"));
+      status.innerHTML = s.enabled ? statusBadge("On", "ok") + " " + escapeHtml(parts.join(", ")) : statusBadge("Off", "warn");
+      if (s.admin && !s.enabled) status.innerHTML += " " + statusBadge(s.admin.enforced ? "Required for admin changes" : "Required for admins", "danger");
+      document.getElementById("tfaSetupBtn").classList.toggle("hidden", Boolean(s.totpEnabled));
+      document.getElementById("tfaDisableBtn").classList.toggle("hidden", !s.totpEnabled);
+      document.getElementById("tfaRecoveryBtn").classList.toggle("hidden", !s.totpEnabled);
+    }
+    function showCodes(codes) {
+      document.getElementById("tfaCodes").textContent = codes.join("\\n");
+      document.getElementById("tfaCodesBox").classList.remove("hidden");
+    }
+    document.getElementById("tfaSetupBtn").addEventListener("click", async () => {
+      const r = await call("/portal/api/security/2fa/totp/setup", { method: "POST", body: "{}" });
+      if (!r.ok) { showToast(r.json.error === "two_factor_key_not_configured" ? "Two-factor authentication is not configured on this portal." : "Could not start: " + (r.json.error || r.status), true); return; }
+      document.getElementById("tfaQr").innerHTML = r.json.qrSvg || "";
+      document.getElementById("tfaSecret").textContent = r.json.secret;
+      document.getElementById("tfaSetupBox").classList.remove("hidden");
+      document.getElementById("tfaCode").focus();
+    });
+    document.getElementById("tfaEnableBtn").addEventListener("click", async () => {
+      const code = document.getElementById("tfaCode").value.trim();
+      const r = await call("/portal/api/security/2fa/totp/enable", { method: "POST", body: JSON.stringify({ code }) });
+      if (!r.ok) { showToast(r.json.error === "totp_code_invalid" ? "That code is not right. Check the time on your phone and try the next code." : "Could not turn it on: " + (r.json.error || r.status), true); return; }
+      document.getElementById("tfaSetupBox").classList.add("hidden");
+      showCodes(r.json.recoveryCodes || []);
+      showToast("Two-factor authentication is on.");
+      loadTwoFactor();
+    });
+    document.getElementById("tfaDisableBtn").addEventListener("click", async () => {
+      const code = window.prompt("To turn off two-factor authentication, enter a code from your authenticator app (or a recovery code).");
+      if (!code) return;
+      const r = await call("/portal/api/security/2fa/totp/disable", { method: "POST", body: JSON.stringify({ code: code.trim() }) });
+      if (!r.ok) { showToast(r.json.error === "two_factor_rate_limited" ? "Too many wrong codes. Wait 15 minutes." : "That code is not right.", true); return; }
+      document.getElementById("tfaCodesBox").classList.add("hidden");
+      showToast("Two-factor authentication is off.");
+      loadTwoFactor();
+    });
+    document.getElementById("tfaRecoveryBtn").addEventListener("click", async () => {
+      const code = window.prompt("Enter a code from your authenticator app to get new recovery codes (the old ones stop working).");
+      if (!code) return;
+      const r = await call("/portal/api/security/2fa/recovery-codes", { method: "POST", body: JSON.stringify({ code: code.trim() }) });
+      if (!r.ok) { showToast("That code is not right.", true); return; }
+      showCodes(r.json.recoveryCodes || []);
+      loadTwoFactor();
+    });
+    document.getElementById("tfaCopyCodesBtn").addEventListener("click", async () => {
+      try { await navigator.clipboard.writeText(document.getElementById("tfaCodes").textContent); showToast("Copied."); } catch { showToast("Copy failed; select the codes and copy them.", true); }
+    });
+    loadTwoFactor();
 
     /* ── Connected sign-ins: list and disconnect (the server refuses to remove the last way in) ── */
     async function loadSignIns() {

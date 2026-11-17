@@ -263,5 +263,69 @@ export function createPortalMailer(cfg: PortalMailerConfig, log: { warn: (msg: s
     return sendResendEmail(input.email, "Your EdgeCoder host request is approved", html, "host_approved_email");
   }
 
-  return { sendOauthLinkConfirmEmail, sendOauthConnectedEmail, sendOauthLinkClaimNoticeEmail, sendHostRequestAdminEmail, sendHostApprovedEmail, sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail, sendWithdrawCodeEmail, sendPayoutCallbackChangedEmail, sendPayoutCallbackCodeEmail };
+  const when = (ms: number) => new Date(ms).toUTCString();
+
+  /**
+   * Adding or changing a payout destination (src/portal/account-security.ts): a link that confirms
+   * it (single use, expires after ttlMinutes), and the same confirmation as a code for the app.
+   */
+  async function sendPayoutDestinationConfirmEmail(input: { email: string; destination: string; token: string; code: string; ttlMinutes: number; cooldownHours: number }): Promise<void> {
+    const link = `${cfg.portalPublicUrl}/auth/account-security/confirm-destination?token=${encodeURIComponent(input.token)}`;
+    const html = `
+      <p>Someone signed in to your EdgeCoder account asked to send your payouts to:</p>
+      <p><strong>${escapeHtml(input.destination)}</strong></p>
+      <p>If this was you, confirm it: <a href="${link}">${link}</a></p>
+      <p>Or enter this code in the app: <strong style="font-size:20px;letter-spacing:0.18em;">${escapeHtml(input.code)}</strong></p>
+      <p>The link and code work once and expire in ${input.ttlMinutes} minutes. After you confirm, payouts start going to this address in ${input.cooldownHours} hours.</p>
+      <p>If this was not you, do not click the link. Change your password and turn on two-factor authentication.</p>
+    `;
+    if (!(await sendResendEmail(input.email, "Confirm your new EdgeCoder payout address", html, "payout_destination_confirm_email"))) throw new Error("email_not_configured");
+  }
+
+  /** Sent when a destination change is confirmed: when it takes effect, and a one-click cancel. */
+  async function sendPayoutDestinationAddedEmail(input: { email: string; destination: string; activatesAtMs: number; cancelToken: string }): Promise<boolean> {
+    const link = `${cfg.portalPublicUrl}/auth/account-security/cancel-destination?token=${encodeURIComponent(input.cancelToken)}`;
+    const html = `
+      <p>A new payout address was added to your EdgeCoder account:</p>
+      <p><strong>${escapeHtml(input.destination)}</strong></p>
+      <p>Payouts go there from ${escapeHtml(when(input.activatesAtMs))}. Until then your previous address (if you had one) keeps receiving them, and withdrawals are paused.</p>
+      <p><strong>If this wasn't you</strong>, click to cancel the change and secure your account (this signs out every session): <a href="${link}">${link}</a></p>
+    `;
+    return sendResendEmail(input.email, "A new payout address was added to your EdgeCoder account", html, "payout_destination_added_email");
+  }
+
+  /** Every withdrawal: what, where (masked) and when, with a link that locks the account. */
+  async function sendWithdrawalReceiptEmail(input: { email: string; amountSats: number; destination: string; atMs: number; lockToken: string; status: string; what?: string }): Promise<boolean> {
+    const link = `${cfg.portalPublicUrl}/auth/account-security/lock?token=${encodeURIComponent(input.lockToken)}`;
+    const html = `
+      <p>${escapeHtml(input.what ?? "A withdrawal")} was made from your EdgeCoder account.</p>
+      <ul>
+        <li>Amount: ${escapeHtml(input.amountSats.toLocaleString("en-US"))} sats</li>
+        <li>To: ${escapeHtml(input.destination)}</li>
+        <li>Time: ${escapeHtml(when(input.atMs))}</li>
+        <li>Status: ${escapeHtml(input.status)}</li>
+      </ul>
+      <p><strong>Not you?</strong> Lock your account: <a href="${link}">${link}</a></p>
+      <p>Locking pauses payouts and signs out every session. An EdgeCoder admin unlocks it after checking with you.</p>
+    `;
+    return sendResendEmail(input.email, `EdgeCoder withdrawal receipt: ${input.amountSats.toLocaleString("en-US")} sats`, html, "withdrawal_receipt_email");
+  }
+
+  async function sendAccountLockedEmail(input: { email: string }): Promise<boolean> {
+    const html = `
+      <p>Your EdgeCoder account was locked: payouts are paused and every session was signed out.</p>
+      <p>Reset your password, then contact support (or reply to this email) so an admin can unlock it.</p>
+    `;
+    return sendResendEmail(input.email, "Your EdgeCoder account is locked", html, "account_locked_email");
+  }
+
+  /** Two-factor authentication turned on or off. */
+  async function sendTwoFactorChangedEmail(input: { email: string; enabled: boolean }): Promise<boolean> {
+    const html = input.enabled
+      ? `<p>Two-factor authentication was turned on for your EdgeCoder account. Keep your recovery codes somewhere safe.</p>`
+      : `<p>Two-factor authentication was turned off for your EdgeCoder account.</p><p>If this was not you, reset your password now.</p>`;
+    return sendResendEmail(input.email, `Two-factor authentication ${input.enabled ? "on" : "off"} for your EdgeCoder account`, html, "two_factor_changed_email");
+  }
+
+  return { sendOauthLinkConfirmEmail, sendOauthConnectedEmail, sendOauthLinkClaimNoticeEmail, sendHostRequestAdminEmail, sendHostApprovedEmail, sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail, sendWithdrawCodeEmail, sendPayoutCallbackChangedEmail, sendPayoutCallbackCodeEmail, sendPayoutDestinationConfirmEmail, sendPayoutDestinationAddedEmail, sendWithdrawalReceiptEmail, sendAccountLockedEmail, sendTwoFactorChangedEmail };
 }

@@ -21,7 +21,7 @@ import { registerPasskeyRoutes } from "./routes/passkey.js";
 import { registerAuthRoutes } from "./routes/auth.js";
 import { registerCoordinatorOpsRoutes } from "./routes/coordinator-ops.js";
 import { registerWalletRoutes } from "./routes/wallet.js";
-import { createPayoutRegistrar, registerPayoutDestinationRoutes } from "./routes/payout-destination.js";
+import { registerPayoutDestinationRoutes } from "./routes/payout-destination.js"; import { setupAccountSecurity } from "./account-security-setup.js";
 import { createPayoutCallbackClient, registerPayoutCallbackNotifyRoute, registerPayoutCallbackRoutes } from "./routes/payout-callback.js";
 import { registerChatApiRoutes } from "./routes/chat.js";
 import { registerReviewRoutes } from "./routes/reviews.js";
@@ -309,7 +309,7 @@ function uint8ArrayFromBase64Url(value: string): Uint8Array<ArrayBuffer> {
   return new Uint8Array(Array.from(buffer.values())) as Uint8Array<ArrayBuffer>;
 }
 
-const { sendOauthLinkConfirmEmail, sendOauthConnectedEmail, sendOauthLinkClaimNoticeEmail, sendHostRequestAdminEmail, sendHostApprovedEmail, sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendPayoutDestinationCodeEmail, sendWithdrawCodeEmail, sendPayoutCallbackChangedEmail, sendPayoutCallbackCodeEmail } = createPortalMailer(
+const { sendOauthLinkConfirmEmail, sendOauthConnectedEmail, sendOauthLinkClaimNoticeEmail, sendHostRequestAdminEmail, sendHostApprovedEmail, sendVerificationEmail, sendWalletSendMfaCodeEmail, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendWithdrawCodeEmail, sendPayoutCallbackChangedEmail, sendPayoutCallbackCodeEmail, sendPayoutDestinationConfirmEmail, sendPayoutDestinationAddedEmail, sendWithdrawalReceiptEmail, sendAccountLockedEmail, sendTwoFactorChangedEmail } = createPortalMailer(
   {
     resendApiKey: RESEND_API_KEY,
     resendFromEmail: RESEND_FROM_EMAIL,
@@ -837,12 +837,13 @@ app.get("/health", async () => ({ ok: true, portalDb: Boolean(store) }));
 
 // Apple App Site Association for passkey webcredentials (iOS app ↔ domain link)
 registerWellKnownRoutes(app);
+const { accountSecurity, secondFactor, payoutRegistrar } = /* 2FA, payout destination cooling-off, receipts, lock */ setupAccountSecurity(app, { store, config: C, getCurrentUser, buildAccessContext, registrar: { controlPlaneUrl: CONTROL_PLANE_URL, controlPlaneAdminToken: CONTROL_PLANE_ADMIN_TOKEN, portalServiceToken: PORTAL_SERVICE_TOKEN, timeoutMs: EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrls: discoverCoordinatorUrlsForPortal }, passkey: { rpId: PASSKEY_RP_ID, allowedOrigins: PASSKEY_ALLOWED_ORIGINS, challengeTtlMs: PASSKEY_CHALLENGE_TTL_MS, generateAuthenticationOptions, verifyAuthenticationResponse, uint8ArrayFromBase64Url, normalizePasskeyResponsePayload, deriveCredentialIdFromVerifyBody }, mail: { sendDestinationAdded: sendPayoutDestinationAddedEmail, sendAccountLocked: sendAccountLockedEmail, sendTwoFactorChanged: sendTwoFactorChangedEmail } });
 
 const authRouteDeps = { LAUNCH_MODE, EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, encodeCookie, secureCompare, decodeJwtPayload, ensureCreditAccountForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sendOauthLinkConfirmEmail, sendOauthConnectedEmail, sendOauthLinkClaimNoticeEmail, sha256Hex, store, verifyPassword, clientIp: (req: FastifyRequest) => clientIp(req, { ...process.env, edge: C.PORTAL_EDGE, originLockToken: C.PORTAL_ORIGIN_LOCK_TOKEN }) };
 export type AuthRoutesDeps = typeof authRouteDeps;
 registerAuthRoutes(app, authRouteDeps);
 
-const passkeyRouteDeps = { PASSKEY_ALLOWED_ORIGINS, PASSKEY_CHALLENGE_TTL_MS, PASSKEY_RP_ID, PASSKEY_RP_NAME, base64UrlFromBuffer, createSessionForUser, deriveCredentialIdFromVerifyBody, generateAuthenticationOptions, generateRegistrationOptions, getCurrentUser, normalizeEmail, normalizePasskeyResponsePayload, store, uint8ArrayFromBase64Url, verifyAuthenticationResponse, verifyRegistrationResponse };
+const passkeyRouteDeps = { PASSKEY_ALLOWED_ORIGINS, PASSKEY_CHALLENGE_TTL_MS, PASSKEY_RP_ID, PASSKEY_RP_NAME, base64UrlFromBuffer, createSessionForUser, deriveCredentialIdFromVerifyBody, generateAuthenticationOptions, generateRegistrationOptions, getCurrentUser, normalizeEmail, normalizePasskeyResponsePayload, secondFactor, store, uint8ArrayFromBase64Url, verifyAuthenticationResponse, verifyRegistrationResponse };
 export type PasskeyRoutesDeps = typeof passkeyRouteDeps;
 registerPasskeyRoutes(app, passkeyRouteDeps);
 const walletRouteDeps = { PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, RESEND_API_KEY, RESEND_FROM_EMAIL, WALLET_DEFAULT_NETWORK, WALLET_SEND_MFA_TTL_MS, generateAuthenticationOptions, generateSixDigitCode, getCurrentUser, secureCompare, sendWalletSendMfaCodeEmail, sha256Hex, store, uint8ArrayFromBase64Url, verifyAuthenticationResponse };
@@ -855,9 +856,8 @@ registerPayoutCallbackRoutes(app, {
   sendCode: sendPayoutCallbackCodeEmail, generateSixDigitCode, sha256Hex, secureCompare
 });
 registerPayoutDestinationRoutes(app, {
-  store, getCurrentUser, network: WALLET_DEFAULT_NETWORK, onchainEnabled: C.ONCHAIN_ENABLED, codeTtlMs: WALLET_SEND_MFA_TTL_MS, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL),
-  sendCode: sendPayoutDestinationCodeEmail, generateSixDigitCode, sha256Hex, secureCompare, callbackChange: (a, dest) => payoutCallbackClient.pendingChange(a, dest),
-  register: createPayoutRegistrar({ controlPlaneUrl: CONTROL_PLANE_URL, controlPlaneAdminToken: CONTROL_PLANE_ADMIN_TOKEN, portalServiceToken: PORTAL_SERVICE_TOKEN, timeoutMs: EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrls: discoverCoordinatorUrlsForPortal })
+  store, getCurrentUser, network: WALLET_DEFAULT_NETWORK, onchainEnabled: C.ONCHAIN_ENABLED, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), register: payoutRegistrar,
+  security: accountSecurity, secondFactor, sendConfirm: sendPayoutDestinationConfirmEmail, sendAdded: sendPayoutDestinationAddedEmail, callbackChange: (a, dest) => payoutCallbackClient.pendingChange(a, dest)
 });
 const accountRouteDeps = { discoverCoordinatorUrlsForPortal, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store };
 export type AccountApiRoutesDeps = typeof accountRouteDeps;
@@ -887,7 +887,7 @@ const reviewsRouteDeps = { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, build
 export type ReviewRoutesDeps = typeof reviewsRouteDeps;
 registerReviewRoutes(app, reviewsRouteDeps);
 
-const marketRouteDeps = { LAUNCH_MODE, EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store, ensureCreditAccountForUser, chatCapacity };
+const marketRouteDeps = { LAUNCH_MODE, EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store, ensureCreditAccountForUser, chatCapacity, secondFactor };
 export type MarketRoutesDeps = typeof marketRouteDeps;
 registerMarketRoutes(app, marketRouteDeps);
 // Settings > Nodes > Machines (remote model control, routes/machines.ts; with the machines' bots, routes/bots.ts) and Settings > Network (the world view, routes/network-world.ts).
@@ -897,13 +897,13 @@ registerNetworkWorldRoutes(app, { PORTAL_SERVICE_TOKEN, EXTERNAL_HTTP_TIMEOUT_MS
 registerWalletApiRoutes(app, { ...marketRouteDeps, fallbackNetwork: WALLET_DEFAULT_NETWORK });
 registerPayoutRoutes(app, marketRouteDeps, {
   store, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), codeTtlMs: WALLET_SEND_MFA_TTL_MS, dailyCapSats: C.PORTAL_WITHDRAW_DAILY_CAP_SATS,
-  sendCode: sendWithdrawCodeEmail, generateSixDigitCode, sha256Hex, secureCompare
+  sendCode: sendWithdrawCodeEmail, generateSixDigitCode, sha256Hex, secureCompare, security: accountSecurity, secondFactor, sendReceipt: sendWithdrawalReceiptEmail
 });
 // EdgeCoder's revenue (the network fee pool) for system admins: report and withdraw, through the coordinator's admin routes.
 registerRevenueRoutes(
   app,
   { coordinatorAdminToken: C.COORDINATOR_ADMIN_TOKEN ?? "", EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal, getCurrentUser, buildAccessContext },
-  { store, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), codeTtlMs: WALLET_SEND_MFA_TTL_MS, sendCode: sendWithdrawCodeEmail, generateSixDigitCode, sha256Hex, secureCompare }
+  { store, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), codeTtlMs: WALLET_SEND_MFA_TTL_MS, sendCode: sendWithdrawCodeEmail, generateSixDigitCode, sha256Hex, secureCompare, security: accountSecurity, sendReceipt: sendWithdrawalReceiptEmail }
 );
 
 // Settings > Admin > Early access: system admins mint, list and revoke invite codes (src/portal/invites.ts).

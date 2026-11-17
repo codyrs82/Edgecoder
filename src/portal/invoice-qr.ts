@@ -77,6 +77,18 @@ export function bitcoinAddressQrSvg(address: string): string | null {
   );
 }
 
+/** An SVG QR code for any short text (the otpauth:// URI an authenticator app scans when 2FA is set up). */
+export function textQrSvg(payload: string): string {
+  const { size, d } = qrPath(payload);
+  const full = size + QUIET * 2;
+  return (
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${full} ${full}" width="${full * 4}" height="${full * 4}" shape-rendering="crispEdges">` +
+    `<rect width="${full}" height="${full}" fill="#ffffff"/>` +
+    `<path transform="translate(${QUIET} ${QUIET})" d="${d}" fill="#000000"/>` +
+    `</svg>`
+  );
+}
+
 /** A deposit answer with `qrSvg` added when it carries an address. */
 export function withAddressQr(status: number, json: unknown): unknown {
   if (status !== 200 || !json || typeof json !== "object") return json;

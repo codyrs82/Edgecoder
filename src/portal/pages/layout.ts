@@ -282,6 +282,9 @@ export function portalAuthedPageHtml(input: {
               <div class="verify-banner-text"><strong>Verify your email:</strong> we sent a link to <span id="verifyEmailMasked"></span>. <button type="button" class="link-btn" id="verifyEmailResend">Resend</button></div>
               <button type="button" class="ghost verify-banner-close" id="verifyEmailDismiss" aria-label="Dismiss">${icon("x", 14)}</button>
             </div>
+            <div id="admin2faBanner" class="callout warn verify-banner" role="status" hidden>
+              <div class="verify-banner-text"><strong>Turn on two-factor authentication:</strong> admins must have it. <span id="admin2faWhen"></span> <a href="/portal/settings#profile">Set it up in Settings, Profile</a>.</div>
+            </div>
             <div class="content-stack">
               ${input.content}
             </div>
@@ -299,6 +302,70 @@ export function portalAuthedPageHtml(input: {
           toast.style.borderLeftColor = isError ? "var(--danger)" : "var(--ok)";
           clearTimeout(toast._t);
           toast._t = setTimeout(() => toast.classList.add("hidden"), 5000);
+        }
+        /* ── Two-factor step-up: a protected action answered 403 two_factor_required (routes/account-security.ts).
+           Ask for a code (or the passkey), make the step-up, and send the request once more. ── */
+        (function() {
+          if (typeof window.fetch !== "function") return;
+          var origFetch = window.fetch.bind(window);
+          var post = function(path, body) { return origFetch(path, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify(body || {}) }); };
+          var toBuf = function(v) { v = String(v).replace(/-/g, "+").replace(/_/g, "/"); v += "=".repeat((4 - (v.length % 4)) % 4); var bin = atob(v); var a = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return a.buffer; };
+          var toB64u = function(buf) { var b = new Uint8Array(buf); var str = ""; for (var i = 0; i < b.length; i++) str += String.fromCharCode(b[i]); return btoa(str).replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/g, ""); };
+          async function passkeyStepUp() {
+            if (!window.PublicKeyCredential || !navigator.credentials) throw new Error("passkeys_unsupported");
+            var r = await post("/portal/api/security/2fa/passkey/options");
+            var o = await r.json();
+            if (!r.ok) throw new Error(o.error || "passkey_options_failed");
+            var opts = o.options || {};
+            var cred = await navigator.credentials.get({ publicKey: {
+              challenge: toBuf(opts.challenge), rpId: opts.rpId, timeout: opts.timeout, userVerification: opts.userVerification || "required",
+              allowCredentials: (opts.allowCredentials || []).map(function(c) { return { id: toBuf(c.id), type: "public-key", transports: c.transports }; })
+            } });
+            var response = { id: cred.id, rawId: toB64u(cred.rawId), type: cred.type, clientExtensionResults: {}, response: {
+              clientDataJSON: toB64u(cred.response.clientDataJSON), authenticatorData: toB64u(cred.response.authenticatorData),
+              signature: toB64u(cred.response.signature), userHandle: cred.response.userHandle ? toB64u(cred.response.userHandle) : undefined } };
+            var v = await post("/portal/api/security/2fa/passkey/verify", { challengeId: o.challengeId, credentialId: cred.id, response: response });
+            if (!v.ok) throw new Error("passkey_verification_failed");
+          }
+          async function stepUp(methods) {
+            methods = methods || [];
+            var hasCode = methods.indexOf("totp") >= 0;
+            var hasPasskey = methods.indexOf("passkey") >= 0;
+            if (hasCode) {
+              var code = window.prompt("Two-factor authentication: enter the 6-digit code from your authenticator app, or a recovery code." + (hasPasskey ? " Leave it empty to use your passkey instead." : ""));
+              if (code === null) return false;
+              if (code.trim()) {
+                var r = await post("/portal/api/security/2fa/verify", { code: code.trim() });
+                if (r.ok) return true;
+                var j = {}; try { j = await r.json(); } catch {}
+                window.alert(j.error === "two_factor_rate_limited" ? "Too many wrong codes. Wait 15 minutes and try again." : "That code is not right.");
+                return false;
+              }
+            }
+            if (hasPasskey) {
+              try { await passkeyStepUp(); return true; } catch { window.alert("Passkey confirmation did not complete."); return false; }
+            }
+            return false;
+          }
+          window.edgecoderStepUp = stepUp;
+          window.fetch = async function(input, init) {
+            var res = await origFetch(input, init);
+            if (res.status !== 403) return res;
+            var j = null; try { j = await res.clone().json(); } catch {}
+            if (!j || j.error !== "two_factor_required") return res;
+            if (!(await stepUp(j.methods))) return res;
+            return origFetch(input, init);
+          };
+        })();
+        /* ── Admins without 2FA: a banner until they turn it on (enforced after ADMIN_2FA_GRACE_DAYS) ── */
+        async function showAdmin2faBanner() {
+          try {
+            var st = await api("/portal/api/security/2fa", { method: "GET", headers: {} });
+            if (!st || !st.admin || st.enabled) return;
+            var when = document.getElementById("admin2faWhen");
+            when.textContent = st.admin.enforced ? "Admin changes are paused until you do." : st.admin.graceEndsAtMs ? "Admin changes stop working on " + new Date(st.admin.graceEndsAtMs).toLocaleDateString() + " without it." : "";
+            document.getElementById("admin2faBanner").hidden = false;
+          } catch {}
         }
         async function api(path, options = {}) {
           const res = await fetch(path, {
@@ -395,6 +462,7 @@ export function portalAuthedPageHtml(input: {
               document.querySelectorAll("[data-admin-only]").forEach(function(e) { e.hidden = false; e.classList.remove("hidden"); });
             }
             showVerifyEmailBanner(user);
+            if (user.roles && user.roles.isSystemAdmin) showAdmin2faBanner();
           } catch { return; }
           // The balance lives on the coordinator (cSats); the control plane's credits are a fallback.
           try {

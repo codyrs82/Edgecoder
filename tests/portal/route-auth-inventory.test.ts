@@ -116,6 +116,12 @@ const PUBLIC: Record<string, string> = {
   "POST /auth/oauth/mobile/complete": "exchanges a one-time code for the session",
   "GET /auth/oauth-link/confirm": "emailed link (page only; changes nothing)",
   "POST /auth/oauth-link/confirm": "emailed link; proven by the token plus this browser or the provider identity",
+  "GET /auth/account-security/confirm-destination": "emailed link (page only; changes nothing)",
+  "POST /auth/account-security/confirm-destination": "emailed link: confirms a payout address, proven by the single-use token",
+  "GET /auth/account-security/cancel-destination": "emailed link (page only; changes nothing)",
+  "POST /auth/account-security/cancel-destination": "emailed link: cancels a payout address change, proven by the token",
+  "GET /auth/account-security/lock": "emailed link (page only; changes nothing)",
+  "POST /auth/account-security/lock": "emailed link in a withdrawal receipt: locks the account, proven by the token",
   "POST /auth/passkey/login/options": "starts passkey sign-in",
   "POST /auth/passkey/login/verify": "finishes passkey sign-in",
   "POST /agents/challenge": "agent signup, proven by a key signature",
@@ -531,6 +537,7 @@ describe("portal rate-limit inventory (#17)", () => {
     const wallet = routes.filter((route) => route.url.startsWith("/wallet/") && STATE_CHANGING.has(route.method));
     expect(wallet.map(key).sort()).toEqual([
       "POST /wallet/payout-destination/callback/confirm",
+      "POST /wallet/payout-destination/cancel",
       "POST /wallet/payouts/withdraw",
       "POST /wallet/send/mfa/confirm",
       "POST /wallet/send/mfa/start",

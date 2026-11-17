@@ -16,6 +16,7 @@ import { createChatCapacityDirectory, type ChatCapacityDirectory } from "../chat
 import { clientRegionOf, type CoordinatorChoice } from "../../common/coordinator-choice.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { SecondFactorGate } from "./account-security.js";
 import { z } from "zod";
 import { RESERVATION_MAX_MINUTES, RESERVATION_MIN_MINUTES } from "../../economy/reservations.js";
 import {
@@ -53,6 +54,8 @@ export interface HostedRoutesDeps {
   LAUNCH_MODE?: LaunchMode;
   /** Where network calls go (shared with portal chat); built from discoverCoordinatorUrlsForPortal when absent. */
   chatCapacity?: ChatCapacityDirectory;
+  /** With 2FA on, creating an API key needs the second factor (routes/account-security.ts). */
+  secondFactor?: SecondFactorGate;
 }
 
 /** Where a hosted request runs, from the model the tool named: network/<m>[@class] (or a bare model), mine/<m>, reserved/<lease>/<m>. */
@@ -258,7 +261,11 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
     // An unverified account holds no long-lived credentials (routes/auth.ts, verify-email).
     if (user.emailVerified === false) return reply.code(403).send({ error: "email_not_verified" });
-    const { name } = z.object({ name: z.string().trim().min(1).max(60) }).parse(req.body ?? {});
+    const { name } = z.object({ name: z.string().trim().min(1).max(60), twoFactorCode: z.string().max(32).optional() }).parse(req.body ?? {});
+    if (deps.secondFactor) {
+      const check = await deps.secondFactor(req, user);
+      if (!check.ok) return reply.code(check.status).send(check.body);
+    }
     if ((await store.countApiKeys(user.userId)) >= MAX_KEYS) return reply.code(409).send({ error: "too_many_keys", max: MAX_KEYS });
     const key = `${API_KEY_PREFIX}${randomBytes(32).toString("base64url")}`;
     const keyId = randomUUID();

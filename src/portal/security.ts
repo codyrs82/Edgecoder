@@ -81,6 +81,8 @@ const AUTH_ROUTES: RegExp[] = [
   /^\/auth\/oauth\/[^/]+\/(start|callback|connect)$/,
   // Confirming an emailed link that connects a sign-in provider (oauth-pending-link.ts).
   /^\/auth\/oauth-link\/confirm$/,
+  // Emailed account-security links: confirm or cancel a payout destination, lock the account (routes/account-security.ts).
+  /^\/auth\/account-security\/(confirm-destination|cancel-destination|lock)$/,
   // Logout needs no credential and runs a delete per token sent; limit it like sign-in.
   /^\/auth\/logout$/,
   /^\/auth\/oauth\/mobile\/complete$/,
@@ -91,7 +93,14 @@ const AUTH_ROUTES: RegExp[] = [
 // page's list) must not share this bucket.
 const PASSWORD_RESET_ROUTES: RegExp[] = [/^\/auth\/password\/(forgot|reset)$/];
 // Withdraw (the code request and the confirm) shares the wallet bucket.
-const WALLET_ROUTES: RegExp[] = [/^\/wallet\/send\/mfa\/(start|confirm)$/, /^\/wallet\/payouts\/withdraw$/, /^\/wallet\/payout-destination\/callback\/confirm$/];
+const WALLET_ROUTES: RegExp[] = [
+  /^\/wallet\/send\/mfa\/(start|confirm)$/,
+  /^\/wallet\/payouts\/withdraw$/,
+  /^\/wallet\/payout-destination\/callback\/confirm$/,
+  /^\/wallet\/payout-destination\/cancel$/,
+  // Second-factor codes (routes/account-security.ts; each account also pauses after 5 wrong codes).
+  /^\/portal\/api\/security\/2fa\/(verify|totp\/setup|totp\/enable|totp\/disable|recovery-codes|passkey\/options|passkey\/verify)$/
+];
 /**
  * Chat messages and new conversations (each chat turn is stored and sent to a coordinator):
  * 20 per minute per signed-in user (keyed on the user when known, else the client IP).

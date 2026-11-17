@@ -382,12 +382,13 @@ ${WALLET_DIRECT_CONTENT}
           <button class="primary" id="payoutDestSaveBtn">Save</button>
         </div>
         <div id="payoutDestCodeWrap" class="hidden u-mt-8">
-          <label for="payoutDestCode">Email code</label>
+          <label for="payoutDestCode">Code from the email (or click the link in it)</label>
           <div class="row">
             <input id="payoutDestCode" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code" class="u-flex-1" />
             <button class="primary" id="payoutDestConfirmBtn">Confirm change</button>
           </div>
         </div>
+        <div id="payoutDestPending" class="hidden payout-warning u-mt-8" role="status"><p class="u-m-0 u-mb-6" id="payoutDestPendingText"></p><div class="row"><button id="payoutDestCancelBtn" type="button">Cancel this change</button></div></div>
         <div id="payoutDestOnchainNote" class="wl-faint hidden u-mt-8"></div>
         <div id="payoutDestError" role="alert" class="hidden u-mt-8 u-danger"></div>
         <div id="payoutDestInfo" class="muted hidden u-mt-8"></div>
@@ -916,6 +917,12 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + W
       $("payoutDestNetwork").textContent = networkInfo(v.network).short;
       $("payoutDestRetired").classList.toggle("hidden", !(v.legacyAddressRetired && !current));
       if (current && !$("payoutDestInput").value) $("payoutDestInput").value = current;
+      const p = v.pendingDestination;
+      $("payoutDestPending").classList.toggle("hidden", !p);
+      if (p) $("payoutDestPendingText").textContent = p.confirmed
+        ? "New address " + p.destination + " is confirmed. Payouts go there from " + new Date(p.activatesAtMs).toLocaleString() + "; until then " + (current ? "they keep going to " + current : "automatic payouts wait") + ", and withdrawals are paused."
+        : "Waiting for you to confirm " + p.destination + " from the link we emailed (it expires " + new Date(p.confirmExpiresAtMs).toLocaleTimeString() + ").";
+      if (v.locked) payoutDestMessage("error", "This account is locked: payouts are paused. Contact support to unlock it.");
       const cc = v.callbackChange;
       $("payoutCallbackChanged").classList.toggle("hidden", !cc);
       if (cc) $("payoutCallbackText").textContent = "Your wallet's payment server changed from " + originHost(cc.previousOrigin) + " to " + originHost(cc.newOrigin) + ". Confirm to keep receiving payouts.";
@@ -957,8 +964,9 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + W
       if (r.status === 200) {
         payoutDestChallenge = null; $("payoutDestCodeWrap").classList.add("hidden"); $("payoutDestCode").value = "";
         renderPayoutDest(r.payload);
-        const reg = r.payload.registration || {};
-        payoutDestMessage("info", reg.controlPlane === "ok" || reg.coordinator === "ok" ? "Saved. Payouts will go to " + r.payload.destination.destination + "." : "Saved here, but the payout service could not be reached. Save again later so payouts can reach you.");
+        const pend = r.payload.pendingDestination;
+        if (pend && pend.confirmed) payoutDestMessage("info", "Confirmed. Payouts go to " + pend.destination + " from " + new Date(pend.activatesAtMs).toLocaleString() + ".");
+        else payoutDestMessage("info", r.payload.destination ? "Payouts go to " + r.payload.destination.destination + "." : "Saved.");
         return;
       }
       if (r.status === 202 && r.payload.verificationRequired) { payoutDestChallenge = r.payload.challengeId; $("payoutDestCodeWrap").classList.remove("hidden"); payoutDestMessage("info", r.payload.detail || "We emailed you a code. Enter it to confirm the change."); return; }
@@ -967,6 +975,10 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + W
       payoutDestMessage("error", r.payload.detail || ("Could not save: " + (r.payload.error || r.status)));
     }
     $("payoutDestSaveBtn").addEventListener("click", () => savePayoutDest(false).catch((e) => payoutDestMessage("error", String(e.message || e))));
+    $("payoutDestCancelBtn").addEventListener("click", async () => { // a requested or cooling-off change
+      const res = await fetch("/wallet/payout-destination/cancel", { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: "{}" }); let r = {}; try { r = await res.json(); } catch {}
+      if (res.ok) { renderPayoutDest(r); payoutDestMessage("info", "Cancelled. Payouts keep going where they went before."); } else payoutDestMessage("error", "Could not cancel: " + (r.error || res.status));
+    });
     $("payoutDestConfirmBtn").addEventListener("click", () => savePayoutDest(true).catch((e) => payoutDestMessage("error", String(e.message || e))));
 
 ${WALLET_DIRECT_SCRIPT}
