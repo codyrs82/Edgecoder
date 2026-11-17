@@ -476,6 +476,8 @@
                 turnId={turn.turnId}
                 changedFiles={turn.changedFiles}
                 usage={run ? { cSats: run.cSats, where: run.where, ...(turn.usage?.calls ? { calls: turn.usage.calls } : {}) } : turn.usage}
+                web={turn.web}
+                activity={turn.activity}
                 onToolApproval={approve}
                 {onOpenPath}
                 {onPreview}

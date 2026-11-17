@@ -16,6 +16,11 @@ import { clientRegionOf, type CoordinatorChoice } from "../../common/coordinator
 import { moduleLogger } from "../../common/logger.js";
 import type { Served } from "../../common/served.js";
 import type { ReplyUsage } from "../reply-usage.js";
+import { backendChat, runAgentLoop, makeToolRunner } from "../../apps/ide/agent-loop.js";
+import type { IdeStreamEvent } from "../../apps/ide/tool-types.js";
+import { WEB_SYSTEM_NOTE, WebToolSession, citedSources, isWebTool, sourcesMarkdown, webFooter, webToolSchemas, type WebToolCall } from "../../web-tool/tools.js";
+import { modelCallsTools } from "../../web-tool/model-support.js";
+import { portalCoordinatorTransport } from "./compute.js";
 
 const logger = moduleLogger("portal-chat");
 
@@ -476,6 +481,8 @@ export function registerChatApiRoutes(
       compute: chatComputeSchema.optional(),
       /** The page's Retry: the same message again; it is not saved a second time when it is already the last one. */
       resend: z.boolean().optional(),
+      /** The chat's Web toggle: web_search and read_page on EdgeCoder's servers, billed per call (docs/web-tool.md). */
+      web: z.boolean().optional(),
     }).safeParse(req.body);
     if (!parsedBody.success) return reply.code(400).send({ error: "invalid_chat_request" });
     const body = parsedBody.data;
@@ -509,6 +516,13 @@ export function registerChatApiRoutes(
     // From here a slow first token keeps the browser's request alive (heartbeats after a short grace).
     const out = chatResponse(reply, deps.chatKeepalive ?? CHAT_KEEPALIVE);
     try {
+      if (body.web && body.compute) {
+        // Web: an agent loop with only the web tool, on the chat's compute (Auto: your own machines first, then the network's best fit).
+        const own = body.compute.target === "auto" && deps.ownMachineModels ? await deps.ownMachineModels(user.userId).catch(() => [] as string[]) : [];
+        const compute: ChatCompute = body.compute.target === "auto" && own[0] ? { target: "mine", model: own[0] } : body.compute;
+        return await runWebChat(req, reply, out, user.userId, body.conversationId, compute, messages);
+      }
+      if (body.web) out.send({ warning: "Web needs a model that can use tools; this one answered without it." });
       if (body.compute?.target === "auto") return await runAuto(req, reply, out, user.userId, body.conversationId, body.compute, messages, chatPayload);
       if (body.compute) return await runOnNetwork(req, reply, out, user.userId, body.conversationId, body.compute, messages);
       return await runDefaultChat(req, reply, out, body.conversationId, chatPayload);
@@ -518,6 +532,113 @@ export function registerChatApiRoutes(
       req.log.error({ err }, "portal_chat_failed");
       return out.fail(500, { error: "chat_failed" });
     }
+  });
+
+  /**
+   * A chat with the Web toggle on: the agent loop with web_search and read_page (src/web-tool/tools.ts)
+   * on the chosen compute. Status lines ("Searching the web…") go out as {status}, the web tool's
+   * running total and numbered sources as {web}, the answer as {content}; the end carries the cSats
+   * of the model calls and the web calls together. The sources the answer cites are kept with it.
+   */
+  async function runWebChat(
+    req: FastifyRequest,
+    reply: FastifyReply,
+    out: ChatResponse,
+    userId: string,
+    conversationId: string,
+    compute: ChatCompute,
+    messages: Array<{ role: "user" | "assistant" | "system"; content: string }>,
+  ) {
+    const ac = new AbortController();
+    reply.raw.on("close", () => ac.abort());
+    const accountId = accountIdFor(userId);
+    const where = { clientRegion: clientRegionOf(req.headers as Record<string, unknown>) };
+    const picked: { url: string | null; choice?: CoordinatorChoice } =
+      compute.target === "auto"
+        ? await (capacity.pickAutoChoice ? capacity.pickAutoChoice(where) : capacity.pickAuto().then((url) => ({ url, choice: undefined }))).catch(() => ({ url: null }))
+        : compute.target === "network"
+          ? await capacity.pick({ kind: "network", model: compute.model, computeClass: compute.computeClass }, [], where).catch(() => ({ url: null }))
+          : await capacity.pick({ kind: "network", model: compute.model }, []).catch(() => ({ url: null }));
+    if (!picked.url) return out.fail(503, { ...NO_COMPUTE_BODY, compute: computeLabel(compute) });
+    const url = picked.url;
+    const pinned = portalNetworkDeps({ PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, accountId);
+    const backend = networkBackend(pinned, { ...networkTargetFor(compute), ...(picked.choice ? { coordinatorChoice: picked.choice } : {}) });
+    const coordinator = portalCoordinatorTransport({ PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, accountId);
+    const call: WebToolCall = (path, payload, signal) => coordinator("POST", path, { ...payload, accountId }, signal);
+    let modelCSats = 0;
+    let fullContent = "";
+    let failedText = "";
+    const sendEvent = (e: IdeStreamEvent) => {
+      if (e.type === "text") {
+        if (/^(\n\n)?Error contacting model: /.test(e.content)) {
+          failedText = e.content.replace(/^\n\n/, "").replace(/^Error contacting model: /, "");
+          return;
+        }
+        fullContent += e.content;
+        out.send({ content: e.content });
+      } else if (e.type === "status") {
+        out.send({ status: e.message });
+      } else if (e.type === "web") {
+        out.send({ web: { searches: e.searches, pages: e.pages, cSats: e.cSats, sources: e.sources } });
+      } else if (e.type === "usage") {
+        modelCSats += Number.isFinite(e.cSats) ? e.cSats : 0;
+      }
+    };
+    const web = new WebToolSession({ call, emit: sendEvent, signal: ac.signal });
+    out.status("Thinking...");
+    try {
+      await runAgentLoop({
+        chat: backendChat(backend, (cSats) => sendEvent({ type: "usage", cSats, where: computeLabel(compute) }), ac.signal),
+        systemPrompt: () => WEB_SYSTEM_NOTE,
+        messages,
+        sendEvent,
+        isCancelled: () => ac.signal.aborted,
+        tools: webToolSchemas(),
+        runTool: makeToolRunner({
+          execute: (tool, args) => (isWebTool(tool) ? web.run(tool, args) : Promise.resolve({ error: `${tool} isn't available in this chat.` })),
+          sendEvent,
+          waitForApproval: async () => false,
+          captureBeforeWrite: () => null,
+          turnId: conversationId,
+          decide: (tool) => (isWebTool(tool) ? { action: "run", reason: "web access is on" } : { action: "refuse", reason: "Only the web tool is available in this chat." }),
+        }),
+      });
+    } catch (err) {
+      req.log.warn({ err }, "portal_web_chat_failed");
+      failedText ||= (err as Error).message || "stream_interrupted";
+    }
+    if (ac.signal.aborted) return reply;
+    const usage = web.usage();
+    const sources = citedSources(fullContent, usage.sources);
+    const cSatsSpent = Number((modelCSats + usage.cSats).toFixed(6));
+    if (!fullContent && failedText) {
+      const paymentRequired = /\b402\b|insufficient|out of csats|not enough csats/i.test(failedText);
+      return out.fail(paymentRequired ? 402 : 502, { error: failedText, ...(paymentRequired ? { code: OUT_OF_CSATS_CODE } : {}), compute: computeLabel(compute) });
+    }
+    if (fullContent.length > 0) {
+      await store!.addMessage({ messageId: randomUUID(), conversationId, role: "assistant", content: fullContent + sourcesMarkdown(sources), ...(cSatsSpent > 0 ? { creditsSpent: cSatsSpent } : {}) });
+    }
+    const footer = webFooter(usage);
+    out.send({ done: true, compute: computeLabel(compute), cSatsSpent, ...(footer ? { web: { searches: usage.searches, pages: usage.pages, cSats: usage.cSats, sources, footer } } : {}) });
+    return out.end();
+  }
+
+  /** The Web toggle's state for the chat's compute: set up, the model can call tools, cSats for a search. */
+  app.get("/portal/api/web/status", async (req, reply) => {
+    const user = await getCurrentUser(req as any);
+    if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    const q = (req.query ?? {}) as { model?: unknown; target?: unknown };
+    const target = typeof q.target === "string" ? q.target : "auto";
+    const model = typeof q.model === "string" ? q.model.slice(0, 200) : "";
+    // The coordinator's own chat (no compute) has no tool loop; a named model must call tools.
+    const toolsSupported = target === "default" ? false : target === "auto" || !model ? true : modelCallsTools(model);
+    const accountId = accountIdFor(user.userId);
+    const r = await portalCoordinatorTransport({ PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }, accountId)("POST", "/v1/tools/web/status", { accountId }).catch(() => ({ status: 502, json: {} as Record<string, unknown> }));
+    if (r.status !== 200) return reply.send({ available: false, configured: false, toolsSupported, reason: "unreachable", message: "Couldn't reach EdgeCoder to check web search." });
+    const st = r.json as { configured?: boolean; canAfford?: boolean; message?: string };
+    const configured = st.configured === true;
+    const reason = !configured ? "not_configured" : !toolsSupported ? "no_tools" : st.canAfford === false ? "needs_csats" : null;
+    return reply.send({ ...st, configured, toolsSupported, available: reason === null, reason });
   });
 
   /**

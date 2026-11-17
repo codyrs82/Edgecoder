@@ -42,7 +42,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { announcesWork, backendChat, makeToolRunner, runAgentLoop, toolSchemas, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
 import { ATTACHMENT_BODY_LIMIT, AttachmentError, attachedLine, attachmentsSchema, saveAttachments, savedAttachmentsText, type AttachmentInput, type SavedAttachment } from "./attachments.js";
-import { READ_TOOLS, TENTACLE_TOOLS, TOOL_DEFINITIONS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
+import { READ_TOOLS, TENTACLE_TOOLS, TOOL_DEFINITIONS, WEB_TOOLS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
 import {
   CI_SCOPES, TRIGGER_KINDS, TRIGGER_POLL_MS, ghApiCli, parseGitHubRepo, pollTrigger, untrustedEventBlock,
   type BotGitHubTrigger, type GhApi, type TriggerCursor, type TriggerEvent,
@@ -55,6 +55,7 @@ import { decideToolCall, suggestRule, type Decision } from "./permission-policy.
 import { ensureRepo as realEnsureRepo } from "./repo-connect.js";
 import { COMPUTE_POLICIES, FALLBACK_NOTE, NETWORK_CLASSES, isNetworkClass, type NetworkClass, routeLabel, routeModelId, routeSummary, type ComputePolicy, type PlanOptions, type Route } from "../../inference-api/auto-route.js";
 import type { ChatBackend } from "../../inference-api/types.js";
+import { WEB_SYSTEM_NOTE, isWebTool, webToolSchemas, type WebToolSession } from "../../web-tool/tools.js";
 
 // ---------------------------------------------------------------------------
 // Schedules: "every 30 minutes", "every 2 hours", "hourly", "daily at 09:00", or 5-field cron
@@ -190,7 +191,8 @@ export const DEFAULT_BOT_TOOLS: ToolName[] = [...[...READ_TOOLS].filter((t) => !
 export const DEFAULT_TRIGGER_RUNS_PER_HOUR = 6;
 const MAX_TRIGGERS = 10;
 const MAX_QUEUED_EVENTS = 10;
-const ALL_TOOLS = TOOL_DEFINITIONS.map((t) => t.name) as [ToolName, ...ToolName[]];
+/** Everything a bot may be allowed, the web tool included ("Search the web": web_search and read_page, off by default). */
+const ALL_TOOLS = [...TOOL_DEFINITIONS.map((t) => t.name), ...WEB_TOOLS] as [ToolName, ...ToolName[]];
 export const DEFAULT_BUDGET_CSATS_PER_DAY = 100;
 /** A bot with a job and no schedule checks in this often (minutes) unless set otherwise. */
 export const DEFAULT_HEARTBEAT_MINUTES = 30;
@@ -1770,7 +1772,15 @@ export class BotManager {
       for (const k of ["result", "error", "stdout", "stderr"]) if (typeof e[k] === "string") e[k] = clip(e[k] as string);
       events.push(e);
     }
-    if (event.type === "usage") {
+    if (event.type === "web") {
+      // Web searches and page reads count toward the bot's daily budget like model calls.
+      act.run.cSats = Number((act.run.cSats + (Number.isFinite(event.addedCSats) ? event.addedCSats : 0)).toFixed(6));
+      const bot = this.bots.find((b) => b.id === id);
+      if (bot && this.overBudget(bot) && !act.cancelReason) {
+        act.cancelReason = "budget";
+        this.abortRun(act);
+      }
+    } else if (event.type === "usage") {
       act.run.cSats = Number((act.run.cSats + (Number.isFinite(event.cSats) ? event.cSats : 0)).toFixed(6));
       if (event.where) act.run.where = event.where;
       const bot = this.bots.find((b) => b.id === id);
@@ -2185,6 +2195,11 @@ export function agentBotRunner(d: {
   /** The IDE agent's own system prompt for the bot's project (built once per run). */
   systemPrompt: (bot: BotConfig) => Promise<(format: "native" | "text") => string>;
   checkpoints?: { begin(turnId: string, root: string): void; capture(turnId: string, path: string): string | null };
+  /**
+   * The web tool for a run of a bot allowed to "Search the web" (src/web-tool/tools.ts), or null
+   * when this computer can't reach EdgeCoder's servers. Its cost counts toward the daily budget.
+   */
+  web?: (ctx: BotRunContext) => WebToolSession | null;
 }): BotRunner {
   return async (ctx) => {
     const turnId = ctx.runId;
@@ -2192,9 +2207,13 @@ export function agentBotRunner(d: {
     d.checkpoints?.begin(turnId, botWorkRoot(ctx.bot));
     ctx.sendEvent({ type: "turn", id: turnId });
     const allowed = new Set<string>(ctx.bot.allowedTools);
-    const tools = [...toolSchemas().filter((t) => allowed.has(t.function.name)), REMEMBER_TOOL, FOLLOW_UP_TOOL];
+    // "Search the web": web_search and read_page through EdgeCoder's servers.
+    const web = [...WEB_TOOLS].some((t) => allowed.has(t)) ? d.web?.(ctx) ?? null : null;
+    const webTools = web ? webToolSchemas().filter((t) => allowed.has(t.function.name)) : [];
+    const tools = [...toolSchemas().filter((t) => allowed.has(t.function.name)), ...webTools, REMEMBER_TOOL, FOLLOW_UP_TOOL];
+    const execute = d.execute(ctx.bot);
     const inner = makeToolRunner({
-      execute: d.execute(ctx.bot),
+      execute: (tool, args, opts) => (isWebTool(tool) ? (web ? web.run(tool, args) : Promise.resolve({ error: "The web tool isn't reachable from this computer right now." })) : execute(tool, args, opts)),
       sendEvent: ctx.sendEvent,
       waitForApproval: ctx.waitForApproval,
       captureBeforeWrite: (path) => d.checkpoints?.capture(turnId, path) ?? null,
@@ -2209,7 +2228,7 @@ export function agentBotRunner(d: {
     await runAgentLoop({
       chat,
       ...(chat.escalate ? { escalate: chat.escalate } : {}),
-      systemPrompt: (format) => [basePrompt(format), ctx.systemAddition].filter(Boolean).join("\n\n"),
+      systemPrompt: (format) => [basePrompt(format), ctx.systemAddition, webTools.length ? WEB_SYSTEM_NOTE : ""].filter(Boolean).join("\n\n"),
       messages: ctx.messages,
       sendEvent: ctx.sendEvent,
       isCancelled: ctx.isCancelled,

@@ -20,7 +20,7 @@ import { basename } from "node:path";
 import { scrubText } from "../../common/redaction.js";
 import { isReadOnlyCommand, splitCommand, type PermissionMode } from "./permissions.js";
 import { classifyRelativePath, isWithin, parseArgv, protectedToolPath, realPathEscape } from "./tool-executor.js";
-import { READ_TOOLS, TENTACLE_TOOLS, type ToolName } from "./tool-types.js";
+import { READ_TOOLS, TENTACLE_TOOLS, WEB_TOOLS, type ToolName } from "./tool-types.js";
 import { resolve } from "node:path";
 
 export type Action = "run" | "ask" | "refuse";
@@ -496,6 +496,10 @@ function ruleCovers(ctx: DecideContext, command: unknown, cls: CommandClass, leg
  */
 export function decideToolCall(tool: ToolName, args: Record<string, unknown>, ctx: DecideContext, legacyRisk?: (command: unknown) => string | null): Decision {
   if (READ_TOOLS.has(tool)) return { action: "run", reason: "reads only" };
+  // The web tool is offered only when the chat's Web toggle or the bot's "Search the web" permission
+  // is on: that is the allowance. Manual mode still asks for each call (it costs cSats and sends the
+  // query off this machine); Plan may use it (it changes nothing).
+  if (WEB_TOOLS.has(tool)) return ctx.mode === "ask" ? { action: "ask", reason: "web access asks in Manual mode" } : { action: "run", reason: "web access is on" };
   if (ctx.mode === "plan") {
     if (tool === "run_shell" && isReadOnlyCommand(args.command, ctx.root)) return { action: "run", reason: "a read-only command" };
     return { action: "refuse", reason: PLAN_REFUSAL };

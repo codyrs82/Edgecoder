@@ -28,6 +28,9 @@
   import { autoRestart, startAutoRestart } from "./lib/auto-restart-app";
   import { setBusy, takeUpdatedTo } from "./lib/auto-restart";
   import ComputePicker from "./components/ComputePicker.svelte";
+  import WebToggle from "./components/WebToggle.svelte";
+  import { getWebStatus } from "./lib/api";
+  import type { WebStatus } from "./lib/web-tool";
   import { computeChoice } from "./lib/compute-choice";
   import { Settings as SettingsIcon, Plus, SquarePen, FolderPlus, FolderOpen, FolderGit2, Folder, Bot, PanelLeft } from "@lucide/svelte";
   import ProjectSidebar from "./components/ProjectSidebar.svelte";
@@ -133,6 +136,18 @@
   /** The Chat view's permission mode (its picker sits in this page's composer). */
   let chatPermissionMode = $state<EngineMode>(defaultPermissionMode());
   let chatInput: ChatInput | undefined = $state(undefined);
+  /** The Chat view's Web toggle (kept per chat) and whether it can be on for the chosen model. */
+  let chatWeb = $state(false);
+  let webStatus = $state<WebStatus | null>(null);
+  $effect(() => {
+    const model = $computeChoice;
+    let gone = false;
+    const check = () => backendReady.then(() => getWebStatus(model)).then((s) => { if (!gone) webStatus = s; });
+    void check();
+    // Balance and set-up change while the app is open: look again now and then.
+    const timer = setInterval(() => void check(), 5 * 60_000);
+    return () => { gone = true; clearInterval(timer); };
+  });
   let editorView: EditorView | undefined = $state(undefined);
 
   let user: AuthUser | null = $state(null);
@@ -646,11 +661,12 @@
           </div>
         {/if}
         <div class="chat-main" class:hidden={!!activeBot}>
-          <ChatView bind:this={chatView} onModeChange={(m) => (chatPermissionMode = m)} onFocusComposer={() => chatInput?.focus()} onHeaderChange={(h) => (chatHeader = h)} onOpenInEditor={handleOpenInEditor} {projectRoot} onRepoConnected={(r) => void repoConnected(r)} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} onPreview={previewInEditor} onQuote={(b) => void chatInput?.insertQuote(b)} />
+          <ChatView bind:this={chatView} webUsable={webStatus?.available === true} onWebChange={(on) => (chatWeb = on)} onModeChange={(m) => (chatPermissionMode = m)} onFocusComposer={() => chatInput?.focus()} onHeaderChange={(h) => (chatHeader = h)} onOpenInEditor={handleOpenInEditor} {projectRoot} onRepoConnected={(r) => void repoConnected(r)} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} onPreview={previewInEditor} onQuote={(b) => void chatInput?.insertQuote(b)} />
           <div class="composer">
             <ChatInput bind:this={chatInput} onSend={handleSend} streaming={chatStreaming} onStop={() => chatView?.stop()} attach={{ vision: projectRoot ? visionFor($computeChoice) : NO_VISION, who: "This model" }} mentions={projectRoot ? (q) => mentionSuggestions(q, (x) => fsFind(x, 8)) : undefined}>
               {#snippet controls()}
                 <ComputePicker selected={$computeChoice} onSelect={(id) => computeChoice.set(id)} onOpenSettings={openSettings} />
+                <WebToggle status={webStatus} on={chatWeb} onChange={(on) => { chatWeb = on; chatView?.setWeb(on); }} />
                 {#if projectRoot && !isRemoteMode()}
                   <PermissionModePicker mode={chatPermissionMode} onChange={(m) => { chatPermissionMode = m; chatView?.setMode(m); }} />
                 {/if}

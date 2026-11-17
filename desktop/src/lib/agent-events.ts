@@ -4,6 +4,7 @@
 import type { IdeStreamEvent } from "./api";
 import type { ToolEvent } from "./types";
 import type { CallUsage, Served } from "./served";
+import { isWebStatus, webUsageOf, type WebUsage } from "./web-tool";
 
 export interface AgentTurn {
   text: string;
@@ -14,6 +15,10 @@ export interface AgentTurn {
   changedFiles?: string[];
   /** cSats the turn's model calls cost, where the last one ran, each call (machine, timings), and USD on your own frontier key. */
   usage?: { cSats: number; where?: string; calls?: CallUsage[]; usd?: number };
+  /** The web tool's running total and numbered sources (docs/web-tool.md). */
+  web?: WebUsage;
+  /** What it's doing right now, when that's the web tool ("Searching the web…", "Reading example.com…"). */
+  activity?: string;
 }
 
 /** Tools whose successful result means files in the project changed. */
@@ -26,7 +31,7 @@ const WRITE_TOOLS = new Set(["write_file", "edit_file", "run_shell", "git_commit
 export function applyAgentEvent(turn: AgentTurn, event: IdeStreamEvent): { turn: AgentTurn; filesChanged: boolean } {
   switch (event.type) {
     case "text":
-      return { turn: { ...turn, text: turn.text + String(event.content ?? "") }, filesChanged: false };
+      return { turn: { ...turn, text: turn.text + String(event.content ?? ""), ...(turn.activity ? { activity: undefined } : {}) }, filesChanged: false };
     case "tool_call":
       return {
         turn: {
@@ -86,9 +91,14 @@ export function applyAgentEvent(turn: AgentTurn, event: IdeStreamEvent): { turn:
         turn: { ...turn, toolEvents: [...turn.toolEvents, { type: "plan", steps: event.steps as ToolEvent["steps"], plan_status: event.status as string }] },
         filesChanged: false,
       };
+    case "web": {
+      const web = webUsageOf(event);
+      return { turn: web ? { ...turn, web, activity: undefined } : turn, filesChanged: false };
+    }
     case "status": {
       // Auto says where each model call went ("Auto: this computer (free) · qwen3.5:9b for agent work").
       const msg = String(event.message ?? "");
+      if (isWebStatus(msg)) return { turn: { ...turn, activity: msg }, filesChanged: false };
       return msg.startsWith("Auto: ") ? { turn: { ...turn, usage: { ...turn.usage, cSats: turn.usage?.cSats ?? 0, where: msg.slice(6) } }, filesChanged: false } : { turn, filesChanged: false };
     }
     default:

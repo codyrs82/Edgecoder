@@ -18,7 +18,7 @@ import { randomUUID } from "node:crypto";
 import { request } from "undici";
 import type { ChatBackend, ChatMedia, ToolSpec } from "../../inference-api/types.js";
 import { thisComputer } from "../../inference-api/backends.js";
-import { READ_TOOLS, TENTACLE_TOOLS, TOOL_DEFINITIONS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
+import { READ_TOOLS, TENTACLE_TOOLS, TOOL_DEFINITIONS, WEB_TOOLS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
 import { PLAN_REFUSAL, type Decision } from "./permission-policy.js";
 import { protectedToolPath } from "./tool-executor.js";
 import { extractTextToolCalls, TextToolCallFilter } from "./text-tool-calls.js";
@@ -292,7 +292,8 @@ export const PLAN_PROMPT = [
 
 /** Tools plan mode offers: the read-only ones and run_shell (read-only commands only). */
 export function planTools(tools: ToolSchema[]): ToolSchema[] {
-  return tools.filter((t) => READ_TOOLS.has(t.function.name as ToolName) && !TENTACLE_TOOLS.has(t.function.name as ToolName) || t.function.name === "run_shell");
+  // The web tool (when offered) changes nothing, so a plan may use it.
+  return tools.filter((t) => READ_TOOLS.has(t.function.name as ToolName) && !TENTACLE_TOOLS.has(t.function.name as ToolName) || t.function.name === "run_shell" || WEB_TOOLS.has(t.function.name as ToolName));
 }
 
 /** What the model hears when it announced work and stopped. */
@@ -388,7 +389,7 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
       }
     }
     // Plan mode, first gate: nothing but read tools and (read-only, checked by the runner) commands.
-    if (d.plan && !(READ_TOOLS.has(tool) && !TENTACLE_TOOLS.has(tool)) && tool !== "run_shell") {
+    if (d.plan && !(READ_TOOLS.has(tool) && !TENTACLE_TOOLS.has(tool)) && tool !== "run_shell" && !WEB_TOOLS.has(tool)) {
       const callId = `tc_${randomUUID().slice(0, 8)}`;
       d.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: false });
       d.sendEvent({ type: "tool_result", id: callId, error: PLAN_REFUSAL });
@@ -675,6 +676,11 @@ function deepFreeze<T>(value: T): T {
 
 /** One tool call: announce it, wait for approval when needed, checkpoint writes, run, report. */
 export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
+  // Prompt-injection guard (docs/web-tool.md): once read_page has put a web page's text into the
+  // context, nothing that changes files or runs commands happens on its own for the rest of the
+  // turn or run: a call the mode (or an "always allow" rule) would have run asks first, so page text
+  // alone can never make the agent act. Unattended bots queue it as "Needs approval".
+  let webPageRead = false;
   return async (tool, rawArgs) => {
     const callId = `tc_${randomUUID().slice(0, 8)}`;
     let args = rawArgs;
@@ -716,6 +722,11 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
       always = !ALWAYS_ASK_TOOLS.has(tool) && !READ_TOOLS.has(tool) && d.alwaysAllowed?.(tool, args) === true;
       requiresApproval = ALWAYS_ASK_TOOLS.has(tool) || (!READ_TOOLS.has(tool) && !shellAutoApprove && !editAutoApprove && !always);
     }
+    if (webPageRead && !requiresApproval && !READ_TOOLS.has(tool) && !WEB_TOOLS.has(tool)) {
+      requiresApproval = true;
+      always = false;
+      allowRule = undefined;
+    }
     d.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: requiresApproval, ...(allowRule ? { allow_rule: allowRule } : {}) });
     if (requiresApproval && !(await d.waitForApproval(callId, tool, args))) {
       const msg = `Tool call ${tool} was rejected by the user.`;
@@ -726,6 +737,7 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
     const tracked = writesFile ? d.captureBeforeWrite(String(args.path ?? "")) : null;
     // `approved` means the user approved this call; auto-approved edits don't count.
     const result = await d.execute(tool, args, { approved: requiresApproval || always });
+    if (tool === "read_page" && !result.error) webPageRead = true;
     if (tracked && !result.error) d.sendEvent({ type: "file_change", turnId: d.turnId, path: tracked });
     if (tool === "run_shell" && result.result) {
       try {

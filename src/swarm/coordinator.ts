@@ -47,6 +47,7 @@ import "./coordinator/schemas.js";
 import { finalizeFailedSubtask } from "./coordinator/results.js";
 import { registerInferenceRoutes } from "./coordinator/routes/inference.js";
 import { registerAccountRoutes } from "./coordinator/routes/account.js";
+import { registerWebToolRoutes } from "./coordinator/routes/web-tools.js";
 import "./coordinator/ledger-verify.js";
 import { registerMeshRoutes } from "./coordinator/routes/mesh.js";
 import { registerOrchestrationRoutes } from "./coordinator/routes/orchestration.js";
@@ -203,7 +204,7 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath?.startsWith("/mesh/ws")) return;
   if (
     hasPortalServiceToken(((req as any).headers ?? {}) as Record<string, unknown>) &&
-    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat" || reqPath?.startsWith("/account/") || reqPath === "/inference/submit" || reqPath === "/inference/stream" || reqPath === "/inference/models" || reqPath?.split("?")[0] === "/network/world" || reqPath?.startsWith("/economy/market/") || reqPath === "/economy/rates/current" || reqPath?.startsWith("/economy/payouts") || reqPath?.startsWith("/economy/hosts") || reqPath?.startsWith("/economy/fee-pool") || reqPath?.startsWith("/escalate/") || reqPath === "/agent-control/machines" || /^\/agent-control\/agents\/[^/?]+\/commands$/.test(reqPath ?? "") || reqPath === "/agent-control/bots" || /^\/agent-control\/agents\/[^/?]+\/bot-commands$/.test(reqPath ?? "") || /^\/agent-control\/bot-commands\/[^/?]+$/.test(reqPath ?? ""))
+    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat" || reqPath?.startsWith("/account/") || reqPath?.startsWith("/v1/tools/web/") || reqPath === "/inference/submit" || reqPath === "/inference/stream" || reqPath === "/inference/models" || reqPath?.split("?")[0] === "/network/world" || reqPath?.startsWith("/economy/market/") || reqPath === "/economy/rates/current" || reqPath?.startsWith("/economy/payouts") || reqPath?.startsWith("/economy/hosts") || reqPath?.startsWith("/economy/fee-pool") || reqPath?.startsWith("/escalate/") || reqPath === "/agent-control/machines" || /^\/agent-control\/agents\/[^/?]+\/commands$/.test(reqPath ?? "") || reqPath === "/agent-control/bots" || /^\/agent-control\/agents\/[^/?]+\/bot-commands$/.test(reqPath ?? "") || /^\/agent-control\/bot-commands\/[^/?]+$/.test(reqPath ?? ""))
   ) {
     return;
   }
@@ -222,6 +223,8 @@ app.addHook("onRequest", async (req, reply) => {
 registerAgentRoutes(app);
 registerTaskRoutes(app);
 registerAccountRoutes(app);
+// POST /v1/tools/web/{status,search,read} (signed agent or portal): web search and page reads, billed per call.
+registerWebToolRoutes(app);
 registerInferenceRoutes(app);
 registerStatusRoutes(app);
 registerEconomyRoutes(app);

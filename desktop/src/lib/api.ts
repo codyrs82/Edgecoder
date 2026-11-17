@@ -1,6 +1,7 @@
 import { localAgentUsable, parseAgentStatus, shouldDropToken, statusFromTokenError, type LocalAgentStatus } from "./agent-status";
 import type { EngineMode } from "./permission-modes";
 import type { AttachmentPayload } from "./attachments";
+import type { WebStatus } from "./web-tool";
 import { fetchLocalService, serviceErrorText } from "./local-service";
 import { coordinatorUrl, defaultEndpoints, fetchEndpoint, portalUrl, type EndpointKind } from "./endpoints";
 import type {
@@ -638,6 +639,11 @@ export async function streamPortalChat(
   onChunk: (text: string) => void,
   signal?: AbortSignal,
   onProgress?: (progress: StreamProgress) => void,
+  /**
+   * The chat's Web toggle: the portal runs the web tool (Auto compute, which can call tools) and
+   * sends status lines ("Searching the web…") and the web tool's total with the numbered sources.
+   */
+  web?: { onStatus?: (message: string) => void; onWeb?: (event: Record<string, unknown>) => void },
 ): Promise<void> {
   const streamStart = Date.now();
   let tokenCount = 0;
@@ -645,7 +651,7 @@ export async function streamPortalChat(
   const res = await fetch(`${portalBase()}/portal/api/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ conversationId, message }),
+    body: JSON.stringify({ conversationId, message, ...(web ? { web: true, compute: { target: "auto" } } : {}) }),
     signal,
     credentials: "include",
   });
@@ -686,6 +692,8 @@ export async function streamPortalChat(
             warning: chunk.warning,
           });
         }
+        if (typeof chunk.status === "string") web?.onStatus?.(chunk.status);
+        if (chunk.web && typeof chunk.web === "object") web?.onWeb?.(chunk.web);
 
         if (chunk.content) {
           tokenCount++;
@@ -1423,7 +1431,7 @@ export const listPermissions = () => fsCall<{ projects: Record<string, ProjectPe
 export const removePermission = (projectRoot: string, rule: string) => fsCall<{ removed: boolean }>("POST", "/v1/ide/permissions/remove", { projectRoot, rule });
 
 export interface IdeStreamEvent {
-  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "usage" | "done";
+  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "usage" | "web" | "done";
   [key: string]: unknown;
 }
 
@@ -1464,6 +1472,8 @@ export async function streamIdeChat(
   origin?: "chat" | "code",
   /** Files attached to the last message (images/PDFs reach only a model that can see them). */
   attachments?: AttachmentPayload[],
+  /** The chat's Web toggle: offer web_search and read_page (docs/web-tool.md). */
+  web = false,
 ): Promise<void> {
   const base = ideBase();
   const res = await ideFetch(`${base}/v1/ide/chat`, {
@@ -1479,6 +1489,7 @@ export async function streamIdeChat(
       ...(origin ? { origin } : {}),
       ...(githubToken ? { githubToken } : {}),
       ...(attachments?.length ? { attachments } : {}),
+      ...(web ? { web: true } : {}),
     }),
     signal,
   });
@@ -1511,6 +1522,71 @@ export async function streamIdeChat(
         // Skip malformed events
       }
     }
+  }
+}
+
+/** The SSE events of an IDE stream, one parsed object per `data:` line, until [DONE]. */
+async function readIdeEvents(res: Response, onEvent: (event: IdeStreamEvent) => void): Promise<void> {
+  if (!res.body) throw new Error("No response body");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data: ")) continue;
+      const data = trimmed.slice(6);
+      if (data === "[DONE]") return;
+      try {
+        onEvent(JSON.parse(data) as IdeStreamEvent);
+      } catch {
+        // Skip malformed events
+      }
+    }
+  }
+}
+
+/**
+ * A chat without a project with the Web toggle on (/v1/ide/web-chat): the model with only
+ * web_search and read_page, on the chat's compute. Same events as streamIdeChat.
+ */
+export async function streamIdeWebChat(
+  messages: Array<{ role: string; content: string }>,
+  onEvent: (event: IdeStreamEvent) => void,
+  signal?: AbortSignal,
+  requestedModel?: string,
+): Promise<void> {
+  const res = await ideFetch(`${ideBase()}/v1/ide/web-chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, ...computeFields(requestedModel) }),
+    signal,
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { message?: string };
+    throw new Error(body.message ?? `Web chat request failed: ${res.status}`);
+  }
+  await readIdeEvents(res, onEvent);
+}
+
+/**
+ * Whether the chat's Web toggle can be on for this model (docs/web-tool.md): asked of this
+ * computer's IDE server, or of the portal when no local agent runs (web chats there run on Auto).
+ */
+export async function getWebStatus(model?: string): Promise<WebStatus | null> {
+  try {
+    if (isRemoteMode() && !import.meta.env.DEV) {
+      const res = await fetch(`${portalBase()}/portal/api/web/status?target=auto`, { headers: { ...authHeaders() }, credentials: "include", signal: AbortSignal.timeout(10_000) });
+      return res.ok ? ((await res.json()) as WebStatus) : null;
+    }
+    return await withIdeRetry((h) => get<WebStatus>(ideBase(), `/v1/ide/web/status${model ? `?model=${encodeURIComponent(model)}` : ""}`, h));
+  } catch {
+    return null;
   }
 }
 

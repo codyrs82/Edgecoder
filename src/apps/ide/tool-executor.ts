@@ -475,6 +475,13 @@ export class ToolExecutor {
   /** Search by meaning (the project's codebase index), when available. */
   private readonly codebaseSearch: ((query: string) => Promise<string>) | null;
 
+  /**
+   * The web tool for this turn (src/web-tool/tools.ts WebToolSession.run), set when the chat's Web
+   * toggle or the bot's "Search the web" permission is on. It calls EdgeCoder's servers; nothing is
+   * fetched from this machine.
+   */
+  web: ((tool: "web_search" | "read_page", args: Record<string, unknown>) => Promise<ToolResult>) | null = null;
+
   /** The agent's GitHub connection when none was passed (the one the desktop last handed the server). */
   private readonly githubCreds: CredentialDeps;
 
@@ -595,6 +602,10 @@ export class ToolExecutor {
           return await this.githubListIssues(args);
         case "open_pull_request":
           return await this.openPullRequest(args, opts.approved === true);
+        case "web_search":
+        case "read_page":
+          if (!this.web) return { error: "The web tool is off here (turn on Web in the chat, or the bot's \"Search the web\")." };
+          return await this.web(tool, args);
         case "delegate":
         case "await_tentacles":
         case "cancel_tentacle":
