@@ -42,6 +42,8 @@ desktop/a11y-report/
 
 # Claude Code agent worktrees
 .claude/worktrees/
+# ec-fleet session state (scripts/ec-fleet)
+.claude/ec-fleet/
 
 # Infrastructure node bundle: operator config and secrets (scripts/infra-bootstrap.sh)
 deploy/infra/.env
