@@ -22,7 +22,8 @@ import { readFileSync } from "node:fs";
 import { ensureSandboxImages, isDockerAvailable } from "../executor/docker-sandbox.js";
 import { runInferenceSubtask } from "./inference-runner.js";
 import { warmOllamaModel } from "../inference-api/ollama.js";
-import { detectHardware, hardwareProfileFor, selectGpu, selectGpuPool, type Probe } from "../install/hardware.js";
+import { detectHardware, gpuNeedsOffloadProof, hardwareProfileFor, selectGpu, selectGpuPool, type Probe } from "../install/hardware.js";
+import { claimedProfile, decideGpuClaim, type GpuClaimDecision } from "./gpu-claim.js";
 import { enforceSandboxPolicy, inferenceOnlyRejection, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
 import { portalLabel, enrollmentBackoffMs, enrollmentRefusalFromError, enrollmentRefusalKey, enrollmentRefusalMessage, isAgentNotRegisteredError, parseRetryAfterMs, rateLimitWaitMs, registeredLogLine, registerRefreshMsFromEnv, shouldLogEnrollmentRefusal, shouldRegister, type RegisterReply } from "./registration-policy.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
@@ -177,6 +178,8 @@ const hardwareProbe: Probe = (cmd, args) => {
  * override detection (containers and unusual hardware); such a profile is marked `overridden` and
  * the coordinator re-proves it with a benchmark challenge every session.
  */
+/** Set by buildHardwareProfile: the reported card is one only Vulkan / sysfs vouches for (src/swarm/gpu-claim.ts). */
+let GPU_NEEDS_OFFLOAD_PROOF = false;
 function buildHardwareProfile(): Record<string, unknown> {
   const hw = detectHardware({ probe: hardwareProbe });
   const gpuModel = W.AGENT_GPU_MODEL;
@@ -193,9 +196,19 @@ function buildHardwareProfile(): Record<string, unknown> {
       overridden: true
     };
   }
-  return hardwareProfileFor(hw, selectGpu(hw, process.env), selectGpuPool(hw, process.env));
+  const gpu = selectGpu(hw, process.env);
+  GPU_NEEDS_OFFLOAD_PROOF = gpuNeedsOffloadProof(gpu);
+  return hardwareProfileFor(hw, gpu, selectGpuPool(hw, process.env));
 }
+/** The detected hardware (memory budget, the portal's machine panel). What the agent claims is CLAIMED_PROFILE. */
 const HARDWARE_PROFILE = buildHardwareProfile();
+/**
+ * GPU claim (src/swarm/gpu-claim.ts): a card only Vulkan can drive is claimed once Ollama shows the
+ * model in VRAM or the GPU benchmark clears the GPU floor; until then the agent registers as CPU.
+ */
+let gpuClaim: GpuClaimDecision = decideGpuClaim({ needsProof: GPU_NEEDS_OFFLOAD_PROOF });
+let gpuClaimCheckedAtMs = 0;
+const claimedHardwareProfile = (): Record<string, unknown> => claimedProfile(HARDWARE_PROFILE, gpuClaim.claimGpu);
 /**
  * Host memory budget (src/swarm/memory-budget.ts): AGENT_MEMORY_BUDGET_PCT of RAM (default 60%),
  * or 90% of a discrete GPU's VRAM. Network models are loaded, served and sized to fit it.
@@ -737,7 +750,15 @@ const modelControl = new ModelControlAgent({
   agentId: AGENT_ID,
   // vLLM / MLX serve the model they were started with: model changes are made on the host.
   enabled: remoteControlEnabled(W.AGENT_REMOTE_CONTROL) && !OPENAI_ENGINE,
-  extraNotes: () => (OPENAI_ENGINE ? [`The model is served by ${ENGINE_LABEL} (EDGECODER_ENGINE=${OPENAI_ENGINE.preset}) at ${OPENAI_ENGINE.url}: change it on the host; remote model control is view only`] : []),
+  extraNotes: () => [
+    ...(OPENAI_ENGINE ? [`The model is served by ${ENGINE_LABEL} (EDGECODER_ENGINE=${OPENAI_ENGINE.preset}) at ${OPENAI_ENGINE.url}: change it on the host; remote model control is view only`] : []),
+    // A Vulkan-only GPU (src/swarm/gpu-claim.ts): say which class the agent claims and why.
+    ...(GPU_NEEDS_OFFLOAD_PROOF && HARDWARE_PROFILE.gpu
+      ? [gpuClaim.claimGpu
+          ? `GPU class claimed: ${gpuClaim.detail}`
+          : `Paid as CPU until the GPU is confirmed: ${gpuClaim.detail}. Run Ollama on the GPU (AMD without ROCm: sudo edgecoder-install apply --keep-config --ollama-env OLLAMA_VULKAN=1) and load the model`]
+      : [])
+  ],
   allowlist: resolveAllowlist(W.AGENT_MODEL_ALLOWLIST),
   ollama: ollamaAdmin,
   overridesFile: MODEL_OVERRIDES_FILE,
@@ -1662,7 +1683,7 @@ async function loop(): Promise<void> {
       powerTelemetry,
       publicKeyPem: keys.publicKeyPem,
       x25519PublicKey: envelopeKeys.publicKey.toString("base64"),
-      hardwareProfile: HARDWARE_PROFILE,
+      hardwareProfile: claimedHardwareProfile(),
       ...(BENCHMARK_ENABLED ? { challengeKinds: currentProvider === "ollama-local" ? ["cpu", "gpu"] : ["cpu"] } : {}),
       ...(lastBenchmark ? { benchmark: lastBenchmark } : {}),
       ...(ASK_MSAT_PER_CREDIT !== undefined ? { askMsatPerCredit: ASK_MSAT_PER_CREDIT } : {}),
@@ -1735,6 +1756,17 @@ async function loop(): Promise<void> {
             } catch (e) {
               console.warn(`[agent:${AGENT_ID}] benchmark failed: ${e}`);
             }
+          }
+          // A Vulkan-only GPU: re-check the evidence; a changed claim re-registers now.
+          if (GPU_NEEDS_OFFLOAD_PROOF && HARDWARE_PROFILE.gpu && Date.now() - gpuClaimCheckedAtMs >= 60_000) {
+            gpuClaimCheckedAtMs = Date.now();
+            const loaded = currentProvider === "ollama-local" && !OPENAI_ENGINE ? await ollamaAdmin.loaded().catch(() => undefined) : undefined;
+            const next = decideGpuClaim({ needsProof: true, loaded, model: OLLAMA_MODEL, benchmarkBandwidthGbps: lastBenchmark?.gpu?.bandwidthGbps, previous: gpuClaim.claimGpu });
+            if (next.claimGpu !== gpuClaim.claimGpu || next.evidence !== gpuClaim.evidence) {
+              console.log(`[agent:${AGENT_ID}] GPU claim: ${next.claimGpu ? "GPU" : "CPU"} class (${next.detail})`);
+              if (next.claimGpu !== gpuClaim.claimGpu) lastRegisteredAtMs = 0;
+            }
+            gpuClaim = next;
           }
           if (shouldRegister({ registeredWithUrl, lastRegisteredAtMs }, coordinator.url, Date.now(), REGISTER_REFRESH_MS)) {
             const registerBody = await buildRegisterBody(powerTelemetry);
