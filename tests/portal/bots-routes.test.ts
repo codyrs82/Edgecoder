@@ -149,7 +149,7 @@ describe("the Bots page", () => {
       expect(html, id).toContain(`id="${id}"`);
     }
     expect(html).toContain('role="tablist"');
-    expect(html).toContain("Approve on your Mac");
+    expect(html).toContain("Approve on your machine");
     expect(html).toContain("offline. This is the last conversation it shared");
     // The shared markdown cap (issue 333) is in the page.
     expect(html).toContain(`var MAX_MARKDOWN = ${MAX_MARKDOWN};`);
