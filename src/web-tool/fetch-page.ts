@@ -10,9 +10,10 @@
 import { Agent, request } from "undici";
 import { BlockedUrlError, checkUrlShape, pinnedLookup, resolvePublic, systemResolver, type Resolver } from "./ssrf.js";
 import { htmlToText, jsonToText, pdfToText, plainToText, type PageText } from "./extract.js";
+import { DEFAULT_PORTAL_URL } from "../install/options.js";
 
-/** What the fetcher says it is (no personal contact details). */
-export const WEB_TOOL_USER_AGENT = "EdgeCoderWebTool/1.0 (+https://edgecoder.io)";
+/** What the fetcher says it is: EdgeCoder's public site (DEFAULT_PORTAL_URL), no personal contact details. */
+export const WEB_TOOL_USER_AGENT = `EdgeCoderWebTool/1.0 (+${DEFAULT_PORTAL_URL})`;
 export const PAGE_MAX_BYTES = 2 * 1024 * 1024;
 export const PAGE_TIMEOUT_MS = 10_000;
 export const MAX_REDIRECTS = 5;
