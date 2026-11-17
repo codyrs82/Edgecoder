@@ -12,6 +12,7 @@
   import { notify } from "../lib/toast";
   import FrontierKeys from "../components/FrontierKeys.svelte";
   import PermissionSettings from "../components/PermissionSettings.svelte";
+  import { setWebAutoDefault, webAutoDefault } from "../lib/web-tool";
 
   /** Open a portal page (the Bluetooth explainer) in the browser. */
   async function openPortalPage(path: string) {
@@ -34,6 +35,13 @@
       appVersion = "dev";
     }
   })();
+
+  // Web in chat (docs/web-tool.md): automatic by default; each chat can turn it off from the composer.
+  let webAuto = $state(webAutoDefault());
+  function toggleWebAuto() {
+    webAuto = !webAuto;
+    setWebAutoDefault(webAuto);
+  }
 
   // Update state
   let updateStatus: UpdateStatus = $state({ state: "idle" });
@@ -341,6 +349,21 @@
   </section>
 
   <PermissionSettings />
+
+  <section class="sp-group" aria-labelledby="gen-web">
+    <h2 class="sp-group-title" id="gen-web">Web</h2>
+    <div class="sp-card">
+      <div class="sp-row">
+        <div class="sp-text">
+          <span class="sp-title">Search the web automatically</span>
+          <span class="sp-desc">In chats, the model searches the web when a question needs fresh information (news, prices, versions, a specific page) and cites its sources. Each search and page read costs a little cSats. Turn it off for one chat from the Web menu under the message box.</span>
+        </div>
+        <div class="sp-controls">
+          <button class="sp-switch" role="switch" aria-checked={webAuto} aria-label="Search the web automatically" onclick={toggleWebAuto}></button>
+        </div>
+      </div>
+    </div>
+  </section>
 
   <FrontierKeys />
 

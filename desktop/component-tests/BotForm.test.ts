@@ -190,3 +190,15 @@ describe("BotForm: the project folder", () => {
     expect(screen.getByTestId("bot-project-folder").textContent).toBe("Project folder: /Users/me/Projects/Edgecoder");
   });
 });
+
+describe("BotForm: Search the web (docs/web-tool.md)", () => {
+  it("is on for a new bot", () => {
+    render(BotForm, { bot: null, onClose: vi.fn(), onSaved: vi.fn() });
+    expect(screen.getByRole("switch", { name: "Search the web" }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("an existing bot keeps what it was given", () => {
+    open(harry({ allowedTools: ["read_file"] as Bot["allowedTools"] }));
+    expect(screen.getByRole("switch", { name: "Search the web" }).getAttribute("aria-checked")).toBe("false");
+  });
+});

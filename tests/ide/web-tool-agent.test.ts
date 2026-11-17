@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { makeToolRunner, planTools, toolSchemas, type ChatFn } from "../../src/apps/ide/agent-loop.js";
 import { decideToolCall } from "../../src/apps/ide/permission-policy.js";
-import { BotManager, agentBotRunner, type BotRunner } from "../../src/apps/ide/bots.js";
+import { BotManager, DEFAULT_BOT_TOOLS, agentBotRunner, type BotRunner } from "../../src/apps/ide/bots.js";
 import type { IdeStreamEvent, ToolName } from "../../src/apps/ide/tool-types.js";
 import { WEB_SYSTEM_NOTE, WebToolSession, webToolSchemas, type WebToolCall } from "../../src/web-tool/tools.js";
 
@@ -79,6 +79,10 @@ describe("prompt-injection guard: after read_page, edits and commands ask first"
 });
 
 describe("bots: the Search the web permission", () => {
+  it("is on for new bots (existing bots keep what they were given)", () => {
+    expect(DEFAULT_BOT_TOOLS).toEqual(expect.arrayContaining(["web_search", "read_page"]));
+  });
+
   const managers: BotManager[] = [];
   afterEach(async () => {
     for (const m of managers.splice(0)) await m.shutdown();

@@ -26,8 +26,9 @@ In every mode:
   on their own: Auto refuses them, the other modes ask.
 - The tool executor's own checks still apply after any "yes".
 
-- The web tool (`web_search`, `read_page`) is offered only when the chat's **Web** toggle or the
-  bot's **Search the web** permission is on, which is its allowance: Auto, Accept edits and Plan run
+- The web tool (`web_search`, `read_page`) is offered only when the chat is on **Web: Auto** (the
+  default; **Off for this chat** turns it off) or the bot has the **Search the web** permission (on
+  for new bots), which is its allowance: Auto, Accept edits and Plan run
   it, Manual asks for each call. After a page is read, edits and commands that would have run on
   their own ask first for the rest of the reply or run ([web tool](web-tool.md)).
 

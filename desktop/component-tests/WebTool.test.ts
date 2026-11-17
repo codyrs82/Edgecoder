@@ -4,10 +4,10 @@ import { render, screen, fireEvent, cleanup } from "@testing-library/svelte";
 const shell = vi.hoisted(() => ({ open: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("@tauri-apps/plugin-shell", () => shell);
 
-import WebToggle from "../src/components/WebToggle.svelte";
+import WebIndicator from "../src/components/WebIndicator.svelte";
 import WebSources from "../src/components/WebSources.svelte";
 import ChatMessage from "../src/components/ChatMessage.svelte";
-import { NO_TOOLS_TITLE, type WebStatus } from "../src/lib/web-tool";
+import { UNAVAILABLE_TITLE, WEB_AUTO_KEY, chatWebMode, webAutoDefault, webIndicatorView, webOffered, type WebStatus } from "../src/lib/web-tool";
 import { applyAgentEvent } from "../src/lib/agent-events";
 
 afterEach(() => {
@@ -17,48 +17,94 @@ afterEach(() => {
 
 const ready: WebStatus = { available: true, configured: true, toolsSupported: true, reason: null, searchCSats: 0.5, readCSats: 0.2, balanceCSats: 40 };
 
-describe("the composer's Web toggle", () => {
-  it("is off by default and turns on when clicked (the chat keeps it)", async () => {
+describe("the composer's Web indicator (web is automatic)", () => {
+  it("shows \"Web: Auto\" by default; its menu turns it off for this chat", async () => {
     const onChange = vi.fn();
-    render(WebToggle, { status: ready, on: false, onChange });
-    const btn = screen.getByRole("button", { name: "Web" });
-    expect(btn.getAttribute("aria-pressed")).toBe("false");
-    expect((btn as HTMLButtonElement).disabled).toBe(false);
+    render(WebIndicator, { status: ready, mode: "auto", onChange });
+    const btn = screen.getByTestId("web-indicator");
+    expect(btn.textContent).toContain("Web: Auto");
+    expect(btn.getAttribute("aria-pressed")).toBeNull();
     expect(btn.getAttribute("title")).toContain("0.5 cSats a search, 0.2 a page");
     await fireEvent.click(btn);
-    expect(onChange).toHaveBeenCalledWith(true);
+    const options = screen.getAllByRole("option");
+    expect(options.map((o) => o.textContent)).toEqual([expect.stringContaining("Auto"), expect.stringContaining("Off for this chat")]);
+    expect(options[0].getAttribute("aria-selected")).toBe("true");
+    await fireEvent.click(options[1]);
+    expect(onChange).toHaveBeenCalledWith("off");
+    expect(screen.queryByRole("listbox")).toBeNull();
   });
 
-  it("shows pressed when on", () => {
-    render(WebToggle, { status: ready, on: true, onChange: () => {} });
-    expect(screen.getByRole("button", { name: "Web" }).getAttribute("aria-pressed")).toBe("true");
-  });
-
-  it("is disabled, with a tooltip, for a model that can't call tools", async () => {
+  it("shows \"Web: Off\" when off for this chat, and picks Auto with the keyboard", async () => {
     const onChange = vi.fn();
-    render(WebToggle, { status: { ...ready, available: false, toolsSupported: false, reason: "no_tools" }, on: true, onChange });
-    const btn = screen.getByRole("button", { name: "Web" }) as HTMLButtonElement;
-    expect(btn.disabled).toBe(true);
-    expect(btn.getAttribute("aria-pressed")).toBe("false");
-    expect(btn.title).toBe(NO_TOOLS_TITLE);
+    render(WebIndicator, { status: ready, mode: "off", onChange });
+    const btn = screen.getByTestId("web-indicator");
+    expect(btn.textContent).toContain("Web: Off");
     await fireEvent.click(btn);
+    const list = screen.getByRole("listbox");
+    await fireEvent.keyDown(list, { key: "ArrowDown" });
+    await fireEvent.keyDown(list, { key: "Enter" });
+    expect(onChange).toHaveBeenCalledWith("auto");
+  });
+
+  it("is dimmed, without a menu, for a model that can't call tools", async () => {
+    const onChange = vi.fn();
+    render(WebIndicator, { status: { ...ready, available: false, toolsSupported: false, reason: "no_tools" }, mode: "auto", onChange });
+    const btn = screen.getByTestId("web-indicator");
+    expect(btn.getAttribute("aria-disabled")).toBe("true");
+    expect(btn.title).toBe(UNAVAILABLE_TITLE);
+    expect(btn.textContent?.trim()).toBe("Web");
+    await fireEvent.click(btn);
+    expect(screen.queryByRole("listbox")).toBeNull();
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it("says \"needs cSats\" with an empty balance", () => {
-    render(WebToggle, { status: { ...ready, available: false, reason: "needs_csats", balanceCSats: 0 }, on: false, onChange: () => {} });
-    const btn = screen.getByRole("button", { name: "Web (needs cSats)" }) as HTMLButtonElement;
-    expect(btn.disabled).toBe(true);
-    expect(btn.textContent).toContain("needs cSats");
-    expect(btn.title).toMatch(/Top up/);
+  it("says \"needs cSats\" quietly with an empty balance (still Auto: it answers without the web)", () => {
+    render(WebIndicator, { status: { ...ready, available: false, reason: "needs_csats", balanceCSats: 0 }, mode: "auto", onChange: () => {} });
+    const btn = screen.getByRole("button", { name: "Web: Auto (needs cSats)" });
+    expect(btn.getAttribute("aria-disabled")).toBe("false");
+    expect(btn.title).toMatch(/Web search needs cSats.*top up/);
   });
 
   it("is hidden while web search isn't set up on the servers (or the status is unknown)", () => {
-    render(WebToggle, { status: { available: false, configured: false, toolsSupported: true, reason: "not_configured", message: "Web search isn't set up yet" }, on: true, onChange: () => {} });
-    expect(screen.queryByTestId("web-toggle")).toBeNull();
+    render(WebIndicator, { status: { available: false, configured: false, toolsSupported: true, reason: "not_configured", message: "Web search isn't set up yet" }, mode: "auto", onChange: () => {} });
+    expect(screen.queryByTestId("web-indicator")).toBeNull();
     cleanup();
-    render(WebToggle, { status: null, on: true, onChange: () => {} });
-    expect(screen.queryByTestId("web-toggle")).toBeNull();
+    render(WebIndicator, { status: null, mode: "auto", onChange: () => {} });
+    expect(screen.queryByTestId("web-indicator")).toBeNull();
+  });
+});
+
+describe("a chat's web mode", () => {
+  it("is the chat's own choice, else the Settings default (on unless turned off)", () => {
+    expect(chatWebMode(undefined, true)).toBe("auto");
+    expect(chatWebMode(undefined, false)).toBe("off");
+    expect(chatWebMode(true, false)).toBe("auto");
+    expect(chatWebMode(false, true)).toBe("off");
+  });
+
+  it("the Settings default reads \"off\" only when turned off, and survives broken storage", () => {
+    expect(webAutoDefault(null)).toBe(true);
+    expect(webAutoDefault({ getItem: () => null })).toBe(true);
+    expect(webAutoDefault({ getItem: (k) => (k === WEB_AUTO_KEY ? "off" : null) })).toBe(false);
+    expect(webAutoDefault({ getItem: () => { throw new Error("blocked"); } })).toBe(true);
+  });
+
+  it("offers the web tools only on Auto with a status that says they can be used now", () => {
+    expect(webOffered(ready, "auto")).toBe(true);
+    expect(webOffered(ready, "off")).toBe(false);
+    expect(webOffered({ ...ready, available: false, reason: "needs_csats" }, "auto")).toBe(false);
+    expect(webOffered({ ...ready, available: false, reason: "rate_limited" }, "auto")).toBe(false);
+    expect(webOffered(null, "auto")).toBe(false);
+  });
+
+  it("the indicator's view for off and rate-limited", () => {
+    expect(webIndicatorView(ready, "off")).toMatchObject({ visible: true, unavailable: false, label: "Web: Off", note: "" });
+    expect(webIndicatorView({ ...ready, available: false, reason: "rate_limited", message: "Hourly limit used" }, "auto")).toMatchObject({ label: "Web: Auto", title: "Hourly limit used" });
+  });
+
+  it("a web_off event marks the turn (the reply goes on without the web)", () => {
+    const turn = applyAgentEvent({ text: "", toolEvents: [] }, { type: "web_off", reason: "needs_csats", message: "Web search needs cSats" }).turn;
+    expect(turn.webOff).toEqual({ reason: "needs_csats", message: "Web search needs cSats" });
   });
 });
 

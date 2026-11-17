@@ -19,6 +19,8 @@ export interface AgentTurn {
   web?: WebUsage;
   /** What it's doing right now, when that's the web tool ("Searching the web…", "Reading example.com…"). */
   activity?: string;
+  /** Web was wanted (Auto) but not offered for this reply: "needs_csats", "rate_limited" or "unreachable". */
+  webOff?: { reason: string; message: string };
 }
 
 /** Tools whose successful result means files in the project changed. */
@@ -95,6 +97,8 @@ export function applyAgentEvent(turn: AgentTurn, event: IdeStreamEvent): { turn:
       const web = webUsageOf(event);
       return { turn: web ? { ...turn, web, activity: undefined } : turn, filesChanged: false };
     }
+    case "web_off":
+      return { turn: { ...turn, webOff: { reason: String(event.reason ?? ""), message: String(event.message ?? "") } }, filesChanged: false };
     case "status": {
       // Auto says where each model call went ("Auto: this computer (free) · qwen3.5:9b for agent work").
       const msg = String(event.message ?? "");

@@ -3,16 +3,33 @@
 Live, real-world information for chats and bots: the model can **search the web** (`web_search`)
 and **read a page** (`read_page`), and its answer cites the sources it used.
 
-- **Chats** (desktop app and web chat): a **Web** toggle in the composer, off by default and kept
-  per chat. Answers list their numbered sources under the reply, with links, and a footer such as
-  `2 searches · 1 page · 1.2 cSats`. While it works the reply shows "Searching the web…" and
-  "Reading example.com…".
-- **Bots**: a **Search the web** permission in the bot's settings (What it may do), off by default.
-- **Tool-capable models only.** The toggle is disabled ("Web needs a model that can use tools. Pick
-  another model.") when the chat's model can't call tools (`src/model/tool-support.ts`
-  `supportsTools`), and on the web chat for EdgeCoder's own default chat.
+- **Automatic in chats** (desktop app and web chat). When web search is set up, the chat's model
+  can call tools and the account has cSats, every chat offers the web tools and **the model decides**
+  when a question needs them: news and current events, prices, release dates and versions of
+  software, a specific page or document, or anything you ask it to look up. General coding help,
+  explanations, writing and maths are answered directly, without searching (the system note,
+  `WEB_SYSTEM_NOTE` in `src/web-tool/tools.ts`). Answers list their numbered sources under the
+  reply, with links, and a footer such as `2 searches · 1 page · 1.2 cSats`. While it works the
+  reply shows "Searching the web…" and "Reading example.com…".
+- **A quiet indicator, not a toggle.** Under the message box the composer shows **Web: Auto**. Its
+  small menu has **Auto** and **Off for this chat** (kept per chat). **Settings → General → Search
+  the web automatically** (on by default) sets it for chats that haven't chosen; it's kept on that
+  computer or in that browser (`edgecoder.web.auto`).
+- **Bots**: a **Search the web** permission in the bot's settings (What it may do), **on for new
+  bots**. Existing bots keep what they were given.
+- **Tool-capable models only.** With a model that can't call tools (`src/web-tool/model-support.ts`
+  `modelCallsTools`), and on the web chat for EdgeCoder's own default chat, the indicator is dimmed
+  ("Web: unavailable with this model") and the chat answers without the web. Auto on your own
+  machines picks one of their models that calls tools, or answers without the web.
 - **cSats.** Each search and each page read costs a little from the account's balance (defaults:
-  0.5 cSats a search, 0.2 a page). With no balance the toggle says **needs cSats**.
+  0.5 cSats a search, 0.2 a page). With no balance the web tools **aren't offered at all**, so no
+  search is made just to fail: the chat answers without the web, the indicator says **needs cSats**,
+  and the chat notes "Web search needs cSats" once under the reply. The same goes for an account
+  over the hour's search limit.
+- **Per reply**, at most `WEB_MAX_SEARCHES_PER_REPLY` searches (3) and `WEB_MAX_READS_PER_REPLY`
+  page reads (4); past that a call is refused before it reaches EdgeCoder (it costs nothing) and the
+  model answers with what it has. A call refused for cSats (402), the hour's limit (429) or setup
+  (503) turns the web off for the rest of that reply.
 
 ## Where it runs
 
@@ -29,12 +46,21 @@ Callers are account-authenticated: a signed agent (the desktop app reaches it th
 forwarder, `/forward/v1/tools/web/*`; the signer's owner is billed) or the portal with its service
 token, naming the account it authenticated (a web chat user, or an API key through the hosted
 endpoint `POST https://edgecoder.io/v1/tools/web/{status,search,read}` for machines without an
-enrolled agent). The desktop app asks `GET /v1/ide/web/status?model=…` (IDE server) or
-`GET /portal/api/web/status` (portal) whether its toggle can be on.
+enrolled agent). The desktop app asks `GET /v1/ide/web/status?model=…` (IDE server) and the web
+chat `GET /portal/api/web/status` (portal) what the indicator shows: `available`, and otherwise a
+`reason` (`not_configured`, `no_tools`, `needs_csats`, `rate_limited`, `unreachable`), plus the
+per-reply limits.
+
+Before a reply is offered the web tools, the IDE server and the portal check the account's status
+(`webAvailability` in `src/web-tool/tools.ts`, cached for 30 seconds per account and refreshed when
+the app asks for the status). When it can't be used the reply goes ahead without the tools: the IDE
+chat stream sends `{type: "web_off", reason, message}`, the portal chat stream `{webOff: {reason,
+message}}`, and `POST /v1/ide/web-chat` (a chat without a project) answers `409 {error: "web_off"}`
+so the app answers through the plain chat instead.
 
 Search is the [Brave Search API](https://api.search.brave.com). Its key is the coordinator secret
 `BRAVE_SEARCH_API_KEY`; without it the whole tool is off ("Web search isn't set up yet") and the
-apps hide the toggle. Set it on each coordinator with:
+apps hide the Web indicator. Set it on each coordinator with:
 
 ```sh
 fly secrets set BRAVE_SEARCH_API_KEY=<subscription token> -a <coordinator app>
@@ -71,8 +97,9 @@ fly secrets set BRAVE_SEARCH_API_KEY=<subscription token> -a <coordinator app>
 
 ## Permission modes
 
-The toggle (chats) and the permission (bots) are the allowance, and network access needs one: the
-web tools aren't offered without it. With it on:
+A chat on **Web: Auto** and a bot with **Search the web** have the allowance, and network access
+needs it: the web tools aren't offered to a chat that's **Off for this chat** or a bot without the
+permission. With it:
 
 | Mode | web_search / read_page |
 | --- | --- |
@@ -91,5 +118,7 @@ web tools aren't offered without it. With it on:
   `WEB_READ_PER_HOUR` page reads (120); over it: `429 rate_limited`.
 - Bots: web calls count toward the bot's daily cSat budget; once it's spent the web tool refuses and
   the run stops like any over-budget run.
-- Prices: `WEB_SEARCH_CSATS` (0.5) and `WEB_READ_CSATS` (0.2). All five variables are in the
+- Per reply (IDE server and portal): `WEB_MAX_SEARCHES_PER_REPLY` (3) and `WEB_MAX_READS_PER_REPLY`
+  (4), each 0 to 50; a bot run counts as one reply.
+- Prices: `WEB_SEARCH_CSATS` (0.5) and `WEB_READ_CSATS` (0.2). All these variables are in the
   [environment reference](../site-docs/reference/environment-variables.md#web-tool-coordinator).

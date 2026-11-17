@@ -9,6 +9,7 @@ import { registerSettingsNetworkPage } from "./settings-network.js";
 import { registerSettingsWorldPage } from "./settings-world.js";
 import { LEGACY_SETTINGS_REDIRECTS, SETTINGS_HELPERS_SCRIPT, redirectKeepingQuery, settingRow, settingsPage } from "./settings-shell.js";
 import { CSP_NONCE } from "../csp-nonce.js";
+import { WEB_AUTO_KEY } from "./web-toggle.js";
 
 /**
  * Settings (/portal/settings): General, Profile, Usage and Connect your tools, one section at a
@@ -24,14 +25,20 @@ const group = (label: string) => `<div class="set-group">${label}</div>`;
 const GENERAL = section(
   "general",
   "General",
-  "How the portal looks in this browser.",
+  "How the portal looks and behaves in this browser.",
   card(
     settingRow(
       "Theme",
       "Light, dark, or follow your system setting. Saved in this browser, like the desktop app.",
       `<select id="themeSelect" aria-label="Theme" data-theme-select><option value="system">System</option><option value="light">Light</option><option value="dark">Dark (default)</option></select>`,
       { keywords: "theme appearance colour color dark light mode" }
-    )
+    ) +
+      settingRow(
+        "Search the web automatically",
+        "In chat, the model searches the web when a question needs fresh information (news, prices, versions, a specific page) and cites its sources. Each search costs a little cSats. Turn it off for one chat from the Web menu under the message box. Saved in this browser.",
+        `<select id="webAutoSelect" aria-label="Search the web automatically"><option value="on">On (default)</option><option value="off">Off</option></select>`,
+        { keywords: "web search internet browse automatic sources citations" }
+      )
   )
 );
 
@@ -232,6 +239,16 @@ const SCRIPT = SETTINGS_HELPERS_SCRIPT + `
       }
     });
     // #89: /assets/theme.js applies and stores the choice for select[data-theme-select].
+    // Web in chat (docs/web-tool.md): automatic unless turned off here (pages/web-toggle.ts WEB_AUTO_KEY).
+    (function() {
+      const sel = document.getElementById("webAutoSelect");
+      if (!sel) return;
+      try { sel.value = localStorage.getItem("${WEB_AUTO_KEY}") === "off" ? "off" : "on"; } catch (e) {}
+      sel.addEventListener("change", function() {
+        try { if (sel.value === "off") localStorage.setItem("${WEB_AUTO_KEY}", "off"); else localStorage.removeItem("${WEB_AUTO_KEY}"); } catch (e) {}
+        showToast(sel.value === "off" ? "Web search is off for new chats." : "Chats search the web automatically.");
+      });
+    })();
 
     /* ── Plan & usage ── */
     function reasonLabel(reason) {

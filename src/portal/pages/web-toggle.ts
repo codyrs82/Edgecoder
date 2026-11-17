@@ -2,10 +2,18 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 /**
- * The web chat's Web toggle and the numbered sources under a web answer (docs/web-tool.md), for
- * pages/chat.ts. The script expects the page's api(), selectedCompute, selectedModel, activeConvId
- * and WEB_KEY / webOn / webState variables, and the #webToggle and #webNote elements.
+ * The web chat's Web indicator and the numbered sources under a web answer (docs/web-tool.md), for
+ * pages/chat.ts. Web is automatic: when web search is set up, the chat's model can call tools and
+ * the account has cSats, the model may search on its own ("Web: Auto"); the quiet indicator's menu
+ * turns it off for one chat, and Settings → General sets the default (WEB_AUTO_KEY, this browser).
+ * The script expects the page's api(), selectedCompute, selectedModel, activeConvId and WEB_KEY /
+ * webMode / webState variables, and the #webToggle, #webLabel, #webMenu elements.
  */
+
+/** Settings → General "Search the web automatically" (this browser): "off" turns it off by default. */
+export const WEB_AUTO_KEY = "edgecoder.web.auto";
+export const WEB_UNAVAILABLE_TITLE = "Web: unavailable with this model";
+export const WEB_NEEDS_CSATS = "Web search needs cSats";
 
 export const WEB_TOGGLE_CSS = `      /* ── Web toggle (docs/web-tool.md) and the sources under an answer ── */
       .chat-input-left { display:flex; align-items:center; gap:6px; min-width:0; }
@@ -15,9 +23,24 @@ export const WEB_TOGGLE_CSS = `      /* ── Web toggle (docs/web-tool.md) and
         border-radius:999px; font-size:12.5px; font-weight:500; cursor:pointer; white-space:nowrap;
       }
       .web-toggle:hover:not(:disabled) { background:var(--bg-elevated); color:var(--text); }
-      .web-toggle[aria-pressed="true"] { background:var(--brand-soft); border-color:var(--brand); color:var(--brand); }
-      .web-toggle:disabled { opacity:0.55; cursor:not-allowed; }
+      .web-wrap { position:relative; display:inline-flex; }
+      .web-toggle { border-color:transparent; color:var(--muted); padding:4px 8px; }
+      .web-toggle.off { opacity:0.7; }
+      .web-toggle.unavailable { opacity:0.5; cursor:default; }
       .web-toggle .web-note { font-size:11px; color:var(--muted); }
+      .web-menu {
+        position:absolute; bottom:calc(100% + 8px); left:-4px; width:min(270px, 80vw);
+        background:var(--bg-surface); border:1px solid var(--border-strong);
+        border-radius:var(--radius-md); box-shadow:var(--shadow-up); z-index:100; padding:6px;
+      }
+      .web-menu button {
+        display:flex; flex-direction:column; align-items:flex-start; gap:1px; width:100%; min-height:0;
+        padding:7px 10px; border:none; background:none; color:var(--text); cursor:pointer;
+        border-radius:var(--radius-sm); text-align:left; font-size:13px; font-weight:400; white-space:normal;
+      }
+      .web-menu button:hover { background:var(--bg-elevated); }
+      .web-menu button[aria-checked="true"] .wm-title::after { content:" ✓"; color:var(--brand); }
+      .web-menu .wm-desc { font-size:11.5px; color:var(--muted); }
       .msg-sources { margin-top:10px; font-size:12.5px; line-height:1.5; }
       .msg-sources .msg-sources-title { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); }
       .msg-sources ol { margin:4px 0 0; padding-left:22px; }
@@ -26,7 +49,11 @@ export const WEB_TOGGLE_CSS = `      /* ── Web toggle (docs/web-tool.md) and
       .chat-msg .msg-body a { color:var(--brand); }
 `;
 
-export const WEB_TOGGLE_SCRIPT = `    // ── Web toggle: per chat, offered when web search is set up and the chat's model can use tools ──
+export const WEB_TOGGLE_SCRIPT = `    // ── Web: automatic by default (the model decides when to search), off per chat from the indicator ──
+    var WEB_AUTO_KEY = "${WEB_AUTO_KEY}";
+    function webDefaultMode() {
+      try { return localStorage.getItem(WEB_AUTO_KEY) === "off" ? "off" : "auto"; } catch (e) { return "auto"; }
+    }
     function webStatusQuery() {
       if (selectedCompute) return "target=" + encodeURIComponent(selectedCompute.target) + "&model=" + encodeURIComponent(selectedCompute.model || "");
       if (selectedModel) return "target=default&model=" + encodeURIComponent(selectedModel);
@@ -36,34 +63,76 @@ export const WEB_TOGGLE_SCRIPT = `    // ── Web toggle: per chat, offered wh
       try { webState = await api("/portal/api/web/status?" + webStatusQuery()); } catch (e) { webState = null; }
       renderWebToggle();
     }
+    /** Offer the web tools with this message: Auto, and the status says it can (set up, tools, cSats). */
+    function webWanted() { return webMode === "auto" && !!webState && webState.available === true; }
     function renderWebToggle() {
       var btn = document.getElementById("webToggle");
+      var label = document.getElementById("webLabel");
       var note = document.getElementById("webNote");
-      // Not set up on the servers (or unknown): no toggle at all.
-      if (!webState || webState.reason === "not_configured" || webState.configured === false) { btn.classList.add("hidden"); return; }
+      // Not set up on the servers (or unknown): nothing to show.
+      if (!webState || webState.reason === "not_configured" || webState.configured === false) { btn.classList.add("hidden"); closeWebMenu(); return; }
       btn.classList.remove("hidden");
       var reason = webState.reason || null;
-      btn.disabled = !!reason;
-      btn.setAttribute("aria-pressed", webOn && !reason ? "true" : "false");
-      note.textContent = reason === "needs_csats" ? "needs cSats" : "";
-      if (reason === "no_tools") btn.title = "Web needs a model that can use tools. Pick another model.";
-      else if (reason === "needs_csats") btn.title = "Web search costs cSats (" + webState.searchCSats + " a search, " + webState.readCSats + " a page). Top up to use it.";
+      var unavailable = reason === "no_tools";
+      btn.classList.toggle("unavailable", unavailable);
+      btn.classList.toggle("off", !unavailable && webMode === "off");
+      btn.setAttribute("aria-disabled", unavailable ? "true" : "false");
+      label.textContent = unavailable ? "Web" : webMode === "off" ? "Web: Off" : "Web: Auto";
+      note.textContent = reason === "needs_csats" && webMode === "auto" ? "needs cSats" : "";
+      var prices = webState.searchCSats !== undefined ? " (" + webState.searchCSats + " cSats a search, " + webState.readCSats + " a page)" : "";
+      if (unavailable) btn.title = "${WEB_UNAVAILABLE_TITLE}";
+      else if (webMode === "off") btn.title = "Web is off for this chat. Click to change.";
+      else if (reason === "needs_csats") btn.title = "${WEB_NEEDS_CSATS}" + prices + ". This chat answers without the web until you top up.";
       else if (reason) btn.title = webState.message || "Web search isn't available right now.";
-      else btn.title = webOn ? "Web is on: the model may search the web and read pages (" + webState.searchCSats + " cSats a search, " + webState.readCSats + " a page)." : "Let the model search the web and read pages (cites sources; " + webState.searchCSats + " cSats a search, " + webState.readCSats + " a page).";
+      else btn.title = "Web: Auto. The model searches the web when a question needs fresh information, and cites its sources" + prices + ".";
+      var items = document.querySelectorAll("#webMenu [data-web-mode]");
+      for (var i = 0; i < items.length; i++) items[i].setAttribute("aria-checked", items[i].getAttribute("data-web-mode") === webMode ? "true" : "false");
     }
     function restoreWeb(convId) {
-      try { webOn = localStorage.getItem(WEB_KEY + convId) === "1"; } catch (e) { webOn = false; }
+      var saved = null;
+      try { saved = localStorage.getItem(WEB_KEY + convId); } catch (e) {}
+      // "off": turned off for this chat; "auto" (or "1" from the old toggle): on; nothing: the default.
+      webMode = saved === "off" ? "off" : saved === "auto" || saved === "1" ? "auto" : webDefaultMode();
       renderWebToggle();
     }
     function saveWeb() {
-      try { if (activeConvId) { if (webOn) localStorage.setItem(WEB_KEY + activeConvId, "1"); else localStorage.removeItem(WEB_KEY + activeConvId); } } catch (e) {}
+      try { if (activeConvId) { if (webMode === webDefaultMode()) localStorage.removeItem(WEB_KEY + activeConvId); else localStorage.setItem(WEB_KEY + activeConvId, webMode); } } catch (e) {}
     }
-    document.getElementById("webToggle").addEventListener("click", function() {
-      if (this.disabled) return;
-      webOn = !webOn;
+    function closeWebMenu() {
+      var menu = document.getElementById("webMenu");
+      if (menu) menu.classList.add("hidden");
+      document.getElementById("webToggle").setAttribute("aria-expanded", "false");
+    }
+    document.getElementById("webToggle").addEventListener("click", function(ev) {
+      ev.stopPropagation();
+      if (this.getAttribute("aria-disabled") === "true") return;
+      var menu = document.getElementById("webMenu");
+      var open = menu.classList.contains("hidden");
+      menu.classList.toggle("hidden", !open);
+      this.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    document.getElementById("webMenu").addEventListener("click", function(ev) {
+      var item = ev.target && ev.target.closest ? ev.target.closest("[data-web-mode]") : null;
+      if (!item) return;
+      webMode = item.getAttribute("data-web-mode") === "off" ? "off" : "auto";
       saveWeb();
       renderWebToggle();
+      closeWebMenu();
     });
+    document.addEventListener("click", function(ev) {
+      var wrap = document.getElementById("webWrap");
+      if (wrap && !wrap.contains(ev.target)) closeWebMenu();
+    });
+    document.addEventListener("keydown", function(ev) { if (ev.key === "Escape") closeWebMenu(); });
+    /** "Web search needs cSats", once per chat, quietly under the reply that answered without the web. */
+    function noteWebOffOnce(bubble, message) {
+      var key = WEB_KEY + "noted." + (activeConvId || "");
+      try { if (localStorage.getItem(key)) return; localStorage.setItem(key, "1"); } catch (e) {}
+      var line = document.createElement("div");
+      line.className = "msg-meta web-off-note";
+      line.textContent = message || "${WEB_NEEDS_CSATS}";
+      bubble.appendChild(line);
+    }
     /** Numbered sources (links) and "2 searches · 1 page · 1.2 cSats" under a web answer. */
     function renderWebSources(bubble, w) {
       var sources = (w && w.sources) || [];

@@ -74,7 +74,7 @@ import { FrontierKeyError, FrontierKeyStore } from "../../inference-api/frontier
 import { FrontierSpend } from "../../inference-api/frontier-usage.js";
 import { frontierContextWindow, isFrontierModelId } from "../../inference-api/frontier-models.js";
 import { request as undiciRequest } from "undici";
-import { WEB_SYSTEM_NOTE, WebToolSession, isWebTool, webToolSchemas, type WebToolCall } from "../../web-tool/tools.js";
+import { WEB_SYSTEM_NOTE, WebToolSession, forgetWebAvailability, isWebTool, webAvailability, webReplyLimitsFromEnv, webToolSchemas, type WebToolCall } from "../../web-tool/tools.js";
 import { modelCallsTools } from "../../web-tool/model-support.js";
 
 // Forked by the agent: exit with it, so a restarted agent's provider can take the port.
@@ -1445,8 +1445,12 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
   reply.raw.on("close", () => { if (!reply.raw.writableEnded) abort.abort(); });
   // open_pull_request is offered only when the project is a GitHub repository.
   const projectTools = hasGitHubOrigin(projectRoot) ? toolSchemas() : toolSchemas().filter((t) => t.function.name !== "open_pull_request");
-  // The Web toggle: web_search and read_page, through EdgeCoder's servers (docs/web-tool.md).
-  const web = body.web && webCall ? new WebToolSession({ call: webCall, emit: sendEvent, signal: abort.signal }) : null;
+  // Web (docs/web-tool.md): offered by default (the chat's "Web: Auto"), and the model decides when
+  // to search. Not offered when the account has no cSats or the hour's searches are used (no failed
+  // searches): the reply goes ahead without the web and the app notes it once.
+  const avail = body.web && webCall ? await webAvailability(webCall, "local", { signal: abort.signal }) : null;
+  if (avail && !avail.offer && avail.reason !== "not_configured") sendEvent({ type: "web_off", reason: avail.reason ?? "unreachable", message: avail.message ?? "" });
+  const web = avail?.offer && webCall ? new WebToolSession({ call: webCall, emit: sendEvent, signal: abort.signal }) : null;
   if (web) executor.web = (tool, args) => web.run(tool, args);
   const tools = web ? [...projectTools, ...webToolSchemas()] : projectTools;
   reply.raw.on("close", () => tracked.end("cancelled"));
@@ -1506,12 +1510,15 @@ app.get("/v1/ide/web/status", async (req, reply) => {
   const model = z.string().max(300).catch("").parse((req.query as { model?: unknown } | undefined)?.model ?? "");
   const toolsSupported = model ? modelCallsTools(model) : true;
   if (!webCall) return reply.send({ available: false, configured: false, toolsSupported, reason: "offline", message: "Web needs this computer connected to EdgeCoder (sign in, or set an API key)." });
+  // A fresh look (the app asks after a top-up and now and then): the next reply asks again too.
+  forgetWebAvailability("local");
   const r = await webCall("/v1/tools/web/status", {}).catch(() => ({ status: 502, json: {} as Record<string, unknown> }));
   if (r.status !== 200) return reply.send({ available: false, configured: false, toolsSupported, reason: "unreachable", message: "Couldn't reach EdgeCoder to check web search." });
-  const st = r.json as { configured?: boolean; canAfford?: boolean; message?: string; searchCSats?: number; readCSats?: number; balanceCSats?: number | null };
+  const st = r.json as { configured?: boolean; canAfford?: boolean; message?: string; searchCSats?: number; readCSats?: number; balanceCSats?: number | null; searchesLeftThisHour?: number };
   const configured = st.configured === true;
-  const reason = !configured ? "not_configured" : !toolsSupported ? "no_tools" : st.canAfford === false ? "needs_csats" : null;
-  return reply.send({ ...st, configured, toolsSupported, available: reason === null, reason, ...(reason === "not_configured" ? { message: st.message ?? "Web search isn't set up yet" } : {}) });
+  const reason = !configured ? "not_configured" : !toolsSupported ? "no_tools" : st.canAfford === false ? "needs_csats" : st.searchesLeftThisHour === 0 ? "rate_limited" : null;
+  const limits = webReplyLimitsFromEnv();
+  return reply.send({ ...st, configured, toolsSupported, available: reason === null, reason, maxSearchesPerReply: limits.searches, maxReadsPerReply: limits.reads, ...(reason === "not_configured" ? { message: st.message ?? "Web search isn't set up yet" } : {}) });
 });
 
 const webChatSchema = z.object({
@@ -1530,6 +1537,11 @@ app.post("/v1/ide/web-chat", async (req, reply) => {
   if (!webCall) return reply.status(503).send({ error: "web_unavailable", message: "Web needs this computer connected to EdgeCoder." });
   const chatModel = body.model || process.env.OLLAMA_MODEL || "qwen3.5:9b";
   const ollamaHost = process.env.OLLAMA_HOST || "http://127.0.0.1:11434";
+  // Web is offered only to a model that calls tools, and only when the account can pay for a search
+  // (no failed searches); otherwise 409 web_off and the app answers through the plain chat.
+  if (!modelCallsTools(body.model ?? chatModel)) return reply.status(409).send({ error: "web_off", reason: "no_tools", message: "Web is unavailable with this model." });
+  const avail = await webAvailability(webCall, "local");
+  if (!avail.offer) return reply.status(409).send({ error: "web_off", reason: avail.reason, message: avail.message ?? "" });
   const promptCtx = await agentPromptContext(chatModel);
   writeSseHead(reply);
   let clientDisconnected = false;

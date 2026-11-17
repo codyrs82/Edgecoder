@@ -1,5 +1,8 @@
-// The chat's Web toggle and the sources under a web answer (docs/web-tool.md). The server side is
-// src/web-tool/: web_search and read_page run on EdgeCoder's servers and are billed per call.
+// The chat's Web indicator ("Web: Auto" / "Off for this chat") and the sources under a web answer
+// (docs/web-tool.md). Web is automatic: when it's set up, the model can call tools and the account
+// has cSats, the chat offers web_search and read_page and the model decides when to search. The
+// server side is src/web-tool/: they run on EdgeCoder's servers and are billed per call.
+import { writable } from "svelte/store";
 
 export interface WebSource {
   n: number;
@@ -21,40 +24,87 @@ export interface WebStatus {
   configured: boolean;
   toolsSupported: boolean;
   /** Why it can't be on: not set up on the servers, the model can't call tools, no cSats, or unreachable. */
-  reason?: "not_configured" | "no_tools" | "needs_csats" | "offline" | "unreachable" | null;
+  reason?: "not_configured" | "no_tools" | "needs_csats" | "rate_limited" | "offline" | "unreachable" | null;
   message?: string;
   searchCSats?: number;
   readCSats?: number;
   balanceCSats?: number | null;
+  maxSearchesPerReply?: number;
+  maxReadsPerReply?: number;
 }
 
-export interface WebToggleView {
-  /** Shown at all (hidden while web search isn't set up on the servers). */
+/** A chat's web: "auto" (the model searches when a question needs fresh information) or "off". */
+export type WebMode = "auto" | "off";
+
+export interface WebIndicatorView {
+  /** Shown at all (hidden while web search isn't set up on the servers or the status is unknown). */
   visible: boolean;
-  disabled: boolean;
-  pressed: boolean;
-  /** A short note beside "Web" ("needs cSats"). */
+  /** The menu can't be opened: the chat's model can't call tools. */
+  unavailable: boolean;
+  /** "Web: Auto", "Web: Off", or "Web" when unavailable. */
+  label: string;
+  /** A short quiet note beside it ("needs cSats"). */
   note: string;
   title: string;
 }
 
-export const NO_TOOLS_TITLE = "Web needs a model that can use tools. Pick another model.";
+export const UNAVAILABLE_TITLE = "Web: unavailable with this model";
+export const NEEDS_CSATS_NOTE = "Web search needs cSats";
 
-/** What the composer's Web toggle shows for a status and the chat's setting. */
-export function webToggleView(status: WebStatus | null | undefined, on: boolean): WebToggleView {
-  if (!status || !status.configured || status.reason === "not_configured") return { visible: false, disabled: true, pressed: false, note: "", title: status?.message ?? "Web search isn't set up yet" };
+/** What the composer's quiet Web indicator shows for a status and the chat's mode. */
+export function webIndicatorView(status: WebStatus | null | undefined, mode: WebMode): WebIndicatorView {
+  if (!status || !status.configured || status.reason === "not_configured") return { visible: false, unavailable: true, label: "Web", note: "", title: status?.message ?? "Web search isn't set up yet" };
+  if (!status.toolsSupported || status.reason === "no_tools") return { visible: true, unavailable: true, label: "Web", note: "", title: UNAVAILABLE_TITLE };
   const prices = status.searchCSats !== undefined ? ` (${status.searchCSats} cSats a search, ${status.readCSats ?? 0} a page)` : "";
-  if (!status.toolsSupported || status.reason === "no_tools") return { visible: true, disabled: true, pressed: false, note: "", title: NO_TOOLS_TITLE };
-  if (status.reason === "needs_csats") return { visible: true, disabled: true, pressed: false, note: "needs cSats", title: `Web search costs cSats${prices}. Top up to use it.` };
-  if (!status.available) return { visible: true, disabled: true, pressed: false, note: "", title: status.message ?? "Web search isn't available right now." };
-  return {
-    visible: true,
-    disabled: false,
-    pressed: on,
-    note: "",
-    title: on ? `Web is on: the model may search the web and read pages${prices}.` : `Let the model search the web and read pages, with sources${prices}.`,
-  };
+  if (mode === "off") return { visible: true, unavailable: false, label: "Web: Off", note: "", title: "Web is off for this chat. Click to change." };
+  if (status.reason === "needs_csats") return { visible: true, unavailable: false, label: "Web: Auto", note: "needs cSats", title: `${NEEDS_CSATS_NOTE}${prices}. This chat answers without the web until you top up.` };
+  if (!status.available) return { visible: true, unavailable: false, label: "Web: Auto", note: "", title: status.message ?? "Web search isn't available right now." };
+  return { visible: true, unavailable: false, label: "Web: Auto", note: "", title: `Web: Auto. The model searches the web when a question needs fresh information, and cites its sources${prices}.` };
 }
+
+/** A chat's mode: its own choice (true: Auto, false: Off for this chat), else the Settings default. */
+export function chatWebMode(chatChoice: boolean | undefined, autoByDefault: boolean): WebMode {
+  if (chatChoice === true) return "auto";
+  if (chatChoice === false) return "off";
+  return autoByDefault ? "auto" : "off";
+}
+
+/** Offer web_search and read_page with this message: Auto, and the status says they can be used now. */
+export function webOffered(status: WebStatus | null | undefined, mode: WebMode): boolean {
+  return mode === "auto" && status?.available === true;
+}
+
+/** Settings → General "Search the web automatically" (default on), kept on this computer. */
+export const WEB_AUTO_KEY = "edgecoder.web.auto";
+
+type Store = Pick<Storage, "getItem">;
+function safeStorage(): Storage | null {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
+}
+
+export function webAutoDefault(store: Store | null = safeStorage()): boolean {
+  try {
+    return store?.getItem(WEB_AUTO_KEY) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+export function setWebAutoDefault(on: boolean, store: Pick<Storage, "setItem"> | null = safeStorage()): void {
+  try {
+    store?.setItem(WEB_AUTO_KEY, on ? "on" : "off");
+  } catch {
+    /* storage unavailable */
+  }
+  webAutoStore.set(on);
+}
+
+/** The default, live (Settings changes it; the chat reads it). */
+export const webAutoStore = writable<boolean>(webAutoDefault());
 
 /** "2 searches · 1 page · 1.2 cSats"; "" when the web wasn't used. */
 export function webFooter(u: Pick<WebUsage, "searches" | "pages" | "cSats"> | undefined): string {

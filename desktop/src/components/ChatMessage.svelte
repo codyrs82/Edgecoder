@@ -42,13 +42,15 @@
     web?: WebUsage;
     /** While streaming: what the web tool is doing ("Searching the web…"). */
     activity?: string;
+    /** A quiet note under the reply ("Web search needs cSats", once per chat). */
+    notice?: string;
   }
   /** The footer's tooltip: each model call (machine, hardware, region, timings, cost). */
   function usageTitle(u: { cSats: number; where?: string; calls?: CallUsage[] }): string {
     return u.calls?.length ? `Where this reply ran:\n${servedBreakdown(u.calls)}` : "Where this reply ran and what it cost";
   }
 
-  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, onToolAlways, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview, usage, web, activity }: Props = $props();
+  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, onToolAlways, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview, usage, web, activity, notice }: Props = $props();
 
   /** A failed reply: its text, and the error as one compact notice (with Buy cSats when it's money). */
   let failed = $derived(role === "assistant" && !streaming ? splitModelError(content) : { text: content, error: undefined });
@@ -146,6 +148,9 @@
       {#if web && !streaming}
         <WebSources {web} text={failed.text} />
       {/if}
+      {#if notice && !streaming}
+        <div class="reply-notice" role="note">{notice}</div>
+      {/if}
       {#if streaming && activity}
         <div class="web-activity" role="status">{activity}</div>
       {/if}
@@ -170,6 +175,7 @@
 
 <style>
   .web-activity { margin-top: 6px; font-size: var(--fs-sm); color: var(--text-secondary); }
+  .reply-notice { margin-top: 6px; font-size: var(--fs-xs); color: var(--text-muted); }
   .reply-failure { display: flex; align-items: center; gap: 10px; margin-top: 4px; padding: 6px 10px; border-radius: 8px; background: var(--bg-surface); font-size: 12.5px; color: var(--text-secondary); }
   .rf-text { flex: 1; min-width: 0; }
   .rf-title { color: var(--text-primary); font-weight: 500; }

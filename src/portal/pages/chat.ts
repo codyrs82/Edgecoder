@@ -192,9 +192,15 @@ ${WEB_TOGGLE_CSS}${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px
                     <div class="model-options" id="modelOptions" role="listbox" aria-label="Compute"></div>
                   </div>
                 </div>
-                <button type="button" class="web-toggle hidden" id="webToggle" aria-pressed="false" title="Let the model search the web and read pages (cites sources; costs cSats per search and page)">
-                  ${icon("globe", 14)}<span>Web</span><span class="web-note" id="webNote"></span>
-                </button>
+                <div class="web-wrap" id="webWrap">
+                  <button type="button" class="web-toggle hidden" id="webToggle" aria-haspopup="menu" aria-expanded="false" aria-controls="webMenu" title="Web: Auto">
+                    ${icon("globe", 14)}<span id="webLabel">Web: Auto</span><span class="web-note" id="webNote"></span>
+                  </button>
+                  <div class="web-menu hidden" id="webMenu" role="menu" aria-label="Web search">
+                    <button type="button" role="menuitemradio" aria-checked="true" data-web-mode="auto"><span class="wm-title">Auto</span><span class="wm-desc">Searches when a question needs fresh information, and cites sources.</span></button>
+                    <button type="button" role="menuitemradio" aria-checked="false" data-web-mode="off"><span class="wm-title">Off for this chat</span><span class="wm-desc">Answers from the model alone.</span></button>
+                  </div>
+                </div>
                 </div>
                 <button class="chat-send-btn" id="sendBtn">Send</button>
               </div>
@@ -218,7 +224,7 @@ ${WEB_TOGGLE_CSS}${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px
     var computeOptions = [];
     var COMPUTE_KEY = "edgecoder.chat.compute.";
     var WEB_KEY = "edgecoder.chat.web.";
-    var webOn = false;            // this chat's Web toggle (kept per chat in this browser)
+    var webMode = "auto";         // this chat's web: "auto" (the default) or "off" (kept per chat in this browser)
     var webState = null;          // /portal/api/web/status for the chat's compute
     var CHAT_IDLE_TIMEOUT_MS = ${CHAT_IDLE_TIMEOUT_MS};
     var CHAT_FIRST_REPLY_TIMEOUT_MS = ${CHAT_FIRST_REPLY_TIMEOUT_MS};
@@ -595,6 +601,7 @@ ${WEB_TOGGLE_CSS}${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px
       var doneUsage = null;
       var doneCompute = "";
       var doneWeb = null;          // web tool: numbered sources and "2 searches · 1 page · 1.2 cSats"
+      var webOff = null;           // the web wasn't offered for this reply (no cSats): noted once per chat
       var ac = new AbortController();
       abortController = ac;
       // Never an endless "Thinking...": no bytes for CHAT_IDLE_TIMEOUT_MS (heartbeats count), or no
@@ -637,7 +644,9 @@ ${WEB_TOGGLE_CSS}${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px
         else if (selectedModel) chatBody.model = selectedModel;
         // Auto (nothing picked): your own machines first (free), then the network's best fit.
         else chatBody.compute = { target: "auto" };
-        if (webOn && webState && webState.available) chatBody.web = true;
+        // Web: Auto offers the web tools and the model decides; not when they can't be used (no cSats, a model without tools).
+        var webAsked = webMode === "auto";
+        if (webWanted()) chatBody.web = true;
         var response = await fetch("/portal/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -685,6 +694,7 @@ ${WEB_TOGGLE_CSS}${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px
                   warnBanner.textContent = parsed.warning;
                   assistantBubble.insertBefore(warnBanner, assistantBody);
                 }
+                if (parsed.webOff) { webOff = parsed.webOff; refreshWebStatus(); }
                 if (parsed.error) fail(parsed.error, { code: parsed.code, httpStatus: parsed.httpStatus });
                 if (parsed.done) {
                   gotDone = true;
@@ -714,6 +724,7 @@ ${WEB_TOGGLE_CSS}${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px
           else if (!failed && !gotDone && looksTruncated(fullContent)) showCutShort(assistantBubble, text);
           if (!failed && fullContent) appendReplyFooter(assistantBubble, fullContent, doneUsage, doneCompute);
           if (!failed && fullContent && doneWeb) renderWebSources(assistantBubble, doneWeb);
+          if (!failed && fullContent && webAsked && (webOff ? webOff.reason === "needs_csats" : webState && webState.reason === "needs_csats")) noteWebOffOnce(assistantBubble, webOff && webOff.message);
         }
       } catch (err) {
         if (timedOut === "idle") fail("No response from EdgeCoder for " + Math.round(CHAT_IDLE_TIMEOUT_MS / 1000) + " seconds.");
@@ -934,6 +945,7 @@ ${WEB_TOGGLE_CSS}${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px
     (async function() {
       await requireAuth();
       restoreCompute("last");
+      webMode = webDefaultMode();
       refreshModels();
       refreshWebStatus();
       await loadConversations();
