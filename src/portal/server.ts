@@ -11,7 +11,7 @@ import { registerErrorTracking } from "../common/error-tracking.js";
 import { isRequestValidationError, registerRequestValidationErrors } from "./validation-errors.js";
 import { registerPortalPages } from "./pages/index.js";
 import { appendSetCookie, assertOauthStateSecret } from "./oauth-state-cookie.js";
-import { coordinatorPricingSource } from "./public-pricing.js";
+import { coordinatorPricingSource } from "./public-pricing.js"; import { coordinatorReservesSource } from "./reserves.js";
 import { registerWellKnownRoutes } from "./routes/well-known.js";
 import { startDnsStaleSweep } from "./dns-sweep.js";
 import { createPortalMailer } from "./email.js";
@@ -964,7 +964,7 @@ startUnverifiedPurge(
 );
 
 // #16: HTML pages live in src/portal/pages/; the home page shows live sats pricing (public-pricing.ts).
-registerPortalPages(app, { getPricing: coordinatorPricingSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }) });
+registerPortalPages(app, { getPricing: coordinatorPricingSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }), getReserves: coordinatorReservesSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }) });
 
 // #40: every /internal/* route lives in this plugin, so new internal routes inherit the token check.
 const internalRouteDeps = { deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, hostApprovedFor, isDnsConfigured, requireControlPlaneAdmin, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns };

@@ -69,6 +69,8 @@ Consolidated reference for all environment controls. The primary config file on 
 | `PAYOUT_RECONCILE_TOLERANCE_SATS` | `1000` | Slack per reconciliation check, in sats. |
 | `PAYOUT_RECONCILE_LOOKBACK_MS` | `86400000` | How far back the first reconciliation after a start reads node payments (ms). |
 | `PAYOUT_ALERT_WEBHOOK_URL` | _(unset)_ | POSTed a JSON summary (counts, amounts, payment hashes; no secrets) when reconciliation alerts or trips. |
+| `RESERVES_CACHE_MS` | `60000` | Proof of reserves (coordinator `GET /economy/reserves`, portal `/reserves` and `/reserves.json`): how long one report is reused before the ledger totals and the Lightning node's balances are read again (ms; min 10000). An unavailable report is cached too. |
+| `RESERVES_RATE_LIMIT_PER_MIN` | `30` | Coordinator: requests per client IP per minute to the public `GET /economy/reserves` (the portal's service token is not limited). The portal's `/reserves` pages have their own limit of 30 per minute per IP. |
 | `MOCK_LIGHTNING_BALANCE_SATS` | `0` | Dev only: starting balance of the mock Lightning wallet. |
 | `LAUNCH_MODE` | `open` | Portal and coordinator: `invite` turns on the soft launch (`src/economy/launch-gate.ts`). On the portal, a new account (email signup, first OAuth sign-in, a new AI-agent key) needs an invite code minted in Settings > Admin; existing accounts are grandfathered. On the coordinator, the `LAUNCH_MAX_*` caps below apply to every account. Set it on both. |
 | `LAUNCH_MAX_BUY_SATS_PER_DAY` | `50000` | Invite mode only: sats one account may spend buying cSats per rolling 24 h; paid and still-payable invoices count. `0` = no cap. |

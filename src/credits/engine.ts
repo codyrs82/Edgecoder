@@ -26,6 +26,15 @@ export class CreditEngine {
     }, 0);
   }
 
+  /** Proof of reserves in memory mode: Σ max(0, balance) over every account except `exclude`, in micro-credits. */
+  positiveBalancesMicros(exclude: string): number {
+    let sum = 0;
+    for (const accountId of this.txByAccount.keys()) {
+      if (accountId !== exclude) sum += Math.max(0, this.balanceMicros(accountId));
+    }
+    return sum;
+  }
+
   history(accountId: string): CreditTransaction[] {
     return [...(this.txByAccount.get(accountId) ?? [])];
   }

@@ -187,6 +187,12 @@ export const payoutEnv = {
   PAYOUT_ALERT_WEBHOOK_URL: envUrl()
 };
 
+/** Public proof of reserves (src/economy/proof-of-reserves.ts): coordinator GET /economy/reserves, portal /reserves. */
+export const reservesEnv = {
+  RESERVES_CACHE_MS: envInt(undefined, { min: 0 }),
+  RESERVES_RATE_LIMIT_PER_MIN: envInt(undefined, { min: 1 })
+};
+
 /** Soft launch (src/economy/launch-gate.ts): invite-only signups on the portal, low per-account caps on the coordinator. */
 export const launchEnv = {
   LAUNCH_MODE: envEnumCi(["open", "invite"]),

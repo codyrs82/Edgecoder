@@ -65,6 +65,8 @@ const PUBLIC: Record<string, string> = {
   "GET /acceptable-use": "static page",
   "GET /host-agreement": "static page",
   "GET /bluetooth": "static page",
+  "GET /reserves": "proof of reserves: aggregate totals only, cached and rate limited",
+  "GET /reserves.json": "proof of reserves: aggregate totals only, cached and rate limited",
   "GET /install.sh": "installer script",
   "GET /install.ps1": "installer script",
   "GET /assets/tokens.css": "static asset",

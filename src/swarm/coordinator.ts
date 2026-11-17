@@ -66,6 +66,7 @@ import { registerDirectPaymentRoutes } from "./coordinator/direct-payments.js";
 import { registerOnchainRoutes } from "./coordinator/routes/onchain.js";
 import { registerIssuanceRoutes } from "./coordinator/routes/issuance.js";
 import { registerStatsRoutes } from "./coordinator/routes/stats.js";
+import { registerReservesRoutes } from "./coordinator/routes/reserves.js";
 import { registerSecurityRoutes } from "./coordinator/routes/security.js";
 import { registerAgentMeshRoutes } from "./coordinator/routes/agent-mesh.js";
 import { registerPortalRoutes } from "./coordinator/routes/portal.js";
@@ -190,6 +191,8 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath === "/discovery/announcement" || reqPath === "/discovery/peers") return;
   // Mirror of the signed coordinator registry (clients verify the signature; no auth needed).
   if (reqPath === "/network/registry") return;
+  // Proof of reserves: aggregate totals only, cached and rate limited per IP in the route (routes/reserves.ts).
+  if (reqPath?.split("?")[0] === "/economy/reserves" && (req as any).method === "GET") return;
   // #40: all /admin/* routes are behind authorizeAdmin (admin plugin), not the mesh token.
   // WARNING: register /admin/* routes ONLY inside the admin plugin below — a route added with
   // app.get("/admin/...") outside it would get no auth at all because of this skip.
@@ -230,6 +233,8 @@ registerOnchainRoutes(app);
 registerIssuanceRoutes(app);
 registerMeshRoutes(app);
 registerStatsRoutes(app);
+// Public proof of reserves (aggregate liabilities vs node balances; docs/decentralization.md).
+registerReservesRoutes(app);
 registerSecurityRoutes(app);
 registerAgentMeshRoutes(app);
 registerOrchestrationRoutes(app);

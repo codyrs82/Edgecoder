@@ -3336,6 +3336,42 @@ export class PostgresStore {
     };
   }
 
+  /**
+   * Proof of reserves (src/economy/proof-of-reserves.ts): totals only, nothing per account leaves
+   * the query. Account balances are summed per account first so no negative balance offsets
+   * another; the fee pool is valued at its sats as in solvencyMsat(); held = cSats reserved for
+   * tasks whose billing hasn't settled (task_billing.settled_at_ms IS NULL) less what they paid out.
+   */
+  async reserveLiabilitiesMsat(feePoolAccountId = "network:fee_pool"): Promise<{ accountBalancesMsat: number; feePoolMsat: number; heldForJobsMsat: number }> {
+    const r = await this.pool.query(
+      `WITH per AS (
+         SELECT account_id, SUM(CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END) AS bal
+           FROM credit_transactions WHERE account_id <> $1 GROUP BY account_id),
+       pool AS (
+         SELECT COALESCE(SUM((CASE WHEN tx_type = 'spend' THEN -1 ELSE 1 END)
+           * COALESCE(msat, CASE WHEN split_part(reason, ':', 1) IN ('payout', 'payout_refund', 'payout_fee_excess') THEN credits * 1000 ELSE 0 END)), 0) AS msat
+           FROM credit_transactions WHERE account_id = $1),
+       open AS (SELECT task_id FROM task_billing WHERE settled_at_ms IS NULL),
+       reserve AS (
+         SELECT related_task_id AS task_id, SUM(credits) AS reserved FROM credit_transactions
+          WHERE tx_type = 'spend' AND reason IN ('task_reserve', 'inference_reserve') AND related_task_id IN (SELECT task_id FROM open) GROUP BY 1),
+       paid AS (
+         SELECT related_task_id AS task_id, SUM(credits) AS paid FROM credit_transactions
+          WHERE tx_type = 'earn' AND (reason = 'compute_contribution' OR reason LIKE 'network\\_fee:%') AND related_task_id IN (SELECT task_id FROM open) GROUP BY 1)
+       SELECT
+         (SELECT COALESCE(SUM(GREATEST(bal, 0)), 0) * 1000 FROM per) AS accounts_msat,
+         (SELECT GREATEST(msat, 0) FROM pool) AS pool_msat,
+         (SELECT COALESCE(SUM(GREATEST(r.reserved - COALESCE(p.paid, 0), 0)), 0) * 1000 FROM reserve r LEFT JOIN paid p ON p.task_id = r.task_id) AS held_msat`,
+      [feePoolAccountId]
+    );
+    const row = r.rows[0] ?? {};
+    return {
+      accountBalancesMsat: Math.round(Number(row.accounts_msat ?? 0)),
+      feePoolMsat: Math.round(Number(row.pool_msat ?? 0)),
+      heldForJobsMsat: Math.round(Number(row.held_msat ?? 0))
+    };
+  }
+
   async listPendingPayouts(limit = 100): Promise<PayoutRecord[]> {
     const r = await this.pool.query(`SELECT * FROM payouts WHERE status = 'pending' ORDER BY created_at_ms ASC LIMIT $1`, [limit]);
     return r.rows.map(rowToPayout);

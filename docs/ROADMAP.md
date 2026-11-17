@@ -101,6 +101,8 @@ Every payment and every exchange of value settles in bitcoin, over Lightning.
     and a payment hash.
 - Ecash (Cashu or Fedimint) is an option for small, frequent, private payments. It is still
   bitcoin-backed, but it trusts a mint, so it would be opt-in.
+- The phases from here (proof of reserves, non-custodial paths, a multisig vault for reserves,
+  pay-on-result, federated coordinators) and the anchoring plan are in docs/decentralization.md.
 
 ### AI agents as first-class users (MCP)
 
