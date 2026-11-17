@@ -1819,6 +1819,9 @@ export interface Reservation {
   usedCSats?: number;
   refundCSats?: number;
   models: string[];
+  /** "Let the network use my idle time" (docs/reservation-backfill.md). */
+  backfill?: boolean;
+  backfillStats?: { jobs: number; earnedCSats: number; holderShare: number; preempted: number; active: boolean; holderWait: { samples: number; p50Ms: number; maxMs: number } };
 }
 export interface ReservationOptions {
   reservations: Reservation[];

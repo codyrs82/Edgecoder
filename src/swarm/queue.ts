@@ -669,6 +669,25 @@ export class SwarmQueue {
     return count;
   }
 
+  /**
+   * Reservation backfill (src/swarm/coordinator/backfill.ts), one pass: the lease's jobs still
+   * unclaimed and running on its agent, and the other (network) subtasks the agent holds.
+   */
+  leaseView(agentId: string, reservationId: string): { leaseQueued: number; leaseRunning: number; others: Array<{ subtask: Subtask; claimedAtMs: number }> } {
+    let leaseQueued = 0;
+    let leaseRunning = 0;
+    const others: Array<{ subtask: Subtask; claimedAtMs: number }> = [];
+    for (const t of this.tasks) {
+      if (t.subtask.projectMeta.reservationId === reservationId) {
+        if (!t.claimedBy) leaseQueued++;
+        else if (t.claimedBy === agentId) leaseRunning++;
+      } else if (t.claimedBy === agentId) {
+        others.push({ subtask: t.subtask, claimedAtMs: t.claimedAt ?? 0 });
+      }
+    }
+    return { leaseQueued, leaseRunning, others };
+  }
+
   agentClaims(agentId: string): number {
     return this.agentClaimCount.get(agentId) ?? 0;
   }

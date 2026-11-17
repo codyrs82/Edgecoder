@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { z } from "zod";
-import { envEnum, envEnumCi, envFlag, envInt, envJson, envNumber, envUrl } from "../common/config.js";
+import { envEnum, envEnumCi, envFlag, envFlagWord, envInt, envJson, envNumber, envUrl } from "../common/config.js";
 
 /*
  * #15: variables that more than one service reads, grouped by the library that reads them. A
@@ -285,6 +285,16 @@ export const bestFitEnv = {
   BEST_FIT_OVERSIZE_PENALTY: fraction(),
   BEST_FIT_PEERS: envFlag({ off: ["0", "false"] }),
   BEST_FIT_COMPLEXITY_WEIGHTS_JSON: envJson()
+};
+
+/** Reservation backfill: idle reserved machines take small network calls (src/economy/reservation-backfill.ts). */
+export const reservationBackfillEnv = {
+  RESERVATION_BACKFILL: envFlagWord(),
+  RESERVATION_BACKFILL_DEFAULT: envFlagWord(),
+  RESERVATION_BACKFILL_HOLDER_SHARE: fraction(),
+  RESERVATION_BACKFILL_MAX_TOKENS: envNumber(undefined, { min: 256, max: 1_000_000 }),
+  RESERVATION_BACKFILL_MAX_SECONDS: envNumber(undefined, { min: 1, max: 600 }),
+  RESERVATION_BACKFILL_SLOT_FRACTION: fraction()
 };
 
 /** Claim leases on queued subtasks (src/swarm/queue.ts). */

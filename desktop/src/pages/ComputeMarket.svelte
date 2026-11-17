@@ -189,6 +189,7 @@
               <div class="sp-text">
                 <span class="sp-title">{CLASS_LABELS[r.computeClass]}{r.tier ? ` · ${r.tier}` : ""} · {left(r.endMs)}</span>
                 <span class="sp-desc">{r.models.map(shortModel).join(", ") || "no models listed"} · {fmt(r.cSatsPerSecond, 4)} cSats/s · paid {fmt(r.prepaidCSats)}</span>
+                {#if r.backfill}<span class="sp-desc">Idle time shared with the network · {r.backfillStats?.jobs ?? 0} jobs · {fmt(r.backfillStats?.earnedCSats ?? 0)} cSats to you</span>{/if}
               </div>
               <div class="sp-controls">
                 {#if r.models[0]}

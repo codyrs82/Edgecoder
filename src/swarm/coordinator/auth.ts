@@ -82,6 +82,7 @@ const AGENT_POST_ROUTES: ReadonlySet<string> = new Set([
   "/account/reservations",
   "/account/reservations/list",
   "/account/reservations/cancel",
+  "/account/reservations/backfill",
   "/economy/market/orders",
   "/agent-mesh/connect",
   "/agent-mesh/accept",

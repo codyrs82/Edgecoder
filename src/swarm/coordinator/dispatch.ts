@@ -29,6 +29,11 @@
  *    session's cache, its speed). For a short while (preferAgent's `ms`, BEST_FIT_PREFER_MS) other
  *    agents leave the call to it while it is live and has room, and it is nudged first; after that
  *    anyone eligible may take it, as before.
+ *
+ * 4. Reservation backfill (backfill.ts, docs/reservation-backfill.md). A reserved agent whose lease
+ *    opted in may take small network model calls while its holder has no lease job queued or
+ *    running, up to a slot cap; claimRule decides it once per pull, so a waiting lease job is
+ *    always what the agent gets first.
  */
 
 import type { Subtask } from "../../common/types.js";
@@ -41,8 +46,9 @@ import { queue, reservations } from "./context.js";
 import { agentCapabilities, activeBlacklistRecord } from "./agent-state.js";
 import { askCapabilityOf, orderBook } from "./economy.js";
 import { peerGrantAllowsClaim } from "./grants.js";
-import { restrictedClaimAllowed } from "./restricted.js";
-import { circuitOpen, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
+import { restrictedClaimAllowed, subtaskRestrictedTier } from "./restricted.js";
+import { circuitOpen, loadedModelsOf, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
+import { backfillCallOk, backfillOpen } from "./backfill.js";
 
 /** Agents nudged per claimable subtask. */
 export const NUDGE_FANOUT = 2;
@@ -123,6 +129,10 @@ export function forgetAgentLoad(agentId: string): void {
  */
 export function claimRule(agentId: string, capability: Capability | undefined, pullerAccount: string | undefined, nowMs = Date.now()): (subtask: Subtask) => boolean {
   const lease = reservations.activeForAgent(agentId, nowMs);
+  // Reservation backfill (backfill.ts): may the reserved agent start a small network call now?
+  // Decided once per pull: closed while a lease job is queued or running, or at the slot cap.
+  const backfill = lease?.backfill === true && backfillOpen(lease, agentHealthy(agentId, capability, nowMs), loads.get(agentId)?.slots ?? 1, nowMs);
+  const loaded = backfill ? loadedModelsOf(agentId, nowMs) : undefined;
   return (subtask) => {
     if (!agentMayClaim(capability, subtask)) return false;
     // Security research tier: a restricted model runs only where its admitted call allows (restricted.ts).
@@ -138,12 +148,28 @@ export function claimRule(agentId: string, capability: Capability | undefined, p
     // Host approval (src/portal/host-requests.ts): an agent whose owner is not an approved host
     // runs only its owner's own work ("My machines"): no other account's job, no lease.
     if (capability?.hostApproved === false) return Boolean(meta.onlyAccountId) && !meta.reservationId && (pullerAccount === undefined || meta.onlyAccountId === pullerAccount) && hasModel;
-    // A reserved agent takes only its lease's jobs; a job for a lease or for its owner's own machines goes nowhere else.
-    if (lease) return meta.reservationId === lease.id && hasModel;
+    // A reserved agent takes its lease's jobs; while it is idle and the lease opted in, also small
+    // network calls (backfill). A job for a lease or for its owner's own machines goes nowhere else.
+    if (lease) {
+      if (meta.reservationId === lease.id) return hasModel;
+      if (!backfill || !hasModel) return false;
+      if (!backfillCallOk(agentId, capability, lease, subtask, { restricted: subtaskRestrictedTier(subtask, capability) !== undefined, loadedModels: loaded })) return false;
+      return orderBook.canMatch(agentId, subtask.taskId).ok && meetsCapability(askCapabilityOf(agentId, capability), meta);
+    }
     if (meta.reservationId) return false;
     if (meta.onlyAccountId) return (pullerAccount === undefined || meta.onlyAccountId === pullerAccount) && hasModel;
     return orderBook.canMatch(agentId, subtask.taskId).ok && meetsCapability(askCapabilityOf(agentId, capability), meta) && hasModel;
   };
+}
+
+/** Live, not blacklisted, circuit closed and memory not under pressure (reservation backfill). */
+function agentHealthy(agentId: string, capability: Capability | undefined, nowMs: number): boolean {
+  return liveAgent(agentId, capability, nowMs) && !circuitOpen(agentId, nowMs) && memoryAdmits(agentId, undefined, 0, nowMs);
+}
+
+/** When a subtask became claimable (undefined: not known here or already claimed). */
+export function readySinceMs(subtaskId: string): number | undefined {
+  return readyAt.get(subtaskId);
 }
 
 /** Context window an agent reported (undefined: not reported, takes any size). */

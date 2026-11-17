@@ -74,6 +74,8 @@ import {
 import { depTracker, recordWorkReceipt } from "./services.js";
 import { persistStatsLedgerRecord } from "./stats-ledger.js";
 import { attestAgentSigningKey } from "./attested-keys.js";
+import { backfillAccrualFor, backfillConfig, forgetBackfillClaim } from "./backfill.js";
+import { splitBackfillEarnings } from "../../economy/reservation-backfill.js";
 
 /** Store a subtask's output and release (and gossip) the subtasks that depended on it. */
 export function releaseDependents(subtaskId: string, output: string): void {
@@ -384,6 +386,12 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
     app.log.warn({ taskId, subtaskId: r.subtaskId, kind: subtask.kind, model: subtask.requestedModel, pricedMsat: Math.round(priced.costMsat), settledMsat: costMsat, reservedMsat: billing.reservedMsat, basis: priced.basis }, "job_cost_capped_at_reserve");
   }
   const { agentMsat, feeMsat } = splitJobCost(costMsat, NETWORK_FEE_BPS);
+  // Reservation backfill (backfill.ts): run on a reserved agent while its holder was idle, so the
+  // host-side earnings are split with the holder. The submitter's charge is the same either way.
+  // (NWC-paid calls are never taken as backfill.)
+  const bf = billing?.nwc ? undefined : backfillAccrualFor(subtask, r.agentId, durationMs);
+  forgetBackfillClaim(r.subtaskId);
+  const split = bf ? { ...bf, ...splitBackfillEarnings(agentMsat, backfillConfig.holderShareBps) } : undefined;
   if (billing?.nwc) {
     // Paid from the buyer's own wallet: a tally to the host and to EdgeCoder's fee, settled over
     // Lightning (direct-payments.ts). No cSats move.
@@ -409,7 +417,8 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
         modelParamSizeB,
         hardwareWeight
       },
-      { agentMsat, feeMsat }
+      { agentMsat, feeMsat },
+      split
     );
   } finally {
     // Nothing was paid (already recorded, #44, or the store failed): the task is not charged for it.
@@ -445,7 +454,9 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
         durationMs,
         reportedDurationMs,
         ok: r.ok,
-        resourceClass: subtask.projectMeta.resourceClass
+        resourceClass: subtask.projectMeta.resourceClass,
+        // credits/msat above are the host's; the holder's share of agentMsat is recorded here.
+        ...(split ? { backfill: { reservationId: split.reservationId, holderAccountId: split.holderAccountId, holderMsat: split.holderMsat, hostMsat: split.hostMsat, holderShareBps: backfillConfig.holderShareBps } } : {})
       })
     });
     await pgStore?.persistLedgerRecord(earningsRecord);

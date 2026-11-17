@@ -463,13 +463,18 @@ export async function listReservations(d: NetworkDeps) {
 }
 
 /** Reserve one machine of a class for some minutes (paid now; unused time comes back). */
-export async function createReservation(d: NetworkDeps, body: { computeClass: string; minutes: number; model?: string; minVramGb?: number }) {
+export async function createReservation(d: NetworkDeps, body: { computeClass: string; minutes: number; model?: string; minVramGb?: number; backfill?: boolean }) {
   return call(d, "POST", "/account/reservations", body);
 }
 
 /** Your usage over the last N days (summary for the usage page). */
 export async function usageSummary(d: NetworkDeps, days: number) {
   return call(d, "POST", "/account/usage", { days });
+}
+
+/** "Let the network use my idle time" on or off for an active lease. */
+export async function setReservationBackfill(d: NetworkDeps, reservationId: string, enabled: boolean) {
+  return call(d, "POST", "/account/reservations/backfill", { reservationId, enabled });
 }
 
 export async function cancelReservation(d: NetworkDeps, reservationId: string) {
