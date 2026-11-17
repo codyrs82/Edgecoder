@@ -21,7 +21,10 @@ primary_region = "ord" # next to edgecoder-seed and edgecoder-pg
 
 [env]
   LND_ALIAS = "edgecoder"
-  LND_EXTERNAL_IP = "37.16.0.48" # the app's dedicated IPv4 (README step 1), so peers can find the node
+  # LND_EXTERNAL_IP unset and the public 9735 service below disabled: peers reached through Fly's
+  # TCP proxy dropped every ~5 min (pong failures), taking the ACINQ channel offline. The node
+  # connects outbound only (direct egress) and advertises no address. To accept inbound peers
+  # again, uncomment the services block and set LND_EXTERNAL_IP = "37.16.0.48" (still allocated).
   # lnd's backend: external (ocean-node) or bundled (this app's bitcoind machine, the rollback).
   BITCOIND_MODE = "external"
   BITCOIND_LABEL = "ocean-node"  # names the backend in logs only
@@ -55,19 +58,19 @@ primary_region = "ord" # next to edgecoder-seed and edgecoder-pg
   processes = ["lnd"]
 
 # Lightning P2P, public. Needs a dedicated IPv4 (fly ips allocate-v4); IPv6 works without one.
-[[services]]
-  internal_port = 9735
-  protocol = "tcp"
-  processes = ["lnd"]
-  auto_stop_machines = "off"
-  auto_start_machines = false
-  min_machines_running = 1
-  [[services.ports]]
-    port = 9735
-  [[services.tcp_checks]]
-    interval = "30s"
-    timeout = "5s"
-    grace_period = "60s"
+# [[services]]
+#   internal_port = 9735
+#   protocol = "tcp"
+#   processes = ["lnd"]
+#   auto_stop_machines = "off"
+#   auto_start_machines = false
+#   min_machines_running = 1
+#   [[services.ports]]
+#     port = 9735
+#   [[services.tcp_checks]]
+#     interval = "30s"
+#     timeout = "5s"
+#     grace_period = "60s"
 
 [[vm]]
   processes = ["bitcoind"]
