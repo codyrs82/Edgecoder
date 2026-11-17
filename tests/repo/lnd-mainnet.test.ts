@@ -18,7 +18,7 @@ const PASS = "s3cret-Pass_value-0123456789abcdef";
 const WALLET = "wallet-pass-do-not-log-42";
 const BTC_RPC = "bundled-rpc-pass-do-not-log-77";
 
-type Run = { code: number | null; log: string; args: string[]; conf: string };
+type Run = { code: number | null; log: string; args: string[]; conf: string; watch: string };
 
 const listen = (s: HttpServer | TcpServer, host: string) =>
   new Promise<number>((ok, fail) => {
@@ -91,6 +91,10 @@ describe.skipIf(!canRunScripts)("deploy/lnd-mainnet entrypoint", () => {
       );
       chmodSync(p, 0o755);
     }
+    // Stub backup watcher: records that the entrypoint started it, then exits.
+    const w = join(bin, "scb-watch");
+    writeFileSync(w, '#!/bin/sh\nprintf \'%s\' "$SCB_RUN_DIR" > "$OUT/scb-watch"\n');
+    chmodSync(w, 0o755);
   });
 
   afterAll(async () => {
@@ -119,7 +123,7 @@ describe.skipIf(!canRunScripts)("deploy/lnd-mainnet entrypoint", () => {
       child.on("close", (code) => {
         clearTimeout(t);
         const f = (n: string) => (existsSync(join(out, n)) ? readFileSync(join(out, n), "utf8") : "");
-        done({ code, log, args: f("args").split("\n").filter(Boolean), conf: f("conf") });
+        done({ code, log, args: f("args").split("\n").filter(Boolean), conf: f("conf"), watch: f("scb-watch") });
       });
     });
   }
@@ -161,6 +165,9 @@ describe.skipIf(!canRunScripts)("deploy/lnd-mainnet entrypoint", () => {
     expect(r.args.join(" ")).not.toMatch(/assumechanvalid|prunednode|pruned/i);
     expect(r.conf).not.toMatch(/assumechanvalid|prunednode/i);
     expect(r.log).toMatch(/ocean-node RPC at 127\.0\.0\.1:\d+ is up: chain=main blocks=900000/);
+    // The watchtower client is on, and the channel-backup watcher runs beside lnd.
+    expect(r.args).toContain("--wtclient.active");
+    expect(r.watch).not.toBe("");
   });
 
   it("brackets an IPv6 host and derives the ZMQ URLs from it", async () => {
@@ -322,7 +329,9 @@ describe.skipIf(!canRunScripts)("deploy/lnd-mainnet entrypoint", () => {
       "--wallet-unlock-allow-create",
       "--minchansize=100000",
       "--coop-close-target-confs=6",
+      "--wtclient.active",
     ]);
+    expect(r.watch).toBe(run_);
     expect(r.conf).toBe(`[Bitcoind]\nbitcoind.rpcuser=edgecoder\nbitcoind.rpcpass=${BTC_RPC}\n`);
     expect(r.log).not.toContain(BTC_RPC);
     expect(r.log).not.toContain(WALLET);
@@ -391,5 +400,214 @@ describe("deploy/lnd-mainnet fly config", () => {
     for (const line of code.filter((l) => /\b(echo|ok|bad)\b/.test(l))) {
       expect(line).not.toMatch(/\$\{?BITCOIND_RPC_(USER|PASS)\b(?!:-\})/);
     }
+  });
+});
+
+// scb-watch: channel.backup -> local history (last N) and, when configured, an S3 bucket.
+describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)("deploy/lnd-mainnet scb-watch", () => {
+  const WATCH = resolve(DIR, "scb-watch.sh");
+  const KEY_ID = "tid_access_key_example";
+  const SECRET = "tsec_secret-do-not-log-123";
+  type Req = { method: string; url: string; auth: string; sha: string; body: Buffer };
+  let tmp: string;
+  let s3: HttpServer;
+  let port = 0;
+  let reqs: Req[] = [];
+  let status = 200;
+
+  beforeAll(async () => {
+    tmp = mkdtempSync(join(tmpdir(), "scb-watch-"));
+    s3 = createHttpServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      reqs.push({
+        method: req.method ?? "",
+        url: req.url ?? "",
+        auth: String(req.headers.authorization ?? ""),
+        sha: String(req.headers["x-amz-content-sha256"] ?? ""),
+        body: Buffer.concat(chunks),
+      });
+      res.writeHead(req.method === "DELETE" && status === 200 ? 204 : status).end();
+    });
+    port = await listen(s3, "127.0.0.1");
+  });
+
+  afterAll(async () => {
+    await new Promise((r) => s3.close(r));
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  function once(dir: string, env: Record<string, string> = {}) {
+    return new Promise<{ code: number | null; log: string }>((done) => {
+      const child = spawn("bash", [WATCH], {
+        env: {
+          PATH: process.env.PATH,
+          SCB_WATCH_ONCE: "1",
+          SCB_PATH: join(dir, "channel.backup"),
+          SCB_HISTORY_DIR: join(dir, "hist"),
+          SCB_RUN_DIR: dir,
+          ...env,
+        },
+      });
+      let log = "";
+      child.stdout.on("data", (d) => (log += d));
+      child.stderr.on("data", (d) => (log += d));
+      child.on("close", (code) => done({ code, log }));
+    });
+  }
+  const history = (dir: string) =>
+    execFileSync("ls", ["-1", join(dir, "hist")], { encoding: "utf8" })
+      .split("\n")
+      .filter((n) => /^channel-.*\.backup$/.test(n));
+  const s3env = () => ({
+    SCB_S3_ENDPOINT: `http://127.0.0.1:${port}`,
+    SCB_S3_BUCKET: "edgecoder-lnd-scb",
+    SCB_S3_ACCESS_KEY_ID: KEY_ID,
+    SCB_S3_SECRET_ACCESS_KEY: SECRET,
+  });
+
+  it("parses (bash -n), and the image installs it", () => {
+    execFileSync("bash", ["-n", WATCH]);
+    expect(read("scb-watch.sh")).toMatch(/^set -euo pipefail$/m);
+    expect(read("Dockerfile")).toMatch(/^COPY --chmod=0755 scb-watch\.sh \/usr\/local\/bin\/scb-watch$/m);
+  });
+
+  it("without S3 settings keeps a local copy per change, says it is not shipping, and skips unchanged files", async () => {
+    const dir = mkdtempSync(join(tmp, "local-"));
+    let r = await once(dir); // no channel.backup yet: nothing to do
+    expect(r.code, r.log).toBe(0);
+    expect(r.log).toMatch(/NOT shipping off the node/);
+    writeFileSync(join(dir, "channel.backup"), "scb-v1");
+    r = await once(dir);
+    expect(r.code, r.log).toBe(0);
+    expect(history(dir)).toHaveLength(1);
+    r = await once(dir);
+    expect(history(dir)).toHaveLength(1);
+    expect(r.log).not.toMatch(/changed/);
+  });
+
+  it("keeps only the newest SCB_HISTORY_KEEP copies", async () => {
+    const dir = mkdtempSync(join(tmp, "keep-"));
+    mkdirSync(join(dir, "hist"));
+    for (let i = 1; i <= 5; i++) writeFileSync(join(dir, "hist", `channel-2026010${i}T000000Z.backup`), `old${i}`);
+    writeFileSync(join(dir, "channel.backup"), "scb-new");
+    const r = await once(dir, { SCB_HISTORY_KEEP: "3" });
+    expect(r.code, r.log).toBe(0);
+    const h = history(dir);
+    expect(h).toHaveLength(3);
+    expect(h).toContain("channel-20260105T000000Z.backup");
+    expect(h).not.toContain("channel-20260103T000000Z.backup");
+    expect(readFileSync(join(dir, "hist", h.sort().at(-1)!), "utf8")).toBe("scb-new");
+  });
+
+  it("uploads each change (latest + timestamped history), signed, without logging or passing the secret on argv", async () => {
+    const dir = mkdtempSync(join(tmp, "s3-"));
+    reqs = [];
+    status = 200;
+    writeFileSync(join(dir, "channel.backup"), "scb-encrypted-bytes");
+    const r = await once(dir, s3env());
+    expect(r.code, r.log).toBe(0);
+    const puts = reqs.filter((q) => q.method === "PUT");
+    expect(puts.map((q) => q.url)).toEqual([
+      expect.stringMatching(/^\/edgecoder-lnd-scb\/edgecoder-lnd\/history\/channel-\d{8}T\d{6}Z\.backup$/),
+      "/edgecoder-lnd-scb/edgecoder-lnd/channel.backup",
+    ]);
+    for (const q of puts) {
+      expect(q.body.toString()).toBe("scb-encrypted-bytes");
+      expect(q.auth).toMatch(new RegExp(`^AWS4-HMAC-SHA256 Credential=${KEY_ID}/\\d{8}/auto/s3/aws4_request`));
+      expect(q.sha).toMatch(/^[0-9a-f]{64}$/);
+    }
+    expect(r.log).toMatch(/uploaded channel-.* to s3 bucket edgecoder-lnd-scb/);
+    expect(r.log).not.toContain(SECRET);
+    expect(readFileSync(join(dir, "scb-s3.conf"), "utf8")).toContain(SECRET); // in the run dir, not argv
+    expect(read("scb-watch.sh")).not.toMatch(/--user\b|-u "\$SCB_S3/);
+    // Unchanged: no new upload.
+    reqs = [];
+    await once(dir, s3env());
+    expect(reqs).toEqual([]);
+  });
+
+  it("retries a failed upload on the next pass", async () => {
+    const dir = mkdtempSync(join(tmp, "retry-"));
+    reqs = [];
+    status = 503;
+    writeFileSync(join(dir, "channel.backup"), "scb-retry");
+    let r = await once(dir, s3env());
+    expect(r.code, r.log).toBe(0);
+    expect(r.log).toMatch(/failed \(HTTP 503\); retrying next poll/);
+    status = 200;
+    reqs = [];
+    r = await once(dir, s3env());
+    expect(reqs.filter((q) => q.method === "PUT")).toHaveLength(2);
+    expect(history(dir)).toHaveLength(1);
+  });
+
+  it("deletes remote history copies that fell out of the local last-N", async () => {
+    const dir = mkdtempSync(join(tmp, "prune-"));
+    status = 200;
+    for (let i = 1; i <= 3; i++) {
+      writeFileSync(join(dir, "channel.backup"), `scb-${i}`);
+      await once(dir, { ...s3env(), SCB_HISTORY_KEEP: "2" });
+      await new Promise((r) => setTimeout(r, 1100)); // distinct timestamps
+    }
+    const deletes = reqs.filter((q) => q.method === "DELETE");
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0].url).toMatch(/\/history\/channel-\d{8}T\d{6}Z\.backup$/);
+    expect(readFileSync(join(dir, "hist", ".remote"), "utf8").trim().split("\n")).toEqual(history(dir).sort());
+  });
+
+  it("refuses partial S3 settings", async () => {
+    const dir = mkdtempSync(join(tmp, "partial-"));
+    const r = await once(dir, { ...s3env(), SCB_S3_SECRET_ACCESS_KEY: "" });
+    expect(r.code).toBe(2);
+    expect(r.log).toMatch(/SCB_S3_SECRET_ACCESS_KEY is not set/);
+  });
+});
+
+describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)("deploy/lnd-mainnet lnc wrapper", () => {
+  function lnc(...args: string[]) {
+    const tmp = mkdtempSync(join(tmpdir(), "lnc-"));
+    writeFileSync(join(tmp, "lncli"), "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
+    chmodSync(join(tmp, "lncli"), 0o755);
+    const out = execFileSync("bash", [resolve(DIR, "lncli.sh"), ...args], { env: { PATH: `${tmp}:${process.env.PATH}` }, encoding: "utf8" });
+    rmSync(tmp, { recursive: true, force: true });
+    return out.split("\n").filter(Boolean);
+  }
+
+  it("defaults to lnd's IPv6 gRPC listener ([::1]:10009)", () => {
+    expect(lnc("getinfo")).toEqual(["--lnddir=/data", "--network=mainnet", "--rpcserver=[::1]:10009", "getinfo"]);
+  });
+
+  it("leaves an explicit --rpcserver alone", () => {
+    expect(lnc("--rpcserver=localhost:10009", "getinfo")).toEqual(["--lnddir=/data", "--network=mainnet", "--rpcserver=localhost:10009", "getinfo"]);
+  });
+});
+
+// deploy/lnd-mainnet/tower: EdgeCoder's own watchtower (not created until the owner approves it).
+describe("deploy/lnd-mainnet/tower", () => {
+  const toml = read("tower/fly.toml");
+  const df = read("tower/Dockerfile");
+  const entry = read("tower/entrypoint.sh");
+
+  it("is its own app, in a different region from the node, with its own volume and no public service", () => {
+    expect(toml).toMatch(/^app = "edgecoder-lnd-tower"$/m);
+    expect(toml).toMatch(/^primary_region = "iad"$/m);
+    expect(read("fly.toml")).toMatch(/^primary_region = "ord"/m);
+    expect(toml).toMatch(/source = "towerdata"/);
+    expect(toml).not.toMatch(/^\s*\[\[services\]\]|^\s*\[http_service\]/m);
+  });
+
+  it("runs the same pinned LND release as the node", () => {
+    const pin = (s: string) => s.match(/^FROM (lightninglabs\/lnd:\S+@sha256:[0-9a-f]{64})/m)?.[1];
+    expect(pin(df)).toBeDefined();
+    expect(pin(df)).toBe(pin(read("Dockerfile")));
+  });
+
+  it("is a watchtower server only: neutrino, no P2P, no REST, gRPC on loopback, tower on 9911", () => {
+    execFileSync("sh", ["-n", resolve(DIR, "tower/entrypoint.sh")]);
+    for (const flag of ["--bitcoin.mainnet", "--bitcoin.node=neutrino", "--fee.url=", "--noseedbackup", "--nolisten", "--norest", "--rpclisten=[::1]:10009", "--watchtower.active", "--watchtower.listen=[::]:9911"]) {
+      expect(entry).toContain(flag);
+    }
+    expect(entry.replace(/^#.*$/gm, "")).not.toMatch(/ocean-node|bitcoind\./);
   });
 });

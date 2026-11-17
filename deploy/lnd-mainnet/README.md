@@ -247,16 +247,125 @@ first (`POST /admin/payouts/pause`), then resume after reviewing the reconciliat
 
 ## 7. Back up channel state
 
-After every channel open or close, and on a schedule:
+The seed recovers on-chain funds. The static channel backup `channel.backup` (encrypted with the
+seed, useless without it) lets a restored node ask its peers to force-close our channels and
+return our balance. LND rewrites it at `/data/data/chain/bitcoin/mainnet/channel.backup` on every
+channel open or close.
+
+### Automatic channel backups
+
+`scb-watch` (`scb-watch.sh`, started by the entrypoint beside lnd) hashes `channel.backup` every
+60 s. On every change it:
+
+1. keeps a timestamped copy in `/data/scb-history/channel-<UTC time>.backup`, the last 30
+   (`SCB_HISTORY_KEEP`). This is on the node's own volume, so it covers mistakes, not loss of the
+   app or the volume;
+2. if the `SCB_S3_*` secrets are set, uploads it to an S3 bucket **outside this app** (Fly
+   Tigris): `edgecoder-lnd/channel.backup` (always the latest) and
+   `edgecoder-lnd/history/channel-<UTC time>.backup` (the same last 30; older remote copies are
+   deleted). A failed upload is retried on the next poll. Requests are SigV4-signed by `curl`; the
+   key goes to curl in a config file on the rootfs, never on a command line or into the logs.
+
+Without the secrets it logs `scb-watch: no SCB_S3_* settings: keeping local history ... NOT
+shipping off the node` once at start. Its log lines start with `scb-watch:` (`fly logs -a
+edgecoder-lnd | grep scb-watch`).
+
+**Turning on the off-node copy (owner, once).** Tigris is billed by Fly per use: storage
+$0.02/GB-month, writes $0.005 per 1,000, with a monthly free allowance (5 GB, 10,000 writes) that
+this stays far inside (a few KB, a handful of writes a month): **about $0/month**.
 
 ```bash
-deploy/lnd-mainnet/backup-scb.sh     # saves ~/.config/edgecoder/lnd-backups/channel-<time>.backup
+# A private bucket, not attached to an app (so nothing is redeployed yet). It prints the
+# access key id and secret once: keep the terminal private.
+fly storage create --org edgecoder --name edgecoder-lnd-scb
+# Stage them on the node (typed by you; not into a chat):
+fly secrets set -a edgecoder-lnd --stage SCB_S3_ENDPOINT=https://fly.storage.tigris.dev \
+  SCB_S3_BUCKET=edgecoder-lnd-scb SCB_S3_ACCESS_KEY_ID=tid_... SCB_S3_SECRET_ACCESS_KEY=tsec_...
+cd deploy/lnd-mainnet && fly deploy --process-groups lnd --remote-only --wait-timeout 600 --yes && cd -
+fly logs -a edgecoder-lnd --no-tail | grep scb-watch    # "uploaded channel-... to s3 bucket edgecoder-lnd-scb"
 ```
 
-The seed recovers on-chain funds. The channel backup (encrypted with the seed) lets a restored
-node ask its peers to close channels and return our balance. Keep the latest copy somewhere other
-than this laptop too. Rehearse a restore once on regtest (`deploy/lnd-test`), as the mainnet
-checklist asks.
+Keep the copies on the owner's Mac too (`~/.config/edgecoder/lnd-backups/`, mode 600) with
+`deploy/lnd-mainnet/backup-scb.sh`, which pulls the current file over `fly ssh` and keeps the last
+30 there. Run it after any channel open or close, until the bucket is on.
+
+### Restore (node lost)
+
+You need the 24 words (and the passphrase, if one was set) and the newest `channel.backup`
+(the bucket's `edgecoder-lnd/channel.backup`, or the newest file in `~/.config/edgecoder/lnd-backups/`).
+
+**Never** restore while the old node may still be running with the same seed: two nodes
+broadcasting with the same channel state can lose the channel balance (a restored SCB makes peers
+force-close; an old node publishing old state is a breach). Stop or destroy the old machine first.
+
+```bash
+# 1. A fresh lnd machine with an empty volume (same app, or a rebuilt one per steps 1-2).
+#    LND_WALLET_PASS must be the password you give `lnc create` below.
+fly ssh console -a edgecoder-lnd --select     # the lnd machine; lnd waits for a wallet
+lnc create
+#   password: LND_WALLET_PASS
+#   "Do you have an existing cipher seed?" y -> the 24 words, then the passphrase (or none)
+#   recovery window: 2500 (or more for a heavily used wallet); lnd rescans for on-chain funds
+lnc getinfo                                    # wait for synced_to_chain: true
+# 2. Copy the backup onto the machine (from the Mac):
+#    fly ssh sftp shell -a edgecoder-lnd  ->  put channel.backup /tmp/channel.backup
+#    or: aws s3 cp s3://edgecoder-lnd-scb/edgecoder-lnd/channel.backup . --endpoint-url https://fly.storage.tigris.dev
+lnc restorechanbackup --multi_file /tmp/channel.backup
+lnc pendingchannels                            # waiting_close_channels: the peers force-close
+```
+
+Each peer (ACINQ) force-closes; our balance comes back on-chain after the peer's close confirms
+(no CSV delay on our side for a peer-initiated force close). Re-add the watchtower
+(`lnc wtclient add`, below): the client's tower list lives on the lost volume. Rehearse this once
+on regtest (`deploy/lnd-test`), as the mainnet checklist asks.
+
+## Watchtower
+
+The node runs LND's watchtower client (`--wtclient.active`). After each channel update it sends
+an encrypted justice transaction to its towers. If **our node is offline** and a peer broadcasts
+an old (revoked) channel state, a tower broadcasts the justice transaction and sweeps the whole
+channel to us. It does nothing while our node is online (lnd catches the breach itself). With
+ACINQ as the only peer the risk is low, but not zero: a bug or a compromised peer during a long
+outage of this machine or of ocean-node.
+
+`--wtclient.active` with no tower does nothing. Status:
+
+```bash
+fly ssh console -a edgecoder-lnd --machine 2870645bd9de18 -q -C "lnc wtclient towers"
+fly ssh console -a edgecoder-lnd --machine 2870645bd9de18 -q -C "lnc wtclient stats"
+```
+
+### Which towers
+
+- **Public towers**: the known altruist LND towers (the LN+ list, the openoms list) are almost all
+  Tor-only, and this node has no Tor; the few clearnet entries are personal nodes with no
+  operator we can verify or hold to anything. None is added.
+- **Our own tower (recommended)**: `tower/`, a second minimal LND in watchtower server mode in
+  its own app `edgecoder-lnd-tower` in `iad` (the node is in `ord`), with its own volume and its
+  own chain view (neutrino, public Bitcoin peers, not ocean-node), reached over Fly's private
+  network only. It holds no funds (altruist tower: justice transactions pay our address) and
+  needs no seed (`--noseedbackup`; its key only identifies it). shared-cpu-1x, 1 GB and a 5 GB
+  volume: **about $6.50/month**.
+
+### Creating our tower (owner OK needed: new app, about $6.50/month)
+
+```bash
+fly apps create edgecoder-lnd-tower --org edgecoder
+cd deploy/lnd-mainnet/tower && fly deploy --ha=false --remote-only --wait-timeout 600 --yes && cd -
+# Wait for the neutrino sync (minutes to an hour): synced_to_chain true.
+fly ssh console -a edgecoder-lnd-tower -q -C "lncli --lnddir=/data --network=mainnet --rpcserver=[::1]:10009 getinfo"
+fly ssh console -a edgecoder-lnd-tower -q -C "lncli --lnddir=/data --network=mainnet --rpcserver=[::1]:10009 tower info"
+#   pubkey: <tower pubkey>
+# Point the node at it, over the private network (lnd resolves the name when it is added):
+fly ssh console -a edgecoder-lnd --machine 2870645bd9de18 -q -C "lnc wtclient add <tower pubkey>@edgecoder-lnd-tower.internal:9911"
+fly ssh console -a edgecoder-lnd --machine 2870645bd9de18 -q -C "lnc wtclient towers"   # active_session_candidate: true, a session
+```
+
+### If the tower is rebuilt
+
+A new volume means a new tower key and a new 6PN address. `lnc wtclient remove <old pubkey>`,
+then `lnc wtclient add` the new one. If only the address changed (machine recreated, same
+volume), `lnc wtclient add <same pubkey>@edgecoder-lnd-tower.internal:9911` updates it.
 
 ## 8. Point the coordinators at it (the mainnet switch)
 
