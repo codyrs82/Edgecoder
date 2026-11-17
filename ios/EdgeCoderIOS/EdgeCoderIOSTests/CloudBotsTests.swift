@@ -46,10 +46,20 @@ final class CloudBotsTests: XCTestCase {
 
     func testComputeChoices() throws {
         XCTAssertNil(try bot(.init(name: "A", role: "", instructions: "", model: .auto))["compute"])
-        let mine = try XCTUnwrap(try bot(.init(name: "A", role: "", instructions: "", model: .mine("qwen3.5:9b")))["compute"] as? [String: String])
-        XCTAssertEqual(mine, ["target": "mine", "model": "qwen3.5:9b"])
-        let net = try XCTUnwrap(try bot(.init(name: "A", role: "", instructions: "", model: .network("llama3.3:70b")))["compute"] as? [String: String])
-        XCTAssertEqual(net, ["target": "network", "model": "llama3.3:70b"])
+        XCTAssertEqual(try bot(.init(name: "A", role: "", instructions: "", model: .mine("qwen3.5:9b")))["compute"] as? String, "mine:qwen3.5:9b")
+        XCTAssertEqual(try bot(.init(name: "A", role: "", instructions: "", model: .network("llama3.3:70b")))["compute"] as? String, "network:llama3.3:70b")
+        XCTAssertEqual(try bot(.init(name: "A", role: "", instructions: "", model: .network("auto")))["compute"] as? String, "network:auto")
+    }
+
+    func testComputeStringRoundTrip() {
+        XCTAssertEqual(BotModelChoice(computeString: "auto"), .auto)
+        XCTAssertEqual(BotModelChoice(computeString: nil), .auto)
+        XCTAssertEqual(BotModelChoice(computeString: "mine:qwen3.5:9b"), .mine("qwen3.5:9b"))
+        XCTAssertEqual(BotModelChoice(computeString: "network:big"), .network("big"))
+        // A bare model name is that model on the network.
+        XCTAssertEqual(BotModelChoice(computeString: "big"), .network("big"))
+        XCTAssertEqual(BotModelChoice.network("auto").label, "Network · best fit")
+        for c in [BotModelChoice.auto, .mine("m"), .network("n")] { XCTAssertEqual(BotModelChoice(computeString: c.computeString), c) }
     }
 
     func testWebToggle() throws {
@@ -61,6 +71,10 @@ final class CloudBotsTests: XCTestCase {
         XCTAssertNil(try bot(.init(name: "A", role: "", instructions: "", schedule: .none))["schedule"])
         let every = try XCTUnwrap(try bot(.init(name: "A", role: "", instructions: "", schedule: .everyHours(6)))["schedule"] as? [String: Int])
         XCTAssertEqual(every, ["everyMinutes": 360])
+        // The portal's floor is 15 minutes.
+        let floor = try XCTUnwrap(try bot(.init(name: "A", role: "", instructions: "", schedule: .everyHours(0)))["schedule"] as? [String: Int])
+        XCTAssertEqual(floor, ["everyMinutes": BotSchedule.minEveryMinutes])
+        XCTAssertEqual(BotSchedule.minEveryMinutes, 15)
         let daily = try XCTUnwrap(try bot(.init(name: "A", role: "", instructions: "", schedule: .daily(hour: 9, minute: 30), timeZone: ny, now: winter))["schedule"] as? [String: String])
         XCTAssertEqual(daily, ["dailyAtUtc": "14:30"])
     }
@@ -72,6 +86,10 @@ final class CloudBotsTests: XCTestCase {
         XCTAssertEqual(g["token"] as? String, "ghp_secret")
         let triggers = try XCTUnwrap(g["triggers"] as? [[String: String]])
         XCTAssertEqual(triggers, [["kind": "pr_opened"], ["kind": "ci_failed"], ["kind": "issue_labeled", "label": "bot"]])
+        // No label: the portal's default ("bot").
+        let noLabel = NewBotRequest.GitHub(repo: "o/r", token: nil, triggers: [.issueLabeled("")])
+        let g2 = try XCTUnwrap(try bot(.init(name: "A", role: "", instructions: "", github: noLabel))["github"] as? [String: Any])
+        XCTAssertEqual(g2["triggers"] as? [[String: String]], [["kind": "issue_labeled"]])
     }
 
     func testGitHubWithoutTokenOrTriggers() throws {
@@ -97,6 +115,16 @@ final class CloudBotsTests: XCTestCase {
         XCTAssertNil(BotSchedule.normalizeRepo("justone"))
         XCTAssertNil(BotSchedule.normalizeRepo("a/b/c"))
         XCTAssertNil(BotSchedule.normalizeRepo("a b/c"))
+        XCTAssertNil(BotSchedule.normalizeRepo("-a/c"))
+        XCTAssertNil(BotSchedule.normalizeRepo("a_b/c"))
+        XCTAssertNil(BotSchedule.normalizeRepo(String(repeating: "a", count: 40) + "/c"))
+    }
+
+    func testTokenShape() {
+        XCTAssertTrue(BotSchedule.isPlausibleToken("ghp_" + String(repeating: "A", count: 36)))
+        XCTAssertTrue(BotSchedule.isPlausibleToken("github_pat_11ABCDEFG0123456789_abc"))
+        XCTAssertFalse(BotSchedule.isPlausibleToken("short"))
+        XCTAssertFalse(BotSchedule.isPlausibleToken("ghp_" + String(repeating: "A", count: 30) + " x"))
     }
 
     // MARK: UTC schedule conversion
@@ -118,8 +146,9 @@ final class CloudBotsTests: XCTestCase {
     private let cloudListJSON = #"""
     {"machines":[{"agentId":"agent-mac","machineName":"Studio","online":true,"controls":"on"}],
      "bots":[
-       {"id":"b1","name":"Docs","status":"idle","enabled":true,"machine":{"agentId":"agent-mac","machineName":"Studio","online":true,"controls":"on"}},
-       {"id":"c1","name":"Triage","status":"idle","enabled":true,"runtime":"cloud","agentId":"cloud","schedule":"Daily 14:00 UTC","futureField":{"x":1}},
+       {"id":"b1","runtime":"desktop","name":"Docs","status":"idle","enabled":true,"machine":{"agentId":"agent-mac","machineName":"Studio","online":true,"controls":"on"}},
+       {"id":"c1","name":"Triage","status":"idle","enabled":true,"runtime":"cloud","agentId":"cloud","schedule":"daily at 14:00 UTC",
+        "compute":{"policy":"network_only","model":"big"},"triggers":[{"id":"ci_failed","kind":"ci_failed","enabled":true}],"pending":[],"futureField":{"x":1}},
        {"id":"c2","name":"Release","status":"paused","enabled":false,"runtime":"cloud","agentId":"cloud",
         "machine":{"agentId":"cloud","machineName":"Cloud","online":true,"controls":"on"}}
      ],
@@ -127,7 +156,7 @@ final class CloudBotsTests: XCTestCase {
      "targets":[{"agentId":"cloud","machineName":"Cloud","online":true,"canCreate":true},
                 {"agentId":"agent-mac","machineName":"Studio","online":true,"canCreate":true},
                 {"agentId":"agent-old","machineName":"Old","online":false,"canCreate":false}],
-     "canCreate":true}
+     "canCreate":true,"cloud":{"github":false}}
     """#
 
     func testParsesCloudBotsAndTargets() throws {
@@ -142,6 +171,7 @@ final class CloudBotsTests: XCTestCase {
         XCTAssertEqual(r.cloudTarget?.machineName, "Cloud")
         XCTAssertEqual(r.machineTargets.map(\.agentId), ["agent-mac"])
         XCTAssertEqual(r.createTargets.map(\.agentId), ["cloud", "agent-mac"])
+        XCTAssertFalse(r.cloudGitHub)
     }
 
     func testCloudTargetEvenWithoutMachineHolding() throws {
@@ -160,6 +190,8 @@ final class CloudBotsTests: XCTestCase {
         """#
         let r = try JSONDecoder().decode(BotsListResponse.self, from: Data(old.utf8))
         XCTAssertNil(r.cloudTarget)
+        XCTAssertNil(r.cloud)
+        XCTAssertTrue(r.cloudGitHub)
         XCTAssertTrue(r.cloudBots.isEmpty)
         XCTAssertNil(r.bots[0].runtime)
         XCTAssertEqual(r.bots[0].id, "agent-mac/b1")
@@ -171,6 +203,32 @@ final class CloudBotsTests: XCTestCase {
         // A portal that can't hold machine bots: machines aren't offered.
         let noHold = try JSONDecoder().decode(BotsListResponse.self, from: Data(#"{"machines":[],"bots":[],"targets":[{"agentId":"a","machineName":"A","online":true}]}"#.utf8))
         XCTAssertTrue(noHold.machineTargets.isEmpty)
+    }
+
+    func testCloudDetailAsThePortalSendsIt() throws {
+        let j = #"""
+        {"bot":{"id":"cbot_1","runtime":"cloud","name":"Triage","role":"","color":"#336699","status":"running","activity":"Working…",
+                "enabled":true,"instructions":"x","folderName":"","repository":"o/r","schedule":"every 4 hours","heartbeatMinutes":null,
+                "maxRunsPerDay":24,"runsToday":1,"runCount":1,"budgetCSatsPerDay":500,"spentTodayCSats":1.5,
+                "compute":{"policy":"mine_only","model":"small"},"triggers":[],"pending":[],"queuedMessages":0,
+                "lastRun":{"id":"r1","trigger":"message","startedAtMs":1,"status":"done","summary":"ok","cSats":1,"where":"Cloud"},
+                "tail":[{"id":"cm-1","role":"user","content":"hi","atMs":1,"runId":"r2"}],"messageCount":1,"updatedAtMs":2,
+                "cloud":{"compute":"mine:small","web":false,"schedule":{"everyMinutes":240},
+                         "github":{"repo":"o/r","hasToken":true,"triggers":[{"id":"pr_opened","kind":"pr_opened","enabled":true}],"available":true},
+                         "limits":{"maxTurns":8}}},
+         "machine":{"agentId":"cloud","machineName":"Cloud","online":true,"controls":"on","reportedAtMs":3}}
+        """#
+        let r = try JSONDecoder().decode(BotDetailResponse.self, from: Data(j.utf8))
+        XCTAssertTrue(r.bot.isCloud)
+        XCTAssertTrue(r.bot.isRunning)
+        XCTAssertEqual(r.machine?.canControl, true)
+        XCTAssertEqual(r.bot.cloud?.modelLabel, "My machines · small")
+        XCTAssertEqual(r.bot.cloud?.web, false)
+        XCTAssertEqual(r.bot.cloud?.github?.repo, "o/r")
+        XCTAssertEqual(r.bot.cloud?.github?.hasToken, true)
+        let noGitHub = try JSONDecoder().decode(BotDetailResponse.self, from: Data(#"{"bot":{"id":"c","runtime":"cloud","name":"n","status":"idle","enabled":true,"cloud":{"compute":"auto","web":true,"schedule":null,"github":null}}}"#.utf8))
+        XCTAssertNil(noGitHub.bot.cloud?.github)
+        XCTAssertEqual(noGitHub.bot.cloud?.modelLabel, "Auto")
     }
 
     func testCloudDetailWithoutMachine() throws {
@@ -187,6 +245,15 @@ final class CloudBotsTests: XCTestCase {
     func testCreateAndCommandAnswers() throws {
         let cloud = try JSONDecoder().decode(BotCommandResponse.self, from: Data(#"{"botId":"c9","agentId":"cloud"}"#.utf8))
         XCTAssertTrue(cloud.accepted)
+        let created = try JSONDecoder().decode(BotCommandResponse.self, from: Data(#"{"ok":true,"botId":"cbot_1","agentId":"cloud","state":"created","runtime":"cloud","created":true}"#.utf8))
+        XCTAssertTrue(created.accepted)
+        XCTAssertEqual(created.created, true)
+        let retried = try JSONDecoder().decode(BotCommandResponse.self, from: Data(#"{"ok":true,"botId":"cbot_1","agentId":"cloud","state":"created","runtime":"cloud"}"#.utf8))
+        XCTAssertTrue(retried.accepted)
+        XCTAssertNil(retried.created)
+        let inline = try JSONDecoder().decode(BotCommandResponse.self, from: Data(#"{"ok":true,"commandId":"cc-1","result":{"commandId":"cc-1","status":"done","data":{"stopped":true}}}"#.utf8))
+        XCTAssertTrue(inline.accepted)
+        XCTAssertEqual(inline.result?.status, "done")
         let machine = try JSONDecoder().decode(BotCommandResponse.self, from: Data(#"{"ok":true,"botId":"bot_w1","state":"waiting"}"#.utf8))
         XCTAssertTrue(machine.accepted)
         let cmd = try JSONDecoder().decode(BotCommandResponse.self, from: Data(#"{"commandId":"cmd-123456789"}"#.utf8))
@@ -203,6 +270,15 @@ final class CloudBotsTests: XCTestCase {
         XCTAssertFalse(queued.isFinished)
         let failed = try JSONDecoder().decode(BotCommandState.self, from: Data(#"{"status":"failed","error":"x"}"#.utf8))
         XCTAssertTrue(failed.failed)
+        // A cloud message: the run's status says when the reply is in.
+        let running = try JSONDecoder().decode(BotCommandState.self, from: Data(#"{"status":"done","agentId":"cloud","action":"message","result":{"commandId":"cm-1","status":"done"},"run":{"id":"r1","status":"running"}}"#.utf8))
+        XCTAssertFalse(running.runFinished)
+        let queuedRun = try JSONDecoder().decode(BotCommandState.self, from: Data(#"{"status":"done","run":{"id":"r1","status":"queued"}}"#.utf8))
+        XCTAssertFalse(queuedRun.runFinished)
+        for end in ["done", "failed", "budget", "cancelled", "interrupted"] {
+            let st = try JSONDecoder().decode(BotCommandState.self, from: Data(#"{"status":"done","run":{"id":"r1","status":"\#(end)"}}"#.utf8))
+            XCTAssertTrue(st.runFinished, end)
+        }
     }
 
     func testComputeOptionsToModelChoices() throws {

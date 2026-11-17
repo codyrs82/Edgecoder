@@ -13,6 +13,7 @@ struct BotsView: View {
     @State private var pending: [PendingBot] = []
     @State private var cloudTarget: BotTarget?
     @State private var machineTargets: [BotTarget] = []
+    @State private var cloudGitHub = true
     @State private var showNew = false
 
     private var portal: URL { APIClient.shared.config.portalBaseURL }
@@ -92,7 +93,7 @@ struct BotsView: View {
                 }
             }
             .sheet(isPresented: $showNew) {
-                NewBotSheet(cloudTarget: cloudTarget, machineTargets: machineTargets) { Task { await load() } }
+                NewBotSheet(cloudTarget: cloudTarget, machineTargets: machineTargets, cloudGitHub: cloudGitHub) { Task { await load() } }
             }
             .refreshable { await load() }
             .task(id: sessionStore.isAuthenticated) { await load() }
@@ -110,6 +111,7 @@ struct BotsView: View {
             pending = r.pending ?? []
             cloudTarget = r.cloudTarget
             machineTargets = r.machineTargets
+            cloudGitHub = r.cloudGitHub
             error = ""
         } catch {
             self.error = "Couldn't load your bots: \(error.localizedDescription)"
@@ -176,6 +178,11 @@ struct BotDetailView: View {
                     LabeledContent("Status", value: BotsFormat.status(bot))
                     LabeledContent("Runs on", value: isCloud ? "Cloud" : (machine?.machineName ?? bot.machine?.machineName ?? "Your machine"))
                     if let folder = bot.folderName, !folder.isEmpty { LabeledContent("Folder", value: folder) }
+                    if let c = bot.cloud {
+                        LabeledContent("Model", value: c.modelLabel)
+                        if let web = c.web { LabeledContent("Search the web", value: web ? "On" : "Off") }
+                        if let repo = c.github?.repo, !repo.isEmpty { LabeledContent("GitHub", value: repo) }
+                    }
                     if let schedule = bot.schedule, !schedule.isEmpty { LabeledContent("Schedule", value: schedule) }
                     if let runs = bot.runsToday { LabeledContent("Runs today", value: "\(runs)\(bot.maxRunsPerDay.map { " of \($0)" } ?? "")") }
                     if let spent = bot.spentTodayCSats {
@@ -191,7 +198,10 @@ struct BotDetailView: View {
                         HStack {
                             Button(bot.isPaused ? "Resume" : "Pause") { Task { await command(bot.isPaused ? "resume" : "pause") } }
                                 .buttonStyle(.bordered)
-                            if !isCloud {
+                            if bot.isRunning {
+                                Button("Stop", role: .destructive) { Task { await command("stop") } }
+                                    .buttonStyle(.bordered)
+                            } else {
                                 Button("Check now") { Task { await command("check_now") } }
                                     .buttonStyle(.bordered)
                                     .disabled(bot.isPaused)
@@ -322,6 +332,7 @@ struct BotDetailView: View {
         let body = Body(action: action, args: args.compactMapValues(JSONValue.init))
         let lastBefore = bot?.tail?.last?.id
         let commandId: String?
+        var inlineResult: BotCommandState.Result?
         do {
             let r = try await APIClient.shared.requestRaw(baseURL: portal, path: "\(basePath)/commands", method: "POST", body: body)
             let res = try? JSONDecoder().decode(BotCommandResponse.self, from: r.data)
@@ -331,6 +342,7 @@ struct BotDetailView: View {
                 return false
             }
             commandId = res?.commandId
+            inlineResult = res?.result
         } catch {
             sending = false
             note = (false, "The command didn't go through: \(error.localizedDescription)")
@@ -339,6 +351,10 @@ struct BotDetailView: View {
         sending = false
         note = (true, action == "message" ? "Sent." : "Done.")
         guard reload else { return true }
+        if isCloud {
+            await followCloud(action, commandId: commandId, inline: inlineResult)
+            return true
+        }
         if action == "message" { waitingReply = true }
         defer { waitingReply = false }
         var finished = commandId == nil
@@ -363,6 +379,30 @@ struct BotDetailView: View {
             }
         }
         return true
+    }
+}
+
+extension BotDetailView {
+    /// A cloud command answers inline, so only a message is followed: its id is the message id, and
+    /// GET …/cloud/commands/:id (any portal machine) gives its run's status until the run ends.
+    fileprivate func followCloud(_ action: String, commandId: String?, inline: BotCommandState.Result?) async {
+        if let r = inline, ["refused", "failed", "error"].contains(r.status ?? "") {
+            note = (false, BotsFormat.commandError(r.error, message: r.message))
+        }
+        guard action == "message", let commandId else {
+            await load()
+            return
+        }
+        waitingReply = true
+        defer { waitingReply = false }
+        // Up to about 3 minutes: a run can take a while; the detail reloads as it goes.
+        for i in 0..<60 {
+            try? await Task.sleep(nanoseconds: (i < 10 ? 2 : 4) * 1_000_000_000)
+            if Task.isCancelled { return }
+            let st: BotCommandState? = try? await APIClient.shared.request(baseURL: portal, path: "/portal/api/bots/cloud/commands/\(commandId)")
+            await load()
+            if st?.runFinished == true || (st != nil && st?.run == nil) { return }
+        }
     }
 }
 
@@ -399,6 +439,8 @@ extension Color {
 private struct NewBotSheet: View {
     let cloudTarget: BotTarget?
     let machineTargets: [BotTarget]
+    /// GitHub is set up for cloud bots on this portal (`cloud.github` on the list).
+    var cloudGitHub: Bool = true
     let onCreated: () -> Void
 
     private enum ScheduleKind: Hashable { case none, everyHours, daily }
@@ -421,7 +463,8 @@ private struct NewBotSheet: View {
     @State private var onPrOpened = false
     @State private var onCiFailed = false
     @State private var onIssueLabeled = false
-    @State private var issueLabel = ""
+    /// The portal's default label.
+    @State private var issueLabel = "bot"
     /// One per sheet: a retry of "Create" sends the same one, so the bot is made once.
     @State private var requestId = UUID().uuidString
     @State private var saving = false
@@ -432,6 +475,11 @@ private struct NewBotSheet: View {
     private var repoTrimmed: String { repo.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var normalizedRepo: String? { BotSchedule.normalizeRepo(repo) }
     private var labelTrimmed: String { issueLabel.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var tokenTrimmed: String { token.trimmingCharacters(in: .whitespacesAndNewlines) }
+    /// GitHub can't be used: a cloud bot on a portal without the token store.
+    private var gitHubUnavailable: Bool { isCloud && !cloudGitHub }
+    /// A machine uses the GitHub account signed in there; the token is for cloud bots.
+    private var showsToken: Bool { isCloud }
 
     private var schedule: BotScheduleChoice {
         switch scheduleKind {
@@ -444,20 +492,22 @@ private struct NewBotSheet: View {
     }
 
     private var github: NewBotRequest.GitHub? {
-        guard let repo = normalizedRepo else { return nil }
+        guard !gitHubUnavailable, let repo = normalizedRepo else { return nil }
         var triggers: [BotGitHubTrigger] = []
         if onPrOpened { triggers.append(.prOpened) }
         if onCiFailed { triggers.append(.ciFailed) }
-        if onIssueLabeled && !labelTrimmed.isEmpty { triggers.append(.issueLabeled(String(labelTrimmed.prefix(100)))) }
-        let t = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        if onIssueLabeled { triggers.append(.issueLabeled(String(labelTrimmed.prefix(50)))) }
+        let t = showsToken ? tokenTrimmed : ""
         return .init(repo: repo, token: t.isEmpty ? nil : t, triggers: triggers)
     }
 
     private var invalidReason: String? {
         if name.trimmingCharacters(in: .whitespaces).isEmpty { return "" }
         if !hasTargets { return "" }
+        if case .everyHours(let h) = schedule, h * 60 < BotSchedule.minEveryMinutes { return "A schedule runs at most every 15 minutes." }
+        if gitHubUnavailable { return nil }
         if !repoTrimmed.isEmpty && normalizedRepo == nil { return "Enter the repository as owner/name." }
-        if normalizedRepo != nil && onIssueLabeled && labelTrimmed.isEmpty { return "Enter the label for \"Issue labeled\"." }
+        if showsToken && normalizedRepo != nil && !tokenTrimmed.isEmpty && !BotSchedule.isPlausibleToken(tokenTrimmed) { return "That doesn't look like a GitHub token." }
         return nil
     }
 
@@ -526,30 +576,37 @@ private struct NewBotSheet: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
-                    SecureField("Token (optional)", text: $token)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .disabled(normalizedRepo == nil)
+                        .disabled(gitHubUnavailable)
+                    if showsToken {
+                        SecureField("Token (optional)", text: $token)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .disabled(normalizedRepo == nil || gitHubUnavailable)
+                    }
                     Group {
                         Toggle("Pull request opened", isOn: $onPrOpened)
                         Toggle("CI failed", isOn: $onCiFailed)
                         Toggle("Issue labeled", isOn: $onIssueLabeled)
                         if onIssueLabeled {
-                            TextField("Label", text: $issueLabel)
+                            TextField("Label (default: bot)", text: $issueLabel)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
                         }
                     }
-                    .disabled(normalizedRepo == nil)
+                    .disabled(normalizedRepo == nil || gitHubUnavailable)
                 } header: {
                     Text("GitHub (optional)")
                 } footer: {
-                    if repoTrimmed.isEmpty {
+                    if gitHubUnavailable {
+                        Text("GitHub isn't set up for cloud bots yet.")
+                    } else if repoTrimmed.isEmpty {
                         Text("Add a repository to use triggers.")
                     } else if normalizedRepo == nil {
                         Text("Enter the repository as owner/name.")
-                    } else {
+                    } else if showsToken {
                         Text("The token is sent once to create the bot and isn't saved on this device.")
+                    } else {
+                        Text("The machine uses the GitHub account signed in there.")
                     }
                 }
                 if let reason = invalidReason, !reason.isEmpty {

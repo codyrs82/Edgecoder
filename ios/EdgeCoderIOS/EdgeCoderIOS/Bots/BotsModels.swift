@@ -75,12 +75,14 @@ struct BotSummary: Decodable, Equatable, Identifiable {
     let runtime: String?
     /// "cloud" for a cloud bot; absent on an older portal.
     let agentId: String?
+    /// A cloud bot's own settings (on its detail read).
+    let cloud: CloudBotSettings?
 
     enum CodingKeys: String, CodingKey {
         case botId = "id"
         case name, role, color, status, activity, enabled, folderName, schedule, runsToday, maxRunsPerDay
         case budgetCSatsPerDay, spentTodayCSats, held, lastRun, pending, queuedMessages, tail, machine
-        case runtime, agentId
+        case runtime, agentId, cloud
     }
 
     /// Runs in the cloud, not on one of your machines.
@@ -88,8 +90,26 @@ struct BotSummary: Decodable, Equatable, Identifiable {
     /// Where its detail and commands live: "cloud", or the machine's agent id.
     var hostAgentId: String? { isCloud ? BotTarget.cloudId : (machine?.agentId ?? agentId) }
 
+    /// A run is going (Stop can end it).
+    var isRunning: Bool { status == "running" }
+
     /// Paused by its owner, or held by the desktop (a stuck loop, the budget).
     var isPaused: Bool { !enabled || status == "paused" || held != nil }
+}
+
+/// `bot.cloud` on a cloud bot's read: what it was set up with. Read loosely.
+struct CloudBotSettings: Decodable, Equatable {
+    struct GitHub: Decodable, Equatable {
+        let repo: String?
+        let hasToken: Bool?
+        let available: Bool?
+    }
+    /// "auto", "mine:<model>" or "network:<model>".
+    let compute: String?
+    let web: Bool?
+    let github: GitHub?
+
+    var modelLabel: String { BotModelChoice(computeString: compute).label }
 }
 
 /// A bot made on the web (#414) that has not reached a machine yet.
@@ -123,6 +143,15 @@ struct BotsListResponse: Decodable {
     let targets: [BotTarget]?
     /// The portal can hold new bots for a machine (#414).
     let canCreate: Bool?
+    /// Cloud bot features on this portal (absent: no cloud bots, or an older portal).
+    let cloud: CloudFeatures?
+
+    struct CloudFeatures: Decodable, Equatable {
+        /// GitHub repositories and triggers can be used by cloud bots (the token store is set up).
+        let github: Bool?
+    }
+    /// GitHub works for cloud bots here (unknown: assumed yes).
+    var cloudGitHub: Bool { cloud?.github ?? true }
 
     /// The cloud target, when the portal runs cloud bots (nil: no cloud yet, an older portal).
     var cloudTarget: BotTarget? { (targets ?? []).first { $0.isCloud && $0.canCreate != false } }
@@ -143,9 +172,28 @@ enum BotModelChoice: Hashable {
     case mine(String)
     case network(String)
 
+    /// The portal's compute string for a bot: "auto", "mine:<model>", "network:<model>".
+    var computeString: String {
+        switch self {
+        case .auto: return "auto"
+        case .mine(let m): return "mine:\(m)"
+        case .network(let m): return "network:\(m)"
+        }
+    }
+
+    /// From the portal's compute string; a bare model name is a network model.
+    init(computeString: String?) {
+        let s = (computeString ?? "").trimmingCharacters(in: .whitespaces)
+        if s.isEmpty || s == "auto" { self = .auto }
+        else if s.hasPrefix("mine:") { self = .mine(String(s.dropFirst(5))) }
+        else if s.hasPrefix("network:") { self = .network(String(s.dropFirst(8))) }
+        else { self = .network(s) }
+    }
+
     var label: String {
         switch self {
         case .auto: return "Auto"
+        case .network("auto"): return "Network · best fit"
         case .mine(let m): return "My machines · \(m)"
         case .network(let m): return "Network · \(m)"
         }
@@ -212,17 +260,15 @@ struct NewBotRequest: Encodable {
             try c.encode(instructions, forKey: Key("instructions"))
             switch model {
             case .auto: break
-            case .mine(let m), .network(let m):
-                var cc = c.nestedContainer(keyedBy: Key.self, forKey: Key("compute"))
-                try cc.encode(model == .mine(m) ? "mine" : "network", forKey: Key("target"))
-                try cc.encode(m, forKey: Key("model"))
+            case .mine, .network:
+                try c.encode(model.computeString, forKey: Key("compute"))
             }
             if !web { try c.encode(false, forKey: Key("web")) }
             switch schedule {
             case .none: break
             case .everyHours(let h):
                 var sc = c.nestedContainer(keyedBy: Key.self, forKey: Key("schedule"))
-                try sc.encode(max(1, h) * 60, forKey: Key("everyMinutes"))
+                try sc.encode(max(BotSchedule.minEveryMinutes, h * 60), forKey: Key("everyMinutes"))
             case .daily(let hour, let minute):
                 var sc = c.nestedContainer(keyedBy: Key.self, forKey: Key("schedule"))
                 try sc.encode(BotSchedule.utcTime(hour: hour, minute: minute, in: timeZone, on: now), forKey: Key("dailyAtUtc"))
@@ -239,7 +285,8 @@ struct NewBotRequest: Encodable {
                     case .ciFailed: try one.encode("ci_failed", forKey: Key("kind"))
                     case .issueLabeled(let label):
                         try one.encode("issue_labeled", forKey: Key("kind"))
-                        try one.encode(label, forKey: Key("label"))
+                        // Empty: the portal's default label, "bot".
+                        if !label.isEmpty { try one.encode(label, forKey: Key("label")) }
                     }
                 }
             }
@@ -261,6 +308,14 @@ struct NewBotRequest: Encodable {
 }
 
 enum BotSchedule {
+    /// The portal runs a schedule at most every 15 minutes.
+    static let minEveryMinutes = 15
+
+    /// A GitHub token the portal takes: classic, fine-grained or app (20-400 of A-Z a-z 0-9 _ . -).
+    static func isPlausibleToken(_ t: String) -> Bool {
+        (20...400).contains(t.count) && t.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "_.-".contains($0)) }
+    }
+
     /// "HH:MM" in UTC for a local time of day, on the given day (so daylight saving is right today).
     static func utcTime(hour: Int, minute: Int, in timeZone: TimeZone, on day: Date) -> String {
         var local = Calendar(identifier: .gregorian)
@@ -285,8 +340,11 @@ enum BotSchedule {
         if s.hasSuffix(".git") { s = String(s.dropLast(4)) }
         let parts = s.split(separator: "/", omittingEmptySubsequences: false)
         guard parts.count == 2 else { return nil }
-        let ok = { (p: Substring) in !p.isEmpty && p.count <= 100 && p.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "-_.".contains($0)) } }
-        guard parts.allSatisfy({ ok($0) }) else { return nil }
+        // GitHub's rules: owner is letters, digits and dashes (not first, at most 39); repo also . and _.
+        let owner = parts[0], name = parts[1]
+        let alnum = { (c: Character) in c.isASCII && (c.isLetter || c.isNumber) }
+        guard let first = owner.first, alnum(first), owner.count <= 39, owner.allSatisfy({ alnum($0) || $0 == "-" }) else { return nil }
+        guard !name.isEmpty, name.count <= 100, name.allSatisfy({ alnum($0) || "-_.".contains($0) }) else { return nil }
         return parts.joined(separator: "/")
     }
 }
@@ -339,8 +397,20 @@ struct BotCommandState: Decodable {
         let error: String?
         let message: String?
     }
+    /// A cloud message's run (GET /portal/api/bots/cloud/commands/:messageId).
+    struct Run: Decodable {
+        let id: String?
+        let status: String?
+    }
     let status: String?
     let result: Result?
+    let run: Run?
+
+    /// The message's run has ended (or there is no run to wait for).
+    var runFinished: Bool {
+        guard let s = run?.status else { return false }
+        return s != "queued" && s != "running"
+    }
 
     /// Finished one way or another: stop polling.
     var isFinished: Bool {
@@ -360,6 +430,10 @@ struct BotCommandResponse: Decodable {
     let commandId: String?
     let error: String?
     let message: String?
+    /// Cloud commands answer inline: { commandId, status: "done", data? }.
+    let result: BotCommandState.Result?
+    /// Cloud create: true only on the first create (false or absent on a retry).
+    let created: Bool?
 
     /// Accepted: `ok`, or (cloud) an id back without an error.
     var accepted: Bool { error == nil && (ok == true || botId != nil || commandId != nil) }
@@ -377,7 +451,10 @@ enum BotsFormat {
         case "not_authenticated": return "Your session ended. Sign in again."
         case "invalid_command", "invalid_bot": return message ?? "That wasn't accepted."
         case "too_many_pending": return "Too many new bots are waiting for a machine."
-        case "cloud_unavailable", "cloud_not_enabled": return "Cloud bots aren't available yet. Pick one of your machines."
+        case "github_unavailable": return "GitHub isn't set up for cloud bots yet."
+        case "too_many_bots", "rate_limited": return message ?? "Too many right now. Try again later."
+        case "not_supported": return "Cloud bots don't do that."
+        case "cloud_bots_unavailable", "cloud_unavailable", "cloud_not_enabled": return "Cloud bots aren't available yet. Pick one of your machines."
         case "busy": return "Try again."
         case nil: return message ?? "The command didn't go through."
         default: return message ?? "The command didn't go through (\(code!))."
