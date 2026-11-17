@@ -3,8 +3,7 @@
 
 /**
  * Shared coding sessions over HTTP (sessions.ts), on the IDE provider: 127.0.0.1 and the IDE
- * token only, like every other provider route. Mutations are POST (the desktop's CORS allows GET
- * and POST). Every write names the client (`clientId`, `kind`, `label`); sessions are co-edited,
+ * token only, like every other provider route. Mutations are POST. Every write names the client (`clientId`, `kind`, `label`); sessions are co-edited,
  * so any attached client may send, answer approvals and change settings.
  *
  *   GET  /v1/ide/sessions[?projectRoot=&published=1]   summaries

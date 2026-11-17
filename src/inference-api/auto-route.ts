@@ -277,21 +277,31 @@ export function rankRoutes(w: Workload, inp: RouteInputs): Route[] {
   const mine = bestModel(usable(inp.myModels), w);
   if (mine) out.push({ placement: "mine", model: mine, cSatsPerSecond: 0, reason: `your machines (free) · ${mine} for ${sizeNote}${fits("on your machines")}` });
 
+  out.push(...networkRoutes(w, inp));
+  return out;
+}
+
+/**
+ * The network's places for a job, fastest class first. `only`: that class alone (Network GPU only,
+ * …), even CPU for agent work, which Auto otherwise skips as too slow.
+ */
+export function networkRoutes(w: Workload, inp: RouteInputs, only?: string): Route[] {
+  const cx = w.complexity ? levelText(w.complexity.level) : "";
+  const usable = (models: string[]) => (w.needsTools ? models.filter(callsTools) : models);
   const net: Array<Route & { cost: number }> = [];
-  for (const cls of Object.keys(CLASS_SPEED)) {
-    // Heavy work on CPU is too slow to be worth it, whatever the price.
-    if (w.heavy && cls === "cpu") continue;
+  for (const cls of only ? [only] : Object.keys(CLASS_SPEED)) {
+    // Heavy work on CPU is too slow to be worth it, whatever the price (unless CPU was asked for).
+    if (!only && w.heavy && cls === "cpu") continue;
     const price = inp.classPrice[cls];
     if (price === undefined) continue;
     const model = bestModel(usable(inp.networkModels.filter((m) => m.classes.includes(cls)).map((m) => m.model)), w);
     if (!model) continue;
     // Same token price on every class: the faster one finishes sooner for the same cSats.
-    const cost = 1 / CLASS_SPEED[cls];
-    net.push({ placement: "network", model, computeClass: cls, cSatsPerSecond: price, cost, reason: `network ${cls} (per-token price, fastest available) · ${model}${cx ? ` — ${cx} complexity` : ""}` });
+    const cost = 1 / (CLASS_SPEED[cls] ?? 1);
+    net.push({ placement: "network", model, computeClass: cls, cSatsPerSecond: price, cost, reason: `network ${cls} (per-token price, ${only ? `${cls} only` : "fastest available"}) · ${model}${cx ? ` — ${cx} complexity` : ""}` });
   }
   net.sort((a, b) => a.cost - b.cost);
-  for (const { cost: _c, ...r } of net) out.push(r);
-  return out;
+  return net.map(({ cost: _c, ...r }) => r);
 }
 
 /** The model id other parts of the system run a route with. */
@@ -315,6 +325,13 @@ export function isUnpinnedModel(model: string | null | undefined): boolean {
 }
 
 /** The route for the network's best fit: the coordinator picks the model, the class and the machine. */
+export function bestFitRoute(computeClass?: string): Route {
+  return computeClass && computeClass !== "any"
+    ? { ...BEST_FIT_ROUTE, computeClass, reason: `network ${computeClass} only · best fit (the coordinator picks the model and machine)` }
+    : BEST_FIT_ROUTE;
+}
+
+/** The fixed best-fit route (any class). */
 export const BEST_FIT_ROUTE: Route = Object.freeze({
   placement: "network",
   model: AUTO_MODEL_ID,
@@ -378,8 +395,8 @@ export function routeSummary(r: Route): RouteSummary {
 
 /** Where a route ran, for the reply footer and the bot's runs table: "This computer · qwen2.5-coder:1.5b". */
 export function routeLabel(r: Route): string {
-  if (r.bestFit) return "Network · best fit";
   const cls = r.computeClass ? CLASS_NAMES[r.computeClass] ?? r.computeClass : "";
+  if (r.bestFit) return `Network${cls ? ` ${cls}` : ""} · best fit`;
   const where =
     r.placement === "local" ? "This computer" :
     r.placement === "mine" ? "My machines" :
@@ -399,9 +416,18 @@ export function routeLabel(r: Route): string {
  * - local_only: this computer only; never the network.
  * - mine_only: this computer and your other machines (free); never the network.
  * - model: one specific model id (routeModelId form).
+ * - network_only: always the network (paid, within the budget), never this computer, your machines
+ *   or a reservation, and no free fallback: with no cSats left it stops (noRouteMessage). Limited to
+ *   one class when PlanOptions.computeClass is set; the model is the network's best fit, or
+ *   PlanOptions.model when one is chosen.
  */
-export type ComputePolicy = "local_first" | "auto" | "local_only" | "mine_only" | "model";
-export const COMPUTE_POLICIES: readonly ComputePolicy[] = ["local_first", "auto", "local_only", "mine_only", "model"];
+export type ComputePolicy = "local_first" | "auto" | "local_only" | "mine_only" | "model" | "network_only";
+export const COMPUTE_POLICIES: readonly ComputePolicy[] = ["local_first", "auto", "local_only", "mine_only", "model", "network_only"];
+
+/** The classes Network only may be limited to (economy/compute-classes.ts COMPUTE_CLASS_IDS). */
+export const NETWORK_CLASSES = ["gpu", "apple", "cpu", "gpu.dc"] as const;
+export type NetworkClass = (typeof NETWORK_CLASSES)[number];
+export const isNetworkClass = (v: unknown): v is NetworkClass => typeof v === "string" && (NETWORK_CLASSES as readonly string[]).includes(v);
 
 /** Policies chat, Code and API clients may run Auto on ("model" is a pin, not Auto). */
 export const AUTO_POLICIES = ["auto", "local_first", "local_only", "mine_only"] as const;
@@ -449,8 +475,12 @@ function fallbackRoutes(inp: RouteInputs, places: Array<"local" | "mine">, needs
 export interface PlanOptions {
   /** cSats this request may spend on the network (a bot's budget left today); undefined: only the balance caps it. */
   allowanceCSats?: number;
-  /** The model id for the "model" policy. */
+  /** The model id for the "model" policy (and network_only's chosen model). */
   model?: string;
+  /** network_only: the one class it may run on (undefined: any class). */
+  computeClass?: string;
+  /** network_only: the bot's daily budget, for the message when it's spent. */
+  budgetCSats?: number | null;
   /**
    * Routes to leave out (routeModelId form, "network/auto@any" for the network's best fit): a bot
    * whose model answered an agent step with a plan and no tool call tries the next place once.
@@ -490,6 +520,19 @@ export function planRoutes(w: Workload, inp: RouteInputs, policy: ComputePolicy 
   if (policy === "model") {
     const r = opts.model ? routeFromModelId(opts.model) : null;
     return r && ok(r) ? [r] : [];
+  }
+  if (policy === "network_only") {
+    // Never a free place, never a free fallback: the network or nothing (noRouteMessage says why).
+    const cls = isNetworkClass(opts.computeClass) ? opts.computeClass : undefined;
+    if (opts.model) {
+      const named = routeFromModelId(opts.model);
+      if (!named) return [];
+      const pinnedCls = cls ?? (named.placement === "network" ? named.computeClass ?? "any" : "any");
+      const r: Route = { placement: "network", model: named.model, computeClass: pinnedCls, cSatsPerSecond: 0, reason: `network ${pinnedCls === "any" ? "" : `${pinnedCls} `}only · ${named.model}` };
+      return ok(r) ? [r] : [];
+    }
+    const sized = w.heavy && opts.agentMinParamsB && opts.agentMinParamsB > (w.minParamsB ?? 0) ? { ...w, minParamsB: opts.agentMinParamsB } : w;
+    return networkRoutes(sized, inp, cls).filter(ok);
   }
   if (policy === "local_only" || policy === "mine_only") {
     // Free machines only: never the network, whatever the step needs.
@@ -593,6 +636,16 @@ export function noRouteMessage(policy: ComputePolicy, inp: RouteInputs, opts: Pl
       return "No model is installed on this computer. Install one in Settings > Models.";
     case "mine_only":
       return "No model is available on this computer or your machines. Install one in Settings > Models, or bring one of your machines online.";
+    case "network_only": {
+      const cls = opts.computeClass && opts.computeClass !== "any" ? ` ${CLASS_NAMES[opts.computeClass] ?? opts.computeClass}` : "";
+      if (opts.allowanceCSats !== undefined && opts.allowanceCSats <= 0) {
+        return `Network${cls} only: no cSats left today${opts.budgetCSats != null ? ` (budget ${opts.budgetCSats})` : ""}. It never runs on this computer or your machines; it resumes tomorrow, or raise the daily budget.`;
+      }
+      if (inp.balanceCSats !== undefined && inp.balanceCSats <= 0) return `Network${cls} only: no cSats left (balance 0). Buy cSats on Plan & usage.`;
+      if (broke) return `Network${cls} only: ${why}.`;
+      if (!inp.networkModels.length && inp.balanceCSats === undefined) return `Network${cls} only: this computer isn't connected to the network. Sign in and let the agent start.`;
+      return `Network${cls} only: no network${cls} machine has a model for this step right now${opts.model ? ` (${opts.model.replace(/^network\//, "")})` : ""}. Try again later or choose another class.`;
+    }
     case "model":
       return opts.model?.startsWith("network/")
         ? `Can't run ${opts.model.slice(8)} on the network: ${why}. Buy cSats, or pick a model on this computer.`

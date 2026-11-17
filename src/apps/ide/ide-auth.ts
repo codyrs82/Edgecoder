@@ -154,11 +154,18 @@ export function createIdeAuthHook(opts: IdeAuthOptions) {
  * #77: CORS for the packaged desktop app (tauri://localhost, http(s)://tauri.localhost, plus
  * IDE_ALLOWED_ORIGINS). Exact origins only: no wildcard, no reflection of other origins,
  * no credentials. Register AFTER the auth hook so disallowed origins get 403 first.
+ *
+ * Every method the desktop calls must be listed (IDE_CORS_METHODS): WebKit fails a request whose
+ * method the preflight doesn't allow with a bare "Load failed", which the app can only report as
+ * "couldn't reach the local service". PATCH (saving a bot's settings, a connection) and DELETE
+ * (deleting a bot) were missing, so those saves never left the packaged app.
  */
+export const IDE_CORS_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
+
 export async function registerIdeCors(app: FastifyInstance, origins: Set<string> = allowedOrigins()): Promise<void> {
   await app.register(cors, {
     origin: (origin, cb) => cb(null, typeof origin === "string" && origins.has(origin.trim().toLowerCase())),
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: [...IDE_CORS_METHODS],
     allowedHeaders: ["Authorization", "Content-Type"],
     credentials: false,
     maxAge: 600,
