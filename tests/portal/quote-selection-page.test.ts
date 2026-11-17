@@ -40,3 +40,11 @@ describe("the reply footer on the portal's Chat page", () => {
     for (const m of html.matchAll(/<script nonce="[^"]*">([\s\S]*?)<\/script>/g)) expect(() => new Function(m[1])).not.toThrow();
   });
 });
+
+describe("the reply footer after a reload", () => {
+  it("renders a loaded reply's footer from its saved usage, cost only without it", async () => {
+    const html = await page("/portal/chat");
+    expect(html).toContain("saved.usageMeta && Array.isArray(saved.usageMeta.calls) ? saved.usageMeta");
+    expect(html).toContain("{ cSats: Number(saved.creditsSpent), calls: [] }");
+  });
+});

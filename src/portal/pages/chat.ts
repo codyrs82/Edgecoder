@@ -450,12 +450,12 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
         html += "<div class=\\"chat-msg " + role + "\\"><div class=\\"msg-header\\"><div class=\\"msg-role\\">" + label + "</div>" + (timeStr ? "<div class=\\"msg-time\\">" + timeStr + "</div>" : "") + "</div><div class=\\"msg-body\\" data-quotable>" + renderMarkdown(m.content || "") + "</div></div>";
       }
       container.innerHTML = html;
-      // Each saved reply: Copy, and what it cost (where it ran is only known for replies of this session).
+      // Each saved reply: Copy, and its footer (saved usage; older replies show cost only).
       var bubbles = container.querySelectorAll(".chat-msg");
       for (var bi = 0; bi < bubbles.length && bi < messages.length; bi++) {
         if (messages[bi].role === "user") continue;
         var saved = messages[bi];
-        appendReplyFooter(bubbles[bi], saved.content || "", Number(saved.creditsSpent) > 0 ? { cSats: Number(saved.creditsSpent), calls: [] } : null);
+        appendReplyFooter(bubbles[bi], saved.content || "", saved.usageMeta && Array.isArray(saved.usageMeta.calls) ? saved.usageMeta : Number(saved.creditsSpent) > 0 ? { cSats: Number(saved.creditsSpent), calls: [] } : null);
       }
       scrollParent.scrollTop = scrollParent.scrollHeight;
     }

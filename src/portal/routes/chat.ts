@@ -14,7 +14,8 @@ import { accountIdFor, chatComputeSchema, computeLabel, networkTargetFor, portal
 import { createChatCapacityDirectory, type ChatCapacityDirectory } from "../chat-capacity.js";
 import { clientRegionOf, type CoordinatorChoice } from "../../common/coordinator-choice.js";
 import { moduleLogger } from "../../common/logger.js";
-import type { CallUsage, Served } from "../../common/served.js";
+import type { Served } from "../../common/served.js";
+import type { ReplyUsage } from "../reply-usage.js";
 
 const logger = moduleLogger("portal-chat");
 
@@ -142,15 +143,7 @@ export interface DefaultChatUsage {
 }
 type DefaultChatEvent = { content?: string; warning?: string; usage?: DefaultChatUsage };
 
-/**
- * What a reply ran on and cost, as the page's footer reads it (src/common/served.ts servedLine,
- * the same line the desktop app shows): sent with the final `done` event on every path.
- */
-export interface ReplyUsage {
-  cSats: number;
-  where?: string;
-  calls: CallUsage[];
-}
+export type { ReplyUsage } from "../reply-usage.js";
 
 /** A network / own-machine / reserved reply's usage from the backend's final piece. */
 export function networkReplyUsage(compute: ChatCompute, done: Extract<ChatPiece, { done: true }> | undefined): ReplyUsage {
@@ -264,10 +257,10 @@ export function registerChatApiRoutes(
     createChatCapacityDirectory({ candidates: discoverCoordinatorUrlsForPortal, allowed: () => true, serviceToken: PORTAL_SERVICE_TOKEN });
 
   /** Saves the assistant's reply; a failure is logged, never thrown (the reply already reached the browser). */
-  async function saveReply(req: FastifyRequest, conversationId: string, content: string, cSatsSpent?: number): Promise<void> {
+  async function saveReply(req: FastifyRequest, conversationId: string, content: string, cSatsSpent: number | undefined, usage: ReplyUsage): Promise<void> {
     if (!store || content.length === 0) return;
     try {
-      await store.addMessage({ messageId: randomUUID(), conversationId, role: "assistant", content, ...(cSatsSpent !== undefined ? { creditsSpent: cSatsSpent } : {}) });
+      await store.addMessage({ messageId: randomUUID(), conversationId, role: "assistant", content, ...(cSatsSpent !== undefined ? { creditsSpent: cSatsSpent } : {}), usageMeta: usage });
     } catch (err) {
       req.log.error({ err, conversationId }, "portal_chat_save_reply_failed");
     }
@@ -379,8 +372,9 @@ export function registerChatApiRoutes(
       req.log.warn({ err }, "portal_network_chat_failed");
       send({ error: (err as Error).message || "stream_interrupted" });
     }
-    await saveReply(req, conversationId, fullContent, cSatsSpent);
-    send({ done: true, compute: computeLabel(compute), ...(cSatsSpent !== undefined ? { cSatsSpent } : {}), usage: networkReplyUsage(compute, donePiece) });
+    const usage = networkReplyUsage(compute, donePiece);
+    await saveReply(req, conversationId, fullContent, cSatsSpent, usage);
+    send({ done: true, compute: computeLabel(compute), ...(cSatsSpent !== undefined ? { cSatsSpent } : {}), usage });
     return out.end();
   }
   /** POST /portal/chat on one coordinator, held until its first event so a dead end can still be retried elsewhere. */
@@ -614,8 +608,9 @@ export function registerChatApiRoutes(
       out.send({ error: "stream_interrupted" });
     }
 
-    await saveReply(req, conversationId, fullContent);
-    out.send({ done: true, usage: defaultReplyUsage(usage) });
+    const replyUsage = defaultReplyUsage(usage);
+    await saveReply(req, conversationId, fullContent, undefined, replyUsage);
+    out.send({ done: true, usage: replyUsage });
     return out.end();
   }
 }
