@@ -48,6 +48,9 @@
   import { getOnboarding, saveOnboarding } from "./lib/api";
   import { probeLocalService, restartLocalService, serviceCameBack } from "./lib/api";
   import { inDesktopShell, startServiceMonitor, stopServiceMonitor } from "./lib/service-status";
+  import { startConnectivity } from "./lib/connectivity-app";
+  import { connectivity } from "./lib/connectivity";
+  import OfflineBar from "./components/OfflineBar.svelte";
 
   let activeTab = $state<"chat" | "editor">("chat");
   let settingsOpen = $state(false);
@@ -179,6 +182,8 @@
     // The desktop app owns its local service: watch it, so pages say "Starting…" and wait for it
     // instead of asking whether it runs (lib/service-status.ts; the shell restarts it by itself).
     if (inDesktopShell()) startServiceMonitor({ probe: probeLocalService, restart: restartLocalService, onReady: serviceCameBack });
+    // Offline mode: a calm bar, network-only bots pause, "Back online" on reconnect (lib/connectivity.ts).
+    const stopConnectivity = startConnectivity();
     void import("@tauri-apps/api/app").then(({ getVersion }) => getVersion()).then((v) => {
       const updated = takeUpdatedTo(v);
       if (updated) notify(`Updated to EdgeCoder ${updated}`, "success", "updated-to");
@@ -187,7 +192,7 @@
       .then((u) => { user = u; })
       .catch(() => { user = null; })
       .finally(() => { authChecked = true; });
-    return () => { stopPeriodicCheck(); stopAutoRestart(); stopServiceMonitor(); };
+    return () => { stopPeriodicCheck(); stopAutoRestart(); stopServiceMonitor(); stopConnectivity(); };
   });
 
   // Auto-restart waits for these (lib/auto-restart.ts).
@@ -551,7 +556,8 @@
   }
 </script>
 
-<EndpointBanner />
+<!-- Offline is a mode, not an error: the calm bar replaces the red "unreachable" banner. -->
+{#if $connectivity.state === "offline"}<OfflineBar />{:else}<EndpointBanner />{/if}
 <Toaster />
 <UpdateCountdown controller={autoRestart} />
 

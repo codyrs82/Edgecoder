@@ -7,11 +7,13 @@
   import BotAvatar from "../components/BotAvatar.svelte";
   import ToolArgs from "../components/ToolArgs.svelte";
   import ServiceNotice from "../components/ServiceNotice.svelte";
+  import { connectivity } from "../lib/connectivity";
+  import { botStatusChip, offlinePausedIds } from "../lib/offline-bots";
   import { onServiceReady, serviceStatus } from "../lib/service-status";
   import { Play, Pause, RotateCw, Pencil, Trash2, History, MessageSquare, Ellipsis, CircleAlert, X, CalendarClock, Cpu, Folder, PanelRight, Copy, FolderOpen, GitPullRequest, GitBranch, Zap, RefreshCw } from "@lucide/svelte";
   import { approveBotCall, botHistory, botMessages, cancelBotRun, deleteBot, getBot, runBot, sendBotMessage, syncBotRepository, updateBot, botErrorText } from "../lib/api";
   import {
-    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, botModeOf, autoStatus, botCompute, botPlacement, checksIn, routineText, botSubtitle, computeText, failureNotice, foldBotReply, folderName, formatCSats, prCards, readableSummary, reconcileRuns, relativeTime, runSourceText, shownReplyText, scheduleText, statusChip,
+    NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, botModeOf, autoStatus, botCompute, botPlacement, checksIn, routineText, botSubtitle, computeText, failureNotice, foldBotReply, folderName, formatCSats, prCards, readableSummary, reconcileRuns, relativeTime, runSourceText, shownReplyText, scheduleText,
     triggerStatusText, triggerText,
     type Bot, type BotMessage, type BotRun, type NoticeAction,
   } from "../lib/bots";
@@ -118,7 +120,8 @@
     }
   }
 
-  const chip = $derived(statusChip(bot));
+  // Offline: a network-only bot says "Offline" (paused until the connection is back), not "Failed".
+  const chip = $derived(botStatusChip(bot, $connectivity.state === "offline", offlinePausedIds()));
   // The header says what it's doing or when it next works on its own; the clock keeps "in 12 min" fresh.
   let now = $state(Date.now());
   $effect(() => {

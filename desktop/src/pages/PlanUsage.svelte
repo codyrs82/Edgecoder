@@ -1,5 +1,7 @@
 <script lang="ts">
   import AgentPausedNotice from "../components/AgentPausedNotice.svelte";
+  import OfflinePlaceholder from "../components/OfflinePlaceholder.svelte";
+  import { connectivity, onBackOnline } from "../lib/connectivity";
   // Settings > Wallet: balance and Add funds (Lightning top-up with a live invoice, or Fund with
   // Bitcoin on-chain to a deposit address when the coordinator has ONCHAIN_ENABLED), where your sats
   // go, Earnings & withdrawals, where we pay you, and activity. docs/design/wallet-and-market.md.
@@ -134,6 +136,10 @@
   }
   // Direct (non-custodial) payment paths: shown only when the coordinator turns them on.
   let paths = $state<PaymentPaths>({ prepaid: true, directReservations: false, nwc: false });
+  onDestroy(onBackOnline(() => {
+    void load();
+    void loadPayoutDestination();
+  }));
   onMount(() => {
     void getPaymentPaths().then((p) => (paths = p));
     void load();
@@ -286,7 +292,9 @@
   </div>
   <p class="sp-lead">cSats pay for compute on the network. 1 cSat = 1 sat. Models on this computer and on your own machines are free.</p>
 
-  {#if loading}
+  {#if $connectivity.state === "offline"}
+    <OfflinePlaceholder detail="Your balance is safe. Adding funds, payouts and network compute resume when you're back online." />
+  {:else if loading}
     <div class="wl-grid" aria-busy="true"><div class="wl-card wl-skel-card"></div><div class="wl-card wl-skel-card"></div></div>
   {:else}
     {#if local?.paused}

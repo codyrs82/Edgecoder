@@ -1,6 +1,8 @@
 <script lang="ts">
   import AgentPausedNotice from "../components/AgentPausedNotice.svelte";
   import ServiceNotice from "../components/ServiceNotice.svelte";
+  import OfflinePlaceholder from "../components/OfflinePlaceholder.svelte";
+  import { connectivity, onBackOnline } from "../lib/connectivity";
   import { onServiceReady, serviceStatus } from "../lib/service-status";
   import { onMount, onDestroy } from "svelte";
   import { open as openUrl } from "@tauri-apps/plugin-shell";
@@ -77,8 +79,10 @@
     refresher = setInterval(load, 30_000);
   });
   const offReady = onServiceReady(() => void load());
+  const offOnline = onBackOnline(() => void load());
   onDestroy(() => {
     offReady();
+    offOnline();
     clearInterval(tick);
     clearInterval(refresher);
   });
@@ -130,12 +134,14 @@
   <h1>Compute</h1>
   <p class="sp-lead">Run on this computer and your own machines for free, on any machine on the network by the second, or reserve a machine so it works only for you. Pick what a chat uses from the menu in the chat box.</p>
 
-  {#if $serviceStatus.phase !== "ready"}
+  {#if $connectivity.state === "offline"}
+    <OfflinePlaceholder detail="Models on this computer keep working. Network machines and reservations come back with the connection." />
+  {:else if $serviceStatus.phase !== "ready"}
     <ServiceNotice />
   {:else if error}<p class="sp-err">{error}</p>{/if}
   {#if notice}<p class="sp-ok">{notice}</p>{/if}
 
-  {#if $serviceStatus.phase !== "ready" && !overview}
+  {#if $connectivity.state === "offline" || ($serviceStatus.phase !== "ready" && !overview)}
     <!-- Nothing loaded yet: the notice above is the whole page until the service answers. -->
   {:else if loading}
     <p class="sp-muted">Loading…</p>
