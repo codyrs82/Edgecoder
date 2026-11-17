@@ -24,7 +24,7 @@ import { runInferenceSubtask } from "./inference-runner.js";
 import { warmOllamaModel } from "../inference-api/ollama.js";
 import { detectHardware, hardwareProfileFor, selectGpu, selectGpuPool, type Probe } from "../install/hardware.js";
 import { enforceSandboxPolicy, inferenceOnlyRejection, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
-import { enrollmentBackoffMs, enrollmentRefusalFromError, enrollmentRefusalKey, enrollmentRefusalMessage, isAgentNotRegisteredError, parseRetryAfterMs, rateLimitWaitMs, registeredLogLine, registerRefreshMsFromEnv, shouldLogEnrollmentRefusal, shouldRegister, type RegisterReply } from "./registration-policy.js";
+import { portalLabel, enrollmentBackoffMs, enrollmentRefusalFromError, enrollmentRefusalKey, enrollmentRefusalMessage, isAgentNotRegisteredError, parseRetryAfterMs, rateLimitWaitMs, registeredLogLine, registerRefreshMsFromEnv, shouldLogEnrollmentRefusal, shouldRegister, type RegisterReply } from "./registration-policy.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
 import { signMeshWsBind } from "../mesh/ws-auth.js";
 import { hashResultOutput, signReceiptAsAgent } from "../receipts/receipt.js";
@@ -2378,7 +2378,7 @@ async function loop(): Promise<void> {
         const wait = enrollmentBackoffMs(enrollmentRefusals);
         const now = Date.now();
         if (shouldLogEnrollmentRefusal(lastEnrollmentLog, refusal, now)) {
-          console.error(enrollmentRefusalMessage(AGENT_ID, refusal, wait));
+          console.error(enrollmentRefusalMessage(AGENT_ID, refusal, wait, portalLabel(PORTAL_URL)));
           lastEnrollmentLog = { key: enrollmentRefusalKey(refusal), atMs: now };
         }
         await new Promise((r) => setTimeout(r, wait));

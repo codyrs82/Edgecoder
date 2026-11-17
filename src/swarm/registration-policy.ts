@@ -117,22 +117,31 @@ export function enrollmentRefusalFromError(err: unknown): EnrollmentRefusal | nu
 }
 
 /** The one line an agent logs when its enrolment is refused: what is wrong and how to fix it. */
-export function enrollmentRefusalMessage(agentId: string, refusal: EnrollmentRefusal, retryMs: number): string {
+/** The portal's host for log lines ("edgecoder.io" from https://edgecoder.io), or "the portal". */
+export function portalLabel(portalUrl: string | undefined): string {
+  try {
+    return portalUrl ? new URL(portalUrl).host || "the portal" : "the portal";
+  } catch {
+    return "the portal";
+  }
+}
+
+export function enrollmentRefusalMessage(agentId: string, refusal: EnrollmentRefusal, retryMs: number, portal = "the portal"): string {
   const retry = `Retrying in ${Math.round(retryMs / 1000)}s.`;
   const fix = "re-run the installer with an install key (EDGECODER_API_KEY), which enrols the right name";
   if (refusal.reason === "node_not_enrolled") {
     const tokenHint = refusal.tokenNodeId && refusal.tokenNodeId !== agentId
       ? ` Its registration token was issued for "${refusal.tokenNodeId}": re-run the installer with that token and it uses that name.`
       : "";
-    return `[agent:${agentId}] This machine's id "${agentId}" isn't enrolled. Enroll it on edgecoder.io → Settings → Nodes with exactly this name, or ${fix}.${tokenHint} ${retry}`;
+    return `[agent:${agentId}] This machine's id "${agentId}" isn't enrolled. Enroll it on ${portal} → Settings → Nodes with exactly this name, or ${fix}.${tokenHint} ${retry}`;
   }
   if (refusal.reason === "registration_token_required") {
-    return `[agent:${agentId}] This machine ("${agentId}") has no registration token (AGENT_REGISTRATION_TOKEN). Enroll "${agentId}" on edgecoder.io → Settings → Nodes and re-run the installer with --token ${agentId}=<token>, or ${fix}. ${retry}`;
+    return `[agent:${agentId}] This machine ("${agentId}") has no registration token (AGENT_REGISTRATION_TOKEN). Enroll "${agentId}" on ${portal} → Settings → Nodes and re-run the installer with --token ${agentId}=<token>, or ${fix}. ${retry}`;
   }
   if (refusal.reason === "registration_token_invalid") {
-    return `[agent:${agentId}] The registration token doesn't match the enrolment of "${agentId}" (it was re-enrolled, or the token is for another node). Generate a new token for "${agentId}" on edgecoder.io → Settings → Nodes and re-run the installer with --token ${agentId}=<token>, or ${fix}. ${retry}`;
+    return `[agent:${agentId}] The registration token doesn't match the enrolment of "${agentId}" (it was re-enrolled, or the token is for another node). Generate a new token for "${agentId}" on ${portal} → Settings → Nodes and re-run the installer with --token ${agentId}=<token>, or ${fix}. ${retry}`;
   }
-  return `[agent:${agentId}] "${agentId}" is enrolled as a different node type. Enroll it as an Agent on edgecoder.io → Settings → Nodes. ${retry}`;
+  return `[agent:${agentId}] "${agentId}" is enrolled as a different node type. Enroll it as an Agent on ${portal} → Settings → Nodes. ${retry}`;
 }
 
 export const ENROLLMENT_BACKOFF_BASE_MS = 60_000;

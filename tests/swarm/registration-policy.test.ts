@@ -6,6 +6,7 @@ import {
   enrollmentRefusalFromError,
   enrollmentRefusalKey,
   enrollmentRefusalMessage,
+  portalLabel,
   isAgentNotRegisteredError,
   shouldLogEnrollmentRefusal,
   registeredLogLine,
@@ -103,7 +104,8 @@ describe("enrolment refusals: one clear line and a long back-off", () => {
   });
 
   it("says which name to enrol, and the token's name when it differs", () => {
-    const line = enrollmentRefusalMessage("nvidia-1-gpu", { reason: "node_not_enrolled", tokenNodeId: "RTXA2000-Laptop" }, 60_000);
+    const line = enrollmentRefusalMessage("nvidia-1-gpu", { reason: "node_not_enrolled", tokenNodeId: "RTXA2000-Laptop" }, 60_000, portalLabel("https://edgecoder.io"));
+    expect(portalLabel(undefined)).toBe("the portal");
     expect(line).toContain(`This machine's id "nvidia-1-gpu" isn't enrolled. Enroll it on edgecoder.io → Settings → Nodes with exactly this name, or re-run the installer with an install key`);
     expect(line).toContain(`issued for "RTXA2000-Laptop"`);
     expect(line).toContain("Retrying in 60s.");
