@@ -13,6 +13,12 @@ struct ChatMessage: Codable, Identifiable, Equatable {
     var failure: ChatFailureInfo?
     /// The reply has text but stopped mid-sentence ("Reply may be cut short").
     var cutShort: Bool?
+    /// Web answers: the numbered sources it cites (links under the reply).
+    var webSources: [PortalWebSource]?
+    /// Web answers: "2 searches · 1 page · 1.2 cSats".
+    var webFooter: String?
+    /// "Web search needs cSats" (once per chat) when the reply answered without the web.
+    var webNote: String?
 
     enum Role: String, Codable {
         case user
@@ -63,6 +69,10 @@ struct Conversation: Codable, Identifiable, Equatable {
     var selectedModel: String?
     /// The portal conversation this chat continues (web chat API), created on the first network message.
     var portalConversationId: String?
+    /// The Web menu's choice for this chat: "auto", "off", or nil for the Settings default.
+    var webMode: String?
+    /// The `webOff` reasons already noted under a reply in this chat (each is noted once).
+    var webNotedReasons: [String]?
 
     enum Source: String, Codable {
         case chat
@@ -117,6 +127,8 @@ struct StreamProgress {
     var routeLabel: String = ""
     var model: String = ""
     var creditsSpent: Double?
+    /// The web tool's running total while the reply works ("1 search · 0.5 cSats").
+    var webLine: String?
 
     var routeIcon: String {
         switch route {

@@ -2,7 +2,9 @@ import Foundation
 
 /// The web chat API (src/portal/routes/chat.ts, conversations.ts) over the session cookie:
 /// POST /portal/api/conversations, then POST /portal/api/chat with `compute: { target: "auto" }`
-/// (your own online machines first, free; then the network's best fit, billed in cSats). The reply
+/// (your own online machines first, free; then the network's best fit, billed in cSats) and, unless
+/// web search is off, `web: true` (docs/web-tool.md: the model may search; `{web}` progress,
+/// `{webOff}` when it can't, sources and a footer on `done`). The reply
 /// is an HTTP error while nothing was sent, else SSE: `data: {...}` events, ": keepalive"
 /// heartbeats, and `data: [DONE]`.
 
@@ -21,6 +23,74 @@ enum PortalChatCompute: Equatable {
     }
 }
 
+/// A numbered web source the answer cites (src/web-tool/tools.ts WebSource).
+struct PortalWebSource: Codable, Equatable, Identifiable {
+    let n: Int
+    let title: String
+    let url: String
+    var id: Int { n }
+
+    /// The link, only for http(s) (the web page's renderWebSources skips anything else).
+    var link: URL? {
+        guard let u = URL(string: url), let scheme = u.scheme?.lowercased(), scheme == "http" || scheme == "https" else { return nil }
+        return u
+    }
+
+    /// "example.com" beside the title.
+    var host: String {
+        guard let h = link?.host else { return "" }
+        return h.hasPrefix("www.") ? String(h.dropFirst(4)) : h
+    }
+}
+
+/// The web tool's running total for one reply (`{web: {...}}`), and on `done` the cited sources and
+/// the footer "2 searches · 1 page · 1.2 cSats" (docs/web-tool.md).
+struct PortalWebUsage: Codable, Equatable {
+    var searches: Int
+    var pages: Int
+    var cSats: Double
+    var sources: [PortalWebSource]
+    var footer: String?
+
+    /// The server's footer, else the same line built here (src/web-tool/tools.ts webFooter).
+    var footerLine: String {
+        if let footer, !footer.isEmpty { return footer }
+        return Self.footer(searches: searches, pages: pages, cSats: cSats)
+    }
+
+    /// "2 searches · 1 page · 1.2 cSats"; "" when the web wasn't used.
+    static func footer(searches: Int, pages: Int, cSats: Double) -> String {
+        var parts: [String] = []
+        if searches > 0 { parts.append("\(searches) search\(searches == 1 ? "" : "es")") }
+        if pages > 0 { parts.append("\(pages) page\(pages == 1 ? "" : "s")") }
+        if parts.isEmpty { return "" }
+        // JS `Number(x.toFixed(2))`: at most two decimals, no trailing zeros.
+        let rounded = (cSats * 100).rounded() / 100
+        let f = NumberFormatter()
+        f.locale = Locale(identifier: "en_US")
+        f.usesGroupingSeparator = false
+        f.minimumFractionDigits = 0
+        f.maximumFractionDigits = 2
+        parts.append("\(f.string(from: NSNumber(value: rounded)) ?? String(rounded)) cSats")
+        return parts.joined(separator: " \u{00B7} ")
+    }
+
+    static func parse(_ raw: Any?) -> PortalWebUsage? {
+        guard let obj = raw as? [String: Any] else { return nil }
+        var sources: [PortalWebSource] = []
+        for s in (obj["sources"] as? [[String: Any]]) ?? [] {
+            guard let url = s["url"] as? String, !url.isEmpty else { continue }
+            let n = (s["n"] as? NSNumber)?.intValue ?? sources.count + 1
+            sources.append(PortalWebSource(n: n, title: (s["title"] as? String) ?? "", url: url))
+        }
+        let footer = (obj["footer"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return PortalWebUsage(searches: (obj["searches"] as? NSNumber)?.intValue ?? 0,
+                              pages: (obj["pages"] as? NSNumber)?.intValue ?? 0,
+                              cSats: (obj["cSats"] as? NSNumber)?.doubleValue ?? 0,
+                              sources: sources, footer: footer)
+    }
+}
+
 /// One event of the chat stream.
 enum PortalChatEvent: Equatable {
     case content(String)
@@ -28,7 +98,12 @@ enum PortalChatEvent: Equatable {
     case status(String)
     case warning(String)
     case error(message: String, code: String?, httpStatus: Int?)
-    case done(cSatsSpent: Double?, compute: String?, calls: [CallUsage]?)
+    /// The web tool's running total while the reply works (after each search or page read).
+    case web(PortalWebUsage)
+    /// The web tools weren't offered for this reply: `needs_csats` or `rate_limited`, with a note.
+    case webOff(reason: String, message: String)
+    /// The end of the reply; `web` (sources and footer) when the web was used.
+    case done(cSatsSpent: Double?, compute: String?, calls: [CallUsage]?, web: PortalWebUsage?)
     case end
 }
 
@@ -45,6 +120,10 @@ enum PortalChatParser {
         var out: [PortalChatEvent] = []
         if let s = obj["status"] as? String, !s.isEmpty { out.append(.status(s)) }
         if let w = obj["warning"] as? String, !w.isEmpty { out.append(.warning(w)) }
+        if let off = obj["webOff"] as? [String: Any], let reason = off["reason"] as? String, !reason.isEmpty {
+            out.append(.webOff(reason: reason, message: (off["message"] as? String) ?? ""))
+        }
+        if obj["done"] as? Bool != true, let w = PortalWebUsage.parse(obj["web"]) { out.append(.web(w)) }
         if let e = obj["error"] as? String, !e.isEmpty {
             out.append(.error(message: e, code: obj["code"] as? String, httpStatus: (obj["httpStatus"] as? NSNumber)?.intValue))
         }
@@ -56,7 +135,8 @@ enum PortalChatParser {
                 calls = try? JSONDecoder().decode([CallUsage].self, from: d)
             }
             out.append(.done(cSatsSpent: (obj["cSatsSpent"] as? NSNumber)?.doubleValue ?? (usage?["cSats"] as? NSNumber)?.doubleValue,
-                             compute: (obj["compute"] as? String) ?? (usage?["where"] as? String), calls: calls))
+                             compute: (obj["compute"] as? String) ?? (usage?["where"] as? String), calls: calls,
+                             web: PortalWebUsage.parse(obj["web"])))
         }
         if let c = obj["content"] as? String, !c.isEmpty { out.append(.content(c)) }
         return out
@@ -102,8 +182,17 @@ final class PortalChatClient {
         return created.conversationId
     }
 
+    /// The POST /portal/api/chat body. `web`: offer the web tools (the chat's "Web: Auto"); the portal
+    /// still answers without them when they can't be used (no cSats, a model that can't call tools).
+    static func chatBody(conversationId: String, message: String, compute: PortalChatCompute, resend: Bool = false, web: Bool) -> [String: Any] {
+        var body: [String: Any] = ["conversationId": conversationId, "message": message, "compute": compute.json]
+        if resend { body["resend"] = true }
+        if web { body["web"] = true }
+        return body
+    }
+
     /// Sends one message and streams the reply's events (ending with `.end`, or an `.error`).
-    func send(conversationId: String, message: String, compute: PortalChatCompute, resend: Bool = false) -> AsyncThrowingStream<PortalChatEvent, Error> {
+    func send(conversationId: String, message: String, compute: PortalChatCompute, resend: Bool = false, web: Bool) -> AsyncThrowingStream<PortalChatEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -111,8 +200,7 @@ final class PortalChatClient {
                     req.httpMethod = "POST"
                     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-                    var body: [String: Any] = ["conversationId": conversationId, "message": message, "compute": compute.json]
-                    if resend { body["resend"] = true }
+                    let body = Self.chatBody(conversationId: conversationId, message: message, compute: compute, resend: resend, web: web)
                     req.httpBody = try JSONSerialization.data(withJSONObject: body)
                     let (bytes, response) = try await session.bytes(for: req)
                     guard let http = response as? HTTPURLResponse else { throw APIClientError.invalidResponse }
@@ -141,4 +229,39 @@ final class PortalChatClient {
 
 extension PortalChatEvent {
     var isContent: Bool { if case .content = self { return true } else { return false } }
+}
+
+/// Web search in chat (docs/web-tool.md), as the web chat and desktop app do it: automatic by
+/// default (the model decides when a question needs the web), off for one chat from the Web menu
+/// under the message box, and Settings > Chat "Search the web automatically" sets the default.
+enum WebSearchPreference {
+    /// Settings default (on unless turned off), kept on this iPhone.
+    static let storageKey = "edgecoder.web.auto"
+    /// The web chat's words (src/portal/pages/web-toggle.ts).
+    static let needsCSatsNote = "Web search needs cSats"
+    static let rateLimitedNote = "Web search's hourly limit is used up; it's back within the hour."
+
+    /// A chat's choice: "auto" or "off"; nil follows the Settings default.
+    static func enabled(chatMode: String?, defaultOn: Bool) -> Bool {
+        switch chatMode {
+        case "off": return false
+        case "auto": return true
+        default: return defaultOn
+        }
+    }
+
+    /// What to keep for a chat after picking `on` in its menu (nil when it matches the default).
+    static func chatMode(on: Bool, defaultOn: Bool) -> String? {
+        on == defaultOn ? nil : (on ? "auto" : "off")
+    }
+
+    /// The quiet note under a reply that answered without the web (`webOff`), or nil for reasons
+    /// that aren't noted. Shown once per chat for each reason.
+    static func offNote(reason: String, message: String) -> String? {
+        switch reason {
+        case "needs_csats": return message.isEmpty ? needsCSatsNote : message
+        case "rate_limited": return message.isEmpty ? rateLimitedNote : message
+        default: return nil
+        }
+    }
 }

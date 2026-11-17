@@ -10,12 +10,15 @@ struct SettingsView: View {
     @AppStorage(AppearancePreference.storageKey) private var appearance = AppearancePreference.defaultValue.rawValue
     @Environment(\.openURL) private var openURL
     @State private var confirmDelete = false
+    /// "Search the web automatically" (on by default), as on the web and desktop (docs/web-tool.md).
+    @AppStorage(WebSearchPreference.storageKey) private var webAuto = true
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
                     accountCard
+                    chatCard
                     runtimeCard
                     modelCard
                     networkCard
@@ -195,6 +198,20 @@ struct SettingsView: View {
             URLQueryItem(name: "body", value: "Please delete my EdgeCoder account\(email.map { " (\($0))" } ?? "") and its data.\n\nSent from the EdgeCoder iOS app."),
         ]
         return c.url
+    }
+
+    // MARK: - Chat Card
+
+    private var chatCard: some View {
+        SettingsCard {
+            SettingsCardHeader(icon: "globe", title: "Chat", color: Theme.accent)
+
+            SettingsToggle(title: "Search the web automatically", isOn: $webAuto)
+
+            Text("In chat, the model searches the web when a question needs fresh information (news, prices, versions, a specific page) and cites its sources. Each search costs a little cSats. Turn it off for one chat from the Web menu under the message box. Saved on this iPhone.")
+                .font(.caption)
+                .foregroundColor(Theme.textMuted)
+        }
     }
 
     // MARK: - Runtime Card
