@@ -28,6 +28,8 @@ export interface MachineRoutesDeps {
   discoverCoordinatorUrlsForPortal: () => Promise<string[]>;
   getCurrentUser: (req: { headers: Record<string, unknown> }) => Promise<{ userId: string } | null | undefined>;
   store: { listNodesByOwner(userId: string): Promise<Array<{ nodeId: string; nodeKind: string; active?: boolean; lastSeenMs?: number }>> } | null | undefined;
+  /** Cloud bots on the bots API (routes/cloud-bots.ts). */
+  cloud?: import("./cloud-bots.js").CloudBotService | null;
   /** The newest agent release version (agent-release.ts), or null when unknown. */
   latestAgentVersion?: () => string | null;
 }

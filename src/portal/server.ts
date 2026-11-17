@@ -23,7 +23,7 @@ import { registerCoordinatorOpsRoutes } from "./routes/coordinator-ops.js";
 import { registerWalletRoutes } from "./routes/wallet.js";
 import { registerPayoutDestinationRoutes } from "./routes/payout-destination.js"; import { setupAccountSecurity } from "./account-security-setup.js";
 import { createPayoutCallbackClient, registerPayoutCallbackNotifyRoute, registerPayoutCallbackRoutes } from "./routes/payout-callback.js";
-import { registerChatApiRoutes } from "./routes/chat.js";
+import { registerChatApiRoutes } from "./routes/chat.js"; import { createCloudBots } from "./cloud-bots/setup.js";
 import { registerReviewRoutes } from "./routes/reviews.js";
 import { registerMarketRoutes } from "./routes/market.js";
 import { createLatestAgentVersion, ownMachineModels, registerMachineRoutes } from "./routes/machines.js";
@@ -890,8 +890,8 @@ registerReviewRoutes(app, reviewsRouteDeps);
 const marketRouteDeps = { LAUNCH_MODE, EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store, ensureCreditAccountForUser, chatCapacity, secondFactor };
 export type MarketRoutesDeps = typeof marketRouteDeps;
 registerMarketRoutes(app, marketRouteDeps);
-// Settings > Nodes > Machines (remote model control, routes/machines.ts; with the machines' bots, routes/bots.ts) and Settings > Network (the world view, routes/network-world.ts).
-registerMachineRoutes(app, { PORTAL_SERVICE_TOKEN, EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal, getCurrentUser, store, latestAgentVersion: createLatestAgentVersion() });
+const { service: cloudBots, runner: cloudBotRunner } = createCloudBots({ pool: store?.pool ?? null, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, capacity: chatCapacity, ownMachineModels: chatRouteDeps.ownMachineModels, log: app.log }); // Cloud bots (docs/cloud-bots.md): run here, with no machine
+registerMachineRoutes(app, { PORTAL_SERVICE_TOKEN, EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal, getCurrentUser, store, cloud: cloudBots, latestAgentVersion: createLatestAgentVersion() }); // Settings > Nodes > Machines (remote model control, routes/machines.ts; with the machines' bots and cloud bots, routes/bots.ts) and Settings > Network (the world view, routes/network-world.ts).
 registerNetworkWorldRoutes(app, { PORTAL_SERVICE_TOKEN, EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal, getCurrentUser });
 // The Wallet screens (web, desktop, iOS): one read-only overview, and a session-bound Lightning top-up.
 registerWalletApiRoutes(app, { ...marketRouteDeps, fallbackNetwork: WALLET_DEFAULT_NETWORK });
@@ -988,7 +988,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       await store.migrate();
     })
     .then(() => app.listen({ port: 4310, host: LISTEN_HOST }).then(async () => (await import("./shutdown.js")).installGracefulShutdown(app))) // a deploy drains streamed calls
-    .then(() => portalAlerting.start()) // production alerting checks start once the portal listens
+    .then(() => { if (process.env.CLOUD_BOTS_WORKER !== "off") cloudBotRunner?.start(); return portalAlerting.start(); }) // alerting checks and the cloud bots' worker, scheduler and GitHub poller start once the portal listens
     .catch((error) => {
       app.log.error(error);
       process.exit(1);

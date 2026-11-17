@@ -9,13 +9,17 @@
  *   POST /portal/api/bots/:agentId/:botId/commands            { action, args } for one of the account's machines
  *   GET  /portal/api/bots/:agentId/commands/:commandId        that command's result (polled)
  *   POST /portal/api/bots/new                                 { requestId, agentId|null, bot } a new bot (#409)
- *   DELETE /portal/api/bots/pending/:requestId                drop a new bot that hasn't reached a Mac
+ *   DELETE /portal/api/bots/pending/:requestId                drop a new bot that hasn't reached a machine
  *
- * New bots from the web: the request is kept (pending) in the portal database until a Mac made it.
+ * Cloud bots (routes/cloud-bots.ts, docs/cloud-bots.md) share these routes with agentId "cloud":
+ * they are listed with the machines' bots, made at once by /new, and have their own static
+ * /portal/api/bots/cloud/... routes (registered first, so "cloud" is never taken for a machine).
+ *
+ * New bots from the web: the request is kept (pending) in the portal database until a machine made it.
  * It is sent as the relay's signed "create" command to the machine picked ("Runs on"), or to the
- * first of the account's machines that is online with an app that can take it. The Mac makes it
+ * first of the account's machines that is online with an app that can take it. The machine makes it
  * without a folder ("Needs folder") and someone there picks the folder. The request id makes it
- * idempotent end to end: the same entry here, the same command at the coordinator, one bot on the Mac.
+ * idempotent end to end: the same entry here, the same command at the coordinator, one bot on the machine.
  * Pending requests are checked on each list poll and by a sweep every minute (any portal machine;
  * a duplicate send is harmless for that reason).
  *
@@ -27,12 +31,14 @@
 import type { FastifyInstance } from "fastify";
 import { request } from "undici";
 import { z } from "zod";
+import { CLOUD_AGENT_ID, CLOUD_MACHINE, normalizeCompute } from "../cloud-bots/types.js";
+import type { CloudBotService } from "./cloud-bots.js";
 import { BOT_CONTROL_ACTIONS, botControlRequestSchema, botIdSchema, botRequestIdSchema, remoteBotCreateSchema, webBotId, type BotsSnapshot, type RemoteBotCreate, type RemoteBotSummary } from "../../common/bot-relay.js";
 
-/** A new bot from the web that no Mac has made yet (stored per account: PendingBotStore). */
+/** A new bot from the web that no machine has made yet (stored per account: PendingBotStore). */
 export interface PendingBot {
   requestId: string;
-  /** The id it gets on the Mac (webBotId). */
+  /** The id it gets on the machine (webBotId). */
   botId: string;
   /** The machine picked in "Runs on"; null: the first of the account's machines that can take it. */
   target: string | null;
@@ -41,7 +47,7 @@ export interface PendingBot {
   agentId?: string;
   commandId?: string;
   sentAtMs?: number;
-  /** The Mac said done; dropped once its snapshot shows the bot. */
+  /** The machine said done; dropped once its snapshot shows the bot. */
   doneAtMs?: number;
   error?: string;
   message?: string;
@@ -56,7 +62,7 @@ export interface PendingBotStore {
   listPendingBotOwners(limit: number): Promise<string[]>;
 }
 
-/** New bots one account may have waiting for a Mac. */
+/** New bots one account may have waiting for a machine. */
 export const MAX_PENDING_BOTS = 10;
 /** A done create is dropped after this long even if no snapshot showed it yet. */
 const DONE_KEEP_MS = 10 * 60_000;
@@ -72,6 +78,47 @@ export interface BotRoutesDeps {
   /** How often pending new bots are retried without anyone on the page (0: never; default 60 s). */
   pendingSweepMs?: number;
   now?: () => number;
+  /** Cloud bots (null: not available here, e.g. no portal database). */
+  cloud?: CloudBotService | null;
+}
+
+/**
+ * A new bot for a machine from a client that sends the cloud contract's fields too (the iOS app
+ * sends them for every target): what the desktop understands is mapped to its form's fields, the
+ * rest is dropped. A GitHub token never goes to a machine (it uses the GitHub account signed in there).
+ */
+export function machineBotSpec(bot: Record<string, unknown>): Record<string, unknown> {
+  const { web: _web, schedule, github, compute, budgetCSatsPerRun: _bpr, maxTurns: _mt, ...rest } = bot;
+  const out: Record<string, unknown> = { ...rest };
+  if (typeof schedule === "string") out.schedule = schedule;
+  else if (schedule && typeof schedule === "object" && typeof (schedule as { everyMinutes?: unknown }).everyMinutes === "number") {
+    // "daily at" on a machine is its local time, so a UTC time isn't carried over.
+    out.schedule = `every ${Math.max(5, Math.floor((schedule as { everyMinutes: number }).everyMinutes))} minutes`;
+  }
+  if (compute !== undefined) {
+    const c = normalizeCompute(compute);
+    if (compute && typeof compute === "object" && !c) out.compute = compute;
+    else if (c === "auto") out.compute = { policy: "auto" };
+    else if (c?.startsWith("mine:")) out.compute = { policy: "model", model: c.slice(5) };
+    else if (c === "network:auto") out.compute = { policy: "network_only" };
+    else if (c?.startsWith("network:")) out.compute = { policy: "network_only", model: c.slice(8).startsWith("network/") ? c.slice(8) : `network/${c.slice(8)}` };
+  }
+  if (github && typeof github === "object") {
+    const g = github as { repo?: unknown; triggers?: unknown };
+    if (typeof g.repo === "string" && g.repo.trim() && out.repository === undefined) out.repository = g.repo.trim();
+    if (Array.isArray(g.triggers) && out.triggers === undefined) {
+      const tr: Array<Record<string, unknown>> = [];
+      for (const t of g.triggers) {
+        const kind = typeof t === "string" ? t : (t as { kind?: unknown; event?: unknown })?.kind ?? (t as { event?: unknown })?.event;
+        const label = typeof t === "object" && t && typeof (t as { label?: unknown }).label === "string" ? String((t as { label: string }).label).trim() : "";
+        if (kind === "pr_opened" || kind === "pr") tr.push({ kind: "pr", enabled: true, onlyOthers: true });
+        else if (kind === "ci_failed") tr.push({ kind: "ci_failed", enabled: true, scope: "any" });
+        else if (kind === "issue_labeled") tr.push({ kind: "issue_labeled", enabled: true, label: label || "bot" });
+      }
+      if (tr.length) out.triggers = tr;
+    }
+  }
+  return out;
 }
 
 interface CoordinatorBotMachine {
@@ -91,7 +138,7 @@ export interface MachineInfo {
   agentId: string;
   machineName: string;
   online: boolean;
-  /** "on": commands and approvals from the web; "view": read-only (approve on the Mac). Offline is always read-only. */
+  /** "on": commands and approvals from the web; "view": read-only (approve on the machine). Offline is always read-only. */
   controls: "on" | "view";
   reportedAtMs: number | null;
   /** Online, takes changes from the web, and its app can make new bots ("create"). */
@@ -218,7 +265,7 @@ export function registerBotRoutes(app: FastifyInstance, deps: BotRoutesDeps): vo
   }
 
   /**
-   * Moves each of the account's pending new bots on: dropped once a Mac shows it, sent to the
+   * Moves each of the account's pending new bots on: dropped once a machine shows it, sent to the
    * machine it waits for (or the first that can take it), settled from the command's result.
    */
   async function reconcile(userId: string, known?: Array<{ machine: MachineInfo; bots: RemoteBotSummary[] }>): Promise<PendingBot[]> {
@@ -234,7 +281,7 @@ export function registerBotRoutes(app: FastifyInstance, deps: BotRoutesDeps): vo
     const next: PendingBot[] = [];
     for (const p0 of list) {
       let p = p0;
-      // A Mac has it: it shows in the list as a bot now.
+      // A machine has it: it shows in the list as a bot now.
       if (made.has(p.botId)) {
         changed = true;
         continue;
@@ -294,29 +341,73 @@ export function registerBotRoutes(app: FastifyInstance, deps: BotRoutesDeps): vo
     return [...machines.map((m) => ({ agentId: m.machine.agentId, machineName: m.machine.machineName, online: m.machine.online, canCreate: m.machine.canCreate })), ...others];
   }
 
+  // ---- Cloud bots: static routes, so they win over /:agentId/... ----
+  const cloud = deps.cloud ?? null;
+  const botIdParam = z.object({ botId: botIdSchema });
+  app.get("/portal/api/bots/cloud/:botId", { config: { rateLimit: { max: 240, timeWindow: "1 minute" } } }, async (req, reply) => {
+    const user = await deps.getCurrentUser(req as never);
+    if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    if (!cloud) return reply.code(503).send({ error: "cloud_bots_unavailable" });
+    const p = botIdParam.safeParse(req.params);
+    if (!p.success) return reply.code(400).send({ error: "invalid_bot" });
+    reply.header("cache-control", "no-store");
+    const a = await cloud.detail(user.userId, p.data.botId);
+    return reply.code(a.status).send(a.body);
+  });
+  app.post("/portal/api/bots/cloud/:botId/commands", { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } }, async (req, reply) => {
+    const user = await deps.getCurrentUser(req as never);
+    if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    if (!cloud) return reply.code(503).send({ error: "cloud_bots_unavailable" });
+    const p = botIdParam.safeParse(req.params);
+    const body = z.object({ action: z.string().min(1).max(40), args: z.record(z.string(), z.unknown()).optional() }).safeParse(req.body ?? {});
+    if (!p.success || !body.success) return reply.code(400).send({ error: "invalid_command" });
+    const a = await cloud.command(user.userId, p.data.botId, body.data.action, body.data.args ?? {});
+    return reply.code(a.status).send(a.body);
+  });
+  app.get("/portal/api/bots/cloud/commands/:commandId", { config: { rateLimit: { max: 600, timeWindow: "1 minute" } } }, async (req, reply) => {
+    const user = await deps.getCurrentUser(req as never);
+    if (!user) return reply.code(401).send({ error: "not_authenticated" });
+    if (!cloud) return reply.code(503).send({ error: "cloud_bots_unavailable" });
+    const p = z.object({ commandId: z.string().min(8).max(64).regex(/^[A-Za-z0-9-]+$/) }).safeParse(req.params);
+    if (!p.success) return reply.code(400).send({ error: "invalid_command" });
+    reply.header("cache-control", "no-store");
+    const a = await cloud.commandState(user.userId, p.data.commandId);
+    return reply.code(a.status).send(a.body);
+  });
+
   app.get("/portal/api/bots", { config: { rateLimit: { max: 240, timeWindow: "1 minute" } } }, async (req, reply) => {
     const user = await deps.getCurrentUser(req as never);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
-    const machines = await machinesFor(user.userId);
+    const [machines, cloudBots] = await Promise.all([machinesFor(user.userId), cloud ? cloud.list(user.userId).catch(() => []) : Promise.resolve([])]);
     const pending = await reconcile(user.userId, machines).catch(() => [] as PendingBot[]);
     reply.header("cache-control", "no-store");
     return reply.send({
       machines: machines.map((m) => m.machine),
-      bots: machines.flatMap((m) => m.bots.map(({ tail: _tail, instructions: _i, ...b }) => ({ ...b, machine: m.machine }))),
+      bots: [
+        ...cloudBots.map(({ tail: _tail, instructions: _i, ...b }) => b),
+        ...machines.flatMap((m) => m.bots.map(({ tail: _tail, instructions: _i, ...b }) => ({ ...b, runtime: "desktop", machine: m.machine }))),
+      ],
       pending: pending.map((p) => pendingView(p, machines.map((m) => m.machine))),
-      targets: await targetsFor(user.userId, machines),
-      canCreate: !!pendingStore(),
+      // Cloud first: there is always somewhere to make a bot, with or without a machine.
+      targets: [...(cloud ? [{ agentId: CLOUD_MACHINE.agentId, machineName: CLOUD_MACHINE.machineName, online: true, canCreate: true }] : []), ...(await targetsFor(user.userId, machines))],
+      canCreate: !!pendingStore() || !!cloud,
+      ...(cloud ? { cloud: { github: cloud.githubEnabled } } : {}),
     });
   });
 
   app.post("/portal/api/bots/new", { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } }, async (req, reply) => {
     const user = await deps.getCurrentUser(req as never);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
-    const store = pendingStore();
-    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const body = z.object({ requestId: botRequestIdSchema, agentId: agentIdSchema.nullable().default(null), bot: z.record(z.string(), z.unknown()) }).strict().safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send({ error: "invalid_bot" });
-    const spec = remoteBotCreateSchema.safeParse({ ...body.data.bot, requestId: body.data.requestId });
+    if (body.data.agentId === CLOUD_AGENT_ID) {
+      if (!cloud) return reply.code(503).send({ error: "cloud_bots_unavailable", message: "Cloud bots aren't available here." });
+      const a = await cloud.create(user.userId, body.data.requestId, body.data.bot);
+      return reply.code(a.status).send(a.body);
+    }
+    const store = pendingStore();
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    const spec = remoteBotCreateSchema.safeParse({ ...machineBotSpec(body.data.bot), requestId: body.data.requestId });
     if (!spec.success) return reply.code(400).send({ error: "invalid_bot", detail: spec.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ").slice(0, 300) });
     // Only the session's own enrolled machines (the coordinator checks the verified owner again).
     if (body.data.agentId && !(await agentNodes(user.userId)).includes(body.data.agentId)) return reply.code(403).send({ error: "not_your_machine" });
@@ -329,7 +420,7 @@ export function registerBotRoutes(app: FastifyInstance, deps: BotRoutesDeps): vo
       const machines = await machinesFor(user.userId);
       const made = machines.find((m) => m.bots.some((b) => b.id === botId));
       if (made) return reply.send({ ok: true, botId, agentId: made.machine.agentId, state: "created" });
-      if (list.length >= MAX_PENDING_BOTS) return reply.code(429).send({ error: "too_many_pending", message: `At most ${MAX_PENDING_BOTS} new bots can wait for a Mac.` });
+      if (list.length >= MAX_PENDING_BOTS) return reply.code(429).send({ error: "too_many_pending", message: `At most ${MAX_PENDING_BOTS} new bots can wait for a machine.` });
       const entry: PendingBot = { requestId: body.data.requestId, botId, target: body.data.agentId, spec: spec.data, state: "waiting", createdAtMs: now() };
       if (!(await store.savePendingBots(user.userId, [...list, entry], version, now()))) return reply.code(409).send({ error: "busy", message: "Try again." });
       const after = await reconcile(user.userId, machines);
@@ -371,7 +462,7 @@ export function registerBotRoutes(app: FastifyInstance, deps: BotRoutesDeps): vo
     const p = z.object({ agentId: agentIdSchema, botId: botIdSchema }).safeParse(req.params);
     if (!p.success) return reply.code(400).send({ error: "invalid_bot" });
     const body = z.object({ action: z.enum(BOT_CONTROL_ACTIONS), args: z.record(z.string(), z.unknown()).optional() }).safeParse(req.body ?? {});
-    // New bots go through /portal/api/bots/new (kept until a Mac made them).
+    // New bots go through /portal/api/bots/new (kept until a machine made them).
     if (!body.success || body.data.action === "create") return reply.code(400).send({ error: "invalid_command" });
     const parsed = botControlRequestSchema.safeParse({ action: body.data.action, args: body.data.args ?? {} });
     if (!parsed.success) return reply.code(400).send({ error: "invalid_command", detail: parsed.error.issues[0]?.message });
