@@ -72,6 +72,24 @@ export function splitBackfillEarnings(agentMsat: number, holderShareBps: number)
 }
 
 /**
+ * The holder's backfill credit on one lease is capped at the lease price (its prepaidMsat: at best
+ * the reservation becomes free). `alreadyMsat` is what the holder was already credited on this lease;
+ * the part of `holderMsat` above the room left goes to the host instead, so holder + host is
+ * unchanged (conservation to the msat). The caller computes `alreadyMsat` and writes the rows
+ * atomically (one transaction under a per-lease lock, or synchronously in memory).
+ */
+export function capBackfillSplit(
+  split: { holderMsat: number; hostMsat: number },
+  alreadyMsat: number,
+  capMsat: number
+): { holderMsat: number; hostMsat: number; cappedMsat: number } {
+  const room = Math.max(0, Math.floor(capMsat) - Math.max(0, Math.round(alreadyMsat)));
+  const holderMsat = Math.min(split.holderMsat, room);
+  const cappedMsat = split.holderMsat - holderMsat;
+  return { holderMsat, hostMsat: split.hostMsat + cappedMsat, cappedMsat };
+}
+
+/**
  * Model slots backfill may hold at once on an agent with `slots` slots: `slotFraction` of them,
  * rounded down, at least 1; with 2 or more slots at least one always stays free for the holder.
  * 0 when slotFraction is 0.

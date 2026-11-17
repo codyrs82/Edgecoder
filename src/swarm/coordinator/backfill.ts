@@ -148,13 +148,21 @@ export function noteLeaseJobClaim(lease: Reservation, readyAtMs: number | undefi
  * opted-in lease that is still active counts as that lease's backfill (a reserved agent takes no
  * other network work).
  */
-export function backfillAccrualFor(subtask: Pick<Subtask, "id" | "projectMeta">, agentId: string, durationMs: number, nowMs = Date.now()): { reservationId: string; holderAccountId: string } | undefined {
+export function backfillAccrualFor(
+  subtask: Pick<Subtask, "id" | "projectMeta">,
+  agentId: string,
+  durationMs: number,
+  nowMs = Date.now()
+): { reservationId: string; holderAccountId: string; holderCapMsat: number } | undefined {
   if (subtask.projectMeta.reservationId || subtask.projectMeta.onlyAccountId) return undefined;
+  // The holder's backfill credit on a lease is capped at the lease price (its prepaid amount); a
+  // lease no longer in the book caps at 0 (everything to the host).
+  const capOf = (id: string) => Math.max(0, reservations.get(id)?.prepaidMsat ?? 0);
   const c = backfillClaims.get(subtask.id);
-  if (c) return c.agentId === agentId ? { reservationId: c.reservationId, holderAccountId: c.holderAccountId } : undefined;
+  if (c) return c.agentId === agentId ? { reservationId: c.reservationId, holderAccountId: c.holderAccountId, holderCapMsat: capOf(c.reservationId) } : undefined;
   const lease = reservations.activeForAgent(agentId, nowMs);
   if (!lease || lease.backfill !== true || nowMs - Math.max(0, durationMs) < lease.startMs) return undefined;
-  return { reservationId: lease.id, holderAccountId: lease.accountId };
+  return { reservationId: lease.id, holderAccountId: lease.accountId, holderCapMsat: capOf(lease.id) };
 }
 
 /** The call settled (paid or not): forget its claim record. */
@@ -228,6 +236,10 @@ export interface BackfillStats {
   jobs: number;
   /** What was credited to the holder for backfill on this lease (msat). */
   holderMsat: number;
+  /** The most the holder can be credited on this lease: its price (prepaidMsat). */
+  capMsat: number;
+  /** What is left under the cap; past it, the holder's share goes to the host. */
+  remainingMsat: number;
   holderShare: number;
   /** Lease jobs that arrived while backfill ran, and their wait (ms; this coordinator's memory). */
   holderWait: { samples: number; p50Ms: number; maxMs: number };
@@ -255,6 +267,8 @@ export async function backfillStats(r: Reservation): Promise<BackfillStats> {
     enabled: r.backfill === true && backfillConfig.enabled,
     jobs,
     holderMsat,
+    capMsat: Math.max(0, r.prepaidMsat),
+    remainingMsat: Math.max(0, r.prepaidMsat - holderMsat),
     holderShare: backfillConfig.holderShareBps / 10_000,
     holderWait: { samples: waits.length, p50Ms: waits.length ? waits[Math.floor(waits.length / 2)] : 0, maxMs: waits.length ? waits[waits.length - 1] : 0 },
     preempted: preempted.get(r.id) ?? 0,

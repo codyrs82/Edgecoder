@@ -80,7 +80,7 @@ export async function publicReservationWithBackfill(r: Reservation) {
   const base = publicReservation(r);
   try {
     const st = await backfillStats(r);
-    return { ...base, backfillStats: { jobs: st.jobs, earnedCSats: msatToCSats(st.holderMsat), holderShare: st.holderShare, preempted: st.preempted, holderWait: st.holderWait, active: st.enabled && r.status === "active" } };
+    return { ...base, backfillStats: { jobs: st.jobs, earnedCSats: msatToCSats(st.holderMsat), capCSats: msatToCSats(st.capMsat), remainingCSats: msatToCSats(st.remainingMsat), holderShare: st.holderShare, preempted: st.preempted, holderWait: st.holderWait, active: st.enabled && r.status === "active" } };
   } catch {
     return base;
   }
@@ -143,7 +143,8 @@ setInterval(async () => {
     // Leases made or ended on another coordinator, and heartbeats it saw, come from the shared store.
     await syncReservations(reservations, pgStore);
     const due = await dueReservations(reservations, pgStore, now, (agentId) => agentCapabilities.get(agentId)?.lastSeenMs);
-    for (const { r, reason } of due) await endReservation(r.id, reason, now);
+    // An offline agent's lease is billed to its last heartbeat, not to now (reservations.ts offlineEndMs).
+    for (const { r, reason, atMs } of due) await endReservation(r.id, reason, atMs);
   } catch (err) {
     app.log.warn({ err }, "reservation_tick_failed");
   }

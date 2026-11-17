@@ -121,13 +121,13 @@ describe("#115 reconcileLedger", () => {
 
   describe("reservation backfill", () => {
     // A backfill call: cost 10 000 msat, fee 10 % -> agentMsat 9 000, split 50/50 holder/host.
-    function backfillSnapshot(over: { holderMsat?: number; hostMsat?: number; holderRowMsat?: number; holderRows?: boolean } = {}): ReconcileInput {
+    function backfillSnapshot(over: { holderMsat?: number; hostMsat?: number; holderRowMsat?: number; holderRows?: boolean; cappedMsat?: number } = {}): ReconcileInput {
       const { agentMsat, feeMsat } = splitJobCost(10_000, 1000);
       const holderMsat = over.holderMsat ?? Math.floor(agentMsat / 2);
       const hostMsat = over.hostMsat ?? agentMsat - holderMsat;
       const record = {
         id: "rec-b1", subtaskId: "b1", taskId: "tb", actorId: "host", coordinatorId: "coord-a",
-        payload: { accountId: "host", credits: hostMsat / 1000, msat: hostMsat, costMsat: 10_000, feeMsat, networkFeeBps: 1000, pricingBasis: "tokens", backfill: { reservationId: "r1", holderAccountId: "holder", holderMsat, hostMsat, holderShareBps: 5000 } },
+        payload: { accountId: "host", credits: hostMsat / 1000, msat: hostMsat, costMsat: 10_000, feeMsat, networkFeeBps: 1000, pricingBasis: "tokens", backfill: { reservationId: "r1", holderAccountId: "holder", holderMsat, hostMsat, holderShareBps: 5000, ...(over.cappedMsat !== undefined ? { holderCapMsat: 10_000, cappedMsat: over.cappedMsat } : {}) } },
       };
       const rowMsat = over.holderRowMsat ?? holderMsat;
       return {
@@ -155,6 +155,12 @@ describe("#115 reconcileLedger", () => {
     it("a split that is not the recorded share, or loses or creates msat, is flagged", () => {
       expect(run(backfillSnapshot({ holderMsat: 5_000, hostMsat: 4_000 })).byKind).toEqual({ backfill_split_mismatch: 1 });
       expect(run(backfillSnapshot({ holderMsat: 4_500, hostMsat: 4_501 })).byKind).toMatchObject({ accrual_pricing_mismatch: 1 });
+    });
+
+    it("past the lease's cap, the share moved to the host (cappedMsat) reconciles; an unrecorded move does not", () => {
+      expect(run(backfillSnapshot({ holderMsat: 1_500, hostMsat: 7_500, cappedMsat: 3_000 }))).toMatchObject({ ok: true });
+      expect(run(backfillSnapshot({ holderMsat: 0, hostMsat: 9_000, cappedMsat: 4_500, holderRows: false }))).toMatchObject({ ok: true });
+      expect(run(backfillSnapshot({ holderMsat: 1_500, hostMsat: 7_500 })).byKind).toEqual({ backfill_split_mismatch: 1 });
     });
 
     it("a holder row with no accrual behind it is flagged", () => {

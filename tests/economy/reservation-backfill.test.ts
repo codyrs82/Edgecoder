@@ -5,6 +5,7 @@ import {
   backfillConfigFromEnv,
   backfillGate,
   backfillSlotCap,
+  capBackfillSplit,
   overrunBackfill,
   splitBackfillEarnings,
   type BackfillCandidate,
@@ -101,5 +102,24 @@ describe("reservation backfill: preemption", () => {
     const running = [{ id: "short", claimedAtMs: now - 5_000 }, { id: "long", claimedAtMs: now - 16_000 }];
     expect(overrunBackfill(running, 0, now, cfg)).toEqual([]);
     expect(overrunBackfill(running, 1, now, cfg).map((r) => r.id)).toEqual(["long"]);
+  });
+});
+
+describe("reservation backfill: the holder's cap at the lease price", () => {
+  it("below the cap the split is unchanged; at it the holder gets exactly the room; above it everything goes to the host", () => {
+    expect(capBackfillSplit({ holderMsat: 400, hostMsat: 400 }, 0, 1_000)).toEqual({ holderMsat: 400, hostMsat: 400, cappedMsat: 0 });
+    expect(capBackfillSplit({ holderMsat: 400, hostMsat: 400 }, 600, 1_000)).toEqual({ holderMsat: 400, hostMsat: 400, cappedMsat: 0 });
+    expect(capBackfillSplit({ holderMsat: 400, hostMsat: 400 }, 700, 1_000)).toEqual({ holderMsat: 300, hostMsat: 500, cappedMsat: 100 });
+    expect(capBackfillSplit({ holderMsat: 400, hostMsat: 400 }, 1_000, 1_000)).toEqual({ holderMsat: 0, hostMsat: 800, cappedMsat: 400 });
+    expect(capBackfillSplit({ holderMsat: 400, hostMsat: 400 }, 5_000, 1_000)).toEqual({ holderMsat: 0, hostMsat: 800, cappedMsat: 400 });
+    expect(capBackfillSplit({ holderMsat: 400, hostMsat: 400 }, 0, 0)).toEqual({ holderMsat: 0, hostMsat: 800, cappedMsat: 400 });
+  });
+
+  it("conserves holder + host for every input", () => {
+    for (const holder of [0, 1, 7, 500]) for (const already of [0, 3, 499, 10_000]) for (const cap of [0, 1, 500, 20_000]) {
+      const r = capBackfillSplit({ holderMsat: holder, hostMsat: 123 }, already, cap);
+      expect(r.holderMsat + r.hostMsat).toBe(holder + 123);
+      expect(r.holderMsat).toBeLessThanOrEqual(Math.max(0, cap - already));
+    }
   });
 });

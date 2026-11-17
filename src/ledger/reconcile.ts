@@ -27,8 +27,9 @@
  *    `backfill` paid its agentMsat as two rows, the host's (reservation_backfill_host:<lease>,
  *    counted with the compute_contribution rows above: msat/credits in the payload are the host's)
  *    and the lease holder's (reservation_backfill_holder:<lease>). Host + holder must equal the
- *    recomputed agentMsat, the holder's part must be the recorded share, and per (holder, task)
- *    the holder rows must match the accruals.
+ *    recomputed agentMsat, the holder's part plus what the per-lease cap moved to the host
+ *    (cappedMsat) must be the recorded share, and per (holder, task) the holder rows must match
+ *    the accruals.
  *  - Task reserves: per task with a reserve (task_reserve / inference_reserve spends), what it paid
  *    out (compute_contribution + network_fee:<task> earns) plus what was refunded to the requester
  *    (task_submit_refund:<task>) must not exceed the reserve. More would be cSats created from
@@ -243,7 +244,9 @@ export function reconcileLedger(input: ReconcileInput, opts: { maxDiscrepancies?
       const holder = typeof bf.holderAccountId === "string" ? bf.holderAccountId : "";
       const shareBps = num(bf.holderShareBps);
       const expectedHolder = shareBps === undefined ? undefined : Math.floor((split.agentMsat * Math.max(0, Math.min(10_000, Math.floor(shareBps)))) / 10_000);
-      if (!holder || num(bf.hostMsat) !== msat || (expectedHolder !== undefined && expectedHolder !== holderMsat)) {
+      // Past the lease's cap the holder's share went to the host: recorded as cappedMsat.
+      const capped = Math.max(0, num(bf.cappedMsat) ?? 0);
+      if (!holder || num(bf.hostMsat) !== msat || (expectedHolder !== undefined && expectedHolder !== holderMsat + capped)) {
         flag({ kind: "backfill_split_mismatch", accountId: rep.accountId, taskId: rep.taskId, reportId: rep.reportId, detail: { hostMsat: msat ?? null, holderMsat, recordedHostMsat: bf.hostMsat ?? null, expectedHolderMsat: expectedHolder ?? null, holderAccountId: holder || null } });
       }
       if (holder && holderMsat > 0) {

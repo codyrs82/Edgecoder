@@ -391,7 +391,7 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
   // (NWC-paid calls are never taken as backfill.)
   const bf = billing?.nwc ? undefined : backfillAccrualFor(subtask, r.agentId, durationMs);
   forgetBackfillClaim(r.subtaskId);
-  const split = bf ? { ...bf, ...splitBackfillEarnings(agentMsat, backfillConfig.holderShareBps) } : undefined;
+  const split: (NonNullable<typeof bf> & { holderMsat: number; hostMsat: number; cappedMsat?: number }) | undefined = bf ? { ...bf, ...splitBackfillEarnings(agentMsat, backfillConfig.holderShareBps) } : undefined;
   if (billing?.nwc) {
     // Paid from the buyer's own wallet: a tally to the host and to EdgeCoder's fee, settled over
     // Lightning (direct-payments.ts). No cSats move.
@@ -456,7 +456,8 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
         ok: r.ok,
         resourceClass: subtask.projectMeta.resourceClass,
         // credits/msat above are the host's; the holder's share of agentMsat is recorded here.
-        ...(split ? { backfill: { reservationId: split.reservationId, holderAccountId: split.holderAccountId, holderMsat: split.holderMsat, hostMsat: split.hostMsat, holderShareBps: backfillConfig.holderShareBps } } : {})
+        // After the per-lease cap (accruePricedJob updates split in place): cappedMsat moved holder -> host.
+        ...(split ? { backfill: { reservationId: split.reservationId, holderAccountId: split.holderAccountId, holderMsat: split.holderMsat, hostMsat: split.hostMsat, holderShareBps: backfillConfig.holderShareBps, holderCapMsat: split.holderCapMsat, cappedMsat: split.cappedMsat ?? 0 } } : {})
       })
     });
     await pgStore?.persistLedgerRecord(earningsRecord);

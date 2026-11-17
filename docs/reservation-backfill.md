@@ -105,13 +105,24 @@ agents. On single-slot agents, the bound is the remainder of one call of ≤ 15 
 
   Both earn rows have `related_task_id` = the backfill task. Conservation is exact to the msat:
   host + holder + fee = cost.
+- **Cap at the lease price.** The holder's total backfill credit on one lease never exceeds what
+  they paid for it (`prepaidMsat`). At best, the reservation becomes free. Past the cap, the
+  holder's share goes to the host, so host + holder + fee is still the cost
+  (`capBackfillSplit`).
+  - On Postgres, the holder's running total for the lease is read under a per-lease advisory lock
+    (`BACKFILL_CAP_LOCK_NAMESPACE`, keyed by the holder reason). The read happens in the accrual's
+    own transaction, so concurrent accruals can't over-credit.
+  - In memory, the read and the write happen with no await in between.
+  - A lease that is no longer in the book caps at 0.
 - The `earnings_accrual` record carries the host's `credits` and `msat`, plus
-  `backfill {reservationId, holderAccountId, holderMsat, hostMsat, holderShareBps}`.
+  `backfill {reservationId, holderAccountId, holderMsat, hostMsat, holderShareBps, holderCapMsat,
+  cappedMsat}`. These are the amounts after the cap; `cappedMsat` is what the cap moved from the
+  holder to the host.
 - The lease's own accounting (prepaid, used, refund, settlement at end) is unchanged. The lease
   fields are never touched.
 - Ledger checks (`/ledger/verify`, `reconcile.ts`):
   - host + holder must equal the recomputed `agentMsat`;
-  - the holder's part must equal the recorded share;
+  - the holder's part plus `cappedMsat` must equal the recorded share;
   - per (holder, task), the holder rows must match the accruals (`backfill_split_mismatch`);
   - host rows count with `compute_contribution` rows;
   - task-reserve "paid" (and `taskLedgerTotals` in billing restore) includes both backfill reasons,
@@ -122,7 +133,9 @@ agents. On single-slot agents, the bound is the remainder of one call of ≤ 15 
 ## Visibility
 
 - `/account/reservations/list` and `POST /account/reservations` return `backfill` and
-  `backfillStats {jobs, earnedCSats, holderShare, preempted, holderWait, active}` for each lease.
+  `backfillStats {jobs, earnedCSats, capCSats, remainingCSats, holderShare, preempted, holderWait,
+  active}` for each lease. `capCSats` is the lease price and `remainingCSats` is the room left
+  under it.
   Jobs and earnings come from the ledger (`earnIncome`, by reason).
 - The holder's credit history (`/account/summary` recent, wallet) shows
   `reservation_backfill_holder:*` rows labeled "Your reserved machine's idle time (network jobs)".
@@ -136,8 +149,26 @@ agents. On single-slot agents, the bound is the remainder of one call of ≤ 15 
   are never billed as network work (`accrueResultCredits` still returns early for `reservationId`).
 - The sandbox, restricted-model, host-approval, envelope and market rules are unchanged. A lease
   holder's own-machines placement (`onlyAccountId`) is never backfill.
+- The holder can't profit from backfill beyond getting the lease free (the cap).
 - Self-dealing gains nothing. A holder or host who submits work to the leased machine pays the full
   price and gets back at most the host-side share less the fee.
+
+## Ending a lease whose machine went offline
+
+This is not backfill-specific, but it is part of the same change.
+
+- A lease ends as `agent_offline` once its agent has been unseen for 2 minutes. It is billed up to
+  the agent's **last-seen time**, clamped to `[startMs, endMs]`, not up to the moment the
+  coordinator noticed. The host's pay and the holder's refund follow from that time
+  (`offlineEndMs`, `ReservationBook.due`).
+- The last-seen time is the newer of two values:
+  - this coordinator's `agentCapabilities[agent].lastSeenMs`, updated on registration, heartbeat
+    and mesh activity;
+  - the newest `agent_registry.last_seen_ms` any coordinator recorded. This one is persisted in
+    Postgres, so it survives a coordinator restart.
+- **Fallback:** with no shared store and no local record (a restart without Postgres), or when the
+  last-seen time is 0 (a clean goodbye zeroes the local value), the lease is billed to the time it
+  was noticed, as before.
 
 ## Defaults
 

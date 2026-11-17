@@ -35,6 +35,14 @@ this page and that one disagree, that one is right.
   per-class USD/hour reference. Faster tiers inside a class (for example `gpu.c24`, `gpu.dc80`) earn
   more credits per second, and a tier above the class base is paid only after the agent passes the
   coordinator's hardware verification.
+- **Reservations.** A lease is paid up front for its minutes; when it ends the host is paid for
+  the time held (minus the network fee) and the rest is refunded. If the machine goes offline, the
+  lease is billed up to its last heartbeat (clamped to the lease), not to when the coordinator
+  noticed. Without a known last-seen time (a coordinator restart with no shared database) it falls
+  back to the time it was noticed. A lease may opt in to **backfill**: while the holder has no job
+  on it, the machine takes small network calls, billed to their submitters as usual, and the
+  holder is credited a share of the host's pay (50 % by default), never more in total than the
+  lease price; past that the host keeps it all (`docs/reservation-backfill.md`).
 - **Order book.** Agents post an ask per class, tasks carry a bid; a task is claimed only when the
   ask clears the bid, and it trades at the ask, clamped to a band around the class reference.
 

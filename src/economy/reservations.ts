@@ -10,7 +10,11 @@
  * (src/economy/reservation-backfill.ts, docs/reservation-backfill.md). Otherwise the agent takes
  * only the lease's jobs. When it ends (time up, cancelled, or the agent went
  * offline) the agent is paid for the time it was held, minus the network fee, and the rest is
- * refunded to the account.
+ * refunded to the account. A lease whose agent went offline is held until the agent was last seen
+ * (its last heartbeat, clamped to the lease), not until the coordinator noticed: the time
+ * the machine was already gone is refunded. With no last-seen time known (0 or missing: a clean
+ * goodbye without a shared store, or a coordinator restart without Postgres) it falls back to the
+ * time the coordinator noticed.
  *
  * Price: the class's reference per-second rate times the agent's tier weight, for every second
  * held, used or not (that is what holding a machine costs its owner).
@@ -68,6 +72,16 @@ export function reservationUsage(r: Pick<Reservation, "startMs" | "endMs" | "rat
   return { usedMsat, refundMsat: r.prepaidMsat - usedMsat };
 }
 
+/**
+ * When a lease whose agent went offline is billed to: the agent's last-seen time (registration,
+ * heartbeat or mesh activity; newest any coordinator recorded), clamped to [startMs, endMs]. Unknown (undefined or 0, as
+ * after a clean goodbye) falls back to `detectedAtMs`, the time the coordinator noticed.
+ */
+export function offlineEndMs(r: Pick<Reservation, "startMs" | "endMs">, lastSeenMs: number | undefined, detectedAtMs: number): number {
+  const at = lastSeenMs !== undefined && lastSeenMs > 0 ? lastSeenMs : detectedAtMs;
+  return Math.max(r.startMs, Math.min(r.endMs, at));
+}
+
 export class ReservationBook {
   private readonly byId = new Map<string, Reservation>();
 
@@ -100,15 +114,19 @@ export class ReservationBook {
       .sort((a, b) => b.startMs - a.startMs);
   }
 
-  /** Active leases that should end now: time is up, or the agent hasn't been seen for a while. */
-  due(now: number, lastSeenMs: (agentId: string) => number | undefined): Array<{ r: Reservation; reason: ReservationEndReason }> {
-    const out: Array<{ r: Reservation; reason: ReservationEndReason }> = [];
+  /**
+   * Active leases that should end now: time is up, or the agent hasn't been seen for a while.
+   * `atMs` is when the lease is billed to: its end when expired; for an offline agent the time it
+   * was last seen (offlineEndMs), else `now`.
+   */
+  due(now: number, lastSeenMs: (agentId: string) => number | undefined): Array<{ r: Reservation; reason: ReservationEndReason; atMs: number }> {
+    const out: Array<{ r: Reservation; reason: ReservationEndReason; atMs: number }> = [];
     for (const r of this.byId.values()) {
       if (r.status !== "active") continue;
-      if (now >= r.endMs) out.push({ r, reason: "expired" });
+      if (now >= r.endMs) out.push({ r, reason: "expired", atMs: r.endMs });
       else {
         const seen = lastSeenMs(r.agentId);
-        if (seen === undefined || now - seen > RESERVATION_OFFLINE_MS) out.push({ r, reason: "agent_offline" });
+        if (seen === undefined || now - seen > RESERVATION_OFFLINE_MS) out.push({ r, reason: "agent_offline", atMs: offlineEndMs(r, seen, now) });
       }
     }
     return out;
@@ -125,7 +143,7 @@ export class ReservationBook {
   endedCopy(id: string, atMs: number, reason: ReservationEndReason): Reservation | undefined {
     const r = this.byId.get(id);
     if (!r || r.status !== "active") return undefined;
-    const endAt = reason === "expired" ? r.endMs : Math.min(atMs, r.endMs);
+    const endAt = reason === "expired" ? r.endMs : Math.max(r.startMs, Math.min(atMs, r.endMs));
     const { usedMsat, refundMsat } = reservationUsage(r, endAt);
     return { ...r, status: "ended", endedAtMs: endAt, endReason: reason, usedMsat, refundMsat };
   }
@@ -173,7 +191,7 @@ export async function dueReservations(
   store: SharedReservationStore | null | undefined,
   now: number,
   localLastSeenMs: (agentId: string) => number | undefined
-): Promise<Array<{ r: Reservation; reason: ReservationEndReason }>> {
+): Promise<Array<{ r: Reservation; reason: ReservationEndReason; atMs: number }>> {
   const shared = store ? await store.agentLastSeenMs(book.activeAgentIds()) : new Map<string, number>();
   return book.due(now, (agentId) => {
     const local = localLastSeenMs(agentId);

@@ -9,6 +9,7 @@ import type { WorkReceipt } from "../receipts/receipt.js";
 import { clampLimit, parseCursor, type ReceiptEpoch, type ReceiptPage, type ReceiptStore } from "../receipts/store.js";
 import type { RateEpoch } from "../economy/rate-oracle.js";
 import type { Reservation } from "../economy/reservations.js";
+import { capBackfillSplit } from "../economy/reservation-backfill.js";
 import type { UsageRecord } from "../economy/usage.js";
 import type { HardwareVerificationRecord } from "../swarm/hardware-verification.js";
 import type { NonceStore } from "../security/nonce-verifier.js";
@@ -104,6 +105,8 @@ export const LEDGER_VERIFY_LOCK_NAMESPACE = 0x45430006;
 export const LEDGER_VERIFY_LOCK_KEY = 1;
 /** Periodic task-billing sweep (swarm/billing-sweep.ts): one instance per coordinator id at a time; key = hashtext(coordinator id). */
 export const TASK_BILLING_SWEEP_LOCK_NAMESPACE = 0x45430007;
+/** Reservation backfill: a lease holder's credits are capped per lease; key = hashtext(holder reason). */
+export const BACKFILL_CAP_LOCK_NAMESPACE = 0x45430008;
 /** Read-side dedupe bucket for issuance epochs when the caller does not pass its recalc interval. */
 export const DEFAULT_ISSUANCE_BUCKET_MS = 3_600_000;
 /** Event types that sign the stats ledger rather than record work; never a checkpoint target. */
@@ -1623,7 +1626,14 @@ export class PostgresStore {
     tx: CreditTransaction,
     feeTx?: CreditTransaction,
     /** More earn rows of the same accrual (reservation backfill: the lease holder's share). */
-    extra: CreditTransaction[] = []
+    extra: CreditTransaction[] = [],
+    /**
+     * Reservation backfill: `holder` (one of `extra`) may bring its account's total under its reason
+     * to at most `capMsat`; the excess moves to `tx` (the host). Read and written under a per-lease
+     * advisory lock in this transaction, so concurrent accruals cannot over-credit. The rows are
+     * changed in place to what was written.
+     */
+    cap?: { holder: CreditTransaction; capMsat: number }
   ): Promise<boolean> {
     const client = await this.pool.connect();
     try {
@@ -1652,6 +1662,18 @@ export class PostgresStore {
       if ((result.rowCount ?? 0) === 0) {
         await client.query("ROLLBACK");
         return false;
+      }
+      if (cap) {
+        await client.query(`SELECT pg_advisory_xact_lock(${BACKFILL_CAP_LOCK_NAMESPACE}, hashtext($1))`, [cap.holder.reason]);
+        const prior = await client.query(
+          `SELECT COALESCE(SUM(msat), 0) AS msat FROM credit_transactions WHERE account_id = $1 AND tx_type = 'earn' AND reason = $2`,
+          [cap.holder.accountId, cap.holder.reason]
+        );
+        const capped = capBackfillSplit({ holderMsat: cap.holder.msat ?? 0, hostMsat: tx.msat ?? 0 }, Number(prior.rows[0]?.msat ?? 0), cap.capMsat);
+        cap.holder.msat = capped.holderMsat;
+        cap.holder.credits = Math.round(capped.holderMsat * 1000) / 1_000_000;
+        tx.msat = capped.hostMsat;
+        tx.credits = Math.round(capped.hostMsat * 1000) / 1_000_000;
       }
       for (const row of [tx, ...extra, ...(feeTx ? [feeTx] : [])]) {
         if (row.credits <= 0) continue;

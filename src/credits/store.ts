@@ -6,6 +6,7 @@ import { CreditEngine } from "./engine.js";
 import { ComputeContributionReport, CreditTransaction } from "../common/types.js";
 import { contributionCredits, splitNetworkFee, LoadSnapshot } from "./pricing.js";
 import { pgStore } from "../db/store.js";
+import { capBackfillSplit } from "../economy/reservation-backfill.js";
 
 export const creditEngine = new CreditEngine();
 
@@ -38,17 +39,30 @@ export interface AccrualValuation {
  * holder's row (reservation_backfill_holder:<lease>, `holderMsat`), written in the same
  * transaction as the report and the fee row. hostMsat + holderMsat must equal agentMsat. The
  * returned row is still the host's.
+ *
+ * `holderCapMsat` (the lease price) caps the holder's total backfill credit on that lease: the part
+ * of holderMsat above the room left goes to the host (capBackfillSplit), read and written
+ * atomically (Postgres: per-lease advisory lock in the accrual's transaction; memory: no await in
+ * between). `backfill.holderMsat` / `hostMsat` are updated in place to what was credited.
  */
 export async function accruePricedJob(
   report: ComputeContributionReport,
   priced: { agentMsat: number; feeMsat: number },
-  backfill?: { reservationId: string; holderAccountId: string; holderMsat: number; hostMsat: number }
+  backfill?: { reservationId: string; holderAccountId: string; holderMsat: number; hostMsat: number; holderCapMsat?: number; cappedMsat?: number }
 ): Promise<CreditTransaction | null> {
   if (!(priced.agentMsat > 0)) return null;
   if (backfill && (backfill.holderMsat < 0 || backfill.hostMsat < 0 || backfill.holderMsat + backfill.hostMsat !== Math.round(priced.agentMsat))) {
     throw new Error("backfill_split_mismatch");
   }
   const now = Date.now();
+  /** What was actually credited (after the cap), reported back on `backfill`. */
+  const noteCredited = () => {
+    if (!backfill) return;
+    const holderMsat = holderTx?.msat ?? 0;
+    backfill.cappedMsat = backfill.holderMsat - holderMsat;
+    backfill.holderMsat = holderMsat;
+    backfill.hostMsat = tx.msat ?? 0;
+  };
   const hostMsat = backfill ? backfill.hostMsat : Math.round(priced.agentMsat);
   const tx: CreditTransaction = {
     txId: randomUUID(),
@@ -60,6 +74,7 @@ export async function accruePricedJob(
     timestampMs: now,
     msat: hostMsat,
   };
+  const holderReason = backfill ? `reservation_backfill_holder:${backfill.reservationId}` : "";
   const holderTx: CreditTransaction | undefined =
     backfill && backfill.holderMsat > 0
       ? {
@@ -67,7 +82,7 @@ export async function accruePricedJob(
           accountId: backfill.holderAccountId,
           type: "earn",
           credits: roundCredits(backfill.holderMsat / 1000),
-          reason: `reservation_backfill_holder:${backfill.reservationId}`,
+          reason: holderReason,
           relatedTaskId: report.taskId,
           timestampMs: now,
           msat: backfill.holderMsat,
@@ -98,13 +113,25 @@ export async function accruePricedJob(
       },
       tx,
       feeTx,
-      holderTx ? [holderTx] : []
+      holderTx ? [holderTx] : [],
+      holderTx && backfill?.holderCapMsat !== undefined ? { holder: holderTx, capMsat: backfill.holderCapMsat } : undefined
     );
+    if (inserted) noteCredited();
     return inserted ? tx : null;
   }
   if (!creditEngine.claimReport(report.reportId)) return null;
+  if (holderTx && backfill?.holderCapMsat !== undefined) {
+    // Synchronous from here to the records: concurrent accruals see each other's holder rows.
+    const already = creditEngine.history(backfill.holderAccountId).reduce((n, t) => n + (t.type === "earn" && t.reason === holderReason ? (t.msat ?? 0) : 0), 0);
+    const capped = capBackfillSplit({ holderMsat: holderTx.msat ?? 0, hostMsat: tx.msat ?? 0 }, already, backfill.holderCapMsat);
+    holderTx.msat = capped.holderMsat;
+    holderTx.credits = roundCredits(capped.holderMsat / 1000);
+    tx.msat = capped.hostMsat;
+    tx.credits = roundCredits(capped.hostMsat / 1000);
+  }
+  noteCredited();
   if (!backfill || tx.credits > 0) creditEngine.record(tx);
-  if (holderTx) creditEngine.record(holderTx);
+  if (holderTx && holderTx.credits > 0) creditEngine.record(holderTx);
   if (feeTx) creditEngine.record(feeTx);
   return tx;
 }

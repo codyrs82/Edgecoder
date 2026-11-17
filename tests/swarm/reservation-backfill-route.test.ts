@@ -103,7 +103,7 @@ async function finish(k: PeerKeys, c: { taskId: string; subtaskId: string }) {
 function lease(over: Partial<Reservation> = {}): Reservation {
   const r: Reservation = {
     id: `res-${randomUUID()}`, accountId: holder.peerId, agentId: reserved.peerId, agentAccountId: reserved.peerId, computeClass: "cpu", creditsPerSecond: 1,
-    model: MODEL, startMs: Date.now() - 1_000, endMs: Date.now() + 600_000, ratePerSecondMsat: 1, prepaidMsat: 600, status: "active", ...over,
+    model: MODEL, startMs: Date.now() - 1_000, endMs: Date.now() + 600_000, ratePerSecondMsat: 1, prepaidMsat: 10_000_000, status: "active", ...over,
   };
   ctx.reservations.add(r);
   return r;
@@ -175,10 +175,31 @@ describe("reservation backfill", () => {
     const charged = Math.round((reqBefore - store.creditEngine.balance(requester.peerId)) * 1000);
     expect(agentMsat + (fee[0].msat ?? 0)).toBe(charged);
     // The lease itself is untouched.
-    expect(ctx.reservations.get(r.id)).toMatchObject({ prepaidMsat: 600, status: "active" });
+    expect(ctx.reservations.get(r.id)).toMatchObject({ prepaidMsat: 10_000_000, status: "active" });
     // The lease API shows it.
     const stats = await backfill.backfillStats(ctx.reservations.get(r.id)!);
     expect(stats).toMatchObject({ enabled: true, jobs: 1, holderMsat: h[0].msat });
+    endLease(r);
+  });
+
+  test("cap: the holder is never credited more than the lease price; the rest goes to the host", async () => {
+    const r = lease({ backfill: true, prepaidMsat: 3 });
+    const reqBefore = store.creditEngine.balance(requester.peerId);
+    const c = await submit(requester, { maxTokens: 2_048 }, "summarize this: " + "lorem ipsum ".repeat(100));
+    expect((await pull(reserved))?.id).toBe(c.subtaskId);
+    const reply = Array.from({ length: 1_500 }, (_, i) => `v${(i * 7919) % 10_007}`).join(" ");
+    await post("/inference/chunks", { subtaskId: c.subtaskId, seq: 0, delta: reply, done: true, promptTokens: 400, outputTokens: 2_000 }, reserved);
+    expect((await post("/result", { subtaskId: c.subtaskId, taskId: c.taskId, agentId: reserved.peerId, ok: true, output: reply, durationMs: 12_000, model: MODEL }, reserved)).statusCode).toBe(200);
+    const of = (acct: string) => store.creditEngine.history(acct).filter((t) => t.type === "earn" && t.relatedTaskId === c.taskId);
+    const end = Date.now() + 5_000;
+    while (of(reserved.peerId).length === 0 && Date.now() < end) await sleep(20);
+    const holderMsat = of(holder.peerId).reduce((n, t) => n + (t.msat ?? 0), 0);
+    const hostMsat = of(reserved.peerId).reduce((n, t) => n + (t.msat ?? 0), 0);
+    const feeMsat = of(store.NETWORK_FEE_POOL_ACCOUNT).reduce((n, t) => n + (t.msat ?? 0), 0);
+    expect(holderMsat).toBe(3);
+    expect(hostMsat).toBeGreaterThan(3);
+    expect(holderMsat + hostMsat + feeMsat).toBe(Math.round((reqBefore - store.creditEngine.balance(requester.peerId)) * 1000));
+    expect(await backfill.backfillStats(ctx.reservations.get(r.id)!)).toMatchObject({ holderMsat: 3, capMsat: 3, remainingMsat: 0 });
     endLease(r);
   });
 
@@ -267,7 +288,7 @@ describe("reservation backfill", () => {
     const r = lease({ backfill: false });
     const toggled = await post("/account/reservations/backfill", { reservationId: r.id, enabled: true }, holder);
     expect(toggled.statusCode, toggled.body).toBe(200);
-    expect(toggled.json().reservation).toMatchObject({ id: r.id, backfill: true, backfillStats: { jobs: 0, earnedCSats: 0, holderShare: 0.5 } });
+    expect(toggled.json().reservation).toMatchObject({ id: r.id, backfill: true, backfillStats: { jobs: 0, earnedCSats: 0, capCSats: 10_000, remainingCSats: 10_000, holderShare: 0.5 } });
     expect(ctx.reservations.get(r.id)?.backfill).toBe(true);
     // Not the holder's: unknown.
     expect((await post("/account/reservations/backfill", { reservationId: r.id, enabled: false }, requester)).statusCode).toBe(404);
