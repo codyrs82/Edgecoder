@@ -470,6 +470,72 @@ export function registerCoordinatorOpsRoutes(app: FastifyInstance, { autoRequest
     return reply.code(dismissed > 0 ? 200 : 502).send({ ok: dismissed > 0, nodeId: body.nodeId, dismissed, blockDays: body.blockDays, coordinators });
   });
 
+  // Remove an approved machine (e.g. its VM was destroyed). Revokes its enrollment so the token stops
+  // working, and drops it from every coordinator's agent registry and status projection. Ledger and
+  // earnings rows are kept. Refuses while it holds a reservation lease or runs a task, unless force.
+  // System admins only; audited as node.remove. Owners delete their own machines with DELETE /nodes/:id.
+  app.post("/coordinator/ops/node-remove", async (req, reply) => {
+    const principal = await requireCoordinatorOperationsUser(req as any, reply);
+    if (!principal) return;
+    const { user, access } = principal;
+    if (!access.isSystemAdmin || !access.canManageCoordinatorOps) {
+      return reply.code(403).send({ error: "coordinator_operations_forbidden" });
+    }
+    if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
+    const body = z
+      .object({
+        nodeId: z.string().min(1).max(200).regex(/^[A-Za-z0-9._:@-]+$/),
+        nodeKind: z.enum(["agent", "coordinator"]).default("agent"),
+        force: z.boolean().default(false)
+      })
+      .parse(req.body);
+    if (!COORDINATOR_ADMIN_TOKEN) {
+      return reply.code(503).send({ error: "coordinator_admin_token_not_configured", detail: "Set COORDINATOR_ADMIN_TOKEN on the portal (the coordinators' ADMIN_API_TOKEN)." });
+    }
+    const urls = [...new Set((await discoverCoordinatorUrlsForPortal()).map((u: string) => u.replace(/\/+$/, "")))];
+    const callAll = (payload: { force: boolean; dryRun: boolean }) =>
+      Promise.all(
+        urls.map(async (url) => {
+          try {
+            const res = await request(`${url}/admin/nodes/${encodeURIComponent(body.nodeId)}/remove`, {
+              method: "POST",
+              headers: { "x-admin-token": COORDINATOR_ADMIN_TOKEN, "content-type": "application/json" },
+              body: JSON.stringify(payload),
+              headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+              bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS
+            });
+            const json = (await res.body.json().catch(() => ({}))) as Record<string, unknown>;
+            return { url, status: res.statusCode, json };
+          } catch {
+            return { url, status: 0, json: {} as Record<string, unknown> };
+          }
+        })
+      );
+    // Check first on every coordinator, so a lease or running task anywhere blocks the whole removal.
+    if (!body.force) {
+      const blocked = (await callAll({ force: false, dryRun: true })).find((c) => c.status === 409);
+      if (blocked) {
+        const error = String(blocked.json.error || "node_busy");
+        return reply.code(409).send({ error, detail: `${body.nodeId} ${String(blocked.json.detail || "is busy")}; end it first or remove with force.`, coordinator: blocked.url });
+      }
+    }
+    const enrollment = await store.getNodeEnrollment(body.nodeId);
+    const revoked = enrollment ? await store.deleteNodeEnrollment(body.nodeId) : false;
+    const coordinators = (await callAll({ force: body.force, dryRun: false })).map(({ url, status }) => ({ url, status }));
+    const removed = coordinators.filter((c) => c.status >= 200 && c.status < 300).length;
+    if (!revoked && removed === 0) return reply.code(404).send({ error: "node_not_found", coordinators });
+    await store.appendAdminAudit({
+      actorUserId: user.userId,
+      actorEmail: user.email,
+      action: "node.remove",
+      targetUserId: enrollment?.ownerUserId ?? null,
+      targetEmailHint: enrollment?.ownerEmail ?? null,
+      detail: { nodeId: body.nodeId, nodeKind: enrollment?.nodeKind ?? body.nodeKind, force: body.force, tokenRevoked: revoked, removed, coordinators: coordinators.length }
+    });
+    req.log.info({ nodeId: body.nodeId, by: user.email, revoked, removed, force: body.force }, "admin_node_remove");
+    return reply.send({ ok: true, nodeId: body.nodeId, tokenRevoked: revoked, removed, coordinators });
+  });
+
   app.post("/coordinator/ops/coordinator-ollama", async (req, reply) => {
     const principal = await requireCoordinatorOperationsUser(req as any, reply);
     if (!principal) return;

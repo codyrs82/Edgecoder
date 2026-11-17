@@ -280,13 +280,16 @@ app.get("/portal/settings/admin", async (_req, reply) => {
     </div>
     <div id="adminNodeApprovalSection" class="hidden">
     <div class="card">
-      <h3 class="u-mt-0">Coordinator enrollment requests</h3>
+      <h3 class="u-mt-0">Enrollment requests</h3>
+      <p class="muted u-mt-0" data-node-kinds-explainer>Agents run jobs. Coordinators route jobs between agents (EdgeCoder runs these today).</p>
       <div class="row">
-        <button class="primary" id="filterAllBtn">All pending</button>
-        <button id="filterCoordinatorBtn">Coordinator enrollment requests</button>
-        <button id="filterAgentBtn">Agent enrollment requests</button>
-        <label class="muted" for="rejectBlockDays">On reject of an ownerless request, block the agent id for</label>
-        <input type="number" id="rejectBlockDays" min="0" max="365" value="0" aria-label="Block days"> <span class="muted">days (0 = no block)</span>
+        <button class="primary" id="filterAllBtn">All <span id="pendingCount-all"></span></button>
+        <button id="filterAgentBtn">Agents <span id="pendingCount-agent"></span></button>
+        <button id="filterCoordinatorBtn">Coordinators <span id="pendingCount-coordinator"></span></button>
+      </div>
+      <div class="row">
+        <label class="muted" for="rejectBlockDays">On reject of an ownerless request, block the agent id for
+        <input type="number" class="u-w-num" id="rejectBlockDays" min="0" max="365" value="0" aria-label="Block days"> days (0 = no block)</label>
       </div>
       <div class="table-scroll wide"><table>
         <thead><tr><th>Node</th><th>Kind</th><th>Owner email</th><th>Email verified</th><th>IP</th><th>Country</th><th>VPN</th><th>Last seen</th><th class="sticky-actions">Actions</th></tr></thead>
@@ -296,14 +299,16 @@ app.get("/portal/settings/admin", async (_req, reply) => {
     </div>
     <div class="card">
       <h3 class="u-mt-0">Approved nodes</h3>
+      <p class="muted u-mt-0" data-node-kinds-explainer>Agents run jobs. Coordinators route jobs between agents (EdgeCoder runs these today).</p>
       <div class="row">
-        <button class="primary" id="approvedFilterAllBtn">All approved</button>
-        <button id="approvedFilterCoordinatorBtn">Coordinators</button>
-        <button id="approvedFilterAgentBtn">Agents</button>
-        <button id="approvedFilterActiveBtn">Active only</button>
+        <button class="primary" id="approvedFilterAllBtn">All <span id="approvedCount-all"></span></button>
+        <button id="approvedFilterAgentBtn">Agents <span id="approvedCount-agent"></span></button>
+        <button id="approvedFilterCoordinatorBtn">Coordinators <span id="approvedCount-coordinator"></span></button>
+        <button id="approvedFilterActiveBtn">Active only <span id="approvedCount-active"></span></button>
+        <button id="approvedFilterStaleBtn">Offline &gt; 7 days <span id="approvedCount-stale"></span></button>
       </div>
       <div class="table-scroll wide"><table>
-        <thead><tr><th>Node</th><th>Kind</th><th>Owner email</th><th>Email verified</th><th>Active</th><th>IP</th><th>Country</th><th>VPN</th><th>Last seen</th><th>Updated</th></tr></thead>
+        <thead><tr><th>Node</th><th>Kind</th><th>Owner email</th><th>Email verified</th><th>Active</th><th>IP</th><th>Country</th><th>VPN</th><th>Last seen</th><th>Updated</th><th class="sticky-actions">Actions</th></tr></thead>
         <tbody id="opsApprovedBody"></tbody>
       </table></div>
       <div id="opsApprovedNote" class="muted"></div>
@@ -328,15 +333,28 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       if (mode === "all") return nodes;
       return (nodes || []).filter((n) => String(n.nodeKind) === mode);
     }
-    function filterApproved(nodes, mode, activeOnly) {
+    const OFFLINE_AFTER_MS = 10 * 60 * 1000;
+    const STALE_MS = 7 * 24 * 60 * 60 * 1000;
+    // Offline: not active, or not seen for 10 minutes. Stale: offline and not seen for over 7 days.
+    function isOffline(n) { return n.active !== true || !n.lastSeenMs || Date.now() - Number(n.lastSeenMs) > OFFLINE_AFTER_MS; }
+    function isStale(n) { return isOffline(n) && (!n.lastSeenMs || Date.now() - Number(n.lastSeenMs) > STALE_MS); }
+    function filterApproved(nodes, mode, activeOnly, staleOnly) {
       let values = nodes || [];
       if (mode !== "all") values = values.filter((n) => String(n.nodeKind) === mode);
       if (activeOnly) values = values.filter((n) => n.active === true);
+      if (staleOnly) values = values.filter(isStale);
       return values;
     }
+    function lastSeenCell(n) {
+      if (!isOffline(n)) return fmtTime(n.lastSeenMs);
+      return n.lastSeenMs ? "<span class='u-danger'>Offline since " + fmtTime(n.lastSeenMs) + "</span>" : "<span class='u-danger'>Offline (never seen)</span>";
+    }
+    function setCount(id, value) { const el = document.getElementById(id); if (el) el.textContent = "(" + value + ")"; }
     let pendingFilter = "all";
     let approvedFilter = "all";
     let approvedActiveOnly = false;
+    let approvedStaleOnly = false;
+    let canRemoveNodes = false;
     let cachedPending = [];
     let cachedApproved = [];
     let canManageApprovals = false;
@@ -372,7 +390,10 @@ app.get("/portal/settings/admin", async (_req, reply) => {
         coordinator: cachedPending.filter((n) => n.nodeKind === "coordinator").length,
         agent: cachedPending.filter((n) => n.nodeKind === "agent").length
       };
-      document.getElementById("opsPendingNote").textContent = "Filter: " + pendingFilter + " | all=" + counts.all + " coordinator=" + counts.coordinator + " agent=" + counts.agent;
+      setCount("pendingCount-all", counts.all);
+      setCount("pendingCount-agent", counts.agent);
+      setCount("pendingCount-coordinator", counts.coordinator);
+      document.getElementById("opsPendingNote").textContent = "";
       document.getElementById("filterAllBtn").className = pendingFilter === "all" ? "primary" : "";
       document.getElementById("filterCoordinatorBtn").className = pendingFilter === "coordinator" ? "primary" : "";
       document.getElementById("filterAgentBtn").className = pendingFilter === "agent" ? "primary" : "";
@@ -380,27 +401,35 @@ app.get("/portal/settings/admin", async (_req, reply) => {
 
     function renderApproved() {
       const body = document.getElementById("opsApprovedBody");
-      const rows = filterApproved(cachedApproved, approvedFilter, approvedActiveOnly).map((n) => {
+      const rows = filterApproved(cachedApproved, approvedFilter, approvedActiveOnly, approvedStaleOnly).map((n) => {
+        const removeBtn = canRemoveNodes
+          ? "<button class='danger removeNodeBtn' data-node-id='" + encodeAttr(n.nodeId) + "' data-node-kind='" + encodeAttr(n.nodeKind) + "'>Remove</button>"
+          : "<span class='muted'>Read-only</span>";
         const ownerHost = n.ownerEmail ? "<div class='nowrap'>" + hostBadge(n.ownerEmail) + (isHostEmail(n.ownerEmail) ? "" : " " + hostButton(n.ownerEmail, "Approve owner as host")) + "</div>" : "";
         return "<tr><td>" + trunc(n.nodeId) + "</td><td>" + escapeHtml(n.nodeKind) + "</td><td>" + trunc(n.ownerEmail || "unknown") + ownerHost + "</td><td>" +
           String(Boolean(n.emailVerified)) + "</td><td>" + (n.active === true ? "yes" : "no") + "</td><td>" + escapeHtml(n.sourceIp || "unknown") +
           "</td><td>" + escapeHtml(n.countryCode || "unknown") + "</td><td>" + (n.vpnDetected === true ? "yes" : "no") + "</td><td>" +
-          fmtTime(n.lastSeenMs) + "</td><td>" + fmtTime(n.updatedAtMs) + "</td></tr>";
+          lastSeenCell(n) + "</td><td>" + fmtTime(n.updatedAtMs) + "</td><td class='sticky-actions'>" + removeBtn + "</td></tr>";
       });
-      body.innerHTML = rows.length > 0 ? rows.join("") : "<tr><td colspan='10'>No approved nodes for this filter.</td></tr>";
+      body.innerHTML = rows.length > 0 ? rows.join("") : "<tr><td colspan='11'>No approved nodes for this filter.</td></tr>";
       const counts = {
         all: cachedApproved.length,
         coordinator: cachedApproved.filter((n) => n.nodeKind === "coordinator").length,
         agent: cachedApproved.filter((n) => n.nodeKind === "agent").length,
-        active: cachedApproved.filter((n) => n.active === true).length
+        active: cachedApproved.filter((n) => n.active === true).length,
+        stale: cachedApproved.filter(isStale).length
       };
-      document.getElementById("opsApprovedNote").textContent =
-        "Filter: " + approvedFilter + (approvedActiveOnly ? " + active-only" : "") +
-        " | all=" + counts.all + " coordinator=" + counts.coordinator + " agent=" + counts.agent + " active=" + counts.active;
+      setCount("approvedCount-all", counts.all);
+      setCount("approvedCount-agent", counts.agent);
+      setCount("approvedCount-coordinator", counts.coordinator);
+      setCount("approvedCount-active", counts.active);
+      setCount("approvedCount-stale", counts.stale);
+      document.getElementById("opsApprovedNote").textContent = "";
       document.getElementById("approvedFilterAllBtn").className = approvedFilter === "all" ? "primary" : "";
       document.getElementById("approvedFilterCoordinatorBtn").className = approvedFilter === "coordinator" ? "primary" : "";
       document.getElementById("approvedFilterAgentBtn").className = approvedFilter === "agent" ? "primary" : "";
       document.getElementById("approvedFilterActiveBtn").className = approvedActiveOnly ? "primary" : "";
+      document.getElementById("approvedFilterStaleBtn").className = approvedStaleOnly ? "primary" : "";
     }
 
     async function refreshOps() {
@@ -408,6 +437,7 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       cachedPending = data.pendingNodes || [];
       cachedApproved = data.approvedNodes || [];
       canManageApprovals = Boolean(data.access && data.access.canManageApprovals);
+      canRemoveNodes = canManageApprovals && Boolean(data.access && data.access.isSystemAdmin);
       renderPending();
       renderApproved();
     }
@@ -426,6 +456,39 @@ app.get("/portal/settings/admin", async (_req, reply) => {
     document.getElementById("approvedFilterCoordinatorBtn").addEventListener("click", () => { approvedFilter = "coordinator"; renderApproved(); });
     document.getElementById("approvedFilterAgentBtn").addEventListener("click", () => { approvedFilter = "agent"; renderApproved(); });
     document.getElementById("approvedFilterActiveBtn").addEventListener("click", () => { approvedActiveOnly = !approvedActiveOnly; renderApproved(); });
+    document.getElementById("approvedFilterStaleBtn").addEventListener("click", () => { approvedStaleOnly = !approvedStaleOnly; renderApproved(); });
+
+    // Remove an approved machine (POST /coordinator/ops/node-remove): revokes its token, drops it on the
+    // coordinators, keeps its earnings history. A reservation lease or a running task blocks it; the
+    // admin is then offered a forced removal.
+    async function removeNode(nodeId, nodeKind, force) {
+      return api("/coordinator/ops/node-remove", { method: "POST", body: JSON.stringify({ nodeId, nodeKind, force }) });
+    }
+    document.getElementById("opsApprovedBody").addEventListener("click", async (event) => {
+      const target = event.target;
+      if (!target || !target.classList || !target.classList.contains("removeNodeBtn")) return;
+      const nodeId = decodeURIComponent(target.getAttribute("data-node-id") || "");
+      const nodeKind = decodeURIComponent(target.getAttribute("data-node-kind") || "agent");
+      if (!nodeId) return;
+      if (!window.confirm("Remove " + nodeId + "? Its token stops working; it must be re-enrolled to come back. Earnings history is kept.")) return;
+      try {
+        await removeNode(nodeId, nodeKind, false);
+        showToast("Removed " + nodeId);
+      } catch (err) {
+        const msg = String(err.message || err);
+        const why = /active_reservation/.test(msg) ? "it holds an active reservation lease" : /running_task/.test(msg) ? "it is running a task" : "";
+        if (!why) { showToast("Remove failed: " + msg, true); return; }
+        if (!window.confirm("Cannot remove " + nodeId + " yet: " + why + " (" + msg + "). Remove it anyway (force)?")) return;
+        try {
+          await removeNode(nodeId, nodeKind, true);
+          showToast("Removed " + nodeId + " (forced)");
+        } catch (err2) {
+          showToast("Remove failed: " + String(err2.message || err2), true);
+          return;
+        }
+      }
+      await refreshOps();
+    });
 
     document.getElementById("opsPendingBody").addEventListener("click", async (event) => {
       const target = event.target;

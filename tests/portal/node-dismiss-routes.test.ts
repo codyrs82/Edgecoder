@@ -4,10 +4,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // Rejecting a pending request from a node with no portal enrollment (owner "unknown") goes to the
 // coordinators' /admin/nodes/:id/dismiss; such a node is never approved.
 const calls: Array<{ url: string; headers: Record<string, string>; body: unknown }> = [];
+let respond: (url: string, body: any) => { status: number; json: unknown } = () => ({ status: 200, json: {} });
 vi.mock("undici", () => ({
   request: vi.fn(async (url: string, opts: { headers: Record<string, string>; body?: string }) => {
-    calls.push({ url, headers: opts.headers, body: opts.body ? JSON.parse(opts.body) : undefined });
-    return { statusCode: 200, body: { dump: async () => {}, json: async () => ({}), text: async () => "" } };
+    const body = opts.body ? JSON.parse(opts.body) : undefined;
+    calls.push({ url, headers: opts.headers, body });
+    const r = respond(url, body);
+    return { statusCode: r.status, body: { dump: async () => {}, json: async () => r.json, text: async () => "" } };
   })
 }));
 const { registerCoordinatorOpsRoutes } = await import("../../src/portal/routes/coordinator-ops.js");
@@ -15,6 +18,7 @@ const { registerCoordinatorOpsRoutes } = await import("../../src/portal/routes/c
 function build(opts: { isSystemAdmin?: boolean; enrolled?: boolean } = {}) {
   const audit: unknown[] = [];
   const autoRequested: unknown[] = [];
+  const deleted: string[] = [];
   const app = Fastify();
   registerCoordinatorOpsRoutes(app, {
     COORDINATOR_ADMIN_TOKEN: "coord-admin",
@@ -31,15 +35,16 @@ function build(opts: { isSystemAdmin?: boolean; enrolled?: boolean } = {}) {
     store: {
       getNodeEnrollment: async (id: string) => (opts.enrolled ? { nodeId: id, nodeKind: "agent", ownerEmail: "owner@x.io", nodeApproved: false } : null),
       setNodeApproval: async () => undefined,
-      deleteNodeEnrollment: async () => true,
+      deleteNodeEnrollment: async (id: string) => { deleted.push(id); return true; },
+      deleteLedgerRows: async () => { throw new Error("history must be kept"); },
       appendAdminAudit: async (e: unknown) => { audit.push(e); return "a1"; }
     }
   } as never);
-  return { app, audit, autoRequested };
+  return { app, audit, autoRequested, deleted };
 }
 
 describe("ownerless enrollment requests", () => {
-  beforeEach(() => { calls.length = 0; });
+  beforeEach(() => { calls.length = 0; respond = () => ({ status: 200, json: {} }); });
 
   it("refuses to approve a node with no owner account", async () => {
     const { app } = build();
@@ -79,6 +84,53 @@ describe("ownerless enrollment requests", () => {
     const res = await app.inject({ method: "POST", url: "/coordinator/ops/node-approval", payload: { nodeId: "mac-1", nodeKind: "agent", approved: true } });
     expect(res.statusCode, res.body).toBe(200);
     expect(autoRequested).toEqual([expect.objectContaining({ nodeId: "mac-1", ownerEmail: "owner@x.io" })]);
+    await app.close();
+  });
+});
+
+describe("removing an approved machine (node.remove)", () => {
+  beforeEach(() => { calls.length = 0; respond = () => ({ status: 200, json: {} }); });
+  const remove = (app: ReturnType<typeof build>["app"], payload: unknown) => app.inject({ method: "POST", url: "/coordinator/ops/node-remove", payload });
+
+  it("revokes the token, drops it on every coordinator, keeps history and audits it", async () => {
+    const { app, audit, deleted } = build({ enrolled: true });
+    const res = await remove(app, { nodeId: "ec-st10-chi-gpu0-1", nodeKind: "agent" });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(res.json()).toMatchObject({ ok: true, tokenRevoked: true, removed: 2 });
+    expect(deleted).toEqual(["ec-st10-chi-gpu0-1"]);
+    // A dry-run check on both coordinators, then the removal on both.
+    expect(calls.map((c) => (c.body as { dryRun: boolean }).dryRun)).toEqual([true, true, false, false]);
+    for (const c of calls) {
+      expect(c.url).toMatch(/\/admin\/nodes\/ec-st10-chi-gpu0-1\/remove$/);
+      expect(c.headers["x-admin-token"]).toBe("coord-admin");
+    }
+    expect(audit).toEqual([expect.objectContaining({ action: "node.remove", actorEmail: "admin@x.io", targetEmailHint: "owner@x.io", detail: expect.objectContaining({ nodeId: "ec-st10-chi-gpu0-1", tokenRevoked: true, force: false }) })]);
+    await app.close();
+  });
+
+  it("refuses while a coordinator reports an active reservation lease, unless forced", async () => {
+    respond = (url, body) => (body.dryRun && url.startsWith("https://seed-eu") ? { status: 409, json: { error: "active_reservation", detail: "holds active reservation r1 until 2026-11-16T12:00:00.000Z" } } : body.force ? { status: 200, json: {} } : { status: body.dryRun ? 200 : 409, json: {} });
+    const { app, audit, deleted } = build({ enrolled: true });
+    const res = await remove(app, { nodeId: "busy-1", nodeKind: "agent" });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe("active_reservation");
+    expect(res.json().detail).toContain("reservation r1");
+    expect(deleted).toEqual([]);
+    expect(audit).toEqual([]);
+    calls.length = 0;
+    const forced = await remove(app, { nodeId: "busy-1", nodeKind: "agent", force: true });
+    expect(forced.statusCode, forced.body).toBe(200);
+    expect(calls.every((c) => (c.body as { force: boolean; dryRun: boolean }).force === true && (c.body as { dryRun: boolean }).dryRun === false)).toBe(true);
+    expect(deleted).toEqual(["busy-1"]);
+    expect(audit).toEqual([expect.objectContaining({ action: "node.remove", detail: expect.objectContaining({ force: true }) })]);
+    await app.close();
+  });
+
+  it("is for system admins only", async () => {
+    const { app, deleted } = build({ isSystemAdmin: false, enrolled: true });
+    expect((await remove(app, { nodeId: "x1", nodeKind: "agent" })).statusCode).toBe(403);
+    expect(calls).toEqual([]);
+    expect(deleted).toEqual([]);
     await app.close();
   });
 });

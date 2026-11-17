@@ -84,3 +84,28 @@ describe("Settings > Admin enrollment requests", () => {
     expect(h.approvalToast(true, "node_has_no_owner")).toBe("Approve failed: node_has_no_owner");
   });
 });
+
+describe("Settings > Admin: node labels and removal", () => {
+  it("names the cards by what they hold and explains agents vs coordinators", async () => {
+    const html = await adminHtml();
+    expect(html).toContain(">Enrollment requests</h3>");
+    expect(html).not.toContain("Coordinator enrollment requests");
+    expect(html).not.toContain("Agent enrollment requests");
+    const explainer = "Agents run jobs. Coordinators route jobs between agents (EdgeCoder runs these today).";
+    expect(html.split(explainer).length - 1).toBe(2);
+    for (const id of ["pendingCount-all", "pendingCount-agent", "pendingCount-coordinator", "approvedCount-all", "approvedCount-agent", "approvedCount-coordinator", "approvedCount-stale"]) expect(html).toContain(`id="${id}"`);
+    expect(html).toMatch(/id="filterAllBtn">All </);
+    expect(html).toMatch(/id="filterAgentBtn">Agents </);
+    expect(html).toMatch(/id="filterCoordinatorBtn">Coordinators </);
+    expect(html).toContain("Offline &gt; 7 days");
+    expect(html).toMatch(/<input type="number" class="u-w-num" id="rejectBlockDays"/);
+  });
+
+  it("offers Remove on approved nodes with the agreed confirm text, and shows offline since", async () => {
+    const html = await adminHtml();
+    expect(html).toContain("removeNodeBtn");
+    expect(html).toContain("/coordinator/ops/node-remove");
+    expect(html).toContain("? Its token stops working; it must be re-enrolled to come back. Earnings history is kept.");
+    expect(html).toContain("Offline since ");
+  });
+});

@@ -15,7 +15,7 @@ import {
   verifyReporterEvidenceSignature
 } from "../../../security/blacklist.js";
 import type { CoordinatorApp } from "../app.js";
-import { mesh, peerScore, identity, coordinatorKeys, protocol } from "../context.js";
+import { mesh, peerScore, identity, coordinatorKeys, protocol, queue, reservations } from "../context.js";
 import { pgStore } from "../../../db/store.js";
 import { mutable } from "../mutable-state.js";
 import {
@@ -26,8 +26,10 @@ import {
   appendBlacklistRecord,
   issueCoordinatorBlacklistRecord,
   behaviorTracker,
-  autoBlacklister
+  autoBlacklister,
+  agentCapabilities
 } from "../agent-state.js";
+import { nodeRemovalBlocker } from "../node-removal.js";
 import { requireMeshToken, ADMIN_API_TOKEN, authorizeAdmin } from "../auth.js";
 
 export function registerSecurityRoutes(app: CoordinatorApp): void {
@@ -216,6 +218,26 @@ export function registerSecurityRoutes(app: CoordinatorApp): void {
       }
       req.log.info({ nodeId: params.nodeId, nodeKind: body.nodeKind, removed, blockDays: body.blockDays, reason: body.reason }, "admin_node_request_dismissed");
       return { ok: true, nodeId: params.nodeId, removed, blacklisted, coordinatorId: identity.peerId };
+    });
+
+    /**
+     * Remove an approved machine (its host deleted it, or an admin is cleaning up). Refuses while it
+     * holds an active reservation lease or is running a task, unless force. dryRun only checks.
+     * Drops it from the agent registry and the status projection; ledger and earnings rows are untouched.
+     * The portal revokes the enrollment token, so the agent cannot register again.
+     */
+    admin.post("/admin/nodes/:nodeId/remove", async (req, reply) => {
+      if (!authorizeAdmin(req, reply)) return;
+      const params = z.object({ nodeId: z.string().min(1).max(200).regex(/^[A-Za-z0-9._:@-]+$/) }).parse(req.params);
+      const body = z.object({ force: z.boolean().default(false), dryRun: z.boolean().default(false) }).parse(req.body ?? {});
+      const lease = reservations.activeForAgent(params.nodeId);
+      const blocker = nodeRemovalBlocker({ lease: lease ? { id: lease.id, endMs: lease.endMs } : undefined, runningClaims: queue.activeClaims().get(params.nodeId)?.all ?? 0 });
+      if (blocker && !body.force) return reply.code(409).send({ ...blocker, nodeId: params.nodeId, coordinatorId: identity.peerId });
+      if (body.dryRun) return { ok: true, dryRun: true, nodeId: params.nodeId, coordinatorId: identity.peerId };
+      const registered = agentCapabilities.delete(params.nodeId);
+      const projected = pgStore ? await pgStore.deleteNodeStatusProjection(params.nodeId) : 0;
+      req.log.info({ nodeId: params.nodeId, registered, projected, force: body.force, blocker: blocker?.error }, "admin_node_removed");
+      return { ok: true, nodeId: params.nodeId, registered, projected, forced: Boolean(blocker), coordinatorId: identity.peerId };
     });
   });
 }

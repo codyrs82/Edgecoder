@@ -206,6 +206,7 @@ tbody tr:hover td.sticky-actions { background: var(--bg-elevated); }
 .u-pad-12 { padding: 12px !important; }
 .u-flex-1 { flex: 1 !important; } .u-between { justify-content: space-between !important; }
 .u-w-full { width: 100% !important; } .u-w-34 { width: 34% !important; }
+.u-w-num { width: 72px !important; min-width: 0 !important; flex: none !important; display: inline-block !important; }
 .u-center { text-align: center !important; } .u-left { text-align: left !important; } .u-break-all { word-break: break-all !important; }
 .u-fs-10 { font-size: 10px !important; } .u-fs-12 { font-size: 12px !important; } .u-fs-13 { font-size: 13px !important; }
 .u-font-ui { font-family: system-ui !important; } .u-font-mono { font-family: var(--font-mono) !important; }
