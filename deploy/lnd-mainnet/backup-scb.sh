@@ -15,4 +15,7 @@ fly ssh console -a "$A" --machine "$machine" -q -C "base64 -w0 /data/data/chain/
   | grep -v '^Connecting' | tr -d '\r\n' | base64 -d > "$out"
 chmod 600 "$out"
 [ -s "$out" ] || { rm -f "$out"; echo "empty backup; is the wallet created?" >&2; exit 1; }
+# Keep the newest 30 here (names sort by time).
+ls -1 "$dir" | grep -E '^channel-[0-9TZ]+\.backup$' | sort | awk '{a[NR]=$0} END {for (i = 1; i <= NR - 30; i++) print a[i]}' \
+  | while read -r old; do rm -f "$dir/$old"; done
 echo "saved $out ($(wc -c < "$out" | tr -d ' ') bytes)"

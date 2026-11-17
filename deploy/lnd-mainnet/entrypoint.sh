@@ -11,6 +11,10 @@
 #   bundled             the fallback: the pruned Bitcoin Core in this app's `bitcoind` process
 #                       group. Secrets: BTC_RPC_PASS, LND_WALLET_PASS.
 # Both: LND_ALIAS, LND_EXTERNAL_IP (optional).
+# Both: the watchtower client is on (--wtclient.active; towers are added with `lnc wtclient add`,
+# README: "Watchtower"), and scb-watch runs beside lnd, shipping channel.backup off the node on
+# every change (optional secrets SCB_S3_ENDPOINT, SCB_S3_BUCKET, SCB_S3_ACCESS_KEY_ID,
+# SCB_S3_SECRET_ACCESS_KEY; README: "Automatic channel backups").
 # BITCOIND_MODE only changes what `entrypoint.sh lnd` connects to. `entrypoint.sh bitcoind` always
 # runs the pruned node (env BITCOIN_PRUNE_MB, BITCOIN_DBCACHE_MB), so the stopped bitcoind machine
 # can be started again as-is for a rollback (README: "Rollback").
@@ -175,7 +179,18 @@ lnd_tail() {
     --tlsextradomain="$host" --tlsextradomain=localhost ${external[@]+"${external[@]}"}
     --wallet-unlock-password-file="$RUN/wallet.pass" --wallet-unlock-allow-create
     --minchansize=100000 --coop-close-target-confs=6
+    --wtclient.active
   )
+}
+
+# scb-watch in the background, beside lnd (which this script then becomes via exec). It logs to
+# the same stream as lnd; if it dies, lnd keeps running and the log says so.
+start_scb_watch() {
+  if ! command -v scb-watch > /dev/null; then
+    log "WARNING: scb-watch is not installed; channel.backup is not being shipped off the node"
+    return 0
+  fi
+  ( SCB_RUN_DIR="$RUN" scb-watch || log "WARNING: scb-watch exited ($?); channel.backup is no longer being shipped" ) &
 }
 
 case "$MODE" in
@@ -209,6 +224,7 @@ case "${1:-}" in
       # volume snapshot carries neither.
       printf '%s' "$LND_WALLET_PASS" > "$RUN/wallet.pass"
       printf '[Bitcoind]\nbitcoind.rpcuser=edgecoder\nbitcoind.rpcpass=%s\n' "$BTC_RPC_PASS" > "$RUN/lnd.conf"
+      start_scb_watch
       exec lnd --configfile="$RUN/lnd.conf" "${lnd_common[@]}" \
         --bitcoind.rpchost="$btc:8332" \
         --bitcoind.zmqpubrawblock="tcp://$btc:28332" --bitcoind.zmqpubrawtx="tcp://$btc:28333" \
@@ -242,6 +258,7 @@ case "${1:-}" in
     } > "$RUN/lnd.conf"
     rm -f "$RUN/curl-rpc.conf"
     log "starting lnd with the external backend at $RPC_HOSTPORT"
+    start_scb_watch
     # An unpruned backend serves every historical block, so none of the pruned-node settings
     # (routing.assumechanvalid and the like) are set. The chain-backend health check is off: it
     # calls getpeerinfo, which ocean-node's rpcwhitelist blocks on purpose, and three failures

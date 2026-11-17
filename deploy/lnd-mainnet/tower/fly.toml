@@ -1,0 +1,25 @@
+# EdgeCoder's own watchtower for edgecoder-lnd (README.md here). NOT CREATED YET: needs the owner's
+# OK (about $6.50/month). A separate app, in a different region (iad) from the node (ord), with its
+# own volume, so one Fly app, region or volume failing does not take out both.
+#   fly apps create edgecoder-lnd-tower --org edgecoder
+#   cd deploy/lnd-mainnet/tower && fly deploy --ha=false --remote-only
+# The client reaches it over Fly's private network: edgecoder-lnd-tower.internal:9911. No public
+# IP, no [[services]].
+app = "edgecoder-lnd-tower"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  TOWER_ALIAS = "edgecoder-tower"
+
+[[mounts]]
+  source = "towerdata"
+  destination = "/data"
+  initial_size = "5gb"   # neutrino headers + filter headers (~1 GB) and the tower's session db
+  snapshot_retention = 7
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1gb"

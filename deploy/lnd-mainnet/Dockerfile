@@ -28,4 +28,5 @@ COPY --from=lnd /bin/lnd /bin/lncli /usr/local/bin/
 COPY --chmod=0755 entrypoint.sh /entrypoint.sh
 COPY --chmod=0755 lncli.sh /usr/local/bin/lnc
 COPY --chmod=0755 check-backend.sh /usr/local/bin/check-backend
+COPY --chmod=0755 scb-watch.sh /usr/local/bin/scb-watch
 ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
