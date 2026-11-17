@@ -185,16 +185,30 @@ describe("modes", () => {
   });
 
   it("switching to auto lets a waiting call that auto runs go ahead", async () => {
+    // The outcome is read from the session's events, not from whether `make` is installed on the
+    // machine running the tests (it isn't on every CI image: then the call errors, but it still ran).
     const { hub } = makeHub([
       { content: "", toolCalls: [{ name: "run_shell", arguments: { command: "make -v" } }] },
       { content: "ok", toolCalls: [] },
     ]);
     const s = hub.create({ projectRoot: root, client: TERM, mode: "ask" });
+    const events: SessionEvent[] = [];
+    hub.subscribe(s.id, TERM, 0, (e) => events.push(e));
     hub.send(s.id, "go", TERM);
     await until(() => hub.snapshot(s.id).pending.length === 1, 5000, "the command to ask");
+    const callId = hub.snapshot(s.id).pending[0].id;
     hub.update(s.id, { mode: "auto" }, TERM);
+    await until(() => events.some((e) => e.type === "approval" && e.id === callId), 5000, "the waiting call to be answered");
+    expect(events.find((e) => e.type === "approval" && e.id === callId)).toMatchObject({ approved: true, by: "always" });
+    await until(() => events.some((e) => e.type === "turn_end"), 10_000, "the turn to end");
     await hub.idle(s.id);
     expect(hub.snapshot(s.id).pending).toHaveLength(0);
-    expect(JSON.stringify(hub.snapshot(s.id).session.transcript.at(-1)!.events)).toContain("shell_output");
+    // The call ran: its outcome is shell output or an execution error, never a rejection.
+    const outcome = events
+      .filter((e) => e.type === "agent")
+      .map((e) => e.event as { type: string; id?: string; error?: string })
+      .find((ev) => (ev.type === "shell_output" || ev.type === "tool_result") && ev.id === callId);
+    expect(outcome).toBeTruthy();
+    expect(outcome!.error ?? "").not.toMatch(/rejected/i);
   });
 });
