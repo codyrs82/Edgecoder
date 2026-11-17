@@ -69,6 +69,11 @@ export function chatResponse(reply: FastifyReply, timing: { graceMs: number; int
   const head = () => {
     if (streaming) return;
     streaming = true;
+    // From here the response is ours: Fastify must never try to send a status or an error body on
+    // it. Without this, an error thrown after the stream began (a failed save) went to Fastify's
+    // error handler, whose writeHead threw ERR_HTTP_HEADERS_SENT and took the portal process down,
+    // cutting the browser's stream after the full reply (2026-11-17).
+    reply.hijack();
     writeSseHead(reply);
     if (pendingStatus !== undefined && open()) reply.raw.write(`data: ${JSON.stringify({ status: pendingStatus })}\n\n`);
   };
@@ -190,6 +195,16 @@ export function registerChatApiRoutes(
     (deps.chatCapacity as ChatCapacityDirectory | undefined) ??
     createChatCapacityDirectory({ candidates: discoverCoordinatorUrlsForPortal, allowed: () => true, serviceToken: PORTAL_SERVICE_TOKEN });
 
+  /** Saves the assistant's reply; a failure is logged, never thrown (the reply already reached the browser). */
+  async function saveReply(req: FastifyRequest, conversationId: string, content: string, cSatsSpent?: number): Promise<void> {
+    if (!store || content.length === 0) return;
+    try {
+      await store.addMessage({ messageId: randomUUID(), conversationId, role: "assistant", content, ...(cSatsSpent !== undefined ? { creditsSpent: cSatsSpent } : {}) });
+    } catch (err) {
+      req.log.error({ err, conversationId }, "portal_chat_save_reply_failed");
+    }
+  }
+
   /** A chat on a chosen compute, through networkBackend for the user's account; streams {content} then {done, cSatsSpent}. */
   async function runOnNetwork(
     req: FastifyRequest,
@@ -292,9 +307,7 @@ export function registerChatApiRoutes(
       req.log.warn({ err }, "portal_network_chat_failed");
       send({ error: (err as Error).message || "stream_interrupted" });
     }
-    if (fullContent.length > 0) {
-      await store!.addMessage({ messageId: randomUUID(), conversationId, role: "assistant", content: fullContent, ...(cSatsSpent !== undefined ? { creditsSpent: cSatsSpent } : {}) });
-    }
+    await saveReply(req, conversationId, fullContent, cSatsSpent);
     send({ done: true, compute: computeLabel(compute), ...(cSatsSpent !== undefined ? { cSatsSpent } : {}) });
     return out.end();
   }
@@ -429,9 +442,16 @@ export function registerChatApiRoutes(
     if (body.model) chatPayload.model = body.model;
     // From here a slow first token keeps the browser's request alive (heartbeats after a short grace).
     const out = chatResponse(reply, deps.chatKeepalive ?? CHAT_KEEPALIVE);
-    if (body.compute?.target === "auto") return runAuto(req, reply, out, user.userId, body.conversationId, body.compute, messages, chatPayload);
-    if (body.compute) return runOnNetwork(req, reply, out, user.userId, body.conversationId, body.compute, messages);
-    return runDefaultChat(req, reply, out, body.conversationId, chatPayload);
+    try {
+      if (body.compute?.target === "auto") return await runAuto(req, reply, out, user.userId, body.conversationId, body.compute, messages, chatPayload);
+      if (body.compute) return await runOnNetwork(req, reply, out, user.userId, body.conversationId, body.compute, messages);
+      return await runDefaultChat(req, reply, out, body.conversationId, chatPayload);
+    } catch (err) {
+      // Every path ends with a terminator: an unexpected error is an error event and [DONE], never
+      // a dropped connection (or, before the head, a plain 500).
+      req.log.error({ err }, "portal_chat_failed");
+      return out.fail(500, { error: "chat_failed" });
+    }
   });
 
   /**
@@ -520,16 +540,8 @@ export function registerChatApiRoutes(
       out.send({ error: "stream_interrupted" });
     }
 
-    // Save assistant message
-    if (fullContent.length > 0) {
-      await store.addMessage({
-        messageId: randomUUID(),
-        conversationId,
-        role: "assistant",
-        content: fullContent
-      });
-    }
-
+    await saveReply(req, conversationId, fullContent);
+    out.send({ done: true });
     return out.end();
   }
 }

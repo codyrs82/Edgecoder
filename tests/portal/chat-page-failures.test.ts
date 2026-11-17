@@ -50,4 +50,24 @@ describe("web chat failures", () => {
     expect(chatErrorText("all_coordinators_failed")).toMatch(/didn't answer/);
     expect(chatErrorText("stream_interrupted")).toBe("The reply was cut off.");
   });
+  // 2026-11-17: a full answer, then a red "dropped before the reply arrived" under it.
+  it("once answer text arrived, the end of the stream finishes the reply: grey note only if it stops mid-sentence", async () => {
+    const html = await chatPage();
+    const src = /function looksTruncated\(text\) \{[\s\S]*?\n    \}/.exec(html)![0];
+    const looksTruncated = new Function(`${src}; return looksTruncated;`)() as (t: string) => boolean;
+    expect(looksTruncated("The video you're referring to is a parody. It ends with a full paragraph.")).toBe(false);
+    expect(looksTruncated("Done!\n\n")).toBe(false);
+    expect(looksTruncated("Here is the code:\n```js\nconst a = 1;\n```")).toBe(false);
+    expect(looksTruncated("Here is the code:\n```js\nconst a = 1;")).toBe(true);
+    expect(looksTruncated("The video you're referring to is a parody that")).toBe(true);
+    expect(looksTruncated("")).toBe(false);
+    // The red failure is only for no answer text at all; after text it is the grey note (or nothing).
+    const fail = /function fail\(message, opts\) \{[\s\S]*?\n      \}/.exec(html)![0];
+    expect(fail.indexOf("if (fullContent)")).toBeGreaterThan(-1);
+    expect(fail.indexOf("if (fullContent)")).toBeLessThan(fail.indexOf("showChatFailure("));
+    expect(fail).toContain("showCutShort(assistantBubble, text)");
+    expect(html).toContain('label.textContent = "Reply may be cut short"');
+    // A stream that closed after text with no terminator is noted only when truncated.
+    expect(html).toContain("else if (!failed && !gotDone && looksTruncated(fullContent)) showCutShort(assistantBubble, text);");
+  });
 });
