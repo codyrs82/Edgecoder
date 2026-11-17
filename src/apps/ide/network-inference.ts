@@ -271,12 +271,14 @@ async function* streamSubmitted(
       err === "no_agent_has_model" ? `No machine on the network has ${req.model} right now.` :
       err === "no_own_agent_has_model" ? `None of your own machines has ${req.model} (or none is online).` :
       err === "no_agent_in_class" ? `No ${String(sub.json.computeClass ?? req.computeClass)} machine runs ${req.model} right now; it runs on: ${((sub.json.availableClasses as string[]) ?? []).join(", ") || "no class"}. Nothing was charged.` :
-      err === "reservation_not_active" ? "That reservation has ended. Reserve again on the Compute page." :
+      err === "reservation_not_active" ? "That reservation isn't active: it ended, or it belongs to another account. Reserve again on the Compute page." :
       err === "reserved_agent_lacks_model" ? `The reserved machine doesn't have ${req.model}; it has: ${((sub.json.models as string[]) ?? []).join(", ") || "no models"}.` :
       err === "insufficient_credits" ? `Not enough cSats for this request (it sets aside up to ${sub.json.neededCSats} cSats; unused cSats come back).` :
       err === "agent_not_registered" ? "This computer's agent isn't connected to the network yet." :
       `Network request failed: ${err}`;
-    throw new NetworkInferenceError(msg, sub.status === 402 ? 402 : sub.status === 409 ? 404 : 502);
+    // 404 (reservation_not_active) stays a 404: as a 502 the edge (Cloudflare) swaps the body for its
+    // own error page, so an API caller never sees why.
+    throw new NetworkInferenceError(msg, sub.status === 402 ? 402 : sub.status === 409 || sub.status === 404 ? 404 : 502);
   }
   const subtaskId = String(sub.json.subtaskId);
   const routed = typeof (sub.json.routing as { line?: unknown } | undefined)?.line === "string" ? String((sub.json.routing as { line: string }).line) : undefined;
