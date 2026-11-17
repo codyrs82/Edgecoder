@@ -104,9 +104,9 @@
   .folder-setup {
     margin: 12px 16px 0;
     padding: 14px 16px;
-    border: 1px solid var(--warn, #c98a00);
+    border: 1px solid var(--yellow);
     border-radius: 10px;
-    background: var(--bg-elevated, transparent);
+    background: var(--bg-elevated);
     display: flex;
     flex-direction: column;
     gap: 10px;
@@ -124,7 +124,7 @@
   .fs-note {
     margin: 0;
     font-size: 12.5px;
-    color: var(--text-secondary, inherit);
+    color: var(--text-secondary);
     line-height: 1.5;
   }
   .fs-note code {
@@ -162,7 +162,7 @@
     min-width: 200px;
   }
   .fs-error {
-    color: var(--err, #d33);
+    color: var(--danger);
     font-size: 12.5px;
   }
   .visually-hidden {
