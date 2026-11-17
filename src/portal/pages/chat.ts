@@ -156,6 +156,23 @@ app.get("/portal/chat", async (_req, reply) => {
       .chat-empty { padding:60px 0; text-align:center; }
       .chat-empty-icon { display:inline-flex; width:44px; height:44px; border-radius:var(--radius-md); border:1px solid var(--card-border); background:var(--bg-surface); align-items:center; justify-content:center; color:var(--brand-2); margin-bottom:12px; }
       .chat-empty .chat-empty-title { margin:0 0 6px; font-size:18px; color:var(--text); }
+      /* ── Web toggle (docs/web-tool.md) and the sources under an answer ── */
+      .chat-input-left { display:flex; align-items:center; gap:6px; min-width:0; }
+      .web-toggle {
+        display:inline-flex; align-items:center; gap:5px; min-height:28px; padding:4px 10px;
+        border:1px solid var(--card-border); background:transparent; color:var(--text-secondary);
+        border-radius:999px; font-size:12.5px; font-weight:500; cursor:pointer; white-space:nowrap;
+      }
+      .web-toggle:hover:not(:disabled) { background:var(--bg-elevated); color:var(--text); }
+      .web-toggle[aria-pressed="true"] { background:var(--brand-soft); border-color:var(--brand); color:var(--brand); }
+      .web-toggle:disabled { opacity:0.55; cursor:not-allowed; }
+      .web-toggle .web-note { font-size:11px; color:var(--muted); }
+      .msg-sources { margin-top:10px; font-size:12.5px; line-height:1.5; }
+      .msg-sources .msg-sources-title { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; color:var(--muted); }
+      .msg-sources ol { margin:4px 0 0; padding-left:22px; }
+      .msg-sources a { color:var(--brand); word-break:break-word; }
+      .msg-sources .src-host { color:var(--muted); margin-left:6px; }
+      .chat-msg .msg-body a { color:var(--brand); }
 ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; display:flex; align-items:center; gap:8px; padding:6px 24px; color:var(--muted); font-size:12px; }
     </style>
     <div class="chat-layout">
@@ -180,6 +197,7 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
             <div class="chat-input-row">
               <textarea id="chatInput" rows="1" placeholder="Message EdgeCoder..." aria-label="Message"></textarea>
               <div class="chat-input-tools">
+                <div class="chat-input-left">
                 <div class="model-picker-wrap" id="modelPickerWrap">
                   <button type="button" class="model-trigger" id="modelTrigger" aria-haspopup="listbox" aria-expanded="false" aria-controls="modelDropdown" title="Where this chat runs">
                     ${icon("cpu", 14)}<span id="modelLabel">Auto</span>
@@ -189,6 +207,10 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
                     <input id="computeSearch" type="search" placeholder="Search models" aria-label="Search compute" autocomplete="off" />
                     <div class="model-options" id="modelOptions" role="listbox" aria-label="Compute"></div>
                   </div>
+                </div>
+                <button type="button" class="web-toggle hidden" id="webToggle" aria-pressed="false" title="Let the model search the web and read pages (cites sources; costs cSats per search and page)">
+                  ${icon("globe", 14)}<span>Web</span><span class="web-note" id="webNote"></span>
+                </button>
                 </div>
                 <button class="chat-send-btn" id="sendBtn">Send</button>
               </div>
@@ -211,6 +233,9 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
     var portalModels = { local: [], swarm: [] };
     var computeOptions = [];
     var COMPUTE_KEY = "edgecoder.chat.compute.";
+    var WEB_KEY = "edgecoder.chat.web.";
+    var webOn = false;            // this chat's Web toggle (kept per chat in this browser)
+    var webState = null;          // /portal/api/web/status for the chat's compute
     var CHAT_IDLE_TIMEOUT_MS = ${CHAT_IDLE_TIMEOUT_MS};
     var CHAT_FIRST_REPLY_TIMEOUT_MS = ${CHAT_FIRST_REPLY_TIMEOUT_MS};
 
@@ -343,6 +368,8 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
       });
       // Inline code
       html = html.replace(/\\\`([^\\\`]+?)\\\`/g, "<code>$1</code>");
+      // Links: [text](http(s)://...) only (sources under web answers).
+      html = html.replace(/\\[([^\\]\\n]+)\\]\\((https?:\\/\\/[^\\s)]+)\\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
       // Bold
       html = html.replace(/\\*\\*(.+?)\\*\\*/g, "<strong>$1</strong>");
       // Italic
@@ -487,6 +514,8 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
       var titleEl = document.getElementById("chatTitle");
       if (titleEl) titleEl.textContent = (conv && conv.title) || "New chat";
       restoreCompute(convId);
+      restoreWeb(convId);
+      refreshWebStatus();
       await loadMessages(convId);
     }
 
@@ -538,6 +567,7 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
           if (newId) {
             activeConvId = newId;
             saveCompute();
+            saveWeb();
             await loadConversations();
             renderConversations();
           }
@@ -580,6 +610,7 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
       var fullContent = "";
       var doneUsage = null;
       var doneCompute = "";
+      var doneWeb = null;          // web tool: numbered sources and "2 searches · 1 page · 1.2 cSats"
       var ac = new AbortController();
       abortController = ac;
       // Never an endless "Thinking...": no bytes for CHAT_IDLE_TIMEOUT_MS (heartbeats count), or no
@@ -622,6 +653,7 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
         else if (selectedModel) chatBody.model = selectedModel;
         // Auto (nothing picked): your own machines first (free), then the network's best fit.
         else chatBody.compute = { target: "auto" };
+        if (webOn && webState && webState.available) chatBody.web = true;
         var response = await fetch("/portal/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -658,7 +690,8 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
               if (payload === "[DONE]") continue;
               try {
                 var parsed = JSON.parse(payload);
-                if (parsed.status && !fullContent) {
+                if (parsed.status) {
+                  // "Searching the web…", "Reading example.com…" may come between parts of an answer too.
                   thinkingStatus = parsed.status;
                   document.getElementById("streamStatus").textContent = thinkingStatus;
                 }
@@ -673,7 +706,9 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
                   gotDone = true;
                   doneUsage = parsed.usage || (typeof parsed.cSatsSpent === "number" ? { cSats: parsed.cSatsSpent, calls: [] } : null);
                   doneCompute = parsed.compute || "";
+                  doneWeb = parsed.web || null;
                   if (typeof parsed.cSatsSpent === "number" && parsed.cSatsSpent > 0) loadTopTicker();
+                  if (parsed.web) refreshWebStatus();
                 }
                 if (parsed.content) {
                   fullContent += parsed.content;
@@ -694,6 +729,7 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
           // Text, then the stream closed without the terminator: finished (noted only if it stops mid-sentence).
           else if (!failed && !gotDone && looksTruncated(fullContent)) showCutShort(assistantBubble, text);
           if (!failed && fullContent) appendReplyFooter(assistantBubble, fullContent, doneUsage, doneCompute);
+          if (!failed && fullContent && doneWeb) renderWebSources(assistantBubble, doneWeb);
         }
       } catch (err) {
         if (timedOut === "idle") fail("No response from EdgeCoder for " + Math.round(CHAT_IDLE_TIMEOUT_MS / 1000) + " seconds.");
@@ -732,6 +768,81 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
     function formatCSats(n) {
       var v = Number(n);
       return v.toLocaleString(undefined, { maximumFractionDigits: v >= 100 ? 0 : v >= 1 ? 2 : 4 }) + " cSats";
+    }
+
+    // ── Web toggle: per chat, offered when web search is set up and the chat's model can use tools ──
+    function webStatusQuery() {
+      if (selectedCompute) return "target=" + encodeURIComponent(selectedCompute.target) + "&model=" + encodeURIComponent(selectedCompute.model || "");
+      if (selectedModel) return "target=default&model=" + encodeURIComponent(selectedModel);
+      return "target=auto";
+    }
+    async function refreshWebStatus() {
+      try { webState = await api("/portal/api/web/status?" + webStatusQuery()); } catch (e) { webState = null; }
+      renderWebToggle();
+    }
+    function renderWebToggle() {
+      var btn = document.getElementById("webToggle");
+      var note = document.getElementById("webNote");
+      // Not set up on the servers (or unknown): no toggle at all.
+      if (!webState || webState.reason === "not_configured" || webState.configured === false) { btn.classList.add("hidden"); return; }
+      btn.classList.remove("hidden");
+      var reason = webState.reason || null;
+      btn.disabled = !!reason;
+      btn.setAttribute("aria-pressed", webOn && !reason ? "true" : "false");
+      note.textContent = reason === "needs_csats" ? "needs cSats" : "";
+      if (reason === "no_tools") btn.title = "Web needs a model that can use tools. Pick another model.";
+      else if (reason === "needs_csats") btn.title = "Web search costs cSats (" + webState.searchCSats + " a search, " + webState.readCSats + " a page). Top up to use it.";
+      else if (reason) btn.title = webState.message || "Web search isn't available right now.";
+      else btn.title = webOn ? "Web is on: the model may search the web and read pages (" + webState.searchCSats + " cSats a search, " + webState.readCSats + " a page)." : "Let the model search the web and read pages (cites sources; " + webState.searchCSats + " cSats a search, " + webState.readCSats + " a page).";
+    }
+    function restoreWeb(convId) {
+      try { webOn = localStorage.getItem(WEB_KEY + convId) === "1"; } catch (e) { webOn = false; }
+      renderWebToggle();
+    }
+    function saveWeb() {
+      try { if (activeConvId) { if (webOn) localStorage.setItem(WEB_KEY + activeConvId, "1"); else localStorage.removeItem(WEB_KEY + activeConvId); } } catch (e) {}
+    }
+    document.getElementById("webToggle").addEventListener("click", function() {
+      if (this.disabled) return;
+      webOn = !webOn;
+      saveWeb();
+      renderWebToggle();
+    });
+    /** Numbered sources (links) and "2 searches · 1 page · 1.2 cSats" under a web answer. */
+    function renderWebSources(bubble, w) {
+      var sources = (w && w.sources) || [];
+      if (sources.length) {
+        var box = document.createElement("div");
+        box.className = "msg-sources";
+        var title = document.createElement("div");
+        title.className = "msg-sources-title";
+        title.textContent = "Sources";
+        box.appendChild(title);
+        var ol = document.createElement("ol");
+        for (var i = 0; i < sources.length; i++) {
+          var src = sources[i];
+          if (!/^https?:\\/\\//i.test(String(src.url || ""))) continue;
+          var li = document.createElement("li");
+          li.value = Number(src.n) || (i + 1);
+          var a = document.createElement("a");
+          a.href = src.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+          a.textContent = src.title || src.url;
+          li.appendChild(a);
+          var host = document.createElement("span");
+          host.className = "src-host";
+          try { host.textContent = new URL(src.url).hostname.replace(/^www\\./, ""); } catch (e) {}
+          li.appendChild(host);
+          ol.appendChild(li);
+        }
+        box.appendChild(ol);
+        bubble.appendChild(box);
+      }
+      if (w && w.footer) {
+        var line = document.createElement("div");
+        line.className = "msg-meta";
+        line.textContent = w.footer;
+        bubble.appendChild(line);
+      }
     }
 
     function displayModelName(name) {
@@ -842,6 +953,7 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
       selectedModel = o.compute ? null : (o.model || null);
       updateModelLabel();
       saveCompute();
+      refreshWebStatus();
       closeModelPicker(false);
       document.getElementById("chatInput").focus();
     }
@@ -912,6 +1024,7 @@ ${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; 
       await requireAuth();
       restoreCompute("last");
       refreshModels();
+      refreshWebStatus();
       await loadConversations();
       // Links from the sidebar on other pages: ?c=<id> opens that chat, ?new=1 starts one.
       var params = new URLSearchParams(location.search);

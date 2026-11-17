@@ -15,6 +15,7 @@
     streamChat,
     streamPortalChat,
     streamIdeChat,
+    streamIdeWebChat,
     ideSendToolApproval,
     portalCreateConversation,
     portalRenameConversation,
@@ -36,6 +37,7 @@
     listConversationsBySource,
   } from "../lib/chat-store";
   import type { Conversation, ReplyUsage, ToolEvent } from "../lib/types";
+  import { webUsageOf, type WebUsage } from "../lib/web-tool";
 
   interface Props {
     onOpenInEditor?: (code: string, language: string) => void;
@@ -55,8 +57,12 @@
     onModeChange?: (mode: EngineMode) => void;
     /** Plan's "Revise": put the cursor in the page's composer. */
     onFocusComposer?: () => void;
+    /** The Web toggle can be on now (set up, a model that calls tools, cSats); docs/web-tool.md. */
+    webUsable?: boolean;
+    /** This chat's Web toggle, for the composer (it changes it with setWeb). */
+    onWebChange?: (on: boolean) => void;
   }
-  let { onOpenInEditor, projectRoot = null, onStreamingChange, onOpenPath, onPreview, onRepoConnected, onHeaderChange, onQuote, onModeChange, onFocusComposer }: Props = $props();
+  let { onOpenInEditor, projectRoot = null, onStreamingChange, onOpenPath, onPreview, onRepoConnected, onHeaderChange, onQuote, onModeChange, onFocusComposer, webUsable = false, onWebChange }: Props = $props();
 
   let connectRepoBox: ConnectRepo | undefined = $state(undefined);
   /** The open project's folder name and branch, for the header. */
@@ -104,6 +110,18 @@
     conversation = conversation;
     if (conversation.messages.length > 0) void saveConversation(conversation);
   }
+  $effect(() => {
+    onWebChange?.(conversation.web === true);
+  });
+  /** The composer's Web toggle changed (kept with the chat, off by default). */
+  export function setWeb(on: boolean) {
+    conversation.web = on;
+    conversation = conversation;
+    if (conversation.messages.length > 0) void saveConversation(conversation);
+  }
+  /** The web tool's total and sources for the reply streaming now, and its status line. */
+  let streamingWeb: WebUsage | undefined = $state(undefined);
+  let streamingActivity: string | undefined = $state(undefined);
   let streamingContent = $state("");
   let isStreaming = $state(false);
   let streamProgress: StreamProgress | undefined = $state(undefined);
@@ -232,46 +250,58 @@
       await Promise.race([whenServiceReady(), new Promise((r) => setTimeout(r, 60_000))]);
     }
     const sentMode: EngineMode = mode;
+    // Web: the chat's toggle, when it can be on for this model now.
+    const useWeb = conversation.web === true && webUsable;
+    streamingWeb = undefined;
+    streamingActivity = undefined;
     let planned = false;
     if (projectRoot && !conversation.permissionMode) conversation.permissionMode = sentMode;
 
     try {
-      if (projectRoot && !usePortalChat) {
-        // IDE agent mode — stream with tool events
+      if ((projectRoot || useWeb) && !usePortalChat) {
+        // IDE agent mode — stream with tool events (no project: the web tool only, /v1/ide/web-chat)
         const apiMessages = conversation.messages.map((m) => ({
           role: m.role,
           content: m.content,
         }));
-        const attached = await expandMentions(text);
-        if (attached) apiMessages[apiMessages.length - 1] = { role: "user", content: `${attached}\n\n${text}` };
         streamingToolEvents = [];
         streamingTurnId = undefined;
         streamingUsage = undefined;
         streamingChanged = [];
-        planned = sentMode === "plan";
-
-        await streamIdeChat(
-          apiMessages,
-          projectRoot,
-          (event: IdeStreamEvent) => {
-            const next = applyAgentEvent(
-              { text: streamingContent, toolEvents: streamingToolEvents, turnId: streamingTurnId, changedFiles: streamingChanged, usage: streamingUsage },
-              event,
-            ).turn;
-            if (next.text !== streamingContent) streamingContent = next.text;
-            if (next.toolEvents !== streamingToolEvents) streamingToolEvents = next.toolEvents;
-            streamingTurnId = next.turnId;
-            streamingUsage = next.usage;
-            if (next.changedFiles && next.changedFiles !== streamingChanged) streamingChanged = next.changedFiles;
-            if (event.type !== "status" && event.type !== "done") scrollToBottom();
-          },
-          abortController.signal,
-          get(computeChoice),
-          await agentGitHubToken().catch(() => null),
-          sentMode,
-          "chat",
-          attachments,
-        );
+        const onEvent = (event: IdeStreamEvent) => {
+          const next = applyAgentEvent(
+            { text: streamingContent, toolEvents: streamingToolEvents, turnId: streamingTurnId, changedFiles: streamingChanged, usage: streamingUsage, web: streamingWeb, activity: streamingActivity },
+            event,
+          ).turn;
+          if (next.text !== streamingContent) streamingContent = next.text;
+          if (next.toolEvents !== streamingToolEvents) streamingToolEvents = next.toolEvents;
+          streamingTurnId = next.turnId;
+          streamingUsage = next.usage;
+          streamingWeb = next.web;
+          streamingActivity = next.activity;
+          if (next.changedFiles && next.changedFiles !== streamingChanged) streamingChanged = next.changedFiles;
+          if (event.type !== "status" && event.type !== "done") scrollToBottom();
+        };
+        if (projectRoot) {
+          const attached = await expandMentions(text);
+          if (attached) apiMessages[apiMessages.length - 1] = { role: "user", content: `${attached}\n\n${text}` };
+          planned = sentMode === "plan";
+          await streamIdeChat(
+            apiMessages,
+            projectRoot,
+            onEvent,
+            abortController.signal,
+            get(computeChoice),
+            await agentGitHubToken().catch(() => null),
+            sentMode,
+            "chat",
+            attachments,
+            useWeb,
+          );
+        } else {
+          if (inlineText !== text) apiMessages[apiMessages.length - 1] = { role: "user", content: inlineText };
+          await streamIdeWebChat(apiMessages, onEvent, abortController.signal, get(computeChoice));
+        }
       } else if (usePortalChat) {
         // Stream through the portal API (server persists messages)
         const portalConvId = await ensurePortalConversation();
@@ -281,6 +311,7 @@
           inlineText,
           (chunk) => {
             streamingContent += chunk;
+            streamingActivity = undefined;
             scrollToBottom();
           },
           abortController.signal,
@@ -288,6 +319,15 @@
             streamProgress = progress;
             if (progress.warning) meshWarning = progress.warning;
           },
+          useWeb
+            ? {
+                onStatus: (m) => (streamingActivity = m),
+                onWeb: (w) => {
+                  const u = webUsageOf({ type: "web", ...w });
+                  if (u) streamingWeb = u;
+                },
+              }
+            : undefined,
         );
       } else {
         // Stream through local IDE provider (OpenAI-compatible format)
@@ -346,6 +386,8 @@
       }
     } finally {
       streamingContent = "";
+      streamingWeb = undefined;
+      streamingActivity = undefined;
       isStreaming = false;
       streamProgress = undefined;
       streamingToolEvents = [];
@@ -360,6 +402,7 @@
     if (streamingToolEvents.length > 0) lastMsg.toolEvents = [...streamingToolEvents];
     const usage = streamingUsage ?? freeReplyUsage(get(computeChoice));
     if (usage) lastMsg.usage = usage;
+    if (streamingWeb && (streamingWeb.searches > 0 || streamingWeb.pages > 0)) lastMsg.web = streamingWeb;
     if (streamingTurnId && streamingChanged.length > 0) {
       lastMsg.turnId = streamingTurnId;
       lastMsg.changedFiles = [...streamingChanged];
@@ -476,10 +519,10 @@
   {:else}
     <div class="messages">
       {#each conversation.messages as msg (msg.id)}
-        <ChatMessage role={msg.role as "user" | "assistant"} content={msg.content} toolEvents={msg.toolEvents} turnId={msg.turnId} changedFiles={msg.changedFiles} usage={msg.usage} {onOpenPath} {onPreview} {onOpenInEditor} onToolApproval={handleToolApproval} />
+        <ChatMessage role={msg.role as "user" | "assistant"} content={msg.content} toolEvents={msg.toolEvents} turnId={msg.turnId} changedFiles={msg.changedFiles} usage={msg.usage} web={msg.web} {onOpenPath} {onPreview} {onOpenInEditor} onToolApproval={handleToolApproval} />
       {/each}
-      {#if isStreaming && (streamingContent || streamingToolEvents.length > 0)}
-        <ChatMessage role="assistant" content={streamingContent} streaming={true} {streamProgress} toolEvents={streamingToolEvents} {onOpenInEditor} onToolApproval={handleToolApproval} onToolAlways={(id) => handleToolApproval(id, true, true)} />
+      {#if isStreaming && (streamingContent || streamingToolEvents.length > 0 || streamingActivity)}
+        <ChatMessage role="assistant" content={streamingContent} streaming={true} {streamProgress} toolEvents={streamingToolEvents} activity={streamingActivity} {onOpenInEditor} onToolApproval={handleToolApproval} onToolAlways={(id) => handleToolApproval(id, true, true)} />
       {/if}
       {#if pendingPlan}
         <PlanApproval onApprove={approvePlan} onRevise={() => onFocusComposer?.()} />

@@ -42,6 +42,18 @@ Consolidated reference for all environment controls. The primary config file on 
 | `COORDINATOR_POST_RETRIES` | `2` | Retry count for coordinator POST requests on transient failure. |
 | `COORDINATOR_TRUST_PROXY` | `10.0.0.5` | Coordinator: comma-separated addresses of reverse proxies in front of it. Only a request whose TCP peer is one of these has `X-Forwarded-For` / `X-Real-IP` / `CF-Connecting-IP` / `True-Client-IP` read, and only for the displayed and geolocated client IP. Unset (default): those headers are ignored. On Fly (`FLY_APP_NAME` set by the runtime) only `Fly-Client-IP` is read. No header ever makes a request count as loopback: the embedded worker's tokenless self-registration is decided from the socket address, and a socket address listed here is never treated as loopback, so list a same-host TLS proxy here. |
 
+## Web tool (coordinator)
+
+The chat's **Web** toggle and a bot's **Search the web** permission ([web tool](https://github.com/codyrs82/Edgecoder/blob/main/docs/web-tool.md)): `web_search` and `read_page` run on the coordinator (`POST /v1/tools/web/search`, `/read`, `/status`), never on a host's machine, and are billed to the caller's account per call.
+
+| Variable | Purpose |
+|---|---|
+| `BRAVE_SEARCH_API_KEY` | Secret. The Brave Search API subscription token. Unset (the default): the web tool is off everywhere ("Web search isn't set up yet") and the apps hide their Web toggle. Set it with `fly secrets set BRAVE_SEARCH_API_KEY=… -a <coordinator app>` on each coordinator; it never leaves the coordinator. |
+| `WEB_SEARCH_CSATS` | cSats charged per search (number ≥ 0, default `0.5`). Debited before the call (ledger reason `tool:web_search`), refunded when it fails. |
+| `WEB_READ_CSATS` | cSats charged per page read (number ≥ 0, default `0.2`; reason `tool:read_page`). |
+| `WEB_SEARCH_PER_HOUR` | Searches per account per hour on one coordinator (default `60`). |
+| `WEB_READ_PER_HOUR` | Page reads per account per hour on one coordinator (default `120`). |
+
 ## Economy, payouts and receipts (coordinator)
 
 | Variable | Default | Description |

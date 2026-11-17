@@ -28,6 +28,10 @@ export type ToolName =
   | "github_list_prs"
   | "github_list_issues"
   | "open_pull_request"
+  // The web tool (src/web-tool/tools.ts): offered only when a chat's Web toggle or a bot's "Search the
+  // web" permission is on; run on EdgeCoder's servers; never in TOOL_DEFINITIONS.
+  | "web_search"
+  | "read_page"
   // Tentacles (delegate.ts): offered only when a session has tentacles on; never in TOOL_DEFINITIONS.
   | "delegate"
   | "await_tentacles"
@@ -38,6 +42,14 @@ export type ToolName =
  * lead's tree, and a tentacle's patch is applied (or asked about) when it finishes (tentacles.ts).
  */
 export const TENTACLE_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>(["delegate", "await_tentacles", "cancel_tentacle"]);
+
+/**
+ * The web tool (src/web-tool/tools.ts). Not read tools: a call costs cSats and sends the query or URL
+ * off this machine, so Manual mode asks; the other modes run them when the toggle or permission is on
+ * (permission-policy.ts). After read_page, edits and commands that would run on their own ask
+ * (agent-loop.ts makeToolRunner).
+ */
+export const WEB_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>(["web_search", "read_page"]);
 
 /** Tools that only observe the workspace (no approval needed). */
 export const READ_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>([
@@ -174,6 +186,11 @@ export type IdeStreamEvent =
         usd?: number;
       };
     }
+  /**
+   * The web tool's running total for this reply, after each search or page read: counts, cSats (in
+   * all; `addedCSats` for this call) and the numbered sources the answer cites as [n].
+   */
+  | { type: "web"; searches: number; pages: number; cSats: number; addedCSats: number; sources: Array<{ n: number; title: string; url: string }> }
   | { type: "done" };
 
 // ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@
  *
  *   POST /forward/submit                                      -> POST {coordinator}/submit (signed)
  *   POST /forward/inference/submit | /forward/inference/stream -> the coordinator's (signed)
+ *   POST /forward/v1/tools/web/{status,search,read}           -> the coordinator's web tool (signed; billed to the owner)
  *   GET  /forward/inference/models                            -> GET  {coordinator}/inference/models
  *   GET  /forward/network/world                               -> GET  {coordinator}/network/world (anonymized)
  *   GET  /forward/tasks/:taskId/subtasks/:subtaskId/result    -> GET  {coordinator}/tasks/...
@@ -41,6 +42,9 @@ const SIGNED_POSTS: Record<string, string> = {
   "/forward/account/reservations/list": "/account/reservations/list",
   "/forward/account/reservations/cancel": "/account/reservations/cancel",
   "/forward/account/usage": "/account/usage",
+  "/forward/v1/tools/web/status": "/v1/tools/web/status",
+  "/forward/v1/tools/web/search": "/v1/tools/web/search",
+  "/forward/v1/tools/web/read": "/v1/tools/web/read",
 };
 /** GET routes relayed to the coordinator, signed by this agent (no query string). */
 const SIGNED_GETS: Record<string, string> = {

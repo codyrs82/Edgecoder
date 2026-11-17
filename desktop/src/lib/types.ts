@@ -141,6 +141,8 @@ export interface ChatMessage {
   toolEvents?: ToolEvent[];
   /** What the reply cost and where it ran ("Network GPU · qwen3.5:9b", 0.42 cSats). */
   usage?: ReplyUsage;
+  /** The web tool's searches, pages and cSats for this reply, with its numbered sources. */
+  web?: import("./web-tool").WebUsage;
 }
 
 export interface ReplyUsage {
@@ -164,6 +166,8 @@ export interface Conversation {
   projectRoot?: string;
   /** Its permission mode (ask, auto-edits, auto, plan; permission-modes.ts), kept with the chat. */
   permissionMode?: import("./permission-modes").EngineMode;
+  /** The composer's Web toggle for this chat (off by default; docs/web-tool.md). */
+  web?: boolean;
 }
 
 export interface ChatCompletionChunk {

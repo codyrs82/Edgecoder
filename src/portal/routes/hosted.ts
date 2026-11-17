@@ -247,6 +247,17 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
     return relay(reply, await cancelReservation(networkFor(ctx.accountId), parsed.data.reservationId).catch(unreachable));
   });
 
+  // ── The web tool (docs/web-tool.md): for the IDE server on a machine without an enrolled agent ──
+  // The search and the page fetch run on the coordinator; the key's account is billed per call.
+  for (const tool of ["status", "search", "read"] as const) {
+    app.post(`/v1/tools/web/${tool}`, async (req, reply) => {
+      const ctx = await keyAccount(req, reply);
+      if (!ctx) return reply;
+      const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
+      return relay(reply, await coord(ctx.accountId, `/v1/tools/web/${tool}`, { ...body, accountId: ctx.accountId }));
+    });
+  }
+
   // ── API keys ──
   app.get("/portal/api/keys", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });

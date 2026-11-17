@@ -82,6 +82,10 @@ const AGENT_POST_ROUTES: ReadonlySet<string> = new Set([
   "/account/reservations",
   "/account/reservations/list",
   "/account/reservations/cancel",
+  // The web tool (routes/web-tools.ts): the signer's owner is the account billed.
+  "/v1/tools/web/status",
+  "/v1/tools/web/search",
+  "/v1/tools/web/read",
   "/economy/market/orders",
   "/agent-mesh/connect",
   "/agent-mesh/accept",

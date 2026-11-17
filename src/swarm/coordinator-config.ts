@@ -181,6 +181,13 @@ export const coordinatorConfigSchema = z.object({
   // full, and the requester told 503 no_capacity: well under the 100 s a proxy in front of the
   // portal (Cloudflare) waits for a response, so an overloaded call fails cleanly instead.
   INFERENCE_CLAIM_TIMEOUT_MS: envInt(45_000, { min: 1_000, max: 600_000 }),
+  // The web tool (docs/web-tool.md): the Brave Search API key (a secret; unset = the tool is off),
+  // what a search and a page read cost the caller in cSats, and how many each account may make an hour.
+  BRAVE_SEARCH_API_KEY: str(),
+  WEB_SEARCH_CSATS: envNumber(0.5, { min: 0, max: 1_000 }),
+  WEB_READ_CSATS: envNumber(0.2, { min: 0, max: 1_000 }),
+  WEB_SEARCH_PER_HOUR: envInt(60, { min: 1, max: 10_000 }),
+  WEB_READ_PER_HOUR: envInt(120, { min: 1, max: 10_000 }),
   // Output cap (tokens) for a network model call that sets none: bounds what an agent can bill for
   // a reply (token padding) and so the worst case of every call. Matches the 4096 the context
   // sizing already assumed for such calls (contextNeeded). A call may still ask for up to 32768.

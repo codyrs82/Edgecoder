@@ -74,6 +74,8 @@ import { FrontierKeyError, FrontierKeyStore } from "../../inference-api/frontier
 import { FrontierSpend } from "../../inference-api/frontier-usage.js";
 import { frontierContextWindow, isFrontierModelId } from "../../inference-api/frontier-models.js";
 import { request as undiciRequest } from "undici";
+import { WEB_SYSTEM_NOTE, WebToolSession, isWebTool, webToolSchemas, type WebToolCall } from "../../web-tool/tools.js";
+import { modelCallsTools } from "../../web-tool/model-support.js";
 
 // Forked by the agent: exit with it, so a restarted agent's provider can take the port.
 if (process.send) process.on("disconnect", () => process.exit(0));
@@ -192,6 +194,32 @@ const networkDeps: NetworkDeps | null = C.SWARM_VIA_LOCAL_AGENT_URL
 
 /** The hosted endpoint and the user's API key (EDGECODER_API_KEY / _FILE), for network models without an enrolled agent. */
 const hosted = hostedConfigFromEnv();
+
+/**
+ * The web tool's calls (docs/web-tool.md): to the coordinator's /v1/tools/web/* through this
+ * machine's agent (signed, billed to its owner), else the hosted endpoint with the API key. The
+ * search and the page fetch run on EdgeCoder's servers; nothing is fetched from this machine.
+ */
+const webCall: WebToolCall | null = networkDeps
+  ? (path, body, signal) => networkCall(networkDeps, "POST", path, body, signal)
+  : hosted
+    ? async (path, body, signal) => {
+        const res = await undiciRequest(`${hosted.baseUrl}${path}`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${hosted.apiKey()}`, "content-type": "application/json" },
+          body: JSON.stringify(body),
+          headersTimeout: 30_000,
+          bodyTimeout: 30_000,
+          signal,
+        });
+        const text = await res.body.text();
+        try {
+          return { status: res.statusCode, json: JSON.parse(text) as Record<string, unknown> };
+        } catch {
+          return { status: res.statusCode, json: { error: "bad_response" } };
+        }
+      }
+    : null;
 
 /**
  * The EdgeCoder account signed in on this computer: from this machine's enrolled agent (the
@@ -1079,6 +1107,19 @@ const bots = new BotManager({
       return (format) => buildIdeAgentSystemPrompt(ctx, root, rules, format);
     },
     checkpoints,
+    // "Search the web" (docs/web-tool.md): through EdgeCoder's servers; refused once today's budget is spent.
+    web: (ctx) =>
+      webCall
+        ? new WebToolSession({
+            call: webCall,
+            emit: ctx.sendEvent,
+            signal: ctx.signal,
+            allow: () => {
+              const left = ctx.budgetLeft();
+              return left !== null && left <= 0 ? "Today's budget for this bot is spent, so the web tool is off until tomorrow." : null;
+            },
+          })
+        : null,
   }),
 });
 registerBotRoutes(app, bots);
@@ -1229,6 +1270,8 @@ const ideChatSchema = z.object({
   origin: z.enum(["chat", "code"]).optional(),
   /** Files attached to the last user message in the composer (attachments.ts). */
   attachments: attachmentsSchema.optional(),
+  /** The chat's Web toggle: offer web_search and read_page (run on EdgeCoder's servers, billed per call). */
+  web: z.boolean().optional(),
   /** Where the model runs: this computer (default), your machines, any network agent (optionally one class), or a reserved machine. */
   compute: z
     .object({
@@ -1401,13 +1444,17 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
   const abort = new AbortController();
   reply.raw.on("close", () => { if (!reply.raw.writableEnded) abort.abort(); });
   // open_pull_request is offered only when the project is a GitHub repository.
-  const tools = hasGitHubOrigin(projectRoot) ? toolSchemas() : toolSchemas().filter((t) => t.function.name !== "open_pull_request");
+  const projectTools = hasGitHubOrigin(projectRoot) ? toolSchemas() : toolSchemas().filter((t) => t.function.name !== "open_pull_request");
+  // The Web toggle: web_search and read_page, through EdgeCoder's servers (docs/web-tool.md).
+  const web = body.web && webCall ? new WebToolSession({ call: webCall, emit: sendEvent, signal: abort.signal }) : null;
+  if (web) executor.web = (tool, args) => web.run(tool, args);
+  const tools = web ? [...projectTools, ...webToolSchemas()] : projectTools;
   reply.raw.on("close", () => tracked.end("cancelled"));
   await runAgentLoop({
     chat: isFrontierModelId(chatModel)
       ? frontierChatFn(chatModel, { sessionKey: `chat:${turnId}` }, sendEvent, abort.signal)
       : chatFnFor(body.compute, chatModel, ollamaHost, sendEvent, abort.signal, "EdgeCoder chat", body.compute?.target === "auto" ? { sessionKey: `chat:${turnId}` } : undefined),
-    systemPrompt: (format) => (promptCtx ? buildIdeAgentSystemPrompt(promptCtx, projectRoot, projectRules, format) : ""),
+    systemPrompt: (format) => [promptCtx ? buildIdeAgentSystemPrompt(promptCtx, projectRoot, projectRules, format) : "", web ? WEB_SYSTEM_NOTE : ""].filter(Boolean).join("\n\n"),
     messages,
     sendEvent,
     isCancelled: () => clientDisconnected,
@@ -1443,6 +1490,84 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
     plan: chatMode === "plan",
   });
 
+  sendEvent({ type: "done" });
+  tracked.end(clientDisconnected ? "cancelled" : undefined);
+  reply.raw.end();
+});
+
+// --- The web tool for chats without a project (docs/web-tool.md) ---
+
+/**
+ * Whether the chat's Web toggle can be on, for the model the chat picked: the tool is set up on
+ * EdgeCoder's servers (BRAVE_SEARCH_API_KEY), this computer can reach them (an enrolled agent or an
+ * API key), the model can call tools, and the account has cSats for a search.
+ */
+app.get("/v1/ide/web/status", async (req, reply) => {
+  const model = z.string().max(300).catch("").parse((req.query as { model?: unknown } | undefined)?.model ?? "");
+  const toolsSupported = model ? modelCallsTools(model) : true;
+  if (!webCall) return reply.send({ available: false, configured: false, toolsSupported, reason: "offline", message: "Web needs this computer connected to EdgeCoder (sign in, or set an API key)." });
+  const r = await webCall("/v1/tools/web/status", {}).catch(() => ({ status: 502, json: {} as Record<string, unknown> }));
+  if (r.status !== 200) return reply.send({ available: false, configured: false, toolsSupported, reason: "unreachable", message: "Couldn't reach EdgeCoder to check web search." });
+  const st = r.json as { configured?: boolean; canAfford?: boolean; message?: string; searchCSats?: number; readCSats?: number; balanceCSats?: number | null };
+  const configured = st.configured === true;
+  const reason = !configured ? "not_configured" : !toolsSupported ? "no_tools" : st.canAfford === false ? "needs_csats" : null;
+  return reply.send({ ...st, configured, toolsSupported, available: reason === null, reason, ...(reason === "not_configured" ? { message: st.message ?? "Web search isn't set up yet" } : {}) });
+});
+
+const webChatSchema = z.object({
+  messages: z.array(z.object({ role: z.string(), content: z.string() })).min(1),
+  model: z.string().optional(),
+  compute: ideChatSchema.shape.compute,
+});
+
+/**
+ * A chat without a project with the Web toggle on: the agent loop with only web_search and
+ * read_page, on the chat's compute. Streams the same events as /v1/ide/chat (text, tool calls,
+ * status lines, usage, web totals with the numbered sources).
+ */
+app.post("/v1/ide/web-chat", async (req, reply) => {
+  const body = webChatSchema.parse(req.body);
+  if (!webCall) return reply.status(503).send({ error: "web_unavailable", message: "Web needs this computer connected to EdgeCoder." });
+  const chatModel = body.model || process.env.OLLAMA_MODEL || "qwen3.5:9b";
+  const ollamaHost = process.env.OLLAMA_HOST || "http://127.0.0.1:11434";
+  const promptCtx = await agentPromptContext(chatModel);
+  writeSseHead(reply);
+  let clientDisconnected = false;
+  reply.raw.on("close", () => {
+    if (!reply.raw.writableEnded) clientDisconnected = true;
+  });
+  const lastUser = [...body.messages].reverse().find((m) => m.role === "user");
+  const tracked = activity.begin({ kind: "chat", title: lastUser?.content ?? "", source: "EdgeCoder chat", model: chatModel });
+  const sendEvent = (event: IdeStreamEvent): void => {
+    tracked.event(event);
+    if (!clientDisconnected) reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+  };
+  const abort = new AbortController();
+  reply.raw.on("close", () => {
+    if (!reply.raw.writableEnded) abort.abort();
+  });
+  const web = new WebToolSession({ call: webCall, emit: sendEvent, signal: abort.signal });
+  const turnId = randomUUID();
+  sendEvent({ type: "turn", id: turnId });
+  await runAgentLoop({
+    chat: isFrontierModelId(chatModel)
+      ? frontierChatFn(chatModel, { sessionKey: `chat:${turnId}` }, sendEvent, abort.signal)
+      : chatFnFor(body.compute, chatModel, ollamaHost, sendEvent, abort.signal, "EdgeCoder chat", body.compute?.target === "auto" ? { sessionKey: `chat:${turnId}` } : undefined),
+    systemPrompt: () => `${buildChatSystemPrompt(promptCtx)}\n\n${WEB_SYSTEM_NOTE}`,
+    messages: body.messages,
+    sendEvent,
+    isCancelled: () => clientDisconnected,
+    tools: webToolSchemas(),
+    runTool: makeToolRunner({
+      execute: (tool, args) => (isWebTool(tool) ? web.run(tool, args) : Promise.resolve({ error: `${tool} isn't available in this chat.` })),
+      sendEvent,
+      waitForApproval: async () => false,
+      captureBeforeWrite: () => null,
+      turnId,
+      // The toggle is the allowance; nothing else is offered here.
+      decide: (tool) => (isWebTool(tool) ? { action: "run", reason: "web access is on" } : { action: "refuse", reason: "Only the web tool is available in this chat." }),
+    }),
+  });
   sendEvent({ type: "done" });
   tracked.end(clientDisconnected ? "cancelled" : undefined);
   reply.raw.end();

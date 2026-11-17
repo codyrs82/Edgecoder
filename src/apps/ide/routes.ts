@@ -23,6 +23,8 @@ export const IDE_ROUTES = [
   { method: "POST", path: "/v1/ide/project/trust", auth: true },
   { method: "POST", path: "/v1/ide/tool-approval", auth: true },
   { method: "POST", path: "/v1/ide/chat", auth: true },
+  { method: "GET", path: "/v1/ide/web/status", auth: true },
+  { method: "POST", path: "/v1/ide/web-chat", auth: true },
   { method: "GET", path: "/v1/ide/fs/list", auth: true },
   { method: "GET", path: "/v1/ide/fs/read", auth: true },
   { method: "POST", path: "/v1/ide/fs/write", auth: true },

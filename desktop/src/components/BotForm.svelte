@@ -353,7 +353,7 @@
         {#each BOT_TOOL_GROUPS as g (g.id)}
           <div class="sp-row">
             <span class="sp-text"><span class="sp-title">{g.title}</span><span class="sp-desc">{g.desc}</span></span>
-            <button type="button" class="sp-switch" role="switch" aria-checked={groups[g.id]} aria-label={g.title} onclick={() => (groups = { ...groups, [g.id]: !groups[g.id] })}></button>
+            <button type="button" class="sp-switch" role="switch" aria-checked={groups[g.id] === true} aria-label={g.title} onclick={() => (groups = { ...groups, [g.id]: !groups[g.id] })}></button>
           </div>
         {/each}
         {#if groups.edit}

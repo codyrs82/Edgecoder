@@ -7,6 +7,8 @@
   import PlanBlock from "./PlanBlock.svelte";
   import ChangesCard from "./ChangesCard.svelte";
   import NetworkTaskCard from "./NetworkTaskCard.svelte";
+  import WebSources from "./WebSources.svelte";
+  import type { WebUsage } from "../lib/web-tool";
   import type { StreamProgress } from "../lib/api";
   import { usageText } from "../lib/compute-choice";
   import { servedBreakdown, servedLine, type CallUsage } from "../lib/served";
@@ -36,13 +38,17 @@
     onPreview?: (path: string) => void;
     /** What the reply cost and where it ran. */
     usage?: { cSats: number; where?: string; calls?: CallUsage[] };
+    /** The web tool's searches and pages for this reply, with the numbered sources it cites. */
+    web?: WebUsage;
+    /** While streaming: what the web tool is doing ("Searching the web…"). */
+    activity?: string;
   }
   /** The footer's tooltip: each model call (machine, hardware, region, timings, cost). */
   function usageTitle(u: { cSats: number; where?: string; calls?: CallUsage[] }): string {
     return u.calls?.length ? `Where this reply ran:\n${servedBreakdown(u.calls)}` : "Where this reply ran and what it cost";
   }
 
-  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, onToolAlways, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview, usage }: Props = $props();
+  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, onToolAlways, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview, usage, web, activity }: Props = $props();
 
   /** A failed reply: its text, and the error as one compact notice (with Buy cSats when it's money). */
   let failed = $derived(role === "assistant" && !streaming ? splitModelError(content) : { text: content, error: undefined });
@@ -137,6 +143,12 @@
       {#if turnId && changedFiles && changedFiles.length > 0 && !streaming}
         <ChangesCard {turnId} files={changedFiles} onReverted={onFilesReverted} {onOpenPath} {onPreview} />
       {/if}
+      {#if web && !streaming}
+        <WebSources {web} text={failed.text} />
+      {/if}
+      {#if streaming && activity}
+        <div class="web-activity" role="status">{activity}</div>
+      {/if}
       {#if streaming}
         <StreamingIndicator progress={streamProgress} />
       {/if}
@@ -157,6 +169,7 @@
 </div>
 
 <style>
+  .web-activity { margin-top: 6px; font-size: var(--fs-sm); color: var(--text-secondary); }
   .reply-failure { display: flex; align-items: center; gap: 10px; margin-top: 4px; padding: 6px 10px; border-radius: 8px; background: var(--bg-surface); font-size: 12.5px; color: var(--text-secondary); }
   .rf-text { flex: 1; min-width: 0; }
   .rf-title { color: var(--text-primary); font-weight: 500; }
