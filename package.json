@@ -51,6 +51,7 @@
     "check:scripts": "node scripts/check-scripts.mjs",
     "check:fly-configs": "node scripts/check-fly-configs.mjs",
     "fleet": "node scripts/ec-fleet/ec-fleet.mjs",
+    "ops:accounts": "node scripts/ops/accounts.mjs",
     "fly:bootstrap": "bash scripts/fly-bootstrap-org.sh",
     "test:desktop-ui": "cd desktop && npx playwright test --config e2e/playwright.config.ts"
   },

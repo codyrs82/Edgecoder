@@ -246,6 +246,10 @@ export async function networkSnapshot(range: SeriesRange = "1h", nowMs = Date.no
       version: cap.version,
       mode: cap.mode,
       provider: cap.localModelProvider,
+      // Engine running the model (register's inferenceEngine; unset = Ollama).
+      engine: cap.inferenceEngine ?? "ollama",
+      // Portal host approval: false = own work only (dispatch claimRule); null = no restriction known.
+      hostApproved: cap.hostApproved ?? null,
       countryCode: cap.countryCode ?? null,
       // Hosting region the agent reported (null: unknown; the page then uses its coordinator's).
       region: cap.region ?? null,

@@ -6,6 +6,7 @@ This document covers deploying EdgeCoder services across Fly.io, Docker, systemd
 
 - [Fly.io Deployment](#flyio-deployment)
   - [Database: current state](#database-current-state)
+  - [Accounts and machines at a glance](#accounts-and-machines-at-a-glance)
 - [Docker Deployment](#docker-deployment)
 - [Self-Hosted Linux (systemd)](#self-hosted-linux-systemd)
 - [macOS Installer](#macos-installer)
@@ -221,6 +222,33 @@ It has no `[mounts]` section. The EU seed (`fly.seed-eu.toml`) is the seed that 
   DOCS_SITE_URL = "https://codyrs82.github.io/Edgecoder/"
   COORDINATOR_DISCOVERY_URLS = "https://edgecoder-seed-eu.fly.dev,https://edgecoder-seed.fly.dev"
 ```
+
+### Accounts and machines at a glance
+
+A read-only owner view of every account, its balance and its machines, for testing across the network:
+
+```bash
+npm run ops:accounts                       # all accounts
+npm run ops:accounts -- proton             # email substring (or a user id, its first 8 chars, acct-<userId>)
+npm run ops:accounts -- --online           # accounts with a machine online now, online machines only
+npm run ops:accounts -- --with-machines --json
+```
+
+Each block shows the account (short id, email, name, admin / system admin, host-approved and how,
+email verified, created, last sign-in), its balance and today's spend in cSats, API keys and payout
+destination (counts and "set"/"not set" only), and its machines: agent id, online/offline and last
+seen, compute class/tier, models, engine, approved node, host role (serves network or own work only)
+and the coordinator it is on.
+
+How it works (`scripts/ops/accounts.mjs`): it needs `fly` signed in to the org and nothing else. It
+runs `fly ssh console -C "node -e …"` on `edgecoder-portal` (portal tables, `PORTAL_DATABASE_URL`),
+`edgecoder-seed` (ledger and agent tables on `edgecoder_seed`, `DATABASE_URL`, plus
+`GET /admin/network`) and `edgecoder-seed-eu` (`GET /admin/network`) in parallel, so database URLs and
+admin tokens stay on the machines; only the result JSON comes back. Every SQL statement must be a
+single SELECT (checked here and again on the machine) and the connection is opened with
+`default_transaction_read_only=on`. Tokens, hashes, keys and payout destinations are never selected
+or printed. Bots are in coordinator memory with no read-only admin endpoint, so they show as `n/a`.
+App names can be overridden with `OPS_PORTAL_APP`, `OPS_LEDGER_APP` and `OPS_COORDINATOR_APPS`.
 
 ---
 
