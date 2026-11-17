@@ -5,6 +5,8 @@ struct RootTabView: View {
     @EnvironmentObject private var swarmRuntime: SwarmRuntimeController
     @EnvironmentObject private var conversationStore: ConversationStore
     @EnvironmentObject private var chatRouter: ChatRouter
+    @EnvironmentObject private var purchasePolicy: PurchasePolicy
+    @EnvironmentObject private var networkStatus: NetworkStatusStore
     @StateObject private var bt = BluetoothTransport.shared
     @State private var selectedTab: AppTab = .chat
     @State private var showLoginSheet = false
@@ -17,6 +19,20 @@ struct RootTabView: View {
                     Label("Chat", systemImage: "bubble.left.and.bubble.right")
                 }
 
+            BotsView()
+                .tag(AppTab.bots)
+                .tabItem {
+                    Label("Bots", systemImage: "person.2.wave.2")
+                }
+
+            NavigationStack {
+                WalletView()
+            }
+                .tag(AppTab.wallet)
+                .tabItem {
+                    Label("Wallet", systemImage: "wallet.pass")
+                }
+
             IDEView()
                 .tag(AppTab.edgecoder)
                 .tabItem {
@@ -26,6 +42,7 @@ struct RootTabView: View {
         }
         .tint(Theme.accent)
         .task {
+            await purchasePolicy.refreshStorefront()
             if swarmRuntime.isLocalCoordinator {
                 await swarmRuntime.autoStartIfReady()
             } else {
@@ -35,15 +52,21 @@ struct RootTabView: View {
                 if !sessionStore.isAuthenticated {
                     showLoginSheet = true
                 } else {
+                    await networkStatus.refresh()
                     await swarmRuntime.ensureEnrollment()
                     await swarmRuntime.autoStartIfReady()
                 }
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .edgeCoderBalanceChanged)) { _ in
+            Task { await networkStatus.refresh() }
+        }
         .onChange(of: sessionStore.isAuthenticated) { _, isAuthenticated in
+            if !isAuthenticated { networkStatus.clear() }
             if isAuthenticated {
                 showLoginSheet = false
                 Task {
+                    await networkStatus.refresh()
                     await swarmRuntime.ensureEnrollment()
                     await swarmRuntime.autoStartIfReady()
                 }
@@ -69,6 +92,8 @@ struct RootTabView: View {
 
 private enum AppTab {
     case chat
+    case bots
+    case wallet
     case edgecoder
 }
 
@@ -83,7 +108,7 @@ private struct LoginSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    Text("Sign in to access swarm network, wallet, and stats.")
+                    Text("Sign in to chat on your machines and the EdgeCoder network, and to see your bots and wallet.")
                         .font(.subheadline)
                         .foregroundColor(Theme.textSecondary)
                 }
@@ -115,15 +140,14 @@ private struct LoginSheet: View {
                     }
                     .disabled(viewModel.email.isEmpty || viewModel.password.isEmpty || viewModel.isLoading)
 
-                    TermsAgreementToggle(isOn: $viewModel.acceptedTerms)
+                }
 
-                    Button("Create Account") {
-                        Task {
-                            await viewModel.signUp(sessionStore: sessionStore)
-                            if sessionStore.isAuthenticated { dismiss() }
-                        }
-                    }
-                    .disabled(viewModel.email.isEmpty || viewModel.password.count < 8 || viewModel.isLoading || !viewModel.acceptedTerms)
+                // No account creation in the iOS app until the portal has in-app account deletion
+                // (App Store Review Guideline 5.1.1(v)); see docs/ios-app-store-release.md.
+                Section {
+                    Text("New to EdgeCoder? Create your account on edgecoder.io, then sign in here.")
+                        .font(.footnote)
+                        .foregroundColor(Theme.textSecondary)
                 }
 
                 if !viewModel.statusMessage.isEmpty {

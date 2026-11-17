@@ -33,7 +33,7 @@ struct ModelPickerSheet: View {
                                 Text("Auto")
                                     .font(.subheadline.weight(.medium))
                                     .foregroundColor(Theme.textPrimary)
-                                Text("Best available route")
+                                Text("Your machines first, then the network")
                                     .font(.caption)
                                     .foregroundColor(Theme.textMuted)
                             }
@@ -125,7 +125,7 @@ struct ModelPickerSheet: View {
 
                 // Swarm Network
                 if !swarmModels.isEmpty {
-                    Section("Swarm Network") {
+                    Section("EdgeCoder Network") {
                         ForEach(swarmModels) { model in
                             let cost = max(0.5, model.paramSize)
                             let available = model.agentCount > 0
@@ -144,7 +144,7 @@ struct ModelPickerSheet: View {
                                             Text("\(String(format: "%.1f", model.paramSize))B")
                                                 .font(.caption)
                                                 .foregroundColor(Theme.textMuted)
-                                            Text("\(String(format: "%.1f", cost)) credits")
+                                            Text("\(String(format: "%.1f", cost)) cSats")
                                                 .font(.caption)
                                                 .foregroundColor(Theme.accent)
                                             Text("\(model.agentCount) agent\(model.agentCount == 1 ? "" : "s")")

@@ -8,6 +8,8 @@ struct SettingsView: View {
     @ObservedObject private var swarmRuntime = SwarmRuntimeController.shared
     private let config = AppConfig.current
     @AppStorage(AppearancePreference.storageKey) private var appearance = AppearancePreference.defaultValue.rawValue
+    @Environment(\.openURL) private var openURL
+    @State private var confirmDelete = false
 
     var body: some View {
         NavigationStack {
@@ -77,6 +79,24 @@ struct SettingsView: View {
                     .font(.caption.weight(.medium))
                     .foregroundColor(Theme.red)
                 }
+
+                Divider().overlay(Theme.border)
+
+                Button(role: .destructive) {
+                    confirmDelete = true
+                } label: {
+                    Label("Delete account…", systemImage: "person.crop.circle.badge.xmark")
+                        .font(.subheadline)
+                        .foregroundColor(Theme.red)
+                }
+                .confirmationDialog("Delete your EdgeCoder account?", isPresented: $confirmDelete, titleVisibility: .visible) {
+                    Button("Request deletion", role: .destructive) {
+                        if let url = Self.deletionRequestURL(email: sessionStore.user?.email) { openURL(url) }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This sends a deletion request for your account, its machines, conversations and bots to support@edgecoder.io. Withdraw any earnings first: unspent cSats cannot be refunded after deletion.")
+                }
             } else {
                 HStack(spacing: 14) {
                     ZStack {
@@ -135,37 +155,24 @@ struct SettingsView: View {
                         .background(Theme.bgInput)
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-                    TermsAgreementToggle(isOn: $authViewModel.acceptedTerms)
+                    Button {
+                        Task { await authViewModel.login(sessionStore: sessionStore) }
+                    } label: {
+                        Text("Log In")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundColor(Theme.onAccent)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Theme.accent)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .disabled(authViewModel.email.isEmpty || authViewModel.password.isEmpty || authViewModel.isLoading)
+
+                    // No account creation in the iOS app until the portal has in-app account deletion
+                    // (App Store Review Guideline 5.1.1(v)); see docs/ios-app-store-release.md.
+                    Text("New to EdgeCoder? Create your account on edgecoder.io, then sign in here.")
                         .font(.caption)
                         .foregroundColor(Theme.textSecondary)
-
-                    HStack(spacing: 10) {
-                        Button {
-                            Task { await authViewModel.login(sessionStore: sessionStore) }
-                        } label: {
-                            Text("Log In")
-                                .font(.subheadline.weight(.medium))
-                                .foregroundColor(Theme.textPrimary)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 10)
-                                .background(Theme.accent)
-                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                        .disabled(authViewModel.email.isEmpty || authViewModel.password.isEmpty || authViewModel.isLoading)
-
-                        Button {
-                            Task { await authViewModel.signUp(sessionStore: sessionStore) }
-                        } label: {
-                            Text("Create Account")
-                                .font(.subheadline.weight(.medium))
-                                .foregroundColor(Theme.textPrimary)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 10)
-                                .background(Theme.bgElevated)
-                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                        .disabled(authViewModel.email.isEmpty || authViewModel.password.count < 8 || authViewModel.isLoading || !authViewModel.acceptedTerms)
-                    }
                 }
 
                 if !authViewModel.statusMessage.isEmpty {
@@ -175,6 +182,19 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    /// A prefilled deletion request (the portal has no self-service deletion API yet; see
+    /// docs/ios-app-store-release.md, "Account deletion").
+    static func deletionRequestURL(email: String?) -> URL? {
+        var c = URLComponents()
+        c.scheme = "mailto"
+        c.path = "support@edgecoder.io"
+        c.queryItems = [
+            URLQueryItem(name: "subject", value: "Delete my EdgeCoder account"),
+            URLQueryItem(name: "body", value: "Please delete my EdgeCoder account\(email.map { " (\($0))" } ?? "") and its data.\n\nSent from the EdgeCoder iOS app."),
+        ]
+        return c.url
     }
 
     // MARK: - Runtime Card
@@ -214,7 +234,6 @@ struct SettingsView: View {
         case .running: return Theme.green
         case .paused: return Theme.yellow
         case .stopped: return Theme.textMuted
-        default: return Theme.textMuted
         }
     }
 

@@ -4,6 +4,13 @@ struct MessageBubble: View {
     let message: ChatMessage
     var streaming: Bool = false
     var progress: StreamProgress?
+    /// The portal's "Thinking..." note while nothing has arrived yet.
+    var statusText: String = ""
+    /// Buy cSats under an out-of-cSats reply (nil where the App Store rules do not allow it).
+    var buyAction: (() -> Void)?
+    var retryAction: (() -> Void)?
+    /// "Signed in as you@example.com · 12 cSats" under an out-of-cSats reply.
+    var signedInLine: String?
 
     @State private var verb = StreamProgress.randomVerb()
     @State private var pulseOpacity: Double = 1.0
@@ -17,7 +24,15 @@ struct MessageBubble: View {
             VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 4) {
                 // Content
                 if message.role == .assistant {
-                    assistantContent
+                    if !message.content.isEmpty { assistantContent }
+                    if let f = message.failure { failureView(f) }
+                    if message.cutShort == true { cutShortView }
+                    if let footer = message.footer, !streaming {
+                        Text(footer)
+                            .font(.caption2)
+                            .foregroundColor(Theme.textMuted)
+                            .accessibilityLabel("Ran on: \(footer)")
+                    }
                 } else {
                     Text(message.content)
                         .font(.body)
@@ -57,8 +72,8 @@ struct MessageBubble: View {
                     }
                 }
 
-            // Verb
-            Text("\(verb)…")
+            // Verb (or the portal's note, e.g. "Answering with EdgeCoder's own model (free, slower)...")
+            Text(statusText.isEmpty || !message.content.isEmpty ? "\(verb)…" : statusText)
                 .font(.caption)
                 .foregroundColor(Theme.textMuted)
 
@@ -99,6 +114,45 @@ struct MessageBubble: View {
             }
         }
         .padding(.top, 4)
+    }
+
+    // MARK: - Failure (src/portal/pages/chat.ts showChatFailure)
+
+    private func failureView(_ f: ChatFailureInfo) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(f.headline, systemImage: f.offersBuy ? "bolt.slash" : "exclamationmark.triangle")
+                .font(.subheadline.weight(.semibold))
+                .foregroundColor(Theme.red)
+            if !f.detail.isEmpty {
+                Text(f.detail).font(.caption).foregroundColor(Theme.textSecondary)
+            }
+            if f.offersBuy, let who = signedInLine {
+                Text(who).font(.caption).foregroundColor(Theme.textSecondary)
+            }
+            HStack(spacing: 8) {
+                if f.offersBuy, let buyAction {
+                    Button("Buy cSats on edgecoder.io", action: buyAction)
+                        .buttonStyle(.borderedProminent).tint(Theme.accent).foregroundColor(Theme.onAccent)
+                        .font(.caption.weight(.semibold))
+                }
+                if let retryAction {
+                    Button("Retry", action: retryAction)
+                        .buttonStyle(.bordered).tint(Theme.textPrimary)
+                        .font(.caption.weight(.semibold))
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private var cutShortView: some View {
+        HStack(spacing: 6) {
+            Text("Reply may be cut short").font(.caption).foregroundColor(Theme.textMuted)
+            if let retryAction {
+                Text("\u{00B7}").font(.caption).foregroundColor(Theme.textMuted)
+                Button("Retry", action: retryAction).font(.caption)
+            }
+        }
     }
 
     // MARK: - Assistant content with code blocks

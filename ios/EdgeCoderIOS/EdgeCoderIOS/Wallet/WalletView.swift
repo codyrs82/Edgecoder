@@ -43,22 +43,6 @@ enum WalletFormat {
     }
 }
 
-/// Mainnet is real money; every other network is test sats with no value.
-struct NetworkInfo {
-    let label: String
-    let short: String
-    let isTest: Bool
-    init(_ network: String?) {
-        switch network {
-        case "bitcoin", "mainnet": label = "Bitcoin mainnet · real sats"; short = "mainnet"; isTest = false
-        case "regtest": label = "Regtest · test sats, no value"; short = "regtest"; isTest = true
-        case "signet": label = "Signet · test sats, no value"; short = "signet"; isTest = true
-        case "testnet": label = "Testnet · test sats, no value"; short = "testnet"; isTest = true
-        default: label = "Network unknown"; short = network ?? "unknown"; isTest = true
-        }
-    }
-}
-
 /// A QR code for a Lightning invoice (or, with `scheme: "bitcoin"`, a Bitcoin deposit address), drawn
 /// with CoreImage (a system framework; no package).
 struct InvoiceQRCode: View {
@@ -94,6 +78,7 @@ struct InvoiceQRCode: View {
 struct WalletView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.openURL) private var openURL
+    @EnvironmentObject private var purchasePolicy: PurchasePolicy
 
     @State private var overview: WalletOverview?
     @State private var destination: PayoutDestinationView?
@@ -127,6 +112,9 @@ struct WalletView: View {
     @State private var challengeDetail = ""
     @State private var withdrawMessage: (ok: Bool, text: String)?
     @State private var withdrawing = false
+    /// Two-factor step-up (#420): asked for when the portal answers two_factor_required.
+    @State private var needsTwoFactor = false
+    @State private var twoFactorCode = ""
 
     enum Step { case amount, onchain, invoice, paid, expired }
 
@@ -136,7 +124,12 @@ struct WalletView: View {
     private var feeBps: Int { overview?.fees.purchaseFeeBps ?? 0 }
     private var netFeeBps: Int { overview?.fees.networkFeeBps ?? 500 }
     private var chosenAmount: Int { useCustom ? (Int(customText) ?? 0) : amount }
-    private var amountValid: Bool { (100...1_000_000).contains(chosenAmount) }
+    /// The early-access caps and the global range (src/common/buy-limits.ts).
+    private var buyLimit: BuyLimit {
+        BuyLimits.limit(launch: overview?.launch, balanceCSats: overview?.cSats, feeBps: feeBps,
+                        globalMin: overview?.topup.minSats ?? 100, globalMax: overview?.topup.maxSats ?? 1_000_000)
+    }
+    private var amountValid: Bool { BuyLimits.fits(chosenAmount, buyLimit) }
     private var onchainPolicy: WalletOverview.OnchainPolicy? {
         guard let p = overview?.payouts?.policy?.onchain, p.enabled else { return nil }
         return p
@@ -153,7 +146,11 @@ struct WalletView: View {
                         card { Text(loadError).font(.subheadline).foregroundColor(Theme.red) }
                     }
                     balanceCard
-                    addFundsCard
+                    if purchasePolicy.canBuyInApp {
+                        addFundsCard
+                    } else if purchasePolicy.canLinkOut {
+                        linkOutCard
+                    }
                     feesCard
                     pricesCard
                     earningsSection
@@ -242,8 +239,9 @@ struct WalletView: View {
                     presetButton(title: WalletFormat.sats(Double(p)), subtitle: "sats", selected: !useCustom && amount == p) {
                         useCustom = false; amount = p
                     }
+                    .disabled(!BuyLimits.fits(p, buyLimit))
                 }
-                presetButton(title: "Custom", subtitle: "100–1M", selected: useCustom) {
+                presetButton(title: "Custom", subtitle: BuyLimits.rangeLabel(buyLimit), selected: useCustom) {
                     useCustom = true
                     if customText.isEmpty { customText = String(amount) }
                 }
@@ -255,7 +253,7 @@ struct WalletView: View {
                     .accessibilityLabel("Amount in sats")
             }
             breakdown(
-                pay: amountValid ? "\(WalletFormat.sats(Double(chosenAmount))) sats" : "100 to 1,000,000 sats",
+                pay: amountValid ? "\(WalletFormat.sats(Double(chosenAmount))) sats" : BuyLimits.rangeLabel(buyLimit) + " sats",
                 payUsd: amountValid ? WalletFormat.usd(Double(chosenAmount), overview?.btcUsd) : nil,
                 feeLabel: feeBps > 0 ? "Purchase fee (\(WalletFormat.pct(feeBps)))" : nil,
                 fee: amountValid ? "− \(WalletFormat.sats(Double(WalletFormat.preview(chosenAmount, feeBps: feeBps).fee))) sats" : "–",
@@ -268,11 +266,18 @@ struct WalletView: View {
             Button {
                 Task { await createInvoice() }
             } label: {
-                Text(creating ? "Preparing payment…" : amountValid ? "Buy \(WalletFormat.sats(Double(chosenAmount))) cSats with Lightning" : "Enter 100 to 1,000,000 sats")
+                Text(creating ? "Preparing payment…" : amountValid ? "Buy \(WalletFormat.sats(Double(chosenAmount))) cSats with Lightning" : "Enter \(BuyLimits.rangeLabel(buyLimit)) sats")
                     .font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity).padding(.vertical, 12)
             }
             .buttonStyle(.borderedProminent).tint(Theme.accent).foregroundColor(Theme.onAccent)
             .disabled(!amountValid || creating)
+            let limitText = BuyLimits.limitText(chosenAmount, buyLimit)
+            if !limitText.isEmpty {
+                Text(limitText).font(.footnote).foregroundColor(Theme.yellow)
+            } else if let cap = buyLimit.dailyCapSats {
+                Text("Early access: up to \(WalletFormat.sats(Double(cap))) sats per day (\(WalletFormat.sats(Double(buyLimit.dailyLeftSats ?? 0))) left today).")
+                    .font(.footnote).foregroundColor(Theme.textSecondary)
+            }
             if !topupError.isEmpty {
                 Text(topupError).font(.footnote).foregroundColor(Theme.red)
             }
@@ -280,6 +285,22 @@ struct WalletView: View {
                 Label("This coordinator runs on \(network.short). Pay with a \(network.short) wallet; these sats have no value.", systemImage: "exclamationmark.triangle")
                     .font(.footnote).foregroundColor(Theme.yellow)
             }
+        }
+    }
+
+    /// United States storefront only (PurchasePolicy .linkOutUS): buying happens on the web.
+    private var linkOutCard: some View {
+        card {
+            Text("Buy cSats").font(.headline).foregroundColor(Theme.textPrimary)
+            Text("Buy cSats with Lightning on edgecoder.io. They show up here as soon as the payment lands.")
+                .font(.footnote).foregroundColor(Theme.textSecondary)
+            Button {
+                openURL(purchasePolicy.webBuyURL)
+            } label: {
+                Label("Buy cSats on edgecoder.io", systemImage: "arrow.up.forward.app")
+                    .font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity).padding(.vertical, 10)
+            }
+            .buttonStyle(.borderedProminent).tint(Theme.accent).foregroundColor(Theme.onAccent)
         }
     }
 
@@ -612,6 +633,14 @@ struct WalletView: View {
                 .textInputAutocapitalization(.never).autocorrectionDisabled()
                 .textFieldStyle(.roundedBorder)
                 .accessibilityLabel("Lightning payment code")
+            if needsTwoFactor {
+                TextField("Authenticator code", text: $twoFactorCode)
+                    .keyboardType(.numbersAndPunctuation).textContentType(.oneTimeCode).textFieldStyle(.roundedBorder)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .accessibilityLabel("Two-factor code")
+                Text("Two-factor authentication is on: enter the current code from your authenticator app, or a recovery code.")
+                    .font(.caption).foregroundColor(Theme.textSecondary)
+            }
             if challengeId != nil {
                 Text(challengeDetail).font(.footnote).foregroundColor(Theme.textSecondary)
                 HStack {
@@ -638,7 +667,7 @@ struct WalletView: View {
             Text("Activity").font(.headline).foregroundColor(Theme.textPrimary)
             let rows = overview?.recent ?? []
             if rows.isEmpty {
-                Text("Nothing yet. Buy cSats or connect a machine to get started.").font(.footnote).foregroundColor(Theme.textSecondary)
+                Text(purchasePolicy.canBuyInApp ? "Nothing yet. Buy cSats or connect a machine to get started." : "Nothing yet.").font(.footnote).foregroundColor(Theme.textSecondary)
             }
             ForEach(rows) { r in
                 HStack {
@@ -773,6 +802,9 @@ struct WalletView: View {
         guard let p else { return "Payout details are unavailable right now." }
         if p.lightningEnabled == false { return "Lightning payouts are not enabled on this coordinator yet." }
         var parts = ["Minimum \(WalletFormat.sats(Double(p.minPayoutSats ?? 0))) sats.", "Routing fee up to \(WalletFormat.pct(p.maxFeeBps ?? 0)) is set aside and the unused part returned."]
+        if let daily = overview?.launch?.maxPayoutSatsPerDay, daily > 0 {
+            parts.append("Early access: up to \(WalletFormat.sats(daily)) sats withdrawn per 24 h.")
+        }
         if let single = p.limits?.maxSingleSats {
             parts.append("Up to \(WalletFormat.sats(Double(single))) sats per payout\(p.limits?.maxAccountDailySats.map { " and \(WalletFormat.sats(Double($0))) per 24 h" } ?? "").")
         }
@@ -806,8 +838,10 @@ struct WalletView: View {
         do {
             let r = try await APIClient.shared.requestRaw(baseURL: portal, path: "/portal/api/wallet/topup", method: "POST", body: ["amountSats": chosenAmount])
             guard r.status == 200, let inv = try? JSONDecoder().decode(TopupInvoice.self, from: r.data) else {
-                let err = (try? JSONDecoder().decode(WithdrawResponse.self, from: r.data))?.error ?? "status \(r.status)"
-                topupError = err == "payments_disabled" ? "Buying cSats is turned off on this coordinator." : "Could not start the payment (\(err))."
+                struct Refusal: Decodable { let error: String?; let code: String?; let remainingSats: Double?; let limitSats: Double? }
+                let f = try? JSONDecoder().decode(Refusal.self, from: r.data)
+                topupError = BuyLimits.errorText(f?.code ?? f?.error ?? (r.status == 429 ? "rate_limited" : r.status == 401 ? "not_authenticated" : nil),
+                                                 remainingSats: f?.remainingSats, limitSats: f?.limitSats)
                 return
             }
             invoice = inv
@@ -888,11 +922,31 @@ struct WalletView: View {
             body["challengeId"] = id
             body["emailCode"] = withdrawCode.trimmingCharacters(in: .whitespaces)
         }
+        let tfa = twoFactorCode.trimmingCharacters(in: .whitespaces)
+        if needsTwoFactor {
+            guard !tfa.isEmpty else { withdrawMessage = (false, "Enter the code from your authenticator app."); return }
+            body["twoFactorCode"] = tfa
+        }
         withdrawing = true
         defer { withdrawing = false }
         do {
             let r = try await APIClient.shared.requestRaw(baseURL: portal, path: "/wallet/payouts/withdraw", method: "POST", body: body)
             let w = try? JSONDecoder().decode(WithdrawResponse.self, from: r.data)
+            switch WithdrawStep.classify(status: r.status, response: w) {
+            case .twoFactorCode(let detail):
+                needsTwoFactor = true
+                withdrawMessage = (false, detail)
+                return
+            case .passkeyOnWeb:
+                withdrawMessage = (false, "This account confirms withdrawals with a passkey. Withdraw on edgecoder.io (Settings > Wallet) for now.")
+                return
+            case .held(let detail):
+                challengeId = nil
+                withdrawMessage = (false, detail)
+                return
+            case .other:
+                break
+            }
             if r.status == 202, w?.verificationRequired == true {
                 challengeId = w?.challengeId
                 challengeDetail = "\(w?.detail ?? "We emailed you a code.") Amount: \(WalletFormat.msat(w?.amountMsat ?? 0)) sats."
@@ -901,8 +955,10 @@ struct WalletView: View {
             }
             challengeId = nil
             if (200...299).contains(r.status), w?.ok == true {
-                withdrawMessage = (true, "Paid \(WalletFormat.msat(w?.payout?.amountMsat ?? 0)) sats to your wallet.")
+                withdrawMessage = (true, "Paid \(WalletFormat.msat(w?.payout?.amountMsat ?? 0)) sats to your wallet. A receipt is on its way by email.")
                 bolt11 = ""
+                twoFactorCode = ""
+                needsTwoFactor = false
             } else {
                 withdrawMessage = (false, w?.detail ?? "Withdrawal failed (\(w?.code ?? w?.error ?? "status \(r.status)")).")
             }
@@ -912,3 +968,4 @@ struct WalletView: View {
         }
     }
 }
+

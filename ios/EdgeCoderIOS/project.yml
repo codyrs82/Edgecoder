@@ -7,7 +7,8 @@ settings:
   base:
     PRODUCT_NAME: EdgeCoder
     SWIFT_VERSION: "5.0"
-    CURRENT_PROJECT_VERSION: 1
+    # Bump CURRENT_PROJECT_VERSION for every TestFlight upload (App Store Connect refuses a repeat).
+    CURRENT_PROJECT_VERSION: 9
     MARKETING_VERSION: 1.0.0
 targets:
   EdgeCoderIOS:
@@ -22,18 +23,32 @@ targets:
         CODE_SIGN_ENTITLEMENTS: EdgeCoderIOS/EdgeCoderIOS.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: R68RHRM2H4
+        # The Apple Developer team that signs the app (the owner sets it; see docs/ios-app-store-release.md).
+        DEVELOPMENT_TEAM: 63CL88WY7G
         TARGETED_DEVICE_FAMILY: "1,2"
+        # Buying cSats in the app (Core/PurchasePolicy.swift): none | link-out-us | in-app-lightning.
+        # Release (TestFlight / App Store) ships `none` for App Store Review Guideline 3.1.1.
+        EDGECODER_PURCHASE_MODE: none
       configs:
         Debug:
           CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION: YES
+          EDGECODER_PURCHASE_MODE: in-app-lightning
     info:
       path: EdgeCoderIOS/Info.plist
       properties:
         CFBundleDisplayName: EdgeCoder
-        CFBundleShortVersionString: 1.0.0
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleIconName: AppIcon
+        EdgeCoderPurchaseMode: $(EDGECODER_PURCHASE_MODE)
+        NSBluetoothAlwaysUsageDescription: EdgeCoder uses Bluetooth to share your device's AI compute with nearby Mac nodes when internet is unavailable, enabling local AI task execution without a coordinator.
+        NSBluetoothPeripheralUsageDescription: EdgeCoder advertises as a Bluetooth peripheral to allow nearby devices to discover and route tasks.
+        NSLocalNetworkUsageDescription: EdgeCoder runs a local HTTP server and connects to mesh peers on your network for P2P task routing and execution.
+        BGTaskSchedulerPermittedIdentifiers:
+          - io.edgecoder.ble-mesh
+          - io.edgecoder.inference
+          - io.edgecoder.ios.runtime
+          - io.edgecoder.ios.heartbeat
         CFBundleURLTypes:
           - CFBundleTypeRole: Editor
             CFBundleURLName: io.edgecoder.ios.oauth
@@ -59,6 +74,7 @@ targets:
         UILaunchStoryboardName: LaunchScreen
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: false
+          NSAllowsLocalNetworking: true
         ITSAppUsesNonExemptEncryption: false
     dependencies:
       - package: SwiftLlama
@@ -74,6 +90,19 @@ targets:
       - path: EdgeCoderIOS/Security/RequestSigner.swift
       # #63: BLE credit-transaction canonical bytes (BLETxV3) for BLETxV3VectorsTests.
       - path: EdgeCoderIOS/Mesh/OfflineLedger.swift
+      # API client parsing and the shared-wording ports (chat failures, served line, buy limits).
+      - path: EdgeCoderIOS/Core/ChatFailures.swift
+      - path: EdgeCoderIOS/Core/ServedFormatter.swift
+      - path: EdgeCoderIOS/Core/BuyLimits.swift
+      - path: EdgeCoderIOS/Core/PortalChatClient.swift
+      - path: EdgeCoderIOS/Core/APIClient.swift
+      - path: EdgeCoderIOS/Core/AppConfig.swift
+      - path: EdgeCoderIOS/Core/Models.swift
+      - path: EdgeCoderIOS/Core/PurchasePolicy.swift
+      - path: EdgeCoderIOS/Core/Theme.swift
+      - path: EdgeCoderIOS/Shared/NetworkBadge.swift
+      - path: EdgeCoderIOS/Bots/BotsModels.swift
+      - path: EdgeCoderIOS/Chat/ChatModels.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.edgecoder.ios.tests

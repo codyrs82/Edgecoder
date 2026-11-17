@@ -12,6 +12,8 @@ struct EdgeCoderIOSApp: App {
         swarmRuntime: SwarmRuntimeController.shared,
         bleMeshManager: SwarmRuntimeController.shared.bleMeshManager
     )
+    @StateObject private var purchasePolicy = PurchasePolicy.shared
+    @StateObject private var networkStatus = NetworkStatusStore()
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(AppearancePreference.storageKey) private var appearance = AppearancePreference.defaultValue.rawValue
 
@@ -42,6 +44,8 @@ struct EdgeCoderIOSApp: App {
                 .environmentObject(swarmRuntime)
                 .environmentObject(conversationStore)
                 .environmentObject(chatRouter)
+                .environmentObject(purchasePolicy)
+                .environmentObject(networkStatus)
                 .preferredColorScheme(AppearancePreference.from(appearance).colorScheme)
                 .onReceive(
                     NotificationCenter.default.publisher(

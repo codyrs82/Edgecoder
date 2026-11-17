@@ -7,6 +7,12 @@ struct ChatMessage: Codable, Identifiable, Equatable {
     let role: Role
     let content: String
     let timestamp: Date
+    /// The line under a finished reply: cSats spent and where it ran ("3.4 cSats · Network · best fit").
+    var footer: String?
+    /// A reply that could not run: the shared failure line and what to do (Buy cSats, Retry).
+    var failure: ChatFailureInfo?
+    /// The reply has text but stopped mid-sentence ("Reply may be cut short").
+    var cutShort: Bool?
 
     enum Role: String, Codable {
         case user
@@ -14,12 +20,35 @@ struct ChatMessage: Codable, Identifiable, Equatable {
         case system
     }
 
-    init(role: Role, content: String) {
+    init(role: Role, content: String, footer: String? = nil, failure: ChatFailureInfo? = nil, cutShort: Bool? = nil) {
         self.id = UUID().uuidString
         self.role = role
         self.content = content
         self.timestamp = Date()
+        self.footer = footer
+        self.failure = failure
+        self.cutShort = cutShort
     }
+}
+
+/// A failed reply as the web chat shows it (src/portal/pages/chat.ts showChatFailure).
+struct ChatFailureInfo: Codable, Equatable {
+    let kind: ChatFailureKind
+    let headline: String
+    let detail: String
+    /// The message to send again from Retry.
+    let retryText: String?
+
+    init(message: String?, code: String? = nil, httpStatus: Int? = nil, retryText: String?) {
+        let kind = ChatFailures.kind(message: message, code: code, httpStatus: httpStatus)
+        self.kind = kind
+        self.headline = ChatFailures.headline(kind: kind, message: message)
+        let detail = ChatFailures.detail(kind: kind, message: message)
+        self.detail = kind == .other ? "" : detail
+        self.retryText = retryText
+    }
+
+    var offersBuy: Bool { ChatFailures.offersBuy(kind) }
 }
 
 // MARK: - Conversation
@@ -32,6 +61,8 @@ struct Conversation: Codable, Identifiable, Equatable {
     let createdAt: Date
     var updatedAt: Date
     var selectedModel: String?
+    /// The portal conversation this chat continues (web chat API), created on the first network message.
+    var portalConversationId: String?
 
     enum Source: String, Codable {
         case chat
@@ -47,8 +78,8 @@ struct Conversation: Codable, Identifiable, Equatable {
         self.updatedAt = Date()
     }
 
-    mutating func addMessage(role: ChatMessage.Role, content: String) {
-        let msg = ChatMessage(role: role, content: content)
+    mutating func addMessage(role: ChatMessage.Role, content: String, footer: String? = nil, failure: ChatFailureInfo? = nil, cutShort: Bool? = nil) {
+        let msg = ChatMessage(role: role, content: content, footer: footer, failure: failure, cutShort: cutShort)
         messages.append(msg)
         updatedAt = Date()
         // Auto-title from first user message
