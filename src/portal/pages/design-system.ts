@@ -147,6 +147,14 @@ th, td { border-bottom: 1px solid var(--card-border); text-align: left; padding:
 th { color: var(--muted); font-weight: 600; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; }
 tbody tr:hover { background: var(--hover-wash); }
 td.num, th.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+/* Wide tables: scroll inside their card instead of spilling past it. */
+.table-scroll { overflow-x: auto; max-width: 100%; }
+.table-scroll > table { min-width: 760px; }
+.table-scroll.wide > table { min-width: 980px; }
+.nowrap { white-space: nowrap; }
+.cell-trunc { display: inline-block; max-width: 220px; vertical-align: bottom; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: anywhere; }
+th.sticky-actions, td.sticky-actions { position: sticky; right: 0; background: var(--card); white-space: nowrap; box-shadow: -1px 0 0 var(--card-border); }
+tbody tr:hover td.sticky-actions { background: var(--bg-elevated); }
 .table-controls { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; margin: 0 0 var(--sp-3); }
 .table-controls input, .table-controls select { width: auto; min-width: 160px; }
 

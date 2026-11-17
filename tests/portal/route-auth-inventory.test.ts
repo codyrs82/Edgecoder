@@ -414,7 +414,7 @@ describe("portal route inventory (#17)", () => {
 
     const operatorRoutes = protectedRoutes().filter((route) => OPERATOR_ONLY.some((prefix) => route.url.startsWith(prefix)));
     const manageRoutes = operatorRoutes.filter((route) => !VIEW_TIER.has(key(route)));
-    for (const url of ["/coordinator/ops/node-approval", "/coordinator/ops/coordinator-ollama", "/coordinator/ops/agents-model"]) {
+    for (const url of ["/coordinator/ops/node-approval", "/coordinator/ops/node-dismiss", "/coordinator/ops/coordinator-ollama", "/coordinator/ops/agents-model"]) {
       expect(manageRoutes.some((route) => route.method === "POST" && route.url === url), url).toBe(true);
     }
     const failures: string[] = [];

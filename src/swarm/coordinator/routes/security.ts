@@ -16,6 +16,7 @@ import {
 } from "../../../security/blacklist.js";
 import type { CoordinatorApp } from "../app.js";
 import { mesh, peerScore, identity, coordinatorKeys, protocol } from "../context.js";
+import { pgStore } from "../../../db/store.js";
 import { mutable } from "../mutable-state.js";
 import {
   blacklistByAgent,
@@ -183,6 +184,38 @@ export function registerSecurityRoutes(app: CoordinatorApp): void {
     admin.post("/admin/security/blacklist/:agentId/lift", async (req, reply) => {
       if (!authorizeAdmin(req, reply)) return;
       return liftBlacklist(req, reply);
+    });
+    /**
+     * Dismiss a pending enrollment request from a node with no portal enrollment (an agent that tried
+     * /register and got node_not_enrolled). Removes it from this coordinator's pending list and,
+     * with blockDays, blacklists the agent id for that long (gossiped like any blacklist record).
+     * Never approves anything: an ownerless node has to enroll with a token from a signed-in account.
+     */
+    admin.post("/admin/nodes/:nodeId/dismiss", async (req, reply) => {
+      if (!authorizeAdmin(req, reply)) return;
+      const params = z.object({ nodeId: z.string().min(1).max(200).regex(/^[A-Za-z0-9._:@-]+$/) }).parse(req.params);
+      const body = z
+        .object({
+          nodeKind: z.enum(["agent", "coordinator"]).default("agent"),
+          blockDays: z.number().int().min(0).max(365).default(0),
+          reason: z.string().min(3).max(500).default("enrollment request dismissed by admin")
+        })
+        .parse(req.body ?? {});
+      const removed = pgStore ? await pgStore.deleteUnapprovedNodeStatusProjection(params.nodeId) : 0;
+      let blacklisted = false;
+      if (body.blockDays > 0 && body.nodeKind === "agent") {
+        issueCoordinatorBlacklistRecord({
+          agentId: params.nodeId,
+          reasonCode: "manual_review",
+          reason: `enrollment request rejected: ${body.reason}`,
+          evidenceHashSha256: createHash("sha256").update(`dismiss:${params.nodeId}`).digest("hex"),
+          reportedBy: "admin",
+          expiresAtMs: Date.now() + body.blockDays * 86_400_000
+        });
+        blacklisted = true;
+      }
+      req.log.info({ nodeId: params.nodeId, nodeKind: body.nodeKind, removed, blockDays: body.blockDays, reason: body.reason }, "admin_node_request_dismissed");
+      return { ok: true, nodeId: params.nodeId, removed, blacklisted, coordinatorId: identity.peerId };
     });
   });
 }

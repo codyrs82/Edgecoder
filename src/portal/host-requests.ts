@@ -137,6 +137,68 @@ export async function isApprovedHost(
   return (await store.getHostApproval(e)) !== null;
 }
 
+// ── Automatic requests ──
+
+/** Shown as the request's source (in its message) in Settings > Admin > Host requests. */
+export const AUTO_HOST_REQUEST_SOURCE = "auto (machine enrolled)";
+
+/**
+ * When a machine of an account that is not an approved host is approved as a node, or first
+ * connects, file a pending host request for that account so it shows up in Host requests and the
+ * admin approves it with one click. One open request per email: nothing is filed when the account
+ * is already a host, or any request from that email is new, contacted or approved. Declined
+ * requests are not reopened automatically. Returns the request filed, or null.
+ */
+export async function autoRequestHosting(
+  deps: {
+    store: Pick<HostRequestStore, "createHostRequest" | "listHostRequests" | "getHostApproval"> | null | undefined;
+    policy: HostApprovalPolicy;
+    now?: () => number;
+  },
+  node: { nodeId: string; nodeKind: "agent" | "coordinator"; ownerEmail: string; lastIp?: string; lastCountryCode?: string; hardware?: string | null }
+): Promise<HostRequestRecord | null> {
+  if (!deps.store || !deps.policy.required) return null;
+  const email = normalizeEmail(node.ownerEmail ?? "");
+  if (!email || !z.string().email().safeParse(email).success) return null;
+  if (await isApprovedHost(email, deps.policy, deps.store)) return null;
+  const existing = (await deps.store.listHostRequests(1000)).filter((r) => normalizeEmail(r.email) === email);
+  if (existing.length > 0) return null;
+  const nowMs = (deps.now ?? Date.now)();
+  const clean = (v: string, max: number) => v.replace(/[<>\u0000-\u001f\u007f]/g, " ").trim().slice(0, max);
+  const record: HostRequestRecord = {
+    requestId: randomBytes(12).toString("hex"),
+    createdAtMs: nowMs,
+    name: clean(email.split("@")[0] || email, 100),
+    email,
+    organisation: null,
+    hostKinds: [node.nodeKind === "coordinator" ? "coordinator" : "compute_agent"],
+    computeHardware: null,
+    hardwareDetails: clean(`Machine: ${node.nodeId}` + (node.hardware ? ` · ${node.hardware}` : ""), 500),
+    region: node.lastCountryCode ? clean(node.lastCountryCode, 80) : null,
+    message: `Source: ${AUTO_HOST_REQUEST_SOURCE}`,
+    status: "new",
+    notes: null,
+    updatedAtMs: nowMs,
+    updatedBy: null,
+    inviteCodeId: null
+  };
+  await deps.store.createHostRequest({ ...record, ipHash: null });
+  return record;
+}
+
+/** autoRequestHosting for a route: logs, never throws. */
+export async function autoRequestHostingSafe(
+  deps: Parameters<typeof autoRequestHosting>[0] & { log: { info: (o: unknown, m?: string) => void; warn: (o: unknown, m?: string) => void } },
+  node: Parameters<typeof autoRequestHosting>[1]
+): Promise<void> {
+  try {
+    const filed = await autoRequestHosting(deps, node);
+    if (filed) deps.log.info({ requestId: filed.requestId, nodeId: node.nodeId }, "host_request_auto_filed");
+  } catch (err) {
+    deps.log.warn({ err: err instanceof Error ? err.message : String(err), nodeId: node.nodeId }, "host_request_auto_failed");
+  }
+}
+
 // ── Request validation ──
 
 /** Printable text without angle brackets or control characters (newlines allowed where `multiline`). */

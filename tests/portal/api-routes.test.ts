@@ -51,6 +51,7 @@ const API_ROUTES: Array<[string, string]> = [
   ["GET", "/coordinator/ops/summary"],
   ["GET", "/coordinator/ops/agent-diagnostics"],
   ["POST", "/coordinator/ops/node-approval"],
+  ["POST", "/coordinator/ops/node-dismiss"],
   ["POST", "/coordinator/ops/coordinator-ollama"],
   ["POST", "/coordinator/ops/agents-model"],
   ["GET", "/portal/api/conversations"],

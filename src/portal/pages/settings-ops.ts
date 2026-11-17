@@ -3,10 +3,26 @@
 
 import type { FastifyInstance } from "fastify";
 import { settingRow, settingsPage } from "./settings-shell.js";
+import { HOST_ADMIN_JS } from "./host-admin.js";
 import { machinesPageScript, machinesSectionHtml } from "./settings-machines.js";
 import { securityResearchScript, securityResearchSectionHtml } from "./settings-security-research.js";
 
 /** Settings > Nodes (/portal/settings/nodes) and Settings > Admin (/portal/settings/admin). */
+/**
+ * Compact UTC date for admin tables: "Nov 16, 21:02", full ISO in the title tooltip, never wraps.
+ * Serialised into the page script with toString(), so it must stay self-contained.
+ */
+export function formatAdminDate(ms: number | null | undefined): string {
+  if (!ms) return "n/a";
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return "n/a";
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const pad = (n: number) => (n < 10 ? "0" : "") + n;
+  const label = months[d.getUTCMonth()] + " " + d.getUTCDate() + ", " + pad(d.getUTCHours()) + ":" + pad(d.getUTCMinutes());
+  const iso = d.toISOString();
+  return "<time class='nowrap' datetime='" + iso + "' title='" + iso + "'>" + label + "</time>";
+}
+
 export function registerSettingsOpsPages(app: FastifyInstance): void {
 app.get("/portal/settings/nodes", async (_req, reply) => {
   const content = `
@@ -63,13 +79,17 @@ app.get("/portal/settings/nodes", async (_req, reply) => {
     }
 
     /* ── Nodes ── */
+    ${HOST_ADMIN_JS}
     let allNodes = [];
+    let nodeOwnerEmail = "";
+    onHostDirectoryChange(function() { applyNodeTableView(); });
     function renderNodes(nodes) {
       const body = document.getElementById("nodesBody");
       const rows = (nodes || []).map((n) =>
         "<tr><td>" + escapeHtml(n.nodeId) + "</td><td>" + escapeHtml(n.nodeKind) + "</td><td>" + boolBadge(Boolean(n.emailVerified), "VERIFIED", "UNVERIFIED") + "</td><td>" +
         boolBadge(Boolean(n.nodeApproved), "APPROVED", "PENDING") + "</td><td>" + (n.active ? statusBadge("ACTIVE", "ok") : statusBadge("DORMANT", "warn")) +
-        "</td><td>" + fmtTime(n.lastSeenMs) + "</td><td><button class='deleteNodeBtn' data-node-id='" + encodeAttr(n.nodeId) + "'>Delete</button></td></tr>"
+        (hostAdmin.enabled ? " " + hostBadge(nodeOwnerEmail) : "") +
+        "</td><td>" + fmtTime(n.lastSeenMs) + "</td><td class='nowrap'>" + (hostAdmin.enabled && !isHostEmail(nodeOwnerEmail) ? hostButton(nodeOwnerEmail, "Approve owner as host") + " " : "") + "<button class='deleteNodeBtn' data-node-id='" + encodeAttr(n.nodeId) + "'>Delete</button></td></tr>"
       );
       body.innerHTML = rows.length > 0 ? rows.join("") : "<tr><td colspan='7'>No nodes enrolled.</td></tr>";
     }
@@ -140,6 +160,9 @@ app.get("/portal/settings/nodes", async (_req, reply) => {
       revealSettingsAdminTab(me);
       const user = me.user || {};
       if (!user.emailVerified) document.getElementById("emailVerifyNote").classList.remove("hidden");
+      nodeOwnerEmail = user.email || "";
+      // Admins see whether each machine's owner is a host, with one-click approval (host-admin.ts).
+      if (user.roles && user.roles.isSystemAdmin) await loadHostDirectory();
       // Host approval (src/portal/host-requests.ts): approved hosts' machines also take other people's work.
       api("/portal/api/host/status", { method: "GET", headers: {} }).then(function(st) {
         if (!st || !st.required || !st.approved) return;
@@ -178,20 +201,20 @@ app.get("/portal/settings/admin", async (_req, reply) => {
         <div id="newInviteCode" class="token-box"></div>
         <div id="newInviteLink" class="token-box"></div>
       </div>
-      <table>
+      <div class="table-scroll wide"><table>
         <thead><tr><th>Code</th><th>Label</th><th>Uses</th><th>Expires</th><th>Status</th><th>Created by</th><th>Actions</th></tr></thead>
         <tbody id="inviteBody"></tbody>
-      </table>
+      </table></div>
     </div>
     </div>
     <div id="hostRequestSection" class="hidden">
     <div class="card" id="hostRequests">
       <h2 class="u-mt-0">Host requests</h2>
       <p class="muted" id="hostGateNote">Loading…</p>
-      <table>
+      <div class="table-scroll wide"><table>
         <thead><tr><th>Received</th><th>Who</th><th>Would host</th><th>Hardware / region</th><th>Message</th><th>Status</th><th>Notes</th><th>Actions</th></tr></thead>
         <tbody id="hostRequestBody"></tbody>
-      </table>
+      </table></div>
       <div id="hostInviteWrap" class="hidden u-mt-10">
         <div class="muted" id="hostInviteNote">Invite code for the approved host, shown only once.</div>
         <div id="hostInviteCode" class="token-box"></div>
@@ -200,15 +223,18 @@ app.get("/portal/settings/admin", async (_req, reply) => {
     <div class="card">
       <h3 class="u-mt-0">Approved hosts</h3>
       <p class="muted">Accounts with these emails may take other people's work. Everyone else's machines run only their own work.</p>
+      <details class="u-mt-10">
+      <summary>Add by email</summary>
       <div class="row">
         <input id="hostApproveEmail" type="email" maxlength="254" placeholder="host@example.com" aria-label="Host email" />
         <input id="hostApproveNote" type="text" maxlength="200" placeholder="Note (optional)" aria-label="Note" />
         <button class="primary" id="hostApproveBtn">Approve host</button>
       </div>
-      <table>
+      </details>
+      <div class="table-scroll wide"><table>
         <thead><tr><th>Email</th><th>Source</th><th>Approved</th><th>By</th><th>Note</th><th>Actions</th></tr></thead>
         <tbody id="hostListBody"></tbody>
-      </table>
+      </table></div>
     </div>
     </div>
     ${securityResearchSectionHtml}
@@ -224,10 +250,10 @@ app.get("/portal/settings/admin", async (_req, reply) => {
         <button class="userFilterBtn" data-filter="admin">Admins <span id="userCount-admin"></span></button>
         <input id="userSearch" type="search" maxlength="200" placeholder="Search email, id or name" aria-label="Search users" />
       </div>
-      <table>
-        <thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Created</th><th>Last sign-in</th><th>Machines</th><th>API keys</th><th>Balance</th><th>Actions</th></tr></thead>
+      <div class="table-scroll wide"><table>
+        <thead><tr><th>Email</th><th>Role</th><th>Status</th><th>Created</th><th>Last sign-in</th><th>Machines</th><th>API keys</th><th>Balance</th><th class="sticky-actions">Actions</th></tr></thead>
         <tbody id="userMgmtBody"></tbody>
-      </table>
+      </table></div>
       <div class="row">
         <button id="userPrevBtn">Previous</button>
         <span class="muted" id="userPageNote"></span>
@@ -244,10 +270,10 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       </div>
       <div id="cleanupResult" class="hidden u-mt-10">
         <div class="muted" id="cleanupNote"></div>
-        <table>
+        <div class="table-scroll wide"><table>
           <thead><tr><th>Email</th><th>Status</th><th>Created</th><th>Last activity</th><th>Result</th></tr></thead>
           <tbody id="cleanupBody"></tbody>
-        </table>
+        </table></div>
         <button class="danger" id="cleanupConfirmBtn">Delete these accounts</button>
       </div>
     </div>
@@ -259,11 +285,13 @@ app.get("/portal/settings/admin", async (_req, reply) => {
         <button class="primary" id="filterAllBtn">All pending</button>
         <button id="filterCoordinatorBtn">Coordinator enrollment requests</button>
         <button id="filterAgentBtn">Agent enrollment requests</button>
+        <label class="muted" for="rejectBlockDays">On reject of an ownerless request, block the agent id for</label>
+        <input type="number" id="rejectBlockDays" min="0" max="365" value="0" aria-label="Block days"> <span class="muted">days (0 = no block)</span>
       </div>
-      <table>
-        <thead><tr><th>Node</th><th>Kind</th><th>Owner email</th><th>Email verified</th><th>IP</th><th>Country</th><th>VPN</th><th>Last seen</th><th>Actions</th></tr></thead>
+      <div class="table-scroll wide"><table>
+        <thead><tr><th>Node</th><th>Kind</th><th>Owner email</th><th>Email verified</th><th>IP</th><th>Country</th><th>VPN</th><th>Last seen</th><th class="sticky-actions">Actions</th></tr></thead>
         <tbody id="opsPendingBody"></tbody>
-      </table>
+      </table></div>
       <div id="opsPendingNote" class="muted"></div>
     </div>
     <div class="card">
@@ -274,16 +302,19 @@ app.get("/portal/settings/admin", async (_req, reply) => {
         <button id="approvedFilterAgentBtn">Agents</button>
         <button id="approvedFilterActiveBtn">Active only</button>
       </div>
-      <table>
+      <div class="table-scroll wide"><table>
         <thead><tr><th>Node</th><th>Kind</th><th>Owner email</th><th>Email verified</th><th>Active</th><th>IP</th><th>Country</th><th>VPN</th><th>Last seen</th><th>Updated</th></tr></thead>
         <tbody id="opsApprovedBody"></tbody>
-      </table>
+      </table></div>
       <div id="opsApprovedNote" class="muted"></div>
     </div>
     </div>
   `;
   const script = `
-    function fmtTime(ms) { return ms ? new Date(ms).toISOString() : "n/a"; }
+    ${formatAdminDate.toString()}
+    function fmtTime(ms) { return formatAdminDate(ms); }
+    ${HOST_ADMIN_JS}
+    function trunc(v) { const t = escapeHtml(v); return "<span class='cell-trunc' title='" + t + "'>" + t + "</span>"; }
     function encodeAttr(v) { return encodeURIComponent(String(v || "")).replace(/'/g, "%27"); }
     // escapeHtml comes from the app shell (pages/escape.ts); every node, owner and network field
     // below is user- or agent-supplied and goes through it before reaching innerHTML.
@@ -310,15 +341,29 @@ app.get("/portal/settings/admin", async (_req, reply) => {
     let cachedApproved = [];
     let canManageApprovals = false;
 
+    const NO_OWNER_TIP = "No owner: the machine must be enrolled with a token from a signed-in account";
+    // A row with no owner account is an agent a coordinator saw try /register without enrollment.
+    // It can never be approved; Reject dismisses it on the coordinators instead.
+    function pendingActions(n) {
+      const id = encodeAttr(n.nodeId);
+      const kind = encodeAttr(n.nodeKind);
+      const owned = Boolean(n.ownerEmail);
+      const approve = owned
+        ? "<button class='approveBtn' data-node-id='" + id + "' data-node-kind='" + kind + "' data-approved='true'>Approve</button>"
+        : "<button class='approveBtn' disabled title='" + NO_OWNER_TIP + "' aria-label='Approve (unavailable: no owner)'>Approve</button>";
+      return approve + " <button class='approveBtn' data-node-id='" + id + "' data-node-kind='" + kind + "' data-approved='false' data-owned='" + (owned ? "true" : "false") + "'>Reject</button>";
+    }
+    function approvalToast(approved, err) {
+      if (err) return (approved ? "Approve failed: " : "Reject failed: ") + err;
+      return approved ? "Approved" : "Rejected";
+    }
     function renderPending() {
       const body = document.getElementById("opsPendingBody");
       const rows = filterPending(cachedPending, pendingFilter).map((n) =>
-        "<tr><td>" + escapeHtml(n.nodeId) + "</td><td>" + escapeHtml(n.nodeKind) + "</td><td>" + escapeHtml(n.ownerEmail || "unknown") + "</td><td>" +
+        "<tr><td>" + trunc(n.nodeId) + "</td><td>" + escapeHtml(n.nodeKind) + "</td><td>" + trunc(n.ownerEmail || "unknown") + "</td><td>" +
         String(Boolean(n.emailVerified)) + "</td><td>" + escapeHtml(n.sourceIp || "unknown") + "</td><td>" + escapeHtml(n.countryCode || "unknown") +
-        "</td><td>" + (n.vpnDetected === true ? "yes" : "no") + "</td><td>" + fmtTime(n.lastSeenMs) + "</td><td>" +
-        (canManageApprovals
-          ? "<button class='approveBtn' data-node-id='" + encodeAttr(n.nodeId) + "' data-node-kind='" + encodeAttr(n.nodeKind) + "' data-approved='true'>Approve</button> <button class='approveBtn' data-node-id='" + encodeAttr(n.nodeId) + "' data-node-kind='" + encodeAttr(n.nodeKind) + "' data-approved='false'>Reject</button>"
-          : "<span class='muted'>Read-only</span>") +
+        "</td><td>" + (n.vpnDetected === true ? "yes" : "no") + "</td><td>" + fmtTime(n.lastSeenMs) + "</td><td class='sticky-actions'>" +
+        (canManageApprovals ? pendingActions(n) : "<span class='muted'>Read-only</span>") +
         "</td></tr>"
       );
       body.innerHTML = rows.length > 0 ? rows.join("") : "<tr><td colspan='9'>No pending nodes for this filter.</td></tr>";
@@ -336,7 +381,8 @@ app.get("/portal/settings/admin", async (_req, reply) => {
     function renderApproved() {
       const body = document.getElementById("opsApprovedBody");
       const rows = filterApproved(cachedApproved, approvedFilter, approvedActiveOnly).map((n) => {
-        return "<tr><td>" + escapeHtml(n.nodeId) + "</td><td>" + escapeHtml(n.nodeKind) + "</td><td>" + escapeHtml(n.ownerEmail || "unknown") + "</td><td>" +
+        const ownerHost = n.ownerEmail ? "<div class='nowrap'>" + hostBadge(n.ownerEmail) + (isHostEmail(n.ownerEmail) ? "" : " " + hostButton(n.ownerEmail, "Approve owner as host")) + "</div>" : "";
+        return "<tr><td>" + trunc(n.nodeId) + "</td><td>" + escapeHtml(n.nodeKind) + "</td><td>" + trunc(n.ownerEmail || "unknown") + ownerHost + "</td><td>" +
           String(Boolean(n.emailVerified)) + "</td><td>" + (n.active === true ? "yes" : "no") + "</td><td>" + escapeHtml(n.sourceIp || "unknown") +
           "</td><td>" + escapeHtml(n.countryCode || "unknown") + "</td><td>" + (n.vpnDetected === true ? "yes" : "no") + "</td><td>" +
           fmtTime(n.lastSeenMs) + "</td><td>" + fmtTime(n.updatedAtMs) + "</td></tr>";
@@ -390,15 +436,24 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       const nodeId = decodeURIComponent(coordinatorIdRaw);
       const nodeKind = decodeURIComponent(nodeKindRaw);
       const approved = target.getAttribute("data-approved") === "true";
+      const owned = target.getAttribute("data-owned") !== "false";
       try {
-        await api("/coordinator/ops/node-approval", {
-          method: "POST",
-          body: JSON.stringify({ nodeId, nodeKind, approved })
-        });
-        showToast("Updated " + nodeKind + " " + nodeId + " to " + (approved ? "approved" : "rejected"));
+        if (approved || owned) {
+          await api("/coordinator/ops/node-approval", {
+            method: "POST",
+            body: JSON.stringify({ nodeId, nodeKind, approved })
+          });
+        } else {
+          const days = Math.max(0, Math.min(365, Math.floor(Number(document.getElementById("rejectBlockDays").value) || 0)));
+          await api("/coordinator/ops/node-dismiss", {
+            method: "POST",
+            body: JSON.stringify({ nodeId, nodeKind, blockDays: days })
+          });
+        }
+        showToast(approvalToast(approved) + " " + nodeKind + " " + nodeId);
         await refreshOps();
       } catch (err) {
-        showToast("Approval failed: " + String(err.message || err), true);
+        showToast(approvalToast(approved, String(err.message || err)), true);
       }
     });
 
@@ -461,6 +516,7 @@ app.get("/portal/settings/admin", async (_req, reply) => {
     async function loadHostRequests() {
       try {
         const data = await api("/portal/api/admin/host-requests", { method: "GET", headers: {} });
+        setHostDirectory(data);
         document.getElementById("hostGateNote").textContent = data.required
           ? "HOST_APPROVAL_REQUIRED is on: only approved hosts' machines take other people's work. Approving a request approves its email" + (data.allowlist && data.allowlist.length ? " (also always approved: " + data.allowlist.length + " allowlisted email(s))." : ".")
           : "HOST_APPROVAL_REQUIRED=0: every account's machines may take network work. Approvals here start to matter once the gate is on.";
@@ -479,7 +535,7 @@ app.get("/portal/settings/admin", async (_req, reply) => {
         });
         renderRows("hostRequestBody", rows, 8, "No host requests yet.");
         const hosts = (data.hosts || []).map(function(h) {
-          return "<tr><td>" + escapeHtml(h.email) + "</td><td>" + escapeHtml(h.source) + "</td><td>" + fmtTime(h.approvedAtMs) + "</td><td>" + escapeHtml(h.approvedBy) +
+          return "<tr><td>" + trunc(h.email) + "</td><td>" + escapeHtml(h.source) + "</td><td>" + fmtTime(h.approvedAtMs) + "</td><td>" + escapeHtml(h.approvedBy) +
             "</td><td>" + escapeHtml(h.note || "") + "</td><td><button class='hostRevokeBtn' data-email='" + encodeAttr(h.email) + "'>Revoke</button></td></tr>";
         });
         renderRows("hostListBody", hosts, 6, "No approved hosts.");
@@ -573,11 +629,11 @@ app.get("/portal/settings/admin", async (_req, reply) => {
             : "<button class='userRoleBtn primary' data-uid='" + uid + "' data-role='admin'>Make Admin</button>";
           const canDelete = u.role !== "admin" && u.userId !== userView.selfUserId;
           const delBtn = canDelete ? " <button class='userDeleteBtn danger' data-uid='" + uid + "' data-email='" + encodeAttr(u.email) + "'>Delete</button>" : "";
-          const machines = Number(u.machines) + (Number(u.approvedMachines) ? " (" + Number(u.approvedMachines) + " approved)" : "");
+          const machines = Number(u.machines) + (Number(u.approvedMachines) ? " · " + Number(u.approvedMachines) + " approved" : "");
           const lastSignIn = u.lastSessionMs ? fmtTime(u.lastSessionMs) + (Number(u.activeSessions) ? " · " + Number(u.activeSessions) + " active" : "") : "never";
-          return "<tr><td>" + escapeHtml(u.email) + (u.displayName ? "<div class='muted'>" + escapeHtml(u.displayName) + "</div>" : "") + "</td><td>" + escapeHtml(u.role) + "</td><td>" +
-            userStatusBadge(u) + "</td><td>" + fmtTime(u.createdAtMs) + "</td><td>" + escapeHtml(lastSignIn) + "</td><td>" + escapeHtml(machines) + "</td><td>" + Number(u.apiKeys) +
-            "</td><td><span id='bal-" + uid + "'><button class='userBalanceBtn' data-uid='" + uid + "'>Check</button></span></td><td>" + roleBtn + delBtn + "</td></tr>";
+          return "<tr><td>" + trunc(u.email) + (u.displayName ? "<div class='muted'>" + escapeHtml(u.displayName) + "</div>" : "") + "</td><td>" + escapeHtml(u.role) + "</td><td>" +
+            userStatusBadge(u) + " " + hostBadge(u.email) + "</td><td>" + fmtTime(u.createdAtMs) + "</td><td class='nowrap'>" + lastSignIn + "</td><td class='nowrap'>" + escapeHtml(machines) + "</td><td>" + Number(u.apiKeys) +
+            "</td><td><span id='bal-" + uid + "'><button class='userBalanceBtn' data-uid='" + uid + "'>Check</button></span></td><td class='sticky-actions'>" + roleBtn + " " + hostButton(u.email, "Approve host") + delBtn + "</td></tr>";
         });
         renderRows("userMgmtBody", rows, 9, "No users found.");
       } catch (err) {
@@ -654,7 +710,7 @@ app.get("/portal/settings/admin", async (_req, reply) => {
         const plan = await apiDetail("/portal/api/admin/users/cleanup", { method: "POST", body: JSON.stringify({ ...cleanupRequest(), dryRun: true }) });
         cleanupPlan = { request: cleanupRequest(), userIds: (plan.candidates || []).map(function(c) { return c.userId; }) };
         const rows = (plan.candidates || []).map(function(c) {
-          return "<tr><td>" + escapeHtml(c.email) + "</td><td>" + escapeHtml(c.label) + "</td><td>" + fmtTime(c.createdAtMs) + "</td><td>" + fmtTime(c.lastActivityMs) + "</td><td>will be deleted</td></tr>";
+          return "<tr><td>" + trunc(c.email) + "</td><td>" + escapeHtml(c.label) + "</td><td>" + fmtTime(c.createdAtMs) + "</td><td>" + fmtTime(c.lastActivityMs) + "</td><td>will be deleted</td></tr>";
         }).concat((plan.skipped || []).map(function(s) {
           return "<tr><td>" + escapeHtml(s.email) + "</td><td></td><td></td><td></td><td>skipped: " + escapeHtml(s.error) + "</td></tr>";
         }));
@@ -696,6 +752,8 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       loadHostRequests();
       document.getElementById("securityResearchSection").classList.remove("hidden");
       loadSecurityResearch();
+      await loadHostDirectory();
+      onHostDirectoryChange(function() { loadUserManagement(); loadHostRequests(); renderApproved(); });
       document.getElementById("userMgmtSection").classList.remove("hidden");
       document.getElementById("adminNodeApprovalSection").classList.remove("hidden");
       loadUserManagement();
@@ -705,6 +763,6 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       showToast("Could not load admin settings: " + String(err.message || err), true);
     });
   `;
-  return reply.type("text/html").send(settingsPage("admin", "Invites, host requests, user management and node enrollment approvals.", content, script));
+  return reply.type("text/html").send(settingsPage("admin", "Invites, host requests, user management and node enrollment approvals.", content, script, { wide: true }));
 });
 }
