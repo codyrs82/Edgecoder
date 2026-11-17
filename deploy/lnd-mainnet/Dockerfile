@@ -1,5 +1,7 @@
-# Mainnet Lightning node for the EdgeCoder coordinators: Bitcoin Core (pruned) + LND, one image,
-# two Fly process groups (see fly.toml). Real funds: every artifact is pinned and verified.
+# Mainnet Lightning node for the EdgeCoder coordinators: LND, plus Bitcoin Core (pruned) for the
+# bundled fallback. One image, two Fly process groups (fly.toml). In external mode (the default)
+# lnd uses ocean-node and the bitcoind machine is stopped and kept for the rollback. Real funds:
+# every artifact is pinned and verified.
 #
 # - Bitcoin Core: the official release tarball, checked against the SHA256SUMS entry published
 #   at https://bitcoincore.org/bin/bitcoin-core-<version>/SHA256SUMS. Bumping BITCOIN_VERSION
@@ -25,4 +27,5 @@ COPY --from=bitcoin /usr/local/bin/bitcoind /usr/local/bin/bitcoin-cli /usr/loca
 COPY --from=lnd /bin/lnd /bin/lncli /usr/local/bin/
 COPY --chmod=0755 entrypoint.sh /entrypoint.sh
 COPY --chmod=0755 lncli.sh /usr/local/bin/lnc
+COPY --chmod=0755 check-backend.sh /usr/local/bin/check-backend
 ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]

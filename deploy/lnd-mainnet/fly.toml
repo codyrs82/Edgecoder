@@ -1,9 +1,14 @@
 # Mainnet Lightning node for the coordinators (see Dockerfile and README.md). Real funds.
-# Two machines in one app, each with its own volume:
-#   bitcoind  pruned Bitcoin Core; RPC/ZMQ on the private network only
+# External mode (BITCOIND_MODE below): lnd's chain backend is the owner's Bitcoin Knots node
+# `ocean-node` in Azure, reached over Fly's private network as a WireGuard peer of the edgecoder
+# org. README: "External Bitcoin node".
 #   lnd       the coordinators' payout/invoice node; REST (8080) on the private network only,
 #             P2P (9735) public so other nodes can open channels to it
-# The coordinators reach it at https://lnd.process.edgecoder-lnd.internal:8080 over Fly's 6PN.
+#   bitcoind  the old pruned Bitcoin Core. STOPPED in external mode, not destroyed: its process
+#             group, volume and VM size stay declared here so no `fly deploy` can remove the
+#             machine. It is the rollback (README: "Rollback"). Always deploy external mode with
+#             `fly deploy --process-groups lnd`, so the bitcoind machine is not touched.
+# The coordinators reach lnd at https://lnd.process.edgecoder-lnd.internal:8080 over Fly's 6PN.
 app = "edgecoder-lnd"
 primary_region = "ord" # next to edgecoder-seed and edgecoder-pg
 
@@ -16,9 +21,23 @@ primary_region = "ord" # next to edgecoder-seed and edgecoder-pg
 
 [env]
   LND_ALIAS = "edgecoder"
-  BITCOIN_PRUNE_MB = "50000"   # keeps ~50 GB of blocks; lnd fetches older pruned blocks from peers
-  BITCOIN_DBCACHE_MB = "2000"  # raise to 6000 for the initial sync on the larger VM, then lower
   LND_EXTERNAL_IP = "37.16.0.48" # the app's dedicated IPv4 (README step 1), so peers can find the node
+  # lnd's backend: external (ocean-node) or bundled (this app's bitcoind machine, the rollback).
+  BITCOIND_MODE = "external"
+  BITCOIND_LABEL = "ocean-node"  # names the backend in logs only
+  # ocean-node's 6PN address as a WireGuard peer of the edgecoder org (peer ocean-node-lnd).
+  # The entrypoint adds the IPv6 brackets: rpchost [fdaa:...]:8332.
+  BITCOIND_HOST = "fdaa:ec:ae3e:a7b:9016:7eba:d6ac:1b02"
+  BITCOIND_RPC_PORT = "8332"
+  BITCOIND_ZMQ_BLOCK = "tcp://[fdaa:ec:ae3e:a7b:9016:7eba:d6ac:1b02]:28332"
+  BITCOIND_ZMQ_TX = "tcp://[fdaa:ec:ae3e:a7b:9016:7eba:d6ac:1b02]:28333"
+  BITCOIND_ESTIMATEMODE = "ECONOMICAL"
+  # Secrets (fly secrets list -a edgecoder-lnd): BITCOIND_RPC_USER, BITCOIND_RPC_PASS (the limited
+  # `lnd-edgecoder` user on ocean-node), LND_WALLET_PASS. BTC_RPC_PASS is used by the bitcoind
+  # machine and by lnd in bundled mode; keep it while the rollback is wanted.
+  # Used by the bitcoind machine only:
+  BITCOIN_PRUNE_MB = "50000"   # keeps ~50 GB of blocks
+  BITCOIN_DBCACHE_MB = "2000"
 
 [[mounts]]
   source = "btcdata"
@@ -50,10 +69,12 @@ primary_region = "ord" # next to edgecoder-seed and edgecoder-pg
 
 [[vm]]
   processes = ["bitcoind"]
-  size = "shared-cpu-4x" # README: performance-4x for the initial sync, then back to this
+  size = "shared-cpu-4x"
   memory = "4gb"
 
 [[vm]]
   processes = ["lnd"]
+  # Unchanged for the first external-mode deploy. Without a local bitcoind, lnd alone may fit
+  # shared-cpu-1x with 1gb; move down only after a week of memory graphs shows the headroom.
   size = "shared-cpu-2x"
   memory = "2gb"
