@@ -185,4 +185,16 @@ final class NetworkWorldTests: XCTestCase {
         let links = (1..<n).map { WorldLink(from: "c0", to: "c\($0)", workPerMin: $0 * 5) }
         return NetworkWorld(coordinators: coords, links: links, agents: agents)
     }
+
+    func testFitColumnsStacksInTallWindowsAndSpreadsInWideOnes() {
+        let cell = NetworkGraph.cell
+        XCTAssertEqual(NetworkGraph.fitColumns(coordinators: 1, width: 2000, height: 500), 1)
+        XCTAssertEqual(NetworkGraph.fitColumns(coordinators: 2, width: 700, height: 1000), 1, "tall: stack the two hubs")
+        XCTAssertEqual(NetworkGraph.fitColumns(coordinators: 2, width: 2000, height: 900), 2, "wide: side by side")
+        XCTAssertEqual(NetworkGraph.fitColumns(coordinators: 2, width: 2 * cell, height: 2 * cell), 1, "a tie keeps fewer columns")
+        XCTAssertEqual(NetworkGraph.fitColumns(coordinators: 3, width: 3000, height: 800), 3)
+        XCTAssertEqual(NetworkGraph.fitColumns(coordinators: 5, width: 3000, height: 800), 3, "never more than 3 across")
+        XCTAssertEqual(NetworkGraph.fitColumns(coordinators: 3, width: 700, height: 2000), 2, "three never in one column")
+        XCTAssertEqual(NetworkGraph.fitColumns(coordinators: 2, width: 0, height: 800), 1)
+    }
 }
