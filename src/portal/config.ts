@@ -100,6 +100,8 @@ export const portalConfigSchema = z.object({
   PORTAL_PURGE_UNVERIFIED_AFTER_DAYS: envInt(undefined, { min: 1, max: 3650 }),
   // Cloud bots (docs/cloud-bots.md). The key seals their GitHub tokens (AES-256-GCM); unset: GitHub off for them.
   PORTAL_BOT_SECRETS_KEY: optStr,
+  // Web chat at rest (src/portal/chat-crypto.ts): AES-256-GCM key for message content and titles; unset: plaintext, with a warning.
+  PORTAL_CHAT_KEY: optStr,
   CLOUD_BOTS_WORKER: envEnum(["on", "off"]).default("on"),
   CLOUD_BOTS_MAX_PER_ACCOUNT: envInt(20, { min: 1, max: 1000 }),
   CLOUD_BOTS_MAX_CONCURRENT_PER_ACCOUNT: envInt(2, { min: 1, max: 20 }),
