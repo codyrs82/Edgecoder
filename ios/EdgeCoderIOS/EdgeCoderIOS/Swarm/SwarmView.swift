@@ -27,7 +27,9 @@ struct SwarmView: View {
                     LabeledContent("Tasks pulled", value: String(swarmRuntime.coordinatorTasksObserved))
                     LabeledContent("Tasks completed", value: String(swarmRuntime.tasksCompleted))
                     LabeledContent("Tasks failed", value: String(swarmRuntime.tasksFailed))
-                    LabeledContent("Credits earned", value: String(swarmRuntime.creditsEarned))
+                    if HostEarningsPolicy.inApp {
+                        LabeledContent("Credits earned", value: String(swarmRuntime.creditsEarned))
+                    }
                     if swarmRuntime.isProcessingTask {
                         LabeledContent("Status", value: "Processing task...")
                     }

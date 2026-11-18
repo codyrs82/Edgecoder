@@ -153,7 +153,7 @@ struct WalletView: View {
                     }
                     feesCard
                     pricesCard
-                    earningsSection
+                    if HostEarningsPolicy.inApp { earningsSection }
                     activityCard
                 }
             }
@@ -198,10 +198,10 @@ struct WalletView: View {
             } else if overview?.connected == false {
                 Text("Not connected to the network right now. Your balance is safe.").font(.footnote).foregroundColor(Theme.textSecondary)
             }
-            HStack(spacing: 10) {
+            if HostEarningsPolicy.inApp { HStack(spacing: 10) {
                 mini("Earned by your machines", overview?.payouts?.balance.map { "\(WalletFormat.msat($0.earnedMsat)) sats" } ?? overview?.earnedSats.map { "\(WalletFormat.sats($0)) sats" } ?? "–")
                 mini("Available to withdraw", overview?.payouts?.balance.map { "\(WalletFormat.msat($0.payableMsat)) sats" } ?? "–")
-            }
+            } }
             Text("1 cSat = 1 sat. Spend it on model calls, code jobs and reserved machines.")
                 .font(.footnote).foregroundColor(Theme.textMuted)
         }
@@ -665,7 +665,7 @@ struct WalletView: View {
     private var activityCard: some View {
         card {
             Text("Activity").font(.headline).foregroundColor(Theme.textPrimary)
-            let rows = overview?.recent ?? []
+            let rows = (overview?.recent ?? []).filter { HostEarningsPolicy.inApp || !HostEarningsPolicy.isEarningsReason($0.reason) }
             if rows.isEmpty {
                 Text(purchasePolicy.canBuyInApp ? "Nothing yet. Buy cSats or connect a machine to get started." : "Nothing yet.").font(.footnote).foregroundColor(Theme.textSecondary)
             }

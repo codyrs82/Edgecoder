@@ -76,6 +76,7 @@
 		CBC9CBA702A4130F7BDA5D47 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B2D03BEBEB092AA1E44BC0A /* AppConfig.swift */; };
 		CE01A6B3D458A3A0C7C483C4 /* PurchasePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEB62ACFC126AF64173557A3 /* PurchasePolicy.swift */; };
 		CE3C917DA3EDA26D0AF84065 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7C2233E12CF05A6453ECFE4 /* DashboardView.swift */; };
+		D19C7BD18E5B7FBAB52184F2 /* HostEarningsPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61D22BEA678DE9EE6056343A /* HostEarningsPolicyTests.swift */; };
 		D3640D6F8B0D0D9C33FDB90B /* ChatFailuresTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F1EE875627693EE65332B98 /* ChatFailuresTests.swift */; };
 		D4E5B58BC4532ACC83A30BDF /* ChatModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D772FF8CC80706B636E1B73 /* ChatModels.swift */; };
 		DBB6DA1C38F94E939183AD59 /* SwarmRuntimeController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87ED038C5B5374809650FFBF /* SwarmRuntimeController.swift */; };
@@ -119,6 +120,7 @@
 		4AE20F58B769C14A15DC8BB1 /* EdgeCoderIOSTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = EdgeCoderIOSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		560511050BF96086720ED32E /* ChatRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatRouter.swift; sourceTree = "<group>"; };
 		58F68F1BB89F29F23B394ED2 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		61D22BEA678DE9EE6056343A /* HostEarningsPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostEarningsPolicyTests.swift; sourceTree = "<group>"; };
 		629D161DC2E412DA32706681 /* ChatFailures.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatFailures.swift; sourceTree = "<group>"; };
 		6A85EE2204D379E8381A0ED3 /* BuyLimits.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuyLimits.swift; sourceTree = "<group>"; };
 		6B2D03BEBEB092AA1E44BC0A /* AppConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfig.swift; sourceTree = "<group>"; };
@@ -349,6 +351,7 @@
 				A736286E7E0FBDBE10BEC4AB /* BuyLimitsTests.swift */,
 				9F1EE875627693EE65332B98 /* ChatFailuresTests.swift */,
 				B79575DD8A20DD4FF2BC73C3 /* CloudBotsTests.swift */,
+				61D22BEA678DE9EE6056343A /* HostEarningsPolicyTests.swift */,
 				9580DF0E7DDEB1B61CF0A59F /* MachinesTests.swift */,
 				408BFDE15434F4E2581718CC /* NetworkWorldTests.swift */,
 				98D672F44064782C1EF76D7E /* PasskeyProtocolTests.swift */,
@@ -498,6 +501,7 @@
 				D3640D6F8B0D0D9C33FDB90B /* ChatFailuresTests.swift in Sources */,
 				BDFB375DD7A094B1619D8064 /* ChatModels.swift in Sources */,
 				3EA9F76223C86A11F929CB8D /* CloudBotsTests.swift in Sources */,
+				D19C7BD18E5B7FBAB52184F2 /* HostEarningsPolicyTests.swift in Sources */,
 				920D8DFC385D9F22CB53742D /* MachinesModels.swift in Sources */,
 				AA145690549577ED9B597A8B /* MachinesTests.swift in Sources */,
 				14CAA0AE958AD1BB645F2BC2 /* Models.swift in Sources */,
@@ -589,6 +593,7 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = 63CL88WY7G;
+				EDGECODER_HOST_EARNINGS_IN_APP = NO;
 				EDGECODER_PURCHASE_MODE = none;
 				INFOPLIST_FILE = EdgeCoderIOS/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -610,6 +615,7 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = 63CL88WY7G;
+				EDGECODER_HOST_EARNINGS_IN_APP = YES;
 				EDGECODER_PURCHASE_MODE = "in-app-lightning";
 				INFOPLIST_FILE = EdgeCoderIOS/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -688,7 +694,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 37;
+				CURRENT_PROJECT_VERSION = 40;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -753,7 +759,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 37;
+				CURRENT_PROJECT_VERSION = 40;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
