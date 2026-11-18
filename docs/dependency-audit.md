@@ -1,5 +1,15 @@
 # Dependency audit
 
+## Exceptions (`audit-exceptions.json`)
+
+CI (`dependency-audit` job, `scripts/ci/audit-check.mjs`) fails on any high or critical advisory
+unless it is listed in `audit-exceptions.json` at the repo root with a reason and an expiry at
+most 30 days out. An expired entry fails the job, so each accepted advisory is looked at again.
+
+| Advisory | Package | Expires | Why accepted |
+|---|---|---|---|
+| GHSA-fc5q-39xc-vjpf | picomatch (ReDoS) | 2026-12-18 | No fixed release yet. Reached in all three lockfiles only through build and test tooling (vite, tinyglobby, node-gyp, @vitest/coverage-v8), which matches globs from this repo, not user input. |
+
 ## Current status (2026-11-02)
 
 `npm audit --package-lock-only` on `main`:
