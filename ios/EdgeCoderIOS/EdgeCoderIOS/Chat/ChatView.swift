@@ -472,6 +472,12 @@ struct ChatView: View {
     }
 
     private func restoreLastConversation() {
+        #if DEBUG
+        if ScreenshotFixture.isEnabled {
+            if conversation.messages.isEmpty { conversation = ScreenshotFixture.conversation }
+            return
+        }
+        #endif
         if let lastId = conversationStore.lastId(source: .chat),
            let loaded = conversationStore.load(id: lastId) {
             conversation = loaded

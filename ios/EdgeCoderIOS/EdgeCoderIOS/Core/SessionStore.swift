@@ -10,7 +10,17 @@ final class SessionStore: ObservableObject {
         user != nil
     }
 
+    init() {
+        #if DEBUG
+        // Screenshots: a generic signed-in account, so no sign-in sheet and no /me call.
+        if ScreenshotFixture.isEnabled { user = ScreenshotFixture.user }
+        #endif
+    }
+
     func refreshSession() async {
+        #if DEBUG
+        if ScreenshotFixture.isEnabled { return }
+        #endif
         loading = true
         defer { loading = false }
         do {

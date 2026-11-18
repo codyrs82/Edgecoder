@@ -71,6 +71,7 @@
 		BDFB375DD7A094B1619D8064 /* ChatModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D772FF8CC80706B636E1B73 /* ChatModels.swift */; };
 		C3898FECA10395D8E89075FE /* AuthView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44A7CA4F071392F4801C6C60 /* AuthView.swift */; };
 		C58B0AF7BA0CE7B7055A7C47 /* BLEConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3A4C3E5BF20EF662B00D426 /* BLEConstants.swift */; };
+		C740A30BCF59B23783FA0E59 /* ScreenshotFixtureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 330797C4A87AEF39CCE75843 /* ScreenshotFixtureTests.swift */; };
 		C8FC5DFC9D6FD600349B3255 /* KeychainEd25519.swift in Sources */ = {isa = PBXBuildFile; fileRef = ACA085B3ABEE3CF3DAF7D8C4 /* KeychainEd25519.swift */; };
 		CA0491A22360359F5890EB53 /* RequestSigningVectorsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09E3886017E14BF423BA6139 /* RequestSigningVectorsTests.swift */; };
 		CBC9CBA702A4130F7BDA5D47 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B2D03BEBEB092AA1E44BC0A /* AppConfig.swift */; };
@@ -81,9 +82,11 @@
 		DBB6DA1C38F94E939183AD59 /* SwarmRuntimeController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87ED038C5B5374809650FFBF /* SwarmRuntimeController.swift */; };
 		DC4DAE8FEC805D793A73C252 /* ModelLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3AA5F805294A0BC4927CEB4F /* ModelLibraryView.swift */; };
 		DE86938A5DFE7E6AC333B896 /* ChatRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 560511050BF96086720ED32E /* ChatRouter.swift */; };
+		E2A956AA5D03706278ED2120 /* ScreenshotFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34ACFA9D068813FD45960CDF /* ScreenshotFixture.swift */; };
 		E5462A99E8D054EEC8753F5C /* NetworkView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33DBE81C547DC218A3D7A47F /* NetworkView.swift */; };
 		E700BAB29852EFE2EB0E7712 /* BuyLimits.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A85EE2204D379E8381A0ED3 /* BuyLimits.swift */; };
 		EAD0E0A47F4D49F94EBC2E1B /* BuyLimitsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A736286E7E0FBDBE10BEC4AB /* BuyLimitsTests.swift */; };
+		EB41502F9FCC0C35181DF7FC /* ScreenshotFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 34ACFA9D068813FD45960CDF /* ScreenshotFixture.swift */; };
 		EBFE08F6FB2BABEF42CC528A /* SwarmView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29F9EA12DD9A5B2CCE2A292D /* SwarmView.swift */; };
 		F09719A20AF9E871E5CCA8E3 /* ServedFormatterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85A1812030202071FFC1D3AA /* ServedFormatterTests.swift */; };
 		F2BFB001CBA9534326B90B6B /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 886F776460D1ACBCEEE0FF3E /* APIClient.swift */; };
@@ -111,7 +114,9 @@
 		29F9EA12DD9A5B2CCE2A292D /* SwarmView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwarmView.swift; sourceTree = "<group>"; };
 		2F41193CEB26AC72290E0717 /* ModelPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerView.swift; sourceTree = "<group>"; };
 		30D16E261FFA98D17D4DACEA /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
+		330797C4A87AEF39CCE75843 /* ScreenshotFixtureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotFixtureTests.swift; sourceTree = "<group>"; };
 		33DBE81C547DC218A3D7A47F /* NetworkView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkView.swift; sourceTree = "<group>"; };
+		34ACFA9D068813FD45960CDF /* ScreenshotFixture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotFixture.swift; sourceTree = "<group>"; };
 		3AA5F805294A0BC4927CEB4F /* ModelLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelLibraryView.swift; sourceTree = "<group>"; };
 		3B3FE43571559418C65CAD0D /* RequestSigningVectorCheck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RequestSigningVectorCheck.swift; sourceTree = "<group>"; };
 		408BFDE15434F4E2581718CC /* NetworkWorldTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkWorldTests.swift; sourceTree = "<group>"; };
@@ -261,6 +266,7 @@
 			children = (
 				F6AF428A5BAF919E6D2B895D /* NetworkBadge.swift */,
 				D29E66F7BB2B2DD53363564C /* RootTabView.swift */,
+				34ACFA9D068813FD45960CDF /* ScreenshotFixture.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -355,6 +361,7 @@
 				DCB9CAB8B8D310AAB40A33C4 /* PortalAPIParsingTests.swift */,
 				3B3FE43571559418C65CAD0D /* RequestSigningVectorCheck.swift */,
 				09E3886017E14BF423BA6139 /* RequestSigningVectorsTests.swift */,
+				330797C4A87AEF39CCE75843 /* ScreenshotFixtureTests.swift */,
 				85A1812030202071FFC1D3AA /* ServedFormatterTests.swift */,
 			);
 			path = EdgeCoderIOSTests;
@@ -514,6 +521,8 @@
 				21AD052E450CFD0E17C0AA29 /* RequestSigner.swift in Sources */,
 				B84EBA46A293E3D4287DE57A /* RequestSigningVectorCheck.swift in Sources */,
 				CA0491A22360359F5890EB53 /* RequestSigningVectorsTests.swift in Sources */,
+				EB41502F9FCC0C35181DF7FC /* ScreenshotFixture.swift in Sources */,
+				C740A30BCF59B23783FA0E59 /* ScreenshotFixtureTests.swift in Sources */,
 				5F4E1B6FEB2F6BB2F92F2470 /* ServedFormatter.swift in Sources */,
 				F09719A20AF9E871E5CCA8E3 /* ServedFormatterTests.swift in Sources */,
 				B263F8DC8BFCDBFE9C07BBDC /* Theme.swift in Sources */,
@@ -568,6 +577,7 @@
 				8654DC9A4B0E363B6265D48D /* RealLlamaContext.swift in Sources */,
 				F4B554AAC65FAAD7EA72E01E /* RequestSigner.swift in Sources */,
 				8D5E31F9D98473054447741F /* RootTabView.swift in Sources */,
+				E2A956AA5D03706278ED2120 /* ScreenshotFixture.swift in Sources */,
 				3F322F9325ABFE8CB4F165DA /* ServedFormatter.swift in Sources */,
 				7E423092ADCA6E6D683CC0BB /* SessionStore.swift in Sources */,
 				B996DC26F09449F1DFB014C2 /* SettingsView.swift in Sources */,

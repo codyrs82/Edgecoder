@@ -819,6 +819,14 @@ struct WalletView: View {
     // MARK: Actions
 
     private func load() async {
+        #if DEBUG
+        if ScreenshotFixture.isEnabled {
+            overview = ScreenshotFixture.wallet
+            loadError = overview == nil ? "Sample wallet failed to decode." : ""
+            loading = false
+            return
+        }
+        #endif
         loading = true
         defer { loading = false }
         do {

@@ -108,6 +108,8 @@ targets:
       - path: EdgeCoderIOS/Network/NetworkModels.swift
       - path: EdgeCoderIOS/Network/NetworkFixture.swift
       - path: EdgeCoderIOS/Chat/ChatModels.swift
+      # App Store screenshot sample data (Debug only): checked to decode in ScreenshotFixtureTests.
+      - path: EdgeCoderIOS/Shared/ScreenshotFixture.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.edgecoder.ios.tests
