@@ -53,6 +53,9 @@ Web search in chats (automatic, **Web: Auto**) and a bot's **Search the web** pe
 | `WEB_READ_CSATS` | cSats charged per page read (number ≥ 0, default `0.2`; reason `tool:read_page`). |
 | `WEB_SEARCH_PER_HOUR` | Searches per account per hour on one coordinator (default `60`). |
 | `WEB_READ_PER_HOUR` | Page reads per account per hour on one coordinator (default `120`). |
+| `WEB_FREE_OWN_MACHINE_SEARCHES_PER_DAY` | Free searches per account per UTC day on one coordinator for a chat whose model runs on the account's **own machine** (the desktop's local model, or compute "My machines" / Auto on your own machine), integer 0 to 100000, default `100`. Free calls need no cSats and move none; they still count toward `WEB_SEARCH_PER_HOUR`. Past the cap a search is paid as usual (`WEB_SEARCH_CSATS`, or `needs_csats` with no balance). |
+| `WEB_FREE_OWN_MACHINE_READS_PER_DAY` | Free page reads per account per UTC day for own-machine chats (integer 0 to 100000, default `200`); past it reads are paid (`WEB_READ_CSATS`). |
+| `WEB_FREE_GLOBAL_PER_DAY` | Free web calls (searches and page reads, all accounts) per UTC day on one coordinator, a cost circuit-breaker (integer 0 to 10000000, default `5000`; `0` turns free web off). Past it own-machine calls are paid as usual. |
 | `WEB_MAX_SEARCHES_PER_REPLY` | Desktop IDE server and portal (not the coordinator). Searches one chat reply or bot run may make (integer 0 to 50, default `3`); past it the call is refused before it costs anything. |
 | `WEB_MAX_READS_PER_REPLY` | Desktop IDE server and portal (not the coordinator). Page reads one chat reply or bot run may make (integer 0 to 50, default `4`). |
 

@@ -213,6 +213,12 @@ export const coordinatorConfigSchema = z.object({
   WEB_READ_CSATS: envNumber(0.2, { min: 0, max: 1_000 }),
   WEB_SEARCH_PER_HOUR: envInt(60, { min: 1, max: 10_000 }),
   WEB_READ_PER_HOUR: envInt(120, { min: 1, max: 10_000 }),
+  // Free web calls for a chat whose model runs on the account's own machine (no cSats needed),
+  // per account per UTC day; past them the call is paid as usual. And free calls in all per day
+  // on one coordinator, a cost circuit-breaker (0 turns free web off).
+  WEB_FREE_OWN_MACHINE_SEARCHES_PER_DAY: envInt(100, { min: 0, max: 100_000 }),
+  WEB_FREE_OWN_MACHINE_READS_PER_DAY: envInt(200, { min: 0, max: 100_000 }),
+  WEB_FREE_GLOBAL_PER_DAY: envInt(5_000, { min: 0, max: 10_000_000 }),
   // Output cap (tokens) for a network model call that sets none: bounds what an agent can bill for
   // a reply (token padding) and so the worst case of every call. Matches the 4096 the context
   // sizing already assumed for such calls (contextNeeded). A call may still ask for up to 32768.

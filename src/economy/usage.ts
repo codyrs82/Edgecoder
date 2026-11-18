@@ -7,7 +7,8 @@
  * request settles; the usage page summarizes them.
  */
 
-export type UsageKind = "inference" | "job" | "reservation";
+/** "web": an account's free web calls for one day (own machine; no cSats), kept for ops, not listed as requests. */
+export type UsageKind = "inference" | "job" | "reservation" | "web";
 export type UsagePlacement = "network" | "mine" | "reserved";
 
 export interface UsageRecord {
@@ -31,6 +32,8 @@ export interface UsageRecord {
   outputTokens?: number;
   /** For a `model: "auto"` call: "routed to <model> on <class> because <reason>". */
   routing?: string;
+  /** kind "web": the day's free web searches and page reads (src/swarm/coordinator/routes/web-tools.ts). */
+  webFree?: { searches: number; reads: number };
 }
 
 export interface UsageSlice {
@@ -52,6 +55,8 @@ export interface UsageSummary {
   byPlacement: UsageSlice[];
   /** Newest first. */
   records: UsageRecord[];
+  /** Free web calls on your own machine in the window (not requests: no cSats moved). */
+  webFree: { searches: number; reads: number };
 }
 
 const round = (n: number, d = 3) => Number(n.toFixed(d));
@@ -74,7 +79,9 @@ function slice(records: UsageRecord[], keyOf: (r: UsageRecord) => string | undef
 
 /** Summarize an account's records since `sinceMs` (every day in the window appears, even empty). */
 export function summarizeUsage(all: UsageRecord[], sinceMs: number, nowMs = Date.now(), maxRecords = 500): UsageSummary {
-  const records = all.filter((r) => r.atMs >= sinceMs).sort((a, b) => b.atMs - a.atMs);
+  const inWindow = all.filter((r) => r.atMs >= sinceMs);
+  const webFree = inWindow.filter((r) => r.kind === "web").reduce((t, r) => ({ searches: t.searches + (r.webFree?.searches ?? 0), reads: t.reads + (r.webFree?.reads ?? 0) }), { searches: 0, reads: 0 });
+  const records = inWindow.filter((r) => r.kind !== "web").sort((a, b) => b.atMs - a.atMs);
   const days = new Map<string, { day: string; requests: number; cSats: number }>();
   for (let t = sinceMs; t <= nowMs; t += 86_400_000) days.set(dayOf(t), { day: dayOf(t), requests: 0, cSats: 0 });
   days.set(dayOf(nowMs), days.get(dayOf(nowMs)) ?? { day: dayOf(nowMs), requests: 0, cSats: 0 });
@@ -100,6 +107,7 @@ export function summarizeUsage(all: UsageRecord[], sinceMs: number, nowMs = Date
     bySource: slice(records, (r) => r.source),
     byPlacement: slice(records, (r) => r.placement),
     records: records.slice(0, maxRecords),
+    webFree,
   };
 }
 

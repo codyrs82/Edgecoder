@@ -366,14 +366,18 @@ export async function resolveSubmitterAccount(
  * Whose account an /account/* call is for: the portal (service token) names it; otherwise the
  * signing agent's owner (or the agent itself when it has no owner yet).
  */
-export async function callerAccount(req: any, routePath: string, requested?: string): Promise<{ accountId: string } | { status: number; error: string }> {
+/** Who called an account route: the portal (service token, naming the account) or a signed agent (billed to its owner). */
+export type CallerAccount = { accountId: string; via: "portal" } | { accountId: string; via: "agent"; agentId: string; ownerAccountId: string | null };
+
+export async function callerAccount(req: any, routePath: string, requested?: string): Promise<CallerAccount | { status: number; error: string }> {
   const headers = (req.headers ?? {}) as Record<string, unknown>;
   // The portal path needs the header itself: with no token configured (development) every request
   // would otherwise count as the portal's.
-  if (headers["x-portal-service-token"] !== undefined && hasPortalServiceToken(headers)) return requested ? { accountId: requested } : { status: 400, error: "account_required" };
+  if (headers["x-portal-service-token"] !== undefined && hasPortalServiceToken(headers)) return requested ? { accountId: requested, via: "portal" } : { status: 400, error: "account_required" };
   const verified = await verifyAgentRequest(headers, routePath, req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
   if (!verified || verified === "rejected") return { status: 401, error: "signature_invalid" };
-  return { accountId: (await pgStore?.getAgentOwnership(verified.agentId))?.accountId ?? verified.agentId };
+  const ownerAccountId = (await pgStore?.getAgentOwnership(verified.agentId))?.accountId ?? null;
+  return { accountId: ownerAccountId ?? verified.agentId, via: "agent", agentId: verified.agentId, ownerAccountId };
 }
 
 /* ── Admin dashboard (token-gated) ── */

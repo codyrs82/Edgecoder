@@ -12,8 +12,9 @@ afterEach(async () => {
   forgetWebAvailability();
 });
 
-async function coordinator(status: Record<string, unknown>, opts: { submitted?: Array<Record<string, unknown>> } = {}) {
+async function coordinator(status: Record<string, unknown>, opts: { submitted?: Array<Record<string, unknown>>; ownStatus?: Record<string, unknown> } = {}) {
   const seen: string[] = [];
+  const bodies: Array<Record<string, unknown>> = [];
   const app = Fastify();
   // A model call that answers in words, without calling a tool.
   app.post("/inference/submit", async (req) => {
@@ -21,9 +22,11 @@ async function coordinator(status: Record<string, unknown>, opts: { submitted?: 
     return { ok: true, subtaskId: "s1" };
   });
   app.post("/inference/stream", async () => ({ chunks: ["I can't browse the web."], next: 1, done: true, creditsSpent: 0 }));
-  app.post("/v1/tools/web/status", async () => {
+  app.post("/v1/tools/web/status", async (req) => {
     seen.push("status");
-    return status;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    bodies.push(body);
+    return body.ownMachine === true && opts.ownStatus ? opts.ownStatus : status;
   });
   app.post("/v1/tools/web/search", async () => {
     seen.push("search");
@@ -32,7 +35,7 @@ async function coordinator(status: Record<string, unknown>, opts: { submitted?: 
   await app.listen({ port: 0, host: "127.0.0.1" });
   apps.push(app);
   const addr = app.server.address() as { port: number };
-  return { url: `http://127.0.0.1:${addr.port}`, seen };
+  return { url: `http://127.0.0.1:${addr.port}`, seen, bodies };
 }
 
 function portal(coordUrl: string, opts: { logs?: Array<Record<string, unknown>>; ownMachineModels?: (userId: string) => Promise<string[]> } = {}) {
@@ -134,5 +137,54 @@ describe("portal_web_decision log", () => {
     expect(decisions(logs)[0]).toMatchObject({ target: "network", model: "qwen3:8b", compute: { target: "network", model: "qwen3:8b" }, availOffer: false, availReason: "needs_csats", path: "runOnNetwork" });
     await app.inject({ method: "POST", url: "/portal/api/chat", payload: { conversationId: "c1", message: "hi", compute: { target: "network", model: "qwen3:8b" } } });
     expect(decisions(logs)).toHaveLength(1);
+  });
+});
+
+describe("free web on your own machine (portal)", () => {
+  const broke = { configured: true, canAfford: false, free: false, balanceCSats: 0, searchesLeftThisHour: 60 };
+  const freeOwn = { ...broke, canAfford: true, free: true, freeSearchesLeftToday: 100, freeReadsLeftToday: 200 };
+
+  it("status for My machines asks with the own-machine basis: available and free with 0 cSats", async () => {
+    const c = await coordinator(broke, { ownStatus: freeOwn });
+    const res = await portal(c.url).inject({ url: "/portal/api/web/status?target=mine&model=qwen3:8b" });
+    expect(res.json()).toMatchObject({ available: true, reason: null, free: true, freeSearchesLeftToday: 100 });
+    expect(c.bodies[0]).toMatchObject({ accountId: "acct-u1", ownMachine: true });
+  });
+
+  it("status for Auto is free only when one of your machines has a model that calls tools", async () => {
+    const c = await coordinator(broke, { ownStatus: freeOwn });
+    expect((await portal(c.url, { ownMachineModels: async () => ["qwen3:8b"] }).inject({ url: "/portal/api/web/status?target=auto" })).json()).toMatchObject({ available: true, free: true });
+    const d = await coordinator(broke, { ownStatus: freeOwn });
+    expect((await portal(d.url, { ownMachineModels: async () => [] }).inject({ url: "/portal/api/web/status?target=auto" })).json()).toMatchObject({ available: false, reason: "needs_csats", free: false });
+    expect(d.bodies[0]).not.toHaveProperty("ownMachine");
+  });
+
+  it("a network chat stays paid: no basis, and 0 cSats isn't offered the web", async () => {
+    const c = await coordinator(broke, { ownStatus: freeOwn });
+    const res = await portal(c.url).inject({ url: "/portal/api/web/status?target=network&model=qwen3:8b" });
+    expect(res.json()).toMatchObject({ available: false, reason: "needs_csats", free: false });
+    expect(c.bodies[0]).not.toHaveProperty("ownMachine");
+  });
+
+  it("a chat on My machines with 0 cSats is offered the web (no webOff), asked with the basis", async () => {
+    const c = await coordinator(broke, { ownStatus: freeOwn });
+    const res = await portal(c.url).inject({ method: "POST", url: "/portal/api/chat", payload: { conversationId: "c1", message: "What's new in Rust?", web: true, compute: { target: "mine", model: "qwen3:8b" } } });
+    expect(res.body).not.toContain("webOff");
+    expect(c.bodies[0]).toMatchObject({ ownMachine: true });
+  });
+
+  it("a forged ownMachine in the chat body is ignored for a network chat", async () => {
+    const c = await coordinator(broke, { ownStatus: freeOwn });
+    const res = await portal(c.url).inject({ method: "POST", url: "/portal/api/chat", payload: { conversationId: "c1", message: "What's new in Rust?", web: true, ownMachine: true, free: true, compute: { target: "network", model: "qwen3:8b", ownMachine: true } } });
+    expect(res.body).toContain('"webOff":{"reason":"needs_csats"');
+    expect(c.bodies).toHaveLength(1);
+    expect(c.bodies[0]).not.toHaveProperty("ownMachine");
+    expect(c.seen).toEqual(["status"]);
+  });
+
+  it("own machine past today's free calls with 0 cSats: free_used, not needs cSats", async () => {
+    const c = await coordinator(broke, { ownStatus: { ...broke, free: false, freeSearchesLeftToday: 0, freeReadsLeftToday: 0 } });
+    const res = await portal(c.url).inject({ url: "/portal/api/web/status?target=mine&model=qwen3:8b" });
+    expect(res.json()).toMatchObject({ available: false, reason: "free_used", message: "Today's free web searches on your machine are used up" });
   });
 });

@@ -73,6 +73,27 @@ final class PortalAPIParsingTests: XCTestCase {
         XCTAssertEqual(WebSearchPreference.offNote(reason: "needs_csats", message: ""), "Web search needs cSats")
         XCTAssertEqual(WebSearchPreference.offNote(reason: "rate_limited", message: ""), "Web search's hourly limit is used up; it's back within the hour.")
         XCTAssertNil(WebSearchPreference.offNote(reason: "not_configured", message: "Web search isn't set up yet"))
+        XCTAssertEqual(WebSearchPreference.offNote(reason: "free_used", message: ""), "Today's free web searches on your machine are used up")
+    }
+
+    /// On your own machine the web is free: the server sends `free: true` and the footer says so,
+    /// also while the reply works (progress events carry no footer, so it's built here).
+    func testFreeWebOnYourMachine() {
+        let progress = #"data: {"web":{"searches":2,"pages":0,"cSats":0,"free":true,"sources":[]}}"#
+        guard case let .web(w)? = PortalChatParser.events(fromLine: progress).first else { return XCTFail("no web") }
+        XCTAssertEqual(w.free, true)
+        XCTAssertEqual(w.footerLine, "2 searches · free (your machine)")
+        let done = #"data: {"done":true,"compute":"My machines · qwen3:8b","cSatsSpent":0,"web":{"searches":1,"pages":1,"cSats":0,"free":true,"sources":[],"footer":"1 search · 1 page · free (your machine)"}}"#
+        guard case let .done(_, _, _, web)? = PortalChatParser.events(fromLine: done).first, let web else { return XCTFail("no done web") }
+        XCTAssertEqual(web.free, true)
+        XCTAssertEqual(web.footerLine, "1 search · 1 page · free (your machine)")
+        // Without the flag (older servers, network chats) nothing changes.
+        guard case let .web(paid)? = PortalChatParser.events(fromLine: #"data: {"web":{"searches":1,"pages":0,"cSats":0.5,"sources":[]}}"#).first else { return XCTFail("no web") }
+        XCTAssertNil(paid.free)
+        XCTAssertEqual(paid.footerLine, "1 search · 0.5 cSats")
+        XCTAssertEqual(PortalWebUsage.footer(searches: 1, pages: 0, cSats: 0, free: true), "1 search · free (your machine)")
+        // A reply that went past the free allowance and paid shows its cSats.
+        XCTAssertEqual(PortalWebUsage.footer(searches: 2, pages: 0, cSats: 0.5, free: true), "2 searches · 0.5 cSats")
     }
 
     func testDoneEventCarriesWebSourcesAndFooter() {

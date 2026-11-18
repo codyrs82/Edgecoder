@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { CreditEngine } from "../../src/credits/engine.js";
-import { HourlyLimiter, NOT_CONFIGURED_MESSAGE, WebToolService, webToolConfigFromEnv, type WebToolConfig, type WebToolDeps } from "../../src/web-tool/service.js";
+import { DailyCounter, HourlyLimiter, NOT_CONFIGURED_MESSAGE, WebToolService, webToolConfigFromEnv, type WebToolConfig, type WebToolDeps } from "../../src/web-tool/service.js";
 import { PageFetchError } from "../../src/web-tool/fetch-page.js";
 
 const ACCOUNT = "acct-user-1";
-const config: WebToolConfig = { braveApiKey: "test-key", searchCSats: 0.5, readCSats: 0.2, searchesPerHour: 3, readsPerHour: 2 };
+const config: WebToolConfig = { braveApiKey: "test-key", searchCSats: 0.5, readCSats: 0.2, searchesPerHour: 3, readsPerHour: 2, freeSearchesPerDay: 100, freeReadsPerDay: 200, freeGlobalPerDay: 5000 };
 
 /** The ledger as the coordinator uses it, in memory: debits and idempotent refunds on one engine. */
 function ledger(start = 10) {
@@ -121,6 +121,101 @@ describe("without BRAVE_SEARCH_API_KEY", () => {
   });
 
   it("defaults: 0.5 cSats a search, 0.2 a page, 60 searches and 120 reads an hour", () => {
-    expect(webToolConfigFromEnv({ BRAVE_SEARCH_API_KEY: " k " })).toEqual({ braveApiKey: "k", searchCSats: 0.5, readCSats: 0.2, searchesPerHour: 60, readsPerHour: 120 });
+    expect(webToolConfigFromEnv({ BRAVE_SEARCH_API_KEY: " k " })).toEqual({ braveApiKey: "k", searchCSats: 0.5, readCSats: 0.2, searchesPerHour: 60, readsPerHour: 120, freeSearchesPerDay: 100, freeReadsPerDay: 200, freeGlobalPerDay: 5000 });
+    expect(webToolConfigFromEnv({ WEB_FREE_OWN_MACHINE_SEARCHES_PER_DAY: 5, WEB_FREE_OWN_MACHINE_READS_PER_DAY: 6, WEB_FREE_GLOBAL_PER_DAY: 7 })).toMatchObject({ freeSearchesPerDay: 5, freeReadsPerDay: 6, freeGlobalPerDay: 7 });
+  });
+});
+
+describe("free on your own machine", () => {
+  const page = async (url: string) => ({ url, title: "T", text: "x", truncated: false, contentType: "text/html" });
+  const own = { ownMachine: true };
+
+  it("with 0 cSats: status offers it (free), and searches and reads run without a debit", async () => {
+    const { engine, deps } = ledger(0);
+    const recordFree = vi.fn();
+    const debit = vi.fn(deps.debit);
+    const svc = new WebToolService(config, { ...deps, debit, recordFree, search: async () => results, read: page });
+    expect(await svc.status(ACCOUNT, own)).toMatchObject({ canAfford: true, free: true, freeSearchesLeftToday: 100, freeReadsLeftToday: 200 });
+    expect(await svc.search(ACCOUNT, "q", 5, "a", own)).toMatchObject({ ok: true, cSats: 0, free: true });
+    expect(await svc.read(ACCOUNT, "https://r.example/", "b", own)).toMatchObject({ ok: true, cSats: 0, free: true });
+    expect(debit).not.toHaveBeenCalled();
+    expect(engine.balance(ACCOUNT)).toBe(0);
+    expect(engine.history(ACCOUNT).filter((t) => t.type === "spend")).toEqual([]);
+    // Counted for ops (no cSats): the day's totals after each free call.
+    expect(recordFree).toHaveBeenLastCalledWith(ACCOUNT, expect.objectContaining({ searches: 1, reads: 1 }));
+    expect(await svc.status(ACCOUNT, own)).toMatchObject({ freeSearchesLeftToday: 99, freeReadsLeftToday: 199 });
+  });
+
+  it("a network chat (no basis) with 0 cSats is still refused and nothing is free", async () => {
+    const { deps } = ledger(0);
+    const search = vi.fn(async () => results);
+    const svc = new WebToolService(config, { ...deps, search });
+    const st = await svc.status(ACCOUNT);
+    expect(st).toMatchObject({ canAfford: false, free: false });
+    expect(st).not.toHaveProperty("freeSearchesLeftToday");
+    expect(await svc.search(ACCOUNT, "q", 5, "a")).toMatchObject({ ok: false, status: 402, error: "needs_csats" });
+    expect(search).not.toHaveBeenCalled();
+  });
+
+  it("a network chat with cSats is charged as before", async () => {
+    const { engine, deps } = ledger(1);
+    const svc = new WebToolService(config, { ...deps, search: async () => results });
+    expect(await svc.search(ACCOUNT, "q", 5, "a")).toMatchObject({ ok: true, cSats: 0.5 });
+    expect(engine.balance(ACCOUNT)).toBeCloseTo(0.5, 9);
+  });
+
+  it("free calls still count toward the hour's limit", async () => {
+    const { deps } = ledger(0);
+    const svc = new WebToolService(config, { ...deps, search: async () => results });
+    for (const id of ["1", "2", "3"]) expect((await svc.search(ACCOUNT, "q", 5, id, own)).ok).toBe(true);
+    expect(await svc.search(ACCOUNT, "q", 5, "4", own)).toMatchObject({ ok: false, status: 429 });
+  });
+
+  it("past the account's daily free cap it's paid: cSats when the balance allows, else needs_csats", async () => {
+    const { engine, deps } = ledger(0.5);
+    const svc = new WebToolService({ ...config, searchesPerHour: 100, freeSearchesPerDay: 2 }, { ...deps, search: async () => results });
+    expect(await svc.search(ACCOUNT, "q", 5, "1", own)).toMatchObject({ ok: true, free: true });
+    expect(await svc.search(ACCOUNT, "q", 5, "2", own)).toMatchObject({ ok: true, free: true });
+    expect(await svc.status(ACCOUNT, own)).toMatchObject({ free: false, freeSearchesLeftToday: 0, canAfford: true });
+    const paid = await svc.search(ACCOUNT, "q", 5, "3", own);
+    expect(paid).toMatchObject({ ok: true, cSats: 0.5 });
+    expect(paid).not.toHaveProperty("free");
+    expect(engine.balance(ACCOUNT)).toBeCloseTo(0, 9);
+    expect(await svc.status(ACCOUNT, own)).toMatchObject({ free: false, canAfford: false });
+    expect(await svc.search(ACCOUNT, "q", 5, "4", own)).toMatchObject({ ok: false, status: 402, error: "needs_csats" });
+    // Another account still has its own allowance.
+    expect(await svc.search("acct-other", "q", 5, "5", own)).toMatchObject({ ok: true, free: true });
+  });
+
+  it("the global daily free cap is a circuit-breaker for every account; it starts over the next UTC day", async () => {
+    let now = Date.UTC(2026, 10, 17, 12);
+    const { deps } = ledger(0);
+    const svc = new WebToolService({ ...config, searchesPerHour: 100, freeGlobalPerDay: 2 }, { ...deps, search: async () => results, read: page, now: () => now });
+    expect(await svc.search("acct-a", "q", 5, "1", own)).toMatchObject({ ok: true, free: true });
+    expect(await svc.read("acct-b", "https://r.example/", "2", own)).toMatchObject({ ok: true, free: true });
+    expect(await svc.status("acct-c", own)).toMatchObject({ free: false, freeSearchesLeftToday: 0, canAfford: false });
+    expect(await svc.search("acct-c", "q", 5, "3", own)).toMatchObject({ ok: false, status: 402, error: "needs_csats" });
+    now = Date.UTC(2026, 10, 18, 0, 0, 1);
+    expect(await svc.search("acct-c", "q", 5, "4", own)).toMatchObject({ ok: true, free: true });
+  });
+
+  it("a failed free call gives its free call back", async () => {
+    const { deps } = ledger(0);
+    const svc = new WebToolService({ ...config, freeSearchesPerDay: 1 }, {
+      ...deps,
+      search: async () => {
+        throw Object.assign(new Error("boom"), { status: 500 });
+      },
+    });
+    expect(await svc.search(ACCOUNT, "q", 5, "1", own)).toMatchObject({ ok: false, status: 502 });
+    expect(await svc.status(ACCOUNT, own)).toMatchObject({ free: true, freeSearchesLeftToday: 1 });
+  });
+
+  it("DailyCounter counts per UTC day", () => {
+    const c = new DailyCounter();
+    const day1 = Date.UTC(2026, 0, 1, 23, 59);
+    expect(c.take("k", 1, day1)).toBe(true);
+    expect(c.take("k", 1, day1)).toBe(false);
+    expect(c.take("k", 1, Date.UTC(2026, 0, 2, 0, 0))).toBe(true);
   });
 });

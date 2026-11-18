@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_WEB_REPLY_LIMITS, WEB_SYSTEM_NOTE, WebToolSession, citedSources, forgetWebAvailability, sourcesMarkdown, webAvailability, webFooter, webReplyLimitsFromEnv, webToolSchemas, wrapUntrusted, type WebToolCall } from "../../src/web-tool/tools.js";
+import { DEFAULT_WEB_REPLY_LIMITS, NEEDS_CSATS_NOTE, WEB_SYSTEM_NOTE, availabilityOf, WebToolSession, citedSources, forgetWebAvailability, sourcesMarkdown, webAvailability, webFooter, webReplyLimitsFromEnv, webToolSchemas, wrapUntrusted, type WebToolCall } from "../../src/web-tool/tools.js";
 import { modelCallsTools } from "../../src/web-tool/model-support.js";
 
 describe("prompt-injection wrapping", () => {
@@ -195,5 +195,67 @@ describe("webAvailability: whether to offer the web tools for a reply", () => {
     await webAvailability(down, "d", { nowMs: 1 });
     await webAvailability(down, "d", { nowMs: 2 });
     expect(down).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("free web on your own machine", () => {
+  it("the footer says free (your machine) instead of a cSats cost; a paid reply keeps its cost", () => {
+    expect(webFooter({ searches: 2, pages: 0, cSats: 0, free: true })).toBe("2 searches · free (your machine)");
+    expect(webFooter({ searches: 1, pages: 1, cSats: 0, free: true })).toBe("1 search · 1 page · free (your machine)");
+    expect(webFooter({ searches: 2, pages: 0, cSats: 0.5, free: true })).toBe("2 searches · 0.5 cSats");
+    expect(webFooter({ searches: 2, pages: 0, cSats: 0 })).toBe("2 searches · 0 cSats");
+  });
+
+  it("an own-machine session asks for free on each call and reports free when every call was", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const call: WebToolCall = async (path, body) => {
+      bodies.push(body);
+      return path.endsWith("/search") ? { status: 200, json: { results: [{ title: "A", url: "https://a.example/" }], cSats: 0, free: true } } : { status: 200, json: { url: "https://a.example/", title: "A", text: "x", cSats: 0, free: true } };
+    };
+    const events: Array<Record<string, unknown>> = [];
+    const s = new WebToolSession({ call, emit: (e) => events.push(e as never), ownMachine: true, requestId: () => "r" });
+    await s.run("web_search", { query: "q" });
+    await s.run("read_page", { url: "https://a.example/" });
+    expect(bodies.every((b) => b.ownMachine === true)).toBe(true);
+    expect(s.usage()).toMatchObject({ searches: 1, pages: 1, cSats: 0, free: true });
+    expect(events.filter((e) => e.type === "web").every((e) => e.free === true)).toBe(true);
+  });
+
+  it("a network session never asks; a call the server charged (past the free cap) makes the reply paid", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    let n = 0;
+    const call: WebToolCall = async (_path, body) => {
+      bodies.push(body);
+      return n++ === 0 ? { status: 200, json: { results: [], cSats: 0, free: true } } : { status: 200, json: { results: [], cSats: 0.5 } };
+    };
+    const net = new WebToolSession({ call, emit: () => {} });
+    await net.run("web_search", { query: "q" });
+    expect(bodies[0]).not.toHaveProperty("ownMachine");
+    const own = new WebToolSession({ call, emit: () => {}, ownMachine: true });
+    await own.run("web_search", { query: "q" });
+    expect(own.usage()).not.toHaveProperty("free");
+    expect(own.usage().cSats).toBe(0.5);
+  });
+
+  it("availability: own-machine with 0 cSats is offered (free); the status call carries the basis and is cached apart", async () => {
+    forgetWebAvailability();
+    const bodies: Array<Record<string, unknown>> = [];
+    const call: WebToolCall = async (_p, body) => {
+      bodies.push(body);
+      return body.ownMachine ? { status: 200, json: { configured: true, canAfford: true, free: true, freeSearchesLeftToday: 100, searchesLeftThisHour: 60 } } : { status: 200, json: { configured: true, canAfford: false, free: false, searchesLeftThisHour: 60 } };
+    };
+    expect(await webAvailability(call, "acct-1", { ownMachine: true })).toEqual({ offer: true, reason: null, free: true });
+    expect(await webAvailability(call, "acct-1")).toMatchObject({ offer: false, reason: "needs_csats" });
+    expect(bodies).toEqual([{ ownMachine: true }, {}]);
+    forgetWebAvailability("acct-1");
+    await webAvailability(call, "acct-1", { ownMachine: true });
+    expect(bodies).toHaveLength(3);
+  });
+
+  it("own machine past today's free calls with no cSats: free_used, not needs cSats", async () => {
+    forgetWebAvailability();
+    const call: WebToolCall = async () => ({ status: 200, json: { configured: true, canAfford: false, free: false, freeSearchesLeftToday: 0, searchesLeftThisHour: 60 } });
+    expect(await webAvailability(call, "acct-2", { ownMachine: true })).toMatchObject({ offer: false, reason: "free_used" });
+    expect(availabilityOf({ configured: true, canAfford: false })).toMatchObject({ reason: "needs_csats", message: NEEDS_CSATS_NOTE });
   });
 });

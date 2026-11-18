@@ -113,15 +113,19 @@ export interface WebUsage {
   pages: number;
   cSats: number;
   sources: WebSource[];
+  /** Every call so far was free (the chat runs on your own machine); absent when any was paid. */
+  free?: true;
 }
 
-/** "2 searches · 1 page · 1.2 cSats" (the reply footer); "" when the web wasn't used. */
-export function webFooter(u: Pick<WebUsage, "searches" | "pages" | "cSats">): string {
+export const FREE_ON_YOUR_MACHINE = "free (your machine)";
+
+/** "2 searches · 1 page · 1.2 cSats" (the reply footer), or "2 searches · free (your machine)"; "" when the web wasn't used. */
+export function webFooter(u: Pick<WebUsage, "searches" | "pages" | "cSats" | "free">): string {
   const parts: string[] = [];
   if (u.searches) parts.push(`${u.searches} search${u.searches === 1 ? "" : "es"}`);
   if (u.pages) parts.push(`${u.pages} page${u.pages === 1 ? "" : "s"}`);
   if (parts.length === 0) return "";
-  parts.push(`${Number(u.cSats.toFixed(2))} cSats`);
+  parts.push(u.free && !u.cSats ? FREE_ON_YOUR_MACHINE : `${Number(u.cSats.toFixed(2))} cSats`);
   return parts.join(" · ");
 }
 
@@ -149,6 +153,8 @@ export interface WebToolEvent {
   /** What this call cost (for budgets that add up per call). */
   addedCSats: number;
   sources: WebSource[];
+  /** Every call so far was free (own machine). */
+  free?: true;
 }
 
 export interface WebSessionDeps {
@@ -162,6 +168,12 @@ export interface WebSessionDeps {
   requestId?: () => string;
   /** Per-reply limits (default: webReplyLimitsFromEnv()). */
   limits?: WebReplyLimits;
+  /**
+   * The reply's model runs on the account's own machine: each call asks to be free (ownMachine).
+   * The server decides whether that stands (only for a caller that can vouch for it) and within
+   * today's free caps; otherwise the call is paid as usual.
+   */
+  ownMachine?: boolean;
 }
 
 const hostOf = (u: string) => {
@@ -178,6 +190,8 @@ export class WebToolSession {
   private searches = 0;
   private pages = 0;
   private cSats = 0;
+  private paidCalls = 0;
+  private freeCalls = 0;
   /** A page was read in this reply (its text is now in the model's context). */
   pageRead = false;
   /** Out of cSats or over the hour's limit: no more calls this reply (each would fail the same way). */
@@ -189,7 +203,7 @@ export class WebToolSession {
   }
 
   usage(): WebUsage {
-    return { searches: this.searches, pages: this.pages, cSats: Number(this.cSats.toFixed(6)), sources: [...this.sources.values()] };
+    return { searches: this.searches, pages: this.pages, cSats: Number(this.cSats.toFixed(6)), sources: [...this.sources.values()], ...(this.freeCalls > 0 && this.paidCalls === 0 ? { free: true as const } : {}) };
   }
 
   private source(url: string, title: string): WebSource {
@@ -209,7 +223,19 @@ export class WebToolSession {
 
   private emitUsage(added: number): void {
     const u = this.usage();
-    this.d.emit({ type: "web", searches: u.searches, pages: u.pages, cSats: u.cSats, addedCSats: added, sources: u.sources });
+    this.d.emit({ type: "web", searches: u.searches, pages: u.pages, cSats: u.cSats, addedCSats: added, sources: u.sources, ...(u.free ? { free: true as const } : {}) });
+  }
+
+  /** Count a call as free or paid (from the server's answer). */
+  private countCall(json: Record<string, unknown>): number {
+    const charged = Number(json.cSats ?? 0) || 0;
+    if (json.free === true && charged === 0) this.freeCalls++;
+    else this.paidCalls++;
+    return charged;
+  }
+
+  private basis(): Record<string, unknown> {
+    return this.d.ownMachine ? { ownMachine: true } : {};
   }
 
   /** Run web_search or read_page; the result is what the model reads (wrapped), or an error for it. */
@@ -222,10 +248,10 @@ export class WebToolSession {
       if (this.searches >= this.limits.searches) return { error: `This reply has used its ${this.limits.searches} web search${this.limits.searches === 1 ? "" : "es"}. Answer with what you found (cite it), and say what you couldn't check.` };
       const count = Number(args.count ?? 5);
       this.d.emit({ type: "status", message: "Searching the web…" });
-      const r = await this.d.call("/v1/tools/web/search", { query, count: Number.isFinite(count) ? count : 5, requestId: this.id() }, this.d.signal).catch((err: Error) => ({ status: 502, json: { message: err.message } as Record<string, unknown> }));
+      const r = await this.d.call("/v1/tools/web/search", { query, count: Number.isFinite(count) ? count : 5, requestId: this.id(), ...this.basis() }, this.d.signal).catch((err: Error) => ({ status: 502, json: { message: err.message } as Record<string, unknown> }));
       if (r.status !== 200) return { error: this.failed(r) };
       const results = (r.json.results as Array<{ title?: string; url?: string; snippet?: string }> | undefined) ?? [];
-      const charged = Number(r.json.cSats ?? 0) || 0;
+      const charged = this.countCall(r.json);
       this.searches++;
       this.cSats += charged;
       this.emitUsage(charged);
@@ -243,11 +269,11 @@ export class WebToolSession {
     if (!url) return { error: "read_page needs a url." };
     if (this.pages >= this.limits.reads) return { error: `This reply has read its ${this.limits.reads} page${this.limits.reads === 1 ? "" : "s"}. Answer with what you found (cite it), and say what you couldn't check.` };
     this.d.emit({ type: "status", message: `Reading ${hostOf(url)}…` });
-    const r = await this.d.call("/v1/tools/web/read", { url, requestId: this.id() }, this.d.signal).catch((err: Error) => ({ status: 502, json: { message: err.message } as Record<string, unknown> }));
+    const r = await this.d.call("/v1/tools/web/read", { url, requestId: this.id(), ...this.basis() }, this.d.signal).catch((err: Error) => ({ status: 502, json: { message: err.message } as Record<string, unknown> }));
     if (r.status !== 200) return { error: this.failed(r) };
     const finalUrl = typeof r.json.url === "string" ? r.json.url : url;
     const title = typeof r.json.title === "string" ? r.json.title : "";
-    const charged = Number(r.json.cSats ?? 0) || 0;
+    const charged = this.countCall(r.json);
     const s = this.source(finalUrl, title);
     this.pages++;
     this.cSats += charged;
@@ -268,12 +294,16 @@ export class WebToolSession {
 /** Whether to offer the web tools for a reply, from the coordinator's /v1/tools/web/status. */
 export interface WebAvailability {
   offer: boolean;
+  /** The next search is free (own machine, today's free calls left). */
+  free?: boolean;
   /** Why not: not set up, no cSats for a search, the hour's searches used, or the servers unreachable. */
-  reason: null | "not_configured" | "needs_csats" | "rate_limited" | "unreachable";
+  reason: null | "not_configured" | "needs_csats" | "free_used" | "rate_limited" | "unreachable";
   message?: string;
 }
 
 export const NEEDS_CSATS_NOTE = "Web search needs cSats";
+/** Own-machine chats: today's free web searches are used (more would need cSats). */
+export const FREE_USED_NOTE = "Today's free web searches on your machine are used up";
 
 const availabilityCache = new Map<string, { atMs: number; value: WebAvailability }>();
 const AVAILABILITY_TTL_MS = 30_000;
@@ -283,34 +313,53 @@ const AVAILABILITY_TTL_MS = 30_000;
  * hour's searches, isn't offered them at all, so the model never makes a call that fails; the chat
  * answers without the web. Cached briefly per account (`key`) so a busy chat doesn't ask every time.
  */
-export async function webAvailability(call: WebToolCall, key: string, opts: { nowMs?: number; signal?: AbortSignal } = {}): Promise<WebAvailability> {
+export async function webAvailability(call: WebToolCall, key: string, opts: { nowMs?: number; signal?: AbortSignal; ownMachine?: boolean } = {}): Promise<WebAvailability> {
   const now = opts.nowMs ?? Date.now();
-  const hit = availabilityCache.get(key);
+  // Own-machine chats ask with the basis, so their answer (free) is kept apart from network chats'.
+  const cacheKey = opts.ownMachine ? `${key}|own` : key;
+  const hit = availabilityCache.get(cacheKey);
   if (hit && now - hit.atMs < AVAILABILITY_TTL_MS) return hit.value;
-  const r = await call("/v1/tools/web/status", {}, opts.signal).catch(() => ({ status: 502, json: {} as Record<string, unknown> }));
+  const r = await call("/v1/tools/web/status", opts.ownMachine ? { ownMachine: true } : {}, opts.signal).catch(() => ({ status: 502, json: {} as Record<string, unknown> }));
   let value: WebAvailability;
   if (r.status !== 200) value = { offer: false, reason: "unreachable", message: "Couldn't reach EdgeCoder to check web search." };
-  else {
-    const st = r.json as { configured?: boolean; canAfford?: boolean; searchesLeftThisHour?: number; message?: string };
-    value =
-      st.configured !== true
-        ? { offer: false, reason: "not_configured", message: st.message ?? "Web search isn't set up yet" }
-        : st.canAfford === false
-          ? { offer: false, reason: "needs_csats", message: NEEDS_CSATS_NOTE }
-          : st.searchesLeftThisHour === 0
-            ? { offer: false, reason: "rate_limited", message: "Web search's hourly limit is used up; it's back within the hour." }
-            : { offer: true, reason: null };
-  }
+  else value = availabilityOf(r.json);
   // Don't remember a failure to reach the servers; ask again next time.
-  if (value.reason !== "unreachable") availabilityCache.set(key, { atMs: now, value });
+  if (value.reason !== "unreachable") availabilityCache.set(cacheKey, { atMs: now, value });
   if (availabilityCache.size > 5_000) availabilityCache.delete(availabilityCache.keys().next().value!);
   return value;
+}
+
+/** A coordinator /v1/tools/web/status answer as whether to offer the tools (free: no cSats needed). */
+export function availabilityOf(json: Record<string, unknown>): WebAvailability {
+  const st = json as { configured?: boolean; canAfford?: boolean; free?: boolean; freeSearchesLeftToday?: number; searchesLeftThisHour?: number; message?: string };
+  const free = st.free === true;
+  return st.configured !== true
+    ? { offer: false, reason: "not_configured", message: st.message ?? "Web search isn't set up yet" }
+    : !free && st.canAfford === false
+      ? // On your own machine with today's free calls used: no "needs cSats" (that's for network chats).
+        typeof st.freeSearchesLeftToday === "number"
+        ? { offer: false, reason: "free_used", message: FREE_USED_NOTE }
+        : { offer: false, reason: "needs_csats", message: NEEDS_CSATS_NOTE }
+      : st.searchesLeftThisHour === 0
+        ? { offer: false, reason: "rate_limited", message: "Web search's hourly limit is used up; it's back within the hour." }
+        : { offer: true, reason: null, ...(free ? { free: true } : {}) };
+}
+
+/** The reason a status endpoint (IDE server, portal) reports, or null when the web can be used. */
+export function webStatusReason(json: Record<string, unknown>, toolsSupported: boolean): WebAvailability["reason"] | "no_tools" {
+  const a = availabilityOf(json);
+  if (a.reason === "not_configured") return a.reason;
+  if (!toolsSupported) return "no_tools";
+  return a.reason;
 }
 
 /** Forget the cached availability (after a reply used the web, or in tests). */
 export function forgetWebAvailability(key?: string): void {
   if (key === undefined) availabilityCache.clear();
-  else availabilityCache.delete(key);
+  else {
+    availabilityCache.delete(key);
+    availabilityCache.delete(`${key}|own`);
+  }
 }
 
 /** The server's refusal in words for the model (and the tool card). */

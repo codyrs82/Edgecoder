@@ -57,4 +57,33 @@ describe("hosted endpoint", () => {
     expect((await app.inject({ method: "POST", url: "/me/profile", headers: { cookie: "session" }, payload: { displayName: "<b>x</b>" } })).statusCode).toBe(400);
     expect((await app.inject({ method: "POST", url: "/me/profile", headers: { cookie: "session" }, payload: { displayName: "Cody" } })).json()).toEqual({ ok: true, displayName: "Cody" });
   });
+
+  it("the web tool relay drops a client's ownMachine claim: an API key's searches are paid", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const coord = Fastify();
+    coord.post("/v1/tools/web/search", async (req) => {
+      bodies.push(req.body as Record<string, unknown>);
+      return { query: "q", results: [], cSats: 0.5 };
+    });
+    await coord.listen({ port: 0, host: "127.0.0.1" });
+    try {
+      const keys = new Map<string, string>();
+      const app = Fastify();
+      registerHostedRoutes(app, {
+        store: { userForApiKeyHash: async (h: string) => keys.get(h) ?? null, createApiKey: async (k: { keyHash: string; userId: string }) => void keys.set(k.keyHash, k.userId), countApiKeys: async () => keys.size } as never,
+        getCurrentUser: async () => ({ userId: "u1" }),
+        PORTAL_SERVICE_TOKEN: "svc",
+        EXTERNAL_HTTP_TIMEOUT_MS: 5000,
+        discoverCoordinatorUrlsForPortal: async () => [`http://127.0.0.1:${(coord.server.address() as { port: number }).port}`],
+      });
+      const { key } = (await app.inject({ method: "POST", url: "/portal/api/keys", payload: { name: "IDE" } })).json();
+      const r = await app.inject({ method: "POST", url: "/v1/tools/web/search", headers: { authorization: `Bearer ${key}` }, payload: { query: "q", ownMachine: true, accountId: "acct-someone-else" } });
+      expect(r.statusCode).toBe(200);
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]).not.toHaveProperty("ownMachine");
+      expect(bodies[0]).toMatchObject({ query: "q", accountId: "acct-u1" });
+    } finally {
+      await coord.close();
+    }
+  });
 });
