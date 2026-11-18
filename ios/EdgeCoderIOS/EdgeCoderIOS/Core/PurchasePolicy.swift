@@ -26,14 +26,21 @@ enum PurchaseMode: String {
     }
 }
 
-/// Whether the Wallet offers "Withdraw now" (Info.plist `EdgeCoderWithdrawInApp`, build setting
-/// `EDGECODER_WITHDRAW_IN_APP` in project.yml): off in Release (Guideline 3.1.5(i) needs an organization
-/// developer account for wallet functions), on in Debug.
-enum WithdrawPolicy {
-    static var inApp: Bool { enabled(raw: Bundle.main.object(forInfoDictionaryKey: "EdgeCoderWithdrawInApp") as? String) }
+/// Whether the app shows host earnings: the Wallet's earnings, payouts and "Withdraw now", earning rows
+/// in the activity list, and the on-device runtime's credits counter (Info.plist
+/// `EdgeCoderHostEarningsInApp`, build setting `EDGECODER_HOST_EARNINGS_IN_APP` in project.yml). Off in
+/// Release, so the App Store app is a coding app and not a financial one; on in Debug.
+enum HostEarningsPolicy {
+    static var inApp: Bool { enabled(raw: Bundle.main.object(forInfoDictionaryKey: "EdgeCoderHostEarningsInApp") as? String) }
 
     static func enabled(raw: String?) -> Bool {
         ["yes", "true", "1"].contains((raw ?? "").trimmingCharacters(in: .whitespaces).lowercased())
+    }
+
+    /// Ledger reasons that are host earnings or payouts (hidden from the activity list when earnings are off).
+    static func isEarningsReason(_ reason: String) -> Bool {
+        let base = String(reason.split(separator: ":").first ?? "")
+        return ["compute_contribution", "payout", "payout_refund", "payout_fee_excess", "fee_pool_distribution"].contains(base)
     }
 }
 

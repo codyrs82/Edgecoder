@@ -231,7 +231,9 @@ struct SettingsView: View {
             HStack(spacing: 0) {
                 StatCell(label: "Tasks", value: "\(swarmRuntime.tasksCompleted)")
                 StatCell(label: "Failed", value: "\(swarmRuntime.tasksFailed)")
-                StatCell(label: "Credits", value: "\(swarmRuntime.creditsEarned)")
+                if HostEarningsPolicy.inApp {
+                    StatCell(label: "Credits", value: "\(swarmRuntime.creditsEarned)")
+                }
                 StatCell(label: "Beats", value: "\(swarmRuntime.heartbeatCount)")
             }
 
@@ -562,6 +564,6 @@ private struct WalletLinkRow: View {
                 Image(systemName: "chevron.right").font(.caption).foregroundColor(Theme.textMuted)
             }
         }
-        .accessibilityHint("Balance, add funds, prices, earnings and withdrawals")
+        .accessibilityHint(HostEarningsPolicy.inApp ? "Balance, add funds, prices, earnings and withdrawals" : "Balance, prices and activity")
     }
 }

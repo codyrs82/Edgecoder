@@ -42,10 +42,10 @@
 	</array>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>EdgeCoderHostEarningsInApp</key>
+	<string>$(EDGECODER_HOST_EARNINGS_IN_APP)</string>
 	<key>EdgeCoderPurchaseMode</key>
 	<string>$(EDGECODER_PURCHASE_MODE)</string>
-	<key>EdgeCoderWithdrawInApp</key>
-	<string>$(EDGECODER_WITHDRAW_IN_APP)</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSAppTransportSecurity</key>
