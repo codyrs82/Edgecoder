@@ -7,7 +7,7 @@ vi.mock("@tauri-apps/plugin-shell", () => shell);
 import WebIndicator from "../src/components/WebIndicator.svelte";
 import WebSources from "../src/components/WebSources.svelte";
 import ChatMessage from "../src/components/ChatMessage.svelte";
-import { UNAVAILABLE_TITLE, WEB_AUTO_KEY, chatWebMode, webAutoDefault, webIndicatorView, webOffered, type WebStatus } from "../src/lib/web-tool";
+import { UNAVAILABLE_TITLE, WEB_AUTO_KEY, chatWebMode, webAutoDefault, webFooter, webIndicatorView, webOffered, type WebStatus } from "../src/lib/web-tool";
 import { applyAgentEvent } from "../src/lib/agent-events";
 
 afterEach(() => {
@@ -154,5 +154,25 @@ describe("citations under a web answer", () => {
     turn = applyAgentEvent(turn, { type: "web", searches: 1, pages: 0, cSats: 0.5, addedCSats: 0.5, sources: [{ n: 1, title: "A", url: "https://a.example/" }, { n: 2, title: "bad", url: "javascript:alert(1)" }] }).turn;
     expect(turn.activity).toBeUndefined();
     expect(turn.web).toEqual({ searches: 1, pages: 0, cSats: 0.5, sources: [{ n: 1, title: "A", url: "https://a.example/" }] });
+  });
+
+  it("on your own machine the footer says free (your machine), from the stream's free flag", () => {
+    const turn = applyAgentEvent({ text: "", toolEvents: [] }, { type: "web", searches: 2, pages: 0, cSats: 0, addedCSats: 0, free: true, sources: [{ n: 1, title: "A", url: "https://a.example/" }] }).turn;
+    expect(turn.web).toMatchObject({ searches: 2, cSats: 0, free: true });
+    render(WebSources, { web: turn.web!, text: "It's out [1]." });
+    expect(screen.getByText("2 searches · free (your machine)")).toBeTruthy();
+    expect(webFooter({ searches: 2, pages: 0, cSats: 0.5, free: true })).toBe("2 searches · 0.5 cSats");
+  });
+});
+
+describe("free web on your own machine (indicator)", () => {
+  it("no \"needs cSats\" when the chat runs on your machine; it still shows for network chats", () => {
+    const own: WebStatus = { ...ready, balanceCSats: 0, free: true, freeSearchesLeftToday: 97 };
+    const v = webIndicatorView(own, "auto");
+    expect(v).toMatchObject({ label: "Web: Auto", note: "" });
+    expect(v.title).toContain("Free on your machine (97 free searches left today)");
+    expect(webOffered(own, "auto")).toBe(true);
+    expect(webIndicatorView({ ...ready, available: false, reason: "needs_csats", balanceCSats: 0 }, "auto").note).toBe("needs cSats");
+    expect(webIndicatorView({ ...ready, available: false, reason: "free_used", message: "Today's free web searches on your machine are used up" }, "auto")).toMatchObject({ note: "", title: "Today's free web searches on your machine are used up" });
   });
 });

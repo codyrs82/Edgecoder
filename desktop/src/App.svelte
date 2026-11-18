@@ -42,8 +42,9 @@
   import type { Conversation } from "./lib/types";
   import type { RepoConnection } from "./lib/api";
   import BotView from "./pages/BotView.svelte";
+  import CloudBotView from "./pages/CloudBotView.svelte";
   import BotForm from "./components/BotForm.svelte";
-  import { bots, activeBotId, pollBots, refreshBots } from "./lib/bots-store";
+  import { bots, activeBotId, pollBots, refreshBots, cloudBots, activeCloudBotId } from "./lib/bots-store";
   import type { Bot as BotRecord } from "./lib/bots";
   import OnboardingWizard from "./components/OnboardingWizard.svelte";
   import { stepFromRoute, type StepId } from "./lib/onboarding";
@@ -118,7 +119,7 @@
   const TRY_PROMPT = "In three short bullet points, what can EdgeCoder do for me?";
   async function runGuideAction(action: string) {
     if (action === "try-chat") {
-      activeBotId.set(null);
+      closeBots();
       activeTab = "chat";
       chatView?.newChat();
       await tick();
@@ -339,6 +340,17 @@
 
   // Persistent bots: the sidebar lists them; one can be open in place of the chat.
   const activeBot = $derived($bots.find((b) => b.id === $activeBotId) ?? null);
+  /** A cloud bot open in place of the chat (read and message only here). */
+  const activeCloudBot = $derived($cloudBots.find((b) => b.id === $activeCloudBotId) ?? null);
+  function closeBots() {
+    activeBotId.set(null);
+    activeCloudBotId.set(null);
+  }
+  function openCloudBot(id: string) {
+    activeTab = "chat";
+    activeBotId.set(null);
+    activeCloudBotId.set(id);
+  }
   /** What the title bar names: the open chat (or bot) in Chat, the project in Code. */
   let chatHeader = $state<{ title: string; detail: string | null }>({ title: "New chat", detail: null });
   /** The Code view's projects sidebar. */
@@ -357,7 +369,7 @@
   let newProjectSheet = $state<null | "new" | "clone">(null);
   const projectName = $derived(projectRoot ? projectRoot.replace(/[/\\]+$/, "").split(/[/\\]/).pop() ?? null : null);
   const titleText = $derived(
-    activeTab === "editor" ? (projectName ?? "No project open") : activeBot ? activeBot.name : chatHeader.title || "New chat",
+    activeTab === "editor" ? (projectName ?? "No project open") : activeBot ? activeBot.name : activeCloudBot ? activeCloudBot.name : chatHeader.title || "New chat",
   );
   const titleDetail = $derived(activeTab === "editor" ? null : activeBot ? activeBot.role || null : chatHeader.detail);
   $effect(() => {
@@ -378,6 +390,7 @@
   });
   function openBot(id: string) {
     activeTab = "chat";
+    activeCloudBotId.set(null);
     activeBotId.set(id);
   }
   async function botSaved(b: BotRecord) {
@@ -387,7 +400,7 @@
   }
 
   async function handleSelectConversation(id: string) {
-    activeBotId.set(null);
+    closeBots();
     activeTab = "chat";
     if (chatView) {
       await chatView.loadConversation(id);
@@ -405,7 +418,7 @@
   }
 
   function handleNewChatFromSidebar() {
-    activeBotId.set(null);
+    closeBots();
     activeTab = "chat";
     chatView?.newChat();
   }
@@ -422,7 +435,7 @@
       void newCodingChat(null);
       return;
     }
-    activeBotId.set(null);
+    closeBots();
     activeTab = "chat";
     chatView?.newChat();
     queueMicrotask(() => document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus());
@@ -660,14 +673,20 @@
             onSelectBot={openBot}
             onNewBot={() => (botForm = "new")}
             activeBotId={$activeBotId}
+            onSelectCloudBot={openCloudBot}
+            activeCloudBotId={$activeCloudBotId}
           />
         </div>
         {#if activeBot}
           <div class="chat-main">
-            <BotView bot={activeBot} onEdit={(b) => (botForm = b)} onDeleted={() => { activeBotId.set(null); void refreshBots(); }} onOpenPath={openInEditor} onPreview={previewInEditor} onOpenSettings={openSettings} onOpenFolder={openFolderInEditor} />
+            <BotView bot={activeBot} onEdit={(b) => (botForm = b)} onDeleted={() => { closeBots(); void refreshBots(); }} onOpenPath={openInEditor} onPreview={previewInEditor} onOpenSettings={openSettings} onOpenFolder={openFolderInEditor} />
+          </div>
+        {:else if activeCloudBot}
+          <div class="chat-main">
+            <CloudBotView bot={activeCloudBot} />
           </div>
         {/if}
-        <div class="chat-main" class:hidden={!!activeBot}>
+        <div class="chat-main" class:hidden={!!activeBot || !!activeCloudBot}>
           <ChatView bind:this={chatView} {webStatus} onWebChange={(choice) => (chatWeb = choice)} onWebStale={() => webRecheck++} onModeChange={(m) => (chatPermissionMode = m)} onFocusComposer={() => chatInput?.focus()} onHeaderChange={(h) => (chatHeader = h)} onOpenInEditor={handleOpenInEditor} {projectRoot} onRepoConnected={(r) => void repoConnected(r)} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} onPreview={previewInEditor} onQuote={(b) => void chatInput?.insertQuote(b)} />
           <div class="composer">
             <ChatInput bind:this={chatInput} onSend={handleSend} streaming={chatStreaming} onStop={() => chatView?.stop()} attach={{ vision: projectRoot ? visionFor($computeChoice) : NO_VISION, who: "This model" }} mentions={projectRoot ? (q) => mentionSuggestions(q, (x) => fsFind(x, 8)) : undefined}>

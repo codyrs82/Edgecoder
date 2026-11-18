@@ -4,7 +4,7 @@
 /**
  * Browser helpers for bots on the web (the sidebar list and pages/bots.ts). The words mirror the
  * desktop app's (desktop/src/lib/bots.ts: statusChip, autoStatus, routineText, scheduleText,
- * computeText, triggerText, RUN_STATUS_TEXT), so a bot reads the same on the Mac and on the web.
+ * computeText, triggerText, RUN_STATUS_TEXT), so a bot reads the same on the machine and on the web.
  * Every value from a bot goes through escapeHtml before it reaches innerHTML; the avatar colour is
  * set through the CSSOM (no style attributes: the portal's style-src has no 'unsafe-inline').
  */
@@ -58,7 +58,7 @@ export const CLIENT_BOT_HELPERS_JS = String.raw`
       now = now || Date.now();
       if (b.status === "running") return { text: b.activity && !/^(Auto|Compute): /.test(b.activity) ? "Working: " + b.activity : "Working…", tone: "accent" };
       if (b.status === "needs_approval") return { text: "Waiting for your approval", tone: "warn" };
-      if (b.status === "needs_folder") return { text: "Needs folder · set it up in the EdgeCoder app on " + ((b.machine && b.machine.machineName) || "your Mac"), tone: "warn" };
+      if (b.status === "needs_folder") return { text: "Needs folder · set it up in the EdgeCoder app on " + ((b.machine && b.machine.machineName) || "your machine"), tone: "warn" };
       if (!b.enabled) return { text: "Paused", tone: "muted" };
       if (b.status === "over_budget" || b.held === "budget") return { text: "Budget spent · resumes tomorrow", tone: "warn" };
       if (b.held === "run_cap") return { text: "Daily limit of " + (b.maxRunsPerDay || 48) + " runs reached · resumes tomorrow", tone: "warn" };
@@ -79,6 +79,7 @@ export const CLIENT_BOT_HELPERS_JS = String.raw`
       return "Auto";
     }
     function botTriggerText(t) {
+      if (t.kind === "pr_opened") return "PR opened by others";
       if (t.kind === "pr") return "PR opened or updated" + (t.onlyOthers !== false ? " by others" : "") + (t.label ? " with label " + t.label : "");
       if (t.kind === "ci_failed") return "CI failed " + (t.scope === "default" ? "on the default branch" : t.scope === "prs" ? "on a PR" : "on the default branch or a PR");
       return "Issue labeled " + (String(t.label || "").trim() || "…");

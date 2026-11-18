@@ -253,7 +253,9 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
     app.post(`/v1/tools/web/${tool}`, async (req, reply) => {
       const ctx = await keyAccount(req, reply);
       if (!ctx) return reply;
-      const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
+      // A client's own `ownMachine` claim is dropped: the portal's service token vouches for what it
+      // relays, and an API key caller can't show where its model runs, so these calls are paid.
+      const { ownMachine: _claimed, ...body } = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
       return relay(reply, await coord(ctx.accountId, `/v1/tools/web/${tool}`, { ...body, accountId: ctx.accountId }));
     });
   }

@@ -53,6 +53,9 @@ Web search in chats (automatic, **Web: Auto**) and a bot's **Search the web** pe
 | `WEB_READ_CSATS` | cSats charged per page read (number ≥ 0, default `0.2`; reason `tool:read_page`). |
 | `WEB_SEARCH_PER_HOUR` | Searches per account per hour on one coordinator (default `60`). |
 | `WEB_READ_PER_HOUR` | Page reads per account per hour on one coordinator (default `120`). |
+| `WEB_FREE_OWN_MACHINE_SEARCHES_PER_DAY` | Free searches per account per UTC day on one coordinator for a chat whose model runs on the account's **own machine** (the desktop's local model, or compute "My machines" / Auto on your own machine), integer 0 to 100000, default `100`. Free calls need no cSats and move none; they still count toward `WEB_SEARCH_PER_HOUR`. Past the cap a search is paid as usual (`WEB_SEARCH_CSATS`, or `needs_csats` with no balance). |
+| `WEB_FREE_OWN_MACHINE_READS_PER_DAY` | Free page reads per account per UTC day for own-machine chats (integer 0 to 100000, default `200`); past it reads are paid (`WEB_READ_CSATS`). |
+| `WEB_FREE_GLOBAL_PER_DAY` | Free web calls (searches and page reads, all accounts) per UTC day on one coordinator, a cost circuit-breaker (integer 0 to 10000000, default `5000`; `0` turns free web off). Past it own-machine calls are paid as usual. |
 | `WEB_MAX_SEARCHES_PER_REPLY` | Desktop IDE server and portal (not the coordinator). Searches one chat reply or bot run may make (integer 0 to 50, default `3`); past it the call is refused before it costs anything. |
 | `WEB_MAX_READS_PER_REPLY` | Desktop IDE server and portal (not the coordinator). Page reads one chat reply or bot run may make (integer 0 to 50, default `4`). |
 
@@ -198,6 +201,15 @@ Reputation, abandonment and replica exclusion are keyed on the agent's reward ac
 | `PASSKEY_ORIGIN` | `https://portal.edgecoder.io` | Expected WebAuthn origin. |
 | `PASSKEY_CHALLENGE_TTL_MS` | `300000` | Passkey challenge expiry (ms). |
 | `PORTAL_TRUST_FLY_CLIENT_IP` | unset | When `true` and Fly's runtime `FLY_APP_NAME` is set, the rate-limit client IP is read from the `Fly-Client-IP` header that the Fly edge proxy sets ([Fly request headers](https://fly.io/docs/networking/request-headers/)). Otherwise it is the socket address, and `X-Forwarded-*` is never trusted (`trustProxy: false`). **Keep unset until #31.** Until it is set, all portal traffic on Fly shares the proxy's rate-limit bucket. `PORTAL_TRUST_PROXY_HOPS` is gone, because Fastify 5.12 ignores hop counts. |
+| `PORTAL_BOT_SECRETS_KEY` | _(64 hex chars or base64 of 32 bytes)_ | Cloud bots ([docs/cloud-bots.md](https://github.com/codyrs82/Edgecoder/blob/main/docs/cloud-bots.md)): the AES-256-GCM key that seals each bot's GitHub token in the portal database. Unset or malformed: cloud bots work without GitHub, and the page says GitHub isn't set up. Set the same value on every portal instance; changing it makes stored tokens unreadable (owners enter them again). Generate with `openssl rand -hex 32`. |
+| `CLOUD_BOTS_WORKER` | `on` | `off` stops this portal instance from running cloud bots (their worker, scheduler and GitHub poller); the API still queues runs for another instance. |
+| `CLOUD_BOTS_MAX_PER_ACCOUNT` | `20` | Cloud bots one account may have. |
+| `CLOUD_BOTS_MAX_CONCURRENT_PER_ACCOUNT` | `2` | Cloud bot runs one account may have going at once (across portal instances). |
+| `CLOUD_BOTS_WORKER_CONCURRENCY` | `4` | Cloud bot runs one portal instance works on at once. |
+| `CLOUD_BOTS_MAX_TOKENS_PER_CALL` | `4096` | Output tokens a cloud bot's model call may produce. |
+| `CLOUD_BOTS_MAX_OUTPUT_TOKENS_PER_RUN` | `32000` | Output tokens one cloud bot run may produce in all; past it the run stops. |
+| `CLOUD_BOTS_RUN_TIMEOUT_MS` | `600000` | A cloud bot run's wall-clock limit. |
+| `CLOUD_BOTS_GITHUB_POLL_MS` | `180000` | How often a cloud bot with GitHub triggers polls its repository. |
 | `OAUTH_STATE_SECRET` | _(32+ random chars)_ | HMAC key for the browser-bound OAuth state cookie (`__Host-oauth_state`, #88). **Required in production** (at least 32 characters; the portal refuses to start without it). Set the same value on every instance. Outside production, unset means a random key per process. |
 
 ## Bluetooth Local (BLE proxy — Mac IDE mode)
@@ -780,6 +792,7 @@ These are not service configuration, so no schema lists them and the docs test s
 | `VITEST` | portal registry | Set by the test runner. |
 | `CUDA_VISIBLE_DEVICES`, `HIP_VISIBLE_DEVICES`, `EDGECODER_GPU_INDEX`, `OLLAMA_NUM_PARALLEL` | installer (`src/install/`), worker | Written into the service units the installer generates; a worker uses them to pick its GPU. |
 | `OLLAMA_MAX_LOADED_MODELS`, `OLLAMA_KEEP_ALIVE`, `OLLAMA_FLASH_ATTENTION`, `OLLAMA_KV_CACHE_TYPE` | desktop app (`local_compute.rs`), installer (`src/install/services.ts`), worker | Ollama's own settings, written for the `ollama serve` EdgeCoder starts: at most 1 loaded model up to 32 GB of memory and 2 above, `5m` keep-alive (desktop app), flash attention and a `q8_0` KV cache. A value already in the environment wins. The worker serves at most `OLLAMA_MAX_LOADED_MODELS` distinct network models. |
+| `OLLAMA_VULKAN`, `GGML_VK_VISIBLE_DEVICES` | installer (`src/install/hardware.ts`, `src/install/services.ts`), Ollama | Ollama's Vulkan backend for AMD and other non-CUDA GPUs. Set by the host with `--ollama-env OLLAMA_VULKAN=1`; the installer prints that hint when it finds an AMD or Intel GPU without ROCm support. With `OLLAMA_VULKAN=1` and no `GGML_VK_VISIBLE_DEVICES`, the installer fills in each instance's own cards by their Vulkan device numbers. `--ollama-env` values win. |
 | `OLLAMA_MODELS` | Ollama, worker (`src/model/remote-control/ollama-admin.ts`) | Ollama's model directory (the installer sets it in the Ollama unit: `/var/lib/edgecoder/ollama`). The worker reads it, when set in its own environment, to report the free disk space for models and to refuse a remote pull that does not fit; otherwise it looks at `/var/lib/edgecoder/ollama`, then `~/.ollama/models`. |
 | `EDGECODER_INSTALL_TUNING` | installer CLI (`src/install/options.ts`) | Written into each instance's env file: the tuning flags (`--context-window`, `--parallel`, `--keep-alive`) the last `edgecoder-install apply` was given, so a re-run without them (a package upgrade) keeps their values. The agent ignores it. |
 | `EDGECODER_COORDINATOR_URL`, `EDGECODER_PORTAL_URL`, `EDGECODER_MESH_TOKEN`, `EDGECODER_REGISTRATION_TOKEN`, `EDGECODER_ENROLL_TOKEN` | installer CLI (`src/install/options.ts`) | Defaults for the installer's command-line options. |

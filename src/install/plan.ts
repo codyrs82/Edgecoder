@@ -30,6 +30,8 @@ export interface AgentInstance {
   env: Record<string, string>;
   /** The engine serving the model (engine.ts); Ollama when unset. */
   engine?: InstanceEngine;
+  /** --ollama-env: extra environment for this instance's Ollama server (services.ts). */
+  ollamaEnv?: Record<string, string>;
 }
 
 export interface InstallPlan {
@@ -143,8 +145,12 @@ export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvaila
     // Lines the host set in its env file and a re-run keeps (cli.ts keptEnvLines), for this same agent id.
     Object.assign(env, opts.keepEnv?.[index] ?? {});
     if (!env.AGENT_REGISTRATION_TOKEN) warnings.push(`${agentId}: no registration token; enrol this node id in the portal and re-run with --token ${agentId}=<token>`);
-    return { index, agentId, gpu, gpus: group, ollamaPort, model, memoryGb, env, engine };
+    const ollamaEnv = opts.ollamaEnv && Object.keys(opts.ollamaEnv).length ? { ...opts.ollamaEnv } : undefined;
+    return { index, agentId, gpu, gpus: group, ollamaPort, model, memoryGb, env, engine, ...(ollamaEnv ? { ollamaEnv } : {}) };
   });
+  if (instances.length > 1 && opts.ollamaEnv?.GGML_VK_VISIBLE_DEVICES !== undefined) {
+    warnings.push(`--ollama-env GGML_VK_VISIBLE_DEVICES=${opts.ollamaEnv.GGML_VK_VISIBLE_DEVICES} applies to all ${instances.length} instances; drop it and keep OLLAMA_VULKAN=1 to give each instance its own cards' Vulkan devices.`);
+  }
   return { hostname: hw.hostname, platform: hw.platform, sandboxMode, instances, warnings };
 }
 

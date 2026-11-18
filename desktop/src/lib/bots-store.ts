@@ -1,13 +1,27 @@
 // The bots list, shared by the sidebar and the bot page; refreshed every few seconds while the
 // app is open (a local call to :4304), faster while a bot is working.
 import { writable } from "svelte/store";
-import { listBots } from "./api";
+import { listBots, listCloudBots, type CloudBotSummary } from "./api";
 import { stuckText, type Bot } from "./bots";
 import { notify } from "./toast";
 
 export const bots = writable<Bot[]>([]);
 /** The bot whose conversation is open in the chat tab, or null for an ordinary chat. */
 export const activeBotId = writable<string | null>(null);
+/** The account's cloud bots (from the portal; they run on EdgeCoder's servers, not here). */
+export const cloudBots = writable<CloudBotSummary[]>([]);
+/** The cloud bot open in the chat tab, or null. */
+export const activeCloudBotId = writable<string | null>(null);
+
+export async function refreshCloudBots(): Promise<CloudBotSummary[]> {
+  try {
+    const list = await listCloudBots();
+    cloudBots.set(list);
+    return list;
+  } catch {
+    return [];
+  }
+}
 
 let timer: ReturnType<typeof setTimeout> | undefined;
 let polling = 0;
@@ -43,8 +57,8 @@ export async function refreshBots(): Promise<Bot[]> {
 export function pollBots(): () => void {
   polling++;
   const loop = async () => {
-    const list = await refreshBots();
-    const busy = list.some((b) => b.status === "running" || b.status === "needs_approval");
+    const [list, cloud] = await Promise.all([refreshBots(), refreshCloudBots()]);
+    const busy = list.some((b) => b.status === "running" || b.status === "needs_approval") || cloud.some((b) => b.status === "running");
     if (polling > 0) timer = setTimeout(loop, busy ? 2_000 : 8_000);
   };
   void loop();

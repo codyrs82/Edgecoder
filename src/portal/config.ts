@@ -98,6 +98,16 @@ export const portalConfigSchema = z.object({
    * balance, pending payouts or activity (src/portal/account-admin.ts). Unset: off.
    */
   PORTAL_PURGE_UNVERIFIED_AFTER_DAYS: envInt(undefined, { min: 1, max: 3650 }),
+  // Cloud bots (docs/cloud-bots.md). The key seals their GitHub tokens (AES-256-GCM); unset: GitHub off for them.
+  PORTAL_BOT_SECRETS_KEY: optStr,
+  CLOUD_BOTS_WORKER: envEnum(["on", "off"]).default("on"),
+  CLOUD_BOTS_MAX_PER_ACCOUNT: envInt(20, { min: 1, max: 1000 }),
+  CLOUD_BOTS_MAX_CONCURRENT_PER_ACCOUNT: envInt(2, { min: 1, max: 20 }),
+  CLOUD_BOTS_WORKER_CONCURRENCY: envInt(4, { min: 1, max: 50 }),
+  CLOUD_BOTS_MAX_TOKENS_PER_CALL: envInt(4_096, { min: 256, max: 32_768 }),
+  CLOUD_BOTS_MAX_OUTPUT_TOKENS_PER_RUN: envInt(32_000, { min: 1_000, max: 500_000 }),
+  CLOUD_BOTS_RUN_TIMEOUT_MS: envInt(600_000, { min: 30_000, max: 3_600_000 }),
+  CLOUD_BOTS_GITHUB_POLL_MS: envInt(180_000, { min: 60_000, max: 3_600_000 }),
   // #39: read by chatCapacityOptionsFromEnv (src/portal/chat-capacity.ts); declared here so a bad value stops startup.
   PORTAL_CHAT_CAPACITY_TIMEOUT_MS: envInt(2_000, { min: 100, max: 30_000 }),
   PORTAL_CHAT_CAPACITY_TTL_MS: envInt(15_000, { min: 0, max: 600_000 }),
