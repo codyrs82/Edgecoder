@@ -32,6 +32,40 @@ export function modelShareNote(
   return "Not shared on the network from this machine" + nums + ". Update its agent to run it for you only.";
 }
 
+/**
+ * Under the settings: who chooses the active model and exactly how to change it. Remote control on:
+ * the portal's Use writes the choice to the machine (its model-overrides file, kept through updates;
+ * src/model/remote-control/overrides.ts), and only a later change to the machine's own config of the
+ * model replaces it. A model loaded by hand (`ollama run`) is not the one the agent serves; say so.
+ * Serialised into the page script with toString(), so it stays self-contained.
+ */
+export function modelSourceNote(
+  st: { activeModel?: string; remoteControl?: string; localUi?: boolean; sources?: { model?: string }; loaded?: Array<{ name: string }> },
+  connected: boolean,
+): string {
+  if (!st) return "";
+  const active = st.activeModel || "n/a";
+  const src = st.sources && st.sources.model;
+  const cmd = "sudo edgecoder-install apply --keep-config --model <model>";
+  const canUse = connected && st.remoteControl === "on";
+  const parts: string[] = [];
+  if (src === "remote") {
+    parts.push("Active model " + active + " was chosen here. It is saved on the machine and kept through updates; a later model change on the machine itself (" + (st.localUi ? "its EdgeCoder app" : cmd) + ") replaces it.");
+  } else if (st.localUi) {
+    parts.push("This machine's EdgeCoder app chooses " + active + ". Change it in the app" + (canUse ? ", or press Use next to an installed model here (a later change in the app replaces it)." : "."));
+  } else {
+    const who = src === "env" ? "This machine's own config (OLLAMA_MODEL in /etc/edgecoder/agent-<n>.env) chooses " : "This machine's agent picked ";
+    parts.push(who + active + "." + (canUse
+      ? " To switch from here, press Use next to an installed model (Pull it first if needed): the choice is saved on the machine and kept through updates. Or on the machine run: " + cmd
+      : " Remote control is " + (connected ? "off on this machine" : "unavailable while it is offline") + ", so change it on the machine: " + cmd));
+  }
+  const others = (st.loaded || []).map(function (l) { return l.name; }).filter(function (n) { return n && n !== st.activeModel && n.replace(/:latest$/, "") !== String(st.activeModel || "").replace(/:latest$/, ""); });
+  if (others.length) {
+    parts.push("Also loaded in Ollama: " + others.join(", ") + " (for example by ollama run on the machine). Network work runs on the active model, " + active + "; " + (canUse ? "press Use on " + others[0] + " to serve it instead." : "to serve " + others[0] + ", run on the machine: sudo edgecoder-install apply --keep-config --model " + others[0]));
+  }
+  return parts.join(" ");
+}
+
 export function machinesSectionHtml(): string {
   return `
       <div class="set-group" id="machinesGroup">Your machines' models</div>
@@ -40,7 +74,7 @@ export function machinesSectionHtml(): string {
           <div class="set-text">
             <div class="set-desc">Choose and manage the model each of your machines serves, including headless Linux hosts.
             Commands go only to machines enrolled to your account, signed by the coordinator the machine trusts.
-            A machine's own settings (its env file, or the desktop app) win over a change made here.
+            A change made here is saved on the machine and kept through updates; a later change to the same setting on the machine itself (re-running the installer with it, or the desktop app) replaces it.
             Hosts can turn this off (<code>AGENT_REMOTE_CONTROL=off</code>) or limit the models (<code>AGENT_MODEL_ALLOWLIST</code>).</div>
           </div>
           <div class="set-control"><button id="machinesReloadBtn">Reload</button></div>
@@ -54,6 +88,7 @@ export function machinesPageScript(): string {
     /* ── Machines: remote model control ── */
     let machinesData = { machines: [], catalog: [] };
     ${modelShareNote.toString()}
+    ${modelSourceNote.toString()}
     let machinesTimer = null;
     function fmtBytes(n) {
       if (n === null || n === undefined || !isFinite(Number(n))) return "n/a";
@@ -64,7 +99,7 @@ export function machinesPageScript(): string {
       return v + " B";
     }
     function attr(v) { return encodeURIComponent(String(v === undefined || v === null ? "" : v)).replace(/'/g, "%27"); }
-    function srcLabel(s) { return s === "remote" ? "set here" : s === "env" ? "host config" : "auto"; }
+    function srcLabel(s) { return s === "remote" ? "set here" : s === "env" ? "this machine's config" : "auto"; }
     function pendingCommand(m) { return (m.audit || []).some((e) => ["sent", "accepted", "progress"].indexOf(e.status) >= 0); }
     function statusTone(s) { return s === "done" ? "ok" : s === "refused" || s === "failed" || s === "undelivered" || s === "expired" ? "danger" : "info"; }
     function renderMachine(m) {
@@ -118,6 +153,7 @@ export function machinesPageScript(): string {
         "<button class='mcBtn primary' data-action='set_settings' data-agent='" + id + "'" + dis + ">Apply</button> " +
         "<button class='mcBtn' data-action='restart_model' data-agent='" + id + "'" + dis + ">Reload model</button> " +
         "<button class='mcBtn' data-action='refresh' data-agent='" + id + "'" + (m.connected ? "" : " disabled") + ">Refresh</button></div>" +
+        "<div class='muted'>" + escapeHtml(modelSourceNote(st, m.connected)) + "</div>" +
         "<div class='muted'>Active model: " + escapeHtml(st.activeModel || "n/a") + " (" + srcLabel(src.model) + "). Context " + Number(b.contextWindow.min) + "-" + Number(b.contextWindow.max) +
         " tokens, slots " + Number(b.parallel.min) + "-" + Number(b.parallel.max) + ", keep-alive -1 (never unload), 0 or up to 24h." +
         (st.ollamaNumParallel ? " Ollama runs " + Number(st.ollamaNumParallel) + " calls at once." : "") + "</div>";

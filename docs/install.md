@@ -152,6 +152,36 @@ first card's model with the pool's summed VRAM and a `count`. The installer does
 `AGENT_GPU_*`: those override detection inside containers, and an overridden profile re-proves its
 tier every session.
 
+### AMD and Intel GPUs without ROCm (Vulkan)
+
+Cards that ROCm does not support (for example the RX 5700 XT, `gfx1010`), or hosts without the ROCm
+tools, are still found: from sysfs (`/sys/class/drm/card*/device/{vendor,mem_info_vram_total}`),
+with the ROCm target from the KFD topology and the Vulkan device numbers from
+`vulkaninfo --summary` when it is installed. `edgecoder-install detect`, `plan` and `apply` then
+print the flags that run Ollama on those cards through Vulkan, for example:
+
+```bash
+sudo edgecoder-install apply --keep-config --ollama-env OLLAMA_VULKAN=1 --ollama-env GGML_VK_VISIBLE_DEVICES=1,2,3,4
+```
+
+`--ollama-env KEY=VALUE` (repeatable) is written into every instance's Ollama unit and recorded in
+`EDGECODER_INSTALL_ARGS`, so every later run, `update` and package upgrade keeps it; `KEY=` removes
+one. With `OLLAMA_VULKAN=1` and no `GGML_VK_VISIBLE_DEVICES`, each instance gets its own cards'
+Vulkan device numbers.
+
+The agent claims a GPU class for such a card only once the GPU is confirmed: Ollama's `/api/ps`
+shows the served model (or the largest loaded one) at least 90% in VRAM, or, with nothing loaded,
+the agent's own GPU benchmark clears the GPU class floor. Until then (or when the model runs
+mostly on the CPU) it registers as CPU, and the coordinator's benchmark challenge still decides the
+tier above a class's base ([hardware verification](../src/swarm/hardware-verification.ts)).
+NVIDIA, ROCm-supported AMD and Apple silicon are claimed as detected, as before.
+
+**Your own settings survive updates.** `apply` and `update` rewrite
+`/etc/systemd/system/edgecoder-ollama-<n>.service` but never touch the files in its drop-in
+directory, `/etc/systemd/system/edgecoder-ollama-<n>.service.d/` (the only one they manage there is
+`vllm-switch.conf`, for `--engine vllm`). Put custom `Environment=` lines in a drop-in such as
+`override.conf` (`sudo systemctl edit edgecoder-ollama-0`); a drop-in wins over the unit's own lines.
+
 ### vLLM instead of Ollama on a GPU server
 
 The installer sets every instance up with Ollama. On a datacenter GPU host whose model slots are
@@ -429,6 +459,7 @@ sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" bash install.sh --mesh-token "$MESH"
 | `--model TAG` | Ollama model for every instance (default: the strongest that fits each instance's VRAM, see the table below; on a Mac or CPU host the recommended model for its memory). |
 | `--context-window N` | Context window (tokens, 2048 to 131072) every network call is served with: `AGENT_CONTEXT_WINDOW`. Default: sized by memory and model. |
 | `--parallel N` | Parallel model calls per instance, 1 to 16: the agent's `AGENT_PARALLEL_INFERENCE` and the instance's Ollama `OLLAMA_NUM_PARALLEL`. Default: sized by VRAM and model. |
+| `--ollama-env KEY=VALUE` | Extra environment for every instance's Ollama server; repeatable (for example `OLLAMA_VULKAN=1` for AMD cards ROCm does not support). Recorded in `EDGECODER_INSTALL_ARGS` and kept by later runs and updates; `KEY=` removes one. Systemd drop-ins in `edgecoder-ollama-<n>.service.d/` also survive updates and win over these. |
 | `--keep-alive DUR` | How long Ollama keeps the model loaded after a call: a duration (`30m`, `1h30m`), seconds, or `-1` to never unload. Written as the agent's `AGENT_MODEL_KEEP_ALIVE` and the instance's Ollama `OLLAMA_KEEP_ALIVE`. Default `30m`. |
 | `--engine ollama\|vllm\|mlx` | Engine that serves each instance's model ([inference engines](inference-engines.md)). `vllm` (Linux, NVIDIA): `edgecoder-vllm@<n>` serves it and the instance's Ollama stays off. `mlx` (Apple silicon): you run `mlx_lm.server`. Default: every instance keeps the engine it runs now (Ollama on a first install), so re-runs and upgrades never switch engines. |
 | `--vllm-model ORG/REPO` | vLLM: the Hugging Face id it serves (`VLLM_MODEL`). Implies `--engine vllm`. Default: the value already set, else `VLLM_MODEL_ID` from `vllm-<n>.env`. |
@@ -499,6 +530,9 @@ directory, mode 0600) and are layered over the env file at startup. Each entry r
 it replaced; if that value later changes (you edit the env file, or re-run the installer with
 `--model`, `--context-window`, `--parallel` or `--keep-alive`), **the local value wins** and the
 remote one is dropped. Delete the file and restart the agent to return to the env file alone.
+An `update` (`apply --keep-config`) keeps the env file's model, so a model chosen in the portal stays
+in force through updates. A model loaded by hand (`ollama run`) is not the agent's model: press
+**Use** on it in the portal, or run `sudo edgecoder-install apply --keep-config --model <tag>`.
 
 **Host controls** (in `agent-N.env`):
 
