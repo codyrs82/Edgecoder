@@ -16,7 +16,7 @@ describe("ownMachineBasis", () => {
   });
 
   it("a signed agent linked to the billed account may claim it (the desktop's local model)", () => {
-    expect(ownMachineBasis({ accountId: "acct-u1", via: "agent", agentId: "a1", ownerAccountId: "acct-u1" }, true)).toEqual({ ownMachine: true });
+    expect(ownMachineBasis({ accountId: "acct-u1", via: "agent", agentId: "a1", ownerAccountId: "acct-u1" }, true)).toEqual({ ownMachine: true, agentId: "a1" });
   });
 
   it("an agent from another account, or one linked to no account, can't claim free", () => {

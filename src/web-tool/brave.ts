@@ -41,12 +41,26 @@ export async function braveSearch(query: string, count: number, opts: { apiKey: 
   });
   if (!res.ok) throw new SearchError(res.status === 429 ? "The search service is busy; try again shortly." : `The search service answered HTTP ${res.status}.`, res.status);
   const body = (await res.json()) as { web?: { results?: Array<{ title?: unknown; url?: unknown; description?: unknown }> } };
+  return cleanResults((body.web?.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.description })), n);
+}
+
+/** Longest URL a search result may carry (longer ones are dropped, not cut). */
+export const RESULT_URL_MAX_CHARS = 2_000;
+
+/**
+ * Search results from any backend (Brave, a host's own SearXNG, an agent's report of one) as the
+ * same untrusted, capped shape: plain text (tags and entities gone, whitespace collapsed), title 300
+ * and snippet 600 characters at most, http(s) URLs only, at most `n` (1–8) results.
+ */
+export function cleanResults(items: ReadonlyArray<{ title?: unknown; url?: unknown; snippet?: unknown }>, n: number): SearchResult[] {
+  const max = Math.max(1, Math.min(SEARCH_MAX_COUNT, Math.floor(n) || 5));
   const out: SearchResult[] = [];
-  for (const r of body.web?.results ?? []) {
-    const link = String(r.url ?? "");
-    if (!/^https?:\/\//i.test(link)) continue;
-    out.push({ title: plain(r.title).slice(0, 300) || link, url: link, snippet: plain(r.description).slice(0, 600) });
-    if (out.length >= n) break;
+  for (const r of Array.isArray(items) ? items : []) {
+    if (!r || typeof r !== "object") continue;
+    const link = typeof r.url === "string" ? r.url.trim() : "";
+    if (!/^https?:\/\/[^\s]+$/i.test(link) || link.length > RESULT_URL_MAX_CHARS) continue;
+    out.push({ title: plain(r.title).slice(0, 300) || link, url: link, snippet: plain(r.snippet).slice(0, 600) });
+    if (out.length >= max) break;
   }
   return out;
 }

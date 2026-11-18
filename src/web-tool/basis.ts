@@ -17,7 +17,8 @@ import type { FreeWebCount, WebCallBasis } from "./service.js";
 export function ownMachineBasis(caller: CallerAccount, claimed: boolean | undefined): WebCallBasis {
   if (claimed !== true) return {};
   if (caller.via === "portal") return { ownMachine: true };
-  return caller.ownerAccountId !== null && caller.ownerAccountId === caller.accountId ? { ownMachine: true } : {};
+  // Its own machine is asked first for local web (local-web.ts); the account check is the same either way.
+  return caller.ownerAccountId !== null && caller.ownerAccountId === caller.accountId ? { ownMachine: true, agentId: caller.agentId } : {};
 }
 
 /**

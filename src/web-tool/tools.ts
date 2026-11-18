@@ -460,6 +460,8 @@ export interface WebAvailability {
   offer: boolean;
   /** The next search is free (own machine, today's free calls left). */
   free?: boolean;
+  /** Searched on your own machine (its SearXNG): free with no daily cap. */
+  local?: boolean;
   /** Why not: not set up, no cSats for a search, the hour's searches used, or the servers unreachable. */
   reason: null | "not_configured" | "needs_csats" | "free_used" | "rate_limited" | "unreachable";
   message?: string;
@@ -495,8 +497,10 @@ export async function webAvailability(call: WebToolCall, key: string, opts: { no
 
 /** A coordinator /v1/tools/web/status answer as whether to offer the tools (free: no cSats needed). */
 export function availabilityOf(json: Record<string, unknown>): WebAvailability {
-  const st = json as { configured?: boolean; canAfford?: boolean; free?: boolean; freeSearchesLeftToday?: number; searchesLeftThisHour?: number; message?: string };
+  const st = json as { configured?: boolean; canAfford?: boolean; free?: boolean; freeSearchesLeftToday?: number; searchesLeftThisHour?: number; message?: string; localSearch?: boolean };
   const free = st.free === true;
+  // Your own machine's SearXNG answers: no cSats, no daily cap, and not EdgeCoder's hourly search limit.
+  if (st.localSearch === true && st.configured === true) return { offer: true, reason: null, free: true, local: true };
   return st.configured !== true
     ? { offer: false, reason: "not_configured", message: st.message ?? "Web search isn't set up yet" }
     : !free && st.canAfford === false

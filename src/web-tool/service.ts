@@ -20,10 +20,17 @@
  * free calls in all (a cost circuit-breaker), per coordinator. Free calls still count toward the
  * hour's limits. Past a daily cap the call is paid as usual (cSats when the balance allows, else
  * needs_csats). Free calls move no cSats; they are counted (recordFree) for ops visibility only.
+ *
+ * Searched on your own machine (local-web.ts): with the same own-machine basis, a search goes first
+ * to the account's own machine's SearXNG, and a page read to that machine, when one reported it can
+ * (deps.local). Its answer costs nothing, counts toward no daily cap (it cost EdgeCoder nothing) and
+ * works without BRAVE_SEARCH_API_KEY; LOCAL_WEB_PER_HOUR bounds the relaying. When the machine has
+ * nothing (none, down, late, no results), the call takes the path above as if it hadn't been asked.
  */
 
-import { SEARCH_MAX_COUNT, braveSearch, type SearchResult } from "./brave.js";
+import { SEARCH_MAX_COUNT, braveSearch, cleanResults, type SearchResult } from "./brave.js";
 import { fetchPage, PageFetchError, type FetchedPage } from "./fetch-page.js";
+import type { LocalWebCapability } from "./local-web.js";
 
 export const NOT_CONFIGURED_MESSAGE = "Web search isn't set up yet";
 
@@ -49,6 +56,18 @@ export const WEB_TOOL_DEFAULTS = { searchCSats: 0.5, readCSats: 0.2, searchesPer
 /** Why a call may be free: the chat's model runs on the account's own machine (decided by the route, never by a client). */
 export interface WebCallBasis {
   ownMachine?: boolean;
+  /** The calling agent (a signed agent caller): its own machine is asked first for local web. */
+  agentId?: string;
+}
+
+/** Calls relayed to the account's own machines per account per hour (searches and reads together). */
+export const LOCAL_WEB_PER_HOUR = 600;
+
+/** The account's own machines (src/swarm/coordinator/local-web.ts); null: nothing from them. */
+export interface LocalWebBackend {
+  available: (accountId: string, preferAgentId?: string) => Promise<LocalWebCapability>;
+  search: (accountId: string, query: string, count: number, preferAgentId?: string) => Promise<SearchResult[] | null>;
+  read: (accountId: string, url: string, preferAgentId?: string) => Promise<FetchedPage | null>;
 }
 
 /** An account's free calls today (after a free call; for the usage record). */
@@ -68,10 +87,12 @@ export interface WebToolDeps {
   recordFree?: (accountId: string, count: FreeWebCount) => void | Promise<void>;
   search?: (query: string, count: number) => Promise<SearchResult[]>;
   read?: (url: string) => Promise<FetchedPage>;
+  /** Searches and page reads on the account's own machine (own-machine basis only). */
+  local?: LocalWebBackend;
   now?: () => number;
 }
 
-export type WebToolResult<T> = { ok: true; value: T; cSats: number; free?: true } | { ok: false; status: number; error: string; message: string };
+export type WebToolResult<T> = { ok: true; value: T; cSats: number; free?: true; local?: true } | { ok: false; status: number; error: string; message: string };
 
 /** Per-account sliding-window counter. */
 export class HourlyLimiter {
@@ -139,6 +160,7 @@ export class WebToolService {
   private readonly searches: HourlyLimiter;
   private readonly reads: HourlyLimiter;
   private readonly free = new DailyCounter();
+  private readonly localCalls = new HourlyLimiter(LOCAL_WEB_PER_HOUR);
   private readonly now: () => number;
 
   constructor(private readonly config: WebToolConfig, private readonly deps: WebToolDeps) {
@@ -169,10 +191,14 @@ export class WebToolService {
     const now = this.now();
     const balance = await this.deps.balance(accountId).catch(() => null);
     const left = basis.ownMachine ? this.freeLeft(accountId, now) : null;
-    const free = !!left && left.searches > 0;
+    // Searched on your own machine: free with no daily cap (the caps below are the fallback's).
+    const local = basis.ownMachine && this.deps.local ? await this.deps.local.available(accountId, basis.agentId).catch(() => null) : null;
+    const localSearch = !!local?.search && this.localCalls.remaining(accountId, now) > 0;
+    const free = localSearch || (!!left && left.searches > 0);
+    const configured = this.configured || localSearch;
     return {
-      configured: this.configured,
-      ...(this.configured ? {} : { message: NOT_CONFIGURED_MESSAGE }),
+      configured,
+      ...(configured ? {} : { message: NOT_CONFIGURED_MESSAGE }),
       searchCSats: this.config.searchCSats,
       readCSats: this.config.readCSats,
       balanceCSats: balance,
@@ -180,6 +206,8 @@ export class WebToolService {
       canAfford: free || balance === null ? true : balance >= this.config.searchCSats,
       free,
       ...(left ? { freeSearchesLeftToday: left.searches, freeReadsLeftToday: left.reads } : {}),
+      // No daily cap while your machine answers; the counts above apply only when it doesn't.
+      ...(localSearch ? { localSearch: true, localRead: local?.read === true } : {}),
       searchesLeftThisHour: this.searches.remaining(accountId, now),
       readsLeftThisHour: this.reads.remaining(accountId, now),
     };
@@ -190,6 +218,12 @@ export class WebToolService {
     if (!q) return { ok: false, status: 400, error: "invalid_query", message: "The search needs a query." };
     if (q.length > 400) return { ok: false, status: 400, error: "invalid_query", message: "The query is too long (400 characters at most)." };
     const n = Math.max(1, Math.min(SEARCH_MAX_COUNT, Math.floor(count) || 5));
+    // Untrusted like Brave's (the host's word): cleaned here too; nothing found counts as no answer.
+    const local = await this.onOwnMachine(accountId, basis, async (l) => {
+      const found = cleanResults((await l.search(accountId, q, n, basis.agentId)) ?? [], n);
+      return found.length ? found : null;
+    });
+    if (local) return { ok: true, value: { query: q, results: local }, cSats: 0, free: true, local: true };
     return this.charged(accountId, "web_search", this.searches, this.config.searchCSats, requestId, basis, async () => {
       const run = this.deps.search ?? ((qq: string, nn: number) => braveSearch(qq, nn, { apiKey: this.config.braveApiKey! }));
       return { query: q, results: await run(q, n) };
@@ -198,7 +232,23 @@ export class WebToolService {
 
   async read(accountId: string, url: string, requestId: string, basis: WebCallBasis = {}): Promise<WebToolResult<FetchedPage>> {
     if (!url.trim()) return { ok: false, status: 400, error: "invalid_url", message: "read_page needs a URL." };
+    const local = await this.onOwnMachine(accountId, basis, (l) => l.read(accountId, url.trim(), basis.agentId));
+    if (local) return { ok: true, value: local, cSats: 0, free: true, local: true };
     return this.charged(accountId, "read_page", this.reads, this.config.readCSats, requestId, basis, () => (this.deps.read ?? ((u: string) => fetchPage(u)))(url));
+  }
+
+  /**
+   * The account's own machine answers (own-machine basis only): its value, or null to take the
+   * usual path. Counts toward LOCAL_WEB_PER_HOUR only when it answered.
+   */
+  private async onOwnMachine<T>(accountId: string, basis: WebCallBasis, run: (l: LocalWebBackend) => Promise<T | null>): Promise<T | null> {
+    const l = this.deps.local;
+    if (!basis.ownMachine || !l) return null;
+    const now = this.now();
+    if (!this.localCalls.take(accountId, now)) return null;
+    const value = await run(l).catch(() => null);
+    if (value === null || value === undefined) this.localCalls.untake(accountId);
+    return value ?? null;
   }
 
   /** One of today's free calls for the account, when its cap and the global cap both have room. */

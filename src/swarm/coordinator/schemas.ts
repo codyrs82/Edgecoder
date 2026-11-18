@@ -4,6 +4,7 @@
 /**
  * Request schemas for agent registration, heartbeat, tasks and results.
  */
+import { localWebCapabilitySchema } from "../../web-tool/local-web.js";
 import { z } from "zod";
 import type { ExecutionPolicy } from "../../common/types.js";
 import {
@@ -195,7 +196,9 @@ export const heartbeatSchema = z.object({
   /** A new self-benchmark (periodic). */
   benchmark: benchmarkReportSchema,
   /** Memory, loaded models and budget (admission control). */
-  memory: memoryTelemetrySchema
+  memory: memoryTelemetrySchema,
+  /** Web calls this machine does itself for its owner's chats (src/web-tool/local-web.ts). Signed heartbeats only; a bad value is ignored. */
+  localWeb: localWebCapabilitySchema.optional().catch(undefined)
 });
 /** Answer to a benchmark challenge handed out in a heartbeat response. */
 export const benchmarkResponseSchema = z.object({

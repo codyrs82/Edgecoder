@@ -69,6 +69,8 @@ export interface InstallOptions {
   ollamaBin?: string;
   /** apply: --auto-update on|off (auto-update.env); unset keeps the host's setting (default on). */
   autoUpdate?: boolean;
+  /** apply: --searxng on|off / --no-searxng (searxng.env); unset keeps the host's setting (default on, Linux). */
+  searxng?: boolean;
   /**
    * --keep-config (what `update` runs): a re-run that keeps the host's configuration from its env
    * files: coordinator and portal URLs, mesh token, the recorded plan flags (EDGECODER_INSTALL_ARGS),
@@ -139,6 +141,7 @@ export const INSTALL_OPTIONS: OptionSpec[] = [
   { flag: "--app-dir", arg: "DIR", description: "Installed app directory containing dist/ (default: where this installer lives)." },
   { flag: "--node-bin", arg: "PATH", description: "Node binary for the services (default: the one running the installer)." },
   { flag: "--ollama-bin", arg: "PATH", description: "Ollama binary (default: found on PATH or the platform install location)." },
+  { flag: "--searxng", arg: "on|off", description: "Free web search for your own chats from this machine: a local SearXNG on 127.0.0.1 (Linux; default on). --no-searxng is --searxng off. Kept in /etc/edgecoder/searxng.env, so later runs and updates keep it." },
   { flag: "--auto-update", arg: "on|off", description: "Scheduled updates to new signed releases (Linux, macOS; default on). Kept in /etc/edgecoder/auto-update.env, so later runs keep it." },
   { flag: "--keep-config", description: "Re-run with this host's configuration from its env files (URLs, mesh token, layout and model flags, models); what update runs." },
   { flag: "--check", description: "update: only report whether a newer release exists." },
@@ -237,6 +240,8 @@ export function parseInstallArgs(argv: string[], env: NodeJS.ProcessEnv = {}): I
       case "--node-bin": o.nodeBin = val(); break;
       case "--ollama-bin": o.ollamaBin = val(); break;
       case "--auto-update": { const v = val(); if (v !== "on" && v !== "off") throw new Error("--auto-update must be on or off"); o.autoUpdate = v === "on"; break; }
+      case "--searxng": { const v = val(); if (v !== "on" && v !== "off") throw new Error("--searxng must be on or off"); o.searxng = v === "on"; break; }
+      case "--no-searxng": o.searxng = false; break;
       case "--keep-config": o.keepConfig = true; break;
       case "--check": o.check = true; break;
       case "--scheduled": o.scheduled = true; break;
