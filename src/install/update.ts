@@ -46,6 +46,12 @@ const POLL_MS = 10_000;
 const STATUS_FRESH_MS = 2 * 60_000;
 
 // ───────────────────────────── versions ─────────────────────────────
+/**
+ * Largest agent tarball the updater downloads (2 GiB). Plain arithmetic, not `2 << 30`: JavaScript
+ * shifts are 32-bit signed, so `2 << 30` is -2147483648 and every download was "too large" (1.2.2).
+ */
+export const MAX_TARBALL_BYTES = 2 * 1024 ** 3;
+
 const TAG_RE = /^agent-v(\d+)\.(\d+)\.(\d+)$/;
 
 /** [major, minor, patch] of a release tag (agent-v1.2.3) or version (1.2.3); null for anything else (prereleases included). */
@@ -390,7 +396,7 @@ export async function runUpdate(opts: UpdateOptions, p: UpdatePaths, deps: Updat
     try {
       const sums = await deps.fetchBytes(`${releaseBase}/SHA256SUMS`, 64 << 10);
       const sig = (await deps.fetchBytes(`${releaseBase}/SHA256SUMS.minisig`, 4 << 10)).toString("utf8");
-      await deps.fetchToFile(`${releaseBase}/${asset}`, join(stage, asset), 2 << 30);
+      await deps.fetchToFile(`${releaseBase}/${asset}`, join(stage, asset), MAX_TARBALL_BYTES);
       verified = verifyRelease(opts.pubkey ?? RELEASE_PUBKEY, sums, sig, join(stage, asset), latest);
     } catch (e) {
       return save({ ...base, result: "failed", message: `download of ${latest} failed: ${(e as Error).message}`, code: 1 });
