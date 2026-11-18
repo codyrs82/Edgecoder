@@ -74,7 +74,7 @@ import { FrontierKeyError, FrontierKeyStore } from "../../inference-api/frontier
 import { FrontierSpend } from "../../inference-api/frontier-usage.js";
 import { frontierContextWindow, isFrontierModelId } from "../../inference-api/frontier-models.js";
 import { request as undiciRequest } from "undici";
-import { FREE_USED_NOTE, WEB_SYSTEM_NOTE, WebToolSession, forgetWebAvailability, isWebTool, webAvailability, webReplyLimitsFromEnv, webStatusReason, webToolSchemas, type WebToolCall } from "../../web-tool/tools.js";
+import { FREE_USED_NOTE, webSystemNote, webGrounding, WebToolSession, forgetWebAvailability, isWebTool, webAvailability, webReplyLimitsFromEnv, webStatusReason, webToolSchemas, type WebToolCall } from "../../web-tool/tools.js";
 import { modelCallsTools } from "../../web-tool/model-support.js";
 
 // Forked by the agent: exit with it, so a restarted agent's provider can take the port.
@@ -1477,8 +1477,10 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
     chat: isFrontierModelId(chatModel)
       ? frontierChatFn(chatModel, { sessionKey: `chat:${turnId}` }, sendEvent, abort.signal)
       : chatFnFor(body.compute, chatModel, ollamaHost, sendEvent, abort.signal, "EdgeCoder chat", body.compute?.target === "auto" ? { sessionKey: `chat:${turnId}` } : undefined),
-    systemPrompt: (format) => [promptCtx ? buildIdeAgentSystemPrompt(promptCtx, projectRoot, projectRules, format) : "", web ? WEB_SYSTEM_NOTE : ""].filter(Boolean).join("\n\n"),
+    systemPrompt: (format) => [promptCtx ? buildIdeAgentSystemPrompt(promptCtx, projectRoot, projectRules, format) : "", web ? webSystemNote() : ""].filter(Boolean).join("\n\n"),
     messages,
+    // Web grounding: a question that needs fresh facts is searched once before the first turn (not in Manual, where web calls ask).
+    ...(web ? webGrounding(web, messages, { skip: chatMode === "ask" }) : {}),
     sendEvent,
     isCancelled: () => clientDisconnected,
     tools,
@@ -1592,8 +1594,9 @@ app.post("/v1/ide/web-chat", async (req, reply) => {
     chat: isFrontierModelId(chatModel)
       ? frontierChatFn(chatModel, { sessionKey: `chat:${turnId}` }, sendEvent, abort.signal)
       : chatFnFor(body.compute, chatModel, ollamaHost, sendEvent, abort.signal, "EdgeCoder chat", body.compute?.target === "auto" ? { sessionKey: `chat:${turnId}` } : undefined),
-    systemPrompt: () => `${buildChatSystemPrompt(promptCtx)}\n\n${WEB_SYSTEM_NOTE}`,
+    systemPrompt: () => `${buildChatSystemPrompt(promptCtx)}\n\n${webSystemNote()}`,
     messages: body.messages,
+    ...webGrounding(web, body.messages),
     sendEvent,
     isCancelled: () => clientDisconnected,
     tools: webToolSchemas(),

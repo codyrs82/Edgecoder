@@ -18,7 +18,7 @@ import type { Served } from "../../common/served.js";
 import type { ReplyUsage } from "../reply-usage.js";
 import { backendChat, runAgentLoop, makeToolRunner } from "../../apps/ide/agent-loop.js";
 import type { IdeStreamEvent } from "../../apps/ide/tool-types.js";
-import { FREE_USED_NOTE, WEB_SYSTEM_NOTE, WebToolSession, citedSources, forgetWebAvailability, isWebTool, sourcesMarkdown, webAvailability, webFooter, webReplyLimitsFromEnv, webStatusReason, webToolSchemas, type WebToolCall } from "../../web-tool/tools.js";
+import { FREE_USED_NOTE, webSystemNote, webGrounding, WebToolSession, citedSources, forgetWebAvailability, isWebTool, sourcesMarkdown, webAvailability, webFooter, webReplyLimitsFromEnv, webStatusReason, webToolSchemas, type WebToolCall } from "../../web-tool/tools.js";
 import { modelCallsTools } from "../../web-tool/model-support.js";
 import { portalCoordinatorTransport } from "./compute.js";
 
@@ -630,7 +630,7 @@ export function registerChatApiRoutes(
     // What the agent loop did (portal_web_loop): model turns, the tools it called (names only),
     // whether the model ever answered with a tool call, and for the first model call whether the
     // tool definitions went with it and how it ended.
-    const loop = { turns: 0, toolCalls: [] as string[], modelReturnedToolCall: false, first: null as null | { toolsSent: number; toolCallsReturned: number; finishReason: string | null } };
+    const loop: { turns: number; toolCalls: string[]; modelReturnedToolCall: boolean; grounded?: boolean; first: null | { toolsSent: number; toolCallsReturned: number; finishReason: string | null } } = { turns: 0, toolCalls: [] as string[], modelReturnedToolCall: false, first: null as null | { toolsSent: number; toolCallsReturned: number; finishReason: string | null } };
     const chatFn = backendChat(
       async function* (r, signal) {
         loop.turns++;
@@ -647,12 +647,17 @@ export function registerChatApiRoutes(
       (cSats) => sendEvent({ type: "usage", cSats, where: computeLabel(compute) }),
       ac.signal,
     );
+    // Grounding (docs/web-tool.md): a question that needs fresh facts is searched once by the server
+    // before the model's first turn (same web.run: same billing, caps and per-reply limits).
+    const grounding = webGrounding(web, messages);
+    Object.assign(loop, { grounded: Boolean(grounding.prefetch) });
     out.status("Thinking...");
     try {
       await runAgentLoop({
         chat: chatFn,
-        systemPrompt: () => WEB_SYSTEM_NOTE,
+        systemPrompt: () => webSystemNote(),
         messages,
+        ...grounding,
         sendEvent,
         isCancelled: () => ac.signal.aborted,
         tools: webToolSchemas(),
