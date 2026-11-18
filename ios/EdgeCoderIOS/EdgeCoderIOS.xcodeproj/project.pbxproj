@@ -32,6 +32,7 @@
 		304BE5F46F48440A0BF91BF9 /* BLEMeshManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07E9D5632E5680FDA1EC2D3D /* BLEMeshManager.swift */; };
 		30E39AA09D805BAEF9FBA665 /* BotsModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08534AB8A861F8CE3582EC0C /* BotsModels.swift */; };
 		3381CB6037EDCAA1DBB3F53A /* PortalChatClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EE04C29E6C1D9B6FBF14683 /* PortalChatClient.swift */; };
+		3EA9F76223C86A11F929CB8D /* CloudBotsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B79575DD8A20DD4FF2BC73C3 /* CloudBotsTests.swift */; };
 		3F322F9325ABFE8CB4F165DA /* ServedFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79C4FFDBBCE508D92678FA57 /* ServedFormatter.swift */; };
 		408B7BBCEA51523CAF6D6831 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 30D16E261FFA98D17D4DACEA /* LaunchScreen.storyboard */; };
 		4245630B297660739989B403 /* NetworkFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F7B1A41CDD28D58727A081E /* NetworkFixture.swift */; };
@@ -150,6 +151,7 @@
 		AEB62ACFC126AF64173557A3 /* PurchasePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PurchasePolicy.swift; sourceTree = "<group>"; };
 		B0BDF006DD7B1DA4499F2BAD /* PasskeyProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasskeyProtocol.swift; sourceTree = "<group>"; };
 		B10DAC1310BC95E99485B1D2 /* OfflineLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineLedger.swift; sourceTree = "<group>"; };
+		B79575DD8A20DD4FF2BC73C3 /* CloudBotsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudBotsTests.swift; sourceTree = "<group>"; };
 		B7C2233E12CF05A6453ECFE4 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
 		BE8E161A0ADC90132E5B3989 /* EdgeCoderIOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = EdgeCoderIOS.entitlements; sourceTree = "<group>"; };
 		C3A4C3E5BF20EF662B00D426 /* BLEConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLEConstants.swift; sourceTree = "<group>"; };
@@ -346,6 +348,7 @@
 				9DF4D40DF7A0CFB63D97BE0B /* BLETxV3VectorsTests.swift */,
 				A736286E7E0FBDBE10BEC4AB /* BuyLimitsTests.swift */,
 				9F1EE875627693EE65332B98 /* ChatFailuresTests.swift */,
+				B79575DD8A20DD4FF2BC73C3 /* CloudBotsTests.swift */,
 				9580DF0E7DDEB1B61CF0A59F /* MachinesTests.swift */,
 				408BFDE15434F4E2581718CC /* NetworkWorldTests.swift */,
 				98D672F44064782C1EF76D7E /* PasskeyProtocolTests.swift */,
@@ -494,6 +497,7 @@
 				9A40EE412DF1CFA36AF49A19 /* ChatFailures.swift in Sources */,
 				D3640D6F8B0D0D9C33FDB90B /* ChatFailuresTests.swift in Sources */,
 				BDFB375DD7A094B1619D8064 /* ChatModels.swift in Sources */,
+				3EA9F76223C86A11F929CB8D /* CloudBotsTests.swift in Sources */,
 				920D8DFC385D9F22CB53742D /* MachinesModels.swift in Sources */,
 				AA145690549577ED9B597A8B /* MachinesTests.swift in Sources */,
 				14CAA0AE958AD1BB645F2BC2 /* Models.swift in Sources */,
@@ -684,7 +688,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 36;
+				CURRENT_PROJECT_VERSION = 37;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -749,7 +753,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 36;
+				CURRENT_PROJECT_VERSION = 37;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
