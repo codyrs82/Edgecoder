@@ -58,6 +58,23 @@ describe("groundingSearch", () => {
     expect(groundingSearch(messages)?.args.query).toBe("What are today's zero day threats?");
   });
 
+  it("a pushier follow-up that names no topic also searches for the previous question", () => {
+    const q = "Tell me about the latest zero day threats over the last 24 hours";
+    for (const followUp of ["You should be able to search the Internet for this information", "Can you use the web to find that answer?", "Try searching online again please"]) {
+      const messages = [{ role: "user", content: q }, { role: "assistant", content: "I cannot provide real-time updates…" }, { role: "user", content: followUp }];
+      expect(groundingSearch(messages)?.args.query).toBe(q);
+    }
+  });
+
+  it("a coding question about searching isn't a web search", () => {
+    expect(needsFreshInfo("How do I do binary searching for a value in a sorted Python list?")).toBe(false);
+  });
+
+  it("a follow-up that names its own topic searches for it", () => {
+    const messages = [{ role: "user", content: "What are today's zero day threats?" }, { role: "assistant", content: "…" }, { role: "user", content: "Search the web for the latest Chrome release" }];
+    expect(groundingSearch(messages)?.args.query).toBe("Search the web for the latest Chrome release");
+  });
+
   it("caps the query at 200 characters and is null for a coding question", () => {
     expect(groundingSearch([{ role: "user", content: `latest news ${"x".repeat(400)}` }])!.args.query.length).toBeLessThanOrEqual(200);
     expect(groundingSearch([{ role: "user", content: "How do I reverse a linked list in Python?" }])).toBeNull();
