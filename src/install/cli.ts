@@ -6,6 +6,8 @@
  * curl/PowerShell bootstraps (docs/install.md). Detects the hardware, plans one agent per GPU
  * (or one per host), writes env files and services, starts them.
  */
+import { randomBytes } from "node:crypto";
+import { applySearxng, removeSearxng, searxngAgentEnv, searxngWanted } from "./searxng.js";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, closeSync, cpSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -553,7 +555,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     return 0;
   }
   if (opts.command === "remove") {
-    const removed = opts.dryRun ? [] : [...removeServices(host, p), ...removeUpdateSchedule(host)];
+    const removed = opts.dryRun ? [] : [...removeServices(host, p), ...removeUpdateSchedule(host), ...removeSearxng(host)];
     console.log(opts.json ? JSON.stringify({ removed }) : `removed ${removed.length} services`);
     return 0;
   }
@@ -676,7 +678,13 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
     console.error("refusing to create services that run code a non-root user can replace");
     return 1;
   }
+  // Local web search (searxng.ts): the agents get SEARXNG_URL while it's on; set up after the services.
+  const searxngOn = searxngWanted(host.platform, opts.searxng, readIfPresent, p.configDir);
+  for (const inst of plan.instances) Object.assign(inst.env, searxngAgentEnv(searxngOn));
   const result = applyPlan(plan, host, p, opts.dryRun);
+  const searxng = applySearxng(host, p, { ...(opts.searxng !== undefined ? { flag: opts.searxng } : {}), dryRun: opts.dryRun, read: readIfPresent, randomHex: () => randomBytes(32).toString("hex") });
+  result.files.push(...searxng.files);
+  result.commands.push(...searxng.commands);
   const schedule = applyUpdateSchedule(host, p, { ...(opts.autoUpdate !== undefined ? { flag: opts.autoUpdate } : {}), releaseInstall: existsSync(resolve(appDir, RELEASE_INFO_FILE)), dryRun: opts.dryRun, insideUpdate: env.EDGECODER_UPDATE_RUN === "1", read: readIfPresent, listDir: listDirOrEmpty });
   result.files.push(...schedule.files);
   result.commands.push(...schedule.commands);
@@ -691,6 +699,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
       for (const line of await enrollmentConfirmation(opts.portalUrl, plan.instances, enrollFailed, get)) console.log(line);
     }
     console.log(schedule.summary);
+    console.log(searxng.summary);
     console.log(hostAgreementLine(opts.portalUrl));
     const missing = plan.instances.filter((i) => !i.env.AGENT_REGISTRATION_TOKEN).map((i) => i.agentId);
     if (missing.length) {

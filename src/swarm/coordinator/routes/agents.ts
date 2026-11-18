@@ -4,6 +4,7 @@
 /**
  * Agent routes: register, heartbeat, benchmark response and diagnostics.
  */
+import { noteLocalWebReport } from "../local-web.js";
 import { z } from "zod";
 import type { SandboxMode } from "../../../common/types.js";
 import { rewardAccountForAgent } from "../../../credits/store.js";
@@ -401,6 +402,8 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       if (existing && cls) orderBook.postAsk(body.agentId, cls, body.askMsatPerCredit > 0 ? body.askMsatPerCredit : undefined, now, askCapabilityOf(body.agentId, existing));
     }
     if (body.memory) noteAgentMemory(body.agentId, body.memory, now);
+    // Local web (src/web-tool/local-web.ts): only a signed heartbeat says what this machine does; every one replaces it.
+    if (verified) noteLocalWebReport(body.agentId, body.localWeb, now);
     if (body.sandboxMode !== undefined) {
       const existing = agentCapabilities.get(body.agentId);
       if (existing) {

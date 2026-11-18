@@ -86,7 +86,7 @@ export const WEB_TOGGLE_SCRIPT = `    // ── Web: automatic by default (the m
       else if (webMode === "off") btn.title = "Web is off for this chat. Click to change.";
       else if (reason === "needs_csats" && !free) btn.title = "${WEB_NEEDS_CSATS}" + prices + ". This chat answers without the web until you top up.";
       else if (reason) btn.title = webState.message || "Web search isn't available right now.";
-      else if (free) btn.title = "Web: Auto. The model searches the web when a question needs fresh information, and cites its sources. Free on your machine" + (typeof webState.freeSearchesLeftToday === "number" ? " (" + webState.freeSearchesLeftToday + " free searches left today)" : "") + ".";
+      else if (free) btn.title = "Web: Auto. The model searches the web when a question needs fresh information, and cites its sources. Free on your machine" + (webState.localSearch === true ? ", searched from your machine (no daily limit)" : typeof webState.freeSearchesLeftToday === "number" ? " (" + webState.freeSearchesLeftToday + " free searches left today)" : "") + ".";
       else btn.title = "Web: Auto. The model searches the web when a question needs fresh information, and cites its sources" + prices + ".";
       var items = document.querySelectorAll("#webMenu [data-web-mode]");
       for (var i = 0; i < items.length; i++) items[i].setAttribute("aria-checked", items[i].getAttribute("data-web-mode") === webMode ? "true" : "false");

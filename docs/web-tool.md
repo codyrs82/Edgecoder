@@ -37,6 +37,11 @@ and **read a page** (`read_page`), and its answer cites the sources it used.
   coordinator); past it the call is paid as usual (cSats when the balance allows; with none the
   chat answers without the web and notes "Today's free web searches on your machine are used up").
   See [Free on your own machine](#free-on-your-own-machine).
+- **Searched on your own machine, no daily limit.** When that machine (or another of yours) is a
+  Linux host set up by the installer, it runs its own SearXNG, and your own chats search there
+  (from your connection, at no cost to anyone): free with **no daily cap**, and pages are read from
+  your machine too. If it's down or finds nothing, the call falls back to the daily allowance
+  above. See [Searches on your own machine](#searches-on-your-own-machine).
 - **Per reply**, at most `WEB_MAX_SEARCHES_PER_REPLY` searches (3) and `WEB_MAX_READS_PER_REPLY`
   page reads (4); past that a call is refused before it reaches EdgeCoder (it costs nothing) and the
   model answers with what it has. A call refused for cSats (402), the hour's limit (429) or setup
@@ -74,14 +79,15 @@ The portal's `portal_web_loop` log line carries `grounded: true` when the server
 
 ## Where it runs
 
-On EdgeCoder's servers, never on a host's machine. The model's tool calls go from the desktop app's
+On EdgeCoder's servers, except for an own-machine chat whose machine has local web (see
+[Searches on your own machine](#searches-on-your-own-machine)). The model's tool calls go from the desktop app's
 IDE server, a bot or the web portal's chat to a coordinator:
 
 | Endpoint (coordinator) | Body | Answer |
 | --- | --- | --- |
-| `POST /v1/tools/web/status` | `{ownMachine?}` | `configured`, prices, `balanceCSats`, `canAfford`, `free` (+ free calls left today with the basis), what's left of the hour |
-| `POST /v1/tools/web/search` | `{query, count≤8, requestId, ownMachine?}` | `{query, results: [{title, url, snippet}], cSats, free?}` |
-| `POST /v1/tools/web/read` | `{url, requestId, ownMachine?}` | `{url, title, text (≤20k chars), truncated, contentType, cSats, free?}` |
+| `POST /v1/tools/web/status` | `{ownMachine?}` | `configured`, prices, `balanceCSats`, `canAfford`, `free` (+ free calls left today with the basis, and `localSearch`/`localRead` when your machine answers), what's left of the hour |
+| `POST /v1/tools/web/search` | `{query, count≤8, requestId, ownMachine?}` | `{query, results: [{title, url, snippet}], cSats, free?, local?}` |
+| `POST /v1/tools/web/read` | `{url, requestId, ownMachine?}` | `{url, title, text (≤20k chars), truncated, contentType, cSats, free?, local?}` |
 
 Callers are account-authenticated: a signed agent (the desktop app reaches it through its local
 forwarder, `/forward/v1/tools/web/*`; the signer's owner is billed) or the portal with its service
@@ -136,6 +142,59 @@ For ops, free calls are counted in `usage_records` (no migration): one record pe
 per coordinator, `kind: "web"`, `placement: "mine"`, `costMsat: 0`, with `webFree: {searches,
 reads}`, rewritten after each free call. `/account/usage` leaves them out of the request list and
 totals and reports them as `webFree`.
+
+## Searches on your own machine
+
+`src/web-tool/local-web.ts`, `searxng.ts`, `src/swarm/coordinator/local-web.ts`,
+`src/install/searxng.ts`.
+
+**The host.** `edgecoder-install apply` (and so every auto-update) sets up SearXNG on Linux hosts:
+a pinned commit (`SEARXNG_COMMIT`), the GitHub archive checked against `SEARXNG_TARBALL_SHA256`
+before it is unpacked, a Python venv with every dependency hash-pinned
+(`scripts/linux/searxng/requirements.lock`, `pip --require-hashes --only-binary=:all:`), and
+`edgecoder-searxng.service` (granian on `127.0.0.1:18888` only, `DynamicUser`, read-only system, the
+root-only `settings.yml` handed over as a systemd credential). Its settings: JSON output on, its own
+generated `secret_key` (kept across runs), no limiter (one local user; the agent and the
+coordinator cap the calls instead), and a few engines that need no keys (DuckDuckGo, Brave's web
+search, Mojeek, Startpage, Wikipedia). The agents get `SEARXNG_URL=http://127.0.0.1:18888`
+(loopback http only; anything else is ignored). `--searxng off` (or `--no-searxng`) writes
+`EDGECODER_SEARXNG=off` to `/etc/edgecoder/searxng.env`, which every later apply and update keeps;
+it stops and removes the unit and drops `SEARXNG_URL`. A failed install doesn't fail the apply;
+the host just uses EdgeCoder's servers. macOS and Windows hosts don't get SearXNG yet; their
+agents still read pages locally.
+
+**The agent** checks its SearXNG's `/healthz` (at most once a minute) and reports
+`localWeb: {search, read}` in its signed heartbeat (`AGENT_LOCAL_WEB=off` reports nothing and does
+nothing).
+
+**A call.** For a call with the own-machine basis (decided as in
+[Free on your own machine](#free-on-your-own-machine); a client still can't claim it), the
+coordinator picks one of the account's machines: verified owner (`agent_ownership`) equal to the
+chat's account, a signed heartbeat with `localWeb` in the last 3 minutes, and a mesh WebSocket that
+proved its key; the calling agent first, else the most recently seen. It sends a `local_web` frame
+signed with its identity key down that socket (the agent checks the pinned key, its own agent id, a
+30-second lifetime and a replay cache, as for `bot_control`). The agent searches its SearXNG, or
+reads the page with `fetchPage` (the same SSRF rules as the server reader: public addresses only,
+pinned connection, ports 80/443, 2 MB, 10 s), and answers on `POST
+/agent-control/agents/:agentId/web/result` (signed). The coordinator takes an answer only for a
+command it sent to that very agent, once, and cleans it again (`cleanResults`: plain text, title
+300 / snippet 600 characters, http(s) only, at most 8; pages to 20,000 characters). It then reaches
+the model like a Brave result, wrapped as untrusted web content.
+
+**Cost and fallback.** An answer from your machine costs nothing, counts toward no daily cap and
+works without `BRAVE_SEARCH_API_KEY`; its response carries `free: true, local: true, cSats: 0`. The
+relaying is capped at `LOCAL_WEB_PER_HOUR` (600) calls per account per coordinator, and each agent
+runs at most 120 per 10 minutes (so the engines don't see a burst from your IP). No machine, a
+refusal, no answer within 9 seconds (15 for a page), or no results: the call goes on as if your
+machine hadn't been asked (free within the daily caps, then paid). So a host that claims SearXNG
+and answers nothing gets nothing it wouldn't have had anyway. `/status` with the basis says
+`localSearch: true` (and `free: true`, `canAfford: true`) while one of your machines can search; the
+apps then show "Free on your machine, searched from your machine (no daily limit)".
+
+Caveats: the machine must be connected to the coordinator the chat's web calls go to (the portal
+pins the coordinator it picked for the chat; another coordinator's machine isn't asked). Search
+engines change their pages and sometimes block scrapers; the engine list and the pinned commit are
+updated with agent releases.
 
 ## read_page safety (`src/web-tool/ssrf.ts`, `fetch-page.ts`)
 

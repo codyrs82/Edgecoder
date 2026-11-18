@@ -91,6 +91,32 @@ describe("POST /v1/tools/web/* on the coordinator", () => {
     expect(plain.json().free).toBe(false);
   });
 
+  test("a heartbeat may report local web; a machine with no verified owner still gets no local search", async () => {
+    const hb = await signedPost("/heartbeat", { agentId: agent.peerId, localWeb: { search: true, read: true } });
+    expect(hb.statusCode).toBe(200);
+    // A malformed report is ignored, not a failed heartbeat (older/newer agents).
+    expect((await signedPost("/heartbeat", { agentId: agent.peerId, localWeb: { search: "yes" } })).statusCode).toBe(200);
+    // Claiming SearXNG gives nothing without ownership: no basis, no local search.
+    const st = await signedPost("/v1/tools/web/status", { ownMachine: true });
+    expect(st.json()).not.toHaveProperty("localSearch");
+    expect(st.json().configured).toBe(false);
+  });
+
+  test("local web results: only the agent itself, only a command this coordinator sent it", async () => {
+    const url = `/agent-control/agents/${encodeURIComponent(agent.peerId)}/web/result`;
+    const result = { commandId: "00000000-0000-4000-8000-000000000000", status: "done", results: [] };
+    const unsigned = await app.inject({ method: "POST", url, remoteAddress: REMOTE, headers: { "content-type": "application/json" }, payload: JSON.stringify(result) });
+    expect(unsigned.statusCode).toBe(401);
+    const unknown = await signedPost(url, result);
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json()).toEqual({ ok: false, error: "unknown_command" });
+    const malformed = await signedPost(url, { ...result, extra: 1 });
+    expect(malformed.statusCode).toBe(400);
+    const other = createPeerKeys("agent-web-tool-other");
+    const forged = await signedPost(`/agent-control/agents/${encodeURIComponent(other.peerId)}/web/result`, result);
+    expect(forged.statusCode).toBe(403);
+  });
+
   test("anyone else is refused", async () => {
     const res = await app.inject({ method: "POST", url: "/v1/tools/web/search", remoteAddress: REMOTE, headers: { "content-type": "application/json" }, payload: JSON.stringify({ query: "x" }) });
     expect(res.statusCode).toBe(401);

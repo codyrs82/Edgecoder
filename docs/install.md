@@ -481,6 +481,7 @@ sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" bash install.sh --mesh-token "$MESH"
 | `--app-dir DIR` | Installed app directory containing `dist/`. |
 | `--node-bin PATH` | Node binary for the services. |
 | `--ollama-bin PATH` | Ollama binary. |
+| `--searxng on\|off`, `--no-searxng` | Local web search for your own chats (Linux; default `on`): SearXNG on `127.0.0.1:18888` (`edgecoder-searxng.service`, pinned and hash-verified), so your own chats search from this machine for free with no daily limit ([docs/web-tool.md](web-tool.md#searches-on-your-own-machine)). Kept in `/etc/edgecoder/searxng.env`, so later runs and updates keep it. |
 | `--auto-update on\|off` | Scheduled updates to new signed releases (Linux, macOS; default `on`). Kept in `/etc/edgecoder/auto-update.env`, so later runs keep it ([Updates](#updates)). |
 | `--keep-config` | Re-run with this host's configuration from its env files: coordinator and portal URLs, mesh token, the recorded layout and model flags (`EDGECODER_INSTALL_ARGS`), each instance's model and `MAX_CONCURRENT_TASKS`. Flags given now still win. `update` runs `apply --from-package --keep-config`. |
 | `--check` | `update` only: report whether a newer release exists, change nothing. |

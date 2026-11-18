@@ -131,6 +131,16 @@ export const workerConfigSchema = z.object({
    */
   AGENT_BOT_RELAY: z.string().trim().regex(/^(on|off|view|1|0|true|false|yes|no)$/i, "on, view or off").optional(),
   /**
+   * Web calls on this machine for its owner's own chats (src/web-tool/local-web.ts): searches on
+   * the local SearXNG (SEARXNG_URL) and page reads from this machine's connection. "off" does none.
+   */
+  AGENT_LOCAL_WEB: z.string().trim().regex(/^(on|off|1|0|true|false|yes|no)$/i, "on or off").optional(),
+  /**
+   * The host's own SearXNG for its owner's web searches, loopback http only (the installer sets
+   * http://127.0.0.1:18888 on Linux; src/install/searxng.ts). Unset: no local search.
+   */
+  SEARXNG_URL: z.string().trim().max(200).optional(),
+  /**
    * Models a remote command (the owner's, or an operator rollout) may pull or select: comma-separated
    * Ollama tags. Unset = the curated catalog; `catalog` in the list adds it back; `none` allows nothing.
    */

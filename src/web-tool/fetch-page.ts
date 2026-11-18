@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 /**
- * read_page's fetch, run on EdgeCoder's servers only (never on a host's machine): the SSRF checks
+ * read_page's fetch, on EdgeCoder's servers (and on the owner's own machine for its own chats, local-web.ts): the SSRF checks
  * of ssrf.ts on the URL and on every redirect, the connection pinned to the address that was
  * checked, 10 seconds and 2 MB at most, and only HTML, text, JSON and (simple) PDF pages.
  */

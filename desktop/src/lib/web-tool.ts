@@ -37,6 +37,8 @@ export interface WebStatus {
   free?: boolean;
   freeSearchesLeftToday?: number;
   freeReadsLeftToday?: number;
+  /** Your machine's own SearXNG answers this chat's searches: free with no daily limit. */
+  localSearch?: boolean;
 }
 
 /** A chat's web: "auto" (the model searches when a question needs fresh information) or "off". */
@@ -67,7 +69,8 @@ export function webIndicatorView(status: WebStatus | null | undefined, mode: Web
   if (status.reason === "needs_csats" && !status.free) return { visible: true, unavailable: false, label: "Web: Auto", note: "needs cSats", title: `${NEEDS_CSATS_NOTE}${prices}. This chat answers without the web until you top up.` };
   if (!status.available) return { visible: true, unavailable: false, label: "Web: Auto", note: "", title: status.message ?? "Web search isn't available right now." };
   if (status.free) {
-    const left = typeof status.freeSearchesLeftToday === "number" ? ` (${status.freeSearchesLeftToday} free searches left today)` : "";
+    // Searched from your own machine (its SearXNG): no daily limit to count down.
+    const left = status.localSearch ? ", searched from your machine (no daily limit)" : typeof status.freeSearchesLeftToday === "number" ? ` (${status.freeSearchesLeftToday} free searches left today)` : "";
     return { visible: true, unavailable: false, label: "Web: Auto", note: "", title: `Web: Auto. The model searches the web when a question needs fresh information, and cites its sources. Free on your machine${left}.` };
   }
   return { visible: true, unavailable: false, label: "Web: Auto", note: "", title: `Web: Auto. The model searches the web when a question needs fresh information, and cites its sources${prices}.` };

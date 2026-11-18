@@ -108,7 +108,9 @@ const AGENT_POST_PATTERNS: readonly RegExp[] = [
   // Remote model control: the agent's own state and command results (routes/model-control.ts).
   /^\/agent-control\/agents\/[^/]+\/report$/,
   // Bots on the web: the agent's bot snapshot and command results (routes/bot-relay.ts).
-  /^\/agent-control\/agents\/[^/]+\/bots\/report$/
+  /^\/agent-control\/agents\/[^/]+\/bots\/report$/,
+  // Local web on the owner's machine: the agent's answer to a local_web frame (routes/web-tools.ts).
+  /^\/agent-control\/agents\/[^/]+\/web\/result$/
 ];
 /** GET routes a signed agent may call; each scopes what it returns to the signer (see the route). */
 const AGENT_GET_PATTERNS: readonly RegExp[] = [

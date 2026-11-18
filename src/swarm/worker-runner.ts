@@ -73,6 +73,9 @@ import { remoteControlEnabled, resolveAllowlist } from "../model/remote-control/
 import { MODEL_CONTROL_FRAME_TYPE } from "../model/remote-control/protocol.js";
 import { BOT_CONTROL_FRAME_TYPE, botRelayMode } from "../common/bot-relay.js";
 import { BotRelayAgent, httpProviderClient } from "./bot-relay-agent.js";
+import { LOCAL_WEB_FRAME_TYPE, LocalWebAgent, localWebEnabled } from "../web-tool/local-web.js";
+import { searxngBaseUrl, searxngHealthy, searxngSearch } from "../web-tool/searxng.js";
+import { fetchPage } from "../web-tool/fetch-page.js";
 
 // #15: validated once; a malformed value exits here with a message naming the variable.
 const W = loadConfigOrExit("worker", workerConfigSchema);
@@ -805,6 +808,21 @@ const botRelay: BotRelayAgent | null = LOCAL_FORWARD_PORT > 0
       log: (m) => console.log(`[agent:${AGENT_ID}] ${m}`)
     })
   : null;
+// Web calls on this machine for its owner's own chats (src/web-tool/local-web.ts): searches on the
+// host's SearXNG (SEARXNG_URL, loopback only) and page reads, asked by our pinned coordinator.
+const localWeb = new LocalWebAgent({
+  agentId: AGENT_ID,
+  searxngUrl: searxngBaseUrl(W.SEARXNG_URL),
+  enabled: localWebEnabled(W.AGENT_LOCAL_WEB),
+  search: (base, query, count) => searxngSearch(base, query, count),
+  read: (url) => fetchPage(url),
+  healthy: (base) => searxngHealthy(base),
+  report: async (result) => {
+    if (!registeredWithUrl) throw new Error("not registered yet");
+    await post(`/agent-control/agents/${encodeURIComponent(AGENT_ID)}/web/result`, result, { retries: 0, timeoutMs: 10_000, signed: true });
+  },
+  log: (m) => console.log(`[agent:${AGENT_ID}] ${m}`)
+});
 const MODEL_STATE_REPORT_MS = 10 * 60_000;
 let lastModelStateReportMs = 0;
 /** Sends this machine's model state to the coordinator (the portal's view). */
@@ -1297,6 +1315,17 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
             verified = null;
           }
           if (botRelay) void botRelay.handleFrame(message, verified);
+          return;
+        }
+        // Local web for the owner's chat: the same checks (pinned coordinator key, target, lifetime, replay).
+        if (message && typeof message === "object" && message.type === LOCAL_WEB_FRAME_TYPE) {
+          let verified: { peerId: string; publicKeyPem: string } | null = null;
+          try {
+            verified = coordinator.url === coordinatorUrl ? coordinator.requireVerifiedIdentity().identity : null;
+          } catch {
+            verified = null;
+          }
+          void localWeb.handleFrame(message, verified);
           return;
         }
         const peer = getMeshPeer();
@@ -1797,7 +1826,8 @@ async function loop(): Promise<void> {
           // The model already in memory, so the coordinator sends calls for it here first (affinity).
           const hbActive = currentProvider === "ollama-local" ? hostMemory.activeModel() : undefined;
           const hbMemory = hostMemory.telemetry();
-          const hbBody = { agentId: AGENT_ID, powerTelemetry, sandboxMode: SANDBOX_MODE, ...(hbModels.length ? { installedModels: hbModels } : {}), ...(hbOwnerModels ? { ownerModels: hbOwnerModels } : {}), ...(hbActive && hbModels.includes(hbActive) ? { activeModel: hbActive, activeModelParamSize: paramsB(hbActive) } : {}), ...(hbMemory ? { memory: hbMemory } : {}), ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
+          const hbLocalWeb = await localWeb.capability().catch(() => undefined);
+          const hbBody = { agentId: AGENT_ID, ...(hbLocalWeb ? { localWeb: hbLocalWeb } : {}), powerTelemetry, sandboxMode: SANDBOX_MODE, ...(hbModels.length ? { installedModels: hbModels } : {}), ...(hbOwnerModels ? { ownerModels: hbOwnerModels } : {}), ...(hbActive && hbModels.includes(hbActive) ? { activeModel: hbActive, activeModelParamSize: paramsB(hbActive) } : {}), ...(hbMemory ? { memory: hbMemory } : {}), ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
           hb = (await post("/heartbeat", hbBody, { signed: true })) as HeartbeatReply;
           if ("benchmark" in hbBody) benchmarkUnreported = false;
           try { localStore.recordHeartbeat(coordinator.url, hb.blacklisted ? "blacklisted" : "ok", Date.now() - hbStart); } catch (e) { console.warn(`[db] heartbeat write failed: ${e}`); }

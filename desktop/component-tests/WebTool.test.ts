@@ -175,4 +175,11 @@ describe("free web on your own machine (indicator)", () => {
     expect(webIndicatorView({ ...ready, available: false, reason: "needs_csats", balanceCSats: 0 }, "auto").note).toBe("needs cSats");
     expect(webIndicatorView({ ...ready, available: false, reason: "free_used", message: "Today's free web searches on your machine are used up" }, "auto")).toMatchObject({ note: "", title: "Today's free web searches on your machine are used up" });
   });
+
+  it("searched from your machine (its SearXNG): no daily count, no limit shown", () => {
+    const local: WebStatus = { ...ready, balanceCSats: 0, free: true, freeSearchesLeftToday: 0, localSearch: true };
+    const v = webIndicatorView(local, "auto");
+    expect(v.title).toContain("Free on your machine, searched from your machine (no daily limit).");
+    expect(v.title).not.toContain("left today");
+  });
 });
