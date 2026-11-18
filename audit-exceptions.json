@@ -1,0 +1,11 @@
+{
+  "comment": "High/critical npm advisories CI accepts until they expire. Each needs a reason and an expiry at most 30 days out; see docs/dependency-audit.md.",
+  "exceptions": [
+    {
+      "id": "GHSA-fc5q-39xc-vjpf",
+      "package": "picomatch",
+      "expires": "2026-12-18",
+      "reason": "ReDoS in picomatch with no fixed release yet. Reached only through build and test tooling (vite, tinyglobby, node-gyp, @vitest/coverage-v8), which matches globs written in this repo, not user input."
+    }
+  ]
+}
