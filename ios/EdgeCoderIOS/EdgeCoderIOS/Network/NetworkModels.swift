@@ -395,6 +395,21 @@ enum NetworkGraph {
         max(1, min(portrait ? 2 : 3, coordinators))
     }
 
+    /// Columns of hubs (1 to 3) that draw the map largest in a width x height space: a tall window
+    /// stacks the coordinators, a wide one puts them side by side. Ties go to fewer columns. Three or
+    /// more never go in a single column: the outer hubs' link would run straight through the middle one.
+    static func fitColumns(coordinators: Int, width: Double, height: Double) -> Int {
+        guard coordinators > 1, width > 0, height > 0 else { return 1 }
+        let fewest = coordinators >= 3 ? 2 : 1
+        var best = fewest, bestScale = 0.0
+        for c in fewest...min(3, coordinators) {
+            let rows = Double((coordinators + c - 1) / c)
+            let scale = min(width / (Double(c) * cell), height / (rows * cell))
+            if scale > bestScale * 1.0001 { best = c; bestScale = scale }
+        }
+        return best
+    }
+
     /// Coordinators as hubs (west to east, `columns` to a row), each machine on a ring around its
     /// coordinator at a distance set by the coordinator's round trip to it, spread evenly by region and
     /// clear of the coordinator lines. Deterministic: the same answer lays out the same.

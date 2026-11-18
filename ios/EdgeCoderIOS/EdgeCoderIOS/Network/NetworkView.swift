@@ -156,11 +156,13 @@ private struct NetworkGraphScreen: View {
         VStack(spacing: 0) {
             header
             GeometryReader { geo in
-                let portrait = geo.size.width < geo.size.height
-                let layout = NetworkGraph.layout(world, columns: NetworkGraph.columns(coordinators: world.coordinators.count, portrait: portrait))
+                let pad = GraphTransform.labelPad(world)
+                let layout = NetworkGraph.layout(world, columns: NetworkGraph.fitColumns(coordinators: world.coordinators.count,
+                                                                                         width: geo.size.width - 2 * pad,
+                                                                                         height: geo.size.height))
                 let lanes = NetworkGraph.pulseLanes(world, layout: layout)
                 let path = NetworkGraph.yourPath(world)
-                let view = GraphTransform(layout: layout, size: geo.size, zoom: zoom * pinch,
+                let view = GraphTransform(layout: layout, size: geo.size, labelPad: pad, zoom: zoom * pinch,
                                           pan: CGSize(width: pan.width + drag.width, height: pan.height + drag.height))
                 let animate = !reduceMotion && lanes.contains { $0.count > 0 || $0.heartbeat }
                 TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animate)) { timeline in
@@ -319,9 +321,21 @@ private struct GraphTransform {
     let scale: CGFloat
     let origin: CGPoint
 
-    init(layout: WorldLayout, size: CGSize, zoom: CGFloat, pan: CGSize) {
+    /// Room kept on the left and right for your machines' names, which are drawn at a fixed size
+    /// beside their dots and would otherwise run off the edge (widest name plus its gap, at most 160).
+    static func labelPad(_ world: NetworkWorld) -> CGFloat {
+        let font = UIFont.systemFont(ofSize: 11, weight: .semibold)
+        let widest = world.agents.filter(\.mine).map { a -> CGFloat in
+            let name = NetworkText.shortMachineName(a.name ?? "")
+            return (name as NSString).size(withAttributes: [.font: font]).width
+        }.max()
+        guard let widest else { return 8 }
+        return min(160, widest + 20)
+    }
+
+    init(layout: WorldLayout, size: CGSize, labelPad: CGFloat = 0, zoom: CGFloat, pan: CGSize) {
         self.layout = layout
-        let fit = min(size.width / CGFloat(layout.width), size.height / CGFloat(layout.height)) * 0.96
+        let fit = min(max(1, size.width - 2 * labelPad) / CGFloat(layout.width), size.height / CGFloat(layout.height)) * 0.96
         scale = max(0.01, fit * zoom)
         origin = CGPoint(x: size.width / 2 - CGFloat(layout.width) * scale / 2 + pan.width,
                          y: size.height / 2 - CGFloat(layout.height) * scale / 2 + pan.height)
