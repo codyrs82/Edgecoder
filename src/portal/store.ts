@@ -6,6 +6,7 @@ import type { HostApprovalRecord, HostApprovalSource, HostKind, HostRequestRecor
 import type { SecurityResearchEntitlement } from "./security-research.js";
 import type { Pool } from "pg";
 import { createPgPool } from "../db/pool.js";
+import { migrateCloudBots } from "./cloud-bots/store.js";
 import { RATE_LIMIT_SCHEMA_SQL } from "./rate-limit-store.js";
 import { compactReplyUsage, type ReplyUsage } from "./reply-usage.js";
 import { randomUUID } from "node:crypto";
@@ -376,6 +377,8 @@ export class PortalStore {
     await this.migrateLegalAcceptance();
     await this.migrateSecurityResearch();
     await this.migrateOnboarding();
+    // Cloud bots (src/portal/cloud-bots/store.ts): bots, their conversations and their runs. New tables, owner approval needed.
+    await migrateCloudBots(this.pool);
   }
 
   /**

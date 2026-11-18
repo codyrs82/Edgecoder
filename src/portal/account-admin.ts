@@ -74,6 +74,10 @@ export const USER_DELETE_PLAN: readonly DeleteStep[] = [
   // signs up again must be verified and granted again. The signed agreement itself is kept in the
   // company's records (agreement_ref points there) and each call stays in the coordinators' log.
   { table: "portal_security_research_entitlements", column: "user_id", by: "userId" },
+  // Cloud bots (src/portal/cloud-bots/store.ts): conversations, runs, then the bots with their sealed tokens.
+  { table: "portal_cloud_bot_messages", column: "user_id", by: "userId" },
+  { table: "portal_cloud_bot_runs", column: "user_id", by: "userId" },
+  { table: "portal_cloud_bots", column: "user_id", by: "userId" },
   // Deletion is refused while machines are enrolled; this only matters for a row added mid-way.
   { table: "portal_node_enrollments", column: "owner_user_id", by: "userId" },
   { table: "portal_users", column: "user_id", by: "userId" }

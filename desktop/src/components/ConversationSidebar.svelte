@@ -11,7 +11,7 @@
   import type { Conversation } from "../lib/types";
   import type { AuthUser } from "../lib/api";
   import { SquarePen, Search, Cpu, Plug, Laptop, Server, Cloud, Plus, X, EllipsisVertical, Pencil, Trash2 } from "@lucide/svelte";
-  import { bots } from "../lib/bots-store";
+  import { bots, cloudBots } from "../lib/bots-store";
   import { botStatusLine } from "../lib/bots";
   import BotAvatar from "./BotAvatar.svelte";
   import { parseChoice } from "../lib/compute-choice";
@@ -35,9 +35,12 @@
     onSelectBot?: (id: string) => void;
     onNewBot?: () => void;
     activeBotId?: string | null;
+    /** Cloud bots (they run on EdgeCoder's servers): read and message only here. */
+    onSelectCloudBot?: (id: string) => void;
+    activeCloudBotId?: string | null;
   }
 
-  let { open, onClose, onSelectConversation, onNewChat, activeConversationId, inline = false, user, onOpenSettings, onLogout, onSelectBot, onNewBot, activeBotId = null }: Props = $props();
+  let { open, onClose, onSelectConversation, onNewChat, activeConversationId, inline = false, user, onOpenSettings, onLogout, onSelectBot, onNewBot, activeBotId = null, onSelectCloudBot, activeCloudBotId = null }: Props = $props();
 
   let searchOpen = $state(false);
   let searchEl: HTMLInputElement | undefined = $state();
@@ -286,7 +289,7 @@
         <span>Bots</span>
         {#if onNewBot}<button class="bots-add" type="button" title="New bot" aria-label="New bot" onclick={onNewBot}><Plus size={13} /></button>{/if}
       </div>
-      {#if $bots.length === 0}
+      {#if $bots.length === 0 && (!onSelectCloudBot || $cloudBots.length === 0)}
         {#if onNewBot}<button class="bot-row empty-bot" type="button" onclick={onNewBot}>Create a bot that owns a job</button>{/if}
       {:else}
         {#each $bots as bot (bot.id)}
@@ -302,6 +305,24 @@
             <span class="bot-text">
               <span class="bot-name">{bot.name}{#if bot.role}<span class="bot-role"> · {bot.role}</span>{/if}</span>
               <span class="bot-status" class:warn={bot.status === "needs_approval" || bot.status === "over_budget" || bot.status === "out_of_csats" || bot.status === "needs_folder" || !!bot.stuck}>{botStatusLine(bot)}</span>
+            </span>
+          </button>
+        {/each}
+      {/if}
+      {#if onSelectCloudBot}
+        {#each $cloudBots as bot (bot.id)}
+          <button
+            class="bot-row"
+            type="button"
+            class:active={bot.id === activeCloudBotId}
+            aria-current={bot.id === activeCloudBotId ? "true" : undefined}
+            onclick={() => { onSelectCloudBot?.(bot.id); if (!inline) onClose(); }}
+            title="{bot.name}{bot.role ? ` · ${bot.role}` : ''}: runs in the cloud"
+          >
+            <BotAvatar name={bot.name} color={bot.color} status={bot.status === "running" ? "running" : bot.status === "error" ? "error" : "idle"} size={26} decorative />
+            <span class="bot-text">
+              <span class="bot-name">{bot.name}{#if bot.role}<span class="bot-role"> · {bot.role}</span>{/if}</span>
+              <span class="bot-status"><span class="cloud-chip">Cloud</span> {bot.status === "running" ? (bot.activity ?? "Working…") : bot.enabled ? "Idle" : "Paused"}</span>
             </span>
           </button>
         {/each}
@@ -416,6 +437,13 @@
 </div>
 
 <style>
+  .cloud-chip {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 0 5px;
+    border-radius: 999px;
+    border: 1px solid var(--border-strong);
+  }
   .bots-section {
     display: flex;
     flex-direction: column;

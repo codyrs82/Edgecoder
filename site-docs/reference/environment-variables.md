@@ -201,6 +201,15 @@ Reputation, abandonment and replica exclusion are keyed on the agent's reward ac
 | `PASSKEY_ORIGIN` | `https://portal.edgecoder.io` | Expected WebAuthn origin. |
 | `PASSKEY_CHALLENGE_TTL_MS` | `300000` | Passkey challenge expiry (ms). |
 | `PORTAL_TRUST_FLY_CLIENT_IP` | unset | When `true` and Fly's runtime `FLY_APP_NAME` is set, the rate-limit client IP is read from the `Fly-Client-IP` header that the Fly edge proxy sets ([Fly request headers](https://fly.io/docs/networking/request-headers/)). Otherwise it is the socket address, and `X-Forwarded-*` is never trusted (`trustProxy: false`). **Keep unset until #31.** Until it is set, all portal traffic on Fly shares the proxy's rate-limit bucket. `PORTAL_TRUST_PROXY_HOPS` is gone, because Fastify 5.12 ignores hop counts. |
+| `PORTAL_BOT_SECRETS_KEY` | _(64 hex chars or base64 of 32 bytes)_ | Cloud bots ([docs/cloud-bots.md](https://github.com/codyrs82/Edgecoder/blob/main/docs/cloud-bots.md)): the AES-256-GCM key that seals each bot's GitHub token in the portal database. Unset or malformed: cloud bots work without GitHub, and the page says GitHub isn't set up. Set the same value on every portal instance; changing it makes stored tokens unreadable (owners enter them again). Generate with `openssl rand -hex 32`. |
+| `CLOUD_BOTS_WORKER` | `on` | `off` stops this portal instance from running cloud bots (their worker, scheduler and GitHub poller); the API still queues runs for another instance. |
+| `CLOUD_BOTS_MAX_PER_ACCOUNT` | `20` | Cloud bots one account may have. |
+| `CLOUD_BOTS_MAX_CONCURRENT_PER_ACCOUNT` | `2` | Cloud bot runs one account may have going at once (across portal instances). |
+| `CLOUD_BOTS_WORKER_CONCURRENCY` | `4` | Cloud bot runs one portal instance works on at once. |
+| `CLOUD_BOTS_MAX_TOKENS_PER_CALL` | `4096` | Output tokens a cloud bot's model call may produce. |
+| `CLOUD_BOTS_MAX_OUTPUT_TOKENS_PER_RUN` | `32000` | Output tokens one cloud bot run may produce in all; past it the run stops. |
+| `CLOUD_BOTS_RUN_TIMEOUT_MS` | `600000` | A cloud bot run's wall-clock limit. |
+| `CLOUD_BOTS_GITHUB_POLL_MS` | `180000` | How often a cloud bot with GitHub triggers polls its repository. |
 | `OAUTH_STATE_SECRET` | _(32+ random chars)_ | HMAC key for the browser-bound OAuth state cookie (`__Host-oauth_state`, #88). **Required in production** (at least 32 characters; the portal refuses to start without it). Set the same value on every instance. Outside production, unset means a random key per process. |
 
 ## Bluetooth Local (BLE proxy — Mac IDE mode)

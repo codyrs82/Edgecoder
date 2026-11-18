@@ -2366,3 +2366,42 @@ export const addFrontierKey = (input: { id: string; key: string; kind?: "anthrop
 export const testFrontierKey = (id: string) => fsCall<{ models: string[] }>("POST", "/v1/ide/frontier/keys/test", { id });
 export const removeFrontierKey = (id: string, ownerAccount?: string) => fsCall<{ removed: boolean }>("POST", "/v1/ide/frontier/keys/remove", { id, ...(ownerAccount ? { ownerAccount } : {}) });
 export const updateFrontierSettings = (patch: Partial<FrontierSettingsView>) => fsCall<{ settings: FrontierSettingsView }>("POST", "/v1/ide/frontier/settings", patch);
+
+// Cloud bots (portal /portal/api/bots, agentId "cloud"; docs/cloud-bots.md): bots that run on
+// EdgeCoder's servers. The desktop lists them with its own bots and can read and message them.
+export interface CloudBotMessage {
+  id: string;
+  role: "user" | "assistant" | "event";
+  content: string;
+  atMs: number;
+}
+export interface CloudBotSummary {
+  id: string;
+  runtime: "cloud";
+  name: string;
+  role: string;
+  color: string;
+  status: string;
+  activity?: string;
+  enabled: boolean;
+  repository?: string;
+  lastRun?: { status: string; summary: string; error?: string; startedAtMs: number };
+  tail?: CloudBotMessage[];
+  messageCount?: number;
+}
+const cloudBotPath = (id: string, rest = "") => `${portalBase()}/portal/api/bots/cloud/${encodeURIComponent(id)}${rest}`;
+async function portalJson<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const res = await fetch(url, { ...init, headers: { "Content-Type": "application/json", ...authHeaders(), ...(init.headers ?? {}) }, credentials: "include", signal: AbortSignal.timeout(15_000) });
+  const body = (await res.json().catch(() => ({}))) as T & { error?: string; message?: string };
+  if (!res.ok) throw new Error(body.message || body.error || `HTTP ${res.status}`);
+  return body;
+}
+/** The account's cloud bots (empty when signed out or the portal can't be reached). */
+export async function listCloudBots(): Promise<CloudBotSummary[]> {
+  if (!loadSessionToken()) return [];
+  const r = await portalJson<{ bots?: Array<CloudBotSummary | { runtime?: string }> }>(`${portalBase()}/portal/api/bots`);
+  return (r.bots ?? []).filter((b): b is CloudBotSummary => b.runtime === "cloud");
+}
+export const getCloudBot = (id: string) => portalJson<{ bot: CloudBotSummary }>(cloudBotPath(id)).then((r) => r.bot);
+export const messageCloudBot = (id: string, content: string) =>
+  portalJson<{ commandId: string; result?: { data?: { queued?: boolean } } }>(cloudBotPath(id, "/commands"), { method: "POST", body: JSON.stringify({ action: "message", args: { content } }) });

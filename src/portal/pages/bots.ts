@@ -6,6 +6,7 @@ import { portalAuthedPageHtml } from "./layout.js";
 import { icon } from "./design-system.js";
 import { CSP_NONCE } from "../csp-nonce.js";
 import { CLIENT_MARKDOWN_CAP_JS } from "../../common/markdown-cap.js";
+import { CLOUD_FIELDS, CLOUD_BOTS_PAGE_JS } from "./bots-cloud.js";
 import { QUOTE_SELECTION_BROWSER_LIB, QUOTE_SELECTION_CSS, quoteSelectionScript } from "./quote-selection.js";
 
 /**
@@ -21,6 +22,11 @@ import { QUOTE_SELECTION_BROWSER_LIB, QUOTE_SELECTION_CSS, quoteSelectionScript 
  *                                 machines, or the first that connects). It waits as "pending" until a
  *                                 machine made it, then shows as "Needs folder" until someone at that machine
  *                                 picks its folder (the web can only suggest one).
+ *
+ * Cloud bots (agentId "cloud", docs/cloud-bots.md) run on EdgeCoder's servers with no machine: "Runs on"
+ * offers Cloud first (the default when no machine can take a new bot), with its own fields (compute,
+ * web, a UTC schedule, a GitHub repository with a token and triggers), and the bot page drives them
+ * through the same API (commands answer at once; Edit and Delete have cloud forms).
  *
  * The bots keep running on their machine; everything here goes through /portal/api/bots (the owner's
  * session; the coordinator checks the machine's verified owner). When the machine is offline the page
@@ -42,6 +48,7 @@ export function registerBotsPage(app: FastifyInstance): void {
       file: icon("file", 12),
       bot: icon("bot", 28),
       plus: icon("plus", 14),
+      trash: icon("trash", 14),
     };
     const content = `
     <style nonce="${CSP_NONCE}">
@@ -166,6 +173,13 @@ export function registerBotsPage(app: FastifyInstance): void {
       .bot-card.pending .bc-actions { margin-top:6px; display:flex; gap:6px; }
       .bot-edit .hint { font-size:11px; color:var(--muted); }
       .bot-edit fieldset { border:1px solid var(--card-border); border-radius:var(--radius-sm); padding:8px 10px; display:flex; flex-direction:column; gap:6px; }
+      .bot-edit .cloud-fields { display:flex; flex-direction:column; gap:12px; }
+      .bot-edit .check { flex-direction:row; align-items:center; gap:8px; font-size:13px; color:var(--text); }
+      .bot-edit .check input[type="checkbox"] { width:auto; min-height:0; margin:0; padding:0; flex:none; }
+      .bot-edit .sched { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+      .bot-edit .sched select { flex:1 1 160px; }
+      .bot-edit .sched input { width:120px; flex:none; }
+      .bot-edit [hidden] { display:none !important; }
       .visually-hidden { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
       @media (max-width:1100px) {
         .details { position:fixed; right:0; top:var(--topbar-h); bottom:0; z-index:50; box-shadow:var(--shadow-2); width:min(340px, 92vw); }
@@ -189,7 +203,7 @@ export function registerBotsPage(app: FastifyInstance): void {
       <dialog class="bot-edit" id="bnDialog" aria-labelledby="bnTitle">
         <form id="bnForm" method="dialog" novalidate>
           <h3 id="bnTitle" class="u-m-0">New bot</h3>
-          <p class="muted u-fs-12 u-m-0">It runs on one of your machines. When it gets there, the EdgeCoder app asks for its folder; it starts once you pick one there.</p>
+          <p class="muted u-fs-12 u-m-0" id="bnIntro">It runs on one of your machines. When it gets there, the EdgeCoder app asks for its folder; it starts once you pick one there.</p>
           <label>Start from<select name="template" id="bnTemplate"></select></label>
           <div class="row2">
             <label>Name<input name="name" maxlength="60" required placeholder="Harry" /></label>
@@ -197,13 +211,15 @@ export function registerBotsPage(app: FastifyInstance): void {
           </div>
           <label>Instructions<textarea name="instructions" maxlength="8000" placeholder="What it owns and how it should work"></textarea></label>
           <label>Runs on<select name="agentId" id="bnTarget"></select><span class="hint" id="bnTargetHint"></span></label>
-          <div class="row2">
-            <label>Schedule<select name="schedule" id="bnSchedule"></select></label>
-            <label>Check-ins (no schedule)<select name="heartbeatMinutes" id="bnHeartbeat"></select></label>
-          </div>
+          <div id="bnCloudOnly" class="cloud-fields" hidden>${CLOUD_FIELDS("bn")}</div>
           <div class="row2">
             <label>Runs a day it starts on its own<input name="maxRunsPerDay" type="number" min="1" max="500" step="1" value="48" /></label>
             <label>Daily budget (cSats, empty = no limit)<input name="budgetCSatsPerDay" type="number" min="0" step="any" value="100" /></label>
+          </div>
+          <div id="bnMachineOnly">
+          <div class="row2">
+            <label>Schedule<select name="schedule" id="bnSchedule"></select></label>
+            <label>Check-ins (no schedule)<select name="heartbeatMinutes" id="bnHeartbeat"></select></label>
           </div>
           <div class="row2">
             <label>Compute<select name="computePolicy" id="bnCompute"></select></label>
@@ -217,6 +233,7 @@ export function registerBotsPage(app: FastifyInstance): void {
             <label class="trig"><input type="checkbox" name="trigCi" />CI failed on the default branch or a PR</label>
             <label class="trig"><input type="checkbox" name="trigIssue" />Issue labeled<input name="trigIssueLabel" class="trig-label" maxlength="100" placeholder="bot" aria-label="Issue label" /></label>
           </fieldset>
+          </div>
           <div id="bnError" class="callout danger u-m-0" role="alert" hidden></div>
           <div class="foot"><button type="button" id="bnCancel">Cancel</button><button type="submit" class="primary" id="bnSave">Create bot</button></div>
         </form>
@@ -238,6 +255,7 @@ export function registerBotsPage(app: FastifyInstance): void {
               <button type="button" class="sm" id="bpStop" hidden>${icons.stop}<span>Stop</span></button>
               <button type="button" class="sm" id="bpPause"></button>
               <button type="button" class="sm" id="bpEdit">${icons.edit}<span>Edit</span></button>
+              <button type="button" class="sm danger" id="bpDelete" hidden>${icons.trash}<span>Delete</span></button>
               <button type="button" class="sm ghost" id="bpPanel" aria-controls="bpDetails" aria-pressed="true" aria-label="Show details" title="Details">${icons.panel}</button>
             </div>
           </header>
@@ -279,6 +297,10 @@ export function registerBotsPage(app: FastifyInstance): void {
             <label>Role<input name="role" maxlength="80" /></label>
           </div>
           <label>Instructions<textarea name="instructions" maxlength="8000"></textarea></label>
+          <div id="bpEditCloud" class="cloud-fields" hidden>${CLOUD_FIELDS("bpe")}
+            <label>Budget per run (cSats)<input name="budgetCSatsPerRun" type="number" min="0" step="any" /></label>
+          </div>
+          <div id="bpEditMachine">
           <div class="row2">
             <label>Schedule<select name="schedule" id="bpEditSchedule"></select></label>
             <label>Check-ins (no schedule)<select name="heartbeatMinutes" id="bpEditHeartbeat"></select></label>
@@ -287,9 +309,10 @@ export function registerBotsPage(app: FastifyInstance): void {
             <label>Runs a day it starts on its own<input name="maxRunsPerDay" type="number" min="1" max="500" step="1" /></label>
             <label>Daily budget (cSats, empty = no limit)<input name="budgetCSatsPerDay" type="number" min="0" step="any" /></label>
           </div>
-          <label>Compute<select name="computePolicy" id="bpEditCompute"></select></label>
+          </div>
+          <label id="bpEditComputeWrap">Compute<select name="computePolicy" id="bpEditCompute"></select></label>
           <fieldset class="u-m-0" id="bpEditTriggers"><legend class="u-fs-12">GitHub triggers</legend></fieldset>
-          <p class="muted u-fs-12 u-m-0">Its folder, repository, tools and auto-approval are changed on the machine.</p>
+          <p class="muted u-fs-12 u-m-0" id="bpEditNote">Its folder, repository, tools and auto-approval are changed on the machine.</p>
           <div id="bpEditError" class="callout danger u-m-0" role="alert" hidden></div>
           <div class="foot"><button type="button" id="bpEditCancel">Cancel</button><button type="submit" class="primary" id="bpEditSave">Save</button></div>
         </form>
@@ -299,6 +322,7 @@ export function registerBotsPage(app: FastifyInstance): void {
     const script = `
     ${CLIENT_MARKDOWN_CAP_JS}
     var BOT_ICONS = ${JSON.stringify(icons)};
+    ${CLOUD_BOTS_PAGE_JS}
     ${BOTS_PAGE_JS}
     ${QUOTE_SELECTION_BROWSER_LIB}
     ${quoteSelectionScript("bpScroll", "bpInput")}
@@ -308,7 +332,7 @@ export function registerBotsPage(app: FastifyInstance): void {
         title: "EdgeCoder | Bots",
         activeTab: "bots",
         heading: "Bots",
-        subtitle: "The bots on your desktop machines",
+        subtitle: "Bots in the cloud and on your machines",
         content,
         script,
       }),
@@ -320,6 +344,7 @@ export function registerBotsPage(app: FastifyInstance): void {
 const BOTS_PAGE_JS = String.raw`
     var params = new URLSearchParams(location.search);
     var agentId = params.get("m"), botId = params.get("b");
+    var isCloud = agentId === "cloud";
     var state = { bot: null, machine: null, older: [], more: null, tab: "chat", dtab: "details", runs: null, memory: null, busy: false, lastSig: "", loaded: false };
 
     /* Chat markdown: escaped first, then code blocks, inline code, bold, italics; capped like the desktop (issue 333). */
@@ -337,6 +362,11 @@ const BOTS_PAGE_JS = String.raw`
     /* Commands go to the bot's machine through the coordinator; the answer is polled. */
     async function command(action, args) {
       var r = await api("/portal/api/bots/" + encodeURIComponent(agentId) + "/" + encodeURIComponent(botId) + "/commands", { method: "POST", body: JSON.stringify({ action: action, args: args || {} }) });
+      // A cloud bot answers at once (the result is in the reply); a machine's answer is polled.
+      if (r.result) {
+        if (r.result.status !== "done") throw new Error(r.result.message || r.result.error || "Refused");
+        return r.result.data;
+      }
       var id = r.commandId, end = Date.now() + 25000, wait = 400;
       while (Date.now() < end) {
         await new Promise(function(res) { setTimeout(res, wait); });
@@ -358,7 +388,7 @@ const BOTS_PAGE_JS = String.raw`
     }
 
     /* ── The list ── */
-    var listState = { targets: [], pending: [], timer: null };
+    var listState = { targets: [], pending: [], timer: null, cloudGithub: false, computeLoaded: false };
     function pendingLine(p) {
       if (p.state === "failed") return "Couldn't create it" + (p.message ? ": " + p.message : p.error ? " (" + p.error + ")" : "");
       if (p.state === "sent") return "Sending to " + (p.machineName || "your machine") + "…";
@@ -372,12 +402,13 @@ const BOTS_PAGE_JS = String.raw`
         var bots = res.bots || [], pending = res.pending || [];
         listState.targets = res.targets || [];
         listState.pending = pending;
+        listState.cloudGithub = !!(res.cloud && res.cloud.github);
         document.getElementById("bnOpen").hidden = !res.canCreate;
         // Pending new bots move on as machines answer: look again soon while any wait.
         clearTimeout(listState.timer);
         if (pending.length) listState.timer = setTimeout(showList, 8000);
         if (!bots.length && !pending.length) {
-          box.innerHTML = '<div class="bots-empty"><div class="empty-icon">' + BOT_ICONS.bot + '</div><h3>No bots yet</h3><p>Bots live on your desktop machines. Create one here with New bot, or in the EdgeCoder app on a machine you enrolled. It runs on that machine, with its folder and tools; from here you can message it, pause it and change its settings.</p></div>';
+          box.innerHTML = '<div class="bots-empty"><div class="empty-icon">' + BOT_ICONS.bot + '</div><h3>No bots yet</h3><p>Create one with New bot. It can run in the cloud, with no machine needed, or on one of your machines with its folder and tools. From here you can message it, pause it and change its settings.</p></div>';
           return;
         }
         box.innerHTML = '<div class="bot-cards">' + pending.map(function(p) {
@@ -386,6 +417,10 @@ const BOTS_PAGE_JS = String.raw`
             '<span class="bc-actions"><button type="button" class="sm ghost" data-cancel-pending="' + escapeHtml(p.requestId) + '">' + (p.state === "failed" ? "Dismiss" : "Cancel") + "</button></span></span></div>";
         }).join("") + bots.map(function(b) {
           var online = b.machine.online;
+          if (b.runtime === "cloud") {
+            return '<a class="bot-card" href="' + botHref("cloud", b.id) + '">' + botAvatarHtml(b, true, "lg") +
+              '<span class="bc-text"><span class="bc-name">' + escapeHtml(botTitle(b)) + '</span><span class="bc-sub">Cloud</span><span class="bc-line">' + escapeHtml(botAutoStatus(b).text) + "</span></span></a>";
+          }
           var line = online ? botAutoStatus(b).text : "Offline · last seen " + (b.machine.reportedAtMs ? botRelative(b.machine.reportedAtMs) : "a while ago");
           return '<a class="bot-card" href="' + botHref(b.machine.agentId, b.id) + '">' + botAvatarHtml(b, online, "lg") +
             '<span class="bc-text"><span class="bc-name">' + escapeHtml(botTitle(b)) + '</span><span class="bc-sub">on ' + escapeHtml(b.machine.machineName) + (online ? "" : " · offline") + '</span><span class="bc-line">' + escapeHtml(line) + "</span></span></a>";
@@ -422,9 +457,15 @@ const BOTS_PAGE_JS = String.raw`
       document.getElementById("bnCompute").innerHTML = opts(BOT_COMPUTE_OPTIONS.filter(function(o) { return o[0] !== "model"; }), "auto");
       document.getElementById("bnClass").innerHTML = '<option value="">Any class</option>' + Object.keys(BOT_CLASS_NAMES).map(function(k) { return '<option value="' + escapeHtml(k) + '">' + escapeHtml(BOT_CLASS_NAMES[k]) + "</option>"; }).join("");
       document.getElementById("bnMode").innerHTML = opts(BOT_MODES, "auto-edits");
-      var ready = listState.targets.filter(function(t) { return t.canCreate; });
-      document.getElementById("bnTarget").innerHTML = '<option value="">' + escapeHtml(ready.length ? "First available: " + ready[0].machineName : "The first of my machines that comes online") + "</option>" +
-        listState.targets.map(function(t) { return '<option value="' + escapeHtml(t.agentId) + '">' + escapeHtml(t.machineName + (t.canCreate ? "" : t.online ? " (update the app to create bots)" : " (offline: waits for it)")) + "</option>"; }).join("");
+      var machines = listState.targets.filter(function(t) { return t.agentId !== "cloud"; });
+      var hasCloud = listState.targets.some(function(t) { return t.agentId === "cloud"; });
+      var ready = machines.filter(function(t) { return t.canCreate; });
+      // Cloud first; it's the default when none of your machines can take a new bot now.
+      var useCloud = hasCloud && !ready.length;
+      document.getElementById("bnTarget").innerHTML = (hasCloud ? '<option value="cloud"' + (useCloud ? " selected" : "") + ">Cloud (no machine needed)</option>" : "") +
+        '<option value=""' + (useCloud ? "" : " selected") + ">" + escapeHtml(ready.length ? "First available: " + ready[0].machineName : "The first of my machines that comes online") + "</option>" +
+        machines.map(function(t) { return '<option value="' + escapeHtml(t.agentId) + '">' + escapeHtml(t.machineName + (t.canCreate ? "" : t.online ? " (update the app to create bots)" : " (offline: waits for it)")) + "</option>"; }).join("");
+      if (hasCloud) loadCloudCompute("bnCloudCompute", "auto");
       newFormChanged();
       document.getElementById("bnError").hidden = true;
       document.getElementById("bnDialog").showModal();
@@ -432,13 +473,18 @@ const BOTS_PAGE_JS = String.raw`
     }
     function newFormChanged() {
       var f = document.getElementById("bnForm");
+      var cloud = f.agentId.value === "cloud";
+      document.getElementById("bnCloudOnly").hidden = !cloud;
+      document.getElementById("bnMachineOnly").hidden = cloud;
+      setText("bnIntro", cloud ? "It runs on EdgeCoder's servers, with no machine or folder: message it from here, the EdgeCoder app or your phone." : "It runs on one of your machines. When it gets there, the EdgeCoder app asks for its folder; it starts once you pick one there.");
+      cloudFieldsChanged(f, "bn");
       document.getElementById("bnClassWrap").hidden = f.computePolicy.value !== "network_only";
       var hasRepo = !!f.repository.value.trim();
       document.getElementById("bnTriggers").disabled = !hasRepo;
       document.getElementById("bnTriggersHint").hidden = hasRepo;
       setText("bnModeHint", f.mode.value === "auto" ? "Auto runs commands without asking. It starts on Accept edits until you confirm Auto in the EdgeCoder app." : "");
       var t = listState.targets.find(function(x) { return x.agentId === f.agentId.value; });
-      setText("bnTargetHint", !f.agentId.value ? "Sent to the first of your machines that can take it." : t && t.canCreate ? "Sent now." : "Saved here and sent when " + (t ? t.machineName : "it") + " comes online.");
+      setText("bnTargetHint", cloud ? "Runs now, in the cloud. Its model calls use your machines when one is online, else the network." : !f.agentId.value ? "Sent to the first of your machines that can take it." : t && t.canCreate ? "Sent now." : "Saved here and sent when " + (t ? t.machineName : "it") + " comes online.");
     }
     function applyTemplate() {
       var f = document.getElementById("bnForm"), t = BOT_TEMPLATES.find(function(x) { return x[0] === f.template.value; });
@@ -447,7 +493,15 @@ const BOTS_PAGE_JS = String.raw`
       if (!f.instructions.value.trim()) f.instructions.value = t[3];
     }
     function newBotSpec() {
-      var f = document.getElementById("bnForm"), bot = { name: f.name.value.trim(), role: f.role.value.trim(), instructions: f.instructions.value, schedule: f.schedule.value, mode: f.mode.value };
+      var f = document.getElementById("bnForm");
+      if (f.agentId.value === "cloud") {
+        var cb = cloudSpec(f, true);
+        cb.name = f.name.value.trim(); cb.role = f.role.value.trim(); cb.instructions = f.instructions.value;
+        if (f.maxRunsPerDay.value !== "") cb.maxRunsPerDay = Number(f.maxRunsPerDay.value);
+        if (f.budgetCSatsPerDay.value !== "") cb.budgetCSatsPerDay = Number(f.budgetCSatsPerDay.value);
+        return cb;
+      }
+      var bot = { name: f.name.value.trim(), role: f.role.value.trim(), instructions: f.instructions.value, schedule: f.schedule.value, mode: f.mode.value };
       bot.heartbeatMinutes = f.heartbeatMinutes.value === "" ? null : Number(f.heartbeatMinutes.value);
       if (f.maxRunsPerDay.value !== "") bot.maxRunsPerDay = Number(f.maxRunsPerDay.value);
       bot.budgetCSatsPerDay = f.budgetCSatsPerDay.value === "" ? null : Number(f.budgetCSatsPerDay.value);
@@ -470,6 +524,7 @@ const BOTS_PAGE_JS = String.raw`
       err.hidden = true;
       if (!f.name.value.trim()) { err.hidden = false; err.textContent = "Give it a name."; f.name.focus(); return; }
       if (f.budgetCSatsPerDay.value !== "" && !(Number(f.budgetCSatsPerDay.value) > 0)) { err.hidden = false; err.textContent = "The budget must be more than 0 cSats a day (or empty for no limit)."; return; }
+      if (f.agentId.value === "cloud") { var bad = cloudCheck(f); if (bad) { err.hidden = false; err.textContent = bad; return; } }
       save.disabled = true;
       try {
         // The same request id on every retry: one bot, however often this is sent.
@@ -481,6 +536,7 @@ const BOTS_PAGE_JS = String.raw`
           throw new Error((words[j && j.error] || "") + ((j && (j.detail || j.message)) || (j && j.error) || res.status));
         }
         document.getElementById("bnDialog").close();
+        if (j.agentId === "cloud") { showToast("Created in the cloud"); location.href = botHref("cloud", j.botId); return; }
         showToast(j.state === "created" ? "It's already on your machine" : j.state === "sent" ? "Sent to your machine: choose its folder there" : "Saved: it's created when your machine comes online");
         await showList();
       } catch (e2) {
@@ -501,6 +557,7 @@ const BOTS_PAGE_JS = String.raw`
       var f = document.getElementById("bnForm");
       f.addEventListener("submit", saveNew);
       f.repository.addEventListener("input", newFormChanged);
+      f.cloudRepo.addEventListener("input", newFormChanged);
       f.addEventListener("change", function(e) { if (e.target && e.target.name === "template") applyTemplate(); newFormChanged(); });
       document.getElementById("botCards").addEventListener("click", function(e) {
         var b = e.target.closest && e.target.closest("[data-cancel-pending]");
@@ -522,14 +579,14 @@ const BOTS_PAGE_JS = String.raw`
       chipEl.textContent = online() ? chip.text : "Offline";
       chipEl.className = "chip " + (online() ? "tone-" + chip.tone : "");
       var where = document.getElementById("bpWhere");
-      where.textContent = "on " + m.machineName + (online() ? "" : " · offline" + (m.reportedAtMs ? " · last seen " + botRelative(m.reportedAtMs) : ""));
+      where.textContent = isCloud ? "Runs in the cloud" : "on " + m.machineName + (online() ? "" : " · offline" + (m.reportedAtMs ? " · last seen " + botRelative(m.reportedAtMs) : ""));
       where.classList.toggle("offline", !online());
       var pct = b.budgetCSatsPerDay ? Math.min(100, (b.spentTodayCSats / b.budgetCSatsPerDay) * 100) : 0;
       document.getElementById("bpMeta").innerHTML =
         '<span class="m" title="Routine">' + BOT_ICONS.clock + escapeHtml(botRoutineText(b) + (!b.enabled && (b.schedule || botChecksIn(b)) ? " · paused" : "")) + "</span><span aria-hidden=\"true\">·</span>" +
         '<span class="m" title="cSats spent today against the daily budget">' + (b.budgetCSatsPerDay != null ? '<span class="meter" role="meter" aria-label="Daily budget used" aria-valuemin="0" aria-valuemax="' + escapeHtml(b.budgetCSatsPerDay) + '" aria-valuenow="' + escapeHtml(b.spentTodayCSats) + '"><span id="bpMeterFill"></span></span> ' + escapeHtml(botCSats(b.spentTodayCSats) + " / " + botCSats(b.budgetCSatsPerDay)) : escapeHtml(botCSats(b.spentTodayCSats) + " cSats · no limit")) + "</span><span aria-hidden=\"true\">·</span>" +
         '<span class="m" title="Compute: where its model calls run">' + BOT_ICONS.cpu + escapeHtml(botComputeText(b.compute)) + "</span><span aria-hidden=\"true\">·</span>" +
-        '<span class="m" title="Its folder on the machine">' + BOT_ICONS.file + escapeHtml(b.repository || b.folderName || "No folder yet") + "</span>";
+        (isCloud ? '<span class="m" title="Its GitHub repository">' + BOT_ICONS.file + escapeHtml(b.repository || "No repository") + "</span>" : '<span class="m" title="Its folder on the machine">' + BOT_ICONS.file + escapeHtml(b.repository || b.folderName || "No folder yet") + "</span>");
       var fill = document.getElementById("bpMeterFill");
       if (fill) fill.style.width = pct + "%";
       var autoEl = document.getElementById("bpAuto");
@@ -542,6 +599,8 @@ const BOTS_PAGE_JS = String.raw`
       // Read-only (offline, or a view-only machine): no controls at all, rather than dead buttons.
       ["bpCheck", "bpPause", "bpEdit", "bpStop"].forEach(function(id) { var el = document.getElementById(id); el.disabled = state.busy; el.hidden = !ctl; });
       if (ctl) { document.getElementById("bpCheck").hidden = busy; document.getElementById("bpStop").hidden = !busy; }
+      var del = document.getElementById("bpDelete");
+      del.hidden = !isCloud; del.disabled = state.busy;
       var note = document.getElementById("bpOffline");
       if (!online()) {
         note.hidden = false;
@@ -653,7 +712,7 @@ const BOTS_PAGE_JS = String.raw`
         body.innerHTML = '<div class="d-section"><div class="d-label">Notes it saved for itself</div>' +
           (state.memory === null ? '<div class="d-sub muted">' + (online() ? "Loading…" : "Its memory stays on the machine while it's offline.") + "</div>"
             : state.memory.trim() ? '<pre class="memory" tabindex="0" aria-label="Bot memory">' + escapeHtml(state.memory) + "</pre>"
-            : '<div class="d-sub muted">Nothing yet. It saves notes with its remember tool as it works.</div>') + "</div>";
+            : '<div class="d-sub muted">' + (isCloud ? "Cloud bots don't keep notes yet: their conversation is what they remember." : "Nothing yet. It saves notes with its remember tool as it works.") + "</div>") + "</div>";
         return;
       }
       var routine = String(b.schedule || "").trim()
@@ -664,10 +723,10 @@ const BOTS_PAGE_JS = String.raw`
       var triggers = (b.triggers || []).length
         ? b.triggers.map(function(t) {
             var st = (b.triggerStatus || {})[t.id] || {};
-            var sub = !t.enabled ? "Off" : !b.enabled ? "Paused with the bot" : st.error ? st.error : st.lastCheckedAtMs ? "Checked " + botRelative(st.lastCheckedAtMs) : "Checks GitHub every 2 minutes";
+            var sub = !t.enabled ? "Off" : !b.enabled ? "Paused with the bot" : st.error ? st.error : st.lastCheckedAtMs ? "Checked " + botRelative(st.lastCheckedAtMs) : "Checks GitHub every " + (isCloud ? 3 : 2) + " minutes";
             return '<div class="routine"><div class="routine-text"><div class="routine-title">' + escapeHtml(botTriggerText(t)) + '</div><div class="routine-sub">' + escapeHtml(sub) + '</div></div><button type="button" class="switch" role="switch" data-toggle-trigger="' + escapeHtml(t.id) + '" aria-checked="' + (t.enabled ? "true" : "false") + '" aria-label="' + escapeHtml("Trigger: " + botTriggerText(t)) + '"' + (ctl ? "" : " disabled") + "></button></div>";
           }).join("")
-        : '<div class="routine-sub">' + (b.repository ? "No triggers: add one on the machine to run on PRs, CI failures or labeled issues." : "Set a repository on the machine to run on GitHub events.") + "</div>";
+        : '<div class="routine-sub">' + (isCloud ? "No triggers: add a repository and triggers in Edit." : b.repository ? "No triggers: add one on the machine to run on PRs, CI failures or labeled issues." : "Set a repository on the machine to run on GitHub events.") + "</div>";
       var pct = b.budgetCSatsPerDay ? Math.min(100, (b.spentTodayCSats / b.budgetCSatsPerDay) * 100) : 0;
       var lr = b.lastRun;
       body.innerHTML =
@@ -680,11 +739,12 @@ const BOTS_PAGE_JS = String.raw`
           : '<div class="d-sub">' + escapeHtml(botCSats(b.spentTodayCSats) + " cSats · no limit") + "</div>") +
         '<div class="d-sub muted">' + escapeHtml(b.runsToday + " of " + b.maxRunsPerDay + " runs it may start on its own today") + "</div></div>" +
         (lr ? '<div class="d-section"><div class="d-label">Last run</div><div class="d-sub">' + escapeHtml((BOT_RUN_STATUS_TEXT[lr.status] || lr.status) + " · " + botRelative(lr.startedAtMs) + (lr.where ? " · " + lr.where : "")) + "</div>" + (lr.summary ? '<div class="d-sub muted">' + escapeHtml(lr.summary) + "</div>" : "") + (lr.note ? '<div class="d-sub muted">' + escapeHtml(lr.note) + "</div>" : "") + "</div>" : "") +
-        '<div class="d-section"><div class="d-label">Where it runs</div><div class="d-sub">' + escapeHtml("On " + state.machine.machineName + ", in its folder " + b.folderName + ".") + "</div></div>";
+        '<div class="d-section"><div class="d-label">Where it runs</div><div class="d-sub">' + escapeHtml(isCloud ? "In EdgeCoder's cloud: no machine or folder. " + (b.cloud && b.cloud.web ? "It can search the web." : "No web access.") : "On " + state.machine.machineName + ", in its folder " + b.folderName + ".") + "</div></div>";
       var fill = document.getElementById("bpDMeterFill");
       if (fill) fill.style.width = pct + "%";
     }
     async function loadMemory() {
+      if (isCloud) { state.memory = ""; renderDetails(); return; }
       if (!online()) { renderDetails(); return; }
       try { var data = await command("memory"); state.memory = String((data && data.memory) || ""); } catch (err) { state.memory = ""; commandError(err); }
       renderDetails();
@@ -765,6 +825,17 @@ const BOTS_PAGE_JS = String.raw`
     function openEdit() {
       var b = state.bot, f = document.getElementById("bpEditForm");
       f.name.value = b.name; f.role.value = b.role || ""; f.instructions.value = b.instructions || "";
+      ["bpEditMachine", "bpEditComputeWrap", "bpEditNote"].forEach(function(id) { document.getElementById(id).hidden = isCloud; });
+      document.getElementById("bpEditCloud").hidden = !isCloud;
+      if (isCloud) {
+        fillCloudEdit(b, f);
+        cloudFieldsChanged(f, "bpe");
+        document.getElementById("bpEditTriggers").hidden = true;
+        document.getElementById("bpEditError").hidden = true;
+        document.getElementById("bpEditDialog").showModal();
+        f.name.focus();
+        return;
+      }
       var sched = document.getElementById("bpEditSchedule"), presets = BOT_SCHEDULE_PRESETS.slice();
       if (b.schedule && !presets.some(function(p) { return p[0] === b.schedule; })) presets.push([b.schedule, botScheduleText(b.schedule)]);
       sched.innerHTML = presets.map(function(p) { return '<option value="' + escapeHtml(p[0]) + '"' + (p[0] === (b.schedule || "") ? " selected" : "") + ">" + escapeHtml(p[1]) + "</option>"; }).join("");
@@ -788,6 +859,26 @@ const BOTS_PAGE_JS = String.raw`
       if (f.name.value.trim() !== b.name) patch.name = f.name.value.trim();
       if (f.role.value !== (b.role || "")) patch.role = f.role.value;
       if (f.instructions.value !== (b.instructions || "")) patch.instructions = f.instructions.value;
+      if (isCloud) {
+        var bad = cloudCheck(f);
+        if (!bad && f.budgetCSatsPerDay.value !== "" && !(Number(f.budgetCSatsPerDay.value) > 0)) bad = "The daily budget must be more than 0 cSats.";
+        if (bad) { var eb = document.getElementById("bpEditError"); eb.hidden = false; eb.textContent = bad; return; }
+        var cs = cloudSpec(f, false);
+        Object.keys(cs).forEach(function(k) { patch[k] = cs[k]; });
+        if (f.maxRunsPerDay.value !== "") patch.maxRunsPerDay = Number(f.maxRunsPerDay.value);
+        if (f.budgetCSatsPerDay.value !== "") patch.budgetCSatsPerDay = Number(f.budgetCSatsPerDay.value);
+        if (f.budgetCSatsPerRun.value !== "" && Number(f.budgetCSatsPerRun.value) > 0) patch.budgetCSatsPerRun = Number(f.budgetCSatsPerRun.value);
+        var sv = document.getElementById("bpEditSave");
+        sv.disabled = true;
+        try {
+          await command("update_settings", patch);
+          document.getElementById("bpEditDialog").close();
+          showToast("Saved");
+          await refresh();
+        } catch (err) { var bx = document.getElementById("bpEditError"); bx.hidden = false; bx.textContent = String(err.message || err); }
+        sv.disabled = false;
+        return;
+      }
       if (f.schedule.value !== (b.schedule || "")) patch.schedule = f.schedule.value;
       var hb = f.heartbeatMinutes.value === "" ? null : Number(f.heartbeatMinutes.value);
       if (hb !== b.heartbeatMinutes) patch.heartbeatMinutes = hb;
@@ -862,6 +953,13 @@ const BOTS_PAGE_JS = String.raw`
       document.getElementById("bpStop").addEventListener("click", function() { act("Stopped", "stop"); });
       document.getElementById("bpPause").addEventListener("click", function() { act(state.bot.enabled ? "Paused" : "Resumed", state.bot.enabled ? "pause" : "resume"); });
       document.getElementById("bpEdit").addEventListener("click", openEdit);
+      document.getElementById("bpDelete").addEventListener("click", async function() {
+        if (!confirm("Delete " + state.bot.name + "? Its conversation and run history go too.")) return;
+        try { await command("delete"); location.href = "/portal/bots"; } catch (err) { commandError(err); }
+      });
+      var ef = document.getElementById("bpEditForm");
+      ef.addEventListener("change", function() { if (isCloud) cloudFieldsChanged(ef, "bpe"); });
+      ef.cloudRepo.addEventListener("input", function() { if (isCloud) cloudFieldsChanged(ef, "bpe"); });
       document.getElementById("bpEditCancel").addEventListener("click", function() { document.getElementById("bpEditDialog").close(); });
       document.getElementById("bpEditForm").addEventListener("submit", saveEdit);
       document.getElementById("bpOlder").addEventListener("click", loadOlder);
@@ -891,3 +989,4 @@ const BOTS_PAGE_JS = String.raw`
       if (agentId && botId) initBot(); else initList();
     })();
 `;
+
