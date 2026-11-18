@@ -87,7 +87,7 @@ export const WEB_SYSTEM_NOTE = webSystemNote();
 const CODE_BLOCK = /```[\s\S]*?(?:```|$)|`[^`\n]+`/g;
 const URL_RE = /\bhttps?:\/\/[^\s<>()]+|\bwww\.[a-z0-9-]+\.[a-z]{2,}[^\s<>()]*/i;
 /** Asking to search, in so many words. */
-const ASKS_TO_SEARCH = /\b(?:search (?:the )?(?:web|internet|online|net)|search (?:for|online)|web search|look (?:it |this |that |them )?up|google (?:it|this|that|for)?|googl(?:e|ing)\b|on the (?:web|internet|net)|the internet|online|browse|check online)\b/i;
+const ASKS_TO_SEARCH = /\b(?:search(?:ing)? (?:the )?(?:web|internet|online|net)|search (?:for|online)|searching online|(?:use|using|check|from) the web|web search|look (?:it |this |that |them )?up|google (?:it|this|that|for)?|googl(?:e|ing)\b|on the (?:web|internet|net)|the internet|online|browse|check online)\b/i;
 /** Plainly about now: today, this week, news, weather, scores, prices, who won. */
 const STRONG_FRESH = new RegExp(
   [
@@ -131,8 +131,8 @@ export function needsFreshInfo(message: string): boolean {
   return !coding && WEAK_FRESH.test(prose);
 }
 
-/** "Search the internet", "look it up", "please google it": a request to search that names no topic. */
-const SEARCH_FILLER = /\b(?:please|pls|can you|could you|would you|will you|go|and|then|now|just|do|a|an|the|web|internet|online|net|search(?:es|ing)?|for|it|this|that|them|look|up|google|check|browse|find|on|me|again|instead)\b|[^\w\s]/gi;
+/** "Search the internet", "look it up", "you should be able to search the internet for this information": a request to search that names no topic. */
+const SEARCH_FILLER = /\b(?:please|pls|can|could|would|will|should|you|you're|your|i|we|be|able|to|have|has|use|try|go|and|then|now|just|do|a|an|the|web|internet|online|net|search(?:es|ing)?|engine|for|it|this|that|these|those|them|look|up|google|check|browse|find|on|me|again|instead|info|information|answer|results?|details?|about|so|actually|really)\b|[^\w\s]/gi;
 
 const lastUserText = (messages: ReadonlyArray<{ role: string; content: string }>, skip = 0) => messages.filter((m) => m.role === "user").reverse()[skip]?.content ?? "";
 

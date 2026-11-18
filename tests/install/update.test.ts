@@ -7,7 +7,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 // @ts-expect-error plain .mjs release tooling, no type declarations
 import { keygen, signMinisign } from "../../scripts/release/minisign.mjs";
 import { nonRootWritable, type BinFs } from "../../src/install/binaries.js";
-import { compareVersions, parseReleaseInfo, parseVersion, pickLatestTag, releaseTarget, runUpdate, updateStatusLines, waitForIdle, type AgentStatus, type UpdateDeps } from "../../src/install/update.js";
+import { MAX_TARBALL_BYTES, compareVersions, parseReleaseInfo, parseVersion, pickLatestTag, releaseTarget, runUpdate, updateStatusLines, waitForIdle, type AgentStatus, type UpdateDeps } from "../../src/install/update.js";
 import { parseAgentStatus } from "../../src/install/update-host.js";
 
 describe("versions", () => {
@@ -36,6 +36,10 @@ describe("versions", () => {
     expect(pickLatestTag(listing)).toBe("agent-v1.10.0");
     expect(pickLatestTag({})).toBeNull();
   });
+  it("allows agent tarballs up to 2 GiB (not a 32-bit shift that overflows negative)", () => {
+    expect(MAX_TARBALL_BYTES).toBe(2147483648);
+  });
+
   it("maps platforms to release targets", () => {
     expect(releaseTarget("linux", "x64")).toBe("linux-x64");
     expect(releaseTarget("darwin", "arm64")).toBe("darwin-arm64");
@@ -162,8 +166,17 @@ function deps(w: World, over: Partial<UpdateDeps> = {}): UpdateDeps {
       w.now += ms;
     },
     log: (l) => w.logs.push(l),
-    fetchBytes: async (url) => get(url),
-    fetchToFile: async (url, dest) => writeFileSync(dest, get(url), { flag: "wx", mode: 0o600 }),
+    // Size limits enforced like update-host.ts does, so a broken limit fails here too.
+    fetchBytes: async (url, maxBytes) => {
+      const b = get(url);
+      if (!(maxBytes > 0) || b.length > maxBytes) throw new Error(`${url} is larger than ${maxBytes} bytes`);
+      return b;
+    },
+    fetchToFile: async (url, dest, maxBytes) => {
+      const b = get(url);
+      if (!(maxBytes > 0) || b.length > maxBytes) throw new Error(`${url} is larger than ${maxBytes} bytes`);
+      writeFileSync(dest, b, { flag: "wx", mode: 0o600 });
+    },
     run(cmd, args) {
       w.calls.push([cmd, ...args]);
       if (cmd === "tar" || cmd === "mkdir") {
