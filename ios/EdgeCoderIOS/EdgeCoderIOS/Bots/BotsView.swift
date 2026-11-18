@@ -105,7 +105,7 @@ struct BotsView: View {
         loading = true
         defer { loading = false; loaded = true }
         do {
-            let r: BotsListResponse = try await APIClient.shared.request(baseURL: portal, path: "/portal/api/bots")
+            let r: BotsListResponse = try await fetchList()
             machines = r.machines.sorted { ($0.online ? 0 : 1, $0.machineName) < ($1.online ? 0 : 1, $1.machineName) }
             bots = r.bots
             pending = r.pending ?? []
@@ -116,6 +116,16 @@ struct BotsView: View {
         } catch {
             self.error = "Couldn't load your bots: \(error.localizedDescription)"
         }
+    }
+}
+
+extension BotsView {
+    /// GET /portal/api/bots (the sample list for Debug screenshots).
+    fileprivate func fetchList() async throws -> BotsListResponse {
+        #if DEBUG
+        if ScreenshotFixture.isEnabled, let r = ScreenshotFixture.bots { return r }
+        #endif
+        return try await APIClient.shared.request(baseURL: portal, path: "/portal/api/bots")
     }
 }
 
@@ -309,6 +319,13 @@ struct BotDetailView: View {
     }
 
     private func load() async {
+        #if DEBUG
+        if ScreenshotFixture.isEnabled {
+            bot = ScreenshotFixture.bots?.bots.first { $0.botId == botId }
+            machine = bot?.machine
+            return
+        }
+        #endif
         do {
             let r: BotDetailResponse = try await APIClient.shared.request(baseURL: portal, path: basePath)
             bot = r.bot

@@ -21,6 +21,10 @@ enum PurchaseMode: String {
     case inAppLightning = "in-app-lightning"
 
     static var configured: PurchaseMode {
+        #if DEBUG
+        // App Store screenshots show what the App Store build ships: no buying in the app.
+        if ScreenshotFixture.isEnabled { return .none }
+        #endif
         let raw = (Bundle.main.object(forInfoDictionaryKey: "EdgeCoderPurchaseMode") as? String)?.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
         return PurchaseMode(rawValue: raw) ?? .none
     }

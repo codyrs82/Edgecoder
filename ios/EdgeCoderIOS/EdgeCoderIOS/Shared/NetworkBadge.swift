@@ -19,6 +19,13 @@ final class NetworkStatusStore: ObservableObject {
     }
 
     func refresh() async {
+        #if DEBUG
+        if ScreenshotFixture.isEnabled {
+            network = ScreenshotFixture.network
+            cSats = ScreenshotFixture.cSats
+            return
+        }
+        #endif
         guard let s: Snapshot = try? await APIClient.shared.request(baseURL: APIClient.shared.config.portalBaseURL, path: "/portal/api/wallet/overview") else { return }
         network = s.network
         cSats = s.cSats

@@ -7,7 +7,7 @@ struct RootTabView: View {
     @EnvironmentObject private var chatRouter: ChatRouter
     @EnvironmentObject private var purchasePolicy: PurchasePolicy
     @EnvironmentObject private var networkStatus: NetworkStatusStore
-    @State private var selectedTab: AppTab = .chat
+    @State private var selectedTab: AppTab = RootTabView.initialTab
     @State private var showLoginSheet = false
 
     var body: some View {
@@ -46,6 +46,13 @@ struct RootTabView: View {
         }
         .tint(Theme.accent)
         .task {
+            #if DEBUG
+            // App Store screenshots: sample data on every tab, no sign-in, no network calls.
+            if ScreenshotFixture.isEnabled {
+                await networkStatus.refresh()
+                return
+            }
+            #endif
             // Debug screenshots: open on the Network tab with its sample data, no sign-in.
             if NetworkFixture.isEnabled {
                 selectedTab = .network
@@ -68,9 +75,11 @@ struct RootTabView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .edgeCoderBalanceChanged)) { _ in
+            if ScreenshotFixture.isEnabled { return }
             Task { await networkStatus.refresh() }
         }
         .onChange(of: sessionStore.isAuthenticated) { _, isAuthenticated in
+            if ScreenshotFixture.isEnabled { return }
             if !isAuthenticated { networkStatus.clear() }
             if isAuthenticated {
                 showLoginSheet = false
@@ -95,12 +104,23 @@ struct RootTabView: View {
     }
 }
 
-private enum AppTab {
+private enum AppTab: String {
     case chat
     case bots
     case wallet
     case machines
     case network
+}
+
+extension RootTabView {
+    /// Chat, or for Debug screenshots the tab `-screenshotTab` names (Network with `-networkFixture`).
+    fileprivate static var initialTab: AppTab {
+        #if DEBUG
+        if ScreenshotFixture.isEnabled { return ScreenshotFixture.openingTab.flatMap(AppTab.init(rawValue:)) ?? .chat }
+        if NetworkFixture.isEnabled { return .network }
+        #endif
+        return .chat
+    }
 }
 
 // MARK: - Login Sheet (replaces Auth tab)

@@ -39,6 +39,13 @@ struct MachinesView: View {
         guard sessionStore.isAuthenticated else { rows = []; loaded = false; error = ""; return }
         loading = true
         defer { loading = false; loaded = true }
+        #if DEBUG
+        if ScreenshotFixture.isEnabled, let m = ScreenshotFixture.machines {
+            rows = MachinesDirectory.rows(machines: m, bots: ScreenshotFixture.bots)
+            error = ""
+            return
+        }
+        #endif
         async let machines: MachinesListResponse = APIClient.shared.request(baseURL: portal, path: "/portal/api/machines")
         // Names and bot counts; the list still shows without them.
         async let bots = loadBots()
