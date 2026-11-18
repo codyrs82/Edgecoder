@@ -22,7 +22,8 @@
  * settings are unit-tested.
  *
  * Why a venv and not a container: hosts run with and without Docker, and the agent's sandbox may
- * use Docker for code runs; a venv needs only python3 (3.10+, every supported Ubuntu/Debian) and
+ * use Docker for code runs; a venv needs only Python 3.11+ (the system python3, or a pinned standalone
+ * CPython the script fetches when it is older, e.g. Ubuntu 22.04) and
  * python3-venv, pins every dependency by hash, and runs under the same systemd hardening as the
  * agent. No compiler is needed (wheels only).
  *
