@@ -26,6 +26,17 @@ enum PurchaseMode: String {
     }
 }
 
+/// Whether the Wallet offers "Withdraw now" (Info.plist `EdgeCoderWithdrawInApp`, build setting
+/// `EDGECODER_WITHDRAW_IN_APP` in project.yml): off in Release (Guideline 3.1.5(i) needs an organization
+/// developer account for wallet functions), on in Debug.
+enum WithdrawPolicy {
+    static var inApp: Bool { enabled(raw: Bundle.main.object(forInfoDictionaryKey: "EdgeCoderWithdrawInApp") as? String) }
+
+    static func enabled(raw: String?) -> Bool {
+        ["yes", "true", "1"].contains((raw ?? "").trimmingCharacters(in: .whitespaces).lowercased())
+    }
+}
+
 @MainActor
 final class PurchasePolicy: ObservableObject {
     static let shared = PurchasePolicy()

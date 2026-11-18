@@ -577,14 +577,21 @@ struct WalletView: View {
             kpi("Paid out", b.map { "\(WalletFormat.msat($0.paidMsat)) sats" } ?? "–", (b?.pendingMsat ?? 0) > 0 ? "\(WalletFormat.msat(b!.pendingMsat)) sats on the way" : " ", Theme.textPrimary)
         }
         Text("Payout method").font(.footnote).foregroundColor(Theme.textSecondary)
-        method("bolt.fill", "Lightning", "BTC. Withdraw now from any Lightning wallet, or get paid automatically to a Lightning address.", active: true)
+        method("bolt.fill", "Lightning", WithdrawPolicy.inApp
+               ? "BTC. Withdraw now from any Lightning wallet, or get paid automatically to a Lightning address."
+               : "BTC. Get paid automatically to a Lightning address, or withdraw from the EdgeCoder desktop app.", active: true)
         if let oc = onchainPolicy {
             method("bitcoinsign.circle", "Bitcoin on-chain", onchainPayoutText(oc), active: true, badge: "Available")
         } else {
             method("bitcoinsign.circle", "Bitcoin on-chain", "BTC. Batched payouts above a minimum. Not available yet.", active: false)
         }
         method("z.circle", "Zcash on-chain", "ZEC. Batched payouts. Not available yet.", active: false)
-        withdrawCard(policy: policy)
+        if WithdrawPolicy.inApp {
+            withdrawCard(policy: policy)
+        } else {
+            Text("Withdrawals are made in the EdgeCoder desktop app.").font(.footnote).foregroundColor(Theme.textSecondary)
+                .accessibilityIdentifier("walletWithdrawElsewhere")
+        }
         card {
             Text("Where we pay you").font(.headline).foregroundColor(Theme.textPrimary)
             row(destination?.destination?.kind == "onchain" ? "Bitcoin address" : "Lightning address", destination?.destination?.destination ?? "Not set")

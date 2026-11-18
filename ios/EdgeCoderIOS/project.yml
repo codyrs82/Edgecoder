@@ -8,7 +8,7 @@ settings:
     PRODUCT_NAME: EdgeCoder
     SWIFT_VERSION: "5.0"
     # Bump CURRENT_PROJECT_VERSION for every TestFlight upload (App Store Connect refuses a repeat).
-    CURRENT_PROJECT_VERSION: 37
+    CURRENT_PROJECT_VERSION: 39
     MARKETING_VERSION: 1.0.0
 targets:
   EdgeCoderIOS:
@@ -29,10 +29,15 @@ targets:
         # Buying cSats in the app (Core/PurchasePolicy.swift): none | link-out-us | in-app-lightning.
         # Release (TestFlight / App Store) ships `none` for App Store Review Guideline 3.1.1.
         EDGECODER_PURCHASE_MODE: none
+        # Withdrawing earnings in the app (Wallet > Withdraw now). Off in Release: Guideline 3.1.5(i)
+        # allows wallet functions only for apps from an organization developer account, and this app's
+        # account is an individual one. Earnings still show; withdrawals happen in the desktop app or on the web.
+        EDGECODER_WITHDRAW_IN_APP: NO
       configs:
         Debug:
           CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION: YES
           EDGECODER_PURCHASE_MODE: in-app-lightning
+          EDGECODER_WITHDRAW_IN_APP: YES
     info:
       path: EdgeCoderIOS/Info.plist
       properties:
@@ -41,6 +46,7 @@ targets:
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         CFBundleIconName: AppIcon
         EdgeCoderPurchaseMode: $(EDGECODER_PURCHASE_MODE)
+        EdgeCoderWithdrawInApp: $(EDGECODER_WITHDRAW_IN_APP)
         NSBluetoothAlwaysUsageDescription: EdgeCoder uses Bluetooth to share your device's AI compute with nearby machines when internet is unavailable, enabling local AI task execution without a coordinator.
         NSBluetoothPeripheralUsageDescription: EdgeCoder advertises as a Bluetooth peripheral to allow nearby devices to discover and route tasks.
         NSLocalNetworkUsageDescription: EdgeCoder runs a local HTTP server and connects to mesh peers on your network for P2P task routing and execution.

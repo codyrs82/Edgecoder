@@ -84,6 +84,7 @@
 		E5462A99E8D054EEC8753F5C /* NetworkView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33DBE81C547DC218A3D7A47F /* NetworkView.swift */; };
 		E700BAB29852EFE2EB0E7712 /* BuyLimits.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A85EE2204D379E8381A0ED3 /* BuyLimits.swift */; };
 		EAD0E0A47F4D49F94EBC2E1B /* BuyLimitsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A736286E7E0FBDBE10BEC4AB /* BuyLimitsTests.swift */; };
+		EB676822AE7C7C5703C3A069 /* WithdrawPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 18789D1C74DAE9D00249C657 /* WithdrawPolicyTests.swift */; };
 		EBFE08F6FB2BABEF42CC528A /* SwarmView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29F9EA12DD9A5B2CCE2A292D /* SwarmView.swift */; };
 		F09719A20AF9E871E5CCA8E3 /* ServedFormatterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85A1812030202071FFC1D3AA /* ServedFormatterTests.swift */; };
 		F2BFB001CBA9534326B90B6B /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 886F776460D1ACBCEEE0FF3E /* APIClient.swift */; };
@@ -103,6 +104,7 @@
 		0EE04C29E6C1D9B6FBF14683 /* PortalChatClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortalChatClient.swift; sourceTree = "<group>"; };
 		12367B62AC1DC0A50FD34CD0 /* MachinesModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MachinesModels.swift; sourceTree = "<group>"; };
 		1692E1BB28D7EB00FF6D8829 /* MessageBubble.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageBubble.swift; sourceTree = "<group>"; };
+		18789D1C74DAE9D00249C657 /* WithdrawPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WithdrawPolicyTests.swift; sourceTree = "<group>"; };
 		1C6ACFF4694F13D01FBB0C73 /* BLETxV3VectorCheck.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLETxV3VectorCheck.swift; sourceTree = "<group>"; };
 		1F0CE2074D38918B8392965A /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		23F37DFB88500BCAC235C0B6 /* PasskeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasskeyManager.swift; sourceTree = "<group>"; };
@@ -356,6 +358,7 @@
 				3B3FE43571559418C65CAD0D /* RequestSigningVectorCheck.swift */,
 				09E3886017E14BF423BA6139 /* RequestSigningVectorsTests.swift */,
 				85A1812030202071FFC1D3AA /* ServedFormatterTests.swift */,
+				18789D1C74DAE9D00249C657 /* WithdrawPolicyTests.swift */,
 			);
 			path = EdgeCoderIOSTests;
 			sourceTree = "<group>";
@@ -517,6 +520,7 @@
 				5F4E1B6FEB2F6BB2F92F2470 /* ServedFormatter.swift in Sources */,
 				F09719A20AF9E871E5CCA8E3 /* ServedFormatterTests.swift in Sources */,
 				B263F8DC8BFCDBFE9C07BBDC /* Theme.swift in Sources */,
+				EB676822AE7C7C5703C3A069 /* WithdrawPolicyTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -590,6 +594,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = 63CL88WY7G;
 				EDGECODER_PURCHASE_MODE = none;
+				EDGECODER_WITHDRAW_IN_APP = NO;
 				INFOPLIST_FILE = EdgeCoderIOS/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -611,6 +616,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = 63CL88WY7G;
 				EDGECODER_PURCHASE_MODE = "in-app-lightning";
+				EDGECODER_WITHDRAW_IN_APP = YES;
 				INFOPLIST_FILE = EdgeCoderIOS/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -688,7 +694,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 37;
+				CURRENT_PROJECT_VERSION = 39;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -753,7 +759,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 37;
+				CURRENT_PROJECT_VERSION = 39;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
