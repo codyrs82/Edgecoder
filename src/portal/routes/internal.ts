@@ -6,6 +6,9 @@ import { z } from "zod";
 import type { InternalRoutesDeps } from "../server.js";
 import { dnsLabelConflicts } from "../dns-manager.js";
 import { moduleLogger } from "../../common/logger.js";
+import { QUIET_ROUTE, logQuietRouteRefusals } from "../quiet-routes.js";
+
+export { QUIET_ROUTE };
 
 const logger = moduleLogger("portal-internal");
 
@@ -15,7 +18,11 @@ export function registerInternalRoutes(internal: FastifyInstance, { autoRequestH
     if (!requireInternalToken(req as any, reply)) return reply;
   });
 
-  internal.post("/internal/nodes/validate", async (req, reply) => {
+  // Coordinators call validate and lookup several times a second: their request lines are dropped
+  // (QUIET_ROUTE); refused tokens (401/403) and 5xx still log at warn.
+  logQuietRouteRefusals(internal);
+
+  internal.post("/internal/nodes/validate", QUIET_ROUTE, async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     if (!requireInternalToken(req as any, reply)) return;
     const body = z
@@ -156,7 +163,7 @@ export function registerInternalRoutes(internal: FastifyInstance, { autoRequestH
     return reply.send({ ok: true, node: updated });
   });
 
-  internal.post("/internal/nodes/lookup", async (req, reply) => {
+  internal.post("/internal/nodes/lookup", QUIET_ROUTE, async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     if (!requireInternalToken(req as any, reply)) return;
     const body = z.object({ nodeIds: z.array(z.string()).max(200) }).parse(req.body);

@@ -8,7 +8,10 @@ and **read a page** (`read_page`), and its answer cites the sources it used.
   when a question needs them: news and current events, prices, release dates and versions of
   software, a specific page or document, or anything you ask it to look up. General coding help,
   explanations, writing and maths are answered directly, without searching (the system note,
-  `WEB_SYSTEM_NOTE` in `src/web-tool/tools.ts`). Answers list their numbered sources under the
+  `webSystemNote()` in `src/web-tool/tools.ts`, which also tells the model it has live web access,
+  gives today's date in UTC and says never to claim it has no internet or real-time access). A
+  question that plainly needs fresh facts is also **searched by the server first** (Grounding,
+  below), because small open models often don't call the tool on their own. Answers list their numbered sources under the
   reply, with links, and a footer such as `2 searches · 1 page · 1.2 cSats`. While it works the
   reply shows "Searching the web…" and "Reading example.com…".
 - **A quiet indicator, not a toggle.** Under the message box the composer shows **Web: Auto**. Its
@@ -26,10 +29,48 @@ and **read a page** (`read_page`), and its answer cites the sources it used.
   search is made just to fail: the chat answers without the web, the indicator says **needs cSats**,
   and the chat notes "Web search needs cSats" once under the reply. The same goes for an account
   over the hour's search limit.
+- **Free on your own machine.** A chat whose model runs on your own machine (the desktop app's
+  model on this computer, **My machines**, Auto kept to your machines, or the web chat's Auto when
+  it picks one of your machines) searches and reads pages **for free**, even with no cSats: the
+  footer says `2 searches · free (your machine)` and "needs cSats" is never shown for it. There is
+  a daily allowance (100 searches and 200 page reads per account, and 5000 free calls in all per
+  coordinator); past it the call is paid as usual (cSats when the balance allows; with none the
+  chat answers without the web and notes "Today's free web searches on your machine are used up").
+  See [Free on your own machine](#free-on-your-own-machine).
 - **Per reply**, at most `WEB_MAX_SEARCHES_PER_REPLY` searches (3) and `WEB_MAX_READS_PER_REPLY`
   page reads (4); past that a call is refused before it reaches EdgeCoder (it costs nothing) and the
   model answers with what it has. A call refused for cSats (402), the hour's limit (429) or setup
   (503) turns the web off for the rest of that reply.
+
+## Grounding (server-side search for time-sensitive questions)
+
+Small and medium open models (qwen2.5/3/3.5, qwen3-coder) don't reliably decide to call a tool, and
+often answer "as an AI I don't have real-time access" with the tool in front of them. So the shared
+web layer (`webGrounding` in `src/web-tool/tools.ts`, used by the portal chat, the desktop app's
+chats and bots) does two things around the agent loop:
+
+- **Search first.** Before the first model turn, `needsFreshInfo` (a cheap, deterministic check of the
+  latest user message) decides whether it needs fresh information. It fires on a URL; on an explicit
+  "search / look up / google / the internet / online"; on plainly current questions (today, tonight,
+  this week, news, what's new, weather, scores, who won, prices, the latest version or release of
+  something, zero-days, CVEs); and on weaker cues (latest, current, recent, now, version, release, a
+  year from 2025 on, a date) unless the message reads like a coding question. Code blocks and
+  inline code are ignored, and a message with code needs an explicit ask or a URL. When it fires,
+  the server runs one `web_search` with the message as the query (code removed, at most 200
+  characters; a bare "search the internet" searches the previous question) and puts it in the
+  conversation as the assistant's own tool call and its result, so the model answers from it and
+  may search or read more. It goes through the same `WebToolSession.run` as a model's call: same
+  billing to the account, same hourly cap, and it counts toward the reply's searches; the reply shows
+  "Searching the web…" and the sources as usual. Not in **Manual** (web calls ask first), and for
+  bots only on a message the owner wrote (a schedule's or GitHub's prompt never becomes a search on
+  its own). Coding questions don't trigger it, so they cost nothing.
+- **Post-check.** Once web results were provided, a sentence such as "I don't have access to
+  real-time data" or "As an AI I can't browse the internet" is dropped from the streamed answer
+  (`DisclaimerFilter`, held back only to the end of the current sentence). Stripping was chosen over
+  a retry turn: no extra model call, cost or wait, it works the same on every backend, and the rest of
+  the answer is kept.
+
+The portal's `portal_web_loop` log line carries `grounded: true` when the server searched first.
 
 ## Where it runs
 
@@ -38,9 +79,9 @@ IDE server, a bot or the web portal's chat to a coordinator:
 
 | Endpoint (coordinator) | Body | Answer |
 | --- | --- | --- |
-| `POST /v1/tools/web/status` | `{}` | `configured`, prices, `balanceCSats`, `canAfford`, what's left of the hour |
-| `POST /v1/tools/web/search` | `{query, count≤8, requestId}` | `{query, results: [{title, url, snippet}], cSats}` |
-| `POST /v1/tools/web/read` | `{url, requestId}` | `{url, title, text (≤20k chars), truncated, contentType, cSats}` |
+| `POST /v1/tools/web/status` | `{ownMachine?}` | `configured`, prices, `balanceCSats`, `canAfford`, `free` (+ free calls left today with the basis), what's left of the hour |
+| `POST /v1/tools/web/search` | `{query, count≤8, requestId, ownMachine?}` | `{query, results: [{title, url, snippet}], cSats, free?}` |
+| `POST /v1/tools/web/read` | `{url, requestId, ownMachine?}` | `{url, title, text (≤20k chars), truncated, contentType, cSats, free?}` |
 
 Callers are account-authenticated: a signed agent (the desktop app reaches it through its local
 forwarder, `/forward/v1/tools/web/*`; the signer's owner is billed) or the portal with its service
@@ -65,6 +106,36 @@ apps hide the Web indicator. Set it on each coordinator with:
 ```sh
 fly secrets set BRAVE_SEARCH_API_KEY=<subscription token> -a <coordinator app>
 ```
+
+## Free on your own machine
+
+The caller says `ownMachine: true` in the body of `/v1/tools/web/{status,search,read}`. The
+coordinator (`ownMachineBasis` in `src/web-tool/basis.ts`) accepts it only from a caller that can
+vouch for it; otherwise it is ignored and the call is paid:
+
+- **The portal** (service token) sets it itself, from the compute it resolved for the chat:
+  `compute.target === "mine"`, or Auto when one of the user's machines has a model that calls tools
+  (the chat then runs there). Nothing in the chat request can set it (the body schema drops unknown
+  fields), and the hosted `/v1/tools/web/*` relay (an API key) drops a client's `ownMachine`.
+- **A signed agent** (the desktop's IDE server through its local forwarder) may claim it for this
+  computer's model, **My machines** and Auto with policy `local_only` / `mine_only`, and only when
+  the agent is linked to the very account the call is billed to (an unlinked agent can't). Frontier
+  models and the network pay as usual.
+
+Free calls still count toward the hour's limits. Per coordinator and UTC day:
+`WEB_FREE_OWN_MACHINE_SEARCHES_PER_DAY` (100) and `WEB_FREE_OWN_MACHINE_READS_PER_DAY` (200) per
+account, and `WEB_FREE_GLOBAL_PER_DAY` (5000) free calls in all, a cost circuit-breaker. Past a cap
+the call falls back to paid. A free call moves no cSats; its answer carries `free: true` and
+`cSats: 0`. With the basis, `/status` reports `free` (the next search costs nothing) and
+`freeSearchesLeftToday` / `freeReadsLeftToday`; the IDE server's and the portal's status endpoints
+pass these on with `ownMachine`, and say `reason: "free_used"` (not `needs_csats`) when an own-machine
+chat has used today's free calls and has no cSats. The chat streams' `web` totals and the `done`
+event's `web` carry `free: true` when every call of the reply was free.
+
+For ops, free calls are counted in `usage_records` (no migration): one record per account per day
+per coordinator, `kind: "web"`, `placement: "mine"`, `costMsat: 0`, with `webFree: {searches,
+reads}`, rewritten after each free call. `/account/usage` leaves them out of the request list and
+totals and reports them as `webFree`.
 
 ## read_page safety (`src/web-tool/ssrf.ts`, `fetch-page.ts`)
 
@@ -120,5 +191,7 @@ permission. With it:
   the run stops like any over-budget run.
 - Per reply (IDE server and portal): `WEB_MAX_SEARCHES_PER_REPLY` (3) and `WEB_MAX_READS_PER_REPLY`
   (4), each 0 to 50; a bot run counts as one reply.
-- Prices: `WEB_SEARCH_CSATS` (0.5) and `WEB_READ_CSATS` (0.2). All these variables are in the
+- Prices: `WEB_SEARCH_CSATS` (0.5) and `WEB_READ_CSATS` (0.2). Free on your own machine within
+  the daily caps (`WEB_FREE_OWN_MACHINE_SEARCHES_PER_DAY`, `WEB_FREE_OWN_MACHINE_READS_PER_DAY`,
+  `WEB_FREE_GLOBAL_PER_DAY`). All these variables are in the
   [environment reference](../site-docs/reference/environment-variables.md#web-tool-coordinator).

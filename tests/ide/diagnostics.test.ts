@@ -24,7 +24,9 @@ describe("checker output parsing", () => {
       { path: "app/src/main.rs", line: 12, column: 5, severity: "error", message: "cannot find value `x` in this scope[E0425]", source: "cargo" },
     ]);
   });
-  it("python syntax errors (real interpreter output)", () => {
+  // Windows runners: `python3` is the Store alias or a cold interpreter that can outlast the test's
+  // timeout (seen at 24 s in CI); the parser itself is covered on Linux and macOS.
+  it.skipIf(process.platform === "win32")("python syntax errors (real interpreter output)", () => {
     const dir = mkdtempSync(join(tmpdir(), "pyc-"));
     try {
       writeFileSync(join(dir, "bad.py"), "x = 1\ndef f(:\n    pass\n");

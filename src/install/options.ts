@@ -27,6 +27,12 @@ export interface InstallOptions {
   parallel?: number;
   /** Tuning: how long Ollama keeps the model loaded (AGENT_MODEL_KEEP_ALIVE and OLLAMA_KEEP_ALIVE). */
   keepAlive?: string;
+  /**
+   * --ollama-env KEY=VALUE (repeatable): extra environment for every instance's Ollama server
+   * (e.g. OLLAMA_VULKAN=1 for AMD cards ROCm does not support). Recorded in EDGECODER_INSTALL_ARGS
+   * and kept by every later run (an update, a package upgrade) until changed; KEY= removes one.
+   */
+  ollamaEnv?: Record<string, string>;
   /** Engine for every instance (engine.ts). Unset: each instance keeps the engine it runs now (Ollama on a first install). */
   engine?: EngineKind;
   /** vLLM: the served Hugging Face id (VLLM_MODEL), model calls at once (VLLM_MAX_SLOTS), the server URL (VLLM_URL). */
@@ -112,6 +118,7 @@ export const INSTALL_OPTIONS: OptionSpec[] = [
   { flag: "--context-window", arg: "N", description: "Context window (tokens, 2048-131072) every network call is served with (AGENT_CONTEXT_WINDOW). Default: sized by memory and model." },
   { flag: "--parallel", arg: "N", description: "Parallel model calls per instance, 1-16 (AGENT_PARALLEL_INFERENCE and the instance's OLLAMA_NUM_PARALLEL). Default: sized by VRAM and model." },
   { flag: "--keep-alive", arg: "DUR", description: "How long Ollama keeps the model loaded after a call: a duration (30m, 1h30m), seconds, or -1 for always (AGENT_MODEL_KEEP_ALIVE and OLLAMA_KEEP_ALIVE). Default 30m." },
+  { flag: "--ollama-env", arg: "KEY=VALUE", description: "Extra environment for every instance's Ollama server, repeatable (e.g. --ollama-env OLLAMA_VULKAN=1 --ollama-env GGML_VK_VISIBLE_DEVICES=0,1 for AMD cards ROCm does not support). Kept by later runs and updates; KEY= removes one. Settings in a systemd drop-in (/etc/systemd/system/edgecoder-ollama-<n>.service.d/*.conf) also survive updates and win over these." },
   { flag: "--engine", arg: "ollama|vllm|mlx", description: "Engine that serves each instance's model (docs/inference-engines.md). vllm: Linux NVIDIA hosts, edgecoder-vllm@<n> serves the model and the instance's Ollama stays off. mlx: Apple silicon, you run mlx_lm.server. Default: each instance keeps the engine it runs now (Ollama on a first install), so re-runs and upgrades never switch engines." },
   { flag: "--vllm-model", arg: "ORG/REPO", description: "vLLM: the Hugging Face model id vLLM serves (VLLM_MODEL). Implies --engine vllm. Default: the one already set, else vllm-<n>.env's VLLM_MODEL_ID." },
   { flag: "--vllm-slots", arg: "N", description: "vLLM: model calls at once, 1-16 (VLLM_MAX_SLOTS). Implies --engine vllm. Default: the one already set, else derived from vLLM's KV cache." },
@@ -198,6 +205,11 @@ export function parseInstallArgs(argv: string[], env: NodeJS.ProcessEnv = {}): I
       case "--context-window": o.contextWindow = checkContextWindow(val()); break;
       case "--parallel": o.parallel = checkParallel(val()); break;
       case "--keep-alive": o.keepAlive = checkKeepAlive(val()); break;
+      case "--ollama-env": {
+        const [k, v] = checkOllamaEnv(val());
+        o.ollamaEnv = { ...(o.ollamaEnv ?? {}), [k]: v };
+        break;
+      }
       case "--engine": o.engine = checkEngine(val()); break;
       case "--vllm-model": o.vllmModel = checkVllmModel(val()); break;
       case "--vllm-slots": o.vllmSlots = checkVllmSlots(val()); break;
@@ -261,6 +273,29 @@ function checkKeepAlive(v: string): string {
   return v;
 }
 
+/** Variables the installer sets itself for each Ollama: changing them would break the instance. */
+const OLLAMA_ENV_RESERVED = new Set(["OLLAMA_HOST", "OLLAMA_MODELS", "HOME", "PATH", "LD_PRELOAD"]);
+const OLLAMA_ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+/** Values that are safe in a systemd Environment= line, a launchd plist and a Windows .cmd wrapper. */
+const OLLAMA_ENV_VALUE = /^[A-Za-z0-9._:/,=+@-]{0,256}$/;
+
+/** "KEY=VALUE" -> [KEY, VALUE]; an empty VALUE means "remove". Throws on anything unsafe. */
+export function checkOllamaEnv(raw: string): [string, string] {
+  const eq = raw.indexOf("=");
+  if (eq <= 0) throw new Error("--ollama-env must be KEY=VALUE");
+  const k = raw.slice(0, eq);
+  const v = raw.slice(eq + 1);
+  if (!OLLAMA_ENV_KEY.test(k)) throw new Error(`--ollama-env: invalid variable name ${JSON.stringify(k)}`);
+  if (OLLAMA_ENV_RESERVED.has(k.toUpperCase())) throw new Error(`--ollama-env: ${k} is set by the installer for each instance and cannot be overridden`);
+  if (!OLLAMA_ENV_VALUE.test(v)) throw new Error(`--ollama-env: ${k} may only contain letters, digits and . _ : / , = + @ - (up to 256)`);
+  return [k, v];
+}
+
+/** The set without removals (empty values). */
+export function effectiveOllamaEnv(env: Record<string, string> | undefined): Record<string, string> {
+  return Object.fromEntries(Object.entries(env ?? {}).filter(([, v]) => v !== ""));
+}
+
 export type InstallTuning = Pick<InstallOptions, "contextWindow" | "parallel" | "keepAlive">;
 
 /** The env-file line that records which tuning flags set the values, so a later run can keep them. */
@@ -301,13 +336,19 @@ export function tuningFromEnvFile(text: string): InstallTuning {
  * tuning flag not given now takes the value the previous run recorded in `previousEnvFile`.
  */
 export function inheritTuning(o: InstallOptions, previousEnvFile: string | undefined): InstallOptions {
-  if (!previousEnvFile) return o;
+  if (!previousEnvFile) return { ...o, ...(o.ollamaEnv ? { ollamaEnv: effectiveOllamaEnv(o.ollamaEnv) } : {}) };
   const prev = tuningFromEnvFile(previousEnvFile);
+  // --ollama-env is kept by every re-run (not only --keep-config): losing OLLAMA_VULKAN=1 on a
+  // package upgrade would put an AMD host back on its CPU. Given now: merged over the recorded
+  // set, an empty value removing that key.
+  const recorded = installArgsFromEnvFile(previousEnvFile).ollamaEnv;
+  const merged = effectiveOllamaEnv({ ...(recorded ?? {}), ...(o.ollamaEnv ?? {}) });
   return {
     ...o,
     contextWindow: o.contextWindow ?? prev.contextWindow,
     parallel: o.parallel ?? prev.parallel,
-    keepAlive: o.keepAlive ?? prev.keepAlive
+    keepAlive: o.keepAlive ?? prev.keepAlive,
+    ...(Object.keys(merged).length ? { ollamaEnv: merged } : { ollamaEnv: undefined })
   };
 }
 
@@ -318,7 +359,7 @@ export function inheritTuning(o: InstallOptions, previousEnvFile: string | undef
  */
 export const INSTALL_ARGS_ENV_KEY = "EDGECODER_INSTALL_ARGS";
 
-export type RecordedArgs = Partial<Pick<InstallOptions, "model" | "layout" | "gpusPerInstance" | "instances" | "sandbox" | "agentIdPrefix" | "ollamaBin">>;
+export type RecordedArgs = Partial<Pick<InstallOptions, "model" | "layout" | "gpusPerInstance" | "instances" | "sandbox" | "agentIdPrefix" | "ollamaBin" | "ollamaEnv">>;
 
 const RECORD_VALUE = /^[A-Za-z0-9._:/@+-]{1,256}$/;
 
@@ -337,6 +378,8 @@ export function renderInstallArgs(o: InstallOptions): string | undefined {
   if (o.sandbox !== "auto" && (given.has("--sandbox") || o.keepConfig)) add("sandbox", o.sandbox);
   if (o.agentIdPrefix !== undefined) add("agent-id-prefix", o.agentIdPrefix);
   if (o.ollamaBin !== undefined) add("ollama-bin", o.ollamaBin);
+  // ollama-env:KEY=<value, percent-encoded> (a value may hold commas: GGML_VK_VISIBLE_DEVICES=1,2,3,4).
+  for (const [k, v] of Object.entries(effectiveOllamaEnv(o.ollamaEnv))) parts.push(`ollama-env:${k}=${encodeURIComponent(v)}`);
   return parts.length ? parts.join(",") : undefined;
 }
 
@@ -349,6 +392,14 @@ export function installArgsFromEnvFile(text: string): RecordedArgs {
     const i = part.indexOf(":");
     if (i < 0) continue;
     const [k, v] = [part.slice(0, i), part.slice(i + 1)];
+    if (k === "ollama-env") {
+      try {
+        const eq = v.indexOf("=");
+        const [ek, ev] = checkOllamaEnv(eq > 0 ? `${v.slice(0, eq)}=${decodeURIComponent(v.slice(eq + 1))}` : v);
+        if (ev !== "") out.ollamaEnv = { ...(out.ollamaEnv ?? {}), [ek]: ev };
+      } catch { /* a tampered or malformed entry is dropped */ }
+      continue;
+    }
     if (!RECORD_VALUE.test(v)) continue;
     const n = Number(v);
     if (k === "model") out.model = v;

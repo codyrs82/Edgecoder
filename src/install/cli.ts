@@ -10,12 +10,12 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, closeSync, cpSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { detectHardware, type HostHardware, type Probe } from "./hardware.js";
+import { detectHardware, vulkanHint, type HostHardware, type Probe } from "./hardware.js";
 import { helpText, inheritConfig, inheritTuning, parseInstallArgs, parseTokensFile, TOKEN_PATTERN, validateInstallOptions, type InstallOptions } from "./options.js";
 import { planInstall, type AgentInstance, type InstallPlan } from "./plan.js";
 import { HOST_AGREEMENT_VERSION } from "../common/legal-notices.js";
 import { appDirProblems, planBinary, stageBinary, type BinFs, type StagePlan } from "./binaries.js";
-import { engineProblems, instanceVllmProfile, legacyVllmMarkerPath, parseEnvFile, resolveInstanceEngine, VLLM_PROFILE_AUTO, vllmEnvPath, vllmInstalledPaths, vllmMarkerPath, vllmProfileChoices, type InstanceEngine } from "./engine.js";
+import { engineProblems, instanceVllmProfile, legacyVllmMarkerPath, ollamaDropInDir, parseEnvFile, resolveInstanceEngine, VLLM_PROFILE_AUTO, vllmEnvPath, vllmInstalledPaths, vllmMarkerPath, vllmProfileChoices, type InstanceEngine } from "./engine.js";
 import { allocateOllamaPorts, portOwner } from "./ports.js";
 import { RELEASE_INFO_FILE, runUpdate, updateStatusLines } from "./update.js";
 import { realUpdateDeps } from "./update-host.js";
@@ -374,7 +374,10 @@ export function redactPlan(plan: InstallPlan): InstallPlan {
 function describeHardware(hw: HostHardware): string {
   const lines = [`Host ${hw.hostname}: ${hw.platform}/${hw.arch}, ${hw.cpuCores} cores (${hw.cpuModel}), ${hw.ramGb} GB RAM${hw.unifiedMemory ? " (unified)" : ""}`];
   if (hw.gpus.length === 0) lines.push("GPUs: none detected (CPU class)");
-  for (const g of hw.gpus) lines.push(`GPU ${g.index}: ${g.model} ${g.vramGb} GB ${g.vendor}${g.datacenter ? " datacenter" : ""}`);
+  for (const g of hw.gpus) {
+    const extra = [g.source === "sysfs" ? "found in sysfs" : "", g.gfxTarget ? `${g.gfxTarget}${g.rocmSupported === false ? ", not supported by ROCm" : ""}` : "", g.vulkanIndex !== undefined ? `Vulkan device ${g.vulkanIndex}` : ""].filter(Boolean).join(", ");
+    lines.push(`GPU ${g.index}: ${g.model} ${g.vramGb} GB ${g.vendor}${g.datacenter ? " datacenter" : ""}${extra ? ` (${extra})` : ""}`);
+  }
   return lines.join("\n");
 }
 
@@ -389,6 +392,28 @@ function describePlan(plan: InstallPlan, p: ServicePaths): string {
   lines.push(`Config dir: ${p.configDir}   App dir: ${p.appDir}   Node: ${p.nodeBin}   Ollama: ${p.ollamaBin}`);
   for (const w of plan.warnings) lines.push(`warning: ${w}`);
   return lines.join("\n");
+}
+
+/**
+ * Environment= lines a host put in its own drop-ins for instance 0's Ollama
+ * (/etc/systemd/system/edgecoder-ollama-0.service.d/*.conf; apply and update never touch them), so
+ * the Vulkan hint is not repeated to a host that already turned Vulkan on by hand.
+ */
+export function hostOllamaEnv(read: (path: string) => string | undefined, list: (dir: string) => string[], index = 0): Record<string, string> {
+  const dir = ollamaDropInDir(index);
+  const out: Record<string, string> = {};
+  for (const name of list(dir).filter((n) => n.endsWith(".conf")).sort()) {
+    for (const line of (read(`${dir}/${name}`) ?? "").split(/\r?\n/)) {
+      const m = /^\s*Environment\s*=\s*(.+)$/.exec(line);
+      if (!m) continue;
+      for (const tok of m[1].match(/"[^"]*"|\S+/g) ?? []) {
+        const kv = tok.replace(/^"|"$/g, "");
+        const eq = kv.indexOf("=");
+        if (eq > 0) out[kv.slice(0, eq)] = kv.slice(eq + 1);
+      }
+    }
+  }
+  return out;
 }
 
 function listDirOrEmpty(dir: string): string[] {
@@ -517,7 +542,8 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
   const hw = detectHardware({ probe, platform: host.platform });
 
   if (opts.command === "detect") {
-    console.log(opts.json ? JSON.stringify(hw, null, 2) : describeHardware(hw));
+    const hint = vulkanHint(hw, { ...hostOllamaEnv(readIfPresent, listDirOrEmpty), ...(inheritTuning(opts, readIfPresent(envFilePath(p, { index: 0 } as AgentInstance))).ollamaEnv ?? {}) });
+    console.log(opts.json ? JSON.stringify(hw, null, 2) : `${describeHardware(hw)}${hint ? `\nhint: ${hint}` : ""}`);
     return 0;
   }
   if (opts.command === "status") {
@@ -576,6 +602,9 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
   }
   plan = planInstall(hw, opts, dockerPresent);
   if (naming.error) plan.warnings.push(naming.error);
+  // AMD / Intel cards only Vulkan can drive, and Vulkan not on yet: the exact flags.
+  const hint = vulkanHint(hw, { ...hostOllamaEnv(readIfPresent, listDirOrEmpty), ...(opts.ollamaEnv ?? {}) }, plan.instances.length);
+  if (hint) plan.warnings.push(hint);
   if (host.platform === "linux") {
     const problems = planVllmInstalls(opts, plan, p, (f) => host.exists(f));
     if (problems.length && opts.command === "plan") plan.warnings.push(...problems);

@@ -16,6 +16,8 @@ export interface WebUsage {
   pages: number;
   cSats: number;
   sources: WebSource[];
+  /** Every call was free: the chat ran on your own machine. */
+  free?: boolean;
 }
 
 /** /v1/ide/web/status (IDE server) or /portal/api/web/status (portal) for the chat's model. */
@@ -24,13 +26,17 @@ export interface WebStatus {
   configured: boolean;
   toolsSupported: boolean;
   /** Why it can't be on: not set up on the servers, the model can't call tools, no cSats, or unreachable. */
-  reason?: "not_configured" | "no_tools" | "needs_csats" | "rate_limited" | "offline" | "unreachable" | null;
+  reason?: "not_configured" | "no_tools" | "needs_csats" | "free_used" | "rate_limited" | "offline" | "unreachable" | null;
   message?: string;
   searchCSats?: number;
   readCSats?: number;
   balanceCSats?: number | null;
   maxSearchesPerReply?: number;
   maxReadsPerReply?: number;
+  /** The chat runs on your own machine and the web is free for it now (no cSats needed). */
+  free?: boolean;
+  freeSearchesLeftToday?: number;
+  freeReadsLeftToday?: number;
 }
 
 /** A chat's web: "auto" (the model searches when a question needs fresh information) or "off". */
@@ -57,8 +63,13 @@ export function webIndicatorView(status: WebStatus | null | undefined, mode: Web
   if (!status.toolsSupported || status.reason === "no_tools") return { visible: true, unavailable: true, label: "Web", note: "", title: UNAVAILABLE_TITLE };
   const prices = status.searchCSats !== undefined ? ` (${status.searchCSats} cSats a search, ${status.readCSats ?? 0} a page)` : "";
   if (mode === "off") return { visible: true, unavailable: false, label: "Web: Off", note: "", title: "Web is off for this chat. Click to change." };
-  if (status.reason === "needs_csats") return { visible: true, unavailable: false, label: "Web: Auto", note: "needs cSats", title: `${NEEDS_CSATS_NOTE}${prices}. This chat answers without the web until you top up.` };
+  // "needs cSats" is for chats on the network; on your own machine the web is free (daily allowance).
+  if (status.reason === "needs_csats" && !status.free) return { visible: true, unavailable: false, label: "Web: Auto", note: "needs cSats", title: `${NEEDS_CSATS_NOTE}${prices}. This chat answers without the web until you top up.` };
   if (!status.available) return { visible: true, unavailable: false, label: "Web: Auto", note: "", title: status.message ?? "Web search isn't available right now." };
+  if (status.free) {
+    const left = typeof status.freeSearchesLeftToday === "number" ? ` (${status.freeSearchesLeftToday} free searches left today)` : "";
+    return { visible: true, unavailable: false, label: "Web: Auto", note: "", title: `Web: Auto. The model searches the web when a question needs fresh information, and cites its sources. Free on your machine${left}.` };
+  }
   return { visible: true, unavailable: false, label: "Web: Auto", note: "", title: `Web: Auto. The model searches the web when a question needs fresh information, and cites its sources${prices}.` };
 }
 
@@ -106,14 +117,16 @@ export function setWebAutoDefault(on: boolean, store: Pick<Storage, "setItem"> |
 /** The default, live (Settings changes it; the chat reads it). */
 export const webAutoStore = writable<boolean>(webAutoDefault());
 
-/** "2 searches · 1 page · 1.2 cSats"; "" when the web wasn't used. */
-export function webFooter(u: Pick<WebUsage, "searches" | "pages" | "cSats"> | undefined): string {
+export const FREE_ON_YOUR_MACHINE = "free (your machine)";
+
+/** "2 searches · 1 page · 1.2 cSats", or "2 searches · free (your machine)"; "" when the web wasn't used. */
+export function webFooter(u: Pick<WebUsage, "searches" | "pages" | "cSats" | "free"> | undefined): string {
   if (!u) return "";
   const parts: string[] = [];
   if (u.searches) parts.push(`${u.searches} search${u.searches === 1 ? "" : "es"}`);
   if (u.pages) parts.push(`${u.pages} page${u.pages === 1 ? "" : "s"}`);
   if (parts.length === 0) return "";
-  parts.push(`${Number(u.cSats.toFixed(2))} cSats`);
+  parts.push(u.free && !u.cSats ? FREE_ON_YOUR_MACHINE : `${Number(u.cSats.toFixed(2))} cSats`);
   return parts.join(" · ");
 }
 
@@ -133,7 +146,7 @@ export function webUsageOf(event: Record<string, unknown>): WebUsage | null {
         .filter((s) => typeof s.url === "string" && /^https?:\/\//i.test(s.url as string))
         .map((s) => ({ n: n(s.n), title: String(s.title ?? s.url), url: String(s.url) }))
     : [];
-  return { searches: n(event.searches), pages: n(event.pages), cSats: n(event.cSats), sources };
+  return { searches: n(event.searches), pages: n(event.pages), cSats: n(event.cSats), sources, ...(event.free === true ? { free: true } : {}) };
 }
 
 /** The status lines the web tool sends ("Searching the web…", "Reading example.com…"). */

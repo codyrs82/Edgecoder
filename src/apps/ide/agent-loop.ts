@@ -280,6 +280,18 @@ export interface AgentLoopDeps {
    * ends with the plan for the user to approve.
    */
   plan?: boolean;
+  /**
+   * Tool calls the server makes before the model's first turn (web grounding: one web_search for a
+   * question that needs fresh facts, src/web-tool/tools.ts groundingSearch). Each runs through
+   * runTool like a model's call (permission, events, billing), and goes into the conversation as the
+   * assistant's own tool call and its result, so the model answers from it (and may search more).
+   */
+  prefetch?: Array<{ tool: ToolName; args: Record<string, unknown> }>;
+  /**
+   * Rewrites the answer's text as it streams (web: drops "I have no real-time access" sentences once
+   * results were given, DisclaimerFilter). end() is called when the loop finishes.
+   */
+  textFilter?: { push(text: string): string; end(): string };
 }
 
 /** Added to the system prompt in plan mode. */
@@ -352,6 +364,16 @@ function callLabel(tool: string, args: Record<string, unknown>, result: string):
 }
 
 const KNOWN_TOOLS = new Set<string>(TOOL_DEFINITIONS.map((t) => t.name));
+
+/** A native tool call or result as the text format writes it (```tool_call block, "[Tool x result]: …"). */
+function asTextFormat(m: ChatMessage): ChatMessage {
+  if (m.role === "tool") return { role: "user", content: `[Tool ${m.tool_name ?? "tool"} result]: ${m.content}` };
+  if (m.role === "assistant" && m.tool_calls?.length) {
+    const blocks = m.tool_calls.map((c) => "```tool_call\n" + JSON.stringify({ tool: c.function.name, args: c.function.arguments }) + "\n```");
+    return { role: "assistant", content: [m.content, ...blocks].filter(Boolean).join("\n\n") };
+  }
+  return m;
+}
 
 export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
   let native = d.native ?? process.env.IDE_NATIVE_TOOLS !== "0";
@@ -442,7 +464,12 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
   };
   const failed = (err: unknown) => {
     const where = pathsLine(paths);
-    say(`Error contacting model: ${(err as Error).message}${where ? `\n\n(${where}.)` : ""}`);
+    // Straight to the stream (not through textFilter): callers recognise the error by its first event.
+    flushText();
+    const text = `Error contacting model: ${(err as Error).message}${where ? `\n\n(${where}.)` : ""}`;
+    d.sendEvent({ type: "text", content: needBreak && emitted ? `\n\n${text}` : text });
+    emitted = true;
+    needBreak = false;
   };
   // Separate replies (and text-mode segments) with a blank line instead of running them together.
   let emitted = false;
@@ -472,11 +499,41 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
   };
   const say = (text: string) => {
     if (!text) return;
-    d.sendEvent({ type: "text", content: needBreak && emitted ? `\n\n${text}` : text });
+    const piece = needBreak && emitted ? `\n\n${text}` : text;
     emitted = true;
     needBreak = false;
+    const out = d.textFilter ? d.textFilter.push(piece) : piece;
+    if (out) d.sendEvent({ type: "text", content: out });
+  };
+  const flushText = () => {
+    const rest = d.textFilter?.end();
+    if (rest) d.sendEvent({ type: "text", content: rest });
   };
 
+  // Grounding: the server's own calls before the first turn, in the conversation as the model's.
+  for (const p of d.prefetch ?? []) {
+    if (d.isCancelled()) return;
+    const r = await runTool(p.tool, p.args);
+    if (native) {
+      messages.push({ role: "assistant", content: "", tool_calls: [{ function: { name: p.tool, arguments: p.args } }] });
+      const m: ChatMessage = { role: "tool", content: r.result, tool_name: p.tool };
+      labels.set(m, r.label);
+      messages.push(m);
+    } else {
+      messages.push(asTextFormat({ role: "assistant", content: "", tool_calls: [{ function: { name: p.tool, arguments: p.args } }] }));
+      const m = asTextFormat({ role: "tool", content: r.result, tool_name: p.tool });
+      labels.set(m, r.label);
+      messages.push(m);
+    }
+  }
+
+  try {
+    await loop();
+  } finally {
+    flushText();
+  }
+
+  async function loop(): Promise<void> {
   for (let i = 0; i < maxIterations && !d.isCancelled(); i++) {
     needBreak = true;
     if (native) {
@@ -492,7 +549,8 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
           // This model can't take tool definitions: continue in text mode from the same point.
           native = false;
           const sys = history("text").filter((m) => m.role === "system");
-          messages = [...sys, ...messages.filter((m) => m.role !== "system")];
+          // Native tool calls so far (the grounding search) in the text format's shape.
+          messages = [...sys, ...messages.filter((m) => m.role !== "system").map(asTextFormat)];
           request = pinned(messages);
           i--;
           continue;
@@ -630,6 +688,7 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
       messages.push(m);
     }
     if (!hadToolCall) return;
+  }
   }
 }
 
