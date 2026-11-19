@@ -49,7 +49,8 @@ import { AUTO_MODEL_ID, AUTO_POLICIES, autoPolicyFromEnv, isUnpinnedModel, route
 import { ChatBackendError, type ChatBackend } from "../../inference-api/types.js";
 import { ATTACHMENT_BODY_LIMIT, attachmentsSchema, withAttachments } from "./attachments.js";
 import { checkProject } from "./diagnostics.js";
-import { isProjectTrusted, setProjectTrusted } from "./workspace-trust.js";
+import { isProjectTrusted, loadOrCreateMachineSalt, setProjectTrusted } from "./workspace-trust.js";
+import { registerCodeRemoteRoutes } from "./code-remote.js";
 import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
 import { NewProjectError, PROJECT_TEMPLATES, createNewProject } from "./new-project.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
@@ -1746,6 +1747,8 @@ const sessions: SessionHub = new SessionHub({
 }, { permissions: permissionStore });
 registerSessionRoutes(app, sessions);
 registerTentacleRoutes(app, sessions, tentacles);
+// Coding sessions driven from the phone, this Mac's side (code-remote.ts): trusted folders only, no paths out.
+registerCodeRemoteRoutes(app, sessions, { account: machineAccount, checkpoints, machineSalt: (() => { let salt: string | undefined; return () => (salt ??= loadOrCreateMachineSalt()); })(), branch: currentBranch });
 
 // Settings → Active work, Tasks and Logs (activity-routes.ts).
 registerActivityRoutes(app, {
