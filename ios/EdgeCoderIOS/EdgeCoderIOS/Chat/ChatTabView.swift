@@ -20,6 +20,7 @@ struct ChatTabView: View {
     @State private var activeChatId: String?
     @State private var showSettings = false
     @AccessibilityFocusState private var menuButtonFocused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(conversationStore: ConversationStore) {
         _chatSource = StateObject(wrappedValue: ChatDrawerSource(store: conversationStore))
@@ -33,7 +34,8 @@ struct ChatTabView: View {
                 case .chat:
                     ChatView(command: $chatCommand, activeConversationId: $activeChatId)
                 case .code:
-                    CodePlaceholderView()
+                    // The iPad sidebar already says what goes here; don't repeat it.
+                    CodePlaceholderView(showsExplanation: !(drawer.isPersistent && drawer.isShowing))
                 }
             }
             .background(Theme.bgBase)
@@ -41,6 +43,9 @@ struct ChatTabView: View {
             drawerContent
         }
         .background(Theme.bgBase)
+        // iPhone: the overlay drawer and its backdrop run to the bottom of the screen.
+        .toolbar(drawer.isOpen ? .hidden : .visible, for: .tabBar)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: drawer.isOpen)
         .onAppear {
             #if DEBUG
             // Screenshots: -drawerOpen starts with the drawer out, -drawerHidden with the iPad sidebar hidden.
@@ -65,7 +70,7 @@ struct ChatTabView: View {
     private var header: some View {
         HStack(spacing: 12) {
             Button {
-                drawer.toggle()
+                withAnimation(reduceMotion ? nil : .spring(response: 0.32, dampingFraction: 0.88)) { drawer.toggle() }
             } label: {
                 Image(systemName: drawer.isPersistent ? "sidebar.leading" : "line.3.horizontal")
                     .font(.title3)

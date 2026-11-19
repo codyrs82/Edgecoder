@@ -76,7 +76,7 @@ struct SideDrawer<Content: View, Drawer: View>: View {
     }
 
     private func drawerWidth(_ available: CGFloat) -> CGFloat {
-        regular ? min(320, max(260, available * 0.32)) : min(320, available * 0.84)
+        regular ? min(320, available * 0.4) : min(320, available * 0.84)
     }
 
     // MARK: - Regular width: persistent sidebar

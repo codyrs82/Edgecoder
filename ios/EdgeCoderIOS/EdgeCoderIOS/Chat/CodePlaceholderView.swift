@@ -3,6 +3,10 @@ import SwiftUI
 /// The first tab's Code mode until code sessions from the desktop arrive: an empty state and a
 /// composer that can't send yet.
 struct CodePlaceholderView: View {
+    /// False when the iPad sidebar beside it already shows the empty-state sentence: then only a
+    /// short title and the composer.
+    var showsExplanation = true
+
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
@@ -11,13 +15,19 @@ struct CodePlaceholderView: View {
                         .font(.system(size: 40))
                         .foregroundColor(Theme.textMuted)
                         .accessibilityHidden(true)
-                    Text("No code sessions yet")
-                        .font(.headline)
-                        .foregroundColor(Theme.textSecondary)
-                    Text(CodeCopy.emptyState)
-                        .font(.callout)
-                        .foregroundColor(Theme.textMuted)
-                        .multilineTextAlignment(.center)
+                    if showsExplanation {
+                        Text("No code sessions yet")
+                            .font(.headline)
+                            .foregroundColor(Theme.textSecondary)
+                        Text(CodeCopy.emptyState)
+                            .font(.callout)
+                            .foregroundColor(Theme.textMuted)
+                            .multilineTextAlignment(.center)
+                    } else {
+                        Text("Code on your computers")
+                            .font(.headline)
+                            .foregroundColor(Theme.textSecondary)
+                    }
                 }
                 .padding(.horizontal, 32)
                 .padding(.vertical, 48)

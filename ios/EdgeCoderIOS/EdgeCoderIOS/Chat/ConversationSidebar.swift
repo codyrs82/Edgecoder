@@ -135,6 +135,7 @@ struct ConversationSidebar<Source: DrawerDataSource, Footer: View>: View {
                         .font(.subheadline.weight(.medium))
                         .foregroundColor(Theme.textPrimary)
                         .lineLimit(1)
+                        .truncationMode(.tail)
                     Spacer(minLength: 8)
                     if let date = row.date {
                         Text(Self.relativeTime(date))
@@ -147,6 +148,7 @@ struct ConversationSidebar<Source: DrawerDataSource, Footer: View>: View {
                         .font(.caption)
                         .foregroundColor(Theme.textSecondary)
                         .lineLimit(1)
+                        .truncationMode(.tail)
                 }
             }
             .padding(.vertical, 4)
