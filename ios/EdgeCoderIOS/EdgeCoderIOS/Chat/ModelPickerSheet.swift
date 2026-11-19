@@ -8,16 +8,13 @@ struct ModelPickerSheet: View {
     let localActiveModel: String
     let catalogModels: [CatalogModel]
     let blePeers: [BLEPeer]
-    @State private var swarmModels: [SwarmModelInfo] = []
-    @State private var isLoadingSwarm = false
-
-    struct SwarmModelInfo: Identifiable, Decodable {
-        let model: String
-        let paramSize: Double
-        let agentCount: Int
-        let avgLoad: Double
-        var id: String { model }
-    }
+    /// Signed in: the portal lists your machines and the network's models.
+    let isSignedIn: Bool
+    @State private var remote = ModelPickerRemote()
+    @State private var isLoading = false
+    @State private var loaded = false
+    @State private var machinesFailed = false
+    @State private var modelsFailed = false
 
     var body: some View {
         NavigationView {
@@ -123,12 +120,60 @@ struct ModelPickerSheet: View {
                     }
                 }
 
+                if isSignedIn && isLoading && !loaded {
+                    Section {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text("Loading your machines and network models\u{2026}")
+                                .font(.caption)
+                                .foregroundColor(Theme.textMuted)
+                        }
+                        .accessibilityIdentifier("modelPickerLoading")
+                    }
+                }
+
+                // My machines (free): the portal runs "mine" on whichever online machine has the model.
+                if !remote.own.isEmpty {
+                    Section {
+                        ForEach(remote.own) { row in
+                            Button {
+                                selectedModel = row.choice
+                                isPresented = false
+                            } label: {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(row.model)
+                                            .font(.subheadline)
+                                            .foregroundColor(Theme.textPrimary)
+                                        HStack(spacing: 8) {
+                                            Text(row.machineName)
+                                                .font(.caption)
+                                                .foregroundColor(Theme.textMuted)
+                                                .lineLimit(1)
+                                            Text("Free")
+                                                .font(.caption)
+                                                .foregroundColor(Theme.accent)
+                                        }
+                                    }
+                                    Spacer()
+                                    if selectedModel == row.choice {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundColor(Theme.accent)
+                                    }
+                                }
+                            }
+                        }
+                    } header: {
+                        Text("My machines")
+                    }
+                }
+
                 // Swarm Network
-                if !swarmModels.isEmpty {
+                if !remote.network.isEmpty {
                     Section("EdgeCoder Network") {
-                        ForEach(swarmModels) { model in
-                            let cost = max(0.5, model.paramSize)
-                            let available = model.agentCount > 0
+                        ForEach(remote.network) { model in
+                            let cost = model.cost
+                            let available = model.available
                             Button {
                                 if available {
                                     selectedModel = model.model
@@ -167,6 +212,24 @@ struct ModelPickerSheet: View {
                         }
                     }
                 }
+
+                if let note = ModelPickerSections.footer(signedIn: isSignedIn, loaded: loaded, machinesFailed: machinesFailed,
+                                                         modelsFailed: modelsFailed, remote: remote) {
+                    Section {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(note)
+                                .font(.caption)
+                                .foregroundColor(machinesFailed || modelsFailed ? Theme.red : Theme.textMuted)
+                            if isSignedIn && (machinesFailed || modelsFailed) {
+                                Button("Retry") { Task { await loadRemote() } }
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundColor(Theme.accent)
+                                    .disabled(isLoading)
+                            }
+                        }
+                        .accessibilityIdentifier("modelPickerFooter")
+                    }
+                }
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
@@ -179,32 +242,32 @@ struct ModelPickerSheet: View {
                         .foregroundColor(Theme.textSecondary)
                 }
             }
-            .onAppear { fetchSwarmModels() }
+            .refreshable { await loadRemote() }
+            .task { await loadRemote() }
         }
     }
 
-    private func fetchSwarmModels() {
-        guard !isLoadingSwarm else { return }
-        isLoadingSwarm = true
-        let coordinatorURL = SwarmRuntimeController.shared.selectedCoordinatorURL
-        guard let url = URL(string: "\(coordinatorURL)/models/available") else {
-            isLoadingSwarm = false
-            return
-        }
-
-        Task {
-            do {
-                let (data, _) = try await URLSession.shared.data(from: url)
-                let decoded = try JSONDecoder().decode([SwarmModelInfo].self, from: data)
-                await MainActor.run {
-                    swarmModels = decoded
-                }
-            } catch {
-                // Silent -- swarm section just won't show
-            }
-            await MainActor.run {
-                isLoadingSwarm = false
-            }
-        }
+    /// Your machines (GET /portal/api/machines, named from /portal/api/bots) and the network's
+    /// models (GET /portal/api/models), signed in; a failure stays on screen with Retry.
+    private func loadRemote() async {
+        guard isSignedIn, !isLoading else { return }
+        isLoading = true
+        defer { isLoading = false; loaded = true }
+        let api = APIClient.shared
+        let portal = api.config.portalBaseURL
+        async let machines: MachinesListResponse = api.request(baseURL: portal, path: "/portal/api/machines")
+        async let models: PortalModelsResponse = api.request(baseURL: portal, path: "/portal/api/models")
+        // Machine names only; the rows still show without them.
+        async let bots: BotsListResponse? = try? api.request(baseURL: portal, path: "/portal/api/bots") as BotsListResponse
+        let m: MachinesListResponse? = try? await machines
+        let n: PortalModelsResponse? = try? await models
+        let b = await bots
+        machinesFailed = m == nil
+        modelsFailed = n == nil
+        // Keep what loaded before when a retry fails.
+        var next = ModelPickerSections.build(models: n, machines: m, bots: b)
+        if m == nil { next.own = remote.own }
+        if n == nil { next.network = remote.network }
+        remote = next
     }
 }
