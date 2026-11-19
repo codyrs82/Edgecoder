@@ -115,6 +115,12 @@ targets:
       - path: EdgeCoderIOS/Network/NetworkModels.swift
       - path: EdgeCoderIOS/Network/NetworkFixture.swift
       - path: EdgeCoderIOS/Chat/ChatModels.swift
+      # PR4 side drawer: drawer state, data sources, Chat | Code mode.
+      - path: EdgeCoderIOS/Shared/SideDrawer.swift
+      - path: EdgeCoderIOS/Shared/DrawerDataSource.swift
+      - path: EdgeCoderIOS/Chat/ChatDrawerSource.swift
+      - path: EdgeCoderIOS/Chat/ConversationStore.swift
+      - path: EdgeCoderIOS/Chat/WorkspaceMode.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.edgecoder.ios.tests
