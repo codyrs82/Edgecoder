@@ -27,24 +27,7 @@ enum WorkspaceMode: String, CaseIterable, Identifiable {
     }
 }
 
-/// Wording shared by the Code placeholder screen and the drawer's Code list.
+/// Wording shared by the Code screens and the drawer's Code list.
 enum CodeCopy {
     static let emptyState = "Code sessions on your computers will show here. Turn on 'Code from your phone' in the EdgeCoder desktop app."
-}
-
-/// The drawer's Code list. A stub until the desktop pairing lands: no networking, always empty.
-@MainActor
-final class CodeDrawerSource: DrawerDataSource {
-    @Published var selectedId: String?
-
-    let title = "Code sessions"
-    let newLabel: String? = nil
-    let searchPrompt = "Search sessions"
-    let emptyTitle = "No code sessions"
-    let emptyMessage: String? = CodeCopy.emptyState
-    let canDelete = false
-
-    func sections(matching query: String) -> [DrawerSection] { [] }
-    func reload() {}
-    func delete(id: String) {}
 }

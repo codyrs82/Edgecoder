@@ -15,7 +15,10 @@ struct ChatTabView: View {
     @AppStorage(WorkspaceMode.storageKey) private var mode: WorkspaceMode = WorkspaceMode.defaultValue
     @StateObject private var drawer = SideDrawerState()
     @StateObject private var chatSource: ChatDrawerSource
-    @StateObject private var codeSource = CodeDrawerSource()
+    @StateObject private var codeStore: CodeStore
+    @StateObject private var codeSource: CodeDrawerSource
+    @State private var codePath: [CodeRoute] = []
+    @State private var showNewCodeSession = false
     @State private var chatCommand: ChatCommand?
     @State private var activeChatId: String?
     @State private var showSettings = false
@@ -24,6 +27,9 @@ struct ChatTabView: View {
 
     init(conversationStore: ConversationStore) {
         _chatSource = StateObject(wrappedValue: ChatDrawerSource(store: conversationStore))
+        let codeStore = CodeStore()
+        _codeStore = StateObject(wrappedValue: codeStore)
+        _codeSource = StateObject(wrappedValue: CodeDrawerSource(store: codeStore))
     }
 
     var body: some View {
@@ -35,7 +41,12 @@ struct ChatTabView: View {
                     ChatView(command: $chatCommand, activeConversationId: $activeChatId)
                 case .code:
                     // The iPad sidebar already says what goes here; don't repeat it.
-                    CodePlaceholderView(showsExplanation: !(drawer.isPersistent && drawer.isShowing))
+                    CodeHomeView(
+                        store: codeStore,
+                        path: $codePath,
+                        showNewSession: $showNewCodeSession,
+                        showsExplanation: !(drawer.isPersistent && drawer.isShowing)
+                    )
                 }
             }
             .background(Theme.bgBase)
@@ -52,9 +63,27 @@ struct ChatTabView: View {
             let args = ProcessInfo.processInfo.arguments
             if args.contains("-drawerOpen") { drawer.open() }
             if args.contains("-drawerHidden") { DispatchQueue.main.async { drawer.close() } }
+            // -codeFixture [-codeScreen projects|session|diff]: Code mode on canned data.
+            if CodeFixture.isEnabled {
+                mode = .code
+                let a = CodeFixture.agentId, s = CodeFixture.sessionId
+                switch CodeFixture.startScreen {
+                case "projects": codePath = [.machine(a)]
+                case "session": codePath = [.machine(a), .session(agentId: a, sessionId: s)]
+                case "diff": codePath = [.machine(a), .session(agentId: a, sessionId: s), .diff(agentId: a, sessionId: s, turnId: CodeFixture.turnId)]
+                default: break
+                }
+            }
             #endif
         }
         .onChange(of: activeChatId) { _, id in chatSource.selectedId = id }
+        .onChange(of: codePath) { _, path in
+            if case .session(let a, let s)? = path.last(where: { if case .session = $0 { return true } else { return false } }) {
+                codeSource.selectedId = CodeDrawerSource.rowId(agentId: a, sessionId: s)
+            } else {
+                codeSource.selectedId = nil
+            }
+        }
         .onChange(of: drawer.isShowing) { _, showing in
             // Back to the menu button when the overlay closes, so VoiceOver doesn't lose its place.
             if !showing && !drawer.isPersistent && UIAccessibility.isVoiceOverRunning { menuButtonFocused = true }
@@ -99,7 +128,7 @@ struct ChatTabView: View {
             HStack(spacing: 8) {
                 NetworkBadge(network: networkStatus.network, compact: true)
                 Button {
-                    chatCommand = .newChat
+                    if mode == .chat { chatCommand = .newChat } else { showNewCodeSession = true }
                 } label: {
                     Image(systemName: "square.and.pencil")
                         .font(.title3)
@@ -107,10 +136,7 @@ struct ChatTabView: View {
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(Rectangle())
                 }
-                .accessibilityLabel("New chat")
-                .opacity(mode == .chat ? 1 : 0)
-                .disabled(mode != .chat)
-                .accessibilityHidden(mode != .chat)
+                .accessibilityLabel(mode == .chat ? "New chat" : "New code session")
             }
         }
         .padding(.horizontal, 8)
@@ -142,8 +168,16 @@ struct ChatTabView: View {
         case .code:
             ConversationSidebar(
                 source: codeSource,
-                onSelect: { _ in drawer.didSelect() },
-                onNew: { drawer.didSelect() },
+                onSelect: { id in
+                    if let r = CodeDrawerSource.parse(id) {
+                        codePath = [.machine(r.agentId), .session(agentId: r.agentId, sessionId: r.sessionId)]
+                    }
+                    drawer.didSelect()
+                },
+                onNew: {
+                    showNewCodeSession = true
+                    drawer.didSelect()
+                },
                 footer: { drawerFooter }
             )
         }

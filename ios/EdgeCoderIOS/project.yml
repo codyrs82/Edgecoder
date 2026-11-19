@@ -121,6 +121,12 @@ targets:
       - path: EdgeCoderIOS/Chat/ChatDrawerSource.swift
       - path: EdgeCoderIOS/Chat/ConversationStore.swift
       - path: EdgeCoderIOS/Chat/WorkspaceMode.swift
+      # PR5 Code mode: portal/Mac answers, errors, diffs, the drawer's Code list.
+      - path: EdgeCoderIOS/Code/CodeModels.swift
+      - path: EdgeCoderIOS/Code/CodeAPI.swift
+      - path: EdgeCoderIOS/Code/CodeFixture.swift
+      - path: EdgeCoderIOS/Code/CodeDrawerSource.swift
+      - path: EdgeCoderIOS/Code/UnifiedDiff.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.edgecoder.ios.tests

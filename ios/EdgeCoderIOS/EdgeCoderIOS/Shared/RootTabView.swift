@@ -53,7 +53,7 @@ struct RootTabView: View {
             }
             #if DEBUG
             // Screenshots of the Chat tab without signing in: launch with -skipSignIn.
-            if ProcessInfo.processInfo.arguments.contains("-skipSignIn") { return }
+            if ProcessInfo.processInfo.arguments.contains("-skipSignIn") || CodeFixture.isEnabled { return }
             #endif
             await purchasePolicy.refreshStorefront()
             if swarmRuntime.isLocalCoordinator {
