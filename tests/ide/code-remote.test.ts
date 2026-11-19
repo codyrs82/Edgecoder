@@ -132,7 +132,8 @@ describe("what the phone sees", () => {
     expect(snap.projects).toHaveLength(1);
     const one = (await command({ action: "snapshot", sessionId: mine })).body.data as RemoteSessionSnapshot;
     expect(one.tail.at(-1)?.content).toBe("Looked at <project>/a.txt and ~/notes.");
-    expect(one.tail.at(-1)?.steps?.[0]).toMatchObject({ tool: "read_file", detail: "<project>/a.txt" });
+    // The step detail keeps the platform separator (Windows: <project>\a.txt).
+    expect(one.tail.at(-1)?.steps?.[0]).toMatchObject({ tool: "read_file", detail: expect.stringMatching(/^<project>[\\/]a\.txt$/) });
     for (const text of [JSON.stringify(snap), JSON.stringify(one), JSON.stringify((await command({ action: "messages", sessionId: mine })).body)]) {
       expect(text).not.toContain(tmp);
       expect(text).not.toContain(homedir());
