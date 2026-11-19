@@ -598,6 +598,7 @@ Amounts must be numbers of 0 or more. A value the reader's own limit rejects (no
 | `SWARM_VIA_LOCAL_AGENT_URL` | unset | Set by the all-in-one entry once the machine is enrolled: swarm work goes through its own worker's forwarder. An http(s) URL. |
 | `AGENT_ACCOUNT_ID` | `AGENT_ID`, else `local-agent` | Account that swarm requests from the IDE are billed to. |
 | `EDGECODER_BOTS_FILE` | `~/.edgecoder/bots.json` | Where bots are stored. |
+| `EDGECODER_MACHINE_SALT_FILE` | `~/.edgecoder/machine-salt` | This computer's random salt for the opaque project ids "Code from your phone" uses (a project is never named by its path off this Mac). Removing it gives every project a new id. |
 | `EDGECODER_CONNECTIONS_FILE` | `~/.edgecoder/connections.json` | Where connections are stored. |
 | `EDGECODER_IDE_SETTINGS_FILE` | `~/.edgecoder/ide-settings.json` | Where IDE settings are stored. |
 | `EDGECODER_PROJECTS_DIR` | the setting, else `~/EdgeCoder` | Where projects are created. |
