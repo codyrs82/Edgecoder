@@ -95,7 +95,8 @@ struct ChatView: View {
                 localModels: chatRouter.modelManager.installedModels,
                 localActiveModel: chatRouter.modelManager.selectedModel,
                 catalogModels: chatRouter.modelManager.availableCatalog,
-                blePeers: chatRouter.bleMeshManager.discoveredPeers
+                blePeers: chatRouter.bleMeshManager.discoveredPeers,
+                isSignedIn: sessionStore.isAuthenticated
             )
         }
     }
@@ -109,14 +110,14 @@ struct ChatView: View {
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "cpu").font(.caption2)
-                Text(conversation.selectedModel ?? "Auto")
+                Text(ModelChoice.label(conversation.selectedModel))
                     .font(.caption)
                     .lineLimit(1)
                 Image(systemName: "chevron.up.chevron.down").font(.caption2)
             }
             .foregroundColor(Theme.textMuted)
         }
-        .accessibilityLabel("Model: \(conversation.selectedModel ?? "Auto")")
+        .accessibilityLabel("Model: \(ModelChoice.label(conversation.selectedModel))")
         .accessibilityHint("Choose the model for this chat")
         .accessibilityIdentifier("modelPicker")
     }
@@ -305,8 +306,14 @@ struct ChatView: View {
                 convId = try await PortalChatClient.shared.createConversation(title: String(text.prefix(60)))
                 conversation.portalConversationId = convId
             }
-            let compute: PortalChatCompute = conversation.selectedModel.map { .network(model: $0) } ?? .auto
-            streamProgress = StreamProgress(route: .swarm, routeLabel: compute == .auto ? "your machines, then the network" : "network")
+            let compute = ModelChoice.compute(for: conversation.selectedModel)
+            let routeLabel: String
+            switch compute {
+            case .auto: routeLabel = "your machines, then the network"
+            case .mine: routeLabel = "your machines"
+            case .network: routeLabel = "network"
+            }
+            streamProgress = StreamProgress(route: .swarm, routeLabel: routeLabel)
             for try await event in PortalChatClient.shared.send(conversationId: convId, message: text, compute: compute, resend: resend, web: web) {
                 switch event {
                 case .content(let c):

@@ -13,6 +13,10 @@ struct PortalMachine: Decodable, Equatable {
     let state: PortalMachineState?
     let stateAtMs: Double?
     let lastSeenMs: Double?
+    /// Newer coordinators: the models a `compute: { target: "mine" }` chat can run here, shared on
+    /// the network and kept for you only (too big to share).
+    var networkModels: [String]? = nil
+    var ownerModels: [String]? = nil
 }
 
 /// The machine's own report (agent-supplied).
@@ -20,6 +24,12 @@ struct PortalMachineState: Decodable, Equatable {
     let activeModel: String?
     let reportedAtMs: Double?
     let remoteControl: String?
+    /// The Ollama models on the machine (older coordinators send no networkModels / ownerModels).
+    var installed: [Installed]? = nil
+
+    struct Installed: Decodable, Equatable {
+        let name: String
+    }
 }
 
 /// One row on the Machines tab.

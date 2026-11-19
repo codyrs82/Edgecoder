@@ -42,10 +42,12 @@
 		30E39AA09D805BAEF9FBA665 /* BotsModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08534AB8A861F8CE3582EC0C /* BotsModels.swift */; };
 		3381CB6037EDCAA1DBB3F53A /* PortalChatClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EE04C29E6C1D9B6FBF14683 /* PortalChatClient.swift */; };
 		392F07B757E2AC1834751332 /* SideDrawer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CDBFBD92DFE9BAA6A6F26C2 /* SideDrawer.swift */; };
+		3C9CC2914A54476F789DFD87 /* ModelPickerModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADAD6F89D04BD9949B6BCBBD /* ModelPickerModels.swift */; };
 		3EA9F76223C86A11F929CB8D /* CloudBotsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B79575DD8A20DD4FF2BC73C3 /* CloudBotsTests.swift */; };
 		3F322F9325ABFE8CB4F165DA /* ServedFormatter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79C4FFDBBCE508D92678FA57 /* ServedFormatter.swift */; };
 		408B7BBCEA51523CAF6D6831 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 30D16E261FFA98D17D4DACEA /* LaunchScreen.storyboard */; };
 		4245630B297660739989B403 /* NetworkFixture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F7B1A41CDD28D58727A081E /* NetworkFixture.swift */; };
+		43DCA57917A5A823432B1EDA /* ModelPickerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADE9F90245668AC49DA620D8 /* ModelPickerTests.swift */; };
 		46B6E029E58D411799FA3F9E /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFBBA5E0D5A24AB740C7769D /* ChatView.swift */; };
 		537F9EC0FFBB1C276088AA8A /* UnifiedDiff.swift in Sources */ = {isa = PBXBuildFile; fileRef = B56B7A9E3DF1E1FDF5ED2A8B /* UnifiedDiff.swift */; };
 		54FABEFDD2AF6B9E97B6AF1A /* BotsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3B78A3B23F283C27C578B68 /* BotsView.swift */; };
@@ -70,6 +72,7 @@
 		943B1DE375716BAF91C6FAB4 /* MachinesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E18B53BBBCE7A0692B0E4A6 /* MachinesView.swift */; };
 		95B93613856251FD87F0EB4B /* CodeDrawerSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C6966DD6A8330827FF125CD /* CodeDrawerSource.swift */; };
 		97BC8F55EB908435C2E283CB /* BluetoothTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB3AD26514C723A4A5787814 /* BluetoothTransport.swift */; };
+		9858AACB47E69382094E08FB /* ModelPickerModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADAD6F89D04BD9949B6BCBBD /* ModelPickerModels.swift */; };
 		98E91FF0AA64ED55D9BCEC55 /* PurchasePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEB62ACFC126AF64173557A3 /* PurchasePolicy.swift */; };
 		9A40EE412DF1CFA36AF49A19 /* ChatFailures.swift in Sources */ = {isa = PBXBuildFile; fileRef = 629D161DC2E412DA32706681 /* ChatFailures.swift */; };
 		9C5E95AC2A0017918C7EE056 /* MachinesModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12367B62AC1DC0A50FD34CD0 /* MachinesModels.swift */; };
@@ -187,6 +190,8 @@
 		AC9A2FF9401D82989E5176F5 /* SessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionStore.swift; sourceTree = "<group>"; };
 		ACA085B3ABEE3CF3DAF7D8C4 /* KeychainEd25519.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainEd25519.swift; sourceTree = "<group>"; };
 		AD280B14C422C854EB8D18DF /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		ADAD6F89D04BD9949B6BCBBD /* ModelPickerModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerModels.swift; sourceTree = "<group>"; };
+		ADE9F90245668AC49DA620D8 /* ModelPickerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerTests.swift; sourceTree = "<group>"; };
 		AEB62ACFC126AF64173557A3 /* PurchasePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PurchasePolicy.swift; sourceTree = "<group>"; };
 		B0BDF006DD7B1DA4499F2BAD /* PasskeyProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasskeyProtocol.swift; sourceTree = "<group>"; };
 		B10DAC1310BC95E99485B1D2 /* OfflineLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineLedger.swift; sourceTree = "<group>"; };
@@ -330,6 +335,7 @@
 				93A41FCCF2A95E5E965C2D11 /* ConversationSidebar.swift */,
 				A2E7E1D4187121B8BCF09244 /* ConversationStore.swift */,
 				1692E1BB28D7EB00FF6D8829 /* MessageBubble.swift */,
+				ADAD6F89D04BD9949B6BCBBD /* ModelPickerModels.swift */,
 				D72B65674A570E6D64251082 /* ModelPickerSheet.swift */,
 				512DC39F392611E315DD4BA2 /* WorkspaceMode.swift */,
 			);
@@ -400,6 +406,7 @@
 				80122B9B45EAE760BBC0F48E /* CodeModeTests.swift */,
 				61D22BEA678DE9EE6056343A /* HostEarningsPolicyTests.swift */,
 				9580DF0E7DDEB1B61CF0A59F /* MachinesTests.swift */,
+				ADE9F90245668AC49DA620D8 /* ModelPickerTests.swift */,
 				408BFDE15434F4E2581718CC /* NetworkWorldTests.swift */,
 				98D672F44064782C1EF76D7E /* PasskeyProtocolTests.swift */,
 				DCB9CAB8B8D310AAB40A33C4 /* PortalAPIParsingTests.swift */,
@@ -575,6 +582,8 @@
 				D19C7BD18E5B7FBAB52184F2 /* HostEarningsPolicyTests.swift in Sources */,
 				920D8DFC385D9F22CB53742D /* MachinesModels.swift in Sources */,
 				AA145690549577ED9B597A8B /* MachinesTests.swift in Sources */,
+				9858AACB47E69382094E08FB /* ModelPickerModels.swift in Sources */,
+				43DCA57917A5A823432B1EDA /* ModelPickerTests.swift in Sources */,
 				14CAA0AE958AD1BB645F2BC2 /* Models.swift in Sources */,
 				232E7810E67615DE4F56A7D1 /* NetworkBadge.swift in Sources */,
 				4245630B297660739989B403 /* NetworkFixture.swift in Sources */,
@@ -641,6 +650,7 @@
 				943B1DE375716BAF91C6FAB4 /* MachinesView.swift in Sources */,
 				A962771B9714B0544AA75A67 /* MessageBubble.swift in Sources */,
 				DC4DAE8FEC805D793A73C252 /* ModelLibraryView.swift in Sources */,
+				3C9CC2914A54476F789DFD87 /* ModelPickerModels.swift in Sources */,
 				2C06A9ACAF6FF91CC77E8604 /* ModelPickerSheet.swift in Sources */,
 				5ADB52218B258D73E1DEAB68 /* ModelPickerView.swift in Sources */,
 				29F4BB744A068253C499D3B8 /* ModelStatusBanner.swift in Sources */,

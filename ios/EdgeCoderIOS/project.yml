@@ -115,6 +115,8 @@ targets:
       - path: EdgeCoderIOS/Network/NetworkModels.swift
       - path: EdgeCoderIOS/Network/NetworkFixture.swift
       - path: EdgeCoderIOS/Chat/ChatModels.swift
+      # Chat model picker: portal models + your machines' models, sections and the compute choice.
+      - path: EdgeCoderIOS/Chat/ModelPickerModels.swift
       # PR4 side drawer: drawer state, data sources, Chat | Code mode.
       - path: EdgeCoderIOS/Shared/SideDrawer.swift
       - path: EdgeCoderIOS/Shared/DrawerDataSource.swift
