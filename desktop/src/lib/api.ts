@@ -2118,7 +2118,8 @@ export const botErrorText = (err: unknown) => (err instanceof FsError ? err.mess
 
 export interface SessionClientRef {
   clientId: string;
-  kind: "terminal" | "desktop" | "api";
+  /** "remote": the owner's phone (Code from your phone), shown as "Phone". */
+  kind: "terminal" | "desktop" | "api" | "remote";
   label?: string;
 }
 export interface SessionSummary {

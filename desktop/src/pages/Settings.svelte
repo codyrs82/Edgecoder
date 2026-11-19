@@ -137,6 +137,36 @@
     }
   }
 
+  // Code from your phone (src/common/code-relay.ts): the app keeps the choice and restarts its agent
+  // with AGENT_CODE_RELAY. Off by default.
+  type CodeRelay = "off" | "view" | "on";
+  let codeRelay = $state<CodeRelay>("off");
+  let codeRelaySaving = $state(false);
+  let codeRelayNote = $state("");
+  $effect(() => {
+    import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke<{ codeRelay?: string }>("get_agent_settings"))
+      .then((s) => (codeRelay = s.codeRelay === "view" || s.codeRelay === "on" ? s.codeRelay : "off"))
+      .catch(() => (codeRelayNote = "Only available in the desktop app."));
+  });
+
+  async function setCodeRelay(mode: CodeRelay) {
+    const before = codeRelay;
+    codeRelaySaving = true;
+    codeRelayNote = "";
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const s = await invoke<{ codeRelay: string }>("set_agent_code_relay", { mode });
+      codeRelay = s.codeRelay === "view" || s.codeRelay === "on" ? s.codeRelay : "off";
+      codeRelayNote = mode === "off" ? "Saved. The agent is restarting; your phone no longer sees this Mac's sessions." : mode === "view" ? "Saved. The agent is restarting; your phone can see sessions but not drive them." : "Saved. The agent is restarting; your phone can start and drive sessions in trusted projects.";
+    } catch (e) {
+      codeRelay = before;
+      codeRelayNote = `Couldn't save: ${(e as Error).message ?? e}`;
+    } finally {
+      codeRelaySaving = false;
+    }
+  }
+
   // Token test state
 
   // Identity state
@@ -498,6 +528,27 @@
         </div>
         <div class="sp-controls">
           <button class="sp-switch" role="switch" aria-checked={bleEnabled} aria-label="Enable Bluetooth mesh" disabled={bleSaving} onclick={() => setBle(!bleEnabled)}></button>
+        </div>
+      </div>
+      <div class="sp-row">
+        <div class="sp-text">
+          <span class="sp-title">Code from your phone</span>
+          <span class="sp-desc" data-testid="code-relay-description">
+            Lets the EdgeCoder app on your iPhone, signed in to this same account, see your trusted projects and the sessions you share, and start or drive sessions here. Projects are named by folder only; no path leaves this Mac.
+          </span>
+          <span class="sp-desc">
+            View only shows sessions without driving them. With On, every command that changes something still asks you, and Auto mode can only be turned on here.
+          </span>
+          {#if codeRelayNote}<span class="sp-desc" role="status">{codeRelayNote}</span>{/if}
+        </div>
+        <div class="sp-controls">
+          <Select
+            ariaLabel="Code from your phone"
+            value={codeRelay}
+            disabled={codeRelaySaving}
+            onChange={(v) => void setCodeRelay(v)}
+            options={[{ value: "off", label: "Off" }, { value: "view", label: "View only" }, { value: "on", label: "On" }]}
+          />
         </div>
       </div>
     </div>

@@ -55,11 +55,17 @@ export interface LiveView {
   deleted: boolean;
 }
 
-const FROM: Record<string, string> = { terminal: "the terminal", desktop: "the EdgeCoder app", api: "a script" };
+const FROM: Record<string, string> = { terminal: "the terminal", desktop: "the EdgeCoder app", api: "a script", remote: "your phone" };
+/** The short name of a client shown in the session header ("Phone" for the iPhone app). */
+export function clientLabel(c: { kind: string; label?: string }): string {
+  return c.kind === "remote" ? "Phone" : c.label ?? c.kind;
+}
 /** "the terminal" for a session event's client (kind and label). */
 export function fromWhom(by: unknown, label?: unknown): string {
   if (by === "desktop") return "the EdgeCoder app";
   if (by === "terminal") return "the terminal";
+  // The phone (code-remote.ts phoneClient), whatever label its app sends.
+  if (by === "remote") return "your phone";
   return typeof label === "string" && label ? label : FROM[String(by)] ?? "another client";
 }
 
@@ -171,7 +177,7 @@ export function applySessionEvent(v: LiveView, e: SessionEvent): LiveView {
     case "settings": {
       const changed = Array.isArray(e.changed) ? (e.changed as string[]) : [];
       const what = [changed.includes("model") && typeof e.model === "string" ? `model to ${e.model}` : "", (changed.includes("mode") || changed.includes("autoApprove")) && typeof e.mode === "string" ? `mode to ${e.mode}` : ""].filter(Boolean).join(" and ");
-      const notes = e.by && e.by !== "desktop" && what ? note(v, `${fromWhom(e.by, e.label).replace(/^the t/, "The t").replace(/^the E/, "The E")} changed the ${what}.`) : v.notes;
+      const notes = e.by && e.by !== "desktop" && what ? note(v, `${fromWhom(e.by, e.label).replace(/^the t/, "The t").replace(/^the E/, "The E").replace(/^your p/, "Your p")} changed the ${what}.`) : v.notes;
       return { ...next, notes, ...(typeof e.model === "string" ? { model: e.model, frontierModel: e.model.startsWith("frontier/") ? e.model : undefined } : {}), ...(typeof e.title === "string" ? { title: e.title } : {}), ...(typeof e.mode === "string" ? { mode: e.mode } : {}) };
     }
     case "undo": {
@@ -194,6 +200,6 @@ export function presenceText(v: LiveView, me: SessionClientRef): string {
   const others = v.clients.filter((c) => c.clientId !== me.clientId);
   const terminal = others.some((c) => c.kind === "terminal");
   if (terminal) return "Terminal and EdgeCoder app connected";
-  if (others.length) return `${others.map((c) => c.label ?? c.kind).join(", ")} and this app connected`;
+  if (others.length) return `${others.map(clientLabel).join(", ")} and this app connected`;
   return "Only this app is connected";
 }

@@ -10,18 +10,33 @@ use std::path::PathBuf;
 pub struct AgentSettings {
     /// BLE mesh: find and serve nearby EdgeCoder machines over Bluetooth (macOS).
     pub ble_enabled: bool,
+    /// "Code from your phone" (AGENT_CODE_RELAY): "off" (default), "view" or "on".
+    pub code_relay: String,
 }
+
+/// The values AGENT_CODE_RELAY takes; anything else is read as "off".
+pub const CODE_RELAY_MODES: [&str; 3] = ["off", "view", "on"];
 
 impl Default for AgentSettings {
     fn default() -> Self {
         // On by default: the agent always started BLE before this setting existed.
-        Self { ble_enabled: true }
+        // Code from your phone is off until the user turns it on.
+        Self { ble_enabled: true, code_relay: "off".into() }
     }
 }
 
 impl AgentSettings {
+    /// The code relay mode to pass on: a value from an older or hand-edited file that isn't one of
+    /// CODE_RELAY_MODES is "off".
+    pub fn code_relay_mode(&self) -> &'static str {
+        CODE_RELAY_MODES.iter().copied().find(|m| *m == self.code_relay).unwrap_or("off")
+    }
+
     pub fn agent_env(&self) -> Vec<(String, String)> {
-        vec![("EDGECODER_BLE".into(), if self.ble_enabled { "1" } else { "0" }.into())]
+        vec![
+            ("EDGECODER_BLE".into(), if self.ble_enabled { "1" } else { "0" }.into()),
+            ("AGENT_CODE_RELAY".into(), self.code_relay_mode().into()),
+        ]
     }
 }
 
@@ -59,11 +74,32 @@ mod tests {
         let p = dir.join("agent-settings.json");
         let _ = fs::remove_file(&p);
         assert!(load_from(&p).ble_enabled, "missing file means the old default: on");
-        save_to(&p, &AgentSettings { ble_enabled: false }).unwrap();
+        save_to(&p, &AgentSettings { ble_enabled: false, ..Default::default() }).unwrap();
         assert!(!load_from(&p).ble_enabled);
-        assert_eq!(load_from(&p).agent_env(), vec![("EDGECODER_BLE".to_string(), "0".to_string())]);
+        assert_eq!(
+            load_from(&p).agent_env(),
+            vec![("EDGECODER_BLE".to_string(), "0".to_string()), ("AGENT_CODE_RELAY".to_string(), "off".to_string())]
+        );
         fs::write(&p, "not json").unwrap();
         assert!(load_from(&p).ble_enabled, "a broken file falls back to the default");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn code_relay_is_off_until_turned_on_and_unknown_values_are_off() {
+        let dir = std::env::temp_dir().join(format!("ec-agent-settings-code-{}", std::process::id()));
+        let p = dir.join("agent-settings.json");
+        let _ = fs::remove_file(&p);
+        assert_eq!(load_from(&p).code_relay_mode(), "off");
+        // A file from before this setting existed: BLE kept, code relay off.
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&p, "{\"bleEnabled\":false}").unwrap();
+        assert_eq!(load_from(&p).code_relay_mode(), "off");
+        assert!(!load_from(&p).ble_enabled);
+        save_to(&p, &AgentSettings { code_relay: "view".into(), ..Default::default() }).unwrap();
+        assert!(load_from(&p).agent_env().contains(&("AGENT_CODE_RELAY".to_string(), "view".to_string())));
+        save_to(&p, &AgentSettings { code_relay: "everything".into(), ..Default::default() }).unwrap();
+        assert_eq!(load_from(&p).code_relay_mode(), "off");
         let _ = fs::remove_dir_all(&dir);
     }
 }
