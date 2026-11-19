@@ -116,11 +116,11 @@ final class SideDrawerTests: XCTestCase {
         XCTAssertEqual(src.sections(matching: "").flatMap(\.rows).map(\.title), ["B"])
     }
 
-    func testCodeSourceIsAnEmptyStub() {
-        let src = CodeDrawerSource()
+    func testCodeSourceStartsEmptyWithTheDesktopHint() {
+        let src = CodeDrawerSource(machines: Just([]).eraseToAnyPublisher())
         XCTAssertTrue(src.sections(matching: "").isEmpty)
         XCTAssertFalse(src.canDelete)
-        XCTAssertNil(src.newLabel)
+        XCTAssertEqual(src.newLabel, "New session")
         XCTAssertEqual(src.emptyMessage, "Code sessions on your computers will show here. Turn on 'Code from your phone' in the EdgeCoder desktop app.")
     }
 
