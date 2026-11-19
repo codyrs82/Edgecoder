@@ -12,7 +12,7 @@ struct RootTabView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            ChatView()
+            ChatTabView(conversationStore: conversationStore)
                 .tag(AppTab.chat)
                 .tabItem {
                     Label("Chat", systemImage: "bubble.left.and.bubble.right")
@@ -51,6 +51,10 @@ struct RootTabView: View {
                 selectedTab = .network
                 return
             }
+            #if DEBUG
+            // Screenshots of the Chat tab without signing in: launch with -skipSignIn.
+            if ProcessInfo.processInfo.arguments.contains("-skipSignIn") { return }
+            #endif
             await purchasePolicy.refreshStorefront()
             if swarmRuntime.isLocalCoordinator {
                 await swarmRuntime.autoStartIfReady()
