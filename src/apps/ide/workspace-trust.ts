@@ -6,11 +6,15 @@
  * node_modules/.bin/tsc, cargo build scripts) by itself, e.g. diagnostics when a file is opened.
  * Folders are untrusted until the user trusts them. The list lives outside every project, in
  * ~/.edgecoder/trusted-projects.json (0600), so a project can't mark itself trusted.
+ *
+ * The phone (code-remote.ts) may start sessions only in trusted folders, and sees each one as an
+ * opaque projectId (projectIdOf, salted per machine) with its folder names, never a full path.
  */
 
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 function trustFile(): string {
   return process.env.EDGECODER_TRUST_FILE ?? join(homedir(), ".edgecoder", "trusted-projects.json");
@@ -47,4 +51,86 @@ export function setProjectTrusted(root: string, trusted: boolean): void {
   const file = trustFile();
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   writeFileSync(file, JSON.stringify({ trusted: list }, null, 2), { mode: 0o600 });
+}
+
+// --- Trusted projects for the phone (code-remote.ts) ---
+
+/** A trusted project as the phone sees it: an opaque id and folder names, never a full path. */
+export interface TrustedProject {
+  projectId: string;
+  /** The folder's name. */
+  name: string;
+  /** Its parent folder's name (tells two "app" folders apart). */
+  parent: string;
+  branch?: string;
+}
+
+/** Every trusted folder that still exists as a directory (full paths: for this computer only). */
+export function trustedProjectRoots(): string[] {
+  return [...new Set(readTrusted())].filter((p) => {
+    try {
+      return statSync(p).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** sha256(machineSalt + canonical path), first 16 hex: stable on this computer, meaningless elsewhere. */
+export function projectIdOf(path: string, machineSalt: string): string {
+  return createHash("sha256").update(machineSalt + canonical(path)).digest("hex").slice(0, 16);
+}
+
+/** The trusted projects with ids for `machineSalt` and, given `branchOf`, each folder's current branch. */
+export function listTrustedProjects(machineSalt: string, branchOf?: (root: string) => string | null): TrustedProject[] {
+  return trustedProjectRoots().map((root) => {
+    let branch: string | null = null;
+    try {
+      branch = branchOf?.(root) ?? null;
+    } catch {
+      branch = null;
+    }
+    return { projectId: projectIdOf(root, machineSalt), name: basename(root), parent: basename(dirname(root)), ...(branch ? { branch } : {}) };
+  });
+}
+
+/** The trusted folder whose id is `projectId` right now (recomputed over the current list), or null. */
+export function trustedRootForId(projectId: string, machineSalt: string): string | null {
+  return trustedProjectRoots().find((root) => projectIdOf(root, machineSalt) === projectId) ?? null;
+}
+
+function saltFile(): string {
+  return process.env.EDGECODER_MACHINE_SALT_FILE ?? join(homedir(), ".edgecoder", "machine-salt");
+}
+
+/**
+ * This computer's random salt for project ids: ~/.edgecoder/machine-salt (0600), made once, the
+ * way ~/.edgecoder/ide-token is (ide-auth.ts).
+ */
+export function loadOrCreateMachineSalt(file = saltFile()): string {
+  const readExisting = (): string => {
+    try {
+      chmodSync(file, 0o600);
+    } catch {
+      /* best effort on non-POSIX */
+    }
+    return readFileSync(file, "utf8").trim();
+  };
+  if (existsSync(file)) {
+    const existing = readExisting();
+    if (existing) return existing;
+  }
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  const salt = randomBytes(32).toString("base64url");
+  try {
+    // "wx": fail if another process created it first; then use theirs.
+    writeFileSync(file, `${salt}\n`, { mode: 0o600, flag: "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      const existing = readExisting();
+      if (existing) return existing;
+    }
+    throw error;
+  }
+  return salt;
 }
