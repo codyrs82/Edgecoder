@@ -73,6 +73,8 @@ import { remoteControlEnabled, resolveAllowlist } from "../model/remote-control/
 import { MODEL_CONTROL_FRAME_TYPE } from "../model/remote-control/protocol.js";
 import { BOT_CONTROL_FRAME_TYPE, botRelayMode } from "../common/bot-relay.js";
 import { BotRelayAgent, httpProviderClient } from "./bot-relay-agent.js";
+import { CODE_CONTROL_FRAME_TYPE, codeRelayMode } from "../common/code-relay.js";
+import { CodeRelayAgent, httpCodeProviderClient } from "./code-relay-agent.js";
 import { LOCAL_WEB_FRAME_TYPE, LocalWebAgent, localWebEnabled } from "../web-tool/local-web.js";
 import { searxngBaseUrl, searxngHealthy, searxngSearch } from "../web-tool/searxng.js";
 import { fetchPage } from "../web-tool/fetch-page.js";
@@ -808,6 +810,33 @@ const botRelay: BotRelayAgent | null = LOCAL_FORWARD_PORT > 0
       log: (m) => console.log(`[agent:${AGENT_ID}] ${m}`)
     })
   : null;
+// Code from your phone (src/common/code-relay.ts): with the desktop's IDE provider on this machine,
+// its trusted projects and visible sessions are published for the account that owns this machine
+// (the coordinator names it at /register), and that account's signed commands are handed to it.
+// Off unless the app's "Code from your phone" setting (AGENT_CODE_RELAY) turns it on.
+let codeRelayAccount: string | null = null;
+const codeRelayModeHere = codeRelayMode(W.AGENT_CODE_RELAY, remoteControlEnabled(W.AGENT_REMOTE_CONTROL));
+const codeRelay: CodeRelayAgent | null = LOCAL_FORWARD_PORT > 0 && codeRelayModeHere !== "off"
+  ? new CodeRelayAgent({
+      agentId: AGENT_ID,
+      mode: codeRelayModeHere,
+      machineName: hostname().replace(/\.local$/i, ""),
+      account: () => codeRelayAccount,
+      provider: httpCodeProviderClient({
+        baseUrl: `http://127.0.0.1:${W.IDE_PROVIDER_PORT ?? 4304}`,
+        token: (() => {
+          let t: string | undefined;
+          return () => (t ??= resolveIdeToken());
+        })(),
+        request
+      }),
+      report: async (body) => {
+        if (!registeredWithUrl) throw new Error("not registered yet");
+        await post(`/agent-control/agents/${encodeURIComponent(AGENT_ID)}/code/report`, body, { retries: 0, timeoutMs: 10_000, signed: true });
+      },
+      log: (m) => console.log(`[agent:${AGENT_ID}] ${m}`)
+    })
+  : null;
 // Web calls on this machine for its owner's own chats (src/web-tool/local-web.ts): searches on the
 // host's SearXNG (SEARXNG_URL, loopback only) and page reads, asked by our pinned coordinator.
 const localWeb = new LocalWebAgent({
@@ -1281,6 +1310,11 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
         botRelay.start();
         void botRelay.publish(true);
       }
+      if (codeRelay) {
+        codeRelay.invalidate();
+        codeRelay.start();
+        void codeRelay.publish(true);
+      }
     });
 
     ws.on("message", async (data) => {
@@ -1315,6 +1349,18 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
             verified = null;
           }
           if (botRelay) void botRelay.handleFrame(message, verified);
+          return;
+        }
+        // Code from your phone: the same checks (pinned coordinator key, target, lifetime, replay), then
+        // AGENT_CODE_RELAY, then the desktop app's own (signed-in account, trusted folders, session rules).
+        if (message && typeof message === "object" && message.type === CODE_CONTROL_FRAME_TYPE) {
+          let verified: { peerId: string; publicKeyPem: string } | null = null;
+          try {
+            verified = coordinator.url === coordinatorUrl ? coordinator.requireVerifiedIdentity().identity : null;
+          } catch {
+            verified = null;
+          }
+          if (codeRelay) void codeRelay.handleFrame(message, verified);
           return;
         }
         // Local web for the owner's chat: the same checks (pinned coordinator key, target, lifetime, replay).
@@ -1558,6 +1604,12 @@ async function loop(): Promise<void> {
   function adoptRewardAccount(accountId: unknown): void {
     if (typeof accountId === "string" && accountId.length > 0 && !accountId.includes("\n")) {
       rewardAccountId = accountId;
+      // An owner account (acct-...), not the agent-id fallback: the phone's account for code snapshots.
+      const owner = accountId.startsWith("acct-") ? accountId : null;
+      if (owner !== codeRelayAccount) {
+        codeRelayAccount = owner;
+        codeRelay?.invalidate();
+      }
       bleMesh?.setAccountId(accountId);
     }
   }

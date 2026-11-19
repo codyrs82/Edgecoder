@@ -356,6 +356,21 @@ fn set_agent_ble(enabled: bool, process: tauri::State<'_, AgentProcess>) -> Resu
     Ok(s)
 }
 
+/// Save "Code from your phone" (off, view or on) and restart the agent so it takes effect.
+#[tauri::command]
+fn set_agent_code_relay(mode: String, process: tauri::State<'_, AgentProcess>) -> Result<agent_settings::AgentSettings, String> {
+    if !agent_settings::CODE_RELAY_MODES.contains(&mode.as_str()) {
+        return Err("expected off, view or on".into());
+    }
+    let mut s = agent_settings::load();
+    if s.code_relay_mode() != mode {
+        s.code_relay = mode;
+        agent_settings::save(&s)?;
+        restart_agent(&process.0);
+    }
+    Ok(s)
+}
+
 /// First-run local compute (Ollama + the Colima Docker sandbox): progress for the setup screen.
 #[tauri::command]
 fn get_local_compute_status() -> local_compute::ComputeStatus {
@@ -796,6 +811,7 @@ fn main() {
             get_local_compute_status,
             get_agent_settings,
             set_agent_ble,
+            set_agent_code_relay,
             start_local_compute_setup,
             get_ide_token,
             set_remote_hosts,

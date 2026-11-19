@@ -131,6 +131,13 @@ export const workerConfigSchema = z.object({
    */
   AGENT_BOT_RELAY: z.string().trim().regex(/^(on|off|view|1|0|true|false|yes|no)$/i, "on, view or off").optional(),
   /**
+   * Coding sessions on this Mac driven from the owner's phone (src/common/code-relay.ts): "off"
+   * (default) publishes nothing, "view" publishes projects and sessions only (no command), "on" also
+   * takes the owner's commands. AGENT_REMOTE_CONTROL=off caps it at view. Set by the desktop app's
+   * "Code from your phone" setting.
+   */
+  AGENT_CODE_RELAY: z.string().trim().regex(/^(on|off|view|1|0|true|false|yes|no)$/i, "on, view or off").optional(),
+  /**
    * Web calls on this machine for its owner's own chats (src/web-tool/local-web.ts): searches on
    * the local SearXNG (SEARXNG_URL) and page reads from this machine's connection. "off" does none.
    */

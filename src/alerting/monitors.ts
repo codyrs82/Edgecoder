@@ -462,6 +462,7 @@ export function securityRules(authFailuresPer10Min: number): Record<string, Secu
     onchain_batch_resurfaced: once("onchain_batch_resurfaced", "critical", "On-chain payout batch resurfaced", "a released payout batch reappeared in the node"),
     onchain_batch_stuck: once("onchain_batch_stuck", "warning", "On-chain payout batch stuck", "an on-chain payout batch is not confirming"),
     bot_control_not_owner: once("bot_control_not_owner", "warning", "Bot control attempted by a non-owner", "a portal session tried to control a bot on a machine its account does not own"),
+    code_control_not_owner: once("code_control_not_owner", "warning", "Code control attempted by a non-owner", "a portal session tried to drive a coding session on a machine its account does not own"),
     model_control_not_owner: once("model_control_not_owner", "warning", "Model control attempted by a non-owner", "a portal session tried to control a machine its account does not own"),
     restricted_access_suspended: once("restricted_access_suspended", "warning", "Restricted model access suspended", "an account's security-research access was suspended"),
     failed_auth: { key: "auth_failures", threshold: authFailuresPer10Min, windowMs: M10, severity: "warning", title: "Repeated authentication failures", what: "failed authentications" },
