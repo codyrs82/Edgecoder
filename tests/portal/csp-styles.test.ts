@@ -163,7 +163,8 @@ describe("the static mirror's style hashes (#27)", () => {
       expect(html, page).not.toContain("nonce=");
       expect(STYLE_ATTR.test(html), `${page}: style attribute`).toBe(false);
       // no inline scripts: the mirror's default-src 'self' has no nonce for them
-      for (const tag of html.match(/<script\b[^>]*>/g) ?? []) expect(tag, page).toMatch(/\bsrc="\/assets\//);
+      // (JSON-LD is a data block the browser never executes, so CSP does not apply to it)
+      for (const tag of html.match(/<script\b[^>]*>/g) ?? []) if (tag !== '<script type="application/ld+json">') expect(tag, page).toMatch(/\bsrc="\/assets\//);
       const blocks = [...html.matchAll(/<style>([\s\S]*?)<\/style>/g)].map((m) => m[1]);
       expect(blocks.length, page).toBeGreaterThan(0);
       expect((html.match(/<style\b/g) ?? []).length, page).toBe(blocks.length);

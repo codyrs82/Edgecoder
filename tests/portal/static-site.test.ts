@@ -20,7 +20,7 @@ describe("static mirror of the public pages", () => {
   it("writes the files to disk", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ec-static-"));
     const written = await exportStaticSite(dir, { portalUrl: "https://example.test" });
-    expect(written.length).toBe(11); // + assets/tokens.css and assets/theme.js (#89), + acceptable-use, host-agreement, bluetooth
+    expect(written.length).toBe(14); // + assets/tokens.css and assets/theme.js (#89), + acceptable-use, host-agreement, bluetooth, + robots.txt, sitemap.xml, llms.txt
     expect(await readFile(join(dir, "privacy", "index.html"), "utf8")).toContain("<!doctype html>");
   });
 });

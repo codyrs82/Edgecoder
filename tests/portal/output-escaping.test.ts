@@ -280,6 +280,8 @@ describe("enforced CSP with per-request script nonces", () => {
       // #89: plus the same-origin theme script, which needs no nonce under script-src 'self'.
       for (const tag of tags) {
         if (/^<script src="\/assets\/theme\.js\?v=[0-9a-f]+">$/.test(tag)) continue;
+        // JSON-LD on the homepage is a data block, never executed, so it needs no nonce.
+        if (tag === '<script type="application/ld+json">') continue;
         expect(tag, url).toBe(`<script nonce="${nonce}">`);
       }
       // And each one still parses (the handler rewrites didn't break the page scripts).

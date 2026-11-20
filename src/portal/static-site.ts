@@ -16,6 +16,7 @@ import { acceptableUseHtml, bluetoothPageHtml, hostAgreementHtml, marketingHomeH
 import type { PublicPricing } from "./public-pricing.js";
 import { THEME_JS, portalTokensCss } from "./assets.js";
 import { CSP_NONCE } from "./csp-nonce.js";
+import { llmsTxt, robotsTxt, sitemapXml } from "./pages/seo.js";
 
 export interface StaticSiteOptions {
   /** Canonical portal origin that dynamic paths redirect to, e.g. https://edgecoder.io */
@@ -44,7 +45,7 @@ export function withStyleHashes(html: string): { html: string; hashes: string[] 
 export function staticSiteFiles(opts: StaticSiteOptions): Record<string, string> {
   const origin = opts.portalUrl.replace(/\/$/, "");
   const pages = {
-    "index.html": withStyleHashes(marketingHomeHtml(opts.pricing)),
+    "index.html": withStyleHashes(marketingHomeHtml(opts.pricing, origin)),
     "privacy/index.html": withStyleHashes(privacyPolicyHtml()),
     "terms/index.html": withStyleHashes(termsOfServiceHtml()),
     "acceptable-use/index.html": withStyleHashes(acceptableUseHtml()),
@@ -73,6 +74,10 @@ export function staticSiteFiles(opts: StaticSiteOptions): Record<string, string>
     "assets/tokens.css": portalTokensCss(),
     "assets/theme.js": THEME_JS,
     "healthz": "ok\n",
+    // Point crawlers at the canonical origin's pages (favicon.ico is binary and stays portal-only).
+    "robots.txt": robotsTxt(origin),
+    "sitemap.xml": sitemapXml(origin),
+    "llms.txt": llmsTxt(origin),
     _redirects: redirects,
     _headers: headers,
   };
