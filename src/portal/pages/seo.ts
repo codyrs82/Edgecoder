@@ -15,6 +15,8 @@ import { LEGAL_PAGES } from "./public.js";
 import { ICON_128_PNG_BASE64, ICON_32_PNG_BASE64 } from "./favicon-data.js";
 
 export const DEFAULT_SITE_ORIGIN = "https://edgecoder.io";
+/** Public docs link used when DOCS_SITE_URL is unset or local (DOCS_SITE_URL overrides). */
+export const DEFAULT_PUBLIC_DOCS_URL = "https://docs.edgecoder.io/";
 
 /** The public site origin (PORTAL_PUBLIC_URL), falling back to edgecoder.io. */
 export function siteOrigin(raw: string | undefined = process.env.PORTAL_PUBLIC_URL): string {
@@ -81,7 +83,7 @@ export function sitemapXml(origin: string = siteOrigin()): string {
 
 /** /llms.txt (llmstxt.org): a short factual summary for AI agents, from the README. */
 export function llmsTxt(origin: string = siteOrigin(), docsUrl: string | undefined = publicDocsUrl()): string {
-  const docs = docsUrl ?? "https://docs.edgecoder.io/";
+  const docs = docsUrl ?? DEFAULT_PUBLIC_DOCS_URL;
   return `# EdgeCoder
 
 > AI coding platform built on local LLMs: your own machines first (Ollama or llama.cpp), and a network of approved hosts behind EdgeCoder's coordinators when you need more compute. Network compute is priced and settled in Bitcoin.
