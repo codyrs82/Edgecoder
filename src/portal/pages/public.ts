@@ -10,6 +10,7 @@ import { HERO_CLASSES, formatSats, formatUsd, referencePricing, type PublicPrici
 import { DOCS_SITE_URL, GITHUB_REPO_URL } from "./urls.js";
 import { escapeHtml } from "./escape.js";
 import { CSP_NONCE } from "../csp-nonce.js";
+import { homeSeoHeadTags, siteOrigin } from "./seo.js";
 import { legalLinksHtml } from "./legal-footer.js";
 import { PUBLIC_DOCUMENTS } from "../legal/documents.js";
 import { renderMarkdown } from "../legal/markdown.js";
@@ -30,7 +31,13 @@ function pricingMeta(p: PublicPricing): string {
   return `<span class="status-badge info" title="BTC/USD median of four sources${asOf ? ", rate epoch " + asOf : ""}">BTC ${escapeHtml(formatUsd(p.btcUsd))}</span>`;
 }
 
-export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): string {
+/** Homepage title and meta description (the wording is pending a positioning decision). */
+export const HOME_TITLE = "EdgeCoder | Private AI Coding on Your Infrastructure";
+export const HOME_DESCRIPTION =
+  "EdgeCoder is a decentralized compute network for AI coding workloads, priced and settled in Bitcoin. Buy compute at a daily market rate; hosting is by invitation during early access.";
+
+/** The public homepage; `origin` sets the canonical and social URLs (default PORTAL_PUBLIC_URL). */
+export function marketingHomeHtml(pricing: PublicPricing = referencePricing(), origin: string = siteOrigin()): string {
   const byId = new Map(pricing.classes.map((c) => [c.id, c]));
   const heroRows = HERO_CLASSES.map((id) => byId.get(id))
     .filter((c): c is NonNullable<typeof c> => Boolean(c))
@@ -54,11 +61,12 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing()): 
     <head>
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
-      <title>EdgeCoder | Private AI Coding on Your Infrastructure</title>
+      <title>${escapeHtml(HOME_TITLE)}</title>
       <meta
         name="description"
-        content="EdgeCoder is a decentralized compute network for AI coding workloads, priced and settled in Bitcoin. Buy compute at a daily market rate; hosting is by invitation during early access."
+        content="${escapeHtml(HOME_DESCRIPTION)}"
       />
+      ${homeSeoHeadTags({ title: HOME_TITLE, description: HOME_DESCRIPTION, origin })}
       ${themeHeadTags()}
       <style nonce="${CSP_NONCE}">
         ${TOKENS_CSS}
