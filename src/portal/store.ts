@@ -8,6 +8,7 @@ import { createPgPool } from "../db/pool.js";
 import { migrateCloudBots } from "./cloud-bots/store.js";
 import { RATE_LIMIT_SCHEMA_SQL } from "./rate-limit-store.js";
 import { compactReplyUsage, type ReplyUsage } from "./reply-usage.js";
+import { ChatCipher, messageAad, titleAad } from "./chat-crypto.js";
 import { randomUUID } from "node:crypto";
 import {
   USER_DELETE_PLAN,
@@ -111,6 +112,18 @@ export type PortalMessage = {
   /** The reply footer's usage (where it ran, model, tokens, timings, per-call cSats); absent on older messages. */
   usageMeta?: ReplyUsage;
 };
+
+/** A message shared for improving EdgeCoder: only from users who opted in (listSharedChatMessages). */
+export type SharedChatMessage = {
+  userId: string;
+  conversationId: string;
+  messageId: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  createdAtMs: number;
+};
+
+export type SharedChatCursor = { createdAtMs: number; messageId: string };
 
 export type OauthPendingLink = { userId: string; provider: string; providerSubject: string; tenantId?: string; email: string; browserHash?: string };
 function pendingLinkFromRow(row: Record<string, unknown>): OauthPendingLink {
@@ -289,7 +302,8 @@ CREATE INDEX IF NOT EXISTS idx_portal_conversations_user ON portal_conversations
 
 export class PortalStore {
   /** Also handed to the shared rate-limit store (security.ts) before routes are declared. */
-  constructor(readonly pool: Pool) {}
+  /** chatCipher seals chat content and titles at rest (src/portal/chat-crypto.ts, PORTAL_CHAT_KEY). */
+  constructor(readonly pool: Pool, private readonly chatCipher: ChatCipher = ChatCipher.fromEnv()) {}
 
   static fromEnv(): PortalStore | null {
     const url = process.env.PORTAL_DATABASE_URL;
@@ -368,6 +382,9 @@ export class PortalStore {
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_last_updated_ms BIGINT`);
     // Owner-approved 2026-11-17: the web chat reply footer survives a reload (nullable; old rows show cost only).
     await this.pool.query(`ALTER TABLE portal_messages ADD COLUMN IF NOT EXISTS usage_meta JSONB`);
+    // Consent to share chat context to improve EdgeCoder (opt-in, default off; chat stays encrypted either way).
+    await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS share_chat_for_improvement BOOLEAN NOT NULL DEFAULT FALSE`);
+    await this.pool.query(`ALTER TABLE portal_users ADD COLUMN IF NOT EXISTS share_chat_updated_at_ms BIGINT`);
     await this.pool.query(`CREATE INDEX IF NOT EXISTS portal_node_enrollments_token_idx ON portal_node_enrollments (registration_token_hash)`);
     await this.migrateInviteCodes();
     await this.migratePayoutDestinations();
@@ -2319,7 +2336,7 @@ export class PortalStore {
     await this.pool.query(
       `INSERT INTO portal_conversations (conversation_id, user_id, title, created_at_ms, updated_at_ms)
        VALUES ($1, $2, $3, $4, $5)`,
-      [input.conversationId, input.userId, input.title ?? "New chat", now, now]
+      [input.conversationId, input.userId, this.chatCipher.seal(input.title ?? "New chat", titleAad(input.conversationId)), now, now]
     );
   }
 
@@ -2333,7 +2350,7 @@ export class PortalStore {
     return result.rows.map((r) => ({
       conversationId: r.conversation_id,
       userId: r.user_id,
-      title: r.title,
+      title: this.chatCipher.openOrPlaceholder(r.title, titleAad(r.conversation_id)),
       createdAtMs: Number(r.created_at_ms),
       updatedAtMs: Number(r.updated_at_ms)
     }));
@@ -2359,7 +2376,7 @@ export class PortalStore {
       messageId: r.message_id,
       conversationId: r.conversation_id,
       role: r.role as "user" | "assistant" | "system",
-      content: r.content,
+      content: this.chatCipher.openOrPlaceholder(r.content, messageAad(r.conversation_id, r.message_id)),
       tokensUsed: Number(r.tokens_used),
       creditsSpent: Number(r.credits_spent),
       createdAtMs: Number(r.created_at_ms),
@@ -2381,7 +2398,7 @@ export class PortalStore {
     await this.pool.query(
       `INSERT INTO portal_messages (message_id, conversation_id, role, content, tokens_used, credits_spent, created_at_ms, usage_meta)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [input.messageId, input.conversationId, input.role, input.content, wholeNumber(input.tokensUsed), wholeNumber(input.creditsSpent), now, usage ? JSON.stringify(usage) : null]
+      [input.messageId, input.conversationId, input.role, this.chatCipher.seal(input.content, messageAad(input.conversationId, input.messageId)), wholeNumber(input.tokensUsed), wholeNumber(input.creditsSpent), now, usage ? JSON.stringify(usage) : null]
     );
     await this.pool.query(
       `UPDATE portal_conversations SET updated_at_ms = $1 WHERE conversation_id = $2`,
@@ -2392,8 +2409,69 @@ export class PortalStore {
   async renameConversation(conversationId: string, title: string): Promise<void> {
     await this.pool.query(
       `UPDATE portal_conversations SET title = $1, updated_at_ms = $2 WHERE conversation_id = $3`,
-      [title, Date.now(), conversationId]
+      [this.chatCipher.seal(title, titleAad(conversationId)), Date.now(), conversationId]
     );
+  }
+
+  /** Whether the user agreed to share chat context to improve EdgeCoder (default false). */
+  async getChatSharing(userId: string): Promise<{ shareChatForImprovement: boolean; updatedAtMs: number | null }> {
+    const r = await this.pool.query(
+      `SELECT share_chat_for_improvement, share_chat_updated_at_ms FROM portal_users WHERE user_id = $1`,
+      [userId]
+    );
+    const row = r.rows[0];
+    return {
+      shareChatForImprovement: row?.share_chat_for_improvement === true,
+      updatedAtMs: row?.share_chat_updated_at_ms == null ? null : Number(row.share_chat_updated_at_ms)
+    };
+  }
+
+  async setChatSharing(userId: string, share: boolean, atMs = Date.now()): Promise<void> {
+    await this.pool.query(
+      `UPDATE portal_users SET share_chat_for_improvement = $2, share_chat_updated_at_ms = $3 WHERE user_id = $1`,
+      [userId, share, atMs]
+    );
+  }
+
+  /**
+   * The ONE place improvement tooling may read chat text from: decrypted messages of users who have
+   * share_chat_for_improvement on right now (consent is checked at read time, so turning it off
+   * withdraws earlier messages too). Messages that can't be decrypted are left out. Oldest first,
+   * keyset-paged by (created_at_ms, message_id): pass `next` back as `after`; null when done.
+   */
+  async listSharedChatMessages(opts: { limit?: number; after?: SharedChatCursor } = {}): Promise<{ messages: SharedChatMessage[]; next: SharedChatCursor | null }> {
+    const limit = Math.min(Math.max(1, Math.floor(opts.limit ?? 500)), 5000);
+    const after = opts.after ?? { createdAtMs: -1, messageId: "" };
+    const r = await this.pool.query(
+      `SELECT c.user_id, m.conversation_id, m.message_id, m.role, m.content, m.created_at_ms
+       FROM portal_messages m
+       JOIN portal_conversations c ON c.conversation_id = m.conversation_id
+       JOIN portal_users u ON u.user_id = c.user_id
+       WHERE u.share_chat_for_improvement = TRUE
+         AND (m.created_at_ms, m.message_id) > ($1::bigint, $2::text)
+       ORDER BY m.created_at_ms, m.message_id
+       LIMIT $3`,
+      [after.createdAtMs, after.messageId, limit]
+    );
+    const out: SharedChatMessage[] = [];
+    for (const row of r.rows) {
+      let content: string;
+      try {
+        content = this.chatCipher.open(row.content, messageAad(row.conversation_id, row.message_id));
+      } catch {
+        continue;
+      }
+      out.push({
+        userId: row.user_id,
+        conversationId: row.conversation_id,
+        messageId: row.message_id,
+        role: row.role,
+        content,
+        createdAtMs: Number(row.created_at_ms)
+      });
+    }
+    const last = r.rows.at(-1);
+    return { messages: out, next: r.rows.length < limit || !last ? null : { createdAtMs: Number(last.created_at_ms), messageId: last.message_id } };
   }
 
   async deleteConversation(conversationId: string): Promise<void> {

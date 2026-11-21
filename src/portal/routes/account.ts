@@ -11,6 +11,7 @@ import { NODE_ID_PATTERN } from "../pages/escape.js";
 import { dnsLabelConflicts } from "../dns-manager.js";
 import { rejectedAttemptsForOwner } from "../rejected-attempts.js";
 import { moduleLogger } from "../../common/logger.js";
+import { registerChatSharingRoutes } from "./chat-sharing.js";
 
 const logger = moduleLogger("portal-account");
 
@@ -128,6 +129,9 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
     await store.setUserTheme(user.userId, body.theme);
     return reply.send({ ok: true, theme: body.theme });
   });
+
+  // Opt-in to share chat context to improve EdgeCoder (GET/PUT /me/chat-sharing).
+  registerChatSharingRoutes(app, { store, getCurrentUser });
 
   // /portal/api/admin/users* moved to routes/admin-users.ts (list, role, delete, cleanup).
 
