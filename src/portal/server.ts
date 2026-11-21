@@ -78,11 +78,9 @@ import { clientIp, parseOriginList, registerPortalSecurity } from "./security.js
 import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls, registerPortalRegistry } from "./coordinator-discovery.js";
 import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinatorDns } from "./dns-manager.js";
 import { nativeRedirectMatches } from "./native-app-auth.js";
-import { registerInviteAdminRoutes } from "./invites.js";
 import { autoRequestHosting, autoRequestHostingSafe, hostApprovalPolicyFromEnv, isApprovedHost, registerHostRequestRoutes } from "./host-requests.js";
 import { renderHostFormResult } from "./pages/host.js";
 import { registerSecurityResearchForPortal, registerSecurityResearchInternalRoute } from "./security-research.js";
-import { launchModeFromEnv } from "../economy/launch-gate.js";
 
 // #13: X-Forwarded-* is not trusted; the rate-limit client IP comes from clientIp() in security.ts
 // (Fly-Client-IP behind PORTAL_TRUST_FLY_CLIENT_IP on Fly, else the socket address).
@@ -195,8 +193,6 @@ const PASSKEY_ALLOWED_ORIGINS = (() => {
 // (same env + defaults); C still validates both at startup (DOCS_SITE_URL is required in production).
 import { DOCS_SITE_URL, GITHUB_REPO_URL } from "./pages/urls.js";
 const WALLET_DEFAULT_NETWORK = C.WALLET_DEFAULT_NETWORK;
-/** Soft launch (src/economy/launch-gate.ts): "invite" makes new accounts need an invite code. */
-const LAUNCH_MODE = launchModeFromEnv();
 const NODE_ENV = C.NODE_ENV;
 const COORDINATOR_OPERATIONS_OWNER_EMAILS = new Set(
   (C.COORDINATOR_OPERATIONS_OWNER_EMAILS ?? "")
@@ -839,7 +835,7 @@ app.get("/health", QUIET_ROUTE /* no request lines, only warnings and errors */,
 registerWellKnownRoutes(app);
 const { accountSecurity, secondFactor, payoutRegistrar } = /* 2FA, payout destination cooling-off, receipts, lock */ setupAccountSecurity(app, { store, config: C, getCurrentUser, buildAccessContext, registrar: { controlPlaneUrl: CONTROL_PLANE_URL, controlPlaneAdminToken: CONTROL_PLANE_ADMIN_TOKEN, portalServiceToken: PORTAL_SERVICE_TOKEN, timeoutMs: EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrls: discoverCoordinatorUrlsForPortal }, passkey: { rpId: PASSKEY_RP_ID, allowedOrigins: PASSKEY_ALLOWED_ORIGINS, challengeTtlMs: PASSKEY_CHALLENGE_TTL_MS, generateAuthenticationOptions, verifyAuthenticationResponse, uint8ArrayFromBase64Url, normalizePasskeyResponsePayload, deriveCredentialIdFromVerifyBody }, mail: { sendDestinationAdded: sendPayoutDestinationAddedEmail, sendAccountLocked: sendAccountLockedEmail, sendTwoFactorChanged: sendTwoFactorChangedEmail } });
 
-const authRouteDeps = { LAUNCH_MODE, EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, encodeCookie, secureCompare, decodeJwtPayload, ensureCreditAccountForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sendOauthLinkConfirmEmail, sendOauthConnectedEmail, sendOauthLinkClaimNoticeEmail, sha256Hex, store, verifyPassword, clientIp: (req: FastifyRequest) => clientIp(req, { ...process.env, edge: C.PORTAL_EDGE, originLockToken: C.PORTAL_ORIGIN_LOCK_TOKEN }) };
+const authRouteDeps = { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, encodeCookie, secureCompare, decodeJwtPayload, ensureCreditAccountForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sendOauthLinkConfirmEmail, sendOauthConnectedEmail, sendOauthLinkClaimNoticeEmail, sha256Hex, store, verifyPassword, clientIp: (req: FastifyRequest) => clientIp(req, { ...process.env, edge: C.PORTAL_EDGE, originLockToken: C.PORTAL_ORIGIN_LOCK_TOKEN }) };
 export type AuthRoutesDeps = typeof authRouteDeps;
 registerAuthRoutes(app, authRouteDeps);
 
@@ -887,7 +883,7 @@ const reviewsRouteDeps = { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, build
 export type ReviewRoutesDeps = typeof reviewsRouteDeps;
 registerReviewRoutes(app, reviewsRouteDeps);
 
-const marketRouteDeps = { LAUNCH_MODE, EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store, ensureCreditAccountForUser, chatCapacity, secondFactor };
+const marketRouteDeps = { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store, ensureCreditAccountForUser, chatCapacity, secondFactor };
 export type MarketRoutesDeps = typeof marketRouteDeps;
 registerMarketRoutes(app, marketRouteDeps);
 const { service: cloudBots, runner: cloudBotRunner } = createCloudBots({ pool: store?.pool ?? null, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, capacity: chatCapacity, ownMachineModels: chatRouteDeps.ownMachineModels, log: app.log }); // Cloud bots (docs/cloud-bots.md): run here, with no machine
@@ -906,16 +902,12 @@ registerRevenueRoutes(
   { store, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), codeTtlMs: WALLET_SEND_MFA_TTL_MS, sendCode: sendWithdrawCodeEmail, generateSixDigitCode, sha256Hex, secureCompare, security: accountSecurity, sendReceipt: sendWithdrawalReceiptEmail }
 );
 
-// Settings > Admin > Early access: system admins mint, list and revoke invite codes (src/portal/invites.ts).
-registerInviteAdminRoutes(app, { store, launchMode: LAUNCH_MODE, getCurrentUser, buildAccessContext });
-
 // Hosting by request (src/portal/host-requests.ts): the public "Request to host" form, Settings >
 // Admin > Host requests, and the host approval the coordinators check (HOST_APPROVAL_REQUIRED).
 const HOST_APPROVAL_POLICY = hostApprovalPolicyFromEnv();
 await registerHostRequestRoutes(app, {
   store,
   policy: HOST_APPROVAL_POLICY,
-  launchMode: LAUNCH_MODE,
   getCurrentUser,
   buildAccessContext,
   clientIp: (req) => clientIp(req, { ...process.env, edge: C.PORTAL_EDGE, originLockToken: C.PORTAL_ORIGIN_LOCK_TOKEN }),

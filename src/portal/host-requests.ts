@@ -2,18 +2,17 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 /**
- * Hosting by request (early access).
+ * Hosting by request.
  *
- * Running a node for other people's work is invite-only while the network is in early access:
+ * Running a node for other people's work needs host approval:
  *
  * - The public page /host explains it and carries a "Request to host" form. POST /host/request
  *   stores the request (portal_host_requests), after a honeypot check, input validation and two
  *   rate limits (per client IP on the route, see security.ts, and per email and per IP over 24 h
  *   in the store, which holds across portal machines). System admins are emailed.
  * - Settings > Admin > Host requests lists them; an admin sets the status (new, contacted,
- *   approved, declined) and notes. Approving one approves the email as a host and, when no
- *   account exists for it yet, mints a single-use invite code (src/portal/invites.ts) that is
- *   emailed to the requester when email is configured, and shown to the admin either way.
+ *   approved, declined) and notes. Approving one approves the email as a host and emails the
+ *   requester (when email is configured): sign in, or create an account with that email first.
  * - Host approval (portal_host_approvals, keyed by email) is what the coordinators check. With
  *   HOST_APPROVAL_REQUIRED on (the default), the portal's /internal/nodes/validate and
  *   /internal/nodes/lookup answers carry `hostApproved: false` for nodes of accounts that are not
@@ -27,8 +26,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import type { LaunchMode } from "../economy/launch-gate.js";
-import { mintInviteCode, type InviteStore } from "./invites.js";
 import { normalizeEmail } from "./portal-utils.js";
 
 export const HOST_KINDS = ["compute_agent", "coordinator", "bitcoin_node", "lightning_node"] as const;
@@ -68,8 +65,6 @@ export interface HostRequestRecord {
   notes: string | null;
   updatedAtMs: number;
   updatedBy: string | null;
-  /** Invite code minted when the request was approved (its id; the code itself is never stored). */
-  inviteCodeId: string | null;
 }
 
 export type HostApprovalSource = "grandfathered" | "admin" | "host_request";
@@ -87,7 +82,7 @@ export interface HostRequestStore {
   countHostRequestsSince(input: { email: string; ipHash: string | null; sinceMs: number }): Promise<{ byEmail: number; byIp: number }>;
   listHostRequests(limit: number): Promise<HostRequestRecord[]>;
   getHostRequest(requestId: string): Promise<HostRequestRecord | null>;
-  updateHostRequest(requestId: string, patch: { status?: HostRequestStatus; notes?: string | null; inviteCodeId?: string; updatedAtMs: number; updatedBy: string }): Promise<HostRequestRecord | null>;
+  updateHostRequest(requestId: string, patch: { status?: HostRequestStatus; notes?: string | null; updatedAtMs: number; updatedBy: string }): Promise<HostRequestRecord | null>;
   getHostApproval(email: string): Promise<HostApprovalRecord | null>;
   listHostApprovals(limit: number): Promise<HostApprovalRecord[]>;
   /** Insert or replace the approval for `email`. */
@@ -179,8 +174,7 @@ export async function autoRequestHosting(
     status: "new",
     notes: null,
     updatedAtMs: nowMs,
-    updatedBy: null,
-    inviteCodeId: null
+    updatedBy: null
   };
   await deps.store.createHostRequest({ ...record, ipHash: null });
   return record;
@@ -271,8 +265,6 @@ export const HOST_REQUEST_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const HOST_REQUESTS_PER_EMAIL = 3;
 /** Requests one client IP may send per 24 h (on top of the per-minute route limit). */
 export const HOST_REQUESTS_PER_IP = 10;
-/** Days an invite minted for an approved host request stays valid. */
-export const HOST_INVITE_DAYS = 30;
 
 export function ipHash(ip: string | undefined | null): string | null {
   if (!ip) return null;
@@ -284,17 +276,16 @@ export function ipHash(ip: string | undefined | null): string | null {
 type SessionUser = { userId: string; email: string; role?: "user" | "admin"; emailVerified?: boolean };
 
 export interface HostRequestRouteDeps {
-  store: (HostRequestStore & InviteStore & { getUserByEmail(email: string): Promise<{ userId: string } | null> }) | null | undefined;
+  store: (HostRequestStore & { getUserByEmail(email: string): Promise<{ userId: string } | null> }) | null | undefined;
   policy: HostApprovalPolicy;
-  launchMode: LaunchMode;
   getCurrentUser: (req: { headers: Record<string, unknown> }) => Promise<SessionUser | null>;
   buildAccessContext: (user: SessionUser) => Promise<{ isSystemAdmin: boolean }>;
   /** The address rate limits key on (security.ts clientIp). */
   clientIp: (req: FastifyRequest) => string;
   /** Email the system admins about a new request; resolves false when email is not configured. */
   notifyAdmins: (record: HostRequestRecord) => Promise<boolean>;
-  /** Email an approved requester (with their invite code when one was minted); false when not configured. */
-  notifyApproved: (input: { email: string; name: string; inviteCode: string | null }) => Promise<boolean>;
+  /** Email an approved requester (`hasAccount`: whether an account with that email exists yet); false when not configured. */
+  notifyApproved: (input: { email: string; name: string; hasAccount: boolean }) => Promise<boolean>;
   /** Renders the HTML answer for a browser form post (pages/host.ts). */
   renderFormResult: (result: { ok: true } | { ok: false; error: "invalid" | "rate_limited" | "unavailable"; fields?: string[]; values?: Record<string, unknown> }) => string;
   log?: { warn: (obj: unknown, msg?: string) => void; info: (obj: unknown, msg?: string) => void };
@@ -303,9 +294,7 @@ export interface HostRequestRouteDeps {
 
 const statusBody = z.object({
   status: z.enum(HOST_REQUEST_STATUSES).optional(),
-  notes: z.preprocess((v) => (v === "" ? null : v), z.string().max(4000).regex(/^[^<>\u0000-\u0008\u000b\u000c\u000e-\u001f]*$/).nullable().optional()),
-  /** On approve: mint and send an invite when the requester has no account yet (default true). */
-  sendInvite: z.boolean().optional()
+  notes: z.preprocess((v) => (v === "" ? null : v), z.string().max(4000).regex(/^[^<>\u0000-\u0008\u000b\u000c\u000e-\u001f]*$/).nullable().optional())
 });
 const approveHostBody = z.object({
   email: z.string().trim().max(254).email().transform(normalizeEmail),
@@ -319,7 +308,7 @@ const FORM_TYPE = "application/x-www-form-urlencoded";
  * Settings > Admin > Host requests:
  *   GET  /portal/api/host/status                       -> { required, approved } for the signed-in account
  *   GET  /portal/api/admin/host-requests               -> { required, requests, hosts }
- *   POST /portal/api/admin/host-requests/:id { status?, notes?, sendInvite? } -> { request, invite? }
+ *   POST /portal/api/admin/host-requests/:id { status?, notes? } -> { request, approvalEmailed? }
  *   POST /portal/api/admin/hosts { email, note? }      -> { host }
  *   POST /portal/api/admin/hosts/revoke { email }      -> { ok }
  */
@@ -372,8 +361,7 @@ export async function registerHostRequestRoutes(app: FastifyInstance, deps: Host
         status: "new",
         notes: null,
         updatedAtMs: nowMs,
-        updatedBy: null,
-        inviteCodeId: null
+        updatedBy: null
       };
       await deps.store.createHostRequest({ ...record, ipHash: ip });
       deps.log?.info({ requestId: record.requestId, hostKinds: record.hostKinds }, "host_request_received");
@@ -424,23 +412,15 @@ export async function registerHostRequestRoutes(app: FastifyInstance, deps: Host
     if (!existing) return reply.code(404).send({ error: "host_request_not_found" });
     const nowMs = now();
     const by = a.user.email;
-    let invite: { code: string; codeId: string; emailed: boolean } | undefined;
     let approvalEmailed: boolean | undefined;
     const becomesApproved = body.data.status === "approved" && existing.status !== "approved";
     if (becomesApproved) {
       await a.store.approveHost({ email: existing.email, approvedAtMs: nowMs, approvedBy: by, source: "host_request", note: `request ${existing.requestId}` });
       const hasAccount = Boolean(await a.store.getUserByEmail(existing.email));
-      let code: string | null = null;
-      if (!hasAccount && body.data.sendInvite !== false && deps.launchMode === "invite") {
-        const minted = await mintInviteCode(a.store, { label: `Host: ${existing.email}`.slice(0, 80), maxUses: 1, expiresInDays: HOST_INVITE_DAYS, createdBy: by, nowMs });
-        code = minted.code;
-        invite = { code, codeId: minted.record.codeId, emailed: false };
-      }
-      approvalEmailed = await deps.notifyApproved({ email: existing.email, name: existing.name, inviteCode: code }).catch((err: unknown) => {
+      approvalEmailed = await deps.notifyApproved({ email: existing.email, name: existing.name, hasAccount }).catch((err: unknown) => {
         deps.log?.warn({ err: err instanceof Error ? err.message : String(err), requestId: existing.requestId }, "host_request_approval_email_failed");
         return false;
       });
-      if (invite) invite.emailed = approvalEmailed;
     }
     // Declining an approved request takes back the host approval it gave.
     if (body.data.status === "declined" && existing.status === "approved") {
@@ -450,12 +430,11 @@ export async function registerHostRequestRoutes(app: FastifyInstance, deps: Host
     const updated = await a.store.updateHostRequest(existing.requestId, {
       ...(body.data.status ? { status: body.data.status } : {}),
       ...(body.data.notes !== undefined ? { notes: body.data.notes } : {}),
-      ...(invite ? { inviteCodeId: invite.codeId } : {}),
       updatedAtMs: nowMs,
       updatedBy: by
     });
-    req.log.info({ requestId: existing.requestId, status: body.data.status, invite: Boolean(invite), by: a.user.userId }, "host_request_updated");
-    return reply.send({ request: updated, ...(invite ? { invite } : {}), ...(approvalEmailed !== undefined ? { approvalEmailed } : {}) });
+    req.log.info({ requestId: existing.requestId, status: body.data.status, by: a.user.userId }, "host_request_updated");
+    return reply.send({ request: updated, ...(approvalEmailed !== undefined ? { approvalEmailed } : {}) });
   });
 
   app.post("/portal/api/admin/hosts", async (req, reply) => {

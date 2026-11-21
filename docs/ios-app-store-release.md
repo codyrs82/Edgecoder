@@ -144,8 +144,8 @@ Core smoke checklist (signed in to a mainnet account with a desktop machine onli
   a pending call; a view-only or offline machine is read-only.
 - Wallet: balance, activity, prices, earnings; withdraw asks for the emailed code, and with 2FA on (#420) for the
   authenticator code (passkey-only 2FA points to the web); a locked account or a cooling-off payout address shows
-  the portal's reason; the coordinator's limits (including the early-access daily payout cap) are shown. Debug builds also show Buy cSats with the early-access
-  limits and the Lightning invoice (QR, copy, "Open in wallet" `lightning:` link).
+  the portal's reason; the coordinator's limits are shown. Debug builds also show Buy cSats with
+  its limits and the Lightning invoice (QR, copy, "Open in wallet" `lightning:` link).
 - Settings: Delete account... opens a prefilled deletion request to support@edgecoder.io.
 - On-device runtime / BLE mesh: start, pause, stop; nearby Mac discovery (physical devices only).
 
@@ -201,7 +201,7 @@ What the app does (`Core/PurchasePolicy.swift`, Info.plist `EdgeCoderPurchaseMod
 |---|---|---|
 | `none` | **yes** | No buying and no call to action. Wallet shows balance, activity, earnings and withdrawals; out-of-cSats replies say so, without a Buy button. |
 | `link-out-us` | opt-in | US storefront only (StoreKit `Storefront.current`): "Buy cSats on edgecoder.io" opens the web wallet in the browser. Elsewhere behaves as `none`. |
-| `in-app-lightning` | Debug only | The in-app Lightning invoice flow with the early-access limits. Not for App Store builds. |
+| `in-app-lightning` | Debug only | The in-app Lightning invoice flow. Not for App Store builds. |
 
 Recommendation: ship `none` for the first TestFlight; move to `link-out-us` once the owner has confirmed the
 current 3.1.1(a) text. Offering cSats through In-App Purchase is the only way to sell inside the app everywhere,

@@ -21,8 +21,6 @@ Controls that already exist (**built**, on unless noted):
 - Payout caps per payout, per account per day and per coordinator per day, a kill switch, and periodic
   reconciliation of the ledger against the node that pauses payouts on a mismatch
   (`src/economy/payout-safeguards.ts`, `src/economy/payout-reconcile.ts`, docs/going-to-mainnet.md).
-- Soft-launch caps (`LAUNCH_MODE=invite`): a per-account balance cap (`LAUNCH_MAX_BALANCE_SATS`,
-  default 200 000), daily buy and payout caps (`src/economy/launch-gate.ts`).
 - A 24 h earnings hold on mainnet before earnings become withdrawable.
 - Read-only ledger reconciliation (`src/ledger/reconcile.ts`, `/admin/payouts/reconciliation`,
   `/ledger/verify`).
@@ -37,13 +35,11 @@ Controls that already exist (**built**, on unless noted):
 
 1. **Proof of reserves** (**this PR**, details below): a public page and endpoint with what EdgeCoder
    owes against what its node holds.
-2. **Per-account prepaid caps** (**built**): launch with `LAUNCH_MODE=invite`, so no single account can
-   hold more than `LAUNCH_MAX_BALANCE_SATS`. This bounds what any one customer can lose.
-3. **Bitcoin anchoring on** (**built, off**): turn it on at mainnet. Plan and exact asks in
+2. **Bitcoin anchoring on** (**built, off**): turn it on at mainnet. Plan and exact asks in
    [Turning anchoring on](#turning-anchoring-on-at-mainnet).
-4. **A small hot float plus a 2-of-3 on-chain vault** (**proposed**, see
+3. **A small hot float plus a 2-of-3 on-chain vault** (**proposed**, see
    [Multisig custody](#multisig-custody)). Can follow launch by a few weeks. Until it exists, the cap on
-   what can be lost is the node's total balance, so keep that small (launch caps, earnings hold).
+   what can be lost is the node's total balance, so keep that small (payout caps, earnings hold).
 
 ### Phase 2: paths that don't hold customer funds
 

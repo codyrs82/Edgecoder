@@ -77,7 +77,7 @@ const tokenOf = (cookie: string) => cookie.split(";")[0].split("=")[1];
 const attrs = (cookie: string) => cookie.split(";").slice(1).map((p) => p.trim().replace(/^Max-Age=\d+$/i, "Max-Age")).sort();
 
 beforeAll(async () => {
-  for (const name of ["PORTAL_DATABASE_URL", "DATABASE_URL", "PORTAL_ORIGIN_LOCK_TOKEN", "PORTAL_EDGE", "PORTAL_PUBLIC_URL", "PORTAL_TRUSTED_ORIGINS", "RESEND_API_KEY", "LAUNCH_MODE"]) {
+  for (const name of ["PORTAL_DATABASE_URL", "DATABASE_URL", "PORTAL_ORIGIN_LOCK_TOKEN", "PORTAL_EDGE", "PORTAL_PUBLIC_URL", "PORTAL_TRUSTED_ORIGINS", "RESEND_API_KEY"]) {
     vi.stubEnv(name, undefined);
   }
   vi.stubEnv("LOG_LEVEL", "silent");
@@ -119,6 +119,14 @@ describe("POST /auth/signup signs in", () => {
     const me = await app.inject({ url: "/me", headers: { cookie: cookie.split(";")[0] } });
     expect(me.statusCode).toBe(200);
     expect(me.json().user).toMatchObject({ email: "first@example.test", emailVerified: false });
+  });
+
+  it("ignores an inviteCode that older desktop builds still send, and capabilities report open sign-up", async () => {
+    const res = await app.inject({ method: "POST", url: "/auth/signup", remoteAddress: freshIp(), headers: json, payload: { email: "old-desktop@example.test", password: "correct-horse-1", acceptTerms: true, inviteCode: "EC-OLD0-CODE" } });
+    expect(res.statusCode).toBe(200);
+    // Installed desktop builds read launch.inviteRequired to decide whether to show an invite field.
+    const caps = await app.inject({ url: "/auth/capabilities" });
+    expect(caps.json().launch).toEqual({ mode: "open", inviteRequired: false });
   });
 
   it("a second click from the browser that just created the account goes straight in", async () => {

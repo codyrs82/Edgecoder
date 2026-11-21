@@ -472,8 +472,6 @@ export class SignupError extends Error {
 }
 
 const SIGNUP_MESSAGES: Record<string, string> = {
-  invite_required: "EdgeCoder is in early access: enter your invite code to create an account.",
-  invite_invalid: "That invite code is not valid: it may be mistyped, expired, revoked or used up.",
   email_already_registered: "An account with this email already exists.",
   terms_not_accepted: "To create an account, agree to the Terms, Privacy Policy and Acceptable Use Policy.",
   email_not_allowed: "That email address can't be used for an account.",
@@ -483,7 +481,6 @@ const SIGNUP_MESSAGES: Record<string, string> = {
 export interface SignupInput {
   email: string;
   password: string;
-  inviteCode?: string;
   acceptTerms: boolean;
 }
 
@@ -500,7 +497,6 @@ export async function signup(input: SignupInput): Promise<AuthUser> {
       email: input.email,
       password: input.password,
       acceptTerms: input.acceptTerms,
-      ...(input.inviteCode?.trim() ? { inviteCode: input.inviteCode.trim() } : {}),
     }),
     credentials: "include",
   });
@@ -512,18 +508,6 @@ export async function signup(input: SignupInput): Promise<AuthUser> {
   }
   if (data.sessionToken) saveSessionToken(data.sessionToken);
   return data.user;
-}
-
-/** Whether a new account needs an invite code (soft launch, LAUNCH_MODE=invite). */
-export async function signupNeedsInvite(): Promise<boolean> {
-  try {
-    const res = await fetch(`${portalBase()}/auth/capabilities`);
-    if (!res.ok) return false;
-    const data = await res.json();
-    return Boolean(data?.launch?.inviteRequired);
-  } catch {
-    return false;
-  }
 }
 
 export async function getMe(): Promise<AuthUser> {
@@ -1062,8 +1046,6 @@ export interface WalletOverview {
   rateStale: boolean;
   fees: { purchaseFeeBps: number | null; networkFeeBps: number | null };
   topup: { minSats: number; maxSats: number };
-  /** Early-access caps (LAUNCH_MODE=invite on the coordinator); null or absent when open. */
-  launch?: { mode: "invite"; maxBuySatsPerDay: number; maxBalanceSats: number; maxPayoutSatsPerDay: number; boughtWindowSats: number } | null;
   payouts: { balance: PayoutBalance | null; policy: PayoutPolicyView | null; payouts: PayoutRow[] } | null;
 }
 

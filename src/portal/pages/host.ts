@@ -42,7 +42,7 @@ function list(values: Record<string, unknown> | undefined, key: string): string[
 function formHtml(state: HostFormState): string {
   if (state.kind === "sent") {
     return `<div class="callout ok" role="status" id="hostRequestSent"><h3>Thanks, we have your request.</h3>
-      <p class="muted">We read every one and reply by email, usually within a few days. Nothing to install yet: if it is a fit, we send you an invite and the setup steps.</p></div>`;
+      <p class="muted">We read every one and reply by email, usually within a few days. Nothing to install yet: if it is a fit, we email you the setup steps.</p></div>`;
   }
   const values = state.kind === "error" ? state.values : undefined;
   const bad = new Set(state.kind === "error" ? state.fields ?? [] : []);

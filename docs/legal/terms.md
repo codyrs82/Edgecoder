@@ -23,8 +23,6 @@ You may use the Service only if:
 
 If you use the Service for an organization, you confirm that you are authorized to bind it, and "you" includes that organization.
 
-During early access, creating an account may require an invite code.
-
 ## 3. Accounts
 
 - You must give accurate information, including a working email address, and keep it current.

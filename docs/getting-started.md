@@ -11,8 +11,6 @@ From zero to taking part: your machines, models, funds and tools. This page foll
 Your progress is saved to your account, so you can stop and carry on later, on any computer or
 on the web. Close the guide whenever you like.
 
-Accounts are invite-only for now (`LAUNCH_MODE=invite`): you need an invite code to sign up.
-
 | Step | Web URL | App route | Done when |
 | --- | --- | --- | --- |
 | 1. Welcome | `/portal/welcome/welcome` | `#/welcome/welcome` | you chose what you want to do |
@@ -143,7 +141,6 @@ disappears on mainnet.
 
 - **Fund with Bitcoin** (on-chain): shown as "Coming soon" until it is turned on
   (`ONCHAIN_ENABLED`).
-- During the invite launch, purchases have a daily cap, shown in the Wallet.
 - Bots have a daily budget, so a bot never spends more than you allow.
 
 The step's buttons:

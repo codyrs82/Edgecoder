@@ -196,7 +196,6 @@ export const WALLET_CONTENT = `
         <div class="wl-step" id="stepAmount">
           <div class="wl-faint">Pay from any Lightning wallet. Your cSats arrive the moment the payment lands.</div>
           <div class="wl-faint u-mt-6" id="noWalletHelp"><strong>No Lightning wallet?</strong> Any Lightning wallet works: for example Cash App, Strike, Wallet of Satoshi, Phoenix, or an exchange that can send over Lightning. <a href="${O.INSTALL_LINKS.fundGuide}" target="_blank" rel="noreferrer">How to buy cSats</a></div>
-          <div class="wl-testnote hidden" id="launchNote" role="note">${icon("alert", 14)}<span id="launchNoteText"></span></div>
           <div class="wl-presets" role="radiogroup" aria-label="Amount in sats">
             ${presets.map((p, i) => `<button type="button" role="radio" aria-checked="${i === 1 ? "true" : "false"}" data-amount="${p}">${p.toLocaleString("en-US")}<small>sats</small></button>`).join("")}
             <button type="button" role="radio" aria-checked="false" data-amount="custom">Custom<small id="customRange">100 to 1M</small></button>
@@ -478,7 +477,7 @@ export const WALLET_PRICE_LIB = [
   `var TYPICAL_CALL = ${JSON.stringify(O.TYPICAL_CALL)};`,
   `var FUND_EXAMPLE_CLASS = ${JSON.stringify(O.FUND_EXAMPLE_CLASS)};`,
   ...[O.paramsFromModel, O.usdPerMToCSats, O.classPrice, O.cSatsPerCall, O.callsForCSats, O.isTestNetwork, O.testNetworkNote].map((f) => f.toString()),
-  // Early-access limits and purchase error text (src/common/buy-limits.ts), shared with the desktop app.
+  // Purchase limits and error text (src/common/buy-limits.ts), shared with the desktop app.
   ...[BL.buyLimit, BL.clampBuyAmount, BL.buyAmountFits, BL.buyRangeLabel, BL.buyLimitText, BL.buyErrorText].map((f) => f.toString())
 ].join("\n");
 
@@ -539,13 +538,13 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + W
       $("bdCalls").classList.toggle("hidden", calls === null);
       $("bdCalls").textContent = calls === null ? "" : "About " + fmtSats(calls) + " calls on a 30B coder model.";
       $("topupBtn").disabled = !valid;
-      $("topupBtn").textContent = valid ? "Buy " + fmtSats(a) + " cSats with Lightning" : lim.maxSats < lim.minSats ? "Early-access limit reached" : "Enter " + fmtSats(lim.minSats) + " to " + fmtSats(lim.maxSats) + " sats";
+      $("topupBtn").textContent = valid ? "Buy " + fmtSats(a) + " cSats with Lightning" : "Enter " + fmtSats(lim.minSats) + " to " + fmtSats(lim.maxSats) + " sats";
     }
-    /** The most one purchase can be now (early-access caps, balance, 100 to 1M). */
+    /** The range one purchase can be (100 to 1M). */
     function currentLimit() {
       const o = state.overview || {};
       const t = o.topup || {};
-      return buyLimit({ launch: o.launch || null, balanceCSats: o.connected ? o.cSats : null, feeBps: feeBps(), globalMin: t.minSats || 100, globalMax: t.maxSats || 1000000 });
+      return buyLimit({ globalMin: t.minSats || 100, globalMax: t.maxSats || 1000000 });
     }
     function pickAmount(btn) {
       for (const b of document.querySelectorAll(".wl-presets button")) b.setAttribute("aria-checked", b === btn ? "true" : "false");
@@ -587,8 +586,8 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + W
       btn.disabled = true; btn.textContent = "Preparing payment…";
       const r = await call("/portal/api/wallet/topup", { method: "POST", body: JSON.stringify({ amountSats: state.amount }) }).catch(() => ({ ok: false, json: {} }));
       renderBreakdown();
-      // Plain text for every refusal (src/common/buy-limits.ts); a soft-launch one carries the sats still allowed.
-      if (!r.ok || !r.json.invoice) { topupError(buyErrorText(r.json.error || (r.status === 401 ? "not_authenticated" : ""), r.json)); if (/^launch_/.test(r.json.error || "")) loadOverview(); return; }
+      // Plain text for every refusal (src/common/buy-limits.ts).
+      if (!r.ok || !r.json.invoice) { topupError(buyErrorText(r.json.error || (r.status === 401 ? "not_authenticated" : ""))); return; }
       state.intent = r.json;
       state.expiresAt = Date.now() + Number(r.json.expiresInSeconds || 0) * 1000;
       const ttlMin = Math.round(Number(r.json.expiresInSeconds || 0) / 60);
@@ -654,25 +653,6 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + W
     $("paidDoneBtn").addEventListener("click", backToAmount);
     $("retryInvoiceBtn").addEventListener("click", () => { showStep("stepAmount"); createInvoice().catch((e) => topupError(String(e.message || e))); });
 
-    /* ── Early access (LAUNCH_MODE=invite on the coordinator: src/economy/launch-gate.ts) ── */
-    /** \`onchainOn\`: Fund with Bitcoin is enabled, so deposits count toward the caps too. */
-    function launchText(l, onchainOn) {
-      if (!l || l.mode !== "invite") return "";
-      const parts = [];
-      if (l.maxBuySatsPerDay > 0) parts.push("up to " + fmtSats(l.maxBuySatsPerDay) + " sats per day" + (l.boughtWindowSats ? " (" + fmtSats(Math.max(0, l.maxBuySatsPerDay - l.boughtWindowSats)) + " left today)" : ""));
-      if (l.maxBalanceSats > 0) parts.push("a balance of up to " + fmtSats(l.maxBalanceSats) + " cSats");
-      if (l.maxPayoutSatsPerDay > 0) parts.push("withdrawals of up to " + fmtSats(l.maxPayoutSatsPerDay) + " sats per day");
-      if (!parts.length) return "";
-      // Bitcoin deposits count like purchases; one over a limit waits for a manual review.
-      const chain = onchainOn && (l.maxBuySatsPerDay > 0 || l.maxBalanceSats > 0) ? " Bitcoin deposits count toward these limits; a deposit over them waits for a manual review." : "";
-      return "Early access: " + parts.join(", ") + "." + chain;
-    }
-    function renderLaunch(l) {
-      const oc = onchainPolicy();
-      const text = launchText(l, !!(oc && oc.enabled));
-      $("launchNote").classList.toggle("hidden", !text);
-      $("launchNoteText").textContent = text;
-    }
     /* ── Fund with Bitcoin (on-chain): a deposit address, credited after N confirmations ── */
     const DEPOSIT_STATUS = { pending: ["Confirming", "warn"], credited: ["Added", "ok"], below_minimum: ["Below minimum", "danger"], held: ["Held for review", "warn"], dropped: ["Dropped", "danger"], reversed: ["Reversed", "danger"] };
     let onchainPoll = null;
@@ -750,7 +730,7 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + W
       const net = renderNetBadge(o.network);
       $("topupTestNote").classList.toggle("hidden", !net.test);
       $("topupTestNoteText").textContent = net.test ? "This coordinator runs on " + net.short + ". Pay with a " + net.short + " wallet; these sats have no value." + (o.network === "signet" ? " " + testNetworkNote(o.network) : "") : "";
-      // A selected amount over the early-access limit comes down to it (the custom field holds it).
+      // A selected amount over the limit comes down to it (the custom field holds it).
       const lim = currentLimit();
       if (state.amount > lim.maxSats && lim.maxSats >= lim.minSats) {
         const custom = document.querySelector('.wl-presets button[data-amount="custom"]');
@@ -760,7 +740,6 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + W
         state.amount = lim.maxSats;
       }
       renderBreakdown();
-      renderLaunch(o.launch);
       if (o.connected && o.cSats !== null) {
         $("balanceValue").textContent = fmtNum(o.cSats);
         $("balanceUsd").textContent = (fmtUsd(o.cSats, o.btcUsd) || "") + (o.btcUsd ? " · BTC $" + fmtSats(o.btcUsd) + (o.rateStale ? " (rate is stale)" : "") : "");

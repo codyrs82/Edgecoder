@@ -14,8 +14,8 @@
  *   (hosted.ts, API key); both call the coordinator's existing /account/buy and /account/intent,
  *   which price the purchase (docs/economy-math.md section 2). Nothing here computes money. A
  *   created invoice also carries `qrSvg`, its QR code (invoice-qr.ts).
- * - `launch`: the coordinator's soft-launch caps in LAUNCH_MODE=invite (null otherwise), which
- *   the Wallet shows as "Early access: up to N sats per day".
+ * - `launch`: always null. It carried the removed soft-launch caps; the field stays because shipped
+ *   clients (iOS 1.0 WalletOverview, older desktop builds) still read it.
  * - GET /portal/api/wallet/onchain and POST /portal/api/wallet/onchain/address: Fund with Bitcoin
  *   (ONCHAIN_ENABLED on the coordinator). The account's deposit address (with `qrSvg` for its
  *   bitcoin: URI) and its deposits with their confirmations; the coordinator credits a deposit
@@ -68,18 +68,6 @@ export function walletOverviewView(input: {
   const epoch = (input.rates?.epoch ?? null) as Json | null;
   const policy = (input.payouts?.policy ?? null) as Json | null;
   const coordinatorNetwork = typeof policy?.network === "string" ? policy.network : null;
-  // Soft launch (src/economy/launch-gate.ts): the coordinator's caps, shown as "Early access".
-  const launchRaw = (policy?.launch ?? null) as Json | null;
-  const launch =
-    launchRaw && launchRaw.mode === "invite"
-      ? {
-          mode: "invite" as const,
-          maxBuySatsPerDay: num(launchRaw.maxBuySatsPerDay) ?? 0,
-          maxBalanceSats: num(launchRaw.maxBalanceSats) ?? 0,
-          maxPayoutSatsPerDay: num(launchRaw.maxPayoutSatsPerDay) ?? 0,
-          boughtWindowSats: num(launchRaw.boughtWindowSats) ?? 0
-        }
-      : null;
   return {
     connected: Boolean(input.overview?.connected && acct),
     network: coordinatorNetwork ?? input.fallbackNetwork,
@@ -93,7 +81,8 @@ export function walletOverviewView(input: {
     rateStale: input.rates?.stale === true,
     fees: { purchaseFeeBps: num(input.book?.purchaseFeeBps), networkFeeBps: num(input.book?.networkFeeBps) },
     topup: { minSats: TOPUP_MIN_SATS, maxSats: TOPUP_MAX_SATS },
-    launch,
+    // Kept for shipped clients (iOS 1.0, older desktop builds) that decode it; the soft-launch caps are gone.
+    launch: null,
     classes: (input.overview?.classes as Json | undefined) ?? {},
     models: Array.isArray(input.overview?.models) ? input.overview!.models : [],
     payouts: input.payouts ? { balance: input.payouts.balance ?? null, policy, payouts: Array.isArray(input.payouts.payouts) ? input.payouts.payouts : [] } : null

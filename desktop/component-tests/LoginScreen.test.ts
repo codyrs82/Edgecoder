@@ -11,7 +11,6 @@ const api = vi.hoisted(() => {
     SignupError,
     login: vi.fn(),
     signup: vi.fn(),
-    signupNeedsInvite: vi.fn(),
     getOAuthStartUrl: vi.fn(),
     completeOAuthWithToken: vi.fn(),
     pendingOAuthVerifier: vi.fn(() => null),
@@ -25,7 +24,6 @@ import LoginScreen from "../src/pages/LoginScreen.svelte";
 
 const user = { userId: "u1", email: "cody@proton.me", displayName: null, emailVerified: false };
 
-beforeEach(() => api.signupNeedsInvite.mockResolvedValue(false));
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
@@ -49,7 +47,7 @@ describe("LoginScreen sign-up", () => {
     await fireEvent.click(screen.getByRole("checkbox"));
     await fireEvent.click(create);
     await vi.waitFor(() => expect(onLogin).toHaveBeenCalledWith(user));
-    expect(api.signup).toHaveBeenCalledWith({ email: "cody@proton.me", password: "correct-horse-1", inviteCode: "", acceptTerms: true });
+    expect(api.signup).toHaveBeenCalledWith({ email: "cody@proton.me", password: "correct-horse-1", acceptTerms: true });
     expect(shell.open).not.toHaveBeenCalled();
   });
 
@@ -82,9 +80,8 @@ describe("LoginScreen sign-up", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
-  it("asks for an invite code when the portal needs one", async () => {
-    api.signupNeedsInvite.mockResolvedValue(true);
+  it("never asks for an invite code (sign-up is open)", async () => {
     await openSignup();
-    expect(await screen.findByPlaceholderText(/Invite code/)).toBeTruthy();
+    expect(screen.queryByPlaceholderText(/Invite code/)).toBeNull();
   });
 });

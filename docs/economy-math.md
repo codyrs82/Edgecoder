@@ -259,8 +259,6 @@ deposit (txid:vout, amountSats, confirmations)
   amountSats < ONCHAIN_DEPOSIT_MIN_SATS (10,000)               -> below_minimum, not credited
   confirmations < ONCHAIN_DEPOSIT_CONFIRMATIONS (3 main, 1 else) -> pending, shown with "n of N"
   over ONCHAIN_DEPOSIT_MAX_SATS or the account's 24 h cap        -> held for an operator
-  LAUNCH_MODE=invite: over LAUNCH_MAX_BUY_SATS_PER_DAY or
-    LAUNCH_MAX_BALANCE_SATS, counted like a purchase            -> held for an operator
   otherwise                                                    -> credited: cSats = amountSats − feeSats
 ```
 

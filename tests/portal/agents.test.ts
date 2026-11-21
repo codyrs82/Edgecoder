@@ -67,6 +67,13 @@ describe("agent signup by public key", () => {
     expect(models.json().data.map((m: { id: string }) => m.id)).toContain("auto");
   });
 
+  it("ignores an inviteCode that older agents still send (invites were removed)", async () => {
+    const { app } = hostedApp();
+    const r = await signup(app, nostrKey(), { inviteCode: "EC-OLD0-CODE-FROM-2026" });
+    expect(r.statusCode).toBe(200);
+    expect(r.json().created).toBe(true);
+  });
+
   it("accepts ed25519 keys", async () => {
     const { app } = hostedApp();
     const r = await signup(app, edKey() as never);

@@ -149,12 +149,11 @@ describe("walletOverviewView", () => {
     expect(v).toMatchObject({ network: "bitcoin", networkSource: "portal", connected: true, btcUsd: null });
   });
 
-  it("passes on the coordinator's soft-launch caps (early access), and nothing when it runs open", () => {
+  it("keeps `launch` as null for shipped clients that still decode it (the soft-launch caps are gone)", () => {
     const launch = { mode: "invite", maxBuySatsPerDay: 50000, maxBalanceSats: 200000, maxPayoutSatsPerDay: 50000, boughtWindowSats: 1200 };
     const v = walletOverviewView({ fallbackNetwork: "bitcoin", overview: null, rates: null, book: null, payouts: { policy: { launch } } });
-    expect(v.launch).toEqual(launch);
-    expect(walletOverviewView({ fallbackNetwork: "bitcoin", overview: null, rates: null, book: null, payouts: { policy: { launch: { mode: "open" } } } }).launch).toBeNull();
-    expect(walletOverviewView({ fallbackNetwork: "bitcoin", overview: null, rates: null, book: null, payouts: null }).launch).toBeNull();
+    expect(v).toHaveProperty("launch", null);
+    expect(walletOverviewView({ fallbackNetwork: "bitcoin", overview: null, rates: null, book: null, payouts: null })).toHaveProperty("launch", null);
   });
 });
 
@@ -167,35 +166,17 @@ describe("wallet top-up rate limit", () => {
   });
 });
 
-describe("wallet page: early access", () => {
-  it("shows the soft-launch caps from the overview, and a cap refusal's own sentence", async () => {
-    const { WALLET_SCRIPT } = await import("../../src/portal/pages/wallet.js");
-    // Run the page's text builder on its own (it is plain JS inside the script).
-    const src = WALLET_SCRIPT.slice(WALLET_SCRIPT.indexOf("function launchText"), WALLET_SCRIPT.indexOf("function renderLaunch"));
-    const fmtSats = (n: number) => Math.round(n).toLocaleString("en-US");
-    const launchText = new Function("fmtSats", `${src}; return launchText;`)(fmtSats);
-    expect(launchText({ mode: "invite", maxBuySatsPerDay: 50000, maxBalanceSats: 200000, maxPayoutSatsPerDay: 0, boughtWindowSats: 20000 })).toBe(
-      "Early access: up to 50,000 sats per day (30,000 left today), a balance of up to 200,000 cSats."
-    );
-    expect(launchText(null)).toBe("");
-    // With Fund with Bitcoin on, deposits count toward the same caps.
-    expect(launchText({ mode: "invite", maxBuySatsPerDay: 50000, maxBalanceSats: 0, maxPayoutSatsPerDay: 0 }, true)).toBe(
-      "Early access: up to 50,000 sats per day. Bitcoin deposits count toward these limits; a deposit over them waits for a manual review."
-    );
-    expect(WALLET_SCRIPT).toContain("renderLaunch(o.launch)");
-  });
-});
-
 describe("wallet page: purchase limits", () => {
   it("ships the shared limit and error helpers to the browser, and uses them for presets, the custom range and refusals", async () => {
     const { WALLET_PRICE_LIB, WALLET_SCRIPT, WALLET_CONTENT } = await import("../../src/portal/pages/wallet.js");
     const lib = new Function(`${WALLET_PRICE_LIB}; return { buyLimit, buyRangeLabel, buyLimitText, buyErrorText, buyAmountFits };`)();
-    const l = lib.buyLimit({ launch: { mode: "invite", maxBuySatsPerDay: 50000, maxBalanceSats: 200000, boughtWindowSats: 5000 }, balanceCSats: 1000, feeBps: 0 });
-    expect(l.maxSats).toBe(45000);
-    expect(lib.buyRangeLabel(l)).toBe("100 to 45,000 today");
-    expect(lib.buyAmountFits(500000, l)).toBe(false);
-    expect(lib.buyLimitText(500000, l)).toBe("Early access: up to 50,000 sats per day (45,000 left today).");
-    expect(lib.buyErrorText("launch_buy_daily_cap", { remainingSats: 45000 })).toBe("That's over today's early-access limit. You can buy up to 45,000 sats more today.");
+    const l = lib.buyLimit({ globalMin: 100, globalMax: 1000000 });
+    expect(l.maxSats).toBe(1000000);
+    expect(lib.buyRangeLabel(l)).toBe("100 to 1M");
+    expect(lib.buyAmountFits(5000000, l)).toBe(false);
+    expect(lib.buyLimitText(5000000, l)).toBe("The most you can buy at once is 1,000,000 sats.");
+    expect(lib.buyErrorText("payments_disabled")).toBe("Buying cSats is turned off on this coordinator.");
+    expect(WALLET_SCRIPT).not.toContain("launch");
     // Presets over the limit are disabled with a tooltip; the custom label and input follow the limit.
     expect(WALLET_SCRIPT).toContain("b.disabled = off");
     expect(WALLET_SCRIPT).toContain('$("customRange").textContent = range');

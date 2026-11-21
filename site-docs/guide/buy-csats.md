@@ -58,11 +58,6 @@ In the **Buy cSats** box you see four buttons: **5,000**, **20,000** (picked for
 
 Press **Buy N cSats with Lightning**.
 
-::: tip Early access limits
-During the invite launch there is a daily limit on purchases. The Wallet page shows it above the
-amounts when it applies.
-:::
-
 ## 2. Pay with Lightning {#2-pay-with-lightning}
 
 The box changes to **Scan to pay**. You see:
@@ -205,11 +200,6 @@ Don't send your wallet's seed words or passwords. EdgeCoder never asks for them.
   number.
 - **In the desktop app:** this computer's agent must be connected to the network. It connects on
   its own while you're signed in; give it a minute after the app starts.
-
-### "Early access: you reached today's purchase limit"
-
-During the invite launch, purchases have a daily limit. Try again tomorrow, or buy a smaller
-amount if the message says how many sats are still allowed today.
 
 ### I'm on the test network and Cash App (or another wallet) won't pay
 

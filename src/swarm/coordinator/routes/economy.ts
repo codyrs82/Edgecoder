@@ -44,7 +44,6 @@ import {
   payoutPolicy,
   ECONOMY_PAYMENTS_ENABLED,
   payoutLimits,
-  launchConfig,
   payoutPause,
   memoryPayoutStore,
   RESERVED_HOST_ACCOUNTS,
@@ -52,8 +51,6 @@ import {
   runFeePoolDistribution
 } from "../payouts.js";
 import { recordInfraHeartbeat } from "../infra-hosts.js";
-import { launchUsageFor } from "../payments.js";
-import { launchPolicyView } from "../../../economy/launch-gate.js";
 import { onchainPolicyView } from "../../../economy/onchain.js";
 import { onchainConfig, onchainPayoutStore } from "../onchain.js";
 import { verifyCreditLedger, alertLedgerMismatch } from "../ledger-verify.js";
@@ -106,14 +103,13 @@ export function registerEconomyRoutes(app: CoordinatorApp): void {
       callbackPins.listCallbackPins(accountId),
       onchainConfig.enabled ? onchainPayoutStore.getOnchainDestination(accountId) : Promise.resolve(null)
     ]);
-    const launch = launchPolicyView(launchConfig, launchConfig.mode === "invite" ? (await launchUsageFor(accountId)).boughtWindowSats : undefined);
     return {
       accountId,
       balance,
       payouts,
       callbackPins: callbackPinStatus(pins),
       onchainDestination: onchainDestination ? { address: onchainDestination.address, updatedAtMs: onchainDestination.updatedAtMs } : null,
-      policy: { ...payoutPolicy, lightningEnabled: ECONOMY_PAYMENTS_ENABLED, limits: payoutLimits, paused: await payoutPause.isPaused(), launch, onchain: onchainPolicyView(onchainConfig) }
+      policy: { ...payoutPolicy, lightningEnabled: ECONOMY_PAYMENTS_ENABLED, limits: payoutLimits, paused: await payoutPause.isPaused(), onchain: onchainPolicyView(onchainConfig) }
     };
   });
   app.post("/economy/payouts/withdraw", async (req, reply) => {

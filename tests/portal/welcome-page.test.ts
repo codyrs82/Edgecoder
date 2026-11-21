@@ -25,7 +25,7 @@ const ctx = (current: O.StepId, over: Record<string, unknown> = {}) => ({
   state: { ...O.emptyOnboardingState(0), current, goal: "both" },
   signals: SIGNALS,
   origin: "https://edgecoder.io",
-  wallet: { models: [{ model: "qwen3-coder:30b", cSatsPerMTokens: { input: 322.7, output: 939.8 } }], btcUsd: 176_600, launch: { mode: "invite", maxBuySatsPerDay: 50_000 } },
+  wallet: { models: [{ model: "qwen3-coder:30b", cSatsPerMTokens: { input: 322.7, output: 939.8 } }], btcUsd: 176_600 },
   onchain: false,
   calls: 100,
   classId: "35b",
@@ -170,7 +170,7 @@ describe("/portal/welcome (Getting started on the web)", () => {
     expect(html).toContain("Fund with Lightning");
     expect(html).toMatch(/<button type='button' class='wz-btn' disabled aria-describedby='wzOnchainSoon'>Fund with Bitcoin<\/button> <span id='wzOnchainSoon' class='wz-muted'>Coming soon<\/span>/);
     expect(html).toMatch(/XL \(20–35B\)<\/td><td class='num'>2\.\d<\/td><td class='num'>about 3\d\d</);
-    expect(html).toContain("Early access: up to 50,000 sats a day.");
+    expect(html).not.toContain("Early access");
     expect(html.toLowerCase()).not.toContain("invoice");
     expect(R.wzPanel(ctx("fund", { onchain: true }))).toContain("<a class='wz-btn' href='/portal/settings/plan'>Fund with Bitcoin</a>");
   });

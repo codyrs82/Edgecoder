@@ -3879,7 +3879,7 @@ export class PostgresStore {
     );
   }
 
-  /** One account's purchases created since `sinceMs` (the soft-launch caps, src/economy/launch-gate.ts). */
+  /** One account's purchases created since `sinceMs` (the open-invoice count). */
   async listPaymentIntentsForAccountSince(accountId: string, sinceMs: number): Promise<Array<Pick<PaymentIntent, "accountId" | "amountSats" | "quotedCredits" | "status" | "createdAtMs">>> {
     const result = await this.pool.query(
       `SELECT account_id, amount_sats, quoted_credits, status, created_at_ms

@@ -194,9 +194,9 @@ describe("portal Create account", () => {
   });
 
   it("other errors show without the account actions", async () => {
-    const { el } = await signupPage({ "/auth/signup": () => ({ status: 403, body: { error: "invite_invalid" } }) });
+    const { el } = await signupPage({ "/auth/signup": () => ({ status: 400, body: { error: "terms_not_accepted" } }) });
     await el("signupBtn").click();
-    expect(el("signupErrorText").textContent).toContain("invite code is not valid");
+    expect(el("signupErrorText").textContent).toContain("agree to the Terms");
     expect(el("signupExistsActions").classList.contains("hidden")).toBe(true);
   });
 });

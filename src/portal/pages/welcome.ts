@@ -183,7 +183,6 @@ export const WELCOME_RENDER_SCRIPT = `
       }
       if (step.id === "fund") {
         var w = ctx.wallet || {};
-        var cap = w.launch && w.launch.maxBuySatsPerDay ? "<p class='wz-muted'>Early access: up to " + groupThousands(w.launch.maxBuySatsPerDay) + " sats a day.</p>" : "";
         var chain = ctx.onchain === true
           ? "<a class='wz-btn' href='/portal/settings/plan'>Fund with Bitcoin</a>"
           : "<button type='button' class='wz-btn' disabled aria-describedby='wzOnchainSoon'>Fund with Bitcoin</button> <span id='wzOnchainSoon' class='wz-muted'>Coming soon</span>";
@@ -195,7 +194,7 @@ export const WELCOME_RENDER_SCRIPT = `
           (testNote ? "<p class='wz-note' data-testid='wz-test-network'>" + escapeHtml(testNote) + "</p>" : "") +
           "<h3 class='wz-sub'>Reserve a machine</h3><p>To hold a machine for your jobs only, use Settings → <a href='/portal/settings/compute#sec-reservations'>Compute</a>. It's paid from the same cSats balance; unused time comes back when you cancel.</p>" +
           // The estimator stays right before the buttons: the fund video's script focuses ".wz-estimator + .wz-actions".
-          wzEstimator(ctx) + "<div class='wz-actions'><a class='wz-btn primary' href='/portal/settings/plan'>Fund with Lightning</a>" + chain + "</div>" + cap +
+          wzEstimator(ctx) + "<div class='wz-actions'><a class='wz-btn primary' href='/portal/settings/plan'>Fund with Lightning</a>" + chain + "</div>" +
           "<p class='wz-muted'>Bots have a daily budget, so a bot never spends more than you allow.</p>";
       }
       if (step.id === "tools") {

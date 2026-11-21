@@ -249,31 +249,10 @@ app.get("/portal/settings/nodes", async (_req, reply) => {
 app.get("/portal/settings/admin", async (_req, reply) => {
   const content = `
     <h2 class="set-title">Admin</h2>
-    <p class="set-lead">Early access invites, host requests, user management and node enrollment approvals.</p>
+    <p class="set-lead">Host requests, user management and node enrollment approvals.</p>
     <div id="adminDeniedNote" class="callout warn hidden">
       <h3>Admin access required</h3>
       <div class="muted">This section is only available to system administrators.</div>
-    </div>
-    <div id="inviteSection" class="hidden">
-    <div class="card">
-      <h2 class="u-mt-0">Early access</h2>
-      <p class="muted" id="inviteModeNote">Loading launch mode…</p>
-      <div class="row">
-        <input id="inviteLabel" type="text" maxlength="80" placeholder="Label, e.g. who it is for" aria-label="Invite label" />
-        <input id="inviteMaxUses" type="number" min="1" max="1000" step="1" value="1" aria-label="Number of uses" title="Number of accounts the code can create" />
-        <input id="inviteExpiresDays" type="number" min="1" max="365" step="1" placeholder="Days valid (blank: no expiry)" aria-label="Days until it expires" />
-        <button class="primary" id="mintInviteBtn">Create invite code</button>
-      </div>
-      <div id="newInviteWrap" class="hidden u-mt-10">
-        <div class="muted">Shown only once. Send it, or the sign-up link, to the person you invite.</div>
-        <div id="newInviteCode" class="token-box"></div>
-        <div id="newInviteLink" class="token-box"></div>
-      </div>
-      <div class="table-scroll wide"><table>
-        <thead><tr><th>Code</th><th>Label</th><th>Uses</th><th>Expires</th><th>Status</th><th>Created by</th><th>Actions</th></tr></thead>
-        <tbody id="inviteBody"></tbody>
-      </table></div>
-    </div>
     </div>
     <div id="hostRequestSection" class="hidden">
     <div class="card" id="hostRequests">
@@ -283,10 +262,6 @@ app.get("/portal/settings/admin", async (_req, reply) => {
         <thead><tr><th>Received</th><th>Who</th><th>Would host</th><th>Hardware / region</th><th>Message</th><th>Status</th><th>Notes</th><th>Actions</th></tr></thead>
         <tbody id="hostRequestBody"></tbody>
       </table></div>
-      <div id="hostInviteWrap" class="hidden u-mt-10">
-        <div class="muted" id="hostInviteNote">Invite code for the approved host, shown only once.</div>
-        <div id="hostInviteCode" class="token-box"></div>
-      </div>
     </div>
     <div class="card">
       <h3 class="u-mt-0">Approved hosts</h3>
@@ -597,57 +572,6 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       }
     });
 
-    /* ── Early access: invite codes (admin only; src/portal/invites.ts) ── */
-    const INVITE_STATUS = { active: ["ACTIVE", "ok"], used_up: ["USED UP", "warn"], expired: ["EXPIRED", "warn"], revoked: ["REVOKED", "warn"] };
-    async function loadInvites() {
-      try {
-        const data = await api("/portal/api/admin/invites", { method: "GET", headers: {} });
-        document.getElementById("inviteModeNote").textContent = data.launchMode === "invite"
-          ? "Invite-only (LAUNCH_MODE=invite): new accounts need one of these codes. Existing accounts are not affected."
-          : "Open (LAUNCH_MODE=open): anyone can sign up. Codes you create here start to matter once LAUNCH_MODE=invite is set.";
-        const rows = (data.invites || []).map(function(i) {
-          const st = INVITE_STATUS[i.status] || [String(i.status), "warn"];
-          const action = i.status === "revoked" ? "<span class='muted'>–</span>" : "<button class='revokeInviteBtn' data-code-id='" + encodeAttr(i.codeId) + "'>Revoke</button>";
-          return "<tr><td><code>" + escapeHtml(i.prefix) + "-…</code></td><td>" + escapeHtml(i.label || "") + "</td><td>" + Number(i.uses) + " / " + Number(i.maxUses) +
-            "</td><td>" + (i.expiresAtMs ? fmtTime(i.expiresAtMs) : "never") + "</td><td>" + statusBadge(st[0], st[1]) + "</td><td>" + escapeHtml(i.createdBy) +
-            "</td><td>" + action + "</td></tr>";
-        });
-        renderRows("inviteBody", rows, 7, "No invite codes yet.");
-      } catch (err) {
-        renderRows("inviteBody", [], 7, "Could not load invite codes.");
-      }
-    }
-    document.getElementById("mintInviteBtn").addEventListener("click", async function() {
-      const days = document.getElementById("inviteExpiresDays").value;
-      const body = { maxUses: Number(document.getElementById("inviteMaxUses").value || 1) };
-      const label = document.getElementById("inviteLabel").value.trim();
-      if (label) body.label = label;
-      if (days) body.expiresInDays = Number(days);
-      try {
-        const r = await api("/portal/api/admin/invites", { method: "POST", body: JSON.stringify(body) });
-        document.getElementById("newInviteWrap").classList.remove("hidden");
-        document.getElementById("newInviteCode").textContent = r.code;
-        document.getElementById("newInviteLink").textContent = location.origin + "/portal?invite=" + encodeURIComponent(r.code) + "#signup";
-        showToast("Invite code created.");
-        await loadInvites();
-      } catch (err) {
-        showToast("Could not create the invite: " + String(err.message || err), true);
-      }
-    });
-    document.getElementById("inviteBody").addEventListener("click", async function(event) {
-      const target = event.target;
-      if (!target || !target.classList || !target.classList.contains("revokeInviteBtn")) return;
-      const id = decodeURIComponent(target.getAttribute("data-code-id") || "");
-      if (!id || !window.confirm("Revoke this invite code? Accounts already created with it stay.")) return;
-      try {
-        await api("/portal/api/admin/invites/" + encodeURIComponent(id) + "/revoke", { method: "POST", body: JSON.stringify({}) });
-        showToast("Invite code revoked.");
-        await loadInvites();
-      } catch (err) {
-        showToast("Revoke failed: " + String(err.message || err), true);
-      }
-    });
-
     /* ── Host requests (admin only; src/portal/host-requests.ts) ── */
     const HOST_STATUS = { new: ["NEW", "info"], contacted: ["CONTACTED", "warn"], approved: ["APPROVED", "ok"], declined: ["DECLINED", "warn"] };
     const HOST_KIND = { compute_agent: "Compute agent", coordinator: "Coordinator", bitcoin_node: "Bitcoin node", lightning_node: "Lightning node" };
@@ -692,16 +616,9 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       const notes = row.querySelector(".hostNotes").value;
       const prev = hostRequestsCache.find(function(r) { return r.requestId === id; });
       if (status === "approved" && prev && prev.status !== "approved" &&
-          !window.confirm("Approve " + prev.email + " as a host? Their machines will take other people's work. If they have no account yet, an invite code is created and emailed.")) return;
+          !window.confirm("Approve " + prev.email + " as a host? Their machines will take other people's work. They are emailed (with a sign-up link if they have no account yet).")) return;
       try {
         const r = await api("/portal/api/admin/host-requests/" + encodeURIComponent(id), { method: "POST", body: JSON.stringify({ status: status, notes: notes }) });
-        if (r.invite) {
-          document.getElementById("hostInviteWrap").classList.remove("hidden");
-          document.getElementById("hostInviteCode").textContent = r.invite.code;
-          document.getElementById("hostInviteNote").textContent = r.invite.emailed
-            ? "Invite code emailed to " + prev.email + " (shown only once):"
-            : "Email is not configured: send this invite code to " + (prev ? prev.email : "the requester") + " yourself (shown only once):";
-        }
         showToast(status === "approved" && r.approvalEmailed ? "Saved; the requester was emailed." : "Saved.");
         await loadHostRequests();
       } catch (err) {
@@ -904,8 +821,6 @@ app.get("/portal/settings/admin", async (_req, reply) => {
         document.getElementById("adminDeniedNote").classList.remove("hidden");
         return;
       }
-      document.getElementById("inviteSection").classList.remove("hidden");
-      loadInvites();
       document.getElementById("hostRequestSection").classList.remove("hidden");
       loadHostRequests();
       document.getElementById("securityResearchSection").classList.remove("hidden");
@@ -922,6 +837,6 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       showToast("Could not load admin settings: " + String(err.message || err), true);
     });
   `;
-  return reply.type("text/html").send(settingsPage("admin", "Invites, host requests, user management and node enrollment approvals.", content, script, { wide: true }));
+  return reply.type("text/html").send(settingsPage("admin", "Host requests, user management and node enrollment approvals.", content, script, { wide: true }));
 });
 }

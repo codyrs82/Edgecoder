@@ -4,7 +4,6 @@ import { decodeJwtPayload, hashPassword, normalizeEmail, parseCookies, readCooki
 import { OAUTH_STATE_COOKIE } from "../../src/portal/oauth-state-cookie.js";
 import { HOST_AGREEMENT_VERSION, TERMS_VERSION } from "../../src/common/legal-notices.js";
 import { registerLegalRoutes } from "../../src/portal/routes/legal.js";
-import { memoryInviteStore } from "./invite-store-memory.js";
 
 /*
  * Sign-up needs "I agree to the Terms, Privacy Policy and Acceptable Use Policy"; the accepted
@@ -26,13 +25,11 @@ const { registerAuthRoutes } = await import("../../src/portal/routes/auth.js");
 type User = { userId: string; email: string; emailVerified: boolean; termsVersion?: string; termsAcceptedAtMs?: number; hostAgreementVersion?: string; hostAgreementAcceptedAtMs?: number };
 
 function build() {
-  const invites = memoryInviteStore();
   const users = new Map<string, User>();
   const states = new Map<string, Record<string, unknown>>();
   const links = new Map<string, string>();
   let currentUser: string | null = null;
   const store = {
-    ...invites.store,
     getUserByEmail: async (email: string) => [...users.values()].find((u) => u.email === email) ?? null,
     getUserById: async (id: string) => users.get(id) ?? null,
     createUser: async (u: User) => {
@@ -61,7 +58,6 @@ function build() {
   const app = Fastify();
   registerAuthRoutes(app, {
     store,
-    LAUNCH_MODE: "open",
     oauthProviders: { google: cfg, microsoft: { ...cfg, clientId: "" }, github: { ...cfg, clientId: "" } },
     PORTAL_PUBLIC_URL: "https://portal.example",
     EMAIL_VERIFY_TTL_MS: 60_000,
