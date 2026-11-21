@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getMe, loadSessionToken, signup, signupNeedsInvite, SignupError } from "../src/lib/api";
+import { getMe, loadSessionToken, signup, SignupError } from "../src/lib/api";
 
 // Desktop sign-up signs in, as sign-in does: the portal's session token is kept and sent as Bearer.
 function memoryStorage(): Storage {
@@ -25,10 +25,10 @@ describe("desktop sign-up", () => {
   it("posts to /auth/signup, keeps the session token and uses it from then on", async () => {
     const fetchMock = vi.fn(async (url: string) => (String(url).endsWith("/auth/signup") ? reply(200, { ok: true, sessionToken: "tok-1", user }) : reply(200, { user })));
     vi.stubGlobal("fetch", fetchMock);
-    expect(await signup({ email: "cody@proton.me", password: "correct-horse-1", inviteCode: " EC-1 ", acceptTerms: true })).toEqual(user);
+    expect(await signup({ email: "cody@proton.me", password: "correct-horse-1", acceptTerms: true })).toEqual(user);
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toMatch(/\/auth\/signup$/);
-    expect(JSON.parse(String(init.body))).toEqual({ email: "cody@proton.me", password: "correct-horse-1", acceptTerms: true, inviteCode: "EC-1" });
+    expect(JSON.parse(String(init.body))).toEqual({ email: "cody@proton.me", password: "correct-horse-1", acceptTerms: true });
     expect(loadSessionToken()).toBe("tok-1");
     await getMe();
     const meInit = fetchMock.mock.calls[1][1] as unknown as RequestInit;
@@ -49,12 +49,5 @@ describe("desktop sign-up", () => {
     expect(err.code).toBe("email_already_registered");
     expect(err.message).toBe("An account with this email already exists.");
     expect(loadSessionToken()).toBeNull();
-  });
-
-  it("reads whether an invite code is needed", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => reply(200, { launch: { mode: "invite", inviteRequired: true } })));
-    expect(await signupNeedsInvite()).toBe(true);
-    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("offline"); }));
-    expect(await signupNeedsInvite()).toBe(false);
   });
 });

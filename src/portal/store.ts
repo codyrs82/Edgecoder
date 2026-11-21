@@ -1,7 +1,6 @@
 // Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 
-import type { InviteRecord } from "./invites.js";
 import type { HostApprovalRecord, HostApprovalSource, HostKind, HostRequestRecord, HostRequestStatus, ComputeHardware } from "./host-requests.js";
 import type { SecurityResearchEntitlement } from "./security-research.js";
 import type { Pool } from "pg";
@@ -544,7 +543,7 @@ export class PortalStore {
     await this.pool.query(
       `INSERT INTO portal_host_requests (request_id, created_at_ms, name, email, organisation, host_kinds, compute_hardware, hardware_details, region, message, status, notes, updated_at_ms, updated_by, invite_code_id, ip_hash)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
-      [r.requestId, r.createdAtMs, r.name, r.email, r.organisation, r.hostKinds.join(","), r.computeHardware, r.hardwareDetails, r.region, r.message, r.status, r.notes, r.updatedAtMs, r.updatedBy, r.inviteCodeId, r.ipHash]
+      [r.requestId, r.createdAtMs, r.name, r.email, r.organisation, r.hostKinds.join(","), r.computeHardware, r.hardwareDetails, r.region, r.message, r.status, r.notes, r.updatedAtMs, r.updatedBy, null, r.ipHash]
     );
   }
 
@@ -572,8 +571,7 @@ export class PortalStore {
       status: row.status as HostRequestStatus,
       notes: row.notes ?? null,
       updatedAtMs: Number(row.updated_at_ms),
-      updatedBy: row.updated_by ?? null,
-      inviteCodeId: row.invite_code_id ?? null
+      updatedBy: row.updated_by ?? null
     };
   }
 
@@ -587,15 +585,14 @@ export class PortalStore {
     return r.rows[0] ? this.hostRequestFromRow(r.rows[0]) : null;
   }
 
-  async updateHostRequest(requestId: string, patch: { status?: HostRequestStatus; notes?: string | null; inviteCodeId?: string; updatedAtMs: number; updatedBy: string }): Promise<HostRequestRecord | null> {
+  async updateHostRequest(requestId: string, patch: { status?: HostRequestStatus; notes?: string | null; updatedAtMs: number; updatedBy: string }): Promise<HostRequestRecord | null> {
     const r = await this.pool.query(
       `UPDATE portal_host_requests SET
          status = COALESCE($2, status),
          notes = CASE WHEN $3::boolean THEN $4 ELSE notes END,
-         invite_code_id = COALESCE($5, invite_code_id),
-         updated_at_ms = $6, updated_by = $7
+         updated_at_ms = $5, updated_by = $6
        WHERE request_id = $1 RETURNING *`,
-      [requestId, patch.status ?? null, patch.notes !== undefined, patch.notes ?? null, patch.inviteCodeId ?? null, patch.updatedAtMs, patch.updatedBy]
+      [requestId, patch.status ?? null, patch.notes !== undefined, patch.notes ?? null, patch.updatedAtMs, patch.updatedBy]
     );
     return r.rows[0] ? this.hostRequestFromRow(r.rows[0]) : null;
   }
@@ -873,7 +870,11 @@ export class PortalStore {
     return r.rows[0] ? this.securityResearchRow(r.rows[0]) : null;
   }
 
-  /** Soft-launch invite codes (src/portal/invites.ts): only the code's hash is kept. */
+  /**
+   * Tables of the removed soft-launch invite codes. No code reads or writes them any more; they are
+   * still created so existing rows and account deletion (account-admin.ts) keep working. Dropping
+   * them is a separate, owner-approved migration.
+   */
   async migrateInviteCodes(): Promise<void> {
     await this.pool.query(
       `CREATE TABLE IF NOT EXISTS portal_invite_codes (
@@ -885,66 +886,8 @@ export class PortalStore {
       `CREATE TABLE IF NOT EXISTS portal_invite_redemptions (
          code_id TEXT NOT NULL, user_id TEXT NOT NULL, redeemed_at_ms BIGINT NOT NULL, PRIMARY KEY (code_id, user_id))`
     );
-    // OAuth sign-ups carry the invite from /start to the callback (hash only).
+    // Unused column of the removed invite flow, kept for existing databases.
     await this.pool.query(`ALTER TABLE portal_oauth_states ADD COLUMN IF NOT EXISTS invite_code_hash TEXT`);
-  }
-
-  // ── Soft-launch invite codes (src/portal/invites.ts) ──
-
-  async createInviteCode(input: { codeId: string; codeHash: string; prefix: string; label: string | null; maxUses: number; expiresAtMs: number | null; createdBy: string; createdAtMs: number }): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO portal_invite_codes (code_id, code_hash, prefix, label, max_uses, uses, expires_at_ms, created_by, created_at_ms)
-       VALUES ($1,$2,$3,$4,$5,0,$6,$7,$8)`,
-      [input.codeId, input.codeHash, input.prefix, input.label, input.maxUses, input.expiresAtMs, input.createdBy, input.createdAtMs]
-    );
-  }
-
-  async listInviteCodes(limit: number): Promise<InviteRecord[]> {
-    const r = await this.pool.query(
-      `SELECT code_id, prefix, label, max_uses, uses, expires_at_ms, created_by, created_at_ms, revoked_at_ms
-       FROM portal_invite_codes ORDER BY created_at_ms DESC LIMIT $1`,
-      [limit]
-    );
-    return r.rows.map((row) => ({
-      codeId: row.code_id,
-      prefix: row.prefix,
-      label: row.label ?? null,
-      maxUses: Number(row.max_uses),
-      uses: Number(row.uses),
-      expiresAtMs: row.expires_at_ms === null ? null : Number(row.expires_at_ms),
-      createdBy: row.created_by,
-      createdAtMs: Number(row.created_at_ms),
-      revokedAtMs: row.revoked_at_ms === null ? null : Number(row.revoked_at_ms)
-    }));
-  }
-
-  async revokeInviteCode(codeId: string, nowMs: number): Promise<boolean> {
-    const r = await this.pool.query(`UPDATE portal_invite_codes SET revoked_at_ms = $2 WHERE code_id = $1 AND revoked_at_ms IS NULL`, [codeId, nowMs]);
-    return (r.rowCount ?? 0) > 0;
-  }
-
-  async inviteCodeRedeemable(codeHash: string, nowMs: number): Promise<boolean> {
-    const r = await this.pool.query(
-      `SELECT 1 FROM portal_invite_codes
-       WHERE code_hash = $1 AND revoked_at_ms IS NULL AND (expires_at_ms IS NULL OR expires_at_ms > $2) AND uses < max_uses`,
-      [codeHash, nowMs]
-    );
-    return (r.rowCount ?? 0) > 0;
-  }
-
-  /** One statement: takes a use only while the code is live and not used up, and records who took it. */
-  async redeemInviteCode(codeHash: string, userId: string, nowMs: number): Promise<boolean> {
-    const r = await this.pool.query(
-      `WITH taken AS (
-         UPDATE portal_invite_codes SET uses = uses + 1
-         WHERE code_hash = $1 AND revoked_at_ms IS NULL AND (expires_at_ms IS NULL OR expires_at_ms > $2) AND uses < max_uses
-         RETURNING code_id)
-       INSERT INTO portal_invite_redemptions (code_id, user_id, redeemed_at_ms)
-       SELECT code_id, $3, $2 FROM taken
-       RETURNING code_id`,
-      [codeHash, nowMs, userId]
-    );
-    return (r.rowCount ?? 0) > 0;
   }
 
   /**
@@ -1600,8 +1543,6 @@ export class PortalStore {
     linkUserId?: string;
     /** Native flows: base64url sha256 of a verifier the app keeps; the mobile token is bound to it. */
     appChallenge?: string;
-    /** Soft launch: the hash of the invite given at the start, redeemed if the callback creates the account. */
-    inviteCodeHash?: string;
     /** The Terms version the person accepted on the Create account form, recorded if the callback creates the account. */
     termsVersion?: string;
     /** Re-authentication that completes an emailed link (oauth-pending-link.ts): the link token's hash. */
@@ -1609,18 +1550,18 @@ export class PortalStore {
   }): Promise<void> {
     await this.pruneExpired("portal_oauth_states");
     await this.pool.query(
-      `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms, native_redirect, link_user_id, app_challenge, invite_code_hash, terms_version, pending_link_hash)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-      [input.stateId, input.provider, input.redirectUri, input.expiresAtMs, Date.now(), input.nativeRedirect ?? null, input.linkUserId ?? null, input.appChallenge ?? null, input.inviteCodeHash ?? null, input.termsVersion ?? null, input.pendingLinkHash ?? null]
+      `INSERT INTO portal_oauth_states (state_id, provider, redirect_uri, expires_at_ms, created_at_ms, native_redirect, link_user_id, app_challenge, terms_version, pending_link_hash)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [input.stateId, input.provider, input.redirectUri, input.expiresAtMs, Date.now(), input.nativeRedirect ?? null, input.linkUserId ?? null, input.appChallenge ?? null, input.termsVersion ?? null, input.pendingLinkHash ?? null]
     );
   }
 
-  async consumeOauthState(stateId: string): Promise<{ provider: string; redirectUri: string; nativeRedirect?: string; linkUserId?: string; appChallenge?: string; inviteCodeHash?: string; termsVersion?: string; pendingLinkHash?: string } | null> {
+  async consumeOauthState(stateId: string): Promise<{ provider: string; redirectUri: string; nativeRedirect?: string; linkUserId?: string; appChallenge?: string; termsVersion?: string; pendingLinkHash?: string } | null> {
     const now = Date.now();
     const result = await this.pool.query(
       `DELETE FROM portal_oauth_states
        WHERE state_id = $1 AND expires_at_ms > $2
-       RETURNING provider, redirect_uri, native_redirect, link_user_id, app_challenge, invite_code_hash, terms_version, pending_link_hash`,
+       RETURNING provider, redirect_uri, native_redirect, link_user_id, app_challenge, terms_version, pending_link_hash`,
       [stateId, now]
     );
     const row = result.rows[0];
@@ -1631,7 +1572,6 @@ export class PortalStore {
       ...(row.native_redirect ? { nativeRedirect: row.native_redirect } : {}),
       ...(row.link_user_id ? { linkUserId: row.link_user_id } : {}),
       ...(row.app_challenge ? { appChallenge: row.app_challenge } : {}),
-      ...(row.invite_code_hash ? { inviteCodeHash: row.invite_code_hash } : {}),
       ...(row.terms_version ? { termsVersion: row.terms_version } : {}),
       ...(row.pending_link_hash ? { pendingLinkHash: row.pending_link_hash } : {})
     };

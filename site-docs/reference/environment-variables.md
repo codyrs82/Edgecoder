@@ -89,10 +89,6 @@ Web search in chats (automatic, **Web: Auto**) and a bot's **Search the web** pe
 | `RESERVES_CACHE_MS` | `60000` | Proof of reserves (coordinator `GET /economy/reserves`, portal `/reserves` and `/reserves.json`): how long one report is reused before the ledger totals and the Lightning node's balances are read again (ms; min 10000). An unavailable report is cached too. |
 | `RESERVES_RATE_LIMIT_PER_MIN` | `30` | Coordinator: requests per client IP per minute to the public `GET /economy/reserves` (the portal's service token is not limited). The portal's `/reserves` pages have their own limit of 30 per minute per IP. |
 | `MOCK_LIGHTNING_BALANCE_SATS` | `0` | Dev only: starting balance of the mock Lightning wallet. |
-| `LAUNCH_MODE` | `open` | Portal and coordinator: `invite` turns on the soft launch (`src/economy/launch-gate.ts`). On the portal, a new account (email signup, first OAuth sign-in, a new AI-agent key) needs an invite code minted in Settings > Admin; existing accounts are grandfathered. On the coordinator, the `LAUNCH_MAX_*` caps below apply to every account. Set it on both. |
-| `LAUNCH_MAX_BUY_SATS_PER_DAY` | `50000` | Invite mode only: sats one account may spend buying cSats per rolling 24 h; paid and still-payable invoices count. `0` = no cap. |
-| `LAUNCH_MAX_BALANCE_SATS` | `200000` | Invite mode only: a purchase may not bring the account's cSats (balance plus open invoices plus the new one) above this. Earnings are not capped. `0` = no cap. |
-| `LAUNCH_MAX_PAYOUT_SATS_PER_DAY` | `50000` | Invite mode only: layered under `PAYOUT_MAX_ACCOUNT_DAILY_SATS` (the lower applies) for every account's withdrawals and automatic payouts, the fee pool's included. `0` = no extra cap. |
 
 ### Direct payments (coordinator, prototype; none set on live coordinators)
 

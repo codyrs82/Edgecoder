@@ -12,13 +12,11 @@ import {
   type HostRequestRecord,
   type HostRequestStore
 } from "../../src/portal/host-requests.js";
-import { inviteCodeHash, normalizeInviteCode } from "../../src/portal/invites.js";
 import { marketingHomeHtml } from "../../src/portal/pages/public.js";
 import { hostPageHtml, renderHostFormResult } from "../../src/portal/pages/host.js";
 import { HOST_REQUEST_RATE_LIMIT, rateLimitFor, registerPortalSecurity } from "../../src/portal/security.js";
 import { staticSiteFiles } from "../../src/portal/static-site.js";
 import { PortalStore } from "../../src/portal/store.js";
-import { memoryInviteStore } from "./invite-store-memory.js";
 
 function memoryHostStore(existingUsers: string[] = []) {
   const requests = new Map<string, HostRequestRecord & { ipHash: string | null }>();
@@ -45,7 +43,6 @@ function memoryHostStore(existingUsers: string[] = []) {
       if (!r) return null;
       if (patch.status) r.status = patch.status;
       if (patch.notes !== undefined) r.notes = patch.notes;
-      if (patch.inviteCodeId) r.inviteCodeId = patch.inviteCodeId;
       r.updatedAtMs = patch.updatedAtMs;
       r.updatedBy = patch.updatedBy;
       const { ipHash: _i, ...rest } = r;
@@ -79,16 +76,14 @@ const valid = {
   message: "Happy to help.\nTwo machines."
 };
 
-async function makeApp(opts: { isAdmin?: boolean; launchMode?: "open" | "invite"; existingUsers?: string[]; policyEnv?: NodeJS.ProcessEnv; ip?: () => string } = {}) {
+async function makeApp(opts: { isAdmin?: boolean; existingUsers?: string[]; policyEnv?: NodeJS.ProcessEnv; ip?: () => string } = {}) {
   const mem = memoryHostStore(opts.existingUsers);
-  const inv = memoryInviteStore();
   const notified: HostRequestRecord[] = [];
-  const approvedMails: Array<{ email: string; inviteCode: string | null }> = [];
+  const approvedMails: Array<{ email: string; hasAccount: boolean }> = [];
   const app = Fastify();
   await registerHostRequestRoutes(app, {
-    store: { ...mem.store, ...inv.store, getUserByEmail: mem.getUserByEmail },
+    store: { ...mem.store, getUserByEmail: mem.getUserByEmail },
     policy: hostApprovalPolicyFromEnv(opts.policyEnv ?? { SYSTEM_ADMIN_EMAILS: "boss@edgecoder.io" }),
-    launchMode: opts.launchMode ?? "invite",
     getCurrentUser: async (req) => (req.headers.cookie === "admin" ? { userId: "a1", email: "boss@edgecoder.io", emailVerified: true } : req.headers.cookie ? { userId: "u1", email: String(req.headers.cookie), emailVerified: true } : null),
     buildAccessContext: async () => ({ isSystemAdmin: opts.isAdmin ?? true }),
     clientIp: opts.ip ?? (() => "198.51.100.7"),
@@ -97,13 +92,13 @@ async function makeApp(opts: { isAdmin?: boolean; launchMode?: "open" | "invite"
       return true;
     },
     notifyApproved: async (m) => {
-      approvedMails.push({ email: m.email, inviteCode: m.inviteCode });
+      approvedMails.push({ email: m.email, hasAccount: m.hasAccount });
       return true;
     },
     renderFormResult: renderHostFormResult,
     now: () => 1_000_000
   });
-  return { app, mem, inv, notified, approvedMails };
+  return { app, mem, notified, approvedMails };
 }
 
 const json = (payload: unknown) => ({ method: "POST" as const, url: "/host/request", payload: payload as Record<string, unknown> });
@@ -249,8 +244,8 @@ describe("Settings > Admin > Host requests", () => {
     expect((await app.inject({ method: "POST", url: "/portal/api/admin/hosts", headers: admin, payload: { email: "a@b.co" } })).statusCode).toBe(403);
   });
 
-  it("lists requests, changes status and notes, and approving mints an emailed invite for a new person", async () => {
-    const { app, mem, inv, approvedMails } = await makeApp();
+  it("lists requests, changes status and notes, and approving emails a new person to sign up (no invite code)", async () => {
+    const { app, mem, approvedMails } = await makeApp();
     await app.inject(json(valid));
     const list = (await app.inject({ method: "GET", url: "/portal/api/admin/host-requests", headers: admin })).json();
     expect(list.required).toBe(true);
@@ -264,12 +259,9 @@ describe("Settings > Admin > Host requests", () => {
     const approved = await app.inject({ method: "POST", url: `/portal/api/admin/host-requests/${id}`, headers: admin, payload: { status: "approved" } });
     const body = approved.json();
     expect(body.request).toMatchObject({ status: "approved", notes: "Called on Monday" });
-    expect(normalizeInviteCode(body.invite.code)).toBe(body.invite.code);
-    expect(body.invite.emailed).toBe(true);
-    expect(body.request.inviteCodeId).toBe(body.invite.codeId);
-    expect(await inv.store.inviteCodeRedeemable(inviteCodeHash(body.invite.code), 1_000_001)).toBe(true);
-    expect([...inv.codes.values()][0]).toMatchObject({ maxUses: 1, label: "Host: ada@example.com" });
-    expect(approvedMails).toEqual([{ email: "ada@example.com", inviteCode: body.invite.code }]);
+    expect(body.invite).toBeUndefined();
+    expect(body.approvalEmailed).toBe(true);
+    expect(approvedMails).toEqual([{ email: "ada@example.com", hasAccount: false }]);
     expect(mem.approvals.get("ada@example.com")).toMatchObject({ source: "host_request", approvedBy: "boss@edgecoder.io" });
 
     // Declining takes back the approval the request gave.
@@ -277,14 +269,13 @@ describe("Settings > Admin > Host requests", () => {
     expect(mem.approvals.has("ada@example.com")).toBe(false);
   });
 
-  it("approving someone who already has an account approves the host without an invite", async () => {
-    const { app, inv, approvedMails } = await makeApp({ existingUsers: ["ada@example.com"] });
+  it("approving someone who already has an account approves the host and tells them to sign in", async () => {
+    const { app, approvedMails } = await makeApp({ existingUsers: ["ada@example.com"] });
     await app.inject(json(valid));
     const id = (await app.inject({ method: "GET", url: "/portal/api/admin/host-requests", headers: admin })).json().requests[0].requestId;
     const res = (await app.inject({ method: "POST", url: `/portal/api/admin/host-requests/${id}`, headers: admin, payload: { status: "approved" } })).json();
     expect(res.invite).toBeUndefined();
-    expect(inv.codes.size).toBe(0);
-    expect(approvedMails).toEqual([{ email: "ada@example.com", inviteCode: null }]);
+    expect(approvedMails).toEqual([{ email: "ada@example.com", hasAccount: true }]);
   });
 
   it("refuses bad updates", async () => {

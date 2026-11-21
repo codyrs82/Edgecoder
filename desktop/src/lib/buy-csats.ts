@@ -15,7 +15,7 @@ export const TOP_UP_PRESETS = [5_000, 20_000, 100_000] as const;
 export function suggestedTopUpSats(opts: { budgetCSatsPerDay?: number | null; stepCSats?: number | null; limit?: BuyLimit | null } = {}): number {
   const need = Math.max(opts.budgetCSatsPerDay ?? 0, (opts.stepCSats ?? 0) * 20);
   const pick = TOP_UP_PRESETS.find((p) => p >= need) ?? TOP_UP_PRESETS[TOP_UP_PRESETS.length - 1];
-  // Never more than can be bought now (early-access caps): the Wallet would only refuse it.
+  // Never more than can be bought now (the 100 to 1M range): the Wallet would only refuse it.
   const limit = opts.limit === undefined ? get(buyLimitState) : opts.limit;
   return limit && limit.maxSats >= limit.minSats ? clampBuyAmount(pick, limit) : pick;
 }

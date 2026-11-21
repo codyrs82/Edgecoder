@@ -4,7 +4,7 @@
 import { z } from "zod";
 import { alertingEnv } from "../alerting/config.js";
 import { envEnum, envEnumCi, envFlag, envInt, envNumber, envUrl } from "../common/config.js";
-import { computeClassEnv, discoveryEnv, launchEnv, reservesEnv, observabilityEnv, onchainEnv, postgresPoolEnv, rotationEnv, serviceUrlsEnv, webReplyEnv } from "../config/shared.js";
+import { computeClassEnv, discoveryEnv, reservesEnv, observabilityEnv, onchainEnv, postgresPoolEnv, rotationEnv, serviceUrlsEnv, webReplyEnv } from "../config/shared.js";
 import { parseSigningKey } from "../security/portal-action.js";
 
 /*
@@ -27,7 +27,6 @@ export const portalConfigSchema = z.object({
   ...serviceUrlsEnv,
   ...discoveryEnv,
   ...computeClassEnv,
-  ...launchEnv,
   ...reservesEnv,
   NODE_ENV: z.string().default("development"),
   PORTAL_PUBLIC_URL: envUrl("http://127.0.0.1:4310"),

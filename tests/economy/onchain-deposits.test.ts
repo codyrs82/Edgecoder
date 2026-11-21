@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MockOnchainWallet, onchainConfigFromEnv, type OnchainConfig } from "../../src/economy/onchain.js";
 import { DepositWatcher, MemoryOnchainDepositStore, depositIntentId, type DepositCredit } from "../../src/economy/onchain-deposits.js";
-import { checkLaunchBuy, launchConfigFromEnv } from "../../src/economy/launch-gate.js";
 
 function setup(over: Partial<OnchainConfig> = {}, feeBps = 0) {
   const config: OnchainConfig = { ...onchainConfigFromEnv("regtest", { ONCHAIN_ENABLED: "1" }), depositConfirmations: 3, depositMinSats: 10_000, ...over };
@@ -179,29 +178,5 @@ describe("transactions that disappear", () => {
     const t = setup({ depositConfirmations: 1 });
     t.wallet.receive("bcrt1qnotadepositaddress", 40_000, 1);
     expect(await t.watcher.tick()).toMatchObject({ seen: 0 });
-  });
-});
-
-describe("soft launch (LAUNCH_MODE=invite)", () => {
-  it("counts a deposit like a purchase toward the daily buy and balance caps, and holds one over them", async () => {
-    const t = setup({ depositConfirmations: 1 });
-    const launch = launchConfigFromEnv({ LAUNCH_MODE: "invite", LAUNCH_MAX_BUY_SATS_PER_DAY: "50000", LAUNCH_MAX_BALANCE_SATS: "60000" });
-    const watcher = new DepositWatcher({
-      store: t.store, wallet: t.wallet, config: t.config, coordinatorId: "c1",
-      launchHold: async (d, netSats) => {
-        const bought = t.credited.filter((c) => c.accountId === d.accountId).reduce((s, c) => s + c.amountSats, 0);
-        const v = checkLaunchBuy({ amountSats: d.amountSats, newCreditsSats: netSats, boughtWindowSats: bought, balanceSats: bought, openCreditsSats: 0 }, launch);
-        return v ? `early access: ${v.error}` : null;
-      }
-    });
-    const { address } = await watcher.depositAddress("acct-a");
-    t.wallet.receive(address, 40_000, 1, 0);
-    await watcher.tick();
-    const over = t.wallet.receive(address, 20_000, 1, 1);
-    expect(await watcher.tick()).toMatchObject({ held: 1 });
-    expect(await t.store.getDeposit(over, 1)).toMatchObject({ status: "held", detail: "early access: launch_buy_daily_cap" });
-    expect(t.credited.map((c) => c.amountSats)).toEqual([40_000]);
-    // An operator may still credit it after review.
-    expect(await watcher.releaseHeld(over, 1)).toEqual({ ok: true });
   });
 });

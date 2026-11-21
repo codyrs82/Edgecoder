@@ -70,14 +70,6 @@ work, and earning for it, needs an approved host (`HOST_APPROVAL_REQUIRED`, on b
 request in Settings > Admin > Host requests. Until then a coordinator gives your agents only your
 own work.
 
-## Invite launch
-
-The network is in early access with `LAUNCH_MODE=invite` (`src/economy/launch-gate.ts`): a new
-account needs an invite code (admins create them in Settings > Admin > Early access), and the
-coordinators apply low per-account caps on purchases, balances and payouts. In invite mode new
-users sign up on the web portal; the desktop and iOS apps have no invite field yet. See
-[docs/going-to-mainnet.md](docs/going-to-mainnet.md#soft-launch).
-
 ## Quick Start
 
 ### Prerequisites
@@ -409,7 +401,7 @@ src/
   mesh/           - peer registration, gossip, model transfer
   mesh/ble/       - Bluetooth Low Energy transport and routing
   model/          - Ollama installer, model router, prompts, swap
-  portal/         - user-facing auth, chat, reviews, wallet, host requests, invites
+  portal/         - user-facing auth, chat, reviews, wallet, host requests
   receipts/       - signed work receipts and epochs
   security/       - blacklist, envelope encryption, request signing, rate limiting
   swarm/          - coordinator, queue, worker runner, hardware verification, power policy

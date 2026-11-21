@@ -49,7 +49,7 @@ async function setup() {
   });
   // Stand-ins for admin actions (the hook guards every mutation under these prefixes).
   const adminAction = vi.fn(async () => ({ ok: true }));
-  app.post("/portal/api/admin/invites", adminAction);
+  app.post("/portal/api/admin/hosts", adminAction);
   app.post("/coordinator/ops/node-remove", adminAction);
   app.get("/portal/api/admin/users", adminAction);
   await app.ready();
@@ -188,7 +188,7 @@ describe("admin actions and 2FA", () => {
   });
 
   it("covers mutations under the admin prefixes only", () => {
-    expect(isAdminActionRoute("POST", "/portal/api/admin/invites")).toBe(true);
+    expect(isAdminActionRoute("POST", "/portal/api/admin/hosts")).toBe(true);
     expect(isAdminActionRoute("DELETE", "/coordinator/ops/x")).toBe(true);
     expect(isAdminActionRoute("POST", "/admin/network/registry/suspend")).toBe(true);
     expect(isAdminActionRoute("GET", "/portal/api/admin/users")).toBe(false);
@@ -196,7 +196,7 @@ describe("admin actions and 2FA", () => {
   });
 
   it("a system admin without 2FA works during the grace period, then must enable it", async () => {
-    const act = () => s.app.inject({ method: "POST", url: "/portal/api/admin/invites", headers: cookie("s-admin"), payload: {} });
+    const act = () => s.app.inject({ method: "POST", url: "/portal/api/admin/hosts", headers: cookie("s-admin"), payload: {} });
     expect((await act()).statusCode).toBe(200);
     const status = await s.app.inject({ url: "/portal/api/security/2fa", headers: cookie("s-admin") });
     expect(status.json().admin).toMatchObject({ required: true, enabled: false, enforced: false });
@@ -208,7 +208,7 @@ describe("admin actions and 2FA", () => {
     expect((await s.app.inject({ url: "/portal/api/admin/users", headers: cookie("s-admin") })).statusCode).toBe(200);
     const e = await enableTotp(s, "s-admin");
     expect((await act()).statusCode).toBe(403);
-    expect((await s.app.inject({ method: "POST", url: "/portal/api/admin/invites", headers: { ...cookie("s-admin"), "x-edgecoder-2fa-code": e.code() }, payload: {} })).statusCode).toBe(200);
+    expect((await s.app.inject({ method: "POST", url: "/portal/api/admin/hosts", headers: { ...cookie("s-admin"), "x-edgecoder-2fa-code": e.code() }, payload: {} })).statusCode).toBe(200);
     expect((await act()).statusCode).toBe(200); // the step-up covers the session
   });
 
@@ -220,10 +220,10 @@ describe("admin actions and 2FA", () => {
     // An ordinary user (even with 2FA) is not stopped by the hook: the route refuses them itself.
     await enableTotp(s, "s-user");
     s.adminAction.mockClear();
-    expect((await s.app.inject({ method: "POST", url: "/portal/api/admin/invites", headers: cookie("s-user"), payload: {} })).statusCode).toBe(200);
+    expect((await s.app.inject({ method: "POST", url: "/portal/api/admin/hosts", headers: cookie("s-user"), payload: {} })).statusCode).toBe(200);
     expect(s.adminAction).toHaveBeenCalledTimes(1);
     // No session: the hook does nothing.
-    expect((await s.app.inject({ method: "POST", url: "/portal/api/admin/invites", payload: {} })).statusCode).toBe(200);
+    expect((await s.app.inject({ method: "POST", url: "/portal/api/admin/hosts", payload: {} })).statusCode).toBe(200);
   });
 });
 

@@ -7,7 +7,6 @@ import { htmlOpenTag, themeHeadTags, themeToggleButton } from "../assets.js";
 import { siteLabel } from "./urls.js";
 import { CSP_NONCE } from "../csp-nonce.js";
 import { legalLinksHtml } from "./legal-footer.js";
-import { launchModeFromEnv } from "../../economy/launch-gate.js";
 import { TERMS_VERSION } from "../../common/legal-notices.js";
 
 // #16: moved verbatim from src/portal/server.ts.
@@ -18,12 +17,6 @@ app.get("/portal", async (_req, reply) => {
   const googleOn = Boolean(process.env.OAUTH_GOOGLE_CLIENT_ID && process.env.OAUTH_GOOGLE_CLIENT_SECRET);
   const microsoftOn = Boolean(process.env.OAUTH_MICROSOFT_CLIENT_ID && process.env.OAUTH_MICROSOFT_CLIENT_SECRET);
   const ssoButtons = [googleOn ? `<a href="/auth/oauth/google/start"><button type="button"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M21.6 12.2c0-.7-.1-1.4-.2-2H12v3.9h5.4a4.6 4.6 0 0 1-2 3v2.5h3.2c1.9-1.7 3-4.3 3-7.4z"/><path fill="#34A853" d="M12 22c2.7 0 5-.9 6.6-2.4l-3.2-2.5c-.9.6-2 1-3.4 1-2.6 0-4.8-1.8-5.6-4.1H3.1v2.6A10 10 0 0 0 12 22z"/><path fill="#FBBC05" d="M6.4 14a6 6 0 0 1 0-3.9V7.5H3.1a10 10 0 0 0 0 9z"/><path fill="#EA4335" d="M12 6c1.5 0 2.8.5 3.8 1.5l2.8-2.8A10 10 0 0 0 3.1 7.5L6.4 10c.8-2.3 3-4 5.6-4z"/></svg> Google</button></a>` : "", microsoftOn ? `<a href="/auth/oauth/microsoft/start"><button type="button"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="9" height="9" fill="#F25022"/><rect x="13" y="2" width="9" height="9" fill="#7FBA00"/><rect x="2" y="13" width="9" height="9" fill="#00A4EF"/><rect x="13" y="13" width="9" height="9" fill="#FFB900"/></svg> Microsoft 365</button></a>` : ""].filter(Boolean).join("");
-  // Soft launch (LAUNCH_MODE=invite): Create account asks for an invite code (src/portal/invites.ts).
-  const inviteOnly = launchModeFromEnv() === "invite";
-  const inviteField = inviteOnly
-    ? `<label>Invite code</label><input id="signupInvite" type="text" placeholder="EC-XXXX-XXXX-XXXX-XXXX" autocomplete="off" spellcheck="false" maxlength="64" />
-       <p class="muted u-mt-10">EdgeCoder is in early access: a new account needs an invite code. To sign up with Google or Microsoft, enter the code here first.</p>`
-    : "";
   const ssoBlock = ssoButtons ? `<div class="or">or continue with</div><div class="sso">${ssoButtons}</div>` : "";
   const html = `<!doctype html>
   ${htmlOpenTag()}
@@ -117,7 +110,6 @@ app.get("/portal", async (_req, reply) => {
               <label>Email</label><input id="signupEmail" type="email" placeholder="you@company.com" autocomplete="email" />
               <label>Password</label><input id="signupPassword" type="password" placeholder="At least 8 characters" autocomplete="new-password" />
               <label>Display name (optional)</label><input id="signupDisplayName" type="text" placeholder="Team or your name" />
-              ${inviteField}
               <label class="agree-row" for="signupAcceptTerms"><input id="signupAcceptTerms" type="checkbox" required aria-describedby="signupLegalNote" /><span>I agree to the <a href="/terms" target="_blank" rel="noopener">Terms</a>, <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a> and <a href="/acceptable-use" target="_blank" rel="noopener">Acceptable Use Policy</a></span></label>
               <p class="muted legal-note" id="signupLegalNote">Accounts created with single sign-on are asked to agree on first sign-in.</p>
               <div id="signupError" class="callout danger u-mt-14 hidden" role="alert">
@@ -207,28 +199,18 @@ app.get("/portal", async (_req, reply) => {
             sessionBanner.classList.add("hidden");
           }
         }
-        // Soft launch: an invite link (/portal?invite=CODE#signup) fills the code in, and single
-        // sign-on carries it to /auth/oauth/<provider>/start, which uses it only for a new account.
-        // Single sign-on also carries the Terms version the checkbox accepted (?terms=), recorded if
+        // Single sign-on carries the Terms version the checkbox accepted (?terms=), recorded if
         // the callback creates a new account (routes/auth.ts).
-        const inviteInput = document.getElementById("signupInvite");
         const acceptTerms = document.getElementById("signupAcceptTerms");
         const TERMS_VERSION = ${JSON.stringify(TERMS_VERSION)};
         const ssoLinks = [...document.querySelectorAll(".sso a")];
         const ssoBases = ssoLinks.map((a) => a.getAttribute("href"));
         const syncSso = () => {
           const q = new URLSearchParams();
-          const code = inviteInput ? inviteInput.value.trim() : "";
-          if (code) q.set("invite", code);
           if (acceptTerms.checked) q.set("terms", TERMS_VERSION);
           const qs = q.toString();
           ssoLinks.forEach((a, i) => a.setAttribute("href", qs ? ssoBases[i] + "?" + qs : ssoBases[i]));
         };
-        if (inviteInput) {
-          const fromLink = new URLSearchParams(location.search).get("invite");
-          if (fromLink) { inviteInput.value = fromLink; document.getElementById("tabSignup").click(); }
-          inviteInput.addEventListener("input", syncSso);
-        }
         let signupInFlight = false;
         acceptTerms.addEventListener("change", () => {
           if (!signupInFlight) document.getElementById("signupBtn").disabled = !acceptTerms.checked;
@@ -236,8 +218,6 @@ app.get("/portal", async (_req, reply) => {
         });
         syncSso();
         const SIGNUP_ERRORS = {
-          invite_required: "EdgeCoder is in early access: enter your invite code to create an account.",
-          invite_invalid: "That invite code is not valid: it may be mistyped, expired, revoked or used up.",
           email_already_registered: "An account with this email already exists.",
           terms_not_accepted: "To create an account, agree to the Terms, Privacy Policy and Acceptable Use Policy.",
           invalid_request: "Check the email address, and use a password of at least 8 characters."
@@ -295,7 +275,6 @@ app.get("/portal", async (_req, reply) => {
                 email: document.getElementById("signupEmail").value,
                 password: document.getElementById("signupPassword").value,
                 displayName: document.getElementById("signupDisplayName").value || undefined,
-                inviteCode: inviteInput ? inviteInput.value.trim() || undefined : undefined,
                 acceptTerms: acceptTerms.checked
               })
             });

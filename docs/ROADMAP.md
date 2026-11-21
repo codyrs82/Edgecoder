@@ -14,8 +14,6 @@ item was added or finished.
 - **Signet Lightning node** (`edgecoder-lnd-signet`, Mutinynet) for pre-mainnet testing (#301).
 - **Hosting by request.** A Host with us page and request form at `/host`, admin Host requests,
   and a host approval gate (`HOST_APPROVAL_REQUIRED`, on by default) (#304).
-- **Invite launch.** `LAUNCH_MODE=invite`: sign-up by invite code and low per-account caps on
-  purchases, balances and payouts (#299).
 - **Best-fit routing** for model auto: job type, complexity score, load, speed, price and session
   affinity (#311).
 - **`edgecoder code`** terminal agent, with shared sessions and `/remote` co-editing with the

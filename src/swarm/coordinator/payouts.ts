@@ -16,7 +16,6 @@ import {
 } from "../../economy/payout-service.js";
 import { PayoutPauseControl, payoutLimitsFromEnv, payoutsPausedByEnv } from "../../economy/payout-safeguards.js";
 import { PayoutReconciler, payoutReconcileConfigFromEnv } from "../../economy/payout-reconcile.js";
-import { launchConfigFromEnv, layerLaunchPayoutLimits } from "../../economy/launch-gate.js";
 import { earningsHoldFromEnv, payoutPolicyFromEnv } from "../../economy/payouts.js";
 import { MemoryCallbackPinStore, type CallbackPinStore } from "../../economy/lnurl-callback-pin.js";
 import { MemoryPayoutRunClaimStore, payoutTickMs, runPayoutJobIfDue, type PayoutRunClaimStore } from "../../economy/payout-schedule.js";
@@ -96,9 +95,7 @@ export const memoryPayoutStore = pgStore ? null : new EnginePayoutStore();
 export const payoutStore: PayoutStore = pgStore ?? (memoryPayoutStore as PayoutStore);
 
 // Hot-wallet safeguards (docs/going-to-mainnet.md): caps, the kill switch and reconciliation.
-// Soft launch (LAUNCH_MODE=invite): the launch payout cap is layered under the per-account cap.
-export const launchConfig = launchConfigFromEnv();
-export const payoutLimits = layerLaunchPayoutLimits(payoutLimitsFromEnv(BITCOIN_NETWORK), launchConfig);
+export const payoutLimits = payoutLimitsFromEnv(BITCOIN_NETWORK);
 export const payoutPause = new PayoutPauseControl({
   store: payoutStore,
   envPaused: payoutsPausedByEnv(),

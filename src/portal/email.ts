@@ -242,18 +242,16 @@ export function createPortalMailer(cfg: PortalMailerConfig, log: { warn: (msg: s
     return sendResendEmail(adminEmails.join(","), `Host request: ${r.name.slice(0, 60)}`, html, "host_request_admin_email");
   }
 
-  /** An approved host request: what to do next, with the invite code when one was minted. */
-  async function sendHostApprovedEmail(input: { email: string; name: string; inviteCode: string | null }): Promise<boolean> {
-    const signup = `${cfg.portalPublicUrl}/portal${input.inviteCode ? `?invite=${encodeURIComponent(input.inviteCode)}` : ""}#signup`;
+  /** An approved host request: what to do next (create an account first when there is none for the email). */
+  async function sendHostApprovedEmail(input: { email: string; name: string; hasAccount: boolean }): Promise<boolean> {
+    const signup = `${cfg.portalPublicUrl}/portal#signup`;
     const signin = `${cfg.portalPublicUrl}/portal`;
-    const html = input.inviteCode
+    const html = !input.hasAccount
       ? `
       <p>Hi ${escapeHtml(input.name)},</p>
       <p>Thanks for offering to host on EdgeCoder. Your request is approved.</p>
-      <p>Create your account with this invite code (it works once and expires in 30 days):</p>
-      <p><strong style="font-size:18px;letter-spacing:0.08em;">${escapeHtml(input.inviteCode)}</strong></p>
-      <p><a href="${signup}">${signup}</a></p>
-      <p>Once signed in, Settings, Install agent has the installer and your node token. Use this email address for the account: host approval is tied to it.</p>
+      <p>Create your account here: <a href="${signup}">${signup}</a></p>
+      <p>Use this email address for the account: host approval is tied to it. Once signed in, Settings, Install agent has the installer and your node token.</p>
     `
       : `
       <p>Hi ${escapeHtml(input.name)},</p>

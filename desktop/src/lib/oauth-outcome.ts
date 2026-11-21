@@ -34,8 +34,6 @@ export function oauthFailureMessage(code: string | null, provider: string | null
       return `Verify your email address before connecting ${p}.`;
     case "oauth_connect_session_mismatch":
       return `Your session changed while connecting ${p}. Sign in again and retry.`;
-    case "invite_required":
-      return "EdgeCoder is in early access: creating an account needs an invite code. Create your account on the portal first.";
     default:
       return code ? `${p} sign-in was not completed (${code}).` : "OAuth sign-in was not completed";
   }

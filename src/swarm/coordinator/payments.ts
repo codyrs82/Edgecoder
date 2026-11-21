@@ -30,9 +30,7 @@ import {
   BITCOIN_NETWORK
 } from "./context.js";
 import { paymentIntents } from "./economy.js";
-import { payoutStore, lightningProvider, launchConfig } from "./payouts.js";
-import { checkLaunchBuy, launchBuyUsage, LAUNCH_WINDOW_MS, type LaunchBuyViolation } from "../../economy/launch-gate.js";
-import { creditEngine } from "../../credits/store.js";
+import { payoutStore, lightningProvider } from "./payouts.js";
 import { PurchaseSignals } from "../../alerting/monitors.js";
 
 async function allocateIntentPayouts(intent: PaymentIntent): Promise<IssuancePayoutEvent[]> {
@@ -239,38 +237,3 @@ export async function createPaymentIntent(accountId: string, amountSats: number,
   return intent;
 }
 
-/** Paid and payable purchases of one account in the soft-launch window (Postgres when shared, else memory). */
-export async function launchUsageFor(accountId: string, nowMs = Date.now()): Promise<{ boughtWindowSats: number; openCreditsSats: number }> {
-  const rows = pgStore ? await pgStore.listPaymentIntentsForAccountSince(accountId, nowMs - LAUNCH_WINDOW_MS) : paymentIntents.values();
-  // An invoice can still be paid (and credited) until TTL + grace: it counts against the cap until then.
-  return launchBuyUsage(rows, accountId, nowMs, PAYMENT_INTENT_TTL_MS + PAYMENT_INTENT_EXPIRY_GRACE_MS);
-}
-
-// One purchase check-and-create at a time per account: across every coordinator on the shared
-// database (a Postgres advisory lock), and in this process when there is none.
-const launchBuyLocks = new Map<string, Promise<unknown>>();
-
-/**
- * A purchase under the soft-launch caps (LAUNCH_MODE=invite; src/economy/launch-gate.ts): the
- * invoice, or the cap it would break. Open mode creates the invoice directly.
- */
-export async function createPaymentIntentWithinLaunchCaps(accountId: string, amountSats: number): Promise<{ intent: PaymentIntent } | { violation: LaunchBuyViolation }> {
-  if (launchConfig.mode !== "invite") return { intent: await createPaymentIntent(accountId, amountSats) };
-  const checkAndCreate = async (): Promise<{ intent: PaymentIntent } | { violation: LaunchBuyViolation }> => {
-    const usage = await launchUsageFor(accountId);
-    const balanceSats = pgStore ? await pgStore.creditBalance(accountId) : creditEngine.balance(accountId);
-    const { netSats } = computeIntentFee(amountSats, COORDINATOR_FEE_BPS);
-    const violation = checkLaunchBuy({ amountSats, newCreditsSats: netSats, balanceSats, ...usage }, launchConfig);
-    if (violation) return { violation };
-    return { intent: await createPaymentIntent(accountId, amountSats) };
-  };
-  const previous = launchBuyLocks.get(accountId) ?? Promise.resolve();
-  const store = pgStore;
-  const run = previous.catch(() => undefined).then(() => (store ? store.withAccountPurchaseLock(accountId, checkAndCreate) : checkAndCreate()));
-  launchBuyLocks.set(accountId, run);
-  try {
-    return await run;
-  } finally {
-    if (launchBuyLocks.get(accountId) === run) launchBuyLocks.delete(accountId);
-  }
-}

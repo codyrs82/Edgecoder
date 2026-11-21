@@ -90,27 +90,15 @@
   let charged = $derived(feeBps > 0);
   let feeKnown = $derived(wallet?.fees.purchaseFeeBps != null);
   let netFeeBps = $derived(wallet?.fees.networkFeeBps ?? 500);
-  // The most one purchase can be now: early-access caps (daily, balance) and the 100 to 1M range.
+  // The range one purchase can be (100 to 1M).
   let limit = $derived(buyLimit({
-    launch: wallet?.launch ?? null,
-    balanceCSats: local?.connected && local.account ? local.account.cSats : wallet?.cSats ?? null,
-    feeBps: wallet?.fees.purchaseFeeBps ?? 0,
     globalMin: wallet?.topup?.minSats ?? 100,
     globalMax: wallet?.topup?.maxSats ?? 1_000_000,
   }));
   let valid = $derived(buyAmountFits(amount, limit));
   let overText = $derived(buyLimitText(amount, limit));
   let rangeText = $derived(buyRangeLabel(limit));
-  let launchLine = $derived.by(() => {
-    const l = wallet?.launch;
-    if (!l || l.mode !== "invite") return "";
-    const parts: string[] = [];
-    if (l.maxBuySatsPerDay > 0) parts.push(`up to ${fmtSats(l.maxBuySatsPerDay)} sats per day${l.boughtWindowSats ? ` (${fmtSats(Math.max(0, l.maxBuySatsPerDay - l.boughtWindowSats))} left today)` : ""}`);
-    if (l.maxBalanceSats > 0) parts.push(`a balance of up to ${fmtSats(l.maxBalanceSats)} cSats`);
-    if (l.maxPayoutSatsPerDay > 0) parts.push(`withdrawals of up to ${fmtSats(l.maxPayoutSatsPerDay)} sats per day`);
-    return parts.length ? `Early access: ${parts.join(", ")}.` : "";
-  });
-  // Buy cSats suggestions elsewhere clamp to this; a requested amount over it comes down once the caps are known.
+  // Buy cSats suggestions elsewhere clamp to this; a requested amount over it comes down once the limit is known.
   let clampedRequest = false;
   $effect(() => {
     buyLimitState.set(wallet ? limit : null);
@@ -225,10 +213,7 @@
       clearInterval(pollTimer);
       pollTimer = setInterval(checkInvoice, 3000);
     } catch (e) {
-      const err = e as { code?: string; data?: { remainingSats?: number; limitSats?: number } };
-      topupError = buyErrorText(err.code, err.data ?? null);
-      // The caps moved since the page loaded (another purchase): refresh them.
-      if (/^launch_/.test(err.code ?? "")) void load();
+      topupError = buyErrorText((e as { code?: string }).code);
     } finally {
       creating = false;
     }
@@ -434,7 +419,6 @@
         {:else if step === "amount"}
           <p class="wl-faint">Pay from any Lightning wallet. Your cSats arrive the moment the payment lands.</p>
           <p class="wl-faint" data-testid="no-wallet-help"><strong>No Lightning wallet?</strong> Any Lightning wallet works: for example Cash App, Strike, Wallet of Satoshi, Phoenix, or an exchange that can send over Lightning. <button type="button" class="wl-link" onclick={() => openUrl(INSTALL_LINKS.fundGuide)}>How to buy cSats</button></p>
-          {#if launchLine}<p class="wl-faint" data-testid="launch-note">{launchLine}</p>{/if}
           <div class="wl-presets" role="radiogroup" aria-label="Amount in sats">
             {#each [...PRESETS, "custom" as const] as p, i}
               {@const over = p !== "custom" && p > limit.maxSats}

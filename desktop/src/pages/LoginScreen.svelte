@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { login, signup, signupNeedsInvite, SignupError, getOAuthStartUrl, completeOAuthWithToken, pendingOAuthVerifier } from "../lib/api";
+  import { login, signup, SignupError, getOAuthStartUrl, completeOAuthWithToken, pendingOAuthVerifier } from "../lib/api";
   import type { AuthUser } from "../lib/api";
   import { open } from "@tauri-apps/plugin-shell";
   import { portalResetPasswordUrl, portalUrl } from "../lib/endpoints";
@@ -18,9 +18,7 @@
   let submitting = $state(false);
   // Sign in, or create an account (in the app: a new account is signed in straight away).
   let mode = $state<"signin" | "signup">("signin");
-  let inviteCode = $state("");
   let acceptTerms = $state(false);
-  let inviteRequired = $state(false);
   // Set when sign-up says the address already has an account: offer Sign in / Forgot password.
   let accountExists = $state(false);
 
@@ -29,7 +27,6 @@
     error = "";
     notice = "";
     accountExists = false;
-    if (next === "signup") signupNeedsInvite().then((v) => (inviteRequired = v));
   }
 
   async function handleSubmit() {
@@ -58,7 +55,7 @@
     }
     submitting = true;
     try {
-      const user = await signup({ email, password, inviteCode, acceptTerms });
+      const user = await signup({ email, password, acceptTerms });
       onLogin(user);
     } catch (err) {
       error = (err as Error).message;
@@ -185,10 +182,6 @@
         disabled={submitting}
       />
       {#if mode === "signup"}
-        {#if inviteRequired}
-          <label class="sr-only" for="signup-invite">Invite code</label>
-          <input id="signup-invite" type="text" autocomplete="off" spellcheck="false" maxlength="64" bind:value={inviteCode} placeholder="Invite code (EC-XXXX-XXXX-XXXX-XXXX)" disabled={submitting} />
-        {/if}
         <label class="agree-row" for="signup-terms">
           <input id="signup-terms" type="checkbox" bind:checked={acceptTerms} disabled={submitting} />
           <span>I agree to the

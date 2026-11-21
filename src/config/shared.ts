@@ -195,14 +195,6 @@ export const reservesEnv = {
   RESERVES_RATE_LIMIT_PER_MIN: envInt(undefined, { min: 1 })
 };
 
-/** Soft launch (src/economy/launch-gate.ts): invite-only signups on the portal, low per-account caps on the coordinator. */
-export const launchEnv = {
-  LAUNCH_MODE: envEnumCi(["open", "invite"]),
-  LAUNCH_MAX_BUY_SATS_PER_DAY: count(),
-  LAUNCH_MAX_BALANCE_SATS: count(),
-  LAUNCH_MAX_PAYOUT_SATS_PER_DAY: count()
-};
-
 /**
  * On-chain Bitcoin through the coordinator's LND wallet (src/economy/onchain*.ts): deposits credited
  * as cSats and batched on-chain payouts. Read by onchainConfigFromEnv, which applies the defaults

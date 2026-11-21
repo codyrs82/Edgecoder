@@ -5,9 +5,9 @@
  * AI agents as users: an agent signs up with a public key instead of an email.
  *
  *   POST /agents/challenge { keyType, publicKey }                          -> { nonce, challenge, expiresAtMs }
- *   POST /agents/signup    { keyType, publicKey, nonce, signature, name?, inviteCode? } -> { accountId, apiKey, created }
+ *   POST /agents/signup    { keyType, publicKey, nonce, signature, name? }  -> { accountId, apiKey, created }
  *
- * In the soft launch (LAUNCH_MODE=invite) a new key needs `inviteCode` (src/portal/invites.ts).
+ * An `inviteCode` that older agents still send is ignored (the soft-launch invites were removed).
  *
  * The agent signs sha256(utf8(challenge)): BIP-340 Schnorr for "secp256k1" (a Nostr key, 32-byte
  * x-only public key hex) or Ed25519 for "ed25519". A challenge lives 5 minutes, is bound to the
@@ -22,8 +22,6 @@ import { schnorr } from "@noble/curves/secp256k1.js";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { PortalStore } from "../store.js";
-import type { LaunchMode } from "../../economy/launch-gate.js";
-import { redeemInviteForNewAccount, type InviteStore } from "../invites.js";
 
 export const AGENT_CHALLENGE_TTL_MS = 5 * 60_000;
 export const AGENT_KEY_TYPES = ["secp256k1", "ed25519"] as const;
@@ -63,9 +61,6 @@ export interface AgentRoutesDeps {
   onAgentCreated?: (user: { userId: string; email: string }) => Promise<void>;
   /** New agent accounts allowed per hour on this instance (on top of the per-IP rate limit). */
   maxNewAccountsPerHour?: number;
-  /** Soft launch: in invite mode a new key (a new account) needs `inviteCode`; a known key does not. */
-  launchMode?: LaunchMode;
-  inviteStore?: Pick<InviteStore, "redeemInviteCode"> | null;
   now?: () => number;
 }
 
@@ -103,11 +98,12 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentRoutesDeps)
           .max(60)
           .regex(/^[^<>\u0000-\u001f]*$/)
           .optional(),
-        inviteCode: z.string().max(64).optional(),
+        // Ignored; accepted so older agents that still send an invite code are not refused.
+        inviteCode: z.unknown().optional(),
       })
       .safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: "invalid_signup" });
-    const { keyType, publicKey, nonce, signature, name, inviteCode } = parsed.data;
+    const { keyType, publicKey, nonce, signature, name } = parsed.data;
     // Single use: taken out before anything else, so a replay finds nothing whatever the outcome.
     const challenge = await store.consumeAgentChallenge(sha256(nonce).toString("hex"));
     if (!challenge) return reply.code(401).send({ error: "unknown_challenge" });
@@ -126,8 +122,6 @@ export function registerAgentRoutes(app: FastifyInstance, deps: AgentRoutesDeps)
       }
       if (createdInWindow >= maxPerHour) return reply.code(429).send({ error: "agent_signups_paused", retryAfter: "1 hour" });
       const fresh = randomUUID();
-      const invite = await redeemInviteForNewAccount({ mode: deps.launchMode ?? "open", store: deps.inviteStore, code: inviteCode, userId: fresh, nowMs: now() });
-      if (!invite.ok) return reply.code(invite.status).send({ error: invite.error, detail: invite.detail });
       createdInWindow++;
       userId = await store.createAgentAccount({ userId: fresh, keyType, publicKey, displayName: name });
       created = userId === fresh;

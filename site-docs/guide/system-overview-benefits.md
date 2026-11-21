@@ -6,7 +6,7 @@ This page covers what EdgeCoder is, what it ships today, and why it matters.
 
 EdgeCoder is an AI coding network built on local models. Your own machines run models locally. Work you choose to share is queued on a coordinator and runs on agents of approved hosts; coordinators gossip with each other to share tasks. On the public network the coordinators are EdgeCoder's seeds on Fly.io and the portal is EdgeCoder-hosted, so the network today is a set of operated coordinators with a mesh of agents behind them, not a serverless peer-to-peer network. Anyone can also run their own coordinator.
 
-You sign in to the EdgeCoder portal (invite-only during early access, `LAUNCH_MODE=invite`). Running your own work on your own machines is free. Using other people's machines is paid in cSats (1 cSat = 1 sat), and hosting other people's work is by request and earns sats. Frontier models are used only with your own API key ([frontier keys](https://github.com/codyrs82/Edgecoder/blob/main/docs/frontier-keys.md)).
+You sign in to the EdgeCoder portal. Running your own work on your own machines is free. Using other people's machines is paid in cSats (1 cSat = 1 sat), and hosting other people's work is by request and earns sats. Frontier models are used only with your own API key ([frontier keys](https://github.com/codyrs82/Edgecoder/blob/main/docs/frontier-keys.md)).
 
 ## Shipped Features
 
@@ -50,7 +50,7 @@ Inference runs on commodity hardware: your own, or an approved host's. EdgeCoder
 
 ### Open mesh, invited hosts
 
-Any signed-in device can run its owner's work. Hosting other people's work is by request: apply at `/host` on the portal and an admin approves you (`HOST_APPROVAL_REQUIRED`, on by default). Sign-up is invite-only during early access. The code is source-available, and you can run your own coordinator.
+Any signed-in device can run its owner's work. Hosting other people's work is by request: apply at `/host` on the portal and an admin approves you (`HOST_APPROVAL_REQUIRED`, on by default). The code is source-available, and you can run your own coordinator.
 
 ### Cryptographically auditable
 
