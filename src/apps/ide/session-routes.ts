@@ -42,7 +42,8 @@ const STATUS: Record<SessionError["code"], number> = {
 
 const client = {
   clientId: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/),
-  kind: z.enum(["terminal", "desktop", "api"]).default("api"),
+  // "remote" only makes a client stricter (sessions.ts remoteDecision; "always" ignored on approve).
+  kind: z.enum(["terminal", "desktop", "api", "remote"]).default("api"),
   label: z.string().max(80).optional(),
 };
 const clientSchema = z.object(client);

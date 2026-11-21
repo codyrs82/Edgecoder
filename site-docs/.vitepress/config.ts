@@ -8,9 +8,11 @@ const base = process.env.DOCS_BASE ?? "/";
 
 export default withMermaid(defineConfig({
   title: "EdgeCoder Docs",
-  description: "Wiki-style documentation for the EdgeCoder platform.",
+  description: "EdgeCoder documentation: run AI coding models on your own machines, use the network when you need more compute, and pay for it in sats over Lightning.",
   base,
   cleanUrls: true,
+  // sitemap.xml for search engines (the custom domain serves the site at /).
+  sitemap: { hostname: process.env.DOCS_SITEMAP_HOSTNAME ?? "https://docs.edgecoder.io/" },
   themeConfig: {
     nav: [
       { text: "Guide", link: "/guide/how-edgecoder-works" },

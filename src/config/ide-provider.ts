@@ -48,6 +48,8 @@ export const ideProviderConfigSchema = z.object({
   BT_PROXY_URL: envUrl(),
   BT_STATUS_URL: envUrl(),
   EDGECODER_BOTS_FILE: str(),
+  /** This computer's salt for opaque project ids sent to the phone (src/apps/ide/workspace-trust.ts). */
+  EDGECODER_MACHINE_SALT_FILE: str(),
   EDGECODER_CONNECTIONS_FILE: str(),
   EDGECODER_IDE_SETTINGS_FILE: str(),
   EDGECODER_PROJECTS_DIR: str(),

@@ -13,6 +13,8 @@ const ALLOWED = [
   /export const DEFAULT_COORDINATOR_URL = /, // --coordinator-url / EDGECODER_COORDINATOR_URL overrides
   /export const DEFAULT_PORTAL_URL = /, // --portal-url / EDGECODER_PORTAL_URL overrides
   /export const DEFAULT_DOWNLOAD_DOMAINS = /, // MODEL_DOWNLOAD_DOMAINS overrides
+  /export const DEFAULT_SITE_ORIGIN = /, // PORTAL_PUBLIC_URL overrides (siteOrigin)
+  /export const DEFAULT_PUBLIC_DOCS_URL = /, // DOCS_SITE_URL overrides (publicDocsUrl)
   /export const EDGECODER_NETWORK_DOMAIN = /, // scopes the seed keys to their own network; EDGECODER_TRUST_MODE / TRUSTED_COORDINATOR_KEYS override
   /: "support@edgecoder\.io";$/, // SUPPORT_EMAIL overrides (supportEmail fallback)
   /^[A-Z0-9_]+: envUrl\("https:\/\/[a-z.]*edgecoder\.io"\),$/ // #15: a config schema default; the variable it is declared for overrides it

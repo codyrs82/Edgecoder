@@ -19,16 +19,21 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { ALWAYS_ASK_TOOLS, makeToolRunner, runAgentLoop, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
 import type { CheckpointStore } from "./checkpoints.js";
 import { defaultMode, defaultPermissionsFile, EXECUTION_MODES, PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
-import { decideToolCall, suggestRule, type Decision } from "./permission-policy.js";
+import { classifyCommand, decideToolCall, suggestRule, type Decision } from "./permission-policy.js";
+import { isWithin } from "./tool-executor.js";
 import { redactApiKeys } from "../../common/redaction.js";
 import { parseFrontierModelId } from "../../inference-api/frontier-models.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 
-export type ClientKind = "terminal" | "desktop" | "api";
+/**
+ * "remote": the user's phone driving this Mac (code-remote.ts). Its turns ask before any command
+ * that isn't read-only, are refused outside the project, and its approvals never add "always" rules.
+ */
+export type ClientKind = "terminal" | "desktop" | "api" | "remote";
 
 export interface ClientRef {
   clientId: string;
@@ -551,7 +556,9 @@ export class SessionHub {
     const turnId = randomUUID();
     // The turn acts for the account behind its messages (startTurn never mixes accounts).
     const first = msgs[0];
-    const by: ClientRef = { clientId: first?.clientId ?? "unknown", kind: first?.by ?? "api", ...(first?.label ? { label: first.label } : {}), ...(first?.accountId ? { accountId: first.accountId } : {}) };
+    // A batch with a remote message runs under the remote rules (decide), whoever sent the first one.
+    const kind: ClientKind = msgs.some((q) => q.by === "remote") ? "remote" : first?.by ?? "api";
+    const by: ClientRef = { clientId: first?.clientId ?? "unknown", kind, ...(first?.label ? { label: first.label } : {}), ...(first?.accountId ? { accountId: first.accountId } : {}) };
     const running: Running = { turnId, by, abort: new AbortController(), text: "", events: [], changed: [], done: Promise.resolve() };
     l.running = running;
     running.done = this.runTurn(s, l, running);
@@ -599,7 +606,7 @@ export class SessionHub {
           waitForApproval: (callId, tool, args) => this.waitForApproval(s, l, r, callId, tool, args),
           captureBeforeWrite: (path) => this.env.checkpoints.capture(r.turnId, path),
           turnId: r.turnId,
-          decide: (tool, args) => this.decide(s, tool, args),
+          decide: (tool, args) => this.decide(s, tool, args, r.by ?? null),
         }),
       });
     } catch (err) {
@@ -647,8 +654,13 @@ export class SessionHub {
     }
   }
 
-  /** The session's verdict on a call (permission-policy.ts): its mode, then the project's and session's "always" answers. */
-  decide(s: SessionData, tool: ToolName, args: Record<string, unknown>): Decision {
+  /**
+   * The session's verdict on a call (permission-policy.ts): its mode, then the project's and
+   * session's "always" answers. `by` is the client whose message started the turn (default: the
+   * running turn's); a remote turn gets the stricter remoteDecision.
+   */
+  decide(s: SessionData, tool: ToolName, args: Record<string, unknown>, by: ClientRef | null = this.live.get(s.id)?.running?.by ?? null): Decision {
+    if (by?.kind === "remote") return this.remoteDecision(s, tool, args);
     const project = this.permissions.get(s.projectRoot);
     return decideToolCall(
       tool,
@@ -664,6 +676,33 @@ export class SessionHub {
     );
   }
 
+  /**
+   * A turn started from the phone: no "always allow" rule (project or session) and no Auto safe
+   * class runs a command without asking; only read-only commands run. A command or edit that
+   * reaches outside the project, or one the classifier refuses, is refused rather than asked (the
+   * Mac can still run it). Edits inside the project follow the session's mode.
+   */
+  private remoteDecision(s: SessionData, tool: ToolName, args: Record<string, unknown>): Decision {
+    const branch = () => this.env.branch?.(s.projectRoot) ?? s.branch;
+    const base = decideToolCall(tool, args, { mode: s.mode, root: s.projectRoot, branch });
+    if (tool === "run_shell") {
+      if (s.mode === "plan") return base;
+      const cls = classifyCommand(args.command, { root: s.projectRoot, branch: branch() });
+      if (cls.category === "outside") return { action: "refuse", reason: `Refused from the phone: ${cls.reason}. Run it from the Mac.` };
+      if (cls.action === "refuse") return { action: "refuse", reason: `Refused from the phone: ${cls.reason}.` };
+      if (cls.action === "run" && cls.category === "read") return { action: "run", reason: cls.reason };
+      return { action: "ask", reason: cls.reason };
+    }
+    if (tool === "write_file" || tool === "edit_file") {
+      const path = args.path;
+      if (typeof path === "string" && (path.startsWith("~") || !isWithin(s.projectRoot, resolve(s.projectRoot, path)))) {
+        return { action: "refuse", reason: "Refused from the phone: a file outside the project." };
+      }
+    }
+    // Never offer the phone an "always allow" rule.
+    return { action: base.action, reason: base.reason };
+  }
+
   /** A call that runs without asking in the session's mode (kept for callers that only need yes/no). */
   allowedWithoutAsking(s: SessionData, tool: ToolName, args: Record<string, unknown>): boolean {
     return this.decide(s, tool, args).action === "run";
@@ -671,7 +710,7 @@ export class SessionHub {
 
   private waitForApproval(s: SessionData, l: Live, r: Running, callId: string, tool: ToolName, args: Record<string, unknown>): Promise<boolean> {
     // The mode or an "always" answer given meanwhile (never for the tools that always ask).
-    if (!ALWAYS_ASK_TOOLS.has(tool) && this.decide(s, tool, args).action === "run") {
+    if (!ALWAYS_ASK_TOOLS.has(tool) && this.decide(s, tool, args, r.by ?? null).action === "run") {
       this.emit(s.id, { type: "approval", id: callId, approved: true, by: "always" });
       return Promise.resolve(true);
     }
@@ -690,8 +729,10 @@ export class SessionHub {
    * An answer from any attached client. The first answer wins: a later one (the call was answered
    * elsewhere, or it timed out) returns false and changes nothing.
    */
-  approve(id: string, callId: string, approved: boolean, client: ClientRef, always = false): boolean {
+  approve(id: string, callId: string, approved: boolean, client: ClientRef, alwaysAsked = false): boolean {
     const s = this.need(id);
+    // An answer from the phone approves this one call only: it never adds a rule or turns on auto-edits.
+    const always = alwaysAsked && client.kind !== "remote";
     const l = this.liveOf(id);
     const p = l.pending.get(callId);
     if (!p) return false;

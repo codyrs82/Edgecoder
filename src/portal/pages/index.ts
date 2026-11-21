@@ -9,6 +9,7 @@ import { registerDashboardPages } from "./dashboard.js";
 import { registerHomePage } from "./home.js";
 import { registerHostPage } from "./host.js";
 import { registerPublicPages, type PublicPagesDeps } from "./public.js";
+import { registerSeoRoutes } from "./seo.js";
 import { registerResetPasswordPage } from "./reset-password.js";
 import { registerReviewsPage } from "./reviews.js";
 import { registerBotsPage } from "./bots.js";
@@ -20,6 +21,8 @@ export function registerPortalPages(app: FastifyInstance, deps: PublicPagesDeps 
   // #89: /assets/tokens.css and /assets/theme.js, linked from every page.
   registerPortalAssets(app);
   registerPublicPages(app, deps);
+  // robots.txt, sitemap.xml, llms.txt, favicon.ico (src/portal/pages/seo.ts).
+  registerSeoRoutes(app);
   // Hosting by request (src/portal/host-requests.ts): the "Host with us" page and its form.
   registerHostPage(app);
   // #27: /portal-legacy was the first single-page portal. Nothing linked to it and every function

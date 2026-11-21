@@ -18,7 +18,7 @@ import { TentacleError, type TentacleManager } from "./tentacles.js";
 
 const client = {
   clientId: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/),
-  kind: z.enum(["terminal", "desktop", "api"]).default("api"),
+  kind: z.enum(["terminal", "desktop", "api", "remote"]).default("api"),
   label: z.string().max(80).optional(),
 };
 const params = z.object({ id: z.string().uuid() });

@@ -5,13 +5,16 @@ struct ChatView: View {
     @EnvironmentObject private var chatRouter: ChatRouter
     @EnvironmentObject private var sessionStore: SessionStore
 
+    /// Requests from the drawer and header (ChatTabView): open a chat, start a new one.
+    @Binding var command: ChatCommand?
+    /// The open chat's id, for the drawer's highlight.
+    @Binding var activeConversationId: String?
+
     @State private var conversation = Conversation(source: .chat)
     @State private var inputText = ""
     @State private var isStreaming = false
     @State private var streamingContent = ""
     @State private var streamProgress: StreamProgress?
-    @State private var showHistory = false
-    @State private var showSettings = false
     @State private var showModelPicker = false
     @State private var streamStatus = ""
     @EnvironmentObject private var purchasePolicy: PurchasePolicy
@@ -24,9 +27,6 @@ struct ChatView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Header
-            header
-
             // Messages
             ScrollViewReader { proxy in
                 ScrollView {
@@ -75,25 +75,18 @@ struct ChatView: View {
         .background(Theme.bgBase)
         .onAppear {
             restoreLastConversation()
+            activeConversationId = conversation.id
         }
-        .sheet(isPresented: $showHistory) {
-            ConversationSidebar(
-                source: .chat,
-                activeConversationId: conversation.id,
-                onSelect: { id in
-                    loadConversation(id: id)
-                    showHistory = false
-                },
-                onNewChat: {
-                    newChat()
-                    showHistory = false
-                }
-            )
-            .environmentObject(conversationStore)
+        .onChange(of: conversation.id) { _, id in
+            activeConversationId = id
         }
-        .sheet(isPresented: $showSettings) {
-            SettingsView()
-                .environmentObject(sessionStore)
+        .onChange(of: command) { _, cmd in
+            guard let cmd else { return }
+            command = nil
+            switch cmd {
+            case .select(let id): loadConversation(id: id)
+            case .newChat: newChat()
+            }
         }
         .sheet(isPresented: $showModelPicker) {
             ModelPickerSheet(
@@ -102,68 +95,31 @@ struct ChatView: View {
                 localModels: chatRouter.modelManager.installedModels,
                 localActiveModel: chatRouter.modelManager.selectedModel,
                 catalogModels: chatRouter.modelManager.availableCatalog,
-                blePeers: chatRouter.bleMeshManager.discoveredPeers
+                blePeers: chatRouter.bleMeshManager.discoveredPeers,
+                isSignedIn: sessionStore.isAuthenticated
             )
         }
     }
 
-    // MARK: - Header
+    // MARK: - Model picker
 
-    private var header: some View {
-        HStack {
-            Button {
-                showSettings = true
-            } label: {
-                Image(systemName: "person.circle")
-                    .font(.title3)
-                    .foregroundColor(Theme.textSecondary)
+    /// The model chip under the message box (was the header's centre button).
+    private var modelButton: some View {
+        Button {
+            showModelPicker = true
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "cpu").font(.caption2)
+                Text(ModelChoice.label(conversation.selectedModel))
+                    .font(.caption)
+                    .lineLimit(1)
+                Image(systemName: "chevron.up.chevron.down").font(.caption2)
             }
-
-            Spacer()
-
-            Button {
-                showModelPicker = true
-            } label: {
-                HStack(spacing: 4) {
-                    Text(conversation.selectedModel ?? "Auto")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundColor(Theme.textPrimary)
-                        .lineLimit(1)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.caption2)
-                        .foregroundColor(Theme.textMuted)
-                }
-            }
-
-            Spacer()
-
-            HStack(spacing: 16) {
-                NetworkBadge(network: networkStatus.network, compact: true)
-                Button {
-                    newChat()
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.title3)
-                        .foregroundColor(Theme.textSecondary)
-                }
-
-                Button {
-                    showHistory = true
-                } label: {
-                    Image(systemName: "clock.arrow.circlepath")
-                        .font(.title3)
-                        .foregroundColor(Theme.textSecondary)
-                }
-            }
+            .foregroundColor(Theme.textMuted)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(Theme.bgBase)
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(Theme.border)
-                .frame(height: 0.5)
-        }
+        .accessibilityLabel("Model: \(ModelChoice.label(conversation.selectedModel))")
+        .accessibilityHint("Choose the model for this chat")
+        .accessibilityIdentifier("modelPicker")
     }
 
     // MARK: - Empty State
@@ -221,7 +177,11 @@ struct ChatView: View {
                 }
                 .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isStreaming)
             }
-            if usesPortal { webMenu }
+            HStack(spacing: 14) {
+                modelButton
+                if usesPortal { webMenu }
+            }
+            .padding(.leading, 6)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -263,7 +223,6 @@ struct ChatView: View {
             }
             .foregroundColor(Theme.textMuted)
             .opacity(webOn ? 1 : 0.7)
-            .padding(.leading, 6)
         }
         .accessibilityLabel(webOn ? "Web: Auto" : "Web: Off")
         .accessibilityHint("Choose whether this chat searches the web")
@@ -347,8 +306,14 @@ struct ChatView: View {
                 convId = try await PortalChatClient.shared.createConversation(title: String(text.prefix(60)))
                 conversation.portalConversationId = convId
             }
-            let compute: PortalChatCompute = conversation.selectedModel.map { .network(model: $0) } ?? .auto
-            streamProgress = StreamProgress(route: .swarm, routeLabel: compute == .auto ? "your machines, then the network" : "network")
+            let compute = ModelChoice.compute(for: conversation.selectedModel)
+            let routeLabel: String
+            switch compute {
+            case .auto: routeLabel = "your machines, then the network"
+            case .mine: routeLabel = "your machines"
+            case .network: routeLabel = "network"
+            }
+            streamProgress = StreamProgress(route: .swarm, routeLabel: routeLabel)
             for try await event in PortalChatClient.shared.send(conversationId: convId, message: text, compute: compute, resend: resend, web: web) {
                 switch event {
                 case .content(let c):

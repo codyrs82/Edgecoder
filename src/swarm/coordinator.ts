@@ -54,6 +54,7 @@ import { registerMeshRoutes } from "./coordinator/routes/mesh.js";
 import { registerOrchestrationRoutes } from "./coordinator/routes/orchestration.js";
 import { registerModelControlRoutes } from "./coordinator/routes/model-control.js";
 import { registerBotRelayRoutes } from "./coordinator/routes/bot-relay.js";
+import { registerCodeRelayRoutes } from "./coordinator/routes/code-relay.js";
 import { registerEscalationRoutes } from "./coordinator/routes/escalation.js";
 import { registerBleSyncRoutes } from "./coordinator/routes/ble-sync.js";
 import { registerDebugRoutes } from "./coordinator/routes/debug.js";
@@ -205,7 +206,7 @@ app.addHook("onRequest", async (req, reply) => {
   if (reqPath?.startsWith("/mesh/ws")) return;
   if (
     hasPortalServiceToken(((req as any).headers ?? {}) as Record<string, unknown>) &&
-    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat" || reqPath?.startsWith("/account/") || reqPath?.startsWith("/v1/tools/web/") || reqPath === "/inference/submit" || reqPath === "/inference/stream" || reqPath === "/inference/models" || reqPath?.split("?")[0] === "/network/world" || reqPath?.startsWith("/economy/market/") || reqPath === "/economy/rates/current" || reqPath?.startsWith("/economy/payouts") || reqPath?.startsWith("/economy/hosts") || reqPath?.startsWith("/economy/fee-pool") || reqPath?.startsWith("/escalate/") || reqPath === "/agent-control/machines" || /^\/agent-control\/agents\/[^/?]+\/commands$/.test(reqPath ?? "") || reqPath === "/agent-control/bots" || /^\/agent-control\/agents\/[^/?]+\/bot-commands$/.test(reqPath ?? "") || /^\/agent-control\/bot-commands\/[^/?]+$/.test(reqPath ?? ""))
+    (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat" || reqPath?.startsWith("/account/") || reqPath?.startsWith("/v1/tools/web/") || reqPath === "/inference/submit" || reqPath === "/inference/stream" || reqPath === "/inference/models" || reqPath?.split("?")[0] === "/network/world" || reqPath?.startsWith("/economy/market/") || reqPath === "/economy/rates/current" || reqPath?.startsWith("/economy/payouts") || reqPath?.startsWith("/economy/hosts") || reqPath?.startsWith("/economy/fee-pool") || reqPath?.startsWith("/escalate/") || reqPath === "/agent-control/machines" || /^\/agent-control\/agents\/[^/?]+\/commands$/.test(reqPath ?? "") || reqPath === "/agent-control/bots" || /^\/agent-control\/agents\/[^/?]+\/bot-commands$/.test(reqPath ?? "") || /^\/agent-control\/bot-commands\/[^/?]+$/.test(reqPath ?? "") || reqPath === "/agent-control/code" || /^\/agent-control\/agents\/[^/?]+\/code-commands$/.test(reqPath ?? "") || /^\/agent-control\/code-commands\/[^/?]+$/.test(reqPath ?? ""))
   ) {
     return;
   }
@@ -246,6 +247,8 @@ registerOrchestrationRoutes(app);
 registerModelControlRoutes(app);
 // Bots on the web (portal service token for the owner's reads and commands; signed agent reports).
 registerBotRelayRoutes(app);
+// Code from your phone (portal service token for the owner's reads and commands; signed agent reports).
+registerCodeRelayRoutes(app);
 registerPortalRoutes(app);
 registerEscalationRoutes(app);
 registerBleSyncRoutes(app);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applySessionEvent, presenceText, viewFromSnapshot } from "../src/lib/live-session";
+import { applySessionEvent, clientLabel, fromWhom, presenceText, viewFromSnapshot } from "../src/lib/live-session";
 import { servedBreakdown, servedLine } from "../src/lib/served";
 import type { SessionSnapshotView } from "../src/lib/api";
 
@@ -96,5 +96,16 @@ describe("live session view", () => {
     expect(servedLine([{ cSats: 0, model: "qwen3.5:9b", served: { label: "This computer", own: true, computeClass: "local", tier: null, hardware: "This computer (Apple M1 Max)", region: null, country: null } }])).toBe("qwen3.5:9b · This computer (Apple M1 Max) · free");
     expect(servedLine([{ cSats: 1, where: "Network" }])).toBeNull();
     expect(servedBreakdown([{ cSats: 3.4, model: "qwen3-coder:30b", served }])).toBe("1. qwen3-coder:30b · lin-•••3f2a · Datacenter GPU (gpu.dc40) · 2× NVIDIA A16 · Chicago ord (pickup 0.4 s, read 24.8k tok in 81 s, wrote 312 tok in 6.5 s) · 3.4 cSats");
+  });
+});
+
+describe("the phone as a client (Code from your phone)", () => {
+  it("is shown as Phone in the header and \"your phone\" in notes", () => {
+    const PHONE = { clientId: "remote-phone", kind: "remote" as const, label: "iPhone" };
+    expect(clientLabel(PHONE)).toBe("Phone");
+    expect(clientLabel(TERM)).toBe("Terminal on mbp");
+    expect(fromWhom("remote", "iPhone")).toBe("your phone");
+    const v = { ...viewFromSnapshot(snap()), clients: [DESK, PHONE] };
+    expect(presenceText(v, DESK)).toBe("Phone and this app connected");
   });
 });

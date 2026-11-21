@@ -8,7 +8,7 @@ settings:
     PRODUCT_NAME: EdgeCoder
     SWIFT_VERSION: "5.0"
     # Bump CURRENT_PROJECT_VERSION for every TestFlight upload (App Store Connect refuses a repeat).
-    CURRENT_PROJECT_VERSION: 40
+    CURRENT_PROJECT_VERSION: 42
     MARKETING_VERSION: 1.0.0
 targets:
   EdgeCoderIOS:
@@ -115,6 +115,20 @@ targets:
       - path: EdgeCoderIOS/Network/NetworkModels.swift
       - path: EdgeCoderIOS/Network/NetworkFixture.swift
       - path: EdgeCoderIOS/Chat/ChatModels.swift
+      # Chat model picker: portal models + your machines' models, sections and the compute choice.
+      - path: EdgeCoderIOS/Chat/ModelPickerModels.swift
+      # PR4 side drawer: drawer state, data sources, Chat | Code mode.
+      - path: EdgeCoderIOS/Shared/SideDrawer.swift
+      - path: EdgeCoderIOS/Shared/DrawerDataSource.swift
+      - path: EdgeCoderIOS/Chat/ChatDrawerSource.swift
+      - path: EdgeCoderIOS/Chat/ConversationStore.swift
+      - path: EdgeCoderIOS/Chat/WorkspaceMode.swift
+      # PR5 Code mode: portal/Mac answers, errors, diffs, the drawer's Code list.
+      - path: EdgeCoderIOS/Code/CodeModels.swift
+      - path: EdgeCoderIOS/Code/CodeAPI.swift
+      - path: EdgeCoderIOS/Code/CodeFixture.swift
+      - path: EdgeCoderIOS/Code/CodeDrawerSource.swift
+      - path: EdgeCoderIOS/Code/UnifiedDiff.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.edgecoder.ios.tests

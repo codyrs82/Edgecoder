@@ -109,6 +109,8 @@ const AGENT_POST_PATTERNS: readonly RegExp[] = [
   /^\/agent-control\/agents\/[^/]+\/report$/,
   // Bots on the web: the agent's bot snapshot and command results (routes/bot-relay.ts).
   /^\/agent-control\/agents\/[^/]+\/bots\/report$/,
+  // Code from your phone: the agent's code snapshot and command results (routes/code-relay.ts).
+  /^\/agent-control\/agents\/[^/]+\/code\/report$/,
   // Local web on the owner's machine: the agent's answer to a local_web frame (routes/web-tools.ts).
   /^\/agent-control\/agents\/[^/]+\/web\/result$/
 ];

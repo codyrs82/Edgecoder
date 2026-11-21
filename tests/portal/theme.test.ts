@@ -139,6 +139,8 @@ describe("portal tokens and theme (#89)", () => {
       for (const tag of res.body.match(/<script\b[^>]*>/g) ?? []) {
         // external scripts are same-origin; inline ones need this response's nonce
         if (/\bsrc="\/assets\//.test(tag) || /\bsrc="\/portal\/vendor\//.test(tag)) continue;
+        // the homepage's JSON-LD is a data block the browser never executes; CSP does not apply
+        if (tag === '<script type="application/ld+json">') continue;
         expect(tag, url).toContain(`nonce="${nonce}"`);
       }
       // no inline event handlers either
