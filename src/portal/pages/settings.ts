@@ -74,6 +74,15 @@ const PROFILE = section(
         `<div id="tfaSetupBox" class="hidden set-row wide" data-keywords="authenticator setup qr"><div class="set-text"><div class="set-label">Scan this with your authenticator app</div><div id="tfaQr" class="tfa-qr"></div><div class="set-desc">Or enter this key: <code id="tfaSecret" class="u-break-all"></code></div><div class="row"><input id="tfaCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6-digit code" aria-label="Code from your authenticator app" /><button class="primary" id="tfaEnableBtn" type="button">Turn on</button></div></div></div>` +
         `<div id="tfaCodesBox" class="hidden set-row wide" data-keywords="recovery codes"><div class="set-text"><strong>Save these recovery codes now. They won't be shown again.</strong><pre id="tfaCodes"></pre><button id="tfaCopyCodesBtn" type="button">Copy</button></div></div>`
     ) +
+    group("Privacy") +
+    card(
+      settingRow(
+        "Share my chats to help improve EdgeCoder",
+        `<span id="chatShareDesc">Off by default. Shared chats may be used to improve EdgeCoder, including to train AI models. Your chats stay encrypted at rest either way. Turning it off withdraws chats you shared before from future use. <a href="/privacy">Privacy Policy</a></span>`,
+        `<label class="check" for="chatShareToggle"><input id="chatShareToggle" type="checkbox" role="switch" aria-label="Share my chats to help improve EdgeCoder" aria-describedby="chatShareDesc chatShareStatus" disabled /></label><span class="set-desc" id="chatShareStatus" role="status" aria-live="polite">Loading…</span>`,
+        { keywords: "privacy chat share sharing improve data consent encrypted encryption" }
+      )
+    ) +
     group("Sign-in") +
     card(
       settingRow("Passkey", "Enroll a passkey for passwordless sign-in on future visits.", `<button class="primary" id="passkeyEnrollBtn">Enroll passkey</button>`, { keywords: "passkey security login password webauthn" }) +
@@ -142,7 +151,54 @@ claude</pre></div></div>` +
     )
 );
 
-const SCRIPT = SETTINGS_HELPERS_SCRIPT + `
+/**
+ * Privacy > Share my chats (routes/chat-sharing.ts): reads GET /me/chat-sharing on load and PUTs on
+ * change. The box stays disabled until the saved value is known; a failed save puts it back to the
+ * saved value. Uses call() and showToast() from the settings shell. Exported for tests.
+ */
+export const CHAT_SHARING_SCRIPT = `
+    (function() {
+      const box = document.getElementById("chatShareToggle");
+      const status = document.getElementById("chatShareStatus");
+      if (!box || !status) return;
+      let saved = false;
+      let busy = false;
+      async function safeCall(path, options) {
+        try { return await call(path, options); } catch (e) { return { ok: false, status: 0, json: {} }; }
+      }
+      async function loadChatSharing() {
+        const r = await safeCall("/me/chat-sharing");
+        if (!r.ok) { box.disabled = true; status.textContent = "Could not load this setting. Reload to try again."; return; }
+        saved = r.json.shareChatForImprovement === true;
+        box.checked = saved;
+        box.disabled = false;
+        status.textContent = saved ? "On" : "Off";
+      }
+      box.addEventListener("change", async function() {
+        if (busy) { box.checked = !box.checked; return; }
+        const want = box.checked;
+        busy = true;
+        box.setAttribute("aria-busy", "true");
+        status.textContent = "Saving…";
+        const r = await safeCall("/me/chat-sharing", { method: "PUT", body: JSON.stringify({ shareChatForImprovement: want }) });
+        busy = false;
+        box.removeAttribute("aria-busy");
+        if (r.ok) {
+          saved = r.json.shareChatForImprovement === true;
+          box.checked = saved;
+          status.textContent = saved ? "On" : "Off";
+          showToast(saved ? "Your chats are shared to help improve EdgeCoder." : "Chat sharing is off. Chats you shared before are withdrawn.");
+        } else {
+          box.checked = saved;
+          status.textContent = "Could not save. Still " + (saved ? "on" : "off") + ".";
+          showToast("Could not save the chat sharing setting: " + String((r.json && r.json.error) || r.status), true);
+        }
+      });
+      loadChatSharing();
+    })();
+`;
+
+const SCRIPT = SETTINGS_HELPERS_SCRIPT + CHAT_SHARING_SCRIPT + `
     function b64urlToArrayBuffer(base64url) {
       const base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
       const padded = base64 + "=".repeat((4 - (base64.length % 4)) % 4);

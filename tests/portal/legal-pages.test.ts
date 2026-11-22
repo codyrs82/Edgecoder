@@ -18,7 +18,8 @@ describe("legal documents (docs/legal/*.md)", () => {
   it("each starts with its version and dates, with no draft banner, placeholder, counsel note or LLC", () => {
     for (const key of LEGAL) {
       const md = PUBLIC_DOCUMENTS[key];
-      expect(md.split("\n")[2], key).toBe("Version: 2026-11-16 · Effective date: 16 November 2026 · Last updated: 16 November 2026");
+      const v = key === "host-agreement" ? "Version: 2026-11-16 · Effective date: 16 November 2026 · Last updated: 16 November 2026" : "Version: 2026-11-22 · Effective date: 22 November 2026 · Last updated: 22 November 2026";
+      expect(md.split("\n")[2], key).toBe(v);
       expect(md, key).not.toMatch(/DRAFT|pending legal review|working draft/);
       // The only square brackets left are Markdown links: [text](/path).
       expect(md.match(/\[[^\]]*\](?!\()/g), key).toBeNull();
@@ -51,7 +52,7 @@ describe("legal and Bluetooth pages", () => {
       expect(res.statusCode, page.path).toBe(200);
       expect(res.headers["content-type"]).toMatch(/text\/html/);
       expect(res.body.match(/<title>([^<]*)<\/title>/)?.[1]).toBe(`${page.title} | EdgeCoder`);
-      expect(res.body).toContain("Last updated: 16 November 2026");
+      expect(res.body).toContain(key === "host-agreement" ? "Last updated: 16 November 2026" : "Last updated: 22 November 2026");
       expect(res.body).not.toMatch(/draft-banner|pending legal review|DRAFT/);
       expect(res.body).not.toMatch(/<meta name="description" content="[^"]*draft/i);
       expect(res.body).not.toContain('<mark class="placeholder">');

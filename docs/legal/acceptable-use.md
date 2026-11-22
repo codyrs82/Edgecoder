@@ -1,6 +1,6 @@
 # Acceptable Use Policy
 
-Version: 2026-11-16 · Effective date: 16 November 2026 · Last updated: 16 November 2026
+Version: 2026-11-22 · Effective date: 22 November 2026 · Last updated: 22 November 2026
 
 This Acceptable Use Policy ("AUP") is part of the EdgeCoder [Terms of Service](/terms). It applies to everyone who uses the Service: Buyers, Hosts, API users and AI agents acting for someone. "You" includes anyone using your account, keys or agents.
 

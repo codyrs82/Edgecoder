@@ -1,6 +1,6 @@
 # Terms of Service
 
-Version: 2026-11-16 · Effective date: 16 November 2026 · Last updated: 16 November 2026
+Version: 2026-11-22 · Effective date: 22 November 2026 · Last updated: 22 November 2026
 
 These Terms of Service (the "Terms") are an agreement between you and EdgeCoder ("EdgeCoder", "we", "us"). They govern your use of the EdgeCoder website (edgecoder.io), the EdgeCoder portal, the desktop and iOS apps, the EdgeCoder agent, the hosted API and any related services (together, the "Service").
 
