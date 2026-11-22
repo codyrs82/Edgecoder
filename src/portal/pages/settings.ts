@@ -78,7 +78,7 @@ const PROFILE = section(
     card(
       settingRow(
         "Share my chats to help improve EdgeCoder",
-        `<span id="chatShareDesc">Off by default. Your chats stay encrypted at rest either way. Turning it off also withdraws chats you shared before. <a href="/privacy">Privacy Policy</a></span>`,
+        `<span id="chatShareDesc">Off by default. Shared chats may be used to improve EdgeCoder, including to train AI models. Your chats stay encrypted at rest either way. Turning it off withdraws chats you shared before from future use. <a href="/privacy">Privacy Policy</a></span>`,
         `<label class="check" for="chatShareToggle"><input id="chatShareToggle" type="checkbox" role="switch" aria-label="Share my chats to help improve EdgeCoder" aria-describedby="chatShareDesc chatShareStatus" disabled /></label><span class="set-desc" id="chatShareStatus" role="status" aria-live="polite">Loading…</span>`,
         { keywords: "privacy chat share sharing improve data consent encrypted encryption" }
       )

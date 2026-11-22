@@ -1,6 +1,6 @@
 # Privacy Policy
 
-Version: 2026-11-16 · Effective date: 16 November 2026 · Last updated: 16 November 2026
+Version: 2026-11-22 · Effective date: 22 November 2026 · Last updated: 22 November 2026
 
 This policy explains what personal information EdgeCoder ("EdgeCoder", "we") collects when you use the EdgeCoder website (edgecoder.io), the EdgeCoder portal, the desktop and iOS apps, the EdgeCoder agent and the hosted API (the "Service"), how we use and share it, and your choices. Words defined in the [Terms of Service](/terms) have the same meaning here.
 
@@ -39,11 +39,11 @@ EdgeCoder is a decentralized network. **When you send a prompt, code or data to 
 **Prompts, code, data and outputs**
 
 - **Portal chat:** conversations you have in the portal (and the desktop app when it uses your portal account) are stored on EdgeCoder's servers, including the full text of your messages and the model's replies, so you can see them again. You can delete a conversation at any time, which deletes its messages.
-- **Portal chat encryption and sharing:** portal web chat messages and conversation titles are stored encrypted at rest on EdgeCoder's servers. This is encryption at rest, not end-to-end encryption: our servers decrypt your chats to show them to you, and the coordinator and the Host that run a job still see its input in plaintext while processing it. We do not use your chat content to improve the Service unless you turn on "Share my chats to help improve EdgeCoder" in Settings, which is off by default. If you turn it off, we stop using your chats for that purpose, and chats you shared before are withdrawn from that use too.
+- **Portal chat encryption and sharing:** portal web chat messages and conversation titles are stored encrypted at rest on EdgeCoder's servers. This is encryption at rest, not end-to-end encryption: our servers decrypt your chats to show them to you, and the coordinator and the Host that run a job still see its input in plaintext while processing it. We do not use your chat content to improve the Service or to train AI models unless you turn on "Share my chats to help improve EdgeCoder" in Settings, which is off by default. While it is on, we may use the chats you share to improve the Service, including to train or fine-tune AI models. If you turn it off, we stop using your chats for those purposes, and chats you shared before are withdrawn from future use; models already trained on them are not retrained.
 - **Desktop app chats:** chats kept locally by the desktop app are stored on your computer.
 - **Jobs on the network:** to run a job, its input passes through an EdgeCoder coordinator to a Host. The coordinator's job queue stores the task input and the result for up to 30 days, in encrypted form when the end-to-end task envelope is used.
 - **On Hosts' machines:** the EdgeCoder agent keeps a local history of the jobs it ran, including their input and output, in a database on the Host's machine. This history is under the Host's control, not ours.
-- We do not use your prompts, code, data or outputs to train AI models.
+- Except for portal chats you choose to share with "Share my chats to help improve EdgeCoder" (see above), we do not use your prompts, code, data or outputs to train AI models.
 
 **Website and portal**
 

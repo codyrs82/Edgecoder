@@ -157,7 +157,7 @@ describe("/portal/api/legal", () => {
   });
 
   it("an account that accepted the 2026-11-15-draft documents (same text) is current and isn't asked again", async () => {
-    expect(TERMS_VERSION).toBe("2026-11-16");
+    expect(TERMS_VERSION).toBe("2026-11-22");
     expect(HOST_AGREEMENT_VERSION).toBe("2026-11-16");
     idp.claims = { sub: "g-4", email: "early@example.test", email_verified: true };
     await oauth(ctx);

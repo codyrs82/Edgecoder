@@ -42,7 +42,7 @@ describe("legal notices", () => {
     for (const f of ["terms", "privacy", "acceptable-use", "host-agreement", "ai-notices"]) {
       const md = readFileSync(`docs/legal/${f}.md`, "utf8");
       expect(md, f).not.toMatch(/draft|pending legal review/i);
-      expect(md, f).toContain("Last updated: 16 November 2026");
+      expect(md, f).toContain(["terms", "privacy", "acceptable-use"].includes(f) ? "Last updated: 22 November 2026" : "Last updated: 16 November 2026");
     }
   });
 });

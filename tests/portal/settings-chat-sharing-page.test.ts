@@ -53,7 +53,7 @@ describe("Settings > Privacy > Share my chats", () => {
     expect(html).toContain('<input id="chatShareToggle" type="checkbox" role="switch" aria-label="Share my chats to help improve EdgeCoder" aria-describedby="chatShareDesc chatShareStatus" disabled />');
     expect(html).toContain('<label class="check" for="chatShareToggle">');
     expect(html).toContain('id="chatShareStatus" role="status" aria-live="polite"');
-    expect(html).toContain("Off by default. Your chats stay encrypted at rest either way. Turning it off also withdraws chats you shared before.");
+    expect(html).toContain("Off by default. Shared chats may be used to improve EdgeCoder, including to train AI models. Your chats stay encrypted at rest either way. Turning it off withdraws chats you shared before from future use.");
     expect(html).toContain("/me/chat-sharing");
     const privacy = html.slice(html.indexOf('set-group">Privacy'), html.indexOf('set-group">Sign-in'));
     expect(privacy).toContain("chatShareToggle");

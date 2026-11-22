@@ -12,7 +12,7 @@
  */
 
 /** Terms of Service, Privacy Policy and Acceptable Use Policy, accepted together at sign-up. */
-export const TERMS_VERSION = "2026-11-16";
+export const TERMS_VERSION = "2026-11-22";
 /** Host Agreement, accepted on the Install agent page (and by installing the agent). */
 export const HOST_AGREEMENT_VERSION = "2026-11-16";
 
