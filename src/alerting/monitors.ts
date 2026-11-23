@@ -118,7 +118,6 @@ export function lightningMonitor(o: {
   getHealth: () => Promise<LightningHealth | { supported: false; reason: string }>;
   failures: number;
   minOutboundSats: number;
-  minInboundSats: number;
   /** Not synced / channels inactive only count once they last this long (blocks arrive; peers reconnect). */
   sustainMs?: number;
   label: string;
@@ -159,14 +158,68 @@ export function lightningMonitor(o: {
       if (o.minOutboundSats > 0 && h.localSats < o.minOutboundSats) {
         out.push({ key: "ln_low_outbound", severity: h.localSats === 0 ? "critical" : "warning", title: `Lightning outbound liquidity low (${o.label})`, summary: `${sats(h.localSats)} spendable in active channels, below ${sats(o.minOutboundSats)}. Payouts are at risk.`, link, details: { outboundSats: h.localSats, minOutboundSats: o.minOutboundSats, activeChannels: h.activeChannels } });
       }
-      if (o.minInboundSats > 0 && h.remoteSats < o.minInboundSats) {
-        out.push({ key: "ln_low_inbound", severity: h.remoteSats === 0 ? "critical" : "warning", title: `Lightning inbound liquidity low (${o.label})`, summary: `${sats(h.remoteSats)} receivable in active channels, below ${sats(o.minInboundSats)}. Buyers may be unable to pay invoices.`, link, details: { inboundSats: h.remoteSats, minInboundSats: o.minInboundSats, activeChannels: h.activeChannels } });
-      }
       const inactive = sustained.update("inactive", h.inactiveChannels > 0, nowMs);
       if (inactive.fire) {
         out.push({ key: "ln_channels_inactive", severity: h.activeChannels === 0 ? "critical" : "warning", title: `${h.inactiveChannels} Lightning channel${h.inactiveChannels === 1 ? "" : "s"} inactive (${o.label})`, summary: `${h.inactiveChannels} of ${h.inactiveChannels + h.activeChannels} channels have been inactive (peer offline) for over ${formatDuration(nowMs - inactive.sinceMs)}.`, link, sinceMs: inactive.sinceMs, details: { inactiveChannels: h.inactiveChannels, activeChannels: h.activeChannels, inactive: h.inactive.slice(0, 5).map((c) => `${c.chanId} (${c.remotePubkey.slice(0, 16)}…, ${c.localSats} sats local)`) } });
       }
       return out;
+    }
+  };
+}
+
+/** The inbound-capacity rule (lightningInboundMonitor): its own name, so it resolves independently of "lightning". */
+export const LN_INBOUND_RULE = "lightning_inbound";
+
+/** One incident per Lightning node: keyed by its pubkey, so coordinators sharing a node share the incident. */
+export function lnInboundKey(nodePubkey: string | null): string {
+  return nodePubkey ? `ln_low_inbound:${nodePubkey.slice(0, 16)}` : "ln_low_inbound";
+}
+
+/**
+ * Inbound capacity: how many more sats the Lightning node can receive from buyers
+ * (LightningNodeHealth.receivableSats: remote balance minus the peer's channel reserve, active
+ * channels only). Warns below `thresholdSats` (critical at 0); once active it stays active until the
+ * figure is back to at least `thresholdSats + hysteresisSats`, so a balance hovering at the line does
+ * not flap. `isActive` reads the stored incident, so a restart inside that band does not resolve it.
+ *
+ * Shared scope: the seeds use one LND node and one database, so they share one incident and one
+ * notification (claimNotify) instead of each alerting. Reminders follow `renotifyMs`, not the
+ * global ALERT_RENOTIFY_MINUTES. A failed LND call throws (the runner logs it and nothing
+ * resolves); repeated failures are the lightning rule's ln_unreachable alert.
+ */
+export function lightningInboundMonitor(o: {
+  getHealth: () => Promise<LightningHealth | { supported: false; reason: string }>;
+  thresholdSats: number;
+  hysteresisSats: number;
+  intervalMs?: number;
+  renotifyMs: number;
+  isActive: (key: string) => Promise<boolean>;
+  label: string;
+}): Monitor {
+  return {
+    name: LN_INBOUND_RULE,
+    scope: "shared",
+    intervalMs: o.intervalMs,
+    async check() {
+      if (o.thresholdSats <= 0) return [];
+      const h = await o.getHealth();
+      if (!h.supported) return [];
+      const key = lnInboundKey(h.nodePubkey);
+      const inbound = h.receivableSats;
+      const low = inbound < o.thresholdSats || (inbound < o.thresholdSats + Math.max(0, o.hysteresisSats) && (await o.isActive(key)));
+      if (!low) return [];
+      const channels = `${h.activeChannels} active channel${h.activeChannels === 1 ? "" : "s"}`;
+      return [
+        {
+          key,
+          severity: inbound === 0 ? "critical" : "warning",
+          title: "Lightning inbound capacity low",
+          summary: `The Lightning node can receive ${sats(inbound)} more over ${channels}, below the ${sats(o.thresholdSats)} alert threshold. Buyers cannot pay cSats invoices larger than that; add inbound capacity (open or lease an inbound channel, or move funds out of a channel). Checked by ${o.label}.`,
+          link: "/portal/settings/revenue",
+          renotifyMs: o.renotifyMs,
+          details: { inboundSats: inbound, thresholdSats: o.thresholdSats, recoverAtSats: o.thresholdSats + Math.max(0, o.hysteresisSats), activeChannels: h.activeChannels, remoteBalanceSats: h.remoteSats, nodePubkey: h.nodePubkey }
+        }
+      ];
     }
   };
 }

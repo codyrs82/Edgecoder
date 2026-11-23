@@ -6,7 +6,8 @@
  *
  *  - its mesh peers' GET /health/runtime and the portal's GET /health (a coordinator that is down
  *    cannot report itself, so the coordinators and the portal watch each other);
- *  - its Lightning node (reachable, synced to chain and graph, liquidity, inactive channels);
+ *  - its Lightning node (reachable, synced to chain and graph, liquidity, inactive channels), and
+ *    inbound capacity as a shared incident per node (both seeds use one LND: one notification);
  *  - payouts (failures, stuck pending, the kill switch) and purchase invoices;
  *  - the ledger (the periodic reconciliation and its own ordering chain);
  *  - its Postgres pool (the #328 error counter and a probe);
@@ -17,12 +18,13 @@
  * routes/alerts.ts; the portal's Settings > Network shows them (src/portal/alerts.ts).
  */
 import { alertConfigFromEnv } from "../../alerting/config.js";
-import { AlertRunner, createAlertManager } from "../../alerting/index.js";
+import { AlertRunner, SHARED_SOURCE, createAlertManager } from "../../alerting/index.js";
 import {
   SecurityEventMonitor,
   databaseMonitor,
   healthWatchMonitor,
   ledgerMonitor,
+  lightningInboundMonitor,
   lightningMonitor,
   orderingChainMonitor,
   payoutMonitor,
@@ -142,7 +144,18 @@ export function coordinatorMonitors(): Monitor[] {
     securityMonitor
   ];
   if (ECONOMY_PAYMENTS_ENABLED && lightningProvider.getNodeHealth) {
-    monitors.push(lightningMonitor({ getHealth: () => lightningProvider.getNodeHealth!(), failures: c.healthFailures, minOutboundSats: c.lnMinOutboundSats, minInboundSats: c.lnMinInboundSats, label }));
+    monitors.push(lightningMonitor({ getHealth: () => lightningProvider.getNodeHealth!(), failures: c.healthFailures, minOutboundSats: c.lnMinOutboundSats, label }));
+    monitors.push(
+      lightningInboundMonitor({
+        getHealth: () => lightningProvider.getNodeHealth!(),
+        thresholdSats: c.lnMinInboundSats,
+        hysteresisSats: c.lnInboundHysteresisSats,
+        intervalMs: c.lnInboundCheckMs,
+        renotifyMs: c.lnInboundRenotifyMs,
+        isActive: async (key) => (await coordinatorAlerts.store.get(SHARED_SOURCE, key))?.status === "active",
+        label
+      })
+    );
   }
   if (pool) {
     monitors.push(ledgerMonitor({ latest: latestLedgerVerifications }));

@@ -10,7 +10,7 @@
  *    flapping check cannot flood the owner; a severity raised (warning to critical) notifies at once
  *    within that limit;
  *  - while still active and not acknowledged, a quiet reminder every ALERT_RENOTIFY_MINUTES
- *    (low priority on the webhook; 0 = never);
+ *    (low priority on the webhook; 0 = never), or the alert's own renotifyMs when it sets one;
  *  - a resolution notice when it clears, for incidents the owner was told about;
  *  - acknowledging (admin page) stops reminders until the incident resolves.
  *
@@ -88,10 +88,11 @@ export class AlertManager {
     const escalated = !opened && before !== null && SEVERITY_RANK[input.severity] > SEVERITY_RANK[before.severity];
     let kind: NotificationKind | null = null;
     let interval = this.o.rateLimitMs;
+    const renotifyMs = input.renotifyMs ?? this.o.renotifyMs;
     if (record.notifyCount === 0 || escalated) kind = "firing";
-    else if (!record.acknowledgedAtMs && this.o.renotifyMs > 0 && record.lastNotifiedMs !== null && nowMs - record.lastNotifiedMs >= this.o.renotifyMs) {
+    else if (!record.acknowledgedAtMs && renotifyMs > 0 && record.lastNotifiedMs !== null && nowMs - record.lastNotifiedMs >= renotifyMs) {
       kind = "renotify";
-      interval = this.o.renotifyMs;
+      interval = renotifyMs;
     }
     if (!kind) return record;
     const claimed = await this.o.store.claimNotify(source, input.key, nowMs, interval);

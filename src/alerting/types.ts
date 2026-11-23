@@ -27,6 +27,8 @@ export interface AlertInput {
   /** When the problem started, when the monitor knows better than "now" (first failed probe). */
   sinceMs?: number;
   details?: Record<string, unknown>;
+  /** This alert's reminder interval while active, instead of ALERT_RENOTIFY_MINUTES (0 = never). */
+  renotifyMs?: number;
 }
 
 export interface AlertRecord {

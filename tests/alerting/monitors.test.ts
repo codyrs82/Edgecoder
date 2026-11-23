@@ -1,14 +1,18 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { AlertRunner } from "../../src/alerting/runner.js";
+import { SHARED_SOURCE } from "../../src/alerting/manager.js";
 import {
   SecurityEventMonitor,
   backupMonitor,
   capacityMonitor,
   databaseMonitor,
   healthWatchMonitor,
+  LN_INBOUND_RULE,
   ledgerMonitor,
+  lightningInboundMonitor,
   lightningMonitor,
+  lnInboundKey,
   orderingChainMonitor,
   payoutMonitor,
   probeHealth,
@@ -111,11 +115,11 @@ describe("1, 2. health watches: N consecutive failures, cross-watching", () => {
 });
 
 describe("3. lightning", () => {
-  const healthy = (over: Partial<LightningHealth> = {}): LightningHealth => ({ supported: true, syncedToChain: true, syncedToGraph: true, blockHeight: 900_000, activeChannels: 3, inactiveChannels: 0, pendingChannels: 0, localSats: 2_000_000, remoteSats: 2_000_000, inactive: [], ...over });
+  const healthy = (over: Partial<LightningHealth> = {}): LightningHealth => ({ supported: true, syncedToChain: true, syncedToGraph: true, blockHeight: 900_000, activeChannels: 3, inactiveChannels: 0, pendingChannels: 0, localSats: 2_000_000, remoteSats: 2_000_000, receivableSats: 1_980_000, nodePubkey: "02aa11bb22cc33dd44ee55ff66", inactive: [], ...over });
 
   it("unreachable after N failures, then resolves", async () => {
     let fail = true;
-    const d = driver(lightningMonitor({ getHealth: async () => { if (fail) throw new Error("lnd_http_503:/v1/getinfo"); return healthy(); }, failures: 3, minOutboundSats: 0, minInboundSats: 0, label: "seed-ord" }));
+    const d = driver(lightningMonitor({ getHealth: async () => { if (fail) throw new Error("lnd_http_503:/v1/getinfo"); return healthy(); }, failures: 3, minOutboundSats: 0, label: "seed-ord" }));
     await d.tick();
     await d.tick();
     expect(await d.active()).toEqual([]);
@@ -128,14 +132,13 @@ describe("3. lightning", () => {
 
   it("not synced only after 10 minutes; low liquidity at once; inactive channels after 10 minutes", async () => {
     let h = healthy({ syncedToGraph: false, localSats: 50_000, remoteSats: 0, inactiveChannels: 1, activeChannels: 2, inactive: [{ chanId: "1x2x3", remotePubkey: "02abc", localSats: 10 }] });
-    const d = driver(lightningMonitor({ getHealth: async () => h, failures: 3, minOutboundSats: 100_000, minInboundSats: 500_000, label: "seed-ord" }));
+    const d = driver(lightningMonitor({ getHealth: async () => h, failures: 3, minOutboundSats: 100_000, label: "seed-ord" }));
     await d.tick(5 * MIN);
-    expect(await d.active()).toEqual(["ln_low_inbound", "ln_low_outbound"]);
+    expect(await d.active()).toEqual(["ln_low_outbound"]); // inbound is its own rule (lightningInboundMonitor)
     await d.tick(6 * MIN);
     await d.tick();
-    expect(await d.active()).toEqual(["ln_channels_inactive", "ln_low_inbound", "ln_low_outbound", "ln_not_synced"]);
+    expect(await d.active()).toEqual(["ln_channels_inactive", "ln_low_outbound", "ln_not_synced"]);
     const list = (await d.h.manager.list()).active;
-    expect(list.find((a) => a.key === "ln_low_inbound")!.severity).toBe("critical"); // nothing receivable at all
     expect(list.find((a) => a.key === "ln_not_synced")!.title).toContain("graph");
     h = healthy();
     await d.tick();
@@ -149,6 +152,119 @@ describe("3. lightning", () => {
     );
     expect(r).toMatchObject({ syncedToChain: true, syncedToGraph: false, activeChannels: 1, inactiveChannels: 1, localSats: 1000, remoteSats: 500, inactive: [{ chanId: "2", remotePubkey: "03ff", localSats: 7000 }] });
     expect(() => interpretLndNodeHealth({}, { channels: [] })).toThrow("getinfo_malformed");
+  });
+
+  it("LND channels: receivable subtracts the peer's channel reserve, never below 0", () => {
+    const r = interpretLndNodeHealth(
+      { synced_to_chain: true, synced_to_graph: true, identity_pubkey: "03abcdef0123456789abcdef" },
+      {
+        channels: [
+          { active: true, remote_balance: "200000", remote_constraints: { chan_reserve_sat: "10000" } },
+          { active: true, remote_balance: "50000", remote_chan_reserve_sat: "5000" }, // deprecated field as fallback
+          { active: true, remote_balance: "3000", remote_constraints: { chan_reserve_sat: "10000" } }, // below reserve: 0
+          { active: false, remote_balance: "900000", remote_constraints: { chan_reserve_sat: "1000" } } // inactive: excluded
+        ]
+      }
+    );
+    expect(r).toMatchObject({ remoteSats: 253_000, receivableSats: 235_000, activeChannels: 3, nodePubkey: "03abcdef0123456789abcdef" });
+  });
+});
+
+describe("3b. lightning inbound capacity", () => {
+  const PUBKEY = "02aa11bb22cc33dd44ee55ff66";
+  const KEY = lnInboundKey(PUBKEY);
+  const health = (receivableSats: number, over: Partial<LightningHealth> = {}): LightningHealth => ({ supported: true, syncedToChain: true, syncedToGraph: true, blockHeight: 900_000, activeChannels: 2, inactiveChannels: 0, pendingChannels: 0, localSats: 1_000_000, remoteSats: receivableSats + 20_000, receivableSats, nodePubkey: PUBKEY, inactive: [], ...over });
+
+  /** A coordinator's inbound monitor on a harness; isActive reads the shared incident like production. */
+  function inbound(getHealth: () => Promise<LightningHealth | { supported: false; reason: string }>, h = harness({ sourceId: "seed-a", renotifyMs: 4 * 3_600_000 }), over: { thresholdSats?: number } = {}) {
+    const monitor = lightningInboundMonitor({
+      getHealth,
+      thresholdSats: over.thresholdSats ?? 300_000,
+      hysteresisSats: 25_000,
+      intervalMs: 10 * MIN,
+      renotifyMs: 12 * 3_600_000,
+      isActive: async (key) => (await h.store.get(SHARED_SOURCE, key))?.status === "active",
+      label: "seed-a"
+    });
+    return { monitor, ...driver(monitor, h) };
+  }
+
+  it("alerts once below the threshold with inbound, threshold and channel count; reminds only after the 12 h cooldown", async () => {
+    let sats = 400_000;
+    const d = inbound(async () => health(sats));
+    expect(d.monitor).toMatchObject({ name: LN_INBOUND_RULE, scope: "shared", intervalMs: 10 * MIN });
+    await d.tick(10 * MIN);
+    expect(d.h.kinds()).toEqual([]);
+    sats = 120_000;
+    await d.tick(10 * MIN);
+    expect(d.h.kinds()).toEqual([`firing:${KEY}`]);
+    const n = d.h.sent[0]!;
+    expect(n.alert.severity).toBe("warning");
+    expect(n.alert.title).toBe("Lightning inbound capacity low");
+    expect(n.alert.summary).toContain("120,000 sats");
+    expect(n.alert.summary).toContain("300,000 sats");
+    expect(n.alert.summary).toContain("2 active channels");
+    expect(n.alert.details).toMatchObject({ inboundSats: 120_000, thresholdSats: 300_000, activeChannels: 2 });
+    // Still low for 11 h 50 m (well past the global 4 h reminder): nothing more.
+    for (let i = 0; i < 71; i++) await d.tick(10 * MIN);
+    expect(d.h.kinds()).toEqual([`firing:${KEY}`]);
+    await d.tick(10 * MIN);
+    await d.tick(10 * MIN);
+    expect(d.h.kinds()).toEqual([`firing:${KEY}`, `renotify:${KEY}`]);
+  });
+
+  it("recovers only above threshold + hysteresis, with one recovered notice; critical at 0", async () => {
+    let sats = 0;
+    const d = inbound(async () => health(sats));
+    await d.tick();
+    expect(d.h.sent[0]!.alert.severity).toBe("critical");
+    sats = 310_000; // above the threshold but inside the hysteresis band: still active
+    await d.tick();
+    expect(await d.active()).toEqual([KEY]);
+    expect(d.h.kinds()).toEqual([`firing:${KEY}`]);
+    sats = 325_000;
+    await d.tick();
+    expect(await d.active()).toEqual([]);
+    expect(d.h.kinds()).toEqual([`firing:${KEY}`, `resolved:${KEY}`]);
+    sats = 310_000; // inside the band but not active: no new alert
+    await d.tick();
+    expect(d.h.kinds()).toEqual([`firing:${KEY}`, `resolved:${KEY}`]);
+  });
+
+  it("two coordinators on one LND and one database notify once and resolve once", async () => {
+    let sats = 100_000;
+    const a = inbound(async () => health(sats));
+    const b = inbound(async () => health(sats), harness({ sourceId: "seed-b", store: a.h.store }));
+    await a.tick(0);
+    await b.tick(0);
+    expect([...a.h.kinds(), ...b.h.kinds()]).toEqual([`firing:${KEY}`]);
+    sats = 500_000;
+    await b.tick(0);
+    await a.tick(0);
+    expect([...a.h.kinds(), ...b.h.kinds()].sort()).toEqual([`firing:${KEY}`, `resolved:${KEY}`]);
+  });
+
+  it("LND unreachable: no alert from this rule, the incident is kept, the runner does not throw", async () => {
+    let down = false;
+    const d = inbound(async () => {
+      if (down) throw new Error("lnd_http_503:/v1/channels");
+      return health(50_000);
+    });
+    await d.tick();
+    down = true;
+    await d.tick();
+    await d.tick();
+    expect(await d.active()).toEqual([KEY]);
+    expect(d.h.kinds()).toEqual([`firing:${KEY}`]);
+  });
+
+  it("0 disables; a provider without node health is ignored", async () => {
+    const off = inbound(async () => health(0), undefined, { thresholdSats: 0 });
+    await off.tick();
+    expect(off.h.kinds()).toEqual([]);
+    const unsupported = inbound(async () => ({ supported: false, reason: "mock" }));
+    await unsupported.tick();
+    expect(unsupported.h.kinds()).toEqual([]);
   });
 });
 
