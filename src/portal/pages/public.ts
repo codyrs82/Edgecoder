@@ -33,9 +33,9 @@ function pricingMeta(p: PublicPricing): string {
 }
 
 /** Homepage title and meta description (the wording is pending a positioning decision). */
-export const HOME_TITLE = "EdgeCoder | Private AI Coding on Your Infrastructure";
+export const HOME_TITLE = "EdgeCoder | AI Coding on Your Machines, Paid in Bitcoin";
 export const HOME_DESCRIPTION =
-  "EdgeCoder is a decentralized compute network for AI coding workloads, priced and settled in Bitcoin. Buy compute at a daily market rate; hosting is by invitation during early access.";
+  "An AI coding assistant that runs on your machines first and uses a network of approved hosts when you need more. Pay in sats over Lightning, or host and earn them.";
 
 /** The public homepage; `origin` sets the canonical and social URLs (default PORTAL_PUBLIC_URL). */
 export function marketingHomeHtml(pricing: PublicPricing = referencePricing(), origin: string = siteOrigin()): string {
@@ -166,7 +166,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing(), o
         <section class="hero">
           <div>
             <div class="eyebrow u-brand-2">Decentralized compute · settled in Bitcoin</div>
-            <h1>A global market for AI compute, priced in sats.</h1>
+            <h1>Code with AI on your own machines.<br />Rent out yours for sats.</h1>
             <p class="lead">
               EdgeCoder turns idle machines into a coding swarm. Agents sell measured seconds of CPU and GPU time,
               requesters buy them with Lightning, and every hardware class trades against Bitcoin on an open order book.
