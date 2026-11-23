@@ -46,13 +46,13 @@ export function socialPageContent(): string {
       .soc-thumb img { width:120px; height:90px; object-fit:cover; border-radius:var(--radius-md); border:1px solid var(--card-border); }
       .soc-thumb-open { padding:0; border:0; background:none; cursor:zoom-in; border-radius:var(--radius-md); }
       .soc-thumb-open:focus-visible { outline:2px solid var(--brand-2); outline-offset:2px; }
-      .soc-lightbox { border:0; padding:0; background:transparent; max-width:96vw; max-height:96vh; }
-      .soc-lightbox::backdrop { background:rgba(0,0,0,0.85); }
+      .soc-lightbox { border:1px solid var(--card-border); padding:12px; background:var(--bg-elevated); color:var(--text); border-radius:var(--radius-md); max-width:96vw; max-height:96vh; }
+      .soc-lightbox::backdrop { background:var(--scrim); }
       .soc-lightbox figure { margin:0; display:flex; flex-direction:column; align-items:center; gap:8px; }
-      .soc-lightbox img { max-width:94vw; max-height:84vh; object-fit:contain; border-radius:var(--radius-md); background:#000; }
-      .soc-lightbox figcaption { color:#fff; font-size:13px; text-align:center; max-width:94vw; }
-      .soc-lightbox-bar { display:flex; gap:8px; justify-content:center; align-items:center; }
-      .soc-lightbox-bar span { color:#ccc; font-size:12.5px; }
+      .soc-lightbox img { max-width:94vw; max-height:82vh; object-fit:contain; border-radius:var(--radius-md); background:var(--bg); }
+      .soc-lightbox figcaption { color:var(--text); font-size:13px; text-align:center; max-width:94vw; }
+      .soc-lightbox-bar { margin-top:8px; display:flex; gap:8px; justify-content:center; align-items:center; }
+      .soc-lightbox-bar span { color:var(--muted); font-size:12.5px; }
       .soc-thread { border-left:3px solid var(--brand-2); padding-left:10px; margin-bottom:12px; }
       .soc-thread-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:12.5px; margin-bottom:6px; }
     </style>
