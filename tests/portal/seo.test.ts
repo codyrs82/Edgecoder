@@ -14,6 +14,9 @@ describe("technical SEO", () => {
     expect(robots.headers["content-type"]).toContain("text/plain");
     expect(robots.body).toContain("User-agent: *");
     expect(robots.body).toContain("Disallow: /portal");
+    expect(robots.body).toContain("Content-Signal: search=yes, ai-input=yes, ai-train=no");
+    expect(robots.body).toMatch(/User-agent: GPTBot\n(User-agent: .+\n)*Disallow: \/\n/);
+    expect(robots.body).not.toContain("OAI-SearchBot");
     expect(robots.body).toMatch(/^Sitemap: https?:\/\/[^\s]+\/sitemap\.xml$/m);
 
     const sitemap = await app.inject({ url: "/sitemap.xml" });

@@ -60,12 +60,25 @@ export const ROBOTS_DISALLOW: readonly string[] = [
   "/reserves.json",
 ];
 
+/** User agents that crawl to train AI models (search and answer bots such as OAI-SearchBot stay allowed). */
+export const AI_TRAINING_CRAWLERS = [
+  "GPTBot", "ClaudeBot", "anthropic-ai", "Google-Extended", "Applebot-Extended",
+  "CCBot", "Meta-ExternalAgent", "Bytespider", "cohere-training-data-crawler",
+] as const;
+
 export function robotsTxt(origin: string = siteOrigin(), docsUrl: string | undefined = publicDocsUrl()): string {
   const lines = [
-    "# EdgeCoder robots rules. AI-training content signals are pending the owner's decision.",
+    // Owner's decision (Nov 21): search engines and AI answer/search assistants may crawl; crawlers
+    // that collect content to train AI models are asked not to. Matches site-docs/public/robots.txt.
+    "# EdgeCoder robots rules. Search and AI answer assistants are welcome; AI training crawlers are not.",
     "User-agent: *",
     "Allow: /",
     ...ROBOTS_DISALLOW.map((p) => `Disallow: ${p}`),
+    "Content-Signal: search=yes, ai-input=yes, ai-train=no",
+    "",
+    "# AI training crawlers",
+    ...AI_TRAINING_CRAWLERS.map((ua) => `User-agent: ${ua}`),
+    "Disallow: /",
     "",
     `Sitemap: ${origin}/sitemap.xml`,
   ];
@@ -94,7 +107,7 @@ export function llmsTxt(origin: string = siteOrigin(), docsUrl: string | undefin
 - A hosted API at ${origin}/v1 is OpenAI- and Anthropic-compatible and uses \`eck_\` API keys.
 - Clients: web portal, desktop app (macOS and Windows), iOS app, VS Code extension, and a terminal agent (\`edgecoder code\`).
 - Source-available under the Business Source License 1.1 (BUSL-1.1).
-- Hosting is by invitation during early access.
+- Hosting needs approval: request it at /host.
 
 ## Docs
 

@@ -165,7 +165,7 @@ The canonical, current model is [docs/economy-math.md](https://github.com/codyrs
 - **cSats** -- prepaid compute balance, 1 cSat = 1 sat. Model calls are priced per token by model size with a power floor per compute class; code jobs and reservations are priced per second by compute class. The code still calls ledger rows "credits".
 - **Network fee** -- on every compute payment the host gets 95 % and EdgeCoder keeps 5 % (`NETWORK_FEE_BPS`, default 500). Buying cSats is free.
 - **Payouts** -- hosts withdraw earned sats over Lightning (LND or CLN). Funding with Bitcoin on-chain is behind `ONCHAIN_ENABLED`.
-- **Bitcoin anchoring** -- the coordinator can write ledger checkpoint hashes to Bitcoin via `OP_RETURN` (directly through bitcoind, or through the anchor proxy on port 4311). It is off in production and planned for mainnet; the anchor proxy is not deployed.
+- **Bitcoin anchoring** -- the coordinator can write ledger checkpoint hashes to Bitcoin via `OP_RETURN` (directly through bitcoind, or through the anchor proxy on port 4311). It is implemented but not enabled yet on the mainnet coordinators.
 
 ## Source Layout
 
