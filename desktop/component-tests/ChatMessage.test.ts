@@ -58,4 +58,12 @@ describe("ChatMessage: a failed reply", () => {
     expect(screen.getByTestId("reply-failure").textContent).toMatch(/Couldn't run: no machines of that class online · No GPU machines online/);
     expect(screen.queryByRole("button", { name: "Buy cSats" })).toBeNull();
   });
+
+  it("shows the error's own words on an unclassified failure, so it is never a bare \"Couldn't run\"", async () => {
+    const { screen } = await import("@testing-library/svelte");
+    render(ChatMessage, { role: "assistant", content: "Error contacting model: Anthropic returned 401: invalid x-api-key" });
+    const note = screen.getByTestId("reply-failure");
+    expect(note.textContent).toMatch(/^Couldn't run · Anthropic returned 401: invalid x-api-key/);
+    expect(note.getAttribute("title")).toBe("Anthropic returned 401: invalid x-api-key");
+  });
 });
