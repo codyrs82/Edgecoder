@@ -124,8 +124,16 @@ export interface LightningNodeHealth {
   pendingChannels: number;
   /** Spendable (outbound) sats in active channels. */
   localSats: number;
-  /** Receivable (inbound) sats in active channels. */
+  /** The peers' balance in active channels (what they hold on their side, reserve included). */
   remoteSats: number;
+  /**
+   * What the node can still receive over active channels: per channel, the remote balance minus the
+   * reserve the remote peer must keep (remote_constraints.chan_reserve_sat, else the deprecated
+   * remote_chan_reserve_sat), floored at 0. In-flight HTLCs and commitment fees are not subtracted.
+   */
+  receivableSats: number;
+  /** The node's identity pubkey (getinfo identity_pubkey), when reported. */
+  nodePubkey: string | null;
   /** Inactive channels (peer offline), at most 20. */
   inactive: Array<{ chanId: string; remotePubkey: string; localSats: number }>;
 }
@@ -615,6 +623,7 @@ export interface LndGetInfo {
   num_active_channels?: number;
   num_inactive_channels?: number;
   num_pending_channels?: number;
+  identity_pubkey?: string;
 }
 export interface LndChannel {
   active?: boolean;
@@ -622,6 +631,10 @@ export interface LndChannel {
   chan_id?: string;
   local_balance?: string;
   remote_balance?: string;
+  /** Deprecated in LND in favour of remote_constraints.chan_reserve_sat; read as a fallback. */
+  remote_chan_reserve_sat?: string;
+  /** Constraints on the remote peer; chan_reserve_sat is the balance it must keep, so cannot send us. */
+  remote_constraints?: { chan_reserve_sat?: string };
 }
 
 /** Fails closed on a getinfo without the sync flags (an LND that is not answering properly). */
@@ -630,12 +643,16 @@ export function interpretLndNodeHealth(info: LndGetInfo, body: { channels?: LndC
   const channels = Array.isArray(body?.channels) ? body.channels : [];
   let localSats = 0;
   let remoteSats = 0;
+  let receivableSats = 0;
   const inactive: LightningNodeHealth["inactive"] = [];
   for (const c of channels) {
     const local = optionalSats(c.local_balance, "local_balance");
     if (c.active) {
       localSats += local;
-      remoteSats += optionalSats(c.remote_balance, "remote_balance");
+      const remote = optionalSats(c.remote_balance, "remote_balance");
+      const reserve = optionalSats(c.remote_constraints?.chan_reserve_sat ?? c.remote_chan_reserve_sat, "remote_chan_reserve_sat");
+      remoteSats += remote;
+      receivableSats += Math.max(0, remote - reserve);
     } else if (inactive.length < 20) {
       inactive.push({ chanId: String(c.chan_id ?? ""), remotePubkey: String(c.remote_pubkey ?? ""), localSats: local });
     }
@@ -651,6 +668,8 @@ export function interpretLndNodeHealth(info: LndGetInfo, body: { channels?: LndC
     pendingChannels: Number(info.num_pending_channels ?? 0),
     localSats,
     remoteSats,
+    receivableSats,
+    nodePubkey: typeof info.identity_pubkey === "string" && info.identity_pubkey ? info.identity_pubkey : null,
     inactive
   };
 }

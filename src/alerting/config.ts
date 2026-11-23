@@ -28,7 +28,13 @@ export const alertingEnv = {
   /** Coordinator: the portal health URL its watch probes; default PORTAL_PUBLIC_URL + /health. */
   ALERT_PORTAL_HEALTH_URL: envUrl(),
   ALERT_LN_MIN_OUTBOUND_SATS: envInt(0, { min: 0 }),
-  ALERT_LN_MIN_INBOUND_SATS: envInt(0, { min: 0 }),
+  /** Inbound capacity (sats the node can still receive) below which the coordinator alerts; 0 = off. */
+  ALERT_LN_MIN_INBOUND_SATS: envInt(300_000, { min: 0 }),
+  /** Recovery needs ALERT_LN_MIN_INBOUND_SATS plus this, so a balance at the line does not flap. */
+  ALERT_LN_INBOUND_HYSTERESIS_SATS: envInt(25_000, { min: 0 }),
+  ALERT_LN_INBOUND_CHECK_MINUTES: envInt(10, { min: 1, max: 1_440 }),
+  /** Reminder interval while inbound stays low and unacknowledged; 0 = never. */
+  ALERT_LN_INBOUND_RENOTIFY_MINUTES: envInt(720, { min: 0, max: 10_080 }),
   ALERT_PAYOUT_FAILURES_PER_HOUR: envInt(3, { min: 1 }),
   ALERT_PAYOUT_PENDING_MINUTES: envInt(60, { min: 1 }),
   ALERT_PURCHASE_FAILURE_RATE: envNumber(0.5, { min: 0, max: 1 }),
@@ -60,6 +66,9 @@ export interface AlertConfig {
   portalHealthUrl: string | null;
   lnMinOutboundSats: number;
   lnMinInboundSats: number;
+  lnInboundHysteresisSats: number;
+  lnInboundCheckMs: number;
+  lnInboundRenotifyMs: number;
   payoutFailuresPerHour: number;
   payoutPendingMs: number;
   purchaseFailureRate: number;
@@ -92,6 +101,9 @@ export function alertConfigFrom(raw: Raw): AlertConfig {
     portalHealthUrl: raw.ALERT_PORTAL_HEALTH_URL ?? null,
     lnMinOutboundSats: raw.ALERT_LN_MIN_OUTBOUND_SATS,
     lnMinInboundSats: raw.ALERT_LN_MIN_INBOUND_SATS,
+    lnInboundHysteresisSats: raw.ALERT_LN_INBOUND_HYSTERESIS_SATS,
+    lnInboundCheckMs: raw.ALERT_LN_INBOUND_CHECK_MINUTES * 60_000,
+    lnInboundRenotifyMs: raw.ALERT_LN_INBOUND_RENOTIFY_MINUTES * 60_000,
     payoutFailuresPerHour: raw.ALERT_PAYOUT_FAILURES_PER_HOUR,
     payoutPendingMs: raw.ALERT_PAYOUT_PENDING_MINUTES * 60_000,
     purchaseFailureRate: raw.ALERT_PURCHASE_FAILURE_RATE,
