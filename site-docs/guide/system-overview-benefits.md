@@ -18,6 +18,34 @@ The `all-in-one` runtime runs coordinator, inference, control plane and an embed
 
 A Tauri-based IDE ships with a Monaco code editor, streaming chat interface, conversation history, model management, and a live mesh visualization panel. This is the primary user surface for interacting with the network.
 
+### Web Chat
+
+Chat in the browser at `/portal/chat` on edgecoder.io, on your own machines or the network, with no install.
+
+### `edgecoder code` Terminal
+
+A coding agent in your terminal that works in a folder or a cloned GitHub repository, with the same tools as the desktop app's Code view ([docs/terminal.md](https://github.com/codyrs82/Edgecoder/blob/main/docs/terminal.md)).
+
+### iOS App
+
+EdgeCoder for iPhone and iPad, on the App Store, with Chat and Code modes; see [How EdgeCoder Works](/guide/how-edgecoder-works#ios-app).
+
+### Code From Your Phone
+
+With **Code from your phone** on in the desktop app, the iOS app drives coding sessions on that computer, relayed through the coordinator; `/remote` in `edgecoder code` continues a terminal session in the desktop app.
+
+### Bots and Cloud Bots
+
+Bots answer messages, run on a schedule and react to GitHub events: desktop bots run on your machine with its folder and tools, cloud bots run on EdgeCoder's servers with no machine needed ([docs/cloud-bots.md](https://github.com/codyrs82/Edgecoder/blob/main/docs/cloud-bots.md)).
+
+### Web Search
+
+Chats and bots can search the web and read pages when the model needs current information, and the answer lists its sources ([docs/web-tool.md](https://github.com/codyrs82/Edgecoder/blob/main/docs/web-tool.md)).
+
+### Reservations
+
+Reserve a network machine for your jobs only for a set time, paid up front in cSats, with unused time refunded on cancel (**Settings → Compute → Reserve a machine**).
+
 ### Gossip Mesh
 
 HTTP-based peer discovery and task broadcasting. Nodes announce themselves and relay peer lists to build a full mesh view. Task distribution uses a claim-delay protocol to prevent duplicate execution across nodes.
@@ -54,7 +82,7 @@ Any signed-in device can run its owner's work. Hosting other people's work is by
 
 ### Cryptographically auditable
 
-Every credit transaction is recorded in an append-only, hash-chained ordering chain that `/ledger/verify` checks. Bitcoin OP_RETURN anchoring of checkpoints is implemented but off in production; it is planned for mainnet.
+Every credit transaction is recorded in an append-only, hash-chained ordering chain that `/ledger/verify` checks. Bitcoin OP_RETURN anchoring of checkpoints is implemented but not enabled yet on EdgeCoder's coordinators, which run on Bitcoin mainnet ([Bitcoin Anchoring](/economy/bitcoin-anchoring)).
 
 ### Private by choice
 

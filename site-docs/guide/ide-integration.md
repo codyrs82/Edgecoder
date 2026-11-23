@@ -63,37 +63,40 @@ If you prefer to work in your own editor, EdgeCoder exposes an **OpenAI-compatib
 ### How it works
 
 ```
-Your IDE  --> POST /v1/chat/completions
+Your IDE  --> POST /v1/chat/completions  (model: "auto", "network/...", a local tag, ...)
                       |
                       v
           EdgeCoder Provider Server :4304
                       |
-                      v
-          IntelligentRouter waterfall
-         +------------+-------------+
-         v            v             v
-    BT-local     ollama-local    swarm
-    (free)       (free)         (credits)
+     +----------------+-----------------+------------------+
+     v                v                 v                  v
+   "auto"        mine/, network/,   frontier/...      a local tag or
+ (auto-route)    reserved/          (your own key)    edgecoder-local
+                 (pinned place)                       (local router)
 ```
 
-The provider server at `:4304` accepts standard OpenAI `chat/completions` requests and routes them through IntelligentRouter automatically:
-
-| Priority | Route | Cost | When |
-|---|---|---|---|
-| 1 | **Bluetooth-local** | Free | iPhone in BT Local mode + connected |
-| 2 | **Ollama-local** | Free | Local Ollama healthy, <2 concurrent, p95 <8s |
-| 3 | **Swarm** | Credits | Mesh token set, local overloaded or slow |
-| 4 | **Edgecoder-local** | Free | Always-on stub safety net |
+The provider server at `:4304` accepts standard OpenAI `chat/completions` requests. What happens
+next depends on the model ID you pick.
 
 ### Available model IDs
 
-When adding EdgeCoder in your IDE, you can choose which routing mode to use by picking a model name:
+`GET /v1/models` lists the IDs this server can run right now: `auto`, this computer's Ollama
+models, models on your machines and on the network (when this computer is signed in and connected),
+and frontier models your account has a key for.
 
-| Model ID | Behaviour |
-|---|---|
-| `edgecoder-auto` | IntelligentRouter picks the best route automatically **(recommended)** |
-| `edgecoder-local` | Force local Ollama only -- never touches swarm |
-| `edgecoder-swarm` | Force swarm network -- costs credits |
+| Model ID | Where it runs | Cost |
+|---|---|---|
+| `auto` | **Recommended.** EdgeCoder picks the cheapest place that can do the request well (see [Routing behaviour](#routing-behaviour)) | Free on your machines; cSats on the network |
+| A local Ollama tag, e.g. `qwen3-coder:30b` | This computer's Ollama, through the local router | Free |
+| `edgecoder-local` | This computer's default local model (`OLLAMA_MODEL`), through the local router | Free |
+| `mine/<model>` | Your other machines signed in to your account | Free |
+| `network/<model>` or `network/<model>@<class>` | An approved host on the network; `<class>` is `cpu`, `apple`, `gpu` or `gpu.dc` (any class when left out) | cSats, per token by model size |
+| `reserved/<reservation-id>/<model>` | A machine you reserved | Already paid by the reservation |
+| `frontier/<provider>/<model>` | The provider's API, on your own key | Billed by the provider |
+
+`mine/`, `network/` and `reserved/` IDs need this computer to be signed in to EdgeCoder and
+connected to the network (the desktop app's agent); otherwise the server answers `503
+network_unavailable`. No model, `""`, `default` and `auto` all mean Auto.
 
 ---
 
@@ -147,7 +150,7 @@ The VS Code extension uses these endpoints (#36). The full contract is in `src/a
 - `GET /status` (alias of `/v1/router/status`)
 - `POST /run`, `POST /run/local` and `POST /run/swarm` with `{ task, language, maxTokens? }`
 
-`/run/swarm` returns `503 { "error": "swarm_unavailable" }` when `MESH_AUTH_TOKEN` is not set.
+`/run/swarm` returns `503 { "error": "swarm_unavailable" }` when neither this computer's agent nor `MESH_AUTH_TOKEN` is configured.
 
 ---
 
@@ -163,8 +166,8 @@ The VS Code extension uses these endpoints (#36). The full contract is in `src/a
    http://127.0.0.1:4304/v1
    ```
 5. Set the API key to your IDE token (`cat ~/.edgecoder/ide-token`). It is sent as `Authorization: Bearer <token>` and is required.
-6. In the model name field, type `edgecoder-auto` and press Enter to add it
-7. Select `edgecoder-auto` as your active model
+6. In the model name field, type `auto` and press Enter to add it
+7. Select `auto` as your active model
 
 > Cursor calls `POST /v1/chat/completions` -- EdgeCoder handles it natively.
 
@@ -181,13 +184,13 @@ Add to `~/.config/zed/settings.json`:
       "api_url": "http://127.0.0.1:4304/v1",
       "available_models": [
         {
-          "name": "edgecoder-auto",
-          "display_name": "EdgeCoder (auto-route)",
+          "name": "auto",
+          "display_name": "EdgeCoder (Auto)",
           "max_tokens": 8192
         },
         {
           "name": "edgecoder-local",
-          "display_name": "EdgeCoder (local only)",
+          "display_name": "EdgeCoder (this computer)",
           "max_tokens": 8192
         }
       ],
@@ -197,7 +200,7 @@ Add to `~/.config/zed/settings.json`:
   "agent": {
     "default_model": {
       "provider": "openai",
-      "model": "edgecoder-auto"
+      "model": "auto"
     }
   }
 }
@@ -215,14 +218,14 @@ Add to `~/.continue/config.json`:
 {
   "models": [
     {
-      "title": "EdgeCoder (auto-route)",
+      "title": "EdgeCoder (Auto)",
       "provider": "openai",
-      "model": "edgecoder-auto",
+      "model": "auto",
       "apiKey": "<contents of ~/.edgecoder/ide-token>",
       "apiBase": "http://127.0.0.1:4304/v1"
     },
     {
-      "title": "EdgeCoder (local only)",
+      "title": "EdgeCoder (this computer)",
       "provider": "openai",
       "model": "edgecoder-local",
       "apiKey": "<contents of ~/.edgecoder/ide-token>",
@@ -245,8 +248,8 @@ Or use the in-app config: click the model selector in the Continue sidebar -> **
    ```
    http://127.0.0.1:4304/v1
    ```
-5. Enter any API key (e.g. `edgecoder`)
-6. Enter model name: `edgecoder-auto`
+5. Enter your IDE token as the API key (`cat ~/.edgecoder/ide-token`); it is required
+6. Enter model name: `auto`
 7. Click **Test Connection** -- should return model info
 8. Click **Apply**
 
@@ -254,12 +257,8 @@ Or use the in-app config: click the model selector in the Continue sidebar -> **
 
 #### Windsurf (Codeium)
 
-Windsurf's primary AI is hosted. For custom models, use the **MCP (Model Context Protocol)** server support:
-
-1. Go to **Settings -> Cascade -> MCP Servers**
-2. Add an OpenAI-compatible MCP entry pointing to `http://127.0.0.1:4304/v1`
-
-Alternatively, install Continue.dev alongside Windsurf -- it works in any VS Code fork.
+Windsurf's built-in AI is hosted and does not take a custom OpenAI base URL. Install
+Continue.dev in Windsurf (it works in any VS Code fork) and configure it as above.
 
 ---
 
@@ -274,7 +273,7 @@ curl -s http://127.0.0.1:4304/v1/chat/completions \
   -H "Authorization: Bearer $(cat ~/.edgecoder/ide-token)" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "edgecoder-auto",
+    "model": "auto",
     "messages": [{"role": "user", "content": "Write a Python function to debounce a callback"}]
   }' | jq '.choices[0].message.content'
 ```
@@ -296,11 +295,14 @@ curl -H "Authorization: Bearer $(cat ~/.edgecoder/ide-token)" http://127.0.0.1:4
 curl -s http://127.0.0.1:4304/v1/chat/completions \
   -H "Authorization: Bearer $(cat ~/.edgecoder/ide-token)" \
   -H "Content-Type: application/json" \
-  -d '{"model":"edgecoder-auto","messages":[{"role":"user","content":"say hello"}]}' \
+  -d '{"model":"auto","messages":[{"role":"user","content":"say hello"}]}' \
   | jq '.choices[0].message.content, .edgecoder'
 ```
 
-The response includes an `edgecoder` field with `route` and `latencyMs` so you can see which backend handled the request.
+For `auto` and network models the response includes an `edgecoder` field: `where` (where the
+request ran) and `cSatsSpent` (what it cost, when it ran on the network). Replies from the local
+router (a local tag or `edgecoder-local`) don't carry it; with `stream: true` they start with a
+`route_info` event naming the route.
 
 ---
 
@@ -320,23 +322,43 @@ curl http://127.0.0.1:4301/model/pull/progress
 
 ## Routing behaviour
 
-### When does traffic go to swarm?
+### Auto (`auto`)
 
-The router spills to swarm when local Ollama is overloaded (>2 concurrent), too slow (p95 >8s), or unhealthy. Swarm tasks cost credits from your agent account; the fulfilling agent earns them.
+Auto (`src/inference-api/auto-route.ts`) decides per request:
 
-### When does Bluetooth-local activate?
+1. **Size the job.** Does it need tools or a long context (an agent step), or is it a short
+   question? That sets the smallest model that will do it well, never below a quality floor
+   (7B by default). Harder steps raise the floor (about 14B, then 30B).
+2. **Rank the places, cheapest first:** a machine you already reserved (prepaid), this computer
+   (free), your other machines (free), then the network (cSats per token; among machine classes
+   the fastest comes first, and CPU is skipped for heavy work).
+3. **Try them in order.** A place that can't start falls through to the next. If no free place
+   fits and the network can't take the request (not connected, no cSats, or a budget or policy
+   that keeps to free machines), the biggest free model answers, marked as a fallback with the
+   reason.
 
-When your iPhone is running EdgeCoder with **Bluetooth Local** mode enabled and is connected to your Mac over BT. The inference runs on the phone's llama.cpp model -- free, offline, no credits involved.
+### Local router (a local tag or `edgecoder-local`)
 
-### Forcing a specific route
+A local model ID goes through the local router, in this order:
+
+| Order | Route | Cost | When |
+|---|---|---|---|
+| 1 | **Bluetooth-local** | Free | `BT_STATUS_URL` is set and an iPhone in Bluetooth Local mode is connected |
+| 2 | **Ollama-local** | Free | Local Ollama is healthy, fewer than 2 requests in flight, p95 latency under 8 s |
+| 3 | **Network** | cSats | Local is unavailable or overloaded, and this computer's agent (or a mesh token) is configured |
+| 4 | **Offline message** | Free | Nothing else is reachable: the reply says Ollama is not running and the network is unreachable |
+
+### Forcing a specific place
 
 Pick the model ID:
 
 | Want | Model ID |
 |---|---|
-| Always local | `edgecoder-local` |
-| Always swarm | `edgecoder-swarm` |
-| Smart routing | `edgecoder-auto` |
+| Let EdgeCoder choose | `auto` |
+| This computer | a local tag, or `edgecoder-local` |
+| Your other machines | `mine/<model>` |
+| The network | `network/<model>` or `network/<model>@<class>` |
+| A machine you reserved | `reserved/<reservation-id>/<model>` |
 
 ---
 
@@ -351,14 +373,14 @@ cd "/path/to/EdgeCoder" && npm run dev:ide
 
 ### IDE says "model not found"
 
-Make sure you typed the model name exactly: `edgecoder-auto`, `edgecoder-local`, or `edgecoder-swarm`. Verify they appear:
+Make sure you typed the model ID exactly as `GET /v1/models` lists it (`auto`, a local tag, `mine/…`, `network/…`). Verify:
 ```bash
 curl -H "Authorization: Bearer $(cat ~/.edgecoder/ide-token)" http://127.0.0.1:4304/v1/models
 ```
 
 ### Responses are slow
 
-Check which route was used -- look at the `X-EdgeCoder-Route` response header or the `edgecoder.route` field in the JSON. If it is hitting `swarm`, the local model may be overloaded or unhealthy. Verify Ollama is running:
+Check where the request ran: the `edgecoder.where` field for `auto` and network models, or the `route_info` event at the start of a streamed local-router reply. If a local model ID is going to the network, the local model may be overloaded or unhealthy. Verify Ollama is running:
 ```bash
 curl http://127.0.0.1:11434/api/tags
 ```

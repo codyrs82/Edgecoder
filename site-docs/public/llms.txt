@@ -1,0 +1,27 @@
+# EdgeCoder
+
+> AI coding assistant built on local models: it runs on your own machines first (Ollama or llama.cpp), and on a network of approved hosts behind EdgeCoder's coordinators when you need more compute. Approved hosts earn sats for the work their machines run. Network compute is priced and settled in Bitcoin over Lightning, on Bitcoin mainnet.
+
+- Work on your own machines is free and does not leave them.
+- Work sent to the network goes through a coordinator to an agent on an approved host. The coordinator and the host see network work in plaintext.
+- Compute is priced in cSats (1 cSat = 1 sat), bought with Bitcoin over Lightning. Hosts receive 95% of each compute payment; the network fee is 5%. Hosting is by application and admin approval.
+- Clients: web chat at edgecoder.io, desktop app (Tauri), iOS app (App Store), `edgecoder code` in the terminal, and external IDEs through an OpenAI-compatible endpoint.
+- Source-available under the Business Source License 1.1 (BUSL-1.1).
+
+## Docs
+
+- [Documentation home](https://docs.edgecoder.io/)
+- [Getting started](https://docs.edgecoder.io/guide/getting-started)
+- [System overview](https://docs.edgecoder.io/guide/system-overview-benefits)
+- [How EdgeCoder works](https://docs.edgecoder.io/guide/how-edgecoder-works)
+- [Buy cSats](https://docs.edgecoder.io/guide/buy-csats): pay for network compute
+- [IDE integration](https://docs.edgecoder.io/guide/ide-integration): model IDs and editor setup
+- [Model management](https://docs.edgecoder.io/guide/model-management)
+- [Credits, pricing and issuance](https://docs.edgecoder.io/economy/credits-pricing-issuance)
+- [Trust and security](https://docs.edgecoder.io/security/trust-and-security)
+- [API surfaces](https://docs.edgecoder.io/reference/api-surfaces)
+
+## Site
+
+- [EdgeCoder](https://edgecoder.io)
+- [Source code](https://github.com/codyrs82/Edgecoder)
