@@ -28,7 +28,7 @@ Users interact through web chat on the portal, a chat-first desktop app (Tauri +
 - [Model Management](/guide/model-management)
 - [Deployment Topology](/operations/deployment-topology)
 - [Public Mesh Operations](/operations/public-mesh-operations)
-- [iOS Background Execution & Compute Modes](/operations/ios-power-scheduling)
+- [iOS Power & Background](/operations/ios-power-scheduling)
 - [Coordinator Discovery and Failover](/operations/coordinator-discovery-failover)
 - [Coordinator Federation](/operations/coordinator-federation)
 - [Trust and Security](/security/trust-and-security)

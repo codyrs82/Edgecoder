@@ -41,7 +41,7 @@ export default withMermaid(defineConfig({
           { text: "Hosting", link: "/guide/hosting" },
           { text: "System Overview and Benefits", link: "/guide/system-overview-benefits" },
           { text: "How EdgeCoder Works", link: "/guide/how-edgecoder-works" },
-          { text: "IDE Integration (VS Code, Cursor, Windsurf)", link: "/guide/ide-integration" },
+          { text: "IDE Integration (Cursor, Zed, JetBrains, Continue)", link: "/guide/ide-integration" },
           { text: "Architecture Deep Dive", link: "/guide/architecture-deep-dive" },
           { text: "Request Lifecycle Sequences", link: "/guide/request-lifecycle-sequences" },
           { text: "Model Provider Abstraction", link: "/guide/model-provider-abstraction" },
@@ -61,7 +61,7 @@ export default withMermaid(defineConfig({
           { text: "Agent Mesh Peer-Direct Flow", link: "/operations/agent-mesh-peer-direct" },
           { text: "Coordinator Discovery and Failover", link: "/operations/coordinator-discovery-failover" },
           { text: "Executor Subset Reference", link: "/operations/executor-subset-reference" },
-          { text: "iOS Power Scheduling", link: "/operations/ios-power-scheduling" },
+          { text: "iOS Power & Background", link: "/operations/ios-power-scheduling" },
           { text: "Stats Ledger Rollout", link: "/operations/stats-ledger-rollout" },
           { text: "Coordinator Federation", link: "/operations/coordinator-federation" },
           { text: "Load Testing", link: "/operations/load-testing" }

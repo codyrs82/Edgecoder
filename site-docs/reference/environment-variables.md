@@ -213,6 +213,8 @@ Reputation, abandonment and replica exclusion are keyed on the agent's reward ac
 
 Used by the IDE provider server (`EDGE_RUNTIME_MODE=ide-provider`) to bridge the Mac-side IntelligentRouter to a nearby iPhone over Bluetooth.
 
+The current iOS app no longer has a Bluetooth Local mode and nothing in it starts the phone-side peripheral, so these settings have no phone to talk to today. See [iOS Power & Background](/operations/ios-power-scheduling).
+
 | Variable | Default | Description |
 |---|---|---|
 | `BT_PROXY_URL` | `http://127.0.0.1:11435` | Full URL the IntelligentRouter calls for bluetooth-local inference. |
@@ -923,5 +925,5 @@ Run a `fly secrets list` checklist against this list before any deploy.
 ## Cross-links
 
 - [Deployment Topology](/operations/deployment-topology)
-- [iOS Background Execution](/operations/ios-power-scheduling)
+- [iOS Power & Background](/operations/ios-power-scheduling)
 - [macOS env example](https://github.com/codyrs82/Edgecoder/blob/main/scripts/macos/payload/etc/edgecoder/edgecoder.env.example)
