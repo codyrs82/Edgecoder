@@ -26,8 +26,8 @@ export const socialEnv = {
   SOCIAL_NOSTR_RELAYS: z.string().optional(),
   /** How often the drafting and posting job runs. */
   SOCIAL_TICK_MINUTES: envInt(15, { min: 1, max: 1_440 }),
-  /** The docs sitemap new guides are detected from. */
-  SOCIAL_DOCS_SITEMAP_URL: envUrl("https://docs.edgecoder.io/sitemap.xml")
+  /** The docs sitemap new guides are detected from; default: the public docs site's /sitemap.xml. */
+  SOCIAL_DOCS_SITEMAP_URL: envUrl()
 };
 
 export const DEFAULT_SOCIAL_RELAYS = ["wss://relay.damus.io", "wss://nos.lol", "wss://relay.primal.net"];
@@ -49,7 +49,10 @@ export interface SocialConfig {
   nostrSecret: string | null;
   relays: string[];
   tickMs: number;
-  docsSitemapUrl: string;
+  /** SOCIAL_DOCS_SITEMAP_URL; null: the portal fills in the public docs site's sitemap. */
+  docsSitemapUrl: string | null;
+  /** Where the weekly report links (the portal passes its public origin); null: no link. */
+  siteUrl: string | null;
 }
 
 export function socialConfigFromEnv(env: NodeJS.ProcessEnv = process.env): SocialConfig {
@@ -68,6 +71,7 @@ export function socialConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Socia
     nostrSecret: s(raw.NOSTR_BRAND_NSEC) || null,
     relays: [...new Set(relayList)],
     tickMs: raw.SOCIAL_TICK_MINUTES * 60_000,
-    docsSitemapUrl: raw.SOCIAL_DOCS_SITEMAP_URL
+    docsSitemapUrl: raw.SOCIAL_DOCS_SITEMAP_URL ?? null,
+    siteUrl: null
   };
 }

@@ -29,6 +29,7 @@ import { SocialService, type PostView, type SocialServiceDeps } from "../social/
 import { MemorySocialStore, PostgresSocialStore } from "../social/store.js";
 import { tweetUrl } from "../social/x-client.js";
 import { loadMergedNetwork, type NetworkAdminRoutesDeps } from "./routes/network-admin.js";
+import { DEFAULT_PUBLIC_DOCS_URL, siteOrigin } from "./pages/seo.js";
 
 type User = { userId: string; email: string; role?: "user" | "admin"; emailVerified?: boolean };
 
@@ -156,9 +157,11 @@ async function getText(url: string, headers: Record<string, string>, timeoutMs: 
 export function setupPortalSocial(
   app: FastifyInstance,
   d: Pick<NetworkAdminRoutesDeps, "coordinatorAdminToken" | "EXTERNAL_HTTP_TIMEOUT_MS" | "coordinatorUrls" | "getCurrentUser" | "buildAccessContext" | "lookupOwners"> & { pool: Pool | null },
-  config: SocialConfig = socialConfigFromEnv(),
+  envConfig: SocialConfig = socialConfigFromEnv(),
   overrides: Partial<Pick<SocialServiceDeps, "fetch" | "publishNostr" | "sources">> = {}
 ) {
+  // The weekly report links the public site; new docs pages come from the public docs site's sitemap unless SOCIAL_DOCS_SITEMAP_URL says otherwise.
+  const config: SocialConfig = { ...envConfig, siteUrl: envConfig.siteUrl ?? `${siteOrigin()}/`, docsSitemapUrl: envConfig.docsSitemapUrl ?? new URL("sitemap.xml", DEFAULT_PUBLIC_DOCS_URL).href };
   const timeoutMs = d.EXTERNAL_HTTP_TIMEOUT_MS;
   const adminRevenue = async () => {
     if (!d.coordinatorAdminToken) return null;

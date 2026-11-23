@@ -256,7 +256,7 @@ export class SocialService {
     const nowMs = this.now();
     if (await this.d.store.hasSourceKey(`weekly:${isoWeekKey(nowMs)}`)) return null;
     const [network, revenue] = await Promise.all([s.network ? s.network().catch(() => null) : null, s.revenue ? s.revenue().catch(() => null) : null]);
-    const draft = weeklyDraft({ ...networkWeekly(network, nowMs), hostSats7d: hostSatsFromRevenue(revenue, nowMs) }, nowMs);
+    const draft = weeklyDraft({ ...networkWeekly(network, nowMs), hostSats7d: hostSatsFromRevenue(revenue, nowMs) }, nowMs, this.d.config.siteUrl);
     return draft ? this.addDraft(draft) : null;
   }
 
@@ -289,6 +289,7 @@ export class SocialService {
     const fetchText = this.d.sources?.fetchText;
     if (!fetchText) return [];
     const sitemapUrl = this.d.config.docsSitemapUrl;
+    if (!sitemapUrl) return [];
     const xml = await fetchText(sitemapUrl);
     if (!xml) return [];
     const urls = sitemapUrls(xml, new URL(sitemapUrl).host);

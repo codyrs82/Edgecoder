@@ -19,7 +19,7 @@ function harness(o: { config?: Partial<SocialConfig>; enabled?: boolean; xStatus
     return { status, text: async () => (status === 201 ? JSON.stringify({ data: { id: String(nextId++), text: "x" } }) : JSON.stringify({ title: "Forbidden", detail: "duplicate content" })) };
   });
   const nostr = vi.fn(async () => ({ ok: true as const, eventId: "ab".repeat(32), relaysOk: 2, relays: 3 }));
-  const config: SocialConfig = { sendEnabled: true, x: X, nostrSecret: NSEC_HEX, relays: ["wss://r1", "wss://r2", "wss://r3"], tickMs: 60_000, docsSitemapUrl: "https://docs.edgecoder.io/sitemap.xml", ...o.config };
+  const config: SocialConfig = { sendEnabled: true, x: X, nostrSecret: NSEC_HEX, relays: ["wss://r1", "wss://r2", "wss://r3"], tickMs: 60_000, docsSitemapUrl: "https://docs.edgecoder.io/sitemap.xml", siteUrl: "https://edgecoder.io/", ...o.config };
   const svc = new SocialService({ store, config, fetch, publishNostr: nostr, now: () => clock.now, sources: o.sources });
   const ready = o.enabled === false ? Promise.resolve() : svc.setEnabled(true, "root@example.com").then(() => undefined);
   return { svc, store, calls, fetch, nostr, clock, ready };

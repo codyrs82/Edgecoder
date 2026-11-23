@@ -18,7 +18,7 @@ describe("portal social admin routes", () => {
   const build = (config: Partial<SocialConfig> = {}) => {
     const svc = new SocialService({
       store,
-      config: { sendEnabled: true, x: SECRETS, nostrSecret: null, relays: ["wss://relay.example"], tickMs: 60_000, docsSitemapUrl: "https://docs.edgecoder.io/sitemap.xml", ...config }
+      config: { sendEnabled: true, x: SECRETS, nostrSecret: null, relays: ["wss://relay.example"], tickMs: 60_000, docsSitemapUrl: "https://docs.edgecoder.io/sitemap.xml", siteUrl: "https://edgecoder.io/", ...config }
     });
     const a = Fastify();
     registerSocialRoutes(a, { service: svc, getCurrentUser: async () => user, buildAccessContext: async () => ({ isSystemAdmin: isAdmin }) });

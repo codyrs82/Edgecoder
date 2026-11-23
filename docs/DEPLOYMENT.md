@@ -636,7 +636,7 @@ fly secrets set -a edgecoder-portal SOCIAL_POSTING_ENABLED=1     # last: lets ap
 | `NOSTR_BRAND_NSEC` | unset | The brand Nostr key, 64 hex characters or `nsec1...`. Each X post is also published as a kind-1 note. Unset (or invalid): Nostr is skipped and recorded on the post; X still posts. Never logged or returned. |
 | `SOCIAL_NOSTR_RELAYS` | `wss://relay.damus.io,wss://nos.lol,wss://relay.primal.net` | Comma-separated `wss://` relays for the Nostr cross-post. A note counts as published when at least one relay accepts it. |
 | `SOCIAL_TICK_MINUTES` | `15` | How often the drafting and sending job runs (1 to 1440). |
-| `SOCIAL_DOCS_SITEMAP_URL` | `https://docs.edgecoder.io/sitemap.xml` | The docs sitemap new pages are detected from. |
+| `SOCIAL_DOCS_SITEMAP_URL` | `https://docs.edgecoder.io/sitemap.xml` | The docs sitemap new pages are detected from. The weekly report links `PORTAL_PUBLIC_URL`. |
 
 See [Environment variables](../site-docs/reference/environment-variables.md#brand-account-posting-portal) for the rules every post is checked against.
 

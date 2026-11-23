@@ -71,7 +71,7 @@ export function stripLeadingMentions(text: string): string {
 
 const URL_RE = /\bhttps?:\/\/[^\s<>"]+/gi;
 // Bare domains X links anyway (edgecoder.io, docs.edgecoder.io/guides).
-const BARE_DOMAIN_RE = /\b(?:[a-z0-9-]+\.)+(?:io|com|org|net|dev|app|ai|co|xyz|me|sh)\b(?:\/[^\s<>"]*)?/gi;
+const BARE_DOMAIN_RE = /\b(?:[a-z0-9-]+\.)+(?:io|com|org|net|dev|app|ai|co|xyz)\b(?:\/[^\s<>"]*)?/gi;
 
 /**
  * X's weighted length (twitter-text v3): each URL counts 23; code points in the Latin and

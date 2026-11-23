@@ -21,8 +21,6 @@ import type { NewDraft } from "./store.js";
  * as seen), so turning the feature on does not draft the whole back catalog.
  */
 
-export const SITE_URL = "https://edgecoder.io/";
-
 /** ISO-8601 week key (2026-W48) of a time, UTC. */
 export function isoWeekKey(ms: number): string {
   const d = new Date(ms);
@@ -45,13 +43,13 @@ export interface WeeklyStats {
 
 const fmt = (n: number) => Math.round(n).toLocaleString("en-US");
 
-export function weeklyDraft(stats: WeeklyStats, nowMs: number): NewDraft | null {
+export function weeklyDraft(stats: WeeklyStats, nowMs: number, siteUrl: string | null = null): NewDraft | null {
   const lines: string[] = [];
   if (stats.hostsOnline !== null) lines.push(`• ${fmt(stats.hostsOnline)} ${stats.hostsOnline === 1 ? "host" : "hosts"} online`);
   if (stats.jobs7d !== null) lines.push(`• ${fmt(stats.jobs7d)} ${stats.jobs7d === 1 ? "job" : "jobs"} run`);
   if (stats.hostSats7d !== null) lines.push(`• ${fmt(stats.hostSats7d)} sats paid to hosts`);
   if (!lines.length) return null;
-  const text = `The EdgeCoder network, last 7 days:\n${lines.join("\n")}\n\n${withUtm(SITE_URL, "x", "weekly")}`;
+  const text = `The EdgeCoder network, last 7 days:\n${lines.join("\n")}${siteUrl ? `\n\n${withUtm(siteUrl, "x", "weekly")}` : ""}`;
   return { sourceKey: `weekly:${isoWeekKey(nowMs)}`, kind: "weekly", text };
 }
 

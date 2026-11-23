@@ -84,6 +84,7 @@ describe("post rules", () => {
     const url = "https://docs.edgecoder.io/guides/a-very-long-path-that-would-otherwise-count-a-lot?utm_source=x&utm_medium=social&utm_campaign=docs";
     expect(xWeightedLength(`Hi ${url}`)).toBe(3 + 23);
     expect(xWeightedLength("see edgecoder.io")).toBe(4 + 23);
+    expect(xWeightedLength("see docs.edgecoder.io/guides/x")).toBe(4 + 23);
     expect(xWeightedLength("a".repeat(280))).toBe(280);
     expect(postProblems("a".repeat(280))).toEqual([]);
     expect(postProblems("a".repeat(281)).map((p) => p.code)).toEqual(["too_long"]);
@@ -143,7 +144,7 @@ describe("draft sources", () => {
     const revenue = { feeBps: 500, byDay: [{ date: "2026-11-10", msat: 9_000_000 }, { date: "2026-11-20", msat: 600_000 }, { date: "2026-11-23", msat: 400_000 }] };
     expect(hostSatsFromRevenue(revenue, now)).toBe(19_000);
     expect(hostSatsFromRevenue({ feeBps: 0, byDay: [] }, now)).toBeNull();
-    const d = weeklyDraft({ hostsOnline: 2, jobs7d: 42, hostSats7d: 19_000 }, now)!;
+    const d = weeklyDraft({ hostsOnline: 2, jobs7d: 42, hostSats7d: 19_000 }, now, "https://edgecoder.io/")!;
     expect(d.sourceKey).toBe("weekly:2026-W48");
     expect(d.text).toContain("2 hosts online");
     expect(d.text).toContain("42 jobs run");
