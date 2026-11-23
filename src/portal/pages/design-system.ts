@@ -61,7 +61,7 @@ export const BASE_CSS = `
 html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0; font-family: var(--font-sans); font-size: 14px; line-height: 1.5;
-  color: var(--text); background: var(--bg); min-height: 100vh;
+  color: var(--text); background: var(--bg); min-height: 100vh; min-height: 100dvh;
   -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
   font-feature-settings: "cv11", "ss01", "tnum";
 }
@@ -222,6 +222,11 @@ border: 1px solid var(--border-strong); color: var(--text-secondary); background
 .u-fs-10 { font-size: 10px !important; } .u-fs-12 { font-size: 12px !important; } .u-fs-13 { font-size: 13px !important; }
 .u-font-ui { font-family: system-ui !important; } .u-font-mono { font-family: var(--font-mono) !important; }
 .u-muted { color: var(--muted) !important; } .u-brand-2 { color: var(--brand-2) !important; } .u-danger { color: var(--danger) !important; }
+/* iOS Safari zooms the page in when a field under 16px gets focus, and the page then no longer fits
+   the screen. Touch screens get 16px fields; desktop keeps the compact sizes. */
+@media (hover: none) and (pointer: coarse) {
+  input, textarea, select { font-size: max(16px, 1em) !important; }
+}
 `;
 
 /** Inline SVG icons (24x24 viewBox, stroke-based, currentColor). */

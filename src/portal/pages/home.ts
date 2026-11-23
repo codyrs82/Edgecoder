@@ -28,7 +28,7 @@ app.get("/portal", async (_req, reply) => {
       <style nonce="${CSP_NONCE}">
         ${TOKENS_CSS}
         ${BASE_CSS}
-        .auth { min-height: 100vh; display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); }
+        .auth { min-height: 100vh; min-height: 100dvh; display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 6fr); }
         .auth-brand {
           display: flex; flex-direction: column; justify-content: space-between;
           padding: 36px 44px; background: var(--bg-soft); border-right: 1px solid var(--card-border);

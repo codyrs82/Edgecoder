@@ -90,9 +90,9 @@ export function portalAuthedPageHtml(input: {
         ${TOKENS_CSS}
         ${BASE_CSS}
         /* ── Shell ── */
-        .app { display: grid; grid-template-columns: var(--sidebar-w) minmax(0, 1fr); min-height: 100vh; }
+        .app { display: grid; grid-template-columns: var(--sidebar-w) minmax(0, 1fr); min-height: 100vh; min-height: 100dvh; }
         .sidebar {
-          position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column;
+          position: sticky; top: 0; height: 100vh; height: 100dvh; display: flex; flex-direction: column;
           background: var(--bg-soft); border-right: 1px solid var(--card-border);
         }
         .sidebar-brand { display: flex; align-items: center; gap: 10px; padding: 14px 16px; height: var(--topbar-h); border-bottom: 1px solid var(--card-border); }
@@ -641,7 +641,7 @@ export function portalCardPageHtml(input: {
       <style nonce="${CSP_NONCE}">
         ${TOKENS_CSS}
         ${BASE_CSS}
-        .wrap { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 36px 16px; }
+        .wrap { min-height: 100vh; min-height: 100dvh; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 36px 16px; }
         ${LEGAL_FOOTER_CSS}
         .page-card { width: min(420px, 100%); }
         .page-card .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; margin-bottom: 24px; }

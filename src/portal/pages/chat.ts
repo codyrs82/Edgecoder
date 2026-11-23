@@ -24,7 +24,7 @@ app.get("/portal/chat", async (_req, reply) => {
     <style nonce="${CSP_NONCE}">
       .shell { max-width:none !important; margin:0 !important; padding:0 !important; }
       .content-stack { padding:0 !important; margin:0 !important; }
-      .chat-layout { display:flex; height:calc(100vh - var(--topbar-h)); }
+      .chat-layout { display:flex; height:calc(100vh - var(--topbar-h)); height:calc(100dvh - var(--topbar-h)); }
       .chat-main { flex:1; display:flex; flex-direction:column; min-width:0; }
       .chat-scroll { flex:1; overflow-y:auto; scroll-behavior:smooth; }
       .chat-thread { max-width:768px; margin:0 auto; padding:16px 24px; }
