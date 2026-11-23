@@ -54,6 +54,8 @@ export function socialPageContent(): string {
       .soc-lightbox-bar { margin-top:8px; display:flex; gap:8px; justify-content:center; align-items:center; }
       .soc-lightbox-bar span { color:var(--muted); font-size:12.5px; }
       .soc-thread { border-left:3px solid var(--brand-2); padding-left:10px; margin-bottom:12px; }
+      .soc-approved { margin-top:12px; }
+      .soc-approved summary { cursor:pointer; color:var(--muted); font-size:13px; padding:6px 0; }
       .soc-thread-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:12.5px; margin-bottom:6px; }
     </style>
     <h2 class="set-title">Social posts</h2>
@@ -86,6 +88,7 @@ export function socialPageContent(): string {
       </div>
       <h3 class="set-group">Queue</h3>
       <div id="socQueue"></div>
+      <details id="socApproved" class="soc-approved hidden"><summary>Approved, waiting to send (<span id="socApprovedCount">0</span>)</summary><div id="socApprovedList"></div></details>
       <dialog id="socLightbox" class="soc-lightbox" aria-label="Image preview">
         <figure><img id="socLightboxImg" alt=""><figcaption id="socLightboxCap"></figcaption></figure>
         <div class="soc-lightbox-bar">
@@ -308,31 +311,43 @@ export function socialPageScript(): string {
       }
       if (!state.recent.length) { const tr = el("tr"); tr.appendChild(el("td", { colspan: "4" }, "Nothing posted yet.")); body.appendChild(tr); }
     }
-    function render() {
-      $("socError").classList.add("hidden");
-      $("socBody").classList.remove("hidden");
-      renderSwitch();
-      const q = $("socQueue");
+    // Threads together (position order), everything soonest first: no send time (goes out on approval), then by send time.
+    function renderQueueList(q, list, threadNote) {
       q.textContent = "";
-      // Threads together, in position order; single posts as they come.
       const groups = new Map();
-      for (const p of state.queue) {
+      for (const p of list) {
         const k = p.threadId ? "t:" + p.threadId : "p:" + p.id;
         if (!groups.has(k)) groups.set(k, []);
         groups.get(k).push(p);
       }
-      for (const [k, posts] of groups) {
+      const when = (p) => (p.scheduledAtMs === null || p.scheduledAtMs === undefined ? -Infinity : p.scheduledAtMs);
+      const groupWhen = (posts) => Math.min(...posts.map(when));
+      const groupMade = (posts) => Math.min(...posts.map((p) => p.createdAtMs || 0));
+      const ordered = [...groups].sort((a, b) => (groupWhen(a[1]) - groupWhen(b[1])) || (groupMade(a[1]) - groupMade(b[1])));
+      for (const [k, posts] of ordered) {
         if (!k.startsWith("t:")) { q.appendChild(renderPost(posts[0])); continue; }
         posts.sort((a, b) => (a.threadPosition || 0) - (b.threadPosition || 0));
         const wrap = el("div", { class: "soc-thread" });
         const head = el("div", { class: "soc-thread-head" });
         head.appendChild(el("strong", {}, "Thread " + posts[0].threadId));
-        head.appendChild(el("span", { class: "muted" }, posts.length + " post(s) waiting. Approving one approves them all; each next post replies to the one before it."));
+        head.appendChild(el("span", { class: "muted" }, posts.length + " " + threadNote));
         wrap.appendChild(head);
         for (const p of posts) wrap.appendChild(renderPost(p));
         q.appendChild(wrap);
       }
-      if (!state.queue.length) q.appendChild(el("div", { class: "soc-empty" }, "No drafts waiting."));
+    }
+    function render() {
+      $("socError").classList.add("hidden");
+      $("socBody").classList.remove("hidden");
+      renderSwitch();
+      // Waiting on you (drafts, failed) in the queue; approved ones tucked away below.
+      const waiting = state.queue.filter((p) => p.status !== "approved" && p.status !== "posting");
+      const approved = state.queue.filter((p) => p.status === "approved" || p.status === "posting");
+      renderQueueList($("socQueue"), waiting, "post(s) waiting. Approving one approves them all; each next post replies to the one before it.");
+      if (!waiting.length) $("socQueue").appendChild(el("div", { class: "soc-empty" }, "Nothing waiting for approval."));
+      renderQueueList($("socApprovedList"), approved, "post(s) approved, sending at the time shown.");
+      $("socApprovedCount").textContent = String(approved.length);
+      $("socApproved").classList.toggle("hidden", !approved.length);
       renderRecent();
     }
     async function load() {
