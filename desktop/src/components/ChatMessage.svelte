@@ -16,7 +16,7 @@
   import { ChevronRight } from "@lucide/svelte";
   import { summarizeSteps, toolStepStatus } from "../lib/tool-steps";
   import { Copy, Check } from "@lucide/svelte";
-  import { FAILURE_LINE, failureKind, splitModelError } from "../lib/failures";
+  import { FAILURE_LINE, failureDetail, failureKind, splitModelError } from "../lib/failures";
   import { neededCSatsIn, requestBuy, suggestedTopUpSats } from "../lib/buy-csats";
 
   interface Props {
@@ -134,8 +134,8 @@
       {/if}
       {#if failed.error && failure}
         <!-- One compact notice instead of a raw error bubble; money problems lead to Buy cSats. -->
-        <div class="reply-failure" role="note" data-testid="reply-failure">
-          <span class="rf-text"><span class="rf-title">{FAILURE_LINE[failure]}</span>{#if failure === "csats" || failure === "class"}{" "}<span class="rf-detail">· {failed.error.replace(/^Not enough cSats:\s*/i, "")}</span>{/if}</span>
+        <div class="reply-failure" role="note" data-testid="reply-failure" title={failed.error}>
+          <span class="rf-text"><span class="rf-title">{FAILURE_LINE[failure]}</span>{#if failure === "csats" || failure === "class" || failure === "other"}{" "}<span class="rf-detail">· {failureDetail(failed.error)}</span>{/if}</span>
           {#if failure === "csats"}<button type="button" class="rf-buy" onclick={buy}>Buy cSats</button>{/if}
         </div>
       {/if}

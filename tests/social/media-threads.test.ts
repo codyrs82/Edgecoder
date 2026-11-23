@@ -104,14 +104,20 @@ describe("images", () => {
     for (const call of h.calls) expect(call.headers.authorization).toMatch(/^OAuth .*oauth_signature_method="HMAC-SHA1"/);
   });
 
-  it("allows at most 4 images, only while the post is editable", async () => {
+  it("allows at most 4 images, swappable until the post starts sending", async () => {
     const h = harness({ config: { sendEnabled: false } });
     await h.ready;
     const id = idOf(await h.svc.compose("Hello"));
     for (let i = 0; i < 4; i++) expect((await h.svc.addImage(id, { filename: `${i}.png`, base64: PNG_B64 })).ok).toBe(true);
     expect(await h.svc.addImage(id, { filename: "5.png", base64: PNG_B64 })).toEqual({ ok: false, error: "too_many_images" });
     await h.svc.approve(id, "root");
-    expect(await h.svc.addImage(id, { filename: "x.png", base64: PNG_B64 })).toEqual({ ok: false, error: "not_editable" });
+    // Approved but not sent yet: an image can still be swapped, and the post stays approved.
+    const [first] = await h.store.listImages([id]);
+    expect((await h.svc.removeImage(id, first!.id)).ok).toBe(true);
+    expect((await h.svc.addImage(id, { filename: "x.png", base64: PNG_B64 })).ok).toBe(true);
+    expect((await h.store.get(id))!.status).toBe("approved");
+    await h.svc.reject(id);
+    expect(await h.svc.addImage(id, { filename: "y.png", base64: PNG_B64 })).toEqual({ ok: false, error: "not_editable" });
   });
 
   it("an image upload failure fails the post without tweeting", async () => {

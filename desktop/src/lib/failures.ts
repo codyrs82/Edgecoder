@@ -34,6 +34,12 @@ export const FAILURE_LINE: Record<FailureKind, string> = {
   other: "Couldn't run",
 };
 
+/** The error's own words for the compact line: the cSats prefix dropped, long errors cut to 200 characters. */
+export function failureDetail(error: string): string {
+  const e = error.replace(/^Not enough cSats:\s*/i, "").trim();
+  return e.length > 200 ? `${e.slice(0, 199)}…` : e;
+}
+
 /**
  * A reply split from the model error at its end ("Error contacting model: …" from the agent loop,
  * "Error: …" from chat). `error` is undefined when the reply didn't fail.
