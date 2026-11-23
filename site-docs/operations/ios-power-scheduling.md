@@ -156,22 +156,16 @@ npm run build:ble-proxy
 curl http://127.0.0.1:11435/status
 ```
 
-### IDE task tracking (iOS app)
+### iOS app: no IDE tab
 
-When the phone is in **Bluetooth Local** mode and a Mac IDE submits a task, it appears in the **IDE** tab of the iOS app in real-time:
-
-- **Running** — spinner while inference runs on the phone
-- **Success** — green check, output viewable in detail sheet
-- **Failed** — red cross with error
-
-The IDE tab badge shows the count of in-progress tasks. Tapping any entry opens a full detail view with prompt, generated output, duration, and timestamp.
+Earlier builds had an **IDE** tab that listed tasks a Mac sent to the phone in **Bluetooth Local** mode. It was removed in build 34 (#429) because the Swarm "Bluetooth Local" setting it depended on no longer exists, and nothing in the current app starts the phone's BLE peripheral. Its place in the tab bar is now **Machines**, which lists your account's machines (name, online or last seen, active model, bot count) from `GET /portal/api/machines`. See the [iOS app guide](/guide/ios-app).
 
 ## Operator practices
 
 - Keep iOS fleet policy conservative by default (low battery threshold, `runOnlyWhileCharging` for intensive models).
 - Track assignment drop reasons to understand power-policy impact.
 - Use separate worker pools for mobile vs desktop if reliability goals diverge.
-- Bluetooth Local mode is unrewarded — communicate this clearly to users.
+- Bluetooth Local mode is unrewarded — communicate this clearly to users. The current iOS app does not offer it (see above).
 - The `edgecoder-ble-proxy` binary requires Bluetooth access via System Settings → Privacy & Security → Bluetooth on the Mac.
 
 ## Cross-links

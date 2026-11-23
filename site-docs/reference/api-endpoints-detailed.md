@@ -3,6 +3,10 @@
 This page provides a practical endpoint-level index grouped by service.
 Authentication and payload specifics should be validated against runtime code and source docs.
 
+It covers the public and user-facing routes. The services have many more internal routes
+(portal-to-coordinator `/internal/*`, admin `/admin/*` and `/portal/api/admin/*`, agent control,
+order book and ledger plumbing); those are omitted here.
+
 ## Coordinator (mesh-auth required)
 
 | Method | Path | Purpose |
@@ -47,6 +51,13 @@ Authentication and payload specifics should be validated against runtime code an
 | GET | `/mesh/capabilities` | federated capability summaries |
 | POST | `/credits/ble-sync` | sync offline BLE credit transactions |
 
+## Coordinator (public or account-authenticated)
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/economy/reserves` | proof of reserves: aggregate liabilities, node balances and the latest anchor. No auth; rate-limited per client IP; cached (`RESERVES_CACHE_MS`, default 60 s) |
+| POST | `/v1/tools/web/status`, `/v1/tools/web/search`, `/v1/tools/web/read` | the web tool for a signed agent or the portal (service token naming the account); billed per call |
+
 ## Control Plane
 
 | Method | Path | Purpose |
@@ -79,10 +90,108 @@ Authentication and payload specifics should be validated against runtime code an
 | POST | `/auth/passkey/login/verify` | passkey login verify |
 | POST | `/nodes/enroll` | enroll new node |
 | GET | `/dashboard/summary` | account dashboard summary |
-| GET | `/portal/coordinator-ops` | coordinator operations dashboard |
+| GET | `/portal/coordinator-ops` | legacy URL: redirects (302) to `/portal/settings/admin`, keeping the query string |
 | GET | `/wallet/payout-destination` | where payouts go (the user's own Lightning address) |
 | PUT | `/wallet/payout-destination` | set it; changing it needs an emailed code |
 | GET | `/wallet/onboarding` | deprecated status for old clients (no wallet is created) |
+| GET | `/wallet/payouts` | the account's payouts and what is withdrawable |
+| POST | `/wallet/payouts/withdraw` | withdraw earnings to a BOLT11 invoice; confirmed with an emailed code (and the second factor when 2FA is on) |
+| GET | `/me` | the signed-in user |
+| GET / PUT | `/me/chat-sharing` | the "Share my chats to help improve EdgeCoder" consent: `{ shareChatForImprovement, updatedAtMs }`; PUT `{ shareChatForImprovement: boolean }`. Off by default |
+| GET | `/portal/api/wallet/overview` | balance, prices and the wallet page's data |
+| POST | `/portal/api/wallet/topup` | create a Lightning invoice to buy cSats |
+| GET | `/portal/api/wallet/topup/:intentId` | an invoice's state |
+| GET | `/portal/api/keys` | list API keys (`eck_…`, prefix only) |
+| POST | `/portal/api/keys` | create an API key (shown once; needs the second factor when 2FA is on) |
+| DELETE | `/portal/api/keys/:keyId` | revoke an API key |
+| GET | `/portal/api/machines` | the account's machines: state, model, audit |
+| POST | `/portal/api/machines/:agentId/commands` | a model command for one of the account's machines ([Changing models from the portal](/guide/remote-model-control)) |
+| POST | `/host/request` | public "Request to host" form (JSON or form post; honeypot and rate limits) |
+| GET | `/portal/api/host/status` | `{ required, approved }`: whether the signed-in account is an approved host |
+| GET | `/reserves`, `/reserves.json` | public proof of reserves page and its JSON |
+
+Old top-level pages redirect into Settings: `/portal/wallet` → `/portal/settings/plan`,
+`/portal/market` → `/portal/settings/compute`, `/portal/download` → `/portal/settings/install`,
+`/portal/nodes` → `/portal/settings/nodes`, `/portal/coordinator-ops` → `/portal/settings/admin`
+(`LEGACY_SETTINGS_REDIRECTS` in `src/portal/pages/settings-shell.ts`).
+
+### Web chat
+
+Session cookie auth. Source: `src/portal/routes/chat.ts`, `src/portal/routes/conversations.ts`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/portal/chat` | the web chat page |
+| GET | `/portal/api/models` | models the chat can use |
+| GET | `/portal/api/conversations` | the user's conversations |
+| POST | `/portal/api/conversations` | create one (`{ title? }`) → `{ conversationId }` |
+| GET | `/portal/api/conversations/:id/messages` | a conversation's messages |
+| PATCH | `/portal/api/conversations/:id` | rename (`{ title }`) |
+| DELETE | `/portal/api/conversations/:id` | delete a conversation and its messages |
+| POST | `/portal/api/chat` | send a message and stream the reply (SSE). Body: `{ conversationId, message, model?, compute?, resend?, web? }`. `compute` is `{target: "auto"}`, `{target: "network", model, computeClass?}`, `{target: "mine", model}` or `{target: "reserved", model, reservationId}`; omitted, EdgeCoder's default chat model answers. Messages up to 32,000 characters |
+| GET | `/portal/api/web/status` | whether the web tool is available for this chat's compute, and why not (`not_configured`, `no_tools`, `needs_csats`, `rate_limited`, …) |
+
+Messages and titles are encrypted at rest; see [Web chat privacy](/security/trust-and-security#web-chat-privacy).
+
+### Bots
+
+Session cookie auth. Cloud bots use `agentId: "cloud"`. Source: `src/portal/routes/bots.ts`, `src/portal/routes/cloud-bots.ts`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/portal/bots` | the bots page |
+| GET | `/portal/api/bots` | every bot of the account (cloud and desktop, `runtime: "cloud" \| "desktop"`) and where new ones can run (`targets`) |
+| POST | `/portal/api/bots/new` | create a bot: `{ requestId, agentId, bot }`; `agentId: "cloud"` creates a cloud bot at once |
+| DELETE | `/portal/api/bots/pending/:requestId` | cancel a pending create on a machine |
+| GET | `/portal/api/bots/cloud/:botId` | a cloud bot's detail and latest messages |
+| POST | `/portal/api/bots/cloud/:botId/commands` | `{ action, args }`: `message`, `pause`, `resume`, `check_now`, `stop`, `update_settings`, `delete`, `messages`, `history`, `memory` |
+| GET | `/portal/api/bots/cloud/commands/:commandId` | a cloud command's state |
+| GET | `/portal/api/bots/:agentId/:botId` | a desktop bot's detail (relayed from its machine) |
+| POST | `/portal/api/bots/:agentId/:botId/commands` | a command for a desktop bot |
+| GET | `/portal/api/bots/:agentId/commands/:commandId` | a desktop command's state |
+
+### Code from your phone
+
+Session cookie auth. The portal checks the machine is one of the user's enrolled nodes; each coordinator checks verified ownership again. Source: `src/portal/routes/code.ts`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/portal/api/code/machines` | the account's machines with their trusted projects and sessions |
+| POST | `/portal/api/code/:agentId/commands` | `{ action, ...args }` for one machine → `202 { commandId }` |
+| GET | `/portal/api/code/commands/:commandId` | `{ status: pending \| done \| failed \| expired, result?, error? }` |
+
+### Compute and reservations
+
+Session cookie auth. Source: `src/portal/routes/compute.ts`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/portal/api/compute/summary` | cSats balance and recent activity |
+| GET | `/portal/api/compute/options` | where a web chat can run: network models and classes, your own machines, your reservations |
+| GET | `/portal/api/compute/reservations` | the account's reservations |
+| POST | `/portal/api/compute/reservations` | reserve a machine (paid up front from cSats) |
+| POST | `/portal/api/compute/reservations/cancel` | end a reservation early (unused time is refunded) |
+
+## Hosted API (`https://edgecoder.io`)
+
+`Authorization: Bearer eck_…` (or `x-api-key`), an API key from **Settings → Connect your tools**. Requests are billed to the key's account in cSats. Source: `src/portal/routes/hosted.ts`, `src/inference-api/routes.ts`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/v1/models` | models available (OpenAI format) |
+| POST | `/v1/chat/completions` | OpenAI chat, streamed or not |
+| POST | `/v1/messages` | Anthropic Messages, streamed or not |
+| POST | `/v1/messages/count_tokens` | Anthropic token count |
+| GET | `/v1/account` | balance and recent usage |
+| GET | `/v1/account/usage` | usage records (`?days=N`) |
+| POST | `/v1/account/topup` | a Lightning invoice to buy cSats |
+| GET | `/v1/account/topup/:intentId` | an invoice's state |
+| GET | `/v1/account/reservations` | list reservations |
+| POST | `/v1/account/reservations` | create one |
+| POST | `/v1/account/reservations/cancel` | cancel one |
+| POST | `/v1/tools/web/status`, `/v1/tools/web/search`, `/v1/tools/web/read` | the web tool, billed per call |
+
+Model names: `auto`, `network/<model>[@cpu|apple|gpu|gpu.dc]` (or a bare model), `mine/<model>`, `reserved/<reservation>/<model>`.
 
 ## Inference Service
 
@@ -131,10 +240,20 @@ Returns an array of models currently available across the mesh, assembled from c
 
 ## IDE Provider
 
+Local to the desktop app (`127.0.0.1:4304`), IDE token required, loopback only.
+
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/models` | model discovery for IDE integration |
 | GET | `/model/pull/progress` | active model download progress |
+| GET | `/v1/models` | OpenAI model list |
+| POST | `/v1/chat/completions` | OpenAI chat |
+| GET / POST | `/v1/ide/sessions` | list or create shared coding sessions (the Code view and `edgecoder code`) |
+| GET | `/v1/ide/sessions/:id`, `/v1/ide/sessions/:id/events` | a session's snapshot and its event stream (SSE) |
+| POST | `/v1/ide/sessions/:id/{messages,unqueue,approve,settings,publish,trust,cancel,undo,clear,delete}` | writes from any attached client |
+| GET / POST | `/v1/ide/bots` | desktop bots |
+| GET | `/v1/ide/code/remote/snapshot` | Code from your phone: trusted projects and sessions for the account signed in on this machine |
+| POST | `/v1/ide/code/remote/command` | Code from your phone: one command (`create`, `message`, `approve`, `cancel`, `undo`, `plan`, `settings`, `unqueue`, or a read such as `snapshot`) |
 
 ## Coordinator (public, no auth)
 

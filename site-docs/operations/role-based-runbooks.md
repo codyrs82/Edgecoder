@@ -53,40 +53,48 @@ This page gives concrete responsibilities and recurring actions by role.
 
 ## Node Contributor Runbook
 
-## Initial setup — macOS
+## Initial setup — Mac and Windows (desktop app)
 
-1. Download `EdgeCoder-{version}-macos-installer.pkg` from [portal Downloads](https://portal.edgecoder.io/portal/download) or [GitHub Releases](https://github.com/codyrs82/Edgecoder/releases).
-2. Install: double-click the `.pkg` or `sudo installer -pkg EdgeCoder-*.pkg -target /`.
-3. Enroll node in portal → Nodes → copy registration token.
-4. Edit `/etc/edgecoder/edgecoder.env` — set `EDGE_RUNTIME_MODE=worker`, `AGENT_ID`, `AGENT_REGISTRATION_TOKEN`.
-5. Restart: `sudo launchctl kickstart -k system/io.edgecoder.runtime`
-6. Confirm node appears in Nodes → approve it.
+1. Download the desktop app (version 1.4.53 at the time of writing; the links always point at the newest release):
+   - Mac (Apple silicon): [`EdgeCoder_aarch64.dmg`](https://github.com/codyrs82/Edgecoder/releases/latest/download/EdgeCoder_aarch64.dmg)
+   - Windows (x64): [`EdgeCoder_x64-setup.exe`](https://github.com/codyrs82/Edgecoder/releases/latest/download/EdgeCoder_x64-setup.exe)
 
-## Initial setup — Linux (Debian/Ubuntu)
+   The same links are on edgecoder.io under **Settings → Install agent**.
+2. Mac: open the `.dmg` and drag EdgeCoder to Applications. Windows: run the setup program and allow admin access if asked.
+3. Open EdgeCoder and sign in with your EdgeCoder account. The app bundles the agent and Ollama, so there is nothing else to install and no env file to edit: signing in links this computer to your account.
+4. Confirm it shows up on edgecoder.io under **Settings → Nodes**.
 
-1. Install Node.js 22+ from https://nodejs.org/en/download (verify the archive against its published SHASUMS256.txt).
-2. Download and install `.deb`: `sudo dpkg -i EdgeCoder-{version}-linux-amd64.deb`
-3. Enroll node in portal → Nodes → copy registration token.
-4. Edit `/etc/edgecoder/edgecoder.env` — set `EDGE_RUNTIME_MODE=worker`, `AGENT_ID`, `AGENT_REGISTRATION_TOKEN`.
-5. Restart: `sudo systemctl restart edgecoder`
-6. Confirm node appears in Nodes → approve it.
+Details: [Install the desktop app](/guide/install-desktop).
+
+## Initial setup — Linux and GPU servers
+
+1. On edgecoder.io create an install key (**Settings → Getting started → Add your other machines → Create install key**, or an `eck_` API key under **Settings → Connect your tools**).
+2. On the server run the installer with the key:
+
+   ```bash
+   curl -fsSLo install.sh https://edgecoder.io/install.sh && sudo EDGECODER_API_KEY=YOUR_INSTALL_KEY bash install.sh --pull-models
+   ```
+
+   It verifies a signed agent release, installs Node.js, Ollama and Docker, sets up one agent per GPU (or one for the CPU) as `systemd` services, enrols each one with your account, and leaves the `edgecoder-install` command on the PATH.
+3. Check it with `sudo edgecoder-install status`, then confirm the agents under **Settings → Nodes**.
+4. Revoke the install key once the machines are online; each machine keeps its own credential.
+
+Step by step: [Run EdgeCoder on a cloud GPU or Linux server](/guide/cloud-gpu-server).
 
 ## Initial setup — iOS
 
-1. Install EdgeCoder from App Store (or TestFlight for beta).
-2. Sign in with EdgeCoder account.
-3. Go to Swarm tab → set Coordinator URL.
-4. Enroll device in portal → Nodes → copy registration token.
-5. Paste token in Swarm tab → tap **On** to start contributing.
-6. Optionally tap **Bluetooth Local** to serve nearby Mac nodes without internet.
+1. Install EdgeCoder from the App Store.
+2. Sign in with your EdgeCoder account. The app enrolls the device with your account by itself after sign-in; there is no coordinator URL or token to paste.
+3. The tabs are **Chat**, **Bots**, **Wallet**, **Machines** and **Network**. See the [iOS app guide](/guide/ios-app).
+
+Your own machines run your own work for free. Running other people's work needs host approval: see [Hosting](/guide/hosting).
 
 ## Ongoing
 
-- Keep runtime updated (re-run installer for new releases; iOS auto-updates from App Store).
+- Desktop app: it updates itself. Linux hosts installed with `install.sh` check for a new signed release every 6 hours (`sudo edgecoder-install update` updates now). iOS updates from the App Store.
 - Monitor local resource usage and scheduling constraints.
-- Rotate `AGENT_REGISTRATION_TOKEN` when required by policy.
-- View logs: `tail -f /var/log/edgecoder/runtime.log` (macOS) or `journalctl -u edgecoder -f` (Linux).
-- Service status: `launchctl print system/io.edgecoder.runtime` (macOS) or `systemctl status edgecoder` (Linux).
+- Linux logs: `journalctl -u edgecoder-agent-0 -f` (agent), `journalctl -u edgecoder-ollama-0 -f` (Ollama). Status: `sudo edgecoder-install status`.
+- Revoke install keys you no longer need (Settings → Connect your tools).
 
 ## Application User Runbook
 
