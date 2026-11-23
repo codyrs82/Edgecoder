@@ -202,3 +202,46 @@ describe("BotForm: Search the web (docs/web-tool.md)", () => {
     expect(screen.getByRole("switch", { name: "Search the web" }).getAttribute("aria-checked")).toBe("false");
   });
 });
+
+describe("BotForm: lead with your frontier key", () => {
+  const LEAD = "frontier/anthropic/claude-opus-5-5";
+
+  it("is hidden when your account has no key here", async () => {
+    api.getFrontierStatus.mockResolvedValue({ models: [] });
+    open(harry());
+    await Promise.resolve();
+    expect(screen.queryByTestId("bot-frontier")).toBeNull();
+  });
+
+  it("turns on with the default caps and sends the lead with the change", async () => {
+    api.getFrontierStatus.mockResolvedValue({ models: [LEAD] });
+    const onSaved = open(harry());
+    api.updateBot.mockImplementation(async (_id: string, patch: Partial<Bot>) => harry(patch));
+    const sw = await screen.findByRole("switch", { name: "Lead with your frontier key" });
+    expect(screen.getByText(/Lead with Claude Opus 5.5 \(your key\)/)).toBeTruthy();
+    await fireEvent.click(sw);
+    expect((screen.getByLabelText("Frontier cap per run (USD)") as HTMLInputElement).value).toBe("2");
+    expect((screen.getByLabelText("Frontier cap per day (USD)") as HTMLInputElement).value).toBe("5");
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(api.updateBot.mock.calls[0][1]).toMatchObject({ frontierLead: LEAD, frontierRunCapUsd: 2, frontierDailyCapUsd: 5 });
+  });
+
+  it("can't be turned on while the bot has GitHub triggers, and says why", async () => {
+    api.getFrontierStatus.mockResolvedValue({ models: [LEAD] });
+    open(harry({ repository: "o/r", triggers: [{ id: "trg_1", kind: "pr", enabled: false }] }));
+    const sw = await screen.findByRole("switch", { name: "Lead with your frontier key" });
+    expect((sw as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/Off while it has GitHub triggers/)).toBeTruthy();
+  });
+
+  it("turning it off sends null", async () => {
+    api.getFrontierStatus.mockResolvedValue({ models: [LEAD] });
+    const onSaved = open(harry({ frontierLead: LEAD, ownerAccount: "acct-me" }));
+    api.updateBot.mockImplementation(async (_id: string, patch: Partial<Bot>) => harry(patch));
+    await fireEvent.click(await screen.findByRole("switch", { name: "Lead with your frontier key" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(api.updateBot.mock.calls[0][1].frontierLead).toBeNull();
+  });
+});

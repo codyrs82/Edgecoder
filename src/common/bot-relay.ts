@@ -22,7 +22,9 @@
  *
  * No new privileges: a remote settings change cannot touch the bot's folder, repository, tools or
  * auto-approval (change those on the Mac), and approvals answer only calls the bot itself asked
- * about. A bot made from the web ("create", #409) arrives without a folder and with the default
+ * about. A bot's frontier lead (its owner's own key) is turned on only at the Mac; the web shows
+ * whether it is on and what it spent today, and its owner may answer the bot's "Use Claude for this
+ * run?" (approve_frontier / decline_frontier). A bot made from the web ("create", #409) arrives without a folder and with the default
  * tools on Accept edits; someone at the Mac picks its folder (and confirms Auto, if the web asked)
  * before it runs. Its id is webBotId(account, request id), so a retried create makes one bot. AGENT_BOT_RELAY=view (or AGENT_REMOTE_CONTROL=off) makes the web read-only; off publishes
  * nothing.
@@ -132,6 +134,12 @@ export interface RemoteBotSummary {
   held?: string;
   lastRun?: RemoteBotRun;
   pending: RemotePendingCall[];
+  /**
+   * Its owner's frontier key, read-only (it is turned on only in the app on the Mac): on or off,
+   * the model's short name ("Claude") and the estimated USD spent today. A pending item with tool
+   * "use_frontier" is the bot asking to use it (approve_frontier / decline_frontier).
+   */
+  frontier?: { on: boolean; name?: string; spentTodayUsd: number };
   queuedMessages: number;
   idleStreak?: number;
   /** The conversation's latest messages (capped); `messageCount` says how many there are. */
@@ -222,7 +230,7 @@ export function fitSnapshot(s: BotsSnapshot, maxBytes = MAX_SNAPSHOT_BYTES): Bot
 
 // ---- Commands ----
 
-export const BOT_CONTROL_ACTIONS = ["message", "pause", "resume", "check_now", "stop", "update_settings", "approve", "messages", "history", "memory", "create"] as const;
+export const BOT_CONTROL_ACTIONS = ["message", "pause", "resume", "check_now", "stop", "update_settings", "approve", "messages", "history", "memory", "create", "approve_frontier", "decline_frontier"] as const;
 export type BotControlAction = (typeof BOT_CONTROL_ACTIONS)[number];
 /** Actions that only read (their own, larger rate limit; allowed in view-only mode). */
 export const BOT_READ_ACTIONS: ReadonlySet<BotControlAction> = new Set(["messages", "history", "memory"]);
@@ -271,7 +279,11 @@ export type RemoteBotSettings = z.infer<typeof remoteBotSettingsSchema>;
 /** A client request id: the web makes one per "Create bot", and every retry sends the same one. */
 export const botRequestIdSchema = z.string().min(8).max(64).regex(/^[A-Za-z0-9-]+$/);
 
-/** A model id that would use a frontier key (bots never do, wherever they were made). */
+/**
+ * A model id that would use a frontier key. A bot's compute never is one, wherever it was made: a
+ * desktop bot uses its owner's key only through its frontier lead switch, which only the app on
+ * the Mac can turn on (docs/frontier-keys.md).
+ */
 export function isFrontierModel(id: string | undefined): boolean {
   return !!id && /^\s*frontier\//i.test(id);
 }
@@ -296,7 +308,7 @@ export const remoteBotCreateSchema = z
     compute: z
       .object({ policy: enumLike, model: z.string().trim().min(1).max(300).optional(), computeClass: z.string().trim().min(1).max(20).regex(/^[a-z.]+$/).optional() })
       .strict()
-      .refine((c) => !isFrontierModel(c.model), "bots never use a frontier key")
+      .refine((c) => !isFrontierModel(c.model), "a bot's compute can't be a frontier model (turn on its frontier lead in the app on the Mac)")
       .optional(),
     mode: z.enum(["ask", "auto-edits", "plan", "auto"]).default("auto-edits"),
     repository: z.string().trim().max(500).optional(),
@@ -334,6 +346,9 @@ export const botControlRequestSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("stop"), args: none }),
   z.object({ action: z.literal("update_settings"), args: remoteBotSettingsSchema }),
   z.object({ action: z.literal("approve"), args: z.object({ callId: z.string().min(1).max(100), approved: z.boolean() }).strict() }),
+  // The bot's ask to use its owner's frontier key: this run, or every run until midnight; or no.
+  z.object({ action: z.literal("approve_frontier"), args: z.object({ callId: z.string().min(1).max(100), scope: z.enum(["run", "day"]).default("run") }).strict() }),
+  z.object({ action: z.literal("decline_frontier"), args: z.object({ callId: z.string().min(1).max(100) }).strict() }),
   z.object({
     action: z.literal("messages"),
     args: z.object({ beforeMs: z.number().int().nonnegative().optional(), beforeId: z.string().min(1).max(200).optional(), limit: z.number().int().min(1).max(MAX_PAGE_MESSAGES).default(20) }).strict().default({ limit: 20 })

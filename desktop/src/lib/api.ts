@@ -2085,6 +2085,8 @@ export const setupBotFolder = (id: string, body: { choice: "default"; allowAuto?
   fsCall<{ bot: Bot }>("POST", botPath(id, "/folder"), body).then((r) => r.bot);
 export const syncBotRepository = (id: string) => fsCall<{ bot: Bot }>("POST", botPath(id, "/repository/sync"), {}).then((r) => r.bot);
 export const approveBotCall = (id: string, callId: string, approved: boolean, always = false) => fsCall<{ ok: boolean; bot: Bot }>("POST", botPath(id, "/approve"), { callId, approved, ...(always ? { always: true } : {}) });
+/** Your answer to a bot's "Use Claude for this run?": this run, every run today, or no. */
+export const answerBotFrontier = (id: string, callId: string, choice: "run" | "day" | "decline") => fsCall<{ ok: boolean; bot: Bot }>("POST", botPath(id, "/frontier"), { callId, choice });
 /** The server's message for a failed bot call (its `error` field). */
 /**
  * The server's message for a failed bot call: its own text for a 4xx or 5xx (serviceErrorText),

@@ -24,6 +24,8 @@ interface UsageFile {
   sessions: Record<string, { usd: number; at: number }>;
   /** Totals by model (`<provider>/<model>`). */
   models: Record<string, { usd: number; inputTokens: number; outputTokens: number; calls: number }>;
+  /** Local date + session key ("2026-11-23 bot:bot_ab12") -> USD: a bot's spend today, for its daily cap. */
+  sessionDays: Record<string, number>;
 }
 
 export interface Caps {
@@ -51,9 +53,9 @@ export class FrontierSpend {
   private read(): UsageFile {
     try {
       const d = JSON.parse(readFileSync(this.file, "utf8")) as Partial<UsageFile>;
-      return { days: d.days ?? {}, sessions: d.sessions ?? {}, models: d.models ?? {} };
+      return { days: d.days ?? {}, sessions: d.sessions ?? {}, models: d.models ?? {}, sessionDays: d.sessionDays ?? {} };
     } catch {
-      return { days: {}, sessions: {}, models: {} };
+      return { days: {}, sessions: {}, models: {}, sessionDays: {} };
     }
   }
 
@@ -61,6 +63,9 @@ export class FrontierSpend {
     // Keep 90 days and the sessions used in the last 30.
     const cutDay = localDay(new Date(this.now().getTime() - 90 * 86_400_000));
     for (const k of Object.keys(d.days)) if (k < cutDay) delete d.days[k];
+    // A session's per-day spend is only asked for today: keep a week.
+    const cutKeyDay = localDay(new Date(this.now().getTime() - 7 * 86_400_000));
+    for (const k of Object.keys(d.sessionDays)) if (k.slice(0, 10) < cutKeyDay) delete d.sessionDays[k];
     const cutAt = this.now().getTime() - 30 * 86_400_000;
     for (const [k, v] of Object.entries(d.sessions)) if (v.at < cutAt) delete d.sessions[k];
     mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 });
@@ -77,6 +82,11 @@ export class FrontierSpend {
   totals(sessionKey?: string): { sessionUsd: number; dayUsd: number } {
     const d = this.read();
     return { sessionUsd: sessionKey ? d.sessions[sessionKey]?.usd ?? 0 : 0, dayUsd: d.days[localDay(this.now())] ?? 0 };
+  }
+
+  /** What one session key (a bot: "bot:<id>") spent today (local date). */
+  todayFor(sessionKey: string): number {
+    return this.read().sessionDays[`${localDay(this.now())} ${sessionKey}`] ?? 0;
   }
 
   /** Before a call: stop at 100% of either cap, warn (once per session and threshold) at 80%. */
@@ -110,6 +120,8 @@ export class FrontierSpend {
     const add = (n: number | undefined) => Math.round(((n ?? 0) + usd) * 1e6) / 1e6;
     d.days[day] = add(d.days[day]);
     d.sessions[sessionKey] = { usd: add(d.sessions[sessionKey]?.usd), at: this.now().getTime() };
+    const dayKey = `${day} ${sessionKey}`;
+    d.sessionDays[dayKey] = add(d.sessionDays[dayKey]);
     const m = d.models[model] ?? { usd: 0, inputTokens: 0, outputTokens: 0, calls: 0 };
     d.models[model] = { usd: add(m.usd), inputTokens: m.inputTokens + tokens.inputTokens, outputTokens: m.outputTokens + tokens.outputTokens, calls: m.calls + 1 };
     this.write(d);
