@@ -5,7 +5,7 @@ import { registerPortalPages } from "../../src/portal/pages/index.js";
 // #16: the HTML pages moved out of server.ts must still be served, unchanged, on the same paths.
 // Each page is pinned by its <title> so a later slice can't swap or empty one unnoticed.
 const PAGES: Record<string, string> = {
-  "/": "EdgeCoder | Private AI Coding on Your Infrastructure",
+  "/": "EdgeCoder | AI Coding on Your Machines, Paid in Bitcoin",
   "/privacy": "Privacy Policy | EdgeCoder",
   "/terms": "Terms of Service | EdgeCoder",
   "/portal": "EdgeCoder Portal | Sign in",

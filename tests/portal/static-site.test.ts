@@ -7,7 +7,7 @@ import { exportStaticSite, staticSiteFiles } from "../../src/portal/static-site.
 describe("static mirror of the public pages", () => {
   it("renders the three public pages and redirects dynamic paths to the portal", () => {
     const files = staticSiteFiles({ portalUrl: "https://edgecoder.io/" });
-    expect(files["index.html"]).toContain("<title>EdgeCoder | Private AI Coding on Your Infrastructure</title>");
+    expect(files["index.html"]).toContain("<title>EdgeCoder | AI Coding on Your Machines, Paid in Bitcoin</title>");
     expect(files["privacy/index.html"]).toContain("Privacy Policy");
     expect(files["terms/index.html"]).toContain("Terms");
     expect(files._redirects).toContain("/portal https://edgecoder.io/portal 302");

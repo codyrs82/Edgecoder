@@ -64,10 +64,10 @@ describe("technical SEO", () => {
 
   it("adds canonical, Open Graph, Twitter and JSON-LD tags without changing the title", () => {
     const html = marketingHomeHtml(undefined, "https://edgecoder.io");
-    expect(html).toContain("<title>EdgeCoder | Private AI Coding on Your Infrastructure</title>");
+    expect(html).toContain("<title>EdgeCoder | AI Coding on Your Machines, Paid in Bitcoin</title>");
     expect(html).toContain('<link rel="canonical" href="https://edgecoder.io/" />');
     expect(html).toContain('<meta property="og:url" content="https://edgecoder.io/" />');
-    expect(html).toContain('<meta property="og:title" content="EdgeCoder | Private AI Coding on Your Infrastructure" />');
+    expect(html).toContain('<meta property="og:title" content="EdgeCoder | AI Coding on Your Machines, Paid in Bitcoin" />');
     expect(html).toContain('<meta name="twitter:card" content="summary" />');
     const ld = html.match(/<script type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/);
     expect(ld).not.toBeNull();
