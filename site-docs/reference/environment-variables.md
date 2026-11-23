@@ -636,6 +636,7 @@ What is watched: the portal watches every coordinator's `/health/runtime`, netwo
 | `ALERT_WEBHOOK_FORMAT` | `auto` | `slack` (`{ text }`), `ntfy` (plain body; `Title`, `Priority`, `Tags`, `Click` headers; reminders and resolutions at low priority), `json` (`text`, `content` and the structured alert), or `auto`: `slack` for hooks.slack.com, `ntfy` for ntfy.sh or an `ntfy.` host, else `json`. |
 | `ALERT_CHECK_INTERVAL_MS` | `30000` | How often each check runs (5000 to 3600000). The ordering-chain check runs every 10 minutes. |
 | `ALERT_HEALTH_FAILURES` | `3` | Failed checks in a row before a service (coordinator, portal, Lightning node, database) counts as down: 3 x 30 s by default. |
+| `ALERT_HEALTH_MIN_DOWN_MS` | `180000` | A down service alerts only once it has also been failing this long, so a deploy restart does not alert. |
 | `ALERT_RATE_LIMIT_MINUTES` | `15` | At most one notification per alert key in this time. |
 | `ALERT_RENOTIFY_MINUTES` | `240` | Reminder interval while an alert stays active and unacknowledged; `0` = never. |
 | `ALERT_PORTAL_HEALTH_URL` | `PORTAL_PUBLIC_URL` + `/health` | Coordinator: the portal health URL it watches. |
@@ -747,6 +748,7 @@ The schemas are collected in `src/config/index.ts`. `tests/common/env-docs.test.
 | `STATS_ANCHOR_INTERVAL_MS` | integer ≥ 1 | `600000` |
 | `AGENT_RATE_LIMIT_MAX` | integer ≥ 0 | `300` |
 | `AGENT_RATE_LIMIT_WINDOW_MS` | integer ≥ 1 | `60000` |
+| `AGENT_CHUNK_RATE_LIMIT_MAX` | integer ≥ 0 | `3000` |
 | `INFERENCE_CLAIM_TIMEOUT_MS` | integer ms, 1000 to 600000 (a network inference call no agent claimed by then is cancelled, refunded in full and answered `503 no_capacity` with `Retry-After`) | `45000` |
 | `INFERENCE_DEFAULT_MAX_TOKENS` | integer tokens, 16 to 32768 (output cap for a network model call that sets no `maxTokens`; an agent is never paid for output past a call's cap) | `4096` |
 | `RESTRICTED_MODELS_JSON` | JSON object of model tag to tier, `{"<tag>": "security_research"}`; the operator's list of restricted models (listed and served only to entitled accounts, only on their own or leased machines). An unreadable value stops the coordinator | unset (no restricted models) |

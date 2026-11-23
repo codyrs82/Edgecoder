@@ -35,6 +35,7 @@ import {
   identity,
   SECURITY_MAX_SKEW_MS,
   agentRateLimiter,
+  agentChunkRateLimiter,
   nonceStore,
   SECURITY_NONCE_TTL_MS,
   CC
@@ -307,11 +308,15 @@ export async function verifyAgentRequest(
   //    Over the limit is not an authentication failure: the request is refused with 429 and
   //    Retry-After (AgentRateLimitedError, answered by the coordinator's error handler) and is
   //    not recorded as a protocol violation, so it feeds no behaviour rule.
-  if (!isLoopback && !agentRateLimiter.check(agentId)) {
-    const retryAfterMs = agentRateLimiter.retryAfterMs(agentId);
+  //    Streamed reply pieces count against their own, larger budget, and a proven agent over its
+  //    budget is logged as agent_rate_limited (INFO): auth_rate_limit_hit, which alerts, stays for
+  //    addresses turned away before any signature checked out (step 2).
+  const limiter = routePath === "/inference/chunks" ? agentChunkRateLimiter : agentRateLimiter;
+  if (!isLoopback && !limiter.check(agentId)) {
+    const retryAfterMs = limiter.retryAfterMs(agentId);
     securityLog.log({
-      level: securityLog.severity("auth_rate_limit_hit"),
-      event: "auth_rate_limit_hit",
+      level: securityLog.severity("agent_rate_limited"),
+      event: "agent_rate_limited",
       source: { type: "agent", id: agentId, ip: clientIp },
       details: { route: routePath, retryAfterMs },
       action: "reject_request",

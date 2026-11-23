@@ -6,6 +6,7 @@ export type SecurityLevel = "INFO" | "WARN" | "HIGH" | "CRITICAL";
 export type SecurityEventType =
   | "failed_auth"
   | "auth_rate_limit_hit"
+  | "agent_rate_limited"
   | "replay_attempt"
   | "invalid_signature"
   | "manifest_signature_failure"
@@ -62,6 +63,8 @@ export interface SecurityEvent {
 const SEVERITY_MAP: Record<SecurityEventType, SecurityLevel> = {
   failed_auth: "WARN",
   auth_rate_limit_hit: "HIGH",
+  // A proven agent over its own request budget: throttled with 429, not an attack signal.
+  agent_rate_limited: "INFO",
   replay_attempt: "HIGH",
   invalid_signature: "HIGH",
   manifest_signature_failure: "CRITICAL",

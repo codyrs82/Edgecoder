@@ -136,8 +136,8 @@ export function coordinatorMonitors(): Monitor[] {
   const c = alertConfig;
   const portalHealth = c.portalHealthUrl ?? `${CC.PORTAL_PUBLIC_URL.replace(/\/+$/, "")}/health`;
   const monitors: Monitor[] = [
-    healthWatchMonitor({ name: "peer_health", what: "coordinator", targets: peerTargets, failures: c.healthFailures, observer: `coordinator ${label}` }),
-    healthWatchMonitor({ name: "portal_health", what: "portal", targets: async () => [{ url: portalHealth, label: host(CC.PORTAL_PUBLIC_URL) }], failures: c.healthFailures, observer: `coordinator ${label}` }),
+    healthWatchMonitor({ name: "peer_health", what: "coordinator", targets: peerTargets, failures: c.healthFailures, minDownMs: c.healthMinDownMs, observer: `coordinator ${label}` }),
+    healthWatchMonitor({ name: "portal_health", what: "portal", targets: async () => [{ url: portalHealth, label: host(CC.PORTAL_PUBLIC_URL) }], failures: c.healthFailures, minDownMs: c.healthMinDownMs, observer: `coordinator ${label}` }),
     payoutMonitor({ queries: payoutQueries, failuresPerHour: c.payoutFailuresPerHour, pendingMaxMs: c.payoutPendingMs }),
     purchaseMonitor({ signals: purchaseSignals, failureRate: c.purchaseFailureRate, minAttempts: c.purchaseMinAttempts, label }),
     orderingChainMonitor({ verify: () => verifyOrderingChain(ordering.snapshot(), coordinatorKeys.publicKeyPem), label }),

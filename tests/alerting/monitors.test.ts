@@ -67,6 +67,22 @@ describe("1, 2. health watches: N consecutive failures, cross-watching", () => {
     expect(d.h.kinds()).toEqual(["firing:coordinator_down:seed-eu.example", "resolved:coordinator_down:seed-eu.example"]);
   });
 
+  it("with minDownMs, a deploy restart (down about a minute) never alerts; a longer outage does", async () => {
+    let up = false;
+    const probe = async (): Promise<ProbeResult> => (up ? { ok: true } : { ok: false, error: "ENOTFOUND" });
+    const d = driver(healthWatchMonitor({ name: "peer_health", what: "coordinator", targets: async () => [{ url: "https://seed-eu.example/health/runtime", label: "seed-eu.example" }], probe, failures: 3, minDownMs: 3 * MIN, observer: "the portal" }));
+    for (let i = 0; i < 3; i++) await d.tick(); // three failures over a minute: a restart
+    expect(await d.active()).toEqual([]);
+    up = true;
+    await d.tick();
+    up = false;
+    for (let i = 0; i < 6; i++) await d.tick(); // first failure at t, sixth at t + 2.5 min
+    expect(await d.active()).toEqual([]);
+    await d.tick(); // t + 3 min
+    expect(await d.active()).toEqual(["coordinator_down:seed-eu.example"]);
+    expect(d.h.sent).toHaveLength(1);
+  });
+
   it("keeps watching a peer that dropped out of the mesh list (down peers are pruned)", async () => {
     let listed = true;
     const d = driver(healthWatchMonitor({ name: "peer_health", what: "coordinator", targets: async () => (listed ? [{ url: "https://p/health/runtime", label: "p" }] : []), probe: async () => ({ ok: false, error: "timeout" }), failures: 3, observer: "x" }));
@@ -451,6 +467,18 @@ describe("8. security events", () => {
     h.advance(7 * 60 * MIN);
     await d.tick();
     expect(await d.active()).toEqual([]);
+  });
+
+  it("a proven agent over its own request budget (agent_rate_limited) never alerts", async () => {
+    const h = harness({ sourceId: "coord-ord" });
+    const mon = new SecurityEventMonitor({ authFailuresPer10Min: 5, isOwnedHost: () => false, label: "seed-ord", now: () => h.clock.now });
+    const d = driver(mon, h);
+    for (let i = 0; i < 200; i++) mon.ingest({ event: "agent_rate_limited", source: { type: "agent", id: "gpu-1" }, details: { route: "/inference/chunks" } } as any);
+    await d.tick();
+    expect(await d.active()).toEqual([]);
+    for (let i = 0; i < 10; i++) mon.ingest({ event: "auth_rate_limit_hit", source: { type: "system", id: "unauthenticated" }, details: {} } as any);
+    await d.tick();
+    expect(await d.active()).toEqual(["security:auth_rate_limited"]);
   });
 
   it("a listener that throws never breaks the security log", () => {

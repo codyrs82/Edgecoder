@@ -731,6 +731,7 @@ Even for code tasks, generated programs can print differently between honest run
 |----------|---------|-------------|
 | `AGENT_RATE_LIMIT_MAX` | `300` | Max signed requests per agent per window (counted only once the signature verifies); over it the agent gets `429 agent_rate_limited` with `Retry-After` |
 | `AGENT_RATE_LIMIT_WINDOW_MS` | `60000` | Rate limit window |
+| `AGENT_CHUNK_RATE_LIMIT_MAX` | `3000` | Streamed reply pieces (`/inference/chunks`) per agent per window, counted apart from `AGENT_RATE_LIMIT_MAX` |
 | `INFERENCE_CLAIM_TIMEOUT_MS` | `45000` | A network inference call no agent has claimed by then is cancelled, refunded in full and answered `503 no_capacity` with `Retry-After` (keep it well under the 100 s a proxy such as Cloudflare waits for a response) |
 | `INFERENCE_DEFAULT_MAX_TOKENS` | `4096` | Output cap for a network model call that sets no `maxTokens`. An agent is never paid for output past a call's cap, so this bounds the worst case of every call |
 | `PREAUTH_FAILURE_MAX_PER_IP` | `120` | Signed requests per client address per window whose signature fails (bad signature, clock skew); past it the address is refused for the rest of the window. Such failures are never counted against the agent id the request names. Behind a reverse proxy other than Fly, set `COORDINATOR_TRUST_PROXY` so the client address is known |

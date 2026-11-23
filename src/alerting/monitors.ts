@@ -68,6 +68,8 @@ export function healthWatchMonitor(o: {
   targets: () => Promise<HealthTarget[]>;
   probe?: (url: string) => Promise<ProbeResult>;
   failures: number;
+  /** Also failing at least this long before it alerts (a deploy restart clears inside it). */
+  minDownMs?: number;
   intervalMs?: number;
   scope?: AlertScope;
   observer: string;
@@ -92,7 +94,7 @@ export function healthWatchMonitor(o: {
         [...known.values()].map(async ({ target }) => {
           const r = await probe(target.url);
           const s = runs.record(target.url, r.ok, nowMs, r.ok ? undefined : r.error);
-          if (!s.failing) return;
+          if (!s.failing || nowMs - s.sinceMs < (o.minDownMs ?? 0)) return;
           const name = o.what === "portal" ? "The portal" : `Coordinator ${target.label}`;
           out.push({
             key: `${o.what}_down:${hostOf(target.label)}`,

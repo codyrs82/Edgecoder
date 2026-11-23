@@ -59,6 +59,7 @@ export function portalMonitors(o: {
       what: "coordinator",
       targets: async () => [...new Set((await o.coordinatorUrls()).map((u) => u.replace(/\/+$/, "")))].map((u) => ({ url: `${u}/health/runtime`, label: host(u) })),
       failures: c.healthFailures,
+      minDownMs: c.healthMinDownMs,
       observer: "the portal"
     }),
     backupMonitor({ reports: o.backups, maxAgeMs: c.backupMaxAgeMs, expected: c.backupExpected, startedAtMs: o.startedAtMs })

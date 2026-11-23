@@ -84,6 +84,15 @@ describe("signed agent requests over the rate limit", () => {
     expect(activeBlacklistRecord(agent.peerId)).toBeUndefined();
   });
 
+  test("streamed reply pieces have their own budget: /inference/chunks is not refused while the general limit is spent", async () => {
+    // The general limit is still exhausted from the previous test.
+    expect((await heartbeat(agent)).statusCode).toBe(429);
+    const payload = JSON.stringify({ subtaskId: "no-such-subtask", seq: 0, delta: "hi", done: false });
+    const signed = signRequest({ method: "POST", path: "/inference/chunks", bodyHash: hashRequestBody(payload), privateKeyPem: agent.privateKeyPem, agentId: agent.peerId }) as unknown as Record<string, string>;
+    const res = await app.inject({ method: "POST", url: "/inference/chunks", remoteAddress: AGENT_IP, headers: { "content-type": "application/json", ...signed }, payload });
+    expect(res.statusCode).not.toBe(429);
+  });
+
   test("a rate-limited /register is refused with 429 and is not counted as a registration", async () => {
     // The limit is still exhausted from the previous test; a signed re-register proves the key
     // (verifyAgentRequest) and so meets the limit too.
