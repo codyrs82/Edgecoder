@@ -24,6 +24,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { FastifyInstance } from "fastify";
 import { CSP_NONCE } from "./csp-nonce.js";
+import { smartAppBannerTag } from "../common/app-store.js";
 
 /** localStorage key and values shared with the desktop app (desktop/src/lib/theme.ts). */
 export const THEME_STORAGE_KEY = "edgecoder-theme";
@@ -121,9 +122,10 @@ export function themeJsHref(): string {
   return `/assets/theme.js?v=${hash(THEME_JS)}`;
 }
 
-/** `<head>` tags every portal page includes: the tokens stylesheet, then the theme script. */
+/** `<head>` tags every portal page includes: the tokens stylesheet, the theme script and the iOS Smart App Banner. */
 export function themeHeadTags(): string {
-  return `<link rel="stylesheet" href="${tokensCssHref()}" />
+  return `${smartAppBannerTag()}
+      <link rel="stylesheet" href="${tokensCssHref()}" />
       <script src="${themeJsHref()}"></script>`;
 }
 

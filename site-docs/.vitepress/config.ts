@@ -11,6 +11,8 @@ export default withMermaid(defineConfig({
   description: "EdgeCoder documentation: run AI coding models on your own machines, use the network when you need more compute, and pay for it in sats over Lightning.",
   base,
   cleanUrls: true,
+  // Safari's Smart App Banner for EdgeCoder on iPhone and iPad (src/common/app-store.ts).
+  head: [["meta", { name: "apple-itunes-app", content: "app-id=6759273340" }]],
   // sitemap.xml for search engines (the custom domain serves the site at /).
   sitemap: { hostname: process.env.DOCS_SITEMAP_HOSTNAME ?? "https://docs.edgecoder.io/" },
   themeConfig: {
