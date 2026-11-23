@@ -147,6 +147,17 @@ What it does **not** cover:
 - It does not hide the routing metadata (task id, resource class, priority,
   language, timeout, model) that travels with the envelope.
 
+## Web chat privacy
+
+Conversations in the web chat on edgecoder.io are kept on EdgeCoder's servers so you can open them again. How they are protected:
+
+- **Encrypted at rest.** Message text and conversation titles are stored encrypted with AES-256-GCM, under a server key (`PORTAL_CHAT_KEY`) that is kept as a deployment secret, not in the database. Each value gets a fresh random IV, and each ciphertext is bound to its own row (conversation and message id) as additional data, so a ciphertext copied onto another row does not open. Implementation: `src/portal/chat-crypto.ts`.
+- **This is encryption at rest, not end-to-end encryption.** The portal decrypts your chats to show them to you and to send them on. The coordinator that routes a reply and the host machine that runs the model see the conversation in plaintext while they process it. Don't paste passwords, API keys, private keys or other secrets into a chat.
+- **You can delete a conversation** from the chat sidebar at any time; its messages are deleted with it.
+- **Sharing is opt-in and off by default.** **Settings → Profile → Privacy → Share my chats to help improve EdgeCoder** controls whether your web chats may be used to improve EdgeCoder, including to train AI models. While it is off, your chat content is not used for that. Turning it off later withdraws chats you shared before from future use (models already trained on them are not retrained). Your chats stay encrypted at rest either way. The setting is `GET /me/chat-sharing` and `PUT /me/chat-sharing { "shareChatForImprovement": true | false }` (`src/portal/routes/chat-sharing.ts`).
+
+Chats kept by the desktop app stay on your computer. See the [Privacy Policy](https://edgecoder.io/privacy) for retention and your rights, and [Web chat](/guide/web-chat) for how the chat works.
+
 ## Runtime Safety Controls
 
 - Worker execution uses constrained runtime expectations.
