@@ -16,7 +16,7 @@ import { CSP_NONCE } from "../csp-nonce.js";
  * /portal/settings/; Getting started is the guide at /portal/welcome (welcome.ts); Network (settings-world.ts) is the world view for everyone. Admin is revealed client-side for system admins only; its APIs enforce
  * authorization server-side.
  */
-export type SettingsSection = "welcome" | "general" | "profile" | "plan" | "usage" | "compute" | "tools" | "nodes" | "install" | "admin" | "revenue" | "network" | "world";
+export type SettingsSection = "welcome" | "general" | "profile" | "plan" | "usage" | "compute" | "tools" | "nodes" | "install" | "admin" | "revenue" | "network" | "world" | "social";
 
 export const SETTINGS_NAV: Array<{ key: SettingsSection; label: string; icon: string; href: string; adminOnly?: boolean }> = [
   { key: "welcome", label: "Getting started", icon: "check", href: "/portal/welcome" },
@@ -31,7 +31,8 @@ export const SETTINGS_NAV: Array<{ key: SettingsSection; label: string; icon: st
   { key: "world", label: "Network", icon: "globe", href: "/portal/settings/world" },
   { key: "admin", label: "Admin", icon: "shield", href: "/portal/settings/admin", adminOnly: true },
   { key: "revenue", label: "Revenue", icon: "wallet", href: "/portal/settings/revenue", adminOnly: true },
-  { key: "network", label: "Network admin", icon: "market", href: "/portal/settings/network", adminOnly: true }
+  { key: "network", label: "Network admin", icon: "market", href: "/portal/settings/network", adminOnly: true },
+  { key: "social", label: "Social posts", icon: "note", href: "/portal/settings/social", adminOnly: true }
 ];
 
 /**

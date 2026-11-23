@@ -616,6 +616,30 @@ The WiX source is at `scripts/windows/edgecoder.wxs`.
 | `PORTAL_CSP_ENFORCE` | unset | The CSP is enforced, with a per-request nonce on the pages' inline scripts and `<style>` blocks (no `'unsafe-inline'`, #27). `0` sends it as `Content-Security-Policy-Report-Only` instead, for diagnosing a page the policy breaks (#10) |
 | `PORTAL_TRUST_PROXY_HOPS` | `1` | Proxy hops to trust for the client IP (Fly = 1). Used by rate limits (#10) |
 
+### Brand-account posting
+
+Settings > Social posts drafts posts for the brand X account (cross-posted to Nostr) and sends each one only after an admin approves it. Nothing is sent until both the page's **Posting** switch is turned on (it starts paused) and `SOCIAL_POSTING_ENABLED=1` is set. The X credentials are Fly secrets on `edgecoder-portal`:
+
+```bash
+fly secrets set -a edgecoder-portal X_API_KEY=... X_API_SECRET=... X_ACCESS_TOKEN=... X_ACCESS_TOKEN_SECRET=...
+fly secrets set -a edgecoder-portal NOSTR_BRAND_NSEC=nsec1...   # optional: without it Nostr is skipped
+fly secrets set -a edgecoder-portal SOCIAL_POSTING_ENABLED=1     # last: lets approved posts go out
+```
+
+| Variable | Default | Description |
+|---|---|---|
+| `SOCIAL_POSTING_ENABLED` | unset | Exactly `1` lets approved posts leave the portal (X and Nostr). Anything else keeps everything as drafts, whatever the admin switch says. |
+| `X_API_KEY` | unset | The brand X app's API key (OAuth 1.0a consumer key). All four `X_*` values are needed to post; the admin page shows only whether they are set. |
+| `X_API_SECRET` | unset | The X app's API key secret (consumer secret). Never logged or returned. |
+| `X_ACCESS_TOKEN` | unset | The brand account's access token (user context, read and write). |
+| `X_ACCESS_TOKEN_SECRET` | unset | The brand account's access token secret. Never logged or returned. |
+| `NOSTR_BRAND_NSEC` | unset | The brand Nostr key, 64 hex characters or `nsec1...`. Each X post is also published as a kind-1 note. Unset (or invalid): Nostr is skipped and recorded on the post; X still posts. Never logged or returned. |
+| `SOCIAL_NOSTR_RELAYS` | `wss://relay.damus.io,wss://nos.lol,wss://relay.primal.net` | Comma-separated `wss://` relays for the Nostr cross-post. A note counts as published when at least one relay accepts it. |
+| `SOCIAL_TICK_MINUTES` | `15` | How often the drafting and sending job runs (1 to 1440). |
+| `SOCIAL_DOCS_SITEMAP_URL` | `https://docs.edgecoder.io/sitemap.xml` | The docs sitemap new pages are detected from. |
+
+See [Environment variables](../site-docs/reference/environment-variables.md#brand-account-posting-portal) for the rules every post is checked against.
+
 ### Passkey / WebAuthn
 
 | Variable | Default | Description |

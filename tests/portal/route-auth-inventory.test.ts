@@ -92,6 +92,7 @@ const PUBLIC: Record<string, string> = {
   "GET /portal/settings/nodes": "page shell",
   "GET /portal/settings/admin": "page shell",
   "GET /portal/settings/revenue": "page shell (the revenue APIs it calls are system-admin only)",
+  "GET /portal/settings/social": "page shell (the social-post APIs it calls are system-admin only)",
   "GET /portal/settings/network": "page shell (the network API it calls is system-admin only)",
   "GET /portal/settings/world": "page shell (the world view API it calls needs a session)",
   "GET /portal/welcome": "page shell (Getting started; the onboarding API it calls needs a session)",

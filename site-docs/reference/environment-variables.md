@@ -662,6 +662,22 @@ What is watched: the portal watches every coordinator's `/health/runtime`, netwo
 
 A coordinator cannot list Fly Postgres backups, so a scheduled job does: `scripts/ops/report-pg-backups.sh` runs `fly postgres backup list` for each app in `PG_APPS` and posts the newest successful backup time to the portal's `POST /internal/alerts/backup-report` (portal service token). Run it every few hours (GitHub Actions schedule, cron on an ops machine or a Fly scheduled machine) with `PORTAL_URL`, `PORTAL_SERVICE_TOKEN`, `PG_APPS` and `FLY_API_TOKEN`; `DRY_RUN=1` prints the reports instead. A failed listing is reported as "no successful backup known", which alerts. Set `ALERT_BACKUP_EXPECTED=1` on the portal once the job is scheduled.
 
+## Brand-account posting (portal)
+
+Settings > Social posts (system admins) holds the brand account's post queue (`src/social`, `src/portal/social.ts`). A job on the portal drafts posts from live data: a weekly network report (hosts online, jobs run and sats paid to hosts over 7 days, from the Network admin view and the coordinator's revenue report), new desktop and agent releases (the GitHub releases listing), and new pages in the docs sitemap; iOS release notes and anything else are written in the page's compose box. Every post needs an admin's approval; approving sends it at once (or at the next run). Posts go to X (`POST /2/tweets`, OAuth 1.0a user context) and are cross-posted to Nostr. Rules are enforced in code: original posts only (no @mentions, replies or reposts), 280 characters with links counting 23, no text posted in the last 90 days, and the never-claim list (no "open source", end-to-end encryption, private network or compute, passive or guaranteed income, frontier-model parity; nothing about earning, hosting or withdrawing next to the iOS app). A draft that breaks a rule cannot be approved until it is edited. Two switches must both be on before anything is sent: the page's **Posting** switch (stored; starts paused, which also stops drafting) and `SOCIAL_POSTING_ENABLED=1`. State is kept in Postgres (`social_posts`, `social_state`, created on first use).
+
+| Variable | Default | Description |
+|---|---|---|
+| `SOCIAL_POSTING_ENABLED` | unset | Exactly `1` lets approved posts leave the portal (X and Nostr). Anything else keeps everything as drafts, whatever the admin switch says. |
+| `X_API_KEY` | unset | The brand X app's API key (OAuth 1.0a consumer key). All four `X_*` values are needed to post; the admin page shows only whether they are set. |
+| `X_API_SECRET` | unset | The X app's API key secret (consumer secret). Never logged or returned. |
+| `X_ACCESS_TOKEN` | unset | The brand account's access token (user context, read and write). |
+| `X_ACCESS_TOKEN_SECRET` | unset | The brand account's access token secret. Never logged or returned. |
+| `NOSTR_BRAND_NSEC` | unset | The brand Nostr key, 64 hex characters or `nsec1...`. Each X post is also published as a kind-1 note. Unset (or invalid): Nostr is skipped and recorded on the post; X still posts. Never logged or returned. |
+| `SOCIAL_NOSTR_RELAYS` | `wss://relay.damus.io,wss://nos.lol,wss://relay.primal.net` | Comma-separated `wss://` relays for the Nostr cross-post. A note counts as published when at least one relay accepts it. |
+| `SOCIAL_TICK_MINUTES` | `15` | How often the drafting and sending job runs (1 to 1440). |
+| `SOCIAL_DOCS_SITEMAP_URL` | `https://docs.edgecoder.io/sitemap.xml` | The docs sitemap new pages are detected from. |
+
 ## Startup validation (#15)
 
 Each service reads its environment once at startup through a zod schema. An invalid value (for example `abc` for a port or an interval, `maybe` for a flag, or a URL without `http(s)://`) stops the service with exit code 1. The error names each variable and what is wrong with it, and lists every problem at once. The value of a secret (a variable whose name contains `TOKEN`, `SECRET`, `PASSWORD`, `PRIVATE_KEY`, `API_KEY` and the like) is never printed. Empty values count as unset, and variables no schema lists are ignored.

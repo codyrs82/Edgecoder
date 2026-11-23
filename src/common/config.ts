@@ -33,7 +33,7 @@ function normalizeEnv(env: NodeJS.ProcessEnv): Record<string, string> {
  * Variables whose value must never reach a log line. Matched by name so a variable no schema
  * declares is covered too. Durations and limits that only mention a token (..._TOKEN_TTL_MS) are not secrets.
  */
-const SECRET_NAME = /TOKEN|SECRET|PASSWORD|PEPPER|MACAROON|PRIVATE_KEY|API_KEY|_PIN$|_DSN$|DATABASE_URL$|KEY_HEX$|KEY_PEM$|DATA_KEY$/;
+const SECRET_NAME = /TOKEN|SECRET|PASSWORD|PEPPER|MACAROON|PRIVATE_KEY|API_KEY|_PIN$|_DSN$|DATABASE_URL$|KEY_HEX$|KEY_PEM$|DATA_KEY$|NSEC$/;
 export function isSecretEnvName(name: string): boolean {
   return SECRET_NAME.test(name) && !/_(MS|SATS|BPS)$/.test(name);
 }

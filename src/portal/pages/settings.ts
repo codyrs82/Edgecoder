@@ -5,6 +5,7 @@ import type { FastifyInstance } from "fastify";
 import { registerSettingsComputePage } from "./settings-compute.js";
 import { registerSettingsOpsPages } from "./settings-ops.js";
 import { registerSettingsRevenuePage } from "./settings-revenue.js";
+import { registerSettingsSocialPage } from "./settings-social.js";
 import { registerSettingsNetworkPage } from "./settings-network.js";
 import { registerSettingsWorldPage } from "./settings-world.js";
 import { LEGACY_SETTINGS_REDIRECTS, SETTINGS_HELPERS_SCRIPT, redirectKeepingQuery, settingRow, settingsPage } from "./settings-shell.js";
@@ -528,6 +529,7 @@ export function registerSettingsPages(app: FastifyInstance): void {
   registerSettingsComputePage(app);
   registerSettingsOpsPages(app);
   registerSettingsRevenuePage(app);
+  registerSettingsSocialPage(app);
   registerSettingsNetworkPage(app);
   registerSettingsWorldPage(app);
   // The old top-level pages (Wallet, Market, Install agent, Nodes, Coordinator ops) live in Settings now.

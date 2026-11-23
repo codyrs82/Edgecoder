@@ -30,7 +30,7 @@ import { createLatestAgentVersion, ownMachineModels, registerMachineRoutes } fro
 import { registerNetworkWorldRoutes } from "./routes/network-world.js";
 import { registerPayoutRoutes } from "./routes/payouts.js";
 import { registerRevenueRoutes } from "./routes/revenue.js";
-import { registerNetworkAdminRoutes } from "./routes/network-admin.js"; import { setupPortalAlerting } from "./alerts.js";
+import { registerNetworkAdminRoutes } from "./routes/network-admin.js"; import { setupPortalAlerting } from "./alerts.js"; import { setupPortalSocial } from "./social.js";
 import { registerAdminUserRoutes } from "./routes/admin-users.js";
 import { fetchAccountBalances, startUnverifiedPurge } from "./account-admin.js";
 import { registerWalletApiRoutes } from "./routes/wallet-api.js";
@@ -935,6 +935,7 @@ const networkAdminDeps = {
 };
 registerNetworkAdminRoutes(app, networkAdminDeps);
 const portalAlerting = setupPortalAlerting(app, { ...networkAdminDeps, portalUrl: PORTAL_PUBLIC_URL, pool: store?.pool ?? null, serviceToken: PORTAL_SERVICE_TOKEN }); // Production alerting (src/portal/alerts.ts): Settings > Network's Alerts and the checks
+const portalSocial = setupPortalSocial(app, { ...networkAdminDeps, pool: store?.pool ?? null }); // Brand-account posting (src/portal/social.ts): Settings > Social posts and its drafting job
 
 // Settings > Admin > Users: the account list, deleting accounts and the cleanup of abandoned sign-ups
 // (src/portal/account-admin.ts). Balances come from every allowlisted coordinator, with the service token.
@@ -980,7 +981,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       await store.migrate();
     })
     .then(() => app.listen({ port: 4310, host: LISTEN_HOST }).then(async () => (await import("./shutdown.js")).installGracefulShutdown(app))) // a deploy drains streamed calls
-    .then(() => { if (process.env.CLOUD_BOTS_WORKER !== "off") cloudBotRunner?.start(); return portalAlerting.start(); }) // alerting checks and the cloud bots' worker, scheduler and GitHub poller start once the portal listens
+    .then(() => { if (process.env.CLOUD_BOTS_WORKER !== "off") cloudBotRunner?.start(); portalSocial.start(); return portalAlerting.start(); }) // alerting checks and the cloud bots' worker, scheduler and GitHub poller start once the portal listens
     .catch((error) => {
       app.log.error(error);
       process.exit(1);
