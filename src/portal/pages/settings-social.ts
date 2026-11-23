@@ -321,7 +321,12 @@ export function socialPageScript(): string {
         if (!groups.has(k)) groups.set(k, []);
         groups.get(k).push(p);
       }
-      for (const [k, posts] of groups) {
+      // Soonest first: posts with no send time go out when approved (now), then by send time.
+      const when = (p) => (p.scheduledAtMs === null || p.scheduledAtMs === undefined ? -Infinity : p.scheduledAtMs);
+      const groupWhen = (posts) => Math.min(...posts.map(when));
+      const groupMade = (posts) => Math.min(...posts.map((p) => p.createdAtMs || 0));
+      const ordered = [...groups].sort((a, b) => (groupWhen(a[1]) - groupWhen(b[1])) || (groupMade(a[1]) - groupMade(b[1])));
+      for (const [k, posts] of ordered) {
         if (!k.startsWith("t:")) { q.appendChild(renderPost(posts[0])); continue; }
         posts.sort((a, b) => (a.threadPosition || 0) - (b.threadPosition || 0));
         const wrap = el("div", { class: "soc-thread" });
