@@ -24,7 +24,7 @@ export const socialEnv = {
   NOSTR_BRAND_NSEC: z.string().optional(),
   /** Comma-separated wss:// relays for the Nostr cross-post. */
   SOCIAL_NOSTR_RELAYS: z.string().optional(),
-  /** How often the drafting and posting job runs. */
+  /** How often the drafting job runs (due posts are checked every minute regardless, src/portal/social.ts). */
   SOCIAL_TICK_MINUTES: envInt(15, { min: 1, max: 1_440 }),
   /** The docs sitemap new guides are detected from; default: the public docs site's /sitemap.xml. */
   SOCIAL_DOCS_SITEMAP_URL: envUrl()
