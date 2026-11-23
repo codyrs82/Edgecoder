@@ -343,7 +343,7 @@ A local model ID goes through the local router, in this order:
 
 | Order | Route | Cost | When |
 |---|---|---|---|
-| 1 | **Bluetooth-local** | Free | `BT_STATUS_URL` is set and an iPhone in Bluetooth Local mode is connected |
+| 1 | **Bluetooth-local** | Free | `BT_STATUS_URL` is set and a phone is connected through `edgecoder-ble-proxy`. The current iOS app does not offer this mode, so in practice this step is skipped |
 | 2 | **Ollama-local** | Free | Local Ollama is healthy, fewer than 2 requests in flight, p95 latency under 8 s |
 | 3 | **Network** | cSats | Local is unavailable or overloaded, and this computer's agent (or a mesh token) is configured |
 | 4 | **Offline message** | Free | Nothing else is reachable: the reply says Ollama is not running and the network is unreachable |

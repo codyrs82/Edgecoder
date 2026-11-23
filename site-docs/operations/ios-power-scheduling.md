@@ -1,24 +1,55 @@
-# iOS Agent — Background Execution & Compute Modes
+# iOS App — Power & Background Behavior
 
-iOS workers can contribute compute in three modes with full background execution and Bluetooth-local fallback. This page documents the compute mode system, background task scheduling, power-aware policy, and Bluetooth Local transport.
+This page covers what the current iOS app does about battery, power and background work, and how the coordinator treats a phone's power readings. For using the app (the **Chat**, **Bots**, **Wallet**, **Machines** and **Network** tabs), see the [iOS app guide](/guide/ios-app).
 
-## Compute modes
+::: warning Removed from the app
+Older builds had a three-way compute mode picker (**Off / On / Bluetooth Local**) in a **Swarm** tab, an automatic switch to Bluetooth Local when the internet dropped, and an **IDE** tab that listed tasks a Mac sent to the phone over Bluetooth. None of these exist in the current app. The IDE tab was replaced by **Machines** in build 34 (#429).
+:::
 
-| Mode | Description | Rewards |
-|---|---|---|
-| **Off** | App is idle; no compute offered. | None |
-| **On** | Connects to the internet swarm via coordinator heartbeat loop. | Yes |
-| **Bluetooth Local** | Advertises compute over CoreBluetooth to nearby Mac nodes; no internet required. | No |
+## On-device runtime
 
-Mode is controlled via the three-way picker in the **Swarm** tab (`ComputeMode` enum). The selected mode is persisted to `UserDefaults` and restored on next launch.
+The phone can load a model and run it on the device. The controls are in **Settings** (bottom of the Chat drawer):
 
-### Automatic mode downgrade
+| Card | What it shows or controls |
+|---|---|
+| **Runtime** | State (Stopped / Running / Paused), start, pause and stop buttons, task and heartbeat counters, and two toggles: **Auto-start on launch** (on by default) and **Run only when charging** (off by default). |
+| **Local Model** | Pick, download and load the on-device model. |
+| **Network** | Nearby peers, battery percent, and power source (`AC` or `Bat`). |
 
-When the device is in **On** mode and the network path becomes unsatisfied (Wi-Fi drops, airplane mode), `NWPathMonitor` automatically switches the agent to **Bluetooth Local** mode and logs an event. When internet returns, the app notifies the user but does not auto-escalate back — the user must switch back to **On** manually to avoid silently re-enrolling in the rewards network.
+After you sign in, the app enrolls the phone (`POST /nodes/enroll`) and, if **Auto-start on launch** is on, starts the runtime. While running, the runtime registers with the coordinator as an agent (`os: "ios"`, one task at a time), sends a heartbeat about every 15 seconds, and asks for work only when the on-device model is loaded.
+
+**Run only when charging** is checked when the runtime starts: if the phone is not charging or full, it does not start and shows "Runtime blocked: connect power to start." It does not stop a runtime that is already running when you unplug.
+
+## Power telemetry
+
+Every `/register` and `/heartbeat` from the phone carries a `powerTelemetry` object:
+
+| Field | Meaning |
+|---|---|
+| `onExternalPower` | Battery state is charging or full |
+| `batteryLevelPct` | Battery percentage (0–100) |
+| `lowPowerMode` | iOS Low Power Mode is on |
+| `updatedAtMs` | When the reading was taken |
+
+The app does not report thermal state. Thermal throttling in the coordinator applies only to desktop agents that send `thermalState`.
+
+## Coordinator power policy
+
+When an agent with `os: "ios"` calls `/pull`, the coordinator runs `evaluateIosPowerPolicy` (`src/swarm/power-policy.ts`). The first matching rule wins:
+
+| Order | Condition | Result | `reason` |
+|---|---|---|---|
+| 1 | Low Power Mode on | No work | `ios_low_power_mode` |
+| 2 | On external power | Work allowed | `ios_external_power` |
+| 3 | Battery ≤ `IOS_BATTERY_TASK_STOP_LEVEL_PCT` (default `20`) | No work | `ios_battery_critical` |
+| 4 | Last assignment less than `IOS_BATTERY_PULL_MIN_INTERVAL_MS` ago (default `45000`) | No work yet | `ios_on_battery_throttled` |
+| 5 | Otherwise | Work allowed | `ios_on_battery_lite_mode` |
+
+When work is held back, `/pull` answers `{ "subtask": null, "powerDeferred": true, "reason": "<reason>" }` and the phone tries again on its next poll. Both thresholds are coordinator settings; see [Environment Variables](/reference/environment-variables).
 
 ## Background execution
 
-### UIBackgroundModes declared
+The app declares these background modes in `Info.plist`:
 
 ```xml
 <key>UIBackgroundModes</key>
@@ -30,147 +61,22 @@ When the device is in **On** mode and the network path becomes unsatisfied (Wi-F
 </array>
 ```
 
-### BGTaskScheduler tasks
+Each time the app goes to the background it submits these `BGTaskScheduler` requests:
 
-| Task ID | Type | Purpose |
+| Task ID | Type | Request |
 |---|---|---|
-| `io.edgecoder.ios.runtime` | `BGProcessingTask` | Long-running compute burst; keeps heartbeat loop alive while backgrounded. Re-schedules itself on expiry for continuous coverage. |
-| `io.edgecoder.ios.heartbeat` | `BGAppRefreshTask` | Short-lived 15-minute wake for a single heartbeat when the processing task is not running. |
+| `io.edgecoder.ios.runtime` | `BGProcessingTask` | Needs external power |
+| `io.edgecoder.ios.heartbeat` | `BGAppRefreshTask` | Earliest 15 minutes later |
+| `io.edgecoder.ble-mesh` | `BGProcessingTask` | Needs external power; earliest 1 minute later |
 
-Both tasks are registered in `AppDelegate.application(_:didFinishLaunchingWithOptions:)`. Background tasks are scheduled automatically when the app enters the background (via `UIApplication.didEnterBackgroundNotification`) if `computeMode != .off`.
+iOS decides whether and when these run. The handlers only keep the process alive for a while and schedule the next request; heartbeats and task polling happen in the runtime loop. Do not expect a backgrounded phone to keep taking work, especially on battery.
 
-### Scheduling flow
+## Nearby devices (Bluetooth)
 
-```
-App → Background
-  └─ if computeMode != .off:
-       BGProcessingTaskRequest(id: "io.edgecoder.ios.runtime", requiresNetworkConnectivity: false)
-       BGAppRefreshTaskRequest(id: "io.edgecoder.ios.heartbeat", earliestBeginDate: +15min)
-
-iOS grants BGProcessingTask:
-  └─ sendHeartbeatIfNeeded() every 15s
-  └─ Re-schedules itself before expiry
-  └─ task.setTaskCompleted(success:) on cancellation
-
-iOS grants BGAppRefreshTask:
-  └─ One sendHeartbeatIfNeeded() call
-  └─ Re-schedules next BGAppRefreshTask
-```
-
-### Entitlements required
-
-```xml
-<key>BGTaskSchedulerPermittedIdentifiers</key>
-<array>
-  <string>io.edgecoder.ios.runtime</string>
-  <string>io.edgecoder.ios.heartbeat</string>
-</array>
-<key>com.apple.developer.bluetooth-always-authorization</key>
-<true/>
-```
-
-## Power-aware scheduling
-
-| Signal | Meaning |
-|---|---|
-| `onExternalPower` | Charging / external power connected |
-| `batteryLevelPct` | Battery percentage (0–100) |
-| `lowPowerMode` | iOS Low Power Mode active |
-
-These are reported to the coordinator in every heartbeat's `powerTelemetry` payload. The `runOnlyWhileCharging` toggle (persisted in `UserDefaults`) gates the `start()` call: if true and not on external power, the runtime refuses to start with a status message.
-
-### Assignment decision
-
-```mermaid
-flowchart TD
-  telemetry[PowerTelemetry received]
-  lowPower{LowPowerMode?}
-  threshold{Battery ≥ threshold?}
-  charging{OnExternalPower?}
-  assign[Allow assignment]
-  hold[Hold / defer]
-
-  telemetry --> lowPower
-  lowPower -->|true| hold
-  lowPower -->|false| threshold
-  threshold -->|false| hold
-  threshold -->|true| charging
-  charging -->|true| assign
-  charging -->|false| assign
-```
-
-## Bluetooth Local transport
-
-When in **Bluetooth Local** mode, `BluetoothTransport` makes the iPhone act as a **CBPeripheralManager** (BLE server):
-
-### BLE service layout
-
-| UUID suffix | Characteristic | Properties | Role |
-|---|---|---|---|
-| `...0002` | `requestChar` | write / writeWithoutResponse | Mac sends inference request JSON |
-| `...0003` | `responseChar` | notify / read | Phone sends inference result back |
-| `...0004` | `statusChar` | notify / read | Phone pushes `modelState` + `batteryPct` |
-
-Service UUID: `EC0D-0001-EC0D-EC0D-EC0D-EC0D0001EC0D`
-
-### Wire protocol (JSON over BLE)
-
-**Request** (Mac → Phone, written to `requestChar`):
-```json
-{ "id": "<uuid>", "prompt": "<text>", "maxTokens": 512 }
-```
-
-**Response** (Phone → Mac, notified on `responseChar`):
-```json
-{ "id": "<uuid>", "output": "<text>", "ok": true, "durationMs": 450 }
-```
-
-**Status** (Phone → Mac, notified on `statusChar`):
-```json
-{ "modelState": "ready", "batteryPct": 87 }
-```
-
-Responses larger than 512 bytes are chunked and sent sequentially with 10ms pauses between chunks.
-
-### Mac-side integration
-
-The Mac side uses `edgecoder-ble-proxy` — a Swift `CBCentralManager` companion binary that:
-
-1. Scans for peripherals advertising the EdgeCoder BLE service UUID.
-2. Connects, subscribes to `responseChar` and `statusChar`.
-3. Exposes a local HTTP server on `127.0.0.1:11435`:
-   - `GET /status` → BLE connection state, device name, battery, model state.
-   - `POST /api/generate` → `{ prompt, maxTokens }` → forwards over BLE, returns result.
-
-The IDE provider server (port 4304) starts this binary automatically and registers its status URL with `IntelligentRouter` so the routing waterfall (`bluetooth-local → ollama-local → swarm → edgecoder-local`) works transparently.
-
-**Building the proxy:**
-```bash
-npm run build:ble-proxy
-# Compiles src/bluetooth/swift-ble-proxy/ and installs to /opt/edgecoder/bin/
-```
-
-**Manual test:**
-```bash
-/opt/edgecoder/bin/edgecoder-ble-proxy --port 11435 &
-curl http://127.0.0.1:11435/status
-```
-
-### iOS app: no IDE tab
-
-Earlier builds had an **IDE** tab that listed tasks a Mac sent to the phone in **Bluetooth Local** mode. It was removed in build 34 (#429) because the Swarm "Bluetooth Local" setting it depended on no longer exists, and nothing in the current app starts the phone's BLE peripheral. Its place in the tab bar is now **Machines**, which lists your account's machines (name, online or last seen, active model, bot count) from `GET /portal/api/machines`. See the [iOS app guide](/guide/ios-app).
-
-## Operator practices
-
-- Keep iOS fleet policy conservative by default (low battery threshold, `runOnlyWhileCharging` for intensive models).
-- Track assignment drop reasons to understand power-policy impact.
-- Use separate worker pools for mobile vs desktop if reliability goals diverge.
-- Bluetooth Local mode is unrewarded — communicate this clearly to users. The current iOS app does not offer it (see above).
-- The `edgecoder-ble-proxy` binary requires Bluetooth access via System Settings → Privacy & Security → Bluetooth on the Mac.
+The chat model picker shows a **Nearby Devices** section only when the runtime's Bluetooth mesh has discovered a peer. This path is not tested end to end, so don't rely on it. The older transport that made the phone a Bluetooth peripheral for a Mac (`BluetoothTransport`, used with `edgecoder-ble-proxy`) is still compiled into the app, but nothing in the current app starts it (#429).
 
 ## Cross-links
 
+- [iOS app guide](/guide/ios-app)
 - [Public Mesh Operations](/operations/public-mesh-operations)
-- [Role-based Runbooks](/operations/role-based-runbooks)
 - [Environment Variables](/reference/environment-variables)
-- [Deployment Topology](/operations/deployment-topology)

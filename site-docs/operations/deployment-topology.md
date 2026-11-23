@@ -78,11 +78,10 @@ docker compose up ide-provider
 ### iOS agent
 
 - **Distribution**: App Store / TestFlight
-- **Background**: `BGProcessingTask` + `BGAppRefreshTask` (always-on)
-- **Modes**: Off / On (internet swarm) / Bluetooth Local (no internet)
-- **BLE**: CBPeripheralManager -- advertises EdgeCoder service UUID
-- **Auto-fallback**: Switches to Bluetooth Local when internet drops
-- **Rewards**: On mode only; Bluetooth Local mode earns no credits
+- **Runtime**: optional on-device model runtime, started from Settings (auto-start on by default; "Run only when charging" off by default)
+- **Background**: `BGProcessingTask` + `BGAppRefreshTask` requests; iOS decides when (or whether) they run, so background work is not continuous
+- **Power**: battery, charging and Low Power Mode are sent with every heartbeat; the coordinator's iOS power policy decides when the phone gets work
+- See [iOS Power & Background](/operations/ios-power-scheduling). The old Off / On / Bluetooth Local mode picker is gone from the app.
 
 ### Docker
 
@@ -153,4 +152,4 @@ Release artifacts are published to GitHub Releases at:
 
 - [Environment Variables](/reference/environment-variables)
 - [Role-based Runbooks](/operations/role-based-runbooks)
-- [iOS Background Execution](/operations/ios-power-scheduling)
+- [iOS Power & Background](/operations/ios-power-scheduling)
