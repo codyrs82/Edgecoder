@@ -13,9 +13,12 @@ import { SETTINGS_HELPERS_SCRIPT, settingRow, settingsPage } from "./settings-sh
  * - The switch: off (paused) stops all drafting and sending. Sending also needs
  *   SOCIAL_POSTING_ENABLED=1 on the portal; the page shows whether it is set, and whether X and
  *   Nostr are configured (never the values).
- * - Compose a draft by hand (release notes for iOS, anything else).
- * - The queue: edit, approve (sends at once when sending is on) or reject each draft. A draft that
- *   breaks a rule lists the problems and cannot be approved until it is edited.
+ * - Compose a draft by hand (release notes for iOS, anything else), optionally in a thread, with a
+ *   send time and up to 4 images (PNG/JPEG, 5 MB each).
+ * - The queue: edit, approve (sends at once when sending is on and it is due) or reject each draft;
+ *   image thumbnails (add with alt text, remove), the send time (shown and edited in America/Chicago
+ *   time) and the thread. A thread is approved as a whole. A draft that breaks a rule lists the
+ *   problems and cannot be approved until it is edited.
  * - Recent: posted (with the X post and Nostr note links) and rejected.
  */
 export function socialPageContent(): string {
@@ -34,6 +37,15 @@ export function socialPageContent(): string {
       .soc-recent td { font-size:12.5px; vertical-align:top; }
       .soc-recent .txt { max-width:420px; white-space:pre-wrap; }
       .soc-recent a { color:var(--brand-2); }
+      .soc-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; font-size:12.5px; }
+      .soc-row label { color:var(--muted); }
+      .soc-row input[type="text"] { width:160px; }
+      .soc-row input[type="number"] { width:70px; }
+      .soc-thumbs { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+      .soc-thumb { display:flex; flex-direction:column; gap:4px; align-items:flex-start; font-size:11.5px; color:var(--muted); max-width:120px; }
+      .soc-thumb img { width:120px; height:90px; object-fit:cover; border-radius:var(--radius-md); border:1px solid var(--card-border); }
+      .soc-thread { border-left:3px solid var(--brand-2); padding-left:10px; margin-bottom:12px; }
+      .soc-thread-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:12.5px; margin-bottom:6px; }
     </style>
     <h2 class="set-title">Social posts</h2>
     <p class="set-lead">Posts for the EdgeCoder brand account on X, cross-posted to Nostr. Drafts come from live network data, new releases and new docs pages; every post needs your approval.</p>
@@ -51,6 +63,16 @@ export function socialPageContent(): string {
         <textarea id="socCompose" maxlength="2000" placeholder="Write a post (iOS release notes, announcements). Original posts only: no @mentions." aria-label="New post"></textarea>
         <div class="soc-meta" id="socComposeMeta"></div>
         <ul class="soc-problems" id="socComposeProblems"></ul>
+        <div class="soc-row">
+          <label for="socComposeThread">Thread (optional)</label><input type="text" id="socComposeThread" maxlength="100" placeholder="e.g. launch-week">
+          <label for="socComposePos">Position</label><input type="number" id="socComposePos" min="1" max="1000" placeholder="next">
+        </div>
+        <div class="soc-row">
+          <label for="socComposeWhen">Send time (America/Chicago, optional)</label><input type="datetime-local" id="socComposeWhen">
+        </div>
+        <div class="soc-row">
+          <label for="socComposeImages">Images (up to 4, PNG/JPEG, 5 MB each)</label><input type="file" id="socComposeImages" accept="image/png,image/jpeg" multiple>
+        </div>
         <div class="soc-actions"><button type="button" class="primary" id="socComposeBtn">Save draft</button></div>
       </div>
       <h3 class="set-group">Queue</h3>
@@ -66,7 +88,23 @@ export function socialPageScript(): string {
   return `
     ${SETTINGS_HELPERS_SCRIPT}
     const $ = (id) => document.getElementById(id);
-    const KIND = { weekly: "Weekly report", release: "Release", docs: "Docs", manual: "Manual" };
+    const KIND = { weekly: "Weekly report", release: "Release", docs: "Docs", manual: "Manual", import: "Imported" };
+    const TZ_LABEL = "America/Chicago";
+    const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+    function readBase64(file) {
+      return new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result || "").replace(/^data:[^,]*,/, ""));
+        fr.onerror = () => reject(fr.error || new Error("read failed"));
+        fr.readAsDataURL(file);
+      });
+    }
+    async function uploadImage(postId, file, alt) {
+      if (!/^image\\/(png|jpeg)$/.test(file.type)) return { ok: false, json: { error: file.name + ": only PNG or JPEG" } };
+      if (file.size > MAX_IMAGE_BYTES) return { ok: false, json: { error: file.name + ": larger than 5 MB" } };
+      const base64 = await readBase64(file);
+      return call("/portal/api/admin/social/posts/" + encodeURIComponent(postId) + "/images", { method: "POST", body: JSON.stringify({ filename: file.name, base64, alt: alt || null }) });
+    }
     const TONE = { draft: "info", approved: "ok", posting: "warn", posted: "ok", rejected: "", failed: "danger" };
     let state = null;
     function badge(text, tone) { return el("span", { class: "status-badge " + (tone || "") }, text); }
@@ -109,8 +147,11 @@ export function socialPageScript(): string {
       head.appendChild(el("span", { class: "mono" }, p.sourceKey.startsWith("manual:") ? "manual" : p.sourceKey));
       head.appendChild(el("span", {}, "updated " + fmtDate(p.updatedAtMs)));
       if (p.approvedBy) head.appendChild(el("span", {}, "approved by " + p.approvedBy));
+      if (p.threadId) head.appendChild(el("span", {}, "thread post " + (p.threadPosition || "?")));
+      head.appendChild(el("span", {}, p.scheduledAtLocal ? "sends " + p.scheduledAtLocal.replace("T", " ") + " (" + TZ_LABEL + ")" : "sends when approved"));
       box.appendChild(head);
       const editable = p.status === "draft" || p.status === "failed";
+      const schedulable = editable || p.status === "approved";
       const ta = el("textarea", { maxlength: "2000", "aria-label": "Post text" });
       ta.value = p.text;
       if (!editable) ta.setAttribute("readonly", "");
@@ -119,13 +160,75 @@ export function socialPageScript(): string {
       const ul = el("ul", { class: "soc-problems" }); problemsList(ul, p.problems); box.appendChild(ul);
       if (p.error) box.appendChild(el("div", { class: "soc-error" }, p.error));
       ta.addEventListener("input", () => liveCheck(ta.value, m, ul));
+      // Images: thumbnails, remove, add (with alt text).
+      const images = p.images || [];
+      if (images.length) {
+        const thumbs = el("div", { class: "soc-thumbs" });
+        for (const img of images) {
+          const t = el("div", { class: "soc-thumb" });
+          t.appendChild(el("img", { src: img.url, alt: img.alt || img.filename, title: img.filename, loading: "lazy" }));
+          t.appendChild(el("span", {}, img.alt ? "Alt: " + img.alt : "No alt text"));
+          if (editable) {
+            const rm = el("button", { type: "button", class: "btn-secondary" }, "Remove");
+            rm.addEventListener("click", () => act(p.id, "images/" + encodeURIComponent(img.id) + "/delete", {}, rm));
+            t.appendChild(rm);
+          }
+          thumbs.appendChild(t);
+        }
+        box.appendChild(thumbs);
+      }
+      if (editable && images.length < 4) {
+        const row = el("div", { class: "soc-row" });
+        const file = el("input", { type: "file", accept: "image/png,image/jpeg", "aria-label": "Image" });
+        const alt = el("input", { type: "text", maxlength: "1000", placeholder: "Alt text (optional)", "aria-label": "Alt text" });
+        const add = el("button", { type: "button", class: "btn-secondary" }, "Add image");
+        add.addEventListener("click", async () => {
+          const f = file.files && file.files[0];
+          if (!f) return;
+          add.disabled = true;
+          try {
+            const r = await uploadImage(p.id, f, alt.value.trim());
+            setStatus(r.ok ? "Image added." : "Image not added: " + ((r.json.problems || []).map((x) => x.message).join(" ") || r.json.error || r.status));
+            await load();
+          } finally { add.disabled = false; }
+        });
+        row.appendChild(el("label", {}, "Image (" + images.length + "/4)"));
+        row.appendChild(file); row.appendChild(alt); row.appendChild(add);
+        box.appendChild(row);
+      }
+      if (schedulable) {
+        const row = el("div", { class: "soc-row" });
+        const when = el("input", { type: "datetime-local", "aria-label": "Send time (" + TZ_LABEL + ")" });
+        when.value = p.scheduledAtLocal || "";
+        const setT = el("button", { type: "button", class: "btn-secondary" }, "Save time");
+        setT.addEventListener("click", () => { if (when.value) act(p.id, "schedule", { scheduledAtLocal: when.value }, setT); });
+        const clr = el("button", { type: "button", class: "btn-secondary" }, "Clear time");
+        clr.addEventListener("click", () => act(p.id, "schedule", { scheduledAtLocal: null }, clr));
+        row.appendChild(el("label", {}, "Send time (" + TZ_LABEL + ")" + (p.threadId ? ", whole thread" : "")));
+        row.appendChild(when); row.appendChild(setT); row.appendChild(clr);
+        box.appendChild(row);
+      }
+      if (editable) {
+        const row = el("div", { class: "soc-row" });
+        const th = el("input", { type: "text", maxlength: "100", placeholder: "none", "aria-label": "Thread" });
+        th.value = p.threadId || "";
+        const pos = el("input", { type: "number", min: "1", max: "1000", placeholder: "last", "aria-label": "Position" });
+        if (p.threadPosition) pos.value = String(p.threadPosition);
+        const setTh = el("button", { type: "button", class: "btn-secondary" }, "Save thread");
+        setTh.addEventListener("click", () => act(p.id, "thread", { threadId: th.value.trim() || null, ...(pos.value ? { position: Number(pos.value) } : {}) }, setTh));
+        row.appendChild(el("label", {}, "Thread")); row.appendChild(th);
+        row.appendChild(el("label", {}, "Position")); row.appendChild(pos); row.appendChild(setTh);
+        box.appendChild(row);
+      }
       const actions = el("div", { class: "soc-actions" });
       if (editable) {
         const save = el("button", { type: "button", class: "btn-secondary" }, "Save edit");
         save.addEventListener("click", () => act(p.id, "edit", { text: ta.value }, save));
-        const approve = el("button", { type: "button", class: "primary" }, p.status === "failed" ? "Approve again" : "Approve");
+        const approve = el("button", { type: "button", class: "primary" }, p.threadId ? "Approve thread" : p.status === "failed" ? "Approve again" : "Approve");
         approve.addEventListener("click", () => {
-          if (!confirm(state.sending.ok ? "Approve and post this to X" + (state.channels.nostr.configured ? " and Nostr" : "") + " now?" : "Approve? It is sent once posting is on.")) return;
+          const later = p.scheduledAtLocal ? " at " + p.scheduledAtLocal.replace("T", " ") + " (" + TZ_LABEL + ")" : " now";
+          const what = p.threadId ? "this whole thread" : "this";
+          if (!confirm(state.sending.ok ? "Approve and post " + what + " to X" + (state.channels.nostr.configured ? " and Nostr" : "") + later + "?" : "Approve " + what + "? It is sent once posting is on.")) return;
           act(p.id, "approve", ta.value !== p.text ? { text: ta.value } : {}, approve);
         });
         actions.appendChild(save); actions.appendChild(approve);
@@ -161,7 +264,24 @@ export function socialPageScript(): string {
       renderSwitch();
       const q = $("socQueue");
       q.textContent = "";
-      for (const p of state.queue) q.appendChild(renderPost(p));
+      // Threads together, in position order; single posts as they come.
+      const groups = new Map();
+      for (const p of state.queue) {
+        const k = p.threadId ? "t:" + p.threadId : "p:" + p.id;
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(p);
+      }
+      for (const [k, posts] of groups) {
+        if (!k.startsWith("t:")) { q.appendChild(renderPost(posts[0])); continue; }
+        posts.sort((a, b) => (a.threadPosition || 0) - (b.threadPosition || 0));
+        const wrap = el("div", { class: "soc-thread" });
+        const head = el("div", { class: "soc-thread-head" });
+        head.appendChild(el("strong", {}, "Thread " + posts[0].threadId));
+        head.appendChild(el("span", { class: "muted" }, posts.length + " post(s) waiting. Approving one approves them all; each next post replies to the one before it."));
+        wrap.appendChild(head);
+        for (const p of posts) wrap.appendChild(renderPost(p));
+        q.appendChild(wrap);
+      }
       if (!state.queue.length) q.appendChild(el("div", { class: "soc-empty" }, "No drafts waiting."));
       renderRecent();
     }
@@ -206,10 +326,28 @@ export function socialPageScript(): string {
     $("socComposeBtn").addEventListener("click", async () => {
       const text = $("socCompose").value;
       if (!text.trim()) return;
-      const r = await call("/portal/api/admin/social/drafts", { method: "POST", body: JSON.stringify({ text }) });
-      if (r.ok) { $("socCompose").value = ""; $("socComposeMeta").textContent = ""; $("socComposeProblems").textContent = ""; setStatus("Draft saved."); }
-      else setStatus("Not saved: " + (r.json.error || r.status));
-      await load();
+      const files = Array.from($("socComposeImages").files || []);
+      if (files.length > 4) { setStatus("Not saved: at most 4 images."); return; }
+      const body = { text };
+      const thread = $("socComposeThread").value.trim();
+      if (thread) body.threadId = thread;
+      if (thread && $("socComposePos").value) body.position = Number($("socComposePos").value);
+      if ($("socComposeWhen").value) body.scheduledAtLocal = $("socComposeWhen").value;
+      const btn = $("socComposeBtn"); btn.disabled = true;
+      try {
+        const r = await call("/portal/api/admin/social/drafts", { method: "POST", body: JSON.stringify(body) });
+        if (r.ok) {
+          const failed = [];
+          for (const f of files) {
+            const u = await uploadImage(r.json.post.id, f, "");
+            if (!u.ok) failed.push((u.json && u.json.error) || f.name);
+          }
+          for (const id of ["socCompose", "socComposeThread", "socComposePos", "socComposeWhen", "socComposeImages"]) $(id).value = "";
+          $("socComposeMeta").textContent = ""; $("socComposeProblems").textContent = "";
+          setStatus(failed.length ? "Draft saved; images not added: " + failed.join("; ") : "Draft saved.");
+        } else setStatus("Not saved: " + (r.json.error || r.status));
+        await load();
+      } finally { btn.disabled = false; }
     });
     (async () => {
       const me = await requireAuth();

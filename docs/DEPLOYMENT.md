@@ -635,8 +635,34 @@ fly secrets set -a edgecoder-portal SOCIAL_POSTING_ENABLED=1     # last: lets ap
 | `X_ACCESS_TOKEN_SECRET` | unset | The brand account's access token secret. Never logged or returned. |
 | `NOSTR_BRAND_NSEC` | unset | The brand Nostr key, 64 hex characters or `nsec1...`. Each X post is also published as a kind-1 note. Unset (or invalid): Nostr is skipped and recorded on the post; X still posts. Never logged or returned. |
 | `SOCIAL_NOSTR_RELAYS` | `wss://relay.damus.io,wss://nos.lol,wss://relay.primal.net` | Comma-separated `wss://` relays for the Nostr cross-post. A note counts as published when at least one relay accepts it. |
-| `SOCIAL_TICK_MINUTES` | `15` | How often the drafting and sending job runs (1 to 1440). |
+| `SOCIAL_TICK_MINUTES` | `15` | How often the drafting job runs (1 to 1440). Approved posts are checked for their send time every minute regardless. |
 | `SOCIAL_DOCS_SITEMAP_URL` | `https://docs.edgecoder.io/sitemap.xml` | The docs sitemap new pages are detected from. The weekly report links `PORTAL_PUBLIC_URL`. |
+
+Images, threads and send times:
+
+- **Images**: up to 4 per post, PNG or JPEG, 5 MB each, with optional alt text. Stored in Postgres (`social_post_images`, bytea) and uploaded to X (`POST /2/media/upload`, one-shot multipart, OAuth 1.0a) right before the post is sent; alt text goes through `POST /2/media/metadata`.
+- **Threads**: posts with the same thread id and a position. Approving any post of a thread approves all of them (each still passes the rules). Post 1 is an original post; each next post replies only to the previous post of the same thread, which this portal just posted. If a post fails, the rest are marked failed and the ones already posted are recorded. Nostr gets plain sequential notes (no reply tags).
+- **Send time**: optional, stored in UTC, shown and edited in America/Chicago time on the page. An approved post or thread waits until its time; clearing it sends at the next minute.
+
+Bulk import (loads drafts, never approves them). Authenticate as a system admin with the portal session token as a bearer token (the value of the `edgecoder_portal_session` cookie). Scripts send no `Origin` header, so the CSRF origin check lets them through:
+
+```bash
+curl -sS -X POST "$PORTAL_URL/portal/api/admin/social/import" \
+  -H "Authorization: Bearer $PORTAL_SESSION_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data @plan.json
+```
+
+```json
+{ "posts": [
+  { "text": "Post 1 of the launch thread", "threadKey": "launch-week", "position": 1, "scheduledAt": "2026-12-01T15:00:00Z",
+    "images": [{ "filename": "hero.png", "base64": "iVBORw0...", "alt": "The EdgeCoder desktop app" }] },
+  { "text": "Post 2 of the launch thread", "threadKey": "launch-week", "position": 2 },
+  { "text": "A single post", "scheduledAtLocal": "2026-12-02T09:30" }
+] }
+```
+
+Per post: `text` (required), `key` (optional stable id), `threadKey` and `position`, `scheduledAt` (ISO 8601 with `Z` or an offset) or `scheduledAtLocal` (America/Chicago wall time), `images` (up to 4). At most 200 posts and 48 MB per request. Re-importing an item with the same `key` (or, without one, the same thread key, position and text) reports it under `existing` instead of creating a duplicate. The response lists `created` (with any rule problems, which block approval but not the draft), `existing` and `errors` by index.
 
 See [Environment variables](../site-docs/reference/environment-variables.md#brand-account-posting-portal) for the rules every post is checked against.
 

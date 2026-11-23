@@ -15,11 +15,13 @@ describe("portal social admin routes", () => {
   let store: MemorySocialStore;
   let app: FastifyInstance;
 
+  let currentSvc: SocialService;
+  const svcOf = () => currentSvc;
   const build = (config: Partial<SocialConfig> = {}) => {
-    const svc = new SocialService({
+    const svc = (currentSvc = new SocialService({
       store,
       config: { sendEnabled: true, x: SECRETS, nostrSecret: null, relays: ["wss://relay.example"], tickMs: 60_000, docsSitemapUrl: "https://docs.edgecoder.io/sitemap.xml", siteUrl: "https://edgecoder.io/", ...config }
-    });
+    }));
     const a = Fastify();
     registerSocialRoutes(a, { service: svc, getCurrentUser: async () => user, buildAccessContext: async () => ({ isSystemAdmin: isAdmin }) });
     return a;
@@ -50,7 +52,14 @@ describe("portal social admin routes", () => {
       ["POST", "/portal/api/admin/social/posts/00000000-0000-4000-8000-000000000000/edit"],
       ["POST", "/portal/api/admin/social/posts/00000000-0000-4000-8000-000000000000/approve"],
       ["POST", "/portal/api/admin/social/posts/00000000-0000-4000-8000-000000000000/reject"],
-      ["POST", "/portal/api/admin/social/run"]
+      ["POST", "/portal/api/admin/social/run"],
+      ["POST", "/portal/api/admin/social/import"],
+      ["POST", "/portal/api/admin/social/posts/00000000-0000-4000-8000-000000000000/schedule"],
+      ["POST", "/portal/api/admin/social/posts/00000000-0000-4000-8000-000000000000/thread"],
+      ["POST", "/portal/api/admin/social/posts/00000000-0000-4000-8000-000000000000/images"],
+      ["POST", "/portal/api/admin/social/posts/00000000-0000-4000-8000-000000000000/images/00000000-0000-4000-8000-000000000001/delete"],
+      ["GET", "/portal/api/admin/social/images/00000000-0000-4000-8000-000000000001"],
+      ["POST", "/portal/api/admin/social/threads/launch/approve"]
     ];
     user = null;
     for (const [method, url] of routes) expect((await app.inject({ method: method as "GET", url, payload: method === "POST" ? {} : undefined })).statusCode).toBe(401);
@@ -126,6 +135,67 @@ describe("portal social admin routes", () => {
     const a = await post(`/portal/api/admin/social/posts/${d.json().post.id}/approve`);
     expect(a.json().post.status).toBe("approved");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  const PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+  it("import creates drafts once; re-importing reports them as existing", async () => {
+    const payload = {
+      posts: [
+        { text: "Launch thread 1", threadKey: "launch", position: 1, scheduledAtLocal: "2026-12-01T09:30", images: [{ filename: "hero.png", base64: PNG_B64, alt: "Hero" }] },
+        { text: "Launch thread 2", threadKey: "launch", position: 2 },
+        { text: "Single post", scheduledAt: "2026-12-02T15:00:00Z" }
+      ]
+    };
+    const a = await post("/portal/api/admin/social/import", payload);
+    expect(a.statusCode).toBe(200);
+    expect(a.json()).toMatchObject({ ok: true, existing: [], errors: [] });
+    expect(a.json().created).toHaveLength(3);
+    const b = await post("/portal/api/admin/social/import", payload);
+    expect(b.json().created).toEqual([]);
+    expect(b.json().existing).toHaveLength(3);
+    const list = (await app.inject({ url: "/portal/api/admin/social" })).json();
+    expect(list.queue).toHaveLength(3);
+    const first = list.queue.find((p: { text: string }) => p.text === "Launch thread 1");
+    expect(first).toMatchObject({ status: "draft", kind: "import", threadId: "launch", threadPosition: 1, scheduledAtMs: Date.UTC(2026, 11, 1, 15, 30), scheduledAtLocal: "2026-12-01T09:30", scheduleTimeZone: "America/Chicago" });
+    expect(first.images).toHaveLength(1);
+    // Thumbnails: the bytes, as the sniffed type.
+    const img = await app.inject({ url: first.images[0].url });
+    expect(img.statusCode).toBe(200);
+    expect(img.headers["content-type"]).toBe("image/png");
+    expect(img.rawPayload.equals(Buffer.from(PNG_B64, "base64"))).toBe(true);
+    expect((await post("/portal/api/admin/social/import", { posts: [{ text: "x", scheduledAt: "tomorrow" }] })).statusCode).toBe(400);
+    expect((await post("/portal/api/admin/social/import", { posts: [] })).statusCode).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("image upload, schedule and thread routes; a thread approval posts the chain", async () => {
+    await post("/portal/api/admin/social/settings", { enabled: true });
+    let n = 0;
+    fetchMock.mockImplementation(async (url: string) =>
+      url.endsWith("/2/media/upload")
+        ? new Response(JSON.stringify({ data: { id: "7001" } }), { status: 200 })
+        : new Response(JSON.stringify({ data: { id: `186000000000000000${++n}` } }), { status: 201 })
+    );
+    const one = (await post("/portal/api/admin/social/drafts", { text: "Thread one", threadId: "t1" })).json().post.id;
+    const two = (await post("/portal/api/admin/social/drafts", { text: "Thread two" })).json().post.id;
+    expect((await post(`/portal/api/admin/social/posts/${two}/thread`, { threadId: "t1" })).json().post).toMatchObject({ threadId: "t1", threadPosition: 2 });
+    const up = await post(`/portal/api/admin/social/posts/${one}/images`, { filename: "a.png", base64: PNG_B64 });
+    expect(up.statusCode).toBe(200);
+    expect((await post(`/portal/api/admin/social/posts/${one}/images`, { filename: "a.gif", base64: Buffer.from("GIF89a").toString("base64") })).statusCode).toBe(422);
+    const s = await post(`/portal/api/admin/social/posts/${one}/schedule`, { scheduledAtLocal: "2099-01-01T08:00" });
+    expect(s.json().post.scheduledAtLocal).toBe("2099-01-01T08:00");
+    const ap = await post("/portal/api/admin/social/threads/t1/approve");
+    expect(ap.statusCode).toBe(200);
+    expect(ap.json().note).toMatch(/Scheduled/);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect((await post(`/portal/api/admin/social/posts/${two}/schedule`, { scheduledAt: null })).statusCode).toBe(200);
+    expect(await svcOf().sendDue()).toBe(2);
+    const bodies = fetchMock.mock.calls.filter(([u]) => String(u).endsWith("/2/tweets")).map(([, init]) => JSON.parse(String((init as RequestInit).body)));
+    expect(bodies).toEqual([
+      { text: "Thread one", media: { media_ids: ["7001"] } },
+      { text: "Thread two", reply: { in_reply_to_tweet_id: "1860000000000000001" } }
+    ]);
   });
 
   it("serves the Settings > Social posts page shell with no data", async () => {

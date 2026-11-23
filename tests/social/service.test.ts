@@ -14,7 +14,7 @@ function harness(o: { config?: Partial<SocialConfig>; enabled?: boolean; xStatus
   const calls: Array<{ url: string; body: string | undefined; auth: string }> = [];
   let nextId = 1000;
   const fetch: FetchLike = vi.fn(async (url, init) => {
-    calls.push({ url, body: init.body, auth: init.headers.authorization ?? "" });
+    calls.push({ url, body: init.body as string | undefined, auth: init.headers.authorization ?? "" });
     const status = o.xStatus ?? 201;
     return { status, text: async () => (status === 201 ? JSON.stringify({ data: { id: String(nextId++), text: "x" } }) : JSON.stringify({ title: "Forbidden", detail: "duplicate content" })) };
   });
