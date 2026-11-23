@@ -12,7 +12,7 @@ export function registerReviewsPage(app: FastifyInstance): void {
 app.get("/portal/reviews", async (_req, reply) => {
   const content = `
     <style nonce="${CSP_NONCE}">
-      .reviews-layout { display:flex; gap:12px; min-height:calc(100vh - 120px); }
+      .reviews-layout { display:flex; gap:12px; min-height:calc(100vh - 120px); min-height:calc(100dvh - 120px); }
       .reviews-list { width:320px; min-width:280px; flex-shrink:0; }
       .reviews-detail { flex:1; min-width:0; }
       .review-item {

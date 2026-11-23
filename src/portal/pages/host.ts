@@ -101,6 +101,8 @@ export function hostPageHtml(state: HostFormState = { kind: "blank" }): string {
         .nav-links a:hover, .nav-links a.active { color: var(--text); background: var(--bg-elevated); }
         .nav-actions { display: flex; gap: 8px; align-items: center; }
         @media (max-width: 760px) { .nav-links { display: none; } }
+        /* Phones: icon-only theme toggle so Sign in and Get started fit without sideways scrolling. */
+        @media (max-width: 480px) { .nav-actions { gap: 6px; } .nav-actions [data-theme-label] { display: none; } }
         .head { padding: 56px 0 8px; max-width: 720px; }
         .head h1 { font-size: clamp(30px, 4vw, 42px); line-height: 1.1; letter-spacing: -0.02em; margin: 12px 0 14px; }
         .head p { color: var(--text-secondary); font-size: 16px; line-height: 1.6; }

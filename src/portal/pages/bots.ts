@@ -70,7 +70,7 @@ export function registerBotsPage(app: FastifyInstance): void {
       .bots-empty p { max-width:420px; margin:0 auto; font-size:13px; line-height:1.6; }
 
       /* ── One bot (the desktop's BotView layout) ── */
-      .bot-view { display:flex; height:calc(100vh - var(--topbar-h)); min-height:0; }
+      .bot-view { display:flex; height:calc(100vh - var(--topbar-h)); height:calc(100dvh - var(--topbar-h)); min-height:0; }
       .bot-main { flex:1; min-width:0; display:flex; flex-direction:column; }${QUOTE_SELECTION_CSS}      .bot-head { display:flex; gap:12px; align-items:flex-start; padding:14px 20px; border-bottom:1px solid var(--card-border); }
       .bot-head .who { flex:1; min-width:0; }
       .bot-head .line1 { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
@@ -156,7 +156,7 @@ export function registerBotsPage(app: FastifyInstance): void {
       .d-meter { height:6px; border-radius:3px; background:var(--bg-elevated); overflow:hidden; }
       .d-meter > span { display:block; height:100%; width:0; background:var(--brand); }
       pre.memory { white-space:pre-wrap; font-family:var(--font-mono); font-size:12px; background:var(--bg-input); padding:10px; border-radius:var(--radius-sm); max-height:50vh; overflow:auto; }
-      dialog.bot-edit { width:min(560px, calc(100vw - 32px)); max-height:calc(100vh - 48px); border:1px solid var(--border-strong); border-radius:var(--radius-md); background:var(--bg-surface); color:var(--text); padding:0; }
+      dialog.bot-edit { width:min(560px, calc(100vw - 32px)); max-height:calc(100vh - 48px); max-height:calc(100dvh - 48px); border:1px solid var(--border-strong); border-radius:var(--radius-md); background:var(--bg-surface); color:var(--text); padding:0; }
       dialog.bot-edit::backdrop { background:var(--scrim); }
       .bot-edit form { padding:18px 20px; display:flex; flex-direction:column; gap:12px; }
       .bot-edit label { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--text-secondary); }

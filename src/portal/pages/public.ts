@@ -87,6 +87,8 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing(), o
         .footer-legal a { color: var(--muted); } .footer-legal a:hover { color: var(--text); }
         .ok { color: var(--ok); font-weight: 600; }
         @media (max-width: 760px) { .nav-links { display: none; } }
+        /* Phones: icon-only theme toggle so Sign in and Get started fit without sideways scrolling. */
+        @media (max-width: 480px) { .nav-actions { gap: 6px; } .nav-actions [data-theme-label] { display: none; } }
 
         .hero { padding: 72px 0 40px; display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 40px; align-items: center; }
         .hero h1 { font-size: clamp(34px, 5vw, 54px); line-height: 1.08; letter-spacing: -0.025em; margin: 14px 0 16px; }
@@ -125,6 +127,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing(), o
         .formula { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.7; border: 1px solid var(--card-border); border-radius: var(--radius-md); background: var(--bg-input); padding: 16px 18px; color: var(--text-secondary); overflow-x: auto; }
         .formula b { color: var(--text); font-weight: 600; }
         .classes { border: 1px solid var(--card-border); border-radius: var(--radius-md); overflow: hidden; }
+        .classes { overflow-x: auto; }
         .classes table { font-size: 13px; }
         .classes th:first-child, .classes td:first-child { padding-left: 14px; }
         .host-tiers { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
@@ -306,6 +309,8 @@ function publicDocumentPage(opts: { title: string; description: string; lead?: s
         .footer-legal { font-size: 12px; color: var(--muted); margin-top: 10px; display: flex; gap: 12px; flex-wrap: wrap; }
         .footer-legal a { color: var(--muted); } .footer-legal a:hover { color: var(--text); }
         @media (max-width: 760px) { .nav-links { display: none; } }
+        /* Phones: icon-only theme toggle so Sign in and Get started fit without sideways scrolling. */
+        @media (max-width: 480px) { .nav-actions { gap: 6px; } .nav-actions [data-theme-label] { display: none; } }
         .content { max-width: 760px; margin: 40px auto 0; border: 1px solid var(--card-border); border-radius: var(--radius-lg); padding: 32px; background: var(--card); overflow-wrap: anywhere; }
         @media (max-width: 640px) { .content { padding: 20px 16px; } }
         .content h1 { margin: 0 0 12px; font-size: 26px; letter-spacing: -0.02em; }
