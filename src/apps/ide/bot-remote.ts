@@ -16,6 +16,11 @@
  * on Accept edits (Auto only as a request), with the id fixed by the account and request id so a
  * retry makes no second bot. Nothing from the web can set or create a folder: that is
  * BotManager.setupFolder, reached only from the desktop app (/v1/ide/bots/:id/folder).
+ *
+ * A bot's frontier lead (its owner's key, bot-frontier.ts) is turned on only in the desktop app:
+ * settings changes from the web can't touch it, and a frontier model is never a bot's compute. The
+ * web sees whether it is on and today's spend, and the owner may answer the bot's ask to use it
+ * (approve_frontier / decline_frontier: the account must be the bot's owner).
  */
 
 import { basename } from "node:path";
@@ -27,6 +32,8 @@ import {
   type BotControlRequest, type BotControlResult, type BotsSnapshot, type RelayControls, type RemoteBotMessage, type RemoteBotRun, type RemoteBotSummary,
 } from "../../common/bot-relay.js";
 import { BotError, botPatchSchema, type BotInput, type BotManager, type BotMessage, type BotRun, type BotView } from "./bots.js";
+import { frontierLeadName } from "./frontier-access.js";
+import { FRONTIER_ASK_TOOL } from "./bot-frontier.js";
 
 function remoteRun(r: BotRun): RemoteBotRun {
   return {
@@ -81,6 +88,7 @@ export function remoteSummary(b: BotView, messages: BotMessage[]): RemoteBotSumm
     ...(b.held ? { held: b.held } : {}),
     ...(b.lastRun ? { lastRun: remoteRun(b.lastRun) } : {}),
     pending: b.pending.map((p) => ({ callId: p.callId, tool: p.tool, detail: toolCallDetail(p.tool, p.args) })),
+    ...(b.frontierLead || b.frontierSpentTodayUsd ? { frontier: { on: !!b.frontierLead, ...(b.frontierLead ? { name: frontierLeadName(b.frontierLead) } : {}), spentTodayUsd: b.frontierSpentTodayUsd ?? 0 } } : {}),
     queuedMessages: b.queuedMessages,
     ...(b.auto ? { idleStreak: b.auto.idleStreak } : {}),
     tail: messages.slice(-SNAPSHOT_TAIL_MESSAGES).map((m) => remoteMessage(m, pendingIds, SNAPSHOT_MESSAGE_CHARS)),
@@ -129,18 +137,33 @@ export function runRemoteBotCommand(bots: BotManager, botId: string, request: Bo
         // The desktop form's validation, then BotManager's own checks (schedule, compute, triggers).
         const patch = botPatchSchema.safeParse(request.args);
         if (!patch.success) return { status: "refused", error: "invalid_settings", message: patch.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ").slice(0, 300) };
-        // Permissions (tools, auto-approval, the permission mode) change on the Mac only.
-        const { projectRoot, repository, allowedTools, autoApproveEdits, mode, ...safe } = patch.data;
+        // Permissions (tools, auto-approval, the permission mode) and the frontier lead change on the Mac only.
+        const { projectRoot, repository, allowedTools, autoApproveEdits, mode, frontierLead, frontierRunCapUsd, frontierDailyCapUsd, ...safe } = patch.data;
+        if (frontierLead !== undefined || frontierRunCapUsd !== undefined || frontierDailyCapUsd !== undefined) {
+          return { status: "refused", error: "change_on_mac", message: "A bot's frontier lead (your own key) is turned on and off in the EdgeCoder app on the Mac." };
+        }
         if (projectRoot !== undefined || repository !== undefined || allowedTools !== undefined || autoApproveEdits !== undefined || mode !== undefined) {
           return { status: "refused", error: "change_on_mac", message: "The folder, repository, tools and auto-approval are changed on the Mac." };
         }
-        bots.update(botId, safe);
-        return { status: "done" };
+        const updated = bots.update(botId, safe);
+        // A GitHub trigger added from the web turns the frontier lead off: say so.
+        return updated.notice ? { status: "done", message: updated.notice.slice(0, 300) } : { status: "done" };
       }
       case "approve": {
         // Only a call this bot is waiting on right now; the first answer (Mac or web) wins.
-        if (!bot.pending.some((p) => p.callId === request.args.callId)) return { status: "refused", error: "no_pending_approval", message: "That approval was already answered or the run ended." };
+        const waiting = bot.pending.find((p) => p.callId === request.args.callId);
+        if (!waiting) return { status: "refused", error: "no_pending_approval", message: "That approval was already answered or the run ended." };
+        // Apps that only know Approve and Deny (the phone, an older web page): a frontier ask is approved for this run, or declined; still owner-only.
+        if (waiting.tool === FRONTIER_ASK_TOOL) return bots.answerFrontier(botId, request.args.callId, request.args.approved ? "run" : "decline", ctx.requestedBy) ? { status: "done" } : { status: "refused", error: "no_pending_approval" };
         return bots.approve(botId, request.args.callId, request.args.approved) ? { status: "done" } : { status: "refused", error: "no_pending_approval" };
+      }
+      case "approve_frontier":
+      case "decline_frontier": {
+        // Only the bot's owner (checked in answerFrontier), only an ask it is waiting on right now.
+        const choice = request.action === "decline_frontier" ? "decline" : request.args.scope;
+        return bots.answerFrontier(botId, request.args.callId, choice, ctx.requestedBy)
+          ? { status: "done" }
+          : { status: "refused", error: "no_pending_approval", message: "That question was already answered or the run ended." };
       }
       case "messages": {
         const all = bots.messages(botId);
@@ -163,6 +186,7 @@ export function runRemoteBotCommand(bots: BotManager, botId: string, request: Bo
   } catch (err) {
     if (err instanceof BotError) {
       if (err.status === 404) return { status: "refused", error: "no_such_bot", message: err.message.slice(0, 300) };
+      if (err.status === 403) return { status: "refused", error: "not_this_account", message: err.message.slice(0, 300) };
       return { status: err.status < 500 ? "refused" : "failed", error: err.status < 500 ? "invalid_settings" : "bot_error", message: err.message.slice(0, 300) };
     }
     if (err instanceof z.ZodError) return { status: "refused", error: "invalid_settings", message: err.issues.map((i) => i.message).join("; ").slice(0, 300) };
@@ -175,12 +199,12 @@ function createFromWeb(bots: BotManager, botId: string, args: Extract<BotControl
   if (!requestedBy) return { status: "refused", error: "not_this_account" };
   // One bot per request and account, whatever the retries; a frame naming another id is refused.
   if (botId !== webBotId(requestedBy, args.requestId)) return { status: "refused", error: "bad_bot_id" };
-  if (isFrontierModel(args.compute?.model)) return { status: "refused", error: "invalid_settings", message: "Bots never use a frontier key." };
+  if (isFrontierModel(args.compute?.model)) return { status: "refused", error: "invalid_settings", message: "A bot's compute can't be a frontier model. Turn on its frontier lead in the EdgeCoder app on the Mac." };
   // The desktop form's validation of every field (a folder is never part of a web create).
   const { requestId, suggestedFolder, ...fields } = args;
   const checked = botPatchSchema.safeParse(fields);
   if (!checked.success) return { status: "refused", error: "invalid_settings", message: checked.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ").slice(0, 300) };
-  const { projectRoot: _p, allowedTools: _t, autoApproveEdits: _a, memory: _m, ...safe } = checked.data;
+  const { projectRoot: _p, allowedTools: _t, autoApproveEdits: _a, memory: _m, frontierLead: _fl, frontierRunCapUsd: _fr, frontierDailyCapUsd: _fd, ...safe } = checked.data;
   const r = bots.createFromWeb({ ...(safe as Omit<BotInput, "projectRoot">), name: args.name, id: botId, requestId, requestedBy, ...(suggestedFolder ? { suggestedFolder } : {}) });
   return { status: "done", data: { botId: r.bot.id, created: r.created, status: r.bot.status } };
 }

@@ -3,7 +3,7 @@
 import { FAILURE_STATUS, failureKind, type FailureKind } from "./failures";
 import { applyAgentEvent, type AgentTurn } from "./agent-events";
 import type { IdeStreamEvent } from "./api";
-import { frontierName } from "./compute-choice";
+import { formatUsd, frontierName } from "./compute-choice";
 import { hardwareShort, type Served } from "./served";
 
 export type BotStatus = "idle" | "running" | "needs_approval" | "paused" | "over_budget" | "out_of_csats" | "error" | "needs_folder";
@@ -62,6 +62,8 @@ export interface BotRun {
   where?: string;
   /** e.g. "ran on a smaller local model (no cSats)" */
   note?: string;
+  /** Estimated USD spent on your frontier key in this run. */
+  frontierUsd?: number;
   error?: string;
 }
 
@@ -134,6 +136,16 @@ export interface Bot {
   activity?: string;
   /** Made on the web and waiting for its folder (status "needs_folder"). */
   setup?: BotSetup;
+  /** The account signed in when it was made (or when you turned its frontier lead on here). */
+  ownerAccount?: string;
+  /** Lead with your frontier key (`frontier/<provider>/<model>`), after you approve each use; null/unset: off. */
+  frontierLead?: string | null;
+  frontierRunCapUsd?: number;
+  frontierDailyCapUsd?: number;
+  /** "Approve for today": runs use the key without asking until this time. */
+  frontierApprovedUntilMs?: number;
+  /** Estimated USD spent on your frontier key today. */
+  frontierSpentTodayUsd?: number;
 }
 
 export interface BotMessage {
@@ -164,6 +176,34 @@ export interface BotInput {
   compute?: BotCompute;
   color?: string;
   avatarShape?: string;
+  frontierLead?: string | null;
+  frontierRunCapUsd?: number;
+  frontierDailyCapUsd?: number;
+}
+
+/** The pending item a bot uses to ask before it uses your frontier key (the server's FRONTIER_ASK_TOOL). */
+export const FRONTIER_ASK_TOOL = "use_frontier";
+/** The lead a bot's switch turns on by default. */
+export const DEFAULT_BOT_FRONTIER_LEAD = "frontier/anthropic/claude-opus-5-5";
+export const DEFAULT_BOT_FRONTIER_RUN_CAP_USD = 2;
+export const DEFAULT_BOT_FRONTIER_DAILY_CAP_USD = 5;
+
+/** The bot's ask to use your frontier key, if it is waiting on one: the question and the model's short name. */
+export function frontierAsk(bot: Pick<Bot, "pending">): { callId: string; question: string; name: string; capUsd: number } | null {
+  const p = bot.pending.find((x) => x.tool === FRONTIER_ASK_TOOL);
+  if (!p) return null;
+  const name = typeof p.args.name === "string" ? p.args.name : "your frontier key";
+  const capUsd = typeof p.args.capUsd === "number" ? p.args.capUsd : DEFAULT_BOT_FRONTIER_RUN_CAP_USD;
+  const question = typeof p.args.question === "string" ? p.args.question : `Use ${name} for this run? Up to ${formatUsd(capUsd)}.`;
+  return { callId: p.callId, question, name, capUsd };
+}
+
+/** "Claude Opus 5.5 · $0.42 today" (the frontier lead's spend line), or null when it isn't on and spent nothing. */
+export function frontierSpendLine(bot: Pick<Bot, "frontierLead" | "frontierSpentTodayUsd" | "frontierDailyCapUsd">): string | null {
+  const spent = bot.frontierSpentTodayUsd ?? 0;
+  if (!bot.frontierLead && !spent) return null;
+  const who = bot.frontierLead ? frontierName(bot.frontierLead) : "Your frontier key";
+  return `${who} · ${formatUsd(spent)} of ${formatUsd(bot.frontierDailyCapUsd ?? DEFAULT_BOT_FRONTIER_DAILY_CAP_USD)} today`;
 }
 
 /** A tool call the bot asked you about, as a card in the conversation. */
@@ -519,6 +559,8 @@ export function readableSummary(summary: string | undefined): string {
 export function botStatusLine(bot: Bot, now = Date.now()): string {
   switch (bot.status) {
     case "needs_approval": {
+      const ask = frontierAsk(bot);
+      if (ask) return `Needs your OK: use ${ask.name}`;
       const p = bot.pending[0];
       const what = p ? (p.tool === "run_shell" && typeof p.args.command === "string" ? `run \`${p.args.command}\`` : p.tool.replace(/_/g, " ")) : "a tool call";
       return `Needs approval: ${what}`;

@@ -12,10 +12,10 @@
   import { botStatusChip, offlinePausedIds } from "../lib/offline-bots";
   import { onServiceReady, serviceStatus } from "../lib/service-status";
   import { Play, Pause, RotateCw, Pencil, Trash2, History, MessageSquare, Ellipsis, CircleAlert, X, CalendarClock, Cpu, Folder, PanelRight, Copy, FolderOpen, GitPullRequest, GitBranch, Zap, RefreshCw } from "@lucide/svelte";
-  import { approveBotCall, botHistory, botMessages, cancelBotRun, deleteBot, getBot, runBot, sendBotMessage, syncBotRepository, updateBot, botErrorText } from "../lib/api";
+  import { answerBotFrontier, approveBotCall, botHistory, botMessages, cancelBotRun, deleteBot, getBot, runBot, sendBotMessage, syncBotRepository, updateBot, botErrorText } from "../lib/api";
   import {
     NOTICE_ACTION_TEXT, RUN_STATUS_TEXT, askCards, botModeOf, autoStatus, botCompute, botPlacement, checksIn, routineText, botSubtitle, computeText, failureNotice, foldBotReply, folderName, formatCSats, prCards, readableSummary, reconcileRuns, relativeTime, runSourceText, shownReplyText, scheduleText,
-    triggerStatusText, triggerText,
+    triggerStatusText, triggerText, frontierAsk, frontierSpendLine,
     type Bot, type BotMessage, type BotRun, type NoticeAction,
   } from "../lib/bots";
   import { open as openShell } from "@tauri-apps/plugin-shell";
@@ -306,6 +306,10 @@
   const retryRepo = () => act(() => syncBotRepository(bot.id));
   const send = (text: string, attachments?: AttachmentPayload[]) => act(() => sendBotMessage(bot.id, text, attachments));
   const approve = (callId: string, approved: boolean, always = false) => act(() => (always ? approveBotCall(bot.id, callId, approved, true) : approveBotCall(bot.id, callId, approved)));
+  // Its ask to use your frontier key (bot-frontier.ts on the server), and what that key spent today.
+  const fAsk = $derived(frontierAsk(bot));
+  const fSpend = $derived(frontierSpendLine(bot));
+  const answerFrontier = (callId: string, choice: "run" | "day" | "decline") => act(() => answerBotFrontier(bot.id, callId, choice));
   // Its permission mode, kept with the bot (shown live: a change applies to its next call).
   let modeOverride = $state<{ id: string; mode: EngineMode } | null>(null);
   const mode = $derived<EngineMode>(modeOverride && modeOverride.id === bot.id ? modeOverride.mode : botModeOf(bot));
@@ -384,6 +388,10 @@
             {formatCSats(bot.spentTodayCSats)} cSats today · no limit
           {/if}
         </span>
+        {#if fSpend}
+          <span class="sep" aria-hidden="true">·</span>
+          <span class="m" title="Estimated spend on your own frontier key today (the provider bills you)" data-testid="bot-frontier-spend">{fSpend}</span>
+        {/if}
         <span class="sep" aria-hidden="true">·</span>
         <span class="m" title="Compute: where its model calls run (change it in Edit)"><Cpu size={12} />{computeLabel}</span>
         {#if placement}
@@ -532,6 +540,18 @@
         {/if}
         {/if}
       {/each}
+      {#if fAsk}
+        <!-- Before it uses your frontier key: you approve each use (or every run today), or it carries on without it. -->
+        <div class="ask-card waiting" data-testid="frontier-ask-card" role="group" aria-label="{bot.name} asks: {fAsk.question}">
+          <div class="ask-q">{bot.name} asks: {fAsk.question}</div>
+          <div class="ask-detail-text">It leads with your own key (billed to you by the provider), and its usual compute does the rest. No answer in 30 minutes: it carries on without it.</div>
+          <div class="ask-choices">
+            <button class="primary" onclick={() => answerFrontier(fAsk.callId, "run")}>Approve this run</button>
+            <button onclick={() => answerFrontier(fAsk.callId, "day")}>Approve for today</button>
+            <button onclick={() => answerFrontier(fAsk.callId, "decline")}>Decline</button>
+          </div>
+        </div>
+      {/if}
       {#if pendingPlan}
         <PlanApproval onApprove={(m) => void approvePlan(m)} onRevise={() => botInput?.focus()} />
       {/if}
@@ -577,8 +597,8 @@
   {#if !bot.setup}
   <div class="composer">
     <!-- Working: the send arrow is Stop (no Stop in the header); Enter still sends, and the bot takes it next.
-         queue={[]}: the bot keeps its own queue, so messages go to it at once. Bots never use a
-         frontier key, so they can't see images or PDFs: those are saved in its folder by name. -->
+         queue={[]}: the bot keeps its own queue, so messages go to it at once. Bot models never
+         get images or PDFs (even with a frontier lead): those are saved in its folder by name. -->
     <ChatInput
       bind:this={botInput}
       onSend={send}
@@ -696,6 +716,7 @@
           {:else}
             <div class="d-sub">{formatCSats(bot.spentTodayCSats)} cSats · no limit</div>
           {/if}
+          {#if fSpend}<div class="d-sub" data-testid="bot-frontier-spend-detail">{fSpend} (your key)</div>{/if}
         </div>
         {#if bot.lastRun}
           <div class="d-section">
@@ -811,6 +832,10 @@
     white-space: pre-wrap;
     word-break: break-word;
     color: var(--text-primary);
+  }
+  .ask-detail-text {
+    font-size: 12px;
+    color: var(--text-secondary);
   }
   .ask-choices {
     display: flex;

@@ -638,6 +638,14 @@ const BOTS_PAGE_JS = String.raw`
       var b = state.bot;
       if (!b.pending || !b.pending.length) return "";
       return b.pending.map(function(p) {
+        if (p.tool === "use_frontier") {
+          // Its ask to use the owner's frontier key: this run, every run today, or no (only the owner's account can answer).
+          var fchoices = canControl()
+            ? '<button type="button" class="primary sm" data-frontier="run" data-call="' + escapeHtml(p.callId) + '">Approve this run</button><button type="button" class="sm" data-frontier="day" data-call="' + escapeHtml(p.callId) + '">Approve for today</button><button type="button" class="sm danger" data-frontier="decline" data-call="' + escapeHtml(p.callId) + '">Decline</button>'
+            : '<span class="on-mac">Answer on your machine' + (online() ? "" : " (it's offline)") + "</span>";
+          var fq = p.detail || "Use your frontier key for this run?";
+          return '<div class="ask-card" role="group" aria-label="' + escapeHtml(b.name + " asks: " + fq) + '"><div class="ask-q">' + escapeHtml(b.name + " asks: " + fq) + '</div><div class="muted u-fs-12">Your own key, billed to you by the provider. No answer in 30 minutes: it carries on without it.</div><div class="ask-choices">' + fchoices + "</div></div>";
+        }
         var q = p.tool === "run_shell" ? "Run this command?" : p.tool === "git_commit" ? "Commit?" : p.tool === "git_push" ? "Push?" : p.tool === "open_pull_request" ? "Open this pull request?" : "Allow " + p.tool.replace(/_/g, " ") + "?";
         var choices = canControl()
           ? '<button type="button" class="primary sm" data-approve="' + escapeHtml(p.callId) + '">Approve</button><button type="button" class="sm danger" data-deny="' + escapeHtml(p.callId) + '">Deny</button>'
@@ -733,7 +741,10 @@ const BOTS_PAGE_JS = String.raw`
         '<div class="d-section"><div class="d-label">Routines</div>' + routine + "</div>" +
         '<div class="d-section"><div class="d-label">Triggers</div>' + triggers + "</div>" +
         (b.repository ? '<div class="d-section"><div class="d-label">Repository</div><div class="d-row">' + escapeHtml(b.repository) + "</div>" + (b.repo ? '<div class="d-sub' + (b.repo.state === "error" ? "" : " muted") + '">' + escapeHtml(b.repo.message) + "</div>" : "") + "</div>" : "") +
-        '<div class="d-section"><div class="d-label">Compute</div><div class="d-row">' + BOT_ICONS.cpu + escapeHtml(botComputeText(b.compute)) + "</div></div>" +
+        '<div class="d-section"><div class="d-label">Compute</div><div class="d-row">' + BOT_ICONS.cpu + escapeHtml(botComputeText(b.compute)) + "</div>" +
+          // Its owner's frontier key: read-only here (turned on and off in the app on the machine).
+          (b.frontier ? '<div class="d-sub">' + escapeHtml((b.frontier.on ? (b.frontier.name || "Frontier") + " lead on (your key)" : "Frontier lead off") + " · $" + Number(b.frontier.spentTodayUsd || 0).toFixed(2) + " today") + '</div><div class="d-sub muted">Turned on and off in the EdgeCoder app on the machine.</div>' : "") +
+          "</div>" +
         '<div class="d-section"><div class="d-label">Budget today</div>' + (b.budgetCSatsPerDay != null
           ? '<div class="d-meter" role="meter" aria-label="Daily budget used" aria-valuemin="0" aria-valuemax="' + escapeHtml(b.budgetCSatsPerDay) + '" aria-valuenow="' + escapeHtml(b.spentTodayCSats) + '"><span id="bpDMeterFill"></span></div><div class="d-sub">' + escapeHtml(botCSats(b.spentTodayCSats) + " of " + botCSats(b.budgetCSatsPerDay) + " cSats") + "</div>"
           : '<div class="d-sub">' + escapeHtml(botCSats(b.spentTodayCSats) + " cSats · no limit") + "</div>") +
@@ -968,6 +979,13 @@ const BOTS_PAGE_JS = String.raw`
       input.addEventListener("input", grow);
       input.addEventListener("keydown", function(e) { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage(); } });
       document.getElementById("bpMessages").addEventListener("click", function(e) {
+        var f = e.target.closest && e.target.closest("[data-frontier]");
+        if (f) {
+          var fc = f.getAttribute("data-frontier"), fid = f.getAttribute("data-call");
+          if (fc === "decline") act("Declined", "decline_frontier", { callId: fid });
+          else act("Approved", "approve_frontier", { callId: fid, scope: fc === "day" ? "day" : "run" });
+          return;
+        }
         var a = e.target.closest && e.target.closest("[data-approve],[data-deny]");
         if (!a) return;
         var callId = a.getAttribute("data-approve") || a.getAttribute("data-deny");

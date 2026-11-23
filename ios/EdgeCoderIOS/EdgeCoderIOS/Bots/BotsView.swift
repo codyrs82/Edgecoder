@@ -219,7 +219,18 @@ struct BotDetailView: View {
                             VStack(alignment: .leading, spacing: 6) {
                                 Text(call.tool).font(.caption.weight(.semibold)).foregroundColor(Theme.textPrimary)
                                 Text(call.detail).font(.system(.caption, design: .monospaced)).foregroundColor(Theme.textSecondary)
-                                if canControl {
+                                if canControl && call.tool == "use_frontier" {
+                                    // The bot asks to use your own frontier key: this run, every run today, or no.
+                                    HStack {
+                                        Button("This run") { Task { await command("approve_frontier", args: ["callId": call.callId, "scope": "run"]) } }
+                                            .buttonStyle(.borderedProminent).tint(Theme.accent)
+                                        Button("Today") { Task { await command("approve_frontier", args: ["callId": call.callId, "scope": "day"]) } }
+                                            .buttonStyle(.bordered)
+                                        Button("Decline", role: .destructive) { Task { await command("decline_frontier", args: ["callId": call.callId]) } }
+                                            .buttonStyle(.bordered)
+                                    }
+                                    .disabled(sending)
+                                } else if canControl {
                                     HStack {
                                         Button("Approve") { Task { await command("approve", args: ["callId": call.callId, "approved": true]) } }
                                             .buttonStyle(.borderedProminent).tint(Theme.accent)

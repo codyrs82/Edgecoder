@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({
   cancelBotRun: vi.fn(),
   sendBotMessage: vi.fn(),
   approveBotCall: vi.fn(),
+  answerBotFrontier: vi.fn(),
   getBot: vi.fn(),
   botErrorText: (e: unknown) => String(e),
 }));
@@ -448,5 +449,33 @@ describe("BotView: a bot made on the web (#409)", () => {
   it("a bot with a folder has no card", () => {
     setup();
     expect(screen.queryByTestId("bot-folder-setup")).toBeNull();
+  });
+});
+
+describe("BotView: your frontier key", () => {
+  const LEAD = "frontier/anthropic/claude-opus-5-5";
+  const ask = { callId: "fr_1", tool: "use_frontier", args: { model: LEAD, name: "Claude", capUsd: 2, why: "start", question: "Use Claude for this run? Up to $2.00." } };
+
+  it("asks in the chat with three choices and answers with the one you pick", async () => {
+    api.answerBotFrontier.mockResolvedValue({ ok: true });
+    for (const [label, choice] of [["Approve this run", "run"], ["Approve for today", "day"], ["Decline", "decline"]] as const) {
+      setup(harry({ status: "needs_approval", lastRun: undefined, frontierLead: LEAD, pending: [ask] }));
+      const card = await screen.findByTestId("frontier-ask-card");
+      expect(card.textContent).toMatch(/Harry asks: Use Claude for this run\? Up to \$2\.00\./);
+      await fireEvent.click(within(card).getByRole("button", { name: label }));
+      expect(api.answerBotFrontier).toHaveBeenLastCalledWith("bot_h", "fr_1", choice);
+      cleanup();
+    }
+  });
+
+  it("shows dollars spent today on your key next to cSats", () => {
+    setup(harry({ frontierLead: LEAD, frontierSpentTodayUsd: 0.42, frontierDailyCapUsd: 5 }));
+    expect(screen.getByTestId("bot-frontier-spend").textContent).toBe("Claude Opus 5.5 · $0.42 of $5.00 today");
+  });
+
+  it("shows nothing about the key for a bot that doesn't use it", () => {
+    setup();
+    expect(screen.queryByTestId("bot-frontier-spend")).toBeNull();
+    expect(screen.queryByTestId("frontier-ask-card")).toBeNull();
   });
 });

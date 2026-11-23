@@ -15,7 +15,7 @@
  *
  * - A bot saves them into its folder (`.edgecoder/attachments/`, ignored by git) so it can read
  *   or use them with its tools, and the model gets text files inline plus the saved path of each.
- *   Bots never use a frontier key, so no bot model sees images or PDFs: it gets the name and path.
+ *   No bot model sees images or PDFs (not even one led by its owner's frontier key): it gets the name and path.
  * - The chat (/v1/ide/chat) passes images and PDFs as message parts only to a frontier model that
  *   takes them (frontier.ts); every other backend gets a note instead (see `withoutMedia`).
  */
