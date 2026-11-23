@@ -17,6 +17,7 @@ import { PUBLIC_DOCUMENTS } from "../legal/documents.js";
 import { renderMarkdown } from "../legal/markdown.js";
 import type { ProofOfReservesReport } from "../../economy/proof-of-reserves.js";
 import { portalNetworkName, unavailableReservesReport } from "../reserves.js";
+import { shortLinkTarget } from "../short-links.js";
 
 /** Sats-per-hour cell with the USD conversion underneath (reference mode: USD only). */
 function priceCell(c: { satsPerHour?: number; usdPerHour: number }): string {
@@ -485,6 +486,12 @@ for (const key of Object.keys(LEGAL_PAGES) as LegalPageKey[]) {
   app.get(LEGAL_PAGES[key].path, async (_req, reply) => reply.type("text/html").send(legalPageHtml(key)));
 }
 app.get("/bluetooth", async (_req, reply) => reply.type("text/html").send(bluetoothPageHtml()));
+// Short links for X posts (src/portal/short-links.ts): /x/<campaign> → a public page with UTM tags.
+app.get<{ Params: { campaign: string } }>("/x/:campaign", async (req, reply) => {
+  const to = shortLinkTarget(req.params.campaign);
+  if (!to) return reply.code(404).type("text/plain").send("Not found");
+  return reply.header("cache-control", "no-store").redirect(to, 302);
+});
 // Proof of reserves: aggregate totals from the coordinator's public /economy/reserves (cached).
 const reserves = async (): Promise<ProofOfReservesReport> =>
   deps.getReserves ? deps.getReserves().catch(() => unavailableReservesReport("coordinator_unreachable", portalNetworkName(), Date.now())) : unavailableReservesReport("coordinator_unreachable", portalNetworkName(), Date.now());

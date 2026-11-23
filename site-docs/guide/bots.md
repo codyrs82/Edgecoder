@@ -30,6 +30,7 @@ that folder on Auto compute.
 | Schedule | `every N minutes/hours/days`, `hourly`, `daily`, `daily at HH:MM`, or a cron expression such as `0 9 * * 1-5`. At most every 5 minutes; local time. |
 | Daily budget | cSats a day (default 100). Runs on this computer are free. |
 | Tools | Reading is always on. Optional: Edit files, Run commands, Commit and push. |
+| Lead with Claude (your key) | Off by default. Shown only when your account has a frontier key on this machine. Per-run cap (default $2) and daily cap (default $5) in USD. |
 
 **Approvals.** Shell commands, commits and pushes always ask first: the run pauses with **Needs
 approval** until you approve or reject. An unanswered approval is rejected after 24 hours. Turn off
@@ -40,6 +41,16 @@ project every 30 minutes, waiting longer (up to 8 hours) while nothing in the pr
 never runs twice at once, starts at most **Runs a day** (48 by default) runs on its own, and stops
 when its daily budget is spent. **Pause** stops everything it does on its own (messages still get
 answers), **Stop** ends the current run, and **Check now** nudges it.
+
+**Your frontier key.** Bots use your key only when only you can start them, and only after you
+approve each use. With **Lead with Claude (your key)** on, a bot with no GitHub triggers asks in
+its chat before a run uses your key: "Use Claude for this run? Up to $2.00." Choose **Approve this
+run**, **Approve for today** (every run until midnight) or **Decline**. With no answer in 30
+minutes, the run goes on with the bot's own compute. When a run reaches its cap, the bot asks
+again. Claude leads the run, and the bot's compute does the rest. A run started by a GitHub trigger
+never uses the key. Adding a GitHub trigger turns the switch off. The switch is set only in the
+app; on the web you can see whether it is on and answer the bot's question. The bot's view shows
+today's spend on your key next to its cSats. See [Frontier models on your own key](https://github.com/codyrs82/Edgecoder/blob/main/docs/frontier-keys.md#bots-and-your-key).
 
 Desktop bots' settings and history stay on the machine (`~/.edgecoder/bots.json` and
 `~/.edgecoder/bots/<id>/`).

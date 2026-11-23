@@ -176,7 +176,7 @@ const githubSchema = z
 const computeSchema = z.unknown().transform((v, ctx) => {
   const c = normalizeCompute(v);
   if (!c) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'auto, "mine:<model>" or "network:<model>" (bots never use a frontier key)' });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'auto, "mine:<model>" or "network:<model>" (cloud bots never use a frontier key)' });
     return z.NEVER;
   }
   return c;
@@ -207,7 +207,7 @@ export const cloudBotCreateSchema = z
       if (v === undefined || v === null) return "auto";
       const c = normalizeCompute(v);
       if (!c) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'auto, "mine:<model>" or "network:<model>" (bots never use a frontier key)' });
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'auto, "mine:<model>" or "network:<model>" (cloud bots never use a frontier key)' });
         return z.NEVER;
       }
       return c;

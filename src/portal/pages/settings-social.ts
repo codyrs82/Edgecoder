@@ -56,6 +56,7 @@ export function socialPageContent(): string {
       .soc-thread { border-left:3px solid var(--brand-2); padding-left:10px; margin-bottom:12px; }
       .soc-approved { margin-top:12px; }
       .soc-approved summary { cursor:pointer; color:var(--muted); font-size:13px; padding:6px 0; }
+      .soc-saved { color:var(--muted); font-size:12px; margin-left:6px; }
       .soc-thread-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:12.5px; margin-bottom:6px; }
     </style>
     <h2 class="set-title">Social posts</h2>
@@ -210,7 +211,19 @@ export function socialPageScript(): string {
       const ul = el("ul", { class: "soc-problems" }); problemsList(ul, p.problems); box.appendChild(ul);
       if (p.error) box.appendChild(el("div", { class: "soc-error" }, p.error));
       ta.addEventListener("input", () => liveCheck(ta.value, m, ul));
+      // Every field saves itself (text on leaving the box, time and thread on change); Approve saves what is left first.
+      const flag = el("span", { class: "soc-saved", role: "status" });
+      m.after(flag);
+      if (editable) {
+        ta.addEventListener("blur", async () => {
+          if (ta.value === p.text || !ta.value.trim()) return;
+          const np = await autosave(p.id, "edit", { text: ta.value }, flag);
+          if (np) p.text = np.text ?? ta.value;
+        });
+      }
       // Images: thumbnails, remove, add (with alt text).
+      // Approved posts that have not gone out yet can still swap images.
+      const imagesEditable = editable || p.status === "approved";
       const images = p.images || [];
       if (images.length) {
         const thumbs = el("div", { class: "soc-thumbs" });
@@ -221,7 +234,7 @@ export function socialPageScript(): string {
           open.addEventListener("click", () => openLightbox(images, i));
           t.appendChild(open);
           t.appendChild(el("span", {}, img.alt ? "Alt: " + img.alt : "No alt text"));
-          if (editable) {
+          if (imagesEditable) {
             const rm = el("button", { type: "button", class: "btn-secondary" }, "Remove");
             rm.addEventListener("click", () => act(p.id, "images/" + encodeURIComponent(img.id) + "/delete", {}, rm));
             t.appendChild(rm);
@@ -230,7 +243,7 @@ export function socialPageScript(): string {
         });
         box.appendChild(thumbs);
       }
-      if (editable && images.length < 4) {
+      if (imagesEditable && images.length < 4) {
         const row = el("div", { class: "soc-row" });
         const file = el("input", { type: "file", accept: "image/png,image/jpeg", "aria-label": "Image" });
         const alt = el("input", { type: "text", maxlength: "1000", placeholder: "Alt text (optional)", "aria-label": "Alt text" });
@@ -249,42 +262,64 @@ export function socialPageScript(): string {
         row.appendChild(file); row.appendChild(alt); row.appendChild(add);
         box.appendChild(row);
       }
+      let saveTime = async () => true;
+      let when = null;
       if (schedulable) {
         const row = el("div", { class: "soc-row" });
-        const when = el("input", { type: "datetime-local", "aria-label": "Send time (" + TZ_LABEL + ")" });
+        when = el("input", { type: "datetime-local", "aria-label": "Send time (" + TZ_LABEL + ")" });
         when.value = p.scheduledAtLocal || "";
-        const setT = el("button", { type: "button", class: "btn-secondary" }, "Save time");
-        setT.addEventListener("click", () => { if (when.value) act(p.id, "schedule", { scheduledAtLocal: when.value }, setT); });
+        saveTime = async () => {
+          if (when.value === (p.scheduledAtLocal || "")) return true;
+          const np = await autosave(p.id, "schedule", { scheduledAtLocal: when.value || null }, flag);
+          if (!np) return false;
+          p.scheduledAtLocal = np.scheduledAtLocal ?? (when.value || null);
+          return true;
+        };
+        // A thread's time moves the whole thread: redraw so its other posts show it.
+        when.addEventListener("change", async () => { if ((await saveTime()) && p.threadId) await load(); });
         const clr = el("button", { type: "button", class: "btn-secondary" }, "Clear time");
         clr.addEventListener("click", () => act(p.id, "schedule", { scheduledAtLocal: null }, clr));
         row.appendChild(el("label", {}, "Send time (" + TZ_LABEL + ")" + (p.threadId ? ", whole thread" : "")));
-        row.appendChild(when); row.appendChild(setT); row.appendChild(clr);
+        row.appendChild(when); row.appendChild(clr);
         box.appendChild(row);
       }
+      let saveThread = async () => true;
       if (editable) {
         const row = el("div", { class: "soc-row" });
         const th = el("input", { type: "text", maxlength: "100", placeholder: "none", "aria-label": "Thread" });
         th.value = p.threadId || "";
         const pos = el("input", { type: "number", min: "1", max: "1000", placeholder: "last", "aria-label": "Position" });
         if (p.threadPosition) pos.value = String(p.threadPosition);
-        const setTh = el("button", { type: "button", class: "btn-secondary" }, "Save thread");
-        setTh.addEventListener("click", () => act(p.id, "thread", { threadId: th.value.trim() || null, ...(pos.value ? { position: Number(pos.value) } : {}) }, setTh));
+        saveThread = async () => {
+          const tid = th.value.trim() || null;
+          const ps = pos.value ? Number(pos.value) : null;
+          if (tid === (p.threadId || null) && (ps === null || ps === (p.threadPosition || null))) return true;
+          return !!(await autosave(p.id, "thread", { threadId: tid, ...(ps ? { position: ps } : {}) }, flag));
+        };
+        // Moving a post in or out of a thread regroups the queue: redraw after it saves.
+        const onThread = async () => { if (await saveThread()) await load(); };
+        th.addEventListener("change", onThread); pos.addEventListener("change", onThread);
         row.appendChild(el("label", {}, "Thread")); row.appendChild(th);
-        row.appendChild(el("label", {}, "Position")); row.appendChild(pos); row.appendChild(setTh);
+        row.appendChild(el("label", {}, "Position")); row.appendChild(pos);
         box.appendChild(row);
       }
       const actions = el("div", { class: "soc-actions" });
       if (editable) {
-        const save = el("button", { type: "button", class: "btn-secondary" }, "Save edit");
-        save.addEventListener("click", () => act(p.id, "edit", { text: ta.value }, save));
         const approve = el("button", { type: "button", class: "primary" }, p.threadId ? "Approve thread" : p.status === "failed" ? "Approve again" : "Approve");
-        approve.addEventListener("click", () => {
-          const later = p.scheduledAtLocal ? " at " + p.scheduledAtLocal.replace("T", " ") + " (" + TZ_LABEL + ")" : " now";
+        approve.addEventListener("click", async () => {
+          // What is on screen is what gets approved: the time and thread as shown, saved first.
+          const shown = when ? when.value : p.scheduledAtLocal || "";
+          const due = shown && new Date(shown + ":00").getTime() > Date.now() - 60_000 ? shown : "";
+          const later = due ? " at " + due.replace("T", " ") + " (" + TZ_LABEL + ")" : shown ? " now (the time set has passed)" : " now";
           const what = p.threadId ? "this whole thread" : "this";
           if (!confirm(state.sending.ok ? "Approve and post " + what + " to X" + (state.channels.nostr.configured ? " and Nostr" : "") + later + "?" : "Approve " + what + "? It is sent once posting is on.")) return;
+          approve.disabled = true;
+          try {
+            if (!(await saveThread()) || !(await saveTime())) return;
+          } finally { approve.disabled = false; }
           act(p.id, "approve", ta.value !== p.text ? { text: ta.value } : {}, approve);
         });
-        actions.appendChild(save); actions.appendChild(approve);
+        actions.appendChild(approve);
       }
       if (p.status === "draft" || p.status === "failed" || p.status === "approved") {
         const reject = el("button", { type: "button", class: "danger" }, "Reject");
@@ -356,6 +391,19 @@ export function socialPageScript(): string {
       if (!r.ok) { showError("Could not load social posts: " + (r.json.error || r.status)); return; }
       state = r.json;
       render();
+    }
+    // Saves one field of a post without a button: returns the updated post, or null (and says why).
+    async function autosave(id, action, body, flag) {
+      if (flag) flag.textContent = "Saving…";
+      const r = await call("/portal/api/admin/social/posts/" + encodeURIComponent(id) + "/" + action, { method: "POST", body: JSON.stringify(body) });
+      if (!r.ok) {
+        const why = (r.json.problems || []).map((x) => x.message).join(" ") || r.json.error || r.status;
+        if (flag) flag.textContent = "Not saved";
+        setStatus("Not saved: " + why);
+        return null;
+      }
+      if (flag) flag.textContent = "Saved";
+      return r.json.post || {};
     }
     async function act(id, action, body, btn) {
       btn.disabled = true;

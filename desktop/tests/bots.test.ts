@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { autoStatus, checksIn, routineText, botCompute, botInitial, botStatusLine, readableSummary, reconcileRuns, shownReplyText, MAX_SHOWN_REPLY, REPLY_TRIMMED_TEXT, botTitle, budgetText, computeText, failureNotice, foldBotReply, folderName, formatCSats, groupsOf, relativeTime, scheduleText, statusChip, toolsFor, type Bot } from "../src/lib/bots";
+import { frontierAsk, frontierSpendLine, autoStatus, checksIn, routineText, botCompute, botInitial, botStatusLine, readableSummary, reconcileRuns, shownReplyText, MAX_SHOWN_REPLY, REPLY_TRIMMED_TEXT, botTitle, budgetText, computeText, failureNotice, foldBotReply, folderName, formatCSats, groupsOf, relativeTime, scheduleText, statusChip, toolsFor, type Bot } from "../src/lib/bots";
 
 describe("bot header helpers", () => {
   it("status chip, folder name and compute text", () => {
@@ -202,5 +202,19 @@ describe("the bot page's bounded views", () => {
     expect(reconcileRuns([run("b")], run("a")).map((r) => r.id)).toEqual(["a", "b"]);
     const fresher = run("b", "running");
     expect(reconcileRuns([run("b"), run("c")], fresher)).toEqual([fresher, run("c")]);
+  });
+});
+
+describe("frontier lead helpers", () => {
+  const ask = { callId: "fr_1", tool: "use_frontier", args: { name: "Claude", capUsd: 2, question: "Use Claude for this run? Up to $2.00." } };
+  it("reads the bot's ask and says what it waits for", () => {
+    expect(frontierAsk(bot())).toBeNull();
+    expect(frontierAsk(bot({ pending: [ask] }))).toEqual({ callId: "fr_1", question: "Use Claude for this run? Up to $2.00.", name: "Claude", capUsd: 2 });
+    expect(botStatusLine(bot({ status: "needs_approval", pending: [ask] }))).toBe("Needs your OK: use Claude");
+  });
+  it("the spend line: only when the lead is on or it spent something", () => {
+    expect(frontierSpendLine(bot())).toBeNull();
+    expect(frontierSpendLine(bot({ frontierLead: "frontier/anthropic/claude-opus-5-5" }))).toBe("Claude Opus 5.5 · $0.00 of $5.00 today");
+    expect(frontierSpendLine(bot({ frontierSpentTodayUsd: 1.5, frontierDailyCapUsd: 3 }))).toBe("Your frontier key · $1.50 of $3.00 today");
   });
 });
