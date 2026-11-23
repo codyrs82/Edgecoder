@@ -388,6 +388,9 @@ export function evaluateShellCommand(
       if (outside !== undefined) return deny(`path '${outside}' is outside the project root`);
     }
   }
+  // `PATH="/opt/homebrew/opt/node@22/bin:$PATH" npm ci` (an approved command with a variable
+  // assignment first) needs the shell to apply the assignment and expand $PATH.
+  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[0])) return { allowed: true, argv, useShell: true };
   return { allowed: true, argv, useShell: false };
 }
 

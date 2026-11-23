@@ -78,6 +78,7 @@ import { frontierContextWindow, isFrontierModelId } from "../../inference-api/fr
 import { request as undiciRequest } from "undici";
 import { FREE_USED_NOTE, webSystemNote, webGrounding, WebToolSession, forgetWebAvailability, isWebTool, webAvailability, webReplyLimitsFromEnv, webStatusReason, webToolSchemas, type WebToolCall } from "../../web-tool/tools.js";
 import { modelCallsTools } from "../../web-tool/model-support.js";
+import { toolchainFailureHint, toolchainNote } from "./toolchain.js";
 
 // Forked by the agent: exit with it, so a restarted agent's provider can take the port.
 if (process.send) process.on("disconnect", () => process.exit(0));
@@ -1120,7 +1121,8 @@ const bots = new BotManager({
       const ctx = await agentPromptContext(process.env.OLLAMA_MODEL || "qwen3.5:9b");
       const root = botWorkRoot(bot);
       const rules = readProjectRules(root);
-      return (format) => buildIdeAgentSystemPrompt(ctx, root, rules, format);
+      const node = toolchainNote(root);
+      return (format) => [buildIdeAgentSystemPrompt(ctx, root, rules, format), node].filter(Boolean).join("\n\n");
     },
     checkpoints,
     // "Search the web" (docs/web-tool.md): through EdgeCoder's servers; refused once today's budget is spent.
@@ -1441,6 +1443,7 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
 
   const promptCtx = await agentPromptContext(chatModel);
   const projectRules = readProjectRules(projectRoot);
+  const nodeNote = toolchainNote(projectRoot);
   const messages = withAttachments(body.messages, body.attachments ?? [], chatModel);
 
   const chatMode: PermissionMode = body.mode ?? (body.autoApprove === "edits" ? "auto-edits" : "ask");
@@ -1493,7 +1496,7 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
     chat: isFrontierModelId(chatModel)
       ? frontierChatFn(chatModel, { sessionKey: `chat:${turnId}` }, sendEvent, abort.signal)
       : chatFnFor(body.compute, chatModel, ollamaHost, sendEvent, abort.signal, "EdgeCoder chat", body.compute?.target === "auto" ? { sessionKey: `chat:${turnId}` } : undefined),
-    systemPrompt: (format) => [promptCtx ? buildIdeAgentSystemPrompt(promptCtx, projectRoot, projectRules, format) : "", web ? webSystemNote() : ""].filter(Boolean).join("\n\n"),
+    systemPrompt: (format) => [promptCtx ? buildIdeAgentSystemPrompt(promptCtx, projectRoot, projectRules, format) : "", promptCtx ? nodeNote : "", web ? webSystemNote() : ""].filter(Boolean).join("\n\n"),
     messages,
     // Web grounding: a question that needs fresh facts is searched once before the first turn (not in Manual, where web calls ask).
     ...(web ? webGrounding(web, messages, { skip: chatMode === "ask" }) : {}),
@@ -1527,6 +1530,7 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
       captureBeforeWrite: (path) => checkpoints.capture(turnId, path),
       turnId,
       decide: (tool, args) => decideFor(chatMode, projectRoot, tool, args),
+      shellHint: (command, output) => toolchainFailureHint(projectRoot, command, output),
     }),
     plan: chatMode === "plan",
   });
@@ -1721,7 +1725,9 @@ const sessions: SessionHub = new SessionHub({
   systemPrompt: async (s) => {
     const ctx = await agentPromptContext(s.compute.target === "local" ? s.model : process.env.OLLAMA_MODEL || "qwen3.5:9b");
     const rules = readProjectRules(s.projectRoot);
-    return withTentacleGuidance((format) => buildIdeAgentSystemPrompt(ctx, s.projectRoot, rules, format), tentacles.enabled(s.id), tentacles.unreported(s.id));
+    // The project's Node version versus the shell's, and how to run under the right one (toolchain.ts).
+    const node = toolchainNote(s.projectRoot);
+    return withTentacleGuidance((format) => [buildIdeAgentSystemPrompt(ctx, s.projectRoot, rules, format), node].filter(Boolean).join("\n\n"), tentacles.enabled(s.id), tentacles.unreported(s.id));
   },
   executor: (s) => {
     const index = codebaseIndexFor(s.projectRoot, ollamaHostForIndex());

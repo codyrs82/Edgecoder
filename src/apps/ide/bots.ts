@@ -56,6 +56,7 @@ import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
 import { decideToolCall, suggestRule, type Decision } from "./permission-policy.js";
 import { ensureRepo as realEnsureRepo } from "./repo-connect.js";
+import { toolchainFailureHint } from "./toolchain.js";
 import { COMPUTE_POLICIES, FALLBACK_NOTE, NETWORK_CLASSES, isNetworkClass, type NetworkClass, routeLabel, routeModelId, routeSummary, type ComputePolicy, type PlanOptions, type Route } from "../../inference-api/auto-route.js";
 import type { ChatBackend } from "../../inference-api/types.js";
 import { isFrontierModelId } from "../../inference-api/frontier-models.js";
@@ -2563,6 +2564,7 @@ export function agentBotRunner(d: {
       autoApproveEdits: ctx.bot.autoApproveEdits,
       allowShellAutoApprove: false,
       ...(ctx.decide ? { decide: ctx.decide } : {}),
+      shellHint: (command, output) => toolchainFailureHint(botWorkRoot(ctx.bot), command, output),
       ...(d.prepare ? { prepare: d.prepare(ctx.bot) } : {}),
     });
     const chat: BotChatFn = d.chat(ctx);
