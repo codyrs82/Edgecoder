@@ -110,6 +110,8 @@ export interface ImportResult {
 
 const noLog: Log = { info: () => undefined, warn: () => undefined };
 const EDITABLE: PostStatus[] = ["draft", "failed"];
+/** Images may still be swapped on an approved post until it starts sending (text, time and thread stay locked). */
+const IMAGE_EDITABLE: PostStatus[] = ["draft", "failed", "approved"];
 
 export class SocialService {
   private readonly now: () => number;
@@ -267,7 +269,7 @@ export class SocialService {
   async addImage(id: string, input: ImageInput): Promise<{ ok: true; image: PostImage } | { ok: false; error: string; problems?: RuleProblem[] }> {
     const post = await this.d.store.get(id);
     if (!post) return { ok: false, error: "not_found" };
-    if (!EDITABLE.includes(post.status)) return { ok: false, error: "not_editable" };
+    if (!IMAGE_EDITABLE.includes(post.status)) return { ok: false, error: "not_editable" };
     const v = validateImage(input);
     if (!v.ok) return v;
     const image = await this.d.store.addImage(id, v.image, this.now());
@@ -279,7 +281,7 @@ export class SocialService {
   async removeImage(id: string, imageId: string): Promise<{ ok: boolean; error?: string }> {
     const post = await this.d.store.get(id);
     if (!post) return { ok: false, error: "not_found" };
-    if (!EDITABLE.includes(post.status)) return { ok: false, error: "not_editable" };
+    if (!IMAGE_EDITABLE.includes(post.status)) return { ok: false, error: "not_editable" };
     return (await this.d.store.deleteImage(id, imageId)) ? { ok: true } : { ok: false, error: "not_found" };
   }
 
