@@ -53,6 +53,12 @@ describe("technical SEO", () => {
     }
   });
 
+  it("shows the iOS Smart App Banner and an App Store link on the homepage", () => {
+    const html = marketingHomeHtml();
+    expect(html).toContain('<meta name="apple-itunes-app" content="app-id=6759273340" />');
+    expect(html).toContain('href="https://apps.apple.com/app/id6759273340"');
+  });
+
   it("adds canonical, Open Graph, Twitter and JSON-LD tags without changing the title", () => {
     const html = marketingHomeHtml(undefined, "https://edgecoder.io");
     expect(html).toContain("<title>EdgeCoder | Private AI Coding on Your Infrastructure</title>");

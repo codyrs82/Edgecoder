@@ -11,6 +11,7 @@ import { DOCS_SITE_URL, GITHUB_REPO_URL } from "./urls.js";
 import { escapeHtml } from "./escape.js";
 import { CSP_NONCE } from "../csp-nonce.js";
 import { homeSeoHeadTags, siteOrigin } from "./seo.js";
+import { IOS_APP_STORE_URL } from "../../common/app-store.js";
 import { legalLinksHtml } from "./legal-footer.js";
 import { PUBLIC_DOCUMENTS } from "../legal/documents.js";
 import { renderMarkdown } from "../legal/markdown.js";
@@ -171,6 +172,7 @@ export function marketingHomeHtml(pricing: PublicPricing = referencePricing(), o
             <div class="hero-cta">
               <a class="btn primary" href="/portal#signup">Create an account</a>
               <a class="btn" href="/host">Host with us</a>
+              <a class="btn" href="${IOS_APP_STORE_URL}" rel="noopener">Get the iPhone app</a>
               <a class="btn ghost" href="#how">How it works ${icon("arrowRight", 14)}</a>
             </div>
           </div>
