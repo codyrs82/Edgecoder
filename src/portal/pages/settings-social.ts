@@ -16,7 +16,7 @@ import { SETTINGS_HELPERS_SCRIPT, settingRow, settingsPage } from "./settings-sh
  * - Compose a draft by hand (release notes for iOS, anything else), optionally in a thread, with a
  *   send time and up to 4 images (PNG/JPEG, 5 MB each).
  * - The queue: edit, approve (sends at once when sending is on and it is due) or reject each draft;
- *   image thumbnails (add with alt text, remove), the send time (shown and edited in America/Chicago
+ *   image thumbnails (click to enlarge, add with alt text, remove), the send time (shown and edited in America/Chicago
  *   time) and the thread. A thread is approved as a whole. A draft that breaks a rule lists the
  *   problems and cannot be approved until it is edited.
  * - Recent: posted (with the X post and Nostr note links) and rejected.
@@ -44,6 +44,15 @@ export function socialPageContent(): string {
       .soc-thumbs { display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
       .soc-thumb { display:flex; flex-direction:column; gap:4px; align-items:flex-start; font-size:11.5px; color:var(--muted); max-width:120px; }
       .soc-thumb img { width:120px; height:90px; object-fit:cover; border-radius:var(--radius-md); border:1px solid var(--card-border); }
+      .soc-thumb-open { padding:0; border:0; background:none; cursor:zoom-in; border-radius:var(--radius-md); }
+      .soc-thumb-open:focus-visible { outline:2px solid var(--brand-2); outline-offset:2px; }
+      .soc-lightbox { border:1px solid var(--card-border); padding:12px; background:var(--bg-elevated); color:var(--text); border-radius:var(--radius-md); max-width:96vw; max-height:96vh; }
+      .soc-lightbox::backdrop { background:var(--scrim); }
+      .soc-lightbox figure { margin:0; display:flex; flex-direction:column; align-items:center; gap:8px; }
+      .soc-lightbox img { max-width:94vw; max-height:82vh; object-fit:contain; border-radius:var(--radius-md); background:var(--bg); }
+      .soc-lightbox figcaption { color:var(--text); font-size:13px; text-align:center; max-width:94vw; }
+      .soc-lightbox-bar { margin-top:8px; display:flex; gap:8px; justify-content:center; align-items:center; }
+      .soc-lightbox-bar span { color:var(--muted); font-size:12.5px; }
       .soc-thread { border-left:3px solid var(--brand-2); padding-left:10px; margin-bottom:12px; }
       .soc-thread-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:12.5px; margin-bottom:6px; }
     </style>
@@ -77,6 +86,16 @@ export function socialPageContent(): string {
       </div>
       <h3 class="set-group">Queue</h3>
       <div id="socQueue"></div>
+      <dialog id="socLightbox" class="soc-lightbox" aria-label="Image preview">
+        <figure><img id="socLightboxImg" alt=""><figcaption id="socLightboxCap"></figcaption></figure>
+        <div class="soc-lightbox-bar">
+          <button type="button" class="btn-secondary" id="socLightboxPrev" aria-label="Previous image">&larr;</button>
+          <span id="socLightboxPos"></span>
+          <button type="button" class="btn-secondary" id="socLightboxNext" aria-label="Next image">&rarr;</button>
+          <a class="btn-secondary" id="socLightboxOpen" target="_blank" rel="noopener">Open full size</a>
+          <button type="button" class="primary" id="socLightboxClose">Close</button>
+        </div>
+      </dialog>
       <h3 class="set-group">Recent</h3>
       <div class="set-card soc-recent"><div class="soc-table">
         <table><thead><tr><th>When</th><th>Status</th><th>Post</th><th>Links</th></tr></thead><tbody id="socRecent"></tbody></table>
@@ -91,6 +110,34 @@ export function socialPageScript(): string {
     const KIND = { weekly: "Weekly report", release: "Release", docs: "Docs", manual: "Manual", import: "Imported" };
     const TZ_LABEL = "America/Chicago";
     const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+    // Lightbox: click a thumbnail to see the image large; arrows step through that post's images.
+    let lbImages = [], lbIndex = 0;
+    function lbShow() {
+      const img = lbImages[lbIndex];
+      if (!img) return;
+      $("socLightboxImg").src = img.url;
+      $("socLightboxImg").alt = img.alt || img.filename || "";
+      $("socLightboxCap").textContent = img.alt ? img.alt : (img.filename || "");
+      $("socLightboxOpen").href = img.url;
+      $("socLightboxPos").textContent = lbImages.length > 1 ? (lbIndex + 1) + " / " + lbImages.length : "";
+      $("socLightboxPrev").hidden = lbImages.length < 2;
+      $("socLightboxNext").hidden = lbImages.length < 2;
+    }
+    function openLightbox(images, index) {
+      lbImages = images; lbIndex = index; lbShow();
+      const d = $("socLightbox");
+      if (typeof d.showModal === "function") { if (!d.open) d.showModal(); }
+      else window.open(images[index].url, "_blank", "noopener");
+    }
+    function lbStep(delta) { if (lbImages.length < 2) return; lbIndex = (lbIndex + delta + lbImages.length) % lbImages.length; lbShow(); }
+    $("socLightboxPrev").addEventListener("click", () => lbStep(-1));
+    $("socLightboxNext").addEventListener("click", () => lbStep(1));
+    $("socLightboxClose").addEventListener("click", () => $("socLightbox").close());
+    $("socLightbox").addEventListener("click", (e) => { if (e.target === $("socLightbox")) $("socLightbox").close(); });
+    $("socLightbox").addEventListener("keydown", (e) => {
+      if (e.key === "ArrowLeft") { e.preventDefault(); lbStep(-1); }
+      else if (e.key === "ArrowRight") { e.preventDefault(); lbStep(1); }
+    });
     function readBase64(file) {
       return new Promise((resolve, reject) => {
         const fr = new FileReader();
@@ -164,9 +211,12 @@ export function socialPageScript(): string {
       const images = p.images || [];
       if (images.length) {
         const thumbs = el("div", { class: "soc-thumbs" });
-        for (const img of images) {
+        images.forEach((img, i) => {
           const t = el("div", { class: "soc-thumb" });
-          t.appendChild(el("img", { src: img.url, alt: img.alt || img.filename, title: img.filename, loading: "lazy" }));
+          const open = el("button", { type: "button", class: "soc-thumb-open", "aria-label": "View image " + (i + 1) + " larger" });
+          open.appendChild(el("img", { src: img.url, alt: img.alt || img.filename, title: "Click to enlarge", loading: "lazy" }));
+          open.addEventListener("click", () => openLightbox(images, i));
+          t.appendChild(open);
           t.appendChild(el("span", {}, img.alt ? "Alt: " + img.alt : "No alt text"));
           if (editable) {
             const rm = el("button", { type: "button", class: "btn-secondary" }, "Remove");
@@ -174,7 +224,7 @@ export function socialPageScript(): string {
             t.appendChild(rm);
           }
           thumbs.appendChild(t);
-        }
+        });
         box.appendChild(thumbs);
       }
       if (editable && images.length < 4) {
