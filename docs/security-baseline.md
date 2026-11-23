@@ -74,6 +74,8 @@ Signed agent requests whose signature does not verify are counted against the cl
 from the agent's key (a body mismatch on a valid signature, a nonce replay) counts toward that
 agent's behaviour checks. A verified request over the agent's own rate limit
 (`AGENT_RATE_LIMIT_MAX` per `AGENT_RATE_LIMIT_WINDOW_MS`) is answered `429 agent_rate_limited` with
-`Retry-After`, not 401: it is not a protocol violation and feeds no behaviour rule. Workers wait the
+`Retry-After`, not 401: it is not a protocol violation and feeds no behaviour rule, and it is logged as
+`agent_rate_limited` (INFO), which does not alert. Streamed reply pieces (`/inference/chunks`) count
+against their own budget, `AGENT_CHUNK_RATE_LIMIT_MAX`. Workers wait the
 `Retry-After` and carry on; they do not re-register (re-registering on refusals is what the
 registration-storm rule BHV008 punishes).

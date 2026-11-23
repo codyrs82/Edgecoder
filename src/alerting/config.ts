@@ -23,6 +23,9 @@ export const alertingEnv = {
   RESEND_FROM_EMAIL: z.string().optional(),
   ALERT_CHECK_INTERVAL_MS: envInt(30_000, { min: 5_000, max: 3_600_000 }),
   ALERT_HEALTH_FAILURES: envInt(3, { min: 1, max: 100 }),
+  // A down target alerts only once it has also been failing this long: a single-machine deploy
+  // restart (the app briefly missing from internal DNS) clears well inside it.
+  ALERT_HEALTH_MIN_DOWN_MS: envInt(180_000, { min: 0, max: 3_600_000 }),
   ALERT_RATE_LIMIT_MINUTES: envInt(15, { min: 1, max: 1_440 }),
   ALERT_RENOTIFY_MINUTES: envInt(240, { min: 0, max: 10_080 }),
   /** Coordinator: the portal health URL its watch probes; default PORTAL_PUBLIC_URL + /health. */
@@ -61,6 +64,7 @@ export interface AlertConfig {
   resendFromEmail: string;
   checkIntervalMs: number;
   healthFailures: number;
+  healthMinDownMs: number;
   rateLimitMs: number;
   renotifyMs: number;
   portalHealthUrl: string | null;
@@ -96,6 +100,7 @@ export function alertConfigFrom(raw: Raw): AlertConfig {
     resendFromEmail: raw.RESEND_FROM_EMAIL ?? "",
     checkIntervalMs: raw.ALERT_CHECK_INTERVAL_MS,
     healthFailures: raw.ALERT_HEALTH_FAILURES,
+    healthMinDownMs: raw.ALERT_HEALTH_MIN_DOWN_MS,
     rateLimitMs: raw.ALERT_RATE_LIMIT_MINUTES * 60_000,
     renotifyMs: raw.ALERT_RENOTIFY_MINUTES * 60_000,
     portalHealthUrl: raw.ALERT_PORTAL_HEALTH_URL ?? null,

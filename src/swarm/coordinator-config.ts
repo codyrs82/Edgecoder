@@ -200,6 +200,9 @@ export const coordinatorConfigSchema = z.object({
   // (~100/min), so the limit must sit well above that or healthy agents read as bad signatures.
   AGENT_RATE_LIMIT_MAX: envInt(300, { min: 0 }),
   AGENT_RATE_LIMIT_WINDOW_MS: envInt(60000, { min: 1 }),
+  // Streamed reply pieces (/inference/chunks) have their own budget: a fast GPU serving several
+  // calls at once flushes a piece every ~150 ms per call, far above the general limit.
+  AGENT_CHUNK_RATE_LIMIT_MAX: envInt(3000, { min: 0 }),
   // A network inference call no agent has claimed by then is cancelled, its reserve refunded in
   // full, and the requester told 503 no_capacity: well under the 100 s a proxy in front of the
   // portal (Cloudflare) waits for a response, so an overloaded call fails cleanly instead.
