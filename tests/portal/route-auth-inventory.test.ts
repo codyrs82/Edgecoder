@@ -65,6 +65,7 @@ const PUBLIC: Record<string, string> = {
   "GET /acceptable-use": "static page",
   "GET /host-agreement": "static page",
   "GET /bluetooth": "static page",
+  "GET /x/:campaign": "short link for X posts: a 302 to a public page with UTM tags, never off-site",
   "GET /reserves": "proof of reserves: aggregate totals only, cached and rate limited",
   "GET /reserves.json": "proof of reserves: aggregate totals only, cached and rate limited",
   "GET /robots.txt": "crawler rules (src/portal/pages/seo.ts)",
