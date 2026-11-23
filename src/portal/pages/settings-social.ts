@@ -222,6 +222,8 @@ export function socialPageScript(): string {
         });
       }
       // Images: thumbnails, remove, add (with alt text).
+      // Approved posts that have not gone out yet can still swap images.
+      const imagesEditable = editable || p.status === "approved";
       const images = p.images || [];
       if (images.length) {
         const thumbs = el("div", { class: "soc-thumbs" });
@@ -232,7 +234,7 @@ export function socialPageScript(): string {
           open.addEventListener("click", () => openLightbox(images, i));
           t.appendChild(open);
           t.appendChild(el("span", {}, img.alt ? "Alt: " + img.alt : "No alt text"));
-          if (editable) {
+          if (imagesEditable) {
             const rm = el("button", { type: "button", class: "btn-secondary" }, "Remove");
             rm.addEventListener("click", () => act(p.id, "images/" + encodeURIComponent(img.id) + "/delete", {}, rm));
             t.appendChild(rm);
@@ -241,7 +243,7 @@ export function socialPageScript(): string {
         });
         box.appendChild(thumbs);
       }
-      if (editable && images.length < 4) {
+      if (imagesEditable && images.length < 4) {
         const row = el("div", { class: "soc-row" });
         const file = el("input", { type: "file", accept: "image/png,image/jpeg", "aria-label": "Image" });
         const alt = el("input", { type: "text", maxlength: "1000", placeholder: "Alt text (optional)", "aria-label": "Alt text" });
