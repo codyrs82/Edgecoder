@@ -2,12 +2,13 @@
 
 A coding session's **lead** agent runs on the strongest model you have: your own frontier key
 (BYOK, #323, for your own requests only) or the best network model. With tentacles on, the lead can spin off
-**helper agents ("tentacles")** onto the EdgeCoder network's cheaper, slower models. Each one works
-in parallel on a scoped piece of work: tests for a function, a contained edit, a search, a summary.
-It then hands its result back to the lead as a patch.
+**helper agents ("tentacles")** onto cheaper models: easy pieces on the model on this computer
+(free), medium ones on the EdgeCoder network. Each one works in parallel on a scoped piece of
+work: tests for a function, a contained edit, a search, a summary. It then hands its result back
+to the lead as a patch.
 
-Helpers always run on network models (the session's worker model, or `auto`), never on a frontier
-model and never with your frontier key, whoever the lead is.
+Helpers run on this computer's own model or on network models (the session's worker model, or
+`auto`), never on a frontier model and never with your frontier key, whoever the lead is.
 
 The lead keeps planning and integration. Tentacles do the well-specified pieces.
 
@@ -45,23 +46,51 @@ The terminal prints a line as each tentacle starts, begins running, finishes, or
 ```
   ⟡ tentacle t3fa91c2: Write tests for parseFileRef (tests)
   ⟡ t3fa91c2 running on auto
-    ↳ t3fa91c2 · qwen3-coder:30b · gpu · lin-•••3f2a Chicago · 4.2k in / 310 out tok · 1.6 cSats
-    ↳ t3fa91c2 · qwen3-coder:30b · gpu · lin-•••3f2a Chicago · 5.0k in / 120 out tok · 1.5 cSats
+    ↳ t3fa91c2 · qwen3-coder:30b · network gpu · lin-•••3f2a Chicago · 4.2k in / 310 out tok · 1.6 cSats
+    ↳ t3fa91c2 · qwen3-coder:30b · network gpu · lin-•••3f2a Chicago · 5.0k in / 120 out tok · 1.5 cSats
   ⟡ t3fa91c2 passed · applied · Write tests for parseFileRef · qwen3-coder:30b on gpu · 3.1 cSats
-  ⟡ helpers merged: 1 helper · 2 calls · qwen3-coder:30b · 9.2k in / 430 out tok · 3.1 cSats
+  ⟡ tentacle t81c0d4e: Find where parseFileRef is called (search)
+    ↳ t81c0d4e · qwen3.5:9b · this computer · 2.1k in / 140 out tok · 0.0 cSats
+  ⟡ t81c0d4e passed · Find where parseFileRef is called · qwen3.5:9b on this computer · 0.0 cSats
+  ⟡ helpers merged: 2 helpers · 3 calls · qwen3-coder:30b, qwen3.5:9b · 11.3k in / 570 out tok · 3.1 cSats
 ```
 
-Each `↳` line is one helper model call: model · class · host and region · tokens · cSats.
-`/tentacles` shows them under each tentacle, with the session's total.
+Each `↳` line is one helper model call: model · where it ran (`this computer`, or `network`
+and the class) · host and region · tokens · cSats. `/tentacles` shows them under each tentacle,
+with the session's total.
 
 `/undo` undoes the last change, whether a turn or an applied tentacle. Each applied tentacle is
 its own checkpoint.
 
 ### Desktop
 
-The Live session panel (Code view, a session published with `/remote`) shows the same tree above
-the conversation, each helper call's served line under its row, and the merged totals at the
-bottom. Expand a row to see the tentacle's summary and patch. Any attached client can:
+The Code view has a **Helpers** button next to the model picker and the permission mode. It
+opens a switch and two numbers:
+
+| Control | Default | Meaning |
+| --- | --- | --- |
+| Helpers on/off | On when the chat's model is a frontier model on your own key, off otherwise | Whether the lead gets the `delegate` tools in this chat. |
+| At once | 4 | How many helpers run in parallel (1–16). |
+| Budget for this chat | 100 cSats | What all of the chat's helpers may spend together. Helpers on this computer are free. |
+
+Each chat keeps its own setting. Turning the switch on or off is remembered for that chat
+whatever model you pick later; until you touch it, the default rule applies (so switching the
+chat's model to Claude turns helpers on). New chats follow **Settings → General → Helpers**:
+"Turn helpers on for new chats" (*With your frontier key*, *Always* or *Off*), and the default
+"at once" and budget. Helpers are not offered in Plan mode.
+
+While the lead works, the chat shows the helpers above the message box: one row per helper with
+its status, where it ran and what it cost, and each model call's served line (`this computer ·
+qwen3.5:9b · …` or `network · qwen3-coder:30b · GPU · Chicago · …`). Expand a row for the
+summary and patch. **×** cancels a running helper; **Merge** and **Drop** answer a passed patch
+that waits for approval (mode Manual). Stopping the reply stops the chat's helpers.
+
+The app sends the setting with each message (`helpers` on `POST /v1/ide/chat`, below); the chat's
+id is the helpers' session id, so the budget and finished results last across its turns.
+
+The Live session panel (a session published with `/remote`) shows the same tree above the
+conversation, each helper call's served line under its row, and the merged totals at the bottom.
+Expand a row to see the tentacle's summary and patch. Any attached client can:
 
 - **×** cancels a running tentacle.
 - **Merge** and **Drop** answer a passed patch that is waiting for approval.
@@ -75,16 +104,28 @@ bottom. Expand a row to see the tentacle's summary and patch. Any attached clien
 | `EDGECODER_TENTACLES_BUDGET_CSATS` | Default session budget (100). |
 | `EDGECODER_TENTACLE_CSATS` | Default per-tentacle budget (25). |
 | `EDGECODER_TENTACLES_WORKER` | Default worker model (`auto`). |
+| `EDGECODER_TENTACLES_LOCAL` | `0` turns local first off (see Routing); on by default. |
+| `EDGECODER_TENTACLES_LOCAL_MIN_B` | The smallest model on this computer (billions of parameters) a helper may run on first (7). |
 | `EDGECODER_TENTACLE_CONTEXT_CHARS` | How many characters of files a tentacle's prompt may carry (36,000; about 12K tokens). |
 
 Over HTTP, on the IDE provider (same token rules as the session routes; any attached client):
 
 ```
 GET  /v1/ide/sessions/:id/tentacles                {config, spentCSats, tentacles}
-POST /v1/ide/sessions/:id/tentacles/config         {enabled?, maxParallel?, budgetCSats?, perTentacleCSats?, workerModel?}
+POST /v1/ide/sessions/:id/tentacles/config         {enabled?, maxParallel?, budgetCSats?, perTentacleCSats?, workerModel?, localFirst?}
 POST /v1/ide/sessions/:id/tentacles/:tid/cancel
 POST /v1/ide/sessions/:id/tentacles/:tid/merge     {approved}
 ```
+
+The desktop Code view's chats are not sessions. A chat turns helpers on per message:
+
+```
+POST /v1/ide/chat   {..., helpers: {sessionId, enabled, maxParallel?, budgetCSats?}}
+```
+
+`sessionId` is the chat's id (a UUID; never an existing session's). The turn's event stream then
+carries the `tentacle_*` events below, and the routes above accept the chat's id (IDE token only;
+a chat has no controlling client).
 
 ## What the lead sees
 
@@ -182,9 +223,31 @@ needs to.
 
 ### Routing
 
-With the worker model set to `auto`, every call a tentacle makes goes to the coordinator's
-best-fit routing (`model: "auto"`, #311). The call carries job hints derived from the delegate
-arguments:
+With the worker model set to `auto`, where a tentacle runs depends on its complexity (below):
+
+| Complexity | First attempt | Retry (one level up) |
+| --- | --- | --- |
+| Low (search, summarize and docs by default, when small) | **This computer's model**, when one can take it; otherwise the network | The network |
+| Medium and higher | The network | The network |
+
+**Local first.** A low-complexity helper's first attempt runs on a model installed on this
+computer (Ollama) when one can take it, at no cost:
+
+- it calls tools (Ollama's capabilities, the same check Auto uses; `deepseek-r1` only writes plans);
+- it is at least `EDGECODER_TENTACLES_LOCAL_MIN_B` big (7B by default; like bots' 14B floor, but
+  lower because only easy pieces run here);
+- its context window, when the catalog knows it, holds the helper's `minContext` (below).
+
+Among those, Auto's fit for agent work picks the model (coders around 14B first). The list of
+installed models and their tool support is Auto's own (`routeInputsHere`, refreshed every 15 s).
+
+If no local model fits, the attempt goes to the network as before. If the local attempt fails
+(its check fails, it changes nothing, or the model call fails), the retry goes to the network one
+level up, like any escalation. `EDGECODER_TENTACLES_LOCAL=0`, or `localFirst: false` in the
+tentacle settings, turns local first off.
+
+Every network call goes to the coordinator's best-fit routing (`model: "auto"`, #311). The call
+carries job hints derived from the delegate arguments:
 
 | Hint | Value |
 | --- | --- |
@@ -198,7 +261,8 @@ arguments:
 | session id | `tentacle:<id>`, so session affinity keeps one tentacle's calls on one machine. |
 
 The coordinator picks the model, class and machine. The tentacle reports where it ran as
-`model on class` and the agent label.
+`model on class` (`qwen3.5:9b on this computer` for a local run) and the agent label. Each call
+carries `place` (`local` or `network`), shown first in its served line.
 
 How a call reaches the coordinator:
 
@@ -209,8 +273,8 @@ How a call reaches the coordinator:
 An explicit worker model (`network/<m>[@class]`, `mine/<m>`, or a local tag) runs exactly there.
 
 None of these paths can use your frontier key. A frontier id as the worker becomes `auto`, the
-tentacle settings refuse one, and a call answered by a frontier model stops the tentacle with an
-error. A frontier lead serves only its owner's own requests (#323); a turn started by another
+tentacle settings refuse one, a frontier id is never chosen as the local model, and a call
+answered by a frontier model stops the tentacle with an error. A frontier lead serves only its owner's own requests (#323); a turn started by another
 account's message leads on the worker model and can still delegate.
 
 ### Permissions
@@ -240,7 +304,8 @@ The workspace goes back to the baseline first, and the second attempt's prompt i
 attempt's failure. If that also fails, the tentacle reports `failed` (or `error`).
 
 An explicit worker model keeps the same model on the retry, so nothing is spent on a place you
-didn't choose. A tentacle that ran out of budget is not retried.
+didn't choose. With `auto`, a first attempt that ran on this computer is retried on the network
+(the progress says "retrying on the network"). A tentacle that ran out of budget is not retried.
 
 ### Merge back
 
@@ -326,7 +391,9 @@ The tentacle code lives in its own files:
 - `src/apps/ide/lead-model.ts`
 - `src/terminal/tentacles.ts`
 - `desktop/src/lib/tentacles.ts`
+- `desktop/src/lib/helpers.ts` (the Code view's switch and its default rule)
 - `desktop/src/components/TentacleTree.svelte`
+- `desktop/src/components/HelpersPicker.svelte`, `HelpersSettings.svelte`
 
 Existing files get thin, marked hooks:
 
@@ -334,9 +401,11 @@ Existing files get thin, marked hooks:
 | --- | --- |
 | `sessions.ts` | `TurnEnv.onSessionStop` (called from `cancel`, `remove` and `shutdown`); `SessionHub.peek`, `publishEvent` and `recordNote`; `undo` also accepts notes; `TranscriptEntry.tentacle`. |
 | `tool-types.ts` | Three tool names and `TENTACLE_TOOLS`, included in `READ_TOOLS` so they don't ask. `bots.ts` filters them out of bot defaults; `tool-executor.ts` has a refusing `case` for them. |
-| `provider-server.ts` | Builds the `TentacleManager` with `tentacleWorkerBackend` (the worker role: `workerModelOf`, never frontier) and `shellAllowed` (`SessionHub.allowedWithoutAsking`); wraps the session `executor`, `tools` and `systemPrompt`; registers the routes; context graduation for network leads in `chat`. |
+| `provider-server.ts` | Builds the `TentacleManager` with `tentacleWorkerBackend` (the worker role: `workerModelOf`, never frontier), `localModelFor` / `localBackend` (local first: `pickLocalHelperModel` over `routeInputsHere`) and `shellAllowed` (`SessionHub.allowedWithoutAsking`); wraps the session `executor`, `tools` and `systemPrompt`; registers the routes; context graduation for network leads in `chat`. `/v1/ide/chat` takes `helpers` for Code view chats (`chatHelpers`: the tentacle host's view of a chat, its events into the turn's stream). |
 | `hosted-backend.ts` | Forwards `req.hints` as the body's `edgecoder` field. |
 | `src/terminal/repl.ts` | Hands `tentacle_*` events and `/tentacles` to `TentacleTracker`. |
 | `src/terminal/cli.ts` | `--tentacles` and `--tentacle-budget`; posts the config after the session is created. |
 | `LiveSessionPanel.svelte` | Loads and folds the tree, and renders `<TentacleTree>`. |
+| `EditorChatPanel.svelte` | The Helpers button beside the pickers; sends `helpers` with each message; folds the turn's `tentacle_*` events into `<TentacleTree>`. |
+| `Settings.svelte` | `<HelpersSettings>` under General. |
 | `desktop/src/lib/api.ts` | Three calls. |

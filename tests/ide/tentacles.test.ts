@@ -16,14 +16,17 @@ import {
   canAutoApply,
   parseFileRef,
   parseWhere,
+  pickLocalHelperModel,
   sessionAllowsShell,
   tentacleCallLine,
   tentacleComplexity,
+  tentacleConfigFromEnv,
   TentacleError,
   TentacleManager,
   tentacleShellDecision,
   tentacleTotals,
   tentacleWorkerModel,
+  tentaclePlacement,
   workerHints,
   type TentacleConfig,
 } from "../../src/apps/ide/tentacles.js";
@@ -599,8 +602,8 @@ describe("tentacles served lines and totals (5)", () => {
     await until(() => events.some((e) => e.type === "tentacle_totals"));
     const usage = events.filter((e) => e.type === "tentacle_usage");
     expect(usage).toHaveLength(2);
-    expect(usage[0].line).toBe("qwen3-coder:30b · gpu · lin-•••3f2a Chicago · 1.2k in / 80 out tok · 1.2 cSats");
-    expect(usage[0].call).toMatchObject({ model: "qwen3-coder:30b", served: { region: "ord" } });
+    expect(usage[0].line).toBe("qwen3-coder:30b · network gpu · lin-•••3f2a Chicago · 1.2k in / 80 out tok · 1.2 cSats");
+    expect(usage[0].call).toMatchObject({ model: "qwen3-coder:30b", place: "network", served: { region: "ord" } });
     expect(r.finished[0].served).toEqual([usage[0].line, usage[1].line]);
     expect(r.totals).toBe("1 helper · 2 calls · qwen3-coder:30b · 2.1k in / 100 out tok · 2.0 cSats");
     expect(r.sessionTotals).toBe(r.totals);
@@ -614,6 +617,8 @@ describe("tentacles served lines and totals (5)", () => {
 
   it("formats one call and the totals", () => {
     expect(tentacleCallLine({ cSats: 0, model: "network/small:7b", where: "routed to small:7b on cpu" })).toBe("small:7b · cpu · 0.0 cSats");
+    expect(tentacleCallLine({ cSats: 0, model: "network/small:7b", place: "network", where: "routed to small:7b on cpu" })).toBe("small:7b · network cpu · 0.0 cSats");
+    expect(tentacleCallLine({ cSats: 0, model: "qwen3.5:9b", place: "local", promptTokens: 2000, outputTokens: 50 })).toBe("qwen3.5:9b · this computer · 2k in / 50 out tok · 0.0 cSats");
     expect(tentacleTotals([]).line).toBe("0 helpers · 0 calls · 0 in / 0 out tok · 0.0 cSats");
   });
 });
@@ -628,5 +633,159 @@ describe("tentacles and announce-only replies", () => {
     await tentacles.idle(s.id);
     expect(tentacles.get(s.id, v.id)!.status).toBe("passed");
     expect(worker.requests.length).toBe(3);
+  });
+});
+
+const THIS_COMPUTER: ServedBy = { label: "This computer", own: true, computeClass: "local", tier: null, hardware: "This computer", region: null, country: null };
+
+describe("tentacles local first", () => {
+  const tools = (m: string) => !/deepseek-r1|embed|tiny/.test(m);
+  const ctx = (m: string) => (m.startsWith("short") ? 4_096 : undefined);
+
+  it("picks a tool-capable local model at least the floor big whose window fits, never a frontier id", () => {
+    const o = { callsTools: tools, contextTokens: ctx, minParamsB: 7 };
+    expect(pickLocalHelperModel(["qwen3.5:9b", "qwen2.5-coder:14b", "deepseek-r1:14b"], { minContext: 8_192 }, o)).toBe("qwen2.5-coder:14b");
+    expect(pickLocalHelperModel(["qwen3.5:9b"], { minContext: 8_192 }, o)).toBe("qwen3.5:9b");
+    // None capable: too small, no tools, a window that doesn't fit, an embedding model.
+    expect(pickLocalHelperModel(["llama3.2:3b", "deepseek-r1:14b", "short-coder:14b", "nomic-embed-text:latest"], { minContext: 8_192 }, o)).toBeNull();
+    expect(pickLocalHelperModel([], { minContext: 8_192 }, o)).toBeNull();
+    expect(pickLocalHelperModel(["frontier/anthropic/claude-opus-5-5"], { minContext: 8_192 }, { ...o, callsTools: () => true })).toBeNull();
+  });
+
+  it("places low pieces on this computer first; the retry, medium and harder pieces and an explicit worker on the worker", () => {
+    const base = { workerModel: "auto", level: "low" as const, escalate: false, localFirst: true, localModel: "qwen3.5:9b" as string | null };
+    expect(tentaclePlacement(base)).toEqual({ place: "local", model: "qwen3.5:9b" });
+    expect(tentaclePlacement({ ...base, localModel: null })).toEqual({ place: "worker", model: "auto" });
+    expect(tentaclePlacement({ ...base, escalate: true })).toEqual({ place: "worker", model: "auto" });
+    expect(tentaclePlacement({ ...base, level: "medium" })).toEqual({ place: "worker", model: "auto" });
+    expect(tentaclePlacement({ ...base, localFirst: false })).toEqual({ place: "worker", model: "auto" });
+    expect(tentaclePlacement({ ...base, workerModel: "network/qwen3-coder:30b@gpu" })).toEqual({ place: "worker", model: "network/qwen3-coder:30b@gpu" });
+    // Never a frontier model, as the local pick or the worker.
+    expect(tentaclePlacement({ ...base, localModel: "frontier/anthropic/claude-opus-5-5" })).toEqual({ place: "worker", model: "auto" });
+    expect(tentaclePlacement({ ...base, workerModel: "frontier/anthropic/claude-opus-5-5", localModel: null })).toEqual({ place: "worker", model: "auto" });
+  });
+
+  it("is on by default and EDGECODER_TENTACLES_LOCAL=0 turns it off", () => {
+    expect(tentacleConfigFromEnv({}).localFirst).toBe(true);
+    expect(tentacleConfigFromEnv({ EDGECODER_TENTACLES_LOCAL: "0" }).localFirst).toBe(false);
+  });
+
+  function localSetup(o: { local: string | null; localScript: Script; script: Script; model?: string }) {
+    const local = fakeWorker(o.localScript);
+    const asked: Array<{ minContext: number }> = [];
+    const localModels: string[] = [];
+    const env = setup({
+      script: o.script,
+      ...(o.model ? { model: o.model, ownerAccount: "acct-owner" } : {}),
+      deps: {
+        localModelFor: async (need) => {
+          asked.push(need);
+          return o.local;
+        },
+        localBackend: (m) => {
+          localModels.push(m);
+          return local.backend;
+        },
+      },
+    });
+    return { ...env, local, asked, localModels };
+  }
+
+  it("runs a low-complexity search on this computer's model, free, and says so in its served line", async () => {
+    const { tentacles, s, local, localModels, backendCalls, events, worker } = localSetup({
+      local: "qwen3.5:9b",
+      localScript: () => ({ text: "found it in lib.ts:1", cSats: 0, where: "", served: THIS_COMPUTER, promptTokens: 900, outputTokens: 30 }),
+      script: () => ({ text: "network" }),
+    });
+    const v = tentacles.delegate(s.id, { task: "Find x", kind: "search", files: [], instructions: "where is x" });
+    await tentacles.idle(s.id);
+    const t = tentacles.get(s.id, v.id)!;
+    expect(t.status).toBe("passed");
+    expect(localModels).toEqual(["qwen3.5:9b"]);
+    expect(local.requests).toHaveLength(1);
+    expect(worker.requests).toHaveLength(0);
+    expect(backendCalls).toHaveLength(0);
+    expect(t.result).toMatchObject({ place: "local", model: "qwen3.5:9b", class: "this computer", cSats: 0 });
+    const usage = events.filter((e) => e.type === "tentacle_usage");
+    expect(usage[0].line).toBe("qwen3.5:9b · this computer · 900 in / 30 out tok · 0.0 cSats");
+    expect(usage[0].call).toMatchObject({ place: "local" });
+  });
+
+  it("goes to the network when no local model can take it", async () => {
+    const { tentacles, s, asked, localModels, backendCalls } = localSetup({ local: null, localScript: () => ({ text: "local" }), script: () => ({ text: "found" }) });
+    const v = tentacles.delegate(s.id, { task: "Find y", kind: "search", files: [], instructions: "y" });
+    await tentacles.idle(s.id);
+    expect(asked).toHaveLength(1);
+    expect(asked[0].minContext).toBeGreaterThanOrEqual(8_192);
+    expect(localModels).toHaveLength(0);
+    expect(backendCalls.length).toBeGreaterThan(0);
+    expect(backendCalls.every((c) => c.model === "auto")).toBe(true);
+    expect(tentacles.get(s.id, v.id)!.result).toMatchObject({ place: "network" });
+  });
+
+  it("retries a failed local attempt on the network, one level up", async () => {
+    const { tentacles, s, local, worker, events } = localSetup({
+      local: "qwen3.5:9b",
+      localScript: ({ call }) => (call === 0 ? { tool: ["write_file", { path: "d.md", content: "wrong\n" }], cSats: 0, served: THIS_COMPUTER } : { text: "done", cSats: 0, served: THIS_COMPUTER }),
+      script: ({ call }) => (call === 0 ? { tool: ["write_file", { path: "d.md", content: "right\n" }], served: GPU_ORD } : { text: "done", served: GPU_ORD }),
+    });
+    const v = tentacles.delegate(s.id, { task: "Write d", kind: "docs", files: [], instructions: "d", acceptance: { kind: "grep", args: { pattern: "right", paths: ["d.md"] } } });
+    await tentacles.idle(s.id);
+    const t = tentacles.get(s.id, v.id)!;
+    expect(t).toMatchObject({ status: "passed", merge: { state: "applied" } });
+    expect(t.result).toMatchObject({ attempts: 2, place: "network" });
+    expect(local.requests.length).toBeGreaterThan(0);
+    expect(worker.requests[0].hints).toMatchObject({ quality: "best" });
+    expect(worker.requests[0].messages.find((m) => m.role === "user")!.content).toMatch(/A previous attempt failed/);
+    expect(t.result!.calls.map((c) => c.place)).toEqual(["local", "local", "network", "network"]);
+    expect(events.some((e) => e.type === "tentacle_progress" && e.progress === "retrying on the network (a stronger tier)")).toBe(true);
+    expect(readFileSync(join(root, "d.md"), "utf8")).toBe("right\n");
+  });
+
+  it("retries on the network when the local model call fails", async () => {
+    const failing: ChatBackend = async function* () {
+      throw new Error("ollama is not running");
+    };
+    const env = setup({
+      script: () => ({ text: "found on the network", served: GPU_ORD }),
+      deps: { localModelFor: async () => "qwen3.5:9b", localBackend: () => failing },
+    });
+    const v = env.tentacles.delegate(env.s.id, { task: "Find z", kind: "search", files: [], instructions: "z" });
+    await env.tentacles.idle(env.s.id);
+    const t = env.tentacles.get(env.s.id, v.id)!;
+    expect(t.status).toBe("passed");
+    expect(t.result).toMatchObject({ attempts: 2, place: "network", summary: "found on the network" });
+    expect(env.worker.requests[0].hints).toMatchObject({ quality: "best" });
+  });
+
+  it("sends medium pieces to the network as before, without looking for a local model", async () => {
+    const { tentacles, s, asked, localModels } = localSetup({ local: "qwen3.5:9b", localScript: () => ({ text: "local" }), script: writer("e.ts", "e\n") });
+    tentacles.delegate(s.id, { task: "Add e", kind: "code_edit", files: [], instructions: "e" });
+    await tentacles.idle(s.id);
+    expect(asked).toHaveLength(0);
+    expect(localModels).toHaveLength(0);
+  });
+
+  it("a frontier lead's low helpers run here or on the network, never on the frontier model", async () => {
+    const { tentacles, s, localModels, backendCalls, local } = localSetup({
+      model: "frontier/anthropic/claude-opus-5-5",
+      local: "frontier/anthropic/claude-opus-5-5",
+      localScript: () => ({ text: "local" }),
+      script: () => ({ text: "found" }),
+    });
+    tentacles.delegate(s.id, { task: "Find w", kind: "search", files: [], instructions: "w" });
+    await tentacles.idle(s.id);
+    expect(localModels).toHaveLength(0);
+    expect(local.requests).toHaveLength(0);
+    expect(backendCalls.length).toBeGreaterThan(0);
+    for (const c of backendCalls) expect(c).toEqual({ model: "auto", ctx: { role: "worker" } });
+  });
+
+  it("is off when the session's config turns it off", async () => {
+    const { tentacles, s, asked } = localSetup({ local: "qwen3.5:9b", localScript: () => ({ text: "local" }), script: () => ({ text: "found" }) });
+    tentacles.configure(s.id, { localFirst: false });
+    tentacles.delegate(s.id, { task: "Find v", kind: "search", files: [], instructions: "v" });
+    await tentacles.idle(s.id);
+    expect(asked).toHaveLength(0);
   });
 });

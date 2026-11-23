@@ -6,9 +6,12 @@
  * rules: the IDE token, loopback, and only the client in control may write.
  *
  *   GET  /v1/ide/sessions/:id/tentacles                    {config, spentCSats, tentacles}
- *   POST /v1/ide/sessions/:id/tentacles/config             {enabled?, maxParallel?, budgetCSats?, perTentacleCSats?, workerModel?}
+ *   POST /v1/ide/sessions/:id/tentacles/config             {enabled?, maxParallel?, budgetCSats?, perTentacleCSats?, workerModel?, localFirst?}
  *   POST /v1/ide/sessions/:id/tentacles/:tid/cancel
  *   POST /v1/ide/sessions/:id/tentacles/:tid/merge         {approved}   a passed patch waiting for approval
+ *
+ * `:id` may also be a desktop Code view chat that runs helpers (POST /v1/ide/chat with `helpers`):
+ * it has no session in the hub and no controlling client, only the IDE token, like the chat itself.
  */
 
 import type { FastifyInstance, FastifyReply } from "fastify";
@@ -39,11 +42,15 @@ async function handle(reply: FastifyReply, fn: () => unknown): Promise<unknown> 
   }
 }
 
-export function registerTentacleRoutes(app: FastifyInstance, hub: SessionHub, tentacles: TentacleManager): void {
+export function registerTentacleRoutes(app: FastifyInstance, hub: SessionHub, tentacles: TentacleManager, opts: { isChat?: (id: string) => boolean } = {}): void {
+  /** A hub session's writes need the client in control; a Code view chat's only the token. */
+  const control = (id: string, ref: ClientRef) => {
+    if (!opts.isChat?.(id)) hub.assertControl(id, ref);
+  };
   app.get("/v1/ide/sessions/:id/tentacles", (req, reply) =>
     handle(reply, () => {
       const { id } = params.parse(req.params);
-      hub.snapshot(id); // 404 for an unknown session
+      if (!opts.isChat?.(id)) hub.snapshot(id); // 404 for an unknown session
       return tentacles.list(id);
     }));
 
@@ -58,9 +65,10 @@ export function registerTentacleRoutes(app: FastifyInstance, hub: SessionHub, te
           budgetCSats: z.number().min(0).max(1e7).optional(),
           perTentacleCSats: z.number().min(0).max(1e7).optional(),
           workerModel: z.string().min(1).max(200).optional(),
+          localFirst: z.boolean().optional(),
         })
         .parse(req.body ?? {});
-      hub.assertControl(id, refOf(b));
+      control(id, refOf(b));
       const { clientId: _c, kind: _k, label: _l, ...patch } = b;
       return { config: tentacles.configure(id, patch) };
     }));
@@ -69,7 +77,7 @@ export function registerTentacleRoutes(app: FastifyInstance, hub: SessionHub, te
     handle(reply, () => {
       const { id, tid } = tParams.parse(req.params);
       const b = z.object(client).parse(req.body ?? {});
-      hub.assertControl(id, refOf(b));
+      control(id, refOf(b));
       return { cancelled: tentacles.cancel(id, tid) };
     }));
 
@@ -77,7 +85,7 @@ export function registerTentacleRoutes(app: FastifyInstance, hub: SessionHub, te
     handle(reply, () => {
       const { id, tid } = tParams.parse(req.params);
       const b = z.object({ ...client, approved: z.boolean() }).parse(req.body ?? {});
-      hub.assertControl(id, refOf(b));
+      control(id, refOf(b));
       return { tentacle: tentacles.decide(id, tid, b.approved) };
     }));
 }
