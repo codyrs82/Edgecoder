@@ -49,8 +49,8 @@ any balance yet**. Issuance parameters are in [Issuance Parameters](/reference/i
 
 - Every claim, result and earning is an append-only, hash-chained ledger record; `/ledger/verify`
   checks the chain.
-- Bitcoin OP_RETURN anchoring of checkpoints is implemented but off in production; it is planned
-  for mainnet. See [Bitcoin Anchoring](/economy/bitcoin-anchoring).
+- Bitcoin OP_RETURN anchoring of checkpoints is implemented but not enabled yet on EdgeCoder's
+  coordinators, which run on Bitcoin mainnet. See [Bitcoin Anchoring](/economy/bitcoin-anchoring).
 
 ## BLE offline credits
 

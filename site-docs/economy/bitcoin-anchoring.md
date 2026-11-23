@@ -4,7 +4,7 @@ EdgeCoder coordinators anchor checkpoint and issuance epoch hashes to the Bitcoi
 
 Anchoring is off by default. It needs a provider with a funded wallet (`BITCOIN_ANCHOR_PROVIDER=anchor-proxy` or `bitcoind`). Without one the coordinator broadcasts nothing, records no anchors, and reports `anchoring.mode: "disabled"` on its status endpoints; checkpoints stop at `soft_finalized`.
 
-**Production status:** anchoring is off on EdgeCoder's coordinators and the `edgecoder-anchor-proxy` app is not deployed. Anchoring is planned for mainnet.
+**Production status:** EdgeCoder's coordinators run on Bitcoin mainnet (`BITCOIN_NETWORK=bitcoin`), and anchoring is not enabled on them yet, so their checkpoints stop at `soft_finalized`. Turning it on needs a funded anchor wallet, `BITCOIN_ANCHOR_PROVIDER`, and `BITCOIN_ANCHOR_MAINNET=1` (mainnet anchoring is opt-in; see the coordinator variables below).
 
 ## Architecture
 
@@ -68,10 +68,10 @@ The anchor proxy is a lightweight authenticated HTTPS service that sits between 
 | `GET` | `/anchor/find/:dataHex` | Bearer | Reconciliation: txid of the wallet tx whose OP_RETURN carries `dataHex`, or `null` |
 | `GET` | `/anchor/mempool/:txid` | Bearer | Reconciliation: whether an unconfirmed tx is still in the mempool |
 | `POST` | `/anchor/abandon` | Bearer | Reconciliation: `abandontransaction` for a dropped tx (`{ "txid": "..." }`) |
-
-`dataHex` is the raw OP_RETURN payload (what `/anchor/broadcast` embeds), not the full script: even-length hex, at most 160 characters (80 bytes). The three reconciliation routes share a rate limit of `MAX_RECONCILE_CALLS_PER_MINUTE` (default 30), separate from `MAX_BROADCASTS_PER_MINUTE`. A node error returns 502 with only an error code, and the detail is logged on the proxy. `/anchor/mempool` returns `inMempool: false` only for bitcoind error -5 (not in mempool). Any other node error is a 502, so the reconciler counts it as an attempt instead of treating the tx as dropped.
 | `GET` | `/health` | None | Basic node health (for Fly health checks) |
 | `GET` | `/health/detailed` | Bearer | Full node + wallet + rate limit status |
+
+`dataHex` is the raw OP_RETURN payload (what `/anchor/broadcast` embeds), not the full script: even-length hex, at most 160 characters (80 bytes). The three reconciliation routes share a rate limit of `MAX_RECONCILE_CALLS_PER_MINUTE` (default 30), separate from `MAX_BROADCASTS_PER_MINUTE`. A node error returns 502 with only an error code, and the detail is logged on the proxy. `/anchor/mempool` returns `inMempool: false` only for bitcoind error -5 (not in mempool). Any other node error is a 502, so the reconciler counts it as an attempt instead of treating the tx as dropped.
 
 **Environment variables (anchor proxy service):**
 
@@ -82,7 +82,7 @@ The anchor proxy is a lightweight authenticated HTTPS service that sits between 
 | `BITCOIND_RPC_USER` | Yes | RPC username |
 | `BITCOIND_RPC_PASSWORD` | Yes | RPC password |
 | `BITCOIND_WALLET_NAME` | No | Wallet name (default: empty) |
-| `BITCOIN_NETWORK` | No | Network label (default: `signet`) |
+| `BITCOIN_NETWORK` | No | Network label (default: `signet`; set it to `bitcoin` for mainnet, as `deploy/fly/fly.anchor-proxy.toml` does) |
 | `MAX_BROADCASTS_PER_MINUTE` | No | Rate limit (default: `10`) |
 
 ## Provider types
@@ -100,7 +100,7 @@ The anchor proxy is a lightweight authenticated HTTPS service that sits between 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `BITCOIN_ANCHOR_PROVIDER` | To anchor | Provider type (see above). Unset, unknown, or missing credentials: anchoring is disabled |
-| `BITCOIN_NETWORK` | Yes | Must match across all coordinators in the mesh |
+| `BITCOIN_NETWORK` | Yes | `bitcoin`, `testnet`, `signet` or `regtest` (default: `testnet`). Must match across all coordinators in the mesh. EdgeCoder's public coordinators use `bitcoin` |
 | `ANCHOR_PROXY_URL` | When using anchor-proxy | URL of the anchor proxy service |
 | `ANCHOR_PROXY_TOKEN` | When using anchor-proxy | Bearer token matching the proxy |
 | `ANCHOR_CONFIRM_POLL_MS` | No | Poll interval for anchor confirmations (default: `600000`, minimum `30000`) |

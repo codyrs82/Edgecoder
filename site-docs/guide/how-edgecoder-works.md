@@ -50,7 +50,12 @@ VS Code, Cursor, and Windsurf connect to the node via the OpenAI-compatible endp
 
 ### iOS App
 
-Mobile agent running llama.cpp for on-device inference. Connects to the local mesh over BLE for proximity-based peer discovery.
+EdgeCoder for iPhone and iPad is on the App Store. It has two modes, switched at the top of the first tab:
+
+- **Chat** -- a chat with a model picker whose sections are **Auto** (your machines first, then the network), **On This Device** (models run on the phone with llama.cpp), **Nearby Devices** (models on devices found over Bluetooth), **My machines** (models on computers signed in to your account) and **EdgeCoder Network** (models on approved hosts, paid in cSats).
+- **Code** -- drives coding sessions on your own computers from the phone. Turn on **Code from your phone** in the EdgeCoder desktop app; the session runs on that computer, relayed through the coordinator.
+
+The App Store build does not sell cSats and does not show host earnings; buy cSats on the web ([Buy cSats](/guide/buy-csats)). How phones find nearby devices is in [BLE Local Mesh](/guide/ble-local-mesh).
 
 ## Task Flow
 
@@ -96,7 +101,7 @@ Compute is priced in **cSats** (1 cSat = 1 sat). The canonical, current model is
 - **Earning sats**: Approved hosts earn for work they run for others: 95 % of each compute payment goes to the host and 5 % is the network fee (`NETWORK_FEE_BPS`). The coordinator measures the work and records it on the ledger.
 - **Spending cSats**: Model calls are priced per token by model size (with a power floor per compute class); code jobs and reservations per second by compute class. Work on your own machines is free.
 - **Payouts**: earned sats are withdrawn over Lightning, on request or automatically to a Lightning address. Funding with Bitcoin on-chain is behind `ONCHAIN_ENABLED`.
-- **Bitcoin anchoring**: OP_RETURN anchoring of ledger checkpoints is implemented but off in production; it is planned for mainnet.
+- **Bitcoin anchoring**: OP_RETURN anchoring of ledger checkpoints is implemented but not enabled yet on EdgeCoder's coordinators (which run on Bitcoin mainnet); checkpoints stop at quorum commit (`soft_finalized`). See [Bitcoin Anchoring](/economy/bitcoin-anchoring).
 
 ## Runtime Modes
 

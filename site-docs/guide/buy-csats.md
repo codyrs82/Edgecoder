@@ -63,8 +63,7 @@ Press **Buy N cSats with Lightning**.
 The box changes to **Scan to pay**. You see:
 
 - a **QR code** (a square black-and-white pattern);
-- the **payment code** (a long line of letters starting with `lnbc`; on a test network it starts
-  differently);
+- the **payment code** (a long line of letters starting with `lnbc`);
 - **Copy payment code** and **Open in wallet** buttons;
 - **Waiting for payment…** with a countdown: **Expires in 14:59**.
 
@@ -116,17 +115,18 @@ Things to know:
   Lightning code. Paying with on-chain bitcoin shows as **Fund with Bitcoin: Coming soon** until
   it's turned on.
 
-### On the test network
+### Real sats on Bitcoin mainnet {#on-the-test-network}
 
-Right now the network runs on a Bitcoin **test network** (signet). The Wallet page shows a yellow
-badge (**Signet · test sats, no value**) and the Getting started step shows a note.
+EdgeCoder's coordinators run on **Bitcoin mainnet** (since 17 November 2026). The Wallet page
+shows the badge **Bitcoin mainnet · real sats**: you pay with real bitcoin from a normal Lightning
+wallet, as above.
 
-On a test network, **real-money wallets such as Cash App can't pay the code.** Use free test sats
-instead: open [faucet.mutinynet.com](https://faucet.mutinynet.com), paste the payment code into
-its Lightning payment form and send. Test sats have no value and test balances may be reset.
-
-When the network moves to Bitcoin mainnet, the badge says **Bitcoin mainnet · real sats**, the
-test note disappears, and you pay with a normal Lightning wallet as above.
+**Running your own coordinator on a test network?** A coordinator set to `BITCOIN_NETWORK=signet`,
+`testnet` or `regtest` (see [self-hosting](/operations/self-hosting)) shows a yellow badge instead,
+such as **Signet · test sats, no value**, and a note under the payment code. Real-money wallets
+can't pay a test-network code. On signet, pay it with free test sats from
+[faucet.mutinynet.com](https://faucet.mutinynet.com) (paste the payment code into its Lightning
+payment form). Test sats have no value, and balances on a test coordinator may be reset.
 
 ## How much to buy
 
@@ -136,11 +136,23 @@ Start small. You can always buy more, and you can't cash cSats out (see
 - The Getting started step **Fund your account** shows what **1,000 cSats** buys on a 30B coder
   model, and has an **Estimate your cost** box: pick calls per day and a model size, and it shows
   about how many cSats a day and a month. It uses live prices from the network.
-- A typical agent call is about 8,300 tokens in and 130 out. On a 30B model that's roughly
-  3 cSats a call, or roughly 350 calls per 1,000 cSats at recent prices. Smaller models cost much
-  less per call; bigger ones cost more.
-- Prices are set in cSats and move with the market and the daily BTC/USD rate. The price that
-  applies to a job is the one in effect when it's placed.
+- **How a network model call is priced.** Each call costs its tokens at a reference price in US
+  dollars per million tokens, set by model size, converted to cSats at the coordinator's BTC/USD
+  rate. It is never less than the electricity floor for the seconds the host's machine spent on it.
+
+  `cost (USD) = tokens in × input price ÷ 1,000,000 + tokens out × output price ÷ 1,000,000`
+
+  For models from 17B up to 35B (a 30B coder model, for example) the reference price is
+  **0.57 USD per million tokens in** and **1.66 USD per million tokens out** (prices set
+  16 November 2026, `src/economy/job-pricing.ts`).
+- **Worked example.** A typical agent call is about 8,300 tokens in and 130 out. On a 30B model
+  that's 8,300 × 0.57 ÷ 1,000,000 + 130 × 1.66 ÷ 1,000,000 ≈ **0.0049 USD** a call. In sats it
+  depends on the bitcoin price: *assuming* 1 BTC = 100,000 USD (1 sat = 0.001 USD), that's about
+  **5 cSats a call**, or about 200 calls per 1,000 cSats. If bitcoin is worth less, a call costs
+  more cSats; if it's worth more, fewer. Smaller models cost much less per call; bigger ones cost
+  more.
+- The **Fund your account** estimate uses live prices and the current rate, so trust it over the
+  example above. Prices can change for future calls; each reply shows what it actually cost.
 
 If you try EdgeCoder for a few days, 5,000 or 20,000 sats is plenty for most people.
 
@@ -155,7 +167,8 @@ The rules are in the [Terms of Service](https://edgecoder.io/terms), section 4. 
   the amount is credited back to your balance as cSats.
 - **Unused cSats may expire** 12 months after your last account activity, with notice where the
   law requires it.
-- **On a test network**, balances have no real value and may be reset.
+- **On a self-hosted test-network coordinator** (not EdgeCoder's), balances have no real value
+  and may be reset.
 
 Earnings are different: if you host, what your machines **earn** can be withdrawn to your own
 Lightning wallet from the Wallet page. Purchased cSats can't.
@@ -201,7 +214,9 @@ Don't send your wallet's seed words or passwords. EdgeCoder never asks for them.
 - **In the desktop app:** this computer's agent must be connected to the network. It connects on
   its own while you're signed in; give it a minute after the app starts.
 
-### I'm on the test network and Cash App (or another wallet) won't pay
+### My wallet says the code is for the wrong network
 
-That's expected: real-money wallets can't pay test codes. Use
-[faucet.mutinynet.com](https://faucet.mutinynet.com) (see [above](#on-the-test-network)).
+EdgeCoder's coordinators are on Bitcoin mainnet, so their codes start with `lnbc` and any normal
+Lightning wallet can pay them. If the Wallet page shows a yellow **test sats, no value** badge, you
+are on a self-hosted coordinator running a test network: real-money wallets can't pay its codes
+(see [above](#on-the-test-network)).

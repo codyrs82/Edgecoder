@@ -20,9 +20,12 @@ memory, context length, license and Ollama capability labels (tools, thinking, v
 - `defaultModelForMemory(ramGb)` picks the largest recommended entry that fits: `qwen3.5:4b` on
   8 GB, `qwen3.5:9b` (the project default) on 12-24 GB, `qwen3-coder:30b` from 24 GB.
 
-Catalog as of version `2026-11-01`: Qwen3-Coder 30B MoE, Devstral Small 2 24B, Qwen 3.5
-(0.8B, 2B, 4B, 9B, 27B, 35B MoE), Qwen2.5-Coder 7B (8 GB machines), GPT-OSS 20B, Gemma 4
-(E4B, 26B), DeepSeek-R1 14B.
+Catalog as of version `2026-11-15.1` (`MODEL_CATALOG_VERSION`): Qwen3-Coder 30B MoE, Devstral
+Small 2 24B, Qwen 3.5 (0.8B, 2B, 4B, 9B, 27B, 35B MoE), Qwen2.5-Coder 7B (8 GB machines),
+GPT-OSS 20B, Gemma 4 (E4B, 26B), DeepSeek-R1 14B, and a **Large** category for datacenter GPUs
+(one card or several pooled): Qwen2.5-Coder 32B, Llama 3.3 70B, DeepSeek-R1 70B (distill),
+Qwen3-Coder-Next 80B MoE, gpt-oss 120B MoE, DeepSeek-Coder-V2 236B MoE, Qwen3 235B MoE and
+Qwen3-Coder 480B MoE.
 
 ## iOS (llama.cpp)
 
@@ -86,15 +89,17 @@ Both iOS and desktop clients provide a model selection interface that lets users
 
 ### iOS: ModelPickerSheet
 
-The iOS client presents a `ModelPickerSheet` with three sections:
+The iOS client presents a `ModelPickerSheet` (`ios/EdgeCoderIOS/EdgeCoderIOS/Chat/ModelPickerSheet.swift`) with these sections:
 
-- **Local Models** — GGUF models downloaded to the device, managed by `LocalModelManager`
-- **BLE Peers** — models available on nearby devices discovered via Bluetooth
-- **Swarm Models** — models advertised through coordinator capability gossip
+- **Auto** — your machines first, then the network
+- **On This Device** — GGUF models on the phone, run with llama.cpp (free)
+- **Nearby Devices** — models on nearby devices discovered over Bluetooth (free)
+- **My machines** — models on computers signed in to your account (free)
+- **EdgeCoder Network** — models on approved hosts, with their size, price in cSats and agent count
 
-### Desktop: ModelPicker Dropdown
+### Desktop: Compute Picker
 
-The desktop (Electron / web) client renders a `ModelPicker` dropdown in the chat header. It queries `/model/list` (local) and `/models/available` (mesh) to build the option list.
+The desktop app (Tauri + Svelte) has a searchable model and compute picker (`desktop/src/components/ComputePicker.svelte`). It lists **Auto** (your machines first, then the network's best fit), **Auto · This computer only**, **Lead on your key** (frontier models, only when your account has a key for that provider), **This computer**, **My machines**, **Reserved** (machines you reserved) and **Network** (one row per model, with a choice of machine class, priced in cSats per million tokens).
 
 ### Persistence
 
@@ -102,7 +107,7 @@ The selected model is persisted per `Conversation`. When the user switches conve
 
 ### "Auto" Mode
 
-When no model is explicitly selected, the system operates in **Auto** mode. In this mode the `IntelligentRouter` picks the best available model based on latency, load, and parameter-size heuristics. Auto is the default for new conversations.
+When no model is explicitly selected, the system operates in **Auto** mode (model id `auto`). Auto sizes each request (tools, context length, complexity), then picks the cheapest place that can do it well: a machine you reserved, this computer, your other machines, then the network (`src/inference-api/auto-route.ts`). Auto is the default for new conversations.
 
 ## System-Aware Chat (Dynamic System Prompt)
 
