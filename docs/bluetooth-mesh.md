@@ -39,7 +39,7 @@ The internet path is always preferred. Bluetooth is used only when the coordinat
 
 - **Bluetooth traffic is not encrypted by EdgeCoder.** Devices don't pair, and prompts and outputs travel as plain text. Anyone nearby with Bluetooth tools could capture them, and the device that runs your prompt can read it. **Don't send secrets over Bluetooth mesh.**
 - **Macs refuse incoming Bluetooth work unless an operator sets a mesh token.** Without a token (the default), a Mac still advertises and can be discovered, but it turns down every request. With a token (the `MESH_AUTH_TOKEN` setting), a request must carry a proof made with the same token, issued within the last 2 minutes and never seen before, so it can't be replayed. Prompts are limited to 64 KiB, and each sender to 6 requests a minute (30 a minute in total).
-- **iPhones and iPads** accept prompts from any nearby EdgeCoder device; requester authentication is not built there yet. They limit prompts to 16 KiB, run one Bluetooth request at a time, and require at least 5 seconds between requests from the same device. The iOS app doesn't log Bluetooth prompts.
+- **iPhones and iPads** serve nearby devices only while they are charging (or full on the charger). They accept prompts from any nearby EdgeCoder device; requester authentication is not built there yet. They limit prompts to 16 KiB, run one Bluetooth request at a time, and require at least 5 seconds between requests from the same device. The iOS app doesn't log Bluetooth prompts.
 - **Local history.** A Mac keeps Bluetooth prompts and outputs it ran in its local job history, like other jobs.
 - **Payment records are signed by both sides.** A device signs only a record that matches the work it actually did, and only once per job. The coordinator verifies both signatures against the devices' registered keys and the accounts they belong to. A payer can't claim more CPU time than the request actually took (on Macs). Each record is capped at 100 credits.
 
@@ -48,7 +48,7 @@ The internet path is always preferred. Bluetooth is used only when the coordinat
 - While Bluetooth mesh is on, the device advertises continuously. Advertising uses little power.
 - Scanning uses more. A Mac scans only while it can't reach the coordinator and stops when it reconnects. The iOS app scans from start-up, stops once it is back online, and starts again after three failed heartbeats.
 - Scanning is continuous while active; there is no duty cycling yet.
-- On iOS, background Bluetooth work is scheduled only while the phone is on external power.
+- An iPhone serves nearby devices (advertises and runs their prompts) only while it is charging or full. When you unplug it, it stops advertising and refuses new requests at once, with a reply saying so (a prompt already running finishes); when you plug it back in, it resumes. On battery it still scans for nearby devices to send its own requests.
 - Running a prompt for someone else uses your CPU or GPU, memory and battery as any job does. Phones on low battery are avoided when choosing a peer.
 
 ## How it's paid and settled
@@ -82,4 +82,4 @@ Not built yet, or limited:
 - **Desktop app (macOS):** Settings > General > Bluetooth mesh. It is on by default; switching it restarts the agent.
 - **Agent without the app:** set `EDGECODER_BLE=0` to turn it off.
 - **Accepting work on a Mac:** in addition, an operator must set `MESH_AUTH_TOKEN` on the agent, with the same value on every Mac allowed to send it work. Without it the Mac never runs Bluetooth requests.
-- **iOS:** Bluetooth mesh runs while hosting runs (Settings > Hosting), on battery too; network jobs from the coordinator run only while the phone is charging. To stop Bluetooth, stop hosting in the app, or turn off Bluetooth access for EdgeCoder in iOS Settings > Privacy & Security > Bluetooth.
+- **iOS:** the phone serves nearby devices over Bluetooth while hosting runs (Settings > Hosting) and the phone is charging, the same rule as network jobs from the coordinator. On battery it neither advertises nor runs Bluetooth requests. To stop Bluetooth altogether, stop hosting in the app, or turn off Bluetooth access for EdgeCoder in iOS Settings > Privacy & Security > Bluetooth.

@@ -616,6 +616,7 @@ export class NobleBLETransport implements BLETransport {
     // Always update the stored peripheral reference (noble gives fresh objects)
     // and update lastSeen/rssi for already-identified peers
     if (this.identifiedPeripherals.has(peripheralId)) {
+      let stillListed = false;
       for (const [agentId, p] of this.peripheralsByAgentId) {
         if ((p.id ?? p.uuid) === peripheralId) {
           // Update to the latest peripheral reference from noble
@@ -624,11 +625,15 @@ export class NobleBLETransport implements BLETransport {
           if (existing) {
             existing.lastSeenMs = Date.now();
             existing.rssi = peripheral.rssi ?? -60;
+            stillListed = true;
           }
           break;
         }
       }
-      return;
+      if (stillListed) return;
+      // Dropped after 60 s unseen (an iPhone stops advertising when unplugged, since it serves only
+      // while charging) and advertising again: read its identity again so it is listed again.
+      this.identifiedPeripherals.delete(peripheralId);
     }
 
     // Skip if already in the process of connecting for identity read

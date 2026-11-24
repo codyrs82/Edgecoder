@@ -217,8 +217,8 @@ struct SettingsView: View {
 
     // MARK: - Hosting Card
 
-    /// Network jobs (from the coordinator) run only while the iPhone is charging; Bluetooth requests
-    /// from nearby machines are served whenever hosting is on.
+    /// Network jobs (from the coordinator) and Bluetooth requests from nearby machines both run only
+    /// while the iPhone is charging (HostingPowerPolicy).
     private var hostingCard: some View {
         SettingsCard {
             SettingsCardHeader(icon: "bolt.fill", title: "Hosting", color: Theme.green)
@@ -244,7 +244,7 @@ struct SettingsView: View {
                 }
             }
 
-            Text("Bluetooth (nearby machines, this session)")
+            Text("Bluetooth requests from nearby machines (only while charging; this session)")
                 .font(.caption.weight(.medium))
                 .foregroundColor(Theme.textSecondary)
             HStack(spacing: 0) {
@@ -257,7 +257,7 @@ struct SettingsView: View {
 
             Text(swarmRuntime.isCharging
                  ? "Charging: this iPhone takes network jobs and serves nearby machines over Bluetooth."
-                 : "Not charging: no network jobs until you plug in. Nearby machines can still use it over Bluetooth.")
+                 : "Not charging: network jobs and Bluetooth requests from nearby machines run only while charging. Plug in to host.")
                 .font(.caption)
                 .foregroundColor(Theme.textMuted)
 

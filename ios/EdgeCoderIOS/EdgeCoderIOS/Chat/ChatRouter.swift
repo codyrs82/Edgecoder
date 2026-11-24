@@ -113,10 +113,13 @@ final class ChatRouter: ObservableObject {
             }
         }
 
-        // 3. Coordinator/swarm — submit to task queue
+        // 3. Coordinator/swarm — a network model call (/inference/submit, SwarmChatProtocol)
         if swarmRuntime.isSwarmReady {
             do {
-                let swarmResult = try await swarmRuntime.submitChatTask(prompt: lastUserContent, requestedModel: requestedModel)
+                let history = messages
+                    .filter { !$0.content.isEmpty }
+                    .map { SwarmChatProtocol.Message(role: $0.role.rawValue, content: $0.content) }
+                let swarmResult = try await swarmRuntime.submitChatTask(messages: history, requestedModel: requestedModel)
                 let elapsed = Int((CFAbsoluteTimeGetCurrent() - started) * 1000)
                 let paramSize: Double
                 if let catalog = modelManager.availableCatalog.first(where: { $0.modelId == requestedModel }) {
@@ -129,7 +132,7 @@ final class ChatRouter: ObservableObject {
                     text: swarmResult.output,
                     model: "swarm",
                     latencyMs: elapsed,
-                    creditsSpent: Int(max(0.5, paramSize)),
+                    creditsSpent: swarmResult.creditsSpent.map { Int($0.rounded(.up)) } ?? Int(max(0.5, paramSize)),
                     swarmTaskId: swarmResult.taskId
                 )
                 lastRoute = .swarm

@@ -9,12 +9,14 @@ enum SwarmRuntimeState: String {
     case paused
 }
 
-/// Hosting on the iPhone. While running it serves nearby machines over Bluetooth (BLEMeshManager)
-/// whatever the power state, and takes coordinator jobs (/pull -> local model -> /result) only while
-/// the phone is on external power (charging or full). Unplugging stops pulling at once (no new job
-/// is pulled; one already running finishes and reports); plugging back in resumes. The coordinator
-/// enforces the same rule: /pull gives an iOS agent whose latest power telemetry is not on external
-/// power no job.
+/// Hosting on the iPhone, only while the phone is on external power (charging or full,
+/// HostingPowerPolicy): coordinator jobs (/pull -> local model -> /result) and serving nearby machines
+/// over Bluetooth (BLEMeshManager advertising and running their prompts). Unplugging stops both at
+/// once: no new job is pulled, advertising stops and new Bluetooth prompts are refused (a job or
+/// prompt already running finishes and replies); plugging back in resumes both. The coordinator
+/// enforces the same rule for jobs: /pull gives an iOS agent whose latest power telemetry is not on
+/// external power no job. Registration, heartbeats, Bluetooth scanning (the phone's own requests to
+/// nearby machines when offline) and offline ledger sync run on battery too.
 @MainActor
 final class SwarmRuntimeController: ObservableObject {
     static let shared = SwarmRuntimeController()
@@ -146,15 +148,48 @@ final class SwarmRuntimeController: ObservableObject {
         )
     }
 
-    /// Plugging in or unplugging: pulling follows at once (the loop checks `isCharging` before every
-    /// pull), and a heartbeat tells the coordinator the new power state right away.
     @objc private func batteryStateDidChange() {
+        refreshPowerState()
+    }
+
+    /// Plugging in or unplugging: pulling follows at once (the loop checks `isCharging` before every
+    /// pull), Bluetooth serving starts or stops, and a heartbeat tells the coordinator the new power
+    /// state right away. Also called before a Bluetooth prompt runs, since a battery notification can
+    /// arrive late when Bluetooth wakes the app in the background. Returns whether the phone may host.
+    @discardableResult
+    func refreshPowerState() -> Bool {
         let charging = isOnExternalPower
-        guard charging != isCharging else { return }
+        guard charging != isCharging else { return charging }
         isCharging = charging
-        appendEvent(charging ? "Charging: coordinator jobs resume." : "Unplugged: no new coordinator jobs until charging.")
-        guard state == .running, isSwarmReady else { return }
+        appendEvent(charging
+            ? "Charging: network jobs and Bluetooth serving resume."
+            : "Unplugged: no new network jobs or Bluetooth requests until charging.")
+        applyBluetoothServing()
+        guard state == .running, isSwarmReady else { return charging }
         Task { [weak self] in await self?.sendHeartbeat() }
+        return charging
+    }
+
+    /// Serve nearby machines over Bluetooth while hosting is on and the phone is charging; stop
+    /// serving otherwise. Scanning (this phone's own requests) is left alone.
+    private func applyBluetoothServing() {
+        guard state != .stopped, isCharging else {
+            if bleMeshManager.isServing { bleMeshManager.stopServing() }
+            return
+        }
+        guard !bleMeshManager.isServing else { return }
+        let mgr = modelManager
+        bleMeshManager.startServing(
+            agentId: agentId,
+            model: modelManager.selectedModel,
+            modelParamSize: modelManager.selectedModelParamSize
+        ) { [weak self] prompt in
+            // Unplugged while the app was suspended: refuse instead of running on battery.
+            guard await self?.refreshPowerState() == true else {
+                return (ok: false, output: HostingPowerPolicy.notChargingReply, durationMs: 0)
+            }
+            return await mgr.generate(prompt: prompt, maxTokens: 512)
+        }
     }
 
     /// Called after enrollment is confirmed. Auto-starts hosting if enabled.
@@ -212,8 +247,8 @@ final class SwarmRuntimeController: ObservableObject {
         }
     }
 
-    /// Starts hosting: Bluetooth serving right away, and the register/heartbeat/job loop, which pulls
-    /// coordinator jobs only while charging.
+    /// Starts hosting: the register/heartbeat/job loop, which pulls coordinator jobs only while
+    /// charging, Bluetooth scanning, and Bluetooth serving while charging.
     func start() async {
         if state == .running {
             statusText = "Hosting is already running."
@@ -233,26 +268,20 @@ final class SwarmRuntimeController: ObservableObject {
         bleMeshManager.start()
         // #63: the agent key signs this device's side of BLE credit transactions.
         bleMeshManager.signingKey = resolveSigningKey()
-        bleMeshManager.startAdvertising(
-            agentId: agentId,
-            model: modelManager.selectedModel,
-            modelParamSize: modelManager.selectedModelParamSize
-        )
         bleMeshManager.startScanning()
-
-        // Wire BLE task handler to local inference
-        let mgr = modelManager
-        bleMeshManager.taskHandler = { prompt in
-            await mgr.generate(prompt: prompt, maxTokens: 512)
-        }
+        // Serve nearby machines only while charging; the battery observer starts and stops it later.
+        isCharging = isOnExternalPower
+        applyBluetoothServing()
+        if !isCharging { appendEvent("On battery: network jobs and Bluetooth serving wait for charging.") }
     }
 
-    /// Pauses the coordinator loop (no jobs, no heartbeats); Bluetooth keeps serving, as before.
+    /// Pauses the coordinator loop (no jobs, no heartbeats); Bluetooth serving keeps following the
+    /// charging state.
     func pause() {
         runtimeTask?.cancel()
         runtimeTask = nil
         state = .paused
-        statusText = "Network jobs paused; Bluetooth still on."
+        statusText = isCharging ? "Network jobs paused; Bluetooth still serving." : "Network jobs paused."
         appendEvent(statusText)
     }
 
@@ -313,8 +342,7 @@ final class SwarmRuntimeController: ObservableObject {
 
     var isOnExternalPower: Bool {
         UIDevice.current.isBatteryMonitoringEnabled = true
-        let state = UIDevice.current.batteryState
-        return state == .charging || state == .full
+        return HostingPowerPolicy.mayHost(UIDevice.current.batteryState)
     }
 
     /// The persistent Keychain signing key (#64). If the Keychain is unavailable the runtime falls
@@ -582,47 +610,53 @@ final class SwarmRuntimeController: ObservableObject {
 
     // MARK: - Chat Task Submission (used by ChatRouter)
 
-    /// Submit a chat prompt to the coordinator task queue and poll for the result.
-    func submitChatTask(prompt: String, requestedModel: String? = nil) async throws -> (output: String, taskId: String) {
-        let taskId = "chat-\(Int(Date().timeIntervalSince1970 * 1000))"
-        var submitPayload: [String: Any] = [
-            "taskId": taskId,
-            "prompt": prompt,
-            "language": "python",
-            "submitterAccountId": agentId,
-            "projectId": "chat-requests",
-            "resourceClass": "cpu",
-            "priority": 60,
-            "subtasks": [["prompt": prompt, "language": "python"]]
-        ]
-        if let model = requestedModel {
-            submitPayload["requestedModel"] = model
+    /// Run a chat on the network as a model call (SwarmChatProtocol): POST /inference/submit, then read
+    /// the reply from /inference/stream until it ends. Billed to this agent's owner like any network
+    /// call; coordinator refusals (insufficient_credits, no_agent_has_model, no_capacity, ...) throw.
+    func submitChatTask(
+        messages: [SwarmChatProtocol.Message],
+        requestedModel: String? = nil
+    ) async throws -> (output: String, taskId: String, creditsSpent: Double?) {
+        let taskId = SwarmChatProtocol.newTaskId()
+        let submitResponse = try await postCoordinator(
+            path: SwarmChatProtocol.submitPath,
+            payload: SwarmChatProtocol.submitBody(taskId: taskId, agentId: agentId, messages: messages, requestedModel: requestedModel)
+        )
+        guard let subtaskId = SwarmChatProtocol.subtaskId(fromSubmit: submitResponse) else {
+            throw APIClientError.serverError("Network chat: the coordinator returned no subtask.")
         }
 
-        let submitResponse = try await postCoordinator(path: "/tasks", payload: submitPayload)
-
-        guard let returnedTaskId = submitResponse["taskId"] as? String,
-              let subtasks = submitResponse["subtasks"] as? [String],
-              let subtaskId = subtasks.first else {
-            throw APIClientError.serverError("Swarm: no subtaskId returned")
-        }
-
-        // Poll for result — up to 90s
-        let pollPath = "/tasks/\(returnedTaskId)/subtasks/\(subtaskId)/result"
-        let deadline = Date().addingTimeInterval(90)
+        var output = ""
+        var after = 0
+        var transientFailures = 0
+        let deadline = Date().addingTimeInterval(SwarmChatProtocol.deadlineSeconds)
         while Date() < deadline {
-            try await Task.sleep(nanoseconds: 2_000_000_000)
+            try Task.checkCancellation()
+            let response: [String: Any]
             do {
-                let pollResponse = try await postCoordinator(path: pollPath, payload: [:])
-                if let output = pollResponse["output"] as? String {
-                    return (output: output, taskId: returnedTaskId)
-                }
-            } catch {
-                // Continue polling
+                response = try await postCoordinator(
+                    path: SwarmChatProtocol.streamPath,
+                    payload: SwarmChatProtocol.streamBody(taskId: taskId, subtaskId: subtaskId, after: after)
+                )
+            } catch let error as URLError {
+                // A dropped connection: read again from the same place, a few times.
+                transientFailures += 1
+                if transientFailures > 3 { throw error }
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                continue
+            }
+            transientFailures = 0
+            guard let page = SwarmChatProtocol.streamPage(response, after: after) else {
+                throw APIClientError.serverError("Network chat: unexpected stream answer.")
+            }
+            output += page.text
+            after = page.next
+            if page.done {
+                if let error = page.error { throw APIClientError.serverError("Network chat failed: \(error)") }
+                return (output: output, taskId: taskId, creditsSpent: page.creditsSpent)
             }
         }
-
-        throw APIClientError.serverError("Swarm task timed out after 90s")
+        throw APIClientError.serverError("Network chat timed out after \(Int(SwarmChatProtocol.deadlineSeconds))s")
     }
 
     func postCoordinator(path: String, payload: [String: Any]) async throws -> [String: Any] {
