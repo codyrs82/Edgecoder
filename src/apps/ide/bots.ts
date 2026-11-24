@@ -40,7 +40,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { announcesWork, backendChat, makeToolRunner, runAgentLoop, toolSchemas, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
@@ -60,6 +60,7 @@ import { toolchainFailureHint } from "./toolchain.js";
 import { COMPUTE_POLICIES, FALLBACK_NOTE, NETWORK_CLASSES, isNetworkClass, type NetworkClass, routeLabel, routeModelId, routeSummary, type ComputePolicy, type PlanOptions, type Route } from "../../inference-api/auto-route.js";
 import type { ChatBackend } from "../../inference-api/types.js";
 import { isFrontierModelId } from "../../inference-api/frontier-models.js";
+import { servedFromWhere } from "../../common/bot-relay.js";
 import { FRONTIER_ASK_TIMEOUT_MS, FRONTIER_ASK_TOOL, frontierAskQuestion, type BotFrontierHooks, type FrontierAnswer, type FrontierAsk, type FrontierChoice } from "./bot-frontier.js";
 import { frontierLeadName } from "./frontier-access.js";
 import { webSystemNote, webGrounding, isWebTool, webToolSchemas, type WebToolSession } from "../../web-tool/tools.js";
@@ -324,6 +325,13 @@ export interface BotSetup {
   suggestedFolder?: string;
   /** The web asked for Auto: the bot runs on Accept edits unless the Mac confirms Auto. */
   requestedMode?: "auto";
+}
+
+/** A path strictly inside `home` (not home itself), after resolving "..". */
+export function isInsideHome(path: string, home: string): boolean {
+  const p = resolve(path);
+  const h = resolve(home);
+  return p !== h && p.startsWith(h.endsWith(sep) ? h : h + sep);
 }
 
 /** Where "Use default" puts a web-made bot's folder: ~/EdgeCoder/Bots/<name>. */
@@ -927,6 +935,8 @@ export class BotManager {
       balance?: () => Promise<number | undefined>;
       /** Where "Use default" makes a web-made bot's folder (default ~/EdgeCoder/Bots). */
       botsHome?: () => string;
+      /** Your home folder (tests); a missing bot folder inside it is created on save. */
+      homeDir?: () => string;
       /** USD the bot spent on its owner's frontier key today (FrontierSpend.todayFor("bot:<id>")). */
       frontierSpentToday?: (botId: string) => number;
     },
@@ -1473,6 +1483,15 @@ export class BotManager {
   private validate(input: Partial<BotInput>): void {
     if (input.projectRoot !== undefined) {
       if (!isAbsolute(input.projectRoot)) throw new BotError("The project folder must be an absolute path");
+      // A new bot's home folder inside your home folder (the form suggests ~/EdgeCoder/<name>) is made
+      // for you; anything outside it, or a path that is a file, still has to exist as a folder.
+      if (!existsSync(input.projectRoot) && isInsideHome(input.projectRoot, (this.deps.homeDir ?? homedir)())) {
+        try {
+          mkdirSync(input.projectRoot, { recursive: true });
+        } catch (err) {
+          throw new BotError(`Couldn't make ${input.projectRoot}: ${(err as Error).message}`);
+        }
+      }
       let dir = false;
       try {
         dir = statSync(input.projectRoot).isDirectory();
@@ -2512,8 +2531,11 @@ export function botComputeChat(
   // and the routing reason (complexity) for the Tasks history.
   const chat: BotChatFn = backendChat(
     agentic,
-    (cSats, served) =>
-      ctx.sendEvent({ type: "usage", cSats, where, ...(reason ? { reason } : {}), ...(last && !last.bestFit ? { model: routeModelId(last) } : {}), ...(served ? { served } : {}) }),
+    (cSats, served, routed) => {
+      // The network's best fit names its model only in the call's own `where` ("routed to <model> on <class> …").
+      const model = last && !last.bestFit ? routeModelId(last) : servedFromWhere(routed).model;
+      ctx.sendEvent({ type: "usage", cSats, where, ...(reason ? { reason } : {}), ...(model ? { model } : {}), ...(served ? { served } : {}) });
+    },
     ctx.signal,
   );
   // A pinned model has nowhere else to go.

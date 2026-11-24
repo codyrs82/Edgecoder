@@ -35,6 +35,7 @@ import { z } from "zod";
 import { signPayload, verifyPayload } from "../mesh/peer.js";
 import { canonicalJson, CommandReplayGuard } from "../model/remote-control/protocol.js";
 import { capMarkdownSource } from "./markdown-cap.js";
+import { hardwareShort, type CallUsage } from "./served.js";
 
 export { CommandReplayGuard };
 
@@ -73,6 +74,30 @@ export interface RemoteToolStep {
   status: "ok" | "error" | "pending" | "denied" | "running";
 }
 
+/**
+ * Where a reply's (or a run's) model calls ran, compact: the web's "qwen3-coder:30b · Datacenter GPU
+ * · Frankfurt · 3.4 cSats" line. Newer Macs only: an older one leaves it out and the web shows the
+ * run's `where` as before. Every string is capped (SERVED_CAPS).
+ */
+export interface RemoteServed {
+  /** The model that answered the last call ("qwen3-coder:30b"), when known. */
+  model?: string;
+  /** A run: the distinct models its calls ran on (at most SERVED_CAPS.models). */
+  models?: string[];
+  /** The last call's machine class, short ("Datacenter GPU 2×A16", "This computer (Apple M1 Max)", "GPU"). */
+  machine?: string;
+  /** City, region or country, when known. */
+  place?: string;
+  /** Distinct machines, when more than one answered. */
+  machines?: number;
+  /** Model calls. */
+  calls: number;
+  /** cSats of all of them. */
+  cSats: number;
+  /** Frontier calls on the owner's own key: estimated USD. */
+  usd?: number;
+}
+
 export interface RemoteBotMessage {
   id: string;
   role: "user" | "assistant" | "event";
@@ -80,6 +105,8 @@ export interface RemoteBotMessage {
   atMs: number;
   runId?: string;
   steps?: RemoteToolStep[];
+  /** assistant: where its model calls ran (newer Macs; see RemoteServed). */
+  served?: RemoteServed;
 }
 
 export interface RemoteBotRun {
@@ -92,6 +119,8 @@ export interface RemoteBotRun {
   summary: string;
   cSats: number;
   where?: string;
+  /** Where its model calls ran: models and machine class (newer Macs; see RemoteServed). */
+  served?: RemoteServed;
   note?: string;
   error?: string;
   pullRequests?: Array<{ url: string; number?: number; title?: string }>;
@@ -217,6 +246,66 @@ export function toolSteps(events: StreamEventLike[] | undefined, pendingIds: Rea
 
 export function capMessage<T extends { content: string }>(m: T, chars: number): T {
   return m.content.length > chars ? { ...m, content: capMarkdownSource(m.content, chars) } : m;
+}
+
+/** The caps on a RemoteServed's fields (a served line is at most a few hundred bytes). */
+export const SERVED_CAPS = { model: 80, machine: 60, place: 40, models: 3 } as const;
+
+const CLASS_NAMES: Record<string, string> = { gpu: "GPU", "gpu.dc": "Datacenter GPU", apple: "Apple", cpu: "CPU", cloud: "Cloud", local: "This computer" };
+const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+const plainModel = (m: string) => clip(m.replace(/^network\//, "").replace(/^frontier\/[^/]+\//, "").trim(), SERVED_CAPS.model);
+
+/**
+ * The model and machine class named by a backend's `where`, when it names them: the coordinator's
+ * "routed to <model> on <class> because …", or a compute label ("Network · <model> · GPU",
+ * "My machines · <model>"). Route labels that name neither give {}.
+ */
+export function servedFromWhere(where: string | undefined): { model?: string; machine?: string } {
+  const w = (where ?? "").trim();
+  const routed = /routed to (\S+) on (\S+)/.exec(w);
+  if (routed) {
+    const cls = routed[2].replace(/[,.;]$/, "");
+    return { model: plainModel(routed[1]), machine: CLASS_NAMES[cls] ?? clip(cls, SERVED_CAPS.machine) };
+  }
+  const label = /^(Network|My machines|Reserved [^·]*?) · ([^·\s]+)(?: · ([^·]+))?$/.exec(w);
+  if (label && label[2] !== "best") {
+    const machine = label[1] === "My machines" ? "Your machines" : label[1].startsWith("Reserved") ? label[1].trim() : label[3]?.trim() || undefined;
+    return { model: plainModel(label[2]), ...(machine ? { machine: clip(machine, SERVED_CAPS.machine) } : {}) };
+  }
+  return {};
+}
+
+type CallLike = CallUsage & { usd?: number };
+
+/** A reply's or run's model calls (usage events), compact; undefined when there were none. */
+export function servedSummary(calls: CallLike[]): RemoteServed | undefined {
+  const list = calls.filter((c) => c && Number.isFinite(c.cSats));
+  if (!list.length) return undefined;
+  const last = list[list.length - 1];
+  const fromWhere = servedFromWhere(last.where);
+  const model = last.model ? plainModel(last.model) : fromWhere.model;
+  const s = last.served;
+  const machine = s ? clip(hardwareShort(s).replace(/ · your machine$/, " (yours)"), SERVED_CAPS.machine) : fromWhere.machine;
+  const place = s ? (s.city ?? s.region ?? s.country ?? undefined) : undefined;
+  const models = [...new Set(list.map((c) => (c.model ? plainModel(c.model) : servedFromWhere(c.where).model)).filter((m): m is string => !!m))].slice(-SERVED_CAPS.models);
+  const machines = new Set(list.filter((c) => c.served).map((c) => c.served!.label)).size;
+  const cSats = Number(list.reduce((n, c) => n + c.cSats, 0).toFixed(6));
+  const usd = list.reduce((n, c) => n + (typeof c.usd === "number" && Number.isFinite(c.usd) ? c.usd : c.served?.usd ?? 0), 0);
+  return {
+    ...(model ? { model } : {}),
+    ...(models.length > 1 ? { models } : {}),
+    ...(machine ? { machine } : {}),
+    ...(place ? { place: clip(place, SERVED_CAPS.place) } : {}),
+    ...(machines > 1 ? { machines } : {}),
+    calls: list.length,
+    cSats,
+    ...(usd > 0 ? { usd: Number(usd.toFixed(4)) } : {}),
+  };
+}
+
+/** The usage events among a message's stream events, as calls. */
+export function usageCalls(events: Array<{ type: string } & Record<string, unknown>> | undefined): CallLike[] {
+  return (events ?? []).filter((e) => e.type === "usage" && typeof e.cSats === "number").map((e) => e as unknown as CallLike);
 }
 
 /** Shrinks a snapshot until it fits MAX_SNAPSHOT_BYTES: shorter tails, then shorter messages. */

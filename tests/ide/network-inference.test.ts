@@ -107,6 +107,24 @@ describe("streamNetworkCompletion", () => {
     expect(err!.message).toContain("Nothing was charged");
   });
 
+  it("model auto: a busy answer names the model best fit chose, not \"auto\"", async () => {
+    const deps = await fakeForwarder((path, body) =>
+      path === "/forward/inference/submit"
+        ? { json: { taskId: body.taskId, subtaskId: "st-busy", reservedCSats: 10, routing: { model: "qwen3.5:9b", line: "routed to qwen3.5:9b on gpu" } } }
+        : { status: 503, json: { error: "no_capacity", retryAfterSec: 20 } }
+    );
+    const err = await streamNetworkCompletion(deps, { model: "auto", computeClass: "any", messages: [{ role: "user", content: "hi" }] }).next().catch((e: Error) => e);
+    expect(String((err as Error).message)).toMatch(/^Every machine that runs qwen3\.5:9b is busy/);
+  });
+
+  it("model auto: a coordinator's \"No machine on the network can run this job\" is shown as is", async () => {
+    const detail = "No machine on the network can run this job right now (needs a model ≥ 14B with tools; online: qwen2.5-coder:7b, qwen3.5:9b)";
+    const deps = await fakeForwarder(() => ({ status: 409, json: { error: "no_route_fits", reason: "size", detail } }));
+    const err = await streamNetworkCompletion(deps, { model: "auto", computeClass: "any", messages: [{ role: "user", content: "hi" }] }).next().catch((e: Error) => e);
+    expect((err as Error).message).toBe(`${detail}. Nothing was charged.`);
+    expect((err as { info?: unknown }).info).toMatchObject({ code: "no_route_fits", reason: "size" });
+  });
+
   it("explains why a request couldn't start", async () => {
     const deps = await fakeForwarder(() => ({ status: 409, json: { error: "no_agent_has_model" } }));
     await expect(streamNetworkCompletion(deps, { model: "x", computeClass: "any", messages: [{ role: "user", content: "hi" }] }).next()).rejects.toThrow(/No machine on the network has x/);

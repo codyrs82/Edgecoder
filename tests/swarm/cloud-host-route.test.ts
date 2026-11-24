@@ -118,14 +118,16 @@ describe("cloud hosts on the coordinator", () => {
     expect(models.find((m) => m.model === "qwen3-coder:30b")!.cloudRank).toBeUndefined();
   });
 
-  test("Auto sees the cloud host only with AUTO_CLOUD_MODELS, and then only its autoEligible models", async () => {
+  test("Auto sees the cloud host by default with every autoEligible model; a list narrows it; off hides it", async () => {
     const { bestFitConfig, localAgentViews } = await import("../../src/swarm/coordinator/routing.js");
     const before = bestFitConfig.autoCloudModels;
     try {
-      bestFitConfig.autoCloudModels = [];
-      expect(localAgentViews().find((a) => a.agentId === cloud.peerId)).toBeUndefined();
-      bestFitConfig.autoCloudModels = ["deepseek-v4.1-flash", "glm-5.3"];
+      bestFitConfig.autoCloudModels = "all";
+      expect([...(localAgentViews().find((a) => a.agentId === cloud.peerId)?.models ?? [])].sort()).toEqual(["deepseek-v4.1-flash", "glm-5.3"]);
+      bestFitConfig.autoCloudModels = ["deepseek-v4.1-flash"];
       expect(localAgentViews().find((a) => a.agentId === cloud.peerId)).toMatchObject({ computeClass: "cloud", models: ["deepseek-v4.1-flash"] });
+      bestFitConfig.autoCloudModels = "off";
+      expect(localAgentViews().find((a) => a.agentId === cloud.peerId)).toBeUndefined();
     } finally {
       bestFitConfig.autoCloudModels = before;
     }

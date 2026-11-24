@@ -19,7 +19,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { request } from "undici";
 import { z } from "zod";
-import { CODE_CONTROL_ACTIONS, codeControlRequestSchema, type CodeSnapshot } from "../../common/code-relay.js";
+import { CODE_COMMAND_BODY_LIMIT, CODE_CONTROL_ACTIONS, codeControlRequestSchema, type CodeSnapshot } from "../../common/code-relay.js";
 
 export interface CodeRoutesDeps {
   PORTAL_SERVICE_TOKEN: string;
@@ -177,7 +177,8 @@ export function registerCodeRoutes(app: FastifyInstance, deps: CodeRoutesDeps): 
     return reply.send({ machines: agentIds.map((id) => codeMachineView(id, known.get(id))) });
   });
 
-  app.post("/portal/api/code/:agentId/commands", { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } }, async (req, reply) => {
+  // A message may carry images (CODE_COMMAND_BODY_LIMIT; codeImagesSchema checks type, size and count).
+  app.post("/portal/api/code/:agentId/commands", { bodyLimit: CODE_COMMAND_BODY_LIMIT, config: { rateLimit: { max: 60, timeWindow: "1 minute" } } }, async (req, reply) => {
     const userId = await signedIn(req, reply);
     if (!userId) return reply;
     const p = z.object({ agentId: agentIdSchema }).safeParse(req.params);

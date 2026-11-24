@@ -10,7 +10,7 @@ export function failureKind(error: string | undefined): FailureKind {
   if (/not enough cSats|no cSats|insufficient|balance 0|costs more than the .* cSats ceiling/i.test(e)) return "csats";
   if (/^No .+ machines? online|machine runs .* right now|no network .* machine has a model|no agent with a model is online/i.test(e)) return "class";
   if (/isn't connected|not connected|offline|isn't running|unreachable/i.test(e)) return "offline";
-  if (/isn't installed|no model is installed|no model is available|no model fits|no model on the network fits/i.test(e)) return "model";
+  if (/isn't installed|no model is installed|no model is available|no model fits|no model on the network fits|no machine on the network can run/i.test(e)) return "model";
   return "other";
 }
 

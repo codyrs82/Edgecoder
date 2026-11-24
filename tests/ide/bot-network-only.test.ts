@@ -217,6 +217,27 @@ describe("Network only: the routed backend", () => {
     expect(hints[0]).toMatchObject({ computeClass: "apple", maxCSats: 50 });
   });
 
+  it("a bot's agent floor goes to best fit as minParamsB (a hard floor: a cloud model when nothing else is that big)", async () => {
+    const hints: RoutingHints[] = [];
+    const b = autoBackend({
+      inputs: async () => rich,
+      policy: "network_only",
+      plan: () => ({ allowanceCSats: 50, agentMinParamsB: 14 }),
+      run: () =>
+        async function* () {
+          throw new ChatBackendError("No machine.", 503);
+        },
+      networkBestFit: (routing) =>
+        async function* () {
+          hints.push(routing);
+          yield { delta: "ok" };
+          yield { done: true, where: "routed to deepseek-v4.1-flash on cloud" };
+        },
+    });
+    await collect(b);
+    expect(hints[0]).toMatchObject({ minParamsB: 14, maxCSats: 50 });
+  });
+
   it("best fit still leads when this side doesn't know the network's models", async () => {
     const tried: string[] = [];
     const b = autoBackend({

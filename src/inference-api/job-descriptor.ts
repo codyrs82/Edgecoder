@@ -15,6 +15,9 @@
  *   needsTools  true | false                               (x-edgecoder-needs-tools)
  *   minContext  tokens                                     (x-edgecoder-min-context)
  *   complexity  0..1 or low | medium | high | very_high    (x-edgecoder-complexity)
+ *   minParamsB  smallest model this call may run on, B params (x-edgecoder-min-params-b);
+ *               a bot's agent step sends its floor (BOT_AGENT_MIN_PARAMS_B). A hard floor:
+ *               best fit never goes below it (a cloud model when nothing else meets it).
  *   sessionId   conversation id                            (x-session-id; else the OpenAI `user`)
  *   computeClass  gpu | apple | cpu | gpu.dc: only this class (x-edgecoder-compute-class);
  *               a bot on "Network GPU only" sends it. The submit's own computeClass wins.
@@ -42,6 +45,8 @@ export interface RoutingHints {
   needsTools?: boolean;
   minContext?: number;
   complexity?: number | string;
+  /** Smallest model (B params) the call may run on: a hard floor (a bot's agent step). */
+  minParamsB?: number;
   sessionId?: string;
   /** Only machines of this class (Network GPU only, …). */
   computeClass?: string;
@@ -63,6 +68,8 @@ export interface JobDescriptor {
   expectedOutputTokens: number;
   maxTokens?: number;
   maxCSats?: number;
+  /** The client's hard size floor (hint minParamsB), B params. */
+  minParamsB?: number;
   complexity: Complexity;
   /** Conversation key for session affinity. */
   sessionKey: string;
@@ -102,6 +109,8 @@ export function cleanHints(raw: unknown): RoutingHints {
   if (needsTools !== undefined) out.needsTools = needsTools;
   const minContext = posNum(o.minContext ?? o.min_context, 10_000_000);
   if (minContext !== undefined) out.minContext = Math.floor(minContext);
+  const minParamsB = posNum(o.minParamsB ?? o.min_params_b, 100_000);
+  if (minParamsB !== undefined && minParamsB > 0) out.minParamsB = minParamsB;
   const c = o.complexity;
   if (hintScore(c) !== undefined) out.complexity = typeof c === "number" ? c : String(c);
   const sessionId = str(o.sessionId ?? o.session_id, 200);
@@ -125,7 +134,7 @@ export function routingHintsFrom(body: unknown, headers: Record<string, unknown>
   };
   const fromHeaders = cleanHints({
     job: h("x-edgecoder-job"), quality: h("x-edgecoder-quality"), maxCSats: h("x-edgecoder-max-csats"), latency: h("x-edgecoder-latency"),
-    needsTools: h("x-edgecoder-needs-tools"), minContext: h("x-edgecoder-min-context"), complexity: h("x-edgecoder-complexity"), sessionId: h("x-session-id"), computeClass: h("x-edgecoder-compute-class"),
+    needsTools: h("x-edgecoder-needs-tools"), minContext: h("x-edgecoder-min-context"), complexity: h("x-edgecoder-complexity"), minParamsB: h("x-edgecoder-min-params-b"), sessionId: h("x-session-id"), computeClass: h("x-edgecoder-compute-class"),
   });
   const fromBody = cleanHints(b.edgecoder);
   const out: RoutingHints = { ...fromHeaders, ...fromBody };
@@ -219,6 +228,7 @@ export function describeJob(
     expectedOutputTokens,
     ...(req.maxTokens ? { maxTokens: req.maxTokens } : {}),
     ...(hints.maxCSats !== undefined ? { maxCSats: hints.maxCSats } : {}),
+    ...(hints.minParamsB !== undefined ? { minParamsB: hints.minParamsB } : {}),
     complexity,
     sessionKey: session.key,
     sessionFrom: session.from,

@@ -16,11 +16,13 @@ describe("chat failure wording is shared with the desktop app", () => {
       "No GPU machines online. Available now: CPU (9).",
       "Your machine isn't connected",
       "No model on the network fits this request",
+      "No machine on the network can run this job right now (needs a model ≥ 14B with tools; online: qwen3.5:9b). Nothing was charged.",
       "all_coordinators_failed",
       "",
     ];
     for (const m of samples) expect(web.failureKind(m), m).toBe(desktop.failureKind(m));
     expect(web.failureKind(samples[0])).toBe("csats");
+    expect(web.failureKind(samples[6])).toBe("model");
   });
 
   it("works in the browser as shipped", () => {

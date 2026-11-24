@@ -96,12 +96,12 @@ export function localAgentViews(nowMs = Date.now(), rttOf: (agentId: string) => 
   const out: AgentView[] = [];
   for (const [agentId, cap] of agentCapabilities) {
     if (activeBlacklistRecord(agentId) || cap.hostApproved === false || reservations.isHeld(agentId, nowMs)) continue;
-    // Cloud hosts (src/cloud-host/) are reached by naming a cloud model. Best fit sees them only
-    // with the models the owner let Auto use (AUTO_CLOUD_MODELS, catalog autoEligible; default
-    // none), and places on them only top-tier jobs (best-fit.ts): each call spends the platform's
-    // provider budget (docs/cloud-host.md).
+    // Cloud hosts (src/cloud-host/): best fit sees each online one with the models AUTO_CLOUD_MODELS
+    // allows (default: every autoEligible catalog model; "off": none), and places on them only
+    // top-tier jobs or jobs nothing else on the network can take (best-fit.ts). Each call spends
+    // the platform's provider budget under the host's spend caps (docs/cloud-host.md).
     const cloudHost = effectiveHardware(agentId, cap)?.computeClass === "cloud";
-    if (cloudHost && bestFitConfig.autoCloudModels.length === 0) continue;
+    if (cloudHost && bestFitConfig.autoCloudModels === "off") continue;
     // Host memory (memory-admission.ts): only models it can load or has loaded, and no free slot
     // while it is under memory pressure or its circuit is open.
     const held = claims.get(agentId)?.inference ?? 0;

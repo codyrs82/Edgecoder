@@ -57,8 +57,9 @@ export interface CloudModelSpec {
   /** Short hint after "Cloud" in pickers ("Cloud · recommended"); none: just "Cloud". */
   hint?: "recommended" | "premium";
   /**
-   * Auto (best fit) may place a high-complexity job on it, when the coordinator's AUTO_CLOUD_MODELS
-   * also names it (default empty: Auto never uses cloud models). docs/cloud-host.md.
+   * Auto (best fit) may consider it without being told to (AUTO_CLOUD_MODELS unset: every
+   * autoEligible model whose host is online). false keeps it out of Auto unless AUTO_CLOUD_MODELS
+   * names it. CLOUD_MODELS_JSON entries default to true. docs/cloud-host.md.
    */
   autoEligible: boolean;
 }
@@ -76,10 +77,11 @@ export const BUILTIN_CLOUD_MODELS: readonly CloudModelSpec[] = [
     paramsB: 744,
     origin: { vendor: "Z.ai (Zhipu AI)", country: "CN" },
     capabilities: ["tools"],
-    // The premium cloud model: listed after the default, never chosen by Auto.
+    // The premium cloud model: listed after the default. Auto takes it only when Flash can't take
+    // the job, or the job asks for the best quality at top-tier complexity and the price allows it.
     rank: 2,
     hint: "premium",
-    autoEligible: false,
+    autoEligible: true,
   },
   {
     id: "deepseek-v4.1-flash",
@@ -91,7 +93,7 @@ export const BUILTIN_CLOUD_MODELS: readonly CloudModelSpec[] = [
     paramsB: 552,
     origin: { vendor: "DeepSeek", country: "CN" },
     capabilities: ["tools"],
-    // The default cloud model (owner decision 2026-11-23): listed first; Auto may use it (AUTO_CLOUD_MODELS).
+    // The default cloud model (owner decision 2026-11-23): listed first; Auto's cloud pick by default (cheapest).
     rank: 1,
     hint: "recommended",
     autoEligible: true,
@@ -142,7 +144,7 @@ export function parseCloudModelSpec(raw: unknown): CloudModelSpec {
   if (r.autoEligible !== undefined && typeof r.autoEligible !== "boolean") bad(`${id}: autoEligible must be true or false`);
   return {
     id, provider, providerModel: r.providerModel.trim(), usdPerM: { input, cachedInput, output }, priceAsOf: asOf, contextWindow: ctx, paramsB, origin: { vendor, country }, capabilities: caps,
-    rank, ...(r.hint ? { hint: r.hint as "recommended" | "premium" } : {}), autoEligible: r.autoEligible === true,
+    rank, ...(r.hint ? { hint: r.hint as "recommended" | "premium" } : {}), autoEligible: r.autoEligible !== false,
   };
 }
 
@@ -217,18 +219,30 @@ export function cloudLabel(hint: string | undefined): string {
   return hint ? `Cloud · ${hint}` : "Cloud";
 }
 
-/** AUTO_CLOUD_MODELS: the comma list of cloud model ids the owner lets Auto use (lower case, deduplicated). */
-export function parseAutoCloudModels(raw: string | undefined): string[] {
-  return [...new Set((raw ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean))];
+/**
+ * Which cloud models Auto may use (AUTO_CLOUD_MODELS): "all" (unset or empty, the default: every
+ * autoEligible catalog model whose host is online), "off" (none: the emergency switch), or a list
+ * of ids (only those, autoEligible or not).
+ */
+export type AutoCloudModels = "all" | "off" | readonly string[];
+
+/** AUTO_CLOUD_MODELS: unset/empty = "all"; "off" (or none/0/false) = "off"; else the comma list (lower case, deduplicated). */
+export function parseAutoCloudModels(raw: string | undefined): AutoCloudModels {
+  const t = (raw ?? "").trim().toLowerCase();
+  if (t === "" || t === "all" || t === "auto") return "all";
+  if (t === "off" || t === "none" || t === "0" || t === "false") return "off";
+  const list = [...new Set(t.split(",").map((s) => s.trim()).filter(Boolean))];
+  return list.length ? list : "all";
 }
 
 /**
- * Auto may place a job on `model`: a cloud model of the catalog flagged autoEligible that the
- * coordinator's AUTO_CLOUD_MODELS (`allowed`) names. Empty `allowed` (the default) = never.
+ * Auto may place a job on `model`: a catalog cloud model that the setting allows ("all": flagged
+ * autoEligible; a list: named in it; "off": never). Never a model outside the cloud catalog.
  */
-export function autoMayUseCloudModel(model: string, allowed: readonly string[]): boolean {
+export function autoMayUseCloudModel(model: string, allowed: AutoCloudModels = "all"): boolean {
   const spec = cloudModelSpec(model);
-  return !!spec && spec.autoEligible && allowed.includes(spec.id);
+  if (!spec || allowed === "off") return false;
+  return allowed === "all" ? spec.autoEligible : allowed.includes(spec.id);
 }
 
 export function isCloudModel(model: string | undefined | null): boolean {

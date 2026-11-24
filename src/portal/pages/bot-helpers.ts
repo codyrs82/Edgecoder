@@ -90,6 +90,29 @@ export const CLIENT_BOT_HELPERS_JS = String.raw`
       if (n < 0.01) return "<0.01";
       return n < 10 ? n.toFixed(2).replace(/\.?0+$/, "") : Math.round(n).toLocaleString("en-US");
     }
+    /**
+     * Where a reply or run ran (RemoteServed, src/common/bot-relay.ts): "qwen3-coder:30b · Datacenter GPU ·
+     * Frankfurt · 3.4 cSats", like the web chat's footer. "" without one (older Macs send none).
+     */
+    function botServedText(s, withCost) {
+      if (!s || typeof s !== "object") return "";
+      var models = Array.isArray(s.models) && s.models.length > 1 ? s.models.join(", ") : s.model;
+      var bits = [models, s.machine, s.place].filter(function(x) { return typeof x === "string" && x; });
+      if (s.machines > 1) bits.push(s.machines + " machines");
+      if (withCost) {
+        if (s.calls > 1) bits.push(s.calls + " calls");
+        if (s.usd > 0) bits.push(s.usd < 0.01 ? "<$0.01" : "$" + Number(s.usd).toFixed(2));
+        if (!(s.usd > 0) || s.cSats > 0) bits.push(s.cSats > 0 ? botCSats(s.cSats) + " cSats" : "free");
+      }
+      return bits.length > (withCost ? 1 : 0) ? bits.join(" · ") : "";
+    }
+    /** The small line under a bot's reply (its text escaped; iconHtml is the page's own icon markup). */
+    function botServedHtml(m, iconHtml) {
+      var t = m && m.role === "assistant" ? botServedText(m.served, true) : "";
+      return t ? '<div class="msg-served" title="Where this reply ran">' + (iconHtml || "") + escapeHtml(t) + "</div>" : "";
+    }
+    /** A run's "Ran on": the actual model and machine when the Mac sent them, else its route ("Network · best fit"). */
+    function botRanOn(r) { return botServedText(r && r.served, false) || (r && r.where) || ""; }
     /** The avatar: initial, shape, status dot. The colour is painted by paintBotAvatars (CSSOM). */
     function botAvatarHtml(b, online, size) {
       var chip = botStatusChip(b);
