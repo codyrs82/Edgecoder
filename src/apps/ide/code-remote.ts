@@ -12,11 +12,13 @@
  * answered unless the account signed in on this Mac is the account that asked.
  *
  * What the phone can reach:
- *   - projects: only folders trusted on this Mac (workspace-trust.ts), named by an opaque projectId
+ *   - projects: only folders trusted on this Mac or used in its Code view (workspace-trust.ts), named by an opaque projectId
  *     (salted per machine) and folder names. No request carries a path and no answer contains one:
  *     the project folder and the home folder are replaced in every string that leaves.
- *   - sessions: only those owned by that account, in a folder that is still trusted, and started
- *     from the phone or published by the Mac.
+ *   - sessions: only those owned by that account, in a folder that is still open to the phone, and
+ *     started from the phone, published by the Mac, or mirroring a desktop Code view chat
+ *     (desktop-chats.ts). A turn the desktop app runs itself shows live; the phone may stop it and
+ *     answer its approvals, but only those a phone turn could approve (sessions.ts remoteMayApprove).
  * What a session started or driven from the phone may do is in sessions.ts (remoteDecision): every
  * command that isn't read-only asks, paths outside the project are refused, and approving from the
  * phone never adds an "always allow" rule or turns on auto-edits. Auto and Full access are set on the
@@ -33,7 +35,7 @@ import {
 } from "../../common/bot-relay.js";
 import type { CheckpointStore } from "./checkpoints.js";
 import { modelIdOf, SessionError, type ClientKind, type ClientRef, type SessionData, type SessionHub, type TranscriptEntry } from "./sessions.js";
-import { isProjectTrusted, listTrustedProjects, projectIdOf, trustedRootForId, type TrustedProject } from "./workspace-trust.js";
+import { isProjectOpenToPhone, listTrustedProjects, projectIdOf, trustedRootForId, type TrustedProject } from "./workspace-trust.js";
 
 /** A pending command longer than this is shown cut and must be approved on the Mac. */
 export const MAX_APPROVABLE_COMMAND_BYTES = 4 * 1024;
@@ -135,14 +137,14 @@ function projectName(root: string): string {
   return root.split("/").filter(Boolean).pop() ?? "";
 }
 
-/** The sessions `account` may see from its phone: its own, in a trusted folder, phone-started or published. */
+/** The sessions `account` may see from its phone: its own, in a folder open to it, phone-started, published or a desktop chat. */
 function visible(hub: SessionHub, account: string): SessionData[] {
   const out: SessionData[] = [];
   for (const summary of hub.list()) {
     const s = hub.peek(summary.id);
     if (!s || s.ownerAccount !== account) continue;
-    if (s.origin !== "remote" && !s.published) continue;
-    if (!isProjectTrusted(s.projectRoot)) continue;
+    if (s.origin !== "remote" && !s.published && !s.chatId) continue;
+    if (!isProjectOpenToPhone(s.projectRoot)) continue;
     out.push(s);
   }
   return out;
@@ -190,7 +192,13 @@ function messageOf(e: TranscriptEntry, root: string, pendingIds: ReadonlySet<str
   }, chars);
 }
 
-function pendingOf(p: { id: string; tool: string; args: Record<string, unknown> }, root: string): RemotePendingApproval {
+const ON_MAC = "This one runs outside what the phone may approve. Approve it on the Mac.";
+
+function pendingOf(p: { id: string; tool: string; args: Record<string, unknown> }, root: string, mayApprove = true): RemotePendingApproval {
+  if (!mayApprove) {
+    const command = p.tool === "run_shell" && typeof p.args.command === "string" ? { command: scrubPaths(Buffer.from(p.args.command).subarray(0, MAX_APPROVABLE_COMMAND_BYTES).toString("utf8"), root) } : {};
+    return { callId: p.id, tool: p.tool, detail: scrubPaths(toolCallDetail(p.tool, p.args), root), ...command, approvable: false, message: ON_MAC };
+  }
   if (p.tool === "run_shell") {
     const command = typeof p.args.command === "string" ? p.args.command : "";
     const bytes = Buffer.from(command);
@@ -220,7 +228,7 @@ export function remoteSessionSnapshot(hub: SessionHub, s: SessionData, salt: str
     running: snap.running
       ? { turnId: snap.running.turnId, text: scrubPaths(cap(snap.running.text, chars * 2), root), steps: scrubSteps(toolSteps(snap.running.events as never, pendingIds), root) }
       : null,
-    pending: snap.pending.map((p) => pendingOf(p, root)),
+    pending: snap.pending.map((p) => pendingOf(p, root, hub.remoteMayApprove(s.id, p.id))),
     queue: snap.queue.map((q) => ({ id: q.id, text: scrubPaths(cap(q.text, 2_000), root), by: q.by, ...(q.label ? { label: q.label.slice(0, 80) } : {}), at: q.at })),
     tail: keep ? s.transcript.slice(-keep).map((e) => messageOf(e, root, pendingIds, chars)) : [],
   });
@@ -346,6 +354,7 @@ export function runCodeRemoteCommand(hub: SessionHub, cmd: CodeRemoteCommand, de
         const p = hub.snapshot(s.id).pending.find((x) => x.id === cmd.callId);
         if (!p) return { status: "refused", error: "no_pending_approval", message: "That approval was already answered or the turn ended." };
         if (cmd.approved && tooLongToApprove(p)) return { status: "refused", error: "approve_on_mac", message: "This command is too long to check on the phone. Approve it on the Mac." };
+        if (cmd.approved && !hub.remoteMayApprove(s.id, p.id)) return { status: "refused", error: "approve_on_mac", message: ON_MAC };
         // One call only: the phone never answers "always" (and SessionHub ignores it for remote clients).
         return hub.approve(s.id, cmd.callId, cmd.approved, client) ? { status: "done" } : { status: "refused", error: "no_pending_approval" };
       }
@@ -390,7 +399,7 @@ function createSession(hub: SessionHub, cmd: Extract<CodeRemoteCommand, { action
   } catch {
     isDir = false;
   }
-  if (!isProjectTrusted(root) || !isDir) return { status: "refused", error: "no_such_project", message: "That project isn't trusted on this Mac." };
+  if (!isProjectOpenToPhone(root) || !isDir) return { status: "refused", error: "no_such_project", message: "That project isn't trusted on this Mac." };
   const s = hub.create({ projectRoot: root, ...(cmd.title ? { title: cmd.title } : {}), ...(cmd.model ? { model: cmd.model } : {}), mode: cmd.mode, client, ownerAccount: client.accountId });
   hub.publish(s.id, true, client);
   hub.recordNote(s.id, { content: "Started from iPhone" });

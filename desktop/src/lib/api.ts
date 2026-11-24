@@ -3,6 +3,8 @@ import type { EngineMode } from "./permission-modes";
 import type { AttachmentPayload } from "./attachments";
 import type { WebStatus } from "./web-tool";
 import { fetchLocalService, serviceErrorText } from "./local-service";
+import { compactPaidTokensSetting } from "./compaction";
+import { replyAskCSatsSetting, replyAskUsdSetting } from "./cost-check";
 import { coordinatorUrl, defaultEndpoints, fetchEndpoint, portalUrl, type EndpointKind } from "./endpoints";
 import type {
   HealthRuntime,
@@ -1398,9 +1400,12 @@ export async function ideGetProject(): Promise<string | null> {
   }
 }
 
-/** Answer a chat or bot tool call; `always` also keeps the call's "Always allow" rule for its project. */
-export async function ideSendToolApproval(id: string, approved: boolean, always = false): Promise<void> {
-  await withIdeRetry((h) => post(ideBase(), "/v1/ide/tool-approval", { id, approved, ...(always ? { always: true } : {}) }, h));
+/**
+ * Answer a chat or bot tool call; `always` also keeps the call's "Always allow" rule for its project.
+ * A cost check (cost-check.ts) answers with `choice`: continue, switch (to its suggested model) or stop.
+ */
+export async function ideSendToolApproval(id: string, approved: boolean, always = false, choice?: "continue" | "switch" | "stop"): Promise<void> {
+  await withIdeRetry((h) => post(ideBase(), "/v1/ide/tool-approval", { id, approved, ...(always ? { always: true } : {}), ...(choice ? { choice } : {}) }, h));
 }
 
 /** Every project's "always allow" answers (Settings → General). */
@@ -1414,7 +1419,7 @@ export const listPermissions = () => fsCall<{ projects: Record<string, ProjectPe
 export const removePermission = (projectRoot: string, rule: string) => fsCall<{ removed: boolean }>("POST", "/v1/ide/permissions/remove", { projectRoot, rule });
 
 export interface IdeStreamEvent {
-  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "usage" | "web" | "web_off" | "done";
+  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "usage" | "web" | "web_off" | "context" | "compacted" | "cost_note" | "done";
   [key: string]: unknown;
 }
 
@@ -1459,6 +1464,8 @@ export async function streamIdeChat(
   web = false,
   /** The Code view's Helpers switch (docs/tentacles.md): `sessionId` is the chat's id. */
   helpers?: { sessionId: string; enabled: boolean; maxParallel: number; budgetCSats: number },
+  /** The Code view chat's id: its mirror on the provider shows the turn to your phone (code-chat-mirror.ts). */
+  chatId?: string,
 ): Promise<void> {
   const base = ideBase();
   const res = await ideFetch(`${base}/v1/ide/chat`, {
@@ -1476,6 +1483,12 @@ export async function streamIdeChat(
       ...(attachments?.length ? { attachments } : {}),
       ...(web ? { web: true } : {}),
       ...(helpers ? { helpers } : {}),
+      // Settings → General → "Compact long chats at … tokens" (a paid lead compacts past it).
+      compactPaidTokens: compactPaidTokensSetting(),
+      // Settings → General → "Ask before a reply spends more than …" (a paid lead asks past it).
+      replyAskCSats: replyAskCSatsSetting(),
+      replyAskUsd: replyAskUsdSetting(),
+      ...(chatId ? { chatId } : {}),
     }),
     signal,
   });
@@ -1509,6 +1522,23 @@ export async function streamIdeChat(
       }
     }
   }
+}
+
+/**
+ * Summarize a chat's older messages (POST /v1/ide/compact, compaction.ts). `force`: now (`/compact`,
+ * "Compact conversation"); otherwise only when the chat's model is paid and its history passed the
+ * budget. The summary runs on a cheap model (this computer's for a local chat), never your
+ * frontier key unless you turned that on.
+ */
+export async function ideCompact(messages: Array<{ role: "user" | "assistant"; content: string }>, requestedModel: string | undefined, force: boolean, signal?: AbortSignal): Promise<import("./compaction").CompactResult> {
+  const res = await ideFetch(`${ideBase()}/v1/ide/compact`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, ...computeFields(requestedModel), force, compactPaidTokens: compactPaidTokensSetting() }),
+    signal,
+  });
+  if (!res.ok) throw new Error(`Compacting failed: ${res.status}`);
+  return (await res.json()) as import("./compaction").CompactResult;
 }
 
 /** The SSE events of an IDE stream, one parsed object per `data:` line, until [DONE]. */
@@ -1874,7 +1904,7 @@ export interface ComputeOverview {
   /** restricted: a security research tier model, listed only to entitled accounts; never a network call. */
   /** agentsByClass: machines per class with the model (newer coordinators). */
   // cloudRank / cloudHint: a cloud model (hosted API), its order among cloud models and its hint ("recommended", "premium").
-  models?: Array<{ model: string; agents: number; agentsByClass?: Record<string, number>; classes: string[]; cSatsPerMTokens?: { input: number; output: number }; restricted?: string; cloudRank?: number; cloudHint?: string }>;
+  models?: Array<{ model: string; agents: number; agentsByClass?: Record<string, number>; classes: string[]; cSatsPerMTokens?: { input: number; output: number; cachedInput?: number }; restricted?: string; cloudRank?: number; cloudHint?: string }>;
   /** How this computer's agent chose its coordinator: from the signed registry by latency, or the fallback URL. */
   steering?: CoordinatorSteering | null;
   /** The network refused this computer's agent (its safety check blacklisted it), with the reason. */
@@ -2125,6 +2155,8 @@ export interface SessionSummary {
   controller: SessionClientRef | null;
   clients: SessionClientRef[];
   pending: number;
+  /** A Code view chat's mirror (code-chat-mirror.ts): the chat shows in the Code view, not as its own session. */
+  chatId?: string;
 }
 export interface SessionEntry {
   id: string;
@@ -2139,6 +2171,8 @@ export interface SessionEntry {
   undone?: boolean;
   /** A plan written in Plan mode (Approve plan / Revise). */
   plan?: boolean;
+  /** A note: older messages were summarized to save tokens (`/compact`, or before a paid turn). */
+  compaction?: { throughId: string; savedTokens: number; manual: boolean };
 }
 export interface SessionQueued {
   id: string;
@@ -2183,11 +2217,27 @@ export const sessionSettings = (id: string, patch: { model?: string; mode?: Engi
 export const sessionApprovePlan = (id: string, mode: EngineMode = "auto-edits") => sessionPost<{ turnId: string | null }>(id, "plan", { mode });
 export const sessionCancel = (id: string) => sessionPost(id, "cancel");
 export const sessionUndo = (id: string) => sessionPost<{ reverted: string[] }>(id, "undo");
+/** Summarize the session's older messages now (`/compact` in the terminal). */
+export const sessionCompact = (id: string) => sessionPost<{ compacted: boolean; savedTokens?: number }>(id, "compact");
 // Tentacles (helper agents; docs/tentacles.md): the session's tree, cancel, merge or drop a waiting patch.
 export const sessionTentacles = (id: string) =>
   fsCall<{ config: { enabled: boolean }; spentCSats: number; tentacles: import("./tentacles").TentacleItem[] }>("GET", `/v1/ide/sessions/${id}/tentacles`);
 export const tentacleCancel = (id: string, tid: string) => sessionPost<{ cancelled: boolean }>(id, `tentacles/${tid}/cancel`);
 export const tentacleMerge = (id: string, tid: string, approved: boolean) => sessionPost(id, `tentacles/${tid}/merge`, { approved });
+
+/** A Code view chat as the provider mirrors it for your phone (POST /v1/ide/code-chats/sync, desktop-chats.ts). */
+export interface CodeChatSync {
+  chatId: string;
+  projectRoot: string;
+  title?: string;
+  mode?: EngineMode;
+  model?: string;
+  messages: Array<{ id: string; role: "user" | "assistant"; content: string; at: number; turnId?: string; changedFiles?: string[]; plan?: boolean }>;
+}
+/** Adds the chat's messages the mirror lacks (made on first sync); returns the mirror session's id. */
+export const syncCodeChat = (body: CodeChatSync) => fsCall<{ sessionId: string; messages: number }>("POST", "/v1/ide/code-chats/sync", body);
+/** The chat was deleted here: its mirror (and what the phone sees of it) goes too. */
+export const forgetCodeChat = (chatId: string) => fsCall<{ removed: boolean }>("POST", "/v1/ide/code-chats/forget", { chatId });
 
 /** Follow a session's events after `since` until the signal aborts; reconnects resume after the last event. */
 export async function followSession(id: string, since: number, onEvent: (e: SessionEvent) => void, signal: AbortSignal): Promise<void> {

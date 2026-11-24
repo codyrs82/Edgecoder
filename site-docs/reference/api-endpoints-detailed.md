@@ -252,6 +252,7 @@ Local to the desktop app (`127.0.0.1:4304`), IDE token required, loopback only.
 | GET | `/v1/ide/sessions/:id`, `/v1/ide/sessions/:id/events` | a session's snapshot and its event stream (SSE) |
 | POST | `/v1/ide/sessions/:id/{messages,unqueue,approve,settings,publish,trust,cancel,undo,clear,delete}` | writes from any attached client |
 | GET / POST | `/v1/ide/bots` | desktop bots |
+| POST | `/v1/ide/code-chats/sync` | the desktop Code view's chat (its messages, mode and model) mirrored as a session for Code from your phone; marks the folder as used in the Code view |
 | GET | `/v1/ide/code/remote/snapshot` | Code from your phone: trusted projects and sessions for the account signed in on this machine |
 | POST | `/v1/ide/code/remote/command` | Code from your phone: one command (`create`, `message`, `approve`, `cancel`, `undo`, `plan`, `settings`, `unqueue`, or a read such as `snapshot`) |
 

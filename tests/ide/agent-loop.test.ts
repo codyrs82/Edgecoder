@@ -17,6 +17,31 @@ function scripted(replies: Array<ReturnType<ChatFn> extends Promise<infer R> ? R
 }
 
 describe("runAgentLoop", () => {
+  it("says so when it runs out of steps instead of ending silently", async () => {
+    const step = { content: "Reading more.", toolCalls: [{ name: "read_file", arguments: { path: "a.ts" } }] };
+    const { chat } = scripted([step, step, step]);
+    const events: IdeStreamEvent[] = [];
+    await runAgentLoop({
+      chat,
+      systemPrompt: () => "sys",
+      messages: [{ role: "user", content: "look around" }],
+      sendEvent: (e) => events.push(e),
+      isCancelled: () => false,
+      runTool: async () => "x",
+      native: true,
+      maxIterations: 3,
+    });
+    const text = events.filter((e) => e.type === "text").map((e) => (e as { content: string }).content).join("");
+    expect(text).toMatch(/Stopped after 3 steps without finishing\. Reply "continue"/);
+  });
+
+  it("ends quietly when it finishes in time", async () => {
+    const { chat } = scripted([{ content: "Done.", toolCalls: [] }]);
+    const events: IdeStreamEvent[] = [];
+    await runAgentLoop({ chat, systemPrompt: () => "sys", messages: [{ role: "user", content: "hi" }], sendEvent: (e) => events.push(e), isCancelled: () => false, runTool: async () => "x", native: true });
+    expect(events.filter((e) => e.type === "text").map((e) => (e as { content: string }).content).join("")).not.toMatch(/Stopped after/);
+  });
+
   it("native: streams text, runs tool calls, feeds results back, stops on a plain answer", async () => {
     const { chat, seen } = scripted([
       { content: "Reading it.", toolCalls: [{ name: "read_file", arguments: { path: "a.ts" } }] },

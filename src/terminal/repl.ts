@@ -55,6 +55,7 @@ export const HELP = `Commands (they work at any prompt, an approval included):
   /queue                        list queued messages; /unqueue [n] removes one (default: the last)
   /undo                         undo the files the last reply changed
   /clear                        start the conversation over
+  /compact                      summarize earlier messages now to save tokens (the last few stay as they are)
   /status                       session, project, model, mode, where the last call ran, who is connected
   /cost                         what this session has spent (cSats, and USD on your own frontier key)
   /github                       sign in to GitHub (device code)
@@ -365,6 +366,11 @@ export class Repl {
       case "undo":
         this.line(st.yellow(`▸ Undid ${(e.reverted as string[]).join(", ") || "nothing"}.`));
         break;
+      case "note": {
+        const c = (e.entry as TranscriptEntry | undefined)?.compaction;
+        if (c) this.line(st.dim(`▸ ${compactionLine(c)}`));
+        break;
+      }
       case "cleared":
         this.line(st.dim("▸ The conversation was cleared."));
         break;
@@ -535,6 +541,17 @@ export class Repl {
         case "/clear":
           await this.c.clear(id);
           return;
+        case "/compact": {
+          if (this.running) {
+            this.line(st.dim("Wait for the reply to finish (or /stop it) before compacting."));
+            return;
+          }
+          this.line(st.dim("  Summarizing earlier messages…"));
+          const r = await this.c.compact(id);
+          if (!r.compacted) this.line(st.dim("Nothing to compact yet: the conversation is short."));
+          // The provider's "note" event prints the result line.
+          return;
+        }
         case "/undo": {
           const r = await this.c.undo(id);
           if (!r.reverted.length) this.line(st.dim("Nothing to undo."));
@@ -668,6 +685,11 @@ function modelLabel(model: string, compute: { target: string; computeClass?: str
   if (compute.target === "mine") return `mine/${model}`;
   if (compute.target === "reserved") return `reserved/${compute.reservationId}/${model}`;
   return `network/${model}${compute.computeClass && compute.computeClass !== "any" ? `@${compute.computeClass}` : ""}`;
+}
+
+/** "Earlier messages summarized to save tokens · ~12,400 tokens saved" (a compaction note). */
+export function compactionLine(c: { savedTokens: number }): string {
+  return `Earlier messages summarized to save tokens · ~${Math.round(c.savedTokens).toLocaleString("en-US")} tokens saved`;
 }
 
 export function placementOf(id: string): "local" | "network" | "mine" | "reserved" | "auto" {

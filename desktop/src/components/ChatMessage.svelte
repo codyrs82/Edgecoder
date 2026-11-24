@@ -2,6 +2,8 @@
   import MarkdownRenderer from "./MarkdownRenderer.svelte";
   import StreamingIndicator from "./StreamingIndicator.svelte";
   import ToolCallBlock from "./ToolCallBlock.svelte";
+  import CostCheckCard from "./CostCheckCard.svelte";
+  import { COST_CHECK_TOOL } from "../lib/cost-check";
   import ShellBlock from "./ShellBlock.svelte";
   import DiffBlock from "./DiffBlock.svelte";
   import PlanBlock from "./PlanBlock.svelte";
@@ -44,13 +46,20 @@
     activity?: string;
     /** A quiet note under the reply ("Web search needs cSats", once per chat). */
     notice?: string;
+    /**
+     * A paid reply's cost check (CostCheckCard): Keep going, Switch (with the suggested model) or
+     * Stop. Without it the card answers through onToolApproval (Keep going / Stop only).
+     */
+    onCostChoice?: (id: string, choice: "continue" | "switch" | "stop", suggest?: { id: string; name: string }) => void;
+    /** While streaming: the reply's cost notes ("Skipped re-reading 3 unchanged files · ~90K tokens saved"). */
+    costNotes?: string[];
   }
   /** The footer's tooltip: each model call (machine, hardware, region, timings, cost). */
   function usageTitle(u: { cSats: number; where?: string; calls?: CallUsage[] }): string {
     return u.calls?.length ? `Where this reply ran:\n${servedBreakdown(u.calls)}` : "Where this reply ran and what it cost";
   }
 
-  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, onToolAlways, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview, usage, web, activity, notice }: Props = $props();
+  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, onToolAlways, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview, usage, web, activity, notice, onCostChoice, costNotes }: Props = $props();
 
   /** A failed reply: its text, and the error as one compact notice (with Buy cSats when it's money). */
   let failed = $derived(role === "assistant" && !streaming ? splitModelError(content) : { text: content, error: undefined });
@@ -76,7 +85,7 @@
   {:else}
     <div class="bubble assistant-bubble">
       {#if toolEvents && toolEvents.length > 0}
-        {@const stepCount = toolEvents.filter((e) => e.type === "tool_call" || e.type === "shell_output").length}
+        {@const stepCount = toolEvents.filter((e) => (e.type === "tool_call" && e.tool !== COST_CHECK_TOOL) || e.type === "shell_output").length}
         {#if !streaming && stepCount >= 2}
           <!-- A finished turn's steps fold into one line ("Read 2 files, edited 1 file · 5 steps"). -->
           <button type="button" class="steps-summary" aria-expanded={stepsOpen} onclick={() => (stepsOpen = !stepsOpen)}>
@@ -88,7 +97,16 @@
         {#if streaming || stepCount < 2 || stepsOpen}
         <div class="tool-events" class:folded={!streaming && stepCount >= 2}>
           {#each toolEvents as evt}
-              {#if evt.type === "tool_call"}
+              {#if evt.type === "tool_call" && evt.tool === COST_CHECK_TOOL}
+                <CostCheckCard
+                  id={evt.id ?? ""}
+                  args={evt.args ?? {}}
+                  pending={streaming && evt.approval_status === "pending" && !evt.result}
+                  result={evt.result}
+                  canSwitch={!!onCostChoice}
+                  onChoice={onCostChoice ?? ((id, choice) => onToolApproval?.(id, choice !== "stop"))}
+                />
+              {:else if evt.type === "tool_call"}
                 <ToolCallBlock
                   id={evt.id ?? ""}
                   tool={evt.tool ?? "unknown"}
@@ -151,6 +169,9 @@
       {#if notice && !streaming}
         <div class="reply-notice" role="note">{notice}</div>
       {/if}
+      {#if streaming && costNotes?.length}
+        {#each costNotes as n, i (i)}<div class="reply-notice" role="note">{n}</div>{/each}
+      {/if}
       {#if streaming && activity}
         <div class="web-activity" role="status">{activity}</div>
       {/if}
@@ -175,7 +196,7 @@
 
 <style>
   .web-activity { margin-top: 6px; font-size: var(--fs-sm); color: var(--text-secondary); }
-  .reply-notice { margin-top: 6px; font-size: var(--fs-xs); color: var(--text-muted); }
+  .reply-notice { margin-top: 6px; font-size: var(--fs-xs); color: var(--text-muted); white-space: pre-line; }
   .reply-failure { display: flex; align-items: center; gap: 10px; margin-top: 4px; padding: 6px 10px; border-radius: 8px; background: var(--bg-surface); font-size: 12.5px; color: var(--text-secondary); }
   .rf-text { flex: 1; min-width: 0; }
   .rf-title { color: var(--text-primary); font-weight: 500; }

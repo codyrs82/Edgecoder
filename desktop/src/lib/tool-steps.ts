@@ -74,7 +74,8 @@ function plural(n: number, one: string, many = `${one}s`): string {
 
 /** "Read 2 files, edited 1 file, ran 1 command" for a turn's tool calls. */
 export function summarizeSteps(events: ToolEvent[]): string {
-  const calls = events.filter((e) => e.type === "tool_call");
+  // A paid reply's cost check (cost_check) is a question, not a step.
+  const calls = events.filter((e) => e.type === "tool_call" && e.tool !== "cost_check");
   const files = { read: new Set<string>(), edited: new Set<string>() };
   let searches = 0;
   let commands = 0;
