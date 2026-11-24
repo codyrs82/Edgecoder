@@ -56,7 +56,9 @@ function build() {
   };
   const cfg = { clientId: "id", clientSecret: "secret", scopes: "openid email", authorizeUrl: "https://google.idp.example/auth", tokenUrl: "https://google.idp.example/token", userinfoUrl: "https://google.idp.example/userinfo" };
   const app = Fastify();
+  const signups: Array<{ userId: string; email: string; method: string; cookieHeader: string | undefined }> = [];
   registerAuthRoutes(app, {
+    onSignup: (e: (typeof signups)[number]) => void signups.push(e),
     store,
     oauthProviders: { google: cfg, microsoft: { ...cfg, clientId: "" }, github: { ...cfg, clientId: "" } },
     PORTAL_PUBLIC_URL: "https://portal.example",
@@ -79,7 +81,7 @@ function build() {
     issueMobileOauthSessionToken: async () => "mobile"
   } as any);
   registerLegalRoutes(app, { store: store as any, getCurrentUser: async () => (currentUser ? { userId: currentUser } : null) });
-  return { app, users, signIn: (id: string | null) => (currentUser = id) };
+  return { app, users, signups, signIn: (id: string | null) => (currentUser = id) };
 }
 
 const signup = (ctx: ReturnType<typeof build>, extra: Record<string, unknown> = {}) =>
@@ -114,6 +116,18 @@ describe("sign-up requires accepting the Terms, Privacy Policy and Acceptable Us
     expect(user.termsVersion).toBe(TERMS_VERSION);
     expect(user.termsAcceptedAtMs).toBeGreaterThanOrEqual(before);
     expect(user.termsAcceptedAtMs).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("tells growth signals about each new account, with its method and cookies (src/portal/growth.ts)", async () => {
+    const res = await ctx.app.inject({ method: "POST", url: "/auth/signup", headers: { cookie: "ec_utm=abc" }, payload: { email: "new@example.test", password: "correct-horse-1", acceptTerms: true } });
+    expect(res.statusCode).toBe(200);
+    expect(ctx.signups).toEqual([{ userId: res.json().userId, email: "new@example.test", method: "email", cookieHeader: "ec_utm=abc" }]);
+    idp.claims = { sub: "g-9", email: "sso9@example.test", email_verified: true };
+    await oauth(ctx, `?terms=${encodeURIComponent(TERMS_VERSION)}`);
+    expect(ctx.signups[1]).toMatchObject({ email: "sso9@example.test", method: "google" });
+    // Signing in again is not a sign-up.
+    await oauth(ctx, `?terms=${encodeURIComponent(TERMS_VERSION)}`);
+    expect(ctx.signups).toHaveLength(2);
   });
 
   it("single sign-on records the version the Create account checkbox passed, and only the current one", async () => {

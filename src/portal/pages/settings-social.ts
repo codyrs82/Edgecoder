@@ -4,6 +4,7 @@
 import type { FastifyInstance } from "fastify";
 import { CSP_NONCE } from "../csp-nonce.js";
 import { SETTINGS_HELPERS_SCRIPT, settingRow, settingsPage } from "./settings-shell.js";
+import { TRAFFIC_PANEL_SCRIPT, trafficPanelHtml } from "./settings-traffic.js";
 
 /**
  * Settings > Social posts (/portal/settings/social), system admins only: the brand account's post
@@ -20,6 +21,7 @@ import { SETTINGS_HELPERS_SCRIPT, settingRow, settingsPage } from "./settings-sh
  *   time) and the thread. A thread is approved as a whole. A draft that breaks a rule lists the
  *   problems and cannot be approved until it is edited.
  * - Recent: posted (with the X post and Nostr note links) and rejected.
+ * - Traffic from X (settings-traffic.ts): campaign visits and sign-ups for the last 14 days.
  */
 export function socialPageContent(): string {
   return `
@@ -103,7 +105,7 @@ export function socialPageContent(): string {
       <h3 class="set-group">Recent</h3>
       <div class="set-card soc-recent"><div class="soc-table">
         <table><thead><tr><th>When</th><th>Status</th><th>Post</th><th>Links</th></tr></thead><tbody id="socRecent"></tbody></table>
-      </div></div>
+      </div></div>${trafficPanelHtml()}
     </div>`;
 }
 
@@ -111,6 +113,7 @@ export function socialPageScript(): string {
   return `
     ${SETTINGS_HELPERS_SCRIPT}
     const $ = (id) => document.getElementById(id);
+    ${TRAFFIC_PANEL_SCRIPT}
     const KIND = { weekly: "Weekly report", release: "Release", docs: "Docs", manual: "Manual", import: "Imported" };
     const TZ_LABEL = "America/Chicago";
     const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -467,6 +470,7 @@ export function socialPageScript(): string {
       revealSettingsAdminTab(me);
       const user = me.user || {};
       if (!(user.roles && user.roles.isSystemAdmin)) { $("socDenied").classList.remove("hidden"); return; }
+      loadTraffic().catch((err) => { $("trafficSummary").textContent = "Could not load traffic: " + String(err.message || err); });
       await load();
     })().catch((err) => showError("Could not load social posts: " + String(err.message || err)));
     `;

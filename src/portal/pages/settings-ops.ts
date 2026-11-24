@@ -655,7 +655,9 @@ app.get("/portal/settings/admin", async (_req, reply) => {
 
     ${securityResearchScript}
     /* ── User management (admin only; routes/admin-users.ts) ── */
-    const userView = { filter: "all", q: "", page: 1, pages: 1, selfUserId: "" };
+    // ?user=<email or id> (the new sign-up alert links here) opens the list searched for that account.
+    const userView = { filter: "all", q: (new URLSearchParams(location.search).get("user") || "").trim().slice(0, 200), page: 1, pages: 1, selfUserId: "" };
+    if (userView.q && document.getElementById("userSearch")) document.getElementById("userSearch").value = userView.q;
     const STATUS_TONE = { verified: "ok", unverified: "warn", agent: "info" };
     async function apiDetail(path, options) {
       const res = await fetch(path, { credentials: "include", headers: { "content-type": "application/json" }, ...options });

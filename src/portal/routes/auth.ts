@@ -57,7 +57,7 @@ export const RESEND_VERIFICATION_RESPONSE = {
 } as const;
 
 /** #16: Email/password and OAuth sign-in, GitHub link (/auth/*, /portal/api/github/*). Moved unchanged from server.ts; server.ts passes in what it needs. */
-export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, decodeJwtPayload, ensureCreditAccountForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sendOauthLinkConfirmEmail, sendOauthConnectedEmail, sendOauthLinkClaimNoticeEmail, sha256Hex, store, verifyPassword, clientIp }: AuthRoutesDeps): void {
+export function registerAuthRoutes(app: FastifyInstance, { onSignup, EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, decodeJwtPayload, ensureCreditAccountForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sendOauthLinkConfirmEmail, sendOauthConnectedEmail, sendOauthLinkClaimNoticeEmail, sha256Hex, store, verifyPassword, clientIp }: AuthRoutesDeps): void {
   registerPasswordResetRoutes(app, { store, hashPassword, normalizeEmail, sha256Hex, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail });
   // #88: HMAC key for the browser-bound OAuth state cookie (OAUTH_STATE_SECRET, or per process).
   const oauthStateHmacKey = oauthStateKey();
@@ -131,6 +131,8 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
       termsVersion: TERMS_VERSION,
       termsAcceptedAtMs: Date.now()
     });
+    // Growth signals (src/portal/growth.ts): first-touch campaign and the new-sign-up alert. Fire and forget.
+    onSignup?.({ userId: user.userId, email: user.email, method: "email", cookieHeader: req.headers.cookie });
 
     const verifyToken = randomUUID();
     await store.createEmailVerification({
@@ -593,6 +595,7 @@ export function registerAuthRoutes(app: FastifyInstance, { EMAIL_VERIFY_TTL_MS, 
       } else {
         const newUserId = randomUUID();
         user = await portalStore.createUser({ userId: newUserId, email, emailVerified: profile.emailVerified, displayName: undefined, ...(state.termsVersion ? { termsVersion: state.termsVersion, termsAcceptedAtMs: Date.now() } : {}) });
+        onSignup?.({ userId: user.userId, email: user.email, method: providerName, cookieHeader: typeof req.headers.cookie === "string" ? req.headers.cookie : undefined });
         await ensureCreditAccountForUser(user);
       }
     } else if (!user.emailVerified && provesEmailOf(user)) {
