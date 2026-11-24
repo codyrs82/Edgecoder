@@ -446,3 +446,26 @@ describe("botSystemPrompt: knows its folder and tools, orients itself", () => {
     expect(DEFAULT_BOT_COMPUTE).toEqual({ policy: "auto" });
   });
 });
+
+describe("a new bot's home folder", () => {
+  const idle: BotRunner = async () => {};
+  it("is made when it's missing inside your home folder", () => {
+    const home = dir();
+    const m = new BotManager({ runner: idle, file: join(dir(), "bots.json"), homeDir: () => home });
+    managers.push(m);
+    const root = join(home, "EdgeCoder", "Trader Boy");
+    const bot = m.create({ name: "Trader Boy", projectRoot: root });
+    expect(statSync(root).isDirectory()).toBe(true);
+    expect(bot.projectRoot).toBe(root);
+  });
+  it("is not made outside your home folder, nor over a file", () => {
+    const home = dir();
+    const m = new BotManager({ runner: idle, file: join(dir(), "bots.json"), homeDir: () => home });
+    managers.push(m);
+    expect(() => m.create({ name: "X", projectRoot: join(dir(), "elsewhere", "x") })).toThrow(/No folder at/);
+    const file = join(home, "a-file");
+    writeFileSync(file, "x");
+    expect(() => m.create({ name: "Y", projectRoot: file })).toThrow(/No folder at/);
+    expect(() => m.create({ name: "Z", projectRoot: home })).not.toThrow();
+  });
+});
