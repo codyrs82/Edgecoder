@@ -30,7 +30,7 @@ import { createLatestAgentVersion, ownMachineModels, registerMachineRoutes } fro
 import { registerNetworkWorldRoutes } from "./routes/network-world.js";
 import { registerPayoutRoutes } from "./routes/payouts.js";
 import { registerRevenueRoutes } from "./routes/revenue.js";
-import { registerNetworkAdminRoutes } from "./routes/network-admin.js"; import { setupPortalAlerting } from "./alerts.js"; import { setupPortalSocial } from "./social.js";
+import { registerNetworkAdminRoutes } from "./routes/network-admin.js"; import { setupPortalAlerting } from "./alerts.js"; import { setupPortalSocial } from "./social.js"; import { setupPortalGrowth } from "./growth.js";
 import { registerAdminUserRoutes } from "./routes/admin-users.js";
 import { fetchAccountBalances, startUnverifiedPurge } from "./account-admin.js";
 import { registerWalletApiRoutes } from "./routes/wallet-api.js";
@@ -835,7 +835,8 @@ app.get("/health", QUIET_ROUTE /* no request lines, only warnings and errors */,
 registerWellKnownRoutes(app);
 const { accountSecurity, secondFactor, payoutRegistrar } = /* 2FA, payout destination cooling-off, receipts, lock */ setupAccountSecurity(app, { store, config: C, getCurrentUser, buildAccessContext, registrar: { controlPlaneUrl: CONTROL_PLANE_URL, controlPlaneAdminToken: CONTROL_PLANE_ADMIN_TOKEN, portalServiceToken: PORTAL_SERVICE_TOKEN, timeoutMs: EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrls: discoverCoordinatorUrlsForPortal }, passkey: { rpId: PASSKEY_RP_ID, allowedOrigins: PASSKEY_ALLOWED_ORIGINS, challengeTtlMs: PASSKEY_CHALLENGE_TTL_MS, generateAuthenticationOptions, verifyAuthenticationResponse, uint8ArrayFromBase64Url, normalizePasskeyResponsePayload, deriveCredentialIdFromVerifyBody }, mail: { sendDestinationAdded: sendPayoutDestinationAddedEmail, sendAccountLocked: sendAccountLockedEmail, sendTwoFactorChanged: sendTwoFactorChangedEmail } });
 
-const authRouteDeps = { EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, encodeCookie, secureCompare, decodeJwtPayload, ensureCreditAccountForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sendOauthLinkConfirmEmail, sendOauthConnectedEmail, sendOauthLinkClaimNoticeEmail, sha256Hex, store, verifyPassword, clientIp: (req: FastifyRequest) => clientIp(req, { ...process.env, edge: C.PORTAL_EDGE, originLockToken: C.PORTAL_ORIGIN_LOCK_TOKEN }) };
+const portalGrowth = setupPortalGrowth(app, { pool: store?.pool ?? null, portalUrl: PORTAL_PUBLIC_URL, getCurrentUser, buildAccessContext }); // Growth signals (src/portal/growth.ts): campaign visit counts, sign-up alerts, the daily digest
+const authRouteDeps = { onSignup: portalGrowth.onSignup, EMAIL_VERIFY_TTL_MS, OAUTH_MICROSOFT_PROMPT, PASSKEY_ALLOWED_ORIGINS, PASSKEY_RP_ID, PORTAL_PUBLIC_URL, claimIsTrue, clearCookies, consumeMobileOauthSessionToken, createSessionForUser, encodeCookie, secureCompare, decodeJwtPayload, ensureCreditAccountForUser, getCurrentUser, hashPassword, issueMobileOauthSessionToken, normalizeEmail, normalizeNativeOauthRedirect, oauthProviders, parseCookies, readCookie, sendPasswordResetEmail, sendPasswordResetSsoNoticeEmail, sendVerificationEmail, sendOauthLinkConfirmEmail, sendOauthConnectedEmail, sendOauthLinkClaimNoticeEmail, sha256Hex, store, verifyPassword, clientIp: (req: FastifyRequest) => clientIp(req, { ...process.env, edge: C.PORTAL_EDGE, originLockToken: C.PORTAL_ORIGIN_LOCK_TOKEN }) };
 export type AuthRoutesDeps = typeof authRouteDeps;
 registerAuthRoutes(app, authRouteDeps);
 
@@ -981,7 +982,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       await store.migrate();
     })
     .then(() => app.listen({ port: 4310, host: LISTEN_HOST }).then(async () => (await import("./shutdown.js")).installGracefulShutdown(app))) // a deploy drains streamed calls
-    .then(() => { if (process.env.CLOUD_BOTS_WORKER !== "off") cloudBotRunner?.start(); portalSocial.start(); return portalAlerting.start(); }) // alerting checks and the cloud bots' worker, scheduler and GitHub poller start once the portal listens
+    .then(() => { if (process.env.CLOUD_BOTS_WORKER !== "off") cloudBotRunner?.start(); portalSocial.start(); portalGrowth.start(); return portalAlerting.start(); }) // alerting checks and the cloud bots' worker, scheduler and GitHub poller start once the portal listens
     .catch((error) => {
       app.log.error(error);
       process.exit(1);

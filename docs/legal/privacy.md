@@ -97,7 +97,7 @@ We use measures including password hashing, passkeys, hashed API keys and tokens
 
 ## Cookies and local storage
 
-The portal uses a session cookie to keep you signed in and a short-lived cookie to protect single sign-on against forgery. The site and apps store your theme preference in your browser's local storage, and the desktop app stores local chats, settings and agent data on your computer. We do not use advertising or third-party tracking cookies or analytics cookies.
+The portal uses a session cookie to keep you signed in and a short-lived cookie to protect single sign-on against forgery. The site and apps store your theme preference in your browser's local storage, and the desktop app stores local chats, settings and agent data on your computer. We do not use advertising or third-party tracking cookies or analytics cookies. The one exception is campaign counting: when you arrive through a link with campaign tags (such as a link in one of our posts on X or an ad), we count the visit only in aggregate daily totals per campaign, and a first-party cookie remembers which campaign brought you for 30 days so that, if you create an account, the sign-up is counted for that campaign and recorded with your account; the cookie holds no identifier and is not shared with anyone.
 
 ## Children
 

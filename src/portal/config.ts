@@ -4,6 +4,7 @@
 import { z } from "zod";
 import { alertingEnv } from "../alerting/config.js";
 import { socialEnv } from "../social/config.js";
+import { growthEnv } from "../growth/config.js";
 import { envEnum, envEnumCi, envFlag, envInt, envNumber, envUrl } from "../common/config.js";
 import { computeClassEnv, discoveryEnv, reservesEnv, observabilityEnv, onchainEnv, postgresPoolEnv, rotationEnv, serviceUrlsEnv, webReplyEnv } from "../config/shared.js";
 import { parseSigningKey } from "../security/portal-action.js";
@@ -25,6 +26,7 @@ export const portalConfigSchema = z.object({
   ...webReplyEnv,
   ...alertingEnv,
   ...socialEnv,
+  ...growthEnv,
   ...observabilityEnv,
   ...serviceUrlsEnv,
   ...discoveryEnv,
