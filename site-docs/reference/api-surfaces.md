@@ -59,7 +59,7 @@ See [Using network compute](/guide/using-compute).
 - OpenAI-compatible model list and chat for local tools.
 - Shared coding sessions used by the app's Code view and `edgecoder code` (`/v1/ide/sessions*`).
 - Desktop bots (`/v1/ide/bots*`), connections, reservations and usage.
-- Code from your phone, the desktop half (`/v1/ide/code/remote/snapshot`, `/v1/ide/code/remote/command`). Requests from the phone reach it through the portal and the coordinator, never directly.
+- Code from your phone, the desktop half (`/v1/ide/code/remote/snapshot`, `/v1/ide/code/remote/command`, and `/v1/ide/code-chats/sync`, which mirrors the desktop Code view's chats). Requests from the phone reach it through the portal and the coordinator, never directly.
 
 All routes need the local IDE token and are bound to loopback.
 

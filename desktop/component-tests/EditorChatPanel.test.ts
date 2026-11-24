@@ -11,7 +11,15 @@ vi.mock("../src/lib/chat-store", async (original) => ({
   loadConversation: vi.fn(async (id: string) => structuredClone(db.convs.get(id))),
   saveConversation: vi.fn(async (c: Conversation) => { db.saved.push(JSON.parse(JSON.stringify(c))); }),
 }));
-const api = vi.hoisted(() => ({ streamIdeChat: vi.fn() }));
+const api = vi.hoisted(() => ({
+  streamIdeChat: vi.fn(),
+  // The chat's mirror on the provider (code-chat-mirror.ts): none by default.
+  syncCodeChat: vi.fn(async (_b: unknown): Promise<{ sessionId: string }> => { throw new Error("no provider"); }),
+  getSession: vi.fn(),
+  followSession: vi.fn(async () => {}),
+  sessionCancel: vi.fn(async () => ({})),
+  sessionApprove: vi.fn(async () => ({ ok: true })),
+}));
 vi.mock("../src/lib/api", async (original) => ({
   ...(await original<typeof import("../src/lib/api")>()),
   backendReady: Promise.resolve(),
@@ -21,6 +29,11 @@ vi.mock("../src/lib/api", async (original) => ({
   agentGitHubToken: vi.fn(async () => null),
   getModelPullProgress: vi.fn(async () => null),
   streamIdeChat: api.streamIdeChat,
+  syncCodeChat: api.syncCodeChat,
+  getSession: api.getSession,
+  followSession: api.followSession,
+  sessionCancel: api.sessionCancel,
+  sessionApprove: api.sessionApprove,
   gitState: vi.fn(async () => ({ branch: "main", upstream: null, ahead: 0, behind: 0, staged: [], unstaged: [], branches: ["main"], remotes: [], remoteUrl: null, hasCommits: true })),
   gitGitHubStatus: vi.fn(async () => ({ ghInstalled: true, loggedIn: true, login: "me" })),
   fsFind: vi.fn(async () => []),
@@ -203,5 +216,79 @@ describe("EditorChatPanel helpers (docs/tentacles.md)", () => {
     await send("Where is the footer?");
     expect(await screen.findByText(/Tentacles · 1 running/)).toBeTruthy();
     expect(screen.getByText(/↳ this computer · qwen3\.5:9b/)).toBeTruthy();
+  });
+});
+
+describe("EditorChatPanel on your phone (code-chat-mirror.ts)", () => {
+  const PROJECT = "/Users/me/EdgeCoder/site";
+  const chat: Conversation = { ...legacy, id: "c1", title: "what open PRs do we have?", projectRoot: PROJECT, permissionMode: "auto-edits" };
+  const snapshot = (transcript: unknown[], running: unknown = null) => ({
+    session: { id: "s1", title: chat.title, projectRoot: PROJECT, branch: "main", model: "auto", compute: { target: "auto" }, published: false, cSats: 0, transcript, mode: "auto-edits" },
+    seq: 5, controller: null, clients: [], running, pending: [], queue: [],
+  });
+  let emit: (e: Record<string, unknown>) => void = () => {};
+  beforeEach(() => {
+    db.convs.set("c1", structuredClone(chat));
+    localStorage.setItem("edgecoder-last-editor-id:" + PROJECT, "c1");
+    api.syncCodeChat.mockImplementation(async () => ({ sessionId: "s1" }));
+    api.getSession.mockImplementation(async () => snapshot([]));
+    api.followSession.mockImplementation(async (_id: string, _since: number, onEvent: (e: Record<string, unknown>) => void) => {
+      emit = onEvent;
+    });
+  });
+
+  it("opening a chat syncs it (messages, mode) and a send carries the chat's id", async () => {
+    api.streamIdeChat.mockImplementation(async (_m: unknown, _r: string, onEvent: (e: unknown) => void) => {
+      onEvent({ type: "turn", id: "11111111-1111-4111-8111-111111111111" });
+      onEvent({ type: "text", content: "Fixed." });
+    });
+    render(EditorChatPanel, { projectRoot: PROJECT });
+    await vi.waitFor(() => expect(api.syncCodeChat).toHaveBeenCalled());
+    // Every call (the open chat's own and the backfill of earlier chats) carries the chat whole the first time.
+    for (const [body] of api.syncCodeChat.mock.calls) {
+      expect(body).toMatchObject({ chatId: "c1", projectRoot: PROJECT, mode: "auto-edits" });
+      expect((body as { messages: Array<{ id: string }> }).messages.map((m) => m.id)).toEqual(["m1", "m2"]);
+    }
+    await vi.waitFor(() => expect(api.followSession).toHaveBeenCalledWith("s1", 5, expect.any(Function), expect.any(AbortSignal)));
+    const box = await screen.findByRole("textbox");
+    await fireEvent.input(box, { target: { value: "fix it" } });
+    await fireEvent.keyDown(box, { key: "Enter" });
+    await vi.waitFor(() => expect(api.streamIdeChat).toHaveBeenCalled());
+    expect(api.streamIdeChat.mock.calls[0][11]).toBe("c1");
+    // The new message reached the mirror before the turn; afterwards so did the reply, with its turn id.
+    const synced = api.syncCodeChat.mock.calls.flatMap((c) => (c[0] as { messages: Array<{ content: string; turnId?: string }> }).messages);
+    expect(synced.find((m) => m.content === "fix it")).toBeTruthy();
+    await vi.waitFor(() => expect(api.syncCodeChat.mock.calls.flatMap((c) => (c[0] as { messages: Array<{ content: string; turnId?: string }> }).messages).find((m) => m.content === "Fixed.")).toMatchObject({ turnId: "11111111-1111-4111-8111-111111111111" }));
+  });
+
+  it("shows what the phone did: its message, its running turn (Stop goes to the mirror) and the reply, saved with the chat", async () => {
+    render(EditorChatPanel, { projectRoot: PROJECT });
+    await vi.waitFor(() => expect(api.followSession).toHaveBeenCalled());
+    emit({ seq: 6, type: "message", entry: { id: "p1", role: "user", content: "run the tests", at: 2, by: "remote" } });
+    expect(await screen.findByText("run the tests")).toBeTruthy();
+    emit({ seq: 7, type: "agent", turnId: "t2", event: { type: "turn", id: "t2" } });
+    emit({ seq: 8, type: "agent", turnId: "t2", event: { type: "text", content: "Running npm test" } });
+    expect(await screen.findByText("Running npm test")).toBeTruthy();
+    await fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(api.sessionCancel).toHaveBeenCalledWith("s1");
+    emit({ seq: 9, type: "turn_end", entry: { id: "p2", role: "assistant", content: "Tests pass.", at: 3, turnId: "t2" } });
+    expect(await screen.findByText("Tests pass.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    await vi.waitFor(() => expect(db.saved.at(-1)!.messages.map((m) => m.id)).toEqual(["m1", "m2", "p1", "p2"]));
+    // The app's own messages coming back from the mirror aren't added twice.
+    emit({ seq: 10, type: "message", entry: { id: "m9", role: "user", content: "mine", at: 4, by: "desktop" } });
+    expect(screen.queryByText("mine")).toBeNull();
+  });
+
+  it("on open, adds the phone's messages the chat missed while it was closed", async () => {
+    api.getSession.mockImplementation(async () => snapshot([
+      { id: "m1", role: "user", content: "Lets build a website.", at: 0, by: "desktop" },
+      { id: "p1", role: "user", content: "add a contact page", at: 5, by: "remote" },
+      { id: "p2", role: "assistant", content: "Added contact.html.", at: 6, turnId: "t9", changedFiles: ["contact.html"] },
+    ]));
+    render(EditorChatPanel, { projectRoot: PROJECT });
+    expect(await screen.findByText("Added contact.html.")).toBeTruthy();
+    expect(screen.getByText("add a contact page")).toBeTruthy();
+    expect(screen.getAllByText("Lets build a website.")).toHaveLength(1);
   });
 });

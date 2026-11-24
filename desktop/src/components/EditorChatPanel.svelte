@@ -29,6 +29,8 @@
   import { effectiveHelpers, type ChatHelpers } from "../lib/helpers";
   import { applyTentacleEvent, emptyTentacles, type TentacleState } from "../lib/tentacles";
   import { tentacleCancel, tentacleMerge, type SessionEvent } from "../lib/api";
+  import { followSession, getSession, sessionApprove, sessionCancel, syncCodeChat } from "../lib/api";
+  import { backfillCodeChats, CodeChatMirror, mergeEntries } from "../lib/code-chat-mirror";
   import PlanApproval from "./PlanApproval.svelte";
   import { chatMode, modeOption, PLAN_APPROVED_MESSAGE, type EngineMode } from "../lib/permission-modes";
   import { fsFind } from "../lib/api";
@@ -106,7 +108,10 @@
   function setMode(m: EngineMode) {
     conversation.permissionMode = m;
     conversation = conversation;
-    if (conversation.messages.length > 0) void persist();
+    if (conversation.messages.length > 0) {
+      void persist();
+      void mirror.sync(conversation, { mode: m });
+    }
   }
 
   /**
@@ -186,6 +191,46 @@
   }
   let streamingContent = $state("");
   let isStreaming = $state(false);
+
+  // The chat's mirror on the provider (code-chat-mirror.ts): your phone reads and continues it, and
+  // a turn it starts shows here like this app's own (Stop and approvals go to the mirror).
+  let remoteTurn = $state(false);
+  const mirror = new CodeChatMirror(
+    { sync: syncCodeChat, snapshot: getSession, follow: followSession },
+    {
+      ownTurn: () => isStreaming && !remoteTurn,
+      onEntries: (entries) => {
+        const added = mergeEntries(conversation, entries);
+        if (!added) return;
+        conversation = conversation;
+        void persist();
+        scrollToBottom();
+        if (conversation.messages.slice(-added).some((m) => m.changedFiles?.length)) onFilesChanged?.();
+      },
+      onRemoteTurn: (turn) => {
+        if (turn) {
+          remoteTurn = isStreaming = true;
+          streamingContent = turn.text;
+          streamingToolEvents = turn.toolEvents;
+          scrollToBottom();
+        } else if (remoteTurn) {
+          remoteTurn = isStreaming = false;
+          streamingContent = "";
+          streamingToolEvents = [];
+        }
+      },
+    },
+  );
+  $effect(() => {
+    const convo = conversation;
+    const open = convo.messages.length > 0 && !!convo.projectRoot;
+    untrack(() => {
+      if (usePortalChat) return;
+      if (!open) {
+        if (mirror.chatId && mirror.chatId !== convo.id) mirror.detach();
+      } else if (mirror.chatId !== convo.id) void mirror.sync(convo, { mode, model: get(computeChoice) });
+    });
+  });
   /** The last reply is a plan waiting for approval (the chat is still in Plan mode). */
   const pendingPlan = $derived(!isStreaming && mode === "plan" && conversation.messages.at(-1)?.role === "assistant" && conversation.messages.at(-1)?.plan === true);
   function approvePlan(next: EngineMode) {
@@ -244,6 +289,8 @@
       if (!projectRoot || loaded.projectRoot === projectRoot) conversation = loaded;
     }
     await refreshConversationList();
+    // Earlier Code chats reach your phone without being opened (code-chat-mirror.ts).
+    if (!usePortalChat) void listConversationsBySource("editor").then((all) => backfillCodeChats(all, syncCodeChat)).catch(() => {});
 
     // Hand the agent's GitHub connection to the IDE server early (sessions and bots use it too).
     void agentGitHubToken().catch(() => {});
@@ -256,6 +303,7 @@
 
   // Save current conversation when component unmounts (tab switch)
   onDestroy(() => {
+    mirror.detach();
     if (pullPollTimer) clearInterval(pullPollTimer);
     if (conversation.messages.length > 0) void persist();
   });
@@ -374,6 +422,8 @@
         streamingChanged = [];
         streamingContext = undefined;
         streamingCompacted = 0;
+        // The mirror has the message first, so your phone sees this turn live (a slow provider doesn't hold it up).
+        await Promise.race([mirror.sync(conversation, { mode: sentMode, model: get(computeChoice) }), new Promise((r) => setTimeout(r, 3000))]);
         await streamIdeChat(
           apiMessages,
           projectRoot,
@@ -402,11 +452,14 @@
           attachments,
           false,
           { sessionId: conversation.id, ...helpers },
+          conversation.id,
         );
       }
       finishTurn(streamingContent, !usePortalChat && sentMode === "plan");
       await persist();
       await refreshConversationList();
+      // The reply as this app has it, then anything your phone sent meanwhile.
+      if (!usePortalChat) void mirror.sync(conversation).then(() => mirror.refresh());
     } catch (err) {
       if ((err as Error).name === "AbortError") {
         // Stopped: keep what arrived so far.
@@ -431,6 +484,8 @@
     addMessage(conversation, "assistant", content);
     const last = conversation.messages[conversation.messages.length - 1];
     if (last && plan && content.trim()) last.plan = true;
+    // The mirror already has this turn's reply (by its turn id).
+    if (last && streamingTurnId) last.turnId = streamingTurnId;
     if (last && streamingToolEvents.length > 0) last.toolEvents = [...streamingToolEvents];
     const usage = streamingUsage ?? freeReplyUsage(get(computeChoice));
     if (last && usage) last.usage = usage;
@@ -456,11 +511,13 @@
   }
 
   export function stop() {
-    abortController?.abort();
+    if (remoteTurn && mirror.sessionId) void sessionCancel(mirror.sessionId).catch(() => {});
+    else abortController?.abort();
   }
 
   function handleToolApproval(id: string, approved: boolean, always = false) {
-    void ideSendToolApproval(id, approved, always);
+    if (remoteTurn && mirror.sessionId) void sessionApprove(mirror.sessionId, id, approved, always).catch(() => {});
+    else void ideSendToolApproval(id, approved, always);
     streamingToolEvents = markApproval(streamingToolEvents, id, approved);
   }
 
