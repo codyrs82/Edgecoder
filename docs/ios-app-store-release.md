@@ -168,7 +168,7 @@ See step 0.5 (archive, export with `ExportOptions.plist`, upload) and 0.6 (TestF
 - Confirm production passkey origin and RP settings match app domain
 - Validate seed phrase handling policy and no sensitive local persistence beyond Keychain flags
 - Run on at least one physical iPhone with Face ID / Touch ID passkey flows
-- Validate low-power/charging behavior for swarm runtime controls
+- Validate low-power/charging behavior for the Bluetooth hosting controls
 
 ## 7) Known v1 constraints (deferred from the first TestFlight)
 

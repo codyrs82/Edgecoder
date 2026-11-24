@@ -6,6 +6,7 @@ struct SettingsView: View {
 
     @StateObject private var authViewModel = AuthViewModel()
     @ObservedObject private var swarmRuntime = SwarmRuntimeController.shared
+    @ObservedObject private var bleMesh = BLEMeshManager.shared
     private let config = AppConfig.current
     @AppStorage(AppearancePreference.storageKey) private var appearance = AppearancePreference.defaultValue.rawValue
     @Environment(\.openURL) private var openURL
@@ -19,7 +20,7 @@ struct SettingsView: View {
                 VStack(spacing: 16) {
                     accountCard
                     chatCard
-                    runtimeCard
+                    bluetoothHostingCard
                     modelCard
                     networkCard
                     nodeCard
@@ -214,14 +215,16 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Runtime Card
+    // MARK: - Bluetooth Hosting Card
 
-    private var runtimeCard: some View {
+    /// The iPhone hosts only over Bluetooth: nearby machines send it prompts and it answers with the
+    /// local model. It takes no coordinator jobs. Counts are for this app session.
+    private var bluetoothHostingCard: some View {
         SettingsCard {
-            SettingsCardHeader(icon: "bolt.fill", title: "Runtime", color: Theme.green)
+            SettingsCardHeader(icon: "dot.radiowaves.left.and.right", title: "Bluetooth hosting", color: Theme.green)
 
             HStack(spacing: 8) {
-                StatusPill(label: swarmRuntime.state.rawValue.capitalized, color: stateColor)
+                StatusPill(label: swarmRuntime.state == .running ? "On" : "Off", color: stateColor)
                 Spacer()
                 runtimeButtons
             }
@@ -229,13 +232,16 @@ struct SettingsView: View {
             Divider().overlay(Theme.border)
 
             HStack(spacing: 0) {
-                StatCell(label: "Tasks", value: "\(swarmRuntime.tasksCompleted)")
-                StatCell(label: "Failed", value: "\(swarmRuntime.tasksFailed)")
+                StatCell(label: "Served", value: "\(bleMesh.bleTasksCompleted)")
+                StatCell(label: "Failed", value: "\(max(0, bleMesh.bleTasksReceived - bleMesh.bleTasksCompleted))")
                 if HostEarningsPolicy.inApp {
-                    StatCell(label: "Credits", value: "\(swarmRuntime.creditsEarned)")
+                    StatCell(label: "Credits", value: String(format: "%.3f", Double(bleMesh.bleCreditMillisCosigned) / 1000))
                 }
-                StatCell(label: "Beats", value: "\(swarmRuntime.heartbeatCount)")
             }
+
+            Text("Nearby machines can send prompts to this iPhone over Bluetooth; it answers with the local model. It does not take jobs from the network. Counts are since the app opened.")
+                .font(.caption)
+                .foregroundColor(Theme.textMuted)
 
             Divider().overlay(Theme.border)
 
@@ -251,7 +257,6 @@ struct SettingsView: View {
     private var stateColor: Color {
         switch swarmRuntime.state {
         case .running: return Theme.green
-        case .paused: return Theme.yellow
         case .stopped: return Theme.textMuted
         }
     }
@@ -267,18 +272,9 @@ struct SettingsView: View {
                         .background(Theme.green)
                         .clipShape(Circle())
                 }
+                .accessibilityLabel("Start Bluetooth hosting")
             }
             if swarmRuntime.state == .running {
-                Button { swarmRuntime.pause() } label: {
-                    Image(systemName: "pause.fill")
-                        .font(.caption)
-                        .foregroundColor(Theme.textPrimary)
-                        .padding(8)
-                        .background(Theme.bgElevated)
-                        .clipShape(Circle())
-                }
-            }
-            if swarmRuntime.state != .stopped {
                 Button { swarmRuntime.stop() } label: {
                     Image(systemName: "stop.fill")
                         .font(.caption)
@@ -287,6 +283,7 @@ struct SettingsView: View {
                         .background(Theme.bgElevated)
                         .clipShape(Circle())
                 }
+                .accessibilityLabel("Stop Bluetooth hosting")
             }
         }
     }

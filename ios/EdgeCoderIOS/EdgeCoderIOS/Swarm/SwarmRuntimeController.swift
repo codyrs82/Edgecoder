@@ -6,9 +6,14 @@ import UIKit
 enum SwarmRuntimeState: String {
     case stopped
     case running
-    case paused
 }
 
+/// Bluetooth hosting on the iPhone. The phone serves nearby machines over BLE (BLEMeshManager) and
+/// never takes coordinator jobs: there is no /pull or /result here, and coordinators refuse /pull to
+/// iOS agents. It still registers and sends heartbeats, because BLE needs what that gives it: the
+/// reward account BLE credit transactions are signed for (/register), and the online/offline signal
+/// that starts BLE scanning and syncs the offline ledger (/heartbeat). Chat's swarm route
+/// (`submitChatTask`) also needs a registered agent.
 @MainActor
 final class SwarmRuntimeController: ObservableObject {
     static let shared = SwarmRuntimeController()
@@ -16,7 +21,7 @@ final class SwarmRuntimeController: ObservableObject {
     @Published var state: SwarmRuntimeState = .stopped
     @Published var runOnlyWhileCharging = false
     @Published var diagnosticsUploadEnabled = false
-    @Published var statusText = "Swarm runtime stopped."
+    @Published var statusText = "Bluetooth hosting stopped."
     @Published var discoveredCoordinators: [DiscoveryResponse.CoordinatorRecord] = []
     @Published var agentId: String = "iphone-\(UUID().uuidString.prefix(8))"
     @Published var registrationToken: String = ""
@@ -27,14 +32,7 @@ final class SwarmRuntimeController: ObservableObject {
     /// Swarm features are available: registered, or an operator-configured mesh token is set.
     var isSwarmReady: Bool { isRegistered || !meshToken.isEmpty }
     @Published var selectedCoordinatorURL: String = AppConfig.current.coordinatorBootstrapURL.absoluteString
-    @Published var heartbeatCount = 0
     @Published var lastHeartbeatAt: Date?
-    @Published var coordinatorTasksObserved = 0
-    @Published var tasksCompleted = 0
-    @Published var tasksFailed = 0
-    @Published var creditsEarned = 0
-    @Published var lastTaskAt: Date?
-    @Published var isProcessingTask = false
     @Published var lastRegisterAt: Date?
     @Published var lastRegisterError = ""
     @Published var runtimeEvents: [String] = []
@@ -62,12 +60,12 @@ final class SwarmRuntimeController: ObservableObject {
         static let coordinatorURL = "edgecoder.coordinatorURL"
         static let runOnlyWhileCharging = "edgecoder.runOnlyWhileCharging"
         static let diagnosticsUploadEnabled = "edgecoder.diagnosticsUploadEnabled"
-        static let heartbeatCount = "edgecoder.heartbeatCount"
-        static let coordinatorTasksObserved = "edgecoder.coordinatorTasksObserved"
-        static let tasksCompleted = "edgecoder.tasksCompleted"
-        static let tasksFailed = "edgecoder.tasksFailed"
-        static let creditsEarned = "edgecoder.creditsEarned"
         static let autoStartEnabled = "edgecoder.autoStartEnabled"
+        /// Counters of the removed coordinator job loop, cleared on launch.
+        static let retiredCoordinatorCounters = [
+            "edgecoder.heartbeatCount", "edgecoder.coordinatorTasksObserved",
+            "edgecoder.tasksCompleted", "edgecoder.tasksFailed", "edgecoder.creditsEarned"
+        ]
     }
 
     static func defaultIosAgentId() -> String {
@@ -121,16 +119,14 @@ final class SwarmRuntimeController: ObservableObject {
         }
         runOnlyWhileCharging = UserDefaults.standard.object(forKey: DefaultsKey.runOnlyWhileCharging) as? Bool ?? false
         diagnosticsUploadEnabled = UserDefaults.standard.object(forKey: DefaultsKey.diagnosticsUploadEnabled) as? Bool ?? false
-        heartbeatCount = UserDefaults.standard.integer(forKey: DefaultsKey.heartbeatCount)
-        coordinatorTasksObserved = UserDefaults.standard.integer(forKey: DefaultsKey.coordinatorTasksObserved)
-        tasksCompleted = UserDefaults.standard.integer(forKey: DefaultsKey.tasksCompleted)
-        tasksFailed = UserDefaults.standard.integer(forKey: DefaultsKey.tasksFailed)
-        creditsEarned = UserDefaults.standard.integer(forKey: DefaultsKey.creditsEarned)
+        for key in DefaultsKey.retiredCoordinatorCounters {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
         autoStartEnabled = UserDefaults.standard.object(forKey: DefaultsKey.autoStartEnabled) as? Bool ?? true
         persistRuntimeSettings()
     }
 
-    /// Called after enrollment is confirmed. Auto-starts the swarm runtime if enabled.
+    /// Called after enrollment is confirmed. Auto-starts Bluetooth hosting if enabled.
     func autoStartIfReady() async {
         guard autoStartEnabled else { return }
         guard state == .stopped else { return }
@@ -185,24 +181,26 @@ final class SwarmRuntimeController: ObservableObject {
         }
     }
 
+    /// Starts Bluetooth hosting: BLE advertising, scanning and serving nearby machines with the local
+    /// model, plus the register/heartbeat loop BLE relies on. No coordinator jobs are pulled.
     func start() async {
         if state == .running {
-            statusText = "Swarm runtime is already running."
+            statusText = "Bluetooth hosting is already running."
             return
         }
         if runOnlyWhileCharging && !isOnExternalPower {
-            statusText = "Runtime blocked: connect power to start."
+            statusText = "Bluetooth hosting blocked: connect power to start."
             return
         }
         // Model activation is handled separately via LocalModelManager.activate(modelId:)
         persistRuntimeSettings()
-        appendEvent("Starting runtime → coordinator: \(selectedCoordinatorURL), token: \(registrationToken.isEmpty ? "empty" : "present"), meshToken: \(meshToken.isEmpty ? "empty" : "present")")
+        appendEvent("Starting Bluetooth hosting → coordinator: \(selectedCoordinatorURL), token: \(registrationToken.isEmpty ? "empty" : "present"), meshToken: \(meshToken.isEmpty ? "empty" : "present")")
         runtimeTask?.cancel()
         runtimeTask = Task { [weak self] in
             await self?.runtimeLoop()
         }
         state = .running
-        statusText = "Swarm runtime running with local model \(modelManager.selectedModel)."
+        statusText = "Bluetooth hosting with local model \(modelManager.selectedModel)."
         appendEvent(statusText)
         await discoverCoordinators()
         bleMeshManager.start()
@@ -222,20 +220,12 @@ final class SwarmRuntimeController: ObservableObject {
         }
     }
 
-    func pause() {
-        runtimeTask?.cancel()
-        runtimeTask = nil
-        state = .paused
-        statusText = "Swarm runtime paused."
-        appendEvent(statusText)
-    }
-
     func stop() {
         runtimeTask?.cancel()
         runtimeTask = nil
         bleMeshManager.stop()
         state = .stopped
-        statusText = "Swarm runtime stopped."
+        statusText = "Bluetooth hosting stopped."
         appendEvent(statusText)
     }
 
@@ -319,24 +309,17 @@ final class SwarmRuntimeController: ObservableObject {
         UserDefaults.standard.set(runOnlyWhileCharging, forKey: DefaultsKey.runOnlyWhileCharging)
         UserDefaults.standard.set(diagnosticsUploadEnabled, forKey: DefaultsKey.diagnosticsUploadEnabled)
         UserDefaults.standard.set(autoStartEnabled, forKey: DefaultsKey.autoStartEnabled)
-        UserDefaults.standard.set(heartbeatCount, forKey: DefaultsKey.heartbeatCount)
-        UserDefaults.standard.set(coordinatorTasksObserved, forKey: DefaultsKey.coordinatorTasksObserved)
-        UserDefaults.standard.set(tasksCompleted, forKey: DefaultsKey.tasksCompleted)
-        UserDefaults.standard.set(tasksFailed, forKey: DefaultsKey.tasksFailed)
-        UserDefaults.standard.set(creditsEarned, forKey: DefaultsKey.creditsEarned)
     }
 
+    /// Register, then heartbeat every 15 s (the same cadence as before). The heartbeat result drives
+    /// BLE: three failures in a row mark the phone offline and start BLE scanning; the next success
+    /// syncs the offline ledger. Nothing here pulls or runs coordinator jobs.
     private func runtimeLoop() async {
         while !Task.isCancelled {
             let registered = await registerAgent()
             if registered {
                 await sendHeartbeat()
-                // Poll for tasks between heartbeats (3 polls per 15s cycle)
-                for _ in 0..<3 {
-                    guard !Task.isCancelled else { break }
-                    await pollAndExecuteTask()
-                    try? await Task.sleep(nanoseconds: 5_000_000_000)
-                }
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
             } else {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
@@ -358,8 +341,8 @@ final class SwarmRuntimeController: ObservableObject {
             "clientType": "edgecoder-ios",
             "maxConcurrentTasks": 1,
             "powerTelemetry": currentPowerTelemetry(),
-            // #64: the key RequestSigner signs with; the coordinator verifies /heartbeat, /pull,
-            // /result and /credits/ble-sync against it.
+            // #64: the key RequestSigner signs with; the coordinator verifies /heartbeat, /tasks
+            // and /credits/ble-sync against it.
             "publicKeyPem": signingPublicKeyPem
         ]
         do {
@@ -420,10 +403,8 @@ final class SwarmRuntimeController: ObservableObject {
         ]
         do {
             _ = try await postCoordinator(path: "/heartbeat", payload: payload)
-            heartbeatCount += 1
             lastHeartbeatAt = Date()
             consecutiveHeartbeatFailures = 0
-            persistRuntimeSettings()
             statusText = "Heartbeat sent (\(Date().formatted(date: .omitted, time: .standard)))."
             appendEvent(statusText)
             if bleMeshManager.isOffline {
@@ -453,68 +434,6 @@ final class SwarmRuntimeController: ObservableObject {
             }
             statusText = "Heartbeat failed: \(error.localizedDescription)"
             appendEvent(statusText)
-        }
-    }
-
-    /// Poll for a task and execute it if one is available.
-    private func pollAndExecuteTask() async {
-        guard modelManager.state == .ready else { return }
-        guard !isProcessingTask else { return }
-
-        do {
-            let pullPayload: [String: Any] = ["agentId": agentId]
-            let response = try await postCoordinator(path: "/pull", payload: pullPayload)
-
-            guard let subtask = response["subtask"] as? [String: Any] else {
-                return // No task available — idle
-            }
-
-            let subtaskId = subtask["id"] as? String ?? ""
-            let taskId = subtask["taskId"] as? String ?? ""
-            let input = subtask["input"] as? String ?? ""
-
-            guard !subtaskId.isEmpty, !input.isEmpty else { return }
-
-            coordinatorTasksObserved += 1
-            isProcessingTask = true
-            appendEvent("Task \(subtaskId.prefix(8))… pulled — running inference.")
-
-            // Execute inference
-            let result = await modelManager.generate(prompt: input, maxTokens: 512)
-
-            // Build result payload matching coordinator /result schema
-            let resultPayload: [String: Any] = [
-                "subtaskId": subtaskId,
-                "taskId": taskId,
-                "agentId": agentId,
-                "ok": result.ok,
-                "output": result.output,
-                "durationMs": result.durationMs
-            ]
-
-            // POST result back to coordinator
-            _ = try await postCoordinator(path: "/result", payload: resultPayload)
-
-            lastTaskAt = Date()
-            let earnedCredits = Int(max(0.5, modelManager.selectedModelParamSize))
-            if result.ok {
-                tasksCompleted += 1
-                creditsEarned += earnedCredits
-                appendEvent("Task \(subtaskId.prefix(8))… completed (\(result.durationMs)ms) — +\(earnedCredits) credits")
-            } else {
-                tasksFailed += 1
-                let failCredits = max(1, earnedCredits / 2)
-                creditsEarned += failCredits
-                appendEvent("Task \(subtaskId.prefix(8))… failed (\(result.durationMs)ms) — +\(failCredits) credits")
-            }
-            isProcessingTask = false
-            persistRuntimeSettings()
-        } catch is CancellationError {
-            isProcessingTask = false
-        } catch {
-            isProcessingTask = false
-            // Non-fatal; will retry on next poll cycle
-            appendEvent("Task poll/exec error: \(error.localizedDescription)")
         }
     }
 

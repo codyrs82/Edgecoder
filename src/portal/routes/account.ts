@@ -28,31 +28,21 @@ export function maxAgentsPerAccount(env: NodeJS.ProcessEnv = process.env): numbe
   return Number.isInteger(n) && n >= 1 ? n : 25;
 }
 
-export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordinatorUrlsForPortal, everyCoordinatorUrl, fetchCoordinatorFederatedSummary, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store }: AccountApiRoutesDeps): void {
+export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordinatorUrlsForPortal, everyCoordinatorUrl, fetchCoordinatorFederatedSummary, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentRuntime, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store }: AccountApiRoutesDeps): void {
+  // iOS app summary: account and network info only. The iPhone hosts only over Bluetooth and does
+  // not earn or pay out, so neither route returns contribution, earnings or wallet figures. Both stay
+  // (no 404) for older app builds; no shipped build decodes the removed fields (DashboardView was
+  // unreachable from the app's UI before the first TestFlight build).
   app.get("/ios/dashboard", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const user = await getCurrentUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
-    const [nodes, walletSnapshot, networkSummary] = await Promise.all([
+    const [nodes, networkSummary] = await Promise.all([
       store.listNodesByOwner(user.userId),
-      loadWalletSnapshotForUser(user.userId),
       loadIosNetworkSummary()
     ]);
-    const history = (walletSnapshot as any)?.creditHistory ?? [];
-    const earned = history
-      .filter((tx: any) => tx?.reason === "compute_contribution" && tx?.type === "earn")
-      .reduce((sum: number, tx: any) => sum + Number(tx.credits ?? 0), 0);
-    const contributedTasks = new Set(
-      history
-        .filter((tx: any) => tx?.reason === "compute_contribution" && tx?.relatedTaskId)
-        .map((tx: any) => String(tx.relatedTaskId))
-    );
     return reply.send({
       user: { userId: user.userId, email: user.email, emailVerified: user.emailVerified },
-      contribution: {
-        earnedCredits: Number(earned.toFixed(3)),
-        contributedTaskCount: contributedTasks.size
-      },
       nodes: nodes.map((n) => ({
         nodeId: n.nodeId,
         nodeKind: n.nodeKind,
@@ -60,7 +50,6 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
         nodeApproved: n.nodeApproved,
         lastSeenMs: n.lastSeenMs
       })),
-      walletSnapshot,
       networkSummary
     });
   });
@@ -81,7 +70,7 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
       return reply.code(403).send({ error: "agent_access_forbidden" });
     }
 
-    const agentSnapshot = await loadIosAgentContributionForUser(params.agentId);
+    const { runtime } = await loadIosAgentRuntime(params.agentId);
     return reply.send({
       agentId: params.agentId,
       node: {
@@ -89,7 +78,7 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
         nodeApproved: node.nodeApproved,
         lastSeenMs: node.lastSeenMs
       },
-      ...agentSnapshot
+      runtime
     });
   });
 

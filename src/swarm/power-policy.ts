@@ -35,6 +35,17 @@ export interface PowerPolicyDecision {
   reason: string;
 }
 
+/**
+ * The iPhone hosts only over Bluetooth, for nearby machines; it takes no coordinator jobs. /pull hands
+ * such an agent no subtask, so already-installed app versions that still poll stop getting work.
+ * Matches the iOS app (it registers with os "ios" and clientType "edgecoder-ios") and phones known
+ * only through mesh gossip (stored with os "ios").
+ */
+export function refusesCoordinatorJobs(agent: { os?: string; clientType?: string } | undefined): boolean {
+  if (!agent) return false;
+  return agent.os === "ios" || agent.clientType === "edgecoder-ios";
+}
+
 export function evaluateAgentPowerPolicy(input: PowerPolicyInput): PowerPolicyDecision {
   const telemetry = input.telemetry ?? {};
 

@@ -6,19 +6,19 @@ This page covers what the current iOS app does about battery, power and backgrou
 Older builds had a three-way compute mode picker (**Off / On / Bluetooth Local**) in a **Swarm** tab, an automatic switch to Bluetooth Local when the internet dropped, and an **IDE** tab that listed tasks a Mac sent to the phone over Bluetooth. None of these exist in the current app. The IDE tab was replaced by **Machines** in build 34 (#429).
 :::
 
-## On-device runtime
+## Bluetooth hosting
 
-The phone can load a model and run it on the device. The controls are in **Settings** (bottom of the Chat drawer):
+The iPhone hosts only over Bluetooth: nearby machines can send it prompts and it answers with the on-device model. It does not take jobs from the network (no coordinator `/pull`). The controls are in **Settings** (bottom of the Chat drawer):
 
 | Card | What it shows or controls |
 |---|---|
-| **Runtime** | State (Stopped / Running / Paused), start, pause and stop buttons, task and heartbeat counters, and two toggles: **Auto-start on launch** (on by default) and **Run only when charging** (off by default). |
-| **Local Model** | Pick, download and load the on-device model. |
+| **Bluetooth hosting** | On or off, start and stop buttons, how many Bluetooth requests it served or failed since the app opened, and two toggles: **Auto-start on launch** (on by default) and **Run only when charging** (off by default). |
+| **Local Model** | Pick, download and load the on-device model that answers Bluetooth requests. |
 | **Network** | Nearby peers, battery percent, and power source (`AC` or `Bat`). |
 
-After you sign in, the app enrolls the phone (`POST /nodes/enroll`) and, if **Auto-start on launch** is on, starts the runtime. While running, the runtime registers with the coordinator as an agent (`os: "ios"`, one task at a time), sends a heartbeat about every 15 seconds, and asks for work only when the on-device model is loaded.
+After you sign in, the app enrolls the phone (`POST /nodes/enroll`) and, if **Auto-start on launch** is on, starts Bluetooth hosting: it advertises and scans over Bluetooth and answers requests from nearby machines. It also registers with the coordinator as an agent (`os: "ios"`, `clientType: "edgecoder-ios"`) and sends a heartbeat about every 15 seconds. Registration gives the phone the account its Bluetooth credit transactions are signed for; the heartbeat tells it when it is offline (start Bluetooth scanning) and back online (sync the offline ledger).
 
-**Run only when charging** is checked when the runtime starts: if the phone is not charging or full, it does not start and shows "Runtime blocked: connect power to start." It does not stop a runtime that is already running when you unplug.
+**Run only when charging** is checked when hosting starts: if the phone is not charging or full, it does not start and shows "Bluetooth hosting blocked: connect power to start." It does not stop hosting that is already running when you unplug.
 
 ## Power telemetry
 
@@ -33,9 +33,13 @@ Every `/register` and `/heartbeat` from the phone carries a `powerTelemetry` obj
 
 The app does not report thermal state. Thermal throttling in the coordinator applies only to desktop agents that send `thermalState`.
 
-## Coordinator power policy
+## Coordinator jobs
 
-When an agent with `os: "ios"` calls `/pull`, the coordinator runs `evaluateIosPowerPolicy` (`src/swarm/power-policy.ts`). The first matching rule wins:
+Coordinators give iOS agents no jobs. `/pull` from an agent registered with `os: "ios"` (or `clientType: "edgecoder-ios"`) answers `{ "subtask": null, "reason": "ios_bluetooth_only" }`, the same shape as an idle pull, so older app builds that still poll simply wait for their next poll (`refusesCoordinatorJobs` in `src/swarm/power-policy.ts`). `/register`, `/heartbeat` and `/credits/ble-sync` work as before.
+
+### Power policy (reporting only)
+
+The coordinator still evaluates `evaluateIosPowerPolicy` (`src/swarm/power-policy.ts`) for iOS agents and shows the result in `/capacity`; it no longer decides whether a phone gets work, since a phone never does. The first matching rule wins:
 
 | Order | Condition | Result | `reason` |
 |---|---|---|---|
@@ -45,7 +49,7 @@ When an agent with `os: "ios"` calls `/pull`, the coordinator runs `evaluateIosP
 | 4 | Last assignment less than `IOS_BATTERY_PULL_MIN_INTERVAL_MS` ago (default `45000`) | No work yet | `ios_on_battery_throttled` |
 | 5 | Otherwise | Work allowed | `ios_on_battery_lite_mode` |
 
-When work is held back, `/pull` answers `{ "subtask": null, "powerDeferred": true, "reason": "<reason>" }` and the phone tries again on its next poll. Both thresholds are coordinator settings; see [Environment Variables](/reference/environment-variables).
+Both thresholds are coordinator settings; see [Environment Variables](/reference/environment-variables).
 
 ## Background execution
 
@@ -69,11 +73,11 @@ Each time the app goes to the background it submits these `BGTaskScheduler` requ
 | `io.edgecoder.ios.heartbeat` | `BGAppRefreshTask` | Earliest 15 minutes later |
 | `io.edgecoder.ble-mesh` | `BGProcessingTask` | Needs external power; earliest 1 minute later |
 
-iOS decides whether and when these run. The handlers only keep the process alive for a while and schedule the next request; heartbeats and task polling happen in the runtime loop. Do not expect a backgrounded phone to keep taking work, especially on battery.
+iOS decides whether and when these run. The handlers only keep the process alive for a while and schedule the next request; heartbeats happen in the hosting loop. Do not expect a backgrounded phone to keep answering Bluetooth requests, especially on battery.
 
 ## Nearby devices (Bluetooth)
 
-The chat model picker shows a **Nearby Devices** section only when the runtime's Bluetooth mesh has discovered a peer. This path is not tested end to end, so don't rely on it. The older transport that made the phone a Bluetooth peripheral for a Mac (`BluetoothTransport`, used with `edgecoder-ble-proxy`) is still compiled into the app, but nothing in the current app starts it (#429).
+The chat model picker shows a **Nearby Devices** section only when Bluetooth hosting has discovered a peer. This path is not tested end to end, so don't rely on it. The older transport that made the phone a Bluetooth peripheral for a Mac (`BluetoothTransport`, used with `edgecoder-ble-proxy`) is still compiled into the app, but nothing in the current app starts it (#429).
 
 ## Cross-links
 
