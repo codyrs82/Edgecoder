@@ -72,6 +72,8 @@ export interface RemoteToolStep {
   /** One line: the command, the file, the commit message. */
   detail: string;
   status: "ok" | "error" | "pending" | "denied" | "running";
+  /** Ran in the OS sandbox on the Mac (Auto mode): project-only writes, no network. */
+  sandboxed?: true;
 }
 
 /**
@@ -227,6 +229,7 @@ interface StreamEventLike {
   error?: string;
   result?: string;
   approval_status?: string;
+  sandboxed?: boolean;
 }
 
 /** A message's tool steps (call + its result), at most MAX_TOOL_STEPS of the latest. */
@@ -235,7 +238,7 @@ export function toolSteps(events: StreamEventLike[] | undefined, pendingIds: Rea
   const calls = new Map<string, RemoteToolStep>();
   for (const e of events) {
     if (e.type === "tool_call" && e.id && e.tool) {
-      calls.set(e.id, { tool: e.tool, detail: toolCallDetail(e.tool, e.args), status: pendingIds.has(e.id) ? "pending" : "running" });
+      calls.set(e.id, { tool: e.tool, detail: toolCallDetail(e.tool, e.args), status: pendingIds.has(e.id) ? "pending" : "running", ...(e.sandboxed === true ? { sandboxed: true as const } : {}) });
     } else if (e.type === "tool_result" && e.id) {
       const c = calls.get(e.id);
       if (c) c.status = e.error ? (/denied|rejected/i.test(e.error) ? "denied" : "error") : "ok";

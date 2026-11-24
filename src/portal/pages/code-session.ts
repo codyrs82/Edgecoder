@@ -41,7 +41,7 @@ export const CODE_SESSION_JS = String.raw`
       if (!steps || !steps.length) return "";
       var open = key in cs.open ? cs.open[key] : openByDefault;
       return '<details class="steps-d" data-key="' + escapeHtml(key) + '"' + (open ? " open" : "") + '><summary>' + escapeHtml(steps.length === 1 ? "1 tool step" : steps.length + " tool steps") + '</summary><ul class="steps">' + steps.map(function(s) {
-        return '<li class="st-' + escapeHtml(s.status) + '"><span class="s-tool">' + escapeHtml(s.tool) + '</span><span class="s-detail" title="' + escapeHtml(s.detail) + '">' + escapeHtml(s.detail) + '</span><span class="s-status">' + escapeHtml(STEP_STATUS[s.status] || s.status) + "</span></li>";
+        return '<li class="st-' + escapeHtml(s.status) + '"><span class="s-tool">' + escapeHtml(s.tool) + '</span><span class="s-detail" title="' + escapeHtml(s.detail) + '">' + escapeHtml(s.detail) + '</span>' + (s.sandboxed === true ? '<span class="chip" title="Ran in the sandbox on the Mac: project-only writes, no network">sandboxed</span>' : "") + '<span class="s-status">' + escapeHtml(STEP_STATUS[s.status] || s.status) + "</span></li>";
       }).join("") + "</ul></details>";
     }
     function changesHtml(m) {

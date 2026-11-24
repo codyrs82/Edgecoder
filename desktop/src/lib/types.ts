@@ -117,6 +117,12 @@ export interface ToolEvent {
   web_guard?: boolean;
   /** With web_guard: the call runs a file this run changed, so the run-wide answer isn't offered. */
   runs_edited?: string;
+  /** Ran (or runs) in the OS sandbox in Auto mode: project-only writes, no network. */
+  sandboxed?: boolean;
+  /** shell_output: what the sandbox most likely blocked. */
+  sandbox_denied?: string;
+  /** tool_call: asks to re-run outside the sandbox after it blocked this (what it blocked). */
+  sandbox_retry?: string;
   result?: string;
   error?: string;
   command?: string;

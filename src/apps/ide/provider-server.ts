@@ -72,6 +72,7 @@ import { registerTentacleRoutes } from "./tentacle-routes.js";
 import { chooseLeadModel, estimateTokens, parseLeadCandidates } from "./lead-model.js";
 import { compactHistory, compactPaidTokens, estimateTokens as estimateContextTokens, isPaidLead } from "./context-budget.js";
 import { registerSessionRoutes } from "./session-routes.js";
+import { autoSandboxFor, registerSandboxRoutes } from "./sandbox-settings.js";
 import { hostedBackend, hostedConfigFromEnv } from "./hosted-backend.js";
 import { GitHubDeviceLogins } from "./github-device.js";
 import { FrontierAccess, autoWithFrontier, botSpendKey, frontierChat, type FrontierAccountState, type FrontierRequest } from "./frontier-access.js";
@@ -185,7 +186,7 @@ const permissionStore = new PermissionStore(defaultPermissionsFile());
 /** The verdict on a call in a chat turn or bot run (permission-policy.ts): the mode, then the project's rules. */
 function decideFor(mode: PermissionMode, root: string, tool: ToolName, args: Record<string, unknown>): Decision {
   const p = permissionStore.get(root);
-  return decideToolCall(tool, args, { mode, root, rules: p.rules ?? [], legacyNames: p.shell, branch: () => currentBranch(root) }, (c) => riskOf(c, root));
+  return decideToolCall(tool, args, { mode, root, rules: p.rules ?? [], legacyNames: p.shell, branch: () => currentBranch(root), sandbox: autoSandboxFor(root) }, (c) => riskOf(c, root));
 }
 /** The owner's requests through this provider while they run, then briefly (Settings → Active work / Tasks). */
 const activity = new ActivityTracker();
@@ -1111,6 +1112,7 @@ app.addHook("onClose", async () => {
 const bots = new BotManager({
   approvals: pendingApprovals,
   permissions: permissionStore,
+  sandbox: autoSandboxFor,
   // Bots paused out of cSats resume after a top-up.
   balance: async () => (networkDeps ? (await computeOverview(networkDeps).catch(() => null))?.account?.cSats : undefined),
   log: (msg, extra) => app.log.warn({ extra }, msg),
@@ -2026,11 +2028,13 @@ const sessions: SessionHub = new SessionHub({
   tools: (s) => withTentacleTools(hasGitHubOrigin(s.projectRoot) ? toolSchemas() : toolSchemas().filter((t) => t.function.name !== "open_pull_request"), tentacles.enabled(s.id)),
   checkpoints,
   branch: currentBranch,
+  sandbox: autoSandboxFor,
   contextWindow: (s) => sessionContextWindow(s),
   summarize: (s, emit, signal, ctx) => sessionSummarizer(s, emit, signal, ctx?.client ?? null),
   onSessionStop: (id) => void tentacles.cancelAll(id),
 }, { permissions: permissionStore });
 registerSessionRoutes(app, sessions);
+registerSandboxRoutes(app);
 // The desktop Code view's chats, mirrored so the owner's phone can read and continue them (desktop-chats.ts).
 registerDesktopChatRoutes(app, sessions);
 registerTentacleRoutes(app, sessions, tentacles, { isChat: (id) => chatHelpers.has(id) && !sessions.peek(id) });

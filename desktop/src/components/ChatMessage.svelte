@@ -134,6 +134,8 @@
                   stderr={evt.stderr}
                   exitCode={evt.exit_code}
                   status="completed"
+                  sandboxed={evt.sandboxed === true}
+                  sandboxDenied={evt.sandbox_denied}
                 />
               {:else if evt.type === "diff"}
                 <DiffBlock

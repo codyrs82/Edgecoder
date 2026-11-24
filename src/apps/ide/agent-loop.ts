@@ -22,6 +22,8 @@ import { READ_TOOLS, TENTACLE_TOOLS, TOOL_DEFINITIONS, WEB_TOOLS, type IdeStream
 import { PLAN_REFUSAL, type Decision } from "./permission-policy.js";
 import { protectedToolPath } from "./tool-executor.js";
 import { editKey, runsEditedFile } from "./edited-runs.js";
+import { SANDBOX_UNAVAILABLE } from "./sandbox.js";
+import { reportToolResult } from "./tool-report.js";
 import { extractTextToolCalls, TextToolCallFilter } from "./text-tool-calls.js";
 import { COMPACT_AT, compactMessages, compactThreshold, DEFAULT_CONTEXT_WINDOW, estimateTokens, isContextTooLong, isTransient, pathsLine, REPLY_RESERVE_TOKENS } from "./context-budget.js";
 import type { CostCheckContext, CostVerdict } from "./cost-guard.js";
@@ -810,7 +812,8 @@ export interface ApprovalAsk {
 }
 
 export interface ToolRunnerDeps {
-  execute: (tool: ToolName, args: Record<string, unknown>, opts: { approved: boolean }) => Promise<{ result?: string; error?: string }>;
+  /** `sandbox`: run a command in the OS sandbox (Auto, sandbox.ts). */
+  execute: (tool: ToolName, args: Record<string, unknown>, opts: { approved: boolean; sandbox?: boolean }) => Promise<{ result?: string; error?: string }>;
   sendEvent: (event: IdeStreamEvent) => void;
   /** Resolves true (or "run") when the user approves the call (false on reject, timeout or disconnect). */
   waitForApproval: (callId: string, tool: ToolName, args: Record<string, unknown>, ask: ApprovalAsk) => Promise<ApprovalAnswer>;
@@ -897,6 +900,9 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
     let rules: string[] = [];
     /** Calls the web-page guard leaves alone: Full access, and edits the mode applies inside the project. */
     let guardExempt = false;
+    /** Auto runs it in the OS sandbox (sandbox.ts); the rules are offered if the sandbox blocks it. */
+    let sandboxed = false;
+    let offer: string[] = [];
     if (d.decide) {
       const verdict = d.decide(tool, args);
       if (verdict.action === "refuse") {
@@ -909,7 +915,9 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
       // do (the executor still guards protected paths for them), except in Full access, where the
       // verdict itself says the user approved every call (the executor's hard refusals still apply).
       always = !requiresApproval && (tool === "run_shell" || verdict.approved === true);
-      if (requiresApproval) rules = verdict.rules ?? (verdict.rule ? [verdict.rule] : []);
+      offer = verdict.rules ?? (verdict.rule ? [verdict.rule] : []);
+      if (requiresApproval) rules = offer;
+      sandboxed = tool === "run_shell" && verdict.sandbox === true;
       // decideToolCall runs an edit only inside the project, off protected paths and secrets.
       guardExempt = verdict.approved === true || (verdict.action === "run" && (tool === "write_file" || tool === "edit_file"));
     } else {
@@ -934,6 +942,7 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
       requires_approval: requiresApproval,
       ...(rules.length ? { allow_rule: rules[0], ...(rules.length > 1 ? { allow_rules: rules } : {}) } : {}),
       ...(webGuard ? { web_guard: true as const, ...(runsEdited ? { runs_edited: runsEdited } : {}) } : {}),
+      ...(sandboxed ? { sandboxed: true as const } : {}),
     });
     if (requiresApproval) {
       const answer = await d.waitForApproval(callId, tool, args, { webGuard });
@@ -947,33 +956,26 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
     const writesFile = tool === "write_file" || tool === "edit_file";
     const tracked = writesFile ? d.captureBeforeWrite(String(args.path ?? "")) : null;
     // `approved` means the user approved this call; auto-approved edits don't count.
-    const result = await d.execute(tool, args, { approved: requiresApproval || always });
+    const result = await d.execute(tool, args, { approved: requiresApproval || always, ...(sandboxed ? { sandbox: true } : {}) });
     if (tool === "read_page" && !result.error) webPageRead = true;
     if (tracked && !result.error) d.sendEvent({ type: "file_change", turnId: d.turnId, path: tracked });
     if (writesFile && !result.error) {
       const k = editKey(args.path);
       if (k) edited.add(k);
     }
-    let hint: string | null = null;
-    if (tool === "run_shell" && result.result) {
-      try {
-        const shell = JSON.parse(result.result) as { stdout: string; stderr: string; exit_code: number };
-        d.sendEvent({ type: "shell_output", id: callId, stdout: shell.stdout, stderr: shell.stderr, exit_code: shell.exit_code });
-        if (d.shellHint) {
-          try {
-            hint = d.shellHint(String(args.command ?? ""), `${shell.stdout ?? ""}\n${shell.stderr ?? ""}`);
-          } catch {
-            hint = null;
-          }
-        }
-      } catch {
-        d.sendEvent({ type: "tool_result", id: callId, result: result.result, error: result.error });
-      }
-    } else {
-      d.sendEvent({ type: "tool_result", id: callId, result: result.result, error: result.error });
+    const first = reportToolResult(d, callId, tool, args, result);
+    // The sandbox blocked it (a write outside the project, the network): never re-run outside on
+    // its own; ask, as the mode would without the sandbox, and run it outside only on a yes.
+    const blocked = sandboxed ? (first.denied ?? (result.error?.startsWith(SANDBOX_UNAVAILABLE) ? "the sandbox couldn't start" : null)) : null;
+    if (!blocked) return first.text;
+    const retryId = `tc_${randomUUID().slice(0, 8)}`;
+    d.sendEvent({ type: "tool_call", id: retryId, tool, args, requires_approval: true, sandbox_retry: blocked, ...(offer.length ? { allow_rule: offer[0], ...(offer.length > 1 ? { allow_rules: offer } : {}) } : {}) });
+    const note = `[Sandbox]: the sandbox blocked ${blocked}.`;
+    if ((await d.waitForApproval(retryId, tool, args, { webGuard: false })) === false) {
+      d.sendEvent({ type: "tool_result", id: retryId, error: "Not run outside the sandbox: the user didn't approve it." });
+      return `${first.text}\n\n${note} The user didn't approve running it outside the sandbox.`;
     }
-    if (result.error) return `[Error]: ${result.error}`;
-    const text = result.result ?? "(no output)";
-    return hint ? `${text}\n\n${hint}` : text;
+    const again = reportToolResult(d, retryId, tool, args, await d.execute(tool, args, { approved: true }));
+    return `${first.text}\n\n${note} The user approved running it outside the sandbox:\n${again.text}`;
   };
 }

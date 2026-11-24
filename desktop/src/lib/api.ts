@@ -1419,6 +1419,16 @@ export const listPermissions = () => fsCall<{ projects: Record<string, ProjectPe
 /** Remove one rule (`npm test:*`), an older command name, or "edits". */
 export const removePermission = (projectRoot: string, rule: string) => fsCall<{ removed: boolean }>("POST", "/v1/ide/permissions/remove", { projectRoot, rule });
 
+/** Settings → General → Sandbox: Auto runs unchecked commands in the OS sandbox (src/apps/ide/sandbox-settings.ts). */
+export interface SandboxSettingView {
+  enabled: boolean;
+  available: boolean;
+  kind: "sandbox-exec" | "bwrap" | null;
+  why: string;
+}
+export const getSandboxSetting = () => fsCall<SandboxSettingView>("GET", "/v1/ide/sandbox");
+export const setSandboxSetting = (enabled: boolean) => fsCall<SandboxSettingView>("POST", "/v1/ide/sandbox", { enabled });
+
 export interface IdeStreamEvent {
   type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "usage" | "web" | "web_off" | "context" | "compacted" | "cost_note" | "done";
   [key: string]: unknown;

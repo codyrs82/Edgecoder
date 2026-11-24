@@ -375,6 +375,12 @@ struct CodeStepsView: View {
                             .foregroundColor(Theme.textMuted)
                             .lineLimit(2)
                             .truncationMode(.middle)
+                        if step.sandboxed {
+                            Text("sandboxed")
+                                .font(.caption2)
+                                .foregroundColor(Theme.textMuted)
+                                .accessibilityLabel("Ran in the sandbox")
+                        }
                     }
                 }
             }

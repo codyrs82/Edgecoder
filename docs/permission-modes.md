@@ -8,7 +8,7 @@ default from **Settings → General → Permissions** (Accept edits unless you c
 
 | # | Mode | Engine name | File edits | Commands |
 | --- | --- | --- | --- | --- |
-| 1 | **Auto** | `auto` | apply | safe ones run, risky ones ask, dangerous ones are refused (below) |
+| 1 | **Auto** | `auto` | apply | safe ones run, unchecked scripts run [in the sandbox](#sandboxed-commands), risky ones ask, dangerous ones are refused (below) |
 | 2 | **Manual** | `ask` | ask | ask |
 | 3 | **Accept edits** | `auto-edits` | apply (each reply stays undoable) | ask |
 | 4 | **Plan** | `plan` | refused until you approve the plan | read-only only |
@@ -52,11 +52,54 @@ The decision is made in one place, `src/apps/ide/permission-policy.ts` (`decideT
 | `git status/diff/log/show`, `git add`, `git commit` on the session's work branch (not `main`/`master`), the `git_commit` tool likewise | Deletes: `rm` of project files (only build output such as `dist`, `build`, `coverage`, `node_modules`, `.next`, `target` runs), `git clean`, `git reset --hard`, history rewrites | Writing secrets: a redirect or copy to `.env*` or another secrets file, a command or file containing an API key or token |
 | Deleting build output inside the project (`rm -rf dist`) | Anything touching a path outside the project, or a protected path | `mkfs`, `dd of=/dev/…`, a fork bomb |
 | | Docker and friends: `docker`, `docker compose`, `podman`, `kubectl`, `helm` | |
-| | Inline code: `sh -c`, `bash -c`, `node -e`, `python -c`, `xargs` | |
-| | Other package scripts or make targets (`npm run deploy`, `make release`), commits on `main`/`master`, `git commit --amend`, other git commands | |
-| | Shell syntax that can't be checked (`$(…)`, backticks, subshells, here-docs), and any program Auto doesn't know | |
+| In the [sandbox](#sandboxed-commands) (on by default): inline code (`python3 - <<'EOF' … EOF`, `python -c`, `node -e`, `bash -c`), project scripts (`python3 tools/x.py`, `./scripts/x.sh`), other package scripts (`npm run deploy`) and programs Auto doesn't know | Inline code, scripts and unknown programs when the sandbox is off or this computer has none; `xargs` | |
+| | Commits on `main`/`master`, `git commit --amend`, other git commands | |
+| | Shell syntax that can't be checked (`$(…)`, backticks, subshells, a background `&`); a here-doc is read as the command's input | |
 
 A command chained with `&&`, `;` or `|` takes the strictest verdict of its parts.
+
+### Sandboxed commands
+
+Auto can't tell what an inline script or a project script will do, so without a sandbox it asks.
+With **Settings → General → Sandbox → Run unchecked commands in a sandbox** on (the default), Auto
+runs such a command without asking, inside an OS sandbox (`src/apps/ide/sandbox.ts`), and the
+command's card shows a **sandboxed** tag (desktop, web and iPhone). Cody's
+`cd src/portal/pages && python3 - <<'EOF' … EOF` runs this way: the here-doc is judged as the
+input of `python3 -`, so the line is `cd` (reads) plus an interpreter fed code.
+
+| | macOS (`sandbox-exec`) | Linux (bubblewrap, `bwrap`) |
+| --- | --- | --- |
+| Writes | the project folder and a private temp folder (`TMPDIR`), `/dev/null` and the terminal; never the project's `.git`, `.husky/`, `.githooks/`, `.vscode/`, `.cargo/`, `node_modules/` (its `.cache`, `.vite`, `.vitest` caches excepted), `.gitmodules`, `.gitattributes`, `.envrc`, `.npmrc`, `.yarnrc`, lefthook and pre-commit configs | `/` read-only; the project and the temp folder writable; the same project paths read-only when they exist; a fresh `/tmp` and `/run` |
+| Network | none: TCP, UDP, DNS and Unix sockets (ssh agent, Docker) are all denied | none (`--unshare-net`); `/run` (Docker, D-Bus) is hidden |
+| Reads | everything except `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.docker`, `~/.config/gh`, `~/.config/gcloud`, `~/.azure`, `~/.edgecoder` (the IDE token), `~/.netrc`, `~/.npmrc`, `~/.git-credentials`, keychains, browser profiles and cookies, wallets (`~/.bitcoin`, `~/.lnd`, Electrum, Exodus, …), and `.env` files outside the project | everything except the same home folders and files (hidden when they exist); `.env` files elsewhere are still readable |
+| Other apps | only a few system services: no Apple Events, LaunchServices (`open`), pasteboard or keychain; `sudo`, `su`, `security`, `osascript`, `open` can't start | no new privileges (setuid programs don't work), own PID and IPC namespaces, a new session |
+
+What still asks in Auto: anything that installs or reaches the network (`npm install`, `pip install`,
+`curl`, `git fetch`/`pull`/`push`), writes or paths outside the project, protected paths, deletes,
+Docker, `git push` and pull requests, commands that open other apps or need a person (`open`,
+`osascript`, `security`, `vim`, `less`, `tmux`, …), syntax that can't be read, a here-doc whose
+unquoted body has `$(…)` or backticks, and the [web-page guard](web-tool.md#prompt-injection) (after
+a page is read a sandboxed command asks first like any other, and one that runs a file the run
+edited never takes the run-wide answer). An always-allow rule that covers a command runs it outside
+the sandbox, as before. Manual and Accept edits still ask; Full access runs everything outside the
+sandbox; phone and web turns keep their stricter rules (no sandboxed auto-run).
+
+If the sandbox blocks a command (a write outside the project, the network), the card says
+**Blocked by the sandbox: …** and a new approval card asks to run the same command outside the
+sandbox (with its **Always allow** rule when it has one). Nothing is re-run outside on its own; Deny
+leaves the sandboxed result. The model is told what was blocked.
+
+No sandbox on Windows, or on Linux without a working `bwrap` (install `bubblewrap`; some systems
+disable the user namespaces it needs): those commands ask as before, and Settings says why. A
+project that is the home folder (or contains it) is never sandboxed. Turning the switch off
+(`POST /v1/ide/sandbox {enabled:false}`, kept in `~/.edgecoder/sandbox.json`) restores asking.
+
+Residual risks: a sandboxed command can change any file in the project (not checkpointed, like any
+command), so a script could edit test or source files that a later `npm test` (which Auto runs
+outside the sandbox) executes; it can read files outside the project that aren't on the list above
+(and on Linux, `.env` files outside the project); it can use CPU and memory until the command's
+timeout (30 seconds unless the call sets another); and the macOS profile relies on `sandbox-exec`, which Apple marks deprecated but
+still ships.
 
 The refused classes ask (rather than being refused) in Manual and Accept edits, where you see the
 exact command before it runs; they can never be allow-listed.
@@ -165,6 +208,8 @@ An approval card for a command offers **Allow**, **Always allow `npm test …` i
 - The rule offered is the program and its subcommand (`npm test:*`, `npm run lint:*`,
   `python -m pytest:*`), or an interpreter and the project script it runs
   (`python3 tools/watchlist.py:*`, `node scripts/build.mjs:*`), not every script.
+- In Auto, a command that runs [in the sandbox](#sandboxed-commands) asks only if the sandbox
+  blocks it; that card offers the same rule.
 - Never offered or honoured for refused commands, nor for classes that must always ask: network,
   `git push`, deletes, paths outside the project, protected paths, inline code, unreadable syntax.
   Installs, Docker, other scripts and unknown programs can be allow-listed.

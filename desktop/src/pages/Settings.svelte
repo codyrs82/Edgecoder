@@ -12,6 +12,7 @@
   import { notify } from "../lib/toast";
   import FrontierKeys from "../components/FrontierKeys.svelte";
   import PermissionSettings from "../components/PermissionSettings.svelte";
+  import SandboxSettings from "../components/SandboxSettings.svelte";
   import HelpersSettings from "../components/HelpersSettings.svelte";
   import CompactSettings from "../components/CompactSettings.svelte";
   import CostAskSettings from "../components/CostAskSettings.svelte";
@@ -382,6 +383,8 @@
   </section>
 
   <PermissionSettings />
+
+  <SandboxSettings />
 
   <HelpersSettings />
 

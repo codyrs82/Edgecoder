@@ -59,6 +59,8 @@ export function applyAgentEvent(turn: AgentTurn, event: IdeStreamEvent): { turn:
               ...(Array.isArray(event.allow_rules) ? { allow_rules: (event.allow_rules as unknown[]).filter((r): r is string => typeof r === "string") } : {}),
               ...(event.web_guard === true ? { web_guard: true } : {}),
               ...(typeof event.runs_edited === "string" ? { runs_edited: event.runs_edited } : {}),
+              ...(event.sandboxed === true ? { sandboxed: true } : {}),
+              ...(typeof event.sandbox_retry === "string" ? { sandbox_retry: event.sandbox_retry } : {}),
               approval_status: (event.requires_approval ? "pending" : "approved") as "pending" | "approved",
             },
           ],
@@ -94,7 +96,11 @@ export function applyAgentEvent(turn: AgentTurn, event: IdeStreamEvent): { turn:
           ...turn,
           toolEvents: [
             ...turn.toolEvents,
-            { type: "shell_output", id: event.id as string, stdout: event.stdout as string, stderr: event.stderr as string, exit_code: event.exit_code as number },
+            {
+              type: "shell_output", id: event.id as string, stdout: event.stdout as string, stderr: event.stderr as string, exit_code: event.exit_code as number,
+              ...(event.sandboxed === true ? { sandboxed: true } : {}),
+              ...(typeof event.sandbox_denied === "string" ? { sandbox_denied: event.sandbox_denied } : {}),
+            },
           ],
         },
         // A command may have changed files (not tracked by checkpoints): reload what's open.
