@@ -387,7 +387,9 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
     return [...(sys ? [{ role: "system", content: sys }] : []), ...d.messages];
   };
   let messages = history(native ? "native" : "text");
-  const maxIterations = d.maxIterations ?? 20;
+  // Long enough for real repo work (a lead reading a dozen files, editing and testing); a turn that
+  // still runs out says so instead of ending silently (see the end of loop()).
+  const maxIterations = d.maxIterations ?? 40;
   // Context: the request being worked on stays whole; tool results get a label for summaries.
   const pinned = (msgs: ChatMessage[]) => [...msgs].reverse().find((m) => m.role === "user" && !m.content.startsWith("[Tool "));
   let request = pinned(messages);
@@ -688,6 +690,10 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
       messages.push(m);
     }
     if (!hadToolCall) return;
+  }
+  if (!d.isCancelled()) {
+    flushText();
+    d.sendEvent({ type: "text", content: `\n\n_Stopped after ${maxIterations} steps without finishing. Reply "continue" to pick up where it left off._` });
   }
   }
 }
