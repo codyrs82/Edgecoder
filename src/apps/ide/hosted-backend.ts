@@ -13,6 +13,8 @@
 import { readFileSync } from "node:fs";
 import { request } from "undici";
 import { ChatBackendError, type ChatBackend, type ChatMessage, type ToolCall } from "../../inference-api/types.js";
+import type { ServedBy } from "../../swarm/served-by.js";
+import { servedOf } from "./network-inference.js";
 
 export interface HostedConfig {
   /** Origin of the hosted endpoint, without /v1. */
@@ -70,7 +72,7 @@ export function toOpenAiMessages(messages: ChatMessage[]): Array<Record<string, 
 interface OpenAiChunk {
   choices?: Array<{ delta?: { content?: string | null; tool_calls?: Array<{ index?: number; function?: { name?: string; arguments?: string } }> }; finish_reason?: string | null }>;
   usage?: { prompt_tokens?: number; completion_tokens?: number };
-  edgecoder?: { cSatsSpent?: number };
+  edgecoder?: { cSatsSpent?: number; where?: string; served?: unknown };
   error?: { message?: string };
 }
 
@@ -115,6 +117,8 @@ export function hostedBackend(cfg: HostedConfig, model: string): ChatBackend {
     // Tool calls arrive in pieces per index; their arguments are a JSON string built up across chunks.
     const calls = new Map<number, { name: string; args: string }>();
     let spent: number | undefined;
+    let where: string | undefined;
+    let served: ServedBy | undefined;
     let promptTokens: number | undefined;
     let outputTokens: number | undefined;
     let stop: "stop" | "length" = "stop";
@@ -143,6 +147,9 @@ export function hostedBackend(cfg: HostedConfig, model: string): ChatBackend {
         if (c.finish_reason === "length") stop = "length";
       }
       if (chunk.edgecoder?.cSatsSpent !== undefined) spent = chunk.edgecoder.cSatsSpent;
+      // Where the call ran (#525): the route line and the coordinator's served-by, for the served line.
+      if (typeof chunk.edgecoder?.where === "string" && chunk.edgecoder.where) where = chunk.edgecoder.where.slice(0, 300);
+      if (chunk.edgecoder?.served) served = servedOf(chunk.edgecoder.served) ?? served;
       if (chunk.usage) {
         promptTokens = chunk.usage.prompt_tokens;
         outputTokens = chunk.usage.completion_tokens;
@@ -173,6 +180,6 @@ export function hostedBackend(cfg: HostedConfig, model: string): ChatBackend {
         });
       if (toolCalls.length) yield { toolCalls };
     }
-    yield { done: true, stopReason: stop, ...(spent !== undefined ? { cSatsSpent: spent } : {}), ...(promptTokens !== undefined ? { promptTokens } : {}), ...(outputTokens !== undefined ? { outputTokens } : {}) };
+    yield { done: true, stopReason: stop, ...(spent !== undefined ? { cSatsSpent: spent } : {}), ...(where ? { where } : {}), ...(served ? { served } : {}), ...(promptTokens !== undefined ? { promptTokens } : {}), ...(outputTokens !== undefined ? { outputTokens } : {}) };
   };
 }

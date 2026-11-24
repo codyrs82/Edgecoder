@@ -27,16 +27,14 @@
 
 import { randomUUID } from "node:crypto";
 import { join, relative } from "node:path";
-import { runAgentLoop, type ChatFn, type ChatResult, type ToolSchema } from "./agent-loop.js";
+import { runAgentLoop, type ToolSchema } from "./agent-loop.js";
 import type { CheckpointStore } from "./checkpoints.js";
 import { ProjectFs } from "./project-fs.js";
 import { workerModelOf, type SessionData, type TranscriptEntry } from "./sessions.js";
-import { isReadOnlyCommand, riskOf, type PermissionMode } from "./permissions.js";
-import { decideToolCall } from "./permission-policy.js";
-import { evaluateShellCommand, parseArgv, protectedToolPath, ToolExecutor } from "./tool-executor.js";
+import { riskOf } from "./permissions.js";
+import { ToolExecutor } from "./tool-executor.js";
 import { TOOL_DEFINITIONS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
 import {
-  acceptanceCommand,
   applyPatch,
   checkPatch,
   createWorkspace,
@@ -53,13 +51,17 @@ import {
 } from "./tentacle-workspace.js";
 import type { ChatBackend } from "../../inference-api/types.js";
 import type { ServedBy } from "../../swarm/served-by.js";
-import { formatCSatsShort, parseWhere, tentacleCallLine, tentacleTotals } from "./tentacle-format.js";
+import { formatCSatsShort, parseWhere, patchReturn, tentacleCallLine, tentacleTotals } from "./tentacle-format.js";
 
-export { formatCSatsShort, parseWhere, tentacleCallLine, tentacleTotals };
+import { emptyAttempt, hintedChat, parseFileRef, pickLocalHelperModel, retryAfterEmpty, smallWorkerWarning, TENTACLE_LOCAL_MIN_PARAMS_B, tentacleLocalMinParamsB, tentaclePrompt, tentacleSystemPrompt } from "./tentacle-chat.js";
+import { acceptanceProbe, canAutoApply, modeOf, sessionAllowsShell, TENTACLE_SHELL_ALLOW, tentacleShellDecision } from "./tentacle-shell.js";
+import { CallHolds, ceilingRefusal, helperCallCeiling, helperMaxTokens, MIN_HELPER_CALL_CSATS, paidWorker } from "./tentacle-reserve.js";
+
+export { acceptanceProbe, canAutoApply, modeOf, sessionAllowsShell, TENTACLE_SHELL_ALLOW, tentacleShellDecision };
+export { pickLocalHelperModel, TENTACLE_LOCAL_MIN_PARAMS_B, tentacleLocalMinParamsB };
+export { formatCSatsShort, hintedChat, parseFileRef, parseWhere, patchReturn, tentacleCallLine, tentaclePrompt, tentacleTotals };
 import type { RoutingHints, JobType, Quality } from "../../inference-api/job-descriptor.js";
-import { callsTools, fitScore, type Workload } from "../../inference-api/auto-route.js";
 import { isFrontierModelId } from "../../inference-api/frontier-models.js";
-import { catalogEntryForTag } from "../../model/catalog.js";
 
 export const TENTACLE_KINDS = ["tests", "code_edit", "search", "summarize", "docs", "review", "refactor_piece"] as const;
 export type TentacleKind = (typeof TENTACLE_KINDS)[number];
@@ -254,6 +256,8 @@ interface SessionState {
   spent: number;
   /** Wakes await_tentacles callers when anything finishes. */
   waiters: Set<() => void>;
+  /** The price ceilings of helper calls in flight (tentacle-reserve.ts). */
+  holds: CallHolds;
 }
 
 const LEVELS = ["low", "medium", "high", "very_high"] as const;
@@ -278,97 +282,6 @@ const DEFAULT_COMPLEXITY: Record<TentacleKind, TentacleComplexity> = {
 };
 const READ_TOOL_NAMES: ToolName[] = ["read_file", "list_directory", "search_files"];
 const WRITE_TOOL_NAMES: ToolName[] = [...READ_TOOL_NAMES, "write_file", "edit_file", "run_shell", "git_diff", "git_status"];
-
-/**
- * Commands a tentacle may run in its workspace without anyone approving: tests, type checks and
- * reading. Plain argv only (no shell syntax), paths inside the workspace.
- * Hook: when the terminal branch's read-only / allowlist classification lands, use it here.
- */
-export const TENTACLE_SHELL_ALLOW: readonly string[][] = [
-  ["npx", "vitest", "run"],
-  ["npx", "tsc", "--noEmit"],
-  ["npm", "test"],
-  ["npm", "run", "test"],
-  ["npm", "run", "lint"],
-  ["npm", "run", "typecheck"],
-  ["git", "diff"],
-  ["git", "status"],
-  ["ls"],
-  ["cat"],
-  ["grep"],
-  ["rg"],
-  ["head"],
-  ["tail"],
-  ["wc"],
-];
-
-/** The session's permission mode (older sessions: from autoApprove). */
-export function modeOf(s: Pick<SessionData, "mode" | "autoApprove">): PermissionMode {
-  return s.mode ?? (s.autoApprove === "edits" ? "auto-edits" : "ask");
-}
-
-/**
- * A helper's patch applies on its own exactly when the lead's own edit to those files would: the
- * session's mode lets edits apply (auto-edits, auto, full) and no file is a protected path. Otherwise it
- * waits for the user's approval.
- */
-export function canAutoApply(s: Pick<SessionData, "mode" | "autoApprove">, files: string[]): boolean {
-  const m = modeOf(s);
-  return (m === "auto-edits" || m === "auto" || m === "full") && files.every((f) => protectedToolPath(f) === null);
-}
-
-/**
- * Whether the session runs `command` without asking (SessionHub.allowedWithoutAsking without a
- * hub): read-only in any mode; otherwise never a risky one, and only in mode auto or for a
- * command name answered "always" for the session.
- */
-export function sessionAllowsShell(s: Pick<SessionData, "mode" | "autoApprove" | "alwaysShell">, command: string, root: string): boolean {
-  if (isReadOnlyCommand(command, root)) return true;
-  // A helper can't ask: anything risky never runs, whatever the mode or rules say.
-  if (riskOf(command, root) !== null) return false;
-  const always = s.alwaysShell ?? [];
-  return decideToolCall("run_shell", { command }, { mode: modeOf(s), root, rules: always, legacyNames: always }, (c) => riskOf(c, root)).action === "run";
-}
-
-/**
- * Whether a tentacle may run `command` in `root`, and the command (niced) it runs as. The shared
- * classifier decides (permissions.ts): risky commands never run (they ask in every mode, and a
- * helper can't ask); read-only commands run; anything else must be on the tentacle allowlist AND
- * be something the session's mode runs without asking (`allowed`). A helper never goes past the
- * session's mode. `npx` runs with --no-install (the classifier checks the command without npx).
- */
-export function tentacleShellDecision(command: unknown, root: string, allowed: (probe: string) => boolean = () => false): { ok: true; command: string } | { ok: false; reason: string } {
-  if (typeof command !== "string" || !command.trim()) return { ok: false, reason: "command must be a non-empty string" };
-  const probe = command.trim().replace(/^npx\s+(--no-install\s+)?/, "");
-  const risk = riskOf(probe, root);
-  if (risk) return { ok: false, reason: `risky (${risk}): it would ask in every mode, and a helper can't ask` };
-  const policy = evaluateShellCommand(probe, { approved: false, root, env: { IDE_SHELL_ALLOW: "npm,git,ls,cat,grep,rg,head,tail,wc,vitest,tsc" } });
-  if (!policy.allowed) return { ok: false, reason: policy.reason };
-  let argv: string[];
-  try {
-    argv = parseArgv(command.trim());
-  } catch (err) {
-    return { ok: false, reason: (err as Error).message };
-  }
-  const nice = process.platform === "win32" ? "" : "nice -n 10 ";
-  const run = command.trim().replace(/^npx\s+(--no-install\s+)?/, "npx --no-install ");
-  if (isReadOnlyCommand(probe, root)) return { ok: true, command: `${nice}${run}` };
-  if (!TENTACLE_SHELL_ALLOW.some((p) => p.every((w, i) => argv[i] === w))) return { ok: false, reason: `tentacles may only run read-only commands and: ${TENTACLE_SHELL_ALLOW.map((p) => p.join(" ")).join(", ")}` };
-  if (!allowed(probe)) return { ok: false, reason: "the session's permission mode would ask before running this, and a helper can't ask; tell the lead to run it" };
-  return { ok: true, command: `${nice}${run}` };
-}
-
-/** The acceptance check as the classifier sees it ("vitest run a.test.ts", "tsc --noEmit -p tsconfig.json", a grep). */
-export function acceptanceProbe(a: Acceptance): string | null {
-  const cmd = acceptanceCommand(a, "linux");
-  if ("error" in cmd || !cmd.argv.length) return null;
-  const argv = cmd.argv.filter((w, i) => !(i < 3 && ["nice", "-n", "10"].includes(w)));
-  const i = argv[0] === "npx" ? (argv[1] === "--no-install" ? 2 : 1) : 0;
-  return argv
-    .slice(i)
-    .map((w) => (/^[\w./:=@,+-]+$/.test(w) ? w : `'${w.replace(/'/g, "")}'`))
-    .join(" ");
-}
 
 /**
  * The model a session's tentacles run on: the session's worker model (workerModelOf), or the
@@ -426,46 +339,6 @@ export function workerHints(spec: Pick<TentacleSpec, "kind" | "complexity"> & Pa
 }
 
 /**
- * The smallest model (billions of parameters) on this computer a helper may run on first, like
- * bots' BOT_AGENT_MIN_PARAMS_B: a tentacle is an agent loop with tools, so a tiny model never takes
- * one. Lower than bots' 14B because only low-complexity pieces run locally, and the retry goes to
- * the network. EDGECODER_TENTACLES_LOCAL_MIN_B overrides it.
- */
-export const TENTACLE_LOCAL_MIN_PARAMS_B = 7;
-
-export function tentacleLocalMinParamsB(env: NodeJS.ProcessEnv = process.env): number {
-  const n = Number(env.EDGECODER_TENTACLES_LOCAL_MIN_B);
-  return env.EDGECODER_TENTACLES_LOCAL_MIN_B && Number.isFinite(n) && n >= 0 ? n : TENTACLE_LOCAL_MIN_PARAMS_B;
-}
-
-/**
- * The model on this computer a helper runs on first, or null when none can take it: it calls tools
- * (model/tool-support.ts, Ollama's capabilities), is at least `minParamsB` big, and its context
- * window (when the catalog knows it) holds the helper's `minContext`. Among those, Auto's fit for
- * agent work (auto-route.ts fitScore: ~14B coders first). Never a frontier id.
- */
-export function pickLocalHelperModel(
-  localModels: string[],
-  need: { minContext: number; promptTokens?: number },
-  o: { minParamsB?: number; callsTools?: (m: string) => boolean; contextTokens?: (m: string) => number | undefined } = {},
-): string | null {
-  const tools = o.callsTools ?? callsTools;
-  const ctxOf = o.contextTokens ?? ((m: string) => catalogEntryForTag(m)?.contextTokens);
-  const w: Workload = { heavy: true, needsTools: true, promptTokens: need.promptTokens ?? 0, minParamsB: o.minParamsB ?? tentacleLocalMinParamsB() };
-  return (
-    localModels
-      .filter((m) => !isFrontierModelId(m) && tools(m))
-      .filter((m) => {
-        const c = ctxOf(m);
-        return !c || c >= need.minContext;
-      })
-      .map((m) => ({ m, s: fitScore(m, w) }))
-      .filter((x) => x.s >= 0)
-      .sort((a, b) => b.s - a.s)[0]?.m ?? null
-  );
-}
-
-/**
  * Where a helper's attempt runs. Local first: with the worker on auto and local first on, a
  * low-complexity first attempt runs on `localModel` (this computer, free) when there is one. The
  * retry (one level up), medium and harder pieces, and an explicit worker model go to the worker
@@ -475,47 +348,6 @@ export function tentaclePlacement(o: { workerModel: string; level: (typeof LEVEL
   const worker = workerModelOf({ workerModel: o.workerModel });
   if (o.localFirst && worker === "auto" && !o.escalate && o.level === "low" && o.localModel && !isFrontierModelId(o.localModel)) return { place: "local", model: o.localModel };
   return { place: "worker", model: worker };
-}
-
-/** "path#L10-L40" → { path, start, end }. */
-export function parseFileRef(ref: string): { path: string; start?: number; end?: number } {
-  const m = /^(.*?)#L(\d+)(?:-L?(\d+))?$/.exec(ref.trim());
-  if (!m) return { path: ref.trim() };
-  const start = Number(m[2]);
-  const end = m[3] ? Number(m[3]) : start;
-  return { path: m[1], start: Math.max(1, Math.min(start, end)), end: Math.max(start, end) };
-}
-
-/** A ChatFn over a backend that sends `hints` with every request and reports each call's usage. */
-export function hintedChat(
-  backend: ChatBackend,
-  hints: () => RoutingHints,
-  signal: AbortSignal,
-  onCall: (u: { cSats: number; where?: string; promptTokens?: number; outputTokens?: number; served?: ServedBy }) => void,
-  guard?: () => void,
-): ChatFn {
-  return async ({ messages, tools }, onDelta) => {
-    guard?.();
-    let content = "";
-    const toolCalls: ChatResult["toolCalls"] = [];
-    const req = {
-      messages: messages.map((m) => ({ ...m, role: (["system", "user", "assistant", "tool"].includes(m.role) ? m.role : "user") as "user" })),
-      ...(tools ? { tools: tools as never } : {}),
-      temperature: 0.2,
-      hints: hints(),
-    };
-    for await (const p of backend(req, signal)) {
-      if ("delta" in p) {
-        content += p.delta;
-        onDelta?.(p.delta);
-      } else if ("toolCalls" in p) {
-        for (const c of p.toolCalls) toolCalls.push({ name: c.function.name, arguments: c.function.arguments ?? {} });
-      } else if ("done" in p) {
-        onCall({ cSats: Number.isFinite(p.cSatsSpent) ? (p.cSatsSpent as number) : 0, where: p.where, promptTokens: p.promptTokens, outputTokens: p.outputTokens, ...(p.served ? { served: p.served } : {}) });
-      }
-    }
-    return { content, toolCalls };
-  };
 }
 
 function schemasFor(names: ToolName[]): ToolSchema[] {
@@ -531,51 +363,6 @@ function schemasFor(names: ToolName[]): ToolSchema[] {
       },
     },
   }));
-}
-
-function tentacleSystemPrompt(readOnly: boolean): string {
-  return [
-    "You are a helper agent (a tentacle) working for a lead agent on one scoped piece of work.",
-    readOnly
-      ? "You can only read the project. Find what is asked and answer with the facts, file paths and line numbers."
-      : "You work in a private copy of the project. Make exactly the change asked for, nothing else; keep edits small and in the style of the code around them. Paths are relative to the project folder.",
-    "Use the tools to read what you need. When you are done, reply without calling a tool: a short summary of what you did (or found) and anything the lead must know.",
-    "Don't ask questions; nobody will answer. If the task can't be done, say why in your summary.",
-  ].join("\n");
-}
-
-/** The tentacle's first message: the task, its instructions and the given files (within the size cap). */
-export function tentaclePrompt(spec: TentacleSpec, read: (path: string) => string | null, maxChars: number, extra?: string): string {
-  const parts: string[] = [`# Task\n${spec.task}`];
-  if (spec.instructions.trim()) parts.push(`# Instructions\n${spec.instructions.trim()}`);
-  if (spec.acceptance && spec.acceptance.kind !== "none") parts.push(`# Done when\nThis check passes in your workspace: ${spec.acceptance.kind} ${JSON.stringify(spec.acceptance.args ?? "")}`);
-  if (extra) parts.push(extra);
-  let budget = maxChars - parts.join("\n\n").length;
-  const files: string[] = [];
-  for (const ref of spec.files) {
-    const { path, start, end } = parseFileRef(ref);
-    const text = read(path);
-    if (text === null) {
-      files.push(`## ${ref}\n(not found)`);
-      continue;
-    }
-    let body = text;
-    let label = path;
-    if (start) {
-      const lines = text.split("\n").slice(start - 1, end);
-      body = lines.map((l, i) => `${start + i}: ${l}`).join("\n");
-      label = `${path} (lines ${start}-${start + lines.length - 1})`;
-    }
-    if (budget <= 200) {
-      files.push(`## ${label}\n(not included: context limit; read it with read_file if needed)`);
-      continue;
-    }
-    if (body.length > budget - 100) body = `${body.slice(0, budget - 100)}\n… (cut: read_file with offset for the rest)`;
-    budget -= body.length + label.length + 10;
-    files.push(`## ${label}\n\`\`\`\n${body}\n\`\`\``);
-  }
-  if (files.length) parts.push(`# Files\n${files.join("\n\n")}`);
-  return parts.join("\n\n");
 }
 
 /** Where the last attempt ran, for the result: this computer when it ran locally (or Auto here served it there). */
@@ -598,7 +385,7 @@ export class TentacleManager {
   private state(sessionId: string): SessionState {
     let st = this.sessions.get(sessionId);
     if (!st) {
-      st = { config: { ...this.base }, tentacles: new Map(), queue: [], running: 0, spent: 0, waiters: new Set() };
+      st = { config: { ...this.base }, tentacles: new Map(), queue: [], running: 0, spent: 0, waiters: new Set(), holds: new CallHolds() };
       this.sessions.set(sessionId, st);
     }
     return st;
@@ -631,9 +418,10 @@ export class TentacleManager {
     return { ...c };
   }
 
-  list(sessionId: string): { config: TentacleConfig; spentCSats: number; tentacles: TentacleView[] } {
+  list(sessionId: string): { config: TentacleConfig; spentCSats: number; patches: ReturnType<typeof patchReturn>; tentacles: TentacleView[] } {
     const st = this.state(sessionId);
-    return { config: { ...st.config }, spentCSats: round(st.spent), tentacles: [...st.tentacles.values()].map((t) => structuredClone(t.view)) };
+    const views = [...st.tentacles.values()].map((t) => t.view);
+    return { config: { ...st.config }, spentCSats: round(st.spent), patches: patchReturn(views), tentacles: views.map((v) => structuredClone(v)) };
   }
 
   get(sessionId: string, id: string): TentacleView | null {
@@ -802,12 +590,16 @@ export class TentacleManager {
     t.view.startedAt = Date.now();
     const cfg = st.config;
     // The worker model: never a frontier one, whoever the lead is (workerModelOf turns one into auto).
-    const model = workerModelOf({ workerModel: this.d.workerModelFor?.(s, cfg) ?? tentacleWorkerModel(s, cfg) });
+    // An attempt that came back with nothing may move the retry to auto (retryAfterEmpty).
+    let model = workerModelOf({ workerModel: this.d.workerModelFor?.(s, cfg) ?? tentacleWorkerModel(s, cfg) });
     t.view.model = model;
+    const minB = tentacleLocalMinParamsB();
     const calls: TentacleCall[] = [];
     t.view.calls = calls;
     let unverified: string | undefined;
     this.progress(sessionId, t, "starting", "running");
+    const small = smallWorkerWarning(model, minB);
+    if (small) this.progress(sessionId, t, small);
     const budget = Math.max(0, Math.min(t.spec.budgetCSats ?? cfg.perTentacleCSats, cfg.budgetCSats - st.spent));
     let ws: Workspace | null = null;
     const started = Date.now();
@@ -829,15 +621,24 @@ export class TentacleManager {
       let lastFailure = "";
       let outcome: { status: "passed" | "failed" | "error"; summary: string; error?: string } = { status: "error", summary: "" };
       let attempts = 0;
+      // After an empty attempt on the worker: where the retry goes (another machine, or auto's next tier).
+      let retry: ReturnType<typeof retryAfterEmpty> | null = null;
+      const markEmpty = (why: "empty_reply" | "no_file") => {
+        retry = place === "worker" ? retryAfterEmpty(model, minB, why) : null;
+      };
       for (const escalate of [false, true]) {
         if (t.abort.signal.aborted) break;
         attempts++;
+        const again = retry as ReturnType<typeof retryAfterEmpty> | null;
         if (escalate) {
           if (ws) resetWorkspace(ws);
-          this.progress(sessionId, t, place === "local" ? "retrying on the network (a stronger tier)" : "retrying on a stronger tier");
+          if (again) model = again.model;
+          this.progress(sessionId, t, again ? again.note : place === "local" ? "retrying on the network (a stronger tier)" : "retrying on a stronger tier");
         }
         checks.length = 0;
         let budgetHit = false;
+        let budgetWhy = "";
+        let holdKey: number | undefined;
         let frontierRefused = false;
         let text = "";
         const read = (p: string) => readText(root, p);
@@ -864,7 +665,27 @@ export class TentacleManager {
           // same on the retry (no surprise spend); "auto" moves up a tier by its hints, and a local
           // attempt's retry goes to the network.
           place === "local" ? this.d.localBackend!(localModel) : this.d.workerBackend(model, sessionId, { role: "worker" }),
-          () => workerHints(t.spec, { escalate, promptChars: prompt.length, maxCSats: budget - t.spent, tentacleId: t.view.id }),
+          async () => {
+            const hintsFor = (maxCSats: number) => workerHints(t.spec, { escalate, promptChars: prompt.length, maxCSats, tentacleId: escalate && again?.freshHost ? `${t.view.id}:retry` : t.view.id });
+            // Free places hold nothing; a paid call's ceiling is sized from the budgets left (tentacle-reserve.ts).
+            if (place !== "worker" || !paidWorker(model)) return hintsFor(Math.max(0, budget - t.spent));
+            for (;;) {
+              const ceiling = helperCallCeiling({ tentacleLeft: budget - t.spent, sessionLeft: cfg.budgetCSats - st.spent, heldByOthers: st.holds.total() });
+              const refusal = ceilingRefusal(ceiling, { tentacleBudget: budget, tentacleLeft: budget - t.spent });
+              if (!refusal) {
+                holdKey = st.holds.hold(ceiling);
+                return hintsFor(ceiling);
+              }
+              // Other helpers' calls hold the session's budget: wait for one to end.
+              if (budget - t.spent >= MIN_HELPER_CALL_CSATS && st.holds.total() > 0 && !t.abort.signal.aborted) {
+                await st.holds.released(30_000, t.abort.signal);
+                continue;
+              }
+              budgetHit = true;
+              budgetWhy = refusal;
+              throw new Error(refusal);
+            }
+          },
           t.abort.signal,
           (u) => {
             if (u.served?.computeClass === "frontier") {
@@ -893,6 +714,13 @@ export class TentacleManager {
               budgetHit = true;
               throw new Error(`budget reached (${formatCSatsShort(budget)})`);
             }
+          },
+          {
+            ...(place === "worker" ? { maxTokens: helperMaxTokens() } : {}),
+            after: () => {
+              st.holds.release(holdKey);
+              holdKey = undefined;
+            },
           },
         );
         await runAgentLoop({
@@ -932,12 +760,20 @@ export class TentacleManager {
           break; // never retried
         }
         if (budgetHit) {
-          outcome = { status: "error", summary, error: `The tentacle's budget ran out (${formatCSatsShort(budget)}).` };
+          outcome = { status: "error", summary, error: budgetWhy ? `The tentacle stopped before a call: ${budgetWhy}.` : `The tentacle's budget ran out (${formatCSatsShort(budget)}).` };
           break; // no escalation past a budget
         }
+        const empty = emptyAttempt({ modelError, summary, changedFiles: ws ? workspacePatch(ws).files.length : 0, writes: !!ws && t.spec.kind !== "review" });
         if (modelError && !summary) {
           outcome = { status: "error", summary, error: modelError };
           lastFailure = `The model call failed: ${modelError}`;
+          if (empty === "empty_reply") markEmpty(empty);
+          continue;
+        }
+        if (empty === "empty_reply") {
+          outcome = { status: "error", summary, error: "The helper returned an empty reply." };
+          lastFailure = "Your previous attempt returned an empty reply: no summary and no change. Start by calling a tool (read_file, then edit_file or write_file), then reply with a short summary.";
+          markEmpty(empty);
           continue;
         }
         // Verify.
@@ -966,6 +802,7 @@ export class TentacleManager {
           if (!files.length) {
             outcome = { status: "failed", summary, error: "The tentacle changed no files." };
             lastFailure = `Your summary: ${summary.slice(0, 500)}\nBut no file was changed. Make the change with write_file or edit_file.`;
+            markEmpty("no_file");
             continue;
           }
         }
