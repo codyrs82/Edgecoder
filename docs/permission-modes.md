@@ -185,7 +185,7 @@ An approval card for a command offers **Allow**, **Always allow `npm test …` i
   only reads, is covered by a rule, or (in Auto) is a command Auto runs. No rule is offered, and
   none covers the line, when any part uses `$(…)` or backticks, `eval` or `source`, a variable in a
   covered part, `>` / `>>` into a file, a pipe into a shell or interpreter that runs its input
-  (`| sh`, `| bash -s`, `| python3`, `| python -c …`, `| xargs`), a background `&`, the network,
+  (`sh`, `bash -s`, a bare `python3` or `python -c …` after the pipe, or `xargs`), a background `&`, the network,
   or a path outside the project. When every part is read-only it runs without asking anyway (above).
 - Kept per project folder in `~/.edgecoder/permissions.json` (0600), never in the project itself, so
   a cloned repository can't allow commands on its own. **Settings → General → Permissions →

@@ -481,7 +481,7 @@ export interface CommandPart {
 }
 
 /**
- * A shell or interpreter fed its code on stdin (`… | sh`, `… | python3 -`, `bash < x.sh`): it runs
+ * A shell or interpreter fed its code on stdin (piped into `sh` or `python3 -`, or `bash < x.sh`): it runs
  * whatever the pipe or file carries, so no rule may cover it.
  */
 function runsStdin(argvIn: string[], stdinFed: boolean): boolean {
@@ -627,20 +627,22 @@ export function suggestRule(command: unknown, ctx: CommandContext): string | nul
   if (word(b)) tokens = ["run", "run-script", "exec", "x", "-m"].includes(b) && word(d) ? [a, b, d] : [a, b];
   else if (b === "-m" && word(d)) tokens = [a, b, d];
   // `python3 tools/watchlist.py --md` keeps `python3 tools/watchlist.py:*`, not every python3 script.
-  else if (INTERPRETERS.test(a) && b && SCRIPT_PATH.test(b) && !b.split("/").includes("..")) tokens = [a, b];
+  else if (INTERPRETERS.test(a) && b && isScriptPath(b)) tokens = [a, b];
   const rule = `${tokens.join(" ")}:*`;
   return parseRule(rule) ? rule : null;
 }
 
 /** A script inside the project, as an interpreter's first argument (`tools/watchlist.py`, `./scripts/x.sh`). */
-const SCRIPT_PATH = /^(\.\/)?[A-Za-z0-9_][\w.-]*(\/[\w.-]+){0,6}\.(py|js|mjs|cjs|ts|mts|rb|pl|php|sh|bash|zsh)$/;
+const SCRIPT_PATH = /^(\.\/)?[A-Za-z0-9_][\w.-]*(\/[\w.-]+){0,6}\.(?<ext>[a-z]{1,4})$/;
+const SCRIPT_EXTENSIONS = new Set(["py", "js", "mjs", "cjs", "ts", "mts", "rb", "pl", "php", "sh", "bash", "zsh"]);
+const isScriptPath = (p: string) => SCRIPT_EXTENSIONS.has(SCRIPT_PATH.exec(p)?.groups?.ext ?? "") && !p.split("/").includes("..");
 
 /**
  * The rules "Always allow" keeps for a command, or null when none may be kept. A plain command gets
  * suggestRule's one rule. A command line (`python3 tools/x.py SPY 2>&1 | head -20; echo "exit=$?"`)
  * gets one plain rule per part that isn't read-only (`python3 tools/x.py:*`); read-only parts (head,
  * tail, echo, grep, wc, sort, cat of project files) need none. None at all when a part can't have
- * one: it writes a file (`>`), runs code from its input (`| sh`), reaches the network or outside the
+ * one: it writes a file (`>`), pipes into a shell that runs its input, reaches the network or outside the
  * project, or the line uses syntax that can't be checked (`$(...)`, backticks).
  */
 export function suggestRules(command: unknown, ctx: CommandContext): string[] | null {
