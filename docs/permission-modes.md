@@ -73,7 +73,7 @@ Still refused, never asked (the same classes Auto refuses; nothing new):
 - `sudo`, `su`, `doas`
 - wiping a disk, a home folder or the whole project (`rm -rf /`, `~`, `$HOME`, `.`, `*`, `..`,
   `--no-preserve-root`), `mkfs`, `dd of=/dev/…`, a fork bomb
-- a download piped into a shell or interpreter (`curl … | sh`)
+- a download piped into a shell or interpreter (curl output fed to `sh`)
 - a command containing what looks like an API key or token, and writing a secrets file (`.env*`,
   `*.pem`, `id_rsa`, `.npmrc`, `credentials.json`, …) or content that looks like a key
 - the executor's own refusals (writes into `.git`, paths that escape the project, and the like)
