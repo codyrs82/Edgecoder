@@ -25,7 +25,8 @@ key for a frontier model and make it the **lead**: the model that plans and driv
 ## Who can use a key
 
 > Usable only by your account on this computer. Never used for other people's requests or for
-> network work.
+> network work. Bots use your key only when only you can start them, and only after you approve
+> each use.
 
 Each stored key records the EdgeCoder account (`acct-…`) that added it. EdgeCoder uses the key
 only when all of these hold:
@@ -44,8 +45,8 @@ can be removed there but not used, until you sign back in.
 A session can be joined by a client from another account. Today that only happens on the same
 machine; remote attach is planned. When it does, frontier turns are refused for that client's
 messages. The turn runs on the session's worker model instead, with the note "Frontier lead is
-limited to <owner>'s own requests." Bots never use frontier keys, because they act on triggers
-from other people, such as GitHub comments.
+limited to <owner>'s own requests." Bots use your key only when only you can start them, and only
+after you approve each use: see [Bots and your key](#bots-and-your-key).
 
 Messages sent while a turn runs wait in the session's queue. Each queued message carries the
 account of the client that sent it. When the queue drains, the next turn takes only a run of
@@ -72,6 +73,63 @@ that holds it. Sharing it with others, pooling it, or reselling access breaks th
 would also make your bill and your rate limits pay for other people's work. EdgeCoder therefore
 binds each key to one account on one computer and never routes anyone else's request to it. Use
 the network for shared compute. Use your own key for your own work.
+
+## Bots and your key
+
+A desktop bot can lead with your key, the way a coding session does, when you turn on **Lead with
+Claude (your key)** in its settings in the app. The switch shows only when your account has a key
+on this computer. Bots use your key only when only you can start them, and only after you approve
+each use.
+
+**Only you can start it.** A run may use the key when it was started by your message, **Check
+now**, the bot's schedule, its check-ins, its own start or its follow-ups. Never a GitHub trigger:
+anyone who opens a pull request or an issue could start that run. So:
+
+- the switch can't be turned on while the bot has a GitHub trigger, enabled or not;
+- adding a GitHub trigger later turns the switch off, with a note in the bot's chat
+  ("Claude lead turned off: GitHub triggers let other people start …").
+
+**Only your account.** A bot records the account that was signed in when it was made
+(`ownerAccount`). Each run checks that the account signed in on this computer is the bot's owner
+and owns the key. Bots made before this existed have no owner: turning the switch on in the app,
+signed in, records you as the owner. Bots made from the web record the account that asked.
+
+**Only from the app.** The switch and its caps are set only in the desktop app (the IDE provider's
+routes, behind the IDE token). The web can't turn it on or change its caps, and a bot's compute is
+never a frontier model. The web shows whether the switch is on and what it spent today. Cloud bots
+never use a key.
+
+**You approve each use.** Before the first model call that would use the key, the run checks, in
+order: what started it, no GitHub triggers, the account (signed in here, the bot's owner, the
+key's owner), and the caps. If any check fails, the run uses the bot's own compute, with a note
+such as "Claude lead off: GitHub trigger". Then the bot asks in its chat:
+
+> Use Claude for this run? Up to $2.00.
+
+- **Approve this run.** Claude leads until the run ends or reaches the run cap.
+- **Approve for today.** Every run until local midnight, within the bot's daily cap.
+- **Decline.** This run uses the bot's own compute.
+
+The bot shows **Needs approval**, like a tool approval, in the app, on the web and on the phone.
+Only the bot's owner can answer: from the app, or from the web (`approve_frontier` and
+`decline_frontier` commands). With no answer in 30 minutes, the run goes on without the key. While
+the bot waits, the run is paused, so nothing is spent.
+
+**Caps.** Each bot has a run cap (default $2) and a daily cap (default $5). The key's own daily cap
+still applies to everything. When a run reaches its run cap, the key stops and the bot asks again,
+with the same three choices. The run waits for the answer. The bot's daily cap and the key's daily
+cap don't ask: the run carries on with the bot's own compute.
+
+**Lead and worker.** Claude leads: it plans and makes the tool calls. The bot's compute policy is
+the worker: it runs compaction summaries, and every call once the key is off.
+
+**Auto.** With **Use my frontier key for Auto** on, a bot on Auto whose switch is off may use the
+key for high-complexity steps, judged by the same estimate as sessions. These steps go through the
+same checks, approval and caps.
+
+**Spend.** It is logged under `bot:<id>` in `frontier-usage.json`. The bot's view shows today's
+dollars next to its cSats ("Claude Opus 5.5 · $0.42 of $5.00 today"), and each run records its
+own estimate.
 
 ## Where the key is stored
 

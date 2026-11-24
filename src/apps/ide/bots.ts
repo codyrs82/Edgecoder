@@ -28,6 +28,9 @@
  * with a repository, its memory file (memory.md) lives there. GitHub triggers (bot-triggers.ts)
  * start runs when a PR opens or updates, CI fails or an issue gets a label.
  *
+ * Its owner's frontier key (bot-frontier.ts): a bot only its owner can start (no GitHub triggers)
+ * may lead with the owner's own key (frontierLead), after the owner approves each use in its chat.
+ *
  * Config and run history: ~/.edgecoder/bots.json (0600). Per bot, under ~/.edgecoder/bots/<id>/:
  * conversation.json, and memory.md for bots without a repository (0600, directory 0700).
  */
@@ -55,6 +58,9 @@ import { decideToolCall, suggestToolRule, type Decision } from "./permission-pol
 import { ensureRepo as realEnsureRepo } from "./repo-connect.js";
 import { COMPUTE_POLICIES, FALLBACK_NOTE, NETWORK_CLASSES, isNetworkClass, type NetworkClass, routeLabel, routeModelId, routeSummary, type ComputePolicy, type PlanOptions, type Route } from "../../inference-api/auto-route.js";
 import type { ChatBackend } from "../../inference-api/types.js";
+import { isFrontierModelId } from "../../inference-api/frontier-models.js";
+import { FRONTIER_ASK_TIMEOUT_MS, FRONTIER_ASK_TOOL, frontierAskQuestion, type BotFrontierHooks, type FrontierAnswer, type FrontierAsk, type FrontierChoice } from "./bot-frontier.js";
+import { frontierLeadName } from "./frontier-access.js";
 import { webSystemNote, webGrounding, isWebTool, webToolSchemas, type WebToolSession } from "../../web-tool/tools.js";
 
 // ---------------------------------------------------------------------------
@@ -287,6 +293,23 @@ export interface BotConfig {
    * own until someone at this computer picks the folder (setupFolder). The web can only suggest one.
    */
   setup?: BotSetup;
+  /**
+   * The EdgeCoder account signed in when the bot was made (or when its owner turned the frontier
+   * switch on at this computer). Bots without one never use a frontier key.
+   */
+  ownerAccount?: string;
+  /**
+   * Lead with the owner's frontier key (`frontier/<provider>/<model>`), after the owner approves
+   * each use; null or unset: off. Only a bot without GitHub triggers can have it on, and only the
+   * desktop app can turn it on (bot-frontier.ts).
+   */
+  frontierLead?: string | null;
+  /** USD one run may spend on the key before it asks again (default $2, frontier-access.ts). */
+  frontierRunCapUsd?: number;
+  /** USD the bot may spend on the key a day (default $5), within the key's own daily cap. */
+  frontierDailyCapUsd?: number;
+  /** "Approve for today": every run uses the key without asking until this time (local midnight). */
+  frontierApprovedUntilMs?: number;
 }
 
 /** A bot made from the web that is waiting for this computer to give it a folder. */
@@ -416,6 +439,8 @@ export interface BotRun {
   where?: string;
   /** Something worth knowing about how it ran, e.g. "ran on a smaller local model (no cSats)". */
   note?: string;
+  /** Estimated USD spent on the owner's frontier key in this run (billed by the provider, not cSats). */
+  frontierUsd?: number;
   error?: string;
   /** What it tried, what failed and what you answered, and how it ended (bot-outcomes.ts). */
   outcome?: RunOutcome;
@@ -470,6 +495,10 @@ export interface BotView extends BotConfig {
   held?: "run_cap" | "budget";
   /** Paused because it kept hitting the same problem (see BotAutoState.stuck). */
   stuck?: { atMs: number; problem: string; runs: number };
+  /** Estimated USD spent on the owner's frontier key today (local date). */
+  frontierSpentTodayUsd?: number;
+  /** Set by a change that turned the frontier lead off (a GitHub trigger was added). */
+  notice?: string;
 }
 
 /** A job to do: a role or instructions. Bots without one wait to be messaged. */
@@ -566,6 +595,8 @@ export interface BotRunContext {
   followUp: (minutes: number, reason: string) => void;
   /** cSats left in today's budget (null: no limit); the network never gets more than this. */
   budgetLeft: () => number | null;
+  /** Asks the owner before the run uses their frontier key (bot-frontier.ts). */
+  frontier?: BotFrontierHooks;
 }
 
 export type BotRunner = (ctx: BotRunContext) => Promise<void>;
@@ -775,6 +806,30 @@ export interface BotInput {
   compute?: BotCompute;
   color?: string;
   avatarShape?: BotAvatarShape;
+  /** The frontier lead switch (desktop app only; see BotConfig.frontierLead). */
+  frontierLead?: string | null;
+  frontierRunCapUsd?: number;
+  frontierDailyCapUsd?: number;
+}
+
+/** Where a change comes from: the desktop app (with the account signed in here) or the web relay. */
+export interface BotChangeSource {
+  /** The desktop app's routes (behind the IDE token); the web relay never sets this. */
+  desktop?: boolean;
+  /** The account signed in on this computer when the change was made. */
+  account?: string | null;
+}
+
+/** Why the frontier lead can't be on with GitHub triggers. */
+export const GITHUB_TRIGGER_REFUSAL = "A bot with GitHub triggers can't use your frontier key: anyone who opens a pull request or issue could start it. Remove its GitHub triggers first.";
+
+/** The fields only the desktop app may change. */
+const FRONTIER_FIELDS = ["frontierLead", "frontierRunCapUsd", "frontierDailyCapUsd"] as const;
+
+/** The next local midnight after `ms`. */
+export function nextLocalMidnight(ms: number): number {
+  const d = new Date(ms);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
 }
 
 /** A bot's permission mode (older bots: from autoApproveEdits). */
@@ -806,7 +861,7 @@ interface ActiveRun {
   run: BotRun;
   abort: AbortController;
   cancelReason?: "cancelled" | "budget";
-  pending: Map<string, PendingCall & { finish: (approved: boolean, how?: "timeout" | "cancelled") => void }>;
+  pending: Map<string, PendingCall & { finish: (approved: boolean, how?: "timeout" | "cancelled") => void; frontier?: (choice: FrontierChoice) => void }>;
   reply: BotMessage;
   activity?: string;
   /** callId → tool, to tell which results came from open_pull_request. */
@@ -868,6 +923,8 @@ export class BotManager {
       balance?: () => Promise<number | undefined>;
       /** Where "Use default" makes a web-made bot's folder (default ~/EdgeCoder/Bots). */
       botsHome?: () => string;
+      /** USD the bot spent on its owner's frontier key today (FrontierSpend.todayFor("bot:<id>")). */
+      frontierSpentToday?: (botId: string) => number;
     },
   ) {
     this.approvals = deps.approvals ?? new Map();
@@ -1451,6 +1508,11 @@ export class BotManager {
     if (input.maxRunsPerDay !== undefined && !(Number.isInteger(input.maxRunsPerDay) && input.maxRunsPerDay >= 1 && input.maxRunsPerDay <= 500)) {
       throw new BotError("Runs a day must be a whole number from 1 to 500");
     }
+    if (input.frontierLead != null && !isFrontierModelId(input.frontierLead)) throw new BotError("The frontier lead must be a frontier/<provider>/<model> id");
+    for (const k of ["frontierRunCapUsd", "frontierDailyCapUsd"] as const) {
+      const v = input[k];
+      if (v !== undefined && !(Number.isFinite(v) && v > 0 && v <= 1_000)) throw new BotError(`${k === "frontierRunCapUsd" ? "The run cap" : "The daily cap"} must be more than $0 and at most $1,000`);
+    }
     if (input.compute !== undefined) {
       if (!COMPUTE_POLICIES.includes(input.compute.policy)) throw new BotError(`Unknown compute policy "${input.compute.policy}"`);
       if (input.compute.policy === "model" && !input.compute.model?.trim()) throw new BotError("Pick the model this bot runs on (or choose another compute option)");
@@ -1490,10 +1552,16 @@ export class BotManager {
     return s ? nextRunAt(s, this.now()) ?? undefined : undefined;
   }
 
-  create(input: BotInput): BotView {
+  create(input: BotInput, source: BotChangeSource = {}): BotView {
     this.validate(input);
     const now = this.now();
     const repository = input.repository?.trim() || undefined;
+    const owner = source.account || undefined;
+    if (FRONTIER_FIELDS.some((k) => input[k] !== undefined) && !source.desktop) throw new BotError("The frontier lead is set in the EdgeCoder app on this computer.", 403);
+    if (input.frontierLead) {
+      if (!owner) throw new BotError("Sign in to EdgeCoder on this computer to let a bot use your frontier key.", 409);
+      if (input.triggers?.length) throw new BotError(GITHUB_TRIGGER_REFUSAL, 409);
+    }
     const bot: BotConfig = {
       id: `bot_${randomUUID().slice(0, 8)}`,
       name: input.name.trim(),
@@ -1516,6 +1584,10 @@ export class BotManager {
       ...(input.avatarShape ? { avatarShape: input.avatarShape } : {}),
       createdAtMs: now,
       updatedAtMs: now,
+      ...(owner ? { ownerAccount: owner } : {}),
+      ...(input.frontierLead ? { frontierLead: input.frontierLead } : {}),
+      ...(input.frontierRunCapUsd !== undefined ? { frontierRunCapUsd: input.frontierRunCapUsd } : {}),
+      ...(input.frontierDailyCapUsd !== undefined ? { frontierDailyCapUsd: input.frontierDailyCapUsd } : {}),
     };
     bot.nextRunAtMs = this.nextFor(bot);
     // A bot with a job starts on it right away; nobody has to press anything.
@@ -1542,7 +1614,8 @@ export class BotManager {
     }
     if (!/^bot_w[0-9a-f]{12}$/.test(input.id)) throw new BotError("Bad bot id");
     if (this.bots.length >= MAX_BOTS) throw new BotError(`At most ${MAX_BOTS} bots on one computer`, 409);
-    const { id, requestId, requestedBy, suggestedFolder, mode, ...fields } = input;
+    // The frontier lead is never set from the web.
+    const { id, requestId, requestedBy, suggestedFolder, mode, frontierLead: _fl, frontierRunCapUsd: _fr, frontierDailyCapUsd: _fd, ...fields } = input;
     this.validate({ ...fields, projectRoot: undefined });
     const now = this.now();
     const repository = fields.repository?.trim() || undefined;
@@ -1571,6 +1644,8 @@ export class BotManager {
       ...(fields.avatarShape ? { avatarShape: fields.avatarShape } : {}),
       createdAtMs: now,
       updatedAtMs: now,
+      // The relay checked that the account asking is the one signed in here.
+      ownerAccount: requestedBy,
       setup: {
         source: "web",
         requestId,
@@ -1623,16 +1698,35 @@ export class BotManager {
     return this.view(bot);
   }
 
-  update(id: string, patch: BotPatch): BotView {
+  update(id: string, patch: BotPatch, source: BotChangeSource = {}): BotView {
     const bot = this.find(id);
     this.validate(patch);
+    if (FRONTIER_FIELDS.some((k) => patch[k] !== undefined) && !source.desktop) throw new BotError("The frontier lead is changed in the EdgeCoder app on this computer.", 403);
+    // Turning the frontier lead on (or to another model): only the owner, signed in here, for a bot nobody else can start.
+    if (patch.frontierLead && patch.frontierLead !== bot.frontierLead) {
+      const triggersAfter = patch.triggers !== undefined ? patch.triggers : bot.triggers;
+      if (triggersAfter.length) throw new BotError(GITHUB_TRIGGER_REFUSAL, 409);
+      if (!source.account) throw new BotError("Sign in to EdgeCoder on this computer to let a bot use your frontier key.", 409);
+      if (bot.ownerAccount && bot.ownerAccount !== source.account) throw new BotError(`${bot.name} belongs to another account, so it can't use your frontier key.`, 403);
+    }
     // A folder set from this computer's form (the web can't send one: bot-remote.ts) is the confirmation.
     if (bot.setup && patch.projectRoot !== undefined) {
       const { projectRoot, ...rest } = patch;
       this.setupFolder(id, { kind: "path", path: projectRoot }, { allowAuto: patch.mode === "auto" });
-      return Object.keys(rest).length ? this.update(id, rest) : this.view(bot);
+      return Object.keys(rest).length ? this.update(id, rest, source) : this.view(bot);
     }
-    const { memory, repository, triggers, ...fields } = patch;
+    const { memory, repository, triggers, frontierLead, ...fields } = patch;
+    let notice: string | undefined;
+    if (frontierLead !== undefined) {
+      if (frontierLead) {
+        bot.frontierLead = frontierLead;
+        // Bots made before owners were recorded: the owner confirms it's theirs here.
+        if (!bot.ownerAccount && source.account) bot.ownerAccount = source.account;
+      } else {
+        bot.frontierLead = null;
+        delete bot.frontierApprovedUntilMs;
+      }
+    }
     // The mode and the older autoApproveEdits switch stay in step.
     const modeBefore = botMode(bot);
     if (fields.mode !== undefined) fields.autoApproveEdits = fields.mode === "auto-edits" || fields.mode === "auto";
@@ -1672,10 +1766,19 @@ export class BotManager {
         if (old && old.kind === t.kind && old.label === t.label && old.scope === t.scope && cur[t.id]) kept[t.id] = cur[t.id];
       }
       this.cursors[id] = kept;
+      if (bot.frontierLead && bot.triggers.length) {
+        // A GitHub trigger lets others start it: the key is off until the triggers are gone and the owner turns it on again.
+        const name = frontierLeadName(bot.frontierLead);
+        bot.frontierLead = null;
+        delete bot.frontierApprovedUntilMs;
+        notice = `${name} lead turned off: GitHub triggers let other people start ${bot.name}, so it can't use your key. Remove the triggers and turn it on again to use it.`;
+        this.note(id, notice);
+      }
     }
     if (fields.mode !== undefined && fields.mode !== modeBefore) {
-      // Calls waiting for an answer that the new mode runs without asking go ahead now.
+      // Calls waiting for an answer that the new mode runs without asking go ahead now (never a frontier ask).
       for (const p of [...(this.active.get(id)?.pending.values() ?? [])]) {
+        if (p.frontier) continue;
         if (this.decide(id, p.tool as ToolName, p.args).action === "run") p.finish(true);
       }
     }
@@ -1702,7 +1805,7 @@ export class BotManager {
     this.save();
     if (repoChanged && bot.repository) void this.syncRepository(id);
     if (auto.due) this.kick();
-    return this.view(bot);
+    return { ...this.view(bot), ...(notice ? { notice } : {}) };
   }
 
   async delete(id: string): Promise<void> {
@@ -1789,6 +1892,7 @@ export class BotManager {
       ...(hold === "budget" || hold === "run_cap" ? { held: hold } : {}),
       ...(bot.auto?.stuck && !bot.enabled ? { stuck: { ...bot.auto.stuck } } : {}),
       ...(bot.setup ? { setup: { ...bot.setup } } : {}),
+      ...(this.deps.frontierSpentToday && (bot.frontierLead || bot.ownerAccount) ? { frontierSpentTodayUsd: Number((this.deps.frontierSpentToday(bot.id) || 0).toFixed(4)) } : {}),
       triggerStatus: Object.fromEntries(
         bot.triggers.map((t) => {
           const c = cursors[t.id] ?? {};
@@ -1946,6 +2050,7 @@ export class BotManager {
       }
     } else if (event.type === "usage") {
       act.run.cSats = Number((act.run.cSats + (Number.isFinite(event.cSats) ? event.cSats : 0)).toFixed(6));
+      if (typeof event.usd === "number" && Number.isFinite(event.usd)) act.run.frontierUsd = Number(((act.run.frontierUsd ?? 0) + event.usd).toFixed(6));
       if (event.where) act.run.where = event.where;
       const bot = this.bots.find((b) => b.id === id);
       if (bot && this.overBudget(bot) && !act.cancelReason) {
@@ -2044,6 +2149,13 @@ export class BotManager {
         act.activity = `Needs approval: ${tool}`;
         this.save();
       });
+    const frontier: BotFrontierHooks = {
+      ask: (a) => this.askFrontier(id, act, a),
+      dayApproved: () => {
+        const live = this.bots.find((b) => b.id === id);
+        return !!live?.frontierApprovedUntilMs && live.frontierApprovedUntilMs > this.now();
+      },
+    };
     let error: string | undefined;
     try {
       // Work in an up-to-date checkout: clone it the first time, fetch and fast-forward after that
@@ -2077,6 +2189,7 @@ export class BotManager {
           const cap = (this.bots.find((b) => b.id === id) ?? bot).budgetCSatsPerDay;
           return cap == null ? null : Math.max(0, cap - this.spentToday(id));
         },
+        frontier,
       });
     } catch (err) {
       error = (err as Error).message ?? String(err);
@@ -2238,7 +2351,8 @@ export class BotManager {
   approve(id: string, callId: string, approved: boolean, always = false): boolean {
     const bot = this.find(id);
     const p = this.active.get(id)?.pending.get(callId);
-    if (!p) return false;
+    // A frontier ask is answered only by its owner (answerFrontier).
+    if (!p || p.frontier) return false;
     if (approved && always) {
       // "Always allow" keeps the command's rule for the bot's project (never a refused or always-ask command).
       const root = botWorkRoot(bot);
@@ -2246,6 +2360,69 @@ export class BotManager {
       if (rule) this.permissions.addRule(root, rule);
     }
     p.finish(approved);
+    return true;
+  }
+
+  /**
+   * Asks the owner in the bot's chat whether this run may use their frontier key (bot-frontier.ts).
+   * The ask is a pending item like a tool approval (status "Needs approval" on the desktop, the
+   * web and the phone), never in the IDE's shared approvals map. Unanswered after 30 minutes:
+   * "timeout" (the run goes on on its own compute). The run waits while it asks.
+   */
+  private askFrontier(id: string, act: ActiveRun, a: FrontierAsk): Promise<FrontierAnswer> {
+    return new Promise<FrontierAnswer>((resolve) => {
+      if (act.cancelReason) return resolve("cancelled");
+      const callId = `fr_${randomUUID().slice(0, 8)}`;
+      const question = frontierAskQuestion(a);
+      let settled = false;
+      const done = (answer: FrontierAnswer) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        act.pending.delete(callId);
+        act.run.status = act.pending.size > 0 ? "needs_approval" : "running";
+        const said: Record<FrontierAnswer, string> = {
+          run: `You approved ${a.name} for this run`,
+          day: `You approved ${a.name} for every run today`,
+          decline: `You declined ${a.name}`,
+          timeout: `No answer about ${a.name} in 30 minutes: this run goes on without it`,
+          cancelled: "",
+        };
+        if (said[answer]) this.note(id, said[answer]);
+        this.save();
+        resolve(answer);
+      };
+      const timer = setTimeout(() => done("timeout"), FRONTIER_ASK_TIMEOUT_MS);
+      timer.unref?.();
+      act.pending.set(callId, {
+        callId,
+        tool: FRONTIER_ASK_TOOL,
+        args: { model: a.model, name: a.name, capUsd: a.capUsd, why: a.why, question, note: question },
+        finish: (approved, how) => done(how === "timeout" ? "timeout" : how === "cancelled" ? "cancelled" : approved ? "run" : "decline"),
+        frontier: (choice) => {
+          if (choice === "day") {
+            const live = this.bots.find((b) => b.id === id);
+            if (live) live.frontierApprovedUntilMs = nextLocalMidnight(this.now());
+          }
+          done(choice);
+        },
+      });
+      act.run.status = "needs_approval";
+      act.activity = `Needs your OK: use ${a.name}`;
+      this.save();
+    });
+  }
+
+  /**
+   * The owner's answer to a frontier ask (desktop or web): approve this run, approve for today, or
+   * decline. Only the bot's owner account may answer. False: no such ask (answered, or the run ended).
+   */
+  answerFrontier(id: string, callId: string, choice: FrontierChoice, account: string | null | undefined): boolean {
+    const bot = this.find(id);
+    const p = this.active.get(id)?.pending.get(callId);
+    if (!p?.frontier) return false;
+    if (!account || !bot.ownerAccount || account !== bot.ownerAccount) throw new BotError(`Only ${bot.name}'s owner can answer this.`, 403);
+    p.frontier(choice);
     return true;
   }
 
@@ -2271,7 +2448,7 @@ export class BotManager {
 const COMPUTE_STATUS = /^(Auto|Compute): /;
 
 /** A bot's model calls, and the switch to the next model in the ranking (see AgentLoopDeps.escalate). */
-export type BotChatFn = ChatFn & { escalate?: () => boolean };
+export type BotChatFn = ChatFn & { escalate?: () => boolean; summarize?: (text: string) => Promise<string | null> };
 
 /**
  * "Auto → qwen3.5:9b on this computer (tools needed; local deepseek-r1:14b has no tool support)",
@@ -2393,6 +2570,8 @@ export function agentBotRunner(d: {
     await runAgentLoop({
       chat,
       ...(chat.escalate ? { escalate: chat.escalate } : {}),
+      // Led by the owner's frontier key: compaction summaries run on the bot's own compute (the worker).
+      ...(chat.summarize ? { summarize: chat.summarize } : {}),
       systemPrompt: (format) => [basePrompt(format), ctx.systemAddition, webTools.length ? webSystemNote() : ""].filter(Boolean).join("\n\n"),
       messages: ctx.messages,
       // Web grounding for a bot allowed to search, on a message the owner wrote (a schedule's or
@@ -2454,6 +2633,10 @@ const botFields = {
   color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
   avatarShape: z.enum(BOT_AVATAR_SHAPES),
   repository: z.string().trim().max(500),
+  // The frontier lead (desktop app only: bot-remote.ts refuses these from the web).
+  frontierLead: z.string().trim().min(1).max(200).nullable(),
+  frontierRunCapUsd: z.number().positive().max(1_000),
+  frontierDailyCapUsd: z.number().positive().max(1_000),
   triggers: z
     .array(
       z.object({
@@ -2474,7 +2657,21 @@ const patchSchema = z.object({ ...botFields, memory: z.string().max(MAX_MEMORY_B
 export const botPatchSchema = patchSchema;
 const idParams = z.object({ id: z.string().min(1).max(100) });
 
-export function registerBotRoutes(app: FastifyInstance, bots: BotManager): void {
+export interface BotRouteDeps {
+  /** The EdgeCoder account signed in on this computer (stamped as a new bot's owner; checked for the frontier lead). */
+  account?: () => Promise<string | null>;
+  /** The frontier model ids the signed-in account has a key for here (FrontierAccess.modelIds). */
+  frontierModels?: () => Promise<string[]>;
+}
+
+export function registerBotRoutes(app: FastifyInstance, bots: BotManager, deps: BotRouteDeps = {}): void {
+  const account = async () => (deps.account ? await deps.account().catch(() => null) : null);
+  /** Turning the frontier lead on needs a key for that model, for the account signed in here. */
+  const checkKey = async (lead: string | null | undefined) => {
+    if (!lead || !deps.frontierModels) return;
+    const ids = await deps.frontierModels().catch(() => [] as string[]);
+    if (!ids.includes(lead)) throw new BotError("No key for that model for your account on this computer. Add one in Settings → Frontier models.", 409);
+  };
   const handle = async (reply: { status: (n: number) => { send: (b: unknown) => unknown } }, fn: () => unknown) => {
     try {
       return await fn();
@@ -2485,9 +2682,23 @@ export function registerBotRoutes(app: FastifyInstance, bots: BotManager): void 
     }
   };
   app.get("/v1/ide/bots", async () => ({ bots: bots.list() }));
-  app.post("/v1/ide/bots", (req, reply) => handle(reply, () => ({ bot: bots.create(createSchema.parse(req.body ?? {})) })));
+  app.post("/v1/ide/bots", (req, reply) =>
+    handle(reply, async () => {
+      const input = createSchema.parse(req.body ?? {});
+      await checkKey(input.frontierLead);
+      return { bot: bots.create(input, { desktop: true, account: await account() }) };
+    }),
+  );
   app.get("/v1/ide/bots/:id", (req, reply) => handle(reply, () => ({ bot: bots.get(idParams.parse(req.params).id), memory: bots.memory(idParams.parse(req.params).id) })));
-  app.patch("/v1/ide/bots/:id", (req, reply) => handle(reply, () => ({ bot: bots.update(idParams.parse(req.params).id, patchSchema.parse(req.body ?? {})) })));
+  app.patch("/v1/ide/bots/:id", (req, reply) =>
+    handle(reply, async () => {
+      const id = idParams.parse(req.params).id;
+      const patch = patchSchema.parse(req.body ?? {});
+      if (patch.frontierLead && patch.frontierLead !== bots.get(id).frontierLead) await checkKey(patch.frontierLead);
+      const { notice, ...bot } = bots.update(id, patch, { desktop: true, account: await account() });
+      return { bot, ...(notice ? { notice } : {}) };
+    }),
+  );
   app.delete("/v1/ide/bots/:id", (req, reply) =>
     handle(reply, async () => {
       await bots.delete(idParams.parse(req.params).id);
@@ -2544,6 +2755,15 @@ export function registerBotRoutes(app: FastifyInstance, bots: BotManager): void 
       const id = idParams.parse(req.params).id;
       const { callId, approved, always } = z.object({ callId: z.string().min(1).max(100), approved: z.boolean(), always: z.boolean().default(false) }).parse(req.body ?? {});
       if (!bots.approve(id, callId, approved, always)) return reply.status(404).send({ error: "No pending approval with that id" });
+      return { ok: true, bot: bots.get(id) };
+    }),
+  );
+  // The owner's answer to "Use Claude for this run?" (approve this run, for today, or decline).
+  app.post("/v1/ide/bots/:id/frontier", (req, reply) =>
+    handle(reply, async () => {
+      const id = idParams.parse(req.params).id;
+      const { callId, choice } = z.object({ callId: z.string().min(1).max(100), choice: z.enum(["run", "day", "decline"]) }).parse(req.body ?? {});
+      if (!bots.answerFrontier(id, callId, choice, await account())) return reply.status(404).send({ error: "That question was already answered or the run ended." });
       return { ok: true, bot: bots.get(id) };
     }),
   );

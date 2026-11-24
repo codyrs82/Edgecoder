@@ -12,14 +12,19 @@
  *   - the request is that account's own: the requester (a remote client's authenticated account;
  *     this computer's own clients act for the account signed in here) and, for a session, the
  *     session's owner are that same account.
- * Anything else is refused; a session falls back to its worker model with a note. The network,
- * bots and other accounts' requests never reach a frontier backend.
+ * Anything else is refused; a session falls back to its worker model with a note. The network and
+ * other accounts' requests never reach a frontier backend.
+ *
+ * Bots (forBot, bot-frontier.ts): a desktop bot uses its owner's key only when every way it can be
+ * started comes from the owner (no GitHub triggers, a run the owner can start: a message, "Check
+ * now", its schedule, check-ins, its own start and follow-ups), the account signed in here is the
+ * bot's owner and the key's account, its caps have room, and the owner approved the use.
  */
 
-import { ANTHROPIC_MODELS, frontierDisplayName, frontierModelId, parseFrontierModelId } from "../../inference-api/frontier-models.js";
+import { ANTHROPIC_MODELS, formatUsd, frontierDisplayName, frontierModelId, parseFrontierModelId } from "../../inference-api/frontier-models.js";
 import { FrontierKeyError, type FrontierKeyStore, type FrontierProvider } from "../../inference-api/frontier-keys.js";
 import { frontierBackend, testFrontierKey, withSpendControls, type FrontierTarget } from "../../inference-api/frontier.js";
-import type { FrontierSpend } from "../../inference-api/frontier-usage.js";
+import type { Caps, FrontierSpend } from "../../inference-api/frontier-usage.js";
 import { complexityWeightsFromEnv, estimateComplexity } from "../../inference-api/job-complexity.js";
 import { ChatBackendError, type ChatBackend } from "../../inference-api/types.js";
 import { backendChat, type ChatFn } from "./agent-loop.js";
@@ -52,8 +57,50 @@ export interface FrontierRequest {
   sessionKey: string;
   onWarn?: (message: string) => void;
   onCost?: (usd: number, totals: { sessionUsd: number; dayUsd: number }) => void;
+  /** Caps for this request instead of the settings' session and daily caps (bots: no session cap, the daily cap). */
+  caps?: () => Caps;
 }
 
+/** What starts a run that only the bot's owner can start (never "github": anyone on GitHub can). */
+export const BOT_FRONTIER_TRIGGERS: readonly string[] = ["message", "manual", "schedule", "heartbeat", "start", "follow_up"];
+/** The frontier lead a bot gets when its switch is turned on without naming one. */
+export const DEFAULT_BOT_FRONTIER_LEAD = "frontier/anthropic/claude-opus-5-5";
+/** USD a bot's run may spend on the key before it asks again. */
+export const DEFAULT_BOT_FRONTIER_RUN_CAP_USD = 2;
+/** USD a bot may spend on the key a day (local date), within the key's own daily cap. */
+export const DEFAULT_BOT_FRONTIER_DAILY_CAP_USD = 5;
+
+/** The spend key a bot's frontier calls are logged under. */
+export const botSpendKey = (botId: string) => `bot:${botId}`;
+
+/** "Claude" for an Anthropic id, else the provider's name ("openai"). */
+export function frontierLeadName(id: string): string {
+  const p = parseFrontierModelId(id);
+  if (!p) return "Frontier";
+  return p.provider === "anthropic" ? "Claude" : p.provider;
+}
+
+export interface BotFrontierCheck {
+  botId: string;
+  /** The account signed in when the bot was made (or when its owner turned the switch on here). */
+  ownerAccount?: string;
+  /** What started this run. */
+  trigger: string;
+  /** The bot's GitHub triggers, enabled or not. */
+  githubTriggers: number;
+  /** The frontier model id it would use. */
+  model: string;
+  /** Spent on the key in this run since the owner last approved, and the run cap. */
+  runSpentUsd: number;
+  runCapUsd: number;
+  /** The bot's own daily cap (USD). */
+  dailyCapUsd: number;
+}
+
+export type BotFrontierRefusal = "trigger" | "github_trigger" | "not_signed_in" | "no_owner" | "other_account" | "no_key" | "bad_id" | "bot_daily_cap" | "daily_cap";
+export type BotFrontierVerdict =
+  | { ok: true; runCapReached: boolean }
+  | { ok: false; reason: BotFrontierRefusal; note: string };
 export type FrontierResolution =
   | { ok: true; backend: ChatBackend; label: string; provider: FrontierProvider; model: string }
   | { ok: false; status: number; message: string; reason: "not_signed_in" | "other_account" | "no_key" | "bad_id" };
@@ -117,6 +164,7 @@ export class FrontierAccess {
     }
     const settings = this.d.store.settings();
     const store = this.d.store;
+    const caps = req.caps ?? (() => this.d.store.settings());
     const backend = frontierBackend({
       provider,
       model: parsed.model,
@@ -142,11 +190,37 @@ export class FrontierAccess {
         spend: this.d.spend,
         sessionKey: req.sessionKey,
         model: `${provider.id}/${parsed.model}`,
-        caps: () => this.d.store.settings(),
+        caps,
         onWarn: req.onWarn,
         onCost: req.onCost,
       }),
     };
+  }
+
+  /**
+   * May a bot run use its owner's key now? In order: what started the run (never GitHub), no GitHub
+   * triggers on the bot, the account signed in here is the bot's owner and owns the key, and the
+   * caps (the bot's daily cap, then the key's daily cap) have room. The run cap is reported, not
+   * refused: reaching it asks the owner again (bot-frontier.ts). Approval is asked after this.
+   */
+  async forBot(c: BotFrontierCheck): Promise<BotFrontierVerdict> {
+    const name = frontierLeadName(c.model);
+    const off = (reason: BotFrontierRefusal, why: string): BotFrontierVerdict => ({ ok: false, reason, note: `${name} lead off: ${why}` });
+    const parsed = parseFrontierModelId(c.model);
+    if (!parsed) return off("bad_id", `${c.model} isn't a frontier model id`);
+    if (!BOT_FRONTIER_TRIGGERS.includes(c.trigger)) return off("trigger", c.trigger === "github" ? "GitHub trigger" : `${c.trigger} run`);
+    if (c.githubTriggers > 0) return off("github_trigger", "the bot has GitHub triggers");
+    const account = await this.d.account().catch(() => null);
+    if (!account) return off("not_signed_in", "nobody is signed in on this computer");
+    if (!c.ownerAccount) return off("no_owner", "turn the switch on again in the bot's settings to confirm it's yours");
+    if (c.ownerAccount !== account) return off("other_account", "the bot belongs to another account");
+    if (!this.d.store.usable(parsed.provider, account)) return off("no_key", `no ${parsed.provider} key for your account on this computer`);
+    const botToday = this.d.spend.todayFor(botSpendKey(c.botId));
+    if (botToday >= c.dailyCapUsd) return off("bot_daily_cap", `the bot's daily cap is reached (${formatUsd(botToday)} of ${formatUsd(c.dailyCapUsd)})`);
+    const settings = this.d.store.settings();
+    const dayUsd = this.d.spend.totals().dayUsd;
+    if (settings.dailyCapUsd !== null && dayUsd >= settings.dailyCapUsd) return off("daily_cap", `your daily cap is reached (${formatUsd(dayUsd)} of ${formatUsd(settings.dailyCapUsd)})`);
+    return { ok: true, runCapReached: c.runSpentUsd >= c.runCapUsd };
   }
 
   /** Test a key without storing it: the provider's model list. */

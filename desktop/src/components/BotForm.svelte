@@ -2,13 +2,15 @@
   import "../styles/settings-page.css";
   import Dialog from "./ui/Dialog.svelte";
   import Select from "./ui/Select.svelte";
-  import { createBot, updateBot, getBot, botErrorText, computeOverview, type ComputeOverview } from "../lib/api";
+  import { createBot, updateBot, getBot, botErrorText, computeOverview, getFrontierStatus, type ComputeOverview } from "../lib/api";
+  import { frontierName } from "../lib/compute-choice";
   import { availabilityLine, classAvailability, modelsInClass, unavailableTitle, unavailableWarning, type ClassAvailability } from "../lib/compute-availability";
   import { RESTARTING_TEXT, localServiceRestarting } from "../lib/local-service";
   import ComputePicker from "./ComputePicker.svelte";
   import BotAvatar from "./BotAvatar.svelte";
   import { AVATAR_COLORS, AVATAR_SHAPES, AVATAR_SHAPE_LABELS, colorFromName, shapeFor, type AvatarShape } from "../lib/bot-avatar";
   import {
+    DEFAULT_BOT_FRONTIER_DAILY_CAP_USD, DEFAULT_BOT_FRONTIER_LEAD, DEFAULT_BOT_FRONTIER_RUN_CAP_USD,
     BOT_TOOL_GROUPS, CI_SCOPE_OPTIONS, COMPUTE_POLICY_OPTIONS, DEFAULT_COMPUTE, DEFAULT_HEARTBEAT_MINUTES, DEFAULT_MAX_RUNS_PER_DAY, HEARTBEAT_OPTIONS, SCHEDULE_PRESETS, TRIGGER_KIND_OPTIONS, botCompute, computeChoiceOf, computeFromChoice, groupsOf, networkModelId, toolsFor,
     type Bot, type BotTriggerConfig, type ComputeChoice, type TriggerKind,
   } from "../lib/bots";
@@ -91,6 +93,21 @@
   function pickNetworkModel(id: string | undefined) {
     networkModel = id === undefined ? undefined : networkModelId(id);
   }
+  // Your frontier key as its lead (only when your account has a key here; docs/frontier-keys.md).
+  let frontierModels = $state<string[]>([]);
+  $effect(() => {
+    getFrontierStatus().then((s) => (frontierModels = s.models ?? [])).catch(() => (frontierModels = []));
+  });
+  let frontierOn = $state(!!initial?.frontierLead);
+  let frontierModel = $state(initial?.frontierLead ?? DEFAULT_BOT_FRONTIER_LEAD);
+  // The switch's model: the bot's own, else Claude Opus 5.5, else the first model your key has.
+  const leadModel = $derived(frontierModels.includes(frontierModel) ? frontierModel : frontierModels.includes(DEFAULT_BOT_FRONTIER_LEAD) ? DEFAULT_BOT_FRONTIER_LEAD : frontierModels[0] ?? frontierModel);
+  let runCapText = $state(String(initial?.frontierRunCapUsd ?? DEFAULT_BOT_FRONTIER_RUN_CAP_USD));
+  let dailyCapText = $state(String(initial?.frontierDailyCapUsd ?? DEFAULT_BOT_FRONTIER_DAILY_CAP_USD));
+  /** Shown when your account has a key here, or this bot has the lead on already (so it can be turned off). */
+  const showFrontier = $derived(frontierModels.length > 0 || !!initial?.frontierLead);
+  /** GitHub triggers let other people start it: no frontier key then. */
+  const frontierBlocked = $derived(triggers.length > 0);
   // The avatar: follows the name until you pick a color or shape.
   let pickedColor = $state<string | null>(initial?.color ?? null);
   let pickedShape = $state<AvatarShape | null>((initial?.avatarShape as AvatarShape | undefined) ?? null);
@@ -144,7 +161,24 @@
       error = "GitHub triggers need a repository (owner/repo).";
       return;
     }
+    let frontier: { frontierLead?: string | null; frontierRunCapUsd?: number; frontierDailyCapUsd?: number } = {};
+    if (frontierOn && showFrontier) {
+      if (frontierBlocked) {
+        error = "A bot with GitHub triggers can't use your frontier key: anyone could start it. Remove the triggers or turn the frontier lead off.";
+        return;
+      }
+      const runCap = Number(runCapText);
+      const dailyCap = Number(dailyCapText);
+      if (!(runCap > 0 && runCap <= 1000) || !(dailyCap > 0 && dailyCap <= 1000)) {
+        error = "The frontier caps must be dollar amounts above $0 (at most $1,000).";
+        return;
+      }
+      frontier = { frontierLead: leadModel, frontierRunCapUsd: runCap, frontierDailyCapUsd: dailyCap };
+    } else if (initial?.frontierLead) {
+      frontier = { frontierLead: null };
+    }
     const input = {
+      ...frontier,
       name: name.trim(),
       role: role.trim(),
       instructions,
@@ -345,6 +379,35 @@
         </label>
       </div>
     </div>
+
+    {#if showFrontier}
+      <div class="sp-group" data-testid="bot-frontier">
+        <div class="sp-group-title">Your frontier key</div>
+        <div class="sp-card">
+          <div class="sp-row">
+            <span class="sp-text">
+              <span class="sp-title">Lead with {frontierName(leadModel)} (your key)</span>
+              <span class="sp-desc">
+                {frontierBlocked
+                  ? "Off while it has GitHub triggers: anyone who opens a pull request or issue could start it. Bots use your key only when only you can start them."
+                  : "It asks you in its chat before each run that would use your key (approve this run, approve for today, or decline), and stops at the caps below. Its compute above does the rest. The provider bills you."}
+              </span>
+            </span>
+            <button type="button" class="sp-switch" role="switch" aria-checked={frontierOn} aria-label="Lead with your frontier key" disabled={!frontierOn && (frontierBlocked || frontierModels.length === 0)} onclick={() => (frontierOn = !frontierOn)}></button>
+          </div>
+          {#if frontierOn && !frontierBlocked}
+            <label class="sp-row">
+              <span class="sp-text"><span class="sp-title">Per run</span><span class="sp-desc">USD a run may spend on your key before it asks again.</span></span>
+              <input type="number" min="0.01" max="1000" step="any" bind:value={runCapText} class="bf-num" aria-label="Frontier cap per run (USD)" />
+            </label>
+            <label class="sp-row">
+              <span class="sp-text"><span class="sp-title">Per day</span><span class="sp-desc">USD a day for this bot, within your key's own daily cap.</span></span>
+              <input type="number" min="0.01" max="1000" step="any" bind:value={dailyCapText} class="bf-num" aria-label="Frontier cap per day (USD)" />
+            </label>
+          {/if}
+        </div>
+      </div>
+    {/if}
 
     <div class="sp-group">
       <div class="sp-group-title">What it may do</div>

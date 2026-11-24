@@ -70,7 +70,8 @@ import { chooseLeadModel, estimateTokens, parseLeadCandidates } from "./lead-mod
 import { registerSessionRoutes } from "./session-routes.js";
 import { hostedBackend, hostedConfigFromEnv } from "./hosted-backend.js";
 import { GitHubDeviceLogins } from "./github-device.js";
-import { FrontierAccess, autoWithFrontier, frontierChat, type FrontierAccountState, type FrontierRequest } from "./frontier-access.js";
+import { FrontierAccess, autoWithFrontier, botSpendKey, frontierChat, type FrontierAccountState, type FrontierRequest } from "./frontier-access.js";
+import { botFrontierChat } from "./bot-frontier.js";
 import { FrontierKeyError, FrontierKeyStore } from "../../inference-api/frontier-keys.js";
 import { FrontierSpend } from "../../inference-api/frontier-usage.js";
 import { frontierContextWindow, isFrontierModelId } from "../../inference-api/frontier-models.js";
@@ -228,7 +229,21 @@ const webCall: WebToolCall | null = networkDeps
  */
 let accountCache: { at: number; id: string | null; state: FrontierAccountState } | null = null;
 let lastAccount: string | undefined;
+/** The account last confirmed signed in, and when (ms); cleared by a definitive "signed out". */
+let confirmed: { id: string; at: number } | null = null;
+/**
+ * How long an "unknown" answer (coordinator slow, agent reconnecting, the machine busy compiling)
+ * keeps the last confirmed account. Only a definitive "signed out" ends it sooner, so a blip
+ * mid-turn no longer drops a frontier lead with "Sign in to EdgeCoder".
+ */
+const ACCOUNT_UNKNOWN_GRACE_MS = 10 * 60_000;
 async function machineAccount(): Promise<string | null> {
+  const id = await checkMachineAccount();
+  if (id) return id;
+  if (accountCache?.state === "unknown" && confirmed && Date.now() - confirmed.at < ACCOUNT_UNKNOWN_GRACE_MS) return confirmed.id;
+  return null;
+}
+async function checkMachineAccount(): Promise<string | null> {
   // A definitive answer is kept a minute (signed in) or 10 s (signed out); an unknown one (the
   // agent isn't connected yet, the coordinator is slow) is retried after 3 s.
   if (accountCache && Date.now() - accountCache.at < (accountCache.state === "signed_in" ? 60_000 : accountCache.state === "signed_out" ? 10_000 : 3_000)) return accountCache.id;
@@ -252,7 +267,12 @@ async function machineAccount(): Promise<string | null> {
     state = "unknown";
   }
   accountCache = { at: Date.now(), id, state };
-  if (id) lastAccount = id;
+  if (id) {
+    lastAccount = id;
+    confirmed = { id, at: Date.now() };
+  } else if (state === "signed_out") {
+    confirmed = null;
+  }
   return id;
 }
 const machineAccountState = (): FrontierAccountState => accountCache?.state ?? "unknown";
@@ -1089,9 +1109,23 @@ const bots = new BotManager({
   // Bots paused out of cSats resume after a top-up.
   balance: async () => (networkDeps ? (await computeOverview(networkDeps).catch(() => null))?.account?.cSats : undefined),
   log: (msg, extra) => app.log.warn({ extra }, msg),
+  // Its owner's frontier key spend today (the bot view's "$0.42 today" next to cSats).
+  frontierSpentToday: (id) => frontier.spend.todayFor(botSpendKey(id)),
   runner: agentBotRunner({
-    // Each step on the bot's compute policy (Local first by default), within its budget and your balance.
-    chat: (ctx) => botComputeChat(ctx, (policy, plan, onRoute) => autoHere(onRoute, `bot ${ctx.bot.name}`, policy, plan)),
+    // Each step on the bot's compute policy (Auto by default), within its budget and your balance.
+    // A bot only its owner can start may lead with the owner's frontier key, after the owner
+    // approves (bot-frontier.ts); its compute policy is then the worker.
+    chat: (ctx) =>
+      botFrontierChat({
+        bot: ctx.bot,
+        trigger: ctx.trigger ?? "manual",
+        access: frontier,
+        worker: botComputeChat(ctx, (policy, plan, onRoute) => autoHere(onRoute, `bot ${ctx.bot.name}`, policy, plan)),
+        hooks: ctx.frontier,
+        sendEvent: ctx.sendEvent,
+        signal: ctx.signal,
+        isCancelled: ctx.isCancelled,
+      }),
     // Runs work in the bot's repository checkout when it has one, else in its home folder.
     execute: (bot) => {
       const executor = new ToolExecutor(botWorkRoot(bot), null, undefined, { branchPrefix: botBranchPrefix(bot.name), github: githubCreds });
@@ -1123,7 +1157,7 @@ const bots = new BotManager({
         : null,
   }),
 });
-registerBotRoutes(app, bots);
+registerBotRoutes(app, bots, { account: machineAccount, frontierModels: () => frontier.modelIds() });
 // Bots on the web: this machine's agent publishes their summaries and relays the owner's commands (bot-remote.ts).
 registerRemoteBotRoutes(app, bots, { account: machineAccount });
 app.addHook("onReady", async () => {
