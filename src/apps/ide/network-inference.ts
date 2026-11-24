@@ -265,9 +265,11 @@ export function drainRetryWaitMs(json: Record<string, unknown>): number {
   const ms = typeof json.retryAfterMs === "number" && Number.isFinite(json.retryAfterMs) ? json.retryAfterMs : 2_000;
   return Math.min(DRAIN_RETRY_MAX_WAIT_MS, Math.max(250, ms));
 }
-async function submitRetryingDrain(d: NetworkDeps, body: unknown, signal?: AbortSignal, sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))) {
+async function submitRetryingDrain(d: NetworkDeps, body: unknown, signal?: AbortSignal, sleep = (ms: number) => new Promise((r) => setTimeout(r, ms)), followPeer = false) {
   const first = await call(d, "POST", "/inference/submit", body, signal);
   if (!isDrainingAnswer(first) || signal?.aborted) return first;
+  // The caller will go to the named peer instead of waiting for this one.
+  if (followPeer && typeof first.json.coordinatorUrl === "string") return first;
   await sleep(drainRetryWaitMs(first.json));
   return call(d, "POST", "/inference/submit", body, signal);
 }
@@ -317,7 +319,9 @@ async function* streamSubmitted(
     ...(req.clientRegion ? { clientRegion: req.clientRegion.slice(0, 40) } : {}),
     ...(req.coordinatorChoice ? { coordinatorChoice: req.coordinatorChoice } : {}),
   };
-  const sub = await submitRetryingDrain(d, submitBody, signal);
+  // A draining coordinator that names a peer: a caller that allows redirects goes there now (#524 test 6).
+  const sub = await submitRetryingDrain(d, submitBody, signal, undefined, Boolean(req.routeRedirect));
+  if (req.routeRedirect && isDrainingAnswer(sub) && typeof sub.json.coordinatorUrl === "string") throw new RouteElsewhereError(sub.json.coordinatorUrl, undefined);
   if (sub.status !== 200) {
     const err = String(sub.json.error ?? `HTTP ${sub.status}`);
     // A named model with no free slot there, free on a peer (#526): resubmit there (the caller decides).
@@ -368,6 +372,8 @@ async function* streamSubmitted(
       // model "auto": the busy machines are the ones running the model best fit chose for it.
       if (r.status === 503 && r.json.error === "no_capacity") {
         ended = true;
+        // Refunded by a coordinator that is going down before any agent took it: resubmit to its peer.
+        if (r.json.reason === "draining" && req.routeRedirect && typeof r.json.coordinatorUrl === "string") throw new RouteElsewhereError(r.json.coordinatorUrl, undefined);
         throw noCapacityError(r.json, req.model === "auto" ? routedModel ?? "the model best fit chose" : req.model);
       }
       if (r.status !== 200) throw new NetworkInferenceError(`Network stream failed: ${String(r.json.error ?? r.status)}`, 502);

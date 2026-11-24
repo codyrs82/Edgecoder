@@ -107,10 +107,11 @@ describe("draining for a restart", () => {
     const { taskId, r } = await submit("qwen3.5:9b"); // nobody holds it (still in the grace: accepted)
     expect(r.statusCode, r.body).toBe(200);
     expect(creditEngine.balance(requester.peerId)).toBeLessThan(before);
-    expect(await inference.cancelUnclaimedForDrain()).toBeGreaterThanOrEqual(1);
+    expect(await inference.cancelUnclaimedForDrain("https://coordinator-eu.example")).toBeGreaterThanOrEqual(1);
     expect(creditEngine.balance(requester.peerId)).toBeCloseTo(before, 6);
     const read = await post("/inference/stream", { taskId, subtaskId: r.json().subtaskId, waitMs: 0 }, requester);
     expect(read.statusCode).toBe(503);
-    expect(read.json().error).toBe("no_capacity");
+    // Says so, and names the peer: the portal resubmits there at once.
+    expect(read.json()).toMatchObject({ error: "no_capacity", reason: "draining", coordinatorUrl: "https://coordinator-eu.example", retryAfterSec: 1 });
   });
 });

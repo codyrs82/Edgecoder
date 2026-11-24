@@ -66,4 +66,34 @@ describe("named-model redirect", () => {
     await collect(networkBackend(deps(US), { model: "m:7b", computeClass: "any", target: "mine", routeRedirect: true }));
     expect(calls.find((c) => c.path === "/inference/submit")!.body.routeRedirect).toBeUndefined();
   });
+
+  it("#524: a draining coordinator naming a peer sends the call there at once (no wait, nothing charged there)", async () => {
+    const { calls, deps } = fakeCoordinators((url, body) =>
+      url === US ? { status: 503, json: { error: "coordinator_draining", retryable: true, retryAfterMs: 3_000, charged: false, coordinatorUrl: EU } } : { status: 200, json: { taskId: body.taskId, subtaskId: "s-1" } },
+    );
+    const t0 = Date.now();
+    const out = await collect(backend(deps, (u) => u === EU));
+    expect(out.map((p) => p.delta).filter(Boolean).join("")).toBe("hello");
+    expect(Date.now() - t0).toBeLessThan(2_000);
+    expect(calls.filter((c) => c.path === "/inference/submit").map((c) => c.url)).toEqual([US, EU]);
+  });
+
+  it("#524: a call refunded by a coordinator going down before any agent took it is resubmitted to the peer", async () => {
+    const calls: Call[] = [];
+    const deps = (url: string): NetworkDeps => ({
+      forwarder: "", token: () => "", agentId: "acct-1",
+      transport: async (_m, path, body) => {
+        calls.push({ url, path, body: body as Record<string, unknown> });
+        if (path === "/inference/submit") return { status: 200, json: { taskId: (body as { taskId: string }).taskId, subtaskId: "s-1" } };
+        if (url === US && path === "/inference/stream") return { status: 503, json: { error: "no_capacity", reason: "draining", coordinatorUrl: EU, retryAfterSec: 1 } };
+        return { status: 200, json: { chunks: ["hello"], next: 1, done: true } };
+      },
+    });
+    const out = await collect(backend(deps, (u) => u === EU));
+    expect(out.map((p) => p.delta).filter(Boolean).join("")).toBe("hello");
+    expect(calls.filter((c) => c.path === "/inference/submit").map((c) => c.url)).toEqual([US, EU]);
+    // Not cancelled: it ended (refunded) on the coordinator that went down.
+    expect(calls.some((c) => c.path === "/inference/cancel")).toBe(false);
+  });
 });
+

@@ -52,7 +52,8 @@ export const TASK_BILLING_SWEEP_MIN_AGE_MS = 30 * 60_000;
  * older than this that no task here holds is a call lost to a restart or an overlap (#524).
  */
 export const INFERENCE_BILLING_SWEEP_MIN_AGE_MS = 8 * 60_000;
-export const TASK_BILLING_SWEEP_INTERVAL_MS = 5 * 60_000;
+/** One query under a try-lock: every minute, so an orphaned model-call reserve settles within ~9 minutes, every time. */
+export const TASK_BILLING_SWEEP_INTERVAL_MS = 60_000;
 
 export async function sweepStaleTaskBilling(d: {
   store: BillingSweepStore;

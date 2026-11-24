@@ -21,7 +21,7 @@ import { noteAgentSocketClosed, noteAgentSocketOpen } from "../agent-liveness.js
 import { setModelControlTransport } from "../model-control.js";
 import { RttTracker, startRttPings, type PingableSocket } from "../../agent-rtt.js";
 import { MESH_WS_BIND_MAX_SKEW_MS, decideMeshWsBind, meshWsSenderMatches } from "../../../mesh/ws-auth.js";
-import type { DrainSocket } from "../drain.js";
+import { coordinatorDrain, type DrainSocket } from "../drain.js";
 import {
   MESH_WS_CLOSE_NOT_REGISTERED,
   MESH_WS_HELD_BIND_TTL_MS,
@@ -561,7 +561,9 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
     fingerprint: IDENTITY_FINGERPRINT,
     trustEntry: `${identity.peerId}:${IDENTITY_FINGERPRINT}`,
     legacyFingerprints: legacyPemFingerprints(identity.publicKeyPem),
-    responseSigning: RESPONSE_SIGNING_VERSION
+    responseSigning: RESPONSE_SIGNING_VERSION,
+    // Stopping for a deploy or restart: agents' steering picks another coordinator meanwhile (#524).
+    ...(coordinatorDrain.draining ? { draining: true } : {})
   }));
   // Agents send a fresh nonce; the answer is signed with this coordinator's identity key, so a
   // replayed /identity does not pass their pinned-key check.

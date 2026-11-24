@@ -173,3 +173,14 @@ describe("coordinator drain", () => {
     expect(exits).toBe(1);
   });
 });
+
+describe("the portal's capacity probe while draining (#524 test 6)", () => {
+  it("/inference/models answers 503 draining (with a peer), so the portal stops sending calls here within seconds", () => {
+    const drain = new CoordinatorDrain();
+    drain.peerUrl = () => "https://coordinator.example.com";
+    expect(drain.gate("GET", "/inference/models")).toBeNull();
+    void drain.run({ drainMs: 60_000, busy: () => ({ claims: 1, accruals: 0 }), settle: async () => 0, sockets: () => [], frameFor: () => "", close: async () => undefined, exit: () => undefined, log: { info: () => undefined, warn: () => undefined }, sleep: () => new Promise(() => undefined) });
+    const a = drain.gate("GET", "/inference/models?x=1");
+    expect(a).toMatchObject({ status: 503, body: { error: "coordinator_draining", coordinatorUrl: "https://coordinator.example.com" } });
+  });
+});

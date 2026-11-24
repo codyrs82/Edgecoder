@@ -299,7 +299,7 @@ export function installCoordinatorShutdown(opts: { exit?: (code: number) => void
       },
       settle: async () => {
         // #524: calls nobody claimed cannot run here any more: refunded now, before exit.
-        const cancelled = await cancelUnclaimedForDrain().catch(() => 0);
+        const cancelled = await cancelUnclaimedForDrain(coordinatorDrain.peerUrl()).catch(() => 0);
         if (cancelled > 0) app.log.warn({ cancelled }, "drain_unclaimed_inference_refunded");
         let settled = 0;
         for (const taskId of [...taskBilling.keys()]) {

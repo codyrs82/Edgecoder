@@ -144,7 +144,8 @@ export function judgeInferenceReply(
 export const INFERENCE_CLAIM_TIMEOUT_MS = CC.INFERENCE_CLAIM_TIMEOUT_MS;
 export const NO_CAPACITY_RETRY_AFTER_SEC = 15;
 const NO_CAPACITY_KEEP_MS = 10 * 60_000;
-const noCapacity = new Map<string, { accountId: string; subtaskId: string; atMs: number; reason: "busy" | "none_in_class"; computeClass?: string; model?: string }>();
+type NoCapacityReason = "busy" | "none_in_class" | "draining";
+const noCapacity = new Map<string, { accountId: string; subtaskId: string; atMs: number; reason: NoCapacityReason; computeClass?: string; model?: string; coordinatorUrl?: string }>();
 
 /** Granted classes of the online, unblacklisted agents that hold `model` (one entry per agent), free of a reservation unless `includeReserved`. */
 function holderClasses(model: string, nowMs = Date.now(), includeReserved = false): ComputeClassId[] {
@@ -186,7 +187,7 @@ export function inferenceCancelledForCapacity(taskId: string): boolean {
  * holds it: that call runs and is settled as usual. Removal from the queue is synchronous and only
  * of an unclaimed item, so a claim racing the cancel either got it first or finds nothing.
  */
-export async function cancelUnclaimedInference(taskId: string, subtaskId: string): Promise<boolean> {
+export async function cancelUnclaimedInference(taskId: string, subtaskId: string, draining?: { peerUrl: string | null }): Promise<boolean> {
   const timer = claimDeadlines.get(subtaskId);
   if (timer) clearTimeout(timer);
   claimDeadlines.delete(subtaskId);
@@ -195,7 +196,9 @@ export async function cancelUnclaimedInference(taskId: string, subtaskId: string
   // Say which: every agent of the class was busy, or (now) no agent of the class holds the model.
   const usage = usagePending.get(taskId);
   const gap = usage?.model && usage.computeClass ? capacityGap(usage.computeClass as ComputeClassId, holderClasses(usage.model)) : "busy";
-  noCapacity.set(taskId, { accountId, subtaskId, atMs: Date.now(), reason: gap === "none_in_class" ? "none_in_class" : "busy", ...(usage?.computeClass ? { computeClass: usage.computeClass } : {}), ...(usage?.model ? { model: usage.model } : {}) });
+  // Draining: the caller is told so, with a peer to send the call to (it was refunded here in full).
+  const reason: NoCapacityReason = draining ? "draining" : gap === "none_in_class" ? "none_in_class" : "busy";
+  noCapacity.set(taskId, { accountId, subtaskId, atMs: Date.now(), reason, ...(usage?.computeClass ? { computeClass: usage.computeClass } : {}), ...(usage?.model ? { model: usage.model } : {}), ...(draining?.peerUrl ? { coordinatorUrl: draining.peerUrl } : {}) });
   // A failed result from the coordinator (like a lease failure), so the subtask is settled everywhere.
   queue.complete({ subtaskId, taskId, agentId: "coordinator", ok: false, output: "", error: "no_capacity", durationMs: 0 });
   inferenceStreams.finish(subtaskId, "no_capacity");
@@ -234,14 +237,17 @@ function knownModel(model: string): boolean {
  * Drain (a deploy or restart): calls nobody claimed cannot run here any more. They are taken off the
  * queue and refunded in full now (the requester's stream answers no_capacity with a short
  * Retry-After, and its client sends the call again), rather than waiting for the next instance to
- * restore and refund them. Claimed calls are left to finish (their billing is restored if not).
+ * restore and refund them. The stream answer says "draining" and names a peer coordinator, so a
+ * client that allows redirects (the portal) sends the call there at once (test 6, 2026-11-24: calls
+ * queued on a stopping EU seed came back as "busy" 503s while the US seed had room). Claimed calls
+ * are left to finish (their billing is restored if not).
  */
-export async function cancelUnclaimedForDrain(): Promise<number> {
+export async function cancelUnclaimedForDrain(peerUrl: string | null = null): Promise<number> {
   let n = 0;
   for (const c of queue.inferenceCalls()) {
     if (c.claimedBy) continue;
     const st = queue.getSubtask(c.subtaskId);
-    if (st && (await cancelUnclaimedInference(st.taskId, st.id).catch(() => false))) n++;
+    if (st && (await cancelUnclaimedInference(st.taskId, st.id, { peerUrl }).catch(() => false))) n++;
   }
   return n;
 }
@@ -374,19 +380,24 @@ export function waitingBound(holderIds: string[], nowMs = Date.now()): number {
   return Math.max(16, Math.min(512, slots * WAITING_PER_SLOT));
 }
 
-function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: string) => { send: (b: unknown) => unknown } } }, c?: { reason: "busy" | "none_in_class"; computeClass?: string; model?: string }) {
+function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: string) => { send: (b: unknown) => unknown } } }, c?: { reason: NoCapacityReason; computeClass?: string; model?: string; coordinatorUrl?: string }) {
   const noneInClass = c?.reason === "none_in_class";
+  const draining = c?.reason === "draining";
+  const retryAfterSec = draining ? 1 : NO_CAPACITY_RETRY_AFTER_SEC;
   return reply
     .code(503)
-    .header("retry-after", String(NO_CAPACITY_RETRY_AFTER_SEC))
+    .header("retry-after", String(retryAfterSec))
     .send({
       error: "no_capacity",
       reason: c?.reason ?? "busy",
       ...(c?.computeClass ? { computeClass: c.computeClass } : {}),
-      message: noneInClass
+      ...(c?.coordinatorUrl ? { coordinatorUrl: c.coordinatorUrl } : {}),
+      message: draining
+        ? "This coordinator is restarting; the call had not started and nothing was charged. Send it again (to the coordinator named, if any)."
+        : noneInClass
         ? `No ${c?.computeClass} machine runs ${c?.model ?? "this model"} right now; nothing was charged.`
         : `No agent could take this call within ${Math.round(INFERENCE_CLAIM_TIMEOUT_MS / 1000)} s; nothing was charged.`,
-      retryAfterSec: NO_CAPACITY_RETRY_AFTER_SEC,
+      retryAfterSec,
     });
 }
 
