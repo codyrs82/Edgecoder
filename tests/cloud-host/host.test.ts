@@ -1,0 +1,136 @@
+import { afterEach, describe, expect, it } from "vitest";
+import { CloudHost, cloudHostConfigFromEnv, spendAlert, type CloudHostConfig } from "../../src/cloud-host/host.js";
+import { cloudHostEnv } from "../../src/cloud-host/main.js";
+import { classifyHardware } from "../../src/economy/compute-classes.js";
+import type { SpendEvent, SpendState } from "../../src/cloud-host/spend-guard.js";
+import type { OllamaPiece } from "../../src/inference-api/ollama.js";
+import { startFakeProvider, streamReply, type FakeProvider } from "./fake-provider.js";
+
+/*
+ * The cloud host: what it advertises and claims, how a call runs and is counted against the spend
+ * guard, and how a refused key or a cap pauses it ("cloud_capacity_paused").
+ */
+
+const KEY = "fw-secret-key-abcdef0123456789";
+let fake: FakeProvider | undefined;
+afterEach(async () => {
+  await fake?.close();
+  fake = undefined;
+});
+
+function host(url: string, opts: { guard?: Partial<CloudHostConfig["guard"]>; events?: SpendEvent[]; store?: { s?: SpendState } } = {}) {
+  const cfg = cloudHostConfigFromEnv({ CLOUD_HOST_API_KEY: KEY, CLOUD_HOST_BASE_URL: url, CLOUD_HOST_MAX_RETRIES: 0 });
+  cfg.guard = { ...cfg.guard, ...opts.guard };
+  const store = opts.store ?? {};
+  return new CloudHost(cfg, { notify: (e) => opts.events?.push(e), store: { load: () => store.s, save: (s) => (store.s = structuredClone(s)) }, backend: { sleep: async () => undefined } });
+}
+
+async function run(h: CloudHost, model: string, maxTokens = 50): Promise<OllamaPiece[]> {
+  const out: OllamaPiece[] = [];
+  for await (const p of h.chat(model, { messages: [{ role: "user", content: "write a haiku" }], maxTokens }, new AbortController().signal, 10_000)) out.push(p);
+  return out;
+}
+
+describe("cloud host configuration", () => {
+  it("defaults to Fireworks and every Fireworks catalog model, with the spend caps' defaults", () => {
+    const cfg = cloudHostConfigFromEnv({ CLOUD_HOST_API_KEY: KEY });
+    expect(cfg).toMatchObject({ provider: "fireworks", baseUrl: "https://api.fireworks.ai/inference/v1", models: ["glm-5.3", "deepseek-v4.1-flash"], maxSlots: 16, guard: { dailyCapUsd: 200, monthlyCapUsd: 2_000, alertAtPct: 0.8, authFailureLimit: 3 } });
+  });
+
+  it("needs the key, known models and a well-formed model map", () => {
+    expect(() => cloudHostConfigFromEnv({})).toThrow(/CLOUD_HOST_API_KEY is required/);
+    expect(() => cloudHostConfigFromEnv({ CLOUD_HOST_API_KEY: KEY, CLOUD_HOST_MODELS: "glm-5.3,gpt-9" })).toThrow(/gpt-9 is not a Fireworks model/);
+    expect(cloudHostConfigFromEnv({ CLOUD_HOST_API_KEY: KEY, CLOUD_HOST_MODELS: "deepseek-v4.1-flash" }).models).toEqual(["deepseek-v4.1-flash"]);
+    expect(cloudHostConfigFromEnv({ CLOUD_HOST_API_KEY: KEY, CLOUD_HOST_MODEL_MAP: "glm-5.3=accounts/fireworks/models/glm-5p3-0818" }).modelMap).toEqual({ "glm-5.3": "accounts/fireworks/models/glm-5p3-0818" });
+    expect(() => cloudHostConfigFromEnv({ CLOUD_HOST_API_KEY: KEY, CLOUD_HOST_MODEL_MAP: "nope" })).toThrow(/CLOUD_HOST_MODEL_MAP/);
+  });
+
+  it("the cloud-host role fills in an inference-only agent on the cloud engine", () => {
+    const env = cloudHostEnv({ CLOUD_HOST_API_KEY: KEY, AGENT_BENCHMARK: "1" });
+    expect(env).toMatchObject({ EDGECODER_ENGINE: "cloud", SANDBOX_MODE: "none", AGENT_INFERENCE_ONLY: "1", LOCAL_MODEL_PROVIDER: "ollama-local", AGENT_BENCHMARK: "1" });
+    expect(cloudHostEnv({ EDGECODER_ENGINE: "vllm" }).EDGECODER_ENGINE).toBe("cloud");
+  });
+});
+
+describe("what a cloud host advertises", () => {
+  it("the enabled cloud model ids, a 1M window, and a hardware claim the coordinator classifies as the cloud class", () => {
+    const h = host("http://127.0.0.1:9/v1");
+    expect(h.advertisedModels()).toEqual(["glm-5.3", "deepseek-v4.1-flash"]);
+    expect(h.contextWindow()).toBe(1_000_000);
+    const profile = h.hardwareProfile();
+    expect(profile.cloud).toEqual({ provider: "fireworks" });
+    expect(classifyHardware(profile as never)).toMatchObject({ computeClass: "cloud", tier: "cloud", creditsPerSecond: 1 });
+  });
+});
+
+describe("a call on the cloud host", () => {
+  it("is forwarded under the provider's model id and counted at the provider's price", async () => {
+    fake = await startFakeProvider([streamReply({ text: ["old pond"], usage: { prompt_tokens: 1_000_000, completion_tokens: 100_000, cached: 500_000 } })]);
+    const h = host(fake.url);
+    const pieces = await run(h, "glm-5.3");
+    expect(pieces.at(-1)).toMatchObject({ promptTokens: 1_000_000, outputTokens: 100_000, cachedPromptTokens: 500_000 });
+    expect(fake.requests[0].body.model).toBe("accounts/fireworks/models/glm-5p3");
+    // 500k × 1.40 + 500k × 0.26 + 100k × 4.40, per million: 0.70 + 0.13 + 0.44
+    expect(h.guard.status().dayUsd).toBeCloseTo(1.27, 9);
+  });
+
+  it("a reply cut off before the counts is still counted (estimated from the text)", async () => {
+    fake = await startFakeProvider([{ stream: [{ choices: [{ index: 0, delta: { content: "x".repeat(300) } }] }, { error: { message: "reset" } }] }]);
+    const h = host(fake.url);
+    await expect(run(h, "deepseek-v4.1-flash")).rejects.toThrow(/reset/);
+    expect(h.guard.status().dayUsd).toBeGreaterThan(0);
+  });
+
+  it("refuses a model it does not serve and a call longer than the model's window", async () => {
+    const h = host("http://127.0.0.1:9/v1");
+    await expect(run(h, "qwen3-coder:30b")).rejects.toThrow(/^model_unavailable/);
+    await expect(run(h, "glm-5.3", 2_000_000)).rejects.toMatchObject({ contextOverflow: true });
+  });
+
+  it("three refused keys pause it with an alert; it advertises nothing and refuses calls until the key works", async () => {
+    fake = await startFakeProvider([{ status: 401, body: { error: { message: "bad key" } } }, { status: 401, body: {} }, { status: 401, body: {} }, { status: 200, body: { data: [] } }]);
+    const events: SpendEvent[] = [];
+    const h = host(fake.url, { events });
+    for (let i = 0; i < 3; i++) await expect(run(h, "glm-5.3")).rejects.toThrow(/^cloud_provider_auth/);
+    expect(events).toEqual([{ kind: "paused", reason: "auth", failures: 3 }]);
+    expect(h.ready()).toBe(false);
+    expect(h.advertisedModels()).toEqual([]);
+    expect(h.advertisedChanged()).toBe(true);
+    await expect(run(h, "glm-5.3")).rejects.toThrow(/^cloud_capacity_paused/);
+    expect(fake.requests).toHaveLength(3); // the paused call never reached the provider
+    await h.maybeProbeKey(Date.now()); // GET /models answers 200
+    expect(h.ready()).toBe(true);
+    expect(events.at(-1)).toEqual({ kind: "resumed", reason: "auth" });
+    expect(h.advertisedModels()).toEqual(["glm-5.3", "deepseek-v4.1-flash"]);
+  });
+
+  it("at the daily cap it pauses (alert at 80 %, then 100 %) and refuses with cloud_capacity_paused", async () => {
+    // 1M prompt + 1M out on DeepSeek = 1.50 USD per call against a 2 USD cap.
+    fake = await startFakeProvider([streamReply({ text: ["a"], usage: { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 } })]);
+    const events: SpendEvent[] = [];
+    const h = host(fake.url, { events, guard: { dailyCapUsd: 2 } });
+    await run(h, "deepseek-v4.1-flash");
+    expect(events).toEqual([]);
+    await run(h, "deepseek-v4.1-flash"); // 3.00 USD: past 80 % and 100 %
+    expect(events.map((e) => e.kind)).toEqual(["warn", "paused"]);
+    expect(h.advertisedModels()).toEqual([]);
+    await expect(run(h, "deepseek-v4.1-flash")).rejects.toThrow(/^cloud_capacity_paused: the daily cloud spend cap is reached; resumes at /);
+  });
+});
+
+describe("ops alerts", () => {
+  it("say what happened and never carry the key", () => {
+    const ctx = { agentId: "cloud-fw-1", provider: "Fireworks", reporter: "cloud host cloud-fw-1", portalUrl: "https://edgecoder.io", nowMs: 1 };
+    const warn = spendAlert({ kind: "warn", scope: "day", spentUsd: 161.5, capUsd: 200 }, ctx);
+    expect(warn.alert.title).toBe("Cloud host cloud-fw-1: daily Fireworks spend at 81 % of its cap");
+    expect(warn.alert.severity).toBe("warning");
+    const paused = spendAlert({ kind: "paused", reason: "monthly_cap", spentUsd: 2_001, capUsd: 2_000, resumesAtMs: Date.UTC(2026, 11, 1) }, ctx);
+    expect(paused.alert).toMatchObject({ severity: "critical", title: "Cloud host cloud-fw-1 paused: monthly Fireworks spend cap reached" });
+    expect(paused.alert.summary).toContain("2026-12-01T00:00:00.000Z");
+    const auth = spendAlert({ kind: "paused", reason: "auth", failures: 3 }, ctx);
+    expect(auth.alert.summary).toContain("CLOUD_HOST_API_KEY");
+    const resumed = spendAlert({ kind: "resumed", reason: "auth" }, ctx);
+    expect(resumed.kind).toBe("resolved");
+    for (const n of [warn, paused, auth, resumed]) expect(JSON.stringify(n)).not.toContain(KEY);
+  });
+});

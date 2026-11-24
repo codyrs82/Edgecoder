@@ -13,6 +13,10 @@
  *   gpu     consumer GPUs
  *   gpu.dc  datacenter GPUs (kept separate as a reliability / SLA tier)
  *
+ * and a fifth, `cloud`: cloud hosts, which forward calls to a hosted model API with the platform's
+ * key (src/cloud-host/). Only the coordinator's cloud-host allowlist registers in it, and its model
+ * calls are priced at the provider's cost plus margin (src/economy/cloud-pricing.ts).
+ *
  * Throughput is expressed by weights, not by more markets: within a class, faster hardware mints
  * more credits per measured second (`creditsPerSecond` of its tier). The base tier of each class
  * has weight 1, and the class's reference USD/hour is the base tier's hour, so
@@ -32,17 +36,20 @@
  * tier ids now, and `normalizeComputeClass` maps any of them onto its class.
  */
 
-export type ComputeClassId = "cpu" | "apple" | "gpu" | "gpu.dc";
+export type ComputeClassId = "cpu" | "apple" | "gpu" | "gpu.dc" | "cloud";
 
-export const COMPUTE_CLASS_IDS: ComputeClassId[] = ["cpu", "apple", "gpu", "gpu.dc"];
+export const COMPUTE_CLASS_IDS: ComputeClassId[] = ["cpu", "apple", "gpu", "gpu.dc", "cloud"];
 
 /** The nine pre-2026-11 class ids. Never rewritten where they were signed or persisted. */
 export type LegacyComputeClassId = "cpu.std" | "cpu.hi" | "apple.m" | "apple.m.hi" | "gpu.c8" | "gpu.c16" | "gpu.c24" | "gpu.dc40" | "gpu.dc80";
 
 export const LEGACY_COMPUTE_CLASS_IDS: LegacyComputeClassId[] = ["cpu.std", "cpu.hi", "apple.m", "apple.m.hi", "gpu.c8", "gpu.c16", "gpu.c24", "gpu.dc40", "gpu.dc80"];
 
-/** Hardware tiers inside the classes. The legacy class ids name the tiers; gpu.c32 is new (> 24 GB consumer cards). */
-export type ComputeTierId = LegacyComputeClassId | "gpu.c32";
+/**
+ * Hardware tiers inside the classes. The legacy class ids name the tiers; gpu.c32 is new (> 24 GB
+ * consumer cards). `cloud` is the one tier of the cloud class (a cloud host: src/cloud-host/).
+ */
+export type ComputeTierId = LegacyComputeClassId | "gpu.c32" | "cloud";
 
 /**
  * The one legacy map. `creditsPerSecond` is the frozen divisor the old oracle used for that class
@@ -81,6 +88,12 @@ export interface HardwareProfile {
   benchmarkScore?: number;
   /** Profile came from env overrides (AGENT_GPU_*), not detection. Such claims are re-proven every session. */
   overridden?: boolean;
+  /**
+   * A cloud host (src/cloud-host/): its calls run on a hosted model API, not this machine. Classified
+   * as the `cloud` class, which the coordinator grants only to its cloud-host allowlist
+   * (CLOUD_HOST_OWNER_EMAILS); anyone else claiming it is refused at registration.
+   */
+  cloud?: { provider: string };
 }
 
 export interface ComputeTierSpec {
@@ -150,11 +163,24 @@ export const DEFAULT_COMPUTE_CLASSES: Record<ComputeClassId, ComputeClassSpec> =
       { id: "gpu.dc40", label: "≤ 48 GB (A6000 / L40 / A100-40)", creditsPerSecond: 1 },
       { id: "gpu.dc80", label: "> 48 GB (A100-80 / H100 / H200)", creditsPerSecond: 2.9 }
     ]
+  },
+  /**
+   * Cloud hosts: models served through a hosted API with the platform's key (src/cloud-host/).
+   * Their calls are priced per token at the provider's cost plus margin (economy/cloud-pricing.ts);
+   * this per-second reference only matters for a call that reports no token counts, which a cloud
+   * host always does. Set at the gpu.dc reference so a reserve for "any" class is unchanged.
+   */
+  cloud: {
+    id: "cloud",
+    label: "Cloud (hosted API)",
+    resourceClass: "gpu",
+    usdPerHourReference: 0.7,
+    tiers: [{ id: "cloud", label: "Hosted model API", creditsPerSecond: 1 }]
   }
 };
 
 /** The legacy (or tier) id that is the base tier of each class. */
-export const BASE_TIER: Record<ComputeClassId, ComputeTierId> = { cpu: "cpu.std", apple: "apple.m", gpu: "gpu.c8", "gpu.dc": "gpu.dc40" };
+export const BASE_TIER: Record<ComputeClassId, ComputeTierId> = { cpu: "cpu.std", apple: "apple.m", gpu: "gpu.c8", "gpu.dc": "gpu.dc40", cloud: "cloud" };
 
 const isCurrentId = (id: string): id is ComputeClassId => (COMPUTE_CLASS_IDS as string[]).includes(id);
 export const isLegacyComputeClassId = (id: string): id is LegacyComputeClassId => Object.prototype.hasOwnProperty.call(LEGACY_COMPUTE_CLASSES, id);
@@ -245,6 +271,8 @@ export function classifyHardware(hw: HardwareProfile | undefined, classes: Recor
   };
   if (!hw) return make("cpu.std");
   const memoryGb = gb(hw.ramGb);
+  // A cloud host claims the cloud class; the coordinator admits that claim only from its allowlist.
+  if (hw.cloud && typeof hw.cloud.provider === "string") return make("cloud", undefined, memoryGb);
   const gpu = hw.gpu;
   const vendor = (gpu?.vendor ?? "").toLowerCase();
   const isApple = hw.platform === "darwin" && (hw.arch === "arm64" || vendor === "apple");

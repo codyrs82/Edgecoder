@@ -67,6 +67,8 @@ Web search in chats (automatic, **Web: Auto**) and a bot's **Search the web** pe
 | `RATE_RECALIBRATION_MS` | `86400000` | How often the rate oracle recalibrates its per-class reference rates (ms; min 60000). |
 | `MARKET_DEFAULT_BID_PREMIUM_BPS` | `1000` | Default order-book bid premium over the oracle reference, in basis points. |
 | `NETWORK_FEE_BPS` | `500` | Network fee skimmed into the fee pool on each settled trade, in basis points. |
+| `CLOUD_MARGIN_PCT` | `30` | Margin over the provider's USD token price for calls on cloud models (src/economy/cloud-pricing.ts), in percent (0–1000). Never below the margin at which the host's share after `NETWORK_FEE_BPS` covers the provider's cost (about 5.3 % at 500 bps). |
+| `CLOUD_HOST_OWNER_EMAILS` | unset (none) | Comma-separated owner emails whose agents may register as cloud hosts (the `cloud` class) and serve cloud models. Anyone else's cloud-class registration is refused (`403 cloud_host_not_allowed`), and cloud model ids are dropped from every other agent's model list. The cloud host's account must also be an approved host. Set `CLOUD_MODELS_JSON` here too when the cloud host uses it (see "Cloud host"). |
 | `HOST_HEARTBEAT_MS` | `60000` | Interval at which a host reports its uptime/services heartbeat (ms; min 1000). |
 | `INFRA_HOST_REPORT_URLS` | _(unset)_ | Comma-separated coordinator URLs whose fee pool this host also reports to; each heartbeat is signed with `COORDINATOR_PRIVATE_KEY_PEM` and must come from a peer the receiver's mesh admitted. |
 | `INFRA_HOST_LIGHTNING_NODE_ID` | _(unset)_ | This host's Lightning node id (`lncli getinfo` → `identity_pubkey`); a remote coordinator attests the `lightning` service by a BOLT 8 handshake against it on port 9735. |
@@ -362,7 +364,7 @@ Validated by `workerConfigSchema` (`src/config/worker.ts`). Intervals are in ms.
 | `EDGECODER_STEERING` | on | `off`, `0` or `false` stops the worker following the signed coordinator registry. |
 | `EDGECODER_STEERING_INTERVAL_MS` | `600000` | Registry refresh interval (min 60000). |
 | `AGENT_PARALLEL_INFERENCE` | by memory and model size | Concurrent model calls, 1 to 16. Default: as many 8k-token contexts as fit next to `OLLAMA_MODEL` in 60% of RAM, at most 2 below 31 GB and 4 above (a 4 GB machine with a 1.5B model runs 2, 8 GB with a 7B model 1); never more than `OLLAMA_NUM_PARALLEL` when that is set. The coordinator hands an agent a model call only while it has a free slot. Other values fall back to the default. |
-| `EDGECODER_ENGINE` | `ollama` | Inference engine: `ollama`, `vllm` (datacenter GPUs) or `mlx` (Apple silicon). An unknown value stops the agent. See docs/inference-engines.md. |
+| `EDGECODER_ENGINE` | `ollama` | Inference engine: `ollama`, `vllm` (datacenter GPUs), `mlx` (Apple silicon) or `cloud` (a cloud host: hosted model API, see "Cloud host" below and docs/cloud-host.md). An unknown value stops the agent. See docs/inference-engines.md. |
 | `VLLM_URL` | `http://127.0.0.1:8000` | vLLM's OpenAI-compatible server (engine `vllm`). |
 | `VLLM_MODEL` | — | Model id vLLM serves (e.g. `QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ`); mapped to the network's catalog name. |
 | `VLLM_MAX_SLOTS` | from the KV cache | Concurrent model calls on vLLM (1–16); overrides `AGENT_PARALLEL_INFERENCE`. Default: KV-cache tokens ÷ half the context window. |
@@ -406,6 +408,27 @@ Validated by `workerConfigSchema` (`src/config/worker.ts`). Intervals are in ms.
 | `EDGECODER_LOG_DIR` | per platform | Directory for the worker's logs. |
 | `EDGECODER_DEV` | unset | `1` reports the `dev` distribution channel to the release-integrity check. |
 | `EDGECODER_RELEASE` | unset | `github` reports the `github` distribution channel. |
+
+## Cloud host (worker, `EDGECODER_ENGINE=cloud`)
+
+A cloud host is the agent serving models through a hosted API with the platform's key (`edgecoder cloud-host`; docs/cloud-host.md). Validated by `workerConfigSchema`. Alerts go to the channels of "Production alerting" below (`ALERT_EMAILS` with `RESEND_API_KEY` / `RESEND_FROM_EMAIL`, or `ALERT_WEBHOOK_URL`), set on the cloud host's app.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CLOUD_HOST_API_KEY` | required | The provider API key (a Fly secret). Sent only as the provider's bearer token; never logged or reported. |
+| `CLOUD_HOST_PROVIDER` | `fireworks` | Hosted model provider. Only `fireworks` today. |
+| `CLOUD_HOST_BASE_URL` | `https://api.fireworks.ai/inference/v1` | The provider's OpenAI-compatible base URL. |
+| `CLOUD_HOST_MODELS` | every catalog model of the provider | Comma-separated cloud model ids to serve (`glm-5.3,deepseek-v4.1-flash`). An id not in the cloud catalog stops the host. |
+| `CLOUD_HOST_MODEL_MAP` | catalog ids | Comma-separated `<model id>=<provider model id>` overrides, e.g. to pin a dated provider version. |
+| `CLOUD_HOST_MAX_SLOTS` | `16` | Calls at once (1–16). |
+| `CLOUD_HOST_MAX_RETRIES` | `3` | Retries of a provider 429 / 5xx / failed connection, with exponential backoff (Retry-After honoured), before anything streamed. |
+| `CLOUD_HOST_DAILY_CAP_USD` | `200` | Provider spend cap per UTC day. At 80 % an ops alert; at 100 % the host advertises nothing and refuses calls (`cloud_capacity_paused`) until the next day. |
+| `CLOUD_HOST_MONTHLY_CAP_USD` | `2000` | The same per UTC month. |
+| `CLOUD_HOST_ALERT_PCT` | `80` | Percent of a cap that sends the warning alert (1–100). |
+| `CLOUD_HOST_AUTH_FAILURES` | `3` | Provider 401 / 403 answers in a row that pause the host with a critical alert (a bad or revoked key). |
+| `CLOUD_HOST_AUTH_PROBE_MINUTES` | `15` | While paused for the key, minutes between key checks; a good answer resumes the host. |
+| `CLOUD_HOST_STATE_FILE` | `<config dir>/cloud-host-spend.json` | Where the day's and month's spend are kept across restarts. Put it on a volume. |
+| `CLOUD_MODELS_JSON` | unset (built-in list) | JSON array of cloud models layered over the built-in catalog by id (`id`, `providerModel`, `usdPerM` `{input, cachedInput, output}`, `contextWindow`, `paramsB`, `origin` `{vendor, country}`, `priceAsOf`). Read by the cloud host and the coordinators: set the same value on both. An unreadable value stops the service. |
 
 ## Model runtime: other settings
 

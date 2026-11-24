@@ -11,6 +11,7 @@ import { rewardAccountForAgent } from "../../../credits/store.js";
 import { pgStore } from "../../../db/store.js";
 import { classifyHardware } from "../../../economy/compute-classes.js";
 import { normalizeReportedModels } from "../../model-catalog.js";
+import { cloudHostAllowed, filterCloudModels } from "../cloud-hosts.js";
 import type { ChallengeResponse } from "../../benchmark.js";
 import { rawBodyOf } from "../../../security/request-signing.js";
 import {
@@ -53,6 +54,7 @@ import {
 import { extractSignedHeaders, verifyAgentRequest, hasMeshToken, hasPortalServiceToken, agentSignatureAtGate } from "../auth.js";
 import {
   rateOracleConfig,
+  CLOUD_HOST_OWNERS,
   hardwareVerifier,
   marketOrders,
   effectiveHardware,
@@ -148,13 +150,20 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
     if (blacklisted) {
       return reply.code(403).send({ error: "agent_blacklisted", reason: blacklisted.reason });
     }
+    // Cloud hosts (src/cloud-host/): the cloud class is the operator's to grant (CLOUD_HOST_OWNER_EMAILS).
+    const cloudHost = hardwareClass.computeClass === "cloud";
+    if (cloudHost && !cloudHostAllowed(CLOUD_HOST_OWNERS, activation.ownerEmail, activation.hostApproved ?? previous?.hostApproved)) {
+      app.log.warn({ agentId: body.agentId, ownerEmail: activation.ownerEmail ?? null }, "cloud_host_not_allowed");
+      return reply.code(403).send({ error: "cloud_host_not_allowed", reason: "this account is not on the coordinator's cloud-host allowlist (CLOUD_HOST_OWNER_EMAILS)" });
+    }
     queue.registerAgent(body.agentId, defaultPolicy, {
       os: body.os,
       version: body.version,
       mode: body.mode,
       localModelEnabled: true
     });
-    const reportedModels = normalizeReportedModels(body.installedModels);
+    // Cloud model ids only from a cloud host, and a cloud host serves nothing else (cloud-hosts.ts).
+    const reportedModels = filterCloudModels(normalizeReportedModels(body.installedModels), cloudHost);
     // Memory, loaded models and budget: admission control (memory-admission.ts). It can only narrow
     // what the agent is handed, so an unsigned report is as safe to keep as none.
     noteAgentMemory(body.agentId, body.memory);
@@ -166,9 +175,10 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       localModelProvider: body.localModelProvider,
       // What the agent reports it has installed (signed /register). Older agents don't say: the default
       // model is assumed for display, but an assumed catalog never makes them eligible for a named model (#54).
-      localModelCatalog: reportedModels.length ? reportedModels : body.localModelProvider === "ollama-local" ? [OLLAMA_MODEL] : ["edgecoder-default"],
-      modelsReported: reportedModels.length > 0,
-      ...(body.ownerModels !== undefined ? { ownerModels: normalizeReportedModels(body.ownerModels).filter((m) => !reportedModels.includes(m)) } : previous?.ownerModels ? { ownerModels: previous.ownerModels } : {}),
+      // A cloud host with nothing to serve (paused by its spend guard) holds nothing: no assumed default.
+      localModelCatalog: reportedModels.length || cloudHost ? reportedModels : body.localModelProvider === "ollama-local" ? [OLLAMA_MODEL] : ["edgecoder-default"],
+      modelsReported: reportedModels.length > 0 || cloudHost,
+      ...(body.ownerModels !== undefined ? { ownerModels: filterCloudModels(normalizeReportedModels(body.ownerModels), cloudHost).filter((m) => !reportedModels.includes(m)) } : previous?.ownerModels ? { ownerModels: previous.ownerModels } : {}),
       ...(body.activeModel || reportedModels.length ? { activeModel: body.activeModel ?? reportedModels[0] } : {}),
       ...(body.inferenceEngine && body.inferenceEngine !== "ollama" ? { inferenceEngine: body.inferenceEngine, ...(body.engineModel ? { engineModel: body.engineModel } : {}) } : {}),
       clientType: body.clientType,
@@ -378,8 +388,11 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
     // /register). Unsigned heartbeats (non-production only) can't change what the agent is routed.
     if (body.installedModels !== undefined && verified) {
       const existing = agentCapabilities.get(body.agentId);
-      const models = normalizeReportedModels(body.installedModels);
-      if (existing && models.length) {
+      // Cloud model ids only from a cloud host (cloud-hosts.ts); a cloud host's empty list is meant
+      // (its spend guard paused it) and clears what it serves.
+      const cloudHost = existing?.hardwareClass?.computeClass === "cloud";
+      const models = filterCloudModels(normalizeReportedModels(body.installedModels), cloudHost);
+      if (existing && (models.length || cloudHost)) {
         existing.localModelCatalog = models;
         existing.modelsReported = true;
         if (!existing.activeModel || !models.includes(existing.activeModel)) existing.activeModel = models[0];
@@ -388,7 +401,7 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
     // Owner-only models (kept off the network by the agent's memory budget): a signed heartbeat replaces them.
     if (body.ownerModels !== undefined && verified) {
       const existing = agentCapabilities.get(body.agentId);
-      if (existing) existing.ownerModels = normalizeReportedModels(body.ownerModels).filter((m) => !existing.localModelCatalog.includes(m));
+      if (existing) existing.ownerModels = filterCloudModels(normalizeReportedModels(body.ownerModels), existing.hardwareClass?.computeClass === "cloud").filter((m) => !existing.localModelCatalog.includes(m));
     }
     if (body.activeModel !== undefined) {
       const existing = agentCapabilities.get(body.agentId);

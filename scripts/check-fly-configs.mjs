@@ -4,7 +4,8 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const IGNORED = new Set([]);
+// Deployed by hand (docs/cloud-host.md): one machine, its own spend caps, so no workflow deploys it.
+export const IGNORED = new Set(["deploy/fly/fly.cloud-host.toml"]);
 const REF_RE = /(?:--config[ =]|config:\s*)["']?(deploy\/fly\/[\w.-]+\.toml)/g;
 
 export function checkFlyConfigs(root) {

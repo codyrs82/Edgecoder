@@ -676,7 +676,7 @@ export function placementOf(id: string): "local" | "network" | "mine" | "reserve
 }
 
 function bareModel(id: string): string {
-  if (id.startsWith("network/")) return id.slice(8).replace(/@(cpu|apple|gpu|gpu\.dc)$/, "");
+  if (id.startsWith("network/")) return id.slice(8).replace(/@(cpu|apple|gpu|gpu\.dc|cloud)$/, "");
   if (id.startsWith("mine/")) return id.slice(5);
   const r = /^reserved\/[^/]+\/(.+)$/.exec(id);
   if (r) return r[1];

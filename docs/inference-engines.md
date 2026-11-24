@@ -11,6 +11,9 @@ in the agent's env file:
 
 Nothing changes for an agent that does not set `EDGECODER_ENGINE`.
 
+A fourth value, `EDGECODER_ENGINE=cloud`, is not a local engine: it makes the agent a cloud host,
+which forwards calls to a hosted model API with the platform's key. See [cloud-host.md](cloud-host.md).
+
 ## When to use which
 
 - **Ollama** for anything that is not a dedicated GPU server: it is managed for you (install, pull,

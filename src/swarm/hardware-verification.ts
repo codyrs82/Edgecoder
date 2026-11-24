@@ -107,7 +107,9 @@ export const DEFAULT_TIER_MINIMUMS: Record<ComputeTierId, number> = {
   // ~300, which decode at ~90-160 effective). Was 300 until 2026-11-15, which no A16, A2, L4, T4 or
   // A4000 can reach, so they fell to the consumer tiers or to cpu. Still above CPU decode (~30-70).
   "gpu.dc40": 80,
-  "gpu.dc80": 900 // A100-80 / H100 / H200
+  "gpu.dc80": 900, // A100-80 / H100 / H200
+  // Nothing to measure: a cloud host is admitted by the coordinator's allowlist (CLOUD_HOST_OWNER_EMAILS).
+  cloud: 0
 };
 
 export interface HardwareVerificationConfig {
@@ -406,7 +408,7 @@ export function hardwareProfileKey(claimedTier: ComputeTierId, profile: Hardware
   return g?.count !== undefined && g.count > 1 ? `${key}|x${g.count}` : key;
 }
 
-const CLASS_RANK: Record<ComputeClassId, number> = { cpu: 0, apple: 1, gpu: 1, "gpu.dc": 2 };
+const CLASS_RANK: Record<ComputeClassId, number> = { cpu: 0, apple: 1, gpu: 1, "gpu.dc": 2, cloud: 2 };
 
 /** Order of grants along a demotion chain (gpu.dc > gpu > cpu, then tier weight). */
 function grantRank(classes: Record<ComputeClassId, ComputeClassSpec>, g: { computeClass: ComputeClassId; tier: ComputeTierId }): number {

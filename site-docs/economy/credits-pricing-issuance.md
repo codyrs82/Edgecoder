@@ -30,6 +30,11 @@ this page and that one disagree, that one is right.
 - **Model calls: per token, by model size.** A USD price per million input and output tokens for
   each model-size band, converted to sats at the live BTC price, with a power floor per compute
   class so a host never earns less than the electricity the seconds cost.
+- **Cloud models: per token, at cost plus margin.** Models a cloud host serves through a hosted API
+  (`glm-5.3`, `deepseek-v4.1-flash` on Fireworks; class `cloud`) are priced at the provider's USD
+  price per million input, cached-input and output tokens times `1 + CLOUD_MARGIN_PCT` (default
+  30 %), converted at the live BTC price, never below the provider's cost. See
+  [the cloud host doc](https://github.com/codyrs82/Edgecoder/blob/main/docs/cloud-host.md).
 - **Code jobs and reservations: per second, by compute class.** Four classes (`cpu`, `apple`,
   `gpu`, `gpu.dc`), each with one reference price recalibrated daily from public BTC quotes and a
   per-class USD/hour reference. Faster tiers inside a class (for example `gpu.c24`, `gpu.dc80`) earn

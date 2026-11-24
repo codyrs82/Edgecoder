@@ -42,7 +42,9 @@ const hardwareProfileSchema = z.object({
     })
     .optional(),
   benchmarkScore: z.number().min(0).optional(),
-  overridden: z.boolean().optional()
+  overridden: z.boolean().optional(),
+  // A cloud host (src/cloud-host/): admitted only from CLOUD_HOST_OWNER_EMAILS (routes/agents.ts).
+  cloud: z.object({ provider: z.string().min(1).max(32) }).optional()
 });
 
 /** The agent's self-benchmark (src/swarm/benchmark.ts). Plausibility evidence only; a malformed one is dropped, never a 400. */

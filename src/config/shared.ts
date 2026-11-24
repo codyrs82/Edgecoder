@@ -5,6 +5,7 @@ import { z } from "zod";
 import { envEnum, envEnumCi, envFlag, envInt, envJson, envNumber, envUrl } from "../common/config.js";
 import { previousUntilProblem } from "../common/token-rotation.js";
 import { allowedCidrsProblem } from "../common/admin-origin.js";
+import { parseCloudCatalog } from "../cloud-host/catalog.js";
 
 /*
  * #15: variables that more than one service reads, grouped by the library that reads them. A
@@ -354,4 +355,22 @@ export const adminOriginEnv = {
 export const webReplyEnv = {
   WEB_MAX_SEARCHES_PER_REPLY: envInt(3, { min: 0, max: 50 }),
   WEB_MAX_READS_PER_REPLY: envInt(4, { min: 0, max: 50 }),
+};
+
+/**
+ * Cloud models (src/cloud-host/catalog.ts): read by the coordinators (pricing, who may serve them)
+ * and by the cloud host (what it serves, what a call cost). Keep the same value on both.
+ */
+export const cloudModelsEnv = {
+  /** JSON array of cloud model entries layered over the built-in list by id; unset = built-in only. */
+  CLOUD_MODELS_JSON: z
+    .string()
+    .optional()
+    .superRefine((v, ctx) => {
+      try {
+        parseCloudCatalog(v);
+      } catch (err) {
+        ctx.addIssue({ code: "custom", message: err instanceof Error ? err.message : String(err) });
+      }
+    }),
 };

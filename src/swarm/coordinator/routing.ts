@@ -95,6 +95,9 @@ export function localAgentViews(nowMs = Date.now(), rttOf: (agentId: string) => 
   const out: AgentView[] = [];
   for (const [agentId, cap] of agentCapabilities) {
     if (activeBlacklistRecord(agentId) || cap.hostApproved === false || reservations.isHeld(agentId, nowMs)) continue;
+    // Cloud hosts (src/cloud-host/) are reached by naming a cloud model; best fit does not place
+    // jobs on them yet (each call spends the platform's provider budget; docs/cloud-host.md).
+    if (effectiveHardware(agentId, cap)?.computeClass === "cloud") continue;
     // Host memory (memory-admission.ts): only models it can load or has loaded, and no free slot
     // while it is under memory pressure or its circuit is open.
     const held = claims.get(agentId)?.inference ?? 0;

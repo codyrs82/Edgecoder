@@ -48,8 +48,12 @@ export const CLASS_HARDWARE: Record<ComputeClassId, string> = {
   cpu: "x86 / ARM cores, by core count and memory",
   apple: "M-series Macs, by unified memory",
   gpu: "Consumer cards, by VRAM",
-  "gpu.dc": "A6000 / L40 / A100 / H100, a separate reliability tier"
+  "gpu.dc": "A6000 / L40 / A100 / H100, a separate reliability tier",
+  cloud: "Hosted model APIs, priced per token at provider cost plus margin"
 };
+
+/** The classes with an hourly price on the public page: cloud is priced per token (economy/cloud-pricing.ts), not by the hour. */
+const HOURLY_CLASSES = () => Object.values(DEFAULT_COMPUTE_CLASSES).filter((spec) => spec.id !== "cloud");
 
 /** The four pairs shown in the hero ticker, in order. */
 export const HERO_CLASSES: ComputeClassId[] = ["cpu", "apple", "gpu", "gpu.dc"];
@@ -78,7 +82,7 @@ function tiersOf(id: ComputeClassId, usdPerHour: number, satsPerUnitHour: number
 export function referencePricing(): PublicPricing {
   return {
     mode: "reference",
-    classes: Object.values(DEFAULT_COMPUTE_CLASSES).map((spec) => ({
+    classes: HOURLY_CLASSES().map((spec) => ({
       id: spec.id,
       label: spec.label,
       hardware: CLASS_HARDWARE[spec.id],
@@ -94,7 +98,7 @@ export function referencePricing(): PublicPricing {
  * tier (cpu.std, apple.m, gpu.c8, gpu.dc40) has exactly the class's credit-hour, so it stands in.
  */
 export function pricingFromRateEpoch(epoch: RateEpochView): PublicPricing {
-  const classes: PublicClassPrice[] = Object.values(DEFAULT_COMPUTE_CLASSES).map((spec) => {
+  const classes: PublicClassPrice[] = HOURLY_CLASSES().map((spec) => {
     const rate = epoch.classRates[spec.id] ?? epoch.classRates[BASE_TIER[spec.id]];
     const usdPerHour = rate ? rate.usdPerHour : spec.usdPerHourReference;
     return {

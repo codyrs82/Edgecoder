@@ -271,7 +271,7 @@ export function parseModelId(id: string): { model: string; compute: ComputeSetti
     const rest = id.slice(8);
     const at = rest.lastIndexOf("@");
     const cls = at > 0 ? rest.slice(at + 1) : "";
-    return ["cpu", "apple", "gpu", "gpu.dc"].includes(cls)
+    return ["cpu", "apple", "gpu", "gpu.dc", "cloud"].includes(cls)
       ? { model: rest.slice(0, at), compute: { target: "network", computeClass: cls } }
       : { model: rest, compute: { target: "network", computeClass: "any" } };
   }

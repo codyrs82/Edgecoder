@@ -12,6 +12,7 @@ This index links the documents this wiki synthesizes.
 - [Public Mesh Operations](https://github.com/codyrs82/Edgecoder/blob/main/docs/public-mesh-operations.md)
 - [Agent and Coordinator Install](https://github.com/codyrs82/Edgecoder/blob/main/docs/agent-and-coordinator-install.md)
 - [Fly.io Bootstrap](https://github.com/codyrs82/Edgecoder/blob/main/docs/flyio-bootstrap.md)
+- [Cloud Host](https://github.com/codyrs82/Edgecoder/blob/main/docs/cloud-host.md)
 - [macOS Installer](https://github.com/codyrs82/Edgecoder/blob/main/docs/macos-installer.md)
 - [Cross-OS Validation](https://github.com/codyrs82/Edgecoder/blob/main/docs/cross-os-validation.md)
 - [iOS App Store Release](https://github.com/codyrs82/Edgecoder/blob/main/docs/ios-app-store-release.md)

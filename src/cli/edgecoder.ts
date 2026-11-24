@@ -5,6 +5,7 @@
 /*
  * One entry point, every role (docs/packages.md). `edgecoder <role>` or EDGE_RUNTIME_MODE=<role>:
  *   agent          compute agent (sells CPU/GPU seconds)            -> dist/swarm/worker-runner.js
+ *   cloud-host     the agent serving hosted-API models (docs/cloud-host.md) -> dist/cloud-host/main.js
  *   coordinator    coordinator only                                  -> dist/swarm/coordinator.js
  *   all-in-one     coordinator + inference + control plane + portal  -> dist/index.js
  *   portal         web portal only                                   -> dist/portal/server.js
@@ -19,6 +20,7 @@ import { fileURLToPath } from "node:url";
 
 export const ROLES = {
   agent: "../swarm/worker-runner.js",
+  "cloud-host": "../cloud-host/main.js",
   worker: "../swarm/worker-runner.js",
   coordinator: "../swarm/coordinator.js",
   "all-in-one": "../index.js",
