@@ -104,6 +104,23 @@ const peerSchema = z.object({
   signature: z.string().optional()
 });
 
+/** The fields `GET /mesh/peers` returns for a peer (what mesh-peer bootstrap and dashboards read). */
+export function publicPeerView(p: MeshPeerIdentity & { role?: string }): {
+  peerId: string;
+  publicKeyPem: string;
+  coordinatorUrl: string;
+  networkMode: MeshPeerIdentity["networkMode"];
+  role?: string;
+} {
+  return {
+    peerId: p.peerId,
+    publicKeyPem: p.publicKeyPem,
+    coordinatorUrl: p.coordinatorUrl,
+    networkMode: p.networkMode,
+    ...(p.role ? { role: p.role } : {})
+  };
+}
+
 const meshIngestSchema = z.object({
   id: z.string(),
   type: z.enum([
@@ -561,7 +578,8 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
     const r = answerLocalAttest(req.body, { adminToken: ADMIN_API_TOKEN, loopback: requestOrigin(req).loopback, nonces: localAttestNonces });
     return reply.code(r.status).send(r.body);
   });
-  app.get("/mesh/peers", async () => ({ peers: mesh.listPeers() }));
+  // Public identity fields only; registration credentials stay out of the listing.
+  app.get("/mesh/peers", async () => ({ peers: mesh.listPeers().map(publicPeerView) }));
 
   app.get("/network/registry", async (_req, reply) => {
     const doc = await registryMirror.get();
@@ -608,7 +626,8 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
       activationReason = activation.reason ?? "portal_validated";
     }
 
-    const { issuedAtMs: _issuedAtMs, signature: _signature, ...peerIdentity } = body;
+    // Only the identity is kept: the registration token is checked above and not stored.
+    const { issuedAtMs: _issuedAtMs, signature: _signature, registrationToken: _registrationToken, ...peerIdentity } = body;
     // Proven key (or portal-validated): may replace a squatter or update its own URL.
     if (!mesh.addPeer(peerIdentity as MeshPeerIdentity, { authoritative: true, source: "register" })) {
       // #118 review: also refused when the URL disagrees with the pin or no endpoint is pinned/known.

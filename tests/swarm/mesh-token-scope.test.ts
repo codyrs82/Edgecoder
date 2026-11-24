@@ -216,6 +216,27 @@ describe("coordinator-to-coordinator registration needs an allowlisted signed ke
     const body = { ...fields(peerKey), ...signRegistration(fields(peerKey), peerKey.privateKeyPem) };
     expect((await post("/mesh/register-peer", body)).statusCode).toBe(200);
   });
+
+  test("the peer listing carries identity fields only, no tokens", async () => {
+    const body = { ...fields(peerKey), registrationToken: "peer-listing-reg-token-123", ...signRegistration(fields(peerKey), peerKey.privateKeyPem) };
+    expect((await post("/mesh/register-peer", body)).statusCode).toBe(200);
+    const res = await app.inject({ method: "GET", url: "/mesh/peers", remoteAddress: REMOTE, headers: { "x-mesh-token": MESH } });
+    expect(res.statusCode).toBe(200);
+    const peers = res.json().peers as Array<Record<string, unknown>>;
+    const listed = peers.find((p) => p.peerId === peerKey.peerId);
+    expect(listed).toBeTruthy();
+    expect(listed!.publicKeyPem).toBe(peerKey.publicKeyPem);
+    expect(listed!.coordinatorUrl).toBe("https://peer.invalid");
+    for (const p of peers) {
+      expect(Object.keys(p).sort()).toEqual(expect.arrayContaining(["coordinatorUrl", "networkMode", "peerId", "publicKeyPem"]));
+      for (const key of Object.keys(p)) {
+        expect(["peerId", "publicKeyPem", "coordinatorUrl", "networkMode", "role"]).toContain(key);
+        expect(key.toLowerCase()).not.toContain("token");
+      }
+    }
+    expect(res.body).not.toContain("peer-listing-reg-token-123");
+    expect(res.body).not.toContain(MESH);
+  });
 });
 
 describe("admin dashboard", () => {
