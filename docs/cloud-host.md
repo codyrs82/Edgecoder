@@ -35,7 +35,7 @@ has a `rank` (lower is listed first), an optional `hint` and an `autoEligible` f
 | Network id | `rank` | `hint` | `autoEligible` | Shown as |
 | --- | --- | --- | --- | --- |
 | `deepseek-v4.1-flash` | 1 | `recommended` | yes | Cloud · recommended |
-| `glm-5.3` | 2 | `premium` | no | Cloud · premium |
+| `glm-5.3` | 2 | `premium` | yes (premium: see Auto routing) | Cloud · premium |
 
 `GET /inference/models` lists the cloud models in rank order among themselves (other models keep
 their order by machines online) with `cloudRank`, `cloudHint` and `paramsB`, and the web chat
@@ -118,16 +118,37 @@ coordinator decides who runs one:
 
 ### Auto routing
 
-By default Auto (`model: "auto"`, the coordinator's best fit) does not place calls on cloud hosts:
-a cloud model is used only when it is named. The owner turns it on per model with the coordinator
-variable `AUTO_CLOUD_MODELS` (comma list, e.g. `deepseek-v4.1-flash`; default empty = off). A cloud
-model is then a best-fit candidate only when
+Auto (`model: "auto"`, the coordinator's best fit) considers cloud models on its own: nobody has
+to pick or pin one when the network's models change. The coordinator variable `AUTO_CLOUD_MODELS`
+only narrows it:
 
-- `AUTO_CLOUD_MODELS` names it **and** its catalog entry has `autoEligible: true` (Flash yes,
-  GLM-5.3 no: naming `glm-5.3` there has no effect), and
-- the job would otherwise go to the network's top tier: not a light job (summarize, extract,
-  classify) and complexity at least 0.75 (`AUTO_CLOUD_MIN_COMPLEXITY` in
-  `src/swarm/coordinator/best-fit.ts`), where best fit asks for a 30B-class model.
+- unset or empty (the default): every catalog cloud model flagged `autoEligible` (Flash and
+  GLM-5.3; `CLOUD_MODELS_JSON` entries default to true) whose cloud host is online;
+- a comma list (e.g. `deepseek-v4.1-flash`): only those (named models count even when not
+  `autoEligible`);
+- `off`: none, the emergency switch.
+
+An allowed cloud model is a best-fit candidate for a job only when
+
+- the job wants the network's top tier: not a light job (summarize, extract, classify) and
+  complexity at least 0.75 (`AUTO_CLOUD_MIN_COMPLEXITY` in `src/swarm/coordinator/best-fit.ts`),
+  where best fit asks for a 30B-class model, **or**
+- no other machine meets the job's hard requirements: a model that calls tools when it needs
+  them, a context window that holds it, within the price ceiling, and at least the size floor
+  (complexity's `minParamsB`, or the client's own floor: a bot's agent step sends
+  `minParamsB` = `BOT_AGENT_MIN_PARAMS_B`). The cloud is then the automatic fallback.
+
+A light or simple job that a network machine can serve never goes to the cloud. Among cloud
+models the standard one (Flash) is kept over the premium one (catalog `hint: "premium"`,
+GLM-5.3): the premium one is used when it is the only cloud model that fits, or when the job
+asks for `quality: best` at top-tier complexity and its estimate is within the price ceiling. A
+price ceiling (`maxCSats`, a bot's budget left) below a cloud call's estimate leaves it out, and
+the no-route error then names the cheapest fitting model and its estimate.
+
+When nothing fits, the coordinator says why: `No machine on the network can run this job right
+now (needs a model ≥ 14B with tools; online: …)`, a price ceiling below every fitting model, or
+(after a routed call found no free machine in time) that the machines running the chosen model
+are busy.
 
 It then competes with the network's machines on the usual score (quality, latency, price,
 reliability). A cloud host's speed is its measured rate, else 60 tokens/s, it never pays a cold
@@ -217,7 +238,8 @@ fly ssh console --app edgecoder-cloud-host -C "chown -R 1000:1000 /data" && fly 
      `[{"id":"kimi-k3","providerModel":"accounts/fireworks/models/kimi-k3","usdPerM":{"input":1.0,"cachedInput":0.2,"output":3.0},"contextWindow":256000,"paramsB":1000,"origin":{"vendor":"Moonshot AI","country":"CN"},"priceAsOf":"2026-12-01"}]`.
      Entries replace built-in ones with the same id, which is also how a price change is applied.
      An entry replaces the whole built-in entry: give `rank`, `hint` and `autoEligible` again
-     (unset: rank 100, no hint, not auto-eligible).
+     (unset: rank 100, no hint, auto-eligible: Auto may use it as soon as its host serves it;
+     `"autoEligible": false` keeps it out of Auto).
 3. Add the id to `CLOUD_HOST_MODELS` (or leave it unset to serve every catalog model of the
    provider) and restart the cloud host.
 
@@ -227,7 +249,7 @@ fly ssh console --app edgecoder-cloud-host -C "chown -R 1000:1000 /data" && fly 
   reserve: a cloud call capped that way can settle below the provider's cost. The spend guard
   still bounds the platform's exposure. A follow-up could lower `max_tokens` to fit the ceiling.
 - The spend total is per cloud-host process; run one machine per provider key.
-- Auto / best-fit routing uses cloud hosts only when `AUTO_CLOUD_MODELS` is set (see above).
+- Auto / best-fit routing uses cloud hosts by default for top-tier jobs and as the fallback when nothing else fits; `AUTO_CLOUD_MODELS=off` stops it (see above).
 - The origin field is data only; no filter or UI uses it yet.
 
 Environment variables: [site-docs/reference/environment-variables.md](../site-docs/reference/environment-variables.md)

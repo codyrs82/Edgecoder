@@ -22,6 +22,16 @@ describe("routing hints", () => {
     expect(cleanHints({ job: "code-edit", needs_tools: false, max_csats: "2.5" })).toEqual({ job: "code_edit", needsTools: false, maxCSats: 2.5 });
     expect(cleanHints(null)).toEqual({});
   });
+
+  it("takes a hard size floor (minParamsB) from the body or x-edgecoder-min-params-b", () => {
+    expect(cleanHints({ minParamsB: 14 })).toEqual({ minParamsB: 14 });
+    expect(cleanHints({ min_params_b: "30" })).toEqual({ minParamsB: 30 });
+    expect(cleanHints({ minParamsB: 0 })).toEqual({});
+    expect(cleanHints({ minParamsB: "big" })).toEqual({});
+    expect(routingHintsFrom({}, { "x-edgecoder-min-params-b": "14" })).toEqual({ minParamsB: 14 });
+    expect(describeJob(SIMPLE_QA, { minParamsB: 14 }).minParamsB).toBe(14);
+    expect(describeJob(SIMPLE_QA).minParamsB).toBeUndefined();
+  });
 });
 
 describe("job type", () => {

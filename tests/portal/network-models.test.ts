@@ -164,7 +164,7 @@ describe("cloud catalog order and flags", () => {
   it("Flash is the default (rank 1, recommended, auto-eligible); GLM-5.3 is premium and not auto-eligible", () => {
     const byId = Object.fromEntries(BUILTIN_CLOUD_MODELS.map((m) => [m.id, m]));
     expect(byId["deepseek-v4.1-flash"]).toMatchObject({ rank: 1, hint: "recommended", autoEligible: true });
-    expect(byId["glm-5.3"]).toMatchObject({ rank: 2, hint: "premium", autoEligible: false });
+    expect(byId["glm-5.3"]).toMatchObject({ rank: 2, hint: "premium", autoEligible: true });
     expect(orderCloudModels(parseCloudCatalog(undefined), (m) => m.id).map((m) => m.id)).toEqual(["deepseek-v4.1-flash", "glm-5.3"]);
   });
 
@@ -173,9 +173,10 @@ describe("cloud catalog order and flags", () => {
     expect(orderCloudModels(rows, (r) => r)).toEqual(["deepseek-v4.1-flash", "a", "glm-5.3", "b"]);
   });
 
-  it("CLOUD_MODELS_JSON entries take rank, hint and autoEligible (defaults: 100, none, false) and refuse bad values", () => {
+  it("CLOUD_MODELS_JSON entries take rank, hint and autoEligible (defaults: 100, none, true) and refuse bad values", () => {
     const base = { id: "kimi-k3", providerModel: "accounts/fireworks/models/kimi-k3", usdPerM: { input: 1, output: 3 } };
-    expect(parseCloudModelSpec(base)).toMatchObject({ rank: 100, autoEligible: false });
+    expect(parseCloudModelSpec(base)).toMatchObject({ rank: 100, autoEligible: true });
+    expect(parseCloudModelSpec({ ...base, autoEligible: false })).toMatchObject({ autoEligible: false });
     expect(parseCloudModelSpec(base).hint).toBeUndefined();
     expect(parseCloudModelSpec({ ...base, rank: 0, hint: "premium", autoEligible: true })).toMatchObject({ rank: 0, hint: "premium", autoEligible: true });
     expect(() => parseCloudModelSpec({ ...base, rank: 1.5 })).toThrow(/rank/);

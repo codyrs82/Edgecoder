@@ -159,7 +159,7 @@ describe("network best fit with needsTools", () => {
     expect(agentic.candidates.some((c) => c.model === "deepseek-r1:14b")).toBe(false);
     expect(bestFit(describeJob(AGENTIC_LOOP), view).chosen?.model).toBe("qwen3-coder:30b");
     const onlyR1: NetworkView = { ...view, agents: [view.agents[0]] };
-    expect(bestFit(describeJob(SIMPLE_QA, { job: "agentic" }), onlyR1).rejected).toMatch(/no available model calls tools/);
+    expect(bestFit(describeJob(SIMPLE_QA, { job: "agentic" }), onlyR1).rejected).toMatch(/^No machine on the network can run this job right now \(needs a model with tools; online: /);
     const chat = bestFit(describeJob(SIMPLE_QA, { needsTools: false }), view);
     expect(chat.requirements.needsTools).toBe(false);
     expect(chat.candidates.some((c) => c.model === "deepseek-r1:14b")).toBe(true);

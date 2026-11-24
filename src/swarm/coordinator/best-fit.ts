@@ -38,10 +38,15 @@
  * Per (model, class) only the best agent is kept; the answer is the best pair, its agent as a soft
  * preference (dispatch.ts preferAgent), and the ranked alternatives with their score breakdown.
  *
- * Cloud models (src/cloud-host/): a candidate only when the coordinator's AUTO_CLOUD_MODELS names
- * the model, the catalog flags it autoEligible, and the job is one that wants the network's top
- * tier (not a light job, complexity >= AUTO_CLOUD_MIN_COMPLEXITY, where it asks for a 30B-class
- * model). AUTO_CLOUD_MODELS is empty by default, so Auto never uses them until the owner sets it.
+ * Cloud models (src/cloud-host/): every catalog cloud model whose host is online is an Auto
+ * candidate by default (AUTO_CLOUD_MODELS unset; a list narrows it, "off" turns it off), but only
+ * when either the job wants the network's top tier (jobWantsTopTier: not a light job, complexity
+ * >= AUTO_CLOUD_MIN_COMPLEXITY), or no other machine meets the job's hard requirements (tools,
+ * context window, price ceiling, the size floor minParamsB): the automatic fallback when nothing
+ * on the network fits. A light or simple job a network model can serve never goes to the cloud.
+ * Among cloud models the standard one (Flash) is kept over a premium one (catalog hint "premium",
+ * GLM-5.3) unless the job asks for the best quality at top-tier complexity and the premium one
+ * is within the price ceiling; a premium one is also used when it is the only cloud model that fits.
  * A cloud host's speed is the hosted API's (not scaled by model size), it never cold-loads, and
  * its size is not penalised as oversized (its slots are not the network's scarce big-model slots).
  */
@@ -52,7 +57,7 @@ import { isCodeJob, isLightJob, type JobDescriptor, type JobType } from "../../i
 import { catalogEntryForTag } from "../../model/catalog.js";
 import { inferenceCostMsat } from "../../economy/job-pricing.js";
 import { modelTokenPrice } from "../../economy/cloud-pricing.js";
-import { autoMayUseCloudModel, cloudModelSpec, isCloudModel, parseAutoCloudModels } from "../../cloud-host/catalog.js";
+import { autoMayUseCloudModel, cloudModelSpec, isCloudModel, parseAutoCloudModels, type AutoCloudModels } from "../../cloud-host/catalog.js";
 
 /** Complexity from which Auto may use a cloud model: where best fit asks for a 30B-class model (requirementsFor). */
 export const AUTO_CLOUD_MIN_COMPLEXITY = 0.75;
@@ -64,6 +69,13 @@ const CLOUD_PREFILL_FACTOR = 40;
 export function jobWantsTopTier(job: Pick<JobDescriptor, "job" | "complexity">): boolean {
   return !isLightJob(job.job) && job.complexity.score >= AUTO_CLOUD_MIN_COMPLEXITY;
 }
+
+/** The job asks for more than the standard cloud model: the best quality at top-tier complexity (a premium cloud model may then win). */
+export function jobWantsPremiumCloud(job: Pick<JobDescriptor, "job" | "complexity" | "quality">): boolean {
+  return job.quality === "best" && jobWantsTopTier(job);
+}
+
+const isPremiumCloud = (model: string) => cloudModelSpec(model)?.hint === "premium";
 
 /** A cloud model's cost-plus price for inferenceCostMsat (economy/cloud-pricing.ts); none for other models. */
 function ownPriceOf(model: string): { price?: NonNullable<ReturnType<typeof modelTokenPrice>> } {
@@ -148,10 +160,10 @@ export interface BestFitConfig {
   /** Also score agents on peer coordinators (the caller may be sent there). */
   peers: boolean;
   /**
-   * Cloud model ids Auto may use (AUTO_CLOUD_MODELS; only catalog entries flagged autoEligible
-   * count). Empty (the default): Auto never places a job on a cloud host.
+   * Cloud models Auto may use (AUTO_CLOUD_MODELS): "all" (the default: every autoEligible catalog
+   * model whose host is online), "off", or a list of ids. See the module comment for when.
    */
-  autoCloudModels: string[];
+  autoCloudModels: AutoCloudModels;
 }
 
 export const DEFAULT_BEST_FIT_CONFIG: BestFitConfig = {
@@ -163,7 +175,7 @@ export const DEFAULT_BEST_FIT_CONFIG: BestFitConfig = {
   sessionTtlMs: 30 * 60_000,
   oversizePenalty: 0.25,
   peers: true,
-  autoCloudModels: [],
+  autoCloudModels: "all",
 };
 
 /** The config from BEST_FIT_* variables; a missing or invalid value keeps its default. */
@@ -207,6 +219,8 @@ export const ENOUGH_B: Record<JobType, number> = {
 
 export interface Requirements {
   minParamsB: number;
+  /** The client's hard floor (job.minParamsB): never anything smaller, not even as "best available". */
+  hardMinParamsB?: number;
   enoughParamsB: number;
   needsTools: boolean;
   contextTokens: number;
@@ -217,12 +231,13 @@ export function requirementsFor(job: JobDescriptor): Requirements {
   const c = job.complexity.score;
   const light = isLightJob(job.job);
   const byComplexity = light ? (c >= 0.75 ? 7 : c >= 0.5 ? 3 : 0) : c >= 0.75 ? 30 : c >= 0.5 ? 14 : c >= 0.25 ? 7 : 0;
-  const minParamsB = Math.max(BASE_MIN_B[job.job], byComplexity);
+  const hardMinParamsB = job.minParamsB && job.minParamsB > 0 ? job.minParamsB : undefined;
+  const minParamsB = Math.max(BASE_MIN_B[job.job], byComplexity, hardMinParamsB ?? 0);
   const qualityFactor = job.quality === "best" ? 2 : job.quality === "fast" ? 0.5 : 1;
   let enoughParamsB = Math.max(minParamsB, ENOUGH_B[job.job] * (0.5 + 1.5 * c) * qualityFactor);
   // "best": code work prefers a 30B-class coder, other work at least 14B (light jobs excepted).
   if (job.quality === "best" && !light) enoughParamsB = Math.max(enoughParamsB, isCodeJob(job.job) ? 30 : 14);
-  return { minParamsB, enoughParamsB: Math.round(enoughParamsB * 10) / 10, needsTools: job.needsTools, contextTokens: job.contextTokens };
+  return { minParamsB, ...(hardMinParamsB ? { hardMinParamsB } : {}), enoughParamsB: Math.round(enoughParamsB * 10) / 10, needsTools: job.needsTools, contextTokens: job.contextTokens };
 }
 
 /** Weights for this job: complexity moves weight to quality and reliability; normalised to 1. */
@@ -368,10 +383,11 @@ export interface BestFitResult {
   /** Why nothing fits, when chosen is null. */
   rejected?: string;
   /**
-   * The same as a code: "none" (no agent with a model), "tools", "context", or "price" (every
-   * fitting model costs more than job.maxCSats: a money problem, not capacity).
+   * The same as a code: "none" (no agent with a model), "tools", "context", "size" (nothing meets
+   * the client's hard floor, hardMinParamsB), or "price" (every fitting model, cloud ones included,
+   * costs more than job.maxCSats: a money problem, not capacity).
    */
-  rejectedCode?: "none" | "tools" | "context" | "price";
+  rejectedCode?: "none" | "tools" | "context" | "size" | "price";
   /** "price": the cheapest fitting estimate (cSats), so the caller can say what the step needs. */
   cheapestCSats?: number;
 }
@@ -399,19 +415,51 @@ function scoreOf(parts: ScoreParts, w: BestFitWeights): number {
   return round3(w.quality * parts.quality + w.latency * parts.latency + w.price * parts.price + w.reliability * parts.reliability);
 }
 
+type Evaluated = Candidate & { cloud: boolean; contextOk: boolean; priceOk: boolean; toolsOk: boolean };
+
+/**
+ * Cloud models are considered for this job: it wants the top tier, or no other machine meets its
+ * hard requirements (tools, context, price ceiling, size floor): the fallback when nothing fits.
+ */
+export function cloudConsidered(job: JobDescriptor, req: Requirements, all: ReadonlyArray<Pick<Evaluated, "cloud" | "toolsOk" | "contextOk" | "priceOk" | "paramsB">>): boolean {
+  if (jobWantsTopTier(job)) return true;
+  return !all.some((c) => !c.cloud && c.toolsOk && c.contextOk && c.priceOk && c.paramsB >= req.minParamsB);
+}
+
+/**
+ * Among the cloud models that fit, the standard one (Flash) unless the job wants a premium one
+ * (jobWantsPremiumCloud) and one fits within the price ceiling; a premium one alone stays.
+ */
+function cloudTier<T extends Pick<Evaluated, "cloud" | "model">>(job: JobDescriptor, fits: T[]): T[] {
+  const premium = fits.filter((c) => c.cloud && isPremiumCloud(c.model));
+  const standard = fits.filter((c) => c.cloud && !isPremiumCloud(c.model));
+  if (!premium.length || !standard.length) return fits;
+  const drop = new Set<T>(jobWantsPremiumCloud(job) ? standard : premium);
+  return fits.filter((c) => !drop.has(c));
+}
+
+/** "qwen2.5-coder:7b, qwen3.5:9b": the models online that Auto may use, for an error (at most 8). */
+function onlineModels(view: NetworkView, cfg: BestFitConfig): string {
+  const usable = (m: string) => !isEmbedding(m) && (!isCloudModel(m) || autoMayUseCloudModel(m, cfg.autoCloudModels ?? "all"));
+  const ms = [...new Set(view.agents.filter((a) => !a.stale).flatMap((a) => a.models).filter(usable))];
+  ms.sort((a, b) => paramsB(a) - paramsB(b) || a.localeCompare(b));
+  return ms.length ? `${ms.slice(0, 8).join(", ")}${ms.length > 8 ? `, +${ms.length - 8} more` : ""}` : "none";
+}
+
 /** Every (agent, model) that passes the hard filters except size, with its parts and score. */
 function evaluate(job: JobDescriptor, view: NetworkView, cfg: BestFitConfig, req: Requirements, w: BestFitWeights, session?: SessionMemo) {
   const holders = new Map<string, number>();
   for (const a of view.agents) if (!a.stale) for (const m of new Set(a.models)) holders.set(m, (holders.get(m) ?? 0) + 1);
-  const out: Array<Candidate & { contextOk: boolean; priceOk: boolean; toolsOk: boolean }> = [];
+  const out: Evaluated[] = [];
   const target = job.latency === "batch" ? cfg.latencyTargetMs.batch : cfg.latencyTargetMs.interactive;
-  const topTier = jobWantsTopTier(job);
   for (const a of view.agents) {
     if (a.stale) continue;
     for (const model of new Set(a.models)) {
       if (isEmbedding(model)) continue;
-      // Cloud: only models the owner allowed (AUTO_CLOUD_MODELS, autoEligible), only for top-tier jobs.
-      if ((a.computeClass === "cloud" || isCloudModel(model)) && !(topTier && autoMayUseCloudModel(model, cfg.autoCloudModels ?? []))) continue;
+      // Cloud: only the models AUTO_CLOUD_MODELS allows (default: every autoEligible one); when it
+      // may be used is bestFit's call (cloudConsidered).
+      const cloud = a.computeClass === "cloud" || isCloudModel(model);
+      if (cloud && !autoMayUseCloudModel(model, cfg.autoCloudModels ?? "all")) continue;
       const cached = !!session && session.agentId === a.agentId && session.model === model;
       const est = estimate(job, a, model, view, holders.get(model) ?? 1, cached);
       const parts: ScoreParts = {
@@ -422,7 +470,7 @@ function evaluate(job: JobDescriptor, view: NetworkView, cfg: BestFitConfig, req
       };
       out.push({
         model, computeClass: a.computeClass, agentId: a.agentId, agentLabel: a.label, coordinatorId: a.coordinatorId, local: a.local,
-        paramsB: paramsB(model), score: scoreOf(parts, w), parts, estimate: est, belowFloor: false,
+        paramsB: paramsB(model), score: scoreOf(parts, w), parts, estimate: est, belowFloor: false, cloud,
         toolsOk: !req.needsTools || callsTools(model),
         contextOk: req.contextTokens <= contextWindowOf(a, model),
         priceOk: job.maxCSats === undefined || est.cSats <= job.maxCSats,
@@ -452,19 +500,33 @@ export function bestFit(job: JobDescriptor, view: NetworkView, cfg: BestFitConfi
   const req = requirementsFor(job);
   const w = effectiveWeights(job, cfg);
   const sessionLive = session && (nowMs === 0 || nowMs - session.atMs <= cfg.sessionTtlMs) ? session : undefined;
-  const all = evaluate(job, view, cfg, req, w, sessionLive);
-  const fits = all.filter((c) => c.toolsOk && c.contextOk && c.priceOk);
+  const evaluated = evaluate(job, view, cfg, req, w, sessionLive);
+  // Cloud models only for top-tier jobs, or when nothing else meets the job (cloudConsidered).
+  const all = cloudConsidered(job, req, evaluated) ? evaluated : evaluated.filter((c) => !c.cloud);
+  const hardB = req.hardMinParamsB ?? 0;
+  const fits = cloudTier(job, all.filter((c) => c.toolsOk && c.contextOk && c.priceOk));
   const header = `${job.job.replace("_", " ")} · complexity ${describeComplexity(job.complexity, 2)}`;
-  if (fits.length === 0) {
+  if (fits.length === 0 || (hardB > 0 && !fits.some((c) => c.paramsB >= hardB))) {
+    const big = (c: Evaluated) => c.paramsB >= hardB;
     const rejectedCode: NonNullable<BestFitResult["rejectedCode"]> =
-      all.length === 0 ? "none" : !all.some((c) => c.toolsOk) ? "tools" : !all.some((c) => c.toolsOk && c.contextOk) ? "context" : "price";
+      all.length === 0 ? "none" :
+      !all.some((c) => c.toolsOk) ? "tools" :
+      !all.some((c) => c.toolsOk && c.contextOk) ? "context" :
+      !all.some((c) => c.toolsOk && c.contextOk && big(c)) ? "size" : "price";
+    const needs = [
+      hardB > 0 || rejectedCode === "size" ? `a model ≥ ${hardB || req.minParamsB}B` : "a model",
+      req.needsTools ? "with tools" : "",
+      rejectedCode === "context" ? `and a ${req.contextTokens}-token context window` : "",
+    ].filter(Boolean).join(" ");
+    const cloudNote = cfg.autoCloudModels === "off" ? "; cloud models are off (AUTO_CLOUD_MODELS=off)" : "";
+    const fitting = all.filter((c) => c.toolsOk && c.contextOk && big(c));
+    const cheapestC = rejectedCode === "price" && fitting.length ? fitting.reduce((a, b) => (b.estimate.cSats < a.estimate.cSats ? b : a)) : undefined;
     const rejected =
-      rejectedCode === "none" ? "no agent with a model is online" :
-      rejectedCode === "tools" ? "no available model calls tools" :
-      rejectedCode === "context" ? `no agent's context window holds ${req.contextTokens} tokens` :
-      `every fitting model costs more than the ${job.maxCSats} cSats ceiling`;
-    const fitting = all.filter((c) => c.toolsOk && c.contextOk);
-    const cheapest = rejectedCode === "price" && fitting.length ? round3(Math.min(...fitting.map((c) => c.estimate.cSats))) : undefined;
+      rejectedCode === "none" ? `no agent with a model is online${cloudNote}` :
+      rejectedCode === "price"
+        ? `every fitting model costs more than the ${job.maxCSats} cSats ceiling (the cheapest, ${cheapestC!.model} on ${cheapestC!.computeClass}, is about ${round3(cheapestC!.estimate.cSats)} cSats)`
+        : `No machine on the network can run this job right now (needs ${needs}; online: ${onlineModels(view, cfg)}${cloudNote})`;
+    const cheapest = cheapestC ? round3(cheapestC.estimate.cSats) : undefined;
     return { chosen: null, candidates: [], requirements: req, weights: w, affinity: { status: "none" }, reason: `${header}: nothing fits (${rejected})`, rejected, rejectedCode, ...(cheapest !== undefined ? { cheapestCSats: cheapest } : {}) };
   }
   let pool: Candidate[] = fits.filter((c) => c.paramsB >= req.minParamsB);
@@ -481,7 +543,7 @@ export function bestFit(job: JobDescriptor, view: NetworkView, cfg: BestFitConfi
     if (!prev || c.score > prev.score || (c.score === prev.score && c.estimate.totalMs < prev.estimate.totalMs)) byPair.set(k, c);
   }
   const strip = (c: Candidate): Candidate => {
-    const { contextOk: _a, priceOk: _b, toolsOk: _c, ...rest } = c as Candidate & { contextOk?: boolean; priceOk?: boolean; toolsOk?: boolean };
+    const { contextOk: _a, priceOk: _b, toolsOk: _c, cloud: _d, ...rest } = c as Candidate & { contextOk?: boolean; priceOk?: boolean; toolsOk?: boolean; cloud?: boolean };
     return rest;
   };
   const ranked = [...byPair.values()].sort((a, b) => b.score - a.score || a.estimate.totalMs - b.estimate.totalMs).map(strip);
@@ -512,7 +574,9 @@ export function bestFit(job: JobDescriptor, view: NetworkView, cfg: BestFitConfi
 
   const next = ranked.find((c) => c !== chosen && !(c.model === chosen.model && c.computeClass === chosen.computeClass));
   const why = affinity.status === "kept" && affinity.reason ? `session affinity: ${affinity.reason}` : whyChosen(chosen, next, w, req);
-  const floorNote = chosen.belowFloor ? ` (nothing ≥ ${req.minParamsB}B is available)` : "";
+  // A cloud model that would have met the size but costs more than the ceiling: say so.
+  const cloudOverBudget = chosen.belowFloor && all.some((c) => c.cloud && c.toolsOk && c.contextOk && !c.priceOk);
+  const floorNote = chosen.belowFloor ? ` (nothing ≥ ${req.minParamsB}B is available${cloudOverBudget ? ` within the ${job.maxCSats} cSats ceiling` : ""})` : "";
   return {
     chosen,
     candidates: ranked.slice(0, 8),
