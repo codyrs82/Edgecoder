@@ -504,7 +504,7 @@ export function helpText(): string {
   for (const c of INSTALL_COMMANDS) lines.push(`  ${c.name.padEnd(10)} ${c.description}`);
   lines.push("", "Options (identical on macOS, Linux and Windows):");
   for (const o of INSTALL_OPTIONS) lines.push(`  ${(o.flag + (o.arg ? " " + o.arg : "")).padEnd(34)} ${o.description}`);
-  lines.push("", "Updates (Linux, macOS release installs): a timer runs `update --scheduled` every 6 hours; `sudo edgecoder-install update` updates now; `apply --auto-update off` turns the timer off.");
+  lines.push("", "Updates (Linux, macOS release installs): a timer runs `update --scheduled` every hour, and early when the coordinator announces a release; `sudo edgecoder-install update` updates now; `apply --auto-update off` turns the timer off.");
   lines.push("", "Environment: EDGECODER_COORDINATOR_URL, EDGECODER_PORTAL_URL, EDGECODER_MESH_TOKEN, EDGECODER_REGISTRATION_TOKEN, EDGECODER_ENROLL_TOKEN, EDGECODER_API_KEY (same as --enroll, kept out of shell history) set the defaults.");
   return lines.join("\n");
 }

@@ -3,13 +3,18 @@
 
 /*
  * When `edgecoder-install update --scheduled` runs (update.ts), and how a host turns it off.
- *   Linux   edgecoder-update.service (oneshot, as root) + edgecoder-update.timer: every 6 hours,
- *           RandomizedDelaySec=1h so a fleet does not update at once, Persistent=true so a missed
- *           run happens after boot.
- *   macOS   /Library/LaunchDaemons/io.edgecoder.update.plist (root): every 6 hours, with up to an
- *           hour of jitter inside the run (launchd has no randomized delay).
+ *   Linux   edgecoder-update.service (oneshot, as root) + edgecoder-update.timer: every hour,
+ *           RandomizedDelaySec=10min so a fleet does not update at once, Persistent=true so a
+ *           missed run happens after boot. edgecoder-update.path starts the same service when an
+ *           agent writes its update-request file (the coordinator's nudge, src/swarm/update-nudge.ts).
+ *   macOS   /Library/LaunchDaemons/io.edgecoder.update.plist (root): every hour, with up to 10
+ *           minutes of jitter inside the run (launchd has no randomized delay), and WatchPaths on
+ *           the agents' update-request files for the nudge.
  *   Windows not yet: the agents are scheduled tasks of the installing user, and replacing
  *           C:\Program Files\EdgeCoder\app needs an elevated task; re-run install.ps1 to update.
+ * The nudge only starts the same scheduled check early: the updater never reads the request file
+ * (the agent is unprivileged and its HOME untrusted), runs the same signed-release flow, and does
+ * nothing when it checked less than MIN_SCHEDULED_GAP_MS ago (update.ts).
  * Only a signed release install (its app dir has edgecoder-release.json) gets the schedule: a
  * .deb/.pkg is updated by its package manager and a --from-source install by hand.
  *
@@ -23,9 +28,12 @@ export const AUTO_UPDATE_ENV_FILE = "auto-update.env";
 export const AUTO_UPDATE_KEY = "EDGECODER_AUTO_UPDATE";
 export const UPDATE_SERVICE = "edgecoder-update.service";
 export const UPDATE_TIMER = "edgecoder-update.timer";
+export const UPDATE_PATH_UNIT = "edgecoder-update.path";
+/** Written by an agent in its own HOME (stateDir/agent-<n>) to ask for an early check (update-nudge.ts). */
+export const UPDATE_REQUEST_FILE = "update-request";
 export const UPDATE_LAUNCHD_LABEL = "io.edgecoder.update";
-export const UPDATE_INTERVAL_SEC = 6 * 3600;
-export const UPDATE_JITTER_SEC = 3600;
+export const UPDATE_INTERVAL_SEC = 3600;
+export const UPDATE_JITTER_SEC = 600;
 
 const OFF = /^(off|0|false|no|disabled?)$/i;
 
@@ -82,13 +90,18 @@ SyslogIdentifier=edgecoder-update
 `;
 }
 
+/** The update-request file of each agent instance (they live in stateDir/agent-<n>, services.ts). */
+export function updateRequestPaths(p: Pick<ServicePaths, "stateDir">, instances: number[]): string[] {
+  return [...new Set(instances)].sort((a, b) => a - b).map((n) => `${p.stateDir}/agent-${n}/${UPDATE_REQUEST_FILE}`);
+}
+
 export function systemdUpdateTimer(): string {
   return `[Unit]
-Description=EdgeCoder agent update check, every 6 hours
+Description=EdgeCoder agent update check, every hour
 
 [Timer]
-OnCalendar=00/6:00
-RandomizedDelaySec=1h
+OnCalendar=hourly
+RandomizedDelaySec=10min
 Persistent=true
 Unit=${UPDATE_SERVICE}
 
@@ -97,9 +110,36 @@ WantedBy=timers.target
 `;
 }
 
-export function launchdUpdatePlist(p: Pick<ServicePaths, "nodeBin" | "appDir" | "configDir" | "logDir">): string {
+/**
+ * Starts edgecoder-update.service when an agent writes its update-request file. Root never reads or
+ * writes that file; systemd only watches it. The service is the timer's own (one run at a time),
+ * and the updater ignores a start that comes less than MIN_SCHEDULED_GAP_MS after its last check.
+ */
+export function systemdUpdatePath(requestPaths: string[]): string {
+  return `[Unit]
+Description=EdgeCoder agent update check, early when an agent hears of a newer release
+Documentation=https://github.com/codyrs82/Edgecoder/blob/main/docs/install.md#updates
+
+[Path]
+${requestPaths.map((r) => `PathModified=${r}`).join("\n")}
+Unit=${UPDATE_SERVICE}
+
+[Install]
+WantedBy=paths.target
+`;
+}
+
+export function launchdUpdatePlist(p: Pick<ServicePaths, "nodeBin" | "appDir" | "configDir" | "logDir">, requestPaths: string[] = []): string {
   const xml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const args = [...updateCommand(p), "--jitter", String(UPDATE_JITTER_SEC)];
+  // The agents' nudge: launchd starts the job when one writes its update-request file.
+  const watch = requestPaths.length
+    ? `
+    <key>WatchPaths</key>
+    <array>
+${requestPaths.map((r) => `      <string>${xml(r)}</string>`).join("\n")}
+    </array>`
+    : "";
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -111,7 +151,7 @@ export function launchdUpdatePlist(p: Pick<ServicePaths, "nodeBin" | "appDir" | 
 ${args.map((a) => `      <string>${xml(a)}</string>`).join("\n")}
     </array>
     <key>StartInterval</key>
-    <integer>${UPDATE_INTERVAL_SEC}</integer>
+    <integer>${UPDATE_INTERVAL_SEC}</integer>${watch}
     <key>RunAtLoad</key>
     <false/>
     <key>LowPriorityIO</key>
@@ -144,7 +184,8 @@ export interface ScheduleResult {
  * auto-update.env); undefined keeps what the host has. `releaseInstall`: the app dir is a signed
  * release; otherwise nothing is scheduled.
  */
-export function applyUpdateSchedule(host: Host, p: ServicePaths, opts: { flag?: boolean; releaseInstall: boolean; dryRun: boolean; insideUpdate?: boolean; read: (path: string) => string | undefined; listDir: (dir: string) => string[] }): ScheduleResult {
+export function applyUpdateSchedule(host: Host, p: ServicePaths, opts: { flag?: boolean; releaseInstall: boolean; dryRun: boolean; insideUpdate?: boolean; read: (path: string) => string | undefined; listDir: (dir: string) => string[]; /** Agent instance indices: their update-request files are watched for the nudge. */ instances?: number[] }): ScheduleResult {
+  const requests = updateRequestPaths(p, opts.instances ?? []);
   const out: ScheduleResult = { files: [], commands: [], summary: "" };
   const write = (path: string, content: string, mode: number) => {
     out.files.push(path);
@@ -166,20 +207,29 @@ export function applyUpdateSchedule(host: Host, p: ServicePaths, opts: { flag?: 
   if (host.platform === "linux") {
     const service = `/etc/systemd/system/${UPDATE_SERVICE}`;
     const timer = `/etc/systemd/system/${UPDATE_TIMER}`;
+    const pathUnit = `/etc/systemd/system/${UPDATE_PATH_UNIT}`;
     if (opts.releaseInstall) {
       write(service, systemdUpdateService(p), 0o644);
       write(timer, systemdUpdateTimer(), 0o644);
+      if (requests.length) write(pathUnit, systemdUpdatePath(requests), 0o644);
       run("systemctl", ["daemon-reload"]);
       if (on) run("systemctl", ["enable", "--now", UPDATE_TIMER]);
       else run("systemctl", ["disable", "--now", UPDATE_TIMER]);
-    } else if (host.exists(timer)) {
-      run("systemctl", ["disable", "--now", UPDATE_TIMER]);
+      // restart, not start: a running path unit keeps watching the old instances' files.
+      if (on && requests.length) {
+        run("systemctl", ["enable", UPDATE_PATH_UNIT]);
+        run("systemctl", ["restart", UPDATE_PATH_UNIT]);
+      }
+      else if (host.exists(pathUnit)) run("systemctl", ["disable", "--now", UPDATE_PATH_UNIT]);
+    } else {
+      if (host.exists(timer)) run("systemctl", ["disable", "--now", UPDATE_TIMER]);
+      if (host.exists(pathUnit)) run("systemctl", ["disable", "--now", UPDATE_PATH_UNIT]);
     }
   } else {
     // Booting the job out kills its processes, and an update's own apply runs inside that job
     // (insideUpdate): then the plist is only rewritten, and launchd reads it at the next boot or apply.
     const path = `/Library/LaunchDaemons/${UPDATE_LAUNCHD_LABEL}.plist`;
-    const content = launchdUpdatePlist(p);
+    const content = launchdUpdatePlist(p, requests);
     if (on) {
       const same = opts.read(path) === content;
       if (!same) write(path, content, 0o644);
@@ -199,7 +249,7 @@ export function applyUpdateSchedule(host: Host, p: ServicePaths, opts: { flag?: 
   out.summary = !opts.releaseInstall
     ? `Automatic updates: off (${p.appDir} is not a signed release install; update it the way it was installed).`
     : on
-      ? `Automatic updates: on, every 6 hours (${host.platform === "linux" ? UPDATE_TIMER : UPDATE_LAUNCHD_LABEL}); turn off with: sudo edgecoder-install apply --auto-update off`
+      ? `Automatic updates: on, every hour and when the coordinator announces a release (${host.platform === "linux" ? `${UPDATE_TIMER}, ${UPDATE_PATH_UNIT}` : UPDATE_LAUNCHD_LABEL}); turn off with: sudo edgecoder-install apply --auto-update off`
       : `Automatic updates: off (${setting.source}); update by hand with: sudo edgecoder-install update`;
   return out;
 }
@@ -208,9 +258,11 @@ export function applyUpdateSchedule(host: Host, p: ServicePaths, opts: { flag?: 
 export function removeUpdateSchedule(host: Host): string[] {
   if (host.platform === "linux") {
     host.run("systemctl", ["disable", "--now", UPDATE_TIMER]);
+    host.run("systemctl", ["disable", "--now", UPDATE_PATH_UNIT]);
     host.removeFile(`/etc/systemd/system/${UPDATE_TIMER}`);
+    host.removeFile(`/etc/systemd/system/${UPDATE_PATH_UNIT}`);
     host.removeFile(`/etc/systemd/system/${UPDATE_SERVICE}`);
-    return [UPDATE_TIMER, UPDATE_SERVICE];
+    return [UPDATE_TIMER, UPDATE_PATH_UNIT, UPDATE_SERVICE];
   }
   if (host.platform === "darwin") {
     const path = `/Library/LaunchDaemons/${UPDATE_LAUNCHD_LABEL}.plist`;

@@ -22,6 +22,8 @@
  *   6. Health: every agent service active, and each agent that was registered before registers
  *      again (its agent-status.json), within the health timeout. Otherwise roll back: swap
  *      <app>.prev back, re-apply it, and remember the failed tag so the timer does not retry it.
+ * Scheduled runs come from the hourly timer, or early from an agent's nudge (update-schedule.ts):
+ * they do nothing within MIN_SCHEDULED_GAP_MS of the last check or before a GitHub rate limit resets.
  * One previous version is kept (<app>.prev). The result goes to the state file, which `status`
  * shows. Everything that touches the host goes through UpdateDeps so the flow is unit-tested.
  */
@@ -42,6 +44,17 @@ export const STAGE_PREFIX = ".edgecoder-update-";
 export const IDLE_TIMEOUT_MS = 10 * 60_000;
 export const HEALTH_TIMEOUT_MS = 3 * 60_000;
 const POLL_MS = 10_000;
+/**
+ * Scheduled runs closer together than this do nothing (no GitHub call): an agent's nudge
+ * (update-nudge.ts, the update-request path unit / WatchPaths) can start a run any time, so this
+ * caps a host at 12 extra checks an hour even if an agent pokes nonstop. Not written to the state
+ * file, so pokes cannot push the next real check away.
+ */
+export const MIN_SCHEDULED_GAP_MS = 5 * 60_000;
+/** After GitHub says 403/429 (rate limit), scheduled runs wait at least this long, at most RATE_LIMIT_MAX_WAIT_MS. */
+export const RATE_LIMIT_MIN_WAIT_MS = 15 * 60_000;
+export const RATE_LIMIT_MAX_WAIT_MS = 6 * 3600_000;
+const RATE_LIMIT_DEFAULT_WAIT_MS = 3600_000;
 /** A status file older than this says nothing about the agent now. */
 const STATUS_FRESH_MS = 2 * 60_000;
 
@@ -106,6 +119,27 @@ export function parseReleaseInfo(text: string | undefined): ReleaseInfo | null {
   }
 }
 
+/** A non-200 answer, with when the server said to come back (rate limits). */
+export class HttpStatusError extends Error {
+  constructor(message: string, readonly status: number, readonly retryAtMs?: number) {
+    super(message);
+    this.name = "HttpStatusError";
+  }
+}
+
+/**
+ * When to come back after a GitHub 403/429 (unauthenticated: 60 requests an hour per IP): its
+ * retry-after (seconds) or x-ratelimit-reset (epoch seconds), else an hour; clamped so a wrong
+ * clock or header neither hammers the API nor stops updates for long. Undefined: not a rate limit.
+ */
+export function rateLimitRetryAt(status: number, headers: { get(name: string): string | null }, nowMs: number): number | undefined {
+  if (status !== 403 && status !== 429) return undefined;
+  const after = Number(headers.get("retry-after"));
+  const reset = Number(headers.get("x-ratelimit-reset"));
+  const at = Number.isFinite(after) && after > 0 ? nowMs + after * 1000 : Number.isFinite(reset) && reset > 0 ? reset * 1000 : nowMs + RATE_LIMIT_DEFAULT_WAIT_MS;
+  return Math.min(Math.max(at, nowMs + RATE_LIMIT_MIN_WAIT_MS), nowMs + RATE_LIMIT_MAX_WAIT_MS);
+}
+
 // ───────────────────────────── state ─────────────────────────────
 export type UpdateResultKind = "up-to-date" | "available" | "updated" | "rolled-back" | "skipped-busy" | "skipped" | "disabled" | "failed";
 
@@ -118,6 +152,8 @@ export interface UpdateState {
   previousTag?: string;
   /** A tag that failed its health check: scheduled runs skip it, `update` by hand tries it again. */
   failedTag?: string;
+  /** GitHub rate-limited the last check: scheduled runs make no call before this (ISO time). */
+  rateLimitedUntil?: string;
 }
 
 export function parseUpdateState(text: string | undefined): UpdateState | null {
@@ -347,6 +383,17 @@ export async function runUpdate(opts: UpdateOptions, p: UpdatePaths, deps: Updat
   if (opts.scheduled) {
     const setting = autoUpdateSetting(deps.readText, deps.listDir, p.configDir);
     if (!setting.enabled) return save({ result: "disabled", message: `automatic updates are off (${setting.source}); run sudo edgecoder-install update to update by hand`, code: 0 });
+    // Throttles: neither is saved, so they never move the next real check.
+    const limitedUntil = Date.parse(previous?.rateLimitedUntil ?? "");
+    if (limitedUntil > deps.now()) {
+      deps.log(`edgecoder-update: skipped: GitHub rate-limited the last check; next check after ${previous!.rateLimitedUntil}`);
+      return { result: "skipped", message: `rate-limited until ${previous!.rateLimitedUntil}`, code: 0 };
+    }
+    const last = Date.parse(previous?.lastCheckAt ?? "");
+    if (last <= deps.now() && deps.now() - last < MIN_SCHEDULED_GAP_MS) {
+      deps.log(`edgecoder-update: skipped: checked at ${previous!.lastCheckAt}, less than ${MIN_SCHEDULED_GAP_MS / 60_000} minutes ago`);
+      return { result: "skipped", message: `checked less than ${MIN_SCHEDULED_GAP_MS / 60_000} minutes ago`, code: 0 };
+    }
   }
 
   // A crash between the two renames of a swap left no app dir: put the previous one back first.
@@ -369,6 +416,11 @@ export async function runUpdate(opts: UpdateOptions, p: UpdatePaths, deps: Updat
   try {
     latest = pickLatestTag(JSON.parse((await deps.fetchBytes(opts.apiUrl ?? RELEASE_API_URL, 8 << 20)).toString("utf8")));
   } catch (e) {
+    const retryAtMs = e instanceof HttpStatusError ? e.retryAtMs : undefined;
+    if (retryAtMs !== undefined) {
+      const until = new Date(retryAtMs).toISOString();
+      return save({ result: "failed", message: `could not list releases: ${(e as Error).message} (rate-limited; scheduled checks wait until ${until})`, installedTag: installed.tag, code: 1 }, { rateLimitedUntil: until });
+    }
     return save({ result: "failed", message: `could not list releases: ${(e as Error).message}`, installedTag: installed.tag, code: 1 });
   }
   if (!latest) return save({ result: "failed", message: "no agent-v* release found", installedTag: installed.tag, code: 1 });

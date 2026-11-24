@@ -685,7 +685,7 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
   const searxng = applySearxng(host, p, { ...(opts.searxng !== undefined ? { flag: opts.searxng } : {}), dryRun: opts.dryRun, read: readIfPresent, randomHex: () => randomBytes(32).toString("hex") });
   result.files.push(...searxng.files);
   result.commands.push(...searxng.commands);
-  const schedule = applyUpdateSchedule(host, p, { ...(opts.autoUpdate !== undefined ? { flag: opts.autoUpdate } : {}), releaseInstall: existsSync(resolve(appDir, RELEASE_INFO_FILE)), dryRun: opts.dryRun, insideUpdate: env.EDGECODER_UPDATE_RUN === "1", read: readIfPresent, listDir: listDirOrEmpty });
+  const schedule = applyUpdateSchedule(host, p, { ...(opts.autoUpdate !== undefined ? { flag: opts.autoUpdate } : {}), releaseInstall: existsSync(resolve(appDir, RELEASE_INFO_FILE)), dryRun: opts.dryRun, insideUpdate: env.EDGECODER_UPDATE_RUN === "1", read: readIfPresent, listDir: listDirOrEmpty, instances: plan.instances.map((i) => i.index) });
   result.files.push(...schedule.files);
   result.commands.push(...schedule.commands);
   if (opts.pullModels && !opts.dryRun) pullModels(host, p.ollamaBin, plan.instances);
