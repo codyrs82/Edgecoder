@@ -154,7 +154,7 @@ primary_region = "ord"
   CLOUD_HOST_DAILY_CAP_USD = "200"
   CLOUD_HOST_MONTHLY_CAP_USD = "2000"
   CLOUD_HOST_STATE_FILE = "/data/edgecoder/cloud-host-spend.json"
-  ALERT_EMAILS = "ops@edgecoder.io"          # who gets the 80 % / cap / bad-key alerts
+  ALERT_EMAILS = "cody@edgecoder.io"          # who gets the 80 % / cap / bad-key alerts
 
 [mounts]
   source = "cloud_host_data"
