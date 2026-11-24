@@ -57,7 +57,8 @@ export const CONTEXT_WINDOWS = [8192, 16384, 32768] as const;
  * VRAM, model = params x 0.6 + 0.5 GB, KV = max(0.25, params x 0.12) GB per slot per 8k tokens);
  * 8k when the model is unknown. A 4 GB CPU agent with a 1.5B model and 2 slots: 8k; 16 GB with a
  * 7B model and 2 slots: 16k; 32 GB with a 7B model and 4 slots: 32k.
- * AGENT_CONTEXT_WINDOW (2048-131072) overrides.
+ * AGENT_CONTEXT_WINDOW (2048-131072) overrides. This is the CPU / unified-memory sizing: a host with
+ * a discrete GPU sizes from its VRAM instead (defaultServing below).
  */
 export function servedContextWindow(
   totalMemBytes: number,
@@ -74,4 +75,102 @@ export function servedContextWindow(
     if (modelGb + Math.max(1, opts.slots) * kvPer8k * (ctx / 8192) < usable) return ctx;
   }
   return CONTEXT_WINDOWS[0];
+}
+
+/** Largest window a GPU host sizes itself to by default (an explicit AGENT_CONTEXT_WINDOW may go higher). */
+export const GPU_CONTEXT_CEILING = 65_536;
+/** The window agentic calls need (a 7-19k prompt and a 4k reply): a GPU host gives up slots to reach it. */
+export const AGENTIC_CONTEXT_WINDOW = 32_768;
+const GIB = 1024 ** 3;
+/** Runtime (compute graph, buffers) next to the weights, as memory-budget.ts RUNTIME_OVERHEAD_BYTES. */
+const RUNTIME_BYTES = 0.5 * GIB;
+/** Each GPU a model is split over keeps its own compute buffers. */
+const PER_GPU_BYTES = 0.5 * GIB;
+const GPU_WINDOWS = [65_536, 32_768, 16_384, 8_192] as const;
+
+/**
+ * The window (and slots) a host with a discrete GPU serves its model with: what the KV cache can
+ * use of the VRAM once the weights are in.
+ *
+ *   free     = VRAM x 0.9 (the memory budget) - weights - 0.5 GB runtime - 0.5 GB per GPU
+ *   window   = the largest of 64k / 32k / 16k / 8k, never past the model's own context length,
+ *              whose KV cache for every slot fits in `free` (KV slots: at least OLLAMA_NUM_PARALLEL)
+ *
+ * Below 32k with more than one slot, the slots come down (unless fixed by AGENT_PARALLEL_INFERENCE)
+ * when that reaches 32k: one call that holds an agentic prompt beats several that do not (and when
+ * not even 8k fits every slot, as many slots as fit at 8k). Undefined when the model does not fit
+ * the VRAM even at 8k with one slot (the caller then sizes by RAM).
+ */
+export function gpuContextWindow(opts: {
+  vramBytes: number;
+  gpuCount?: number;
+  weightsBytes: number;
+  kvBytesPer8k: number;
+  nativeContext?: number;
+  slots: number;
+  slotsFixed?: boolean;
+  /** Ollama's OLLAMA_NUM_PARALLEL: it allocates the KV cache for this many slots whatever the agent runs. */
+  kvSlotsFloor?: number;
+}): { contextWindow: number; slots: number } | undefined {
+  if (!(opts.vramBytes > 0) || !(opts.weightsBytes > 0) || !(opts.kvBytesPer8k > 0)) return undefined;
+  const free = opts.vramBytes * 0.9 - opts.weightsBytes - RUNTIME_BYTES - PER_GPU_BYTES * Math.max(1, Math.floor(opts.gpuCount ?? 1));
+  const cap = Math.min(GPU_CONTEXT_CEILING, opts.nativeContext && opts.nativeContext >= 2048 ? opts.nativeContext : GPU_CONTEXT_CEILING);
+  const windows: number[] = GPU_WINDOWS.filter((w) => w <= cap);
+  if (windows.length === 0) windows.push(cap);
+  const kvSlots = (s: number) => Math.max(s, opts.kvSlotsFloor ?? 0);
+  const best = (s: number) => windows.find((w) => kvSlots(s) * opts.kvBytesPer8k * (w / 8192) <= free);
+  const slots = Math.max(1, Math.floor(opts.slots));
+  const want = best(slots);
+  const agentic = Math.min(AGENTIC_CONTEXT_WINDOW, cap);
+  if (opts.slotsFixed || (want !== undefined && want >= agentic)) return want === undefined ? undefined : { contextWindow: want, slots };
+  for (let s = slots - 1; s >= 1; s--) {
+    const w = best(s);
+    if (w !== undefined && w >= agentic) return { contextWindow: w, slots: s };
+  }
+  if (want !== undefined) return { contextWindow: want, slots };
+  // Not even 8k for every slot: as many slots as fit at the smallest window.
+  for (let s = slots - 1; s >= 1; s--) {
+    const w = best(s);
+    if (w !== undefined) return { contextWindow: w, slots: s };
+  }
+  return undefined;
+}
+
+/**
+ * The default window and slots an Ollama agent serves with. AGENT_CONTEXT_WINDOW wins. A host with
+ * a discrete GPU (not Apple's unified memory, which is RAM) sizes from its VRAM (gpuContextWindow);
+ * a CPU host, an unknown model, or a model too big for the VRAM, by RAM (servedContextWindow).
+ */
+export function defaultServing(
+  totalMemBytes: number,
+  override: number | undefined,
+  opts: {
+    modelParamsB?: number;
+    slots: number;
+    slotsFixed?: boolean;
+    discreteGpu?: { vramBytes: number; count?: number };
+    weightsBytes?: number;
+    kvBytesPer8k?: number;
+    nativeContext?: number;
+    kvSlotsFloor?: number;
+  }
+): { contextWindow: number; slots: number; basis: "override" | "gpu" | "memory" } {
+  const slots = Math.max(1, Math.floor(opts.slots));
+  if (override !== undefined && Number.isInteger(override) && override >= 2048 && override <= 131_072) return { contextWindow: override, slots, basis: "override" };
+  const b = opts.modelParamsB;
+  const known = b !== undefined && Number.isFinite(b) && b > 0;
+  if (opts.discreteGpu && known) {
+    const g = gpuContextWindow({
+      vramBytes: opts.discreteGpu.vramBytes,
+      gpuCount: opts.discreteGpu.count,
+      weightsBytes: opts.weightsBytes && opts.weightsBytes > 0 ? opts.weightsBytes : (b as number) * 0.6 * GIB,
+      kvBytesPer8k: opts.kvBytesPer8k && opts.kvBytesPer8k > 0 ? opts.kvBytesPer8k : Math.max(0.25, (b as number) * 0.12) * GIB,
+      nativeContext: opts.nativeContext,
+      slots,
+      slotsFixed: opts.slotsFixed,
+      kvSlotsFloor: opts.kvSlotsFloor
+    });
+    if (g) return { ...g, basis: "gpu" };
+  }
+  return { contextWindow: servedContextWindow(totalMemBytes, undefined, { modelParamsB: b, slots }), slots, basis: "memory" };
 }

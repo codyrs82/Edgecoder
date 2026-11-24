@@ -234,8 +234,9 @@ keep-alive (dedicated hosts) and get the loaded-model cap by the instance's memo
 
 **2. A memory budget in the agent** (`src/swarm/memory-budget.ts`): 60% of RAM
 (`AGENT_MEMORY_BUDGET_PCT`), or 90% of a discrete GPU's VRAM. A model needs its weights (its file
-size), 0.5 GB runtime, and a KV cache of max(0.25, params × 0.12) GB per 8k tokens per parallel slot
-(Ollama allocates `num_ctx` × `OLLAMA_NUM_PARALLEL`). The agent:
+size), 0.5 GB runtime, and a KV cache per 8k tokens per parallel slot (Ollama allocates `num_ctx` ×
+`OLLAMA_NUM_PARALLEL`): the model's own, read from Ollama (`/api/show`: layers × KV heads × head
+size, f16), else max(0.25, params × 0.12) GB. The agent:
 
 - lowers its context window, then its parallel slots, until its model fits, even an explicit
   `AGENT_CONTEXT_WINDOW`, and logs and reports the effective values;
@@ -250,7 +251,29 @@ size), 0.5 GB runtime, and a KV cache of max(0.25, params × 0.12) GB per 8k tok
 - reports its memory (pressure, budget, loaded models, served models with their footprint) with
   each heartbeat; an updated coordinator uses it for admission control.
 
-Default budgets and what fits at the served window (2 slots up to 63 GB, 4 above):
+**The context window** every network call is served with (Ollama runs the model with that
+`num_ctx`, and the agent reports it with each pull and heartbeat) is sized by the agent itself; no
+host needs to set it:
+
+- `AGENT_CONTEXT_WINDOW` (or `--context-window`, or a remote change from the portal) wins;
+- a **discrete GPU** (NVIDIA, AMD, Intel; a pool of cards counts their VRAM together): the KV cache
+  gets what is left of 90% of the VRAM after the model's weights, 0.5 GB runtime and 0.5 GB per
+  card. The window is the largest of 64k / 32k / 16k / 8k that fits for every slot, never past the
+  model's own context length. Below 32k with several slots, the slots come down when one slot
+  reaches 32k (an agentic call is a 7-19k prompt and a 4k reply), unless `AGENT_PARALLEL_INFERENCE`
+  fixes them. The agent reads the model's size and KV geometry from Ollama a few seconds after it
+  starts, before loading it; a card only Vulkan drives is sized this way once Ollama is seen
+  running the model on it (until then, by RAM);
+- a CPU-only host, Apple silicon (unified memory), or a model too big for the VRAM: by RAM, as in
+  the table below.
+
+The memory budget then has the last word (above). Examples: four 8 GB AMD cards (32 GB) with
+`qwen3-coder:30b` (19 GB, 0.75 GB of KV per 8k): 32k with 2 slots; an 8 GB RTX A2000 with an 8B
+model (5 GB, about 1.1 GB of KV per 8k): 8k; the same card with `qwen2.5-coder:7b`: 32k with one
+slot.
+
+Default budgets and what fits at the served window on a CPU or Apple silicon host (2 slots up to
+63 GB, 4 above):
 
 | RAM | Budget | 7B | 9B | 14B | 30B |
 | --- | --- | --- | --- | --- | --- |
@@ -457,7 +480,7 @@ sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" bash install.sh --mesh-token "$MESH"
 | `--tokens-file PATH` | File of `AGENT_ID=TOKEN` lines. |
 | `--enroll API_KEY` | Portal API key (`eck_...`) or session token; `EDGECODER_API_KEY` is the same without the flag. Self-enrol each un-tokened instance and apply the registration token the portal returns, so install and enrolment happen in one run. |
 | `--model TAG` | Ollama model for every instance (default: the strongest that fits each instance's VRAM, see the table below; on a Mac or CPU host the recommended model for its memory). |
-| `--context-window N` | Context window (tokens, 2048 to 131072) every network call is served with: `AGENT_CONTEXT_WINDOW`. Default: sized by memory and model. |
+| `--context-window N` | Context window (tokens, 2048 to 131072) every network call is served with: `AGENT_CONTEXT_WINDOW`. Default: sized by the model and the GPU's free VRAM (RAM without a discrete GPU). |
 | `--parallel N` | Parallel model calls per instance, 1 to 16: the agent's `AGENT_PARALLEL_INFERENCE` and the instance's Ollama `OLLAMA_NUM_PARALLEL`. Default: sized by VRAM and model. |
 | `--ollama-env KEY=VALUE` | Extra environment for every instance's Ollama server; repeatable (for example `OLLAMA_VULKAN=1` for AMD cards ROCm does not support). Recorded in `EDGECODER_INSTALL_ARGS` and kept by later runs and updates; `KEY=` removes one. Systemd drop-ins in `edgecoder-ollama-<n>.service.d/` also survive updates and win over these. |
 | `--keep-alive DUR` | How long Ollama keeps the model loaded after a call: a duration (`30m`, `1h30m`), seconds, or `-1` to never unload. Written as the agent's `AGENT_MODEL_KEEP_ALIVE` and the instance's Ollama `OLLAMA_KEEP_ALIVE`. Default `30m`. |

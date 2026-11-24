@@ -13,7 +13,9 @@
  *   weights  = the model's file size (Ollama /api/tags), else params(B) x bytes per param by quant
  *              (q4: 0.6 GB/B, q5: 0.72, q6: 0.85, q8: 1.07, f16: 2.0)
  *   runtime  = 0.5 GB (compute graph, buffers)
- *   KV cache = max(0.25 GB, params(B) x 0.12 GB) per 8k tokens per parallel slot
+ *   KV cache = per 8k tokens per parallel slot: the model's own (Ollama /api/show: layers x KV
+ *              heads x head size, learnModelFacts) once the agent has looked, else
+ *              max(0.25 GB, params(B) x 0.12 GB)
  *              (Ollama allocates num_ctx x OLLAMA_NUM_PARALLEL when it loads a model)
  *
  * Shared by the agent (src/swarm/worker-runner.ts: what to load, advertise and serve) and the
@@ -53,15 +55,92 @@ export function bytesPerParamGb(model: string): number {
   return 0.6;
 }
 
-/** The weights in memory: the model's file size when known, else by parameters and quant. */
+/** The weights in memory: the model's file size when known (given, or learned from Ollama), else by parameters and quant. */
 export function weightsBytes(model: string, sizeBytes?: number): number {
   if (sizeBytes && sizeBytes > 0) return sizeBytes;
+  const learned = modelFacts(model)?.sizeBytes;
+  if (learned) return learned;
   return paramsB(model) * bytesPerParamGb(model) * GB;
 }
 
-/** KV cache per parallel slot per 8k tokens (f16). */
+/**
+ * What the agent has learned about an installed model from Ollama: its file size (/api/tags) and,
+ * from /api/show's model_info, its exact KV-cache size per token (layers x KV heads x head size)
+ * and its native context length. Learned facts replace the parameter-count estimates above; until
+ * a model has been looked at (or for an architecture Ollama does not describe) the estimates stay.
+ */
+export interface ModelFacts {
+  sizeBytes?: number;
+  /** f16 KV cache per parallel slot per 8k tokens. */
+  kvBytesPer8k?: number;
+  /** The model's own context length (model_info <arch>.context_length). */
+  contextLength?: number;
+}
+const learnedFacts = new Map<string, ModelFacts>();
+const factsKey = (model: string): string => (model.includes(":") ? model : `${model}:latest`);
+
+/** Records facts about a model; true when something changed. Invalid values are ignored. */
+export function learnModelFacts(model: string, facts: ModelFacts): boolean {
+  const key = factsKey(model);
+  const prev = learnedFacts.get(key) ?? {};
+  const next: ModelFacts = { ...prev };
+  for (const k of ["sizeBytes", "kvBytesPer8k", "contextLength"] as const) {
+    const v = facts[k];
+    if (typeof v === "number" && Number.isFinite(v) && v > 0) next[k] = Math.round(v);
+  }
+  if (prev.sizeBytes === next.sizeBytes && prev.kvBytesPer8k === next.kvBytesPer8k && prev.contextLength === next.contextLength) return false;
+  learnedFacts.set(key, next);
+  return true;
+}
+export function modelFacts(model: string): ModelFacts | undefined {
+  return learnedFacts.get(factsKey(model));
+}
+/** Tests: forget every learned fact. */
+export function forgetModelFacts(): void {
+  learnedFacts.clear();
+}
+
+const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined);
+
+/**
+ * KV cache per 8k tokens (f16) and native context from Ollama /api/show `model_info`
+ * (GGUF metadata): block_count x head_count_kv x (key_length + value_length) x 2 bytes per token.
+ * head_count_kv may be per layer (an array: summed); key_length defaults to
+ * embedding_length / head_count. Missing or odd metadata: those fields are left out.
+ */
+export function modelFactsFromModelInfo(info: Record<string, unknown> | undefined): Pick<ModelFacts, "kvBytesPer8k" | "contextLength"> {
+  if (!info || typeof info !== "object") return {};
+  const arch = info["general.architecture"];
+  if (typeof arch !== "string" || !arch) return {};
+  const g = (k: string): unknown => info[`${arch}.${k}`];
+  const out: Pick<ModelFacts, "kvBytesPer8k" | "contextLength"> = {};
+  const ctx = num(g("context_length"));
+  if (ctx) out.contextLength = ctx;
+  const layers = num(g("block_count"));
+  const headsRaw = g("attention.head_count");
+  const heads = Array.isArray(headsRaw) ? Math.max(0, ...headsRaw.map((h) => num(h) ?? 0)) || undefined : num(headsRaw);
+  const kvRaw = g("attention.head_count_kv");
+  let kvHeadsTotal: number | undefined;
+  if (Array.isArray(kvRaw)) {
+    const per = kvRaw.map((h) => (typeof h === "number" && Number.isFinite(h) && h >= 0 ? h : Number.NaN));
+    if (per.length > 0 && per.every((h) => !Number.isNaN(h))) kvHeadsTotal = per.reduce((a, b) => a + b, 0);
+  } else if (layers) {
+    const kvHeads = num(kvRaw) ?? heads;
+    if (kvHeads) kvHeadsTotal = kvHeads * layers;
+  }
+  const embd = num(g("embedding_length"));
+  const keyLen = num(g("attention.key_length")) ?? (embd && heads ? embd / heads : undefined);
+  const valueLen = num(g("attention.value_length")) ?? keyLen;
+  if (kvHeadsTotal && keyLen && valueLen) {
+    const perToken = kvHeadsTotal * (keyLen + valueLen) * 2;
+    if (Number.isFinite(perToken) && perToken > 0) out.kvBytesPer8k = Math.round(perToken * 8192);
+  }
+  return out;
+}
+
+/** KV cache per parallel slot per 8k tokens (f16): learned from Ollama when known, else max(0.25, params x 0.12) GB. */
 export function kvBytesPer8kSlot(model: string): number {
-  return Math.max(0.25, paramsB(model) * 0.12) * GB;
+  return modelFacts(model)?.kvBytesPer8k ?? Math.max(0.25, paramsB(model) * 0.12) * GB;
 }
 
 export interface ModelEstimate {
