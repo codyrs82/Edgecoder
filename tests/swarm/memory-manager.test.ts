@@ -188,3 +188,34 @@ describe("host memory manager with vLLM / MLX (the engine holds its model)", () 
     expect((await m.admit("qwen3-coder:30b")).ok).toBe(false);
   });
 });
+
+describe("host memory manager: model facts from Ollama", () => {
+  it("reads /api/show for installed models (the configured one first) and tells the agent", async () => {
+    const { forgetModelFacts, modelFacts } = await import("../../src/swarm/memory-budget.js");
+    forgetModelFacts();
+    const { ollama } = fakeOllama([["qwen2.5-coder:7b", 4.7], ["qwen3.5:9b", 6.6]]);
+    const shown: string[] = [];
+    ollama.show = async (name) => {
+      shown.push(name);
+      return { modelInfo: { "general.architecture": "qwen2", "qwen2.block_count": 28, "qwen2.attention.head_count": 28, "qwen2.attention.head_count_kv": 4, "qwen2.embedding_length": 3584, "qwen2.context_length": 32_768 } };
+    };
+    let told = 0;
+    const m = new HostMemoryManager({
+      ollama,
+      readPressure: (): MemorySnapshot => ({ level: "normal", totalBytes: 48 * GB, availableBytes: 24 * GB, detail: "test" }),
+      budgetBytes: memoryBudgetBytes(48 * GB),
+      settings: () => ({ primary: "qwen3.5:9b", contextWindow: 32768, slots: 2, kvSlots: 2 }),
+      guardEnabled: true,
+      onModelFacts: () => told++,
+    });
+    // Two refreshes at once: the second waits for the first.
+    await Promise.all([m.refresh(), m.refresh()]);
+    expect(shown).toEqual(["qwen3.5:9b", "qwen2.5-coder:7b"]);
+    expect(told).toBe(1);
+    expect(modelFacts("qwen3.5:9b")).toEqual({ sizeBytes: Math.round(6.6 * GB), kvBytesPer8k: 0.4375 * GB, contextLength: 32_768 });
+    await m.refresh();
+    expect(shown).toHaveLength(2); // read once
+    expect(told).toBe(1);
+    forgetModelFacts();
+  });
+});

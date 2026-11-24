@@ -36,6 +36,8 @@ export interface OllamaAdmin {
   remove(model: string): Promise<void>;
   /** Unloads a model now (keep_alive 0). */
   unload(model: string): Promise<void>;
+  /** /api/show model_info (GGUF metadata: layers, KV heads, context length); the agent sizes its context window from it. */
+  show?(model: string): Promise<{ modelInfo?: Record<string, unknown> }>;
 }
 
 function base(host: string | undefined): string {
@@ -69,6 +71,10 @@ export function createOllamaAdmin(host: string | undefined, opts: { timeoutMs?: 
         .filter((m) => typeof m.name === "string")
         .slice(0, 200)
         .map((m) => ({ name: String(m.name), sizeBytes: Number(m.size) || 0, modifiedAt: m.modified_at }));
+    },
+    async show(model) {
+      const t = (await json("POST", "/api/show", { model })) as { model_info?: unknown };
+      return t.model_info && typeof t.model_info === "object" ? { modelInfo: t.model_info as Record<string, unknown> } : {};
     },
     async loaded() {
       const t = (await json("GET", "/api/ps")) as { models?: Array<{ name?: string; size?: number; size_vram?: number; expires_at?: string }> };

@@ -5,8 +5,8 @@ import { request } from "undici";
 import WebSocket from "ws";
 import { randomUUID, createHash } from "node:crypto";
 import { cpus, freemem, hostname, totalmem } from "node:os";
-import { parallelInferenceFor, servedContextWindow } from "./parallelism.js";
-import { fitModel, fmtGb, memoryBudgetBytes, memoryBudgetPct } from "./memory-budget.js";
+import { defaultServing, parallelInferenceFor } from "./parallelism.js";
+import { fitModel, fmtGb, memoryBudgetBytes, memoryBudgetPct, modelFacts } from "./memory-budget.js";
 import { readMemoryPressure } from "./memory-pressure.js";
 import { HostMemoryManager } from "./memory-manager.js";
 import { paramsB } from "../inference-api/auto-route.js";
@@ -47,7 +47,7 @@ import { ensureOllamaModelInstalled, isOllamaLibraryModelName } from "../model/o
 import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
 import { BLEMeshManager } from "../mesh/ble/ble-mesh-manager.js";
 import { BleCosignProvider } from "../mesh/ble/ble-cosign.js";
-import { paramSizeBillions } from "../model/catalog.js";
+import { catalogEntryForTag, paramSizeBillions } from "../model/catalog.js";
 import { ledgerRowToTransaction, settledBleTxIds } from "../mesh/ble/offline-ledger.js";
 import { localStore } from "../db/local-store.js";
 import { hashRequestBody, signRequest } from "../security/request-signing.js";
@@ -292,24 +292,55 @@ let modelOverrides: ModelOverridesFile = (() => {
   }
   return kept;
 })();
-/** The effective model settings from the env and the override file (also re-run after a remote change). */
+/**
+ * The discrete GPU the agent sizes its model from (VRAM, summed over a pool, and how many cards),
+ * or undefined: no GPU, Apple's unified memory (counted as RAM), or a card only Vulkan can drive
+ * that Ollama has not been seen using yet (src/swarm/gpu-claim.ts; once seen, it stays).
+ */
+let gpuSizingConfirmed = false;
+function sizingGpu(): { vramBytes: number; count?: number } | undefined {
+  if (CLOUD_MODE) return undefined;
+  const gpu = HARDWARE_PROFILE.gpu as { vendor?: string; vramGb?: number; count?: number } | undefined;
+  if (!gpu || gpu.vendor === "apple" || !gpu.vramGb || gpu.vramGb <= 0) return undefined;
+  if (GPU_NEEDS_OFFLOAD_PROOF && !gpuSizingConfirmed) return undefined;
+  return { vramBytes: gpu.vramGb * 1024 ** 3, ...(gpu.count ? { count: gpu.count } : {}) };
+}
+/** The effective model settings from the env and the override file (also re-run after a remote change, or when Ollama describes the model). */
 function computeModelSettings(): CurrentModelSettings {
   const layered = layerOverrides(ENV_MODEL_SETTINGS, modelOverrides);
   const model = layered.env.model || W.OLLAMA_MODEL;
   const modelParamsB = model ? paramsB(model) : undefined;
-  // By memory and the model's size, never past this machine's OLLAMA_NUM_PARALLEL when set (src/swarm/parallelism.ts).
+  const gpu = sizingGpu();
+  // By memory and the model's size, never past this machine's OLLAMA_NUM_PARALLEL when set
+  // (src/swarm/parallelism.ts); on a GPU, defaultServing may give up slots for a 32k window.
   const parallel = parallelInferenceFor(totalmem(), layered.env.parallel, { modelParamsB, ollamaNumParallel: process.env.OLLAMA_NUM_PARALLEL });
+  const parRaw = Number(layered.env.parallel);
   const ctxRaw = layered.env.contextWindow !== undefined ? Number(layered.env.contextWindow) : undefined;
-  /** One context window for every network call (Ollama reloads the model when num_ctx changes). */
-  const wantContext = servedContextWindow(totalmem(), Number.isInteger(ctxRaw) ? ctxRaw : undefined, { modelParamsB, slots: parallel });
+  /**
+   * One context window for every network call (Ollama reloads the model when num_ctx changes):
+   * AGENT_CONTEXT_WINDOW, else from a discrete GPU's free VRAM after the weights, using what Ollama
+   * says about the model (size, KV cache per token, context length), else by RAM (parallelism.ts).
+   */
+  const facts = model ? modelFacts(model) : undefined;
+  const want = defaultServing(totalmem(), Number.isInteger(ctxRaw) ? ctxRaw : undefined, {
+    modelParamsB,
+    slots: parallel,
+    slotsFixed: Number.isInteger(parRaw) && parRaw >= 1 && parRaw <= 16,
+    discreteGpu: OPENAI_ENGINE ? undefined : gpu,
+    weightsBytes: facts?.sizeBytes,
+    kvBytesPer8k: facts?.kvBytesPer8k,
+    nativeContext: facts?.contextLength ?? (model ? catalogEntryForTag(model)?.contextTokens : undefined),
+    kvSlotsFloor: OLLAMA_SERVER_PARALLEL
+  });
+  const wantContext = want.contextWindow;
   // The memory budget has the last word, an explicit AGENT_CONTEXT_WINDOW / AGENT_PARALLEL_INFERENCE
   // included: the window (then the slots) come down until the model fits (memory-budget.ts fitModel).
   let contextWindow = wantContext;
-  let slots = parallel;
+  let slots = want.slots;
   if (model && !OPENAI_ENGINE && !CLOUD_MODE) {
-    const fit = fitModel(model, { budgetBytes: MEMORY_BUDGET_BYTES, wantContext, wantSlots: parallel, fixedKvSlots: OLLAMA_SERVER_PARALLEL });
-    if (fit.contextWindow !== wantContext || fit.slots !== parallel || !fit.fits) {
-      console.warn(`[worker] memory budget ${fmtGb(MEMORY_BUDGET_BYTES)}: ${model} at ${wantContext} tokens x ${parallel} slot(s) ${fit.fits ? "does not fit; serving" : "does not fit even at"} ${fit.contextWindow} tokens x ${fit.slots} slot(s) (${fmtGb(fit.bytes)})`);
+    const fit = fitModel(model, { budgetBytes: MEMORY_BUDGET_BYTES, wantContext, wantSlots: want.slots, fixedKvSlots: OLLAMA_SERVER_PARALLEL });
+    if (fit.contextWindow !== wantContext || fit.slots !== want.slots || !fit.fits) {
+      console.warn(`[worker] memory budget ${fmtGb(MEMORY_BUDGET_BYTES)}: ${model} at ${wantContext} tokens x ${want.slots} slot(s) ${fit.fits ? "does not fit; serving" : "does not fit even at"} ${fit.contextWindow} tokens x ${fit.slots} slot(s) (${fmtGb(fit.bytes)})`);
     }
     contextWindow = fit.contextWindow;
     slots = fit.slots;
@@ -382,6 +413,8 @@ if (CLOUD_MODE && !INFERENCE_ONLY) {
 }
 /** Ollama keep_alive for network calls: a dedicated (inference-only) host keeps its model loaded. */
 let MODEL_KEEP_ALIVE = modelSettings.keepAlive;
+/** The configured network model has been loaded once (a re-sized window then re-loads it). */
+let networkModelWarmed = false;
 /**
  * Load the network model before taking work, so the first call does not pay a cold load (about
  * 4-5 s on a CPU, and a headers timeout under parallel calls). Bounded: a missing model or a
@@ -404,6 +437,7 @@ async function warmNetworkModel(model: string, why: string): Promise<void> {
     // `generate`: also run a first short generation, whose one-time set-up (seconds to tens of seconds
     // on a GPU) would otherwise land on the first network call or the first benchmark challenge.
     await warmOllamaModel(host, model, { keepAlive: MODEL_KEEP_ALIVE, timeoutMs: 180_000, numCtx: CONTEXT_WINDOW, generate: true });
+    if (model === OLLAMA_MODEL) networkModelWarmed = true;
     console.log(`[agent:${AGENT_ID}] model ${model} loaded (${why}) in ${Date.now() - started} ms, context ${CONTEXT_WINDOW}, keep_alive ${MODEL_KEEP_ALIVE}, ${MAX_PARALLEL_INFERENCE} parallel`);
   } catch (e) {
     console.warn(`[agent:${AGENT_ID}] could not load model ${model} (${why}): ${String(e).slice(0, 200)}`);
@@ -774,7 +808,8 @@ const hostMemory = new HostMemoryManager({
     const r = await announceGoingOffline((body) => post("/heartbeat", body, { retries: 0, timeoutMs: 4_000, signed: true }), AGENT_ID, "drain", 5_000);
     console.warn(`[agent:${AGENT_ID}] critical memory pressure: network calls cancelled${r.ok ? `, ${r.released} claim(s) handed back` : ""}`);
   },
-  log: (msg) => console.log(`[agent:${AGENT_ID}] ${msg}`)
+  log: (msg) => console.log(`[agent:${AGENT_ID}] ${msg}`),
+  onModelFacts: () => resizeServing("sized from Ollama's model details")
 });
 setInterval(() => void hostMemory.refresh(), 5_000).unref?.();
 void hostMemory.refresh();
@@ -800,6 +835,24 @@ async function applyModelSettings(): Promise<void> {
   }
   console.log(`[agent:${AGENT_ID}] model settings now: ${OLLAMA_MODEL}, context ${CONTEXT_WINDOW}, ${MAX_PARALLEL_INFERENCE} parallel, keep_alive ${MODEL_KEEP_ALIVE}`);
   if (SERVES_OLLAMA) await warmNetworkModel(OLLAMA_MODEL, "remote change");
+}
+/**
+ * Re-size the context window (and slots) when its inputs change after startup: Ollama described
+ * the model (size, KV cache per token, context length: memory-manager.ts learnFacts), or a
+ * Vulkan-only GPU was confirmed in use. The new window is reported with the next pull and register;
+ * an already loaded model is re-loaded with it now, so no network call pays for the reload.
+ */
+function resizeServing(why: string): void {
+  if (OPENAI_ENGINE || CLOUD_HOST) return;
+  const next = computeModelSettings();
+  if (next.model !== OLLAMA_MODEL) return; // a model change is applied by applyModelSettings
+  if (next.contextWindow === CONTEXT_WINDOW && next.parallel === MAX_PARALLEL_INFERENCE) return;
+  console.log(`[agent:${AGENT_ID}] context window ${CONTEXT_WINDOW} -> ${next.contextWindow} tokens, ${MAX_PARALLEL_INFERENCE} -> ${next.parallel} parallel (${why})`);
+  modelSettings = next;
+  CONTEXT_WINDOW = next.contextWindow;
+  MAX_PARALLEL_INFERENCE = next.parallel;
+  lastRegisteredAtMs = 0;
+  if (networkModelWarmed && SERVES_OLLAMA && PULLS_FROM_COORDINATOR) void warmNetworkModel(OLLAMA_MODEL, "context window resized");
 }
 const modelControl = new ModelControlAgent({
   agentId: AGENT_ID,
@@ -2007,6 +2060,11 @@ async function loop(): Promise<void> {
               if (next.claimGpu !== gpuClaim.claimGpu) lastRegisteredAtMs = 0;
             }
             gpuClaim = next;
+            // Ollama runs the model on the card: size the context window from its VRAM from now on.
+            if (next.claimGpu && next.evidence === "offload" && !gpuSizingConfirmed) {
+              gpuSizingConfirmed = true;
+              resizeServing("GPU in use");
+            }
           }
           if (CLOUD_HOST) {
             // A key the provider refuses: check it now and then. Paused or resumed: tell the
