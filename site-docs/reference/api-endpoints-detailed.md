@@ -152,7 +152,7 @@ Session cookie auth. Cloud bots use `agentId: "cloud"`. Source: `src/portal/rout
 
 ### Code from your phone
 
-Session cookie auth. The portal checks the machine is one of the user's enrolled nodes; each coordinator checks verified ownership again. Source: `src/portal/routes/code.ts`.
+Session cookie auth. The portal checks the machine is one of the user's enrolled nodes; each coordinator checks verified ownership again. Source: `src/portal/routes/code.ts`. The iOS app's Code mode and the website's Code page (`/portal/code`, `src/portal/pages/code.ts`) both use these routes.
 
 | Method | Path | Purpose |
 |---|---|---|

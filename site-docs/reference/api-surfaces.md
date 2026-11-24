@@ -34,7 +34,7 @@ Representative endpoint groups:
 - Wallet: balance and top-up with Lightning (`/portal/api/wallet/*`), payout destination (`/wallet/payout-destination`) and withdrawals (`/wallet/payouts*`). `/wallet/onboarding` remains only as a deprecated status for old clients; no wallet is created.
 - Web chat: models, the streaming chat, saved conversations and the web tool's status (`/portal/api/chat`, `/portal/api/conversations*`, `/portal/api/web/status`), plus the chat-sharing consent (`/me/chat-sharing`).
 - Bots: desktop and cloud bots in one list, create, message and control (`/portal/api/bots*`).
-- Code from your phone: machines, trusted projects and sessions, and commands relayed to a desktop app (`/portal/api/code/*`).
+- Code from your phone: machines, trusted projects and sessions, and commands relayed to a desktop app (`/portal/api/code/*`), used by the iOS app's Code mode and the website's Code page (`/portal/code`).
 - Compute: overview, options and reservations (`/portal/api/compute/*`).
 - Hosting by request: the public form (`POST /host/request`) and the signed-in account's host status (`/portal/api/host/status`).
 - Public proof of reserves page (`/reserves`, `/reserves.json`).
