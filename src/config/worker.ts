@@ -3,7 +3,7 @@
 
 import { z } from "zod";
 import { envEnum, envEnumCi, envFlag, envFlagWord, envInt, envNumber, envPort, envUrl } from "../common/config.js";
-import { computeClassEnv, discoveryEnv, modelEnv, releaseEnv, sandboxEnv, serviceUrlsEnv, trustEnv, webReplyEnv } from "./shared.js";
+import { cloudModelsEnv, computeClassEnv, discoveryEnv, modelEnv, releaseEnv, sandboxEnv, serviceUrlsEnv, trustEnv, webReplyEnv } from "./shared.js";
 
 const str = () => z.string().optional();
 const amount = () => envNumber(undefined, { min: 0 });
@@ -24,6 +24,7 @@ export const workerConfigSchema = z.object({
   ...discoveryEnv,
   ...computeClassEnv,
   ...webReplyEnv,
+  ...cloudModelsEnv,
   NODE_ENV: str(),
   HOST: str(),
 
@@ -83,7 +84,34 @@ export const workerConfigSchema = z.object({
    * their own (docs/inference-engines.md); the agent checks they are up and serve a catalog model,
    * and never pulls or switches models in them. Keep LOCAL_MODEL_PROVIDER=ollama-local with them.
    */
-  EDGECODER_ENGINE: envEnumCi(["ollama", "vllm", "mlx"]),
+  EDGECODER_ENGINE: envEnumCi(["ollama", "vllm", "mlx", "cloud"]),
+  // ---- cloud host (EDGECODER_ENGINE=cloud or `edgecoder cloud-host`; docs/cloud-host.md) ----
+  /** The platform's API key for the hosted model provider. Required for a cloud host; never logged. */
+  CLOUD_HOST_API_KEY: str(),
+  /** Hosted model provider: fireworks (default). */
+  CLOUD_HOST_PROVIDER: envEnumCi(["fireworks"]),
+  /** The provider's OpenAI-compatible base URL; default https://api.fireworks.ai/inference/v1. */
+  CLOUD_HOST_BASE_URL: envUrl(),
+  /** Comma-separated cloud model ids to serve (src/cloud-host/catalog.ts); unset = every catalog model of the provider. */
+  CLOUD_HOST_MODELS: str(),
+  /** Comma-separated <model id>=<provider model id> overrides of the catalog's provider ids. */
+  CLOUD_HOST_MODEL_MAP: str(),
+  /** Calls at once (1-16); default 16. */
+  CLOUD_HOST_MAX_SLOTS: envInt(undefined, { min: 1, max: 16 }),
+  /** Retries of a provider 429 / 5xx before anything streamed; default 3. */
+  CLOUD_HOST_MAX_RETRIES: envInt(undefined, { min: 0, max: 10 }),
+  /** Daily provider spend cap, USD (UTC day); default 200. */
+  CLOUD_HOST_DAILY_CAP_USD: envNumber(undefined, { min: 0 }),
+  /** Monthly provider spend cap, USD (UTC month); default 2000. */
+  CLOUD_HOST_MONTHLY_CAP_USD: envNumber(undefined, { min: 0 }),
+  /** Percent of a cap that sends the ops alert; default 80. */
+  CLOUD_HOST_ALERT_PCT: envNumber(undefined, { min: 1, max: 100 }),
+  /** Provider auth failures (401/403) in a row that pause the host; default 3. */
+  CLOUD_HOST_AUTH_FAILURES: envInt(undefined, { min: 1, max: 100 }),
+  /** While paused for a bad key, minutes between key checks; default 15. */
+  CLOUD_HOST_AUTH_PROBE_MINUTES: envNumber(undefined, { min: 1, max: 1440 }),
+  /** File the spend totals are kept in; default <config dir>/cloud-host-spend.json (use a volume on Fly). */
+  CLOUD_HOST_STATE_FILE: str(),
   /** vLLM's OpenAI-compatible server. Default http://127.0.0.1:8000. */
   VLLM_URL: envUrl(),
   /** vLLM --api-key, when the server was started with one. */

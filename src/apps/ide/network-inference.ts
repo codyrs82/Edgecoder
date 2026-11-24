@@ -16,7 +16,7 @@ import type { RoutingHints } from "../../inference-api/job-descriptor.js";
 import type { CoordinatorChoice } from "../../common/coordinator-choice.js";
 
 export const NETWORK_PREFIX = "network/";
-const CLASSES = new Set(["cpu", "apple", "gpu", "gpu.dc"]);
+const CLASSES = new Set(["cpu", "apple", "gpu", "gpu.dc", "cloud"]);
 
 export type Transport = (method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal) => Promise<{ status: number; json: Record<string, unknown> }>;
 

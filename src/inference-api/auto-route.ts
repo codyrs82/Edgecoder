@@ -25,6 +25,7 @@
  */
 
 import { catalogEntryForTag } from "../model/catalog.js";
+import { cloudModelSpec } from "../cloud-host/catalog.js";
 import { supportsTools } from "../model/tool-support.js";
 import type { ChatRequest } from "./types.js";
 import { isFrontierModelId } from "./frontier-models.js";
@@ -211,9 +212,13 @@ export function sizeWorkload(
 /**
  * Billions of parameters (total, for MoE models) of a model: from its tag ("qwen2.5-coder:7b" -> 7,
  * "qwen3-coder:30b" -> 30), else from the catalog's size for a tag that carries none
- * ("qwen3-coder-next:latest" -> 80); unknown models count as 7. Pricing and Auto's sizing use it.
+ * ("qwen3-coder-next:latest" -> 80), or a cloud model's ("glm-5.3" -> 744, src/cloud-host/catalog.ts);
+ * unknown models count as 7. Pricing and Auto's sizing use it (a cloud model is priced by its own
+ * cost-plus price, economy/cloud-pricing.ts, never by this size).
  */
 export function paramsB(model: string): number {
+  const cloud = cloudModelSpec(model);
+  if (cloud) return cloud.paramsB;
   const m = /[:\-_](\d+(?:\.\d+)?)b\b/i.exec(model);
   if (m) return Number(m[1]);
   const fromCatalog = Number(/^\s*([\d.]+)\s*B/i.exec(catalogEntryForTag(model)?.paramSize ?? "")?.[1]);
@@ -369,7 +374,7 @@ export function routeFromModelId(id: string): Route | null {
     const rest = t.slice(8);
     const at = rest.lastIndexOf("@");
     const suffix = at > 0 ? rest.slice(at + 1) : "";
-    const known = suffix === "any" || suffix in CLASS_SPEED;
+    const known = suffix === "any" || suffix in CLASS_SPEED || suffix === "cloud";
     const model = known ? rest.slice(0, at) : rest;
     const cls = known ? suffix : "any";
     return { placement: "network", model, computeClass: cls, cSatsPerSecond: 0, reason: `network ${cls} · ${model}` };
@@ -377,7 +382,7 @@ export function routeFromModelId(id: string): Route | null {
   return { placement: "local", model: t, cSatsPerSecond: 0, reason: `this computer (free) · ${t}` };
 }
 
-export const CLASS_NAMES: Record<string, string> = { any: "", cpu: "CPU", apple: "Apple", gpu: "GPU", "gpu.dc": "Datacenter GPU" };
+export const CLASS_NAMES: Record<string, string> = { any: "", cpu: "CPU", apple: "Apple", gpu: "GPU", "gpu.dc": "Datacenter GPU", cloud: "Cloud" };
 
 /**
  * What Auto decided for one model call, for status events (`route`) and the UI: where it runs, the

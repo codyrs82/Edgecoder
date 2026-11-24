@@ -15,6 +15,9 @@ import { ENGINE_PRESETS, openAiEngineChat, resolveEngine, type EngineConfig } fr
 import type { ChatMessage, ToolSpec } from "../inference-api/types.js";
 import { parseModelAliases } from "../model/engine-models.js";
 import { engineServing, probeEngine, type EngineStatus } from "./engine-probe.js";
+import { CloudHost, alertNotifier, cloudHostConfigFromEnv } from "../cloud-host/host.js";
+import { configureCloudCatalog } from "../cloud-host/catalog.js";
+import { alertConfigFromEnv } from "../alerting/config.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
 import { Subtask, SubtaskResult, BLETaskRequest, Language, MeshMessage, SandboxMode } from "../common/types.js";
 import { execFileSync } from "node:child_process";
@@ -153,19 +156,46 @@ const OS = (W.AGENT_OS ?? platformInfo.os) as "debian" | "ubuntu" | "windows" | 
  * catalog model the engine serves, and nothing Ollama-specific (pull, warm, keep_alive, remote
  * model changes) runs.
  */
-const ENGINE: EngineConfig = (() => {
-  try {
-    return resolveEngine(process.env);
-  } catch (e) {
-    console.error(`[worker] ${(e as Error).message}`);
-    process.exit(1);
-  }
-})();
+/*
+ * A cloud host (EDGECODER_ENGINE=cloud, or `edgecoder cloud-host`; docs/cloud-host.md): the same
+ * agent with a hosted model API (src/cloud-host/) in place of Ollama / vLLM. It serves the enabled
+ * cloud models with the platform's key, registers in the `cloud` class, and pauses itself at its
+ * spend caps. Nothing Ollama-specific (pull, warm, memory budget, benchmark, remote model control) runs.
+ */
+const CLOUD_MODE = (W.EDGECODER_ENGINE ?? "").trim().toLowerCase() === "cloud";
+const ENGINE: EngineConfig = CLOUD_MODE
+  ? { kind: "ollama" }
+  : (() => {
+      try {
+        return resolveEngine(process.env);
+      } catch (e) {
+        console.error(`[worker] ${(e as Error).message}`);
+        process.exit(1);
+      }
+    })();
 const OPENAI_ENGINE = ENGINE.kind === "ollama" ? undefined : ENGINE;
+const CLOUD_HOST: CloudHost | undefined = CLOUD_MODE
+  ? (() => {
+      try {
+        configureCloudCatalog(W.CLOUD_MODELS_JSON);
+        const cfg = cloudHostConfigFromEnv(W, { stateFile: `${PLATFORM_CONFIG_DIR}/cloud-host-spend.json` });
+        const host = new CloudHost(cfg, {
+          notify: alertNotifier(alertConfigFromEnv(process.env), { agentId: W.AGENT_ID ?? hostname(), provider: cfg.label, portalUrl: W.PORTAL_URL ?? "", log: (line) => console.warn(`[cloud-host] ${line}`) })
+        });
+        const st = host.guard.status();
+        // Never the key: only where it goes and what is served.
+        console.log(`[cloud-host] ${cfg.label} at ${cfg.baseUrl}: serving ${cfg.models.join(", ")} (${cfg.maxSlots} slots); spend today $${st.dayUsd.toFixed(2)} of $${cfg.guard.dailyCapUsd}, this month $${st.monthUsd.toFixed(2)} of $${cfg.guard.monthlyCapUsd}${st.paused ? ` — paused (${st.reason})` : ""}`);
+        return host;
+      } catch (e) {
+        console.error(`[worker] cloud host: ${(e as Error).message}`);
+        process.exit(1);
+      }
+    })()
+  : undefined;
 const ENGINE_LABEL = OPENAI_ENGINE ? ENGINE_PRESETS[OPENAI_ENGINE.preset].label : "Ollama";
 const ENGINE_ALIASES = parseModelAliases(W.ENGINE_MODEL_ALIASES);
 if (OPENAI_ENGINE && W.LOCAL_MODEL_PROVIDER !== "ollama-local") console.log(`[worker] EDGECODER_ENGINE=${OPENAI_ENGINE.preset}: serving the local model (LOCAL_MODEL_PROVIDER=ollama-local implied)`);
-const PROVIDER = OPENAI_ENGINE ? "ollama-local" : W.LOCAL_MODEL_PROVIDER;
+const PROVIDER = OPENAI_ENGINE || CLOUD_MODE ? "ollama-local" : W.LOCAL_MODEL_PROVIDER;
 const OLLAMA_HOST = W.OLLAMA_HOST;
 const OLLAMA_AUTO_INSTALL = W.OLLAMA_AUTO_INSTALL;
 const hardwareProbe: Probe = (cmd, args) => {
@@ -213,7 +243,7 @@ const HARDWARE_PROFILE = buildHardwareProfile();
  */
 let gpuClaim: GpuClaimDecision = decideGpuClaim({ needsProof: GPU_NEEDS_OFFLOAD_PROOF });
 let gpuClaimCheckedAtMs = 0;
-const claimedHardwareProfile = (): Record<string, unknown> => claimedProfile(HARDWARE_PROFILE, gpuClaim.claimGpu);
+const claimedHardwareProfile = (): Record<string, unknown> => (CLOUD_HOST ? CLOUD_HOST.hardwareProfile() : claimedProfile(HARDWARE_PROFILE, gpuClaim.claimGpu));
 /**
  * Host memory budget (src/swarm/memory-budget.ts): AGENT_MEMORY_BUDGET_PCT of RAM (default 60%),
  * or 90% of a discrete GPU's VRAM. Network models are loaded, served and sized to fit it.
@@ -275,7 +305,7 @@ function computeModelSettings(): CurrentModelSettings {
   // included: the window (then the slots) come down until the model fits (memory-budget.ts fitModel).
   let contextWindow = wantContext;
   let slots = parallel;
-  if (model && !OPENAI_ENGINE) {
+  if (model && !OPENAI_ENGINE && !CLOUD_MODE) {
     const fit = fitModel(model, { budgetBytes: MEMORY_BUDGET_BYTES, wantContext, wantSlots: parallel, fixedKvSlots: OLLAMA_SERVER_PARALLEL });
     if (fit.contextWindow !== wantContext || fit.slots !== parallel || !fit.fits) {
       console.warn(`[worker] memory budget ${fmtGb(MEMORY_BUDGET_BYTES)}: ${model} at ${wantContext} tokens x ${parallel} slot(s) ${fit.fits ? "does not fit; serving" : "does not fit even at"} ${fit.contextWindow} tokens x ${fit.slots} slot(s) (${fmtGb(fit.bytes)})`);
@@ -293,6 +323,12 @@ let modelSettings = computeModelSettings();
 let OLLAMA_MODEL = modelSettings.model;
 let MAX_PARALLEL_INFERENCE = modelSettings.parallel;
 let CONTEXT_WINDOW = modelSettings.contextWindow;
+if (CLOUD_HOST) {
+  // A hosted API: its slots and window are the cloud host's, not this machine's memory.
+  OLLAMA_MODEL = CLOUD_HOST.config.models[0];
+  MAX_PARALLEL_INFERENCE = CLOUD_HOST.config.maxSlots;
+  CONTEXT_WINDOW = CLOUD_HOST.contextWindow();
+}
 const inflightInference = new Set<Promise<void>>();
 let meshAuthToken = W.MESH_AUTH_TOKEN ?? "";
 const COORDINATOR_HTTP_TIMEOUT_MS = W.COORDINATOR_HTTP_TIMEOUT_MS;
@@ -310,7 +346,8 @@ const SANDBOX_MODE: SandboxMode = resolveSandboxMode(process.env);
  * coordinator's challenges, which are what actually grant a tier. AGENT_BENCHMARK=0 turns both off
  * (the agent then earns at its class base tier).
  */
-const BENCHMARK_ENABLED = W.AGENT_BENCHMARK;
+// A cloud host has no hardware to prove (the coordinator admits it by its allowlist).
+const BENCHMARK_ENABLED = W.AGENT_BENCHMARK && !CLOUD_MODE;
 const BENCHMARK_INTERVAL_MS = Math.max(10 * 60_000, W.AGENT_BENCHMARK_INTERVAL_MS || 6 * 60 * 60_000);
 let lastBenchmark: AgentBenchmarkReport | undefined;
 let benchmarkDueAtMs = 0;
@@ -337,6 +374,11 @@ if (W.AGENT_INFERENCE_ONLY && SANDBOX_MODE !== "none") {
   console.warn(`[agent] AGENT_INFERENCE_ONLY is ignored with SANDBOX_MODE=${SANDBOX_MODE}: this agent takes code and inference work`);
 }
 const PULLS_FROM_COORDINATOR = SWARM_EXECUTION_ENABLED || INFERENCE_ONLY;
+if (CLOUD_MODE && !INFERENCE_ONLY) {
+  // A cloud host answers model calls only; it never runs task code.
+  console.error("[worker] a cloud host runs inference only: set SANDBOX_MODE=none and AGENT_INFERENCE_ONLY=1 (the `edgecoder cloud-host` role sets both)");
+  process.exit(1);
+}
 /** Ollama keep_alive for network calls: a dedicated (inference-only) host keeps its model loaded. */
 let MODEL_KEEP_ALIVE = modelSettings.keepAlive;
 /**
@@ -347,6 +389,7 @@ let MODEL_KEEP_ALIVE = modelSettings.keepAlive;
 async function warmNetworkModel(model: string, why: string): Promise<void> {
   // vLLM / MLX load their model at start: check that it is up and serving instead.
   if (OPENAI_ENGINE) return refreshEngine(why);
+  if (CLOUD_HOST) return; // nothing to load: the provider serves the model
   const host = OLLAMA_HOST ?? "http://127.0.0.1:11434";
   const started = Date.now();
   // Never load past the host's memory budget (memory-manager.ts admits it or says why not).
@@ -413,6 +456,8 @@ async function* engineChat(model: string, req: { messages: ChatMessage[]; tools?
 }
 /** The engine is up and serving (always true with Ollama, whose failures show per call). */
 function engineReady(): boolean {
+  // A cloud host is ready unless its spend guard paused it (a spend cap, or a key the provider refuses).
+  if (CLOUD_HOST) return CLOUD_HOST.ready();
   return !OPENAI_ENGINE || engineStatus?.ok === true;
 }
 let warnedNoSandbox = false;
@@ -650,6 +695,8 @@ const updateDrain = process.env.EDGECODER_INSTANCE !== undefined && process.plat
 
 /** Models in this machine's Ollama (embedding-only models left out); [] when it can't be reached. */
 async function listInstalledModels(): Promise<string[]> {
+  // A cloud host: its enabled cloud models, none while paused.
+  if (CLOUD_HOST) return CLOUD_HOST.advertisedModels();
   if (OPENAI_ENGINE) {
     await refreshEngine("refresh");
     return engineStatus?.ok && engineStatus.model ? [engineStatus.model.tag] : [];
@@ -685,13 +732,15 @@ const networkCallAborts = new Set<AbortController>();
  * Host memory (src/swarm/memory-manager.ts): which models this host serves on the network, what
  * may load, and the pressure guard. With vLLM / MLX (or no local model) only the guard applies.
  */
-const MANAGES_OLLAMA_MEMORY = SERVES_OLLAMA && !OPENAI_ENGINE;
+const MANAGES_OLLAMA_MEMORY = SERVES_OLLAMA && !OPENAI_ENGINE && !CLOUD_MODE;
 const hostMemory = new HostMemoryManager({
   ollama: MANAGES_OLLAMA_MEMORY ? ollamaAdmin : { list: async () => [], loaded: async () => [], unload: async () => undefined },
   // vLLM / MLX: the served model is resident and holds the whole budget (vLLM preallocates
   // --gpu-memory-utilization of the VRAM); calls for it are limited by the engine's slots, which
   // come from its reported KV cache (refreshEngine), not from Ollama's /api/ps.
   ...(OPENAI_ENGINE ? { engine: () => (engineStatus?.ok && engineStatus.model ? { model: engineStatus.model.tag, bytes: MEMORY_BUDGET_BYTES } : undefined) } : {}),
+  // A cloud host loads nothing: no plan, so every advertised model is served; only the pressure guard applies.
+  ...(CLOUD_MODE ? { engine: () => undefined } : {}),
   readPressure: () =>
     readMemoryPressure({
       platform: process.platform,
@@ -754,7 +803,7 @@ async function applyModelSettings(): Promise<void> {
 const modelControl = new ModelControlAgent({
   agentId: AGENT_ID,
   // vLLM / MLX serve the model they were started with: model changes are made on the host.
-  enabled: remoteControlEnabled(W.AGENT_REMOTE_CONTROL) && !OPENAI_ENGINE,
+  enabled: remoteControlEnabled(W.AGENT_REMOTE_CONTROL) && !OPENAI_ENGINE && !CLOUD_MODE,
   extraNotes: () => [
     ...(OPENAI_ENGINE ? [`The model is served by ${ENGINE_LABEL} (EDGECODER_ENGINE=${OPENAI_ENGINE.preset}) at ${OPENAI_ENGINE.url}: change it on the host; remote model control is view only`] : []),
     // A Vulkan-only GPU (src/swarm/gpu-claim.ts): say which class the agent claims and why.
@@ -1430,7 +1479,7 @@ async function loop(): Promise<void> {
   console.log(`[agent:${AGENT_ID}] coordinator selected (${discoveredAtStartup && !steeredByRegistry() ? discoveredAtStartup.source : coordinatorSelection.source}): ${coordinator.url}`);
 
   await ensureOllamaModelInstalled({
-    enabled: PROVIDER === "ollama-local" && !OPENAI_ENGINE,
+    enabled: PROVIDER === "ollama-local" && !OPENAI_ENGINE && !CLOUD_MODE,
     autoInstall: OLLAMA_AUTO_INSTALL,
     model: OLLAMA_MODEL,
     role: "agent",
@@ -1849,6 +1898,15 @@ async function loop(): Promise<void> {
             }
             gpuClaim = next;
           }
+          if (CLOUD_HOST) {
+            // A key the provider refuses: check it now and then. Paused or resumed: tell the
+            // coordinator what is served now (a paused host advertises nothing).
+            await CLOUD_HOST.maybeProbeKey();
+            if (CLOUD_HOST.advertisedChanged()) {
+              installedModelsCache = undefined;
+              lastRegisteredAtMs = 0;
+            }
+          }
           if (shouldRegister({ registeredWithUrl, lastRegisteredAtMs }, coordinator.url, Date.now(), REGISTER_REFRESH_MS)) {
             const registerBody = await buildRegisterBody(powerTelemetry);
             const registerResponse = (await post("/register", registerBody, {
@@ -1879,7 +1937,7 @@ async function loop(): Promise<void> {
           const hbActive = currentProvider === "ollama-local" ? hostMemory.activeModel() : undefined;
           const hbMemory = hostMemory.telemetry();
           const hbLocalWeb = await localWeb.capability().catch(() => undefined);
-          const hbBody = { agentId: AGENT_ID, ...(hbLocalWeb ? { localWeb: hbLocalWeb } : {}), powerTelemetry, sandboxMode: SANDBOX_MODE, ...(hbModels.length ? { installedModels: hbModels } : {}), ...(hbOwnerModels ? { ownerModels: hbOwnerModels } : {}), ...(hbActive && hbModels.includes(hbActive) ? { activeModel: hbActive, activeModelParamSize: paramsB(hbActive) } : {}), ...(hbMemory ? { memory: hbMemory } : {}), ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
+          const hbBody = { agentId: AGENT_ID, ...(hbLocalWeb ? { localWeb: hbLocalWeb } : {}), powerTelemetry, sandboxMode: SANDBOX_MODE, ...(hbModels.length || CLOUD_MODE ? { installedModels: hbModels } : {}), ...(hbOwnerModels ? { ownerModels: hbOwnerModels } : {}), ...(hbActive && hbModels.includes(hbActive) ? { activeModel: hbActive, activeModelParamSize: paramsB(hbActive) } : {}), ...(hbMemory ? { memory: hbMemory } : {}), ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
           hb = (await post("/heartbeat", hbBody, { signed: true })) as HeartbeatReply;
           if ("benchmark" in hbBody) benchmarkUnreported = false;
           try { localStore.recordHeartbeat(coordinator.url, hb.blacklisted ? "blacklisted" : "ok", Date.now() - hbStart); } catch (e) { console.warn(`[db] heartbeat write failed: ${e}`); }
@@ -1961,6 +2019,7 @@ async function loop(): Promise<void> {
               await reportStatus("starting", "Preparing to switch model…");
               const switchModel = hb.orchestration.model ?? OLLAMA_MODEL;
               // vLLM / MLX serve the model they were started with: only "keep the current one" can be done here.
+              if (CLOUD_MODE) throw new Error("orchestration_engine_managed: a cloud host serves its configured cloud models; change CLOUD_HOST_MODELS on the host");
               if (OPENAI_ENGINE && (switchModel !== OLLAMA_MODEL || hb.orchestration.provider !== "ollama-local")) throw new Error(`orchestration_engine_managed: ${ENGINE_LABEL} serves ${OLLAMA_MODEL}; change its model on the host`);
               // A coordinator may only name Ollama library models, and never installs the binary.
               if (!isOllamaLibraryModelName(switchModel)) throw new Error("orchestration_model_rejected");
@@ -2116,7 +2175,7 @@ async function loop(): Promise<void> {
             const run = admission && !admission.ok
               ? Promise.resolve<SubtaskResult>({ subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID, ok: false, output: "", error: admission.error, durationMs: 0, executed: false })
               : st.kind === "inference"
-              ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: keepAliveFor(st.requestedModel), contextWindow: CONTEXT_WINDOW, signal: callAbort.signal, onDelta: serving?.delta, post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }), ...(OPENAI_ENGINE ? { chat: engineChat } : {}) })
+              ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: keepAliveFor(st.requestedModel), contextWindow: CONTEXT_WINDOW, signal: callAbort.signal, onDelta: serving?.delta, post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }), ...(OPENAI_ENGINE ? { chat: engineChat } : CLOUD_HOST ? { chat: (m, r, s, t) => CLOUD_HOST.chat(m, r, s, t) } : {}) })
               : runPolicedSubtask(st, { quiet: true });
             if (admission && !admission.ok) console.warn(`[agent:${AGENT_ID}] handed back inference ${st.id} on ${st.requestedModel}: ${admission.error}`);
             else if (st.kind === "inference") console.log(`[agent:${AGENT_ID}] running inference ${st.id} on ${st.requestedModel}`);

@@ -351,7 +351,16 @@ export function normalizeRateEpoch(epoch: RateEpoch, classes: Record<ComputeClas
       continue;
     }
     const base = BASE_TIER[id];
-    const old = isLegacyComputeClassId(base) ? stored[base] : undefined;
+    if (!isLegacyComputeClassId(base)) {
+      // A class newer than the legacy ids (cloud): its reference at the epoch's BTC/USD and markup.
+      const spec = classes[id];
+      if (!spec || !(epoch.btcUsd > 0)) continue;
+      const perCredit = satsPerCreditForClass(spec.usdPerHourReference, epoch.btcUsd, epoch.markupBps ?? 0);
+      const satsPerUnitHour = Number((perCredit * 3600).toFixed(3));
+      classRates[id] = { computeClass: id, usdPerHour: spec.usdPerHourReference, satsPerUnitHour, satsPerCredit: perCredit, msatPerCredit: Math.max(1, Math.round(perCredit * 1000)), source: "reference", tiers: tierRates(spec, satsPerUnitHour) };
+      continue;
+    }
+    const old = stored[base];
     if (!old || !Number.isFinite(old.satsPerCredit)) continue;
     // Old per-credit × old credits/s = sats per base-tier second = new per-credit (base weight 1).
     const perCredit = Number((old.satsPerCredit * LEGACY_COMPUTE_CLASSES[base as keyof typeof LEGACY_COMPUTE_CLASSES].creditsPerSecond).toFixed(9));

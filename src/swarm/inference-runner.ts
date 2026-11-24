@@ -85,7 +85,7 @@ export async function runInferenceSubtask(
   let full = "";
   const toolCalls: ToolCall[] = [];
   // Token counts, and the model-load time of a cold call (the power floor leaves it out: job-pricing.ts).
-  let tokens: { promptTokens?: number; outputTokens?: number; loadMs?: number; promptMs?: number; genMs?: number } = {};
+  let tokens: { promptTokens?: number; outputTokens?: number; cachedPromptTokens?: number; loadMs?: number; promptMs?: number; genMs?: number } = {};
   const flush = async (done: boolean, error?: string) => {
     if (!pending && !done) return;
     const delta = pending;
@@ -120,7 +120,7 @@ export async function runInferenceSubtask(
       : ollamaChat(deps.ollamaHost, { model, messages: input.messages, tools: input.tools, maxTokens: input.maxTokens, temperature: input.temperature, keepAlive: deps.keepAlive, numCtx: deps.contextWindow }, abort.signal, deadlineMs + 1_000);
     for await (const piece of pieces) {
       if ("toolCalls" in piece) toolCalls.push(...piece.toolCalls);
-      else if ("doneReason" in piece) tokens = { promptTokens: piece.promptTokens, outputTokens: piece.outputTokens, ...(piece.loadMs !== undefined ? { loadMs: piece.loadMs } : {}), ...(piece.promptMs !== undefined ? { promptMs: piece.promptMs } : {}), ...(piece.genMs !== undefined ? { genMs: piece.genMs } : {}) };
+      else if ("doneReason" in piece) tokens = { promptTokens: piece.promptTokens, outputTokens: piece.outputTokens, ...(piece.cachedPromptTokens !== undefined ? { cachedPromptTokens: piece.cachedPromptTokens } : {}), ...(piece.loadMs !== undefined ? { loadMs: piece.loadMs } : {}), ...(piece.promptMs !== undefined ? { promptMs: piece.promptMs } : {}), ...(piece.genMs !== undefined ? { genMs: piece.genMs } : {}) };
       else if ("delta" in piece) {
         full += piece.delta;
         pending += piece.delta;

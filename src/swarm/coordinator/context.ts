@@ -120,6 +120,8 @@ interface TaskBilling {
   /** Token counts an inference call was billed on (bounded), returned to the requester with the result. */
   promptTokens?: number;
   outputTokens?: number;
+  /** Of promptTokens, those a cloud model's provider served from its cache (priced at its cached-input rate). */
+  cachedPromptTokens?: number;
   /** The agent's model-load time for the call (Ollama load_duration), left out of the power floor. */
   loadMs?: number;
   /** Where a model call ran, for the requester (served-by.ts): the agent, and how long each part took. */

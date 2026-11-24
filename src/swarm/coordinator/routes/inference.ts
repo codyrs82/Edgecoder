@@ -9,6 +9,8 @@ import { z } from "zod";
 import type { ResourceClass, Subtask } from "../../../common/types.js";
 import { DuplicateDebitError, rewardAccountForAgent, spendCredits, taskReserveKey } from "../../../credits/store.js";
 import { cSatsPerMTokens, msatToCSats, ratePerSecondMsat } from "../../../economy/job-pricing.js";
+import { modelTokenPrice } from "../../../economy/cloud-pricing.js";
+import { cloudModelSpec } from "../../../cloud-host/catalog.js";
 import { paramsB } from "../../../inference-api/auto-route.js";
 import { contextNeeded } from "../../../inference-api/ollama.js";
 import type { ChatMessage } from "../../../inference-api/types.js";
@@ -469,7 +471,11 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
           // restricted: runs only on your own machines or a lease you hold, never as a network call.
           // agentRttMs: median round trip to the agents with a free slot for it (else to all that hold it).
           const agentRtt = medianRtt(e.freeRtts.length ? e.freeRtts : e.rtts);
-          return { model, agents: e.agents, agentsByClass: e.byClass, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD), ...(e.ctx ? { contextWindow: e.ctx } : {}), ...(restricted ? { restricted } : {}), ...(agentRtt !== null ? { agentRttMs: agentRtt } : {}) };
+          // A cloud model (src/cloud-host/): its cost-plus price, its own context window, and where it
+          // comes from (origin: the data for a "no models of origin X" filter) and who serves it.
+          const cloud = cloudModelSpec(model);
+          const ctx = cloud ? Math.min(e.ctx ?? cloud.contextWindow, cloud.contextWindow) : e.ctx;
+          return { model, agents: e.agents, agentsByClass: e.byClass, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD, modelTokenPrice(model)), ...(ctx ? { contextWindow: ctx } : {}), ...(cloud ? { origin: cloud.origin, hostedBy: cloud.provider } : {}), ...(restricted ? { restricted } : {}), ...(agentRtt !== null ? { agentRttMs: agentRtt } : {}) };
         })
         .sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model)),
       classes,
@@ -682,6 +688,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         // (accrueResultCredits), so they are bounded below and never cost more than was set aside.
         promptTokens: z.number().int().min(0).max(10_000_000).optional(),
         outputTokens: z.number().int().min(0).max(10_000_000).optional(),
+        // Of promptTokens, those a cloud model's provider served from its prompt cache: priced at the
+        // cheaper cached-input rate (economy/cloud-pricing.ts). Only ever lowers the price; kept ≤ promptTokens.
+        cachedPromptTokens: z.number().int().min(0).max(10_000_000).optional(),
         // The agent's model-load time for this call: left out of the power floor (job-pricing.ts). Only
         // the agent is paid by the floor, so reporting more than it spent only lowers its own pay.
         loadMs: z.number().min(0).max(INFERENCE_MAX_TIMEOUT_MS).optional(),
@@ -708,7 +717,13 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     // Taken once, from the piece that ended the stream (a refused, repeated or later piece changes
     // nothing), set rather than added, and kept within what the request and the reply could hold.
     if (r === "ok" && body.done && inferenceStreams.isDone(body.subtaskId) && (body.promptTokens !== undefined || body.outputTokens !== undefined)) {
-      const bounded = boundTokenCounts(body, Buffer.byteLength(claim.subtask.input, "utf8"), inferenceStreams.replyBytes(body.subtaskId) ?? 0, maxTokensOf(claim.subtask.input));
+      // A cloud host (allowlisted, the platform's own) relays the provider's billed counts, which
+      // include tokens that never reach the reply text (tool calls, a reasoning pass): bounding them
+      // by the reply's bytes would price the call below the provider's cost. Its output stays
+      // bounded by the call's own max_tokens, which caps the provider's completion tokens too.
+      const cloudCall = cloudModelSpec(claim.subtask.requestedModel) !== undefined && effectiveHardware(verified.agentId)?.computeClass === "cloud";
+      const replyBytes = cloudCall ? Number.MAX_SAFE_INTEGER : (inferenceStreams.replyBytes(body.subtaskId) ?? 0);
+      const bounded = boundTokenCounts(body, Buffer.byteLength(claim.subtask.input, "utf8"), replyBytes, maxTokensOf(claim.subtask.input));
       const u = usagePending.get(claim.subtask.taskId);
       if (u) {
         u.promptTokens = bounded.promptTokens;
@@ -719,6 +734,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       if (b) {
         b.promptTokens = bounded.promptTokens;
         b.outputTokens = bounded.outputTokens;
+        if (body.cachedPromptTokens !== undefined) b.cachedPromptTokens = Math.min(body.cachedPromptTokens, bounded.promptTokens ?? 0);
         if (body.loadMs !== undefined) b.loadMs = Math.round(body.loadMs);
       }
     }
