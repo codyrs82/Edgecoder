@@ -694,7 +694,7 @@
                 <ComputePicker selected={$computeChoice} onSelect={(id) => computeChoice.set(id)} onOpenSettings={openSettings} />
                 <WebIndicator status={webStatus} mode={chatWebModeNow} onChange={(m) => { chatWeb = m === "auto"; chatView?.setWeb(m === "auto"); }} />
                 {#if projectRoot && !isRemoteMode()}
-                  <PermissionModePicker mode={chatPermissionMode} onChange={(m) => { chatPermissionMode = m; chatView?.setMode(m); }} />
+                  <PermissionModePicker mode={chatPermissionMode} onChange={(m) => { chatPermissionMode = m; chatView?.setMode(m); }} allowFull project={projectRoot} />
                 {/if}
               {/snippet}
             </ChatInput>

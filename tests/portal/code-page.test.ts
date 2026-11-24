@@ -60,6 +60,9 @@ describe("the Code page", () => {
     expect(html).not.toMatch(/data-approve-always|always:\s*true/);
     expect(html).toContain("Always-allow rules are set on the Mac.");
     expect(html).toContain("Auto (set on the Mac)");
+    // Full access is shown, never offered as a choice the web can send.
+    expect(html).toContain("Full access (set on the Mac)");
+    expect(html).not.toMatch(/v === "full"/);
   });
 });
 

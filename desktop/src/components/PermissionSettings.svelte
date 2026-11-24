@@ -5,11 +5,38 @@
   // allow anything on its own). Removing one makes that command ask again.
   import { onMount } from "svelte";
   import Select from "./ui/Select.svelte";
+  import Dialog from "./ui/Dialog.svelte";
   import { listPermissions, removePermission, type ProjectPermissionsView } from "../lib/api";
-  import { defaultMode, MODE_OPTIONS, setDefaultMode, type EngineMode } from "../lib/permission-modes";
+  import {
+    confirmFullAccess, defaultMode, FULL_ACCESS_DEFAULT_SCOPE, FULL_ACCESS_WARNING, fullAccessConfirmed, MODE_OPTIONS, setDefaultMode, type EngineMode,
+  } from "../lib/permission-modes";
   import { projectName, tildePath } from "../lib/projects";
 
   let mode = $state<EngineMode>(defaultMode());
+  /** Full access as the default waits for its one-time confirm. */
+  let confirmingFull = $state(false);
+
+  function pickDefault(v: EngineMode) {
+    if (v === "full" && !fullAccessConfirmed(FULL_ACCESS_DEFAULT_SCOPE)) {
+      // Shown as picked while the confirm is open; Cancel puts the saved default back.
+      confirmingFull = true;
+      return;
+    }
+    mode = v;
+    setDefaultMode(v);
+  }
+
+  function cancelFullDefault() {
+    confirmingFull = false;
+    mode = defaultMode();
+  }
+
+  function confirmFullDefault() {
+    confirmFullAccess(FULL_ACCESS_DEFAULT_SCOPE);
+    confirmingFull = false;
+    mode = "full";
+    setDefaultMode("full");
+  }
   let projects = $state<Record<string, ProjectPermissionsView> | null>(null);
   let error = $state<string | null>(null);
 
@@ -49,6 +76,20 @@
   );
 </script>
 
+{#if confirmingFull}
+  <Dialog label="Make Full access the default?" width="440px" onClose={cancelFullDefault}>
+    <div class="full-confirm">
+      <h2>Make Full access the default?</h2>
+      <p>New chats and sessions would start in Full access. {FULL_ACCESS_WARNING}</p>
+      <p class="muted">Bots keep their own mode, and the phone, the web and other accounts never get Full access.</p>
+      <div class="actions">
+        <button type="button" class="btn" onclick={cancelFullDefault}>Cancel</button>
+        <button type="button" class="btn btn--primary" onclick={confirmFullDefault}>Make it the default</button>
+      </div>
+    </div>
+  </Dialog>
+{/if}
+
 <section class="sp-group" aria-labelledby="gen-permissions">
   <h2 class="sp-group-title" id="gen-permissions">Permissions</h2>
   <div class="sp-card">
@@ -61,7 +102,7 @@
         <Select
           ariaLabel="Default permission mode"
           bind:value={mode}
-          onChange={(v) => setDefaultMode(v)}
+          onChange={pickDefault}
           options={MODE_OPTIONS.map((o) => ({ value: o.engine, label: o.title }))}
         />
       </div>
@@ -102,6 +143,11 @@
 </section>
 
 <style>
+  .full-confirm { display: flex; flex-direction: column; gap: 10px; padding: 18px; }
+  .full-confirm h2 { margin: 0; font-size: 15px; color: var(--warn); }
+  .full-confirm p { margin: 0; font-size: 13px; line-height: 1.45; color: var(--text-primary); }
+  .full-confirm .muted { color: var(--text-secondary); font-size: 12px; }
+  .full-confirm .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
   .rules, .rules ul { list-style: none; margin: 0; padding: 0; }
   .project { padding: 6px 0; border-top: 0.5px solid var(--border); }
   .project:first-child { border-top: none; }

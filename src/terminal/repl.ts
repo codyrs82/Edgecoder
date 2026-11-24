@@ -9,7 +9,7 @@
  * any prompt, an approval prompt included.
  */
 
-import type { PermissionMode } from "../apps/ide/permissions.js";
+import { nextMode, type PermissionMode } from "../apps/ide/permissions.js";
 import type { ClientRef, QueuedMessage, SessionEvent, TranscriptEntry } from "../apps/ide/sessions.js";
 import type { IdeStreamEvent } from "../apps/ide/tool-types.js";
 import { ProviderError, type ProviderClient, type Snapshot } from "./client.js";
@@ -48,7 +48,7 @@ export const HELP = `Commands (they work at any prompt, an approval included):
   /lead [id]                    show or set the lead model, e.g. frontier/anthropic/claude-opus-5-5 (your own key)
   /worker [id]                  show or set the worker model for helpers and delegated work (default auto)
   /compute [local|network|mine|auto]   where the model runs
-  /mode [ask|auto-edits|auto|plan]   how much to ask first (Shift+Tab cycles)
+  /mode [ask|auto-edits|auto|plan|full]   how much to ask first (Shift+Tab cycles; full only by name)
   /approve [ask|auto-edits|auto]     approve the plan and carry it out (default auto-edits)
   /remote [off]                 show this session live in the EdgeCoder app (Code view), or stop
   /stop                         stop the reply (Esc does the same); queued messages run next
@@ -63,7 +63,9 @@ ${TENTACLES_HELP}
   /exit                         leave (the session stays; reopen it in the app or with --resume)
 Modes: ask (edits and commands ask), auto-edits (edits apply, undoable; commands ask),
        auto (safe commands and edits apply; risky ones ask; dangerous ones are refused),
-       plan (read-only until you approve the plan with /approve). Read-only commands never ask.
+       plan (read-only until you approve the plan with /approve),
+       full (Full access: nothing asks; only a few destructive or secret-leaking commands are
+       still refused). Read-only commands never ask.
 Approvals: Enter or y = yes, n = no, a = always (edits: this project; a command: a rule such as
            \`npm test:*\` for this project).
 Type while a reply runs: Enter queues the message for the next turn.`;
@@ -74,7 +76,7 @@ interface Pending {
   args: Record<string, unknown>;
 }
 
-const MODE_LABEL: Record<PermissionMode, string> = { ask: "ask", "auto-edits": "auto-edits", auto: "auto", plan: "plan" };
+const MODE_LABEL: Record<PermissionMode, string> = { ask: "ask", "auto-edits": "auto-edits", auto: "auto", plan: "plan", full: "full access" };
 const KIND_LABEL: Record<string, string> = { terminal: "the terminal", desktop: "the EdgeCoder app", api: "a script" };
 
 export class Repl {
@@ -188,7 +190,8 @@ export class Repl {
     const p = this.currentApproval();
     if (p) return this.st.yellow(`  Allow ${toolSummary(p.tool, p.args)}? [Y/n/a] › `);
     const state = this.running ? this.st.dim(` · running${this.queue.length ? `, ${this.queue.length} queued` : ""} (Esc stops)`) : "";
-    return `${this.st.dim(`[${MODE_LABEL[this.mode]}]`)}${state} ${this.st.bold("›")} `;
+    const tag = `[${MODE_LABEL[this.mode]}]`;
+    return `${this.mode === "full" ? this.st.yellow(tag) : this.st.dim(tag)}${state} ${this.st.bold("›")} `;
   }
 
   private applySnapshot(s: Snapshot): void {
@@ -431,8 +434,8 @@ export class Repl {
       if (this.running) await this.command("/stop");
       return;
     }
-    const order: PermissionMode[] = ["ask", "auto-edits", "auto", "plan"];
-    await this.command(`/mode ${order[(order.indexOf(this.mode) + 1) % order.length]}`);
+    // Full access is never cycled into (only `/mode full`); from it, Shift+Tab goes back to ask.
+    await this.command(`/mode ${nextMode(this.mode)}`);
     this.refreshPrompt();
   }
 
@@ -481,16 +484,16 @@ export class Repl {
         case "/mode": {
           const m = arg.toLowerCase();
           if (!m) {
-            this.line(`mode: ${this.mode} ${st.dim("(ask, auto-edits, auto or plan; Shift+Tab cycles)")}`);
+            this.line(`mode: ${this.mode} ${st.dim("(ask, auto-edits, auto, plan or full; Shift+Tab cycles)")}`);
             return;
           }
-          if (!["ask", "auto-edits", "auto", "plan"].includes(m)) {
-            this.line(st.red("Use /mode ask, auto-edits, auto or plan."));
+          if (!["ask", "auto-edits", "auto", "plan", "full"].includes(m)) {
+            this.line(st.red("Use /mode ask, auto-edits, auto, plan or full."));
             return;
           }
           await this.c.settings(id, { mode: m as PermissionMode });
           this.mode = m as PermissionMode;
-          this.line(st.dim(`▸ mode: ${m}${m === "auto" ? " (safe commands and edits apply; risky ones ask; dangerous ones are refused)" : m === "plan" ? " (read-only until you approve the plan: /approve)" : m === "auto-edits" ? " (edits apply without asking, undoable; commands ask)" : " (edits and commands ask)"}`));
+          this.line(st.dim(`▸ mode: ${m}${m === "auto" ? " (safe commands and edits apply; risky ones ask; dangerous ones are refused)" : m === "plan" ? " (read-only until you approve the plan: /approve)" : m === "auto-edits" ? " (edits apply without asking, undoable; commands ask)" : m === "full" ? " (Full access: commands, edits, installs and pushes run without asking; only a few destructive or secret-leaking commands are still refused)" : " (edits and commands ask)"}`));
           return;
         }
         case "/approve": {

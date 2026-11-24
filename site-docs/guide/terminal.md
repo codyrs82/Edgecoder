@@ -41,7 +41,7 @@ tooling (type checkers, linters) by itself. The agent's own commands still ask f
 | `--repo <url\|owner/repo>` | Clone into `~/EdgeCoder` (or update the copy already there). |
 | `--model <id>` | A local Ollama model, `network/<model>[@cpu\|apple\|gpu\|gpu.dc]`, `mine/<model>`, or `auto` (the default). |
 | `--compute local\|network\|mine\|auto` | Where the model runs. |
-| `--mode ask\|auto-edits\|auto\|plan` | How much it asks first (below). |
+| `--mode ask\|auto-edits\|auto\|plan\|full` | How much it asks first (below). |
 | `--remote` | Show the session in the desktop app from the start. |
 | `--resume <id>`, `--list` | Continue a saved session, or list them. |
 | `--api-key-file <path>` | An `eck_` API key for network models without the app. |
@@ -62,9 +62,10 @@ Before an edit the diff prints; before a command the command prints. Then it ask
 | `auto-edits` (Accept edits) | apply, each turn undoable | ask |
 | `auto` | apply | safe ones run (tests, lint, build, git add/commit on a work branch); risky ones ask; dangerous ones are refused |
 | `plan` | refused | read-only only, until you approve the plan with `/approve` |
+| `full` (Full access) | apply | run without asking (pushes and PRs too); only sudo, wiping a disk or the project, download-and-run and secrets are refused. Set with `--mode full` or `/mode full`; Shift+Tab never cycles into it |
 
 The default is `auto-edits` in a git repository with a clean working tree, otherwise `ask`.
-**Shift+Tab** cycles the mode. Pushes and pull requests always ask.
+**Shift+Tab** cycles the mode. Pushes and pull requests always ask, except in Full access.
 
 ## Commands
 

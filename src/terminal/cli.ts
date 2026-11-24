@@ -38,13 +38,16 @@ Options:
   --remote                 show the session live in the EdgeCoder app from the start (same as /remote)
   --resume <session-id>    continue a saved session
   --trust                  trust the folder without asking (the project's own tooling may then run)
-  --mode <mode>            ask, auto-edits, auto or plan (default: auto-edits in a git repository with a
+  --mode <mode>            ask, auto-edits, auto, plan or full (default: auto-edits in a git repository with a
                            clean working tree, else ask). Shift+Tab or /mode changes it later.
                              ask         edits and commands ask
                              auto-edits  edits apply without asking (each turn stays undoable)
                              auto        safe commands and edits apply; risky ones ask,
                                          dangerous ones are refused (docs/permission-modes.md)
                              plan        read-only until you approve the plan (/approve)
+                             full        Full access: nothing asks (commands, edits, installs,
+                                         pushes); only a few destructive or secret-leaking
+                                         commands are still refused
                            Read-only commands (grep, ls, cat, git status/diff/log…) never ask.
   --auto-edits             same as --mode auto-edits
   --provider <url>         the IDE provider to use (default http://127.0.0.1:4304, or IDE_PROVIDER_URL)
@@ -66,7 +69,7 @@ interface Args {
   resume?: string;
   trust: boolean;
   autoEdits: boolean;
-  mode?: "ask" | "auto-edits" | "auto" | "plan";
+  mode?: "ask" | "auto-edits" | "auto" | "plan" | "full";
   provider?: string;
   standalone: boolean;
   port?: number;
@@ -104,7 +107,7 @@ export function parseCodeArgs(argv: string[]): Args | { error: string } {
       },
     });
     if (positionals.length > 1) return { error: "Give at most one folder." };
-    if (values.mode && !["ask", "auto-edits", "auto", "plan"].includes(values.mode)) return { error: "--mode is ask, auto-edits, auto or plan." };
+    if (values.mode && !["ask", "auto-edits", "auto", "plan", "full"].includes(values.mode)) return { error: "--mode is ask, auto-edits, auto, plan or full." };
     if (values.worker?.toLowerCase().startsWith("frontier/")) return { error: "--worker can't be a frontier model: helpers and delegated work run on auto, the network or this computer." };
     if (values.compute && !["local", "network", "auto", "mine"].includes(values.compute)) return { error: "--compute is local, network, mine or auto." };
     const port = values.port ? Number(values.port) : undefined;
@@ -125,7 +128,7 @@ export function parseCodeArgs(argv: string[]): Args | { error: string } {
       resume: values.resume,
       trust: values.trust ?? false,
       autoEdits: values["auto-edits"] ?? false,
-      ...(values.mode ? { mode: values.mode as "ask" | "auto-edits" | "auto" | "plan" } : values["auto-edits"] ? { mode: "auto-edits" as const } : {}),
+      ...(values.mode ? { mode: values.mode as "ask" | "auto-edits" | "auto" | "plan" | "full" } : values["auto-edits"] ? { mode: "auto-edits" as const } : {}),
       provider: values.provider,
       standalone: values.standalone ?? false,
       port,

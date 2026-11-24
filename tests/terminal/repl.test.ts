@@ -82,6 +82,8 @@ describe("edgecoder code arguments", () => {
     expect(parseCodeArgs(["--repo", "https://github.com/codyrs82/Edgecoder", "--remote", "--compute", "network"])).toMatchObject({ repo: "https://github.com/codyrs82/Edgecoder", remote: true, compute: "network" });
     expect(parseCodeArgs(["a", "b"])).toEqual({ error: expect.stringContaining("one folder") });
     expect(parseCodeArgs(["--compute", "moon"])).toEqual({ error: expect.stringContaining("--compute") });
+    expect(parseCodeArgs(["--mode", "full"])).toMatchObject({ mode: "full" });
+    expect(parseCodeArgs(["--mode", "yolo"])).toEqual({ error: expect.stringContaining("plan or full") });
     expect(initialModel({ compute: "network" })).toBe("network/qwen3-coder:30b");
     expect(initialModel({ compute: "local" }, { OLLAMA_MODEL: "x:1b" })).toBe("x:1b");
     expect(initialModel({ model: "mine/m" })).toBe("mine/m");
@@ -304,5 +306,30 @@ describe("rendering", () => {
     ]);
     expect(line).toBe("qwen3-coder:30b · Datacenter GPU 2×A16 · Chicago · read 24.8k tok in 81 s · wrote 312 tok in 6.5 s · 2 calls · 3.4 cSats");
     expect(usageLine([{ cSats: 0, where: "x", model: "qwen3.5:9b", served: { label: "This computer", own: true, computeClass: "local", tier: null, hardware: "This computer (Apple M1 Max)", region: null, country: null, outputTokens: 50, genMs: 2_000 } }])).toBe("qwen3.5:9b · This computer (Apple M1 Max) · wrote 50 tok in 2.0 s · 0 cSats");
+  });
+});
+
+describe("Full access in the terminal", () => {
+  it("/mode full runs a compound command without asking; Shift+Tab never cycles into it and leaves it for ask", async () => {
+    const { t, repl, hub, id } = await setup([
+      { content: "", toolCalls: [{ name: "run_shell", arguments: { command: "echo one > one.txt && cat one.txt | tail -1" } }] },
+      { content: "Ran it.", toolCalls: [] },
+    ]);
+    const done = repl.run();
+    t.feed("/mode full");
+    await until(() => t.prompt().includes("[full access]"), 5000, "prompt shows full access");
+    expect(hub.snapshot(id).session.mode).toBe("full");
+    t.feed("run it");
+    await until(() => t.out().includes("Ran it."), 5000, "reply");
+    expect(readFileSync(join(root, "one.txt"), "utf8")).toBe("one\n");
+    expect(t.out()).not.toContain("Allow run_shell");
+    t.press("shift-tab");
+    await until(() => t.prompt().includes("[ask]"), 5000, "back to ask");
+    for (const next of ["auto-edits", "auto", "plan", "ask"]) {
+      t.press("shift-tab");
+      await until(() => t.prompt().includes(`[${next}]`), 5000, `cycles to ${next}`);
+    }
+    t.feed("/exit");
+    await done;
   });
 });

@@ -285,12 +285,12 @@ export function modeOf(s: Pick<SessionData, "mode" | "autoApprove">): Permission
 
 /**
  * A helper's patch applies on its own exactly when the lead's own edit to those files would: the
- * session's mode lets edits apply (auto-edits, auto) and no file is a protected path. Otherwise it
+ * session's mode lets edits apply (auto-edits, auto, full) and no file is a protected path. Otherwise it
  * waits for the user's approval.
  */
 export function canAutoApply(s: Pick<SessionData, "mode" | "autoApprove">, files: string[]): boolean {
   const m = modeOf(s);
-  return (m === "auto-edits" || m === "auto") && files.every((f) => protectedToolPath(f) === null);
+  return (m === "auto-edits" || m === "auto" || m === "full") && files.every((f) => protectedToolPath(f) === null);
 }
 
 /**

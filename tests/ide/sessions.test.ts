@@ -224,3 +224,95 @@ describe("SessionHub", () => {
     expect(ev.find((e) => e.type === "tool_result")).toMatchObject({ error: expect.stringContaining("rejected") });
   });
 });
+
+describe("Full access", () => {
+  const OWNER = "acct_owner";
+  const OWN_DESK: ClientRef = { ...DESK, accountId: OWNER };
+  const GUEST: ClientRef = { clientId: "guest-1", kind: "desktop", label: "Guest", accountId: "acct_guest" };
+  const PHONE: ClientRef = { clientId: "remote-phone", kind: "remote", label: "iPhone", accountId: OWNER };
+
+  it("runs a compound command, then a commit, without a single approval card", async () => {
+    const { hub } = makeHub([
+      { content: "", toolCalls: [{ name: "run_shell", arguments: { command: 'X="$HOME" && echo made > made.txt && cat made.txt | tail -1' } }] },
+      { content: "", toolCalls: [{ name: "write_file", arguments: { path: "b.txt", content: "b\n" } }] },
+      { content: "done", toolCalls: [] },
+    ]);
+    const s = hub.create({ projectRoot: root, client: TERM, mode: "full" });
+    expect(s).toMatchObject({ mode: "full", autoApprove: "edits" });
+    const events: SessionEvent[] = [];
+    hub.subscribe(s.id, TERM, 0, (e) => events.push(e));
+    hub.send(s.id, "go", TERM);
+    await hub.idle(s.id);
+    expect(readFileSync(join(root, "made.txt"), "utf8")).toBe("made\n");
+    expect(readFileSync(join(root, "b.txt"), "utf8")).toBe("b\n");
+    expect(events.filter((e) => e.type === "approval")).toEqual([]);
+    const calls = events.filter((e) => e.type === "agent" && (e.event as { type: string }).type === "tool_call").map((e) => (e.event as { requires_approval: boolean }).requires_approval);
+    expect(calls).toEqual([false, false]);
+  });
+
+  it("is turned on from this computer's own clients or the owner's account only", () => {
+    const { hub } = makeHub([]);
+    const s = hub.create({ projectRoot: root, client: TERM, ownerAccount: OWNER });
+    for (const who of [PHONE, GUEST, { ...PHONE, accountId: "acct_guest" }]) {
+      expect(() => hub.update(s.id, { mode: "full" }, who)).toThrow(SessionError);
+      expect(hub.peek(s.id)!.mode).not.toBe("full");
+    }
+    try {
+      hub.update(s.id, { mode: "full" }, PHONE);
+    } catch (err) {
+      expect((err as SessionError).code).toBe("forbidden");
+    }
+    expect(() => hub.create({ projectRoot: root, client: PHONE, ownerAccount: OWNER, mode: "full" })).toThrow(/Mac/);
+    expect(() => hub.create({ projectRoot: root, client: GUEST, ownerAccount: OWNER, mode: "full" })).toThrow(/owner/);
+    expect(hub.update(s.id, { mode: "full" }, OWN_DESK).mode).toBe("full");
+    expect(hub.update(s.id, { mode: "auto" }, DESK).mode).toBe("auto");
+    expect(hub.update(s.id, { mode: "full" }, TERM).mode).toBe("full");
+  });
+
+  it("another account's message, or the phone's, runs as Accept edits; the owner's runs in Full access", () => {
+    const { hub } = makeHub([]);
+    const s = hub.create({ projectRoot: root, client: TERM, ownerAccount: OWNER, mode: "full" });
+    const install = { command: "npm install left-pad" };
+    expect(hub.decide(s, "run_shell", install, OWN_DESK).action).toBe("run");
+    expect(hub.decide(s, "run_shell", install, TERM).action).toBe("run");
+    expect(hub.decide(s, "git_push", {}, OWN_DESK).action).toBe("run");
+    // Another account: exactly Accept edits (edits inside apply, commands and pushes ask).
+    expect(hub.modeFor(s, GUEST)).toBe("auto-edits");
+    expect(hub.decide(s, "run_shell", install, GUEST).action).toBe("ask");
+    expect(hub.decide(s, "git_push", {}, GUEST).action).toBe("ask");
+    expect(hub.decide(s, "write_file", { path: "x.txt", content: "x" }, GUEST).action).toBe("run");
+    // The phone keeps its remote rules (commands ask) as Accept edits.
+    expect(hub.decide(s, "run_shell", install, PHONE).action).toBe("ask");
+    expect(hub.decide(s, "git_push", {}, PHONE).action).toBe("ask");
+    expect(hub.decide(s, "write_file", { path: "x.txt", content: "x" }, PHONE).action).toBe("run");
+    expect(hub.peek(s.id)!.mode).toBe("full");
+  });
+
+  it("a turn from another account in a Full access session asks before a command", async () => {
+    const { hub } = makeHub([
+      { content: "", toolCalls: [{ name: "run_shell", arguments: { command: "echo hi > hi.txt" } }] },
+      { content: "ok", toolCalls: [] },
+    ]);
+    const s = hub.create({ projectRoot: root, client: TERM, ownerAccount: OWNER, mode: "full" });
+    hub.send(s.id, "write hi", GUEST);
+    await until(() => hub.snapshot(s.id).pending.length === 1, 3000, "the guest's command to ask");
+    hub.approve(s.id, hub.snapshot(s.id).pending[0].id, false, TERM);
+    await hub.idle(s.id);
+    expect(existsSync(join(root, "hi.txt"))).toBe(false);
+  });
+
+  it("switching to Full access lets a waiting push go ahead", async () => {
+    const { hub } = makeHub([
+      { content: "", toolCalls: [{ name: "git_push", arguments: {} }] },
+      { content: "ok", toolCalls: [] },
+    ]);
+    const s = hub.create({ projectRoot: root, client: TERM, mode: "auto" });
+    const events: SessionEvent[] = [];
+    hub.subscribe(s.id, TERM, 0, (e) => events.push(e));
+    hub.send(s.id, "push", TERM);
+    await until(() => hub.snapshot(s.id).pending.length === 1, 3000, "push to ask");
+    hub.update(s.id, { mode: "full" }, TERM);
+    await hub.idle(s.id);
+    expect(events.filter((e) => e.type === "approval")).toEqual([expect.objectContaining({ approved: true, by: "always" })]);
+  });
+});

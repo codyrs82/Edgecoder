@@ -38,6 +38,7 @@ const STATUS: Record<SessionError["code"], number> = {
   invalid: 400,
   checkpoint_gone: 410,
   nothing_to_undo: 409,
+  forbidden: 403,
 };
 
 const client = {
@@ -80,7 +81,7 @@ export function registerSessionRoutes(app: FastifyInstance, hub: SessionHub): vo
           workerModel: z.string().min(1).max(200).optional(),
           title: z.string().max(120).optional(),
           autoApprove: z.enum(["none", "edits"]).optional(),
-          mode: z.enum(["ask", "auto-edits", "auto", "plan"]).optional(),
+          mode: z.enum(["ask", "auto-edits", "auto", "plan", "full"]).optional(),
           published: z.boolean().optional(),
         })
         .parse(req.body ?? {});
@@ -162,7 +163,7 @@ export function registerSessionRoutes(app: FastifyInstance, hub: SessionHub): vo
   app.post("/v1/ide/sessions/:id/settings", (req, reply) =>
     handle(reply, () => {
       const { id } = idParams.parse(req.params);
-      const b = z.object({ ...client, model: z.string().min(1).max(200).optional(), leadModel: z.string().min(1).max(200).optional(), workerModel: z.string().min(1).max(200).optional(), title: z.string().max(120).optional(), autoApprove: z.enum(["none", "edits"]).optional(), mode: z.enum(["ask", "auto-edits", "auto", "plan"]).optional() }).parse(req.body ?? {});
+      const b = z.object({ ...client, model: z.string().min(1).max(200).optional(), leadModel: z.string().min(1).max(200).optional(), workerModel: z.string().min(1).max(200).optional(), title: z.string().max(120).optional(), autoApprove: z.enum(["none", "edits"]).optional(), mode: z.enum(["ask", "auto-edits", "auto", "plan", "full"]).optional() }).parse(req.body ?? {});
       const s = hub.update(id, { model: b.model, leadModel: b.leadModel, workerModel: b.workerModel, title: b.title, autoApprove: b.autoApprove, mode: b.mode }, refOf(b));
       return { session: s };
     }));
