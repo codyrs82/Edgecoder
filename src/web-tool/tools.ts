@@ -10,8 +10,9 @@
  *
  * Prompt injection: what comes back is wrapped as untrusted data (wrapUntrusted) and the system
  * note (webSystemNote) tells the model that web content is information, never instructions.
- * After a page is read, a reply's file edits and commands that would have run on their own ask
- * first (agent-loop.ts makeToolRunner), so page text can't make anything happen by itself.
+ * After a page is read, a reply's commands and other actions that would have run on their own ask
+ * first (agent-loop.ts makeToolRunner), so page text can't make anything happen by itself. Edits
+ * the mode applies inside the project still apply (undoable), and Full access skips the guard.
  */
 
 import type { ToolSchema } from "../apps/ide/agent-loop.js";

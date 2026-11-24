@@ -796,11 +796,23 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
   }
 }
 
+/**
+ * An answer to an approval: true (allow this call), false (deny, timeout, disconnect) or "run":
+ * allow it and, when the web-page guard asked, let the rest of this run's guard asks go ahead
+ * (only calls the mode or a rule would run anyway; nothing is kept after the run).
+ */
+export type ApprovalAnswer = boolean | "run";
+
+/** Why a call asks, for waitForApproval: `webGuard` when only the web-page guard asked (the mode would run it). */
+export interface ApprovalAsk {
+  webGuard: boolean;
+}
+
 export interface ToolRunnerDeps {
   execute: (tool: ToolName, args: Record<string, unknown>, opts: { approved: boolean }) => Promise<{ result?: string; error?: string }>;
   sendEvent: (event: IdeStreamEvent) => void;
-  /** Resolves true when the user approves the call (false on reject, timeout or disconnect). */
-  waitForApproval: (callId: string, tool: ToolName, args: Record<string, unknown>) => Promise<boolean>;
+  /** Resolves true (or "run") when the user approves the call (false on reject, timeout or disconnect). */
+  waitForApproval: (callId: string, tool: ToolName, args: Record<string, unknown>, ask: ApprovalAsk) => Promise<ApprovalAnswer>;
   /** Keep a file's original before the turn first writes it; returns the tracked path or null. */
   captureBeforeWrite: (path: string) => string | null;
   turnId: string;
@@ -846,10 +858,16 @@ function deepFreeze<T>(value: T): T {
 /** One tool call: announce it, wait for approval when needed, checkpoint writes, run, report. */
 export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
   // Prompt-injection guard (docs/web-tool.md): once read_page has put a web page's text into the
-  // context, nothing that changes files or runs commands happens on its own for the rest of the
-  // turn or run: a call the mode (or an "always allow" rule) would have run asks first, so page text
-  // alone can never make the agent act. Unattended bots queue it as "Needs approval".
+  // context, commands and other calls that act beyond the project's files don't happen on their own
+  // for the rest of the turn or run: a call the mode (or an "always allow" rule) would have run asks
+  // first, so page text alone can never make the agent act. Unattended bots queue it as "Needs
+  // approval". Not guarded: edits inside the project that the mode applies anyway (each is in the
+  // turn's checkpoint, undoable; protected paths, secrets and files outside the project still ask
+  // or are refused by the mode), and Full access (the user chose to approve everything). Answering
+  // a guard ask with "Allow for the rest of this run" (ApprovalAnswer "run") lifts the guard until
+  // the run ends; it never makes a call run that the mode itself asks about or refuses.
   let webPageRead = false;
+  let guardLifted = false;
   return async (tool, rawArgs) => {
     const callId = `tc_${randomUUID().slice(0, 8)}`;
     let args = rawArgs;
@@ -872,7 +890,9 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
     // auto-approved; the executor refuses .git outright and the rest without an explicit approval.
     let requiresApproval: boolean;
     let always: boolean;
-    let allowRule: string | undefined;
+    let rules: string[] = [];
+    /** Calls the web-page guard leaves alone: Full access, and edits the mode applies inside the project. */
+    let guardExempt = false;
     if (d.decide) {
       const verdict = d.decide(tool, args);
       if (verdict.action === "refuse") {
@@ -885,23 +905,37 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
       // do (the executor still guards protected paths for them), except in Full access, where the
       // verdict itself says the user approved every call (the executor's hard refusals still apply).
       always = !requiresApproval && (tool === "run_shell" || verdict.approved === true);
-      allowRule = requiresApproval ? verdict.rule : undefined;
+      if (requiresApproval) rules = verdict.rules ?? (verdict.rule ? [verdict.rule] : []);
+      // decideToolCall runs an edit only inside the project, off protected paths and secrets.
+      guardExempt = verdict.approved === true || (verdict.action === "run" && (tool === "write_file" || tool === "edit_file"));
     } else {
       const autoEdits = typeof d.autoApproveEdits === "function" ? d.autoApproveEdits() : d.autoApproveEdits === true;
       const editAutoApprove = autoEdits && (tool === "write_file" || tool === "edit_file") && protectedToolPath(args.path) === null;
       always = !ALWAYS_ASK_TOOLS.has(tool) && !READ_TOOLS.has(tool) && d.alwaysAllowed?.(tool, args) === true;
       requiresApproval = ALWAYS_ASK_TOOLS.has(tool) || (!READ_TOOLS.has(tool) && !shellAutoApprove && !editAutoApprove && !always);
     }
-    if (webPageRead && !requiresApproval && !READ_TOOLS.has(tool) && !WEB_TOOLS.has(tool)) {
+    const webGuard = webPageRead && !guardLifted && !guardExempt && !requiresApproval && !READ_TOOLS.has(tool) && !WEB_TOOLS.has(tool);
+    if (webGuard) {
       requiresApproval = true;
       always = false;
-      allowRule = undefined;
     }
-    d.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: requiresApproval, ...(allowRule ? { allow_rule: allowRule } : {}) });
-    if (requiresApproval && !(await d.waitForApproval(callId, tool, args))) {
-      const msg = `Tool call ${tool} was rejected by the user.`;
-      d.sendEvent({ type: "tool_result", id: callId, error: msg });
-      return `[Rejected]: ${msg}`;
+    d.sendEvent({
+      type: "tool_call",
+      id: callId,
+      tool,
+      args,
+      requires_approval: requiresApproval,
+      ...(rules.length ? { allow_rule: rules[0], ...(rules.length > 1 ? { allow_rules: rules } : {}) } : {}),
+      ...(webGuard ? { web_guard: true as const } : {}),
+    });
+    if (requiresApproval) {
+      const answer = await d.waitForApproval(callId, tool, args, { webGuard });
+      if (answer === false) {
+        const msg = `Tool call ${tool} was rejected by the user.`;
+        d.sendEvent({ type: "tool_result", id: callId, error: msg });
+        return `[Rejected]: ${msg}`;
+      }
+      if (answer === "run" && webGuard) guardLifted = true;
     }
     const writesFile = tool === "write_file" || tool === "edit_file";
     const tracked = writesFile ? d.captureBeforeWrite(String(args.path ?? "")) : null;

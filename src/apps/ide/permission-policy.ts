@@ -296,7 +296,7 @@ function redirections(segment: string): { rest: string; targets: string[]; input
       while (k < segment.length && !/\s/.test(segment[k])) k++;
       const target = segment.slice(j, k);
       if (!target) return null;
-      rest = rest.replace(/\d$/, "");
+      rest = rest.replace(/[\d&]$/, ""); // the fd before `2>`, or the & of `&>`
       if (ch === ">") {
         if (!/^\d$/.test(target) && target !== "-" && target !== "/dev/null") targets.push(target);
       } else inputs.push(target);
@@ -320,6 +320,9 @@ export interface CommandContext {
   branch?: string | null;
 }
 
+/** Programs that run the command after them (classifySegment judges that command). */
+const WRAPPERS = new Set(["env", "command", "exec", "nohup", "time", "nice", "timeout"]);
+
 /** One command segment (no pipes or `&&`), already without its redirections. */
 function classifySegment(argvIn: string[], ctx: CommandContext): CommandClass {
   let argv = [...argvIn];
@@ -331,7 +334,7 @@ function classifySegment(argvIn: string[], ctx: CommandContext): CommandClass {
   }
   if (!argv.length) return run("read", "sets variables");
   // Wrappers: look at what they run.
-  while (argv.length && ["env", "command", "exec", "nohup", "time", "nice", "timeout"].includes(argv[0])) {
+  while (argv.length && WRAPPERS.has(argv[0])) {
     const w = argv.shift()!;
     argv = argv.filter((a, i) => !(i === 0 && w === "timeout" && /^\d/.test(a)));
     while (argv.length && (argv[0].startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[0]) || (w === "nice" && /^\d+$/.test(argv[0])))) argv.shift();
@@ -351,6 +354,7 @@ function classifySegment(argvIn: string[], ctx: CommandContext): CommandClass {
 
   if (PRIVILEGE_BINS.has(name)) return refuse("privilege", `${name} runs commands as another user`);
   if (name === "xargs") return ask("inline", "xargs runs commands from its input");
+  if (name === "eval" || name === "source" || name === "." || name === "trap") return ask("inline", `${name} runs shell code it is given`);
   if (name === "rm" || name === "rmdir" || name === "unlink") {
     const targets = args.filter((a) => !a.startsWith("-"));
     const recursive = args.some((a) => /^-[a-zA-Z]*[rR]/.test(a) || a === "--recursive");
@@ -455,16 +459,55 @@ export function classifyCommand(command: unknown, ctx: CommandContext): CommandC
     if (/\brm\s+-[a-zA-Z]*[rR][a-zA-Z]*\s+(\/|~|\$HOME)(\s|$|\/\*)/.test(c)) return refuse("destructive", "deletes a disk or a home folder");
     return ask("syntax", "uses shell syntax that can't be checked (command substitution, subshells or here-docs)");
   }
+  const judged = judgeParts(parts, ctx);
+  if (!judged.ok) return judged.cls;
   let worst: CommandClass = run("read", "only reads");
-  const take = (k: CommandClass) => {
+  for (const p of judged.parts) {
+    const k = p.cls;
     // Same verdict: the reason that can't be allow-listed wins (so a rule never covers it).
     if (RANK[k.action] > RANK[worst.action] || (RANK[k.action] === RANK[worst.action] && ((worst.category === "read" && k.category !== "read") || (REMEMBERABLE.has(worst.category) && !REMEMBERABLE.has(k.category))))) worst = k;
-  };
-  let commands = 0;
+  }
+  if (!judged.parts.length) return ask("unlisted", "only selects a Node version");
+  return worst;
+}
+
+/** One part of a command line (between `|`, `;`, `&&`, `||`), judged on its own. */
+export interface CommandPart {
+  /** The part without its redirections (`python3 tools/x.py SPY` for `python3 tools/x.py SPY 2>&1`). */
+  text: string;
+  cls: CommandClass;
+  /** Files it writes through `>` / `>>` (not `2>&1` or /dev/null). */
+  writes: string[];
+}
+
+/**
+ * A shell or interpreter fed its code on stdin (`… | sh`, `… | python3 -`, `bash < x.sh`): it runs
+ * whatever the pipe or file carries, so no rule may cover it.
+ */
+function runsStdin(argvIn: string[], stdinFed: boolean): boolean {
+  if (!stdinFed) return false;
+  // Past wrappers and their options (`env FOO=1 sh`, `nice -n 5 bash`, `timeout 5 python3`).
+  let i = 0;
+  while (i < argvIn.length && (WRAPPERS.has(argvIn[i]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(argvIn[i]) || (i > 0 && (argvIn[i].startsWith("-") || /^\d+[smhd]?$/.test(argvIn[i]))))) i++;
+  const argv = argvIn.slice(i);
+  const name = (argv[0] ?? "").split("/").pop() ?? "";
+  if (!INTERPRETERS.test(name)) return false;
+  const operands = argv.slice(1).filter((a) => !a.startsWith("-") || a === "-");
+  return operands.length === 0 || operands[0] === "-" || /^\/dev\/(stdin|fd\/0)$/.test(operands[0]);
+}
+
+/**
+ * Each part of a split command with its class, or the verdict for the whole command when a part
+ * is refused or can't be read. Node version setup parts (`. ~/.nvm/nvm.sh &&`) are left out.
+ */
+function judgeParts(parts: Array<{ text: string; op: string }>, ctx: CommandContext): { ok: true; parts: CommandPart[] } | { ok: false; cls: CommandClass } {
+  const out: CommandPart[] = [];
+  let prevOp = "";
   for (const p of parts) {
-    if (p.op === "&") take(ask("syntax", "runs something in the background"));
+    const pipedInto = prevOp === "|";
+    prevOp = p.op;
     const r = redirections(p.text);
-    if (!r) return ask("syntax", "has a redirection that can't be checked");
+    if (!r) return { ok: false, cls: ask("syntax", "has a redirection that can't be checked") };
     // `. ~/.nvm/nvm.sh && nvm use 22 >/dev/null && npm test` is judged as `npm test`.
     if (!r.targets.length && !r.inputs.length && p.op === "&&") {
       try {
@@ -473,9 +516,13 @@ export function classifyCommand(command: unknown, ctx: CommandContext): CommandC
         // judged below
       }
     }
-    commands++;
+    let worst: CommandClass | null = null;
+    const take = (k: CommandClass) => {
+      if (!worst || RANK[k.action] > RANK[worst.action] || (RANK[k.action] === RANK[worst.action] && ((worst.category === "read" && k.category !== "read") || (REMEMBERABLE.has(worst.category) && !REMEMBERABLE.has(k.category))))) worst = k;
+    };
+    if (p.op === "&") take(ask("syntax", "runs something in the background"));
     for (const t of r.targets) {
-      if (isSecretPath(t)) return refuse("secret", `writes a secrets file (${t})`);
+      if (isSecretPath(t)) return { ok: false, cls: refuse("secret", `writes a secrets file (${t})`) };
       if (escapes(t, ctx.root)) take(ask("outside", `writes outside the project (${t})`));
       else if (protectedArg(t, ctx.root)) take(ask("protected", `writes a protected path (${t})`));
       else take(ask("unlisted", `writes ${t} outside the edit tools`));
@@ -485,15 +532,16 @@ export function classifyCommand(command: unknown, ctx: CommandContext): CommandC
     try {
       argv = parseArgv(r.rest);
     } catch {
-      return ask("syntax", "has an unterminated quote");
+      return { ok: false, cls: ask("syntax", "has an unterminated quote") };
     }
+    if (runsStdin(argv, pipedInto || r.inputs.length > 0)) take(ask("inline", `${argv[0]} runs code from its input`));
     const k = classifySegment(argv, ctx);
-    if (k.action === "refuse") return k;
+    if (k.action === "refuse") return { ok: false, cls: k };
     take(k);
     // Arguments that reach outside the project or into protected paths ask, whatever the program.
     if (k.category !== "outside" && k.category !== "network" && k.category !== "build-clean") {
       for (const a of argv.slice(1)) {
-        if (isSecretPath(a) && /^(cp|mv|tee|ln|install|sed|truncate)$/.test(argv[0])) return refuse("secret", `writes a secrets file (${a})`);
+        if (isSecretPath(a) && /^(cp|mv|tee|ln|install|sed|truncate)$/.test(argv[0])) return { ok: false, cls: refuse("secret", `writes a secrets file (${a})`) };
         if (escapes(a, ctx.root)) {
           take(ask("outside", `touches a path outside the project (${a})`));
           break;
@@ -504,9 +552,20 @@ export function classifyCommand(command: unknown, ctx: CommandContext): CommandC
         }
       }
     }
+    out.push({ text: r.rest, cls: worst ?? k, writes: r.targets });
   }
-  if (!commands) return ask("unlisted", "only selects a Node version");
-  return worst;
+  return { ok: true, parts: out };
+}
+
+/** The parts of a command line, judged one by one; null when it can't be split (substitution, subshells, here-docs) or a part is refused. */
+export function commandParts(command: unknown, ctx: CommandContext): CommandPart[] | null {
+  if (typeof command !== "string" || !command.trim()) return null;
+  const c = command.trim();
+  if (classifyCommand(c, ctx).action === "refuse") return null;
+  const parts = splitCommand(c);
+  if (!parts) return null;
+  const judged = judgeParts(parts, ctx);
+  return judged.ok ? judged.parts : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -567,22 +626,70 @@ export function suggestRule(command: unknown, ctx: CommandContext): string | nul
   let tokens = [a];
   if (word(b)) tokens = ["run", "run-script", "exec", "x", "-m"].includes(b) && word(d) ? [a, b, d] : [a, b];
   else if (b === "-m" && word(d)) tokens = [a, b, d];
+  // `python3 tools/watchlist.py --md` keeps `python3 tools/watchlist.py:*`, not every python3 script.
+  else if (INTERPRETERS.test(a) && b && SCRIPT_PATH.test(b) && !b.split("/").includes("..")) tokens = [a, b];
   const rule = `${tokens.join(" ")}:*`;
   return parseRule(rule) ? rule : null;
+}
+
+/** A script inside the project, as an interpreter's first argument (`tools/watchlist.py`, `./scripts/x.sh`). */
+const SCRIPT_PATH = /^(\.\/)?[A-Za-z0-9_][\w.-]*(\/[\w.-]+){0,6}\.(py|js|mjs|cjs|ts|mts|rb|pl|php|sh|bash|zsh)$/;
+
+/**
+ * The rules "Always allow" keeps for a command, or null when none may be kept. A plain command gets
+ * suggestRule's one rule. A command line (`python3 tools/x.py SPY 2>&1 | head -20; echo "exit=$?"`)
+ * gets one plain rule per part that isn't read-only (`python3 tools/x.py:*`); read-only parts (head,
+ * tail, echo, grep, wc, sort, cat of project files) need none. None at all when a part can't have
+ * one: it writes a file (`>`), runs code from its input (`| sh`), reaches the network or outside the
+ * project, or the line uses syntax that can't be checked (`$(...)`, backticks).
+ */
+export function suggestRules(command: unknown, ctx: CommandContext): string[] | null {
+  if (typeof command !== "string" || !command.trim()) return null;
+  if (!SHELL_META.test(command.trim())) {
+    const one = suggestRule(command, ctx);
+    return one ? [one] : null;
+  }
+  const parts = commandParts(command, ctx);
+  if (!parts) return null;
+  const rules: string[] = [];
+  for (const p of parts) {
+    if (p.cls.category === "read" && !p.writes.length) continue;
+    if (!rememberable(p.cls) || p.writes.length) return null;
+    const rule = suggestRule(p.text, ctx);
+    if (!rule) return null;
+    if (!rules.includes(rule)) rules.push(rule);
+  }
+  return rules.length ? rules : null;
+}
+
+/**
+ * True when every part of a command line runs without asking on its own: it only reads, Auto runs
+ * it (Auto mode only), or one of the rules covers it. A part that writes a file through `>`, runs
+ * code from its input or can't be read is never covered.
+ */
+function partsCovered(command: unknown, ctx: CommandContext, rules: readonly string[], auto: boolean): boolean {
+  if (typeof command !== "string" || !SHELL_META.test(command.trim()) || !rules.length) return false;
+  const parts = commandParts(command, ctx);
+  if (!parts?.length) return false;
+  return parts.every((p) => {
+    if (p.writes.length || !rememberable(p.cls)) return false;
+    if (p.cls.category === "read" || (auto && p.cls.action === "run")) return true;
+    return rules.some((r) => ruleMatches(r, p.text));
+  });
 }
 
 /** The command a git tool runs, for matching "always allow" rules (`git pull:*`). */
 const GIT_TOOL_COMMAND: Partial<Record<ToolName, string>> = { git_pull: "git pull", git_fetch: "git fetch" };
 
 /**
- * The rule "Always allow" keeps for a tool call, or null when none may be kept: a shell command's
- * suggestRule, or `git pull:*` / `git fetch:*` for the git tools (they take only a configured
+ * The rules "Always allow" keeps for a tool call (empty when none may be kept): a shell command's
+ * suggestRules, or `git pull:*` / `git fetch:*` for the git tools (they take only a configured
  * remote's name and a branch, checked by the executor).
  */
-export function suggestToolRule(tool: ToolName, args: Record<string, unknown>, ctx: CommandContext): string | null {
-  if (tool === "run_shell") return suggestRule(args.command, ctx);
+export function suggestToolRules(tool: ToolName, args: Record<string, unknown>, ctx: CommandContext): string[] {
+  if (tool === "run_shell") return suggestRules(args.command, ctx) ?? [];
   const cmd = GIT_TOOL_COMMAND[tool];
-  return cmd ? `${cmd}:*` : null;
+  return cmd ? [`${cmd}:*`] : [];
 }
 
 // ---------------------------------------------------------------------------
@@ -592,8 +699,10 @@ export function suggestToolRule(tool: ToolName, args: Record<string, unknown>, c
 export interface Decision {
   action: Action;
   reason: string;
-  /** The "Always allow" rule the approval card may offer (asks only). */
+  /** The "Always allow" rule the approval card may offer (asks only); the first of `rules` for a command line. */
   rule?: string;
+  /** A command line's rules, one per part that needs one (`python3 tools/x.py:*`), when there are several. */
+  rules?: string[];
   /**
    * A run that counts as the user's approval for the executor's own checks (Full access: the user
    * chose to approve everything). The executor still refuses what it always refuses (.git internals).
@@ -655,8 +764,10 @@ export function decideToolCall(tool: ToolName, args: Record<string, unknown>, ct
     if (cls.category === "read") return { action: "run", reason: cls.reason };
     if (ruleCovers(ctx, args.command, cls, () => !legacyRisk || legacyRisk(args.command) === null)) return { action: "run", reason: "an always-allow rule for this project" };
     if (ctx.mode === "auto" && cls.action === "run") return { action: "run", reason: cls.reason };
-    const rule = suggestRule(args.command, { root: ctx.root, branch: null });
-    return { action: "ask", reason: cls.reason, ...(rule ? { rule } : {}) };
+    // A command line runs when each part only reads, Auto runs it, or a rule covers it.
+    if (partsCovered(args.command, { root: ctx.root, branch: ctx.branch?.() ?? null }, ctx.rules ?? [], ctx.mode === "auto")) return { action: "run", reason: "always-allow rules cover every part" };
+    const rules = suggestRules(args.command, { root: ctx.root, branch: null });
+    return { action: "ask", reason: cls.reason, ...(rules ? { rule: rules[0], ...(rules.length > 1 ? { rules } : {}) } : {}) };
   }
   if (tool === "write_file" || tool === "edit_file") {
     const path = args.path;

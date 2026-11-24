@@ -25,6 +25,7 @@ import { existsSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import type { ApprovalAnswer, ApprovalAsk } from "./agent-loop.js";
 import type { DesktopTurn, SessionHub } from "./sessions.js";
 import type { ToolName } from "./tool-types.js";
 import { markCodeProject } from "./workspace-trust.js";
@@ -100,24 +101,25 @@ export function desktopTurnFor(hub: SessionHub, chatId: string | undefined, turn
  * An answer from the app takes the call off the mirror's pending list.
  */
 export function firstAnswer(
-  call: { id: string; tool: ToolName; args: Record<string, unknown> },
+  call: { id: string; tool: ToolName; args: Record<string, unknown>; ask?: ApprovalAsk },
   mirror: DesktopTurn | null,
-  register: (answer: (approved: boolean) => void) => void,
+  register: (answer: (approved: ApprovalAnswer) => void) => void,
   unregister: () => void,
   timeoutMs: number,
-): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
+): Promise<ApprovalAnswer> {
+  return new Promise<ApprovalAnswer>((resolve) => {
     let settled = false;
-    const settle = (approved: boolean, fromMirror = false) => {
+    // The phone answers one call at a time (true/false); only the app answers "run".
+    const settle = (approved: ApprovalAnswer, fromMirror = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       unregister();
-      if (!fromMirror) mirror?.answered(call.id, approved);
+      if (!fromMirror) mirror?.answered(call.id, approved !== false);
       resolve(approved);
     };
     const timer = setTimeout(() => settle(false), timeoutMs);
     register((approved) => settle(approved));
-    void mirror?.ask(call.id, call.tool, call.args).then((approved) => settle(approved, true));
+    void mirror?.ask(call.id, call.tool, call.args, call.ask).then((approved) => settle(approved, true));
   });
 }

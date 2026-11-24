@@ -220,10 +220,25 @@ updated with agent releases.
 - Everything the tools return is wrapped as untrusted data (`<<<untrusted_web_content …>>>`, with
   any marker inside the page neutralised), and the system prompt says web content is information,
   never instructions.
-- After `read_page` has put a page's text into the context, nothing that changes files or runs
-  commands happens on its own for the rest of that reply or bot run: a call the mode (or an "Always
-  allow" rule) would have run asks first (`makeToolRunner` in `src/apps/ide/agent-loop.ts`). A bot
-  running on its own queues it as **Needs approval**, so page text alone can never make it act.
+- After `read_page` has put a page's text into the context, the rest of that reply or bot run is
+  guarded (`makeToolRunner` in `src/apps/ide/agent-loop.ts`): a command, git call or other action
+  the mode (or an "Always allow" rule) would have run asks first, so page text alone can never make
+  the agent run anything. A bot running on its own queues it as **Needs approval**.
+  - **Edits inside the project still apply** when the mode applies them anyway (Accept edits, Auto):
+    each one is in the turn's checkpoint and can be undone. Protected paths (git hooks, files tooling
+    runs), secrets files and files outside the project ask (or are refused) as the mode says.
+  - **Allow for the rest of this run**: a card the guard asked shows why ("Asked because this run read
+    a web page") and offers this answer next to Allow and Deny. It lets later guarded calls (only
+    calls the mode or a rule would run anyway) go ahead until that reply or run ends; anything the
+    mode itself asks about still asks, and nothing is kept afterwards. The phone and the web portal
+    answer one call at a time and don't offer it (their answers never widen what runs without
+    asking, like "Always allow").
+  - An ask the mode makes after a page read keeps its **Always allow** rule. Answering with it keeps
+    the rule but doesn't lift the guard: the next guarded call in that run still asks (once, if you
+    answer it with "Allow for the rest of this run"). A rule says which commands are routine; the
+    guard is about whether page text is steering this run, so one tap never does both.
+  - **Full access** skips the guard: the user chose to approve everything. Its hard refusals (sudo,
+    wiping a disk or the project, download-and-run, secrets) still apply.
 
 ## Permission modes
 

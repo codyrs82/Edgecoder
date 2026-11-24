@@ -305,7 +305,8 @@
     act(() => updateBot(bot.id, { triggers: (bot.triggers ?? []).map((t) => (t.id === id ? { ...t, enabled: !t.enabled } : t)) }));
   const retryRepo = () => act(() => syncBotRepository(bot.id));
   const send = (text: string, attachments?: AttachmentPayload[]) => act(() => sendBotMessage(bot.id, text, attachments));
-  const approve = (callId: string, approved: boolean, always = false) => act(() => (always ? approveBotCall(bot.id, callId, approved, true) : approveBotCall(bot.id, callId, approved)));
+  const approve = (callId: string, approved: boolean, always = false, forRun = false) =>
+    act(() => (always ? approveBotCall(bot.id, callId, approved, true) : forRun ? approveBotCall(bot.id, callId, approved, false, true) : approveBotCall(bot.id, callId, approved)));
   // Its ask to use your frontier key (bot-frontier.ts on the server), and what that key spent today.
   const fAsk = $derived(frontierAsk(bot));
   const fSpend = $derived(frontierSpendLine(bot));
@@ -515,10 +516,14 @@
                   {#if c.answer}
                     <div class="ask-answer" class:denied={c.answer === "Denied"}>You: {c.answer}</div>
                   {:else}
+                    {#if c.webGuard}<div class="ask-note" data-testid="web-guard-note">Asked because this run read a web page. Its mode would run it without asking.</div>{/if}
                     <div class="ask-choices">
                       <button class="primary" onclick={() => approve(c.id, true)}>Allow</button>
-                      {#if c.rule}
-                        <button class="always" onclick={() => approve(c.id, true, true)} title="Commands starting with this run without asking in this project. Remove it in Settings → General → Always-allowed commands.">Always allow <code>{c.rule.replace(/:\*$/, " …")}</code> in this project</button>
+                      {#if c.webGuard}
+                        <button class="always" onclick={() => approve(c.id, true, false, true)} title="Calls its permission mode runs anyway stop asking until this run ends. Anything the mode asks about still asks.">Allow for the rest of this run</button>
+                      {/if}
+                      {#if c.rules?.length}
+                        <button class="always" onclick={() => approve(c.id, true, true)} title="Commands starting with this run without asking in this project. Remove it in Settings → General → Always-allowed commands.">Always allow {#each c.rules as r, i (r)}{i ? ", " : ""}<code>{r.replace(/:\*$/, " …")}</code>{/each} in this project</button>
                       {/if}
                       <button onclick={() => approve(c.id, false)}>Deny</button>
                     </div>
@@ -850,6 +855,10 @@
     color: var(--text-primary);
     font-size: 12.5px;
     cursor: pointer;
+  }
+  .ask-note {
+    font-size: 12px;
+    color: var(--text-secondary);
   }
   .ask-choices button.always code {
     font-size: 11.5px;

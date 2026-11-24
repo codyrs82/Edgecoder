@@ -110,7 +110,12 @@ Chats (desktop app and web chat) and bots can search the web (`web_search`) and 
   installer can run their own search (SearXNG), which your chats on that machine use with no daily
   cap.
 - **Safety:** page reads go only to public addresses on ports 80 and 443, at most 2 MB and 10
-  seconds. Page content is marked as untrusted data, and after a page has been read, nothing that
-  changes files or runs commands happens without asking for the rest of that reply or run.
+  seconds. Page content is marked as untrusted data, and after a page has been read, commands and
+  other actions ask first for the rest of that reply or run, even ones the mode would run (Full
+  access excepted). Edits inside the project that the mode applies anyway still apply (undoable);
+  protected paths, secrets and files outside the project ask or are refused as usual. The card says
+  why it asked and offers **Allow for the rest of this run**, which lets the rest of that run's
+  guarded calls go ahead (never ones the mode itself asks about; nothing is kept). The phone and the
+  web answer one call at a time.
 
 In **Manual** permission mode, every web call asks first.

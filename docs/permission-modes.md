@@ -34,8 +34,10 @@ In every mode but Full access (which has [its own section](#full-access)):
 - The web tool (`web_search`, `read_page`) is offered only when the chat is on **Web: Auto** (the
   default; **Off for this chat** turns it off) or the bot has the **Search the web** permission (on
   for new bots), which is its allowance: Auto, Accept edits, Plan and Full access run
-  it, Manual asks for each call. After a page is read, edits and commands that would have run on
-  their own ask first for the rest of the reply or run ([web tool](web-tool.md)).
+  it, Manual asks for each call. After a page is read, commands and other actions that would have
+  run on their own ask first for the rest of the reply or run; edits inside the project that the
+  mode applies still apply (undoable), and the card offers **Allow for the rest of this run**
+  ([web tool](web-tool.md#prompt-injection)). Full access skips this guard.
 
 The decision is made in one place, `src/apps/ide/permission-policy.ts` (`decideToolCall`,
 `classifyCommand`), for chats, sessions and bots alike.
@@ -79,16 +81,17 @@ Still refused, never asked (the same classes Auto refuses; nothing new):
 - the executor's own refusals (writes into `.git`, paths that escape the project, and the like)
 
 Also unchanged: Plan mode still means Plan; using a frontier key for a bot still asks (that is a
-key approval, not a permission ask); and after `read_page` reads a web page, calls that would have
-run ask first for the rest of the reply (the [web tool](web-tool.md)'s prompt-injection guard,
-kept in every mode).
+key approval, not a permission ask). Full access skips the [web tool](web-tool.md#prompt-injection)'s
+prompt-injection guard: after `read_page` reads a web page, everything still runs as Full access
+decides (the hard refusals above stay).
 
 Where it is offered:
 
 - **The desktop app's chats and live sessions, and `edgecoder code`** (`--mode full`,
   `/mode full`). Shift+Tab never cycles into it; from Full access it goes back to `ask`. Picking it
   in the app asks for a confirm the first time in each project ("runs commands, edits, installs and
-  pushes without asking; only a few destructive or secret-leaking commands are still blocked").
+  pushes without asking, even after it reads a web page; only a few destructive or secret-leaking
+  commands are still blocked").
   The mode button shows it in the warning color. **Settings → General → Permissions** can make it
   the default for new chats, behind the same confirm.
 - **Not from the phone or the web** (the code relay): they can't switch a session into Full access
@@ -132,8 +135,9 @@ How these commands are judged:
 | `nvm install`, `fnm install`, `volta fetch/install`, `mise install`, `asdf install`, `brew install` | Ask as an install |
 | `nvm use 22` on its own | Asks |
 
-"Always allow" rules don't match commands with `$` or `&&`, so a wrapped command asks in Manual
-even when its plain form is allow-listed; approve it once from the card.
+A rule matches a plain command only (no `$`); a wrapped command with `$PATH` asks in Manual even
+when its plain form is allow-listed; approve it once from the card. Command lines joined with `&&`,
+`;`, `|` or `||` are covered part by part (below).
 
 ## Plan
 
@@ -159,7 +163,8 @@ An approval card for a command offers **Allow**, **Always allow `npm test …` i
   `|`, `$(…)`). A rule without `:*` matches exactly. Older entries that are a single program name
   (`npm`) still work and keep their old meaning (only commands that aren't risky).
 - The rule offered is the program and its subcommand (`npm test:*`, `npm run lint:*`,
-  `python -m pytest:*`).
+  `python -m pytest:*`), or an interpreter and the project script it runs
+  (`python3 tools/watchlist.py:*`, `node scripts/build.mjs:*`), not every script.
 - Never offered or honoured for refused commands, nor for classes that must always ask: network,
   `git push`, deletes, paths outside the project, protected paths, inline code, unreadable syntax.
   Installs, Docker, other scripts and unknown programs can be allow-listed.
@@ -172,8 +177,16 @@ An approval card for a command offers **Allow**, **Always allow `npm test …` i
   `git ls-remote`, `git submodule`, `curl`, `wget` and other network commands are never
   allow-listed, and `git push`, pull requests, commits on the default branch, deletes and
   destructive commands keep asking whatever rules exist.
-- A chained command (`git status && npm test`) is never offered a rule; when every part is
-  read-only it runs without asking anyway (above).
+- A command line (`python3 tools/watchlist.py SPY 2>&1 | head -20; echo "exit=$?"`) is judged part
+  by part. Its card offers one plain rule per part that needs one (here `python3 tools/watchlist.py:*`)
+  and the button names each rule it keeps, so **Always-allowed commands** stays readable. Read-only
+  parts (`head`, `tail`, `echo`, `grep`, `wc`, `sort`, `cat` of project files, ...) need none, and
+  `2>&1`, `2>/dev/null` and `&>` are fine. The line then runs without asking only when every part
+  only reads, is covered by a rule, or (in Auto) is a command Auto runs. No rule is offered, and
+  none covers the line, when any part uses `$(…)` or backticks, `eval` or `source`, a variable in a
+  covered part, `>` / `>>` into a file, a pipe into a shell or interpreter that runs its input
+  (`| sh`, `| bash -s`, `| python3`, `| python -c …`, `| xargs`), a background `&`, the network,
+  or a path outside the project. When every part is read-only it runs without asking anyway (above).
 - Kept per project folder in `~/.edgecoder/permissions.json` (0600), never in the project itself, so
   a cloned repository can't allow commands on its own. **Settings → General → Permissions →
   Always-allowed commands** lists them per project with Remove. API: `GET /v1/ide/permissions`,
@@ -190,7 +203,9 @@ A bot that runs on its own (schedule, check-ins, GitHub triggers) has nobody wat
 does what Auto runs; anything that would ask is queued on the bot as **Needs approval** (the bot's
 status and avatar say so, in the app and on the web) and waits for your Allow / Always allow / Deny.
 It never blocks forever: after 24 hours unanswered the call is denied and the run goes on to its
-summary. Changing the mode while a call waits lets it go ahead when the new mode would run it.
+summary. Changing the mode while a call waits lets it go ahead when the new mode would run it
+(not a call the web-page guard asked about: that waits for your answer, or for Full access in a
+chat or session).
 
 On the web portal a bot's approvals can be answered (Approve / Deny), but its mode, tools and
 always-allow rules are changed on the Mac only.

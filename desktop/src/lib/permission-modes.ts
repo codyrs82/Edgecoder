@@ -38,7 +38,7 @@ export function modeOptions(allowFull: boolean): readonly ModeOption[] {
 
 /** What the one-time confirm says before Full access is turned on. */
 export const FULL_ACCESS_WARNING =
-  "Full access runs commands, edits, installs and pushes without asking; only a few destructive or secret-leaking commands are still blocked (sudo, wiping a disk or the project, piping a download into a shell, writing secrets).";
+  "Full access runs commands, edits, installs and pushes without asking, even after it reads a web page; only a few destructive or secret-leaking commands are still blocked (sudo, wiping a disk or the project, piping a download into a shell, writing secrets).";
 
 const FULL_OK_KEY = "edgecoder-full-access-ok";
 /** The key the confirm is kept under for Settings' default (not a project). */

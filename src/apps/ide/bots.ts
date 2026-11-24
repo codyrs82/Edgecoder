@@ -43,7 +43,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { announcesWork, backendChat, makeToolRunner, runAgentLoop, toolSchemas, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
+import { announcesWork, backendChat, makeToolRunner, runAgentLoop, toolSchemas, type ApprovalAnswer, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
 import { ATTACHMENT_BODY_LIMIT, AttachmentError, attachedLine, attachmentsSchema, saveAttachments, savedAttachmentsText, type AttachmentInput, type SavedAttachment } from "./attachments.js";
 import { READ_TOOLS, TENTACLE_TOOLS, TOOL_DEFINITIONS, WEB_TOOLS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
 import {
@@ -54,7 +54,7 @@ import { blockedResult, outcomeOf, projectCheck, runsDigest, stuckProblem, updat
 import { normalizeRemoteUrl } from "./git-setup.js";
 import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
-import { decideToolCall, suggestToolRule, type Decision } from "./permission-policy.js";
+import { decideToolCall, suggestToolRules, type Decision } from "./permission-policy.js";
 import { ensureRepo as realEnsureRepo } from "./repo-connect.js";
 import { toolchainFailureHint } from "./toolchain.js";
 import { COMPUTE_POLICIES, FALLBACK_NOTE, NETWORK_CLASSES, isNetworkClass, type NetworkClass, routeLabel, routeModelId, routeSummary, type ComputePolicy, type PlanOptions, type Route } from "../../inference-api/auto-route.js";
@@ -613,7 +613,8 @@ export type BotRunner = (ctx: BotRunContext) => Promise<void>;
 export interface ApprovalEntry {
   /** The project the call runs in ("Always allow" keeps its rule there). */
   projectRoot?: string;
-  resolve: (approved: boolean) => void;
+  /** true / false, or "run": allowed, and a web-page guard ask lifts the guard for the rest of the run. */
+  resolve: (approved: ApprovalAnswer) => void;
   /** A chat's cost check (cost-guard.ts): the app's three-way answer (Keep going, Switch, Stop). */
   choose?: (choice: "continue" | "switch" | "stop") => void;
   tool: ToolName;
@@ -873,7 +874,8 @@ interface ActiveRun {
   run: BotRun;
   abort: AbortController;
   cancelReason?: "cancelled" | "budget";
-  pending: Map<string, PendingCall & { finish: (approved: boolean, how?: "timeout" | "cancelled") => void; frontier?: (choice: FrontierChoice) => void }>;
+  /** `webGuard`: asked only because a web page was read this run (a mode change alone doesn't release it). */
+  pending: Map<string, PendingCall & { finish: (approved: ApprovalAnswer, how?: "timeout" | "cancelled") => void; frontier?: (choice: FrontierChoice) => void; webGuard?: boolean }>;
   reply: BotMessage;
   activity?: string;
   /** callId → tool, to tell which results came from open_pull_request. */
@@ -1802,7 +1804,9 @@ export class BotManager {
       // Calls waiting for an answer that the new mode runs without asking go ahead now (never a frontier ask).
       for (const p of [...(this.active.get(id)?.pending.values() ?? [])]) {
         if (p.frontier) continue;
-        if (this.decide(id, p.tool as ToolName, p.args).action === "run") p.finish(true);
+        // A web-page guard ask goes ahead only in Full access, which the guard leaves alone.
+        const v = this.decide(id, p.tool as ToolName, p.args);
+        if (v.action === "run" && (!p.webGuard || v.approved === true)) p.finish(true);
       }
     }
     const auto = (bot.auto ??= { idleStreak: 0, followUps: 0 });
@@ -2151,10 +2155,10 @@ export class BotManager {
   private async execute(bot: BotConfig, act: ActiveRun, memory: string, messages: Array<{ role: string; content: string }>, digest = ""): Promise<void> {
     const id = bot.id;
     const owner = `bot:${id}`;
-    const waitForApproval: BotRunContext["waitForApproval"] = (callId, tool, args) =>
-      new Promise<boolean>((resolve) => {
+    const waitForApproval: BotRunContext["waitForApproval"] = (callId, tool, args, ask) =>
+      new Promise<ApprovalAnswer>((resolve) => {
         if (act.cancelReason) return resolve(false);
-        const finish = (approved: boolean, how?: "timeout" | "cancelled") => {
+        const finish = (approved: ApprovalAnswer, how?: "timeout" | "cancelled") => {
           if (!act.pending.has(callId)) return;
           act.decisions.set(callId, how ? "unanswered" : approved ? "approved" : "denied");
           clearTimeout(timer);
@@ -2166,7 +2170,7 @@ export class BotManager {
         };
         const timer = setTimeout(() => finish(false, "timeout"), APPROVAL_TIMEOUT_MS);
         timer.unref?.();
-        act.pending.set(callId, { callId, tool, args, finish });
+        act.pending.set(callId, { callId, tool, args, finish, ...(ask?.webGuard ? { webGuard: true } : {}) });
         this.approvals.set(callId, { resolve: finish, tool, args, owner, projectRoot: botWorkRoot(bot) });
         act.run.status = "needs_approval";
         act.activity = `Needs approval: ${tool}`;
@@ -2370,8 +2374,11 @@ export class BotManager {
     return true;
   }
 
-  /** Answer one of the bot's pending tool calls. */
-  approve(id: string, callId: string, approved: boolean, always = false): boolean {
+  /**
+   * Answer one of the bot's pending tool calls. `forRun` ("Allow for the rest of this run") lifts the
+   * web-page guard for the rest of this run; the phone never sends it (bot-remote.ts).
+   */
+  approve(id: string, callId: string, approved: boolean, always = false, forRun = false): boolean {
     const bot = this.find(id);
     const p = this.active.get(id)?.pending.get(callId);
     // A frontier ask is answered only by its owner (answerFrontier).
@@ -2379,10 +2386,9 @@ export class BotManager {
     if (approved && always) {
       // "Always allow" keeps the command's rule for the bot's project (never a refused or always-ask command).
       const root = botWorkRoot(bot);
-      const rule = suggestToolRule(p.tool as ToolName, p.args, { root });
-      if (rule) this.permissions.addRule(root, rule);
+      for (const rule of suggestToolRules(p.tool as ToolName, p.args, { root })) this.permissions.addRule(root, rule);
     }
-    p.finish(approved);
+    p.finish(approved ? (forRun ? "run" : true) : false);
     return true;
   }
 
@@ -2780,8 +2786,8 @@ export function registerBotRoutes(app: FastifyInstance, bots: BotManager, deps: 
   app.post("/v1/ide/bots/:id/approve", (req, reply) =>
     handle(reply, () => {
       const id = idParams.parse(req.params).id;
-      const { callId, approved, always } = z.object({ callId: z.string().min(1).max(100), approved: z.boolean(), always: z.boolean().default(false) }).parse(req.body ?? {});
-      if (!bots.approve(id, callId, approved, always)) return reply.status(404).send({ error: "No pending approval with that id" });
+      const { callId, approved, always, forRun } = z.object({ callId: z.string().min(1).max(100), approved: z.boolean(), always: z.boolean().default(false), forRun: z.boolean().default(false) }).parse(req.body ?? {});
+      if (!bots.approve(id, callId, approved, always, forRun)) return reply.status(404).send({ error: "No pending approval with that id" });
       return { ok: true, bot: bots.get(id) };
     }),
   );

@@ -217,6 +217,10 @@ export interface AskCard {
   answer: "Allowed" | "Denied" | null;
   /** The "Always allow" rule this command may keep for the project (`npm test:*`). */
   rule?: string;
+  /** Every rule "Always allow" keeps (a command line keeps one per part); `rule` is the first. */
+  rules?: string[];
+  /** Asked only because the run read a web page (the mode would run it): "Allow for the rest of this run" is offered. */
+  webGuard?: boolean;
   /** open_pull_request: what the PR will be. */
   pr?: { title: string; body: string; branch: string; base: string; diffstat: string; commits?: number; uncommitted?: number };
 }
@@ -227,7 +231,10 @@ export function botModeOf(bot: Pick<Bot, "mode" | "autoApproveEdits">): import("
   return bot.mode ?? (bot.autoApproveEdits ? "auto-edits" : "ask");
 }
 
-export function askCards(events: Array<{ type: string; id?: string; tool?: string; args?: Record<string, unknown>; requires_approval?: boolean; approval_status?: string; allow_rule?: string }>, botName: string): AskCard[] {
+export function askCards(
+  events: Array<{ type: string; id?: string; tool?: string; args?: Record<string, unknown>; requires_approval?: boolean; approval_status?: string; allow_rule?: string; allow_rules?: string[]; web_guard?: boolean }>,
+  botName: string,
+): AskCard[] {
   return events
     .filter((e) => e.type === "tool_call" && e.requires_approval && e.id)
     .map((e) => {
@@ -250,7 +257,16 @@ export function askCards(events: Array<{ type: string; id?: string; tool?: strin
         const pr = { title: s("title"), body: s("body"), branch: s("branch"), base: s("base"), diffstat: s("diffstat"), commits: n("commits"), uncommitted: n("uncommitted") };
         return { id: e.id!, question, answer, pr };
       }
-      return { id: e.id!, question, ...(detail ? { detail } : {}), ...(answer === null ? { call: { tool, args } } : {}), ...(answer === null && e.allow_rule ? { rule: e.allow_rule } : {}), answer };
+      const rules = e.allow_rules?.length ? e.allow_rules : e.allow_rule ? [e.allow_rule] : [];
+      return {
+        id: e.id!,
+        question,
+        ...(detail ? { detail } : {}),
+        ...(answer === null ? { call: { tool, args } } : {}),
+        ...(answer === null && rules.length ? { rule: rules[0], rules } : {}),
+        ...(answer === null && e.web_guard === true ? { webGuard: true } : {}),
+        answer,
+      };
     });
 }
 
@@ -318,8 +334,8 @@ export const BOT_TOOL_GROUPS: Array<{ id: string; title: string; desc: string; t
   { id: "git", title: "Commit, push and open pull requests", desc: "Commits, pushes and pull requests ask you first. Pull requests never go to the default branch.", tools: ["git_commit", "git_push", "open_pull_request"] },
   // docs/web-tool.md: on for new bots (existing bots keep theirs). Network access: it's the allowance, so
   // Auto and Accept edits run searches without asking (Manual asks each time); after it reads a page,
-  // edits and commands ask first.
-  { id: "web", title: "Search the web", desc: "Search the web and read pages through EdgeCoder, citing sources. Each search and page costs a little cSats (part of its daily budget). After it reads a page, its edits and commands ask you first.", tools: ["web_search", "read_page"] },
+  // commands ask first (edits the mode applies inside the project still apply).
+  { id: "web", title: "Search the web", desc: "Search the web and read pages through EdgeCoder, citing sources. Each search and page costs a little cSats (part of its daily budget). After it reads a page, its commands ask you first for the rest of the run (edits in its folder still apply, undoable).", tools: ["web_search", "read_page"] },
 ];
 
 export function toolsFor(groups: Record<string, boolean>): string[] {
