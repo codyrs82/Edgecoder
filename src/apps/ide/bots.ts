@@ -607,6 +607,8 @@ export interface ApprovalEntry {
   /** The project the call runs in ("Always allow" keeps its rule there). */
   projectRoot?: string;
   resolve: (approved: boolean) => void;
+  /** A chat's cost check (cost-guard.ts): the app's three-way answer (Keep going, Switch, Stop). */
+  choose?: (choice: "continue" | "switch" | "stop") => void;
   tool: ToolName;
   args: Record<string, unknown>;
   owner?: string;

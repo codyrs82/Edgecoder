@@ -8,6 +8,7 @@ import { CSP_NONCE } from "../csp-nonce.js";
 import { CLIENT_ESCAPE_JS } from "./escape.js";
 import { CLIENT_BOT_HELPERS_JS } from "./bot-helpers.js";
 import { LEGAL_FOOTER_CSS, legalFooterHtml } from "./legal-footer.js";
+import { SIDEBAR_MODE_CSS, sidebarModeJs, sidebarModeSwitchHtml } from "./sidebar-mode.js";
 
 /** Account menu entries (the popup above the avatar row), in the desktop app's order. */
 export const ACCOUNT_MENU_ITEMS: Array<{ href: string; label: string; icon: string; external?: boolean; adminOnly?: boolean; separatorBefore?: boolean }> = [
@@ -23,17 +24,19 @@ export const ACCOUNT_MENU_ITEMS: Array<{ href: string; label: string; icon: stri
   { href: DOCS_SITE_URL, label: "Docs", icon: "docs", external: true, separatorBefore: true }
 ];
 
-/** The short primary list under New chat and Search. Everything about the account and the economy lives in Settings. */
+/**
+ * The short primary list under New chat and Search. Chat and Code are the switch at the top of the
+ * sidebar (pages/sidebar-mode.ts). Everything about the account and the economy lives in Settings.
+ */
 export const PRIMARY_NAV_ITEMS: Array<{ key: string; href: string; label: string; icon: string; badge?: string }> = [
-  { key: "chat", href: "/portal/chat", label: "Chat", icon: "chat" },
-  { key: "code", href: "/portal/code", label: "Code", icon: "code" },
   { key: "dashboard", href: "/portal/dashboard", label: "Overview", icon: "dashboard" },
   { key: "reviews", href: "/portal/reviews", label: "Reviews", icon: "reviews", badge: "reviewsBadge" }
 ];
 
 /**
- * Authenticated app shell, laid out like the desktop app: a left sidebar with New chat and Search,
- * a short primary list (Chat, Code, Overview, Reviews), your recent chats grouped by date, and an avatar
+ * Authenticated app shell, laid out like the desktop app: a left sidebar with the Chat / Code switch,
+ * New chat (or New session) and Search, a short primary list (Overview, Reviews), then your recent
+ * chats grouped by date in Chat mode or your Macs' coding sessions in Code mode, and an avatar
  * row at the bottom (name and cSats balance, a gear that opens Settings). Clicking the avatar opens
  * the account menu. Market, Wallet, Install agent and the rest live in Settings. Top bar (page
  * title, subtitle, actions) and content area on the right; on mobile the sidebar slides in behind
@@ -64,10 +67,13 @@ export function portalAuthedPageHtml(input: {
   sidebarNav?: string;
 }): string {
   const onChat = input.activeTab === "chat";
+  const fixedMode = onChat ? "chat" : input.activeTab === "code" ? "code" : null;
   // On the chat page New chat starts a chat in place; elsewhere it opens the chat page on a new chat.
   const newChat = onChat
-    ? `<button type="button" class="nav-link nav-action" id="newChatBtn">${icon("edit", 16)}<span class="nav-label">New chat</span></button>`
-    : `<a class="nav-link nav-action" id="newChatBtn" href="/portal/chat?new=1">${icon("edit", 16)}<span class="nav-label">New chat</span></a>`;
+    ? `<button type="button" class="nav-link nav-action chat-only" id="newChatBtn">${icon("edit", 16)}<span class="nav-label">New chat</span></button>`
+    : `<a class="nav-link nav-action chat-only" id="newChatBtn" href="/portal/chat?new=1">${icon("edit", 16)}<span class="nav-label">New chat</span></a>`;
+  // Code mode: sessions start on a Mac, so New session opens the Code page's list of Macs.
+  const newSession = `<a class="nav-link nav-action code-only" id="newSessionBtn" href="/portal/code">${icon("plus", 16)}<span class="nav-label">New session</span></a>`;
   const primaryHtml = PRIMARY_NAV_ITEMS.map((item) => {
     const active = item.key === input.activeTab;
     const badge = item.badge ? `<span class="nav-badge hidden" id="${item.badge}">0</span>` : "";
@@ -217,6 +223,7 @@ export function portalAuthedPageHtml(input: {
         .verify-banner-text { font-size: 13px; }
         .verify-banner .link-btn { background: none; border: none; padding: 0; min-height: 0; color: var(--brand-2); text-decoration: underline; font: inherit; cursor: pointer; }
         .verify-banner-close { flex: none; min-height: 0; padding: 4px; }
+        ${SIDEBAR_MODE_CSS}
         ${LEGAL_FOOTER_CSS}
         .main > .legal-footer { margin-top: auto; }
         /* ── Mobile ── */
@@ -234,13 +241,15 @@ export function portalAuthedPageHtml(input: {
     </head>
     <body>
       <div class="app">
-        <aside class="sidebar" id="topbarNav">
+        <aside class="sidebar" id="topbarNav" data-mode="${fixedMode ?? "chat"}">
           <div class="sidebar-brand">
             <a href="/portal/chat">${brandMark(28)}<span><div class="brand-name">EdgeCoder</div><div class="brand-sub">Compute network</div></span></a>
           </div>
           ${input.sidebarNav ?? `<nav class="sidebar-nav" aria-label="Primary">
             <div class="nav-group">
+              ${sidebarModeSwitchHtml(fixedMode)}
               ${newChat}
+              ${newSession}
               <button type="button" class="nav-link" id="sidebarSearchBtn" aria-expanded="false" aria-controls="sidebarSearch">${icon("search", 16)}<span class="nav-label">Search</span></button>
               <div class="sidebar-search" id="sidebarSearch" hidden><input id="convSearch" type="search" placeholder="Search chats" aria-label="Search chats" autocomplete="off" /></div>
             </div>
@@ -249,8 +258,11 @@ export function portalAuthedPageHtml(input: {
               <a class="nav-group-label nav-group-link${input.activeTab === "bots" ? " active" : ""}" id="botsNavLabel" href="/portal/bots"${input.activeTab === "bots" ? ' aria-current="page"' : ""}>${icon("bot", 14)}<span>Bots</span></a>
               <div class="bot-nav-list" id="botNavList"></div>
             </div>
-            <div class="nav-group" aria-label="Recent chats">
+            <div class="nav-group chat-only" role="group" aria-label="Recent chats">
               <div class="conv-list" id="convList"></div>
+            </div>
+            <div class="nav-group code-only" role="group" aria-label="Coding sessions on your computers">
+              <div class="conv-list" id="codeNavList"></div>
             </div>
           </nav>`}
           <div class="sidebar-foot">
@@ -566,6 +578,7 @@ export function portalAuthedPageHtml(input: {
             .then(function(res) { all = (res && res.conversations) || []; render(); })
             .catch(function() {});`}
         })();
+        ${sidebarModeJs(fixedMode)}
         async function loadReviewsBadge() {
           try {
             var res = await api("/portal/api/reviews");

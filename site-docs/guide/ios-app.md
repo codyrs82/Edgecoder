@@ -44,14 +44,21 @@ Code mode drives a coding session that runs **on one of your computers**, not on
 sends messages and approvals; the computer does the reading, editing and running.
 
 1. On the computer, open the EdgeCoder desktop app, turn on **Code from your phone** in Settings, and
-   open and trust the project folder you want to work in.
-2. On the phone, switch to **Code**. **Your computers** lists each computer with its trusted projects
-   and sessions.
+   open the project you want to work in, in the **Code** view (a project you have chatted in there,
+   or a folder you trusted, shows on the phone; this doesn't trust the folder's own tooling).
+2. On the phone, switch to **Code**. **Your computers** lists each computer with its projects and
+   sessions, including the chats from the desktop app's Code view.
 3. Open a session, or tap **New session**, pick the project and the mode, and send a message.
 
 While a session runs you can send messages (they queue while a reply is running), **Stop** the reply,
 approve or deny tool calls, approve a plan, and **Undo last turn**. Sessions started on the phone
 are marked **Started from your phone**.
+
+A chat from the desktop app's Code view continues where it left off: what you send from the phone
+runs on the computer, and the desktop app shows those messages and replies in the same chat. While
+the desktop app is replying, the phone shows the reply live and can stop it or answer its approvals
+(a command or edit outside the project is approved on the computer). **Full access** stays on the
+computer: from the phone, a Full access chat runs as **Accept edits** with the phone's rules.
 
 For safety, commands that aren't read-only always ask first, paths outside the project are refused,
 and approving from the phone never adds an "always allow" rule or turns on automatic edits. Very long

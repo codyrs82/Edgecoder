@@ -210,6 +210,9 @@ export function toolCallDetail(tool: string, args: Record<string, unknown> | und
       return short([a.remote, a.branch].filter(Boolean).join(" ") || "push", 200);
     case "open_pull_request":
       return short([a.title, a.branch ? `(${String(a.branch)})` : ""].filter(Boolean).join(" "), 200);
+    case "cost_check":
+      // A chat's per-reply cost check (src/apps/ide/cost-guard.ts): its question.
+      return short(a.question, 200);
     default:
       return short(a.path ?? a.file ?? a.query ?? a.pattern ?? a.url ?? a.note ?? "", 200);
   }

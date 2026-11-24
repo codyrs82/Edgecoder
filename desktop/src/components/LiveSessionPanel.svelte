@@ -8,7 +8,11 @@
   import ChatMessage from "./ChatMessage.svelte";
   import ChatInput from "./ChatInput.svelte";
   import QuoteSelection from "./QuoteSelection.svelte";
-  import { DESKTOP_CLIENT, followSession, getSession, sessionApprove, sessionApprovePlan, sessionCancel, sessionSend, sessionSettings, sessionTentacles, sessionUnqueue, tentacleCancel, tentacleMerge } from "../lib/api";
+  import JumpToLatest from "./JumpToLatest.svelte";
+  import CompactionNote from "./CompactionNote.svelte";
+  import { createFollower, type FollowState } from "../lib/follow-bottom";
+  import { isCompactCommand } from "../lib/compaction";
+  import { DESKTOP_CLIENT, followSession, getSession, sessionApprove, sessionApprovePlan, sessionCancel, sessionCompact, sessionSend, sessionSettings, sessionTentacles, sessionUnqueue, tentacleCancel, tentacleMerge } from "../lib/api";
   import PermissionModePicker from "./PermissionModePicker.svelte";
   import PlanApproval from "./PlanApproval.svelte";
   import { modeOption, isEngineMode, type EngineMode } from "../lib/permission-modes";
@@ -35,6 +39,9 @@
   let abort: AbortController | null = null;
   // Tentacles hook: the session's helper agents (TentacleTree).
   let tentacles = $state<TentacleState>(emptyTentacles());
+  // Scroll (follow-bottom.ts): opens at the latest messages; follows a reply only while at the bottom.
+  let follow = $state<FollowState>({ atBottom: true, unseen: false });
+  const follower = createFollower((s) => (follow = s));
 
   const presence = $derived(view ? presenceText(view, DESKTOP_CLIENT) : "");
   const lastNote = $derived(view?.notes.at(-1) ?? null);
@@ -47,8 +54,10 @@
     try {
       const snap = await getSession(id);
       if (ctl.signal.aborted) return;
+      const fresh = view?.id !== snap.session.id;
       view = viewFromSnapshot(snap);
-      scrollDown();
+      if (fresh) follower.reset();
+      else scrollDown();
       void followSession(id, snap.seq, (e) => {
         if (!view || ctl.signal.aborted) return;
         view = applySessionEvent(view, e);
@@ -76,9 +85,7 @@
   onDestroy(() => abort?.abort());
 
   function scrollDown() {
-    requestAnimationFrame(() => {
-      if (scroller) scroller.scrollTop = scroller.scrollHeight;
-    });
+    follower.contentChanged();
   }
 
   async function act(fn: () => Promise<unknown>) {
@@ -91,7 +98,12 @@
   }
 
   // Sent at once; while a turn runs the provider queues it (it shows below as Queued).
-  const send = (text: string) => act(() => sessionSend(sessionId, text));
+  // `/compact` summarizes the session's older messages now (as in the terminal).
+  const send = (text: string) => {
+    if (isCompactCommand(text)) return act(() => sessionCompact(sessionId));
+    follower.reset();
+    return act(() => sessionSend(sessionId, text));
+  };
   const stop = () => act(() => sessionCancel(sessionId));
   const unqueue = (id: string) => act(() => sessionUnqueue(sessionId, id));
   function approve(id: string, approved: boolean, always = false) {
@@ -123,7 +135,7 @@
   <TentacleTree tree={tentacles} canAct={true} onCancel={(tid) => void act(() => tentacleCancel(sessionId, tid))} onMerge={(tid, ok) => void act(() => tentacleMerge(sessionId, tid, ok))} />
 
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <div class="messages-scroll" bind:this={scroller} tabindex="0" role="region" aria-label="Conversation">
+  <div class="messages-scroll" bind:this={scroller} use:follower.action tabindex="0" role="region" aria-label="Conversation">
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     {#if view?.deleted}
       <p class="note">This session was deleted.</p>
@@ -132,6 +144,7 @@
         {#each view.messages as m (m.id)}
           {#if m.role === "user" && m.by === "terminal"}<div class="from">from the terminal</div>{/if}
           <ChatMessage role={m.role} content={m.content} toolEvents={m.toolEvents} turnId={m.turnId} changedFiles={m.changedFiles} usage={m.usage} onFilesReverted={onFilesChanged} {onOpenPath} {onPreview} />
+          {#if view.summary?.throughId === m.id}<CompactionNote savedTokens={view.summary.savedTokens} />{/if}
         {/each}
         {#if view.streaming}
           <ChatMessage role="assistant" content={view.streaming.text} streaming={true} toolEvents={view.streaming.toolEvents} usage={view.streaming.usage} onToolApproval={approve} onToolAlways={(id) => approve(id, true, true)} />
@@ -144,6 +157,7 @@
       <p class="note">Loading the session…</p>
     {/if}
     <QuoteSelection scope={scroller} onQuote={(b) => void chatInput?.insertQuote(b)} />
+    <JumpToLatest visible={!follow.atBottom && !!view && view.messages.length > 0} unseen={follow.unseen} onJump={follower.jump} />
   </div>
 
   <div class="panel-input">

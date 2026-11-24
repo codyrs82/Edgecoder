@@ -11,6 +11,16 @@
  * call when one is offered, else plain truncation). The system prompt, the request being worked on
  * and the most recent messages are kept, and so are the exact paths of the files the turn used (a
  * model that lost them guessed `src/worker-runner.ts` for `src/swarm/worker-runner.ts`).
+ *
+ * A lead paid per token (your frontier key, a network or cloud model) also compacts once the prompt
+ * passes a token budget, however big its window: COMPACT_PAID_TOKENS (80K by default; Settings →
+ * General → "Compact long chats at … tokens", EDGECODER_COMPACT_PAID_TOKENS). Without it a 1M-token
+ * window resent the whole history every turn and a long chat's cost grew with every message.
+ * Models on this computer or your own machines are free and keep the 85%-of-window rule.
+ *
+ * compactHistory is the persistent form (`/compact`, the chat's "Compact conversation", and the
+ * automatic pass before a paid turn): everything but the last few messages becomes one summary that
+ * the chat keeps and sends instead of those messages from then on.
  */
 
 import type { ChatMessage, ToolSchema } from "./agent-loop.js";
@@ -23,6 +33,41 @@ export const COMPACT_AT = 0.85;
 export const REPLY_RESERVE_TOKENS = 4_096 + 256;
 /** Messages at the end of the conversation that are never compacted. */
 const KEEP_RECENT = 6;
+/** Paid leads: compact once a call's prompt passes this many tokens (default; see compactPaidTokens). */
+export const COMPACT_PAID_TOKENS = 80_000;
+/** The smallest and largest budget a setting may ask for. */
+export const COMPACT_PAID_MIN = 8_000;
+export const COMPACT_PAID_MAX = 2_000_000;
+/** Messages a persistent compaction (`/compact`) keeps as they are. */
+export const KEEP_ON_COMPACT = 4;
+
+/**
+ * The paid-lead budget in tokens: the client's setting when it is a sane number, else
+ * EDGECODER_COMPACT_PAID_TOKENS, else 80,000. Values outside 8K–2M are ignored.
+ */
+export function compactPaidTokens(setting?: unknown, env: NodeJS.ProcessEnv = process.env): number {
+  const ok = (v: unknown): number | null => {
+    const n = typeof v === "string" && v.trim() ? Number(v) : v;
+    return typeof n === "number" && Number.isFinite(n) && n >= COMPACT_PAID_MIN && n <= COMPACT_PAID_MAX ? Math.round(n) : null;
+  };
+  return ok(setting) ?? ok(env.EDGECODER_COMPACT_PAID_TOKENS) ?? COMPACT_PAID_TOKENS;
+}
+
+/**
+ * Whether the lead is paid per token: a frontier model on your own key, or a network model
+ * (cloud models included). This computer, your machines, a reservation (prepaid) and Auto are not.
+ */
+export function isPaidLead(modelId: string | undefined, target?: string): boolean {
+  if (target === "frontier" || target === "network") return true;
+  if (target) return false;
+  return typeof modelId === "string" && (modelId.startsWith("frontier/") || modelId.startsWith("network/"));
+}
+
+/** Tokens a call may reach before it compacts: 85% of the window, and for a paid lead at most `paidTokens`. */
+export function compactThreshold(window: number, paidTokens?: number | null): number {
+  const share = window * COMPACT_AT;
+  return paidTokens && paidTokens > 0 ? Math.min(share, paidTokens) : share;
+}
 
 /** Tokens a call with these messages and tools needs, reply included (coordinator's contextNeeded). */
 export function estimateTokens(messages: ChatMessage[], tools?: ToolSchema[]): number {
@@ -31,8 +76,9 @@ export function estimateTokens(messages: ChatMessage[], tools?: ToolSchema[]): n
   return Math.ceil(chars / 3) + REPLY_RESERVE_TOKENS;
 }
 
-export function shouldCompact(messages: ChatMessage[], tools: ToolSchema[] | undefined, window: number, share = COMPACT_AT): boolean {
-  return estimateTokens(messages, tools) > window * share;
+export function shouldCompact(messages: ChatMessage[], tools: ToolSchema[] | undefined, window: number, share = COMPACT_AT, paidTokens?: number | null): boolean {
+  const at = share === COMPACT_AT ? compactThreshold(window, paidTokens) : window * share;
+  return estimateTokens(messages, tools) > at;
 }
 
 /** Whether a model call failed because the request did not fit the model's context. */
@@ -156,4 +202,77 @@ export async function compactMessages(messages: ChatMessage[], o: CompactOptions
     if (fits(out)) break;
   }
   return { messages: out, summarized, dropped: older.length };
+}
+
+/** The first line of a persistent summary (the message a chat sends in place of what it covers). */
+export const SUMMARY_HEAD = "[Earlier messages of this conversation were summarized to save tokens.]";
+
+/** File paths mentioned in some text ("src/swarm/worker-runner.ts"), first seen first, at most `max`. */
+export function pathsIn(texts: string[], max = 20): string[] {
+  const out: string[] = [];
+  const re = /(?:^|[\s`'"(\[])((?:\.{1,2}\/|~\/|\/)?(?:[\w@.+-]+\/)+[\w@.+-]+\.[A-Za-z0-9]{1,8})(?=$|[\s`'"),:;\].!?])/g;
+  for (const t of texts) {
+    for (const m of t.matchAll(re)) {
+      const p = m[1];
+      if (/^https?:/.test(p) || out.includes(p)) continue;
+      out.push(p);
+      if (out.length >= max) return out;
+    }
+  }
+  return out;
+}
+
+export interface HistoryCompaction {
+  /** The message to send in place of the covered ones (SUMMARY_HEAD, the summary, the file paths). */
+  note: string;
+  /** How many leading messages it replaces. */
+  covered: number;
+  /** Estimated prompt tokens of the history before and after. */
+  before: number;
+  after: number;
+  /** A model wrote the summary (false: a plain shortened transcript). */
+  summarized: boolean;
+}
+
+/**
+ * Persistent compaction of a chat's history (user and assistant messages, oldest first): all but
+ * the last `keep` messages become one summary note. The kept part starts at a user message when it
+ * can (a reply keeps the request it answers), never on a tool result, and never leaves a tool call
+ * without its result. Null when there is nothing worth compacting (too few messages).
+ */
+export async function compactHistory(
+  messages: ChatMessage[],
+  o: { keep?: number; summarize?: (text: string) => Promise<string | null>; maxTranscriptChars?: number } = {},
+): Promise<HistoryCompaction | null> {
+  const keep = Math.max(1, o.keep ?? KEEP_ON_COMPACT);
+  let start = Math.max(0, messages.length - keep);
+  // The kept part starts at a request, so a reply never loses the question it answers.
+  while (start > 0 && messages[start].role !== "user") start--;
+  // A tool result (or a "[Tool …" message) stays with the call before it.
+  while (start > 0 && (messages[start].role === "tool" || messages[start].content.startsWith("[Tool "))) start--;
+  // A call whose results come after it stays with them.
+  while (start > 0 && messages[start - 1].role === "assistant" && messages[start - 1].tool_calls?.length) start--;
+  if (start < 2) return null;
+  const older = messages.slice(0, start);
+  // An earlier summary is folded into the new one.
+  const transcript = older.map((m) => `${m.role}${m.tool_name ? ` (${m.tool_name})` : ""}: ${m.role === "assistant" ? cut(m.content, 4_000) : cut(m.content, 6_000)}`).join("\n\n");
+  let summary: string | null = null;
+  if (o.summarize) {
+    try {
+      summary = (await o.summarize(cut(transcript, o.maxTranscriptChars ?? 120_000)))?.trim() || null;
+    } catch {
+      summary = null;
+    }
+  }
+  const summarized = !!summary;
+  if (!summary) {
+    // No model to summarize: each older message shortened, the newest kept longest.
+    summary = older.map((m) => `${m.role}: ${cut(m.content.replace(/\s+/g, " "), m.content.startsWith(SUMMARY_HEAD) ? 2_000 : 240)}`).join("\n").slice(-6_000);
+  }
+  const paths = pathsIn(older.map((m) => m.content));
+  const note = [SUMMARY_HEAD, summary, pathsLine(paths)].filter(Boolean).join("\n");
+  const before = estimateTokens(messages);
+  const after = estimateTokens([{ role: "user", content: note }, ...messages.slice(start)]);
+  if (after >= before) return null;
+  return { note, covered: start, before, after, summarized };
 }

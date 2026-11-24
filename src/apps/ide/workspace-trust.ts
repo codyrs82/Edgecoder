@@ -9,6 +9,9 @@
  *
  * The phone (code-remote.ts) may start sessions only in trusted folders, and sees each one as an
  * opaque projectId (projectIdOf, salted per machine) with its folder names, never a full path.
+ * A folder the user works in from the desktop app's Code view (a chat there) is open to the phone
+ * too: it is kept in the same file's `code` list, which reaches the phone only and never turns on
+ * the folder's own tooling. Untrusting a folder takes it off both lists.
  */
 
 import { createHash, randomBytes } from "node:crypto";
@@ -29,13 +32,30 @@ function canonical(root: string): string {
   }
 }
 
-function readTrusted(): string[] {
+interface TrustStore {
+  trusted: string[];
+  /** Folders used in the desktop app's Code view: open to the phone, not trusted for tooling. */
+  code: string[];
+}
+
+function readStore(): TrustStore {
+  const strings = (v: unknown) => (Array.isArray(v) ? v.filter((p): p is string => typeof p === "string") : []);
   try {
-    const parsed = JSON.parse(readFileSync(trustFile(), "utf8")) as { trusted?: unknown };
-    return Array.isArray(parsed?.trusted) ? parsed.trusted.filter((p): p is string => typeof p === "string") : [];
+    const parsed = JSON.parse(readFileSync(trustFile(), "utf8")) as { trusted?: unknown; code?: unknown };
+    return { trusted: strings(parsed?.trusted), code: strings(parsed?.code) };
   } catch {
-    return [];
+    return { trusted: [], code: [] };
   }
+}
+
+function writeStore(store: TrustStore): void {
+  const file = trustFile();
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  writeFileSync(file, JSON.stringify(store.code.length ? store : { trusted: store.trusted }, null, 2), { mode: 0o600 });
+}
+
+function readTrusted(): string[] {
+  return readStore().trusted;
 }
 
 /** True only for a folder the user explicitly trusted (exact folder, not its parents or children). */
@@ -46,11 +66,29 @@ export function isProjectTrusted(root: string): boolean {
 /** Record the user's decision for `root`. */
 export function setProjectTrusted(root: string, trusted: boolean): void {
   const key = canonical(root);
-  const list = readTrusted().filter((p) => p !== key);
+  const store = readStore();
+  const list = store.trusted.filter((p) => p !== key);
   if (trusted) list.push(key);
-  const file = trustFile();
-  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-  writeFileSync(file, JSON.stringify({ trusted: list }, null, 2), { mode: 0o600 });
+  // "Don't trust" is the user's explicit answer: the folder leaves the phone's list too.
+  writeStore({ trusted: list, code: trusted ? store.code : store.code.filter((p) => p !== key) });
+}
+
+/**
+ * The user works in `root` from the desktop app's Code view: the phone may see it (and its Code
+ * chats) and start sessions there. Never trusts the folder's own tooling (isProjectTrusted).
+ */
+export function markCodeProject(root: string): void {
+  const key = canonical(root);
+  const store = readStore();
+  if (store.trusted.includes(key) || store.code.includes(key)) return;
+  writeStore({ trusted: store.trusted, code: [...store.code, key] });
+}
+
+/** True for a folder the phone may reach: trusted, or used in the desktop app's Code view. */
+export function isProjectOpenToPhone(root: string): boolean {
+  const key = canonical(root);
+  const store = readStore();
+  return store.trusted.includes(key) || store.code.includes(key);
 }
 
 // --- Trusted projects for the phone (code-remote.ts) ---
@@ -65,9 +103,10 @@ export interface TrustedProject {
   branch?: string;
 }
 
-/** Every trusted folder that still exists as a directory (full paths: for this computer only). */
+/** Every folder open to the phone that still exists as a directory (full paths: for this computer only). */
 export function trustedProjectRoots(): string[] {
-  return [...new Set(readTrusted())].filter((p) => {
+  const store = readStore();
+  return [...new Set([...store.trusted, ...store.code])].filter((p) => {
     try {
       return statSync(p).isDirectory();
     } catch {

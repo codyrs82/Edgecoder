@@ -68,6 +68,7 @@ export const CODE_SESSION_JS = String.raw`
         stepsHtml(m.steps, "steps-" + m.id, false) + (m.content ? '<div class="msg-body">' + renderMarkdown(m.content) + "</div>" : "") + (m.role === "user" && sentImages(m) ? '<div data-sent-imgs="' + escapeHtml(m.id) + '"></div>' : "") + (m.role === "assistant" ? changesHtml(m) : "") + "</article>";
     }
     function approvalHtml(p) {
+      if (p.tool === "cost_check") return costCheckHtml(p);
       var q = p.tool === "run_shell" ? "Run this command?" : "Allow " + p.tool + "?";
       var choices;
       if (!canDrive()) choices = '<span class="on-mac">Answer on your Mac' + (cs.machine && cs.machine.online ? "" : " (it's offline)") + "</span>";
@@ -75,6 +76,12 @@ export const CODE_SESSION_JS = String.raw`
         '<span class="on-mac">' + escapeHtml(p.approvable ? "Allows this call only. Always-allow rules are set on the Mac." : p.message || "Approve it on the Mac.") + "</span>";
       return '<div class="ask-card" role="group" aria-label="' + escapeHtml(q) + '"><div class="ask-q">' + escapeHtml(q) + '</div><div class="ask-tool"><span class="s-tool">' + escapeHtml(p.tool) + "</span> " + escapeHtml(p.detail) + "</div>" +
         (p.command ? "<code>" + escapeHtml(p.command) + "</code>" : "") + '<div class="ask-choices">' + choices + "</div></div>";
+    }
+    // A chat's per-reply cost check: Keep going (approve) or Stop (deny); Switch is on the Mac.
+    function costCheckHtml(p) {
+      var choices = !canDrive() ? '<span class="on-mac">Answer on your Mac</span>'
+        : '<button type="button" class="primary sm" data-approve="' + escapeHtml(p.callId) + '">Keep going</button><button type="button" class="sm danger" data-deny="' + escapeHtml(p.callId) + '">Stop</button><span class="on-mac">Switching to a cheaper model is on the Mac.</span>';
+      return '<div class="ask-card" role="group" aria-label="Keep going?"><div class="ask-q">Keep going?</div><div class="ask-tool">' + escapeHtml(p.detail) + '</div><div class="ask-choices">' + choices + "</div></div>";
     }
     function planHtml() {
       return '<div class="ask-card plan" role="group" aria-label="Approve this plan"><div class="ask-q">Approve this plan?</div><div class="muted u-fs-12">It starts making changes in the mode you pick.</div><div class="ask-choices">' +

@@ -3,6 +3,7 @@
   import { ensureNetworkEnrollment } from "./lib/network-enrollment";
   import { openWalletRequest } from "./lib/buy-csats";
   import TabSwitcher from "./components/TabSwitcher.svelte";
+  import { viewSwitchSpot, type View } from "./lib/view-switch";
   import { menu } from "./lib/menu";
   import Toaster from "./components/ui/Toaster.svelte";
   import ChatInput from "./components/ChatInput.svelte";
@@ -28,6 +29,7 @@
   import { autoRestart, startAutoRestart } from "./lib/auto-restart-app";
   import { setBusy, takeUpdatedTo } from "./lib/auto-restart";
   import ComputePicker from "./components/ComputePicker.svelte";
+  import ContextMeter from "./components/ContextMeter.svelte";
   import WebIndicator from "./components/WebIndicator.svelte";
   import { getWebStatus } from "./lib/api";
   import { chatWebMode, webAutoStore, type WebStatus } from "./lib/web-tool";
@@ -134,6 +136,8 @@
 
   let historyOpen = $state(true);
   let chatView: ChatView | undefined = $state(undefined);
+  /** The Chat view's context meter (compaction.ts); null for a portal chat. */
+  let chatContext = $state<{ tokens: number; compacting: boolean; note: string | null } | null>(null);
   /** The Chat view's permission mode (its picker sits in this page's composer). */
   let chatPermissionMode = $state<EngineMode>(defaultPermissionMode());
   let chatInput: ChatInput | undefined = $state(undefined);
@@ -425,6 +429,14 @@
 
   // The header's + : what you can create.
   let newMenuOpen = $state(false);
+  // The Chat / Code switch sits above New chat in the open sidebar, in the title bar while it's hidden.
+  let switchSpot = $derived(viewSwitchSpot(activeTab, historyOpen, codeSidebarOpen));
+  function switchView(tab: View) {
+    // The switch moves to the other view's sidebar; keep keyboard focus on it.
+    const hadFocus = !!(document.activeElement as HTMLElement | null)?.closest?.(".view-switch");
+    activeTab = tab;
+    if (hadFocus) void tick().then(() => document.getElementById(`view-tab-${tab}`)?.focus());
+  }
   let sidebarToggleLabel = $derived((activeTab === "chat" ? historyOpen : codeSidebarOpen) ? "Hide sidebar" : "Show sidebar");
   /** Recent projects for the + menu, read when it opens. */
   let recentForMenu = $state<RecentProject[]>([]);
@@ -605,6 +617,9 @@
 {:else}
   <div class="app-shell">
     {#if activeTab !== "chat"}<UpdateBanner />{/if}
+    {#snippet viewSwitch()}
+      <div class="sidebar-switch"><TabSwitcher {activeTab} onSwitch={switchView} /></div>
+    {/snippet}
     <!-- Title bar: drawn by the page (macOS overlay title bar leaves room for the traffic lights). -->
     <header class="titlebar" data-tauri-drag-region>
       <div class="tb-side" data-tauri-drag-region>
@@ -641,7 +656,7 @@
             </div>
           {/if}
         </div>
-        <TabSwitcher {activeTab} onSwitch={(tab) => activeTab = tab} />
+        {#if switchSpot === "titlebar"}<TabSwitcher {activeTab} onSwitch={switchView} />{/if}
       </div>
 
       <div class="tb-title" data-tauri-drag-region title={activeTab === "editor" && projectRoot ? projectRoot : titleText}>
@@ -675,6 +690,7 @@
             activeBotId={$activeBotId}
             onSelectCloudBot={openCloudBot}
             activeCloudBotId={$activeCloudBotId}
+            top={switchSpot === "chat-sidebar" ? viewSwitch : undefined}
           />
         </div>
         {#if activeBot}
@@ -687,11 +703,12 @@
           </div>
         {/if}
         <div class="chat-main" class:hidden={!!activeBot || !!activeCloudBot}>
-          <ChatView bind:this={chatView} {webStatus} onWebChange={(choice) => (chatWeb = choice)} onWebStale={() => webRecheck++} onModeChange={(m) => (chatPermissionMode = m)} onFocusComposer={() => chatInput?.focus()} onHeaderChange={(h) => (chatHeader = h)} onOpenInEditor={handleOpenInEditor} {projectRoot} onRepoConnected={(r) => void repoConnected(r)} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} onPreview={previewInEditor} onQuote={(b) => void chatInput?.insertQuote(b)} />
+          <ChatView bind:this={chatView} {webStatus} onWebChange={(choice) => (chatWeb = choice)} onWebStale={() => webRecheck++} onModeChange={(m) => (chatPermissionMode = m)} onFocusComposer={() => chatInput?.focus()} onHeaderChange={(h) => (chatHeader = h)} onOpenInEditor={handleOpenInEditor} {projectRoot} onRepoConnected={(r) => void repoConnected(r)} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} onPreview={previewInEditor} onQuote={(b) => void chatInput?.insertQuote(b)} onContextChange={(c) => (chatContext = c)} />
           <div class="composer">
             <ChatInput bind:this={chatInput} onSend={handleSend} streaming={chatStreaming} onStop={() => chatView?.stop()} attach={{ vision: projectRoot ? visionFor($computeChoice) : NO_VISION, who: "This model" }} mentions={projectRoot ? (q) => mentionSuggestions(q, (x) => fsFind(x, 8)) : undefined}>
               {#snippet controls()}
                 <ComputePicker selected={$computeChoice} onSelect={(id) => computeChoice.set(id)} onOpenSettings={openSettings} />
+                {#if chatContext}<ContextMeter tokens={chatContext.tokens} busy={chatContext.compacting} note={chatContext.note} disabled={chatStreaming} onCompact={() => chatView?.compactConversation()} />{/if}
                 <WebIndicator status={webStatus} mode={chatWebModeNow} onChange={(m) => { chatWeb = m === "auto"; chatView?.setWeb(m === "auto"); }} />
                 {#if projectRoot && !isRemoteMode()}
                   <PermissionModePicker mode={chatPermissionMode} onChange={(m) => { chatPermissionMode = m; chatView?.setMode(m); }} allowFull project={projectRoot} />
@@ -718,6 +735,7 @@
             {liveSessions}
             activeSessionId={liveSessionId}
             onSelectSession={(x) => void openLiveSession(x)}
+            top={switchSpot === "code-sidebar" ? viewSwitch : undefined}
           />
         </div>
         {#if liveSessionId}
@@ -840,6 +858,17 @@
   }
   .tb-side > :global(.view-switch) {
     margin-left: 6px;
+  }
+  /* The switch at the top of the open sidebar, above New chat: two equal halves. */
+  .sidebar-switch {
+    padding: 8px 8px 0;
+  }
+  .sidebar-switch :global(.view-switch) {
+    width: 100%;
+  }
+  .sidebar-switch :global(.view-switch .tab) {
+    flex: 1 1 0;
+    justify-content: center;
   }
   .tb-title {
     display: flex;

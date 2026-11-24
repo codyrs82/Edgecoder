@@ -11,7 +11,7 @@ import { registerErrorTracking } from "../common/error-tracking.js";
 import { isRequestValidationError, registerRequestValidationErrors } from "./validation-errors.js";
 import { registerPortalPages } from "./pages/index.js";
 import { appendSetCookie, assertOauthStateSecret } from "./oauth-state-cookie.js";
-import { coordinatorPricingSource } from "./public-pricing.js"; import { coordinatorReservesSource } from "./reserves.js";
+import { coordinatorPricingSource } from "./public-pricing.js"; import { coordinatorReservesSource } from "./reserves.js"; import { everyCoordinator } from "./coordinator-fanout.js";
 import { registerWellKnownRoutes } from "./routes/well-known.js";
 import { startDnsStaleSweep } from "./dns-sweep.js";
 import { createPortalMailer } from "./email.js";
@@ -637,6 +637,9 @@ const COORDINATOR_URL_POLICY = coordinatorUrlPolicyFromEnv(process.env, COORDINA
 async function discoverCoordinatorUrlsForPortal(): Promise<string[]> {
   return filterCoordinatorUrls(await discoverCoordinatorUrlsUnfiltered(), COORDINATOR_URL_POLICY);
 }
+const allowlistedCoordinatorUrls = async () => [...COORDINATOR_DISCOVERY_URLS, ...(await controlPlaneCoordinatorUrls())].filter((url) => coordinatorUrlAllowed(url, COORDINATOR_URL_POLICY));
+// Lookups of live machines ask every coordinator, the healthy pick first (coordinator-fanout.ts).
+const everyCoordinatorUrl = everyCoordinator(discoverCoordinatorUrlsForPortal, allowlistedCoordinatorUrls);
 
 /** The control plane's coordinator list, allowlisted; empty when it is not configured or did not answer. */
 async function controlPlaneCoordinatorUrls(): Promise<string[]> {
@@ -856,7 +859,7 @@ registerPayoutDestinationRoutes(app, {
   store, getCurrentUser, network: WALLET_DEFAULT_NETWORK, onchainEnabled: C.ONCHAIN_ENABLED, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), register: payoutRegistrar,
   security: accountSecurity, secondFactor, sendConfirm: sendPayoutDestinationConfirmEmail, sendAdded: sendPayoutDestinationAddedEmail, callbackChange: (a, dest) => payoutCallbackClient.pendingChange(a, dest)
 });
-const accountRouteDeps = { discoverCoordinatorUrlsForPortal, fetchCoordinatorFederatedSummary, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store };
+const accountRouteDeps = { discoverCoordinatorUrlsForPortal, everyCoordinatorUrl, fetchCoordinatorFederatedSummary, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store };
 export type AccountApiRoutesDeps = typeof accountRouteDeps;
 registerAccountApiRoutes(app, accountRouteDeps);
 function autoRequestHost(node: Parameters<typeof autoRequestHosting>[1]) { return autoRequestHostingSafe({ store, policy: HOST_APPROVAL_POLICY, log: app.log }, node); }
@@ -875,7 +878,7 @@ const chatCapacity = createChatCapacityDirectory({
   serviceToken: PORTAL_SERVICE_TOKEN,
   ...chatCapacityOptionsFromEnv(),
 });
-const chatRouteDeps = { PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store, chatCapacity, ownMachineModels: (userId: string) => ownMachineModels({ PORTAL_SERVICE_TOKEN, EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal, store }, userId) };
+const chatRouteDeps = { PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, everyCoordinatorUrl, getCurrentUser, store, chatCapacity, ownMachineModels: (userId: string) => ownMachineModels({ PORTAL_SERVICE_TOKEN, EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal: everyCoordinatorUrl, store }, userId) };
 export type ChatApiRoutesDeps = typeof chatRouteDeps;
 registerChatApiRoutes(app, chatRouteDeps);
 
@@ -884,12 +887,12 @@ const reviewsRouteDeps = { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, build
 export type ReviewRoutesDeps = typeof reviewsRouteDeps;
 registerReviewRoutes(app, reviewsRouteDeps);
 
-const marketRouteDeps = { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store, ensureCreditAccountForUser, chatCapacity, secondFactor };
+const marketRouteDeps = { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, everyCoordinatorUrl, getCurrentUser, store, ensureCreditAccountForUser, chatCapacity, secondFactor };
 export type MarketRoutesDeps = typeof marketRouteDeps;
 registerMarketRoutes(app, marketRouteDeps);
 const { service: cloudBots, runner: cloudBotRunner } = createCloudBots({ pool: store?.pool ?? null, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, capacity: chatCapacity, ownMachineModels: chatRouteDeps.ownMachineModels, log: app.log }); // Cloud bots (docs/cloud-bots.md): run here, with no machine
-registerMachineRoutes(app, { PORTAL_SERVICE_TOKEN, EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal, getCurrentUser, store, cloud: cloudBots, latestAgentVersion: createLatestAgentVersion() }); // Settings > Nodes > Machines (remote model control, routes/machines.ts; with the machines' bots and cloud bots, routes/bots.ts) and Settings > Network (the world view, routes/network-world.ts).
-registerNetworkWorldRoutes(app, { PORTAL_SERVICE_TOKEN, EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal, getCurrentUser });
+registerMachineRoutes(app, { PORTAL_SERVICE_TOKEN, EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal: everyCoordinatorUrl, getCurrentUser, store, cloud: cloudBots, latestAgentVersion: createLatestAgentVersion() }); // Settings > Nodes > Machines (remote model control, routes/machines.ts; with the machines' bots and cloud bots, routes/bots.ts) and Settings > Network (the world view, routes/network-world.ts).
+registerNetworkWorldRoutes(app, { PORTAL_SERVICE_TOKEN, EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal: everyCoordinatorUrl, getCurrentUser }); // every coordinator, the healthy pick first
 // The Wallet screens (web, desktop, iOS): one read-only overview, and a session-bound Lightning top-up.
 registerWalletApiRoutes(app, { ...marketRouteDeps, fallbackNetwork: WALLET_DEFAULT_NETWORK });
 registerPayoutRoutes(app, marketRouteDeps, {
@@ -940,8 +943,6 @@ const portalSocial = setupPortalSocial(app, { ...networkAdminDeps, pool: store?.
 
 // Settings > Admin > Users: the account list, deleting accounts and the cleanup of abandoned sign-ups
 // (src/portal/account-admin.ts). Balances come from every allowlisted coordinator, with the service token.
-const allowlistedCoordinatorUrls = async () =>
-  [...COORDINATOR_DISCOVERY_URLS, ...(await controlPlaneCoordinatorUrls())].filter((url) => coordinatorUrlAllowed(url, COORDINATOR_URL_POLICY));
 const accountBalanceDeps = { coordinatorUrls: allowlistedCoordinatorUrls, serviceToken: PORTAL_SERVICE_TOKEN, timeoutMs: EXTERNAL_HTTP_TIMEOUT_MS };
 registerAdminUserRoutes(app, { store, getCurrentUser, buildAccessContext, balances: accountBalanceDeps }); registerOnboardingRoutes(app, { store, getCurrentUser, balances: accountBalanceDeps, hostApproved: hostApprovedFor }); // Getting started (/portal/welcome, the desktop wizard)
 // PORTAL_PURGE_UNVERIFIED_AFTER_DAYS (unset = off): the daily cleanup, under the same checks.
@@ -958,7 +959,7 @@ startUnverifiedPurge(
 );
 
 // #16: HTML pages live in src/portal/pages/; the home page shows live sats pricing (public-pricing.ts).
-registerPortalPages(app, { getPricing: coordinatorPricingSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }), getReserves: coordinatorReservesSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }) });
+registerPortalPages(app, { getPricing: coordinatorPricingSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: everyCoordinatorUrl }), getReserves: coordinatorReservesSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: everyCoordinatorUrl }) }); // the first that answers
 
 // #40: every /internal/* route lives in this plugin, so new internal routes inherit the token check.
 const internalRouteDeps = { autoRequestHost, deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, hostApprovedFor, isDnsConfigured, requireControlPlaneAdmin, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns };

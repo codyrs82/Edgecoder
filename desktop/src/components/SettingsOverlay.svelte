@@ -35,7 +35,7 @@
 
   // Grouped like Cursor's settings; keywords make the search find a section by what's in it.
   const sections = [
-    { id: "general", label: "General", icon: Settings2, group: 0, keywords: "preferences theme appearance editor network bluetooth ble mesh startup" },
+    { id: "general", label: "General", icon: Settings2, group: 0, keywords: "preferences theme appearance editor network bluetooth ble mesh startup compact compaction tokens context" },
     { id: "profile", label: "Profile", icon: UserRound, group: 0, keywords: "account name email sign out" },
     { id: "plan", label: "Wallet", icon: Wallet, group: 1, keywords: "csats buy add funds top up balance lightning invoice billing activity sats earnings withdraw payout" },
     { id: "usage", label: "Usage", icon: BarChart3, group: 1, keywords: "spend cost tokens budget requests history csv export chart" },
@@ -84,6 +84,9 @@
     {#snippet child({ props })}
       <div {...props} class="overlay">
         <aside class="settings-side">
+          <!-- macOS overlay title bar: room for the traffic lights, and a handle to drag the window
+               (this full-window dialog covers the app's own title bar). -->
+          <div class="settings-titlebar" data-tauri-drag-region data-testid="settings-titlebar" aria-hidden="true"></div>
           <button class="back-btn" onclick={onClose}>
             <ArrowLeft size={15} strokeWidth={2} />
             Back
@@ -113,16 +116,19 @@
           {#if visible.length === 0}<p class="no-match" role="status">No settings match "{query}"</p>{/if}
           <ProfileMenu {user} onOpenSettings={(s) => go(s)} {onLogout} />
         </aside>
-        <Tabs.Content value={activeSectionId} id="settings-panel">
-          {#snippet child({ props })}
-            <!-- Keyed, so a section opens at its top instead of at the last one's scroll offset. -->
-            {#key activeSectionId}
-              <div {...props} class="settings-content">
-                {@render page()}
-              </div>
-            {/key}
-          {/snippet}
-        </Tabs.Content>
+        <div class="settings-main">
+          <div class="settings-titlebar" data-tauri-drag-region aria-hidden="true"></div>
+          <Tabs.Content value={activeSectionId} id="settings-panel">
+            {#snippet child({ props })}
+              <!-- Keyed, so a section opens at its top instead of at the last one's scroll offset. -->
+              {#key activeSectionId}
+                <div {...props} class="settings-content">
+                  {@render page()}
+                </div>
+              {/key}
+            {/snippet}
+          </Tabs.Content>
+        </div>
       </div>
     {/snippet}
   </Tabs.Root>
@@ -263,15 +269,31 @@
   }
   .settings-content {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
     min-width: 0;
     /* Pages size themselves to this pane (styles/settings-page.css @container settings-pane). */
     container: settings-pane / inline-size;
   }
-  /* On macOS the window's traffic lights sit over the top of the section list. */
-  :global(html[data-titlebar="overlay"]) .settings-side {
-    padding-top: 30px;
+  /* The window's title bar strip. Elsewhere it takes no room; on macOS (overlay title bar, see
+     main.ts) it clears the traffic lights over the section list and drags the window, across the
+     side and the page alike. */
+  .settings-titlebar {
+    flex: none;
+    height: 0;
+    -webkit-app-region: drag;
+    user-select: none;
+  }
+  :global(html[data-titlebar="overlay"]) .settings-titlebar {
+    height: 30px;
+  }
+  .settings-main {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
   /* Sections not yet built from styles/settings-page.css read at the same scale: a centred
      column, a 20 px title and quiet group titles (no shouting uppercase). */

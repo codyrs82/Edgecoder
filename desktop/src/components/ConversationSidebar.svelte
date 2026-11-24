@@ -17,7 +17,7 @@
   import { parseChoice } from "../lib/compute-choice";
   import ProfileMenu from "./ProfileMenu.svelte";
   import { menu } from "../lib/menu";
-  import { tick } from "svelte";
+  import { tick, type Snippet } from "svelte";
 
   interface Props {
     open: boolean;
@@ -38,9 +38,11 @@
     /** Cloud bots (they run on EdgeCoder's servers): read and message only here. */
     onSelectCloudBot?: (id: string) => void;
     activeCloudBotId?: string | null;
+    /** Above New chat: the Chat / Code switch while this sidebar is showing (App.svelte). */
+    top?: Snippet;
   }
 
-  let { open, onClose, onSelectConversation, onNewChat, activeConversationId, inline = false, user, onOpenSettings, onLogout, onSelectBot, onNewBot, activeBotId = null, onSelectCloudBot, activeCloudBotId = null }: Props = $props();
+  let { open, onClose, onSelectConversation, onNewChat, activeConversationId, inline = false, user, onOpenSettings, onLogout, onSelectBot, onNewBot, activeBotId = null, onSelectCloudBot, activeCloudBotId = null, top }: Props = $props();
 
   let searchOpen = $state(false);
   let searchEl: HTMLInputElement | undefined = $state();
@@ -274,6 +276,7 @@
     </div>
   {/if}
 
+  {@render top?.()}
   <nav class="side-nav" aria-label="Chat">
     <button class="nav-row primary" onclick={handleNewChat}><SquarePen size={16} /> New chat</button>
     <button class="nav-row" onclick={toggleSearch} aria-expanded={searchOpen}><Search size={16} /> Search</button>

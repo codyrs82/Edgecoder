@@ -137,6 +137,10 @@ export class ProviderClient {
   clear(id: string): Promise<unknown> {
     return this.req("POST", `/v1/ide/sessions/${id}/clear`, {});
   }
+  /** Summarize all but the last few messages now (the model gets the summary from the next turn). */
+  compact(id: string): Promise<{ compacted: boolean; savedTokens?: number; before?: number; after?: number; summarized?: boolean }> {
+    return this.req("POST", `/v1/ide/sessions/${id}/compact`, {});
+  }
   githubStatus(): Promise<{ ghInstalled: boolean; loggedIn: boolean; login: string | null }> {
     return this.req("GET", "/v1/ide/git/github/status");
   }

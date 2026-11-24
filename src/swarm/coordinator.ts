@@ -29,11 +29,11 @@ import { LISTEN_HOST } from "../common/env-guard.js";
 import { registerReceiptRoutes, startReceiptReplication } from "../receipts/replication.js";
 import { anchorEpoch, closeEpoch } from "../receipts/epochs.js";
 import { app, metrics } from "./coordinator/app.js";
-import { queue, identity, coordinatorKeys, CC, mesh, MESH_AUTH_TOKEN } from "./coordinator/context.js";
+import { queue, identity, coordinatorKeys, CC, mesh, MESH_AUTH_TOKEN, COORDINATOR_PUBLIC_URL, taskBilling } from "./coordinator/context.js";
 import { startAdminListener } from "./coordinator/admin-listener.js";
 import "./coordinator/mutable-state.js";
 import { agentCapabilities, connectedAgentCount, recordAbandonedClaim } from "./coordinator/agent-state.js";
-import { hasMeshToken, hasPortalServiceToken, requireMeshToken, isAgentGateRoute, agentSignatureAtGate } from "./coordinator/auth.js";
+import { hasMeshToken, hasPortalServiceToken, requireMeshToken, isAgentGateRoute, agentSignatureAtGate, agentGateRefusalReason } from "./coordinator/auth.js";
 import { isPaymentGatedRequest } from "./coordinator/economy.js";
 import { ECONOMY_PAYMENTS_ENABLED, lightningProvider, payoutReconciler } from "./coordinator/payouts.js";
 import { robotQueue, receiptStore, discoveryAnnouncer } from "./coordinator/services.js";
@@ -45,12 +45,14 @@ import "./coordinator/attested-keys.js";
 import "./coordinator/issuance.js";
 import "./coordinator/payments.js";
 import "./coordinator/schemas.js";
-import { finalizeFailedSubtask } from "./coordinator/results.js";
+import { accrualsInFlight, finalizeFailedSubtask, settleTaskIfDone } from "./coordinator/results.js";
 import { registerInferenceRoutes } from "./coordinator/routes/inference.js";
 import { registerAccountRoutes } from "./coordinator/routes/account.js";
 import { registerWebToolRoutes } from "./coordinator/routes/web-tools.js";
 import "./coordinator/ledger-verify.js";
-import { registerMeshRoutes } from "./coordinator/routes/mesh.js";
+import { meshDrainSockets, registerMeshRoutes } from "./coordinator/routes/mesh.js";
+import { coordinatorDrain, installDrainHooks, installDrainSignals, RECONNECT_DELAY_MS, RECONNECT_JITTER_MS } from "./coordinator/drain.js";
+import { createCoordinatorReconnectFrame } from "../mesh/coordinator-reconnect.js";
 import { registerOrchestrationRoutes } from "./coordinator/routes/orchestration.js";
 import { registerModelControlRoutes } from "./coordinator/routes/model-control.js";
 import { registerBotRelayRoutes } from "./coordinator/routes/bot-relay.js";
@@ -218,9 +220,19 @@ app.addHook("onRequest", async (req, reply) => {
   const gatePath = String(reqPath ?? "").split("?")[0];
   if (isAgentGateRoute(req.method, gatePath) && agentSignatureAtGate(headers, req.method, gatePath)) return;
   if (!requireMeshToken(req as any, reply)) {
-    return reply.send({ error: "mesh_unauthorized" });
+    const reason = isAgentGateRoute(req.method, gatePath) ? agentGateRefusalReason(headers) : null;
+    return reply.send(reason ? { error: "mesh_unauthorized", reason } : { error: "mesh_unauthorized" });
   }
 });
+
+// Graceful stop (coordinator/drain.ts): while draining, new work is refused (retryable) and the
+// requests still open are counted so the drain can wait for them.
+installDrainHooks(app);
+coordinatorDrain.peerUrl = () => {
+  const self = COORDINATOR_PUBLIC_URL.replace(/\/+$/, "");
+  const peer = mesh.listPeers().find((p) => isApprovedCoordinator(p.peerId) && p.coordinatorUrl && p.coordinatorUrl.replace(/\/+$/, "") !== self);
+  return peer?.coordinatorUrl ?? null;
+};
 
 registerAgentRoutes(app);
 registerTaskRoutes(app);
@@ -267,9 +279,42 @@ export async function startCoordinatorAdminListener(): Promise<void> {
   await startAdminListener(app, CC.ADMIN_LISTEN_PORT, CC.ADMIN_LISTEN_HOST);
 }
 
+/**
+ * SIGTERM / SIGINT (a deploy or restart) drain the coordinator, then exit (coordinator/drain.ts):
+ * running work finishes for up to COORDINATOR_DRAIN_MS, its billing settles, and every connected
+ * agent is told to register again and reconnect.
+ */
+export function installCoordinatorShutdown(opts: { exit?: (code: number) => void; signals?: Pick<NodeJS.Process, "once"> } = {}): void {
+  installDrainSignals(() => {
+    void coordinatorDrain.run({
+      drainMs: CC.COORDINATOR_DRAIN_MS,
+      busy: () => {
+        let claims = 0;
+        for (const c of queue.activeClaims().values()) claims += c.all;
+        return { claims, accruals: accrualsInFlight.size };
+      },
+      settle: async () => {
+        let settled = 0;
+        for (const taskId of [...taskBilling.keys()]) {
+          await settleTaskIfDone(taskId).catch((err) => app.log.warn({ err, taskId }, "drain_settle_failed"));
+          if (!taskBilling.has(taskId)) settled++;
+        }
+        return settled;
+      },
+      sockets: meshDrainSockets,
+      frameFor: (agentId) =>
+        JSON.stringify(createCoordinatorReconnectFrame({ agentId, coordinatorId: identity.peerId, privateKeyPem: coordinatorKeys.privateKeyPem, delayMs: RECONNECT_DELAY_MS, jitterMs: RECONNECT_JITTER_MS })),
+      close: () => app.close(),
+      exit: opts.exit ?? ((code) => process.exit(code)),
+      log: app.log
+    });
+  }, opts.signals);
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   (async () => {
     await app.listen({ port: 4301, host: LISTEN_HOST });
+    installCoordinatorShutdown();
     await startCoordinatorAdminListener();
     await initCoordinator();
     startCoordinatorAlerting();
