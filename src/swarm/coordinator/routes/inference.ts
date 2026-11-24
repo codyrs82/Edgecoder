@@ -64,6 +64,7 @@ import { servedBy } from "../served-by-route.js";
 import { isFrontierModelId } from "../../../inference-api/frontier-models.js";
 import { taskIdInUse, accrualsInFlight, settleTaskIfDone, refundTaskSubmit } from "../results.js";
 import { closeUnreservedBillingRow } from "../billing-restore.js";
+import { registerInferenceCancelRoute, requesterCancelled } from "../inference-cancel.js";
 import { recordMeshWork } from "../world-activity.js";
 import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
 import { armAutoReplace } from "../auto-replace.js";
@@ -225,7 +226,7 @@ setInterval(() => {
  * when the subtask went back on the queue (the caller then records no result).
  */
 export async function retryInferenceElsewhere(subtask: Subtask, agentId: string, error: string | undefined, nowMs = Date.now()): Promise<boolean> {
-  if (subtask.kind !== "inference" || retriedInference.has(subtask.id)) return false;
+  if (subtask.kind !== "inference" || retriedInference.has(subtask.id) || requesterCancelled(subtask.id)) return false;
   if (error && NOT_RETRYABLE.test(error)) return false;
   const submittedAtMs = usagePending.get(subtask.taskId)?.atMs;
   if (submittedAtMs === undefined) return false;
@@ -255,6 +256,13 @@ export async function retryInferenceElsewhere(subtask: Subtask, agentId: string,
   armClaimDeadline(subtask.taskId, subtask.id, Math.min(INFERENCE_CLAIM_TIMEOUT_MS, leftMs));
   coordinatorApp.log.warn({ taskId: subtask.taskId, subtaskId: subtask.id, agentId, error }, "inference_retry_elsewhere");
   return true;
+}
+
+/** Drop the call's no-capacity bound (it is being ended another way: inference-cancel.ts). */
+export function clearClaimDeadline(subtaskId: string): void {
+  const timer = claimDeadlines.get(subtaskId);
+  if (timer) clearTimeout(timer);
+  claimDeadlines.delete(subtaskId);
 }
 
 /** Cancel (and refund) the call if nobody claims it within `ms`; replaces an earlier bound. */
@@ -431,6 +439,8 @@ function medianRtt(values: number[]): number | null {
 export function registerInferenceRoutes(app: CoordinatorApp): void {
   // Security research tier: entitlement pushes from the portal and the admin view (routes/restricted.ts).
   registerRestrictedRoutes(app);
+  // The requester went away: POST /inference/cancel (inference-cancel.ts).
+  registerInferenceCancelRoute(app);
   /** Models agents on the network can run now, with how many agents and the price per class. */
   app.get("/inference/models", async (req) => {
     const now = Date.now();
@@ -798,7 +808,8 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         if (body.genMs !== undefined) b.genMs = Math.round(body.genMs);
       }
     }
-    return reply.code(r === "ok" || r === "duplicate" ? 200 : 409).send({ status: r });
+    // The requester cancelled (inference-cancel.ts): the agent should stop and report what it produced.
+    return reply.code(r === "ok" || r === "duplicate" ? 200 : 409).send({ status: r, ...(requesterCancelled(body.subtaskId) ? { cancelled: true } : {}) });
   });
 
   /** The requester reads the reply as it streams (long poll; signed by the requester's own agent). */

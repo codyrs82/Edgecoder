@@ -359,22 +359,44 @@ async function* streamSubmitted(
   const routedModel = typeof (sub.json.routing as { model?: unknown } | undefined)?.model === "string" ? String((sub.json.routing as { model: string }).model) : undefined;
   let after = 0;
   const deadline = Date.now() + 6 * 60_000;
-  while (Date.now() < deadline) {
-    if (signal?.aborted) return;
-    const r = await readStream(d, { taskId, subtaskId, after }, signal);
-    // model "auto": the busy machines are the ones running the model best fit chose for it.
-    if (r.status === 503 && r.json.error === "no_capacity") throw noCapacityError(r.json, req.model === "auto" ? routedModel ?? "the model best fit chose" : req.model);
-    if (r.status !== 200) throw new NetworkInferenceError(`Network stream failed: ${String(r.json.error ?? r.status)}`, 502);
-    const chunks = (r.json.chunks as string[]) ?? [];
-    for (const c of chunks) if (c) yield { delta: c };
-    after = Number(r.json.next ?? after + chunks.length);
-    if (r.json.done) {
-      if (Array.isArray(r.json.toolCalls) && r.json.toolCalls.length) yield { toolCalls: r.json.toolCalls as ToolCall[] };
-      yield { done: true, ...(r.json.error ? { error: String(r.json.error) } : {}), ...(typeof r.json.creditsSpent === "number" ? { creditsSpent: r.json.creditsSpent } : {}), ...(typeof r.json.promptTokens === "number" ? { promptTokens: r.json.promptTokens } : {}), ...(typeof r.json.outputTokens === "number" ? { outputTokens: r.json.outputTokens } : {}), ...(routed ? { routed } : {}), ...(servedOf(r.json.served) ? { served: servedOf(r.json.served) } : {}) };
-      return;
+  // The reply ended (done, or an error the coordinator gave): nothing to cancel.
+  let ended = false;
+  try {
+    while (Date.now() < deadline) {
+      if (signal?.aborted) return;
+      const r = await readStream(d, { taskId, subtaskId, after }, signal);
+      // model "auto": the busy machines are the ones running the model best fit chose for it.
+      if (r.status === 503 && r.json.error === "no_capacity") {
+        ended = true;
+        throw noCapacityError(r.json, req.model === "auto" ? routedModel ?? "the model best fit chose" : req.model);
+      }
+      if (r.status !== 200) throw new NetworkInferenceError(`Network stream failed: ${String(r.json.error ?? r.status)}`, 502);
+      const chunks = (r.json.chunks as string[]) ?? [];
+      for (const c of chunks) if (c) yield { delta: c };
+      after = Number(r.json.next ?? after + chunks.length);
+      if (r.json.done) {
+        ended = true;
+        if (Array.isArray(r.json.toolCalls) && r.json.toolCalls.length) yield { toolCalls: r.json.toolCalls as ToolCall[] };
+        yield { done: true, ...(r.json.error ? { error: String(r.json.error) } : {}), ...(typeof r.json.creditsSpent === "number" ? { creditsSpent: r.json.creditsSpent } : {}), ...(typeof r.json.promptTokens === "number" ? { promptTokens: r.json.promptTokens } : {}), ...(typeof r.json.outputTokens === "number" ? { outputTokens: r.json.outputTokens } : {}), ...(routed ? { routed } : {}), ...(servedOf(r.json.served) ? { served: servedOf(r.json.served) } : {}) };
+        return;
+      }
     }
+    throw new NetworkInferenceError("The network didn't finish within 6 minutes.", 504);
+  } finally {
+    // The reader went away before the reply ended (the client disconnected, its session was
+    // cancelled or deleted, the caller stopped reading, or the read failed): cancel the call, so it
+    // stops running and is billed only for what was produced (coordinator inference-cancel.ts).
+    if (!ended) void cancelNetworkCall(d, taskId, subtaskId);
   }
-  throw new NetworkInferenceError("The network didn't finish within 6 minutes.", 504);
+}
+
+/** Ask the coordinator to cancel a call whose reply nobody will read (best effort; older coordinators answer 404). */
+export async function cancelNetworkCall(d: NetworkDeps, taskId: string, subtaskId: string): Promise<void> {
+  try {
+    await call(d, "POST", "/inference/cancel", { taskId, subtaskId });
+  } catch {
+    // The call still ends on its own (its claim bound, or the agent finishing); nothing else to do.
+  }
 }
 
 /** OpenAI message content may be a string or a list of parts; the network takes text. */

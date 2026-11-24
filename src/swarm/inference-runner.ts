@@ -30,6 +30,9 @@ export const FRONTIER_REFUSED_ERROR = "frontier_models_are_not_network_work";
 /** A call the agent cancelled because its host ran critically low on memory (the coordinator gives it to another agent). */
 export const CANCELLED_FOR_MEMORY_ERROR = "memory_pressure: cancelled, this host ran critically low on memory";
 
+/** A call whose requester went away before anything was produced (the coordinator ended it). */
+export const CANCELLED_BY_REQUESTER_ERROR = "cancelled_by_requester";
+
 /** Send what has arrived at least this often, or sooner once this much has piled up. */
 const FLUSH_MS = 150;
 const FLUSH_CHARS = 400;
@@ -80,6 +83,7 @@ export async function runInferenceSubtask(
   }
 
   let seq = 0;
+  let requesterCancelled = false;
   let pending = "";
   let lastFlush = Date.now();
   let full = "";
@@ -92,8 +96,14 @@ export async function runInferenceSubtask(
     pending = "";
     lastFlush = Date.now();
     try {
-      await deps.post("/inference/chunks", { subtaskId: st.id, seq, delta, done, ...(error ? { error } : {}), ...(done && toolCalls.length ? { toolCalls } : {}), ...(done ? tokens : {}) });
+      const res = await deps.post("/inference/chunks", { subtaskId: st.id, seq, delta, done, ...(error ? { error } : {}), ...(done && toolCalls.length ? { toolCalls } : {}), ...(done ? tokens : {}) });
       seq++;
+      // The requester went away (coordinator inference-cancel.ts): stop generating; what was
+      // produced so far is reported as the result and billed, nothing more.
+      if (!done && (res as { cancelled?: unknown } | null)?.cancelled === true && !requesterCancelled) {
+        requesterCancelled = true;
+        abort.abort();
+      }
     } catch {
       // Keep the piece and its number: the next flush sends it again with what came after, so one
       // lost post does not make every later piece a gap. (The coordinator also fills a stream in
@@ -137,6 +147,17 @@ export async function runInferenceSubtask(
     await flush(true);
     return { ...base, ok: true, output: full, durationMs: Date.now() - started };
   } catch (err) {
+    if (requesterCancelled) {
+      // Stopped for a requester that went away: report what was produced (an estimate of its tokens,
+      // the engine's counts are lost with the abort), billed as any reply and capped by the reserve.
+      const produced = full.trim() || toolCalls.length;
+      if (produced) {
+        tokens = { ...tokens, outputTokens: tokens.outputTokens ?? Math.ceil(full.length / 4), promptTokens: tokens.promptTokens ?? Math.ceil(JSON.stringify(input.messages).length / 4) };
+        await flush(true);
+        return { ...base, ok: true, output: full, durationMs: Date.now() - started };
+      }
+      return { ...base, ok: false, output: "", error: CANCELLED_BY_REQUESTER_ERROR, durationMs: Date.now() - started };
+    }
     // The engine's own context check (vLLM counts exact tokens; the estimate above is rough): another
     // agent with a bigger window may serve it, as with the check above.
     const overflow = err instanceof EngineError && err.contextOverflow && !full && toolCalls.length === 0;
