@@ -28,6 +28,11 @@ export interface ReplIO {
   /** Esc (stop the reply) and Shift+Tab (next permission mode). */
   onKey?(fn: (key: "escape" | "shift-tab") => void): void;
   close?(): void;
+  /**
+   * False when stdin or stdout isn't a terminal (piped, headless, remote): the prompt line is never
+   * redrawn there, so an approval is printed as its own line instead (#525).
+   */
+  interactive?: boolean;
 }
 
 export interface ReplOptions {
@@ -103,6 +108,7 @@ export class Repl {
   private worker = "auto";
   private usd = 0;
   private published = false;
+  private surfacing = false;
   private clients: ClientRef[] = [];
   private exiting = false;
   private interrupts = 0;
@@ -268,7 +274,29 @@ export class Repl {
       else if (p.tool === "run_shell") this.line(`    ${this.st.yellow("$")} ${clean(String(p.args.command ?? ""))}`);
     }
     this.approvals.push(p);
+    if (this.io.interactive === false) this.surfaceApproval(p);
     this.refreshPrompt();
+  }
+
+  /**
+   * Not on a terminal: the approval prompt would never show (#525). Print it as a line, and show
+   * the session live in the app (the normal session events carry the pending call to the desktop
+   * and web), so whoever is there can answer it; it is refused on its own after the approval timeout.
+   */
+  private surfaceApproval(p: Pending): void {
+    this.line(this.st.yellow(`  Approval needed: allow ${toolSummary(p.tool, p.args)}? Answer y (yes), n (no) or a (always) on stdin, or in the EdgeCoder app.`));
+    if (this.published || this.surfacing) return;
+    this.surfacing = true;
+    void this.c
+      .publish(this.o.sessionId, true)
+      .then(() => {
+        this.published = true;
+        this.line(this.st.dim("  ▸ Not a terminal: the session is now shown live in the EdgeCoder app (remote on) so the approval can be answered there. Unanswered approvals are refused after 30 minutes."));
+      })
+      .catch((err) => this.line(this.st.dim(`  ▸ Couldn't show the session in the app (${errText(err)}); answer on stdin.`)))
+      .finally(() => {
+        this.surfacing = false;
+      });
   }
 
   private who(e: SessionEvent): string {

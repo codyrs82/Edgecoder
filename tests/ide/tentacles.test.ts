@@ -605,7 +605,7 @@ describe("tentacles served lines and totals (5)", () => {
     expect(usage[0].line).toBe("qwen3-coder:30b · network gpu · lin-•••3f2a Chicago · 1.2k in / 80 out tok · 1.2 cSats");
     expect(usage[0].call).toMatchObject({ model: "qwen3-coder:30b", place: "network", served: { region: "ord" } });
     expect(r.finished[0].served).toEqual([usage[0].line, usage[1].line]);
-    expect(r.totals).toBe("1 helper · 2 calls · qwen3-coder:30b · 2.1k in / 100 out tok · 2.0 cSats");
+    expect(r.totals).toBe("1 helper · 2 calls · qwen3-coder:30b · 2.1k in / 100 out tok · 2.0 cSats · 1/1 patch back");
     expect(r.sessionTotals).toBe(r.totals);
     const totals = events.find((e) => e.type === "tentacle_totals")!;
     expect(totals).toMatchObject({ totals: { helpers: 1, calls: 2, cSats: 2 } });

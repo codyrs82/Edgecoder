@@ -88,11 +88,21 @@ export async function* openAiStream(pieces: AsyncIterable<ChatPiece>, model: str
     } else if ("done" in p) {
       yield chunk({}, calls ? "tool_calls" : p.stopReason === "length" ? "length" : "stop", {
         usage: openAiUsage(p, outChars),
-        ...(p.cSatsSpent !== undefined || p.where ? { edgecoder: { cSatsSpent: p.cSatsSpent, where: p.where } } : {})
+        ...edgecoderUsage(p),
       });
     }
   }
   yield "data: [DONE]\n\n";
+}
+
+/**
+ * The reply's `edgecoder` field: what it cost, the route line and where it ran (the coordinator's
+ * served-by: masked machine label, class, region), so a client on the hosted endpoint can show
+ * each call's served line (#525: it showed "unknown" without `served`).
+ */
+export function edgecoderUsage(done: Pick<Extract<ChatPiece, { done: true }>, "cSatsSpent" | "where" | "served"> | undefined): { edgecoder?: Record<string, unknown> } {
+  if (!done || (done.cSatsSpent === undefined && !done.where && !done.served)) return {};
+  return { edgecoder: { cSatsSpent: done.cSatsSpent, where: done.where, ...(done.served ? { served: done.served } : {}) } };
 }
 
 /**
@@ -123,6 +133,6 @@ export async function openAiResponse(pieces: AsyncIterable<ChatPiece>, model: st
     model,
     choices: [{ index: 0, message: { role: "assistant", content: text || (calls.length ? null : ""), ...(calls.length ? { tool_calls: toolCalls } : {}) }, finish_reason: calls.length ? "tool_calls" : done?.stopReason === "length" ? "length" : "stop" }],
     usage: openAiUsage(done, text.length),
-    ...(done?.cSatsSpent !== undefined || done?.where ? { edgecoder: { cSatsSpent: done?.cSatsSpent, where: done?.where } } : {}),
+    ...edgecoderUsage(done),
   };
 }

@@ -52,12 +52,24 @@ The terminal prints a line as each tentacle starts, begins running, finishes, or
   ⟡ tentacle t81c0d4e: Find where parseFileRef is called (search)
     ↳ t81c0d4e · qwen3.5:9b · this computer · 2.1k in / 140 out tok · 0.0 cSats
   ⟡ t81c0d4e passed · Find where parseFileRef is called · qwen3.5:9b on this computer · 0.0 cSats
-  ⟡ helpers merged: 2 helpers · 3 calls · qwen3-coder:30b, qwen3.5:9b · 11.3k in / 570 out tok · 3.1 cSats
+  ⟡ helpers merged: 2 helpers · 3 calls · qwen3-coder:30b, qwen3.5:9b · 11.3k in / 570 out tok · 3.1 cSats · 1/1 patch back
 ```
 
 Each `↳` line is one helper model call: model · where it ran (`this computer`, or `network`
 and the class) · host and region · tokens · cSats. `/tentacles` shows them under each tentacle,
-with the session's total.
+with the session's total. Over the hosted endpoint (an API key, no enrolled agent) the class,
+host and region come from the reply's `edgecoder.served` field (#525); before, those calls read
+`unknown`.
+
+The totals end with the **patch-return rate**: how many finished helpers that write (not
+read-only, not review) came back with a patch, e.g. `3/8 patches back`. `GET …/tentacles` returns it
+as `patches: {asked, returned, rate}`.
+
+Not on a terminal (stdin or stdout piped, a headless or remote run), the approval prompt line is
+never redrawn. The terminal then prints each approval as its own line (`Approval needed: allow …?
+Answer y, n or a on stdin, or in the EdgeCoder app`) and shows the session live in the app (remote
+on), so the pending call reaches the desktop and web through the normal session events and can
+be answered there. An approval nobody answers is refused after 30 minutes.
 
 `/undo` undoes the last change, whether a turn or an applied tentacle. Each applied tentacle is
 its own checkpoint.
@@ -257,7 +269,7 @@ carries job hints derived from the delegate arguments:
 | `latency` | `batch`. |
 | `needsTools` | `true`. |
 | `minContext` | The prompt plus room for tool round trips, 8K–32K. |
-| `maxCSats` | What is left of the tentacle's budget. |
+| `maxCSats` | The call's price ceiling (see Reserves below): what is left of the tentacle's budget, within what is left of the session's after the other helper calls in flight. |
 | session id | `tentacle:<id>`, so session affinity keeps one tentacle's calls on one machine. |
 
 The coordinator picks the model, class and machine. The tentacle reports where it ran as
@@ -271,6 +283,30 @@ How a call reaches the coordinator:
 - Otherwise through Auto on this computer.
 
 An explicit worker model (`network/<m>[@class]`, `mine/<m>`, or a local tag) runs exactly there.
+A named model's call still carries `maxCSats` as its price ceiling, on every path: through the
+hosted endpoint the portal forwards it to the coordinator (`namedModelCeiling` in
+`inference-api/backends.ts`), which caps the call's reserve at it.
+
+#### Reserves
+
+The coordinator sets aside an upper bound on each call's cost before it runs (the model's token
+price for the input and reply cap, or the class's power floor for the call's timeout, × 1.5),
+capped at the call's `maxCSats`. Before #525 the hosted path dropped `maxCSats` for named models,
+so a `network/qwen2.5-coder:1.5b` helper call set aside 53.6 cSats on a 25 cSat tentacle budget,
+and four helpers at once used up a 250 cSat account while spending about 9.
+
+Each paid helper call (worker `auto` or `network/…`) now sizes its ceiling
+(`tentacle-reserve.ts`) as the smaller of:
+
+- what is left of the tentacle's budget, and
+- what is left of the session's tentacle budget after the ceilings of the session's other helper
+  calls in flight (their reserves are held on the account at the same time).
+
+So the helpers' reserves together never exceed the session's tentacle budget. A call also asks
+for at most 8192 reply tokens (`EDGECODER_TENTACLE_MAX_TOKENS`, 256–32768), which keeps the
+token bound small. A call whose ceiling is under 0.05 cSats doesn't start: it waits while other
+helpers' calls hold the session's budget, and otherwise the tentacle stops with an error that says
+which budget is short. Calls on this computer, your machines or a lease hold nothing.
 
 None of these paths can use your frontier key. A frontier id as the worker becomes `auto`, the
 tentacle settings refuse one, a frontier id is never chosen as the local model, and a call
@@ -298,6 +334,7 @@ quality `best`. Failure means any of these:
 
 - its check failed;
 - it changed nothing on a kind that should change files;
+- it came back empty: no reply and no change, or the machine reported `empty_reply`;
 - its model call failed.
 
 The workspace goes back to the baseline first, and the second attempt's prompt includes the first
@@ -306,6 +343,19 @@ attempt's failure. If that also fails, the tentacle reports `failed` (or `error`
 An explicit worker model keeps the same model on the retry, so nothing is spent on a place you
 didn't choose. With `auto`, a first attempt that ran on this computer is retried on the network
 (the progress says "retrying on the network"). A tentacle that ran out of budget is not retried.
+
+An attempt that came back empty (#525: 0 of 16 patches came back from `qwen2.5-coder:1.5b`
+workers) is retried like this:
+
+- `auto`: one tier up, as above.
+- An explicit network worker under the helper floor (7B, `EDGECODER_TENTACLES_LOCAL_MIN_B`):
+  the retry goes to `auto`, which picks the next tier, within the same tentacle budget. The tentacle
+  says so when it starts ("small models often return nothing for helper work").
+- Any other explicit worker: the same model with a fresh session key, so affinity doesn't send it
+  back to the machine that returned nothing.
+
+The helper's system prompt also tells it that only `edit_file` or `write_file` change files and
+code pasted into a reply changes nothing, and the retry's prompt says the first attempt was empty.
 
 ### Merge back
 
@@ -335,7 +385,7 @@ Tentacle: Write tests for parseFileRef · qwen3-coder:30b on gpu · passed (appl
 | --- | --- | --- |
 | Running at once per session | 4 | More wait in a queue (at most 32 waiting). |
 | Session budget | 100 cSats | `delegate` is refused once it is spent. |
-| Per tentacle | 25 cSats | The tentacle stops with `error` when it is reached. Can be set lower per `delegate` call. |
+| Per tentacle | 25 cSats | The tentacle stops with `error` when it is reached. Can be set lower per `delegate` call. No call sets aside more than what is left of it. |
 | Agent steps per attempt | 12 | |
 
 Calls on this computer or your own machines cost 0 cSats and never trip a budget. Tentacle spend
@@ -353,7 +403,7 @@ Session events, through the existing stream (`GET /v1/ide/sessions/:id/events`):
 | `tentacle_started` | `{tentacle}` (queued) |
 | `tentacle_progress` | `{id, status, progress, cSats, model?}`, sent at each step and check |
 | `tentacle_usage` | `{id, call, line, cSats, spentCSats}`, one per helper model call: `call` has the model, cSats, tokens and `served` (where it ran); `line` is its served line |
-| `tentacle_totals` | `{ids, totals, session}`, when await_tentacles hands results to the lead: the batch's and the session's totals (`line`, calls, models, tokens, cSats) |
+| `tentacle_totals` | `{ids, totals, session}`, when await_tentacles hands results to the lead: the batch's and the session's totals (`line`, calls, models, tokens, cSats, `patches`) |
 | `tentacle_finished` | `{tentacle}`, with its result and merge state |
 | `tentacle_merge` | `{id, merge, tentacle}`, when an approval is answered |
 | `tentacle_config` | `{config, spentCSats}` |
@@ -384,6 +434,9 @@ A session on `auto` is left alone, because Auto sizes each call itself.
 The tentacle code lives in its own files:
 
 - `src/apps/ide/tentacles.ts`
+- `src/apps/ide/tentacle-chat.ts` (the helper's ChatFn, prompts, local model pick, empty-attempt retry)
+- `src/apps/ide/tentacle-reserve.ts` (per-call price ceilings)
+- `src/apps/ide/tentacle-shell.ts` (the shell allowlist and the session's mode, as a helper sees them)
 - `src/apps/ide/tentacle-format.ts`
 - `src/apps/ide/tentacle-workspace.ts`
 - `src/apps/ide/delegate.ts`
@@ -402,8 +455,10 @@ Existing files get thin, marked hooks:
 | `sessions.ts` | `TurnEnv.onSessionStop` (called from `cancel`, `remove` and `shutdown`); `SessionHub.peek`, `publishEvent` and `recordNote`; `undo` also accepts notes; `TranscriptEntry.tentacle`. |
 | `tool-types.ts` | Three tool names and `TENTACLE_TOOLS`, included in `READ_TOOLS` so they don't ask. `bots.ts` filters them out of bot defaults; `tool-executor.ts` has a refusing `case` for them. |
 | `provider-server.ts` | Builds the `TentacleManager` with `tentacleWorkerBackend` (the worker role: `workerModelOf`, never frontier), `localModelFor` / `localBackend` (local first: `pickLocalHelperModel` over `routeInputsHere`) and `shellAllowed` (`SessionHub.allowedWithoutAsking`); wraps the session `executor`, `tools` and `systemPrompt`; registers the routes; context graduation for network leads in `chat`. `/v1/ide/chat` takes `helpers` for Code view chats (`chatHelpers`: the tentacle host's view of a chat, its events into the turn's stream). |
-| `hosted-backend.ts` | Forwards `req.hints` as the body's `edgecoder` field. |
-| `src/terminal/repl.ts` | Hands `tentacle_*` events and `/tentacles` to `TentacleTracker`. |
+| `hosted-backend.ts` | Forwards `req.hints` as the body's `edgecoder` field; reads `edgecoder.where` and `edgecoder.served` from the reply. |
+| `inference-api/openai.ts`, `anthropic.ts` | The reply's `edgecoder` field carries `served` (`edgecoderUsage`). |
+| `inference-api/backends.ts` | `networkBackend` sends a named model's `maxCSats` as its price ceiling. |
+| `src/terminal/repl.ts` | Hands `tentacle_*` events and `/tentacles` to `TentacleTracker`; off a terminal, prints approvals as lines and turns remote on (`surfaceApproval`). |
 | `src/terminal/cli.ts` | `--tentacles` and `--tentacle-budget`; posts the config after the session is created. |
 | `LiveSessionPanel.svelte` | Loads and folds the tree, and renders `<TentacleTree>`. |
 | `EditorChatPanel.svelte` | The Helpers button beside the pickers; sends `helpers` with each message; folds the turn's `tentacle_*` events into `<TentacleTree>`. |

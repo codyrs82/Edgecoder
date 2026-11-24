@@ -216,6 +216,7 @@ export function terminalIO(): ReplIO {
     rl.prompt(true);
   };
   return {
+    interactive: tty,
     readLine(prompt) {
       if (lines.length) return Promise.resolve(lines.shift()!);
       if (ended) return Promise.resolve(null);

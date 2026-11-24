@@ -5,6 +5,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { ChatMessage, ChatPiece, ChatRequest, ToolCall, ToolSpec } from "./types.js";
+import { edgecoderUsage } from "./openai.js";
 
 type Block = { type?: string; text?: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; content?: unknown; is_error?: boolean };
 
@@ -107,7 +108,7 @@ export async function* anthropicStream(pieces: AsyncIterable<ChatPiece>, model: 
         yield ev("content_block_stop", { index });
         textOpen = false;
       }
-      yield ev("message_delta", { delta: { stop_reason: stopReason(calls, p), stop_sequence: null }, usage: { ...(p.promptTokens !== undefined ? { input_tokens: p.promptTokens } : {}), output_tokens: p.outputTokens ?? Math.ceil(outChars / 4) }, ...(p.cSatsSpent !== undefined || p.where ? { edgecoder: { cSatsSpent: p.cSatsSpent, where: p.where } } : {}) });
+      yield ev("message_delta", { delta: { stop_reason: stopReason(calls, p), stop_sequence: null }, usage: { ...(p.promptTokens !== undefined ? { input_tokens: p.promptTokens } : {}), output_tokens: p.outputTokens ?? Math.ceil(outChars / 4) }, ...edgecoderUsage(p) });
     }
   }
   yield ev("message_stop", {});
@@ -132,6 +133,6 @@ export async function anthropicResponse(pieces: AsyncIterable<ChatPiece>, model:
     stop_reason: stopReason(calls.length, done),
     stop_sequence: null,
     usage: { input_tokens: done?.promptTokens ?? 0, output_tokens: done?.outputTokens ?? Math.ceil(text.length / 4) },
-    ...(done?.cSatsSpent !== undefined || done?.where ? { edgecoder: { cSatsSpent: done?.cSatsSpent, where: done?.where } } : {}),
+    ...edgecoderUsage(done),
   };
 }

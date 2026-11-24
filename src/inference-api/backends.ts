@@ -78,7 +78,7 @@ export function localEngineBackend(engine: OpenAiEngine, model: string): ChatBac
 export function networkBackend(deps: NetworkDeps, target: { model: string; computeClass?: string } & NetworkTarget): ChatBackend {
   return async function* (req, signal) {
     try {
-      const routing = target.model === "auto" ? { routing: target.routing ?? req.hints } : {};
+      const routing = target.model === "auto" ? { routing: target.routing ?? req.hints } : namedModelCeiling(target.routing, req.hints);
       for await (const p of streamNetworkCompletion(deps, { ...target, ...routing, computeClass: target.computeClass ?? "any", messages: req.messages, tools: req.tools, maxTokens: req.maxTokens, temperature: req.temperature }, signal)) {
         if (p.delta) yield { delta: p.delta };
         if (p.toolCalls?.length) yield { toolCalls: p.toolCalls };
@@ -95,6 +95,16 @@ export function networkBackend(deps: NetworkDeps, target: { model: string; compu
       throw new ChatBackendError((err as Error).message, 502);
     }
   };
+}
+
+/**
+ * A named model's call carries only the buyer's price ceiling (maxCSats): the lower of the target's
+ * (a bot's budget left) and the request's hints (a helper's budget left), so the coordinator caps
+ * the call's reserve at it (#525: hosted helper calls reserved 53.6 cSats on a 25 cSat budget).
+ */
+export function namedModelCeiling(...sources: Array<{ maxCSats?: number } | undefined>): { routing?: { maxCSats: number } } {
+  const caps = sources.map((s) => s?.maxCSats).filter((n): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0);
+  return caps.length ? { routing: { maxCSats: Math.max(0.001, Math.min(...caps)) } } : {};
 }
 
 /** model "auto" on the coordinator: the best fit is on another coordinator (`url`). */
