@@ -428,7 +428,7 @@ A cloud host is the agent serving models through a hosted API with the platform'
 | `CLOUD_HOST_AUTH_FAILURES` | `3` | Provider 401 / 403 answers in a row that pause the host with a critical alert (a bad or revoked key). |
 | `CLOUD_HOST_AUTH_PROBE_MINUTES` | `15` | While paused for the key, minutes between key checks; a good answer resumes the host. |
 | `CLOUD_HOST_STATE_FILE` | `<config dir>/cloud-host-spend.json` | Where the day's and month's spend are kept across restarts. Put it on a volume. |
-| `CLOUD_MODELS_JSON` | unset (built-in list) | JSON array of cloud models layered over the built-in catalog by id (`id`, `providerModel`, `usdPerM` `{input, cachedInput, output}`, `contextWindow`, `paramsB`, `origin` `{vendor, country}`, `priceAsOf`). Read by the cloud host and the coordinators: set the same value on both. An unreadable value stops the service. |
+| `CLOUD_MODELS_JSON` | unset (built-in list) | JSON array of cloud models layered over the built-in catalog by id (`id`, `providerModel`, `usdPerM` `{input, cachedInput, output}`, `contextWindow`, `paramsB`, `origin` `{vendor, country}`, `priceAsOf`, `rank`, `hint` `recommended`/`premium`, `autoEligible`). Read by the cloud host and the coordinators: set the same value on both. An unreadable value stops the service. |
 
 ## Model runtime: other settings
 
@@ -541,6 +541,7 @@ A request with `model: "auto"` is routed by the coordinator: it describes the jo
 | `BEST_FIT_SESSION_TTL_MS` | `1800000` | How long a session remembers the agent of its last turn (session affinity). |
 | `BEST_FIT_OVERSIZE_PENALTY` | `0.25` | Quality taken off a model more than 4x the size the job wants, so big-model slots stay free for jobs that need them (0 to 1). |
 | `BEST_FIT_PEERS` | on | `0` or `false` scores only this coordinator's agents (no `route_elsewhere` to a peer). |
+| `AUTO_CLOUD_MODELS` | unset (off) | Comma-separated cloud model ids Auto (best fit) may place jobs on, e.g. `deepseek-v4.1-flash`. Only catalog entries flagged `autoEligible` count (`glm-5.3` is not), and only for jobs that would otherwise go to the network's top tier (not light work, complexity ≥ 0.75). Empty: Auto never uses cloud hosts. Set the same value on every coordinator. See docs/cloud-host.md "Auto routing". |
 | `BEST_FIT_COMPLEXITY_WEIGHTS_JSON` | built-in table | JSON object of complexity signal weights (0 to 1 each), for example `{"reasoning": 0.25, "files": 0.15}`. Signals: `length`, `turns`, `code`, `files`, `languages`, `diff`, `trace`, `tools`, `agentSteps`, `reasoning`, `output`, `simple` (subtracted). |
 
 ## Coordinator: pricing, payout and anchoring limits

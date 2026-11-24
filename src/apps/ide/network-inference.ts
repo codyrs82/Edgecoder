@@ -361,7 +361,7 @@ export interface ComputeOverview {
   /** agents: machines online in the class with a model (newer coordinators). */
   classes?: Record<string, { label: string; cSatsPerSecondBaseTier: number; agents?: number }>;
   /** agentsByClass: machines per class with the model (newer coordinators). */
-  models?: Array<{ model: string; agents: number; agentsByClass?: Record<string, number>; classes: string[]; cSatsPerMTokens?: { input: number; output: number }; restricted?: string }>;
+  models?: Array<{ model: string; agents: number; agentsByClass?: Record<string, number>; classes: string[]; cSatsPerMTokens?: { input: number; output: number }; restricted?: string; cloudRank?: number; cloudHint?: string }>;
   /** How this machine's agent chose its coordinator (signed registry + latency), from /forward/health. */
   steering?: CoordinatorSteeringView | null;
   /**

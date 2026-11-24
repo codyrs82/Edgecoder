@@ -6,7 +6,7 @@
   import { ChevronDown, Check, Laptop, Server, Globe, Lock, Search, Plus, Zap, KeyRound } from "@lucide/svelte";
   import { computeOverview, getFrontierStatus, getOllamaTags, listReservations, type ComputeOverview, type Reservation } from "../lib/api";
   import { classFamily } from "../lib/compute-availability";
-  import { CLASS_LABELS, choiceId, choiceLabel, frontierName, parseChoice, shortModel } from "../lib/compute-choice";
+  import { CLASS_LABELS, choiceId, choiceLabel, cloudHint, frontierName, parseChoice, shortModel } from "../lib/compute-choice";
 
   interface Props {
     selected: string | undefined;
@@ -220,7 +220,7 @@
                 <Command.Group class="net-row" value="group-network-{m.model}">
                   <Command.GroupHeading class="net-head">
                     <span class="name">{shortModel(m.model)}</span>
-                    <span class="meta">{m.agents} machine{m.agents === 1 ? "" : "s"}{#if m.cSatsPerMTokens} · {m.cSatsPerMTokens.input} in / {m.cSatsPerMTokens.output} out{/if}</span>
+                    <span class="meta">{#if cloudHint(m)}{cloudHint(m)}{:else}{m.agents} machine{m.agents === 1 ? "" : "s"}{/if}{#if m.cSatsPerMTokens} · {m.cSatsPerMTokens.input} in / {m.cSatsPerMTokens.output} out{/if}</span>
                   </Command.GroupHeading>
                   <Command.GroupItems class="chips">
                     {#each chipsFor(m.classes) as cls (cls)}

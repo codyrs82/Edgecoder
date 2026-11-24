@@ -37,6 +37,13 @@
  *
  * Per (model, class) only the best agent is kept; the answer is the best pair, its agent as a soft
  * preference (dispatch.ts preferAgent), and the ranked alternatives with their score breakdown.
+ *
+ * Cloud models (src/cloud-host/): a candidate only when the coordinator's AUTO_CLOUD_MODELS names
+ * the model, the catalog flags it autoEligible, and the job is one that wants the network's top
+ * tier (not a light job, complexity >= AUTO_CLOUD_MIN_COMPLEXITY, where it asks for a 30B-class
+ * model). AUTO_CLOUD_MODELS is empty by default, so Auto never uses them until the owner sets it.
+ * A cloud host's speed is the hosted API's (not scaled by model size), it never cold-loads, and
+ * its size is not penalised as oversized (its slots are not the network's scarce big-model slots).
  */
 
 import { callsTools, paramsB } from "../../inference-api/auto-route.js";
@@ -45,6 +52,18 @@ import { isCodeJob, isLightJob, type JobDescriptor, type JobType } from "../../i
 import { catalogEntryForTag } from "../../model/catalog.js";
 import { inferenceCostMsat } from "../../economy/job-pricing.js";
 import { modelTokenPrice } from "../../economy/cloud-pricing.js";
+import { autoMayUseCloudModel, cloudModelSpec, isCloudModel, parseAutoCloudModels } from "../../cloud-host/catalog.js";
+
+/** Complexity from which Auto may use a cloud model: where best fit asks for a 30B-class model (requirementsFor). */
+export const AUTO_CLOUD_MIN_COMPLEXITY = 0.75;
+/** A cloud host's decode rate when none was measured (tokens/s; hosted APIs serve far above a home machine). */
+export const CLOUD_DECODE_TPS = 60;
+const CLOUD_PREFILL_FACTOR = 40;
+
+/** The job is one Auto may send to a cloud model: not light work, and complex enough to want the network's top tier. */
+export function jobWantsTopTier(job: Pick<JobDescriptor, "job" | "complexity">): boolean {
+  return !isLightJob(job.job) && job.complexity.score >= AUTO_CLOUD_MIN_COMPLEXITY;
+}
 
 /** A cloud model's cost-plus price for inferenceCostMsat (economy/cloud-pricing.ts); none for other models. */
 function ownPriceOf(model: string): { price?: NonNullable<ReturnType<typeof modelTokenPrice>> } {
@@ -128,6 +147,11 @@ export interface BestFitConfig {
   oversizePenalty: number;
   /** Also score agents on peer coordinators (the caller may be sent there). */
   peers: boolean;
+  /**
+   * Cloud model ids Auto may use (AUTO_CLOUD_MODELS; only catalog entries flagged autoEligible
+   * count). Empty (the default): Auto never places a job on a cloud host.
+   */
+  autoCloudModels: string[];
 }
 
 export const DEFAULT_BEST_FIT_CONFIG: BestFitConfig = {
@@ -139,6 +163,7 @@ export const DEFAULT_BEST_FIT_CONFIG: BestFitConfig = {
   sessionTtlMs: 30 * 60_000,
   oversizePenalty: 0.25,
   peers: true,
+  autoCloudModels: [],
 };
 
 /** The config from BEST_FIT_* variables; a missing or invalid value keeps its default. */
@@ -165,6 +190,7 @@ export function bestFitConfigFromEnv(env: Record<string, string | undefined> = p
     sessionTtlMs: num(env.BEST_FIT_SESSION_TTL_MS, d.sessionTtlMs, 0),
     oversizePenalty: num(env.BEST_FIT_OVERSIZE_PENALTY, d.oversizePenalty, 0, 1),
     peers: !["0", "false"].includes((env.BEST_FIT_PEERS ?? "").trim().toLowerCase()),
+    autoCloudModels: parseAutoCloudModels(env.AUTO_CLOUD_MODELS),
   };
 }
 
@@ -244,6 +270,8 @@ export function activeParamsB(model: string): number {
 
 /** Decode tok/s of `model` on `agent`: measured (scaled from its active model), else the class default. */
 export function decodeTps(agent: Pick<AgentView, "computeClass" | "tokensPerSec" | "activeModel">, model: string): number {
+  // A cloud host runs every model on the provider's hardware: its own measured rate, else a flat default.
+  if (agent.computeClass === "cloud") return agent.tokensPerSec && agent.tokensPerSec > 0 ? Math.min(500, agent.tokensPerSec) : CLOUD_DECODE_TPS;
   const b = Math.max(0.3, activeParamsB(model));
   if (agent.tokensPerSec && agent.tokensPerSec > 0) {
     const ref = agent.activeModel ? Math.max(0.3, activeParamsB(agent.activeModel)) : b;
@@ -253,12 +281,12 @@ export function decodeTps(agent: Pick<AgentView, "computeClass" | "tokensPerSec"
 }
 
 export function prefillTps(agent: Pick<AgentView, "computeClass" | "tokensPerSec" | "activeModel">, model: string): number {
-  return decodeTps(agent, model) * (PREFILL_FACTOR[agent.computeClass] ?? PREFILL_FACTOR.cpu);
+  return decodeTps(agent, model) * (agent.computeClass === "cloud" ? CLOUD_PREFILL_FACTOR : PREFILL_FACTOR[agent.computeClass] ?? PREFILL_FACTOR.cpu);
 }
 
 /** Context window an agent serves `model` with: its report, else the model's published one. */
 export function contextWindowOf(agent: Pick<AgentView, "contextWindow">, model: string): number {
-  return agent.contextWindow ?? catalogEntryForTag(model)?.contextTokens ?? 32_768;
+  return agent.contextWindow ?? cloudModelSpec(model)?.contextWindow ?? catalogEntryForTag(model)?.contextTokens ?? 32_768;
 }
 
 export interface Estimate {
@@ -290,7 +318,7 @@ export function estimate(job: JobDescriptor, agent: AgentView, model: string, vi
   }
   // Model affinity: an agent that has to load the model first pays the load (and it may unload
   // another to make room), so an agent with it loaded wins a close call.
-  if (agent.loadedModels && !agent.loadedModels.includes(model)) waitMs += coldLoadMs(model);
+  if (agent.loadedModels && !agent.loadedModels.includes(model) && agent.computeClass !== "cloud") waitMs += coldLoadMs(model);
   const rttMs = (agent.rttMs ?? 50) + (agent.local ? 0 : agent.linkRttMs ?? 100);
   const ttftMs = waitMs + rttMs + prefillMs;
   const totalMs = ttftMs + decodeMs;
@@ -359,7 +387,7 @@ export function qualityPrior(model: string, job: JobDescriptor, req: Requirement
   const b = paramsB(model);
   const enough = Math.max(0.5, req.enoughParamsB);
   const q = Math.log2(1 + b) / Math.log2(1 + enough);
-  const oversize = oversizePenalty * Math.max(0, Math.min(1, Math.log2(b / (4 * enough))));
+  const oversize = isCloudModel(model) ? 0 : oversizePenalty * Math.max(0, Math.min(1, Math.log2(b / (4 * enough))));
   return Math.max(0, Math.min(1, q + (isCodeJob(job.job) && isCoder(model) ? 0.08 : 0)) - oversize);
 }
 
@@ -377,10 +405,13 @@ function evaluate(job: JobDescriptor, view: NetworkView, cfg: BestFitConfig, req
   for (const a of view.agents) if (!a.stale) for (const m of new Set(a.models)) holders.set(m, (holders.get(m) ?? 0) + 1);
   const out: Array<Candidate & { contextOk: boolean; priceOk: boolean; toolsOk: boolean }> = [];
   const target = job.latency === "batch" ? cfg.latencyTargetMs.batch : cfg.latencyTargetMs.interactive;
+  const topTier = jobWantsTopTier(job);
   for (const a of view.agents) {
     if (a.stale) continue;
     for (const model of new Set(a.models)) {
       if (isEmbedding(model)) continue;
+      // Cloud: only models the owner allowed (AUTO_CLOUD_MODELS, autoEligible), only for top-tier jobs.
+      if ((a.computeClass === "cloud" || isCloudModel(model)) && !(topTier && autoMayUseCloudModel(model, cfg.autoCloudModels ?? []))) continue;
       const cached = !!session && session.agentId === a.agentId && session.model === model;
       const est = estimate(job, a, model, view, holders.get(model) ?? 1, cached);
       const parts: ScoreParts = {

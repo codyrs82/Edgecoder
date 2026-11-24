@@ -29,6 +29,18 @@ USD per million tokens, serverless standard tier.
 | `glm-5.3` | `accounts/fireworks/models/glm-5p3` | 1.40 | 0.26 | 4.40 | 1,000,000 (Fireworks: 1040k) | Z.ai (Zhipu AI), CN |
 | `deepseek-v4.1-flash` | `accounts/fireworks/models/deepseek-v4p1-flash` | 0.30 | 0.006 | 1.20 | 1,000,000 (Fireworks: 1040k) | DeepSeek, CN |
 
+DeepSeek V4.1 Flash is the default cloud model (owner decision, 2026-11-23). Each catalog entry
+has a `rank` (lower is listed first), an optional `hint` and an `autoEligible` flag:
+
+| Network id | `rank` | `hint` | `autoEligible` | Shown as |
+| --- | --- | --- | --- | --- |
+| `deepseek-v4.1-flash` | 1 | `recommended` | yes | Cloud · recommended |
+| `glm-5.3` | 2 | `premium` | no | Cloud · premium |
+
+`GET /inference/models` lists the cloud models in rank order among themselves (other models keep
+their order by machines online) with `cloudRank`, `cloudHint` and `paramsB`, and the web chat
+picker, `GET /portal/api/models` (the iPhone picker) and the desktop compute picker follow it.
+
 Each catalog entry carries `origin: { vendor, country }`, and `GET /inference/models` returns it
 (with `hostedBy: "fireworks"`) for every cloud model, so a "no models of origin X" filter can be
 built on it later. No filter is applied today.
@@ -104,9 +116,22 @@ coordinator decides who runs one:
   serves only cloud models;
 - payouts go to the owner account of the enrolled node, like any host.
 
-Auto routing (`model: "auto"` and the coordinator's best fit) does not place calls on cloud hosts
-yet: a cloud model is used only when it is named. That keeps today's Auto costs unchanged until the
-owner decides how Auto should weigh a paid provider.
+### Auto routing
+
+By default Auto (`model: "auto"`, the coordinator's best fit) does not place calls on cloud hosts:
+a cloud model is used only when it is named. The owner turns it on per model with the coordinator
+variable `AUTO_CLOUD_MODELS` (comma list, e.g. `deepseek-v4.1-flash`; default empty = off). A cloud
+model is then a best-fit candidate only when
+
+- `AUTO_CLOUD_MODELS` names it **and** its catalog entry has `autoEligible: true` (Flash yes,
+  GLM-5.3 no: naming `glm-5.3` there has no effect), and
+- the job would otherwise go to the network's top tier: not a light job (summarize, extract,
+  classify) and complexity at least 0.75 (`AUTO_CLOUD_MIN_COMPLEXITY` in
+  `src/swarm/coordinator/best-fit.ts`), where best fit asks for a 30B-class model.
+
+It then competes with the network's machines on the usual score (quality, latency, price,
+reliability). A cloud host's speed is its measured rate, else 60 tokens/s, it never pays a cold
+load, and its size is not penalised as oversized. Set the same value on every coordinator.
 
 ## Running it
 
@@ -186,10 +211,13 @@ fly ssh console --app edgecoder-cloud-host -C "chown -R 1000:1000 /data" && fly 
 1. Find the provider's model id and its input / cached-input / output price per million tokens.
 2. Add it, either
    - in code: a `BUILTIN_CLOUD_MODELS` entry in `src/cloud-host/catalog.ts` (id, `providerModel`,
-     `usdPerM`, `priceAsOf`, `contextWindow`, `paramsB`, `origin`, `capabilities`), or
+     `usdPerM`, `priceAsOf`, `contextWindow`, `paramsB`, `origin`, `capabilities`, `rank`, `hint`,
+     `autoEligible`), or
    - without a release: `CLOUD_MODELS_JSON` on **both** the coordinators and the cloud host, e.g.
      `[{"id":"kimi-k3","providerModel":"accounts/fireworks/models/kimi-k3","usdPerM":{"input":1.0,"cachedInput":0.2,"output":3.0},"contextWindow":256000,"paramsB":1000,"origin":{"vendor":"Moonshot AI","country":"CN"},"priceAsOf":"2026-12-01"}]`.
      Entries replace built-in ones with the same id, which is also how a price change is applied.
+     An entry replaces the whole built-in entry: give `rank`, `hint` and `autoEligible` again
+     (unset: rank 100, no hint, not auto-eligible).
 3. Add the id to `CLOUD_HOST_MODELS` (or leave it unset to serve every catalog model of the
    provider) and restart the cloud host.
 
@@ -199,7 +227,7 @@ fly ssh console --app edgecoder-cloud-host -C "chown -R 1000:1000 /data" && fly 
   reserve: a cloud call capped that way can settle below the provider's cost. The spend guard
   still bounds the platform's exposure. A follow-up could lower `max_tokens` to fit the ceiling.
 - The spend total is per cloud-host process; run one machine per provider key.
-- Auto / best-fit routing does not use cloud hosts yet (see above).
+- Auto / best-fit routing uses cloud hosts only when `AUTO_CLOUD_MODELS` is set (see above).
 - The origin field is data only; no filter or UI uses it yet.
 
 Environment variables: [site-docs/reference/environment-variables.md](../site-docs/reference/environment-variables.md)

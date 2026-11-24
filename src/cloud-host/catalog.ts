@@ -49,6 +49,18 @@ export interface CloudModelSpec {
   /** Who made the model and where (ISO 3166-1 alpha-2): the data for an origin filter. */
   origin: { vendor: string; country: string };
   capabilities: Array<"tools" | "thinking" | "vision">;
+  /**
+   * Order among cloud models wherever they are listed (lower first; the default cloud model is 1).
+   * The apps list cloud models in this order (orderCloudModels), never by name.
+   */
+  rank: number;
+  /** Short hint after "Cloud" in pickers ("Cloud · recommended"); none: just "Cloud". */
+  hint?: "recommended" | "premium";
+  /**
+   * Auto (best fit) may place a high-complexity job on it, when the coordinator's AUTO_CLOUD_MODELS
+   * also names it (default empty: Auto never uses cloud models). docs/cloud-host.md.
+   */
+  autoEligible: boolean;
 }
 
 /** Built-in cloud models. Prices and ids read from fireworks.ai/pricing and the model pages on 2026-11-23. */
@@ -64,6 +76,10 @@ export const BUILTIN_CLOUD_MODELS: readonly CloudModelSpec[] = [
     paramsB: 744,
     origin: { vendor: "Z.ai (Zhipu AI)", country: "CN" },
     capabilities: ["tools"],
+    // The premium cloud model: listed after the default, never chosen by Auto.
+    rank: 2,
+    hint: "premium",
+    autoEligible: false,
   },
   {
     id: "deepseek-v4.1-flash",
@@ -75,6 +91,10 @@ export const BUILTIN_CLOUD_MODELS: readonly CloudModelSpec[] = [
     paramsB: 552,
     origin: { vendor: "DeepSeek", country: "CN" },
     capabilities: ["tools"],
+    // The default cloud model (owner decision 2026-11-23): listed first; Auto may use it (AUTO_CLOUD_MODELS).
+    rank: 1,
+    hint: "recommended",
+    autoEligible: true,
   },
 ];
 
@@ -116,7 +136,14 @@ export function parseCloudModelSpec(raw: unknown): CloudModelSpec {
     ? r.capabilities.filter((c): c is "tools" | "thinking" | "vision" => c === "tools" || c === "thinking" || c === "vision")
     : (["tools"] as Array<"tools">);
   const asOf = typeof r.priceAsOf === "string" && /^\d{4}-\d{2}-\d{2}$/.test(r.priceAsOf) ? r.priceAsOf : "unknown";
-  return { id, provider, providerModel: r.providerModel.trim(), usdPerM: { input, cachedInput, output }, priceAsOf: asOf, contextWindow: ctx, paramsB, origin: { vendor, country }, capabilities: caps };
+  const rank = r.rank === undefined ? 100 : Number(r.rank);
+  if (!Number.isInteger(rank) || rank < 0 || rank > 10_000) bad(`${id}: rank must be an integer from 0 to 10000`);
+  if (r.hint !== undefined && r.hint !== "recommended" && r.hint !== "premium") bad(`${id}: hint must be "recommended" or "premium"`);
+  if (r.autoEligible !== undefined && typeof r.autoEligible !== "boolean") bad(`${id}: autoEligible must be true or false`);
+  return {
+    id, provider, providerModel: r.providerModel.trim(), usdPerM: { input, cachedInput, output }, priceAsOf: asOf, contextWindow: ctx, paramsB, origin: { vendor, country }, capabilities: caps,
+    rank, ...(r.hint ? { hint: r.hint as "recommended" | "premium" } : {}), autoEligible: r.autoEligible === true,
+  };
 }
 
 /**
@@ -160,6 +187,48 @@ export function cloudModelSpec(model: string | undefined | null): CloudModelSpec
   if (!model) return undefined;
   const id = model.trim().toLowerCase().replace(/:latest$/, "");
   return active.find((m) => m.id === id);
+}
+
+/**
+ * `rows` with the cloud models in catalog rank order (the default cloud model first). Every other
+ * row keeps its place, and the cloud rows keep the places they had, only their order among
+ * themselves changes, so a list sorted by something else (machines online) stays sorted by it.
+ */
+export function orderCloudModels<T>(rows: readonly T[], modelOf: (row: T) => string, rankOf: (row: T) => number | undefined = (row) => cloudModelSpec(modelOf(row))?.rank): T[] {
+  const slots: number[] = [];
+  const cloud: T[] = [];
+  rows.forEach((row, i) => {
+    if (rankOf(row) !== undefined) {
+      slots.push(i);
+      cloud.push(row);
+    }
+  });
+  const sorted = cloud
+    .map((row, i) => ({ row, i }))
+    .sort((a, b) => (rankOf(a.row) ?? 0) - (rankOf(b.row) ?? 0) || a.i - b.i)
+    .map((x) => x.row);
+  const out = [...rows];
+  slots.forEach((slot, i) => (out[slot] = sorted[i]));
+  return out;
+}
+
+/** "Cloud · recommended", "Cloud · premium", or "Cloud". */
+export function cloudLabel(hint: string | undefined): string {
+  return hint ? `Cloud · ${hint}` : "Cloud";
+}
+
+/** AUTO_CLOUD_MODELS: the comma list of cloud model ids the owner lets Auto use (lower case, deduplicated). */
+export function parseAutoCloudModels(raw: string | undefined): string[] {
+  return [...new Set((raw ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean))];
+}
+
+/**
+ * Auto may place a job on `model`: a cloud model of the catalog flagged autoEligible that the
+ * coordinator's AUTO_CLOUD_MODELS (`allowed`) names. Empty `allowed` (the default) = never.
+ */
+export function autoMayUseCloudModel(model: string, allowed: readonly string[]): boolean {
+  const spec = cloudModelSpec(model);
+  return !!spec && spec.autoEligible && allowed.includes(spec.id);
 }
 
 export function isCloudModel(model: string | undefined | null): boolean {

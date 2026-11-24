@@ -12,7 +12,7 @@ export const CLIENT_BOT_HELPERS_JS = String.raw`
     var BOT_SCHEDULE_PRESETS = [["", "No fixed schedule (check-ins)"], ["every 30 minutes", "Every 30 minutes"], ["hourly", "Every hour"], ["every 6 hours", "Every 6 hours"], ["daily at 09:00", "Daily at 09:00"], ["0 9 * * 1-5", "Weekdays at 09:00"]];
     var BOT_HEARTBEAT_OPTIONS = [["15", "Every 15 minutes"], ["30", "Every 30 minutes"], ["60", "Every hour"], ["240", "Every 4 hours"], ["", "Never (only messages and triggers)"]];
     var BOT_COMPUTE_OPTIONS = [["auto", "Auto"], ["local_first", "Local first"], ["local_only", "This computer only"], ["mine_only", "My machines only"], ["network_only", "Network only"], ["model", "Specific model"]];
-    var BOT_CLASS_NAMES = { gpu: "GPU", apple: "Apple", cpu: "CPU", "gpu.dc": "Datacenter GPU" };
+    var BOT_CLASS_NAMES = { gpu: "GPU", apple: "Apple", cpu: "CPU", "gpu.dc": "Datacenter GPU", cloud: "Cloud" };
     var BOT_RUN_STATUS_TEXT = { running: "Running", needs_approval: "Needs approval", done: "Done", failed: "Failed", budget: "Budget spent", cancelled: "Stopped", interrupted: "Interrupted" };
     function botHref(agentId, botId) { return "/portal/bots?m=" + encodeURIComponent(agentId) + "&b=" + encodeURIComponent(botId); }
     function botTitle(b) { return b.role && b.role.trim() ? b.name + " · " + b.role.trim() : b.name; }

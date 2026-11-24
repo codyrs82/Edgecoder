@@ -1873,7 +1873,8 @@ export interface ComputeOverview {
   /** Network models; model calls are priced per token (cSats per million tokens in / out). */
   /** restricted: a security research tier model, listed only to entitled accounts; never a network call. */
   /** agentsByClass: machines per class with the model (newer coordinators). */
-  models?: Array<{ model: string; agents: number; agentsByClass?: Record<string, number>; classes: string[]; cSatsPerMTokens?: { input: number; output: number }; restricted?: string }>;
+  // cloudRank / cloudHint: a cloud model (hosted API), its order among cloud models and its hint ("recommended", "premium").
+  models?: Array<{ model: string; agents: number; agentsByClass?: Record<string, number>; classes: string[]; cSatsPerMTokens?: { input: number; output: number }; restricted?: string; cloudRank?: number; cloudHint?: string }>;
   /** How this computer's agent chose its coordinator: from the signed registry by latency, or the fallback URL. */
   steering?: CoordinatorSteering | null;
   /** The network refused this computer's agent (its safety check blacklisted it), with the reason. */

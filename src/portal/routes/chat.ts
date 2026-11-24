@@ -21,6 +21,7 @@ import type { IdeStreamEvent } from "../../apps/ide/tool-types.js";
 import { FREE_USED_NOTE, webSystemNote, webGrounding, WebToolSession, citedSources, forgetWebAvailability, isWebTool, sourcesMarkdown, webAvailability, webFooter, webReplyLimitsFromEnv, webStatusReason, webToolSchemas, type WebToolCall } from "../../web-tool/tools.js";
 import { modelCallsTools } from "../../web-tool/model-support.js";
 import { portalCoordinatorTransport } from "./compute.js";
+import { swarmModelsFromInference } from "../network-models.js";
 
 const logger = moduleLogger("portal-chat");
 
@@ -414,6 +415,8 @@ export function registerChatApiRoutes(
     }
   }
 
+  // local: the coordinator's own Ollama models (default chat). swarm: the network's models from
+  // /inference/models (cloud models included, network-models.ts), the iPhone picker's list.
   app.get("/portal/api/models", async (req, reply) => {
     const user = await getCurrentUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
@@ -427,44 +430,23 @@ export function registerChatApiRoutes(
     if (PORTAL_SERVICE_TOKEN) hdrs["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
 
     let local: Array<{ name: string; parameterSize: string; quantization: string; running: boolean }> = [];
-    let swarm: Array<{ model: string; paramSize: number; agentCount: number }> = [];
-
-    // Fetch Ollama tags via coordinator proxy
-    try {
-      const tagsRes = await request(`${coordinatorUrl}/portal/models`, {
-        method: "GET",
-        headers: hdrs,
-        headersTimeout: 5_000,
-      });
-      if (tagsRes.statusCode >= 200 && tagsRes.statusCode < 300) {
-        const data = (await tagsRes.body.json()) as { local?: typeof local; swarm?: typeof swarm };
-        local = data.local ?? [];
-        swarm = data.swarm ?? [];
-      } else {
-        await tagsRes.body.text().catch(() => "");
-      }
-    } catch {
-      // coordinator unreachable
-    }
-
-    // Fallback: try swarm models directly if coordinator didn't return them
-    if (swarm.length === 0) {
-      try {
-        const swarmRes = await request(`${coordinatorUrl}/models/available`, {
-          method: "GET",
-          headers: hdrs,
-          headersTimeout: 5_000,
-        });
-        if (swarmRes.statusCode >= 200 && swarmRes.statusCode < 300) {
-          swarm = (await swarmRes.body.json()) as typeof swarm;
-        } else {
-          await swarmRes.body.text().catch(() => "");
+    const [, network] = await Promise.all([
+      (async () => {
+        try {
+          const tagsRes = await request(`${coordinatorUrl}/portal/models`, { method: "GET", headers: hdrs, headersTimeout: 5_000 });
+          if (tagsRes.statusCode >= 200 && tagsRes.statusCode < 300) {
+            local = ((await tagsRes.body.json()) as { local?: typeof local }).local ?? [];
+          } else {
+            await tagsRes.body.text().catch(() => "");
+          }
+        } catch {
+          // coordinator unreachable
         }
-      } catch {
-        // ignore
-      }
-    }
-
+      })(),
+      // As the user's account: a restricted model is listed only to an account entitled to it (and dropped here anyway).
+      portalCoordinatorTransport({ PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }, accountIdFor(user.userId))("GET", "/inference/models", undefined, AbortSignal.timeout(8_000)).catch(() => ({ status: 0, json: {} as Record<string, unknown> })),
+    ]);
+    const swarm = network.status === 200 ? swarmModelsFromInference((network.json as { models?: unknown }).models) : [];
     return reply.send({ local, swarm });
   });
 
