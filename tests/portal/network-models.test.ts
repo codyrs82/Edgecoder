@@ -74,7 +74,10 @@ describe("GET /portal/api/models", () => {
   it("builds swarm from the coordinator's /inference/models: numeric sizes, cloud rows, Flash before GLM, no restricted model", async () => {
     const co = await stubCoordinator();
     const app = await portalWith(co.url);
-    const res = await app.inject({ method: "GET", url: "/portal/api/models" });
+    // The shipped iPhone app (no ?cloud=1) gets no cloud rows: it would show paramSize as cSats.
+    const plain = (await app.inject({ method: "GET", url: "/portal/api/models" })).json() as { swarm: Array<Record<string, any>> };
+    expect(plain.swarm.map((r) => r.model)).toEqual(["qwen3-coder:30b", "qwen2.5-coder:7b"]);
+    const res = await app.inject({ method: "GET", url: "/portal/api/models?cloud=1" });
     expect(res.statusCode).toBe(200);
     const body = res.json() as { local: unknown[]; swarm: Array<Record<string, any>> };
     // local: unchanged (the coordinator's own Ollama list; empty when it refuses).

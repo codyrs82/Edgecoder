@@ -446,7 +446,11 @@ export function registerChatApiRoutes(
       // As the user's account: a restricted model is listed only to an account entitled to it (and dropped here anyway).
       portalCoordinatorTransport({ PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }, accountIdFor(user.userId))("GET", "/inference/models", undefined, AbortSignal.timeout(8_000)).catch(() => ({ status: 0, json: {} as Record<string, unknown> })),
     ]);
-    const swarm = network.status === 200 ? swarmModelsFromInference((network.json as { models?: unknown }).models) : [];
+    const rows = network.status === 200 ? swarmModelsFromInference((network.json as { models?: unknown }).models) : [];
+    // The shipped iPhone app shows paramSize as "cSats per message", which is wrong for per-token
+    // cloud prices (it would read "552 cSats"): cloud rows only for clients that ask (?cloud=1).
+    const withCloud = (req.query as { cloud?: string } | undefined)?.cloud === "1";
+    const swarm = withCloud ? rows : rows.filter((r) => !r.cloud);
     return reply.send({ local, swarm });
   });
 
