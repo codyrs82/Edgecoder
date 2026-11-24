@@ -78,6 +78,10 @@ final class BLEMeshManager: NSObject, ObservableObject {
 
     /// Handler called when a remote peer writes a task request over BLE
     nonisolated(unsafe) var taskHandler: BLETaskHandler?
+    /// Serving nearby machines: advertising this device and running the prompts they send. On the
+    /// iPhone it runs only while charging or full (SwarmRuntimeController follows the battery state,
+    /// HostingPowerPolicy). Scanning and sending this device's own requests (sendTask) do not depend on it.
+    @Published private(set) var isServing = false
     /// Any nearby device can write a task request (no pairing or requester authentication yet, see
     /// #63), so at most one runs at a time, each central waits between requests, and prompts are capped.
     private var bleTaskInFlight = false
@@ -133,6 +137,7 @@ final class BLEMeshManager: NSObject, ObservableObject {
     }
 
     func stop() {
+        isServing = false
         stopScanning()
         stopAdvertising()
         for peripheral in connectedPeripherals {
@@ -159,6 +164,24 @@ final class BLEMeshManager: NSObject, ObservableObject {
     func stopScanning() {
         centralManager?.stopScan()
         isScanning = false
+    }
+
+    // MARK: - Serving nearby machines
+
+    /// Start serving: advertise this device and run nearby machines' prompts with `handler`.
+    func startServing(agentId: String, model: String, modelParamSize: Double, handler: @escaping BLETaskHandler) {
+        taskHandler = handler
+        isServing = true
+        startAdvertising(agentId: agentId, model: model, modelParamSize: modelParamSize)
+    }
+
+    /// Stop serving: stop advertising and refuse new prompts (the requester gets a "failed" reply at
+    /// once). The GATT service stays up until hosting stops or serving resumes, so a prompt already
+    /// running still sends its reply and its credit co-sign (#63) can complete.
+    func stopServing() {
+        isServing = false
+        peripheralManager?.stopAdvertising()
+        isAdvertising = false
     }
 
     // MARK: - Peripheral (Advertising)
@@ -240,7 +263,10 @@ final class BLEMeshManager: NSObject, ObservableObject {
               let modelId = userInfo["modelId"] as? String,
               let paramSize = userInfo["paramSize"] as? Double else { return }
         stopAdvertising()
-        if let agentId = currentAgentId {
+        // Not serving (on battery): remember the model for when serving resumes, but stay silent.
+        currentModel = modelId
+        currentModelParamSize = paramSize
+        if isServing, let agentId = currentAgentId {
             startAdvertising(agentId: agentId, model: modelId, modelParamSize: paramSize)
         }
     }
@@ -304,6 +330,24 @@ final class BLEMeshManager: NSObject, ObservableObject {
         // The prompt is not logged: it is the requester's data.
         print("[BLE] received task request \(requestId) from \(requesterId) (\(task.utf8.count) bytes)")
 
+        // Unplugged since the requester found us: say so at once instead of letting it wait out a timeout.
+        guard isServing else {
+            print("[BLE] task request \(requestId) refused: not serving (on battery)")
+            let providerId = currentAgentId ?? "unknown"
+            let refusal: [String: Any] = [
+                "requestId": requestId,
+                "providerId": providerId,
+                "providerAccountId": currentAccountId ?? providerId,
+                "status": "failed",
+                "output": HostingPowerPolicy.notChargingReply,
+                "cpuSeconds": 0,
+                "providerSignature": ""
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: refusal) {
+                sendNotify(data, to: central, label: "task \(requestId)")
+            }
+            return
+        }
         guard let handler = taskHandler else {
             print("[BLE] no task handler registered")
             return

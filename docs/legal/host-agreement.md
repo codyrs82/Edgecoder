@@ -2,7 +2,7 @@
 
 Version: 2026-11-16 · Effective date: 16 November 2026 · Last updated: 16 November 2026
 
-This Host Agreement is between you and EdgeCoder ("EdgeCoder", "we", "us"). It applies when you install the EdgeCoder agent, the desktop app with the agent enabled, the iOS app with its swarm runtime, or any other EdgeCoder software that lets your machine run work for others (a "Host"). It adds to the [Terms of Service](/terms), the [Acceptable Use Policy](/acceptable-use) and the [Privacy Policy](/privacy). If this agreement conflicts with the Terms on hosting, this agreement controls.
+This Host Agreement is between you and EdgeCoder ("EdgeCoder", "we", "us"). It applies when you install the EdgeCoder agent, the desktop app with the agent enabled, the iOS app with hosting turned on, or any other EdgeCoder software that lets your machine run work for others (a "Host"). The iOS app hosts only while your iPhone or iPad is connected to a charger: it then runs network jobs and serves nearby devices over Bluetooth. The iOS app does not show earnings or make payouts; you see your earnings and request payouts on the web or in the desktop app. This agreement adds to the [Terms of Service](/terms), the [Acceptable Use Policy](/acceptable-use) and the [Privacy Policy](/privacy). If this agreement conflicts with the Terms on hosting, this agreement controls.
 
 By installing or running the agent, enrolling a machine, or checking the box to accept this agreement, you agree to it.
 

@@ -8,17 +8,17 @@ Older builds had a three-way compute mode picker (**Off / On / Bluetooth Local**
 
 ## Hosting
 
-The phone loads a model and runs it on the device. It hosts in two ways: it runs network jobs from the coordinator **only while it is charging** (on external power: charging or full), and it serves nearby machines over Bluetooth whenever hosting is on. The controls are in **Settings** (bottom of the Chat drawer):
+The phone loads a model and runs it on the device. It hosts in two ways, both **only while it is charging** (on external power: charging or full): it runs network jobs from the coordinator, and it serves nearby machines over Bluetooth. The controls are in **Settings** (bottom of the Chat drawer):
 
 | Card | What it shows or controls |
 |---|---|
-| **Hosting** | State (Stopped / Running / Paused), whether the phone is charging, start, pause and stop buttons, network jobs done and failed, Bluetooth requests served and failed (this session), and **Auto-start on launch** (on by default). Pause stops network jobs and heartbeats; Bluetooth keeps serving. |
+| **Hosting** | State (Stopped / Running / Paused), whether the phone is charging, start, pause and stop buttons, network jobs done and failed, Bluetooth requests served and failed (this session), and **Auto-start on launch** (on by default). Pause stops network jobs and heartbeats; Bluetooth keeps serving while charging. |
 | **Local Model** | Pick, download and load the on-device model. |
 | **Network** | Nearby peers, battery percent, and power source (`AC` or `Bat`). |
 
-After you sign in, the app enrolls the phone (`POST /nodes/enroll`) and, if **Auto-start on launch** is on, starts hosting. While running, it registers with the coordinator as an agent (`os: "ios"`, `clientType: "edgecoder-ios"`, one task at a time) and sends a heartbeat about every 15 seconds, on battery too: Bluetooth needs the account from registration and the heartbeat's offline/online signal. It asks for network jobs only while charging and only when the on-device model is loaded.
+After you sign in, the app enrolls the phone (`POST /nodes/enroll`) and, if **Auto-start on launch** is on, starts hosting. While running, it registers with the coordinator as an agent (`os: "ios"`, `clientType: "edgecoder-ios"`, one task at a time) and sends a heartbeat about every 15 seconds, on battery too: Bluetooth needs the account from registration and the heartbeat's offline/online signal. It asks for network jobs only while charging and only when the on-device model is loaded, and it advertises to nearby machines and runs their Bluetooth requests only while charging. Scanning for nearby machines (for the phone's own requests when it is offline) runs on battery too.
 
-Charging is required for network jobs; there is no setting for it (older builds had a **Run only when charging** toggle, off by default). The app watches the battery state: when you unplug, it pulls no new job (a job already running finishes and reports) and sends a heartbeat at once so the coordinator knows; when you plug back in, it resumes.
+Charging is required for network jobs and for Bluetooth serving; there is no setting for it (older builds had a **Run only when charging** toggle, off by default). The app watches the battery state: when you unplug, it pulls no new job (a job already running finishes and reports), stops advertising over Bluetooth and refuses new Bluetooth requests (one already running finishes and replies), and sends a heartbeat at once so the coordinator knows; when you plug back in, it resumes both. A Bluetooth request that wakes the app in the background checks the battery state again before it runs.
 
 ## Power telemetry
 

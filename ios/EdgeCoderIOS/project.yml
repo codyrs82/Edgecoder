@@ -129,6 +129,9 @@ targets:
       - path: EdgeCoderIOS/Code/CodeFixture.swift
       - path: EdgeCoderIOS/Code/CodeDrawerSource.swift
       - path: EdgeCoderIOS/Code/UnifiedDiff.swift
+      # The chat's network fallback (/inference/submit + /inference/stream) and the charging rule.
+      - path: EdgeCoderIOS/Swarm/SwarmChatProtocol.swift
+      - path: EdgeCoderIOS/Swarm/HostingPowerPolicy.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.edgecoder.ios.tests
