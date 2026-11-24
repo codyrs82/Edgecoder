@@ -976,14 +976,17 @@ export class SessionHub {
     }
     this.emit(id, { type: "approval", id: callId, approved, by: client.kind, ...(client.label ? { label: client.label } : {}), ...(always ? { always: true } : {}), ...(approved && forRun ? { forRun: true } : {}), ...(offer ? { session: offer.label } : {}) });
     p.resolve(approved ? (forRun ? "run" : true) : false);
-    if (offer || (approved && always)) this.releaseCovered(s, l);
+    if (offer || (approved && always)) this.releaseCovered(s, l, true);
     return true;
   }
 
-  /** Calls waiting for an answer that the mode, a rule or an allowance now runs without asking go ahead. */
-  private releaseCovered(s: SessionData, l: Live): void {
-    // A turn the app runs (a desktop chat) answers its own asks: only this hub's turns are released here.
-    if (l.running?.external) return;
+  /**
+   * Calls waiting for an answer that the mode, a rule or an allowance now runs without asking go
+   * ahead. After an answer (`ownTurnsOnly`), a turn the app runs (a desktop chat) is left alone: it
+   * judges its own calls with its own allowances.
+   */
+  private releaseCovered(s: SessionData, l: Live, ownTurnsOnly = false): void {
+    if (ownTurnsOnly && l.running?.external) return;
     for (const [callId, p] of [...l.pending]) {
       if (p.tool === COST_CHECK_TOOL) continue;
       // A web-page guard ask goes ahead only in Full access, which the guard leaves alone.
