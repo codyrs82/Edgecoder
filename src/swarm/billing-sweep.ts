@@ -47,6 +47,11 @@ export interface BillingSweepSummary {
 }
 
 export const TASK_BILLING_SWEEP_MIN_AGE_MS = 30 * 60_000;
+/**
+ * A model call's row is swept sooner: no call lives past its 6-minute stream deadline, so a row
+ * older than this that no task here holds is a call lost to a restart or an overlap (#524).
+ */
+export const INFERENCE_BILLING_SWEEP_MIN_AGE_MS = 8 * 60_000;
 export const TASK_BILLING_SWEEP_INTERVAL_MS = 5 * 60_000;
 
 export async function sweepStaleTaskBilling(d: {
@@ -60,9 +65,9 @@ export async function sweepStaleTaskBilling(d: {
   minAgeMs?: number;
 }): Promise<{ swept: number; skipped?: "locked"; summary?: BillingSweepSummary }> {
   const now = d.nowMs ?? Date.now();
-  const minAge = d.minAgeMs ?? TASK_BILLING_SWEEP_MIN_AGE_MS;
+  const minAgeOf = (kind: string) => d.minAgeMs ?? (kind === "inference" ? INFERENCE_BILLING_SWEEP_MIN_AGE_MS : TASK_BILLING_SWEEP_MIN_AGE_MS);
   const locked = await d.store.withTaskBillingSweepLock(d.coordinatorId, async () => {
-    const stale = (await d.store.listOpenTaskBilling(d.coordinatorId)).filter((r) => now - r.createdAtMs >= minAge && !d.isLive(r.taskId));
+    const stale = (await d.store.listOpenTaskBilling(d.coordinatorId)).filter((r) => now - r.createdAtMs >= minAgeOf(r.kind) && !d.isLive(r.taskId));
     if (stale.length === 0) return { swept: 0 };
     return { swept: stale.length, summary: await d.restore(stale) };
   });

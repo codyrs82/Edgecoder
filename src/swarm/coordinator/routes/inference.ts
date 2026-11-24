@@ -10,7 +10,8 @@ import type { ResourceClass, Subtask } from "../../../common/types.js";
 import { DuplicateDebitError, rewardAccountForAgent, spendCredits, taskReserveKey } from "../../../credits/store.js";
 import { cSatsPerMTokens, msatToCSats, ratePerSecondMsat } from "../../../economy/job-pricing.js";
 import { modelTokenPrice } from "../../../economy/cloud-pricing.js";
-import { cloudModelSpec, orderCloudModels } from "../../../cloud-host/catalog.js";
+import { cloudModelSpec, isCloudModel, orderCloudModels } from "../../../cloud-host/catalog.js";
+import { catalogEntryForTag } from "../../../model/catalog.js";
 import { paramsB } from "../../../inference-api/auto-route.js";
 import { contextNeeded } from "../../../inference-api/ollama.js";
 import type { ChatMessage } from "../../../inference-api/types.js";
@@ -204,6 +205,48 @@ export async function cancelUnclaimedInference(taskId: string, subtaskId: string
   await refundTaskSubmit(taskId);
   coordinatorApp.log.warn({ taskId, subtaskId, claimTimeoutMs: INFERENCE_CLAIM_TIMEOUT_MS }, "inference_no_capacity_cancelled");
   return true;
+}
+
+/**
+ * #524 (restart under load, 2026-11-24): right after a restart no agent has registered yet (they come
+ * back in ~50 s), and a named call was refused at once with no_agent_has_model. For this long after
+ * start a call for a catalog model nobody holds yet is accepted and queued instead; its claim bound
+ * is stretched to the end of the grace plus the usual bound, and refunds it in full if no agent comes.
+ */
+const STARTED_AT_MS = Date.now();
+export const STARTUP_GRACE_MS = (() => {
+  const n = Number(process.env.COORDINATOR_STARTUP_GRACE_MS);
+  return Number.isFinite(n) && n >= 0 ? Math.min(n, 10 * 60_000) : 90_000;
+})();
+export function inStartupGrace(nowMs = Date.now(), startedAtMs = STARTED_AT_MS, graceMs = STARTUP_GRACE_MS): boolean {
+  return nowMs - startedAtMs < graceMs;
+}
+/** Claim bound for a call accepted in the startup grace: until the grace ends, plus the usual bound. */
+function startupClaimBoundMs(nowMs = Date.now()): number {
+  return Math.max(0, STARTED_AT_MS + STARTUP_GRACE_MS - nowMs) + INFERENCE_CLAIM_TIMEOUT_MS;
+}
+/**
+ * A model an agent could come back with: a catalog or cloud model, or an Ollama-style tag
+ * (name:size). Anything else (no agent can ever have it) is refused at once, as before.
+ */
+function knownModel(model: string): boolean {
+  return isCloudModel(model) || catalogEntryForTag(model) !== undefined || /^[a-z0-9][a-z0-9._/-]{0,80}:[a-z0-9][a-z0-9._-]{0,40}$/i.test(model);
+}
+
+/**
+ * Drain (a deploy or restart): calls nobody claimed cannot run here any more. They are taken off the
+ * queue and refunded in full now (the requester's stream answers no_capacity with a short
+ * Retry-After, and its client sends the call again), rather than waiting for the next instance to
+ * restore and refund them. Claimed calls are left to finish (their billing is restored if not).
+ */
+export async function cancelUnclaimedForDrain(): Promise<number> {
+  let n = 0;
+  for (const c of queue.inferenceCalls()) {
+    if (c.claimedBy) continue;
+    const st = queue.getSubtask(c.subtaskId);
+    if (st && (await cancelUnclaimedInference(st.taskId, st.id).catch(() => false))) n++;
+  }
+  return n;
 }
 
 /** A failed call is given to another agent only with at least this much of its time left. */
@@ -604,7 +647,8 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
           return reply.code(409).send({ error: "route_elsewhere", coordinatorId: peer.coordinatorId, coordinatorUrl: peer.url, model: body.model });
         }
       }
-      if (!holders.some(([id]) => !reservations.isHeld(id))) return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
+      // Just restarted, agents not back yet: a known model's call waits for them (bounded, refunded if none comes).
+      if (!holders.some(([id]) => !reservations.isHeld(id)) && !(holders.length === 0 && inStartupGrace() && knownModel(body.model))) return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
     }
     // Backpressure: network calls wait for a slot up to a bound (waitingBound); past it the
     // caller hears no_capacity at once (nothing reserved or charged) instead of piling more onto
@@ -621,7 +665,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const taskClass = (billed ? resolved.computeClass ?? "any" : "any") as ComputeClassId | "any";
     // Agents hold the model, but none is paid at the requested class (matching is by granted class):
     // say so now instead of waiting out the claim bound and calling every machine "busy".
-    if (billed && taskClass !== "any") {
+    if (billed && taskClass !== "any" && holders.length > 0) {
       const classes = holderClasses(body.model);
       if (capacityGap(taskClass, classes) === "none_in_class") {
         return reply.code(409).send({ error: "no_agent_in_class", model: body.model, computeClass: taskClass, availableClasses: [...new Set(classes)].sort() });
@@ -731,7 +775,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       });
     }
     inferenceStreams.open(subtask.id, body.taskId);
-    armClaimDeadline(body.taskId, subtask.id, INFERENCE_CLAIM_TIMEOUT_MS);
+    armClaimDeadline(body.taskId, subtask.id, holders.length === 0 && inStartupGrace() ? startupClaimBoundMs() : INFERENCE_CLAIM_TIMEOUT_MS);
     app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, ...(sized ? { reserveTokenMsat: sized.tokenMsat, reserveFloorMsat: sized.floorMsat, reserveCappedByMaxCSats: sized.capped } : {}), holders: holders.length }, "inference_submitted");
     return reply.send({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second", ...(routed ? { routing: routed.summary } : {}) });
   });

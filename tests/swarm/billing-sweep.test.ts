@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { idleTaskBilling, sweepStaleTaskBilling, TASK_BILLING_IDLE_SWEEP_MS, TASK_BILLING_SWEEP_MIN_AGE_MS, type BillingSweepStore, type OpenTaskBillingRow } from "../../src/swarm/billing-sweep.js";
+import { idleTaskBilling, INFERENCE_BILLING_SWEEP_MIN_AGE_MS, sweepStaleTaskBilling, TASK_BILLING_IDLE_SWEEP_MS, TASK_BILLING_SWEEP_MIN_AGE_MS, type BillingSweepStore, type OpenTaskBillingRow } from "../../src/swarm/billing-sweep.js";
 
 // Live regtest finding (2026-11-15): a deploy replaced the US seed while model calls were in
 // flight. Billing is restored only at startup, and calls the outgoing instance had accepted after
@@ -34,6 +34,17 @@ describe("periodic task billing sweep", () => {
     expect(restored).toEqual([["old-orphan"]]);
     expect(r).toMatchObject({ swept: 1, summary: { refunded: 1 } });
     expect(st.asked).toEqual(["coord-a"]);
+  });
+
+  it("#524: a model call's row is swept after its stream deadline, a code job's after the long age", async () => {
+    // A model call lost to a restart (2026-11-24: 8 reserves left open) no longer waits 30 minutes.
+    const age = INFERENCE_BILLING_SWEEP_MIN_AGE_MS + 1;
+    const job = { ...row("job-young", now - age), kind: "job" };
+    const st = store([row("call-lost", now - age), job, row("call-young", now - 60_000)]);
+    const restored: string[][] = [];
+    await sweepStaleTaskBilling({ store: st, coordinatorId: "c", isLive: () => false, restore: async (rows) => { restored.push(rows.map((x) => x.taskId)); return { resumed: 0, refunded: rows.length, subtasksRestored: 0 }; }, nowMs: now });
+    expect(restored).toEqual([["call-lost"]]);
+    expect(INFERENCE_BILLING_SWEEP_MIN_AGE_MS).toBeGreaterThan(6 * 60_000);
   });
 
   it("skips when another process holds the sweep lock, and does nothing when nothing is stale", async () => {

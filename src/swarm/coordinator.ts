@@ -84,7 +84,7 @@ import { initCoordinator } from "./coordinator/init.js";
 import { onClaimable, pickupStats } from "./coordinator/dispatch.js";
 import { noteAgentOutcome } from "./coordinator/memory-admission.js";
 import { envelopeStats } from "./envelope-policy.js";
-import { onInferenceClaimable } from "./coordinator/routes/inference.js";
+import { cancelUnclaimedForDrain, onInferenceClaimable } from "./coordinator/routes/inference.js";
 import { startLostAgentSweep } from "./coordinator/lost-agent-claims.js";
 
 // Read at scrape time.
@@ -298,6 +298,9 @@ export function installCoordinatorShutdown(opts: { exit?: (code: number) => void
         return { claims, accruals: accrualsInFlight.size };
       },
       settle: async () => {
+        // #524: calls nobody claimed cannot run here any more: refunded now, before exit.
+        const cancelled = await cancelUnclaimedForDrain().catch(() => 0);
+        if (cancelled > 0) app.log.warn({ cancelled }, "drain_unclaimed_inference_refunded");
         let settled = 0;
         for (const taskId of [...taskBilling.keys()]) {
           await settleTaskIfDone(taskId).catch((err) => app.log.warn({ err, taskId }, "drain_settle_failed"));

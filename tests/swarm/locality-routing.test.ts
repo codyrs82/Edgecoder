@@ -41,6 +41,7 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => portal.listen(0, "127.0.0.1", resolve));
   process.env.PORTAL_SERVICE_URL = `http://127.0.0.1:${(portal.address() as AddressInfo).port}`;
   process.env.MESH_AUTH_TOKEN = MESH;
+  process.env.COORDINATOR_STARTUP_GRACE_MS = "0"; // a model nobody holds is refused at once (no restart grace here)
   delete process.env.COORDINATOR_TRUST_PROXY;
   delete process.env.FLY_APP_NAME;
   delete process.env.MESH_PEER_ALLOWLIST;
@@ -56,6 +57,7 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
+  delete process.env.COORDINATOR_STARTUP_GRACE_MS;
   await app?.close();
   await new Promise<void>((resolve) => portal.close(() => resolve()));
 });
