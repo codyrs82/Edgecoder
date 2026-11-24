@@ -22,6 +22,7 @@ import { allocateOllamaPorts, portOwner } from "./ports.js";
 import { RELEASE_INFO_FILE, runUpdate, updateStatusLines } from "./update.js";
 import { realUpdateDeps } from "./update-host.js";
 import { applyUpdateSchedule, removeUpdateSchedule, timerStatus } from "./update-schedule.js";
+import { clearOverrideEntries, instanceOverridesPath, type ClearableOverride } from "./overrides-clear.js";
 import { applyPlan, defaultPaths, envFilePath, lockConfigDir, removeServices, serviceStatus, windowsDirOwnerProblems, type Host, type ServicePaths } from "./services.js";
 
 export const probe: Probe = (cmd, args) => {
@@ -681,6 +682,21 @@ export async function runInstaller(argv: string[], env: NodeJS.ProcessEnv = proc
   // Local web search (searxng.ts): the agents get SEARXNG_URL while it's on; set up after the services.
   const searxngOn = searxngWanted(host.platform, opts.searxng, readIfPresent, p.configDir);
   for (const inst of plan.instances) Object.assign(inst.env, searxngAgentEnv(searxngOn));
+  // auto: a portal override of the same setting would keep pinning it; drop that entry before the restart.
+  const autoKeys: ClearableOverride[] = [...(opts.contextWindow === "auto" ? ["contextWindow" as const] : []), ...(opts.parallel === "auto" ? ["parallel" as const] : [])];
+  if (autoKeys.length && !opts.dryRun) {
+    for (const inst of plan.instances) {
+      const path = instanceOverridesPath(host.platform, p, inst.index);
+      if (!path) continue;
+      try {
+        const r = clearOverrideEntries(path, autoKeys);
+        if (r === "cleared" && !opts.json) console.log(`cleared the portal's ${autoKeys.join(" and ")} override in ${path}`);
+        if (r === "unreadable") console.error(`warning: ${path} is not valid JSON; left as is (the agent ignores it)`);
+      } catch (e) {
+        console.error(`warning: could not update ${path}: ${String(e)}`);
+      }
+    }
+  }
   const result = applyPlan(plan, host, p, opts.dryRun);
   const searxng = applySearxng(host, p, { ...(opts.searxng !== undefined ? { flag: opts.searxng } : {}), dryRun: opts.dryRun, read: readIfPresent, randomHex: () => randomBytes(32).toString("hex") });
   result.files.push(...searxng.files);
