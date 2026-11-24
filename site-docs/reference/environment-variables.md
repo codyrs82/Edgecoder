@@ -274,7 +274,7 @@ The inference service checks these values at startup against `inferenceConfigSch
 | `IOS_ON_EXTERNAL_POWER` | `true`/`false` — device is charging |
 | `IOS_BATTERY_LEVEL_PCT` | Battery percentage (0–100) |
 | `IOS_LOW_POWER_MODE` | `true`/`false` — iOS Low Power Mode active |
-| `IOS_BATTERY_PULL_MIN_INTERVAL_MS` | Throttle between assignment attempts on battery |
+| `IOS_BATTERY_PULL_MIN_INTERVAL_MS` | Throttle between assignment attempts on battery (iOS agents not on external power get no jobs; shown in `/capacity`) |
 | `IOS_BATTERY_TASK_STOP_LEVEL_PCT` | Minimum battery level before stopping assignment |
 
 ## Bitcoin anchoring

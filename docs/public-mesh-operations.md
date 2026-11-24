@@ -24,7 +24,7 @@ Examples use placeholders. Replace them with your deployment's hosts:
 - Start coordinator + inference + control-plane + portal services.
 - Create user account in portal, verify email, then enroll node and capture `registrationToken`.
 - Start worker process with unique `AGENT_ID`, `AGENT_OS=macos`, and `AGENT_REGISTRATION_TOKEN=<portal token>`.
-- For iOS swarm workers, run `AGENT_ID=<iphone-id> AGENT_REGISTRATION_TOKEN=<portal token> npm run dev:worker:ios`.
+- For iOS swarm workers, run `AGENT_ID=<iphone-id> AGENT_REGISTRATION_TOKEN=<portal token> npm run dev:worker:ios`. Coordinators give an iOS agent work only while its telemetry says it is on external power, so set `IOS_ON_EXTERNAL_POWER=true` to get jobs.
   - Optional iOS telemetry controls:
     - `IOS_ON_EXTERNAL_POWER=true|false`
     - `IOS_BATTERY_LEVEL_PCT=0..100`
@@ -230,7 +230,7 @@ Model access boundary:
 - Email verification is required (Resend integration with `RESEND_API_KEY`, `RESEND_FROM_EMAIL`).
 - First-time signup bootstraps a starter wallet onboarding record and returns seed-protection guidance.
 - Payout destination: `GET`/`PUT /wallet/payout-destination` (a Lightning address from the user's own wallet; the server never generates wallet keys).
-- iOS/mobile summary endpoint: `GET /ios/dashboard`.
+- iOS/mobile summary endpoint: `GET /ios/dashboard` (account, job counts and network; no earnings).
 - Unverified accounts with enrolled agents/coordinators remain dormant and cannot register.
 - Even after email verification, nodes require coordinator approval to become active.
 - Coordinator UI surfaces node owner email, source IP, VPN/proxy detection, and country code.

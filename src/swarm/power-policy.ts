@@ -35,6 +35,21 @@ export interface PowerPolicyDecision {
   reason: string;
 }
 
+/** An iOS agent: the iOS app registers with os "ios" and clientType "edgecoder-ios"; mesh-gossip phones are stored with os "ios". */
+export function isIosAgent(agent: { os?: string; clientType?: string } | undefined): boolean {
+  return Boolean(agent) && (agent!.os === "ios" || agent!.clientType === "edgecoder-ios");
+}
+
+/**
+ * An iPhone takes coordinator jobs only while it is on external power (charging or full). True when
+ * this is an iOS agent whose latest power telemetry (from /register or /heartbeat) does not say
+ * `onExternalPower: true`; missing telemetry counts as not charging. Older app builds that run jobs
+ * on battery are held back by this too.
+ */
+export function iosAgentNotCharging(agent: { os?: string; clientType?: string; powerTelemetry?: AgentPowerTelemetry } | undefined): boolean {
+  return isIosAgent(agent) && agent!.powerTelemetry?.onExternalPower !== true;
+}
+
 export function evaluateAgentPowerPolicy(input: PowerPolicyInput): PowerPolicyDecision {
   const telemetry = input.telemetry ?? {};
 

@@ -82,4 +82,4 @@ Not built yet, or limited:
 - **Desktop app (macOS):** Settings > General > Bluetooth mesh. It is on by default; switching it restarts the agent.
 - **Agent without the app:** set `EDGECODER_BLE=0` to turn it off.
 - **Accepting work on a Mac:** in addition, an operator must set `MESH_AUTH_TOKEN` on the agent, with the same value on every Mac allowed to send it work. Without it the Mac never runs Bluetooth requests.
-- **iOS:** Bluetooth mesh runs while the EdgeCoder runtime runs. To stop it, stop the runtime in the app, or turn off Bluetooth access for EdgeCoder in iOS Settings > Privacy & Security > Bluetooth.
+- **iOS:** Bluetooth mesh runs while hosting runs (Settings > Hosting), on battery too; network jobs from the coordinator run only while the phone is charging. To stop Bluetooth, stop hosting in the app, or turn off Bluetooth access for EdgeCoder in iOS Settings > Privacy & Security > Bluetooth.

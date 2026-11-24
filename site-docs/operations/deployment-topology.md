@@ -78,9 +78,9 @@ docker compose up ide-provider
 ### iOS agent
 
 - **Distribution**: App Store / TestFlight
-- **Runtime**: optional on-device model runtime, started from Settings (auto-start on by default; "Run only when charging" off by default)
+- **Hosting**: on-device model, started from Settings (auto-start on by default). Network jobs run only while the phone is charging; nearby machines can use it over Bluetooth whenever hosting is on.
 - **Background**: `BGProcessingTask` + `BGAppRefreshTask` requests; iOS decides when (or whether) they run, so background work is not continuous
-- **Power**: battery, charging and Low Power Mode are sent with every heartbeat; the coordinator's iOS power policy decides when the phone gets work
+- **Power**: battery, charging and Low Power Mode are sent with every heartbeat; the coordinator gives a phone no job unless its latest telemetry says it is on external power, then applies the iOS power policy
 - See [iOS Power & Background](/operations/ios-power-scheduling). The old Off / On / Bluetooth Local mode picker is gone from the app.
 
 ### Docker

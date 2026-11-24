@@ -6,7 +6,7 @@ import UIKit
 // Wallet & market (docs/design/wallet-and-market.md): balance, Add funds with a Lightning invoice
 // (QR, copy, open in wallet, live waiting state, paid and expired states) or, when the coordinator
 // has ONCHAIN_ENABLED, Fund with Bitcoin to a deposit address (QR, deposits with confirmations), where your sats go,
-// prices now, earnings & withdrawals with payout methods and history. Everything comes from the
+// prices now, and (Debug builds only) earnings & withdrawals with payout methods and history. Everything comes from the
 // portal over the session cookie; the app never prices anything except the purchase-fee preview
 // before an invoice exists, which uses the coordinator's own rate and is replaced by the invoice.
 
@@ -81,7 +81,11 @@ struct WalletView: View {
     @EnvironmentObject private var purchasePolicy: PurchasePolicy
 
     @State private var overview: WalletOverview?
+    #if DEBUG
+    // Host earnings and payouts exist only in Debug builds (EDGECODER_HOST_EARNINGS_IN_APP is NO in
+    // Release, see project.yml), so Release binaries carry no withdraw or payout code.
     @State private var destination: PayoutDestinationView?
+    #endif
     @State private var loading = true
     @State private var loadError = ""
 
@@ -105,7 +109,8 @@ struct WalletView: View {
     @State private var addressCopied = false
     @State private var onchainTask: Task<Void, Never>?
 
-    // Withdraw
+    #if DEBUG
+    // Withdraw (Debug builds only)
     @State private var bolt11 = ""
     @State private var withdrawCode = ""
     @State private var challengeId: String?
@@ -115,6 +120,7 @@ struct WalletView: View {
     /// Two-factor step-up (#420): asked for when the portal answers two_factor_required.
     @State private var needsTwoFactor = false
     @State private var twoFactorCode = ""
+    #endif
 
     enum Step { case amount, onchain, invoice, paid, expired }
 
@@ -153,7 +159,9 @@ struct WalletView: View {
                     }
                     feesCard
                     pricesCard
+                    #if DEBUG
                     if HostEarningsPolicy.inApp { earningsSection }
+                    #endif
                     activityCard
                 }
             }
@@ -198,10 +206,12 @@ struct WalletView: View {
             } else if overview?.connected == false {
                 Text("Not connected to the network right now. Your balance is safe.").font(.footnote).foregroundColor(Theme.textSecondary)
             }
+            #if DEBUG
             if HostEarningsPolicy.inApp { HStack(spacing: 10) {
                 mini("Earned by your machines", overview?.payouts?.balance.map { "\(WalletFormat.msat($0.earnedMsat)) sats" } ?? overview?.earnedSats.map { "\(WalletFormat.sats($0)) sats" } ?? "–")
                 mini("Available to withdraw", overview?.payouts?.balance.map { "\(WalletFormat.msat($0.payableMsat)) sats" } ?? "–")
             } }
+            #endif
             Text("1 cSat = 1 sat. Spend it on model calls, code jobs and reserved machines.")
                 .font(.footnote).foregroundColor(Theme.textMuted)
         }
@@ -398,6 +408,7 @@ struct WalletView: View {
         ["pending": "Confirming", "credited": "Added", "below_minimum": "Below minimum", "held": "Held for review", "dropped": "Dropped", "reversed": "Reversed"][s] ?? s
     }
 
+    #if DEBUG
     private func onchainPayoutText(_ p: WalletOverview.OnchainPolicy) -> String {
         let hours = (p.payoutIntervalMs ?? 0) / 3_600_000
         let every = hours >= 1 ? "every \(WalletFormat.num(hours, digits: 1)) h" : "every \(Int(((p.payoutIntervalMs ?? 0) / 60_000).rounded())) min"
@@ -406,6 +417,7 @@ struct WalletView: View {
             : "The network fee comes out of your payout (at most \(WalletFormat.sats(Double(p.payoutMaxFeeSats ?? 0))) sats; the unused part is returned)."
         return "BTC to your own bc1 address. Paid in a batch \(every) once at least \(WalletFormat.sats(Double(p.payoutMinSats ?? 0))) sats are available. \(fee)"
     }
+    #endif
 
     @ViewBuilder private var invoiceStep: some View {
         if let invoice {
@@ -557,6 +569,7 @@ struct WalletView: View {
         }
     }
 
+    #if DEBUG
     @ViewBuilder private var earningsSection: some View {
         let b = overview?.payouts?.balance
         let policy = overview?.payouts?.policy
@@ -661,6 +674,7 @@ struct WalletView: View {
             Text(policyLine(policy)).font(.caption).foregroundColor(Theme.textMuted)
         }
     }
+    #endif
 
     private var activityCard: some View {
         card {
@@ -762,6 +776,7 @@ struct WalletView: View {
         }
     }
 
+    #if DEBUG
     private func kpi(_ label: String, _ value: String, _ detail: String, _ tint: Color) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(label).font(.caption).foregroundColor(Theme.textSecondary)
@@ -811,6 +826,8 @@ struct WalletView: View {
         return parts.joined(separator: " ")
     }
 
+    #endif
+
     private func countdown(until: Date, now: Date) -> String {
         let s = max(0, Int(until.timeIntervalSince(now).rounded()))
         return s > 0 ? String(format: "Expires in %d:%02d", s / 60, s % 60) : "Expiring…"
@@ -827,7 +844,12 @@ struct WalletView: View {
         } catch {
             loadError = "Could not load your wallet: \(error.localizedDescription)"
         }
-        destination = try? await APIClient.shared.request(baseURL: portal, path: "/wallet/payout-destination")
+        #if DEBUG
+        // Only a build that shows host earnings asks for the payout destination.
+        if HostEarningsPolicy.inApp {
+            destination = try? await APIClient.shared.request(baseURL: portal, path: "/wallet/payout-destination")
+        }
+        #endif
     }
 
     private func createInvoice() async {
@@ -912,6 +934,7 @@ struct WalletView: View {
         step = .amount
     }
 
+    #if DEBUG
     private func withdraw(withCode: Bool) async {
         withdrawMessage = nil
         let inv = bolt11.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -967,5 +990,5 @@ struct WalletView: View {
             withdrawMessage = (false, "Withdrawal failed: \(error.localizedDescription)")
         }
     }
+    #endif
 }
-

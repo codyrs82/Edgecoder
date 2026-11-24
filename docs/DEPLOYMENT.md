@@ -803,7 +803,7 @@ Even for code tasks, generated programs can print differently between honest run
 | `IOS_ON_EXTERNAL_POWER` | | Whether iOS device is on external power |
 | `IOS_BATTERY_LEVEL_PCT` | | iOS battery level percentage |
 | `IOS_LOW_POWER_MODE` | | Whether iOS Low Power Mode is enabled |
-| `IOS_BATTERY_PULL_MIN_INTERVAL_MS` | `45000` | Min interval between task pulls on battery |
+| `IOS_BATTERY_PULL_MIN_INTERVAL_MS` | `45000` | Min interval between task pulls on battery (an iPhone not on external power gets no jobs; this only affects `/capacity` reporting) |
 | `IOS_BATTERY_TASK_STOP_LEVEL_PCT` | `20` | Battery level below which tasks are blocked |
 
 ### Robot Queue

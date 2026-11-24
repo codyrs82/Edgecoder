@@ -516,17 +516,12 @@ async function loadWalletSnapshotForUser(userId: string): Promise<unknown> {
   }
 }
 
-async function loadIosAgentContributionForUser(agentId: string): Promise<{
-  contribution: {
-    earnedCredits: number;
-    contributedTaskCount: number;
-  };
-  wallet: {
-    accountId: string;
-    balance: number;
-    estimatedSats: number;
-    satsPerCredit: number;
-  };
+/**
+ * Job counts and runtime state of one of the user's agents, for the iOS app. No earnings, balance or
+ * payout figures: the iPhone does not show what hosting earned.
+ */
+async function loadIosAgentActivity(agentId: string): Promise<{
+  contribution: { contributedTaskCount: number };
   runtime: {
     connected: boolean;
     health?: string;
@@ -538,26 +533,11 @@ async function loadIosAgentContributionForUser(agentId: string): Promise<{
   } | null;
   recentTaskIds: string[];
 }> {
-  if (!CONTROL_PLANE_URL || !CONTROL_PLANE_ADMIN_TOKEN) {
-    return {
-      contribution: { earnedCredits: 0, contributedTaskCount: 0 },
-      wallet: { accountId: agentId, balance: 0, estimatedSats: 0, satsPerCredit: 0 },
-      runtime: null,
-      recentTaskIds: []
-    };
-  }
-
+  const empty = { contribution: { contributedTaskCount: 0 }, runtime: null, recentTaskIds: [] };
+  if (!CONTROL_PLANE_URL || !CONTROL_PLANE_ADMIN_TOKEN) return empty;
   try {
-    const [creditRes, historyRes, quoteRes, catalogRes] = await Promise.all([
-      request(`${CONTROL_PLANE_URL}/credits/${encodeURIComponent(agentId)}/balance`, {
-        method: "GET",
-        headers: controlPlaneHeaders()
-      }),
+    const [historyRes, catalogRes] = await Promise.all([
       request(`${CONTROL_PLANE_URL}/credits/${encodeURIComponent(agentId)}/history`, {
-        method: "GET",
-        headers: controlPlaneHeaders()
-      }),
-      request(`${CONTROL_PLANE_URL}/economy/credits/${encodeURIComponent(agentId)}/quote`, {
         method: "GET",
         headers: controlPlaneHeaders()
       }),
@@ -566,45 +546,22 @@ async function loadIosAgentContributionForUser(agentId: string): Promise<{
         headers: controlPlaneHeaders()
       })
     ]);
-
-    const credits = creditRes.statusCode >= 200 && creditRes.statusCode < 300
-      ? ((await creditRes.body.json()) as { balance?: number })
-      : { balance: 0 };
     const historyPayload = historyRes.statusCode >= 200 && historyRes.statusCode < 300
-      ? ((await historyRes.body.json()) as { history?: Array<{ reason?: string; type?: string; credits?: number; relatedTaskId?: string }> })
+      ? ((await historyRes.body.json()) as { history?: Array<{ reason?: string; relatedTaskId?: string }> })
       : { history: [] };
-    const quote = quoteRes.statusCode >= 200 && quoteRes.statusCode < 300
-      ? ((await quoteRes.body.json()) as { estimatedSats?: number; satsPerCredit?: number })
-      : { estimatedSats: 0, satsPerCredit: 0 };
     const catalog = catalogRes.statusCode >= 200 && catalogRes.statusCode < 300
       ? ((await catalogRes.body.json()) as { agents?: Array<Record<string, unknown>> })
       : { agents: [] };
-
-    const history = historyPayload.history ?? [];
-    const earned = history
-      .filter((tx) => tx?.reason === "compute_contribution" && tx?.type === "earn")
-      .reduce((sum, tx) => sum + Number(tx?.credits ?? 0), 0);
     const contributedTaskIds = Array.from(
       new Set(
-        history
+        (historyPayload.history ?? [])
           .filter((tx) => tx?.reason === "compute_contribution" && tx?.relatedTaskId)
           .map((tx) => String(tx.relatedTaskId))
       )
     );
-
     const runtimeAgent = (catalog.agents ?? []).find((item) => String(item?.agentId ?? "") === agentId) ?? null;
-
     return {
-      contribution: {
-        earnedCredits: Number(earned.toFixed(3)),
-        contributedTaskCount: contributedTaskIds.length
-      },
-      wallet: {
-        accountId: agentId,
-        balance: Number(Number(credits.balance ?? 0).toFixed(3)),
-        estimatedSats: Number(quote.estimatedSats ?? 0),
-        satsPerCredit: Number(quote.satsPerCredit ?? 0)
-      },
+      contribution: { contributedTaskCount: contributedTaskIds.length },
       runtime: runtimeAgent
         ? {
             connected: true,
@@ -621,12 +578,7 @@ async function loadIosAgentContributionForUser(agentId: string): Promise<{
       recentTaskIds: contributedTaskIds.slice(-5).reverse()
     };
   } catch {
-    return {
-      contribution: { earnedCredits: 0, contributedTaskCount: 0 },
-      wallet: { accountId: agentId, balance: 0, estimatedSats: 0, satsPerCredit: 0 },
-      runtime: null,
-      recentTaskIds: []
-    };
+    return empty;
   }
 }
 
@@ -859,7 +811,7 @@ registerPayoutDestinationRoutes(app, {
   store, getCurrentUser, network: WALLET_DEFAULT_NETWORK, onchainEnabled: C.ONCHAIN_ENABLED, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), register: payoutRegistrar,
   security: accountSecurity, secondFactor, sendConfirm: sendPayoutDestinationConfirmEmail, sendAdded: sendPayoutDestinationAddedEmail, callbackChange: (a, dest) => payoutCallbackClient.pendingChange(a, dest)
 });
-const accountRouteDeps = { discoverCoordinatorUrlsForPortal, everyCoordinatorUrl, fetchCoordinatorFederatedSummary, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store };
+const accountRouteDeps = { discoverCoordinatorUrlsForPortal, everyCoordinatorUrl, fetchCoordinatorFederatedSummary, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentActivity, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store };
 export type AccountApiRoutesDeps = typeof accountRouteDeps;
 registerAccountApiRoutes(app, accountRouteDeps);
 function autoRequestHost(node: Parameters<typeof autoRequestHosting>[1]) { return autoRequestHostingSafe({ store, policy: HOST_APPROVAL_POLICY, log: app.log }, node); }

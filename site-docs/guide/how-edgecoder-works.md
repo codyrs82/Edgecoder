@@ -7,7 +7,7 @@ This page describes the EdgeCoder runtime architecture end to end: from node sta
 EdgeCoder has two kinds of node:
 
 - **Coordinators** hold the task queue, the credit engine, the ledger and the peer mesh. The `all-in-one` runtime (what `npm run dev` and the Fly.io seeds run) puts a coordinator, the inference service and the control plane in one process, with an embedded worker in development (the Fly.io seeds disable it, `DISABLE_SELF_AGENT=1`). On the public network the coordinators are EdgeCoder's seeds: `edgecoder-seed` (US, coordinator-only) and `edgecoder-seed-eu` (EU, also runs Ollama).
-- **Agents** (the desktop app, installed hosts, iOS) register with a coordinator, pull subtasks and run them on local models. An agent runs its owner's work for free; it takes other people's work only once its owner is an approved host.
+- **Agents** (the desktop app, installed hosts, iOS) register with a coordinator, pull subtasks and run them on local models. An agent runs its owner's work for free; it takes other people's work only once its owner is an approved host. An iPhone takes network jobs only while it is charging; it also hosts over Bluetooth for nearby machines.
 
 When an `all-in-one` process boots:
 

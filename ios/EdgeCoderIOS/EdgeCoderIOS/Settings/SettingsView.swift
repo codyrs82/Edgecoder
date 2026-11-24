@@ -6,6 +6,7 @@ struct SettingsView: View {
 
     @StateObject private var authViewModel = AuthViewModel()
     @ObservedObject private var swarmRuntime = SwarmRuntimeController.shared
+    @ObservedObject private var bleMesh = BLEMeshManager.shared
     private let config = AppConfig.current
     @AppStorage(AppearancePreference.storageKey) private var appearance = AppearancePreference.defaultValue.rawValue
     @Environment(\.openURL) private var openURL
@@ -19,7 +20,7 @@ struct SettingsView: View {
                 VStack(spacing: 16) {
                     accountCard
                     chatCard
-                    runtimeCard
+                    hostingCard
                     modelCard
                     networkCard
                     nodeCard
@@ -214,35 +215,55 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Runtime Card
+    // MARK: - Hosting Card
 
-    private var runtimeCard: some View {
+    /// Network jobs (from the coordinator) run only while the iPhone is charging; Bluetooth requests
+    /// from nearby machines are served whenever hosting is on.
+    private var hostingCard: some View {
         SettingsCard {
-            SettingsCardHeader(icon: "bolt.fill", title: "Runtime", color: Theme.green)
+            SettingsCardHeader(icon: "bolt.fill", title: "Hosting", color: Theme.green)
 
             HStack(spacing: 8) {
                 StatusPill(label: swarmRuntime.state.rawValue.capitalized, color: stateColor)
+                StatusPill(label: swarmRuntime.isCharging ? "Charging" : "Not charging",
+                           color: swarmRuntime.isCharging ? Theme.green : Theme.yellow)
                 Spacer()
                 runtimeButtons
             }
 
             Divider().overlay(Theme.border)
 
+            Text("Network jobs (only while charging)")
+                .font(.caption.weight(.medium))
+                .foregroundColor(Theme.textSecondary)
             HStack(spacing: 0) {
-                StatCell(label: "Tasks", value: "\(swarmRuntime.tasksCompleted)")
+                StatCell(label: "Done", value: "\(swarmRuntime.tasksCompleted)")
                 StatCell(label: "Failed", value: "\(swarmRuntime.tasksFailed)")
                 if HostEarningsPolicy.inApp {
                     StatCell(label: "Credits", value: "\(swarmRuntime.creditsEarned)")
                 }
-                StatCell(label: "Beats", value: "\(swarmRuntime.heartbeatCount)")
             }
+
+            Text("Bluetooth (nearby machines, this session)")
+                .font(.caption.weight(.medium))
+                .foregroundColor(Theme.textSecondary)
+            HStack(spacing: 0) {
+                StatCell(label: "Served", value: "\(bleMesh.bleTasksCompleted)")
+                StatCell(label: "Failed", value: "\(max(0, bleMesh.bleTasksReceived - bleMesh.bleTasksCompleted))")
+                if HostEarningsPolicy.inApp {
+                    StatCell(label: "Credits", value: String(format: "%.3f", Double(bleMesh.bleCreditMillisCosigned) / 1000))
+                }
+            }
+
+            Text(swarmRuntime.isCharging
+                 ? "Charging: this iPhone takes network jobs and serves nearby machines over Bluetooth."
+                 : "Not charging: no network jobs until you plug in. Nearby machines can still use it over Bluetooth.")
+                .font(.caption)
+                .foregroundColor(Theme.textMuted)
 
             Divider().overlay(Theme.border)
 
             SettingsToggle(title: "Auto-start on launch", isOn: $swarmRuntime.autoStartEnabled) {
-                swarmRuntime.persistRuntimeSettings()
-            }
-            SettingsToggle(title: "Run only when charging", isOn: $swarmRuntime.runOnlyWhileCharging) {
                 swarmRuntime.persistRuntimeSettings()
             }
         }

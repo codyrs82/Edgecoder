@@ -54,6 +54,9 @@ final class BLEMeshManager: NSObject, ObservableObject {
     @Published var bleTasksCompleted = 0
     @Published var bleTasksSent = 0
     @Published var lastBLETaskResult: String = ""
+    /// Credits (in millis) of the transactions this device co-signed as the provider this session.
+    /// A display counter only; the credits settle when the requester syncs its offline ledger.
+    @Published var bleCreditMillisCosigned: Int64 = 0
 
     private(set) var currentAgentId: String?
     /// Reward account the coordinator resolves for this agent (from /register); signed into BLE txs.
@@ -480,6 +483,7 @@ final class BLEMeshManager: NSObject, ObservableObject {
         served.signedBytes = bytes
         served.signature = signature
         servedTasks[requestId] = served
+        bleCreditMillisCosigned += creditMillis
         reply("signed", signature: signature)
     }
 

@@ -98,7 +98,6 @@
 		CA0491A22360359F5890EB53 /* RequestSigningVectorsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09E3886017E14BF423BA6139 /* RequestSigningVectorsTests.swift */; };
 		CBC9CBA702A4130F7BDA5D47 /* AppConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B2D03BEBEB092AA1E44BC0A /* AppConfig.swift */; };
 		CE01A6B3D458A3A0C7C483C4 /* PurchasePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = AEB62ACFC126AF64173557A3 /* PurchasePolicy.swift */; };
-		CE3C917DA3EDA26D0AF84065 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7C2233E12CF05A6453ECFE4 /* DashboardView.swift */; };
 		D19C7BD18E5B7FBAB52184F2 /* HostEarningsPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61D22BEA678DE9EE6056343A /* HostEarningsPolicyTests.swift */; };
 		D279ADF2E5A5031590E672B6 /* DrawerDataSource.swift in Sources */ = {isa = PBXBuildFile; fileRef = 661AA5D7C760EF091102D254 /* DrawerDataSource.swift */; };
 		D3640D6F8B0D0D9C33FDB90B /* ChatFailuresTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9F1EE875627693EE65332B98 /* ChatFailuresTests.swift */; };
@@ -112,7 +111,6 @@
 		E5462A99E8D054EEC8753F5C /* NetworkView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33DBE81C547DC218A3D7A47F /* NetworkView.swift */; };
 		E700BAB29852EFE2EB0E7712 /* BuyLimits.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6A85EE2204D379E8381A0ED3 /* BuyLimits.swift */; };
 		EAD0E0A47F4D49F94EBC2E1B /* BuyLimitsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A736286E7E0FBDBE10BEC4AB /* BuyLimitsTests.swift */; };
-		EBFE08F6FB2BABEF42CC528A /* SwarmView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29F9EA12DD9A5B2CCE2A292D /* SwarmView.swift */; };
 		F09719A20AF9E871E5CCA8E3 /* ServedFormatterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 85A1812030202071FFC1D3AA /* ServedFormatterTests.swift */; };
 		F2BFB001CBA9534326B90B6B /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 886F776460D1ACBCEEE0FF3E /* APIClient.swift */; };
 		F4B554AAC65FAAD7EA72E01E /* RequestSigner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 036A798E5417C7C98880A156 /* RequestSigner.swift */; };
@@ -139,7 +137,6 @@
 		23F37DFB88500BCAC235C0B6 /* PasskeyManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PasskeyManager.swift; sourceTree = "<group>"; };
 		2733B6A0674685579153C996 /* LocalModelManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalModelManager.swift; sourceTree = "<group>"; };
 		273E1728A975361EDA5901F1 /* IDEView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IDEView.swift; sourceTree = "<group>"; };
-		29F9EA12DD9A5B2CCE2A292D /* SwarmView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwarmView.swift; sourceTree = "<group>"; };
 		2F41193CEB26AC72290E0717 /* ModelPickerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerView.swift; sourceTree = "<group>"; };
 		30D16E261FFA98D17D4DACEA /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		33DBE81C547DC218A3D7A47F /* NetworkView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkView.swift; sourceTree = "<group>"; };
@@ -197,7 +194,6 @@
 		B10DAC1310BC95E99485B1D2 /* OfflineLedger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineLedger.swift; sourceTree = "<group>"; };
 		B56B7A9E3DF1E1FDF5ED2A8B /* UnifiedDiff.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnifiedDiff.swift; sourceTree = "<group>"; };
 		B79575DD8A20DD4FF2BC73C3 /* CloudBotsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudBotsTests.swift; sourceTree = "<group>"; };
-		B7C2233E12CF05A6453ECFE4 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
 		BE8E161A0ADC90132E5B3989 /* EdgeCoderIOS.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = EdgeCoderIOS.entitlements; sourceTree = "<group>"; };
 		C3A4C3E5BF20EF662B00D426 /* BLEConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLEConstants.swift; sourceTree = "<group>"; };
 		CFCA2D7AB2EA836D5C6A0FF6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -241,7 +237,6 @@
 				63B8751367E0AC7B69EAC1AF /* Chat */,
 				C3C196F1C7092A6308FE3F93 /* Code */,
 				18E84012372F925E131AE0E7 /* Core */,
-				72C65A6CF93352209D512BDB /* Dashboard */,
 				6451C09B95E2059D4B254A54 /* IDE */,
 				48C31AE385C5C30F306C8FF6 /* Machines */,
 				EE48DC7510333863D73E4E40 /* Mesh */,
@@ -282,7 +277,6 @@
 				E21E9C45DF6BBC3C932C11B4 /* ModelStatusBanner.swift */,
 				9C0676973CD654A6BD253A66 /* RealLlamaContext.swift */,
 				87ED038C5B5374809650FFBF /* SwarmRuntimeController.swift */,
-				29F9EA12DD9A5B2CCE2A292D /* SwarmView.swift */,
 			);
 			path = Swarm;
 			sourceTree = "<group>";
@@ -357,14 +351,6 @@
 				4AE20F58B769C14A15DC8BB1 /* EdgeCoderIOSTests.xctest */,
 			);
 			name = Products;
-			sourceTree = "<group>";
-		};
-		72C65A6CF93352209D512BDB /* Dashboard */ = {
-			isa = PBXGroup;
-			children = (
-				B7C2233E12CF05A6453ECFE4 /* DashboardView.swift */,
-			);
-			path = Dashboard;
 			sourceTree = "<group>";
 		};
 		739D77BFC58772D88BAC5717 /* Security */ = {
@@ -639,7 +625,6 @@
 				F7345CFC101ED5DC06D6E184 /* CodeSessionView.swift in Sources */,
 				1CE07F590B5A0845215A777A /* ConversationSidebar.swift in Sources */,
 				B62CC97ACF7A76BB2B1B7C5A /* ConversationStore.swift in Sources */,
-				CE3C917DA3EDA26D0AF84065 /* DashboardView.swift in Sources */,
 				100892882C2D73514A926714 /* DiffView.swift in Sources */,
 				D279ADF2E5A5031590E672B6 /* DrawerDataSource.swift in Sources */,
 				19DD56837B15699DEC3346B4 /* EdgeCoderIOSApp.swift in Sources */,
@@ -672,7 +657,6 @@
 				B996DC26F09449F1DFB014C2 /* SettingsView.swift in Sources */,
 				C8EADCC9BBE887FFD4E48415 /* SideDrawer.swift in Sources */,
 				DBB6DA1C38F94E939183AD59 /* SwarmRuntimeController.swift in Sources */,
-				EBFE08F6FB2BABEF42CC528A /* SwarmView.swift in Sources */,
 				0643A36B95A8598DC4E919F9 /* Theme.swift in Sources */,
 				537F9EC0FFBB1C276088AA8A /* UnifiedDiff.swift in Sources */,
 				B016C5F9FAFAD95844D7FF05 /* WalletView.swift in Sources */,
