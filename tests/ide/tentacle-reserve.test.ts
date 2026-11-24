@@ -73,7 +73,8 @@ function setup(script: Script, config: Partial<TentacleConfig> = {}) {
 
 const write = (file: string): Script => ({ call }) => (call === 0 ? { tool: ["write_file", { path: file, content: "x\n" }] } : { text: `wrote ${file}` });
 
-describe("helper call ceilings (tentacle-reserve.ts)", () => {
+// Git worktrees per helper are slow on Windows runners.
+describe("helper call ceilings (tentacle-reserve.ts)", { timeout: 60_000 }, () => {
   it("sizes a ceiling from the tentacle's and the session's budget left, minus the others' holds", () => {
     expect(helperCallCeiling({ tentacleLeft: 25, sessionLeft: 100, heldByOthers: 50 })).toBe(25);
     expect(helperCallCeiling({ tentacleLeft: 25, sessionLeft: 60, heldByOthers: 50 })).toBe(10);
@@ -105,7 +106,7 @@ describe("helper call ceilings (tentacle-reserve.ts)", () => {
   });
 
   it("four helpers at once: each call's maxCSats is within the tentacle's budget and together within the session's", async () => {
-    const { tentacles, s, requests, maxHeld } = setup(({ call }) => (call === 0 ? { tool: ["write_file", { path: `f${Math.random()}.txt`, content: "x\n" }], wait: 40 } : { text: "done", wait: 40 }), { budgetCSats: 60, perTentacleCSats: 25 });
+    const { tentacles, s, requests, maxHeld } = setup(({ call }) => (call === 0 ? { tool: ["write_file", { path: `f${Math.random()}.txt`, content: "x\n" }], wait: 20 } : { text: "done", wait: 20 }), { budgetCSats: 60, perTentacleCSats: 25 });
     for (let i = 0; i < 4; i++) tentacles.delegate(s.id, { task: `piece ${i}`, kind: "code_edit", files: [], instructions: "" });
     await tentacles.idle(s.id);
     expect(requests.length).toBeGreaterThanOrEqual(8);
@@ -137,7 +138,7 @@ describe("helper call ceilings (tentacle-reserve.ts)", () => {
   });
 });
 
-describe("empty helper attempts (#525)", () => {
+describe("empty helper attempts (#525)", { timeout: 60_000 }, () => {
   it("tells empty attempts apart and picks where the retry goes", () => {
     expect(emptyAttempt({ modelError: "The machine running qwen2.5-coder:1.5b reported: empty_reply", summary: "", changedFiles: 0, writes: true })).toBe("empty_reply");
     expect(emptyAttempt({ summary: "", changedFiles: 0, writes: false })).toBe("empty_reply");
@@ -154,7 +155,7 @@ describe("empty helper attempts (#525)", () => {
     expect(tentacleSystemPrompt(true)).not.toMatch(/edit_file/);
   });
 
-  it("a 1.5B worker's empty_reply retries on auto, with a warning at the start, and the patch comes back", { timeout: 20_000 }, async () => {
+  it("a 1.5B worker's empty_reply retries on auto, with a warning at the start, and the patch comes back", async () => {
     const { tentacles, s, requests, events } = setup(({ model, call }) => (model !== "auto" ? { fail: "The machine running qwen2.5-coder:1.5b reported: empty_reply" } : call === 0 ? { tool: ["write_file", { path: "d.txt", content: "d\n" }] } : { text: "wrote d" }), { workerModel: "network/qwen2.5-coder:1.5b" });
     const v = tentacles.delegate(s.id, { task: "add d", kind: "code_edit", files: [], instructions: "" });
     await tentacles.idle(s.id);
