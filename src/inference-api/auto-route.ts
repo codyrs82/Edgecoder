@@ -29,6 +29,7 @@ import { cloudModelSpec } from "../cloud-host/catalog.js";
 import { supportsTools } from "../model/tool-support.js";
 import type { ChatRequest } from "./types.js";
 import { isFrontierModelId } from "./frontier-models.js";
+import { normalizeComputeClass } from "../economy/compute-classes.js";
 import type { Complexity, ComplexityLevel } from "./job-complexity.js";
 
 /** Whether a model can do an agent step (take tools and call them); see model/tool-support.ts. */
@@ -374,9 +375,10 @@ export function routeFromModelId(id: string): Route | null {
     const rest = t.slice(8);
     const at = rest.lastIndexOf("@");
     const suffix = at > 0 ? rest.slice(at + 1) : "";
-    const known = suffix === "any" || suffix in CLASS_SPEED || suffix === "cloud";
-    const model = known ? rest.slice(0, at) : rest;
-    const cls = known ? suffix : "any";
+    // A class, or a hardware tier ("@gpu.c8") standing for its class: calls match by class only.
+    const named = suffix === "any" ? "any" : normalizeComputeClass(suffix);
+    const model = named ? rest.slice(0, at) : rest;
+    const cls = named ?? "any";
     return { placement: "network", model, computeClass: cls, cSatsPerSecond: 0, reason: `network ${cls} · ${model}` };
   }
   return { placement: "local", model: t, cSatsPerSecond: 0, reason: `this computer (free) · ${t}` };

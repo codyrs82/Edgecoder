@@ -29,6 +29,7 @@ import { classifyCommand, decideToolCall, suggestToolRules, type Decision } from
 import { isWithin } from "./tool-executor.js";
 import { redactApiKeys } from "../../common/redaction.js";
 import { parseFrontierModelId } from "../../inference-api/frontier-models.js";
+import { normalizeComputeClass } from "../../economy/compute-classes.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 import { COST_ASK_TIMEOUT_MS, COST_CHECK_TOOL, ReplyCostMeter, makeCostCheck, replyAskCSats, replyAskUsd, type CostChoice } from "./cost-guard.js";
 
@@ -352,8 +353,9 @@ export function parseModelId(id: string): { model: string; compute: ComputeSetti
   if (id.startsWith("network/")) {
     const rest = id.slice(8);
     const at = rest.lastIndexOf("@");
-    const cls = at > 0 ? rest.slice(at + 1) : "";
-    return ["cpu", "apple", "gpu", "gpu.dc", "cloud"].includes(cls)
+    // A class, or a hardware tier ("@gpu.c8") standing for its class.
+    const cls = at > 0 ? normalizeComputeClass(rest.slice(at + 1)) : undefined;
+    return cls
       ? { model: rest.slice(0, at), compute: { target: "network", computeClass: cls } }
       : { model: rest, compute: { target: "network", computeClass: "any" } };
   }

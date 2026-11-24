@@ -11,6 +11,15 @@ describe("network model ids", () => {
     expect(parseNetworkModel("network/me@home:1b")).toEqual({ model: "me@home:1b", computeClass: "any" });
     expect(parseNetworkModel("qwen3.5:9b")).toBeNull();
   });
+  it("reads a hardware tier suffix as its class (calls match by class, never by tier)", () => {
+    // The tier the Network page shows for a machine; before, "@gpu.c8" stayed in the model name and no agent matched.
+    expect(parseNetworkModel("network/qwen3-coder:30b@gpu.c8")).toEqual({ model: "qwen3-coder:30b", computeClass: "gpu" });
+    expect(parseNetworkModel("network/qwen3-coder:30b@gpu.c32")).toEqual({ model: "qwen3-coder:30b", computeClass: "gpu" });
+    expect(parseNetworkModel("network/qwen3.5:9b@apple.m.hi")).toEqual({ model: "qwen3.5:9b", computeClass: "apple" });
+    expect(parseNetworkModel("network/llama3:70b@gpu.dc80")).toEqual({ model: "llama3:70b", computeClass: "gpu.dc" });
+    expect(parseNetworkModel("network/glm-5.3@cloud")).toEqual({ model: "glm-5.3", computeClass: "cloud" });
+    expect(parseNetworkModel("network/m@gpu.c9")).toEqual({ model: "m@gpu.c9", computeClass: "any" });
+  });
   it("flattens OpenAI content parts to text", () => {
     expect(contentToText("hi")).toBe("hi");
     expect(contentToText([{ type: "text", text: "a" }, { type: "image_url", image_url: {} }, { type: "text", text: "b" }])).toBe("a\nb");

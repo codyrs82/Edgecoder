@@ -119,6 +119,23 @@ describe("status, region and models", () => {
     expect(a.modelsTotal).toBe(30);
   });
 
+  it("lists another person's home GPU host with no region, country, VRAM or LAN facts, masked, with its model", () => {
+    // What a plain Linux agent (clientType edgecoder-native) reports: no AGENT_REGION, no country, a
+    // demoted grant (the tier is the grant, not the claim). None of those gate the world view.
+    const gpuHost = facts("amd-5700xt", {
+      ownerAccountId: "acct-patrick", os: "linux", clientType: "edgecoder-native", region: null, countryCode: null,
+      computeClass: "gpu", tier: "gpu.c8", vramGb: undefined, models: ["qwen3-coder:30b"], activeModel: "qwen3-coder:30b", slots: 1,
+      sourceIp: undefined, lanAddresses: undefined
+    });
+    const v = toPublicWorld(world("c", "u", [facts("mine-mac", { ownerAccountId: "acct-cody" }), gpuHost]), [], "acct-cody", NOW);
+    const host = v.agents.find((a) => !a.mine)!;
+    expect(host).toMatchObject({ os: "linux", region: null, country: null, continent: null, computeClass: "gpu", tier: "gpu.c8", vramGb: null, models: ["qwen3-coder:30b"], status: "idle", slots: 1 });
+    expect(host.label).toMatch(/^lin-\u2022\u2022\u2022[0-9a-f]{4}$/);
+    expect(JSON.stringify(host)).not.toContain("amd-5700xt");
+    expect(v.models.map((m) => m.model)).toContain("qwen3-coder:30b");
+    expect(v.totals).toMatchObject({ agents: 2, online: 2 });
+  });
+
   it("counts models over online agents", () => {
     const v = toPublicWorld(world("c", "u", [facts("a", { models: ["x:1b", "y:2b"] }), facts("b", { models: ["x:1b"] })]), [], null, NOW);
     expect(v.models[0]).toEqual({ model: "x:1b", agents: 2, online: 2 });
