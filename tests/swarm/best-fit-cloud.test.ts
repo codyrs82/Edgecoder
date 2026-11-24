@@ -41,6 +41,21 @@ const botStep = (hints: Record<string, unknown> = {}) => describeJob(AGENTIC_LOO
 const cloudOf = (r: ReturnType<typeof bestFit>) => r.candidates.filter((c) => c.computeClass === "cloud").map((c) => c.model);
 const pick = (r: ReturnType<typeof bestFit>) => `${r.chosen?.model}@${r.chosen?.computeClass}`;
 
+describe("the cloud host as pool capacity (B4/B5, 2026-11-24)", () => {
+  it("takes a simple job when every other machine that fits is busy, and not while one is free", () => {
+    const q = describeJob(SIMPLE_QA, {});
+    expect(cloudOf(bestFit(q, smallNetwork(), DEFAULT_BEST_FIT_CONFIG))).toEqual([]);
+    const busy = smallNetwork();
+    for (const a of busy.agents) if (a.computeClass !== "cloud") a.freeSlots = 0;
+    busy.waitingByModel = { "qwen2.5-coder:7b": 6, "qwen3.5:9b": 4, "qwen2.5-coder:1.5b": 10 };
+    const r = bestFit(q, busy, DEFAULT_BEST_FIT_CONFIG);
+    expect(cloudOf(r)).toContain(FLASH);
+    expect(pick(r)).toBe(`${FLASH}@cloud`);
+    // Off is still off.
+    expect(cloudOf(bestFit(q, busy, cfgWith("off")))).toEqual([]);
+  });
+});
+
 describe("AUTO_CLOUD_MODELS", () => {
   it("unset or empty is all (the default); off is none; a comma list is only those (lower case, deduplicated)", () => {
     expect(DEFAULT_BEST_FIT_CONFIG.autoCloudModels).toBe("all");

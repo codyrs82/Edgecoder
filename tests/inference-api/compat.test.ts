@@ -137,6 +137,24 @@ describe("compatible routes", () => {
       expect(a.json()).toMatchObject({ type: "error", error: { type: "overloaded_error" } });
     });
 
+    it("answers an upstream 502/504 as a JSON 503 (Cloudflare would replace a 502 with its own page)", async () => {
+      const agentFailed: ChatBackend = async function* () {
+        throw new ChatBackendError("The machine running deepseek-v4.1-flash reported: empty_reply", 502);
+      };
+      const app = makeWith(agentFailed);
+      const o = await app.inject({ method: "POST", url: "/v1/chat/completions", headers: { authorization: "Bearer k" }, payload: { messages: [{ role: "user", content: "x" }] } });
+      expect(o.statusCode).toBe(503);
+      expect(o.headers["retry-after"]).toBe("2");
+      expect(o.json().error).toMatchObject({ type: "upstream_error", code: 503 });
+      expect(o.json().error.message).toContain("empty_reply");
+      const a = await app.inject({ method: "POST", url: "/v1/messages", headers: { "x-api-key": "k" }, payload: { messages: [{ role: "user", content: "x" }] } });
+      expect(a.statusCode).toBe(503);
+      const gw: ChatBackend = async function* () {
+        throw new ChatBackendError("gateway", 504);
+      };
+      expect((await makeWith(gw).inject({ method: "POST", url: "/v1/chat/completions", headers: { authorization: "Bearer k" }, payload: { messages: [{ role: "user", content: "x" }] } })).statusCode).toBe(503);
+    });
+
     it("a streamed call waiting for its first piece sends SSE keepalive comments, then the error event", async () => {
       const app = makeWith(busy(250), 40);
       const o = await app.inject({ method: "POST", url: "/v1/chat/completions", headers: { authorization: "Bearer k" }, payload: { stream: true, messages: [{ role: "user", content: "x" }] } });

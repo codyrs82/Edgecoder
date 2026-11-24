@@ -18,9 +18,16 @@
  *    unload thrash); best-fit adds a cold-load wait for agents that would have to load M.
  *  - Refusals: an agent that hands a call back for memory ("memory_..." errors) gets no more calls
  *    for that model for REFUSAL_COOLDOWN_MS: work is never pushed onto an agent that said no.
- *  - Circuit breaker: CIRCUIT_FAILURES consecutive failures or timeouts within CIRCUIT_WINDOW_MS
- *    open the agent's circuit for a cool-down (60 s, doubling per trip up to 10 min); no work of
- *    any kind is dispatched to it meanwhile. A success closes it and resets the doubling.
+ *  - Circuit breaker: consecutive failures or timeouts within CIRCUIT_WINDOW_MS (CIRCUIT_FAILURES,
+ *    more for a many-slot host: half its slots, up to CIRCUIT_MAX_FAILURES, so one upstream burst
+ *    across a 16-slot cloud host's parallel calls does not trip it) open the agent's circuit for a
+ *    cool-down (60 s, doubling per trip up to CIRCUIT_MAX_COOLDOWN_MS); no work of any kind is
+ *    dispatched to it meanwhile, and best fit does not place on it. A failure reported while the
+ *    circuit is open (a call it held from before) does not count again. After the cool-down the
+ *    circuit is half open: one call at a time (the probe). The probe's success closes it and resets
+ *    the doubling; its failure opens it again at once for the next, longer cool-down. A trip count
+ *    quiet for CIRCUIT_TRIP_RESET_MS after its cool-down starts over. Listeners (onCircuitTrip) hear
+ *    each trip, so calls waiting for the agent can go elsewhere at once.
  *
  * Agents that report no telemetry (older releases) are admitted as before.
  */
@@ -36,9 +43,13 @@ export const PENDING_LOAD_MS = 30_000;
 /** No calls for a model an agent refused for memory, for this long. */
 export const REFUSAL_COOLDOWN_MS = 60_000;
 export const CIRCUIT_FAILURES = 3;
+/** The most consecutive failures any host needs to trip (a 16-slot host needs 8). */
+export const CIRCUIT_MAX_FAILURES = 8;
 export const CIRCUIT_WINDOW_MS = 5 * 60_000;
 export const CIRCUIT_BASE_COOLDOWN_MS = 60_000;
-export const CIRCUIT_MAX_COOLDOWN_MS = 10 * 60_000;
+export const CIRCUIT_MAX_COOLDOWN_MS = 5 * 60_000;
+/** A tripped agent quiet this long after its cool-down starts its doubling over. */
+export const CIRCUIT_TRIP_RESET_MS = 15 * 60_000;
 
 interface MemoryRecord {
   t: MemoryTelemetry;
@@ -65,6 +76,27 @@ interface Circuit {
   failures: number[];
   trips: number;
   openUntilMs: number;
+  /** When it last opened (0: never). */
+  openedAtMs: number;
+}
+
+/** Parallel model slots of an agent, for its trip threshold (set by the coordinator: dispatch.ts agentLoadReport). */
+let slotsOf: (agentId: string) => number | undefined = () => undefined;
+export function setCircuitSlotsLookup(fn: (agentId: string) => number | undefined): void {
+  slotsOf = fn;
+}
+
+/** Consecutive failures that trip this agent's circuit: CIRCUIT_FAILURES, or half its slots (at most CIRCUIT_MAX_FAILURES). */
+export function circuitThreshold(agentId: string): number {
+  const slots = slotsOf(agentId) ?? 1;
+  return Math.max(CIRCUIT_FAILURES, Math.min(CIRCUIT_MAX_FAILURES, Math.ceil(slots / 2)));
+}
+
+const tripListeners = new Set<(agentId: string, openUntilMs: number) => void>();
+/** Hear each trip (the circuit just opened). Returns a function that stops listening. */
+export function onCircuitTrip(fn: (agentId: string, openUntilMs: number) => void): () => void {
+  tripListeners.add(fn);
+  return () => tripListeners.delete(fn);
 }
 
 const memory = new Map<string, MemoryRecord>();
@@ -214,6 +246,25 @@ export function noteDispatched(agentId: string, model: string | undefined, nowMs
   pend.set(model, [...(pend.get(model) ?? []), nowMs]);
 }
 
+/** Cooled down after a trip, no success since, not yet quiet long enough to start over. */
+function halfOpen(c: Circuit | undefined, nowMs: number): boolean {
+  return !!c && c.trips > 0 && c.openUntilMs > 0 && nowMs >= c.openUntilMs && nowMs - c.openUntilMs < CIRCUIT_TRIP_RESET_MS;
+}
+
+function trip(agentId: string, c: Circuit, nowMs: number): void {
+  c.trips += 1;
+  c.openedAtMs = nowMs;
+  c.openUntilMs = nowMs + Math.min(CIRCUIT_MAX_COOLDOWN_MS, CIRCUIT_BASE_COOLDOWN_MS * 2 ** (c.trips - 1));
+  c.failures = [];
+  for (const fn of tripListeners) {
+    try {
+      fn(agentId, c.openUntilMs);
+    } catch {
+      // a listener's failure never blocks the breaker
+    }
+  }
+}
+
 /** An agent's result: success closes its circuit; failures and timeouts count toward opening it. */
 export function noteAgentOutcome(agentId: string, ok: boolean, nowMs = Date.now()): void {
   let c = circuits.get(agentId);
@@ -222,16 +273,21 @@ export function noteAgentOutcome(agentId: string, ok: boolean, nowMs = Date.now(
       c.failures = [];
       c.trips = 0;
       c.openUntilMs = 0;
+      c.openedAtMs = 0;
     }
     return;
   }
-  if (!c) circuits.set(agentId, (c = { failures: [], trips: 0, openUntilMs: 0 }));
-  c.failures = [...c.failures.filter((at) => nowMs - at <= CIRCUIT_WINDOW_MS), nowMs];
-  if (c.failures.length >= CIRCUIT_FAILURES) {
-    c.trips += 1;
-    c.openUntilMs = nowMs + Math.min(CIRCUIT_MAX_COOLDOWN_MS, CIRCUIT_BASE_COOLDOWN_MS * 2 ** (c.trips - 1));
-    c.failures = [];
+  if (!c) circuits.set(agentId, (c = { failures: [], trips: 0, openUntilMs: 0, openedAtMs: 0 }));
+  // Already open: a call it held from before the trip (or a wait the open circuit itself caused) is not a new failure.
+  if (nowMs < c.openUntilMs) return;
+  // Half open: the probe failed, so the circuit opens again now, for longer.
+  if (halfOpen(c, nowMs)) return trip(agentId, c, nowMs);
+  if (c.trips > 0 && c.openUntilMs > 0 && nowMs - c.openUntilMs >= CIRCUIT_TRIP_RESET_MS) {
+    c.trips = 0;
+    c.openUntilMs = 0;
   }
+  c.failures = [...c.failures.filter((at) => nowMs - at <= CIRCUIT_WINDOW_MS), nowMs];
+  if (c.failures.length >= circuitThreshold(agentId)) trip(agentId, c, nowMs);
 }
 
 /** A result error that is the agent saying no for memory (not a failure of the agent). */
@@ -245,8 +301,9 @@ export function noteAgentResult(agentId: string, model: string | undefined, ok: 
     noteRefusal(agentId, model, nowMs);
     return;
   }
-  // A call the agent declined before running it (too long for its window, a frontier model): neutral.
-  if (!ok && typeof error === "string" && /^(context_too_long|frontier_models_are_not_network_work)/.test(error)) return;
+  // A call the agent declined before running it (too long for its window, a frontier model), or one
+  // whose output cap ended inside the model's reasoning (the caller's max_tokens, src/cloud-host/backend.ts): neutral.
+  if (!ok && typeof error === "string" && /^(context_too_long|frontier_models_are_not_network_work|reasoning_only)/.test(error)) return;
   noteAgentOutcome(agentId, ok, nowMs);
 }
 
@@ -256,9 +313,25 @@ export function circuitOpen(agentId: string, nowMs = Date.now()): boolean {
   return !!c && nowMs < c.openUntilMs;
 }
 
-export function circuitState(agentId: string, nowMs = Date.now()): { open: boolean; openUntilMs: number | null; trips: number; recentFailures: number } {
+/** Half open (cooled down after a trip, no success yet): it takes one call at a time, the probe. */
+export function circuitHalfOpen(agentId: string, nowMs = Date.now()): boolean {
+  return halfOpen(circuits.get(agentId), nowMs);
+}
+
+/** No new call for the agent now: its circuit is open, or half open with its probe call running (`held`: calls it holds). */
+export function circuitBlocks(agentId: string, held: number, nowMs = Date.now()): boolean {
+  return circuitOpen(agentId, nowMs) || (held > 0 && circuitHalfOpen(agentId, nowMs));
+}
+
+/** The circuit was open at some point since `sinceMs` (a wait for the agent then was the breaker's doing, not the agent's). */
+export function circuitOpenSince(agentId: string, sinceMs: number, nowMs = Date.now()): boolean {
   const c = circuits.get(agentId);
-  return { open: circuitOpen(agentId, nowMs), openUntilMs: c && nowMs < c.openUntilMs ? c.openUntilMs : null, trips: c?.trips ?? 0, recentFailures: c?.failures.filter((at) => nowMs - at <= CIRCUIT_WINDOW_MS).length ?? 0 };
+  return !!c && c.openUntilMs > 0 && c.openUntilMs > sinceMs && c.openedAtMs <= nowMs;
+}
+
+export function circuitState(agentId: string, nowMs = Date.now()): { open: boolean; halfOpen: boolean; openUntilMs: number | null; trips: number; recentFailures: number } {
+  const c = circuits.get(agentId);
+  return { open: circuitOpen(agentId, nowMs), halfOpen: halfOpen(c, nowMs), openUntilMs: c && nowMs < c.openUntilMs ? c.openUntilMs : null, trips: c?.trips ?? 0, recentFailures: c?.failures.filter((at) => nowMs - at <= CIRCUIT_WINDOW_MS).length ?? 0 };
 }
 
 /**
@@ -274,6 +347,6 @@ export function pruneMemoryAdmission(nowMs = Date.now()): void {
   for (const [id, r] of memory) if (nowMs - r.atMs > 6 * 60 * 60_000) memory.delete(id);
   for (const id of pendingLoads.keys()) prunePending(id, nowMs);
   for (const [k, until] of refusals) if (nowMs >= until) refusals.delete(k);
-  for (const [id, c] of circuits) if (nowMs >= c.openUntilMs && c.failures.every((at) => nowMs - at > CIRCUIT_WINDOW_MS)) circuits.delete(id);
+  for (const [id, c] of circuits) if (nowMs >= c.openUntilMs && !halfOpen(c, nowMs) && c.failures.every((at) => nowMs - at > CIRCUIT_WINDOW_MS)) circuits.delete(id);
 }
 setInterval(() => pruneMemoryAdmission(), 60_000).unref?.();

@@ -103,6 +103,21 @@ Provider errors: 429 and 5xx are retried with exponential backoff (Retry-After h
 `cloud_provider_error: …` / `cloud_provider_rate_limited: …` and the coordinator may give it to
 another host. A prompt longer than the model's window fails as `context_too_long`.
 
+Reasoning: GLM-5.3 and DeepSeek V4.1 Flash stream their thinking (`reasoning_content`) before the
+answer, and the provider counts it as output. A call whose `max_tokens` runs out inside the
+reasoning fails as `reasoning_only: … send a larger max_tokens` (HTTP 400 to the caller): it is
+the request's limit, so the coordinator neither retries it elsewhere nor counts it against the
+host's circuit breaker, and the host still adds what the provider billed to its spend guard.
+`CLOUD_HOST_REASONING_EFFORT` (unset: the provider's default) is sent as `reasoning_effort` with
+every call, e.g. `low`, or `none` where the provider can turn thinking off for the model.
+
+Circuit breaker (coordinator, `memory-admission.ts`): a host trips after consecutive failed calls,
+3 or half its slots (8 for a 16-slot cloud host). While open it gets no placements: a named call
+whose only hosts are cooling down is answered at once with `503 no_capacity` (`reason:
+cooling_down`, Retry-After), Auto places elsewhere, and calls already waiting for it are re-placed
+or refunded when it trips. After the cool-down (60 s, doubling to 5 min) it takes one call at a
+time; a success closes the circuit, a failure opens it again.
+
 ## Who may run one
 
 A cloud host spends the platform's provider budget and is paid at the cost-plus price, so the

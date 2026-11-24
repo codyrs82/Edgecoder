@@ -16,7 +16,7 @@ import { paramsB } from "../../../inference-api/auto-route.js";
 import { contextNeeded } from "../../../inference-api/ollama.js";
 import type { ChatMessage } from "../../../inference-api/types.js";
 import { agentContextWindow, agentLoadReport, freeModelSlots, preferAgent } from "../dispatch.js";
-import { agentUnavailable, memoryAdmits, modelLoadedOn } from "../memory-admission.js";
+import { agentUnavailable, circuitBlocks, circuitOpen, circuitState, memoryAdmits, modelLoadedOn, onCircuitTrip, setCircuitSlotsLookup } from "../memory-admission.js";
 import { AUTO_MODEL_ID } from "../../../inference-api/auto-route.js";
 import { cleanHints, describeJob, type JobDescriptor } from "../../../inference-api/job-descriptor.js";
 import type { BestFitResult } from "../best-fit.js";
@@ -68,7 +68,7 @@ import { closeUnreservedBillingRow } from "../billing-restore.js";
 import { registerInferenceCancelRoute, requesterCancelled } from "../inference-cancel.js";
 import { recordMeshWork } from "../world-activity.js";
 import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
-import { armAutoReplace } from "../auto-replace.js";
+import { armAutoReplace, replaceAutoNow } from "../auto-replace.js";
 import { freeLocalHolders, LOCALITY_PREFER_MS, nearestFreeHolder, peerWithFreeCapacity } from "../locality.js";
 
 // ── Network inference (chat completions on agents' local models, streamed) ──────────────────
@@ -144,7 +144,7 @@ export function judgeInferenceReply(
 export const INFERENCE_CLAIM_TIMEOUT_MS = CC.INFERENCE_CLAIM_TIMEOUT_MS;
 export const NO_CAPACITY_RETRY_AFTER_SEC = 15;
 const NO_CAPACITY_KEEP_MS = 10 * 60_000;
-type NoCapacityReason = "busy" | "none_in_class" | "draining";
+type NoCapacityReason = "busy" | "none_in_class" | "draining" | "cooling_down";
 const noCapacity = new Map<string, { accountId: string; subtaskId: string; atMs: number; reason: NoCapacityReason; computeClass?: string; model?: string; coordinatorUrl?: string }>();
 
 /** Granted classes of the online, unblacklisted agents that hold `model` (one entry per agent), free of a reservation unless `includeReserved`. */
@@ -187,7 +187,7 @@ export function inferenceCancelledForCapacity(taskId: string): boolean {
  * holds it: that call runs and is settled as usual. Removal from the queue is synchronous and only
  * of an unclaimed item, so a claim racing the cancel either got it first or finds nothing.
  */
-export async function cancelUnclaimedInference(taskId: string, subtaskId: string, draining?: { peerUrl: string | null }): Promise<boolean> {
+export async function cancelUnclaimedInference(taskId: string, subtaskId: string, draining?: { peerUrl: string | null }, why?: "cooling_down"): Promise<boolean> {
   const timer = claimDeadlines.get(subtaskId);
   if (timer) clearTimeout(timer);
   claimDeadlines.delete(subtaskId);
@@ -197,7 +197,7 @@ export async function cancelUnclaimedInference(taskId: string, subtaskId: string
   const usage = usagePending.get(taskId);
   const gap = usage?.model && usage.computeClass ? capacityGap(usage.computeClass as ComputeClassId, holderClasses(usage.model)) : "busy";
   // Draining: the caller is told so, with a peer to send the call to (it was refunded here in full).
-  const reason: NoCapacityReason = draining ? "draining" : gap === "none_in_class" ? "none_in_class" : "busy";
+  const reason: NoCapacityReason = draining ? "draining" : why ?? (gap === "none_in_class" ? "none_in_class" : "busy");
   noCapacity.set(taskId, { accountId, subtaskId, atMs: Date.now(), reason, ...(usage?.computeClass ? { computeClass: usage.computeClass } : {}), ...(usage?.model ? { model: usage.model } : {}), ...(draining?.peerUrl ? { coordinatorUrl: draining.peerUrl } : {}) });
   // A failed result from the coordinator (like a lease failure), so the subtask is settled everywhere.
   queue.complete({ subtaskId, taskId, agentId: "coordinator", ok: false, output: "", error: "no_capacity", durationMs: 0 });
@@ -206,9 +206,56 @@ export async function cancelUnclaimedInference(taskId: string, subtaskId: string
   orderBook.removeBid(taskId);
   // Nothing ran, so nothing was spent: the refund is the whole reserve (refundTaskSubmit is idempotent).
   await refundTaskSubmit(taskId);
-  coordinatorApp.log.warn({ taskId, subtaskId, claimTimeoutMs: INFERENCE_CLAIM_TIMEOUT_MS }, "inference_no_capacity_cancelled");
+  coordinatorApp.log.warn({ taskId, subtaskId, reason, claimTimeoutMs: INFERENCE_CLAIM_TIMEOUT_MS }, "inference_no_capacity_cancelled");
   return true;
 }
+
+/**
+ * B4 (network test 2026-11-24: calls sat 45 s behind cloud-fireworks-1's open circuit): an agent that
+ * could take `subtask` now or soon, other than those whose circuit blocks them. A busy holder
+ * counts (the call waits for its slot as usual).
+ */
+function usableHolderExists(subtask: Subtask, claims: Map<string, { all: number; inference: number }>, nowMs: number): boolean {
+  const model = subtask.requestedModel ?? "";
+  const excluded = new Set(queue.excludedAgents(subtask.id));
+  for (const [id, cap] of agentCapabilities) {
+    if (excluded.has(id) || !agentHasModel(cap, model) || activeBlacklistRecord(id) || agentSocketLost(id, nowMs)) continue;
+    if (cap.lastSeenMs !== undefined && nowMs - cap.lastSeenMs > 3 * 60_000) continue;
+    if (cap.hostApproved === false || reservations.isHeld(id, nowMs)) continue;
+    if (circuitBlocks(id, claims.get(id)?.all ?? 0, nowMs)) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * B4: `agentId`'s circuit just opened. Its waiting Auto calls are re-placed now (auto-replace.ts),
+ * and network calls it could have served that no other agent can take any more are ended now with
+ * a retryable no_capacity ("cooling_down", refunded in full) instead of waiting out the claim bound.
+ * Calls another holder can take stay queued. Reserved and own-machine calls keep their bound.
+ */
+export async function moveCallsOffTrippedAgent(agentId: string, nowMs = Date.now()): Promise<{ replaced: number; cancelled: number }> {
+  const replaced = await replaceAutoNow(agentId, nowMs);
+  const cap = agentCapabilities.get(agentId);
+  let cancelled = 0;
+  if (!cap) return { replaced, cancelled };
+  const claims = queue.activeClaims();
+  for (const c of queue.inferenceCalls()) {
+    if (c.claimedBy) continue;
+    const st = queue.getSubtask(c.subtaskId);
+    if (!st?.requestedModel || st.projectMeta.reservationId || st.projectMeta.onlyAccountId) continue;
+    if (!agentHasModel(cap, st.requestedModel) || usableHolderExists(st, claims, nowMs)) continue;
+    if (await cancelUnclaimedInference(st.taskId, st.id, undefined, "cooling_down").catch(() => false)) cancelled++;
+  }
+  if (replaced || cancelled) coordinatorApp.log.warn({ agentId, replaced, cancelled }, "circuit_open_calls_moved");
+  return { replaced, cancelled };
+}
+
+// The breaker's trip threshold scales with the agent's slots, and a trip moves its waiting calls.
+setCircuitSlotsLookup((id) => agentLoadReport(id)?.slots);
+onCircuitTrip((agentId) => {
+  queueMicrotask(() => void moveCallsOffTrippedAgent(agentId).catch((err) => coordinatorApp.log.error({ err, agentId }, "circuit_open_move_failed")));
+});
 
 /**
  * #524 (restart under load, 2026-11-24): right after a restart no agent has registered yet (they come
@@ -254,8 +301,8 @@ export async function cancelUnclaimedForDrain(peerUrl: string | null = null): Pr
 
 /** A failed call is given to another agent only with at least this much of its time left. */
 export const INFERENCE_RETRY_MIN_LEFT_MS = 15_000;
-/** Failures another agent would only repeat (the request itself is bad). */
-const NOT_RETRYABLE = /^(bad inference request|no model requested)/;
+/** Failures another agent would only repeat (the request itself is bad, or its max_tokens ends inside the reasoning). */
+const NOT_RETRYABLE = /^(bad inference request|no model requested|reasoning_only)/;
 /** Subtasks already given to another agent once (each call is retried at most once). */
 const retriedInference = new Map<string, number>();
 setInterval(() => {
@@ -380,10 +427,11 @@ export function waitingBound(holderIds: string[], nowMs = Date.now()): number {
   return Math.max(16, Math.min(512, slots * WAITING_PER_SLOT));
 }
 
-function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: string) => { send: (b: unknown) => unknown } } }, c?: { reason: NoCapacityReason; computeClass?: string; model?: string; coordinatorUrl?: string }) {
+function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: string) => { send: (b: unknown) => unknown } } }, c?: { reason: NoCapacityReason; computeClass?: string; model?: string; coordinatorUrl?: string; retryAfterSec?: number }) {
   const noneInClass = c?.reason === "none_in_class";
   const draining = c?.reason === "draining";
-  const retryAfterSec = draining ? 1 : NO_CAPACITY_RETRY_AFTER_SEC;
+  const coolingDown = c?.reason === "cooling_down";
+  const retryAfterSec = draining ? 1 : coolingDown && c?.retryAfterSec !== undefined ? c.retryAfterSec : NO_CAPACITY_RETRY_AFTER_SEC;
   return reply
     .code(503)
     .header("retry-after", String(retryAfterSec))
@@ -394,6 +442,8 @@ function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: 
       ...(c?.coordinatorUrl ? { coordinatorUrl: c.coordinatorUrl } : {}),
       message: draining
         ? "This coordinator is restarting; the call had not started and nothing was charged. Send it again (to the coordinator named, if any)."
+        : coolingDown
+        ? `The machine serving ${c?.model ?? "this model"} is cooling down after failed calls; nothing was charged. Send it again shortly or pick another model.`
         : noneInClass
         ? `No ${c?.computeClass} machine runs ${c?.model ?? "this model"} right now; nothing was charged.`
         : `No agent could take this call within ${Math.round(INFERENCE_CLAIM_TIMEOUT_MS / 1000)} s; nothing was charged.`,
@@ -657,6 +707,16 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       }
       // Just restarted, agents not back yet: a known model's call waits for them (bounded, refunded if none comes).
       if (!holders.some(([id]) => !reservations.isHeld(id)) && !(holders.length === 0 && inStartupGrace() && knownModel(body.model))) return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
+    }
+    // B4: every machine holding the model has its circuit open (cooling down after failures): say so
+    // now, retryable, rather than queue the call for the claim bound behind the breaker.
+    if (!reservationId && !onlyAccountId && holders.length > 0) {
+      const free = holders.filter(([id]) => !reservations.isHeld(id));
+      const nowMs = Date.now();
+      if (free.length > 0 && free.every(([id]) => circuitOpen(id, nowMs))) {
+        const soonest = Math.min(...free.map(([id]) => circuitState(id, nowMs).openUntilMs ?? nowMs));
+        return noCapacityReply(reply as any, { reason: "cooling_down", model: body.model, retryAfterSec: Math.max(1, Math.min(NO_CAPACITY_RETRY_AFTER_SEC * 4, Math.ceil((soonest - nowMs) / 1000))) });
+      }
     }
     // Backpressure: network calls wait for a slot up to a bound (waitingBound); past it the
     // caller hears no_capacity at once (nothing reserved or charged) instead of piling more onto

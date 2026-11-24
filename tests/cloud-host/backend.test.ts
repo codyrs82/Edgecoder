@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { backoffMs, CloudApiError, probeKey, remoteChat, retryAfterMs, type RemoteBackendConfig } from "../../src/cloud-host/backend.js";
+import { backoffMs, CloudApiError, probeKey, REASONING_ONLY_ERROR, remoteChat, retryAfterMs, type RemoteBackendConfig } from "../../src/cloud-host/backend.js";
 import type { OllamaPiece } from "../../src/inference-api/ollama.js";
 import { startFakeProvider, streamReply, type FakeProvider } from "./fake-provider.js";
 
@@ -97,6 +97,39 @@ describe("remoteChat", () => {
     const err = await collect(remoteChat(cfg(fake.url), req)).catch((e) => e);
     expect(err).toBeInstanceOf(CloudApiError);
     expect(err.message).toContain("upstream reset");
+  });
+
+  it("a reply that is reasoning only (max_tokens spent thinking) is reasoning_only, with the provider's counts", async () => {
+    fake = await startFakeProvider([
+      {
+        stream: [
+          { choices: [{ index: 0, delta: { reasoning_content: "Let me think about" } }] },
+          { choices: [{ index: 0, delta: { reasoning_content: " this carefully" } }] },
+          { choices: [{ index: 0, delta: {}, finish_reason: "length" }] },
+          { choices: [], usage: { prompt_tokens: 20, completion_tokens: 16 } },
+          "[DONE]"
+        ]
+      }
+    ]);
+    const err = await collect(remoteChat(cfg(fake.url), { ...req, maxTokens: 16 })).catch((e) => e);
+    expect(err).toBeInstanceOf(CloudApiError);
+    expect(err.message.startsWith(`${REASONING_ONLY_ERROR}: `)).toBe(true);
+    expect(err.message).toContain("max_tokens 16");
+    expect(err.status).toBe(400);
+    expect(err.usage).toEqual({ promptTokens: 20, outputTokens: 16 });
+    // Not retried: it would only think again.
+    expect(fake.requests).toHaveLength(1);
+  });
+
+  it("reasoning before the answer is not sent on as text; reasoning_effort only when configured", async () => {
+    fake = await startFakeProvider([
+      { stream: [{ choices: [{ index: 0, delta: { reasoning_content: "hmm" } }] }, { choices: [{ index: 0, delta: { content: "42" }, finish_reason: "stop" }] }, "[DONE]"] }
+    ]);
+    const pieces = await collect(remoteChat(cfg(fake.url, { reasoningEffort: "low" }), req));
+    expect(pieces.filter((p) => "delta" in p)).toEqual([{ delta: "42" }]);
+    expect(fake.requests[0].body.reasoning_effort).toBe("low");
+    await collect(remoteChat(cfg(fake.url), req));
+    expect(fake.requests[1].body).not.toHaveProperty("reasoning_effort");
   });
 
   it("probeKey reports whether the key is accepted", async () => {
