@@ -178,7 +178,7 @@ User-facing web application serving the signup/login flow, chat interface, code 
 - cSat wallet with BTC/Lightning purchase intents
 - User-selectable themes (Midnight, Emerald, Light Pro)
 - Coordinator operations dashboard (node approval, model rollouts, diagnostics)
-- iOS dashboard with contribution and network aggregate views
+- Account and network summary API for the iOS app (`/ios/dashboard`); the app only views it and does not host or run jobs
 
 ### Coordinator (port 4301)
 

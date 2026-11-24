@@ -135,8 +135,8 @@ coordinator shows a banner and disables the form.
   on the web only; there is no account-scoped list for the desktop or iOS.
 - **Order book on desktop and iOS**: they show the price board; the full exchange stays on the
   web.
-- **iOS payout destination** is shown read-only; setting or changing it (with its emailed code)
-  stays in the portal and the desktop app for now.
+- **Payout destination** is not part of the iOS app, which does not earn or pay out; setting or
+  changing it (with its emailed code) is done in the portal and the desktop app.
 - **Fee wording follows the coordinator.** The screens read `purchaseFeeBps` and `networkFeeBps`
   and fall back to 0 and 500 (the owner's defaults) only when an older coordinator does not
   report them.
