@@ -73,6 +73,8 @@ as they join, plus federated ecash (Fedimint) for prepaid balances if the regula
    quorum issuance exist (site-docs/operations/coordinator-federation.md). What is missing for
    independent operators: per-operator ledgers that reconcile with each other instead of one shared
    Postgres, anchoring by each operator, and admission of operators run by people other than EdgeCoder.
+   A design for regional databases and a hash-chained ledger replicated between coordinators is
+   being drafted (**planned**, not built): today there is still one shared Postgres.
 3. **Ecash** (docs/ROADMAP.md): Cashu or Fedimint for small, frequent, private payments, opt-in, since it
    trusts a mint.
 

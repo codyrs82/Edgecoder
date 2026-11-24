@@ -26,7 +26,7 @@ that folder on Auto compute.
 | Name, Role | The role is shown next to the name. |
 | Instructions | Its job, added to the agent's instructions on every run. |
 | Memory | Notes the bot saves for itself (up to 8 KB). You can edit or clear them. |
-| Project folder | It reads and edits files only there. |
+| Project folder | It reads and edits files only there. The form suggests `~/EdgeCoder/<name>`. A missing folder inside your home folder is created when you save; a folder anywhere else must already exist. |
 | Schedule | `every N minutes/hours/days`, `hourly`, `daily`, `daily at HH:MM`, or a cron expression such as `0 9 * * 1-5`. At most every 5 minutes; local time. |
 | Daily budget | cSats a day (default 100). Runs on this computer are free. |
 | Tools | Reading is always on. Optional: Edit files, Run commands, Commit and push. |
@@ -51,6 +51,12 @@ again. Claude leads the run, and the bot's compute does the rest. A run started 
 never uses the key. Adding a GitHub trigger turns the switch off. The switch is set only in the
 app; on the web you can see whether it is on and answer the bot's question. The bot's view shows
 today's spend on your key next to its cSats. See [Frontier models on your own key](https://github.com/codyrs82/Edgecoder/blob/main/docs/frontier-keys.md#bots-and-your-key).
+
+**Where each reply ran.** Under each reply, on the desktop and on the web, a line shows the model,
+the kind of machine (for example a network GPU or this computer), the number of calls and the
+cSats. **Runs** and **Last run** name the model and machine class that ran, instead of
+`Network · best fit`, once the machine reports them. A run that fails shows `Couldn't run` with the
+error's own words (up to 200 characters); hover it for the full text.
 
 Desktop bots' settings and history stay on the machine (`~/.edgecoder/bots.json` and
 `~/.edgecoder/bots/<id>/`).

@@ -17,11 +17,15 @@ The compute picker above the message box lists:
 | **Default → Auto** | The network's best fit: the coordinator picks the model and the machine. When it can't, EdgeCoder's default chat model answers. | Network work is billed in cSats |
 | **Default → EdgeCoder · *model*** | EdgeCoder's own default chat models. | Free |
 | **My machines · free** | Models on machines signed in to your account. | Free |
-| **Network · billed in cSats** | A specific model on the network, optionally on one class of hardware. | Per token, in cSats |
+| **Network · billed in cSats** | A specific model on the network, optionally on one class of hardware. Cloud models are listed here too, marked **Cloud · recommended** (DeepSeek V4.1 Flash) or **Cloud · premium** (GLM-5.3) and **hosted model API**: a host forwards them to a hosted model provider. | Per token, in cSats |
 | **Reserved** | A machine you reserved (see [Using network compute](/guide/using-compute#reservations)). | Prepaid by the reservation |
 
 Each reply says where it ran and, for network work, what it cost. If you run out of cSats, the chat
 says so; see [Buy cSats](/guide/buy-csats).
+
+You can paste, drop or attach images in the message box, but no chat model on the network reads
+images yet. The chat says **This model can't read images** and keeps them in the box without
+sending them. To show images to a coding agent, use **Code** (below).
 
 ## Searching the web
 
@@ -40,7 +44,12 @@ More in [Bots, cloud bots and web search](/guide/bots#web-search).
 
 ## Your conversations
 
-Conversations are listed in the sidebar and are titled from your first message. You can delete one
+The sidebar has a **Chat / Code** switch at the top. **Chat** lists your web chats. **Code** lists
+the coding sessions on computers running the EdgeCoder desktop app, grouped by project, newest
+first, each with the computer's name. A session runs on that computer, not in your browser. See
+[Code on edgecoder.io](/guide/ios-app#code-on-edgecoder-io).
+
+Conversations are titled from your first message. You can delete one
 at any time; deleting a conversation deletes its messages. Messages can be up to 32,000 characters; the most recent part of
 a long conversation is sent to the model as context.
 

@@ -76,6 +76,16 @@ While it runs:
   `qwen3-coder:30b · Datacenter GPU 2×A16 · Chicago · read 24.8k tok in 81 s · wrote 312 tok in 6.5 s · 3.4 cSats`.
   The machine is named by its masked label (`lin-•••3f2a`), or as yours when it is your own;
   local runs say `This computer (Apple M1 Max)`. `/status` shows the last call in detail.
+- **Long replies**: a reply can make up to 40 model calls; if it runs out it ends with
+  `Stopped after 40 steps without finishing. Reply "continue" to pick up where it left off.`
+- **Cost check**: on a paid lead (a network or cloud model, or your own frontier key), a reply that
+  has spent `EDGECODER_REPLY_COST_ASK_CSATS` (150 cSats) or `EDGECODER_REPLY_COST_ASK_USD` ($0.50)
+  pauses before its next model call and asks like an approval (`cost_check`): yes keeps going
+  (and asks again after the same amount more), no stops the turn. No answer in 10 minutes stops
+  it. Free models and Auto never ask (`src/apps/ide/cost-guard.ts`). Switching to a cheaper model
+  from the card is in the desktop app only.
+- **Re-reads**: on a paid lead, reading a file that hasn't changed since an earlier read still in
+  context returns a short pointer instead of the whole file (`src/apps/ide/turn-waste.ts`).
 
 ### Permission modes
 

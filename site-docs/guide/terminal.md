@@ -51,6 +51,13 @@ type at any time: during a reply, Enter queues your message. **Esc** (or `/stop`
 `/undo` reverts the files the last reply changed. Each turn ends with a line saying which model ran
 it, where, how long it took and what it cost.
 
+A reply can make up to 40 model calls. If it runs out, it ends with `Stopped after 40 steps without
+finishing`; reply `continue` to pick up where it left off. On a paid model (a network or cloud
+model, or your own frontier key), a reply that spends 150 cSats (or $0.50 on your key) pauses and
+asks before its next call, as an approval: yes keeps going, no stops. Long histories on a paid
+model are summarized once they pass 80,000 tokens. The limits are the same as in the
+[desktop app](/guide/ide-integration#long-and-paid-replies).
+
 ## Approvals and modes
 
 Before an edit the diff prints; before a command the command prints. Then it asks

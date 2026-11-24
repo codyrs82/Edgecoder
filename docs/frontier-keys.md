@@ -39,6 +39,11 @@ only when all of these hold:
 - for a shared session, the session was created by that account, and the message came from one of
   that account's clients.
 
+The signed-in account is checked with the coordinator. If that check can't get an answer (a slow
+coordinator, the agent reconnecting, or the machine busy compiling), the last confirmed account is
+kept for up to 10 minutes, so a running turn isn't cut off. A definite "signed out" ends it at once
+(`ACCOUNT_UNKNOWN_GRACE_MS` in `src/apps/ide/provider-server.ts`).
+
 If someone else signs in on this computer, your keys show as **belongs to another account**. They
 can be removed there but not used, until you sign back in.
 

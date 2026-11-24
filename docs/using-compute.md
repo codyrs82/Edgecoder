@@ -75,6 +75,8 @@ Auto picks a place per request (`src/inference-api/auto-route.ts`):
 
 If nothing fits, the request fails with a message asking you to install a coder model (7B or larger) on one of your machines or try again later. The hosted endpoint's `auto` works the same way without "this computer".
 
+The network leg can be the coordinator's best fit (model `auto`), which picks the model and the machine. Best fit uses a cloud model (`src/swarm/coordinator/best-fit.ts`; DeepSeek V4.1 Flash first, GLM-5.3 only when it is the only cloud fit or the job asks for `quality: best` at top-tier complexity) for top-tier jobs, or when no other machine meets the job's hard requirements (tools, context, price ceiling, size floor `minParamsB`). `AUTO_CLOUD_MODELS` on the coordinators narrows this or turns it `off`. When nothing fits, the coordinator's error says why: the size and tools the job needs and what is online, or the price ceiling and the cheapest fitting model. Details: [cloud-host.md](cloud-host.md#auto-routing).
+
 ## Reservations
 
 A reservation holds one machine of a class for a set time, so it works only for you. Make one on the **Compute** page under **Reserve a machine**:

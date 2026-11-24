@@ -26,8 +26,8 @@ Workers     Inference (4302)
 - **Inference Service** -- LLM-powered task decomposition and escalation. Breaks large prompts into subtasks.
 - **Control Plane** -- admin API for agent management, rollouts, network mode, cSat balances, and economy operations.
 - **Worker Runner** -- swarm agent that registers with a coordinator, pulls subtasks, executes code in a sandbox, and returns results.
-- **Desktop App** -- Tauri + Svelte desktop client (`desktop/`).
-- **iOS App** -- native Swift BLE proxy + WebView (`ios/`).
+- **Desktop App** -- Tauri + Svelte desktop client (`desktop/`): Chat and Code views, bots, models and the agent.
+- **iOS App** -- native SwiftUI client (`ios/`): chat, Code from your phone, bots, machines and the cSats wallet.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for a detailed walkthrough of data flows, mesh networking, and the cSat economy.
 
@@ -169,7 +169,9 @@ User-facing web application serving the signup/login flow, chat interface, code 
 - Email/password signup with email verification
 - SSO via Google and Microsoft 365 (OAuth 2.0)
 - Passkey (WebAuthn) enrollment and login
-- Chat interface that submits tasks to the coordinator
+- Chat interface that submits tasks to the coordinator, with a Chat / Code switch in the sidebar
+- Code page (`/portal/code`): drive coding sessions on computers running the desktop app (Code from your phone)
+- Bots page: desktop and cloud bots, with where each reply ran
 - Code review queue with approve/reject decisions
 - Human escalation handling for tasks that exceed swarm capacity
 - Node enrollment and token issuance
@@ -238,11 +240,15 @@ Swarm agent process that registers with a coordinator, enters a poll loop, pulls
 
 ### Desktop App
 
-Tauri + Svelte desktop client in `desktop/`. Packages the portal UI as a native application.
+Tauri + Svelte desktop client in `desktop/`, with its own UI (not the portal's). Chat and Code views
+(switch at the top of the sidebar), permission modes up to Full access, helper agents, your own
+frontier key, bots, model management, and the agent that connects this computer to the network.
+See [IDE integration](site-docs/guide/ide-integration.md).
 
 ### iOS App
 
-Native Swift BLE proxy + WebView in `ios/`. Acts as a swarm worker with BLE mesh support for local device-to-device task offloading.
+Native SwiftUI client in `ios/`: chat, Code mode (drives a coding session on one of your computers),
+bots, your machines, the cSats balance, and the network map. See [iOS app](site-docs/guide/ios-app.md).
 
 ## Deployment
 
