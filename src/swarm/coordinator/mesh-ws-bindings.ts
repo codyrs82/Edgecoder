@@ -85,6 +85,11 @@ export class MeshWsBindingTable<S extends BindableSocket = BindableSocket> {
     return b && b.authenticated && b.socket.readyState === 1 ? b.socket : null;
   }
 
+  /** Every binding (the graceful stop tells each agent to reconnect, then closes each connection). */
+  entries(): IterableIterator<[string, MeshWsBinding<S>]> {
+    return this.bindings.entries();
+  }
+
   heldCount(): number {
     let n = 0;
     for (const b of this.bindings.values()) if (b.held) n++;

@@ -1,5 +1,9 @@
 app = "edgecoder-seed"
 primary_region = "ord"
+# Graceful restart (src/swarm/coordinator/drain.ts): SIGTERM starts a drain; Fly waits up to
+# 35 s (COORDINATOR_DRAIN_MS 25 s + reconnect frames + exit) before killing the machine.
+kill_signal = "SIGTERM"
+kill_timeout = 35
 
 [processes]
   app = "node dist/cli/edgecoder.js all-in-one"

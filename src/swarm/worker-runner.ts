@@ -74,6 +74,7 @@ import { ModelControlAgent, type CurrentModelSettings } from "../model/remote-co
 import { createOllamaAdmin, diskSpace, ollamaModelsDir, registryModelSize } from "../model/remote-control/ollama-admin.js";
 import { remoteControlEnabled, resolveAllowlist } from "../model/remote-control/policy.js";
 import { MODEL_CONTROL_FRAME_TYPE } from "../model/remote-control/protocol.js";
+import { COORDINATOR_RECONNECT_FRAME_TYPE, CoordinatorReconnectState, verifyCoordinatorReconnectFrame } from "../mesh/coordinator-reconnect.js";
 import { BOT_CONTROL_FRAME_TYPE, botRelayMode } from "../common/bot-relay.js";
 import { BotRelayAgent, httpProviderClient } from "./bot-relay-agent.js";
 import { CODE_CONTROL_FRAME_TYPE, codeRelayMode } from "../common/code-relay.js";
@@ -1325,6 +1326,35 @@ function idleWait(ms: number): Promise<void> {
   });
 }
 
+// ── Coordinator restart (src/mesh/coordinator-reconnect.ts, src/swarm/coordinator/drain.ts) ──
+// A coordinator stopping for a deploy sends each agent a signed reconnect frame. The agent waits
+// the frame's jittered delay, registers again (the new instance knows nothing of it), and only
+// then reopens the mesh WebSocket, whose open republishes the relay snapshots and model state.
+const coordinatorReconnect = new CoordinatorReconnectState();
+function onCoordinatorReconnectFrame(message: unknown, coordinatorUrl: string, ws: { close: (code?: number, reason?: string) => void }): void {
+  let verified: { peerId: string; publicKeyPem: string } | null = null;
+  try {
+    verified = coordinator.url === coordinatorUrl ? coordinator.requireVerifiedIdentity().identity : null;
+  } catch {
+    verified = null;
+  }
+  const verdict = verifyCoordinatorReconnectFrame(message, { agentId: AGENT_ID, coordinator: verified });
+  if (!verdict.ok) {
+    console.warn(`[agent:${AGENT_ID}] reconnect frame refused: ${verdict.reason}`);
+    return;
+  }
+  const delayMs = coordinatorReconnect.accept(verdict.command);
+  if (delayMs === null) return;
+  console.log(`[agent:${AGENT_ID}] coordinator restarting (${verdict.command.reason}); registering again in ${delayMs}ms, then reconnecting`);
+  registeredWithUrl = null;
+  try {
+    ws.close(1000, "coordinator_reconnect");
+  } catch {
+    /* already closed */
+  }
+  setTimeout(() => wakeLoop(false), delayMs);
+}
+
 /** What /heartbeat answers (the fields the worker uses). */
 type HeartbeatReply = {
   ok?: boolean;
@@ -1355,9 +1385,16 @@ type HeartbeatReply = {
 
 function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
   let reconnectDelay = 1000;
+  /** How often the mesh socket is pinged; a missed pong by the next ping ends it (half-open sockets after a coordinator restart). */
+  const MESH_WS_PING_MS = 30_000;
   const MAX_RECONNECT_DELAY = 30_000;
 
   function connect(): void {
+    // A coordinator restart: wait until this agent has registered with the new instance.
+    if (coordinatorReconnect.pending()) {
+      setTimeout(connect, 500);
+      return;
+    }
     // Only to a coordinator that has proven its key (it follows URL changes on reconnect), and only
     // once registered: the coordinator admits the connection by this agent's signed bind.
     if (!registeredWithUrl || !coordinator.isVerified()) {
@@ -1375,7 +1412,30 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
     // Track which coordinator peerId this WS is registered against
     let registeredPeerId: string | null = null;
 
+    // Liveness: a coordinator that restarted behind Fly's proxy can leave this socket half-open
+    // (no close ever arrives), so the agent would never reconnect. Ping every 30 s; no pong by the
+    // next ping = dead: terminate, and the close handler reconnects.
+    let alive = true;
+    let liveness: ReturnType<typeof setInterval> | undefined;
+    ws.on("pong", () => {
+      alive = true;
+    });
     ws.on("open", () => {
+      alive = true;
+      liveness = setInterval(() => {
+        if (!alive) {
+          console.warn(`[agent:${AGENT_ID}] mesh WebSocket stopped answering pings: reconnecting`);
+          ws.terminate();
+          return;
+        }
+        alive = false;
+        try {
+          ws.ping();
+        } catch {
+          /* the close handler takes over */
+        }
+      }, MESH_WS_PING_MS);
+      liveness.unref?.();
       meshWsOpen = true;
       meshWsEpoch = openedInEpoch;
       console.log(`[agent:${AGENT_ID}] mesh WebSocket connected to ${coordinatorUrl}`);
@@ -1401,6 +1461,11 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
         // Fast dispatch: there is work; pull now (the pull decides what, if anything, we get).
         if (message && typeof message === "object" && message.type === "work_available" && !message.fromPeerId) {
           wakeLoop(true);
+          return;
+        }
+        // The coordinator is stopping (a deploy): register again after the delay, then reconnect.
+        if (message && typeof message === "object" && message.type === COORDINATOR_RECONNECT_FRAME_TYPE) {
+          onCoordinatorReconnectFrame(message, coordinatorUrl, ws);
           return;
         }
         // Remote model control: checked against the coordinator identity we proved (pinned key),
@@ -1474,6 +1539,7 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
     });
 
     ws.on("close", (code: number, reasonBuf: Buffer) => {
+      if (liveness) clearInterval(liveness);
       if (currentMeshWs === ws) currentMeshWs = null;
       meshWsOpen = false;
       // The coordinator does not know our key (it restarted): register again now rather than after
@@ -1867,6 +1933,12 @@ async function loop(): Promise<void> {
 
       if (coordinatorOnline) {
         // ═══ ONLINE PATH: all coordinator HTTP calls ═══
+        // The coordinator said it is restarting: register again only once its delay is up.
+        const reconnectHoldMs = coordinatorReconnect.holdMs();
+        if (reconnectHoldMs > 0) {
+          await idleWait(reconnectHoldMs);
+          continue;
+        }
         // A work_available nudge (fast dispatch) shortly after a full pass goes straight to the pull:
         // registration, heartbeat, tunnels and the rest ran a moment ago, and run again on the next pass.
         const quickPull = wokenByNudge && Date.now() - lastHousekeepingAtMs < QUICK_PULL_WINDOW_MS && registeredWithUrl === coordinator.url && coordinator.isVerified();
@@ -1956,6 +2028,7 @@ async function loop(): Promise<void> {
             const freshRegistration = registeredWithUrl !== coordinator.url;
             registeredWithUrl = coordinator.url;
             lastRegisteredAtMs = Date.now();
+            coordinatorReconnect.registered();
             noteRegistered(freshRegistration);
             console.log(registeredLogLine(AGENT_ID, coordinator.url, registerResponse));
             updateDrain?.write();
@@ -2499,6 +2572,7 @@ async function loop(): Promise<void> {
             // The probe just registered: don't register again on the next online tick.
             registeredWithUrl = coordinator.url;
             lastRegisteredAtMs = Date.now();
+            coordinatorReconnect.registered();
             noteRegistered(true);
             reconnectProbeIntervalMs = RECONNECT_PROBE_MIN_MS;
             console.log(`[agent:${AGENT_ID}] coordinator back online (probe latency: ${probeLatency}ms)`);
