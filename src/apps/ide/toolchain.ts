@@ -507,6 +507,8 @@ export function detectToolchain(root: string, now = Date.now()): ToolchainReport
 
 /** For the lead's system prompt: the Node version note, or "" (never throws). */
 export function toolchainNote(root: string): string {
+  // The suggested commands are POSIX shell (PATH prefixes, nvm/fnm): not offered on Windows.
+  if (process.platform === "win32") return "";
   try {
     return toolchainNoteFor(detectToolchain(root));
   } catch {
@@ -516,6 +518,7 @@ export function toolchainNote(root: string): string {
 
 /** For makeToolRunner's shellHint: the hint for a run_shell result, or null (never throws). */
 export function toolchainFailureHint(root: string, command: string, output: string): string | null {
+  if (process.platform === "win32") return null;
   try {
     if (!ENGINE_FAILURE.test(output) && !NATIVE_FAILURE.test(output)) return null;
     return toolchainFailureHintFor(command, output, detectToolchain(root));

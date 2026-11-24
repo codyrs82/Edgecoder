@@ -21,11 +21,13 @@ import {
 /** An in-memory file system: paths to contents ("" for a file that only has to exist). */
 function memFs(files: Record<string, string>, links: Record<string, string> = {}): ToolchainFs {
   const paths = Object.keys(files);
+  // The code joins paths with node:path, so on Windows they arrive with backslashes.
+  const n = (p: string) => p.replace(/\\/g, "/");
   return {
-    exists: (p) => p in files || paths.some((f) => f.startsWith(`${p}/`)),
-    readFile: (p) => (p in files ? files[p] : null),
-    readdir: (p) => [...new Set(paths.filter((f) => f.startsWith(`${p}/`)).map((f) => f.slice(p.length + 1).split("/")[0]))],
-    realpath: (p) => links[p] ?? p,
+    exists: (raw) => { const p = n(raw); return p in files || paths.some((f) => f.startsWith(`${p}/`)); },
+    readFile: (raw) => { const p = n(raw); return p in files ? files[p] : null; },
+    readdir: (raw) => { const p = n(raw); return [...new Set(paths.filter((f) => f.startsWith(`${p}/`)).map((f) => f.slice(p.length + 1).split("/")[0]))]; },
+    realpath: (raw) => links[n(raw)] ?? n(raw),
   };
 }
 
@@ -59,7 +61,8 @@ describe("versions and ranges", () => {
   });
 });
 
-describe("readWantedNode", () => {
+// Paths in these fixtures are POSIX; the feature itself is off on Windows (toolchainNote/toolchainFailureHint).
+describe.skipIf(process.platform === "win32")("readWantedNode", () => {
   const root = "/p";
   it("reads .nvmrc first, with engines alongside", () => {
     const fs = memFs({ "/p/.nvmrc": "22\n", "/p/package.json": JSON.stringify({ engines: { node: ">=22.12 <25" } }) });
@@ -83,7 +86,8 @@ describe("readWantedNode", () => {
   });
 });
 
-describe("detectMachine", () => {
+// Paths in these fixtures are POSIX; the feature itself is off on Windows (toolchainNote/toolchainFailureHint).
+describe.skipIf(process.platform === "win32")("detectMachine", () => {
   it("finds nvm and its installed versions", () => {
     const m = detectMachine(machine({ [`${HOME}/.nvm/nvm.sh`]: "", [`${HOME}/.nvm/versions/node/v22.12.0/bin/node`]: "", [`${HOME}/.nvm/versions/node/v26.0.0/bin/node`]: "" }));
     expect(m.managers.map((x) => x.name)).toEqual(["nvm"]);
@@ -126,7 +130,8 @@ describe("detectMachine", () => {
   });
 });
 
-describe("planToolchain and the system-context note", () => {
+// Paths in these fixtures are POSIX; the feature itself is off on Windows (toolchainNote/toolchainFailureHint).
+describe.skipIf(process.platform === "win32")("planToolchain and the system-context note", () => {
   const wanted: WantedNode = { pin: { spec: "22", source: ".nvmrc", major: 22 }, engines: ">=22.12 <25" };
 
   it("says nothing when the shell's Node fits", () => {
@@ -181,7 +186,8 @@ describe("planToolchain and the system-context note", () => {
   });
 });
 
-describe("failure hints", () => {
+// Paths in these fixtures are POSIX; the feature itself is off on Windows (toolchainNote/toolchainFailureHint).
+describe.skipIf(process.platform === "win32")("failure hints", () => {
   const wanted: WantedNode = { pin: { spec: "22", source: ".nvmrc", major: 22 }, engines: ">=22.12 <25" };
   const nvm = detectMachine(machine({ [`${HOME}/.nvm/nvm.sh`]: "", [`${HOME}/.nvm/versions/node/v22.12.0/bin/node`]: "" }));
   const report = planToolchain(wanted, "v26.0.0", nvm);
