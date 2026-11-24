@@ -11,6 +11,8 @@ vi.mock("../src/lib/chat-store", async (original) => ({
   loadConversation: vi.fn(async (id: string) => structuredClone(db.convs.get(id))),
   saveConversation: vi.fn(async (c: Conversation) => { db.saved.push(JSON.parse(JSON.stringify(c))); }),
 }));
+// IndexedDB for the real deleteConversation (the open chat deleted from the sidebar).
+vi.mock("idb", () => ({ openDB: async () => ({ get: async () => undefined, delete: async () => undefined, put: async () => undefined, getAll: async () => [] }) }));
 const api = vi.hoisted(() => ({
   streamIdeChat: vi.fn(),
   // The chat's mirror on the provider (code-chat-mirror.ts): none by default.
@@ -44,6 +46,7 @@ vi.mock("../src/lib/api", async (original) => ({
 }));
 
 import EditorChatPanel from "../src/components/EditorChatPanel.svelte";
+import { deleteConversation } from "../src/lib/chat-store";
 
 Element.prototype.scrollTo ??= function () {};
 
@@ -278,6 +281,26 @@ describe("EditorChatPanel on your phone (code-chat-mirror.ts)", () => {
     // The app's own messages coming back from the mirror aren't added twice.
     emit({ seq: 10, type: "message", entry: { id: "m9", role: "user", content: "mine", at: 4, by: "desktop" } });
     expect(screen.queryByText("mine")).toBeNull();
+  });
+
+  it("the open chat deleted from the sidebar isn't saved or synced again (New chat, the phone's messages)", async () => {
+    // Its own id: a deleted id stays deleted for the rest of the run.
+    db.convs.clear();
+    db.convs.set("gone", { ...structuredClone(chat), id: "gone" });
+    localStorage.setItem("edgecoder-last-editor-id:" + PROJECT, "gone");
+    const { component } = render(EditorChatPanel, { projectRoot: PROJECT });
+    await vi.waitFor(() => expect(api.followSession).toHaveBeenCalled());
+    await deleteConversation("gone");
+    const saves = db.saved.length;
+    const syncs = api.syncCodeChat.mock.calls.length;
+    // A phone message arriving before the panel moves on, then the sidebar's New chat.
+    emit({ seq: 6, type: "message", entry: { id: "p1", role: "user", content: "still there?", at: 2, by: "remote" } });
+    await screen.findByText("still there?");
+    await component.newChat();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(db.saved.slice(saves).filter((c) => c.id === "gone")).toEqual([]);
+    expect(api.syncCodeChat.mock.calls.slice(syncs).filter(([b]) => (b as { chatId: string }).chatId === "gone")).toEqual([]);
+    expect(localStorage.getItem("edgecoder-last-editor-id")).not.toBe("gone");
   });
 
   it("on open, adds the phone's messages the chat missed while it was closed", async () => {

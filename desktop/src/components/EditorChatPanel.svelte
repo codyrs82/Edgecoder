@@ -41,6 +41,7 @@
     saveConversation,
     loadConversation as loadConversationFromDb,
     listConversationsBySource,
+    isDeletedConversation,
   } from "../lib/chat-store";
   import type { Conversation, ReplyUsage, ToolEvent } from "../lib/types";
 
@@ -153,6 +154,8 @@
 
   /** Save the chat and remember it as its project's last one. */
   async function persist() {
+    // Deleted from the sidebar while open: stays deleted (New chat follows).
+    if (isDeletedConversation(conversation.id)) return;
     await saveConversation(conversation);
     localStorage.setItem("edgecoder-last-editor-id", conversation.id);
     if (conversation.projectRoot) setLastChatFor(conversation.projectRoot, conversation.id);
@@ -199,7 +202,12 @@
   // a turn it starts shows here like this app's own (Stop and approvals go to the mirror).
   let remoteTurn = $state(false);
   const mirror = new CodeChatMirror(
-    { sync: syncCodeChat, snapshot: getSession, follow: followSession },
+    {
+      // A chat deleted while open isn't synced again (its mirror was forgotten with it).
+      sync: (body) => (isDeletedConversation(body.chatId) ? Promise.reject(new Error("chat deleted")) : syncCodeChat(body)),
+      snapshot: getSession,
+      follow: followSession,
+    },
     {
       ownTurn: () => isStreaming && !remoteTurn,
       onEntries: (entries) => {

@@ -7,6 +7,7 @@
   import { listConversationsBySource, deleteConversation, renameConversation } from "../lib/chat-store";
   import { chatListVersion, chatsChanged, groupByProject, loadRecentProjects, tildePath, type ProjectGroup } from "../lib/projects";
   import { menu } from "../lib/menu";
+  import { notify } from "../lib/toast";
   import type { Conversation } from "../lib/types";
   import type { AuthUser, SessionSummary } from "../lib/api";
   import ProfileMenu from "./ProfileMenu.svelte";
@@ -122,9 +123,15 @@
       return;
     }
     closeMenu(false);
-    await deleteConversation(c.id);
+    try {
+      await deleteConversation(c.id);
+    } catch (err) {
+      notify(`Couldn't delete "${c.title}": ${(err as Error).message}`, "error");
+      return;
+    }
     chats = chats.filter((x) => x.id !== c.id);
     chatsChanged();
+    // The open chat: the panel moves to a new one (the deleted chat can't save itself back).
     if (c.id === activeChatId) onNewChat(c.projectRoot ?? null);
   }
 
