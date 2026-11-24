@@ -34,9 +34,9 @@ import {
   STATS_ANCHOR_MIN_CONFIRMATIONS,
   MESH_AUTH_TOKEN
 } from "./context.js";
-import { ordering } from "./agent-state.js";
+import { agentCapabilities, ordering } from "./agent-state.js";
 import { receiptStore } from "./services.js";
-import { coordinatorPublicKeyById } from "./peers.js";
+import { coordinatorPublicKeyById, isApprovedCoordinator } from "./peers.js";
 
 async function applyStatsProjectionRecord(record: {
   eventType: string;
@@ -146,9 +146,20 @@ function verifyStatsLedgerRecord(record: {
   return verifyPayload(record.hash, record.signature, publicKeyPem);
 }
 
-export function statsQuorumThreshold(): number {
-  const totalCoordinators = mesh.listPeers().length + 1;
-  return Math.max(1, Math.floor(totalCoordinators / 2) + 1);
+/**
+ * Signers a checkpoint commit needs: a majority of the coordinators. Only coordinator peers count:
+ * the mesh peer table also holds agents (they announce themselves over the mesh), and counting them
+ * set the quorum out of reach on the coordinator with the most agents. The 2026-11-24 run: the US
+ * seed (its 9 fleet agents in its peer table) never committed a checkpoint, while the EU seed
+ * (2 agents) committed every one: each coordinator computed a different threshold.
+ */
+export function statsQuorumThreshold(
+  peers: ReadonlyArray<{ peerId: string }> = mesh.listPeers(),
+  isAgent: (peerId: string) => boolean = (id) => agentCapabilities.has(id),
+  approved: (peerId: string) => boolean = isApprovedCoordinator,
+): number {
+  const coordinators = new Set(peers.map((p) => p.peerId).filter((id) => id !== identity.peerId && !isAgent(id) && approved(id)));
+  return Math.max(1, Math.floor((coordinators.size + 1) / 2) + 1);
 }
 
 /** One checkpoint per period; the settle delay covers records still being written by any coordinator. */
