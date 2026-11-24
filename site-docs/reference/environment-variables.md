@@ -827,6 +827,7 @@ These are not service configuration, so no schema lists them and the docs test s
 | Variable | Read by | Description |
 |---|---|---|
 | `FLY_APP_NAME`, `FLY_REGION` | coordinator, portal | Set by the Fly runtime. |
+| `NVM_DIR`, `FNM_DIR`, `VOLTA_HOME`, `ASDF_DATA_DIR`, `MISE_DATA_DIR` | IDE provider (src/apps/ide/toolchain.ts) | Read only to find Node versions the user's version managers have installed, so the coding agent can run a project's commands under the Node version the project asks for. Set by those tools, not by EdgeCoder. |
 | `EDGECODER_INSTANCE` | agent (src/swarm/worker-runner.ts) | Written by `edgecoder-install` into each `agent-<n>.env`; when set, the agent writes `agent-status.json` in its HOME and handles the `SIGUSR2` / `SIGHUP` update drain (src/swarm/update-drain.ts). |
 | `EDGECODER_UPDATE_RUN` | `edgecoder-install apply` (src/install/cli.ts) | Set by `edgecoder-install update` for the `apply` it runs, so macOS does not unload the update job it is running in. |
 | `GIT_ASKPASS`, `SSH_ASKPASS` | IDE provider (src/apps/ide/github-auth.ts) | Read only to clear them for the read-only `git credential fill` lookup, so no password prompt can appear. |

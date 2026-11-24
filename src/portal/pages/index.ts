@@ -13,6 +13,7 @@ import { registerSeoRoutes } from "./seo.js";
 import { registerResetPasswordPage } from "./reset-password.js";
 import { registerReviewsPage } from "./reviews.js";
 import { registerBotsPage } from "./bots.js";
+import { registerCodePage } from "./code.js";
 import { registerSettingsPages } from "./settings.js";
 import { registerWelcomePages } from "./welcome.js";
 
@@ -38,4 +39,6 @@ export function registerPortalPages(app: FastifyInstance, deps: PublicPagesDeps 
   registerWelcomePages(app);
   registerReviewsPage(app);
   registerBotsPage(app);
+  // Code (/portal/code): the coding sessions on your Macs, through the Code from your phone relay.
+  registerCodePage(app);
 }

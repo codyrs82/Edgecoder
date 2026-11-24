@@ -43,7 +43,7 @@ const READ_ONLY_BINS = new Set([
   "ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "find", "pwd", "echo", "tree", "stat", "file", "du", "df",
   "which", "whoami", "date", "uname", "basename", "dirname", "realpath", "sort", "uniq", "cut", "tr", "nl", "diff", "cmp", "true",
 ]);
-const GIT_READ_ONLY = new Set(["status", "diff", "log", "show", "rev-parse", "ls-files", "blame", "branch", "remote", "describe", "shortlog", "grep"]);
+const GIT_READ_ONLY = new Set(["status", "diff", "log", "show", "rev-parse", "rev-list", "merge-base", "show-ref", "for-each-ref", "ls-tree", "name-rev", "ls-files", "blame", "branch", "remote", "describe", "shortlog", "grep"]);
 /** find actions that run or delete things, or write files. */
 const FIND_WRITES = /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/;
 
