@@ -47,6 +47,8 @@ export interface HostedRoutesDeps {
   PORTAL_SERVICE_TOKEN: string | undefined;
   EXTERNAL_HTTP_TIMEOUT_MS: number;
   discoverCoordinatorUrlsForPortal: () => Promise<string[]>;
+  /** Every coordinator, for lookups of live machines (coordinator-fanout.ts). */
+  everyCoordinatorUrl?: () => Promise<string[]>;
   /** Opens the credit account of a new (agent) user; server.ts's ensureCreditAccountForUser. */
   ensureCreditAccountForUser?: (user: { userId: string; email: string }) => Promise<void>;
   /** Where network calls go (shared with portal chat); built from discoverCoordinatorUrlsForPortal when absent. */

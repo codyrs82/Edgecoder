@@ -24,6 +24,7 @@ import type { PortalStore } from "../store.js";
 import { ownMachineModels } from "./machines.js";
 import { cloudLabel, orderCloudModels } from "../../cloud-host/catalog.js";
 import { moduleLogger } from "../../common/logger.js";
+import { networkModelsFromEvery } from "../coordinator-fanout.js";
 
 const logger = moduleLogger("portal-compute");
 
@@ -32,6 +33,8 @@ export interface ComputeRoutesDeps {
   getCurrentUser: (req: { headers: Record<string, unknown> }) => Promise<{ userId: string } | null>;
   PORTAL_SERVICE_TOKEN: string | undefined;
   discoverCoordinatorUrlsForPortal: () => Promise<string[]>;
+  /** Every coordinator, for lookups of live machines (coordinator-fanout.ts); defaults to the discovered list. */
+  everyCoordinatorUrl?: () => Promise<string[]>;
   EXTERNAL_HTTP_TIMEOUT_MS?: number;
 }
 
@@ -221,11 +224,13 @@ export function registerComputeRoutes(app: FastifyInstance, deps: ComputeRoutesD
     if (!user) return reply;
     const d = net(user.userId);
     const t = d.transport!;
+    const every = deps.everyCoordinatorUrl ?? deps.discoverCoordinatorUrlsForPortal;
     const [cat, leases, own] = await Promise.all([
-      t("GET", "/inference/models").catch(() => ({ status: 0, json: {} as Record<string, unknown> })),
+      // The network's models from every coordinator (each knows only its own machines), merged.
+      every().then((urls) => networkModelsFromEvery(urls, { serviceToken: deps.PORTAL_SERVICE_TOKEN, account: accountIdFor(user.userId) })).catch(() => ({ status: 0, json: {} as Record<string, unknown> })),
       t("POST", "/account/reservations/list", {}).catch(() => ({ status: 0, json: {} as Record<string, unknown> })),
       // Your own machines' models, so one they run only for you (too big to share) can be picked too.
-      store ? ownMachineModels({ PORTAL_SERVICE_TOKEN: deps.PORTAL_SERVICE_TOKEN ?? "", EXTERNAL_HTTP_TIMEOUT_MS: deps.EXTERNAL_HTTP_TIMEOUT_MS ?? 5_000, discoverCoordinatorUrlsForPortal: deps.discoverCoordinatorUrlsForPortal, store }, user.userId).catch(() => [] as string[]) : Promise.resolve([] as string[]),
+      store ? ownMachineModels({ PORTAL_SERVICE_TOKEN: deps.PORTAL_SERVICE_TOKEN ?? "", EXTERNAL_HTTP_TIMEOUT_MS: deps.EXTERNAL_HTTP_TIMEOUT_MS ?? 5_000, discoverCoordinatorUrlsForPortal: every, store }, user.userId).catch(() => [] as string[]) : Promise.resolve([] as string[]),
     ]);
     const models = cat.status === 200 ? ((cat.json.models as NetworkModelEntry[]) ?? []) : [];
     const classes = cat.status === 200 ? ((cat.json.classes as Record<string, { cSatsPerSecondBaseTier?: number }>) ?? {}) : {};

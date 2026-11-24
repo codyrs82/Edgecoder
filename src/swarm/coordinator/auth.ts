@@ -157,6 +157,18 @@ export function agentSignatureAtGate(headers: Record<string, unknown>, method: s
   }
 }
 
+/**
+ * Why a signed agent request was refused at the gate, for the agent's own recovery: a request
+ * signed for an agent id this process holds no key for (it restarted, or pruned the agent) gets
+ * reason agent_not_registered, which agents answer by registering again at once instead of
+ * counting failures into offline mode. Says nothing a /heartbeat does not already say.
+ */
+export function agentGateRefusalReason(headers: Record<string, unknown>): "agent_not_registered" | null {
+  const signed = extractSignedHeaders(headers);
+  if (!signed) return null;
+  return agentCapabilities.get(signed["x-agent-id"])?.publicKeyPem ? null : "agent_not_registered";
+}
+
 /** The account an agent works and pays for: its owner's, or the agent itself before it is linked. */
 export async function agentAccount(agentId: string): Promise<string> {
   return (await pgStore?.getAgentOwnership(agentId))?.accountId ?? agentId;

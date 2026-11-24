@@ -12,6 +12,7 @@ import { dnsLabelConflicts } from "../dns-manager.js";
 import { rejectedAttemptsForOwner } from "../rejected-attempts.js";
 import { moduleLogger } from "../../common/logger.js";
 import { registerChatSharingRoutes } from "./chat-sharing.js";
+import { askEveryCoordinator, getCoordinatorJson } from "../coordinator-fanout.js";
 
 const logger = moduleLogger("portal-account");
 
@@ -27,7 +28,7 @@ export function maxAgentsPerAccount(env: NodeJS.ProcessEnv = process.env): numbe
   return Number.isInteger(n) && n >= 1 ? n : 25;
 }
 
-export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordinatorUrlsForPortal, fetchCoordinatorFederatedSummary, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store }: AccountApiRoutesDeps): void {
+export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordinatorUrlsForPortal, everyCoordinatorUrl, fetchCoordinatorFederatedSummary, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentContributionForUser, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store }: AccountApiRoutesDeps): void {
   app.get("/ios/dashboard", async (req, reply) => {
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     const user = await getCurrentUser(req as any);
@@ -349,19 +350,10 @@ export function registerAccountApiRoutes(app: FastifyInstance, { discoverCoordin
   app.get("/dashboard/network-status", async (req, reply) => {
     const user = await getCurrentUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
-    const [url] = await discoverCoordinatorUrlsForPortal();
-    if (!url) return reply.send({ coordinatorOnline: false, agents: 0, queued: 0 });
-    try {
-      const res = await request(`${url}/health/runtime`, { method: "GET", headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS, bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS });
-      if (res.statusCode !== 200) {
-        await res.body.dump();
-        return reply.send({ coordinatorOnline: false, agents: 0, queued: 0 });
-      }
-      const body = (await res.body.json()) as { coordinator?: { agents?: number; queued?: number } };
-      return reply.send({ coordinatorOnline: true, agents: Number(body.coordinator?.agents ?? 0), queued: Number(body.coordinator?.queued ?? 0) });
-    } catch {
-      return reply.send({ coordinatorOnline: false, agents: 0, queued: 0 });
-    }
+    // Every coordinator (each counts only the machines linked to it): online when any answers; counts add up.
+    const answers = await askEveryCoordinator(await everyCoordinatorUrl(), (base, signal) => getCoordinatorJson(base, "/health/runtime", { signal, timeoutMs: EXTERNAL_HTTP_TIMEOUT_MS }), { timeoutMs: EXTERNAL_HTTP_TIMEOUT_MS });
+    const up = answers.flatMap((a) => (a.ok ? [(a.value as { coordinator?: { agents?: number; queued?: number } }).coordinator ?? {}] : []));
+    return reply.send({ coordinatorOnline: up.length > 0, agents: up.reduce((n, c) => n + (Number(c.agents) || 0), 0), queued: up.reduce((n, c) => n + (Number(c.queued) || 0), 0) });
   });
 
   app.get("/dashboard/summary", async (req, reply) => {
