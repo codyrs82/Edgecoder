@@ -162,7 +162,7 @@
     background: var(--border-strong); cursor: pointer;
   }
   .switch::after {
-    content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--bg-surface, #fff);
+    content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--bg-surface);
     transition: transform 0.15s;
   }
   .switch[aria-checked="true"] { background: var(--accent); }
