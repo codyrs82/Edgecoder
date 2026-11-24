@@ -72,7 +72,8 @@ export function toolSchemas(): ToolSchema[] {
  * A model call through any chat backend (the network, your machines, a reserved machine), in the
  * agent's ChatFn shape. `onSpent` hears what each call cost in cSats and where it ran.
  */
-export function backendChat(backend: ChatBackend, onSpent?: (cSats: number, served?: ChatResult["served"]) => void, signal?: AbortSignal): ChatFn {
+/** `onSpent`'s third argument: the backend's own `where` for the call (Auto's "routed to <model> on <class> …"). */
+export function backendChat(backend: ChatBackend, onSpent?: (cSats: number, served?: ChatResult["served"], where?: string) => void, signal?: AbortSignal): ChatFn {
   return async ({ messages, tools }, onDelta) => {
     let content = "";
     const toolCalls: ChatResult["toolCalls"] = [];
@@ -86,7 +87,7 @@ export function backendChat(backend: ChatBackend, onSpent?: (cSats: number, serv
           for (const c of p.toolCalls) toolCalls.push({ name: c.function.name, arguments: c.function.arguments ?? {} });
         } else if ("done" in p) {
           served = p.served;
-          if (p.cSatsSpent !== undefined || p.served) onSpent?.(p.cSatsSpent ?? 0, p.served);
+          if (p.cSatsSpent !== undefined || p.served) onSpent?.(p.cSatsSpent ?? 0, p.served, p.where);
         }
       }
     } catch (err) {

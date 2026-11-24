@@ -82,6 +82,55 @@ export interface CodeSnapshot {
   sessions: CodeSessionSummary[];
 }
 
+// ---- Images with a message (the web's paste, drop and attach) ----
+
+/** Image types a message may carry: PNG, JPEG and WebP only (checked by their first bytes too). */
+export const CODE_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"] as const;
+export type CodeImageType = (typeof CODE_IMAGE_TYPES)[number];
+/** Each image, decoded. */
+export const CODE_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+/** Images per message. */
+export const CODE_IMAGES_MAX = 4;
+/** All of a message's images together, decoded (they travel in one signed command). */
+export const CODE_IMAGES_TOTAL_MAX_BYTES = 10 * 1024 * 1024;
+/** Body limit for the routes a message with images passes through (base64 adds a third). */
+export const CODE_COMMAND_BODY_LIMIT = Math.ceil((CODE_IMAGES_TOTAL_MAX_BYTES * 4) / 3) + 256 * 1024;
+
+/** Decoded bytes of a base64 string (no decoding). */
+export function base64Bytes(data: string): number {
+  const pad = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+  return Math.floor((data.length * 3) / 4) - pad;
+}
+
+/** The image type its first bytes say it is (PNG, JPEG or WebP), or null. */
+export function sniffImageType(data: string): CodeImageType | null {
+  const head = Buffer.from(data.slice(0, 24), "base64");
+  if (head.length >= 8 && head.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+  if (head.length >= 3 && head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return "image/jpeg";
+  if (head.length >= 12 && head.subarray(0, 4).toString("latin1") === "RIFF" && head.subarray(8, 12).toString("latin1") === "WEBP") return "image/webp";
+  return null;
+}
+
+/** One image: a plain file name (no separators or control characters), its type and its bytes as base64. */
+export const codeImageSchema = z
+  .object({
+    name: z.string().trim().min(1).max(120).regex(/^[^\u0000-\u001f\u007f/\\]+$/, "a plain file name"),
+    mediaType: z.enum(CODE_IMAGE_TYPES),
+    data: z.string().min(8).max(Math.ceil((CODE_IMAGE_MAX_BYTES * 4) / 3) + 4).regex(/^[A-Za-z0-9+/]+={0,2}$/, "not base64")
+  })
+  .strict()
+  .superRefine((img, ctx) => {
+    if (base64Bytes(img.data) > CODE_IMAGE_MAX_BYTES) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Each image can be up to ${CODE_IMAGE_MAX_BYTES / (1024 * 1024)} MB` });
+    if (sniffImageType(img.data) !== img.mediaType) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Only PNG, JPEG and WebP images (the file isn't the image type it says)" });
+  });
+export type CodeImage = z.infer<typeof codeImageSchema>;
+
+export const codeImagesSchema = z
+  .array(codeImageSchema)
+  .min(1)
+  .max(CODE_IMAGES_MAX)
+  .refine((list) => list.reduce((n, i) => n + base64Bytes(i.data), 0) <= CODE_IMAGES_TOTAL_MAX_BYTES, `Images can be up to ${CODE_IMAGES_TOTAL_MAX_BYTES / (1024 * 1024)} MB per message`);
+
 // ---- Commands ----
 
 export const projectIdSchema = z.string().regex(/^[0-9a-f]{16}$/);
@@ -106,7 +155,8 @@ export const codeControlRequestSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("changes"), args: z.object({ sessionId, turnId }).strict() }).strict(),
   z.object({ action: z.literal("messages"), args: z.object({ sessionId, beforeId: z.string().uuid().optional(), limit: z.number().int().min(1).max(MAX_PAGE_MESSAGES).optional() }).strict() }).strict(),
   z.object({ action: z.literal("create"), args: z.object({ projectId: projectIdSchema, title: z.string().max(120).optional(), model: model.optional(), mode: mode.optional() }).strict() }).strict(),
-  z.object({ action: z.literal("message"), args: z.object({ sessionId, text: z.string().min(1).max(32_000) }).strict() }).strict(),
+  // `attachments`: images from the web (newer Macs only; the session summary says `images: true`).
+  z.object({ action: z.literal("message"), args: z.object({ sessionId, text: z.string().min(1).max(32_000), attachments: codeImagesSchema.optional() }).strict() }).strict(),
   z.object({ action: z.literal("approve"), args: z.object({ sessionId, callId: z.string().min(1).max(200), approved: z.boolean() }).strict() }).strict(),
   z.object({ action: z.literal("cancel"), args: z.object({ sessionId }).strict() }).strict(),
   z.object({ action: z.literal("undo"), args: z.object({ sessionId, turnId: turnId.optional() }).strict() }).strict(),

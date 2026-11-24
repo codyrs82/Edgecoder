@@ -10,6 +10,7 @@ import { CODE_COMMON_JS } from "./code-common.js";
 import { CODE_LIST_JS } from "./code-list.js";
 import { CODE_SESSION_JS } from "./code-session.js";
 import { CODE_DIFF_JS } from "./code-diff.js";
+import { IMAGE_ATTACH_CSS, IMAGE_ATTACH_JS } from "./image-attach.js";
 
 /**
  * Code: the coding sessions running in the EdgeCoder desktop app on your own Macs, on the web. The
@@ -38,6 +39,7 @@ export function registerCodePage(app: FastifyInstance): void {
       folder: icon("file", 13),
       file: icon("file", 13),
       x: icon("x", 14),
+      image: icon("image", 16),
     };
     const content = `
     <style nonce="${CSP_NONCE}">
@@ -140,7 +142,10 @@ export function registerCodePage(app: FastifyInstance): void {
       .composer-pill:focus-within { border-color:var(--brand); box-shadow:0 0 0 3px var(--brand-soft); }
       .composer-pill textarea { flex:1; resize:none; border:none; background:transparent; color:var(--text); font:inherit; font-size:14px; line-height:1.5; padding:6px 0; min-height:0; max-height:40vh; outline:none; box-shadow:none; }
       .composer-pill .send { width:32px; height:32px; min-height:0; padding:0; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; flex:none; }
-      .composer .controls { max-width:820px; margin:6px auto 0; font-size:11.5px; color:var(--muted); display:flex; gap:10px; justify-content:space-between; }
+      .cs-imgs { max-width:820px; margin:0 auto 8px; }
+      .cs-imgs:has(.img-tray:empty) { display:none; }
+      .composer-pill .img-attach { margin-left:-10px; }
+${IMAGE_ATTACH_CSS}      .composer .controls { max-width:820px; margin:6px auto 0; font-size:11.5px; color:var(--muted); display:flex; gap:10px; justify-content:space-between; }
       .visually-hidden { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
       @media (max-width:700px) {
         .code-wrap { padding:14px 16px 32px; }
@@ -200,7 +205,10 @@ export function registerCodePage(app: FastifyInstance): void {
           </div>
         </div>
         <div class="composer">
-          <div class="composer-pill">
+          <div class="cs-imgs"><div class="img-tray" id="csImgs" aria-label="Images to send"></div></div>
+          <div class="composer-pill" id="csPill">
+            <button type="button" class="img-attach" id="csAttach" aria-label="Attach images" title="Attach images (or paste or drop them)" hidden>${icons.image}</button>
+            <input type="file" id="csFile" accept="image/png,image/jpeg,image/webp" multiple hidden>
             <label for="csInput" class="visually-hidden">Message your Mac</label>
             <textarea id="csInput" rows="1" placeholder="Message your Mac…" autocomplete="off" disabled></textarea>
             <button type="button" class="primary send" id="csSend" aria-label="Send" disabled>${icons.send}</button>
@@ -215,6 +223,7 @@ export function registerCodePage(app: FastifyInstance): void {
     var CODE_ICONS = ${JSON.stringify(icons)};
     ${CODE_COMMON_JS}
     ${CODE_DIFF_JS}
+    ${IMAGE_ATTACH_JS}
     ${CODE_LIST_JS}
     ${CODE_SESSION_JS}
     (async function() {

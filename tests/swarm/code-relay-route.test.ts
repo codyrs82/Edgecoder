@@ -171,6 +171,19 @@ describe("publish and relay", () => {
     expect(s).toMatchObject({ status: "done", action: "message", result: { status: "done", data: { echo: "message" } } });
     expect(providerCalls.slice(before)).toEqual([{ sessionId: SESSION, text: "fix it", requestedBy: "acct-owner", action: "message" }]);
   });
+
+  test("a message with images (over the default 1 MB body) reaches the provider; a mislabelled image is refused before anything is signed", async () => {
+    const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(3 * 1024 * 1024, 7)]).toString("base64");
+    const attachments = [{ name: "shot.png", mediaType: "image/png", data: png }];
+    const before = providerCalls.length;
+    const { state: s } = await run(mine, A.agent, "acct-owner", "message", { sessionId: SESSION, text: "what's wrong?", attachments });
+    expect(s).toMatchObject({ status: "done", result: { status: "done" } });
+    expect(providerCalls.slice(before)).toEqual([{ sessionId: SESSION, text: "what's wrong?", attachments, requestedBy: "acct-owner", action: "message" }]);
+    const framesBefore = codeFrames(mine).length;
+    const gif = await command(mine.peerId, "acct-owner", "message", { sessionId: SESSION, text: "x", attachments: [{ name: "a.gif", mediaType: "image/png", data: Buffer.from("GIF89a-------").toString("base64") }] });
+    expect(gif.statusCode).toBe(400);
+    expect(codeFrames(mine).length).toBe(framesBefore);
+  });
 });
 
 describe("ownership", () => {
