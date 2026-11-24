@@ -28,7 +28,7 @@ import { warmOllamaModel } from "../inference-api/ollama.js";
 import { detectHardware, gpuNeedsOffloadProof, hardwareProfileFor, selectGpu, selectGpuPool, type Probe } from "../install/hardware.js";
 import { claimedProfile, decideGpuClaim, type GpuClaimDecision } from "./gpu-claim.js";
 import { enforceSandboxPolicy, inferenceOnlyRejection, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
-import { portalLabel, enrollmentBackoffMs, enrollmentRefusalFromError, enrollmentRefusalKey, enrollmentRefusalMessage, isAgentNotRegisteredError, parseRetryAfterMs, rateLimitWaitMs, registeredLogLine, registerRefreshMsFromEnv, shouldLogEnrollmentRefusal, shouldRegister, type RegisterReply } from "./registration-policy.js";
+import { portalLabel, enrollmentBackoffMs, enrollmentRefusalFromError, enrollmentRefusalKey, enrollmentRefusalMessage, isAgentNotRegisteredError, isNotRegisteredWsClose, MESH_WS_REBIND_CLOSE_CODE, QuickReregisterGate, parseRetryAfterMs, rateLimitWaitMs, registeredLogLine, registerRefreshMsFromEnv, shouldLogEnrollmentRefusal, shouldRegister, type RegisterReply } from "./registration-policy.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
 import { signMeshWsBind } from "../mesh/ws-auth.js";
 import { hashResultOutput, signReceiptAsAgent } from "../receipts/receipt.js";
@@ -1272,6 +1272,32 @@ const IDLE_POLL_MS = 1_200;
 /** A nudged pass skips registration/heartbeat/tunnels when a full pass ran this recently. */
 const QUICK_PULL_WINDOW_MS = 5_000;
 let meshWsOpen = false;
+/**
+ * Registration epochs: bumped by every registration made from the unregistered state (first
+ * start, after a coordinator restart / 401 agent_not_registered, after offline recovery). A mesh
+ * socket opened in an earlier epoch was bound before the coordinator held our key again, so it is
+ * reopened for a fresh signed bind (and the bot/code relays publish again on open).
+ */
+let registrationEpoch = 0;
+let meshWsEpoch = -1;
+let currentMeshWs: WebSocket | null = null;
+/** One immediate re-registration per window (registration-policy.ts), shared by HTTP 401s and WS refusals. */
+const quickReregister = new QuickReregisterGate();
+
+/** Call after a successful /register; `fresh` when we were not registered with this URL before it. */
+function noteRegistered(fresh: boolean): void {
+  if (!fresh) return;
+  registrationEpoch++;
+  const ws = currentMeshWs;
+  if (ws && ws.readyState === WebSocket.OPEN && meshWsEpoch < registrationEpoch) {
+    console.log(`[agent:${AGENT_ID}] registered again: reopening the mesh WebSocket for a fresh bind`);
+    try {
+      ws.close(MESH_WS_REBIND_CLOSE_CODE, "rebind_after_register");
+    } catch {
+      /* the close handler reconnects either way */
+    }
+  }
+}
 let wokenByNudge = false;
 let lastHousekeepingAtMs = 0;
 let wakeIdle: (() => void) | null = null;
@@ -1343,12 +1369,15 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
     // coordinator ties this connection to AGENT_ID's registered key (src/mesh/ws-auth.ts).
     const coordinatorUrl = coordinator.url;
     const ws = new WebSocket(meshWsUrl(coordinatorUrl, AGENT_ID), { headers: { ...meshHeaders(), ...signMeshWsBind(AGENT_ID, keys.privateKeyPem) } });
+    currentMeshWs = ws;
+    const openedInEpoch = registrationEpoch;
 
     // Track which coordinator peerId this WS is registered against
     let registeredPeerId: string | null = null;
 
     ws.on("open", () => {
       meshWsOpen = true;
+      meshWsEpoch = openedInEpoch;
       console.log(`[agent:${AGENT_ID}] mesh WebSocket connected to ${coordinatorUrl}`);
       reconnectDelay = 1000;
       // The portal's view of this machine's models (also refreshed every MODEL_STATE_REPORT_MS).
@@ -1444,8 +1473,17 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
       }
     });
 
-    ws.on("close", () => {
+    ws.on("close", (code: number, reasonBuf: Buffer) => {
+      if (currentMeshWs === ws) currentMeshWs = null;
       meshWsOpen = false;
+      // The coordinator does not know our key (it restarted): register again now rather than after
+      // the HTTP loop has counted its way into offline mode; the reconnect below waits for it.
+      const reason = reasonBuf?.toString?.() ?? "";
+      if (isNotRegisteredWsClose(code, reason) && registeredWithUrl === coordinatorUrl && quickReregister.tryTake()) {
+        console.warn(`[agent:${AGENT_ID}] mesh WebSocket refused (${code} ${reason}): registering again`);
+        registeredWithUrl = null;
+        wakeLoop(false);
+      }
       // Unregister WS from gossip mesh
       if (registeredPeerId) {
         const peer = getMeshPeer();
@@ -1915,8 +1953,10 @@ async function loop(): Promise<void> {
               meshToken?: string;
               rewardAccountId?: string;
             };
+            const freshRegistration = registeredWithUrl !== coordinator.url;
             registeredWithUrl = coordinator.url;
             lastRegisteredAtMs = Date.now();
+            noteRegistered(freshRegistration);
             console.log(registeredLogLine(AGENT_ID, coordinator.url, registerResponse));
             updateDrain?.write();
             enrollmentRefusals = 0;
@@ -2459,6 +2499,7 @@ async function loop(): Promise<void> {
             // The probe just registered: don't register again on the next online tick.
             registeredWithUrl = coordinator.url;
             lastRegisteredAtMs = Date.now();
+            noteRegistered(true);
             reconnectProbeIntervalMs = RECONNECT_PROBE_MIN_MS;
             console.log(`[agent:${AGENT_ID}] coordinator back online (probe latency: ${probeLatency}ms)`);
             await flushPendingResults();
@@ -2589,6 +2630,15 @@ async function loop(): Promise<void> {
       }
       const blacklistReason = blacklistReasonFromError(error);
       if (blacklistReason) lifecycle.notePaused(blacklistReason);
+      // The coordinator restarted (or evicted us) and holds no key for us: register again on the very
+      // next tick, without counting a failure, so a restart costs seconds rather than an offline cycle.
+      // At most once per QUICK_REREGISTER_MIN_INTERVAL_MS (registration storms); beyond that, as before.
+      if (coordinatorOnline && isAgentNotRegisteredError(error) && quickReregister.tryTake()) {
+        registeredWithUrl = null;
+        console.warn(`[agent:${AGENT_ID}] coordinator does not know this agent (restarted?): registering again now`);
+        await new Promise((r) => setTimeout(r, 250));
+        continue;
+      }
       consecutiveFailures++;
       console.error(`[agent:${AGENT_ID}] loop error (failures: ${consecutiveFailures}): ${String(error)}`);
       if (isAgentNotRegisteredError(error)) {

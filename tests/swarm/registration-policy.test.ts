@@ -8,6 +8,9 @@ import {
   enrollmentRefusalMessage,
   portalLabel,
   isAgentNotRegisteredError,
+  isNotRegisteredWsClose,
+  QuickReregisterGate,
+  QUICK_REREGISTER_MIN_INTERVAL_MS,
   shouldLogEnrollmentRefusal,
   registeredLogLine,
   registerRefreshMsFromEnv,
@@ -50,6 +53,35 @@ describe("worker registration policy", () => {
     expect(isAgentNotRegisteredError(Object.assign(new Error("POST /heartbeat failed (401): signature_invalid"), { statusCode: 401 }))).toBe(false);
     expect(isAgentNotRegisteredError(Object.assign(new Error("agent_not_registered"), { statusCode: 403 }))).toBe(false);
     expect(isAgentNotRegisteredError(null)).toBe(false);
+  });
+
+  // Production, 2026-11-24: after a coordinator redeploy the request gate refused the agent's signed
+  // /pull and /heartbeat with a bare {"error":"mesh_unauthorized"} (no reason), which the agent did
+  // not read as "not registered": it counted three failures into offline mode before registering.
+  it("the gate's bare mesh_unauthorized and its agent_not_registered reason both mean register again", () => {
+    const err = (status: number, body: unknown, path = "/pull") => Object.assign(new Error(`POST ${path} failed (${status}): ${JSON.stringify(body)}`), { statusCode: status });
+    expect(isAgentNotRegisteredError(err(401, { error: "mesh_unauthorized" }))).toBe(true);
+    expect(isAgentNotRegisteredError(err(401, { error: "mesh_unauthorized" }, "/heartbeat"))).toBe(true);
+    expect(isAgentNotRegisteredError(err(401, { error: "mesh_unauthorized", reason: "agent_not_registered" }))).toBe(true);
+    expect(isAgentNotRegisteredError(err(401, { error: "agent_signature_required" }))).toBe(false);
+    expect(isAgentNotRegisteredError(err(403, { error: "mesh_unauthorized" }))).toBe(false);
+  });
+
+  it("an immediate re-registration is allowed once per window (no registration storm)", () => {
+    const gate = new QuickReregisterGate();
+    expect(gate.tryTake(1_000)).toBe(true);
+    expect(gate.tryTake(1_000 + QUICK_REREGISTER_MIN_INTERVAL_MS - 1)).toBe(false);
+    expect(gate.tryTake(1_000 + QUICK_REREGISTER_MIN_INTERVAL_MS)).toBe(true);
+    // Ten registrations in ten minutes is the BHV008 threshold: the quick path alone stays well under it.
+    expect(10 * 60_000 / QUICK_REREGISTER_MIN_INTERVAL_MS).toBeLessThan(10);
+  });
+
+  it("the mesh socket refusals that mean the coordinator does not know us", () => {
+    expect(isNotRegisteredWsClose(4005, "agent_not_registered")).toBe(true);
+    expect(isNotRegisteredWsClose(4001, "mesh_unauthorized")).toBe(true);
+    expect(isNotRegisteredWsClose(4003, "invalid_signature")).toBe(false);
+    expect(isNotRegisteredWsClose(4004, "replaced_by_new_connection")).toBe(false);
+    expect(isNotRegisteredWsClose(1006, "")).toBe(false);
   });
 });
 
