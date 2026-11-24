@@ -208,6 +208,8 @@ function noCapacityError(json: Record<string, unknown>, model: string): NetworkI
   if (json.reason === "none_in_class") {
     return new NetworkInferenceError(`No ${String(json.computeClass ?? "requested-class")} machine runs ${model} right now (machines of other classes do). Nothing was charged; try another class or try again later.`, 503, retryAfterSec);
   }
+  // Genuinely busy: the model's machines are online but none took the call in time (a job no machine
+  // can run, or one over the price ceiling, is a no_route_fits before anything is queued).
   return new NetworkInferenceError(`Every machine that runs ${model} is busy and none could start this request in time. Nothing was charged; try again in ${retryAfterSec} s.`, 503, retryAfterSec);
 }
 
@@ -311,7 +313,12 @@ async function* streamSubmitted(
       if (err === "route_elsewhere" && typeof sub.json.coordinatorUrl === "string") throw new RouteElsewhereError(sub.json.coordinatorUrl, sub.json.routing as Record<string, unknown> | undefined);
       // An older coordinator looks for a model called "auto"; one that routes says no_route_fits.
       if (err === "no_agent_has_model") throw new AutoUnsupportedError();
-      if (err === "no_route_fits") throw new NetworkInferenceError(`No model on the network fits this request: ${String(sub.json.detail ?? "nothing is available")}.`, 404, undefined, noRouteInfo(sub.json));
+      if (err === "no_route_fits") {
+        const detail = String(sub.json.detail ?? "nothing is available");
+        // A coordinator that words the whole reason ("No machine on the network can run this job right now (needs …)") is shown as is.
+        const msg = /^No machine on the network can run/.test(detail) ? `${detail}. Nothing was charged.` : `No model on the network fits this request: ${detail}.`;
+        throw new NetworkInferenceError(msg, 404, undefined, noRouteInfo(sub.json));
+      }
     }
     const msg =
       err === "no_agent_has_model" ? `No machine on the network has ${req.model} right now.` :
@@ -336,12 +343,14 @@ async function* streamSubmitted(
   }
   const subtaskId = String(sub.json.subtaskId);
   const routed = typeof (sub.json.routing as { line?: unknown } | undefined)?.line === "string" ? String((sub.json.routing as { line: string }).line) : undefined;
+  const routedModel = typeof (sub.json.routing as { model?: unknown } | undefined)?.model === "string" ? String((sub.json.routing as { model: string }).model) : undefined;
   let after = 0;
   const deadline = Date.now() + 6 * 60_000;
   while (Date.now() < deadline) {
     if (signal?.aborted) return;
     const r = await readStream(d, { taskId, subtaskId, after }, signal);
-    if (r.status === 503 && r.json.error === "no_capacity") throw noCapacityError(r.json, req.model);
+    // model "auto": the busy machines are the ones running the model best fit chose for it.
+    if (r.status === 503 && r.json.error === "no_capacity") throw noCapacityError(r.json, req.model === "auto" ? routedModel ?? "the model best fit chose" : req.model);
     if (r.status !== 200) throw new NetworkInferenceError(`Network stream failed: ${String(r.json.error ?? r.status)}`, 502);
     const chunks = (r.json.chunks as string[]) ?? [];
     for (const c of chunks) if (c) yield { delta: c };

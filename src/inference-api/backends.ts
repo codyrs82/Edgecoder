@@ -229,7 +229,10 @@ export function autoBackend(opts: {
     const bestFitHints = (): RoutingHints => {
       const ceiling = Number.isFinite(allowance) ? Math.min(req.hints?.maxCSats ?? Infinity, allowance) : req.hints?.maxCSats;
       const cls = policy === "network_only" && planOpts.computeClass && planOpts.computeClass !== "any" ? { computeClass: planOpts.computeClass } : {};
-      return { ...req.hints, complexity: estimated.score, ...cls, ...(ceiling !== undefined && Number.isFinite(ceiling) ? { maxCSats: Math.max(0.001, ceiling) } : {}) };
+      // A bot's agent step: its size floor goes along, so best fit never places it on a smaller
+      // model (it takes a cloud model when nothing else on the network is big enough).
+      const floor = workload.heavy && planOpts.agentMinParamsB && planOpts.agentMinParamsB > 0 ? { minParamsB: planOpts.agentMinParamsB } : {};
+      return { ...req.hints, complexity: estimated.score, ...cls, ...floor, ...(ceiling !== undefined && Number.isFinite(ceiling) ? { maxCSats: Math.max(0.001, ceiling) } : {}) };
     };
     // The small free fallback is always tried, whatever maxTries cuts (the best-fit leg does not count).
     const main = routes.filter((r) => !r.fallback).slice(0, (opts.maxTries ?? 4) + (routes.some((r) => r.bestFit) ? 1 : 0));

@@ -286,7 +286,7 @@ export const bestFitEnv = {
   BEST_FIT_OVERSIZE_PENALTY: fraction(),
   BEST_FIT_PEERS: envFlag({ off: ["0", "false"] }),
   BEST_FIT_COMPLEXITY_WEIGHTS_JSON: envJson(),
-  /** Cloud model ids Auto may use (autoEligible catalog entries only); empty = off. docs/cloud-host.md. */
+  /** Cloud models Auto may use: unset = every autoEligible catalog model, a comma list = only those, "off" = none. docs/cloud-host.md. */
   AUTO_CLOUD_MODELS: str()
 };
 
