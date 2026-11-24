@@ -207,7 +207,9 @@ cost (msat)      = seconds × rate
   when set) as a `task_reserve` row, tops it up once the task is split, and refunds the unused part
   when the task finishes (`task_submit_refund:<task>`). Not enough balance returns 402
   `insufficient_credits`.
-- Work on your own machines is not charged.
+- Work on your own machines is not charged, and earns nothing: a network call or job that lands on
+  a machine of the account that sent it (or of an account sharing a member with it) takes nothing
+  from the reserve, which is refunded whole, and accrues no earnings.
 - An agent never earns more than the requester is charged: each result's cost is taken from what
   the task set aside and not yet used, and pays only that much. Work with nothing set aside (an
   anonymous `/submit`) earns nothing.

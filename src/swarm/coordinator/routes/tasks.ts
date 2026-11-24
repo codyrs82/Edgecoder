@@ -791,7 +791,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         const worstCase = taskBilling.get(body.taskId)?.perSubtaskReserveMsat ?? 0;
         const reported = (rawBody as { peerCostMsat?: unknown }).peerCostMsat;
         const peerCost = typeof reported === "number" && Number.isFinite(reported) && reported >= 0 ? reported : worstCase;
-        chargedMsat = body.ok ? chargePeerWork(body.taskId, Math.min(peerCost, worstCase)) : 0;
+        chargedMsat = body.ok ? await chargePeerWork(body.taskId, Math.min(peerCost, worstCase), body.agentId) : 0;
         remoteGrants.settle(body.subtaskId, chargedMsat, Date.now());
         if (taskOpenCount(body.taskId) === 0) orderBook.removeBid(body.taskId);
       }

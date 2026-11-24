@@ -2346,6 +2346,18 @@ export class PostgresStore {
     );
   }
 
+  /** Whether two credit accounts have a member (user) in common (account_memberships). */
+  async accountsShareMember(a: string, b: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `SELECT 1 FROM account_memberships x
+       INNER JOIN account_memberships y ON y.user_id = x.user_id
+       WHERE x.account_id = $1 AND y.account_id = $2
+       LIMIT 1`,
+      [a, b]
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
   async linkAgentOwnership(input: {
     agentId: string;
     accountId: string;
