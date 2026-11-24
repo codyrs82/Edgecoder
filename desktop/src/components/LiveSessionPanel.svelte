@@ -159,7 +159,7 @@
       sendWhileWorking
     >
       {#snippet controls()}
-        <PermissionModePicker {mode} onChange={setMode} disabled={!view || view.deleted} />
+        <PermissionModePicker {mode} onChange={setMode} disabled={!view || view.deleted} allowFull project={view?.projectRoot ?? null} />
       {/snippet}
     </ChatInput>
   </div>

@@ -110,6 +110,11 @@ describe("create", () => {
     expect(s.transcript.map((t) => t.content)).toEqual(["Started from iPhone"]);
     expect((await command({ action: "settings", sessionId: s.id, mode: "auto" })).body).toMatchObject({ status: "refused", error: "auto_on_mac" });
     expect(hub.peek(s.id)!.mode).toBe("plan");
+    // Full access is turned on from the Mac only, like Auto.
+    expect((await command({ action: "settings", sessionId: s.id, mode: "full" })).body).toMatchObject({ status: "refused", error: "full_on_mac" });
+    expect((await command({ action: "create", projectId: projectIdOf(root, SALT), mode: "full" })).body).toMatchObject({ status: "refused", error: "full_on_mac" });
+    expect(hub.peek(s.id)!.mode).toBe("plan");
+    expect(hub.list()).toHaveLength(1);
   });
 });
 

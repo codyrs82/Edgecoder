@@ -1,35 +1,45 @@
 <script lang="ts">
   // The permission mode picker beside the composer, like Claude Code's: a quiet button with the
-  // current mode, and a list of the four modes (title, one-line description, a check on the
-  // current one, number keys 1–4). Up/Down move, Enter picks, Escape or a click away closes.
-  import { Check, ChevronDown, ShieldCheck, Hand, FilePen, ListChecks } from "@lucide/svelte";
+  // current mode, and a list of the modes (title, one-line description, a check on the current
+  // one, number keys 1–5). Up/Down move, Enter picks, Escape or a click away closes. Full access
+  // is offered only where `allowFull` (Code view chats and sessions, never bots), and picking it
+  // the first time in a project asks for a confirm.
+  import { Check, ChevronDown, ShieldCheck, Hand, FilePen, ListChecks, ShieldAlert } from "@lucide/svelte";
   import { tick } from "svelte";
-  import { MODE_OPTIONS, modeOption, optionForKey, type EngineMode } from "../lib/permission-modes";
+  import Dialog from "./ui/Dialog.svelte";
+  import { confirmFullAccess, FULL_ACCESS_WARNING, fullAccessConfirmed, modeOption, modeOptions, optionForKey, type EngineMode } from "../lib/permission-modes";
 
   interface Props {
-    /** The current mode (the engine's name: ask, auto-edits, auto or plan). */
+    /** The current mode (the engine's name: ask, auto-edits, auto, plan or full). */
     mode: EngineMode;
     onChange: (mode: EngineMode) => void;
     disabled?: boolean;
     /** Open upward (it sits under the message box). */
     up?: boolean;
+    /** Offer Full access (Code view chats and live sessions; not bots). */
+    allowFull?: boolean;
+    /** The project folder the confirm for Full access is remembered for. */
+    project?: string | null;
   }
-  let { mode, onChange, disabled = false, up = true }: Props = $props();
+  let { mode, onChange, disabled = false, up = true, allowFull = false, project = null }: Props = $props();
 
   let open = $state(false);
   let active = $state(0);
   let root: HTMLDivElement | undefined = $state();
   let trigger: HTMLButtonElement | undefined = $state();
   let list: HTMLDivElement | undefined = $state();
+  let confirming = $state(false);
   const uid = $props.id();
   const current = $derived(modeOption(mode));
-  const ICONS = { auto: ShieldCheck, manual: Hand, "accept-edits": FilePen, plan: ListChecks } as const;
+  // A chat already in Full access keeps showing it, even where it isn't offered.
+  const options = $derived(modeOptions(allowFull || mode === "full"));
+  const ICONS = { auto: ShieldCheck, manual: Hand, "accept-edits": FilePen, plan: ListChecks, full: ShieldAlert } as const;
   const TriggerIcon = $derived(ICONS[current.id]);
 
   async function show() {
     if (disabled) return;
     open = true;
-    active = Math.max(0, MODE_OPTIONS.findIndex((o) => o.engine === mode));
+    active = Math.max(0, options.findIndex((o) => o.engine === mode));
     await tick();
     list?.focus();
   }
@@ -40,30 +50,42 @@
   }
 
   function pick(engine: EngineMode) {
+    if (engine === "full" && engine !== mode && !fullAccessConfirmed(project)) {
+      close(false);
+      confirming = true;
+      return;
+    }
     if (engine !== mode) onChange(engine);
     close();
   }
 
+  function confirmFull() {
+    confirmFullAccess(project);
+    confirming = false;
+    onChange("full");
+    trigger?.focus();
+  }
+
   function onListKey(e: KeyboardEvent) {
-    const byKey = optionForKey(e.key);
+    const byKey = optionForKey(e.key, options);
     if (byKey) {
       e.preventDefault();
       pick(byKey.engine);
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
-      active = (active + 1) % MODE_OPTIONS.length;
+      active = (active + 1) % options.length;
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      active = (active - 1 + MODE_OPTIONS.length) % MODE_OPTIONS.length;
+      active = (active - 1 + options.length) % options.length;
     } else if (e.key === "Home") {
       e.preventDefault();
       active = 0;
     } else if (e.key === "End") {
       e.preventDefault();
-      active = MODE_OPTIONS.length - 1;
+      active = options.length - 1;
     } else if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      pick(MODE_OPTIONS[active].engine);
+      pick(options[active].engine);
     } else if (e.key === "Escape" || e.key === "Tab") {
       if (e.key === "Escape") e.preventDefault();
       close(e.key === "Escape");
@@ -84,6 +106,7 @@
     class="trigger"
     class:plan={mode === "plan"}
     class:auto={mode === "auto"}
+    class:full={mode === "full"}
     aria-haspopup="listbox"
     aria-expanded={open}
     aria-controls={open ? `${uid}-list` : undefined}
@@ -109,12 +132,13 @@
       onkeydown={onListKey}
     >
       <div class="menu-title" aria-hidden="true">Permission mode</div>
-      {#each MODE_OPTIONS as o, i (o.id)}
+      {#each options as o, i (o.id)}
         {@const Icon = ICONS[o.id]}
         <div
           id="{uid}-opt-{i}"
           class="option"
           class:active={i === active}
+          class:full={o.engine === "full"}
           role="option"
           aria-selected={o.engine === mode}
           tabindex="-1"
@@ -136,6 +160,20 @@
   {/if}
 </div>
 
+{#if confirming}
+  <Dialog labelledby="{uid}-full-title" width="440px" onClose={() => { confirming = false; trigger?.focus(); }}>
+    <div class="full-confirm">
+      <h2 id="{uid}-full-title"><ShieldAlert size={16} aria-hidden="true" /> Turn on Full access?</h2>
+      <p>{FULL_ACCESS_WARNING}</p>
+      <p class="muted">Asked once per project. Bots, the phone and other accounts never get Full access.</p>
+      <div class="actions">
+        <button type="button" class="btn" onclick={() => { confirming = false; trigger?.focus(); }}>Cancel</button>
+        <button type="button" class="btn btn--primary" onclick={confirmFull}>Turn on Full access</button>
+      </div>
+    </div>
+  </Dialog>
+{/if}
+
 <style>
   .mode-picker { position: relative; display: inline-flex; }
   .trigger {
@@ -144,6 +182,14 @@
   }
   .trigger:hover, .trigger[aria-expanded="true"] { background: var(--bg-elevated); color: var(--text-primary); }
   .trigger.plan { color: var(--accent); }
+  .trigger.full { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); font-weight: 500; }
+  .option.full .icon, .option.full .title { color: var(--warn); }
+  .full-confirm { display: flex; flex-direction: column; gap: 10px; padding: 18px; }
+  .full-confirm h2 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 15px; color: var(--text-primary); }
+  .full-confirm h2 :global(svg) { color: var(--warn); }
+  .full-confirm p { margin: 0; font-size: 13px; line-height: 1.45; color: var(--text-primary); }
+  .full-confirm .muted { color: var(--text-secondary); font-size: 12px; }
+  .full-confirm .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
   .trigger:disabled { opacity: 0.5; cursor: default; }
   .menu {
     position: absolute; left: 0; z-index: 50; width: min(340px, calc(100vw - 32px)); padding: 6px;

@@ -10,10 +10,13 @@
  *   auto-edits  edits apply without asking (each turn's checkpoint keeps them undoable); commands ask
  *   auto        safe commands and edits apply; risky ones ask; dangerous ones are refused
  *   plan        read-only tools only, until the user approves the agent's plan
+ *   full        nothing asks: edits, commands, commits, pushes and PRs run; only the hard refusals
+ *               (sudo, wiping a disk or the project, download-and-run, secrets) stay refused. Set on
+ *               this computer only (never from the phone, the web or another account's client).
  *
  * permission-policy.ts decides each call (decideToolCall); docs/permission-modes.md has the tables.
  *
- * Whatever the mode: pushes and pull requests ask, edits to protected paths (the git directory,
+ * Whatever the mode but full: pushes and pull requests ask, edits to protected paths (the git directory,
  * hooks, files tooling executes) ask, and the executor's own refusals still apply.
  */
 
@@ -24,8 +27,10 @@ import { dirname, join, resolve } from "node:path";
 import { classifyRelativePath, isWithin, parseArgv, realPathEscape } from "./tool-executor.js";
 import { isValidRule } from "./permission-policy.js";
 
-export type PermissionMode = "ask" | "auto-edits" | "auto" | "plan";
-export const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "auto-edits", "auto", "plan"];
+export type PermissionMode = "ask" | "auto-edits" | "auto" | "plan" | "full";
+export const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "auto-edits", "auto", "plan", "full"];
+/** The modes Shift+Tab cycles through: Full access is picked on purpose (`/mode full`), never cycled into. */
+export const CYCLE_MODES: readonly PermissionMode[] = ["ask", "auto-edits", "auto", "plan"];
 /** The modes a plan can be approved into. */
 export const EXECUTION_MODES: readonly PermissionMode[] = ["ask", "auto-edits", "auto"];
 
@@ -33,9 +38,14 @@ export function isPermissionMode(v: unknown): v is PermissionMode {
   return typeof v === "string" && (PERMISSION_MODES as readonly string[]).includes(v);
 }
 
-/** The next mode for Shift+Tab. */
+/** Modes whose file edits inside the project apply without asking (older clients' autoApprove "edits"). */
+export function editsApply(m: PermissionMode): boolean {
+  return m === "auto-edits" || m === "auto" || m === "full";
+}
+
+/** The next mode for Shift+Tab (from Full access: back to Manual). */
 export function nextMode(m: PermissionMode): PermissionMode {
-  return PERMISSION_MODES[(PERMISSION_MODES.indexOf(m) + 1) % PERMISSION_MODES.length];
+  return CYCLE_MODES[(CYCLE_MODES.indexOf(m) + 1) % CYCLE_MODES.length];
 }
 
 /** Commands that only read. Arguments are checked per program (readOnlyArgs). */

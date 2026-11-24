@@ -728,7 +728,7 @@ export interface ToolRunnerDeps {
   shellHint?: (command: string, output: string) => string | null;
 }
 
-/** Tools that ask every time, whatever auto-approve settings say. */
+/** Tools that ask every time, whatever auto-approve settings say (except a Full access verdict from decide). */
 export const ALWAYS_ASK_TOOLS: ReadonlySet<ToolName> = new Set<ToolName>(["open_pull_request", "git_push", "git_commit"]);
 
 function deepFreeze<T>(value: T): T {
@@ -778,8 +778,9 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
       }
       requiresApproval = verdict.action === "ask" && !(shellAutoApprove && !ALWAYS_ASK_TOOLS.has(tool));
       // A command the mode lets run counts as approved for the executor's shell policy; edits never
-      // do (the executor still guards protected paths for them).
-      always = !requiresApproval && tool === "run_shell";
+      // do (the executor still guards protected paths for them), except in Full access, where the
+      // verdict itself says the user approved every call (the executor's hard refusals still apply).
+      always = !requiresApproval && (tool === "run_shell" || verdict.approved === true);
       allowRule = requiresApproval ? verdict.rule : undefined;
     } else {
       const autoEdits = typeof d.autoApproveEdits === "function" ? d.autoApproveEdits() : d.autoApproveEdits === true;

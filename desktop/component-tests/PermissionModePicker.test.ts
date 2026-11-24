@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { render, screen, cleanup, fireEvent } from "@testing-library/svelte";
 import PermissionModePicker from "../src/components/PermissionModePicker.svelte";
 import PlanApproval from "../src/components/PlanApproval.svelte";
-import { chatMode, defaultMode, engineMode, setDefaultMode, uiMode } from "../src/lib/permission-modes";
+import { chatMode, defaultMode, engineMode, EXECUTION_OPTIONS, setDefaultMode, uiMode } from "../src/lib/permission-modes";
 
 afterEach(cleanup);
 beforeEach(() => localStorage.clear());
@@ -99,5 +99,70 @@ describe("PlanApproval", () => {
     expect(onApprove).toHaveBeenLastCalledWith("auto");
     await fireEvent.click(screen.getByRole("button", { name: "Revise" }));
     expect(onRevise).toHaveBeenCalled();
+  });
+});
+
+describe("Full access in the picker", () => {
+  it("isn't offered unless allowed (bots)", async () => {
+    render(PermissionModePicker, { mode: "ask", onChange: vi.fn() });
+    await fireEvent.click(screen.getByRole("button", { name: /Manual/ }));
+    expect(screen.getAllByRole("option").map((o) => o.getAttribute("data-mode"))).not.toContain("full");
+    await fireEvent.keyDown(screen.getByRole("listbox"), { key: "5" });
+    expect(screen.getByRole("listbox")).toBeTruthy();
+  });
+
+  it("is the fifth option where allowed, and asks for a confirm once per project", async () => {
+    const onChange = vi.fn();
+    const { unmount } = render(PermissionModePicker, { mode: "auto-edits", onChange, allowFull: true, project: "/work/app" });
+    await fireEvent.click(screen.getByRole("button", { name: /Accept edits/ }));
+    const options = screen.getAllByRole("option");
+    expect(options.map((o) => o.querySelector(".title")!.textContent)).toEqual(["Auto", "Manual", "Accept edits", "Plan", "Full access"]);
+    expect(options[4].querySelector(".key")!.textContent).toBe("5");
+    expect(options[4].querySelector(".desc")!.textContent).toMatch(/never asks/i);
+
+    // Cancel: nothing changes.
+    await fireEvent.keyDown(screen.getByRole("listbox"), { key: "5" });
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toMatch(/runs commands, edits, installs and pushes without asking/);
+    expect(dialog.textContent).toMatch(/only a few destructive or secret-leaking commands are still blocked/);
+    expect(onChange).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onChange).not.toHaveBeenCalled();
+
+    // Confirm: switches, and the project doesn't ask again.
+    await fireEvent.click(screen.getByRole("button", { name: /Accept edits/ }));
+    await fireEvent.click(screen.getAllByRole("option")[4]);
+    await fireEvent.click(await screen.findByRole("button", { name: "Turn on Full access" }));
+    expect(onChange).toHaveBeenLastCalledWith("full");
+    unmount();
+
+    const again = vi.fn();
+    const second = render(PermissionModePicker, { mode: "ask", onChange: again, allowFull: true, project: "/work/app" });
+    await fireEvent.click(screen.getByRole("button", { name: /Manual/ }));
+    await fireEvent.keyDown(screen.getByRole("listbox"), { key: "5" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(again).toHaveBeenCalledWith("full");
+    second.unmount();
+
+    // Another project asks again.
+    const other = vi.fn();
+    render(PermissionModePicker, { mode: "ask", onChange: other, allowFull: true, project: "/work/other" });
+    await fireEvent.click(screen.getByRole("button", { name: /Manual/ }));
+    await fireEvent.keyDown(screen.getByRole("listbox"), { key: "5" });
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+    expect(other).not.toHaveBeenCalled();
+  });
+
+  it("shows Full access distinctly on the button", () => {
+    render(PermissionModePicker, { mode: "full", onChange: vi.fn(), allowFull: true, project: "/work/app" });
+    const button = screen.getByRole("button", { name: /Full access/ });
+    expect(button.classList.contains("full")).toBe(true);
+  });
+
+  it("maps to the engine's full mode; plans never continue in it", () => {
+    expect(engineMode("full")).toBe("full");
+    expect(uiMode("full")).toBe("full");
+    expect(EXECUTION_OPTIONS.map((o) => o.engine)).not.toContain("full");
   });
 });

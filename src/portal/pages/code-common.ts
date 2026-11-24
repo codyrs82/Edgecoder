@@ -83,6 +83,7 @@ export const CODE_COMMON_JS = String.raw`
     var CODE_MODES = [["ask", "Ask", "Asks before every edit and command."], ["auto-edits", "Accept edits", "Edits files without asking; still asks before commands."], ["plan", "Plan", "Writes a plan first; nothing changes until you approve it."]];
     function codeModeLabel(mode) {
       if (mode === "auto") return "Auto (set on the Mac)";
+      if (mode === "full") return "Full access (set on the Mac)";
       for (var i = 0; i < CODE_MODES.length; i++) if (CODE_MODES[i][0] === mode) return CODE_MODES[i][1];
       return mode || "";
     }

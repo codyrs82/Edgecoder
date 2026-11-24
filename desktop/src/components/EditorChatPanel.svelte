@@ -600,7 +600,7 @@
           <ComputePicker selected={$computeChoice} onSelect={(id) => computeChoice.set(id)} />
           {#if !usePortalChat}
             <HelpersPicker {helpers} onChange={setHelpers} />
-            <PermissionModePicker {mode} onChange={setMode} />
+            <PermissionModePicker {mode} onChange={setMode} allowFull project={conversation.projectRoot ?? projectRoot ?? null} />
           {/if}
         {/snippet}
       </ChatInput>

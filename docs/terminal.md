@@ -50,7 +50,7 @@ untrusted unless you pass `--trust`.
 | `--worker <id>` | The worker model, for helpers and delegated work. The default is `auto`. It can't be a frontier model. |
 | `--compute local\|network\|mine\|auto` | Where the model runs. A default model is picked for that place. |
 | `--remote` | Show the session live in the app from the start. |
-| `--mode ask\|auto-edits\|auto\|plan` | How much it asks first (below). Default: `auto-edits` in a git repository with a clean working tree (the checkpoint and git both keep the originals), else `ask`. |
+| `--mode ask\|auto-edits\|auto\|plan\|full` | How much it asks first (below). Default: `auto-edits` in a git repository with a clean working tree (the checkpoint and git both keep the originals), else `ask`. |
 | `--auto-edits` | Same as `--mode auto-edits`. |
 | `--resume <id>`, `--list` | Continue a saved session, or list them. |
 | `--provider <url>`, `--standalone`, `--port <n>` | Which provider to use (next section). |
@@ -88,6 +88,7 @@ app's Code view shows the same mode with a picker under the message box.
 | `auto-edits` (Accept edits) | apply (each turn stays undoable) | ask |
 | `auto` | apply | safe ones run (tests, lint, build, git add/commit on a work branch); risky ones ask; dangerous ones are refused |
 | `plan` | refused | read-only only, until you approve the plan with `/approve [mode]` |
+| `full` (Full access) | apply | run without asking (pushes and PRs too); only sudo, wiping a disk or the project, download-and-run and secrets are refused. Set with `--mode full` or `/mode full`; Shift+Tab never cycles into it |
 
 Read-only commands never ask, pushes and pull requests always ask, and "always" answers keep a
 rule such as `npm test:*` for the project. [Permission modes](permission-modes.md) has the full
@@ -97,7 +98,7 @@ run / ask / refuse tables and the rules for "always".
 | --- | --- |
 | `/model [name]` | Show or set the model. A bare name keeps the current place (`network/` stays network). |
 | `/compute [local\|network\|mine\|auto]` | Where the model runs. |
-| `/mode [ask\|auto-edits\|auto\|plan]` | How much it asks first (Shift+Tab cycles). |
+| `/mode [ask\|auto-edits\|auto\|plan\|full]` | How much it asks first (Shift+Tab cycles; `full` only by name). |
 | `/approve [ask\|auto-edits\|auto]` | In plan mode: approve the plan and carry it out (default auto-edits). |
 | `/stop` | Stop the reply (Esc). Queued messages run next. |
 | `/queue`, `/unqueue [n]` | List queued messages; remove one (default the last). |

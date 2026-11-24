@@ -23,7 +23,7 @@ import { join, resolve } from "node:path";
 import { ALWAYS_ASK_TOOLS, makeToolRunner, runAgentLoop, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
 import { toolchainFailureHint } from "./toolchain.js";
 import type { CheckpointStore } from "./checkpoints.js";
-import { defaultMode, defaultPermissionsFile, EXECUTION_MODES, PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
+import { defaultMode, defaultPermissionsFile, editsApply, EXECUTION_MODES, PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
 import { classifyCommand, decideToolCall, suggestToolRule, type Decision } from "./permission-policy.js";
 import { isWithin } from "./tool-executor.js";
 import { redactApiKeys } from "../../common/redaction.js";
@@ -208,7 +208,7 @@ export interface TurnEnv {
 }
 
 export class SessionError extends Error {
-  constructor(readonly code: "not_found" | "busy" | "invalid" | "checkpoint_gone" | "nothing_to_undo", message: string, readonly extra: Record<string, unknown> = {}) {
+  constructor(readonly code: "not_found" | "busy" | "invalid" | "checkpoint_gone" | "nothing_to_undo" | "forbidden", message: string, readonly extra: Record<string, unknown> = {}) {
     super(message);
   }
 }
@@ -409,6 +409,7 @@ export class SessionHub {
     const now = Date.now();
     const parsed = parseModelId(input.model || "auto");
     const mode: PermissionMode = input.mode ?? (input.autoApprove === "edits" ? "auto-edits" : input.autoApprove === "none" ? "ask" : defaultMode(input.projectRoot, this.permissions.get(input.projectRoot)));
+    if (mode === "full") this.assertMaySetFull(input.client, input.ownerAccount ?? this.env.owner?.());
     const s: SessionData = {
       id: randomUUID(),
       title: input.title?.trim() || "New session",
@@ -417,7 +418,7 @@ export class SessionHub {
       model: parsed.model,
       compute: parsed.compute,
       mode,
-      autoApprove: mode === "auto-edits" || mode === "auto" ? "edits" : "none",
+      autoApprove: editsApply(mode) ? "edits" : "none",
       alwaysShell: [],
       origin: input.client.kind,
       published: false,
@@ -669,7 +670,7 @@ export class SessionHub {
       tool,
       args,
       {
-        mode: s.mode,
+        mode: this.modeFor(s, by),
         root: s.projectRoot,
         rules: [...(project.rules ?? []), ...s.alwaysShell],
         legacyNames: [...project.shell, ...s.alwaysShell],
@@ -687,9 +688,12 @@ export class SessionHub {
    */
   private remoteDecision(s: SessionData, tool: ToolName, args: Record<string, unknown>): Decision {
     const branch = () => this.env.branch?.(s.projectRoot) ?? s.branch;
-    const base = decideToolCall(tool, args, { mode: s.mode, root: s.projectRoot, branch });
+    // Full access is for this computer's own clients: a phone turn in a Full access session runs
+    // under the remote rules as Accept edits (edits inside the project apply, commands ask).
+    const mode: PermissionMode = s.mode === "full" ? "auto-edits" : s.mode;
+    const base = decideToolCall(tool, args, { mode, root: s.projectRoot, branch });
     if (tool === "run_shell") {
-      if (s.mode === "plan") return base;
+      if (mode === "plan") return base;
       const cls = classifyCommand(args.command, { root: s.projectRoot, branch: branch() });
       if (cls.category === "outside") return { action: "refuse", reason: `Refused from the phone: ${cls.reason}. Run it from the Mac.` };
       if (cls.action === "refuse") return { action: "refuse", reason: `Refused from the phone: ${cls.reason}.` };
@@ -706,6 +710,38 @@ export class SessionHub {
     return { action: base.action, reason: base.reason };
   }
 
+  /** The session's owner: the account recorded when it was created, else the one signed in here. */
+  private ownerOf(s: Pick<SessionData, "ownerAccount">): string | undefined {
+    return s.ownerAccount ?? this.env.owner?.();
+  }
+
+  /**
+   * True when `by` acts for another account than the session's owner (a shared session's attached
+   * client signed in elsewhere). A client with no account is this computer's own (the IDE token),
+   * like frontier-access.ts's requester check.
+   */
+  private otherAccount(s: Pick<SessionData, "ownerAccount">, by: ClientRef | null): boolean {
+    if (!by?.accountId) return false;
+    const owner = this.ownerOf(s);
+    return !owner || by.accountId !== owner;
+  }
+
+  /**
+   * The mode a turn started by `by` runs in. Full access serves only this computer's own clients
+   * and the owner's account (like a frontier lead); another account's message, or a phone/web turn,
+   * runs as Accept edits.
+   */
+  modeFor(s: SessionData, by: ClientRef | null): PermissionMode {
+    if (s.mode === "full" && (by?.kind === "remote" || this.otherAccount(s, by))) return "auto-edits";
+    return s.mode;
+  }
+
+  /** Full access is turned on from this computer only: never from the phone or web, never by another account. */
+  private assertMaySetFull(client: ClientRef, owner: string | undefined): void {
+    if (client.kind === "remote") throw new SessionError("forbidden", "Full access is turned on from the Mac, not from the phone or the web.");
+    if (client.accountId && (!owner || client.accountId !== owner)) throw new SessionError("forbidden", "Only the session's owner can turn on Full access.");
+  }
+
   /** A call that runs without asking in the session's mode (kept for callers that only need yes/no). */
   allowedWithoutAsking(s: SessionData, tool: ToolName, args: Record<string, unknown>): boolean {
     return this.decide(s, tool, args).action === "run";
@@ -713,7 +749,7 @@ export class SessionHub {
 
   private waitForApproval(s: SessionData, l: Live, r: Running, callId: string, tool: ToolName, args: Record<string, unknown>): Promise<boolean> {
     // The mode or an "always" answer given meanwhile (never for the tools that always ask).
-    if (!ALWAYS_ASK_TOOLS.has(tool) && this.decide(s, tool, args, r.by ?? null).action === "run") {
+    if ((!ALWAYS_ASK_TOOLS.has(tool) || this.modeFor(s, r.by ?? null) === "full") && this.decide(s, tool, args, r.by ?? null).action === "run") {
       this.emit(s.id, { type: "approval", id: callId, approved: true, by: "always" });
       return Promise.resolve(true);
     }
@@ -753,7 +789,7 @@ export class SessionHub {
         if (rule && !s.alwaysShell.includes(rule)) s.alwaysShell.push(rule);
         if (rule) this.permissions.addRule(s.projectRoot, rule);
       }
-      s.autoApprove = s.mode === "auto-edits" || s.mode === "auto" ? "edits" : "none";
+      s.autoApprove = editsApply(s.mode) ? "edits" : "none";
       this.save(s);
       this.emit(id, { type: "settings", mode: s.mode, autoApprove: s.autoApprove, alwaysShell: [...s.alwaysShell], by: client.kind, ...(client.label ? { label: client.label } : {}) });
     }
@@ -785,6 +821,7 @@ export class SessionHub {
   /** Settings from any client; every client hears the change and who made it. */
   update(id: string, patch: { model?: string; leadModel?: string; workerModel?: string; title?: string; autoApprove?: "none" | "edits"; mode?: PermissionMode }, client: ClientRef): SessionData {
     const s = this.need(id);
+    if (patch.mode === "full" && s.mode !== "full") this.assertMaySetFull(client, this.ownerOf(s));
     const lead = patch.leadModel ?? patch.model;
     if (lead) {
       const p = parseModelId(lead);
@@ -797,14 +834,14 @@ export class SessionHub {
     }
     if (patch.title?.trim()) s.title = patch.title.trim().slice(0, 120);
     if (patch.mode) s.mode = patch.mode;
-    else if (patch.autoApprove) s.mode = patch.autoApprove === "edits" ? (s.mode === "auto" ? "auto" : "auto-edits") : "ask";
-    s.autoApprove = s.mode === "auto-edits" || s.mode === "auto" ? "edits" : "none";
+    else if (patch.autoApprove) s.mode = patch.autoApprove === "edits" ? (s.mode === "auto" || s.mode === "full" ? s.mode : "auto-edits") : "ask";
+    s.autoApprove = editsApply(s.mode) ? "edits" : "none";
     this.save(s);
     // Calls waiting for an answer that the new mode runs without asking go ahead now.
     if (patch.mode) {
       const l = this.liveOf(id);
       for (const [callId, p] of [...l.pending]) {
-        if (ALWAYS_ASK_TOOLS.has(p.tool) || this.decide(s, p.tool, p.args).action !== "run") continue;
+        if ((ALWAYS_ASK_TOOLS.has(p.tool) && this.modeFor(s, l.running?.by ?? null) !== "full") || this.decide(s, p.tool, p.args).action !== "run") continue;
         l.pending.delete(callId);
         clearTimeout(p.timer);
         this.emit(id, { type: "approval", id: callId, approved: true, by: "always" });

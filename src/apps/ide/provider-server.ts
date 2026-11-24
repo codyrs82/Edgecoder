@@ -1301,8 +1301,8 @@ const ideChatSchema = z.object({
   githubToken: z.string().optional(),
   /** Older clients: "edits" = mode auto-edits. */
   autoApprove: z.enum(["none", "edits"]).default("none"),
-  /** The permission mode (permission-policy.ts): ask, auto-edits, auto or plan. Wins over autoApprove. */
-  mode: z.enum(["ask", "auto-edits", "auto", "plan"]).optional(),
+  /** The permission mode (permission-policy.ts): ask, auto-edits, auto, plan or full. Wins over autoApprove. */
+  mode: z.enum(["ask", "auto-edits", "auto", "plan", "full"]).optional(),
   /** Which desktop view sent it (Settings → Active work / Tasks). */
   origin: z.enum(["chat", "code"]).optional(),
   /** Files attached to the last user message in the composer (attachments.ts). */
