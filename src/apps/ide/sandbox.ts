@@ -68,6 +68,8 @@ export function resetSandboxProbe(): void {
 }
 
 function real(p: string): string {
+  // Windows has no sandbox; its realpath would turn POSIX paths into drive paths.
+  if (process.platform === "win32") return resolve(p);
   try {
     return realpathSync(p);
   } catch {
