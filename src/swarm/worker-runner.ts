@@ -1385,6 +1385,8 @@ type HeartbeatReply = {
 
 function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
   let reconnectDelay = 1000;
+  /** How often the mesh socket is pinged; a missed pong by the next ping ends it (half-open sockets after a coordinator restart). */
+  const MESH_WS_PING_MS = 30_000;
   const MAX_RECONNECT_DELAY = 30_000;
 
   function connect(): void {
@@ -1410,7 +1412,30 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
     // Track which coordinator peerId this WS is registered against
     let registeredPeerId: string | null = null;
 
+    // Liveness: a coordinator that restarted behind Fly's proxy can leave this socket half-open
+    // (no close ever arrives), so the agent would never reconnect. Ping every 30 s; no pong by the
+    // next ping = dead: terminate, and the close handler reconnects.
+    let alive = true;
+    let liveness: ReturnType<typeof setInterval> | undefined;
+    ws.on("pong", () => {
+      alive = true;
+    });
     ws.on("open", () => {
+      alive = true;
+      liveness = setInterval(() => {
+        if (!alive) {
+          console.warn(`[agent:${AGENT_ID}] mesh WebSocket stopped answering pings: reconnecting`);
+          ws.terminate();
+          return;
+        }
+        alive = false;
+        try {
+          ws.ping();
+        } catch {
+          /* the close handler takes over */
+        }
+      }, MESH_WS_PING_MS);
+      liveness.unref?.();
       meshWsOpen = true;
       meshWsEpoch = openedInEpoch;
       console.log(`[agent:${AGENT_ID}] mesh WebSocket connected to ${coordinatorUrl}`);
@@ -1514,6 +1539,7 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
     });
 
     ws.on("close", (code: number, reasonBuf: Buffer) => {
+      if (liveness) clearInterval(liveness);
       if (currentMeshWs === ws) currentMeshWs = null;
       meshWsOpen = false;
       // The coordinator does not know our key (it restarted): register again now rather than after
