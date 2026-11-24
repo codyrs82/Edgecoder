@@ -18,6 +18,7 @@ import {
   IOS_BATTERY_TASK_STOP_LEVEL_PCT
 } from "../context.js";
 import { mutable } from "../mutable-state.js";
+import { coordinatorDrain } from "../drain.js";
 import {
   agentCapabilities,
   lastTaskAssignedByAgent,
@@ -76,7 +77,9 @@ export function registerStatusRoutes(app: CoordinatorApp): void {
     });
   });
 
-  app.get("/health/runtime", async () => {
+  app.get("/health/runtime", async (_req, reply) => {
+    // Stopping for a deploy or restart (../drain.ts): not ready, so the portal and probes pick another.
+    if (coordinatorDrain.draining) return reply.code(503).send({ ok: false, draining: true });
     const status = queue.status();
     const ollamaHost = OLLAMA_HOST ?? "http://127.0.0.1:11434";
     let ollamaReachable = false;

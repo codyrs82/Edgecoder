@@ -50,6 +50,8 @@ export interface LiveView {
   queue: QueuedView[];
   /** The last few things another client did, newest last. */
   notes: string[];
+  /** Older messages were summarized to save tokens: the note shows after the last one it covers. */
+  summary?: { throughId: string; savedTokens: number } | null;
   /** The provider can't replay what was missed: fetch the snapshot again. */
   needsResync: boolean;
   deleted: boolean;
@@ -105,6 +107,15 @@ function messageOf(t: SessionEntry): LiveMessage | null {
   };
 }
 
+/** The newest compaction note in a transcript (where its inline note goes). */
+function summaryOf(transcript: SessionEntry[]): LiveView["summary"] {
+  for (let i = transcript.length - 1; i >= 0; i--) {
+    const c = transcript[i].compaction;
+    if (c?.throughId) return { throughId: c.throughId, savedTokens: Number(c.savedTokens) || 0 };
+  }
+  return null;
+}
+
 /** The plan waiting for approval: the last message is a plan, the session is still in Plan mode and idle. */
 export function pendingPlan(v: LiveView): LiveMessage | null {
   const last = v.messages.at(-1);
@@ -132,6 +143,7 @@ export function viewFromSnapshot(s: SessionSnapshotView): LiveView {
     messages: s.session.transcript.map(messageOf).filter((m): m is LiveMessage => m !== null),
     streaming,
     queue: (s.queue ?? []).map(queuedOf),
+    summary: summaryOf(s.session.transcript),
     notes: [],
     needsResync: false,
     deleted: false,
@@ -184,8 +196,12 @@ export function applySessionEvent(v: LiveView, e: SessionEvent): LiveView {
       const turnId = String(e.turnId);
       return { ...next, messages: v.messages.map((m) => (m.turnId === turnId ? { ...m, turnId: undefined, changedFiles: undefined } : m)) };
     }
+    case "note": {
+      const c = (e.entry as SessionEntry | undefined)?.compaction;
+      return c?.throughId ? { ...next, summary: { throughId: c.throughId, savedTokens: Number(c.savedTokens) || 0 } } : next;
+    }
     case "cleared":
-      return { ...next, messages: [], title: "New session" };
+      return { ...next, messages: [], summary: null, title: "New session" };
     case "resync":
       return { ...next, needsResync: true };
     case "deleted":

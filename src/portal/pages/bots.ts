@@ -104,6 +104,8 @@ export function registerBotsPage(app: FastifyInstance): void {
       .msg.user .msg-who { color:var(--brand-2); }
       .msg.event { font-size:12px; color:var(--muted); padding:6px 0; }
       .msg-body { overflow-wrap:anywhere; }
+      .msg-served { display:flex; align-items:flex-start; gap:4px; margin-top:6px; font-size:11.5px; line-height:1.5; color:var(--muted); overflow-wrap:anywhere; }
+      .msg-served svg { flex:none; margin-top:2px; }
       .msg-body pre { background:var(--bg-input); padding:10px 12px; border-radius:var(--radius-sm); overflow-x:auto; border:1px solid var(--card-border); }
       .msg-body code { font-family:var(--font-mono); font-size:12.5px; }
       .msg-body :not(pre) > code { background:var(--bg-elevated); padding:1px 5px; border-radius:4px; }
@@ -642,14 +644,14 @@ const BOTS_PAGE_JS = String.raw`
     function messageHtml(m) {
       if (m.role === "event") return '<div class="msg event">' + escapeHtml(m.content) + " · " + escapeHtml(when(m.atMs)) + "</div>";
       var who = m.role === "user" ? "You" : state.bot.name;
-      return '<article class="msg ' + escapeHtml(m.role) + '"><div class="msg-head"><span class="msg-who">' + escapeHtml(who) + "</span><time>" + escapeHtml(when(m.atMs)) + '</time></div><div class="msg-body" data-quotable>' + renderMarkdown(m.content || "") + "</div>" + stepsHtml(m.steps) + "</article>";
+      return '<article class="msg ' + escapeHtml(m.role) + '"><div class="msg-head"><span class="msg-who">' + escapeHtml(who) + "</span><time>" + escapeHtml(when(m.atMs)) + '</time></div><div class="msg-body" data-quotable>' + renderMarkdown(m.content || "") + "</div>" + stepsHtml(m.steps) + botServedHtml(m, BOT_ICONS.cpu) + "</article>";
     }
     function renderConversation() {
       var b = state.bot, tail = b.tail || [];
       var firstTail = tail.length ? tail[0].atMs : Infinity;
       var older = state.older.filter(function(m) { return m.atMs < firstTail; });
       var all = older.concat(tail);
-      var sig = all.length + "|" + all.map(function(m) { return m.id + ":" + (m.content || "").length + ":" + ((m.steps || []).length); }).join(",") + "|" + JSON.stringify(b.pending || []) + "|" + canControl();
+      var sig = all.length + "|" + all.map(function(m) { return m.id + ":" + (m.content || "").length + ":" + ((m.steps || []).length) + ":" + (m.served ? m.served.calls : ""); }).join(",") + "|" + JSON.stringify(b.pending || []) + "|" + canControl();
       var olderBtn = document.getElementById("bpOlder");
       var hasMore = state.more !== null ? state.more : (b.messageCount || 0) > tail.length;
       olderBtn.hidden = !hasMore;
@@ -690,7 +692,7 @@ const BOTS_PAGE_JS = String.raw`
         '<table class="runs-table"><caption class="visually-hidden">Runs</caption><thead><tr><th scope="col">Started</th><th scope="col">Trigger</th><th scope="col">Status</th><th scope="col">Summary</th><th scope="col" class="num">cSats</th><th scope="col" class="opt">Ran on</th></tr></thead><tbody>' +
         runs.map(function(r) {
           var prs = (r.pullRequests || []).map(function(p) { return /^https:\/\//.test(p.url) ? ' <a href="' + escapeHtml(p.url) + '" target="_blank" rel="noreferrer noopener">PR #' + escapeHtml(p.number || "") + "</a>" : ""; }).join("");
-          return "<tr><td>" + escapeHtml(when(r.startedAtMs)) + "</td><td>" + escapeHtml(r.source || r.trigger) + '</td><td class="st-' + escapeHtml(r.status) + '">' + escapeHtml(BOT_RUN_STATUS_TEXT[r.status] || r.status) + '</td><td class="sum">' + escapeHtml(r.summary || r.error || "") + prs + '</td><td class="num">' + escapeHtml(botCSats(r.cSats)) + '</td><td class="opt">' + escapeHtml(r.where || "—") + (r.note ? '<div class="muted u-fs-12">' + escapeHtml(r.note) + "</div>" : "") + "</td></tr>";
+          return "<tr><td>" + escapeHtml(when(r.startedAtMs)) + "</td><td>" + escapeHtml(r.source || r.trigger) + '</td><td class="st-' + escapeHtml(r.status) + '">' + escapeHtml(BOT_RUN_STATUS_TEXT[r.status] || r.status) + '</td><td class="sum">' + escapeHtml(r.summary || r.error || "") + prs + '</td><td class="num">' + escapeHtml(botCSats(r.cSats)) + '</td><td class="opt">' + escapeHtml(botRanOn(r) || "—") + (r.note ? '<div class="muted u-fs-12">' + escapeHtml(r.note) + "</div>" : "") + "</td></tr>";
         }).join("") + "</tbody></table>";
     }
     async function loadRuns() {
@@ -734,7 +736,7 @@ const BOTS_PAGE_JS = String.raw`
           ? '<div class="d-meter" role="meter" aria-label="Daily budget used" aria-valuemin="0" aria-valuemax="' + escapeHtml(b.budgetCSatsPerDay) + '" aria-valuenow="' + escapeHtml(b.spentTodayCSats) + '"><span id="bpDMeterFill"></span></div><div class="d-sub">' + escapeHtml(botCSats(b.spentTodayCSats) + " of " + botCSats(b.budgetCSatsPerDay) + " cSats") + "</div>"
           : '<div class="d-sub">' + escapeHtml(botCSats(b.spentTodayCSats) + " cSats · no limit") + "</div>") +
         '<div class="d-sub muted">' + escapeHtml(b.runsToday + " of " + b.maxRunsPerDay + " runs it may start on its own today") + "</div></div>" +
-        (lr ? '<div class="d-section"><div class="d-label">Last run</div><div class="d-sub">' + escapeHtml((BOT_RUN_STATUS_TEXT[lr.status] || lr.status) + " · " + botRelative(lr.startedAtMs) + (lr.where ? " · " + lr.where : "")) + "</div>" + (lr.summary ? '<div class="d-sub muted">' + escapeHtml(lr.summary) + "</div>" : "") + (lr.note ? '<div class="d-sub muted">' + escapeHtml(lr.note) + "</div>" : "") + "</div>" : "") +
+        (lr ? '<div class="d-section"><div class="d-label">Last run</div><div class="d-sub">' + escapeHtml((BOT_RUN_STATUS_TEXT[lr.status] || lr.status) + " · " + botRelative(lr.startedAtMs) + (botRanOn(lr) ? " · " + botRanOn(lr) : "")) + "</div>" + (lr.summary ? '<div class="d-sub muted">' + escapeHtml(lr.summary) + "</div>" : "") + (lr.note ? '<div class="d-sub muted">' + escapeHtml(lr.note) + "</div>" : "") + "</div>" : "") +
         '<div class="d-section"><div class="d-label">Where it runs</div><div class="d-sub">' + escapeHtml(isCloud ? "In EdgeCoder's cloud: no machine or folder. " + (b.cloud && b.cloud.web ? "It can search the web." : "No web access.") : "On " + state.machine.machineName + ", in its folder " + b.folderName + ".") + "</div></div>";
       var fill = document.getElementById("bpDMeterFill");
       if (fill) fill.style.width = pct + "%";

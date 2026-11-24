@@ -71,6 +71,7 @@ import { validatePortalNode } from "../enrollment.js";
 import { attestAgentSigningKey } from "../attested-keys.js";
 import { sanitizeLanAddresses } from "../../lan-proximity.js";
 import { noteAgentMemory } from "../memory-admission.js";
+import { meshWsAgentRegistered } from "../mesh-ws-bindings.js";
 import {
   registerSchema,
   defaultPolicy,
@@ -273,6 +274,9 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       const ask = body.askMsatPerCredit ?? (standing && (standing.computeClass === "any" || standing.computeClass === cls) && standing.msatPerCredit > 0 ? standing.msatPerCredit : undefined);
       orderBook.postAsk(body.agentId, cls, ask, now, askCapabilityOf(body.agentId, { hardwareClass }));
     }
+    // A /mesh/ws connection that came back before this registration (coordinator restart) is checked
+    // against the registered key now and, if its bind was signed by it, counts as connected.
+    meshWsAgentRegistered(body.agentId, agentCapabilities.get(body.agentId)?.publicKeyPem);
     const approvalRecord = ordering.append({
       eventType: "node_approval",
       taskId: `agent:${body.agentId}`,

@@ -28,14 +28,31 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import {
   BOT_READ_ACTIONS, BOT_RELAY_FEATURES, MAX_PAGE_MESSAGES, MAX_RESULT_BYTES, PAGE_MESSAGE_CHARS, SNAPSHOT_MAX_BOTS, SNAPSHOT_MESSAGE_CHARS, SNAPSHOT_TAIL_MESSAGES,
-  botControlRequestSchema, botIdSchema, capMessage, fitSnapshot, isFrontierModel, toolCallDetail, toolSteps, webBotId,
-  type BotControlRequest, type BotControlResult, type BotsSnapshot, type RelayControls, type RemoteBotMessage, type RemoteBotRun, type RemoteBotSummary,
+  botControlRequestSchema, botIdSchema, capMessage, fitSnapshot, isFrontierModel, servedSummary, toolCallDetail, toolSteps, usageCalls, webBotId,
+  type BotControlRequest, type BotControlResult, type BotsSnapshot, type RelayControls, type RemoteBotMessage, type RemoteBotRun, type RemoteBotSummary, type RemoteServed,
 } from "../../common/bot-relay.js";
 import { BotError, botPatchSchema, type BotInput, type BotManager, type BotMessage, type BotRun, type BotView } from "./bots.js";
 import { frontierLeadName } from "./frontier-access.js";
 import { FRONTIER_ASK_TOOL } from "./bot-frontier.js";
 
-function remoteRun(r: BotRun): RemoteBotRun {
+/** Where each run's model calls ran, from its replies' usage events (runId -> served). */
+function servedByRun(messages: BotMessage[]): Map<string, RemoteServed> {
+  const calls = new Map<string, ReturnType<typeof usageCalls>>();
+  for (const m of messages) {
+    if (m.role !== "assistant" || !m.runId || !m.events?.length) continue;
+    const list = usageCalls(m.events as never);
+    if (list.length) calls.set(m.runId, [...(calls.get(m.runId) ?? []), ...list]);
+  }
+  const out = new Map<string, RemoteServed>();
+  for (const [runId, list] of calls) {
+    const s = servedSummary(list);
+    if (s) out.set(runId, s);
+  }
+  return out;
+}
+
+function remoteRun(r: BotRun, served?: ReadonlyMap<string, RemoteServed>): RemoteBotRun {
+  const ran = served?.get(r.id);
   return {
     id: r.id,
     trigger: r.trigger,
@@ -46,6 +63,7 @@ function remoteRun(r: BotRun): RemoteBotRun {
     summary: (r.summary ?? "").slice(0, 400),
     cSats: r.cSats,
     ...(r.where ? { where: r.where.slice(0, 200) } : {}),
+    ...(ran ? { served: ran } : {}),
     ...(r.note ? { note: r.note.slice(0, 300) } : {}),
     ...(r.error ? { error: r.error.slice(0, 300) } : {}),
     ...(r.pullRequests?.length ? { pullRequests: r.pullRequests.slice(0, 5).map((p) => ({ url: p.url, number: p.number, title: p.title?.slice(0, 200) })) } : {}),
@@ -54,7 +72,8 @@ function remoteRun(r: BotRun): RemoteBotRun {
 
 function remoteMessage(m: BotMessage, pendingIds: ReadonlySet<string>, chars: number): RemoteBotMessage {
   const steps = toolSteps(m.events as never, pendingIds);
-  return capMessage({ id: m.id, role: m.role, content: m.content ?? "", atMs: m.atMs, ...(m.runId ? { runId: m.runId } : {}), ...(steps.length ? { steps } : {}) }, chars);
+  const served = m.role === "assistant" ? servedSummary(usageCalls(m.events as never)) : undefined;
+  return capMessage({ id: m.id, role: m.role, content: m.content ?? "", atMs: m.atMs, ...(m.runId ? { runId: m.runId } : {}), ...(steps.length ? { steps } : {}), ...(served ? { served } : {}) }, chars);
 }
 
 export function remoteSummary(b: BotView, messages: BotMessage[]): RemoteBotSummary {
@@ -86,7 +105,7 @@ export function remoteSummary(b: BotView, messages: BotMessage[]): RemoteBotSumm
     triggerStatus: b.triggerStatus,
     ...(b.nextRun ? { nextRun: { ...b.nextRun } } : {}),
     ...(b.held ? { held: b.held } : {}),
-    ...(b.lastRun ? { lastRun: remoteRun(b.lastRun) } : {}),
+    ...(b.lastRun ? { lastRun: remoteRun(b.lastRun, servedByRun(messages.filter((m) => m.runId === b.lastRun!.id))) } : {}),
     pending: b.pending.map((p) => ({ callId: p.callId, tool: p.tool, detail: toolCallDetail(p.tool, p.args) })),
     ...(b.frontierLead || b.frontierSpentTodayUsd ? { frontier: { on: !!b.frontierLead, ...(b.frontierLead ? { name: frontierLeadName(b.frontierLead) } : {}), spentTodayUsd: b.frontierSpentTodayUsd ?? 0 } } : {}),
     queuedMessages: b.queuedMessages,
@@ -177,8 +196,10 @@ export function runRemoteBotCommand(bots: BotManager, botId: string, request: Bo
         const pendingIds = new Set(bot.pending.map((p) => p.callId));
         return { status: "done", data: fitList(page.map((m) => remoteMessage(m, pendingIds, PAGE_MESSAGE_CHARS)), { more: older.length > page.length, total: all.length }) };
       }
-      case "history":
-        return { status: "done", data: fitList(bots.history(botId).map(remoteRun).reverse()) };
+      case "history": {
+        const served = servedByRun(bots.messages(botId));
+        return { status: "done", data: fitList(bots.history(botId).map((r) => remoteRun(r, served)).reverse()) };
+      }
       case "memory":
         return { status: "done", data: { memory: bots.memory(botId).slice(0, 8_000) } };
     }

@@ -56,7 +56,8 @@
       local
         ? settle("sessions", listAllSessions().then((list) =>
             Promise.all(
-              list.slice(0, MAX_SESSIONS).map(async (s) => {
+              // A Code view chat's mirror (for your phone) is listed with the chats, not again here.
+              list.filter((s) => !s.chatId).slice(0, MAX_SESSIONS).map(async (s) => {
                 const [snap, tent] = await Promise.all([getSession(s.id).catch(() => null), sessionTentacles(s.id).catch(() => null)]);
                 return { id: s.id, title: s.title, model: s.model, transcript: snap?.session.transcript ?? [], tentacles: tent?.tentacles ?? [] };
               }),

@@ -172,7 +172,7 @@ export function tentacleConfigFromArgs(a: Pick<Args, "tentacles" | "tentacleBudg
  */
 export function terminalIO(): ReplIO {
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
-  const slash = ["/help", "/model", "/compute", "/mode", "/remote", "/stop", "/queue", "/unqueue", "/undo", "/clear", "/status", "/cost", "/github", "/tentacles", "/exit"];
+  const slash = ["/help", "/model", "/compute", "/mode", "/remote", "/stop", "/queue", "/unqueue", "/undo", "/clear", "/compact", "/status", "/cost", "/github", "/tentacles", "/exit"];
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,

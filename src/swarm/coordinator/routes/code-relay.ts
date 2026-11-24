@@ -13,7 +13,7 @@
 
 import { z } from "zod";
 import { pgStore } from "../../../db/store.js";
-import { CODE_CONTROL_ACTIONS, MAX_CODE_PROJECTS, MAX_CODE_SESSIONS, MAX_CODE_SNAPSHOT_BYTES, codeControlRequestSchema, projectIdSchema, type CodeSnapshot } from "../../../common/code-relay.js";
+import { CODE_COMMAND_BODY_LIMIT, CODE_CONTROL_ACTIONS, MAX_CODE_PROJECTS, MAX_CODE_SESSIONS, MAX_CODE_SNAPSHOT_BYTES, codeControlRequestSchema, projectIdSchema, type CodeSnapshot } from "../../../common/code-relay.js";
 import type { CoordinatorApp } from "../app.js";
 import { identity, coordinatorKeys, securityLog } from "../context.js";
 import { requireAgentSelf, requirePortalServiceToken } from "../auth.js";
@@ -77,7 +77,8 @@ export function registerCodeRelayRoutes(app: CoordinatorApp): void {
     return reply.send({ coordinatorId: identity.peerId, machines });
   });
 
-  app.post("/agent-control/agents/:agentId/code-commands", async (req, reply) => {
+  // A message may carry images from the web (codeImagesSchema checks each again).
+  app.post("/agent-control/agents/:agentId/code-commands", { bodyLimit: CODE_COMMAND_BODY_LIMIT }, async (req, reply) => {
     if (!requirePortalServiceToken(req as never, reply)) return;
     const { agentId } = agentIdParam.parse(req.params);
     const body = z.object({ accountId, action: z.enum(CODE_CONTROL_ACTIONS), args: z.record(z.string(), z.unknown()).optional() }).strict().safeParse(req.body ?? {});

@@ -60,6 +60,7 @@ import { toolchainFailureHint } from "./toolchain.js";
 import { COMPUTE_POLICIES, FALLBACK_NOTE, NETWORK_CLASSES, isNetworkClass, type NetworkClass, routeLabel, routeModelId, routeSummary, type ComputePolicy, type PlanOptions, type Route } from "../../inference-api/auto-route.js";
 import type { ChatBackend } from "../../inference-api/types.js";
 import { isFrontierModelId } from "../../inference-api/frontier-models.js";
+import { servedFromWhere } from "../../common/bot-relay.js";
 import { FRONTIER_ASK_TIMEOUT_MS, FRONTIER_ASK_TOOL, frontierAskQuestion, type BotFrontierHooks, type FrontierAnswer, type FrontierAsk, type FrontierChoice } from "./bot-frontier.js";
 import { frontierLeadName } from "./frontier-access.js";
 import { webSystemNote, webGrounding, isWebTool, webToolSchemas, type WebToolSession } from "../../web-tool/tools.js";
@@ -613,6 +614,8 @@ export interface ApprovalEntry {
   /** The project the call runs in ("Always allow" keeps its rule there). */
   projectRoot?: string;
   resolve: (approved: boolean) => void;
+  /** A chat's cost check (cost-guard.ts): the app's three-way answer (Keep going, Switch, Stop). */
+  choose?: (choice: "continue" | "switch" | "stop") => void;
   tool: ToolName;
   args: Record<string, unknown>;
   owner?: string;
@@ -2528,8 +2531,11 @@ export function botComputeChat(
   // and the routing reason (complexity) for the Tasks history.
   const chat: BotChatFn = backendChat(
     agentic,
-    (cSats, served) =>
-      ctx.sendEvent({ type: "usage", cSats, where, ...(reason ? { reason } : {}), ...(last && !last.bestFit ? { model: routeModelId(last) } : {}), ...(served ? { served } : {}) }),
+    (cSats, served, routed) => {
+      // The network's best fit names its model only in the call's own `where` ("routed to <model> on <class> …").
+      const model = last && !last.bestFit ? routeModelId(last) : servedFromWhere(routed).model;
+      ctx.sendEvent({ type: "usage", cSats, where, ...(reason ? { reason } : {}), ...(model ? { model } : {}), ...(served ? { served } : {}) });
+    },
     ctx.signal,
   );
   // A pinned model has nowhere else to go.

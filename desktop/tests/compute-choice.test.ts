@@ -48,3 +48,23 @@ describe("cloud models in the compute picker", () => {
     expect(choiceLabel("network/deepseek-v4.1-flash@cloud").where).toBe("Network Cloud");
   });
 });
+
+describe("this computer's models versus cloud models", () => {
+  it("keeps Ollama cloud tags, embedders and EdgeCoder cloud models out of This computer and My machines", async () => {
+    const { cloudModelNames, isOllamaCloudTag, myMachineModels, thisComputerHint, thisComputerModels } = await import("../src/lib/compute-choice");
+    expect(isOllamaCloudTag("gpt-oss:120b-cloud")).toBe(true);
+    expect(isOllamaCloudTag("kimi:cloud")).toBe(true);
+    expect(isOllamaCloudTag("deepseek-r1:14b")).toBe(false);
+    const cloud = cloudModelNames([{ model: "deepseek-v4.1-flash", classes: ["cloud"] }, { model: "qwen3:8b", classes: ["gpu"] }]);
+    expect([...cloud]).toEqual(["deepseek-v4.1-flash"]);
+    expect(thisComputerModels(["deepseek-r1:14b", "nomic-embed-text", "gpt-oss:120b-cloud", "deepseek-v4.1-flash"], cloud)).toEqual(["deepseek-r1:14b"]);
+    expect(myMachineModels([
+      { agentId: "self", online: true, models: ["a"] },
+      { agentId: "host", online: true, computeClass: "cloud", models: ["deepseek-v4.1-flash"] },
+      { agentId: "m2", online: true, computeClass: "gpu", models: ["b", "deepseek-v4.1-flash"] },
+      { agentId: "m3", online: false, models: ["c"] },
+    ], "self", cloud)).toEqual([{ model: "b", machines: 1 }]);
+    expect(thisComputerHint("MacIntel")).toBe("installed on this Mac");
+    expect(thisComputerHint("Win32")).toBe("installed on this computer");
+  });
+});

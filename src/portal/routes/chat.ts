@@ -22,6 +22,7 @@ import { FREE_USED_NOTE, webSystemNote, webGrounding, WebToolSession, citedSourc
 import { modelCallsTools } from "../../web-tool/model-support.js";
 import { portalCoordinatorTransport } from "./compute.js";
 import { swarmModelsFromInference } from "../network-models.js";
+import { askEveryCoordinator, drainingAnswer, getCoordinatorJson, mergeLocalModels, networkModelsFromEvery } from "../coordinator-fanout.js";
 
 const logger = moduleLogger("portal-chat");
 
@@ -253,6 +254,8 @@ export function registerChatApiRoutes(
     ownMachineModels?: (userId: string) => Promise<string[]>;
     /** Tests: shorter heartbeat timing. */
     chatKeepalive?: { graceMs: number; intervalMs: number };
+    /** Every coordinator, for lookups of live machines (coordinator-fanout.ts); defaults to the discovered list. */
+    everyCoordinatorUrl?: () => Promise<string[]>;
   },
 ): void {
   const { PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, getCurrentUser, store } = deps;
@@ -384,7 +387,7 @@ export function registerChatApiRoutes(
     return out.end();
   }
   /** POST /portal/chat on one coordinator, held until its first event so a dead end can still be retried elsewhere. */
-  async function openDefaultChat(url: string, payload: Record<string, unknown>, signal: AbortSignal): Promise<OpenedDefaultChat | { reason: string; retry: boolean }> {
+  async function openDefaultChat(url: string, payload: Record<string, unknown>, signal: AbortSignal): Promise<OpenedDefaultChat | { reason: string; retry: boolean; drainingWaitMs?: number }> {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
     let res;
@@ -402,6 +405,9 @@ export function registerChatApiRoutes(
     }
     if (res.statusCode < 200 || res.statusCode >= 300) {
       const text = await res.body.text().catch(() => "");
+      // Restarting for a deploy (nothing was charged): the caller waits a moment and asks again.
+      const draining = res.statusCode === 503 ? drainingAnswer(text) : null;
+      if (draining) return { reason: "coordinator_draining", retry: true, drainingWaitMs: draining };
       // A request the coordinator calls malformed or too large would be refused by the next one too.
       return { reason: `HTTP ${res.statusCode} ${text}`, retry: ![400, 413, 422].includes(res.statusCode) };
     }
@@ -421,31 +427,18 @@ export function registerChatApiRoutes(
     const user = await getCurrentUser(req as any);
     if (!user) return reply.code(401).send({ error: "not_authenticated" });
 
-    const coordinatorUrls = await discoverCoordinatorUrlsForPortal();
+    // Every coordinator (each knows only the machines linked to it), merged; one that fails is left out.
+    const coordinatorUrls = await (deps.everyCoordinatorUrl ?? discoverCoordinatorUrlsForPortal)();
     if (coordinatorUrls.length === 0) {
       return reply.send({ local: [], swarm: [] });
     }
-    const coordinatorUrl = coordinatorUrls[0].replace(/\/$/, "");
-    const hdrs: Record<string, string> = {};
-    if (PORTAL_SERVICE_TOKEN) hdrs["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
-
-    let local: Array<{ name: string; parameterSize: string; quantization: string; running: boolean }> = [];
-    const [, network] = await Promise.all([
-      (async () => {
-        try {
-          const tagsRes = await request(`${coordinatorUrl}/portal/models`, { method: "GET", headers: hdrs, headersTimeout: 5_000 });
-          if (tagsRes.statusCode >= 200 && tagsRes.statusCode < 300) {
-            local = ((await tagsRes.body.json()) as { local?: typeof local }).local ?? [];
-          } else {
-            await tagsRes.body.text().catch(() => "");
-          }
-        } catch {
-          // coordinator unreachable
-        }
-      })(),
+    type LocalModel = { name: string; parameterSize: string; quantization: string; running: boolean };
+    const [localAnswers, network] = await Promise.all([
+      askEveryCoordinator(coordinatorUrls, async (base, signal) => ((await getCoordinatorJson(base, "/portal/models", { serviceToken: PORTAL_SERVICE_TOKEN, signal })).local ?? []) as LocalModel[]),
       // As the user's account: a restricted model is listed only to an account entitled to it (and dropped here anyway).
-      portalCoordinatorTransport({ PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal }, accountIdFor(user.userId))("GET", "/inference/models", undefined, AbortSignal.timeout(8_000)).catch(() => ({ status: 0, json: {} as Record<string, unknown> })),
+      networkModelsFromEvery(coordinatorUrls, { serviceToken: PORTAL_SERVICE_TOKEN, account: accountIdFor(user.userId) }),
     ]);
+    const local = mergeLocalModels(localAnswers.flatMap((a) => (a.ok && Array.isArray(a.value) ? [a.value] : [])));
     const rows = network.status === 200 ? swarmModelsFromInference((network.json as { models?: unknown }).models) : [];
     // The shipped iPhone app shows paramSize as "cSats per message", which is wrong for per-token
     // cloud prices (it would read "552 cSats"): cloud rows only for clients that ask (?cloud=1).
@@ -746,6 +739,7 @@ export function registerChatApiRoutes(
     const tried: string[] = [];
     let lastError = "";
     let stream: OpenedDefaultChat | undefined;
+    let drainWaited = false;
     while (!stream && tried.length < CHAT_MAX_COORDINATOR_ATTEMPTS) {
       const { url, known } = await capacity.pick({ kind: "chat" }, tried);
       if (!url) {
@@ -761,6 +755,13 @@ export function registerChatApiRoutes(
       }
       lastError = opened.reason;
       if (ac.signal.aborted) return reply; // the browser went away
+      // A coordinator restarting for a deploy: once, wait its moment and ask again (its replacement answers).
+      if (opened.drainingWaitMs !== undefined && !drainWaited) {
+        drainWaited = true;
+        tried.pop();
+        await new Promise((r) => setTimeout(r, opened.drainingWaitMs));
+        continue;
+      }
       capacity.markFailed(url);
       if (!opened.retry) break;
     }

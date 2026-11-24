@@ -333,3 +333,26 @@ describe("Full access in the terminal", () => {
     await done;
   });
 });
+
+describe("/compact", () => {
+  it("is listed, says when there is nothing to compact, and summarizes a longer conversation", async () => {
+    // Each reply takes a moment, so the send's answer reaches the terminal before the turn ends.
+    const replies: Reply[] = Array.from({ length: 4 }, (_, i) => async () => (await new Promise((r) => setTimeout(r, 60)), { content: `answer ${i} ${"a".repeat(800)}`, toolCalls: [] }));
+    const { t, repl, hub, id } = await setup(replies);
+    const done = repl.run();
+    t.feed("/help");
+    await until(() => t.out().includes("/compact"), 5000, "help");
+    t.feed("/compact");
+    await until(() => t.out().includes("Nothing to compact yet"), 5000, "short chat");
+    for (let i = 0; i < 4; i++) {
+      t.feed(`question ${i} ${"q".repeat(800)}`);
+      // The turn's end has reached the terminal too.
+      await until(() => t.out().includes(`answer ${i}`) && !hub.snapshot(id).running && !(repl as unknown as { running: boolean }).running, 5000, `turn ${i}`);
+    }
+    t.feed("/compact");
+    await until(() => /Earlier messages summarized to save tokens · ~[\d,]+ tokens saved/.test(t.out()), 5000, "compacted");
+    expect(hub.snapshot(id).session.transcript.at(-1)?.compaction?.manual).toBe(true);
+    t.feed("/exit");
+    expect(await done).toBe(0);
+  });
+});

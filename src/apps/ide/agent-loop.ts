@@ -22,7 +22,9 @@ import { READ_TOOLS, TENTACLE_TOOLS, TOOL_DEFINITIONS, WEB_TOOLS, type IdeStream
 import { PLAN_REFUSAL, type Decision } from "./permission-policy.js";
 import { protectedToolPath } from "./tool-executor.js";
 import { extractTextToolCalls, TextToolCallFilter } from "./text-tool-calls.js";
-import { COMPACT_AT, compactMessages, DEFAULT_CONTEXT_WINDOW, isContextTooLong, isTransient, pathsLine, shouldCompact } from "./context-budget.js";
+import { COMPACT_AT, compactMessages, compactThreshold, DEFAULT_CONTEXT_WINDOW, estimateTokens, isContextTooLong, isTransient, pathsLine, REPLY_RESERVE_TOKENS } from "./context-budget.js";
+import type { CostCheckContext, CostVerdict } from "./cost-guard.js";
+import { TurnWaste } from "./turn-waste.js";
 
 export interface ChatMessage {
   role: string;
@@ -70,7 +72,8 @@ export function toolSchemas(): ToolSchema[] {
  * A model call through any chat backend (the network, your machines, a reserved machine), in the
  * agent's ChatFn shape. `onSpent` hears what each call cost in cSats and where it ran.
  */
-export function backendChat(backend: ChatBackend, onSpent?: (cSats: number, served?: ChatResult["served"]) => void, signal?: AbortSignal): ChatFn {
+/** `onSpent`'s third argument: the backend's own `where` for the call (Auto's "routed to <model> on <class> …"). */
+export function backendChat(backend: ChatBackend, onSpent?: (cSats: number, served?: ChatResult["served"], where?: string) => void, signal?: AbortSignal): ChatFn {
   return async ({ messages, tools }, onDelta) => {
     let content = "";
     const toolCalls: ChatResult["toolCalls"] = [];
@@ -84,7 +87,7 @@ export function backendChat(backend: ChatBackend, onSpent?: (cSats: number, serv
           for (const c of p.toolCalls) toolCalls.push({ name: c.function.name, arguments: c.function.arguments ?? {} });
         } else if ("done" in p) {
           served = p.served;
-          if (p.cSatsSpent !== undefined || p.served) onSpent?.(p.cSatsSpent ?? 0, p.served);
+          if (p.cSatsSpent !== undefined || p.served) onSpent?.(p.cSatsSpent ?? 0, p.served, p.where);
         }
       }
     } catch (err) {
@@ -261,6 +264,12 @@ export interface AgentLoopDeps {
   contextWindow?: number | (() => Promise<number | undefined> | number | undefined);
   /** A cheap model call (a small or auto model) that summarizes older messages when compacting. */
   summarize?: (text: string) => Promise<string | null>;
+  /**
+   * A lead paid per token (frontier key, network or cloud model): compact once a call's prompt
+   * passes this many tokens even when the window is far bigger (context-budget.ts compactThreshold).
+   * Unset: 85% of the window only.
+   */
+  compactAtTokens?: number | null;
   /** Waits before retrying a transient model-call failure (default 1.5 s, then 4 s). */
   retryDelaysMs?: number[];
   /**
@@ -292,7 +301,22 @@ export interface AgentLoopDeps {
    * results were given, DisclaimerFilter). end() is called when the loop finishes.
    */
   textFilter?: { push(text: string): string; end(): string };
+  /**
+   * The per-reply cost check of a paid lead (cost-guard.ts makeCostCheck), asked before each model
+   * call after the first: go on, stop the turn with a note, or go on with a cheaper model's calls.
+   */
+  costCheck?: (ctx: CostCheckContext) => Promise<CostVerdict>;
+  /**
+   * Waste tracking (turn-waste.ts): re-reads of an unchanged file get a short pointer instead of the
+   * content (always, when set). With `act` (a paid lead), the first sign of waste compacts older tool
+   * results and, with `helpers`, steers lookups to helpers; `stamp` gives a file's mtime/size.
+   */
+  waste?: { stamp?: (path: string) => string | null; act?: boolean; helpers?: boolean };
 }
+
+/** What the lead hears when the turn looks wasteful and helpers are on. */
+export const HELPERS_NUDGE =
+  "[EdgeCoder: this reply is reading a lot and re-reading files. Hand broad lookups (finding where something is, reading many files, summarizing a folder) to helpers with the delegate tool and work from their short reports; keep your own reads to the exact lines you need.]";
 
 /** Added to the system prompt in plan mode. */
 export const PLAN_PROMPT = [
@@ -387,7 +411,14 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
     return [...(sys ? [{ role: "system", content: sys }] : []), ...d.messages];
   };
   let messages = history(native ? "native" : "text");
-  const maxIterations = d.maxIterations ?? 20;
+  // The model calls go here; a cost check's "Switch" replaces it for the rest of the turn.
+  let chat = d.chat;
+  const waste = d.waste ? new TurnWaste({ stamp: d.waste.stamp }) : null;
+  /** Read results the waste tracker is waiting to attach to their conversation message. */
+  let pendingReadKeys: string[] = [];
+  // Long enough for real repo work (a lead reading a dozen files, editing and testing); a turn that
+  // still runs out says so instead of ending silently (see the end of loop()).
+  const maxIterations = d.maxIterations ?? 40;
   // Context: the request being worked on stays whole; tool results get a label for summaries.
   const pinned = (msgs: ChatMessage[]) => [...msgs].reverse().find((m) => m.role === "user" && !m.content.startsWith("[Tool "));
   let request = pinned(messages);
@@ -417,14 +448,32 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
       d.sendEvent({ type: "tool_result", id: callId, error: PLAN_REFUSAL });
       return { result: `[Refused]: ${PLAN_REFUSAL}`, label: `${tool}: refused (plan mode)` };
     }
+    waste?.beforeTool(tool, args);
     const result = await d.runTool(tool, args);
-    return { result, label: callLabel(tool, args, result) };
+    const label = callLabel(tool, args, result);
+    if (waste && tool === "read_file") {
+      const r = waste.afterRead(args, result, (ref) => messages.includes(ref as ChatMessage));
+      if (r.key) pendingReadKeys.push(r.key);
+      return { result: r.text, label };
+    }
+    return { result, label };
   };
-  const compact = async (share: number) => {
+  /** The message now holding the latest reads' full results (the re-read pointer refers to it). */
+  const attachReads = (m: ChatMessage) => {
+    if (!waste) return;
+    for (const k of pendingReadKeys) waste.attach(k, m);
+    pendingReadKeys = [];
+  };
+  /** Compact to fit `budget` tokens; says so in a status line and a `compacted` event (tokens saved). */
+  const compact = async (budget: number, tools?: ToolSchema[], paid = false) => {
     const before = messages.length;
-    const r = await compactMessages(messages, { budget: window * share, tools: native ? tools : undefined, pinned: request, labels, paths, summarize: d.summarize });
+    const beforeTokens = estimateTokens(messages, tools);
+    const r = await compactMessages(messages, { budget, tools: native ? tools : undefined, pinned: request, labels, paths, summarize: d.summarize });
     messages.splice(0, messages.length, ...r.messages);
-    d.sendEvent({ type: "status", message: `Compacted the conversation to fit the model's ${Math.round(window / 1024)}k context (${r.summarized ? "summarized" : "shortened"} ${Math.max(r.dropped, before - messages.length) || "older"} messages; recent ones and file paths kept).` });
+    const afterTokens = estimateTokens(messages, tools);
+    const why = paid ? `to save tokens (paid models compact past ${Math.round(budget / 1000 / ((COMPACT_AT - 0.15) / COMPACT_AT))}K tokens)` : `to fit the model's ${Math.round(window / 1024)}k context`;
+    d.sendEvent({ type: "status", message: `Compacted the conversation ${why} (${r.summarized ? "summarized" : "shortened"} ${Math.max(r.dropped, before - messages.length) || "older"} messages; recent ones and file paths kept).` });
+    d.sendEvent({ type: "compacted", before: beforeTokens, after: afterTokens, savedTokens: Math.max(0, beforeTokens - afterTokens), summarized: r.summarized });
   };
   /** One model call: compacts first when needed, compacts and retries once on context_too_long, retries transient failures. */
   const callModel = async (withTools: boolean, onDelta?: (t: string) => void): Promise<ChatResult> => {
@@ -432,13 +481,21 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
     let transient = 0;
     const delays = d.retryDelaysMs ?? [1_500, 4_000];
     for (;;) {
-      if (shouldCompact(messages, withTools ? tools : undefined, window)) await compact(COMPACT_AT - 0.15);
+      const offered = withTools ? tools : undefined;
+      // Free models: 85% of the window. Paid leads: also at most compactAtTokens (80K by default).
+      const at = compactThreshold(window, d.compactAtTokens);
+      if (estimateTokens(messages, offered) > at) await compact(at * ((COMPACT_AT - 0.15) / COMPACT_AT), offered, at < window * COMPACT_AT);
+      // The prompt this call sends, for the chat's context meter.
+      d.sendEvent({ type: "context", tokens: estimateTokens(messages, offered), window });
       let streamed = false;
       try {
-        return await d.chat(withTools ? { messages, tools } : { messages }, onDelta ? (t) => {
+        const sent = waste ? estimateTokens(messages, offered) - REPLY_RESERVE_TOKENS : 0;
+        const r = await chat(withTools ? { messages, tools } : { messages }, onDelta ? (t) => {
           if (t) streamed = true;
           onDelta(t);
         } : undefined);
+        waste?.onCall(sent, Math.ceil((r.content.length + (r.toolCalls.length ? JSON.stringify(r.toolCalls).length : 0)) / 3));
+        return r;
       } catch (err) {
         if (err instanceof ToolsUnsupportedError || d.isCancelled()) throw err;
         if (isContextTooLong(err) && !compactedForError) {
@@ -447,7 +504,7 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
           const m = /serves (\d+)|largestContextWindow\D+(\d+)/.exec((err as Error).message ?? "");
           const reported = m ? Number(m[1] ?? m[2]) : NaN;
           if (Number.isFinite(reported) && reported >= 2048 && reported < window) window = reported;
-          await compact(0.6);
+          await compact(window * 0.6, withTools ? tools : undefined);
           continue;
         }
         if (isTransient(err) && !streamed && transient < 2) {
@@ -519,11 +576,13 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
       const m: ChatMessage = { role: "tool", content: r.result, tool_name: p.tool };
       labels.set(m, r.label);
       messages.push(m);
+      attachReads(m);
     } else {
       messages.push(asTextFormat({ role: "assistant", content: "", tool_calls: [{ function: { name: p.tool, arguments: p.args } }] }));
       const m = asTextFormat({ role: "tool", content: r.result, tool_name: p.tool });
       labels.set(m, r.label);
       messages.push(m);
+      attachReads(m);
     }
   }
 
@@ -531,11 +590,48 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
     await loop();
   } finally {
     flushText();
+    const saved = waste?.savedLine();
+    if (saved) d.sendEvent({ type: "cost_note", kind: "saved", message: saved, savedTokens: waste!.savedTokens });
+  }
+
+  /**
+   * Before a model call after the first: act on waste once (compact older tool results, steer to
+   * helpers), then the cost check. False: the turn ends here (the owner said Stop).
+   */
+  async function beforeCall(): Promise<boolean> {
+    if (waste && d.waste?.act && waste.shouldAct()) {
+      const why = waste.signal() ?? "kept re-reading";
+      const before = estimateTokens(messages, native ? tools : undefined);
+      // Only the first pass of compaction (older tool results become their one-line labels): a
+      // budget of the current size is always met by it, so nothing is summarized or dropped.
+      const r = await compactMessages(messages, { budget: before, tools: native ? tools : undefined, pinned: request, labels, paths });
+      messages.splice(0, messages.length, ...r.messages);
+      const after = estimateTokens(messages, native ? tools : undefined);
+      if (before - after > 0) d.sendEvent({ type: "compacted", before, after, savedTokens: before - after, summarized: false });
+      if (d.waste.helpers) messages.push({ role: "user", content: HELPERS_NUDGE });
+      d.sendEvent({
+        type: "cost_note",
+        kind: "waste",
+        message: `This reply ${why}: older tool results were shortened to one line each${before - after > 0 ? ` (~${Math.round((before - after) / 1000)}K tokens)` : ""}${d.waste.helpers ? " and lookups go to helpers" : ""}.`,
+      });
+    }
+    if (!d.costCheck) return true;
+    const v = await d.costCheck({ inputTokens: waste?.inputTokens ?? 0, outputTokens: waste?.outputTokens ?? 0, waste: waste?.persists() ?? null });
+    if (v.action === "stop") {
+      flushText();
+      needBreak = true;
+      say(v.note);
+      return false;
+    }
+    if (v.action === "switch") chat = v.chat;
+    return true;
   }
 
   async function loop(): Promise<void> {
   for (let i = 0; i < maxIterations && !d.isCancelled(); i++) {
     needBreak = true;
+    if (i > 0 && (d.costCheck || d.waste?.act) && !(await beforeCall())) return;
+    if (d.isCancelled()) return;
     if (native) {
       let reply: ChatResult;
       // Tool calls written as text are held back from the screen while they stream, then run.
@@ -592,6 +688,7 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
           const m: ChatMessage = { role: "user", content: results.join("\n\n") };
           labels.set(m, resultLabels.join("; "));
           messages.push(m);
+          attachReads(m);
         } else {
           // Only a plan: ask once for the first step as a real tool call (not in plan mode: the plan is the answer).
           if (nudged || d.plan) return;
@@ -609,6 +706,7 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
         const m: ChatMessage = { role: "tool", content: r.result, tool_name: call.name };
         labels.set(m, r.label);
         messages.push(m);
+        attachReads(m);
       }
       continue;
     }
@@ -641,6 +739,7 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
         const m: ChatMessage = { role: "user", content: results.join("\n\n") };
         labels.set(m, resultLabels.join("; "));
         messages.push(m);
+        attachReads(m);
         continue;
       }
       say(content);
@@ -686,8 +785,13 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
       const m: ChatMessage = { role: "user", content: results.join("\n\n") };
       labels.set(m, resultLabels.join("; "));
       messages.push(m);
+      attachReads(m);
     }
     if (!hadToolCall) return;
+  }
+  if (!d.isCancelled()) {
+    flushText();
+    d.sendEvent({ type: "text", content: `\n\n_Stopped after ${maxIterations} steps without finishing. Reply "continue" to pick up where it left off._` });
   }
   }
 }

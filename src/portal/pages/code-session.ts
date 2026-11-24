@@ -12,7 +12,7 @@
  * turn runs or waits, every 6 s otherwise, and slowly while the tab is hidden.
  */
 export const CODE_SESSION_JS = String.raw`
-    var cs = { agentId: "", sessionId: "", machine: null, summary: null, snap: null, older: [], more: null, sig: "", busy: false, timer: null, kick: 0, open: {}, changes: {}, error: "", first: true, mSig: "" };
+    var cs = { agentId: "", sessionId: "", machine: null, summary: null, snap: null, older: [], more: null, sig: "", busy: false, timer: null, kick: 0, open: {}, changes: {}, error: "", first: true, mSig: "", imgs: null, sent: [], shown: {} };
 
     function canDrive() { return !!(cs.machine && cs.machine.online && cs.machine.controls === "on"); }
     function sessionStatus() {
@@ -52,13 +52,23 @@ export const CODE_SESSION_JS = String.raw`
       var body = cs.changes[m.turnId] ? cs.changes[m.turnId] : '<div class="muted u-fs-12">' + escapeHtml(m.changedFiles.join(", ")) + "</div>";
       return '<details class="chg-d" data-key="' + escapeHtml(key) + '" data-turn="' + escapeHtml(m.turnId) + '"' + (open ? " open" : "") + "><summary>" + CODE_ICONS.file + "<span>" + escapeHtml(label) + '</span></summary><div class="chg-body">' + body + "</div></details>";
     }
+    /* Images sent from this page (kept here only; the Mac saves its own copy): matched to their message by its text. */
+    function sentImages(m) {
+      if (cs.shown[m.id]) return cs.shown[m.id];
+      if (!m.content || m.content.indexOf("[Attached: ") < 0) return null;
+      for (var i = 0; i < cs.sent.length; i++) {
+        if (m.content.indexOf(cs.sent[i].text + "\n\n[Attached: ") === 0) { cs.shown[m.id] = cs.sent[i].images; cs.sent.splice(i, 1); return cs.shown[m.id]; }
+      }
+      return null;
+    }
     function messageHtml(m) {
       if (m.role === "note") return '<div class="cmsg note">' + escapeHtml(m.content) + "</div>";
       var who = m.role === "user" ? (m.by === "remote" ? "You (phone or web)" : m.by === "terminal" ? "You (terminal)" : "You") : "EdgeCoder";
       return '<article class="cmsg ' + (m.role === "user" ? "user" : "assistant") + '"><div class="cmsg-head"><span class="who">' + escapeHtml(who) + "</span>" + (m.plan ? '<span class="chip tone-accent">Plan</span>' : "") + "<time>" + escapeHtml(timeText(m.at)) + "</time></div>" +
-        stepsHtml(m.steps, "steps-" + m.id, false) + (m.content ? '<div class="msg-body">' + renderMarkdown(m.content) + "</div>" : "") + (m.role === "assistant" ? changesHtml(m) : "") + "</article>";
+        stepsHtml(m.steps, "steps-" + m.id, false) + (m.content ? '<div class="msg-body">' + renderMarkdown(m.content) + "</div>" : "") + (m.role === "user" && sentImages(m) ? '<div data-sent-imgs="' + escapeHtml(m.id) + '"></div>' : "") + (m.role === "assistant" ? changesHtml(m) : "") + "</article>";
     }
     function approvalHtml(p) {
+      if (p.tool === "cost_check") return costCheckHtml(p);
       var q = p.tool === "run_shell" ? "Run this command?" : "Allow " + p.tool + "?";
       var choices;
       if (!canDrive()) choices = '<span class="on-mac">Answer on your Mac' + (cs.machine && cs.machine.online ? "" : " (it's offline)") + "</span>";
@@ -66,6 +76,12 @@ export const CODE_SESSION_JS = String.raw`
         '<span class="on-mac">' + escapeHtml(p.approvable ? "Allows this call only. Always-allow rules are set on the Mac." : p.message || "Approve it on the Mac.") + "</span>";
       return '<div class="ask-card" role="group" aria-label="' + escapeHtml(q) + '"><div class="ask-q">' + escapeHtml(q) + '</div><div class="ask-tool"><span class="s-tool">' + escapeHtml(p.tool) + "</span> " + escapeHtml(p.detail) + "</div>" +
         (p.command ? "<code>" + escapeHtml(p.command) + "</code>" : "") + '<div class="ask-choices">' + choices + "</div></div>";
+    }
+    // A chat's per-reply cost check: Keep going (approve) or Stop (deny); Switch is on the Mac.
+    function costCheckHtml(p) {
+      var choices = !canDrive() ? '<span class="on-mac">Answer on your Mac</span>'
+        : '<button type="button" class="primary sm" data-approve="' + escapeHtml(p.callId) + '">Keep going</button><button type="button" class="sm danger" data-deny="' + escapeHtml(p.callId) + '">Stop</button><span class="on-mac">Switching to a cheaper model is on the Mac.</span>';
+      return '<div class="ask-card" role="group" aria-label="Keep going?"><div class="ask-q">Keep going?</div><div class="ask-tool">' + escapeHtml(p.detail) + '</div><div class="ask-choices">' + choices + "</div></div>";
     }
     function planHtml() {
       return '<div class="ask-card plan" role="group" aria-label="Approve this plan"><div class="ask-q">Approve this plan?</div><div class="muted u-fs-12">It starts making changes in the mode you pick.</div><div class="ask-choices">' +
@@ -109,6 +125,10 @@ export const CODE_SESSION_JS = String.raw`
       input.disabled = !drive;
       send.disabled = !drive || cs.busy;
       input.placeholder = !drive ? "Answer on your Mac" : isActive() ? "Queue a message…" : "Message your Mac…";
+      // Images need a Mac whose app takes them (it says so in the session summary).
+      var imgs = drive && cs.snap.session.images === true;
+      document.getElementById("csAttach").hidden = !drive;
+      if (cs.imgs) cs.imgs.setEnabled(imgs && !cs.busy, drive && !imgs ? "Update the EdgeCoder app on this Mac to send it images." : "");
       document.getElementById("csWorking").textContent = cs.busy ? "Sending…" : sessionStatus() === "running" ? "Working on your Mac…" : sessionStatus() === "waiting" ? "Waiting for your approval" : "";
     }
     function renderThread() {
@@ -123,6 +143,7 @@ export const CODE_SESSION_JS = String.raw`
       }
       var list = allMessages();
       box.innerHTML = list.length ? list.map(messageHtml).join("") : '<div class="code-wait muted">No messages yet. Send the first one below.</div>';
+      box.querySelectorAll("[data-sent-imgs]").forEach(function(el) { imageAttachShow(el, cs.shown[el.getAttribute("data-sent-imgs")]); });
       var snap = cs.snap, html = "";
       if (snap.running) {
         html += '<article class="cmsg assistant running"><div class="cmsg-head"><span class="who">EdgeCoder</span><span class="working"><span class="loading-spinner sm"></span>' + escapeHtml(snap.pending.length ? "Waiting for your approval" : "Working…") + "</span></div>" +
@@ -211,8 +232,14 @@ export const CODE_SESSION_JS = String.raw`
     async function sendMessage() {
       var input = document.getElementById("csInput");
       var text = input.value.trim();
-      if (!text || cs.busy || !canDrive()) return;
-      if (await act(isActive() ? "Queued" : "", "message", { text: text.slice(0, 32000) })) {
+      var images = cs.imgs && cs.snap && cs.snap.session.images === true ? cs.imgs.items() : [];
+      if ((!text && !images.length) || cs.busy || !canDrive()) return;
+      if (!text) text = images.length === 1 ? "See the attached image." : "See the attached images.";
+      text = text.slice(0, 32000);
+      var args = { text: text };
+      if (images.length) args.attachments = cs.imgs.payload();
+      if (await act(isActive() ? "Queued" : "", "message", args)) {
+        if (images.length) { cs.sent.push({ text: text, images: images }); cs.imgs.clear(); }
         input.value = "";
         grow();
         cs.first = true;
@@ -288,6 +315,8 @@ export const CODE_SESSION_JS = String.raw`
         if (v === "ask" || v === "auto-edits" || v === "plan") act("Mode: " + codeModeLabel(v), "settings", { mode: v });
       });
       var input = document.getElementById("csInput");
+      cs.imgs = imageAttach({ input: input, drop: document.querySelector("#codeSession .composer"), tray: document.getElementById("csImgs"), button: document.getElementById("csAttach"), file: document.getElementById("csFile") });
+      cs.imgs.setEnabled(false, "");
       input.addEventListener("input", grow);
       input.addEventListener("keydown", function(e) { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage(); } });
       document.addEventListener("visibilitychange", function() { if (!document.hidden) tick(); });

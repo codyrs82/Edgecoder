@@ -9,7 +9,7 @@
  * an "unavailable" report: no numbers rather than wrong ones, and never the last good numbers
  * under a new timestamp.
  */
-import { request } from "undici";
+import { firstCoordinatorAnswer, getCoordinatorJson } from "./coordinator-fanout.js";
 import {
   RESERVES_METHOD,
   createReservesCache,
@@ -116,19 +116,11 @@ export function coordinatorReservesSource(deps: {
   return createReservesCache(
     async () => {
       try {
+        // Shared state: the first coordinator that answers (the next one when it fails or is restarting).
         const urls = await deps.discoverCoordinatorUrlsForPortal();
-        if (!urls.length) return unavailableReservesReport("coordinator_unreachable", portalNetworkName(env), now());
-        const res = await request(`${urls[0].replace(/\/$/, "")}/economy/reserves`, {
-          method: "GET",
-          headers: deps.PORTAL_SERVICE_TOKEN ? { "x-portal-service-token": deps.PORTAL_SERVICE_TOKEN } : {},
-          headersTimeout: deps.EXTERNAL_HTTP_TIMEOUT_MS,
-          bodyTimeout: deps.EXTERNAL_HTTP_TIMEOUT_MS
-        });
-        if (res.statusCode !== 200) {
-          await res.body.text().catch(() => undefined);
-          return unavailableReservesReport("coordinator_unreachable", portalNetworkName(env), now());
-        }
-        return parseReservesReport(await res.body.json()) ?? unavailableReservesReport("coordinator_report_invalid", portalNetworkName(env), now());
+        const found = await firstCoordinatorAnswer(urls, (base, signal) => getCoordinatorJson(base, "/economy/reserves", { serviceToken: deps.PORTAL_SERVICE_TOKEN, signal, timeoutMs: deps.EXTERNAL_HTTP_TIMEOUT_MS }), undefined, { timeoutMs: deps.EXTERNAL_HTTP_TIMEOUT_MS });
+        if (!found) return unavailableReservesReport("coordinator_unreachable", portalNetworkName(env), now());
+        return parseReservesReport(found.value) ?? unavailableReservesReport("coordinator_report_invalid", portalNetworkName(env), now());
       } catch {
         return unavailableReservesReport("coordinator_unreachable", portalNetworkName(env), now());
       }
