@@ -179,7 +179,7 @@ describe("the sidebar's Code mode list", () => {
   it("asks you to turn on Code from your phone when no Mac shares its sessions", () => {
     const { ctx } = sidebarCtx(null);
     vm.runInContext(sidebarModeJs("code"), ctx);
-    expect(vm.runInContext(`codeNavHtml([], "", "")`, ctx)).toContain("Turn on <strong>Code from your phone</strong> in the EdgeCoder app on your Mac");
+    expect(vm.runInContext(`codeNavHtml([], "", "")`, ctx)).toContain("Turn on <strong>Code from your phone</strong> in the EdgeCoder desktop app");
     ctx.off = [machines[1]];
     expect(vm.runInContext(`codeNavHtml(off, "", "")`, ctx)).toContain("Code from your phone");
   });

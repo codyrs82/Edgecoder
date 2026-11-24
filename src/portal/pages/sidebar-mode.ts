@@ -76,7 +76,7 @@ export function sidebarModeJs(fixed: SidebarMode | null): string {
         }
         function codeNavHtml(machines, q, activePath) {
           var sharing = machines.filter(function(m) { return m.controls === "on" || m.controls === "view"; });
-          if (!sharing.length) return '<div class="conv-empty code-nav-hint">Turn on <strong>Code from your phone</strong> in the EdgeCoder app on your Mac</div>';
+          if (!sharing.length) return '<div class="conv-empty code-nav-hint">Turn on <strong>Code from your phone</strong> in the EdgeCoder desktop app</div>';
           var groups = {}, order = [];
           sharing.forEach(function(m) {
             (m.sessions || []).forEach(function(s) {

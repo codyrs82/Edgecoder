@@ -261,7 +261,7 @@ export function portalAuthedPageHtml(input: {
             <div class="nav-group chat-only" role="group" aria-label="Recent chats">
               <div class="conv-list" id="convList"></div>
             </div>
-            <div class="nav-group code-only" role="group" aria-label="Coding sessions on your Macs">
+            <div class="nav-group code-only" role="group" aria-label="Coding sessions on your computers">
               <div class="conv-list" id="codeNavList"></div>
             </div>
           </nav>`}
