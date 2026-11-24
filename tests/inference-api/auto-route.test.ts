@@ -220,6 +220,9 @@ describe("compute policies", () => {
     expect(routeFromModelId("reserved/r1/qwen3.5:9b")).toMatchObject({ placement: "reserved", reservationId: "r1", model: "qwen3.5:9b" });
     expect(routeFromModelId("network/qwen3.5:9b")).toMatchObject({ placement: "network", model: "qwen3.5:9b", computeClass: "any" });
     expect(routeFromModelId("network/qwen3.5:9b@gpu.dc")).toMatchObject({ model: "qwen3.5:9b", computeClass: "gpu.dc" });
+    expect(routeFromModelId("network/qwen3-coder:30b@gpu.c8")).toMatchObject({ model: "qwen3-coder:30b", computeClass: "gpu" });
+    expect(routeFromModelId("network/qwen3.5:9b@any")).toMatchObject({ model: "qwen3.5:9b", computeClass: "any" });
+    expect(routeFromModelId("network/m@nope")).toMatchObject({ model: "m@nope", computeClass: "any" });
     expect(routeLabel(routeFromModelId("qwen2.5-coder:1.5b")!)).toBe("This computer · qwen2.5-coder:1.5b");
     expect(routeLabel(routeFromModelId("network/qwen3.5:9b@gpu")!)).toBe("Network GPU · qwen3.5:9b");
   });

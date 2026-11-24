@@ -14,9 +14,9 @@ import { request } from "undici";
 import type { ChatMessage, ToolCall, ToolSpec } from "../../inference-api/types.js";
 import type { RoutingHints } from "../../inference-api/job-descriptor.js";
 import type { CoordinatorChoice } from "../../common/coordinator-choice.js";
+import { normalizeComputeClass } from "../../economy/compute-classes.js";
 
 export const NETWORK_PREFIX = "network/";
-const CLASSES = new Set(["cpu", "apple", "gpu", "gpu.dc", "cloud"]);
 
 export type Transport = (method: "GET" | "POST", path: string, body?: unknown, signal?: AbortSignal) => Promise<{ status: number; json: Record<string, unknown> }>;
 
@@ -41,6 +41,10 @@ export interface NetworkModel {
  * Model ids that run off this computer: "network/qwen2.5-coder:32b@gpu" (any agent, optionally one
  * class), "mine/<model>" (your own machines) and "reserved/<reservation>/<model>" (a machine you
  * reserved). Null for anything else (a local model).
+ *
+ * The suffix may also be a hardware tier ("@gpu.c8", the tier the Network page shows for a machine):
+ * it names that tier's class, since calls are matched by class, never by tier. Anything else after
+ * the last @ stays part of the model name.
  */
 export function parseNetworkModel(id: string): { model: string; computeClass: string; target?: "mine"; reservationId?: string } | null {
   if (id.startsWith("mine/")) return id.length > 5 ? { model: id.slice(5), computeClass: "any", target: "mine" } : null;
@@ -49,7 +53,8 @@ export function parseNetworkModel(id: string): { model: string; computeClass: st
   if (!id.startsWith(NETWORK_PREFIX)) return null;
   const rest = id.slice(NETWORK_PREFIX.length);
   const at = rest.lastIndexOf("@");
-  if (at > 0 && CLASSES.has(rest.slice(at + 1))) return { model: rest.slice(0, at), computeClass: rest.slice(at + 1) };
+  const cls = at > 0 ? normalizeComputeClass(rest.slice(at + 1)) : undefined;
+  if (cls) return { model: rest.slice(0, at), computeClass: cls };
   return rest ? { model: rest, computeClass: "any" } : null;
 }
 

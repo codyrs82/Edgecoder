@@ -26,6 +26,9 @@ describe("model ids", () => {
       expect(modelIdOf(parseModelId(id))).toBe(id);
     }
     expect(parseModelId("network/m@nope")).toEqual({ model: "m@nope", compute: { target: "network", computeClass: "any" } });
+    // A tier suffix names its class (and is kept as the class id).
+    expect(parseModelId("network/qwen3-coder:30b@gpu.c8")).toEqual({ model: "qwen3-coder:30b", compute: { target: "network", computeClass: "gpu" } });
+    expect(modelIdOf(parseModelId("network/qwen3-coder:30b@gpu.c8"))).toBe("network/qwen3-coder:30b@gpu");
   });
   it("only plain commands can be approved always, by program name", () => {
     expect(shellPrefix("npm test")).toBe("npm");
