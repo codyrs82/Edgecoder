@@ -60,6 +60,10 @@ the desktop app is replying, the phone shows the reply live and can stop it or a
 (a command or edit outside the project is approved on the computer). **Full access** stays on the
 computer: from the phone, a Full access chat runs as **Accept edits** with the phone's rules.
 
+A reply on a paid model that passes its spending limit pauses with a cost check (see
+[Long and paid replies](/guide/ide-integration#long-and-paid-replies)). From the phone you can answer
+**Keep going** or **Stop**; switching to a cheaper model is done in the desktop app.
+
 For safety, commands that aren't read-only always ask first, paths outside the project are refused,
 and approving from the phone never adds an "always allow" rule or turns on automatic edits. Very long
 commands must be approved on the computer.
@@ -69,7 +73,8 @@ See [Terminal: `edgecoder code`](/guide/terminal) for how sessions work on the c
 ### Code on edgecoder.io
 
 The same sessions are on the website. Sign in at [edgecoder.io](https://edgecoder.io/portal) with
-the account that is signed in on the computer, and open **Code** in the sidebar (under **Chat**).
+the account that is signed in on the computer, and pick **Code** in the **Chat / Code** switch at
+the top of the sidebar. The sidebar then lists your sessions by project, with each computer's name.
 
 - **Code** lists each of your computers: online or offline, and whether **Code from your phone** is
   **On**, **View only** or **Off**. Under each one are its trusted projects and their sessions,
@@ -81,6 +86,11 @@ the account that is signed in on the computer, and open **Code** in the sidebar 
 - Send a message (it queues while a reply runs), **Allow** or **Deny** a tool call, approve a plan,
   **Stop** the reply, **Undo last turn**, remove a queued message, or switch the mode between **Ask**,
   **Accept edits** and **Plan**.
+- Paste, drop or attach images (PNG, JPEG or WebP; up to 4 per message, 5 MB each, 10 MB in all;
+  bigger ones are scaled down first). The computer saves them in the project's
+  `.edgecoder/attachments` folder and names them in the message. The button is off until the
+  computer runs a desktop app version that accepts images.
+- Answer a cost check with **Keep going** or **Stop**.
 
 The website goes through the same relay as the phone and follows the same rules: only the account
 signed in on the computer can see or drive its sessions, **Allow** covers that one call (an "always

@@ -143,6 +143,11 @@ fly deploy -c deploy/fly/fly.portal.toml --remote-only
 fly deploy -c deploy/fly/fly.anchor-proxy.toml --remote-only
 ```
 
+A coordinator drains before it stops (`SIGTERM`, `kill_timeout = 35` in the seed configs): new jobs
+get a retryable `503 coordinator_draining`, running work gets up to `COORDINATOR_DRAIN_MS` (25 s)
+to finish, and every agent is told to reconnect. Deploy one seed at a time so the other keeps
+serving. See [Restarts and deploys](../site-docs/operations/coordinator-discovery-failover.md#restarts-and-deploys).
+
 ### Setting Secrets
 
 Secrets are not stored in the TOML files. With `NODE_ENV=production` every service refuses to
@@ -643,6 +648,9 @@ Images, threads and send times:
 - **Images**: up to 4 per post, PNG or JPEG, 5 MB each, with optional alt text. Stored in Postgres (`social_post_images`, bytea) and uploaded to X (`POST /2/media/upload`, one-shot multipart, OAuth 1.0a) right before the post is sent; alt text goes through `POST /2/media/metadata`.
 - **Threads**: posts with the same thread id and a position. Approving any post of a thread approves all of them (each still passes the rules). Post 1 is an original post; each next post replies only to the previous post of the same thread, which this portal just posted. If a post fails, the rest are marked failed and the ones already posted are recorded. Nostr gets plain sequential notes (no reply tags).
 - **Send time**: optional, stored in UTC, shown and edited in America/Chicago time on the page. An approved post or thread waits until its time; clearing it sends at the next minute.
+- **Editing**: fields save themselves. The text saves when you leave the box, the send time and thread when they change, with a small Saved / Not saved flag. **Approve** first saves the time and thread as shown, and its confirm names that time (or "now" when it has passed). **Clear time** stays.
+- **Approved posts**: text, time and thread are locked once approved, but images can still be removed or added (same checks) until the post starts sending.
+- **Short links**: `edgecoder.io/x/<campaign>` redirects (302, no-store) to a public page with `utm_source=x&utm_medium=social&utm_campaign=<campaign>`, so a post shows a clean link and its visits are counted (`src/portal/short-links.ts`). The campaign's first word picks the page when it names one (`reserves`, `bluetooth`), otherwise the homepage. Only `a-z`, `0-9` and dashes are allowed; anything else is a 404. The **Traffic from X** panel on the same page shows the last 14 days of visits and sign-ups by campaign, linked to the post that carries its `/x/` link (Growth signals in the [environment variable reference](../site-docs/reference/environment-variables.md#growth-signals-portal)).
 
 Bulk import (loads drafts, never approves them). Authenticate as a system admin with the portal session token as a bearer token (the value of the `edgecoder_portal_session` cookie). Scripts send no `Origin` header, so the CSRF origin check lets them through:
 

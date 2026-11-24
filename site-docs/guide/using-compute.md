@@ -36,6 +36,14 @@ Auto picks a place for each request:
 If nothing fits, the request fails with a message asking you to install a coder model (7B or larger)
 on one of your machines or to try again later.
 
+When Auto sends a request to the network without naming a model, the coordinator's best fit picks
+the model and the machine. It may pick a cloud model (DeepSeek V4.1 Flash first; GLM-5.3 only for
+the hardest work or when nothing else fits) for top-tier jobs, or when no other machine can run the
+job. Simple jobs a network machine can serve never go to a cloud model. When nothing fits, the
+coordinator says why, for example `No machine on the network can run this job right now (needs a
+model ≥ 14B with tools; online: …)`, or that your price limit is below every fitting model. See
+[the cloud host doc](https://github.com/codyrs82/Edgecoder/blob/main/docs/cloud-host.md#auto-routing).
+
 ## Connections (desktop app)
 
 A connection is a local address on your computer that an OpenAI- or Anthropic-compatible tool can

@@ -8,21 +8,49 @@ EdgeCoder provides two ways to write code with AI assistance: the **EdgeCoder De
 
 The desktop application is a Tauri + Svelte app that ships as the primary development surface for EdgeCoder. It connects directly to all local services on ports 4301 through 4304 and provides a fully integrated IDE experience without any external configuration.
 
-### Chat-first interface
+### Chat and Code views
 
-The default tab is **ChatView** -- a conversational interface with streaming responses and full conversation history. Conversations are persisted in IndexedDB, so your history survives restarts.
+A **Chat / Code** switch sits at the top of the sidebar, above **New chat**. When the sidebar is
+hidden, the switch moves to the title bar.
 
-Code blocks in chat responses include **"Open in Editor"** buttons that send the snippet directly into the built-in editor.
+- **Chat** is a conversation with streaming replies and full history.
+- **Code** works in a project folder: the agent reads, edits and runs commands there. It has a
+  Monaco editor (the engine behind VS Code), a file explorer and a chat panel. Sessions started from
+  `edgecoder code`, the iPhone app or the website show here too, with a remote-computer icon.
 
-### Built-in Monaco editor
+Chats are kept in IndexedDB, so they survive restarts. Deleting a chat removes it for good, even
+the one that is open. If a delete fails, the chat stays and an error says so.
 
-The **EditorView** tab embeds a Monaco editor (the same engine behind VS Code) with:
+With **Code from your phone** on (Settings), each Code view chat can also be read and continued
+from the iPhone app and from **Code** on edgecoder.io. See [iOS app: Code](/guide/ios-app#code).
 
-- An integrated chat panel for inline code assistance
-- A file explorer for navigating your project
-- Syntax highlighting for all common languages
+### Under the message box
 
-You can work entirely within the desktop app -- ask questions in chat, open generated code in the editor, and iterate without switching windows.
+| Control | What it does |
+| --- | --- |
+| Model picker | Where the reply runs. Paid models show a rough cost, such as `~140 cSats per long reply` or `~$0.52 per long reply` on your own key. Picking a premium model for a project chat shows a one-time hint you can dismiss. |
+| Permission mode | **Manual**, **Accept edits**, **Auto**, **Plan** or **Full access**. Full access never asks; it needs a one-time confirm per project and is not offered for bots. See [permission modes](https://github.com/codyrs82/Edgecoder/blob/main/docs/permission-modes.md). |
+| **Helpers** | Turns helper agents on or off for this chat, with how many run at once (default 4) and the chat's budget (default 100 cSats). On by default when the lead is a frontier model on your own key. Easy pieces try a model on this computer first. See [tentacles](https://github.com/codyrs82/Edgecoder/blob/main/docs/tentacles.md). |
+| Context meter | Shows the chat's size, for example `context ~42K tokens`. Click it, or type `/compact`, to summarize older messages now. |
+
+### Long and paid replies
+
+| What happens | When |
+| --- | --- |
+| The chat opens at the latest message and follows a reply while you are near the bottom. Scroll up and a round **Jump to latest** button appears (with a dot when something new arrived). | Always |
+| Older messages are summarized on a cheap model. A note says `Earlier messages summarized to save tokens · ~N tokens saved`. | Paid models (your frontier key, network or cloud models): past 80,000 tokens, or 85 % of the model's window if smaller. Free models: past 85 % of the window. Set the paid limit in **Settings → General → Compact long chats at … tokens**. |
+| The reply pauses and asks: **Keep going**, **Switch** to a cheaper model (the same reply carries on), or **Stop**. Keep going asks again after the same amount more. With no answer in 10 minutes it stops. | A paid model spent 150 cSats in one reply, or $0.50 on your own key. Set it in **Settings → General → Ask before a reply spends more than …**. Free models and Auto never ask. Bots keep their own budgets. |
+| A file read again without changes gets a short pointer instead of the whole file. A note says what was saved, for example `Skipped re-reading 3 unchanged files · ~90K tokens saved`. | Paid models |
+| The turn ends with `Stopped after 40 steps without finishing. Reply "continue" to pick up where it left off.` | One reply made 40 model calls |
+
+The environment variables behind these limits are `EDGECODER_COMPACT_PAID_TOKENS`,
+`EDGECODER_REPLY_COST_ASK_CSATS` and `EDGECODER_REPLY_COST_ASK_USD`
+([environment variables](/reference/environment-variables)).
+
+When the coding agent finds the project wants another Node.js version (`.nvmrc`, `.node-version`,
+`.tool-versions`, Volta or `engines`), it is told which version to use and how. A failed install
+caused by the wrong version gets a hint with the command rewritten. Nothing runs on its own. This
+is off on Windows. Details are in [permission modes: Node versions](https://github.com/codyrs82/Edgecoder/blob/main/docs/permission-modes.md#node-versions).
 
 ### Additional pages
 
@@ -336,6 +364,12 @@ Auto (`src/inference-api/auto-route.ts`) decides per request:
    fits and the network can't take the request (not connected, no cSats, or a budget or policy
    that keeps to free machines), the biggest free model answers, marked as a fallback with the
    reason.
+
+On the network, Auto can hand the choice to the coordinator's **best fit**, which picks the model
+and the machine. Best fit may use a cloud model (DeepSeek V4.1 Flash, or GLM-5.3 for the hardest
+work) when a job wants the network's top tier or no other machine can run it. When nothing on the
+network fits, the error says why, for example the model size and tools the job needs. See
+[the cloud host doc](https://github.com/codyrs82/Edgecoder/blob/main/docs/cloud-host.md#auto-routing).
 
 ### Local router (a local tag or `edgecoder-local`)
 

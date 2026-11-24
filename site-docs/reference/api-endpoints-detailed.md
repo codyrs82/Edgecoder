@@ -109,6 +109,8 @@ order book and ledger plumbing); those are omitted here.
 | POST | `/host/request` | public "Request to host" form (JSON or form post; honeypot and rate limits) |
 | GET | `/portal/api/host/status` | `{ required, approved }`: whether the signed-in account is an approved host |
 | GET | `/reserves`, `/reserves.json` | public proof of reserves page and its JSON |
+| GET | `/x/:campaign` | public short link for posts on X: `302` (no-store) to an on-site page with UTM tags (`src/portal/short-links.ts`). The campaign's first word picks the page (`reserves`, `bluetooth`), else the homepage; only `a-z`, `0-9` and dashes, else `404` |
+| GET | `/portal/api/admin/growth` | system admins: the last 14 days of campaign visits and sign-ups, each campaign with the post that carries its `/x/` link (`src/portal/growth.ts`) |
 
 Old top-level pages redirect into Settings: `/portal/wallet` → `/portal/settings/plan`,
 `/portal/market` → `/portal/settings/compute`, `/portal/download` → `/portal/settings/install`,
@@ -159,6 +161,16 @@ Session cookie auth. The portal checks the machine is one of the user's enrolled
 | GET | `/portal/api/code/machines` | the account's machines with their trusted projects and sessions |
 | POST | `/portal/api/code/:agentId/commands` | `{ action, ...args }` for one machine → `202 { commandId }` |
 | GET | `/portal/api/code/commands/:commandId` | `{ status: pending \| done \| failed \| expired, result?, error? }` |
+
+The `message` command takes optional `attachments` (PNG, JPEG or WebP; at most 4, 5 MB each, 10 MB
+in all), checked by type, first bytes, size and count at the portal, the coordinator, the agent and
+the desktop app (`src/common/code-relay.ts`). The desktop app saves them in the project's
+`.edgecoder/attachments`. Send them only to a machine whose session summary says `images: true`. A
+cost check shows as a pending approval with the tool `cost_check`: approve keeps going, deny stops.
+
+Lookups of live machines (chat models, compute options, machines, bots and the code relay) ask
+every allowlisted coordinator, the healthy one first (`src/portal/coordinator-fanout.ts`), so they
+keep working while one coordinator restarts.
 
 ### Compute and reservations
 
@@ -251,7 +263,10 @@ Local to the desktop app (`127.0.0.1:4304`), IDE token required, loopback only.
 | GET / POST | `/v1/ide/sessions` | list or create shared coding sessions (the Code view and `edgecoder code`) |
 | GET | `/v1/ide/sessions/:id`, `/v1/ide/sessions/:id/events` | a session's snapshot and its event stream (SSE) |
 | POST | `/v1/ide/sessions/:id/{messages,unqueue,approve,settings,publish,trust,cancel,undo,clear,delete}` | writes from any attached client |
+| POST | `/v1/ide/sessions/:id/compact` | summarize all but the last few messages now (`/compact`) → `{ compacted, savedTokens?, … }` |
+| POST | `/v1/ide/compact` | the desktop Chat and Code views' compaction: summarizes older messages on the worker model when a paid lead's history passed `EDGECODER_COMPACT_PAID_TOKENS`, or at once with `force`; always returns `tokens` |
 | GET / POST | `/v1/ide/bots` | desktop bots |
+| POST | `/v1/ide/bots/:id/frontier` | the owner's answer to "Use Claude for this run?": `{ callId, choice: run \| day \| decline }` ([frontier keys](https://github.com/codyrs82/Edgecoder/blob/main/docs/frontier-keys.md#bots-and-your-key)) |
 | POST | `/v1/ide/code-chats/sync` | the desktop Code view's chat (its messages, mode and model) mirrored as a session for Code from your phone; marks the folder as used in the Code view |
 | GET | `/v1/ide/code/remote/snapshot` | Code from your phone: trusted projects and sessions for the account signed in on this machine |
 | POST | `/v1/ide/code/remote/command` | Code from your phone: one command (`create`, `message`, `approve`, `cancel`, `undo`, `plan`, `settings`, `unqueue`, or a read such as `snapshot`) |
