@@ -138,3 +138,38 @@ export function usageText(u: { cSats: number; where?: string; usd?: number }): s
 
 /** Whether replies on this choice cost cSats. */
 export const isBilled = (id: string | undefined) => ["network", "anywhere"].includes(parseChoice(id).where);
+
+/**
+ * Ollama's own cloud models ("gpt-oss:120b-cloud", "deepseek-v3.1:671b-cloud", "kimi:cloud") show
+ * up in this computer's model list but run on Ollama's servers: they are not "This computer · free".
+ */
+export const isOllamaCloudTag = (name: string) => /(?::|-)cloud$/i.test(name.trim());
+
+/** Network models served by EdgeCoder's cloud hosts (class "cloud"): listed only under Network. */
+export function cloudModelNames(models: Array<{ model: string; classes?: string[] }> | undefined): Set<string> {
+  return new Set((models ?? []).filter((m) => (m.classes ?? []).includes("cloud")).map((m) => m.model));
+}
+
+/** The picker's "This computer" rows: models installed in Ollama here, without embedders or anything that runs elsewhere. */
+export function thisComputerModels(tags: string[], cloud: Set<string> = new Set()): string[] {
+  return tags.filter((n) => !/embed/i.test(n) && !isOllamaCloudTag(n) && !cloud.has(n));
+}
+
+/** "My machines" rows: models on your other online machines; a cloud host (class "cloud") is never one of them. */
+export function myMachineModels(
+  machines: Array<{ agentId: string; online: boolean; models: string[]; computeClass?: string }> | undefined,
+  selfAgentId: string | null | undefined,
+  cloud: Set<string> = new Set(),
+): Array<{ model: string; machines: number }> {
+  const counts = new Map<string, number>();
+  for (const m of machines ?? []) {
+    if (!m.online || m.agentId === selfAgentId || m.computeClass === "cloud") continue;
+    for (const model of m.models) if (!cloud.has(model) && !isOllamaCloudTag(model)) counts.set(model, (counts.get(model) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([model, machines]) => ({ model, machines }));
+}
+
+/** The hint on the picker's "This computer" heading: these are models installed here (Ollama). */
+export function thisComputerHint(platform = typeof navigator === "undefined" ? "" : navigator.platform || navigator.userAgent || ""): string {
+  return /mac/i.test(platform) ? "installed on this Mac" : "installed on this computer";
+}

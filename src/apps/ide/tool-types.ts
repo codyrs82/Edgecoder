@@ -156,6 +156,14 @@ export type IdeStreamEvent =
   | { type: "turn"; id: string }
   /** The turn wrote this project file (its original is kept under the turn's checkpoint). */
   | { type: "file_change"; turnId: string; path: string }
+  /** The prompt the next model call sends, in estimated tokens (the chat's context meter), and the model's window. */
+  | { type: "context"; tokens: number; window?: number }
+  /**
+   * Older messages were compacted (context-budget.ts): estimated prompt tokens before and after.
+   * A persistent compaction (`/compact`, or the pass before a paid turn) also carries the summary
+   * `note` and how many leading messages it `covered`; `manual` when the user asked for it.
+   */
+  | { type: "compacted"; before: number; after: number; savedTokens: number; summarized?: boolean; manual?: boolean; covered?: number; note?: string }
   /** cSats a model call on the network cost (0 on this computer or your own machines). */
   | {
       type: "usage";

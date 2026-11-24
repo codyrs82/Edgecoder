@@ -177,6 +177,13 @@ export interface Conversation {
   web?: boolean;
   /** "Web search needs cSats" was said in this chat (it's said once). */
   webCSatsNoted?: boolean;
+  /**
+   * Older messages summarized to save tokens (compaction.ts): the model gets `note` in place of
+   * every message up to and including `throughId`. The messages stay on screen.
+   */
+  summary?: { note: string; throughId: string; savedTokens: number; manual: boolean; at: number };
+  /** Estimated prompt tokens of the chat's last model call (the context meter). */
+  contextTokens?: number;
 }
 
 export interface ChatCompletionChunk {

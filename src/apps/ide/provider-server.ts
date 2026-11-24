@@ -61,12 +61,13 @@ import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
 import { loadConfigOrExit } from "../../common/config.js";
 import { ideProviderConfigSchema } from "../../config/ide-provider.js";
-import { SessionHub, compactionModelOf, modelIdOf, parseModelId as parseModelIdForChat, workerModelOf, type ClientRef, type SessionData } from "./sessions.js";
+import { PRE_TURN_SHARE, SessionHub, compactionModelOf, modelIdOf, parseModelId as parseModelIdForChat, workerModelOf, type ClientRef, type SessionData } from "./sessions.js";
 import { cliStatus, installCli } from "./cli-install.js";
 import { pickLocalHelperModel, TentacleManager } from "./tentacles.js";
 import { tentacleExecutor, withTentacleGuidance, withTentacleTools } from "./delegate.js";
 import { registerTentacleRoutes } from "./tentacle-routes.js";
 import { chooseLeadModel, estimateTokens, parseLeadCandidates } from "./lead-model.js";
+import { compactHistory, compactPaidTokens, estimateTokens as estimateContextTokens, isPaidLead } from "./context-budget.js";
 import { registerSessionRoutes } from "./session-routes.js";
 import { hostedBackend, hostedConfigFromEnv } from "./hosted-backend.js";
 import { GitHubDeviceLogins } from "./github-device.js";
@@ -1321,6 +1322,8 @@ const ideChatSchema = z.object({
       budgetCSats: z.number().min(0).max(1e7).optional(),
     })
     .optional(),
+  /** Settings → General → "Compact long chats at … tokens": a paid lead compacts past this (context-budget.ts). */
+  compactPaidTokens: z.number().int().min(1).max(10_000_000).optional(),
   /** Where the model runs: this computer (default), your machines, any network agent (optionally one class), or a reserved machine. */
   compute: z
     .object({
@@ -1533,12 +1536,19 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
   const basePrompt = (format: "native" | "text") => [promptCtx ? buildIdeAgentSystemPrompt(promptCtx, projectRoot, projectRules, format) : "", promptCtx ? nodeNote : "", web ? webSystemNote() : ""].filter(Boolean).join("\n\n");
   const executeTool = (tool: ToolName, args: Record<string, unknown>, opts: { approved: boolean }) => executor.execute(tool, args, opts);
   reply.raw.on("close", () => tracked.end("cancelled"));
+  // Compaction (context-budget.ts): the lead's real window, a cheap summary call, and for a paid
+  // lead (frontier key, network or cloud model) the token budget from Settings.
+  const lead = chatAsSession(chatModel, body.compute);
+  const paidLead = isPaidLead(modelIdOf(lead), lead.compute.target);
   await runAgentLoop({
     chat: isFrontierModelId(chatModel)
       ? frontierChatFn(chatModel, { sessionKey: `chat:${turnId}` }, sendEvent, abort.signal)
       : chatFnFor(body.compute, chatModel, ollamaHost, sendEvent, abort.signal, "EdgeCoder chat", body.compute?.target === "auto" ? { sessionKey: `chat:${turnId}` } : undefined),
     systemPrompt: helpersOn ? withTentacleGuidance(basePrompt, true, tentacles.unreported(helperId!)) : basePrompt,
     messages,
+    contextWindow: () => sessionContextWindow(lead),
+    summarize: sessionSummarizer(lead, (e) => e.type === "usage" && sendEvent(e), abort.signal, null),
+    compactAtTokens: paidLead ? compactPaidTokens(body.compactPaidTokens) : null,
     // Web grounding: a question that needs fresh facts is searched once before the first turn (not in Manual, where web calls ask).
     ...(web ? webGrounding(web, messages, { skip: chatMode === "ask" }) : {}),
     sendEvent,
@@ -1581,6 +1591,58 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
   sendEvent({ type: "done" });
   tracked.end(clientDisconnected ? "cancelled" : undefined);
   reply.raw.end();
+});
+
+const compactSchema = z.object({
+  messages: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string() })).min(1),
+  model: z.string().optional(),
+  compute: ideChatSchema.shape.compute,
+  compactPaidTokens: ideChatSchema.shape.compactPaidTokens,
+  /** true: compact now (the chat's "Compact conversation", `/compact`); false: only when a paid lead's history passes its budget. */
+  force: z.boolean().default(false),
+});
+
+/**
+ * Persistent compaction for a desktop chat (context-budget.ts compactHistory): all but the last few
+ * messages become one summary the app keeps and sends in their place from then on. Without
+ * `force` it runs only for a paid lead whose history passed the token budget (the app asks before
+ * each send); a free model keeps the 85%-of-window rule inside the turn. The summary runs on the
+ * cheap worker model (this computer's model for a local chat), never the frontier key unless
+ * compactWithLead is on. Always answers with `tokens`, the history's estimated size.
+ */
+app.post("/v1/ide/compact", async (req, reply) => {
+  const body = compactSchema.parse(req.body);
+  const chatModel = body.model || process.env.OLLAMA_MODEL || "qwen3.5:9b";
+  const lead = chatAsSession(chatModel, body.compute);
+  const tokens = estimateContextTokens(body.messages);
+  const paid = isPaidLead(modelIdOf(lead), lead.compute.target);
+  const budget = compactPaidTokens(body.compactPaidTokens);
+  if (!body.force && !(paid && tokens > budget * PRE_TURN_SHARE)) return reply.send({ compacted: false, tokens, paid, budget });
+  let cSats = 0;
+  let usd = 0;
+  const abort = new AbortController();
+  reply.raw.on("close", () => { if (!reply.raw.writableEnded) abort.abort(); });
+  const summarize = sessionSummarizer(lead, (e) => {
+    if (e.type !== "usage") return;
+    if (Number.isFinite(e.cSats)) cSats += e.cSats;
+    if (typeof e.usd === "number" && Number.isFinite(e.usd)) usd += e.usd;
+  }, AbortSignal.any([abort.signal, AbortSignal.timeout(90_000)]), null);
+  const r = await compactHistory(body.messages, { summarize });
+  if (!r) return reply.send({ compacted: false, tokens, paid, budget, reason: "too_short" });
+  return reply.send({
+    compacted: true,
+    note: r.note,
+    covered: r.covered,
+    before: r.before,
+    after: r.after,
+    savedTokens: Math.max(0, r.before - r.after),
+    summarized: r.summarized,
+    tokens: r.after,
+    paid,
+    budget,
+    ...(cSats > 0 ? { cSats: Number(cSats.toFixed(6)) } : {}),
+    ...(usd > 0 ? { usd: Number(usd.toFixed(6)) } : {}),
+  });
 });
 
 // --- The web tool for chats without a project (docs/web-tool.md) ---
@@ -1814,6 +1876,69 @@ function graduatedLead(s: SessionData, emit: (e: IdeStreamEvent) => void): strin
   return pick.model;
 }
 
+/** A session's (or chat's) lead context window in tokens; undefined: the loop's conservative default. */
+async function sessionContextWindow(s: Pick<SessionData, "model" | "compute">): Promise<number | undefined> {
+  const fixed = Number(process.env.AGENT_CONTEXT_WINDOW);
+  if (s.compute.target === "local") return Number.isInteger(fixed) && fixed >= 2048 ? fixed : 32_768;
+  // A frontier lead: the model's own window (Anthropic's current models: 1M tokens).
+  if (s.compute.target === "frontier") return frontierContextWindow(s.compute.provider ?? "", s.model);
+  // auto may land anywhere: the default (conservative) window.
+  if (s.compute.target === "auto" || !networkDeps) return undefined;
+  return networkContextWindow(networkDeps, s.model).catch(() => undefined);
+}
+
+/**
+ * The summary call compaction uses: a cheap call on the session's worker model (default auto: a
+ * small model for a short job, on the network or this computer). Never the frontier lead, unless
+ * the user opted in (frontier setting compactWithLead), and then only for the key owner's own turn.
+ */
+function sessionSummarizer(s: SessionData, emit: (e: IdeStreamEvent) => void, signal: AbortSignal, client: ClientRef | null): (text: string) => Promise<string | null> {
+  return async (text) => {
+    const sig = AbortSignal.any([signal, AbortSignal.timeout(60_000)]);
+    const pick = compactionModelOf(s, frontier.store.settings().compactWithLead);
+    const chat =
+      pick.role === "worker" && pick.id === "auto" && !networkDeps && !hosted
+        ? chatFnFor({ target: "local" }, s.compute.target === "local" ? s.model : process.env.OLLAMA_MODEL || "qwen3.5:9b", process.env.OLLAMA_HOST || "http://127.0.0.1:11434", emit, sig, "edgecoder compaction")
+        : sessionChat(s, pick.id, emit, sig, client, pick.role);
+    const r = await chat({
+      messages: [
+        { role: "system", content: "Summarize this coding-agent conversation for the agent itself, in at most 200 words: what was asked, what was found and changed (with exact file paths and line numbers), and what is left to do. No preamble." },
+        { role: "user", content: text },
+      ],
+    });
+    return r.content.trim() || null;
+  };
+}
+
+/**
+ * A desktop chat (POST /v1/ide/chat) as the session shape compaction works with: its lead and
+ * placement. A chat on this computer summarizes on its own model (free); a frontier lead on the
+ * worker (auto), never the key unless compactWithLead is on.
+ */
+function chatAsSession(model: string, compute: z.infer<typeof ideChatSchema>["compute"]): SessionData {
+  const lead = isFrontierModelId(model) ? parseModelIdForChat(model) : { model, compute: (compute ?? { target: "local" }) as SessionData["compute"] };
+  const now = Date.now();
+  return {
+    id: "00000000-0000-4000-8000-000000000000",
+    title: "Code chat",
+    projectRoot: "",
+    branch: null,
+    model: lead.model,
+    compute: lead.compute,
+    mode: "ask",
+    autoApprove: "none",
+    alwaysShell: [],
+    origin: "desktop",
+    published: false,
+    createdAt: now,
+    updatedAt: now,
+    cSats: 0,
+    transcript: [],
+    // A free lead (this computer, your machines, a reservation) summarizes on itself; others on auto.
+    ...(["local", "mine", "reserved"].includes(lead.compute.target) ? { workerModel: modelIdOf(lead) } : {}),
+  };
+}
+
 const sessions: SessionHub = new SessionHub({
   chat: (s: SessionData, emit, signal, ctx) =>
     sessionChat(s, ctx?.role === "worker" ? workerModelOf(s) : graduatedLead(s, emit), emit, signal, ctx?.client ?? null, ctx?.role ?? "lead"),
@@ -1833,33 +1958,8 @@ const sessions: SessionHub = new SessionHub({
   tools: (s) => withTentacleTools(hasGitHubOrigin(s.projectRoot) ? toolSchemas() : toolSchemas().filter((t) => t.function.name !== "open_pull_request"), tentacles.enabled(s.id)),
   checkpoints,
   branch: currentBranch,
-  contextWindow: async (s) => {
-    const fixed = Number(process.env.AGENT_CONTEXT_WINDOW);
-    if (s.compute.target === "local") return Number.isInteger(fixed) && fixed >= 2048 ? fixed : 32_768;
-    // A frontier lead: the model's own window (Anthropic's current models: 1M tokens).
-    if (s.compute.target === "frontier") return frontierContextWindow(s.compute.provider ?? "", s.model);
-    // auto may land anywhere: the default (conservative) window.
-    if (s.compute.target === "auto" || !networkDeps) return undefined;
-    return networkContextWindow(networkDeps, s.model).catch(() => undefined);
-  },
-  summarize: (s, emit, signal, ctx) => async (text) => {
-    // A cheap call on the session's worker model (default auto: a small model for a short job, on
-    // the network or this computer). Never the frontier lead, unless the user opted in
-    // (frontier setting compactWithLead), and then only for the key owner's own turn.
-    const sig = AbortSignal.any([signal, AbortSignal.timeout(60_000)]);
-    const pick = compactionModelOf(s, frontier.store.settings().compactWithLead);
-    const chat =
-      pick.role === "worker" && pick.id === "auto" && !networkDeps && !hosted
-        ? chatFnFor({ target: "local" }, s.compute.target === "local" ? s.model : process.env.OLLAMA_MODEL || "qwen3.5:9b", process.env.OLLAMA_HOST || "http://127.0.0.1:11434", emit, sig, "edgecoder compaction")
-        : sessionChat(s, pick.id, emit, sig, ctx?.client ?? null, pick.role);
-    const r = await chat({
-      messages: [
-        { role: "system", content: "Summarize this coding-agent conversation for the agent itself, in at most 200 words: what was asked, what was found and changed (with exact file paths and line numbers), and what is left to do. No preamble." },
-        { role: "user", content: text },
-      ],
-    });
-    return r.content.trim() || null;
-  },
+  contextWindow: (s) => sessionContextWindow(s),
+  summarize: (s, emit, signal, ctx) => sessionSummarizer(s, emit, signal, ctx?.client ?? null),
   onSessionStop: (id) => void tentacles.cancelAll(id),
 }, { permissions: permissionStore });
 registerSessionRoutes(app, sessions);

@@ -13,6 +13,7 @@
   import FrontierKeys from "../components/FrontierKeys.svelte";
   import PermissionSettings from "../components/PermissionSettings.svelte";
   import HelpersSettings from "../components/HelpersSettings.svelte";
+  import CompactSettings from "../components/CompactSettings.svelte";
   import { setWebAutoDefault, webAutoDefault } from "../lib/web-tool";
 
   /** Open a portal page (the Bluetooth explainer) in the browser. */
@@ -382,6 +383,8 @@
   <PermissionSettings />
 
   <HelpersSettings />
+
+  <CompactSettings />
 
   <section class="sp-group" aria-labelledby="gen-web">
     <h2 class="sp-group-title" id="gen-web">Web</h2>
