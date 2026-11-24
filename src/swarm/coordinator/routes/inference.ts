@@ -63,6 +63,7 @@ import { registerRestrictedRoutes } from "./restricted.js";
 import { servedBy } from "../served-by-route.js";
 import { isFrontierModelId } from "../../../inference-api/frontier-models.js";
 import { taskIdInUse, accrualsInFlight, settleTaskIfDone, refundTaskSubmit } from "../results.js";
+import { closeUnreservedBillingRow } from "../billing-restore.js";
 import { recordMeshWork } from "../world-activity.js";
 import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
 import { armAutoReplace } from "../auto-replace.js";
@@ -644,15 +645,19 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       // Durable billing (stress finding 2): a restart refunds what this call did not use.
       // The task id's one billing row network-wide: an id billed on the other seed, or by another
       // account or kind, is refused before anything is debited.
+      let insertedRow = false;
       try {
         if (pgStore) {
           const billingRow = await pgStore.insertTaskBilling({ taskId: body.taskId, coordinatorId: identity.peerId, accountId, kind: "inference", perSubtaskReserveMsat: reserve, createdAtMs: Date.now() });
           if (billingRow === "conflict") return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
+          insertedRow = billingRow === "inserted";
         }
         await spendCredits(accountId, msatToCSats(reserve), "inference_reserve", body.taskId, { idempotencyKey: taskReserveKey(body.taskId) });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (err instanceof DuplicateDebitError) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
+        // Refused before the reserve: close the billing row this call wrote (only if the ledger has nothing under it).
+        if (insertedRow && pgStore) await closeUnreservedBillingRow(pgStore, { taskId: body.taskId, accountId: accountId, kind: "inference" }).catch((closeErr) => req.log.warn({ err: closeErr, taskId: body.taskId }, "task_billing_close_failed"));
         if (message.startsWith("insufficient_credits")) return reply.code(402).send({ error: "insufficient_credits", neededCSats: msatToCSats(reserve) });
         req.log.error({ err, taskId: body.taskId }, "inference_debit_failed");
         return reply.code(500).send({ error: "credit_debit_failed" });
