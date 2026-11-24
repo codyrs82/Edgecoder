@@ -115,7 +115,8 @@ Chats (desktop app and web chat) and bots can search the web (`web_search`) and 
   access excepted). Edits inside the project that the mode applies anyway still apply (undoable);
   protected paths, secrets and files outside the project ask or are refused as usual. The card says
   why it asked and offers **Allow for the rest of this run**, which lets the rest of that run's
-  guarded calls go ahead (never ones the mode itself asks about; nothing is kept). The phone and the
+  guarded calls go ahead (never ones the mode itself asks about, nor running a script or build file
+  the run itself changed; nothing is kept). The phone and the
   web answer one call at a time.
 
 In **Manual** permission mode, every web call asks first.

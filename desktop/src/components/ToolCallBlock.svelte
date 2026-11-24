@@ -19,6 +19,8 @@
     onAlways?: (id: string) => void;
     /** Asked only because a web page was read this run: the mode would have run it on its own. */
     webGuard?: boolean;
+    /** With webGuard: the file this run changed that the call runs (no run-wide answer for it). */
+    runsEdited?: string;
     /** "Allow for the rest of this run" (only with webGuard): later calls like it go ahead until the run ends. */
     onForRun?: (id: string) => void;
   }
@@ -36,6 +38,7 @@
     allowRules,
     onAlways,
     webGuard = false,
+    runsEdited,
     onForRun,
   }: Props = $props();
 
@@ -155,7 +158,9 @@
       <ToolArgs {tool} {args} />
     </div>
     {#if webGuard}
-      <p class="guard-note" data-testid="web-guard-note">Asked because this run read a web page. Your permission mode would run it without asking.</p>
+      <p class="guard-note" data-testid="web-guard-note">
+        {#if runsEdited}Asked because this run read a web page and changed <code>{runsEdited}</code>, which this runs.{:else}Asked because this run read a web page. Your permission mode would run it without asking.{/if}
+      </p>
     {/if}
     <div class="approval-bar">
       <span class="approval-label">Approve this action?</span>
@@ -163,7 +168,7 @@
         <button class="btn allow" onclick={handleApprove} type="button"
           >Allow</button
         >
-        {#if webGuard && onForRun}
+        {#if webGuard && !runsEdited && onForRun}
           <button class="btn always" onclick={handleForRun} type="button" title="Calls your permission mode runs anyway stop asking until this run ends. Anything the mode asks about still asks."
             >Allow for the rest of this run</button
           >

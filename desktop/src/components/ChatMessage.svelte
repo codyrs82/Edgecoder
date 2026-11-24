@@ -123,6 +123,7 @@
                   allowRules={evt.allow_rules}
                   onAlways={onToolAlways}
                   webGuard={evt.web_guard === true}
+                  runsEdited={evt.runs_edited}
                   onForRun={onToolForRun}
                 />
               {:else if evt.type === "shell_output"}

@@ -75,4 +75,11 @@ describe("ToolCallBlock approval", () => {
     expect(screen.queryByRole("button", { name: /rest of this run/ })).toBeNull();
     expect(screen.getByTestId("web-guard-note")).toBeTruthy();
   });
+
+  it("a guard ask that runs a file this run changed names it and offers no run-wide answer", () => {
+    render(ToolCallBlock, { id: "c11", tool: "run_shell", args: { command: "python3 tools/watchlist.py" }, requiresApproval: true, status: "pending", onApprove: vi.fn(), onReject: vi.fn(), webGuard: true, runsEdited: "tools/watchlist.py", onForRun: vi.fn() });
+    expect(screen.getByTestId("web-guard-note").textContent).toMatch(/changed tools\/watchlist\.py, which this runs/);
+    expect(screen.queryByRole("button", { name: /rest of this run/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Allow" })).toBeTruthy();
+  });
 });

@@ -115,6 +115,8 @@ export interface ToolEvent {
   allow_rules?: string[];
   /** Asked only because a web page was read this run (the mode would run it): may be allowed for the rest of the run. */
   web_guard?: boolean;
+  /** With web_guard: the call runs a file this run changed, so the run-wide answer isn't offered. */
+  runs_edited?: string;
   result?: string;
   error?: string;
   command?: string;

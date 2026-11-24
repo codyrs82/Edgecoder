@@ -516,10 +516,10 @@
                   {#if c.answer}
                     <div class="ask-answer" class:denied={c.answer === "Denied"}>You: {c.answer}</div>
                   {:else}
-                    {#if c.webGuard}<div class="ask-note" data-testid="web-guard-note">Asked because this run read a web page. Its mode would run it without asking.</div>{/if}
+                    {#if c.webGuard}<div class="ask-note" data-testid="web-guard-note">{#if c.runsEdited}Asked because this run read a web page and changed <code>{c.runsEdited}</code>, which this runs.{:else}Asked because this run read a web page. Its mode would run it without asking.{/if}</div>{/if}
                     <div class="ask-choices">
                       <button class="primary" onclick={() => approve(c.id, true)}>Allow</button>
-                      {#if c.webGuard}
+                      {#if c.webGuard && !c.runsEdited}
                         <button class="always" onclick={() => approve(c.id, true, false, true)} title="Calls its permission mode runs anyway stop asking until this run ends. Anything the mode asks about still asks.">Allow for the rest of this run</button>
                       {/if}
                       {#if c.rules?.length}

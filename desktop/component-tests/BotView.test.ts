@@ -360,6 +360,17 @@ describe("BotView avatar, ask cards and details panel", () => {
     expect(api.approveBotCall).toHaveBeenCalledWith("bot_h", "c1", true, false, true);
   });
 
+  it("a guard ask that runs a file the run changed offers no run-wide answer", async () => {
+    const waiting = harry({ status: "needs_approval", lastRun: { id: "run_2", trigger: "manual", startedAtMs: 0, status: "needs_approval", summary: "", cSats: 0 }, pending: [{ callId: "c1", tool: "run_shell", args: { command: "bash x.sh" } }] });
+    api.botMessages.mockResolvedValue([
+      { id: "m1", role: "assistant", content: "", atMs: 0, runId: "run_2", events: [{ type: "tool_call", id: "c1", tool: "run_shell", args: { command: "bash x.sh" }, requires_approval: true, web_guard: true, runs_edited: "x.sh" }] },
+    ]);
+    api.botHistory.mockResolvedValue([waiting.lastRun]);
+    render(BotView, { bot: waiting, onEdit: vi.fn(), onDeleted: vi.fn() });
+    expect((await screen.findByTestId("web-guard-note")).textContent).toMatch(/changed x\.sh, which this runs/);
+    expect(screen.queryByRole("button", { name: /rest of this run/ })).toBeNull();
+  });
+
   it("has a permission mode picker under the message box that changes the bot's mode", async () => {
     api.updateBot.mockResolvedValue(harry({ mode: "auto" }));
     render(BotView, { bot: harry({ mode: "ask" }), onEdit: vi.fn(), onDeleted: vi.fn() });

@@ -58,6 +58,7 @@ export function applyAgentEvent(turn: AgentTurn, event: IdeStreamEvent): { turn:
               ...(typeof event.allow_rule === "string" ? { allow_rule: event.allow_rule } : {}),
               ...(Array.isArray(event.allow_rules) ? { allow_rules: (event.allow_rules as unknown[]).filter((r): r is string => typeof r === "string") } : {}),
               ...(event.web_guard === true ? { web_guard: true } : {}),
+              ...(typeof event.runs_edited === "string" ? { runs_edited: event.runs_edited } : {}),
               approval_status: (event.requires_approval ? "pending" : "approved") as "pending" | "approved",
             },
           ],

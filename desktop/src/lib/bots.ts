@@ -221,6 +221,8 @@ export interface AskCard {
   rules?: string[];
   /** Asked only because the run read a web page (the mode would run it): "Allow for the rest of this run" is offered. */
   webGuard?: boolean;
+  /** With webGuard: the file this run changed that the call runs (no "rest of this run" answer). */
+  runsEdited?: string;
   /** open_pull_request: what the PR will be. */
   pr?: { title: string; body: string; branch: string; base: string; diffstat: string; commits?: number; uncommitted?: number };
 }
@@ -232,7 +234,7 @@ export function botModeOf(bot: Pick<Bot, "mode" | "autoApproveEdits">): import("
 }
 
 export function askCards(
-  events: Array<{ type: string; id?: string; tool?: string; args?: Record<string, unknown>; requires_approval?: boolean; approval_status?: string; allow_rule?: string; allow_rules?: string[]; web_guard?: boolean }>,
+  events: Array<{ type: string; id?: string; tool?: string; args?: Record<string, unknown>; requires_approval?: boolean; approval_status?: string; allow_rule?: string; allow_rules?: string[]; web_guard?: boolean; runs_edited?: string }>,
   botName: string,
 ): AskCard[] {
   return events
@@ -264,7 +266,7 @@ export function askCards(
         ...(detail ? { detail } : {}),
         ...(answer === null ? { call: { tool, args } } : {}),
         ...(answer === null && rules.length ? { rule: rules[0], rules } : {}),
-        ...(answer === null && e.web_guard === true ? { webGuard: true } : {}),
+        ...(answer === null && e.web_guard === true ? { webGuard: true, ...(typeof e.runs_edited === "string" ? { runsEdited: e.runs_edited } : {}) } : {}),
         answer,
       };
     });
@@ -330,7 +332,7 @@ export const DEFAULT_COMPUTE: BotCompute = { policy: "auto" };
 export const BOT_READ_TOOLS = ["read_file", "list_directory", "search_files", "search_codebase", "git_status", "git_diff", "git_log", "git_fetch", "github_list_prs", "github_list_issues"];
 export const BOT_TOOL_GROUPS: Array<{ id: string; title: string; desc: string; tools: string[] }> = [
   { id: "edit", title: "Edit files", desc: "Write and edit files inside its project folder.", tools: ["write_file", "edit_file"] },
-  { id: "shell", title: "Run commands", desc: "Tests, builds, scripts. Each command asks you first.", tools: ["run_shell"] },
+  { id: "shell", title: "Run commands", desc: "Tests, builds, scripts. Auto runs safe ones (tests, builds, reads) and asks about the rest; Manual and Accept edits ask for each.", tools: ["run_shell"] },
   { id: "git", title: "Commit, push and open pull requests", desc: "Commits, pushes and pull requests ask you first. Pull requests never go to the default branch.", tools: ["git_commit", "git_push", "open_pull_request"] },
   // docs/web-tool.md: on for new bots (existing bots keep theirs). Network access: it's the allowance, so
   // Auto and Accept edits run searches without asking (Manual asks each time); after it reads a page,

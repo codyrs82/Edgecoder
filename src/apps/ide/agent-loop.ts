@@ -21,6 +21,7 @@ import { thisComputer } from "../../inference-api/backends.js";
 import { READ_TOOLS, TENTACLE_TOOLS, TOOL_DEFINITIONS, WEB_TOOLS, type IdeStreamEvent, type ToolName } from "./tool-types.js";
 import { PLAN_REFUSAL, type Decision } from "./permission-policy.js";
 import { protectedToolPath } from "./tool-executor.js";
+import { editKey, runsEditedFile } from "./edited-runs.js";
 import { extractTextToolCalls, TextToolCallFilter } from "./text-tool-calls.js";
 import { COMPACT_AT, compactMessages, compactThreshold, DEFAULT_CONTEXT_WINDOW, estimateTokens, isContextTooLong, isTransient, pathsLine, REPLY_RESERVE_TOKENS } from "./context-budget.js";
 import type { CostCheckContext, CostVerdict } from "./cost-guard.js";
@@ -865,9 +866,12 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
   // turn's checkpoint, undoable; protected paths, secrets and files outside the project still ask
   // or are refused by the mode), and Full access (the user chose to approve everything). Answering
   // a guard ask with "Allow for the rest of this run" (ApprovalAnswer "run") lifts the guard until
-  // the run ends; it never makes a call run that the mode itself asks about or refuses.
+  // the run ends; it never makes a call run that the mode itself asks about or refuses, nor one that
+  // runs a file this run wrote or edited (edited-runs.ts): such a call keeps the guard's ask.
   let webPageRead = false;
   let guardLifted = false;
+  /** Files this run wrote or edited (editKey form). */
+  const edited = new Set<string>();
   return async (tool, rawArgs) => {
     const callId = `tc_${randomUUID().slice(0, 8)}`;
     let args = rawArgs;
@@ -914,7 +918,10 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
       always = !ALWAYS_ASK_TOOLS.has(tool) && !READ_TOOLS.has(tool) && d.alwaysAllowed?.(tool, args) === true;
       requiresApproval = ALWAYS_ASK_TOOLS.has(tool) || (!READ_TOOLS.has(tool) && !shellAutoApprove && !editAutoApprove && !always);
     }
-    const webGuard = webPageRead && !guardLifted && !guardExempt && !requiresApproval && !READ_TOOLS.has(tool) && !WEB_TOOLS.has(tool);
+    const guarded = webPageRead && !guardExempt && !requiresApproval && !READ_TOOLS.has(tool) && !WEB_TOOLS.has(tool);
+    // A call that runs a file this run changed is never covered by the run-wide allowance.
+    const runsEdited = guarded ? runsEditedFile(tool, args, edited) : null;
+    const webGuard = guarded && (!guardLifted || runsEdited !== null);
     if (webGuard) {
       requiresApproval = true;
       always = false;
@@ -926,7 +933,7 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
       args,
       requires_approval: requiresApproval,
       ...(rules.length ? { allow_rule: rules[0], ...(rules.length > 1 ? { allow_rules: rules } : {}) } : {}),
-      ...(webGuard ? { web_guard: true as const } : {}),
+      ...(webGuard ? { web_guard: true as const, ...(runsEdited ? { runs_edited: runsEdited } : {}) } : {}),
     });
     if (requiresApproval) {
       const answer = await d.waitForApproval(callId, tool, args, { webGuard });
@@ -935,7 +942,7 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
         d.sendEvent({ type: "tool_result", id: callId, error: msg });
         return `[Rejected]: ${msg}`;
       }
-      if (answer === "run" && webGuard) guardLifted = true;
+      if (answer === "run" && webGuard && !runsEdited) guardLifted = true;
     }
     const writesFile = tool === "write_file" || tool === "edit_file";
     const tracked = writesFile ? d.captureBeforeWrite(String(args.path ?? "")) : null;
@@ -943,6 +950,10 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
     const result = await d.execute(tool, args, { approved: requiresApproval || always });
     if (tool === "read_page" && !result.error) webPageRead = true;
     if (tracked && !result.error) d.sendEvent({ type: "file_change", turnId: d.turnId, path: tracked });
+    if (writesFile && !result.error) {
+      const k = editKey(args.path);
+      if (k) edited.add(k);
+    }
     let hint: string | null = null;
     if (tool === "run_shell" && result.result) {
       try {

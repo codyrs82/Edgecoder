@@ -143,6 +143,11 @@ export type IdeStreamEvent =
        * the mode or a rule would have run it. The card may offer "Allow for the rest of this run".
        */
       web_guard?: true;
+      /**
+       * With web_guard: the call runs a file this run wrote or edited (edited-runs.ts). "Allow for
+       * the rest of this run" isn't offered and never covers it.
+       */
+      runs_edited?: string;
     }
   | { type: "tool_result"; id: string; result?: string; error?: string }
   | { type: "diff"; file: string; hunks: DiffHunk[]; id: string }

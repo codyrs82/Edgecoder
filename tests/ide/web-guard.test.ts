@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { makeToolRunner, type ApprovalAnswer, type ApprovalAsk } from "../../src/apps/ide/agent-loop.js";
+import { editKey, runsEditedFile } from "../../src/apps/ide/edited-runs.js";
 import { classifyCommand, decideToolCall, suggestRules, suggestToolRules } from "../../src/apps/ide/permission-policy.js";
 import { splitCommand, type PermissionMode } from "../../src/apps/ide/permissions.js";
 import type { IdeStreamEvent, ToolName } from "../../src/apps/ide/tool-types.js";
@@ -234,5 +235,78 @@ describe("Always allow for command lines", () => {
 
   it("2>&1 no longer reads as a background job", () => {
     expect(classifyCommand("npm test 2>&1 | tail -5", { root })).toMatchObject({ action: "run", category: "dev" });
+  });
+});
+
+describe("the run-wide allowance never covers running a file this run changed", () => {
+  const ed = (...paths: string[]) => new Set(paths);
+  it.each([
+    ["tools/watchlist.py", "python3 tools/watchlist.py SPY"],
+    ["tools/watchlist.py", "python3 ./tools/watchlist.py 2>&1 | head -20"],
+    ["scripts/run.sh", "./scripts/run.sh --fast"],
+    ["scripts/run.sh", "bash -e scripts/run.sh"],
+    ["x.sh", "source x.sh && npm test"],
+    ["src/gen.js", "nice -n 5 node src/gen.js"],
+    ["Makefile", "make build"],
+    ["mk/rules.mk", "make"],
+    ["package.json", "npm run report"],
+    ["package.json", "npx some-bin"],
+    ["Cargo.toml", "cargo build"],
+    ["conftest.py", "pytest -q"],
+    ["vitest.config.ts", "npx vitest run"],
+  ])("after editing %s: %s", (path, command) => {
+    expect(runsEditedFile("run_shell", { command }, ed(editKey(path)!))).toBe(editKey(path));
+  });
+
+  it.each([
+    ["tools/watchlist.py", "python3 tools/other.py"],
+    ["tools/watchlist.py", "cat tools/watchlist.py"],
+    ["market-notes/2026-11-24.md", "python3 tools/watchlist.py --md"],
+    ["portfolio.md", "make report"],
+    ["package.json", "make build"],
+    ["Makefile", "npm test"],
+    ["pyproject.toml", "python3 tools/watchlist.py"],
+  ])("after editing %s: %s is not running it", (path, command) => {
+    expect(runsEditedFile("run_shell", { command }, ed(editKey(path)!))).toBeNull();
+  });
+
+  it("only shell commands can run one", () => {
+    expect(runsEditedFile("git_commit", { message: "x" }, ed("Makefile"))).toBeNull();
+    expect(runsEditedFile("run_shell", { command: "make" }, ed())).toBeNull();
+  });
+
+  it("after a page read and the allowance, an edited script still asks, without the run-wide answer", async () => {
+    const r = setup("auto", ["run", true], [RULE]);
+    await r.runTool("read_page", { url: "https://markets.example/" });
+    // The allowance is given on a plain guard ask.
+    await r.runTool("run_shell", { command: "npm test" });
+    expect(await r.runTool("run_shell", { command: WATCHLIST })).toBe("ran run_shell");
+    expect(r.asks).toHaveLength(1);
+    // The run edits the script (applies on its own), then runs it: the guard asks again.
+    expect(await r.runTool("edit_file", edit("tools/watchlist.py"))).toBe("ran edit_file");
+    expect(await r.runTool("run_shell", { command: WATCHLIST })).toBe("ran run_shell");
+    expect(r.asks).toHaveLength(2);
+    expect(r.asks[1].ask.webGuard).toBe(true);
+    expect(r.lastCall()).toMatchObject({ web_guard: true, runs_edited: "tools/watchlist.py" });
+    // Other covered calls still go ahead.
+    expect(await r.runTool("run_shell", { command: "npm test" })).toBe("ran run_shell");
+    expect(r.asks).toHaveLength(2);
+  });
+
+  it('answering an edited-file ask with "run" lifts nothing', async () => {
+    const r = setup("auto", ["run"], [RULE]);
+    await r.runTool("edit_file", edit("tools/watchlist.py"));
+    await r.runTool("read_page", { url: "https://markets.example/" });
+    await r.runTool("run_shell", { command: "python3 tools/watchlist.py" });
+    expect(r.lastCall()).toMatchObject({ web_guard: true, runs_edited: "tools/watchlist.py" });
+    await r.runTool("run_shell", { command: "npm test" });
+    expect(r.asks.map((a) => a.ask.webGuard)).toEqual([true, true]);
+  });
+
+  it("no page read means no guard at all, edited or not", async () => {
+    const r = setup("auto", [], [RULE]);
+    await r.runTool("edit_file", edit("tools/watchlist.py"));
+    expect(await r.runTool("run_shell", { command: "python3 tools/watchlist.py" })).toBe("ran run_shell");
+    expect(r.asks).toHaveLength(0);
   });
 });

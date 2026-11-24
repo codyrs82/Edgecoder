@@ -230,7 +230,13 @@ updated with agent releases.
   - **Allow for the rest of this run**: a card the guard asked shows why ("Asked because this run read
     a web page") and offers this answer next to Allow and Deny. It lets later guarded calls (only
     calls the mode or a rule would run anyway) go ahead until that reply or run ends; anything the
-    mode itself asks about still asks, and nothing is kept afterwards. The phone and the web portal
+    mode itself asks about still asks, and nothing is kept afterwards. It never covers a call that
+    runs a file the run wrote or edited (`src/apps/ide/edited-runs.ts`): the script itself
+    (`./x.sh`, `python3 tools/x.py`, `bash x.sh`, `node x.js`), or a runner after its build file
+    changed (`make` after the Makefile, `npm run` / `npx` after `package.json`, `just`, `cargo`,
+    pytest/tox configs, a tool's `*.config.js`). Such a call asks again, naming the file, without the
+    run-wide answer. Residual risk: a test runner or build still runs edited source or test files it
+    finds on its own (`npm test` after editing a test) once the allowance is given. The phone and the web portal
     answer one call at a time and don't offer it (their answers never widen what runs without
     asking, like "Always allow").
   - An ask the mode makes after a page read keeps its **Always allow** rule. Answering with it keeps
