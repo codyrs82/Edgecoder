@@ -17,10 +17,10 @@ import type { FastifyInstance } from "fastify";
 import { request } from "undici";
 import { z } from "zod";
 import { MODEL_CATALOG } from "../../model/catalog.js";
-import { modelControlRequestSchema, MODEL_CONTROL_ACTIONS } from "../../model/remote-control/protocol.js";
+import { modelControlRequestSchema, MODEL_CONTROL_ACTIONS, SETTINGS_AUTO_MIN_AGENT_VERSION } from "../../model/remote-control/protocol.js";
 import { registerBotRoutes } from "./bots.js";
 import { registerCodeRoutes } from "./code.js";
-import { agentUpdateAvailable } from "../agent-release.js";
+import { agentSupportsSettingsAuto, agentUpdateAvailable } from "../agent-release.js";
 export { createLatestAgentVersion } from "../agent-release.js";
 
 export interface MachineRoutesDeps {
@@ -214,12 +214,15 @@ export function registerMachineRoutes(app: FastifyInstance, deps: MachineRoutesD
         ...(machineMemory(m?.memory) ? { memory: machineMemory(m?.memory) } : {}),
         version: typeof m?.version === "string" ? m.version.slice(0, 40) : null,
         updateAvailable: agentUpdateAvailable(m?.version, latestAgentVersion),
+        // "Automatic" context window / slots: only for agents that take it (older ones would refuse it).
+        settingsAuto: agentSupportsSettingsAuto(m?.version, m?.state),
         audit: [...(audits.get(agentId)?.values() ?? [])].sort((x, y) => y.requestedAtMs - x.requestedAtMs).slice(0, 25)
       };
     });
     return reply.send({
       accountId,
       latestAgentVersion,
+      settingsAutoMinVersion: SETTINGS_AUTO_MIN_AGENT_VERSION,
       machines,
       actions: MODEL_CONTROL_ACTIONS,
       catalog: MODEL_CATALOG.map((m) => ({ modelId: m.modelId, name: m.name, diskSize: m.diskSize, minMemoryGb: m.minMemoryGb, category: m.category }))

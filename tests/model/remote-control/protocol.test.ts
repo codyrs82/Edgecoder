@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import { createPeerKeys } from "../../../src/mesh/peer.js";
 import {
   CommandReplayGuard,
@@ -98,6 +99,31 @@ describe("model control frames", () => {
     expect(p({ action: "set_settings", args: { keepAlive: "forever" } })).toBe(false);
     expect(p({ action: "set_settings", args: { contextWindow: 8192 } })).toBe(true);
     expect(p({ action: "install_ollama", args: {} })).toBe(false);
+  });
+
+  it("takes \"auto\" for the context window and slots, and nothing else in their place", () => {
+    const p = (args: unknown) => modelControlRequestSchema.safeParse({ action: "set_settings", args }).success;
+    expect(p({ contextWindow: "auto" })).toBe(true);
+    expect(p({ parallel: "auto" })).toBe(true);
+    expect(p({ contextWindow: "auto", parallel: "auto", keepAlive: "30m" })).toBe(true);
+    expect(p({ contextWindow: "auto", parallel: 2 })).toBe(true);
+    for (const bad of ["Auto", "automatic", "", " auto", "8192", null, true, 8192.5, ["auto"], { auto: true }]) {
+      expect(p({ contextWindow: bad }), JSON.stringify(bad)).toBe(false);
+      expect(p({ parallel: bad }), JSON.stringify(bad)).toBe(false);
+    }
+    expect(p({ keepAlive: "auto" })).toBe(false); // keep-alive has no automatic sizing
+    expect(p({ clear: ["contextWindow"] })).toBe(false);
+  });
+
+  it("a signed \"auto\" verifies on this agent; an agent from before it refuses the whole command", () => {
+    const f = frame({ request: { action: "set_settings", args: { contextWindow: "auto" } } });
+    const v = verify(f);
+    expect(v.ok && v.request).toEqual({ action: "set_settings", args: { contextWindow: "auto" } });
+    // The set_settings schema agents before agent-v1.2.8 shipped: the frame verifies there too, but
+    // the request does not parse, so that agent answers invalid_request and changes nothing.
+    const legacy = z.object({ contextWindow: z.number().int().optional(), parallel: z.number().int().optional(), keepAlive: z.string().optional() }).strict();
+    expect(legacy.safeParse(f.command.args).success).toBe(false);
+    expect(legacy.safeParse({ parallel: "auto" }).success).toBe(false);
   });
 
   it("signs canonical JSON (key order does not matter)", () => {

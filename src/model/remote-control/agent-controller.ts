@@ -8,9 +8,9 @@
  * back to the coordinator (a signed agent request, done by the caller's `report`).
  */
 
-import { verifyModelControlFrame, CommandReplayGuard, type ModelControlCommand, type ModelControlRequest, type ModelControlResult, type ModelControlState, type SettingSource } from "./protocol.js";
+import { verifyModelControlFrame, CommandReplayGuard, MODEL_CONTROL_FEATURES, type ModelControlCommand, type ModelControlRequest, type ModelControlResult, type ModelControlState, type SettingSource } from "./protocol.js";
 import { SETTINGS_BOUNDS, allowedModel, fitCheck, normalizeModelTag, settingsProblem, type ModelAllowlist } from "./policy.js";
-import { saveOverrides, withOverride, type EnvModelSettings, type ModelOverridesFile } from "./overrides.js";
+import { saveOverrides, withOverride, withoutKeys, type EnvModelSettings, type ModelOverridesFile } from "./overrides.js";
 import type { OllamaAdmin } from "./ollama-admin.js";
 
 /** The model settings the agent runs with now. */
@@ -259,22 +259,49 @@ export class ModelControlAgent {
     }
   }
 
-  private async doSettings(command: ModelControlCommand, patch: { contextWindow?: number; parallel?: number; keepAlive?: string }): Promise<Outcome> {
+  private async doSettings(command: ModelControlCommand, patch: { contextWindow?: number | "auto"; parallel?: number | "auto"; keepAlive?: string }): Promise<Outcome> {
     const problem = settingsProblem(patch, SETTINGS_BOUNDS);
     if (problem) return { status: "refused", error: problem };
+    // "auto": drop the portal's override of that setting so the agent sizes it again. The env file's
+    // own value (AGENT_CONTEXT_WINDOW / AGENT_PARALLEL_INFERENCE) is local config and still wins.
+    const autoKeys = (["contextWindow", "parallel"] as const).filter((k) => patch[k] === "auto");
     return this.exclusive(async () => {
       try {
-        if (patch.contextWindow !== undefined) this.persist("contextWindow", patch.contextWindow, command);
-        if (patch.parallel !== undefined) this.persist("parallel", patch.parallel, command);
+        if (typeof patch.contextWindow === "number") this.persist("contextWindow", patch.contextWindow, command);
+        if (typeof patch.parallel === "number") this.persist("parallel", patch.parallel, command);
         if (patch.keepAlive !== undefined) this.persist("keepAlive", patch.keepAlive, command);
-        await this.deps.apply(patch);
+        if (autoKeys.some((k) => this.overrides[k] !== undefined)) {
+          this.overrides = withoutKeys(this.overrides, autoKeys);
+          saveOverrides(this.deps.overridesFile, this.overrides);
+        }
+        const change: Partial<Pick<CurrentModelSettings, "contextWindow" | "parallel" | "keepAlive">> = {};
+        if (typeof patch.contextWindow === "number") change.contextWindow = patch.contextWindow;
+        if (typeof patch.parallel === "number") change.parallel = patch.parallel;
+        if (patch.keepAlive !== undefined) change.keepAlive = patch.keepAlive;
+        // The worker re-reads the override file and re-sizes (a changed window reloads the model).
+        await this.deps.apply(change);
         const np = this.deps.ollamaNumParallel;
-        const note = patch.parallel !== undefined && np !== undefined && patch.parallel > np ? ` (Ollama runs ${np} at once: calls past that queue; re-run the installer with --parallel ${patch.parallel} to raise it)` : "";
-        return { status: "done", message: `settings applied${note}` };
+        const note = typeof patch.parallel === "number" && np !== undefined && patch.parallel > np ? ` (Ollama runs ${np} at once: calls past that queue; re-run the installer with --parallel ${patch.parallel} to raise it)` : "";
+        return { status: "done", message: `settings applied${note}${this.autoNote(autoKeys)}` };
       } catch (e) {
         return { status: "failed", error: "apply_failed", message: String(e).slice(0, 200) };
       }
     });
+  }
+
+  /** What "auto" came to: the newly sized value, or the machine's own config that still pins it. */
+  private autoNote(keys: ReadonlyArray<"contextWindow" | "parallel">): string {
+    if (keys.length === 0) return "";
+    const cur = this.deps.current();
+    const parts = keys.map((k) => {
+      const label = k === "contextWindow" ? "context window" : "parallel slots";
+      const flag = k === "contextWindow" ? "--context-window" : "--parallel";
+      if (cur.sources[k] === "env") {
+        return `${label} stays ${cur[k]}: this machine's own config sets it (${this.deps.localUi ? "change it in the EdgeCoder app" : `edgecoder-install apply --keep-config ${flag} auto`})`;
+      }
+      return `${label} automatic: ${cur[k]}`;
+    });
+    return `; ${parts.join("; ")}`;
   }
 
   private async doRestart(): Promise<Outcome> {
@@ -326,6 +353,7 @@ export class ModelControlAgent {
       allowlist: [...this.deps.allowlist.models.entries()].slice(0, 100).map(([name, v]) => ({ name, sizeBytes: v.sizeBytes, minMemoryGb: v.minMemoryGb })),
       ollamaNumParallel: this.deps.ollamaNumParallel,
       notes,
+      features: [...MODEL_CONTROL_FEATURES],
       pull: this.pull ? { ...this.pull } : undefined,
       localUi: Boolean(this.deps.localUi),
       reportedAtMs: this.now()

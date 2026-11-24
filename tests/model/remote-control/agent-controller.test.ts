@@ -17,6 +17,7 @@ import { startFakeOllama, type FakeOllama } from "./fake-ollama.js";
 const coord = createPeerKeys("coord-ac");
 const pinned = { peerId: coord.peerId, publicKeyPem: coord.publicKeyPem };
 const GB = 1e9;
+const AUTO_SIZED = { contextWindow: 40960, parallel: 4 };
 
 let ollama: FakeOllama;
 let reports: any[];
@@ -38,7 +39,17 @@ function agent(opts: { enabled?: boolean; allowlist?: string; diskFree?: number;
     apply: async (change) => {
       applied.push(change);
       const layered = layerOverrides(env, loadOverrides(overridesPath(configDir)).overrides).env;
-      settings = { ...settings, model: layered.model ?? settings.model, contextWindow: Number(layered.contextWindow ?? settings.contextWindow), parallel: Number(layered.parallel ?? settings.parallel), keepAlive: layered.keepAlive ?? settings.keepAlive };
+      const sources = layerOverrides(env, loadOverrides(overridesPath(configDir)).overrides).sources;
+      const src = (k: "model" | "contextWindow" | "parallel" | "keepAlive") => (sources[k] === "remote" ? "remote" : (env as Record<string, string | undefined>)[k] !== undefined ? "env" : "default");
+      // Nothing set: the worker's automatic sizing (here a fixed AUTO_SIZED).
+      settings = {
+        ...settings,
+        model: layered.model ?? settings.model,
+        contextWindow: Number(layered.contextWindow ?? AUTO_SIZED.contextWindow),
+        parallel: Number(layered.parallel ?? AUTO_SIZED.parallel),
+        keepAlive: layered.keepAlive ?? settings.keepAlive,
+        sources: { model: src("model"), contextWindow: src("contextWindow"), parallel: src("parallel"), keepAlive: src("keepAlive") }
+      };
     },
     hardware: { ramBytes: opts.ramBytes ?? 64 * GB, vramBytes: opts.vramBytes },
     modelsDir: configDir,
@@ -129,6 +140,50 @@ describe("agent model control", () => {
     const file = loadOverrides(overridesPath(configDir)).overrides;
     expect(file.contextWindow).toMatchObject({ value: 32768, baseline: "16384" });
     expect(file.parallel).toMatchObject({ value: 3, baseline: "" });
+  });
+
+  it("\"auto\" drops the portal's pinned value, re-sizes, and reports the sized value", async () => {
+    const a = agent({ env: { model: "qwen3.5:9b" } });
+    expect((await send(a, { action: "set_settings", args: { contextWindow: 8192, parallel: 2, keepAlive: "-1" } })).status).toBe("done");
+    expect(settings).toMatchObject({ contextWindow: 8192, parallel: 2, sources: { contextWindow: "remote", parallel: "remote" } });
+    reports = [];
+    const r = await send(a, { action: "set_settings", args: { contextWindow: "auto" } });
+    expect(r.status).toBe("done");
+    expect(r.message).toContain("context window automatic: 40960");
+    const file = loadOverrides(overridesPath(configDir)).overrides;
+    expect(file.contextWindow).toBeUndefined();
+    expect(file.parallel).toMatchObject({ value: 2 }); // only what was asked
+    expect(file.keepAlive).toMatchObject({ value: "-1" });
+    expect(settings).toMatchObject({ contextWindow: 40960, parallel: 2, sources: { contextWindow: "default", parallel: "remote" } });
+    expect(applied.at(-1)).toEqual({}); // re-sized from the file, not from a number in the command
+    const final = reports.at(-1);
+    expect(final.result).toMatchObject({ status: "done" });
+    expect(final.state.settings).toMatchObject({ contextWindow: 40960, parallel: 2 });
+    expect(final.state.sources).toMatchObject({ contextWindow: "default", parallel: "remote" });
+    expect(final.state.features).toContain("settings_auto");
+    // Slots too; asking again when already automatic is fine and changes nothing.
+    expect((await send(a, { action: "set_settings", args: { parallel: "auto" } })).message).toContain("parallel slots automatic: 4");
+    expect(loadOverrides(overridesPath(configDir)).overrides.parallel).toBeUndefined();
+    expect((await send(a, { action: "set_settings", args: { contextWindow: "auto", parallel: "auto" } })).status).toBe("done");
+  });
+
+  it("\"auto\" leaves a value the machine's own config sets (local config wins), and says so", async () => {
+    const a = agent({ env: { model: "qwen3.5:9b", contextWindow: "16384" } });
+    const r = await send(a, { action: "set_settings", args: { contextWindow: "auto" } });
+    expect(r.status).toBe("done");
+    expect(r.message).toContain("context window stays 16384: this machine's own config sets it (edgecoder-install apply --keep-config --context-window auto)");
+    expect(settings).toMatchObject({ contextWindow: 16384, sources: { contextWindow: "env" } });
+    // A portal value over the env file is dropped by "auto", back to the env file's.
+    await send(a, { action: "set_settings", args: { contextWindow: 32768 } });
+    expect(settings.contextWindow).toBe(32768);
+    await send(a, { action: "set_settings", args: { contextWindow: "auto" } });
+    expect(settings).toMatchObject({ contextWindow: 16384, sources: { contextWindow: "env" } });
+  });
+
+  it("\"auto\" changes nothing with AGENT_REMOTE_CONTROL=off", async () => {
+    const a = agent({ enabled: false, env: { model: "qwen3.5:9b" } });
+    expect((await send(a, { action: "set_settings", args: { contextWindow: "auto" } })).error).toBe("remote_control_off");
+    expect(applied).toEqual([]);
   });
 
   it("reloads the model (unload, then apply)", async () => {

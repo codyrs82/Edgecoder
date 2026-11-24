@@ -1,6 +1,8 @@
 // Copyright (c) 2025 EdgeCoder
 // SPDX-License-Identifier: BUSL-1.1
 
+import { SETTINGS_AUTO_MIN_AGENT_VERSION } from "../../model/remote-control/protocol.js";
+
 /**
  * Settings > Nodes > "Your machines' models": per machine, what its Ollama has and runs, and the
  * owner's commands (src/portal/routes/machines.ts). Everything a machine reports is agent-supplied
@@ -66,6 +68,59 @@ export function modelSourceNote(
   return parts.join(" ");
 }
 
+/**
+ * One sized setting (context window or slots): its number field and an "Automatic" checkbox, with
+ * where the value comes from. Automatic (`"auto"` in set_settings) drops the portal's override so the
+ * agent sizes the value again; it is offered only to agents that take it (`autoOk`, from the
+ * portal route's `settingsAuto`), and is not offered while the machine's own config pins the value
+ * (local config wins, so only a change there makes it automatic). `id` is already attribute-safe.
+ * Serialised into the page script with toString(), so it stays self-contained.
+ */
+export function sizedSettingHtml(o: {
+  key: "ctx" | "par";
+  id: string;
+  value: number;
+  source?: string;
+  min: number;
+  max: number;
+  can: boolean;
+  autoOk: boolean;
+  localUi?: boolean;
+}): string {
+  const name = o.key === "ctx" ? "context window" : "parallel slots";
+  const isAuto = o.source !== "remote" && o.source !== "env";
+  const autoUsable = o.can && o.autoOk && o.source !== "env";
+  const numberOff = !o.can || (o.autoOk && isAuto);
+  const where = o.source === "remote" ? "pinned here" : o.source === "env" ? (o.localUi ? "pinned by this machine's EdgeCoder app" : "pinned by this machine's config") : "automatic";
+  return "<label>" + (o.key === "ctx" ? "Context" : "Slots") + " <input type='number' id='" + o.key + "-" + o.id + "' min='" + Number(o.min) + "' max='" + Number(o.max) + "'" +
+    (o.key === "ctx" ? " step='1024'" : "") + " value='" + Number(o.value) + "'" + (numberOff ? " disabled" : "") + " /></label> " +
+    "<label><input type='checkbox' class='mcAuto' id='" + o.key + "-auto-" + o.id + "' data-for='" + o.key + "-" + o.id + "' aria-label='Automatic " + name + "'" +
+    (isAuto ? " checked" : "") + (autoUsable ? "" : " disabled") + " /> Automatic</label> " +
+    "<span class='muted'>" + Number(o.value) + ", " + where + "</span> ";
+}
+
+/**
+ * The line under the settings about Automatic when it cannot be chosen here: the agent is too old
+ * (update it), or the machine's own config pins a value. Empty otherwise. Self-contained (toString()).
+ */
+export function sizedSettingNote(
+  m: { version?: string | null; settingsAuto?: boolean },
+  st: { localUi?: boolean; sources?: { contextWindow?: string; parallel?: string } },
+  minVersion: string,
+): string {
+  if (!st) return "";
+  if (!m.settingsAuto) {
+    return "Automatic context window and slots need agent " + minVersion + " or later" + (m.version ? "; this machine runs " + m.version : "") +
+      ". Update its agent (it updates itself within about an hour, or now with: sudo edgecoder-install update) to choose Automatic here.";
+  }
+  const src = st.sources || {};
+  const pinned = (src.contextWindow === "env" ? ["context window"] : []).concat(src.parallel === "env" ? ["slots"] : []);
+  if (!pinned.length) return "";
+  if (st.localUi) return "This machine's EdgeCoder app sets its " + pinned.join(" and ") + "; make " + (pinned.length > 1 ? "them" : "it") + " automatic in the app.";
+  const flags = (src.contextWindow === "env" ? " --context-window auto" : "") + (src.parallel === "env" ? " --parallel auto" : "");
+  return "This machine's own config sets its " + pinned.join(" and ") + " (local config wins). To size " + (pinned.length > 1 ? "them" : "it") + " automatically, run on the machine: sudo edgecoder-install apply --keep-config" + flags;
+}
+
 export function machinesSectionHtml(): string {
   return `
       <div class="set-group" id="machinesGroup">Your machines' models</div>
@@ -89,6 +144,8 @@ export function machinesPageScript(): string {
     let machinesData = { machines: [], catalog: [] };
     ${modelShareNote.toString()}
     ${modelSourceNote.toString()}
+    ${sizedSettingHtml.toString()}
+    ${sizedSettingNote.toString()}
     let machinesTimer = null;
     function fmtBytes(n) {
       if (n === null || n === undefined || !isFinite(Number(n))) return "n/a";
@@ -147,13 +204,14 @@ export function machinesPageScript(): string {
       const s = st.settings || {};
       const src = st.sources || {};
       const settings = "<div class='table-controls'>" +
-        "<label>Context <input type='number' id='ctx-" + id + "' min='" + Number(b.contextWindow.min) + "' max='" + Number(b.contextWindow.max) + "' step='1024' value='" + Number(s.contextWindow) + "'" + dis + " /></label> <span class='muted'>" + srcLabel(src.contextWindow) + "</span> " +
-        "<label>Slots <input type='number' id='par-" + id + "' min='" + Number(b.parallel.min) + "' max='" + Number(b.parallel.max) + "' value='" + Number(s.parallel) + "'" + dis + " /></label> <span class='muted'>" + srcLabel(src.parallel) + "</span> " +
+        sizedSettingHtml({ key: "ctx", id: id, value: s.contextWindow, source: src.contextWindow, min: b.contextWindow.min, max: b.contextWindow.max, can: can, autoOk: Boolean(m.settingsAuto), localUi: st.localUi }) +
+        sizedSettingHtml({ key: "par", id: id, value: s.parallel, source: src.parallel, min: b.parallel.min, max: b.parallel.max, can: can, autoOk: Boolean(m.settingsAuto), localUi: st.localUi }) +
         "<label>Keep-alive <input type='text' id='ka-" + id + "' maxlength='8' value='" + escapeHtml(s.keepAlive || "") + "'" + dis + " /></label> <span class='muted'>" + srcLabel(src.keepAlive) + "</span> " +
         "<button class='mcBtn primary' data-action='set_settings' data-agent='" + id + "'" + dis + ">Apply</button> " +
         "<button class='mcBtn' data-action='restart_model' data-agent='" + id + "'" + dis + ">Reload model</button> " +
         "<button class='mcBtn' data-action='refresh' data-agent='" + id + "'" + (m.connected ? "" : " disabled") + ">Refresh</button></div>" +
         "<div class='muted'>" + escapeHtml(modelSourceNote(st, m.connected)) + "</div>" +
+        (function () { const note = sizedSettingNote(m, st, machinesData.settingsAutoMinVersion || "${SETTINGS_AUTO_MIN_AGENT_VERSION}"); return note ? "<div class='muted'>" + escapeHtml(note) + "</div>" : ""; })() +
         "<div class='muted'>Active model: " + escapeHtml(st.activeModel || "n/a") + " (" + srcLabel(src.model) + "). Context " + Number(b.contextWindow.min) + "-" + Number(b.contextWindow.max) +
         " tokens, slots " + Number(b.parallel.min) + "-" + Number(b.parallel.max) + ", keep-alive -1 (never unload), 0 or up to 24h." +
         (st.ollamaNumParallel ? " Ollama runs " + Number(st.ollamaNumParallel) + " calls at once." : "") + "</div>";
@@ -214,13 +272,28 @@ export function machinesPageScript(): string {
         const ka = String(document.getElementById("ka-" + id).value || "").trim();
         const cur = ((machinesData.machines || []).find((m) => m.agentId === agentId) || {}).state || {};
         const s = cur.settings || {};
-        if (ctx && ctx !== s.contextWindow) args.contextWindow = ctx;
-        if (par && par !== s.parallel) args.parallel = par;
+        const src = cur.sources || {};
+        // Automatic ticked: clear a pinned value ("auto"); unticked from automatic: pin the number shown.
+        const sized = [["ctx", "contextWindow", ctx], ["par", "parallel", par]];
+        for (const [key, field, n] of sized) {
+          const box = document.getElementById(key + "-auto-" + id);
+          const usable = box && !box.disabled;
+          const wasAuto = src[field] !== "remote" && src[field] !== "env";
+          if (usable && box.checked) {
+            if (!wasAuto) args[field] = "auto";
+          } else if (n && (n !== s[field] || (usable && wasAuto))) args[field] = n;
+        }
         if (ka && ka !== s.keepAlive) args.keepAlive = ka;
         if (Object.keys(args).length === 0) return showToast("Nothing changed");
         return sendMachineCommand(agentId, "set_settings", args);
       }
       if (action === "restart_model" || action === "refresh") return sendMachineCommand(agentId, action, {});
+    });
+    document.getElementById("machinesList").addEventListener("change", (event) => {
+      const t = event.target;
+      if (!t || !t.classList || !t.classList.contains("mcAuto")) return;
+      const field = document.getElementById(t.getAttribute("data-for") || "");
+      if (field) field.disabled = t.checked;
     });
     document.getElementById("machinesReloadBtn").addEventListener("click", loadMachines);
   `;

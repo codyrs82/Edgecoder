@@ -47,10 +47,32 @@ export const keepAliveSchema = z
   .max(16)
   .regex(/^(-1|0|\d{1,6}|\d{1,4}(s|m|h))$/, "-1, 0, seconds, or a duration such as 30m or 2h");
 
+/**
+ * "Automatic" for a sized setting: the agent drops the portal's override of it and sizes it again
+ * (GPU free VRAM, else RAM: src/swarm/parallelism.ts), unless the machine's own config pins it.
+ *
+ * A value of the same field rather than a separate `clear` list: one field says one thing (no
+ * `contextWindow: 8192` alongside a clear of it), and an agent from before this
+ * (MODEL_CONTROL_FEATURE_SETTINGS_AUTO) has `z.number().int()` here, so it refuses the whole command
+ * as `invalid_request` and reports that, changing nothing: never a misread number.
+ */
+export const SETTING_AUTO = "auto" as const;
+const sizedSetting = z.union([z.number().int(), z.literal(SETTING_AUTO)]);
+
+/** What an agent says it understands, in its state (ModelControlState.features). */
+export const MODEL_CONTROL_FEATURE_SETTINGS_AUTO = "settings_auto";
+export const MODEL_CONTROL_FEATURES: readonly string[] = [MODEL_CONTROL_FEATURE_SETTINGS_AUTO];
+/**
+ * The first agent release that takes `"auto"` (agent-v tag), for machines whose state has not said
+ * so yet. Release installs report their tag as their version; desktop and source builds report
+ * package.json's, so for them the state's `features` is the answer.
+ */
+export const SETTINGS_AUTO_MIN_AGENT_VERSION = "1.2.8";
+
 export const modelSettingsSchema = z
   .object({
-    contextWindow: z.number().int().optional(),
-    parallel: z.number().int().optional(),
+    contextWindow: sizedSetting.optional(),
+    parallel: sizedSetting.optional(),
     keepAlive: keepAliveSchema.optional()
   })
   .strict()
@@ -234,6 +256,8 @@ export interface ModelControlState {
   ollamaNumParallel?: number;
   notes: string[];
   pull?: { commandId: string; model: string; status: string; completedBytes?: number; totalBytes?: number; startedAtMs: number };
+  /** Optional protocol features this agent understands (MODEL_CONTROL_FEATURES); absent on older agents. */
+  features?: string[];
   /** The desktop app (or any local UI) owns this machine's settings; remote changes still apply until it changes them. */
   localUi: boolean;
   reportedAtMs: number;

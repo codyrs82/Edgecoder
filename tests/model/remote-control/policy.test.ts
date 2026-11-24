@@ -29,6 +29,7 @@ describe("remote control policy", () => {
 
   it("bounds the settings", () => {
     expect(settingsProblem({ contextWindow: 65536, parallel: 2, keepAlive: "-1" })).toBeNull();
+    expect(settingsProblem({ contextWindow: "auto", parallel: "auto" })).toBeNull();
     expect(settingsProblem({ contextWindow: 1024 })).toBe("context_window_out_of_bounds");
     expect(settingsProblem({ contextWindow: 262_144 })).toBe("context_window_out_of_bounds");
     expect(settingsProblem({ contextWindow: 8192.5 })).toBe("context_window_out_of_bounds");
