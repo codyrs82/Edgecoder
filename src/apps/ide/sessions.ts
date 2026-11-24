@@ -27,6 +27,7 @@ import type { CheckpointStore } from "./checkpoints.js";
 import { defaultMode, defaultPermissionsFile, editsApply, EXECUTION_MODES, PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
 import { classifyCommand, decideToolCall, suggestToolRules, type Decision } from "./permission-policy.js";
 import { isWithin } from "./tool-executor.js";
+import { allowanceOffer, SessionAllowances, withAllowances } from "./session-allowances.js";
 import { redactApiKeys } from "../../common/redaction.js";
 import { parseFrontierModelId } from "../../inference-api/frontier-models.js";
 import { normalizeComputeClass } from "../../economy/compute-classes.js";
@@ -34,8 +35,10 @@ import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 import { COST_ASK_TIMEOUT_MS, COST_CHECK_TOOL, ReplyCostMeter, makeCostCheck, replyAskCSats, replyAskUsd, type CostChoice } from "./cost-guard.js";
 
 /**
- * "remote": the user's phone driving this Mac (code-remote.ts). Its turns ask before any command
- * that isn't read-only, are refused outside the project, and its approvals never add "always" rules.
+ * "remote": the user's phone or web page driving this Mac (code-remote.ts). Its turns ask before any
+ * command that isn't read-only, are refused outside the project, and its approvals never add
+ * "always" rules; the owner's own turns in Auto or Full access (which the owner may set from there,
+ * Full access with a confirm) run like the Mac's, and the owner may answer "Allow for this session".
  */
 export type ClientKind = "terminal" | "desktop" | "api" | "remote";
 
@@ -208,6 +211,8 @@ export interface PendingApproval {
   id: string;
   tool: ToolName;
   args: Record<string, unknown>;
+  /** What "Allow for this session" would cover for it (session-allowances.ts); unset when it can't be offered. */
+  allowSession?: string;
 }
 
 export interface SessionSummary {
@@ -258,6 +263,8 @@ export interface SessionSnapshot {
   running: { turnId: string; text: string; events: IdeStreamEvent[] } | null;
   pending: PendingApproval[];
   queue: QueuedMessage[];
+  /** What "Allow for this session" answers let run without asking ("npm test commands"). */
+  allowances: string[];
 }
 
 /**
@@ -406,8 +413,11 @@ export class SessionHub {
   private readonly dir: string | null;
   private readonly approvalTimeoutMs: number;
   readonly permissions: PermissionStore;
+  /** "Allow for this session" answers (in memory only; the provider shares them with its desktop chats). */
+  readonly allowances: SessionAllowances;
 
-  constructor(private readonly env: TurnEnv, opts: { dir?: string | null; approvalTimeoutMs?: number; permissionsFile?: string | null; permissions?: PermissionStore } = {}) {
+  constructor(private readonly env: TurnEnv, opts: { dir?: string | null; approvalTimeoutMs?: number; permissionsFile?: string | null; permissions?: PermissionStore; allowances?: SessionAllowances } = {}) {
+    this.allowances = opts.allowances ?? new SessionAllowances();
     this.dir = opts.dir === undefined ? defaultSessionsDir() : opts.dir;
     this.approvalTimeoutMs = opts.approvalTimeoutMs ?? 30 * 60_000;
     // The default sessions folder keeps "always" answers in ~/.edgecoder/permissions.json; any
@@ -493,7 +503,7 @@ export class SessionHub {
     const now = Date.now();
     const parsed = parseModelId(input.model || "auto");
     const mode: PermissionMode = input.mode ?? (input.autoApprove === "edits" ? "auto-edits" : input.autoApprove === "none" ? "ask" : defaultMode(input.projectRoot, this.permissions.get(input.projectRoot)));
-    if (mode === "full") this.assertMaySetFull(input.client, input.ownerAccount ?? this.env.owner?.());
+    if (mode === "full" || (mode === "auto" && input.client.kind === "remote")) this.assertMaySetMode(input.client, { ownerAccount: input.ownerAccount ?? this.env.owner?.() } as SessionData, mode, false);
     const s: SessionData = {
       id: randomUUID(),
       title: input.title?.trim() || "New session",
@@ -561,8 +571,9 @@ export class SessionHub {
       controller: null,
       clients: this.clientsOf(l),
       running: l.running ? { turnId: l.running.turnId, text: l.running.text, events: plain(l.running.events) } : null,
-      pending: [...l.pending.values()].map((p) => ({ id: p.id, tool: p.tool, args: plain(p.args) })),
+      pending: [...l.pending.values()].map((p) => ({ id: p.id, tool: p.tool, args: plain(p.args), ...(p.allowSession && !p.webGuard ? { allowSession: p.allowSession } : {}) })),
       queue: plain(l.queue),
+      allowances: this.allowances.labels(this.allowanceKey(s)),
     };
   }
 
@@ -779,32 +790,53 @@ export class SessionHub {
    * running turn's); a remote turn gets the stricter remoteDecision.
    */
   decide(s: SessionData, tool: ToolName, args: Record<string, unknown>, by: ClientRef | null = this.live.get(s.id)?.running?.by ?? null): Decision {
-    if (by?.kind === "remote") return this.remoteDecision(s, tool, args);
-    const project = this.permissions.get(s.projectRoot);
-    return decideToolCall(
-      tool,
-      args,
-      {
-        mode: this.modeFor(s, by),
-        root: s.projectRoot,
-        rules: [...(project.rules ?? []), ...s.alwaysShell],
-        legacyNames: [...project.shell, ...s.alwaysShell],
-        branch: () => this.env.branch?.(s.projectRoot) ?? s.branch,
-      },
-      (c) => riskOf(c, s.projectRoot),
-    );
+    const branch = () => this.env.branch?.(s.projectRoot) ?? s.branch;
+    // The owner's phone or web turn in Auto or Full access (the owner chose it) runs like the Mac's own.
+    const strict = by?.kind === "remote" && !(this.isOwner(s, by) && (s.mode === "auto" || s.mode === "full"));
+    let base: Decision;
+    if (strict) base = this.remoteDecision(s, tool, args);
+    else {
+      const project = this.permissions.get(s.projectRoot);
+      base = decideToolCall(
+        tool,
+        args,
+        { mode: this.modeFor(s, by), root: s.projectRoot, rules: [...(project.rules ?? []), ...s.alwaysShell], legacyNames: [...project.shell, ...s.alwaysShell], branch },
+        (c) => riskOf(c, s.projectRoot),
+      );
+    }
+    // "Allow for this session" answers (session-allowances.ts): only ever turn an ask into a run.
+    return withAllowances(base, this.allowances, this.allowanceKey(s), tool, args, { root: s.projectRoot, branch });
+  }
+
+  /** The key a session's "Allow for this session" answers are kept under: a desktop chat's mirror shares the chat's. */
+  allowanceKey(s: Pick<SessionData, "id" | "chatId">): string {
+    return s.chatId ? `chat:${s.chatId}` : `session:${s.id}`;
+  }
+
+  /** What this session allows without asking, as labels ("npm test commands"). */
+  allowanceLabels(id: string): string[] {
+    const s = this.sessions.get(id);
+    return s ? this.allowances.labels(this.allowanceKey(s)) : [];
+  }
+
+  /** True when `client` acts for the session's owner: this computer's own clients, or the owner's account (the phone, the web). */
+  isOwner(s: Pick<SessionData, "ownerAccount">, client: ClientRef | null): boolean {
+    if (!client) return true;
+    if (client.kind === "remote") return !!client.accountId && client.accountId === this.ownerOf(s);
+    return !this.otherAccount(s, client);
   }
 
   /**
-   * A turn started from the phone: no "always allow" rule (project or session) and no Auto safe
-   * class runs a command without asking; only read-only commands run. A command or edit that
-   * reaches outside the project, or one the classifier refuses, is refused rather than asked (the
-   * Mac can still run it). Edits inside the project follow the session's mode.
+   * A turn started from the phone or the web in Manual, Accept edits or Plan (or by anyone but the
+   * owner): no "always allow" rule (project or session) and no Auto safe class runs a command
+   * without asking; only read-only commands run (and what "Allow for this session" covers, added by
+   * decide). A command or edit that reaches outside the project, or one the classifier refuses, is
+   * refused rather than asked (the Mac can still run it). Edits inside the project follow the mode.
+   * The owner's own turns in Auto or Full access run like the Mac's (decide).
    */
   private remoteDecision(s: SessionData, tool: ToolName, args: Record<string, unknown>): Decision {
     const branch = () => this.env.branch?.(s.projectRoot) ?? s.branch;
-    // Full access is for this computer's own clients: a phone turn in a Full access session runs
-    // under the remote rules as Accept edits (edits inside the project apply, commands ask).
+    // Not the owner's turn: a Full access session runs it under the remote rules as Accept edits.
     const mode: PermissionMode = s.mode === "full" ? "auto-edits" : s.mode;
     const base = decideToolCall(tool, args, { mode, root: s.projectRoot, branch });
     if (tool === "run_shell") {
@@ -821,7 +853,7 @@ export class SessionHub {
         return { action: "refuse", reason: "Refused from the phone: a file outside the project." };
       }
     }
-    // Never offer the phone an "always allow" rule.
+    // Never offer the phone an "always allow" rule ("Allow for this session" is added by decide).
     return { action: base.action, reason: base.reason };
   }
 
@@ -847,14 +879,23 @@ export class SessionHub {
    * runs as Accept edits.
    */
   modeFor(s: SessionData, by: ClientRef | null): PermissionMode {
-    if (s.mode === "full" && (by?.kind === "remote" || this.otherAccount(s, by))) return "auto-edits";
+    if (s.mode === "full" && !this.isOwner(s, by)) return "auto-edits";
     return s.mode;
   }
 
-  /** Full access is turned on from this computer only: never from the phone or web, never by another account. */
-  private assertMaySetFull(client: ClientRef, owner: string | undefined): void {
-    if (client.kind === "remote") throw new SessionError("forbidden", "Full access is turned on from the Mac, not from the phone or the web.");
-    if (client.accountId && (!owner || client.accountId !== owner)) throw new SessionError("forbidden", "Only the session's owner can turn on Full access.");
+  /**
+   * Auto and Full access are set by the session's owner only: this computer's clients, or the
+   * owner's own phone or web page (code-remote.ts), which must confirm Full access explicitly.
+   */
+  private assertMaySetMode(client: ClientRef, s: SessionData, mode: PermissionMode, confirmFull: boolean): void {
+    if (mode !== "auto" && mode !== "full") return;
+    const owner = this.ownerOf(s);
+    if (client.kind === "remote") {
+      if (!client.accountId || !owner || client.accountId !== owner) throw new SessionError("forbidden", `Only the session's owner can turn on ${mode === "full" ? "Full access" : "Auto"} from the phone or the web.`);
+      if (mode === "full" && !confirmFull) throw new SessionError("invalid", "Full access runs every command without asking: confirm it first.", { needsConfirm: true });
+      return;
+    }
+    if (mode === "full" && client.accountId && (!owner || client.accountId !== owner)) throw new SessionError("forbidden", "Only the session's owner can turn on Full access.");
   }
 
   /** A call that runs without asking in the session's mode (kept for callers that only need yes/no). */
@@ -876,7 +917,7 @@ export class SessionHub {
         this.emit(s.id, { type: "approval", id: callId, approved: false, by: "timeout" });
         resolve(false);
       }, this.approvalTimeoutMs);
-      l.pending.set(callId, { id: callId, tool, args, resolve, timer, ...(ask?.webGuard ? { webGuard: true } : {}) });
+      l.pending.set(callId, { id: callId, tool, args, resolve, timer, ...(ask?.webGuard ? { webGuard: true } : {}), ...(ask?.allowSession ? { allowSession: ask.allowSession } : {}) });
     });
   }
 
@@ -897,12 +938,15 @@ export class SessionHub {
    * An answer from any attached client. The first answer wins: a later one (the call was answered
    * elsewhere, or it timed out) returns false and changes nothing.
    */
-  approve(id: string, callId: string, approved: boolean, client: ClientRef, alwaysAsked = false, forRunAsked = false): boolean {
+  approve(id: string, callId: string, approved: boolean, client: ClientRef, alwaysAsked = false, forRunAsked = false, sessionAsked = false): boolean {
     const s = this.need(id);
-    // An answer from the phone approves this one call only: it never adds a rule or turns on auto-edits.
+    // An answer from the phone never adds a rule or turns on auto-edits; the owner's phone may answer
+    // "Allow for this session" (in memory, this session only).
     const l = this.liveOf(id);
     const p = l.pending.get(callId);
     if (!p) return false;
+    // "Allow for this session": the session's owner only, never a web-page guard ask (the mode runs those anyway).
+    const offer = approved && sessionAsked && !p.webGuard && p.tool !== COST_CHECK_TOOL && this.isOwner(s, client) ? allowanceOffer(p.tool, p.args, { root: s.projectRoot, branch: () => this.env.branch?.(s.projectRoot) ?? s.branch }) : null;
     // (A cost check is never "always": it asks again after another threshold's worth.)
     const always = alwaysAsked && client.kind !== "remote" && p.tool !== COST_CHECK_TOOL;
     // "Allow for the rest of this run" (a web-page guard ask): this computer's clients only, like "always".
@@ -926,9 +970,35 @@ export class SessionHub {
       this.save(s);
       this.emit(id, { type: "settings", mode: s.mode, autoApprove: s.autoApprove, alwaysShell: [...s.alwaysShell], by: client.kind, ...(client.label ? { label: client.label } : {}) });
     }
-    this.emit(id, { type: "approval", id: callId, approved, by: client.kind, ...(client.label ? { label: client.label } : {}), ...(always ? { always: true } : {}), ...(approved && forRun ? { forRun: true } : {}) });
+    if (offer) {
+      this.allowances.grant(this.allowanceKey(s), offer);
+      this.emit(id, { type: "allowances", allowances: this.allowanceLabels(id), by: client.kind, ...(client.label ? { label: client.label } : {}) });
+    }
+    this.emit(id, { type: "approval", id: callId, approved, by: client.kind, ...(client.label ? { label: client.label } : {}), ...(always ? { always: true } : {}), ...(approved && forRun ? { forRun: true } : {}), ...(offer ? { session: offer.label } : {}) });
     p.resolve(approved ? (forRun ? "run" : true) : false);
+    if (offer || (approved && always)) this.releaseCovered(s, l, true);
     return true;
+  }
+
+  /**
+   * Calls waiting for an answer that the mode, a rule or an allowance now runs without asking go
+   * ahead. After an answer (`ownTurnsOnly`), a turn the app runs (a desktop chat) is left alone: it
+   * judges its own calls with its own allowances.
+   */
+  private releaseCovered(s: SessionData, l: Live, ownTurnsOnly = false): void {
+    if (ownTurnsOnly && l.running?.external) return;
+    for (const [callId, p] of [...l.pending]) {
+      if (p.tool === COST_CHECK_TOOL) continue;
+      // A web-page guard ask goes ahead only in Full access, which the guard leaves alone.
+      const v = this.decide(s, p.tool, p.args);
+      if (v.action !== "run" || (p.webGuard && v.approved !== true)) continue;
+      // Pushes, PRs and commits wait for their own answer unless Full access or an allowance covers them.
+      if (ALWAYS_ASK_TOOLS.has(p.tool) && this.modeFor(s, l.running?.by ?? null) !== "full" && !v.sessionAllowed) continue;
+      l.pending.delete(callId);
+      clearTimeout(p.timer);
+      this.emit(s.id, { type: "approval", id: callId, approved: true, by: "always" });
+      p.resolve(true);
+    }
   }
 
   /**
@@ -952,9 +1022,9 @@ export class SessionHub {
   }
 
   /** Settings from any client; every client hears the change and who made it. */
-  update(id: string, patch: { model?: string; leadModel?: string; workerModel?: string; title?: string; autoApprove?: "none" | "edits"; mode?: PermissionMode }, client: ClientRef): SessionData {
+  update(id: string, patch: { model?: string; leadModel?: string; workerModel?: string; title?: string; autoApprove?: "none" | "edits"; mode?: PermissionMode }, client: ClientRef, opts: { confirmFull?: boolean } = {}): SessionData {
     const s = this.need(id);
-    if (patch.mode === "full" && s.mode !== "full") this.assertMaySetFull(client, this.ownerOf(s));
+    if (patch.mode && patch.mode !== s.mode) this.assertMaySetMode(client, s, patch.mode, opts.confirmFull === true);
     const lead = patch.leadModel ?? patch.model;
     if (lead) {
       const p = parseModelId(lead);
@@ -971,19 +1041,7 @@ export class SessionHub {
     s.autoApprove = editsApply(s.mode) ? "edits" : "none";
     this.save(s);
     // Calls waiting for an answer that the new mode runs without asking go ahead now.
-    if (patch.mode) {
-      const l = this.liveOf(id);
-      for (const [callId, p] of [...l.pending]) {
-        if (p.tool === COST_CHECK_TOOL || (ALWAYS_ASK_TOOLS.has(p.tool) && this.modeFor(s, l.running?.by ?? null) !== "full")) continue;
-        // A web-page guard ask goes ahead only in Full access, which the guard leaves alone.
-        const v = this.decide(s, p.tool, p.args);
-        if (v.action !== "run" || (p.webGuard && v.approved !== true)) continue;
-        l.pending.delete(callId);
-        clearTimeout(p.timer);
-        this.emit(id, { type: "approval", id: callId, approved: true, by: "always" });
-        p.resolve(true);
-      }
-    }
+    if (patch.mode) this.releaseCovered(s, this.liveOf(id));
     this.emit(id, {
       type: "settings",
       model: modelIdOf(s),
@@ -1086,6 +1144,7 @@ export class SessionHub {
     l.running?.abort.abort();
     this.env.onSessionStop?.(id); // tentacles hook
     this.emit(id, { type: "deleted" });
+    this.allowances.clear(this.allowanceKey(this.need(id)));
     this.sessions.delete(id);
     this.live.delete(id);
     if (this.dir) rmSync(join(this.dir, `${id}.json`), { force: true });
@@ -1174,7 +1233,7 @@ export class SessionHub {
               const timer = setTimeout(() => {
                 if (l.pending.delete(callId)) resolve(false);
               }, this.approvalTimeoutMs);
-              l.pending.set(callId, { id: callId, tool, args, resolve, timer, ...(ask?.webGuard ? { webGuard: true } : {}) });
+              l.pending.set(callId, { id: callId, tool, args, resolve, timer, ...(ask?.webGuard ? { webGuard: true } : {}), ...(ask?.allowSession ? { allowSession: ask.allowSession } : {}) });
             }),
       answered: (callId, approved) => {
         const p = l.pending.get(callId);

@@ -20,6 +20,8 @@ struct CodeSessionView: View {
     /// Polls left after a write, until the Mac reports the turn as running.
     @State private var kick = 0
     @State private var confirmUndo = false
+    /// Full access was picked: the confirm alert is up.
+    @State private var confirmFullAccess = false
 
     static let pollInterval: UInt64 = 2_500_000_000
 
@@ -48,9 +50,15 @@ struct CodeSessionView: View {
                         }
                         ForEach(snapshot.queue) { q in queuedView(q) }
                         ForEach(snapshot.pending) { p in
-                            CodeApprovalCard(approval: p, canDrive: canDrive, busy: busy) { approved in
-                                Task { await act { try await store.api.approve(agentId: agentId, sessionId: sessionId, callId: p.callId, approved: approved) } }
-                            }
+                            CodeApprovalCard(
+                                approval: p, canDrive: canDrive, busy: busy, remoteModes: snapshot.session.remoteModes,
+                                answer: { approved in
+                                    Task { await act { try await store.api.approve(agentId: agentId, sessionId: sessionId, callId: p.callId, approved: approved) } }
+                                },
+                                allowForSession: {
+                                    Task { await act { try await store.api.approve(agentId: agentId, sessionId: sessionId, callId: p.callId, approved: true, forSession: true) } }
+                                }
+                            )
                             .padding(.horizontal, 16)
                         }
                         if snapshot.awaitingPlanApproval && canDrive {
@@ -91,17 +99,34 @@ struct CodeSessionView: View {
         } message: {
             Text("Files the last turn changed go back to how they were before it.")
         }
+        .alert(CodeMode.fullAccessConfirmTitle, isPresented: $confirmFullAccess) {
+            Button("Turn on Full access", role: .destructive) {
+                Task { await act { try await store.api.setMode(agentId: agentId, sessionId: sessionId, mode: .full, confirmFull: true) } }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(CodeMode.fullAccessConfirmMessage)
+        }
     }
 
     // MARK: - Pieces
 
     private func header(_ s: CodeSessionSnapshot) -> some View {
-        HStack(spacing: 8) {
-            CodeStatusPill(text: status.label, color: status == .running ? Theme.green : status == .waiting ? Theme.accent : Theme.textMuted)
-            Text([s.session.projectName, s.session.branch].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
-                .lineLimit(1)
-            Spacer(minLength: 0)
-            Text(CodeMode.label(for: s.session.mode))
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                CodeStatusPill(text: status.label, color: status == .running ? Theme.green : status == .waiting ? Theme.accent : Theme.textMuted)
+                Text([s.session.projectName, s.session.branch].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Label(s.session.modeLabel, systemImage: s.session.mode == CodeMode.full.rawValue ? "exclamationmark.shield" : "shield.lefthalf.filled")
+                    .foregroundColor(s.session.mode == CodeMode.full.rawValue ? Theme.accent : Theme.textMuted)
+                    .accessibilityLabel("Mode: \(s.session.modeLabel)")
+            }
+            if let line = s.session.allowancesLine {
+                Text(line)
+                    .foregroundColor(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .font(.caption)
         .foregroundColor(Theme.textMuted)
@@ -209,9 +234,19 @@ struct CodeSessionView: View {
                 Menu {
                     Picker("Mode", selection: Binding(
                         get: { CodeMode(rawValue: s.session.mode) },
-                        set: { m in if let m { Task { await act { try await store.api.setMode(agentId: agentId, sessionId: sessionId, mode: m) } } } }
+                        set: { m in
+                            guard let m, m.rawValue != s.session.mode else { return }
+                            if m == .full {
+                                confirmFullAccess = true
+                            } else {
+                                Task { await act { try await store.api.setMode(agentId: agentId, sessionId: sessionId, mode: m) } }
+                            }
+                        }
                     )) {
-                        ForEach(CodeMode.allCases) { Text($0.label).tag(Optional($0)) }
+                        ForEach(CodeMode.choices(remoteModes: s.session.remoteModes)) { Text($0.label).tag(Optional($0)) }
+                    }
+                    if !s.session.remoteModes, let current = CodeMode(rawValue: s.session.mode), current.needsRemoteModes {
+                        Text("Now: \(s.session.modeLabel)")
                     }
                     if status == .idle, s.lastTurnId != nil {
                         Button(role: .destructive) { confirmUndo = true } label: {
@@ -424,7 +459,15 @@ struct CodeApprovalCard: View {
     let approval: CodeApproval
     let canDrive: Bool
     let busy: Bool
+    /// The Mac takes "Allow for this session" (`remoteModes`).
+    var remoteModes: Bool = false
     let answer: (Bool) -> Void
+    /// "Allow for this session": approves this call and lets later ones of its kind run.
+    var allowForSession: (() -> Void)?
+
+    private var offersSession: Bool {
+        remoteModes && canDrive && approval.approvable && approval.allowSession != nil && allowForSession != nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -469,6 +512,22 @@ struct CodeApprovalCard: View {
                     .tint(Theme.accent)
                 }
                 .disabled(busy)
+                if offersSession, let caption = approval.allowSessionCaption {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Button { allowForSession?() } label: {
+                            Text("Allow for this session").frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(Theme.accent)
+                        .disabled(busy)
+                        .accessibilityHint(caption)
+                        Text(caption)
+                            .font(.caption)
+                            .foregroundColor(Theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityHidden(true)
+                    }
+                }
             } else {
                 Text("Approve or deny this on the computer, or turn on 'Code from your phone' there.")
                     .font(.callout)

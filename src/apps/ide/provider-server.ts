@@ -41,6 +41,7 @@ import { botActivity, networkTaskActivity, registerActivityRoutes, sessionActivi
 import { networkWorld } from "./network-world.js";
 import { ConnectionManager } from "./connections.js";
 import { registerRemoteBotRoutes } from "./bot-remote.js";
+import { allowanceOffer, sharedAllowances, withAllowances } from "./session-allowances.js";
 import { BotManager, agentBotRunner, botBranchPrefix, botComputeChat, botWorkRoot, registerBotRoutes, type ApprovalEntry } from "./bots.js";
 import { autoBackend, localBackend, networkBackend } from "../../inference-api/backends.js";
 import { registerCompatRoutes, respondWith } from "../../inference-api/routes.js";
@@ -183,9 +184,12 @@ const pendingApprovals = new Map<string, ApprovalEntry>();
 const permissionStore = new PermissionStore(defaultPermissionsFile());
 
 /** The verdict on a call in a chat turn or bot run (permission-policy.ts): the mode, then the project's rules. */
-function decideFor(mode: PermissionMode, root: string, tool: ToolName, args: Record<string, unknown>): Decision {
+function decideFor(mode: PermissionMode, root: string, tool: ToolName, args: Record<string, unknown>, allowanceKey: string | null = null): Decision {
   const p = permissionStore.get(root);
-  return decideToolCall(tool, args, { mode, root, rules: p.rules ?? [], legacyNames: p.shell, branch: () => currentBranch(root) }, (c) => riskOf(c, root));
+  const branch = () => currentBranch(root);
+  const base = decideToolCall(tool, args, { mode, root, rules: p.rules ?? [], legacyNames: p.shell, branch }, (c) => riskOf(c, root));
+  // "Allow for this session" answers for this Code view chat (session-allowances.ts; shared with its mirror session).
+  return withAllowances(base, sharedAllowances, allowanceKey, tool, args, { root, branch });
 }
 /** The owner's requests through this provider while they run, then briefly (Settings → Active work / Tasks). */
 const activity = new ActivityTracker();
@@ -1280,6 +1284,8 @@ const toolApprovalSchema = z.object({
   always: z.boolean().default(false),
   /** "Allow for the rest of this run": a web-page guard ask lifts the guard until the turn ends (agent-loop.ts makeToolRunner). */
   forRun: z.boolean().default(false),
+  /** "Allow for this session": this call, and later calls of its kind in this chat without asking (session-allowances.ts). */
+  session: z.boolean().default(false),
   /** A cost check's answer (cost-guard.ts): Keep going, Switch to the cheaper model, or Stop. */
   choice: z.enum(["continue", "switch", "stop"]).optional(),
 });
@@ -1295,10 +1301,14 @@ app.post("/v1/ide/tool-approval", async (req, reply) => {
     rules = suggestToolRules(entry.tool, entry.args, { root: entry.projectRoot });
     for (const r of rules) permissionStore.addRule(entry.projectRoot, r);
   }
+  // "Allow for this session": a chat's own ask only (never a web-page guard ask, a cost check or a bot's call).
+  const root = entry.projectRoot;
+  const offer = body.approved && body.session && entry.allowanceKey && !entry.webGuard && root ? allowanceOffer(entry.tool, entry.args, { root, branch: () => currentBranch(root) }) : null;
+  if (offer) sharedAllowances.grant(entry.allowanceKey!, offer);
   if (body.choice && entry.choose) entry.choose(body.choice);
   else entry.resolve(body.approved ? (body.forRun ? "run" : true) : false);
   pendingApprovals.delete(body.id);
-  return reply.send({ ok: true, ...(rules.length ? { rule: rules[0], rules } : {}) });
+  return reply.send({ ok: true, ...(rules.length ? { rule: rules[0], rules } : {}), ...(offer ? { session: offer.label } : {}) });
 });
 
 const ideChatSchema = z.object({
@@ -1532,6 +1542,8 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
 
   checkpoints.begin(turnId, projectRoot);
   sendEvent({ type: "turn", id: turnId });
+  // "Allow for this session" answers last as long as the Code view chat (a chat without an id: this turn).
+  const allowanceKey = body.chatId ? `chat:${body.chatId}` : `turn:${turnId}`;
 
   // open_pull_request is offered only when the project is a GitHub repository.
   const projectTools = hasGitHubOrigin(projectRoot) ? toolSchemas() : toolSchemas().filter((t) => t.function.name !== "open_pull_request");
@@ -1607,19 +1619,20 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
           firstAnswer(
             { id: callId, tool, args, ask },
             mirror,
-            (answer) => pendingApprovals.set(callId, { resolve: answer, tool, args, owner: turnId, projectRoot }),
+            (answer) => pendingApprovals.set(callId, { resolve: answer, tool, args, owner: turnId, projectRoot, allowanceKey, ...(ask?.webGuard ? { webGuard: true } : {}) }),
             () => pendingApprovals.delete(callId),
             5 * 60 * 1000,
           ),
         captureBeforeWrite: (path) => checkpoints.capture(turnId, path),
         turnId,
-        decide: (tool, args) => decideFor(chatMode, projectRoot, tool, args),
+        decide: (tool, args) => decideFor(chatMode, projectRoot, tool, args, allowanceKey),
         shellHint: (command, output) => toolchainFailureHint(projectRoot, command, output),
       }),
       plan: chatMode === "plan",
     });
   } finally {
     mirror?.end();
+    if (!body.chatId) sharedAllowances.clear(allowanceKey);
   }
   // Stopped from the phone: the app's copy says so too (the mirror's reply already does).
   if (abort.signal.aborted && !clientDisconnected) reply.raw.write(`data: ${JSON.stringify({ type: "text", content: "\n\n_(stopped)_" })}\n\n`);
@@ -2029,7 +2042,7 @@ const sessions: SessionHub = new SessionHub({
   contextWindow: (s) => sessionContextWindow(s),
   summarize: (s, emit, signal, ctx) => sessionSummarizer(s, emit, signal, ctx?.client ?? null),
   onSessionStop: (id) => void tentacles.cancelAll(id),
-}, { permissions: permissionStore });
+}, { permissions: permissionStore, allowances: sharedAllowances });
 registerSessionRoutes(app, sessions);
 // The desktop Code view's chats, mirrored so the owner's phone can read and continue them (desktop-chats.ts).
 registerDesktopChatRoutes(app, sessions);

@@ -223,6 +223,8 @@ export interface AskCard {
   webGuard?: boolean;
   /** With webGuard: the file this run changed that the call runs (no "rest of this run" answer). */
   runsEdited?: string;
+  /** "Allow for this run" may answer it (never with webGuard): what later calls it lets run ("npm test commands"). */
+  allowSession?: string;
   /** open_pull_request: what the PR will be. */
   pr?: { title: string; body: string; branch: string; base: string; diffstat: string; commits?: number; uncommitted?: number };
 }
@@ -234,7 +236,7 @@ export function botModeOf(bot: Pick<Bot, "mode" | "autoApproveEdits">): import("
 }
 
 export function askCards(
-  events: Array<{ type: string; id?: string; tool?: string; args?: Record<string, unknown>; requires_approval?: boolean; approval_status?: string; allow_rule?: string; allow_rules?: string[]; web_guard?: boolean; runs_edited?: string }>,
+  events: Array<{ type: string; id?: string; tool?: string; args?: Record<string, unknown>; requires_approval?: boolean; approval_status?: string; allow_rule?: string; allow_rules?: string[]; web_guard?: boolean; runs_edited?: string; allow_session?: string }>,
   botName: string,
 ): AskCard[] {
   return events
@@ -267,6 +269,7 @@ export function askCards(
         ...(answer === null ? { call: { tool, args } } : {}),
         ...(answer === null && rules.length ? { rule: rules[0], rules } : {}),
         ...(answer === null && e.web_guard === true ? { webGuard: true, ...(typeof e.runs_edited === "string" ? { runsEdited: e.runs_edited } : {}) } : {}),
+        ...(answer === null && e.web_guard !== true && typeof e.allow_session === "string" && e.allow_session ? { allowSession: e.allow_session } : {}),
         answer,
       };
     });

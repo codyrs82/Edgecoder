@@ -80,11 +80,12 @@ export const CODE_COMMON_JS = String.raw`
       if (status === "running") return { text: "Working", tone: "accent" };
       return { text: "Idle", tone: "muted" };
     }
-    var CODE_MODES = [["ask", "Ask", "Asks before every edit and command."], ["auto-edits", "Accept edits", "Edits files without asking; still asks before commands."], ["plan", "Plan", "Writes a plan first; nothing changes until you approve it."]];
+    var CODE_MODES = [["ask", "Manual", "Asks before every edit and command."], ["auto-edits", "Accept edits", "Edits files without asking; still asks before commands."], ["plan", "Plan", "Writes a plan first; nothing changes until you approve it."]];
+    /* Newer Macs (a session with remoteModes) also take these from the session's owner; Full access asks to confirm first. */
+    var CODE_MORE_MODES = [["auto", "Auto", "Runs safe commands and edits on its own; risky ones still ask."], ["full", "Full access", "Runs every command without asking, except hard refusals."]];
     function codeModeLabel(mode) {
-      if (mode === "auto") return "Auto (set on the Mac)";
-      if (mode === "full") return "Full access (set on the Mac)";
-      for (var i = 0; i < CODE_MODES.length; i++) if (CODE_MODES[i][0] === mode) return CODE_MODES[i][1];
+      var all = CODE_MODES.concat(CODE_MORE_MODES);
+      for (var i = 0; i < all.length; i++) if (all[i][0] === mode) return all[i][1];
       return mode || "";
     }
     /* Why a machine can't be read or driven from here, in plain words (null: it can). */

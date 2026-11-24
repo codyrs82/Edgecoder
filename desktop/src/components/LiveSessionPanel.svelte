@@ -106,9 +106,9 @@
   };
   const stop = () => act(() => sessionCancel(sessionId));
   const unqueue = (id: string) => act(() => sessionUnqueue(sessionId, id));
-  function approve(id: string, approved: boolean, always = false, forRun = false) {
+  function approve(id: string, approved: boolean, always = false, forRun = false, session = false) {
     if (view?.streaming) view = { ...view, streaming: { ...view.streaming, toolEvents: markApproval(view.streaming.toolEvents, id, approved) } };
-    void act(() => (always || forRun ? sessionApprove(sessionId, id, approved, always, forRun) : sessionApprove(sessionId, id, approved)));
+    void act(() => (always || forRun || session ? sessionApprove(sessionId, id, approved, always, forRun, session) : sessionApprove(sessionId, id, approved)));
   }
   // The mode is the session's own (persisted by the provider; the terminal sees changes too).
   const mode = $derived<EngineMode>(isEngineMode(view?.mode) ? (view!.mode as EngineMode) : "ask");
@@ -130,6 +130,9 @@
       <span><Users size={13} /> {presence}</span>
       {#if lastNote}<span class="note-inline">{lastNote}</span>{/if}
     </div>
+    {#if view.allowances.length}
+      <div class="allowances-bar" data-testid="session-allowances" title="Calls like these run without asking until this session ends.">Allowed this session: {view.allowances.join(", ")}</div>
+    {/if}
   {/if}
 
   <TentacleTree tree={tentacles} canAct={true} onCancel={(tid) => void act(() => tentacleCancel(sessionId, tid))} onMerge={(tid, ok) => void act(() => tentacleMerge(sessionId, tid, ok))} />
@@ -147,7 +150,7 @@
           {#if view.summary?.throughId === m.id}<CompactionNote savedTokens={view.summary.savedTokens} />{/if}
         {/each}
         {#if view.streaming}
-          <ChatMessage role="assistant" content={view.streaming.text} streaming={true} toolEvents={view.streaming.toolEvents} usage={view.streaming.usage} onToolApproval={approve} onToolAlways={(id) => approve(id, true, true)} onToolForRun={(id) => approve(id, true, false, true)} />
+          <ChatMessage role="assistant" content={view.streaming.text} streaming={true} toolEvents={view.streaming.toolEvents} usage={view.streaming.usage} onToolApproval={approve} onToolAlways={(id) => approve(id, true, true)} onToolForRun={(id) => approve(id, true, false, true)} onToolSession={(id) => approve(id, true, false, false, true)} />
         {/if}
         {#if plan}
           <PlanApproval onApprove={(m) => void act(() => sessionApprovePlan(sessionId, m))} onRevise={() => chatInput?.focus()} />
@@ -231,6 +234,15 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
+  }
+  .allowances-bar {
+    padding: 4px 16px;
+    border-bottom: 0.5px solid var(--border);
+    font-size: var(--fs-2xs);
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .note-inline {
     color: var(--text-muted);

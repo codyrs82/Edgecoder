@@ -174,12 +174,19 @@ ${IMAGE_ATTACH_CSS}      .composer .controls { max-width:820px; margin:6px auto 
           <label>Project<select name="projectId" id="cnProject" required></select></label>
           <label>Title (optional)<input name="title" maxlength="120" autocomplete="off" /></label>
           <label>Mode<select name="mode" id="cnMode"></select></label>
-          <p class="muted u-fs-12 u-m-0">Commands that aren't read-only always ask first. Auto mode is turned on from the Mac only.</p>
+          <p class="muted u-fs-12 u-m-0">Commands that aren't read-only ask first. Switch to Auto or Full access in the session once it's started.</p>
           <div id="cnError" class="callout danger u-m-0" role="alert" hidden></div>
           <div class="foot"><button type="button" id="cnCancel">Cancel</button><button type="submit" class="primary" id="cnSave">Start session</button></div>
         </form>
       </dialog>
     </section>
+    <dialog class="code-new" id="csFullDialog" aria-labelledby="csFullTitle" aria-describedby="csFullText">
+      <form method="dialog">
+        <h3 id="csFullTitle" class="u-m-0">Turn on Full access?</h3>
+        <p id="csFullText" class="u-fs-12 u-m-0">Full access runs every command without asking, except hard refusals (sudo, wiping a disk or the project, piping a download into a shell, writing secrets). It applies to this session only, and the session notes who turned it on, when, and from where.</p>
+        <div class="foot"><button type="submit" value="cancel" id="csFullCancel">Cancel</button><button type="submit" value="full" class="danger" id="csFullOk">Turn on Full access</button></div>
+      </form>
+    </dialog>
     <section id="codeSession" hidden>
       <div class="cs-view">
         <header class="cs-head">
@@ -187,6 +194,7 @@ ${IMAGE_ATTACH_CSS}      .composer .controls { max-width:820px; margin:6px auto 
             <a class="back" href="/portal/code">${icons.back}<span>All sessions</span></a>
             <div class="line1"><h2 id="csTitle">Session</h2><span class="chip" id="csChip"></span></div>
             <div class="meta" id="csMeta"></div>
+            <div class="meta" id="csAllowed" hidden></div>
           </div>
           <div class="actions">
             <label for="csMode" class="visually-hidden">Permission mode</label>

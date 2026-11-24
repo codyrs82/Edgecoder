@@ -232,12 +232,20 @@ struct BotDetailView: View {
                                     .disabled(sending)
                                 } else if canControl {
                                     HStack {
-                                        Button("Approve") { Task { await command("approve", args: ["callId": call.callId, "approved": true]) } }
+                                        Button("Approve") { Task { await command("approve", args: call.approveArgs(approved: true)) } }
                                             .buttonStyle(.borderedProminent).tint(Theme.accent)
-                                        Button("Deny", role: .destructive) { Task { await command("approve", args: ["callId": call.callId, "approved": false]) } }
+                                        Button("Deny", role: .destructive) { Task { await command("approve", args: call.approveArgs(approved: false)) } }
                                             .buttonStyle(.bordered)
                                     }
                                     .disabled(sending)
+                                    if let caption = call.allowRunCaption {
+                                        Button("Allow for this run") { Task { await command("approve", args: call.approveArgs(approved: true, forRun: true)) } }
+                                            .buttonStyle(.bordered).tint(Theme.accent)
+                                            .disabled(sending)
+                                            .accessibilityHint(caption)
+                                        Text(caption).font(.caption).foregroundColor(Theme.textSecondary)
+                                            .accessibilityHidden(true)
+                                    }
                                 }
                             }
                         }

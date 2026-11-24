@@ -11,7 +11,7 @@ export const CODE_LIST_JS = String.raw`
 
     function sessionRowHtml(m, s) {
       var chip = codeStatusChip(s.status);
-      var sub = [codeAgo(s.updatedAtMs), s.pendingApprovals ? (s.pendingApprovals === 1 ? "1 approval waiting" : s.pendingApprovals + " approvals waiting") : "", s.startedFrom === "phone" ? "Started from your phone or the web" : ""].filter(Boolean).join(" · ");
+      var sub = [codeAgo(s.updatedAtMs), s.mode ? codeModeLabel(s.mode) : "", s.pendingApprovals ? (s.pendingApprovals === 1 ? "1 approval waiting" : s.pendingApprovals + " approvals waiting") : "", s.startedFrom === "phone" ? "Started from your phone or the web" : ""].filter(Boolean).join(" · ");
       return '<a class="cs-row" href="' + codeHref(m.agentId, s.sessionId) + '"><span class="cs-row-text"><span class="cs-row-title">' + escapeHtml(s.title || "Untitled session") + '</span><span class="cs-row-sub">' + escapeHtml(sub) + '</span></span><span class="chip tone-' + chip.tone + '">' + escapeHtml(chip.text) + "</span></a>";
     }
 
@@ -63,7 +63,7 @@ export const CODE_LIST_JS = String.raw`
       listState.timer = setTimeout(function() { if (!document.hidden) showList(); else listState.timer = setTimeout(showList, 15000); }, 15000);
     }
 
-    /* New session: a trusted project on that Mac and a mode (Auto is set on the Mac only). */
+    /* New session: a trusted project on that Mac and a mode (Auto and Full access are switched on in the session). */
     function openNew(agentId) {
       var m = listState.machines.find(function(x) { return x.agentId === agentId; });
       if (!m) return;

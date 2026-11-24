@@ -19,10 +19,17 @@
  *     started from the phone, published by the Mac, or mirroring a desktop Code view chat
  *     (desktop-chats.ts). A turn the desktop app runs itself shows live; the phone may stop it and
  *     answer its approvals, but only those a phone turn could approve (sessions.ts remoteMayApprove).
- * What a session started or driven from the phone may do is in sessions.ts (remoteDecision): every
- * command that isn't read-only asks, paths outside the project are refused, and approving from the
- * phone never adds an "always allow" rule or turns on auto-edits. Auto and Full access are set on the
- * Mac only; a phone turn in a Full access session runs as Accept edits under the remote rules.
+ * What a session started or driven from the phone may do is in sessions.ts (remoteDecision): in
+ * Manual, Accept edits and Plan every command that isn't read-only asks, paths outside the project
+ * are refused, and approving from the phone never adds an "always allow" rule or turns on
+ * auto-edits. Every request here is the session owner's (the account signed in on this Mac, which
+ * owns the session), so the phone may also:
+ *   - switch the mode to Auto or Full access ("settings"; Full access needs `confirmFull: true`).
+ *     The change is noted in the session's transcript (who, when, from the web or the iPhone) and
+ *     the coordinator's audit; the owner's turns then run like the Mac's in that mode.
+ *   - answer "Allow for this session" (`approve` with `scope: "session"`): this call and later calls
+ *     of the same kind run without asking until the session ends (session-allowances.ts).
+ * `remoteModes: true` in a session's summary says this Mac takes both.
  */
 
 import { realpathSync, statSync } from "node:fs";
@@ -64,6 +71,10 @@ export interface RemoteSessionSummary {
   updatedAt: number;
   /** This Mac takes images with a message ("message" with `attachments`); older Macs leave it out. */
   images?: true;
+  /** This Mac takes Auto / Full access and "Allow for this session" from the phone; older Macs leave it out. */
+  remoteModes?: true;
+  /** What "Allow for this session" answers let run without asking in this session ("npm test commands"). */
+  allowances?: string[];
 }
 
 export interface RemoteMessage {
@@ -89,6 +100,8 @@ export interface RemotePendingApproval {
   /** False: the phone shows it but can't approve it ("approve on the Mac"). */
   approvable: boolean;
   message?: string;
+  /** "Allow for this session" may answer it: what later calls it lets run without asking. */
+  allowSession?: string;
 }
 
 export interface RemoteSessionSnapshot {
@@ -174,6 +187,11 @@ function summaryOf(hub: SessionHub, s: SessionData, salt: string): RemoteSession
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
     images: true,
+    remoteModes: true,
+    ...(() => {
+      const labels = hub.allowanceLabels(s.id).slice(0, 20).map((l) => scrubPaths(cap(l, 120), s.projectRoot));
+      return labels.length ? { allowances: labels } : {};
+    })(),
   };
 }
 
@@ -199,7 +217,12 @@ function messageOf(e: TranscriptEntry, root: string, pendingIds: ReadonlySet<str
 
 const ON_MAC = "This one runs outside what the phone may approve. Approve it on the Mac.";
 
-function pendingOf(p: { id: string; tool: string; args: Record<string, unknown> }, root: string, mayApprove = true): RemotePendingApproval {
+function pendingOf(p: { id: string; tool: string; args: Record<string, unknown>; allowSession?: string }, root: string, mayApprove = true): RemotePendingApproval {
+  const out = pendingCard(p, root, mayApprove);
+  return out.approvable && p.allowSession ? { ...out, allowSession: scrubPaths(cap(p.allowSession, 160), root) } : out;
+}
+
+function pendingCard(p: { id: string; tool: string; args: Record<string, unknown> }, root: string, mayApprove: boolean): RemotePendingApproval {
   if (!mayApprove) {
     const command = p.tool === "run_shell" && typeof p.args.command === "string" ? { command: scrubPaths(Buffer.from(p.args.command).subarray(0, MAX_APPROVABLE_COMMAND_BYTES).toString("utf8"), root) } : {};
     return { callId: p.id, tool: p.tool, detail: scrubPaths(toolCallDetail(p.tool, p.args), root), ...command, approvable: false, message: ON_MAC };
@@ -265,8 +288,10 @@ function fitList<T>(items: T[], extra: Record<string, unknown> = {}): Record<str
 const account = z.string().min(1).max(160);
 const sessionId = z.string().uuid();
 const turnId = z.string().uuid();
-// "auto" and "full" are accepted by the schema only to be refused with a clear message (both are set on the Mac).
+// "full" is refused when a session is created (turn it on in the session, with a confirm).
 const remoteMode = z.enum(["ask", "auto-edits", "plan", "auto", "full"]);
+/** Which app sent it, set by the portal (for the transcript note and the audit; never a permission). */
+const via = z.enum(["web", "iphone"]);
 const model = z.string().min(1).max(200);
 
 /** Every command, flat: { requestedBy, action, ...args }. Strict: no field the action doesn't name (no paths, ever). */
@@ -278,11 +303,11 @@ export const codeRemoteCommandSchema = z.discriminatedUnion("action", [
   z.object({ requestedBy: account, action: z.literal("messages"), sessionId, beforeId: z.string().uuid().optional(), limit: z.number().int().min(1).max(MAX_PAGE_MESSAGES).optional() }).strict(),
   z.object({ requestedBy: account, action: z.literal("create"), projectId: z.string().regex(/^[0-9a-f]{16}$/), title: z.string().max(120).optional(), model: model.optional(), mode: remoteMode.default("ask") }).strict(),
   z.object({ requestedBy: account, action: z.literal("message"), sessionId, text: z.string().min(1).max(32_000), attachments: codeImagesSchema.optional() }).strict(),
-  z.object({ requestedBy: account, action: z.literal("approve"), sessionId, callId: z.string().min(1).max(200), approved: z.boolean() }).strict(),
+  z.object({ requestedBy: account, action: z.literal("approve"), sessionId, callId: z.string().min(1).max(200), approved: z.boolean(), scope: z.enum(["once", "session"]).optional(), via: via.optional() }).strict(),
   z.object({ requestedBy: account, action: z.literal("cancel"), sessionId }).strict(),
   z.object({ requestedBy: account, action: z.literal("undo"), sessionId, turnId: turnId.optional() }).strict(),
   z.object({ requestedBy: account, action: z.literal("plan"), sessionId, mode: z.enum(["ask", "auto-edits"]).default("auto-edits") }).strict(),
-  z.object({ requestedBy: account, action: z.literal("settings"), sessionId, title: z.string().max(120).optional(), model: model.optional(), mode: remoteMode.optional() }).strict(),
+  z.object({ requestedBy: account, action: z.literal("settings"), sessionId, title: z.string().max(120).optional(), model: model.optional(), mode: remoteMode.optional(), confirmFull: z.literal(true).optional(), via: via.optional() }).strict(),
   z.object({ requestedBy: account, action: z.literal("unqueue"), sessionId, queuedId: z.string().uuid() }).strict(),
 ]);
 export type CodeRemoteCommand = z.infer<typeof codeRemoteCommandSchema>;
@@ -305,20 +330,23 @@ export interface CodeRemoteDeps {
   branch?: (root: string) => string | null;
 }
 
-const AUTO_REFUSED: CodeRemoteOutcome = { status: "refused", error: "auto_on_mac", message: "Auto mode is turned on from the Mac." };
-const FULL_REFUSED: CodeRemoteOutcome = { status: "refused", error: "full_on_mac", message: "Full access is turned on from the Mac." };
+const FULL_ON_CREATE: CodeRemoteOutcome = { status: "refused", error: "full_after_create", message: "Start the session first, then turn on Full access in it (it asks you to confirm)." };
+const CONFIRM_FULL: CodeRemoteOutcome = { status: "refused", error: "confirm_full", message: "Full access runs every command without asking, except hard refusals. Confirm it to turn it on." };
+const NOT_OWNER: CodeRemoteOutcome = { status: "refused", error: "not_owner", message: "Only the session's owner can do that." };
 const NO_SESSION: CodeRemoteOutcome = { status: "refused", error: "no_such_session", message: "No such session on this Mac." };
 
-/** The phone's client: every write from it is labelled and judged as remote (sessions.ts). */
-export function phoneClient(accountId: string): ClientRef {
-  return { clientId: "remote-phone", kind: "remote", label: "iPhone", accountId };
+/** The phone's (or the web page's) client: every write from it is labelled and judged as remote (sessions.ts). */
+export function phoneClient(accountId: string, from: "web" | "iphone" = "iphone"): ClientRef {
+  return from === "web" ? { clientId: "remote-web", kind: "remote", label: "the web", accountId } : { clientId: "remote-phone", kind: "remote", label: "iPhone", accountId };
 }
+
+const MODE_NAMES: Record<string, string> = { ask: "Manual", "auto-edits": "Accept edits", plan: "Plan", auto: "Auto", full: "Full access" };
 
 /** Carries out one command from `requestedBy` (already checked to be this Mac's account). */
 export function runCodeRemoteCommand(hub: SessionHub, cmd: CodeRemoteCommand, deps: Omit<CodeRemoteDeps, "account">): CodeRemoteOutcome {
   const salt = deps.machineSalt();
   const by = cmd.requestedBy;
-  const client = phoneClient(by);
+  const client = phoneClient(by, "via" in cmd && cmd.via ? cmd.via : "iphone");
   try {
     if (cmd.action === "projects") return { status: "done", data: { projects: listTrustedProjects(salt, deps.branch) } };
     if (cmd.action === "sessions") return { status: "done", data: { sessions: visible(hub, by).slice(0, MAX_REMOTE_SESSIONS).map((s) => summaryOf(hub, s, salt)) } };
@@ -360,8 +388,11 @@ export function runCodeRemoteCommand(hub: SessionHub, cmd: CodeRemoteCommand, de
         if (!p) return { status: "refused", error: "no_pending_approval", message: "That approval was already answered or the turn ended." };
         if (cmd.approved && tooLongToApprove(p)) return { status: "refused", error: "approve_on_mac", message: "This command is too long to check on the phone. Approve it on the Mac." };
         if (cmd.approved && !hub.remoteMayApprove(s.id, p.id)) return { status: "refused", error: "approve_on_mac", message: ON_MAC };
-        // One call only: the phone never answers "always" (and SessionHub ignores it for remote clients).
-        return hub.approve(s.id, cmd.callId, cmd.approved, client) ? { status: "done" } : { status: "refused", error: "no_pending_approval" };
+        // The phone never answers "always" (SessionHub ignores it for remote clients); the owner may
+        // answer "Allow for this session" (kept in memory for this session only).
+        const forSession = cmd.approved && cmd.scope === "session";
+        if (forSession && !hub.isOwner(s, client)) return NOT_OWNER;
+        return hub.approve(s.id, cmd.callId, cmd.approved, client, false, false, forSession) ? { status: "done" } : { status: "refused", error: "no_pending_approval" };
       }
       case "cancel":
         return { status: "done", data: { cancelled: hub.cancel(s.id, client) } };
@@ -372,9 +403,13 @@ export function runCodeRemoteCommand(hub: SessionHub, cmd: CodeRemoteCommand, de
       case "plan":
         return { status: "done", data: hub.approvePlan(s.id, client, cmd.mode) };
       case "settings": {
-        if (cmd.mode === "auto") return AUTO_REFUSED;
-        if (cmd.mode === "full") return FULL_REFUSED;
-        hub.update(s.id, { ...(cmd.title !== undefined ? { title: cmd.title } : {}), ...(cmd.model ? { model: cmd.model } : {}), ...(cmd.mode ? { mode: cmd.mode } : {}) }, client);
+        const switching = cmd.mode !== undefined && cmd.mode !== s.mode;
+        // Auto and Full access: the session's owner only (every request here is, checked again); Full access with a confirm.
+        if (switching && (cmd.mode === "auto" || cmd.mode === "full") && !hub.isOwner(s, client)) return NOT_OWNER;
+        if (switching && cmd.mode === "full" && cmd.confirmFull !== true) return CONFIRM_FULL;
+        hub.update(s.id, { ...(cmd.title !== undefined ? { title: cmd.title } : {}), ...(cmd.model ? { model: cmd.model } : {}), ...(cmd.mode ? { mode: cmd.mode } : {}) }, client, { confirmFull: cmd.confirmFull === true });
+        // The audit: who, when and from which app, in the session itself (every client sees it).
+        if (switching) hub.recordNote(s.id, { content: `Mode set to ${MODE_NAMES[cmd.mode!]} from ${client.label} by ${by} at ${new Date().toISOString()}` });
         return { status: "done", data: { session: summaryOf(hub, hub.peek(s.id) ?? s, salt) } };
       }
       case "unqueue":
@@ -402,8 +437,7 @@ function withImages(text: string, root: string, images: CodeImage[]): string {
 
 /** "create": a session in a trusted folder named by its projectId, owned by the phone's account. */
 function createSession(hub: SessionHub, cmd: Extract<CodeRemoteCommand, { action: "create" }>, salt: string, client: ClientRef): CodeRemoteOutcome {
-  if (cmd.mode === "auto") return AUTO_REFUSED;
-  if (cmd.mode === "full") return FULL_REFUSED;
+  if (cmd.mode === "full") return FULL_ON_CREATE;
   // The id is looked up over the trusted list as it is now, then trust and the folder are checked
   // again right before use (the list may have changed since the phone fetched it).
   const root = trustedRootForId(cmd.projectId, salt);

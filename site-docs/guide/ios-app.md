@@ -57,16 +57,27 @@ are marked **Started from your phone**.
 A chat from the desktop app's Code view continues where it left off: what you send from the phone
 runs on the computer, and the desktop app shows those messages and replies in the same chat. While
 the desktop app is replying, the phone shows the reply live and can stop it or answer its approvals
-(a command or edit outside the project is approved on the computer). **Full access** stays on the
-computer: from the phone, a Full access chat runs as **Accept edits** with the phone's rules.
+(a command or edit outside the project is approved on the computer).
+
+The session's mode is always shown at the top. From the session's menu you can switch it between
+**Manual**, **Accept edits**, **Plan**, **Auto** and **Full access** (your own sessions only, on a
+computer with a current desktop app). **Full access** asks you to confirm first: it runs every
+command without asking, except hard refusals (sudo, wiping a disk or the project, piping a download
+into a shell, writing secrets). Each change is noted in the session with who made it, when, and from
+the phone or the web. See [permission modes](https://github.com/codyrs82/Edgecoder/blob/main/docs/permission-modes.md).
 
 A reply on a paid model that passes its spending limit pauses with a cost check (see
 [Long and paid replies](/guide/ide-integration#long-and-paid-replies)). From the phone you can answer
 **Keep going** or **Stop**; switching to a cheaper model is done in the desktop app.
 
-For safety, commands that aren't read-only always ask first, paths outside the project are refused,
-and approving from the phone never adds an "always allow" rule or turns on automatic edits. Very long
-commands must be approved on the computer.
+In **Manual**, **Accept edits** and **Plan**, commands that aren't read-only ask first and paths
+outside the project are refused. An approval offers **Allow** (this call), **Allow for this session**
+(this call, and later calls of the same kind, named on the card, until the session ends: for example
+`npm test` commands, inline `python3` scripts, edits inside the project, git commits on a work
+branch) and **Deny**. Allow for this session never covers pushes, pull requests, secrets, files
+outside the project or refused commands, and it isn't kept after the session. The phone never adds an
+"always allow" rule for the project; that is done in the desktop app. Very long commands must be
+approved on the computer. A bot's approval offers **Allow for this run** the same way.
 
 See [Terminal: `edgecoder code`](/guide/terminal) for how sessions work on the computer.
 
@@ -83,9 +94,10 @@ the top of the sidebar. The sidebar then lists your sessions by project, with ea
   turn changed (open one to see its diff), and the session's model and cSats so far. It updates by
   itself while a turn runs. A session has its own link (`/portal/code/<computer>/<session>`) you can
   bookmark.
-- Send a message (it queues while a reply runs), **Allow** or **Deny** a tool call, approve a plan,
-  **Stop** the reply, **Undo last turn**, remove a queued message, or switch the mode between **Ask**,
-  **Accept edits** and **Plan**.
+- Send a message (it queues while a reply runs), **Allow**, **Allow for this session** or **Deny** a
+  tool call, approve a plan, **Stop** the reply, **Undo last turn**, remove a queued message, or
+  switch the mode between **Manual**, **Accept edits**, **Plan**, **Auto** and **Full access** (after
+  a confirm). The header always shows the mode and what the session allows without asking.
 - Paste, drop or attach images (PNG, JPEG or WebP; up to 4 per message, 5 MB each, 10 MB in all;
   bigger ones are scaled down first). The computer saves them in the project's
   `.edgecoder/attachments` folder and names them in the message. The button is off until the
@@ -93,9 +105,10 @@ the top of the sidebar. The sidebar then lists your sessions by project, with ea
 - Answer a cost check with **Keep going** or **Stop**.
 
 The website goes through the same relay as the phone and follows the same rules: only the account
-signed in on the computer can see or drive its sessions, **Allow** covers that one call (an "always
-allow" rule and **Auto** mode are set on the computer only), and very long commands must be approved
-on the computer. Nothing from a session runs in the browser; code and output are shown as text.
+signed in on the computer can see or drive its sessions, **Allow** covers that one call, **Allow for
+this session** covers that kind of call until the session ends (an "always allow" rule for the
+project is set on the computer only), mode changes are noted in the session and audited, and very
+long commands must be approved on the computer. Nothing from a session runs in the browser; code and output are shown as text.
 
 If a computer is offline, or **Code from your phone** is **Off** or **View only**, the page says so:
 open the EdgeCoder desktop app on it, go to **Settings**, and set **Code from your phone** to **On**.

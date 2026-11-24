@@ -117,6 +117,10 @@ export interface ToolEvent {
   web_guard?: boolean;
   /** With web_guard: the call runs a file this run changed, so the run-wide answer isn't offered. */
   runs_edited?: string;
+  /** "Allow for this session" may answer it: what later calls it lets run ("npm test commands"). Never with web_guard. */
+  allow_session?: string;
+  /** Ran without asking because of an earlier "Allow for this session": what was allowed. */
+  session_allowed?: string;
   result?: string;
   error?: string;
   command?: string;

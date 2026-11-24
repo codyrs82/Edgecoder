@@ -11,8 +11,9 @@
  *   auto        safe commands and edits apply; risky ones ask; dangerous ones are refused
  *   plan        read-only tools only, until the user approves the agent's plan
  *   full        nothing asks: edits, commands, commits, pushes and PRs run; only the hard refusals
- *               (sudo, wiping a disk or the project, download-and-run, secrets) stay refused. Set on
- *               this computer only (never from the phone, the web or another account's client).
+ *               (sudo, wiping a disk or the project, download-and-run, secrets) stay refused. Set by
+ *               the session's owner only: this computer, or the owner's phone or web page after a
+ *               confirm (never another account's client).
  *
  * permission-policy.ts decides each call (decideToolCall); docs/permission-modes.md has the tables.
  *

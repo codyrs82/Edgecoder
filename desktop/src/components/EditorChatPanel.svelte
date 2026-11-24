@@ -530,9 +530,9 @@
     else abortController?.abort();
   }
 
-  function handleToolApproval(id: string, approved: boolean, always = false, forRun = false) {
-    if (remoteTurn && mirror.sessionId) void sessionApprove(mirror.sessionId, id, approved, always, forRun).catch(() => {});
-    else void ideSendToolApproval(id, approved, always, undefined, forRun);
+  function handleToolApproval(id: string, approved: boolean, always = false, forRun = false, session = false) {
+    if (remoteTurn && mirror.sessionId) void sessionApprove(mirror.sessionId, id, approved, always, forRun, session).catch(() => {});
+    else void ideSendToolApproval(id, approved, always, undefined, forRun, session);
     streamingToolEvents = markApproval(streamingToolEvents, id, approved);
   }
 
@@ -713,6 +713,7 @@
             onToolApproval={handleToolApproval}
             onToolAlways={(id) => handleToolApproval(id, true, true)}
             onToolForRun={(id) => handleToolApproval(id, true, false, true)}
+            onToolSession={(id) => handleToolApproval(id, true, false, false, true)}
             onCostChoice={remoteTurn ? undefined : handleCostChoice}
             costNotes={streamingCostNotes}
           />

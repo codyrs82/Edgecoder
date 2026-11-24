@@ -106,7 +106,7 @@ export function remoteSummary(b: BotView, messages: BotMessage[]): RemoteBotSumm
     ...(b.nextRun ? { nextRun: { ...b.nextRun } } : {}),
     ...(b.held ? { held: b.held } : {}),
     ...(b.lastRun ? { lastRun: remoteRun(b.lastRun, servedByRun(messages.filter((m) => m.runId === b.lastRun!.id))) } : {}),
-    pending: b.pending.map((p) => ({ callId: p.callId, tool: p.tool, detail: toolCallDetail(p.tool, p.args) })),
+    pending: b.pending.map((p) => ({ callId: p.callId, tool: p.tool, detail: toolCallDetail(p.tool, p.args), ...(p.allowRun ? { allowRun: p.allowRun.slice(0, 160) } : {}) })),
     ...(b.frontierLead || b.frontierSpentTodayUsd ? { frontier: { on: !!b.frontierLead, ...(b.frontierLead ? { name: frontierLeadName(b.frontierLead) } : {}), spentTodayUsd: b.frontierSpentTodayUsd ?? 0 } } : {}),
     queuedMessages: b.queuedMessages,
     ...(b.auto ? { idleStreak: b.auto.idleStreak } : {}),
@@ -174,7 +174,8 @@ export function runRemoteBotCommand(bots: BotManager, botId: string, request: Bo
         if (!waiting) return { status: "refused", error: "no_pending_approval", message: "That approval was already answered or the run ended." };
         // Apps that only know Approve and Deny (the phone, an older web page): a frontier ask is approved for this run, or declined; still owner-only.
         if (waiting.tool === FRONTIER_ASK_TOOL) return bots.answerFrontier(botId, request.args.callId, request.args.approved ? "run" : "decline", ctx.requestedBy) ? { status: "done" } : { status: "refused", error: "no_pending_approval" };
-        return bots.approve(botId, request.args.callId, request.args.approved) ? { status: "done" } : { status: "refused", error: "no_pending_approval" };
+        // "Allow for the rest of this run": the bot's owner (every request here is), in memory for this run only.
+        return bots.approve(botId, request.args.callId, request.args.approved, false, false, request.args.approved && request.args.scope === "run") ? { status: "done" } : { status: "refused", error: "no_pending_approval" };
       }
       case "approve_frontier":
       case "decline_frontier": {

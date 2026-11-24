@@ -253,26 +253,37 @@ describe("Full access", () => {
     expect(calls).toEqual([false, false]);
   });
 
-  it("is turned on from this computer's own clients or the owner's account only", () => {
+  it("is turned on from this computer's own clients or the owner's account only (the owner's phone with a confirm)", () => {
     const { hub } = makeHub([]);
     const s = hub.create({ projectRoot: root, client: TERM, ownerAccount: OWNER });
-    for (const who of [PHONE, GUEST, { ...PHONE, accountId: "acct_guest" }]) {
+    for (const who of [PHONE, GUEST, { ...PHONE, accountId: "acct_guest" }, { ...PHONE, accountId: undefined }]) {
       expect(() => hub.update(s.id, { mode: "full" }, who)).toThrow(SessionError);
       expect(hub.peek(s.id)!.mode).not.toBe("full");
     }
-    try {
-      hub.update(s.id, { mode: "full" }, PHONE);
-    } catch (err) {
-      expect((err as SessionError).code).toBe("forbidden");
-    }
-    expect(() => hub.create({ projectRoot: root, client: PHONE, ownerAccount: OWNER, mode: "full" })).toThrow(/Mac/);
+    const code = (fn: () => unknown) => {
+      try {
+        fn();
+      } catch (err) {
+        return (err as SessionError).code;
+      }
+      return null;
+    };
+    // The owner's phone: only with the confirm; another account's phone or a guest never.
+    expect(code(() => hub.update(s.id, { mode: "full" }, PHONE))).toBe("invalid");
+    expect(code(() => hub.update(s.id, { mode: "full" }, { ...PHONE, accountId: "acct_guest" }, { confirmFull: true }))).toBe("forbidden");
+    expect(code(() => hub.update(s.id, { mode: "auto" }, { ...PHONE, accountId: "acct_guest" }))).toBe("forbidden");
+    expect(code(() => hub.update(s.id, { mode: "full" }, GUEST, { confirmFull: true }))).toBe("forbidden");
+    expect(hub.peek(s.id)!.mode).not.toBe("full");
+    expect(hub.update(s.id, { mode: "full" }, PHONE, { confirmFull: true }).mode).toBe("full");
+    hub.update(s.id, { mode: "ask" }, TERM);
+    expect(() => hub.create({ projectRoot: root, client: PHONE, ownerAccount: OWNER, mode: "full" })).toThrow(/confirm/);
     expect(() => hub.create({ projectRoot: root, client: GUEST, ownerAccount: OWNER, mode: "full" })).toThrow(/owner/);
     expect(hub.update(s.id, { mode: "full" }, OWN_DESK).mode).toBe("full");
     expect(hub.update(s.id, { mode: "auto" }, DESK).mode).toBe("auto");
     expect(hub.update(s.id, { mode: "full" }, TERM).mode).toBe("full");
   });
 
-  it("another account's message, or the phone's, runs as Accept edits; the owner's runs in Full access", () => {
+  it("another account's message, or another account's phone, runs as Accept edits; the owner's (Mac or phone) runs in Full access", () => {
     const { hub } = makeHub([]);
     const s = hub.create({ projectRoot: root, client: TERM, ownerAccount: OWNER, mode: "full" });
     const install = { command: "npm install left-pad" };
@@ -284,10 +295,17 @@ describe("Full access", () => {
     expect(hub.decide(s, "run_shell", install, GUEST).action).toBe("ask");
     expect(hub.decide(s, "git_push", {}, GUEST).action).toBe("ask");
     expect(hub.decide(s, "write_file", { path: "x.txt", content: "x" }, GUEST).action).toBe("run");
-    // The phone keeps its remote rules (commands ask) as Accept edits.
-    expect(hub.decide(s, "run_shell", install, PHONE).action).toBe("ask");
-    expect(hub.decide(s, "git_push", {}, PHONE).action).toBe("ask");
-    expect(hub.decide(s, "write_file", { path: "x.txt", content: "x" }, PHONE).action).toBe("run");
+    // Another account's phone keeps the remote rules (commands ask) as Accept edits.
+    const NOT_OWNER_PHONE = { ...PHONE, accountId: "acct_guest" };
+    expect(hub.modeFor(s, NOT_OWNER_PHONE)).toBe("auto-edits");
+    expect(hub.decide(s, "run_shell", install, NOT_OWNER_PHONE).action).toBe("ask");
+    expect(hub.decide(s, "git_push", {}, NOT_OWNER_PHONE).action).toBe("ask");
+    expect(hub.decide(s, "write_file", { path: "x.txt", content: "x" }, NOT_OWNER_PHONE).action).toBe("run");
+    // The owner chose Full access: their phone's turn runs like the Mac's (hard refusals stay).
+    expect(hub.modeFor(s, PHONE)).toBe("full");
+    expect(hub.decide(s, "run_shell", install, PHONE).action).toBe("run");
+    expect(hub.decide(s, "git_push", {}, PHONE).action).toBe("run");
+    expect(hub.decide(s, "run_shell", { command: "sudo ls" }, PHONE).action).toBe("refuse");
     expect(hub.peek(s.id)!.mode).toBe("full");
   });
 

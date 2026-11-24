@@ -33,6 +33,8 @@
     onToolAlways?: (id: string) => void;
     /** "Allow for the rest of this run" on a web-page guard ask (this computer only, never the phone). */
     onToolForRun?: (id: string) => void;
+    /** "Allow for this session" on an approval card: approve and let later calls of its kind run this session. */
+    onToolSession?: (id: string) => void;
     /** Agent turn checkpoint and the files it wrote: shows the review / undo card. */
     turnId?: string;
     changedFiles?: string[];
@@ -61,7 +63,7 @@
     return u.calls?.length ? `Where this reply ran:\n${servedBreakdown(u.calls)}` : "Where this reply ran and what it cost";
   }
 
-  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, onToolAlways, onToolForRun, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview, usage, web, activity, notice, onCostChoice, costNotes }: Props = $props();
+  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, onToolAlways, onToolForRun, onToolSession, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview, usage, web, activity, notice, onCostChoice, costNotes }: Props = $props();
 
   /** A failed reply: its text, and the error as one compact notice (with Buy cSats when it's money). */
   let failed = $derived(role === "assistant" && !streaming ? splitModelError(content) : { text: content, error: undefined });
@@ -125,6 +127,9 @@
                   webGuard={evt.web_guard === true}
                   runsEdited={evt.runs_edited}
                   onForRun={onToolForRun}
+                  allowSession={evt.allow_session}
+                  sessionAllowed={evt.session_allowed}
+                  onSession={onToolSession}
                 />
               {:else if evt.type === "shell_output"}
                 <ShellBlock

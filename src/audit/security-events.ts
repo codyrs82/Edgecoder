@@ -46,6 +46,7 @@ export type SecurityEventType =
   | "model_control_not_owner"
   | "bot_control_not_owner"
   | "code_control_not_owner"
+  | "code_session_mode_change"
   | "restricted_model_call"
   | "restricted_model_refused"
   | "restricted_access_suspended";
@@ -108,6 +109,8 @@ const SEVERITY_MAP: Record<SecurityEventType, SecurityLevel> = {
   model_control_not_owner: "HIGH",
   bot_control_not_owner: "HIGH",
   code_control_not_owner: "HIGH",
+  // The owner set a coding session to Auto or Full access from the web or the iPhone (routes/code-relay.ts).
+  code_session_mode_change: "INFO",
   // Security research tier (docs/security-research-tier.md): every restricted-model call is recorded.
   restricted_model_call: "INFO",
   restricted_model_refused: "WARN",

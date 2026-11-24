@@ -32,6 +32,37 @@ struct BotPendingCall: Decodable, Equatable, Identifiable {
     let callId: String
     let tool: String
     let detail: String
+    /// Newer machines: "Allow for this run" may answer it; what later calls it lets run without asking.
+    let allowRun: String?
+
+    init(callId: String, tool: String, detail: String, allowRun: String? = nil) {
+        self.callId = callId
+        self.tool = tool
+        self.detail = detail
+        self.allowRun = allowRun
+    }
+
+    enum CodingKeys: String, CodingKey { case callId, tool, detail, allowRun }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        callId = try c.decode(String.self, forKey: .callId)
+        tool = try c.decode(String.self, forKey: .tool)
+        detail = try c.decode(String.self, forKey: .detail)
+        let a = (try? c.decodeIfPresent(String.self, forKey: .allowRun)) ?? nil
+        allowRun = (a?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) ? nil : a
+    }
+
+    /// The caption under "Allow for this run".
+    var allowRunCaption: String? {
+        allowRun.map { "Also runs \($0) without asking until this run ends." }
+    }
+
+    /// The "approve" command's args: `forRun` answers "Allow for this run" (`scope: "run"`).
+    func approveArgs(approved: Bool, forRun: Bool = false) -> [String: Any] {
+        var args: [String: Any] = ["callId": callId, "approved": approved]
+        if approved && forRun { args["scope"] = "run" }
+        return args
+    }
 }
 
 struct BotToolStep: Decodable, Equatable {
