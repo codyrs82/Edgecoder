@@ -9,7 +9,7 @@
  * service token and caches it briefly. Without a coordinator the reference USD figures are shown
  * and the sats column says so.
  */
-import { request } from "undici";
+import { firstCoordinatorAnswer, getCoordinatorJson } from "./coordinator-fanout.js";
 import { BASE_TIER, DEFAULT_COMPUTE_CLASSES, type ComputeClassId, type ComputeTierId } from "../economy/compute-classes.js";
 
 export interface PublicTierPrice {
@@ -167,7 +167,7 @@ export function createPublicPricingSource(
   };
 }
 
-/** The portal's pricing source: the first discovered coordinator's /economy/rates/current. */
+/** The portal's pricing source: /economy/rates/current from the first coordinator that answers (shared state; the next one if it fails). */
 export function coordinatorPricingSource(deps: {
   EXTERNAL_HTTP_TIMEOUT_MS: number;
   PORTAL_SERVICE_TOKEN: string;
@@ -175,18 +175,10 @@ export function coordinatorPricingSource(deps: {
 }): () => Promise<PublicPricing> {
   return createPublicPricingSource(async () => {
     const urls = await deps.discoverCoordinatorUrlsForPortal();
-    if (!urls.length) return null;
-    const res = await request(`${urls[0].replace(/\/$/, "")}/economy/rates/current`, {
-      method: "GET",
-      headers: deps.PORTAL_SERVICE_TOKEN ? { "x-portal-service-token": deps.PORTAL_SERVICE_TOKEN } : {},
-      headersTimeout: deps.EXTERNAL_HTTP_TIMEOUT_MS,
-      bodyTimeout: deps.EXTERNAL_HTTP_TIMEOUT_MS
-    });
-    if (res.statusCode !== 200) {
-      await res.body.text().catch(() => undefined);
-      return null;
-    }
-    const body = (await res.body.json()) as { epoch?: RateEpochView | null };
-    return body.epoch && body.epoch.classRates ? body.epoch : null;
+    const found = await firstCoordinatorAnswer(urls, async (base, signal) => {
+      const body = (await getCoordinatorJson(base, "/economy/rates/current", { serviceToken: deps.PORTAL_SERVICE_TOKEN, signal, timeoutMs: deps.EXTERNAL_HTTP_TIMEOUT_MS })) as { epoch?: RateEpochView | null };
+      return body.epoch && body.epoch.classRates ? body.epoch : null;
+    }, undefined, { timeoutMs: deps.EXTERNAL_HTTP_TIMEOUT_MS });
+    return found?.value ?? null;
   });
 }

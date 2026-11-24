@@ -20,6 +20,7 @@ import { setNudgeTransport } from "../dispatch.js";
 import { setModelControlTransport } from "../model-control.js";
 import { RttTracker, startRttPings, type PingableSocket } from "../../agent-rtt.js";
 import { MESH_WS_BIND_MAX_SKEW_MS, decideMeshWsBind, meshWsSenderMatches } from "../../../mesh/ws-auth.js";
+import type { DrainSocket } from "../drain.js";
 import { legacyPemFingerprints, publicKeyFingerprint } from "../../../security/key-fingerprint.js";
 import { IDENTITY_CHALLENGE_PATH, answerIdentityChallenge } from "../../../trust/identity-challenge.js";
 import { LOCAL_ATTEST_PATH, NonceLog, answerLocalAttest } from "../../../trust/local-attest.js";
@@ -488,6 +489,21 @@ setModelControlTransport({
     }
   }
 });
+
+/**
+ * Every open mesh socket, for the graceful stop (../drain.ts): a registered agent on a signed bind
+ * gets the signed reconnect frame; every socket is then closed.
+ */
+export function meshDrainSockets(): DrainSocket[] {
+  const out: DrainSocket[] = [];
+  const coordinatorPeers = new Set(mesh.listPeers().map((p) => p.peerId));
+  for (const [peerId, b] of meshWsBindings) {
+    const ws = b.socket as { readyState?: number; send: (data: string) => void; close: (code: number, reason: string) => void };
+    if (ws.readyState !== 1) continue;
+    out.push({ peerId, agent: b.authenticated && agentCapabilities.has(peerId) && !coordinatorPeers.has(peerId), send: (frame) => ws.send(frame), close: (code, reason) => ws.close(code, reason) });
+  }
+  return out;
+}
 
 export function registerMeshRoutes(app: CoordinatorApp): void {
   app.get("/identity", async () => ({

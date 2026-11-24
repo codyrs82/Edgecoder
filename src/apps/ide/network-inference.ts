@@ -242,6 +242,24 @@ async function readStream(d: NetworkDeps, body: { taskId: string; subtaskId: str
  */
 export const ownInflightTaskIds = new Set<string>();
 
+/**
+ * A coordinator stopping for a deploy refuses new calls with a retryable 503 coordinator_draining
+ * before anything is set aside or charged (src/swarm/coordinator/drain.ts). Send the call once
+ * more after its short wait: by then the instance replacing it (or a peer) answers.
+ */
+export const DRAIN_RETRY_MAX_WAIT_MS = 5_000;
+export const isDrainingAnswer = (r: { status: number; json: Record<string, unknown> }) => r.status === 503 && r.json.error === "coordinator_draining";
+export function drainRetryWaitMs(json: Record<string, unknown>): number {
+  const ms = typeof json.retryAfterMs === "number" && Number.isFinite(json.retryAfterMs) ? json.retryAfterMs : 2_000;
+  return Math.min(DRAIN_RETRY_MAX_WAIT_MS, Math.max(250, ms));
+}
+async function submitRetryingDrain(d: NetworkDeps, body: unknown, signal?: AbortSignal, sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))) {
+  const first = await call(d, "POST", "/inference/submit", body, signal);
+  if (!isDrainingAnswer(first) || signal?.aborted) return first;
+  await sleep(drainRetryWaitMs(first.json));
+  return call(d, "POST", "/inference/submit", body, signal);
+}
+
 /** Run a chat on the network and yield the reply as it streams. */
 export async function* streamNetworkCompletion(
   d: NetworkDeps,
@@ -263,7 +281,7 @@ async function* streamSubmitted(
   taskId: string,
   signal?: AbortSignal,
 ): AsyncGenerator<CompletionPiece> {
-  const sub = await call(d, "POST", "/inference/submit", {
+  const submitBody = {
     taskId,
     submitterAccountId: d.agentId,
     model: req.model,
@@ -285,7 +303,8 @@ async function* streamSubmitted(
     ...(req.model !== "auto" && req.routing?.maxCSats !== undefined ? { routing: { maxCSats: req.routing.maxCSats } } : {}),
     ...(req.model === "auto" && req.routeRedirect ? { routeRedirect: true } : {}),
     ...(req.coordinatorChoice ? { coordinatorChoice: req.coordinatorChoice } : {}),
-  }, signal);
+  };
+  const sub = await submitRetryingDrain(d, submitBody, signal);
   if (sub.status !== 200) {
     const err = String(sub.json.error ?? `HTTP ${sub.status}`);
     if (req.model === "auto") {
@@ -304,6 +323,7 @@ async function* streamSubmitted(
       err === "reserved_agent_lacks_model" ? `The reserved machine doesn't have ${req.model}; it has: ${((sub.json.models as string[]) ?? []).join(", ") || "no models"}.` :
       err === "insufficient_credits" ? `Not enough cSats for this request (it sets aside up to ${sub.json.neededCSats} cSats; unused cSats come back).` :
       err === "agent_not_registered" ? "This computer's agent isn't connected to the network yet." :
+      err === "coordinator_draining" ? "The coordinator is restarting for an update. Nothing was charged; try again in a few seconds." :
       `Network request failed: ${err}`;
     // 404 (reservation_not_active) stays a 404: as a 502 the edge (Cloudflare) swaps the body for its
     // own error page, so an API caller never sees why.
@@ -311,6 +331,7 @@ async function* streamSubmitted(
       err === "insufficient_credits" ? { code: err, ...(typeof sub.json.neededCSats === "number" ? { neededCSats: sub.json.neededCSats } : {}), ...(req.computeClass && req.computeClass !== "any" ? { computeClass: req.computeClass } : {}) } :
       err === "no_agent_in_class" || err === "no_agent_has_model" ? { code: err, ...(req.computeClass && req.computeClass !== "any" ? { computeClass: req.computeClass } : {}) } :
       undefined;
+    if (err === "coordinator_draining") throw new NetworkInferenceError(msg, 503, Math.ceil(drainRetryWaitMs(sub.json) / 1000));
     throw new NetworkInferenceError(msg, sub.status === 402 ? 402 : sub.status === 409 || sub.status === 404 ? 404 : 502, undefined, info);
   }
   const subtaskId = String(sub.json.subtaskId);
