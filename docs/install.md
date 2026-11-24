@@ -598,9 +598,9 @@ directory, mode 0600) and are layered over the env file at startup. Each entry r
 it replaced; if that value later changes (you edit the env file, or re-run the installer with
 `--model`, `--context-window`, `--parallel` or `--keep-alive`), **the local value wins** and the
 remote one is dropped. Delete the file and restart the agent to return to the env file alone.
-So `--context-window auto` also drops a portal context window applied while the installer's value
-was in force; one applied while the window was already automatic stays until you delete
-`model-overrides.json` (or that entry) and restart the agent.
+`--context-window auto` (or `--parallel auto`) also removes that setting's portal override from
+every instance's `model-overrides.json` before the agents restart, so the value is sized
+automatically again; other portal choices in the file (such as the model) stay.
 An `update` (`apply --keep-config`) keeps the env file's model, so a model chosen in the portal stays
 in force through updates. A model loaded by hand (`ollama run`) is not the agent's model: press
 **Use** on it in the portal, or run `sudo edgecoder-install apply --keep-config --model <tag>`.
