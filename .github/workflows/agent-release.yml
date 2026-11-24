@@ -110,7 +110,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          prerelease=""; [[ "$TAG" == *-* ]] && prerelease="--prerelease"
+          prerelease=""; [[ "${TAG#agent-v}" == *-* ]] && prerelease="--prerelease"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" release/* --clobber
           else
