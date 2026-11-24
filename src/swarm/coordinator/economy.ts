@@ -8,6 +8,9 @@ import { randomInt } from "node:crypto";
 import type { PaymentIntent, PriceEpochRecord, ResourceClass } from "../../common/types.js";
 import { cSatsToMsat, inferenceReserveMsat, reserveMsat } from "../../economy/job-pricing.js";
 import { paramsB } from "../../inference-api/auto-route.js";
+import { configureCloudCatalog } from "../../cloud-host/catalog.js";
+import { configureCloudPricing, modelTokenPrice } from "../../economy/cloud-pricing.js";
+import { parseCloudHostOwners } from "./cloud-hosts.js";
 import { OUTPUT_TOKEN_ALLOWANCE, PROMPT_TOKEN_ALLOWANCE } from "../inference-streams.js";
 import { pgStore } from "../../db/store.js";
 import { dynamicLoadMultiplier, LEGACY_BASE_SATS_PER_UNIT } from "../../economy/pricing.js";
@@ -73,8 +76,10 @@ export function subtaskReserveMsat(resourceClass: ResourceClass, taskClass: Comp
  */
 export function inferenceCallReserve(input: { model: string; taskClass: ComputeClassId | "any"; timeoutMs: number; inputBytes: number; maxTokens: number; maxCSats?: number }) {
   const classes = (input.taskClass === "any" ? Object.keys(rateOracleConfig.computeClasses) : [input.taskClass]) as ComputeClassId[];
+  const own = modelTokenPrice(input.model);
   return inferenceReserveMsat({
     paramsB: paramsB(input.model),
+    ...(own ? { price: own } : {}),
     btcUsd: mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD,
     promptTokensMax: Math.max(0, input.inputBytes) + PROMPT_TOKEN_ALLOWANCE,
     outputTokensMax: Math.max(0, input.maxTokens) + OUTPUT_TOKEN_ALLOWANCE,
@@ -227,6 +232,12 @@ export async function applyMarketOrder(order: MarketOrder): Promise<void> {
 }
 export const MARKET_DEFAULT_BID_PREMIUM_BPS = CC.MARKET_DEFAULT_BID_PREMIUM_BPS;
 export const NETWORK_FEE_BPS = CC.NETWORK_FEE_BPS;
+
+// Cloud hosts (docs/cloud-host.md): the cloud-model price list (CLOUD_MODELS_JSON, validated by the
+// config schema), the cost-plus margin and the owners allowed to run a cloud host.
+configureCloudCatalog(CC.CLOUD_MODELS_JSON);
+configureCloudPricing({ marginPct: CC.CLOUD_MARGIN_PCT, feeBps: NETWORK_FEE_BPS });
+export const CLOUD_HOST_OWNERS = parseCloudHostOwners(CC.CLOUD_HOST_OWNER_EMAILS);
 
 export function syncOrderBookReference(epoch: RateEpoch | null): void {
   if (!epoch) return;

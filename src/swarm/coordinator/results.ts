@@ -10,6 +10,7 @@ import type { Subtask, SubtaskResult } from "../../common/types.js";
 import { signForwardedResult } from "../../mesh/peer-trust.js";
 import type { AgentResultEnvelope } from "../../mesh/forwarded-agent-envelope.js";
 import { accruePricedJob, grantCreditsIdempotent, refundTxId, rewardAccountForAgent } from "../../credits/store.js";
+import { modelTokenPrice } from "../../economy/cloud-pricing.js";
 import {
   clampToBand,
   inferenceCostMsat,
@@ -325,11 +326,14 @@ export function priceExecution(r: ExecutionResult<ResultMeta>) {
   // Model calls are priced per token (tied to the market, with a power floor); code jobs per second.
   const perSecondCostMsat = jobCostMsat(durationMs, rateMsat);
   const usageForTask = usagePending.get(taskId);
+  // A cloud model (src/cloud-host/) is priced at its provider's cost plus margin, not by size.
+  const ownPrice = subtask.kind === "inference" ? modelTokenPrice(subtask.requestedModel) : undefined;
   const priced =
     subtask.kind === "inference"
       ? inferenceCostMsat({
           promptTokens: usageForTask?.promptTokens,
           outputTokens: usageForTask?.outputTokens,
+          ...(ownPrice ? { price: ownPrice, cachedPromptTokens: taskBilling.get(taskId)?.cachedPromptTokens } : {}),
           paramsB: paramsB(subtask.requestedModel ?? ""),
           btcUsd: mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD,
           durationMs,

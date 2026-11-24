@@ -153,3 +153,55 @@ describe("EditorChatPanel and projects", () => {
     expect(screen.queryByTestId("plan-approval")).toBeNull();
   });
 });
+
+describe("EditorChatPanel helpers (docs/tentacles.md)", () => {
+  const send = async (text: string) => {
+    const box = await screen.findByRole("textbox");
+    await fireEvent.input(box, { target: { value: text } });
+    await fireEvent.keyDown(box, { key: "Enter" });
+  };
+
+  it("has a Helpers switch beside the pickers, off on a network lead, and sends it with the chat's id", async () => {
+    api.streamIdeChat.mockImplementation(async () => {});
+    render(EditorChatPanel, { projectRoot: "/Users/me/EdgeCoder/site" });
+    const controls = await screen.findByTestId("composer-controls");
+    expect(within(controls).getByRole("button", { name: /Helpers off/ })).toBeTruthy();
+    await send("Add a footer");
+    await vi.waitFor(() => expect(api.streamIdeChat).toHaveBeenCalled());
+    const helpers = api.streamIdeChat.mock.calls[0][10] as { sessionId: string; enabled: boolean; maxParallel: number; budgetCSats: number };
+    expect(helpers).toMatchObject({ enabled: false, maxParallel: 4, budgetCSats: 100 });
+    expect(helpers.sessionId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("is on by default with a frontier lead, and the chat keeps the user's choice", async () => {
+    const { computeChoice } = await import("../src/lib/compute-choice");
+    computeChoice.set("frontier/anthropic/claude-opus-5-5");
+    try {
+      api.streamIdeChat.mockImplementation(async () => {});
+      render(EditorChatPanel, { projectRoot: "/Users/me/EdgeCoder/site" });
+      const controls = await screen.findByTestId("composer-controls");
+      await fireEvent.click(within(controls).getByRole("button", { name: /Helpers · 4 · 100 cSats/ }));
+      await fireEvent.click(screen.getByRole("switch", { name: "Helpers" }));
+      expect(within(controls).getByRole("button", { name: /Helpers off/ })).toBeTruthy();
+      await send("Refactor the footer");
+      await vi.waitFor(() => expect(api.streamIdeChat).toHaveBeenCalled());
+      expect(api.streamIdeChat.mock.calls[0][10]).toMatchObject({ enabled: false });
+      await vi.waitFor(() => expect(db.saved.at(-1)).toMatchObject({ helpers: { enabled: false } }));
+    } finally {
+      computeChoice.set(undefined);
+    }
+  });
+
+  it("shows the helpers the lead starts, with where each call ran", async () => {
+    const tentacle = { id: "t1234567", task: "Find the footer", kind: "search", readOnly: true, status: "running", progress: "starting", createdAt: 1, cSats: 0 };
+    api.streamIdeChat.mockImplementation(async (_m: unknown, _r: string, onEvent: (e: unknown) => void) => {
+      onEvent({ type: "tentacle_started", tentacle });
+      onEvent({ type: "tentacle_usage", id: "t1234567", call: { cSats: 0, model: "qwen3.5:9b", place: "local", served: { label: "This computer", own: true, computeClass: "local", tier: null, hardware: "This computer", region: null, country: null } }, cSats: 0, spentCSats: 0 });
+      onEvent({ type: "text", content: "Done." });
+    });
+    render(EditorChatPanel, { projectRoot: "/Users/me/EdgeCoder/site" });
+    await send("Where is the footer?");
+    expect(await screen.findByText(/Tentacles · 1 running/)).toBeTruthy();
+    expect(screen.getByText(/↳ this computer · qwen3\.5:9b/)).toBeTruthy();
+  });
+});

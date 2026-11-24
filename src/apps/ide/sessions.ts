@@ -21,6 +21,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { ALWAYS_ASK_TOOLS, makeToolRunner, runAgentLoop, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
+import { toolchainFailureHint } from "./toolchain.js";
 import type { CheckpointStore } from "./checkpoints.js";
 import { defaultMode, defaultPermissionsFile, editsApply, EXECUTION_MODES, PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
 import { classifyCommand, decideToolCall, suggestToolRule, type Decision } from "./permission-policy.js";
@@ -270,7 +271,7 @@ export function parseModelId(id: string): { model: string; compute: ComputeSetti
     const rest = id.slice(8);
     const at = rest.lastIndexOf("@");
     const cls = at > 0 ? rest.slice(at + 1) : "";
-    return ["cpu", "apple", "gpu", "gpu.dc"].includes(cls)
+    return ["cpu", "apple", "gpu", "gpu.dc", "cloud"].includes(cls)
       ? { model: rest.slice(0, at), compute: { target: "network", computeClass: cls } }
       : { model: rest, compute: { target: "network", computeClass: "any" } };
   }
@@ -608,6 +609,8 @@ export class SessionHub {
           captureBeforeWrite: (path) => this.env.checkpoints.capture(r.turnId, path),
           turnId: r.turnId,
           decide: (tool, args) => this.decide(s, tool, args, r.by ?? null),
+          // A Node version mismatch in a command's output: the diagnosis and the command to retry (toolchain.ts).
+          shellHint: (command, output) => toolchainFailureHint(s.projectRoot, command, output),
         }),
       });
     } catch (err) {

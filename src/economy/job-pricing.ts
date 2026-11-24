@@ -121,6 +121,24 @@ export function tokenPriceUsdPerM(paramsB: number): { input: number; output: num
   return { input: row.input, output: row.output };
 }
 
+/**
+ * A model's own token price (USD per million tokens), in place of the size band: a cloud model's
+ * provider price plus margin (src/economy/cloud-pricing.ts). `cachedInput` prices prompt tokens the
+ * provider served from its cache; without it they cost `input`.
+ */
+export interface TokenPrice {
+  input: number;
+  output: number;
+  cachedInput?: number;
+}
+
+/** USD for a call's tokens at a price; cached tokens are part of promptTokens. */
+function tokensUsd(price: TokenPrice, promptTokens: number, outputTokens: number, cachedPromptTokens = 0): number {
+  const prompt = Math.max(0, promptTokens);
+  const cached = Math.min(prompt, Math.max(0, cachedPromptTokens));
+  return ((prompt - cached) * price.input + cached * (price.cachedInput ?? price.input) + Math.max(0, outputTokens) * price.output) / 1_000_000;
+}
+
 /** USD to msat at a BTC/USD price. */
 export const usdToMsat = (usd: number, btcUsd: number) => (btcUsd > 0 ? (usd / btcUsd) * 1e8 * 1000 : 0);
 
@@ -143,7 +161,14 @@ export const usdToMsat = (usd: number, btcUsd: number) => (btcUsd > 0 ? (usd / b
 export function inferenceCostMsat(input: {
   promptTokens?: number;
   outputTokens?: number;
+  /** Prompt tokens the provider served from its cache (priced at `price.cachedInput`); part of promptTokens. */
+  cachedPromptTokens?: number;
   paramsB: number;
+  /**
+   * The model's own token price (a cloud model, src/economy/cloud-pricing.ts) instead of the size
+   * band. That cost is rounded up, never down: it is the provider's cost plus margin.
+   */
+  price?: TokenPrice;
   btcUsd: number;
   durationMs: number;
   /** Model-load time inside durationMs, left out of the power floor. */
@@ -156,15 +181,18 @@ export function inferenceCostMsat(input: {
   perSecondCostMsat: number;
 }): { costMsat: number; basis: "tokens" | "power_floor" | "per_second" } {
   if (input.promptTokens === undefined && input.outputTokens === undefined) return { costMsat: input.perSecondCostMsat, basis: "per_second" };
-  const price = tokenPriceUsdPerM(input.paramsB);
-  const tokenUsd = ((input.promptTokens ?? 0) * price.input + (input.outputTokens ?? 0) * price.output) / 1_000_000;
+  const price = input.price ?? tokenPriceUsdPerM(input.paramsB);
+  const tokenUsd = tokensUsd(price, input.promptTokens ?? 0, input.outputTokens ?? 0, input.price ? input.cachedPromptTokens : 0);
   const exclude = typeof input.floorExcludeMs === "number" && Number.isFinite(input.floorExcludeMs) ? Math.max(0, input.floorExcludeMs) : 0;
   const floorMs = Math.max(0, input.durationMs - exclude);
   const slots = typeof input.floorSlots === "number" && Number.isFinite(input.floorSlots) ? Math.max(1, Math.floor(input.floorSlots)) : 1;
-  const floorUsd = ((POWER_FLOOR_USD_PER_HOUR[input.computeClass] ?? POWER_FLOOR_USD_PER_HOUR.cpu) * Math.max(1, input.tierWeight) * floorMs) / 3_600_000 / slots;
+  // A model with its own price (a cloud model) has no power floor: it draws no power on the host,
+  // and its price already covers what it costs.
+  const floorUsd = input.price ? 0 : ((POWER_FLOOR_USD_PER_HOUR[input.computeClass] ?? POWER_FLOOR_USD_PER_HOUR.cpu) * Math.max(1, input.tierWeight) * floorMs) / 3_600_000 / slots;
   const tokenMsat = usdToMsat(tokenUsd, input.btcUsd);
   const floorMsat = usdToMsat(floorUsd, input.btcUsd);
-  return tokenMsat >= floorMsat ? { costMsat: Math.round(tokenMsat), basis: "tokens" } : { costMsat: Math.round(floorMsat), basis: "power_floor" };
+  if (tokenMsat < floorMsat) return { costMsat: Math.round(floorMsat), basis: "power_floor" };
+  return { costMsat: input.price ? Math.ceil(tokenMsat) : Math.round(tokenMsat), basis: "tokens" };
 }
 
 /**
@@ -192,6 +220,8 @@ export const INFERENCE_RESERVE_MARGIN = 1.5;
  */
 export function inferenceReserveMsat(input: {
   paramsB: number;
+  /** The model's own token price (a cloud model) instead of the size band; prompt tokens are bounded at the uncached price. */
+  price?: TokenPrice;
   btcUsd: number;
   promptTokensMax: number;
   outputTokensMax: number;
@@ -201,10 +231,10 @@ export function inferenceReserveMsat(input: {
   /** The buyer's ceiling for the call (maxCSats), msat. */
   capMsat?: number;
 }): { reserveMsat: number; tokenMsat: number; floorMsat: number; capped: boolean } {
-  const price = tokenPriceUsdPerM(input.paramsB);
+  const price = input.price ?? tokenPriceUsdPerM(input.paramsB);
   const tokenUsd = (Math.max(0, input.promptTokensMax) * price.input + Math.max(0, input.outputTokensMax) * price.output) / 1_000_000;
   const hours = Math.max(0, input.maxDurationMs) / 3_600_000;
-  const floorUsd = Math.max(0, ...input.floorClasses.map((c) => (POWER_FLOOR_USD_PER_HOUR[c.computeClass] ?? POWER_FLOOR_USD_PER_HOUR.cpu) * Math.max(1, c.maxTierWeight) * hours));
+  const floorUsd = input.price ? 0 : Math.max(0, ...input.floorClasses.map((c) => (POWER_FLOOR_USD_PER_HOUR[c.computeClass] ?? POWER_FLOOR_USD_PER_HOUR.cpu) * Math.max(1, c.maxTierWeight) * hours));
   const tokenMsat = usdToMsat(tokenUsd, input.btcUsd);
   const floorMsat = usdToMsat(floorUsd, input.btcUsd);
   const bound = Math.max(1, Math.ceil(Math.max(tokenMsat, floorMsat) * (input.margin ?? INFERENCE_RESERVE_MARGIN)));
@@ -213,8 +243,12 @@ export function inferenceReserveMsat(input: {
   return { reserveMsat, tokenMsat: Math.ceil(tokenMsat), floorMsat: Math.ceil(floorMsat), capped: reserveMsat < bound };
 }
 
-/** cSats per million tokens (input, output) for a model size at a BTC price: what the UI shows. */
-export function cSatsPerMTokens(paramsB: number, btcUsd: number): { input: number; output: number } {
-  const p = tokenPriceUsdPerM(paramsB);
-  return { input: Number((usdToMsat(p.input, btcUsd) / 1000).toFixed(1)), output: Number((usdToMsat(p.output, btcUsd) / 1000).toFixed(1)) };
+/**
+ * cSats per million tokens (input, output) for a model size at a BTC price: what the UI shows. With
+ * a model's own price (a cloud model) that price instead, and `cachedInput` when it has one.
+ */
+export function cSatsPerMTokens(paramsB: number, btcUsd: number, own?: TokenPrice): { input: number; output: number; cachedInput?: number } {
+  const p = own ?? tokenPriceUsdPerM(paramsB);
+  const c = (usd: number) => Number((usdToMsat(usd, btcUsd) / 1000).toFixed(1));
+  return { input: c(p.input), output: c(p.output), ...(own?.cachedInput !== undefined ? { cachedInput: c(own.cachedInput) } : {}) };
 }

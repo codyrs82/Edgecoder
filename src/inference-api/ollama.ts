@@ -76,7 +76,7 @@ export function contextWindowFor(messages: ChatMessage[], tools: ToolSpec[] | un
   return ctx;
 }
 
-export type OllamaPiece = { delta: string } | { toolCalls: ToolCall[] } | { doneReason: string; promptTokens?: number; outputTokens?: number; /** Ollama's load_duration: time spent loading the model for this call. */ loadMs?: number; /** prompt_eval_duration and eval_duration: reading the prompt and writing the reply. */ promptMs?: number; genMs?: number };
+export type OllamaPiece = { delta: string } | { toolCalls: ToolCall[] } | { doneReason: string; promptTokens?: number; outputTokens?: number; /** Of promptTokens, those a hosted API served from its prompt cache (a cloud host, src/cloud-host/backend.ts). */ cachedPromptTokens?: number; /** Ollama's load_duration: time spent loading the model for this call. */ loadMs?: number; /** prompt_eval_duration and eval_duration: reading the prompt and writing the reply. */ promptMs?: number; genMs?: number };
 
 export async function* ollamaChat(
   host: string,

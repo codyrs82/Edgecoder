@@ -11,6 +11,7 @@ import {
   announceEnv,
   bitcoindEnv,
   bleSyncEnv,
+  cloudModelsEnv,
   computeClassEnv,
   discoveryEnv,
   escalationEnv,
@@ -69,6 +70,18 @@ export const coordinatorConfigSchema = z.object({
   ...bestFitEnv,
   ...escalationEnv,
   ...bleSyncEnv,
+  ...cloudModelsEnv,
+  /**
+   * Cloud hosts (docs/cloud-host.md): margin over the provider's USD price for cloud-model calls
+   * (src/economy/cloud-pricing.ts), percent. Never below what keeps the host's share after
+   * NETWORK_FEE_BPS at the provider's cost (about 5.3 % at a 5 % fee).
+   */
+  CLOUD_MARGIN_PCT: envNumber(30, { min: 0, max: 1000 }),
+  /**
+   * Owner emails whose agents may register as cloud hosts (the `cloud` class) and serve cloud models.
+   * Comma-separated; empty = none (a cloud-class registration is refused, cloud ids are dropped).
+   */
+  CLOUD_HOST_OWNER_EMAILS: str(),
   EDGECODER_RESPONSE_SIGNING: trustEnv.EDGECODER_RESPONSE_SIGNING,
   DATABASE_URL: str(),
   ...postgresPoolEnv,

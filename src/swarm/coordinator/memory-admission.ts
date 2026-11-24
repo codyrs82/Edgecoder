@@ -26,6 +26,7 @@
  */
 
 import { estimateModelBytes, type MemoryTelemetry, type PressureLevel } from "../memory-budget.js";
+import { isCloudModel } from "../../cloud-host/catalog.js";
 
 /** Telemetry older than this is ignored (the agent is then treated like one that reports none). */
 export const MEMORY_FRESH_MS = 2 * 60_000;
@@ -184,6 +185,8 @@ function refused(agentId: string, model: string, nowMs: number): boolean {
  */
 export function memoryAdmits(agentId: string, model: string | undefined, heldInference: number, nowMs = Date.now(), opts: { ownerOnly?: boolean } = {}): boolean {
   if (model && refused(agentId, model, nowMs)) return false;
+  // A cloud model runs on a hosted API (src/cloud-host/): it takes no memory on the host.
+  if (model && isCloudModel(model)) return true;
   const t = agentMemory(agentId, nowMs);
   if (!t) return true;
   if (opts.ownerOnly) return t.pressure !== "critical";

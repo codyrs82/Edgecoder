@@ -122,7 +122,8 @@
 
   <TentacleTree tree={tentacles} canAct={true} onCancel={(tid) => void act(() => tentacleCancel(sessionId, tid))} onMerge={(tid, ok) => void act(() => tentacleMerge(sessionId, tid, ok))} />
 
-  <div class="messages-scroll" bind:this={scroller}>
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <div class="messages-scroll" bind:this={scroller} tabindex="0" role="region" aria-label="Conversation">
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     {#if view?.deleted}
       <p class="note">This session was deleted.</p>

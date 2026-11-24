@@ -44,6 +44,13 @@ import { describeComplexity } from "../../inference-api/job-complexity.js";
 import { isCodeJob, isLightJob, type JobDescriptor, type JobType } from "../../inference-api/job-descriptor.js";
 import { catalogEntryForTag } from "../../model/catalog.js";
 import { inferenceCostMsat } from "../../economy/job-pricing.js";
+import { modelTokenPrice } from "../../economy/cloud-pricing.js";
+
+/** A cloud model's cost-plus price for inferenceCostMsat (economy/cloud-pricing.ts); none for other models. */
+function ownPriceOf(model: string): { price?: NonNullable<ReturnType<typeof modelTokenPrice>> } {
+  const price = modelTokenPrice(model);
+  return price ? { price } : {};
+}
 
 export interface AgentView {
   agentId: string;
@@ -288,7 +295,7 @@ export function estimate(job: JobDescriptor, agent: AgentView, model: string, vi
   const ttftMs = waitMs + rttMs + prefillMs;
   const totalMs = ttftMs + decodeMs;
   const cost = inferenceCostMsat({
-    promptTokens: job.promptTokens, outputTokens: job.expectedOutputTokens, paramsB: paramsB(model), btcUsd: view.btcUsd,
+    promptTokens: job.promptTokens, outputTokens: job.expectedOutputTokens, paramsB: paramsB(model), btcUsd: view.btcUsd, ...ownPriceOf(model),
     durationMs: prefillMs + decodeMs, computeClass: agent.computeClass, tierWeight: agent.tierWeight, floorSlots: agent.slots, perSecondCostMsat: 0,
   });
   const r = (n: number) => Math.round(n);

@@ -118,7 +118,74 @@ const INSTALL_SUBCOMMANDS: Record<string, RegExp> = {
   cargo: /^(install|add|uninstall|publish)$/,
   go: /^(install|get)$/,
   composer: /^(require|install|update)$/,
+  // Node version managers: installing a version downloads it (docs/permission-modes.md, "Node versions").
+  nvm: /^(install|i|reinstall-packages|install-latest-npm|uninstall)$/,
+  fnm: /^(install|i|uninstall)$/,
+  volta: /^(install|fetch|pin|uninstall)$/,
+  mise: /^(install|i|use|u|upgrade|up|uninstall|plugins?)$/,
+  asdf: /^(install|uninstall|plugin)$/,
+  pyenv: /^(install|uninstall)$/,
 };
+
+/** A Node version as nvm/fnm take it: 22, v22.12.0, lts/jod, --lts, node. */
+const NODE_VERSION_ARG = /^(v?\d+(\.\d+){0,2}|lts\/[\w*-]+|--lts(=[\w-]+)?|node|--silent)$/;
+
+/**
+ * A segment that only selects the Node version for the segments after it (`. "$HOME/.nvm/nvm.sh"`,
+ * `nvm use 22 >/dev/null`): it runs nothing of the project's, so it adds no class of its own and
+ * the commands it wraps are judged as themselves. nvm.sh must be outside the project (a project
+ * can't ship its own "nvm.sh" to be sourced).
+ */
+export function isNodeVersionSetup(argv: string[], root: string): boolean {
+  if ((argv[0] === "source" || argv[0] === ".") && argv.length === 2) {
+    const p = argv[1];
+    if (!/(^|\/)nvm\.sh$/.test(p)) return false;
+    if (/^(\$NVM_DIR|\$\{NVM_DIR\}|\$HOME|\$\{HOME\}|~)\/(\.nvm\/)?nvm\.sh$/.test(p)) return true;
+    return p.startsWith("/") && !p.includes("$") && !isWithin(root, resolve(p));
+  }
+  if (argv[0] === "nvm" && argv[1] === "use") return argv.length <= 4 && argv.slice(2).every((a) => NODE_VERSION_ARG.test(a));
+  return false;
+}
+
+/** `PATH=...` before a command: only absolute folders outside the project, plus the old $PATH. */
+function safePathAssignment(value: string, root: string): boolean {
+  return value.split(":").every((dir) => dir === "$PATH" || dir === "${PATH}" || (dir.startsWith("/") && !/[$`]/.test(dir) && !isWithin(root, resolve(dir))));
+}
+
+/** The command a version wrapper runs (`fnm exec --using=22 npm ci` is `npm ci`); null when it isn't one. */
+function unwrapVersionManager(argv: string[]): { inner: string[]; mayDownload: string | null } | null {
+  const [bin, sub] = argv;
+  const name = (bin ?? "").split("/").pop();
+  if (name === "fnm" && sub === "exec") {
+    let i = 2;
+    while (i < argv.length && argv[i].startsWith("-")) {
+      if (argv[i] === "--") {
+        i++;
+        break;
+      }
+      if (argv[i] === "--using") i++;
+      i++;
+    }
+    return { inner: argv.slice(i), mayDownload: null };
+  }
+  if (name === "nvm" && (sub === "exec" || sub === "run")) {
+    let i = 2;
+    while (i < argv.length && NODE_VERSION_ARG.test(argv[i])) i++;
+    return { inner: sub === "run" ? ["node", ...argv.slice(i)] : argv.slice(i), mayDownload: null };
+  }
+  if (name === "asdf" && sub === "exec") return { inner: argv.slice(2), mayDownload: null };
+  // These install a missing version before running: they ask like an install.
+  if (name === "volta" && sub === "run") {
+    let i = 2;
+    while (i < argv.length && argv[i].startsWith("-")) i += /^--(node|npm|yarn|pnpm)$/.test(argv[i]) ? 2 : 1;
+    return { inner: argv.slice(i), mayDownload: "volta run downloads a missing Node version" };
+  }
+  if (name === "mise" && (sub === "exec" || sub === "x")) {
+    const dd = argv.indexOf("--");
+    return { inner: dd >= 0 ? argv.slice(dd + 1) : [], mayDownload: "mise exec installs missing tool versions" };
+  }
+  return null;
+}
 const NETWORK_BINS = new Set(["curl", "wget", "ssh", "scp", "sftp", "rsync", "nc", "ncat", "netcat", "telnet", "ftp", "http", "https", "aria2c", "gh", "httpie", "xh"]);
 const DOCKER_BINS = new Set(["docker", "docker-compose", "podman", "kubectl", "helm", "minikube", "kind", "colima", "nerdctl"]);
 const PRIVILEGE_BINS = new Set(["sudo", "su", "doas", "pkexec", "runas"]);
@@ -256,7 +323,12 @@ export interface CommandContext {
 /** One command segment (no pipes or `&&`), already without its redirections. */
 function classifySegment(argvIn: string[], ctx: CommandContext): CommandClass {
   let argv = [...argvIn];
-  while (argv.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[0])) argv.shift();
+  while (argv.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[0])) {
+    const a = argv.shift()!;
+    // PATH=/opt/homebrew/opt/node@22/bin:$PATH npm ci is the command it runs; a PATH into the
+    // project (or a relative one) would swap in the project's own programs.
+    if (a.startsWith("PATH=") && !safePathAssignment(a.slice(5), ctx.root)) return ask("outside", "sets PATH to a folder inside the project or a relative one");
+  }
   if (!argv.length) return run("read", "sets variables");
   // Wrappers: look at what they run.
   while (argv.length && ["env", "command", "exec", "nohup", "time", "nice", "timeout"].includes(argv[0])) {
@@ -265,6 +337,14 @@ function classifySegment(argvIn: string[], ctx: CommandContext): CommandClass {
     while (argv.length && (argv[0].startsWith("-") || /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[0]) || (w === "nice" && /^\d+$/.test(argv[0])))) argv.shift();
   }
   if (!argv.length) return ask("unlisted", "prints the environment");
+  // Node version wrappers (fnm exec, nvm exec, volta run, mise exec): judged by what they run.
+  const wrapped = unwrapVersionManager(argv);
+  if (wrapped) {
+    if (!wrapped.inner.length) return ask("unlisted", `${argv[0]} ${argv[1]} with no command`);
+    const inner = classifySegment(wrapped.inner, ctx);
+    if (!wrapped.mayDownload || inner.action === "refuse" || !REMEMBERABLE.has(inner.category)) return inner;
+    return ask("install", wrapped.mayDownload);
+  }
   const [bin, ...args] = argv;
   const name = bin.split("/").pop()!;
   const sub = args.find((a) => !a.startsWith("-")) ?? "";
@@ -380,10 +460,20 @@ export function classifyCommand(command: unknown, ctx: CommandContext): CommandC
     // Same verdict: the reason that can't be allow-listed wins (so a rule never covers it).
     if (RANK[k.action] > RANK[worst.action] || (RANK[k.action] === RANK[worst.action] && ((worst.category === "read" && k.category !== "read") || (REMEMBERABLE.has(worst.category) && !REMEMBERABLE.has(k.category))))) worst = k;
   };
+  let commands = 0;
   for (const p of parts) {
     if (p.op === "&") take(ask("syntax", "runs something in the background"));
     const r = redirections(p.text);
     if (!r) return ask("syntax", "has a redirection that can't be checked");
+    // `. ~/.nvm/nvm.sh && nvm use 22 >/dev/null && npm test` is judged as `npm test`.
+    if (!r.targets.length && !r.inputs.length && p.op === "&&") {
+      try {
+        if (isNodeVersionSetup(parseArgv(r.rest), ctx.root)) continue;
+      } catch {
+        // judged below
+      }
+    }
+    commands++;
     for (const t of r.targets) {
       if (isSecretPath(t)) return refuse("secret", `writes a secrets file (${t})`);
       if (escapes(t, ctx.root)) take(ask("outside", `writes outside the project (${t})`));
@@ -415,6 +505,7 @@ export function classifyCommand(command: unknown, ctx: CommandContext): CommandC
       }
     }
   }
+  if (!commands) return ask("unlisted", "only selects a Node version");
   return worst;
 }
 

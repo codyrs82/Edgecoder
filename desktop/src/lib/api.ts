@@ -1457,6 +1457,8 @@ export async function streamIdeChat(
   attachments?: AttachmentPayload[],
   /** The chat's Web toggle: offer web_search and read_page (docs/web-tool.md). */
   web = false,
+  /** The Code view's Helpers switch (docs/tentacles.md): `sessionId` is the chat's id. */
+  helpers?: { sessionId: string; enabled: boolean; maxParallel: number; budgetCSats: number },
 ): Promise<void> {
   const base = ideBase();
   const res = await ideFetch(`${base}/v1/ide/chat`, {
@@ -1473,6 +1475,7 @@ export async function streamIdeChat(
       ...(githubToken ? { githubToken } : {}),
       ...(attachments?.length ? { attachments } : {}),
       ...(web ? { web: true } : {}),
+      ...(helpers ? { helpers } : {}),
     }),
     signal,
   });

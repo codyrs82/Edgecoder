@@ -161,7 +161,7 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
         return { backend, model: AUTO_MODEL_ID };
       }
       const target = hostedTarget(model);
-      if (!target) return { status: 400, error: "Unknown model. Leave it out (or auto) for the cheapest place that fits, or name one: network/<model>[@cpu|apple|gpu|gpu.dc], mine/<model> or reserved/<reservation>/<model>. GET /v1/models lists them." };
+      if (!target) return { status: 400, error: "Unknown model. Leave it out (or auto) for the cheapest place that fits, or name one: network/<model>[@cpu|apple|gpu|gpu.dc|cloud], mine/<model> or reserved/<reservation>/<model>. GET /v1/models lists them." };
       const placed = await networkForCall(ctx.accountId, target, ctx.clientRegion);
       return { backend: networkBackend(placed.deps, { ...target, ...(placed.choice ? { coordinatorChoice: placed.choice } : {}) }), model: model! };
     },

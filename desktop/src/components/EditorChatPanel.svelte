@@ -19,6 +19,11 @@
   import { expandMentions, mentionSuggestions } from "../lib/mentions";
   import { autoApplySetting } from "../lib/project-mode";
   import PermissionModePicker from "./PermissionModePicker.svelte";
+  import HelpersPicker from "./HelpersPicker.svelte";
+  import TentacleTree from "./TentacleTree.svelte";
+  import { effectiveHelpers, type ChatHelpers } from "../lib/helpers";
+  import { applyTentacleEvent, emptyTentacles, type TentacleState } from "../lib/tentacles";
+  import { tentacleCancel, tentacleMerge, type SessionEvent } from "../lib/api";
   import PlanApproval from "./PlanApproval.svelte";
   import { chatMode, modeOption, PLAN_APPROVED_MESSAGE, type EngineMode } from "../lib/permission-modes";
   import { fsFind } from "../lib/api";
@@ -94,6 +99,40 @@
     conversation.permissionMode = m;
     conversation = conversation;
     if (conversation.messages.length > 0) void persist();
+  }
+
+  /**
+   * This chat's helpers (docs/tentacles.md): its own choice, else Settings' default (on when the
+   * lead is your frontier key). The tree shows the helpers this chat's lead started.
+   */
+  const helpers = $derived(effectiveHelpers(conversation.helpers, $computeChoice));
+  function setHelpers(patch: ChatHelpers) {
+    conversation.helpers = { ...(conversation.helpers ?? {}), ...patch };
+    conversation = conversation;
+    if (conversation.messages.length > 0) void persist();
+  }
+  let helperTree = $state<TentacleState>(emptyTentacles());
+  let helperTreeFor = "";
+  $effect(() => {
+    if (conversation.id !== helperTreeFor) {
+      helperTreeFor = conversation.id;
+      helperTree = emptyTentacles();
+    }
+  });
+  function onHelperEvent(event: IdeStreamEvent) {
+    const e = event as unknown as SessionEvent;
+    if (typeof e.type !== "string" || !e.type.startsWith("tentacle_")) return;
+    helperTree = applyTentacleEvent(helperTree, e);
+    const merge = (e.tentacle as { merge?: { state?: string } } | undefined)?.merge?.state;
+    if (merge === "applied") onFilesChanged?.();
+  }
+  async function helperAct(fn: () => Promise<unknown>) {
+    try {
+      await fn();
+      onFilesChanged?.();
+    } catch {
+      // the tree keeps its state; the next event corrects it
+    }
   }
 
   /** Save the chat and remember it as its project's last one. */
@@ -280,6 +319,7 @@
           apiMessages,
           projectRoot,
           (event: IdeStreamEvent) => {
+            onHelperEvent(event);
             const { turn, filesChanged } = applyAgentEvent(
               { text: streamingContent, toolEvents: streamingToolEvents, turnId: streamingTurnId, changedFiles: streamingChanged, usage: streamingUsage },
               event,
@@ -299,6 +339,8 @@
           sentMode,
           "code",
           attachments,
+          false,
+          { sessionId: conversation.id, ...helpers },
         );
       }
       finishTurn(streamingContent, !usePortalChat && sentMode === "plan");
@@ -477,7 +519,8 @@
     </div>
   {/if}
 
-  <div class="messages-scroll" bind:this={scrollContainer}>
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <div class="messages-scroll" bind:this={scrollContainer} tabindex="0" role="region" aria-label="Conversation">
     {#if conversation.messages.length === 0 && !isStreaming}
       <div class="empty-state">
         {#if !projectRoot}
@@ -524,6 +567,20 @@
     {#if projectRoot}<QuoteSelection scope={scrollContainer} onQuote={(b) => void chatInput?.insertQuote(b)} />{/if}
   </div>
 
+  {#if projectRoot && helperTree.items.length}
+    <div class="helper-tree">
+      <TentacleTree
+        tree={helperTree}
+        canAct={true}
+        onCancel={(tid) => void helperAct(() => tentacleCancel(conversation.id, tid))}
+        onMerge={(tid, ok) => void helperAct(async () => {
+          const r = (await tentacleMerge(conversation.id, tid, ok)) as { tentacle?: unknown } | undefined;
+          if (r?.tentacle) helperTree = applyTentacleEvent(helperTree, { type: "tentacle_merge", seq: 0, at: Date.now(), tentacle: r.tentacle } as SessionEvent);
+        })}
+      />
+    </div>
+  {/if}
+
   <div class="panel-input">
     {#if !projectRoot}
       {#if conversation.messages.length > 0}
@@ -542,6 +599,7 @@
         {#snippet controls()}
           <ComputePicker selected={$computeChoice} onSelect={(id) => computeChoice.set(id)} />
           {#if !usePortalChat}
+            <HelpersPicker {helpers} onChange={setHelpers} />
             <PermissionModePicker {mode} onChange={setMode} allowFull project={conversation.projectRoot ?? projectRoot ?? null} />
           {/if}
         {/snippet}
@@ -551,6 +609,7 @@
 </div>
 
 <style>
+  .helper-tree { padding: 0 12px; max-height: 40vh; overflow-y: auto; }
   .editor-chat-panel {
     display: flex;
     flex-direction: column;

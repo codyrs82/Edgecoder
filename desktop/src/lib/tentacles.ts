@@ -4,6 +4,9 @@
 import type { SessionEvent } from "./api";
 import { servedLine, type CallUsage } from "./served";
 
+/** A helper call, with where it ran: this computer's own model (local first) or the network. */
+export type HelperCall = CallUsage & { place?: "local" | "network" };
+
 export interface TentacleItem {
   id: string;
   task: string;
@@ -15,8 +18,8 @@ export interface TentacleItem {
   cSats: number;
   model?: string;
   /** Each model call (where it ran: the coordinator's served-by), as tentacle_usage reports it. */
-  calls?: CallUsage[];
-  result?: { model: string; class: string; summary: string; filesTouched: string[]; patch: string; error?: string; attempts: number; calls?: CallUsage[]; unverified?: string };
+  calls?: HelperCall[];
+  result?: { model: string; class: string; summary: string; filesTouched: string[]; patch: string; error?: string; attempts: number; calls?: HelperCall[]; unverified?: string; place?: "local" | "network" };
   merge?: { state: "applied" | "awaiting_approval" | "rejected" | "conflict" | "not_applied" | "no_changes"; error?: string };
 }
 
@@ -31,12 +34,18 @@ export interface TentacleState {
 export const emptyTentacles = (): TentacleState => ({ items: [], spentCSats: 0, enabled: false });
 
 /** A helper's calls (live, or from its result). */
-export const callsOf = (t: TentacleItem): CallUsage[] => t.result?.calls ?? t.calls ?? [];
+export const callsOf = (t: TentacleItem): HelperCall[] => t.result?.calls ?? t.calls ?? [];
 
-/** One served line per helper call, in the desktop footer's format (served.ts). */
+/**
+ * One served line per helper call, in the desktop footer's format (served.ts), led by where it ran:
+ * "this computer · qwen3.5:9b · …" or "network · qwen3-coder:30b · GPU · Chicago · …".
+ */
 export function callLines(t: TentacleItem): string[] {
   return callsOf(t)
-    .map((c) => servedLine([c]) ?? `${c.model ?? "auto"} · ${c.where ?? "unknown"} · ${c.cSats} cSats`)
+    .map((c) => {
+      const line = servedLine([c]) ?? `${c.model ?? "auto"} · ${c.where ?? "unknown"} · ${c.cSats} cSats`;
+      return c.place ? `${c.place === "local" ? "this computer" : "network"} · ${line}` : line;
+    })
     .filter(Boolean);
 }
 
@@ -68,7 +77,7 @@ export function applyTentacleEvent(s: TentacleState, e: SessionEvent): TentacleS
     }
     case "tentacle_usage": {
       const t = s.items.find((x) => x.id === e.id);
-      const call = e.call as CallUsage | undefined;
+      const call = e.call as HelperCall | undefined;
       if (!t || !call) return s;
       const next: TentacleItem = { ...t, calls: [...(t.calls ?? []), call], cSats: Number(e.cSats ?? t.cSats) };
       return { ...s, items: upsert(s.items, next), spentCSats: Number(e.spentCSats ?? s.spentCSats) };

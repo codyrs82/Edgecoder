@@ -23,14 +23,21 @@ export function parseWhere(where: string | undefined, fallbackModel: string): { 
 export const formatCSatsShort = (c: number) => `${c < 10 ? c.toFixed(1) : Math.round(c)} cSats`;
 const tok = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k` : String(n));
 
-/** A helper call's served line: `model · class · host region · tokens · cSats`. */
+/**
+ * A helper call's served line: `model · class · host region · tokens · cSats`. With where it ran
+ * (local first): `model · this computer · tokens · cSats`, or `model · network <class> · host region · …`.
+ */
 export function tentacleCallLine(c: TentacleCall): string {
   const s = c.served;
   const cls = s?.computeClass ?? parseWhere(c.where, c.model).class;
   const place = s ? s.city ?? s.region ?? s.country ?? "" : "";
   const pin = c.promptTokens ?? s?.promptTokens ?? 0;
   const pout = c.outputTokens ?? s?.outputTokens ?? 0;
-  return [c.model.replace(/^network\//, ""), cls, place ? `${s?.label ? `${s.label} ` : ""}${place}` : s?.label ?? "", pin || pout ? `${tok(pin)} in / ${tok(pout)} out tok` : "", formatCSatsShort(c.cSats)].filter(Boolean).join(" · ");
+  const tokens = pin || pout ? `${tok(pin)} in / ${tok(pout)} out tok` : "";
+  const model = c.model.replace(/^network\//, "");
+  if (c.place === "local") return [model, "this computer", tokens, formatCSatsShort(c.cSats)].filter(Boolean).join(" · ");
+  const host = place ? `${s?.label ? `${s.label} ` : ""}${place}` : s?.label ?? "";
+  return [model, c.place === "network" ? `network ${cls}` : cls, host, tokens, formatCSatsShort(c.cSats)].filter(Boolean).join(" · ");
 }
 
 /** Totals over helper calls (the lead's summary): calls, models, tokens, cSats, and one line. */

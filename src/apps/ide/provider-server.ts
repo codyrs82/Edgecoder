@@ -63,7 +63,7 @@ import { loadConfigOrExit } from "../../common/config.js";
 import { ideProviderConfigSchema } from "../../config/ide-provider.js";
 import { SessionHub, compactionModelOf, modelIdOf, parseModelId as parseModelIdForChat, workerModelOf, type ClientRef, type SessionData } from "./sessions.js";
 import { cliStatus, installCli } from "./cli-install.js";
-import { TentacleManager } from "./tentacles.js";
+import { pickLocalHelperModel, TentacleManager } from "./tentacles.js";
 import { tentacleExecutor, withTentacleGuidance, withTentacleTools } from "./delegate.js";
 import { registerTentacleRoutes } from "./tentacle-routes.js";
 import { chooseLeadModel, estimateTokens, parseLeadCandidates } from "./lead-model.js";
@@ -78,6 +78,7 @@ import { frontierContextWindow, isFrontierModelId } from "../../inference-api/fr
 import { request as undiciRequest } from "undici";
 import { FREE_USED_NOTE, webSystemNote, webGrounding, WebToolSession, forgetWebAvailability, isWebTool, webAvailability, webReplyLimitsFromEnv, webStatusReason, webToolSchemas, type WebToolCall } from "../../web-tool/tools.js";
 import { modelCallsTools } from "../../web-tool/model-support.js";
+import { toolchainFailureHint, toolchainNote } from "./toolchain.js";
 
 // Forked by the agent: exit with it, so a restarted agent's provider can take the port.
 if (process.send) process.on("disconnect", () => process.exit(0));
@@ -1139,7 +1140,8 @@ const bots = new BotManager({
       const ctx = await agentPromptContext(process.env.OLLAMA_MODEL || "qwen3.5:9b");
       const root = botWorkRoot(bot);
       const rules = readProjectRules(root);
-      return (format) => buildIdeAgentSystemPrompt(ctx, root, rules, format);
+      const node = toolchainNote(root);
+      return (format) => [buildIdeAgentSystemPrompt(ctx, root, rules, format), node].filter(Boolean).join("\n\n");
     },
     checkpoints,
     // "Search the web" (docs/web-tool.md): through EdgeCoder's servers; refused once today's budget is spent.
@@ -1307,6 +1309,18 @@ const ideChatSchema = z.object({
   attachments: attachmentsSchema.optional(),
   /** The chat's Web toggle: offer web_search and read_page (run on EdgeCoder's servers, billed per call). */
   web: z.boolean().optional(),
+  /**
+   * The Code view's Helpers switch (docs/tentacles.md): the lead may delegate pieces to helper
+   * agents. `sessionId` is the chat's id, so budgets and results last across its turns.
+   */
+  helpers: z
+    .object({
+      sessionId: z.string().uuid(),
+      enabled: z.boolean(),
+      maxParallel: z.number().int().min(1).max(16).optional(),
+      budgetCSats: z.number().min(0).max(1e7).optional(),
+    })
+    .optional(),
   /** Where the model runs: this computer (default), your machines, any network agent (optionally one class), or a reserved machine. */
   compute: z
     .object({
@@ -1460,6 +1474,7 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
 
   const promptCtx = await agentPromptContext(chatModel);
   const projectRules = readProjectRules(projectRoot);
+  const nodeNote = toolchainNote(projectRoot);
   const messages = withAttachments(body.messages, body.attachments ?? [], chatModel);
 
   const chatMode: PermissionMode = body.mode ?? (body.autoApprove === "edits" ? "auto-edits" : "ask");
@@ -1506,13 +1521,23 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
   if (avail && !avail.offer && avail.reason !== "not_configured") sendEvent({ type: "web_off", reason: avail.reason ?? "unreachable", message: avail.message ?? "" });
   const web = avail?.offer && webCall ? new WebToolSession({ call: webCall, emit: sendEvent, signal: abort.signal, ownMachine }) : null;
   if (web) executor.web = (tool, args) => web.run(tool, args);
-  const tools = web ? [...projectTools, ...webToolSchemas()] : projectTools;
+  // Helpers (tentacles.ts): the chat's switch, never on a hub session's id, and not while planning.
+  const helperId = body.helpers && !sessions.peek(body.helpers.sessionId) ? body.helpers.sessionId : null;
+  const helpersOn = !!helperId && body.helpers!.enabled && chatMode !== "plan";
+  const helperBinding = helperId ? bindChatHelpers(helperId, { projectRoot, mode: chatMode, model: chatModel }, (ev) => sendEvent(ev as unknown as IdeStreamEvent)) : null;
+  if (helperId) tentacles.configure(helperId, { enabled: helpersOn, ...(body.helpers!.maxParallel !== undefined ? { maxParallel: body.helpers!.maxParallel } : {}), ...(body.helpers!.budgetCSats !== undefined ? { budgetCSats: body.helpers!.budgetCSats } : {}) });
+  // Stopping the turn stops its helpers, like a session's stop.
+  if (helperId) abort.signal.addEventListener("abort", () => void tentacles.cancelAll(helperId), { once: true });
+  const baseTools = web ? [...projectTools, ...webToolSchemas()] : projectTools;
+  const tools = helpersOn ? withTentacleTools(baseTools, true)! : baseTools;
+  const basePrompt = (format: "native" | "text") => [promptCtx ? buildIdeAgentSystemPrompt(promptCtx, projectRoot, projectRules, format) : "", promptCtx ? nodeNote : "", web ? webSystemNote() : ""].filter(Boolean).join("\n\n");
+  const executeTool = (tool: ToolName, args: Record<string, unknown>, opts: { approved: boolean }) => executor.execute(tool, args, opts);
   reply.raw.on("close", () => tracked.end("cancelled"));
   await runAgentLoop({
     chat: isFrontierModelId(chatModel)
       ? frontierChatFn(chatModel, { sessionKey: `chat:${turnId}` }, sendEvent, abort.signal)
       : chatFnFor(body.compute, chatModel, ollamaHost, sendEvent, abort.signal, "EdgeCoder chat", body.compute?.target === "auto" ? { sessionKey: `chat:${turnId}` } : undefined),
-    systemPrompt: (format) => [promptCtx ? buildIdeAgentSystemPrompt(promptCtx, projectRoot, projectRules, format) : "", web ? webSystemNote() : ""].filter(Boolean).join("\n\n"),
+    systemPrompt: helpersOn ? withTentacleGuidance(basePrompt, true, tentacles.unreported(helperId!)) : basePrompt,
     messages,
     // Web grounding: a question that needs fresh facts is searched once before the first turn (not in Manual, where web calls ask).
     ...(web ? webGrounding(web, messages, { skip: chatMode === "ask" }) : {}),
@@ -1521,7 +1546,7 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
     tools,
     runTool: makeToolRunner({
       prepare: (tool, args) => preparePullRequestArgs(executor, tool, args),
-      execute: (tool, args, opts) => executor.execute(tool, args, opts),
+      execute: helpersOn ? tentacleExecutor(tentacles, helperId!, executeTool) : executeTool,
       sendEvent,
       waitForApproval: (callId, tool, args) =>
         new Promise<boolean>((resolveApproval) => {
@@ -1546,10 +1571,13 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
       captureBeforeWrite: (path) => checkpoints.capture(turnId, path),
       turnId,
       decide: (tool, args) => decideFor(chatMode, projectRoot, tool, args),
+      shellHint: (command, output) => toolchainFailureHint(projectRoot, command, output),
     }),
     plan: chatMode === "plan",
   });
 
+  // Between turns the chat's helpers have no stream: their results reach the lead's next turn.
+  if (helperBinding && chatHelpers.get(helperId!) === helperBinding) helperBinding.emit = null;
   sendEvent({ type: "done" });
   tracked.end(clientDisconnected ? "cancelled" : undefined);
   reply.raw.end();
@@ -1704,15 +1732,68 @@ function tentacleWorkerBackend(modelId: string): ChatBackend {
   return runRoute({ placement: compute.target === "auto" ? "network" : (compute.target as "network"), model, cSatsPerSecond: 0, reason: "", computeClass: compute.computeClass ?? "any", reservationId: compute.reservationId }, "edgecoder tentacle");
 }
 
+/**
+ * Desktop Code view chats that run helpers (POST /v1/ide/chat with `helpers`, the chat's Helpers
+ * switch). They aren't hub sessions, so the tentacle host finds them here: the chat's project and
+ * permission mode, and `emit`, the open turn's event stream (null between turns).
+ */
+interface ChatHelpers {
+  data: SessionData;
+  emit: ((ev: Record<string, unknown> & { type: string }) => void) | null;
+}
+const chatHelpers = new Map<string, ChatHelpers>();
+
+function bindChatHelpers(id: string, o: { projectRoot: string; mode: PermissionMode; model: string }, emit: ChatHelpers["emit"]): ChatHelpers {
+  const now = Date.now();
+  const prev = chatHelpers.get(id);
+  const data: SessionData = {
+    id,
+    title: "Code chat",
+    projectRoot: o.projectRoot,
+    branch: null,
+    model: o.model,
+    compute: { target: "local" },
+    mode: o.mode,
+    autoApprove: o.mode === "auto-edits" || o.mode === "auto" ? "edits" : "none",
+    alwaysShell: [],
+    origin: "desktop",
+    published: false,
+    createdAt: prev?.data.createdAt ?? now,
+    updatedAt: now,
+    cSats: 0,
+    transcript: [],
+    // Helpers run on auto (local first, then the network's best fit): never the chat's frontier lead.
+    workerModel: "auto",
+  };
+  const entry: ChatHelpers = { data, emit };
+  chatHelpers.delete(id);
+  chatHelpers.set(id, entry);
+  // Keep the most recent chats (a waiting patch can still be merged from the app); forget the oldest idle ones.
+  for (const [old, c] of chatHelpers) {
+    if (chatHelpers.size <= 200) break;
+    if (!c.emit) chatHelpers.delete(old);
+  }
+  return entry;
+}
+
 const tentacles: TentacleManager = new TentacleManager({
   host: {
-    session: (id): SessionData | null => sessions.peek(id),
-    publishEvent: (id, ev) => sessions.publishEvent(id, ev),
-    recordNote: (id, note) => sessions.recordNote(id, note),
+    session: (id): SessionData | null => sessions.peek(id) ?? (chatHelpers.has(id) ? structuredClone(chatHelpers.get(id)!.data) : null),
+    publishEvent: (id, ev) => {
+      const chat = chatHelpers.get(id);
+      if (chat) chat.emit?.(ev);
+      else sessions.publishEvent(id, ev);
+    },
+    // A Code view chat keeps its own transcript in the app: the tentacle's result reaches the lead and the stream.
+    recordNote: (id, note) => (chatHelpers.has(id) ? null : sessions.recordNote(id, note)),
   },
   workerBackend: (model) => tentacleWorkerBackend(model),
+  // Local first: a capable model on this computer for low-complexity helpers on auto (Auto's view of
+  // the installed models and their tool support, routeInputsHere), else null and the network.
+  localModelFor: async (need) => pickLocalHelperModel((await routeInputsHere()).localModels, need),
+  localBackend: (model) => localBackend(process.env.OLLAMA_HOST || "http://127.0.0.1:11434", model),
   // Helpers run what the session's mode runs without asking (the shared classifier), never more.
-  shellAllowed: (s, command) => sessions.allowedWithoutAsking(s, "run_shell", { command }),
+  shellAllowed: (s, command) => (chatHelpers.has(s.id) ? decideFor(s.mode, s.projectRoot, "run_shell", { command }).action === "run" : sessions.allowedWithoutAsking(s, "run_shell", { command })),
   checkpoints,
 });
 
@@ -1740,7 +1821,9 @@ const sessions: SessionHub = new SessionHub({
   systemPrompt: async (s) => {
     const ctx = await agentPromptContext(s.compute.target === "local" ? s.model : process.env.OLLAMA_MODEL || "qwen3.5:9b");
     const rules = readProjectRules(s.projectRoot);
-    return withTentacleGuidance((format) => buildIdeAgentSystemPrompt(ctx, s.projectRoot, rules, format), tentacles.enabled(s.id), tentacles.unreported(s.id));
+    // The project's Node version versus the shell's, and how to run under the right one (toolchain.ts).
+    const node = toolchainNote(s.projectRoot);
+    return withTentacleGuidance((format) => [buildIdeAgentSystemPrompt(ctx, s.projectRoot, rules, format), node].filter(Boolean).join("\n\n"), tentacles.enabled(s.id), tentacles.unreported(s.id));
   },
   executor: (s) => {
     const index = codebaseIndexFor(s.projectRoot, ollamaHostForIndex());
@@ -1780,7 +1863,7 @@ const sessions: SessionHub = new SessionHub({
   onSessionStop: (id) => void tentacles.cancelAll(id),
 }, { permissions: permissionStore });
 registerSessionRoutes(app, sessions);
-registerTentacleRoutes(app, sessions, tentacles);
+registerTentacleRoutes(app, sessions, tentacles, { isChat: (id) => chatHelpers.has(id) && !sessions.peek(id) });
 // Coding sessions driven from the phone, this Mac's side (code-remote.ts): trusted folders only, no paths out.
 registerCodeRemoteRoutes(app, sessions, { account: machineAccount, checkpoints, machineSalt: (() => { let salt: string | undefined; return () => (salt ??= loadOrCreateMachineSalt()); })(), branch: currentBranch });
 

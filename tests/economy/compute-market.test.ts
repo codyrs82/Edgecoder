@@ -35,8 +35,8 @@ const OLD_TIER_USD_PER_HOUR: Record<string, number> = {
 };
 
 describe("compute classes: classification and weights", () => {
-  it("four class-markets", () => {
-    expect(COMPUTE_CLASS_IDS).toEqual(["cpu", "apple", "gpu", "gpu.dc"]);
+  it("four hardware class-markets plus cloud", () => {
+    expect(COMPUTE_CLASS_IDS).toEqual(["cpu", "apple", "gpu", "gpu.dc", "cloud"]);
     expect(Object.keys(DEFAULT_COMPUTE_CLASSES)).toEqual(COMPUTE_CLASS_IDS);
     for (const spec of Object.values(DEFAULT_COMPUTE_CLASSES)) expect(spec.tiers[0].creditsPerSecond).toBe(1); // base tier
   });
@@ -147,7 +147,7 @@ describe("rate epoch class rates", () => {
       cfg,
       1_000
     );
-    expect(Object.keys(e.classRates)).toEqual(["cpu", "apple", "gpu", "gpu.dc"]);
+    expect(Object.keys(e.classRates)).toEqual(["cpu", "apple", "gpu", "gpu.dc", "cloud"]);
     expect(e.classRates["gpu.dc"]).toMatchObject({ usdPerHour: 0.8, source: "dc-market" });
     expect(e.classRates.cpu).toMatchObject({ usdPerHour: 0.02, source: "reference", msatPerCredit: 7 });
     expect(e.classRates.gpu).toMatchObject({ usdPerHour: 0.1, source: "reference" }); // 0.35 4090-hour / 3.5
@@ -182,7 +182,7 @@ describe("rate epoch class rates", () => {
     }
     const stored = { ...fresh, classRates: legacyRates } as unknown as RateEpoch;
     const norm = normalizeRateEpoch(stored);
-    expect(Object.keys(norm.classRates)).toEqual(["cpu", "apple", "gpu", "gpu.dc"]);
+    expect(Object.keys(norm.classRates)).toEqual(["cpu", "apple", "gpu", "gpu.dc", "cloud"]);
     for (const id of COMPUTE_CLASS_IDS) {
       expect(norm.classRates[id]!.msatPerCredit).toBe(fresh.classRates[id]!.msatPerCredit);
       expect(norm.classRates[id]!.satsPerCredit).toBeCloseTo(fresh.classRates[id]!.satsPerCredit, 6);

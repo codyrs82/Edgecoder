@@ -1,0 +1,38 @@
+# Cloud host (docs/cloud-host.md): a network host that answers jobs through a hosted model API
+# (Fireworks) with one platform key, priced cost plus margin. One machine only: each machine keeps
+# its own spend total, so two would double the caps. No [http_service]: outbound calls only.
+# Secrets (fly secrets): CLOUD_HOST_API_KEY, AGENT_REGISTRATION_TOKEN, RESEND_API_KEY, RESEND_FROM_EMAIL.
+app = "edgecoder-cloud-host"
+primary_region = "ord"
+
+[build]
+  dockerfile = "../docker/Dockerfile.agent"
+
+[processes]
+  app = "node dist/cli/edgecoder.js cloud-host"
+
+[env]
+  NODE_ENV = "production"
+  SKIP_OLLAMA = "true"
+  AGENT_ID = "cloud-fireworks-1"
+  AGENT_OS = "debian"
+  AGENT_MODE = "swarm-only"
+  COORDINATOR_URL = "https://coordinator.edgecoder.io"
+  PORTAL_URL = "https://edgecoder.io"
+  EDGECODER_CONFIG_DIR = "/data/edgecoder"
+  CLOUD_HOST_PROVIDER = "fireworks"
+  CLOUD_HOST_MODELS = "glm-5.3,deepseek-v4.1-flash"
+  CLOUD_HOST_MAX_SLOTS = "16"
+  CLOUD_HOST_DAILY_CAP_USD = "200"
+  CLOUD_HOST_MONTHLY_CAP_USD = "2000"
+  CLOUD_HOST_STATE_FILE = "/data/edgecoder/cloud-host-spend.json"
+  ALERT_EMAILS = "cody@edgecoder.io"
+
+[mounts]
+  source = "cloud_host_data"
+  destination = "/data"
+
+[[vm]]
+  memory = "1024mb"
+  cpu_kind = "shared"
+  cpus = 1

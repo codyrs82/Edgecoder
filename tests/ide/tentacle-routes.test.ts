@@ -42,4 +42,25 @@ describe("tentacle routes", () => {
     expect(merge.statusCode).toBe(404);
     await app.close();
   });
+
+  it("serves a Code view chat's helpers by its id (no hub session), and still 404s unknown ids", async () => {
+    const { hub } = makeHub([]);
+    const chatId = "6f1c2f9e-8d1b-4c1a-9a43-2b1a3c4d5e6f";
+    const tentacles = new TentacleManager({
+      host: { session: (id) => hub.peek(id), publishEvent: () => {}, recordNote: () => null },
+      workerBackend: () => async function* () { yield { done: true as const }; },
+      checkpoints: new CheckpointStore(),
+      config: { enabled: false },
+    });
+    const app = Fastify();
+    registerTentacleRoutes(app, hub, tentacles, { isChat: (id) => id === chatId });
+    const desk = { clientId: "desk-1", kind: "desktop" as const };
+    const list = await app.inject({ method: "GET", url: `/v1/ide/sessions/${chatId}/tentacles` });
+    expect(list.statusCode).toBe(200);
+    const cfg = await app.inject({ method: "POST", url: `/v1/ide/sessions/${chatId}/tentacles/config`, payload: { ...desk, enabled: true, maxParallel: 2, budgetCSats: 50, localFirst: false } });
+    expect(cfg.json().config).toMatchObject({ enabled: true, maxParallel: 2, budgetCSats: 50, localFirst: false });
+    const unknown = await app.inject({ method: "GET", url: `/v1/ide/sessions/7f1c2f9e-8d1b-4c1a-9a43-2b1a3c4d5e6f/tentacles` });
+    expect(unknown.statusCode).toBe(404);
+    await app.close();
+  });
 });
