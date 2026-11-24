@@ -311,9 +311,9 @@ function computeModelSettings(): CurrentModelSettings {
   const model = layered.env.model || W.OLLAMA_MODEL;
   const modelParamsB = model ? paramsB(model) : undefined;
   const gpu = sizingGpu();
-  // By memory (a discrete GPU's VRAM) and the model's size, never past this machine's
-  // OLLAMA_NUM_PARALLEL when set (src/swarm/parallelism.ts).
-  const parallel = parallelInferenceFor(gpu ? gpu.vramBytes : totalmem(), layered.env.parallel, { modelParamsB, gpu: Boolean(gpu), ollamaNumParallel: process.env.OLLAMA_NUM_PARALLEL });
+  // By memory and the model's size, never past this machine's OLLAMA_NUM_PARALLEL when set
+  // (src/swarm/parallelism.ts); on a GPU, defaultServing may give up slots for a 32k window.
+  const parallel = parallelInferenceFor(totalmem(), layered.env.parallel, { modelParamsB, ollamaNumParallel: process.env.OLLAMA_NUM_PARALLEL });
   const parRaw = Number(layered.env.parallel);
   const ctxRaw = layered.env.contextWindow !== undefined ? Number(layered.env.contextWindow) : undefined;
   /**

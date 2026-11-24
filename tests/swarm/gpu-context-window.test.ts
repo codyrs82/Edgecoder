@@ -63,11 +63,11 @@ describe("GPU-aware default context window", () => {
   it("4x RX 5700 (32 GB VRAM, 23 GB RAM) with qwen3-coder:30b: at least 32k, and the memory budget keeps it", () => {
     learnModelFacts("qwen3-coder:30b", { sizeBytes: 19.3 * GB, ...modelFactsFromModelInfo(QWEN3_CODER_30B) });
     const vram = 32 * GB;
-    const slots = parallelInferenceFor(vram, undefined, { modelParamsB: 30, gpu: true });
-    expect(slots).toBe(2);
+    // The slots come from RAM: 23 GB holds no second 30B context, so one; 64k (the ceiling).
+    expect(parallelInferenceFor(23 * GB, undefined, { modelParamsB: 30 })).toBe(1);
+    const slots = 2; // e.g. OLLAMA_NUM_PARALLEL=2
     const s = defaultServing(23 * GB, undefined, { modelParamsB: 30, slots, discreteGpu: { vramBytes: vram, count: 4 }, weightsBytes: 19.3 * GB, kvBytesPer8k: 0.75 * GB, nativeContext: 262_144 });
     expect(s).toEqual({ contextWindow: 32_768, slots: 2, basis: "gpu" });
-    // One slot: 64k (the ceiling).
     expect(defaultServing(23 * GB, undefined, { modelParamsB: 30, slots: 1, discreteGpu: { vramBytes: vram, count: 4 }, weightsBytes: 19.3 * GB, kvBytesPer8k: 0.75 * GB })).toMatchObject({ contextWindow: 65_536, slots: 1 });
     // The budget (90% of the VRAM) agrees: nothing comes down, and the model is served.
     const budget = memoryBudgetBytes(23 * GB, 60, vram);
@@ -84,12 +84,12 @@ describe("GPU-aware default context window", () => {
   it("8 GB RTX A2000 laptop: an 8B model leaves room for 8k; a 7B coder gets 32k with one slot", () => {
     const vram = 8 * GB;
     const q8 = modelFactsFromModelInfo(QWEN3_8B);
-    const slots8 = parallelInferenceFor(vram, undefined, { modelParamsB: 8, gpu: true });
+    const slots8 = parallelInferenceFor(32 * GB, undefined, { modelParamsB: 8 }); // 32 GB of RAM: 4
     expect(defaultServing(32 * GB, undefined, { modelParamsB: 8, slots: slots8, discreteGpu: { vramBytes: vram }, weightsBytes: 5.2e9, kvBytesPer8k: q8.kvBytesPer8k, nativeContext: q8.contextLength })).toEqual({ contextWindow: 8192, slots: 1, basis: "gpu" });
     const q7 = modelFactsFromModelInfo(QWEN25_CODER_7B);
-    const slots7 = parallelInferenceFor(vram, undefined, { modelParamsB: 7, gpu: true });
-    expect(slots7).toBe(2);
-    // Two slots would leave 16k each: one slot at 32k holds an agentic call.
+    const slots7 = parallelInferenceFor(32 * GB, undefined, { modelParamsB: 7 });
+    expect(slots7).toBe(4);
+    // Four slots would leave 8k each: one slot at 32k holds an agentic call.
     expect(defaultServing(32 * GB, undefined, { modelParamsB: 7, slots: slots7, discreteGpu: { vramBytes: vram }, weightsBytes: 4.68e9, kvBytesPer8k: q7.kvBytesPer8k, nativeContext: q7.contextLength })).toEqual({ contextWindow: 32_768, slots: 1, basis: "gpu" });
     // Unless the slots are fixed (AGENT_PARALLEL_INFERENCE).
     expect(defaultServing(32 * GB, undefined, { modelParamsB: 7, slots: 2, slotsFixed: true, discreteGpu: { vramBytes: vram }, weightsBytes: 4.68e9, kvBytesPer8k: q7.kvBytesPer8k })).toMatchObject({ contextWindow: 16_384, slots: 2 });

@@ -268,7 +268,8 @@ host needs to set it:
   the table below.
 
 The memory budget then has the last word (above). Examples: four 8 GB AMD cards (32 GB) with
-`qwen3-coder:30b` (19 GB, 0.75 GB of KV per 8k): 32k with 2 slots; an 8 GB RTX A2000 with an 8B
+`qwen3-coder:30b` (19 GB, 0.75 GB of KV per 8k) and 23 GB of RAM (one slot): 64k, or 32k with two
+slots (`OLLAMA_NUM_PARALLEL=2`); an 8 GB RTX A2000 with an 8B
 model (5 GB, about 1.1 GB of KV per 8k): 8k; the same card with `qwen2.5-coder:7b`: 32k with one
 slot.
 
