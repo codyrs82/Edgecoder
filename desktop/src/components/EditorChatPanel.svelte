@@ -11,6 +11,7 @@
   import ChatInput from "./ChatInput.svelte";
   import QuoteSelection from "./QuoteSelection.svelte";
   import ComputePicker from "./ComputePicker.svelte";
+  import PremiumModelHint from "./PremiumModelHint.svelte";
   import { computeChoice, freeReplyUsage } from "../lib/compute-choice";
   import { get } from "svelte/store";
   import JumpToLatest from "./JumpToLatest.svelte";
@@ -90,6 +91,8 @@
   /** The streaming turn's latest prompt size and the tokens its in-turn compaction saved. */
   let streamingContext: number | undefined = $state(undefined);
   let streamingCompacted = 0;
+  /** This reply's cost notes (re-reads skipped, waste, a cheaper model): live, then the reply's notice. */
+  let streamingCostNotes: string[] = $state([]);
 
   /** A new coding chat in `root` (none: it waits for a project). */
   function freshConversation(root: string | null): Conversation {
@@ -422,6 +425,7 @@
         streamingChanged = [];
         streamingContext = undefined;
         streamingCompacted = 0;
+        streamingCostNotes = [];
         // The mirror has the message first, so your phone sees this turn live (a slow provider doesn't hold it up).
         await Promise.race([mirror.sync(conversation, { mode: sentMode, model: get(computeChoice) }), new Promise((r) => setTimeout(r, 3000))]);
         await streamIdeChat(
@@ -430,7 +434,7 @@
           (event: IdeStreamEvent) => {
             onHelperEvent(event);
             const { turn, filesChanged } = applyAgentEvent(
-              { text: streamingContent, toolEvents: streamingToolEvents, turnId: streamingTurnId, changedFiles: streamingChanged, usage: streamingUsage },
+              { text: streamingContent, toolEvents: streamingToolEvents, turnId: streamingTurnId, changedFiles: streamingChanged, usage: streamingUsage, costNotes: streamingCostNotes },
               event,
             );
             if (turn.text !== streamingContent) streamingContent = turn.text;
@@ -440,6 +444,7 @@
             if (turn.changedFiles && turn.changedFiles !== streamingChanged) streamingChanged = turn.changedFiles;
             if (turn.contextTokens) streamingContext = turn.contextTokens;
             if (turn.compactedTokens) streamingCompacted = turn.compactedTokens;
+            if (turn.costNotes && turn.costNotes !== streamingCostNotes) streamingCostNotes = turn.costNotes;
             if (filesChanged) onFilesChanged?.();
             if (event.type !== "status" && event.type !== "done") scrollToBottom();
           },
@@ -497,6 +502,8 @@
     if (streamingContext) conversation.contextTokens = streamingContext + Math.ceil(content.length / 3);
     // Older messages were compacted inside this turn (they're sent whole again next time).
     if (last && streamingCompacted > 0) last.notice = `Earlier messages summarized for this reply to save tokens · ~${streamingCompacted.toLocaleString("en-US")} tokens saved`;
+    if (last && streamingCostNotes.length) last.notice = [last.notice, ...streamingCostNotes].filter(Boolean).join("\n");
+    streamingCostNotes = [];
     streamingContext = undefined;
     streamingCompacted = 0;
     conversation = conversation;
@@ -519,6 +526,16 @@
     if (remoteTurn && mirror.sessionId) void sessionApprove(mirror.sessionId, id, approved, always).catch(() => {});
     else void ideSendToolApproval(id, approved, always);
     streamingToolEvents = markApproval(streamingToolEvents, id, approved);
+  }
+
+  /**
+   * A cost check's answer (CostCheckCard): Keep going, Switch (the reply carries on with the cheaper
+   * model, and the picker moves to it for the next messages) or Stop.
+   */
+  function handleCostChoice(id: string, choice: "continue" | "switch" | "stop", suggest?: { id: string; name: string }) {
+    void ideSendToolApproval(id, choice !== "stop", false, choice);
+    streamingToolEvents = markApproval(streamingToolEvents, id, choice !== "stop");
+    if (choice === "switch" && suggest) computeChoice.set(suggest.id);
   }
 
   /** A new chat in the open project. */
@@ -687,6 +704,8 @@
             onOpenInEditor={onApplyCode}
             onToolApproval={handleToolApproval}
             onToolAlways={(id) => handleToolApproval(id, true, true)}
+            onCostChoice={remoteTurn ? undefined : handleCostChoice}
+            costNotes={streamingCostNotes}
           />
         {/if}
         {#if pendingPlan}
@@ -736,6 +755,7 @@
           {/if}
         {/snippet}
       </ChatInput>
+      {#if !usePortalChat}<PremiumModelHint choice={$computeChoice} chatId={conversation.id} />{/if}
     {/if}
   </div>
 </div>

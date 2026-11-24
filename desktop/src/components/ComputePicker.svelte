@@ -6,6 +6,7 @@
   import { ChevronDown, Check, Laptop, Server, Globe, Lock, Search, Plus, Zap, KeyRound } from "@lucide/svelte";
   import { computeOverview, getFrontierStatus, getOllamaTags, listReservations, type ComputeOverview, type Reservation } from "../lib/api";
   import { classFamily } from "../lib/compute-availability";
+  import { frontierCostHint, networkCostHint } from "../lib/cost-check";
   import { CLASS_LABELS, choiceId, choiceLabel, cloudHint, cloudModelNames, frontierName, myMachineModels, parseChoice, shortModel, thisComputerHint, thisComputerModels } from "../lib/compute-choice";
 
   interface Props {
@@ -161,7 +162,8 @@
                   {#each frontierMatches as id (id)}
                     <Command.Item class="ui-command-item row {selected === id ? 'current' : ''}" value={id} onSelect={() => pick(id)}>
                       <span class="name">Lead: {frontierName(id)} · your key</span>
-                      <span class="meta">{id}</span>
+                      <!-- What a long exploring reply costs on your key (cost-check.ts; reply-cost.ts REFERENCE_REPLY). -->
+                      <span class="meta" title={id}>{frontierCostHint(id) ?? id}</span>
                       {#if selected === id}{@render currentMark()}{/if}
                     </Command.Item>
                   {/each}
@@ -223,6 +225,7 @@
                   <Command.GroupHeading class="net-head">
                     <span class="name">{shortModel(m.model)}</span>
                     <span class="meta">{#if cloudHint(m)}{cloudHint(m)}{:else}{m.agents} machine{m.agents === 1 ? "" : "s"}{/if}{#if m.cSatsPerMTokens} · {m.cSatsPerMTokens.input} in / {m.cSatsPerMTokens.output} out{/if}</span>
+                    {#if networkCostHint(m)}<span class="cost" title="A long exploring reply: 200K tokens read (half cached) and 5K written">{networkCostHint(m)}</span>{/if}
                   </Command.GroupHeading>
                   <Command.GroupItems class="chips">
                     {#each chipsFor(m.classes) as cls (cls)}
@@ -298,6 +301,7 @@
     .compute-menu .net-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; font-size: 13px; color: var(--text-primary); }
     .compute-menu .net-head .name { font-weight: 500; }
     .compute-menu .net-head .meta { color: var(--text-secondary); font-size: 12px; }
+    .compute-menu .net-head .cost { flex-basis: 100%; color: var(--text-muted); font-size: 11.5px; }
     .compute-menu .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
     .compute-menu .chip {
       display: inline-flex; gap: 4px; align-items: baseline; padding: 2px 8px; border-radius: 999px; border: 0.5px solid var(--border-control);

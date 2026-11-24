@@ -30,6 +30,7 @@ import { isWithin } from "./tool-executor.js";
 import { redactApiKeys } from "../../common/redaction.js";
 import { parseFrontierModelId } from "../../inference-api/frontier-models.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
+import { COST_ASK_TIMEOUT_MS, COST_CHECK_TOOL, ReplyCostMeter, makeCostCheck, replyAskCSats, replyAskUsd, type CostChoice } from "./cost-guard.js";
 
 /**
  * "remote": the user's phone driving this Mac (code-remote.ts). Its turns ask before any command
@@ -669,7 +670,15 @@ export class SessionHub {
   }
 
   private async runTurn(s: SessionData, l: Live, r: Running): Promise<void> {
-    const sendEvent = (e: IdeStreamEvent) => this.turnEvent(s, r, e);
+    // A paid lead asks before a reply spends past the threshold (cost-guard.ts): Keep going or Stop
+    // from any client (Switch is the desktop chat's; a session's model is changed between turns).
+    const paidLead = isPaidLead(modelIdOf(s), s.compute.target);
+    const frontierLead = s.compute.target === "frontier";
+    const meter = paidLead ? new ReplyCostMeter(frontierLead ? "usd" : "cSats", frontierLead ? replyAskUsd() : replyAskCSats()) : null;
+    const sendEvent = (e: IdeStreamEvent) => {
+      meter?.observe(e);
+      this.turnEvent(s, r, e);
+    };
     try {
       this.env.checkpoints.begin(r.turnId, s.projectRoot);
       sendEvent({ type: "turn", id: r.turnId });
@@ -693,6 +702,8 @@ export class SessionHub {
         ...(this.env.contextWindow ? { contextWindow: () => this.env.contextWindow!(s) } : {}),
         ...(this.env.summarize ? { summarize: this.env.summarize(s, (e) => e.type === "usage" && sendEvent(e), r.abort.signal, { client: r.by ?? null }) } : {}),
         compactAtTokens: paid ? budget : null,
+        ...(meter ? { costCheck: makeCostCheck({ meter, sendEvent, canSwitch: false, ask: (callId, args) => this.waitForCostAnswer(s.id, l, r, callId, args) }) } : {}),
+        waste: { act: paid, helpers: false },
         // Plan mode is read when the turn starts: approving the plan starts the next turn.
         plan: s.mode === "plan",
         runTool: makeToolRunner({
@@ -865,6 +876,19 @@ export class SessionHub {
     });
   }
 
+  /** A cost check in a session turn: approve is Keep going, deny (or no answer, or a stop) is Stop. */
+  private waitForCostAnswer(id: string, l: Live, r: Running, callId: string, args: Record<string, unknown>): Promise<CostChoice> {
+    if (r.abort.signal.aborted) return Promise.resolve("stop");
+    return new Promise<CostChoice>((resolve) => {
+      const timer = setTimeout(() => {
+        if (!l.pending.delete(callId)) return;
+        this.emit(id, { type: "approval", id: callId, approved: false, by: "timeout" });
+        resolve("stop");
+      }, Math.min(this.approvalTimeoutMs, COST_ASK_TIMEOUT_MS));
+      l.pending.set(callId, { id: callId, tool: COST_CHECK_TOOL, args, resolve: (ok) => resolve(ok ? "continue" : "stop"), timer });
+    });
+  }
+
   /**
    * An answer from any attached client. The first answer wins: a later one (the call was answered
    * elsewhere, or it timed out) returns false and changes nothing.
@@ -872,10 +896,11 @@ export class SessionHub {
   approve(id: string, callId: string, approved: boolean, client: ClientRef, alwaysAsked = false): boolean {
     const s = this.need(id);
     // An answer from the phone approves this one call only: it never adds a rule or turns on auto-edits.
-    const always = alwaysAsked && client.kind !== "remote";
     const l = this.liveOf(id);
     const p = l.pending.get(callId);
     if (!p) return false;
+    // (A cost check is never "always": it asks again after another threshold's worth.)
+    const always = alwaysAsked && client.kind !== "remote" && p.tool !== COST_CHECK_TOOL;
     l.pending.delete(callId);
     clearTimeout(p.timer);
     if (approved && always && !ALWAYS_ASK_TOOLS.has(p.tool)) {
@@ -942,7 +967,7 @@ export class SessionHub {
     if (patch.mode) {
       const l = this.liveOf(id);
       for (const [callId, p] of [...l.pending]) {
-        if ((ALWAYS_ASK_TOOLS.has(p.tool) && this.modeFor(s, l.running?.by ?? null) !== "full") || this.decide(s, p.tool, p.args).action !== "run") continue;
+        if (p.tool === COST_CHECK_TOOL || (ALWAYS_ASK_TOOLS.has(p.tool) && this.modeFor(s, l.running?.by ?? null) !== "full") || this.decide(s, p.tool, p.args).action !== "run") continue;
         l.pending.delete(callId);
         clearTimeout(p.timer);
         this.emit(id, { type: "approval", id: callId, approved: true, by: "always" });
@@ -1168,6 +1193,8 @@ export class SessionHub {
     const l = this.liveOf(id);
     const p = l.pending.get(callId);
     if (!p) return false;
+    // A cost check: the phone may say Keep going or Stop.
+    if (p.tool === COST_CHECK_TOOL) return true;
     return !l.running?.external || this.remoteDecision(s, p.tool, p.args).action !== "refuse";
   }
 

@@ -204,6 +204,12 @@ export type IdeStreamEvent =
    * needs cSats"), the hour's searches used, or EdgeCoder unreachable. The reply goes on without it.
    */
   | { type: "web_off"; reason: string; message: string }
+  /**
+   * A one-line cost note under the reply (cost-guard.ts, turn-waste.ts): "saved" re-reads skipped
+   * ("Skipped re-reading 3 unchanged files · ~90K tokens saved"), "waste" what the turn did about
+   * waste, "suggest" a cheaper model for this kind of work (`suggest`: its chat model id).
+   */
+  | { type: "cost_note"; kind: "saved" | "waste" | "suggest"; message: string; savedTokens?: number; suggest?: { id: string; name: string; factor?: number } }
   | { type: "done" };
 
 // ---------------------------------------------------------------------------

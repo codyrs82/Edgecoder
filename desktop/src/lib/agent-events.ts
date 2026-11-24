@@ -25,6 +25,11 @@ export interface AgentTurn {
   contextTokens?: number;
   /** Tokens saved by compacting older messages during this turn (context-budget.ts). */
   compactedTokens?: number;
+  /**
+   * One-line cost notes for this reply (cost-guard.ts, turn-waste.ts): re-reads skipped and tokens
+   * saved, what was done about waste, a cheaper model that may fit better.
+   */
+  costNotes?: string[];
 }
 
 /** Tools whose successful result means files in the project changed. */
@@ -108,6 +113,10 @@ export function applyAgentEvent(turn: AgentTurn, event: IdeStreamEvent): { turn:
     case "compacted": {
       const saved = Number(event.savedTokens);
       return { turn: Number.isFinite(saved) && saved > 0 ? { ...turn, compactedTokens: (turn.compactedTokens ?? 0) + saved } : turn, filesChanged: false };
+    }
+    case "cost_note": {
+      const msg = String(event.message ?? "").trim();
+      return { turn: msg ? { ...turn, costNotes: [...(turn.costNotes ?? []), msg].slice(-5) } : turn, filesChanged: false };
     }
     case "web_off":
       return { turn: { ...turn, webOff: { reason: String(event.reason ?? ""), message: String(event.message ?? "") } }, filesChanged: false };

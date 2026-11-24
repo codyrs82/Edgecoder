@@ -134,3 +134,23 @@ describe("ComputePicker: this computer's models versus cloud models", () => {
     expect(screen.getByRole("option", { name: "deepseek-v4.1-flash, Any" })).toBeTruthy();
   });
 });
+
+describe("ComputePicker: what a long reply costs on paid models", () => {
+  it("network models with a price show their long reply in cSats; Claude on your key in dollars", async () => {
+    api.computeOverview.mockResolvedValue({
+      connected: true,
+      models: [
+        { model: "deepseek-v4.1-flash", agents: 1, classes: ["cloud"], cloudRank: 1, cloudHint: "recommended", cSatsPerMTokens: { input: 222, output: 886, cachedInput: 4.4 } },
+        { model: "glm-5.3", agents: 1, classes: ["cloud"], cloudRank: 2, cloudHint: "premium", cSatsPerMTokens: { input: 1034, output: 3250, cachedInput: 192 } },
+        { model: "qwen3:8b", agents: 3, classes: ["cpu"] },
+      ],
+    });
+    api.getFrontierStatus.mockResolvedValue({ models: ["frontier/anthropic/claude-opus-5-5"] });
+    await openPicker();
+    await screen.findByText("~140 cSats per long reply");
+    expect(screen.getByText("~27 cSats per long reply")).toBeTruthy();
+    // A model without a price has no line.
+    expect(screen.getAllByText(/per long reply/)).toHaveLength(3);
+    expect(screen.getByRole("option", { name: /Lead: Claude Opus 5\.5 · your key.*~\$0\.52 per long reply/ })).toBeTruthy();
+  });
+});

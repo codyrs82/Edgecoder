@@ -9,7 +9,7 @@ import { registerMetrics } from "../../common/metrics.js";
 import { registerErrorTracking } from "../../common/error-tracking.js";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { z } from "zod";
 import { ProviderRegistry } from "../../model/providers.js";
 import { InteractiveAgent } from "../../agent/interactive.js";
@@ -33,7 +33,7 @@ import { GitError, GitOps } from "./git-ops.js";
 import { GitSetupError, cloneRepo, githubStatus, normalizeRemoteUrl } from "./git-setup.js";
 import type { CredentialDeps } from "./github-auth.js";
 import { connectRepoUrl, defaultProjectsFolder, getProjectsFolder, recentGitHubRepos, setProjectsFolder } from "./repo-connect.js";
-import { isAbsolute } from "node:path";
+import { isAbsolute, resolve as resolvePath } from "node:path";
 import { NetworkTasks } from "./network-tasks.js";
 import { buyCSats, usageSummary, cancelReservation, computeOverview, contentToText, drainAgent, createReservation, listNetworkModels, listReservations, networkContextWindow, purchaseStatus, NetworkInferenceError, parseNetworkModel, streamNetworkCompletion, call as networkCall, ownInflightTaskIds, type CompletionPiece, type NetworkDeps } from "./network-inference.js";
 import { ActivityTracker, firstLine } from "./activity.js";
@@ -52,6 +52,8 @@ import { checkProject } from "./diagnostics.js";
 import { isProjectTrusted, loadOrCreateMachineSalt, setProjectTrusted } from "./workspace-trust.js";
 import { registerCodeRemoteRoutes } from "./code-remote.js";
 import { desktopTurnFor, firstAnswer, registerDesktopChatRoutes } from "./desktop-chats.js";
+import { COST_CHECK_TOOL, ReplyCostMeter, firstCostAnswer, makeCostCheck, pickCheaperModel, replyAskCSats, replyAskUsd, type CheaperModel } from "./cost-guard.js";
+import { referenceReplyCost } from "../../common/reply-cost.js";
 import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
 import { NewProjectError, PROJECT_TEMPLATES, createNewProject } from "./new-project.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
@@ -1276,6 +1278,8 @@ const toolApprovalSchema = z.object({
   approved: z.boolean(),
   /** "Always allow" this command in the project: keeps the call's suggested rule (never for refused or always-ask commands). */
   always: z.boolean().default(false),
+  /** A cost check's answer (cost-guard.ts): Keep going, Switch to the cheaper model, or Stop. */
+  choice: z.enum(["continue", "switch", "stop"]).optional(),
 });
 
 app.post("/v1/ide/tool-approval", async (req, reply) => {
@@ -1289,7 +1293,8 @@ app.post("/v1/ide/tool-approval", async (req, reply) => {
     rule = suggestToolRule(entry.tool, entry.args, { root: entry.projectRoot });
     if (rule) permissionStore.addRule(entry.projectRoot, rule);
   }
-  entry.resolve(body.approved);
+  if (body.choice && entry.choose) entry.choose(body.choice);
+  else entry.resolve(body.approved);
   pendingApprovals.delete(body.id);
   return reply.send({ ok: true, ...(rule ? { rule } : {}) });
 });
@@ -1327,6 +1332,9 @@ const ideChatSchema = z.object({
   compactPaidTokens: z.number().int().min(1).max(10_000_000).optional(),
   /** The Code view chat this turn belongs to: its mirror session shows the turn live (desktop-chats.ts). */
   chatId: z.string().uuid().optional(),
+  /** Settings → General → "Ask before a reply spends more than …" (cost-guard.ts): cSats on a network or cloud lead, USD on a frontier key. */
+  replyAskCSats: z.number().min(0).max(10_000_000).optional(),
+  replyAskUsd: z.number().min(0).max(100_000).optional(),
   /** Where the model runs: this computer (default), your machines, any network agent (optionally one class), or a reserved machine. */
   compute: z
     .object({
@@ -1510,7 +1518,10 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
   // A Code view chat's mirror session shows this turn live to the owner's phone, which may stop it
   // (abort) and answer its approvals (desktop-chats.ts).
   const mirror = body.origin !== "chat" ? desktopTurnFor(sessions, body.chatId, turnId, abort) : null;
+  // The per-reply cost check (cost-guard.ts): set below for a paid lead, fed every usage event.
+  let costMeter: ReplyCostMeter | null = null;
   function sendEvent(event: IdeStreamEvent): void {
+    costMeter?.observe(event);
     tracked.event(event);
     mirror?.event(event);
     if (clientDisconnected) return;
@@ -1547,6 +1558,25 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
   // lead (frontier key, network or cloud model) the token budget from Settings.
   const lead = chatAsSession(chatModel, body.compute);
   const paidLead = isPaidLead(modelIdOf(lead), lead.compute.target);
+  // A paid lead asks before a reply spends past the threshold (cSats; USD on a frontier key).
+  const frontierLead = lead.compute.target === "frontier";
+  costMeter = paidLead ? new ReplyCostMeter(frontierLead ? "usd" : "cSats", frontierLead ? replyAskUsd(body.replyAskUsd) : replyAskCSats(body.replyAskCSats)) : null;
+  const costCheck = costMeter
+    ? makeCostCheck({
+        meter: costMeter,
+        sendEvent,
+        cheaper: () => cheaperModelFor(lead),
+        switchTo: (m) => switchedChatFn(m, ollamaHost, sendEvent, abort.signal, turnId),
+        ask: (callId, args) =>
+          firstCostAnswer(
+            callId,
+            args,
+            mirror,
+            (answer) => pendingApprovals.set(callId, { resolve: answer.resolve, choose: answer.choose, tool: COST_CHECK_TOOL, args, owner: turnId, projectRoot }),
+            () => pendingApprovals.delete(callId),
+          ),
+      })
+    : undefined;
   try {
     await runAgentLoop({
       chat: isFrontierModelId(chatModel)
@@ -1557,6 +1587,9 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
       contextWindow: () => sessionContextWindow(lead),
       summarize: sessionSummarizer(lead, (e) => e.type === "usage" && sendEvent(e), abort.signal, null),
       compactAtTokens: paidLead ? compactPaidTokens(body.compactPaidTokens) : null,
+      ...(costCheck ? { costCheck } : {}),
+      // Re-reads of unchanged files become a pointer; a paid lead also acts on waste (turn-waste.ts).
+      waste: { stamp: fileStamp(projectRoot), act: paidLead, helpers: helpersOn },
       // Web grounding: a question that needs fresh facts is searched once before the first turn (not in Manual, where web calls ask).
       ...(web ? webGrounding(web, messages, { skip: chatMode === "ask" }) : {}),
       sendEvent,
@@ -1877,6 +1910,36 @@ function graduatedLead(s: SessionData, emit: (e: IdeStreamEvent) => void): strin
   if (!pick.changed) return current;
   emit({ type: "status", message: `Context: ${pick.reason}` });
   return pick.model;
+}
+
+/** A file's mtime and size, for the re-read dedupe (turn-waste.ts); null when it can't be read. */
+function fileStamp(root: string): (path: string) => string | null {
+  return (path) => {
+    try {
+      const st = statSync(resolvePath(root, path));
+      return `${st.mtimeMs}:${st.size}`;
+    } catch {
+      return null;
+    }
+  };
+}
+
+/** The cheaper model a cost check offers for this lead (cost-guard.ts pickCheaperModel). */
+async function cheaperModelFor(lead: Pick<SessionData, "model" | "compute">): Promise<CheaperModel | null> {
+  const [ov, tags] = await Promise.all([
+    networkDeps ? computeOverview(networkDeps).catch(() => null) : Promise.resolve(null),
+    ollamaTags().then((t) => t.models.map((m) => m.name)).catch(() => [] as string[]),
+  ]);
+  return pickCheaperModel({ model: lead.model, target: lead.compute.target }, { networkModels: ov?.models ?? null, localModels: tags, connected: !!ov?.connected, referenceCost: referenceReplyCost });
+}
+
+/** A cost check's "Switch": the turn's model calls on the cheaper model from then on (null: it can't run here). */
+function switchedChatFn(m: CheaperModel, ollamaHost: string, sendEvent: (e: IdeStreamEvent) => void, signal: AbortSignal, turnId: string): ChatFn | null {
+  const p = parseModelIdForChat(m.id);
+  const t = p.compute.target;
+  if (t !== "local" && t !== "network" && t !== "auto") return null;
+  const compute = t === "network" ? { target: t, computeClass: "any" as const } : { target: t };
+  return chatFnFor(compute, p.model, ollamaHost, sendEvent, signal, "EdgeCoder chat", t === "auto" ? { sessionKey: `chat:${turnId}` } : undefined);
 }
 
 /** A session's (or chat's) lead context window in tokens; undefined: the loop's conservative default. */

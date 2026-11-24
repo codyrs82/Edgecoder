@@ -160,6 +160,8 @@
   let compactNote = $state<string | null>(null);
   let streamingContext: number | undefined = $state(undefined);
   let streamingCompacted = 0;
+  /** This reply's cost notes (cost-guard.ts): live, then the reply's notice. */
+  let streamingCostNotes: string[] = $state([]);
   $effect(() => {
     const tokens = isStreaming && streamingContext ? streamingContext : contextTokens(conversation);
     onContextChange?.(usePortalChat ? null : { tokens, compacting, note: compactNote });
@@ -292,6 +294,13 @@
     streamingToolEvents = markApproval(streamingToolEvents, id, approved);
   }
 
+  /** A cost check's answer (CostCheckCard): Keep going, Switch (the picker moves to the cheaper model too) or Stop. */
+  function handleCostChoice(id: string, choice: "continue" | "switch" | "stop", suggest?: { id: string; name: string }) {
+    void ideSendToolApproval(id, choice !== "stop", false, choice);
+    streamingToolEvents = markApproval(streamingToolEvents, id, choice !== "stop");
+    if (choice === "switch" && suggest) computeChoice.set(suggest.id);
+  }
+
   export async function sendMessage(typed: string, attachments: AttachmentPayload[] = []) {
     // The conversation keeps the typed text and the attached names; the files go with this request only.
     const text = [typed, attachmentLabel(attachments)].filter(Boolean).join("\n\n");
@@ -341,13 +350,14 @@
         const apiMessages: Array<{ role: string; content: string }> = historyForModel(conversation).messages;
         streamingContext = undefined;
         streamingCompacted = 0;
+        streamingCostNotes = [];
         streamingToolEvents = [];
         streamingTurnId = undefined;
         streamingUsage = undefined;
         streamingChanged = [];
         const onEvent = (event: IdeStreamEvent) => {
           const next = applyAgentEvent(
-            { text: streamingContent, toolEvents: streamingToolEvents, turnId: streamingTurnId, changedFiles: streamingChanged, usage: streamingUsage, web: streamingWeb, activity: streamingActivity },
+            { text: streamingContent, toolEvents: streamingToolEvents, turnId: streamingTurnId, changedFiles: streamingChanged, usage: streamingUsage, web: streamingWeb, activity: streamingActivity, costNotes: streamingCostNotes },
             event,
           ).turn;
           if (next.text !== streamingContent) streamingContent = next.text;
@@ -359,6 +369,7 @@
           if (next.webOff) streamingWebOff = next.webOff.reason;
           if (next.contextTokens) streamingContext = next.contextTokens;
           if (next.compactedTokens) streamingCompacted = next.compactedTokens;
+          if (next.costNotes && next.costNotes !== streamingCostNotes) streamingCostNotes = next.costNotes;
           if (next.changedFiles && next.changedFiles !== streamingChanged) streamingChanged = next.changedFiles;
           if (event.type !== "status" && event.type !== "done") scrollToBottom();
         };
@@ -508,6 +519,8 @@
     if (streamingContext) conversation.contextTokens = streamingContext + Math.ceil(lastMsg.content.length / 3);
     // Older messages were compacted inside this turn (they're sent whole again next time).
     if (streamingCompacted > 0 && !lastMsg.notice) lastMsg.notice = `Earlier messages summarized for this reply to save tokens · ~${streamingCompacted.toLocaleString("en-US")} tokens saved`;
+    if (streamingCostNotes.length) lastMsg.notice = [lastMsg.notice, ...streamingCostNotes].filter(Boolean).join("\n");
+    streamingCostNotes = [];
     streamingContext = undefined;
     streamingCompacted = 0;
   }
@@ -622,7 +635,7 @@
         {#if conversation.summary?.throughId === msg.id}<CompactionNote savedTokens={conversation.summary.savedTokens} />{/if}
       {/each}
       {#if isStreaming && (streamingContent || streamingToolEvents.length > 0 || streamingActivity)}
-        <ChatMessage role="assistant" content={streamingContent} streaming={true} {streamProgress} toolEvents={streamingToolEvents} activity={streamingActivity} {onOpenInEditor} onToolApproval={handleToolApproval} onToolAlways={(id) => handleToolApproval(id, true, true)} />
+        <ChatMessage role="assistant" content={streamingContent} streaming={true} {streamProgress} toolEvents={streamingToolEvents} activity={streamingActivity} {onOpenInEditor} onToolApproval={handleToolApproval} onToolAlways={(id) => handleToolApproval(id, true, true)} onCostChoice={handleCostChoice} costNotes={streamingCostNotes} />
       {/if}
       {#if pendingPlan}
         <PlanApproval onApprove={approvePlan} onRevise={() => onFocusComposer?.()} />

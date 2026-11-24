@@ -4,6 +4,7 @@ import type { AttachmentPayload } from "./attachments";
 import type { WebStatus } from "./web-tool";
 import { fetchLocalService, serviceErrorText } from "./local-service";
 import { compactPaidTokensSetting } from "./compaction";
+import { replyAskCSatsSetting, replyAskUsdSetting } from "./cost-check";
 import { coordinatorUrl, defaultEndpoints, fetchEndpoint, portalUrl, type EndpointKind } from "./endpoints";
 import type {
   HealthRuntime,
@@ -1399,9 +1400,12 @@ export async function ideGetProject(): Promise<string | null> {
   }
 }
 
-/** Answer a chat or bot tool call; `always` also keeps the call's "Always allow" rule for its project. */
-export async function ideSendToolApproval(id: string, approved: boolean, always = false): Promise<void> {
-  await withIdeRetry((h) => post(ideBase(), "/v1/ide/tool-approval", { id, approved, ...(always ? { always: true } : {}) }, h));
+/**
+ * Answer a chat or bot tool call; `always` also keeps the call's "Always allow" rule for its project.
+ * A cost check (cost-check.ts) answers with `choice`: continue, switch (to its suggested model) or stop.
+ */
+export async function ideSendToolApproval(id: string, approved: boolean, always = false, choice?: "continue" | "switch" | "stop"): Promise<void> {
+  await withIdeRetry((h) => post(ideBase(), "/v1/ide/tool-approval", { id, approved, ...(always ? { always: true } : {}), ...(choice ? { choice } : {}) }, h));
 }
 
 /** Every project's "always allow" answers (Settings → General). */
@@ -1415,7 +1419,7 @@ export const listPermissions = () => fsCall<{ projects: Record<string, ProjectPe
 export const removePermission = (projectRoot: string, rule: string) => fsCall<{ removed: boolean }>("POST", "/v1/ide/permissions/remove", { projectRoot, rule });
 
 export interface IdeStreamEvent {
-  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "usage" | "web" | "web_off" | "context" | "compacted" | "done";
+  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "usage" | "web" | "web_off" | "context" | "compacted" | "cost_note" | "done";
   [key: string]: unknown;
 }
 
@@ -1481,6 +1485,9 @@ export async function streamIdeChat(
       ...(helpers ? { helpers } : {}),
       // Settings → General → "Compact long chats at … tokens" (a paid lead compacts past it).
       compactPaidTokens: compactPaidTokensSetting(),
+      // Settings → General → "Ask before a reply spends more than …" (a paid lead asks past it).
+      replyAskCSats: replyAskCSatsSetting(),
+      replyAskUsd: replyAskUsdSetting(),
       ...(chatId ? { chatId } : {}),
     }),
     signal,
@@ -1897,7 +1904,7 @@ export interface ComputeOverview {
   /** restricted: a security research tier model, listed only to entitled accounts; never a network call. */
   /** agentsByClass: machines per class with the model (newer coordinators). */
   // cloudRank / cloudHint: a cloud model (hosted API), its order among cloud models and its hint ("recommended", "premium").
-  models?: Array<{ model: string; agents: number; agentsByClass?: Record<string, number>; classes: string[]; cSatsPerMTokens?: { input: number; output: number }; restricted?: string; cloudRank?: number; cloudHint?: string }>;
+  models?: Array<{ model: string; agents: number; agentsByClass?: Record<string, number>; classes: string[]; cSatsPerMTokens?: { input: number; output: number; cachedInput?: number }; restricted?: string; cloudRank?: number; cloudHint?: string }>;
   /** How this computer's agent chose its coordinator: from the signed registry by latency, or the fallback URL. */
   steering?: CoordinatorSteering | null;
   /** The network refused this computer's agent (its safety check blacklisted it), with the reason. */
