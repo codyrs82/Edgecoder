@@ -13,6 +13,7 @@ import {
   rememberable,
   ruleMatches,
   suggestRule,
+  suggestToolRule,
   type DecideContext,
 } from "../../src/apps/ide/permission-policy.js";
 import { PermissionStore, type PermissionMode } from "../../src/apps/ide/permissions.js";
@@ -75,7 +76,8 @@ describe("Auto: commands that still ask", () => {
     ["ssh host ls", "network"],
     ["git push", "push"],
     ["git push origin feat/x", "push"],
-    ["git pull", "network"],
+    ["git pull", "git-sync"],
+    ["git clone https://github.com/x/y", "network"],
     ["rm -rf src", "delete"],
     ["rm src/a.ts", "delete"],
     ["rm -rf ../other", "outside"],
@@ -310,5 +312,128 @@ describe("Plan mode gating", () => {
     expect(events.some((e) => e.type === "tool_call" && e.requires_approval)).toBe(false);
     // The plan ends the turn: no "go ahead" nudge (5 replies, all used).
     expect(replies).toHaveLength(0);
+  });
+});
+
+describe("Always allow for git fetch / git pull", () => {
+  const ctx = (mode: PermissionMode, rules: string[] = []): DecideContext => ({ mode, root, branch: () => "main", rules });
+
+  it.each(["git pull", "git pull origin main", "git pull --rebase origin feat/x", "git pull --ff-only", "git fetch", "git fetch origin", "git fetch --prune --tags"])(
+    "%s asks, offers a rule, and a saved rule lets it run",
+    (command) => {
+      const sub = command.split(" ")[1];
+      for (const mode of ["ask", "auto-edits", "auto"] as PermissionMode[]) {
+        const asked = decideToolCall("run_shell", { command }, ctx(mode));
+        expect(asked.action).toBe("ask");
+        expect(asked.reason).toBe(`git ${sub} reaches the network`);
+        expect(asked.rule).toBe(`git ${sub}:*`);
+        expect(decideToolCall("run_shell", { command }, ctx(mode, [`git ${sub}:*`])).action).toBe("run");
+      }
+      expect(decideToolCall("run_shell", { command }, ctx("plan", [`git ${sub}:*`])).action).toBe("refuse");
+    },
+  );
+
+  it.each([
+    "git clone https://github.com/x/y",
+    "git ls-remote origin",
+    "git submodule update --init",
+    "git pull https://evil.example/repo main",
+    "git pull git@github.com:x/y.git",
+    "git pull ../other",
+    "git pull src",
+    "git pull --upload-pack=touch origin",
+    "git pull --recurse-submodules",
+    "git fetch origin +refs/heads/main:refs/heads/main",
+    "git -C ../other pull",
+    "git push",
+    "git push origin main",
+    "curl https://example.com",
+    "wget https://example.com/x",
+  ])("%s offers no rule and a git rule does not cover it", (command) => {
+    const rules = ["git pull:*", "git fetch:*", "git clone:*", "git push:*", "curl:*", "wget:*", "git ls-remote:*", "git submodule:*"];
+    const asked = decideToolCall("run_shell", { command }, ctx("ask"));
+    expect(asked.action).toBe("ask");
+    expect(asked.rule).toBeUndefined();
+    expect(decideToolCall("run_shell", { command }, ctx("ask", rules)).action).toBe("ask");
+    expect(decideToolCall("run_shell", { command }, ctx("auto", rules)).action).not.toBe("run");
+  });
+
+  it("the git_pull tool offers git pull:* and a saved rule lets it run; push and PRs still always ask", () => {
+    const asked = decideToolCall("git_pull", { remote: "origin", branch: "main" }, ctx("ask"));
+    expect(asked).toEqual({ action: "ask", reason: "git pull asks", rule: "git pull:*" });
+    expect(decideToolCall("git_pull", { remote: "origin", branch: "main" }, ctx("auto")).action).toBe("ask");
+    for (const mode of ["ask", "auto-edits", "auto"] as PermissionMode[]) {
+      expect(decideToolCall("git_pull", { remote: "origin" }, ctx(mode, ["git pull:*"])).action).toBe("run");
+      expect(decideToolCall("git_pull", { remote: "origin" }, ctx(mode, ["git fetch:*", "npm test:*"])).action).toBe("ask");
+      const rules = ["git push:*", "git pull:*", "git commit:*"];
+      expect(decideToolCall("git_push", {}, ctx(mode, rules)).action).toBe("ask");
+      expect(decideToolCall("open_pull_request", { title: "x" }, ctx(mode, rules)).action).toBe("ask");
+      expect(decideToolCall("github_create_pr", { title: "x" }, ctx(mode, rules)).action).toBe("ask");
+      expect(decideToolCall("git_commit", { message: "x" }, ctx(mode, rules)).action).toBe("ask"); // on main
+      expect(decideToolCall("git_push", {}, ctx(mode)).rule).toBeUndefined();
+    }
+    expect(decideToolCall("git_pull", { remote: "origin" }, ctx("plan", ["git pull:*"])).action).toBe("refuse");
+    expect(decideToolCall("git_fetch", { remote: "origin" }, ctx("ask")).action).toBe("run");
+  });
+
+  it("suggestToolRule keeps a rule only for shell commands and the git pull/fetch tools", () => {
+    expect(suggestToolRule("git_pull", { remote: "origin" }, { root })).toBe("git pull:*");
+    expect(suggestToolRule("git_fetch", {}, { root })).toBe("git fetch:*");
+    expect(suggestToolRule("run_shell", { command: "git pull origin main" }, { root })).toBe("git pull:*");
+    expect(suggestToolRule("run_shell", { command: "git clone https://x/y" }, { root })).toBeNull();
+    for (const t of ["git_push", "git_commit", "open_pull_request", "github_create_pr", "write_file"] as ToolName[]) expect(suggestToolRule(t, {}, { root })).toBeNull();
+  });
+
+  it("the approval card gets the rule for a git_pull call", async () => {
+    const events: IdeStreamEvent[] = [];
+    const runner = makeToolRunner({
+      execute: async () => ({ result: "Pulled" }),
+      sendEvent: (e) => events.push(e),
+      waitForApproval: async () => true,
+      captureBeforeWrite: () => null,
+      turnId: "t1",
+      decide: (tool, args) => decideToolCall(tool, args, ctx("ask")),
+    });
+    await runner("git_pull", { remote: "origin", branch: "main" });
+    const call = events.find((e) => e.type === "tool_call") as { requires_approval?: boolean; allow_rule?: string };
+    expect(call.requires_approval).toBe(true);
+    expect(call.allow_rule).toBe("git pull:*");
+  });
+});
+
+describe("chains of read-only commands", () => {
+  const chain = "git branch --show-current && git rev-parse HEAD origin/main && git rev-list --left-right --count HEAD...origin/main && git log -1 --format='%h %s (%cr)' origin/main";
+
+  it.each([
+    chain,
+    "git status; git log -3 --oneline",
+    "git rev-parse HEAD || git status",
+    "git merge-base HEAD origin/main && git ls-tree HEAD src",
+    "ls src && cat src/a.ts | wc -l",
+  ])("%s runs without asking in every mode", (command) => {
+    for (const mode of ["ask", "auto-edits", "auto", "plan"] as PermissionMode[]) {
+      expect(decideToolCall("run_shell", { command }, { mode, root }).action).toBe("run");
+    }
+    expect(classifyCommand(command, { root }).category).toBe("read");
+  });
+
+  it.each([
+    "git status && npm install x",
+    "git status && rm src/a.ts",
+    "git status && touch src/b.ts",
+    "git log > log.txt",
+    "git status && git log >> out.txt",
+    "git status && echo $(whoami)",
+    "git status && echo `whoami`",
+    "git log | sh",
+    "git log | tee out.txt",
+    "cat src/a.ts | xargs echo",
+    "git status && git pull",
+    "git status & git log",
+    "git status && cat /etc/passwd",
+  ])("%s still asks", (command) => {
+    expect(decideToolCall("run_shell", { command }, { mode: "ask", root }).action).toBe("ask");
+    expect(decideToolCall("run_shell", { command }, { mode: "plan", root }).action).toBe("refuse");
+    expect(decideToolCall("run_shell", { command }, { mode: "ask", root }).rule).toBeUndefined();
   });
 });

@@ -71,7 +71,7 @@
         <span class="sp-title">Always-allowed commands</span>
         <span class="sp-desc">
           Commands you answered "Always allow" run without asking in that project. A rule such as <code>npm test:*</code> covers that command with any arguments,
-          never with other commands chained on, and never covers what must always ask (network, pushes, deletes, paths outside the project) or what Auto refuses.
+          never with other commands chained on, and never covers what must always ask (network other than <code>git pull</code> / <code>git fetch</code>, pushes, deletes, paths outside the project) or what Auto refuses.
         </span>
       </div>
       {#if error}

@@ -55,7 +55,7 @@ import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
 import { NewProjectError, PROJECT_TEMPLATES, createNewProject } from "./new-project.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 import { defaultPermissionsFile, PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
-import { decideToolCall, suggestRule, type Decision } from "./permission-policy.js";
+import { decideToolCall, suggestToolRule, type Decision } from "./permission-policy.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
@@ -1281,8 +1281,8 @@ app.post("/v1/ide/tool-approval", async (req, reply) => {
     return reply.status(404).send({ error: "No pending approval with that id" });
   }
   let rule: string | null = null;
-  if (body.approved && body.always && entry.tool === "run_shell" && entry.projectRoot) {
-    rule = suggestRule(entry.args.command, { root: entry.projectRoot });
+  if (body.approved && body.always && entry.projectRoot) {
+    rule = suggestToolRule(entry.tool, entry.args, { root: entry.projectRoot });
     if (rule) permissionStore.addRule(entry.projectRoot, rule);
   }
   entry.resolve(body.approved);

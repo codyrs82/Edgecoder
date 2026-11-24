@@ -54,7 +54,7 @@ import { blockedResult, outcomeOf, projectCheck, runsDigest, stuckProblem, updat
 import { normalizeRemoteUrl } from "./git-setup.js";
 import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
-import { decideToolCall, suggestRule, type Decision } from "./permission-policy.js";
+import { decideToolCall, suggestToolRule, type Decision } from "./permission-policy.js";
 import { ensureRepo as realEnsureRepo } from "./repo-connect.js";
 import { COMPUTE_POLICIES, FALLBACK_NOTE, NETWORK_CLASSES, isNetworkClass, type NetworkClass, routeLabel, routeModelId, routeSummary, type ComputePolicy, type PlanOptions, type Route } from "../../inference-api/auto-route.js";
 import type { ChatBackend } from "../../inference-api/types.js";
@@ -2353,10 +2353,10 @@ export class BotManager {
     const p = this.active.get(id)?.pending.get(callId);
     // A frontier ask is answered only by its owner (answerFrontier).
     if (!p || p.frontier) return false;
-    if (approved && always && p.tool === "run_shell") {
+    if (approved && always) {
       // "Always allow" keeps the command's rule for the bot's project (never a refused or always-ask command).
       const root = botWorkRoot(bot);
-      const rule = suggestRule(p.args.command, { root });
+      const rule = suggestToolRule(p.tool as ToolName, p.args, { root });
       if (rule) this.permissions.addRule(root, rule);
     }
     p.finish(approved);

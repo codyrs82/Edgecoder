@@ -23,7 +23,7 @@ import { join, resolve } from "node:path";
 import { ALWAYS_ASK_TOOLS, makeToolRunner, runAgentLoop, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
 import type { CheckpointStore } from "./checkpoints.js";
 import { defaultMode, defaultPermissionsFile, EXECUTION_MODES, PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
-import { classifyCommand, decideToolCall, suggestRule, type Decision } from "./permission-policy.js";
+import { classifyCommand, decideToolCall, suggestToolRule, type Decision } from "./permission-policy.js";
 import { isWithin } from "./tool-executor.js";
 import { redactApiKeys } from "../../common/redaction.js";
 import { parseFrontierModelId } from "../../inference-api/frontier-models.js";
@@ -743,10 +743,10 @@ export class SessionHub {
         if (s.mode === "ask") s.mode = "auto-edits";
         this.permissions.allowEdits(s.projectRoot);
       }
-      if (p.tool === "run_shell") {
-        // "Always allow" keeps a rule (`npm test:*`) for the project; never for a refused or
-        // always-ask command (suggestRule returns null for those).
-        const rule = suggestRule(p.args.command, { root: s.projectRoot });
+      if (p.tool === "run_shell" || p.tool === "git_pull" || p.tool === "git_fetch") {
+        // "Always allow" keeps a rule (`npm test:*`, `git pull:*`) for the project; never for a
+        // refused or always-ask command (suggestToolRule returns null for those).
+        const rule = suggestToolRule(p.tool, p.args, { root: s.projectRoot });
         if (rule && !s.alwaysShell.includes(rule)) s.alwaysShell.push(rule);
         if (rule) this.permissions.addRule(s.projectRoot, rule);
       }
