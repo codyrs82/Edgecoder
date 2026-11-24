@@ -13,7 +13,7 @@
 
 import { z } from "zod";
 import { pgStore } from "../../../db/store.js";
-import { CODE_COMMAND_BODY_LIMIT, CODE_CONTROL_ACTIONS, MAX_CODE_PROJECTS, MAX_CODE_SESSIONS, MAX_CODE_SNAPSHOT_BYTES, codeControlRequestSchema, projectIdSchema, type CodeSnapshot } from "../../../common/code-relay.js";
+import { CODE_COMMAND_BODY_LIMIT, CODE_CONTROL_ACTIONS, MAX_CODE_PROJECTS, MAX_CODE_SESSIONS, MAX_CODE_SNAPSHOT_BYTES, codeControlRequestSchema, codeRequestPermission, codeRequestTargets, projectIdSchema, type CodeSnapshot } from "../../../common/code-relay.js";
 import type { CoordinatorApp } from "../app.js";
 import { identity, coordinatorKeys, securityLog } from "../context.js";
 import { requireAgentSelf, requirePortalServiceToken } from "../auth.js";
@@ -105,6 +105,18 @@ export function registerCodeRelayRoutes(app: CoordinatorApp): void {
         });
       }
       return reply.code(decision.status).send({ error: decision.error, message: decision.message });
+    }
+    // Auto or Full access set from the web or the iPhone: in the security log as well as the audit.
+    const permission = codeRequestPermission(request.data);
+    if (request.data.action === "settings" && (permission.mode === "auto" || permission.mode === "full")) {
+      securityLog.log({
+        level: securityLog.severity("code_session_mode_change"),
+        event: "code_session_mode_change",
+        source: { type: "system", id: body.data.accountId },
+        details: { agentId, ...codeRequestTargets(request.data), ...permission, commandId: decision.commandId },
+        action: "send_command",
+        coordinatorId: identity.peerId
+      });
     }
     return reply.send({ ok: true, commandId: decision.commandId, coordinatorId: identity.peerId });
   });

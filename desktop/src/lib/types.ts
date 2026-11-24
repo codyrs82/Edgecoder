@@ -123,6 +123,10 @@ export interface ToolEvent {
   sandbox_denied?: string;
   /** tool_call: asks to re-run outside the sandbox after it blocked this (what it blocked). */
   sandbox_retry?: string;
+  /** "Allow for this session" may answer it: what later calls it lets run ("npm test commands"). Never with web_guard. */
+  allow_session?: string;
+  /** Ran without asking because of an earlier "Allow for this session": what was allowed. */
+  session_allowed?: string;
   result?: string;
   error?: string;
   command?: string;

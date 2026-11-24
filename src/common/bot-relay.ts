@@ -132,6 +132,8 @@ export interface RemotePendingCall {
   callId: string;
   tool: string;
   detail: string;
+  /** Newer Macs: "Allow for the rest of this run" may answer it (`approve` with `scope: "run"`); what later calls it lets run. */
+  allowRun?: string;
 }
 
 export interface RemoteBotSummary {
@@ -440,7 +442,8 @@ export const botControlRequestSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("check_now"), args: none }),
   z.object({ action: z.literal("stop"), args: none }),
   z.object({ action: z.literal("update_settings"), args: remoteBotSettingsSchema }),
-  z.object({ action: z.literal("approve"), args: z.object({ callId: z.string().min(1).max(100), approved: z.boolean() }).strict() }),
+  // `scope: "run"`: "Allow for the rest of this run" (only for a pending item that offers `allowRun`).
+  z.object({ action: z.literal("approve"), args: z.object({ callId: z.string().min(1).max(100), approved: z.boolean(), scope: z.enum(["once", "run"]).optional() }).strict() }),
   // The bot's ask to use its owner's frontier key: this run, or every run until midnight; or no.
   z.object({ action: z.literal("approve_frontier"), args: z.object({ callId: z.string().min(1).max(100), scope: z.enum(["run", "day"]).default("run") }).strict() }),
   z.object({ action: z.literal("decline_frontier"), args: z.object({ callId: z.string().min(1).max(100) }).strict() }),

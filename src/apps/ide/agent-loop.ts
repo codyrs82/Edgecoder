@@ -809,6 +809,8 @@ export type ApprovalAnswer = boolean | "run";
 /** Why a call asks, for waitForApproval: `webGuard` when only the web-page guard asked (the mode would run it). */
 export interface ApprovalAsk {
   webGuard: boolean;
+  /** What "Allow for this session" would cover (session-allowances.ts); unset when it can't be offered. */
+  allowSession?: string;
 }
 
 export interface ToolRunnerDeps {
@@ -870,7 +872,9 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
   // or are refused by the mode), and Full access (the user chose to approve everything). Answering
   // a guard ask with "Allow for the rest of this run" (ApprovalAnswer "run") lifts the guard until
   // the run ends; it never makes a call run that the mode itself asks about or refuses, nor one that
-  // runs a file this run wrote or edited (edited-runs.ts): such a call keeps the guard's ask.
+  // runs a file this run wrote or edited (edited-runs.ts): such a call keeps the guard's ask. A call
+  // an "Allow for this session" answer runs (session-allowances.ts) is a "run" verdict like any other,
+  // so the guard asks for it after a page read too; its ask offers no session allowance.
   let webPageRead = false;
   let guardLifted = false;
   /** Files this run wrote or edited (editKey form). */
@@ -903,6 +907,9 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
     /** Auto runs it in the OS sandbox (sandbox.ts); the rules are offered if the sandbox blocks it. */
     let sandboxed = false;
     let offer: string[] = [];
+    /** "Allow for this session" (the ask's label) and a run an allowance covered (its label). */
+    let sessionOffer: string | undefined;
+    let sessionAllowed: string | undefined;
     if (d.decide) {
       const verdict = d.decide(tool, args);
       if (verdict.action === "refuse") {
@@ -916,8 +923,10 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
       // verdict itself says the user approved every call (the executor's hard refusals still apply).
       always = !requiresApproval && (tool === "run_shell" || verdict.approved === true);
       offer = verdict.rules ?? (verdict.rule ? [verdict.rule] : []);
-      if (requiresApproval) rules = offer;
       sandboxed = tool === "run_shell" && verdict.sandbox === true;
+      if (requiresApproval) rules = offer;
+      if (requiresApproval) sessionOffer = verdict.session;
+      else sessionAllowed = verdict.sessionAllowed;
       // decideToolCall runs an edit only inside the project, off protected paths and secrets.
       guardExempt = verdict.approved === true || (verdict.action === "run" && (tool === "write_file" || tool === "edit_file"));
     } else {
@@ -943,9 +952,11 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
       ...(rules.length ? { allow_rule: rules[0], ...(rules.length > 1 ? { allow_rules: rules } : {}) } : {}),
       ...(webGuard ? { web_guard: true as const, ...(runsEdited ? { runs_edited: runsEdited } : {}) } : {}),
       ...(sandboxed ? { sandboxed: true as const } : {}),
+      ...(sessionOffer && !webGuard ? { allow_session: sessionOffer } : {}),
+      ...(sessionAllowed && !webGuard ? { session_allowed: sessionAllowed } : {}),
     });
     if (requiresApproval) {
-      const answer = await d.waitForApproval(callId, tool, args, { webGuard });
+      const answer = await d.waitForApproval(callId, tool, args, { webGuard, ...(sessionOffer && !webGuard ? { allowSession: sessionOffer } : {}) });
       if (answer === false) {
         const msg = `Tool call ${tool} was rejected by the user.`;
         d.sendEvent({ type: "tool_result", id: callId, error: msg });

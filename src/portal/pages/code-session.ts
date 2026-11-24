@@ -5,9 +5,12 @@
  * One coding session on the Code page (/portal/code/:agentId/:sessionId): the conversation (messages,
  * tool steps, file changes), the running turn, queued messages, approval cards and plan approval,
  * with a composer, Stop, Undo and the permission mode. The same actions as the iPhone app's Code
- * mode, through the same relay; the Mac applies the same rules to both (every command that isn't
- * read-only asks, approving covers one call only and never adds an "always allow" rule, Auto is
- * set on the Mac only). Plain browser JS included in pages/code.ts; Mac text reaches innerHTML only
+ * mode, through the same relay; the Mac applies the same rules to both (in Manual and Accept edits
+ * every command that isn't read-only asks; Allow covers one call and never adds an "always allow"
+ * rule). On a Mac whose session says `remoteModes`, the owner may also switch to Auto or Full access
+ * (Full access after a confirm dialog) and answer "Allow for this session" (this call and later
+ * calls of the same kind, until the session ends). The current mode is always shown in the header.
+ * Plain browser JS included in pages/code.ts; Mac text reaches innerHTML only
  * through escapeHtml or renderMarkdown (escaped first). Updates are polled: every 2.5 s while a
  * turn runs or waits, every 6 s otherwise, and slowly while the tab is hidden.
  */
@@ -67,13 +70,18 @@ export const CODE_SESSION_JS = String.raw`
       return '<article class="cmsg ' + (m.role === "user" ? "user" : "assistant") + '"><div class="cmsg-head"><span class="who">' + escapeHtml(who) + "</span>" + (m.plan ? '<span class="chip tone-accent">Plan</span>' : "") + "<time>" + escapeHtml(timeText(m.at)) + "</time></div>" +
         stepsHtml(m.steps, "steps-" + m.id, false) + (m.content ? '<div class="msg-body">' + renderMarkdown(m.content) + "</div>" : "") + (m.role === "user" && sentImages(m) ? '<div data-sent-imgs="' + escapeHtml(m.id) + '"></div>' : "") + (m.role === "assistant" ? changesHtml(m) : "") + "</article>";
     }
+    function newerMac() { return !!(cs.snap && cs.snap.session.remoteModes === true); }
     function approvalHtml(p) {
       if (p.tool === "cost_check") return costCheckHtml(p);
       var q = p.tool === "run_shell" ? "Run this command?" : "Allow " + p.tool + "?";
       var choices;
+      var forSession = p.approvable && p.allowSession && newerMac();
+      var note = !p.approvable ? p.message || "Approve it on the Mac." : forSession ? "Allow covers this call only. Allow for this session also runs " + p.allowSession + " without asking until the session ends." : "Allows this call only. Always-allow rules are set on the Mac.";
       if (!canDrive()) choices = '<span class="on-mac">Answer on your Mac' + (cs.machine && cs.machine.online ? "" : " (it's offline)") + "</span>";
-      else choices = (p.approvable ? '<button type="button" class="primary sm" data-approve="' + escapeHtml(p.callId) + '">Allow</button>' : "") + '<button type="button" class="sm danger" data-deny="' + escapeHtml(p.callId) + '">Deny</button>' +
-        '<span class="on-mac">' + escapeHtml(p.approvable ? "Allows this call only. Always-allow rules are set on the Mac." : p.message || "Approve it on the Mac.") + "</span>";
+      else choices = (p.approvable ? '<button type="button" class="primary sm" data-approve="' + escapeHtml(p.callId) + '">Allow</button>' : "") +
+        (forSession ? '<button type="button" class="sm" data-allow-session="' + escapeHtml(p.callId) + '" title="' + escapeHtml("Also runs " + p.allowSession + " without asking until this session ends") + '">Allow for this session</button>' : "") +
+        '<button type="button" class="sm danger" data-deny="' + escapeHtml(p.callId) + '">Deny</button>' +
+        '<span class="on-mac">' + escapeHtml(note) + "</span>";
       return '<div class="ask-card" role="group" aria-label="' + escapeHtml(q) + '"><div class="ask-q">' + escapeHtml(q) + '</div><div class="ask-tool"><span class="s-tool">' + escapeHtml(p.tool) + "</span> " + escapeHtml(p.detail) + "</div>" +
         (p.command ? "<code>" + escapeHtml(p.command) + "</code>" : "") + '<div class="ask-choices">' + choices + "</div></div>";
     }
@@ -98,14 +106,22 @@ export const CODE_SESSION_JS = String.raw`
       c.textContent = chip.text;
       c.className = "chip tone-" + chip.tone;
       var project = s ? s.projectName : cs.machine && cs.summary ? ((cs.machine.projects.find(function(p) { return p.projectId === cs.summary.projectId; }) || {}).name || "") : "";
-      var bits = [cs.machine ? cs.machine.name + (cs.machine.online ? "" : " (offline)") : "", project + (s && s.branch ? " · " + s.branch : ""), s ? s.model : "", s && s.cSats ? Number(s.cSats).toLocaleString() + " cSats so far" : ""].filter(Boolean);
+      // The mode is always shown here, whether or not this page can change it.
+      var curMode = s ? s.mode : cs.summary && cs.summary.mode;
+      var bits = [cs.machine ? cs.machine.name + (cs.machine.online ? "" : " (offline)") : "", project + (s && s.branch ? " · " + s.branch : ""), s ? s.model : "", curMode ? "Mode: " + codeModeLabel(curMode) : "", s && s.cSats ? Number(s.cSats).toLocaleString() + " cSats so far" : ""].filter(Boolean);
       document.getElementById("csMeta").textContent = bits.join(" · ");
+      var allowed = document.getElementById("csAllowed");
+      var labels = s && s.allowances ? s.allowances : [];
+      allowed.textContent = labels.length ? "Allowed this session without asking: " + labels.join(", ") : "";
+      allowed.hidden = !labels.length;
       var drive = canDrive() && !!cs.snap;
       var mode = document.getElementById("csMode");
       mode.hidden = !drive;
       if (drive) {
         var cur = s.mode;
-        mode.innerHTML = CODE_MODES.map(function(o) { return '<option value="' + escapeHtml(o[0]) + '"' + (o[0] === cur ? " selected" : "") + ' title="' + escapeHtml(o[2]) + '">' + escapeHtml(o[1]) + "</option>"; }).join("") + (cur === "auto" ? '<option value="auto" selected disabled>Auto (set on the Mac)</option>' : "") + (cur === "full" ? '<option value="full" selected disabled>Full access (set on the Mac)</option>' : "");
+        var opts = newerMac() ? CODE_MODES.concat(CODE_MORE_MODES) : CODE_MODES;
+        mode.innerHTML = opts.map(function(o) { return '<option value="' + escapeHtml(o[0]) + '"' + (o[0] === cur ? " selected" : "") + ' title="' + escapeHtml(o[2]) + '">' + escapeHtml(o[1]) + "</option>"; }).join("") +
+          (!newerMac() && cur === "auto" ? '<option value="auto" selected disabled>Auto (set on the Mac)</option>' : "") + (!newerMac() && cur === "full" ? '<option value="full" selected disabled>Full access (set on the Mac)</option>' : "");
         mode.disabled = cs.busy;
       }
       var active = isActive();
@@ -294,9 +310,10 @@ export const CODE_SESSION_JS = String.raw`
         if (d.open && d.getAttribute("data-turn")) loadChanges(d.getAttribute("data-turn"), d);
       }, true);
       thread.addEventListener("click", function(e) {
-        var t = e.target.closest && e.target.closest("[data-approve],[data-deny],[data-plan],[data-unqueue]");
+        var t = e.target.closest && e.target.closest("[data-approve],[data-allow-session],[data-deny],[data-plan],[data-unqueue]");
         if (!t || cs.busy) return;
         if (t.hasAttribute("data-approve")) act("Allowed", "approve", { callId: t.getAttribute("data-approve"), approved: true });
+        else if (t.hasAttribute("data-allow-session")) act("Allowed for this session", "approve", { callId: t.getAttribute("data-allow-session"), approved: true, scope: "session" });
         else if (t.hasAttribute("data-deny")) act("Denied", "approve", { callId: t.getAttribute("data-deny"), approved: false });
         else if (t.hasAttribute("data-plan")) act("Plan approved", "plan", { mode: t.getAttribute("data-plan") === "auto-edits" ? "auto-edits" : "ask" });
         else act("Removed from the queue", "unqueue", { queuedId: t.getAttribute("data-unqueue") });
@@ -310,9 +327,16 @@ export const CODE_SESSION_JS = String.raw`
         act("Undone", "undo", { turnId: turn });
       });
       document.getElementById("csRefresh").addEventListener("click", function() { cs.kick = 1; tick(); });
+      var fullDialog = document.getElementById("csFullDialog");
       document.getElementById("csMode").addEventListener("change", function(e) {
         var v = e.target.value;
-        if (v === "ask" || v === "auto-edits" || v === "plan") act("Mode: " + codeModeLabel(v), "settings", { mode: v });
+        if (v === "ask" || v === "auto-edits" || v === "plan" || (v === "auto" && newerMac())) act("Mode: " + codeModeLabel(v), "settings", { mode: v });
+        // Full access: only after the confirm dialog (the Mac refuses it without confirmFull).
+        else if (v === "full" && newerMac()) { fullDialog.returnValue = ""; fullDialog.showModal(); }
+      });
+      fullDialog.addEventListener("close", function() {
+        if (fullDialog.returnValue === "full") act("Mode: Full access", "settings", { mode: "full", confirmFull: true });
+        else { cs.sig = ""; paint(); }
       });
       var input = document.getElementById("csInput");
       cs.imgs = imageAttach({ input: input, drop: document.querySelector("#codeSession .composer"), tray: document.getElementById("csImgs"), button: document.getElementById("csAttach"), file: document.getElementById("csFile") });

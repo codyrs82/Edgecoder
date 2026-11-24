@@ -109,7 +109,7 @@ export function machinesPageScript(): string {
         (m.connected ? statusBadge("CONNECTED", "ok") : statusBadge("OFFLINE", "warn")) + " " +
         (st ? (st.remoteControl === "on" ? statusBadge("REMOTE CONTROL ON", "info") : statusBadge("VIEW ONLY", "warn")) : "") +
         (m.version ? " <span class='muted'>v" + escapeHtml(m.version) + "</span>" : "") +
-        (m.updateAvailable ? " " + "<span title='The host updates itself within 6 hours (automatic updates), or now with: sudo edgecoder-install update'>" + statusBadge("UPDATE AVAILABLE" + (machinesData && machinesData.latestAgentVersion ? " (" + escapeHtml(machinesData.latestAgentVersion) + ")" : ""), "warn") + "</span>" : "") + "</div>";
+        (m.updateAvailable ? " " + "<span title='The host updates itself within about an hour (automatic updates), or now with: sudo edgecoder-install update'>" + statusBadge("UPDATE AVAILABLE" + (machinesData && machinesData.latestAgentVersion ? " (" + escapeHtml(machinesData.latestAgentVersion) + ")" : ""), "warn") + "</span>" : "") + "</div>";
       if (!st) {
         return "<div class='set-card u-mt-10'>" + head + "<div class='muted'>No report yet. The machine reports when it connects (agents from this release on).</div></div>";
       }

@@ -42,4 +42,13 @@ describe("bot ask cards", () => {
     const [done] = askCards([{ type: "tool_call", id: "c1", tool: "write_file", args, requires_approval: true, approval_status: "approved" }], "Harry");
     expect(done.call).toBeUndefined();
   });
+
+  it("a waiting card offers Allow for this run with what it covers, never on a web-page guard ask", () => {
+    const call = { type: "tool_call", id: "c2", tool: "run_shell", args: { command: "npm test" }, requires_approval: true, allow_session: "npm test commands" };
+    expect(askCards([call], "Harry")[0].allowSession).toBe("npm test commands");
+    expect(askCards([{ ...call, approval_status: "approved" }], "Harry")[0].allowSession).toBeUndefined();
+    const [guarded] = askCards([{ ...call, web_guard: true }], "Harry");
+    expect(guarded.webGuard).toBe(true);
+    expect(guarded.allowSession).toBeUndefined();
+  });
 });

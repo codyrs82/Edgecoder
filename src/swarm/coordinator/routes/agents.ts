@@ -72,6 +72,7 @@ import { attestAgentSigningKey } from "../attested-keys.js";
 import { sanitizeLanAddresses } from "../../lan-proximity.js";
 import { noteAgentMemory } from "../memory-admission.js";
 import { meshWsAgentRegistered } from "../mesh-ws-bindings.js";
+import { agentUpdateHint } from "../agent-update-hint.js";
 import {
   registerSchema,
   defaultPolicy,
@@ -313,7 +314,9 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       // every request with their own key (docs/security/agent-threat-model.md).
       hardwareVerification: verificationSummary(hardwareRecord),
       // #63: BLE credit transactions sign the reward account; tell the agent which one we resolve.
-      rewardAccountId: await rewardAccountForAgent(body.agentId)
+      rewardAccountId: await rewardAccountForAgent(body.agentId),
+      // A newer agent release: the agent asks its own updater to check now (agent-update-hint.ts).
+      ...agentUpdateHint(body.version)
     });
   });
 
@@ -465,7 +468,8 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       blacklist: {
         version: mutable.blacklistVersion,
         agents: [...blacklistByAgent.keys()]
-      }
+      },
+      ...agentUpdateHint(agentCapabilities.get(body.agentId)?.version)
     });
   });
 

@@ -343,8 +343,9 @@ account can reach is set up.
 ## Updates
 
 Hosts installed with `install.sh` (Linux, and macOS without the `.pkg`) **update themselves**:
-nobody has to re-run the installer for a fix. Every 6 hours (plus a random delay of up to an hour,
-so a fleet does not restart at once) the host runs `edgecoder-install update`, which:
+nobody has to re-run the installer for a fix. Every hour (plus a random delay of up to 10 minutes,
+so a fleet does not restart at once), and within minutes of a release when the coordinator
+announces it (the **nudge**, below), the host runs `edgecoder-install update`, which:
 
 1. asks GitHub for the newest published, non-prerelease `agent-v*` release and stops if it is not
    newer than the installed one (it never downgrades);
@@ -385,10 +386,46 @@ disables the timer); `--auto-update on` turns them back on. `EDGECODER_AUTO_UPDA
 
 | Platform | Schedule |
 | --- | --- |
-| Linux | `edgecoder-update.timer` (every 6 h, `RandomizedDelaySec=1h`, `Persistent=true`) starts `edgecoder-update.service`, a root oneshot. |
-| macOS | `/Library/LaunchDaemons/io.edgecoder.update.plist` (root, every 6 h, up to 1 h of jitter inside the run). |
+| Linux | `edgecoder-update.timer` (`OnCalendar=hourly`, `RandomizedDelaySec=10min`, `Persistent=true`) starts `edgecoder-update.service`, a root oneshot. `edgecoder-update.path` starts the same service when an agent asks (the nudge). |
+| macOS | `/Library/LaunchDaemons/io.edgecoder.update.plist` (root, every hour, up to 10 min of jitter inside the run when there is something to install; `WatchPaths` on the agents' request files for the nudge). |
 | Windows | Not yet: the agents are scheduled tasks of the installing user and the app lives in `C:\Program Files`. Re-run `install.ps1` to update. |
 | `.deb`, `.pkg`, `.msi`, `--from-source` | No schedule: update them the way they were installed. |
+
+**The nudge: updates within minutes of a release.** Each coordinator looks up the newest
+published, non-prerelease `agent-v*` release on GitHub (in the background, at most every 10
+minutes; after a GitHub rate limit, not before its reset). When an agent registers or heartbeats
+with an older version, the answer carries `updateAvailable: "agent-v1.3.0"`. The agent (which runs
+unprivileged) then waits a random 0 to 10 minutes, so a fleet does not restart at once, and writes
+`update-request` in its own state directory (`/var/lib/edgecoder/agent-<n>/update-request`). The
+path unit (Linux) or `WatchPaths` (macOS) starts the usual root update run above, early. That is
+all a nudge can do:
+
+- the updater never reads the request file and never takes a version from the coordinator: it asks
+  GitHub itself and installs only a release signed by the pinned key, with all the steps above
+  (waiting for running work, `plan --keep-config`, health check, rollback);
+- the agent ignores a hint that is not a plain `agent-vX.Y.Z` newer than what it runs (never equal
+  or older), and asks at most once every 30 minutes whatever the coordinator says;
+- the updater does nothing (not even the GitHub call) when it checked less than 5 minutes ago, so
+  even an agent that writes the file nonstop causes at most 12 extra checks an hour;
+- after GitHub answers 403 or 429 (rate limit; unauthenticated calls are limited to 60 an hour per
+  IP, and a host makes about one an hour), scheduled runs wait until GitHub's reset (at least 15
+  minutes, at most 6 hours) and record that in `update-state.json`.
+
+A run that finds nothing newer stops there: agents are only drained and restarted when a newer,
+verified release is installed. With automatic updates off (`EDGECODER_AUTO_UPDATE=off`) the agent
+does not ask, the path unit (Linux) is disabled and the launchd job removed, and a run that starts
+anyway does nothing. A coordinator operator can turn the hint off with `AGENT_UPDATE_HINTS=off`.
+
+Worst case from a release to a host running it: about 10 minutes for the coordinator to see it,
+up to 10 minutes of agent delay (plus up to 10 minutes of jitter on macOS), then the update itself
+(up to 10 minutes waiting for running work, the download, 3 minutes of health check). Without a
+coordinator nudge, the hourly check gets it within 70 minutes. Agents still busy after 10 minutes
+are retried on the next hourly run.
+
+**Hosts on the 6-hour schedule** (installed before this change) move to the hourly schedule and the
+nudge with their next update, which still comes from the old timer (up to 7 hours). On macOS the
+new schedule is written then but launchd loads it at the next reboot or `sudo edgecoder-install
+apply` (an update cannot reload the job it runs in).
 
 How the agent is asked to finish its work: an installed agent writes `agent-status.json` in its
 own state directory (`/var/lib/edgecoder/agent-<n>`: registered, draining, running work) and handles
@@ -481,8 +518,8 @@ sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" bash install.sh --mesh-token "$MESH"
 | `--tokens-file PATH` | File of `AGENT_ID=TOKEN` lines. |
 | `--enroll API_KEY` | Portal API key (`eck_...`) or session token; `EDGECODER_API_KEY` is the same without the flag. Self-enrol each un-tokened instance and apply the registration token the portal returns, so install and enrolment happen in one run. |
 | `--model TAG` | Ollama model for every instance (default: the strongest that fits each instance's VRAM, see the table below; on a Mac or CPU host the recommended model for its memory). |
-| `--context-window N` | Context window (tokens, 2048 to 131072) every network call is served with: `AGENT_CONTEXT_WINDOW`. Default: sized by the model and the GPU's free VRAM (RAM without a discrete GPU). |
-| `--parallel N` | Parallel model calls per instance, 1 to 16: the agent's `AGENT_PARALLEL_INFERENCE` and the instance's Ollama `OLLAMA_NUM_PARALLEL`. Default: sized by VRAM and model. |
+| `--context-window N\|auto` | Context window (tokens, 2048 to 131072) every network call is served with: `AGENT_CONTEXT_WINDOW`. Default: sized by the model and the GPU's free VRAM (RAM without a discrete GPU). `auto` clears a value set earlier, so this and later runs size it again. |
+| `--parallel N\|auto` | Parallel model calls per instance, 1 to 16: the agent's `AGENT_PARALLEL_INFERENCE` and the instance's Ollama `OLLAMA_NUM_PARALLEL`. Default: sized by VRAM and model. `auto` clears a value set earlier. |
 | `--ollama-env KEY=VALUE` | Extra environment for every instance's Ollama server; repeatable (for example `OLLAMA_VULKAN=1` for AMD cards ROCm does not support). Recorded in `EDGECODER_INSTALL_ARGS` and kept by later runs and updates; `KEY=` removes one. Systemd drop-ins in `edgecoder-ollama-<n>.service.d/` also survive updates and win over these. |
 | `--keep-alive DUR` | How long Ollama keeps the model loaded after a call: a duration (`30m`, `1h30m`), seconds, or `-1` to never unload. Written as the agent's `AGENT_MODEL_KEEP_ALIVE` and the instance's Ollama `OLLAMA_KEEP_ALIVE`. Default `30m`. |
 | `--engine ollama\|vllm\|mlx` | Engine that serves each instance's model ([inference engines](inference-engines.md)). `vllm` (Linux, NVIDIA): `edgecoder-vllm@<n>` serves it and the instance's Ollama stays off. `mlx` (Apple silicon): you run `mlx_lm.server`. Default: every instance keeps the engine it runs now (Ollama on a first install), so re-runs and upgrades never switch engines. |
@@ -516,6 +553,12 @@ The tuning flags (`--context-window`, `--parallel`, `--keep-alive`) are recorded
 env file (`EDGECODER_INSTALL_TUNING`). A later run without them, such as a package upgrade's
 `apply --from-package`, keeps the recorded values; pass a flag again to change its value. Edit
 them through the flags rather than in the env file, which every run rewrites.
+
+To go back to automatic sizing after pinning a value, pass `auto`: for example
+`sudo edgecoder-install apply --keep-config --context-window auto` removes `AGENT_CONTEXT_WINDOW`
+from every instance's env file and from the record, so later runs and updates keep sizing it
+(`--parallel auto` does the same for the parallel count). A context window applied from the portal
+is a separate override; see [Where changes are kept](#changing-models-from-the-portal).
 
 Environment defaults: `EDGECODER_COORDINATOR_URL`, `EDGECODER_PORTAL_URL`,
 `EDGECODER_MESH_TOKEN`, `EDGECODER_REGISTRATION_TOKEN`, `EDGECODER_ENROLL_TOKEN`,
@@ -555,6 +598,9 @@ directory, mode 0600) and are layered over the env file at startup. Each entry r
 it replaced; if that value later changes (you edit the env file, or re-run the installer with
 `--model`, `--context-window`, `--parallel` or `--keep-alive`), **the local value wins** and the
 remote one is dropped. Delete the file and restart the agent to return to the env file alone.
+`--context-window auto` (or `--parallel auto`) also removes that setting's portal override from
+every instance's `model-overrides.json` before the agents restart, so the value is sized
+automatically again; other portal choices in the file (such as the model) stay.
 An `update` (`apply --keep-config`) keeps the env file's model, so a model chosen in the portal stays
 in force through updates. A model loaded by hand (`ollama run`) is not the agent's model: press
 **Use** on it in the portal, or run `sudo edgecoder-install apply --keep-config --model <tag>`.

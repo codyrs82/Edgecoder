@@ -18,7 +18,8 @@
  *   identity key, down the agent's authenticated mesh WebSocket; pinned key, own agent id, 2-minute
  *   lifetime, replay cache; AGENT_CODE_RELAY; local rate limits) -> provider
  *   (/v1/ide/code/remote/command, IDE token; the account signed in on the Mac must be the one that
- *   asked; trusted folders only; the session's remote rules; Auto mode is set on the Mac only).
+ *   asked; trusted folders only; the session's remote rules; Auto and Full access only for the
+ *   session's owner, Full access with an explicit confirm, noted in the session and the audit).
  *   The agent reports each result back with a signed request; the portal polls for it, and only the
  *   account that asked can read it.
  *
@@ -136,8 +137,12 @@ export const codeImagesSchema = z
 export const projectIdSchema = z.string().regex(/^[0-9a-f]{16}$/);
 const sessionId = z.string().uuid();
 const turnId = z.string().uuid();
-// "auto" passes the schema only so the Mac can refuse it with a clear message (Auto is set on the Mac).
-const mode = z.enum(["ask", "auto-edits", "plan", "auto"]);
+// Newer Macs (a session summary with `remoteModes: true`) take "auto" and "full" from the owner
+// ("full" only with `confirmFull: true`, never on "create"); older Macs refuse both.
+const mode = z.enum(["ask", "auto-edits", "plan", "auto", "full"]);
+/** Which app sent a command: set by the portal from the request, never by the client (audit and labels only). */
+export const codeClientSchema = z.enum(["web", "iphone"]);
+export type CodeClient = z.infer<typeof codeClientSchema>;
 const model = z.string().min(1).max(200);
 
 /** Every action of code-remote.ts, with its arguments (never `requestedBy`: the frame names it). */
@@ -157,11 +162,12 @@ export const codeControlRequestSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("create"), args: z.object({ projectId: projectIdSchema, title: z.string().max(120).optional(), model: model.optional(), mode: mode.optional() }).strict() }).strict(),
   // `attachments`: images from the web (newer Macs only; the session summary says `images: true`).
   z.object({ action: z.literal("message"), args: z.object({ sessionId, text: z.string().min(1).max(32_000), attachments: codeImagesSchema.optional() }).strict() }).strict(),
-  z.object({ action: z.literal("approve"), args: z.object({ sessionId, callId: z.string().min(1).max(200), approved: z.boolean() }).strict() }).strict(),
+  // `scope: "session"`: "Allow for this session" (newer Macs only, `remoteModes: true`).
+  z.object({ action: z.literal("approve"), args: z.object({ sessionId, callId: z.string().min(1).max(200), approved: z.boolean(), scope: z.enum(["once", "session"]).optional(), via: codeClientSchema.optional() }).strict() }).strict(),
   z.object({ action: z.literal("cancel"), args: z.object({ sessionId }).strict() }).strict(),
   z.object({ action: z.literal("undo"), args: z.object({ sessionId, turnId: turnId.optional() }).strict() }).strict(),
   z.object({ action: z.literal("plan"), args: z.object({ sessionId, mode: z.enum(["ask", "auto-edits"]).optional() }).strict() }).strict(),
-  z.object({ action: z.literal("settings"), args: z.object({ sessionId, title: z.string().max(120).optional(), model: model.optional(), mode: mode.optional() }).strict() }).strict(),
+  z.object({ action: z.literal("settings"), args: z.object({ sessionId, title: z.string().max(120).optional(), model: model.optional(), mode: mode.optional(), confirmFull: z.literal(true).optional(), via: codeClientSchema.optional() }).strict() }).strict(),
   z.object({ action: z.literal("unqueue"), args: z.object({ sessionId, queuedId: z.string().uuid() }).strict() }).strict()
 ]);
 export type CodeControlRequest = z.infer<typeof codeControlRequestSchema>;
@@ -170,6 +176,13 @@ export type CodeControlRequest = z.infer<typeof codeControlRequestSchema>;
 export function codeRequestTargets(request: CodeControlRequest): { sessionId?: string; projectId?: string } {
   const a = request.args as { sessionId?: string; projectId?: string };
   return { ...(a.sessionId ? { sessionId: a.sessionId } : {}), ...(a.projectId ? { projectId: a.projectId } : {}) };
+}
+
+/** A permission change a request makes, for the audit log: the mode it sets, "Allow for this session", and the app. */
+export function codeRequestPermission(request: CodeControlRequest): { mode?: string; scope?: "session"; via?: CodeClient } {
+  const a = request.args as { mode?: string; scope?: string; via?: CodeClient };
+  const mode = request.action === "settings" || request.action === "create" ? a.mode : undefined;
+  return { ...(mode ? { mode } : {}), ...(request.action === "approve" && a.scope === "session" ? { scope: "session" as const } : {}), ...(a.via ? { via: a.via } : {}) };
 }
 
 export interface CodeControlCommand {

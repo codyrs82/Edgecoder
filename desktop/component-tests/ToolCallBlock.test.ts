@@ -83,3 +83,53 @@ describe("ToolCallBlock approval", () => {
     expect(screen.getByRole("button", { name: "Allow" })).toBeTruthy();
   });
 });
+
+describe("ToolCallBlock Allow for this session", () => {
+  const ask = { tool: "run_shell", args: { command: "npm test" }, requiresApproval: true, status: "pending" as const, onApprove: vi.fn(), onReject: vi.fn() };
+
+  it("offers Allow for this session with what it covers, and answers with it", async () => {
+    const onSession = vi.fn();
+    const onApprove = vi.fn();
+    render(ToolCallBlock, { ...ask, id: "s1", onApprove, allowSession: "npm test commands", onSession, allowRule: "npm test:*", onAlways: vi.fn() });
+    const btn = screen.getByRole("button", { name: "Allow for this session: npm test commands" });
+    expect(btn.getAttribute("type")).toBe("button");
+    expect(btn.getAttribute("title")).toBe("Also runs npm test commands without asking until this session ends. Never covers pushes, pull requests, secrets, files outside the project or refused commands.");
+    // Between Allow and Always allow; the project-wide button stays.
+    const names = screen.getAllByRole("button").map((b) => b.textContent!.trim());
+    expect(names.indexOf("Allow")).toBeLessThan(names.indexOf("Allow for this session: npm test commands"));
+    expect(screen.getByRole("button", { name: /Always allow npm test … in this project/ })).toBeTruthy();
+    await fireEvent.click(btn);
+    expect(onSession).toHaveBeenCalledWith("s1");
+    expect(onApprove).not.toHaveBeenCalled();
+  });
+
+  it("says Allow for this run for a bot's run", () => {
+    render(ToolCallBlock, { ...ask, id: "s2", allowSession: "edits inside the project", onSession: vi.fn(), sessionScope: "run" });
+    const btn = screen.getByRole("button", { name: "Allow for this run: edits inside the project" });
+    expect(btn.getAttribute("title")).toContain("until this run ends.");
+  });
+
+  it("is not offered on a web-page guard ask, without a label or without a handler", () => {
+    render(ToolCallBlock, { ...ask, id: "s3", allowSession: "npm test commands", onSession: vi.fn(), webGuard: true, onForRun: vi.fn() });
+    expect(screen.queryByTestId("allow-session")).toBeNull();
+    expect(screen.getByRole("button", { name: "Allow for the rest of this run" })).toBeTruthy();
+    cleanup();
+    render(ToolCallBlock, { ...ask, id: "s4", onSession: vi.fn() });
+    expect(screen.queryByTestId("allow-session")).toBeNull();
+    cleanup();
+    render(ToolCallBlock, { ...ask, id: "s5", allowSession: "npm test commands" });
+    expect(screen.queryByTestId("allow-session")).toBeNull();
+  });
+
+  it("notes a call that ran because of an earlier Allow for this session", () => {
+    render(ToolCallBlock, { id: "s6", tool: "run_shell", args: { command: "npm test" }, requiresApproval: false, status: "completed", result: "ok", sessionAllowed: "npm test commands" });
+    const note = screen.getByTestId("session-allowed");
+    expect(note.textContent).toBe("Allowed for this session");
+    expect(note.getAttribute("title")).toContain("npm test commands");
+  });
+
+  it("has no note on a call that was not session-allowed", () => {
+    render(ToolCallBlock, { id: "s7", tool: "run_shell", args: { command: "npm test" }, requiresApproval: false, status: "completed", result: "ok" });
+    expect(screen.queryByTestId("session-allowed")).toBeNull();
+  });
+});

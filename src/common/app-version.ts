@@ -17,6 +17,11 @@ export function appVersion(): string {
   return cached;
 }
 
+/** A signed agent release (its edgecoder-release.json names an agent-v tag): what `edgecoder-install update` updates. */
+export function isReleaseInstall(): boolean {
+  return releaseTagVersion(readText(new URL("../../edgecoder-release.json", import.meta.url))) !== undefined;
+}
+
 function readText(url: URL): string | undefined {
   try {
     return readFileSync(url, "utf8");

@@ -45,8 +45,12 @@ struct CodeAPI {
         _ = try await backend.run(agentId: agentId, action: "message", args: ["sessionId": .string(sessionId), "text": .string(text)])
     }
 
-    func approve(agentId: String, sessionId: String, callId: String, approved: Bool) async throws {
-        _ = try await backend.run(agentId: agentId, action: "approve", args: ["sessionId": .string(sessionId), "callId": .string(callId), "approved": .bool(approved)])
+    /// `forSession`: "Allow for this session" (newer Macs): later calls of the same kind run without
+    /// asking until the session ends. A plain answer sends no scope.
+    func approve(agentId: String, sessionId: String, callId: String, approved: Bool, forSession: Bool = false) async throws {
+        var args: [String: CodeJSON] = ["sessionId": .string(sessionId), "callId": .string(callId), "approved": .bool(approved)]
+        if approved && forSession { args["scope"] = .string("session") }
+        _ = try await backend.run(agentId: agentId, action: "approve", args: args)
     }
 
     func cancel(agentId: String, sessionId: String) async throws {
@@ -64,8 +68,12 @@ struct CodeAPI {
         _ = try await backend.run(agentId: agentId, action: "plan", args: ["sessionId": .string(sessionId), "mode": .string(mode == .autoEdits ? "auto-edits" : "ask")])
     }
 
-    func setMode(agentId: String, sessionId: String, mode: CodeMode) async throws {
-        _ = try await backend.run(agentId: agentId, action: "settings", args: ["sessionId": .string(sessionId), "mode": .string(mode.rawValue)])
+    /// Full access goes through only with `confirmFull` (after the confirm alert); the Mac refuses
+    /// it otherwise ("confirm_full").
+    func setMode(agentId: String, sessionId: String, mode: CodeMode, confirmFull: Bool = false) async throws {
+        var args: [String: CodeJSON] = ["sessionId": .string(sessionId), "mode": .string(mode.rawValue)]
+        if mode == .full && confirmFull { args["confirmFull"] = .bool(true) }
+        _ = try await backend.run(agentId: agentId, action: "settings", args: args)
     }
 
     func unqueue(agentId: String, sessionId: String, queuedId: String) async throws {

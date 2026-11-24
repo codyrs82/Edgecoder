@@ -21,10 +21,10 @@ export interface InstallOptions {
   /** Portal API key (eck_...) or session token: self-enrol every instance that has no --token and apply the returned registration token. */
   enrollToken?: string;
   model?: string;
-  /** Tuning: the context window every network call is served with (AGENT_CONTEXT_WINDOW). */
-  contextWindow?: number;
-  /** Tuning: parallel model calls per instance (AGENT_PARALLEL_INFERENCE and Ollama's OLLAMA_NUM_PARALLEL). */
-  parallel?: number;
+  /** Tuning: the context window every network call is served with (AGENT_CONTEXT_WINDOW). "auto": clear a pinned value. */
+  contextWindow?: number | "auto";
+  /** Tuning: parallel model calls per instance (AGENT_PARALLEL_INFERENCE and Ollama's OLLAMA_NUM_PARALLEL). "auto": clear a pinned value. */
+  parallel?: number | "auto";
   /** Tuning: how long Ollama keeps the model loaded (AGENT_MODEL_KEEP_ALIVE and OLLAMA_KEEP_ALIVE). */
   keepAlive?: string;
   /**
@@ -117,8 +117,8 @@ export const INSTALL_OPTIONS: OptionSpec[] = [
   { flag: "--tokens-file", arg: "PATH", description: "File of AGENT_ID=TOKEN lines (one per instance)." },
   { flag: "--enroll", arg: "API_KEY", description: "Portal API key (eck_..., Settings → API keys; or a portal session token; or set EDGECODER_API_KEY): self-enrol each un-tokened instance with the portal and apply the registration token it returns." },
   { flag: "--model", arg: "TAG", description: "Ollama model for every instance (default: the strongest that fits each instance's VRAM: 30B coder per 48 GB card, qwen3-coder-next on 80 GB+, qwen3:235b on 160 GB+, qwen3-coder:480b on 320 GB+)." },
-  { flag: "--context-window", arg: "N", description: "Context window (tokens, 2048-131072) every network call is served with (AGENT_CONTEXT_WINDOW). Default: sized by the model and the GPU's free VRAM (RAM without a discrete GPU)." },
-  { flag: "--parallel", arg: "N", description: "Parallel model calls per instance, 1-16 (AGENT_PARALLEL_INFERENCE and the instance's OLLAMA_NUM_PARALLEL). Default: sized by VRAM and model." },
+  { flag: "--context-window", arg: "N|auto", description: "Context window (tokens, 2048-131072) every network call is served with (AGENT_CONTEXT_WINDOW). Default: sized by the model and the GPU's free VRAM (RAM without a discrete GPU). auto clears a value set earlier, so later runs and updates size it again." },
+  { flag: "--parallel", arg: "N|auto", description: "Parallel model calls per instance, 1-16 (AGENT_PARALLEL_INFERENCE and the instance's OLLAMA_NUM_PARALLEL). Default: sized by VRAM and model. auto clears a value set earlier." },
   { flag: "--keep-alive", arg: "DUR", description: "How long Ollama keeps the model loaded after a call: a duration (30m, 1h30m), seconds, or -1 for always (AGENT_MODEL_KEEP_ALIVE and OLLAMA_KEEP_ALIVE). Default 30m." },
   { flag: "--ollama-env", arg: "KEY=VALUE", description: "Extra environment for every instance's Ollama server, repeatable (e.g. --ollama-env OLLAMA_VULKAN=1 --ollama-env GGML_VK_VISIBLE_DEVICES=0,1 for AMD cards ROCm does not support). Kept by later runs and updates; KEY= removes one. Settings in a systemd drop-in (/etc/systemd/system/edgecoder-ollama-<n>.service.d/*.conf) also survive updates and win over these." },
   { flag: "--engine", arg: "ollama|vllm|mlx", description: "Engine that serves each instance's model (docs/inference-engines.md). vllm: Linux NVIDIA hosts, edgecoder-vllm@<n> serves the model and the instance's Ollama stays off. mlx: Apple silicon, you run mlx_lm.server. Default: each instance keeps the engine it runs now (Ollama on a first install), so re-runs and upgrades never switch engines." },
@@ -205,8 +205,8 @@ export function parseInstallArgs(argv: string[], env: NodeJS.ProcessEnv = {}): I
       case "--tokens-file": o.tokensFile = val(); break;
       case "--enroll": o.enrollToken = val(); break;
       case "--model": o.model = val(); break;
-      case "--context-window": o.contextWindow = checkContextWindow(val()); break;
-      case "--parallel": o.parallel = checkParallel(val()); break;
+      case "--context-window": { const v = val(); o.contextWindow = v === "auto" ? "auto" : checkContextWindow(v); break; }
+      case "--parallel": { const v = val(); o.parallel = v === "auto" ? "auto" : checkParallel(v); break; }
       case "--keep-alive": o.keepAlive = checkKeepAlive(val()); break;
       case "--ollama-env": {
         const [k, v] = checkOllamaEnv(val());
@@ -265,12 +265,12 @@ const KEEP_ALIVE_PATTERN = /^(-1|\d{1,7}|(\d{1,5}(\.\d{1,3})?(ms|s|m|h)){1,4})$/
 
 function checkContextWindow(v: string): number {
   const n = Number(v);
-  if (!Number.isInteger(n) || n < CONTEXT_WINDOW_RANGE[0] || n > CONTEXT_WINDOW_RANGE[1]) throw new Error(`--context-window must be a whole number of tokens from ${CONTEXT_WINDOW_RANGE[0]} to ${CONTEXT_WINDOW_RANGE[1]}`);
+  if (!Number.isInteger(n) || n < CONTEXT_WINDOW_RANGE[0] || n > CONTEXT_WINDOW_RANGE[1]) throw new Error(`--context-window must be auto or a whole number of tokens from ${CONTEXT_WINDOW_RANGE[0]} to ${CONTEXT_WINDOW_RANGE[1]}`);
   return n;
 }
 function checkParallel(v: string): number {
   const n = Number(v);
-  if (!Number.isInteger(n) || n < PARALLEL_RANGE[0] || n > PARALLEL_RANGE[1]) throw new Error(`--parallel must be a whole number from ${PARALLEL_RANGE[0]} to ${PARALLEL_RANGE[1]}`);
+  if (!Number.isInteger(n) || n < PARALLEL_RANGE[0] || n > PARALLEL_RANGE[1]) throw new Error(`--parallel must be auto or a whole number from ${PARALLEL_RANGE[0]} to ${PARALLEL_RANGE[1]}`);
   return n;
 }
 function checkKeepAlive(v: string): string {
@@ -309,8 +309,9 @@ export const TUNING_ENV_KEY = "EDGECODER_INSTALL_TUNING";
 /** "context-window:32768,parallel:8,keep-alive:-1" for the flags given; undefined when none was. */
 export function renderTuning(t: InstallTuning): string | undefined {
   const parts: string[] = [];
-  if (t.contextWindow !== undefined) parts.push(`context-window:${t.contextWindow}`);
-  if (t.parallel !== undefined) parts.push(`parallel:${t.parallel}`);
+  // "auto" is not recorded: the next run sizes the value again.
+  if (typeof t.contextWindow === "number") parts.push(`context-window:${t.contextWindow}`);
+  if (typeof t.parallel === "number") parts.push(`parallel:${t.parallel}`);
   if (t.keepAlive !== undefined) parts.push(`keep-alive:${t.keepAlive}`);
   return parts.length ? parts.join(",") : undefined;
 }
@@ -339,9 +340,11 @@ export function tuningFromEnvFile(text: string): InstallTuning {
 /**
  * Options for a re-run (a package upgrade runs `apply --from-package` with no tuning flags): every
  * tuning flag not given now takes the value the previous run recorded in `previousEnvFile`.
+ * `auto` drops the recorded value (and is resolved to unset), so the value is sized again.
  */
 export function inheritTuning(o: InstallOptions, previousEnvFile: string | undefined): InstallOptions {
-  if (!previousEnvFile) return { ...o, ...(o.ollamaEnv ? { ollamaEnv: effectiveOllamaEnv(o.ollamaEnv) } : {}) };
+  const pick = <T,>(now: T | "auto" | undefined, recorded: T | undefined): T | undefined => (now === "auto" ? undefined : now ?? recorded);
+  if (!previousEnvFile) return { ...o, contextWindow: pick(o.contextWindow, undefined), parallel: pick(o.parallel, undefined), ...(o.ollamaEnv ? { ollamaEnv: effectiveOllamaEnv(o.ollamaEnv) } : {}) };
   const prev = tuningFromEnvFile(previousEnvFile);
   // --ollama-env is kept by every re-run (not only --keep-config): losing OLLAMA_VULKAN=1 on a
   // package upgrade would put an AMD host back on its CPU. Given now: merged over the recorded
@@ -350,8 +353,8 @@ export function inheritTuning(o: InstallOptions, previousEnvFile: string | undef
   const merged = effectiveOllamaEnv({ ...(recorded ?? {}), ...(o.ollamaEnv ?? {}) });
   return {
     ...o,
-    contextWindow: o.contextWindow ?? prev.contextWindow,
-    parallel: o.parallel ?? prev.parallel,
+    contextWindow: pick(o.contextWindow, prev.contextWindow as number | undefined),
+    parallel: pick(o.parallel, prev.parallel as number | undefined),
     keepAlive: o.keepAlive ?? prev.keepAlive,
     ...(Object.keys(merged).length ? { ollamaEnv: merged } : { ollamaEnv: undefined })
   };
@@ -504,7 +507,7 @@ export function helpText(): string {
   for (const c of INSTALL_COMMANDS) lines.push(`  ${c.name.padEnd(10)} ${c.description}`);
   lines.push("", "Options (identical on macOS, Linux and Windows):");
   for (const o of INSTALL_OPTIONS) lines.push(`  ${(o.flag + (o.arg ? " " + o.arg : "")).padEnd(34)} ${o.description}`);
-  lines.push("", "Updates (Linux, macOS release installs): a timer runs `update --scheduled` every 6 hours; `sudo edgecoder-install update` updates now; `apply --auto-update off` turns the timer off.");
+  lines.push("", "Updates (Linux, macOS release installs): a timer runs `update --scheduled` every hour, and early when the coordinator announces a release; `sudo edgecoder-install update` updates now; `apply --auto-update off` turns the timer off.");
   lines.push("", "Environment: EDGECODER_COORDINATOR_URL, EDGECODER_PORTAL_URL, EDGECODER_MESH_TOKEN, EDGECODER_REGISTRATION_TOKEN, EDGECODER_ENROLL_TOKEN, EDGECODER_API_KEY (same as --enroll, kept out of shell history) set the defaults.");
   return lines.join("\n");
 }

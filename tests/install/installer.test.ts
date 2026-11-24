@@ -362,6 +362,30 @@ describe("tuning flags: --context-window, --parallel, --keep-alive", () => {
     expect(systemdOllamaUnit(p, plan.instances[0])).toContain('Environment="OLLAMA_KEEP_ALIVE=30m"');
   });
 
+  it("--context-window auto / --parallel auto clear a pinned value, and later runs keep it cleared", () => {
+    const pinned = planInstall(hw, parseInstallArgs(["apply", "--token", "t", "--context-window", "32768", "--parallel", "4", "--keep-alive", "2h"]), true);
+    expect(pinned.instances[0].env.AGENT_CONTEXT_WINDOW).toBe("32768");
+    const previous = renderEnvFile(pinned.instances[0].env);
+    // Without the flag (an update): the recorded value is restored.
+    const kept = inheritTuning(parseInstallArgs(["apply", "--keep-config"]), previous);
+    expect(planInstall(hw, { ...kept, tokens: { "*": "t" } }, true).instances[0].env.AGENT_CONTEXT_WINDOW).toBe("32768");
+    // auto: gone from the env file and the record; other tuning kept.
+    const auto = inheritTuning(parseInstallArgs(["apply", "--keep-config", "--context-window", "auto", "--parallel", "auto"]), previous);
+    expect([auto.contextWindow, auto.parallel, auto.keepAlive]).toEqual([undefined, undefined, "2h"]);
+    const cleared = planInstall(hw, { ...auto, tokens: { "*": "t" } }, true).instances[0].env;
+    expect(cleared.AGENT_CONTEXT_WINDOW).toBeUndefined();
+    expect(cleared.AGENT_PARALLEL_INFERENCE).toBe(planInstall(hw, parseInstallArgs(["apply", "--token", "t"]), true).instances[0].env.AGENT_PARALLEL_INFERENCE);
+    expect(cleared.EDGECODER_INSTALL_TUNING).toBe("keep-alive:2h");
+    // The next update (no flags) keeps it automatic.
+    const update = inheritTuning(parseInstallArgs(["apply", "--from-package", "--keep-config"]), renderEnvFile(cleared));
+    expect(planInstall(hw, { ...update, tokens: { "*": "t" } }, true).instances[0].env.AGENT_CONTEXT_WINDOW).toBeUndefined();
+    // auto with no previous env file, and planInstall given auto directly, also leave it unset.
+    expect(inheritTuning(parseInstallArgs(["apply", "--context-window", "auto"]), undefined).contextWindow).toBeUndefined();
+    expect(planInstall(hw, parseInstallArgs(["apply", "--token", "t", "--context-window", "auto"]), true).instances[0].env.AGENT_CONTEXT_WINDOW).toBeUndefined();
+    expect(() => parseInstallArgs(["apply", "--context-window", "1024"])).toThrow(/auto or a whole number/);
+    expect(() => parseInstallArgs(["apply", "--parallel", "automatic"])).toThrow(/auto or a whole number/);
+  });
+
   it("a re-run without the flags (a package upgrade) keeps the values the last run set", () => {
     const first = planInstall(hw, parseInstallArgs(["apply", "--token", "t", "--parallel", "8", "--keep-alive", "2h"]), true);
     const previous = renderEnvFile(first.instances[0].env);

@@ -55,6 +55,7 @@ import { normalizeRemoteUrl } from "./git-setup.js";
 import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
 import { decideToolCall, suggestToolRules, type Decision } from "./permission-policy.js";
+import { allowanceOffer, SessionAllowances, withAllowances } from "./session-allowances.js";
 import { ensureRepo as realEnsureRepo } from "./repo-connect.js";
 import { toolchainFailureHint } from "./toolchain.js";
 import { COMPUTE_POLICIES, FALLBACK_NOTE, NETWORK_CLASSES, isNetworkClass, type NetworkClass, routeLabel, routeModelId, routeSummary, type ComputePolicy, type PlanOptions, type Route } from "../../inference-api/auto-route.js";
@@ -459,6 +460,8 @@ export interface PendingCall {
   callId: string;
   tool: string;
   args: Record<string, unknown>;
+  /** "Allow for the rest of this run" may answer it: what later calls it lets run (session-allowances.ts). */
+  allowRun?: string;
 }
 
 export interface BotMessage {
@@ -620,6 +623,10 @@ export interface ApprovalEntry {
   tool: ToolName;
   args: Record<string, unknown>;
   owner?: string;
+  /** A Code view chat's "Allow for this session" key (session-allowances.ts); unset: not offered. */
+  allowanceKey?: string;
+  /** Asked only because a web page was read this run ("Allow for this session" isn't offered for it). */
+  webGuard?: boolean;
 }
 
 export class BotError extends Error {
@@ -950,6 +957,8 @@ export class BotManager {
   }
 
   readonly permissions: PermissionStore;
+  /** "Allow for the rest of this run" answers, per run (in memory; cleared when the run ends). */
+  private readonly runAllowances = new SessionAllowances();
 
   /** The bot's verdict on a call: its mode (read live, so a change applies to the next call), then the project's rules. */
   decide(id: string, tool: ToolName, args: Record<string, unknown>): Decision {
@@ -960,8 +969,11 @@ export class BotManager {
     const verdict = decideToolCall(tool, args, { mode: botMode(bot), root, rules: p.rules ?? [], legacyNames: p.shell, branch: () => branchOf(root), sandbox: this.deps.sandbox?.(root) === true }, (c) => riskOf(c, root));
     if (verdict.action === "refuse") return verdict;
     // A repo command in a folder that isn't a project, or a question it already had the answer to: refused with why.
-    const held = this.heldBack(bot, this.active.get(id), tool, args, verdict.action);
-    return held ? { action: "refuse", reason: held } : verdict;
+    const act = this.active.get(id);
+    const held = this.heldBack(bot, act, tool, args, verdict.action);
+    if (held) return { action: "refuse", reason: held };
+    // "Allow for the rest of this run" answers (session-allowances.ts): only ever turn an ask into a run.
+    return withAllowances(verdict, this.runAllowances, act ? `run:${act.run.id}` : null, tool, args, { root, branch: () => branchOf(root) });
   }
 
   private get file() {
@@ -1909,7 +1921,7 @@ export class BotManager {
       status,
       spentTodayCSats: Number(this.spentToday(bot.id).toFixed(6)),
       ...(lastRun ? { lastRun: { ...lastRun } } : {}),
-      pending: act ? [...act.pending.values()].map(({ callId, tool, args }) => ({ callId, tool, args })) : [],
+      pending: act ? [...act.pending.values()].map(({ callId, tool, args, allowRun }) => ({ callId, tool, args, ...(allowRun ? { allowRun } : {}) })) : [],
       queuedMessages: this.queued.get(bot.id) ?? 0,
       queuedEvents: this.queuedEvents.get(bot.id)?.length ?? 0,
       ...(act?.activity ? { activity: act.activity } : {}),
@@ -2172,7 +2184,7 @@ export class BotManager {
         };
         const timer = setTimeout(() => finish(false, "timeout"), APPROVAL_TIMEOUT_MS);
         timer.unref?.();
-        act.pending.set(callId, { callId, tool, args, finish, ...(ask?.webGuard ? { webGuard: true } : {}) });
+        act.pending.set(callId, { callId, tool, args, finish, ...(ask?.webGuard ? { webGuard: true } : {}), ...(ask?.allowSession && !ask.webGuard ? { allowRun: ask.allowSession } : {}) });
         this.approvals.set(callId, { resolve: finish, tool, args, owner, projectRoot: botWorkRoot(bot) });
         act.run.status = "needs_approval";
         act.activity = `Needs approval: ${tool}`;
@@ -2261,6 +2273,7 @@ export class BotManager {
     this.ending.add(ending);
     await ending;
     this.ending.delete(ending);
+    this.runAllowances.clear(`run:${act.run.id}`);
     this.active.delete(id);
     if (!this.bots.some((b) => b.id === id)) return;
     this.save();
@@ -2378,13 +2391,21 @@ export class BotManager {
 
   /**
    * Answer one of the bot's pending tool calls. `forRun` ("Allow for the rest of this run") lifts the
-   * web-page guard for the rest of this run; the phone never sends it (bot-remote.ts).
+   * web-page guard for the rest of this run; the phone never sends it (bot-remote.ts). `session`
+   * ("Allow for the rest of this run" on an ordinary ask): this call, and later calls of its kind
+   * in this run without asking (session-allowances.ts; never a web-page guard ask).
    */
-  approve(id: string, callId: string, approved: boolean, always = false, forRun = false): boolean {
+  approve(id: string, callId: string, approved: boolean, always = false, forRun = false, session = false): boolean {
     const bot = this.find(id);
-    const p = this.active.get(id)?.pending.get(callId);
+    const act = this.active.get(id);
+    const p = act?.pending.get(callId);
     // A frontier ask is answered only by its owner (answerFrontier).
-    if (!p || p.frontier) return false;
+    if (!act || !p || p.frontier) return false;
+    if (approved && session && !p.webGuard) {
+      const root = botWorkRoot(bot);
+      const offer = allowanceOffer(p.tool as ToolName, p.args, { root, branch: () => branchOf(root) });
+      if (offer) this.runAllowances.grant(`run:${act.run.id}`, offer);
+    }
     if (approved && always) {
       // "Always allow" keeps the command's rule for the bot's project (never a refused or always-ask command).
       const root = botWorkRoot(bot);
@@ -2788,8 +2809,8 @@ export function registerBotRoutes(app: FastifyInstance, bots: BotManager, deps: 
   app.post("/v1/ide/bots/:id/approve", (req, reply) =>
     handle(reply, () => {
       const id = idParams.parse(req.params).id;
-      const { callId, approved, always, forRun } = z.object({ callId: z.string().min(1).max(100), approved: z.boolean(), always: z.boolean().default(false), forRun: z.boolean().default(false) }).parse(req.body ?? {});
-      if (!bots.approve(id, callId, approved, always, forRun)) return reply.status(404).send({ error: "No pending approval with that id" });
+      const { callId, approved, always, forRun, session } = z.object({ callId: z.string().min(1).max(100), approved: z.boolean(), always: z.boolean().default(false), forRun: z.boolean().default(false), session: z.boolean().default(false) }).parse(req.body ?? {});
+      if (!bots.approve(id, callId, approved, always, forRun, session)) return reply.status(404).send({ error: "No pending approval with that id" });
       return { ok: true, bot: bots.get(id) };
     }),
   );

@@ -61,6 +61,8 @@ export function applyAgentEvent(turn: AgentTurn, event: IdeStreamEvent): { turn:
               ...(typeof event.runs_edited === "string" ? { runs_edited: event.runs_edited } : {}),
               ...(event.sandboxed === true ? { sandboxed: true } : {}),
               ...(typeof event.sandbox_retry === "string" ? { sandbox_retry: event.sandbox_retry } : {}),
+              ...(typeof event.allow_session === "string" && event.allow_session && event.web_guard !== true ? { allow_session: event.allow_session } : {}),
+              ...(typeof event.session_allowed === "string" && event.session_allowed ? { session_allowed: event.session_allowed } : {}),
               approval_status: (event.requires_approval ? "pending" : "approved") as "pending" | "approved",
             },
           ],

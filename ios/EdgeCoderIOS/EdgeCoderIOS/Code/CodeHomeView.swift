@@ -327,6 +327,10 @@ struct CodeSessionRow: View {
                     Text("·")
                     Text(session.updatedAt.formatted(.relative(presentation: .named, unitsStyle: .abbreviated)))
                 }
+                if let mode = session.modeLabel {
+                    Text("·")
+                    Text(mode).lineLimit(1).accessibilityLabel("Mode: \(mode)")
+                }
                 if session.startedFrom == "phone" {
                     Image(systemName: "iphone").accessibilityLabel("Started from your phone")
                 }
@@ -395,13 +399,13 @@ struct NewCodeSessionSheet: View {
                     }
                     Section {
                         Picker("Mode", selection: $mode) {
-                            ForEach(CodeMode.allCases) { Text($0.label).tag($0) }
+                            ForEach(CodeMode.basic) { Text($0.label).tag($0) }
                         }
                         .pickerStyle(.segmented)
                     } header: {
                         Text("Mode")
                     } footer: {
-                        Text(mode.explanation + " Auto mode is turned on from the Mac.")
+                        Text(mode.explanation + " Auto and Full access can be turned on from the session once it starts, on an up-to-date Mac.")
                     }
                     Section("First message") {
                         TextField("What should it do?", text: $text, axis: .vertical)

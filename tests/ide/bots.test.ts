@@ -185,6 +185,36 @@ describe("BotManager", () => {
     expect(m.history(bot.id)[0].status).toBe("done");
   });
 
+  it("Allow for this run: the same kind runs without asking for the rest of the run, never in the next run", async () => {
+    const results: Array<string | boolean> = [];
+    let m!: BotManager;
+    const runner: BotRunner = async (ctx) => {
+      const v = ctx.decide!("run_shell", { command: "npm run build" });
+      results.push(v.action === "ask" ? (v.session ?? "no offer") : v.action);
+      if (v.action === "ask") results.push(await ctx.waitForApproval("tc_b", "run_shell", { command: "npm run build" }, { webGuard: false, allowSession: v.session }));
+      results.push(ctx.decide!("run_shell", { command: "npm run build -- --prod" }).action);
+      results.push(ctx.decide!("run_shell", { command: "npm run deploy" }).action);
+    };
+    m = new BotManager({ runner, file: join(dir(), "bots.json") });
+    managers.push(m);
+    const project = dir();
+    writeFileSync(join(project, "package.json"), JSON.stringify({ name: "p", scripts: { build: "true", deploy: "true" } }));
+    const bot = m.create({ name: "B", projectRoot: project, mode: "ask" } as Parameters<BotManager["create"]>[0]);
+    m.runNow(bot.id);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(m.get(bot.id).pending).toEqual([{ callId: "tc_b", tool: "run_shell", args: { command: "npm run build" }, allowRun: "npm run build commands" }]);
+    expect(m.approve(bot.id, "tc_b", true, false, false, true)).toBe(true);
+    await m.idle(bot.id);
+    expect(results).toEqual(["npm run build commands", true, "run", "ask"]);
+    // A new run starts with nothing allowed.
+    results.length = 0;
+    m.runNow(bot.id);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(results[0]).toBe("npm run build commands");
+    m.approve(bot.id, "tc_b", false);
+    await m.idle(bot.id);
+  });
+
   it("cancel rejects pending approvals and records the run as stopped", async () => {
     const results: boolean[] = [];
     const m = manager(async (ctx) => {

@@ -9,6 +9,15 @@ describe("applyAgentEvent", () => {
     const e = { type: "tool_call", id: "c", tool: "run_shell", args: { command: "x | head" }, requires_approval: true, allow_rule: "x:*", allow_rules: ["x:*", "y:*"], web_guard: true } as Parameters<typeof applyAgentEvent>[1];
     expect(applyAgentEvent(empty, e).turn.toolEvents[0]).toMatchObject({ allow_rule: "x:*", allow_rules: ["x:*", "y:*"], web_guard: true });
   });
+  it("keeps what Allow for this session covers, and a call it let run", () => {
+    const ask = applyAgentEvent(empty, { type: "tool_call", id: "a", tool: "run_shell", args: { command: "npm test" }, requires_approval: true, allow_session: "npm test commands" }).turn;
+    expect(ask.toolEvents[0].allow_session).toBe("npm test commands");
+    const ran = applyAgentEvent(empty, { type: "tool_call", id: "b", tool: "run_shell", args: { command: "npm test" }, requires_approval: false, session_allowed: "npm test commands" }).turn;
+    expect(ran.toolEvents[0]).toMatchObject({ session_allowed: "npm test commands", approval_status: "approved" });
+    // Never offered on a web-page guard ask.
+    const guarded = applyAgentEvent(empty, { type: "tool_call", id: "c", tool: "run_shell", args: {}, requires_approval: true, web_guard: true, allow_session: "x" }).turn;
+    expect(guarded.toolEvents[0].allow_session).toBeUndefined();
+  });
   it("accumulates text and pairs tool results with their calls", () => {
     let t = applyAgentEvent(empty, { type: "text", content: "Reading " }).turn;
     t = applyAgentEvent(t, { type: "tool_call", id: "1", tool: "read_file", args: { path: "a.ts" }, requires_approval: false }).turn;

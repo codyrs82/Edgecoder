@@ -8,6 +8,7 @@ import { CSP_NONCE } from "../csp-nonce.js";
 import { CLIENT_SAFE_MARKDOWN_JS } from "./safe-markdown.js";
 import { CLOUD_FIELDS, CLOUD_BOTS_PAGE_JS } from "./bots-cloud.js";
 import { BOT_FRONTIER_PAGE_JS } from "./bots-frontier.js";
+import { BOT_ASKS_PAGE_JS } from "./bots-asks.js";
 import { QUOTE_SELECTION_BROWSER_LIB, QUOTE_SELECTION_CSS, quoteSelectionScript } from "./quote-selection.js";
 
 /**
@@ -327,6 +328,7 @@ export function registerBotsPage(app: FastifyInstance): void {
     var BOT_ICONS = ${JSON.stringify(icons)};
     ${CLOUD_BOTS_PAGE_JS}
     ${BOT_FRONTIER_PAGE_JS}
+    ${BOT_ASKS_PAGE_JS}
     ${BOTS_PAGE_JS}
     ${QUOTE_SELECTION_BROWSER_LIB}
     ${quoteSelectionScript("bpScroll", "bpInput")}
@@ -622,25 +624,6 @@ const BOTS_PAGE_JS = String.raw`
       paintBotAvatars(document.getElementById("botPage"));
     }
 
-    function stepsHtml(steps) {
-      if (!steps || !steps.length) return "";
-      return '<ul class="steps" aria-label="Steps">' + steps.map(function(s) {
-        var mark = s.status === "ok" ? "✓" : s.status === "error" ? "✗" : s.status === "denied" ? "denied" : s.status === "pending" ? "waiting" : "…";
-        return '<li class="st-' + escapeHtml(s.status) + '"><span class="s-tool">' + escapeHtml(s.tool) + '</span><span class="s-detail" title="' + escapeHtml(s.detail) + '">' + escapeHtml(s.detail) + '</span><span class="s-mark">' + escapeHtml(mark) + "</span></li>";
-      }).join("") + "</ul>";
-    }
-    function askCardsHtml() {
-      var b = state.bot;
-      if (!b.pending || !b.pending.length) return "";
-      return b.pending.map(function(p) {
-        if (p.tool === "use_frontier") return frontierAskCard(b, p);
-        var q = p.tool === "run_shell" ? "Run this command?" : p.tool === "git_commit" ? "Commit?" : p.tool === "git_push" ? "Push?" : p.tool === "open_pull_request" ? "Open this pull request?" : "Allow " + p.tool.replace(/_/g, " ") + "?";
-        var choices = canControl()
-          ? '<button type="button" class="primary sm" data-approve="' + escapeHtml(p.callId) + '">Approve</button><button type="button" class="sm danger" data-deny="' + escapeHtml(p.callId) + '">Deny</button>'
-          : '<span class="on-mac">Approve on your machine' + (online() ? "" : " (it's offline)") + "</span>";
-        return '<div class="ask-card" role="group" aria-label="' + escapeHtml(b.name + " asks: " + q) + '"><div class="ask-q">' + escapeHtml(b.name + " asks: " + q) + "</div>" + (p.detail ? "<code>" + escapeHtml(p.detail) + "</code>" : "") + '<div class="ask-choices">' + choices + "</div></div>";
-      }).join("");
-    }
     function messageHtml(m) {
       if (m.role === "event") return '<div class="msg event">' + escapeHtml(m.content) + " · " + escapeHtml(when(m.atMs)) + "</div>";
       var who = m.role === "user" ? "You" : state.bot.name;
@@ -967,10 +950,7 @@ const BOTS_PAGE_JS = String.raw`
       input.addEventListener("keydown", function(e) { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage(); } });
       document.getElementById("bpMessages").addEventListener("click", function(e) {
         if (frontierClick(e)) return;
-        var a = e.target.closest && e.target.closest("[data-approve],[data-deny]");
-        if (!a) return;
-        var callId = a.getAttribute("data-approve") || a.getAttribute("data-deny");
-        act(a.hasAttribute("data-approve") ? "Approved" : "Denied", "approve", { callId: callId, approved: a.hasAttribute("data-approve") });
+        askClick(e);
       });
       document.getElementById("bpDBody").addEventListener("click", function(e) {
         var t = e.target.closest && e.target.closest("[data-toggle-pause],[data-toggle-trigger]");

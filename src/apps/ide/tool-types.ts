@@ -152,6 +152,13 @@ export type IdeStreamEvent =
       sandboxed?: true;
       /** The sandbox blocked the call just before (what it blocked): this asks to run it outside the sandbox. */
       sandbox_retry?: string;
+      /**
+       * An ask "Allow for this session" may answer (session-allowances.ts): what later calls it lets
+       * run without asking ("npm test commands", "edits inside the project"). A bot: for the rest of the run.
+       */
+      allow_session?: string;
+      /** Ran without asking because the session allowed calls like it: what was allowed. */
+      session_allowed?: string;
     }
   | { type: "tool_result"; id: string; result?: string; error?: string }
   | { type: "diff"; file: string; hunks: DiffHunk[]; id: string }

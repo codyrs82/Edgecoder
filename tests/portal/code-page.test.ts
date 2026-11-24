@@ -70,18 +70,31 @@ describe("the Code page", () => {
     expect(chat).toContain('href="/portal/chat" data-mode-tab="chat" aria-current="page"');
   });
 
-  it("never offers Always allow and keeps Auto on the Mac", async () => {
+  it("never offers Always allow; Auto, Full access (behind a confirm) and Allow for this session only on a newer Mac", async () => {
     const html = (await page("/portal/code")).body;
     expect(html).not.toMatch(/data-approve-always|always:\s*true/);
     expect(html).toContain("Always-allow rules are set on the Mac.");
+    // An older Mac's Auto / Full access is shown, not offered.
     expect(html).toContain("Auto (set on the Mac)");
-    // Full access is shown, never offered as a choice the web can send.
     expect(html).toContain("Full access (set on the Mac)");
-    expect(html).not.toMatch(/v === "full"/);
+    // A newer Mac: Full access is sent only from the confirm dialog, with confirmFull.
+    expect(html).toContain('id="csFullDialog"');
+    expect(html).toContain("Turn on Full access?");
+    expect(html).toContain('else if (v === "full" && newerMac()) { fullDialog.returnValue = ""; fullDialog.showModal(); }');
+    expect(html).toContain('{ mode: "full", confirmFull: true }');
+    expect(html).toContain("Allow for this session</button>");
+    expect(html).toContain('scope: "session"');
+    expect(html).toContain('"Mode: " + codeModeLabel(curMode)');
   });
 });
 
 describe("the Code page's browser helpers", () => {
+  it("names every mode the way the desktop app does", () => {
+    const ctx = helpers();
+    const label = (m: string) => vm.runInContext(`codeModeLabel(${JSON.stringify(m)})`, ctx);
+    expect(["ask", "auto-edits", "plan", "auto", "full"].map(label)).toEqual(["Manual", "Accept edits", "Plan", "Auto", "Full access"]);
+  });
+
   it("markdown escapes HTML from the Mac and keeps code blocks as text", () => {
     const ctx = helpers();
     const html = vm.runInContext(`renderMarkdown("<img src=x onerror=alert(1)> **bold**\\n\\n\\u0060\\u0060\\u0060js\\n<script>alert(1)</script>\\n\\u0060\\u0060\\u0060")`, ctx);

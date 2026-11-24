@@ -21,7 +21,7 @@ import { alertConfigFromEnv } from "../alerting/config.js";
 import { SwarmWorkerAgent } from "../agent/worker.js";
 import { Subtask, SubtaskResult, BLETaskRequest, Language, MeshMessage, SandboxMode } from "../common/types.js";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { ensureSandboxImages, isDockerAvailable } from "../executor/docker-sandbox.js";
 import { runInferenceSubtask } from "./inference-runner.js";
 import { warmOllamaModel } from "../inference-api/ollama.js";
@@ -61,7 +61,9 @@ import { collectDesktopTelemetry } from "./desktop-telemetry.js";
 import { detectPlatform, getConfigDir, getLogDir, type PlatformInfo } from "../common/platform.js";
 import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from "../security/release-integrity.js";
 import { answerChallenge, runLocalBenchmark, type AgentBenchmarkReport, type BenchmarkChallenge } from "./benchmark.js";
-import { appVersion } from "../common/app-version.js";
+import { appVersion, isReleaseInstall } from "../common/app-version.js";
+import { createUpdateNudge } from "./update-nudge.js";
+import { autoUpdateSetting } from "../install/update-schedule.js";
 import { startUpdateDrain } from "./update-drain.js";
 import { createLocalForwarder } from "./local-forwarder.js";
 import { ServingJobs } from "./serving-jobs.js";
@@ -724,6 +726,21 @@ const updateDrain = process.env.EDGECODER_INSTANCE !== undefined && process.plat
       },
       startDrain: (ms) => lifecycle.startDrain(ms),
       endDrain: () => lifecycle.endDrain(),
+      log: (line) => console.log(`[agent:${AGENT_ID}] ${line}`)
+    })
+  : null;
+
+// The coordinator's update nudge (src/swarm/update-nudge.ts): same installed headless agents, signed
+// release installs only (a package or source install is not updated by edgecoder-install update).
+const updateNudge = updateDrain && isReleaseInstall()
+  ? createUpdateNudge({
+      home: process.env.HOME!,
+      installedVersion: appVersion(),
+      enabled: () => {
+        if (/^(off|0|false|no|disabled?)$/i.test((process.env.EDGECODER_AUTO_UPDATE ?? "").trim())) return false;
+        const read = (path: string) => { try { return readFileSync(path, "utf8"); } catch { return undefined; } };
+        return autoUpdateSetting(read, (dir) => readdirSync(dir), "/etc/edgecoder").enabled;
+      },
       log: (line) => console.log(`[agent:${AGENT_ID}] ${line}`)
     })
   : null;
@@ -1432,6 +1449,8 @@ type HeartbeatReply = {
     fromAccountId?: string;
   }>;
   blacklist?: { version: number; agents: string[] };
+  /** The newest agent release, when this agent reported an older version (update-nudge.ts). */
+  updateAvailable?: string;
     benchmarkChallenge?: BenchmarkChallenge;
     hardwareVerification?: { status?: string; claimedTier?: string; grantedTier?: string } | null;
 };
@@ -2082,6 +2101,7 @@ async function loop(): Promise<void> {
             })) as RegisterReply & {
               meshToken?: string;
               rewardAccountId?: string;
+              updateAvailable?: string;
             };
             const freshRegistration = registeredWithUrl !== coordinator.url;
             registeredWithUrl = coordinator.url;
@@ -2090,6 +2110,7 @@ async function loop(): Promise<void> {
             noteRegistered(freshRegistration);
             console.log(registeredLogLine(AGENT_ID, coordinator.url, registerResponse));
             updateDrain?.write();
+            updateNudge?.onHint(registerResponse?.updateAvailable);
             enrollmentRefusals = 0;
             lastEnrollmentLog = null;
             servingJobs.setGrant(registerResponse?.hardwareVerification?.grantedClass, registerResponse?.hardwareVerification?.grantedTier);
@@ -2110,6 +2131,7 @@ async function loop(): Promise<void> {
           const hbLocalWeb = await localWeb.capability().catch(() => undefined);
           const hbBody = { agentId: AGENT_ID, ...(hbLocalWeb ? { localWeb: hbLocalWeb } : {}), powerTelemetry, sandboxMode: SANDBOX_MODE, ...(hbModels.length || CLOUD_MODE ? { installedModels: hbModels } : {}), ...(hbOwnerModels ? { ownerModels: hbOwnerModels } : {}), ...(hbActive && hbModels.includes(hbActive) ? { activeModel: hbActive, activeModelParamSize: paramsB(hbActive) } : {}), ...(hbMemory ? { memory: hbMemory } : {}), ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
           hb = (await post("/heartbeat", hbBody, { signed: true })) as HeartbeatReply;
+          updateNudge?.onHint(hb?.updateAvailable);
           if ("benchmark" in hbBody) benchmarkUnreported = false;
           try { localStore.recordHeartbeat(coordinator.url, hb.blacklisted ? "blacklisted" : "ok", Date.now() - hbStart); } catch (e) { console.warn(`[db] heartbeat write failed: ${e}`); }
 

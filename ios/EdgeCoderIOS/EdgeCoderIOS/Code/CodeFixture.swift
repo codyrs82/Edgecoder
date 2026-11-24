@@ -64,9 +64,9 @@ enum CodeFixture {
          {"projectId":"2c3d4e5f6a7b8c9d","name":"scripts","parent":"codysmith"}
        ],
        "sessions":[
-         {"sessionId":"3f1c2a4e-8b7d-4c1e-9a2f-5d6e7f8a9b0c","projectId":"0a1b2c3d4e5f6a7b","title":"Fix flaky wallet test","status":"waiting","updatedAtMs":1763459940000,"pendingApprovals":1,"startedFrom":"phone"},
-         {"sessionId":"4a2d3b5f-9c8e-4d2f-8b3a-6e7f8a9b0c1d","projectId":"0a1b2c3d4e5f6a7b","title":"Add dark mode to settings","status":"idle","updatedAtMs":1763380000000,"pendingApprovals":0,"startedFrom":"mac"},
-         {"sessionId":"5b3e4c6a-0d9f-4e3a-9c4b-7f8a9b0c1d2e","projectId":"1b2c3d4e5f6a7b8c","title":"Update the hero image","status":"running","updatedAtMs":1763459000000,"pendingApprovals":0,"startedFrom":"phone"}
+         {"sessionId":"3f1c2a4e-8b7d-4c1e-9a2f-5d6e7f8a9b0c","projectId":"0a1b2c3d4e5f6a7b","title":"Fix flaky wallet test","status":"waiting","updatedAtMs":1763459940000,"pendingApprovals":1,"startedFrom":"phone","mode":"ask"},
+         {"sessionId":"4a2d3b5f-9c8e-4d2f-8b3a-6e7f8a9b0c1d","projectId":"0a1b2c3d4e5f6a7b","title":"Add dark mode to settings","status":"idle","updatedAtMs":1763380000000,"pendingApprovals":0,"startedFrom":"mac","mode":"auto"},
+         {"sessionId":"5b3e4c6a-0d9f-4e3a-9c4b-7f8a9b0c1d2e","projectId":"1b2c3d4e5f6a7b8c","title":"Update the hero image","status":"running","updatedAtMs":1763459000000,"pendingApprovals":0,"startedFrom":"phone","mode":"auto-edits"}
        ]},
       {"agentId":"agent-studio-21c9","name":"Mac Studio","online":true,"controls":"view","updatedAtMs":1763459000000,
        "projects":[{"projectId":"3d4e5f6a7b8c9d0e","name":"ml-pipeline","parent":"work"}],
@@ -78,13 +78,13 @@ enum CodeFixture {
 
     /// Shaped like code-remote.ts remoteSessionSnapshot (the Mac's `data` for "snapshot").
     static let snapshotJSON = #"""
-    {"session":{"id":"3f1c2a4e-8b7d-4c1e-9a2f-5d6e7f8a9b0c","title":"Fix flaky wallet test","projectId":"0a1b2c3d4e5f6a7b","projectName":"Edgecoder","branch":"ios-code-mode","model":"claude-sonnet","mode":"ask","origin":"remote","published":true,"running":true,"pending":1,"queued":0,"messages":4,"cSats":12.5,"createdAt":1763459000000,"updatedAt":1763459940000},
+    {"session":{"id":"3f1c2a4e-8b7d-4c1e-9a2f-5d6e7f8a9b0c","title":"Fix flaky wallet test","projectId":"0a1b2c3d4e5f6a7b","projectName":"Edgecoder","branch":"ios-code-mode","model":"claude-sonnet","mode":"ask","origin":"remote","published":true,"running":true,"pending":1,"queued":0,"messages":4,"cSats":12.5,"createdAt":1763459000000,"updatedAt":1763459940000,"remoteModes":true,"allowances":["edits inside the project"]},
      "seq":42,
      "running":{"turnId":"b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e","text":"The test fails because the clock isn't frozen. I'll run the suite to confirm the fix.","steps":[
         {"tool":"read_file","detail":"<project>/src/wallet/ledger.test.ts","status":"ok"},
         {"tool":"edit_file","detail":"<project>/src/wallet/ledger.test.ts","status":"ok"},
         {"tool":"run_shell","detail":"npm test -- ledger","status":"pending"}]},
-     "pending":[{"callId":"call_9","tool":"run_shell","detail":"npm test -- ledger","command":"npm test -- src/wallet/ledger.test.ts --reporter=verbose","approvable":true}],
+     "pending":[{"callId":"call_9","tool":"run_shell","detail":"npm test -- ledger","command":"npm test -- src/wallet/ledger.test.ts --reporter=verbose","approvable":true,"allowSession":"npm test commands"}],
      "queue":[],
      "tail":[
        {"id":"m1","role":"note","content":"Started from iPhone","at":1763459000000},

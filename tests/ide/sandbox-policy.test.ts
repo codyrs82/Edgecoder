@@ -10,6 +10,10 @@ import { decideToolCall, sandboxable, type DecideContext } from "../../src/apps/
 import { bwrapArgs, macProfile, sandboxDenial, secretPaths, stripHeredocs, unsafeSandboxRoot } from "../../src/apps/ide/sandbox.js";
 import { autoSandboxEnabled, setAutoSandbox } from "../../src/apps/ide/sandbox-settings.js";
 import type { IdeStreamEvent, ToolName } from "../../src/apps/ide/tool-types.js";
+import { allowanceOffer, SessionAllowances, withAllowances } from "../../src/apps/ide/session-allowances.js";
+import { SessionHub } from "../../src/apps/ide/sessions.js";
+import { CheckpointStore } from "../../src/apps/ide/checkpoints.js";
+import { phoneClient } from "../../src/apps/ide/code-remote.js";
 
 const root = mkdtempSync(join(tmpdir(), "sbx-policy-"));
 mkdirSync(join(root, "tools"));
@@ -269,5 +273,56 @@ describe("the tool runner", () => {
     await r.run("run_shell", { command: "python3 tools/x.py" });
     expect(r.asked).toEqual([]);
     expect(r.calls).toHaveLength(1);
+  });
+});
+
+describe("with session allowances and remote turns (#522)", () => {
+  const script = { command: "python3 -c 'print(1)'" };
+  const actx = { root, branch: () => "work" };
+
+  it("an allowance never takes a sandboxable command out of the sandbox", () => {
+    const allowances = new SessionAllowances();
+    const offer = allowanceOffer("run_shell", script, actx)!;
+    allowances.grant("k", offer);
+    const d = withAllowances(decideToolCall("run_shell", script, ctx()), allowances, "k", "run_shell", script, actx);
+    expect(d).toMatchObject({ action: "run", sandbox: true });
+    expect(d.sessionAllowed).toBeUndefined();
+  });
+
+  it("without the sandbox the allowance runs it as before (outside)", () => {
+    const allowances = new SessionAllowances();
+    allowances.grant("k", allowanceOffer("run_shell", script, actx)!);
+    const d = withAllowances(decideToolCall("run_shell", script, ctx({ sandbox: false })), allowances, "k", "run_shell", script, actx);
+    expect(d.action).toBe("run");
+    expect(d.sandbox).toBeUndefined();
+    expect(d.sessionAllowed).toEqual(expect.any(String));
+  });
+
+  function hubWith(sandbox: boolean) {
+    return new SessionHub(
+      {
+        chat: () => async () => ({ content: "", toolCalls: [] }),
+        systemPrompt: async () => () => "system",
+        executor: () => ({ execute: async () => ({ result: "" }) }),
+        checkpoints: new CheckpointStore(),
+        branch: () => "work",
+        owner: () => "acct-owner",
+        sandbox: () => sandbox,
+      },
+      { dir: null, permissionsFile: null },
+    );
+  }
+
+  it("the owner's phone turn in Auto runs sandboxed like the Mac's; other remote turns keep asking", () => {
+    const hub = hubWith(true);
+    const desk = { clientId: "d", kind: "desktop" as const };
+    const auto = hub.create({ projectRoot: root, mode: "auto", client: desk, ownerAccount: "acct-owner" });
+    expect(hub.decide(auto, "run_shell", script, desk)).toMatchObject({ action: "run", sandbox: true });
+    expect(hub.decide(auto, "run_shell", script, phoneClient("acct-owner"))).toMatchObject({ action: "run", sandbox: true });
+    expect(hub.decide(auto, "run_shell", script, phoneClient("acct-other")).sandbox).toBeUndefined();
+    expect(hub.decide(auto, "run_shell", script, phoneClient("acct-other")).action).toBe("ask");
+    const edits = hub.create({ projectRoot: root, mode: "auto-edits", client: desk, ownerAccount: "acct-owner" });
+    expect(hub.decide(edits, "run_shell", script, phoneClient("acct-owner")).action).toBe("ask");
+    expect(hubWith(false).decide(auto, "run_shell", script, phoneClient("acct-owner")).sandbox).toBeUndefined();
   });
 });

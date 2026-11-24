@@ -33,7 +33,10 @@ that folder on Auto compute.
 | Lead with Claude (your key) | Off by default. Shown only when your account has a frontier key on this machine. Per-run cap (default $2) and daily cap (default $5) in USD. |
 
 **Approvals.** Shell commands, commits and pushes always ask first: the run pauses with **Needs
-approval** until you approve or reject. An unanswered approval is rejected after 24 hours. Turn off
+approval** until you approve or reject. **Allow for this run** approves it and lets later calls of
+the same kind (named on the card, such as `npm test` commands) run without asking until that run
+ends; it never covers pushes, pull requests, secrets, files outside the project or refused commands.
+An unanswered approval is rejected after 24 hours. Turn off
 **Apply edits without asking** to make file edits ask too.
 
 **Running.** A bot with a job starts working when you create or resume it, then checks in on its
