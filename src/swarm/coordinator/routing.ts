@@ -24,6 +24,7 @@ import { worldOwnerTag, type LocalWorld } from "../network-world.js";
 import { routableModels } from "../model-catalog.js";
 import { accountsFor } from "./agent-accounts.js";
 import { activeBlacklistRecord, agentCapabilities, AGENT_CONNECTED_WINDOW_MS } from "./agent-state.js";
+import { autoMayUseCloudModel } from "../../cloud-host/catalog.js";
 import { bestFit, bestFitConfigFromEnv, routedLine, type AgentView, type BestFitConfig, type BestFitResult, type NetworkView, type SessionMemo } from "./best-fit.js";
 import { FALLBACK_BTC_USD, queue, reservations, identity, usageListeners } from "./context.js";
 import { agentContextWindow, agentLoadReport, freeModelSlots, pickupStats } from "./dispatch.js";
@@ -95,13 +96,18 @@ export function localAgentViews(nowMs = Date.now(), rttOf: (agentId: string) => 
   const out: AgentView[] = [];
   for (const [agentId, cap] of agentCapabilities) {
     if (activeBlacklistRecord(agentId) || cap.hostApproved === false || reservations.isHeld(agentId, nowMs)) continue;
-    // Cloud hosts (src/cloud-host/) are reached by naming a cloud model; best fit does not place
-    // jobs on them yet (each call spends the platform's provider budget; docs/cloud-host.md).
-    if (effectiveHardware(agentId, cap)?.computeClass === "cloud") continue;
+    // Cloud hosts (src/cloud-host/) are reached by naming a cloud model. Best fit sees them only
+    // with the models the owner let Auto use (AUTO_CLOUD_MODELS, catalog autoEligible; default
+    // none), and places on them only top-tier jobs (best-fit.ts): each call spends the platform's
+    // provider budget (docs/cloud-host.md).
+    const cloudHost = effectiveHardware(agentId, cap)?.computeClass === "cloud";
+    if (cloudHost && bestFitConfig.autoCloudModels.length === 0) continue;
     // Host memory (memory-admission.ts): only models it can load or has loaded, and no free slot
     // while it is under memory pressure or its circuit is open.
     const held = claims.get(agentId)?.inference ?? 0;
-    const models = routableModels(cap).filter((m) => memoryAdmits(agentId, m, held, nowMs) || modelLoadedOn(agentId, m, nowMs));
+    const models = cloudHost
+      ? routableModels(cap).filter((m) => autoMayUseCloudModel(m, bestFitConfig.autoCloudModels))
+      : routableModels(cap).filter((m) => memoryAdmits(agentId, m, held, nowMs) || modelLoadedOn(agentId, m, nowMs));
     if (!models.length) continue;
     const perf = agentPerf(agentId, claims);
     const loadedModels = loadedModelsOf(agentId, nowMs);

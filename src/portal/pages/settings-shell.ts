@@ -181,7 +181,7 @@ const SETTINGS_SHELL_SCRIPT = `
  * fetch wrapper that returns status and JSON instead of throwing.
  */
 export const SETTINGS_HELPERS_SCRIPT = `
-    const CLASS_LABELS = { cpu: "CPU", apple: "Apple", gpu: "GPU", "gpu.dc": "Datacenter GPU" };
+    const CLASS_LABELS = { cpu: "CPU", apple: "Apple", gpu: "GPU", "gpu.dc": "Datacenter GPU", cloud: "Cloud" };
     const classLabel = (c) => CLASS_LABELS[c] || c;
     const fmtNum = (n, d) => Number(n).toLocaleString(undefined, { maximumFractionDigits: d === undefined ? 2 : d });
     const fmtRate = (n) => (n >= 1 ? n.toFixed(2) : n >= 0.01 ? n.toFixed(3) : Number(n).toPrecision(2));

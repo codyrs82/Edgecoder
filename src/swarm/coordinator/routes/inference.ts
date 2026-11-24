@@ -10,7 +10,7 @@ import type { ResourceClass, Subtask } from "../../../common/types.js";
 import { DuplicateDebitError, rewardAccountForAgent, spendCredits, taskReserveKey } from "../../../credits/store.js";
 import { cSatsPerMTokens, msatToCSats, ratePerSecondMsat } from "../../../economy/job-pricing.js";
 import { modelTokenPrice } from "../../../economy/cloud-pricing.js";
-import { cloudModelSpec } from "../../../cloud-host/catalog.js";
+import { cloudModelSpec, orderCloudModels } from "../../../cloud-host/catalog.js";
 import { paramsB } from "../../../inference-api/auto-route.js";
 import { contextNeeded } from "../../../inference-api/ollama.js";
 import type { ChatMessage } from "../../../inference-api/types.js";
@@ -462,7 +462,8 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     );
     return {
       // Model calls are priced per token: cSats per million tokens in and out, by model size.
-      models: [...byModel.entries()]
+      // Cloud models in catalog rank order among themselves (cloudRank: the default cloud model first).
+      models: orderCloudModels([...byModel.entries()]
         // idleAgents / freeSlots / waiting: how busy this coordinator is for the model, so the portal can
         // send new calls where a slot is free (inference runs where it was submitted; it is never relayed).
         // freeSlots counts parallel model slots, so two half-busy coordinators still compare by room left.
@@ -472,12 +473,14 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
           // agentRttMs: median round trip to the agents with a free slot for it (else to all that hold it).
           const agentRtt = medianRtt(e.freeRtts.length ? e.freeRtts : e.rtts);
           // A cloud model (src/cloud-host/): its cost-plus price, its own context window, and where it
-          // comes from (origin: the data for a "no models of origin X" filter) and who serves it.
+          // comes from (origin: the data for a "no models of origin X" filter) and who serves it;
+          // cloudRank / cloudHint: its place among cloud models and its picker hint (catalog.ts).
+          // paramsB: billions of parameters (MoE total), for the portal's model list.
           const cloud = cloudModelSpec(model);
           const ctx = cloud ? Math.min(e.ctx ?? cloud.contextWindow, cloud.contextWindow) : e.ctx;
-          return { model, agents: e.agents, agentsByClass: e.byClass, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD, modelTokenPrice(model)), ...(ctx ? { contextWindow: ctx } : {}), ...(cloud ? { origin: cloud.origin, hostedBy: cloud.provider } : {}), ...(restricted ? { restricted } : {}), ...(agentRtt !== null ? { agentRttMs: agentRtt } : {}) };
+          return { model, agents: e.agents, agentsByClass: e.byClass, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], paramsB: paramsB(model), cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD, modelTokenPrice(model)), ...(ctx ? { contextWindow: ctx } : {}), ...(cloud ? { origin: cloud.origin, hostedBy: cloud.provider, cloudRank: cloud.rank, ...(cloud.hint ? { cloudHint: cloud.hint } : {}) } : {}), ...(restricted ? { restricted } : {}), ...(agentRtt !== null ? { agentRttMs: agentRtt } : {}) };
         })
-        .sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model)),
+        .sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model)), (r) => r.model, (r) => r.cloudRank),
       classes,
       // Queueing here, for the portal's latency-aware coordinator choice: pickup p90 and call p50 (ms; null when no recent calls).
       load: coordinatorLoadSignals(),

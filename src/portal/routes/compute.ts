@@ -22,6 +22,7 @@ import {
 } from "../../apps/ide/network-inference.js";
 import type { PortalStore } from "../store.js";
 import { ownMachineModels } from "./machines.js";
+import { cloudLabel, orderCloudModels } from "../../cloud-host/catalog.js";
 import { moduleLogger } from "../../common/logger.js";
 
 const logger = moduleLogger("portal-compute");
@@ -70,7 +71,7 @@ export function portalNetworkDeps(deps: Pick<ComputeRoutesDeps, "PORTAL_SERVICE_
 // ── Where a web chat runs ──
 
 export const COMPUTE_CLASSES = ["cpu", "apple", "gpu", "gpu.dc"] as const;
-const CLASS_LABELS: Record<string, string> = { cpu: "CPU", apple: "Apple", gpu: "GPU", "gpu.dc": "Datacenter GPU" };
+const CLASS_LABELS: Record<string, string> = { cpu: "CPU", apple: "Apple", gpu: "GPU", "gpu.dc": "Datacenter GPU", cloud: "Cloud" };
 export const classLabel = (cls: string | undefined) => (cls && cls !== "any" ? CLASS_LABELS[cls] ?? cls : "Any machine");
 
 export const chatComputeSchema = z.discriminatedUnion("target", [
@@ -109,7 +110,9 @@ export function timeLeft(endMs: number, nowMs: number): string {
 const fmtRate = (n: number) => (n >= 1 ? n.toFixed(2) : n >= 0.01 ? n.toFixed(3) : n.toPrecision(2));
 
 /** restricted: a security research tier model (listed only to entitled accounts); never offered as a network call. */
-export interface NetworkModelEntry { model: string; agents: number; classes: string[]; restricted?: string }
+/** cloudRank / cloudHint: a cloud model (src/cloud-host/catalog.ts), its order among cloud models and its hint. */
+export interface NetworkModelEntry { model: string; agents: number; classes: string[]; restricted?: string; cloudRank?: number; cloudHint?: string }
+const isCloudEntry = (m: NetworkModelEntry) => typeof m.cloudRank === "number" || m.classes.includes("cloud");
 export interface ReservationEntry { id: string; computeClass: string; model?: string; status: string; endMs: number; cSatsPerSecond?: number; models?: string[] }
 /** A pinned compute (the picker's rows): everything but Auto. */
 export type PinnedChatCompute = Exclude<ChatCompute, { target: "auto" }>;
@@ -134,9 +137,16 @@ export function computeOptions(
     for (const m of ms) add("reserved", { target: "reserved", model: m, reservationId: r.id, ...(cls ? { computeClass: cls } : {}) }, `${timeLeft(r.endMs, nowMs)} · prepaid`);
   }
   const rate = (cls: string) => classes[cls]?.cSatsPerSecondBaseTier;
+  // Cloud models in catalog rank order (the default cloud model first); the rest keep the coordinator's order.
+  models = orderCloudModels(models, (m) => m.model, (m) => (isCloudEntry(m) ? m.cloudRank ?? 100 : undefined));
   for (const m of models) {
     // A restricted model runs only on your own machines or a lease you hold (docs/security-research-tier.md).
     if (m.restricted) continue;
+    // A cloud model: priced per token at the provider's cost plus margin, served by the platform's cloud host.
+    if (isCloudEntry(m)) {
+      add("network", { target: "network", model: m.model, computeClass: "any" }, `${cloudLabel(m.cloudHint)} · hosted model API`);
+      continue;
+    }
     const agents = `${m.agents} machine${m.agents === 1 ? "" : "s"}`;
     const cheapest = m.classes.map(rate).filter((n): n is number => typeof n === "number").sort((a, b) => a - b)[0];
     add("network", { target: "network", model: m.model, computeClass: "any" }, `${agents}${cheapest !== undefined ? ` · from ${fmtRate(cheapest)} cSats/s` : ""}`);
@@ -146,7 +156,8 @@ export function computeOptions(
       add("network", { target: "network", model: m.model, computeClass: cls as (typeof COMPUTE_CLASSES)[number] }, r !== undefined ? `${fmtRate(r)} cSats/s` : classLabel(cls));
     }
   }
-  for (const m of models) add("mine", { target: "mine", model: m.model }, m.restricted ? "Security research · runs only on your own approved machines" : "Free · runs only on your own machines");
+  // Cloud models run only on the platform's cloud hosts, never on your own machines.
+  for (const m of models) if (!isCloudEntry(m)) add("mine", { target: "mine", model: m.model }, m.restricted ? "Security research · runs only on your own approved machines" : "Free · runs only on your own machines");
   // Your machines' own models the network does not list (kept off it: too big to share from there).
   const listed = new Set(models.map((m) => m.model));
   for (const model of ownModels) {

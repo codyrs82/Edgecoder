@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { choiceId, choiceLabel, parseChoice, usageText } from "../src/lib/compute-choice";
+import { choiceId, choiceLabel, cloudHint, parseChoice, usageText } from "../src/lib/compute-choice";
 import { computeFields } from "../src/lib/api";
 
 describe("reply usage text", () => {
@@ -32,5 +32,19 @@ describe("compute choice", () => {
     expect(computeFields("network/m@gpu")).toEqual({ model: "m", compute: { target: "network", computeClass: "gpu" } });
     expect(computeFields("reserved/r1/m")).toEqual({ model: "m", compute: { target: "reserved", reservationId: "r1" } });
     expect(computeFields("m")).toEqual({ model: "m" });
+  });
+});
+
+describe("cloud models in the compute picker", () => {
+  it("label cloud models from /inference/models' cloudRank / cloudHint, other models not", () => {
+    expect(cloudHint({ cloudRank: 1, cloudHint: "recommended", classes: ["cloud"] })).toBe("Cloud · recommended");
+    expect(cloudHint({ cloudRank: 2, cloudHint: "premium", classes: ["cloud"] })).toBe("Cloud · premium");
+    expect(cloudHint({ classes: ["cloud"] })).toBe("Cloud");
+    expect(cloudHint({ classes: ["gpu"] })).toBeNull();
+  });
+
+  it("a network choice in the cloud class reads as Network Cloud", () => {
+    expect(parseChoice("network/deepseek-v4.1-flash@cloud")).toMatchObject({ where: "network", model: "deepseek-v4.1-flash", computeClass: "cloud" });
+    expect(choiceLabel("network/deepseek-v4.1-flash@cloud").where).toBe("Network Cloud");
   });
 });

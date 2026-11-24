@@ -27,7 +27,13 @@ computeChoice.subscribe((v) => {
   }
 });
 
-export const CLASS_LABELS: Record<string, string> = { any: "Any", cpu: "CPU", apple: "Apple", gpu: "GPU", "gpu.dc": "Datacenter GPU" };
+export const CLASS_LABELS: Record<string, string> = { any: "Any", cpu: "CPU", apple: "Apple", gpu: "GPU", "gpu.dc": "Datacenter GPU", cloud: "Cloud" };
+
+/** A cloud model's picker hint from /inference/models: "Cloud · recommended", "Cloud · premium", "Cloud"; null for other models. */
+export function cloudHint(m: { cloudRank?: number; cloudHint?: string; classes?: string[] }): string | null {
+  if (typeof m.cloudRank !== "number" && !(m.classes ?? []).includes("cloud")) return null;
+  return m.cloudHint ? `Cloud · ${m.cloudHint}` : "Cloud";
+}
 
 export interface ParsedChoice {
   where: "auto" | "anywhere" | "local" | "mine" | "network" | "reserved" | "frontier";
