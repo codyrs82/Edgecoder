@@ -284,6 +284,8 @@ export interface TurnEnv {
   checkpoints: CheckpointStore;
   /** The project's current branch (null outside git). */
   branch?: (projectRoot: string) => string | null;
+  /** Auto runs unchecked commands in the OS sandbox for this project (sandbox-settings.ts autoSandboxFor); default no. */
+  sandbox?: (projectRoot: string) => boolean;
   /** The session model's context window in tokens (the loop compacts to fit it); undefined: a conservative default. */
   contextWindow?: (s: SessionData) => Promise<number | undefined>;
   /** A cheap model call that summarizes older messages when the loop compacts. */
@@ -800,7 +802,8 @@ export class SessionHub {
       base = decideToolCall(
         tool,
         args,
-        { mode: this.modeFor(s, by), root: s.projectRoot, rules: [...(project.rules ?? []), ...s.alwaysShell], legacyNames: [...project.shell, ...s.alwaysShell], branch },
+        // Sandboxed auto-run (sandbox.ts) applies to the Mac's turns and the owner's own Auto turns alike.
+        { mode: this.modeFor(s, by), root: s.projectRoot, rules: [...(project.rules ?? []), ...s.alwaysShell], legacyNames: [...project.shell, ...s.alwaysShell], branch, sandbox: this.env.sandbox?.(s.projectRoot) === true },
         (c) => riskOf(c, s.projectRoot),
       );
     }

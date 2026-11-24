@@ -8,8 +8,12 @@
     status: "pending" | "approved" | "completed";
     onApprove?: (id: string) => void;
     onReject?: (id: string) => void;
+    /** Ran in the OS sandbox (Auto mode): project-only writes, no network. */
+    sandboxed?: boolean;
+    /** What the sandbox most likely blocked (the next card asks to run it outside). */
+    sandboxDenied?: string;
   }
-  let { id, command, stdout, stderr, exitCode, status, onApprove, onReject }: Props = $props();
+  let { id, command, stdout, stderr, exitCode, status, onApprove, onReject, sandboxed = false, sandboxDenied }: Props = $props();
 
   function handleApprove(e: MouseEvent) {
     e.stopPropagation();
@@ -31,6 +35,9 @@
       {/if}
     </div>
     <div class="header-actions">
+      {#if sandboxed}
+        <span class="sandbox-tag" title="Ran in the sandbox: it could write only inside the project and had no network">sandboxed</span>
+      {/if}
       {#if status === "pending"}
         <button class="btn run" onclick={handleApprove} type="button">Run</button>
         <button class="btn deny" onclick={handleReject} type="button">Deny</button>
@@ -44,6 +51,9 @@
     </div>
   </div>
 
+  {#if sandboxDenied}
+    <div class="sandbox-denied" role="note">Blocked by the sandbox: {sandboxDenied}. Approve the next step to run it outside the sandbox.</div>
+  {/if}
   {#if stdout || stderr}
     <!-- Scrolls, so it has to take keyboard focus. -->
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -59,6 +69,22 @@
 </div>
 
 <style>
+  .sandbox-tag {
+    font-size: 11px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text-muted, inherit);
+    white-space: nowrap;
+  }
+
+  .sandbox-denied {
+    font-size: 12px;
+    padding: 6px 12px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted, inherit);
+  }
+
   .shell-block {
     border-radius: var(--radius-sm);
     background: var(--bg-deep);

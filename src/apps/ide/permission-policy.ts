@@ -18,6 +18,11 @@
  * "Allow for this session" (session-allowances.ts withAllowances) is applied on top of these verdicts:
  * it can only turn an ask into a run, never touches a refusal.
  *
+ * Auto with the sandbox on (sandbox.ts; Settings → General) also runs, without asking, a command it would
+ * ask about only because it can't check the code it runs (`python3 - <<'EOF'`, `node -e`, `python3
+ * tools/x.py`, `./scripts/x.sh`): inside an OS sandbox that writes only in the project and has no
+ * network (sandboxable()).
+ *
  * In every mode a project's "always allow" rules (`npm test:*`) let a matching command run, but a
  * rule never covers a refused command or a class that must always ask (network other than a plain
  * `git fetch` / `git pull`, push, deletes, paths outside the project): see rememberable().
@@ -29,6 +34,7 @@ import { scrubText } from "../../common/redaction.js";
 import { isReadOnlyCommand, splitCommand, type PermissionMode } from "./permissions.js";
 import { classifyRelativePath, isWithin, parseArgv, protectedToolPath, realPathEscape } from "./tool-executor.js";
 import { READ_TOOLS, TENTACLE_TOOLS, WEB_TOOLS, type ToolName } from "./tool-types.js";
+import { stripHeredocs } from "./sandbox.js";
 import { resolve } from "node:path";
 
 export type Action = "run" | "ask" | "refuse";
@@ -698,6 +704,55 @@ export function suggestToolRules(tool: ToolName, args: Record<string, unknown>, 
 }
 
 // ---------------------------------------------------------------------------
+// Sandboxed commands (Auto): code Auto can't check runs in the OS sandbox instead of asking
+// ---------------------------------------------------------------------------
+
+export const SANDBOX_REASON = "runs in the sandbox: writes only inside the project, no network";
+/** Classes Auto asks about only because it can't check the code they run. */
+const SANDBOXABLE = new Set<Category>(["inline", "unlisted", "script"]);
+/** Programs that act outside the process (other apps, the keychain, a terminal session) or need a person: they keep asking. */
+const NOT_SANDBOXED = /^(open|xdg-open|osascript|security|pbcopy|pbpaste|screen|tmux|vi|vim|nvim|nano|emacs|less|more|man|top|htop|watch|ssh-agent|ssh-add|gpg|gpg-agent|at|batch|systemd-run|flatpak|snap|code|cursor|zed|subl|say|caffeinate)$/;
+
+/**
+ * True when Auto may run this command in the sandbox instead of asking: every part either runs in
+ * Auto anyway or asks only because it runs code Auto can't check (an interpreter given code inline or
+ * on stdin, a project script, a program not on Auto's list), and at least one part is such. Never for
+ * a part that installs, reaches the network, pushes, deletes, touches a path outside the project or a
+ * protected one, runs Docker or git commands that change history, or uses syntax that can't be read
+ * (substitution, subshells, background jobs). A here-document is the command's input
+ * (stripHeredocs), so `cd src && python3 - <<'EOF' … EOF` is judged as `cd src && python3 -` fed code.
+ */
+export function sandboxable(command: unknown, ctx: CommandContext): boolean {
+  if (typeof command !== "string" || !command.trim()) return false;
+  let line = command.trim();
+  if (classifyCommand(line, ctx).action === "refuse") return false;
+  if (!splitCommand(line)) {
+    const stripped = stripHeredocs(line);
+    if (!stripped) return false;
+    line = stripped;
+  }
+  if (/(^|[\s;&|])(sudo|doas|su|pkexec|runas)(\s|$)/.test(line)) return false;
+  if (classifyCommand(line, ctx).action !== "ask") return false;
+  const parts = commandParts(line, ctx);
+  if (!parts?.length) return false;
+  let needs = false;
+  for (const p of parts) {
+    if (p.cls.action === "run") continue;
+    if (p.cls.action !== "ask" || !SANDBOXABLE.has(p.cls.category)) return false;
+    let argv: string[];
+    try {
+      argv = parseArgv(p.text);
+    } catch {
+      return false;
+    }
+    while (argv.length && (WRAPPERS.has(argv[0]) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(argv[0]))) argv.shift();
+    if (NOT_SANDBOXED.test((argv[0] ?? "").split("/").pop() ?? "")) return false;
+    needs = true;
+  }
+  return needs;
+}
+
+// ---------------------------------------------------------------------------
 // Tool calls
 // ---------------------------------------------------------------------------
 
@@ -713,6 +768,8 @@ export interface Decision {
    * chose to approve everything). The executor still refuses what it always refuses (.git internals).
    */
   approved?: boolean;
+  /** Run in the OS sandbox (Auto, sandboxable()): project-only writes, no network. */
+  sandbox?: boolean;
   /** An ask "Allow for this session" may answer: what it would cover (session-allowances.ts). */
   session?: string;
   /** A run because the session allowed this kind of call (session-allowances.ts): what was allowed. */
@@ -730,6 +787,8 @@ export interface DecideContext {
   branch?: () => string | null;
   /** Older "always" answer for edits in this project. */
   editsAlways?: boolean;
+  /** This computer has an OS sandbox and the setting is on (sandbox-settings.ts): Auto runs sandboxable commands in it. */
+  sandbox?: boolean;
 }
 
 /** Tools that ask in every mode but Full access (they publish or reach other people). */
@@ -776,7 +835,10 @@ export function decideToolCall(tool: ToolName, args: Record<string, unknown>, ct
     // A command line runs when each part only reads, Auto runs it, or a rule covers it.
     if (partsCovered(args.command, { root: ctx.root, branch: ctx.branch?.() ?? null }, ctx.rules ?? [], ctx.mode === "auto")) return { action: "run", reason: "always-allow rules cover every part" };
     const rules = suggestRules(args.command, { root: ctx.root, branch: null });
-    return { action: "ask", reason: cls.reason, ...(rules ? { rule: rules[0], ...(rules.length > 1 ? { rules } : {}) } : {}) };
+    const offer = rules ? { rule: rules[0], ...(rules.length > 1 ? { rules } : {}) } : {};
+    // The rules stay on a sandboxed run: they are offered if the sandbox blocks it and it asks to re-run outside.
+    if (ctx.mode === "auto" && ctx.sandbox === true && sandboxable(args.command, { root: ctx.root, branch: ctx.branch?.() ?? null })) return { action: "run", reason: SANDBOX_REASON, sandbox: true, ...offer };
+    return { action: "ask", reason: cls.reason, ...offer };
   }
   if (tool === "write_file" || tool === "edit_file") {
     const path = args.path;

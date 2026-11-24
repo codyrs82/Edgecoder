@@ -90,7 +90,8 @@ the top of the sidebar. The sidebar then lists your sessions by project, with ea
 - **Code** lists each of your computers: online or offline, and whether **Code from your phone** is
   **On**, **View only** or **Off**. Under each one are its trusted projects and their sessions,
   newest first. **New session** starts one in a project, as on the phone.
-- Open a session to read the conversation: messages, each reply's tool steps (collapsed), the files a
+- Open a session to read the conversation: messages, each reply's tool steps (collapsed; a command
+  the Mac ran in its Auto-mode sandbox is tagged **sandboxed**), the files a
   turn changed (open one to see its diff), and the session's model and cSats so far. It updates by
   itself while a turn runs. A session has its own link (`/portal/code/<computer>/<session>`) you can
   bookmark.

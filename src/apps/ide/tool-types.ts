@@ -148,6 +148,10 @@ export type IdeStreamEvent =
        * the rest of this run" isn't offered and never covers it.
        */
       runs_edited?: string;
+      /** Auto runs it in the OS sandbox (sandbox.ts): writes only inside the project, no network. */
+      sandboxed?: true;
+      /** The sandbox blocked the call just before (what it blocked): this asks to run it outside the sandbox. */
+      sandbox_retry?: string;
       /**
        * An ask "Allow for this session" may answer (session-allowances.ts): what later calls it lets
        * run without asking ("npm test commands", "edits inside the project"). A bot: for the rest of the run.
@@ -165,6 +169,10 @@ export type IdeStreamEvent =
       stdout: string;
       stderr: string;
       exit_code: number;
+      /** It ran in the OS sandbox (the card shows a "sandboxed" tag). */
+      sandboxed?: true;
+      /** What the sandbox most likely blocked when it failed (a write outside the project, the network). */
+      sandbox_denied?: string;
     }
   | {
       type: "plan";

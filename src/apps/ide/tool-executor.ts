@@ -13,6 +13,7 @@ import { join, resolve, relative, dirname, isAbsolute, sep } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { realpathSync, lstatSync, readFileSync } from "node:fs";
 import type { ToolName } from "./tool-types.js";
+import { SANDBOX_UNAVAILABLE, sandboxDenial, sandboxInvocation } from "./sandbox.js";
 import { cloudFetchMessage, displayPath, findPathVariant, isCloudFetchError, notFoundMessage } from "./path-hints.js";
 import { gitExecEnv, githubTokenCredentialEnv, hardenedGitArgs, hardenedGitEnv } from "./git-safe.js";
 import { findGh, ghCredentialConfig } from "./git-setup.js";
@@ -562,7 +563,7 @@ export class ToolExecutor {
   async execute(
     tool: ToolName,
     args: Record<string, unknown>,
-    opts: { approved?: boolean } = {},
+    opts: { approved?: boolean; sandbox?: boolean } = {},
   ): Promise<ToolResult> {
     try {
       switch (tool) {
@@ -580,7 +581,7 @@ export class ToolExecutor {
         case "edit_file":
           return await this.editFile(args, opts.approved === true);
         case "run_shell":
-          return await this.runShell(args, opts.approved === true);
+          return await this.runShell(args, opts.approved === true, opts.sandbox === true);
         case "git_status":
           return this.gitStatus();
         case "git_diff":
@@ -847,24 +848,30 @@ export class ToolExecutor {
   // run_shell
   // -----------------------------------------------------------------------
 
-  private async runShell(args: Record<string, unknown>, approved = false): Promise<ToolResult> {
+  private async runShell(args: Record<string, unknown>, approved = false, sandbox = false): Promise<ToolResult> {
     // Exactly the string the approval card showed; no coercion of arrays or objects.
     if (typeof args.command !== "string") return { error: "run_shell rejected: command must be a string" };
     const command = args.command;
     const timeout =
       typeof args.timeout === "number" ? args.timeout : 30_000;
 
-    // #4: policy check before anything is spawned.
-    const decision = evaluateShellCommand(command, { approved, root: this.root });
+    // #4: policy check before anything is spawned. A sandboxed run (Auto) counts as approved here:
+    // the sandbox, not the allowlist, contains it (sandbox.ts).
+    const decision = evaluateShellCommand(command, { approved: approved || sandbox, root: this.root });
     if (!decision.allowed) {
       return { error: `run_shell rejected: ${decision.reason}` };
     }
+    // Never falls back to running outside the sandbox: the agent loop asks for that (agent-loop.ts).
+    const boxed = sandbox ? sandboxInvocation(command, this.root) : null;
+    if (boxed && "error" in boxed) return { error: `${SANDBOX_UNAVAILABLE}${boxed.error}` };
 
     return new Promise<ToolResult>((resolvePromise) => {
       // Default: no shell, parsed argv. Only an explicitly approved command that
       // needs shell syntax (pipes, &&, …) is run through sh -c.
       // git run by the agent (directly or from a script) gets the IDE's git hardening.
-      const [cmd, cmdArgs] = decision.useShell
+      const [cmd, cmdArgs] = boxed
+        ? [boxed.file, boxed.args]
+        : decision.useShell
         // /bin/sh, not a PATH lookup that a relative PATH entry could resolve inside the project.
         ? [process.platform === "win32" ? "sh" : "/bin/sh", ["-c", command]]
         : decision.argv[0] === "git"
@@ -875,7 +882,7 @@ export class ToolExecutor {
         proc = spawn(cmd, cmdArgs, {
           cwd: this.root,
           shell: false,
-          env: hardenedGitEnv(scrubShellEnv(process.env)),
+          env: boxed ? { ...hardenedGitEnv(scrubShellEnv(process.env)), TMPDIR: boxed.tmp, TMP: boxed.tmp, TEMP: boxed.tmp } : hardenedGitEnv(scrubShellEnv(process.env)),
           stdio: ["ignore", "pipe", "pipe"],
         });
       } catch (error) {
@@ -912,11 +919,13 @@ export class ToolExecutor {
         settled = true;
         clearTimeout(timer);
         const exitCode = killed ? 137 : (code ?? 1);
+        const denied = boxed ? sandboxDenial(stdout, stderr, exitCode) : null;
         resolvePromise({
           result: JSON.stringify({
             stdout: stdout.trimEnd(),
             stderr: stderr.trimEnd(),
             exit_code: exitCode,
+            ...(boxed ? { sandboxed: true, ...(denied ? { sandbox_denied: denied } : {}) } : {}),
           }),
         });
       });

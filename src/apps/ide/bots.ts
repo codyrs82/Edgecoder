@@ -940,6 +940,8 @@ export class BotManager {
       fingerprint?: (root: string) => Promise<string | null>;
       /** "Always allow" rules per project (shared with chat and sessions); default: in memory. */
       permissions?: PermissionStore;
+      /** Auto runs unchecked commands in the OS sandbox for this folder (sandbox-settings.ts); default no. */
+      sandbox?: (root: string) => boolean;
       /** Your cSat balance now (undefined: unknown), to resume bots paused out of cSats after a top-up. */
       balance?: () => Promise<number | undefined>;
       /** Where "Use default" makes a web-made bot's folder (default ~/EdgeCoder/Bots). */
@@ -964,7 +966,7 @@ export class BotManager {
     if (!bot) return { action: "ask", reason: "the bot is gone" };
     const root = botWorkRoot(bot);
     const p = this.permissions.get(root);
-    const verdict = decideToolCall(tool, args, { mode: botMode(bot), root, rules: p.rules ?? [], legacyNames: p.shell, branch: () => branchOf(root) }, (c) => riskOf(c, root));
+    const verdict = decideToolCall(tool, args, { mode: botMode(bot), root, rules: p.rules ?? [], legacyNames: p.shell, branch: () => branchOf(root), sandbox: this.deps.sandbox?.(root) === true }, (c) => riskOf(c, root));
     if (verdict.action === "refuse") return verdict;
     // A repo command in a folder that isn't a project, or a question it already had the answer to: refused with why.
     const act = this.active.get(id);

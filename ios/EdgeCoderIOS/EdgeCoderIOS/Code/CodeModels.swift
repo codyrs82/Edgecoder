@@ -333,18 +333,22 @@ struct CodeToolStep: Decodable, Equatable {
     let detail: String
     /// ok | error | pending | denied | running
     let status: String
+    /// Ran in the Mac's OS sandbox (Auto mode): project-only writes, no network.
+    let sandboxed: Bool
 
-    enum CodingKeys: String, CodingKey { case tool, detail, status }
-    init(tool: String, detail: String, status: String) {
+    enum CodingKeys: String, CodingKey { case tool, detail, status, sandboxed }
+    init(tool: String, detail: String, status: String, sandboxed: Bool = false) {
         self.tool = tool
         self.detail = detail
         self.status = status
+        self.sandboxed = sandboxed
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         tool = c.lenient(.tool, "tool")
         detail = c.lenient(.detail, "")
         status = c.lenient(.status, "ok")
+        sandboxed = (try? c.decodeIfPresent(Bool.self, forKey: .sandboxed)) == true
     }
 }
 
