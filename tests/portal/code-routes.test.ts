@@ -177,6 +177,21 @@ describe("portal code API", () => {
     for (const s of sent) expect(s).toMatchObject({ token: SERVICE, body: { accountId: "acct-u1", action: "message", args: { sessionId: SESSION, text: "run the tests" } } });
   });
 
+  it("a message with images (over the default 1 MB body) is passed on; a mislabelled or oversized one is refused here", async () => {
+    const png = (n: number) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(n - 8, 5)]).toString("base64");
+    const attachments = [{ name: "shot.png", mediaType: "image/png", data: png(3 * 1024 * 1024) }];
+    const r = await app.inject({ method: "POST", url: "/portal/api/code/mac-1/commands", headers: as("u1"), payload: { action: "message", sessionId: SESSION, text: "what's wrong?", attachments } });
+    expect(r.statusCode).toBe(202);
+    const sent = seen.filter((x) => x.url === "/agent-control/agents/mac-1/code-commands").at(-1)!;
+    expect(sent.body).toMatchObject({ action: "message", args: { sessionId: SESSION, text: "what's wrong?", attachments } });
+    seen.length = 0;
+    for (const bad of [[{ ...attachments[0], mediaType: "image/gif" }], [{ name: "x.png", mediaType: "image/png", data: Buffer.from("<svg/>").toString("base64") }], [{ name: "big.png", mediaType: "image/png", data: png(5 * 1024 * 1024 + 1) }]]) {
+      const b = await app.inject({ method: "POST", url: "/portal/api/code/mac-1/commands", headers: as("u1"), payload: { action: "message", sessionId: SESSION, text: "x", attachments: bad } });
+      expect(b.statusCode).toBe(400);
+    }
+    expect(seen.filter((x) => x.url.includes("code-commands"))).toEqual([]);
+  });
+
   it("ignores account fields in the body: the session decides the account", async () => {
     const r = await app.inject({ method: "POST", url: "/portal/api/code/mac-1/commands", headers: as("u1"), payload: { action: "cancel", sessionId: SESSION, accountId: "acct-evil", account: "acct-evil", requestedBy: "acct-evil" } });
     expect(r.statusCode).toBe(202);

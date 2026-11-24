@@ -21,7 +21,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { BOT_CONTROL_ACTIONS, type RemoteBotMessage, type RemoteBotRun } from "../../common/bot-relay.js";
+import { BOT_CONTROL_ACTIONS, servedFromWhere, type RemoteBotMessage, type RemoteBotRun, type RemoteServed } from "../../common/bot-relay.js";
 import type { CloudBotRunner } from "../cloud-bots/runner.js";
 import { BOT_SECRETS_DISABLED_MESSAGE, type BotSecrets } from "../cloud-bots/secrets.js";
 import type { CloudBotPatch, CloudBotStore } from "../cloud-bots/store.js";
@@ -87,12 +87,22 @@ class Window {
   }
 }
 
-function toRemoteMessage(m: CloudMessage): RemoteBotMessage {
-  const steps = Array.isArray(m.meta?.steps) ? (m.meta!.steps as RemoteBotMessage["steps"]) : undefined;
-  return { id: m.id, role: m.role, content: m.content, atMs: m.createdAtMs, ...(m.runId ? { runId: m.runId } : {}), ...(steps?.length ? { steps } : {}) };
+/** A cloud run's model and machine class, when its `where` names them (Auto's "routed to <model> on <class> …"). */
+function cloudServed(where: unknown, cSats: unknown): RemoteServed | undefined {
+  const w = servedFromWhere(typeof where === "string" ? where : undefined);
+  if (!w.model && !w.machine) return undefined;
+  return { ...w, calls: 1, cSats: typeof cSats === "number" && Number.isFinite(cSats) ? cSats : 0 };
 }
 
-function toRemoteRun(r: CloudRun): RemoteBotRun {
+export function toRemoteMessage(m: CloudMessage): RemoteBotMessage {
+  const steps = Array.isArray(m.meta?.steps) ? (m.meta!.steps as RemoteBotMessage["steps"]) : undefined;
+  const usage = m.role === "assistant" && m.meta?.usage && typeof m.meta.usage === "object" ? (m.meta.usage as { where?: unknown; cSats?: unknown }) : null;
+  const served = usage ? cloudServed(usage.where, usage.cSats) : undefined;
+  return { id: m.id, role: m.role, content: m.content, atMs: m.createdAtMs, ...(m.runId ? { runId: m.runId } : {}), ...(steps?.length ? { steps } : {}), ...(served ? { served } : {}) };
+}
+
+export function toRemoteRun(r: CloudRun): RemoteBotRun {
+  const served = cloudServed(r.where, r.cSats);
   return {
     id: r.id,
     trigger: r.trigger,
@@ -103,6 +113,7 @@ function toRemoteRun(r: CloudRun): RemoteBotRun {
     summary: r.summary,
     cSats: r.cSats,
     where: r.where ?? "Cloud",
+    ...(served ? { served } : {}),
     ...(r.error ? { error: r.error } : {}),
   };
 }

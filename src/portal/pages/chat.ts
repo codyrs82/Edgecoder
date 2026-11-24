@@ -11,6 +11,7 @@ import { SERVED_BROWSER_LIB } from "./served.js";
 import { QUOTE_SELECTION_BROWSER_LIB, QUOTE_SELECTION_CSS, quoteSelectionScript } from "./quote-selection.js";
 import { CHAT_FAILURES_BROWSER_LIB } from "../../common/chat-failures.js";
 import { WEB_TOGGLE_CSS, WEB_TOGGLE_SCRIPT } from "./web-toggle.js";
+import { IMAGE_ATTACH_CSS, IMAGE_ATTACH_JS } from "./image-attach.js";
 
 /** No bytes at all for this long (the server sends a heartbeat every 15 s): the request is dead. */
 export const CHAT_IDLE_TIMEOUT_MS = 45_000;
@@ -157,7 +158,7 @@ app.get("/portal/chat", async (_req, reply) => {
       .chat-empty { padding:60px 0; text-align:center; }
       .chat-empty-icon { display:inline-flex; width:44px; height:44px; border-radius:var(--radius-md); border:1px solid var(--card-border); background:var(--bg-surface); align-items:center; justify-content:center; color:var(--brand-2); margin-bottom:12px; }
       .chat-empty .chat-empty-title { margin:0 0 6px; font-size:18px; color:var(--text); }
-${WEB_TOGGLE_CSS}${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px; margin:0 auto; display:flex; align-items:center; gap:8px; padding:6px 24px; color:var(--muted); font-size:12px; }
+${WEB_TOGGLE_CSS}${QUOTE_SELECTION_CSS}${IMAGE_ATTACH_CSS}      .stream-indicator { max-width:768px; margin:0 auto; display:flex; align-items:center; gap:8px; padding:6px 24px; color:var(--muted); font-size:12px; }
     </style>
     <div class="chat-layout">
       <!-- Conversations (New chat, Search, recent chats) live in the shell's sidebar. -->
@@ -178,10 +179,12 @@ ${WEB_TOGGLE_CSS}${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px
         </div>
         <div class="chat-input-area">
           <div class="chat-input-wrap">
-            <div class="chat-input-row">
+            <div class="chat-input-row" id="chatInputRow">
+              <div class="img-tray" id="chatImgs" aria-label="Images"></div><div class="img-note" id="chatImgNote" role="status"></div>
               <textarea id="chatInput" rows="1" placeholder="Message EdgeCoder..." aria-label="Message"></textarea>
               <div class="chat-input-tools">
                 <div class="chat-input-left">
+                <button type="button" class="img-attach" id="chatAttach" aria-label="Attach images" title="Attach images (or paste or drop them)">${icon("image", 16)}</button><input type="file" id="chatFile" accept="image/png,image/jpeg,image/webp" multiple hidden>
                 <div class="model-picker-wrap" id="modelPickerWrap">
                   <button type="button" class="model-trigger" id="modelTrigger" aria-haspopup="listbox" aria-expanded="false" aria-controls="modelDropdown" title="Where this chat runs">
                     ${icon("cpu", 14)}<span id="modelLabel">Auto</span>
@@ -543,6 +546,9 @@ ${WEB_TOGGLE_CSS}${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px
       var isRetry = typeof retryText === "string";
       var input = document.getElementById("chatInput");
       var text = isRetry ? retryText : input.value.trim();
+      // No chat model on the network reads images: they are shown, never sent, and the composer says so.
+      var sentImgs = isRetry ? [] : chatImgs.items();
+      if (!text && sentImgs.length && !isStreaming) { showToast(CHAT_NO_IMAGES + " Add a message to send.", true); return; }
       if (!text || isStreaming) return;
       if (!isRetry) {
         input.value = "";
@@ -578,6 +584,7 @@ ${WEB_TOGGLE_CSS}${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px
         var nowTime = formatMsgTime(Date.now());
         userBubble.innerHTML = "<div class=\\"msg-header\\"><div class=\\"msg-role\\">You</div><div class=\\"msg-time\\">" + nowTime + "</div></div><div class=\\"msg-body\\" data-quotable>" + renderMarkdown(text) + "</div>";
         chatMessages.appendChild(userBubble);
+        if (sentImgs.length) { imageAttachShow(userBubble, sentImgs, "Not sent: " + CHAT_NO_IMAGES.toLowerCase()); chatImgs.clear(); }
       }
       scrollParent.scrollTop = scrollParent.scrollHeight;
 
@@ -903,6 +910,10 @@ ${WEB_TOGGLE_CSS}${QUOTE_SELECTION_CSS}      .stream-indicator { max-width:768px
 
     // Event listeners
     document.getElementById("newChatBtn").addEventListener("click", createNewChat);
+    ${IMAGE_ATTACH_JS}
+    var CHAT_NO_IMAGES = "This model can't read images.";
+    var chatImgs = imageAttach({ input: document.getElementById("chatInput"), drop: document.getElementById("chatInputRow"), tray: document.getElementById("chatImgs"), button: document.getElementById("chatAttach"), file: document.getElementById("chatFile"),
+      onChange: function(list) { document.getElementById("chatImgNote").textContent = list.length ? CHAT_NO_IMAGES + " They stay here and aren't sent." : ""; } });
     document.getElementById("sendBtn").addEventListener("click", sendMessage);
 
     document.getElementById("chatInput").addEventListener("keydown", function(e) {

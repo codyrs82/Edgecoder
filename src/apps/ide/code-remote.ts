@@ -31,6 +31,8 @@ import {
   MAX_PAGE_MESSAGES, MAX_RESULT_BYTES, MAX_SNAPSHOT_BYTES, PAGE_MESSAGE_CHARS, SNAPSHOT_MESSAGE_CHARS, SNAPSHOT_TAIL_MESSAGES,
   capMessage, toolCallDetail, toolSteps, type RemoteToolStep,
 } from "../../common/bot-relay.js";
+import { CODE_COMMAND_BODY_LIMIT, base64Bytes, codeImagesSchema, type CodeImage } from "../../common/code-relay.js";
+import { attachedLine, saveAttachments, savedAttachmentsText } from "./attachments.js";
 import type { CheckpointStore } from "./checkpoints.js";
 import { modelIdOf, SessionError, type ClientKind, type ClientRef, type SessionData, type SessionHub, type TranscriptEntry } from "./sessions.js";
 import { isProjectTrusted, listTrustedProjects, projectIdOf, trustedRootForId, type TrustedProject } from "./workspace-trust.js";
@@ -58,6 +60,8 @@ export interface RemoteSessionSummary {
   cSats: number;
   createdAt: number;
   updatedAt: number;
+  /** This Mac takes images with a message ("message" with `attachments`); older Macs leave it out. */
+  images?: true;
 }
 
 export interface RemoteMessage {
@@ -167,6 +171,7 @@ function summaryOf(hub: SessionHub, s: SessionData, salt: string): RemoteSession
     cSats: s.cSats,
     createdAt: s.createdAt,
     updatedAt: s.updatedAt,
+    images: true,
   };
 }
 
@@ -264,7 +269,7 @@ export const codeRemoteCommandSchema = z.discriminatedUnion("action", [
   z.object({ requestedBy: account, action: z.literal("changes"), sessionId, turnId }).strict(),
   z.object({ requestedBy: account, action: z.literal("messages"), sessionId, beforeId: z.string().uuid().optional(), limit: z.number().int().min(1).max(MAX_PAGE_MESSAGES).optional() }).strict(),
   z.object({ requestedBy: account, action: z.literal("create"), projectId: z.string().regex(/^[0-9a-f]{16}$/), title: z.string().max(120).optional(), model: model.optional(), mode: remoteMode.default("ask") }).strict(),
-  z.object({ requestedBy: account, action: z.literal("message"), sessionId, text: z.string().min(1).max(32_000) }).strict(),
+  z.object({ requestedBy: account, action: z.literal("message"), sessionId, text: z.string().min(1).max(32_000), attachments: codeImagesSchema.optional() }).strict(),
   z.object({ requestedBy: account, action: z.literal("approve"), sessionId, callId: z.string().min(1).max(200), approved: z.boolean() }).strict(),
   z.object({ requestedBy: account, action: z.literal("cancel"), sessionId }).strict(),
   z.object({ requestedBy: account, action: z.literal("undo"), sessionId, turnId: turnId.optional() }).strict(),
@@ -339,7 +344,7 @@ export function runCodeRemoteCommand(hub: SessionHub, cmd: CodeRemoteCommand, de
         return { status: "done", data: fitList(page.map((m) => messageOf(m, root, pendingIds, PAGE_MESSAGE_CHARS)), { more: older.length > page.length, total: all.length }) };
       }
       case "message": {
-        const r = hub.send(s.id, cmd.text, client);
+        const r = hub.send(s.id, cmd.attachments?.length ? withImages(cmd.text, root, cmd.attachments) : cmd.text, client);
         return { status: "done", data: { turnId: r.turnId, ...(r.queued ? { queuedId: r.queued.id } : {}) } };
       }
       case "approve": {
@@ -376,6 +381,16 @@ export function runCodeRemoteCommand(hub: SessionHub, cmd: CodeRemoteCommand, de
   }
 }
 
+/**
+ * Images sent with a message from the web: saved into the project's `.edgecoder/attachments/` (ignored
+ * by git) the way the desktop app saves a bot's attachments, and named in the message with where
+ * each was saved ("[Attached: shot.png]" and a line per image), so the agent can find them.
+ */
+function withImages(text: string, root: string, images: CodeImage[]): string {
+  const saved = saveAttachments(root, images.map((i) => ({ kind: "image" as const, name: i.name, mediaType: i.mediaType, size: base64Bytes(i.data), data: i.data })));
+  return `${text}\n\n${attachedLine(saved)}\n${savedAttachmentsText(root, saved, false)}`;
+}
+
 /** "create": a session in a trusted folder named by its projectId, owned by the phone's account. */
 function createSession(hub: SessionHub, cmd: Extract<CodeRemoteCommand, { action: "create" }>, salt: string, client: ClientRef): CodeRemoteOutcome {
   if (cmd.mode === "auto") return AUTO_REFUSED;
@@ -405,7 +420,8 @@ export function registerCodeRemoteRoutes(app: FastifyInstance, hub: SessionHub, 
     if (!signedIn || signedIn !== q.data.account) return reply.status(403).send({ status: "refused", error: "not_this_account", message: "The account signed in on this Mac didn't ask for this." });
     return codeRemoteSnapshot(hub, signedIn, deps.machineSalt(), deps.branch);
   });
-  app.post("/v1/ide/code/remote/command", async (req, reply) => {
+  // A message may carry images (CODE_COMMAND_BODY_LIMIT; each image is checked again by codeImagesSchema).
+  app.post("/v1/ide/code/remote/command", { bodyLimit: CODE_COMMAND_BODY_LIMIT }, async (req, reply) => {
     const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
     // Defense in depth: whoever relays this checked ownership; the Mac checks its own signed-in account first.
     const requestedBy = typeof body.requestedBy === "string" ? body.requestedBy : "";
