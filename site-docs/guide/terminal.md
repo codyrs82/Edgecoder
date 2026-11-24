@@ -91,7 +91,8 @@ the model or mode. `/remote off` stops showing it in the app.
 The session server listens on `127.0.0.1` only and every request needs a local token, so web pages
 and other machines can't reach it. Controlling a terminal session from another computer isn't
 available. To work from your phone, use **Code** in the [iOS app](/guide/ios-app#code), which drives
-sessions on a computer whose desktop app has **Code from your phone** turned on.
+sessions on a computer whose desktop app has **Code from your phone** turned on. The same sessions
+are on the web too: see [Code on edgecoder.io](/guide/ios-app#code-on-edgecoder-io).
 
 ## Without the app
 
