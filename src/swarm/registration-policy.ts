@@ -32,11 +32,48 @@ export function shouldRegister(state: RegistrationState, url: string, nowMs: num
   return nowMs - state.lastRegisteredAtMs >= refreshMs;
 }
 
-/** A 401 whose body says agent_not_registered: the coordinator restarted or evicted us. */
+/**
+ * A 401 that means the coordinator holds no key for us: the coordinator restarted or evicted us.
+ * Either the body says agent_not_registered, or it is the request gate's bare mesh_unauthorized
+ * (coordinators before the gate gave a reason): a signed agent request only fails the gate when
+ * the coordinator cannot check its signature, and registering again is the answer to that.
+ */
 export function isAgentNotRegisteredError(err: unknown): boolean {
   const e = err as { statusCode?: number; message?: string } | null;
-  return e?.statusCode === 401 && typeof e.message === "string" && e.message.includes("agent_not_registered");
+  if (e?.statusCode !== 401 || typeof e.message !== "string") return false;
+  if (e.message.includes("agent_not_registered")) return true;
+  return /\{"error":"mesh_unauthorized"\}\s*$/.test(e.message);
 }
+
+/**
+ * Re-registering at once (rather than after counting failures into offline mode) is limited to
+ * once per this long, so a coordinator that keeps refusing us cannot drive a registration storm
+ * (BHV008: 10 registrations in 10 minutes); past it the usual failure counting and backoff apply.
+ */
+export const QUICK_REREGISTER_MIN_INTERVAL_MS = 2 * 60_000;
+
+/** Allows one immediate re-registration per QUICK_REREGISTER_MIN_INTERVAL_MS. */
+export class QuickReregisterGate {
+  private lastAtMs = Number.NEGATIVE_INFINITY;
+  constructor(private readonly minIntervalMs = QUICK_REREGISTER_MIN_INTERVAL_MS) {}
+  tryTake(nowMs = Date.now()): boolean {
+    if (nowMs - this.lastAtMs < this.minIntervalMs) return false;
+    this.lastAtMs = nowMs;
+    return true;
+  }
+}
+
+/**
+ * Close codes by which the coordinator says it does not know this agent's key: 4005 (a connection
+ * held for a registration that never came) and 4001 mesh_unauthorized (coordinators that refuse a
+ * connection from an unregistered agent outright).
+ */
+export function isNotRegisteredWsClose(code: number, reason: string): boolean {
+  return code === 4005 || (code === 4001 && reason === "mesh_unauthorized");
+}
+
+/** Client close code the agent uses to reopen its socket after registering again (a fresh bind). */
+export const MESH_WS_REBIND_CLOSE_CODE = 4000;
 
 /** Longest a worker waits on one 429 before trying again (a bad Retry-After must not park it). */
 export const MAX_RATE_LIMIT_WAIT_MS = 60_000;
