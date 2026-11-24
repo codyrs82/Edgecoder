@@ -75,6 +75,7 @@ The default is `auto-edits` in a git repository with a clean working tree, other
 | `/mode [mode]`, `/approve [mode]` | Set the mode; approve a plan. |
 | `/stop`, `/queue`, `/unqueue [n]` | Stop the reply; list or remove queued messages. |
 | `/undo`, `/clear` | Revert the last reply's file changes; start the conversation over. |
+| `/compact` | Summarize the earlier messages now to save tokens; the last few stay as they are. |
 | `/status`, `/cost` | Session, model, where the last call ran; cSats spent this session. |
 | `/remote [off]` | Continue this session in the desktop app, or stop showing it there. |
 | `/github` | Sign in to GitHub with a one-time code (uses the GitHub CLI, `gh`). |

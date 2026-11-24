@@ -104,6 +104,7 @@ run / ask / refuse tables and the rules for "always".
 | `/queue`, `/unqueue [n]` | List queued messages; remove one (default the last). |
 | `/undo` | Revert the files the last reply changed (the turn's checkpoint). |
 | `/clear` | Start the conversation over (same session and settings). |
+| `/compact` | Summarize the earlier messages now to save tokens (the last few stay as they are). The model gets the summary in their place from the next turn on; with a paid lead (your frontier key, a network or cloud model) this also happens on its own once the history passes `EDGECODER_COMPACT_PAID_TOKENS` (80,000 tokens by default). |
 | `/status` | Session, project and branch, model, mode, where the last call ran, who is connected, the queue, the provider. |
 | `/lead [id]`, `/worker [id]` | Show or set the lead and the worker (next section). |
 | `/cost` | cSats this session has spent, plus the estimated USD on your own frontier key. |

@@ -22,6 +22,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { ALWAYS_ASK_TOOLS, makeToolRunner, runAgentLoop, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
 import { toolchainFailureHint } from "./toolchain.js";
+import { compactHistory, compactPaidTokens, estimateTokens, isPaidLead, type HistoryCompaction } from "./context-budget.js";
 import type { CheckpointStore } from "./checkpoints.js";
 import { defaultMode, defaultPermissionsFile, editsApply, EXECUTION_MODES, PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
 import { classifyCommand, decideToolCall, suggestToolRule, type Decision } from "./permission-policy.js";
@@ -74,7 +75,52 @@ export interface TranscriptEntry {
   tentacle?: Record<string, unknown>;
   /** Assistant: a reply written in plan mode (the plan the user approves or revises). */
   plan?: boolean;
+  /**
+   * Note: older messages were summarized (context-budget.ts compactHistory). From then on the
+   * model gets `note` in place of every message up to and including `throughId`.
+   */
+  compaction?: SessionCompaction;
 }
+
+export interface SessionCompaction {
+  throughId: string;
+  note: string;
+  before: number;
+  after: number;
+  savedTokens: number;
+  summarized: boolean;
+  manual: boolean;
+}
+
+/**
+ * What the model gets from a transcript: its user and assistant messages, with the newest
+ * compaction's summary in place of the messages it covers. `ids` lines up with `messages` (the
+ * summary carries the id of the last message it covers).
+ */
+export function sessionHistory(transcript: TranscriptEntry[]): { messages: Array<{ role: string; content: string }>; ids: string[] } {
+  let from = 0;
+  const messages: Array<{ role: string; content: string }> = [];
+  const ids: string[] = [];
+  for (let i = transcript.length - 1; i >= 0; i--) {
+    const c = transcript[i].compaction;
+    if (!c) continue;
+    const at = transcript.findIndex((t) => t.id === c.throughId);
+    if (at < 0) continue;
+    messages.push({ role: "user", content: c.note });
+    ids.push(c.throughId);
+    from = at + 1;
+    break;
+  }
+  for (const t of transcript.slice(from)) {
+    if (t.role !== "user" && t.role !== "assistant") continue;
+    messages.push({ role: t.role, content: t.content });
+    ids.push(t.id);
+  }
+  return { messages, ids };
+}
+
+/** A paid lead's history this big is summarized before the turn (leaves room for the prompt, tools and the turn's own work). */
+export const PRE_TURN_SHARE = 0.75;
 
 /** What a turn's model calls cost, where the last ran, and each call (model, machine, timings). */
 export interface TurnUsage {
@@ -582,14 +628,23 @@ export class SessionHub {
         if (usd) s.frontierUsd = Number(((s.frontierUsd ?? 0) + usd).toFixed(6));
       }
       if (e.type === "status" && e.message.startsWith("Auto: ")) r.usage = { ...r.usage, cSats: r.usage?.cSats ?? 0, where: e.message.slice(6) };
-      if (e.type !== "done") r.events.push(storable(e));
+      // The context meter's per-call size is live only (not kept in the transcript).
+      if (e.type !== "done" && e.type !== "context") r.events.push(storable(e));
       this.emit(id, { type: "agent", turnId: r.turnId, event: e });
     };
     try {
       this.env.checkpoints.begin(r.turnId, s.projectRoot);
       sendEvent({ type: "turn", id: r.turnId });
       const exec = this.env.executor(s);
-      const messages = s.transcript.filter((t) => t.role === "user" || t.role === "assistant").map((t) => ({ role: t.role, content: t.content }));
+      // A paid lead (frontier key, network or cloud model): past the token budget, older messages
+      // become one summary the session keeps, so later turns stop resending them (context-budget.ts).
+      const paid = isPaidLead(modelIdOf(s), s.compute.target);
+      const budget = compactPaidTokens();
+      if (paid && estimateTokens(sessionHistory(s.transcript).messages) > budget * PRE_TURN_SHARE) {
+        sendEvent({ type: "status", message: "Summarizing earlier messages to save tokens…" });
+        await this.compactTranscript(s, r.by ?? null, false, r.abort.signal, sendEvent).catch(() => null);
+      }
+      const messages = sessionHistory(s.transcript).messages;
       await runAgentLoop({
         chat: this.env.chat(s, sendEvent, r.abort.signal, { client: r.by ?? null, role: "lead" }),
         systemPrompt: await this.env.systemPrompt(s),
@@ -599,6 +654,7 @@ export class SessionHub {
         tools: this.env.tools?.(s),
         ...(this.env.contextWindow ? { contextWindow: () => this.env.contextWindow!(s) } : {}),
         ...(this.env.summarize ? { summarize: this.env.summarize(s, (e) => e.type === "usage" && sendEvent(e), r.abort.signal, { client: r.by ?? null }) } : {}),
+        compactAtTokens: paid ? budget : null,
         // Plan mode is read when the turn starts: approving the plan starts the next turn.
         plan: s.mode === "plan",
         runTool: makeToolRunner({
@@ -903,6 +959,34 @@ export class SessionHub {
     this.save(s);
     this.emit(id, { type: "undo", turnId: entry.turnId, reverted });
     return { turnId: entry.turnId, reverted };
+  }
+
+  /**
+   * Summarize everything but the last few messages now (`/compact`, the app's "Compact
+   * conversation"). The summary is kept as a note and sent in place of those messages from the
+   * next turn on. Null when there is too little to compact.
+   */
+  async compact(id: string, client: ClientRef): Promise<TranscriptEntry | null> {
+    const s = this.need(id);
+    const l = this.liveOf(id);
+    if (l.running) throw new SessionError("busy", "Wait for the reply to finish before compacting.");
+    return this.compactTranscript(s, client, true, AbortSignal.timeout(90_000));
+  }
+
+  private async compactTranscript(s: SessionData, client: ClientRef | null, manual: boolean, signal: AbortSignal, sendEvent?: (e: IdeStreamEvent) => void): Promise<TranscriptEntry | null> {
+    const { messages, ids } = sessionHistory(s.transcript);
+    let cSats = 0;
+    const onUsage = (e: IdeStreamEvent) => {
+      if (e.type !== "usage") return;
+      if (sendEvent) sendEvent(e);
+      else if (Number.isFinite(e.cSats)) cSats += e.cSats;
+    };
+    const summarize = this.env.summarize?.(s, onUsage, signal, { client });
+    const r: HistoryCompaction | null = await compactHistory(messages, summarize ? { summarize } : {});
+    if (!r) return null;
+    const compaction: SessionCompaction = { throughId: ids[r.covered - 1], note: r.note, before: r.before, after: r.after, savedTokens: Math.max(0, r.before - r.after), summarized: r.summarized, manual };
+    sendEvent?.({ type: "compacted", before: r.before, after: r.after, savedTokens: compaction.savedTokens, summarized: r.summarized, manual, covered: r.covered });
+    return this.recordNote(s.id, { content: `Earlier messages summarized to save tokens · ~${compaction.savedTokens.toLocaleString("en-US")} tokens saved`, compaction, ...(cSats > 0 ? { usage: { cSats, where: "compaction" } } : {}) });
   }
 
   /** Start the conversation over (same session, project and settings). */

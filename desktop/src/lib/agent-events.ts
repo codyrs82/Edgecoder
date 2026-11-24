@@ -21,6 +21,10 @@ export interface AgentTurn {
   activity?: string;
   /** Web was wanted (Auto) but not offered for this reply: "needs_csats", "rate_limited" or "unreachable". */
   webOff?: { reason: string; message: string };
+  /** Estimated prompt tokens of the turn's latest model call (the context meter). */
+  contextTokens?: number;
+  /** Tokens saved by compacting older messages during this turn (context-budget.ts). */
+  compactedTokens?: number;
 }
 
 /** Tools whose successful result means files in the project changed. */
@@ -96,6 +100,14 @@ export function applyAgentEvent(turn: AgentTurn, event: IdeStreamEvent): { turn:
     case "web": {
       const web = webUsageOf(event);
       return { turn: web ? { ...turn, web, activity: undefined } : turn, filesChanged: false };
+    }
+    case "context": {
+      const tokens = Number(event.tokens);
+      return { turn: Number.isFinite(tokens) && tokens > 0 ? { ...turn, contextTokens: tokens } : turn, filesChanged: false };
+    }
+    case "compacted": {
+      const saved = Number(event.savedTokens);
+      return { turn: Number.isFinite(saved) && saved > 0 ? { ...turn, compactedTokens: (turn.compactedTokens ?? 0) + saved } : turn, filesChanged: false };
     }
     case "web_off":
       return { turn: { ...turn, webOff: { reason: String(event.reason ?? ""), message: String(event.message ?? "") } }, filesChanged: false };

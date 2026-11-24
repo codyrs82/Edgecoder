@@ -22,7 +22,7 @@ import { READ_TOOLS, TENTACLE_TOOLS, TOOL_DEFINITIONS, WEB_TOOLS, type IdeStream
 import { PLAN_REFUSAL, type Decision } from "./permission-policy.js";
 import { protectedToolPath } from "./tool-executor.js";
 import { extractTextToolCalls, TextToolCallFilter } from "./text-tool-calls.js";
-import { COMPACT_AT, compactMessages, DEFAULT_CONTEXT_WINDOW, isContextTooLong, isTransient, pathsLine, shouldCompact } from "./context-budget.js";
+import { COMPACT_AT, compactMessages, compactThreshold, DEFAULT_CONTEXT_WINDOW, estimateTokens, isContextTooLong, isTransient, pathsLine } from "./context-budget.js";
 
 export interface ChatMessage {
   role: string;
@@ -261,6 +261,12 @@ export interface AgentLoopDeps {
   contextWindow?: number | (() => Promise<number | undefined> | number | undefined);
   /** A cheap model call (a small or auto model) that summarizes older messages when compacting. */
   summarize?: (text: string) => Promise<string | null>;
+  /**
+   * A lead paid per token (frontier key, network or cloud model): compact once a call's prompt
+   * passes this many tokens even when the window is far bigger (context-budget.ts compactThreshold).
+   * Unset: 85% of the window only.
+   */
+  compactAtTokens?: number | null;
   /** Waits before retrying a transient model-call failure (default 1.5 s, then 4 s). */
   retryDelaysMs?: number[];
   /**
@@ -420,11 +426,16 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
     const result = await d.runTool(tool, args);
     return { result, label: callLabel(tool, args, result) };
   };
-  const compact = async (share: number) => {
+  /** Compact to fit `budget` tokens; says so in a status line and a `compacted` event (tokens saved). */
+  const compact = async (budget: number, tools?: ToolSchema[], paid = false) => {
     const before = messages.length;
-    const r = await compactMessages(messages, { budget: window * share, tools: native ? tools : undefined, pinned: request, labels, paths, summarize: d.summarize });
+    const beforeTokens = estimateTokens(messages, tools);
+    const r = await compactMessages(messages, { budget, tools: native ? tools : undefined, pinned: request, labels, paths, summarize: d.summarize });
     messages.splice(0, messages.length, ...r.messages);
-    d.sendEvent({ type: "status", message: `Compacted the conversation to fit the model's ${Math.round(window / 1024)}k context (${r.summarized ? "summarized" : "shortened"} ${Math.max(r.dropped, before - messages.length) || "older"} messages; recent ones and file paths kept).` });
+    const afterTokens = estimateTokens(messages, tools);
+    const why = paid ? `to save tokens (paid models compact past ${Math.round(budget / 1000 / ((COMPACT_AT - 0.15) / COMPACT_AT))}K tokens)` : `to fit the model's ${Math.round(window / 1024)}k context`;
+    d.sendEvent({ type: "status", message: `Compacted the conversation ${why} (${r.summarized ? "summarized" : "shortened"} ${Math.max(r.dropped, before - messages.length) || "older"} messages; recent ones and file paths kept).` });
+    d.sendEvent({ type: "compacted", before: beforeTokens, after: afterTokens, savedTokens: Math.max(0, beforeTokens - afterTokens), summarized: r.summarized });
   };
   /** One model call: compacts first when needed, compacts and retries once on context_too_long, retries transient failures. */
   const callModel = async (withTools: boolean, onDelta?: (t: string) => void): Promise<ChatResult> => {
@@ -432,7 +443,12 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
     let transient = 0;
     const delays = d.retryDelaysMs ?? [1_500, 4_000];
     for (;;) {
-      if (shouldCompact(messages, withTools ? tools : undefined, window)) await compact(COMPACT_AT - 0.15);
+      const offered = withTools ? tools : undefined;
+      // Free models: 85% of the window. Paid leads: also at most compactAtTokens (80K by default).
+      const at = compactThreshold(window, d.compactAtTokens);
+      if (estimateTokens(messages, offered) > at) await compact(at * ((COMPACT_AT - 0.15) / COMPACT_AT), offered, at < window * COMPACT_AT);
+      // The prompt this call sends, for the chat's context meter.
+      d.sendEvent({ type: "context", tokens: estimateTokens(messages, offered), window });
       let streamed = false;
       try {
         return await d.chat(withTools ? { messages, tools } : { messages }, onDelta ? (t) => {
@@ -447,7 +463,7 @@ export async function runAgentLoop(d: AgentLoopDeps): Promise<void> {
           const m = /serves (\d+)|largestContextWindow\D+(\d+)/.exec((err as Error).message ?? "");
           const reported = m ? Number(m[1] ?? m[2]) : NaN;
           if (Number.isFinite(reported) && reported >= 2048 && reported < window) window = reported;
-          await compact(0.6);
+          await compact(window * 0.6, withTools ? tools : undefined);
           continue;
         }
         if (isTransient(err) && !streamed && transient < 2) {

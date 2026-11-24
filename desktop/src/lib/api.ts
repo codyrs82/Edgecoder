@@ -3,6 +3,7 @@ import type { EngineMode } from "./permission-modes";
 import type { AttachmentPayload } from "./attachments";
 import type { WebStatus } from "./web-tool";
 import { fetchLocalService, serviceErrorText } from "./local-service";
+import { compactPaidTokensSetting } from "./compaction";
 import { coordinatorUrl, defaultEndpoints, fetchEndpoint, portalUrl, type EndpointKind } from "./endpoints";
 import type {
   HealthRuntime,
@@ -1414,7 +1415,7 @@ export const listPermissions = () => fsCall<{ projects: Record<string, ProjectPe
 export const removePermission = (projectRoot: string, rule: string) => fsCall<{ removed: boolean }>("POST", "/v1/ide/permissions/remove", { projectRoot, rule });
 
 export interface IdeStreamEvent {
-  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "usage" | "web" | "web_off" | "done";
+  type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "usage" | "web" | "web_off" | "context" | "compacted" | "done";
   [key: string]: unknown;
 }
 
@@ -1476,6 +1477,8 @@ export async function streamIdeChat(
       ...(attachments?.length ? { attachments } : {}),
       ...(web ? { web: true } : {}),
       ...(helpers ? { helpers } : {}),
+      // Settings → General → "Compact long chats at … tokens" (a paid lead compacts past it).
+      compactPaidTokens: compactPaidTokensSetting(),
     }),
     signal,
   });
@@ -1509,6 +1512,23 @@ export async function streamIdeChat(
       }
     }
   }
+}
+
+/**
+ * Summarize a chat's older messages (POST /v1/ide/compact, compaction.ts). `force`: now (`/compact`,
+ * "Compact conversation"); otherwise only when the chat's model is paid and its history passed the
+ * budget. The summary runs on a cheap model (this computer's for a local chat), never your
+ * frontier key unless you turned that on.
+ */
+export async function ideCompact(messages: Array<{ role: "user" | "assistant"; content: string }>, requestedModel: string | undefined, force: boolean, signal?: AbortSignal): Promise<import("./compaction").CompactResult> {
+  const res = await ideFetch(`${ideBase()}/v1/ide/compact`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, ...computeFields(requestedModel), force, compactPaidTokens: compactPaidTokensSetting() }),
+    signal,
+  });
+  if (!res.ok) throw new Error(`Compacting failed: ${res.status}`);
+  return (await res.json()) as import("./compaction").CompactResult;
 }
 
 /** The SSE events of an IDE stream, one parsed object per `data:` line, until [DONE]. */
@@ -2139,6 +2159,8 @@ export interface SessionEntry {
   undone?: boolean;
   /** A plan written in Plan mode (Approve plan / Revise). */
   plan?: boolean;
+  /** A note: older messages were summarized to save tokens (`/compact`, or before a paid turn). */
+  compaction?: { throughId: string; savedTokens: number; manual: boolean };
 }
 export interface SessionQueued {
   id: string;
@@ -2183,6 +2205,8 @@ export const sessionSettings = (id: string, patch: { model?: string; mode?: Engi
 export const sessionApprovePlan = (id: string, mode: EngineMode = "auto-edits") => sessionPost<{ turnId: string | null }>(id, "plan", { mode });
 export const sessionCancel = (id: string) => sessionPost(id, "cancel");
 export const sessionUndo = (id: string) => sessionPost<{ reverted: string[] }>(id, "undo");
+/** Summarize the session's older messages now (`/compact` in the terminal). */
+export const sessionCompact = (id: string) => sessionPost<{ compacted: boolean; savedTokens?: number }>(id, "compact");
 // Tentacles (helper agents; docs/tentacles.md): the session's tree, cancel, merge or drop a waiting patch.
 export const sessionTentacles = (id: string) =>
   fsCall<{ config: { enabled: boolean }; spentCSats: number; tentacles: import("./tentacles").TentacleItem[] }>("GET", `/v1/ide/sessions/${id}/tentacles`);

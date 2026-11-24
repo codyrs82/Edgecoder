@@ -6,7 +6,7 @@
   import { ChevronDown, Check, Laptop, Server, Globe, Lock, Search, Plus, Zap, KeyRound } from "@lucide/svelte";
   import { computeOverview, getFrontierStatus, getOllamaTags, listReservations, type ComputeOverview, type Reservation } from "../lib/api";
   import { classFamily } from "../lib/compute-availability";
-  import { CLASS_LABELS, choiceId, choiceLabel, cloudHint, frontierName, parseChoice, shortModel } from "../lib/compute-choice";
+  import { CLASS_LABELS, choiceId, choiceLabel, cloudHint, cloudModelNames, frontierName, myMachineModels, parseChoice, shortModel, thisComputerHint, thisComputerModels } from "../lib/compute-choice";
 
   interface Props {
     selected: string | undefined;
@@ -55,7 +55,7 @@
       getFrontierStatus().catch(() => null),
     ]);
     frontierModels = frontier?.models ?? [];
-    localModels = (tags.models ?? []).map((m) => m.name).filter((n) => !/embed/i.test(n));
+    localModels = (tags.models ?? []).map((m) => m.name);
     overview = ov;
     leases = (res?.reservations ?? []).filter((r) => r.status === "active");
     loading = false;
@@ -84,16 +84,18 @@
 
   const match = (m: string) => !filter.trim() || m.toLowerCase().includes(filter.trim().toLowerCase());
 
+  // Cloud models (class "cloud", e.g. deepseek-v4.1-flash, glm-5.3) are network models: they show
+  // only under Network with their Cloud label, never as "This computer" or "My machines" (free).
+  let cloudModels = $derived(cloudModelNames(overview?.models));
   let myModels = $derived.by(() => {
-    const counts = new Map<string, number>();
     // Your other machines: this computer's own models are listed above.
     if (onlyModels) return [];
-    for (const m of overview?.account?.machines ?? []) if (m.online && m.agentId !== overview?.selfAgentId) for (const model of m.models) counts.set(model, (counts.get(model) ?? 0) + 1);
-    return [...counts.entries()].map(([model, machines]) => ({ model, machines })).filter((x) => match(x.model));
+    return myMachineModels(overview?.account?.machines, overview?.selfAgentId, cloudModels).filter((x) => match(x.model));
   });
   // Restricted (security research) models run only on your own or reserved machines: never offered as network compute.
   let networkModels = $derived((overview?.models ?? []).filter((m) => !m.restricted && match(m.model) && (!onlyModels || onlyModels.includes(m.model))));
-  let localMatches = $derived(onlyModels ? [] : localModels.filter(match));
+  // Ollama models installed here (an Ollama ":cloud" tag runs on Ollama's servers, so it isn't one).
+  let localMatches = $derived(onlyModels ? [] : thisComputerModels(localModels, cloudModels).filter(match));
   let leaseModels = $derived(
     (onlyModels ? [] : leases).flatMap((r) => (r.models.length ? r.models : r.model ? [r.model] : []).filter(match).map((model) => ({ r, model, id: choiceId({ where: "reserved", reservationId: r.id, model }) }))),
   );
@@ -169,7 +171,7 @@
 
             {#if localMatches.length}
               <Command.Group value="group-local">
-                <Command.GroupHeading class="group"><Laptop size={12} /> This computer <span class="tag">free</span></Command.GroupHeading>
+                <Command.GroupHeading class="group"><Laptop size={12} /> This computer <span class="hint">{thisComputerHint()}</span> <span class="tag">free</span></Command.GroupHeading>
                 <Command.GroupItems>
                   {#each localMatches as m (m)}
                     <Command.Item class="ui-command-item row {selected === m ? 'current' : ''}" value={m} onSelect={() => pick(m)}>
@@ -283,6 +285,7 @@
     .compute-menu .search input { flex: 1; min-width: 0; border: none; background: transparent; color: var(--text-primary); font-size: 13px; outline: none; }
     .compute-menu .scroll { overflow-y: auto; padding: 6px; min-height: 0; }
     .compute-menu .group { display: flex; align-items: center; gap: 6px; padding: 10px 8px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); }
+    .compute-menu .hint { text-transform: none; letter-spacing: 0; color: var(--text-muted); font-weight: 400; }
     .compute-menu .tag { margin-left: auto; text-transform: none; letter-spacing: 0; color: var(--text-muted); }
     .compute-menu .row { padding: 7px 8px; border-radius: var(--radius-md); }
     .compute-menu .row.current { background: color-mix(in srgb, var(--accent) 14%, transparent); }

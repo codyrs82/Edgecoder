@@ -6,8 +6,12 @@
   import { autoApplySetting } from "../lib/project-mode";
   import PlanApproval from "../components/PlanApproval.svelte";
   import { chatMode, PLAN_APPROVED_MESSAGE, type EngineMode } from "../lib/permission-modes";
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, untrack } from "svelte";
   import ChatMessage from "../components/ChatMessage.svelte";
+  import JumpToLatest from "../components/JumpToLatest.svelte";
+  import CompactionNote from "../components/CompactionNote.svelte";
+  import { createFollower, type FollowState } from "../lib/follow-bottom";
+  import { applyCompaction, compactPaidTokensSetting, contextTokens, estimateTokens, historyForModel, isCompactCommand, isPaidChoice, PRE_SEND_SHARE } from "../lib/compaction";
   import QuoteSelection from "../components/QuoteSelection.svelte";
   import { computeChoice, freeReplyUsage } from "../lib/compute-choice";
   import { get } from "svelte/store";
@@ -16,6 +20,7 @@
     streamPortalChat,
     streamIdeChat,
     streamIdeWebChat,
+    ideCompact,
     WebOffError,
     ideSendToolApproval,
     portalCreateConversation,
@@ -64,8 +69,10 @@
     onWebChange?: (choice: boolean | undefined) => void;
     /** A reply used the web or was turned down for it: the status (balance) may have changed. */
     onWebStale?: () => void;
+    /** The context meter beside the composer's model picker (compaction.ts); null when compacting isn't available (portal chat). */
+    onContextChange?: (c: { tokens: number; compacting: boolean; note: string | null } | null) => void;
   }
-  let { onOpenInEditor, projectRoot = null, onStreamingChange, onOpenPath, onPreview, onRepoConnected, onHeaderChange, onQuote, onModeChange, onFocusComposer, webStatus = null, onWebChange, onWebStale }: Props = $props();
+  let { onOpenInEditor, projectRoot = null, onStreamingChange, onOpenPath, onPreview, onRepoConnected, onHeaderChange, onQuote, onModeChange, onFocusComposer, webStatus = null, onWebChange, onWebStale, onContextChange }: Props = $props();
 
   let connectRepoBox: ConnectRepo | undefined = $state(undefined);
   /** The open project's folder name and branch, for the header. */
@@ -133,9 +140,63 @@
   let meshWarning: string | null = $state(null);
   let abortController: AbortController | null = $state(null);
   let scrollContainer: HTMLDivElement | undefined = $state(undefined);
+  // Scroll (follow-bottom.ts): a chat opens at its latest messages; a streaming reply is followed
+  // only while the reader is at the bottom; "Jump to latest" shows when they scrolled up.
+  let follow = $state<FollowState>({ atBottom: true, unseen: false });
+  const follower = createFollower((s) => (follow = s));
+  let followFor = "";
+  $effect(() => {
+    const id = conversation.id;
+    if (id === followFor) return;
+    followFor = id;
+    untrack(() => follower.reset());
+  });
 
   /** Whether we should stream via the portal API (server-side conversations) */
   let usePortalChat = $state(false);
+
+  // Compaction (compaction.ts): the meter's size, a run in progress, and a manual one's short answer.
+  let compacting = $state(false);
+  let compactNote = $state<string | null>(null);
+  let streamingContext: number | undefined = $state(undefined);
+  let streamingCompacted = 0;
+  $effect(() => {
+    const tokens = isStreaming && streamingContext ? streamingContext : contextTokens(conversation);
+    onContextChange?.(usePortalChat ? null : { tokens, compacting, note: compactNote });
+  });
+
+  /**
+   * Summarize the older messages and keep the summary with the chat (POST /v1/ide/compact).
+   * `force`: now (`/compact`, the context meter); otherwise only a paid model's chat past its budget.
+   */
+  async function compactNow(force: boolean): Promise<boolean> {
+    if (usePortalChat || compacting) return false;
+    const sent = historyForModel(conversation);
+    const choice = get(computeChoice);
+    if (!force && (!isPaidChoice(choice) || estimateTokens(sent.messages) <= compactPaidTokensSetting() * PRE_SEND_SHARE)) return false;
+    compacting = true;
+    compactNote = null;
+    try {
+      const r = await ideCompact(sent.messages, choice, force);
+      if (applyCompaction(conversation, r, sent, force)) {
+        conversation = conversation;
+        if (conversation.messages.length > 0) await saveConversation(conversation);
+        return true;
+      }
+      if (force) compactNote = "Nothing to compact yet";
+    } catch (err) {
+      if (force) compactNote = `Couldn't compact: ${(err as Error).message}`;
+    } finally {
+      compacting = false;
+    }
+    if (compactNote) setTimeout(() => (compactNote = null), 4000);
+    return false;
+  }
+
+  /** "Compact conversation" (the context meter) and `/compact`. */
+  export function compactConversation() {
+    if (!isStreaming) void compactNow(true);
+  }
 
   /** IDE agent streaming tool events */
   let streamingToolEvents: ToolEvent[] = $state([]);
@@ -237,12 +298,18 @@
     // Without the agent (portal / plain chat) text files go inline and images/PDFs as a note.
     const inlineText = attachments.length ? [text, attachmentsText(attachments, NO_VISION)].filter(Boolean).join("\n\n") : text;
     if (isStreaming) return;
+    if (isCompactCommand(typed) && !attachments.length) {
+      compactConversation();
+      return;
+    }
 
     addMessage(conversation, "user", text);
     // Where this chat ran last (the sidebar's laptop / server / cloud icon).
     conversation.selectedModel = get(computeChoice);
     if (projectRoot) conversation.projectRoot = projectRoot;
     conversation = conversation; // trigger reactivity
+    // Your own message: show it, and follow the reply.
+    follower.reset();
 
     isStreaming = true;
     streamingContent = "";
@@ -268,10 +335,12 @@
     try {
       if ((projectRoot || useWeb) && !usePortalChat) {
         // IDE agent mode — stream with tool events (no project: the web tool only, /v1/ide/web-chat)
-        const apiMessages = conversation.messages.map((m) => ({
-          role: m.role,
-          content: m.content,
-        }));
+        // A paid model's long chat is summarized first, so this and later turns send less.
+        await compactNow(false);
+        // The kept summary goes in place of the messages it covers (compaction.ts).
+        const apiMessages: Array<{ role: string; content: string }> = historyForModel(conversation).messages;
+        streamingContext = undefined;
+        streamingCompacted = 0;
         streamingToolEvents = [];
         streamingTurnId = undefined;
         streamingUsage = undefined;
@@ -288,6 +357,8 @@
           streamingWeb = next.web;
           streamingActivity = next.activity;
           if (next.webOff) streamingWebOff = next.webOff.reason;
+          if (next.contextTokens) streamingContext = next.contextTokens;
+          if (next.compactedTokens) streamingCompacted = next.compactedTokens;
           if (next.changedFiles && next.changedFiles !== streamingChanged) streamingChanged = next.changedFiles;
           if (event.type !== "status" && event.type !== "done") scrollToBottom();
         };
@@ -400,10 +471,7 @@
 
   /** Stream through the local IDE provider (OpenAI-compatible format), without tools. */
   async function streamLocalChat(inlineText: string) {
-    const apiMessages = conversation.messages.map((m) => ({
-      role: m.role,
-      content: m.content,
-    }));
+    const apiMessages: Array<{ role: string; content: string }> = historyForModel(conversation).messages;
     if (inlineText !== apiMessages[apiMessages.length - 1]?.content) apiMessages[apiMessages.length - 1] = { role: "user", content: inlineText };
     await streamChat(
       apiMessages,
@@ -436,6 +504,12 @@
       lastMsg.turnId = streamingTurnId;
       lastMsg.changedFiles = [...streamingChanged];
     }
+    // The context meter: what the turn's last call sent, plus this reply.
+    if (streamingContext) conversation.contextTokens = streamingContext + Math.ceil(lastMsg.content.length / 3);
+    // Older messages were compacted inside this turn (they're sent whole again next time).
+    if (streamingCompacted > 0 && !lastMsg.notice) lastMsg.notice = `Earlier messages summarized for this reply to save tokens · ~${streamingCompacted.toLocaleString("en-US")} tokens saved`;
+    streamingContext = undefined;
+    streamingCompacted = 0;
   }
 
   /** A note in the conversation from the app itself (e.g. that a project was created). */
@@ -454,11 +528,7 @@
   });
 
   function scrollToBottom() {
-    if (scrollContainer) {
-      requestAnimationFrame(() => {
-        scrollContainer!.scrollTop = scrollContainer!.scrollHeight;
-      });
-    }
+    follower.contentChanged();
   }
 
   export async function newChat() {
@@ -509,7 +579,7 @@
   }
 </script>
 
-<div class="chat-view" bind:this={scrollContainer}>
+<div class="chat-view" bind:this={scrollContainer} use:follower.action>
   {#if !usePortalChat && $serviceStatus.phase !== "ready"}<div class="service-notice"><ServiceNotice /></div>{/if}
   {#if meshWarning}
     <div class="mesh-warning">
@@ -549,6 +619,7 @@
     <div class="messages">
       {#each conversation.messages as msg (msg.id)}
         <ChatMessage role={msg.role as "user" | "assistant"} content={msg.content} toolEvents={msg.toolEvents} turnId={msg.turnId} changedFiles={msg.changedFiles} usage={msg.usage} web={msg.web} notice={msg.notice} {onOpenPath} {onPreview} {onOpenInEditor} onToolApproval={handleToolApproval} />
+        {#if conversation.summary?.throughId === msg.id}<CompactionNote savedTokens={conversation.summary.savedTokens} />{/if}
       {/each}
       {#if isStreaming && (streamingContent || streamingToolEvents.length > 0 || streamingActivity)}
         <ChatMessage role="assistant" content={streamingContent} streaming={true} {streamProgress} toolEvents={streamingToolEvents} activity={streamingActivity} {onOpenInEditor} onToolApproval={handleToolApproval} onToolAlways={(id) => handleToolApproval(id, true, true)} />
@@ -559,6 +630,7 @@
     </div>
   {/if}
   {#if onQuote}<QuoteSelection scope={scrollContainer} {onQuote} />{/if}
+  <JumpToLatest visible={!follow.atBottom && (conversation.messages.length > 0 || isStreaming)} unseen={follow.unseen} onJump={follower.jump} />
 </div>
 
 <style>

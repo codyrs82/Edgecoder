@@ -13,7 +13,12 @@
   import ComputePicker from "./ComputePicker.svelte";
   import { computeChoice, freeReplyUsage } from "../lib/compute-choice";
   import { get } from "svelte/store";
-  import { streamPortalChat, streamIdeChat, ideSendToolApproval, agentGitHubToken, portalCreateConversation, getModelPullProgress, isRemoteMode, backendReady } from "../lib/api";
+  import JumpToLatest from "./JumpToLatest.svelte";
+  import CompactionNote from "./CompactionNote.svelte";
+  import ContextMeter from "./ContextMeter.svelte";
+  import { createFollower, type FollowState } from "../lib/follow-bottom";
+  import { applyCompaction, compactPaidTokensSetting, contextTokens, estimateTokens, historyForModel, isCompactCommand, isPaidChoice, PRE_SEND_SHARE } from "../lib/compaction";
+  import { streamPortalChat, streamIdeChat, ideCompact, ideSendToolApproval, agentGitHubToken, portalCreateConversation, getModelPullProgress, isRemoteMode, backendReady } from "../lib/api";
   import type { StreamProgress, ModelPullProgress, IdeStreamEvent } from "../lib/api";
   import { applyAgentEvent, markApproval } from "../lib/agent-events";
   import { expandMentions, mentionSuggestions } from "../lib/mentions";
@@ -80,6 +85,9 @@
   let streamingTurnId: string | undefined = $state(undefined);
   let streamingUsage: ReplyUsage | undefined = $state(undefined);
   let streamingChanged: string[] = $state([]);
+  /** The streaming turn's latest prompt size and the tokens its in-turn compaction saved. */
+  let streamingContext: number | undefined = $state(undefined);
+  let streamingCompacted = 0;
 
   /** A new coding chat in `root` (none: it waits for a project). */
   function freshConversation(root: string | null): Conversation {
@@ -193,6 +201,21 @@
   let abortController: AbortController | null = $state(null);
   let scrollContainer: HTMLDivElement | undefined = $state(undefined);
   let chatInput: ChatInput | undefined = $state(undefined);
+  // Scroll (follow-bottom.ts): a chat opens at its latest messages; a streaming reply is followed
+  // only while the reader is at the bottom; "Jump to latest" shows when they scrolled up.
+  let follow = $state<FollowState>({ atBottom: true, unseen: false });
+  const follower = createFollower((s) => (follow = s));
+  let followFor = "";
+  $effect(() => {
+    const id = conversation.id;
+    if (id === followFor) return;
+    followFor = id;
+    untrack(() => follower.reset());
+  });
+  /** Compaction (compaction.ts): running now, and what the last manual one said when it had nothing to do. */
+  let compacting = $state(false);
+  let compactNote = $state<string | null>(null);
+  const contextSize = $derived(isStreaming && streamingContext ? streamingContext : contextTokens(conversation));
 
   let recentConversations: Conversation[] = $state([]);
   let showPicker = $state(false);
@@ -244,11 +267,40 @@
   }
 
   function scrollToBottom() {
-    if (scrollContainer) {
-      requestAnimationFrame(() => {
-        if (scrollContainer) scrollContainer.scrollTop = scrollContainer.scrollHeight;
-      });
+    follower.contentChanged();
+  }
+
+  /**
+   * Summarize the older messages and keep the summary with the chat (POST /v1/ide/compact).
+   * `force`: now (`/compact`, the context meter); otherwise only a paid model's chat past its budget.
+   */
+  async function compactNow(force: boolean): Promise<boolean> {
+    if (usePortalChat || !projectRoot || compacting) return false;
+    const sent = historyForModel(conversation);
+    const choice = get(computeChoice);
+    if (!force && (!isPaidChoice(choice) || estimateTokens(sent.messages) <= compactPaidTokensSetting() * PRE_SEND_SHARE)) return false;
+    compacting = true;
+    compactNote = null;
+    try {
+      const r = await ideCompact(sent.messages, choice, force);
+      if (applyCompaction(conversation, r, sent, force)) {
+        conversation = conversation;
+        if (conversation.messages.length > 0) await persist();
+        return true;
+      }
+      if (force) compactNote = "Nothing to compact yet";
+    } catch (err) {
+      if (force) compactNote = `Couldn't compact: ${(err as Error).message}`;
+    } finally {
+      compacting = false;
     }
+    if (compactNote) setTimeout(() => (compactNote = null), 4000);
+    return false;
+  }
+
+  /** "Compact conversation" (the context meter, the chat menu) and `/compact`. */
+  export function compactConversation() {
+    if (!isStreaming) void compactNow(true);
   }
 
   /**
@@ -280,6 +332,8 @@
     addMessage(conversation, "user", text);
     if (!titled) conversation.title = text.slice(0, 60) + (text.length > 60 ? "..." : "");
     conversation = conversation;
+    // Your own message: show it, and follow the reply.
+    follower.reset();
 
     isStreaming = true;
     streamingContent = "";
@@ -308,13 +362,18 @@
         // Agent mode: tools for reading, editing and searching the project and running commands.
         const ctx = getFileContext?.();
         const attached = await expandMentions(text);
-        const apiMessages = conversation.messages.map((m) => ({ role: m.role, content: m.content }));
+        // A paid model's long chat is summarized first, so this and later turns send less.
+        await compactNow(false);
+        // The kept summary goes in place of the messages it covers (compaction.ts).
+        const apiMessages: Array<{ role: string; content: string }> = historyForModel(conversation).messages;
         const preface = [ctx ? editorContextNote(ctx) : "", attached].filter(Boolean).join("\n\n");
         if (preface) apiMessages[apiMessages.length - 1] = { role: "user", content: `${preface}\n\n${text}` };
         streamingToolEvents = [];
         streamingTurnId = undefined;
         streamingUsage = undefined;
         streamingChanged = [];
+        streamingContext = undefined;
+        streamingCompacted = 0;
         await streamIdeChat(
           apiMessages,
           projectRoot,
@@ -329,6 +388,8 @@
             streamingTurnId = turn.turnId;
             streamingUsage = turn.usage;
             if (turn.changedFiles && turn.changedFiles !== streamingChanged) streamingChanged = turn.changedFiles;
+            if (turn.contextTokens) streamingContext = turn.contextTokens;
+            if (turn.compactedTokens) streamingCompacted = turn.compactedTokens;
             if (filesChanged) onFilesChanged?.();
             if (event.type !== "status" && event.type !== "done") scrollToBottom();
           },
@@ -377,6 +438,12 @@
       last.turnId = streamingTurnId;
       last.changedFiles = [...streamingChanged];
     }
+    // The context meter: what the turn's last call sent, plus this reply.
+    if (streamingContext) conversation.contextTokens = streamingContext + Math.ceil(content.length / 3);
+    // Older messages were compacted inside this turn (they're sent whole again next time).
+    if (last && streamingCompacted > 0) last.notice = `Earlier messages summarized for this reply to save tokens · ~${streamingCompacted.toLocaleString("en-US")} tokens saved`;
+    streamingContext = undefined;
+    streamingCompacted = 0;
     conversation = conversation;
   }
 
@@ -440,6 +507,10 @@
   }
 
   function handleSend(text: string, attachments?: AttachmentPayload[]) {
+    if (isCompactCommand(text) && !attachments?.length) {
+      compactConversation();
+      return;
+    }
     sendMessage(text, attachments);
   }
 
@@ -520,7 +591,7 @@
   {/if}
 
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <div class="messages-scroll" bind:this={scrollContainer} tabindex="0" role="region" aria-label="Conversation">
+  <div class="messages-scroll" bind:this={scrollContainer} use:follower.action tabindex="0" role="region" aria-label="Conversation">
     {#if conversation.messages.length === 0 && !isStreaming}
       <div class="empty-state">
         {#if !projectRoot}
@@ -541,11 +612,13 @@
             turnId={msg.turnId}
             changedFiles={msg.changedFiles}
             usage={msg.usage}
+            notice={msg.notice}
             onFilesReverted={onFilesChanged}
             {onOpenPath}
             {onPreview}
             onOpenInEditor={onApplyCode}
           />
+          {#if conversation.summary?.throughId === msg.id}<CompactionNote savedTokens={conversation.summary.savedTokens} />{/if}
         {/each}
         {#if isStreaming && (streamingContent || streamingToolEvents.length > 0)}
           <ChatMessage
@@ -565,6 +638,7 @@
       </div>
     {/if}
     {#if projectRoot}<QuoteSelection scope={scrollContainer} onQuote={(b) => void chatInput?.insertQuote(b)} />{/if}
+    <JumpToLatest visible={!follow.atBottom && (conversation.messages.length > 0 || isStreaming)} unseen={follow.unseen} onJump={follower.jump} />
   </div>
 
   {#if projectRoot && helperTree.items.length}
@@ -599,6 +673,7 @@
         {#snippet controls()}
           <ComputePicker selected={$computeChoice} onSelect={(id) => computeChoice.set(id)} />
           {#if !usePortalChat}
+            <ContextMeter tokens={contextSize} busy={compacting} note={compactNote} disabled={isStreaming} onCompact={compactConversation} />
             <HelpersPicker {helpers} onChange={setHelpers} />
             <PermissionModePicker {mode} onChange={setMode} allowFull project={conversation.projectRoot ?? projectRoot ?? null} />
           {/if}

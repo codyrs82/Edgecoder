@@ -105,3 +105,32 @@ describe("ComputePicker (#24/#26 searchable model combobox)", () => {
     expect(onOpenSettings).toHaveBeenCalledWith("plan");
   });
 });
+
+describe("ComputePicker: this computer's models versus cloud models", () => {
+  it("says the free local models are installed here, and lists cloud models only under Network", async () => {
+    api.getOllamaTags.mockResolvedValue({ models: [{ name: "deepseek-r1:14b" }, { name: "gpt-oss:120b-cloud" }, { name: "glm-5.3" }] });
+    api.computeOverview.mockResolvedValue({
+      connected: true,
+      selfAgentId: "me",
+      account: { accountId: "a", machines: [
+        { agentId: "cloud-host", online: true, computeClass: "cloud", models: ["deepseek-v4.1-flash", "glm-5.3"] },
+        { agentId: "studio", online: true, computeClass: "apple", models: ["qwen3.5:9b", "glm-5.3"] },
+      ] },
+      models: [
+        { model: "deepseek-v4.1-flash", agents: 1, classes: ["cloud"] },
+        { model: "glm-5.3", agents: 1, classes: ["cloud"] },
+      ],
+    });
+    await openPicker();
+    await waitFor(() => expect(screen.getByRole("option", { name: /deepseek-r1:14b/ })).toBeTruthy());
+    expect(screen.getByText(/installed on this (Mac|computer)/)).toBeTruthy();
+    // An Ollama cloud tag runs on Ollama's servers: not "This computer · free".
+    expect(screen.queryByRole("option", { name: /gpt-oss/ })).toBeNull();
+    // EdgeCoder cloud models: Network rows only, never this computer or My machines (free).
+    expect(screen.queryByRole("option", { name: /glm-5\.3$/ })).toBeNull();
+    expect(screen.queryByRole("option", { name: /deepseek-v4\.1-flash.*your machines/ })).toBeNull();
+    expect(screen.queryByRole("option", { name: /glm-5\.3.*your machines/ })).toBeNull();
+    expect(screen.getByRole("option", { name: /qwen3\.5:9b.*your machines/ })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "deepseek-v4.1-flash, Any" })).toBeTruthy();
+  });
+});
