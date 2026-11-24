@@ -58,14 +58,18 @@ export async function listConversations(): Promise<Conversation[]> {
 export async function deleteConversation(id: string): Promise<void> {
   // Marked first, so a save already on its way (an open chat's autosave) can't recreate it.
   deletedIds.add(id);
+  let convo: Conversation | undefined;
   try {
     const db = await getDb();
+    convo = (await db.get(STORE_NAME, id)) as Conversation | undefined;
     await db.delete(STORE_NAME, id);
   } catch (err) {
     // Still there: it keeps saving like any other chat.
     deletedIds.delete(id);
     throw err;
   }
+  // A Code view chat's mirror for your phone (code-chat-mirror.ts) goes with it.
+  if (convo?.source === "editor") void import("./api").then((api) => api.forgetCodeChat(id)).catch(() => {});
 }
 
 export async function renameConversation(id: string, newTitle: string): Promise<void> {
@@ -74,6 +78,11 @@ export async function renameConversation(id: string, newTitle: string): Promise<
     convo.title = newTitle;
     convo.updatedAt = Date.now();
     await saveConversation(convo);
+    // The phone shows the new title too (a Code view chat's mirror, code-chat-mirror.ts).
+    if (convo.source === "editor" && convo.projectRoot && convo.messages.length) {
+      const { projectRoot } = convo;
+      void import("./api").then((api) => api.syncCodeChat({ chatId: id, projectRoot, title: newTitle, messages: [] })).catch(() => {});
+    }
   }
 }
 

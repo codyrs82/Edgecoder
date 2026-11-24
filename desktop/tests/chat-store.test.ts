@@ -17,6 +17,9 @@ vi.mock("idb", () => ({
   }),
 }));
 
+const api = vi.hoisted(() => ({ forgetCodeChat: vi.fn(async () => ({ removed: true })) }));
+vi.mock("../src/lib/api", () => api);
+
 import { deleteConversation, isDeletedConversation, listConversations, loadConversation, renameConversation, saveConversation } from "../src/lib/chat-store";
 
 let seq = 0;
@@ -26,6 +29,7 @@ beforeEach(() => {
   idb.rows.clear();
   idb.failDelete = false;
   idb.deleteGate = null;
+  api.forgetCodeChat.mockClear();
 });
 
 describe("chat-store delete", () => {
@@ -40,6 +44,8 @@ describe("chat-store delete", () => {
     await renameConversation(open.id, "Renamed");
     expect(await loadConversation(open.id)).toBeUndefined();
     expect((await listConversations()).map((c) => c.id)).toEqual([other.id]);
+    // The Code chat's mirror for the phone goes with it.
+    await vi.waitFor(() => expect(api.forgetCodeChat).toHaveBeenCalledWith(open.id));
     // Other chats save as before.
     await saveConversation({ ...other, title: "Add a contact form, v2" });
     expect((await loadConversation(other.id))?.title).toBe("Add a contact form, v2");
@@ -63,6 +69,7 @@ describe("chat-store delete", () => {
     idb.failDelete = true;
     await expect(deleteConversation(open.id)).rejects.toThrow("locked");
     expect(isDeletedConversation(open.id)).toBe(false);
+    expect(api.forgetCodeChat).not.toHaveBeenCalled();
     await saveConversation({ ...open, title: "Stays, edited" });
     expect((await loadConversation(open.id))?.title).toBe("Stays, edited");
   });

@@ -38,7 +38,7 @@ export const CODE_LIST_JS = String.raw`
         return '<section class="cp"><div class="cp-head"><span class="cp-name">' + CODE_ICONS.folder + "<span>" + escapeHtml(p.name) + "</span></span>" + (sub ? '<span class="cp-sub">' + escapeHtml(sub) + "</span>" : "") + "</div>" +
           (list.length ? '<div class="cs-rows">' + list.map(function(s) { return sessionRowHtml(m, s); }).join("") + "</div>" : '<div class="cp-empty">No shared sessions yet.</div>') + "</section>";
       }).join("");
-      if (!groups && !note) groups = '<div class="cp-empty">No trusted projects on this Mac yet. Open a folder in the EdgeCoder app and trust it.</div>';
+      if (!groups && !note) groups = '<div class="cp-empty">No projects on this Mac yet. Open a project in the Code view of the EdgeCoder app and chat in it, or trust a folder.</div>';
       return '<article class="cm" data-agent="' + escapeHtml(m.agentId) + '">' + head + body + groups + "</article>";
     }
 

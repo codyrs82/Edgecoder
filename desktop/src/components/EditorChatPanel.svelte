@@ -11,9 +11,15 @@
   import ChatInput from "./ChatInput.svelte";
   import QuoteSelection from "./QuoteSelection.svelte";
   import ComputePicker from "./ComputePicker.svelte";
+  import PremiumModelHint from "./PremiumModelHint.svelte";
   import { computeChoice, freeReplyUsage } from "../lib/compute-choice";
   import { get } from "svelte/store";
-  import { streamPortalChat, streamIdeChat, ideSendToolApproval, agentGitHubToken, portalCreateConversation, getModelPullProgress, isRemoteMode, backendReady } from "../lib/api";
+  import JumpToLatest from "./JumpToLatest.svelte";
+  import CompactionNote from "./CompactionNote.svelte";
+  import ContextMeter from "./ContextMeter.svelte";
+  import { createFollower, type FollowState } from "../lib/follow-bottom";
+  import { applyCompaction, compactPaidTokensSetting, contextTokens, estimateTokens, historyForModel, isCompactCommand, isPaidChoice, PRE_SEND_SHARE } from "../lib/compaction";
+  import { streamPortalChat, streamIdeChat, ideCompact, ideSendToolApproval, agentGitHubToken, portalCreateConversation, getModelPullProgress, isRemoteMode, backendReady } from "../lib/api";
   import type { StreamProgress, ModelPullProgress, IdeStreamEvent } from "../lib/api";
   import { applyAgentEvent, markApproval } from "../lib/agent-events";
   import { expandMentions, mentionSuggestions } from "../lib/mentions";
@@ -24,6 +30,8 @@
   import { effectiveHelpers, type ChatHelpers } from "../lib/helpers";
   import { applyTentacleEvent, emptyTentacles, type TentacleState } from "../lib/tentacles";
   import { tentacleCancel, tentacleMerge, type SessionEvent } from "../lib/api";
+  import { followSession, getSession, sessionApprove, sessionCancel, syncCodeChat } from "../lib/api";
+  import { backfillCodeChats, CodeChatMirror, mergeEntries } from "../lib/code-chat-mirror";
   import PlanApproval from "./PlanApproval.svelte";
   import { chatMode, modeOption, PLAN_APPROVED_MESSAGE, type EngineMode } from "../lib/permission-modes";
   import { fsFind } from "../lib/api";
@@ -81,6 +89,11 @@
   let streamingTurnId: string | undefined = $state(undefined);
   let streamingUsage: ReplyUsage | undefined = $state(undefined);
   let streamingChanged: string[] = $state([]);
+  /** The streaming turn's latest prompt size and the tokens its in-turn compaction saved. */
+  let streamingContext: number | undefined = $state(undefined);
+  let streamingCompacted = 0;
+  /** This reply's cost notes (re-reads skipped, waste, a cheaper model): live, then the reply's notice. */
+  let streamingCostNotes: string[] = $state([]);
 
   /** A new coding chat in `root` (none: it waits for a project). */
   function freshConversation(root: string | null): Conversation {
@@ -99,7 +112,10 @@
   function setMode(m: EngineMode) {
     conversation.permissionMode = m;
     conversation = conversation;
-    if (conversation.messages.length > 0) void persist();
+    if (conversation.messages.length > 0) {
+      void persist();
+      void mirror.sync(conversation, { mode: m });
+    }
   }
 
   /**
@@ -181,6 +197,51 @@
   }
   let streamingContent = $state("");
   let isStreaming = $state(false);
+
+  // The chat's mirror on the provider (code-chat-mirror.ts): your phone reads and continues it, and
+  // a turn it starts shows here like this app's own (Stop and approvals go to the mirror).
+  let remoteTurn = $state(false);
+  const mirror = new CodeChatMirror(
+    {
+      // A chat deleted while open isn't synced again (its mirror was forgotten with it).
+      sync: (body) => (isDeletedConversation(body.chatId) ? Promise.reject(new Error("chat deleted")) : syncCodeChat(body)),
+      snapshot: getSession,
+      follow: followSession,
+    },
+    {
+      ownTurn: () => isStreaming && !remoteTurn,
+      onEntries: (entries) => {
+        const added = mergeEntries(conversation, entries);
+        if (!added) return;
+        conversation = conversation;
+        void persist();
+        scrollToBottom();
+        if (conversation.messages.slice(-added).some((m) => m.changedFiles?.length)) onFilesChanged?.();
+      },
+      onRemoteTurn: (turn) => {
+        if (turn) {
+          remoteTurn = isStreaming = true;
+          streamingContent = turn.text;
+          streamingToolEvents = turn.toolEvents;
+          scrollToBottom();
+        } else if (remoteTurn) {
+          remoteTurn = isStreaming = false;
+          streamingContent = "";
+          streamingToolEvents = [];
+        }
+      },
+    },
+  );
+  $effect(() => {
+    const convo = conversation;
+    const open = convo.messages.length > 0 && !!convo.projectRoot;
+    untrack(() => {
+      if (usePortalChat) return;
+      if (!open) {
+        if (mirror.chatId && mirror.chatId !== convo.id) mirror.detach();
+      } else if (mirror.chatId !== convo.id) void mirror.sync(convo, { mode, model: get(computeChoice) });
+    });
+  });
   /** The last reply is a plan waiting for approval (the chat is still in Plan mode). */
   const pendingPlan = $derived(!isStreaming && mode === "plan" && conversation.messages.at(-1)?.role === "assistant" && conversation.messages.at(-1)?.plan === true);
   function approvePlan(next: EngineMode) {
@@ -196,6 +257,21 @@
   let abortController: AbortController | null = $state(null);
   let scrollContainer: HTMLDivElement | undefined = $state(undefined);
   let chatInput: ChatInput | undefined = $state(undefined);
+  // Scroll (follow-bottom.ts): a chat opens at its latest messages; a streaming reply is followed
+  // only while the reader is at the bottom; "Jump to latest" shows when they scrolled up.
+  let follow = $state<FollowState>({ atBottom: true, unseen: false });
+  const follower = createFollower((s) => (follow = s));
+  let followFor = "";
+  $effect(() => {
+    const id = conversation.id;
+    if (id === followFor) return;
+    followFor = id;
+    untrack(() => follower.reset());
+  });
+  /** Compaction (compaction.ts): running now, and what the last manual one said when it had nothing to do. */
+  let compacting = $state(false);
+  let compactNote = $state<string | null>(null);
+  const contextSize = $derived(isStreaming && streamingContext ? streamingContext : contextTokens(conversation));
 
   let recentConversations: Conversation[] = $state([]);
   let showPicker = $state(false);
@@ -224,6 +300,8 @@
       if (!projectRoot || loaded.projectRoot === projectRoot) conversation = loaded;
     }
     await refreshConversationList();
+    // Earlier Code chats reach your phone without being opened (code-chat-mirror.ts).
+    if (!usePortalChat) void listConversationsBySource("editor").then((all) => backfillCodeChats(all, syncCodeChat)).catch(() => {});
 
     // Hand the agent's GitHub connection to the IDE server early (sessions and bots use it too).
     void agentGitHubToken().catch(() => {});
@@ -236,6 +314,7 @@
 
   // Save current conversation when component unmounts (tab switch)
   onDestroy(() => {
+    mirror.detach();
     if (pullPollTimer) clearInterval(pullPollTimer);
     if (conversation.messages.length > 0) void persist();
   });
@@ -247,11 +326,40 @@
   }
 
   function scrollToBottom() {
-    if (scrollContainer) {
-      requestAnimationFrame(() => {
-        if (scrollContainer) scrollContainer.scrollTop = scrollContainer.scrollHeight;
-      });
+    follower.contentChanged();
+  }
+
+  /**
+   * Summarize the older messages and keep the summary with the chat (POST /v1/ide/compact).
+   * `force`: now (`/compact`, the context meter); otherwise only a paid model's chat past its budget.
+   */
+  async function compactNow(force: boolean): Promise<boolean> {
+    if (usePortalChat || !projectRoot || compacting) return false;
+    const sent = historyForModel(conversation);
+    const choice = get(computeChoice);
+    if (!force && (!isPaidChoice(choice) || estimateTokens(sent.messages) <= compactPaidTokensSetting() * PRE_SEND_SHARE)) return false;
+    compacting = true;
+    compactNote = null;
+    try {
+      const r = await ideCompact(sent.messages, choice, force);
+      if (applyCompaction(conversation, r, sent, force)) {
+        conversation = conversation;
+        if (conversation.messages.length > 0) await persist();
+        return true;
+      }
+      if (force) compactNote = "Nothing to compact yet";
+    } catch (err) {
+      if (force) compactNote = `Couldn't compact: ${(err as Error).message}`;
+    } finally {
+      compacting = false;
     }
+    if (compactNote) setTimeout(() => (compactNote = null), 4000);
+    return false;
+  }
+
+  /** "Compact conversation" (the context meter, the chat menu) and `/compact`. */
+  export function compactConversation() {
+    if (!isStreaming) void compactNow(true);
   }
 
   /**
@@ -283,6 +391,8 @@
     addMessage(conversation, "user", text);
     if (!titled) conversation.title = text.slice(0, 60) + (text.length > 60 ? "..." : "");
     conversation = conversation;
+    // Your own message: show it, and follow the reply.
+    follower.reset();
 
     isStreaming = true;
     streamingContent = "";
@@ -311,20 +421,28 @@
         // Agent mode: tools for reading, editing and searching the project and running commands.
         const ctx = getFileContext?.();
         const attached = await expandMentions(text);
-        const apiMessages = conversation.messages.map((m) => ({ role: m.role, content: m.content }));
+        // A paid model's long chat is summarized first, so this and later turns send less.
+        await compactNow(false);
+        // The kept summary goes in place of the messages it covers (compaction.ts).
+        const apiMessages: Array<{ role: string; content: string }> = historyForModel(conversation).messages;
         const preface = [ctx ? editorContextNote(ctx) : "", attached].filter(Boolean).join("\n\n");
         if (preface) apiMessages[apiMessages.length - 1] = { role: "user", content: `${preface}\n\n${text}` };
         streamingToolEvents = [];
         streamingTurnId = undefined;
         streamingUsage = undefined;
         streamingChanged = [];
+        streamingContext = undefined;
+        streamingCompacted = 0;
+        streamingCostNotes = [];
+        // The mirror has the message first, so your phone sees this turn live (a slow provider doesn't hold it up).
+        await Promise.race([mirror.sync(conversation, { mode: sentMode, model: get(computeChoice) }), new Promise((r) => setTimeout(r, 3000))]);
         await streamIdeChat(
           apiMessages,
           projectRoot,
           (event: IdeStreamEvent) => {
             onHelperEvent(event);
             const { turn, filesChanged } = applyAgentEvent(
-              { text: streamingContent, toolEvents: streamingToolEvents, turnId: streamingTurnId, changedFiles: streamingChanged, usage: streamingUsage },
+              { text: streamingContent, toolEvents: streamingToolEvents, turnId: streamingTurnId, changedFiles: streamingChanged, usage: streamingUsage, costNotes: streamingCostNotes },
               event,
             );
             if (turn.text !== streamingContent) streamingContent = turn.text;
@@ -332,6 +450,9 @@
             streamingTurnId = turn.turnId;
             streamingUsage = turn.usage;
             if (turn.changedFiles && turn.changedFiles !== streamingChanged) streamingChanged = turn.changedFiles;
+            if (turn.contextTokens) streamingContext = turn.contextTokens;
+            if (turn.compactedTokens) streamingCompacted = turn.compactedTokens;
+            if (turn.costNotes && turn.costNotes !== streamingCostNotes) streamingCostNotes = turn.costNotes;
             if (filesChanged) onFilesChanged?.();
             if (event.type !== "status" && event.type !== "done") scrollToBottom();
           },
@@ -344,11 +465,14 @@
           attachments,
           false,
           { sessionId: conversation.id, ...helpers },
+          conversation.id,
         );
       }
       finishTurn(streamingContent, !usePortalChat && sentMode === "plan");
       await persist();
       await refreshConversationList();
+      // The reply as this app has it, then anything your phone sent meanwhile.
+      if (!usePortalChat) void mirror.sync(conversation).then(() => mirror.refresh());
     } catch (err) {
       if ((err as Error).name === "AbortError") {
         // Stopped: keep what arrived so far.
@@ -373,6 +497,8 @@
     addMessage(conversation, "assistant", content);
     const last = conversation.messages[conversation.messages.length - 1];
     if (last && plan && content.trim()) last.plan = true;
+    // The mirror already has this turn's reply (by its turn id).
+    if (last && streamingTurnId) last.turnId = streamingTurnId;
     if (last && streamingToolEvents.length > 0) last.toolEvents = [...streamingToolEvents];
     const usage = streamingUsage ?? freeReplyUsage(get(computeChoice));
     if (last && usage) last.usage = usage;
@@ -380,6 +506,14 @@
       last.turnId = streamingTurnId;
       last.changedFiles = [...streamingChanged];
     }
+    // The context meter: what the turn's last call sent, plus this reply.
+    if (streamingContext) conversation.contextTokens = streamingContext + Math.ceil(content.length / 3);
+    // Older messages were compacted inside this turn (they're sent whole again next time).
+    if (last && streamingCompacted > 0) last.notice = `Earlier messages summarized for this reply to save tokens · ~${streamingCompacted.toLocaleString("en-US")} tokens saved`;
+    if (last && streamingCostNotes.length) last.notice = [last.notice, ...streamingCostNotes].filter(Boolean).join("\n");
+    streamingCostNotes = [];
+    streamingContext = undefined;
+    streamingCompacted = 0;
     conversation = conversation;
   }
 
@@ -392,12 +526,24 @@
   }
 
   export function stop() {
-    abortController?.abort();
+    if (remoteTurn && mirror.sessionId) void sessionCancel(mirror.sessionId).catch(() => {});
+    else abortController?.abort();
   }
 
   function handleToolApproval(id: string, approved: boolean, always = false) {
-    void ideSendToolApproval(id, approved, always);
+    if (remoteTurn && mirror.sessionId) void sessionApprove(mirror.sessionId, id, approved, always).catch(() => {});
+    else void ideSendToolApproval(id, approved, always);
     streamingToolEvents = markApproval(streamingToolEvents, id, approved);
+  }
+
+  /**
+   * A cost check's answer (CostCheckCard): Keep going, Switch (the reply carries on with the cheaper
+   * model, and the picker moves to it for the next messages) or Stop.
+   */
+  function handleCostChoice(id: string, choice: "continue" | "switch" | "stop", suggest?: { id: string; name: string }) {
+    void ideSendToolApproval(id, choice !== "stop", false, choice);
+    streamingToolEvents = markApproval(streamingToolEvents, id, choice !== "stop");
+    if (choice === "switch" && suggest) computeChoice.set(suggest.id);
   }
 
   /** A new chat in the open project. */
@@ -443,6 +589,10 @@
   }
 
   function handleSend(text: string, attachments?: AttachmentPayload[]) {
+    if (isCompactCommand(text) && !attachments?.length) {
+      compactConversation();
+      return;
+    }
     sendMessage(text, attachments);
   }
 
@@ -523,7 +673,7 @@
   {/if}
 
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <div class="messages-scroll" bind:this={scrollContainer} tabindex="0" role="region" aria-label="Conversation">
+  <div class="messages-scroll" bind:this={scrollContainer} use:follower.action tabindex="0" role="region" aria-label="Conversation">
     {#if conversation.messages.length === 0 && !isStreaming}
       <div class="empty-state">
         {#if !projectRoot}
@@ -544,11 +694,13 @@
             turnId={msg.turnId}
             changedFiles={msg.changedFiles}
             usage={msg.usage}
+            notice={msg.notice}
             onFilesReverted={onFilesChanged}
             {onOpenPath}
             {onPreview}
             onOpenInEditor={onApplyCode}
           />
+          {#if conversation.summary?.throughId === msg.id}<CompactionNote savedTokens={conversation.summary.savedTokens} />{/if}
         {/each}
         {#if isStreaming && (streamingContent || streamingToolEvents.length > 0)}
           <ChatMessage
@@ -560,6 +712,8 @@
             onOpenInEditor={onApplyCode}
             onToolApproval={handleToolApproval}
             onToolAlways={(id) => handleToolApproval(id, true, true)}
+            onCostChoice={remoteTurn ? undefined : handleCostChoice}
+            costNotes={streamingCostNotes}
           />
         {/if}
         {#if pendingPlan}
@@ -568,6 +722,7 @@
       </div>
     {/if}
     {#if projectRoot}<QuoteSelection scope={scrollContainer} onQuote={(b) => void chatInput?.insertQuote(b)} />{/if}
+    <JumpToLatest visible={!follow.atBottom && (conversation.messages.length > 0 || isStreaming)} unseen={follow.unseen} onJump={follower.jump} />
   </div>
 
   {#if projectRoot && helperTree.items.length}
@@ -602,11 +757,13 @@
         {#snippet controls()}
           <ComputePicker selected={$computeChoice} onSelect={(id) => computeChoice.set(id)} />
           {#if !usePortalChat}
+            <ContextMeter tokens={contextSize} busy={compacting} note={compactNote} disabled={isStreaming} onCompact={compactConversation} />
             <HelpersPicker {helpers} onChange={setHelpers} />
             <PermissionModePicker {mode} onChange={setMode} allowFull project={conversation.projectRoot ?? projectRoot ?? null} />
           {/if}
         {/snippet}
       </ChatInput>
+      {#if !usePortalChat}<PremiumModelHint choice={$computeChoice} chatId={conversation.id} />{/if}
     {/if}
   </div>
 </div>
