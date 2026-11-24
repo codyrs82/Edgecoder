@@ -27,11 +27,19 @@
  * inside edgecoder-lnd-signet (deploy/lnd-signet/README.md), and only signet invoices (lntbs...)
  * are accepted. Refuses any invoice that is not for the chosen test network, so it cannot spend real funds,
  * and never spends more than --max-total sats in one call. Keys come from the account files and
- * are never printed. Needs FLY_API_TOKEN (or ~/.config/edgecoder/fly.token) for the payee.
+ * are never printed. Needs a working fly login (FLY_API_TOKEN, else `fly auth login`, else
+ * ~/.config/edgecoder/fly.token) for the payee.
+ *
+ * MAINNET: topup cannot fund mainnet accounts (it would spend real sats). It says so and stops;
+ * fund test accounts by an owner transfer of cSats from a funded account instead (docs/load-testing.md).
+ *
+ * ledger / buyers read who hosts what from /admin/network, which the coordinators serve only on
+ * internal ingress: capacity.mjs runs the query inside the seed machines over fly ssh. If that
+ * fails, buyers exits non-zero with the reason instead of choosing buyers blind.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { adminToken, fetchSnapshots } from "./capacity.mjs";
+import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { adminToken, fetchSnapshots, flyEnv } from "./capacity.mjs";
 import { chargesFrom, chooseBuyers, formatMoney, moneyReport, shortId, snapshotLedger } from "./money.mjs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -42,7 +50,10 @@ const flag = (n, d) => { const i = argv.indexOf(`--${n}`); return i < 0 ? d : ar
 const URL_ = flag("url", "https://edgecoder.io");
 const DIR = flag("keys-dir", join(homedir(), ".config/edgecoder/e2e/accounts"));
 const NETWORK = flag("network", "regtest");
-if (!["regtest", "signet"].includes(NETWORK)) throw new Error("--network must be regtest or signet");
+const MAINNET_TOPUP_MESSAGE = "budget.mjs topup cannot fund mainnet accounts: it only pays regtest/signet invoices and will not spend real sats.\n" +
+  "Fund the test accounts with an owner transfer of cSats from a funded account instead (docs/load-testing.md, \"Funding on mainnet\"), then check with `budget.mjs check`.";
+if (cmd === "topup" && NETWORK === "mainnet") { console.error(MAINNET_TOPUP_MESSAGE); process.exit(2); }
+if (!["regtest", "signet"].includes(NETWORK)) throw new Error("--network must be regtest or signet (mainnet: topup refuses; see docs/load-testing.md)");
 const LND_APP = flag("lnd-app", NETWORK === "signet" ? "edgecoder-lnd-signet" : "edgecoder-lnd-test");
 const UA = "edgecoder-loadgen/1.0 (budget)";
 const only = (flag("users", "") || "").split(",").filter(Boolean);
@@ -65,11 +76,6 @@ const api = async (key, path, body) => {
 };
 const balance = async (a) => { const r = await api(a.key, "/v1/account"); return r.status === 200 ? Number(r.j.cSats ?? 0) : null; };
 
-function flyEnv() {
-  const e = { ...process.env };
-  if (!e.FLY_API_TOKEN) { const f = join(homedir(), ".config/edgecoder/fly.token"); if (existsSync(f)) e.FLY_API_TOKEN = readFileSync(f, "utf8").trim(); }
-  return e;
-}
 let payeeId;
 function payInvoice(invoice) {
   const e = flyEnv();
@@ -111,6 +117,8 @@ if (cmd === "check") {
     if (dry) { console.log(`${a.name}: ${b.toFixed(3)} cSats -> would buy ${want} sats`); spent += want; continue; }
     const r = await api(a.key, "/v1/account/topup", { amountSats: want });
     if (r.status !== 200 || !r.j.invoice) { console.log(`${a.name}: top-up refused (${r.status} ${r.j.error ?? ""})`); continue; }
+    // A mainnet invoice (lnbc..., not lnbcrt/lntbs) means the network is mainnet: stop, never pay it.
+    if (/^lnbc(?!rt)\d/i.test(r.j.invoice)) { console.error(MAINNET_TOPUP_MESSAGE); process.exit(2); }
     let paid = false;
     try { paid = payInvoice(r.j.invoice); } catch (e) { console.log(`${a.name}: payment failed: ${String(e.message).slice(0, 120)}`); }
     let status = "unknown";
@@ -130,17 +138,19 @@ if (cmd === "check") {
   const snapNow = () => snapshotLedger({ url: URL_, accounts, fetchSnapshots, adminToken: token });
   if (cmd === "buyers") {
     const snap = await snapNow();
+    if (!snap.hosts) { console.error(`buyers: cannot tell who hosts what, so self-dealing cannot be avoided: ${snap.hostsError ?? "no snapshot"}`); process.exit(1); }
     const pick = chooseBuyers(snap, { buyers: list(flag("buyers", "")), minBalance: Number(flag("min-balance", 0)) });
     console.log(JSON.stringify(pick));
   } else if (!flag("before")) {
     const snap = await snapNow();
+    if (snap.hostsError) console.error(`warning: hosting unknown: ${snap.hostsError}`);
     if (flag("out")) writeFileSync(flag("out"), JSON.stringify(snap));
     const ids = {};
     for (const [name, a] of Object.entries(snap.accounts)) if (a.accountId) ids[a.accountId] = name;
     const byName = Object.entries(snap.accounts).sort(([a], [b]) => a.localeCompare(b, "en", { numeric: true }));
     for (const [name, a] of byName) {
       const h = snap.hosts?.[a.accountId];
-      console.log(`${name.padEnd(5)} ${a.error ? a.error.padStart(14) : a.cSats.toFixed(3).padStart(14)} cSats  earned ${String(a.earnedSats ?? "-").padStart(8)} sats  ${h?.connected ? `hosts ${h.connected} agent(s) ${h.classes.join("/")}: ${h.models.join(", ")}` : snap.hosts ? "hosts nothing" : "hosting unknown (no admin token)"}`);
+      console.log(`${name.padEnd(5)} ${a.error ? a.error.padStart(14) : a.cSats.toFixed(3).padStart(14)} cSats  earned ${String(a.earnedSats ?? "-").padStart(8)} sats  ${h?.connected ? `hosts ${h.connected} agent(s) ${h.classes.join("/")}: ${h.models.join(", ")}` : snap.hosts ? "hosts nothing" : "hosting unknown (see warning above)"}`);
     }
     for (const [id, h] of Object.entries(snap.hosts ?? {})) if (!ids[id] && h.connected) console.log(`${shortId(id)} (no key: balance not readable)  hosts ${h.connected} agent(s) ${h.classes.join("/")}: ${h.models.join(", ")}`);
     if (flag("out")) console.log(`snapshot saved to ${flag("out")}`);
@@ -159,6 +169,6 @@ if (cmd === "check") {
     console.log(formatMoney(m));
   }
 } else {
-  console.log("usage: budget.mjs check | topup [--network regtest|signet] --min N --to N --max-total N [--users a,b] [--dry-run] | ledger [--out f] [--before f [--after f] [--results f ...]] | buyers [--buyers a,b]");
+  console.log("usage: budget.mjs check | topup [--network regtest|signet] (not mainnet) --min N --to N --max-total N [--users a,b] [--dry-run] | ledger [--out f] [--before f [--after f] [--results f ...]] | buyers [--buyers a,b]");
   process.exit(2);
 }

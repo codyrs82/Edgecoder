@@ -303,3 +303,25 @@ export function pickWithAutoShare(planner, weights, r, avoid = null, autoShare =
   if (share > 0 && r() < share) return auto() ?? planner.pick(named, r, avoid);
   return planner.pick(named, r, avoid) ?? auto();
 }
+
+/**
+ * What a buyer's balance means for it: "ok", "pause" or "stop".
+ *
+ * `balance` is /v1/account's cSats at the last refresh, which already has the reserves of the
+ * buyer's calls then in flight taken out (each call sets aside ~50-750 cSats up front and is
+ * charged far less). `spent` is what calls started after that refresh were charged (calls already
+ * in flight at the refresh are not added again: their reserve was already out of `balance`).
+ * Below `minBalance` with calls of its own still in flight, the shortfall may be set-aside money
+ * that comes back, so the buyer pauses until the next refresh; it stops only when nothing is in flight.
+ */
+export function balanceAction({ balance, spent = 0, inflight = 0, minBalance }) {
+  if (balance === null || balance === undefined || !Number.isFinite(minBalance)) return "ok";
+  if (balance - spent >= minBalance) return "ok";
+  return inflight > 0 ? "pause" : "stop";
+}
+
+/** --model: pin every named-model call to one model ("qwen2.5-coder:1.5b" or "network/..."), or the mix as is. */
+export function pinWeights(weights, pin) {
+  if (!pin) return weights;
+  return { [pin.includes("/") || pin === "auto" ? pin : `network/${pin}`]: 1 };
+}

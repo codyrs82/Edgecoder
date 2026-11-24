@@ -18,14 +18,19 @@
  *     down and is held there (planner.mjs RateGovernor) until --duration ends. The sustain profile
  *     finds the rate that keeps 70-85% of the slots busy and holds it. A run stops early only for
  *     real failure: auth errors, budget exhausted, every buyer out of cSats, coordinator down.
- *   - budget: a user stops below LOADGEN_MIN_BALANCE cSats or after --buyer-cap cSats; the machine
- *     stops after its share of LOADGEN_BUDGET_CSATS.
+ *   - budget: a user stops below --min-balance (LOADGEN_MIN_BALANCE) cSats or after --buyer-cap
+ *     cSats; the machine stops after its share of LOADGEN_BUDGET_CSATS. The balance is the one
+ *     /v1/account reports (net of the buyer's in-flight reserves); while the buyer still has calls
+ *     in flight a low balance pauses it until the next refresh instead of stopping it
+ *     (planner.mjs balanceAction), since set-aside reserves are not spent.
  *   - buyers (--buyers / LOADGEN_BUYERS, default every account) and LOADGEN_AVOID (JSON
  *     { buyer: [model, ...] }, from budget.mjs buyers): a buyer never asks for a model its own
  *     agents hold, so its money goes to other accounts (fly.sh fills both). Model "auto" is safe
  *     for every buyer: best-fit routing never places a call on the requester's own agents.
  *   - --auto-share (LOADGEN_AUTO_SHARE, default 0.5): the share of calls sent as model "auto"
  *     (the coordinator's best-fit routing); 0 sends only named models.
+ *   - --model (LOADGEN_MODEL), e.g. qwen2.5-coder:1.5b: every named-model call asks for that model
+ *     only (with --auto-share 0, every call does). Buyers whose own agents hold it skip it.
  *   - API keys are read from LOADGEN_KEYS (JSON {name: key}) or from account files; never printed.
  *
  * Output: JSON lines on stdout (LOADGEN_START, LOADGEN_TICK, LOADGEN_EVENT, LOADGEN_STAGE,
@@ -41,7 +46,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { HARD_MAX_RATE, PERSONAS, MODELS, buildSchedule, codingContext, parseDuration } from "./profiles.mjs";
 import { StageStats, classifyCall, digestStage, isFailure, table } from "./stats.mjs";
-import { CapacityPlanner, RateGovernor, fatalStop, parseModelId, pickWithAutoShare } from "./planner.mjs";
+import { CapacityPlanner, RateGovernor, balanceAction, fatalStop, parseModelId, pickWithAutoShare, pinWeights } from "./planner.mjs";
 import { fetchCapacity } from "./capacity.mjs";
 import { CodingSession, codegenSize, codegenTask, modelMix, pickWeighted, question, rng } from "./workload.mjs";
 
@@ -84,6 +89,7 @@ const AUTO_SLOTS = Number(opt("auto-slots", "LOADGEN_AUTO_SLOTS", 3));
 // Share of calls (chat, burst, codegen and new coding sessions) sent as model "auto", so the run
 // exercises the coordinator's best-fit routing and fills Settings > Network's "Routing decisions".
 // 0 = every call names a model. The rest are spread over the model mix as before.
+const MODEL_PIN = (opt("model", "LOADGEN_MODEL", "") || "").trim();
 const AUTO_SHARE = Math.min(1, Math.max(0, Number(opt("auto-share", "LOADGEN_AUTO_SHARE", 0.5)) || 0));
 let initialCapacity = null;
 try { initialCapacity = env.LOADGEN_CAPACITY ? JSON.parse(env.LOADGEN_CAPACITY) : null; } catch { initialCapacity = null; }
@@ -142,13 +148,13 @@ const users = names
   .map((name, j) => ({ name, j }))
   .filter(({ j }) => SHARED || j % MACHINES === INDEX)
   .map(({ name, j }) => ({
-    name, key: allKeys[name], persona: personaNames[j % personaNames.length], balance: null, spent: 0, stopped: null, sessions: 0,
+    name, key: allKeys[name], persona: personaNames[j % personaNames.length], balance: null, spent: 0, epoch: 0, inflight: 0, stopped: null, sessions: 0,
     avoid: new Set((AVOID[name] ?? []).map((m) => parseModelId(m).key)), money: newMoney(),
   }));
 const USER_CAP = BUYER_CAP > 0 ? BUYER_CAP / (SHARED ? MACHINES : 1) : Infinity;
 
 out("LOADGEN_START", {
-  profile: PROFILE, url: URL_, machines: MACHINES, index: INDEX, perSecondLimit: PER_SECOND_LIMIT, networkCap: schedule.cap, autoShare: AUTO_SHARE,
+  profile: PROFILE, url: URL_, machines: MACHINES, index: INDEX, perSecondLimit: PER_SECOND_LIMIT, networkCap: schedule.cap, autoShare: AUTO_SHARE, model: MODEL_PIN || null,
   startAt: new Date(START_AT).toISOString(), durationSec: schedule.durationSec, loop: schedule.loop,
   stages: schedule.stages.map((s) => ({ i: s.index, rate: s.rate, sec: s.seconds })), breach: schedule.breach,
   users: users.map((u) => ({ name: u.name, persona: u.persona, avoid: [...u.avoid] })), budgetCSats: BUDGET / MACHINES, buyerCapCSats: Number.isFinite(USER_CAP) ? USER_CAP : null, minBalance: MIN_BALANCE, results: RESULTS,
@@ -182,6 +188,7 @@ async function balance(u) {
  * the error (`meta`), so LOADGEN_ERR lines can be matched to the portal's and coordinator's logs.
  */
 async function chatCall(u, body, { timeoutMs, sessionId }) {
+  const epoch = u.epoch; // the balance refresh this call started after (see record)
   const t0 = performance.now();
   let ttft = null, text = "", status = 0, errBody = "", cSats = 0, usage = null, where = null, served = null;
   let failure = null, gotHeaders = false, sawDone = false, inband = false, keepalives = 0, bytes = 0, lastByte = t0, headersMs = null;
@@ -255,7 +262,7 @@ async function chatCall(u, body, { timeoutMs, sessionId }) {
     : undefined;
   return {
     status, error, errDetail: error ? errBody.slice(0, 160) : undefined, meta, ttftMs: ttft === null ? null : Math.round(ttft), totalMs, text, toolCalls,
-    cSats, where, served, promptTokens: usage?.prompt_tokens ?? 0, outputTokens: usage?.completion_tokens ?? 0,
+    cSats, where, served, promptTokens: usage?.prompt_tokens ?? 0, outputTokens: usage?.completion_tokens ?? 0, epoch,
   };
 }
 
@@ -296,7 +303,8 @@ function record(stats, u, behaviour, model, r, correct, extra = {}) {
   const res = { behaviour, model, error: r.error, ttftMs: r.ttftMs, totalMs: r.totalMs, correct, cSats: r.cSats, promptTokens: r.promptTokens, outputTokens: r.outputTokens, where: r.where };
   stats.add(res);
   recent.push({ atMs: Date.now(), error: isFailure(r.error), type: r.error });
-  u.spent += r.cSats ?? 0;
+  // A call in flight at the last balance refresh already had its reserve taken out of u.balance.
+  if (r.epoch === undefined || r.epoch === u.epoch) u.spent += r.cSats ?? 0;
   machineSpent += r.cSats ?? 0;
   const mo = u.money;
   mo.calls++;
@@ -319,10 +327,7 @@ function record(stats, u, behaviour, model, r, correct, extra = {}) {
   }
   // Every error while they are few, then every 20th (the stage lines carry the full counts).
   if (r.error && (process.env.LOADGEN_VERBOSE === "1" || stats.errLogged++ < 30 || stats.errLogged % 20 === 0)) out("LOADGEN_ERR", { user: u.name, behaviour, model, error: r.error, status: r.status, detail: r.errDetail, ...(r.meta ?? {}), ...extra });
-  if (u.balance !== null && u.balance - u.spent < MIN_BALANCE && !u.stopped) {
-    u.stopped = "low_balance";
-    out("LOADGEN_EVENT", { type: "user_stopped", user: u.name, reason: "low_balance", balance: Math.round(u.balance - u.spent) });
-  }
+  if (!u.stopped) checkBalance(u);
   if (r.error === "insufficient_funds" && !u.stopped) {
     // Each call sets aside a reserve up front (~750 cSats for a long 30b call), so a 402 can mean
     // "too many calls at once" rather than "empty": pause a minute, then the balance refresh decides.
@@ -332,9 +337,22 @@ function record(stats, u, behaviour, model, r, correct, extra = {}) {
   if (machineSpent > BUDGET / MACHINES && !stopReason) stopReason = "budget_exhausted";
 }
 
+/** Stop or pause a buyer whose balance is under --min-balance (planner.mjs balanceAction). */
+function checkBalance(u) {
+  const a = balanceAction({ balance: u.balance, spent: u.spent, inflight: u.inflight, minBalance: MIN_BALANCE });
+  const balance = u.balance === null ? null : Math.round(u.balance - u.spent);
+  if (a === "stop") {
+    u.stopped = "low_balance";
+    out("LOADGEN_EVENT", { type: "user_stopped", user: u.name, reason: "low_balance", balance, minBalance: MIN_BALANCE });
+  } else if (a === "pause" && !(u.pausedUntil > Date.now())) {
+    u.pausedUntil = Date.now() + 60_000;
+    out("LOADGEN_EVENT", { type: "user_paused", user: u.name, reason: "low_balance_in_flight", balance, inflight: u.inflight, minBalance: MIN_BALANCE, seconds: 60 });
+  }
+}
+
 /** The behaviour's model mix now: from the capacity snapshot, less models the network refused. */
 function weightsFor(behaviour) {
-  const w = modelMix(planner.capacity, behaviour, MODELS[behaviour]);
+  const w = pinWeights(modelMix(planner.capacity, behaviour, MODELS[behaviour]), MODEL_PIN);
   const now = Date.now();
   for (const id of Object.keys(w)) {
     const until = droppedModels.get(parseModelId(id).key);
@@ -360,7 +378,8 @@ async function plannedCall(u, m, body, opts) {
   try {
     await takeSlot();
     inflight++;
-    try { r = await chatCall(u, { ...body, model: m.id }, opts); } finally { inflight--; }
+    u.inflight++;
+    try { r = await chatCall(u, { ...body, model: m.id }, opts); } finally { inflight--; u.inflight--; }
   } catch (e) {
     planner.finish(m.key, null, atCap);
     throw e;
@@ -463,8 +482,7 @@ if (!users.some((u) => !u.stopped)) { out("LOADGEN_EVENT", { type: "abort", reas
 setInterval(async () => {
   for (const u of users) if (!u.stopped) {
     const b = await balance(u);
-    if (b !== null) { u.balance = b; u.spent = 0; }
-    if (b !== null && b < MIN_BALANCE) { u.stopped = "low_balance"; out("LOADGEN_EVENT", { type: "user_stopped", user: u.name, reason: "low_balance", balance: Math.round(b) }); }
+    if (b !== null) { u.balance = b; u.spent = 0; u.epoch++; u.pausedUntil = 0; checkBalance(u); }
   }
 }, 60_000).unref();
 
@@ -504,7 +522,7 @@ for (const st of schedule.stages) {
   const stageEnd = stageStart + st.seconds * 1000;
   if (Date.now() >= stageEnd || stopReason) continue; // joined late, or stopped
   if (ADMIN_TOKEN) {
-    const cap = await fetchCapacity(ADMIN_TOKEN).catch(() => null);
+    const cap = await fetchCapacity(ADMIN_TOKEN, undefined, { viaFly: false }).catch(() => null); // no fly CLI on the load machines
     if (cap) planner.setCapacity(cap);
   }
   out("LOADGEN_CAPACITY", { stage: st.index, source: ADMIN_TOKEN ? "admin_network" : initialCapacity ? "snapshot" : "defaults", snapshotAt: planner.capacity?.atMs ? new Date(planner.capacity.atMs).toISOString() : null, models: planner.view() });

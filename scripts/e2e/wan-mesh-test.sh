@@ -1,73 +1,65 @@
 #!/usr/bin/env bash
+# Copyright (c) 2025 EdgeCoder
+# SPDX-License-Identifier: BUSL-1.1
+#
+# WAN mesh check: read-only probes of a seed coordinator and a local node. Sends no work, pulls no
+# tasks and changes nothing. MESH_TOKEN (optional) is sent as x-mesh-token and never printed.
+#
+#   SEED_URL=https://coordinator.edgecoder.io LOCAL_AGENT_URL=http://localhost:4301 MESH_TOKEN=... \
+#     scripts/e2e/wan-mesh-test.sh
 set -euo pipefail
 
 SEED_URL="${SEED_URL:-https://coordinator.edgecoder.io}"
 LOCAL_AGENT_URL="${LOCAL_AGENT_URL:-http://localhost:4301}"
 MESH_TOKEN="${MESH_TOKEN:-}"
 
-AUTH_HEADER=""
-if [[ -n "${MESH_TOKEN}" ]]; then
-  AUTH_HEADER="-H x-mesh-token: ${MESH_TOKEN}"
-fi
+hdr=()
+[[ -n "${MESH_TOKEN}" ]] && hdr=(-H "x-mesh-token: ${MESH_TOKEN}")
+get() { curl -sf --max-time 20 ${hdr[@]+"${hdr[@]}"} "$1"; }
 
-echo "=== WAN Mesh E2E Test ==="
+echo "=== WAN Mesh E2E Test (read-only) ==="
 echo "Seed node: ${SEED_URL}"
 echo "Local agent: ${LOCAL_AGENT_URL}"
 echo ""
 
-# 1. Verify seed node is reachable
-echo "[1/6] Checking seed node health..."
-SEED_HEALTH=$(curl -sf "${SEED_URL}/status" -H "x-mesh-token: ${MESH_TOKEN}" || echo "FAIL")
-if [[ "${SEED_HEALTH}" == "FAIL" ]]; then
-  echo "FAIL: Seed node unreachable at ${SEED_URL}/status"
+echo "[1/5] Seed node health (GET /health/runtime)..."
+if ! SEED_HEALTH=$(get "${SEED_URL}/health/runtime"); then
+  echo "FAIL: Seed node unreachable at ${SEED_URL}/health/runtime"
   exit 1
 fi
-echo "  OK: Seed node is healthy"
+echo "  OK: $(echo "${SEED_HEALTH}" | head -c 200)"
 
-# 2. Verify local agent is running
-echo "[2/6] Checking local agent health..."
-LOCAL_HEALTH=$(curl -sf "${LOCAL_AGENT_URL}/health/runtime" || echo "FAIL")
-if [[ "${LOCAL_HEALTH}" == "FAIL" ]]; then
-  echo "FAIL: Local agent unreachable at ${LOCAL_AGENT_URL}/health/runtime"
+echo "[2/5] Local node health (GET /health/runtime)..."
+if ! LOCAL_HEALTH=$(get "${LOCAL_AGENT_URL}/health/runtime"); then
+  echo "FAIL: Local node unreachable at ${LOCAL_AGENT_URL}/health/runtime"
   exit 1
 fi
-echo "  OK: Local agent is healthy"
+echo "  OK: $(echo "${LOCAL_HEALTH}" | head -c 200)"
 
-# 3. Check peer discovery
-echo "[3/6] Checking peer discovery..."
-PEERS=$(curl -sf "${LOCAL_AGENT_URL}/mesh/peers" || echo "FAIL")
-if [[ "${PEERS}" == "FAIL" ]]; then
-  echo "WARN: Could not fetch peers (endpoint may not exist yet)"
+echo "[3/5] Seed identity (GET /identity)..."
+if IDENTITY=$(get "${SEED_URL}/identity"); then
+  echo "  OK: $(echo "${IDENTITY}" | head -c 200)"
 else
-  echo "  OK: Peers response: $(echo "${PEERS}" | head -c 200)"
+  echo "  WARN: /identity not readable"
 fi
 
-# 4. Submit a test task to seed node
-echo "[4/6] Submitting test task to seed node..."
-TASK_RESULT=$(curl -sf -X POST "${SEED_URL}/pull" \
-  -H "Content-Type: application/json" \
-  -H "x-mesh-token: ${MESH_TOKEN}" \
-  -d '{"agentId":"wan-test-agent","model":"qwen2.5:7b","os":"linux"}' \
-  || echo "FAIL")
-if [[ "${TASK_RESULT}" == "FAIL" ]]; then
-  echo "  WARN: Pull returned no task (queue may be empty — expected)"
+echo "[4/5] Peer discovery (GET /mesh/peers on both)..."
+for u in "${SEED_URL}" "${LOCAL_AGENT_URL}"; do
+  if PEERS=$(get "${u}/mesh/peers"); then
+    echo "  OK: ${u}: $(echo "${PEERS}" | head -c 200)"
+  else
+    echo "  WARN: ${u}/mesh/peers not readable (mesh token needed?)"
+  fi
+done
+
+echo "[5/5] Ledger ordering chain (GET /ledger/verify)..."
+if LEDGER=$(get "${SEED_URL}/ledger/verify"); then
+  echo "  OK: $(echo "${LEDGER}" | head -c 200)"
+  if echo "${LEDGER}" | grep -q '"ok":false'; then echo "FAIL: ledger chain does not verify"; exit 1; fi
 else
-  echo "  OK: Pull response: $(echo "${TASK_RESULT}" | head -c 200)"
+  echo "  SKIP: /ledger/verify not readable (mesh token needed?)"
 fi
 
-# 5. Verify ledger consistency (check seed node)
-echo "[5/6] Checking ledger integrity on seed node..."
-LEDGER=$(curl -sf "${SEED_URL}/credits/ledger/verify" -H "x-mesh-token: ${MESH_TOKEN}" || echo "SKIP")
-if [[ "${LEDGER}" == "SKIP" ]]; then
-  echo "  SKIP: Ledger verify endpoint not available"
-else
-  echo "  OK: Ledger response: $(echo "${LEDGER}" | head -c 200)"
-fi
-
-# 6. Verify gossip propagation (check local agent for seed peer)
-echo "[6/6] Checking gossip propagation..."
-echo "  Manual check: Verify local agent's /mesh/peers includes the seed node"
 echo ""
-
 echo "=== WAN Mesh E2E Test Complete ==="
-echo "Review output above for any FAIL or WARN results."
+echo "Manual check: the local node's /mesh/peers should include the seed. Review any FAIL or WARN above."

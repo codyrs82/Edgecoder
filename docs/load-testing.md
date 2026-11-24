@@ -29,9 +29,13 @@ pressure on the one GPU slot and one Mac, collected `no_capacity` there, and sto
 ~1 call/s per region while the CPU fleet sat idle. So (`planner.mjs`):
 
 - `fly.sh run` takes a snapshot of slots per model and the classes that hold each model
-  (`capacity.mjs`, from the coordinators' `/admin/network` with the admin token on the operator's
-  host) and passes it to the machines as `LOADGEN_CAPACITY`. The admin token does not leave the
-  host; with `LOADGEN_ADMIN_TOKEN` set on the app the machines refresh it before every stage
+  (`capacity.mjs`, from the coordinators' `/admin/network`) and passes it to the machines as
+  `LOADGEN_CAPACITY`. The coordinators refuse admin routes on public ingress
+  (`403 admin_internal_only`), so `capacity.mjs` runs the query inside `edgecoder-seed` /
+  `edgecoder-seed-eu` over `fly ssh console` (a node script on stdin that reads `ADMIN_API_TOKEN`
+  and `ADMIN_LISTEN_PORT` from the machine's env; the token is never printed or copied out). If a
+  coordinator cannot be read, `capacity.mjs` and `budget.mjs buyers` exit non-zero with the reason,
+  and `fly.sh run` stops (set `LOADGEN_ALLOW_BLIND=1` to run without the snapshot anyway); with `LOADGEN_ADMIN_TOKEN` set on the app the machines refresh it before every stage
   (optional, off by default). Without a snapshot: 1.5b 16 slots, 30b 1, 7b 1.
 - Each model has a network-wide in-flight cap: its slot count for scarce models (fewer than 5
   slots), slots × `--oversub` (default 1.5) for the bulk ones so they can queue, and
@@ -63,11 +67,19 @@ inference-only (`SANDBOX_MODE=none`), so jobs would never run.
   30 s, the machine drops to the previous stage's rate for the rest of the stage and then stops; a
   second breach stops it at once. `over_capacity` and gaps (`no_agent_has_model`,
   `no_agent_in_class`) do not count.
-- **Budget**: a user is skipped below `--min-balance` (default 1500 cSats: every network call sets
-  aside up to ~750 cSats up front, refunded after); a `402` pauses that user for a minute; each
-  machine stops after its share of `--budget` cSats (default 2000 for the run).
+- **Budget**: a user is skipped below `--min-balance` (default 1500 cSats in `fly.sh`, 1000 in
+  `loadgen.mjs`: every network call sets aside up to ~750 cSats up front, refunded after); a `402`
+  pauses that user for a minute; each machine stops after its share of `--budget` cSats (default
+  2000 for the run). `/v1/account`'s balance already has the buyer's in-flight reserves taken out,
+  so a buyer below `--min-balance` while it still has calls in flight is **paused** until the next
+  balance refresh (`user_paused`, `low_balance_in_flight`), and stopped (`low_balance`) only with
+  nothing in flight; charges of calls that were in flight at a refresh are not counted twice.
 - This tool generates no agents (the owner's limit is ≤ 60 agents on the network).
 - Regtest by default: top-ups refuse any invoice that is not `lnbcrt…`. With `budget.mjs topup --network signet` (after the coordinators moved to signet) they accept only `lntbs…` invoices, paid by the Mutinynet faucet from inside `edgecoder-lnd-signet`.
+- **Funding on mainnet**: `budget.mjs topup` never pays a mainnet invoice. With `--network mainnet`,
+  or when the API hands it an `lnbc…` invoice, it prints that it cannot fund mainnet accounts and
+  exits 2. The owner funds test accounts by hand (an owner transfer of cSats from a funded account,
+  or paying each account's top-up invoice from a real wallet); then `budget.mjs check`.
 
 ## Profiles
 
@@ -80,13 +92,21 @@ inference-only (`SANDBOX_MODE=none`), so jobs would never run.
 | `soak` | 2 → 4 → 6 → 4 (15 min each), looped for `--duration` (default 2 h) | 10 % |
 
 `--loop` repeats any schedule until `--duration`; `--duration` also cuts a schedule short.
+
+Model choice: `--auto-share F` (default 0.5) is the share of calls sent as model `auto`
+(best-fit routing); `--auto-share 0` names a model on every call. `--model M` (e.g.
+`qwen2.5-coder:1.5b`) pins every named-model call to that model; with `--auto-share 0` the whole
+run asks for that one model (a buyer whose own agents hold it does not ask for it):
+`scripts/loadgen/fly.sh run ramp --model qwen2.5-coder:1.5b --auto-share 0 --min-balance 100`.
 `node scripts/loadgen/loadgen.mjs --profile ramp --dry-run` prints the schedule without sending anything.
 
 ## Running it
 
-Prerequisites: `fly` logged in (or `FLY_API_TOKEN`, else `~/.config/edgecoder/fly.token`), the
-account files with API keys, and the coordinator admin token in
-`~/.config/edgecoder/coordinator-admin-token` for the server-side report. No command prints a key.
+Prerequisites: Fly auth with access to the load-test app and the seed apps (`FLY_API_TOKEN` if set,
+else the `fly auth login` session, else `~/.config/edgecoder/fly.token` as a last resort, since a
+revoked token there fails every call with `verify: root banned`; `fly.sh` stops with instructions
+when none works) and the account files with API keys. No local admin token is needed: admin reads
+run inside the seed machines. No command prints a key or token.
 
 ```sh
 # 0. Once: the app and its only secret (LOADGEN_KEYS, built from the account files on stdin)

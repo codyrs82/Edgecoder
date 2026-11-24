@@ -79,12 +79,12 @@ export async function snapshotLedger({ url, accounts, fetchSnapshots, adminToken
   const atMs = Date.now();
   const out = {};
   await Promise.all(accounts.map(async (a) => { out[a.name] = await fetchAccount(url, a.key); }));
-  let hosts = null;
-  if (adminToken && fetchSnapshots) {
-    const snaps = await fetchSnapshots(adminToken).catch(() => []);
-    if (snaps.some(Boolean)) hosts = hostingFrom(snaps);
+  let hosts = null, hostsError;
+  if (fetchSnapshots) {
+    // Who hosts what needs /admin/network (internal-only now; capacity.mjs runs it inside the seeds).
+    try { hosts = hostingFrom(await fetchSnapshots(adminToken)); } catch (e) { hostsError = String(e?.message ?? e); }
   }
-  return { type: "ledger", atMs, url, accounts: out, hosts };
+  return { type: "ledger", atMs, url, accounts: out, hosts, ...(hostsError ? { hostsError } : {}) };
 }
 
 /** The account id behind a name in a snapshot, and the name behind an id. */
