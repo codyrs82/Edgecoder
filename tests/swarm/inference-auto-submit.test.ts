@@ -228,12 +228,15 @@ describe("the portal's coordinator choice is kept on the routing decision", () =
     await finish(preferred, taskId, j.subtaskId, j.model);
   });
 
-  test("a call without a choice logs no placement", async () => {
+  test("a named call without a choice still logs a placement, without a coordinator choice", async () => {
     const before = recentDecisions(1)[0]?.taskId;
     const taskId = `inf-${randomUUID()}`;
     const r = await post("/inference/submit", { taskId, submitterAccountId: requester.peerId, model: "qwen2.5-coder:7b", timeoutMs: 60_000, messages: [{ role: "user", content: "hi" }] }, requester);
     expect(r.statusCode, r.body).toBe(200);
-    expect(recentDecisions(1)[0]?.taskId).toBe(before);
+    const d = recentDecisions(1)[0];
+    expect(d?.taskId).not.toBe(before);
+    expect(d).toMatchObject({ taskId, pinned: true, model: "qwen2.5-coder:7b" });
+    expect(d?.coordinatorChoice).toBeUndefined();
     const subtaskId = r.json().subtaskId as string;
     for (const k of [a7, b7]) {
       if ((await pull(k)) === subtaskId) {

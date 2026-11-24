@@ -54,16 +54,27 @@ export function flyEnv(run = execFileSync) {
   return e;
 }
 
-/** Runs inside a coordinator machine: prints one SNAPSHOT line (models + agents) or ERROR line. Never prints the token. */
-export const IN_MACHINE_SCRIPT = `
+/**
+ * Script that runs inside a coordinator machine: prints one SNAPSHOT line or ERROR line. Never
+ * prints the token. Default: models + agents. series: also the coordinator's region/uptime and the
+ * network series for `range` (report.mjs's server-side section).
+ */
+export function inMachineScript({ range = "1h", series = false } = {}) {
+  if (!/^[0-9]+[mhd]$/.test(range)) throw new Error(`bad range ${range}`);
+  const pick = series
+    ? `{ coordinator: j.coordinator || null, series: j.series || null }`
+    : `{ models: j.models || [], agents: j.agents || [] }`;
+  return `
 const t = process.env.ADMIN_API_TOKEN || "";
 const port = process.env.ADMIN_LISTEN_PORT || process.env.PORT || "4301";
 if (!t) { console.log("EDGECODER_ERROR no ADMIN_API_TOKEN in the machine env"); process.exit(0); }
-fetch("http://127.0.0.1:" + port + "/admin/network?range=1h", { headers: { "x-admin-token": t }, signal: AbortSignal.timeout(20000) })
+fetch("http://127.0.0.1:" + port + "/admin/network?range=${range}", { headers: { "x-admin-token": t }, signal: AbortSignal.timeout(20000) })
   .then(async (r) => { const j = await r.json().catch(() => ({})); if (r.status !== 200) { console.log("EDGECODER_ERROR http_" + r.status + " " + (j.error || "")); return; }
-    console.log("EDGECODER_SNAPSHOT " + JSON.stringify({ models: j.models || [], agents: j.agents || [] })); })
+    console.log("EDGECODER_SNAPSHOT " + JSON.stringify(${pick})); })
   .catch((e) => console.log("EDGECODER_ERROR " + String(e && e.message || e).slice(0, 200)));
 `;
+}
+export const IN_MACHINE_SCRIPT = inMachineScript();
 
 /** Parse the in-machine script's output: { models, agents } or throws with the reason. */
 export function parseInMachineOutput(text) {
@@ -75,8 +86,8 @@ export function parseInMachineOutput(text) {
 }
 
 /** GET /admin/network from inside the coordinator's Fly app (fly ssh console, script on stdin). */
-export function fetchViaFly(app, run = execFileSync) {
-  const outp = run("fly", ["ssh", "console", "-a", app, "-q", "-C", "node -"], { env: flyEnv(run), input: IN_MACHINE_SCRIPT, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: 90_000 });
+export function fetchViaFly(app, run = execFileSync, script = IN_MACHINE_SCRIPT) {
+  const outp = run("fly", ["ssh", "console", "-a", app, "-q", "-C", "node -"], { env: flyEnv(run), input: script, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: 90_000 });
   return parseInMachineOutput(outp);
 }
 
@@ -107,6 +118,24 @@ export async function fetchSnapshots(token, coordinators = DEFAULT_COORDINATORS,
       throw new Error(`${c}/admin/network: ${reason}; inside ${app} over fly ssh: ${String(e?.message ?? e).split("\n")[0].slice(0, 200)}; ${HOW_TO_FIX}`);
     }
   }));
+}
+
+/**
+ * Server-side series for report.mjs: per coordinator { region, uptimeSeconds, bucketMs, points } or
+ * { error }. /admin/network is internal-only, so this runs inside each seed app over fly ssh with
+ * the machine's own admin token; no token is sent from or printed on this host.
+ */
+export function fetchServerSeries(coordinators = DEFAULT_COORDINATORS, range = "1h", { run = execFileSync } = {}) {
+  const out = {};
+  for (const c of coordinators) {
+    const app = SEED_APPS[c];
+    if (!app) { out[c] = { error: `no Fly app known for ${c}` }; continue; }
+    try {
+      const j = fetchViaFly(app, run, inMachineScript({ range, series: true }));
+      out[c] = { region: j.coordinator?.region, uptimeSeconds: j.coordinator?.uptimeSeconds, bucketMs: j.series?.bucketMs, points: j.series?.points ?? [] };
+    } catch (e) { out[c] = { error: `inside ${app} over fly ssh: ${String(e?.message ?? e).split("\n")[0].slice(0, 200)}; ${HOW_TO_FIX}` }; }
+  }
+  return out;
 }
 
 /**

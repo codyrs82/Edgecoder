@@ -12,8 +12,10 @@
  *                                 and per-class utilization (the CPU fleet is class "cpu")
  *
  * --app: reads /tmp/loadgen-results.jsonl from each started machine of the Fly app (fly ssh).
- * Server side: GET /admin/network?range=... on each coordinator (admin token from
- * ~/.config/edgecoder/coordinator-admin-token or EDGECODER_ADMIN_TOKEN; never printed), keeps the
+ * Fly auth as in fly.sh: FLY_API_TOKEN, else the `fly auth login` session, else ~/.config/edgecoder/fly.token.
+ * Server side: GET /admin/network?range=... on each coordinator. That route is internal-only, so it
+ * runs inside edgecoder-seed / edgecoder-seed-eu over fly ssh with the admin token from the machine's
+ * own env (capacity.mjs fetchServerSeries; no token is sent or printed). Keeps the
  * samples inside the run window and reports per stage: utilization (busy slots / slots), queue and
  * waiting-inference peaks, dispatch pickup p90, server TTFT p90, started/completed/failed and
  * no-capacity counts. The samples are in coordinator memory: a coordinator restart loses them.
@@ -29,7 +31,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { digestStage, mergeStage, table } from "./stats.mjs";
 import { chargesFrom, formatMoney, loadAccountKeys, moneyReport, snapshotLedger } from "./money.mjs";
-import { fetchSnapshots } from "./capacity.mjs";
+import { adminToken as adminTokenFromHost, fetchServerSeries, fetchSnapshots, flyEnv } from "./capacity.mjs";
 import { formatHostMemory, hostMemoryReport, hostsFromSnapshots } from "./memory.mjs";
 
 const argv = process.argv.slice(2);
@@ -40,12 +42,6 @@ const files = listAfter("files");
 const SAMPLES = flag("samples");
 const APP = flag("app");
 const COORDS = (flag("coordinators", "https://coordinator.edgecoder.io,https://coordinator-eu.edgecoder.io")).split(",");
-
-function flyEnv() {
-  const e = { ...process.env };
-  if (!e.FLY_API_TOKEN) { const f = join(homedir(), ".config/edgecoder/fly.token"); if (existsSync(f)) e.FLY_API_TOKEN = readFileSync(f, "utf8").trim(); }
-  return e;
-}
 
 const lines = [];
 for (const f of files) lines.push(...readFileSync(f, "utf8").split("\n"));
@@ -78,19 +74,11 @@ const summaries = mine.filter((r) => r.type === "summary");
 const regions = [...new Set(mine.map((r) => r.region))];
 
 // ---- server side
-const tokenFile = join(homedir(), ".config/edgecoder/coordinator-admin-token");
-const adminToken = process.env.EDGECODER_ADMIN_TOKEN ?? (existsSync(tokenFile) ? readFileSync(tokenFile, "utf8").trim() : "");
 const t0 = Math.min(...stages.map((s) => s.startMs)), t1 = Math.max(...stages.map((s) => s.endMs ?? s.startMs));
 const ageMs = Date.now() - t0;
 const range = ageMs < 55 * 60_000 ? "1h" : ageMs < 5.5 * 3600_000 ? "6h" : "24h";
-const server = {};
-for (const c of COORDS) {
-  try {
-    const r = await fetch(`${c}/admin/network?range=${range}`, { headers: { "x-admin-token": adminToken, "user-agent": "edgecoder-loadgen/1.0 (report)" }, signal: AbortSignal.timeout(30_000) });
-    const j = await r.json();
-    server[c] = { region: j.coordinator?.region, uptimeSeconds: j.coordinator?.uptimeSeconds, bucketMs: j.series?.bucketMs, points: j.series?.points ?? [] };
-  } catch (err) { server[c] = { error: String(err.message) }; }
-}
+const adminToken = adminTokenFromHost(); // optional (public URL); never printed
+const server = fetchServerSeries(COORDS, range);
 const r1 = (x) => (x === null || x === undefined ? null : Math.round(x * 10) / 10);
 function serverWindow(from, to) {
   const out = {};
