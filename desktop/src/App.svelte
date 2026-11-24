@@ -29,6 +29,7 @@
   import { autoRestart, startAutoRestart } from "./lib/auto-restart-app";
   import { setBusy, takeUpdatedTo } from "./lib/auto-restart";
   import ComputePicker from "./components/ComputePicker.svelte";
+  import ContextMeter from "./components/ContextMeter.svelte";
   import WebIndicator from "./components/WebIndicator.svelte";
   import { getWebStatus } from "./lib/api";
   import { chatWebMode, webAutoStore, type WebStatus } from "./lib/web-tool";
@@ -135,6 +136,8 @@
 
   let historyOpen = $state(true);
   let chatView: ChatView | undefined = $state(undefined);
+  /** The Chat view's context meter (compaction.ts); null for a portal chat. */
+  let chatContext = $state<{ tokens: number; compacting: boolean; note: string | null } | null>(null);
   /** The Chat view's permission mode (its picker sits in this page's composer). */
   let chatPermissionMode = $state<EngineMode>(defaultPermissionMode());
   let chatInput: ChatInput | undefined = $state(undefined);
@@ -700,11 +703,12 @@
           </div>
         {/if}
         <div class="chat-main" class:hidden={!!activeBot || !!activeCloudBot}>
-          <ChatView bind:this={chatView} {webStatus} onWebChange={(choice) => (chatWeb = choice)} onWebStale={() => webRecheck++} onModeChange={(m) => (chatPermissionMode = m)} onFocusComposer={() => chatInput?.focus()} onHeaderChange={(h) => (chatHeader = h)} onOpenInEditor={handleOpenInEditor} {projectRoot} onRepoConnected={(r) => void repoConnected(r)} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} onPreview={previewInEditor} onQuote={(b) => void chatInput?.insertQuote(b)} />
+          <ChatView bind:this={chatView} {webStatus} onWebChange={(choice) => (chatWeb = choice)} onWebStale={() => webRecheck++} onModeChange={(m) => (chatPermissionMode = m)} onFocusComposer={() => chatInput?.focus()} onHeaderChange={(h) => (chatHeader = h)} onOpenInEditor={handleOpenInEditor} {projectRoot} onRepoConnected={(r) => void repoConnected(r)} onStreamingChange={(v) => (chatStreaming = v)} onOpenPath={openInEditor} onPreview={previewInEditor} onQuote={(b) => void chatInput?.insertQuote(b)} onContextChange={(c) => (chatContext = c)} />
           <div class="composer">
             <ChatInput bind:this={chatInput} onSend={handleSend} streaming={chatStreaming} onStop={() => chatView?.stop()} attach={{ vision: projectRoot ? visionFor($computeChoice) : NO_VISION, who: "This model" }} mentions={projectRoot ? (q) => mentionSuggestions(q, (x) => fsFind(x, 8)) : undefined}>
               {#snippet controls()}
                 <ComputePicker selected={$computeChoice} onSelect={(id) => computeChoice.set(id)} onOpenSettings={openSettings} />
+                {#if chatContext}<ContextMeter tokens={chatContext.tokens} busy={chatContext.compacting} note={chatContext.note} disabled={chatStreaming} onCompact={() => chatView?.compactConversation()} />{/if}
                 <WebIndicator status={webStatus} mode={chatWebModeNow} onChange={(m) => { chatWeb = m === "auto"; chatView?.setWeb(m === "auto"); }} />
                 {#if projectRoot && !isRemoteMode()}
                   <PermissionModePicker mode={chatPermissionMode} onChange={(m) => { chatPermissionMode = m; chatView?.setMode(m); }} allowFull project={projectRoot} />

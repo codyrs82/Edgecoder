@@ -19,6 +19,7 @@
  *   POST /v1/ide/sessions/:id/publish    {published}   show it live in the desktop app
  *   POST /v1/ide/sessions/:id/trust      {trusted}     trust the session's project folder (workspace-trust.ts)
  *   POST /v1/ide/sessions/:id/cancel | /undo {turnId?} | /clear | /delete
+ *   POST /v1/ide/sessions/:id/compact    summarize all but the last few messages now (`/compact`)
  *
  *   GET  /v1/ide/permissions                           every project's "always allow" rules (Settings → Permissions)
  *   POST /v1/ide/permissions/remove {projectRoot, rule}   remove one ("edits" removes the edits answer)
@@ -219,6 +220,13 @@ export function registerSessionRoutes(app: FastifyInstance, hub: SessionHub): vo
       const { id } = idParams.parse(req.params);
       hub.clear(id, refOf(clientSchema.parse(req.body ?? {})));
       return { ok: true };
+    }));
+
+  app.post("/v1/ide/sessions/:id/compact", (req, reply) =>
+    handle(reply, async () => {
+      const { id } = idParams.parse(req.params);
+      const entry = await hub.compact(id, refOf(clientSchema.parse(req.body ?? {})));
+      return entry?.compaction ? { compacted: true, entryId: entry.id, savedTokens: entry.compaction.savedTokens, before: entry.compaction.before, after: entry.compaction.after, summarized: entry.compaction.summarized } : { compacted: false };
     }));
 
   app.post("/v1/ide/sessions/:id/delete", (req, reply) =>

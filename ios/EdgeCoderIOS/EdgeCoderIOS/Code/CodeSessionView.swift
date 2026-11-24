@@ -459,11 +459,11 @@ struct CodeApprovalCard: View {
             } else if canDrive {
                 HStack(spacing: 10) {
                     Button(role: .destructive) { answer(false) } label: {
-                        Text("Deny").frame(maxWidth: .infinity)
+                        Text(isCostCheck ? "Stop" : "Deny").frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
                     Button { answer(true) } label: {
-                        Text("Approve").frame(maxWidth: .infinity)
+                        Text(isCostCheck ? "Keep going" : "Approve").frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(Theme.accent)
@@ -482,11 +482,15 @@ struct CodeApprovalCard: View {
         .accessibilityElement(children: .contain)
     }
 
+    private var isCostCheck: Bool { approval.tool == "cost_check" }
+
     private var title: String {
         switch approval.tool {
         case "run_shell": return "Run this command?"
         case "write_file", "edit_file", "apply_patch": return "Change this file?"
         case "git_commit": return "Make this commit?"
+        // A Mac chat's per-reply cost check: approve is Keep going, deny is Stop (Switch is on the Mac).
+        case "cost_check": return "Keep going?"
         default: return "Allow \(approval.tool)?"
         }
     }

@@ -11,6 +11,7 @@ const api = vi.hoisted(() => ({
   sessionApprove: vi.fn(async () => ({ ok: true, applied: true })),
   sessionUnqueue: vi.fn(async () => ({ removed: true })),
   sessionCancel: vi.fn(async () => ({})),
+  sessionCompact: vi.fn(async () => ({ compacted: true, savedTokens: 900 })),
   fsFind: vi.fn(async () => []),
   checkpointChanges: vi.fn(async () => ({ changes: [] })),
   sessionTentacles: vi.fn(async () => ({ config: { enabled: false }, spentCSats: 0, tentacles: [] })),
@@ -91,5 +92,36 @@ describe("LiveSessionPanel", () => {
     expect(await screen.findByText("The terminal changed the model to network/qwen2.5-coder:32b and mode to auto.")).toBeTruthy();
     emit({ seq: 15, type: "turn_end", entry: { id: "a2", role: "assistant", content: "Writing the header. Done.", at: 4, events: [] } });
     expect(await screen.findByText("Writing the header. Done.")).toBeTruthy();
+  });
+});
+
+describe("LiveSessionPanel scroll and compaction", () => {
+  it("opens at the latest messages, shows Jump to latest when scrolled up, and /compact summarizes with an inline note", async () => {
+    const sh = Object.getOwnPropertyDescriptor(Element.prototype, "scrollHeight")!;
+    const ch = Object.getOwnPropertyDescriptor(Element.prototype, "clientHeight")!;
+    const isRegion = (el: Element) => el.getAttribute?.("aria-label") === "Conversation";
+    Object.defineProperty(Element.prototype, "scrollHeight", { configurable: true, get() { return isRegion(this) ? 1500 : sh.get!.call(this); } });
+    Object.defineProperty(Element.prototype, "clientHeight", { configurable: true, get() { return isRegion(this) ? 400 : ch.get!.call(this); } });
+    try {
+      render(LiveSessionPanel, { sessionId: "s1" });
+      await screen.findByText("Added it.");
+      const region = screen.getByRole("region", { name: "Conversation" });
+      await waitFor(() => expect(region.scrollTop).toBe(1500));
+      expect(screen.queryByRole("button", { name: "Jump to latest" })).toBeNull();
+      region.scrollTop = 100;
+      await fireEvent.scroll(region);
+      expect(await screen.findByRole("button", { name: "Jump to latest" })).toBeTruthy();
+
+      const input = screen.getByPlaceholderText(/Message this session/) as HTMLTextAreaElement;
+      await fireEvent.input(input, { target: { value: "/compact" } });
+      await fireEvent.keyDown(input, { key: "Enter" });
+      await waitFor(() => expect(api.sessionCompact).toHaveBeenCalledWith("s1"));
+      expect(api.sessionSend).not.toHaveBeenCalled();
+      emit({ seq: 6, type: "note", entry: { id: "n1", role: "note", content: "x", at: 3, compaction: { throughId: "u1", savedTokens: 900, manual: true } } });
+      expect(await screen.findByText("Earlier messages summarized to save tokens · ~900 tokens saved")).toBeTruthy();
+    } finally {
+      Object.defineProperty(Element.prototype, "scrollHeight", sh);
+      Object.defineProperty(Element.prototype, "clientHeight", ch);
+    }
   });
 });
