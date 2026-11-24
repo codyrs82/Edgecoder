@@ -51,7 +51,9 @@ describe.skipIf(!support.kind)(`the ${support.kind ?? "OS"} sandbox`, () => {
   it("can't write outside the project (the home folder)", () => {
     const target = join(home, "escaped.txt");
     const r = inSandbox(`echo out > '${target}'`, paths);
-    expect(r.code).not.toBe(0);
+    // bwrap: this fake home is under /tmp, which is a fresh tmpfs inside the sandbox, so the write
+    // may "succeed" there and vanish; it never reaches the real folder. (Real $HOME: the executor test.)
+    if (support.kind === "sandbox-exec") expect(r.code).not.toBe(0);
     expect(existsSync(target)).toBe(false);
   });
 
