@@ -59,6 +59,30 @@ commands must be approved on the computer.
 
 See [Terminal: `edgecoder code`](/guide/terminal) for how sessions work on the computer.
 
+### Code on edgecoder.io
+
+The same sessions are on the website. Sign in at [edgecoder.io](https://edgecoder.io/portal) with
+the account that is signed in on the computer, and open **Code** in the sidebar (under **Chat**).
+
+- **Code** lists each of your computers: online or offline, and whether **Code from your phone** is
+  **On**, **View only** or **Off**. Under each one are its trusted projects and their sessions,
+  newest first. **New session** starts one in a project, as on the phone.
+- Open a session to read the conversation: messages, each reply's tool steps (collapsed), the files a
+  turn changed (open one to see its diff), and the session's model and cSats so far. It updates by
+  itself while a turn runs. A session has its own link (`/portal/code/<computer>/<session>`) you can
+  bookmark.
+- Send a message (it queues while a reply runs), **Allow** or **Deny** a tool call, approve a plan,
+  **Stop** the reply, **Undo last turn**, remove a queued message, or switch the mode between **Ask**,
+  **Accept edits** and **Plan**.
+
+The website goes through the same relay as the phone and follows the same rules: only the account
+signed in on the computer can see or drive its sessions, **Allow** covers that one call (an "always
+allow" rule and **Auto** mode are set on the computer only), and very long commands must be approved
+on the computer. Nothing from a session runs in the browser; code and output are shown as text.
+
+If a computer is offline, or **Code from your phone** is **Off** or **View only**, the page says so:
+open the EdgeCoder desktop app on it, go to **Settings**, and set **Code from your phone** to **On**.
+
 ## Bots
 
 The **Bots** tab lists your bots: cloud bots, which run on EdgeCoder's servers with no machine of

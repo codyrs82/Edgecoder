@@ -12,10 +12,11 @@
  *   plan                  read-only tools only; everything else is refused until the user approves the plan
  *
  * In every mode a project's "always allow" rules (`npm test:*`) let a matching command run, but a
- * rule never covers a refused command or a class that must always ask (network, push, deletes,
- * paths outside the project): see rememberable().
+ * rule never covers a refused command or a class that must always ask (network other than a plain
+ * `git fetch` / `git pull`, push, deletes, paths outside the project): see rememberable().
  */
 
+import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import { scrubText } from "../../common/redaction.js";
 import { isReadOnlyCommand, splitCommand, type PermissionMode } from "./permissions.js";
@@ -35,6 +36,7 @@ export type Category =
   | "docker"
   | "script" // a package.json script that isn't a test/lint/build one
   | "git" // other local git commands (checkout, merge, ...)
+  | "git-sync" // a plain git fetch / git pull from a named remote (asks, but may be always-allowed)
   | "unlisted" // a program Auto doesn't know
   | "network"
   | "push"
@@ -54,7 +56,7 @@ export interface CommandClass {
 }
 
 /** Classes an "always allow" rule may cover. */
-const REMEMBERABLE = new Set<Category>(["read", "dev", "git-local", "build-clean", "install", "docker", "script", "git", "unlisted"]);
+const REMEMBERABLE = new Set<Category>(["read", "dev", "git-local", "build-clean", "install", "docker", "script", "git", "git-sync", "unlisted"]);
 
 export function rememberable(c: CommandClass): boolean {
   return c.action !== "refuse" && REMEMBERABLE.has(c.category);
@@ -192,7 +194,33 @@ const INTERPRETERS = new RegExp(`^(node|python\\d*(\\.\\d+)?|deno|bun|ruby|perl|
 /** A download piped into a shell or an interpreter (`curl URL`, a pipe, then `sh`, `bash`, `python`, ...). */
 const DOWNLOAD_PIPED_TO = new RegExp(`\\b(curl|wget|fetch)\\b[^|]*\\|\\s*(sudo\\s+)?(env\\s+)?(${[...SHELL_NAMES, "python\\d*", "node", "ruby", "perl"].join("|")})\\b`);
 const INLINE_FLAGS = new Set(["-c", "-e", "--eval", "-p", "--print", "-r", "--require", "--import", "--loader"]);
-const GIT_READ = new Set(["status", "diff", "log", "show", "rev-parse", "ls-files", "blame", "describe", "shortlog", "grep"]);
+const GIT_READ = new Set(["status", "diff", "log", "show", "rev-parse", "rev-list", "merge-base", "show-ref", "for-each-ref", "ls-tree", "name-rev", "ls-files", "blame", "describe", "shortlog", "grep"]);
+/**
+ * Options a plain `git fetch` / `git pull` may carry and still be always-allowed. Anything else
+ * (`--upload-pack`, `--recurse-submodules`, `--set-upstream`, refspecs, URLs, paths) stays "network".
+ */
+const GIT_SYNC_FLAG = /^(-q|--quiet|-v|--verbose|--progress|--no-progress|-p|--prune|--prune-tags|-t|--tags|--no-tags|--all|--dry-run|--unshallow|--depth=\d{1,6}|--rebase|--rebase=(true|false|merges)|--no-rebase|--ff|--no-ff|--ff-only|--autostash|--no-autostash|--no-edit|--stat|--no-stat|-n)$/;
+const GIT_REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+const GIT_BRANCH_NAME = /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,199}$/;
+
+/** True for `git fetch|pull [allowed options] [remote [branch...]]` naming a remote, not a URL or a path. */
+function plainGitSync(args: string[], sub: string, root: string): boolean {
+  if (args[0] !== sub) return false; // options before the subcommand (-C, --git-dir, ...) change where git looks
+  const rest = args.slice(1);
+  if (!rest.filter((a) => a.startsWith("-")).every((a) => GIT_SYNC_FLAG.test(a))) return false;
+  const [remote, ...refs] = rest.filter((a) => !a.startsWith("-"));
+  if (remote !== undefined) {
+    if (!GIT_REMOTE_NAME.test(remote) || remote.includes("..")) return false;
+    // A folder of that name would be read as a path to another repository.
+    try {
+      if (existsSync(resolve(root, remote))) return false;
+    } catch {
+      return false;
+    }
+  }
+  if (sub === "fetch" && refs.length) return false; // refspecs can overwrite local refs
+  return refs.every((r) => GIT_BRANCH_NAME.test(r) && !r.includes("..") && !r.includes("//"));
+}
 
 /** `rm` targets that wipe a disk, a home folder or the whole project. */
 const WIPE_TARGET = /^(\/|\/\*|~|~\/|~\/\*|\$HOME\/?|\$\{HOME\}\/?|\.|\.\/|\.\/\*|\*|\.\.|\.\.\/|\.\.\/\*)$/;
@@ -358,6 +386,7 @@ function classifySegment(argvIn: string[], ctx: CommandContext): CommandClass {
   if (name === "git") {
     if (args.includes("-c") || args.some((a) => a.startsWith("--config") || a.startsWith("--exec-path") || a.startsWith("--git-dir") || a.startsWith("--work-tree"))) return ask("git", "changes git configuration");
     if (sub === "push") return ask("push", "git push publishes commits");
+    if ((sub === "fetch" || sub === "pull") && plainGitSync(args, sub, ctx.root)) return ask("git-sync", `git ${sub} reaches the network`);
     if (["fetch", "pull", "clone", "submodule", "ls-remote"].includes(sub)) return ask("network", `git ${sub} reaches the network`);
     if (GIT_READ.has(sub)) return run("read", `git ${sub} only reads`);
     if (sub === "add") return run("git-local", "git add stages changes");
@@ -538,6 +567,20 @@ export function suggestRule(command: unknown, ctx: CommandContext): string | nul
   return parseRule(rule) ? rule : null;
 }
 
+/** The command a git tool runs, for matching "always allow" rules (`git pull:*`). */
+const GIT_TOOL_COMMAND: Partial<Record<ToolName, string>> = { git_pull: "git pull", git_fetch: "git fetch" };
+
+/**
+ * The rule "Always allow" keeps for a tool call, or null when none may be kept: a shell command's
+ * suggestRule, or `git pull:*` / `git fetch:*` for the git tools (they take only a configured
+ * remote's name and a branch, checked by the executor).
+ */
+export function suggestToolRule(tool: ToolName, args: Record<string, unknown>, ctx: CommandContext): string | null {
+  if (tool === "run_shell") return suggestRule(args.command, ctx);
+  const cmd = GIT_TOOL_COMMAND[tool];
+  return cmd ? `${cmd}:*` : null;
+}
+
 // ---------------------------------------------------------------------------
 // Tool calls
 // ---------------------------------------------------------------------------
@@ -626,5 +669,10 @@ export function decideToolCall(tool: ToolName, args: Record<string, unknown>, ct
     return { action: "ask", reason: "commits ask" };
   }
   if (tool === "git_branch" && ctx.mode === "auto") return { action: "run", reason: "a local branch" };
+  const gitCmd = GIT_TOOL_COMMAND[tool];
+  if (gitCmd) {
+    if ((ctx.rules ?? []).some((r) => ruleMatches(r, gitCmd))) return { action: "run", reason: "an always-allow rule for this project" };
+    return { action: "ask", reason: `${tool.replace(/_/g, " ")} asks`, rule: `${gitCmd}:*` };
+  }
   return { action: "ask", reason: `${tool.replace(/_/g, " ")} asks` };
 }

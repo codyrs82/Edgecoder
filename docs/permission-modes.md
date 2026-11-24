@@ -15,9 +15,13 @@ default from **Settings → General → Permissions** (Accept edits unless you c
 
 In every mode:
 
-- Reading never asks: `read_file`, `list_directory`, the searches, `git status/diff/log`, and
-  read-only shell commands (`ls`, `cat`, `grep`, `rg`, `find` without `-exec`, `git status`, …, with
-  pipes between them and no redirection or path outside the project).
+- Reading never asks: `read_file`, `list_directory`, the searches, `git status/diff/log`, `git_fetch`,
+  and read-only shell commands (`ls`, `cat`, `grep`, `rg`, `find` without `-exec`, `git status`,
+  `git log`, `git rev-parse`, `git rev-list`, `git merge-base`, `git branch --show-current`, …).
+  Read-only commands chained with `&&`, `||`, `;` or `|` also run without asking, as long as every
+  part is read-only and there is no redirection (`>`), no `$(…)` or backticks, no background `&` and
+  no path outside the project. One part that isn't read-only and the chain is judged like any other
+  command (below).
 - `git push`, `open_pull_request` and `github_create_pr` always ask.
 - Edits to protected paths (`.git`, hooks, `.vscode`, `node_modules`, `.gitmodules`, build scripts
   tooling runs) and to files outside the project always ask.
@@ -40,7 +44,7 @@ The decision is made in one place, `src/apps/ide/permission-policy.ts` (`decideT
 | Runs without asking | Still asks | Refused |
 | --- | --- | --- |
 | Reads (above) | Installs: `npm install/i/ci/add`, `pnpm add`, `yarn add`, `pip install`, `brew …`, `apt …`, `cargo install`, `npx <anything but a known dev tool>` | `sudo`, `su`, `doas` |
-| Edits inside the project (not protected paths or secrets) | Network: `curl`, `wget`, `ssh`, `scp`, `rsync`, `gh`, `git fetch/pull/clone` | `rm -rf /`, `~`, `$HOME`, `.`, `*`, `..`, `--no-preserve-root` |
+| Edits inside the project (not protected paths or secrets) | Network: `curl`, `wget`, `ssh`, `scp`, `rsync`, `gh`, `git fetch/pull/clone` (`git fetch` / `git pull` and the `git_pull` tool can be always-allowed, below) | `rm -rf /`, `~`, `$HOME`, `.`, `*`, `..`, `--no-preserve-root` |
 | Tests, lint, typecheck, build, format: `npm test …`, `npm run test/lint/build/typecheck/check/format…`, `yarn/pnpm/bun` the same, `vitest`, `jest`, `pytest`, `python -m pytest`, `tsc`, `eslint`, `prettier`, `svelte-check`, `ruff`, `mypy`, `cargo test/build/check/clippy/fmt`, `go test/build/vet`, `make` / `make test/build/lint/check`, `npx vitest/tsc/eslint/…` | `git push` (every mode) | Download-and-run: `curl` or `wget` output piped into a shell (`sh`, `bash`, …) or into `python`, `node`, `ruby`, `perl` |
 | `git status/diff/log/show`, `git add`, `git commit` on the session's work branch (not `main`/`master`), the `git_commit` tool likewise | Deletes: `rm` of project files (only build output such as `dist`, `build`, `coverage`, `node_modules`, `.next`, `target` runs), `git clean`, `git reset --hard`, history rewrites | Writing secrets: a redirect or copy to `.env*` or another secrets file, a command or file containing an API key or token |
 | Deleting build output inside the project (`rm -rf dist`) | Anything touching a path outside the project, or a protected path | `mkfs`, `dd of=/dev/…`, a fork bomb |
@@ -118,6 +122,17 @@ An approval card for a command offers **Allow**, **Always allow `npm test …` i
 - Never offered or honoured for refused commands, nor for classes that must always ask: network,
   `git push`, deletes, paths outside the project, protected paths, inline code, unreadable syntax.
   Installs, Docker, other scripts and unknown programs can be allow-listed.
+- `git pull` and `git fetch` are the one network exception: their card offers **Always allow
+  `git pull …`** (rule `git pull:*`, or `git fetch:*`), for the shell command and for the `git_pull`
+  tool alike (the `git_fetch` tool already runs without asking). The rule covers only a plain pull
+  or fetch from a named remote (`git pull`, `git pull origin main`, `git pull --rebase`,
+  `git fetch --prune`); a URL or path instead of a remote, a refspec, options such as
+  `--upload-pack` or `--recurse-submodules`, and `git -C …` still ask each time. `git clone`,
+  `git ls-remote`, `git submodule`, `curl`, `wget` and other network commands are never
+  allow-listed, and `git push`, pull requests, commits on the default branch, deletes and
+  destructive commands keep asking whatever rules exist.
+- A chained command (`git status && npm test`) is never offered a rule; when every part is
+  read-only it runs without asking anyway (above).
 - Kept per project folder in `~/.edgecoder/permissions.json` (0600), never in the project itself, so
   a cloned repository can't allow commands on its own. **Settings → General → Permissions →
   Always-allowed commands** lists them per project with Remove. API: `GET /v1/ide/permissions`,

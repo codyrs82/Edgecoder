@@ -5,7 +5,7 @@ import type { FastifyInstance } from "fastify";
 import { portalAuthedPageHtml } from "./layout.js";
 import { icon } from "./design-system.js";
 import { CSP_NONCE } from "../csp-nonce.js";
-import { CLIENT_MARKDOWN_CAP_JS } from "../../common/markdown-cap.js";
+import { CLIENT_SAFE_MARKDOWN_JS } from "./safe-markdown.js";
 import { CLOUD_FIELDS, CLOUD_BOTS_PAGE_JS } from "./bots-cloud.js";
 import { BOT_FRONTIER_PAGE_JS } from "./bots-frontier.js";
 import { QUOTE_SELECTION_BROWSER_LIB, QUOTE_SELECTION_CSS, quoteSelectionScript } from "./quote-selection.js";
@@ -321,7 +321,7 @@ export function registerBotsPage(app: FastifyInstance): void {
     </section>
     `;
     const script = `
-    ${CLIENT_MARKDOWN_CAP_JS}
+    ${CLIENT_SAFE_MARKDOWN_JS}
     var BOT_ICONS = ${JSON.stringify(icons)};
     ${CLOUD_BOTS_PAGE_JS}
     ${BOT_FRONTIER_PAGE_JS}
@@ -349,15 +349,6 @@ const BOTS_PAGE_JS = String.raw`
     var isCloud = agentId === "cloud";
     var state = { bot: null, machine: null, older: [], more: null, tab: "chat", dtab: "details", runs: null, memory: null, busy: false, lastSig: "", loaded: false };
 
-    /* Chat markdown: escaped first, then code blocks, inline code, bold, italics; capped like the desktop (issue 333). */
-    function renderMarkdown(text) {
-      var html = escapeHtml(capMarkdownSource(text));
-      html = html.replace(/&#96;&#96;&#96;[^\n]*\n?([\s\S]*?)&#96;&#96;&#96;/g, function(_m, code) { return "<pre><code>" + code.replace(/\n$/, "") + "</code></pre>"; });
-      html = html.replace(/&#96;([^&\n]|&(?!#96;))+?&#96;/g, function(m) { return "<code>" + m.slice(5, -5) + "</code>"; });
-      html = html.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-      html = html.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-      return html.split(/(<pre>[\s\S]*?<\/pre>)/).map(function(part) { return part.indexOf("<pre>") === 0 ? part : part.replace(/^\n+|\n+$/g, "").replace(/\n/g, "<br>"); }).join("");
-    }
     function when(ms) { return new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); }
     function setText(id, text) { var el = document.getElementById(id); if (el) el.textContent = text; }
 

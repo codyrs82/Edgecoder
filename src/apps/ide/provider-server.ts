@@ -55,7 +55,7 @@ import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
 import { NewProjectError, PROJECT_TEMPLATES, createNewProject } from "./new-project.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 import { defaultPermissionsFile, PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
-import { decideToolCall, suggestRule, type Decision } from "./permission-policy.js";
+import { decideToolCall, suggestToolRule, type Decision } from "./permission-policy.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
@@ -230,7 +230,21 @@ const webCall: WebToolCall | null = networkDeps
  */
 let accountCache: { at: number; id: string | null; state: FrontierAccountState } | null = null;
 let lastAccount: string | undefined;
+/** The account last confirmed signed in, and when (ms); cleared by a definitive "signed out". */
+let confirmed: { id: string; at: number } | null = null;
+/**
+ * How long an "unknown" answer (coordinator slow, agent reconnecting, the machine busy compiling)
+ * keeps the last confirmed account. Only a definitive "signed out" ends it sooner, so a blip
+ * mid-turn no longer drops a frontier lead with "Sign in to EdgeCoder".
+ */
+const ACCOUNT_UNKNOWN_GRACE_MS = 10 * 60_000;
 async function machineAccount(): Promise<string | null> {
+  const id = await checkMachineAccount();
+  if (id) return id;
+  if (accountCache?.state === "unknown" && confirmed && Date.now() - confirmed.at < ACCOUNT_UNKNOWN_GRACE_MS) return confirmed.id;
+  return null;
+}
+async function checkMachineAccount(): Promise<string | null> {
   // A definitive answer is kept a minute (signed in) or 10 s (signed out); an unknown one (the
   // agent isn't connected yet, the coordinator is slow) is retried after 3 s.
   if (accountCache && Date.now() - accountCache.at < (accountCache.state === "signed_in" ? 60_000 : accountCache.state === "signed_out" ? 10_000 : 3_000)) return accountCache.id;
@@ -254,7 +268,12 @@ async function machineAccount(): Promise<string | null> {
     state = "unknown";
   }
   accountCache = { at: Date.now(), id, state };
-  if (id) lastAccount = id;
+  if (id) {
+    lastAccount = id;
+    confirmed = { id, at: Date.now() };
+  } else if (state === "signed_out") {
+    confirmed = null;
+  }
   return id;
 }
 const machineAccountState = (): FrontierAccountState => accountCache?.state ?? "unknown";
@@ -1264,8 +1283,8 @@ app.post("/v1/ide/tool-approval", async (req, reply) => {
     return reply.status(404).send({ error: "No pending approval with that id" });
   }
   let rule: string | null = null;
-  if (body.approved && body.always && entry.tool === "run_shell" && entry.projectRoot) {
-    rule = suggestRule(entry.args.command, { root: entry.projectRoot });
+  if (body.approved && body.always && entry.projectRoot) {
+    rule = suggestToolRule(entry.tool, entry.args, { root: entry.projectRoot });
     if (rule) permissionStore.addRule(entry.projectRoot, rule);
   }
   entry.resolve(body.approved);
