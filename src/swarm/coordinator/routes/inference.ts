@@ -214,10 +214,7 @@ export async function cancelUnclaimedInference(taskId: string, subtaskId: string
  * is stretched to the end of the grace plus the usual bound, and refunds it in full if no agent comes.
  */
 const STARTED_AT_MS = Date.now();
-export const STARTUP_GRACE_MS = (() => {
-  const n = Number(process.env.COORDINATOR_STARTUP_GRACE_MS);
-  return Number.isFinite(n) && n >= 0 ? Math.min(n, 10 * 60_000) : 90_000;
-})();
+export const STARTUP_GRACE_MS = CC.COORDINATOR_STARTUP_GRACE_MS;
 export function inStartupGrace(nowMs = Date.now(), startedAtMs = STARTED_AT_MS, graceMs = STARTUP_GRACE_MS): boolean {
   return nowMs - startedAtMs < graceMs;
 }

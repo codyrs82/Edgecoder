@@ -282,6 +282,8 @@ export const bestFitEnv = {
   BEST_FIT_BATCH_LATENCY_TARGET_MS: envNumber(undefined, { min: 100 }),
   BEST_FIT_PRICE_REF_CSATS: envNumber(undefined, { min: 0.001 }),
   BEST_FIT_PREFER_MS: envNumber(undefined, { min: 0, max: 10_000 }),
+  /** #523: an Auto call nobody picked up after this long is re-placed (0 = off); read by bestFitConfigFromEnv. */
+  BEST_FIT_REPLACE_MS: envNumber(undefined, { min: 0, max: 120_000 }),
   BEST_FIT_SESSION_TTL_MS: amount(),
   BEST_FIT_OVERSIZE_PENALTY: fraction(),
   BEST_FIT_PEERS: envFlag({ off: ["0", "false"] }),
