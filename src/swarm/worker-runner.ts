@@ -413,12 +413,13 @@ if (CLOUD_MODE && !INFERENCE_ONLY) {
 }
 /** Ollama keep_alive for network calls: a dedicated (inference-only) host keeps its model loaded. */
 let MODEL_KEEP_ALIVE = modelSettings.keepAlive;
+/** The configured network model has been loaded once (a re-sized window then re-loads it). */
+let networkModelWarmed = false;
 /**
  * Load the network model before taking work, so the first call does not pay a cold load (about
  * 4-5 s on a CPU, and a headers timeout under parallel calls). Bounded: a missing model or a
  * stopped Ollama only logs, and the agent goes on (the call then fails and is retried elsewhere).
  */
-let networkModelWarmed = false;
 async function warmNetworkModel(model: string, why: string): Promise<void> {
   // vLLM / MLX load their model at start: check that it is up and serving instead.
   if (OPENAI_ENGINE) return refreshEngine(why);
