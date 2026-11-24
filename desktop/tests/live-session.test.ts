@@ -99,6 +99,26 @@ describe("live session view", () => {
   });
 });
 
+describe("Allow for this session", () => {
+  it("keeps the session's allowances from the snapshot and the allowances event", () => {
+    let v = viewFromSnapshot(snap());
+    expect(v.allowances).toEqual([]);
+    v = viewFromSnapshot(snap({ allowances: ["npm test commands"] }));
+    expect(v.allowances).toEqual(["npm test commands"]);
+    v = applySessionEvent(v, { seq: 11, type: "allowances", allowances: ["npm test commands", "edits inside the project"], by: "terminal" });
+    expect(v.allowances).toEqual(["npm test commands", "edits inside the project"]);
+    expect(applySessionEvent(v, { seq: 12, type: "allowances", by: "desktop" }).allowances).toEqual(v.allowances);
+  });
+
+  it("a pending ask in the snapshot offers what its pending item says", () => {
+    const v = viewFromSnapshot(snap({
+      running: { turnId: "t2", text: "", events: [{ type: "turn", id: "t2" }, { type: "tool_call", id: "c9", tool: "run_shell", args: { command: "npm test" }, requires_approval: true }] },
+      pending: [{ id: "c9", tool: "run_shell", args: { command: "npm test" }, allowSession: "npm test commands" }],
+    }));
+    expect(v.streaming?.toolEvents[0]).toMatchObject({ approval_status: "pending", allow_session: "npm test commands" });
+  });
+});
+
 describe("the phone as a client (Code from your phone)", () => {
   it("is shown as Phone in the header and \"your phone\" in notes", () => {
     const PHONE = { clientId: "remote-phone", kind: "remote" as const, label: "iPhone" };

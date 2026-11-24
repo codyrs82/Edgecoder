@@ -1405,8 +1405,9 @@ export async function ideGetProject(): Promise<string | null> {
  * `forRun` ("Allow for the rest of this run") answers a web-page guard ask for the rest of the turn.
  * A cost check (cost-check.ts) answers with `choice`: continue, switch (to its suggested model) or stop.
  */
-export async function ideSendToolApproval(id: string, approved: boolean, always = false, choice?: "continue" | "switch" | "stop", forRun = false): Promise<void> {
-  await withIdeRetry((h) => post(ideBase(), "/v1/ide/tool-approval", { id, approved, ...(always ? { always: true } : {}), ...(forRun ? { forRun: true } : {}), ...(choice ? { choice } : {}) }, h));
+/** `session`: "Allow for this session" (approves it and later calls of its kind in this chat). */
+export async function ideSendToolApproval(id: string, approved: boolean, always = false, choice?: "continue" | "switch" | "stop", forRun = false, session = false): Promise<void> {
+  await withIdeRetry((h) => post(ideBase(), "/v1/ide/tool-approval", { id, approved, ...(always ? { always: true } : {}), ...(forRun ? { forRun: true } : {}), ...(approved && session ? { session: true } : {}), ...(choice ? { choice } : {}) }, h));
 }
 
 /** Every project's "always allow" answers (Settings → General). */
@@ -2119,8 +2120,9 @@ export const botHistory = (id: string) => fsCall<{ runs: BotRun[] }>("GET", botP
 export const setupBotFolder = (id: string, body: { choice: "default"; allowAuto?: boolean } | { choice: "path"; path: string; allowAuto?: boolean }) =>
   fsCall<{ bot: Bot }>("POST", botPath(id, "/folder"), body).then((r) => r.bot);
 export const syncBotRepository = (id: string) => fsCall<{ bot: Bot }>("POST", botPath(id, "/repository/sync"), {}).then((r) => r.bot);
-export const approveBotCall = (id: string, callId: string, approved: boolean, always = false, forRun = false) =>
-  fsCall<{ ok: boolean; bot: Bot }>("POST", botPath(id, "/approve"), { callId, approved, ...(always ? { always: true } : {}), ...(forRun ? { forRun: true } : {}) });
+/** `session`: "Allow for this run" (approves it and later calls of its kind until the run ends). */
+export const approveBotCall = (id: string, callId: string, approved: boolean, always = false, forRun = false, session = false) =>
+  fsCall<{ ok: boolean; bot: Bot }>("POST", botPath(id, "/approve"), { callId, approved, ...(always ? { always: true } : {}), ...(forRun ? { forRun: true } : {}), ...(approved && session ? { session: true } : {}) });
 /** Your answer to a bot's "Use Claude for this run?": this run, every run today, or no. */
 export const answerBotFrontier = (id: string, callId: string, choice: "run" | "day" | "decline") => fsCall<{ ok: boolean; bot: Bot }>("POST", botPath(id, "/frontier"), { callId, choice });
 /** The server's message for a failed bot call (its `error` field). */
@@ -2189,8 +2191,10 @@ export interface SessionSnapshotView {
   controller: SessionClientRef | null;
   clients: SessionClientRef[];
   running: { turnId: string; text: string; events: IdeStreamEvent[] } | null;
-  pending: Array<{ id: string; tool: string; args: Record<string, unknown> }>;
+  pending: Array<{ id: string; tool: string; args: Record<string, unknown>; allowSession?: string }>;
   queue?: SessionQueued[];
+  /** What "Allow for this session" allowed in this session so far ("npm test commands"). */
+  allowances?: string[];
 }
 export interface SessionEvent {
   seq: number;
@@ -2213,8 +2217,8 @@ export const getSession = (id: string) => fsCall<SessionSnapshotView>("GET", `/v
 export const sessionSend = (id: string, text: string) => sessionPost<{ turnId: string | null; queued?: SessionQueued }>(id, "messages", { text });
 export const sessionUnqueue = (id: string, queuedId: string) => sessionPost<{ removed: boolean }>(id, "unqueue", { queuedId });
 /** `applied` false: the terminal answered first. */
-export const sessionApprove = (id: string, callId: string, approved: boolean, always = false, forRun = false) =>
-  sessionPost<{ ok: boolean; applied?: boolean }>(id, "approve", { callId, approved, always, ...(forRun ? { forRun: true } : {}) });
+export const sessionApprove = (id: string, callId: string, approved: boolean, always = false, forRun = false, session = false) =>
+  sessionPost<{ ok: boolean; applied?: boolean }>(id, "approve", { callId, approved, always, ...(forRun ? { forRun: true } : {}), ...(approved && session ? { session: true } : {}) });
 export const sessionSettings = (id: string, patch: { model?: string; mode?: EngineMode }) => sessionPost(id, "settings", patch);
 /** Approve the session's plan (Plan mode) and carry it out in `mode`. */
 export const sessionApprovePlan = (id: string, mode: EngineMode = "auto-edits") => sessionPost<{ turnId: string | null }>(id, "plan", { mode });

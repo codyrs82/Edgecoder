@@ -225,13 +225,15 @@ struct CodeSessionSummary: Decodable, Identifiable, Equatable {
     let pendingApprovals: Int
     /// "phone" or "mac".
     let startedFrom: String
+    /// ask | auto-edits | plan | auto | full (newer portals; nil otherwise).
+    let mode: String?
 
     var id: String { sessionId }
     var updatedAt: Date { Date(timeIntervalSince1970: updatedAtMs / 1000) }
 
-    enum CodingKeys: String, CodingKey { case sessionId, projectId, title, status, updatedAtMs, pendingApprovals, startedFrom }
+    enum CodingKeys: String, CodingKey { case sessionId, projectId, title, status, updatedAtMs, pendingApprovals, startedFrom, mode }
 
-    init(sessionId: String, projectId: String, title: String, status: CodeSessionStatus = .idle, updatedAtMs: Double = 0, pendingApprovals: Int = 0, startedFrom: String = "phone") {
+    init(sessionId: String, projectId: String, title: String, status: CodeSessionStatus = .idle, updatedAtMs: Double = 0, pendingApprovals: Int = 0, startedFrom: String = "phone", mode: String? = nil) {
         self.sessionId = sessionId
         self.projectId = projectId
         self.title = title
@@ -239,6 +241,7 @@ struct CodeSessionSummary: Decodable, Identifiable, Equatable {
         self.updatedAtMs = updatedAtMs
         self.pendingApprovals = pendingApprovals
         self.startedFrom = startedFrom
+        self.mode = mode
     }
 
     init(from decoder: Decoder) throws {
@@ -251,7 +254,12 @@ struct CodeSessionSummary: Decodable, Identifiable, Equatable {
         updatedAtMs = c.lenient(.updatedAtMs, 0)
         pendingApprovals = c.lenient(.pendingApprovals, 0)
         startedFrom = c.lenient(.startedFrom, "mac")
+        let m: String? = c.lenient(.mode)
+        mode = (m?.isEmpty ?? true) ? nil : m
     }
+
+    /// The mode's short label for the session row ("Accept edits"), when the portal sent one.
+    var modeLabel: String? { mode.map { CodeMode(rawValue: $0)?.label ?? $0.capitalized } }
 
     /// "Running · 1 approval waiting".
     var statusLine: String {
@@ -263,19 +271,36 @@ struct CodeSessionSummary: Decodable, Identifiable, Equatable {
 
 // MARK: - Session modes
 
-/// The permission modes the phone may pick. "auto" is set on the Mac only (code-remote.ts refuses it).
+/// A session's permission modes. The phone may pick Manual, Accept edits and Plan on any Mac; Auto
+/// and Full access only where the session says `remoteModes` (Full access after a confirm). A new
+/// session starts in one of `basic` (the Mac refuses "create" in Full access).
 enum CodeMode: String, CaseIterable, Identifiable {
     case ask
     case autoEdits = "auto-edits"
     case plan
+    case auto
+    case full
 
     var id: String { rawValue }
 
+    /// The modes every Mac takes from the phone (and the new-session picker).
+    static let basic: [CodeMode] = [.ask, .autoEdits, .plan]
+
+    /// The modes the session's mode picker offers.
+    static func choices(remoteModes: Bool) -> [CodeMode] {
+        remoteModes ? allCases : basic
+    }
+
+    /// Auto or Full access: only a Mac that says `remoteModes` takes these from the phone.
+    var needsRemoteModes: Bool { self == .auto || self == .full }
+
     var label: String {
         switch self {
-        case .ask: return "Ask"
+        case .ask: return "Manual"
         case .autoEdits: return "Accept edits"
         case .plan: return "Plan"
+        case .auto: return "Auto"
+        case .full: return "Full access"
         }
     }
 
@@ -284,13 +309,20 @@ enum CodeMode: String, CaseIterable, Identifiable {
         case .ask: return "Asks before every edit and command."
         case .autoEdits: return "Edits files without asking; still asks before commands."
         case .plan: return "Writes a plan first; nothing changes until you approve it."
+        case .auto: return "Runs safe commands and edits on its own; risky ones still ask."
+        case .full: return "Never asks, except hard refusals: runs commands, edits, installs and pushes on its own."
         }
     }
 
-    /// The label for any mode the Mac reports, including "auto".
-    static func label(for raw: String) -> String {
-        if raw == "auto" { return "Auto (set on the Mac)" }
-        return CodeMode(rawValue: raw)?.label ?? raw.capitalized
+    static let fullAccessConfirmTitle = "Turn on Full access?"
+    static let fullAccessConfirmMessage = "Full access runs every command without asking, except hard refusals (sudo, wiping a disk or the project, piping a download into a shell, writing secrets). It applies to this session only and is noted in the session with who turned it on."
+
+    /// The label for any mode the Mac reports. On a Mac without `remoteModes`, Auto and Full access
+    /// can't be picked here, so they read "(set on the Mac)".
+    static func label(for raw: String, remoteModes: Bool = false) -> String {
+        guard let m = CodeMode(rawValue: raw) else { return raw.capitalized }
+        if m.needsRemoteModes && !remoteModes { return "\(m.label) (set on the Mac)" }
+        return m.label
     }
 }
 
@@ -355,10 +387,12 @@ struct CodeApproval: Decodable, Identifiable, Equatable {
     /// False: shown, but it must be approved on the Mac.
     let approvable: Bool
     let message: String?
+    /// "Allow for this session" may answer it: what later calls it lets run without asking.
+    let allowSession: String?
 
     var id: String { callId }
 
-    enum CodingKeys: String, CodingKey { case callId, tool, detail, command, approvable, message }
+    enum CodingKeys: String, CodingKey { case callId, tool, detail, command, approvable, message, allowSession }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         callId = try c.decode(String.self, forKey: .callId)
@@ -367,6 +401,13 @@ struct CodeApproval: Decodable, Identifiable, Equatable {
         command = c.lenient(.command)
         approvable = c.lenient(.approvable, false)
         message = c.lenient(.message)
+        let a: String? = c.lenient(.allowSession)
+        allowSession = (a?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) ? nil : a
+    }
+
+    /// The caption under "Allow for this session".
+    var allowSessionCaption: String? {
+        allowSession.map { "Also runs \($0) without asking until this session ends." }
     }
 
     /// The text the card shows in full: the command for run_shell, the detail otherwise.
@@ -400,7 +441,7 @@ struct CodeSessionInfo: Decodable, Equatable {
     let projectName: String
     let branch: String?
     let model: String
-    /// ask | auto-edits | plan | auto
+    /// ask | auto-edits | plan | auto | full
     let mode: String
     let origin: String?
     let running: Bool
@@ -408,8 +449,12 @@ struct CodeSessionInfo: Decodable, Equatable {
     let queued: Int
     let cSats: Double
     let updatedAt: Double
+    /// This Mac takes Auto / Full access and "Allow for this session" from the phone.
+    let remoteModes: Bool
+    /// What this session runs without asking ("npm test commands").
+    let allowances: [String]
 
-    enum CodingKeys: String, CodingKey { case id, title, projectId, projectName, branch, model, mode, origin, running, pending, queued, cSats, updatedAt }
+    enum CodingKeys: String, CodingKey { case id, title, projectId, projectName, branch, model, mode, origin, running, pending, queued, cSats, updatedAt, remoteModes, allowances }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = c.lenient(.id, "")
@@ -426,6 +471,16 @@ struct CodeSessionInfo: Decodable, Equatable {
         queued = c.lenient(.queued, 0)
         cSats = c.lenient(.cSats, 0)
         updatedAt = c.lenient(.updatedAt, 0)
+        remoteModes = c.lenient(.remoteModes, false)
+        let list: [String] = c.lenientList(.allowances)
+        allowances = list.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    var modeLabel: String { CodeMode.label(for: mode, remoteModes: remoteModes) }
+
+    /// "Allowed this session: npm test commands, edits inside the project", or nil when none.
+    var allowancesLine: String? {
+        allowances.isEmpty ? nil : "Allowed this session: " + allowances.joined(separator: ", ")
     }
 }
 
@@ -647,6 +702,8 @@ enum CodeError: Error, Equatable, LocalizedError {
         case "rate_limited": return .rateLimited
         case "unauthorized", "not_signed_in": return .signedOut
         case "unknown_command", "expired": return .expired
+        // Before the HTTP status: the portal answers update_mac with 409, which isn't "offline".
+        case "confirm_full", "not_owner", "update_mac": return .refused(code: code, message: message)
         default: break
         }
         switch status {
@@ -697,6 +754,9 @@ enum CodeError: Error, Equatable, LocalizedError {
             case "no_pending_approval": return "That approval was already answered or the turn ended."
             case "approve_on_mac": return "This command is too long to check on the phone. Approve it on the Mac."
             case "auto_on_mac": return "Auto mode is turned on from the Mac."
+            case "confirm_full": return "Full access needs a confirmation. Pick it again and confirm."
+            case "not_owner": return "Only the session's owner can do that."
+            case "update_mac": return "Update the EdgeCoder app on this Mac to change to Auto or Full access, or allow calls for the session, from here."
             case "checkpoint_gone": return "That turn's changes are gone (the desktop app restarted)."
             case "no_such_turn": return "That turn isn't in this session."
             case "provider_unreachable": return "The EdgeCoder desktop app on that computer isn't answering. Make sure it's open and try again."

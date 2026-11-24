@@ -29,7 +29,7 @@ from the iPhone app and from **Code** on edgecoder.io. See [iOS app: Code](/guid
 | Control | What it does |
 | --- | --- |
 | Model picker | Where the reply runs. Paid models show a rough cost, such as `~140 cSats per long reply` or `~$0.52 per long reply` on your own key. Picking a premium model for a project chat shows a one-time hint you can dismiss. |
-| Permission mode | **Manual**, **Accept edits**, **Auto**, **Plan** or **Full access**. Full access never asks; it needs a one-time confirm per project and is not offered for bots. See [permission modes](https://github.com/codyrs82/Edgecoder/blob/main/docs/permission-modes.md). |
+| Permission mode | **Manual**, **Accept edits**, **Auto**, **Plan** or **Full access**. Full access never asks; it needs a one-time confirm per project and is not offered for bots. An approval card also offers **Allow for this session** (later calls of the same kind, named on the card, run without asking until the session ends; kept in memory only) next to **Always allow** for the project. See [permission modes](https://github.com/codyrs82/Edgecoder/blob/main/docs/permission-modes.md). |
 | **Helpers** | Turns helper agents on or off for this chat, with how many run at once (default 4) and the chat's budget (default 100 cSats). On by default when the lead is a frontier model on your own key. Easy pieces try a model on this computer first. See [tentacles](https://github.com/codyrs82/Edgecoder/blob/main/docs/tentacles.md). |
 | Context meter | Shows the chat's size, for example `context ~42K tokens`. Click it, or type `/compact`, to summarize older messages now. |
 

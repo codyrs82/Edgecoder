@@ -128,15 +128,16 @@ describe("sync", () => {
 describe("continuing a desktop chat from the phone", () => {
   it("runs the turn on this Mac over the whole chat, under the phone's rules, and the app hears it", async () => {
     const { hub, sync, command, model } = await server([{ content: "", toolCalls: [{ name: "run_shell", arguments: { command: "npm test" } }] }, { content: "Tests pass.", toolCalls: [] }]);
-    const r = await sync({ chatId: chatId(), projectRoot: root, mode: "full", messages: [msg("user", "what open PRs do we have?"), msg("assistant", "Two.")] });
+    const r = await sync({ chatId: chatId(), projectRoot: root, mode: "ask", messages: [msg("user", "what open PRs do we have?"), msg("assistant", "Two.")] });
     const id = r.body.sessionId!;
     // The app follows the mirror.
     const seen: SessionEvent[] = [];
     hub.subscribe(id, { clientId: "desk", kind: "desktop" }, hub.snapshot(id).seq, (e) => seen.push(e));
-    // Full access is set from the Mac only.
-    expect((await command({ action: "settings", sessionId: id, mode: "full" })).body).toMatchObject({ status: "refused", error: "full_on_mac" });
+    // Full access from the phone needs the owner's explicit confirm.
+    expect((await command({ action: "settings", sessionId: id, mode: "full" })).body).toMatchObject({ status: "refused", error: "confirm_full" });
+    expect(hub.peek(id)!.mode).toBe("ask");
     expect((await command({ action: "message", sessionId: id, text: "run the tests" })).body.status).toBe("done");
-    // In a Full access chat a phone turn still asks before a command that isn't read-only.
+    // In Manual a phone turn asks before a command that isn't read-only.
     await until(() => hub.snapshot(id).pending.length === 1, 5000, "npm test to ask");
     const snap = (await command({ action: "snapshot", sessionId: id })).body.data as RemoteSessionSnapshot;
     expect(snap.pending[0]).toMatchObject({ tool: "run_shell", command: "npm test", approvable: true });

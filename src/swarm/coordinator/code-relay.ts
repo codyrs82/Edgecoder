@@ -13,12 +13,12 @@
  *     this coordinator's identity key and sent only down the agent's authenticated mesh WebSocket.
  *   - Results: the agent's signed report settles a command this coordinator sent to that agent; the
  *     portal reads it with the same account that asked (anyone else gets "unknown"). Kept a few minutes.
- *   - Audit: every command sent (account, agent, action, session, project, status, time), never its
- *     text. In memory only (the last AUDIT_PER_AGENT per agent): the only Postgres audit helper is
+ *   - Audit: every command sent (account, agent, action, session, project, status, time; a mode it
+ *     sets, "Allow for this session", and from the web or the iPhone), never its text. In memory only (the last AUDIT_PER_AGENT per agent): the only Postgres audit helper is
  *     model control's, whose rows show in the model-control view, and a new table needs a migration.
  */
 
-import { CODE_READ_ACTIONS, MAX_CODE_RESULT_BYTES, MAX_CODE_SNAPSHOT_BYTES, codeRequestTargets, createCodeControlFrame, type CodeControlRequest, type CodeControlResult, type CodeSnapshot } from "../../common/code-relay.js";
+import { CODE_READ_ACTIONS, MAX_CODE_RESULT_BYTES, MAX_CODE_SNAPSHOT_BYTES, codeRequestPermission, codeRequestTargets, createCodeControlFrame, type CodeControlRequest, type CodeControlResult, type CodeSnapshot } from "../../common/code-relay.js";
 import { agentControlConnected, sendAgentControlFrame } from "./model-control.js";
 
 /** Changes (message, approve, cancel, undo, settings…) an account may send per window. */
@@ -49,6 +49,10 @@ export interface CodeAuditEntry {
   requestedAtMs: number;
   updatedAtMs: number;
   error?: string;
+  /** A permission change (codeRequestPermission): the mode set, "Allow for this session", and from which app. */
+  mode?: string;
+  scope?: "session";
+  via?: string;
 }
 
 interface Entry {
@@ -161,7 +165,7 @@ export function sendCodeCommand(input: {
   if (!agentControlConnected(input.agentId)) return { ok: false, status: 409, error: "agent_not_connected" };
   const frame = createCodeControlFrame({ request: input.request, agentId: input.agentId, coordinatorId: input.coordinatorId, requestedBy: input.accountId, privateKeyPem: input.privateKeyPem, nowMs });
   const delivered = sendAgentControlFrame(input.agentId, JSON.stringify(frame));
-  audited({ commandId: frame.command.id, agentId: input.agentId, accountId: input.accountId, action: input.request.action, ...codeRequestTargets(input.request), status: delivered ? "sent" : "undelivered", requestedAtMs: nowMs, updatedAtMs: nowMs });
+  audited({ commandId: frame.command.id, agentId: input.agentId, accountId: input.accountId, action: input.request.action, ...codeRequestTargets(input.request), ...codeRequestPermission(input.request), status: delivered ? "sent" : "undelivered", requestedAtMs: nowMs, updatedAtMs: nowMs });
   if (!delivered) return { ok: false, status: 409, error: "agent_not_connected" };
   if (read) record(`read:${input.accountId}`, nowMs);
   else {

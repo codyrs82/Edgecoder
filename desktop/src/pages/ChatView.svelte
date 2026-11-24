@@ -289,8 +289,8 @@
     return portalId;
   }
 
-  function handleToolApproval(id: string, approved: boolean, always = false, forRun = false) {
-    ideSendToolApproval(id, approved, always, undefined, forRun);
+  function handleToolApproval(id: string, approved: boolean, always = false, forRun = false, session = false) {
+    ideSendToolApproval(id, approved, always, undefined, forRun, session);
     streamingToolEvents = markApproval(streamingToolEvents, id, approved);
   }
 
@@ -635,7 +635,7 @@
         {#if conversation.summary?.throughId === msg.id}<CompactionNote savedTokens={conversation.summary.savedTokens} />{/if}
       {/each}
       {#if isStreaming && (streamingContent || streamingToolEvents.length > 0 || streamingActivity)}
-        <ChatMessage role="assistant" content={streamingContent} streaming={true} {streamProgress} toolEvents={streamingToolEvents} activity={streamingActivity} {onOpenInEditor} onToolApproval={handleToolApproval} onToolAlways={(id) => handleToolApproval(id, true, true)} onToolForRun={(id) => handleToolApproval(id, true, false, true)} onCostChoice={handleCostChoice} costNotes={streamingCostNotes} />
+        <ChatMessage role="assistant" content={streamingContent} streaming={true} {streamProgress} toolEvents={streamingToolEvents} activity={streamingActivity} {onOpenInEditor} onToolApproval={handleToolApproval} onToolAlways={(id) => handleToolApproval(id, true, true)} onToolForRun={(id) => handleToolApproval(id, true, false, true)} onToolSession={(id) => handleToolApproval(id, true, false, false, true)} onCostChoice={handleCostChoice} costNotes={streamingCostNotes} />
       {/if}
       {#if pendingPlan}
         <PlanApproval onApprove={approvePlan} onRevise={() => onFocusComposer?.()} />

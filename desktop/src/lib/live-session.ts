@@ -52,6 +52,8 @@ export interface LiveView {
   notes: string[];
   /** Older messages were summarized to save tokens: the note shows after the last one it covers. */
   summary?: { throughId: string; savedTokens: number } | null;
+  /** What "Allow for this session" allowed so far ("npm test commands"), in the order granted. */
+  allowances: string[];
   /** The provider can't replay what was missed: fetch the snapshot again. */
   needsResync: boolean;
   deleted: boolean;
@@ -126,8 +128,17 @@ export function viewFromSnapshot(s: SessionSnapshotView): LiveView {
   let streaming: AgentTurn | null = null;
   if (s.running) {
     streaming = foldTurn(s.running.events);
-    const pending = new Set(s.pending.map((p) => p.id));
-    streaming = { ...streaming, toolEvents: streaming.toolEvents.map((e) => (e.type === "tool_call" && e.approval_status === "pending" && !pending.has(e.id ?? "") ? { ...e, approval_status: "approved" } : e)) };
+    const pending = new Map(s.pending.map((p) => [p.id, p]));
+    streaming = {
+      ...streaming,
+      toolEvents: streaming.toolEvents.map((e) => {
+        if (e.type !== "tool_call" || e.approval_status !== "pending") return e;
+        const p = pending.get(e.id ?? "");
+        if (!p) return { ...e, approval_status: "approved" };
+        // The pending item says what "Allow for this session" covers (an older event may lack it).
+        return p.allowSession && !e.allow_session && !e.web_guard ? { ...e, allow_session: p.allowSession } : e;
+      }),
+    };
   }
   return {
     id: s.session.id,
@@ -145,6 +156,7 @@ export function viewFromSnapshot(s: SessionSnapshotView): LiveView {
     queue: (s.queue ?? []).map(queuedOf),
     summary: summaryOf(s.session.transcript),
     notes: [],
+    allowances: Array.isArray(s.allowances) ? s.allowances.filter((a): a is string => typeof a === "string") : [],
     needsResync: false,
     deleted: false,
   };
@@ -177,6 +189,8 @@ export function applySessionEvent(v: LiveView, e: SessionEvent): LiveView {
       const notes = elsewhere ? note(v, `${e.approved ? "Approved" : "Rejected"} in ${fromWhom(e.by, e.label)}.`) : v.notes;
       return v.streaming ? { ...next, notes, streaming: { ...v.streaming, toolEvents: markApproval(v.streaming.toolEvents, String(e.id), Boolean(e.approved)) } } : { ...next, notes };
     }
+    case "allowances":
+      return Array.isArray(e.allowances) ? { ...next, allowances: (e.allowances as unknown[]).filter((a): a is string => typeof a === "string") } : next;
     case "turn_end": {
       const m = messageOf(e.entry as SessionEntry);
       const usd = (e.entry as SessionEntry | undefined)?.usage?.usd ?? 0;

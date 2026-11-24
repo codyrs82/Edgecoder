@@ -23,6 +23,14 @@
     runsEdited?: string;
     /** "Allow for the rest of this run" (only with webGuard): later calls like it go ahead until the run ends. */
     onForRun?: (id: string) => void;
+    /** "Allow for this session" (never with webGuard): what it lets run without asking ("npm test commands"). */
+    allowSession?: string;
+    /** Approve and allow later calls like it for the rest of the session (or run). */
+    onSession?: (id: string) => void;
+    /** "session": a chat or shared session; "run": a bot's run. */
+    sessionScope?: "session" | "run";
+    /** Ran without asking because of an earlier "Allow for this session": what was allowed. */
+    sessionAllowed?: string;
   }
   let {
     id,
@@ -40,7 +48,13 @@
     webGuard = false,
     runsEdited,
     onForRun,
+    allowSession,
+    onSession,
+    sessionScope = "session",
+    sessionAllowed,
   }: Props = $props();
+
+  let scopeWord = $derived(sessionScope === "run" ? "run" : "session");
 
   /** The rules "Always allow" keeps (one per part of a command line). */
   let rules = $derived(allowRules?.length ? allowRules : allowRule ? [allowRule] : []);
@@ -118,6 +132,11 @@
     onForRun?.(id);
   }
 
+  function handleSession(e: MouseEvent) {
+    e.stopPropagation();
+    onSession?.(id);
+  }
+
   function handleReject(e: MouseEvent) {
     e.stopPropagation();
     onReject?.(id);
@@ -147,6 +166,9 @@
       {#if status === "failed" && error}
         <span class="fail-reason" title={error}>{failureReason(error)}</span>
       {/if}
+      {#if sessionAllowed && !asking}
+        <span class="session-allowed" title="Allowed: {sessionAllowed}" data-testid="session-allowed">Allowed for this {scopeWord}</span>
+      {/if}
     </span>
     <span class="chevron" class:open={expanded} aria-hidden="true">&#9656;</span>
   </button>
@@ -171,6 +193,11 @@
         {#if webGuard && !runsEdited && onForRun}
           <button class="btn always" onclick={handleForRun} type="button" title="Calls your permission mode runs anyway stop asking until this run ends. Anything the mode asks about still asks."
             >Allow for the rest of this run</button
+          >
+        {/if}
+        {#if allowSession && onSession && !webGuard}
+          <button class="btn always" onclick={handleSession} type="button" data-testid="allow-session" title="Also runs {allowSession} without asking until this {scopeWord} ends. Never covers pushes, pull requests, secrets, files outside the project or refused commands."
+            >Allow for this {scopeWord}: <span class="session-label">{allowSession}</span></button
           >
         {/if}
         {#if rules.length && onAlways}
@@ -420,6 +447,17 @@
   }
   .btn.always code {
     font-size: 11px;
+  }
+  .btn.always .session-label {
+    color: var(--text-secondary);
+  }
+
+  /* "Allowed for this session": quiet, after the step's summary. */
+  .session-allowed {
+    flex-shrink: 0;
+    color: var(--text-muted);
+    font-size: 11px;
+    white-space: nowrap;
   }
 
   .body {

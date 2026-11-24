@@ -227,6 +227,104 @@ final class CodeModeTests: XCTestCase {
         XCTAssertEqual(PortalCodeBackend.error(status: 401, data: Data()), .signedOut)
     }
 
+    // MARK: - Modes and session allowances
+
+    func testModeLabels() {
+        XCTAssertEqual(CodeMode.allCases.map(\.label), ["Manual", "Accept edits", "Plan", "Auto", "Full access"])
+        XCTAssertEqual(CodeMode.allCases.map(\.rawValue), ["ask", "auto-edits", "plan", "auto", "full"], "raw values unchanged")
+        XCTAssertEqual(CodeMode.basic, [.ask, .autoEdits, .plan])
+        XCTAssertEqual(CodeMode.choices(remoteModes: false), [.ask, .autoEdits, .plan], "an older Mac: no Auto or Full access")
+        XCTAssertEqual(CodeMode.choices(remoteModes: true), CodeMode.allCases)
+        XCTAssertEqual(CodeMode.label(for: "ask"), "Manual")
+        XCTAssertEqual(CodeMode.label(for: "auto"), "Auto (set on the Mac)")
+        XCTAssertEqual(CodeMode.label(for: "full"), "Full access (set on the Mac)")
+        XCTAssertEqual(CodeMode.label(for: "auto", remoteModes: true), "Auto")
+        XCTAssertEqual(CodeMode.label(for: "full", remoteModes: true), "Full access")
+        XCTAssertEqual(CodeMode.label(for: "weird"), "Weird")
+    }
+
+    func testSnapshotFixtureCarriesRemoteModesAndAllowances() throws {
+        let s = try decode(CodeSessionSnapshot.self, CodeFixture.snapshotJSON)
+        XCTAssertTrue(s.session.remoteModes)
+        XCTAssertEqual(s.session.allowances, ["edits inside the project"])
+        XCTAssertEqual(s.session.allowancesLine, "Allowed this session: edits inside the project")
+        XCTAssertEqual(s.session.modeLabel, "Manual")
+        XCTAssertEqual(s.pending[0].allowSession, "npm test commands")
+        XCTAssertEqual(s.pending[0].allowSessionCaption, "Also runs npm test commands without asking until this session ends.")
+    }
+
+    func testOlderMacSnapshotHasNoRemoteModes() throws {
+        let json = #"{"session":{"id":"s","mode":"auto","allowances":"nope"},"pending":[{"callId":"c","tool":"run_shell","detail":"x","approvable":true,"allowSession":"  "}]}"#
+        let s = try decode(CodeSessionSnapshot.self, json)
+        XCTAssertFalse(s.session.remoteModes)
+        XCTAssertTrue(s.session.allowances.isEmpty, "a malformed list is ignored")
+        XCTAssertNil(s.session.allowancesLine)
+        XCTAssertEqual(s.session.modeLabel, "Auto (set on the Mac)")
+        XCTAssertNil(s.pending[0].allowSession, "a blank label offers no session button")
+        XCTAssertNil(s.pending[0].allowSessionCaption)
+    }
+
+    func testMachineListSessionModes() throws {
+        let mbp = try decode(CodeMachinesResponse.self, CodeFixture.machinesJSON).machines[0]
+        XCTAssertEqual(mbp.sessions.map(\.mode), ["ask", "auto", "auto-edits"])
+        XCTAssertEqual(mbp.sessions.map(\.modeLabel), ["Manual", "Auto", "Accept edits"])
+        let studio = try decode(CodeMachinesResponse.self, CodeFixture.machinesJSON).machines[1]
+        XCTAssertNil(studio.sessions[0].mode, "older portals send no mode")
+        XCTAssertNil(studio.sessions[0].modeLabel)
+    }
+
+    func testApproveAndSettingsArgs() async throws {
+        let fake = RecordingCodeBackend()
+        let api = CodeAPI(backend: fake)
+        try await api.approve(agentId: "a", sessionId: "s", callId: "c", approved: true)
+        try await api.approve(agentId: "a", sessionId: "s", callId: "c", approved: true, forSession: true)
+        try await api.approve(agentId: "a", sessionId: "s", callId: "c", approved: false, forSession: true)
+        try await api.setMode(agentId: "a", sessionId: "s", mode: .auto)
+        try await api.setMode(agentId: "a", sessionId: "s", mode: .full, confirmFull: true)
+        try await api.setMode(agentId: "a", sessionId: "s", mode: .full)
+        try await api.setMode(agentId: "a", sessionId: "s", mode: .plan, confirmFull: true)
+        XCTAssertEqual(fake.calls.map(\.action), ["approve", "approve", "approve", "settings", "settings", "settings", "settings"])
+        XCTAssertEqual(fake.calls[0].args, ["sessionId": .string("s"), "callId": .string("c"), "approved": .bool(true)], "plain Allow sends no scope")
+        XCTAssertEqual(fake.calls[1].args, ["sessionId": .string("s"), "callId": .string("c"), "approved": .bool(true), "scope": .string("session")])
+        XCTAssertNil(fake.calls[2].args["scope"], "a deny is never session-wide")
+        XCTAssertEqual(fake.calls[3].args, ["sessionId": .string("s"), "mode": .string("auto")], "Auto needs no confirm")
+        XCTAssertEqual(fake.calls[4].args, ["sessionId": .string("s"), "mode": .string("full"), "confirmFull": .bool(true)])
+        XCTAssertNil(fake.calls[5].args["confirmFull"], "Full access without the confirm sends none")
+        XCTAssertNil(fake.calls[6].args["confirmFull"], "only Full access carries confirmFull")
+    }
+
+    func testFullAccessConfirmCopy() {
+        XCTAssertEqual(CodeMode.fullAccessConfirmTitle, "Turn on Full access?")
+        XCTAssertTrue(CodeMode.fullAccessConfirmMessage.hasPrefix("Full access runs every command without asking, except hard refusals"))
+        XCTAssertTrue(CodeMode.fullAccessConfirmMessage.hasSuffix("noted in the session with who turned it on."))
+    }
+
+    func testRemoteModeErrorsReadAsSentences() {
+        XCTAssertEqual(CodeError.from(code: "confirm_full", message: nil).sentence, "Full access needs a confirmation. Pick it again and confirm.")
+        XCTAssertEqual(CodeError.from(code: "not_owner", message: nil).sentence, "Only the session's owner can do that.")
+        let tooOld = PortalCodeBackend.error(status: 409, data: Data(#"{"error":"update_mac"}"#.utf8))
+        XCTAssertEqual(tooOld, .refused(code: "update_mac", message: nil), "update_mac is not 'offline' even with 409")
+        XCTAssertTrue(tooOld.sentence.hasPrefix("Update the EdgeCoder app on this Mac"))
+        let withMessage = PortalCodeBackend.error(status: 409, data: Data(#"{"error":"update_mac","message":"Update this Mac."}"#.utf8))
+        XCTAssertEqual(withMessage.sentence, "Update this Mac.")
+        let refused = CodeCommandState(status: "done", result: .object(["status": .string("refused"), "error": .string("not_owner")]))
+        XCTAssertEqual(refused.outcome().failureValue?.sentence, "Only the session's owner can do that.")
+    }
+
+    // MARK: - Bots: Allow for this run
+
+    func testBotPendingCallAllowRun() throws {
+        let call = try decode(BotPendingCall.self, #"{"callId":"k1","tool":"run_shell","detail":"npm test","allowRun":"npm test commands"}"#)
+        XCTAssertEqual(call.allowRun, "npm test commands")
+        XCTAssertEqual(call.allowRunCaption, "Also runs npm test commands without asking until this run ends.")
+        XCTAssertEqual(call.approveArgs(approved: true, forRun: true)["scope"] as? String, "run")
+        XCTAssertNil(call.approveArgs(approved: true)["scope"], "plain Approve sends no scope")
+        XCTAssertNil(call.approveArgs(approved: false, forRun: true)["scope"])
+        let old = try decode(BotPendingCall.self, #"{"callId":"k2","tool":"run_shell","detail":"x"}"#)
+        XCTAssertNil(old.allowRun)
+        XCTAssertNil(old.allowRunCaption)
+    }
+
     // MARK: - Drawer
 
     func testDrawerGroupsSessionsByMachineAndProject() throws {
@@ -277,6 +375,16 @@ final class CodeModeTests: XCTestCase {
         DispatchQueue.main.async { exp.fulfill() }
         wait(for: [exp], timeout: 1)
         XCTAssertEqual(src.sections(matching: "").flatMap(\.rows).map(\.id), ["a/s"])
+    }
+}
+
+/// Records each command instead of reaching a computer.
+private final class RecordingCodeBackend: CodeBackend {
+    private(set) var calls: [(action: String, args: [String: CodeJSON])] = []
+    func machines() async throws -> [CodeMachine] { [] }
+    func run(agentId: String, action: String, args: [String: CodeJSON]) async throws -> CodeJSON {
+        calls.append((action, args))
+        return .object([:])
     }
 }
 

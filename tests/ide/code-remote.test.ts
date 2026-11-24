@@ -81,7 +81,7 @@ describe("account check", () => {
 });
 
 describe("create", () => {
-  it("refuses unknown and no-longer-trusted projects, path fields and Auto", async () => {
+  it("refuses unknown and no-longer-trusted projects, path fields and Full access", async () => {
     setProjectTrusted(root, true);
     const { command, hub } = await server();
     const projects = (await command({ action: "projects" })).body.data.projects as Array<{ projectId: string }>;
@@ -93,7 +93,8 @@ describe("create", () => {
       expect(r.code).toBe(400);
       expect(r.body.error).toBe("invalid_request");
     }
-    expect((await command({ action: "create", projectId: id, mode: "auto" })).body).toMatchObject({ status: "refused", error: "auto_on_mac" });
+    // Full access is turned on in a session (with a confirm), never when one is created.
+    expect((await command({ action: "create", projectId: id, mode: "full" })).body).toMatchObject({ status: "refused", error: "full_after_create" });
     // Untrusted after the phone listed it.
     setProjectTrusted(root, false);
     expect((await command({ action: "create", projectId: id })).body).toMatchObject({ status: "refused", error: "no_such_project" });
@@ -108,11 +109,9 @@ describe("create", () => {
     const s = hub.peek(r.body.data.sessionId)!;
     expect(s).toMatchObject({ ownerAccount: ACCOUNT, published: true, origin: "remote", mode: "plan", title: "Fix it" });
     expect(s.transcript.map((t) => t.content)).toEqual(["Started from iPhone"]);
-    expect((await command({ action: "settings", sessionId: s.id, mode: "auto" })).body).toMatchObject({ status: "refused", error: "auto_on_mac" });
-    expect(hub.peek(s.id)!.mode).toBe("plan");
-    // Full access is turned on from the Mac only, like Auto.
-    expect((await command({ action: "settings", sessionId: s.id, mode: "full" })).body).toMatchObject({ status: "refused", error: "full_on_mac" });
-    expect((await command({ action: "create", projectId: projectIdOf(root, SALT), mode: "full" })).body).toMatchObject({ status: "refused", error: "full_on_mac" });
+    // Full access needs the explicit confirm.
+    expect((await command({ action: "settings", sessionId: s.id, mode: "full" })).body).toMatchObject({ status: "refused", error: "confirm_full" });
+    expect((await command({ action: "create", projectId: projectIdOf(root, SALT), mode: "full" })).body).toMatchObject({ status: "refused", error: "full_after_create" });
     expect(hub.peek(s.id)!.mode).toBe("plan");
     expect(hub.list()).toHaveLength(1);
   });
@@ -200,5 +199,87 @@ describe("remote turns", () => {
     expect(hub.snapshot(id).pending).toHaveLength(1);
     expect((await command({ action: "approve", sessionId: id, callId: p.callId, approved: false })).body.status).toBe("done");
     await hub.idle(id);
+  });
+});
+
+describe("the owner's mode and session allowances from the phone and the web", () => {
+  async function phoneSession(replies: Reply[] = [], mode = "ask") {
+    setProjectTrusted(root, true);
+    const srv = await server(replies);
+    const id = (await srv.command({ action: "create", projectId: projectIdOf(root, SALT), mode })).body.data.sessionId as string;
+    return { ...srv, id };
+  }
+
+  it("switches to Auto, and to Full access only with the confirm; each change is noted with who, when and which app", async () => {
+    const { command, hub, id } = await phoneSession();
+    const sum = (await command({ action: "snapshot", sessionId: id })).body.data.session;
+    expect(sum).toMatchObject({ mode: "ask", remoteModes: true });
+    expect((await command({ action: "settings", sessionId: id, mode: "auto", via: "web" })).body).toMatchObject({ status: "done", data: { session: { mode: "auto" } } });
+    expect((await command({ action: "settings", sessionId: id, mode: "full" })).body).toMatchObject({ status: "refused", error: "confirm_full" });
+    expect(hub.peek(id)!.mode).toBe("auto");
+    expect((await command({ action: "settings", sessionId: id, mode: "full", confirmFull: true, via: "iphone" })).body).toMatchObject({ status: "done", data: { session: { mode: "full" } } });
+    // Setting the same mode again isn't a change (no note).
+    await command({ action: "settings", sessionId: id, mode: "full", confirmFull: true });
+    const notes = hub.peek(id)!.transcript.filter((t) => t.role === "note").map((t) => t.content);
+    expect(notes).toEqual([
+      "Started from iPhone",
+      expect.stringMatching(new RegExp(`^Mode set to Auto from the web by ${ACCOUNT} at \\d{4}-\\d\\d-\\d\\dT`)),
+      expect.stringMatching(new RegExp(`^Mode set to Full access from iPhone by ${ACCOUNT} at `)),
+    ]);
+    // Only true is a confirm; anything else (or a stray field) is refused by the schema.
+    expect((await command({ action: "settings", sessionId: id, mode: "full", confirmFull: false })).code).toBe(400);
+    expect((await command({ action: "settings", sessionId: id, mode: "auto", via: "desktop" })).code).toBe(400);
+  });
+
+  it("never for another account's session (it isn't even visible), and not for a non-owner remote client", async () => {
+    const { command, hub } = await phoneSession();
+    const DESK = { clientId: "d1", kind: "desktop" as const };
+    const other = hub.create({ projectRoot: root, client: DESK, ownerAccount: "acct_other" });
+    hub.publish(other.id, true, DESK);
+    expect((await command({ action: "settings", sessionId: other.id, mode: "full", confirmFull: true })).body).toMatchObject({ status: "refused", error: "no_such_session" });
+    expect(hub.peek(other.id)!.mode).not.toBe("full");
+    // The hub refuses a remote client that isn't the owner, whatever reaches it.
+    expect(() => hub.update(other.id, { mode: "full" }, phoneClient(ACCOUNT), { confirmFull: true })).toThrow(/owner/);
+    expect(() => hub.update(other.id, { mode: "auto" }, phoneClient(ACCOUNT))).toThrow(/owner/);
+  });
+
+  it("the owner's phone turn in Full access runs a command without asking; hard refusals stay refused", async () => {
+    const { command, hub, id } = await phoneSession([
+      { content: "", toolCalls: [{ name: "run_shell", arguments: { command: "echo hi > hi.txt" } }] },
+      { content: "", toolCalls: [{ name: "run_shell", arguments: { command: "sudo rm -rf /" } }] },
+      { content: "done", toolCalls: [] },
+    ]);
+    await command({ action: "settings", sessionId: id, mode: "full", confirmFull: true });
+    await command({ action: "message", sessionId: id, text: "go" });
+    await hub.idle(id);
+    expect(hub.snapshot(id).pending).toEqual([]);
+    const results = hub.peek(id)!.transcript.flatMap((t) => t.events ?? []).filter((e) => e.type === "tool_result" || e.type === "shell_output");
+    expect(results.some((e) => e.type === "shell_output")).toBe(true);
+    expect(results.find((e) => e.type === "tool_result")).toMatchObject({ error: expect.stringContaining("Full access still refuses") });
+  });
+
+  it("Allow for this session: approves the call, then the same kind runs without asking; other kinds still ask", async () => {
+    const { command, hub, id } = await phoneSession([
+      { content: "", toolCalls: [{ name: "run_shell", arguments: { command: "npm test" } }] },
+      { content: "", toolCalls: [{ name: "run_shell", arguments: { command: "npm test -- --watch=false" } }] },
+      { content: "", toolCalls: [{ name: "run_shell", arguments: { command: "npm run lint" } }] },
+      { content: "done", toolCalls: [] },
+    ]);
+    await command({ action: "message", sessionId: id, text: "test it" });
+    await until(() => hub.snapshot(id).pending.length === 1, 5000, "npm test to ask");
+    const first = ((await command({ action: "snapshot", sessionId: id })).body.data as RemoteSessionSnapshot).pending[0];
+    expect(first).toMatchObject({ command: "npm test", approvable: true, allowSession: "npm test commands" });
+    expect((await command({ action: "approve", sessionId: id, callId: first.callId, approved: true, scope: "session", via: "web" })).body.status).toBe("done");
+    await until(() => hub.snapshot(id).pending.length === 1, 5000, "npm run lint to ask");
+    const snap = (await command({ action: "snapshot", sessionId: id })).body.data as RemoteSessionSnapshot;
+    expect(snap.pending[0]).toMatchObject({ command: "npm run lint", allowSession: "npm run lint commands" });
+    expect(snap.session.allowances).toEqual(["npm test commands"]);
+    await command({ action: "approve", sessionId: id, callId: snap.pending[0].callId, approved: false });
+    await hub.idle(id);
+    const asked = hub.peek(id)!.transcript.flatMap((t) => t.events ?? []).filter((e) => e.type === "tool_call").map((e) => [(e as { args: { command: string } }).args.command, (e as { requires_approval?: boolean }).requires_approval]);
+    expect(asked).toEqual([["npm test", true], ["npm test -- --watch=false", false], ["npm run lint", true]]);
+    // Nothing was kept as an "always" rule.
+    expect(hub.permissions.get(root).rules ?? []).toEqual([]);
+    expect(hub.peek(id)!.alwaysShell).toEqual([]);
   });
 });

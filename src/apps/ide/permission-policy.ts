@@ -12,8 +12,11 @@
  *   plan                  read-only tools only; everything else is refused until the user approves the plan
  *   full (Full access)    nothing asks: edits, commands, commits, pushes and PRs run; the hard refusals
  *                         (classifyCommand's "refuse": sudo, wiping a disk/home/the project, fork bomb,
- *                         raw disk, download-and-run, secrets) stay refused. Set on this computer only
- *                         (sessions.ts: never from the phone/web or another account's client).
+ *                         raw disk, download-and-run, secrets) stay refused. Set by the session's owner
+ *                         only (sessions.ts: this computer, or the owner's phone/web after a confirm).
+ *
+ * "Allow for this session" (session-allowances.ts withAllowances) is applied on top of these verdicts:
+ * it can only turn an ask into a run, never touches a refusal.
  *
  * In every mode a project's "always allow" rules (`npm test:*`) let a matching command run, but a
  * rule never covers a refused command or a class that must always ask (network other than a plain
@@ -66,7 +69,7 @@ export function rememberable(c: CommandClass): boolean {
   return c.action !== "refuse" && REMEMBERABLE.has(c.category);
 }
 
-const DEFAULT_BRANCHES = new Set(["main", "master", "trunk", "default", "production", "release"]);
+export const DEFAULT_BRANCHES: ReadonlySet<string> = new Set(["main", "master", "trunk", "default", "production", "release"]);
 
 /** Directories of generated output that Auto may delete inside the project. */
 const BUILD_DIRS = new Set(["dist", "build", "out", "coverage", ".next", ".nuxt", ".svelte-kit", ".turbo", ".cache", ".parcel-cache", "node_modules", "target", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", "tmp", ".tmp"]);
@@ -710,6 +713,10 @@ export interface Decision {
    * chose to approve everything). The executor still refuses what it always refuses (.git internals).
    */
   approved?: boolean;
+  /** An ask "Allow for this session" may answer: what it would cover (session-allowances.ts). */
+  session?: string;
+  /** A run because the session allowed this kind of call (session-allowances.ts): what was allowed. */
+  sessionAllowed?: string;
 }
 
 export interface DecideContext {

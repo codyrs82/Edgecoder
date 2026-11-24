@@ -94,9 +94,17 @@ Where it is offered:
   commands are still blocked").
   The mode button shows it in the warning color. **Settings → General → Permissions** can make it
   the default for new chats, behind the same confirm.
-- **Not from the phone or the web** (the code relay): they can't switch a session into Full access
-  (`full_on_mac`), and a phone turn in a Full access session runs under the phone's usual remote
-  rules as Accept edits.
+- **From the web Code page and the iPhone, for the session's owner only** (the account signed in on
+  the Mac, which owns the session; never a session on someone else's machine, a View-only Mac, or
+  another account). The mode menu offers Manual, Accept edits, Plan, Auto and Full access; Full
+  access opens a confirm ("runs every command without asking, except hard refusals") and the Mac
+  refuses it without that confirm (`confirm_full`) and when a session is created (`full_after_create`).
+  Each change from there is noted in the session ("Mode set to Full access from the web by acct-… at
+  …", seen on every surface) and in the coordinator's audit and security log
+  (`code_session_mode_change`). The owner's own phone or web turns then run as that mode does on
+  the Mac; in Manual, Accept edits and Plan they keep the phone's stricter rules (commands ask,
+  paths outside the project are refused). Needs a Mac whose app has this (older ones show Auto and
+  Full access as "set on the Mac"; the portal answers `update_mac`).
 - **Not for another account**: in a shared session only the owner's account (or this computer's
   own clients) can turn it on, and a message from another account's client runs as Accept edits,
   the way a frontier lead serves only the owner.
@@ -192,6 +200,40 @@ An approval card for a command offers **Allow**, **Always allow `npm test …` i
   Always-allowed commands** lists them per project with Remove. API: `GET /v1/ide/permissions`,
   `POST /v1/ide/permissions/remove {projectRoot, rule}`.
 
+## Allow for this session
+
+Every approval card that the mode asks about (in the desktop app's chats and live sessions, the
+terminal, the web Code page and the iPhone) also offers **Allow for this session**, labelled with
+what it covers. One tap approves the call and lets later calls of the same kind run without asking
+until the session ends. A bot's card offers **Allow for this run** instead (until the run ends).
+
+| Kind | Example label | Covers |
+| --- | --- | --- |
+| Shell commands of a program and subcommand | `npm test commands` | the rule "Always allow" would keep (`npm test:*`, `python3 tools/x.py:*`), for this session only; a command line needs every part that isn't read-only covered |
+| Inline interpreter scripts | `inline python3 scripts` | `python3 -c '…'`, `node -e '…'`, `ruby -e`, `perl -e`, `bun -e`, and a whole `python3 - <<'EOF'` … `EOF` here-doc, for that interpreter |
+| Edits inside the project | `edits inside the project` | `write_file` / `edit_file` inside the project |
+| Git commits on a work branch | `git commits on feat/x` | `git_commit` on that branch (never `main`, `master` or another default branch, never `--amend`) |
+| `git pull` / `git fetch`, new local branches, the web tool | `git pull commands`, `new local branches`, `web searches and page reads` | those tools |
+
+Never covered, whatever was allowed: hard refusals and anything the classifier refuses (in any
+mode), secrets (commands with a key in them, secrets files, content that looks like a key), files
+or paths outside the project (inline code that names `~`, `..` or an absolute system path is not
+offered), protected paths, pushes and pull requests (they always ask), network commands other than
+a plain `git pull` / `git fetch`, deletes, `$(…)` and other syntax that can't be checked, an inline
+script with anything else on the line (or after its here-doc), and double-quoted inline code (the
+shell expands it). It isn't offered for a web-page guard ask (that card keeps **Allow for the rest
+of this run**), and the [web-page guard](web-tool.md#prompt-injection) still applies on top: after a
+page read, a kind you allowed asks again until you lift the guard, and a script the run edited
+earlier is never run on an allowance or on "rest of this run".
+
+It is kept in the provider's memory only: never written to disk or to the project, gone when the
+session is deleted, when the provider restarts, or after 12 hours unused. A desktop Code view chat
+and its mirror on the phone share one set. From the phone or the web only the session's owner may
+answer it (`approve` with `scope: "session"`, newer Macs: `remoteModes: true` in the session's
+summary); the session lists what it allows ("Allowed this session: npm test commands") on the
+desktop, the web and the iPhone. **Always allow** on the desktop is unchanged and still the way to
+keep a rule for the project.
+
 ## Bots
 
 A bot's mode is set with the same picker under its message box and kept with the bot (`mode` in
@@ -207,5 +249,6 @@ summary. Changing the mode while a call waits lets it go ahead when the new mode
 (not a call the web-page guard asked about: that waits for your answer, or for Full access in a
 chat or session).
 
-On the web portal a bot's approvals can be answered (Approve / Deny), but its mode, tools and
-always-allow rules are changed on the Mac only.
+On the web portal and the iPhone a bot's approvals can be answered (Approve / Deny, and **Allow for
+this run** when the Mac offers it), but its mode, tools and always-allow rules are changed on the
+Mac only.

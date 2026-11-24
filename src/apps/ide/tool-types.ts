@@ -148,6 +148,13 @@ export type IdeStreamEvent =
        * the rest of this run" isn't offered and never covers it.
        */
       runs_edited?: string;
+      /**
+       * An ask "Allow for this session" may answer (session-allowances.ts): what later calls it lets
+       * run without asking ("npm test commands", "edits inside the project"). A bot: for the rest of the run.
+       */
+      allow_session?: string;
+      /** Ran without asking because the session allowed calls like it: what was allowed. */
+      session_allowed?: string;
     }
   | { type: "tool_result"; id: string; result?: string; error?: string }
   | { type: "diff"; file: string; hunks: DiffHunk[]; id: string }

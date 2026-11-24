@@ -305,8 +305,8 @@
     act(() => updateBot(bot.id, { triggers: (bot.triggers ?? []).map((t) => (t.id === id ? { ...t, enabled: !t.enabled } : t)) }));
   const retryRepo = () => act(() => syncBotRepository(bot.id));
   const send = (text: string, attachments?: AttachmentPayload[]) => act(() => sendBotMessage(bot.id, text, attachments));
-  const approve = (callId: string, approved: boolean, always = false, forRun = false) =>
-    act(() => (always ? approveBotCall(bot.id, callId, approved, true) : forRun ? approveBotCall(bot.id, callId, approved, false, true) : approveBotCall(bot.id, callId, approved)));
+  const approve = (callId: string, approved: boolean, always = false, forRun = false, session = false) =>
+    act(() => (always ? approveBotCall(bot.id, callId, approved, true) : forRun ? approveBotCall(bot.id, callId, approved, false, true) : session ? approveBotCall(bot.id, callId, approved, false, false, true) : approveBotCall(bot.id, callId, approved)));
   // Its ask to use your frontier key (bot-frontier.ts on the server), and what that key spent today.
   const fAsk = $derived(frontierAsk(bot));
   const fSpend = $derived(frontierSpendLine(bot));
@@ -521,6 +521,9 @@
                       <button class="primary" onclick={() => approve(c.id, true)}>Allow</button>
                       {#if c.webGuard && !c.runsEdited}
                         <button class="always" onclick={() => approve(c.id, true, false, true)} title="Calls its permission mode runs anyway stop asking until this run ends. Anything the mode asks about still asks.">Allow for the rest of this run</button>
+                      {/if}
+                      {#if c.allowSession && !c.webGuard}
+                        <button type="button" class="always" data-testid="allow-run" onclick={() => approve(c.id, true, false, false, true)} title="Also runs {c.allowSession} without asking until this run ends. Never covers pushes, pull requests, secrets, files outside the project or refused commands.">Allow for this run: <span class="session-label">{c.allowSession}</span></button>
                       {/if}
                       {#if c.rules?.length}
                         <button class="always" onclick={() => approve(c.id, true, true)} title="Commands starting with this run without asking in this project. Remove it in Settings → General → Always-allowed commands.">Always allow {#each c.rules as r, i (r)}{i ? ", " : ""}<code>{r.replace(/:\*$/, " …")}</code>{/each} in this project</button>
@@ -862,6 +865,9 @@
   }
   .ask-choices button.always code {
     font-size: 11.5px;
+  }
+  .ask-choices button.always .session-label {
+    color: var(--text-secondary);
   }
   .ask-choices button.primary {
     background: var(--accent);

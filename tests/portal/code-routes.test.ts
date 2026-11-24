@@ -19,6 +19,8 @@ const CMD = "cmd-12345678";
 type Seen = { coord: string; url: string; token: unknown; body: any };
 const seen: Seen[] = [];
 
+/** A session on a Mac that takes Auto / Full access and "Allow for this session" from the web. */
+const NEWER = "22222222-2222-4222-8222-222222222222";
 const snapshot = (controls: "on" | "view", name: string) => ({
   v: 1,
   machineName: name,
@@ -28,7 +30,7 @@ const snapshot = (controls: "on" | "view", name: string) => ({
   projects: [{ projectId: PROJECT, name: "Edgecoder", parent: "Code", branch: "main" }, { projectId: "fedcba9876543210", name: "Notes", parent: "Docs" }],
   sessions: [
     { id: SESSION, title: "Fix the tests", projectId: PROJECT, projectName: "Edgecoder", branch: "main", model: "m", mode: "ask", origin: "remote", published: true, running: true, pending: 2, queued: 0, messages: 4, cSats: 1, createdAt: 1, updatedAt: NOW - 5 },
-    { id: "22222222-2222-4222-8222-222222222222", title: "Idle one", projectId: PROJECT, projectName: "Edgecoder", branch: null, model: "m", mode: "ask", origin: "desktop", published: true, running: false, pending: 0, queued: 0, messages: 1, cSats: 0, createdAt: 1, updatedAt: 7 },
+    { id: NEWER, title: "Idle one", projectId: PROJECT, projectName: "Edgecoder", branch: null, model: "m", mode: "full", origin: "desktop", published: true, running: false, pending: 0, queued: 0, messages: 1, cSats: 0, createdAt: 1, updatedAt: 7, remoteModes: true },
   ],
 });
 
@@ -136,8 +138,9 @@ describe("portal code API", () => {
       controls: "on",
       projects: [{ projectId: PROJECT, name: "Edgecoder", parent: "Code", branch: "main" }, { projectId: "fedcba9876543210", name: "Notes", parent: "Docs" }],
       sessions: [
-        { sessionId: SESSION, projectId: PROJECT, title: "Fix the tests", status: "waiting", updatedAtMs: NOW - 5, pendingApprovals: 2, startedFrom: "phone" },
-        { sessionId: "22222222-2222-4222-8222-222222222222", projectId: PROJECT, title: "Idle one", status: "idle", updatedAtMs: 7, pendingApprovals: 0, startedFrom: "mac" },
+        // Each session's mode, so every surface can show it.
+        { sessionId: SESSION, projectId: PROJECT, title: "Fix the tests", status: "waiting", updatedAtMs: NOW - 5, pendingApprovals: 2, startedFrom: "phone", mode: "ask" },
+        { sessionId: NEWER, projectId: PROJECT, title: "Idle one", status: "idle", updatedAtMs: 7, pendingApprovals: 0, startedFrom: "mac", mode: "full" },
       ],
       updatedAtMs: NOW,
     });
@@ -232,6 +235,32 @@ describe("portal code API", () => {
       expect(r.statusCode).toBe(400);
     }
     expect(seen.filter((s) => s.url.endsWith("/code-commands"))).toEqual([]);
+  });
+
+  it("Auto / Full access and Allow for this session: to a newer Mac only, with the app that sent it (the client's own claim is dropped)", async () => {
+    const cases: Array<[Record<string, unknown>, Record<string, string>, Record<string, unknown>]> = [
+      [{ action: "settings", sessionId: NEWER, mode: "full", confirmFull: true }, {}, { sessionId: NEWER, mode: "full", confirmFull: true, via: "web" }],
+      [{ action: "settings", sessionId: NEWER, mode: "auto", via: "iphone" }, {}, { sessionId: NEWER, mode: "auto", via: "web" }],
+      [{ action: "approve", sessionId: NEWER, callId: "tc_1", approved: true, scope: "session" }, { "user-agent": "EdgeCoder/43 CFNetwork/1568.200.51 Darwin/24.1.0" }, { sessionId: NEWER, callId: "tc_1", approved: true, scope: "session", via: "iphone" }],
+      [{ action: "approve", sessionId: NEWER, callId: "tc_1", approved: true }, {}, { sessionId: NEWER, callId: "tc_1", approved: true, via: "web" }],
+    ];
+    for (const [payload, extraHeaders, args] of cases) {
+      seen.length = 0;
+      const r = await app.inject({ method: "POST", url: "/portal/api/code/mac-1/commands", headers: { ...as("u1"), ...extraHeaders }, payload });
+      expect(r.statusCode, JSON.stringify(payload)).toBe(202);
+      const sent = seen.filter((s) => s.coord === "B" && s.url === "/agent-control/agents/mac-1/code-commands");
+      expect(sent[0].body).toEqual({ accountId: "acct-u1", action: payload.action, args });
+    }
+    // An older Mac (no remoteModes) would refuse the whole command: said here, nothing sent.
+    for (const payload of [{ action: "settings", sessionId: SESSION, mode: "full", confirmFull: true }, { action: "settings", sessionId: SESSION, mode: "auto" }, { action: "approve", sessionId: SESSION, callId: "tc_1", approved: true, scope: "session" }]) {
+      seen.length = 0;
+      const r = await app.inject({ method: "POST", url: "/portal/api/code/mac-1/commands", headers: as("u1"), payload });
+      expect(r.statusCode).toBe(409);
+      expect(r.json().error).toBe("update_mac");
+      expect(seen.filter((s) => s.url.endsWith("/code-commands"))).toEqual([]);
+    }
+    // A confirm is only ever `true`.
+    expect((await app.inject({ method: "POST", url: "/portal/api/code/mac-1/commands", headers: as("u1"), payload: { action: "settings", sessionId: NEWER, mode: "full", confirmFull: "yes" } })).statusCode).toBe(400);
   });
 
   it("400 bad_request for an unknown action, a bad argument, or a field the action doesn't name", async () => {

@@ -14,6 +14,11 @@
  * other machine; each coordinator checks the agent's verified ownership row again before it shows a
  * snapshot or signs a command, and answers a command's state only to the account that sent it.
  * Every answer is no-store.
+ *
+ * Which app sent a command (`via`: "web" or "iphone", from the request's User-Agent: the iPhone app
+ * is a CFNetwork client) is added here for the Mac's transcript note and the audit; a client's own
+ * `via` is dropped. Auto / Full access and "Allow for this session" go only to a Mac whose session
+ * summary says `remoteModes: true` (older Macs would refuse the whole command).
  */
 
 import type { FastifyInstance, FastifyReply } from "fastify";
@@ -43,15 +48,22 @@ export interface CodeMachineView {
   online: boolean;
   controls: "off" | "view" | "on";
   projects: Array<{ projectId: string; name: string; parent: string; branch?: string }>;
-  sessions: Array<{ sessionId: string; projectId: string; title: string; status: "idle" | "running" | "waiting"; updatedAtMs: number; pendingApprovals: number; startedFrom: "phone" | "mac" }>;
+  sessions: Array<{ sessionId: string; projectId: string; title: string; status: "idle" | "running" | "waiting"; updatedAtMs: number; pendingApprovals: number; startedFrom: "phone" | "mac"; mode?: string }>;
   updatedAtMs: number;
 }
 
 const MAX_COORDINATORS = 8;
 const agentIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/);
 const commandIdSchema = z.string().min(8).max(64).regex(/^[A-Za-z0-9-]+$/);
-/** Fields a client might send to name an account: never used (the session decides), so dropped. */
-const ACCOUNT_FIELDS = ["accountId", "account", "userId", "requestedBy", "ownerAccountId"];
+/** Fields a client might send to name an account or its app: never used (the session and the request decide), so dropped. */
+const ACCOUNT_FIELDS = ["accountId", "account", "userId", "requestedBy", "ownerAccountId", "via"];
+const SESSION_MODES = new Set(["ask", "auto-edits", "plan", "auto", "full"]);
+
+/** The app a request came from: the iPhone app talks through CFNetwork (its User-Agent says so); anything else is the web page. */
+export function codeClientOf(headers: Record<string, unknown>): "web" | "iphone" {
+  const ua = typeof headers["user-agent"] === "string" ? headers["user-agent"] : "";
+  return /CFNetwork|EdgeCoderIOS/i.test(ua) ? "iphone" : "web";
+}
 
 const str = (v: unknown, max: number): string => (typeof v === "string" ? v.slice(0, max) : "");
 const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
@@ -75,6 +87,7 @@ export function codeMachineView(agentId: string, m: CoordinatorCodeMachine | und
         updatedAtMs: num(x.updatedAt),
         pendingApprovals: pending,
         startedFrom: (x.origin === "remote" ? "phone" : "mac") as "phone" | "mac",
+        ...(typeof x.mode === "string" && SESSION_MODES.has(x.mode) ? { mode: x.mode } : {}),
       };
     });
   return {
@@ -200,7 +213,17 @@ export function registerCodeRoutes(app: FastifyInstance, deps: CodeRoutesDeps): 
     const m = (await coordinatorView(accountId, [p.data.agentId])).get(p.data.agentId);
     if (m?.connected && !m.snapshot) return reply.code(409).send({ error: "relay_off", message: "Code from your phone is off on this Mac." });
     if (m?.connected && m.snapshot?.controls !== "on") return reply.code(409).send({ error: "view_only", message: "This Mac shows its sessions on the phone but takes no commands." });
-    const r = await sendCommand(p.data.agentId, { accountId, action: parsed.data.action, args: parsed.data.args });
+    let sendArgs: Record<string, unknown> = parsed.data.args;
+    if (parsed.data.action === "settings" || parsed.data.action === "approve") {
+      const a = parsed.data.args as { sessionId: string; mode?: string; confirmFull?: true; scope?: string };
+      const session = Array.isArray(m?.snapshot?.sessions) ? m!.snapshot!.sessions.find((x) => x?.id === a.sessionId) : undefined;
+      const newer = session?.remoteModes === true;
+      if (!newer && (a.mode === "auto" || a.mode === "full" || a.confirmFull || a.scope === "session")) {
+        return reply.code(409).send({ error: "update_mac", message: "Update the EdgeCoder app on this Mac to change to Auto or Full access, or allow calls for the session, from here." });
+      }
+      if (newer) sendArgs = { ...a, via: codeClientOf(req.headers as Record<string, unknown>) };
+    }
+    const r = await sendCommand(p.data.agentId, { accountId, action: parsed.data.action, args: sendArgs });
     if (r.status === 200 && typeof r.body?.commandId === "string") return reply.code(202).send({ commandId: r.body.commandId });
     if (r.status === 400) return reply.code(400).send({ error: "bad_request", message: r.body?.detail ?? r.body?.message });
     const status = [403, 409, 429, 503].includes(r.status) ? r.status : 502;
