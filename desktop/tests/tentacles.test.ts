@@ -32,3 +32,17 @@ describe("tentacle served lines (5)", () => {
     expect(s.totals).toEqual({ batch: "1 helper · 2 calls · 2.0 cSats", session: "2 helpers · 3 calls · 2.5 cSats" });
   });
 });
+
+describe("where each helper call ran (local first)", () => {
+  it("leads each served line with this computer or the network", () => {
+    const local = { label: "This computer", own: true, computeClass: "local", tier: null, hardware: "This computer", region: null, country: null, promptTokens: 900, outputTokens: 30 };
+    const gpu = { label: "lin-•••3f2a", own: false, computeClass: "gpu", tier: "gpu.dc40", hardware: "Datacenter GPU (gpu.dc40)", region: "ord", city: "Chicago", country: "US", promptTokens: 1200, outputTokens: 80 };
+    let s = applyTentacleEvent(emptyTentacles(), ev("tentacle_started", { tentacle: t({ status: "running" }) }));
+    s = applyTentacleEvent(s, ev("tentacle_usage", { id: "t1", call: { cSats: 0, model: "qwen3.5:9b", place: "local", served: local }, cSats: 0, spentCSats: 0 }));
+    s = applyTentacleEvent(s, ev("tentacle_usage", { id: "t1", call: { cSats: 1.2, model: "qwen3-coder:30b", place: "network", served: gpu }, cSats: 1.2, spentCSats: 1.2 }));
+    const [a, b] = callLines(s.items[0]);
+    expect(a).toMatch(/^this computer · qwen3\.5:9b · /);
+    expect(a).toMatch(/free$/);
+    expect(b).toMatch(/^network · qwen3-coder:30b · Datacenter GPU/);
+  });
+});

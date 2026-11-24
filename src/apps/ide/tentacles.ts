@@ -57,6 +57,9 @@ import { formatCSatsShort, parseWhere, tentacleCallLine, tentacleTotals } from "
 
 export { formatCSatsShort, parseWhere, tentacleCallLine, tentacleTotals };
 import type { RoutingHints, JobType, Quality } from "../../inference-api/job-descriptor.js";
+import { callsTools, fitScore, type Workload } from "../../inference-api/auto-route.js";
+import { isFrontierModelId } from "../../inference-api/frontier-models.js";
+import { catalogEntryForTag } from "../../model/catalog.js";
 
 export const TENTACLE_KINDS = ["tests", "code_edit", "search", "summarize", "docs", "review", "refactor_piece"] as const;
 export type TentacleKind = (typeof TENTACLE_KINDS)[number];
@@ -101,16 +104,23 @@ export interface TentacleResult {
   attempts: number;
   /** Each model call: where it ran (the coordinator's served-by), tokens and cSats. */
   calls: TentacleCall[];
+  /** Where the last attempt ran: this computer's model (local first) or the network. */
+  place?: TentaclePlace;
   /** The acceptance check didn't run: the session's mode would ask first (helpers can't ask). */
   unverified?: string;
   error?: string;
 }
+
+/** Where a helper call ran: this computer's own model (free), or the network (or your machines through it). */
+export type TentaclePlace = "local" | "network";
 
 /** One helper model call, as the session's `served` lines show it. */
 export interface TentacleCall {
   cSats: number;
   where?: string;
   model: string;
+  /** This computer or the network, shown first in the call's served line. */
+  place?: TentaclePlace;
   served?: ServedBy;
   promptTokens?: number;
   outputTokens?: number;
@@ -148,6 +158,11 @@ export interface TentacleConfig {
   workerModel: string;
   /** Characters of file content a tentacle's prompt may carry (cheap models: 8-16K tokens). */
   maxContextChars: number;
+  /**
+   * Local first: with the worker on auto, a low-complexity helper's first attempt runs on a capable
+   * model on this computer (free) when one is installed; its retry, and everything else, goes to the network.
+   */
+  localFirst: boolean;
 }
 
 export function tentacleConfigFromEnv(env: NodeJS.ProcessEnv = process.env): TentacleConfig {
@@ -162,6 +177,7 @@ export function tentacleConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Ten
     perTentacleCSats: num(env.EDGECODER_TENTACLE_CSATS, 25, 0, 1e7),
     workerModel: env.EDGECODER_TENTACLES_WORKER?.trim() || "auto",
     maxContextChars: Math.floor(num(env.EDGECODER_TENTACLE_CONTEXT_CHARS, 36_000, 4_000, 400_000)),
+    localFirst: env.EDGECODER_TENTACLES_LOCAL !== "0",
   };
 }
 
@@ -194,6 +210,14 @@ export interface TentacleDeps {
    * sessionAllowsShell. Helpers can't ask, so anything this refuses is refused.
    */
   shellAllowed?: (s: SessionData, command: string) => boolean;
+  /**
+   * Local first (TentacleConfig.localFirst): a tool-capable model on this computer that fits the
+   * helper (pickLocalHelperModel over this computer's installed models), or null when none does.
+   * Unset: helpers never run locally first.
+   */
+  localModelFor?: (need: { minContext: number; promptTokens: number }) => Promise<string | null>;
+  /** A backend for a model on this computer (Ollama). Required with localModelFor. */
+  localBackend?: (model: string) => ChatBackend;
   /** The session's worker model (default tentacleWorkerModel). Never a frontier model: one becomes auto. */
   workerModelFor?: (s: SessionData, cfg: TentacleConfig) => string;
   /** Where workspaces go (default the OS temp folder). */
@@ -401,6 +425,58 @@ export function workerHints(spec: Pick<TentacleSpec, "kind" | "complexity"> & Pa
   };
 }
 
+/**
+ * The smallest model (billions of parameters) on this computer a helper may run on first, like
+ * bots' BOT_AGENT_MIN_PARAMS_B: a tentacle is an agent loop with tools, so a tiny model never takes
+ * one. Lower than bots' 14B because only low-complexity pieces run locally, and the retry goes to
+ * the network. EDGECODER_TENTACLES_LOCAL_MIN_B overrides it.
+ */
+export const TENTACLE_LOCAL_MIN_PARAMS_B = 7;
+
+export function tentacleLocalMinParamsB(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.EDGECODER_TENTACLES_LOCAL_MIN_B);
+  return env.EDGECODER_TENTACLES_LOCAL_MIN_B && Number.isFinite(n) && n >= 0 ? n : TENTACLE_LOCAL_MIN_PARAMS_B;
+}
+
+/**
+ * The model on this computer a helper runs on first, or null when none can take it: it calls tools
+ * (model/tool-support.ts, Ollama's capabilities), is at least `minParamsB` big, and its context
+ * window (when the catalog knows it) holds the helper's `minContext`. Among those, Auto's fit for
+ * agent work (auto-route.ts fitScore: ~14B coders first). Never a frontier id.
+ */
+export function pickLocalHelperModel(
+  localModels: string[],
+  need: { minContext: number; promptTokens?: number },
+  o: { minParamsB?: number; callsTools?: (m: string) => boolean; contextTokens?: (m: string) => number | undefined } = {},
+): string | null {
+  const tools = o.callsTools ?? callsTools;
+  const ctxOf = o.contextTokens ?? ((m: string) => catalogEntryForTag(m)?.contextTokens);
+  const w: Workload = { heavy: true, needsTools: true, promptTokens: need.promptTokens ?? 0, minParamsB: o.minParamsB ?? tentacleLocalMinParamsB() };
+  return (
+    localModels
+      .filter((m) => !isFrontierModelId(m) && tools(m))
+      .filter((m) => {
+        const c = ctxOf(m);
+        return !c || c >= need.minContext;
+      })
+      .map((m) => ({ m, s: fitScore(m, w) }))
+      .filter((x) => x.s >= 0)
+      .sort((a, b) => b.s - a.s)[0]?.m ?? null
+  );
+}
+
+/**
+ * Where a helper's attempt runs. Local first: with the worker on auto and local first on, a
+ * low-complexity first attempt runs on `localModel` (this computer, free) when there is one. The
+ * retry (one level up), medium and harder pieces, and an explicit worker model go to the worker
+ * (`model`: auto's best fit on the network, or exactly the model chosen). Never a frontier model.
+ */
+export function tentaclePlacement(o: { workerModel: string; level: (typeof LEVELS)[number]; escalate: boolean; localFirst: boolean; localModel: string | null }): { place: "local" | "worker"; model: string } {
+  const worker = workerModelOf({ workerModel: o.workerModel });
+  if (o.localFirst && worker === "auto" && !o.escalate && o.level === "low" && o.localModel && !isFrontierModelId(o.localModel)) return { place: "local", model: o.localModel };
+  return { place: "worker", model: worker };
+}
+
 /** "path#L10-L40" → { path, start, end }. */
 export function parseFileRef(ref: string): { path: string; start?: number; end?: number } {
   const m = /^(.*?)#L(\d+)(?:-L?(\d+))?$/.exec(ref.trim());
@@ -502,6 +578,11 @@ export function tentaclePrompt(spec: TentacleSpec, read: (path: string) => strin
   return parts.join("\n\n");
 }
 
+/** Where the last attempt ran, for the result: this computer when it ran locally (or Auto here served it there). */
+function placeOf(place: "local" | "worker", calls: TentacleCall[]): TentaclePlace {
+  return place === "local" || (calls.length > 0 && calls[calls.length - 1].place === "local") ? "local" : "network";
+}
+
 const FRONTIER_REFUSED = "a helper call was answered by a frontier model; helpers run only on the network or this computer";
 const round = (n: number) => Number(n.toFixed(6));
 const shortTask = (t: string) => (t.length > 80 ? `${t.slice(0, 77)}…` : t);
@@ -544,6 +625,7 @@ export class TentacleManager {
       c.workerModel = patch.workerModel.trim();
     }
     if (patch.maxContextChars !== undefined) c.maxContextChars = Math.max(4_000, Math.floor(patch.maxContextChars));
+    if (patch.localFirst !== undefined) c.localFirst = !!patch.localFirst;
     this.d.host.publishEvent(sessionId, { type: "tentacle_config", config: { ...c }, spentCSats: st.spent });
     this.pump(sessionId);
     return { ...c };
@@ -731,6 +813,10 @@ export class TentacleManager {
     const started = Date.now();
     const tokens = { prompt: 0, output: 0 };
     let where: string | undefined;
+    // Where the latest attempt ran (local first), and the local model when it ran here.
+    let place: "local" | "worker" = "worker";
+    let localModel = "";
+    const whereNow = () => (place === "local" ? { model: localModel, class: "this computer", agentLabel: "this computer" } : parseWhere(where, model));
     const checks: CheckResult[] = [];
     try {
       if (!t.spec.readOnly) {
@@ -748,7 +834,7 @@ export class TentacleManager {
         attempts++;
         if (escalate) {
           if (ws) resetWorkspace(ws);
-          this.progress(sessionId, t, "retrying on a stronger tier");
+          this.progress(sessionId, t, place === "local" ? "retrying on the network (a stronger tier)" : "retrying on a stronger tier");
         }
         checks.length = 0;
         let budgetHit = false;
@@ -756,9 +842,28 @@ export class TentacleManager {
         let text = "";
         const read = (p: string) => readText(root, p);
         const prompt = tentaclePrompt(t.spec, read, cfg.maxContextChars, lastFailure ? `# A previous attempt failed\n${lastFailure.slice(0, 3000)}` : undefined);
+        // Local first: a low-complexity first attempt on auto runs on a capable model on this computer.
+        const { level } = tentacleComplexity(t.spec, { escalate, promptChars: prompt.length });
+        let local: string | null = null;
+        if (!escalate && level === "low" && cfg.localFirst && model === "auto" && this.d.localModelFor && this.d.localBackend) {
+          const need = workerHints(t.spec, { promptChars: prompt.length });
+          local = await this.d.localModelFor({ minContext: need.minContext ?? 8_192, promptTokens: Math.ceil(prompt.length / 3) }).catch(() => null);
+          if (t.abort.signal.aborted) break;
+        }
+        const placed = tentaclePlacement({ workerModel: model, level, escalate, localFirst: cfg.localFirst, localModel: local });
+        place = placed.place;
+        if (place === "local") {
+          localModel = placed.model;
+          t.view.model = localModel;
+          this.progress(sessionId, t, `running on this computer (${localModel})`);
+        } else if (escalate || attempts === 1) {
+          t.view.model = model;
+        }
         const chat = hintedChat(
-          // An explicit worker model stays the same on the retry (no surprise spend); "auto" moves up a tier by its hints.
-          this.d.workerBackend(model, sessionId, { role: "worker" }),
+          // Local first on this computer; otherwise the worker. An explicit worker model stays the
+          // same on the retry (no surprise spend); "auto" moves up a tier by its hints, and a local
+          // attempt's retry goes to the network.
+          place === "local" ? this.d.localBackend!(localModel) : this.d.workerBackend(model, sessionId, { role: "worker" }),
           () => workerHints(t.spec, { escalate, promptChars: prompt.length, maxCSats: budget - t.spent, tentacleId: t.view.id }),
           t.abort.signal,
           (u) => {
@@ -773,9 +878,10 @@ export class TentacleManager {
             tokens.prompt += u.promptTokens ?? 0;
             tokens.output += u.outputTokens ?? 0;
             if (u.where) where = u.where;
-            const w = parseWhere(where, model);
+            const w = whereNow();
             t.view.model = w.model;
-            const call: TentacleCall = { cSats: round(u.cSats), model: w.model, ...(u.where ? { where: u.where } : {}), ...(u.served ? { served: u.served } : {}), ...(u.promptTokens !== undefined ? { promptTokens: u.promptTokens } : {}), ...(u.outputTokens !== undefined ? { outputTokens: u.outputTokens } : {}) };
+            const callPlace: TentaclePlace = place === "local" || u.served?.computeClass === "local" ? "local" : "network";
+            const call: TentacleCall = { cSats: round(u.cSats), model: w.model, place: callPlace, ...(u.where ? { where: u.where } : {}), ...(u.served ? { served: u.served } : {}), ...(u.promptTokens !== undefined ? { promptTokens: u.promptTokens } : {}), ...(u.outputTokens !== undefined ? { outputTokens: u.outputTokens } : {}) };
             calls.push(call);
             // Each helper call's own served line (session event; the terminal and desktop show it).
             this.d.host.publishEvent(sessionId, { type: "tentacle_usage", id: t.view.id, call, line: tentacleCallLine(call), cSats: t.view.cSats, spentCSats: st.spent });
@@ -868,7 +974,7 @@ export class TentacleManager {
       }
       if (t.abort.signal.aborted) return this.finish(sessionId, t, "cancelled", undefined, "cancelled");
       const p = ws ? workspacePatch(ws) : { patch: "", files: [] };
-      const w = parseWhere(where, model);
+      const w = whereNow();
       const result: TentacleResult = {
         status: outcome.status,
         patch: p.patch,
@@ -883,13 +989,14 @@ export class TentacleManager {
         durationMs: Date.now() - started,
         attempts,
         calls: [...calls],
+        place: placeOf(place, calls),
         ...(unverified ? { unverified } : {}),
         ...(outcome.error ? { error: outcome.error } : {}),
       };
       this.finish(sessionId, t, outcome.status, result, undefined, ws);
     } catch (err) {
       if (t.abort.signal.aborted) return this.finish(sessionId, t, "cancelled", undefined, "cancelled");
-      const w = parseWhere(where, model);
+      const w = whereNow();
       this.finish(sessionId, t, "error", {
         status: "error",
         patch: "",
@@ -904,6 +1011,7 @@ export class TentacleManager {
         durationMs: Date.now() - started,
         attempts: 1,
         calls: [...calls],
+        place: placeOf(place, calls),
         error: (err as Error).message,
       });
     } finally {

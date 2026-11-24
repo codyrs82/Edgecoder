@@ -168,6 +168,8 @@ export interface Conversation {
   projectRoot?: string;
   /** Its permission mode (ask, auto-edits, auto, plan; permission-modes.ts), kept with the chat. */
   permissionMode?: import("./permission-modes").EngineMode;
+  /** Code view: its Helpers switch (helpers.ts), kept with the chat; unset follows Settings' default. */
+  helpers?: import("./helpers").ChatHelpers;
   /**
    * This chat's web (docs/web-tool.md): true "Web: Auto", false "Off for this chat", unset the
    * Settings default ("Search the web automatically", on unless turned off).
