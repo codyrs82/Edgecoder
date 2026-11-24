@@ -26,8 +26,14 @@
 # what) is saved before the run for the money report.
 #           --oversub X (bulk models' in-flight cap = slots x X, default 1.5)  --auto-slots N (default 3)
 #           --auto-share F (share of calls sent as model "auto", best-fit routing; default 0.5, 0 = none)
-# Capacity: the run takes a snapshot of slots per model (capacity.mjs, with the admin token on this
-# host) and passes it to the machines as LOADGEN_CAPACITY; the admin token itself is not sent.
+#           --model M (pin named-model calls to one model, e.g. qwen2.5-coder:1.5b; with --auto-share 0
+#           every call asks for it)
+# Capacity: the run takes a snapshot of slots per model (capacity.mjs; /admin/network is internal-only,
+# so it runs inside edgecoder-seed / edgecoder-seed-eu over fly ssh with the token from the machine's
+# env) and passes it to the machines as LOADGEN_CAPACITY; no admin token is sent or printed. If the
+# snapshot or the buyer choice fails, `run` stops with the reason; LOADGEN_ALLOW_BLIND=1 runs anyway.
+# Fly auth: FLY_API_TOKEN if set, else the `fly auth login` session, else ~/.config/edgecoder/fly.token
+# (that file may hold a revoked token, so it is the last resort); fails with instructions otherwise.
 #
 # The code ships as a base64 tarball in the machine's environment (no image build): the image is
 # plain node:22-slim. The generated fly.toml goes to $LOADGEN_FLY_DIR (default a temp dir), never
@@ -38,7 +44,18 @@ ORG=${LOADGEN_ORG:-edgecoder}
 HERE=$(cd "$(dirname "$0")" && pwd)
 DIR=${LOADGEN_FLY_DIR:-${TMPDIR:-/tmp}/edgecoder-loadgen}
 ACCOUNTS=${LOADGEN_KEYS_DIR:-$HOME/.config/edgecoder/e2e/accounts}
-export FLY_API_TOKEN=${FLY_API_TOKEN:-$(cat "$HOME/.config/edgecoder/fly.token" 2>/dev/null || true)}
+# Fly auth: FLY_API_TOKEN, else `fly auth login`, else the token file (may be revoked: last resort).
+if [ -z "${FLY_API_TOKEN:-}" ] && ! fly auth whoami >/dev/null 2>&1; then
+  if [ -s "$HOME/.config/edgecoder/fly.token" ]; then
+    FLY_API_TOKEN=$(cat "$HOME/.config/edgecoder/fly.token"); export FLY_API_TOKEN
+  fi
+fi
+case "${1:-}" in create|run|watch|status|logs|stop|destroy)
+  if ! fly auth whoami >/dev/null 2>&1; then
+    echo "fly is not authenticated: set FLY_API_TOKEN, or run \`fly auth login\` (a revoked token in ~/.config/edgecoder/fly.token fails with 'verify: root banned'; remove or refresh it)" >&2
+    exit 2
+  fi ;;
+esac
 mkdir -p "$DIR"
 cmd=${1:-}; shift || true
 
@@ -58,13 +75,13 @@ case "$cmd" in
 
   run)
     profile=${1:?profile: smoke|steady|ramp|saturate|soak|sustain}; shift
-    regions=iad,lhr,sin,syd; duration=""; rate=""; max_rate=""; stage_minutes=""; loop=""; budget=2000; min_balance=1500; users=""; start_in=150; oversub=""; auto_slots=""; auto_share=""; buyer_cap=""; min_rate=""
+    regions=iad,lhr,sin,syd; duration=""; rate=""; max_rate=""; stage_minutes=""; loop=""; budget=2000; min_balance=1500; users=""; start_in=150; oversub=""; auto_slots=""; auto_share=""; buyer_cap=""; min_rate=""; model=""
     while [ $# -gt 0 ]; do case "$1" in
       --regions) regions=$2; shift 2;; --duration) duration=$2; shift 2;; --rate) rate=$2; shift 2;; --max-rate) max_rate=$2; shift 2;;
       --stage-minutes) stage_minutes=$2; shift 2;; --loop) loop=1; shift;; --budget) budget=$2; shift 2;;
       --min-balance) min_balance=$2; shift 2;; --users|--buyers) users=$2; shift 2;; --start-in) start_in=$2; shift 2;;
       --buyer-cap) buyer_cap=$2; shift 2;; --min-rate) min_rate=$2; shift 2;;
-      --oversub) oversub=$2; shift 2;; --auto-slots) auto_slots=$2; shift 2;; --auto-share) auto_share=$2; shift 2;;
+      --oversub) oversub=$2; shift 2;; --auto-slots) auto_slots=$2; shift 2;; --auto-share) auto_share=$2; shift 2;; --model) model=$2; shift 2;;
       *) echo "unknown option $1" >&2; exit 2;; esac; done
     IFS=, read -r -a R <<<"$regions"
     run_id="lg-$(date -u +%Y%m%d%H%M)-$profile"
@@ -73,18 +90,19 @@ case "$cmd" in
     duration_sec=$(node "$HERE/loadgen.mjs" --dry-run --profile "$profile" --regions "$regions" --region "${R[0]}" \
       ${duration:+--duration "$duration"} ${rate:+--rate "$rate"} ${max_rate:+--max-rate "$max_rate"} ${stage_minutes:+--stage-minutes "$stage_minutes"} ${loop:+--loop} |
       node -e 'const l=require("fs").readFileSync(0,"utf8");console.log(JSON.parse(l.slice(l.indexOf("{"))).durationSec)')
-    capacity=$(node "$HERE/capacity.mjs" 2>/dev/null || true)
-    [ -n "$capacity" ] || echo "warning: no capacity snapshot (admin token?); machines use built-in slot defaults" >&2
+    blind() { if [ "${LOADGEN_ALLOW_BLIND:-}" = 1 ]; then echo "warning: $1 (LOADGEN_ALLOW_BLIND=1: continuing)" >&2; else echo "error: $1; fix it (see above) or set LOADGEN_ALLOW_BLIND=1 to run without it" >&2; exit 1; fi; }
+    capacity=$(node "$HERE/capacity.mjs" || true)
+    [ -n "$capacity" ] || blind "no capacity snapshot, so the machines would use built-in slot defaults and the profiles.mjs model mix"
     printf 'RUN_ID=%s\nSTART_AT=%s\nEND_AT=%s\n' "$run_id" "$start_at" $(( start_at + duration_sec * 1000 )) >"$DIR/last-run.env"
     # Buyers and the models each must avoid (its own agents hold them); then the "before" ledger.
-    pick=$(node "$HERE/budget.mjs" buyers ${users:+--buyers "$users"} --min-balance "$min_balance" 2>/dev/null || true)
+    pick=$(node "$HERE/budget.mjs" buyers ${users:+--buyers "$users"} --min-balance "$min_balance" || true)
     avoid="{}"
     if [ -n "$pick" ]; then
       users=$(printf '%s' "$pick" | node -e 'console.log(JSON.parse(require("fs").readFileSync(0,"utf8")).buyers.join(","))')
       avoid=$(printf '%s' "$pick" | node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync(0,"utf8")).avoid))')
       echo "buyers: $users ($(printf '%s' "$pick" | node -e 'const p=JSON.parse(require("fs").readFileSync(0,"utf8"));console.log(p.reason+"; avoid "+JSON.stringify(p.avoid))'))"
     else
-      echo "warning: could not choose buyers (admin token?); every account buys and self-dealing is not avoided" >&2
+      blind "could not choose buyers, so every account would buy and self-dealing would not be avoided"
     fi
     node "$HERE/budget.mjs" ledger --out "$DIR/ledger-before-$run_id.json" >/dev/null 2>&1 && echo "ledger snapshot: $DIR/ledger-before-$run_id.json" || echo "warning: no ledger snapshot; the report will lack the money section" >&2
     tgz=$(tar czf - -C "$HERE/.." --exclude='*.sh' loadgen | base64 | tr -d '\n')
@@ -110,6 +128,7 @@ primary_region = "${R[0]}"
 $( [ -n "$oversub" ] && echo "  LOADGEN_OVERSUB = \"$oversub\"" )
 $( [ -n "$auto_slots" ] && echo "  LOADGEN_AUTO_SLOTS = \"$auto_slots\"" )
 $( [ -n "$auto_share" ] && echo "  LOADGEN_AUTO_SHARE = \"$auto_share\"" )
+$( [ -n "$model" ] && echo "  LOADGEN_MODEL = \"$model\"" )
 $( [ -n "$buyer_cap" ] && echo "  LOADGEN_BUYER_CAP_CSATS = \"$buyer_cap\"" )
 $( [ -n "$min_rate" ] && echo "  LOADGEN_MIN_RATE = \"$min_rate\"" )
 $( [ -n "$rate" ] && echo "  LOADGEN_RATE = \"$rate\"" )
@@ -170,5 +189,5 @@ TOML
       $( [ -n "$ledger" ] && [ -f "$DIR/ledger-after-$RUN_ID.json" ] && echo --ledger-after "$DIR/ledger-after-$RUN_ID.json" ) "$@" ;;
   stop) fly scale count 0 -a "$APP" --yes ;;
   destroy) fly apps destroy "$APP" --yes ;;
-  *) sed -n '5,20p' "$0"; exit 2 ;;
+  *) sed -n '5,/^set -euo/p' "$0" | sed '$d'; exit 2 ;;
 esac
