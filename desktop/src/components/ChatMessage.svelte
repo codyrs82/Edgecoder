@@ -31,6 +31,8 @@
     onToolApproval?: (id: string, approved: boolean) => void;
     /** "Always allow" on an approval card: approve and keep the call's rule for the project. */
     onToolAlways?: (id: string) => void;
+    /** "Allow for the rest of this run" on a web-page guard ask (this computer only, never the phone). */
+    onToolForRun?: (id: string) => void;
     /** Agent turn checkpoint and the files it wrote: shows the review / undo card. */
     turnId?: string;
     changedFiles?: string[];
@@ -59,7 +61,7 @@
     return u.calls?.length ? `Where this reply ran:\n${servedBreakdown(u.calls)}` : "Where this reply ran and what it cost";
   }
 
-  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, onToolAlways, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview, usage, web, activity, notice, onCostChoice, costNotes }: Props = $props();
+  let { role, content, streaming = false, streamProgress, onOpenInEditor, toolEvents, onToolApproval, onToolAlways, onToolForRun, turnId, changedFiles, onFilesReverted, onOpenPath, networkTaskId, onPreview, usage, web, activity, notice, onCostChoice, costNotes }: Props = $props();
 
   /** A failed reply: its text, and the error as one compact notice (with Buy cSats when it's money). */
   let failed = $derived(role === "assistant" && !streaming ? splitModelError(content) : { text: content, error: undefined });
@@ -118,7 +120,11 @@
                   onApprove={(id) => onToolApproval?.(id, true)}
                   onReject={(id) => onToolApproval?.(id, false)}
                   allowRule={evt.allow_rule}
+                  allowRules={evt.allow_rules}
                   onAlways={onToolAlways}
+                  webGuard={evt.web_guard === true}
+                  runsEdited={evt.runs_edited}
+                  onForRun={onToolForRun}
                 />
               {:else if evt.type === "shell_output"}
                 <ShellBlock

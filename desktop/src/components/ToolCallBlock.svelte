@@ -14,7 +14,15 @@
     onReject?: (id: string) => void;
     /** "Always allow `rule` in this project": shown when the call offers a rule and this is set. */
     allowRule?: string;
+    /** A command line's rules, one per part (`python3 tools/x.py:*`, ...); allowRule is the first. */
+    allowRules?: string[];
     onAlways?: (id: string) => void;
+    /** Asked only because a web page was read this run: the mode would have run it on its own. */
+    webGuard?: boolean;
+    /** With webGuard: the file this run changed that the call runs (no run-wide answer for it). */
+    runsEdited?: string;
+    /** "Allow for the rest of this run" (only with webGuard): later calls like it go ahead until the run ends. */
+    onForRun?: (id: string) => void;
   }
   let {
     id,
@@ -27,8 +35,15 @@
     onApprove,
     onReject,
     allowRule,
+    allowRules,
     onAlways,
+    webGuard = false,
+    runsEdited,
+    onForRun,
   }: Props = $props();
+
+  /** The rules "Always allow" keeps (one per part of a command line). */
+  let rules = $derived(allowRules?.length ? allowRules : allowRule ? [allowRule] : []);
 
   let expanded = $state(false);
 
@@ -98,6 +113,11 @@
     onAlways?.(id);
   }
 
+  function handleForRun(e: MouseEvent) {
+    e.stopPropagation();
+    onForRun?.(id);
+  }
+
   function handleReject(e: MouseEvent) {
     e.stopPropagation();
     onReject?.(id);
@@ -137,15 +157,25 @@
     <div class="approval-details" data-testid="approval-details">
       <ToolArgs {tool} {args} />
     </div>
+    {#if webGuard}
+      <p class="guard-note" data-testid="web-guard-note">
+        {#if runsEdited}Asked because this run read a web page and changed <code>{runsEdited}</code>, which this runs.{:else}Asked because this run read a web page. Your permission mode would run it without asking.{/if}
+      </p>
+    {/if}
     <div class="approval-bar">
       <span class="approval-label">Approve this action?</span>
       <div class="approval-actions">
         <button class="btn allow" onclick={handleApprove} type="button"
           >Allow</button
         >
-        {#if allowRule && onAlways}
+        {#if webGuard && !runsEdited && onForRun}
+          <button class="btn always" onclick={handleForRun} type="button" title="Calls your permission mode runs anyway stop asking until this run ends. Anything the mode asks about still asks."
+            >Allow for the rest of this run</button
+          >
+        {/if}
+        {#if rules.length && onAlways}
           <button class="btn always" onclick={handleAlways} type="button" title="Commands starting with this run without asking in this project. Remove it in Settings → General → Always-allowed commands."
-            >Always allow <code>{allowRule.replace(/:\*$/, " …")}</code> in this project</button
+            >Always allow {#each rules as r, i (r)}{i ? ", " : ""}<code>{r.replace(/:\*$/, " …")}</code>{/each} in this project</button
           >
         {/if}
         <button class="btn deny" onclick={handleReject} type="button"
@@ -327,6 +357,13 @@
   }
   .body-args {
     margin-bottom: 8px;
+  }
+
+  .guard-note {
+    margin: 0;
+    padding: 6px 12px 0;
+    font-size: 12px;
+    color: var(--text-secondary);
   }
 
   .approval-bar {

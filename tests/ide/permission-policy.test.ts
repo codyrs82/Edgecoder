@@ -13,7 +13,7 @@ import {
   rememberable,
   ruleMatches,
   suggestRule,
-  suggestToolRule,
+  suggestToolRules,
   type DecideContext,
 } from "../../src/apps/ide/permission-policy.js";
 import { PermissionStore, type PermissionMode } from "../../src/apps/ide/permissions.js";
@@ -376,12 +376,12 @@ describe("Always allow for git fetch / git pull", () => {
     expect(decideToolCall("git_fetch", { remote: "origin" }, ctx("ask")).action).toBe("run");
   });
 
-  it("suggestToolRule keeps a rule only for shell commands and the git pull/fetch tools", () => {
-    expect(suggestToolRule("git_pull", { remote: "origin" }, { root })).toBe("git pull:*");
-    expect(suggestToolRule("git_fetch", {}, { root })).toBe("git fetch:*");
-    expect(suggestToolRule("run_shell", { command: "git pull origin main" }, { root })).toBe("git pull:*");
-    expect(suggestToolRule("run_shell", { command: "git clone https://x/y" }, { root })).toBeNull();
-    for (const t of ["git_push", "git_commit", "open_pull_request", "github_create_pr", "write_file"] as ToolName[]) expect(suggestToolRule(t, {}, { root })).toBeNull();
+  it("suggestToolRules keeps rules only for shell commands and the git pull/fetch tools", () => {
+    expect(suggestToolRules("git_pull", { remote: "origin" }, { root })).toEqual(["git pull:*"]);
+    expect(suggestToolRules("git_fetch", {}, { root })).toEqual(["git fetch:*"]);
+    expect(suggestToolRules("run_shell", { command: "git pull origin main" }, { root })).toEqual(["git pull:*"]);
+    expect(suggestToolRules("run_shell", { command: "git clone https://x/y" }, { root })).toEqual([]);
+    for (const t of ["git_push", "git_commit", "open_pull_request", "github_create_pr", "write_file"] as ToolName[]) expect(suggestToolRules(t, {}, { root })).toEqual([]);
   });
 
   it("the approval card gets the rule for a git_pull call", async () => {
@@ -418,23 +418,29 @@ describe("chains of read-only commands", () => {
   });
 
   it.each([
-    "git status && npm install x",
     "git status && rm src/a.ts",
-    "git status && touch src/b.ts",
     "git log > log.txt",
     "git status && git log >> out.txt",
     "git status && echo $(whoami)",
     "git status && echo `whoami`",
     "git log | sh",
-    "git log | tee out.txt",
     "cat src/a.ts | xargs echo",
-    "git status && git pull",
     "git status & git log",
     "git status && cat /etc/passwd",
-  ])("%s still asks", (command) => {
+  ])("%s still asks, with no rule to keep", (command) => {
     expect(decideToolCall("run_shell", { command }, { mode: "ask", root }).action).toBe("ask");
     expect(decideToolCall("run_shell", { command }, { mode: "plan", root }).action).toBe("refuse");
     expect(decideToolCall("run_shell", { command }, { mode: "ask", root }).rule).toBeUndefined();
+  });
+
+  it.each([
+    ["git status && npm install x", "npm install:*"],
+    ["git status && touch src/b.ts", "touch:*"],
+    ["git log | tee out.txt", "tee out.txt:*"],
+    ["git status && git pull", "git pull:*"],
+  ])("%s still asks, offering the rule for its one non-read part", (command, rule) => {
+    expect(decideToolCall("run_shell", { command }, { mode: "ask", root })).toMatchObject({ action: "ask", rule });
+    expect(decideToolCall("run_shell", { command }, { mode: "plan", root }).action).toBe("refuse");
   });
 });
 

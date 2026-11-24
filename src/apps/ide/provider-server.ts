@@ -58,7 +58,7 @@ import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
 import { NewProjectError, PROJECT_TEMPLATES, createNewProject } from "./new-project.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 import { defaultPermissionsFile, PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
-import { decideToolCall, suggestToolRule, type Decision } from "./permission-policy.js";
+import { decideToolCall, suggestToolRules, type Decision } from "./permission-policy.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
@@ -1276,8 +1276,10 @@ registerCompatRoutes(
 const toolApprovalSchema = z.object({
   id: z.string().min(1),
   approved: z.boolean(),
-  /** "Always allow" this command in the project: keeps the call's suggested rule (never for refused or always-ask commands). */
+  /** "Always allow" this command in the project: keeps the call's suggested rules (never for refused or always-ask commands). */
   always: z.boolean().default(false),
+  /** "Allow for the rest of this run": a web-page guard ask lifts the guard until the turn ends (agent-loop.ts makeToolRunner). */
+  forRun: z.boolean().default(false),
   /** A cost check's answer (cost-guard.ts): Keep going, Switch to the cheaper model, or Stop. */
   choice: z.enum(["continue", "switch", "stop"]).optional(),
 });
@@ -1288,15 +1290,15 @@ app.post("/v1/ide/tool-approval", async (req, reply) => {
   if (!entry) {
     return reply.status(404).send({ error: "No pending approval with that id" });
   }
-  let rule: string | null = null;
+  let rules: string[] = [];
   if (body.approved && body.always && entry.projectRoot) {
-    rule = suggestToolRule(entry.tool, entry.args, { root: entry.projectRoot });
-    if (rule) permissionStore.addRule(entry.projectRoot, rule);
+    rules = suggestToolRules(entry.tool, entry.args, { root: entry.projectRoot });
+    for (const r of rules) permissionStore.addRule(entry.projectRoot, r);
   }
   if (body.choice && entry.choose) entry.choose(body.choice);
-  else entry.resolve(body.approved);
+  else entry.resolve(body.approved ? (body.forRun ? "run" : true) : false);
   pendingApprovals.delete(body.id);
-  return reply.send({ ok: true, ...(rule ? { rule } : {}) });
+  return reply.send({ ok: true, ...(rules.length ? { rule: rules[0], rules } : {}) });
 });
 
 const ideChatSchema = z.object({
@@ -1601,9 +1603,9 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
         execute: helpersOn ? tentacleExecutor(tentacles, helperId!, executeTool) : executeTool,
         sendEvent,
         // The first answer wins: the app (/v1/ide/tool-approval), the phone (the mirror) or 5 minutes (rejected).
-        waitForApproval: (callId, tool, args) =>
+        waitForApproval: (callId, tool, args, ask) =>
           firstAnswer(
-            { id: callId, tool, args },
+            { id: callId, tool, args, ask },
             mirror,
             (answer) => pendingApprovals.set(callId, { resolve: answer, tool, args, owner: turnId, projectRoot }),
             () => pendingApprovals.delete(callId),

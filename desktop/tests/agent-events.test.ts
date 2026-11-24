@@ -5,6 +5,10 @@ import { detectLanguage, joinPath, parentDir } from "../src/lib/editor-store";
 const empty: AgentTurn = { text: "", toolEvents: [] };
 
 describe("applyAgentEvent", () => {
+  it("keeps a call's rules and the web-page guard mark for its approval card", () => {
+    const e = { type: "tool_call", id: "c", tool: "run_shell", args: { command: "x | head" }, requires_approval: true, allow_rule: "x:*", allow_rules: ["x:*", "y:*"], web_guard: true } as Parameters<typeof applyAgentEvent>[1];
+    expect(applyAgentEvent(empty, e).turn.toolEvents[0]).toMatchObject({ allow_rule: "x:*", allow_rules: ["x:*", "y:*"], web_guard: true });
+  });
   it("accumulates text and pairs tool results with their calls", () => {
     let t = applyAgentEvent(empty, { type: "text", content: "Reading " }).turn;
     t = applyAgentEvent(t, { type: "tool_call", id: "1", tool: "read_file", args: { path: "a.ts" }, requires_approval: false }).turn;

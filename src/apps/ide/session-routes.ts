@@ -144,9 +144,9 @@ export function registerSessionRoutes(app: FastifyInstance, hub: SessionHub): vo
   app.post("/v1/ide/sessions/:id/approve", (req, reply) =>
     handle(reply, () => {
       const { id } = idParams.parse(req.params);
-      const b = z.object({ ...client, callId: z.string().min(1).max(100), approved: z.boolean(), always: z.boolean().default(false) }).parse(req.body ?? {});
+      const b = z.object({ ...client, callId: z.string().min(1).max(100), approved: z.boolean(), always: z.boolean().default(false), forRun: z.boolean().default(false) }).parse(req.body ?? {});
       // A second answer (another client answered first) is not an error: it changes nothing.
-      const applied = hub.approve(id, b.callId, b.approved, refOf(b), b.always);
+      const applied = hub.approve(id, b.callId, b.approved, refOf(b), b.always, b.forRun);
       return { ok: true, applied, ...(applied ? {} : { reason: "already_answered" }) };
     }));
 

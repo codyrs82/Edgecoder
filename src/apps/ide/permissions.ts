@@ -112,6 +112,11 @@ export function splitCommand(command: string): Array<{ text: string; op: string 
       i++;
       continue;
     }
+    // `2>&1`, `>&2`, `<&3` and `&>file` are redirections, not a background `&`.
+    if (ch === "&" && (command[i - 1] === ">" || command[i - 1] === "<" || command[i + 1] === ">")) {
+      cur += ch;
+      continue;
+    }
     if (ch === "|" || ch === ";" || ch === "&") {
       out.push({ text: cur.trim(), op: ch });
       cur = "";
@@ -152,8 +157,8 @@ function redirections(segment: string): { rest: string; targets: string[]; input
       while (k < segment.length && !/\s/.test(segment[k])) k++;
       const target = segment.slice(j, k);
       if (!target) return null;
-      // Drop the fd number before the operator (2>).
-      rest = rest.replace(/\d$/, "");
+      // Drop the fd number before the operator (2>) or the & of `&>`.
+      rest = rest.replace(/[\d&]$/, "");
       if (ch === ">") {
         if (!/^\d$/.test(target) && target !== "-") targets.push(target);
       } else inputs.push(target);

@@ -20,12 +20,12 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { ALWAYS_ASK_TOOLS, makeToolRunner, runAgentLoop, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
+import { ALWAYS_ASK_TOOLS, makeToolRunner, runAgentLoop, type ApprovalAnswer, type ApprovalAsk, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
 import { toolchainFailureHint } from "./toolchain.js";
 import { compactHistory, compactPaidTokens, estimateTokens, isPaidLead, type HistoryCompaction } from "./context-budget.js";
 import type { CheckpointStore } from "./checkpoints.js";
 import { defaultMode, defaultPermissionsFile, editsApply, EXECUTION_MODES, PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
-import { classifyCommand, decideToolCall, suggestToolRule, type Decision } from "./permission-policy.js";
+import { classifyCommand, decideToolCall, suggestToolRules, type Decision } from "./permission-policy.js";
 import { isWithin } from "./tool-executor.js";
 import { redactApiKeys } from "../../common/redaction.js";
 import { parseFrontierModelId } from "../../inference-api/frontier-models.js";
@@ -189,7 +189,7 @@ export interface DesktopTurn {
   /** One of the turn's agent events (kept and sent to the session's clients like a turn's own). */
   event(e: IdeStreamEvent): void;
   /** A call waits for approval: the phone may answer it too. Resolves with the first answer. */
-  ask(callId: string, tool: ToolName, args: Record<string, unknown>): Promise<boolean>;
+  ask(callId: string, tool: ToolName, args: Record<string, unknown>, ask?: ApprovalAsk): Promise<ApprovalAnswer>;
   /** The app answered `callId` itself: it leaves the session's pending list. */
   answered(callId: string, approved: boolean): void;
   /** The turn ended: its reply joins the transcript and queued messages start the next turn. */
@@ -312,7 +312,8 @@ interface Live {
   listeners: Map<number, { client: ClientRef; fn: (e: SessionEvent) => void }>;
   controller: ClientRef | null;
   running: Running | null;
-  pending: Map<string, PendingApproval & { resolve: (ok: boolean) => void; timer: ReturnType<typeof setTimeout> }>;
+  /** `webGuard`: asked only because a web page was read this turn (a mode change alone doesn't release it). */
+  pending: Map<string, PendingApproval & { resolve: (ok: ApprovalAnswer) => void; timer: ReturnType<typeof setTimeout>; webGuard?: boolean }>;
   queue: QueuedMessage[];
 }
 
@@ -710,7 +711,7 @@ export class SessionHub {
           prepare: exec.prepare,
           execute: exec.execute,
           sendEvent,
-          waitForApproval: (callId, tool, args) => this.waitForApproval(s, l, r, callId, tool, args),
+          waitForApproval: (callId, tool, args, ask) => this.waitForApproval(s, l, r, callId, tool, args, ask),
           captureBeforeWrite: (path) => this.env.checkpoints.capture(r.turnId, path),
           turnId: r.turnId,
           decide: (tool, args) => this.decide(s, tool, args, r.by ?? null),
@@ -859,20 +860,21 @@ export class SessionHub {
     return this.decide(s, tool, args).action === "run";
   }
 
-  private waitForApproval(s: SessionData, l: Live, r: Running, callId: string, tool: ToolName, args: Record<string, unknown>): Promise<boolean> {
-    // The mode or an "always" answer given meanwhile (never for the tools that always ask).
-    if ((!ALWAYS_ASK_TOOLS.has(tool) || this.modeFor(s, r.by ?? null) === "full") && this.decide(s, tool, args, r.by ?? null).action === "run") {
+  private waitForApproval(s: SessionData, l: Live, r: Running, callId: string, tool: ToolName, args: Record<string, unknown>, ask?: ApprovalAsk): Promise<ApprovalAnswer> {
+    // The mode or an "always" answer given meanwhile (never for the tools that always ask, and
+    // never for a web-page guard ask: the mode runs those by definition; the guard asks anyway).
+    if (!ask?.webGuard && (!ALWAYS_ASK_TOOLS.has(tool) || this.modeFor(s, r.by ?? null) === "full") && this.decide(s, tool, args, r.by ?? null).action === "run") {
       this.emit(s.id, { type: "approval", id: callId, approved: true, by: "always" });
       return Promise.resolve(true);
     }
     if (r.abort.signal.aborted) return Promise.resolve(false);
-    return new Promise<boolean>((resolve) => {
+    return new Promise<ApprovalAnswer>((resolve) => {
       const timer = setTimeout(() => {
         if (!l.pending.delete(callId)) return;
         this.emit(s.id, { type: "approval", id: callId, approved: false, by: "timeout" });
         resolve(false);
       }, this.approvalTimeoutMs);
-      l.pending.set(callId, { id: callId, tool, args, resolve, timer });
+      l.pending.set(callId, { id: callId, tool, args, resolve, timer, ...(ask?.webGuard ? { webGuard: true } : {}) });
     });
   }
 
@@ -893,7 +895,7 @@ export class SessionHub {
    * An answer from any attached client. The first answer wins: a later one (the call was answered
    * elsewhere, or it timed out) returns false and changes nothing.
    */
-  approve(id: string, callId: string, approved: boolean, client: ClientRef, alwaysAsked = false): boolean {
+  approve(id: string, callId: string, approved: boolean, client: ClientRef, alwaysAsked = false, forRunAsked = false): boolean {
     const s = this.need(id);
     // An answer from the phone approves this one call only: it never adds a rule or turns on auto-edits.
     const l = this.liveOf(id);
@@ -901,6 +903,8 @@ export class SessionHub {
     if (!p) return false;
     // (A cost check is never "always": it asks again after another threshold's worth.)
     const always = alwaysAsked && client.kind !== "remote" && p.tool !== COST_CHECK_TOOL;
+    // "Allow for the rest of this run" (a web-page guard ask): this computer's clients only, like "always".
+    const forRun = forRunAsked && client.kind !== "remote" && p.tool !== COST_CHECK_TOOL;
     l.pending.delete(callId);
     clearTimeout(p.timer);
     if (approved && always && !ALWAYS_ASK_TOOLS.has(p.tool)) {
@@ -911,16 +915,17 @@ export class SessionHub {
       if (p.tool === "run_shell" || p.tool === "git_pull" || p.tool === "git_fetch") {
         // "Always allow" keeps a rule (`npm test:*`, `git pull:*`) for the project; never for a
         // refused or always-ask command (suggestToolRule returns null for those).
-        const rule = suggestToolRule(p.tool, p.args, { root: s.projectRoot });
-        if (rule && !s.alwaysShell.includes(rule)) s.alwaysShell.push(rule);
-        if (rule) this.permissions.addRule(s.projectRoot, rule);
+        for (const rule of suggestToolRules(p.tool, p.args, { root: s.projectRoot })) {
+          if (!s.alwaysShell.includes(rule)) s.alwaysShell.push(rule);
+          this.permissions.addRule(s.projectRoot, rule);
+        }
       }
       s.autoApprove = editsApply(s.mode) ? "edits" : "none";
       this.save(s);
       this.emit(id, { type: "settings", mode: s.mode, autoApprove: s.autoApprove, alwaysShell: [...s.alwaysShell], by: client.kind, ...(client.label ? { label: client.label } : {}) });
     }
-    this.emit(id, { type: "approval", id: callId, approved, by: client.kind, ...(client.label ? { label: client.label } : {}), ...(always ? { always: true } : {}) });
-    p.resolve(approved);
+    this.emit(id, { type: "approval", id: callId, approved, by: client.kind, ...(client.label ? { label: client.label } : {}), ...(always ? { always: true } : {}), ...(approved && forRun ? { forRun: true } : {}) });
+    p.resolve(approved ? (forRun ? "run" : true) : false);
     return true;
   }
 
@@ -967,7 +972,10 @@ export class SessionHub {
     if (patch.mode) {
       const l = this.liveOf(id);
       for (const [callId, p] of [...l.pending]) {
-        if (p.tool === COST_CHECK_TOOL || (ALWAYS_ASK_TOOLS.has(p.tool) && this.modeFor(s, l.running?.by ?? null) !== "full") || this.decide(s, p.tool, p.args).action !== "run") continue;
+        if (p.tool === COST_CHECK_TOOL || (ALWAYS_ASK_TOOLS.has(p.tool) && this.modeFor(s, l.running?.by ?? null) !== "full")) continue;
+        // A web-page guard ask goes ahead only in Full access, which the guard leaves alone.
+        const v = this.decide(s, p.tool, p.args);
+        if (v.action !== "run" || (p.webGuard && v.approved !== true)) continue;
         l.pending.delete(callId);
         clearTimeout(p.timer);
         this.emit(id, { type: "approval", id: callId, approved: true, by: "always" });
@@ -1157,14 +1165,14 @@ export class SessionHub {
       event: (e) => {
         if (!ended && l.running === r) this.turnEvent(s, r, e);
       },
-      ask: (callId, tool, args) =>
+      ask: (callId, tool, args, ask) =>
         ended || abort.signal.aborted
           ? Promise.resolve(false)
-          : new Promise<boolean>((resolve) => {
+          : new Promise<ApprovalAnswer>((resolve) => {
               const timer = setTimeout(() => {
                 if (l.pending.delete(callId)) resolve(false);
               }, this.approvalTimeoutMs);
-              l.pending.set(callId, { id: callId, tool, args, resolve, timer });
+              l.pending.set(callId, { id: callId, tool, args, resolve, timer, ...(ask?.webGuard ? { webGuard: true } : {}) });
             }),
       answered: (callId, approved) => {
         const p = l.pending.get(callId);

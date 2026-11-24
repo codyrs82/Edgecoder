@@ -51,4 +51,35 @@ describe("ToolCallBlock approval", () => {
     expect(screen.getByRole("button", { name: "Allow" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Deny" })).toBeTruthy();
   });
+
+  it("shows every rule a command line keeps on the Always allow button", () => {
+    render(ToolCallBlock, { id: "c7", tool: "run_shell", args: { command: "npm run gen && python3 tools/watchlist.py | head" }, requiresApproval: true, status: "pending", onApprove: vi.fn(), onReject: vi.fn(), allowRule: "npm run gen:*", allowRules: ["npm run gen:*", "python3 tools/watchlist.py:*"], onAlways: vi.fn() });
+    expect(screen.getByRole("button", { name: /^Always allow npm run gen …\s*, python3 tools\/watchlist\.py … in this project$/ })).toBeTruthy();
+  });
+
+  it("a web-page guard ask explains itself and can be allowed for the rest of the run", async () => {
+    const onForRun = vi.fn();
+    const onApprove = vi.fn();
+    render(ToolCallBlock, { id: "c8", tool: "run_shell", args: { command: "npm test" }, requiresApproval: true, status: "pending", onApprove, onReject: vi.fn(), webGuard: true, onForRun, onAlways: vi.fn() });
+    expect(screen.getByTestId("web-guard-note").textContent).toMatch(/read a web page/);
+    await fireEvent.click(screen.getByRole("button", { name: "Allow for the rest of this run" }));
+    expect(onForRun).toHaveBeenCalledWith("c8");
+    expect(onApprove).not.toHaveBeenCalled();
+  });
+
+  it("offers no run-wide answer without the guard, or where the answer can't carry it (the phone)", () => {
+    render(ToolCallBlock, { id: "c9", tool: "run_shell", args: { command: "npm test" }, requiresApproval: true, status: "pending", onApprove: vi.fn(), onReject: vi.fn(), onForRun: vi.fn() });
+    expect(screen.queryByRole("button", { name: /rest of this run/ })).toBeNull();
+    cleanup();
+    render(ToolCallBlock, { id: "c10", tool: "run_shell", args: { command: "npm test" }, requiresApproval: true, status: "pending", onApprove: vi.fn(), onReject: vi.fn(), webGuard: true });
+    expect(screen.queryByRole("button", { name: /rest of this run/ })).toBeNull();
+    expect(screen.getByTestId("web-guard-note")).toBeTruthy();
+  });
+
+  it("a guard ask that runs a file this run changed names it and offers no run-wide answer", () => {
+    render(ToolCallBlock, { id: "c11", tool: "run_shell", args: { command: "python3 tools/watchlist.py" }, requiresApproval: true, status: "pending", onApprove: vi.fn(), onReject: vi.fn(), webGuard: true, runsEdited: "tools/watchlist.py", onForRun: vi.fn() });
+    expect(screen.getByTestId("web-guard-note").textContent).toMatch(/changed tools\/watchlist\.py, which this runs/);
+    expect(screen.queryByRole("button", { name: /rest of this run/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "Allow" })).toBeTruthy();
+  });
 });

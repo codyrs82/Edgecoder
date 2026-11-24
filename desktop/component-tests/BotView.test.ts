@@ -334,6 +334,43 @@ describe("BotView avatar, ask cards and details panel", () => {
     expect(api.approveBotCall).toHaveBeenCalledWith("bot_h", "c1", true, true);
   });
 
+  it("a command line offers its rules, one per part", async () => {
+    const command = 'python3 tools/watchlist.py SPY 2>&1 | head -20; npm run gen';
+    const waiting = harry({ status: "needs_approval", lastRun: { id: "run_2", trigger: "manual", startedAtMs: 0, status: "needs_approval", summary: "", cSats: 0 }, pending: [{ callId: "c1", tool: "run_shell", args: { command } }] });
+    api.botMessages.mockResolvedValue([
+      { id: "m1", role: "assistant", content: "", atMs: 0, runId: "run_2", events: [{ type: "tool_call", id: "c1", tool: "run_shell", args: { command }, requires_approval: true, allow_rule: "python3 tools/watchlist.py:*", allow_rules: ["python3 tools/watchlist.py:*", "npm run gen:*"] }] },
+    ]);
+    api.botHistory.mockResolvedValue([waiting.lastRun]);
+    render(BotView, { bot: waiting, onEdit: vi.fn(), onDeleted: vi.fn() });
+    expect(await screen.findByRole("button", { name: /^Always allow python3 tools\/watchlist\.py …\s*, npm run gen … in this project$/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /rest of this run/ })).toBeNull();
+  });
+
+  it("a web-page guard ask says why and offers Allow for the rest of this run", async () => {
+    const waiting = harry({ status: "needs_approval", lastRun: { id: "run_2", trigger: "manual", startedAtMs: 0, status: "needs_approval", summary: "", cSats: 0 }, pending: [{ callId: "c1", tool: "run_shell", args: { command: "npm test" } }] });
+    api.botMessages.mockResolvedValue([
+      { id: "m1", role: "assistant", content: "", atMs: 0, runId: "run_2", events: [{ type: "tool_call", id: "c1", tool: "run_shell", args: { command: "npm test" }, requires_approval: true, web_guard: true }] },
+    ]);
+    api.botHistory.mockResolvedValue([waiting.lastRun]);
+    api.approveBotCall.mockResolvedValue({ ok: true });
+    render(BotView, { bot: waiting, onEdit: vi.fn(), onDeleted: vi.fn() });
+    expect((await screen.findByTestId("web-guard-note")).textContent).toMatch(/read a web page/);
+    expect(screen.queryByRole("button", { name: /Always allow/ })).toBeNull();
+    await fireEvent.click(screen.getByRole("button", { name: "Allow for the rest of this run" }));
+    expect(api.approveBotCall).toHaveBeenCalledWith("bot_h", "c1", true, false, true);
+  });
+
+  it("a guard ask that runs a file the run changed offers no run-wide answer", async () => {
+    const waiting = harry({ status: "needs_approval", lastRun: { id: "run_2", trigger: "manual", startedAtMs: 0, status: "needs_approval", summary: "", cSats: 0 }, pending: [{ callId: "c1", tool: "run_shell", args: { command: "bash x.sh" } }] });
+    api.botMessages.mockResolvedValue([
+      { id: "m1", role: "assistant", content: "", atMs: 0, runId: "run_2", events: [{ type: "tool_call", id: "c1", tool: "run_shell", args: { command: "bash x.sh" }, requires_approval: true, web_guard: true, runs_edited: "x.sh" }] },
+    ]);
+    api.botHistory.mockResolvedValue([waiting.lastRun]);
+    render(BotView, { bot: waiting, onEdit: vi.fn(), onDeleted: vi.fn() });
+    expect((await screen.findByTestId("web-guard-note")).textContent).toMatch(/changed x\.sh, which this runs/);
+    expect(screen.queryByRole("button", { name: /rest of this run/ })).toBeNull();
+  });
+
   it("has a permission mode picker under the message box that changes the bot's mode", async () => {
     api.updateBot.mockResolvedValue(harry({ mode: "auto" }));
     render(BotView, { bot: harry({ mode: "ask" }), onEdit: vi.fn(), onDeleted: vi.fn() });

@@ -222,7 +222,7 @@ export function pickCheaperModel(
 
 /** The phone's side of an app turn (sessions.ts DesktopTurn): approve/deny only. */
 interface MirrorAsk {
-  ask(callId: string, tool: ToolName, args: Record<string, unknown>): Promise<boolean>;
+  ask(callId: string, tool: ToolName, args: Record<string, unknown>): Promise<boolean | "run">;
   answered(callId: string, approved: boolean): void;
 }
 
@@ -235,7 +235,7 @@ export function firstCostAnswer(
   callId: string,
   args: Record<string, unknown>,
   mirror: MirrorAsk | null,
-  register: (answer: { resolve: (approved: boolean) => void; choose: (choice: CostChoice) => void }) => void,
+  register: (answer: { resolve: (approved: boolean | "run") => void; choose: (choice: CostChoice) => void }) => void,
   unregister: () => void,
   timeoutMs = COST_ASK_TIMEOUT_MS,
 ): Promise<CostChoice> {
