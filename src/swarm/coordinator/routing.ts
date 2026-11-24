@@ -27,7 +27,7 @@ import { activeBlacklistRecord, agentCapabilities, AGENT_CONNECTED_WINDOW_MS } f
 import { autoMayUseCloudModel } from "../../cloud-host/catalog.js";
 import { bestFit, bestFitConfigFromEnv, routedLine, type AgentView, type BestFitConfig, type BestFitResult, type NetworkView, type SessionMemo } from "./best-fit.js";
 import { CC, FALLBACK_BTC_USD, queue, reservations, identity, usageListeners } from "./context.js";
-import { agentContextWindow, agentLastPullMs, agentLoadReport, freeModelSlots, pickupStats } from "./dispatch.js";
+import { agentContextWindow, agentLastPullMs, agentLoadReport, freeModelSlots, modelWarmOn, pickupStats } from "./dispatch.js";
 import { agentSocketLost } from "./agent-liveness.js";
 import { distanceRttMs, regionDistanceKm } from "../../common/geo-regions.js";
 import { agentUnavailable, circuitBlocks, loadedModelsOf, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
@@ -131,7 +131,9 @@ export function localAgentViews(nowMs = Date.now(), rttOf: (agentId: string) => 
       : routableModels(cap).filter((m) => memoryAdmits(agentId, m, held, nowMs) || modelLoadedOn(agentId, m, nowMs));
     if (!models.length) continue;
     const perf = agentPerf(agentId, claims);
-    const loadedModels = loadedModelsOf(agentId, nowMs);
+    // Loaded per its telemetry, plus models it served lately (warm; dispatch.ts modelWarmOn).
+    const reported = loadedModelsOf(agentId, nowMs);
+    const loadedModels = reported ? [...new Set([...reported, ...models.filter((m) => modelWarmOn(agentId, m, nowMs))])] : undefined;
     const hw = effectiveHardware(agentId, cap);
     out.push({
       agentId,
@@ -156,6 +158,9 @@ export function localAgentViews(nowMs = Date.now(), rttOf: (agentId: string) => 
       // #523: an agent that has not pulled recently (or ever) is less certain capacity (best-fit.ts).
       pullAgeMs: pullAge(agentId, nowMs),
       ...withClientRtt(clientRegion, agentRegionCode(cap)),
+      // Circuit open or memory pressure: online but not taking work; best fit uses it only when
+      // nothing healthy fits, so Auto does not queue calls behind it while others have room.
+      ...(agentUnavailable(agentId, nowMs) ? { unhealthy: true } : {}),
     });
   }
   return out;
@@ -349,6 +354,13 @@ export function routingSummary(job: JobDescriptor, r: BestFitResult) {
     quality: job.quality,
     latency: job.latency,
     complexity: { score: job.complexity.score, level: job.complexity.level, estimated: job.complexity.estimated, ...(job.complexity.hinted !== undefined ? { hinted: job.complexity.hinted } : {}), signals: job.complexity.signals.slice(0, 6) },
+    // Complexity class (simple / standard / complex) and why, and whether the call went to a
+    // preferred model, spilled within its band, or queued (best-fit.ts), for the network tests.
+    complexityClass: r.complexityClass ?? null,
+    complexityWhy: r.complexityWhy ?? null,
+    capacity: r.capacity ?? null,
+    spillFloorB: r.spillFloorB ?? null,
+    belowFloor: c?.belowFloor ?? false,
     requirements: r.requirements,
     weights: r.weights,
     score: c?.score ?? null,
@@ -365,7 +377,7 @@ export type RoutingSummary = ReturnType<typeof routingSummary>;
 // ── Decision log ─────────────────────────────────────────────────────────────────────────
 
 /** Best-fit fields a pinned-model call (recordPlacement) does not have. */
-type BestFitOnly = "job" | "jobInferred" | "quality" | "latency" | "complexity" | "requirements" | "weights" | "affinity";
+type BestFitOnly = "job" | "jobInferred" | "quality" | "latency" | "complexity" | "requirements" | "weights" | "affinity" | "complexityClass" | "complexityWhy" | "capacity" | "spillFloorB" | "belowFloor";
 
 export interface RoutingDecision extends Omit<RoutingSummary, BestFitOnly>, Partial<Pick<RoutingSummary, BestFitOnly>> {
   atMs: number;
@@ -477,7 +489,7 @@ function logDecision(d: RoutingDecision): RoutingDecision {
  * #523: an Auto call nobody picked up was re-placed (auto-replace.ts): the decision now names the
  * new model, class and preferred agent, and says why.
  */
-export function noteReplaced(subtaskId: string, to: { model: string; computeClass: string; agentId: string; agentLabel: string; score: number }, why: string): void {
+export function noteReplaced(subtaskId: string, to: { model: string; computeClass: string; agentId: string; agentLabel: string; score: number; belowFloor?: boolean; spill?: boolean; paramsB?: number }, why: string): void {
   const d = bySubtask.get(subtaskId);
   if (!d) return;
   const from = d.model;
@@ -486,7 +498,13 @@ export function noteReplaced(subtaskId: string, to: { model: string; computeClas
   d.agent = to.agentLabel;
   d.score = to.score;
   d.preferredAgentId = to.agentId;
-  d.reason = `${why}; was ${from ?? "?"}`.slice(0, 300);
+  d.belowFloor = to.belowFloor ?? false;
+  if (to.spill) d.capacity = "spill";
+  // Never a silent downgrade: a re-placement below the call's size floor says so.
+  const floor = d.requirements?.minParamsB;
+  const below = to.belowFloor || (floor !== undefined && to.paramsB !== undefined && to.paramsB < floor);
+  const note = below ? ` (below the ${floor ?? "?"}B floor for this ${d.complexityClass ?? ""} call: best available)`.replace("  ", " ") : to.spill ? " (spilled within the band)" : "";
+  d.reason = `${why}; was ${from ?? "?"}${note}`.slice(0, 300);
   d.line = `routed to ${to.model} on ${to.computeClass} because ${d.reason}`.slice(0, 300);
   changed(d);
 }

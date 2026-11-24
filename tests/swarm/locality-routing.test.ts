@@ -23,6 +23,7 @@ let portal: Server;
 let app: any;
 let routing: any;
 let dispatch: any;
+let locality: any;
 const requester = createPeerKeys("agent-locality-requester");
 const syd = createPeerKeys("agent-locality-syd");
 const iad = createPeerKeys("agent-locality-iad");
@@ -49,6 +50,7 @@ beforeAll(async () => {
   ({ coordinatorServer: app } = await import("../../src/swarm/coordinator.js"));
   routing = await import("../../src/swarm/coordinator/routing.js");
   dispatch = await import("../../src/swarm/coordinator/dispatch.js");
+  locality = await import("../../src/swarm/coordinator/locality.js");
   await app.ready();
   await register(requester, []);
   await register(syd, [MODEL], "syd");
@@ -183,3 +185,22 @@ describe("a named model a peer coordinator has free", () => {
     }
   });
 });
+
+describe("locality and warm models (network test run 2, B1)", () => {
+  test("the preference outlasts dispatch's model-affinity deferral", () => {
+    expect(locality.LOCALITY_PREFER_MS).toBeGreaterThan(dispatch.DEFER_MS);
+  });
+
+  test("a near host with the model installed wins over a far warm host unless it is known to be cold", () => {
+    const near = { agentId: "iad", free: 2, slots: 2, region: "iad" };
+    const farWarm = { agentId: "mac-ord", free: 2, slots: 2, region: "ord", warm: true };
+    // Not reporting its loaded models (the Fly CPU hosts): never assumed cold.
+    expect(locality.nearestFreeHolder([farWarm, near], "iad", MODEL)?.agentId).toBe("iad");
+    expect(locality.nearestFreeHolder([farWarm, { ...near, warm: true }], "iad", MODEL)?.agentId).toBe("iad");
+    // Known cold (reports loaded models, not this one, not served lately): the load outweighs ~1,000 km.
+    expect(locality.nearestFreeHolder([farWarm, { ...near, cold: true }], "iad", MODEL)?.agentId).toBe("mac-ord");
+    // Known cold but nobody has it warm: distance decides.
+    expect(locality.nearestFreeHolder([{ ...farWarm, warm: false }, { ...near, cold: true }], "iad", MODEL)?.agentId).toBe("iad");
+  });
+});
+

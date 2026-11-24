@@ -73,7 +73,71 @@ export const AUTO_CLOUD_MIN_COMPLEXITY = 0.75;
 export const CLOUD_DECODE_TPS = 60;
 const CLOUD_PREFILL_FACTOR = 40;
 
-/** The job is one Auto may send to a cloud model: not light work, and complex enough to want the network's top tier. */
+// ── Complexity class ─────────────────────────────────────────────────────────────────────
+//
+// Auto sorts every call into one of three classes before it scores anything:
+//
+//   simple    complexity < 0.25 and none of the "complex" signals: a small model on a CPU host or a
+//             Mac is fine, and when the preferred model is full the call may spill down to any model
+//             of at least SIMPLE_SPILL_MIN_B.
+//   standard  everything in between: spill stays at or above half the job's size floor (min 3B).
+//   complex   complexity >= COMPLEX_MIN_SCORE, or (non-light work) a long context, a large reply, an
+//             agentic tool-use turn over real code, several files, or several reasoning cues. It wants
+//             the network's top tier (GPU 30B-class or cloud models): its size floor is 14B and cloud
+//             models are candidates. It never spills below that floor; when nothing that size is
+//             healthy, the biggest available model is used and the decision says so (belowFloor).
+//
+// The class and the reason are recorded in each routing decision (routing.ts routingSummary).
+
+export type ComplexityClass = "simple" | "standard" | "complex";
+/** Complexity score from which a call is complex (complexity level "high"). */
+export const COMPLEX_MIN_SCORE = 0.5;
+/** Context (prompt + reply room) from which non-light work is complex. */
+export const LONG_CONTEXT_TOKENS = 16_000;
+/** max_tokens above which non-light work is complex (8192, the usual default, is not). */
+export const LARGE_REPLY_TOKENS = 8_192;
+/** Prompt size from which an agentic tool-use turn counts as complex without other code signals. */
+const AGENTIC_COMPLEX_PROMPT_TOKENS = 2_000;
+/** A simple call's spill floor: any model at least this size. */
+export const SIMPLE_SPILL_MIN_B = 1.5;
+
+type ClassInput = Pick<JobDescriptor, "job" | "complexity"> & Partial<Pick<JobDescriptor, "needsTools" | "contextTokens" | "maxTokens" | "promptTokens">>;
+
+/** The call's complexity class and why (see above). */
+export function complexityClassOf(job: ClassInput): { cls: ComplexityClass; why: string } {
+  const c = job.complexity;
+  const sig = (n: string) => c.signals?.find((s) => s.name === n)?.value ?? 0;
+  if (!isLightJob(job.job)) {
+    if (c.score >= COMPLEX_MIN_SCORE) return { cls: "complex", why: `complexity ${c.score.toFixed(2)}` };
+    if ((job.contextTokens ?? 0) >= LONG_CONTEXT_TOKENS) return { cls: "complex", why: `long context (${job.contextTokens} tokens)` };
+    if ((job.maxTokens ?? 0) > LARGE_REPLY_TOKENS) return { cls: "complex", why: `large reply (max ${job.maxTokens} tokens)` };
+    // Content signals only when the client did not say how hard it is.
+    if (c.hinted === undefined) {
+      if (job.job === "agentic" && job.needsTools && (sig("code") >= 0.5 || sig("agentSteps") > 0 || (job.promptTokens ?? 0) >= AGENTIC_COMPLEX_PROMPT_TOKENS)) return { cls: "complex", why: "agentic tool-use turn" };
+      if (sig("files") >= 0.4) return { cls: "complex", why: "multi-file" };
+      if (sig("reasoning") >= 0.66) return { cls: "complex", why: "reasoning-heavy" };
+    }
+  }
+  return c.score < 0.25 ? { cls: "simple", why: `complexity ${c.score.toFixed(2)}` } : { cls: "standard", why: `complexity ${c.score.toFixed(2)}` };
+}
+
+/** The complexity best fit sizes and weighs with: a complex call counts at least COMPLEX_MIN_SCORE. */
+export function routingComplexity(job: ClassInput): number {
+  return complexityClassOf(job).cls === "complex" ? Math.max(job.complexity.score, COMPLEX_MIN_SCORE) : job.complexity.score;
+}
+
+/** Smallest model a call may spill to when its preferred models are full (never below the client's hard floor). */
+export function spillFloorB(job: ClassInput, req: Pick<Requirements, "minParamsB" | "hardMinParamsB">): number {
+  const cls = complexityClassOf(job).cls;
+  const band = cls === "complex" ? req.minParamsB : cls === "standard" ? Math.min(req.minParamsB, Math.max(3, req.minParamsB / 2)) : Math.min(req.minParamsB, SIMPLE_SPILL_MIN_B);
+  return Math.max(band, req.hardMinParamsB ?? 0);
+}
+
+/**
+ * The job is one Auto may always send to a cloud model: not light work, and complex enough to want
+ * the network's top tier. Below that, a complex call (floor 14B) gets a cloud model when no healthy
+ * machine of that size on the network has a free slot (cloudConsidered).
+ */
 export function jobWantsTopTier(job: Pick<JobDescriptor, "job" | "complexity">): boolean {
   return !isLightJob(job.job) && job.complexity.score >= AUTO_CLOUD_MIN_COMPLEXITY;
 }
@@ -130,6 +194,11 @@ export interface AgentView {
   clientRttMs?: number;
   /** worldOwnerTag of the owner account, when known (a requester's own agents are left out of auto). */
   ownerTag?: string | null;
+  /**
+   * Not taking work now although online (its circuit is open, or it is under memory pressure):
+   * placed on only when no healthy candidate fits (spill, below).
+   */
+  unhealthy?: boolean;
 }
 
 export interface NetworkView {
@@ -250,7 +319,7 @@ export interface Requirements {
 
 /** Complexity raises the minimum: high complexity wants a 30B-class model, low takes small ones. */
 export function requirementsFor(job: JobDescriptor): Requirements {
-  const c = job.complexity.score;
+  const c = routingComplexity(job);
   const light = isLightJob(job.job);
   const byComplexity = light ? (c >= 0.75 ? 7 : c >= 0.5 ? 3 : 0) : c >= 0.75 ? 30 : c >= 0.5 ? 14 : c >= 0.25 ? 7 : 0;
   const hardMinParamsB = job.minParamsB && job.minParamsB > 0 ? job.minParamsB : undefined;
@@ -264,7 +333,7 @@ export function requirementsFor(job: JobDescriptor): Requirements {
 
 /** Weights for this job: complexity moves weight to quality and reliability; normalised to 1. */
 export function effectiveWeights(job: JobDescriptor, cfg: BestFitConfig = DEFAULT_BEST_FIT_CONFIG): BestFitWeights {
-  const k = cfg.complexityShift * job.complexity.score;
+  const k = cfg.complexityShift * routingComplexity(job);
   const w = { ...cfg.weights };
   w.quality *= 1 + k;
   w.reliability *= 1 + k / 2;
@@ -341,17 +410,30 @@ export function coldLoadMs(model: string): number {
   return Math.round(1_000 + paramsB(model) * 400);
 }
 
+/** Calls already waiting for `model`, per agent that holds it. */
+export function queuedShare(view: Pick<NetworkView, "waitingByModel">, model: string, holdersOfModel: number): number {
+  return (view.waitingByModel[model] ?? 0) / Math.max(1, holdersOfModel);
+}
+
+/**
+ * The agent could start one more call for the model now: its free slots less its share of the calls
+ * already waiting for that model (a burst placed on one host fills it before anyone pulls).
+ */
+export function hasFreeSlot(agent: Pick<AgentView, "freeSlots">, queued: number): boolean {
+  return agent.freeSlots - queued > 0;
+}
+
 export function estimate(job: JobDescriptor, agent: AgentView, model: string, view: Pick<NetworkView, "pickupP50Ms" | "waitingByModel" | "btcUsd">, holdersOfModel: number, cachedPrefix = false): Estimate {
   const tps = decodeTps(agent, model);
   const pre = prefillTps(agent, model);
   const prefillMs = ((cachedPrefix ? job.newTokens : job.promptTokens) / pre) * 1000;
   const decodeMs = (job.expectedOutputTokens / tps) * 1000;
   let waitMs = Math.max(50, view.pickupP50Ms || 250);
-  if (agent.freeSlots <= 0) {
+  const queued = queuedShare(view, model, holdersOfModel);
+  if (!hasFreeSlot(agent, queued)) {
     // A typical call on this agent: ~2k prompt tokens and ~500 reply tokens.
     const typical = (2_000 / pre + 500 / tps) * 1000;
-    const queued = (view.waitingByModel[model] ?? 0) / Math.max(1, holdersOfModel);
-    waitMs += typical * (0.5 + queued / Math.max(1, agent.slots));
+    waitMs += typical * (0.5 + Math.max(0, queued - Math.max(0, agent.freeSlots)) / Math.max(1, agent.slots));
   }
   // Model affinity: an agent that has to load the model first pays the load (and it may unload
   // another to make room), so an agent with it loaded wins a close call.
@@ -389,12 +471,21 @@ export interface Candidate {
   estimate: Estimate;
   /** Below the job's minimum size, kept because nothing that meets it is available. */
   belowFloor: boolean;
+  /** Chosen over the job's preferred models because those are full (within the spill band). */
+  spill?: boolean;
 }
 
 export type AffinityStatus = "none" | "kept" | "broken";
 
 export interface BestFitResult {
   chosen: Candidate | null;
+  /** The call's complexity class and why (complexityClassOf). */
+  complexityClass?: ComplexityClass;
+  complexityWhy?: string;
+  /** Capacity: "preferred" (a preferred model had a free slot), "spill" (they were full: spilled within the band), "queued" (nothing in the band is free). */
+  capacity?: "preferred" | "spill" | "queued";
+  /** Smallest model the call could spill to. */
+  spillFloorB?: number;
   /** Best agent per (model, class), best first (at most 8). */
   candidates: Candidate[];
   requirements: Requirements;
@@ -447,17 +538,17 @@ function scoreOf(parts: ScoreParts, w: BestFitWeights): number {
   return round3(w.quality * parts.quality + w.latency * parts.latency + w.price * parts.price + w.reliability * parts.reliability);
 }
 
-type Evaluated = Candidate & { cloud: boolean; contextOk: boolean; priceOk: boolean; toolsOk: boolean; free?: boolean };
+type Evaluated = Candidate & { cloud: boolean; contextOk: boolean; priceOk: boolean; toolsOk: boolean; free: boolean; healthy: boolean };
 
 /**
  * Cloud models are considered for this job: it wants the top tier, or no other machine meets its
  * hard requirements (tools, context, price ceiling, size floor): the fallback when nothing fits.
  */
-export function cloudConsidered(job: JobDescriptor, req: Requirements, all: ReadonlyArray<Pick<Evaluated, "cloud" | "toolsOk" | "contextOk" | "priceOk" | "paramsB" | "free">>): boolean {
+export function cloudConsidered(job: JobDescriptor, req: Requirements, all: ReadonlyArray<Pick<Evaluated, "cloud" | "toolsOk" | "contextOk" | "priceOk" | "paramsB"> & Partial<Pick<Evaluated, "free" | "healthy">>>): boolean {
   if (jobWantsTopTier(job)) return true;
-  // Pool capacity (owner 2026-11-24: a healthy cloud host is more GPUs in the pool): also when every
-  // other machine that meets the job is busy, so load spills onto the cloud host instead of queueing.
-  return !all.some((c) => !c.cloud && c.toolsOk && c.contextOk && c.priceOk && c.paramsB >= req.minParamsB && c.free !== false);
+  // Also when every other machine that meets the job is full or not taking work: the cloud host is
+  // one more machine in the pool (expand), and drops out again once one has room (contract).
+  return !all.some((c) => !c.cloud && c.toolsOk && c.contextOk && c.priceOk && c.paramsB >= req.minParamsB && c.free !== false && c.healthy !== false);
 }
 
 /**
@@ -495,7 +586,8 @@ function evaluate(job: JobDescriptor, view: NetworkView, cfg: BestFitConfig, req
       const cloud = a.computeClass === "cloud" || isCloudModel(model);
       if (cloud && !autoMayUseCloudModel(model, cfg.autoCloudModels ?? "all")) continue;
       const cached = !!session && session.agentId === a.agentId && session.model === model;
-      const est = estimate(job, a, model, view, holders.get(model) ?? 1, cached);
+      const held = holders.get(model) ?? 1;
+      const est = estimate(job, a, model, view, held, cached);
       const parts: ScoreParts = {
         quality: round3(qualityPrior(model, job, req, cfg.oversizePenalty)),
         latency: round3(1 / (1 + est.totalMs / target)),
@@ -504,10 +596,12 @@ function evaluate(job: JobDescriptor, view: NetworkView, cfg: BestFitConfig, req
       };
       out.push({
         model, computeClass: a.computeClass, agentId: a.agentId, agentLabel: a.label, coordinatorId: a.coordinatorId, local: a.local,
-        paramsB: paramsB(model), score: scoreOf(parts, w), parts, estimate: est, belowFloor: false, cloud, free: a.freeSlots > 0,
+        paramsB: paramsB(model), score: scoreOf(parts, w), parts, estimate: est, belowFloor: false, cloud,
         toolsOk: !req.needsTools || callsTools(model),
         contextOk: req.contextTokens <= contextWindowOf(a, model),
         priceOk: job.maxCSats === undefined || est.cSats <= job.maxCSats,
+        free: !a.unhealthy && hasFreeSlot(a, queuedShare(view, model, held)),
+        healthy: !a.unhealthy,
       });
     }
   }
@@ -533,13 +627,16 @@ function whyChosen(c: Candidate, next: Candidate | undefined, w: BestFitWeights,
 export function bestFit(job: JobDescriptor, view: NetworkView, cfg: BestFitConfig = DEFAULT_BEST_FIT_CONFIG, session?: SessionMemo, nowMs = 0): BestFitResult {
   const req = requirementsFor(job);
   const w = effectiveWeights(job, cfg);
+  const cc = complexityClassOf(job);
+  const bandB = spillFloorB(job, req);
+  const classInfo = { complexityClass: cc.cls, complexityWhy: cc.why, spillFloorB: bandB };
   const sessionLive = session && (nowMs === 0 || nowMs - session.atMs <= cfg.sessionTtlMs) ? session : undefined;
   const evaluated = evaluate(job, view, cfg, req, w, sessionLive);
   // Cloud models only for top-tier jobs, or when nothing else meets the job (cloudConsidered).
   const all = cloudConsidered(job, req, evaluated) ? evaluated : evaluated.filter((c) => !c.cloud);
   const hardB = req.hardMinParamsB ?? 0;
   const fits = cloudTier(job, all.filter((c) => c.toolsOk && c.contextOk && c.priceOk));
-  const header = `${job.job.replace("_", " ")} · complexity ${describeComplexity(job.complexity, 2)}`;
+  const header = `${job.job.replace("_", " ")} · complexity ${describeComplexity(job.complexity, 2)} · ${cc.cls}${cc.why.startsWith("complexity") ? "" : ` (${cc.why})`}`;
   if (fits.length === 0 || (hardB > 0 && !fits.some((c) => c.paramsB >= hardB))) {
     const big = (c: Evaluated) => c.paramsB >= hardB;
     const rejectedCode: NonNullable<BestFitResult["rejectedCode"]> =
@@ -561,26 +658,50 @@ export function bestFit(job: JobDescriptor, view: NetworkView, cfg: BestFitConfi
         ? `every fitting model costs more than the ${job.maxCSats} cSats ceiling (the cheapest, ${cheapestC!.model} on ${cheapestC!.computeClass}, is about ${round3(cheapestC!.estimate.cSats)} cSats)`
         : `No machine on the network can run this job right now (needs ${needs}; online: ${onlineModels(view, cfg)}${cloudNote})`;
     const cheapest = cheapestC ? round3(cheapestC.estimate.cSats) : undefined;
-    return { chosen: null, candidates: [], requirements: req, weights: w, affinity: { status: "none" }, reason: `${header}: nothing fits (${rejected})`, rejected, rejectedCode, ...(cheapest !== undefined ? { cheapestCSats: cheapest } : {}) };
+    return { chosen: null, candidates: [], requirements: req, weights: w, affinity: { status: "none" }, ...classInfo, reason: `${header}: nothing fits (${rejected})`, rejected, rejectedCode, ...(cheapest !== undefined ? { cheapestCSats: cheapest } : {}) };
   }
-  let pool: Candidate[] = fits.filter((c) => c.paramsB >= req.minParamsB);
+  // Agents not taking work now (circuit open, memory pressure) only when nothing healthy fits.
+  const live = fits.some((c) => c.healthy) ? fits.filter((c) => c.healthy) : fits;
+  let pool: Evaluated[] = live.filter((c) => c.paramsB >= req.minParamsB);
+  let capacity: NonNullable<BestFitResult["capacity"]> = "preferred";
+  if (!pool.some((c) => c.free)) {
+    // Expand: the preferred models are full, so the call spills to models with a free slot within
+    // the band its complexity allows (spillFloorB). Contract: once a preferred model has a free slot
+    // again, this step does not run and calls go back to it.
+    const spill = live.filter((c) => c.free && c.paramsB < req.minParamsB && c.paramsB >= bandB).map((c) => ({ ...c, spill: true }));
+    if (spill.length) {
+      pool = [...pool, ...spill];
+      capacity = "spill";
+    } else capacity = "queued";
+  }
   if (pool.length === 0) {
-    // Nothing meets the minimum: the biggest available models, marked.
-    const top = Math.max(...fits.map((c) => c.paramsB));
-    pool = fits.filter((c) => c.paramsB >= top).map((c) => ({ ...c, belowFloor: true }));
+    // Nothing meets the minimum: the biggest available models, marked. A complex call takes the
+    // biggest even when it is busy; other calls the biggest with a free slot, if any.
+    const src = cc.cls !== "complex" && live.some((c) => c.free) ? live.filter((c) => c.free) : live;
+    const top = Math.max(...src.map((c) => c.paramsB));
+    pool = src.filter((c) => c.paramsB >= top).map((c) => ({ ...c, belowFloor: true }));
+    capacity = pool.some((c) => c.free) ? "spill" : "queued";
   }
+  // Never queue a simple or standard call behind a full host while a candidate in its band has a
+  // free slot: free candidates rank first. A complex call, or one that asks for the best quality,
+  // is scored as before: a much more capable model may be worth a short wait (auto-replace.ts moves
+  // it if nobody picks it up).
+  const freeFirst = cc.cls !== "complex" && job.quality !== "best";
+  const better = (a: Evaluated, b: Evaluated) =>
+    (freeFirst && a.free !== b.free ? (a.free ? -1 : 1) : 0) || b.score - a.score || a.estimate.totalMs - b.estimate.totalMs;
   // Best agent per (model, class).
-  const byPair = new Map<string, Candidate>();
+  const byPair = new Map<string, Evaluated>();
   for (const c of pool) {
     const k = `${c.model}\u0000${c.computeClass}`;
     const prev = byPair.get(k);
-    if (!prev || c.score > prev.score || (c.score === prev.score && c.estimate.totalMs < prev.estimate.totalMs)) byPair.set(k, c);
+    if (!prev || better(c, prev) < 0) byPair.set(k, c);
   }
   const strip = (c: Candidate): Candidate => {
-    const { contextOk: _a, priceOk: _b, toolsOk: _c, cloud: _d, free: _e, ...rest } = c as Candidate & { contextOk?: boolean; priceOk?: boolean; toolsOk?: boolean; cloud?: boolean; free?: boolean };
+    const { contextOk: _a, priceOk: _b, toolsOk: _c, cloud: _d, free: _e, healthy: _f, ...rest } = c as Candidate & { contextOk?: boolean; priceOk?: boolean; toolsOk?: boolean; cloud?: boolean; free?: boolean; healthy?: boolean };
     return rest;
   };
-  const ranked = [...byPair.values()].sort((a, b) => b.score - a.score || a.estimate.totalMs - b.estimate.totalMs).map(strip);
+  const ranked = [...byPair.values()].sort(better).map(strip);
+  const freeKeys = new Set(pool.filter((c) => c.free).map((c) => `${c.agentId}\u0000${c.model}`));
   let chosen = ranked[0];
   let affinity: BestFitResult["affinity"] = { status: "none" };
 
@@ -610,14 +731,17 @@ export function bestFit(job: JobDescriptor, view: NetworkView, cfg: BestFitConfi
   const why = affinity.status === "kept" && affinity.reason ? `session affinity: ${affinity.reason}` : whyChosen(chosen, next, w, req);
   // A cloud model that would have met the size but costs more than the ceiling: say so.
   const cloudOverBudget = chosen.belowFloor && all.some((c) => c.cloud && c.toolsOk && c.contextOk && !c.priceOk);
-  const floorNote = chosen.belowFloor ? ` (nothing ≥ ${req.minParamsB}B is available${cloudOverBudget ? ` within the ${job.maxCSats} cSats ceiling` : ""})` : "";
+  const floorNote = chosen.belowFloor ? ` (nothing ≥ ${req.minParamsB}B is available${cloudOverBudget ? ` within the ${job.maxCSats} cSats ceiling` : ""}${cc.cls === "complex" ? `; complex call (${cc.why}) on a smaller model` : ""})` : "";
+  const spillNote = chosen.spill ? ` (spilled: every model ≥ ${req.minParamsB}B is full; ${cc.cls} band ≥ ${bandB}B)` : "";
   return {
     chosen,
     candidates: ranked.slice(0, 8),
     requirements: req,
     weights: w,
     affinity,
-    reason: `${header}: ${why}${floorNote}`,
+    ...classInfo,
+    capacity: chosen.spill || chosen.belowFloor ? capacity : freeKeys.has(`${chosen.agentId}\u0000${chosen.model}`) ? "preferred" : "queued",
+    reason: `${header}: ${why}${floorNote}${spillNote}`,
   };
 }
 

@@ -823,7 +823,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         recordPlacement(body.taskId, subtask.id, { model: body.model, computeClass: taskClass === "any" ? null : taskClass }, portalChoice);
       }
       // #526: a named network call goes first to the free holder nearest the buyer (locality.ts).
-      const near = billed ? nearestFreeHolder(freeLocalHolders(body.model, taskClass, needTokens), clientRegion) : undefined;
+      const near = billed ? nearestFreeHolder(freeLocalHolders(body.model, taskClass, needTokens), clientRegion, body.model) : undefined;
       if (near) preferAgent(subtask.id, near.agentId, LOCALITY_PREFER_MS);
     }
     if (onlyAccountId && !reservationId && !hasPortalServiceToken((req as any).headers ?? {})) {

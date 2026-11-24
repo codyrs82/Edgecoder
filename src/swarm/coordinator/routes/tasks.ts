@@ -125,7 +125,7 @@ import { inferenceStreams, judgeInferenceReply, retryInferenceElsewhere } from "
 import { isMemoryRefusal, noteAgentResult, noteDispatched } from "../memory-admission.js";
 import { EMPTY_REPLY_ERROR } from "../../inference-runner.js";
 import { judgeResult } from "../../result-outcome.js";
-import { claimRule, mayTakeNow, noteAgentPull, noteClaimed } from "../dispatch.js";
+import { claimRule, mayTakeNow, noteAgentPull, noteClaimed, noteModelServed } from "../dispatch.js";
 import { noteRestrictedOptIn, restrictedCalls, restrictedSubmitGate } from "../restricted.js";
 import type { RemoteGrant } from "../../remote-grants.js";
 
@@ -460,6 +460,8 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     if (task) noteClaimed(task.id);
     // Host memory: a call for a model not loaded there counts against the agent's headroom until it shows as loaded.
     if (task?.kind === "inference") noteDispatched(body.agentId, task.requestedModel, nowMs);
+    // Model affinity and locality (dispatch.ts): the model is warm there now, telemetry or not.
+    if (task?.kind === "inference") noteModelServed(body.agentId, task.requestedModel, nowMs);
     if (task) restrictedCalls.claimed(task.id, body.agentId, pullerAccount);
     if (task) {
       // Market: the trade prices at the agent's ask; remembered per subtask for accrual.

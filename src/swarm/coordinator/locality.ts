@@ -13,6 +13,14 @@
  * that is busy does not hold the call: the call overflows to the next nearest free one, and after
  * the preference lapses anyone eligible may take it, as before.
  *
+ * Warm models (2026-11-24 run 2: 22% nearest, every US 1.5b call on the owner's Mac): the preferred
+ * host is exempt from dispatch's model-affinity deferral, and the preference lasts longer than that
+ * deferral (LOCALITY_PREFER_MS > DEFER_MS), so a near host with a free slot is not overruled by a far
+ * host that has the model loaded. The cold load is weighed here instead: a candidate known to be cold
+ * (it reports its loaded models, the model is not among them, and it has not served it within
+ * WARM_MS) counts the load time as distance when another free candidate has the model warm. A host
+ * that reports no loaded models is never assumed cold, and one that served the model lately is warm.
+ *
  * peerWithFreeCapacity: a named model with no free slot here, which a peer coordinator's agents do
  * have free, is answered with route_elsewhere when the caller allows it (routeRedirect), before
  * anything is reserved, exactly as an Auto call whose best fit is on a peer: the caller resubmits
@@ -26,13 +34,15 @@ import { regionDistanceKm } from "../../common/geo-regions.js";
 import { agentHasModel } from "../model-catalog.js";
 import { queue, reservations } from "./context.js";
 import { agentCapabilities, activeBlacklistRecord } from "./agent-state.js";
-import { agentContextWindow, agentLoadReport, freeModelSlots } from "./dispatch.js";
+import { agentContextWindow, agentLoadReport, freeModelSlots, modelKnownCold, modelWarmOn } from "./dispatch.js";
+import { coldLoadMs } from "./best-fit.js";
+import { KM_PER_RTT_MS } from "../../common/geo-regions.js";
 import { effectiveHardware } from "./economy.js";
 import { agentUnavailable, memoryAdmits } from "./memory-admission.js";
 import { agentRegionCode, peerWorldViews, peerAgentViews } from "./routing.js";
 
-/** How long the nearest free holder keeps a named-model call before anyone eligible may take it. */
-export const LOCALITY_PREFER_MS = 1_000;
+/** How long the nearest free holder keeps a named-model call before anyone eligible may take it (longer than DEFER_MS). */
+export const LOCALITY_PREFER_MS = 2_000;
 /** A fully busy-but-free-slot agent counts as this many km farther (load against distance). */
 export const LOCALITY_LOAD_KM = 1_500;
 
@@ -43,9 +53,20 @@ export interface LocalHolder {
 }
 
 /** This coordinator's agents that could start `model` now in `taskClass`, with their free slots. */
-export function freeLocalHolders(model: string, taskClass: ComputeClassId | "any", neededTokens: number, nowMs = Date.now()): Array<{ agentId: string; free: number; slots: number; region: string | null }> {
+export interface FreeHolder {
+  agentId: string;
+  free: number;
+  slots: number;
+  region: string | null;
+  /** The model is loaded there or it served it lately (dispatch.ts modelWarmOn). */
+  warm?: boolean;
+  /** Known not to have the model loaded (dispatch.ts modelKnownCold): it would pay a cold load. */
+  cold?: boolean;
+}
+
+export function freeLocalHolders(model: string, taskClass: ComputeClassId | "any", neededTokens: number, nowMs = Date.now()): FreeHolder[] {
   const claims = queue.activeClaims();
-  const out: Array<{ agentId: string; free: number; slots: number; region: string | null }> = [];
+  const out: FreeHolder[] = [];
   for (const [id, cap] of agentCapabilities) {
     if (!agentHasModel(cap, model)) continue;
     if (activeBlacklistRecord(id) || cap.hostApproved === false || reservations.isHeld(id, nowMs) || agentUnavailable(id, nowMs)) continue;
@@ -57,22 +78,25 @@ export function freeLocalHolders(model: string, taskClass: ComputeClassId | "any
     if (!memoryAdmits(id, model, claims.get(id)?.inference ?? 0, nowMs)) continue;
     const free = freeModelSlots(id, claims);
     if (free <= 0) continue;
-    out.push({ agentId: id, free, slots: Math.max(1, agentLoadReport(id)?.slots ?? cap.maxConcurrentTasks ?? 1), region: agentRegionCode(cap) });
+    out.push({ agentId: id, free, slots: Math.max(1, agentLoadReport(id)?.slots ?? cap.maxConcurrentTasks ?? 1), region: agentRegionCode(cap), warm: modelWarmOn(id, model, nowMs), cold: modelKnownCold(id, model, nowMs) });
   }
   return out;
 }
 
 /**
- * The free holder to prefer for a buyer in `clientRegion`: the smallest distance plus load term.
- * Undefined when the region or every candidate's region is unknown (no locality then).
+ * The free holder to prefer for a buyer in `clientRegion`: the smallest distance plus load term,
+ * plus the cold-load time (as distance) for a candidate known to be cold when another has the model
+ * warm. Undefined when the region or every candidate's region is unknown (no locality then).
  */
-export function nearestFreeHolder(candidates: ReadonlyArray<{ agentId: string; free: number; slots: number; region: string | null }>, clientRegion: string | null | undefined): LocalHolder | undefined {
+export function nearestFreeHolder(candidates: ReadonlyArray<FreeHolder>, clientRegion: string | null | undefined, model?: string): LocalHolder | undefined {
   if (!clientRegion) return undefined;
+  const anyWarm = candidates.some((c) => c.warm);
+  const coldKm = model ? coldLoadMs(model) * KM_PER_RTT_MS : 0;
   let best: (LocalHolder & { score: number }) | undefined;
   for (const c of candidates) {
     const km = regionDistanceKm(clientRegion, c.region);
     if (km === null) continue;
-    const score = km + LOCALITY_LOAD_KM * (1 - c.free / Math.max(1, c.slots));
+    const score = km + LOCALITY_LOAD_KM * (1 - c.free / Math.max(1, c.slots)) + (anyWarm && c.cold ? coldKm : 0);
     if (!best || score < best.score || (score === best.score && c.free > best.free)) best = { agentId: c.agentId, km, free: c.free, score };
   }
   return best ? { agentId: best.agentId, km: best.km, free: best.free } : undefined;
