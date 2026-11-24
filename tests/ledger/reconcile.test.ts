@@ -118,4 +118,9 @@ describe("#115 reconcileLedger", () => {
     expect(r.discrepancies[0]).toMatchObject({ kind: "task_overpaid", taskId: "t-over", detail: { over: 0.007 } });
     expect(r.tasksChecked).toBe(3);
   });
+
+  it("a task that paid nothing and refunded its whole reserve is consistent", () => {
+    const r = run(snapshot({ taskReserves: [{ taskId: "t-own", reserved: "5.334000", paid: "0", refunded: "5.334000" }] }));
+    expect(r).toMatchObject({ ok: true, mismatches: 0, tasksChecked: 1 });
+  });
 });

@@ -179,7 +179,8 @@ daily budget. Each reply ends with where it ran (your machine or the network) an
 
 ## 9. Host for the network (optional)
 
-Hosts earn 95 % of what their machines' calls cost. Hosting is by request: send the form at
+Hosts earn 95 % of what their machines' calls cost. Calls your own account sends to your own
+machines are free and don't earn payouts. Hosting is by request: send the form at
 [`/host`](https://edgecoder.io/host) and an admin reviews it (`HOST_APPROVAL_REQUIRED`). Until then
 your machines run only your own work. What helps: a machine that stays on with a good connection,
 and a model people use (a 30B coder on a GPU or a 32 GB+ Mac earns most).

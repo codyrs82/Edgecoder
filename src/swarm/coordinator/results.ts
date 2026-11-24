@@ -9,7 +9,7 @@ import { request } from "undici";
 import type { Subtask, SubtaskResult } from "../../common/types.js";
 import { signForwardedResult } from "../../mesh/peer-trust.js";
 import type { AgentResultEnvelope } from "../../mesh/forwarded-agent-envelope.js";
-import { accruePricedJob, grantCreditsIdempotent, refundTxId, rewardAccountForAgent } from "../../credits/store.js";
+import { accruePricedJob, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, sameAccountGroup } from "../../credits/store.js";
 import { modelTokenPrice } from "../../economy/cloud-pricing.js";
 import {
   clampToBand,
@@ -375,6 +375,15 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
   if (!r.ok && !r.meta.payableFailure) return;
   // A reserved agent is paid by its lease (endReservation); your own machine isn't paid by you.
   if (subtask.projectMeta.reservationId || subtask.projectMeta.onlyAccountId) return;
+  // Nor when a task billed here ran on a machine of the account that sent it: the requester is not
+  // charged for it (nothing is taken from its reserve, which goes back whole at settle) and the
+  // machine earns nothing for it. Usage still records the run.
+  const ownBilling = peerOfferBudgetMsat.has(r.subtaskId) ? undefined : taskBilling.get(taskId);
+  if (ownBilling && !ownBilling.refunded && (await sameAccountGroup(ownBilling.accountId, rewardAccountId))) {
+    claimedTradePrice.delete(r.subtaskId);
+    app.log.info({ taskId, subtaskId: r.subtaskId, agentId: r.agentId }, "own_account_job_not_billed");
+    return;
+  }
   const { cap, eff, computeClass, hardwareWeight, modelParamSizeB, perCredit, rateMsat, priced } = priceExecution(r);
   claimedTradePrice.delete(r.subtaskId);
   // What is paid is what the requester is charged: taken out of what was set aside for the task
@@ -696,9 +705,12 @@ function returnTaskBudget(taskId: string, msat: number): void {
  * requester out of what the task set aside and has not used yet (never more); returns the charge,
  * which is all the peer may pay its agent.
  */
-export function chargePeerWork(taskId: string, wantMsat: number): number {
+export async function chargePeerWork(taskId: string, wantMsat: number, agentId?: string): Promise<number> {
   const billing = taskBilling.get(taskId);
   if (!billing || billing.refunded) return 0;
+  // Run on a machine of the requester's own account: not charged, so the peer pays its agent nothing.
+  if (agentId && (await sameAccountGroup(billing.accountId, await rewardAccountForAgent(agentId).catch(() => agentId)))) return 0;
+  if (billing.refunded) return 0;
   const want = Number.isFinite(wantMsat) ? Math.max(0, wantMsat) : 0;
   const take = Math.min(want, Math.max(0, billing.reservedMsat - billing.costMsat));
   billing.costMsat += take;

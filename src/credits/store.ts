@@ -166,6 +166,34 @@ export async function rewardAccountForAgent(agentId: string): Promise<string> {
   return ownership?.accountId ?? agentId;
 }
 
+const sameAccountCache = new Map<string, { same: boolean; atMs: number }>();
+const SAME_ACCOUNT_TTL_MS = 5 * 60_000;
+const SAME_ACCOUNT_CACHE_MAX = 10_000;
+
+/**
+ * Whether work bought by `buyerAccountId` and run on a machine of `hostAccountId` stays within one
+ * account: the same credit account, or two accounts with a member in common (account_memberships).
+ * Such a job is not a sale: it is metered but neither charged nor paid (results.ts). A lookup that
+ * fails counts as different accounts, as before this check.
+ */
+export async function sameAccountGroup(buyerAccountId: string, hostAccountId: string, nowMs = Date.now()): Promise<boolean> {
+  if (!buyerAccountId || !hostAccountId) return false;
+  if (buyerAccountId === hostAccountId) return true;
+  if (!pgStore) return false;
+  const key = `${buyerAccountId}\n${hostAccountId}`;
+  const hit = sameAccountCache.get(key);
+  if (hit && nowMs - hit.atMs < SAME_ACCOUNT_TTL_MS) return hit.same;
+  let same = false;
+  try {
+    same = await pgStore.accountsShareMember(buyerAccountId, hostAccountId);
+  } catch {
+    return false;
+  }
+  if (sameAccountCache.size >= SAME_ACCOUNT_CACHE_MAX) sameAccountCache.clear();
+  sameAccountCache.set(key, { same, atMs: nowMs });
+  return same;
+}
+
 function assertAmount(credits: number): void {
   if (!Number.isFinite(credits) || credits <= 0) throw new Error("invalid_credit_amount");
 }
