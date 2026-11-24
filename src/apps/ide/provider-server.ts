@@ -51,6 +51,7 @@ import { ATTACHMENT_BODY_LIMIT, attachmentsSchema, withAttachments } from "./att
 import { checkProject } from "./diagnostics.js";
 import { isProjectTrusted, loadOrCreateMachineSalt, setProjectTrusted } from "./workspace-trust.js";
 import { registerCodeRemoteRoutes } from "./code-remote.js";
+import { desktopTurnFor, firstAnswer, registerDesktopChatRoutes } from "./desktop-chats.js";
 import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
 import { NewProjectError, PROJECT_TEMPLATES, createNewProject } from "./new-project.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
@@ -1321,6 +1322,8 @@ const ideChatSchema = z.object({
       budgetCSats: z.number().min(0).max(1e7).optional(),
     })
     .optional(),
+  /** The Code view chat this turn belongs to: its mirror session shows the turn live (desktop-chats.ts). */
+  chatId: z.string().uuid().optional(),
   /** Where the model runs: this computer (default), your machines, any network agent (optionally one class), or a reserved machine. */
   compute: z
     .object({
@@ -1499,8 +1502,14 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
 
   const lastUser = [...body.messages].reverse().find((m) => m.role === "user");
   const tracked = activity.begin({ kind: body.origin ?? "code", title: lastUser?.content ?? "", source: body.origin === "chat" ? "EdgeCoder chat" : "Code", model: chatModel });
+  const abort = new AbortController();
+  reply.raw.on("close", () => { if (!reply.raw.writableEnded) abort.abort(); });
+  // A Code view chat's mirror session shows this turn live to the owner's phone, which may stop it
+  // (abort) and answer its approvals (desktop-chats.ts).
+  const mirror = body.origin !== "chat" ? desktopTurnFor(sessions, body.chatId, turnId, abort) : null;
   function sendEvent(event: IdeStreamEvent): void {
     tracked.event(event);
+    mirror?.event(event);
     if (clientDisconnected) return;
     reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
   }
@@ -1508,8 +1517,6 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
   checkpoints.begin(turnId, projectRoot);
   sendEvent({ type: "turn", id: turnId });
 
-  const abort = new AbortController();
-  reply.raw.on("close", () => { if (!reply.raw.writableEnded) abort.abort(); });
   // open_pull_request is offered only when the project is a GitHub repository.
   const projectTools = hasGitHubOrigin(projectRoot) ? toolSchemas() : toolSchemas().filter((t) => t.function.name !== "open_pull_request");
   // Web (docs/web-tool.md): offered by default (the chat's "Web: Auto"), and the model decides when
@@ -1533,48 +1540,44 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
   const basePrompt = (format: "native" | "text") => [promptCtx ? buildIdeAgentSystemPrompt(promptCtx, projectRoot, projectRules, format) : "", promptCtx ? nodeNote : "", web ? webSystemNote() : ""].filter(Boolean).join("\n\n");
   const executeTool = (tool: ToolName, args: Record<string, unknown>, opts: { approved: boolean }) => executor.execute(tool, args, opts);
   reply.raw.on("close", () => tracked.end("cancelled"));
-  await runAgentLoop({
-    chat: isFrontierModelId(chatModel)
-      ? frontierChatFn(chatModel, { sessionKey: `chat:${turnId}` }, sendEvent, abort.signal)
-      : chatFnFor(body.compute, chatModel, ollamaHost, sendEvent, abort.signal, "EdgeCoder chat", body.compute?.target === "auto" ? { sessionKey: `chat:${turnId}` } : undefined),
-    systemPrompt: helpersOn ? withTentacleGuidance(basePrompt, true, tentacles.unreported(helperId!)) : basePrompt,
-    messages,
-    // Web grounding: a question that needs fresh facts is searched once before the first turn (not in Manual, where web calls ask).
-    ...(web ? webGrounding(web, messages, { skip: chatMode === "ask" }) : {}),
-    sendEvent,
-    isCancelled: () => clientDisconnected,
-    tools,
-    runTool: makeToolRunner({
-      prepare: (tool, args) => preparePullRequestArgs(executor, tool, args),
-      execute: helpersOn ? tentacleExecutor(tentacles, helperId!, executeTool) : executeTool,
+  try {
+    await runAgentLoop({
+      chat: isFrontierModelId(chatModel)
+        ? frontierChatFn(chatModel, { sessionKey: `chat:${turnId}` }, sendEvent, abort.signal)
+        : chatFnFor(body.compute, chatModel, ollamaHost, sendEvent, abort.signal, "EdgeCoder chat", body.compute?.target === "auto" ? { sessionKey: `chat:${turnId}` } : undefined),
+      systemPrompt: helpersOn ? withTentacleGuidance(basePrompt, true, tentacles.unreported(helperId!)) : basePrompt,
+      messages,
+      // Web grounding: a question that needs fresh facts is searched once before the first turn (not in Manual, where web calls ask).
+      ...(web ? webGrounding(web, messages, { skip: chatMode === "ask" }) : {}),
       sendEvent,
-      waitForApproval: (callId, tool, args) =>
-        new Promise<boolean>((resolveApproval) => {
-          // 5-minute timeout — auto-reject
-          const timer = setTimeout(() => {
-            if (pendingApprovals.has(callId)) {
-              pendingApprovals.delete(callId);
-              resolveApproval(false);
-            }
-          }, 5 * 60 * 1000);
-          pendingApprovals.set(callId, {
-            resolve: (val: boolean) => {
-              clearTimeout(timer);
-              resolveApproval(val);
-            },
-            tool,
-            args,
-            owner: turnId,
-            projectRoot,
-          });
-        }),
-      captureBeforeWrite: (path) => checkpoints.capture(turnId, path),
-      turnId,
-      decide: (tool, args) => decideFor(chatMode, projectRoot, tool, args),
-      shellHint: (command, output) => toolchainFailureHint(projectRoot, command, output),
-    }),
-    plan: chatMode === "plan",
-  });
+      // Stopped here (the app closed the stream) or from the phone (the mirror aborts the turn).
+      isCancelled: () => clientDisconnected || abort.signal.aborted,
+      tools,
+      runTool: makeToolRunner({
+        prepare: (tool, args) => preparePullRequestArgs(executor, tool, args),
+        execute: helpersOn ? tentacleExecutor(tentacles, helperId!, executeTool) : executeTool,
+        sendEvent,
+        // The first answer wins: the app (/v1/ide/tool-approval), the phone (the mirror) or 5 minutes (rejected).
+        waitForApproval: (callId, tool, args) =>
+          firstAnswer(
+            { id: callId, tool, args },
+            mirror,
+            (answer) => pendingApprovals.set(callId, { resolve: answer, tool, args, owner: turnId, projectRoot }),
+            () => pendingApprovals.delete(callId),
+            5 * 60 * 1000,
+          ),
+        captureBeforeWrite: (path) => checkpoints.capture(turnId, path),
+        turnId,
+        decide: (tool, args) => decideFor(chatMode, projectRoot, tool, args),
+        shellHint: (command, output) => toolchainFailureHint(projectRoot, command, output),
+      }),
+      plan: chatMode === "plan",
+    });
+  } finally {
+    mirror?.end();
+  }
+  // Stopped from the phone: the app's copy says so too (the mirror's reply already does).
+  if (abort.signal.aborted && !clientDisconnected) reply.raw.write(`data: ${JSON.stringify({ type: "text", content: "\n\n_(stopped)_" })}\n\n`);
 
   // Between turns the chat's helpers have no stream: their results reach the lead's next turn.
   if (helperBinding && chatHelpers.get(helperId!) === helperBinding) helperBinding.emit = null;
@@ -1863,6 +1866,8 @@ const sessions: SessionHub = new SessionHub({
   onSessionStop: (id) => void tentacles.cancelAll(id),
 }, { permissions: permissionStore });
 registerSessionRoutes(app, sessions);
+// The desktop Code view's chats, mirrored so the owner's phone can read and continue them (desktop-chats.ts).
+registerDesktopChatRoutes(app, sessions);
 registerTentacleRoutes(app, sessions, tentacles, { isChat: (id) => chatHelpers.has(id) && !sessions.peek(id) });
 // Coding sessions driven from the phone, this Mac's side (code-remote.ts): trusted folders only, no paths out.
 registerCodeRemoteRoutes(app, sessions, { account: machineAccount, checkpoints, machineSalt: (() => { let salt: string | undefined; return () => (salt ??= loadOrCreateMachineSalt()); })(), branch: currentBranch });
@@ -1875,7 +1880,7 @@ registerActivityRoutes(app, {
     : null,
   ownTaskIds: () => new Set([...ownInflightTaskIds, ...networkTasks.list().filter((t) => t.state === "running").map((t) => t.id)]),
   extra: [
-    () => sessions.list().filter((s) => s.running).map((s) => sessionActivity(s, sessions.snapshot(s.id).running as Parameters<typeof sessionActivity>[1])).filter((x) => x !== null),
+    () => sessions.list().filter((s) => s.running && !s.external).map((s) => sessionActivity(s, sessions.snapshot(s.id).running as Parameters<typeof sessionActivity>[1])).filter((x) => x !== null),
     () => bots.list().map((b) => botActivity(b)).filter((x) => x !== null),
     () => sessions.list().flatMap((s) => tentacles.list(s.id).tentacles.map((t) => tentacleActivity(t, s.title))).filter((x) => x !== null),
     () => networkTasks.list().map((t) => networkTaskActivity(t)).filter((x) => x !== null),

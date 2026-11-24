@@ -119,6 +119,34 @@ export interface SessionData {
   ownerAccount?: string;
   /** Estimated USD of this session's frontier calls (the user's own key; billed by the provider). */
   frontierUsd?: number;
+  /**
+   * The desktop app's Code view chat this session mirrors (desktop-chats.ts): the app keeps the chat
+   * and runs its turns over /v1/ide/chat; this copy lets the owner's phone read and continue it.
+   */
+  chatId?: string;
+}
+
+/** A message of a desktop Code view chat, as the app syncs it (syncDesktopChat). */
+export interface DesktopChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  at: number;
+  turnId?: string;
+  changedFiles?: string[];
+  plan?: boolean;
+}
+
+/** A desktop Code view turn (POST /v1/ide/chat) shown as the session's running turn (beginDesktopTurn). */
+export interface DesktopTurn {
+  /** One of the turn's agent events (kept and sent to the session's clients like a turn's own). */
+  event(e: IdeStreamEvent): void;
+  /** A call waits for approval: the phone may answer it too. Resolves with the first answer. */
+  ask(callId: string, tool: ToolName, args: Record<string, unknown>): Promise<boolean>;
+  /** The app answered `callId` itself: it leaves the session's pending list. */
+  answered(callId: string, approved: boolean): void;
+  /** The turn ended: its reply joins the transcript and queued messages start the next turn. */
+  end(): void;
 }
 
 export interface SessionEvent {
@@ -151,6 +179,10 @@ export interface SessionSummary {
   running: boolean;
   /** Published and a client is attached or a turn is running. */
   live: boolean;
+  /** A desktop Code view chat's mirror (its chat id). */
+  chatId?: string;
+  /** The running turn is the app's own /v1/ide/chat turn (already counted as Code activity). */
+  external?: boolean;
   controller: ClientRef | null;
   clients: ClientRef[];
   pending: number;
@@ -223,6 +255,8 @@ interface Running {
   changed: string[];
   usage?: TurnUsage;
   done: Promise<void>;
+  /** A desktop Code view turn run by /v1/ide/chat (beginDesktopTurn), not by this hub. */
+  external?: boolean;
 }
 
 interface Live {
@@ -462,6 +496,8 @@ export class SessionHub {
           controller: null,
           clients,
           pending: l.pending.size,
+          ...(s.chatId ? { chatId: s.chatId } : {}),
+          ...(l.running?.external ? { external: true } : {}),
         };
       });
   }
@@ -567,24 +603,26 @@ export class SessionHub {
     return turnId;
   }
 
+  /** One of a turn's agent events: kept on the running turn (text, files, usage) and sent to every client. */
+  private turnEvent(s: SessionData, r: Running, e: IdeStreamEvent): void {
+    if (e.type === "text") r.text += e.content;
+    if (e.type === "file_change" && !r.changed.includes(e.path)) r.changed.push(e.path);
+    if (e.type === "usage") {
+      const cSats = Number.isFinite(e.cSats) ? e.cSats : 0;
+      const usd = typeof e.usd === "number" && Number.isFinite(e.usd) ? e.usd : 0;
+      const call = { cSats, where: e.where, ...(e.model ? { model: e.model } : {}), ...(e.served ? { served: e.served } : {}), ...(usd ? { usd } : {}) };
+      const turnUsd = Number(((r.usage?.usd ?? 0) + usd).toFixed(6));
+      r.usage = { cSats: Number(((r.usage?.cSats ?? 0) + cSats).toFixed(6)), where: e.where, calls: [...(r.usage?.calls ?? []), call].slice(-50), ...(turnUsd ? { usd: turnUsd } : {}) };
+      s.cSats = Number((s.cSats + cSats).toFixed(6));
+      if (usd) s.frontierUsd = Number(((s.frontierUsd ?? 0) + usd).toFixed(6));
+    }
+    if (e.type === "status" && e.message.startsWith("Auto: ")) r.usage = { ...r.usage, cSats: r.usage?.cSats ?? 0, where: e.message.slice(6) };
+    if (e.type !== "done") r.events.push(storable(e));
+    this.emit(s.id, { type: "agent", turnId: r.turnId, event: e });
+  }
+
   private async runTurn(s: SessionData, l: Live, r: Running): Promise<void> {
-    const id = s.id;
-    const sendEvent = (e: IdeStreamEvent) => {
-      if (e.type === "text") r.text += e.content;
-      if (e.type === "file_change" && !r.changed.includes(e.path)) r.changed.push(e.path);
-      if (e.type === "usage") {
-        const cSats = Number.isFinite(e.cSats) ? e.cSats : 0;
-        const usd = typeof e.usd === "number" && Number.isFinite(e.usd) ? e.usd : 0;
-        const call = { cSats, where: e.where, ...(e.model ? { model: e.model } : {}), ...(e.served ? { served: e.served } : {}), ...(usd ? { usd } : {}) };
-        const turnUsd = Number(((r.usage?.usd ?? 0) + usd).toFixed(6));
-        r.usage = { cSats: Number(((r.usage?.cSats ?? 0) + cSats).toFixed(6)), where: e.where, calls: [...(r.usage?.calls ?? []), call].slice(-50), ...(turnUsd ? { usd: turnUsd } : {}) };
-        s.cSats = Number((s.cSats + cSats).toFixed(6));
-        if (usd) s.frontierUsd = Number(((s.frontierUsd ?? 0) + usd).toFixed(6));
-      }
-      if (e.type === "status" && e.message.startsWith("Auto: ")) r.usage = { ...r.usage, cSats: r.usage?.cSats ?? 0, where: e.message.slice(6) };
-      if (e.type !== "done") r.events.push(storable(e));
-      this.emit(id, { type: "agent", turnId: r.turnId, event: e });
-    };
+    const sendEvent = (e: IdeStreamEvent) => this.turnEvent(s, r, e);
     try {
       this.env.checkpoints.begin(r.turnId, s.projectRoot);
       sendEvent({ type: "turn", id: r.turnId });
@@ -616,45 +654,52 @@ export class SessionHub {
     } catch (err) {
       sendEvent({ type: "text", content: `\n\nError: ${(err as Error).message}` });
     } finally {
-      for (const p of l.pending.values()) {
-        clearTimeout(p.timer);
-        p.resolve(false);
-      }
-      l.pending.clear();
-      const stopped = r.abort.signal.aborted;
-      const planned = s.mode === "plan" && !stopped && r.text.trim().length > 0;
-      const entry: TranscriptEntry = {
-        id: randomUUID(),
-        role: "assistant",
-        content: stopped ? `${r.text}\n\n_(stopped)_` : r.text,
-        at: Date.now(),
-        events: r.events,
-        turnId: r.turnId,
-        ...(r.changed.length ? { changedFiles: [...r.changed] } : {}),
-        ...(r.usage ? { usage: r.usage } : {}),
-        ...(planned ? { plan: true } : {}),
-      };
-      s.transcript.push(entry);
-      try {
-        s.branch = this.env.branch?.(s.projectRoot) ?? s.branch;
-      } catch {
-        // keep the last known branch
-      }
-      l.running = null;
-      this.save(s);
-      this.emit(id, { type: "turn_end", entry, stopped, cSats: s.cSats, branch: s.branch });
-      if (planned) this.emit(id, { type: "plan_ready", entryId: entry.id });
-      // Messages queued meanwhile start the next turn (together, in order).
-      if (l.queue.length && this.sessions.has(id)) {
-        // One turn per requesting account: a run of messages from the same account starts the
-        // next turn, so another account's message never rides on a frontier lead (frontier-access.ts).
-        const acct = l.queue[0].accountId;
-        let n = 0;
-        while (n < l.queue.length && l.queue[n].accountId === acct) n++;
-        const next = l.queue.splice(0, n);
-        this.emit(id, { type: "unqueued", ids: next.map((q) => q.id), queue: plain(l.queue) });
-        this.startTurn(id, next);
-      }
+      this.endTurn(s, l, r);
+    }
+  }
+
+  /** A turn ended (this hub's or the app's): its reply joins the transcript, then queued messages start the next turn. */
+  private endTurn(s: SessionData, l: Live, r: Running): void {
+    const id = s.id;
+    for (const p of l.pending.values()) {
+      clearTimeout(p.timer);
+      p.resolve(false);
+    }
+    l.pending.clear();
+    const stopped = r.abort.signal.aborted;
+    const planned = s.mode === "plan" && !stopped && r.text.trim().length > 0;
+    const entry: TranscriptEntry = {
+      id: randomUUID(),
+      role: "assistant",
+      content: stopped ? `${r.text}\n\n_(stopped)_` : r.text,
+      at: Date.now(),
+      events: r.events,
+      turnId: r.turnId,
+      ...(r.changed.length ? { changedFiles: [...r.changed] } : {}),
+      ...(r.usage ? { usage: r.usage } : {}),
+      ...(planned ? { plan: true } : {}),
+      ...(r.external ? { by: "desktop" as const } : {}),
+    };
+    s.transcript.push(entry);
+    try {
+      s.branch = this.env.branch?.(s.projectRoot) ?? s.branch;
+    } catch {
+      // keep the last known branch
+    }
+    l.running = null;
+    this.save(s);
+    this.emit(id, { type: "turn_end", entry, stopped, cSats: s.cSats, branch: s.branch });
+    if (planned) this.emit(id, { type: "plan_ready", entryId: entry.id });
+    // Messages queued meanwhile start the next turn (together, in order).
+    if (l.queue.length && this.sessions.has(id)) {
+      // One turn per requesting account: a run of messages from the same account starts the
+      // next turn, so another account's message never rides on a frontier lead (frontier-access.ts).
+      const acct = l.queue[0].accountId;
+      let n = 0;
+      while (n < l.queue.length && l.queue[n].accountId === acct) n++;
+      const next = l.queue.splice(0, n);
+      this.emit(id, { type: "unqueued", ids: next.map((q) => q.id), queue: plain(l.queue) });
+      this.startTurn(id, next);
     }
   }
 
@@ -940,6 +985,106 @@ export class SessionHub {
   shutdown(): void {
     for (const l of this.live.values()) l.running?.abort.abort();
     for (const id of this.sessions.keys()) this.env.onSessionStop?.(id); // tentacles hook
+  }
+
+  // --- Desktop Code view chats (desktop-chats.ts): mirrored here so the owner's phone can read and continue them ---
+
+  /** The session mirroring the desktop Code view chat `chatId` (a copy), or null. */
+  desktopChat(chatId: string): SessionData | null {
+    for (const s of this.sessions.values()) if (s.chatId === chatId) return plain(s);
+    return null;
+  }
+
+  /**
+   * The app's copy of a Code view chat: its mirror session is made on first sync (owned by the
+   * account signed in here) and gets the messages it doesn't have yet (by id; a reply also by its
+   * turn, which beginDesktopTurn already recorded). Mode and model follow the app (this computer's
+   * own client, so Full access too).
+   */
+  syncDesktopChat(input: { chatId: string; projectRoot: string; title?: string; mode?: PermissionMode; model?: string; messages: DesktopChatMessage[] }): SessionData {
+    let s = [...this.sessions.values()].find((x) => x.chatId === input.chatId);
+    if (!s) {
+      const created = this.create({ projectRoot: input.projectRoot, client: { clientId: "desktop-chat", kind: "desktop" }, ...(input.model ? { model: input.model } : {}), ...(input.mode ? { mode: input.mode } : {}) });
+      s = this.need(created.id);
+      s.chatId = input.chatId;
+    }
+    s.ownerAccount ??= this.env.owner?.();
+    const title = input.title?.trim();
+    if (title && title !== "New chat") s.title = title.slice(0, 120);
+    if (input.mode) {
+      s.mode = input.mode;
+      s.autoApprove = editsApply(s.mode) ? "edits" : "none";
+    }
+    if (input.model) Object.assign(s, parseModelId(input.model));
+    const ids = new Set(s.transcript.map((t) => t.id));
+    const turns = new Set(s.transcript.map((t) => t.turnId).filter(Boolean));
+    let added = 0;
+    for (const m of input.messages) {
+      if (ids.has(m.id) || (m.role === "assistant" && m.turnId && turns.has(m.turnId))) continue;
+      ids.add(m.id);
+      s.transcript.push({ id: m.id, role: m.role, content: redactApiKeys(m.content), at: m.at, by: "desktop", ...(m.turnId ? { turnId: m.turnId } : {}), ...(m.changedFiles?.length ? { changedFiles: m.changedFiles } : {}), ...(m.plan ? { plan: true } : {}) });
+      added++;
+    }
+    this.save(s);
+    if (added) this.emit(s.id, { type: "synced", added });
+    return plain(s);
+  }
+
+  /**
+   * The app runs a Code view turn itself (/v1/ide/chat): the mirror shows it as its running turn,
+   * so the phone sees it live, may answer its approvals (remoteMayApprove) and stop it (`abort`).
+   * Null when the session is busy with a turn of its own (the app's reply is synced afterwards).
+   */
+  beginDesktopTurn(id: string, turnId: string, abort: AbortController): DesktopTurn | null {
+    const s = this.sessions.get(id);
+    const l = this.liveOf(id);
+    if (!s || l.running) return null;
+    const r: Running = { turnId, by: { clientId: "desktop-chat", kind: "desktop", label: "EdgeCoder app" }, abort, text: "", events: [], changed: [], done: Promise.resolve(), external: true };
+    let finish = () => {};
+    r.done = new Promise<void>((resolve) => (finish = resolve));
+    l.running = r;
+    let ended = false;
+    return {
+      event: (e) => {
+        if (!ended && l.running === r) this.turnEvent(s, r, e);
+      },
+      ask: (callId, tool, args) =>
+        ended || abort.signal.aborted
+          ? Promise.resolve(false)
+          : new Promise<boolean>((resolve) => {
+              const timer = setTimeout(() => {
+                if (l.pending.delete(callId)) resolve(false);
+              }, this.approvalTimeoutMs);
+              l.pending.set(callId, { id: callId, tool, args, resolve, timer });
+            }),
+      answered: (callId, approved) => {
+        const p = l.pending.get(callId);
+        if (!p) return;
+        l.pending.delete(callId);
+        clearTimeout(p.timer);
+        this.emit(id, { type: "approval", id: callId, approved, by: "desktop", label: "EdgeCoder app" });
+        p.resolve(approved);
+      },
+      end: () => {
+        if (ended) return;
+        ended = true;
+        if (l.running === r && this.sessions.has(id)) this.endTurn(s, l, r);
+        finish();
+      },
+    };
+  }
+
+  /**
+   * Whether the phone may approve `callId`. A turn the app runs was judged by the Mac's rules: the
+   * phone may still only approve what a phone turn could (a command or edit outside the project, or
+   * one the classifier refuses, is approved on the Mac).
+   */
+  remoteMayApprove(id: string, callId: string): boolean {
+    const s = this.need(id);
+    const l = this.liveOf(id);
+    const p = l.pending.get(callId);
+    if (!p) return false;
+    return !l.running?.external || this.remoteDecision(s, p.tool, p.args).action !== "refuse";
   }
 
   // --- Tentacles hooks (tentacles.ts): extra session events and transcript notes ---

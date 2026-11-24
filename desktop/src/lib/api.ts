@@ -1459,6 +1459,8 @@ export async function streamIdeChat(
   web = false,
   /** The Code view's Helpers switch (docs/tentacles.md): `sessionId` is the chat's id. */
   helpers?: { sessionId: string; enabled: boolean; maxParallel: number; budgetCSats: number },
+  /** The Code view chat's id: its mirror on the provider shows the turn to your phone (code-chat-mirror.ts). */
+  chatId?: string,
 ): Promise<void> {
   const base = ideBase();
   const res = await ideFetch(`${base}/v1/ide/chat`, {
@@ -1476,6 +1478,7 @@ export async function streamIdeChat(
       ...(attachments?.length ? { attachments } : {}),
       ...(web ? { web: true } : {}),
       ...(helpers ? { helpers } : {}),
+      ...(chatId ? { chatId } : {}),
     }),
     signal,
   });
@@ -2125,6 +2128,8 @@ export interface SessionSummary {
   controller: SessionClientRef | null;
   clients: SessionClientRef[];
   pending: number;
+  /** A Code view chat's mirror (code-chat-mirror.ts): the chat shows in the Code view, not as its own session. */
+  chatId?: string;
 }
 export interface SessionEntry {
   id: string;
@@ -2188,6 +2193,20 @@ export const sessionTentacles = (id: string) =>
   fsCall<{ config: { enabled: boolean }; spentCSats: number; tentacles: import("./tentacles").TentacleItem[] }>("GET", `/v1/ide/sessions/${id}/tentacles`);
 export const tentacleCancel = (id: string, tid: string) => sessionPost<{ cancelled: boolean }>(id, `tentacles/${tid}/cancel`);
 export const tentacleMerge = (id: string, tid: string, approved: boolean) => sessionPost(id, `tentacles/${tid}/merge`, { approved });
+
+/** A Code view chat as the provider mirrors it for your phone (POST /v1/ide/code-chats/sync, desktop-chats.ts). */
+export interface CodeChatSync {
+  chatId: string;
+  projectRoot: string;
+  title?: string;
+  mode?: EngineMode;
+  model?: string;
+  messages: Array<{ id: string; role: "user" | "assistant"; content: string; at: number; turnId?: string; changedFiles?: string[]; plan?: boolean }>;
+}
+/** Adds the chat's messages the mirror lacks (made on first sync); returns the mirror session's id. */
+export const syncCodeChat = (body: CodeChatSync) => fsCall<{ sessionId: string; messages: number }>("POST", "/v1/ide/code-chats/sync", body);
+/** The chat was deleted here: its mirror (and what the phone sees of it) goes too. */
+export const forgetCodeChat = (chatId: string) => fsCall<{ removed: boolean }>("POST", "/v1/ide/code-chats/forget", { chatId });
 
 /** Follow a session's events after `since` until the signal aborts; reconnects resume after the last event. */
 export async function followSession(id: string, since: number, onEvent: (e: SessionEvent) => void, signal: AbortSignal): Promise<void> {
