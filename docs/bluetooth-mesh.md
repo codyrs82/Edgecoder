@@ -75,11 +75,11 @@ Not built yet, or limited:
 - No Bluetooth encryption or pairing.
 - macOS and iOS only: no Linux or Windows support.
 - A Mac currently advertises its model size as unknown, so it earns at the lowest model-size multiplier (0.3) for Bluetooth work.
-- No scan duty cycling. In the iOS app, Bluetooth is switched with **Bluetooth hosting** in Settings.
+- No scan duty cycling, and no separate Bluetooth switch in the iOS app.
 
 ## Turning it on or off
 
 - **Desktop app (macOS):** Settings > General > Bluetooth mesh. It is on by default; switching it restarts the agent.
 - **Agent without the app:** set `EDGECODER_BLE=0` to turn it off.
 - **Accepting work on a Mac:** in addition, an operator must set `MESH_AUTH_TOKEN` on the agent, with the same value on every Mac allowed to send it work. Without it the Mac never runs Bluetooth requests.
-- **iOS:** Bluetooth mesh runs while **Bluetooth hosting** is on (Settings > Bluetooth hosting). To stop it, stop hosting there, or turn off Bluetooth access for EdgeCoder in iOS Settings > Privacy & Security > Bluetooth. Bluetooth is the only way the iPhone hosts: it takes no coordinator jobs.
+- **iOS:** Bluetooth mesh runs while hosting runs (Settings > Hosting), on battery too; network jobs from the coordinator run only while the phone is charging. To stop Bluetooth, stop hosting in the app, or turn off Bluetooth access for EdgeCoder in iOS Settings > Privacy & Security > Bluetooth.

@@ -461,8 +461,8 @@ Both routes share the auth rate limit (10 requests per minute per client IP).
 
 | Method | Path | Description | Auth |
 |--------|------|-------------|------|
-| `GET` | `/ios/dashboard` | iOS summary: user, nodes, network summary (no earnings) | session |
-| `GET` | `/ios/agents/:agentId/contribution` | Node and runtime state of one of your agents (no earnings; path kept for older apps) | session |
+| `GET` | `/ios/dashboard` | iOS summary: user, nodes, job count, network summary (no earnings) | session |
+| `GET` | `/ios/agents/:agentId/contribution` | Job count, recent task IDs and runtime state of one of your agents (no earnings) | session |
 
 ### Coordinator Operations
 

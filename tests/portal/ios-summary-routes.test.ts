@@ -3,9 +3,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { registerAccountApiRoutes } from "../../src/portal/routes/account.js";
 
 /**
- * The iPhone hosts only over Bluetooth and does not earn or pay out: /ios/dashboard and
- * /ios/agents/:agentId/contribution return account and network info only, never contribution,
- * earnings or wallet figures. Both still answer (no 404) for older app builds.
+ * The iPhone does not show what hosting earned: /ios/dashboard and /ios/agents/:agentId/contribution
+ * return account, node, job-count and network/runtime info, never earnings, balance or payout
+ * figures. Both still answer (no 404) for older app builds.
  */
 describe("iOS summary routes", () => {
   const user = { userId: "u1", email: "u1@x.io", emailVerified: true };
@@ -22,9 +22,16 @@ describe("iOS summary routes", () => {
       store,
       getCurrentUser: async () => user,
       loadIosNetworkSummary: async () => ({ capacity: { totals: { totalCapacity: 3, agentsConnected: 2 } } }),
-      loadIosAgentRuntime: async () => ({ runtime: { connected: true, mode: "swarm-only" } }),
-      // Would leak earnings if a route still read it.
-      loadWalletSnapshotForUser: async () => ({ creditHistory: [{ type: "earn", reason: "compute_contribution", credits: 5, relatedTaskId: "t1" }] })
+      loadIosAgentActivity: async () => ({ contribution: { contributedTaskCount: 2 }, runtime: { connected: true, mode: "swarm-only" }, recentTaskIds: ["t2", "t1"] }),
+      // Earnings in the history must not reach the response; only the job count does.
+      loadWalletSnapshotForUser: async () => ({
+        credits: { balance: 42 },
+        quote: { estimatedSats: 4200 },
+        creditHistory: [
+          { type: "earn", reason: "compute_contribution", credits: 5, relatedTaskId: "t1" },
+          { type: "earn", reason: "compute_contribution", credits: 3, relatedTaskId: "t2" }
+        ]
+      })
     } as never);
     await app.ready();
   });
@@ -32,21 +39,24 @@ describe("iOS summary routes", () => {
     await app.close();
   });
 
-  it("/ios/dashboard returns the user, nodes and network summary only", async () => {
+  it("/ios/dashboard returns the user, nodes, job count and network summary, no earnings", async () => {
     const res = await app.inject({ method: "GET", url: "/ios/dashboard" });
     expect(res.statusCode).toBe(200);
     const body = res.json();
-    expect(Object.keys(body).sort()).toEqual(["networkSummary", "nodes", "user"]);
+    expect(Object.keys(body).sort()).toEqual(["contribution", "networkSummary", "nodes", "user"]);
+    expect(body.contribution).toEqual({ contributedTaskCount: 2 });
+    expect(JSON.stringify(body)).not.toMatch(/earned|credits|balance|sats|walletSnapshot/i);
     expect(body.user.userId).toBe("u1");
     expect(body.nodes[0].nodeId).toBe("phone-abc123");
     expect(body.networkSummary.capacity.totals.agentsConnected).toBe(2);
   });
 
-  it("/ios/agents/:agentId/contribution returns node and runtime state, no earnings", async () => {
+  it("/ios/agents/:agentId/contribution returns node, job count and runtime state, no earnings", async () => {
     const res = await app.inject({ method: "GET", url: "/ios/agents/phone-abc123/contribution" });
     expect(res.statusCode).toBe(200);
     const body = res.json();
-    expect(Object.keys(body).sort()).toEqual(["agentId", "node", "runtime"]);
+    expect(Object.keys(body).sort()).toEqual(["agentId", "contribution", "node", "recentTaskIds", "runtime"]);
+    expect(body.contribution).toEqual({ contributedTaskCount: 2 });
     expect(body.runtime).toEqual({ connected: true, mode: "swarm-only" });
     expect(JSON.stringify(body)).not.toMatch(/earned|credits|balance|sats/i);
   });

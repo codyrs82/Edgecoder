@@ -6,22 +6,22 @@ import UIKit
 enum SwarmRuntimeState: String {
     case stopped
     case running
+    case paused
 }
 
-/// Bluetooth hosting on the iPhone. The phone serves nearby machines over BLE (BLEMeshManager) and
-/// never takes coordinator jobs: there is no /pull or /result here, and coordinators refuse /pull to
-/// iOS agents. It still registers and sends heartbeats, because BLE needs what that gives it: the
-/// reward account BLE credit transactions are signed for (/register), and the online/offline signal
-/// that starts BLE scanning and syncs the offline ledger (/heartbeat). Chat's swarm route
-/// (`submitChatTask`) also needs a registered agent.
+/// Hosting on the iPhone. While running it serves nearby machines over Bluetooth (BLEMeshManager)
+/// whatever the power state, and takes coordinator jobs (/pull -> local model -> /result) only while
+/// the phone is on external power (charging or full). Unplugging stops pulling at once (no new job
+/// is pulled; one already running finishes and reports); plugging back in resumes. The coordinator
+/// enforces the same rule: /pull gives an iOS agent whose latest power telemetry is not on external
+/// power no job.
 @MainActor
 final class SwarmRuntimeController: ObservableObject {
     static let shared = SwarmRuntimeController()
 
     @Published var state: SwarmRuntimeState = .stopped
-    @Published var runOnlyWhileCharging = false
     @Published var diagnosticsUploadEnabled = false
-    @Published var statusText = "Bluetooth hosting stopped."
+    @Published var statusText = "Hosting stopped."
     @Published var discoveredCoordinators: [DiscoveryResponse.CoordinatorRecord] = []
     @Published var agentId: String = "iphone-\(UUID().uuidString.prefix(8))"
     @Published var registrationToken: String = ""
@@ -33,6 +33,14 @@ final class SwarmRuntimeController: ObservableObject {
     var isSwarmReady: Bool { isRegistered || !meshToken.isEmpty }
     @Published var selectedCoordinatorURL: String = AppConfig.current.coordinatorBootstrapURL.absoluteString
     @Published var lastHeartbeatAt: Date?
+    /// On external power (charging or full), kept current from UIDevice battery-state notifications.
+    @Published private(set) var isCharging = false
+    @Published var coordinatorTasksObserved = 0
+    @Published var tasksCompleted = 0
+    @Published var tasksFailed = 0
+    @Published var creditsEarned = 0
+    @Published var lastTaskAt: Date?
+    @Published var isProcessingTask = false
     @Published var lastRegisterAt: Date?
     @Published var lastRegisterError = ""
     @Published var runtimeEvents: [String] = []
@@ -58,14 +66,15 @@ final class SwarmRuntimeController: ObservableObject {
         static let registrationToken = "edgecoder.registrationToken"
         static let meshToken = "edgecoder.meshToken"
         static let coordinatorURL = "edgecoder.coordinatorURL"
-        static let runOnlyWhileCharging = "edgecoder.runOnlyWhileCharging"
         static let diagnosticsUploadEnabled = "edgecoder.diagnosticsUploadEnabled"
+        /// Settings of older builds, cleared on launch: charging is now required for coordinator jobs
+        /// (no toggle), and heartbeats are no longer counted on screen.
+        static let retired = ["edgecoder.runOnlyWhileCharging", "edgecoder.heartbeatCount"]
+        static let coordinatorTasksObserved = "edgecoder.coordinatorTasksObserved"
+        static let tasksCompleted = "edgecoder.tasksCompleted"
+        static let tasksFailed = "edgecoder.tasksFailed"
+        static let creditsEarned = "edgecoder.creditsEarned"
         static let autoStartEnabled = "edgecoder.autoStartEnabled"
-        /// Counters of the removed coordinator job loop, cleared on launch.
-        static let retiredCoordinatorCounters = [
-            "edgecoder.heartbeatCount", "edgecoder.coordinatorTasksObserved",
-            "edgecoder.tasksCompleted", "edgecoder.tasksFailed", "edgecoder.creditsEarned"
-        ]
     }
 
     static func defaultIosAgentId() -> String {
@@ -117,16 +126,38 @@ final class SwarmRuntimeController: ObservableObject {
                 selectedCoordinatorURL = value
             }
         }
-        runOnlyWhileCharging = UserDefaults.standard.object(forKey: DefaultsKey.runOnlyWhileCharging) as? Bool ?? false
         diagnosticsUploadEnabled = UserDefaults.standard.object(forKey: DefaultsKey.diagnosticsUploadEnabled) as? Bool ?? false
-        for key in DefaultsKey.retiredCoordinatorCounters {
+        for key in DefaultsKey.retired {
             UserDefaults.standard.removeObject(forKey: key)
         }
+        coordinatorTasksObserved = UserDefaults.standard.integer(forKey: DefaultsKey.coordinatorTasksObserved)
+        tasksCompleted = UserDefaults.standard.integer(forKey: DefaultsKey.tasksCompleted)
+        tasksFailed = UserDefaults.standard.integer(forKey: DefaultsKey.tasksFailed)
+        creditsEarned = UserDefaults.standard.integer(forKey: DefaultsKey.creditsEarned)
         autoStartEnabled = UserDefaults.standard.object(forKey: DefaultsKey.autoStartEnabled) as? Bool ?? true
         persistRuntimeSettings()
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        isCharging = isOnExternalPower
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(batteryStateDidChange),
+            name: UIDevice.batteryStateDidChangeNotification,
+            object: nil
+        )
     }
 
-    /// Called after enrollment is confirmed. Auto-starts Bluetooth hosting if enabled.
+    /// Plugging in or unplugging: pulling follows at once (the loop checks `isCharging` before every
+    /// pull), and a heartbeat tells the coordinator the new power state right away.
+    @objc private func batteryStateDidChange() {
+        let charging = isOnExternalPower
+        guard charging != isCharging else { return }
+        isCharging = charging
+        appendEvent(charging ? "Charging: coordinator jobs resume." : "Unplugged: no new coordinator jobs until charging.")
+        guard state == .running, isSwarmReady else { return }
+        Task { [weak self] in await self?.sendHeartbeat() }
+    }
+
+    /// Called after enrollment is confirmed. Auto-starts hosting if enabled.
     func autoStartIfReady() async {
         guard autoStartEnabled else { return }
         guard state == .stopped else { return }
@@ -181,26 +212,22 @@ final class SwarmRuntimeController: ObservableObject {
         }
     }
 
-    /// Starts Bluetooth hosting: BLE advertising, scanning and serving nearby machines with the local
-    /// model, plus the register/heartbeat loop BLE relies on. No coordinator jobs are pulled.
+    /// Starts hosting: Bluetooth serving right away, and the register/heartbeat/job loop, which pulls
+    /// coordinator jobs only while charging.
     func start() async {
         if state == .running {
-            statusText = "Bluetooth hosting is already running."
-            return
-        }
-        if runOnlyWhileCharging && !isOnExternalPower {
-            statusText = "Bluetooth hosting blocked: connect power to start."
+            statusText = "Hosting is already running."
             return
         }
         // Model activation is handled separately via LocalModelManager.activate(modelId:)
         persistRuntimeSettings()
-        appendEvent("Starting Bluetooth hosting → coordinator: \(selectedCoordinatorURL), token: \(registrationToken.isEmpty ? "empty" : "present"), meshToken: \(meshToken.isEmpty ? "empty" : "present")")
+        appendEvent("Starting hosting → coordinator: \(selectedCoordinatorURL), token: \(registrationToken.isEmpty ? "empty" : "present"), meshToken: \(meshToken.isEmpty ? "empty" : "present")")
         runtimeTask?.cancel()
         runtimeTask = Task { [weak self] in
             await self?.runtimeLoop()
         }
         state = .running
-        statusText = "Bluetooth hosting with local model \(modelManager.selectedModel)."
+        statusText = "Hosting with local model \(modelManager.selectedModel)."
         appendEvent(statusText)
         await discoverCoordinators()
         bleMeshManager.start()
@@ -220,12 +247,21 @@ final class SwarmRuntimeController: ObservableObject {
         }
     }
 
+    /// Pauses the coordinator loop (no jobs, no heartbeats); Bluetooth keeps serving, as before.
+    func pause() {
+        runtimeTask?.cancel()
+        runtimeTask = nil
+        state = .paused
+        statusText = "Network jobs paused; Bluetooth still on."
+        appendEvent(statusText)
+    }
+
     func stop() {
         runtimeTask?.cancel()
         runtimeTask = nil
         bleMeshManager.stop()
         state = .stopped
-        statusText = "Bluetooth hosting stopped."
+        statusText = "Hosting stopped."
         appendEvent(statusText)
     }
 
@@ -306,20 +342,29 @@ final class SwarmRuntimeController: ObservableObject {
         RuntimeSecretStore.save(registrationToken, for: DefaultsKey.registrationToken)
         RuntimeSecretStore.save(meshToken, for: DefaultsKey.meshToken)
         UserDefaults.standard.set(selectedCoordinatorURL, forKey: DefaultsKey.coordinatorURL)
-        UserDefaults.standard.set(runOnlyWhileCharging, forKey: DefaultsKey.runOnlyWhileCharging)
         UserDefaults.standard.set(diagnosticsUploadEnabled, forKey: DefaultsKey.diagnosticsUploadEnabled)
         UserDefaults.standard.set(autoStartEnabled, forKey: DefaultsKey.autoStartEnabled)
+        UserDefaults.standard.set(coordinatorTasksObserved, forKey: DefaultsKey.coordinatorTasksObserved)
+        UserDefaults.standard.set(tasksCompleted, forKey: DefaultsKey.tasksCompleted)
+        UserDefaults.standard.set(tasksFailed, forKey: DefaultsKey.tasksFailed)
+        UserDefaults.standard.set(creditsEarned, forKey: DefaultsKey.creditsEarned)
     }
 
-    /// Register, then heartbeat every 15 s (the same cadence as before). The heartbeat result drives
-    /// BLE: three failures in a row mark the phone offline and start BLE scanning; the next success
-    /// syncs the offline ledger. Nothing here pulls or runs coordinator jobs.
+    /// Register, heartbeat every ~15 s, and between heartbeats poll for a coordinator job every 5 s,
+    /// but only while charging. Registration and heartbeats run on battery too: Bluetooth needs the
+    /// reward account from /register and the heartbeat's offline/online signal (BLE scanning, offline
+    /// ledger sync).
     private func runtimeLoop() async {
         while !Task.isCancelled {
             let registered = await registerAgent()
             if registered {
                 await sendHeartbeat()
-                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                // Poll for tasks between heartbeats (3 polls per 15s cycle), only while charging.
+                for _ in 0..<3 {
+                    guard !Task.isCancelled else { break }
+                    if isCharging { await pollAndExecuteTask() }
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                }
             } else {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
@@ -341,8 +386,8 @@ final class SwarmRuntimeController: ObservableObject {
             "clientType": "edgecoder-ios",
             "maxConcurrentTasks": 1,
             "powerTelemetry": currentPowerTelemetry(),
-            // #64: the key RequestSigner signs with; the coordinator verifies /heartbeat, /tasks
-            // and /credits/ble-sync against it.
+            // #64: the key RequestSigner signs with; the coordinator verifies /heartbeat, /pull,
+            // /result and /credits/ble-sync against it.
             "publicKeyPem": signingPublicKeyPem
         ]
         do {
@@ -405,6 +450,7 @@ final class SwarmRuntimeController: ObservableObject {
             _ = try await postCoordinator(path: "/heartbeat", payload: payload)
             lastHeartbeatAt = Date()
             consecutiveHeartbeatFailures = 0
+            persistRuntimeSettings()
             statusText = "Heartbeat sent (\(Date().formatted(date: .omitted, time: .standard)))."
             appendEvent(statusText)
             if bleMeshManager.isOffline {
@@ -434,6 +480,70 @@ final class SwarmRuntimeController: ObservableObject {
             }
             statusText = "Heartbeat failed: \(error.localizedDescription)"
             appendEvent(statusText)
+        }
+    }
+
+    /// Poll for a task and execute it if one is available.
+    private func pollAndExecuteTask() async {
+        // Coordinator jobs run only on external power; the coordinator refuses them otherwise too.
+        guard isOnExternalPower else { return }
+        guard modelManager.state == .ready else { return }
+        guard !isProcessingTask else { return }
+
+        do {
+            let pullPayload: [String: Any] = ["agentId": agentId]
+            let response = try await postCoordinator(path: "/pull", payload: pullPayload)
+
+            guard let subtask = response["subtask"] as? [String: Any] else {
+                return // No task available — idle
+            }
+
+            let subtaskId = subtask["id"] as? String ?? ""
+            let taskId = subtask["taskId"] as? String ?? ""
+            let input = subtask["input"] as? String ?? ""
+
+            guard !subtaskId.isEmpty, !input.isEmpty else { return }
+
+            coordinatorTasksObserved += 1
+            isProcessingTask = true
+            appendEvent("Task \(subtaskId.prefix(8))… pulled — running inference.")
+
+            // Execute inference
+            let result = await modelManager.generate(prompt: input, maxTokens: 512)
+
+            // Build result payload matching coordinator /result schema
+            let resultPayload: [String: Any] = [
+                "subtaskId": subtaskId,
+                "taskId": taskId,
+                "agentId": agentId,
+                "ok": result.ok,
+                "output": result.output,
+                "durationMs": result.durationMs
+            ]
+
+            // POST result back to coordinator
+            _ = try await postCoordinator(path: "/result", payload: resultPayload)
+
+            lastTaskAt = Date()
+            let earnedCredits = Int(max(0.5, modelManager.selectedModelParamSize))
+            if result.ok {
+                tasksCompleted += 1
+                creditsEarned += earnedCredits
+                appendEvent("Task \(subtaskId.prefix(8))… completed (\(result.durationMs)ms) — +\(earnedCredits) credits")
+            } else {
+                tasksFailed += 1
+                let failCredits = max(1, earnedCredits / 2)
+                creditsEarned += failCredits
+                appendEvent("Task \(subtaskId.prefix(8))… failed (\(result.durationMs)ms) — +\(failCredits) credits")
+            }
+            isProcessingTask = false
+            persistRuntimeSettings()
+        } catch is CancellationError {
+            isProcessingTask = false
+        } catch {
+            isProcessingTask = false
+            // Non-fatal; will retry on next poll cycle
+            appendEvent("Task poll/exec error: \(error.localizedDescription)")
         }
     }
 

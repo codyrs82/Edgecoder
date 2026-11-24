@@ -20,7 +20,7 @@ struct SettingsView: View {
                 VStack(spacing: 16) {
                     accountCard
                     chatCard
-                    bluetoothHostingCard
+                    hostingCard
                     modelCard
                     networkCard
                     nodeCard
@@ -215,22 +215,38 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Bluetooth Hosting Card
+    // MARK: - Hosting Card
 
-    /// The iPhone hosts only over Bluetooth: nearby machines send it prompts and it answers with the
-    /// local model. It takes no coordinator jobs. Counts are for this app session.
-    private var bluetoothHostingCard: some View {
+    /// Network jobs (from the coordinator) run only while the iPhone is charging; Bluetooth requests
+    /// from nearby machines are served whenever hosting is on.
+    private var hostingCard: some View {
         SettingsCard {
-            SettingsCardHeader(icon: "dot.radiowaves.left.and.right", title: "Bluetooth hosting", color: Theme.green)
+            SettingsCardHeader(icon: "bolt.fill", title: "Hosting", color: Theme.green)
 
             HStack(spacing: 8) {
-                StatusPill(label: swarmRuntime.state == .running ? "On" : "Off", color: stateColor)
+                StatusPill(label: swarmRuntime.state.rawValue.capitalized, color: stateColor)
+                StatusPill(label: swarmRuntime.isCharging ? "Charging" : "Not charging",
+                           color: swarmRuntime.isCharging ? Theme.green : Theme.yellow)
                 Spacer()
                 runtimeButtons
             }
 
             Divider().overlay(Theme.border)
 
+            Text("Network jobs (only while charging)")
+                .font(.caption.weight(.medium))
+                .foregroundColor(Theme.textSecondary)
+            HStack(spacing: 0) {
+                StatCell(label: "Done", value: "\(swarmRuntime.tasksCompleted)")
+                StatCell(label: "Failed", value: "\(swarmRuntime.tasksFailed)")
+                if HostEarningsPolicy.inApp {
+                    StatCell(label: "Credits", value: "\(swarmRuntime.creditsEarned)")
+                }
+            }
+
+            Text("Bluetooth (nearby machines, this session)")
+                .font(.caption.weight(.medium))
+                .foregroundColor(Theme.textSecondary)
             HStack(spacing: 0) {
                 StatCell(label: "Served", value: "\(bleMesh.bleTasksCompleted)")
                 StatCell(label: "Failed", value: "\(max(0, bleMesh.bleTasksReceived - bleMesh.bleTasksCompleted))")
@@ -239,7 +255,9 @@ struct SettingsView: View {
                 }
             }
 
-            Text("Nearby machines can send prompts to this iPhone over Bluetooth; it answers with the local model. It does not take jobs from the network. Counts are since the app opened.")
+            Text(swarmRuntime.isCharging
+                 ? "Charging: this iPhone takes network jobs and serves nearby machines over Bluetooth."
+                 : "Not charging: no network jobs until you plug in. Nearby machines can still use it over Bluetooth.")
                 .font(.caption)
                 .foregroundColor(Theme.textMuted)
 
@@ -248,15 +266,13 @@ struct SettingsView: View {
             SettingsToggle(title: "Auto-start on launch", isOn: $swarmRuntime.autoStartEnabled) {
                 swarmRuntime.persistRuntimeSettings()
             }
-            SettingsToggle(title: "Run only when charging", isOn: $swarmRuntime.runOnlyWhileCharging) {
-                swarmRuntime.persistRuntimeSettings()
-            }
         }
     }
 
     private var stateColor: Color {
         switch swarmRuntime.state {
         case .running: return Theme.green
+        case .paused: return Theme.yellow
         case .stopped: return Theme.textMuted
         }
     }
@@ -272,9 +288,18 @@ struct SettingsView: View {
                         .background(Theme.green)
                         .clipShape(Circle())
                 }
-                .accessibilityLabel("Start Bluetooth hosting")
             }
             if swarmRuntime.state == .running {
+                Button { swarmRuntime.pause() } label: {
+                    Image(systemName: "pause.fill")
+                        .font(.caption)
+                        .foregroundColor(Theme.textPrimary)
+                        .padding(8)
+                        .background(Theme.bgElevated)
+                        .clipShape(Circle())
+                }
+            }
+            if swarmRuntime.state != .stopped {
                 Button { swarmRuntime.stop() } label: {
                     Image(systemName: "stop.fill")
                         .font(.caption)
@@ -283,7 +308,6 @@ struct SettingsView: View {
                         .background(Theme.bgElevated)
                         .clipShape(Circle())
                 }
-                .accessibilityLabel("Stop Bluetooth hosting")
             }
         }
     }

@@ -517,10 +517,11 @@ async function loadWalletSnapshotForUser(userId: string): Promise<unknown> {
 }
 
 /**
- * Runtime state of one of the user's agents, for the iOS app. Account and network info only: the
- * iPhone hosts only over Bluetooth and does not earn or pay out, so no contribution or earnings here.
+ * Job counts and runtime state of one of the user's agents, for the iOS app. No earnings, balance or
+ * payout figures: the iPhone does not show what hosting earned.
  */
-async function loadIosAgentRuntime(agentId: string): Promise<{
+async function loadIosAgentActivity(agentId: string): Promise<{
+  contribution: { contributedTaskCount: number };
   runtime: {
     connected: boolean;
     health?: string;
@@ -530,18 +531,37 @@ async function loadIosAgentRuntime(agentId: string): Promise<{
     swarmEnabled?: boolean;
     ideEnabled?: boolean;
   } | null;
+  recentTaskIds: string[];
 }> {
-  if (!CONTROL_PLANE_URL || !CONTROL_PLANE_ADMIN_TOKEN) return { runtime: null };
+  const empty = { contribution: { contributedTaskCount: 0 }, runtime: null, recentTaskIds: [] };
+  if (!CONTROL_PLANE_URL || !CONTROL_PLANE_ADMIN_TOKEN) return empty;
   try {
-    const catalogRes = await request(`${CONTROL_PLANE_URL}/agents/catalog`, {
-      method: "GET",
-      headers: controlPlaneHeaders()
-    });
+    const [historyRes, catalogRes] = await Promise.all([
+      request(`${CONTROL_PLANE_URL}/credits/${encodeURIComponent(agentId)}/history`, {
+        method: "GET",
+        headers: controlPlaneHeaders()
+      }),
+      request(`${CONTROL_PLANE_URL}/agents/catalog`, {
+        method: "GET",
+        headers: controlPlaneHeaders()
+      })
+    ]);
+    const historyPayload = historyRes.statusCode >= 200 && historyRes.statusCode < 300
+      ? ((await historyRes.body.json()) as { history?: Array<{ reason?: string; relatedTaskId?: string }> })
+      : { history: [] };
     const catalog = catalogRes.statusCode >= 200 && catalogRes.statusCode < 300
       ? ((await catalogRes.body.json()) as { agents?: Array<Record<string, unknown>> })
       : { agents: [] };
+    const contributedTaskIds = Array.from(
+      new Set(
+        (historyPayload.history ?? [])
+          .filter((tx) => tx?.reason === "compute_contribution" && tx?.relatedTaskId)
+          .map((tx) => String(tx.relatedTaskId))
+      )
+    );
     const runtimeAgent = (catalog.agents ?? []).find((item) => String(item?.agentId ?? "") === agentId) ?? null;
     return {
+      contribution: { contributedTaskCount: contributedTaskIds.length },
       runtime: runtimeAgent
         ? {
             connected: true,
@@ -554,10 +574,11 @@ async function loadIosAgentRuntime(agentId: string): Promise<{
             swarmEnabled: typeof runtimeAgent.swarmEnabled === "boolean" ? runtimeAgent.swarmEnabled : undefined,
             ideEnabled: typeof runtimeAgent.ideEnabled === "boolean" ? runtimeAgent.ideEnabled : undefined
           }
-        : { connected: false }
+        : { connected: false },
+      recentTaskIds: contributedTaskIds.slice(-5).reverse()
     };
   } catch {
-    return { runtime: null };
+    return empty;
   }
 }
 
@@ -790,7 +811,7 @@ registerPayoutDestinationRoutes(app, {
   store, getCurrentUser, network: WALLET_DEFAULT_NETWORK, onchainEnabled: C.ONCHAIN_ENABLED, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), register: payoutRegistrar,
   security: accountSecurity, secondFactor, sendConfirm: sendPayoutDestinationConfirmEmail, sendAdded: sendPayoutDestinationAddedEmail, callbackChange: (a, dest) => payoutCallbackClient.pendingChange(a, dest)
 });
-const accountRouteDeps = { discoverCoordinatorUrlsForPortal, everyCoordinatorUrl, fetchCoordinatorFederatedSummary, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentRuntime, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store };
+const accountRouteDeps = { discoverCoordinatorUrlsForPortal, everyCoordinatorUrl, fetchCoordinatorFederatedSummary, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentActivity, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store };
 export type AccountApiRoutesDeps = typeof accountRouteDeps;
 registerAccountApiRoutes(app, accountRouteDeps);
 function autoRequestHost(node: Parameters<typeof autoRequestHosting>[1]) { return autoRequestHostingSafe({ store, policy: HOST_APPROVAL_POLICY, log: app.log }, node); }

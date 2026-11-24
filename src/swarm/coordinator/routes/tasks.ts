@@ -29,7 +29,7 @@ import {
 } from "../../result-integrity.js";
 import { executorKey, type ExecutionResult, type VerificationOutcome } from "../../verification.js";
 import { resultModelMismatch } from "../../model-catalog.js";
-import { evaluateAgentPowerPolicy, refusesCoordinatorJobs } from "../../power-policy.js";
+import { evaluateAgentPowerPolicy, iosAgentNotCharging } from "../../power-policy.js";
 import {
   createTaskEnvelope,
   decryptResult as decryptEnvelopeResult,
@@ -373,10 +373,10 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       return reply.send({ subtask: null, blocked: true, reason: blacklisted.reason });
     }
     const capability = agentCapabilities.get(body.agentId);
-    // iPhones host only over Bluetooth: no coordinator job, answered as an idle pull (not an error)
-    // so an older app that still polls just waits for its next cycle.
-    if (refusesCoordinatorJobs(capability)) {
-      return reply.send({ subtask: null, reason: "ios_bluetooth_only" });
+    // iPhones take coordinator jobs only while charging. Answered as an idle, power-deferred pull (not
+    // an error), so an older app that pulls on battery just waits for its next cycle.
+    if (iosAgentNotCharging(capability)) {
+      return reply.send({ subtask: null, powerDeferred: true, reason: "ios_not_charging" });
     }
     // Verified-only policy: /register stores the agent before its integrity check refuses it, so the
     // check is enforced where work is handed out too.
