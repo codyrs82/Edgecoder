@@ -24,8 +24,21 @@ function getDb() {
   return dbPromise;
 }
 
+/**
+ * Chats deleted in this session. A chat that is still open somewhere (the Code view's panel, the
+ * Chat view) saves itself again on its next change, on New chat and on unmount; without this, a
+ * deleted open chat came straight back in the sidebar. Saves of these ids are dropped.
+ */
+const deletedIds = new Set<string>();
+
+/** The chat was deleted (this session): saving it again would bring it back. */
+export function isDeletedConversation(id: string): boolean {
+  return deletedIds.has(id);
+}
+
 export async function saveConversation(convo: Conversation): Promise<void> {
   const db = await getDb();
+  if (deletedIds.has(convo.id)) return;
   // Strip Svelte 5 reactive proxies — IndexedDB's structured clone can't handle them
   const plain = JSON.parse(JSON.stringify(convo));
   await db.put(STORE_NAME, plain);
@@ -43,8 +56,16 @@ export async function listConversations(): Promise<Conversation[]> {
 }
 
 export async function deleteConversation(id: string): Promise<void> {
-  const db = await getDb();
-  await db.delete(STORE_NAME, id);
+  // Marked first, so a save already on its way (an open chat's autosave) can't recreate it.
+  deletedIds.add(id);
+  try {
+    const db = await getDb();
+    await db.delete(STORE_NAME, id);
+  } catch (err) {
+    // Still there: it keeps saving like any other chat.
+    deletedIds.delete(id);
+    throw err;
+  }
 }
 
 export async function renameConversation(id: string, newTitle: string): Promise<void> {

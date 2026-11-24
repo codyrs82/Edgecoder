@@ -17,6 +17,7 @@
   import { parseChoice } from "../lib/compute-choice";
   import ProfileMenu from "./ProfileMenu.svelte";
   import { menu } from "../lib/menu";
+  import { notify } from "../lib/toast";
   import { tick, type Snippet } from "svelte";
 
   interface Props {
@@ -157,11 +158,18 @@
     menuTrigger = null;
     const convo = conversations.find((c) => c.id === id);
     // Delete from portal if synced
+    try {
+      await deleteConversation(id);
+    } catch (err) {
+      notify(`Couldn't delete "${convo?.title ?? "this chat"}": ${(err as Error).message}`, "error");
+      return;
+    }
     if (convo?.portalConversationId) {
       portalDeleteConversation(convo.portalConversationId).catch(() => {});
     }
-    await deleteConversation(id);
     conversations = conversations.filter((c) => c.id !== id);
+    // The open chat: start a new one (the deleted chat can't save itself back).
+    if (id === activeConversationId) onNewChat();
   }
 
   /** Focus the row's "open conversation" button once it is rendered again. */

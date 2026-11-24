@@ -33,6 +33,7 @@
     saveConversation,
     loadConversation as loadConversationFromDb,
     listConversationsBySource,
+    isDeletedConversation,
   } from "../lib/chat-store";
   import type { Conversation, ReplyUsage, ToolEvent } from "../lib/types";
 
@@ -137,6 +138,8 @@
 
   /** Save the chat and remember it as its project's last one. */
   async function persist() {
+    // Deleted from the sidebar while open: stays deleted (New chat follows).
+    if (isDeletedConversation(conversation.id)) return;
     await saveConversation(conversation);
     localStorage.setItem("edgecoder-last-editor-id", conversation.id);
     if (conversation.projectRoot) setLastChatFor(conversation.projectRoot, conversation.id);
