@@ -126,6 +126,11 @@ export async function initCoordinator(): Promise<void> {
       for (const intent of pendingIntents) {
         paymentIntents.set(intent.intentId, intent);
       }
+    };
+    // Billing is restored whatever happened to the loads above: one of them failing used to skip the
+    // restore, and the reserves of calls in flight at a restart then waited for the 30-minute sweep
+    // (8 unsettled reserves after a restart under load, 2026-11-24).
+    const restoreBilling = async () => {
       // #105: results held for verification before a restart are held again, not dropped.
       await restorePendingVerifications(storeRef).catch((error) => app.log.warn({ error: String(error) }, "result_verification_restore_failed"));
       // Stress finding 2: tasks billed here and not settled before the restart are resumed or refunded
@@ -138,7 +143,9 @@ export async function initCoordinator(): Promise<void> {
     };
     const startupDbInitTimeoutMs = 10_000;
     await Promise.race([
-      initDbState(),
+      initDbState()
+        .catch((error) => app.log.warn({ error: String(error) }, "startup_db_state_load_failed"))
+        .then(() => restoreBilling()),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error("startup_db_init_timeout")), startupDbInitTimeoutMs)
       )

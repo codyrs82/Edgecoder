@@ -150,8 +150,13 @@ export interface NetworkTarget {
   source?: string;
   /** model "auto": the client's hints for best-fit routing (job-descriptor.ts). */
   routing?: RoutingHints;
-  /** model "auto": the coordinator may answer route_elsewhere when a peer is the best fit. */
+  /**
+   * The coordinator may answer route_elsewhere: model "auto" when a peer is the best fit; a named
+   * network model when it has no free slot for it and a peer does (#526). The caller resubmits there once.
+   */
   routeRedirect?: boolean;
+  /** Where the buyer is (Fly region or "cc-<country>"): the coordinator prefers free agents near it (#526). */
+  clientRegion?: string;
   /** The portal's coordinator choice for this call (kept on its routing decision; portal service token only). */
   coordinatorChoice?: CoordinatorChoice;
 }
@@ -189,10 +194,10 @@ export function noRouteInfo(json: Record<string, unknown>): NetworkFailureInfo {
   };
 }
 
-/** model "auto": the coordinator's best fit is on a peer coordinator; resubmit there. */
+/** The coordinator sends the call to a peer coordinator (Auto's best fit, or a named model's free slot); resubmit there. */
 export class RouteElsewhereError extends NetworkInferenceError {
   constructor(readonly url: string, readonly routing: Record<string, unknown> | undefined) {
-    super(`The best fit for this request is on another coordinator (${url}).`, 409);
+    super(`The best place for this request is on another coordinator (${url}).`, 409);
   }
 }
 
@@ -260,9 +265,11 @@ export function drainRetryWaitMs(json: Record<string, unknown>): number {
   const ms = typeof json.retryAfterMs === "number" && Number.isFinite(json.retryAfterMs) ? json.retryAfterMs : 2_000;
   return Math.min(DRAIN_RETRY_MAX_WAIT_MS, Math.max(250, ms));
 }
-async function submitRetryingDrain(d: NetworkDeps, body: unknown, signal?: AbortSignal, sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))) {
+async function submitRetryingDrain(d: NetworkDeps, body: unknown, signal?: AbortSignal, sleep = (ms: number) => new Promise((r) => setTimeout(r, ms)), followPeer = false) {
   const first = await call(d, "POST", "/inference/submit", body, signal);
   if (!isDrainingAnswer(first) || signal?.aborted) return first;
+  // The caller will go to the named peer instead of waiting for this one.
+  if (followPeer && typeof first.json.coordinatorUrl === "string") return first;
   await sleep(drainRetryWaitMs(first.json));
   return call(d, "POST", "/inference/submit", body, signal);
 }
@@ -308,12 +315,17 @@ async function* streamSubmitted(
     ...(req.model === "auto" && req.routing && Object.keys(req.routing).length ? { routing: req.routing } : {}),
     // A named model still carries the buyer's price ceiling: the coordinator caps the call's reserve at it.
     ...(req.model !== "auto" && req.routing?.maxCSats !== undefined ? { routing: { maxCSats: req.routing.maxCSats } } : {}),
-    ...(req.model === "auto" && req.routeRedirect ? { routeRedirect: true } : {}),
+    ...(req.routeRedirect && (req.model === "auto" || (!req.target && !req.reservationId)) ? { routeRedirect: true } : {}),
+    ...(req.clientRegion ? { clientRegion: req.clientRegion.slice(0, 40) } : {}),
     ...(req.coordinatorChoice ? { coordinatorChoice: req.coordinatorChoice } : {}),
   };
-  const sub = await submitRetryingDrain(d, submitBody, signal);
+  // A draining coordinator that names a peer: a caller that allows redirects goes there now (#524 test 6).
+  const sub = await submitRetryingDrain(d, submitBody, signal, undefined, Boolean(req.routeRedirect));
+  if (req.routeRedirect && isDrainingAnswer(sub) && typeof sub.json.coordinatorUrl === "string") throw new RouteElsewhereError(sub.json.coordinatorUrl, undefined);
   if (sub.status !== 200) {
     const err = String(sub.json.error ?? `HTTP ${sub.status}`);
+    // A named model with no free slot there, free on a peer (#526): resubmit there (the caller decides).
+    if (req.model !== "auto" && req.routeRedirect && err === "route_elsewhere" && typeof sub.json.coordinatorUrl === "string") throw new RouteElsewhereError(sub.json.coordinatorUrl, undefined);
     if (req.model === "auto") {
       if (err === "route_elsewhere" && typeof sub.json.coordinatorUrl === "string") throw new RouteElsewhereError(sub.json.coordinatorUrl, sub.json.routing as Record<string, unknown> | undefined);
       // An older coordinator looks for a model called "auto"; one that routes says no_route_fits.
@@ -351,22 +363,46 @@ async function* streamSubmitted(
   const routedModel = typeof (sub.json.routing as { model?: unknown } | undefined)?.model === "string" ? String((sub.json.routing as { model: string }).model) : undefined;
   let after = 0;
   const deadline = Date.now() + 6 * 60_000;
-  while (Date.now() < deadline) {
-    if (signal?.aborted) return;
-    const r = await readStream(d, { taskId, subtaskId, after }, signal);
-    // model "auto": the busy machines are the ones running the model best fit chose for it.
-    if (r.status === 503 && r.json.error === "no_capacity") throw noCapacityError(r.json, req.model === "auto" ? routedModel ?? "the model best fit chose" : req.model);
-    if (r.status !== 200) throw new NetworkInferenceError(`Network stream failed: ${String(r.json.error ?? r.status)}`, 502);
-    const chunks = (r.json.chunks as string[]) ?? [];
-    for (const c of chunks) if (c) yield { delta: c };
-    after = Number(r.json.next ?? after + chunks.length);
-    if (r.json.done) {
-      if (Array.isArray(r.json.toolCalls) && r.json.toolCalls.length) yield { toolCalls: r.json.toolCalls as ToolCall[] };
-      yield { done: true, ...(r.json.error ? { error: String(r.json.error) } : {}), ...(typeof r.json.creditsSpent === "number" ? { creditsSpent: r.json.creditsSpent } : {}), ...(typeof r.json.promptTokens === "number" ? { promptTokens: r.json.promptTokens } : {}), ...(typeof r.json.outputTokens === "number" ? { outputTokens: r.json.outputTokens } : {}), ...(routed ? { routed } : {}), ...(servedOf(r.json.served) ? { served: servedOf(r.json.served) } : {}) };
-      return;
+  // The reply ended (done, or an error the coordinator gave): nothing to cancel.
+  let ended = false;
+  try {
+    while (Date.now() < deadline) {
+      if (signal?.aborted) return;
+      const r = await readStream(d, { taskId, subtaskId, after }, signal);
+      // model "auto": the busy machines are the ones running the model best fit chose for it.
+      if (r.status === 503 && r.json.error === "no_capacity") {
+        ended = true;
+        // Refunded by a coordinator that is going down before any agent took it: resubmit to its peer.
+        if (r.json.reason === "draining" && req.routeRedirect && typeof r.json.coordinatorUrl === "string") throw new RouteElsewhereError(r.json.coordinatorUrl, undefined);
+        throw noCapacityError(r.json, req.model === "auto" ? routedModel ?? "the model best fit chose" : req.model);
+      }
+      if (r.status !== 200) throw new NetworkInferenceError(`Network stream failed: ${String(r.json.error ?? r.status)}`, 502);
+      const chunks = (r.json.chunks as string[]) ?? [];
+      for (const c of chunks) if (c) yield { delta: c };
+      after = Number(r.json.next ?? after + chunks.length);
+      if (r.json.done) {
+        ended = true;
+        if (Array.isArray(r.json.toolCalls) && r.json.toolCalls.length) yield { toolCalls: r.json.toolCalls as ToolCall[] };
+        yield { done: true, ...(r.json.error ? { error: String(r.json.error) } : {}), ...(typeof r.json.creditsSpent === "number" ? { creditsSpent: r.json.creditsSpent } : {}), ...(typeof r.json.promptTokens === "number" ? { promptTokens: r.json.promptTokens } : {}), ...(typeof r.json.outputTokens === "number" ? { outputTokens: r.json.outputTokens } : {}), ...(routed ? { routed } : {}), ...(servedOf(r.json.served) ? { served: servedOf(r.json.served) } : {}) };
+        return;
+      }
     }
+    throw new NetworkInferenceError("The network didn't finish within 6 minutes.", 504);
+  } finally {
+    // The reader went away before the reply ended (the client disconnected, its session was
+    // cancelled or deleted, the caller stopped reading, or the read failed): cancel the call, so it
+    // stops running and is billed only for what was produced (coordinator inference-cancel.ts).
+    if (!ended) void cancelNetworkCall(d, taskId, subtaskId);
   }
-  throw new NetworkInferenceError("The network didn't finish within 6 minutes.", 504);
+}
+
+/** Ask the coordinator to cancel a call whose reply nobody will read (best effort; older coordinators answer 404). */
+export async function cancelNetworkCall(d: NetworkDeps, taskId: string, subtaskId: string): Promise<void> {
+  try {
+    await call(d, "POST", "/inference/cancel", { taskId, subtaskId });
+  } catch {
+    // The call still ends on its own (its claim bound, or the agent finishing); nothing else to do.
+  }
 }
 
 /** OpenAI message content may be a string or a list of parts; the network takes text. */

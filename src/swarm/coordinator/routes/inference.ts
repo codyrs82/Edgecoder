@@ -10,7 +10,8 @@ import type { ResourceClass, Subtask } from "../../../common/types.js";
 import { DuplicateDebitError, rewardAccountForAgent, spendCredits, taskReserveKey } from "../../../credits/store.js";
 import { cSatsPerMTokens, msatToCSats, ratePerSecondMsat } from "../../../economy/job-pricing.js";
 import { modelTokenPrice } from "../../../economy/cloud-pricing.js";
-import { cloudModelSpec, orderCloudModels } from "../../../cloud-host/catalog.js";
+import { cloudModelSpec, isCloudModel, orderCloudModels } from "../../../cloud-host/catalog.js";
+import { catalogEntryForTag } from "../../../model/catalog.js";
 import { paramsB } from "../../../inference-api/auto-route.js";
 import { contextNeeded } from "../../../inference-api/ollama.js";
 import type { ChatMessage } from "../../../inference-api/types.js";
@@ -19,8 +20,8 @@ import { agentUnavailable, memoryAdmits, modelLoadedOn } from "../memory-admissi
 import { AUTO_MODEL_ID } from "../../../inference-api/auto-route.js";
 import { cleanHints, describeJob, type JobDescriptor } from "../../../inference-api/job-descriptor.js";
 import type { BestFitResult } from "../best-fit.js";
-import { agentRttMs, bestFitConfig, complexityWeights, coordinatorLoadSignals, recordDecision, recordPlacement, resolveAuto, routingSummary, type RoutingSummary } from "../routing.js";
-import { sanitizeCoordinatorChoice } from "../../../common/coordinator-choice.js";
+import { agentRegionCode, agentRttMs, bestFitConfig, complexityWeights, coordinatorLoadSignals, recordDecision, recordPlacement, resolveAuto, routingSummary, type RoutingSummary } from "../routing.js";
+import { cleanRegion, clientRegionOf, sanitizeCoordinatorChoice } from "../../../common/coordinator-choice.js";
 import { InferenceStreams, boundTokenCounts, maxTokensOf } from "../../inference-streams.js";
 import { DegenerateReplyTracker, billableFraction, detectDegenerateOutput, type DegeneracyVerdict } from "../../inference-degeneracy.js";
 import { pgStore } from "../../../db/store.js";
@@ -63,7 +64,12 @@ import { registerRestrictedRoutes } from "./restricted.js";
 import { servedBy } from "../served-by-route.js";
 import { isFrontierModelId } from "../../../inference-api/frontier-models.js";
 import { taskIdInUse, accrualsInFlight, settleTaskIfDone, refundTaskSubmit } from "../results.js";
+import { closeUnreservedBillingRow } from "../billing-restore.js";
+import { registerInferenceCancelRoute, requesterCancelled } from "../inference-cancel.js";
 import { recordMeshWork } from "../world-activity.js";
+import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
+import { armAutoReplace } from "../auto-replace.js";
+import { freeLocalHolders, LOCALITY_PREFER_MS, nearestFreeHolder, peerWithFreeCapacity } from "../locality.js";
 
 // ── Network inference (chat completions on agents' local models, streamed) ──────────────────
 export const inferenceStreams = new InferenceStreams();
@@ -138,13 +144,14 @@ export function judgeInferenceReply(
 export const INFERENCE_CLAIM_TIMEOUT_MS = CC.INFERENCE_CLAIM_TIMEOUT_MS;
 export const NO_CAPACITY_RETRY_AFTER_SEC = 15;
 const NO_CAPACITY_KEEP_MS = 10 * 60_000;
-const noCapacity = new Map<string, { accountId: string; subtaskId: string; atMs: number; reason: "busy" | "none_in_class"; computeClass?: string; model?: string }>();
+type NoCapacityReason = "busy" | "none_in_class" | "draining";
+const noCapacity = new Map<string, { accountId: string; subtaskId: string; atMs: number; reason: NoCapacityReason; computeClass?: string; model?: string; coordinatorUrl?: string }>();
 
 /** Granted classes of the online, unblacklisted agents that hold `model` (one entry per agent), free of a reservation unless `includeReserved`. */
 function holderClasses(model: string, nowMs = Date.now(), includeReserved = false): ComputeClassId[] {
   const out: ComputeClassId[] = [];
   for (const [id, cap] of agentCapabilities) {
-    if (!agentHasModel(cap, model) || activeBlacklistRecord(id)) continue;
+    if (!agentHasModel(cap, model) || activeBlacklistRecord(id) || agentSocketLost(id, nowMs)) continue;
     if (cap.lastSeenMs !== undefined && nowMs - cap.lastSeenMs > 3 * 60_000) continue;
     if (!includeReserved && reservations.isHeld(id)) continue;
     out.push((effectiveHardware(id, cap)?.computeClass ?? "cpu") as ComputeClassId);
@@ -180,7 +187,7 @@ export function inferenceCancelledForCapacity(taskId: string): boolean {
  * holds it: that call runs and is settled as usual. Removal from the queue is synchronous and only
  * of an unclaimed item, so a claim racing the cancel either got it first or finds nothing.
  */
-export async function cancelUnclaimedInference(taskId: string, subtaskId: string): Promise<boolean> {
+export async function cancelUnclaimedInference(taskId: string, subtaskId: string, draining?: { peerUrl: string | null }): Promise<boolean> {
   const timer = claimDeadlines.get(subtaskId);
   if (timer) clearTimeout(timer);
   claimDeadlines.delete(subtaskId);
@@ -189,7 +196,9 @@ export async function cancelUnclaimedInference(taskId: string, subtaskId: string
   // Say which: every agent of the class was busy, or (now) no agent of the class holds the model.
   const usage = usagePending.get(taskId);
   const gap = usage?.model && usage.computeClass ? capacityGap(usage.computeClass as ComputeClassId, holderClasses(usage.model)) : "busy";
-  noCapacity.set(taskId, { accountId, subtaskId, atMs: Date.now(), reason: gap === "none_in_class" ? "none_in_class" : "busy", ...(usage?.computeClass ? { computeClass: usage.computeClass } : {}), ...(usage?.model ? { model: usage.model } : {}) });
+  // Draining: the caller is told so, with a peer to send the call to (it was refunded here in full).
+  const reason: NoCapacityReason = draining ? "draining" : gap === "none_in_class" ? "none_in_class" : "busy";
+  noCapacity.set(taskId, { accountId, subtaskId, atMs: Date.now(), reason, ...(usage?.computeClass ? { computeClass: usage.computeClass } : {}), ...(usage?.model ? { model: usage.model } : {}), ...(draining?.peerUrl ? { coordinatorUrl: draining.peerUrl } : {}) });
   // A failed result from the coordinator (like a lease failure), so the subtask is settled everywhere.
   queue.complete({ subtaskId, taskId, agentId: "coordinator", ok: false, output: "", error: "no_capacity", durationMs: 0 });
   inferenceStreams.finish(subtaskId, "no_capacity");
@@ -199,6 +208,48 @@ export async function cancelUnclaimedInference(taskId: string, subtaskId: string
   await refundTaskSubmit(taskId);
   coordinatorApp.log.warn({ taskId, subtaskId, claimTimeoutMs: INFERENCE_CLAIM_TIMEOUT_MS }, "inference_no_capacity_cancelled");
   return true;
+}
+
+/**
+ * #524 (restart under load, 2026-11-24): right after a restart no agent has registered yet (they come
+ * back in ~50 s), and a named call was refused at once with no_agent_has_model. For this long after
+ * start a call for a catalog model nobody holds yet is accepted and queued instead; its claim bound
+ * is stretched to the end of the grace plus the usual bound, and refunds it in full if no agent comes.
+ */
+const STARTED_AT_MS = Date.now();
+export const STARTUP_GRACE_MS = CC.COORDINATOR_STARTUP_GRACE_MS;
+export function inStartupGrace(nowMs = Date.now(), startedAtMs = STARTED_AT_MS, graceMs = STARTUP_GRACE_MS): boolean {
+  return nowMs - startedAtMs < graceMs;
+}
+/** Claim bound for a call accepted in the startup grace: until the grace ends, plus the usual bound. */
+function startupClaimBoundMs(nowMs = Date.now()): number {
+  return Math.max(0, STARTED_AT_MS + STARTUP_GRACE_MS - nowMs) + INFERENCE_CLAIM_TIMEOUT_MS;
+}
+/**
+ * A model an agent could come back with: a catalog or cloud model, or an Ollama-style tag
+ * (name:size). Anything else (no agent can ever have it) is refused at once, as before.
+ */
+function knownModel(model: string): boolean {
+  return isCloudModel(model) || catalogEntryForTag(model) !== undefined || /^[a-z0-9][a-z0-9._/-]{0,80}:[a-z0-9][a-z0-9._-]{0,40}$/i.test(model);
+}
+
+/**
+ * Drain (a deploy or restart): calls nobody claimed cannot run here any more. They are taken off the
+ * queue and refunded in full now (the requester's stream answers no_capacity with a short
+ * Retry-After, and its client sends the call again), rather than waiting for the next instance to
+ * restore and refund them. The stream answer says "draining" and names a peer coordinator, so a
+ * client that allows redirects (the portal) sends the call there at once (test 6, 2026-11-24: calls
+ * queued on a stopping EU seed came back as "busy" 503s while the US seed had room). Claimed calls
+ * are left to finish (their billing is restored if not).
+ */
+export async function cancelUnclaimedForDrain(peerUrl: string | null = null): Promise<number> {
+  let n = 0;
+  for (const c of queue.inferenceCalls()) {
+    if (c.claimedBy) continue;
+    const st = queue.getSubtask(c.subtaskId);
+    if (st && (await cancelUnclaimedInference(st.taskId, st.id, { peerUrl }).catch(() => false))) n++;
+  }
+  return n;
 }
 
 /** A failed call is given to another agent only with at least this much of its time left. */
@@ -221,7 +272,7 @@ setInterval(() => {
  * when the subtask went back on the queue (the caller then records no result).
  */
 export async function retryInferenceElsewhere(subtask: Subtask, agentId: string, error: string | undefined, nowMs = Date.now()): Promise<boolean> {
-  if (subtask.kind !== "inference" || retriedInference.has(subtask.id)) return false;
+  if (subtask.kind !== "inference" || retriedInference.has(subtask.id) || requesterCancelled(subtask.id)) return false;
   if (error && NOT_RETRYABLE.test(error)) return false;
   const submittedAtMs = usagePending.get(subtask.taskId)?.atMs;
   if (submittedAtMs === undefined) return false;
@@ -235,7 +286,7 @@ export async function retryInferenceElsewhere(subtask: Subtask, agentId: string,
     // The owner's own call may also go to an owner-only model (kept off the network) on another of their machines.
     const has = subtask.projectMeta.onlyAccountId ? agentHasModelForOwner(cap, subtask.requestedModel) : agentHasModel(cap, subtask.requestedModel ?? "");
     if (excluded.has(id) || activeBlacklistRecord(id) || !has) continue;
-    if (nowMs - cap.lastSeenMs > 3 * 60_000) continue;
+    if (nowMs - cap.lastSeenMs > 3 * 60_000 || agentSocketLost(id, nowMs)) continue;
     if (cap.hostApproved === false && !subtask.projectMeta.onlyAccountId) continue;
     if (subtask.projectMeta.onlyAccountId && (await rewardAccountForAgent(id)) !== subtask.projectMeta.onlyAccountId) continue;
     other = true;
@@ -251,6 +302,13 @@ export async function retryInferenceElsewhere(subtask: Subtask, agentId: string,
   armClaimDeadline(subtask.taskId, subtask.id, Math.min(INFERENCE_CLAIM_TIMEOUT_MS, leftMs));
   coordinatorApp.log.warn({ taskId: subtask.taskId, subtaskId: subtask.id, agentId, error }, "inference_retry_elsewhere");
   return true;
+}
+
+/** Drop the call's no-capacity bound (it is being ended another way: inference-cancel.ts). */
+export function clearClaimDeadline(subtaskId: string): void {
+  const timer = claimDeadlines.get(subtaskId);
+  if (timer) clearTimeout(timer);
+  claimDeadlines.delete(subtaskId);
 }
 
 /** Cancel (and refund) the call if nobody claims it within `ms`; replaces an earlier bound. */
@@ -322,19 +380,24 @@ export function waitingBound(holderIds: string[], nowMs = Date.now()): number {
   return Math.max(16, Math.min(512, slots * WAITING_PER_SLOT));
 }
 
-function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: string) => { send: (b: unknown) => unknown } } }, c?: { reason: "busy" | "none_in_class"; computeClass?: string; model?: string }) {
+function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: string) => { send: (b: unknown) => unknown } } }, c?: { reason: NoCapacityReason; computeClass?: string; model?: string; coordinatorUrl?: string }) {
   const noneInClass = c?.reason === "none_in_class";
+  const draining = c?.reason === "draining";
+  const retryAfterSec = draining ? 1 : NO_CAPACITY_RETRY_AFTER_SEC;
   return reply
     .code(503)
-    .header("retry-after", String(NO_CAPACITY_RETRY_AFTER_SEC))
+    .header("retry-after", String(retryAfterSec))
     .send({
       error: "no_capacity",
       reason: c?.reason ?? "busy",
       ...(c?.computeClass ? { computeClass: c.computeClass } : {}),
-      message: noneInClass
+      ...(c?.coordinatorUrl ? { coordinatorUrl: c.coordinatorUrl } : {}),
+      message: draining
+        ? "This coordinator is restarting; the call had not started and nothing was charged. Send it again (to the coordinator named, if any)."
+        : noneInClass
         ? `No ${c?.computeClass} machine runs ${c?.model ?? "this model"} right now; nothing was charged.`
         : `No agent could take this call within ${Math.round(INFERENCE_CLAIM_TIMEOUT_MS / 1000)} s; nothing was charged.`,
-      retryAfterSec: NO_CAPACITY_RETRY_AFTER_SEC,
+      retryAfterSec,
     });
 }
 
@@ -399,11 +462,22 @@ const inferenceSubmitSchema = z.object({
    * minContext, complexity, sessionId; src/inference-api/job-descriptor.ts). Malformed fields are dropped.
    */
   routing: z.record(z.string(), z.unknown()).optional(),
-  /** model "auto": the caller can resubmit to a peer coordinator when the best fit is there (route_elsewhere). */
+  /**
+   * The caller can resubmit to a peer coordinator (route_elsewhere): model "auto" when the best fit
+   * is there; a named network model when nothing here has a free slot for it and a peer does (#526).
+   */
   routeRedirect: z.boolean().default(false),
+  /** Where the buyer is (a Fly region, or "cc-<country>"): free agents near it are preferred (#526). */
+  clientRegion: z.string().max(40).optional(),
   /** The portal's latency-aware coordinator choice (common/coordinator-choice.ts); kept only from the portal. */
   coordinatorChoice: z.record(z.string(), z.unknown()).optional(),
 });
+
+/** The class a named call is placed in (as resolveRequestedClass does for a class name), for locality and redirects. */
+function namedClass(requested: string): ComputeClassId | "any" {
+  return (resolveRequestedClass(requested, undefined, {}, rateOracleConfig.computeClasses).computeClass ?? "any") as ComputeClassId | "any";
+}
+const sumFree = (hs: ReadonlyArray<{ free: number }>) => hs.reduce((n, h) => n + h.free, 0);
 
 /** Median of the known round trips (ms), null when none is known. */
 function medianRtt(values: number[]): number | null {
@@ -416,16 +490,21 @@ function medianRtt(values: number[]): number | null {
 export function registerInferenceRoutes(app: CoordinatorApp): void {
   // Security research tier: entitlement pushes from the portal and the admin view (routes/restricted.ts).
   registerRestrictedRoutes(app);
+  // The requester went away: POST /inference/cancel (inference-cancel.ts).
+  registerInferenceCancelRoute(app);
   /** Models agents on the network can run now, with how many agents and the price per class. */
   app.get("/inference/models", async (req) => {
     const now = Date.now();
     // Security research tier: a restricted model is listed only to an account entitled to it.
     const viewer = restrictedCatalog.size > 0 ? await modelViewerAccount(req) : undefined;
-    const byModel = new Map<string, { agents: number; idle: number; free: number; classes: Set<ComputeClassId>; byClass: Partial<Record<ComputeClassId, number>>; ctx?: number; rtts: number[]; freeRtts: number[] }>();
+    const byModel = new Map<string, { agents: number; idle: number; free: number; classes: Set<ComputeClassId>; byClass: Partial<Record<ComputeClassId, number>>; ctx?: number; rtts: number[]; freeRtts: number[]; freeRegions: Set<string> }>();
     const classAgents: Partial<Record<ComputeClassId, Set<string>>> = {};
     const claims = queue.activeClaims();
     for (const [id, cap] of agentCapabilities) {
       if (activeBlacklistRecord(id) || (cap.lastSeenMs !== undefined && now - cap.lastSeenMs > 3 * 60_000)) continue;
+      // #524: an agent whose socket closed (nothing heard since) is not capacity: the portal must not
+      // send calls here for it.
+      if (agentSocketLost(id, now)) continue;
       const cls = (effectiveHardware(id, cap)?.computeClass ?? "cpu") as ComputeClassId;
       // #54: only models the agent reported (what it can actually be routed).
       // Host memory (memory-admission.ts): a model the agent can neither load nor has loaded is not
@@ -436,13 +515,16 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         const tier = restrictedCatalog.tierOf(m);
         if (tier && !accountHoldsTier(viewer, tier, now)) continue;
         if (!memoryAdmits(id, m, held, now) && !modelLoadedOn(id, m, now) && !unavailable) continue;
-        const e = byModel.get(m) ?? { agents: 0, idle: 0, free: 0, classes: new Set<ComputeClassId>(), byClass: {}, rtts: [], freeRtts: [] };
+        const e = byModel.get(m) ?? { agents: 0, idle: 0, free: 0, classes: new Set<ComputeClassId>(), byClass: {}, rtts: [], freeRtts: [], freeRegions: new Set<string>() };
         e.agents++;
         e.byClass[cls] = (e.byClass[cls] ?? 0) + 1;
         (classAgents[cls] ??= new Set()).add(id);
         if (queue.agentClaims(id) === 0 && !unavailable) e.idle++;
         const free = unavailable || !memoryAdmits(id, m, held, now) ? 0 : freeModelSlots(id, claims);
         e.free += free;
+        // #526: where the free slots are, so the portal can send a buyer to the coordinator with a free host near it.
+        const region = free > 0 ? agentRegionCode(cap) : null;
+        if (region && e.freeRegions.size < 32) e.freeRegions.add(region);
         // Coordinator <-> agent round trip (the portal adds it to a coordinator's expected latency).
         const rtt = agentRttMs(id);
         if (rtt !== null && Number.isFinite(rtt)) {
@@ -478,7 +560,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
           // paramsB: billions of parameters (MoE total), for the portal's model list.
           const cloud = cloudModelSpec(model);
           const ctx = cloud ? Math.min(e.ctx ?? cloud.contextWindow, cloud.contextWindow) : e.ctx;
-          return { model, agents: e.agents, agentsByClass: e.byClass, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], paramsB: paramsB(model), cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD, modelTokenPrice(model)), ...(ctx ? { contextWindow: ctx } : {}), ...(cloud ? { origin: cloud.origin, hostedBy: cloud.provider, cloudRank: cloud.rank, ...(cloud.hint ? { cloudHint: cloud.hint } : {}) } : {}), ...(restricted ? { restricted } : {}), ...(agentRtt !== null ? { agentRttMs: agentRtt } : {}) };
+          return { model, agents: e.agents, agentsByClass: e.byClass, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], paramsB: paramsB(model), cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD, modelTokenPrice(model)), ...(ctx ? { contextWindow: ctx } : {}), ...(cloud ? { origin: cloud.origin, hostedBy: cloud.provider, cloudRank: cloud.rank, ...(cloud.hint ? { cloudHint: cloud.hint } : {}) } : {}), ...(restricted ? { restricted } : {}), ...(agentRtt !== null ? { agentRttMs: agentRtt } : {}), ...(e.freeRegions.size ? { freeRegions: [...e.freeRegions] } : {}) };
         })
         .sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model)), (r) => r.model, (r) => r.cloudRank),
       classes,
@@ -497,15 +579,17 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const accountId = submitter.accountId;
     // The portal's coordinator choice is believed only from the portal (service token).
     const portalChoice = body.coordinatorChoice && hasPortalServiceToken((req as any).headers ?? {}) ? sanitizeCoordinatorChoice(body.coordinatorChoice) : undefined;
+    // #526: the buyer's region (sent by the portal, else the request's edge headers): only a preference.
+    const clientRegion = cleanRegion(body.clientRegion) ?? portalChoice?.clientRegion ?? clientRegionOf((req as any).headers ?? {});
     // model "auto": best-fit routing picks the model, the class and a preferred agent (routing.ts).
-    let routed: { job: JobDescriptor; result: BestFitResult; summary: RoutingSummary } | undefined;
+    let routed: { job: JobDescriptor; result: BestFitResult; summary: RoutingSummary; onlyClass?: string } | undefined;
     if (body.model === AUTO_MODEL_ID) {
       if (body.reservationId || body.target === "mine") return reply.code(400).send({ error: "auto_network_only", detail: "model auto routes network calls; name a model for your own machines or a reservation" });
       const hints = cleanHints(body.routing);
       const job = describeJob({ messages: body.messages as ChatMessage[], tools: body.tools, maxTokens: body.maxTokens }, hints, complexityWeights);
       // A class named on the submit, else in the hints (a bot on "Network GPU only"), limits best fit to it.
       const onlyClass = body.computeClass !== "any" ? body.computeClass : hints.computeClass;
-      const { result, elsewhere } = await resolveAuto(job, { peers: body.routeRedirect, requesterAccountId: accountId, ...(onlyClass ? { computeClass: onlyClass } : {}) });
+      const { result, elsewhere } = await resolveAuto(job, { peers: body.routeRedirect, requesterAccountId: accountId, clientRegion, ...(onlyClass ? { computeClass: onlyClass } : {}) });
       const summary = routingSummary(job, result);
       if (!result.chosen) {
         // reason: "price" is a money problem (the ceiling is what the caller may spend), not capacity.
@@ -516,13 +600,14 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       const chosen = result.chosen;
       body.model = chosen.model;
       body.computeClass = (ACCEPTED_COMPUTE_CLASS_IDS as readonly string[]).includes(chosen.computeClass) ? (chosen.computeClass as typeof body.computeClass) : "any";
-      routed = { job, result, summary };
+      routed = { job, result, summary, ...(onlyClass ? { onlyClass } : {}) };
     }
     // Security research tier: a restricted model needs an entitlement and your own or leased machines.
     const gate = await restrictedSubmitGate(accountId, body.model, { target: body.target, reservationId: body.reservationId });
     if (!gate.ok) return reply.code(gate.status).send(gate.body);
     const restrictedTier = gate.tier;
-    const holders = [...agentCapabilities.entries()].filter(([id, cap]) => agentHasModel(cap, body.model) && !activeBlacklistRecord(id));
+    // #524: an agent whose socket closed (nothing heard since) holds nothing a call could wait for.
+    const holders = [...agentCapabilities.entries()].filter(([id, cap]) => agentHasModel(cap, body.model) && !activeBlacklistRecord(id) && !agentSocketLost(id));
     // Unbilled targets: a lease you already paid for, or your own machines.
     let onlyAccountId: string | undefined;
     let reservationId: string | undefined;
@@ -560,8 +645,18 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       }
       if (restrictedTier && approved === 0) return reply.code(409).send({ error: "no_restricted_host", model: body.model, reason: "no_own_agent_approved_to_host" });
       onlyAccountId = accountId;
-    } else if (!holders.some(([id]) => !reservations.isHeld(id))) {
-      return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
+    } else {
+      // A named network model with no free slot here that a peer has free (#526): resubmit there,
+      // before anything is reserved (the same redirect as an Auto call whose best fit is on a peer).
+      if (body.routeRedirect && !routed && !restrictedTier && sumFree(freeLocalHolders(body.model, namedClass(body.computeClass), contextNeeded(body.messages as ChatMessage[], body.tools, body.maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS))) <= queue.waitingInference(body.model)) {
+        const peer = await peerWithFreeCapacity(body.model, body.computeClass, clientRegion).catch(() => null);
+        if (peer) {
+          recordMeshWork(peer.coordinatorId);
+          return reply.code(409).send({ error: "route_elsewhere", coordinatorId: peer.coordinatorId, coordinatorUrl: peer.url, model: body.model });
+        }
+      }
+      // Just restarted, agents not back yet: a known model's call waits for them (bounded, refunded if none comes).
+      if (!holders.some(([id]) => !reservations.isHeld(id)) && !(holders.length === 0 && inStartupGrace() && knownModel(body.model))) return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
     }
     // Backpressure: network calls wait for a slot up to a bound (waitingBound); past it the
     // caller hears no_capacity at once (nothing reserved or charged) instead of piling more onto
@@ -578,7 +673,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const taskClass = (billed ? resolved.computeClass ?? "any" : "any") as ComputeClassId | "any";
     // Agents hold the model, but none is paid at the requested class (matching is by granted class):
     // say so now instead of waiting out the claim bound and calling every machine "busy".
-    if (billed && taskClass !== "any") {
+    if (billed && taskClass !== "any" && holders.length > 0) {
       const classes = holderClasses(body.model);
       if (capacityGap(taskClass, classes) === "none_in_class") {
         return reply.code(409).send({ error: "no_agent_in_class", model: body.model, computeClass: taskClass, availableClasses: [...new Set(classes)].sort() });
@@ -612,15 +707,19 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       // Durable billing (stress finding 2): a restart refunds what this call did not use.
       // The task id's one billing row network-wide: an id billed on the other seed, or by another
       // account or kind, is refused before anything is debited.
+      let insertedRow = false;
       try {
         if (pgStore) {
           const billingRow = await pgStore.insertTaskBilling({ taskId: body.taskId, coordinatorId: identity.peerId, accountId, kind: "inference", perSubtaskReserveMsat: reserve, createdAtMs: Date.now() });
           if (billingRow === "conflict") return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
+          insertedRow = billingRow === "inserted";
         }
         await spendCredits(accountId, msatToCSats(reserve), "inference_reserve", body.taskId, { idempotencyKey: taskReserveKey(body.taskId) });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (err instanceof DuplicateDebitError) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
+        // Refused before the reserve: close the billing row this call wrote (only if the ledger has nothing under it).
+        if (insertedRow && pgStore) await closeUnreservedBillingRow(pgStore, { taskId: body.taskId, accountId: accountId, kind: "inference" }).catch((closeErr) => req.log.warn({ err: closeErr, taskId: body.taskId }, "task_billing_close_failed"));
         if (message.startsWith("insufficient_credits")) return reply.code(402).send({ error: "insufficient_credits", neededCSats: msatToCSats(reserve) });
         req.log.error({ err, taskId: body.taskId }, "inference_debit_failed");
         return reply.code(500).send({ error: "credit_debit_failed" });
@@ -653,9 +752,18 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       // (never the requester's own machines: excludeAccounts above, as in best-fit).
       if (routed.result.chosen?.local) preferAgent(subtask.id, routed.result.chosen.agentId, bestFitConfig.preferMs);
       recordDecision(body.taskId, subtask.id, routed.job, routed.result, Date.now(), portalChoice);
-    } else if (portalChoice && billed) {
-      // A named model the portal placed here: log which coordinator and why (Network page, routing decisions).
-      recordPlacement(body.taskId, subtask.id, { model: body.model, computeClass: taskClass === "any" ? null : taskClass }, portalChoice);
+      // #523: nobody picks it up within BEST_FIT_REPLACE_MS: the next candidate, not a 45 s wait (auto-replace.ts).
+      if (routed.result.chosen?.local) {
+        armAutoReplace({ taskId: body.taskId, subtaskId: subtask.id, job: routed.job, accountId, clientRegion, tried: [routed.result.chosen.agentId], ...(routed.onlyClass ? { onlyClass: routed.onlyClass } : {}), ...(body.maxBidMsatPerCredit !== undefined ? { maxBidMsatPerCredit: body.maxBidMsatPerCredit } : {}) });
+      }
+    } else {
+      if (portalChoice && billed) {
+        // A named model the portal placed here: log which coordinator and why (Network page, routing decisions).
+        recordPlacement(body.taskId, subtask.id, { model: body.model, computeClass: taskClass === "any" ? null : taskClass }, portalChoice);
+      }
+      // #526: a named network call goes first to the free holder nearest the buyer (locality.ts).
+      const near = billed ? nearestFreeHolder(freeLocalHolders(body.model, taskClass, needTokens), clientRegion) : undefined;
+      if (near) preferAgent(subtask.id, near.agentId, LOCALITY_PREFER_MS);
     }
     if (onlyAccountId && !reservationId && !hasPortalServiceToken((req as any).headers ?? {})) {
       // "My machines" from the desktop app: a soft preference for the requester's own machine on the
@@ -675,7 +783,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       });
     }
     inferenceStreams.open(subtask.id, body.taskId);
-    armClaimDeadline(body.taskId, subtask.id, INFERENCE_CLAIM_TIMEOUT_MS);
+    armClaimDeadline(body.taskId, subtask.id, holders.length === 0 && inStartupGrace() ? startupClaimBoundMs() : INFERENCE_CLAIM_TIMEOUT_MS);
     app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, ...(sized ? { reserveTokenMsat: sized.tokenMsat, reserveFloorMsat: sized.floorMsat, reserveCappedByMaxCSats: sized.capped } : {}), holders: holders.length }, "inference_submitted");
     return reply.send({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second", ...(routed ? { routing: routed.summary } : {}) });
   });
@@ -707,6 +815,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     // A holder posting pieces is alive: its lease is renewed like a heartbeat's, so a heartbeat that is
     // late (rate limited, a busy machine) cannot lapse a call while its reply is streaming.
     queue.renewClaim(body.subtaskId, verified.agentId);
+    noteAgentHttpAlive(verified.agentId);
     const r = inferenceStreams.append(body.subtaskId, body.seq, body.delta, body.done, body.error, body.toolCalls);
     // Security research tier: the call log records how a restricted call ended (prompts only if configured).
     if (r === "ok" && body.done && restrictedCalls.get(body.subtaskId)) {
@@ -751,7 +860,8 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         if (body.genMs !== undefined) b.genMs = Math.round(body.genMs);
       }
     }
-    return reply.code(r === "ok" || r === "duplicate" ? 200 : 409).send({ status: r });
+    // The requester cancelled (inference-cancel.ts): the agent should stop and report what it produced.
+    return reply.code(r === "ok" || r === "duplicate" ? 200 : 409).send({ status: r, ...(requesterCancelled(body.subtaskId) ? { cancelled: true } : {}) });
   });
 
   /** The requester reads the reply as it streams (long poll; signed by the requester's own agent). */

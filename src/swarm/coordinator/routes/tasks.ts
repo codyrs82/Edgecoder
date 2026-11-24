@@ -120,6 +120,7 @@ import {
   accrueResultCredits,
   settleTaskIfDone
 } from "../results.js";
+import { closeUnreservedBillingRow } from "../billing-restore.js";
 import { inferenceStreams, judgeInferenceReply, retryInferenceElsewhere } from "./inference.js";
 import { isMemoryRefusal, noteAgentResult, noteDispatched } from "../memory-admission.js";
 import { EMPTY_REPLY_ERROR } from "../../inference-runner.js";
@@ -172,6 +173,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       if (!policy.ok) {
         return reply.code(403).send({ error: "contribute_first_required", detail: policy.reason });
       }
+      let insertedRow = false;
       try {
         // Set aside the worst case for one subtask now (topped up once the task is split), settled
         // to the actual cost when it finishes (job-pricing.ts).
@@ -184,6 +186,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         if (pgStore) {
           const billingRow = await pgStore.insertTaskBilling({ taskId: body.taskId, coordinatorId: identity.peerId, accountId: body.submitterAccountId, kind: "job", perSubtaskReserveMsat: perSubtask, createdAtMs: Date.now() });
           if (billingRow === "conflict") return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
+          insertedRow = billingRow === "inserted";
         }
         // One charge per task id network-wide: one reserve key per task id, whatever its kind.
         await spendCredits(body.submitterAccountId, msatToCSats(perSubtask), "task_reserve", body.taskId, { idempotencyKey: taskReserveKey(body.taskId) });
@@ -192,6 +195,8 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (err instanceof DuplicateDebitError) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
+        // Refused before the reserve: close the billing row this call wrote (only if the ledger has nothing under it).
+        if (insertedRow && pgStore) await closeUnreservedBillingRow(pgStore, { taskId: body.taskId, accountId: body.submitterAccountId, kind: "job" }).catch((closeErr) => req.log.warn({ err: closeErr, taskId: body.taskId }, "task_billing_close_failed"));
         if (message.startsWith("insufficient_credits")) {
           return reply.code(402).send({ error: "insufficient_credits" });
         }

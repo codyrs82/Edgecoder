@@ -100,6 +100,12 @@ export class CoordinatorDrain {
     if (!this.draining) return null;
     const path = url.split("?")[0];
     const retryAfterSec = Math.ceil(DRAIN_RETRY_AFTER_MS / 1000);
+    // The portal's capacity probe: a draining coordinator is not a place to send calls (it skips an
+    // answer it cannot use within its 2 s report age, so calls go to a peer within seconds).
+    if (method === "GET" && path === "/inference/models") {
+      const peer = this.peerUrl();
+      return { status: 503, body: { error: "coordinator_draining", retryable: true, retryAfterMs: DRAIN_RETRY_AFTER_MS, ...(peer ? { coordinatorUrl: peer } : {}) }, retryAfterSec };
+    }
     if (method === "POST" && path === "/pull") {
       return { status: 200, body: { subtask: null, draining: true, retryAfterMs: DRAIN_RETRY_AFTER_MS }, retryAfterSec };
     }

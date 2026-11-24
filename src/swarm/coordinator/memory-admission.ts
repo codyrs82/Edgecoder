@@ -27,6 +27,7 @@
 
 import { estimateModelBytes, type MemoryTelemetry, type PressureLevel } from "../memory-budget.js";
 import { isCloudModel } from "../../cloud-host/catalog.js";
+import { agentSocketLost } from "./agent-liveness.js";
 
 /** Telemetry older than this is ignored (the agent is then treated like one that reports none). */
 export const MEMORY_FRESH_MS = 2 * 60_000;
@@ -260,9 +261,12 @@ export function circuitState(agentId: string, nowMs = Date.now()): { open: boole
   return { open: circuitOpen(agentId, nowMs), openUntilMs: c && nowMs < c.openUntilMs ? c.openUntilMs : null, trips: c?.trips ?? 0, recentFailures: c?.failures.filter((at) => nowMs - at <= CIRCUIT_WINDOW_MS).length ?? 0 };
 }
 
-/** No capacity for any new call, by memory or circuit (best-fit, /inference/models). */
+/**
+ * No capacity for any new call, by memory or circuit (best-fit, /inference/models), or because its
+ * socket closed and it has not been heard from since (#524, agent-liveness.ts).
+ */
 export function agentUnavailable(agentId: string, nowMs = Date.now()): boolean {
-  return memoryLimited(agentId, nowMs) || circuitOpen(agentId, nowMs);
+  return memoryLimited(agentId, nowMs) || circuitOpen(agentId, nowMs) || agentSocketLost(agentId, nowMs);
 }
 
 /** Drop records of agents gone quiet. */

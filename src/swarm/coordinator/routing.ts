@@ -26,8 +26,10 @@ import { accountsFor } from "./agent-accounts.js";
 import { activeBlacklistRecord, agentCapabilities, AGENT_CONNECTED_WINDOW_MS } from "./agent-state.js";
 import { autoMayUseCloudModel } from "../../cloud-host/catalog.js";
 import { bestFit, bestFitConfigFromEnv, routedLine, type AgentView, type BestFitConfig, type BestFitResult, type NetworkView, type SessionMemo } from "./best-fit.js";
-import { FALLBACK_BTC_USD, queue, reservations, identity, usageListeners } from "./context.js";
-import { agentContextWindow, agentLoadReport, freeModelSlots, pickupStats } from "./dispatch.js";
+import { CC, FALLBACK_BTC_USD, queue, reservations, identity, usageListeners } from "./context.js";
+import { agentContextWindow, agentLastPullMs, agentLoadReport, freeModelSlots, pickupStats } from "./dispatch.js";
+import { agentSocketLost } from "./agent-liveness.js";
+import { distanceRttMs, regionDistanceKm } from "../../common/geo-regions.js";
 import { agentUnavailable, loadedModelsOf, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
 import { effectiveHardware, hardwareVerifier } from "./economy.js";
 import { mutable } from "./mutable-state.js";
@@ -87,11 +89,27 @@ export function agentPerf(agentId: string, claims = queue.activeClaims()): Agent
   };
 }
 
+/** This coordinator's hosting region (INFRA_HOST_REGION, COORDINATOR_REGION, FLY_REGION), as in /network/world. */
+function hostRegion(): string | null {
+  return CC.INFRA_HOST_REGION || process.env.COORDINATOR_REGION || process.env.FLY_REGION || null;
+}
+
+/** Where an agent is, for locality (#526): the region it reported, else its country, else this coordinator's region. */
+export function agentRegionCode(cap: { region?: string; countryCode?: string } | undefined): string | null {
+  return cap?.region || cap?.countryCode || hostRegion();
+}
+
+/** Estimated buyer <-> agent round trip from their regions; undefined when either is not known. */
+export function clientRttFor(clientRegion: string | null | undefined, agentRegion: string | null | undefined): number | undefined {
+  const km = clientRegion ? regionDistanceKm(clientRegion, agentRegion) : null;
+  return km === null ? undefined : distanceRttMs(km);
+}
+
 /**
  * This coordinator's agents that a network call can be placed on now: online, not blacklisted,
  * not held by a reservation, owner approved as a host, holding at least one model.
  */
-export function localAgentViews(nowMs = Date.now(), rttOf: (agentId: string) => number | null = () => null): AgentView[] {
+export function localAgentViews(nowMs = Date.now(), rttOf: (agentId: string) => number | null = () => null, clientRegion?: string | null): AgentView[] {
   const claims = queue.activeClaims();
   const out: AgentView[] = [];
   for (const [agentId, cap] of agentCapabilities) {
@@ -130,14 +148,28 @@ export function localAgentViews(nowMs = Date.now(), rttOf: (agentId: string) => 
       verified: perf.verified,
       ...(perf.failRate !== null ? { failRate: perf.failRate } : {}),
       rttMs: rttOf(agentId),
-      stale: nowMs - cap.lastSeenMs > AGENT_CONNECTED_WINDOW_MS,
+      // #524: a closed socket with nothing heard since is gone now, not after the 2-minute window.
+      stale: nowMs - cap.lastSeenMs > AGENT_CONNECTED_WINDOW_MS || agentSocketLost(agentId, nowMs),
+      // #523: an agent that has not pulled recently (or ever) is less certain capacity (best-fit.ts).
+      pullAgeMs: pullAge(agentId, nowMs),
+      ...withClientRtt(clientRegion, agentRegionCode(cap)),
     });
   }
   return out;
 }
 
+function pullAge(agentId: string, nowMs: number): number | null {
+  const at = agentLastPullMs(agentId);
+  return at === undefined ? null : Math.max(0, nowMs - at);
+}
+
+function withClientRtt(clientRegion: string | null | undefined, agentRegion: string | null): { clientRttMs?: number } {
+  const rtt = clientRttFor(clientRegion, agentRegion);
+  return rtt === undefined ? {} : { clientRttMs: rtt };
+}
+
 /** Agents of peer coordinators from their world views (only those that sent `perf`). */
-export function peerAgentViews(worlds: Array<{ world: LocalWorld; linkRttMs: number | null }>, nowMs = Date.now()): AgentView[] {
+export function peerAgentViews(worlds: Array<{ world: LocalWorld; linkRttMs: number | null }>, nowMs = Date.now(), clientRegion?: string | null): AgentView[] {
   const out: AgentView[] = [];
   for (const { world, linkRttMs } of worlds) {
     if (world.coordinator.id === identity.peerId) continue;
@@ -163,6 +195,7 @@ export function peerAgentViews(worlds: Array<{ world: LocalWorld; linkRttMs: num
         rttMs: a.rttMs,
         linkRttMs,
         stale: nowMs - a.lastSeenMs > AGENT_CONNECTED_WINDOW_MS,
+        ...withClientRtt(clientRegion, a.region || a.country || world.coordinator.region || null),
         ownerTag: a.ownerTag ?? null,
       });
     }
@@ -205,6 +238,11 @@ async function peerViews(nowMs: number): Promise<Array<{ world: LocalWorld; link
   if (!peerSource) return [];
   const timeout = new Promise<[]>((r) => setTimeout(() => r([]), PEER_VIEW_WAIT_MS).unref?.());
   return Promise.race([peerSource(nowMs).catch(() => []), timeout]);
+}
+
+/** Peers' world views for routing (bounded wait); none when BEST_FIT_PEERS is off. */
+export function peerWorldViews(nowMs = Date.now()): Promise<Array<{ world: LocalWorld; linkRttMs: number | null }>> {
+  return bestFitConfig.peers ? peerViews(nowMs) : Promise.resolve([]);
 }
 
 // ── Sessions ─────────────────────────────────────────────────────────────────────────────
@@ -267,13 +305,18 @@ export interface Resolution {
 }
 
 /** Score `job` on the live network. `peers`: also consider peer coordinators' agents. */
-export async function resolveAuto(job: JobDescriptor, opts: { peers?: boolean; computeClass?: string; requesterAccountId?: string } = {}, nowMs = Date.now()): Promise<Resolution> {
+export async function resolveAuto(
+  job: JobDescriptor,
+  opts: { peers?: boolean; computeClass?: string; requesterAccountId?: string; clientRegion?: string | null; excludeAgents?: readonly string[] } = {},
+  nowMs = Date.now(),
+): Promise<Resolution> {
   const views = opts.peers && bestFitConfig.peers ? await peerViews(nowMs) : [];
-  const local = localAgentViews(nowMs, rttSource);
+  const excluded = new Set(opts.excludeAgents ?? []);
+  const local = localAgentViews(nowMs, rttSource, opts.clientRegion).filter((a) => !excluded.has(a.agentId));
   const owners = opts.requesterAccountId ? await ownerSource(local.map((a) => a.agentId), nowMs).catch(() => new Map<string, string | null>()) : new Map<string, string | null>();
   // Security research tier: a restricted model is never chosen by auto, for anyone (restricted.ts).
   // Never the requester's own machines (self-dealing).
-  const agents = withoutRequesterAgents(withoutRestrictedModels([...local, ...peerAgentViews(views, nowMs)]), opts.requesterAccountId, owners);
+  const agents = withoutRequesterAgents(withoutRestrictedModels([...local, ...peerAgentViews(views, nowMs, opts.clientRegion).filter((a) => !excluded.has(a.agentId))]), opts.requesterAccountId, owners);
   const view: NetworkView = {
     // A class the client named limits the choice to it ("gpu" is the GPU family: gpu and gpu.dc).
     agents: opts.computeClass ? agents.filter((a) => classFamily(opts.computeClass!).includes(a.computeClass)) : agents,
@@ -423,6 +466,24 @@ function logDecision(d: RoutingDecision): RoutingDecision {
     byTask.delete(old.taskId);
   }
   return d;
+}
+
+/**
+ * #523: an Auto call nobody picked up was re-placed (auto-replace.ts): the decision now names the
+ * new model, class and preferred agent, and says why.
+ */
+export function noteReplaced(subtaskId: string, to: { model: string; computeClass: string; agentId: string; agentLabel: string; score: number }, why: string): void {
+  const d = bySubtask.get(subtaskId);
+  if (!d) return;
+  const from = d.model;
+  d.model = to.model;
+  d.computeClass = to.computeClass;
+  d.agent = to.agentLabel;
+  d.score = to.score;
+  d.preferredAgentId = to.agentId;
+  d.reason = `${why}; was ${from ?? "?"}`.slice(0, 300);
+  d.line = `routed to ${to.model} on ${to.computeClass} because ${d.reason}`.slice(0, 300);
+  changed(d);
 }
 
 /** A piece of a routed reply was accepted from `agentId` (admin-network observeInference). */

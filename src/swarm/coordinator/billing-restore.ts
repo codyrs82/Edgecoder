@@ -110,8 +110,50 @@ export async function restoreTaskBillingRows(store: PostgresStore, rows: OpenTas
   return summary;
 }
 
+/** The ledger facts a billing row is closed on (PostgresStore.taskLedgerTotals). */
+type LedgerTotalsStore = Pick<PostgresStore, "taskLedgerTotals" | "markTaskBillingSettled">;
+
+/**
+ * A submit refused before its reserve was debited (402 insufficient cSats, a failed debit) wrote its
+ * task_billing row first (the row is the task id's one billing record network-wide), and that row
+ * then stayed open for ever: 37 of them on 2026-11-24. Close it now, but only when the ledger shows
+ * nothing under the task (no reserve, no payment, no refund): a row whose debit did happen is never
+ * closed here. Idempotent (settling an already settled row changes nothing).
+ */
+export async function closeUnreservedBillingRow(store: LedgerTotalsStore, row: { taskId: string; accountId: string; kind: string }, nowMs = Date.now()): Promise<boolean> {
+  const totals = await store.taskLedgerTotals([{ taskId: row.taskId, refundTxId: refundTxId(row.taskId), accountId: row.accountId, kind: row.kind }]);
+  const t = totals.get(row.taskId);
+  if (t && (t.reservedMsat > 0 || t.paidMsat > 0 || t.refundedMsat > 0)) return false;
+  await store.markTaskBillingSettled(row.taskId, nowMs, identity.peerId);
+  return true;
+}
+
+/** Open rows older than this with nothing in the ledger are orphans of a refused submit (a debit takes milliseconds). */
+export const UNRESERVED_ROW_MIN_AGE_MS = 5 * 60_000;
+
+/**
+ * Reconcile: close this coordinator's open billing rows that no task here holds, that are older than
+ * UNRESERVED_ROW_MIN_AGE_MS, and under which the ledger has nothing (the orphans refused submits left
+ * before closeUnreservedBillingRow). Nothing is refunded or paid: there is nothing to return.
+ */
+export async function settleUnreservedBillingRows(store: LedgerTotalsStore & Pick<PostgresStore, "listOpenTaskBilling">, nowMs = Date.now(), minAgeMs = UNRESERVED_ROW_MIN_AGE_MS): Promise<number> {
+  const rows = (await store.listOpenTaskBilling(identity.peerId)).filter((r) => nowMs - r.createdAtMs >= minAgeMs && !taskBilling.has(r.taskId));
+  if (rows.length === 0) return 0;
+  const totals = await store.taskLedgerTotals(rows.map((r) => ({ taskId: r.taskId, refundTxId: refundTxId(r.taskId), accountId: r.accountId, kind: r.kind })));
+  let closed = 0;
+  for (const r of rows) {
+    const t = totals.get(r.taskId);
+    if (t && (t.reservedMsat > 0 || t.paidMsat > 0 || t.refundedMsat > 0)) continue;
+    await store.markTaskBillingSettled(r.taskId, nowMs, identity.peerId);
+    closed++;
+  }
+  if (closed > 0) app.log.warn({ closed }, "task_billing_unreserved_rows_closed");
+  return closed;
+}
+
 /** The periodic sweep (billing-sweep.ts) wired to this coordinator. */
 export async function sweepTaskBilling(store: PostgresStore): Promise<void> {
+  await settleUnreservedBillingRows(store).catch((err) => app.log.warn({ err: String(err) }, "task_billing_unreserved_sweep_failed"));
   const r = await sweepStaleTaskBilling({ store, coordinatorId: identity.peerId, isLive: (taskId) => taskBilling.has(taskId), restore: (rows) => restoreTaskBillingRows(store, rows) });
   if (r.swept > 0) app.log.warn({ ...r }, "task_billing_swept");
 }

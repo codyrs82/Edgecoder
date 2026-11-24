@@ -24,7 +24,13 @@
  *                  model's active parameters.
  *   price    P     1 / (1 + cSats / priceRef): the call's tokens at the size price, never below
  *                  the class's power floor for its seconds (job-pricing.ts inferenceCostMsat).
- *   reliable R     (verifier reliability, else 0.9) x (0.93 if unverified) x (1 - recent failures).
+ *   reliable R     (verifier reliability, else 0.9) x (0.93 if unverified) x (1 - recent failures)
+ *                  x (UNPROVEN_PULL_FACTOR if the agent has not pulled work within PULL_FRESH_MS,
+ *                  or never has: #523, a machine that heartbeats but never pulls is not capacity
+ *                  Auto can count on, so a proven alternative wins unless it is the only fit).
+ *   locality       the client's distance to the agent (clientRttMs, from the client's region; see
+ *                  src/common/geo-regions.ts) is part of the estimate's round trip, so among
+ *                  otherwise equal agents the one nearest the buyer is preferred (#526).
  *
  *   score = wQ Q + wL L + wP P + wR R, weights normalised to 1. Complexity c moves weight to
  *   quality (x(1 + k c)) and reliability (x(1 + k c / 2)) from latency and price (x(1 - k c / 2));
@@ -113,6 +119,13 @@ export interface AgentView {
   /** Round trip this coordinator <-> the agent's coordinator (peers only). */
   linkRttMs?: number | null;
   stale: boolean;
+  /**
+   * How long ago the agent last pulled work (ms). null: it has not pulled (recently, or ever);
+   * undefined: not known (a peer's agent). See UNPROVEN_PULL_FACTOR.
+   */
+  pullAgeMs?: number | null;
+  /** Estimated round trip between the buyer and this agent (from their regions); undefined: not known. */
+  clientRttMs?: number;
   /** worldOwnerTag of the owner account, when known (a requester's own agents are left out of auto). */
   ownerTag?: string | null;
 }
@@ -153,6 +166,11 @@ export interface BestFitConfig {
   priceRefCSats: number;
   /** How long dispatch keeps a call for the chosen agent before anyone eligible may take it. */
   preferMs: number;
+  /**
+   * #523: an Auto call nobody has picked up after this long is re-placed on the next candidate
+   * (auto-replace.ts); 0 turns it off.
+   */
+  replaceMs: number;
   /** How long a session remembers the agent of its last turn. */
   sessionTtlMs: number;
   /** Quality taken off a model more than 4x (up to 8x) the size the job wants. */
@@ -172,6 +190,7 @@ export const DEFAULT_BEST_FIT_CONFIG: BestFitConfig = {
   latencyTargetMs: { interactive: 8_000, batch: 120_000 },
   priceRefCSats: 5,
   preferMs: 400,
+  replaceMs: 12_000,
   sessionTtlMs: 30 * 60_000,
   oversizePenalty: 0.25,
   peers: true,
@@ -199,6 +218,7 @@ export function bestFitConfigFromEnv(env: Record<string, string | undefined> = p
     },
     priceRefCSats: num(env.BEST_FIT_PRICE_REF_CSATS, d.priceRefCSats, 0.001),
     preferMs: num(env.BEST_FIT_PREFER_MS, d.preferMs, 0, 10_000),
+    replaceMs: num(env.BEST_FIT_REPLACE_MS, d.replaceMs, 0, 120_000),
     sessionTtlMs: num(env.BEST_FIT_SESSION_TTL_MS, d.sessionTtlMs, 0),
     oversizePenalty: num(env.BEST_FIT_OVERSIZE_PENALTY, d.oversizePenalty, 0, 1),
     peers: !["0", "false"].includes((env.BEST_FIT_PEERS ?? "").trim().toLowerCase()),
@@ -334,7 +354,7 @@ export function estimate(job: JobDescriptor, agent: AgentView, model: string, vi
   // Model affinity: an agent that has to load the model first pays the load (and it may unload
   // another to make room), so an agent with it loaded wins a close call.
   if (agent.loadedModels && !agent.loadedModels.includes(model) && agent.computeClass !== "cloud") waitMs += coldLoadMs(model);
-  const rttMs = (agent.rttMs ?? 50) + (agent.local ? 0 : agent.linkRttMs ?? 100);
+  const rttMs = (agent.rttMs ?? 50) + (agent.local ? 0 : agent.linkRttMs ?? 100) + Math.max(0, agent.clientRttMs ?? 0);
   const ttftMs = waitMs + rttMs + prefillMs;
   const totalMs = ttftMs + decodeMs;
   const cost = inferenceCostMsat({
@@ -407,8 +427,18 @@ export function qualityPrior(model: string, job: JobDescriptor, req: Requirement
   return Math.max(0, Math.min(1, q + (isCodeJob(job.job) && isCoder(model) ? 0.08 : 0)) - oversize);
 }
 
+/** An agent that pulled work this recently is proven capacity (agents poll every 1-3 s). */
+export const PULL_FRESH_MS = 30_000;
+/** Reliability multiplier for an agent that has not pulled within PULL_FRESH_MS, or never has (#523). */
+export const UNPROVEN_PULL_FACTOR = 0.5;
+
+/** The agent pulls work: false when it has not within PULL_FRESH_MS (or never); true when unknown. */
+export function pullsWork(a: Pick<AgentView, "pullAgeMs">): boolean {
+  return a.pullAgeMs === undefined || (a.pullAgeMs !== null && a.pullAgeMs <= PULL_FRESH_MS);
+}
+
 export function reliabilityOf(a: AgentView): number {
-  return (a.reliability ?? 0.9) * (a.verified ? 1 : 0.93) * (1 - Math.max(0, Math.min(1, a.failRate ?? 0)));
+  return (a.reliability ?? 0.9) * (a.verified ? 1 : 0.93) * (1 - Math.max(0, Math.min(1, a.failRate ?? 0))) * (pullsWork(a) ? 1 : UNPROVEN_PULL_FACTOR);
 }
 
 function scoreOf(parts: ScoreParts, w: BestFitWeights): number {

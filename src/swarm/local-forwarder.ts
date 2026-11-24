@@ -35,6 +35,7 @@ const SIGNED_POSTS: Record<string, string> = {
   "/forward/submit": "/submit",
   "/forward/inference/submit": "/inference/submit",
   "/forward/inference/stream": "/inference/stream",
+  "/forward/inference/cancel": "/inference/cancel",
   "/forward/account/summary": "/account/summary",
   "/forward/account/buy": "/account/buy",
   "/forward/account/intent": "/account/intent",

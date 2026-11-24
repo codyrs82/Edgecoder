@@ -155,6 +155,13 @@ describe("probeRegistryEntry", () => {
     expect(r2.error).toBe("identity_mismatch");
   });
 
+  it("#524: passes over a coordinator that is draining for a restart (agents move to a peer meanwhile)", async () => {
+    const a = { keys: createPeerKeys("coord-a"), latencyMs: 1 };
+    const fetch: FetchLike = async (url) => ({ status: 200, json: async () => ({ peerId: a.keys.peerId, publicKeyPem: a.keys.publicKeyPem, ...(url.endsWith("/identity") ? { draining: true } : {}) }) });
+    const r = await probeRegistryEntry(entry(a, "https://a.example"), "https://a.example", { fetch });
+    expect(r).toMatchObject({ ok: false, error: "draining" });
+  });
+
   it("fails an unreachable coordinator", async () => {
     const a = { keys: createPeerKeys("coord-a"), latencyMs: 1, down: true };
     const r = await probeRegistryEntry(entry(a, "https://a.example"), "https://a.example", { fetch: fakeNet({ "https://a.example": a }) });

@@ -120,6 +120,8 @@ export const portalConfigSchema = z.object({
   PORTAL_COORD_LATENCY_ROUTING: z.enum(["on", "off", "true", "false", "1", "0"], { message: "must be on or off" }).default("on"),
   PORTAL_COORD_LATENCY_MARGIN_MS: envInt(30, { min: 0, max: 10_000 }),
   PORTAL_COORD_LATENCY_MARGIN_PCT: envInt(15, { min: 0, max: 100 }),
+  /** #526 locality rule margin in km (0 = off). */
+  PORTAL_COORD_LOCALITY_MARGIN_KM: envInt(700, { min: 0, max: 20_000 }),
   /** Agents one account may enrol (read by maxAgentsPerAccount in routes/account.ts). */
   PORTAL_MAX_AGENTS_PER_ACCOUNT: envInt(25, { min: 1 }),
   OAUTH_MICROSOFT_PROMPT: z.string().default("select_account"),

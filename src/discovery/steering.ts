@@ -149,7 +149,7 @@ export async function probeRegistryEntry(
     const started = now();
     try {
       const res = await fetchImpl(`${base}/identity`, { method: "GET", headers: { accept: "application/json" }, signal: ctl.signal });
-      const body = (await res.json().catch(() => null)) as { peerId?: unknown; publicKeyPem?: unknown } | null;
+      const body = (await res.json().catch(() => null)) as { peerId?: unknown; publicKeyPem?: unknown; draining?: unknown } | null;
       const elapsed = now() - started;
       if (res.status < 200 || res.status >= 300) {
         lastError = `http_${res.status}`;
@@ -158,6 +158,12 @@ export async function probeRegistryEntry(
       if (!body || typeof body.peerId !== "string" || typeof body.publicKeyPem !== "string") {
         lastError = "malformed";
         continue;
+      }
+      // Stopping for a deploy or restart (#524): not a coordinator to move to now; another one is
+      // picked, and the next steering round comes back to it once it is up.
+      if (body.draining === true) {
+        clearTimeout(timer);
+        return { url: base, ok: false, latencyMs: null, samples: times.length, error: "draining" };
       }
       // A wrong key is an impersonation attempt, not a slow sample: disqualify immediately.
       if (body.peerId !== entry.peerId || !fingerprintMatches(entry.publicKeyFingerprint, body.publicKeyPem)) {

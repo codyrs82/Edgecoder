@@ -72,6 +72,8 @@ export interface ModelLoad {
   free?: number;
   waiting: number;
   agentRttMs?: number;
+  /** Regions of the hosts with a free slot for it (newer coordinators; #526 locality). */
+  freeRegions?: string[];
 }
 
 /** A model the network can run now, across coordinators: agents holding it and their classes. */
@@ -167,12 +169,18 @@ export function httpCapacityProbe(opts: { serviceToken?: string; timeoutMs: numb
       const modelLoad: Record<string, ModelLoad> = {};
       const modelClasses: Record<string, string[]> = {};
       const num = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
-      for (const m of json.models as Array<{ model?: unknown; agents?: unknown; idleAgents?: unknown; freeSlots?: unknown; waiting?: unknown; classes?: unknown; agentRttMs?: unknown }>) {
+      const regions = (v: unknown): string[] | undefined => {
+        if (!Array.isArray(v)) return undefined;
+        const out = v.map((r) => cleanRegion(r)).filter((r): r is string => r !== null).slice(0, 32);
+        return out.length ? out : undefined;
+      };
+      for (const m of json.models as Array<{ model?: unknown; agents?: unknown; idleAgents?: unknown; freeSlots?: unknown; waiting?: unknown; classes?: unknown; agentRttMs?: unknown; freeRegions?: unknown }>) {
         if (m && typeof m.model === "string" && typeof m.agents === "number" && m.agents > 0) {
           agentModels.push(m.model);
           if (Array.isArray(m.classes)) modelClasses[m.model] = m.classes.filter((c): c is string => typeof c === "string");
           if (num(m.idleAgents)) {
-            modelLoad[m.model] = { agents: m.agents, idle: m.idleAgents, ...(num(m.freeSlots) ? { free: m.freeSlots } : {}), waiting: num(m.waiting) ? m.waiting : 0, ...(num(m.agentRttMs) ? { agentRttMs: m.agentRttMs } : {}) };
+            const freeRegions = regions(m.freeRegions);
+            modelLoad[m.model] = { agents: m.agents, idle: m.idleAgents, ...(num(m.freeSlots) ? { free: m.freeSlots } : {}), waiting: num(m.waiting) ? m.waiting : 0, ...(num(m.agentRttMs) ? { agentRttMs: m.agentRttMs } : {}), ...(freeRegions ? { freeRegions } : {}) };
           }
         }
       }
@@ -392,6 +400,7 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
         callP50Ms: r.callP50Ms ?? null,
         agentRttMs: load.agentRttMs ?? null,
         reportAgeMs: reportAge(urls[i]),
+        ...(load.freeRegions ? { freeRegions: load.freeRegions } : {}),
       });
     }
     let best: (typeof scored)[number] | null = null;
@@ -457,6 +466,7 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
         // Best fit places the call on one of them; the nearest is the fair estimate.
         agentRttMs: agentRtts.length ? Math.min(...agentRtts) : null,
         reportAgeMs: reportAge(urls[i]),
+        ...(loads.some((l) => l.freeRegions) ? { freeRegions: [...new Set(loads.flatMap((l) => l.freeRegions ?? []))] } : {}),
       });
     }
     if (!best) return { url: urls[0] };

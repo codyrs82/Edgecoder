@@ -107,7 +107,26 @@ export function namedModelCeiling(...sources: Array<{ maxCSats?: number } | unde
   return caps.length ? { routing: { maxCSats: Math.max(0.001, Math.min(...caps)) } } : {};
 }
 
-/** model "auto" on the coordinator: the best fit is on another coordinator (`url`). */
+/**
+ * A named network model (#526): sent to `url` with routeRedirect, so a coordinator with no free slot
+ * for it that knows a peer with one answers route_elsewhere before anything is reserved. The call
+ * then goes there once (only to a coordinator `allowed` names), without a further redirect; a peer
+ * that is not allowed is not followed and the first coordinator takes the call without redirecting.
+ */
+export function redirectingNetworkBackend(opts: { url: string; allowed: (url: string) => boolean | Promise<boolean>; run: (url: string, routeRedirect: boolean) => ChatBackend }): ChatBackend {
+  return async function* (req, signal) {
+    try {
+      return yield* opts.run(opts.url, true)(req, signal);
+    } catch (err) {
+      if (!(err instanceof RouteElsewhere)) throw err;
+      const next = err.url.replace(/\/+$/, "");
+      const follow = next !== opts.url.replace(/\/+$/, "") && (await Promise.resolve(opts.allowed(next)).catch(() => false));
+      return yield* opts.run(follow ? next : opts.url, false)(req, signal);
+    }
+  };
+}
+
+/** The coordinator sends the call to another coordinator (`url`): Auto's best fit, or a named model's free slot. */
 export class RouteElsewhere extends ChatBackendError {
   constructor(message: string, readonly url: string) {
     super(message, 409);
