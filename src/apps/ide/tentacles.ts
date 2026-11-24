@@ -51,15 +51,15 @@ import {
 } from "./tentacle-workspace.js";
 import type { ChatBackend } from "../../inference-api/types.js";
 import type { ServedBy } from "../../swarm/served-by.js";
-import { formatCSatsShort, parseWhere, patchReturn, tentacleCallLine, tentacleTotals } from "./tentacle-format.js";
+import { formatCSatsShort, parseWhere, patchReturn, tentacleCallLine, tentacleRanOn, tentacleTotals, whereServed } from "./tentacle-format.js";
 
 import { emptyAttempt, hintedChat, parseFileRef, pickLocalHelperModel, retryAfterEmpty, smallWorkerWarning, TENTACLE_LOCAL_MIN_PARAMS_B, tentacleLocalMinParamsB, tentaclePrompt, tentacleSystemPrompt } from "./tentacle-chat.js";
 import { acceptanceProbe, canAutoApply, modeOf, sessionAllowsShell, TENTACLE_SHELL_ALLOW, tentacleShellDecision } from "./tentacle-shell.js";
-import { CallHolds, ceilingRefusal, helperCallCeiling, helperMaxTokens, MIN_HELPER_CALL_CSATS, paidWorker } from "./tentacle-reserve.js";
+import { CallHolds, ceilingRefusal, helperCallCeiling, helperContextWindow, helperReplyTokens, MIN_HELPER_CALL_CSATS, paidWorker, promptTokensOf } from "./tentacle-reserve.js";
 
 export { acceptanceProbe, canAutoApply, modeOf, sessionAllowsShell, TENTACLE_SHELL_ALLOW, tentacleShellDecision };
 export { pickLocalHelperModel, TENTACLE_LOCAL_MIN_PARAMS_B, tentacleLocalMinParamsB };
-export { formatCSatsShort, hintedChat, parseFileRef, parseWhere, patchReturn, tentacleCallLine, tentaclePrompt, tentacleTotals };
+export { formatCSatsShort, hintedChat, parseFileRef, parseWhere, patchReturn, tentacleCallLine, tentaclePrompt, tentacleRanOn, tentacleTotals, whereServed };
 import type { RoutingHints, JobType, Quality } from "../../inference-api/job-descriptor.js";
 import { isFrontierModelId } from "../../inference-api/frontier-models.js";
 
@@ -331,8 +331,9 @@ export function workerHints(spec: Pick<TentacleSpec, "kind" | "complexity"> & Pa
     quality,
     latency: "batch",
     needsTools: true,
-    // Room for the prompt, the tool round trips and a reply; cheap models have 8-16K.
-    minContext: Math.min(32_768, Math.max(8_192, promptTokens + 6_000)),
+    // Room for the prompt and a reply (tentacle-reserve.ts helperContextWindow): the reply is sized
+    // to the window, so a helper prompt of a few thousand tokens fits the network's common 8K hosts.
+    minContext: helperContextWindow(promptTokens),
     ...(o.maxCSats !== undefined ? { maxCSats: Math.max(0, Number(o.maxCSats.toFixed(6))) } : {}),
     ...(o.tentacleId ? { sessionId: `tentacle:${o.tentacleId}` } : {}),
   };
@@ -608,7 +609,7 @@ export class TentacleManager {
     // Where the latest attempt ran (local first), and the local model when it ran here.
     let place: "local" | "worker" = "worker";
     let localModel = "";
-    const whereNow = () => (place === "local" ? { model: localModel, class: "this computer", agentLabel: "this computer" } : parseWhere(where, model));
+    const whereNow = () => (place === "local" ? { model: localModel, class: "this computer", agentLabel: "this computer" } : whereServed(where, model, [...calls].reverse().find((c) => c.served)?.served));
     const checks: CheckResult[] = [];
     try {
       if (!t.spec.readOnly) {
@@ -716,7 +717,9 @@ export class TentacleManager {
             }
           },
           {
-            ...(place === "worker" ? { maxTokens: helperMaxTokens() } : {}),
+            // Each call's reply is sized to fit the smallest window that holds its prompt (an
+            // 8192 reply fit no 8192-token host, so every helper call waited for one larger host).
+            ...(place === "worker" ? { maxTokens: (msgs: Parameters<typeof promptTokensOf>[0], tools?: unknown[]) => helperReplyTokens(promptTokensOf(msgs, tools)) } : {}),
             after: () => {
               st.holds.release(holdKey);
               holdKey = undefined;
@@ -936,7 +939,7 @@ export class TentacleManager {
   /** The transcript line: "Tentacle: <task> · <model> on <class> · passed · 3.1 cSats" (collapsible, with the patch). */
   private note(sessionId: string, t: Internal): void {
     const r = t.view.result;
-    const where = r ? `${r.model} on ${r.class}` : t.view.model ?? "auto";
+    const where = r ? tentacleRanOn(r) : t.view.model ?? "auto";
     const merge = t.view.merge?.state;
     const content = `Tentacle: ${shortTask(t.view.task)} · ${where} · ${t.view.status}${merge && merge !== "no_changes" && merge !== "not_applied" ? ` (${merge.replace("_", " ")})` : ""} · ${formatCSatsShort(t.view.cSats)}`;
     const applied = merge === "applied";

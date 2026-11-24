@@ -303,8 +303,13 @@ Each paid helper call (worker `auto` or `network/…`) now sizes its ceiling
   calls in flight (their reserves are held on the account at the same time).
 
 So the helpers' reserves together never exceed the session's tentacle budget. A call also asks
-for at most 8192 reply tokens (`EDGECODER_TENTACLE_MAX_TOKENS`, 256–32768), which keeps the
-token bound small. A call whose ceiling is under 0.05 cSats doesn't start: it waits while other
+for at most 4096 reply tokens (`EDGECODER_TENTACLE_MAX_TOKENS`, 256–32768), which keeps the
+token bound small, and the reply is cut so the prompt and the reply fit the smallest context
+window that holds the prompt (8192 tokens for a helper prompt of up to about 6900 tokens; at least
+1024 reply tokens). Most network hosts serve an 8192-token window: an 8192-token reply did not fit
+any of them, so every helper call waited for the few hosts with a larger window. The call's
+`minContext` hint is that same window. A call the coordinator refuses as too long for every
+host's window is sent once more with a 1024-token reply. A call whose ceiling is under 0.05 cSats doesn't start: it waits while other
 helpers' calls hold the session's budget, and otherwise the tentacle stops with an error that says
 which budget is short. Calls on this computer, your machines or a lease hold nothing.
 

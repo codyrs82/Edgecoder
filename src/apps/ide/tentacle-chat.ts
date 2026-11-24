@@ -13,9 +13,11 @@ import { callsTools, fitScore, paramsB, type Workload } from "../../inference-ap
 import { isFrontierModelId } from "../../inference-api/frontier-models.js";
 import { catalogEntryForTag } from "../../model/catalog.js";
 import type { RoutingHints } from "../../inference-api/job-descriptor.js";
-import type { ChatBackend } from "../../inference-api/types.js";
+import type { ChatBackend, ChatMessage } from "../../inference-api/types.js";
 import type { ServedBy } from "../../swarm/served-by.js";
 import type { TentacleSpec } from "./tentacles.js";
+import { isContextTooLong } from "./context-budget.js";
+import { HELPER_MIN_REPLY_TOKENS } from "./tentacle-reserve.js";
 
 /** "path#L10-L40" → { path, start, end }. */
 export function parseFileRef(ref: string): { path: string; start?: number; end?: number } {
@@ -29,7 +31,10 @@ export function parseFileRef(ref: string): { path: string; start?: number; end?:
 /**
  * A ChatFn over a backend that sends `hints` with every request and reports each call's usage.
  * `hints` may wait (a call waits for room in the session's budget); `after` runs when the call
- * ends, answered or not (its hold is released). `maxTokens` caps each reply.
+ * ends, answered or not (its hold is released). `maxTokens` caps each reply: a number, or sized
+ * per call from its messages and tools (helperReplyTokens). A call refused as too long for every
+ * host's context window, before any reply came, is sent once more with the minimum reply
+ * (HELPER_MIN_REPLY_TOKENS) instead of failing the attempt.
  */
 export function hintedChat(
   backend: ChatBackend,
@@ -37,33 +42,47 @@ export function hintedChat(
   signal: AbortSignal,
   onCall: (u: { cSats: number; where?: string; promptTokens?: number; outputTokens?: number; served?: ServedBy }) => void,
   guard?: () => void,
-  o: { maxTokens?: number; after?: () => void } = {},
+  o: { maxTokens?: number | ((messages: ChatMessage[], tools?: unknown[]) => number); after?: () => void } = {},
 ): ChatFn {
   return async ({ messages, tools }, onDelta) => {
     guard?.();
     const h = await hints();
     try {
       guard?.();
-      let content = "";
-      const toolCalls: ChatResult["toolCalls"] = [];
-      const req = {
-        messages: messages.map((m) => ({ ...m, role: (["system", "user", "assistant", "tool"].includes(m.role) ? m.role : "user") as "user" })),
-        ...(tools ? { tools: tools as never } : {}),
-        temperature: 0.2,
-        ...(o.maxTokens ? { maxTokens: o.maxTokens } : {}),
-        hints: h,
-      };
-      for await (const p of backend(req, signal)) {
-        if ("delta" in p) {
-          content += p.delta;
-          onDelta?.(p.delta);
-        } else if ("toolCalls" in p) {
-          for (const c of p.toolCalls) toolCalls.push({ name: c.function.name, arguments: c.function.arguments ?? {} });
-        } else if ("done" in p) {
-          onCall({ cSats: Number.isFinite(p.cSatsSpent) ? (p.cSatsSpent as number) : 0, where: p.where, promptTokens: p.promptTokens, outputTokens: p.outputTokens, ...(p.served ? { served: p.served } : {}) });
+      const msgs = messages.map((m) => ({ ...m, role: (["system", "user", "assistant", "tool"].includes(m.role) ? m.role : "user") as "user" }));
+      let maxTokens = typeof o.maxTokens === "function" ? o.maxTokens(msgs, tools as unknown[] | undefined) : o.maxTokens;
+      for (;;) {
+        let content = "";
+        const toolCalls: ChatResult["toolCalls"] = [];
+        const req = {
+          messages: msgs,
+          ...(tools ? { tools: tools as never } : {}),
+          temperature: 0.2,
+          ...(maxTokens ? { maxTokens } : {}),
+          hints: h,
+        };
+        try {
+          for await (const p of backend(req, signal)) {
+            if ("delta" in p) {
+              content += p.delta;
+              onDelta?.(p.delta);
+            } else if ("toolCalls" in p) {
+              for (const c of p.toolCalls) toolCalls.push({ name: c.function.name, arguments: c.function.arguments ?? {} });
+            } else if ("done" in p) {
+              onCall({ cSats: Number.isFinite(p.cSatsSpent) ? (p.cSatsSpent as number) : 0, where: p.where, promptTokens: p.promptTokens, outputTokens: p.outputTokens, ...(p.served ? { served: p.served } : {}) });
+            }
+          }
+        } catch (err) {
+          // No host's window holds the prompt and this reply: once, with the smallest useful reply.
+          if (maxTokens && maxTokens > HELPER_MIN_REPLY_TOKENS && !content && !toolCalls.length && !signal.aborted && isContextTooLong(err)) {
+            maxTokens = HELPER_MIN_REPLY_TOKENS;
+            guard?.();
+            continue;
+          }
+          throw err;
         }
+        return { content, toolCalls };
       }
-      return { content, toolCalls };
     } finally {
       o.after?.();
     }
