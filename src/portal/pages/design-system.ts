@@ -275,6 +275,7 @@ const ICON_PATHS: Record<string, string> = {
   windows: '<path d="M3 5.5l7.5-1v7H3z"/><path d="M12 4.3L21 3v8.5h-9z"/><path d="M3 12.5h7.5v7L3 18.5z"/><path d="M12 12.5h9V21l-9-1.3z"/>',
   terminal: '<path d="M4 17l6-5-6-5"/><path d="M12 19h8"/>',
   phone: '<rect x="6" y="2" width="12" height="20" rx="2"/><path d="M11 18h2"/>',
+  monitor: '<rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/>',
   code: '<path d="M16 18l6-6-6-6"/><path d="M8 6l-6 6 6 6"/>',
   box: '<path d="M21 8l-9-5-9 5v8l9 5 9-5z"/><path d="M3 8l9 5 9-5"/><path d="M12 13v8"/>',
   trash: '<path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>'
