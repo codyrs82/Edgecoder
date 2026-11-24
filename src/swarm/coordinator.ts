@@ -85,6 +85,7 @@ import { onClaimable, pickupStats } from "./coordinator/dispatch.js";
 import { noteAgentOutcome } from "./coordinator/memory-admission.js";
 import { envelopeStats } from "./envelope-policy.js";
 import { onInferenceClaimable } from "./coordinator/routes/inference.js";
+import { startLostAgentSweep } from "./coordinator/lost-agent-claims.js";
 
 // Read at scrape time.
 registerCoordinatorMetrics(metrics, {
@@ -102,6 +103,9 @@ queue.onClaimable((subtask, claimableAtMs) => {
   // A model call requeued after a lease expiry gets its no-capacity bound again (routes/inference.ts).
   onInferenceClaimable(subtask);
 });
+
+// #524: model calls held by an agent whose socket closed (and that went quiet) run elsewhere once.
+startLostAgentSweep();
 
 // #51: subtasks failed at the retry cap go through finalizeFailedSubtask (coordinator/results.ts).
 queue.onLeaseFailure((result) => {

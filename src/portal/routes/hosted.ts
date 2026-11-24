@@ -29,7 +29,7 @@ import {
   parseNetworkModel,
   type NetworkDeps,
 } from "../../apps/ide/network-inference.js";
-import { autoBackend, coordinatorAutoBackend, networkBackend } from "../../inference-api/backends.js";
+import { autoBackend, coordinatorAutoBackend, networkBackend, redirectingNetworkBackend } from "../../inference-api/backends.js";
 import { AUTO_MODEL_ID, isUnpinnedModel, planRoutes, routeInputsFrom, sizeWorkload } from "../../inference-api/auto-route.js";
 import { apiKeyOf, registerCompatRoutes } from "../../inference-api/routes.js";
 import type { PortalStore } from "../store.js";
@@ -74,18 +74,17 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
    * (chat-capacity.ts); inference runs where it is submitted, so this is what spreads API traffic
    * across seeds. Calls on your own machines or a lease stay with the default coordinator.
    */
+  const pinnedDeps = (url: string, accountId: string) => portalNetworkDeps({ PORTAL_SERVICE_TOKEN: deps.PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, accountId);
   const networkForCall = async (
     accountId: string,
     target: { model: string; computeClass?: string; target?: "mine"; reservationId?: string },
     clientRegion: string | null,
-  ): Promise<{ deps: NetworkDeps; choice?: CoordinatorChoice }> => {
+  ): Promise<{ deps: NetworkDeps; url?: string; choice?: CoordinatorChoice }> => {
     if (target.target === "mine" || target.reservationId) return { deps: networkFor(accountId) };
     // A classed call (network/<model>@<class>) goes to a coordinator with an agent of that class;
     // among those, the latency-aware choice (coordinator-latency.ts), recorded with the call.
     const { url, choice } = await capacity.pick({ kind: "network", model: target.model, computeClass: target.computeClass }, [], { clientRegion }).catch(() => ({ url: null, choice: undefined }));
-    return url
-      ? { deps: portalNetworkDeps({ PORTAL_SERVICE_TOKEN: deps.PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, accountId), ...(choice ? { choice } : {}) }
-      : { deps: networkFor(accountId) };
+    return url ? { deps: pinnedDeps(url, accountId), url, ...(choice ? { choice } : {}) } : { deps: networkFor(accountId) };
   };
   // Balance, reservations and the chat compute picker for signed-in users.
   registerComputeRoutes(app, deps);
@@ -156,6 +155,7 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
               model: AUTO_MODEL_ID,
               computeClass: "any",
               routeRedirect,
+              ...(ctx.clientRegion ? { clientRegion: ctx.clientRegion } : {}),
               // The portal's choice goes with the call it made (not with a route_elsewhere follow-up).
               ...(autoChoice && routeRedirect ? { coordinatorChoice: autoChoice } : {}),
             }),
@@ -165,7 +165,18 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
       const target = hostedTarget(model);
       if (!target) return { status: 400, error: "Unknown model. Leave it out (or auto) for the cheapest place that fits, or name one: network/<model>[@cpu|apple|gpu|gpu.dc|cloud], mine/<model> or reserved/<reservation>/<model>. GET /v1/models lists them." };
       const placed = await networkForCall(ctx.accountId, target, ctx.clientRegion);
-      return { backend: networkBackend(placed.deps, { ...target, ...(placed.choice ? { coordinatorChoice: placed.choice } : {}) }), model: model! };
+      const region = ctx.clientRegion ? { clientRegion: ctx.clientRegion } : {};
+      // #526: a named network call on a chosen coordinator may be sent on to a peer with a free slot for it (once).
+      if (placed.url && !target.target && !target.reservationId) {
+        const first = placed.url;
+        const backend = redirectingNetworkBackend({
+          url: first,
+          allowed: (url) => capacity.isKnown(url),
+          run: (url, routeRedirect) => networkBackend(url === first ? placed.deps : pinnedDeps(url, ctx.accountId), { ...target, ...region, routeRedirect, ...(placed.choice && url === first ? { coordinatorChoice: placed.choice } : {}) }),
+        });
+        return { backend, model: model! };
+      }
+      return { backend: networkBackend(placed.deps, { ...target, ...region, ...(placed.choice ? { coordinatorChoice: placed.choice } : {}) }), model: model! };
     },
   });
 

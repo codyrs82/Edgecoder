@@ -14,8 +14,9 @@
  * - latency: a coordinator with a free slot is faster for this call by more than the margin.
  * - overflow: the load choice had no free slot (calls queue there) and another is faster even after the distance.
  * - single: only one coordinator could take the call.
+ * - locality: another coordinator has a free host nearer the buyer (by more than the margin, #526).
  */
-export type CoordinatorChoiceRule = "load" | "latency" | "overflow" | "single";
+export type CoordinatorChoiceRule = "load" | "latency" | "overflow" | "single" | "locality";
 
 /** One coordinator as the portal scored it (milliseconds; null when not known). */
 export interface CoordinatorChoiceCandidate {
@@ -35,6 +36,8 @@ export interface CoordinatorChoiceCandidate {
   agents: number;
   /** The load report was older than LOAD_REPORT_MAX_AGE_MS: not used for the latency comparison. */
   stale?: boolean;
+  /** Distance (km) from the buyer to this coordinator's nearest host with a free slot, when both are known (#526). */
+  nearKm?: number;
 }
 
 export interface CoordinatorChoice {
@@ -43,7 +46,7 @@ export interface CoordinatorChoice {
   rule: CoordinatorChoiceRule;
   /** One line: why this coordinator. */
   reason: string;
-  /** Where the buyer came in (Fly-Region of the edge, CF-IPCountry, or the client's own region header); recorded, not scored. */
+  /** Where the buyer came in (Fly-Region of the edge, CF-IPCountry, or the client's own region header); scored by the locality rule. */
   clientRegion: string | null;
   /** Region of the portal machine that chose (FLY_REGION): the round trips above are measured from here. */
   portalRegion: string | null;
@@ -66,8 +69,9 @@ export function cleanRegion(raw: unknown): string | null {
  * Where a buyer's request came in, for the record: the client's own region header
  * (x-edgecoder-client-region; the load generator sends its Fly region), else Fly's edge region
  * (fly-region), else Cloudflare's country (cf-ipcountry, as "cc-<code>"). Null when none is sent.
- * Not used to score coordinators: the portal relays every call, so the client <-> portal leg is the
- * same whichever coordinator is chosen; the portal's own round trip to each coordinator is what differs.
+ * The portal relays every call, so the client <-> portal leg is the same whichever coordinator is
+ * chosen; what the region decides is which coordinator has a free host near the buyer (the locality
+ * rule, portal/coordinator-latency.ts), and which of its hosts is preferred (coordinator locality.ts).
  */
 export function clientRegionOf(headers: Record<string, unknown> | undefined): string | null {
   if (!headers) return null;
@@ -79,7 +83,7 @@ export function clientRegionOf(headers: Record<string, unknown> | undefined): st
   return cc && cc !== "xx" && cc !== "t1" ? `cc-${cc}` : null;
 }
 
-const RULES: readonly CoordinatorChoiceRule[] = ["load", "latency", "overflow", "single"];
+const RULES: readonly CoordinatorChoiceRule[] = ["load", "latency", "overflow", "single", "locality"];
 const str = (v: unknown, max: number) => (typeof v === "string" ? v.slice(0, max) : "");
 const numOrNull = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? Math.round(v) : null);
 const num = (v: unknown) => numOrNull(v) ?? 0;
@@ -104,6 +108,7 @@ export function sanitizeCoordinatorChoice(raw: unknown): CoordinatorChoice | und
       waiting: num(c.waiting),
       agents: num(c.agents),
       ...(c.stale === true ? { stale: true } : {}),
+      ...(numOrNull(c.nearKm) !== null ? { nearKm: Math.max(0, numOrNull(c.nearKm)!) } : {}),
     }));
   return { chosen, rule, reason: str(r.reason, 300), clientRegion: cleanRegion(r.clientRegion), portalRegion: cleanRegion(r.portalRegion), candidates };
 }

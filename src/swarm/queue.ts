@@ -504,6 +504,21 @@ export class SwarmQueue {
     return released;
   }
 
+  /**
+   * #523: change what an unclaimed subtask asks for (an Auto call re-placed on another model or
+   * class after nobody picked it up). Synchronous and only while nobody holds it, so a claim racing
+   * the change gets either the old or the new subtask whole. Returns the new subtask, or undefined
+   * when it is claimed or gone. The change is not persisted: after a restart the call is restored as
+   * first placed (its claim bound still refunds it in full if nobody takes it).
+   */
+  reassignUnclaimed(subtaskId: string, patch: { requestedModel: string; projectMeta?: Partial<Subtask["projectMeta"]> }): Subtask | undefined {
+    const item = this.tasks.find((t) => t.subtask.id === subtaskId);
+    if (!item || item.claimedBy) return undefined;
+    item.subtask = { ...item.subtask, requestedModel: patch.requestedModel, projectMeta: { ...item.subtask.projectMeta, ...(patch.projectMeta ?? {}) } };
+    this.notifyClaimable(item);
+    return item.subtask;
+  }
+
   /** True while the subtask is queued and nobody holds it. */
   isUnclaimed(subtaskId: string): boolean {
     const item = this.tasks.find((t) => t.subtask.id === subtaskId);

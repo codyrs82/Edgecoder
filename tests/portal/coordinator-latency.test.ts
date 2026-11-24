@@ -76,8 +76,8 @@ describe("chooseByLatency", () => {
   });
 
   it("reads its policy from the environment", () => {
-    expect(latencyPolicyFromEnv({}, 2_000)).toEqual({ enabled: true, marginMs: 30, marginPct: 15, maxReportAgeMs: 2_000 });
-    expect(latencyPolicyFromEnv({ PORTAL_COORD_LATENCY_ROUTING: "off", PORTAL_COORD_LATENCY_MARGIN_MS: "50", PORTAL_COORD_LATENCY_MARGIN_PCT: "250" }, 2_000)).toEqual({ enabled: false, marginMs: 50, marginPct: 100, maxReportAgeMs: 2_000 });
+    expect(latencyPolicyFromEnv({}, 2_000)).toEqual({ enabled: true, marginMs: 30, marginPct: 15, localityMarginKm: 700, maxReportAgeMs: 2_000 });
+    expect(latencyPolicyFromEnv({ PORTAL_COORD_LATENCY_ROUTING: "off", PORTAL_COORD_LATENCY_MARGIN_MS: "50", PORTAL_COORD_LATENCY_MARGIN_PCT: "250", PORTAL_COORD_LOCALITY_MARGIN_KM: "0" }, 2_000)).toEqual({ enabled: false, marginMs: 50, marginPct: 100, localityMarginKm: 0, maxReportAgeMs: 2_000 });
   });
 });
 
@@ -203,5 +203,67 @@ describe("recording the choice", () => {
     const choice = { chosen: "eu", rule: "latency" as const, reason: "faster", clientRegion: "lhr", portalRegion: "cdg", candidates: [] };
     await expect(streamNetworkCompletion({ forwarder: "", token: () => "", agentId: "acct-1", transport }, { model: M, computeClass: "any", messages: [{ role: "user", content: "hi" }], coordinatorChoice: choice }).next()).rejects.toThrow();
     expect(bodies[0].coordinatorChoice).toEqual(choice);
+  });
+});
+
+/*
+ * #526: locality. Each coordinator says where its hosts with a free slot are (freeRegions); the one
+ * with a free host nearest the buyer wins when it is nearer than the load pick's by the margin. A busy
+ * near coordinator (no free slot) never holds a call; without regions everywhere nothing changes.
+ */
+describe("locality", () => {
+  it("sends a London buyer to the coordinator with a free host in London, though the US has more room and a shorter round trip", () => {
+    const c = chooseByLatency(
+      [cand({ url: US, free: 9, agents: 9, rttMs: 2, freeRegions: ["iad", "lax", "sin", "syd"] }), cand({ url: EU, free: 2, rttMs: 99, freeRegions: ["lhr", "fra"] })],
+      US,
+      POLICY,
+      { clientRegion: "lhr", portalRegion: "ord" },
+    );
+    expect(c).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "locality", clientRegion: "lhr" });
+    expect(c.reason).toMatch(/free host nearest the buyer \(lhr\): 0 km vs 5,\d{3} km on coordinator\.example\.com/);
+    expect(c.candidates.map((x) => x.nearKm)).toEqual([expect.any(Number), 0]);
+  });
+
+  it("keeps a Sydney buyer on the coordinator that has a free host in Sydney", () => {
+    const c = chooseByLatency(
+      [cand({ url: US, free: 9, agents: 9, rttMs: 2, freeRegions: ["iad", "syd"] }), cand({ url: EU, free: 2, rttMs: 99, freeRegions: ["lhr", "fra"] })],
+      EU,
+      POLICY,
+      { clientRegion: "syd" },
+    );
+    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
+  });
+
+  it("a busy near coordinator does not hold the call; nearby within the margin does not move it", () => {
+    // The EU has no free slot: its region does not count, the load pick stands (or overflows by latency).
+    const busy = chooseByLatency([cand({ url: US, free: 9, rttMs: 2, freeRegions: ["iad"] }), cand({ url: EU, free: 0, rttMs: 99, freeRegions: ["lhr"] })], US, POLICY, { clientRegion: "lhr" });
+    expect(busy.rule).not.toBe("locality");
+    expect(busy.chosen).toBe("coordinator.example.com");
+    // lhr vs ams (~370 km): under the 700 km margin.
+    const close = chooseByLatency([cand({ url: US, free: 9, rttMs: 2, freeRegions: ["ams"] }), cand({ url: EU, free: 2, rttMs: 2, freeRegions: ["lhr"] })], US, POLICY, { clientRegion: "lhr" });
+    expect(close.rule).not.toBe("locality");
+  });
+
+  it("is not compared without the buyer's region, without every free coordinator's regions, or with the margin at 0", () => {
+    const both = [cand({ url: US, free: 9, rttMs: 2, freeRegions: ["iad"] }), cand({ url: EU, free: 2, rttMs: 99, freeRegions: ["lhr"] })];
+    expect(chooseByLatency(both, US, POLICY, {}).rule).not.toBe("locality");
+    expect(chooseByLatency([both[0], cand({ url: EU, free: 2, rttMs: 99 })], US, POLICY, { clientRegion: "lhr" }).rule).not.toBe("locality");
+    expect(chooseByLatency(both, US, { ...POLICY, localityMarginKm: 0 }, { clientRegion: "lhr" }).rule).not.toBe("locality");
+  });
+
+  it("the directory reads freeRegions from the coordinators' reports", async () => {
+    const withRegions = (r: CapacityReport, regions: string[]): CapacityReport => ({ ...r, modelLoad: Object.fromEntries(Object.entries(r.modelLoad!).map(([m, l]) => [m, { ...l, freeRegions: regions }])) });
+    const { dir } = directory({ [US]: withRegions(report({ rttMs: 2, free: 6, agents: 9 }), ["iad", "lax"]), [EU]: withRegions(report({ rttMs: 99, free: 2, agents: 2 }), ["lhr", "fra"]) });
+    const p = await dir.pick({ kind: "network", model: M }, [], { clientRegion: "cc-gb" });
+    expect(p).toMatchObject({ url: EU, choice: { rule: "locality" } });
+    const auto = await dir.pickAutoChoice!({ clientRegion: "lhr" });
+    expect(auto).toMatchObject({ url: EU, choice: { rule: "locality" } });
+  });
+
+  it("a recorded locality choice keeps its rule and distances", () => {
+    const c = sanitizeCoordinatorChoice({ chosen: "eu", rule: "locality", reason: "near", clientRegion: "lhr", candidates: [{ coordinator: "eu", nearKm: 12.4 }, { coordinator: "us", nearKm: "x" }] });
+    expect(c?.rule).toBe("locality");
+    expect(c?.candidates[0].nearKm).toBe(12);
+    expect(c?.candidates[1].nearKm).toBeUndefined();
   });
 });

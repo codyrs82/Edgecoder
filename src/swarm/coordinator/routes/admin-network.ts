@@ -31,7 +31,8 @@ import { agentMemoryRecord, agentUnavailable, circuitState, memoryLimited, MEMOR
 import { accountsFor } from "../agent-accounts.js";
 import { agentCapabilities, activeBlacklistRecord, AGENT_CONNECTED_WINDOW_MS } from "../agent-state.js";
 import { authorizeAdmin } from "../auth.js";
-import { agentContextWindow, agentLoadReport, agentSocketConnected, freeModelSlots, pickupStats } from "../dispatch.js";
+import { agentContextWindow, agentLastPullMs, agentLoadReport, agentSocketConnected, freeModelSlots, pickupStats } from "../dispatch.js";
+import { agentSocketLost } from "../agent-liveness.js";
 import { effectiveHardware, hardwareVerifier } from "../economy.js";
 import { routableModels } from "../../model-catalog.js";
 import { inferenceCancelledForCapacity } from "./inference.js";
@@ -90,8 +91,9 @@ export { accountsFor };
 
 type Capability = NonNullable<ReturnType<typeof agentCapabilities.get>>;
 
-function isConnected(cap: Capability, nowMs: number): boolean {
-  return nowMs - cap.lastSeenMs < AGENT_CONNECTED_WINDOW_MS;
+function isConnected(agentId: string, cap: Capability, nowMs: number): boolean {
+  // #524: a closed socket with nothing heard since is gone at once, not after the 2-minute window.
+  return nowMs - cap.lastSeenMs < AGENT_CONNECTED_WINDOW_MS && !agentSocketLost(agentId, nowMs);
 }
 
 /**
@@ -109,7 +111,7 @@ export function agentRegion(cap: Pick<Capability, "region">): string {
 
 /** Live, routable agents: connected and not blacklisted. */
 function liveAgents(nowMs: number): Array<[string, Capability]> {
-  return [...agentCapabilities.entries()].filter(([id, cap]) => isConnected(cap, nowMs) && !activeBlacklistRecord(id));
+  return [...agentCapabilities.entries()].filter(([id, cap]) => isConnected(id, cap, nowMs) && !activeBlacklistRecord(id));
 }
 
 function callOutcome(taskId: string, subtaskId: string): CallOutcome {
@@ -185,7 +187,7 @@ function gapGauges(nowMs: number, claims: ReturnType<typeof queue.activeClaims>)
     regions[r] = (regions[r] ?? 0) + 1;
   }
   let staleAgents = 0;
-  for (const [id, cap] of agentCapabilities) if (!isConnected(cap, nowMs) && !activeBlacklistRecord(id)) staleAgents++;
+  for (const [id, cap] of agentCapabilities) if (!isConnected(id, cap, nowMs) && !activeBlacklistRecord(id)) staleAgents++;
   const saturatedModels = Object.values(slots).filter((v) => v.total > 0 && v.free === 0).length;
   return {
     saturatedModels,
@@ -235,7 +237,7 @@ export async function networkSnapshot(range: SeriesRange = "1h", nowMs = Date.no
     const hw = effectiveHardware(agentId, cap);
     const verification = hardwareVerifier.get(agentId);
     const held = claims.get(agentId);
-    const connected = isConnected(cap, nowMs);
+    const connected = isConnected(agentId, cap, nowMs);
     const unavailable = agentUnavailable(agentId, nowMs);
     return {
       agentId,
@@ -268,7 +270,7 @@ export async function networkSnapshot(range: SeriesRange = "1h", nowMs = Date.no
       claims: held?.all ?? 0,
       inferenceClaims: held?.inference ?? 0,
       lastSeenMs: cap.lastSeenMs,
-      lastPullMs: load?.atMs ?? null,
+      lastPullMs: agentLastPullMs(agentId) ?? null,
       connected,
       socketConnected: agentSocketConnected(agentId),
       wake: load?.wake ?? false,

@@ -24,9 +24,17 @@
  * Work is never moved to a slower coordinator to balance load: when the load rule's pick is slower
  * than one with a free slot by more than the margin, the faster one is taken. A coordinator whose
  * load report is stale, or whose round trip is unknown, is not compared (the baseline stands).
+ *
+ * Locality (#526) comes first when the buyer's region is known: each coordinator reports the regions
+ * of its hosts with a free slot for the model (/inference/models freeRegions). The coordinator whose
+ * nearest free host is closest to the buyer wins ("locality") when it is closer than the baseline's
+ * by more than localityMarginKm. Only coordinators with a free slot count, so a busy near
+ * coordinator never holds a call (it overflows as before). When a coordinator with a free slot does
+ * not report its regions (an older build), locality is not compared.
  */
 
 import { coordinatorHost, type CoordinatorChoice, type CoordinatorChoiceCandidate } from "../common/coordinator-choice.js";
+import { regionDistanceKm } from "../common/geo-regions.js";
 
 export interface LatencyCandidate {
   url: string;
@@ -42,6 +50,8 @@ export interface LatencyCandidate {
   agentRttMs: number | null;
   /** How old the load report is. */
   reportAgeMs: number;
+  /** Regions of its hosts with a free slot for the call (newer coordinators); undefined: not reported. */
+  freeRegions?: readonly string[];
 }
 
 export interface LatencyPolicy {
@@ -53,12 +63,27 @@ export interface LatencyPolicy {
   maxReportAgeMs: number;
   /** Off: the load rule alone decides (the choice is still recorded). */
   enabled: boolean;
+  /** Locality (#526): a coordinator with a free host nearer the buyer by more than this many km wins; 0 turns it off. */
+  localityMarginKm?: number;
 }
 
 export const COORD_LATENCY_DEFAULT_MARGIN_MS = 30;
 export const COORD_LATENCY_DEFAULT_MARGIN_PCT = 15;
 /** A call's duration when the coordinator has not reported one (a short chat reply). */
 export const DEFAULT_CALL_MS = 15_000;
+/** Locality margin: a free host this much nearer the buyer moves the call (about 10 ms of round trip). */
+export const COORD_LOCALITY_DEFAULT_MARGIN_KM = 700;
+
+/** Distance from the buyer to the nearest of `regions` (km); null when not known. */
+export function nearestKm(clientRegion: string | null | undefined, regions: readonly string[] | undefined): number | null {
+  if (!clientRegion || !regions?.length) return null;
+  let best: number | null = null;
+  for (const r of regions) {
+    const km = regionDistanceKm(clientRegion, r);
+    if (km !== null && (best === null || km < best)) best = km;
+  }
+  return best;
+}
 
 export function expectedLatency(c: LatencyCandidate, maxReportAgeMs: number): { queueMs: number; expectedMs: number | null; stale: boolean } {
   const pickup = Math.max(0, c.pickupP90Ms ?? 0);
@@ -77,7 +102,7 @@ export function chooseByLatency(
   policy: LatencyPolicy,
   where: { clientRegion?: string | null; portalRegion?: string | null } = {},
 ): CoordinatorChoice {
-  const scored = candidates.map((c) => ({ c, ...expectedLatency(c, policy.maxReportAgeMs) }));
+  const scored = candidates.map((c) => ({ c, ...expectedLatency(c, policy.maxReportAgeMs), nearKm: c.free > 0 ? nearestKm(where.clientRegion, c.freeRegions) : null }));
   const rows: CoordinatorChoiceCandidate[] = scored.map((s) => ({
     coordinator: coordinatorHost(s.c.url),
     rttMs: s.c.rttMs === null ? null : Math.round(s.c.rttMs),
@@ -88,6 +113,7 @@ export function chooseByLatency(
     waiting: s.c.waiting,
     agents: s.c.agents,
     ...(s.stale ? { stale: true } : {}),
+    ...(s.nearKm !== null ? { nearKm: s.nearKm } : {}),
   }));
   const done = (url: string, rule: CoordinatorChoice["rule"], reason: string): CoordinatorChoice => ({
     chosen: coordinatorHost(url),
@@ -102,6 +128,17 @@ export function chooseByLatency(
   const base = scored.find((s) => s.c.url === baselineUrl);
   const loadReason = base && base.c.free <= 0 && !scored.some((s) => s.c.free > 0) ? "every coordinator busy: backlog shared by agents" : "most free slots for the model";
   if (!policy.enabled) return done(baselineUrl, "load", `${loadReason} (latency-aware choice off)`);
+  // Locality (#526): a free host nearer the buyer, when every coordinator with a free slot says where its are.
+  const margin = policy.localityMarginKm ?? COORD_LOCALITY_DEFAULT_MARGIN_KM;
+  const open = scored.filter((s) => s.c.free > 0);
+  if (margin > 0 && where.clientRegion && open.length > 0 && open.every((s) => s.nearKm !== null)) {
+    const near = open.reduce((a, b) => (b.nearKm! < a.nearKm! || (b.nearKm === a.nearKm && b.c.free > a.c.free) ? b : a));
+    const baseKm = base && base.c.free > 0 ? base.nearKm! : Infinity;
+    if (near !== base && near.nearKm! + margin < baseKm) {
+      const km = (n: number) => (Number.isFinite(n) ? `${Math.round(n).toLocaleString("en-US")} km` : "no free host");
+      return done(near.c.url, "locality", `free host nearest the buyer (${where.clientRegion}): ${km(near.nearKm!)} vs ${km(baseKm)} on ${coordinatorHost(baselineUrl)}`);
+    }
+  }
   if (!base || base.expectedMs === null) return done(baselineUrl, "load", `${loadReason}; its latency is not known (${base?.stale ? "stale load report" : "round trip not measured"})`);
   const congested = base.c.free <= 0;
   let best: (typeof scored)[number] | undefined;
@@ -134,6 +171,7 @@ export function latencyPolicyFromEnv(env: NodeJS.ProcessEnv = process.env, maxRe
     enabled: !["0", "false", "off", "no"].includes(flag),
     marginMs: num(env.PORTAL_COORD_LATENCY_MARGIN_MS, COORD_LATENCY_DEFAULT_MARGIN_MS, 0, 10_000),
     marginPct: num(env.PORTAL_COORD_LATENCY_MARGIN_PCT, COORD_LATENCY_DEFAULT_MARGIN_PCT, 0, 100),
+    localityMarginKm: num(env.PORTAL_COORD_LOCALITY_MARGIN_KM, COORD_LOCALITY_DEFAULT_MARGIN_KM, 0, 20_000),
     maxReportAgeMs,
   };
 }

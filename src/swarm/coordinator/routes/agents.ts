@@ -73,6 +73,7 @@ import { sanitizeLanAddresses } from "../../lan-proximity.js";
 import { noteAgentMemory } from "../memory-admission.js";
 import { meshWsAgentRegistered } from "../mesh-ws-bindings.js";
 import { agentUpdateHint } from "../agent-update-hint.js";
+import { noteAgentHttpAlive } from "../agent-liveness.js";
 import {
   registerSchema,
   defaultPolicy,
@@ -217,6 +218,7 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       hardwareClass,
       lastSeenMs: now
     });
+    noteAgentHttpAlive(body.agentId, now);
     // #122: the shared key record lets other coordinators verify this agent's forwarded results.
     const registeredKey = agentCapabilities.get(body.agentId)?.publicKeyPem;
     if (registeredKey) attestAgentSigningKey(body.agentId, registeredKey);
@@ -362,6 +364,7 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       return reply.send({ ok: true, offline: true, released: released.length });
     }
     queue.heartbeat(body.agentId);
+    noteAgentHttpAlive(body.agentId, now);
     // A busy agent is alive: without this a long job (a big prompt on a slow model) made it look
     // offline, which ended its reservation and hid it from the model list.
     const seen = agentCapabilities.get(body.agentId);

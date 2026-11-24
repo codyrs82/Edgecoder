@@ -19,8 +19,8 @@ import { agentUnavailable, memoryAdmits, modelLoadedOn } from "../memory-admissi
 import { AUTO_MODEL_ID } from "../../../inference-api/auto-route.js";
 import { cleanHints, describeJob, type JobDescriptor } from "../../../inference-api/job-descriptor.js";
 import type { BestFitResult } from "../best-fit.js";
-import { agentRttMs, bestFitConfig, complexityWeights, coordinatorLoadSignals, recordDecision, recordPlacement, resolveAuto, routingSummary, type RoutingSummary } from "../routing.js";
-import { sanitizeCoordinatorChoice } from "../../../common/coordinator-choice.js";
+import { agentRegionCode, agentRttMs, bestFitConfig, complexityWeights, coordinatorLoadSignals, recordDecision, recordPlacement, resolveAuto, routingSummary, type RoutingSummary } from "../routing.js";
+import { cleanRegion, clientRegionOf, sanitizeCoordinatorChoice } from "../../../common/coordinator-choice.js";
 import { InferenceStreams, boundTokenCounts, maxTokensOf } from "../../inference-streams.js";
 import { DegenerateReplyTracker, billableFraction, detectDegenerateOutput, type DegeneracyVerdict } from "../../inference-degeneracy.js";
 import { pgStore } from "../../../db/store.js";
@@ -64,6 +64,9 @@ import { servedBy } from "../served-by-route.js";
 import { isFrontierModelId } from "../../../inference-api/frontier-models.js";
 import { taskIdInUse, accrualsInFlight, settleTaskIfDone, refundTaskSubmit } from "../results.js";
 import { recordMeshWork } from "../world-activity.js";
+import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
+import { armAutoReplace } from "../auto-replace.js";
+import { freeLocalHolders, LOCALITY_PREFER_MS, nearestFreeHolder, peerWithFreeCapacity } from "../locality.js";
 
 // ── Network inference (chat completions on agents' local models, streamed) ──────────────────
 export const inferenceStreams = new InferenceStreams();
@@ -144,7 +147,7 @@ const noCapacity = new Map<string, { accountId: string; subtaskId: string; atMs:
 function holderClasses(model: string, nowMs = Date.now(), includeReserved = false): ComputeClassId[] {
   const out: ComputeClassId[] = [];
   for (const [id, cap] of agentCapabilities) {
-    if (!agentHasModel(cap, model) || activeBlacklistRecord(id)) continue;
+    if (!agentHasModel(cap, model) || activeBlacklistRecord(id) || agentSocketLost(id, nowMs)) continue;
     if (cap.lastSeenMs !== undefined && nowMs - cap.lastSeenMs > 3 * 60_000) continue;
     if (!includeReserved && reservations.isHeld(id)) continue;
     out.push((effectiveHardware(id, cap)?.computeClass ?? "cpu") as ComputeClassId);
@@ -235,7 +238,7 @@ export async function retryInferenceElsewhere(subtask: Subtask, agentId: string,
     // The owner's own call may also go to an owner-only model (kept off the network) on another of their machines.
     const has = subtask.projectMeta.onlyAccountId ? agentHasModelForOwner(cap, subtask.requestedModel) : agentHasModel(cap, subtask.requestedModel ?? "");
     if (excluded.has(id) || activeBlacklistRecord(id) || !has) continue;
-    if (nowMs - cap.lastSeenMs > 3 * 60_000) continue;
+    if (nowMs - cap.lastSeenMs > 3 * 60_000 || agentSocketLost(id, nowMs)) continue;
     if (cap.hostApproved === false && !subtask.projectMeta.onlyAccountId) continue;
     if (subtask.projectMeta.onlyAccountId && (await rewardAccountForAgent(id)) !== subtask.projectMeta.onlyAccountId) continue;
     other = true;
@@ -399,11 +402,22 @@ const inferenceSubmitSchema = z.object({
    * minContext, complexity, sessionId; src/inference-api/job-descriptor.ts). Malformed fields are dropped.
    */
   routing: z.record(z.string(), z.unknown()).optional(),
-  /** model "auto": the caller can resubmit to a peer coordinator when the best fit is there (route_elsewhere). */
+  /**
+   * The caller can resubmit to a peer coordinator (route_elsewhere): model "auto" when the best fit
+   * is there; a named network model when nothing here has a free slot for it and a peer does (#526).
+   */
   routeRedirect: z.boolean().default(false),
+  /** Where the buyer is (a Fly region, or "cc-<country>"): free agents near it are preferred (#526). */
+  clientRegion: z.string().max(40).optional(),
   /** The portal's latency-aware coordinator choice (common/coordinator-choice.ts); kept only from the portal. */
   coordinatorChoice: z.record(z.string(), z.unknown()).optional(),
 });
+
+/** The class a named call is placed in (as resolveRequestedClass does for a class name), for locality and redirects. */
+function namedClass(requested: string): ComputeClassId | "any" {
+  return (resolveRequestedClass(requested, undefined, {}, rateOracleConfig.computeClasses).computeClass ?? "any") as ComputeClassId | "any";
+}
+const sumFree = (hs: ReadonlyArray<{ free: number }>) => hs.reduce((n, h) => n + h.free, 0);
 
 /** Median of the known round trips (ms), null when none is known. */
 function medianRtt(values: number[]): number | null {
@@ -421,11 +435,14 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const now = Date.now();
     // Security research tier: a restricted model is listed only to an account entitled to it.
     const viewer = restrictedCatalog.size > 0 ? await modelViewerAccount(req) : undefined;
-    const byModel = new Map<string, { agents: number; idle: number; free: number; classes: Set<ComputeClassId>; byClass: Partial<Record<ComputeClassId, number>>; ctx?: number; rtts: number[]; freeRtts: number[] }>();
+    const byModel = new Map<string, { agents: number; idle: number; free: number; classes: Set<ComputeClassId>; byClass: Partial<Record<ComputeClassId, number>>; ctx?: number; rtts: number[]; freeRtts: number[]; freeRegions: Set<string> }>();
     const classAgents: Partial<Record<ComputeClassId, Set<string>>> = {};
     const claims = queue.activeClaims();
     for (const [id, cap] of agentCapabilities) {
       if (activeBlacklistRecord(id) || (cap.lastSeenMs !== undefined && now - cap.lastSeenMs > 3 * 60_000)) continue;
+      // #524: an agent whose socket closed (nothing heard since) is not capacity: the portal must not
+      // send calls here for it.
+      if (agentSocketLost(id, now)) continue;
       const cls = (effectiveHardware(id, cap)?.computeClass ?? "cpu") as ComputeClassId;
       // #54: only models the agent reported (what it can actually be routed).
       // Host memory (memory-admission.ts): a model the agent can neither load nor has loaded is not
@@ -436,13 +453,16 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         const tier = restrictedCatalog.tierOf(m);
         if (tier && !accountHoldsTier(viewer, tier, now)) continue;
         if (!memoryAdmits(id, m, held, now) && !modelLoadedOn(id, m, now) && !unavailable) continue;
-        const e = byModel.get(m) ?? { agents: 0, idle: 0, free: 0, classes: new Set<ComputeClassId>(), byClass: {}, rtts: [], freeRtts: [] };
+        const e = byModel.get(m) ?? { agents: 0, idle: 0, free: 0, classes: new Set<ComputeClassId>(), byClass: {}, rtts: [], freeRtts: [], freeRegions: new Set<string>() };
         e.agents++;
         e.byClass[cls] = (e.byClass[cls] ?? 0) + 1;
         (classAgents[cls] ??= new Set()).add(id);
         if (queue.agentClaims(id) === 0 && !unavailable) e.idle++;
         const free = unavailable || !memoryAdmits(id, m, held, now) ? 0 : freeModelSlots(id, claims);
         e.free += free;
+        // #526: where the free slots are, so the portal can send a buyer to the coordinator with a free host near it.
+        const region = free > 0 ? agentRegionCode(cap) : null;
+        if (region && e.freeRegions.size < 32) e.freeRegions.add(region);
         // Coordinator <-> agent round trip (the portal adds it to a coordinator's expected latency).
         const rtt = agentRttMs(id);
         if (rtt !== null && Number.isFinite(rtt)) {
@@ -478,7 +498,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
           // paramsB: billions of parameters (MoE total), for the portal's model list.
           const cloud = cloudModelSpec(model);
           const ctx = cloud ? Math.min(e.ctx ?? cloud.contextWindow, cloud.contextWindow) : e.ctx;
-          return { model, agents: e.agents, agentsByClass: e.byClass, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], paramsB: paramsB(model), cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD, modelTokenPrice(model)), ...(ctx ? { contextWindow: ctx } : {}), ...(cloud ? { origin: cloud.origin, hostedBy: cloud.provider, cloudRank: cloud.rank, ...(cloud.hint ? { cloudHint: cloud.hint } : {}) } : {}), ...(restricted ? { restricted } : {}), ...(agentRtt !== null ? { agentRttMs: agentRtt } : {}) };
+          return { model, agents: e.agents, agentsByClass: e.byClass, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], paramsB: paramsB(model), cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD, modelTokenPrice(model)), ...(ctx ? { contextWindow: ctx } : {}), ...(cloud ? { origin: cloud.origin, hostedBy: cloud.provider, cloudRank: cloud.rank, ...(cloud.hint ? { cloudHint: cloud.hint } : {}) } : {}), ...(restricted ? { restricted } : {}), ...(agentRtt !== null ? { agentRttMs: agentRtt } : {}), ...(e.freeRegions.size ? { freeRegions: [...e.freeRegions] } : {}) };
         })
         .sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model)), (r) => r.model, (r) => r.cloudRank),
       classes,
@@ -497,15 +517,17 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const accountId = submitter.accountId;
     // The portal's coordinator choice is believed only from the portal (service token).
     const portalChoice = body.coordinatorChoice && hasPortalServiceToken((req as any).headers ?? {}) ? sanitizeCoordinatorChoice(body.coordinatorChoice) : undefined;
+    // #526: the buyer's region (sent by the portal, else the request's edge headers): only a preference.
+    const clientRegion = cleanRegion(body.clientRegion) ?? portalChoice?.clientRegion ?? clientRegionOf((req as any).headers ?? {});
     // model "auto": best-fit routing picks the model, the class and a preferred agent (routing.ts).
-    let routed: { job: JobDescriptor; result: BestFitResult; summary: RoutingSummary } | undefined;
+    let routed: { job: JobDescriptor; result: BestFitResult; summary: RoutingSummary; onlyClass?: string } | undefined;
     if (body.model === AUTO_MODEL_ID) {
       if (body.reservationId || body.target === "mine") return reply.code(400).send({ error: "auto_network_only", detail: "model auto routes network calls; name a model for your own machines or a reservation" });
       const hints = cleanHints(body.routing);
       const job = describeJob({ messages: body.messages as ChatMessage[], tools: body.tools, maxTokens: body.maxTokens }, hints, complexityWeights);
       // A class named on the submit, else in the hints (a bot on "Network GPU only"), limits best fit to it.
       const onlyClass = body.computeClass !== "any" ? body.computeClass : hints.computeClass;
-      const { result, elsewhere } = await resolveAuto(job, { peers: body.routeRedirect, requesterAccountId: accountId, ...(onlyClass ? { computeClass: onlyClass } : {}) });
+      const { result, elsewhere } = await resolveAuto(job, { peers: body.routeRedirect, requesterAccountId: accountId, clientRegion, ...(onlyClass ? { computeClass: onlyClass } : {}) });
       const summary = routingSummary(job, result);
       if (!result.chosen) {
         // reason: "price" is a money problem (the ceiling is what the caller may spend), not capacity.
@@ -516,13 +538,14 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       const chosen = result.chosen;
       body.model = chosen.model;
       body.computeClass = (ACCEPTED_COMPUTE_CLASS_IDS as readonly string[]).includes(chosen.computeClass) ? (chosen.computeClass as typeof body.computeClass) : "any";
-      routed = { job, result, summary };
+      routed = { job, result, summary, ...(onlyClass ? { onlyClass } : {}) };
     }
     // Security research tier: a restricted model needs an entitlement and your own or leased machines.
     const gate = await restrictedSubmitGate(accountId, body.model, { target: body.target, reservationId: body.reservationId });
     if (!gate.ok) return reply.code(gate.status).send(gate.body);
     const restrictedTier = gate.tier;
-    const holders = [...agentCapabilities.entries()].filter(([id, cap]) => agentHasModel(cap, body.model) && !activeBlacklistRecord(id));
+    // #524: an agent whose socket closed (nothing heard since) holds nothing a call could wait for.
+    const holders = [...agentCapabilities.entries()].filter(([id, cap]) => agentHasModel(cap, body.model) && !activeBlacklistRecord(id) && !agentSocketLost(id));
     // Unbilled targets: a lease you already paid for, or your own machines.
     let onlyAccountId: string | undefined;
     let reservationId: string | undefined;
@@ -560,8 +583,17 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       }
       if (restrictedTier && approved === 0) return reply.code(409).send({ error: "no_restricted_host", model: body.model, reason: "no_own_agent_approved_to_host" });
       onlyAccountId = accountId;
-    } else if (!holders.some(([id]) => !reservations.isHeld(id))) {
-      return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
+    } else {
+      // A named network model with no free slot here that a peer has free (#526): resubmit there,
+      // before anything is reserved (the same redirect as an Auto call whose best fit is on a peer).
+      if (body.routeRedirect && !routed && !restrictedTier && sumFree(freeLocalHolders(body.model, namedClass(body.computeClass), contextNeeded(body.messages as ChatMessage[], body.tools, body.maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS))) <= queue.waitingInference(body.model)) {
+        const peer = await peerWithFreeCapacity(body.model, body.computeClass, clientRegion).catch(() => null);
+        if (peer) {
+          recordMeshWork(peer.coordinatorId);
+          return reply.code(409).send({ error: "route_elsewhere", coordinatorId: peer.coordinatorId, coordinatorUrl: peer.url, model: body.model });
+        }
+      }
+      if (!holders.some(([id]) => !reservations.isHeld(id))) return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
     }
     // Backpressure: network calls wait for a slot up to a bound (waitingBound); past it the
     // caller hears no_capacity at once (nothing reserved or charged) instead of piling more onto
@@ -653,9 +685,18 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       // (never the requester's own machines: excludeAccounts above, as in best-fit).
       if (routed.result.chosen?.local) preferAgent(subtask.id, routed.result.chosen.agentId, bestFitConfig.preferMs);
       recordDecision(body.taskId, subtask.id, routed.job, routed.result, Date.now(), portalChoice);
-    } else if (portalChoice && billed) {
-      // A named model the portal placed here: log which coordinator and why (Network page, routing decisions).
-      recordPlacement(body.taskId, subtask.id, { model: body.model, computeClass: taskClass === "any" ? null : taskClass }, portalChoice);
+      // #523: nobody picks it up within BEST_FIT_REPLACE_MS: the next candidate, not a 45 s wait (auto-replace.ts).
+      if (routed.result.chosen?.local) {
+        armAutoReplace({ taskId: body.taskId, subtaskId: subtask.id, job: routed.job, accountId, clientRegion, tried: [routed.result.chosen.agentId], ...(routed.onlyClass ? { onlyClass: routed.onlyClass } : {}), ...(body.maxBidMsatPerCredit !== undefined ? { maxBidMsatPerCredit: body.maxBidMsatPerCredit } : {}) });
+      }
+    } else {
+      if (portalChoice && billed) {
+        // A named model the portal placed here: log which coordinator and why (Network page, routing decisions).
+        recordPlacement(body.taskId, subtask.id, { model: body.model, computeClass: taskClass === "any" ? null : taskClass }, portalChoice);
+      }
+      // #526: a named network call goes first to the free holder nearest the buyer (locality.ts).
+      const near = billed ? nearestFreeHolder(freeLocalHolders(body.model, taskClass, needTokens), clientRegion) : undefined;
+      if (near) preferAgent(subtask.id, near.agentId, LOCALITY_PREFER_MS);
     }
     if (onlyAccountId && !reservationId && !hasPortalServiceToken((req as any).headers ?? {})) {
       // "My machines" from the desktop app: a soft preference for the requester's own machine on the
@@ -707,6 +748,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     // A holder posting pieces is alive: its lease is renewed like a heartbeat's, so a heartbeat that is
     // late (rate limited, a busy machine) cannot lapse a call while its reply is streaming.
     queue.renewClaim(body.subtaskId, verified.agentId);
+    noteAgentHttpAlive(verified.agentId);
     const r = inferenceStreams.append(body.subtaskId, body.seq, body.delta, body.done, body.error, body.toolCalls);
     // Security research tier: the call log records how a restricted call ended (prompts only if configured).
     if (r === "ok" && body.done && restrictedCalls.get(body.subtaskId)) {

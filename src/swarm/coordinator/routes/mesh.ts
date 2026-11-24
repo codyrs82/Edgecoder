@@ -17,6 +17,7 @@ import type {
 } from "../../../common/types.js";
 import { checkPeerRegistration, isAllowlistedKey } from "../../../mesh/peer-trust.js";
 import { setNudgeTransport } from "../dispatch.js";
+import { noteAgentSocketClosed, noteAgentSocketOpen } from "../agent-liveness.js";
 import { setModelControlTransport } from "../model-control.js";
 import { RttTracker, startRttPings, type PingableSocket } from "../../agent-rtt.js";
 import { MESH_WS_BIND_MAX_SKEW_MS, decideMeshWsBind, meshWsSenderMatches } from "../../../mesh/ws-auth.js";
@@ -550,6 +551,7 @@ function promoteMeshWs(agentId: string, publicKeyPem: string | undefined): void 
   goLive?.();
   // A mesh-token connection that was already live starts its RTT pings now it is authenticated.
   if (!goLive && CC.MESH_WS_PING_INTERVAL_MS > 0) startRttPings(socket as unknown as PingableSocket, agentId, meshRtt, CC.MESH_WS_PING_INTERVAL_MS);
+  if (!goLive) noteAgentSocketOpen(agentId);
 }
 setMeshWsAgentRegisteredHook(promoteMeshWs);
 
@@ -782,6 +784,8 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
       // Only a bind that proved its key is measured, so an unsigned socket cannot set another peer's figure.
       if (meshWsBindings.get(peerId)?.socket === socket && meshWsBindings.get(peerId)?.authenticated) {
         startRttPings(socket as unknown as PingableSocket, peerId, meshRtt, CC.MESH_WS_PING_INTERVAL_MS);
+        // #524: from here on, this socket closing means the agent is gone (../agent-liveness.ts).
+        noteAgentSocketOpen(peerId);
       }
     };
     if (hold) {
@@ -838,8 +842,11 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
       if (timer) clearTimeout(timer);
       heldTimers.delete(socket);
       heldGoLive.delete(socket);
+      const wasAuthenticated = meshWsBindings.get(peerId)?.socket === socket && meshWsBindings.get(peerId)?.authenticated === true;
       if (!meshWsBindings.release(peerId, socket)) return;
       if (live) mesh.removeWebSocketForPeer(peerId);
+      // #524: the agent's authenticated socket is gone; it gets no new work until it is heard from again.
+      if (live && wasAuthenticated) noteAgentSocketClosed(peerId);
     };
     socket.on("close", () => {
       app.log.info({ peerId }, "mesh_ws_peer_disconnected");

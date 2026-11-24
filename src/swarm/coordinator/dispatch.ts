@@ -43,6 +43,7 @@ import { askCapabilityOf, orderBook } from "./economy.js";
 import { peerGrantAllowsClaim } from "./grants.js";
 import { restrictedClaimAllowed } from "./restricted.js";
 import { circuitOpen, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
+import { agentSocketLost, noteAgentHttpAlive } from "./agent-liveness.js";
 
 /** Agents nudged per claimable subtask. */
 export const NUDGE_FANOUT = 2;
@@ -82,6 +83,8 @@ export const WORK_AVAILABLE_FRAME = JSON.stringify({ type: "work_available" });
 
 let transport: NudgeTransport | undefined;
 const loads = new Map<string, AgentLoad>();
+/** agentId -> its last /pull, whatever it reported (#523: an agent that never pulls is not capacity). */
+const lastPullAt = new Map<string, number>();
 /** subtaskId -> when it became claimable (for deferral and pickup time). */
 const readyAt = new Map<string, number>();
 /** agentId -> when it was last nudged and has not pulled since. */
@@ -98,6 +101,8 @@ export function setNudgeTransport(t: NudgeTransport | undefined): void {
 /** What an agent says about its capacity when it pulls. */
 export function noteAgentPull(agentId: string, report: { inferenceSlots?: number; freeInferenceSlots?: number; contextWindow?: number; wake?: boolean }, nowMs = Date.now()): void {
   nudgedAt.delete(agentId);
+  lastPullAt.set(agentId, nowMs);
+  noteAgentHttpAlive(agentId, nowMs);
   if (report.inferenceSlots === undefined && !report.wake && report.contextWindow === undefined) {
     loads.delete(agentId);
     return;
@@ -193,6 +198,8 @@ export function freeModelSlots(agentId: string, claims: Claims): number {
 
 function liveAgent(agentId: string, cap: Capability | undefined, nowMs: number): cap is Capability {
   if (!cap || activeBlacklistRecord(agentId)) return false;
+  // #524: its socket closed and it has not been heard from since: gone, whatever lastSeenMs says.
+  if (agentSocketLost(agentId, nowMs)) return false;
   return nowMs - cap.lastSeenMs <= LOAD_FRESH_MS;
 }
 
@@ -373,6 +380,7 @@ export function pruneDispatch(nowMs = Date.now()): void {
   for (const [id, p] of preferred) if (nowMs >= p.untilMs) preferred.delete(id);
   for (const id of neededTokens.keys()) if (!queue.getSubtask(id)) neededTokens.delete(id);
   for (const [id, load] of loads) if (nowMs - load.atMs > READY_KEEP_MS) loads.delete(id);
+  for (const [id, at] of lastPullAt) if (nowMs - at > READY_KEEP_MS) lastPullAt.delete(id);
   for (const [id, at] of nudgedAt) if (nowMs - at > READY_KEEP_MS) nudgedAt.delete(id);
 }
 setInterval(() => pruneDispatch(), 60_000).unref?.();
@@ -381,6 +389,11 @@ setInterval(() => pruneDispatch(), 60_000).unref?.();
 export function agentLoadReport(agentId: string): { slots: number; reportedFree?: number; wake: boolean; contextWindow?: number; atMs: number } | undefined {
   const load = loads.get(agentId);
   return load ? { ...load } : undefined;
+}
+
+/** When the agent last pulled (any report, or none); undefined when it has not in READY_KEEP_MS. */
+export function agentLastPullMs(agentId: string): number | undefined {
+  return lastPullAt.get(agentId);
 }
 
 /** An authenticated mesh WebSocket is open for the agent (admin network view). */

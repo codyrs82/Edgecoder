@@ -150,8 +150,13 @@ export interface NetworkTarget {
   source?: string;
   /** model "auto": the client's hints for best-fit routing (job-descriptor.ts). */
   routing?: RoutingHints;
-  /** model "auto": the coordinator may answer route_elsewhere when a peer is the best fit. */
+  /**
+   * The coordinator may answer route_elsewhere: model "auto" when a peer is the best fit; a named
+   * network model when it has no free slot for it and a peer does (#526). The caller resubmits there once.
+   */
   routeRedirect?: boolean;
+  /** Where the buyer is (Fly region or "cc-<country>"): the coordinator prefers free agents near it (#526). */
+  clientRegion?: string;
   /** The portal's coordinator choice for this call (kept on its routing decision; portal service token only). */
   coordinatorChoice?: CoordinatorChoice;
 }
@@ -189,10 +194,10 @@ export function noRouteInfo(json: Record<string, unknown>): NetworkFailureInfo {
   };
 }
 
-/** model "auto": the coordinator's best fit is on a peer coordinator; resubmit there. */
+/** The coordinator sends the call to a peer coordinator (Auto's best fit, or a named model's free slot); resubmit there. */
 export class RouteElsewhereError extends NetworkInferenceError {
   constructor(readonly url: string, readonly routing: Record<string, unknown> | undefined) {
-    super(`The best fit for this request is on another coordinator (${url}).`, 409);
+    super(`The best place for this request is on another coordinator (${url}).`, 409);
   }
 }
 
@@ -308,12 +313,15 @@ async function* streamSubmitted(
     ...(req.model === "auto" && req.routing && Object.keys(req.routing).length ? { routing: req.routing } : {}),
     // A named model still carries the buyer's price ceiling: the coordinator caps the call's reserve at it.
     ...(req.model !== "auto" && req.routing?.maxCSats !== undefined ? { routing: { maxCSats: req.routing.maxCSats } } : {}),
-    ...(req.model === "auto" && req.routeRedirect ? { routeRedirect: true } : {}),
+    ...(req.routeRedirect && (req.model === "auto" || (!req.target && !req.reservationId)) ? { routeRedirect: true } : {}),
+    ...(req.clientRegion ? { clientRegion: req.clientRegion.slice(0, 40) } : {}),
     ...(req.coordinatorChoice ? { coordinatorChoice: req.coordinatorChoice } : {}),
   };
   const sub = await submitRetryingDrain(d, submitBody, signal);
   if (sub.status !== 200) {
     const err = String(sub.json.error ?? `HTTP ${sub.status}`);
+    // A named model with no free slot there, free on a peer (#526): resubmit there (the caller decides).
+    if (req.model !== "auto" && req.routeRedirect && err === "route_elsewhere" && typeof sub.json.coordinatorUrl === "string") throw new RouteElsewhereError(sub.json.coordinatorUrl, undefined);
     if (req.model === "auto") {
       if (err === "route_elsewhere" && typeof sub.json.coordinatorUrl === "string") throw new RouteElsewhereError(sub.json.coordinatorUrl, sub.json.routing as Record<string, unknown> | undefined);
       // An older coordinator looks for a model called "auto"; one that routes says no_route_fits.

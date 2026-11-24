@@ -32,6 +32,7 @@ import { networkTag } from "../../lan-proximity.js";
 import { agentCapabilities, activeBlacklistRecord, AGENT_CONNECTED_WINDOW_MS } from "../agent-state.js";
 import { agentAccount, agentSignatureAtGate, hasMeshToken, hasPortalServiceToken, requireMeshToken } from "../auth.js";
 import { agentLoadReport } from "../dispatch.js";
+import { agentSocketLost } from "../agent-liveness.js";
 import { effectiveHardware } from "../economy.js";
 import { isApprovedCoordinator } from "../peers.js";
 import { parsePeerUrlPins } from "../../../mesh/peer-trust.js";
@@ -155,7 +156,8 @@ export async function buildLocalWorld(nowMs = Date.now()): Promise<LocalWorld> {
       vramGb: cap.hardwareClass?.vramGb ?? null,
       models: routableModels(cap),
       activeModel: cap.activeModel ?? null,
-      connected: nowMs - cap.lastSeenMs < AGENT_CONNECTED_WINDOW_MS,
+      // #524: a closed socket with nothing heard since is stale at once (peers and the portal stop counting it).
+      connected: nowMs - cap.lastSeenMs < AGENT_CONNECTED_WINDOW_MS && !agentSocketLost(agentId, nowMs),
       claims: claims.get(agentId)?.all ?? 0,
       slots: agentLoadReport(agentId)?.slots ?? cap.maxConcurrentTasks ?? 1,
       lastSeenMs: cap.lastSeenMs,
