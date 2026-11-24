@@ -833,9 +833,10 @@ export function nextLocalMidnight(ms: number): number {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getTime();
 }
 
-/** A bot's permission mode (older bots: from autoApproveEdits). */
+/** A bot's permission mode (older bots: from autoApproveEdits). Bots never run in Full access (a hand-edited one runs as Accept edits). */
 export function botMode(bot: Pick<BotConfig, "mode" | "autoApproveEdits">): PermissionMode {
-  return bot.mode ?? (bot.autoApproveEdits ? "auto-edits" : "ask");
+  const m = bot.mode ?? (bot.autoApproveEdits ? "auto-edits" : "ask");
+  return m === "full" ? "auto-edits" : m;
 }
 
 /** The current branch of a work folder (null outside git or on a detached HEAD). */

@@ -89,7 +89,7 @@ export const CODE_SESSION_JS = String.raw`
       mode.hidden = !drive;
       if (drive) {
         var cur = s.mode;
-        mode.innerHTML = CODE_MODES.map(function(o) { return '<option value="' + escapeHtml(o[0]) + '"' + (o[0] === cur ? " selected" : "") + ' title="' + escapeHtml(o[2]) + '">' + escapeHtml(o[1]) + "</option>"; }).join("") + (cur === "auto" ? '<option value="auto" selected disabled>Auto (set on the Mac)</option>' : "");
+        mode.innerHTML = CODE_MODES.map(function(o) { return '<option value="' + escapeHtml(o[0]) + '"' + (o[0] === cur ? " selected" : "") + ' title="' + escapeHtml(o[2]) + '">' + escapeHtml(o[1]) + "</option>"; }).join("") + (cur === "auto" ? '<option value="auto" selected disabled>Auto (set on the Mac)</option>' : "") + (cur === "full" ? '<option value="full" selected disabled>Full access (set on the Mac)</option>' : "");
         mode.disabled = cs.busy;
       }
       var active = isActive();

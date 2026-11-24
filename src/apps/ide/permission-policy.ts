@@ -3,13 +3,17 @@
 
 /**
  * What a tool call does in each permission mode: run without asking, ask the user, or be refused.
- * One function (decideToolCall) answers it for chat turns, shared sessions and bots, so the four
+ * One function (decideToolCall) answers it for chat turns, shared sessions and bots, so the five
  * modes mean the same thing everywhere (docs/permission-modes.md):
  *
  *   ask (Manual)          edits and commands ask; read-only tools and commands never do
  *   auto-edits (Accept)   edits inside the project apply (each turn's checkpoint keeps them undoable); commands ask
  *   auto                  safe commands run, risky ones ask, dangerous ones are refused (classifyCommand)
  *   plan                  read-only tools only; everything else is refused until the user approves the plan
+ *   full (Full access)    nothing asks: edits, commands, commits, pushes and PRs run; the hard refusals
+ *                         (classifyCommand's "refuse": sudo, wiping a disk/home/the project, fork bomb,
+ *                         raw disk, download-and-run, secrets) stay refused. Set on this computer only
+ *                         (sessions.ts: never from the phone/web or another account's client).
  *
  * In every mode a project's "always allow" rules (`npm test:*`) let a matching command run, but a
  * rule never covers a refused command or a class that must always ask (network other than a plain
@@ -590,6 +594,11 @@ export interface Decision {
   reason: string;
   /** The "Always allow" rule the approval card may offer (asks only). */
   rule?: string;
+  /**
+   * A run that counts as the user's approval for the executor's own checks (Full access: the user
+   * chose to approve everything). The executor still refuses what it always refuses (.git internals).
+   */
+  approved?: boolean;
 }
 
 export interface DecideContext {
@@ -605,7 +614,7 @@ export interface DecideContext {
   editsAlways?: boolean;
 }
 
-/** Tools that ask in every mode (they publish or reach other people). */
+/** Tools that ask in every mode but Full access (they publish or reach other people). */
 export const ALWAYS_ASK: ReadonlySet<ToolName> = new Set<ToolName>(["git_push", "open_pull_request", "github_create_pr"]);
 
 export const PLAN_REFUSAL = "Plan mode: only read-only tools until the user approves the plan. Finish your investigation and reply with the plan.";
@@ -630,6 +639,7 @@ function ruleCovers(ctx: DecideContext, command: unknown, cls: CommandClass, leg
  */
 export function decideToolCall(tool: ToolName, args: Record<string, unknown>, ctx: DecideContext, legacyRisk?: (command: unknown) => string | null): Decision {
   if (READ_TOOLS.has(tool)) return { action: "run", reason: "reads only" };
+  if (ctx.mode === "full") return decideFull(tool, args, ctx);
   // The web tool is offered only when the chat's Web toggle or the bot's "Search the web" permission
   // is on: that is the allowance. Manual mode still asks for each call (it costs cSats and sends the
   // query off this machine); Plan may use it (it changes nothing).
@@ -675,4 +685,21 @@ export function decideToolCall(tool: ToolName, args: Record<string, unknown>, ct
     return { action: "ask", reason: `${tool.replace(/_/g, " ")} asks`, rule: `${gitCmd}:*` };
   }
   return { action: "ask", reason: `${tool.replace(/_/g, " ")} asks` };
+}
+
+/**
+ * Full access: everything runs without asking, as if the user approved it, except the hard
+ * refusals (the same ones Auto refuses). Nothing new is refused here.
+ */
+function decideFull(tool: ToolName, args: Record<string, unknown>, ctx: DecideContext): Decision {
+  if (tool === "run_shell") {
+    const cls = classifyCommand(args.command, { root: ctx.root, branch: ctx.branch?.() ?? null });
+    if (cls.action === "refuse") return { action: "refuse", reason: `Full access still refuses this: ${cls.reason}.` };
+    return { action: "run", reason: "Full access", approved: true };
+  }
+  if (tool === "write_file" || tool === "edit_file") {
+    if (isSecretPath(args.path)) return { action: "refuse", reason: `Full access still refuses this: it writes a secrets file (${String(args.path)}).` };
+    if (containsSecret(tool === "write_file" ? args.content : args.new_string)) return { action: "refuse", reason: "Full access still refuses this: it writes what looks like an API key or token." };
+  }
+  return { action: "run", reason: "Full access", approved: true };
 }

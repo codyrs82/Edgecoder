@@ -19,7 +19,8 @@
  *     from the phone or published by the Mac.
  * What a session started or driven from the phone may do is in sessions.ts (remoteDecision): every
  * command that isn't read-only asks, paths outside the project are refused, and approving from the
- * phone never adds an "always allow" rule or turns on auto-edits. Auto mode is set on the Mac only.
+ * phone never adds an "always allow" rule or turns on auto-edits. Auto and Full access are set on the
+ * Mac only; a phone turn in a Full access session runs as Accept edits under the remote rules.
  */
 
 import { realpathSync, statSync } from "node:fs";
@@ -251,8 +252,8 @@ function fitList<T>(items: T[], extra: Record<string, unknown> = {}): Record<str
 const account = z.string().min(1).max(160);
 const sessionId = z.string().uuid();
 const turnId = z.string().uuid();
-// "auto" is accepted by the schema only to be refused with a clear message (Auto is set on the Mac).
-const remoteMode = z.enum(["ask", "auto-edits", "plan", "auto"]);
+// "auto" and "full" are accepted by the schema only to be refused with a clear message (both are set on the Mac).
+const remoteMode = z.enum(["ask", "auto-edits", "plan", "auto", "full"]);
 const model = z.string().min(1).max(200);
 
 /** Every command, flat: { requestedBy, action, ...args }. Strict: no field the action doesn't name (no paths, ever). */
@@ -292,6 +293,7 @@ export interface CodeRemoteDeps {
 }
 
 const AUTO_REFUSED: CodeRemoteOutcome = { status: "refused", error: "auto_on_mac", message: "Auto mode is turned on from the Mac." };
+const FULL_REFUSED: CodeRemoteOutcome = { status: "refused", error: "full_on_mac", message: "Full access is turned on from the Mac." };
 const NO_SESSION: CodeRemoteOutcome = { status: "refused", error: "no_such_session", message: "No such session on this Mac." };
 
 /** The phone's client: every write from it is labelled and judged as remote (sessions.ts). */
@@ -357,6 +359,7 @@ export function runCodeRemoteCommand(hub: SessionHub, cmd: CodeRemoteCommand, de
         return { status: "done", data: hub.approvePlan(s.id, client, cmd.mode) };
       case "settings": {
         if (cmd.mode === "auto") return AUTO_REFUSED;
+        if (cmd.mode === "full") return FULL_REFUSED;
         hub.update(s.id, { ...(cmd.title !== undefined ? { title: cmd.title } : {}), ...(cmd.model ? { model: cmd.model } : {}), ...(cmd.mode ? { mode: cmd.mode } : {}) }, client);
         return { status: "done", data: { session: summaryOf(hub, hub.peek(s.id) ?? s, salt) } };
       }
@@ -376,6 +379,7 @@ export function runCodeRemoteCommand(hub: SessionHub, cmd: CodeRemoteCommand, de
 /** "create": a session in a trusted folder named by its projectId, owned by the phone's account. */
 function createSession(hub: SessionHub, cmd: Extract<CodeRemoteCommand, { action: "create" }>, salt: string, client: ClientRef): CodeRemoteOutcome {
   if (cmd.mode === "auto") return AUTO_REFUSED;
+  if (cmd.mode === "full") return FULL_REFUSED;
   // The id is looked up over the trusted list as it is now, then trust and the folder are checked
   // again right before use (the list may have changed since the phone fetched it).
   const root = trustedRootForId(cmd.projectId, salt);

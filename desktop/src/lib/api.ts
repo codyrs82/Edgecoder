@@ -1447,7 +1447,7 @@ export async function streamIdeChat(
   requestedModel?: string,
   githubToken?: string | null,
   /**
-   * The permission mode (ask, auto-edits, auto, plan; permission-modes.ts). The older values
+   * The permission mode (ask, auto-edits, auto, plan, full; permission-modes.ts). The older values
    * "none" / "edits" still work.
    */
   permission: "none" | "edits" | EngineMode = "none",
@@ -1470,7 +1470,7 @@ export async function streamIdeChat(
       projectRoot,
       ...(permission === "none" || permission === "edits"
         ? { autoApprove: permission }
-        : { mode: permission, autoApprove: permission === "auto-edits" || permission === "auto" ? "edits" : "none" }),
+        : { mode: permission, autoApprove: permission === "auto-edits" || permission === "auto" || permission === "full" ? "edits" : "none" }),
       ...(origin ? { origin } : {}),
       ...(githubToken ? { githubToken } : {}),
       ...(attachments?.length ? { attachments } : {}),
