@@ -319,8 +319,9 @@ account can reach is set up.
 ## Updates
 
 Hosts installed with `install.sh` (Linux, and macOS without the `.pkg`) **update themselves**:
-nobody has to re-run the installer for a fix. Every 6 hours (plus a random delay of up to an hour,
-so a fleet does not restart at once) the host runs `edgecoder-install update`, which:
+nobody has to re-run the installer for a fix. Every hour (plus a random delay of up to 10 minutes,
+so a fleet does not restart at once), and within minutes of a release when the coordinator
+announces it (the **nudge**, below), the host runs `edgecoder-install update`, which:
 
 1. asks GitHub for the newest published, non-prerelease `agent-v*` release and stops if it is not
    newer than the installed one (it never downgrades);
@@ -361,10 +362,46 @@ disables the timer); `--auto-update on` turns them back on. `EDGECODER_AUTO_UPDA
 
 | Platform | Schedule |
 | --- | --- |
-| Linux | `edgecoder-update.timer` (every 6 h, `RandomizedDelaySec=1h`, `Persistent=true`) starts `edgecoder-update.service`, a root oneshot. |
-| macOS | `/Library/LaunchDaemons/io.edgecoder.update.plist` (root, every 6 h, up to 1 h of jitter inside the run). |
+| Linux | `edgecoder-update.timer` (`OnCalendar=hourly`, `RandomizedDelaySec=10min`, `Persistent=true`) starts `edgecoder-update.service`, a root oneshot. `edgecoder-update.path` starts the same service when an agent asks (the nudge). |
+| macOS | `/Library/LaunchDaemons/io.edgecoder.update.plist` (root, every hour, up to 10 min of jitter inside the run when there is something to install; `WatchPaths` on the agents' request files for the nudge). |
 | Windows | Not yet: the agents are scheduled tasks of the installing user and the app lives in `C:\Program Files`. Re-run `install.ps1` to update. |
 | `.deb`, `.pkg`, `.msi`, `--from-source` | No schedule: update them the way they were installed. |
+
+**The nudge: updates within minutes of a release.** Each coordinator looks up the newest
+published, non-prerelease `agent-v*` release on GitHub (in the background, at most every 10
+minutes; after a GitHub rate limit, not before its reset). When an agent registers or heartbeats
+with an older version, the answer carries `updateAvailable: "agent-v1.3.0"`. The agent (which runs
+unprivileged) then waits a random 0 to 10 minutes, so a fleet does not restart at once, and writes
+`update-request` in its own state directory (`/var/lib/edgecoder/agent-<n>/update-request`). The
+path unit (Linux) or `WatchPaths` (macOS) starts the usual root update run above, early. That is
+all a nudge can do:
+
+- the updater never reads the request file and never takes a version from the coordinator: it asks
+  GitHub itself and installs only a release signed by the pinned key, with all the steps above
+  (waiting for running work, `plan --keep-config`, health check, rollback);
+- the agent ignores a hint that is not a plain `agent-vX.Y.Z` newer than what it runs (never equal
+  or older), and asks at most once every 30 minutes whatever the coordinator says;
+- the updater does nothing (not even the GitHub call) when it checked less than 5 minutes ago, so
+  even an agent that writes the file nonstop causes at most 12 extra checks an hour;
+- after GitHub answers 403 or 429 (rate limit; unauthenticated calls are limited to 60 an hour per
+  IP, and a host makes about one an hour), scheduled runs wait until GitHub's reset (at least 15
+  minutes, at most 6 hours) and record that in `update-state.json`.
+
+A run that finds nothing newer stops there: agents are only drained and restarted when a newer,
+verified release is installed. With automatic updates off (`EDGECODER_AUTO_UPDATE=off`) the agent
+does not ask, the path unit (Linux) is disabled and the launchd job removed, and a run that starts
+anyway does nothing. A coordinator operator can turn the hint off with `AGENT_UPDATE_HINTS=off`.
+
+Worst case from a release to a host running it: about 10 minutes for the coordinator to see it,
+up to 10 minutes of agent delay (plus up to 10 minutes of jitter on macOS), then the update itself
+(up to 10 minutes waiting for running work, the download, 3 minutes of health check). Without a
+coordinator nudge, the hourly check gets it within 70 minutes. Agents still busy after 10 minutes
+are retried on the next hourly run.
+
+**Hosts on the 6-hour schedule** (installed before this change) move to the hourly schedule and the
+nudge with their next update, which still comes from the old timer (up to 7 hours). On macOS the
+new schedule is written then but launchd loads it at the next reboot or `sudo edgecoder-install
+apply` (an update cannot reload the job it runs in).
 
 How the agent is asked to finish its work: an installed agent writes `agent-status.json` in its
 own state directory (`/var/lib/edgecoder/agent-<n>`: registered, draining, running work) and handles

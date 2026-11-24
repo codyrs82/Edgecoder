@@ -13,7 +13,7 @@ import { pipeline } from "node:stream/promises";
 import type { ReadableStream as WebReadableStream } from "node:stream/web";
 import type { BinFs } from "./binaries.js";
 import { AGENT_STATUS_FILE } from "../swarm/update-drain.js";
-import type { AgentStatus, UpdateDeps } from "./update.js";
+import { HttpStatusError, rateLimitRetryAt, type AgentStatus, type UpdateDeps } from "./update.js";
 
 const MAX_REDIRECTS = 5;
 const USER_AGENT = "edgecoder-install-update";
@@ -31,7 +31,7 @@ export async function httpsGet(url: string, timeoutMs: number): Promise<Response
       current = new URL(loc, u).toString();
       continue;
     }
-    if (res.status !== 200) throw new Error(`HTTP ${res.status} from ${u.host}${u.pathname}`);
+    if (res.status !== 200) throw new HttpStatusError(`HTTP ${res.status} from ${u.host}${u.pathname}`, res.status, rateLimitRetryAt(res.status, res.headers, Date.now()));
     return res;
   }
   throw new Error(`more than ${MAX_REDIRECTS} redirects for ${url}`);

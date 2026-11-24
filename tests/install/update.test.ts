@@ -7,7 +7,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 // @ts-expect-error plain .mjs release tooling, no type declarations
 import { keygen, signMinisign } from "../../scripts/release/minisign.mjs";
 import { nonRootWritable, type BinFs } from "../../src/install/binaries.js";
-import { MAX_TARBALL_BYTES, compareVersions, parseReleaseInfo, parseVersion, pickLatestTag, releaseTarget, runUpdate, updateStatusLines, waitForIdle, type AgentStatus, type UpdateDeps } from "../../src/install/update.js";
+import { HttpStatusError, MAX_TARBALL_BYTES, MIN_SCHEDULED_GAP_MS, compareVersions, rateLimitRetryAt, parseReleaseInfo, parseVersion, pickLatestTag, releaseTarget, runUpdate, updateStatusLines, waitForIdle, type AgentStatus, type UpdateDeps } from "../../src/install/update.js";
 import { parseAgentStatus } from "../../src/install/update-host.js";
 
 describe("versions", () => {
@@ -321,6 +321,7 @@ describe.skipIf(posixOnly)("edgecoder-install update", () => {
     expect(state(w)).toMatchObject({ lastResult: "rolled-back", failedTag: NEW });
     // The old version was re-applied.
     expect(w.calls.filter((c) => c[2] === "apply")).toHaveLength(2);
+    w.now += 60 * 60_000; // the next hourly run
     const again = await runUpdate(opts({ scheduled: true }), paths(w), deps(w));
     expect(again).toMatchObject({ result: "skipped", code: 0 });
     expect(again.message).toMatch(/failed its health check here before/);
@@ -385,6 +386,60 @@ describe.skipIf(posixOnly)("edgecoder-install update", () => {
     expect(w.calls).toEqual([]);
     // By hand it still updates.
     expect((await runUpdate(opts(), paths(w), deps(w))).result).toBe("updated");
+  });
+
+  it("an up-to-date scheduled run never drains or restarts the agents", async () => {
+    w.urls.set(API, Buffer.from(JSON.stringify([{ tag_name: OLD }])));
+    const out = await runUpdate(opts({ scheduled: true }), paths(w), deps(w));
+    expect(out).toMatchObject({ result: "up-to-date", code: 0 });
+    expect(w.calls).toEqual([]);
+  });
+
+  it("scheduled runs within 5 minutes of the last check do nothing, and do not move it", async () => {
+    w.urls.set(API, Buffer.from(JSON.stringify([{ tag_name: OLD }])));
+    await runUpdate(opts({ scheduled: true }), paths(w), deps(w));
+    const first = state(w).lastCheckAt;
+    let fetches = 0;
+    const counting = deps(w, { fetchBytes: async () => { fetches++; return Buffer.from("[]"); } });
+    w.now += MIN_SCHEDULED_GAP_MS - 1;
+    // An agent poking nonstop: no GitHub call, state untouched.
+    for (let i = 0; i < 5; i++) expect((await runUpdate(opts({ scheduled: true }), paths(w), counting)).result).toBe("skipped");
+    expect(fetches).toBe(0);
+    expect(state(w).lastCheckAt).toBe(first);
+    w.now += 1;
+    publish(w, NEW);
+    w.urls.set(API, Buffer.from(JSON.stringify([{ tag_name: OLD }, { tag_name: NEW }])));
+    expect((await runUpdate(opts({ scheduled: true }), paths(w), deps(w))).result).toBe("updated");
+  });
+
+  it("a GitHub rate limit holds scheduled runs until its reset; by hand still checks", async () => {
+    const limited = deps(w, { fetchBytes: async () => { throw new HttpStatusError("HTTP 403 from api.github.com/repos", 403, w.now + 40 * 60_000); } });
+    const out = await runUpdate(opts({ scheduled: true }), paths(w), limited);
+    expect(out).toMatchObject({ result: "failed", code: 1 });
+    expect(out.message).toMatch(/rate-limited/);
+    expect(Date.parse(state(w).rateLimitedUntil)).toBe(w.now + 40 * 60_000);
+    let fetches = 0;
+    const counting = deps(w, { fetchBytes: async () => { fetches++; throw new Error("unreachable"); } });
+    w.now += 30 * 60_000;
+    expect((await runUpdate(opts({ scheduled: true }), paths(w), counting)).result).toBe("skipped");
+    expect(fetches).toBe(0);
+    // A person can always check.
+    publish(w, NEW);
+    w.now += 1;
+    expect((await runUpdate(opts(), paths(w), deps(w))).result).toBe("updated");
+    expect(state(w).rateLimitedUntil).toBeUndefined();
+  });
+
+  it("works out when to retry after a rate limit, within bounds", () => {
+    const h = (o: Record<string, string>) => ({ get: (k: string) => o[k] ?? null });
+    const now = 1_700_000_000_000;
+    expect(rateLimitRetryAt(404, h({}), now)).toBeUndefined();
+    expect(rateLimitRetryAt(403, h({}), now)).toBe(now + 3600_000);
+    expect(rateLimitRetryAt(429, h({ "retry-after": "1800" }), now)).toBe(now + 1800_000);
+    expect(rateLimitRetryAt(403, h({ "x-ratelimit-reset": String(now / 1000 + 2400) }), now)).toBe(now + 2400_000);
+    // A reset in the past or seconds away: still at least 15 minutes; one days away: at most 6 hours.
+    expect(rateLimitRetryAt(403, h({ "retry-after": "5" }), now)).toBe(now + 15 * 60_000);
+    expect(rateLimitRetryAt(403, h({ "x-ratelimit-reset": String(now / 1000 + 86_400 * 3) }), now)).toBe(now + 6 * 3600_000);
   });
 
   it("refuses to stage under a directory a non-root user can write", async () => {
