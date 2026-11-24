@@ -24,7 +24,7 @@ function accountMenu(html: string): string {
 }
 
 describe("portal navigation like the desktop app", () => {
-  it("keeps the sidebar to New chat, Search, Chat, Overview, Reviews and recent chats", async () => {
+  it("keeps the sidebar to the Chat / Code switch, New chat, Search, Overview, Reviews and recent chats", async () => {
     for (const url of ["/portal/dashboard", "/portal/reviews"]) {
       const nav = sidebar(await page(url));
       expect(nav, url).toContain('id="newChatBtn" href="/portal/chat?new=1"');
@@ -42,7 +42,7 @@ describe("portal navigation like the desktop app", () => {
 
   it("on the chat page New chat is a button the chat drives, and the old inner conversation sidebar is gone", async () => {
     const html = await page("/portal/chat");
-    expect(sidebar(html)).toContain('<button type="button" class="nav-link nav-action" id="newChatBtn">');
+    expect(sidebar(html)).toContain('<button type="button" class="nav-link nav-action chat-only" id="newChatBtn">');
     expect(html).not.toContain('id="convSidebar"');
     expect(html.match(/id="convList"/g)).toHaveLength(1);
     expect(html.match(/id="newChatBtn"/g)).toHaveLength(1);

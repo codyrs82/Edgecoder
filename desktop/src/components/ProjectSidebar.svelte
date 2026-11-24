@@ -1,8 +1,9 @@
 <script lang="ts">
   // The Code view's sidebar: projects (folders) with their coding chats nested under them, like
   // Claude groups chats by project. Chats without a project are listed last.
-  import { tick } from "svelte";
-  import { ChevronRight, Folder, FolderOpen, FolderPlus, FolderGit2, SquarePen, Plus, EllipsisVertical, Pencil, Trash2, SquareTerminal } from "@lucide/svelte";
+  import { tick, type Snippet } from "svelte";
+  import { ChevronRight, Folder, FolderOpen, FolderPlus, FolderGit2, SquarePen, Plus, EllipsisVertical, Pencil, Trash2, SquareTerminal, Monitor } from "@lucide/svelte";
+  import { drivenRemotely } from "../lib/view-switch";
   import { listConversationsBySource, deleteConversation, renameConversation } from "../lib/chat-store";
   import { chatListVersion, chatsChanged, groupByProject, loadRecentProjects, tildePath, type ProjectGroup } from "../lib/projects";
   import { menu } from "../lib/menu";
@@ -30,8 +31,10 @@
     liveSessions?: SessionSummary[];
     activeSessionId?: string | null;
     onSelectSession?: (s: SessionSummary) => void;
+    /** Above New chat: the Chat / Code switch while this sidebar is showing (App.svelte). */
+    top?: Snippet;
   }
-  let { currentProject, activeChatId, onOpenProject, onSelectChat, onNewChat, onNewProject, onOpenFolder, onClone, user, onOpenSettings, onLogout, liveSessions = [], activeSessionId = null, onSelectSession }: Props = $props();
+  let { currentProject, activeChatId, onOpenProject, onSelectChat, onNewChat, onNewProject, onOpenFolder, onClone, user, onOpenSettings, onLogout, liveSessions = [], activeSessionId = null, onSelectSession, top }: Props = $props();
 
   function sessionsIn(root: string): SessionSummary[] {
     return liveSessions.filter((x) => x.projectRoot === root);
@@ -185,6 +188,7 @@
 {/snippet}
 
 <div class="project-sidebar">
+  {@render top?.()}
   <nav class="side-nav" aria-label="Code">
     <button class="nav-row primary" type="button" onclick={() => onNewChat(null)} disabled={!currentProject} title={currentProject ? `New chat in ${grouped.projects.find((p) => p.root === currentProject)?.name ?? "this project"}` : "Open or create a project first"}>
       <SquarePen size={16} /> New chat
@@ -219,9 +223,10 @@
           {#if sessionsIn(g.root).length > 0}
             <ul class="chats sessions" aria-label="Live sessions in {g.name}">
               {#each sessionsIn(g.root) as x (x.id)}
+                {@const remote = drivenRemotely(x)}
                 <li class="chat-row" class:active={x.id === activeSessionId}>
-                  <button class="chat-open" type="button" data-session-id={x.id} aria-current={x.id === activeSessionId ? "true" : undefined} title="{x.title} ({x.live ? 'live' : 'shared'} from the terminal)" onclick={() => onSelectSession?.(x)}>
-                    <SquareTerminal size={13} />
+                  <button class="chat-open" type="button" data-session-id={x.id} data-remote={remote ? "" : undefined} aria-current={x.id === activeSessionId ? "true" : undefined} title={remote ? `${x.title} (open from your phone or the web)` : `${x.title} (${x.live ? "live" : "shared"} from the terminal)`} onclick={() => onSelectSession?.(x)}>
+                    {#if remote}<Monitor size={13} aria-hidden="true" />{:else}<SquareTerminal size={13} />{/if}
                     <span class="chat-title">{x.title}</span>
                     {#if x.live}<span class="live-dot" aria-label="live">Live</span>{:else}<span class="chat-age">{ago(x.updatedAt)}</span>{/if}
                   </button>

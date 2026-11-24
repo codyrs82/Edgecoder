@@ -6,6 +6,7 @@ import { CLIENT_ESCAPE_JS } from "../../src/portal/pages/escape.js";
 import { CLIENT_SAFE_MARKDOWN_JS } from "../../src/portal/pages/safe-markdown.js";
 import { CODE_COMMON_JS } from "../../src/portal/pages/code-common.js";
 import { CODE_DIFF_JS } from "../../src/portal/pages/code-diff.js";
+import { sidebarModeJs } from "../../src/portal/pages/sidebar-mode.js";
 
 /*
  * The web Code page (pages/code.ts): the shell renders at /portal/code and at a session's deep link
@@ -45,14 +46,28 @@ describe("the Code page", () => {
     }
   });
 
-  it("is in the sidebar next to Chat, marked current on its own page", async () => {
+  it("is reached by the Chat / Code switch at the top of the sidebar, above New chat", async () => {
     const dash = (await page("/portal/dashboard")).body;
     const nav = dash.slice(dash.indexOf('<nav class="sidebar-nav"'), dash.indexOf("</nav>", dash.indexOf('<nav class="sidebar-nav"')));
-    expect(nav).toContain('href="/portal/code" title="Code"');
-    expect(nav.indexOf('href="/portal/chat"')).toBeLessThan(nav.indexOf('href="/portal/code"'));
-    expect(nav.indexOf('href="/portal/code"')).toBeLessThan(nav.indexOf('href="/portal/dashboard"'));
-    const own = (await page("/portal/code")).body;
-    expect(own).toContain('class="nav-link active" href="/portal/code" title="Code" aria-current="page"');
+    expect(nav).toContain('<div class="mode-switch" role="group" aria-label="Chat or Code">');
+    expect(nav).toContain('<a class="mode-tab" href="/portal/chat" data-mode-tab="chat">');
+    expect(nav).toContain('<a class="mode-tab" href="/portal/code" data-mode-tab="code">');
+    expect(nav.indexOf('class="mode-switch"')).toBeLessThan(nav.indexOf('id="newChatBtn"'));
+    // No separate Chat or Code rows any more: the switch is the way in.
+    expect(nav).not.toContain('title="Code"');
+    expect(nav).not.toContain('title="Chat"');
+    // Other pages start in Chat mode and pick up the remembered mode in the browser.
+    expect(dash).toContain('<aside class="sidebar" id="topbarNav" data-mode="chat">');
+    expect(dash).toContain('var fixed = null, mode = fixed;');
+    const own = (await page("/portal/code/mac-1/s-1")).body;
+    expect(own).toContain('<aside class="sidebar" id="topbarNav" data-mode="code">');
+    expect(own).toContain('href="/portal/code" data-mode-tab="code" aria-current="page"');
+    expect(own).toContain('id="newSessionBtn" href="/portal/code"');
+    expect(own).toContain('id="codeNavList"');
+    expect(own).toContain('var fixed = "code", mode = fixed;');
+    const chat = (await page("/portal/chat")).body;
+    expect(chat).toContain('<aside class="sidebar" id="topbarNav" data-mode="chat">');
+    expect(chat).toContain('href="/portal/chat" data-mode-tab="chat" aria-current="page"');
   });
 
   it("never offers Always allow and keeps Auto on the Mac", async () => {
@@ -110,5 +125,76 @@ describe("the Code page's browser helpers", () => {
     expect(note(null)).toContain("isn't one of yours");
     expect(vm.runInContext(`codeErrorText(codeErr("relay_off"))`, ctx)).toContain("Code from your phone is off");
     expect(vm.runInContext(`codeErrorText(codeErr("agent_not_connected"))`, ctx)).toContain("offline");
+  });
+});
+
+describe("the sidebar's Code mode list", () => {
+  function sidebarCtx(stored: string | null): { ctx: vm.Context; store: Map<string, string> } {
+    const store = new Map<string, string>(stored ? [["edgecoder-sidebar-mode", stored]] : []);
+    const ctx = vm.createContext({
+      document: { getElementById: () => null, querySelectorAll: () => [], hidden: false },
+      localStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) },
+      location: { pathname: "/portal/dashboard" },
+      setInterval: () => 0,
+      fetch: () => Promise.reject(new Error("no network")),
+    });
+    vm.runInContext(CLIENT_ESCAPE_JS, ctx);
+    return { ctx, store };
+  }
+  const machines = [
+    {
+      agentId: "mac-1", name: "Studio <Mac>", online: true, controls: "on",
+      projects: [{ projectId: "p1", name: "edgecoder", parent: "~/src" }, { projectId: "p2", name: "site", parent: "~/src" }],
+      sessions: [
+        { sessionId: "s-old", projectId: "p1", title: "Old work", status: "idle", updatedAtMs: 1000 },
+        { sessionId: "s-new", projectId: "p2", title: "<b>New</b> work", status: "waiting", updatedAtMs: 3000 },
+        { sessionId: "s-mid", projectId: "p1", title: "Mid work", status: "running", updatedAtMs: 2000 },
+      ],
+    },
+    { agentId: "mac-2", name: "Laptop", online: false, controls: "off", projects: [], sessions: [{ sessionId: "hidden", projectId: "p9", title: "Not shared", status: "idle", updatedAtMs: 9000 }] },
+  ];
+
+  it("groups sessions by project, newest first, each with the remote-computer icon and its Mac; escapes what the Mac sends", () => {
+    const { ctx } = sidebarCtx(null);
+    vm.runInContext(sidebarModeJs("code"), ctx);
+    ctx.machines = machines;
+    const html: string = vm.runInContext(`codeNavHtml(machines, "", "/portal/code/mac-1/s-mid")`, ctx);
+    expect(html.indexOf(">site<")).toBeLessThan(html.indexOf(">edgecoder<"));
+    expect(html.indexOf("Mid work")).toBeLessThan(html.indexOf("Old work"));
+    expect(html).not.toContain("Not shared");
+    expect(html).not.toContain("<b>New</b>");
+    expect(html).toContain("&lt;b&gt;New&lt;/b&gt; work");
+    expect(html).toContain("Studio &lt;Mac&gt;");
+    expect(html).toContain('<span class="waiting">Waiting for you</span>');
+    expect(html).toContain('href="/portal/code/mac-1/s-mid" aria-current="page"');
+    expect(html.match(/<rect x="2" y="3" width="20" height="14"/g)).toHaveLength(3);
+    // Search matches the title, the project or the Mac.
+    const site: string = vm.runInContext(`codeNavHtml(machines, "site", "")`, ctx);
+    expect(site).toContain("&lt;b&gt;New");
+    expect(site).not.toContain("Old work");
+    expect(vm.runInContext(`codeNavHtml(machines, "studio", "")`, ctx)).toContain("Old work");
+    expect(vm.runInContext(`codeNavHtml(machines, "nothing like it", "")`, ctx)).toContain("No matching sessions");
+  });
+
+  it("asks you to turn on Code from your phone when no Mac shares its sessions", () => {
+    const { ctx } = sidebarCtx(null);
+    vm.runInContext(sidebarModeJs("code"), ctx);
+    expect(vm.runInContext(`codeNavHtml([], "", "")`, ctx)).toContain("Turn on <strong>Code from your phone</strong> in the EdgeCoder desktop app");
+    ctx.off = [machines[1]];
+    expect(vm.runInContext(`codeNavHtml(off, "", "")`, ctx)).toContain("Code from your phone");
+  });
+
+  it("remembers the mode from the Chat and Code pages and reuses it elsewhere; storage errors are harmless", () => {
+    const a = sidebarCtx(null);
+    vm.runInContext(sidebarModeJs("code"), a.ctx);
+    expect(a.store.get("edgecoder-sidebar-mode")).toBe("code");
+    const b = sidebarCtx("code");
+    expect(vm.runInContext(sidebarModeJs(null) + ";sidebarMode", b.ctx)).toBe("code");
+    const c = sidebarCtx("weird");
+    expect(vm.runInContext(sidebarModeJs(null) + ";sidebarMode", c.ctx)).toBe("chat");
+    const d = sidebarCtx(null);
+    d.ctx.localStorage = { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); } };
+    expect(vm.runInContext(sidebarModeJs("chat") + ";sidebarMode", d.ctx)).toBe("chat");
+    expect(vm.runInContext(sidebarModeJs(null) + ";sidebarMode", d.ctx)).toBe("chat");
   });
 });
