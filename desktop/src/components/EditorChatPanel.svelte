@@ -519,7 +519,8 @@
     </div>
   {/if}
 
-  <div class="messages-scroll" bind:this={scrollContainer}>
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <div class="messages-scroll" bind:this={scrollContainer} tabindex="0" role="region" aria-label="Conversation">
     {#if conversation.messages.length === 0 && !isStreaming}
       <div class="empty-state">
         {#if !projectRoot}
