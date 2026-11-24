@@ -21,6 +21,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { ALWAYS_ASK_TOOLS, makeToolRunner, runAgentLoop, type ChatFn, type ToolRunnerDeps, type ToolSchema } from "./agent-loop.js";
+import { toolchainFailureHint } from "./toolchain.js";
 import type { CheckpointStore } from "./checkpoints.js";
 import { defaultMode, defaultPermissionsFile, EXECUTION_MODES, PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
 import { classifyCommand, decideToolCall, suggestToolRule, type Decision } from "./permission-policy.js";
@@ -607,6 +608,8 @@ export class SessionHub {
           captureBeforeWrite: (path) => this.env.checkpoints.capture(r.turnId, path),
           turnId: r.turnId,
           decide: (tool, args) => this.decide(s, tool, args, r.by ?? null),
+          // A Node version mismatch in a command's output: the diagnosis and the command to retry (toolchain.ts).
+          shellHint: (command, output) => toolchainFailureHint(s.projectRoot, command, output),
         }),
       });
     } catch (err) {

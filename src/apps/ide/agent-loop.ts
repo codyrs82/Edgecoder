@@ -720,6 +720,12 @@ export interface ToolRunnerDeps {
    * "Always allow" rule the approval card offers.
    */
   decide?: (tool: ToolName, args: Record<string, unknown>) => Decision;
+  /**
+   * Extra text for the model after a run_shell result, from the command and its output (stdout and
+   * stderr): toolchain.ts names a Node version mismatch and the command that retries under the
+   * right version. Only a hint: nothing runs because of it.
+   */
+  shellHint?: (command: string, output: string) => string | null;
 }
 
 /** Tools that ask every time, whatever auto-approve settings say. */
@@ -798,16 +804,26 @@ export function makeToolRunner(d: ToolRunnerDeps): AgentLoopDeps["runTool"] {
     const result = await d.execute(tool, args, { approved: requiresApproval || always });
     if (tool === "read_page" && !result.error) webPageRead = true;
     if (tracked && !result.error) d.sendEvent({ type: "file_change", turnId: d.turnId, path: tracked });
+    let hint: string | null = null;
     if (tool === "run_shell" && result.result) {
       try {
         const shell = JSON.parse(result.result) as { stdout: string; stderr: string; exit_code: number };
         d.sendEvent({ type: "shell_output", id: callId, stdout: shell.stdout, stderr: shell.stderr, exit_code: shell.exit_code });
+        if (d.shellHint) {
+          try {
+            hint = d.shellHint(String(args.command ?? ""), `${shell.stdout ?? ""}\n${shell.stderr ?? ""}`);
+          } catch {
+            hint = null;
+          }
+        }
       } catch {
         d.sendEvent({ type: "tool_result", id: callId, result: result.result, error: result.error });
       }
     } else {
       d.sendEvent({ type: "tool_result", id: callId, result: result.result, error: result.error });
     }
-    return result.error ? `[Error]: ${result.error}` : result.result ?? "(no output)";
+    if (result.error) return `[Error]: ${result.error}`;
+    const text = result.result ?? "(no output)";
+    return hint ? `${text}\n\n${hint}` : text;
   };
 }

@@ -58,6 +58,42 @@ A command chained with `&&`, `;` or `|` takes the strictest verdict of its parts
 The refused classes ask (rather than being refused) in Manual and Accept edits, where you see the
 exact command before it runs; they can never be allow-listed.
 
+## Node versions
+
+A project can pin its Node version (`.nvmrc`, `.node-version`, `nodejs` in `.tool-versions`,
+`volta.node` or `engines.node` in `package.json`) while the machine's default is another one, and
+then `npm ci` fails when a native module such as `better-sqlite3` compiles. The agent handles it
+instead of stopping (`src/apps/ide/toolchain.ts`):
+
+- **Up front.** When a session starts a turn, EdgeCoder compares what the project wants with
+  `node --version` in the agent's own shell, and looks for nvm, fnm, volta, asdf, mise and Homebrew
+  `node@N` kegs. On a mismatch the lead's system prompt gets a short "Node version" note: wanted vs
+  current, and the command prefix that runs a command under the right version with what's installed,
+  usually `PATH="<that version's bin folder>:$PATH" npm ci` (the shell has a scrubbed environment, so
+  paths are spelled out). If no fitting version is installed, it names the install command
+  (`nvm install 22`, `fnm install 22`, `volta fetch node@22`, `mise install node@22`,
+  `asdf install nodejs latest:22`, or `brew install node@22` when there is no manager). Cached a
+  minute per project.
+- **On a failure.** When a command's output shows an engine or native-module mismatch (npm
+  `EBADENGINE` / `Unsupported engine`, `The engine "node" is incompatible`, `NODE_MODULE_VERSION`,
+  node-gyp or `better-sqlite3` build errors while the versions differ), the result the model sees
+  ends with an `[EdgeCoder hint]` giving the same diagnosis and the failed command rewritten under
+  the right version. It is only a hint: nothing runs by itself.
+
+How these commands are judged:
+
+| Command | Verdict |
+| --- | --- |
+| `PATH="/abs/node@22/bin:$PATH" <cmd>` | Same as `<cmd>` (folders must be absolute and outside the project; a PATH into the project or a relative one asks) |
+| `. "$HOME/.nvm/nvm.sh" && nvm use 22 >/dev/null && <cmd>` | Same as `<cmd>` (an `nvm.sh` inside the project is not treated as setup) |
+| `fnm exec --using=22 <cmd>`, `nvm exec 22 <cmd>`, `asdf exec <cmd>` | Same as `<cmd>` |
+| `volta run --node 22 <cmd>`, `mise exec node@22 -- <cmd>` | Ask as an install (they download a missing version), or stricter if `<cmd>` is |
+| `nvm install`, `fnm install`, `volta fetch/install`, `mise install`, `asdf install`, `brew install` | Ask as an install |
+| `nvm use 22` on its own | Asks |
+
+"Always allow" rules don't match commands with `$` or `&&`, so a wrapped command asks in Manual
+even when its plain form is allow-listed; approve it once from the card.
+
 ## Plan
 
 The agent gets only the read-only tools (and read-only shell commands); any other call is refused
