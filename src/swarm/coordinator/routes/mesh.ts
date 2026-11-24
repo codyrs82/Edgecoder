@@ -21,6 +21,15 @@ import { setModelControlTransport } from "../model-control.js";
 import { RttTracker, startRttPings, type PingableSocket } from "../../agent-rtt.js";
 import { MESH_WS_BIND_MAX_SKEW_MS, decideMeshWsBind, meshWsSenderMatches } from "../../../mesh/ws-auth.js";
 import type { DrainSocket } from "../drain.js";
+import {
+  MESH_WS_CLOSE_NOT_REGISTERED,
+  MESH_WS_HELD_BIND_TTL_MS,
+  MESH_WS_MAX_HELD_BINDS,
+  MeshWsBindingTable,
+  pendingBindFrom,
+  setMeshWsAgentRegisteredHook,
+  type BindableSocket
+} from "../mesh-ws-bindings.js";
 import { legacyPemFingerprints, publicKeyFingerprint } from "../../../security/key-fingerprint.js";
 import { IDENTITY_CHALLENGE_PATH, answerIdentityChallenge } from "../../../trust/identity-challenge.js";
 import { LOCAL_ATTEST_PATH, NonceLog, answerLocalAttest } from "../../../trust/local-attest.js";
@@ -440,7 +449,10 @@ function relayToWsPeers(message: z.infer<typeof meshIngestSchema>): void {
 // key, unsigned (older agents) binds are allowed until MESH_WS_REQUIRE_SIGNED=true and never
 // displace an authenticated one, and every message must come from the bound peer.
 const MESH_WS_REQUIRE_SIGNED = CC.MESH_WS_REQUIRE_SIGNED;
-const meshWsBindings = new Map<string, { socket: unknown; authenticated: boolean }>();
+// A connection that arrived before its agent registered (coordinator restart) is held and promoted
+// on /register (../mesh-ws-bindings.ts).
+const meshWsBindings = new MeshWsBindingTable<BindableSocket>();
+const heldTimers = new Map<BindableSocket, ReturnType<typeof setTimeout>>();
 /**
  * Round trip from this coordinator to each peer on an authenticated mesh socket (agents and peer
  * coordinators), from WebSocket pings (src/swarm/agent-rtt.ts). Read by GET /network/world.
@@ -450,15 +462,10 @@ export const meshRtt = new RttTracker();
 // Fast dispatch (../dispatch.ts): work_available nudges go only down a socket whose bind proved the
 // agent's registered key, and only to registered agents (never to a peer coordinator's socket).
 setNudgeTransport({
-  connected: (agentId) => {
-    const b = meshWsBindings.get(agentId);
-    return !!b && b.authenticated && agentCapabilities.has(agentId) && (b.socket as { readyState?: number }).readyState === 1;
-  },
+  connected: (agentId) => !!meshWsBindings.authenticatedOpen(agentId) && agentCapabilities.has(agentId),
   send: (agentId, frame) => {
-    const b = meshWsBindings.get(agentId);
-    if (!b || !b.authenticated || !agentCapabilities.has(agentId)) return false;
-    const ws = b.socket as { readyState?: number; send: (data: string) => void };
-    if (ws.readyState !== 1) return false;
+    const ws = meshWsBindings.authenticatedOpen(agentId) as (BindableSocket & { send: (data: string) => void }) | null;
+    if (!ws || !agentCapabilities.has(agentId)) return false;
     try {
       ws.send(frame);
       return true;
@@ -471,16 +478,11 @@ setNudgeTransport({
 // Remote model control (../model-control.ts): owner commands go only down a socket whose bind proved
 // the agent's registered key, and only to a registered agent (never a peer coordinator's socket).
 setModelControlTransport({
-  connected: (agentId) => {
-    const b = meshWsBindings.get(agentId);
-    return !!b && b.authenticated && agentCapabilities.has(agentId) && (b.socket as { readyState?: number }).readyState === 1;
-  },
+  connected: (agentId) => !!meshWsBindings.authenticatedOpen(agentId) && agentCapabilities.has(agentId),
   send: (agentId, frame) => {
-    const b = meshWsBindings.get(agentId);
-    if (!b || !b.authenticated || !agentCapabilities.has(agentId)) return false;
+    const ws = meshWsBindings.authenticatedOpen(agentId) as (BindableSocket & { send: (data: string) => void }) | null;
+    if (!ws || !agentCapabilities.has(agentId)) return false;
     if (mesh.listPeers().some((p) => p.peerId === agentId)) return false;
-    const ws = b.socket as { readyState?: number; send: (data: string) => void };
-    if (ws.readyState !== 1) return false;
     try {
       ws.send(frame);
       return true;
@@ -497,13 +499,42 @@ setModelControlTransport({
 export function meshDrainSockets(): DrainSocket[] {
   const out: DrainSocket[] = [];
   const coordinatorPeers = new Set(mesh.listPeers().map((p) => p.peerId));
-  for (const [peerId, b] of meshWsBindings) {
+  for (const [peerId, b] of meshWsBindings.entries()) {
     const ws = b.socket as { readyState?: number; send: (data: string) => void; close: (code: number, reason: string) => void };
     if (ws.readyState !== 1) continue;
     out.push({ peerId, agent: b.authenticated && agentCapabilities.has(peerId) && !coordinatorPeers.has(peerId), send: (frame) => ws.send(frame), close: (code, reason) => ws.close(code, reason) });
   }
   return out;
 }
+const heldGoLive = new Map<BindableSocket, () => void>();
+
+/** The agent registered `publicKeyPem`: a connection that arrived first is checked, then goes live. */
+function promoteMeshWs(agentId: string, publicKeyPem: string | undefined): void {
+  const socket = meshWsBindings.get(agentId)?.socket;
+  const outcome = meshWsBindings.promote(agentId, publicKeyPem);
+  if (outcome === "none" || !socket) return;
+  const timer = heldTimers.get(socket);
+  if (timer) clearTimeout(timer);
+  heldTimers.delete(socket);
+  const goLive = heldGoLive.get(socket);
+  heldGoLive.delete(socket);
+  if (outcome === "rejected") {
+    securityLog.log({
+      level: securityLog.severity("agent_trust_violation"),
+      event: "agent_trust_violation",
+      source: { type: "agent", id: agentId },
+      details: { route: "/mesh/ws", reason: "held_bind_signature_mismatch" },
+      action: "reject_connection",
+      coordinatorId: identity.peerId
+    });
+    return;
+  }
+  app.log.info({ peerId: agentId, signedBind: true, promoted: true }, "mesh_ws_peer_connected");
+  goLive?.();
+  // A mesh-token connection that was already live starts its RTT pings now it is authenticated.
+  if (!goLive && CC.MESH_WS_PING_INTERVAL_MS > 0) startRttPings(socket as unknown as PingableSocket, agentId, meshRtt, CC.MESH_WS_PING_INTERVAL_MS);
+}
+setMeshWsAgentRegisteredHook(promoteMeshWs);
 
 export function registerMeshRoutes(app: CoordinatorApp): void {
   app.get("/identity", async () => ({
@@ -664,24 +695,33 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
     // under the same id (an agent named like a coordinator would otherwise take its gossip).
     const meshPeerKey = peerId ? mesh.listPeers().find((p) => p.peerId === peerId)?.publicKeyPem : undefined;
     const registeredAgentKey = peerId && !meshPeerKey ? agentCapabilities.get(peerId)?.publicKeyPem : undefined;
-    if (!peerId || (!tokenValid && !registeredAgentKey)) {
+    const signature = readHeaderValue(req.headers as Record<string, unknown>, "x-mesh-ws-signature") || null;
+    const issuedAtMs = readHeaderValue(req.headers as Record<string, unknown>, "x-mesh-ws-ts") || null;
+    // A signed bind for an agent this process does not know yet (it restarted; the agent's socket came
+    // back before its re-registration): kept, and checked against the key the agent registers.
+    const pending = peerId && !meshPeerKey && !registeredAgentKey ? pendingBindFrom(signature, issuedAtMs) : null;
+    // Never in place of a live connection: only a missing, closed or another held one is replaced.
+    const existingBind = peerId ? meshWsBindings.get(peerId) : undefined;
+    const replaceable = !existingBind || existingBind.held === true || existingBind.socket.readyState !== 1;
+    const hold = !tokenValid && !!pending && replaceable && meshWsBindings.heldCount() < MESH_WS_MAX_HELD_BINDS;
+    if (!peerId || (!tokenValid && !registeredAgentKey && !hold)) {
       socket.close(4001, "mesh_unauthorized");
       return;
     }
-    const signature = readHeaderValue(req.headers as Record<string, unknown>, "x-mesh-ws-signature") || null;
-    const issuedAtMs = readHeaderValue(req.headers as Record<string, unknown>, "x-mesh-ws-ts") || null;
-    const bind = decideMeshWsBind({
-      peerId,
-      signature,
-      issuedAtMs,
-      knownPublicKeyPem: meshPeerKey ?? registeredAgentKey,
-      existingAuthenticated: meshWsBindings.get(peerId)?.authenticated === true,
-      // Without the token, only a signed bind (proof of the registered agent key) is admitted.
-      requireSigned: MESH_WS_REQUIRE_SIGNED || !tokenValid
-    });
-    // A signed bind is single-use: the same headers cannot bind a second connection.
+    const bind = hold
+      ? ({ ok: true, authenticated: false } as const)
+      : decideMeshWsBind({
+          peerId,
+          signature,
+          issuedAtMs,
+          knownPublicKeyPem: meshPeerKey ?? registeredAgentKey,
+          existingAuthenticated: meshWsBindings.get(peerId)?.authenticated === true,
+          // Without the token, only a signed bind (proof of the registered agent key) is admitted.
+          requireSigned: MESH_WS_REQUIRE_SIGNED || !tokenValid
+        });
+    // A signed bind is single-use: the same headers cannot bind a second connection (held ones included).
     const replayed =
-      bind.ok && bind.authenticated &&
+      bind.ok && (bind.authenticated || hold) &&
       !(await verifyNonce(nonceStore, { nonce: `mesh-ws:${signature}`, sourceId: peerId, timestampMs: Number(issuedAtMs), maxSkewMs: MESH_WS_BIND_MAX_SKEW_MS, ttlMs: SECURITY_NONCE_TTL_MS })).valid;
     if (!bind.ok || replayed) {
       const reason = bind.ok ? "replayed_bind" : bind.reason;
@@ -710,22 +750,46 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
       socket.close(4003, "signature_required");
       return;
     }
-    const previous = meshWsBindings.get(peerId);
-    meshWsBindings.set(peerId, { socket, authenticated: bind.authenticated });
-    if (previous && previous.socket !== socket) {
-      try {
-        (previous.socket as { close: (code: number, reason: string) => void }).close(4004, "replaced_by_new_connection");
-      } catch {
-        /* already closed */
+    // The agent may have registered while the nonce check ran: check its key now rather than wait.
+    const keyNow = hold ? agentCapabilities.get(peerId)?.publicKeyPem : undefined;
+    meshWsBindings.bind(peerId, { socket, authenticated: bind.authenticated, ...(pending && !bind.authenticated ? { pending } : {}), ...(hold ? { held: true } : {}) });
+
+    // Gossip and RTT for a connection that may carry them; a held one starts when promoted.
+    let live = false;
+    const goLive = () => {
+      if (live) return;
+      live = true;
+      mesh.setWebSocketForPeer(peerId, socket);
+      // Only a bind that proved its key is measured, so an unsigned socket cannot set another peer's figure.
+      if (meshWsBindings.get(peerId)?.socket === socket && meshWsBindings.get(peerId)?.authenticated) {
+        startRttPings(socket as unknown as PingableSocket, peerId, meshRtt, CC.MESH_WS_PING_INTERVAL_MS);
       }
+    };
+    if (hold) {
+      app.log.info({ peerId }, "mesh_ws_peer_held_until_registered");
+      const timer = setTimeout(() => {
+        heldTimers.delete(socket);
+        const b = meshWsBindings.get(peerId);
+        if (b?.socket !== socket || !b.held) return;
+        meshWsBindings.release(peerId, socket);
+        try {
+          socket.close(MESH_WS_CLOSE_NOT_REGISTERED, "agent_not_registered");
+        } catch {
+          /* already closed */
+        }
+      }, MESH_WS_HELD_BIND_TTL_MS);
+      (timer as { unref?: () => void }).unref?.();
+      heldTimers.set(socket, timer);
+      heldGoLive.set(socket, goLive);
+      if (keyNow) promoteMeshWs(peerId, keyNow);
+    } else {
+      app.log.info({ peerId, signedBind: bind.authenticated }, "mesh_ws_peer_connected");
+      goLive();
     }
 
-    app.log.info({ peerId, signedBind: bind.authenticated }, "mesh_ws_peer_connected");
-    mesh.setWebSocketForPeer(peerId, socket);
-    // Only a bind that proved its key is measured, so an unsigned socket cannot set another peer's figure.
-    if (bind.authenticated) startRttPings(socket as unknown as PingableSocket, peerId, meshRtt, CC.MESH_WS_PING_INTERVAL_MS);
-
     socket.on("message", async (data) => {
+      // A held connection speaks for nobody until its agent registers.
+      if (meshWsBindings.get(peerId)?.socket === socket && meshWsBindings.get(peerId)?.held) return;
       try {
         const message = meshIngestSchema.parse(JSON.parse(data.toString()));
         // The socket speaks for its bound peer only.
@@ -751,9 +815,12 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
 
     // Only the connection that currently holds the binding may release it.
     const release = () => {
-      if (meshWsBindings.get(peerId)?.socket !== socket) return;
-      meshWsBindings.delete(peerId);
-      mesh.removeWebSocketForPeer(peerId);
+      const timer = heldTimers.get(socket);
+      if (timer) clearTimeout(timer);
+      heldTimers.delete(socket);
+      heldGoLive.delete(socket);
+      if (!meshWsBindings.release(peerId, socket)) return;
+      if (live) mesh.removeWebSocketForPeer(peerId);
     };
     socket.on("close", () => {
       app.log.info({ peerId }, "mesh_ws_peer_disconnected");

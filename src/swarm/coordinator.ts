@@ -33,7 +33,7 @@ import { queue, identity, coordinatorKeys, CC, mesh, MESH_AUTH_TOKEN, COORDINATO
 import { startAdminListener } from "./coordinator/admin-listener.js";
 import "./coordinator/mutable-state.js";
 import { agentCapabilities, connectedAgentCount, recordAbandonedClaim } from "./coordinator/agent-state.js";
-import { hasMeshToken, hasPortalServiceToken, requireMeshToken, isAgentGateRoute, agentSignatureAtGate } from "./coordinator/auth.js";
+import { hasMeshToken, hasPortalServiceToken, requireMeshToken, isAgentGateRoute, agentSignatureAtGate, agentGateRefusalReason } from "./coordinator/auth.js";
 import { isPaymentGatedRequest } from "./coordinator/economy.js";
 import { ECONOMY_PAYMENTS_ENABLED, lightningProvider, payoutReconciler } from "./coordinator/payouts.js";
 import { robotQueue, receiptStore, discoveryAnnouncer } from "./coordinator/services.js";
@@ -220,7 +220,8 @@ app.addHook("onRequest", async (req, reply) => {
   const gatePath = String(reqPath ?? "").split("?")[0];
   if (isAgentGateRoute(req.method, gatePath) && agentSignatureAtGate(headers, req.method, gatePath)) return;
   if (!requireMeshToken(req as any, reply)) {
-    return reply.send({ error: "mesh_unauthorized" });
+    const reason = isAgentGateRoute(req.method, gatePath) ? agentGateRefusalReason(headers) : null;
+    return reply.send(reason ? { error: "mesh_unauthorized", reason } : { error: "mesh_unauthorized" });
   }
 });
 

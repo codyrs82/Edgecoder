@@ -124,6 +124,14 @@ Listeners on an agent install:
     GETs are signed and scoped.
   - `/mesh/ws` admits agents by their signed bind. A coordinator peer's id binds only with that
     peer's key, so an agent registered under a coordinator's id cannot take its gossip.
+  - A signed bind for an agent this coordinator holds no key for yet (it restarted, and the
+    agent's socket came back before its re-registration) is held: nothing is sent down it and
+    nothing it sends is read. When the agent registers, the bind signature is checked against the
+    registered key (same payload, skew measured at connect time) and the connection is promoted;
+    a mismatch closes it (4003), and one not claimed within 3 minutes is closed with 4005
+    `agent_not_registered`. A held connection never replaces a live one, and at most 2,000 are
+    held. A signed agent request refused at the global hook says `reason: agent_not_registered`
+    when the coordinator holds no key for that agent id, so the agent registers again at once.
   - The agent mesh server hears trusted senders only.
   - Agents gossip to coordinators only down the signed mesh WebSocket. The HTTP gossip routes
     (`/mesh/ingest`, `/mesh/relay-gossip`) stay behind the coordinators' token; an agent without it

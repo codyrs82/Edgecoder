@@ -169,7 +169,11 @@ describe("mesh WebSocket admits agents by their own key", () => {
     const { signMeshWsBind } = await import("../../src/mesh/ws-auth.js");
     expect(await ws(agentA.peerId, signMeshWsBind(agentA.peerId, agentA.privateKeyPem))).toBeNull(); // stays open
     expect(await ws(agentB.peerId, {})).toBe(4003);
-    expect(await ws("not-registered", signMeshWsBind("not-registered", createPeerKeys("nr").privateKeyPem))).toBe(4001);
+    // A signed bind for an agent not registered yet is held (a coordinator restart: the socket comes
+    // back before the agent registers again). It counts for nothing until that registration proves
+    // the key (tests/swarm/mesh-ws-reconnect-route.test.ts); an unsigned one is refused outright.
+    expect(await ws("not-registered", signMeshWsBind("not-registered", createPeerKeys("nr").privateKeyPem))).toBeNull();
+    expect(await ws("not-registered-unsigned", {})).toBe(4001);
   });
 });
 
