@@ -22,6 +22,11 @@ vi.mock("../src/lib/api", async (original) => ({
   getModelPullProgress: vi.fn(async () => null),
   streamIdeChat: api.streamIdeChat,
   ideCompact: api.ideCompact,
+  // The chat's phone mirror (code-chat-mirror.ts): no provider here, so a sync fails at once
+  // instead of the real call waiting on a local service that isn't running (which holds a send up to 3 s).
+  syncCodeChat: vi.fn(async () => { throw new Error("no provider"); }),
+  getSession: vi.fn(async () => { throw new Error("no provider"); }),
+  followSession: vi.fn(async () => {}),
   gitState: vi.fn(async () => ({ branch: "main", upstream: null, ahead: 0, behind: 0, staged: [], unstaged: [], branches: ["main"], remotes: [], remoteUrl: null, hasCommits: true })),
   gitGitHubStatus: vi.fn(async () => ({ ghInstalled: true, loggedIn: true, login: "me" })),
   fsFind: vi.fn(async () => []),
