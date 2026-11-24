@@ -31,13 +31,15 @@
  *    The pressure guard applies as with Ollama.
  */
 
-import { estimateModelBytes, fmtGb, planLoad, planServing, type InstalledModel, type LoadedModel, type MemoryTelemetry, type PressureLevel, type ServingPlan } from "./memory-budget.js";
+import { estimateModelBytes, fmtGb, learnModelFacts, modelFactsFromModelInfo, planLoad, planServing, type InstalledModel, type LoadedModel, type MemoryTelemetry, type PressureLevel, type ServingPlan } from "./memory-budget.js";
 import { PressureGuard, type MemorySnapshot } from "./memory-pressure.js";
 
 export interface MemoryOllama {
   list(): Promise<Array<{ name: string; sizeBytes: number }>>;
   loaded(): Promise<Array<{ name: string; sizeBytes: number; expiresAt?: string }>>;
   unload(model: string): Promise<void>;
+  /** /api/show model_info: the model's KV-cache geometry and context length (memory-budget.ts learnModelFacts). */
+  show?(model: string): Promise<{ modelInfo?: Record<string, unknown> }>;
 }
 
 export interface MemorySettings {
@@ -74,6 +76,12 @@ export interface MemoryManagerDeps {
   log?: (msg: string) => void;
   recoverMs?: number;
   installedTtlMs?: number;
+  /**
+   * Called (synchronously, before the serving plan is redone) when Ollama taught the agent
+   * something new about an installed model (its size, KV cache per token, context length): the
+   * agent re-sizes its context window from it (worker-runner.ts).
+   */
+  onModelFacts?: () => void;
 }
 
 export type Admission = { ok: true; release: () => void } | { ok: false; error: string };
@@ -111,7 +119,9 @@ export class HostMemoryManager {
   /** Models this agent loaded or used for network work (others are the owner's). */
   private readonly networkUsed = new Map<string, number>();
   private lock: Promise<unknown> = Promise.resolve();
-  private refreshing = false;
+  private refreshing: Promise<void> | undefined;
+  /** Models whose /api/show has been read. */
+  private readonly shown = new Set<string>();
 
   constructor(private readonly d: MemoryManagerDeps) {
     this.guard = new PressureGuard(d.recoverMs ?? 30_000);
@@ -135,27 +145,32 @@ export class HostMemoryManager {
 
   /** Re-read pressure, loaded and installed models; act on a pressure change. Never throws. */
   async refresh(): Promise<void> {
-    if (this.refreshing) return;
-    this.refreshing = true;
+    // A refresh already running: wait for it (the agent's startup needs its result before loading).
+    if (this.refreshing) return this.refreshing;
+    this.refreshing = this.refreshNow();
     try {
-      const nowMs = this.now();
-      try {
-        this.snapshot = this.d.readPressure();
-      } catch {
-        // keep the last reading
-      }
-      await this.readOllama(nowMs);
-      this.replan();
-      if (!this.d.guardEnabled || !this.snapshot) return;
-      const { level, changed, from } = this.guard.update(this.snapshot.level, nowMs);
-      if (changed) this.log(`memory pressure ${from} -> ${level} (${this.snapshot.detail})${level === "normal" ? ": taking network work again" : ": no new network work"}`);
-      if (level === "critical" && changed) {
-        await this.d.onCritical?.().catch(() => undefined);
-        await this.unloadAllButOwnersActive();
-      } else if (level !== "normal") await this.unloadIdle();
+      await this.refreshing;
     } finally {
-      this.refreshing = false;
+      this.refreshing = undefined;
     }
+  }
+
+  private async refreshNow(): Promise<void> {
+    const nowMs = this.now();
+    try {
+      this.snapshot = this.d.readPressure();
+    } catch {
+      // keep the last reading
+    }
+    await this.readOllama(nowMs);
+    this.replan();
+    if (!this.d.guardEnabled || !this.snapshot) return;
+    const { level, changed, from } = this.guard.update(this.snapshot.level, nowMs);
+    if (changed) this.log(`memory pressure ${from} -> ${level} (${this.snapshot.detail})${level === "normal" ? ": taking network work again" : ": no new network work"}`);
+    if (level === "critical" && changed) {
+      await this.d.onCritical?.().catch(() => undefined);
+      await this.unloadAllButOwnersActive();
+    } else if (level !== "normal") await this.unloadIdle();
   }
 
   private async readOllama(nowMs: number): Promise<void> {
@@ -177,6 +192,37 @@ export class HostMemoryManager {
         this.installedAtMs = nowMs;
       } catch {
         // keep the last list
+      }
+    }
+    await this.learnFacts();
+  }
+
+  /**
+   * Learn each installed model's size and (Ollama /api/show) KV-cache geometry and context length,
+   * the configured model first, a few per refresh. A failed /api/show is retried on a later refresh.
+   */
+  private async learnFacts(): Promise<void> {
+    let changed = false;
+    for (const m of this.installed) if (m.sizeBytes && m.sizeBytes > 0) changed = learnModelFacts(m.name, { sizeBytes: m.sizeBytes }) || changed;
+    const show = this.d.ollama.show?.bind(this.d.ollama);
+    if (show) {
+      const primary = this.d.settings().primary;
+      const todo = this.installed.map((m) => m.name).filter((n) => !this.shown.has(n)).sort((a, b) => Number(b === primary) - Number(a === primary)).slice(0, 4);
+      for (const name of todo) {
+        try {
+          const facts = modelFactsFromModelInfo((await show(name)).modelInfo);
+          this.shown.add(name);
+          changed = learnModelFacts(name, facts) || changed;
+        } catch {
+          break; // Ollama busy or down: next refresh
+        }
+      }
+    }
+    if (changed) {
+      try {
+        this.d.onModelFacts?.();
+      } catch (e) {
+        this.log(`re-sizing from model facts failed: ${String(e).slice(0, 160)}`);
       }
     }
   }
