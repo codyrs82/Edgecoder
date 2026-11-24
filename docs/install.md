@@ -481,8 +481,8 @@ sudo EDGECODER_API_KEY="$EDGECODER_API_KEY" bash install.sh --mesh-token "$MESH"
 | `--tokens-file PATH` | File of `AGENT_ID=TOKEN` lines. |
 | `--enroll API_KEY` | Portal API key (`eck_...`) or session token; `EDGECODER_API_KEY` is the same without the flag. Self-enrol each un-tokened instance and apply the registration token the portal returns, so install and enrolment happen in one run. |
 | `--model TAG` | Ollama model for every instance (default: the strongest that fits each instance's VRAM, see the table below; on a Mac or CPU host the recommended model for its memory). |
-| `--context-window N` | Context window (tokens, 2048 to 131072) every network call is served with: `AGENT_CONTEXT_WINDOW`. Default: sized by the model and the GPU's free VRAM (RAM without a discrete GPU). |
-| `--parallel N` | Parallel model calls per instance, 1 to 16: the agent's `AGENT_PARALLEL_INFERENCE` and the instance's Ollama `OLLAMA_NUM_PARALLEL`. Default: sized by VRAM and model. |
+| `--context-window N\|auto` | Context window (tokens, 2048 to 131072) every network call is served with: `AGENT_CONTEXT_WINDOW`. Default: sized by the model and the GPU's free VRAM (RAM without a discrete GPU). `auto` clears a value set earlier, so this and later runs size it again. |
+| `--parallel N\|auto` | Parallel model calls per instance, 1 to 16: the agent's `AGENT_PARALLEL_INFERENCE` and the instance's Ollama `OLLAMA_NUM_PARALLEL`. Default: sized by VRAM and model. `auto` clears a value set earlier. |
 | `--ollama-env KEY=VALUE` | Extra environment for every instance's Ollama server; repeatable (for example `OLLAMA_VULKAN=1` for AMD cards ROCm does not support). Recorded in `EDGECODER_INSTALL_ARGS` and kept by later runs and updates; `KEY=` removes one. Systemd drop-ins in `edgecoder-ollama-<n>.service.d/` also survive updates and win over these. |
 | `--keep-alive DUR` | How long Ollama keeps the model loaded after a call: a duration (`30m`, `1h30m`), seconds, or `-1` to never unload. Written as the agent's `AGENT_MODEL_KEEP_ALIVE` and the instance's Ollama `OLLAMA_KEEP_ALIVE`. Default `30m`. |
 | `--engine ollama\|vllm\|mlx` | Engine that serves each instance's model ([inference engines](inference-engines.md)). `vllm` (Linux, NVIDIA): `edgecoder-vllm@<n>` serves it and the instance's Ollama stays off. `mlx` (Apple silicon): you run `mlx_lm.server`. Default: every instance keeps the engine it runs now (Ollama on a first install), so re-runs and upgrades never switch engines. |
@@ -516,6 +516,12 @@ The tuning flags (`--context-window`, `--parallel`, `--keep-alive`) are recorded
 env file (`EDGECODER_INSTALL_TUNING`). A later run without them, such as a package upgrade's
 `apply --from-package`, keeps the recorded values; pass a flag again to change its value. Edit
 them through the flags rather than in the env file, which every run rewrites.
+
+To go back to automatic sizing after pinning a value, pass `auto`: for example
+`sudo edgecoder-install apply --keep-config --context-window auto` removes `AGENT_CONTEXT_WINDOW`
+from every instance's env file and from the record, so later runs and updates keep sizing it
+(`--parallel auto` does the same for the parallel count). A context window applied from the portal
+is a separate override; see [Where changes are kept](#changing-models-from-the-portal).
 
 Environment defaults: `EDGECODER_COORDINATOR_URL`, `EDGECODER_PORTAL_URL`,
 `EDGECODER_MESH_TOKEN`, `EDGECODER_REGISTRATION_TOKEN`, `EDGECODER_ENROLL_TOKEN`,
@@ -555,6 +561,9 @@ directory, mode 0600) and are layered over the env file at startup. Each entry r
 it replaced; if that value later changes (you edit the env file, or re-run the installer with
 `--model`, `--context-window`, `--parallel` or `--keep-alive`), **the local value wins** and the
 remote one is dropped. Delete the file and restart the agent to return to the env file alone.
+So `--context-window auto` also drops a portal context window applied while the installer's value
+was in force; one applied while the window was already automatic stays until you delete
+`model-overrides.json` (or that entry) and restart the agent.
 An `update` (`apply --keep-config`) keeps the env file's model, so a model chosen in the portal stays
 in force through updates. A model loaded by hand (`ollama run`) is not the agent's model: press
 **Use** on it in the portal, or run `sudo edgecoder-install apply --keep-config --model <tag>`.
