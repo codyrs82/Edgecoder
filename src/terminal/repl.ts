@@ -395,6 +395,8 @@ export class Repl {
         this.line(st.yellow(`▸ Undid ${(e.reverted as string[]).join(", ") || "nothing"}.`));
         break;
       case "note": {
+        // A note's usage (a compaction's model calls) counts toward the session's spend; e.cSats is the new total.
+        if (typeof e.cSats === "number" && Number.isFinite(e.cSats)) this.cSats = e.cSats;
         const c = (e.entry as TranscriptEntry | undefined)?.compaction;
         if (c) this.line(st.dim(`▸ ${compactionLine(c)}`));
         break;
@@ -457,6 +459,8 @@ export class Repl {
         const call: CallUsage = { cSats: Number.isFinite(ev.cSats) ? ev.cSats : 0, where: ev.where, ...(ev.model ? { model: ev.model } : {}), ...(ev.served ? { served: ev.served } : {}) };
         this.turnCalls.push(call);
         this.lastCall = call;
+        // Counted as each call settles, so /cost is current mid-turn; turn_end sets the session's own total.
+        if (call.cSats > 0) this.cSats = Number((this.cSats + call.cSats).toFixed(6));
         if (typeof ev.usd === "number" && Number.isFinite(ev.usd)) this.usd = Number((this.usd + ev.usd).toFixed(6));
         break;
       }

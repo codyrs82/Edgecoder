@@ -152,6 +152,13 @@ export const usdToMsat = (usd: number, btcUsd: number) => (btcUsd > 0 ? (usd / b
  * it again, so a cold call costs what the same call costs warm. Only the agent is paid by the floor,
  * so it gains nothing by over-reporting load time.
  *
+ * The floor's seconds are also at most `floorWorkMs`, the call's own model time as the agent reports
+ * it (Ollama prompt_eval_duration + eval_duration): wall time since the claim includes time the call
+ * waited on the host while a neighbour ran (a busy Ollama queues a request it has no free slot for),
+ * and a short call billed for that paid for the other call's seconds (B6, 2026-11-24: a 12-token call
+ * sharing a host with a long one cost 0.483 cSats, ~160x normal). It only ever lowers the floor
+ * (the wall time stays the ceiling), so an agent gains nothing by over-reporting it.
+ *
  * The floor is the machine's electricity per second, so it is split across the agent's parallel
  * model slots (`floorSlots`, its reported inferenceSlots; 2026-11-16): an agent running N calls at
  * once draws one machine's power, not N. Without the split a 4-slot Mac or a 12-slot vLLM GPU
@@ -173,6 +180,8 @@ export function inferenceCostMsat(input: {
   durationMs: number;
   /** Model-load time inside durationMs, left out of the power floor. */
   floorExcludeMs?: number;
+  /** The call's own model time (prompt + generation) inside durationMs; the power floor counts at most this. */
+  floorWorkMs?: number;
   /** The agent's parallel model slots; the power floor is divided by them (default 1). */
   floorSlots?: number;
   computeClass: string;
@@ -184,7 +193,8 @@ export function inferenceCostMsat(input: {
   const price = input.price ?? tokenPriceUsdPerM(input.paramsB);
   const tokenUsd = tokensUsd(price, input.promptTokens ?? 0, input.outputTokens ?? 0, input.price ? input.cachedPromptTokens : 0);
   const exclude = typeof input.floorExcludeMs === "number" && Number.isFinite(input.floorExcludeMs) ? Math.max(0, input.floorExcludeMs) : 0;
-  const floorMs = Math.max(0, input.durationMs - exclude);
+  const work = typeof input.floorWorkMs === "number" && Number.isFinite(input.floorWorkMs) ? Math.max(0, input.floorWorkMs) : Number.POSITIVE_INFINITY;
+  const floorMs = Math.max(0, Math.min(input.durationMs - exclude, work));
   const slots = typeof input.floorSlots === "number" && Number.isFinite(input.floorSlots) ? Math.max(1, Math.floor(input.floorSlots)) : 1;
   // A model with its own price (a cloud model) has no power floor: it draws no power on the host,
   // and its price already covers what it costs.

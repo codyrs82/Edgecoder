@@ -805,7 +805,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         // The agent's model-load time for this call: left out of the power floor (job-pricing.ts). Only
         // the agent is paid by the floor, so reporting more than it spent only lowers its own pay.
         loadMs: z.number().min(0).max(INFERENCE_MAX_TIMEOUT_MS).optional(),
-        // Reading the prompt and writing the reply (Ollama's durations): shown to the requester, never priced.
+        // Reading the prompt and writing the reply (Ollama's durations): shown to the requester, and the
+        // power floor counts at most their sum (job-pricing.ts floorWorkMs), so time a call waited on a
+        // busy host is not billed to it. They only ever lower the price (wall time stays the ceiling).
         promptMs: z.number().min(0).max(INFERENCE_MAX_TIMEOUT_MS).optional(),
         genMs: z.number().min(0).max(INFERENCE_MAX_TIMEOUT_MS).optional(),
       })

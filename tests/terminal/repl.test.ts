@@ -8,6 +8,9 @@ import { initialModel, parseCodeArgs } from "../../src/terminal/cli.js";
 import { clean, lineDiff, makeStyle, usageLine } from "../../src/terminal/render.js";
 import { placeModel, Repl, withPlacement, type ReplIO } from "../../src/terminal/repl.js";
 import { makeHub, sessionServer, until, type Reply } from "../helpers/sessions.js";
+import { CheckpointStore } from "../../src/apps/ide/checkpoints.js";
+import { SessionHub } from "../../src/apps/ide/sessions.js";
+import { ToolExecutor } from "../../src/apps/ide/tool-executor.js";
 
 const TERM: ClientRef = { clientId: "term-test", kind: "terminal", label: "Terminal" };
 const DESK: ClientRef = { clientId: "desk-test", kind: "desktop", label: "EdgeCoder app" };
@@ -352,6 +355,52 @@ describe("/compact", () => {
     t.feed("/compact");
     await until(() => /Earlier messages summarized to save tokens · ~[\d,]+ tokens saved/.test(t.out()), 5000, "compacted");
     expect(hub.snapshot(id).session.transcript.at(-1)?.compaction?.manual).toBe(true);
+    t.feed("/exit");
+    expect(await done).toBe(0);
+  });
+});
+
+describe("/cost during a turn", () => {
+  it("counts each call's cSats as it settles, before the turn ends (B8)", async () => {
+    // A model call that bills 0.25 cSats, then waits: the turn is still running when /cost is asked.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const hub = new SessionHub(
+      {
+        chat: (_s, emit) => async (_req, onDelta) => {
+          emit({ type: "usage", cSats: 0.25, where: "test host" });
+          await gate;
+          onDelta?.("All done.");
+          return { content: "All done.", toolCalls: [] };
+        },
+        systemPrompt: async () => () => "system",
+        executor: (s) => {
+          const ex = new ToolExecutor(s.projectRoot);
+          return { execute: (tool, args, o) => ex.execute(tool, args, o) };
+        },
+        checkpoints: new CheckpointStore(),
+        branch: () => "main",
+      },
+      { dir: null, permissionsFile: null },
+    );
+    const { app, url } = await sessionServer(hub);
+    cleanup.push(() => app.close());
+    const term = new ProviderClient(url, "unused", TERM);
+    const snap = await term.createSession({ projectRoot: root, model: "network/qwen3-coder:30b" });
+    const t = testIO();
+    const repl = new Repl({ client: term, sessionId: snap.session.id, io: t.io, style: makeStyle(false), providerLabel: "test provider" });
+    const done = repl.run();
+    t.feed("hello");
+    await until(() => hub.snapshot(snap.session.id).session.cSats > 0, 5000, "the call's charge");
+    t.feed("/cost");
+    await until(() => t.out().includes("This session has spent"), 5000, "/cost");
+    expect(t.out()).toContain("This session has spent 0.250 cSats.");
+    release();
+    await until(() => t.out().includes("All done."), 5000, "turn end");
+    // The turn's end gives the session's own total: the same, not counted twice.
+    t.feed("/cost");
+    await until(() => t.out().split("This session has spent").length - 1 === 2, 5000, "second /cost");
+    expect(t.out().split("This session has spent 0.250 cSats.").length - 1).toBe(2);
     t.feed("/exit");
     expect(await done).toBe(0);
   });
