@@ -15,9 +15,13 @@ default from **Settings → General → Permissions** (Accept edits unless you c
 
 In every mode:
 
-- Reading never asks: `read_file`, `list_directory`, the searches, `git status/diff/log`, and
-  read-only shell commands (`ls`, `cat`, `grep`, `rg`, `find` without `-exec`, `git status`, …, with
-  pipes between them and no redirection or path outside the project).
+- Reading never asks: `read_file`, `list_directory`, the searches, `git status/diff/log`, `git_fetch`,
+  and read-only shell commands (`ls`, `cat`, `grep`, `rg`, `find` without `-exec`, `git status`,
+  `git log`, `git rev-parse`, `git rev-list`, `git merge-base`, `git branch --show-current`, …).
+  Read-only commands chained with `&&`, `||`, `;` or `|` also run without asking, as long as every
+  part is read-only and there is no redirection (`>`), no `$(…)` or backticks, no background `&` and
+  no path outside the project. One part that isn't read-only and the chain is judged like any other
+  command (below).
 - `git push`, `open_pull_request` and `github_create_pr` always ask.
 - Edits to protected paths (`.git`, hooks, `.vscode`, `node_modules`, `.gitmodules`, build scripts
   tooling runs) and to files outside the project always ask.
@@ -40,7 +44,7 @@ The decision is made in one place, `src/apps/ide/permission-policy.ts` (`decideT
 | Runs without asking | Still asks | Refused |
 | --- | --- | --- |
 | Reads (above) | Installs: `npm install/i/ci/add`, `pnpm add`, `yarn add`, `pip install`, `brew …`, `apt …`, `cargo install`, `npx <anything but a known dev tool>` | `sudo`, `su`, `doas` |
-| Edits inside the project (not protected paths or secrets) | Network: `curl`, `wget`, `ssh`, `scp`, `rsync`, `gh`, `git fetch/pull/clone` | `rm -rf /`, `~`, `$HOME`, `.`, `*`, `..`, `--no-preserve-root` |
+| Edits inside the project (not protected paths or secrets) | Network: `curl`, `wget`, `ssh`, `scp`, `rsync`, `gh`, `git fetch/pull/clone` (`git fetch` / `git pull` and the `git_pull` tool can be always-allowed, below) | `rm -rf /`, `~`, `$HOME`, `.`, `*`, `..`, `--no-preserve-root` |
 | Tests, lint, typecheck, build, format: `npm test …`, `npm run test/lint/build/typecheck/check/format…`, `yarn/pnpm/bun` the same, `vitest`, `jest`, `pytest`, `python -m pytest`, `tsc`, `eslint`, `prettier`, `svelte-check`, `ruff`, `mypy`, `cargo test/build/check/clippy/fmt`, `go test/build/vet`, `make` / `make test/build/lint/check`, `npx vitest/tsc/eslint/…` | `git push` (every mode) | Download-and-run: `curl` or `wget` output piped into a shell (`sh`, `bash`, …) or into `python`, `node`, `ruby`, `perl` |
 | `git status/diff/log/show`, `git add`, `git commit` on the session's work branch (not `main`/`master`), the `git_commit` tool likewise | Deletes: `rm` of project files (only build output such as `dist`, `build`, `coverage`, `node_modules`, `.next`, `target` runs), `git clean`, `git reset --hard`, history rewrites | Writing secrets: a redirect or copy to `.env*` or another secrets file, a command or file containing an API key or token |
 | Deleting build output inside the project (`rm -rf dist`) | Anything touching a path outside the project, or a protected path | `mkfs`, `dd of=/dev/…`, a fork bomb |
@@ -53,6 +57,42 @@ A command chained with `&&`, `;` or `|` takes the strictest verdict of its parts
 
 The refused classes ask (rather than being refused) in Manual and Accept edits, where you see the
 exact command before it runs; they can never be allow-listed.
+
+## Node versions
+
+A project can pin its Node version (`.nvmrc`, `.node-version`, `nodejs` in `.tool-versions`,
+`volta.node` or `engines.node` in `package.json`) while the machine's default is another one, and
+then `npm ci` fails when a native module such as `better-sqlite3` compiles. The agent handles it
+instead of stopping (`src/apps/ide/toolchain.ts`):
+
+- **Up front.** When a session starts a turn, EdgeCoder compares what the project wants with
+  `node --version` in the agent's own shell, and looks for nvm, fnm, volta, asdf, mise and Homebrew
+  `node@N` kegs. On a mismatch the lead's system prompt gets a short "Node version" note: wanted vs
+  current, and the command prefix that runs a command under the right version with what's installed,
+  usually `PATH="<that version's bin folder>:$PATH" npm ci` (the shell has a scrubbed environment, so
+  paths are spelled out). If no fitting version is installed, it names the install command
+  (`nvm install 22`, `fnm install 22`, `volta fetch node@22`, `mise install node@22`,
+  `asdf install nodejs latest:22`, or `brew install node@22` when there is no manager). Cached a
+  minute per project.
+- **On a failure.** When a command's output shows an engine or native-module mismatch (npm
+  `EBADENGINE` / `Unsupported engine`, `The engine "node" is incompatible`, `NODE_MODULE_VERSION`,
+  node-gyp or `better-sqlite3` build errors while the versions differ), the result the model sees
+  ends with an `[EdgeCoder hint]` giving the same diagnosis and the failed command rewritten under
+  the right version. It is only a hint: nothing runs by itself.
+
+How these commands are judged:
+
+| Command | Verdict |
+| --- | --- |
+| `PATH="/abs/node@22/bin:$PATH" <cmd>` | Same as `<cmd>` (folders must be absolute and outside the project; a PATH into the project or a relative one asks) |
+| `. "$HOME/.nvm/nvm.sh" && nvm use 22 >/dev/null && <cmd>` | Same as `<cmd>` (an `nvm.sh` inside the project is not treated as setup) |
+| `fnm exec --using=22 <cmd>`, `nvm exec 22 <cmd>`, `asdf exec <cmd>` | Same as `<cmd>` |
+| `volta run --node 22 <cmd>`, `mise exec node@22 -- <cmd>` | Ask as an install (they download a missing version), or stricter if `<cmd>` is |
+| `nvm install`, `fnm install`, `volta fetch/install`, `mise install`, `asdf install`, `brew install` | Ask as an install |
+| `nvm use 22` on its own | Asks |
+
+"Always allow" rules don't match commands with `$` or `&&`, so a wrapped command asks in Manual
+even when its plain form is allow-listed; approve it once from the card.
 
 ## Plan
 
@@ -82,6 +122,17 @@ An approval card for a command offers **Allow**, **Always allow `npm test …` i
 - Never offered or honoured for refused commands, nor for classes that must always ask: network,
   `git push`, deletes, paths outside the project, protected paths, inline code, unreadable syntax.
   Installs, Docker, other scripts and unknown programs can be allow-listed.
+- `git pull` and `git fetch` are the one network exception: their card offers **Always allow
+  `git pull …`** (rule `git pull:*`, or `git fetch:*`), for the shell command and for the `git_pull`
+  tool alike (the `git_fetch` tool already runs without asking). The rule covers only a plain pull
+  or fetch from a named remote (`git pull`, `git pull origin main`, `git pull --rebase`,
+  `git fetch --prune`); a URL or path instead of a remote, a refspec, options such as
+  `--upload-pack` or `--recurse-submodules`, and `git -C …` still ask each time. `git clone`,
+  `git ls-remote`, `git submodule`, `curl`, `wget` and other network commands are never
+  allow-listed, and `git push`, pull requests, commits on the default branch, deletes and
+  destructive commands keep asking whatever rules exist.
+- A chained command (`git status && npm test`) is never offered a rule; when every part is
+  read-only it runs without asking anyway (above).
 - Kept per project folder in `~/.edgecoder/permissions.json` (0600), never in the project itself, so
   a cloned repository can't allow commands on its own. **Settings → General → Permissions →
   Always-allowed commands** lists them per project with Remove. API: `GET /v1/ide/permissions`,

@@ -26,13 +26,14 @@ export const ACCOUNT_MENU_ITEMS: Array<{ href: string; label: string; icon: stri
 /** The short primary list under New chat and Search. Everything about the account and the economy lives in Settings. */
 export const PRIMARY_NAV_ITEMS: Array<{ key: string; href: string; label: string; icon: string; badge?: string }> = [
   { key: "chat", href: "/portal/chat", label: "Chat", icon: "chat" },
+  { key: "code", href: "/portal/code", label: "Code", icon: "code" },
   { key: "dashboard", href: "/portal/dashboard", label: "Overview", icon: "dashboard" },
   { key: "reviews", href: "/portal/reviews", label: "Reviews", icon: "reviews", badge: "reviewsBadge" }
 ];
 
 /**
  * Authenticated app shell, laid out like the desktop app: a left sidebar with New chat and Search,
- * a short primary list (Chat, Overview, Reviews), your recent chats grouped by date, and an avatar
+ * a short primary list (Chat, Code, Overview, Reviews), your recent chats grouped by date, and an avatar
  * row at the bottom (name and cSats balance, a gear that opens Settings). Clicking the avatar opens
  * the account menu. Market, Wallet, Install agent and the rest live in Settings. Top bar (page
  * title, subtitle, actions) and content area on the right; on mobile the sidebar slides in behind
@@ -49,7 +50,7 @@ export const PRIMARY_NAV_ITEMS: Array<{ key: string; href: string; label: string
  */
 export function portalAuthedPageHtml(input: {
   title: string;
-  activeTab: "chat" | "dashboard" | "wallet" | "market" | "settings" | "download" | "reviews" | "bots";
+  activeTab: "chat" | "code" | "dashboard" | "wallet" | "market" | "settings" | "download" | "reviews" | "bots";
   heading: string;
   subtitle: string;
   content: string;

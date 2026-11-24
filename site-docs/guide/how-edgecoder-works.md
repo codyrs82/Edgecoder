@@ -53,7 +53,7 @@ VS Code, Cursor, and Windsurf connect to the node via the OpenAI-compatible endp
 EdgeCoder for iPhone and iPad is on the App Store. It has two modes, switched at the top of the first tab:
 
 - **Chat** -- a chat with a model picker whose sections are **Auto** (your machines first, then the network), **On This Device** (models run on the phone with llama.cpp), **Nearby Devices** (models on devices found over Bluetooth), **My machines** (models on computers signed in to your account) and **EdgeCoder Network** (models on approved hosts, paid in cSats).
-- **Code** -- drives coding sessions on your own computers from the phone. Turn on **Code from your phone** in the EdgeCoder desktop app; the session runs on that computer, relayed through the coordinator.
+- **Code** -- drives coding sessions on your own computers from the phone. Turn on **Code from your phone** in the EdgeCoder desktop app; the session runs on that computer, relayed through the coordinator. The same sessions are under **Code** on [edgecoder.io](/guide/ios-app#code-on-edgecoder-io).
 
 The App Store build does not sell cSats and does not show host earnings; buy cSats on the web ([Buy cSats](/guide/buy-csats)). How phones find nearby devices is in [BLE Local Mesh](/guide/ble-local-mesh).
 

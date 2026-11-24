@@ -186,6 +186,39 @@ describe("portal code API", () => {
     expect(JSON.stringify(seen)).not.toContain("acct-evil");
   });
 
+  it("forwards every command the web Code page sends, in the contract's shape (the same as the phone's)", async () => {
+    const TURN = "33333333-3333-4333-8333-333333333333";
+    const QUEUED = "44444444-4444-4444-8444-444444444444";
+    const bodies: Array<[Record<string, unknown>, Record<string, unknown>]> = [
+      [{ action: "snapshot", sessionId: SESSION }, { sessionId: SESSION }],
+      [{ action: "messages", sessionId: SESSION, beforeId: TURN }, { sessionId: SESSION, beforeId: TURN }],
+      [{ action: "changes", sessionId: SESSION, turnId: TURN }, { sessionId: SESSION, turnId: TURN }],
+      [{ action: "approve", sessionId: SESSION, callId: "tc_1", approved: true }, { sessionId: SESSION, callId: "tc_1", approved: true }],
+      [{ action: "approve", sessionId: SESSION, callId: "tc_1", approved: false }, { sessionId: SESSION, callId: "tc_1", approved: false }],
+      [{ action: "plan", sessionId: SESSION, mode: "auto-edits" }, { sessionId: SESSION, mode: "auto-edits" }],
+      [{ action: "settings", sessionId: SESSION, mode: "plan" }, { sessionId: SESSION, mode: "plan" }],
+      [{ action: "unqueue", sessionId: SESSION, queuedId: QUEUED }, { sessionId: SESSION, queuedId: QUEUED }],
+      [{ action: "undo", sessionId: SESSION, turnId: TURN }, { sessionId: SESSION, turnId: TURN }],
+      [{ action: "create", projectId: PROJECT, mode: "ask", title: "From the web" }, { projectId: PROJECT, mode: "ask", title: "From the web" }],
+    ];
+    for (const [payload, args] of bodies) {
+      seen.length = 0;
+      const r = await app.inject({ method: "POST", url: "/portal/api/code/mac-1/commands", headers: as("u1"), payload });
+      expect(r.statusCode, String(payload.action)).toBe(202);
+      const sent = seen.filter((s) => s.coord === "B" && s.url === "/agent-control/agents/mac-1/code-commands");
+      expect(sent, String(payload.action)).toHaveLength(1);
+      expect(sent[0].body).toEqual({ accountId: "acct-u1", action: payload.action, args });
+    }
+  });
+
+  it("an approval can't carry an always-allow rule from the web (the relay approves one call only)", async () => {
+    for (const extra of [{ always: true }, { scope: "always" }, { remember: true }]) {
+      const r = await app.inject({ method: "POST", url: "/portal/api/code/mac-1/commands", headers: as("u1"), payload: { action: "approve", sessionId: SESSION, callId: "tc_1", approved: true, ...extra } });
+      expect(r.statusCode).toBe(400);
+    }
+    expect(seen.filter((s) => s.url.endsWith("/code-commands"))).toEqual([]);
+  });
+
   it("400 bad_request for an unknown action, a bad argument, or a field the action doesn't name", async () => {
     for (const payload of [{ action: "rm" }, { action: "message", sessionId: "nope", text: "x" }, { action: "create", projectId: PROJECT, path: "/etc" }, { sessionId: SESSION }]) {
       const r = await app.inject({ method: "POST", url: "/portal/api/code/mac-1/commands", headers: as("u1"), payload });

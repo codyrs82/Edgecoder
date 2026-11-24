@@ -55,7 +55,7 @@ import { createPreviewServer, PREVIEW_DEFAULT_PORT } from "./preview-server.js";
 import { NewProjectError, PROJECT_TEMPLATES, createNewProject } from "./new-project.js";
 import type { IdeStreamEvent, ToolName } from "./tool-types.js";
 import { defaultPermissionsFile, PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
-import { decideToolCall, suggestRule, type Decision } from "./permission-policy.js";
+import { decideToolCall, suggestToolRule, type Decision } from "./permission-policy.js";
 import { SwarmSpendGuard, swarmBudgetFromEnv } from "./swarm-budget.js";
 import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { allowedOrigins, createIdeAuthHook, isLoopbackHost, registerIdeCors, resolveIdeToken, resolveListenOptions } from "./ide-auth.js";
@@ -78,6 +78,7 @@ import { frontierContextWindow, isFrontierModelId } from "../../inference-api/fr
 import { request as undiciRequest } from "undici";
 import { FREE_USED_NOTE, webSystemNote, webGrounding, WebToolSession, forgetWebAvailability, isWebTool, webAvailability, webReplyLimitsFromEnv, webStatusReason, webToolSchemas, type WebToolCall } from "../../web-tool/tools.js";
 import { modelCallsTools } from "../../web-tool/model-support.js";
+import { toolchainFailureHint, toolchainNote } from "./toolchain.js";
 
 // Forked by the agent: exit with it, so a restarted agent's provider can take the port.
 if (process.send) process.on("disconnect", () => process.exit(0));
@@ -229,7 +230,21 @@ const webCall: WebToolCall | null = networkDeps
  */
 let accountCache: { at: number; id: string | null; state: FrontierAccountState } | null = null;
 let lastAccount: string | undefined;
+/** The account last confirmed signed in, and when (ms); cleared by a definitive "signed out". */
+let confirmed: { id: string; at: number } | null = null;
+/**
+ * How long an "unknown" answer (coordinator slow, agent reconnecting, the machine busy compiling)
+ * keeps the last confirmed account. Only a definitive "signed out" ends it sooner, so a blip
+ * mid-turn no longer drops a frontier lead with "Sign in to EdgeCoder".
+ */
+const ACCOUNT_UNKNOWN_GRACE_MS = 10 * 60_000;
 async function machineAccount(): Promise<string | null> {
+  const id = await checkMachineAccount();
+  if (id) return id;
+  if (accountCache?.state === "unknown" && confirmed && Date.now() - confirmed.at < ACCOUNT_UNKNOWN_GRACE_MS) return confirmed.id;
+  return null;
+}
+async function checkMachineAccount(): Promise<string | null> {
   // A definitive answer is kept a minute (signed in) or 10 s (signed out); an unknown one (the
   // agent isn't connected yet, the coordinator is slow) is retried after 3 s.
   if (accountCache && Date.now() - accountCache.at < (accountCache.state === "signed_in" ? 60_000 : accountCache.state === "signed_out" ? 10_000 : 3_000)) return accountCache.id;
@@ -253,7 +268,12 @@ async function machineAccount(): Promise<string | null> {
     state = "unknown";
   }
   accountCache = { at: Date.now(), id, state };
-  if (id) lastAccount = id;
+  if (id) {
+    lastAccount = id;
+    confirmed = { id, at: Date.now() };
+  } else if (state === "signed_out") {
+    confirmed = null;
+  }
   return id;
 }
 const machineAccountState = (): FrontierAccountState => accountCache?.state ?? "unknown";
@@ -1120,7 +1140,8 @@ const bots = new BotManager({
       const ctx = await agentPromptContext(process.env.OLLAMA_MODEL || "qwen3.5:9b");
       const root = botWorkRoot(bot);
       const rules = readProjectRules(root);
-      return (format) => buildIdeAgentSystemPrompt(ctx, root, rules, format);
+      const node = toolchainNote(root);
+      return (format) => [buildIdeAgentSystemPrompt(ctx, root, rules, format), node].filter(Boolean).join("\n\n");
     },
     checkpoints,
     // "Search the web" (docs/web-tool.md): through EdgeCoder's servers; refused once today's budget is spent.
@@ -1262,8 +1283,8 @@ app.post("/v1/ide/tool-approval", async (req, reply) => {
     return reply.status(404).send({ error: "No pending approval with that id" });
   }
   let rule: string | null = null;
-  if (body.approved && body.always && entry.tool === "run_shell" && entry.projectRoot) {
-    rule = suggestRule(entry.args.command, { root: entry.projectRoot });
+  if (body.approved && body.always && entry.projectRoot) {
+    rule = suggestToolRule(entry.tool, entry.args, { root: entry.projectRoot });
     if (rule) permissionStore.addRule(entry.projectRoot, rule);
   }
   entry.resolve(body.approved);
@@ -1453,6 +1474,7 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
 
   const promptCtx = await agentPromptContext(chatModel);
   const projectRules = readProjectRules(projectRoot);
+  const nodeNote = toolchainNote(projectRoot);
   const messages = withAttachments(body.messages, body.attachments ?? [], chatModel);
 
   const chatMode: PermissionMode = body.mode ?? (body.autoApprove === "edits" ? "auto-edits" : "ask");
@@ -1508,7 +1530,7 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
   if (helperId) abort.signal.addEventListener("abort", () => void tentacles.cancelAll(helperId), { once: true });
   const baseTools = web ? [...projectTools, ...webToolSchemas()] : projectTools;
   const tools = helpersOn ? withTentacleTools(baseTools, true)! : baseTools;
-  const basePrompt = (format: "native" | "text") => [promptCtx ? buildIdeAgentSystemPrompt(promptCtx, projectRoot, projectRules, format) : "", web ? webSystemNote() : ""].filter(Boolean).join("\n\n");
+  const basePrompt = (format: "native" | "text") => [promptCtx ? buildIdeAgentSystemPrompt(promptCtx, projectRoot, projectRules, format) : "", promptCtx ? nodeNote : "", web ? webSystemNote() : ""].filter(Boolean).join("\n\n");
   const executeTool = (tool: ToolName, args: Record<string, unknown>, opts: { approved: boolean }) => executor.execute(tool, args, opts);
   reply.raw.on("close", () => tracked.end("cancelled"));
   await runAgentLoop({
@@ -1549,6 +1571,7 @@ app.post("/v1/ide/chat", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply
       captureBeforeWrite: (path) => checkpoints.capture(turnId, path),
       turnId,
       decide: (tool, args) => decideFor(chatMode, projectRoot, tool, args),
+      shellHint: (command, output) => toolchainFailureHint(projectRoot, command, output),
     }),
     plan: chatMode === "plan",
   });
@@ -1798,7 +1821,9 @@ const sessions: SessionHub = new SessionHub({
   systemPrompt: async (s) => {
     const ctx = await agentPromptContext(s.compute.target === "local" ? s.model : process.env.OLLAMA_MODEL || "qwen3.5:9b");
     const rules = readProjectRules(s.projectRoot);
-    return withTentacleGuidance((format) => buildIdeAgentSystemPrompt(ctx, s.projectRoot, rules, format), tentacles.enabled(s.id), tentacles.unreported(s.id));
+    // The project's Node version versus the shell's, and how to run under the right one (toolchain.ts).
+    const node = toolchainNote(s.projectRoot);
+    return withTentacleGuidance((format) => [buildIdeAgentSystemPrompt(ctx, s.projectRoot, rules, format), node].filter(Boolean).join("\n\n"), tentacles.enabled(s.id), tentacles.unreported(s.id));
   },
   executor: (s) => {
     const index = codebaseIndexFor(s.projectRoot, ollamaHostForIndex());
