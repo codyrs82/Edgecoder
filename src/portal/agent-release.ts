@@ -9,6 +9,7 @@
  * coordinator's update nudge (swarm/coordinator/agent-update-hint.ts) uses it with a 10-minute TTL.
  */
 import { compareVersions, HttpStatusError, parseVersion, pickLatestTag, rateLimitRetryAt, RELEASE_API_URL } from "../install/update.js";
+import { MODEL_CONTROL_FEATURE_SETTINGS_AUTO, SETTINGS_AUTO_MIN_AGENT_VERSION } from "../model/remote-control/protocol.js";
 
 const OK_TTL_MS = 60 * 60_000;
 const FAIL_TTL_MS = 10 * 60_000;
@@ -54,4 +55,18 @@ export function createLatestAgentVersion(fetchJson: FetchJson = defaultFetchJson
 export function agentUpdateAvailable(version: unknown, latest: string | null | undefined): boolean {
   if (typeof version !== "string" || !latest || !parseVersion(version) || !parseVersion(latest)) return false;
   return compareVersions(version, latest) < 0;
+}
+
+/**
+ * Can the portal offer "Automatic" for this machine's context window and slots (`"auto"` in
+ * set_settings, src/model/remote-control/protocol.ts)? Yes when its last state lists the feature
+ * (any build: release, desktop, source), or its version is a release at or past the first that
+ * takes it. Otherwise the agent would refuse the command (invalid_request), so the portal says to
+ * update it instead of sending one.
+ */
+export function agentSupportsSettingsAuto(version: unknown, state: unknown): boolean {
+  const features = (state as { features?: unknown } | null | undefined)?.features;
+  if (Array.isArray(features) && features.includes(MODEL_CONTROL_FEATURE_SETTINGS_AUTO)) return true;
+  if (typeof version !== "string" || !parseVersion(version)) return false;
+  return compareVersions(version, SETTINGS_AUTO_MIN_AGENT_VERSION) >= 0;
 }

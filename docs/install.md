@@ -558,7 +558,8 @@ To go back to automatic sizing after pinning a value, pass `auto`: for example
 `sudo edgecoder-install apply --keep-config --context-window auto` removes `AGENT_CONTEXT_WINDOW`
 from every instance's env file and from the record, so later runs and updates keep sizing it
 (`--parallel auto` does the same for the parallel count). A context window applied from the portal
-is a separate override; see [Where changes are kept](#changing-models-from-the-portal).
+is a separate override; see [Where changes are kept](#changing-models-from-the-portal). The portal's
+**Automatic** box clears that override from the browser (agent 1.2.8 or later).
 
 Environment defaults: `EDGECODER_COORDINATOR_URL`, `EDGECODER_PORTAL_URL`,
 `EDGECODER_MESH_TOKEN`, `EDGECODER_REGISTRATION_TOKEN`, `EDGECODER_ENROLL_TOKEN`,
@@ -582,6 +583,17 @@ and its context window, parallel slots and keep-alive. For a connected machine y
   they take effect at once. Parallel slots are how many calls the agent sends at once; Ollama's own
   `OLLAMA_NUM_PARALLEL` lives in the Ollama unit, which the agent cannot change: above it, calls
   queue inside Ollama. Re-run `edgecoder-install apply --parallel N` to raise it.
+- **Automatic** (next to the context window and the slots): tick it and press **Apply** to drop the
+  value set from the portal, so the agent sizes it again (from the GPU's free VRAM after the
+  weights, or the RAM without a discrete GPU), reloads the model if the window changed, and reports
+  the new value. Each field shows the value in force and whether it is automatic, pinned here (the
+  portal) or pinned by the machine's own config. A value the machine's own config sets
+  (`AGENT_CONTEXT_WINDOW` / `AGENT_PARALLEL_INFERENCE` in `agent-N.env`, or the desktop app) wins
+  over the portal, so Automatic is not offered for it: run
+  `sudo edgecoder-install apply --keep-config --context-window auto` (or `--parallel auto`) on the
+  machine, or change it in the app. Automatic needs agent 1.2.8 or later (or a desktop app with that
+  agent); for an older agent the box is greyed out with a note to update it, because the older agent
+  would refuse the command.
 - **Reload model**: unload and load it again (after an Ollama upgrade, or to free memory).
 
 Every command is listed under the machine with who sent it, when, and the result.
@@ -600,7 +612,10 @@ it replaced; if that value later changes (you edit the env file, or re-run the i
 remote one is dropped. Delete the file and restart the agent to return to the env file alone.
 `--context-window auto` (or `--parallel auto`) also removes that setting's portal override from
 every instance's `model-overrides.json` before the agents restart, so the value is sized
-automatically again; other portal choices in the file (such as the model) stay.
+automatically again; other portal choices in the file (such as the model) stay. The portal's
+**Automatic** does the same for one machine without a restart: the agent removes that entry from
+its own `model-overrides.json` and re-sizes at once. It leaves the env file alone, so a value set
+there stays in force (local wins).
 An `update` (`apply --keep-config`) keeps the env file's model, so a model chosen in the portal stays
 in force through updates. A model loaded by hand (`ollama run`) is not the agent's model: press
 **Use** on it in the portal, or run `sudo edgecoder-install apply --keep-config --model <tag>`.

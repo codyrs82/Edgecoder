@@ -229,7 +229,10 @@ context window, parallel slots, keep-alive, reload. Code: `src/model/remote-cont
    - pulls: the size (catalog, else the registry manifest, else refused) must fit the free disk
      (download + 10% + 2 GiB) and the memory (VRAM + half the RAM, or 75% of the RAM); one at a
      time; aborted after 3 h;
-   - settings: context 2048 to 131072, slots 1 to 8, keep-alive `-1`, `0` or up to 24 h;
+   - settings: context 2048 to 131072, slots 1 to 8, keep-alive `-1`, `0` or up to 24 h; context
+     and slots may also be the literal `"auto"`, which only removes that entry from the override
+     file (the env file's own value still wins). An agent from before it refuses `"auto"` as
+     `invalid_request` and changes nothing;
    - remove: never the active model, never a model loaded in Ollama;
    - at most 30 commands per 10 minutes.
 5. **Agent → coordinator.** Results, progress and state go back as signed agent requests

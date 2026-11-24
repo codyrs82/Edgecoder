@@ -838,6 +838,7 @@ function keepAliveFor(model: string | undefined): string {
 /** Puts the env + override file back into effect after a remote change (model reload included). */
 async function applyModelSettings(): Promise<void> {
   const before = OLLAMA_MODEL;
+  const sizedBefore = `${CONTEXT_WINDOW}x${MAX_PARALLEL_INFERENCE}`;
   modelOverrides = loadOverrides(MODEL_OVERRIDES_FILE).overrides;
   modelSettings = computeModelSettings();
   OLLAMA_MODEL = modelSettings.model;
@@ -850,6 +851,8 @@ async function applyModelSettings(): Promise<void> {
     await ollamaAdmin.unload(before).catch(() => undefined);
     lastRegisteredAtMs = 0; // re-register: the coordinator learns the new active model
   }
+  // A new window or slot count ("auto" from the portal re-sizes both) goes with the next register.
+  if (sizedBefore !== `${CONTEXT_WINDOW}x${MAX_PARALLEL_INFERENCE}`) lastRegisteredAtMs = 0;
   console.log(`[agent:${AGENT_ID}] model settings now: ${OLLAMA_MODEL}, context ${CONTEXT_WINDOW}, ${MAX_PARALLEL_INFERENCE} parallel, keep_alive ${MODEL_KEEP_ALIVE}`);
   if (SERVES_OLLAMA) await warmNetworkModel(OLLAMA_MODEL, "remote change");
 }

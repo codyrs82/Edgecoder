@@ -124,6 +124,7 @@ describe("only the owning account can control a machine", () => {
     expect((await command(mine.peerId, "acct-owner", "pull", { model: "evil.com/x:1" })).statusCode).toBe(400);
     expect((await command(mine.peerId, "acct-owner", "install_ollama", {})).statusCode).toBe(400);
     expect((await command(mine.peerId, "acct-owner", "set_settings", { parallel: 2, shell: "x" })).statusCode).toBe(400);
+    expect((await command(mine.peerId, "acct-owner", "set_settings", { contextWindow: "automatic" })).statusCode).toBe(400);
   });
 
   test("a machine without an authenticated socket is not connected", async () => {

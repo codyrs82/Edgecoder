@@ -86,15 +86,15 @@ export function keepAliveSeconds(value: string): number | undefined {
   return Math.round(n * (m[2] === "h" ? 3600 : m[2] === "m" ? 60 : 1));
 }
 
-export type SettingsPatch = { contextWindow?: number; parallel?: number; keepAlive?: string };
+export type SettingsPatch = { contextWindow?: number | "auto"; parallel?: number | "auto"; keepAlive?: string };
 
-/** Checks a settings change against SETTINGS_BOUNDS; returns the first problem, or null. */
+/** Checks a settings change against SETTINGS_BOUNDS ("auto" is always in bounds); returns the first problem, or null. */
 export function settingsProblem(patch: SettingsPatch, bounds: ModelSettingsBounds = SETTINGS_BOUNDS): string | null {
-  if (patch.contextWindow !== undefined) {
+  if (patch.contextWindow !== undefined && patch.contextWindow !== "auto") {
     const c = patch.contextWindow;
     if (!Number.isInteger(c) || c < bounds.contextWindow.min || c > bounds.contextWindow.max) return "context_window_out_of_bounds";
   }
-  if (patch.parallel !== undefined) {
+  if (patch.parallel !== undefined && patch.parallel !== "auto") {
     const p = patch.parallel;
     if (!Number.isInteger(p) || p < bounds.parallel.min || p > bounds.parallel.max) return "parallel_out_of_bounds";
   }
