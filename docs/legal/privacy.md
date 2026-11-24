@@ -1,6 +1,6 @@
 # Privacy Policy
 
-Version: 2026-11-22 · Effective date: 22 November 2026 · Last updated: 22 November 2026
+Version: 2026-11-22 · Effective date: 22 November 2026 · Last updated: 23 November 2026
 
 This policy explains what personal information EdgeCoder ("EdgeCoder", "we") collects when you use the EdgeCoder website (edgecoder.io), the EdgeCoder portal, the desktop and iOS apps, the EdgeCoder agent and the hosted API (the "Service"), how we use and share it, and your choices. Words defined in the [Terms of Service](/terms) have the same meaning here.
 
