@@ -107,6 +107,25 @@ function median(values: number[]): number | null {
 }
 
 export const serviceTimes = new ServiceTimes();
+/**
+ * The same per model and agent (the agent id in the class slot): one host's own speed, for
+ * /inference/models freeHosts (hostServiceMs).
+ */
+export const agentServiceTimes = new ServiceTimes();
+
+/** The reference call hostServiceMs is given for (tokens read and written). */
+export const REFERENCE_CALL_TOKENS = { promptTokens: 1_000, outputTokens: 200 } as const;
+
+/**
+ * One host's time for a reference call of `model`: its measured speed (its own, else its class's here)
+ * times the work that call is estimated at. Unlike a median of its calls, it does not depend on how
+ * large its recent calls were, so hosts and coordinators compare. Null when no speed is known.
+ */
+export function hostServiceMs(model: string, agentId: string, computeClass: string, nowMs = Date.now()): number | null {
+  const speed = agentServiceTimes.speed(model, agentId, nowMs) ?? serviceTimes.speed(model, computeClass, nowMs);
+  if (speed === null || !Number.isFinite(speed) || speed <= 0) return null;
+  return Math.round(speed * callWorkMs(model, computeClass, REFERENCE_CALL_TOKENS.promptTokens, REFERENCE_CALL_TOKENS.outputTokens));
+}
 
 /** The model work a call with these token counts is estimated at on a slow host of `computeClass` (job-pricing.ts). */
 export function callWorkMs(model: string, computeClass: string, promptTokens: number, outputTokens: number): number {
@@ -122,6 +141,7 @@ export function noteServiceTime(model: string | undefined, agentId: string | und
   const cls = effectiveHardware(agentId)?.computeClass ?? agentCapabilities.get(agentId)?.computeClass ?? "cpu";
   const expected = tokens && tokens.outputTokens > 0 ? callWorkMs(model, cls, tokens.promptTokens, tokens.outputTokens) : undefined;
   serviceTimes.record(model, cls, nowMs - claimedAtMs, nowMs, expected);
+  agentServiceTimes.record(model, agentId, nowMs - claimedAtMs, nowMs, expected);
 }
 
 /** Slots (all, and free now) of this coordinator's agents that could run `model` in `taskClass`. */

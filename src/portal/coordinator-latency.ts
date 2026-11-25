@@ -37,14 +37,30 @@
  * not report its regions (an older build), locality is not compared.
  *
  * The nearest free coordinator (nearer than every other free one by localityMarginKm, or the locality
- * move above) is then kept unless another coordinator with a free slot is clearly faster end to end:
- * round trips + queueing + the model's service time there, faster by both margins. The latency rule
- * alone (time to start) never takes a call away from a free host near the buyer; run 4 sent São Paulo
- * buyers to the EU on 60 ms of round trip while 14 US slots were free 0 km away.
+ * move above) is then kept unless another coordinator with a free slot is clearly faster end to end,
+ * faster by both margins. The latency rule alone (time to start) never takes a call away from a free
+ * host near the buyer; run 4 sent São Paulo buyers to the EU on 60 ms of round trip while 14 US slots
+ * were free 0 km away.
+ *
+ * End to end scores each coordinator by its best free host for the model, with that host's own
+ * numbers (/inference/models freeHosts): portal <-> coordinator round trip + the host's round trip to
+ * the buyer (from the distance between their regions; the host's round trip to its coordinator when
+ * the buyer's region is not known) + the host's own time for a reference call of the model (its
+ * measured speed, claim to last reply piece over the work estimated for the tokens, so its
+ * coordinator <-> host legs are in it, and how large its recent calls were is not). Run 5 compared
+ * coordinator-wide medians of whatever calls ran there and the median round trip to every US agent
+ * (163 ms) instead, and sent iad and lax buyers to the EU while a free host sat next to them. A
+ * coordinator that does not report freeHosts (an older build) is scored by its nearest free region
+ * and the model's median call there.
+ *
+ * Calls this portal sent a coordinator that its load report does not show yet (sentFor) have each
+ * taken a slot on the free host nearest their own buyer, so a burst moves on to the next host or
+ * coordinator instead of every call counting the same free host (run 5: 6 heavy calls onto the EU's
+ * 4 slots).
  */
 
 import { coordinatorHost, type CoordinatorChoice, type CoordinatorChoiceCandidate } from "../common/coordinator-choice.js";
-import { regionDistanceKm } from "../common/geo-regions.js";
+import { distanceRttMs, regionDistanceKm } from "../common/geo-regions.js";
 
 export interface LatencyCandidate {
   url: string;
@@ -64,6 +80,27 @@ export interface LatencyCandidate {
   serviceMs?: number | null;
   /** Regions of its hosts with a free slot for the call (newer coordinators); undefined: not reported. */
   freeRegions?: readonly string[];
+  /** Its hosts with a free slot for the model, each with its own numbers (/inference/models freeHosts). */
+  freeHosts?: readonly FreeHost[];
+  /**
+   * Calls this portal sent it that its load report does not show yet, by their buyers' regions (null:
+   * not known): each has taken a slot on the free host nearest its buyer.
+   */
+  sentFor?: readonly (string | null)[];
+}
+
+/** One host with a free slot for the model, as its coordinator reports it. */
+export interface FreeHost {
+  region: string;
+  /** Its free slots for the model. */
+  free: number;
+  /** Coordinator <-> host round trip, ms. */
+  rttMs?: number;
+  /**
+   * The host's time for a reference call of the model, ms: its measured speed (claim to last reply
+   * piece, over the work estimated for the call's tokens) times the reference call's work.
+   */
+  serviceMs?: number;
 }
 
 export interface LatencyPolicy {
@@ -107,20 +144,75 @@ export function expectedLatency(c: LatencyCandidate, maxReportAgeMs: number): { 
   return { queueMs, expectedMs, stale };
 }
 
-type Scored = { c: LatencyCandidate; queueMs: number; expectedMs: number | null };
+/** The free host a coordinator would most likely put the call on: what end to end is scored with. */
+export interface BestHost {
+  region: string | null;
+  /** Buyer <-> host round trip from their regions, else the host's round trip to its coordinator. */
+  legMs: number;
+  serviceMs: number | null;
+  /** "host": the host's reference-call time (freeHosts); "model": the model's median call there (older coordinators). */
+  serviceKind: "host" | "model";
+  /** Buyer <-> host distance, km; null when not known. */
+  km: number | null;
+}
 
 /**
- * End to end for comparing two coordinators: expected start + the model's service time there. When
- * either does not report its service time, both are given the same one (the reported one, or the
- * default), so the comparison is the start times against a realistic total.
+ * The free hosts `c` still has for this call, the one its coordinator would place it on first: nearest
+ * the buyer (the coordinator offers a call to the free host nearest its buyer, #526), then the faster.
+ * Without the buyer's region: round trip to its coordinator + own service time. Each call sent there
+ * that its report does not show yet has first taken a slot on the host nearest that call's own buyer.
+ * Null when it does not report freeHosts (an older coordinator).
+ */
+export function openHosts(c: LatencyCandidate, clientRegion: string | null | undefined): BestHost[] | null {
+  if (!c.freeHosts?.length) return null;
+  const hostFor = (h: FreeHost, region: string | null | undefined): BestHost => {
+    const km = region ? regionDistanceKm(region, h.region) : null;
+    const legMs = km !== null ? distanceRttMs(km) : Math.max(0, h.rttMs ?? c.agentRttMs ?? 0);
+    return { region: h.region, legMs, serviceMs: h.serviceMs ?? null, serviceKind: "host", km };
+  };
+  const order = (region: string | null | undefined) => (a: BestHost, b: BestHost) =>
+    region && a.km !== null && b.km !== null && a.km !== b.km ? a.km - b.km : a.legMs + Math.max(0, a.serviceMs ?? 0) - (b.legMs + Math.max(0, b.serviceMs ?? 0));
+  const slots = c.freeHosts.filter((h) => h.free > 0).map((h) => ({ h, left: Math.floor(h.free) }));
+  for (const region of c.sentFor ?? []) {
+    const open = slots.filter((s) => s.left > 0);
+    if (!open.length) break;
+    const byIt = open.map((s) => ({ s, host: hostFor(s.h, region) })).sort((a, b) => order(region)(a.host, b.host));
+    byIt[0].s.left--;
+  }
+  return slots
+    .filter((s) => s.left > 0)
+    .map((s) => hostFor(s.h, clientRegion))
+    .sort(order(clientRegion));
+}
+
+/** The best free host of `c` for the buyer; null when it has none left. */
+export function bestHost(c: LatencyCandidate, clientRegion: string | null | undefined): BestHost | null {
+  const open = openHosts(c, clientRegion);
+  if (open?.length) return open[0];
+  // Older coordinator: its nearest free region and the model's service time there.
+  const km = nearestKm(clientRegion, c.freeRegions);
+  const region = km === null ? null : (c.freeRegions ?? []).find((r) => regionDistanceKm(clientRegion!, r) === km) ?? null;
+  return { region, km, legMs: km !== null ? distanceRttMs(km) : Math.max(0, c.agentRttMs ?? 0), serviceMs: c.serviceMs ?? null, serviceKind: "model" };
+}
+
+type Scored = { c: LatencyCandidate; queueMs: number; expectedMs: number | null; host: BestHost | null };
+
+/**
+ * End to end for comparing two coordinators: portal <-> coordinator round trip + queueing + each one's
+ * best free host (its round trip to the buyer + its own service time). When either service time is
+ * not known (or they are not of one kind), both are given the same one (the known one, or the
+ * default), so the comparison is the round trips against a realistic total.
  */
 function endToEnd(a: Scored, b: Scored): [number, number] | null {
-  if (a.expectedMs === null || b.expectedMs === null) return null;
-  const sa = a.c.serviceMs ?? null;
-  const sb = b.c.serviceMs ?? null;
-  const shared = sa ?? sb ?? DEFAULT_CALL_MS;
+  if (a.expectedMs === null || b.expectedMs === null || a.c.rttMs === null || b.c.rttMs === null || !a.host || !b.host) return null;
+  // Service times compare only when both are of one kind (two hosts' reference calls, or two models' medians).
+  const sameKind = a.host.serviceKind === b.host.serviceKind;
+  const sa = sameKind ? a.host.serviceMs : null;
+  const sb = sameKind ? b.host.serviceMs : null;
+  const shared = sa ?? sb ?? a.host.serviceMs ?? b.host.serviceMs ?? DEFAULT_CALL_MS;
   const [ta, tb] = sa !== null && sb !== null ? [sa, sb] : [shared, shared];
-  return [Math.round(a.expectedMs + Math.max(0, ta)), Math.round(b.expectedMs + Math.max(0, tb))];
+  const total = (s: Scored, t: number) => Math.round(s.c.rttMs! + s.queueMs + s.host!.legMs + Math.max(0, t));
+  return [total(a, ta), total(b, tb)];
 }
 
 /** The coordinator with a free slot that beats `near` end to end by both margins, if any. */
@@ -137,15 +229,21 @@ function clearlyFaster(near: Scored, open: readonly Scored[], policy: LatencyPol
   return best;
 }
 
+/** Which hosts the end to end compared (for the record). */
+function hostNote(a: Scored, b: Scored): string {
+  const h = (s: Scored) => (s.host?.region ? `${s.host.region}${s.host.serviceMs !== null ? ` ${s.host.serviceMs} ms` : ""}` : null);
+  return h(a) && h(b) ? `, hosts ${h(a)} vs ${h(b)}` : "";
+}
+
 /** Why the nearest was kept, for the record: the best other end to end. */
 function notFaster(near: Scored, open: readonly Scored[]): string {
-  let best: { host: string; e2e: number; nearE2e: number } | null = null;
+  let best: { host: string; e2e: number; nearE2e: number; note: string } | null = null;
   for (const s of open) {
     if (s === near) continue;
     const pair = endToEnd(near, s);
-    if (pair && (!best || pair[1] < best.e2e)) best = { host: coordinatorHost(s.c.url), e2e: pair[1], nearE2e: pair[0] };
+    if (pair && (!best || pair[1] < best.e2e)) best = { host: coordinatorHost(s.c.url), e2e: pair[1], nearE2e: pair[0], note: hostNote(s, near) };
   }
-  return best ? `${best.host} not clearly faster end to end (expected ${best.e2e} ms vs ${best.nearE2e} ms)` : "no other coordinator's latency known";
+  return best ? `${best.host} not clearly faster end to end (expected ${best.e2e} ms vs ${best.nearE2e} ms${best.note})` : "no other coordinator's latency known";
 }
 
 /** Pick among `candidates` (all can take the call), starting from the load rule's `baselineUrl`. */
@@ -155,7 +253,12 @@ export function chooseByLatency(
   policy: LatencyPolicy,
   where: { clientRegion?: string | null; portalRegion?: string | null } = {},
 ): CoordinatorChoice {
-  const scored = candidates.map((c) => ({ c, ...expectedLatency(c, policy.maxReportAgeMs), nearKm: c.free > 0 ? nearestKm(where.clientRegion, c.freeRegions) : null }));
+  const scored = candidates.map((c) => {
+    const open = openHosts(c, where.clientRegion);
+    // Locality: the nearest of the free hosts still open (or of the free regions, older coordinators).
+    const nearKm = c.free <= 0 ? null : open?.length ? nearestKm(where.clientRegion, open.map((h) => h.region!)) : nearestKm(where.clientRegion, c.freeRegions);
+    return { c, ...expectedLatency(c, policy.maxReportAgeMs), nearKm, host: c.free > 0 ? bestHost(c, where.clientRegion) : null };
+  });
   const rows: CoordinatorChoiceCandidate[] = scored.map((s) => ({
     coordinator: coordinatorHost(s.c.url),
     rttMs: s.c.rttMs === null ? null : Math.round(s.c.rttMs),
@@ -195,7 +298,7 @@ export function chooseByLatency(
     if (moves || holds) {
       const faster = clearlyFaster(near, open, policy);
       if (faster) {
-        return done(faster.s.c.url, "latency", `clearly faster end to end than the free host nearest the buyer (${where.clientRegion}, ${km(near.nearKm!)} on ${coordinatorHost(near.c.url)}): expected ${faster.e2e} ms vs ${faster.nearE2e} ms`);
+        return done(faster.s.c.url, "latency", `clearly faster end to end than the free host nearest the buyer (${where.clientRegion}, ${km(near.nearKm!)} on ${coordinatorHost(near.c.url)}): expected ${faster.e2e} ms vs ${faster.nearE2e} ms${hostNote(faster.s, near)}`);
       }
       return moves
         ? done(near.c.url, "locality", `free host nearest the buyer (${where.clientRegion}): ${km(near.nearKm!)} vs ${km(baseKm)} on ${coordinatorHost(baselineUrl)}`)
