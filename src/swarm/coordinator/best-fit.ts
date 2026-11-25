@@ -51,11 +51,18 @@
  * context window, price ceiling, the size floor of its spill band spillFloorB): the automatic
  * fallback when nothing on the network fits, or every other machine in the band is busy (no free
  * slot: the cloud host takes the overflow as more GPUs in the pool). A light or simple job a free
- * network machine can serve, by spilling to a smaller model if need be, never goes to the cloud.
+ * network machine can serve, by spilling to a smaller model if need be, never goes to the cloud:
+ * this is a hard gate, decided before any score, so neither session affinity nor a faster estimate
+ * puts it there (the cloud is not a candidate at all). A machine counts as room only when its
+ * estimated completion is within maxCompletionMs (BEST_FIT_MAX_COMPLETION_MS): a 1.5b CPU host that
+ * would need ~3 minutes for a 2.5k-token tests call is not room (run 4: 7 such spills timed out at
+ * 180 s), so the cloud takes that overflow instead, and such a slow machine is not placed on while
+ * the cloud can take the call.
  * Reasoning models (GLM-5.3, DeepSeek V4.1 Flash: they think in `reasoning_content` before they
- * answer) are left out for a call whose max_tokens is below their reasoning budget
- * (reasoningMinTokensFor; AUTO_REASONING_MIN_TOKENS): a small output cap ends inside the thinking
- * and the caller gets 400 reasoning_only (2026-11-25 run 3: max_tokens 40 and 1024).
+ * answer): the cloud host asks the provider for the call's max_tokens plus a reasoning allowance
+ * (src/cloud-host/host.ts), so a small max_tokens no longer ends inside the thinking. The old
+ * filter (AUTO_REASONING_MIN_TOKENS: no reasoning model below a max_tokens) is off by default and
+ * stays for a host without the allowance.
  * Among cloud models the standard one (Flash) is kept over a premium one (catalog hint "premium",
  * GLM-5.3) unless the job asks for the best quality at top-tier complexity and the premium one
  * is within the price ceiling; a premium one is also used when it is the only cloud model that fits.
@@ -270,26 +277,32 @@ export interface BestFitConfig {
    * a call with a smaller max_tokens never goes to them. Empty: no such filter.
    */
   reasoningMinTokens: Record<string, number>;
+  /**
+   * Longest estimated completion (ms) a machine may need for Auto to count it as room for a call
+   * (BEST_FIT_MAX_COMPLETION_MS): past it the cloud may take the call as overflow, and while the
+   * cloud can, the slow machine is not placed on. Two thirds of the coordinator's 180 s call deadline
+   * by default: estimates are rough.
+   */
+  maxCompletionMs: number;
 }
 
 /**
- * Reasoning budget of the built-in reasoning models (run 3b: GLM-5.3 0/40 reasoning_only at 1024,
- * 5/15 at 512; DeepSeek V4.1 Flash 1/40 at 512, and one at 1024 in run 3).
+ * The budget a bare number in AUTO_REASONING_MIN_TOKENS used to default to (run 3b: GLM-5.3 0/40
+ * reasoning_only at 1024). Unset is now no filter: the cloud host gives reasoning models room on top
+ * of max_tokens (src/cloud-host/host.ts DEFAULT_REASONING_ALLOWANCE).
  */
 export const DEFAULT_REASONING_MIN_TOKENS = 1_024;
 export const KNOWN_REASONING_MODELS: readonly string[] = ["glm-5.3", "deepseek-v4.1-flash"];
 
 /**
- * AUTO_REASONING_MIN_TOKENS: unset, the built-in reasoning models at DEFAULT_REASONING_MIN_TOKENS; a
- * number, every built-in reasoning model at that; "model=n,model=n", those models (added to or
- * replacing the built-in ones; a bare number in the list sets the built-in ones); "off" or "0": none.
+ * AUTO_REASONING_MIN_TOKENS: unset, "off" or "0", no filter (the cloud host's reasoning allowance
+ * makes room); a number, every built-in reasoning model at that; "model=n,model=n", those models (a
+ * bare number in the list sets the built-in ones; model=0 removes one).
  */
 export function parseReasoningMinTokens(raw: string | undefined): Record<string, number> {
   const t = (raw ?? "").trim().toLowerCase();
-  const builtIn = (n: number) => Object.fromEntries(KNOWN_REASONING_MODELS.map((m) => [m, n]));
-  if (t === "") return builtIn(DEFAULT_REASONING_MIN_TOKENS);
-  if (t === "off" || t === "none" || t === "0" || t === "false") return {};
-  const out = builtIn(DEFAULT_REASONING_MIN_TOKENS);
+  if (t === "" || t === "off" || t === "none" || t === "0" || t === "false") return {};
+  const out: Record<string, number> = {};
   const ok = (n: number) => Number.isInteger(n) && n >= 0 && n <= 1_000_000;
   for (const part of t.split(",").map((x) => x.trim()).filter(Boolean)) {
     const eq = part.lastIndexOf("=");
@@ -329,6 +342,7 @@ export const DEFAULT_BEST_FIT_CONFIG: BestFitConfig = {
   peers: true,
   autoCloudModels: "all",
   reasoningMinTokens: parseReasoningMinTokens(undefined),
+  maxCompletionMs: 120_000,
 };
 
 /** The config from BEST_FIT_* variables; a missing or invalid value keeps its default. */
@@ -358,6 +372,7 @@ export function bestFitConfigFromEnv(env: Record<string, string | undefined> = p
     peers: !["0", "false"].includes((env.BEST_FIT_PEERS ?? "").trim().toLowerCase()),
     autoCloudModels: parseAutoCloudModels(env.AUTO_CLOUD_MODELS),
     reasoningMinTokens: parseReasoningMinTokens(env.AUTO_REASONING_MIN_TOKENS),
+    maxCompletionMs: num(env.BEST_FIT_MAX_COMPLETION_MS, d.maxCompletionMs, 1_000, 3_600_000),
   };
 }
 
@@ -602,7 +617,7 @@ function scoreOf(parts: ScoreParts, w: BestFitWeights): number {
   return round3(w.quality * parts.quality + w.latency * parts.latency + w.price * parts.price + w.reliability * parts.reliability);
 }
 
-type Evaluated = Candidate & { cloud: boolean; contextOk: boolean; priceOk: boolean; toolsOk: boolean; free: boolean; healthy: boolean };
+type Evaluated = Candidate & { cloud: boolean; contextOk: boolean; priceOk: boolean; toolsOk: boolean; free: boolean; healthy: boolean; inTime: boolean };
 
 /**
  * Cloud models are considered for this job: it wants the top tier, or no other machine meets its
@@ -614,17 +629,20 @@ type Evaluated = Candidate & { cloud: boolean; contextOk: boolean; priceOk: bool
  * takes the call by spilling, before the cloud host does. The cloud host is overflow: it joins only
  * when no non-cloud machine in the band has a free slot. A complex call's band is its floor (14B),
  * so it is unchanged; a top-tier job always may use it.
+ *
+ * Run 4: a machine whose estimated completion is past maxCompletionMs (inTime false) is not room:
+ * it would end at the call's deadline.
  */
 export function cloudConsidered(
   job: JobDescriptor,
   req: Requirements,
-  all: ReadonlyArray<Pick<Evaluated, "cloud" | "toolsOk" | "contextOk" | "priceOk" | "paramsB"> & Partial<Pick<Evaluated, "free" | "healthy">>>,
+  all: ReadonlyArray<Pick<Evaluated, "cloud" | "toolsOk" | "contextOk" | "priceOk" | "paramsB"> & Partial<Pick<Evaluated, "free" | "healthy" | "inTime">>>,
   floorB: number = spillFloorB(job, req),
 ): boolean {
   if (jobWantsTopTier(job)) return true;
   // Also when every other machine in the band is full or not taking work: the cloud host is one
   // more machine in the pool (expand), and drops out again once one has room (contract).
-  return !all.some((c) => !c.cloud && c.toolsOk && c.contextOk && c.priceOk && c.paramsB >= floorB && c.free !== false && c.healthy !== false);
+  return !all.some((c) => !c.cloud && c.toolsOk && c.contextOk && c.priceOk && c.paramsB >= floorB && c.free !== false && c.healthy !== false && c.inTime !== false);
 }
 
 /**
@@ -684,6 +702,7 @@ function evaluate(job: JobDescriptor, view: NetworkView, cfg: BestFitConfig, req
         priceOk: job.maxCSats === undefined || est.cSats <= job.maxCSats,
         free: !a.unhealthy && hasFreeSlot(a, queuedShare(view, model, held)),
         healthy: !a.unhealthy,
+        inTime: est.totalMs <= (cfg.maxCompletionMs ?? DEFAULT_BEST_FIT_CONFIG.maxCompletionMs),
       });
     }
   }
@@ -715,7 +734,13 @@ export function bestFit(job: JobDescriptor, view: NetworkView, cfg: BestFitConfi
   const sessionLive = session && (nowMs === 0 || nowMs - session.atMs <= cfg.sessionTtlMs) ? session : undefined;
   const evaluated = evaluate(job, view, cfg, req, w, sessionLive);
   // Cloud models only for top-tier jobs, or when no other machine in the band has room (cloudConsidered).
-  const all = cloudConsidered(job, req, evaluated, bandB) ? evaluated : evaluated.filter((c) => !c.cloud);
+  const cloudIn = evaluated.some((c) => c.cloud) && cloudConsidered(job, req, evaluated, bandB);
+  // A machine that would end at the deadline is not placed on while a cloud model can take the call.
+  const all = !cloudIn
+    ? evaluated.filter((c) => !c.cloud)
+    : evaluated.some((c) => c.cloud && c.toolsOk && c.contextOk && c.priceOk)
+      ? evaluated.filter((c) => c.cloud || c.inTime)
+      : evaluated;
   const hardB = req.hardMinParamsB ?? 0;
   const fits = cloudTier(job, all.filter((c) => c.toolsOk && c.contextOk && c.priceOk));
   const header = `${job.job.replace("_", " ")} · complexity ${describeComplexity(job.complexity, 2)} · ${cc.cls}${cc.why.startsWith("complexity") ? "" : ` (${cc.why})`}`;
@@ -784,7 +809,7 @@ export function bestFit(job: JobDescriptor, view: NetworkView, cfg: BestFitConfi
     if (!prev || better(c, prev) < 0) byPair.set(k, c);
   }
   const strip = (c: Candidate): Candidate => {
-    const { contextOk: _a, priceOk: _b, toolsOk: _c, cloud: _d, free: _e, healthy: _f, ...rest } = c as Candidate & { contextOk?: boolean; priceOk?: boolean; toolsOk?: boolean; cloud?: boolean; free?: boolean; healthy?: boolean };
+    const { contextOk: _a, priceOk: _b, toolsOk: _c, cloud: _d, free: _e, healthy: _f, inTime: _g, ...rest } = c as Candidate & { contextOk?: boolean; priceOk?: boolean; toolsOk?: boolean; cloud?: boolean; free?: boolean; healthy?: boolean; inTime?: boolean };
     return rest;
   };
   const ranked = [...byPair.values()].sort(better).map(strip);
@@ -820,6 +845,8 @@ export function bestFit(job: JobDescriptor, view: NetworkView, cfg: BestFitConfi
   const cloudOverBudget = chosen.belowFloor && all.some((c) => c.cloud && c.toolsOk && c.contextOk && !c.priceOk);
   const floorNote = chosen.belowFloor ? ` (nothing ≥ ${req.minParamsB}B is available${cloudOverBudget ? ` within the ${job.maxCSats} cSats ceiling` : ""}${cc.cls === "complex" ? `; complex call (${cc.why}) on a smaller model` : ""})` : "";
   const spillNote = chosen.spill ? ` (spilled: every model ≥ ${req.minParamsB}B is full; ${cc.cls} band ≥ ${bandB}B)` : "";
+  // The cloud as overflow (not a top-tier job): say so, so a decision log shows why.
+  const overflowNote = (chosen.computeClass === "cloud" || isCloudModel(chosen.model)) && cloudIn && !jobWantsTopTier(job) ? ` (cloud overflow: no machine ≥ ${bandB}B has a free slot that finishes within ${fmtS(cfg.maxCompletionMs ?? DEFAULT_BEST_FIT_CONFIG.maxCompletionMs)})` : "";
   return {
     chosen,
     candidates: ranked.slice(0, 8),
@@ -828,7 +855,7 @@ export function bestFit(job: JobDescriptor, view: NetworkView, cfg: BestFitConfi
     affinity,
     ...classInfo,
     capacity: chosen.spill || chosen.belowFloor ? capacity : freeKeys.has(`${chosen.agentId}\u0000${chosen.model}`) ? "preferred" : "queued",
-    reason: `${header}: ${why}${floorNote}${spillNote}`,
+    reason: `${header}: ${why}${floorNote}${spillNote}${overflowNote}`,
   };
 }
 

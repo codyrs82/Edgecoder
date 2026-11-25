@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { backoffMs, CloudApiError, probeKey, REASONING_ONLY_ERROR, remoteChat, retryAfterMs, type RemoteBackendConfig } from "../../src/cloud-host/backend.js";
+import { backoffMs, CloudApiError, probeKey, reasoningChat, REASONING_ONLY_ERROR, remoteChat, retryAfterMs, type RemoteBackendConfig } from "../../src/cloud-host/backend.js";
 import type { OllamaPiece } from "../../src/inference-api/ollama.js";
 import { startFakeProvider, streamReply, type FakeProvider } from "./fake-provider.js";
 
@@ -130,6 +130,32 @@ describe("remoteChat", () => {
     expect(fake.requests[0].body.reasoning_effort).toBe("low");
     await collect(remoteChat(cfg(fake.url), req));
     expect(fake.requests[1].body).not.toHaveProperty("reasoning_effort");
+  });
+
+  it("contentCap: the answer is cut at the cap (a long piece trimmed), the reply ends as length with estimated counts", async () => {
+    fake = await startFakeProvider([streamReply({ text: ["abcd", "efgh", "x".repeat(40), "never"], usage: { prompt_tokens: 5, completion_tokens: 50 } })]);
+    const pieces = await collect(remoteChat(cfg(fake.url), { ...req, maxTokens: 4_000, contentCap: 5 }));
+    // 2 tokens, then 3 more (12 characters) of the 40-character piece, then nothing.
+    expect(pieces.filter((p) => "delta" in p).map((p) => (p as { delta: string }).delta).join("")).toBe("abcdefgh" + "x".repeat(12));
+    expect(pieces.at(-1)).toMatchObject({ doneReason: "length", outputTokens: 5 });
+    expect(fake.requests[0].body.max_tokens).toBe(4_000);
+  });
+
+  it("reasoningChat: another error is not asked again, and the second reasoning-only reply fails with the provider's counts", async () => {
+    fake = await startFakeProvider([{ status: 400, body: { error: "bad request" } }]);
+    const err = await collect(reasoningChat(cfg(fake.url), { ...req, maxTokens: 64 }, 1_000)).catch((e) => e);
+    expect(err.message).toMatch(/^cloud_provider_error: .*bad request/);
+    expect(fake.requests).toHaveLength(1);
+    await fake.close();
+    const thinking = { stream: [{ choices: [{ index: 0, delta: { reasoning_content: "hmm" }, finish_reason: "length" }] }, { choices: [], usage: { prompt_tokens: 7, completion_tokens: 1_064 } }, "[DONE]" as const] };
+    fake = await startFakeProvider([thinking]);
+    const billed: unknown[] = [];
+    const err2 = await collect(reasoningChat(cfg(fake.url), { ...req, maxTokens: 64 }, 1_000, undefined, 10_000, (u) => billed.push(u))).catch((e) => e);
+    expect(fake.requests.map((r) => r.body.max_tokens)).toEqual([1_064, 2_064]);
+    expect(err2.message.startsWith(`${REASONING_ONLY_ERROR}: `)).toBe(true);
+    expect(err2.status).toBe(400);
+    expect(err2.usage).toEqual({ promptTokens: 7, outputTokens: 1_064 });
+    expect(billed).toEqual([{ promptTokens: 7, outputTokens: 1_064 }]);
   });
 
   it("probeKey reports whether the key is accepted", async () => {

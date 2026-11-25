@@ -167,6 +167,38 @@ describe("GET /network/world: what it shows", () => {
   });
 });
 
+describe("peer views for routing (run 4)", () => {
+  test("a failed or slow refresh keeps routing on the peer's last good view, up to WORLD_PEER_ROUTING_STALE_MS", async () => {
+    const routing = await import("../../src/swarm/coordinator/routing.js");
+    const peerKeys = createPeerKeys("coord-eu-routing");
+    (ctx.mesh as any).peers.set(peerKeys.peerId, { peerId: peerKeys.peerId, publicKeyPem: peerKeys.publicKeyPem, coordinatorUrl: "https://eu2.coord.example", networkMode: "public_mesh" });
+    const world = {
+      coordinator: { id: peerKeys.peerId, url: "https://eu2.coord.example", region: "fra", country: "DE", continent: "EU", agents: 1, agentsOnline: 1 },
+      links: [],
+      generatedAtMs: Date.now(),
+      agents: [{ agentId: "ec-fra", ownerTag: null, lastSeenMs: Date.now(), id: "fra0123456", label: "ec-fra", os: "linux", region: "fra", country: "DE", continent: "EU", computeClass: "cpu", tier: null, vramGb: null, models: ["qwen2.5-coder:1.5b"], modelsTotal: 1, activeModel: "qwen2.5-coder:1.5b", status: "idle", slots: 2, slotsUsed: 0, coordinatorId: "x", rttMs: 10 }]
+    };
+    let up = true;
+    route.setWorldPeerFetch(async () => {
+      if (!up) throw new Error("ETIMEDOUT");
+      return { status: 200, json: world };
+    });
+    try {
+      const t0 = Date.now();
+      const ids = (views: Array<{ world: { coordinator: { id: string } } }>) => views.map((v) => v.world.coordinator.id);
+      expect(ids(await routing.peerWorldViews(t0))).toContain(peerKeys.peerId);
+      up = false;
+      // Past the 15 s cache the refresh fails: the last good view is still used.
+      expect(ids(await routing.peerWorldViews(t0 + route.WORLD_PEER_CACHE_MS + 1_000))).toContain(peerKeys.peerId);
+      // Too old: dropped.
+      expect(ids(await routing.peerWorldViews(t0 + route.WORLD_PEER_ROUTING_STALE_MS + route.WORLD_PEER_CACHE_MS + 2_000))).not.toContain(peerKeys.peerId);
+    } finally {
+      route.setWorldPeerFetch(null);
+      ctx.mesh.removePeer(peerKeys.peerId);
+    }
+  });
+});
+
 describe("round trip on the mesh WebSocket", () => {
   test("an agent's signed socket is pinged and its pong's round trip is recorded", async () => {
     expect(meshRoutes.meshRtt.get(caller.peerId, Date.now())).toBeNull();
