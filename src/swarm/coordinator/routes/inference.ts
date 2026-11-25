@@ -67,9 +67,9 @@ import { taskIdInUse, pricingInFlight, settleTaskIfDone, refundTaskSubmit, LATE_
 import { registerInferenceCancelRoute, requesterCancelled } from "../inference-cancel.js";
 import { recordMeshWork } from "../world-activity.js";
 import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
-import { armAutoReplace, replaceAutoNow } from "../auto-replace.js";
+import { armAutoReplace, overrunAlternativeExists, placeAfterOverrun, replaceAutoNow } from "../auto-replace.js";
 import { freeLocalHolders, LOCALITY_PREFER_MS, nearestFreeHolder, peerWithFreeCapacity } from "../locality.js";
-import { completionByClass, completionLimitMs, hostServiceMs, judgeCompletion, modelSlots, serviceTimes, startEtaLimitMs, startEtaMs } from "../start-eta.js";
+import { completionByClass, completionLimitMs, hostServiceMs, judgeCompletion, modelSlots, parseCompletionPrior, serviceTimes, startEtaLimitMs, startEtaMs } from "../start-eta.js";
 
 // ── Network inference (chat completions on agents' local models, streamed) ──────────────────
 export const inferenceStreams = new InferenceStreams();
@@ -251,6 +251,59 @@ export async function moveCallsOffTrippedAgent(agentId: string, nowMs = Date.now
   return { replaced, cancelled };
 }
 
+/** Named network calls and the agent they were placed on (#526 locality preference), while unclaimed. */
+const namedPlacements = new Map<string, string>();
+setInterval(() => {
+  for (const id of namedPlacements.keys()) if (queue.getClaim(id)?.claimedBy || !queue.getSubtask(id)) namedPlacements.delete(id);
+}, 60_000).unref?.();
+
+/**
+ * Run 5 (3a probe, inf-1795598815019-*): a call whose placement was lost waited out the 45 s claim
+ * bound and was then refused as "busy". When `agentId` is lost (agent-liveness.ts; swept by
+ * lost-agent-claims.ts), its waiting calls are handled now:
+ *
+ * - Auto calls placed on it are placed again on the next candidate (auto-replace.ts);
+ * - a named call placed on it, or one no other live holder could ever take, stays queued only while
+ *   another live holder has a free slot for it; otherwise it is ended now with a retryable
+ *   no_capacity ("busy"), refunded in full, instead of waiting for the claim bound.
+ *
+ * Reserved and own-machine calls keep their bound. Returns how many were re-placed and ended.
+ */
+export async function moveCallsOffLostAgent(agentId: string, nowMs = Date.now()): Promise<{ replaced: number; cancelled: number }> {
+  const replaced = await replaceAutoNow(agentId, nowMs);
+  const cap = agentCapabilities.get(agentId);
+  let cancelled = 0;
+  const claims = queue.activeClaims();
+  for (const c of queue.inferenceCalls()) {
+    if (c.claimedBy) continue;
+    const st = queue.getSubtask(c.subtaskId);
+    if (!st?.requestedModel || st.projectMeta.reservationId || st.projectMeta.onlyAccountId) continue;
+    const placedHere = namedPlacements.get(st.id) === agentId;
+    const heldHere = !!cap && agentHasModel(cap, st.requestedModel);
+    if (!placedHere && !(heldHere && !usableHolderExists(st, claims, nowMs))) continue;
+    const excluded = new Set([agentId, ...queue.excludedAgents(st.id)]);
+    const cls = (st.projectMeta.computeClass ?? "any") as ComputeClassId | "any";
+    const room = freeLocalHolders(st.requestedModel, cls, inferenceTokensNeededOf(st), nowMs).filter((h) => !excluded.has(h.agentId));
+    if (room.length > 0) {
+      namedPlacements.delete(st.id);
+      continue;
+    }
+    if (await cancelUnclaimedInference(st.taskId, st.id).catch(() => false)) cancelled++;
+  }
+  if (replaced || cancelled) coordinatorApp.log.warn({ agentId, replaced, cancelled }, "lost_agent_calls_moved");
+  return { replaced, cancelled };
+}
+
+/** Tokens a waiting call needs (contextNeeded of its input), 0 when it cannot be read. */
+function inferenceTokensNeededOf(st: Subtask): number {
+  try {
+    const input = JSON.parse(st.input) as { messages?: ChatMessage[]; tools?: unknown[]; maxTokens?: number };
+    return Array.isArray(input.messages) ? contextNeeded(input.messages, input.tools, input.maxTokens) : 0;
+  } catch {
+    return 0;
+  }
+}
+
 // The breaker's trip threshold scales with the agent's slots, and a trip moves its waiting calls.
 setCircuitSlotsLookup((id) => agentLoadReport(id)?.slots);
 // Per-agent request budgets grow with the slots it reports too (src/security/agent-rate-limiter.ts).
@@ -331,6 +384,8 @@ function startRerunBudget(subtask: Subtask, budgetMs: number): void {
 function submittedTimeoutMs(subtask: Subtask): number {
   return submittedTimeouts.get(subtask.id) ?? subtask.timeoutMs;
 }
+/** #557: the cloud host's reasoning-room overrun (src/cloud-host/backend.ts REASONING_OVERRUN_ERROR): retryable elsewhere. */
+export const CLOUD_REASONING_OVERRUN = /^cloud_reasoning_overrun\b/;
 /** Failures another agent would only repeat (the request itself is bad, or its max_tokens ends inside the reasoning). */
 const NOT_RETRYABLE = /^(bad inference request|no model requested|reasoning_only)/;
 /** Subtasks already given to another agent once (each call is retried at most once). */
@@ -360,8 +415,11 @@ export async function retryInferenceElsewhere(subtask: Subtask, agentId: string,
   // A reserved call runs only on its lease's agent.
   if (subtask.projectMeta.reservationId) return false;
   const excluded = new Set([agentId, ...queue.excludedAgents(subtask.id)]);
-  let other = false;
-  for (const [id, cap] of agentCapabilities) {
+  // #557: the cloud host ran out of reasoning room (nothing sent, nothing charged). An Auto call goes
+  // to the next candidate without that host (a non-reasoning model) when one can take it.
+  const overrun = !!error && CLOUD_REASONING_OVERRUN.test(error);
+  let other = overrun && (await overrunAlternativeExists(subtask.id, agentId, nowMs).catch(() => false));
+  for (const [id, cap] of other ? [] : agentCapabilities) {
     // The owner's own call may also go to an owner-only model (kept off the network) on another of their machines.
     const has = subtask.projectMeta.onlyAccountId ? agentHasModelForOwner(cap, subtask.requestedModel) : agentHasModel(cap, subtask.requestedModel ?? "");
     if (excluded.has(id) || activeBlacklistRecord(id) || !has) continue;
@@ -380,6 +438,7 @@ export async function retryInferenceElsewhere(subtask: Subtask, agentId: string,
   // The retry runs on its own budget, and gets the same claim bound as a new call (never past it).
   startRerunBudget(subtask, leftMs);
   armClaimDeadline(subtask.taskId, subtask.id, Math.min(INFERENCE_CLAIM_TIMEOUT_MS, leftMs));
+  if (overrun) await placeAfterOverrun(subtask.id, agentId, nowMs).catch((err) => coordinatorApp.log.error({ err, subtaskId: subtask.id }, "overrun_replace_failed"));
   coordinatorApp.log.warn({ taskId: subtask.taskId, subtaskId: subtask.id, agentId, error }, "inference_retry_elsewhere");
   return true;
 }
@@ -465,6 +524,16 @@ export async function endInferenceLostMidReply(subtask: Subtask, timedOut?: stri
   await refundTaskSubmit(subtask.taskId);
   coordinatorApp.log.warn({ taskId: subtask.taskId, subtaskId: subtask.id, replyBytes: inferenceStreams.replyBytes(subtask.id), ...(timedOut ? { timedOut: true } : {}) }, "inference_lost_mid_reply");
   return true;
+}
+
+/**
+ * Why a model call's reply ended, for the requester's finish_reason (run 5: Flash replies cut at the
+ * caller's max_tokens reached the client as "stop"). The agent's word when it sends one; an agent
+ * that does not (before this field) reported as many output tokens as the call allowed: cut there.
+ */
+export function replyFinishReason(body: { finishReason?: "stop" | "length"; outputTokens?: number; error?: string }, maxTokens: number | undefined): "stop" | "length" {
+  if (body.finishReason) return body.finishReason;
+  return maxTokens !== undefined && body.outputTokens !== undefined && body.outputTokens >= maxTokens ? "length" : "stop";
 }
 
 /** Calls that may wait per model: 4 per slot of the (available) agents that hold it, at least 16, at most 512. */
@@ -607,13 +676,25 @@ function startEtaOverLimit(model: string, taskClass: ComputeClassId | "any", nee
  * `exclude`, the agents of classes that would not finish it in time; `none`, no class here would;
  * `etaMs`, the soonest known completion. Nothing is judged without speed samples or with the check off.
  */
-export function completionCheck(model: string, taskClass: ComputeClassId | "any", messages: ChatMessage[], tools: unknown[] | undefined, maxTokens: number, timeoutMs: number, nowMs = Date.now()): { exclude: string[]; none: boolean; etaMs: number | null; limitMs: number } {
+export function completionCheck(model: string, taskClass: ComputeClassId | "any", messages: ChatMessage[], tools: unknown[] | undefined, maxTokens: number | undefined, timeoutMs: number, nowMs = Date.now()): { exclude: string[]; none: boolean; etaMs: number | null; limitMs: number } {
   const limitMs = completionLimitMs(timeoutMs, CC.INFERENCE_COMPLETION_ETA_FRACTION);
   if (!Number.isFinite(limitMs)) return { exclude: [], none: false, etaMs: null, limitMs };
   const promptTokens = Math.ceil(Buffer.byteLength(JSON.stringify({ messages, tools: tools ?? [] }), "utf8") / 4);
-  const outputTokens = Math.max(1, Math.ceil(maxTokens * CC.INFERENCE_COMPLETION_OUTPUT_SHARE));
-  const classes = completionByClass({ model, taskClass, neededTokens: contextNeeded(messages, tools, maxTokens), promptTokens, outputTokens, waiting: queue.waitingInference(model) }, nowMs);
-  return { ...judgeCompletion(classes, limitMs), limitMs: Math.round(limitMs) };
+  // A call that sets no max_tokens is judged on a typical long reply, not the default cap (a billing bound).
+  const judgedMax = maxTokens ?? Math.min(INFERENCE_DEFAULT_MAX_TOKENS, COMPLETION_UNSET_MAX_TOKENS);
+  const outputTokens = Math.max(1, Math.ceil(judgedMax * CC.INFERENCE_COMPLETION_OUTPUT_SHARE));
+  const classes = completionByClass({ model, taskClass, neededTokens: contextNeeded(messages, tools, maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS), promptTokens, outputTokens, waiting: queue.waitingInference(model), prior: completionPrior() }, nowMs);
+  return { ...judgeCompletion(classes, limitMs, timeoutMs), limitMs: Math.round(limitMs) };
+}
+
+/** Run 5: the output a call without max_tokens is judged on (it may write up to INFERENCE_DEFAULT_MAX_TOKENS). */
+export const COMPLETION_UNSET_MAX_TOKENS = 1_024;
+/** Run 5: each class's prior speed for the completion estimate (start-eta.ts parseCompletionPrior), read when used. */
+let priorCache: { raw: string | undefined; prior: Record<string, number> } | undefined;
+function completionPrior(): Record<string, number> {
+  const raw = process.env.INFERENCE_COMPLETION_PRIOR_SPEED;
+  if (!priorCache || priorCache.raw !== raw) priorCache = { raw, prior: parseCompletionPrior(raw) };
+  return priorCache.prior;
 }
 
 /** Auto picks at most this many times while its pick would not finish the call in time. */
@@ -677,7 +758,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         // freeHosts: each free host's own region, free slots, round trip and time for a reference call of
         // the model (portal coordinator-latency.ts scores the free host nearest the buyer with its own numbers).
         if (region && free > 0 && e.freeHosts.length < 32) {
-          const svc = hostServiceMs(m, id, cls, now);
+          const svc = hostServiceMs(m, id, cls, now, completionPrior()[cls]);
           e.freeHosts.push({ region, free, ...(rtt !== null && Number.isFinite(rtt) ? { rttMs: Math.round(rtt) } : {}), ...(svc !== null ? { serviceMs: svc } : {}) });
         }
         e.classes.add(cls);
@@ -749,7 +830,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       let late: { etaMs: number | null; limitMs: number } | undefined;
       for (let pick = 0; result.chosen?.local && !elsewhere; pick++) {
         const chosenClass = (ACCEPTED_COMPUTE_CLASS_IDS as readonly string[]).includes(result.chosen.computeClass) ? (result.chosen.computeClass as ComputeClassId) : "any";
-        const check = completionCheck(result.chosen.model, chosenClass, body.messages as ChatMessage[], body.tools, body.maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS, body.timeoutMs);
+        const check = completionCheck(result.chosen.model, chosenClass, body.messages as ChatMessage[], body.tools, body.maxTokens, body.timeoutMs);
         const fresh = check.exclude.filter((id) => !slowAgents.includes(id));
         slowAgents = [...slowAgents, ...fresh];
         if (!check.exclude.includes(result.chosen.agentId)) break;
@@ -848,7 +929,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       // that would not finish it do not get it; with none here in time it goes to a peer with a free
       // slot (route_elsewhere) or is refused now, retryable, before anything is reserved.
       if (!routed) {
-        const late = completionCheck(body.model, namedClass(body.computeClass), body.messages as ChatMessage[], body.tools, body.maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS, body.timeoutMs);
+        const late = completionCheck(body.model, namedClass(body.computeClass), body.messages as ChatMessage[], body.tools, body.maxTokens, body.timeoutMs);
         if (late.none) {
           const peer = body.routeRedirect && !restrictedTier ? await peerWithFreeCapacity(body.model, body.computeClass, clientRegion).catch(() => null) : null;
           req.log.info({ model: body.model, computeClass: body.computeClass, completionEtaMs: late.etaMs, limitMs: late.limitMs, peer: peer?.coordinatorId ?? null }, "inference_completion_over_limit");
@@ -972,7 +1053,10 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       }
       // #526: a named network call goes first to the free holder nearest the buyer (locality.ts).
       const near = billed ? nearestFreeHolder(freeLocalHolders(body.model, taskClass, needTokens).filter((h) => !slowAgents.includes(h.agentId)), clientRegion, body.model) : undefined;
-      if (near) preferAgent(subtask.id, near.agentId, LOCALITY_PREFER_MS);
+      if (near) {
+        preferAgent(subtask.id, near.agentId, LOCALITY_PREFER_MS);
+        namedPlacements.set(subtask.id, near.agentId);
+      }
     }
     if (onlyAccountId && !reservationId && !hasPortalServiceToken((req as any).headers ?? {})) {
       // "My machines" from the desktop app: a soft preference for the requester's own machine on the
@@ -1019,6 +1103,8 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         // busy host is not billed to it. They only ever lower the price (wall time stays the ceiling).
         promptMs: z.number().min(0).max(INFERENCE_MAX_TIMEOUT_MS).optional(),
         genMs: z.number().min(0).max(INFERENCE_MAX_TIMEOUT_MS).optional(),
+        // Why the model stopped ("length": cut at the call's max_tokens), passed to the requester's finish_reason.
+        finishReason: z.enum(["stop", "length"]).optional(),
       })
       .parse(req.body);
     let claim = queue.getClaim(body.subtaskId);
@@ -1076,6 +1162,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         if (b.submittedAtMs !== undefined && claim.claimedAt !== undefined) b.pickupMs = Math.max(0, claim.claimedAt - b.submittedAtMs);
         if (body.promptMs !== undefined) b.promptMs = Math.round(body.promptMs);
         if (body.genMs !== undefined) b.genMs = Math.round(body.genMs);
+        b.finishReason = replyFinishReason(body, maxTokensOf(claim.subtask.input));
       }
     }
     // The requester cancelled (inference-cancel.ts): the agent should stop and report what it produced.
@@ -1117,6 +1204,8 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       ...(billing.promptTokens !== undefined ? { promptTokens: billing.promptTokens } : {}),
       ...(billing.outputTokens !== undefined ? { outputTokens: billing.outputTokens } : {})
     };
+    // Why the reply ended ("length": cut at max_tokens), once it has.
+    const finish = r.done && billing.finishReason ? { finishReason: billing.finishReason } : {};
     // Settled after the reply: a no-op when the result route already did; a failure is retried by
     // the idle sweep and, after a restart, by the billing restore (billing-restore.ts).
     if (result) void settleTaskIfDone(body.taskId).catch((err) => req.log.warn({ err, taskId: body.taskId }, "stream_settle_failed"));
@@ -1125,6 +1214,6 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const served = servedP ? await servedP.catch(() => undefined) : undefined;
     // The call's cost once priced (its result's cost is on the billing entry), the reserve until then.
     const priced = billing.refunded || (result !== undefined && !pricingInFlight.has(body.taskId));
-    return reply.send({ ...r, ...(result ? { creditsSpent: msatToCSats(priced ? billing.costMsat : billing.reservedMsat), durationMs: result.durationMs, ...tokens } : {}), ...(served ? { served } : {}) });
+    return reply.send({ ...r, ...finish, ...(result ? { creditsSpent: msatToCSats(priced ? billing.costMsat : billing.reservedMsat), durationMs: result.durationMs, ...tokens } : {}), ...(served ? { served } : {}) });
   });
 }

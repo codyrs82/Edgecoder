@@ -40,6 +40,8 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => portal.listen(0, "127.0.0.1", resolve));
   process.env.PORTAL_SERVICE_URL = `http://127.0.0.1:${(portal.address() as AddressInfo).port}`;
   process.env.MESH_AUTH_TOKEN = MESH;
+  // Run 5 prior speed off: completion admission is not what these test (start-eta.ts; tests/swarm/completion-run5.test.ts).
+  process.env.INFERENCE_COMPLETION_PRIOR_SPEED = "off";
   process.env.ADMIN_API_TOKEN = ADMIN;
   process.env.CLAIM_LEASE_LIVENESS_MS = String(LIVENESS_MS);
   delete process.env.COORDINATOR_TRUST_PROXY;

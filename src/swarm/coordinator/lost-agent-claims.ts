@@ -28,10 +28,10 @@ import { queue } from "./context.js";
 import { app } from "./app.js";
 import { agentsLostFor, SOCKET_LOST_CLAIM_GRACE_MS } from "./agent-liveness.js";
 import { noteAgentLapse } from "./memory-admission.js";
-import { inferenceStreams, retryInferenceElsewhere } from "./routes/inference.js";
+import { inferenceStreams, moveCallsOffLostAgent, retryInferenceElsewhere } from "./routes/inference.js";
 
 /** How often the coordinator looks for calls held by lost agents. */
-export const LOST_AGENT_SWEEP_MS = 5_000;
+export const LOST_AGENT_SWEEP_MS = 2_000;
 
 /** Hand the unstarted model calls of agents lost for the grace period to other agents. Returns their subtask ids. */
 export async function requeueLostAgentClaims(nowMs = Date.now(), graceMs = SOCKET_LOST_CLAIM_GRACE_MS): Promise<string[]> {
@@ -55,11 +55,36 @@ export async function requeueLostAgentClaims(nowMs = Date.now(), graceMs = SOCKE
   return moved;
 }
 
+/**
+ * Run 5: a lost agent's waiting (unclaimed) calls are handled once it has been lost this long, well
+ * before the claim bound: a live agent whose socket merely dropped pulls over HTTP within 1-3 s.
+ */
+export const LOST_PLACEMENT_GRACE_MS = 3_000;
+/** Agents whose waiting calls were already handled for their current loss. */
+const handledLoss = new Set<string>();
+
+/** Re-place or end (fast no_capacity) the waiting calls of agents lost for LOST_PLACEMENT_GRACE_MS (routes/inference.ts moveCallsOffLostAgent). */
+export async function moveWaitingCallsOffLostAgents(nowMs = Date.now(), graceMs = LOST_PLACEMENT_GRACE_MS): Promise<{ replaced: number; cancelled: number }> {
+  const lost = new Set(agentsLostFor(graceMs, nowMs));
+  for (const id of handledLoss) if (!lost.has(id)) handledLoss.delete(id);
+  let replaced = 0;
+  let cancelled = 0;
+  for (const id of lost) {
+    if (handledLoss.has(id)) continue;
+    handledLoss.add(id);
+    const r = await moveCallsOffLostAgent(id, nowMs);
+    replaced += r.replaced;
+    cancelled += r.cancelled;
+  }
+  return { replaced, cancelled };
+}
+
 let timer: ReturnType<typeof setInterval> | undefined;
 export function startLostAgentSweep(): void {
   if (timer) return;
   timer = setInterval(() => {
     void requeueLostAgentClaims().catch((err) => app.log.error({ err }, "lost_agent_sweep_failed"));
+    void moveWaitingCallsOffLostAgents().catch((err) => app.log.error({ err }, "lost_agent_waiting_sweep_failed"));
   }, LOST_AGENT_SWEEP_MS);
   timer.unref?.();
 }

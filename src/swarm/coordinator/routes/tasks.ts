@@ -122,8 +122,10 @@ import {
   accrueResultCredits,
   settleTaskIfDone,
   reclaimLateInferenceResult,
-  payTimedOutPartialReply
+  payTimedOutPartialReply,
+  INFERENCE_TIMED_OUT
 } from "../results.js";
+import { noteTimedOutCall } from "../start-eta.js";
 import { closeUnreservedBillingRow } from "../billing-restore.js";
 import { clearClaimDeadline, inferenceStreams, judgeInferenceReply, retryInferenceElsewhere } from "./inference.js";
 import { isMemoryRefusal, noteAgentResult, noteDispatched } from "../memory-admission.js";
@@ -750,6 +752,10 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       evaluateAndEnforce(body.agentId);
     }
 
+    // Run 5: a model call that ran out its deadline with nothing sent teaches the completion estimate (start-eta.ts).
+    if (!isPeerForward && claim && subtask?.kind === "inference" && !body.ok && INFERENCE_TIMED_OUT.test(body.error ?? "") && !(inferenceStreams.replyBytes(body.subtaskId) ?? 0)) {
+      noteTimedOutCall(subtask.requestedModel, body.agentId, claim.claimedAt, subtask.input);
+    }
     // A failed model call that reached the requester with nothing goes to another agent once
     // (routes/inference.ts): no result is recorded and nothing is charged for this run.
     if (!isPeerForward && subtask?.kind === "inference" && !body.ok && (await retryInferenceElsewhere(subtask, body.agentId, body.error))) {

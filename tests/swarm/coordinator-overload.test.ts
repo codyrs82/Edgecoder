@@ -39,6 +39,8 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => portal.listen(0, "127.0.0.1", resolve));
   process.env.PORTAL_SERVICE_URL = `http://127.0.0.1:${(portal.address() as AddressInfo).port}`;
   process.env.MESH_AUTH_TOKEN = MESH;
+  // Run 5 prior speed off: these calls are judged on measured samples only (start-eta.ts; the prior has its own tests).
+  process.env.INFERENCE_COMPLETION_PRIOR_SPEED = "off";
   process.env.COORDINATOR_STARTUP_GRACE_MS = "0"; // a model nobody holds is refused at once (no restart grace here)
   delete process.env.COORDINATOR_TRUST_PROXY;
   delete process.env.FLY_APP_NAME;
@@ -241,7 +243,8 @@ describe("a call that would not finish here in time", () => {
   /** Calls of MODEL on this coordinator's CPU hosts run at `speed` × the slow-host estimate. */
   const measured = (speed: number) => {
     eta.serviceTimes.clear();
-    for (let i = 0; i < 3; i++) eta.serviceTimes.record(MODEL, "cpu", 10_000, Date.now(), 10_000 / speed);
+    // Samples of calls about this size (run 5: a much smaller call says little about a long one).
+    for (let i = 0; i < 3; i++) eta.serviceTimes.record(MODEL, "cpu", 300_000 * speed, Date.now(), 300_000);
   };
 
   test("refused (503, completionEtaMs) or sent to a free peer, before anything is reserved; a short one is accepted", async () => {

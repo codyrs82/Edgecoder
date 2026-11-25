@@ -66,8 +66,24 @@ const timers = new Map<string, ReturnType<typeof setTimeout>>();
 /** The Auto calls with a re-placement armed, by subtask id (replaceAutoNow). */
 const placements = new Map<string, AutoPlacement>();
 
+/**
+ * Every Auto call's placement while it is on the queue, claimed or not (placements above holds only
+ * the waiting ones with a timer): a call whose cloud host ran out of reasoning room is placed again
+ * on another model (replaceAfterOverrun).
+ */
+const autoCalls = new Map<string, AutoPlacement>();
+setInterval(() => {
+  for (const id of autoCalls.keys()) if (!queue.getSubtask(id)) autoCalls.delete(id);
+}, 60_000).unref?.();
+
+/** The Auto placement of a call still on the queue (undefined: not an Auto call, or gone). */
+export function autoPlacementOf(subtaskId: string): AutoPlacement | undefined {
+  return autoCalls.get(subtaskId);
+}
+
 /** Re-place the call if nobody picked it up within `ms` (bestFitConfig.replaceMs; 0: never). */
 export function armAutoReplace(p: AutoPlacement, ms = bestFitConfig.replaceMs, nowMs = Date.now()): void {
+  autoCalls.set(p.subtaskId, p);
   if (!(ms > 0) || (p.replaced ?? 0) >= AUTO_REPLACE_MAX) return;
   const old = timers.get(p.subtaskId);
   if (old) clearTimeout(old);
@@ -86,6 +102,39 @@ export function armAutoReplace(p: AutoPlacement, ms = bestFitConfig.replaceMs, n
   timers.set(p.subtaskId, t);
 }
 
+/** The first local candidate best fit gives for the call without the agents it tried, within its reserve. */
+async function nextPick(p: AutoPlacement, nowMs: number): Promise<Candidate | undefined> {
+  const { result } = await resolveAuto(p.job, { peers: false, requesterAccountId: p.accountId, excludeAgents: p.tried, clientRegion: p.clientRegion ?? null, ...(p.onlyClass ? { computeClass: p.onlyClass } : {}) }, nowMs);
+  const billing = taskBilling.get(p.taskId);
+  const budgetCSats = billing && billing.reservedMsat > 0 ? msatToCSats(billing.reservedMsat) : Infinity;
+  const seen = new Set<Candidate>();
+  return [result.chosen, ...result.candidates].find((c): c is Candidate => {
+    if (!c || seen.has(c)) return false;
+    seen.add(c);
+    return c.local && c.estimate.cSats <= budgetCSats;
+  });
+}
+
+/**
+ * #557 (run 5): a cloud host ran out of reasoning room on this Auto call (cloud_reasoning_overrun:
+ * nothing was sent, nothing is charged). Another candidate without that host (best fit picks a
+ * non-reasoning model elsewhere) exists within the call's reserve: true, and the caller releases the
+ * call and runs placeAfterOverrun. False: nothing else could take it (the call ends now, uncharged).
+ */
+export async function overrunAlternativeExists(subtaskId: string, cloudAgentId: string, nowMs = Date.now()): Promise<boolean> {
+  const p = autoCalls.get(subtaskId);
+  if (!p) return false;
+  return (await nextPick({ ...p, tried: [...new Set([...p.tried, cloudAgentId])] }, nowMs)) !== undefined;
+}
+
+/** After the release: move the (now unclaimed) call to the next candidate without `cloudAgentId`. */
+export async function placeAfterOverrun(subtaskId: string, cloudAgentId: string, nowMs = Date.now()): Promise<ReplaceOutcome> {
+  const p = autoCalls.get(subtaskId);
+  if (!p) return "none";
+  if (!p.tried.includes(cloudAgentId)) p.tried.push(cloudAgentId);
+  return moveTo(p, await nextPick(p, nowMs), nowMs, "re-placed: the cloud host ran out of reasoning room");
+}
+
 /** One re-placement step (exported for tests; armAutoReplace runs it on its timer). */
 export async function replaceUnclaimedAuto(p: AutoPlacement, nowMs = Date.now()): Promise<ReplaceOutcome> {
   if (!queue.isUnclaimed(p.subtaskId)) return "claimed";
@@ -97,17 +146,12 @@ export async function replaceUnclaimedAuto(p: AutoPlacement, nowMs = Date.now())
     noteCircuitOutcome(waitedOn, false, nowMs);
     noteRoutingOutcome(waitedOn, false);
   }
-  const { result } = await resolveAuto(p.job, { peers: false, requesterAccountId: p.accountId, excludeAgents: p.tried, clientRegion: p.clientRegion ?? null, ...(p.onlyClass ? { computeClass: p.onlyClass } : {}) }, nowMs);
+  return moveTo(p, await nextPick(p, nowMs), nowMs, `re-placed: nobody picked it up within ${Math.round(bestFitConfig.replaceMs / 1000)} s`);
+}
+
+function moveTo(p: AutoPlacement, pick: Candidate | undefined, nowMs: number, why: string): ReplaceOutcome {
   const current = queue.getSubtask(p.subtaskId);
   if (!current || !queue.isUnclaimed(p.subtaskId)) return "claimed";
-  const billing = taskBilling.get(p.taskId);
-  const budgetCSats = billing && billing.reservedMsat > 0 ? msatToCSats(billing.reservedMsat) : Infinity;
-  const seen = new Set<Candidate>();
-  const pick = [result.chosen, ...result.candidates].find((c): c is Candidate => {
-    if (!c || seen.has(c)) return false;
-    seen.add(c);
-    return c.local && c.estimate.cSats <= budgetCSats;
-  });
   if (!pick) return "none";
   p.tried.push(pick.agentId);
   const preferMs = Math.max(bestFitConfig.preferMs, 1_000);
@@ -132,8 +176,7 @@ export async function replaceUnclaimedAuto(p: AutoPlacement, nowMs = Date.now())
   }
   p.replaced = (p.replaced ?? 0) + 1;
   preferAgent(p.subtaskId, pick.agentId, preferMs, nowMs);
-  const waitedS = Math.round(bestFitConfig.replaceMs / 1000);
-  noteReplaced(p.subtaskId, pick, `re-placed: nobody picked it up within ${waitedS} s`);
+  noteReplaced(p.subtaskId, pick, why);
   app.log.warn({ taskId: p.taskId, subtaskId: p.subtaskId, from: current.requestedModel, to: pick.model, computeClass: cls, agent: pick.agentLabel, replaced: p.replaced }, "auto_call_replaced");
   return "replaced";
 }
@@ -173,4 +216,5 @@ export function clearAutoReplaceTimers(): void {
   for (const t of timers.values()) clearTimeout(t);
   timers.clear();
   placements.clear();
+  autoCalls.clear();
 }

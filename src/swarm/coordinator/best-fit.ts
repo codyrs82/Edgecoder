@@ -21,7 +21,8 @@
  *                  wait: pickup p50 when the agent has a free slot, else half a typical call plus
  *                  the calls queued for the model per slot. prefill and decode from the agent's
  *                  measured tok/s (hardware verification), else a class default scaled by the
- *                  model's active parameters.
+ *                  model's active parameters, slowed by the calls already running on the agent
+ *                  (contentionFactor: a CPU host's cores are shared by every call it runs).
  *   price    P     1 / (1 + cSats / priceRef): the call's tokens at the size price, never below
  *                  the class's power floor for its seconds (job-pricing.ts inferenceCostMsat).
  *   reliable R     (verifier reliability, else 0.9) x (0.93 if unverified) x (1 - recent failures)
@@ -502,13 +503,33 @@ export function hasFreeSlot(agent: Pick<AgentView, "freeSlots">, queued: number)
   return agent.freeSlots - queued > 0;
 }
 
+/**
+ * Run 5: how much slower a call runs on `agent` while it shares the machine with the calls already
+ * running there. The measured speed (tokensPerSec) is one call alone; a CPU host's cores (or a Mac's
+ * memory bandwidth) are shared by every call it runs at once, so a 2-slot CPU host with one call
+ * running serves a second at about half speed. Simple "tests" calls estimated at 115-119 s on a
+ * 1.5b CPU host that was already running one (inf-1795600164112-dd9f5233 and two more) ran past the
+ * 180 s deadline. A cloud host is not slowed by its other calls.
+ */
+export const CONTENTION_SHARE: Record<string, number> = { cpu: 1, apple: 0.5, gpu: 0.25, "gpu.dc": 0.15, cloud: 0 };
+
+/** 1 + CONTENTION_SHARE × the calls the agent would be running beside this one (at most slots − 1). */
+export function contentionFactor(agent: Pick<AgentView, "computeClass" | "slots" | "freeSlots">, queued = 0): number {
+  const share = CONTENTION_SHARE[agent.computeClass] ?? CONTENTION_SHARE.cpu;
+  if (!(share > 0) || agent.slots <= 1) return 1;
+  const others = Math.min(agent.slots - 1, Math.max(0, agent.slots - agent.freeSlots + Math.max(0, queued)));
+  return 1 + share * others;
+}
+
 export function estimate(job: JobDescriptor, agent: AgentView, model: string, view: Pick<NetworkView, "pickupP50Ms" | "waitingByModel" | "btcUsd">, holdersOfModel: number, cachedPrefix = false): Estimate {
   const tps = decodeTps(agent, model);
   const pre = prefillTps(agent, model);
-  const prefillMs = ((cachedPrefix ? job.newTokens : job.promptTokens) / pre) * 1000;
-  const decodeMs = (job.expectedOutputTokens / tps) * 1000;
-  let waitMs = Math.max(50, view.pickupP50Ms || 250);
   const queued = queuedShare(view, model, holdersOfModel);
+  // Run 5: the calls already running there (and those queued for it) share the machine with this one.
+  const slowdown = contentionFactor(agent, queued);
+  const prefillMs = (((cachedPrefix ? job.newTokens : job.promptTokens) / pre) * 1000) * slowdown;
+  const decodeMs = ((job.expectedOutputTokens / tps) * 1000) * slowdown;
+  let waitMs = Math.max(50, view.pickupP50Ms || 250);
   if (!hasFreeSlot(agent, queued)) {
     // A typical call on this agent: ~2k prompt tokens and ~500 reply tokens.
     const typical = (2_000 / pre + 500 / tps) * 1000;
