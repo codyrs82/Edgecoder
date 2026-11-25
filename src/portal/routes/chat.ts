@@ -11,7 +11,7 @@ import { networkBackend } from "../../inference-api/backends.js";
 import { ChatBackendError, type ChatPiece } from "../../inference-api/types.js";
 import type { Transport } from "../../apps/ide/network-inference.js";
 import { accountIdFor, chatComputeSchema, computeLabel, networkTargetFor, portalNetworkDeps, type ChatCompute } from "./compute.js";
-import { createChatCapacityDirectory, type ChatCapacityDirectory } from "../chat-capacity.js";
+import { createChatCapacityDirectory, promptTokensOf, type ChatCapacityDirectory } from "../chat-capacity.js";
 import { clientRegionOf, type CoordinatorChoice } from "../../common/coordinator-choice.js";
 import { moduleLogger } from "../../common/logger.js";
 import type { Served } from "../../common/served.js";
@@ -301,7 +301,8 @@ export function registerChatApiRoutes(
     while (!first && tried.length < CHAT_MAX_COORDINATOR_ATTEMPTS) {
       // Best fit: the coordinator with the most room asks its routing (one coordinator; it may place on peers' agents itself).
       // Latency-aware among the coordinators with room (coordinator-latency.ts); the choice goes with the call.
-      const where = { clientRegion: clientRegionOf(req.headers as Record<string, unknown>) };
+      // Run 6: the call's size, so free hosts compare by their time for it.
+      const where = { clientRegion: clientRegionOf(req.headers as Record<string, unknown>), call: { promptTokens: promptTokensOf(messages) } };
       const { url, known, choice }: { url: string | null; known: number; choice?: CoordinatorChoice } =
         compute.target === "auto"
           ? tried.length > 0
@@ -573,7 +574,8 @@ export function registerChatApiRoutes(
     const ac = new AbortController();
     reply.raw.on("close", () => ac.abort());
     const accountId = accountIdFor(userId);
-    const where = { clientRegion: clientRegionOf(req.headers as Record<string, unknown>) };
+    // Run 6: the call's size, so free hosts compare by their time for it.
+    const where = { clientRegion: clientRegionOf(req.headers as Record<string, unknown>), call: { promptTokens: promptTokensOf(messages) } };
     const picked: { url: string | null; choice?: CoordinatorChoice } =
       compute.target === "auto"
         ? await (capacity.pickAutoChoice ? capacity.pickAutoChoice(where) : capacity.pickAuto().then((url) => ({ url, choice: undefined }))).catch(() => ({ url: null }))

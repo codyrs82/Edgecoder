@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { createChatCapacityDirectory, LOAD_REPORT_MAX_AGE_MS, type CapacityReport } from "../../src/portal/chat-capacity.js";
-import { chooseByLatency, expectedLatency, latencyPolicyFromEnv, type LatencyCandidate, type LatencyPolicy } from "../../src/portal/coordinator-latency.js";
+import { callSizeFor, createChatCapacityDirectory, LOAD_REPORT_MAX_AGE_MS, type CapacityReport } from "../../src/portal/chat-capacity.js";
+import { chooseByLatency, equallyFast, expectedLatency, hostCallMs, latencyPolicyFromEnv, type FreeHost, type LatencyCandidate, type LatencyPolicy } from "../../src/portal/coordinator-latency.js";
+import { callSizeOf } from "../../src/portal/routes/hosted.js";
 import { clientRegionOf, sanitizeCoordinatorChoice } from "../../src/common/coordinator-choice.js";
 import { streamNetworkCompletion } from "../../src/apps/ide/network-inference.js";
 
@@ -453,5 +454,98 @@ describe("run 5: the nearest free host, scored by its own numbers", () => {
     // Once a report is taken SENT_REFLECT_MS after them, they no longer count.
     advance(2_100);
     expect((await pick()).choice?.candidates.find((c) => c.coordinator === "coordinator-eu.example.com")?.free).toBe(4);
+  });
+});
+
+/*
+ * Run 6 (3c: nearest free host 72 % idle, 22 % in phase 1, 37 % under CPU load). Free hosts were
+ * compared by their time for a fixed reference call (1,000 tokens in, 200 out): 19-29 s on 1.5b CPU
+ * hosts, so a 9 s gap between a host measured fast and one on its class's prior outweighed distance
+ * for calls of about a second. Now a host's time is its speed times this call's work, and two hosts
+ * of one class count as equally fast unless both are measured and differ by SAME_CLASS_SPEED_RATIO.
+ */
+describe("run 6: hosts compared by their time for this call", () => {
+  const M15 = "qwen2.5-coder:1.5b";
+  // The run 6 probe: "Reply with the number n." with max_tokens 8.
+  const SMALL = { paramsB: 1.5, promptTokens: 20, outputTokens: 8 };
+  const host = (region: string, speed: number, speedFrom: FreeHost["speedFrom"], computeClass = "cpu", serviceMs?: number): FreeHost => ({ region, free: 2, rttMs: 40, computeClass, speed, speedFrom, ...(serviceMs ? { serviceMs } : {}) });
+  // Portal in lhr: the EU coordinator is next door, the US one (ord) across the Atlantic. The US has more room.
+  const us = (freeHosts: FreeHost[], o: Partial<LatencyCandidate> = {}) => cand({ url: US, rttMs: 75, agentRttMs: 120, free: 10, agents: 5, serviceMs: 1_000, callP50Ms: 1_000, freeRegions: freeHosts.map((h) => h.region), freeHosts, ...o });
+  const eu = (freeHosts: FreeHost[], o: Partial<LatencyCandidate> = {}) => cand({ url: EU, rttMs: 4, agentRttMs: 15, free: 4, agents: 2, serviceMs: 1_000, callP50Ms: 1_000, freeRegions: freeHosts.map((h) => h.region), freeHosts, ...o });
+
+  it("keeps an lhr buyer on the free lhr host, though iad was measured faster than lhr's prior (inf-1795606309908-ba1349fe, inf-1795606309948-152594a8)", () => {
+    // As recorded: "hosts iad 19348 ms vs lhr 28691 ms": iad at a measured 0.337, lhr at the CPU prior 0.5.
+    const usHosts = [host("iad", 0.337, "class", "cpu", 19_348), host("lax", 0.337, "class", "cpu", 19_348)];
+    const euHosts = [host("lhr", 0.5, "prior", "cpu", 28_691), host("fra", 0.5, "prior", "cpu", 28_691)];
+    for (const call of [SMALL, undefined]) {
+      const c = chooseByLatency([us(usHosts), eu(euHosts)], US, POLICY, { clientRegion: "lhr", portalRegion: "lhr", call });
+      expect(c).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "locality" });
+    }
+    // Both measured on their own calls, but less than 1.5 times apart: still alike, distance decides.
+    const c = chooseByLatency([us([host("iad", 0.34, "host")]), eu([host("lhr", 0.48, "host")])], US, POLICY, { clientRegion: "lhr", call: SMALL });
+    expect(c).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "locality" });
+  });
+
+  it("keeps a fra buyer in the EU rather than on a jnb host (inf-1795606309948-dc24048a)", () => {
+    const usHosts = [host("jnb", 0.3, "host"), host("iad", 0.3, "class")];
+    for (const euHosts of [[host("fra", 0.5, "prior")], [host("fra", 0.42, "host"), host("lhr", 0.5, "class")]]) {
+      const c = chooseByLatency([us(usHosts, { rttMs: 20 }), eu(euHosts)], US, POLICY, { clientRegion: "fra", call: SMALL });
+      expect(c).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "locality" });
+    }
+  });
+
+  it("a genuinely faster GPU elsewhere still wins a large call, and the time is for that call", () => {
+    const big = { paramsB: 7, promptTokens: 3_000, outputTokens: 2_000 };
+    const gpu = host("iad", 0.1, "prior", "gpu");
+    const cpu = host("lhr", 0.5, "prior", "cpu");
+    const c = chooseByLatency([us([gpu]), eu([cpu])], EU, POLICY, { clientRegion: "lhr", call: big });
+    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "latency" });
+    expect(c.reason).toContain(`hosts iad ${hostCallMs(gpu, big)} ms (gpu, prior) vs lhr ${hostCallMs(cpu, big)} ms (cpu, prior)`);
+    expect(hostCallMs(cpu, big)!).toBeGreaterThan(10 * hostCallMs(gpu, big)!);
+  });
+
+  it("a same-class host measured much faster on its own calls can still win", () => {
+    const mid = { paramsB: 1.5, promptTokens: 2_000, outputTokens: 1_000 };
+    const c = chooseByLatency([us([host("iad", 0.15, "host")]), eu([host("lhr", 0.6, "host")])], EU, POLICY, { clientRegion: "lhr", call: mid });
+    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "latency" });
+  });
+
+  it("which hosts count as equally fast", () => {
+    const h = (computeClass: string | undefined, speed: number, speedFrom?: "host" | "class" | "prior") => ({ computeClass, speed, speedFrom });
+    expect(equallyFast(h("cpu", 0.3, "class"), h("cpu", 0.5, "prior"))).toBe(true);
+    expect(equallyFast(h("cpu", 0.3, "host"), h("cpu", 0.9, "prior"))).toBe(true);
+    expect(equallyFast(h("cpu", 0.4, "host"), h("cpu", 0.5, "host"))).toBe(true);
+    expect(equallyFast(h("cpu", 0.2, "host"), h("cpu", 0.5, "host"))).toBe(false);
+    expect(equallyFast(h("cpu", 0.5, "prior"), h("gpu", 0.1, "prior"))).toBe(false);
+    expect(equallyFast(h(undefined, 0.5), h(undefined, 0.5))).toBe(false);
+  });
+
+  it("the directory reads each host's class and speed and passes the call's size", async () => {
+    const load = (free: number, freeHosts: unknown[]) => ({ [M15]: { agents: 2, idle: 0, free, waiting: 0, agentRttMs: 60, serviceMs: 1_000, freeRegions: (freeHosts as Array<{ region: string }>).map((x) => x.region), freeHosts } });
+    const reports: Record<string, CapacityReport> = {
+      [US]: { reachable: true, rttMs: 75, agentModels: [M15], modelLoad: load(10, [{ region: "iad", free: 2, rttMs: 40, serviceMs: 19_348, computeClass: "cpu", speed: 0.337, speedFrom: "class" }]), pickupP90Ms: 200, callP50Ms: 1_000 },
+      [EU]: { reachable: true, rttMs: 4, agentModels: [M15], modelLoad: load(12, [{ region: "lhr", free: 2, rttMs: 10, serviceMs: 28_691, computeClass: "cpu", speed: 0.5, speedFrom: "prior" }]), pickupP90Ms: 200, callP50Ms: 1_000 },
+    };
+    const probe = vi.fn(async (url: string) => reports[url]);
+    const dir = createChatCapacityDirectory({ candidates: async () => [US, EU], allowed: () => true, ttlMs: 15_000, now: () => 1_000_000, probe, latency: POLICY, portalRegion: "lhr" });
+    const call = callSizeOf({ messages: [{ role: "user", content: "Reply with the number 7." }], max_tokens: 8 });
+    const pick = await dir.pick({ kind: "network", model: M15 }, [], { clientRegion: "lhr", call });
+    expect(pick.url).toBe(EU);
+    expect(pick.choice?.rule).toBe("locality");
+    // The hosts' times are for this call (a few seconds at most), not the 19-29 s reference call.
+    const size = callSizeFor(M15, call);
+    expect(size).toEqual({ paramsB: 1.5, promptTokens: call!.promptTokens, outputTokens: 8 });
+    const iadMs = hostCallMs({ computeClass: "cpu", speed: 0.337 }, size)!;
+    const lhrMs = hostCallMs({ computeClass: "cpu", speed: 0.5 }, size)!;
+    expect(lhrMs).toBeLessThan(5_000);
+    expect(pick.choice?.reason).toContain(`hosts iad ${iadMs} ms (cpu, class) vs lhr ${lhrMs} ms (cpu, prior)`);
+  });
+
+  it("a /v1 call's size: prompt tokens as the coordinator counts them, and max_tokens when set", () => {
+    const messages = [{ role: "user", content: "x".repeat(400) }];
+    const n = Math.ceil(Buffer.byteLength(JSON.stringify({ messages, tools: [] }), "utf8") / 4);
+    expect(callSizeOf({ messages, max_tokens: 64 })).toEqual({ promptTokens: n, maxTokens: 64 });
+    expect(callSizeOf({ messages })).toEqual({ promptTokens: n });
+    expect(callSizeOf(null)).toMatchObject({ promptTokens: expect.any(Number) });
   });
 });
