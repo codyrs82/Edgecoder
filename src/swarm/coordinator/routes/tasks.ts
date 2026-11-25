@@ -119,10 +119,12 @@ import {
   isPeerOffered,
   peerWorkCostMsat,
   accrueResultCredits,
-  settleTaskIfDone
+  settleTaskIfDone,
+  reclaimLateInferenceResult,
+  payTimedOutPartialReply
 } from "../results.js";
 import { closeUnreservedBillingRow } from "../billing-restore.js";
-import { inferenceStreams, judgeInferenceReply, retryInferenceElsewhere } from "./inference.js";
+import { clearClaimDeadline, inferenceStreams, judgeInferenceReply, retryInferenceElsewhere } from "./inference.js";
 import { isMemoryRefusal, noteAgentResult, noteDispatched } from "../memory-admission.js";
 import { EMPTY_REPLY_ERROR } from "../../inference-runner.js";
 import { judgeResult } from "../../result-outcome.js";
@@ -592,13 +594,24 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       // subtask went back on the queue), but it was returned, not abandoned: the lapse recorded for
       // it is withdrawn. Only on the agent's own signed request (the event exists only if it held
       // that claim).
-      if (verified && verified.agentId === body.agentId && behaviorTracker.forgiveAbandonedClaim(body.agentId, body.subtaskId)) {
+      const ownRequest = Boolean(verified && verified.agentId === body.agentId);
+      if (ownRequest && behaviorTracker.forgiveAbandonedClaim(body.agentId, body.subtaskId)) {
         app.log.info({ subtaskId: body.subtaskId, agentId: body.agentId }, "late_result_withdraws_abandoned_claim");
       }
-      return reply.code(late.statusCode).send(late.body);
+      // A model call nobody else has taken since, within the grace (results.ts LATE_RESULT_GRACE_MS):
+      // the claim goes back to this agent and its result is settled (paid once) like an on-time one.
+      if (!ownRequest || !reclaimLateInferenceResult(body.subtaskId, body.agentId)) return reply.code(late.statusCode).send(late.body);
+      clearClaimDeadline(body.subtaskId);
+      app.log.info({ subtaskId: body.subtaskId, agentId: body.agentId }, "late_result_accepted");
     }
     // ── #44: claim ownership, before anything is recorded ──
-    const claim = queue.getClaim(body.subtaskId);
+    let claim = queue.getClaim(body.subtaskId);
+    // The lease lapsed just now (this lookup expired it): the same late-result rule as above.
+    if (claim && !claim.claimedBy && verified && verified.agentId === body.agentId && reclaimLateInferenceResult(body.subtaskId, body.agentId)) {
+      clearClaimDeadline(body.subtaskId);
+      app.log.info({ subtaskId: body.subtaskId, agentId: body.agentId }, "late_result_accepted");
+      claim = queue.getClaim(body.subtaskId);
+    }
     // Results forwarded by a peer coordinator (gossip-offered subtask executed elsewhere) carry the
     // mesh token but no agent signature and have no local claim. They are accepted for bookkeeping
     // and dependency release only; no credits are accrued here.
@@ -699,7 +712,9 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     if (judgement.rejectedClaim) {
       app.log.warn({ subtaskId: body.subtaskId, agentId: body.agentId, reason: judgement.rejectedClaim }, "program_error_claim_rejected");
     }
-    const payableFailure = judgement.payableFailure && !isPeerForward && !isPeerOffered(body.subtaskId);
+    // A model call that hit its deadline after part of its reply reached the requester is paid for that part.
+    const timedOutPartial = !isPeerForward && !!subtask && !isPeerOffered(body.subtaskId) && payTimedOutPartialReply(subtask, body, inferenceStreams.replyBytes(body.subtaskId) ?? 0);
+    const payableFailure = (judgement.payableFailure || timedOutPartial) && !isPeerForward && !isPeerOffered(body.subtaskId);
     // Ongoing hardware evidence: real work against the verified tier (server clock, not the agent's).
     // The ask is re-posted every time so its reliability score (minReliability bids) stays current.
     // The agent handed the call back for memory ("memory_..."): not a failure of the agent, but no

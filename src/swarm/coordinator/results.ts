@@ -13,12 +13,14 @@ import { accruePricedJob, grantCreditsIdempotent, refundTxId, rewardAccountForAg
 import { modelTokenPrice } from "../../economy/cloud-pricing.js";
 import {
   clampToBand,
+  expectedWorkMs,
   inferenceCostMsat,
   jobCostMsat,
   msatToCSats,
   ratePerSecondMsat,
   splitJobCost,
-  FEE_ROUNDING
+  FEE_ROUNDING,
+  WORK_PROMPT_TOKEN_ALLOWANCE
 } from "../../economy/job-pricing.js";
 import { paramsB } from "../../inference-api/auto-route.js";
 import { pgStore } from "../../db/store.js";
@@ -75,6 +77,7 @@ import {
 import { depTracker, recordWorkReceipt } from "./services.js";
 import { persistStatsLedgerRecord } from "./stats-ledger.js";
 import { attestAgentSigningKey } from "./attested-keys.js";
+import { boundTokenCounts, maxTokensOf } from "../inference-streams.js";
 
 /** Store a subtask's output and release (and gossip) the subtasks that depended on it. */
 export function releaseDependents(subtaskId: string, output: string): void {
@@ -290,6 +293,54 @@ export function enqueueReplica(req: ReplicaRequest): void {
   );
 }
 
+/**
+ * How long after its claim lapsed a model call's holder may still return its result and be paid for
+ * it (network test 2026-11-24: 43 calls closed at their 180 s timeout with the host's work unpaid).
+ * Only while nobody else has claimed the call (queue.ts reclaimLapsed), so it is paid once.
+ */
+export const LATE_RESULT_GRACE_MS = 60_000;
+
+/**
+ * A late model-call result (its holder's lease lapsed): the claim goes back to that agent when the
+ * call is still waiting, unclaimed, within LATE_RESULT_GRACE_MS of the lapse and its task is still
+ * billed, so /result takes and settles it as usual, and the lapse no longer counts against the agent
+ * (BHV006). False otherwise (the call is refused as before).
+ */
+export function reclaimLateInferenceResult(subtaskId: string, agentId: string, nowMs = Date.now()): boolean {
+  const subtask = queue.getSubtask(subtaskId);
+  if (subtask?.kind !== "inference") return false;
+  const billing = taskBilling.get(subtask.taskId);
+  if (billing?.refunded) return false;
+  if (!queue.reclaimLapsed(subtaskId, agentId, LATE_RESULT_GRACE_MS, nowMs)) return false;
+  // BHV006: returned, not abandoned (as a refused late result is, #539).
+  behaviorTracker.forgiveAbandonedClaim(agentId, subtaskId);
+  return true;
+}
+
+/** The error an agent reports when a model call ran out its own deadline (inference-runner.ts). */
+export const INFERENCE_TIMED_OUT = /^timed out after \d+ s$/;
+
+/**
+ * A model call that hit its deadline after part of its reply reached the requester is paid for what
+ * was delivered, as a call its requester cancelled is (inference-cancel.ts): the host did that work
+ * and the requester has it. The agent's engine never gave counts for it, so they are estimated from
+ * the bytes (4 per token, kept within the /inference/chunks bounds) unless the agent sent some.
+ * Returns whether the failed result is payable; a timeout with nothing delivered stays unpaid.
+ */
+export function payTimedOutPartialReply(subtask: Subtask, result: { ok: boolean; error?: string }, replyBytes: number): boolean {
+  if (subtask.kind !== "inference" || result.ok || !INFERENCE_TIMED_OUT.test(result.error ?? "") || !(replyBytes > 0)) return false;
+  const inputBytes = Buffer.byteLength(subtask.input, "utf8");
+  const estimate = boundTokenCounts({ promptTokens: Math.ceil(inputBytes / 4), outputTokens: Math.ceil(replyBytes / 4) }, inputBytes, replyBytes, maxTokensOf(subtask.input));
+  const usage = usagePending.get(subtask.taskId);
+  const billing = taskBilling.get(subtask.taskId);
+  for (const t of [usage, billing]) {
+    if (!t || t.promptTokens !== undefined || t.outputTokens !== undefined) continue;
+    t.promptTokens = estimate.promptTokens;
+    t.outputTokens = estimate.outputTokens;
+  }
+  return true;
+}
+
 /** A model call's own work time (prompt + generation) as its agent reported it, when it did. */
 export function floorWorkMs(b: { promptMs?: number; genMs?: number } | undefined): number | undefined {
   if (!b || (b.promptMs === undefined && b.genMs === undefined)) return undefined;
@@ -348,6 +399,10 @@ export function priceExecution(r: ExecutionResult<ResultMeta>) {
           // Nor is time the call spent waiting on the host while another call ran: the floor counts
           // at most the call's own prompt + generation time, when the agent reports it (B6).
           floorWorkMs: floorWorkMs(taskBilling.get(taskId)),
+          // Nor more than that many tokens take on a slow host of the class (C10): two calls sharing one
+          // engine interleave, so a short call's own reported time spans the long one. This also keeps
+          // the cost within the hold, which is sized on the same estimate for the call's caps.
+          floorMaxMs: expectedWorkMs({ paramsB: paramsB(subtask.requestedModel ?? ""), computeClass, promptTokens: Math.min(usageForTask?.promptTokens ?? 0, Buffer.byteLength(subtask.input, "utf8") + WORK_PROMPT_TOKEN_ALLOWANCE), outputTokens: usageForTask?.outputTokens ?? 0, tierWeight: hardwareWeight }),
           // One machine's power, shared by the calls its slots run at once.
           floorSlots: agentLoadReport(r.agentId)?.slots,
           computeClass,

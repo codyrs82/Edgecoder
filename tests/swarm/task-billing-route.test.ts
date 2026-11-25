@@ -210,11 +210,11 @@ async function submitJob(extra: Record<string, unknown> = {}) {
 }
 
 /** Report a result after `ms` of server-clock time has passed since the claim. */
-async function resultAfter(ms: number, body: Record<string, unknown>) {
+async function resultAfter(ms: number, body: Record<string, unknown>, by: PeerKeys = worker) {
   vi.useFakeTimers({ toFake: ["Date"] });
   try {
     vi.setSystemTime(Date.now() + ms);
-    return await post("/result", body, worker);
+    return await post("/result", body, by);
   } finally {
     vi.useRealTimers();
   }
@@ -355,7 +355,8 @@ describe("/result pricing (#38)", () => {
       expect((await submitInference(taskId)).statusCode).toBe(200);
       const st = (await post("/pull", { agentId: worker.peerId, inferenceSlots: 2 }, worker)).json().subtask as { id: string; taskId: string };
       expect(st?.taskId).toBe(taskId);
-      expect((await post("/inference/chunks", { subtaskId: st.id, seq: 0, delta: "ok", done: true, promptTokens: 2, outputTokens: 1, ...timings }, worker)).statusCode).toBe(200);
+      // 60 tokens out take over 30 s on a slow host (expectedWorkMs), so the wall time is what binds.
+      expect((await post("/inference/chunks", { subtaskId: st.id, seq: 0, delta: "ok", done: true, promptTokens: 2, outputTokens: 60, ...timings }, worker)).statusCode).toBe(200);
       expect((await resultAfter(30_000, { subtaskId: st.id, taskId, agentId: worker.peerId, ok: true, output: "ok", durationMs: 30_000 })).statusCode).toBe(200);
       return (await accrualsFor(st.id))[0].costMsat as number;
     };
@@ -376,6 +377,163 @@ describe("/result pricing (#38)", () => {
     expect(await earnedMsat(worker.peerId)).toBe(afterFirst);
     expect(await accrualsFor(st.id)).toHaveLength(1);
     expect(balanceBefore - creditEngine.balance(requester.peerId)).toBeCloseTo(charged, 6);
+  });
+});
+
+describe("holds sized on the work, contention, and late results (network test 2026-11-24)", () => {
+  const worker2 = createPeerKeys("agent-billing-worker-2");
+  let queue: typeof import("../../src/swarm/coordinator/context.js")["queue"];
+  const ledgerOk = async () => (await app.inject({ method: "GET", url: "/ledger/verify", remoteAddress: REMOTE, headers: { "x-mesh-token": MESH } })).json();
+
+  const registerWorker2 = async (installedModels: string[]) => {
+    const payload = JSON.stringify({ os: "linux", version: "1", mode: "swarm-only", agentId: worker2.peerId, registrationToken: VALID_TOKEN, publicKeyPem: worker2.publicKeyPem, sandboxMode: "docker", installedModels });
+    const signed = signRequest({ method: "POST", path: "/register", bodyHash: hashRequestBody(payload), privateKeyPem: worker2.privateKeyPem, agentId: worker2.peerId }) as unknown as Record<string, string>;
+    expect((await app.inject({ method: "POST", url: "/register", remoteAddress: REMOTE, headers: { "content-type": "application/json", ...signed }, payload })).statusCode).toBe(200);
+  };
+
+  beforeAll(async () => {
+    ({ queue } = await import("../../src/swarm/coordinator/context.js"));
+    await registerWorker2([MODEL]);
+  });
+  // The later tests here expect one holder of the model.
+  afterAll(async () => registerWorker2([]));
+
+  /** Pull as `by` once any placement preference for the other holder has run out (locality.ts, 2 s). */
+  async function pullAs(by: PeerKeys) {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 3_000);
+      return (await post("/pull", { agentId: by.peerId, inferenceSlots: 2 }, by)).json().subtask as { id: string; taskId: string } | undefined;
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  /** Submit a call with `timeoutMs` and have `by` claim it. */
+  async function claimed(timeoutMs: number, by: PeerKeys = worker, maxTokens = 48) {
+    const taskId = `inf-${randomUUID()}`;
+    const balanceBefore = creditEngine.balance(requester.peerId);
+    const sub = await post("/inference/submit", { taskId, submitterAccountId: requester.peerId, model: MODEL, messages: [{ role: "user", content: "hi" }], timeoutMs, maxTokens }, requester);
+    expect(sub.statusCode).toBe(200);
+    const st = (await pullAs(by))!;
+    expect(st?.taskId).toBe(taskId);
+    return { taskId, st, balanceBefore, reservedMsat: Math.round(sub.json().reservedCSats * 1000) };
+  }
+
+  test("C8: a short call's hold is sized on its own work, the same for a 60 s or a 180 s timeout", async () => {
+    const settle = async (c: Awaited<ReturnType<typeof claimed>>) => {
+      expect((await post("/inference/chunks", { subtaskId: c.st.id, seq: 0, delta: "ok", done: true, promptTokens: 2, outputTokens: 1 }, worker)).statusCode).toBe(200);
+      expect((await resultAfter(5_000, { subtaskId: c.st.id, taskId: c.taskId, agentId: worker.peerId, ok: true, output: "ok", durationMs: 2_000 })).statusCode).toBe(200);
+      const [acc] = await accrualsFor(c.st.id);
+      expect(acc.costMsat).toBeLessThanOrEqual(c.reservedMsat);
+      expect(c.balanceBefore - creditEngine.balance(requester.peerId)).toBeCloseTo(acc.costMsat / 1000, 6);
+    };
+    const a = await claimed(60_000);
+    await settle(a);
+    const b = await claimed(180_000);
+    await settle(b);
+    expect(a.reservedMsat).toBeGreaterThan(0);
+    expect(b.reservedMsat).toBe(a.reservedMsat);
+    // A call that may write 4,096 tokens on a slow CPU can use its whole timeout: that bound still applies.
+    const big = await claimed(180_000, worker, 4_096);
+    await settle(big);
+    expect(big.reservedMsat).toBeGreaterThan(a.reservedMsat * 5);
+    expect(await ledgerOk()).toEqual({ ok: true });
+  });
+
+  test("C10: a short call whose reported time spans a long neighbour's is billed for its own tokens' work", async () => {
+    // The engine interleaves the two calls, so the short one's prompt + generation time covers ~29 s
+    // of the long call's; it is billed what 12 tokens take on a slow host, and stays within its hold.
+    const long = await claimed(60_000);
+    const short = await claimed(60_000);
+    let reply = "";
+    while (reply.length < 2_000) reply += `${randomUUID()} `;
+    expect((await post("/inference/chunks", { subtaskId: long.st.id, seq: 0, delta: reply, done: true, promptTokens: 40, outputTokens: 500, promptMs: 1_000, genMs: 29_000 }, worker)).statusCode).toBe(200);
+    expect((await post("/inference/chunks", { subtaskId: short.st.id, seq: 0, delta: "ok", done: true, promptTokens: 10, outputTokens: 2, promptMs: 14_000, genMs: 15_000 }, worker)).statusCode).toBe(200);
+    expect((await resultAfter(30_000, { subtaskId: long.st.id, taskId: long.taskId, agentId: worker.peerId, ok: true, output: reply, durationMs: 30_000 })).statusCode).toBe(200);
+    expect((await resultAfter(30_000, { subtaskId: short.st.id, taskId: short.taskId, agentId: worker.peerId, ok: true, output: "ok", durationMs: 30_000 })).statusCode).toBe(200);
+    const [longAcc] = await accrualsFor(long.st.id);
+    const [shortAcc] = await accrualsFor(short.st.id);
+    expect(shortAcc.costMsat).toBeGreaterThan(0);
+    expect(shortAcc.costMsat * 2).toBeLessThan(longAcc.costMsat);
+    expect(shortAcc.costMsat).toBeLessThanOrEqual(short.reservedMsat);
+    expect(await ledgerOk()).toEqual({ ok: true });
+  });
+
+  test("a late result is paid once when nobody else took the call, and a replay earns nothing more", async () => {
+    const { taskId, st, balanceBefore } = await claimed(120_000);
+    // The worker went quiet past the liveness window: its claim lapses and the call is back on the queue.
+    queue.expireLeases(Date.now() + 50_000);
+    expect(queue.isUnclaimed(st.id)).toBe(true);
+    const before = await earnedMsat(worker.peerId);
+    // Its reply and result still come: the claim goes back to it and the call settles as usual.
+    expect((await post("/inference/chunks", { subtaskId: st.id, seq: 0, delta: "late reply", done: true, promptTokens: 5, outputTokens: 3 }, worker)).statusCode).toBe(200);
+    expect((await post("/result", { subtaskId: st.id, taskId, agentId: worker.peerId, ok: true, output: "late reply", durationMs: 2_000 }, worker)).statusCode).toBe(200);
+    const accs = await accrualsFor(st.id);
+    expect(accs).toHaveLength(1);
+    const earned = (await earnedMsat(worker.peerId)) - before;
+    expect(earned).toBe(accs[0].msat);
+    expect(earned).toBeGreaterThan(0);
+    expect(balanceBefore - creditEngine.balance(requester.peerId)).toBeCloseTo(accs[0].costMsat / 1000, 6);
+    // Sent again: nothing more is paid or charged.
+    expect((await post("/result", { subtaskId: st.id, taskId, agentId: worker.peerId, ok: true, output: "late reply", durationMs: 2_000 }, worker)).statusCode).not.toBe(200);
+    expect(await accrualsFor(st.id)).toHaveLength(1);
+    expect((await earnedMsat(worker.peerId)) - before).toBe(earned);
+    expect(await ledgerOk()).toEqual({ ok: true });
+  });
+
+  test("a late result is refused when another agent took the call (paid once, to the one that ran it)", async () => {
+    const { taskId, st } = await claimed(120_000);
+    queue.expireLeases(Date.now() + 50_000);
+    const again = await pullAs(worker2);
+    expect(again?.id).toBe(st.id);
+    const before = await earnedMsat(worker.peerId);
+    const late = await post("/result", { subtaskId: st.id, taskId, agentId: worker.peerId, ok: true, output: "late", durationMs: 2_000 }, worker);
+    expect(late.statusCode).toBe(409);
+    expect(late.json().error).toBe("lease_expired");
+    expect(await earnedMsat(worker.peerId)).toBe(before);
+    expect((await post("/inference/chunks", { subtaskId: st.id, seq: 0, delta: "mine", done: true, promptTokens: 5, outputTokens: 1 }, worker2)).statusCode).toBe(200);
+    expect((await resultAfter(5_000, { subtaskId: st.id, taskId, agentId: worker2.peerId, ok: true, output: "mine", durationMs: 1_000 }, worker2)).statusCode).toBe(200);
+    const accs = await accrualsFor(st.id);
+    expect(accs).toHaveLength(1);
+    expect(accs[0].sourceAgentId).toBe(worker2.peerId);
+    expect(await ledgerOk()).toEqual({ ok: true });
+  });
+
+  test("a call whose claim lapsed with no time left waits for its holder's result instead of refunding at once", async () => {
+    // 10 s timeout: the hard deadline (claim + 10 s + 30 s grace) leaves no time for another agent.
+    const { taskId, st } = await claimed(10_000);
+    queue.expireLeases(Date.now() + 41_000);
+    // Off limits to other agents while it waits, and not cancelled.
+    expect((await pullAs(worker2)) ?? null).toBeNull();
+    expect(queue.getSubtask(st.id)).toBeDefined();
+    const before = await earnedMsat(worker.peerId);
+    expect((await post("/inference/chunks", { subtaskId: st.id, seq: 0, delta: "done at last", done: true, promptTokens: 5, outputTokens: 3 }, worker)).statusCode).toBe(200);
+    expect((await post("/result", { subtaskId: st.id, taskId, agentId: worker.peerId, ok: true, output: "done at last", durationMs: 10_000 }, worker)).statusCode).toBe(200);
+    expect(await accrualsFor(st.id)).toHaveLength(1);
+    expect(await earnedMsat(worker.peerId)).toBeGreaterThan(before);
+    expect(await ledgerOk()).toEqual({ ok: true });
+  });
+
+  test("a call that hit its deadline is paid for the part of the reply the requester got; with nothing delivered it is not", async () => {
+    const partial = await claimed(60_000, worker2);
+    const before = await earnedMsat(worker2.peerId);
+    // As the agent reports a timeout (inference-runner.ts): the text so far, then a failed result. No counts.
+    expect((await post("/inference/chunks", { subtaskId: partial.st.id, seq: 0, delta: "half of a long answer", done: true, error: "timed out after 60 s" }, worker2)).statusCode).toBe(200);
+    expect((await resultAfter(60_000, { subtaskId: partial.st.id, taskId: partial.taskId, agentId: worker2.peerId, ok: false, output: "half of a long answer", error: "timed out after 60 s", durationMs: 60_000 }, worker2)).statusCode).toBe(200);
+    const [acc] = await accrualsFor(partial.st.id);
+    expect(acc.costMsat).toBeGreaterThan(0);
+    expect(acc.costMsat).toBeLessThanOrEqual(partial.reservedMsat);
+    expect((await earnedMsat(worker2.peerId)) - before).toBe(acc.msat);
+    expect(partial.balanceBefore - creditEngine.balance(requester.peerId)).toBeCloseTo(acc.costMsat / 1000, 6);
+
+    const nothing = await claimed(60_000, worker2);
+    const mid = await earnedMsat(worker2.peerId);
+    expect((await resultAfter(60_000, { subtaskId: nothing.st.id, taskId: nothing.taskId, agentId: worker2.peerId, ok: false, output: "", error: "timed out after 60 s", durationMs: 60_000 }, worker2)).statusCode).toBe(200);
+    expect(await accrualsFor(nothing.st.id)).toEqual([]);
+    expect(await earnedMsat(worker2.peerId)).toBe(mid);
+    expect(creditEngine.balance(requester.peerId)).toBeCloseTo(nothing.balanceBefore, 6);
+    expect(await ledgerOk()).toEqual({ ok: true });
   });
 });
 

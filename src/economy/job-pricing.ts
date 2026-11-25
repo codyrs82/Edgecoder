@@ -116,6 +116,48 @@ export const TOKEN_PRICE_USD_PER_M: Array<{ maxB: number; input: number; output:
  */
 export const POWER_FLOOR_USD_PER_HOUR: Record<string, number> = { cpu: 0.025, apple: 0.014, gpu: 0.05, "gpu.dc": 0.15 };
 
+/**
+ * How long a model call's own work can take on a slow host of a class (C8/C10, network test
+ * 2026-11-24): decode tok/s of a 7B model there (scaled by 7 / paramsB for other sizes) and how many
+ * times faster it reads the prompt. These are a slow machine's rates, a third or less of what
+ * best-fit.ts expects of a typical one, so an honest host stays inside the estimate.
+ */
+export const SLOW_HOST_DECODE_TPS_7B: Record<string, number> = { cpu: 3, apple: 8, gpu: 15, "gpu.dc": 30 };
+export const SLOW_HOST_PREFILL_FACTOR: Record<string, number> = { cpu: 6, apple: 8, gpu: 15, "gpu.dc": 25 };
+/**
+ * Prompt tokens a call's work is estimated on: at most its request's bytes plus this (the chat
+ * template). Not PROMPT_TOKEN_ALLOWANCE (inference-streams.ts, 2048), which bounds the counts the call
+ * is priced on and would make every short call look like a 2,000-token one. The hold and the billed
+ * floor both use this bound, so the floor still never exceeds the hold.
+ */
+export const WORK_PROMPT_TOKEN_ALLOWANCE = 256;
+/** Safety factor on the slow-host estimate, and a fixed allowance per call (first token, scheduling). */
+export const WORK_TIME_SAFETY = 2;
+export const WORK_TIME_OVERHEAD_MS = 5_000;
+
+/**
+ * The most seconds of model work a call with these token counts takes on a slow host of
+ * `computeClass` (on a tier of weight `tierWeight`, default the base tier): WORK_TIME_OVERHEAD_MS +
+ * WORK_TIME_SAFETY x (prompt / prefill rate + output / decode rate) / tierWeight. It only grows with
+ * the counts and only shrinks with the weight, so the floor it allows (weight × seconds) is largest on
+ * the class's top tier for the call's caps, and that bounds what any tier can bill for any counts it
+ * can report. Used two ways:
+ * - the power-floor part of a model call's hold (inferenceReserveMsat) is sized on it for the call's
+ *   caps (capped by the timeout), not on the timeout alone;
+ * - the power floor a call is billed (inferenceCostMsat `floorMaxMs`) counts at most this for the
+ *   counts it reported, so a short call that shared a busy host is not billed the other call's time.
+ */
+export function expectedWorkMs(input: { paramsB: number; computeClass: string; promptTokens: number; outputTokens: number; tierWeight?: number }): number {
+  const b = Math.max(0.3, Number.isFinite(input.paramsB) ? input.paramsB : 7);
+  const decode = Math.max(0.05, (SLOW_HOST_DECODE_TPS_7B[input.computeClass] ?? SLOW_HOST_DECODE_TPS_7B.cpu) * (7 / b));
+  const prefill = decode * (SLOW_HOST_PREFILL_FACTOR[input.computeClass] ?? SLOW_HOST_PREFILL_FACTOR.cpu);
+  const seconds = Math.max(0, input.promptTokens || 0) / prefill + Math.max(0, input.outputTokens || 0) / decode;
+  // A tier's weight is its speed over the class's base tier (credits per second): it does the same
+  // tokens in 1 / weight of the time, and is paid weight × the base rate per second for them.
+  const weight = typeof input.tierWeight === "number" && Number.isFinite(input.tierWeight) ? Math.max(1, input.tierWeight) : 1;
+  return Math.ceil(WORK_TIME_OVERHEAD_MS + (WORK_TIME_SAFETY * seconds * 1000) / weight);
+}
+
 export function tokenPriceUsdPerM(paramsB: number): { input: number; output: number } {
   const row = TOKEN_PRICE_USD_PER_M.find((r) => paramsB <= r.maxB) ?? TOKEN_PRICE_USD_PER_M[TOKEN_PRICE_USD_PER_M.length - 1];
   return { input: row.input, output: row.output };
@@ -159,6 +201,13 @@ export const usdToMsat = (usd: number, btcUsd: number) => (btcUsd > 0 ? (usd / b
  * sharing a host with a long one cost 0.483 cSats, ~160x normal). It only ever lowers the floor
  * (the wall time stays the ceiling), so an agent gains nothing by over-reporting it.
  *
+ * Both are reports from the agent, and under contention they are not enough: a host that runs two
+ * calls at once in one engine interleaves them, so a short call's own prompt + generation time spans
+ * most of the long call (C10, 2026-11-24: a 1.5b probe sharing a CPU host with a long call billed
+ * 0.427 cSats over 83 s). `floorMaxMs` (expectedWorkMs for the counts the call reported) caps the
+ * floor's seconds at what that many tokens take on a slow host of the class. The settle path
+ * (results.ts) always passes it: it is also what keeps the cost within the hold (inferenceReserveMsat).
+ *
  * The floor is the machine's electricity per second, so it is split across the agent's parallel
  * model slots (`floorSlots`, its reported inferenceSlots; 2026-11-16): an agent running N calls at
  * once draws one machine's power, not N. Without the split a 4-slot Mac or a 12-slot vLLM GPU
@@ -182,6 +231,8 @@ export function inferenceCostMsat(input: {
   floorExcludeMs?: number;
   /** The call's own model time (prompt + generation) inside durationMs; the power floor counts at most this. */
   floorWorkMs?: number;
+  /** At most this many seconds of floor (expectedWorkMs for the reported counts); unset: no cap. */
+  floorMaxMs?: number;
   /** The agent's parallel model slots; the power floor is divided by them (default 1). */
   floorSlots?: number;
   computeClass: string;
@@ -194,7 +245,8 @@ export function inferenceCostMsat(input: {
   const tokenUsd = tokensUsd(price, input.promptTokens ?? 0, input.outputTokens ?? 0, input.price ? input.cachedPromptTokens : 0);
   const exclude = typeof input.floorExcludeMs === "number" && Number.isFinite(input.floorExcludeMs) ? Math.max(0, input.floorExcludeMs) : 0;
   const work = typeof input.floorWorkMs === "number" && Number.isFinite(input.floorWorkMs) ? Math.max(0, input.floorWorkMs) : Number.POSITIVE_INFINITY;
-  const floorMs = Math.max(0, Math.min(input.durationMs - exclude, work));
+  const most = typeof input.floorMaxMs === "number" && Number.isFinite(input.floorMaxMs) ? Math.max(0, input.floorMaxMs) : Number.POSITIVE_INFINITY;
+  const floorMs = Math.max(0, Math.min(input.durationMs - exclude, work, most));
   const slots = typeof input.floorSlots === "number" && Number.isFinite(input.floorSlots) ? Math.max(1, Math.floor(input.floorSlots)) : 1;
   // A model with its own price (a cloud model) has no power floor: it draws no power on the host,
   // and its price already covers what it costs.
@@ -221,12 +273,19 @@ export const INFERENCE_RESERVE_MARGIN = 1.5;
  * - token bound: the model's price for `promptTokensMax` in and `outputTokensMax` out. The caller
  *   passes the same bounds /inference/chunks puts on reported counts (request bytes + allowance,
  *   max_tokens + allowance), so no accepted count can exceed them;
- * - power-floor bound: the dearest of `floorClasses`' floor (USD/h × its top tier weight) for
- *   `maxDurationMs`, the call's timeout, which also caps the duration it is billed on; one slot.
+ * - power-floor bound: the dearest of `floorClasses`' floor (USD/h × its top tier weight) for the
+ *   seconds the call's own work can take there: expectedWorkMs for its token caps on a slow host of
+ *   the class, at most `maxDurationMs` (the call's timeout, which also caps the duration it is billed
+ *   on); one slot. It was the timeout alone until 2026-11-24 (C8): every 1.5b call held 54.47 cSats
+ *   for a cost of 0.002 to 0.5, and a buyer with ~200 cSats got 402s with 3 or 4 calls in flight.
+ *   Settlement bills the floor on at most expectedWorkMs of the counts the call reported
+ *   (inferenceCostMsat floorMaxMs), never more than this bound.
  *
- * Settlement never takes more than the reserve (results.ts takeTaskBudget); a cost above it (the BTC
- * price fell by over a third, a capped maxCSats, an agent that reports no token counts and is priced
- * per second) is settled at the reserve and logged (job_cost_capped_at_reserve).
+ * Settlement never takes more than the reserve (results.ts takeTaskBudget): a hold is not topped up
+ * after the fact, as the buyer's balance may already be spent on other calls and a top-up that fails
+ * would leave the host's earning without a matching charge. A cost above it (the BTC price fell by
+ * over a third, a capped maxCSats, an agent that reports no token counts and is priced per second) is
+ * settled at the reserve and logged (job_cost_capped_at_reserve).
  */
 export function inferenceReserveMsat(input: {
   paramsB: number;
@@ -235,6 +294,8 @@ export function inferenceReserveMsat(input: {
   btcUsd: number;
   promptTokensMax: number;
   outputTokensMax: number;
+  /** Prompt tokens the work time is estimated on (request bytes + WORK_PROMPT_TOKEN_ALLOWANCE); default promptTokensMax. */
+  workPromptTokensMax?: number;
   maxDurationMs: number;
   floorClasses: Array<{ computeClass: string; maxTierWeight: number }>;
   margin?: number;
@@ -243,8 +304,9 @@ export function inferenceReserveMsat(input: {
 }): { reserveMsat: number; tokenMsat: number; floorMsat: number; capped: boolean } {
   const price = input.price ?? tokenPriceUsdPerM(input.paramsB);
   const tokenUsd = (Math.max(0, input.promptTokensMax) * price.input + Math.max(0, input.outputTokensMax) * price.output) / 1_000_000;
-  const hours = Math.max(0, input.maxDurationMs) / 3_600_000;
-  const floorUsd = input.price ? 0 : Math.max(0, ...input.floorClasses.map((c) => (POWER_FLOOR_USD_PER_HOUR[c.computeClass] ?? POWER_FLOOR_USD_PER_HOUR.cpu) * Math.max(1, c.maxTierWeight) * hours));
+  const hoursIn = (c: { computeClass: string; maxTierWeight: number }) =>
+    Math.min(Math.max(0, input.maxDurationMs), expectedWorkMs({ paramsB: input.paramsB, computeClass: c.computeClass, promptTokens: Math.min(input.promptTokensMax, input.workPromptTokensMax ?? input.promptTokensMax), outputTokens: input.outputTokensMax, tierWeight: c.maxTierWeight })) / 3_600_000;
+  const floorUsd = input.price ? 0 : Math.max(0, ...input.floorClasses.map((c) => (POWER_FLOOR_USD_PER_HOUR[c.computeClass] ?? POWER_FLOOR_USD_PER_HOUR.cpu) * Math.max(1, c.maxTierWeight) * hoursIn(c)));
   const tokenMsat = usdToMsat(tokenUsd, input.btcUsd);
   const floorMsat = usdToMsat(floorUsd, input.btcUsd);
   const bound = Math.max(1, Math.ceil(Math.max(tokenMsat, floorMsat) * (input.margin ?? INFERENCE_RESERVE_MARGIN)));

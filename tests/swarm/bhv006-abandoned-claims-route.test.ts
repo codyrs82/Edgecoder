@@ -123,11 +123,12 @@ describe("BHV006: a heartbeat gap is not misbehaviour", () => {
     await sleep(0);
     expect(abandoned()).toBe(before + 6);
     expect(state.activeBlacklistRecord(worker.peerId)).toBeUndefined();
-    // The results arrive late: refused (the calls went back on the queue), but they were returned.
+    // The results arrive late. Nobody else took the calls, so they are taken (results.ts
+    // LATE_RESULT_GRACE_MS; a call another agent took refuses them, task-billing-route.test.ts), and
+    // either way they were returned, not abandoned.
     for (const subtaskId of ids) {
       const late = await post("/result", { subtaskId, taskId: "x", agentId: worker.peerId, ok: true, output: "late", durationMs: 100 }, worker);
-      expect(late.statusCode).toBe(409);
-      expect(late.json().error).toBe("lease_expired");
+      expect(late.statusCode, late.body).toBe(200);
     }
     expect(abandoned()).toBe(before);
     for (const subtaskId of ids) ctx.queue.removeHeld(subtaskId);

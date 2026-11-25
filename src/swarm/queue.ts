@@ -82,6 +82,13 @@ interface QueueItem {
    * being read: nobody may claim it until it is merged (or LEASE_STATE_WAIT_MS passed).
    */
   leaseStatePending?: boolean;
+  /**
+   * The claim that last lapsed on this item while it waits to be claimed again: its holder's late
+   * result may still be taken within a grace window (reclaimLapsed), as nobody else ran it.
+   */
+  lapsed?: { agentId: string; claimedAt: number; atMs: number };
+  /** A late result's claim given back (reclaimLapsed): its lease holds until then, whatever the deadline. */
+  lateReturnUntilMs?: number;
 }
 
 /**
@@ -389,6 +396,8 @@ export class SwarmQueue {
     item.claimedAt = Date.now();
     item.leaseRenewedAt = item.claimedAt;
     item.attempts = (item.attempts ?? 0) + 1;
+    item.lapsed = undefined;
+    item.lateReturnUntilMs = undefined;
     this.expiredHolders.get(item.subtask.id)?.delete(agentId);
     this.agentClaimCount.set(agentId, (this.agentClaimCount.get(agentId) ?? 0) + 1);
     const { claimedAt, attempts } = item;
@@ -551,7 +560,39 @@ export class SwarmQueue {
       : 0;
     const hard = claimedAt + timeout + this.lease.graceMs;
     const live = (item.leaseRenewedAt ?? claimedAt) + this.lease.livenessMs;
-    return Math.min(hard, live);
+    return Math.max(Math.min(hard, live), item.lateReturnUntilMs ?? 0);
+  }
+
+  /**
+   * Keep an item whose claim just lapsed from other agents until `untilMs` (it still waits for its
+   * lapsed holder's late result: a model call with no time left for another agent to run it).
+   */
+  holdForLateResult(subtaskId: string, untilMs: number): boolean {
+    const item = this.tasks.find((t) => t.subtask.id === subtaskId);
+    if (!item || item.claimedBy || !item.lapsed) return false;
+    item.claimableAfterMs = Math.max(item.claimableAfterMs ?? 0, untilMs);
+    return true;
+  }
+
+  /**
+   * A late result from the agent whose claim on this item lapsed, while nobody else has claimed it
+   * and within `graceMs` of the lapse: the claim is given back to that agent (with its original claim
+   * time) so its result is taken and settled once. False, changing nothing, otherwise (another agent
+   * holds or ran it, the item is gone, or the grace passed).
+   */
+  reclaimLapsed(subtaskId: string, agentId: string, graceMs: number, nowMs = Date.now()): boolean {
+    const item = this.tasks.find((t) => t.subtask.id === subtaskId);
+    const lapsed = item?.lapsed;
+    if (!item || item.claimedBy || item.leaseStatePending || !lapsed || lapsed.agentId !== agentId || nowMs - lapsed.atMs > graceMs) return false;
+    item.claimedBy = agentId;
+    item.claimedAt = lapsed.claimedAt;
+    item.leaseRenewedAt = nowMs;
+    item.lateReturnUntilMs = nowMs + Math.max(this.lease.livenessMs, 30_000);
+    item.lapsed = undefined;
+    this.expiredHolders.get(subtaskId)?.delete(agentId);
+    const attempts = item.attempts ?? 1;
+    this.persist(subtaskId, (store) => store.markSubtaskClaimed(subtaskId, agentId, lapsed.claimedAt, attempts));
+    return true;
   }
 
   /**
@@ -628,6 +669,8 @@ export class SwarmQueue {
       const expiries = (item.leaseExpiries ??= {});
       expiries[holder] = (expiries[holder] ?? 0) + 1;
       if (expiries[holder] >= 2 && !item.excludeAgents?.includes(holder)) item.excludeAgents = [...(item.excludeAgents ?? []), holder];
+      item.lapsed = { agentId: holder, claimedAt: item.claimedAt ?? now, atMs: now };
+      item.lateReturnUntilMs = undefined;
       item.claimedBy = undefined;
       item.claimedAt = undefined;
       item.leaseRenewedAt = undefined;

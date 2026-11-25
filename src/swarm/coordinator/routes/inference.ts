@@ -63,7 +63,7 @@ import {
 import { registerRestrictedRoutes } from "./restricted.js";
 import { servedBy } from "../served-by-route.js";
 import { isFrontierModelId } from "../../../inference-api/frontier-models.js";
-import { taskIdInUse, pricingInFlight, settleTaskIfDone, refundTaskSubmit } from "../results.js";
+import { taskIdInUse, pricingInFlight, settleTaskIfDone, refundTaskSubmit, LATE_RESULT_GRACE_MS, reclaimLateInferenceResult } from "../results.js";
 import { registerInferenceCancelRoute, requesterCancelled } from "../inference-cancel.js";
 import { recordMeshWork } from "../world-activity.js";
 import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
@@ -390,7 +390,15 @@ export function onInferenceClaimable(subtask: Subtask, nowMs = Date.now()): void
   if (claimDeadlines.has(subtask.id)) return;
   const submittedAtMs = usagePending.get(subtask.taskId)?.atMs;
   if (submittedAtMs === undefined) return;
-  armClaimDeadline(subtask.taskId, subtask.id, Math.min(INFERENCE_CLAIM_TIMEOUT_MS, submittedAtMs + subtask.timeoutMs - nowMs));
+  const leftMs = submittedAtMs + subtask.timeoutMs - nowMs;
+  // Its claim lapsed with no time left for another agent: it waits (off limits to others) for the
+  // lapsed holder's late result for LATE_RESULT_GRACE_MS (results.ts), then is cancelled and refunded
+  // as before. It was cancelled at once, and a result the host sent just after was never paid.
+  if (leftMs < INFERENCE_RETRY_MIN_LEFT_MS && queue.holdForLateResult(subtask.id, nowMs + LATE_RESULT_GRACE_MS)) {
+    armClaimDeadline(subtask.taskId, subtask.id, LATE_RESULT_GRACE_MS);
+    return;
+  }
+  armClaimDeadline(subtask.taskId, subtask.id, Math.min(INFERENCE_CLAIM_TIMEOUT_MS, leftMs));
 }
 
 /** What the requester is told when the machine running its call vanished after part of the reply. */
@@ -869,8 +877,15 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         genMs: z.number().min(0).max(INFERENCE_MAX_TIMEOUT_MS).optional(),
       })
       .parse(req.body);
-    const claim = queue.getClaim(body.subtaskId);
-    if (claim?.claimedBy !== verified.agentId) return reply.code(403).send({ error: "not_claimant" });
+    let claim = queue.getClaim(body.subtaskId);
+    // The holder whose claim just lapsed is still sending the reply, and nobody else took the call:
+    // the claim goes back to it (results.ts reclaimLateInferenceResult), so its result is paid once.
+    if (claim && !claim.claimedBy && reclaimLateInferenceResult(body.subtaskId, verified.agentId)) {
+      clearClaimDeadline(body.subtaskId);
+      coordinatorApp.log.info({ subtaskId: body.subtaskId, agentId: verified.agentId }, "late_reply_reclaimed");
+      claim = queue.getClaim(body.subtaskId);
+    }
+    if (!claim || claim.claimedBy !== verified.agentId) return reply.code(403).send({ error: "not_claimant" });
     // A holder posting pieces is alive: its lease is renewed like a heartbeat's, so a heartbeat that is
     // late (rate limited, a busy machine) cannot lapse a call while its reply is streaming.
     queue.renewClaim(body.subtaskId, verified.agentId);

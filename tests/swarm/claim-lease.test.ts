@@ -143,4 +143,36 @@ describe("claim leases (#51)", () => {
     expect(leaseConfigFromEnv({ CLAIM_LEASE_LIVENESS_MS: "10", CLAIM_MAX_ATTEMPTS: "0", CLAIM_LEASE_GRACE_MS: "x" }))
       .toEqual(DEFAULT_LEASE);
   });
+
+  it("a lapsed holder's late result can take its claim back while nobody else has, within the grace", () => {
+    const { q, st } = setup(120_000);
+    expect(q.claim("A")?.id).toBe(st.id);
+    const claimedAt = Date.now();
+    vi.advanceTimersByTime(LEASE.livenessMs + 1);
+    expect(q.expireLeases().requeued).toEqual([st.id]);
+    expect(q.leaseExpiredFor(st.id, "A")).toBe(true);
+    // Only the agent whose claim lapsed, and only within the grace.
+    expect(q.reclaimLapsed(st.id, "B", 60_000)).toBe(false);
+    expect(q.reclaimLapsed(st.id, "A", 60_000, Date.now() + 60_001)).toBe(false);
+    expect(q.reclaimLapsed(st.id, "A", 60_000)).toBe(true);
+    expect(q.getClaim(st.id)).toMatchObject({ claimedBy: "A", claimedAt });
+    expect(q.leaseExpiredFor(st.id, "A")).toBe(false);
+    // Its lease holds while its result is taken, though the original deadline has passed.
+    vi.advanceTimersByTime(LEASE.livenessMs);
+    expect(q.expireLeases().requeued).toEqual([]);
+    expect(q.reclaimLapsed(st.id, "A", 60_000)).toBe(false);
+  });
+
+  it("no late reclaim once another agent took the call; a held call is off limits to others", () => {
+    const { q, st } = setup(120_000);
+    q.claim("A");
+    vi.advanceTimersByTime(LEASE.livenessMs + 1);
+    q.expireLeases();
+    expect(q.holdForLateResult(st.id, Date.now() + 30_000)).toBe(true);
+    expect(q.claim("B")).toBeUndefined();
+    vi.advanceTimersByTime(30_001);
+    expect(q.claim("B")?.id).toBe(st.id);
+    expect(q.reclaimLapsed(st.id, "A", 120_000)).toBe(false);
+    expect(q.holdForLateResult(st.id, Date.now() + 30_000)).toBe(false);
+  });
 });
