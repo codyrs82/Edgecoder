@@ -15,7 +15,7 @@ import { catalogEntryForTag } from "../../../model/catalog.js";
 import { paramsB } from "../../../inference-api/auto-route.js";
 import { contextNeeded } from "../../../inference-api/ollama.js";
 import type { ChatMessage } from "../../../inference-api/types.js";
-import { agentContextWindow, agentLoadReport, freeModelSlots, preferAgent } from "../dispatch.js";
+import { agentContextWindow, agentLoadReport, freeModelSlots, preferAgent, setClaimAdmission } from "../dispatch.js";
 import { agentUnavailable, circuitBlocks, circuitOpen, circuitState, memoryAdmits, modelLoadedOn, onCircuitTrip, setCircuitSlotsLookup } from "../memory-admission.js";
 import { AUTO_MODEL_ID } from "../../../inference-api/auto-route.js";
 import { cleanHints, describeJob, type JobDescriptor } from "../../../inference-api/job-descriptor.js";
@@ -69,7 +69,7 @@ import { recordMeshWork } from "../world-activity.js";
 import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
 import { armAutoReplace, autoPlacementOf, overrunAlternativeExists, placeAfterOverrun, replaceAutoNow, setReplaceAdmission, type AutoPlacement } from "../auto-replace.js";
 import { freeLocalHolders, LOCALITY_PREFER_MS, nearestFreeHolder, peerWithFreeCapacity, type PeerFit } from "../locality.js";
-import { agentWithholding, completionByClass, completionLimitMs, hostServiceMs, hostSpeed, type HostSpeedSource, judgeCompletion, modelPickups, modelSlots, parseCompletionPrior, serviceTimes, stalledClaimMs, startEtaLimitMs, startEtaMs, withholdingHolders } from "../start-eta.js";
+import { agentHeldBack, agentStolenRecently, agentWithholding, completionByClass, completionLimitMs, hostServiceMs, hostSpeed, type HostSpeedSource, judgeCompletion, modelPickups, modelSlots, noteHeldCounts, parseCompletionPrior, serviceTimes, stalledClaimMs, startEtaLimitMs, startEtaMs, withholdingHolders } from "../start-eta.js";
 
 // ── Network inference (chat completions on agents' local models, streamed) ──────────────────
 export const inferenceStreams = new InferenceStreams();
@@ -729,6 +729,8 @@ export async function sweepWaitingInference(nowMs = Date.now()): Promise<number>
     byModel.set(st.requestedModel, list);
   }
   for (const model of modelPickups.saturatedModels()) if (!byModel.has(model)) modelPickups.noteSaturated(model, false, nowMs);
+  // Run 8: each agent's held calls, so an idle slot its agent stopped pulling for is known (start-eta.ts agentHeldBack).
+  noteHeldCounts(nowMs);
   let ended = 0;
   for (const [model, waiting] of byModel) {
     const { slots, free } = modelSlots(model, "any", 0, nowMs);
@@ -739,7 +741,9 @@ export async function sweepWaitingInference(nowMs = Date.now()): Promise<number>
       const deadlineAt = claimDeadlineAt.get(st.id);
       if (deadlineAt === undefined) continue;
       const cls = (st.projectMeta.computeClass ?? "any") as ComputeClassId | "any";
-      const room = modelSlots(model, cls, inferenceTokensNeededOf(st), nowMs);
+      // Run 8: without the agents this call may not go to (taken back from them, or failed there): a
+      // re-queued call's only "free" slot was often the host it had just been taken from.
+      const room = modelSlots(model, cls, inferenceTokensNeededOf(st), nowMs, queue.excludedAgents(st.id));
       // Run 7: no slot here will take it (every holder withholds its slots: a throttled CPU, #563): ended now.
       if (room.slots <= 0) {
         if (withholdingHolders(model, nowMs).length > 0 && (await cancelUnclaimedInference(st.taskId, st.id).catch(() => false))) {
@@ -748,11 +752,14 @@ export async function sweepWaitingInference(nowMs = Date.now()): Promise<number>
         }
         continue;
       }
-      if (i < room.free) continue;
-      const eta = startEtaOf(model, cls, i - room.free + 1, room.slots, nowMs);
       // Run 7: a start in time is not enough when it would not finish in the time it has left
       // (completionCheck on the time since submit, as Auto re-placement does): ended now, not at the deadline.
-      const fits = waitingCallFits(st, model, cls, undefined, nowMs);
+      // Run 8: judged also when a slot is free for it: the claim admission (claimAdmits) refuses a call
+      // that would not finish, so it would otherwise sit out its claim bound beside the free slot.
+      const hasSlot = i < room.free;
+      const fits = waitingCallFits(st, model, cls, undefined, nowMs, { exclude: queue.excludedAgents(st.id), ...(hasSlot ? { waiting: 0 } : {}) });
+      if (hasSlot && fits) continue;
+      const eta = hasSlot ? null : startEtaOf(model, cls, i - room.free + 1, room.slots, nowMs);
       if (fits && (eta === null || eta.etaMs <= deadlineAt - nowMs)) continue;
       if (await cancelUnclaimedInference(st.taskId, st.id, undefined, undefined, eta?.etaMs).catch(() => false)) {
         ended++;
@@ -784,7 +791,9 @@ export async function takeBackStalledClaims(nowMs = Date.now()): Promise<number>
     const st = claim?.subtask;
     const agentId = claim?.claimedBy;
     if (!st || !agentId || claim.claimedAt === undefined || !st.requestedModel) continue;
-    if (st.projectMeta.reservationId || st.projectMeta.onlyAccountId || retriedInference.has(st.id) || requesterCancelled(st.id)) continue;
+    // Run 8: not only once. A call taken from the backlog after a take-back (or a failed run) on another
+    // host is taken back again from a held-back one, up to STALL_TAKE_BACKS times while it has time left.
+    if (st.projectMeta.reservationId || st.projectMeta.onlyAccountId || (takenBack.get(st.id) ?? 0) >= STALL_TAKE_BACKS || requesterCancelled(st.id)) continue;
     if (inferenceStreams.firstPieceAt(st.id) !== undefined || inferenceStreams.hasContent(st.id) || inferenceStreams.isDone(st.id)) continue;
     const ageMs = nowMs - claim.claimedAt;
     const cls = effectiveHardware(agentId)?.computeClass ?? agentCapabilities.get(agentId)?.computeClass ?? "cpu";
@@ -795,10 +804,11 @@ export async function takeBackStalledClaims(nowMs = Date.now()): Promise<number>
     if (submittedAtMs === undefined) continue;
     if (!inferenceStreams.reopenIfEmpty(st.id) || !queue.releaseForRetry(st.id, agentId, nowMs)) continue;
     retriedInference.set(st.id, nowMs);
+    takenBack.set(st.id, (takenBack.get(st.id) ?? 0) + 1);
     claimedTradePrice.delete(st.id);
     const leftMs = rerunTimeoutMs(submittedTimeoutMs(st), submittedAtMs, nowMs, 0);
     const why = throttled ? "agent_withholding" : "first_piece_overdue";
-    if (leftMs < INFERENCE_RETRY_MIN_LEFT_MS || !waitingCallFits(st, st.requestedModel, st.projectMeta.computeClass ?? "any", undefined, nowMs)) {
+    if (leftMs < INFERENCE_RETRY_MIN_LEFT_MS || !waitingCallFits(st, st.requestedModel, st.projectMeta.computeClass ?? "any", undefined, nowMs, { exclude: queue.excludedAgents(st.id) })) {
       if (await cancelUnclaimedInference(st.taskId, st.id).catch(() => false)) ended++;
       coordinatorApp.log.warn({ taskId: st.taskId, subtaskId: st.id, agentId, ageMs, why, leftMs }, "inference_stalled_claim_ended");
       continue;
@@ -811,6 +821,13 @@ export async function takeBackStalledClaims(nowMs = Date.now()): Promise<number>
 }
 /** A claim this young is not taken back for its agent's withheld slots (its report may predate the claim). */
 export const STALL_REPORT_GRACE_MS = 2_000;
+/** Run 8: how many times one call may be taken back from a stalled or held-back host. */
+export const STALL_TAKE_BACKS = 2;
+/** Calls taken back (takeBackStalledClaims), and how often. */
+const takenBack = new Map<string, number>();
+setInterval(() => {
+  for (const id of takenBack.keys()) if (!queue.getSubtask(id)) takenBack.delete(id);
+}, 60_000).unref?.();
 setInterval(() => void sweepWaitingInference().catch((err) => coordinatorApp.log.error({ err }, "inference_waiting_sweep_failed")), WAITING_SWEEP_MS).unref?.();
 
 /**
@@ -828,7 +845,7 @@ export function completionCheck(
   const { promptTokens, outputTokens } = completionWork(messages, tools, maxTokens);
   // Run 7: the decode-rate estimate judges a reply of the call's own max_tokens; a call that set none is
   // judged on a typical long reply (COMPLETION_UNSET_MAX_TOKENS) at the speed estimate, as before.
-  const classes = completionByClass({ model, taskClass, neededTokens: contextNeeded(messages, tools, maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS), promptTokens, outputTokens, waiting: queue.waitingInference(model), prior: completionPrior(), decode: maxTokens !== undefined }, nowMs);
+  const classes = completionByClass({ model, taskClass, neededTokens: contextNeeded(messages, tools, maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS), promptTokens, outputTokens, waiting: opts.waiting ?? queue.waitingInference(model), prior: completionPrior(), decode: maxTokens !== undefined, ...(opts.exclude?.length ? { exclude: opts.exclude } : {}) }, nowMs);
   return { ...judgeCompletion(classes, limitMs, opts.explore === false ? 0 : timeoutMs - elapsedMs), limitMs: Math.round(limitMs) };
 }
 
@@ -840,6 +857,10 @@ export function completionCheck(
 export interface CompletionCheckOptions {
   elapsedMs?: number;
   explore?: boolean;
+  /** Run 8: calls ahead of this one (default: every call waiting for the model; 0 for a call being claimed now). */
+  waiting?: number;
+  /** Run 8: agents this call may not go to (not counted as capacity for it). */
+  exclude?: readonly string[];
 }
 
 /** The tokens completion admission judges a call on: its prompt, and its reply (max_tokens, else COMPLETION_UNSET_MAX_TOKENS) × the output share. */
@@ -860,7 +881,7 @@ function peerFit(messages: ChatMessage[], tools: unknown[] | undefined, maxToken
  * submit), by the same completion check as a submit. A call's stored max_tokens equal to the default
  * cap is taken as unset (judged on COMPLETION_UNSET_MAX_TOKENS, as at submit).
  */
-function waitingCallFits(st: Subtask, model: string, cls: string, agentId: string | undefined, nowMs: number): boolean {
+function waitingCallFits(st: Subtask, model: string, cls: string, agentId: string | undefined, nowMs: number, opts: Pick<CompletionCheckOptions, "waiting" | "exclude"> = {}): boolean {
   let input: { messages?: ChatMessage[]; tools?: unknown[]; maxTokens?: number };
   try {
     input = JSON.parse(st.input);
@@ -871,9 +892,30 @@ function waitingCallFits(st: Subtask, model: string, cls: string, agentId: strin
   const submittedAtMs = usagePending.get(st.taskId)?.atMs ?? nowMs;
   const taskClass = ((ACCEPTED_COMPUTE_CLASS_IDS as readonly string[]).includes(cls) ? cls : "any") as ComputeClassId | "any";
   const maxTokens = input.maxTokens === INFERENCE_DEFAULT_MAX_TOKENS ? undefined : input.maxTokens;
-  const check = completionCheck(model, taskClass, input.messages, input.tools, maxTokens, submittedTimeoutMs(st), nowMs, { elapsedMs: nowMs - submittedAtMs });
+  const check = completionCheck(model, taskClass, input.messages, input.tools, maxTokens, submittedTimeoutMs(st), nowMs, { elapsedMs: nowMs - submittedAtMs, ...opts });
   return agentId ? !check.exclude.includes(agentId) : !check.none;
 }
+
+/**
+ * Run 8 (CPU ramp: inf-1795626005562-e8d4e4d0, -42b56eeb, -b008d3ec, -12a17597 waited in the shared
+ * backlog, were claimed by hosts that had just run out of CPU credit and ran to the 180 s timeout):
+ * a network model call is judged again when an agent pulls it, as placement judges it at submit:
+ *  - not by a host that is held back (start-eta.ts agentStolenRecently: CPU steal or its throttle
+ *    guard reported within WITHHELD_REPORT_FRESH_MS, including with this very pull);
+ *  - not when it would no longer finish on that host's class in the time it has left (the completion
+ *    gate on the time since submit, with nothing ahead of it: the host has a slot for it now).
+ * Left waiting, it goes to another host or is ended by the waiting sweep. Reserved and own-machine
+ * calls run where they are placed; a call gossiped from a peer is judged by its origin.
+ */
+export function claimAdmits(agentId: string, st: Subtask, nowMs = Date.now()): boolean {
+  if (st.kind !== "inference" || !st.requestedModel) return true;
+  if (st.projectMeta.reservationId || st.projectMeta.onlyAccountId) return true;
+  if (agentStolenRecently(agentId, nowMs)) return false;
+  if (usagePending.get(st.taskId) === undefined) return true;
+  const cls = effectiveHardware(agentId)?.computeClass ?? agentCapabilities.get(agentId)?.computeClass ?? "cpu";
+  return waitingCallFits(st, st.requestedModel, cls, agentId, nowMs, { waiting: 0 });
+}
+setClaimAdmission(claimAdmits);
 
 setReplaceAdmission({
   fits: (p: AutoPlacement, pick, nowMs) => {
@@ -944,7 +986,8 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         e.byClass[cls] = (e.byClass[cls] ?? 0) + 1;
         (classAgents[cls] ??= new Set()).add(id);
         if (queue.agentClaims(id) === 0 && !unavailable) e.idle++;
-        const free = unavailable || !memoryAdmits(id, m, held, now) ? 0 : freeModelSlots(id, claims);
+        // Run 8: a held-back host (CPU steal, or not pulling with an idle slot) has no free slot to offer.
+        const free = unavailable || !memoryAdmits(id, m, held, now) || agentHeldBack(id, held, now) ? 0 : freeModelSlots(id, claims);
         e.free += free;
         // #526: where the free slots are, so the portal can send a buyer to the coordinator with a free host near it.
         const region = free > 0 ? agentRegionCode(cap) : null;

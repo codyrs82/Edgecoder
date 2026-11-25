@@ -33,6 +33,7 @@ import { agentUnavailable, circuitBlocks, loadedModelsOf, memoryAdmits, modelLoa
 import { effectiveHardware, hardwareVerifier } from "./economy.js";
 import { mutable } from "./mutable-state.js";
 import { restrictedCatalog } from "./restricted.js";
+import { agentHeldBack } from "./start-eta.js";
 
 export const bestFitConfig: BestFitConfig = bestFitConfigFromEnv();
 export const complexityWeights: ComplexityWeights = complexityWeightsFromEnv();
@@ -82,7 +83,8 @@ export function agentPerf(agentId: string, claims = queue.activeClaims()): Agent
     reliability: hardwareVerifier.reliability(agentId) ?? null,
     verified: rec?.status === "verified" || rec?.status === "base",
     // No capacity while under memory pressure or with its circuit open (memory-admission.ts).
-    freeSlots: agentUnavailable(agentId) ? 0 : freeModelSlots(agentId, claims),
+    // Run 8: nor while held back (CPU steal, or not pulling with an idle slot: start-eta.ts agentHeldBack).
+    freeSlots: agentUnavailable(agentId) || agentHeldBack(agentId, claims.get(agentId)?.inference ?? 0) ? 0 : freeModelSlots(agentId, claims),
     failRate: agentFailRate(agentId) ?? null,
     tierWeight: effectiveHardware(agentId, cap)?.creditsPerSecond ?? 1,
   };

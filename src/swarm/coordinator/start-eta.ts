@@ -410,22 +410,27 @@ export function noteServiceTime(model: string | undefined, agentId: string | und
 }
 
 /** Slots (all, and free now) of this coordinator's agents that could run `model` in `taskClass`. */
-export function modelSlots(model: string, taskClass: ComputeClassId | "any", neededTokens: number, nowMs = Date.now()): { slots: number; free: number } {
+export function modelSlots(model: string, taskClass: ComputeClassId | "any", neededTokens: number, nowMs = Date.now(), exclude?: readonly string[]): { slots: number; free: number } {
   let slots = 0;
   let free = 0;
-  for (const h of modelHolders(model, taskClass, neededTokens, nowMs)) {
+  for (const h of modelHolders(model, taskClass, neededTokens, nowMs, exclude)) {
     slots += h.slots;
     free += h.free;
   }
   return { slots, free };
 }
 
-/** This coordinator's agents that could run `model` in `taskClass`, with their class and slots (all, and free now). */
-export function modelHolders(model: string, taskClass: ComputeClassId | "any", neededTokens: number, nowMs = Date.now()): Array<{ agentId: string; computeClass: string; slots: number; free: number }> {
+/**
+ * This coordinator's agents that could run `model` in `taskClass`, with their class and slots (all, and
+ * free now). `exclude`: agents a given call may not go to (run 8: a call taken back from its host, or
+ * re-queued after a failure, is judged without it).
+ */
+export function modelHolders(model: string, taskClass: ComputeClassId | "any", neededTokens: number, nowMs = Date.now(), exclude?: readonly string[]): Array<{ agentId: string; computeClass: string; slots: number; free: number }> {
   const claims = queue.activeClaims();
   const out: Array<{ agentId: string; computeClass: string; slots: number; free: number }> = [];
   for (const [id, cap] of agentCapabilities) {
     if (!agentHasModel(cap, model)) continue;
+    if (exclude?.includes(id)) continue;
     if (activeBlacklistRecord(id) || cap.hostApproved === false || reservations.isHeld(id, nowMs) || agentUnavailable(id, nowMs)) continue;
     if (nowMs - cap.lastSeenMs > 60_000) continue;
     // Run 6: an agent that keeps dropping out is not capacity (agent-liveness.ts agentFlapping).
@@ -435,6 +440,9 @@ export function modelHolders(model: string, taskClass: ComputeClassId | "any", n
     const ctx = agentContextWindow(id);
     if (ctx !== undefined && neededTokens > ctx) continue;
     const held = claims.get(id)?.inference ?? 0;
+    // Run 8: a host held back (CPU steal reported, or idle slots it has stopped pulling for) is not
+    // capacity at all: its busy slots free up into the same throttling (agentHeldBack).
+    if (agentHeldBack(id, held, nowMs)) continue;
     const reported = Math.max(1, agentLoadReport(id)?.slots ?? cap.maxConcurrentTasks ?? 1);
     // Run 7: slots a host withholds (it reports fewer free than it has idle: a throttled CPU, #563)
     // take no call when they free up, so they are not counted as slots a waiting call could get.
@@ -502,8 +510,8 @@ export function classContention(computeClass: string, hosts: number, maxSlotsPer
  * were all ahead of it in proportion to its slots). `prior`: the prior speed per class (run 5;
  * parseCompletionPrior), none: a class with too few relevant samples is not judged.
  */
-export function completionByClass(input: { model: string; taskClass: ComputeClassId | "any"; neededTokens: number; promptTokens: number; outputTokens: number; waiting: number; prior?: Readonly<Record<string, number>>; decode?: boolean }, nowMs = Date.now()): ClassCompletion[] {
-  const holders = modelHolders(input.model, input.taskClass, input.neededTokens, nowMs);
+export function completionByClass(input: { model: string; taskClass: ComputeClassId | "any"; neededTokens: number; promptTokens: number; outputTokens: number; waiting: number; prior?: Readonly<Record<string, number>>; decode?: boolean; exclude?: readonly string[] }, nowMs = Date.now()): ClassCompletion[] {
+  const holders = modelHolders(input.model, input.taskClass, input.neededTokens, nowMs, input.exclude);
   const claims = queue.activeClaims();
   const totalSlots = holders.reduce((n, h) => n + h.slots, 0);
   const byClass = new Map<string, { agents: string[]; slots: number; free: number; maxSlots: number; running: number }>();
@@ -776,12 +784,64 @@ export function withheldSlots(agentId: string, held: number, nowMs = Date.now())
  * would run there stolen from.
  */
 export function agentWithholding(agentId: string, nowMs = Date.now()): boolean {
-  const stolenAt = agentStolenAt(agentId);
-  if (stolenAt !== undefined && nowMs - stolenAt <= WITHHELD_REPORT_FRESH_MS) return true;
-  return withheldSlots(agentId, queue.activeClaims().get(agentId)?.inference ?? 0, nowMs) > 0;
+  const held = queue.activeClaims().get(agentId)?.inference ?? 0;
+  return agentHeldBack(agentId, held, nowMs) || withheldSlots(agentId, held, nowMs) > 0;
 }
 
-/** Live agents that hold `model` but take no new call now (every slot withheld). */
+/** Whether `agentId` reported CPU steal or its throttle guard within WITHHELD_REPORT_FRESH_MS (host-steal.ts). */
+export function agentStolenRecently(agentId: string, nowMs = Date.now()): boolean {
+  const stolenAt = agentStolenAt(agentId);
+  return stolenAt !== undefined && nowMs - stolenAt <= WITHHELD_REPORT_FRESH_MS;
+}
+
+/**
+ * Run 8: an agent with an idle slot (by the coordinator's count) that has not pulled for this long
+ * since that slot went idle takes no call: a healthy agent with a free slot pulls every 1-3 s
+ * (worker-runner.ts IDLE_POLL_MS, IDLE_POLL_WITH_NUDGES_MS), and a VM throttled to its CPU baseline
+ * stops pulling altogether (its event loop starves beside the model).
+ */
+export const PULL_STALE_MS = 10_000;
+
+/** Per agent: the model calls it held when last looked at, and since when (agentHeldBack). */
+const heldSince = new Map<string, { held: number; atMs: number }>();
+function heldUnchangedSince(agentId: string, held: number, nowMs: number): number {
+  const seen = heldSince.get(agentId);
+  if (seen && seen.held === held) return seen.atMs;
+  heldSince.set(agentId, { held, atMs: nowMs });
+  if (heldSince.size > 10_000) heldSince.delete(heldSince.keys().next().value as string);
+  return nowMs;
+}
+
+/** Look at every agent's held calls (the waiting sweep, each tick), so a slot's idle time is known when it is judged. */
+export function noteHeldCounts(nowMs = Date.now()): void {
+  const claims = queue.activeClaims();
+  for (const id of agentCapabilities.keys()) heldUnchangedSince(id, claims.get(id)?.inference ?? 0, nowMs);
+}
+
+/** Tests: forget the held-call observations. */
+export function clearHeldCounts(): void {
+  heldSince.clear();
+}
+
+/**
+ * Run 8 (CPU ramp: 4 calls taken from the backlog by hosts out of CPU credit ran to the 180 s
+ * timeout; 21 waiting calls were refused 34-92 s after submit): whether `agentId` is held back from
+ * taking model calls now, as /pull, placement and admission all treat it:
+ *  - it reported CPU steal or its throttle guard within WITHHELD_REPORT_FRESH_MS (host-steal.ts; the
+ *    coordinator's threshold, INFERENCE_SPEED_STEAL_SHARE, is below the agent guard's own), or
+ *  - it has an idle slot by count and has not pulled for PULL_STALE_MS since it last pulled or its
+ *    held calls last changed (a slot that just freed is not held back before the agent's next pull).
+ * A held-back agent claims no network call (dispatch.ts claim admission), is not counted as a slot a
+ * waiting call could get (modelHolders), and its claimed calls with nothing sent are taken back.
+ */
+export function agentHeldBack(agentId: string, held: number, nowMs = Date.now()): boolean {
+  if (agentStolenRecently(agentId, nowMs)) return true;
+  const load = agentLoadReport(agentId);
+  if (!load || load.slots - held <= 0) return false;
+  return nowMs - Math.max(load.atMs, heldUnchangedSince(agentId, held, nowMs)) > PULL_STALE_MS;
+}
+
+/** Live agents that hold `model` but take no new call now (held back, or every slot withheld). */
 export function withholdingHolders(model: string, nowMs = Date.now()): string[] {
   const claims = queue.activeClaims();
   const out: string[] = [];
@@ -789,7 +849,7 @@ export function withholdingHolders(model: string, nowMs = Date.now()): string[] 
     if (!agentHasModel(cap, model) || activeBlacklistRecord(id) || nowMs - cap.lastSeenMs > 60_000) continue;
     const held = claims.get(id)?.inference ?? 0;
     const slots = Math.max(1, agentLoadReport(id)?.slots ?? cap.maxConcurrentTasks ?? 1);
-    if (slots - withheldSlots(id, held, nowMs) <= 0) out.push(id);
+    if (agentHeldBack(id, held, nowMs) || slots - withheldSlots(id, held, nowMs) <= 0) out.push(id);
   }
   return out;
 }
