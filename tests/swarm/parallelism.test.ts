@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parallelInferenceFor, servedContextWindow } from "../../src/swarm/parallelism.js";
+import { cpuSlotCap, parallelInferenceFor, servedContextWindow } from "../../src/swarm/parallelism.js";
 
 const GB = 1024 ** 3;
 describe("parallel model calls", () => {
@@ -25,6 +25,24 @@ describe("parallel model calls", () => {
     expect(parallelInferenceFor(48 * GB, undefined, { modelParamsB: 30, gpu: true })).toBe(4);
     // The override still wins.
     expect(parallelInferenceFor(4 * GB, "3", { modelParamsB: 7 })).toBe(3);
+  });
+
+  it("network run 10: a CPU-only host runs one call per two CPUs", () => {
+    // The Fly performance-2x test hosts: 2 dedicated CPUs, 4 GB, a 1.5B model. Memory allows 2; the CPUs 1.
+    expect(parallelInferenceFor(4 * GB, undefined, { modelParamsB: 1.5, cpuOnly: true, cpuCount: 2 })).toBe(1);
+    expect(parallelInferenceFor(4 * GB, undefined, { modelParamsB: 1.5, cpuOnly: true, cpuCount: 3 })).toBe(1);
+    expect(parallelInferenceFor(4 * GB, undefined, { modelParamsB: 1.5, cpuOnly: true, cpuCount: 4 })).toBe(2);
+    expect(parallelInferenceFor(64 * GB, undefined, { modelParamsB: 7, cpuOnly: true, cpuCount: 6 })).toBe(3);
+    expect(parallelInferenceFor(64 * GB, undefined, { modelParamsB: 7, cpuOnly: true, cpuCount: 32 })).toBe(4);
+    // A GPU host, an unknown CPU count, or an explicit count: unchanged.
+    expect(parallelInferenceFor(4 * GB, undefined, { modelParamsB: 1.5, cpuOnly: false, cpuCount: 2 })).toBe(2);
+    expect(parallelInferenceFor(48 * GB, undefined, { modelParamsB: 30, gpu: true, cpuOnly: true, cpuCount: 2 })).toBe(4);
+    expect(parallelInferenceFor(4 * GB, undefined, { modelParamsB: 1.5, cpuOnly: true })).toBe(2);
+    expect(parallelInferenceFor(4 * GB, "2", { modelParamsB: 1.5, cpuOnly: true, cpuCount: 2 })).toBe(2);
+    expect(cpuSlotCap(2)).toBe(1);
+    expect(cpuSlotCap(1)).toBe(1);
+    expect(cpuSlotCap(8)).toBe(4);
+    expect(cpuSlotCap(undefined)).toBe(Number.POSITIVE_INFINITY);
   });
 
   it("one context window per agent, by memory, model size and slots", () => {

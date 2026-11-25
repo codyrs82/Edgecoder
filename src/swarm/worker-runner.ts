@@ -4,8 +4,8 @@
 import { request } from "undici";
 import WebSocket from "ws";
 import { randomUUID, createHash } from "node:crypto";
-import { cpus, freemem, hostname, totalmem } from "node:os";
-import { defaultServing, parallelInferenceFor } from "./parallelism.js";
+import { availableParallelism, cpus, freemem, hostname, totalmem } from "node:os";
+import { cpuSlotCap, defaultServing, parallelInferenceFor } from "./parallelism.js";
 import { fitModel, fmtGb, memoryBudgetBytes, memoryBudgetPct, modelFacts } from "./memory-budget.js";
 import { readMemoryPressure } from "./memory-pressure.js";
 import { HostMemoryManager } from "./memory-manager.js";
@@ -23,7 +23,8 @@ import { Subtask, SubtaskResult, BLETaskRequest, Language, MeshMessage, SandboxM
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { ensureSandboxImages, isDockerAvailable } from "../executor/docker-sandbox.js";
-import { runInferenceSubtask } from "./inference-runner.js";
+import { CLAIM_TAKEN_BACK_ERROR, runInferenceSubtask } from "./inference-runner.js";
+import { describeSlots, pullSkipReason, PullSkipLog } from "./pull-skip.js";
 import { warmOllamaModel } from "../inference-api/ollama.js";
 import { detectHardware, gpuNeedsOffloadProof, hardwareProfileFor, selectGpu, selectGpuPool, type Probe } from "../install/hardware.js";
 import { claimedProfile, decideGpuClaim, type GpuClaimDecision } from "./gpu-claim.js";
@@ -310,6 +311,8 @@ function sizingGpu(): { vramBytes: number; count?: number } | undefined {
   if (GPU_NEEDS_OFFLOAD_PROOF && !gpuSizingConfirmed) return undefined;
   return { vramBytes: gpu.vramGb * 1024 ** 3, ...(gpu.count ? { count: gpu.count } : {}) };
 }
+/** Warned once that an explicit slot count shares this CPU-only host's cores (computeModelSettings). */
+let warnedCpuSharedSlots = false;
 /** The effective model settings from the env and the override file (also re-run after a remote change, or when Ollama describes the model). */
 function computeModelSettings(): CurrentModelSettings {
   const layered = layerOverrides(ENV_MODEL_SETTINGS, modelOverrides);
@@ -318,8 +321,15 @@ function computeModelSettings(): CurrentModelSettings {
   const gpu = sizingGpu();
   // By memory and the model's size, never past this machine's OLLAMA_NUM_PARALLEL when set
   // (src/swarm/parallelism.ts); on a GPU, defaultServing may give up slots for a 32k window.
-  const parallel = parallelInferenceFor(totalmem(), layered.env.parallel, { modelParamsB, ollamaNumParallel: process.env.OLLAMA_NUM_PARALLEL });
+  // Network run 10: a host that runs the model on its CPU gets one slot per two CPUs (parallelism.ts cpuSlotCap).
+  const cpuOnly = !CLOUD_MODE && !OPENAI_ENGINE && !HARDWARE_PROFILE.gpu;
+  const cpuCount = availableParallelism();
+  const parallel = parallelInferenceFor(totalmem(), layered.env.parallel, { modelParamsB, ollamaNumParallel: process.env.OLLAMA_NUM_PARALLEL, cpuOnly, cpuCount });
   const parRaw = Number(layered.env.parallel);
+  if (cpuOnly && parallel > cpuSlotCap(cpuCount) && !warnedCpuSharedSlots) {
+    warnedCpuSharedSlots = true;
+    console.warn(`[worker] ${parallel} parallel model calls set on a CPU-only host with ${cpuCount} CPU(s): calls share the cores and each runs at about ${Math.round(100 * cpuSlotCap(cpuCount) / parallel)}% speed; ${cpuSlotCap(cpuCount)} is the default here (AGENT_PARALLEL_INFERENCE)`);
+  }
   const ctxRaw = layered.env.contextWindow !== undefined ? Number(layered.env.contextWindow) : undefined;
   /**
    * One context window for every network call (Ollama reloads the model when num_ctx changes):
@@ -1418,6 +1428,8 @@ function noteRegistered(fresh: boolean): void {
   }
 }
 let wokenByNudge = false;
+/** When a loop tick sends no /pull, and why (pull-skip.ts). */
+const pullSkipLog = new PullSkipLog();
 let lastHousekeepingAtMs = 0;
 let wakeIdle: (() => void) | null = null;
 let wakePending = false;
@@ -2436,7 +2448,8 @@ async function loop(): Promise<void> {
         // Low on memory (or nothing fits the budget): no free slot, and no pull below.
         const memoryOk = hostMemory.canPull();
         // A throttled CPU (cpu-steal.ts): no free slot, but the pull still goes out to say so.
-        const slotReport = modelSlotReport({ slots: MAX_PARALLEL_INFERENCE, inflight: inflightInference.size, available: engineReady() && memoryOk, cpuThrottled: cpuThrottledNow() });
+        const cpuThrottled = cpuThrottledNow();
+        const slotReport = modelSlotReport({ slots: MAX_PARALLEL_INFERENCE, inflight: inflightInference.size, available: engineReady() && memoryOk, cpuThrottled });
         const freeInferenceSlots = slotReport.free;
         // AGENT_ALLOW_RESTRICTED_MODELS: the owner lets this machine take restricted-model calls (security
         // research tier; the coordinator also needs the owner's admin-approved host entitlement).
@@ -2454,6 +2467,14 @@ async function loop(): Promise<void> {
         // Inference-only with every slot busy: nothing we could take; a finishing call wakes the loop.
         // (A throttled CPU with idle slots still pulls, to report that it has no free slot.)
         // Draining (a restart or quit is coming) or stopping: take nothing new (BHV006).
+        // Network run 10: a tick that sends no pull says why, with the slot state (pull-skip.ts).
+        const skipReason = pullSkipReason({
+          pullsFromCoordinator: PULLS_FROM_COORDINATOR, sandboxDown, lifecycleCanPull: lifecycle.canPull(), memoryOk, shuttingDown,
+          inferenceOnly: INFERENCE_ONLY, slots: MAX_PARALLEL_INFERENCE, inflight: inflightInference.size, free: freeInferenceSlots,
+          reportAnyway: slotReport.reportAnyway, drainReturnHold, cpuThrottled
+        });
+        const skipLine = pullSkipLog.note(skipReason, describeSlots({ slots: MAX_PARALLEL_INFERENCE, inflight: inflightInference.size, free: freeInferenceSlots, cpuThrottled }));
+        if (skipLine && skipReason !== "no_swarm_role") console.log(`[agent:${AGENT_ID}] ${skipLine}`);
         // The coordinator a claim from this pull belongs to (URL and proven key): its lease renewals,
         // chunks and result go there even if the agent moves for a drain meanwhile (drain-failover.ts).
         let pullIssuer: CoordinatorTarget | null = null;
@@ -2462,7 +2483,7 @@ async function loop(): Promise<void> {
         } catch {
           pullIssuer = null;
         }
-        const pulled = (PULLS_FROM_COORDINATOR && !sandboxDown && lifecycle.canPull() && memoryOk && !shuttingDown && !(INFERENCE_ONLY && freeInferenceSlots === 0 && !slotReport.reportAnyway && !drainReturnHold)
+        const pulled = (skipReason === null
           ? await post("/pull", pullBody, { signed: true })
           : { subtask: null }) as {
           subtask: Subtask | null;
@@ -2572,6 +2593,13 @@ async function loop(): Promise<void> {
               networkCallAborts.delete(callAbort);
               if (admission?.ok) admission.release();
             });
+            // The coordinator took the call back and gave it to another agent (inference-runner.ts
+            // CLAIM_TAKEN_BACK_ERROR): stopped, and no result, which it would refuse anyway.
+            if (result.error === CLAIM_TAKEN_BACK_ERROR) {
+              console.warn(`[agent:${AGENT_ID}] stopped inference ${st.id} after ${Math.round(result.durationMs / 1000)} s: the coordinator gave it to another agent; slot free again`);
+              try { localStore.recordTaskFailed(st.id, result.error, result.durationMs); } catch (e) { console.warn(`[db] task result write failed: ${e}`); }
+              return;
+            }
             result.snapshotRef = st.snapshotRef;
             try {
               if (result.ok) {

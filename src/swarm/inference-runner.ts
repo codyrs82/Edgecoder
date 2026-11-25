@@ -33,6 +33,21 @@ export const CANCELLED_FOR_MEMORY_ERROR = "memory_pressure: cancelled, this host
 /** A call whose requester went away before anything was produced (the coordinator ended it). */
 export const CANCELLED_BY_REQUESTER_ERROR = "cancelled_by_requester";
 
+/**
+ * Network run 10: the coordinator took the call back (its first piece was overdue, or the host
+ * looked held back) and gave it to another agent, so it refuses this agent's pieces (403
+ * not_claimant). The agent stops at once: the reply is no longer wanted here, and generating it to the
+ * end kept the host's slot (and its CPU) busy for up to two minutes with nothing pulled meanwhile.
+ * No result is posted for it (the coordinator would refuse it too).
+ */
+export const CLAIM_TAKEN_BACK_ERROR = "claim_taken_back";
+
+/** A coordinator refusal of a reply piece saying this agent no longer holds the call. */
+export function isClaimTakenBack(error: unknown): boolean {
+  const e = error as { statusCode?: unknown; message?: unknown } | null;
+  return !!e && e.statusCode === 403 && typeof e.message === "string" && e.message.includes("not_claimant");
+}
+
 /** Send what has arrived at least this often, or sooner once this much has piled up. */
 const FLUSH_MS = 150;
 const FLUSH_CHARS = 400;
@@ -96,6 +111,7 @@ export async function runInferenceSubtask(
 
   let seq = 0;
   let requesterCancelled = false;
+  let claimTakenBack = false;
   let pending = "";
   let lastFlush = Date.now();
   let full = "";
@@ -116,7 +132,15 @@ export async function runInferenceSubtask(
         requesterCancelled = true;
         abort.abort();
       }
-    } catch {
+    } catch (err) {
+      // The call was taken back and given to another agent: stop generating it (CLAIM_TAKEN_BACK_ERROR).
+      if (isClaimTakenBack(err)) {
+        if (!claimTakenBack) {
+          claimTakenBack = true;
+          abort.abort();
+        }
+        return;
+      }
       // Keep the piece and its number: the next flush sends it again with what came after, so one
       // lost post does not make every later piece a gap. (The coordinator also fills a stream in
       // from the final result, which carries the whole reply.)
@@ -171,6 +195,8 @@ export async function runInferenceSubtask(
         if (pending.length >= FLUSH_CHARS || Date.now() - lastFlush >= FLUSH_MS) await flush(false);
       }
     }
+    const takenBack = { ...base, ok: false, output: "", error: CLAIM_TAKEN_BACK_ERROR };
+    if (claimTakenBack) return { ...takenBack, durationMs: Date.now() - started };
     if (!full.trim() && toolCalls.length === 0) {
       // No text and no tool call is not an answer. It is reported as a failure without a final
       // piece, so the requester's stream stays open and the coordinator can give the call to
@@ -178,8 +204,13 @@ export async function runInferenceSubtask(
       return { ...base, ok: false, output: "", error: EMPTY_REPLY_ERROR, durationMs: Date.now() - started };
     }
     await flush(true);
+    if (claimTakenBack) return { ...takenBack, durationMs: Date.now() - started };
     return { ...base, ok: true, output: full, durationMs: Date.now() - started };
   } catch (err) {
+    if (claimTakenBack) {
+      if (abort.signal.aborted) stopPieces();
+      return { ...base, ok: false, output: "", error: CLAIM_TAKEN_BACK_ERROR, durationMs: Date.now() - started };
+    }
     if (requesterCancelled) {
       // Stopped for a requester that went away: report what was produced (an estimate of its tokens,
       // the engine's counts are lost with the abort), billed as any reply and capped by the reserve.

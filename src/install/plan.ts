@@ -114,8 +114,8 @@ export function planInstall(hw: HostHardware, opts: InstallOptions, dockerAvaila
       MAX_CONCURRENT_TASKS: "1",
       // Parallel model calls sized by this instance's own memory (the GPU's VRAM, not host RAM) and its model;
       // its Ollama gets the same OLLAMA_NUM_PARALLEL (services.ts), as the desktop app does.
-      // --parallel pins the count instead.
-      AGENT_PARALLEL_INFERENCE: String(typeof opts.parallel === "number" ? opts.parallel : parallelInferenceFor(memoryGb * 1024 ** 3, undefined, { modelParamsB: paramsB(model), gpu: discreteGpu })),
+      // A CPU-only host: at most one call per two CPUs (parallelism.ts cpuSlotCap). --parallel pins the count instead.
+      AGENT_PARALLEL_INFERENCE: String(typeof opts.parallel === "number" ? opts.parallel : parallelInferenceFor(memoryGb * 1024 ** 3, undefined, { modelParamsB: paramsB(model), gpu: discreteGpu, cpuOnly: !gpu, cpuCount: hw.cpuCores })),
       EDGECODER_INSTANCE: String(index)
     };
     // Tuning flags: the agent's values (its Ollama gets OLLAMA_NUM_PARALLEL / OLLAMA_KEEP_ALIVE from
