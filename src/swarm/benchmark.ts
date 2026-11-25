@@ -392,6 +392,18 @@ export const LOCAL_BENCH_WARMUP_TIMEOUT_MS = 120_000;
 export const LOCAL_BENCH_TIMEOUT_MS = 60_000;
 
 /**
+ * Whether the agent's self-benchmark should run on this loop tick: enabled, due, and only once the
+ * agent is registered. Registering first keeps a started (or restarted) machine from staying off
+ * the network while it benchmarks: the run can take up to its warm-up and timed limits on a slow or
+ * throttled CPU (a test host took 73 s, cpu at a third of its usual speed, and joined ~100 s after
+ * its start). Its report goes out with the next heartbeat. Waiting for registration also keeps a due
+ * benchmark from delaying the re-registration after a coordinator restart.
+ */
+export function selfBenchmarkDue(o: { enabled: boolean; registered: boolean; nowMs: number; dueAtMs: number }): boolean {
+  return o.enabled && o.registered && o.nowMs >= o.dueAtMs;
+}
+
+/**
  * The agent's periodic self-benchmark (< ~30 s once the model is warm): a time-boxed CPU scan on
  * every core, then (when an Ollama model is configured) a short untimed warm-up generation and a
  * fixed-seed timed one, and the largest model in VRAM. The warm-up matters: the first generation
