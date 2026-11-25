@@ -7,7 +7,7 @@
 import { nwcSpotBuyer, nwcTally } from "../direct-payments.js";
 import { z } from "zod";
 import type { ResourceClass, Subtask } from "../../../common/types.js";
-import { DuplicateDebitError, rewardAccountForAgent, spendCredits, taskReserveKey } from "../../../credits/store.js";
+import { DuplicateDebitError, reserveTaskCredits, rewardAccountForAgent, taskReserveKey } from "../../../credits/store.js";
 import { cSatsPerMTokens, msatToCSats, ratePerSecondMsat } from "../../../economy/job-pricing.js";
 import { modelTokenPrice } from "../../../economy/cloud-pricing.js";
 import { cloudModelSpec, isCloudModel, orderCloudModels } from "../../../cloud-host/catalog.js";
@@ -63,8 +63,7 @@ import {
 import { registerRestrictedRoutes } from "./restricted.js";
 import { servedBy } from "../served-by-route.js";
 import { isFrontierModelId } from "../../../inference-api/frontier-models.js";
-import { taskIdInUse, accrualsInFlight, settleTaskIfDone, refundTaskSubmit } from "../results.js";
-import { closeUnreservedBillingRow } from "../billing-restore.js";
+import { taskIdInUse, pricingInFlight, settleTaskIfDone, refundTaskSubmit } from "../results.js";
 import { registerInferenceCancelRoute, requesterCancelled } from "../inference-cancel.js";
 import { recordMeshWork } from "../world-activity.js";
 import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
@@ -769,19 +768,14 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       // Durable billing (stress finding 2): a restart refunds what this call did not use.
       // The task id's one billing row network-wide: an id billed on the other seed, or by another
       // account or kind, is refused before anything is debited.
-      let insertedRow = false;
+      // B2: the row and the debit go in one round trip (reserveTaskCredits); a refused debit writes
+      // neither, so there is no billing row to close afterwards.
       try {
-        if (pgStore) {
-          const billingRow = await pgStore.insertTaskBilling({ taskId: body.taskId, coordinatorId: identity.peerId, accountId, kind: "inference", perSubtaskReserveMsat: reserve, createdAtMs: Date.now() });
-          if (billingRow === "conflict") return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
-          insertedRow = billingRow === "inserted";
-        }
-        await spendCredits(accountId, msatToCSats(reserve), "inference_reserve", body.taskId, { idempotencyKey: taskReserveKey(body.taskId) });
+        const billingRow = await reserveTaskCredits({ taskId: body.taskId, coordinatorId: identity.peerId, accountId, kind: "inference", perSubtaskReserveMsat: reserve, createdAtMs: Date.now() }, msatToCSats(reserve), "inference_reserve", { idempotencyKey: taskReserveKey(body.taskId) });
+        if (billingRow === "conflict") return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (err instanceof DuplicateDebitError) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
-        // Refused before the reserve: close the billing row this call wrote (only if the ledger has nothing under it).
-        if (insertedRow && pgStore) await closeUnreservedBillingRow(pgStore, { taskId: body.taskId, accountId: accountId, kind: "inference" }).catch((closeErr) => req.log.warn({ err: closeErr, taskId: body.taskId }, "task_billing_close_failed"));
         if (message.startsWith("insufficient_credits")) return reply.code(402).send({ error: "insufficient_credits", neededCSats: msatToCSats(reserve) });
         req.log.error({ err, taskId: body.taskId }, "inference_debit_failed");
         return reply.code(500).send({ error: "credit_debit_failed" });
@@ -948,10 +942,15 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     if (!r) return reply.code(404).send({ error: "unknown_stream" });
     // Cancelled while this read waited.
     if (noCapacity.has(body.taskId)) return noCapacityReply(reply, noCapacity.get(body.taskId));
-    // The agent's last piece arrives just before its result, which settles the cost: wait for it briefly.
+    // Who served it (an ownership lookup): fetched while the result is awaited, not after.
+    const servedAgentId = () => billing.servedAgentId ?? queue.getResult(body.subtaskId)?.agentId;
+    let servedP = r.done && billing.servedAgentId ? servedBy(billing.servedAgentId, owner, billing) : undefined;
+    // The agent's last piece arrives just before its result, which prices the call: wait for it briefly.
+    // B2: only until the cost is on the billing entry (pricingInFlight), not for the ledger writes
+    // and the refund, which the result route finishes (and settleTaskIfDone below repeats) after.
     let result = r.done ? queue.getResult(body.subtaskId) : undefined;
-    for (let i = 0; r.done && (!result || accrualsInFlight.has(body.taskId)) && i < 40; i++) {
-      await new Promise((res) => setTimeout(res, 100));
+    for (let i = 0; r.done && (!result || pricingInFlight.has(body.taskId)) && i < 160; i++) {
+      await new Promise((res) => setTimeout(res, 25));
       result = queue.getResult(body.subtaskId);
     }
     // The token counts this call was billed on (agent-reported, bounded at /inference/chunks).
@@ -959,8 +958,14 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       ...(billing.promptTokens !== undefined ? { promptTokens: billing.promptTokens } : {}),
       ...(billing.outputTokens !== undefined ? { outputTokens: billing.outputTokens } : {})
     };
-    if (result) await settleTaskIfDone(body.taskId);
-    const served = r.done && (billing.servedAgentId ?? result?.agentId) ? await servedBy(billing.servedAgentId ?? result!.agentId, owner, billing) : undefined;
-    return reply.send({ ...r, ...(result ? { creditsSpent: msatToCSats(billing.refunded ? billing.costMsat : billing.reservedMsat), durationMs: result.durationMs, ...tokens } : {}), ...(served ? { served } : {}) });
+    // Settled after the reply: a no-op when the result route already did; a failure is retried by
+    // the idle sweep and, after a restart, by the billing restore (billing-restore.ts).
+    if (result) void settleTaskIfDone(body.taskId).catch((err) => req.log.warn({ err, taskId: body.taskId }, "stream_settle_failed"));
+    const agentId = r.done ? servedAgentId() : undefined;
+    if (agentId && !servedP) servedP = servedBy(agentId, owner, billing);
+    const served = servedP ? await servedP.catch(() => undefined) : undefined;
+    // The call's cost once priced (its result's cost is on the billing entry), the reserve until then.
+    const priced = billing.refunded || (result !== undefined && !pricingInFlight.has(body.taskId));
+    return reply.send({ ...r, ...(result ? { creditsSpent: msatToCSats(priced ? billing.costMsat : billing.reservedMsat), durationMs: result.durationMs, ...tokens } : {}), ...(served ? { served } : {}) });
   });
 }

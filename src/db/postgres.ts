@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { randomUUID } from "node:crypto";
-import type { Pool } from "pg";
+import { escapeLiteral, type Pool } from "pg";
 import { createPgPool } from "./pool.js";
 import { QueueDataCodec } from "./queue-data-codec.js";
 import type { WorkReceipt } from "../receipts/receipt.js";
@@ -1507,6 +1507,73 @@ export class PostgresStore {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * A task's billing row and its reserve debit in one round trip (B2: the EU seed is ~90 ms from the
+   * database, and insertTaskBilling + debitCredits took ~7). Same rules as the two calls in order:
+   * - billing "conflict" (the id is billed by another coordinator, account or kind): nothing written;
+   * - otherwise the debit, under the account's advisory lock like debitCredits: "duplicate" (its
+   *   deterministic tx id is already charged) or "insufficient" write nothing, not even the billing
+   *   row (so no orphan row is left to close), and "applied" writes both, atomically.
+   * Sent as one multi-statement simple query: Postgres runs it as one implicit transaction (an error
+   * rolls back all of it), the lock is held to its end, and each statement takes its own snapshot,
+   * so the balance check after the lock sees every debit committed before it. Simple queries take no
+   * bind parameters, so every value is inlined with escapeLiteral (strings) or checked as a number.
+   * billing: "none" when no row existed and none was written because the debit was refused.
+   */
+  async reserveTaskBillingDebit(
+    row: { taskId: string; coordinatorId: string; accountId: string; kind: "job" | "inference"; perSubtaskReserveMsat: number; createdAtMs: number },
+    tx: CreditTransaction
+  ): Promise<{ billing: "inserted" | "same" | "conflict" | "none"; debit: "applied" | "insufficient" | "duplicate" | "skipped"; balance: number }> {
+    if (tx.type !== "spend") throw new Error("reserveTaskBillingDebit requires a spend transaction");
+    if (!Number.isFinite(tx.credits) || tx.credits <= 0) throw new Error("invalid_credit_amount");
+    if (tx.accountId !== row.accountId || tx.relatedTaskId !== row.taskId) throw new Error("reserve_row_mismatch");
+    const int = (n: number) => {
+      if (!Number.isFinite(n)) throw new Error("invalid_number");
+      return String(Math.round(n));
+    };
+    const L = escapeLiteral;
+    const task = L(row.taskId);
+    const account = L(row.accountId);
+    const credits = `${L(String(tx.credits))}::numeric`;
+    const sql = `SELECT pg_advisory_xact_lock(${CREDIT_LOCK_NAMESPACE}, hashtext(${account}));
+WITH existing AS (SELECT coordinator_id, account_id, kind FROM task_billing WHERE task_id = ${task}),
+seen AS (SELECT EXISTS (SELECT 1 FROM credit_transactions WHERE tx_id = ${L(tx.txId)}) AS dup),
+bal AS (
+  SELECT COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END), 0) AS balance,
+         COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END), 0) >= round(${credits}, 6) AS enough
+    FROM credit_transactions WHERE account_id = ${account}
+),
+st AS (
+  SELECT NOT EXISTS (SELECT 1 FROM existing) AS fresh,
+         EXISTS (SELECT 1 FROM existing WHERE coordinator_id = ${L(row.coordinatorId)} AND account_id = ${account} AND kind = ${L(row.kind)}) AS same,
+         (NOT seen.dup) AND bal.enough AS go
+    FROM seen, bal
+),
+ins AS (
+  INSERT INTO task_billing (task_id, coordinator_id, account_id, kind, per_subtask_reserve_msat, created_at_ms)
+  SELECT ${task}, ${L(row.coordinatorId)}, ${account}, ${L(row.kind)}, ${int(row.perSubtaskReserveMsat)}, ${int(row.createdAtMs)}
+    FROM st WHERE st.fresh AND st.go
+  ON CONFLICT (task_id) DO NOTHING RETURNING task_id
+),
+debit AS (
+  INSERT INTO credit_transactions (tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms)
+  SELECT ${L(tx.txId)}, ${account}, 'spend', ${credits}, ${L(tx.reason)}, ${task}, ${int(tx.timestampMs)}
+    FROM st WHERE st.go AND (st.same OR EXISTS (SELECT 1 FROM ins))
+  RETURNING tx_id
+)
+SELECT seen.dup, bal.balance, bal.enough, st.fresh, st.same, st.go,
+       EXISTS (SELECT 1 FROM ins) AS inserted, EXISTS (SELECT 1 FROM debit) AS applied
+  FROM seen, bal, st;`;
+    const results = (await this.pool.query(sql)) as unknown as Array<{ rows: Array<Record<string, unknown>> }>;
+    const r = results[results.length - 1]?.rows[0];
+    if (!r) throw new Error("reserve_no_result");
+    const balance = Number(r.balance ?? 0);
+    const billing = r.inserted ? "inserted" : r.same ? "same" : !r.fresh ? "conflict" : r.go ? "conflict" : "none";
+    if (billing === "conflict") return { billing, debit: "skipped", balance };
+    if (r.applied) return { billing, debit: "applied", balance: balance - tx.credits };
+    return { billing, debit: r.dup ? "duplicate" : "insufficient", balance };
   }
 
   /**
