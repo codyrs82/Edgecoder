@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { contentToText, listNetworkModels, parseNetworkModel, streamNetworkCompletion, type NetworkDeps } from "../../src/apps/ide/network-inference.js";
+import { contentToText, listNetworkModels, parseNetworkModel, routedLine, streamNetworkCompletion, type NetworkDeps } from "../../src/apps/ide/network-inference.js";
 
 describe("network model ids", () => {
   it("parses model and class", () => {
@@ -181,5 +181,28 @@ describe("streamNetworkCompletion", () => {
   it("lists each model, and per class", async () => {
     const deps = await fakeForwarder(() => ({ json: { models: [{ model: "qwen2.5-coder:32b", agents: 2, classes: ["gpu", "apple"] }] } }));
     expect((await listNetworkModels(deps)).map((m) => m.id)).toEqual(["network/qwen2.5-coder:32b", "network/qwen2.5-coder:32b@gpu", "network/qwen2.5-coder:32b@apple"]);
+  });
+});
+
+describe("routedLine: the route line of the attempt that answered (run 8)", () => {
+  const MAC = { label: "mac-•••0e30", own: false, computeClass: "apple", tier: null, hardware: "Apple silicon", region: null, country: null };
+  const CLOUD = { ...MAC, label: "lin-•••85de", computeClass: "cloud" };
+  it("keeps submit's line when the answering attempt ran its model and class", () => {
+    const line = "routed to deepseek-v4.1-flash on cloud because best quality";
+    expect(routedLine(line, "deepseek-v4.1-flash", "deepseek-v4.1-flash", CLOUD)).toBe(line);
+    expect(routedLine(line, "deepseek-v4.1-flash", undefined, undefined)).toBe(line);
+    expect(routedLine(undefined, undefined, "x", CLOUD)).toBeUndefined();
+  });
+  it("a call routed to the cloud but answered on a Mac after re-placement names the Mac's model and class", () => {
+    const line = routedLine("routed to deepseek-v4.1-flash on cloud because best quality", "deepseek-v4.1-flash", "qwen2.5-coder:7b", MAC)!;
+    expect(line).toMatch(/^routed to qwen2\.5-coder:7b on apple /);
+  });
+  it("a call routed to a Mac and retried on the cloud names the cloud model and class", () => {
+    const line = routedLine("routed to qwen2.5-coder:7b on apple because fastest", "qwen2.5-coder:7b", "deepseek-v4.1-flash", CLOUD)!;
+    expect(line).toMatch(/^routed to deepseek-v4\.1-flash on cloud /);
+    expect(line).not.toMatch(/on apple/);
+  });
+  it("same model, another class: the class comes from the host that answered", () => {
+    expect(routedLine("routed to m:7b on gpu because x", "m:7b", "m:7b", MAC)).toMatch(/^routed to m:7b on apple /);
   });
 });

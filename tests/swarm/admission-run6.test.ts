@@ -376,3 +376,24 @@ describe("5. edgecoder.cut tells a deadline cut from a max_tokens cut (finish_re
     expect(edgecoderUsage({ cSatsSpent: 1, stopReason: "stop" }).edgecoder?.cut).toBeUndefined();
   });
 });
+
+describe("run 8: the stream's last read names the model the answering agent ran", () => {
+  test("servedModel comes from the claim that answered, with its served-by", async () => {
+    const call = await submit(lookup());
+    expect(call.r.statusCode, call.r.body).toBe(200);
+    const subtaskId = call.r.json().subtaskId as string;
+    let done = false;
+    for (let i = 0; i < 8 && !done; i++) {
+      for (const k of [lhr, fra]) {
+        const r = await pullAs(k);
+        if (!r.id || !r.taskId) continue;
+        await finish(k, r.taskId, r.id);
+        if (r.id === subtaskId) done = true;
+      }
+    }
+    expect(done).toBe(true);
+    const r = await read(call.taskId, subtaskId);
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json()).toMatchObject({ done: true, servedModel: MODEL, served: { computeClass: expect.any(String) } });
+  });
+});

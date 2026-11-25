@@ -19,6 +19,7 @@ import {
   pickLocalHelperModel,
   sessionAllowsShell,
   tentacleCallLine,
+  tentacleRanOn,
   tentacleComplexity,
   tentacleConfigFromEnv,
   TentacleError,
@@ -635,6 +636,32 @@ describe("tentacles served lines and totals (5)", () => {
     expect(note.usage!.calls).toHaveLength(2);
     expect(note.usage!.calls![0].served).toMatchObject({ city: "Chicago" });
     expect((note.tentacle as { calls: string[] }).calls).toEqual([usage[0].line, usage[1].line]);
+  });
+
+  it("run 8: a cloud call after a Mac attempt never takes the Mac's host or class (deepseek · network apple · mac-…)", async () => {
+    const MAC: ServedBy = { ...GPU_ORD, computeClass: "apple", label: "mac-•••0e30" };
+    const { tentacles, s, events } = setup({
+      script: ({ call }) =>
+        call === 0
+          ? { tool: ["write_file", { path: "m.ts", content: "m\n" }], where: "routed to qwen2.5-coder:7b on apple because fastest", served: MAC }
+          : { text: "wrote m", where: "routed to deepseek-v4.1-flash on cloud because best quality" },
+    });
+    const exec = tentacleExecutor(tentacles, s.id, async () => ({}));
+    await exec("delegate", { task: "Add m", kind: "code_edit", instructions: "m" }, { approved: false });
+    const r = JSON.parse((await exec("await_tentacles", { timeoutS: 10 }, { approved: false })).result!);
+    await until(() => events.some((e) => e.type === "tentacle_totals"));
+    const usage = events.filter((e) => e.type === "tentacle_usage");
+    expect(usage).toHaveLength(2);
+    expect(usage[0].line).toMatch(/^qwen2\.5-coder:7b · network apple · mac-•••0e30/);
+    expect(usage[1].line).toMatch(/^deepseek-v4\.1-flash · network cloud/);
+    expect(usage[1].line).not.toMatch(/mac-|apple/);
+    expect(usage[1].call.served).toBeUndefined();
+    expect(JSON.stringify(r.finished[0])).not.toMatch(/deepseek[^"]*mac-/);
+  });
+
+  it("a finished helper's 'ran on' uses its latest call's host only", () => {
+    const MAC: ServedBy = { ...GPU_ORD, computeClass: "apple", label: "mac-•••0e30" };
+    expect(tentacleRanOn({ model: "deepseek-v4.1-flash", class: "cloud", calls: [{ cSats: 1, model: "qwen2.5-coder:7b", served: MAC }, { cSats: 1, model: "deepseek-v4.1-flash" }] })).toBe("deepseek-v4.1-flash on cloud");
   });
 
   it("formats one call and the totals", () => {
