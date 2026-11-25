@@ -61,6 +61,7 @@ import { localLanAddresses } from "./lan-proximity.js";
 import { collectDesktopTelemetry } from "./desktop-telemetry.js";
 import { detectPlatform, getConfigDir, getLogDir, type PlatformInfo } from "../common/platform.js";
 import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from "../security/release-integrity.js";
+import { CpuStealGuard, CPU_STEAL_HOLD_MS, modelSlotReport } from "./cpu-steal.js";
 import { answerChallenge, runLocalBenchmark, selfBenchmarkDue, type AgentBenchmarkReport, type BenchmarkChallenge } from "./benchmark.js";
 import { appVersion, isReleaseInstall } from "../common/app-version.js";
 import { createUpdateNudge } from "./update-nudge.js";
@@ -832,6 +833,24 @@ const hostMemory = new HostMemoryManager({
 setInterval(() => void hostMemory.refresh(), 5_000).unref?.();
 void hostMemory.refresh();
 console.log(`[agent:${AGENT_ID}] memory budget ${fmtGb(MEMORY_BUDGET_BYTES)}${MAX_NETWORK_MODELS ? `, at most ${MAX_NETWORK_MODELS} network model(s)` : ""}; pressure guard ${W.AGENT_MEMORY_GUARD !== false ? "on" : "off"}`);
+// CPU steal guard (cpu-steal.ts): a VM throttled to its CPU baseline (credits spent) takes no new
+// model call. Only where the model runs on this machine's CPU through Ollama (not the cloud host or
+// a vLLM / MLX engine), and only where /proc/stat exists.
+const cpuSteal = W.AGENT_CPU_STEAL_GUARD !== false && !CLOUD_HOST && !OPENAI_ENGINE && process.platform === "linux"
+  ? new CpuStealGuard({ holdMs: W.AGENT_CPU_STEAL_HOLD_MS ?? CPU_STEAL_HOLD_MS })
+  : undefined;
+/** Read the steal guard on a loop tick: true while this host takes no new model call. Logs each change. */
+function cpuThrottledNow(): boolean {
+  if (!cpuSteal) return false;
+  const s = cpuSteal.sample();
+  if (s.changed) {
+    const pct = cpuSteal.recentShare();
+    console.warn(s.throttled
+      ? `[agent:${AGENT_ID}] CPU throttled (${pct === null ? "?" : Math.round(pct * 100)}% of busy CPU time stolen): taking no new model calls for now`
+      : `[agent:${AGENT_ID}] CPU no longer throttled: taking model calls again`);
+  }
+  return s.throttled;
+}
 /** keep_alive for a network call: the agent's own model keeps the configured one; other models go after 5 minutes idle. */
 function keepAliveFor(model: string | undefined): string {
   return model && model !== OLLAMA_MODEL && MODEL_KEEP_ALIVE !== "0" ? "5m" : MODEL_KEEP_ALIVE;
@@ -2279,7 +2298,9 @@ async function loop(): Promise<void> {
         // A vLLM / MLX engine that is down or serves no catalog model: no free slot (no model call is handed to us).
         // Low on memory (or nothing fits the budget): no free slot, and no pull below.
         const memoryOk = hostMemory.canPull();
-        const freeInferenceSlots = engineReady() && memoryOk ? Math.max(0, MAX_PARALLEL_INFERENCE - inflightInference.size) : 0;
+        // A throttled CPU (cpu-steal.ts): no free slot, but the pull still goes out to say so.
+        const slotReport = modelSlotReport({ slots: MAX_PARALLEL_INFERENCE, inflight: inflightInference.size, available: engineReady() && memoryOk, cpuThrottled: cpuThrottledNow() });
+        const freeInferenceSlots = slotReport.free;
         // AGENT_ALLOW_RESTRICTED_MODELS: the owner lets this machine take restricted-model calls (security
         // research tier; the coordinator also needs the owner's admin-approved host entitlement).
         const pullBody = { agentId: AGENT_ID, inferenceSlots: MAX_PARALLEL_INFERENCE, freeInferenceSlots, contextWindow: CONTEXT_WINDOW, wake: true, ...(W.AGENT_ALLOW_RESTRICTED_MODELS ? { allowRestrictedModels: true } : {}) };
@@ -2291,8 +2312,9 @@ async function loop(): Promise<void> {
           console.log(`[agent:${AGENT_ID}] inference-only: pulling inference subtasks only (no sandbox, no task code is run)`);
         }
         // Inference-only with every slot busy: nothing we could take; a finishing call wakes the loop.
+        // (A throttled CPU with idle slots still pulls, to report that it has no free slot.)
         // Draining (a restart or quit is coming) or stopping: take nothing new (BHV006).
-        const pulled = (PULLS_FROM_COORDINATOR && !sandboxDown && lifecycle.canPull() && memoryOk && !shuttingDown && !(INFERENCE_ONLY && freeInferenceSlots === 0)
+        const pulled = (PULLS_FROM_COORDINATOR && !sandboxDown && lifecycle.canPull() && memoryOk && !shuttingDown && !(INFERENCE_ONLY && freeInferenceSlots === 0 && !slotReport.reportAnyway)
           ? await post("/pull", pullBody, { signed: true })
           : { subtask: null }) as {
           subtask: Subtask | null;

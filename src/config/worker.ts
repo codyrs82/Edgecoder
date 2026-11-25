@@ -193,6 +193,10 @@ export const workerConfigSchema = z.object({
   AGENT_MAX_NETWORK_MODELS: envInt(undefined, { min: 1, max: 8 }),
   /** System memory pressure guard (src/swarm/memory-pressure.ts): on by default; "off" disables it. */
   AGENT_MEMORY_GUARD: envFlag({ off: ["off", "0", "false"], ci: true }),
+  /** CPU steal guard (src/swarm/cpu-steal.ts): on by default (Linux); "off" disables it. */
+  AGENT_CPU_STEAL_GUARD: envFlag({ off: ["off", "0", "false"], ci: true }),
+  /** How long a throttled host takes no new model call after the last throttled reading (ms). Unset: 120000. */
+  AGENT_CPU_STEAL_HOLD_MS: envInt(undefined, { min: 0, max: 3_600_000 }),
   SANDBOX_REQUIRED: envFlag({ on: ["true"] }),
   // Pull and run inference subtasks only, without a sandbox (SANDBOX_MODE=none): for GPU container hosts that cannot run Docker.
   AGENT_INFERENCE_ONLY: envFlag({ on: ["1", "true"] }),
