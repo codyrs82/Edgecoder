@@ -45,6 +45,12 @@ import { agentRegionCode, peerWorldViews, peerAgentViews } from "./routing.js";
 /** How long the nearest free holder keeps a named-model call before anyone eligible may take it (longer than DEFER_MS). */
 export const LOCALITY_PREFER_MS = 2_000;
 /**
+ * Run 10: past LOCALITY_PREFER_MS, the hold lasts until the nearest holder's first pull after it
+ * began (dispatch.ts preferredAgentFor), while that holder is pulling, up to this long. Fly CPU hosts
+ * pull every ~3-5 s; the 2 s hold alone lapsed before the nearest one came (47% nearest in the CPU ramp).
+ */
+export const LOCALITY_PULL_HOLD_MS = 3_000;
+/**
  * A fully busy-but-free-slot agent counts as this many km farther (load against distance). Run 9
  * (nearest host 37% under load): it was 1,500 km, so a near host with one of two slots busy (+750 km)
  * lost to an idle one 640 km farther (lhr buyer -> fra). The nearest host with a free slot now gets

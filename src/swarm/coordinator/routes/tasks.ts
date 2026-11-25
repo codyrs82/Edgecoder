@@ -470,7 +470,15 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         return reply.code(503).send({ error: "envelope_encryption_failed" });
       }
     }
-    if (task) noteClaimed(task.id);
+    if (task) {
+      const claimed = noteClaimed(task.id, nowMs, body.agentId);
+      // Run 10: who claimed a model call, how long after submit, and whether it was the host it was held for
+      // (the nearest free host, best fit's pick): the next run can tell a lapsed hold from a race.
+      if (task.kind === "inference") {
+        const submittedAtMs = usagePending.get(task.taskId)?.atMs;
+        app.log.info({ taskId: task.taskId, subtaskId: task.id, agentId: body.agentId, model: task.requestedModel ?? null, elapsedMs: submittedAtMs === undefined ? null : nowMs - submittedAtMs, waitedMs: claimed.waitedMs, preferred: claimed.preferred, preferredHolding: claimed.preferredHolding, reason: claimed.preferred === null ? "no_preference" : claimed.byPreferred ? "preferred" : "preference_lapsed" }, "inference_claimed");
+      }
+    }
     // Host memory: a call for a model not loaded there counts against the agent's headroom until it shows as loaded.
     if (task?.kind === "inference") noteDispatched(body.agentId, task.requestedModel, nowMs);
     // Model affinity and locality (dispatch.ts): the model is warm there now, telemetry or not.

@@ -168,6 +168,32 @@ describe("run 9: Auto calls are decided within INFERENCE_CLAIM_DECISION_MS", () 
     expect(await pull(small)).toBeNull();
   });
 
+  test("run 10: an Auto call taken back from its host is decided again (re-placed within the window, not left to the 45 s bound)", async () => {
+    const inference = await import("../../src/swarm/coordinator/routes/inference.js");
+    expect(await pull(big)).toBeNull();
+    expect(await pull(small)).toBeNull();
+    const c = await submitAuto(prompt());
+    expect(c.model).toBe(BIG);
+    expect(await pull(big)).toBe(c.subtaskId);
+    // Its decision passed while it was claimed (as in run 10: claimed at once, taken back seconds later).
+    await sleep(DECISION_MS * 1.6);
+    // The 7b host runs out of CPU credit before its first piece: taken back (it may not get the call again).
+    await post("/pull", { agentId: big.peerId, inferenceSlots: 1, freeInferenceSlots: 0, cpuThrottled: true, cpuStealShare: 0.8 }, big);
+    await inference.takeBackStalledClaims(Date.now() + 2_500);
+    expect(mods.context.queue.isUnclaimed(c.subtaskId)).toBe(true);
+    const t0 = Date.now();
+    let got: string | null = null;
+    for (let i = 0; i < 60 && got === null; i++) {
+      await sleep(50);
+      got = await pull(small);
+    }
+    expect(got).toBe(c.subtaskId);
+    expect(Date.now() - t0).toBeLessThan(DECISION_MS * 2.5);
+    expect(mods.context.usagePending.get(c.taskId)?.model).toBe(SMALL);
+    await finish(small, c.taskId, c.subtaskId, SMALL);
+    (await import("../../src/swarm/coordinator/host-steal.js")).clearAgentSteal();
+  });
+
   test("decideAuto: claimed calls are left alone", async () => {
     const autoReplace = await import("../../src/swarm/coordinator/auto-replace.js");
     expect(await pull(big)).toBeNull();
