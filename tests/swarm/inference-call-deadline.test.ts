@@ -111,15 +111,21 @@ describe("a call's deadline", () => {
     const before = creditEngine.balance(requester.peerId);
     const { taskId, subtaskId } = await claimed(10_000);
     // Pieces every 300 ms (each renews the lease's liveness) until past claim + 10 s (grace 0 here).
+    // The deadline is enforced when traffic (or the sweep) runs the lease expiry, so a slow runner's
+    // last loop heartbeat can land just before it: keep the holder sending, and check, until the call
+    // has ended, rather than reading once after a fixed wall-clock span.
     const t0 = Date.now();
     let seq = 0;
-    while (Date.now() - t0 < 10_800) {
+    let read = await stream(taskId, subtaskId, 0, 0);
+    while (!read.json().done) {
+      if (Date.now() - t0 > 25_000) break;
       await post("/heartbeat", { agentId: requester.peerId }, requester);
-      await post("/inference/chunks", { subtaskId, seq, delta: `w${seq} ` }, worker);
+      if (Date.now() - t0 < 10_800) await post("/inference/chunks", { subtaskId, seq, delta: `w${seq} ` }, worker);
       seq++;
       await sleep(300);
+      read = await stream(taskId, subtaskId, 0, 0);
     }
-    const read = await stream(taskId, subtaskId, 0, 5_000);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(9_500);
     expect(read.statusCode, read.body).toBe(200);
     expect(read.json()).toMatchObject({ done: true, error: "timed out after 10 s" });
     expect(read.json().chunks.join("")).toMatch(/^w0 w1 /);
@@ -127,7 +133,7 @@ describe("a call's deadline", () => {
     expect(creditEngine.balance(requester.peerId)).toBeCloseTo(before, 6);
     const again = await post("/pull", { agentId: worker2.peerId }, worker2);
     expect(again.json().subtask?.id ?? again.json().envelope?.subtaskId).not.toBe(subtaskId);
-  }, 30_000);
+  }, 40_000);
 
   test("a re-run after a lost agent gets a fresh timeout, capped at submit + timeout + the re-run budget", async () => {
     const { subtaskId, atMs } = await claimed(20_000);
