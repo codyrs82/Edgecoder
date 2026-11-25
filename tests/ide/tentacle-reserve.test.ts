@@ -7,8 +7,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CheckpointStore } from "../../src/apps/ide/checkpoints.js";
 import { SessionHub, type ClientRef, type SessionEvent } from "../../src/apps/ide/sessions.js";
-import { emptyAttempt, retryAfterEmpty, smallWorkerWarning, tentacleSystemPrompt } from "../../src/apps/ide/tentacle-chat.js";
-import { CallHolds, ceilingRefusal, helperCallCeiling, helperMaxTokens, HELPER_MAX_TOKENS, MIN_HELPER_CALL_CSATS, paidWorker } from "../../src/apps/ide/tentacle-reserve.js";
+import { emptyAttempt, hintedChat, retryAfterEmpty, smallWorkerWarning, tentacleSystemPrompt } from "../../src/apps/ide/tentacle-chat.js";
+import { CallHolds, ceilingRefusal, helperCallCeiling, helperContextWindow, helperMaxTokens, helperReplyTokens, HELPER_FIT_WINDOW, HELPER_MAX_TOKENS, HELPER_MIN_REPLY_TOKENS, MIN_HELPER_CALL_CSATS, paidWorker, promptTokensOf } from "../../src/apps/ide/tentacle-reserve.js";
+import { contextNeeded } from "../../src/inference-api/ollama.js";
+import { tentacleRanOn, whereServed } from "../../src/apps/ide/tentacle-format.js";
+import type { ServedBy } from "../../src/swarm/served-by.js";
 import { patchReturn, TentacleManager, tentacleTotals, type TentacleConfig } from "../../src/apps/ide/tentacles.js";
 import { ChatBackendError, type ChatBackend, type ChatPiece, type ChatRequest } from "../../src/inference-api/types.js";
 
@@ -30,7 +33,7 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-type Step = { tool?: [string, Record<string, unknown>]; text?: string; cSats?: number; fail?: string; wait?: number };
+type Step = { tool?: [string, Record<string, unknown>]; text?: string; cSats?: number; fail?: string; wait?: number; served?: ServedBy };
 type Script = (ctx: { model: string; call: number; req: ChatRequest }) => Step;
 
 function setup(script: Script, config: Partial<TentacleConfig> = {}) {
@@ -53,7 +56,7 @@ function setup(script: Script, config: Partial<TentacleConfig> = {}) {
         if (step.fail) throw new ChatBackendError(step.fail, 502);
         if (step.text) yield { delta: step.text };
         if (step.tool) yield { toolCalls: [{ function: { name: step.tool[0], arguments: step.tool[1] } }] };
-        yield { done: true, cSatsSpent: step.cSats ?? 0.1 };
+        yield { done: true, cSatsSpent: step.cSats ?? 0.1, ...(step.served ? { served: step.served } : {}) };
       } finally {
         running.delete(k);
       }
@@ -199,5 +202,97 @@ describe("empty helper attempts (#525)", { timeout: 60_000 }, () => {
     expect(patchReturn(views)).toEqual({ asked: 3, returned: 1, rate: 0.333 });
     expect(tentacleTotals(views).line).toMatch(/· 1\/3 patches back$/);
     expect(patchReturn([]).rate).toBeNull();
+  });
+});
+
+const SERVED: ServedBy = { label: "mac-•••30e5", own: false, computeClass: "apple", tier: null, hardware: "Apple silicon", region: "fra", city: "Frankfurt", country: "DE" };
+
+describe("helper reply size fits the hosts' context windows", { timeout: 60_000 }, () => {
+  it("a helper call's prompt and reply fit an 8192-token host (an 8192 reply alone never did)", () => {
+    expect(HELPER_MAX_TOKENS).toBeLessThanOrEqual(4096);
+    // The netval helper prompts: about 2.6k tokens with tools.
+    for (const prompt of [500, 2_600, 4_000, 6_000]) {
+      const reply = helperReplyTokens(prompt, HELPER_MAX_TOKENS);
+      expect(reply).toBeGreaterThanOrEqual(HELPER_MIN_REPLY_TOKENS);
+      expect(reply).toBeLessThanOrEqual(HELPER_MAX_TOKENS);
+      expect(prompt + reply + 256).toBeLessThanOrEqual(HELPER_FIT_WINDOW);
+      expect(helperContextWindow(prompt)).toBe(8192);
+    }
+    expect(helperReplyTokens(2_600, HELPER_MAX_TOKENS)).toBe(4096);
+    expect(helperReplyTokens(6_000, HELPER_MAX_TOKENS)).toBe(8192 - 6_000 - 256);
+    // A prompt too big for 8K moves to 16K, and its reply never pushes it past that.
+    expect(helperContextWindow(7_500)).toBe(16_384);
+    expect(helperReplyTokens(7_500, HELPER_MAX_TOKENS)).toBe(4096);
+    expect(helperReplyTokens(14_000, HELPER_MAX_TOKENS)).toBe(16_384 - 14_000 - 256);
+    // A cap under the minimum (EDGECODER_TENTACLE_MAX_TOKENS=512) stays the cap.
+    expect(helperReplyTokens(2_600, 512)).toBe(512);
+    // The same count as the coordinator's contextNeeded.
+    const msgs = [{ role: "user" as const, content: "x".repeat(9_000) }];
+    const tools = [{ type: "function", function: { name: "read_file", description: "d", parameters: {} } }];
+    expect(promptTokensOf(msgs, tools) + 1000 + 256).toBe(contextNeeded(msgs, tools as never, 1000));
+  });
+
+  it("each paid helper call sends a reply cap that fits an 8192 window with its prompt, and minContext 8192", async () => {
+    const { tentacles, s, requests } = setup(({ call }) => (call === 0 ? { tool: ["write_file", { path: "fit.txt", content: "x\n" }] } : { text: "done" }));
+    writeFileSync(join(root, "big.txt"), "y".repeat(6_000));
+    tentacles.delegate(s.id, { task: "fit", kind: "code_edit", files: ["big.txt"], instructions: "" });
+    await tentacles.idle(s.id);
+    expect(requests.length).toBeGreaterThanOrEqual(2);
+    for (const r of requests) {
+      expect(r.req.hints!.minContext).toBe(8192);
+      expect(contextNeeded(r.req.messages, r.req.tools, r.req.maxTokens)).toBeLessThanOrEqual(8192);
+      expect(r.req.hints!.maxCSats!).toBeLessThanOrEqual(25);
+    }
+  });
+
+  it("a call refused as too long for every host is sent once more with the minimum reply", async () => {
+    const sent: number[] = [];
+    const backend: ChatBackend = async function* (req) {
+      sent.push(req.maxTokens ?? 0);
+      if (sent.length === 1) throw new ChatBackendError("Network request failed: context_too_long", 502);
+      yield { delta: "ok" };
+      yield { done: true, cSatsSpent: 0.1 };
+    };
+    let after = 0;
+    const calls: number[] = [];
+    const chat = hintedChat(backend, () => ({}), new AbortController().signal, (u) => calls.push(u.cSats), undefined, { maxTokens: () => 4096, after: () => after++ });
+    const r = await chat({ messages: [{ role: "user", content: "hi" }] });
+    expect(r.content).toBe("ok");
+    expect(sent).toEqual([4096, HELPER_MIN_REPLY_TOKENS]);
+    expect(calls).toEqual([0.1]);
+    expect(after).toBe(1);
+    // Other failures and a second refusal still fail the call.
+    const always: ChatBackend = async function* () {
+      throw new ChatBackendError("Network request failed: context_too_long", 502);
+    };
+    const tries: number[] = [];
+    const chat2 = hintedChat(async function* (req, sig) {
+      tries.push(req.maxTokens ?? 0);
+      yield* always(req, sig);
+    }, () => ({}), new AbortController().signal, () => {}, undefined, { maxTokens: 4096 });
+    await expect(chat2({ messages: [{ role: "user", content: "hi" }] })).rejects.toThrow(/context_too_long/);
+    expect(tries).toEqual([4096, HELPER_MIN_REPLY_TOKENS]);
+  });
+});
+
+describe("where a helper ran (served-by, not \"unknown\")", { timeout: 60_000 }, () => {
+  it("takes the class and host from the call's served-by when the backend gave no where", () => {
+    expect(whereServed(undefined, "network/qwen2.5-coder:1.5b", undefined).class).toBe("unknown");
+    const w = whereServed(undefined, "network/qwen2.5-coder:1.5b", SERVED);
+    expect(w).toEqual({ model: "network/qwen2.5-coder:1.5b", class: "apple", agentLabel: "apple · mac-•••30e5 Frankfurt" });
+    expect(tentacleRanOn({ model: "network/qwen2.5-coder:1.5b", class: "unknown", calls: [{ cSats: 0.05, model: "qwen2.5-coder:1.5b", served: SERVED }] })).toBe("network/qwen2.5-coder:1.5b on apple · mac-•••30e5 Frankfurt");
+    expect(tentacleRanOn({ model: "qwen3-coder:30b", class: "gpu", calls: [] })).toBe("qwen3-coder:30b on gpu");
+    expect(tentacleRanOn({ model: "qwen3.5:9b", class: "this computer", place: "local", calls: [] })).toBe("qwen3.5:9b on this computer");
+  });
+
+  it("a finished helper's summary names the class and host that served it", async () => {
+    const { tentacles, s, events } = setup(({ call }) => (call === 0 ? { tool: ["write_file", { path: "h.txt", content: "x\n" }], served: SERVED } : { text: "done", served: SERVED }), { workerModel: "network/qwen2.5-coder:1.5b" });
+    const v = tentacles.delegate(s.id, { task: "host", kind: "code_edit", files: [], instructions: "" });
+    await tentacles.idle(s.id);
+    const t = tentacles.get(s.id, v.id)!;
+    expect(t.result!.class).toBe("apple");
+    expect(tentacleRanOn(t.result!)).toBe("network/qwen2.5-coder:1.5b on apple · mac-•••30e5 Frankfurt");
+    const notes = JSON.stringify(events);
+    expect(notes).not.toMatch(/on unknown/);
   });
 });

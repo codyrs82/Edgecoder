@@ -15,7 +15,7 @@
  */
 
 import type { ToolRunnerDeps, ToolSchema } from "./agent-loop.js";
-import { TentacleError, TENTACLE_KINDS, formatCSatsShort, tentacleCallLine, tentacleTotals, type TentacleManager, type TentacleSpec, type TentacleView } from "./tentacles.js";
+import { TentacleError, TENTACLE_KINDS, formatCSatsShort, tentacleCallLine, tentacleRanOn, tentacleTotals, type TentacleManager, type TentacleSpec, type TentacleView } from "./tentacles.js";
 import type { ToolName } from "./tool-types.js";
 import type { AcceptanceKind } from "./tentacle-workspace.js";
 
@@ -159,7 +159,7 @@ export function describeTentacle(t: TentacleView): Record<string, unknown> {
     out.summary = cut(r.summary, 3000);
     if (r.filesTouched.length) out.filesTouched = r.filesTouched;
     if (r.checks.length) out.checks = r.checks.map((c) => ({ command: c.command, passed: c.passed, ...(c.passed ? {} : { output: cut(c.output, 2000) }) }));
-    out.ranOn = `${r.model} on ${r.class}`;
+    out.ranOn = tentacleRanOn(r);
     // Each model call's served line: model · class · host region · tokens · cSats.
     if (r.calls?.length) out.served = r.calls.map(tentacleCallLine);
     out.cSats = r.cSats;

@@ -10,7 +10,7 @@
 
 import type { SessionEvent } from "../apps/ide/sessions.js";
 import type { TentacleCall, TentacleConfig, TentacleView } from "../apps/ide/tentacles.js";
-import { tentacleCallLine, tentacleTotals } from "../apps/ide/tentacle-format.js";
+import { tentacleCallLine, tentacleRanOn, tentacleTotals } from "../apps/ide/tentacle-format.js";
 import type { ProviderClient } from "./client.js";
 import { formatCSats, type Style } from "./render.js";
 
@@ -50,7 +50,7 @@ export class TentacleTracker {
 
   private where(t: TentacleView): string {
     const r = t.result;
-    return r ? `${r.model} on ${r.class}` : t.model ?? "auto";
+    return r ? tentacleRanOn(r) : t.model ?? "auto";
   }
 
   /** One line for a tentacle. */

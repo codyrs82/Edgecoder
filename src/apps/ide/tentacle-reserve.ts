@@ -19,13 +19,53 @@
 /** The smallest ceiling a paid helper call starts with: below it the reply would be cut short. */
 export const MIN_HELPER_CALL_CSATS = 0.05;
 
-/** Reply tokens a helper call may write (sent as max_tokens): a bounded reply keeps the reserve small. */
-export const HELPER_MAX_TOKENS = 8192;
+/**
+ * Reply tokens a helper call may write at most (sent as max_tokens). A patch is a few hundred to
+ * a couple of thousand tokens; a bounded reply keeps the reserve small, and with the prompt it
+ * fits the 8192-token window most network hosts serve (an 8192 reply alone did not, so only hosts
+ * with a larger window could take a helper call).
+ */
+export const HELPER_MAX_TOKENS = 4096;
+
+/** The smallest reply a helper call asks for when its prompt leaves less room in the window. */
+export const HELPER_MIN_REPLY_TOKENS = 1024;
+
+/** The context window a helper call is sized to fit first: the network's common agent window (MIN_CONTEXT_WINDOW). */
+export const HELPER_FIT_WINDOW = 8192;
+
+/** Margin the coordinator adds to a call's prompt and reply (src/inference-api/ollama.ts contextNeeded). */
+const CONTEXT_MARGIN = 256;
 
 /** The helper's reply cap: EDGECODER_TENTACLE_MAX_TOKENS when set (256..32768), else HELPER_MAX_TOKENS. */
 export function helperMaxTokens(env: NodeJS.ProcessEnv = process.env): number {
   const n = Number(env.EDGECODER_TENTACLE_MAX_TOKENS);
   return env.EDGECODER_TENTACLE_MAX_TOKENS && Number.isFinite(n) ? Math.min(32_768, Math.max(256, Math.floor(n))) : HELPER_MAX_TOKENS;
+}
+
+/** A call's prompt in tokens, as the coordinator counts it (about 3 characters a token, tool calls and tool list included). */
+export function promptTokensOf(messages: Array<{ content: string; tool_calls?: unknown }>, tools?: unknown[]): number {
+  const chars = messages.reduce((n, m) => n + (m.content?.length ?? 0) + (m.tool_calls ? JSON.stringify(m.tool_calls).length : 0), 0) + (tools ? JSON.stringify(tools).length : 0);
+  return Math.ceil(chars / 3);
+}
+
+/**
+ * The smallest context window (8192, 16384, 32768) that holds a helper call's prompt with at least
+ * the minimum reply: the window the call is sized for, and its minContext routing hint.
+ */
+export function helperContextWindow(promptTokens: number, floor = HELPER_FIT_WINDOW): number {
+  let w = Math.max(HELPER_FIT_WINDOW, floor);
+  while (w < promptTokens + HELPER_MIN_REPLY_TOKENS + CONTEXT_MARGIN && w < 32_768) w *= 2;
+  return w;
+}
+
+/**
+ * Reply tokens for one helper call: the cap (helperMaxTokens), cut so the prompt and the reply fit
+ * the smallest window that holds the prompt (helperContextWindow), never under the minimum (or the
+ * cap, when that is lower). So the reply never pushes a call past the hosts its prompt fits.
+ */
+export function helperReplyTokens(promptTokens: number, cap = helperMaxTokens(), window = helperContextWindow(promptTokens)): number {
+  const room = window - promptTokens - CONTEXT_MARGIN;
+  return Math.max(Math.min(cap, HELPER_MIN_REPLY_TOKENS), Math.min(cap, room));
 }
 
 const round = (n: number) => Number(Math.max(0, n).toFixed(6));

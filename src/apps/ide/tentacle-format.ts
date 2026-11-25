@@ -6,7 +6,8 @@
  * lead's results and the clients show. No Node imports, so the terminal can use it as is.
  */
 
-import type { TentacleCall, TentacleView } from "./tentacles.js";
+import type { ServedBy } from "../../swarm/served-by.js";
+import type { TentacleCall, TentacleResult, TentacleView } from "./tentacles.js";
 
 const round = (n: number) => Number(n.toFixed(6));
 
@@ -20,6 +21,38 @@ export function parseWhere(where: string | undefined, fallbackModel: string): { 
   return { model, class: cls?.[1] ?? (w ? "any" : "unknown"), agentLabel: w || fallbackModel };
 }
 
+/** The host that served a call, as its served line shows it: `mac-•••30e5 Frankfurt`, or just the label. */
+function hostOf(s: ServedBy | undefined): string {
+  if (!s) return "";
+  const place = s.city ?? s.region ?? s.country ?? "";
+  return place ? `${s.label ? `${s.label} ` : ""}${place}` : s.label ?? "";
+}
+
+/**
+ * Where a helper ran, from its backend's `where` and the latest call's served-by: the network's
+ * answer names the class and the host even when the backend gave no `where` (a named network
+ * model), which parseWhere alone read as "unknown".
+ */
+export function whereServed(where: string | undefined, fallbackModel: string, served: ServedBy | undefined): { model: string; class: string; agentLabel: string } {
+  const w = parseWhere(where, fallbackModel);
+  if (!served) return w;
+  const host = hostOf(served);
+  return {
+    model: w.model,
+    class: served.computeClass || w.class,
+    agentLabel: where?.trim() ? w.agentLabel : host ? `${served.computeClass ? `${served.computeClass} · ` : ""}${host}` : w.agentLabel,
+  };
+}
+
+/** A finished helper's "ran on" text: `model on class · host` (the host from its latest served call), or `model on this computer`. */
+export function tentacleRanOn(r: Pick<TentacleResult, "model" | "class"> & Partial<Pick<TentacleResult, "calls" | "place">>): string {
+  if (r.place === "local" || r.class === "this computer") return `${r.model} on this computer`;
+  const served = [...(r.calls ?? [])].reverse().find((c) => c.served)?.served;
+  const cls = r.class && r.class !== "unknown" && r.class !== "any" ? r.class : served?.computeClass || r.class;
+  const host = hostOf(served);
+  return `${r.model} on ${cls}${host ? ` · ${host}` : ""}`;
+}
+
 export const formatCSatsShort = (c: number) => `${c < 10 ? c.toFixed(1) : Math.round(c)} cSats`;
 const tok = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k` : String(n));
 
@@ -30,13 +63,12 @@ const tok = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/,
 export function tentacleCallLine(c: TentacleCall): string {
   const s = c.served;
   const cls = s?.computeClass ?? parseWhere(c.where, c.model).class;
-  const place = s ? s.city ?? s.region ?? s.country ?? "" : "";
   const pin = c.promptTokens ?? s?.promptTokens ?? 0;
   const pout = c.outputTokens ?? s?.outputTokens ?? 0;
   const tokens = pin || pout ? `${tok(pin)} in / ${tok(pout)} out tok` : "";
   const model = c.model.replace(/^network\//, "");
   if (c.place === "local") return [model, "this computer", tokens, formatCSatsShort(c.cSats)].filter(Boolean).join(" · ");
-  const host = place ? `${s?.label ? `${s.label} ` : ""}${place}` : s?.label ?? "";
+  const host = hostOf(s);
   return [model, c.place === "network" ? `network ${cls}` : cls, host, tokens, formatCSatsShort(c.cSats)].filter(Boolean).join(" · ");
 }
 
