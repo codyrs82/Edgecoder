@@ -38,7 +38,7 @@ describe("job pricing (cSats = sats)", () => {
   });
 });
 
-import { HOST_PROFIT_MARGIN, cSatsPerMTokens, inferenceCostMsat, tokenPriceUsdPerM } from "../../src/economy/job-pricing.js";
+import { HOST_PROFIT_MARGIN, WORK_TIME_OVERHEAD_MS, cSatsPerMTokens, expectedWorkMs, inferenceCostMsat, tokenPriceUsdPerM } from "../../src/economy/job-pricing.js";
 import { paramsB } from "../../src/inference-api/auto-route.js";
 
 describe("per-token pricing for model calls", () => {
@@ -116,6 +116,37 @@ describe("per-token pricing for model calls", () => {
     // The token price is untouched: a long reply is charged its tokens either way.
     const big = { ...call, promptTokens: 20_000, outputTokens: 2_000, durationMs: 5_000 };
     expect(inferenceCostMsat({ ...big, floorWorkMs: 1 })).toEqual(inferenceCostMsat(big));
+  });
+
+  it("a short call interleaved with a long one on one engine is billed for its own tokens' work (C10)", () => {
+    // Run 3, 2026-11-24 (inf-1795567223816-a561fb06): a 1.5b probe sharing a 2-slot CPU host with a long
+    // call took 83 s, and its reported prompt + generation time spanned most of it (the engine runs both
+    // calls' steps together), so the floor billed 0.427 cSats for a few dozen tokens.
+    const call = { paramsB: 1.5, btcUsd: 60_000, promptTokens: 40, outputTokens: 48, computeClass: "cpu", tierWeight: 1, floorSlots: 2, perSecondCostMsat: 0, durationMs: 83_000, floorWorkMs: 80_000 };
+    const before = inferenceCostMsat(call);
+    expect(before.basis).toBe("power_floor");
+    const floorMaxMs = expectedWorkMs({ paramsB: 1.5, computeClass: "cpu", promptTokens: 40, outputTokens: 48 });
+    expect(floorMaxMs).toBeLessThan(20_000);
+    const own = inferenceCostMsat({ ...call, floorMaxMs });
+    expect(own).toEqual(inferenceCostMsat({ ...call, durationMs: floorMaxMs, floorWorkMs: undefined }));
+    expect(own.costMsat * 4).toBeLessThan(before.costMsat);
+    // Never raises a floor: a call that really ran shorter is billed its own time.
+    expect(inferenceCostMsat({ ...call, durationMs: 3_000, floorWorkMs: 2_000, floorMaxMs })).toEqual(inferenceCostMsat({ ...call, durationMs: 2_000, floorWorkMs: undefined }));
+    expect(inferenceCostMsat({ ...call, floorMaxMs: Number.NaN })).toEqual(before);
+  });
+
+  it("expectedWorkMs: a slow host's time for the tokens, growing with them and shrinking with size and tier", () => {
+    const at = (o: Partial<Parameters<typeof expectedWorkMs>[0]>) => expectedWorkMs({ paramsB: 7, computeClass: "cpu", promptTokens: 1_000, outputTokens: 100, ...o });
+    expect(expectedWorkMs({ paramsB: 7, computeClass: "cpu", promptTokens: 0, outputTokens: 0 })).toBe(WORK_TIME_OVERHEAD_MS);
+    // 7B on a slow CPU: 3 tok/s out, 18 tok/s in: (55.6 s + 33.3 s) × 2 + 5 s.
+    expect(at({})).toBe(182_778);
+    expect(at({ outputTokens: 200 })).toBeGreaterThan(at({}));
+    expect(at({ promptTokens: 2_000 })).toBeGreaterThan(at({}));
+    expect(at({ paramsB: 1.5 })).toBeLessThan(at({}));
+    expect(at({ computeClass: "gpu.dc" })).toBeLessThan(at({ computeClass: "apple" }));
+    expect(at({ tierWeight: 4 })).toBeCloseTo(WORK_TIME_OVERHEAD_MS + (182_778 - WORK_TIME_OVERHEAD_MS) / 4, -1);
+    expect(at({ tierWeight: 0.5 })).toBe(at({}));
+    expect(at({ computeClass: "unknown" })).toBe(at({}));
   });
 
   it("splits the power floor across the agent's parallel slots: one machine's power, not N", () => {

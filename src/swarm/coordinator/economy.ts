@@ -6,7 +6,7 @@
  */
 import { randomInt } from "node:crypto";
 import type { PaymentIntent, PriceEpochRecord, ResourceClass } from "../../common/types.js";
-import { cSatsToMsat, inferenceReserveMsat, reserveMsat } from "../../economy/job-pricing.js";
+import { cSatsToMsat, inferenceReserveMsat, reserveMsat, WORK_PROMPT_TOKEN_ALLOWANCE } from "../../economy/job-pricing.js";
 import { paramsB } from "../../inference-api/auto-route.js";
 import { configureCloudCatalog } from "../../cloud-host/catalog.js";
 import { configureCloudPricing, modelTokenPrice } from "../../economy/cloud-pricing.js";
@@ -72,7 +72,8 @@ export function subtaskReserveMsat(resourceClass: ResourceClass, taskClass: Comp
  * settled cost from its own size. Token bounds are the ones /inference/chunks applies to reported
  * counts (the queued input's bytes + PROMPT_TOKEN_ALLOWANCE in, maxTokens + OUTPUT_TOKEN_ALLOWANCE
  * out); the power floor is the requested class's (every class for "any") at its top tier for the
- * call's timeout, the most it can be billed for. `maxCSats` (the buyer's ceiling) caps it.
+ * work those tokens take on a slow host there, at most the call's timeout: the most it can be billed
+ * for (job-pricing.ts expectedWorkMs). `maxCSats` (the buyer's ceiling) caps it.
  */
 export function inferenceCallReserve(input: { model: string; taskClass: ComputeClassId | "any"; timeoutMs: number; inputBytes: number; maxTokens: number; maxCSats?: number }) {
   const classes = (input.taskClass === "any" ? Object.keys(rateOracleConfig.computeClasses) : [input.taskClass]) as ComputeClassId[];
@@ -83,6 +84,8 @@ export function inferenceCallReserve(input: { model: string; taskClass: ComputeC
     btcUsd: mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD,
     promptTokensMax: Math.max(0, input.inputBytes) + PROMPT_TOKEN_ALLOWANCE,
     outputTokensMax: Math.max(0, input.maxTokens) + OUTPUT_TOKEN_ALLOWANCE,
+    // The power floor's seconds: the work this many tokens take on a slow host of each class (C8).
+    workPromptTokensMax: Math.max(0, input.inputBytes) + WORK_PROMPT_TOKEN_ALLOWANCE,
     maxDurationMs: input.timeoutMs,
     floorClasses: classes.map((c) => ({ computeClass: c, maxTierWeight: Math.max(1, ...(rateOracleConfig.computeClasses[c]?.tiers ?? []).map((t) => t.creditsPerSecond)) })),
     ...(input.maxCSats !== undefined ? { capMsat: cSatsToMsat(input.maxCSats) } : {}),
