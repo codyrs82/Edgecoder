@@ -323,14 +323,16 @@ describe("tentacle runner", () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     const { tentacles, s, worker } = setup({ config: { maxParallel: 2 }, script: ({ task, call }) => (call === 0 ? { tool: ["write_file", { path: `${task}.txt`, content: task }], wait: gate } : { text: "ok" }) });
-    const ids = ["p1", "p2", "p3", "p4"].map((task) => tentacles.delegate(s.id, { task, kind: "code_edit", files: [], instructions: "" }).id);
+    // Three pieces (two run, one waits) show the cap; each runs a real git worktree, check and merge,
+    // which is several seconds on Windows runners, so this one gets more than the 15 s default.
+    const ids = ["p1", "p2", "p3"].map((task) => tentacles.delegate(s.id, { task, kind: "code_edit", files: [], instructions: "" }).id);
     await until(() => worker.requests.length >= 2, 5000, "two running");
-    expect(ids.map((i) => tentacles.get(s.id, i)!.status)).toEqual(["running", "running", "queued", "queued"]);
+    expect(ids.map((i) => tentacles.get(s.id, i)!.status)).toEqual(["running", "running", "queued"]);
     release();
     await tentacles.idle(s.id);
     expect(worker.stats().maxRunning).toBe(2);
-    expect(ids.map((i) => tentacles.get(s.id, i)!.merge?.state)).toEqual(["applied", "applied", "applied", "applied"]);
-  });
+    expect(ids.map((i) => tentacles.get(s.id, i)!.merge?.state)).toEqual(["applied", "applied", "applied"]);
+  }, 45_000);
 
   it("stops a tentacle at its budget and refuses new ones when the session's budget is spent", async () => {
     const { tentacles, s } = setup({
