@@ -629,3 +629,77 @@ describe("run 7: only fresh measured speeds tell two hosts of one class apart", 
     expect(latencyPolicyFromEnv({ PORTAL_COORD_SPEED_FRESH_MS: "0" }, 2_000).speedFreshMs).toBe(0);
   });
 });
+
+/*
+ * Run 8 (2026-11-25), CPU ramp: the nearest free host 33.9 % of the time (39/115). Most of the rest
+ * had no free slot near the buyer (moving them is the rule). With every coordinator busy, lhr buyers
+ * were queued on the US by agent count although the EU was expected to start them sooner, only not by
+ * the margin (inf-1795625910042-dedcdc64: EU 3,057 ms vs US 3,490 ms, served on iad;
+ * inf-1795625914571-83829970: EU 3,057 vs US 3,533, served on jnb). Now the call queues where its
+ * hosts are nearest the buyer, unless another coordinator would start it sooner by the margin.
+ */
+describe("run 8: every coordinator busy, the call queues nearest the buyer", () => {
+  const US_REGIONS = ["iad", "lax", "gru", "jnb", "nrt", "sin", "syd"];
+  const EU_REGIONS = ["lhr", "fra"];
+  // As recorded for inf-1795625910042-dedcdc64: US rtt 7, queue 3,321, agent rtt 162 (expected 3,490); EU rtt 96, queue 2,950, agent rtt 11 (3,057).
+  const usBusy = (o: Partial<LatencyCandidate> = {}) => cand({ url: US, rttMs: 7, free: -3, waiting: 2, agents: 7, pickupP90Ms: 321, callP50Ms: 3_000, agentRttMs: 162, hostRegions: US_REGIONS, ...o });
+  const euBusy = (o: Partial<LatencyCandidate> = {}) => cand({ url: EU, rttMs: 96, free: -1, waiting: 1, agents: 2, pickupP90Ms: 950, callP50Ms: 2_000, agentRttMs: 11, hostRegions: EU_REGIONS, ...o });
+
+  it("queues an lhr buyer on the EU when the US is not faster by the margin (inf-1795625910042-dedcdc64)", () => {
+    const c = chooseByLatency([usBusy(), euBusy()], US, POLICY, { clientRegion: "lhr", portalRegion: "ord" });
+    expect(c.candidates.map((x) => x.expectedMs)).toEqual([3_490, 3_057]);
+    expect(c).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "locality" });
+    expect(c.reason).toMatch(/^every coordinator busy: queued nearest the buyer \(lhr\): hosts 0 km vs 5,\d{3} km; coordinator\.example\.com not faster by the margin \(expected 3490 ms vs 3057 ms\)$/);
+    // Without the regions (an older record), the backlog share by agents stands, as before.
+    const before = chooseByLatency([usBusy({ hostRegions: undefined }), euBusy({ hostRegions: undefined })], US, POLICY, { clientRegion: "lhr" });
+    expect(before).toMatchObject({ chosen: "coordinator.example.com", rule: "load" });
+  });
+
+  it("overflows to the other coordinator when the nearest queues longer by the margin (inf-1795625912119-f7136858)", () => {
+    // EU 2 behind (4,139 ms queue) against US 3,533 ms: 714 ms is over 15 % of 4,247.
+    const c = chooseByLatency([usBusy({ free: 0, waiting: 0, pickupP90Ms: 364 }), euBusy({ free: -2, waiting: 2, pickupP90Ms: 139 })], US, POLICY, { clientRegion: "lhr" });
+    expect(c.candidates.map((x) => x.expectedMs)).toEqual([3_533, 4_246]);
+    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "overflow" });
+    expect(c.reason).toMatch(/^overflow: every coordinator busy; coordinator-eu\.example\.com has the hosts nearest the buyer \(lhr, 0 km\) but queues longer/);
+  });
+
+  it("a buyer whose nearest hosts are on the load pick stays there; regions within the margin do not move it", () => {
+    const sin = chooseByLatency([usBusy(), euBusy()], US, POLICY, { clientRegion: "sin" });
+    expect(sin).toMatchObject({ chosen: "coordinator.example.com", rule: "load" });
+    // Both coordinators have hosts in the same region: no queue is nearer.
+    const same = chooseByLatency([usBusy({ hostRegions: ["lhr"] }), euBusy({ hostRegions: ["lhr"] })], US, POLICY, { clientRegion: "lhr" });
+    expect(same.rule).toBe("load");
+    // Locality off.
+    expect(chooseByLatency([usBusy(), euBusy()], US, { ...POLICY, localityMarginKm: 0 }, { clientRegion: "lhr" }).rule).toBe("load");
+  });
+
+  it("a nearest coordinator with a free slot still wins under load; one with none does not hold the call", () => {
+    // EU has a slot on fra (lhr busy): the lhr buyer goes there, 661 km, not to a US host.
+    const euOpen = cand({ url: EU, rttMs: 96, free: 1, agents: 2, agentRttMs: 11, freeRegions: ["fra"], hostRegions: EU_REGIONS });
+    const usOpen = cand({ url: US, rttMs: 7, free: 14, agents: 7, agentRttMs: 162, freeRegions: ["iad", "lax"], hostRegions: US_REGIONS });
+    expect(chooseByLatency([usOpen, euOpen], US, POLICY, { clientRegion: "lhr" })).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "locality" });
+    // The EU's last slot is taken by a call already sent: the US host is the nearest free one.
+    expect(chooseByLatency([usOpen, { ...euOpen, free: 0 }], US, POLICY, { clientRegion: "lhr" }).chosen).toBe("coordinator.example.com");
+  });
+
+  it("the directory remembers where a coordinator's hosts are once their slots are all busy", async () => {
+    let t = 1_000_000;
+    const withRegions = (r: CapacityReport, regions: string[] | undefined): CapacityReport => ({ ...r, modelLoad: Object.fromEntries(Object.entries(r.modelLoad!).map(([m, l]) => [m, { ...l, ...(regions ? { freeRegions: regions } : {}) }])) });
+    const reports: Record<string, CapacityReport> = {
+      [US]: withRegions(report({ rttMs: 7, free: 6, agents: 7 }), ["iad", "lax"]),
+      [EU]: withRegions(report({ rttMs: 96, free: 2, agents: 2 }), ["lhr", "fra"]),
+    };
+    const dir = createChatCapacityDirectory({ candidates: async () => [US, EU], allowed: () => true, ttlMs: 15_000, now: () => t, probe: vi.fn(async (url: string) => reports[url]), latency: POLICY, portalRegion: "ord" });
+    expect((await dir.pick({ kind: "network", model: M }, [], { clientRegion: "lhr" })).url).toBe(EU);
+    // A minute later every slot is busy and the reports name no free region; both queue about as long.
+    t += 60_000;
+    reports[US] = withRegions(report({ rttMs: 7, free: 0, waiting: 3, agents: 7 }), undefined);
+    reports[EU] = withRegions(report({ rttMs: 96, free: 0, waiting: 1, agents: 2 }), undefined);
+    const busy = await dir.pick({ kind: "network", model: M }, [], { clientRegion: "lhr" });
+    expect(busy.choice).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "locality" });
+    // Long after (HOST_REGIONS_KEEP_MS), the regions are forgotten and the backlog share decides.
+    t += 20 * 60_000;
+    const later = await dir.pick({ kind: "network", model: M }, [], { clientRegion: "lhr" });
+    expect(later.choice?.rule).not.toBe("locality");
+  });
+});

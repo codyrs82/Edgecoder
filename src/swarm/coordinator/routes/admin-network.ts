@@ -35,7 +35,8 @@ import { agentContextWindow, agentLastPullMs, agentLoadReport, agentSocketConnec
 import { agentSocketLost } from "../agent-liveness.js";
 import { effectiveHardware, hardwareVerifier } from "../economy.js";
 import { routableModels } from "../../model-catalog.js";
-import { noteDecodeRate, noteServiceTime } from "../start-eta.js";
+import { noteCallEnded, noteDecodeRate, noteServiceTime } from "../start-eta.js";
+import { requesterCancelled } from "../inference-cancel.js";
 import { noteAgentSteal } from "../host-steal.js";
 import { inferenceCancelledForCapacity, inferenceStreams } from "./inference.js";
 import { bestFitConfig, complexityWeights, noteRoutedChunk, recentDecisions, restoreDecisions, ROUTING_LOG_SIZE, setCallDurationSource, setDecisionSink, storedDecision } from "../routing.js";
@@ -418,10 +419,18 @@ export function observeInference(url: string | undefined, status: number, body: 
   // With the tokens it read and wrote (the model's counts, else estimated from the bytes: a timed-out
   // call has none), the sample also gives the class's speed, for the completion estimate.
   if (b.done === true && claim) {
+    // Run 8: only a call that completed normally is a sample. A reply that ended with an error (cut at
+    // its deadline, the engine failed) or that its requester cancelled stopped part way, so its time
+    // over its tokens is not the host's speed (run 8's cancel test left lhr "measured" 2.3x slower
+    // than it is). Its end still counts: a call beside it shared the host.
+    if (error || requesterCancelled(b.subtaskId)) {
+      noteCallEnded(claim.claimedBy, nowMs);
+      return;
+    }
     const tokens = sampleTokens(b, claim.subtask.input, inferenceStreams.replyBytes(b.subtaskId) ?? 0);
-    noteServiceTime(claim.subtask.requestedModel, claim.claimedBy, claim.claimedAt, nowMs, tokens);
     // Run 7: the class's decode and prefill rates (first piece to last, claim to first piece).
     const running = claim.claimedBy ? queue.activeClaims().get(claim.claimedBy)?.inference ?? 1 : 1;
+    noteServiceTime(claim.subtask.requestedModel, claim.claimedBy, claim.claimedAt, nowMs, tokens, running);
     noteDecodeRate(claim.subtask.requestedModel, claim.claimedBy, claim.claimedAt, inferenceStreams.firstPieceAt(b.subtaskId), nowMs, tokens, running);
   }
 }

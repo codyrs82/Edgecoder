@@ -76,6 +76,18 @@
  * taken a slot on the free host nearest their own buyer, so a burst moves on to the next host or
  * coordinator instead of every call counting the same free host (run 5: 6 heavy calls onto the EU's
  * 4 slots).
+ *
+ * Run 8: under CPU load the nearest free host was chosen 33.9 % of the time. Most of the rest had no
+ * free slot near the buyer (the EU's two hosts busy or held back by their throttle guard): moving
+ * those is the rule. The calls moved away from a free host near the buyer went on hosts' measured
+ * speeds ("iad 3439 ms vs lhr 26457 ms", inf-1795625872261-fd69eaf5), which the coordinators now take
+ * only from calls that completed normally and ran alone on the host, at least three (start-eta.ts).
+ * And when no coordinator had a free slot, the backlog went by agent count (the US) although the EU
+ * was expected to start the call sooner, only not by the margin (lhr buyers inf-1795625910042-dedcdc64
+ * and inf-1795625914571-83829970: EU 3,057 ms vs US 3,490-3,533 ms, served on iad and jnb). Now, with every coordinator busy, the call queues on the coordinator
+ * whose hosts for the model are nearest the buyer (hostRegions: the regions the portal has seen it
+ * report free hosts in recently) unless another is expected to start it sooner by the margin
+ * ("overflow"), as when the nearest has a free slot.
  */
 
 import { coordinatorHost, type CoordinatorChoice, type CoordinatorChoiceCandidate } from "../common/coordinator-choice.js";
@@ -107,6 +119,11 @@ export interface LatencyCandidate {
    * not known): each has taken a slot on the free host nearest its buyer.
    */
   sentFor?: readonly (string | null)[];
+  /**
+   * Run 8: regions of its hosts for the model, free or not (the portal remembers the free regions its
+   * recent reports showed). Used when no coordinator has a free slot: the call queues nearest the buyer.
+   */
+  hostRegions?: readonly string[];
 }
 
 /** One host with a free slot for the model, as its coordinator reports it. */
@@ -394,6 +411,12 @@ export function chooseByLatency(
         : done(near.c.url, "locality", `free host nearest the buyer (${where.clientRegion}): ${km(near.nearKm!)} vs ${km(runnerKm)}; ${notFaster(near, open, freshMsOf(policy))}`);
     }
   }
+  // Run 8: every coordinator busy. The call queues where its hosts are nearest the buyer, unless
+  // another coordinator is expected to start it sooner by the margin (the overflow below).
+  if (margin > 0 && where.clientRegion && open.length === 0 && scored.length > 1) {
+    const queued = queueNearest(scored, base, where.clientRegion, margin, policy);
+    if (queued) return done(queued.url, queued.rule, queued.reason);
+  }
   if (!base || base.expectedMs === null) return done(baselineUrl, "load", `${loadReason}; its latency is not known (${base?.stale ? "stale load report" : "round trip not measured"})`);
   const congested = base.c.free <= 0;
   let best: (typeof scored)[number] | undefined;
@@ -413,6 +436,30 @@ export function chooseByLatency(
     return done(baselineUrl, "load", `${loadReason}; ${coordinatorHost(best.c.url)} not faster by the margin (expected ${ms(best.expectedMs)} vs ${ms(base.expectedMs)})`);
   }
   return done(baselineUrl, "load", `${loadReason}; no faster coordinator with a free slot (expected ${ms(base.expectedMs)})`);
+}
+
+/**
+ * Run 8: with no free slot anywhere, the coordinator whose hosts for the model are nearest the buyer
+ * (hostRegions, else its free regions) takes the call when it is nearer than every other by `marginKm`
+ * and not the load pick already, unless another is expected to start it sooner by both margins
+ * (then "overflow" to the fastest). Null: not compared (a region or latency unknown) or the load pick
+ * is itself the nearest (the usual overflow check applies).
+ */
+function queueNearest(scored: readonly Scored[], base: Scored | undefined, clientRegion: string, marginKm: number, policy: LatencyPolicy): { url: string; rule: CoordinatorChoice["rule"]; reason: string } | null {
+  const withKm = scored.map((s) => ({ s, km: nearestKm(clientRegion, s.c.hostRegions?.length ? s.c.hostRegions : s.c.freeRegions) }));
+  if (withKm.some((x) => x.km === null || x.s.expectedMs === null)) return null;
+  const near = withKm.reduce((a, b) => (b.km! < a.km! ? b : a));
+  if (near.s === base) return null;
+  const runnerKm = Math.min(...withKm.filter((x) => x !== near).map((x) => x.km!));
+  if (!(near.km! + marginKm < runnerKm)) return null;
+  const km = (n: number) => `${Math.round(n).toLocaleString("en-US")} km`;
+  let best: Scored | null = null;
+  for (const x of withKm) if (x !== near && (!best || x.s.expectedMs! < best.expectedMs!)) best = x.s;
+  const gain = best ? near.s.expectedMs! - best.expectedMs! : 0;
+  if (best && gain > policy.marginMs && gain > (policy.marginPct / 100) * near.s.expectedMs!) {
+    return { url: best.c.url, rule: "overflow", reason: `overflow: every coordinator busy; ${coordinatorHost(near.s.c.url)} has the hosts nearest the buyer (${clientRegion}, ${km(near.km!)}) but queues longer: expected ${best.expectedMs} ms vs ${near.s.expectedMs} ms` };
+  }
+  return { url: near.s.c.url, rule: "locality", reason: `every coordinator busy: queued nearest the buyer (${clientRegion}): hosts ${km(near.km!)} vs ${km(runnerKm)}; ${best ? `${coordinatorHost(best.c.url)} not faster by the margin (expected ${best.expectedMs} ms vs ${near.s.expectedMs} ms)` : "no other coordinator"}` };
 }
 
 /** PORTAL_COORD_LATENCY_* (the only place they are read). */

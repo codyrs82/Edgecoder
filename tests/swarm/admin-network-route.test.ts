@@ -145,3 +145,85 @@ describe("GET /admin/network", () => {
     expect(net.networkSamples.size).toBeGreaterThan(0);
   });
 });
+
+describe("run 8: only calls that completed normally and ran alone feed a host's own speed", () => {
+  /*
+   * Network run 8 (2026-11-25): idle lhr buyers went to iad on "iad 987 ms vs lhr 2273 ms"
+   * (inf-1795623629295-bac0c382, inf-1795623637550-c2e2e888); lhr serves its own buyers in ~1.0 s.
+   * lhr's samples came from the cancel test and from two calls that ran side by side on it.
+   */
+  const MODEL = "qwen2.5-coder:1.5b";
+  let eta: typeof import("../../src/swarm/coordinator/start-eta.js");
+  let cancel: typeof import("../../src/swarm/coordinator/inference-cancel.js");
+  let n = 0;
+
+  beforeAll(async () => {
+    eta = await import("../../src/swarm/coordinator/start-eta.js");
+    cancel = await import("../../src/swarm/coordinator/inference-cancel.js");
+  });
+
+  function claimCall(agentId: string, claimedAtMs: number): { taskId: string; subtaskId: string } {
+    n++;
+    const taskId = `task-r8-${n}`;
+    const subtaskId = `sub-r8-${n}`;
+    const input = JSON.stringify({ messages: [{ role: "user", content: "write a python function that adds two numbers" }] });
+    ctx.queue.restoreSubtask({
+      id: subtaskId, taskId, kind: "inference", language: "python", input, timeoutMs: 600_000, snapshotRef: "inference",
+      requestedModel: MODEL, projectMeta: { projectId: "p-r8", resourceClass: "cpu", priority: 60 }
+    } as never, { claim: { agentId, claimedAtMs } });
+    return { taskId, subtaskId };
+  }
+
+  function finish(call: { subtaskId: string }, atMs: number, extra: Record<string, unknown> = {}): void {
+    net.observeInference("/inference/chunks", 200, { subtaskId: call.subtaskId, seq: 0, delta: "def add(a, b):\n    return a + b\n", done: true, promptTokens: 40, outputTokens: 20, ...extra }, JSON.stringify({ status: "ok" }), atMs);
+    ctx.queue.removeHeld(call.subtaskId);
+  }
+
+  test("an errored (deadline-cut) or requester-cancelled reply is no sample; three normal ones alone are", async () => {
+    const agent = "agent-r8-lhr";
+    addAgent(agent, [MODEL], Date.now(), "lhr");
+    eta.agentServiceTimes.clear();
+    eta.clearCallEnds();
+    const t0 = Date.now() - 120_000;
+    // Two calls that completed normally, one at a time.
+    for (let i = 0; i < 2; i++) finish(claimCall(agent, t0 + i * 5_000), t0 + i * 5_000 + 1_000);
+    // Cut at its 8 s deadline, part of the reply sent.
+    const cut = claimCall(agent, t0 + 10_000);
+    finish(cut, t0 + 18_000, { error: "timed out after 8 s" });
+    // Cancelled by its requester (run 8's cancel test): the agent reports what it produced, no error.
+    const cancelled = claimCall(agent, t0 + 20_000);
+    expect(await cancel.cancelInferenceCall(cancelled.taskId, cancelled.subtaskId, t0 + 21_000, 3_600_000)).toBe("stopping");
+    finish(cancelled, t0 + 22_000);
+    // Two normal samples: not enough for a speed of its own.
+    expect(eta.agentServiceTimes.speed(MODEL, agent, t0 + 23_000)).toBeNull();
+    expect(eta.hostSpeed(MODEL, agent, "apple", t0 + 23_000)?.from).not.toBe("host");
+    // A third normal one: measured, at the normal calls' speed.
+    finish(claimCall(agent, t0 + 30_000), t0 + 31_000);
+    const now = t0 + 40_000;
+    expect(eta.hostSpeed(MODEL, agent, "apple", now)).toMatchObject({ from: "host" });
+    const normal = eta.agentServiceTimes.speed(MODEL, agent, now)!;
+    expect(normal).toBeCloseTo(1_000 / eta.callWorkMs(MODEL, "apple", 40, 20), 6);
+    state.agentCapabilities.delete(agent);
+  });
+
+  test("two calls side by side on one host are no sample of its own speed (the class keeps them)", () => {
+    const agent = "agent-r8-pair";
+    addAgent(agent, [MODEL], Date.now(), "lhr");
+    eta.agentServiceTimes.clear();
+    eta.serviceTimes.clear();
+    eta.clearCallEnds();
+    const t0 = Date.now() - 120_000;
+    for (let i = 0; i < 3; i++) {
+      // Run 8's idle probe: an lhr and a fra buyer's calls on lhr at once, each ~2.5 s.
+      const a = claimCall(agent, t0 + i * 10_000);
+      const b = claimCall(agent, t0 + i * 10_000 + 100);
+      finish(a, t0 + i * 10_000 + 2_450);
+      finish(b, t0 + i * 10_000 + 2_500);
+    }
+    const now = t0 + 40_000;
+    expect(eta.agentServiceTimes.speed(MODEL, agent, now)).toBeNull();
+    expect(eta.serviceTimes.speed(MODEL, "apple", now)).not.toBeNull();
+    expect(eta.hostSpeed(MODEL, agent, "apple", now)?.from).toBe("class");
+    state.agentCapabilities.delete(agent);
+  });
+});
