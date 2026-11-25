@@ -48,10 +48,10 @@
  * candidate by default (AUTO_CLOUD_MODELS unset; a list narrows it, "off" turns it off), but only
  * when either the job wants the network's top tier (jobWantsTopTier: not a light job, complexity
  * >= AUTO_CLOUD_MIN_COMPLEXITY), or no other machine meets the job's hard requirements (tools,
- * context window, price ceiling, the size floor minParamsB): the automatic fallback when nothing
- * on the network fits, or every other machine that meets it is busy (no free slot: the cloud host
- * takes the overflow as more GPUs in the pool). A light or simple job a free network machine can
- * serve never goes to the cloud.
+ * context window, price ceiling, the size floor of its spill band spillFloorB): the automatic
+ * fallback when nothing on the network fits, or every other machine in the band is busy (no free
+ * slot: the cloud host takes the overflow as more GPUs in the pool). A light or simple job a free
+ * network machine can serve, by spilling to a smaller model if need be, never goes to the cloud.
  * Reasoning models (GLM-5.3, DeepSeek V4.1 Flash: they think in `reasoning_content` before they
  * answer) are left out for a call whose max_tokens is below their reasoning budget
  * (reasoningMinTokensFor; AUTO_REASONING_MIN_TOKENS): a small output cap ends inside the thinking
@@ -607,12 +607,24 @@ type Evaluated = Candidate & { cloud: boolean; contextOk: boolean; priceOk: bool
 /**
  * Cloud models are considered for this job: it wants the top tier, or no other machine meets its
  * hard requirements (tools, context, price ceiling, size floor): the fallback when nothing fits.
+ *
+ * C6 (2026-11-25 run 3c: 41 of 118 simple Auto calls went to the cloud host at low load). The size
+ * floor here is the call's spill band (spillFloorB), not its preferred minimum: when the preferred
+ * models (a simple call's 7b/9b Macs) are full, a free machine in the band (an idle 1.5b CPU host)
+ * takes the call by spilling, before the cloud host does. The cloud host is overflow: it joins only
+ * when no non-cloud machine in the band has a free slot. A complex call's band is its floor (14B),
+ * so it is unchanged; a top-tier job always may use it.
  */
-export function cloudConsidered(job: JobDescriptor, req: Requirements, all: ReadonlyArray<Pick<Evaluated, "cloud" | "toolsOk" | "contextOk" | "priceOk" | "paramsB"> & Partial<Pick<Evaluated, "free" | "healthy">>>): boolean {
+export function cloudConsidered(
+  job: JobDescriptor,
+  req: Requirements,
+  all: ReadonlyArray<Pick<Evaluated, "cloud" | "toolsOk" | "contextOk" | "priceOk" | "paramsB"> & Partial<Pick<Evaluated, "free" | "healthy">>>,
+  floorB: number = spillFloorB(job, req),
+): boolean {
   if (jobWantsTopTier(job)) return true;
-  // Also when every other machine that meets the job is full or not taking work: the cloud host is
-  // one more machine in the pool (expand), and drops out again once one has room (contract).
-  return !all.some((c) => !c.cloud && c.toolsOk && c.contextOk && c.priceOk && c.paramsB >= req.minParamsB && c.free !== false && c.healthy !== false);
+  // Also when every other machine in the band is full or not taking work: the cloud host is one
+  // more machine in the pool (expand), and drops out again once one has room (contract).
+  return !all.some((c) => !c.cloud && c.toolsOk && c.contextOk && c.priceOk && c.paramsB >= floorB && c.free !== false && c.healthy !== false);
 }
 
 /**
@@ -702,8 +714,8 @@ export function bestFit(job: JobDescriptor, view: NetworkView, cfg: BestFitConfi
   const classInfo = { complexityClass: cc.cls, complexityWhy: cc.why, spillFloorB: bandB };
   const sessionLive = session && (nowMs === 0 || nowMs - session.atMs <= cfg.sessionTtlMs) ? session : undefined;
   const evaluated = evaluate(job, view, cfg, req, w, sessionLive);
-  // Cloud models only for top-tier jobs, or when nothing else meets the job (cloudConsidered).
-  const all = cloudConsidered(job, req, evaluated) ? evaluated : evaluated.filter((c) => !c.cloud);
+  // Cloud models only for top-tier jobs, or when no other machine in the band has room (cloudConsidered).
+  const all = cloudConsidered(job, req, evaluated, bandB) ? evaluated : evaluated.filter((c) => !c.cloud);
   const hardB = req.hardMinParamsB ?? 0;
   const fits = cloudTier(job, all.filter((c) => c.toolsOk && c.contextOk && c.priceOk));
   const header = `${job.job.replace("_", " ")} · complexity ${describeComplexity(job.complexity, 2)} · ${cc.cls}${cc.why.startsWith("complexity") ? "" : ` (${cc.why})`}`;
