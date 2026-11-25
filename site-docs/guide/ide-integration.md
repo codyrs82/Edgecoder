@@ -328,7 +328,10 @@ curl -s http://127.0.0.1:4304/v1/chat/completions \
 ```
 
 For `auto` and network models the response includes an `edgecoder` field: `where` (where the
-request ran) and `cSatsSpent` (what it cost, when it ran on the network). Replies from the local
+request ran) and `cSatsSpent` (what it cost, when it ran on the network). A reply cut short has
+`finish_reason: "length"` (Anthropic `stop_reason: "max_tokens"`) either way, and `edgecoder.cut`
+says why: `"max_tokens"` (your cap) or `"deadline"` (the call's time limit; `edgecoder.note` explains).
+Replies from the local
 router (a local tag or `edgecoder-local`) don't carry it; with `stream: true` they start with a
 `route_info` event naming the route.
 

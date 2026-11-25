@@ -93,13 +93,13 @@ const finish = async (k: PeerKeys, taskId: string, subtaskId: string) => {
   expect((await post("/result", { subtaskId, taskId, agentId: k.peerId, ok: true, output: "ok", durationMs: 100, model: MODEL }, k)).statusCode).toBe(200);
 };
 
-const peerWorld = (freeSlots: number) => [{
+const peerWorld = (freeSlots: number, computeClass = "cpu", tokensPerSec: number | null = null) => [{
   linkRttMs: 90,
   world: {
     coordinator: { id: "coord-peer-us", url: "https://us.coord.example", region: "iad", country: "US", continent: "NA", agents: 1, agentsOnline: 1 },
     links: [],
     generatedAtMs: Date.now(),
-    agents: [{ agentId: "us-host", ownerTag: null, lastSeenMs: Date.now(), id: "abcdef0456", label: "lin-•••0456", os: "linux", region: "iad", country: "US", continent: "NA", computeClass: "cpu", tier: null, vramGb: null, models: [MODEL], modelsTotal: 1, activeModel: MODEL, status: "idle", slots: 2, slotsUsed: 0, coordinatorId: "coord-peer-us", rttMs: 12, perf: { contextWindow: null, tokensPerSec: null, reliability: null, verified: true, freeSlots, failRate: null, tierWeight: 1 }, activity: { callsNow: 0, streaming: 0, callsPerMin: 0 } }],
+    agents: [{ agentId: "us-host", ownerTag: null, lastSeenMs: Date.now(), id: "abcdef0456", label: "lin-•••0456", os: "linux", region: "iad", country: "US", continent: "NA", computeClass, tier: null, vramGb: null, models: [MODEL], modelsTotal: 1, activeModel: MODEL, status: "idle", slots: 2, slotsUsed: 0, coordinatorId: "coord-peer-us", rttMs: 12, perf: { contextWindow: null, tokensPerSec, reliability: null, verified: true, freeSlots, failRate: null, tierWeight: 1 }, activity: { callsNow: 0, streaming: 0, callsPerMin: 0 } }],
   },
 }];
 
@@ -267,7 +267,16 @@ describe("a call that would not finish here in time", () => {
     expect(refused.json()).toMatchObject({ error: "no_capacity", reason: "busy", limitMs: 108_000 });
     expect(refused.json().completionEtaMs).toBeGreaterThan(108_000);
     expect(refused.json().message).toContain("would finish");
+    // Run 6: a peer whose free host is of the same slow class would not finish it either: refused here, not sent.
     routing.setPeerWorldSource(async () => peerWorld(2));
+    try {
+      const kept = (await submit({ maxTokens: 4_096, routeRedirect: true })).r;
+      expect(kept.statusCode, kept.body).toBe(503);
+    } finally {
+      routing.setPeerWorldSource(undefined);
+    }
+    // A peer whose free host would finish it: sent there.
+    routing.setPeerWorldSource(async () => peerWorld(2, "gpu", 400));
     try {
       const sent = (await submit({ maxTokens: 4_096, routeRedirect: true })).r;
       expect(sent.statusCode, sent.body).toBe(409);

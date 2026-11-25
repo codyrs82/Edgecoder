@@ -65,7 +65,7 @@ import { askCapabilityOf, orderBook } from "./economy.js";
 import { peerGrantAllowsClaim } from "./grants.js";
 import { restrictedClaimAllowed } from "./restricted.js";
 import { circuitBlocks, loadedModelsOf, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
-import { agentSocketLost, noteAgentHttpAlive } from "./agent-liveness.js";
+import { agentFlapping, agentSocketLost, noteAgentHttpAlive } from "./agent-liveness.js";
 import { KM_PER_RTT_MS } from "../../common/geo-regions.js";
 
 /** Agents nudged per claimable subtask. */
@@ -142,6 +142,14 @@ export function coldLoadKm(loadMs: number): number {
 export function agentRoutable(agentId: string, lastSeenMs: number, nowMs = Date.now()): boolean {
   const heardMs = Math.max(lastSeenMs, lastPullAt.get(agentId) ?? 0);
   return nowMs - heardMs <= AGENT_SILENT_MS && !agentSocketLost(agentId, nowMs);
+}
+
+/**
+ * Run 6: routable, and not flapping (agent-liveness.ts agentFlapping: it keeps dropping out and has
+ * not been steady since). New placements (best fit, completion admission, locality) use this.
+ */
+export function agentDependable(agentId: string, lastSeenMs: number, nowMs = Date.now()): boolean {
+  return agentRoutable(agentId, lastSeenMs, nowMs) && !agentFlapping(agentId, nowMs);
 }
 
 /** /pull handed `agentId` a call for `model`: the model is warm there for WARM_MS. */

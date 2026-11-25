@@ -61,6 +61,7 @@ import { agentCapabilities, activeBlacklistRecord } from "./agent-state.js";
 import { agentContextWindow, agentLoadReport, freeModelSlots } from "./dispatch.js";
 import { effectiveHardware } from "./economy.js";
 import { agentUnavailable, memoryAdmits } from "./memory-admission.js";
+import { agentFlapping } from "./agent-liveness.js";
 
 /** Service times are kept this long ... */
 export const SERVICE_WINDOW_MS = 15 * 60_000;
@@ -264,6 +265,8 @@ export function modelHolders(model: string, taskClass: ComputeClassId | "any", n
     if (!agentHasModel(cap, model)) continue;
     if (activeBlacklistRecord(id) || cap.hostApproved === false || reservations.isHeld(id, nowMs) || agentUnavailable(id, nowMs)) continue;
     if (nowMs - cap.lastSeenMs > 60_000) continue;
+    // Run 6: an agent that keeps dropping out is not capacity (agent-liveness.ts agentFlapping).
+    if (agentFlapping(id, nowMs)) continue;
     const cls = effectiveHardware(id, cap)?.computeClass ?? cap.computeClass ?? "cpu";
     if (taskClass !== "any" && cls !== taskClass) continue;
     const ctx = agentContextWindow(id);
@@ -408,3 +411,61 @@ export function noteTimedOutCall(model: string | undefined, agentId: string | un
 
 /** The reply a timed-out call without max_tokens is measured against (routes/inference.ts COMPLETION_UNSET_MAX_TOKENS). */
 const TIMED_OUT_UNSET_MAX_TOKENS = 1_024;
+
+/**
+ * Run 6 (CPU ramp): 16 named 1.5b calls were accepted, waited out the 45 s claim bound and were then
+ * refused "busy" (40-50 s after submit). The start estimate counted the calls waiting and the median
+ * service time, but the slots were held by calls running far longer than that median (some to the
+ * 180 s deadline), so nothing freed in time. While a model is saturated (no free slot for the calls
+ * waiting for it), the rate at which its calls are actually picked up is a second estimate:
+ *
+ *   startEta = calls ahead (and this one) ÷ pickups per ms over the saturated span (at most RATE_WINDOW_MS)
+ *
+ * It is used once the model has been saturated for RATE_MIN_SPAN_MS; the later of the two estimates
+ * judges a new call at submit, and the queue sweep (routes/inference.ts sweepWaitingInference)
+ * re-judges each waiting call against the time left in its claim bound.
+ */
+export const RATE_WINDOW_MS = 60_000;
+export const RATE_MIN_SPAN_MS = 10_000;
+
+export class ModelPickups {
+  private readonly claims = new Map<string, number[]>();
+  private readonly saturatedSince = new Map<string, number>();
+
+  /** A call for `model` was claimed. */
+  record(model: string, atMs = Date.now()): void {
+    if (!model) return;
+    const list = (this.claims.get(model) ?? []).filter((t) => atMs - t <= RATE_WINDOW_MS);
+    list.push(atMs);
+    this.claims.set(model, list.slice(-2_000));
+  }
+
+  /** Whether `model` has calls waiting with no free slot for them (the sweep says so every tick). */
+  noteSaturated(model: string, saturated: boolean, nowMs = Date.now()): void {
+    if (!saturated) this.saturatedSince.delete(model);
+    else if (!this.saturatedSince.has(model)) this.saturatedSince.set(model, nowMs);
+  }
+
+  /** Saturated models (the sweep clears the ones with nothing waiting any more). */
+  saturatedModels(): string[] {
+    return [...this.saturatedSince.keys()];
+  }
+
+  /** When the call with `ahead` calls before it would start (ms), from the pickup rate; null while not known. */
+  etaMs(model: string, ahead: number, nowMs = Date.now()): number | null {
+    const since = this.saturatedSince.get(model);
+    if (since === undefined || nowMs - since < RATE_MIN_SPAN_MS) return null;
+    const span = Math.min(RATE_WINDOW_MS, nowMs - since);
+    const n = (this.claims.get(model) ?? []).filter((t) => t > nowMs - span && t <= nowMs).length;
+    // No pickup at all over the span: at least as slow as one in each span (half a pickup).
+    const perMs = Math.max(n, 0.5) / span;
+    return Math.round(Math.max(1, ahead) / perMs);
+  }
+
+  clear(): void {
+    this.claims.clear();
+    this.saturatedSince.clear();
+  }
+}
+
+export const modelPickups = new ModelPickups();

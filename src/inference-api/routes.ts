@@ -190,7 +190,8 @@ export const DEADLINE_PARTIAL_NOTE = "The machine running this call reached the 
  * pieces so far are passed on; a deadline error after real content (text that is not only
  * whitespace, or a tool call) ends them as a reply cut at the limit instead: stopReason "length"
  * (OpenAI finish_reason "length", Anthropic stop_reason "max_tokens", the shapes a reply cut at
- * max_tokens has) with DEADLINE_PARTIAL_NOTE. Any other error, or a deadline with nothing real
+ * max_tokens has) with DEADLINE_PARTIAL_NOTE, and (run 6) `edgecoder.cut: "deadline"` so a client can tell
+ * it from a max_tokens cut (`edgecoder.cut: "max_tokens"`). Any other error, or a deadline with nothing real
  * sent, is thrown as before.
  */
 export async function* untilDeadline(pieces: AsyncIterable<ChatPiece>): AsyncGenerator<ChatPiece> {
@@ -203,7 +204,7 @@ export async function* untilDeadline(pieces: AsyncIterable<ChatPiece>): AsyncGen
     }
   } catch (err) {
     if (!content || !(err instanceof ChatBackendError) || err.info?.code !== DEADLINE_ERROR_CODE) throw err;
-    yield { done: true, stopReason: "length", note: DEADLINE_PARTIAL_NOTE };
+    yield { done: true, stopReason: "length", cut: "deadline", note: DEADLINE_PARTIAL_NOTE };
   }
 }
 

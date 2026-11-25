@@ -55,7 +55,7 @@ describe("untilDeadline", () => {
       yield { delta: "def f():" } as ChatPiece;
       throw deadline();
     })()));
-    expect(pieces).toEqual([{ delta: "def f():" }, { done: true, stopReason: "length", note: DEADLINE_PARTIAL_NOTE }]);
+    expect(pieces).toEqual([{ delta: "def f():" }, { done: true, stopReason: "length", cut: "deadline", note: DEADLINE_PARTIAL_NOTE }]);
   });
 
   it("passes on a deadline with nothing real sent, and every other error", async () => {
@@ -92,7 +92,7 @@ describe("untilDeadline", () => {
       transport: async (_m, path) => (path === "/inference/submit" ? { status: 200, json: { taskId: "t", subtaskId: "s" } } : { status: 200, json: { chunks: ["part"], next: 1, done: true, error: "timed out after 180 s" } }),
     };
     const out = await collect(untilDeadline(networkBackend(deps, { model: "m1", computeClass: "any" })({ messages: [{ role: "user", content: "x" }] })));
-    expect(out).toEqual([{ delta: "part" }, { done: true, stopReason: "length", note: DEADLINE_PARTIAL_NOTE }]);
+    expect(out).toEqual([{ delta: "part" }, { done: true, stopReason: "length", cut: "deadline", note: DEADLINE_PARTIAL_NOTE }]);
   });
 });
 
@@ -118,6 +118,7 @@ describe("a non-streamed reply cut at its deadline", () => {
     expect(json.choices[0]).toMatchObject({ index: 0, message: { role: "assistant", content: "Here is the start" }, finish_reason: "length" });
     expect(json.usage.completion_tokens).toBeGreaterThan(0);
     expect(json.edgecoder.note).toBe(DEADLINE_PARTIAL_NOTE);
+    expect(json.edgecoder.cut).toBe("deadline"); // run 6: not a max_tokens cut
   });
 
   it("Anthropic: the partial text with stop_reason max_tokens", async () => {
@@ -131,6 +132,7 @@ describe("a non-streamed reply cut at its deadline", () => {
     const json = JSON.parse(res.body);
     expect(json).toMatchObject({ type: "message", role: "assistant", content: [{ type: "text", text: "Partial answer" }], stop_reason: "max_tokens" });
     expect(json.edgecoder.note).toBe(DEADLINE_PARTIAL_NOTE);
+    expect(json.edgecoder.cut).toBe("deadline"); // run 6: not a max_tokens cut
   });
 
   it("before the keepalive commit too: a plain 200 completion", async () => {

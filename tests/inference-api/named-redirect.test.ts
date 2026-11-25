@@ -53,6 +53,20 @@ describe("named-model redirect", () => {
     expect(submits[1].body.clientRegion).toBe("lhr");
   });
 
+  it("run 6: the follow-up tells the coordinator it was sent there (it judges it without exploration)", async () => {
+    const { calls, deps } = fakeCoordinators((url, body) =>
+      url === US && body.routeRedirect ? { status: 409, json: { error: "route_elsewhere", coordinatorUrl: EU, model: body.model } } : { status: 200, json: { taskId: body.taskId, subtaskId: "s-1" } },
+    );
+    await collect(backend(deps, (u) => u === EU));
+    const submits = calls.filter((c) => c.path === "/inference/submit");
+    expect(submits[0].body.redirected).toBeUndefined();
+    expect(submits[1].body.redirected).toBe(true);
+    // Not followed (an unknown peer): the first coordinator takes it as its own call.
+    const other = fakeCoordinators((_u, body) => (body.routeRedirect ? { status: 409, json: { error: "route_elsewhere", coordinatorUrl: "https://evil.example" } } : { status: 200, json: { taskId: body.taskId, subtaskId: "s-1" } }));
+    await collect(backend(other.deps, () => false));
+    expect(other.calls.filter((c) => c.path === "/inference/submit").every((c) => c.body.redirected === undefined)).toBe(true);
+  });
+
   it("does not follow to a coordinator it does not know; the first one takes the call", async () => {
     const { calls, deps } = fakeCoordinators((url, body) =>
       body.routeRedirect ? { status: 409, json: { error: "route_elsewhere", coordinatorUrl: "https://evil.example" } } : { status: 200, json: { taskId: body.taskId, subtaskId: "s-1" } },
