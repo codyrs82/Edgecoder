@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CheckpointStore } from "../../src/apps/ide/checkpoints.js";
 import { SessionHub, type ClientRef, type SessionEvent } from "../../src/apps/ide/sessions.js";
-import { emptyAttempt, hintedChat, isProviderTierError, retryAfterEmpty, smallWorkerWarning, TENTACLE_HELPER_MIN_PARAMS_B, tentacleHelperMinParamsB, tentacleSystemPrompt } from "../../src/apps/ide/tentacle-chat.js";
+import { emptyAttempt, hintedChat, isProviderTierError, retryAfterEmpty, smallWorkerWarning, TENTACLE_HELPER_MIN_PARAMS_B, tentacleHelperMinParamsB, tentacleSystemPrompt, underFloorWorker } from "../../src/apps/ide/tentacle-chat.js";
 import { CallHolds, ceilingRefusal, helperCallCeiling, helperContextWindow, helperMaxTokens, helperReplyTokens, HELPER_FIT_WINDOW, HELPER_MAX_TOKENS, HELPER_MIN_REPLY_TOKENS, MIN_HELPER_CALL_CSATS, paidWorker, promptTokensOf } from "../../src/apps/ide/tentacle-reserve.js";
 import { contextNeeded } from "../../src/inference-api/ollama.js";
 import { tentacleRanOn, whereServed } from "../../src/apps/ide/tentacle-format.js";
@@ -160,30 +160,55 @@ describe("empty helper attempts (#525)", { timeout: 60_000 }, () => {
     expect(smallWorkerWarning("network/qwen2.5-coder:1.5b@gpu", 7)).toMatch(/under 7B/);
     expect(smallWorkerWarning("network/qwen3-coder:30b", 7)).toBeNull();
     expect(smallWorkerWarning("auto", 7)).toBeNull();
+    expect(smallWorkerWarning("network/qwen2.5-coder:1.5b", 0)).toBeNull();
+    expect(underFloorWorker("network/qwen2.5-coder:1.5b", 7)).toBe(true);
+    expect(underFloorWorker("network/qwen2.5-coder:1.5b", 0)).toBe(false);
+    expect(underFloorWorker("network/qwen3-coder:30b", 7)).toBe(false);
+    expect(underFloorWorker("auto", 7)).toBe(false);
+    expect(underFloorWorker("mine/qwen2.5-coder:1.5b", 7)).toBe(false);
     expect(tentacleSystemPrompt(false)).toMatch(/only by calling edit_file/);
     expect(tentacleSystemPrompt(true)).not.toMatch(/edit_file/);
   });
 
-  it("a 1.5B worker's empty_reply retries on auto, with a warning at the start, and the patch comes back", async () => {
-    const { tentacles, s, requests, events } = setup(({ model, call }) => (model !== "auto" ? { fail: "The machine running qwen2.5-coder:1.5b reported: empty_reply" } : call === 0 ? { tool: ["write_file", { path: "d.txt", content: "d\n" }] } : { text: "wrote d" }), { workerModel: "network/qwen2.5-coder:1.5b" });
-    const v = tentacles.delegate(s.id, { task: "add d", kind: "code_edit", files: [], instructions: "" });
+  it("an explicit worker under the floor runs on auto with the floor, warned once per session", async () => {
+    const { tentacles, s, requests, events } = setup(({ model, call, req }) => {
+      if (model !== "auto") return { fail: "The machine running qwen2.5-coder:1.5b reported: empty_reply" };
+      const task = /# Task\n(.*)/.exec(req.messages.find((m) => m.role === "user")?.content ?? "")?.[1];
+      return call === 0 ? { tool: ["write_file", { path: `${task}.txt`, content: "d\n" }] } : { text: `wrote ${task}` };
+    }, { workerModel: "network/qwen2.5-coder:1.5b" });
+    const v = tentacles.delegate(s.id, { task: "d1", kind: "code_edit", files: [], instructions: "" });
     await tentacles.idle(s.id);
     const t = tentacles.get(s.id, v.id)!;
     expect(t.status).toBe("passed");
-    expect(t.result!.patch).toContain("d.txt");
-    // The agent loop's own transient retries stay on the 1.5B model; the tentacle's retry moves to auto.
-    const firstAuto = requests.findIndex((r) => r.model === "auto");
-    expect(requests.slice(0, firstAuto).every((r) => r.model === "network/qwen2.5-coder:1.5b")).toBe(true);
-    expect(requests.slice(firstAuto).map((r) => r.model)).toEqual(["auto", "auto"]);
-    // The retry runs on auto with the helper floor, at the same tier (not straight to the cloud tier).
-    expect(requests[firstAuto].req.hints).toMatchObject({ minParamsB: 7, sessionId: `tentacle:${v.id}:retry` });
-    expect(requests[firstAuto].req.hints!.quality).not.toBe("best");
-    // The explicit 1.5B worker's own calls carry no floor (the user chose it).
-    expect(requests[0].req.hints!.minParamsB).toBeUndefined();
+    expect(t.result!.patch).toContain("d1.txt");
+    // Every call, from the first, runs on auto with the helper floor; none on the 1.5B model.
+    expect(requests.map((r) => r.model)).toEqual(["auto", "auto"]);
+    expect(requests.every((r) => r.req.hints?.minParamsB === 7)).toBe(true);
+    expect(requests[0].req.hints!.sessionId).toBe(`tentacle:${v.id}`);
+    // A second helper in the session: also on auto, and no second warning.
+    const w = tentacles.delegate(s.id, { task: "d2", kind: "code_edit", files: [], instructions: "" });
+    await tentacles.idle(s.id);
+    expect(tentacles.get(s.id, w.id)!.status).toBe("passed");
+    expect(requests.every((r) => r.model === "auto" && r.req.hints?.minParamsB === 7)).toBe(true);
     const progress = events.filter((e) => e.type === "tentacle_progress").map((e) => String(e.progress));
-    expect(progress.some((p) => /under 7B/.test(p))).toBe(true);
-    expect(progress.some((p) => /empty reply; retrying on auto/.test(p))).toBe(true);
-    expect(tentacles.list(s.id).patches).toEqual({ asked: 1, returned: 1, rate: 1 });
+    expect(progress.filter((p) => /qwen2\.5-coder:1\.5b is under 7B.*helpers run on auto/.test(p))).toHaveLength(1);
+    expect(tentacles.list(s.id).patches).toEqual({ asked: 2, returned: 2, rate: 1 });
+  });
+
+  it("EDGECODER_TENTACLES_MIN_B=0 keeps an explicit small worker (no floor, no warning)", async () => {
+    vi.stubEnv("EDGECODER_TENTACLES_MIN_B", "0");
+    try {
+      const { tentacles, s, requests, events } = setup(({ call }) => (call === 0 ? { tool: ["write_file", { path: "d0.txt", content: "d\n" }] } : { text: "wrote d0" }), { workerModel: "network/qwen2.5-coder:1.5b" });
+      const v = tentacles.delegate(s.id, { task: "add d0", kind: "code_edit", files: [], instructions: "" });
+      await tentacles.idle(s.id);
+      expect(tentacles.get(s.id, v.id)!.status).toBe("passed");
+      expect(new Set(requests.map((r) => r.model))).toEqual(new Set(["network/qwen2.5-coder:1.5b"]));
+      expect(requests.every((r) => r.req.hints?.minParamsB === undefined)).toBe(true);
+      const progress = events.filter((e) => e.type === "tentacle_progress").map((e) => String(e.progress));
+      expect(progress.some((p) => /under \d+B/.test(p))).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("a bigger explicit worker that changed no file retries on the same model, on another machine", async () => {
@@ -296,12 +321,12 @@ describe("where a helper ran (served-by, not \"unknown\")", { timeout: 60_000 },
   });
 
   it("a finished helper's summary names the class and host that served it", async () => {
-    const { tentacles, s, events } = setup(({ call }) => (call === 0 ? { tool: ["write_file", { path: "h.txt", content: "x\n" }], served: SERVED } : { text: "done", served: SERVED }), { workerModel: "network/qwen2.5-coder:1.5b" });
+    const { tentacles, s, events } = setup(({ call }) => (call === 0 ? { tool: ["write_file", { path: "h.txt", content: "x\n" }], served: SERVED } : { text: "done", served: SERVED }), { workerModel: "network/qwen2.5-coder:7b" });
     const v = tentacles.delegate(s.id, { task: "host", kind: "code_edit", files: [], instructions: "" });
     await tentacles.idle(s.id);
     const t = tentacles.get(s.id, v.id)!;
     expect(t.result!.class).toBe("apple");
-    expect(tentacleRanOn(t.result!)).toBe("network/qwen2.5-coder:1.5b on apple · mac-•••30e5 Frankfurt");
+    expect(tentacleRanOn(t.result!)).toBe("network/qwen2.5-coder:7b on apple · mac-•••30e5 Frankfurt");
     const notes = JSON.stringify(events);
     expect(notes).not.toMatch(/on unknown/);
   });

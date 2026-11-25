@@ -263,6 +263,8 @@ interface SessionState {
    * holder cooling down): for PROVIDER_ERROR_SKIP_MS after it, retries don't move up a tier.
    */
   providerErrorAt?: number;
+  /** Explicit workers under the helper floor already warned about (their helpers run on auto). */
+  floorWarned?: Set<string>;
 }
 
 /**
@@ -614,15 +616,22 @@ export class TentacleManager {
     // The worker model: never a frontier one, whoever the lead is (workerModelOf turns one into auto).
     // An attempt that came back with nothing may move the retry to auto (retryAfterEmpty).
     let model = workerModelOf({ workerModel: this.d.workerModelFor?.(s, cfg) ?? tentacleWorkerModel(s, cfg) });
-    t.view.model = model;
-    // The helper floor: auto's calls never run below it, and an explicit worker under it moves to auto on an empty attempt.
+    // The helper floor: auto's calls never run below it, and an explicit network worker under it
+    // runs on auto with the floor (warned once per session and model). EDGECODER_TENTACLES_MIN_B=0
+    // keeps the explicit model.
     const minB = tentacleHelperMinParamsB();
+    const small = smallWorkerWarning(model, minB);
+    const smallModel = model;
+    if (small) model = "auto";
+    t.view.model = model;
     const calls: TentacleCall[] = [];
     t.view.calls = calls;
     let unverified: string | undefined;
     this.progress(sessionId, t, "starting", "running");
-    const small = smallWorkerWarning(model, minB);
-    if (small) this.progress(sessionId, t, small);
+    if (small && !st.floorWarned?.has(smallModel)) {
+      (st.floorWarned ??= new Set()).add(smallModel);
+      this.progress(sessionId, t, small);
+    }
     const budget = Math.max(0, Math.min(t.spec.budgetCSats ?? cfg.perTentacleCSats, cfg.budgetCSats - st.spent));
     let ws: Workspace | null = null;
     const started = Date.now();
