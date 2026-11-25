@@ -130,6 +130,8 @@ interface TaskBilling {
   pickupMs?: number;
   promptMs?: number;
   genMs?: number;
+  /** Why the reply ended: "length" when it was cut at the call's max_tokens (the requester's finish_reason). */
+  finishReason?: "stop" | "length";
 }
 export const taskBilling = new Map<string, TaskBilling>();
 /**

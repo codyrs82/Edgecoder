@@ -86,7 +86,7 @@ export function networkBackend(deps: NetworkDeps, target: { model: string; compu
           // reasoning_only: the call's max_tokens ended inside the model's reasoning (src/cloud-host/backend.ts): the request, not the machine.
           // A deadline: said as such (info.code), so a non-streamed reply can return what was sent (routes.ts).
           if (p.error) throw new ChatBackendError(`The machine running ${target.model} reported: ${p.error}`, /\breasoning_only\b/.test(p.error) ? 400 : 502, undefined, DEADLINE_ERROR.test(p.error) ? { code: DEADLINE_ERROR_CODE } : undefined);
-          yield { done: true, ...(p.routed ? { where: p.routed } : {}), ...(p.creditsSpent !== undefined ? { cSatsSpent: p.creditsSpent } : {}), ...(p.promptTokens !== undefined ? { promptTokens: p.promptTokens } : {}), ...(p.outputTokens !== undefined ? { outputTokens: p.outputTokens } : {}), ...(p.served ? { served: p.served } : {}) };
+          yield { done: true, ...(p.finishReason === "length" ? { stopReason: "length" as const } : {}), ...(p.routed ? { where: p.routed } : {}), ...(p.creditsSpent !== undefined ? { cSatsSpent: p.creditsSpent } : {}), ...(p.promptTokens !== undefined ? { promptTokens: p.promptTokens } : {}), ...(p.outputTokens !== undefined ? { outputTokens: p.outputTokens } : {}), ...(p.served ? { served: p.served } : {}) };
         }
       }
     } catch (err) {

@@ -42,6 +42,8 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => portal.listen(0, "127.0.0.1", resolve));
   process.env.PORTAL_SERVICE_URL = `http://127.0.0.1:${(portal.address() as AddressInfo).port}`;
   process.env.MESH_AUTH_TOKEN = MESH;
+  // Run 5 prior speed off: these calls are judged on measured samples only (start-eta.ts; the prior has its own tests).
+  process.env.INFERENCE_COMPLETION_PRIOR_SPEED = "off";
   process.env.INFERENCE_CLAIM_TIMEOUT_MS = String(CLAIM_TIMEOUT_MS);
   process.env.CLAIM_LEASE_LIVENESS_MS = String(LIVENESS_MS);
   process.env.CLAIM_LEASE_GRACE_MS = "0";

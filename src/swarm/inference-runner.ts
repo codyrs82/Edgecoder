@@ -96,7 +96,7 @@ export async function runInferenceSubtask(
   let full = "";
   const toolCalls: ToolCall[] = [];
   // Token counts, and the model-load time of a cold call (the power floor leaves it out: job-pricing.ts).
-  let tokens: { promptTokens?: number; outputTokens?: number; cachedPromptTokens?: number; loadMs?: number; promptMs?: number; genMs?: number } = {};
+  let tokens: { promptTokens?: number; outputTokens?: number; cachedPromptTokens?: number; loadMs?: number; promptMs?: number; genMs?: number; finishReason?: "stop" | "length" } = {};
   const flush = async (done: boolean, error?: string) => {
     if (!pending && !done) return;
     const delta = pending;
@@ -158,7 +158,7 @@ export async function runInferenceSubtask(
       if (next.done) break;
       const piece = next.value;
       if ("toolCalls" in piece) toolCalls.push(...piece.toolCalls);
-      else if ("doneReason" in piece) tokens = { promptTokens: piece.promptTokens, outputTokens: piece.outputTokens, ...(piece.cachedPromptTokens !== undefined ? { cachedPromptTokens: piece.cachedPromptTokens } : {}), ...(piece.loadMs !== undefined ? { loadMs: piece.loadMs } : {}), ...(piece.promptMs !== undefined ? { promptMs: piece.promptMs } : {}), ...(piece.genMs !== undefined ? { genMs: piece.genMs } : {}) };
+      else if ("doneReason" in piece) tokens = { promptTokens: piece.promptTokens, outputTokens: piece.outputTokens, ...(piece.cachedPromptTokens !== undefined ? { cachedPromptTokens: piece.cachedPromptTokens } : {}), ...(piece.loadMs !== undefined ? { loadMs: piece.loadMs } : {}), ...(piece.promptMs !== undefined ? { promptMs: piece.promptMs } : {}), ...(piece.genMs !== undefined ? { genMs: piece.genMs } : {}), finishReason: piece.doneReason === "length" ? "length" : "stop" };
       else if ("delta" in piece) {
         full += piece.delta;
         pending += piece.delta;

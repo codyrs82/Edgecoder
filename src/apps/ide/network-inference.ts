@@ -115,6 +115,8 @@ export interface CompletionPiece {
   creditsSpent?: number;
   promptTokens?: number;
   outputTokens?: number;
+  /** Why the reply ended: "length" when it was cut at max_tokens (the coordinator passes the model's reason on). */
+  finishReason?: "stop" | "length";
   /** model "auto": "routed to <model> on <class> because <reason>" (the coordinator's best-fit choice). */
   routed?: string;
   /** Where the call ran (coordinator's served-by: masked machine label, hardware, region, timings). */
@@ -402,7 +404,7 @@ async function* streamSubmitted(
       if (r.json.done) {
         ended = true;
         if (Array.isArray(r.json.toolCalls) && r.json.toolCalls.length) yield { toolCalls: r.json.toolCalls as ToolCall[] };
-        yield { done: true, ...(r.json.error ? { error: String(r.json.error) } : {}), ...(typeof r.json.creditsSpent === "number" ? { creditsSpent: r.json.creditsSpent } : {}), ...(typeof r.json.promptTokens === "number" ? { promptTokens: r.json.promptTokens } : {}), ...(typeof r.json.outputTokens === "number" ? { outputTokens: r.json.outputTokens } : {}), ...(routed ? { routed } : {}), ...(servedOf(r.json.served) ? { served: servedOf(r.json.served) } : {}) };
+        yield { done: true, ...(r.json.error ? { error: String(r.json.error) } : {}), ...(typeof r.json.creditsSpent === "number" ? { creditsSpent: r.json.creditsSpent } : {}), ...(typeof r.json.promptTokens === "number" ? { promptTokens: r.json.promptTokens } : {}), ...(typeof r.json.outputTokens === "number" ? { outputTokens: r.json.outputTokens } : {}), ...(r.json.finishReason === "length" || r.json.finishReason === "stop" ? { finishReason: r.json.finishReason } : {}), ...(routed ? { routed } : {}), ...(servedOf(r.json.served) ? { served: servedOf(r.json.served) } : {}) };
         return;
       }
     }

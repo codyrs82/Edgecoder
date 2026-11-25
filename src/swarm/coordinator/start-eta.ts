@@ -28,11 +28,32 @@
  * when it would finish there. A class that would not finish within INFERENCE_COMPLETION_ETA_FRACTION
  * of the call's timeout does not get the call (its agents are excluded from it, or Auto picks again
  * without them); when no class here would finish it in time, the call goes to a peer or is refused,
- * before anything is reserved. A class with too few speed samples is not judged.
+ * before anything is reserved.
+ *
+ * Run 5 (2026-11-25): the speed of a class was the median over all its recent calls, and most were
+ * short (lookups of a few dozen tokens, ~1 s), so heavy calls were judged at that speed: a 3k-token
+ * prompt with max_tokens 2000 on a 1.5b CPU host "would finish" in ~35 s and ran to the deadline
+ * (inf-1795598815058-e13b5460, inf-1795599047742-2e35fe93). Now:
+ *
+ *   - relevance: only samples whose own work (expectedWorkMs for their tokens) is at least
+ *     RELEVANT_WORK_SHARE of the judged call's work count for it; a short call says little about a
+ *     long one;
+ *   - prior: with fewer than SERVICE_MIN_SAMPLES relevant samples (always right after a deploy:
+ *     samples live in memory), the missing ones are the class's prior speed (COMPLETION_PRIOR_SPEED,
+ *     INFERENCE_COMPLETION_PRIOR_SPEED: expectedWorkMs at the class's conservative throughput), so
+ *     a class is judged from the first call and real samples take over as they arrive;
+ *   - exploration: a class judged on its prior alone still gets one call at a time while nothing of
+ *     the model runs there and the prior says it would finish within the call's whole timeout, so a
+ *     class with a pessimistic prior learns its real speed instead of never being tried;
+ *   - timeouts: a call that ran out its deadline with nothing sent is a sample too (at least that
+ *     slow for the work it was judged on), so a class learns from the calls it could not finish;
+ *   - contention: the calls already running (and queued) on the class's hosts share them with this
+ *     one (best-fit.ts CONTENTION_SHARE: a 2-slot CPU host runs two calls at about half speed each).
  */
 
 import type { ComputeClassId } from "../../economy/compute-classes.js";
 import { expectedWorkMs } from "../../economy/job-pricing.js";
+import { CONTENTION_SHARE } from "./best-fit.js";
 import { paramsB } from "../../inference-api/auto-route.js";
 import { agentHasModel } from "../model-catalog.js";
 import { queue, reservations } from "./context.js";
@@ -48,9 +69,56 @@ export const SERVICE_SAMPLES = 64;
 /** ... and an estimate needs at least this many. */
 export const SERVICE_MIN_SAMPLES = 3;
 
+/** A sample counts for a call when its own work is at least this share of the call's (relevance). */
+export const RELEVANT_WORK_SHARE = 1 / 8;
+
+/**
+ * Speed (measured ÷ expectedWorkMs) a class is judged at before it has SERVICE_MIN_SAMPLES relevant
+ * samples. expectedWorkMs is the slow-host bound with a 2x safety margin, so 0.5 is the slow host's
+ * own throughput: right for the CPU fleet (run 5: long calls on 1.5b CPU hosts ran at 0.5-0.85 of
+ * the bound). Macs and GPUs run well above their class's slow-host rate (a 9b Mac writes ~20 tok/s
+ * against the bound's ~3; a GPU's MoE model is sized by its total, not its active, parameters),
+ * hence lower priors there. The cloud host is not judged by a prior (hosted APIs).
+ */
+export const COMPLETION_PRIOR_SPEED: Readonly<Record<string, number>> = { cpu: 0.5, apple: 0.15, gpu: 0.1, "gpu.dc": 0.1 };
+
+/**
+ * INFERENCE_COMPLETION_PRIOR_SPEED: unset, the defaults above; "off" or 0, no prior (a class with
+ * too few relevant samples is not judged, as before run 5); a number, every class at it;
+ * "cpu=0.5,apple=0.25", those classes (others keep their default; class=0 removes one).
+ */
+export function parseCompletionPrior(raw: string | undefined): Record<string, number> {
+  const t = (raw ?? "").trim().toLowerCase();
+  if (t === "") return { ...COMPLETION_PRIOR_SPEED };
+  if (t === "off" || t === "none" || t === "false" || t === "0") return {};
+  const ok = (n: number) => Number.isFinite(n) && n >= 0 && n <= 10;
+  if (!t.includes("=")) {
+    const n = Number(t);
+    if (!ok(n)) return { ...COMPLETION_PRIOR_SPEED };
+    return n === 0 ? {} : Object.fromEntries(Object.keys(COMPLETION_PRIOR_SPEED).map((c) => [c, n]));
+  }
+  const out: Record<string, number> = { ...COMPLETION_PRIOR_SPEED };
+  for (const part of t.split(",").map((x) => x.trim()).filter(Boolean)) {
+    const eq = part.lastIndexOf("=");
+    const cls = part.slice(0, eq).trim();
+    const n = Number(part.slice(eq + 1).trim());
+    if (eq <= 0 || !cls || !ok(n)) continue;
+    if (n === 0) delete out[cls];
+    else out[cls] = n;
+  }
+  return out;
+}
+
+/** A class's speed for one call: the speed, how many relevant samples it rests on, and whether the prior filled in. */
+export interface SpeedEstimate {
+  speed: number | null;
+  samples: number;
+  prior: boolean;
+}
+
 /** Recent service times (claim to last reply piece) per model and compute class. */
 export class ServiceTimes {
-  private readonly byKey = new Map<string, Array<{ at: number; ms: number; speed?: number }>>();
+  private readonly byKey = new Map<string, Array<{ at: number; ms: number; speed?: number; work?: number }>>();
 
   /**
    * One sample. `expectedMs`: expectedWorkMs for the tokens the call read and wrote; with it the
@@ -61,13 +129,13 @@ export class ServiceTimes {
     const key = `${model}|${computeClass}`;
     const list = this.byKey.get(key) ?? [];
     const speed = expectedMs !== undefined && Number.isFinite(expectedMs) && expectedMs > 0 ? ms / expectedMs : undefined;
-    list.push({ at: atMs, ms, ...(speed !== undefined ? { speed } : {}) });
+    list.push({ at: atMs, ms, ...(speed !== undefined ? { speed, work: expectedMs } : {}) });
     if (list.length > SERVICE_SAMPLES) list.splice(0, list.length - SERVICE_SAMPLES);
     this.byKey.set(key, list);
     if (this.byKey.size > 512) this.byKey.delete(this.byKey.keys().next().value as string);
   }
 
-  private values(model: string, computeClass: string, nowMs: number, pick: (s: { ms: number; speed?: number }) => number | undefined): number[] {
+  private values(model: string, computeClass: string, nowMs: number, pick: (s: { ms: number; speed?: number; work?: number }) => number | undefined): number[] {
     const values: number[] = [];
     for (const [key, list] of this.byKey) {
       const sep = key.lastIndexOf("|");
@@ -92,6 +160,20 @@ export class ServiceTimes {
    */
   speed(model: string, computeClass: string, nowMs = Date.now()): number | null {
     return median(this.values(model, computeClass, nowMs, (s) => s.speed));
+  }
+
+  /**
+   * Run 5: the speed to judge a call of `workMs` at: the median over the recent samples at least
+   * RELEVANT_WORK_SHARE of its size, with the prior (`priorSpeed`) in place of each missing one
+   * below SERVICE_MIN_SAMPLES. Without a prior, null while too few relevant samples are known.
+   */
+  speedFor(model: string, computeClass: string, workMs: number, priorSpeed: number | undefined, nowMs = Date.now()): SpeedEstimate {
+    const floor = Number.isFinite(workMs) ? workMs * RELEVANT_WORK_SHARE : 0;
+    const values = this.values(model, computeClass, nowMs, (s) => (s.speed !== undefined && (s.work ?? 0) >= floor ? s.speed : undefined));
+    const samples = values.length;
+    const prior = priorSpeed !== undefined && priorSpeed > 0 && samples < SERVICE_MIN_SAMPLES;
+    if (prior) for (let i = samples; i < SERVICE_MIN_SAMPLES; i++) values.push(priorSpeed!);
+    return { speed: median(values), samples, prior };
   }
 
   clear(): void {
@@ -119,10 +201,13 @@ export const REFERENCE_CALL_TOKENS = { promptTokens: 1_000, outputTokens: 200 } 
 /**
  * One host's time for a reference call of `model`: its measured speed (its own, else its class's here)
  * times the work that call is estimated at. Unlike a median of its calls, it does not depend on how
- * large its recent calls were, so hosts and coordinators compare. Null when no speed is known.
+ * large its recent calls were, so hosts and coordinators compare. Run 5: with neither known (right
+ * after a restart), the class's prior speed (`priorSpeed`, COMPLETION_PRIOR_SPEED), when given, as
+ * completion admission uses it. Null when no speed is known.
  */
-export function hostServiceMs(model: string, agentId: string, computeClass: string, nowMs = Date.now()): number | null {
-  const speed = agentServiceTimes.speed(model, agentId, nowMs) ?? serviceTimes.speed(model, computeClass, nowMs);
+export function hostServiceMs(model: string, agentId: string, computeClass: string, nowMs = Date.now(), priorSpeed?: number): number | null {
+  const prior = priorSpeed !== undefined && priorSpeed > 0 ? priorSpeed : null;
+  const speed = agentServiceTimes.speed(model, agentId, nowMs) ?? serviceTimes.speed(model, computeClass, nowMs) ?? prior;
   if (speed === null || !Number.isFinite(speed) || speed <= 0) return null;
   return Math.round(speed * callWorkMs(model, computeClass, REFERENCE_CALL_TOKENS.promptTokens, REFERENCE_CALL_TOKENS.outputTokens));
 }
@@ -205,32 +290,61 @@ export interface ClassCompletion {
   agents: string[];
   startEtaMs: number | null;
   completionEtaMs: number | null;
+  /** Judged on its prior alone (fewer than SERVICE_MIN_SAMPLES relevant samples). */
+  priorOnly?: boolean;
+  /** Calls of the model running or waiting on the class's hosts now. */
+  inFlight?: number;
+}
+
+/**
+ * How much slower a call runs on a class whose hosts already run `running` calls: the new call shares
+ * the least loaded host with ceil((running + 1) / hosts) - 1 others (never more than a host's other
+ * slots), each costing CONTENTION_SHARE of the class (best-fit.ts contentionFactor).
+ */
+export function classContention(computeClass: string, hosts: number, maxSlotsPerHost: number, running: number): number {
+  const share = CONTENTION_SHARE[computeClass] ?? CONTENTION_SHARE.cpu;
+  if (!(share > 0) || hosts <= 0 || maxSlotsPerHost <= 1) return 1;
+  const others = Math.min(maxSlotsPerHost - 1, Math.max(0, Math.ceil((Math.max(0, running) + 1) / hosts) - 1));
+  return 1 + share * others;
 }
 
 /**
  * Per class of this coordinator's holders of `model` (within `taskClass`): when a call reading
  * `promptTokens` and writing `outputTokens` would start and finish there. `waiting`: calls for the
  * model already queued (they go to whichever class frees a slot, so each class is judged as if they
- * were all ahead of it in proportion to its slots).
+ * were all ahead of it in proportion to its slots). `prior`: the prior speed per class (run 5;
+ * parseCompletionPrior), none: a class with too few relevant samples is not judged.
  */
-export function completionByClass(input: { model: string; taskClass: ComputeClassId | "any"; neededTokens: number; promptTokens: number; outputTokens: number; waiting: number }, nowMs = Date.now()): ClassCompletion[] {
+export function completionByClass(input: { model: string; taskClass: ComputeClassId | "any"; neededTokens: number; promptTokens: number; outputTokens: number; waiting: number; prior?: Readonly<Record<string, number>> }, nowMs = Date.now()): ClassCompletion[] {
   const holders = modelHolders(input.model, input.taskClass, input.neededTokens, nowMs);
+  const claims = queue.activeClaims();
   const totalSlots = holders.reduce((n, h) => n + h.slots, 0);
-  const byClass = new Map<string, { agents: string[]; slots: number; free: number }>();
+  const byClass = new Map<string, { agents: string[]; slots: number; free: number; maxSlots: number; running: number }>();
   for (const h of holders) {
-    const e = byClass.get(h.computeClass) ?? { agents: [], slots: 0, free: 0 };
+    const e = byClass.get(h.computeClass) ?? { agents: [], slots: 0, free: 0, maxSlots: 0, running: 0 };
     e.agents.push(h.agentId);
     e.slots += h.slots;
     e.free += h.free;
+    e.maxSlots = Math.max(e.maxSlots, h.slots);
+    e.running += claims.get(h.agentId)?.inference ?? 0;
     byClass.set(h.computeClass, e);
   }
   const out: ClassCompletion[] = [];
   for (const [cls, e] of byClass) {
     const waiting = totalSlots > 0 ? Math.round((input.waiting * e.slots) / totalSlots) : input.waiting;
-    const typicalMs = serviceTimes.typicalMs(input.model, cls, nowMs) ?? serviceTimes.typicalMs(input.model, "any", nowMs);
+    const workMs = callWorkMs(input.model, cls, input.promptTokens, input.outputTokens);
+    const est = serviceTimes.speedFor(input.model, cls, workMs, input.prior?.[cls], nowMs);
+    // The calls running on the class's hosts, and the waiting ones that will take its free slots, run beside this one.
+    const slowdown = classContention(cls, e.agents.length, e.maxSlots, e.running + Math.min(waiting, e.free));
+    const ownMs = est.speed === null ? null : est.speed * workMs * slowdown;
+    // With no service times known yet, a call ahead is taken to hold a slot about as long as this one.
+    const typicalMs = serviceTimes.typicalMs(input.model, cls, nowMs) ?? serviceTimes.typicalMs(input.model, "any", nowMs) ?? (ownMs !== null ? Math.round(ownMs) : null);
     const start = startEtaMs({ waiting, slots: e.slots, free: e.free, typicalMs }) ?? (e.free > waiting ? 0 : null);
-    const speed = serviceTimes.speed(input.model, cls, nowMs);
-    out.push({ computeClass: cls, agents: e.agents, startEtaMs: start, completionEtaMs: completionEtaMs({ startEtaMs: start, speed, workMs: callWorkMs(input.model, cls, input.promptTokens, input.outputTokens) }) });
+    out.push({
+      computeClass: cls, agents: e.agents, startEtaMs: start,
+      completionEtaMs: completionEtaMs({ startEtaMs: start, speed: est.speed === null ? null : est.speed * slowdown, workMs }),
+      priorOnly: est.prior, inFlight: e.running + waiting,
+    });
   }
   return out;
 }
@@ -238,13 +352,43 @@ export function completionByClass(input: { model: string; taskClass: ComputeClas
 /**
  * The completion check for a call: `exclude`, the agents of classes that would not finish it within
  * `limitMs`; `none`, true when no class here would (each class known and over the limit); `etaMs`,
- * the soonest known completion. A class with no estimate is never excluded.
+ * the soonest known completion. A class with no estimate is never excluded. Exploration (run 5): a
+ * class judged on its prior alone, with nothing of the model in flight there, is not excluded while
+ * its estimate is within `exploreWithinMs` (the call's whole timeout): one call teaches it its speed.
  */
-export function judgeCompletion(classes: ClassCompletion[], limitMs: number): { exclude: string[]; none: boolean; etaMs: number | null } {
+export function judgeCompletion(classes: ClassCompletion[], limitMs: number, exploreWithinMs = 0): { exclude: string[]; none: boolean; etaMs: number | null } {
   if (!Number.isFinite(limitMs) || classes.length === 0) return { exclude: [], none: false, etaMs: null };
-  const over = classes.filter((c) => c.completionEtaMs !== null && c.completionEtaMs > limitMs);
+  const explores = (c: ClassCompletion) => c.priorOnly === true && (c.inFlight ?? 0) === 0 && c.completionEtaMs !== null && c.completionEtaMs <= exploreWithinMs;
+  const over = classes.filter((c) => c.completionEtaMs !== null && c.completionEtaMs > limitMs && !explores(c));
   const known = classes.map((c) => c.completionEtaMs).filter((n): n is number => n !== null);
   const etaMs = known.length ? Math.min(...known) : null;
   if (over.length === classes.length) return { exclude: over.flatMap((c) => c.agents), none: true, etaMs };
   return { exclude: over.flatMap((c) => c.agents), none: false, etaMs };
 }
+
+/**
+ * Run 5: a call that ran out its deadline with nothing sent is a sample too. It held its slot for
+ * `ms` and was not done: measured against the work admission judged it on (its prompt and its
+ * max_tokens, COMPLETION_UNSET_MAX_TOKENS when it set none), its speed is at least ms ÷ that work.
+ * Kept as a sample (a lower bound), so a class learns from the calls it cannot finish.
+ */
+export function noteTimedOutCall(model: string | undefined, agentId: string | undefined, claimedAtMs: number | undefined, input: string, nowMs = Date.now()): void {
+  if (!model || !agentId || claimedAtMs === undefined) return;
+  const cls = effectiveHardware(agentId)?.computeClass ?? agentCapabilities.get(agentId)?.computeClass ?? "cpu";
+  let promptBytes = Buffer.byteLength(input, "utf8");
+  let maxTokens: number = TIMED_OUT_UNSET_MAX_TOKENS;
+  try {
+    const parsed = JSON.parse(input) as { messages?: unknown; tools?: unknown; maxTokens?: unknown };
+    promptBytes = Buffer.byteLength(JSON.stringify({ messages: parsed.messages ?? [], tools: parsed.tools ?? [] }), "utf8");
+    if (typeof parsed.maxTokens === "number" && parsed.maxTokens > 0) maxTokens = parsed.maxTokens;
+  } catch {
+    // Not JSON: its bytes are the prompt.
+  }
+  const work = callWorkMs(model, cls, Math.max(1, Math.ceil(promptBytes / 4)), maxTokens);
+  serviceTimes.record(model, cls, nowMs - claimedAtMs, nowMs, work);
+  // The host's own samples too (#558 hostServiceMs): it was at least this slow.
+  agentServiceTimes.record(model, agentId, nowMs - claimedAtMs, nowMs, work);
+}
+
+/** The reply a timed-out call without max_tokens is measured against (routes/inference.ts COMPLETION_UNSET_MAX_TOKENS). */
+const TIMED_OUT_UNSET_MAX_TOKENS = 1_024;

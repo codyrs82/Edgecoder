@@ -40,6 +40,8 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => portal.listen(0, "127.0.0.1", resolve));
   process.env.PORTAL_SERVICE_URL = `http://127.0.0.1:${(portal.address() as AddressInfo).port}`;
   process.env.MESH_AUTH_TOKEN = MESH;
+  // Run 5 prior speed off: these calls are judged on measured samples only (start-eta.ts; the prior has its own tests).
+  process.env.INFERENCE_COMPLETION_PRIOR_SPEED = "off";
   delete process.env.COORDINATOR_TRUST_PROXY;
   delete process.env.FLY_APP_NAME;
   delete process.env.MESH_PEER_ALLOWLIST;
@@ -252,8 +254,9 @@ describe("model auto and a call that would not finish in time (run 4)", () => {
     const { serviceTimes } = await import("../../src/swarm/coordinator/start-eta.js");
     const { creditEngine } = await import("../../src/credits/store.js");
     // The 7b CPU hosts here run at 0.05 × the slow-host estimate: a 4,096-token reply takes ~140 s.
+    // (Samples of calls that size: run 5, a much smaller call says little about a long one.)
     serviceTimes.clear();
-    for (let i = 0; i < 3; i++) serviceTimes.record("qwen2.5-coder:7b", "cpu", 10_000, Date.now(), 200_000);
+    for (let i = 0; i < 3; i++) serviceTimes.record("qwen2.5-coder:7b", "cpu", 140_000, Date.now(), 2_800_000);
     try {
       const question = () => [{ role: "user", content: "What is a closure in JavaScript? " + randomUUID() }];
       // Picked again without the 7b hosts: the 1.5b host (no speed known for it), and the 7b hosts may not take it.
@@ -268,8 +271,8 @@ describe("model auto and a call that would not finish in time (run 4)", () => {
       // The 1.5b host is as slow: nothing here would finish it in time.
       serviceTimes.clear();
       for (let i = 0; i < 3; i++) {
-        serviceTimes.record("qwen2.5-coder:7b", "cpu", 10_000, Date.now(), 200_000);
-        serviceTimes.record("qwen2.5-coder:1.5b", "cpu", 10_000, Date.now(), 20_000);
+        serviceTimes.record("qwen2.5-coder:7b", "cpu", 140_000, Date.now(), 2_800_000);
+        serviceTimes.record("qwen2.5-coder:1.5b", "cpu", 300_000, Date.now(), 600_000);
       }
       const before = creditEngine.balance(requester.peerId);
       const { r } = await submitAuto({ messages: question(), maxTokens: 4_096 });

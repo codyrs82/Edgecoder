@@ -325,8 +325,10 @@ export function noteAgentResult(agentId: string, model: string | undefined, ok: 
     return;
   }
   // A call the agent declined before running it (too long for its window, a frontier model), or one
-  // whose output cap ended inside the model's reasoning (the caller's max_tokens, src/cloud-host/backend.ts): neutral.
-  if (!ok && typeof error === "string" && /^(context_too_long|frontier_models_are_not_network_work|reasoning_only)/.test(error)) return;
+  // whose output cap ended inside the model's reasoning (the caller's max_tokens, src/cloud-host/backend.ts), or
+  // one the cloud host's reasoning room ran out on (cloud_reasoning_overrun, #557: the call is placed
+  // again elsewhere, not the host's fault): neutral.
+  if (!ok && typeof error === "string" && /^(context_too_long|frontier_models_are_not_network_work|reasoning_only|cloud_reasoning_overrun)/.test(error)) return;
   noteAgentOutcome(agentId, ok, nowMs);
 }
 
