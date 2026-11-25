@@ -110,30 +110,30 @@ describe("a call's deadline", () => {
   test("a holder still sending at its hard deadline timed out (not lost): the requester keeps the part with a timeout", async () => {
     const before = creditEngine.balance(requester.peerId);
     const { taskId, subtaskId } = await claimed(10_000);
-    // Pieces every 300 ms (each renews the lease's liveness) until past claim + 10 s (grace 0 here).
-    // The deadline is enforced when traffic (or the sweep) runs the lease expiry, so a slow runner's
-    // last loop heartbeat can land just before it: keep the holder sending, and check, until the call
-    // has ended, rather than reading once after a fixed wall-clock span.
-    const t0 = Date.now();
-    let seq = 0;
+    const { queue } = await import("../../src/swarm/coordinator/context.js");
+    const claimedAt = queue.getClaim(subtaskId)?.claimedAt;
+    expect(claimedAt).toBeDefined();
+    // The holder is sending: two pieces, each renewing the lease's liveness.
+    for (const seq of [0, 1]) expect((await post("/inference/chunks", { subtaskId, seq, delta: `w${seq} ` }, worker)).statusCode).toBe(200);
+    // The hard deadline (claim + 10 s, grace 0 here) is reached: run the lease expiry at that instant,
+    // right after the last piece, instead of waiting ~10 s of wall clock for traffic or the sweep to run
+    // it (a slow runner's timing decided whether the lapse counted as a timeout or a lost holder).
+    const expiry = queue.expireLeases(claimedAt! + 10_000 + 1);
+    expect(expiry.requeued).toContain(subtaskId);
+    // The requeue hook ends the call (on a microtask): wait for that event, not for a time span.
     let read = await stream(taskId, subtaskId, 0, 0);
-    while (!read.json().done) {
-      if (Date.now() - t0 > 25_000) break;
-      await post("/heartbeat", { agentId: requester.peerId }, requester);
-      if (Date.now() - t0 < 10_800) await post("/inference/chunks", { subtaskId, seq, delta: `w${seq} ` }, worker);
-      seq++;
-      await sleep(300);
+    for (let i = 0; i < 100 && !read.json().done; i++) {
+      await new Promise((r) => setImmediate(r));
       read = await stream(taskId, subtaskId, 0, 0);
     }
-    expect(Date.now() - t0).toBeGreaterThanOrEqual(9_500);
     expect(read.statusCode, read.body).toBe(200);
     expect(read.json()).toMatchObject({ done: true, error: "timed out after 10 s" });
-    expect(read.json().chunks.join("")).toMatch(/^w0 w1 /);
+    expect(read.json().chunks.join("")).toBe("w0 w1 ");
     // Nothing charged (its holder overran the deadline), and not handed out again.
     expect(creditEngine.balance(requester.peerId)).toBeCloseTo(before, 6);
     const again = await post("/pull", { agentId: worker2.peerId }, worker2);
     expect(again.json().subtask?.id ?? again.json().envelope?.subtaskId).not.toBe(subtaskId);
-  }, 40_000);
+  }, 15_000);
 
   test("a re-run after a lost agent gets a fresh timeout, capped at submit + timeout + the re-run budget", async () => {
     const { subtaskId, atMs } = await claimed(20_000);
