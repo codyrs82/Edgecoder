@@ -36,6 +36,7 @@ import { agentSocketLost } from "../agent-liveness.js";
 import { effectiveHardware, hardwareVerifier } from "../economy.js";
 import { routableModels } from "../../model-catalog.js";
 import { noteServiceTime } from "../start-eta.js";
+import { noteAgentSteal } from "../host-steal.js";
 import { inferenceCancelledForCapacity, inferenceStreams } from "./inference.js";
 import { bestFitConfig, complexityWeights, noteRoutedChunk, recentDecisions, restoreDecisions, ROUTING_LOG_SIZE, setCallDurationSource, setDecisionSink, storedDecision } from "../routing.js";
 import {
@@ -392,7 +393,7 @@ export type NetworkSnapshot = Awaited<ReturnType<typeof networkSnapshot>>;
 /** Read what /inference/submit and /inference/chunks answered; never changes the answer. */
 export function observeInference(url: string | undefined, status: number, body: unknown, payload: unknown, nowMs = Date.now()): void {
   if (url !== "/inference/submit" && url !== "/inference/chunks") return;
-  const b = (body ?? {}) as { model?: unknown; subtaskId?: unknown; done?: unknown; error?: unknown; promptTokens?: unknown; outputTokens?: unknown };
+  const b = (body ?? {}) as { model?: unknown; subtaskId?: unknown; done?: unknown; error?: unknown; promptTokens?: unknown; outputTokens?: unknown; cpuStealShare?: unknown; cpuThrottled?: unknown };
   const text = typeof payload === "string" ? payload : Buffer.isBuffer(payload) ? payload.toString("utf8") : "";
   if (url === "/inference/submit") {
     const model = typeof b.model === "string" ? b.model : "";
@@ -410,6 +411,8 @@ export function observeInference(url: string | undefined, status: number, body: 
   const error = typeof b.error === "string" && b.error ? b.error : undefined;
   inferenceTracker.chunk(b.subtaskId, b.done === true, error, nowMs);
   const claim = queue.getClaim(b.subtaskId);
+  // Run 7: the agent's CPU steal with the piece (host-steal.ts), before the speed sample below is judged by it.
+  if (claim) noteAgentSteal(claim.claimedBy, b, nowMs);
   noteRoutedChunk(b.subtaskId, claim?.claimedBy, b.done === true, error, nowMs);
   // C9: how long the model holds a slot here (claim to last piece), for the start estimate at submit.
   // With the tokens it read and wrote (the model's counts, else estimated from the bytes: a timed-out

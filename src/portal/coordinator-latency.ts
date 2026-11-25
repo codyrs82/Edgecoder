@@ -63,6 +63,15 @@
  * so distance decides between them. A host of another class (a GPU against a CPU) keeps its own
  * time for the call, so a faster GPU elsewhere still wins a large call.
  *
+ * Run 7: a host's own measured speed counts only while it is fresh. Speeds measured while a fleet
+ * deploy had left hosts throttled (CPU credit) sent lhr and fra buyers to iad on "iad 936 ms vs lhr
+ * 2160 ms" for calls lhr served in about a second; the slow host then got no calls, so its old
+ * measurement never changed. Coordinators now report how old a host's newest speed sample is
+ * (freeHosts speedAgeMs; they also drop samples from calls run while the host reported CPU steal).
+ * Two hosts of one class compare by speed only when both measurements are at most speedFreshMs old
+ * (PORTAL_COORD_SPEED_FRESH_MS, counting the load report's own age); a host without the age (an
+ * older coordinator) is not fresh, and the two count as equally fast, so distance decides.
+ *
  * Calls this portal sent a coordinator that its load report does not show yet (sentFor) have each
  * taken a slot on the free host nearest their own buyer, so a burst moves on to the next host or
  * coordinator instead of every call counting the same free host (run 5: 6 heavy calls onto the EU's
@@ -119,6 +128,8 @@ export interface FreeHost {
   speed?: number;
   /** Where `speed` comes from: the host's own recent calls, its class's on that coordinator, or the class's prior. */
   speedFrom?: "host" | "class" | "prior";
+  /** Run 7: with speedFrom "host", how old its newest speed sample was at the report (ms). */
+  speedAgeMs?: number;
 }
 
 /** The call being placed: the model's size and the tokens it reads and may write (run 6). */
@@ -135,6 +146,8 @@ export const DEFAULT_CALL_TOKENS = { promptTokens: 1_000, outputTokens: 200 } as
  * is at least this many times the other; otherwise they count as equally fast (distance decides).
  */
 export const SAME_CLASS_SPEED_RATIO = 1.5;
+/** Run 7: a host's own measured speed older than this (ms, with the report's age) does not tell it from another of its class. */
+export const COORD_SPEED_FRESH_DEFAULT_MS = 5 * 60_000;
 
 export interface LatencyPolicy {
   /** A switch must save more than this many ms ... */
@@ -147,6 +160,8 @@ export interface LatencyPolicy {
   enabled: boolean;
   /** Locality (#526): a coordinator with a free host nearer the buyer by more than this many km wins; 0 turns it off. */
   localityMarginKm?: number;
+  /** Run 7: a measured host speed this fresh (ms) compares two hosts of one class; 0: never (distance decides). Default COORD_SPEED_FRESH_DEFAULT_MS. */
+  speedFreshMs?: number;
 }
 
 export const COORD_LATENCY_DEFAULT_MARGIN_MS = 30;
@@ -193,6 +208,8 @@ export interface BestHost {
   computeClass?: string;
   speed?: number;
   speedFrom?: "host" | "class" | "prior";
+  /** Run 7: how old its own measured speed is now (its report's age included); undefined when not reported. */
+  speedAgeMs?: number;
   /** Buyer <-> host distance, km; null when not known. */
   km: number | null;
 }
@@ -210,7 +227,7 @@ export function openHosts(c: LatencyCandidate, clientRegion: string | null | und
     const km = region ? regionDistanceKm(region, h.region) : null;
     const legMs = km !== null ? distanceRttMs(km) : Math.max(0, h.rttMs ?? c.agentRttMs ?? 0);
     const forCall = hostCallMs(h, call);
-    return { region: h.region, legMs, serviceMs: forCall ?? h.serviceMs ?? null, serviceKind: forCall !== null ? "call" : "host", km, ...(h.computeClass ? { computeClass: h.computeClass } : {}), ...(h.speed !== undefined ? { speed: h.speed } : {}), ...(h.speedFrom ? { speedFrom: h.speedFrom } : {}) };
+    return { region: h.region, legMs, serviceMs: forCall ?? h.serviceMs ?? null, serviceKind: forCall !== null ? "call" : "host", km, ...(h.computeClass ? { computeClass: h.computeClass } : {}), ...(h.speed !== undefined ? { speed: h.speed } : {}), ...(h.speedFrom ? { speedFrom: h.speedFrom } : {}), ...(h.speedAgeMs !== undefined ? { speedAgeMs: h.speedAgeMs + Math.max(0, c.reportAgeMs) } : {}) };
   };
   const order = (region: string | null | undefined) => (a: BestHost, b: BestHost) =>
     region && a.km !== null && b.km !== null && a.km !== b.km ? a.km - b.km : a.legMs + Math.max(0, a.serviceMs ?? 0) - (b.legMs + Math.max(0, b.serviceMs ?? 0));
@@ -254,11 +271,11 @@ type Scored = { c: LatencyCandidate; queueMs: number; expectedMs: number | null;
  * not known (or they are not of one kind), both are given the same one (the known one, or the
  * default), so the comparison is the round trips against a realistic total.
  */
-function endToEnd(a: Scored, b: Scored): [number, number] | null {
+function endToEnd(a: Scored, b: Scored, freshMs: number): [number, number] | null {
   if (a.expectedMs === null || b.expectedMs === null || a.c.rttMs === null || b.c.rttMs === null || !a.host || !b.host) return null;
   // Service times compare only when both are of one kind (two hosts' times for this call, two reference
   // calls, or two models' medians), and not between two hosts of one class that count as equally fast.
-  const sameKind = a.host.serviceKind === b.host.serviceKind && !equallyFast(a.host, b.host);
+  const sameKind = a.host.serviceKind === b.host.serviceKind && !equallyFast(a.host, b.host, freshMs);
   const sa = sameKind ? a.host.serviceMs : null;
   const sb = sameKind ? b.host.serviceMs : null;
   const shared = sa ?? sb ?? a.host.serviceMs ?? b.host.serviceMs ?? DEFAULT_CALL_MS;
@@ -271,11 +288,18 @@ function endToEnd(a: Scored, b: Scored): [number, number] | null {
  * Run 6: two hosts of one class (and the call's model) count as equally fast unless both speeds are
  * their own measurements and differ by SAME_CLASS_SPEED_RATIO; a class median or the prior does not
  * tell one host from another. Hosts that do not report their class (older coordinators) are not.
+ * Run 7: and both measurements are fresh (speedAgeMs known and at most `freshMs`).
  */
-export function equallyFast(a: Pick<BestHost, "computeClass" | "speed" | "speedFrom">, b: Pick<BestHost, "computeClass" | "speed" | "speedFrom">): boolean {
+export function equallyFast(a: Pick<BestHost, "computeClass" | "speed" | "speedFrom" | "speedAgeMs">, b: Pick<BestHost, "computeClass" | "speed" | "speedFrom" | "speedAgeMs">, freshMs = COORD_SPEED_FRESH_DEFAULT_MS): boolean {
   if (!a.computeClass || a.computeClass !== b.computeClass) return false;
   if (a.speedFrom !== "host" || b.speedFrom !== "host" || !a.speed || !b.speed) return true;
+  const fresh = (age: number | undefined) => age !== undefined && Number.isFinite(age) && age <= freshMs;
+  if (!(freshMs > 0) || !fresh(a.speedAgeMs) || !fresh(b.speedAgeMs)) return true;
   return Math.max(a.speed, b.speed) / Math.min(a.speed, b.speed) < SAME_CLASS_SPEED_RATIO;
+}
+
+function freshMsOf(policy: LatencyPolicy): number {
+  return policy.speedFreshMs ?? COORD_SPEED_FRESH_DEFAULT_MS;
 }
 
 /** The coordinator with a free slot that beats `near` end to end by both margins, if any. */
@@ -283,7 +307,7 @@ function clearlyFaster(near: Scored, open: readonly Scored[], policy: LatencyPol
   let best: { s: Scored; e2e: number; nearE2e: number } | null = null;
   for (const s of open) {
     if (s === near) continue;
-    const pair = endToEnd(near, s);
+    const pair = endToEnd(near, s, freshMsOf(policy));
     if (!pair) continue;
     const [nearE2e, e2e] = pair;
     const gain = nearE2e - e2e;
@@ -299,11 +323,11 @@ function hostNote(a: Scored, b: Scored): string {
 }
 
 /** Why the nearest was kept, for the record: the best other end to end. */
-function notFaster(near: Scored, open: readonly Scored[]): string {
+function notFaster(near: Scored, open: readonly Scored[], freshMs: number): string {
   let best: { host: string; e2e: number; nearE2e: number; note: string } | null = null;
   for (const s of open) {
     if (s === near) continue;
-    const pair = endToEnd(near, s);
+    const pair = endToEnd(near, s, freshMs);
     if (pair && (!best || pair[1] < best.e2e)) best = { host: coordinatorHost(s.c.url), e2e: pair[1], nearE2e: pair[0], note: hostNote(s, near) };
   }
   return best ? `${best.host} not clearly faster end to end (expected ${best.e2e} ms vs ${best.nearE2e} ms${best.note})` : "no other coordinator's latency known";
@@ -367,7 +391,7 @@ export function chooseByLatency(
       }
       return moves
         ? done(near.c.url, "locality", `free host nearest the buyer (${where.clientRegion}): ${km(near.nearKm!)} vs ${km(baseKm)} on ${coordinatorHost(baselineUrl)}`)
-        : done(near.c.url, "locality", `free host nearest the buyer (${where.clientRegion}): ${km(near.nearKm!)} vs ${km(runnerKm)}; ${notFaster(near, open)}`);
+        : done(near.c.url, "locality", `free host nearest the buyer (${where.clientRegion}): ${km(near.nearKm!)} vs ${km(runnerKm)}; ${notFaster(near, open, freshMsOf(policy))}`);
     }
   }
   if (!base || base.expectedMs === null) return done(baselineUrl, "load", `${loadReason}; its latency is not known (${base?.stale ? "stale load report" : "round trip not measured"})`);
@@ -403,6 +427,7 @@ export function latencyPolicyFromEnv(env: NodeJS.ProcessEnv = process.env, maxRe
     marginMs: num(env.PORTAL_COORD_LATENCY_MARGIN_MS, COORD_LATENCY_DEFAULT_MARGIN_MS, 0, 10_000),
     marginPct: num(env.PORTAL_COORD_LATENCY_MARGIN_PCT, COORD_LATENCY_DEFAULT_MARGIN_PCT, 0, 100),
     localityMarginKm: num(env.PORTAL_COORD_LOCALITY_MARGIN_KM, COORD_LOCALITY_DEFAULT_MARGIN_KM, 0, 20_000),
+    speedFreshMs: num(env.PORTAL_COORD_SPEED_FRESH_MS, COORD_SPEED_FRESH_DEFAULT_MS, 0, 3_600_000),
     maxReportAgeMs,
   };
 }

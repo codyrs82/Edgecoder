@@ -83,8 +83,8 @@ describe("chooseByLatency", () => {
   });
 
   it("reads its policy from the environment", () => {
-    expect(latencyPolicyFromEnv({}, 2_000)).toEqual({ enabled: true, marginMs: 30, marginPct: 15, localityMarginKm: 700, maxReportAgeMs: 2_000 });
-    expect(latencyPolicyFromEnv({ PORTAL_COORD_LATENCY_ROUTING: "off", PORTAL_COORD_LATENCY_MARGIN_MS: "50", PORTAL_COORD_LATENCY_MARGIN_PCT: "250", PORTAL_COORD_LOCALITY_MARGIN_KM: "0" }, 2_000)).toEqual({ enabled: false, marginMs: 50, marginPct: 100, localityMarginKm: 0, maxReportAgeMs: 2_000 });
+    expect(latencyPolicyFromEnv({}, 2_000)).toEqual({ enabled: true, marginMs: 30, marginPct: 15, localityMarginKm: 700, speedFreshMs: 300_000, maxReportAgeMs: 2_000 });
+    expect(latencyPolicyFromEnv({ PORTAL_COORD_LATENCY_ROUTING: "off", PORTAL_COORD_LATENCY_MARGIN_MS: "50", PORTAL_COORD_LATENCY_MARGIN_PCT: "250", PORTAL_COORD_LOCALITY_MARGIN_KM: "0" }, 2_000)).toEqual({ enabled: false, marginMs: 50, marginPct: 100, localityMarginKm: 0, speedFreshMs: 300_000, maxReportAgeMs: 2_000 });
   });
 });
 
@@ -506,12 +506,14 @@ describe("run 6: hosts compared by their time for this call", () => {
 
   it("a same-class host measured much faster on its own calls can still win", () => {
     const mid = { paramsB: 1.5, promptTokens: 2_000, outputTokens: 1_000 };
-    const c = chooseByLatency([us([host("iad", 0.15, "host")]), eu([host("lhr", 0.6, "host")])], EU, POLICY, { clientRegion: "lhr", call: mid });
+    // Run 7: both measurements fresh (seconds old).
+    const fresh = (h: FreeHost): FreeHost => ({ ...h, speedAgeMs: 30_000 });
+    const c = chooseByLatency([us([fresh(host("iad", 0.15, "host"))]), eu([fresh(host("lhr", 0.6, "host"))])], EU, POLICY, { clientRegion: "lhr", call: mid });
     expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "latency" });
   });
 
   it("which hosts count as equally fast", () => {
-    const h = (computeClass: string | undefined, speed: number, speedFrom?: "host" | "class" | "prior") => ({ computeClass, speed, speedFrom });
+    const h = (computeClass: string | undefined, speed: number, speedFrom?: "host" | "class" | "prior") => ({ computeClass, speed, speedFrom, speedAgeMs: 0 });
     expect(equallyFast(h("cpu", 0.3, "class"), h("cpu", 0.5, "prior"))).toBe(true);
     expect(equallyFast(h("cpu", 0.3, "host"), h("cpu", 0.9, "prior"))).toBe(true);
     expect(equallyFast(h("cpu", 0.4, "host"), h("cpu", 0.5, "host"))).toBe(true);
@@ -547,5 +549,83 @@ describe("run 6: hosts compared by their time for this call", () => {
     expect(callSizeOf({ messages, max_tokens: 64 })).toEqual({ promptTokens: n, maxTokens: 64 });
     expect(callSizeOf({ messages })).toEqual({ promptTokens: n });
     expect(callSizeOf(null)).toMatchObject({ promptTokens: expect.any(Number) });
+  });
+});
+
+/*
+ * Run 7 (nearest free host 66.7 % idle, 36.1 % under CPU load). #562 compared two hosts of one class by
+ * their own measured speeds once 1.5x apart, and those speeds had been measured while a fleet deploy
+ * had left the hosts throttled (CPU credit): an lhr buyer went to iad on "iad 936 ms vs lhr 2160 ms"
+ * and took 2.5 s (inf-1795614734673-bec45a48), a fra buyer the same way took 2.4 s
+ * (inf-1795614734666-c27e07d8); served locally such calls took about 1.0-1.1 s. The slow-looking host
+ * then got no calls, so its old measurement never changed. Now a measured speed compares two hosts of
+ * one class only while both are fresh (speedAgeMs, with the report's age, within speedFreshMs).
+ */
+describe("run 7: only fresh measured speeds tell two hosts of one class apart", () => {
+  const SMALL = { paramsB: 1.5, promptTokens: 20, outputTokens: 8 };
+  const host = (region: string, speed: number, speedAgeMs?: number): FreeHost => ({ region, free: 2, rttMs: 40, computeClass: "cpu", speed, speedFrom: "host", ...(speedAgeMs !== undefined ? { speedAgeMs } : {}) });
+  const us = (freeHosts: FreeHost[]) => cand({ url: US, rttMs: 75, agentRttMs: 120, free: 10, agents: 5, serviceMs: 1_000, callP50Ms: 1_000, freeRegions: freeHosts.map((h) => h.region), freeHosts });
+  const eu = (freeHosts: FreeHost[]) => cand({ url: EU, rttMs: 4, agentRttMs: 15, free: 4, agents: 2, serviceMs: 1_000, callP50Ms: 1_000, freeRegions: freeHosts.map((h) => h.region), freeHosts });
+  // As recorded: lhr's own speed measured while throttled, 2.3x iad's.
+  const IAD = 0.2;
+  const LHR_THROTTLED = 0.46;
+
+  it("keeps the lhr buyer on lhr once lhr's throttled measurement is no longer fresh (inf-1795614734673-bec45a48)", () => {
+    // Fresh on both sides (as #562 judged it): iad wins, as before.
+    const before = chooseByLatency([us([host("iad", IAD, 20_000)]), eu([host("lhr", LHR_THROTTLED, 60_000)])], US, POLICY, { clientRegion: "lhr", call: SMALL });
+    expect(before).toMatchObject({ chosen: "coordinator.example.com", rule: "latency" });
+    // lhr's measurement is 6 minutes old (it got no calls since): distance decides.
+    const after = chooseByLatency([us([host("iad", IAD, 20_000)]), eu([host("lhr", LHR_THROTTLED, 360_000)])], US, POLICY, { clientRegion: "lhr", call: SMALL });
+    expect(after).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "locality" });
+    // The load report's own age counts: 4 min 50 s old at the coordinator, in a report 20 s old.
+    const reportOld = cand({ ...eu([host("lhr", LHR_THROTTLED, 290_000)]), reportAgeMs: 20_000 });
+    expect(chooseByLatency([us([host("iad", IAD, 20_000)]), reportOld], US, { ...POLICY, maxReportAgeMs: 60_000 }, { clientRegion: "lhr", call: SMALL }).chosen).toBe("coordinator-eu.example.com");
+  });
+
+  it("keeps the fra buyer in the EU when the coordinator does not say how old the speeds are (inf-1795614734666-c27e07d8)", () => {
+    // An older coordinator: no speedAgeMs, so neither measurement counts as fresh.
+    const c = chooseByLatency([us([host("iad", IAD)]), eu([host("fra", LHR_THROTTLED)])], US, POLICY, { clientRegion: "fra", call: SMALL });
+    expect(c).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "locality" });
+  });
+
+  it("a genuinely slower host with fresh measurements still loses", () => {
+    const mid = { paramsB: 1.5, promptTokens: 2_000, outputTokens: 1_000 };
+    const c = chooseByLatency([us([host("iad", 0.15, 30_000)]), eu([host("lhr", 0.6, 45_000)])], EU, POLICY, { clientRegion: "lhr", call: mid });
+    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "latency" });
+  });
+
+  it("speedFreshMs 0: same-class hosts always count as equally fast", () => {
+    const mid = { paramsB: 1.5, promptTokens: 2_000, outputTokens: 1_000 };
+    const c = chooseByLatency([us([host("iad", 0.15, 1_000)]), eu([host("lhr", 0.6, 1_000)])], EU, { ...POLICY, speedFreshMs: 0 }, { clientRegion: "lhr", call: mid });
+    expect(c).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "locality" });
+  });
+
+  it("equallyFast checks the age", () => {
+    const h = (speed: number, speedAgeMs?: number) => ({ computeClass: "cpu", speed, speedFrom: "host" as const, speedAgeMs });
+    expect(equallyFast(h(0.2, 10_000), h(0.5, 10_000))).toBe(false);
+    expect(equallyFast(h(0.2, 10_000), h(0.5, 400_000))).toBe(true);
+    expect(equallyFast(h(0.2), h(0.5, 10_000))).toBe(true);
+    expect(equallyFast(h(0.2, 400_000), h(0.5, 400_000), 600_000)).toBe(false);
+  });
+
+  it("the directory reads speedAgeMs", async () => {
+    const M15 = "qwen2.5-coder:1.5b";
+    const load = (freeHosts: unknown[]) => ({ [M15]: { agents: 2, idle: 0, free: 4, waiting: 0, agentRttMs: 60, serviceMs: 1_000, freeRegions: (freeHosts as Array<{ region: string }>).map((x) => x.region), freeHosts } });
+    const pickWith = async (lhrAgeMs: number) => {
+      const reports: Record<string, CapacityReport> = {
+        [US]: { reachable: true, rttMs: 75, agentModels: [M15], modelLoad: load([{ region: "iad", free: 2, rttMs: 40, computeClass: "cpu", speed: IAD, speedFrom: "host", speedAgeMs: 20_000 }]), pickupP90Ms: 200, callP50Ms: 1_000 },
+        [EU]: { reachable: true, rttMs: 4, agentModels: [M15], modelLoad: load([{ region: "lhr", free: 2, rttMs: 10, computeClass: "cpu", speed: LHR_THROTTLED, speedFrom: "host", speedAgeMs: lhrAgeMs }]), pickupP90Ms: 200, callP50Ms: 1_000 },
+      };
+      const dir = createChatCapacityDirectory({ candidates: async () => [US, EU], allowed: () => true, ttlMs: 15_000, now: () => 1_000_000, probe: vi.fn(async (url: string) => reports[url]), latency: POLICY, portalRegion: "lhr" });
+      return dir.pick({ kind: "network", model: M15 }, [], { clientRegion: "lhr", call: { promptTokens: 20, maxTokens: 8 } });
+    };
+    expect((await pickWith(60_000)).url).toBe(US);
+    expect((await pickWith(360_000)).url).toBe(EU);
+  });
+
+  it("PORTAL_COORD_SPEED_FRESH_MS sets the limit", () => {
+    expect(latencyPolicyFromEnv({}, 2_000).speedFreshMs).toBe(300_000);
+    expect(latencyPolicyFromEnv({ PORTAL_COORD_SPEED_FRESH_MS: "60000" }, 2_000).speedFreshMs).toBe(60_000);
+    expect(latencyPolicyFromEnv({ PORTAL_COORD_SPEED_FRESH_MS: "0" }, 2_000).speedFreshMs).toBe(0);
   });
 });

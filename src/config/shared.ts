@@ -294,7 +294,13 @@ export const bestFitEnv = {
   /** Reasoning models and the max_tokens a call needs before Auto places it on them ("2048", "glm-5.3=2048,...", "off"); best-fit.ts parseReasoningMinTokens. */
   AUTO_REASONING_MIN_TOKENS: str(),
   /** Run 5: the completion estimate's prior speed per class ("0.5", "cpu=0.5,apple=0.25", "off"); start-eta.ts parseCompletionPrior. */
-  INFERENCE_COMPLETION_PRIOR_SPEED: str()
+  INFERENCE_COMPLETION_PRIOR_SPEED: str(),
+  /** Run 7: a speed sample's weight halves every this many ms (0 = no weighting); start-eta.ts speedHalfLifeMs. */
+  INFERENCE_SPEED_HALF_LIFE_MS: envInt(undefined, { min: 0, max: 900_000 }),
+  /** Run 7: a host's own speed counts only its samples this recent (ms); start-eta.ts hostSpeedWindowMs. */
+  INFERENCE_HOST_SPEED_WINDOW_MS: envInt(undefined, { min: 60_000, max: 900_000 }),
+  /** Run 7: reported CPU steal share at which a host's speed samples are left out ("off" = ignore reports); host-steal.ts. */
+  INFERENCE_SPEED_STEAL_SHARE: str()
 };
 
 /** Claim leases on queued subtasks (src/swarm/queue.ts). */

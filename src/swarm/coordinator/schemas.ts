@@ -284,7 +284,10 @@ export const pullSchema = z.object({
   /** The agent pulls at once on a work_available frame over its mesh WebSocket (dispatch.ts). */
   wake: z.boolean().optional(),
   /** AGENT_ALLOW_RESTRICTED_MODELS=1: the owner lets this agent take restricted-model calls (counts only signed). */
-  allowRestrictedModels: z.boolean().optional()
+  allowRestrictedModels: z.boolean().optional(),
+  /** Run 7 (cpu-steal.ts, host-steal.ts): share of its busy CPU time stolen over its last reading, and whether its steal guard holds it back. */
+  cpuStealShare: z.number().min(0).max(1).optional(),
+  cpuThrottled: z.boolean().optional()
 });
 export const resultSchema = z.object({
   subtaskId: z.string(),

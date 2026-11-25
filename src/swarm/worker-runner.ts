@@ -61,7 +61,7 @@ import { localLanAddresses } from "./lan-proximity.js";
 import { collectDesktopTelemetry } from "./desktop-telemetry.js";
 import { detectPlatform, getConfigDir, getLogDir, type PlatformInfo } from "../common/platform.js";
 import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from "../security/release-integrity.js";
-import { CpuStealGuard, CPU_STEAL_HOLD_MS, modelSlotReport } from "./cpu-steal.js";
+import { CpuStealGuard, CPU_STEAL_HOLD_MS, modelSlotReport, type CpuStealReport } from "./cpu-steal.js";
 import { answerChallenge, runLocalBenchmark, selfBenchmarkDue, type AgentBenchmarkReport, type BenchmarkChallenge } from "./benchmark.js";
 import { appVersion, isReleaseInstall } from "../common/app-version.js";
 import { createUpdateNudge } from "./update-nudge.js";
@@ -850,6 +850,16 @@ function cpuThrottledNow(): boolean {
       : `[agent:${AGENT_ID}] CPU no longer throttled: taking model calls again`);
   }
   return s.throttled;
+}
+/**
+ * Run 7: the steal report sent with each pull and reply piece (coordinator host-steal.ts leaves calls
+ * run while stolen from out of this host's measured speed). Empty where the guard does not run.
+ */
+function cpuStealReport(): CpuStealReport {
+  if (!cpuSteal) return {};
+  // A fresh reading (and its log line on a change), then what it says.
+  cpuThrottledNow();
+  return cpuSteal.report();
 }
 /** keep_alive for a network call: the agent's own model keeps the configured one; other models go after 5 minutes idle. */
 function keepAliveFor(model: string | undefined): string {
@@ -2303,7 +2313,8 @@ async function loop(): Promise<void> {
         const freeInferenceSlots = slotReport.free;
         // AGENT_ALLOW_RESTRICTED_MODELS: the owner lets this machine take restricted-model calls (security
         // research tier; the coordinator also needs the owner's admin-approved host entitlement).
-        const pullBody = { agentId: AGENT_ID, inferenceSlots: MAX_PARALLEL_INFERENCE, freeInferenceSlots, contextWindow: CONTEXT_WINDOW, wake: true, ...(W.AGENT_ALLOW_RESTRICTED_MODELS ? { allowRestrictedModels: true } : {}) };
+        // Run 7: with its CPU steal (coordinator host-steal.ts).
+        const pullBody = { agentId: AGENT_ID, inferenceSlots: MAX_PARALLEL_INFERENCE, freeInferenceSlots, contextWindow: CONTEXT_WINDOW, wake: true, ...(W.AGENT_ALLOW_RESTRICTED_MODELS ? { allowRestrictedModels: true } : {}), ...(cpuSteal ? cpuSteal.report() : {}) };
         if (!PULLS_FROM_COORDINATOR && !warnedNoSandbox) {
           warnedNoSandbox = true;
           console.warn(`[agent:${AGENT_ID}] SANDBOX_MODE=none: not pulling swarm tasks (install Docker and set SANDBOX_MODE=docker to contribute compute, or AGENT_INFERENCE_ONLY=1 to serve inference only)`);
@@ -2409,7 +2420,7 @@ async function loop(): Promise<void> {
             const run = admission && !admission.ok
               ? Promise.resolve<SubtaskResult>({ subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID, ok: false, output: "", error: admission.error, durationMs: 0, executed: false })
               : st.kind === "inference"
-              ? runInferenceSubtask(st, { agentId: AGENT_ID, claimedAtMs, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: keepAliveFor(st.requestedModel), contextWindow: CONTEXT_WINDOW, signal: callAbort.signal, onDelta: serving?.delta, post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }), ...(OPENAI_ENGINE ? { chat: engineChat } : CLOUD_HOST ? { chat: (m, r, s, t) => CLOUD_HOST.chat(m, r, s, t) } : {}) })
+              ? runInferenceSubtask(st, { agentId: AGENT_ID, claimedAtMs, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: keepAliveFor(st.requestedModel), contextWindow: CONTEXT_WINDOW, signal: callAbort.signal, onDelta: serving?.delta, post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }), ...(cpuSteal ? { cpuSteal: cpuStealReport } : {}), ...(OPENAI_ENGINE ? { chat: engineChat } : CLOUD_HOST ? { chat: (m, r, s, t) => CLOUD_HOST.chat(m, r, s, t) } : {}) })
               : runPolicedSubtask(st, { quiet: true });
             if (admission && !admission.ok) console.warn(`[agent:${AGENT_ID}] handed back inference ${st.id} on ${st.requestedModel}: ${admission.error}`);
             else if (st.kind === "inference") console.log(`[agent:${AGENT_ID}] running inference ${st.id} on ${st.requestedModel}`);

@@ -72,6 +72,23 @@ describe("CpuStealGuard", () => {
     expect(g.sample(5_000).throttled).toBe(true);
   });
 
+  it("run 7: reports a fresh share and whether it holds the host back, never a stale share", () => {
+    const host = fakeHost();
+    const g = new CpuStealGuard({ read: host.read, holdMs: 60_000, windowMs: 5_000 });
+    g.sample(0);
+    expect(g.report(0)).toEqual({ cpuThrottled: false });
+    host.step(2000, 1000, 1000);
+    g.sample(5_000);
+    expect(g.report(5_000)).toEqual({ cpuStealShare: 0.5, cpuThrottled: true });
+    // Idle since: no new share; the old one is not reported once it is more than two spans old.
+    host.step(2000, 0, 0);
+    g.sample(10_000);
+    expect(g.report(10_000)).toEqual({ cpuStealShare: 0.5, cpuThrottled: true });
+    host.step(2000, 0, 0);
+    g.sample(70_000);
+    expect(g.report(70_000)).toEqual({ cpuThrottled: false });
+  });
+
   it("does nothing where /proc/stat cannot be read", () => {
     const g = new CpuStealGuard({ read: () => null });
     expect(g.sample(0).throttled).toBe(false);

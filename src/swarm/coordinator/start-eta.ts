@@ -49,6 +49,19 @@
  *     slow for the work it was judged on), so a class learns from the calls it could not finish;
  *   - contention: the calls already running (and queued) on the class's hosts share them with this
  *     one (best-fit.ts CONTENTION_SHARE: a 2-slot CPU host runs two calls at about half speed each).
+ *
+ * Run 7 (2026-11-25): hosts' speeds measured while a fleet deploy had left them throttled (CPU credit)
+ * kept sending lhr and fra buyers to iad on "iad 936 ms vs lhr 2160 ms" long after (lhr served the
+ * call in about 1 s). Speeds now:
+ *
+ *   - decay: every speed median is weighted by its samples' age, halving every
+ *     INFERENCE_SPEED_HALF_LIFE_MS (SPEED_HALF_LIFE_MS), so recent calls outweigh older ones;
+ *   - host window: a host's own speed counts only its samples of the last
+ *     INFERENCE_HOST_SPEED_WINDOW_MS (HOST_SPEED_WINDOW_MS), and /inference/models says how old its
+ *     newest one is (speedAgeMs), so the portal trusts only a fresh measurement;
+ *   - steal: a sample from a call during which its host reported CPU steal (host-steal.ts) is kept
+ *     out of every speed, and a host's own speed counts only samples taken after its last stolen
+ *     report, so a speed measured while throttled does not linger once the throttling ends.
  */
 
 import type { ComputeClassId } from "../../economy/compute-classes.js";
@@ -62,6 +75,28 @@ import { agentContextWindow, agentLoadReport, freeModelSlots } from "./dispatch.
 import { effectiveHardware } from "./economy.js";
 import { agentUnavailable, memoryAdmits } from "./memory-admission.js";
 import { agentFlapping } from "./agent-liveness.js";
+import { agentStolenAt, stolenDuring } from "./host-steal.js";
+
+/** Run 7: a speed sample's weight halves every this many ms (0: every sample in the window weighs the same). */
+export const SPEED_HALF_LIFE_MS = 3 * 60_000;
+/** Run 7: a host's own speed counts only its samples of this window (a class's keeps SERVICE_WINDOW_MS). */
+export const HOST_SPEED_WINDOW_MS = 10 * 60_000;
+
+/** Positive integer ms from the environment, within [min, max]; `fallback` when unset or not a number. */
+function envMs(raw: string | undefined, fallback: number, min: number, max: number): number {
+  const n = Number((raw ?? "").trim() || NaN);
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : fallback;
+}
+
+/** INFERENCE_SPEED_HALF_LIFE_MS (0 to SERVICE_WINDOW_MS; 0 turns the weighting off), read when used. */
+export function speedHalfLifeMs(): number {
+  return envMs(process.env.INFERENCE_SPEED_HALF_LIFE_MS, SPEED_HALF_LIFE_MS, 0, SERVICE_WINDOW_MS);
+}
+
+/** INFERENCE_HOST_SPEED_WINDOW_MS (60 s to SERVICE_WINDOW_MS), read when used. */
+export function hostSpeedWindowMs(): number {
+  return envMs(process.env.INFERENCE_HOST_SPEED_WINDOW_MS, HOST_SPEED_WINDOW_MS, 60_000, SERVICE_WINDOW_MS);
+}
 
 /** Service times are kept this long ... */
 export const SERVICE_WINDOW_MS = 15 * 60_000;
@@ -117,36 +152,52 @@ export interface SpeedEstimate {
   prior: boolean;
 }
 
+type Sample = { at: number; ms: number; speed?: number; work?: number; stolen?: boolean };
+
 /** Recent service times (claim to last reply piece) per model and compute class. */
 export class ServiceTimes {
-  private readonly byKey = new Map<string, Array<{ at: number; ms: number; speed?: number; work?: number }>>();
+  private readonly byKey = new Map<string, Sample[]>();
+
+  /** `speedWindowMs`: how far back a speed looks (SERVICE_WINDOW_MS when not given; run 7: shorter for one host's own). */
+  constructor(private readonly speedWindowMs: () => number = () => SERVICE_WINDOW_MS) {}
 
   /**
    * One sample. `expectedMs`: expectedWorkMs for the tokens the call read and wrote; with it the
-   * sample also keeps its speed (ms ÷ expectedMs), for the completion estimate.
+   * sample also keeps its speed (ms ÷ expectedMs), for the completion estimate. `stolen` (run 7):
+   * its host reported CPU steal during the call, so it keeps no speed (its time still counts as a
+   * service time: the slot was held that long).
    */
-  record(model: string, computeClass: string, ms: number, atMs = Date.now(), expectedMs?: number): void {
+  record(model: string, computeClass: string, ms: number, atMs = Date.now(), expectedMs?: number, stolen = false): void {
     if (!model || !Number.isFinite(ms) || ms < 0) return;
     const key = `${model}|${computeClass}`;
     const list = this.byKey.get(key) ?? [];
     const speed = expectedMs !== undefined && Number.isFinite(expectedMs) && expectedMs > 0 ? ms / expectedMs : undefined;
-    list.push({ at: atMs, ms, ...(speed !== undefined ? { speed, work: expectedMs } : {}) });
+    list.push({ at: atMs, ms, ...(speed !== undefined ? { speed, work: expectedMs } : {}), ...(stolen ? { stolen: true } : {}) });
     if (list.length > SERVICE_SAMPLES) list.splice(0, list.length - SERVICE_SAMPLES);
     this.byKey.set(key, list);
     if (this.byKey.size > 512) this.byKey.delete(this.byKey.keys().next().value as string);
   }
 
-  private values(model: string, computeClass: string, nowMs: number, pick: (s: { ms: number; speed?: number; work?: number }) => number | undefined): number[] {
-    const values: number[] = [];
+  private samples(model: string, computeClass: string, nowMs: number, windowMs: number, sinceMs?: number): Sample[] {
+    const out: Sample[] = [];
     for (const [key, list] of this.byKey) {
       const sep = key.lastIndexOf("|");
       if (key.slice(0, sep) !== model || (computeClass !== "any" && key.slice(sep + 1) !== computeClass)) continue;
-      for (const s of list) {
-        const v = nowMs - s.at <= SERVICE_WINDOW_MS ? pick(s) : undefined;
-        if (v !== undefined) values.push(v);
-      }
+      for (const s of list) if (nowMs - s.at <= windowMs && (sinceMs === undefined || s.at > sinceMs)) out.push(s);
     }
-    return values;
+    return out;
+  }
+
+  private values(model: string, computeClass: string, nowMs: number, pick: (s: Sample) => number | undefined): number[] {
+    return this.samples(model, computeClass, nowMs, SERVICE_WINDOW_MS).map(pick).filter((v): v is number => v !== undefined);
+  }
+
+  /** Run 7: the speed samples (not stolen) of the speed window, each weighted by its age. */
+  private speeds(model: string, computeClass: string, nowMs: number, keep: (s: Sample) => boolean = () => true, sinceMs?: number): Weighted[] {
+    const half = speedHalfLifeMs();
+    return this.samples(model, computeClass, nowMs, this.speedWindowMs(), sinceMs)
+      .filter((s) => s.speed !== undefined && !s.stolen && keep(s))
+      .map((s) => ({ v: s.speed!, w: half > 0 ? Math.pow(0.5, Math.max(0, nowMs - s.at) / half) : 1 }));
   }
 
   /** Median recent service time of `model` on `computeClass` ("any": every class), null when too few are known. */
@@ -158,9 +209,20 @@ export class ServiceTimes {
   /**
    * Median recent speed of `model` on `computeClass`: measured time ÷ expectedWorkMs for the same
    * tokens (below 1: faster than the slow-host estimate). Null when too few samples carry one.
+   * Run 7: weighted by age (SPEED_HALF_LIFE_MS), without samples whose host was stolen from, and,
+   * with `sinceMs`, only samples taken after it.
    */
-  speed(model: string, computeClass: string, nowMs = Date.now()): number | null {
-    return median(this.values(model, computeClass, nowMs, (s) => s.speed));
+  speed(model: string, computeClass: string, nowMs = Date.now(), sinceMs?: number): number | null {
+    return weightedMedian(this.speeds(model, computeClass, nowMs, undefined, sinceMs));
+  }
+
+  /** Run 7: how old the newest sample behind speed() is (ms); null when there is none. */
+  speedAgeMs(model: string, computeClass: string, nowMs = Date.now(), sinceMs?: number): number | null {
+    let newest: number | null = null;
+    for (const s of this.samples(model, computeClass, nowMs, this.speedWindowMs(), sinceMs)) {
+      if (s.speed !== undefined && !s.stolen && (newest === null || s.at > newest)) newest = s.at;
+    }
+    return newest === null ? null : Math.max(0, nowMs - newest);
   }
 
   /**
@@ -170,11 +232,12 @@ export class ServiceTimes {
    */
   speedFor(model: string, computeClass: string, workMs: number, priorSpeed: number | undefined, nowMs = Date.now()): SpeedEstimate {
     const floor = Number.isFinite(workMs) ? workMs * RELEVANT_WORK_SHARE : 0;
-    const values = this.values(model, computeClass, nowMs, (s) => (s.speed !== undefined && (s.work ?? 0) >= floor ? s.speed : undefined));
+    const values = this.speeds(model, computeClass, nowMs, (s) => (s.work ?? 0) >= floor);
     const samples = values.length;
     const prior = priorSpeed !== undefined && priorSpeed > 0 && samples < SERVICE_MIN_SAMPLES;
-    if (prior) for (let i = samples; i < SERVICE_MIN_SAMPLES; i++) values.push(priorSpeed!);
-    return { speed: median(values), samples, prior };
+    // The prior stands in for a missing sample at full weight.
+    if (prior) for (let i = samples; i < SERVICE_MIN_SAMPLES; i++) values.push({ v: priorSpeed!, w: 1 });
+    return { speed: weightedMedian(values), samples, prior };
   }
 
   clear(): void {
@@ -189,12 +252,35 @@ function median(values: number[]): number | null {
   return values.length % 2 ? values[mid] : (values[mid - 1] + values[mid]) / 2;
 }
 
+type Weighted = { v: number; w: number };
+
+/**
+ * Run 7: the median of `values` by weight (the value at half the total weight; halfway between two
+ * when the half falls exactly between them, so equal weights give the plain median). Null with
+ * fewer than SERVICE_MIN_SAMPLES values.
+ */
+export function weightedMedian(values: Weighted[]): number | null {
+  if (values.length < SERVICE_MIN_SAMPLES) return null;
+  const sorted = values.filter((x) => Number.isFinite(x.v) && x.w > 0).sort((a, b) => a.v - b.v);
+  if (!sorted.length) return null;
+  const total = sorted.reduce((n, x) => n + x.w, 0);
+  const half = total / 2;
+  const eps = total * 1e-9;
+  let cum = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    cum += sorted[i].w;
+    if (Math.abs(cum - half) <= eps && i + 1 < sorted.length) return (sorted[i].v + sorted[i + 1].v) / 2;
+    if (cum > half) return sorted[i].v;
+  }
+  return sorted[sorted.length - 1].v;
+}
+
 export const serviceTimes = new ServiceTimes();
 /**
  * The same per model and agent (the agent id in the class slot): one host's own speed, for
- * /inference/models freeHosts (hostServiceMs).
+ * /inference/models freeHosts (hostServiceMs). Run 7: its speed looks back HOST_SPEED_WINDOW_MS only.
  */
-export const agentServiceTimes = new ServiceTimes();
+export const agentServiceTimes = new ServiceTimes(hostSpeedWindowMs);
 
 /** The reference call hostServiceMs is given for (tokens read and written). */
 export const REFERENCE_CALL_TOKENS = { promptTokens: 1_000, outputTokens: 200 } as const;
@@ -220,10 +306,12 @@ export type HostSpeedSource = "host" | "class" | "prior";
  * tell a host's own measurement from its class's or the prior (two hosts of one class compare as
  * equal unless both are measured). Null when no speed is known.
  */
-export function hostSpeed(model: string, agentId: string, computeClass: string, nowMs = Date.now(), priorSpeed?: number): { speed: number; from: HostSpeedSource } | null {
+export function hostSpeed(model: string, agentId: string, computeClass: string, nowMs = Date.now(), priorSpeed?: number): { speed: number; from: HostSpeedSource; ageMs?: number } | null {
   const ok = (n: number | null | undefined): n is number => n !== null && n !== undefined && Number.isFinite(n) && n > 0;
-  const own = agentServiceTimes.speed(model, agentId, nowMs);
-  if (ok(own)) return { speed: own, from: "host" };
+  // Run 7: only the host's samples since it last reported CPU steal; `ageMs`, how old the newest is.
+  const since = agentStolenAt(agentId);
+  const own = agentServiceTimes.speed(model, agentId, nowMs, since);
+  if (ok(own)) return { speed: own, from: "host", ageMs: agentServiceTimes.speedAgeMs(model, agentId, nowMs, since) ?? 0 };
   const cls = serviceTimes.speed(model, computeClass, nowMs);
   if (ok(cls)) return { speed: cls, from: "class" };
   return ok(priorSpeed) ? { speed: priorSpeed, from: "prior" } : null;
@@ -242,8 +330,10 @@ export function noteServiceTime(model: string | undefined, agentId: string | und
   if (!model || !agentId || claimedAtMs === undefined) return;
   const cls = effectiveHardware(agentId)?.computeClass ?? agentCapabilities.get(agentId)?.computeClass ?? "cpu";
   const expected = tokens && tokens.outputTokens > 0 ? callWorkMs(model, cls, tokens.promptTokens, tokens.outputTokens) : undefined;
-  serviceTimes.record(model, cls, nowMs - claimedAtMs, nowMs, expected);
-  agentServiceTimes.record(model, agentId, nowMs - claimedAtMs, nowMs, expected);
+  // Run 7: a call its host was stolen from during (host-steal.ts) gives no speed.
+  const stolen = stolenDuring(agentId, claimedAtMs);
+  serviceTimes.record(model, cls, nowMs - claimedAtMs, nowMs, expected, stolen);
+  agentServiceTimes.record(model, agentId, nowMs - claimedAtMs, nowMs, expected, stolen);
 }
 
 /** Slots (all, and free now) of this coordinator's agents that could run `model` in `taskClass`. */
@@ -404,9 +494,11 @@ export function noteTimedOutCall(model: string | undefined, agentId: string | un
     // Not JSON: its bytes are the prompt.
   }
   const work = callWorkMs(model, cls, Math.max(1, Math.ceil(promptBytes / 4)), maxTokens);
-  serviceTimes.record(model, cls, nowMs - claimedAtMs, nowMs, work);
+  // Run 7: not when its host was stolen from during the call (host-steal.ts).
+  const stolen = stolenDuring(agentId, claimedAtMs);
+  serviceTimes.record(model, cls, nowMs - claimedAtMs, nowMs, work, stolen);
   // The host's own samples too (#558 hostServiceMs): it was at least this slow.
-  agentServiceTimes.record(model, agentId, nowMs - claimedAtMs, nowMs, work);
+  agentServiceTimes.record(model, agentId, nowMs - claimedAtMs, nowMs, work, stolen);
 }
 
 /** The reply a timed-out call without max_tokens is measured against (routes/inference.ts COMPLETION_UNSET_MAX_TOKENS). */
