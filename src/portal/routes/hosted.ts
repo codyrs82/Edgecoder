@@ -31,7 +31,7 @@ import {
 } from "../../apps/ide/network-inference.js";
 import { autoBackend, coordinatorAutoBackend, networkBackend, redirectingNetworkBackend } from "../../inference-api/backends.js";
 import { AUTO_MODEL_ID, isUnpinnedModel, planRoutes, routeInputsFrom, sizeWorkload } from "../../inference-api/auto-route.js";
-import { apiKeyOf, registerCompatRoutes } from "../../inference-api/routes.js";
+import { apiKeyOf, registerCompatRoutes, wholeKeepaliveFromEnv, type WholeKeepalive } from "../../inference-api/routes.js";
 import type { PortalStore } from "../store.js";
 import { withInvoiceQr } from "../invoice-qr.js";
 import { registerAgentRoutes } from "./agents.js";
@@ -55,6 +55,8 @@ export interface HostedRoutesDeps {
   chatCapacity?: ChatCapacityDirectory;
   /** With 2FA on, creating an API key needs the second factor (routes/account-security.ts). */
   secondFactor?: SecondFactorGate;
+  /** Keepalive for long non-streamed calls (Cloudflare's 100 s first-byte limit); from the env when absent, null = off. */
+  wholeKeepalive?: WholeKeepalive | null;
 }
 
 /** Where a hosted request runs, from the model the tool named: network/<m>[@class] (or a bare model), mine/<m>, reserved/<lease>/<m>. */
@@ -178,6 +180,8 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
       }
       return { backend: networkBackend(placed.deps, { ...target, ...region, ...(placed.choice ? { coordinatorChoice: placed.choice } : {}) }), model: model! };
     },
+    // Long `stream: false` calls: commit 200 and send whitespace before Cloudflare's 100 s cut (524).
+    wholeKeepalive: (deps.wholeKeepalive === undefined ? wholeKeepaliveFromEnv() : deps.wholeKeepalive) ?? undefined,
   });
 
   // ── The account behind a key (agents, scripts): balance, usage, top-up, reservations ──

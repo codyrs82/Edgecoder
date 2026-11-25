@@ -139,6 +139,59 @@ export function fileStateStore(path: string): { load: () => unknown; save: (s: S
   };
 }
 
+/**
+ * The provider refused a call because of the account, not the key or the call: HTTP 412 (Fireworks
+ * answers this for a suspended account), 402, or an error that says the account is suspended or
+ * out of credit / over its spending limit (network test 3b, D1). Calls keep failing until the owner
+ * fixes the account in the provider's console, so the owner is alerted (at most once per
+ * PROVIDER_ACCOUNT_ALERT_EVERY_MS per host). The host's pause and the coordinator's breaker are unchanged.
+ */
+export interface ProviderAccountEvent {
+  kind: "provider_account";
+  status: number;
+  message: string;
+}
+/** What a cloud host reports to its notifier: spend-guard events and provider account problems. */
+export type CloudHostEvent = SpendEvent | ProviderAccountEvent;
+export const PROVIDER_ACCOUNT_ALERT_EVERY_MS = 60 * 60_000;
+
+const ACCOUNT_TEXT = /\b(account[^.]{0,40}suspended|suspended[^.]{0,40}account|spending limit|spend limit|billing|payment required|insufficient (credit|credits|funds|balance)|out of credits?|credit balance)\b/i;
+
+/** The provider error as an account problem, or null when it is something else. */
+export function providerAccountProblem(err: unknown): ProviderAccountEvent | null {
+  if (!(err instanceof CloudApiError)) return null;
+  if (err.status === 412 || err.status === 402 || ACCOUNT_TEXT.test(err.message)) return { kind: "provider_account", status: err.status, message: err.message.slice(0, 300) };
+  return null;
+}
+
+/** A provider account problem as an ops alert. */
+export function providerAccountAlert(e: ProviderAccountEvent, ctx: { agentId: string; provider: string; reporter: string; portalUrl: string; nowMs: number }): AlertNotification {
+  return {
+    kind: "firing",
+    reporter: ctx.reporter,
+    url: `${ctx.portalUrl.replace(/\/$/, "")}/portal/settings/network#alerts`,
+    nowMs: ctx.nowMs,
+    alert: {
+      source: `cloud-host:${ctx.agentId}`,
+      key: `cloud_host_provider_account:${ctx.agentId}`,
+      rule: "cloud_provider_account",
+      severity: "critical",
+      title: `Cloud host ${ctx.agentId}: ${ctx.provider} refused a call for the account (HTTP ${e.status})`,
+      summary: `${e.message}. The ${ctx.provider} account may be suspended, out of credit or over its spending limit; cloud-model calls fail until it is fixed in the ${ctx.provider} console. This alert repeats at most once an hour while it lasts.`,
+      link: null,
+      details: { agentId: ctx.agentId, provider: ctx.provider, status: e.status },
+      status: "active",
+      firstSeenMs: ctx.nowMs,
+      lastSeenMs: ctx.nowMs,
+      resolvedAtMs: null,
+      lastNotifiedMs: null,
+      notifyCount: 0,
+      acknowledgedAtMs: null,
+      acknowledgedBy: null
+    }
+  };
+}
+
 /** A spend-guard event as an ops alert (the src/alerting channels: ALERT_EMAILS via Resend, ALERT_WEBHOOK_URL). */
 export function spendAlert(e: SpendEvent, ctx: { agentId: string; provider: string; reporter: string; portalUrl: string; nowMs: number }): AlertNotification {
   const usd = (n: number | undefined) => `$${(n ?? 0).toFixed(2)}`;
@@ -186,11 +239,12 @@ export function spendAlert(e: SpendEvent, ctx: { agentId: string; provider: stri
   };
 }
 
-/** Send spend-guard events to the configured alert channels; failures are logged, never thrown. */
-export function alertNotifier(cfg: AlertConfig, ctx: { agentId: string; provider: string; portalUrl: string; log: (line: string) => void }): (e: SpendEvent) => void {
+/** Send spend-guard events and provider account problems to the configured alert channels; failures are logged, never thrown. */
+export function alertNotifier(cfg: AlertConfig, ctx: { agentId: string; provider: string; portalUrl: string; log: (line: string) => void }): (e: CloudHostEvent) => void {
   const channels = cfg.enabled ? alertChannels(cfg) : [];
   return (e) => {
-    const n = spendAlert(e, { ...ctx, reporter: `cloud host ${ctx.agentId}`, nowMs: Date.now() });
+    const actx = { ...ctx, reporter: `cloud host ${ctx.agentId}`, nowMs: Date.now() };
+    const n = e.kind === "provider_account" ? providerAccountAlert(e, actx) : spendAlert(e, actx);
     ctx.log(`${n.alert.severity}: ${n.alert.title}`);
     for (const ch of channels) void ch.send(n).catch((err) => ctx.log(`alert via ${ch.name} failed: ${String((err as Error)?.message ?? err).slice(0, 200)}`));
   };
@@ -201,11 +255,17 @@ export class CloudHost {
   private readonly backend: RemoteBackendConfig;
   private lastProbeMs = 0;
   private lastAdvertised = "";
+  private readonly notify?: (e: CloudHostEvent) => void;
+  private readonly now: () => number;
+  /** When the last provider account alert went out (deduplicated to one per PROVIDER_ACCOUNT_ALERT_EVERY_MS). */
+  private lastAccountAlertMs = -Infinity;
 
   constructor(
     readonly config: CloudHostConfig,
-    deps: { notify?: (e: SpendEvent) => void; now?: () => number; backend?: Partial<RemoteBackendConfig>; store?: { load: () => unknown; save: (s: SpendState) => void } } = {}
+    deps: { notify?: (e: CloudHostEvent) => void; now?: () => number; backend?: Partial<RemoteBackendConfig>; store?: { load: () => unknown; save: (s: SpendState) => void } } = {}
   ) {
+    this.notify = deps.notify;
+    this.now = deps.now ?? Date.now;
     const store = deps.store ?? (config.stateFile ? fileStateStore(config.stateFile) : undefined);
     this.guard = new SpendGuard(config.guard, { ...(deps.now ? { now: deps.now } : {}), ...(store ?? {}), ...(deps.notify ? { notify: deps.notify } : {}) });
     this.backend = { label: config.label, baseUrl: config.baseUrl, apiKey: config.apiKey, maxRetries: config.maxRetries, ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}), ...deps.backend };
@@ -252,6 +312,20 @@ export class CloudHost {
     if (r.ok) this.guard.noteAuthOk();
   }
 
+  /** Alert the owner when the provider refuses calls for the account (suspended, out of credit), at most hourly. */
+  private noteAccountProblem(err: unknown): void {
+    const e = providerAccountProblem(err);
+    if (!e || !this.notify) return;
+    const now = this.now();
+    if (now - this.lastAccountAlertMs < PROVIDER_ACCOUNT_ALERT_EVERY_MS) return;
+    this.lastAccountAlertMs = now;
+    try {
+      this.notify(e);
+    } catch {
+      // alerting never breaks a call's error path
+    }
+  }
+
   /**
    * Run a network call on the provider (inference-runner deps.chat). Refused with
    * "cloud_capacity_paused" while paused; a call longer than the model's window is a context
@@ -281,6 +355,7 @@ export class CloudHost {
       }
     } catch (err) {
       if (err instanceof CloudApiError && err.kind === "auth") this.guard.noteAuthFailure();
+      this.noteAccountProblem(err);
       // Reasoning only: the provider answered (and bills the thinking) though nothing reached the caller.
       if (err instanceof CloudApiError && err.usage) {
         answered = true;

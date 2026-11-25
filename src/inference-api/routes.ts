@@ -23,6 +23,38 @@ export interface CompatRoutes<Ctx> {
   resolve(ctx: Ctx, model: string | undefined): Promise<{ backend: ChatBackend; model: string } | { status: number; error: string }>;
   /** Idle time before a streamed reply sends an SSE keepalive comment (default STREAM_KEEPALIVE_MS). */
   keepaliveMs?: number;
+  /** Non-streamed replies: commit 200 and send whitespace keepalives once a call runs this long (off when unset). */
+  wholeKeepalive?: WholeKeepalive;
+}
+
+/**
+ * Keepalive for non-streamed (`stream: false`) replies behind a proxy with a first-byte timeout
+ * (Cloudflare: 100 s, then a 524). Once a call has run `afterMs` without an answer, the response is
+ * committed as 200 application/json and a space is written every `everyMs` until the body is ready
+ * (JSON allows leading whitespace, so OpenAI and Anthropic clients parse it as usual). A call that
+ * then fails can no longer change the status: the body is the format's error object instead
+ * (OpenAI `{"error":{"message","type","code"}}`, Anthropic `{"type":"error","error":{"type","message"}}`),
+ * which the SDKs read as an error. Only a call that has not committed yet can answer 503 + Retry-After.
+ */
+export interface WholeKeepalive {
+  afterMs: number;
+  everyMs: number;
+}
+export const WHOLE_KEEPALIVE_AFTER_MS = 20_000;
+export const WHOLE_KEEPALIVE_EVERY_MS = 15_000;
+
+/**
+ * PORTAL_NONSTREAM_KEEPALIVE_AFTER_MS (0 = off) and PORTAL_NONSTREAM_KEEPALIVE_MS for the hosted
+ * endpoint; null when off.
+ */
+export function wholeKeepaliveFromEnv(env: NodeJS.ProcessEnv = process.env): WholeKeepalive | null {
+  const num = (raw: string | undefined, fallback: number, min: number, max: number) => {
+    const n = Number((raw ?? "").trim() || NaN);
+    return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : fallback;
+  };
+  const afterMs = num(env.PORTAL_NONSTREAM_KEEPALIVE_AFTER_MS, WHOLE_KEEPALIVE_AFTER_MS, 0, 600_000);
+  if (afterMs === 0) return null;
+  return { afterMs, everyMs: num(env.PORTAL_NONSTREAM_KEEPALIVE_MS, WHOLE_KEEPALIVE_EVERY_MS, 1_000, 90_000) };
 }
 
 /** The key a tool sent: "Authorization: Bearer …" (OpenAI, Claude Code's auth token) or "x-api-key" (Anthropic SDKs). */
@@ -52,6 +84,15 @@ function openAiErrorType(status: number): string {
 export const UPSTREAM_ERROR_RETRY_AFTER_SEC = 2;
 function edgeSafe(status: number): number {
   return status === 502 || status === 504 ? 503 : status;
+}
+
+/** A non-streamed reply's error body once 200 has been committed (see WholeKeepalive). */
+function wholeError(format: Format, rawStatus: number, message: string, openAiType?: string): string {
+  const status = edgeSafe(rawStatus);
+  if (status !== rawStatus) openAiType ??= "upstream_error";
+  return format === "anthropic"
+    ? JSON.stringify({ type: "error", error: { type: anthropicErrorType(status), message } })
+    : JSON.stringify({ error: { message, type: openAiType ?? openAiErrorType(status), code: status } });
 }
 
 function sendError(reply: FastifyReply, format: Format, rawStatus: number, message: string, retryAfterSec?: number, openAiType?: string) {
@@ -112,7 +153,7 @@ const retryAfterOf = (err: unknown) => (err instanceof ChatBackendError ? err.re
 export const STREAM_KEEPALIVE_MS = 15_000;
 
 /** Run a request on a backend and answer in the tool's format, streamed or whole. */
-export async function respondWith(req: FastifyRequest, reply: FastifyReply, format: Format, backend: ChatBackend, model: string, opts: { keepaliveMs?: number } = {}) {
+export async function respondWith(req: FastifyRequest, reply: FastifyReply, format: Format, backend: ChatBackend, model: string, opts: { keepaliveMs?: number; wholeKeepalive?: WholeKeepalive | null } = {}) {
   const body = (req.body ?? {}) as { stream?: boolean };
   const chat = format === "anthropic" ? fromAnthropic(body as never) : fromOpenAi(body as never);
   const hints = routingHintsFrom(body, req.headers as Record<string, unknown>);
@@ -154,12 +195,45 @@ export async function respondWith(req: FastifyRequest, reply: FastifyReply, form
       }, Math.max(5, Math.floor(keepaliveMs / 3)))
     : undefined;
   keepalive?.unref?.();
+  // Non-streamed only: 200 + JSON head committed early, whitespace sent until the body is ready.
+  let whole = false;
+  let wholeTicker: ReturnType<typeof setInterval> | undefined;
+  const wk = !body.stream && opts.wholeKeepalive ? opts.wholeKeepalive : undefined;
+  const wholeStart = wk
+    ? setTimeout(() => {
+        if (finished || whole || reply.raw.writableEnded || reply.raw.headersSent) return;
+        whole = true;
+        const kept: Record<string, string | number | string[]> = {};
+        for (const [k, v] of Object.entries(reply.getHeaders())) {
+          if (v !== undefined && k.toLowerCase() !== "content-length") kept[k] = v as string | number | string[];
+        }
+        reply.raw.writeHead(200, { ...kept, "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-cache" });
+        reply.hijack();
+        write(" ");
+        wholeTicker = setInterval(() => write(" "), Math.max(10, wk.everyMs));
+        wholeTicker.unref?.();
+      }, Math.max(0, wk.afterMs))
+    : undefined;
+  wholeStart?.unref?.();
+  const stopWhole = () => {
+    if (wholeStart) clearTimeout(wholeStart);
+    if (wholeTicker) clearInterval(wholeTicker);
+  };
+  /** End a committed non-streamed reply with this body. */
+  const endWhole = (json: string) => {
+    stopWhole();
+    write(json);
+    end();
+    return reply;
+  };
   // The server is stopping: end this request with an error the client can act on, then stop the backend.
   const open = {
     stop: () => {
       openRequests.delete(open);
       if (finished) return;
-      if (streaming) {
+      if (whole) {
+        endWhole(wholeError(format, 503, RESTARTING_MESSAGE, "server_restarting"));
+      } else if (streaming) {
         write(streamError(format, 503, RESTARTING_MESSAGE, "server_restarting"));
         end();
       } else {
@@ -178,6 +252,7 @@ export async function respondWith(req: FastifyRequest, reply: FastifyReply, form
       first = await iter.next();
     } catch (err) {
       if (finished) return reply;
+      if (whole) return endWhole(wholeError(format, statusOf(err), (err as Error).message));
       if (!streaming) {
         finished = true;
         return sendError(reply, format, statusOf(err), (err as Error).message, retryAfterOf(err));
@@ -201,10 +276,14 @@ export async function respondWith(req: FastifyRequest, reply: FastifyReply, form
         answer = format === "anthropic" ? await anthropicResponse(all(), model) : await openAiResponse(all(), model);
       } catch (err) {
         if (finished) return reply;
+        if (whole) return endWhole(wholeError(format, statusOf(err), (err as Error).message));
+        stopWhole();
         finished = true;
         return sendError(reply, format, statusOf(err), (err as Error).message, retryAfterOf(err));
       }
       if (finished) return reply;
+      if (whole) return endWhole(JSON.stringify(answer));
+      stopWhole();
       finished = true;
       return reply.send(answer);
     }
@@ -222,6 +301,7 @@ export async function respondWith(req: FastifyRequest, reply: FastifyReply, form
   } finally {
     openRequests.delete(open);
     if (keepalive) clearInterval(keepalive);
+    stopWhole();
   }
 }
 
@@ -248,7 +328,7 @@ export function registerCompatRoutes<Ctx>(app: FastifyInstance, opts: CompatRout
     if (!Array.isArray(body.messages) || body.messages.length === 0) return sendError(reply, format, 400, "messages is required");
     const resolved = await opts.resolve(ctx, body.model);
     if ("error" in resolved) return sendError(reply, format, resolved.status, resolved.error);
-    return respondWith(req, reply, format, resolved.backend, resolved.model, { keepaliveMs: opts.keepaliveMs });
+    return respondWith(req, reply, format, resolved.backend, resolved.model, { keepaliveMs: opts.keepaliveMs, wholeKeepalive: opts.wholeKeepalive });
   };
 
   if (formats.openai !== false) app.post(`${prefix}/v1/chat/completions`, { bodyLimit: 16 * 1024 * 1024 }, (req, reply) => run(req, reply, "openai"));
