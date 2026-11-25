@@ -35,7 +35,7 @@ afterEach(async () => {
 });
 
 /** Fake US/EU coordinators: `submit` answers /inference/submit; an accepted call streams "hello". */
-function coordinators(submit: (url: string, body: Record<string, unknown>) => { status: number; json: Record<string, unknown> }) {
+function coordinators(submit: (url: string, body: Record<string, unknown>) => { status: number; json: Record<string, unknown> }, stream: (url: string) => Record<string, unknown> = () => ({ chunks: ["hello"], next: 1, done: true, creditsSpent: 0.4 })) {
   const submits: Submit[] = [];
   for (const url of [US, EU]) {
     const pool = mock.get(url);
@@ -50,7 +50,7 @@ function coordinators(submit: (url: string, body: Record<string, unknown>) => { 
       .persist();
     pool
       .intercept({ path: "/inference/stream", method: "POST" })
-      .reply(200, { chunks: ["hello"], next: 1, done: true, creditsSpent: 0.4 })
+      .reply(() => ({ statusCode: 200, data: JSON.stringify(stream(url)), responseOptions: { headers: { "content-type": "application/json" } } }))
       .persist();
     pool.intercept({ path: "/inference/cancel", method: "POST" }).reply(200, {}).persist();
   }
@@ -290,5 +290,53 @@ describe("hosted API: one log line per call", () => {
     await d.transport!("POST", "/inference/submit", { taskId: "inf-1-x", messages: [{ role: "user", content: "p" }] });
     await expect(d.transport!("POST", "/inference/stream", { taskId: "inf-1-x" })).rejects.toThrow();
     expect(trace).toMatchObject({ taskIds: ["inf-1-x"], coordinators: ["eu.example"], submitStatus: 503, submitError: "no_capacity", upstreamError: "/inference/stream UND_ERR_SOCKET" });
+  });
+});
+
+/*
+ * Run 9: 0 of 507 hosted_call lines carried a served label (#575 put it on the reply only). Every line
+ * now has `served`: the model, class and masked host of the attempt that answered, null when nothing did.
+ */
+describe("hosted API: the served label on the log line", () => {
+  const served = (region: string) => ({ chunks: ["hello"], next: 1, done: true, creditsSpent: 0.4, servedModel: MODEL, served: { label: `lin-•••${region}`, own: false, computeClass: "cpu", tier: null, hardware: "CPU", region, country: null } });
+  const hostedLine = (lines: string[]) => lines.map((l) => JSON.parse(l)).filter((l) => l.msg === "hosted_call").map((l) => l.hostedCall);
+
+  for (const stream of [false, true]) {
+    it(`names the attempt that answered after a failover (${stream ? "stream" : "non-stream"})`, async () => {
+      coordinators((url, body) => (url === US ? { status: 503, json: drainingBody(EU) } : { status: 200, json: { taskId: body.taskId, subtaskId: "s-1" } }), (url) => served(url === US ? "iad" : "fra"));
+      const lines: string[] = [];
+      const { app } = await hostedApp({}, lines);
+      const r = await app.inject({ method: "POST", url: "/v1/chat/completions", headers: { authorization: `Bearer ${KEY}` }, payload: { model: `network/${MODEL}`, messages: [{ role: "user", content: "hi" }], stream } });
+      expect(r.statusCode).toBe(200);
+      const [call] = hostedLine(lines);
+      expect(call.served).toEqual({ label: `${MODEL} on cpu · lin-•••fra (fra)`, model: MODEL, computeClass: "cpu", host: "lin-•••fra", region: "fra", coordinator: "eu.example" });
+      // Not repeated inside upstream.
+      expect(call.upstream.served).toBeUndefined();
+    });
+  }
+
+  it("is null when the call was refused and nothing served it", async () => {
+    coordinators((url) => ({ status: 503, json: drainingBody(url === US ? EU : US) }));
+    const lines: string[] = [];
+    const { app } = await hostedApp({}, lines);
+    const r = await ask(app);
+    expect(r.statusCode).toBe(503);
+    const [call] = hostedLine(lines);
+    expect(call).toHaveProperty("served", null);
+  });
+
+  it("a new submit clears what an earlier attempt said, and a done read without served-by leaves it null", async () => {
+    const { tracedNetworkDeps, newCallTrace, servedLabelOf } = await import("../../src/portal/routes/hosted.js");
+    const trace = newCallTrace();
+    let n = 0;
+    const d = tracedNetworkDeps({ forwarder: "", token: () => "", agentId: "a", transport: async (_m, path) => (path === "/inference/stream" ? { status: 200, json: n++ === 0 ? served("lhr") : { done: true, chunks: [] } } : { status: 200, json: {} }) }, trace, EU);
+    await d.transport!("POST", "/inference/submit", { taskId: "inf-1-a" });
+    await d.transport!("POST", "/inference/stream", { taskId: "inf-1-a" });
+    expect(trace.served?.region).toBe("lhr");
+    await d.transport!("POST", "/inference/submit", { taskId: "inf-1-b" });
+    expect(trace.served).toBeUndefined();
+    await d.transport!("POST", "/inference/stream", { taskId: "inf-1-b" });
+    expect(trace.served).toBeUndefined();
+    expect(servedLabelOf({ servedModel: MODEL }, "eu.example")).toMatchObject({ label: MODEL, computeClass: null, host: null });
   });
 });

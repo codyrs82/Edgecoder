@@ -703,3 +703,46 @@ describe("run 8: every coordinator busy, the call queues nearest the buyer", () 
     expect(later.choice?.rule).not.toBe("locality");
   });
 });
+
+/*
+ * Run 9 (CPU ramp): the load rule ("most free slots for the model") won 18 calls while a host near the
+ * buyer was free. A coordinator's free count subtracts calls waiting there, so it read -3 while its syd
+ * host sat free, and a syd buyer went to the EU's lhr host (inf-1795635739909-427d6667). Free capacity
+ * is now judged by the free hosts each coordinator reports.
+ */
+describe("run 9: free capacity judged by the reported free hosts", () => {
+  const host = (region: string, free = 1): FreeHost => ({ region, free, computeClass: "cpu", speed: 1, speedFrom: "prior" });
+  const usWaiting = (o: Partial<LatencyCandidate> = {}) => cand({ url: US, rttMs: 6, free: -3, waiting: 3, agents: 7, agentRttMs: 163, pickupP90Ms: 300, callP50Ms: 3_000, freeHosts: [host("syd")], ...o });
+  const euFree = (o: Partial<LatencyCandidate> = {}) => cand({ url: EU, rttMs: 96, free: 1, waiting: 0, agents: 2, agentRttMs: 12, freeHosts: [host("lhr")], ...o });
+
+  it("a syd buyer goes to the free syd host though its coordinator's count is negative (inf-1795635739909-427d6667)", () => {
+    const c = chooseByLatency([usWaiting(), euFree()], EU, POLICY, { clientRegion: "syd", portalRegion: "ord" });
+    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
+    expect(c.reason).toMatch(/^free host nearest the buyer \(syd\): 0 km vs 1\d,\d{3} km on coordinator-eu\.example\.com$/);
+    // It starts at once there: no queue is counted against a free host.
+    expect(c.candidates[0]).toMatchObject({ queueMs: 0, nearKm: 0 });
+  });
+
+  it("the load rule still applies when the near coordinator has no free host", () => {
+    const c = chooseByLatency([usWaiting({ freeHosts: undefined }), euFree()], EU, POLICY, { clientRegion: "syd" });
+    expect(c).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "load" });
+  });
+
+  it("free hosts already taken by calls sent since the report are no free capacity, whatever the count says", () => {
+    // The US count says 1 free and its free regions still name syd, but the call sent for a syd buyer has that host.
+    const us = cand({ url: US, rttMs: 6, free: 1, agents: 7, freeRegions: ["syd"], freeHosts: [host("syd")], sentFor: ["syd"] });
+    const c = chooseByLatency([us, euFree()], US, POLICY, { clientRegion: "syd" });
+    expect(c.chosen).toBe("coordinator-eu.example.com");
+    expect(c.candidates[0].nearKm).toBeUndefined();
+  });
+
+  it("the only coordinator with a free slot is recorded as locality when its free host is near the buyer, as load when it is not", () => {
+    // inf-1795635705470-523f504f: iad buyer, the US the only one free, its iad host free.
+    const near = chooseByLatency([usWaiting({ free: 1, waiting: 0, freeHosts: [host("iad"), host("nrt")] }), euFree({ free: -3, waiting: 3, freeHosts: undefined })], US, POLICY, { clientRegion: "iad" });
+    expect(near).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
+    expect(near.reason).toBe("free host nearest the buyer (iad): 0 km; no other coordinator has a free slot");
+    // inf-1795635566692-0e23c3c8: syd buyer, the US's nearest free host nrt (7,8xx km): no near free host, so the load rule.
+    const far = chooseByLatency([usWaiting({ free: 2, waiting: 1, freeHosts: [host("nrt")] }), euFree({ free: 0, freeHosts: undefined })], US, POLICY, { clientRegion: "syd" });
+    expect(far).toMatchObject({ chosen: "coordinator.example.com", rule: "load" });
+  });
+});

@@ -84,6 +84,37 @@ export interface CallTrace {
   cancelled: boolean;
   /** A request to the coordinator that failed in the portal (the connection, a timeout): path and error code. */
   upstreamError?: string;
+  /**
+   * What answered: from the done read of the attempt that answered (the coordinator's servedModel and
+   * served-by). A new submit (a failover or a redirect) clears it, so it never names an earlier attempt.
+   */
+  served?: ServedLabel;
+}
+
+/** The served label on a hosted_call line: the model, class and (masked) host of the attempt that answered. */
+export interface ServedLabel {
+  /** "qwen2.5-coder:1.5b on cpu · lin-•••3f2a (syd)". */
+  label: string;
+  model: string | null;
+  computeClass: string | null;
+  /** The coordinator's masked host label (served-by.ts), never an agent id. */
+  host: string | null;
+  region: string | null;
+  /** The coordinator that answered. */
+  coordinator: string;
+}
+
+/** The served label from a done stream read, or undefined when it names nothing that ran. */
+export function servedLabelOf(json: Record<string, unknown>, coordinator: string): ServedLabel | undefined {
+  const str = (v: unknown, n = 120) => (typeof v === "string" && v ? v.slice(0, n) : null);
+  const s = json.served && typeof json.served === "object" ? (json.served as Record<string, unknown>) : {};
+  const model = str(json.servedModel);
+  const computeClass = str(s.computeClass, 40);
+  const host = str(s.label, 60);
+  const region = str(s.region, 12);
+  if (!model && !computeClass && !host) return undefined;
+  const label = `${model ?? "?"}${computeClass ? ` on ${computeClass}` : ""}${host ? ` · ${host}` : ""}${region ? ` (${region})` : ""}`;
+  return { label, model, computeClass, host, region, coordinator };
 }
 
 export const newCallTrace = (): CallTrace => ({ taskIds: [], coordinators: [], reads: 0, done: false, cancelled: false });
@@ -98,6 +129,7 @@ export function tracedNetworkDeps(d: NetworkDeps, trace: CallTrace, url?: string
   const traced: Transport = async (method, path, body, signal) => {
     const code = (v: unknown) => (typeof v === "string" ? v.slice(0, 60) : undefined);
     if (path === "/inference/submit") {
+      trace.served = undefined;
       const taskId = code((body as { taskId?: unknown } | undefined)?.taskId);
       if (taskId && !trace.taskIds.includes(taskId) && trace.taskIds.length < 4) trace.taskIds.push(taskId);
       const where = url ? coordinatorHost(url) : "default";
@@ -117,6 +149,7 @@ export function tracedNetworkDeps(d: NetworkDeps, trace: CallTrace, url?: string
         if (r.json.done === true) {
           trace.done = true;
           trace.doneWithError = Boolean(r.json.error);
+          trace.served = servedLabelOf(r.json, url ? coordinatorHost(url) : "default");
         }
       }
       return r;
@@ -324,7 +357,9 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
     // (run 5: a connection cut at 50 s could not be explained once the logs had rotated).
     onCallDone: (ctx, outcome, req) => {
       const model = String((req.body as { model?: unknown } | undefined)?.model ?? "auto").slice(0, 120);
-      const line = { accountId: ctx.accountId, model, clientRegion: ctx.clientRegion, ...outcome, upstream: ctx.trace };
+      // The served label (model, class, host of the attempt that answered) on every line; null when nothing served.
+      const { served, ...upstream } = ctx.trace;
+      const line = { accountId: ctx.accountId, model, clientRegion: ctx.clientRegion, ...outcome, served: served ?? null, upstream };
       if (outcome.closedBy !== "server" || outcome.error || ctx.trace.upstreamError) req.log.warn({ hostedCall: line }, "hosted_call");
       else req.log.info({ hostedCall: line }, "hosted_call");
     },

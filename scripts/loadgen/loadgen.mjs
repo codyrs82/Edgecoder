@@ -19,7 +19,12 @@
  *     finds the rate that keeps 70-85% of the slots busy and holds it. A run stops early only for
  *     real failure: auth errors, budget exhausted, every buyer out of cSats, coordinator down.
  *   - budget: a user stops below --min-balance (LOADGEN_MIN_BALANCE) cSats or after --buyer-cap
- *     cSats; the machine stops after its share of LOADGEN_BUDGET_CSATS. The balance is the one
+ *     cSats. --budget (LOADGEN_BUDGET_CSATS) is a hard cap, split evenly between machines: a call
+ *     starts only when the machine's charges so far, plus every call in flight at its worst-case
+ *     charge, plus this call's worst case fit (planner.mjs SpendCap). Worst case before a model has
+ *     been charged: --hold (LOADGEN_HOLD_CSATS, default 2) for a named model, --hold-cloud
+ *     (LOADGEN_HOLD_CLOUD_CSATS, default 20) for one that may run on a cloud host (reasoning models,
+ *     @cloud, "auto"); then 1.5x the most that model was charged, scaled to the call's tokens. The balance is the one
  *     /v1/account reports (net of the buyer's in-flight reserves); while the buyer still has calls
  *     in flight a low balance pauses it until the next refresh instead of stopping it
  *     (planner.mjs balanceAction), since set-aside reserves are not spent.
@@ -50,9 +55,9 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { HARD_MAX_RATE, PERSONAS, MODELS, buildSchedule, codingContext, parseDuration } from "./profiles.mjs";
 import { StageStats, classifyCall, digestStage, isFailure, table } from "./stats.mjs";
-import { CapacityPlanner, RateGovernor, balanceAction, fatalStop, parseModelId, pickWithAutoShare, pinWeights } from "./planner.mjs";
+import { CapacityPlanner, DEFAULT_HOLD_CLOUD_CSATS, DEFAULT_HOLD_CSATS, RateGovernor, SpendCap, balanceAction, fatalStop, parseModelId, pickWithAutoShare, pinWeights } from "./planner.mjs";
 import { fetchCapacity } from "./capacity.mjs";
-import { CodingSession, DEFAULT_REASONING_FLOOR, DEFAULT_REASONING_MODELS, codegenSize, codegenTask, maxTokensFor, modelMix, pickWeighted, question, rng } from "./workload.mjs";
+import { CodingSession, DEFAULT_REASONING_FLOOR, DEFAULT_REASONING_MODELS, approxTokens, codegenSize, codegenTask, maxTokensFor, modelMix, pickWeighted, question, rng } from "./workload.mjs";
 
 // ---------------------------------------------------------------------------- configuration
 const argv = process.argv.slice(2);
@@ -74,6 +79,9 @@ const INDEX = REGIONS.length ? REGIONS.indexOf(REGION) : Number(opt("index", "LO
 const RUN_ID = opt("run-id", "LOADGEN_RUN_ID", `lg-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "")}`);
 const START_AT = Number(opt("start-at", "LOADGEN_START_AT", 0)) || Date.now() + 2_000;
 const BUDGET = Number(opt("budget", "LOADGEN_BUDGET_CSATS", 2_000));
+// Worst-case holds for the hard budget cap (planner.mjs SpendCap).
+const HOLD = Number(opt("hold", "LOADGEN_HOLD_CSATS", DEFAULT_HOLD_CSATS));
+const HOLD_CLOUD = Number(opt("hold-cloud", "LOADGEN_HOLD_CLOUD_CSATS", DEFAULT_HOLD_CLOUD_CSATS));
 const MIN_BALANCE = Number(opt("min-balance", "LOADGEN_MIN_BALANCE", 1000));
 // Most one buyer may spend in this run (all machines together); 0 = no cap beyond the balance floor.
 const BUYER_CAP = Number(opt("buyer-cap", "LOADGEN_BUYER_CAP_CSATS", 0));
@@ -165,7 +173,7 @@ out("LOADGEN_START", {
   profile: PROFILE, url: URL_, machines: MACHINES, index: INDEX, perSecondLimit: PER_SECOND_LIMIT, networkCap: schedule.cap, autoShare: AUTO_SHARE, model: MODEL_PIN || null,
   startAt: new Date(START_AT).toISOString(), durationSec: schedule.durationSec, loop: schedule.loop,
   stages: schedule.stages.map((s) => ({ i: s.index, rate: s.rate, sec: s.seconds })), breach: schedule.breach,
-  users: users.map((u) => ({ name: u.name, persona: u.persona, avoid: [...u.avoid] })), budgetCSats: BUDGET / MACHINES, buyerCapCSats: Number.isFinite(USER_CAP) ? USER_CAP : null, minBalance: MIN_BALANCE, results: RESULTS,
+  users: users.map((u) => ({ name: u.name, persona: u.persona, avoid: [...u.avoid] })), budgetCSats: BUDGET / MACHINES, holdCSats: HOLD, holdCloudCSats: HOLD_CLOUD, buyerCapCSats: Number.isFinite(USER_CAP) ? USER_CAP : null, minBalance: MIN_BALANCE, results: RESULTS,
   adaptive: schedule.adaptive, startRate: schedule.startRate ?? null,
 });
 if (DRY) process.exit(0);
@@ -299,6 +307,8 @@ const stageStats = [];
 let inflight = 0;
 let stopReason = null;
 let machineSpent = 0;
+// The machine's share of --budget, a hard cap counting calls in flight at their worst case.
+const spendCap = new SpendCap({ cap: BUDGET / MACHINES, hold: HOLD, cloudHold: HOLD_CLOUD, cloudPatterns: [...(REASONING_MODELS.length ? REASONING_MODELS : DEFAULT_REASONING_MODELS), "cloud"] });
 const recent = []; // { atMs, error, type } of finished calls, for the breach check (error = a real failure)
 const droppedModels = new Map(); // capacity key -> until (ms): the network refused it (gone, restricted)
 const refusals = {};
@@ -342,7 +352,7 @@ function record(stats, u, behaviour, model, r, correct, extra = {}) {
     u.pausedUntil = Date.now() + 60_000;
     out("LOADGEN_EVENT", { type: "user_paused", user: u.name, reason: "insufficient_funds", seconds: 60 });
   }
-  if (machineSpent > BUDGET / MACHINES && !stopReason) stopReason = "budget_exhausted";
+  if (machineSpent >= BUDGET / MACHINES && !stopReason) stopReason = "budget_exhausted";
 }
 
 /** Stop or pause a buyer whose balance is under --min-balance (planner.mjs balanceAction). */
@@ -379,20 +389,33 @@ function pickModel(behaviour, u) {
   return m;
 }
 
-/** One streamed call against the planner's per-model in-flight count. */
+/**
+ * One streamed call against the planner's per-model in-flight count. Null, without calling, when its
+ * worst-case charge does not fit under the budget with the calls already in flight (the hard cap).
+ */
 async function plannedCall(u, m, body, opts) {
+  const max_tokens = body.max_tokens === undefined ? undefined : maxTokensFor(m.key, body.max_tokens, { floor: REASONING_FLOOR, patterns: REASONING_MODELS.length ? REASONING_MODELS : DEFAULT_REASONING_MODELS, capacity: planner.capacity });
+  const tokens = { promptTokens: approxTokens(body.messages ?? []) + (body.tools ? Math.ceil(JSON.stringify(body.tools).length / 4) : 0), maxTokens: max_tokens ?? 4_096 };
+  // Held synchronously, before any await, so calls started together each see the others' holds.
+  const settle = spendCap.tryHold(m.id, spendCap.worstCase(m.id, tokens), tokens);
+  if (!settle) {
+    // Nothing in flight and still no room: the budget is spent. Otherwise wait for calls to settle.
+    if (spendCap.inflight === 0 && spendCap.remaining < Math.min(HOLD, HOLD_CLOUD) && !stopReason) stopReason = "budget_exhausted";
+    return null;
+  }
   const atCap = planner.start(m.key);
   let r;
   try {
     await takeSlot();
     inflight++;
     u.inflight++;
-    const max_tokens = body.max_tokens === undefined ? undefined : maxTokensFor(m.key, body.max_tokens, { floor: REASONING_FLOOR, patterns: REASONING_MODELS.length ? REASONING_MODELS : DEFAULT_REASONING_MODELS, capacity: planner.capacity });
     try { r = await chatCall(u, { ...body, model: m.id, ...(max_tokens === undefined ? {} : { max_tokens }) }, opts); } finally { inflight--; u.inflight--; }
   } catch (e) {
+    settle(0);
     planner.finish(m.key, null, atCap);
     throw e;
   }
+  settle(r.cSats ?? 0, { promptTokens: r.promptTokens, outputTokens: r.outputTokens });
   r.error = planner.finish(m.key, r.error, atCap);
   return r;
 }
@@ -402,6 +425,7 @@ async function doChat(u, stats, behaviour) {
   if (!m) { stats.drop("capacity"); return; }
   const { q, ok } = question(seq++);
   const r = await plannedCall(u, m, { max_tokens: 16, messages: [{ role: "user", content: q }] }, { timeoutMs: 120_000 });
+  if (!r) { stats.drop("budget"); return; }
   record(stats, u, behaviour, m.id, r, r.error ? null : ok(r.text));
 }
 
@@ -418,6 +442,7 @@ async function doCodegen(u, stats) {
   const { contextTokens, maxTokens } = codegenSize(m.key, planner.capacity, schedule.codingContextScale);
   const t = codegenTask(R, seq++, contextTokens);
   const r = await plannedCall(u, m, { max_tokens: maxTokens, messages: t.messages }, { timeoutMs: 300_000 });
+  if (!r) { stats.drop("budget"); return; }
   record(stats, u, "codegen", m.id, r, r.error ? null : t.ok(r.text), { contextTokens: t.contextTokens });
 }
 
@@ -435,6 +460,7 @@ function newSession(u) {
 async function doCodingTurn(u, s, stats) {
   const { messages, tools, contextTokens } = s.next();
   const r = await plannedCall(u, s.planned, { max_tokens: 160, messages, tools }, { timeoutMs: 300_000, sessionId: s.id });
+  if (!r) { stats.drop("budget"); u.sessions--; return; }
   const correct = r.error ? null : s.record({ text: r.text, toolCalls: r.toolCalls });
   record(stats, u, "coding", s.model, r, correct, { session: s.id, turn: s.turn, contextTokens });
   if (r.error || s.done || stopReason || u.stopped) {
@@ -558,7 +584,7 @@ for (const st of schedule.stages) {
       const byType = {};
       for (const x of recent) if (x.type) byType[x.type] = (byType[x.type] ?? 0) + 1;
       const util = planner.utilization(usableKeys());
-      out("LOADGEN_TICK", { stage: st.index, machineRate: Math.round(rate * 100) / 100, util: util === null ? null : Math.round(util * 1000) / 1000, inflight, waiting, calls: current.all.calls - lastTickCalls, ok: current.all.ok, errors30s: errs, calls30s: recent.length, dropped: current.dropped, inflightByModel: planner.inflight, penalties: planner.penalty, cSats: Math.round(machineSpent * 1000) / 1000, readySessions: readySessions.length });
+      out("LOADGEN_TICK", { stage: st.index, machineRate: Math.round(rate * 100) / 100, util: util === null ? null : Math.round(util * 1000) / 1000, inflight, waiting, calls: current.all.calls - lastTickCalls, ok: current.all.ok, errors30s: errs, calls30s: recent.length, dropped: current.dropped, inflightByModel: planner.inflight, penalties: planner.penalty, cSats: Math.round(machineSpent * 1000) / 1000, heldCSats: Math.round(spendCap.held * 1000) / 1000, readySessions: readySessions.length });
       lastTickCalls = current.all.calls;
       // Capacity trouble never stops the run: the governor steps the rate down and holds it.
       const ch = governor.observe({ calls: recent.length, failures: errs });
