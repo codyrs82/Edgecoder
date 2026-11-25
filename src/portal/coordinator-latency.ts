@@ -53,6 +53,16 @@
  * coordinator that does not report freeHosts (an older build) is scored by its nearest free region
  * and the model's median call there.
  *
+ * Run 6: a host's time is scaled to the call being placed: its speed (ms per ms of expectedWorkMs,
+ * job-pricing.ts) times expectedWorkMs for this call's prompt and output tokens, not a fixed reference
+ * call of 1,000 tokens in and 200 out. Run 6 compared reference calls of 19-29 s on 1.5b CPU hosts, so
+ * a 9 s gap (one host measured, the other on its class's prior) sent lhr buyers to iad and a fra
+ * buyer to jnb for calls that took about a second. Two hosts of one class (the model is the call's)
+ * count as equally fast unless both speeds are the host's own measurements and differ by at least
+ * SAME_CLASS_SPEED_RATIO: a class median or the prior says nothing about one host against another,
+ * so distance decides between them. A host of another class (a GPU against a CPU) keeps its own
+ * time for the call, so a faster GPU elsewhere still wins a large call.
+ *
  * Calls this portal sent a coordinator that its load report does not show yet (sentFor) have each
  * taken a slot on the free host nearest their own buyer, so a burst moves on to the next host or
  * coordinator instead of every call counting the same free host (run 5: 6 heavy calls onto the EU's
@@ -61,6 +71,7 @@
 
 import { coordinatorHost, type CoordinatorChoice, type CoordinatorChoiceCandidate } from "../common/coordinator-choice.js";
 import { distanceRttMs, regionDistanceKm } from "../common/geo-regions.js";
+import { expectedWorkMs } from "../economy/job-pricing.js";
 
 export interface LatencyCandidate {
   url: string;
@@ -98,10 +109,32 @@ export interface FreeHost {
   rttMs?: number;
   /**
    * The host's time for a reference call of the model, ms: its measured speed (claim to last reply
-   * piece, over the work estimated for the call's tokens) times the reference call's work.
+   * piece, over the work estimated for the call's tokens) times the reference call's work. Used only
+   * when `speed` is not reported (an older coordinator).
    */
   serviceMs?: number;
+  /** Its compute class (newer coordinators). */
+  computeClass?: string;
+  /** Its speed for the model: ms per ms of expectedWorkMs (newer coordinators). */
+  speed?: number;
+  /** Where `speed` comes from: the host's own recent calls, its class's on that coordinator, or the class's prior. */
+  speedFrom?: "host" | "class" | "prior";
 }
+
+/** The call being placed: the model's size and the tokens it reads and may write (run 6). */
+export interface CallSize {
+  paramsB: number;
+  promptTokens: number;
+  outputTokens: number;
+}
+
+/** The call a host's time is given for when the call's own size is not known (the coordinator's reference call). */
+export const DEFAULT_CALL_TOKENS = { promptTokens: 1_000, outputTokens: 200 } as const;
+/**
+ * Two hosts of one class compare by speed only when both speeds are their own measurements and one
+ * is at least this many times the other; otherwise they count as equally fast (distance decides).
+ */
+export const SAME_CLASS_SPEED_RATIO = 1.5;
 
 export interface LatencyPolicy {
   /** A switch must save more than this many ms ... */
@@ -149,9 +182,17 @@ export interface BestHost {
   region: string | null;
   /** Buyer <-> host round trip from their regions, else the host's round trip to its coordinator. */
   legMs: number;
+  /** Its time for this call (newer coordinators), else for a reference call, else the model's median call there. */
   serviceMs: number | null;
-  /** "host": the host's reference-call time (freeHosts); "model": the model's median call there (older coordinators). */
-  serviceKind: "host" | "model";
+  /**
+   * "call": the host's time for this call (its speed, newer coordinators); "host": its reference-call
+   * time (freeHosts without speed); "model": the model's median call there (older coordinators).
+   */
+  serviceKind: "call" | "host" | "model";
+  /** Its compute class and where its speed comes from, when reported (same-class hosts compare as equal unless both are measured). */
+  computeClass?: string;
+  speed?: number;
+  speedFrom?: "host" | "class" | "prior";
   /** Buyer <-> host distance, km; null when not known. */
   km: number | null;
 }
@@ -163,12 +204,13 @@ export interface BestHost {
  * that its report does not show yet has first taken a slot on the host nearest that call's own buyer.
  * Null when it does not report freeHosts (an older coordinator).
  */
-export function openHosts(c: LatencyCandidate, clientRegion: string | null | undefined): BestHost[] | null {
+export function openHosts(c: LatencyCandidate, clientRegion: string | null | undefined, call?: CallSize | null): BestHost[] | null {
   if (!c.freeHosts?.length) return null;
   const hostFor = (h: FreeHost, region: string | null | undefined): BestHost => {
     const km = region ? regionDistanceKm(region, h.region) : null;
     const legMs = km !== null ? distanceRttMs(km) : Math.max(0, h.rttMs ?? c.agentRttMs ?? 0);
-    return { region: h.region, legMs, serviceMs: h.serviceMs ?? null, serviceKind: "host", km };
+    const forCall = hostCallMs(h, call);
+    return { region: h.region, legMs, serviceMs: forCall ?? h.serviceMs ?? null, serviceKind: forCall !== null ? "call" : "host", km, ...(h.computeClass ? { computeClass: h.computeClass } : {}), ...(h.speed !== undefined ? { speed: h.speed } : {}), ...(h.speedFrom ? { speedFrom: h.speedFrom } : {}) };
   };
   const order = (region: string | null | undefined) => (a: BestHost, b: BestHost) =>
     region && a.km !== null && b.km !== null && a.km !== b.km ? a.km - b.km : a.legMs + Math.max(0, a.serviceMs ?? 0) - (b.legMs + Math.max(0, b.serviceMs ?? 0));
@@ -185,9 +227,18 @@ export function openHosts(c: LatencyCandidate, clientRegion: string | null | und
     .sort(order(clientRegion));
 }
 
+/**
+ * A host's time for this call: its speed times expectedWorkMs for the call's tokens on its class
+ * (DEFAULT_CALL_TOKENS when the call's size is not known). Null when it reports no speed or class.
+ */
+export function hostCallMs(h: Pick<FreeHost, "speed" | "computeClass">, call?: CallSize | null): number | null {
+  if (h.speed === undefined || !Number.isFinite(h.speed) || h.speed <= 0 || !h.computeClass || !call) return null;
+  return Math.round(h.speed * expectedWorkMs({ paramsB: call.paramsB, computeClass: h.computeClass, promptTokens: call.promptTokens, outputTokens: call.outputTokens }));
+}
+
 /** The best free host of `c` for the buyer; null when it has none left. */
-export function bestHost(c: LatencyCandidate, clientRegion: string | null | undefined): BestHost | null {
-  const open = openHosts(c, clientRegion);
+export function bestHost(c: LatencyCandidate, clientRegion: string | null | undefined, call?: CallSize | null): BestHost | null {
+  const open = openHosts(c, clientRegion, call);
   if (open?.length) return open[0];
   // Older coordinator: its nearest free region and the model's service time there.
   const km = nearestKm(clientRegion, c.freeRegions);
@@ -205,14 +256,26 @@ type Scored = { c: LatencyCandidate; queueMs: number; expectedMs: number | null;
  */
 function endToEnd(a: Scored, b: Scored): [number, number] | null {
   if (a.expectedMs === null || b.expectedMs === null || a.c.rttMs === null || b.c.rttMs === null || !a.host || !b.host) return null;
-  // Service times compare only when both are of one kind (two hosts' reference calls, or two models' medians).
-  const sameKind = a.host.serviceKind === b.host.serviceKind;
+  // Service times compare only when both are of one kind (two hosts' times for this call, two reference
+  // calls, or two models' medians), and not between two hosts of one class that count as equally fast.
+  const sameKind = a.host.serviceKind === b.host.serviceKind && !equallyFast(a.host, b.host);
   const sa = sameKind ? a.host.serviceMs : null;
   const sb = sameKind ? b.host.serviceMs : null;
   const shared = sa ?? sb ?? a.host.serviceMs ?? b.host.serviceMs ?? DEFAULT_CALL_MS;
   const [ta, tb] = sa !== null && sb !== null ? [sa, sb] : [shared, shared];
   const total = (s: Scored, t: number) => Math.round(s.c.rttMs! + s.queueMs + s.host!.legMs + Math.max(0, t));
   return [total(a, ta), total(b, tb)];
+}
+
+/**
+ * Run 6: two hosts of one class (and the call's model) count as equally fast unless both speeds are
+ * their own measurements and differ by SAME_CLASS_SPEED_RATIO; a class median or the prior does not
+ * tell one host from another. Hosts that do not report their class (older coordinators) are not.
+ */
+export function equallyFast(a: Pick<BestHost, "computeClass" | "speed" | "speedFrom">, b: Pick<BestHost, "computeClass" | "speed" | "speedFrom">): boolean {
+  if (!a.computeClass || a.computeClass !== b.computeClass) return false;
+  if (a.speedFrom !== "host" || b.speedFrom !== "host" || !a.speed || !b.speed) return true;
+  return Math.max(a.speed, b.speed) / Math.min(a.speed, b.speed) < SAME_CLASS_SPEED_RATIO;
 }
 
 /** The coordinator with a free slot that beats `near` end to end by both margins, if any. */
@@ -231,7 +294,7 @@ function clearlyFaster(near: Scored, open: readonly Scored[], policy: LatencyPol
 
 /** Which hosts the end to end compared (for the record). */
 function hostNote(a: Scored, b: Scored): string {
-  const h = (s: Scored) => (s.host?.region ? `${s.host.region}${s.host.serviceMs !== null ? ` ${s.host.serviceMs} ms` : ""}` : null);
+  const h = (s: Scored) => (s.host?.region ? `${s.host.region}${s.host.serviceMs !== null ? ` ${s.host.serviceMs} ms` : ""}${s.host.speedFrom ? ` (${s.host.computeClass ?? "?"}, ${s.host.speedFrom})` : ""}` : null);
   return h(a) && h(b) ? `, hosts ${h(a)} vs ${h(b)}` : "";
 }
 
@@ -251,13 +314,15 @@ export function chooseByLatency(
   candidates: readonly LatencyCandidate[],
   baselineUrl: string,
   policy: LatencyPolicy,
-  where: { clientRegion?: string | null; portalRegion?: string | null } = {},
+  where: { clientRegion?: string | null; portalRegion?: string | null; call?: CallSize | null } = {},
 ): CoordinatorChoice {
+  // Hosts' times are for this call (run 6); a call of unknown size is given the reference call's tokens.
+  const call: CallSize | null = where.call ?? null;
   const scored = candidates.map((c) => {
-    const open = openHosts(c, where.clientRegion);
+    const open = openHosts(c, where.clientRegion, call);
     // Locality: the nearest of the free hosts still open (or of the free regions, older coordinators).
     const nearKm = c.free <= 0 ? null : open?.length ? nearestKm(where.clientRegion, open.map((h) => h.region!)) : nearestKm(where.clientRegion, c.freeRegions);
-    return { c, ...expectedLatency(c, policy.maxReportAgeMs), nearKm, host: c.free > 0 ? bestHost(c, where.clientRegion) : null };
+    return { c, ...expectedLatency(c, policy.maxReportAgeMs), nearKm, host: c.free > 0 ? bestHost(c, where.clientRegion, call) : null };
   });
   const rows: CoordinatorChoiceCandidate[] = scored.map((s) => ({
     coordinator: coordinatorHost(s.c.url),

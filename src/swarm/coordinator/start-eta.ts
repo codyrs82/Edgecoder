@@ -206,10 +206,26 @@ export const REFERENCE_CALL_TOKENS = { promptTokens: 1_000, outputTokens: 200 } 
  * completion admission uses it. Null when no speed is known.
  */
 export function hostServiceMs(model: string, agentId: string, computeClass: string, nowMs = Date.now(), priorSpeed?: number): number | null {
-  const prior = priorSpeed !== undefined && priorSpeed > 0 ? priorSpeed : null;
-  const speed = agentServiceTimes.speed(model, agentId, nowMs) ?? serviceTimes.speed(model, computeClass, nowMs) ?? prior;
-  if (speed === null || !Number.isFinite(speed) || speed <= 0) return null;
-  return Math.round(speed * callWorkMs(model, computeClass, REFERENCE_CALL_TOKENS.promptTokens, REFERENCE_CALL_TOKENS.outputTokens));
+  const s = hostSpeed(model, agentId, computeClass, nowMs, priorSpeed);
+  return s === null ? null : Math.round(s.speed * callWorkMs(model, computeClass, REFERENCE_CALL_TOKENS.promptTokens, REFERENCE_CALL_TOKENS.outputTokens));
+}
+
+/** Where a host's speed comes from: its own recent calls, its class's here, or the class's prior. */
+export type HostSpeedSource = "host" | "class" | "prior";
+
+/**
+ * Run 6: one host's speed for `model` (ms per ms of expectedWorkMs), and where it comes from, so the
+ * portal can scale it to the call it is placing (speed × expectedWorkMs for that call's tokens) and
+ * tell a host's own measurement from its class's or the prior (two hosts of one class compare as
+ * equal unless both are measured). Null when no speed is known.
+ */
+export function hostSpeed(model: string, agentId: string, computeClass: string, nowMs = Date.now(), priorSpeed?: number): { speed: number; from: HostSpeedSource } | null {
+  const ok = (n: number | null | undefined): n is number => n !== null && n !== undefined && Number.isFinite(n) && n > 0;
+  const own = agentServiceTimes.speed(model, agentId, nowMs);
+  if (ok(own)) return { speed: own, from: "host" };
+  const cls = serviceTimes.speed(model, computeClass, nowMs);
+  if (ok(cls)) return { speed: cls, from: "class" };
+  return ok(priorSpeed) ? { speed: priorSpeed, from: "prior" } : null;
 }
 
 /** The model work a call with these token counts is estimated at on a slow host of `computeClass` (job-pricing.ts). */

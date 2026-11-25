@@ -12,7 +12,7 @@
  * editing for signed-in users.
  */
 
-import { createChatCapacityDirectory, type ChatCapacityDirectory, type ChatNeed } from "../chat-capacity.js";
+import { createChatCapacityDirectory, promptTokensOf, type ChatCapacityDirectory, type ChatNeed, type PickContext } from "../chat-capacity.js";
 import { clientRegionOf, coordinatorHost, type CoordinatorChoice } from "../../common/coordinator-choice.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -131,6 +131,16 @@ export function hostedTarget(model: string | undefined) {
   return parseNetworkModel(model.startsWith("network/") || model.startsWith("mine/") || model.startsWith("reserved/") ? model : `network/${model}`);
 }
 
+/**
+ * Run 6: a /v1 call's size (prompt tokens as the coordinator estimates them, and max_tokens), so the
+ * coordinator choice compares free hosts by their time for this call (chat-capacity.ts PickContext).
+ */
+export function callSizeOf(body: unknown): PickContext["call"] {
+  const b = (body ?? {}) as { messages?: unknown; tools?: unknown; system?: unknown; max_tokens?: unknown; max_completion_tokens?: unknown };
+  const max = [b.max_tokens, b.max_completion_tokens].find((v): v is number => typeof v === "number" && Number.isFinite(v) && v > 0);
+  return { promptTokens: promptTokensOf(b.system !== undefined ? [b.system, b.messages] : b.messages, b.tools), ...(max !== undefined ? { maxTokens: max } : {}) };
+}
+
 export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDeps): void {
   const { store } = deps;
 
@@ -149,11 +159,12 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
     accountId: string,
     target: { model: string; computeClass?: string; target?: "mine"; reservationId?: string },
     clientRegion: string | null,
+    call?: PickContext["call"],
   ): Promise<{ deps: NetworkDeps; url?: string; choice?: CoordinatorChoice }> => {
     if (target.target === "mine" || target.reservationId) return { deps: networkFor(accountId) };
     // A classed call (network/<model>@<class>) goes to a coordinator with an agent of that class;
     // among those, the latency-aware choice (coordinator-latency.ts), recorded with the call.
-    const { url, choice } = await capacity.pick({ kind: "network", model: target.model, computeClass: target.computeClass }, [], { clientRegion }).catch(() => ({ url: null, choice: undefined }));
+    const { url, choice } = await capacity.pick({ kind: "network", model: target.model, computeClass: target.computeClass }, [], { clientRegion, ...(call ? { call } : {}) }).catch(() => ({ url: null, choice: undefined }));
     return url ? { deps: pinnedDeps(url, accountId), url, ...(choice ? { choice } : {}) } : { deps: networkFor(accountId) };
   };
   /**
@@ -161,13 +172,13 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
    * that is a vetted coordinator, else the best other one for `need` (network calls), else any other
    * vetted coordinator. Null when there is none. `from` is passed over for a while either way.
    */
-  const drainPeer = async (from: string | undefined, refusal: CoordinatorDraining, need: ChatNeed | null, clientRegion: string | null): Promise<string | null> => {
+  const drainPeer = async (from: string | undefined, refusal: CoordinatorDraining, need: ChatNeed | null, clientRegion: string | null, call?: PickContext["call"]): Promise<string | null> => {
     const self = from?.replace(/\/+$/, "");
     if (self) capacity.markFailed(self);
     const named = refusal.peerUrl?.replace(/\/+$/, "");
     if (named && named !== self && (await capacity.isKnown(named).catch(() => false))) return named;
     if (need) {
-      const { url } = await capacity.pick(need, self ? [self] : [], { clientRegion }).catch(() => ({ url: null }));
+      const { url } = await capacity.pick(need, self ? [self] : [], { clientRegion, ...(call ? { call } : {}) }).catch(() => ({ url: null }));
       if (url && url !== self) return url;
     }
     for (const raw of await deps.discoverCoordinatorUrlsForPortal().catch(() => [] as string[])) {
@@ -192,7 +203,7 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
     const key = apiKeyOf(req);
     if (!store || !key.startsWith(API_KEY_PREFIX)) return null;
     const userId = await store.userForApiKeyHash(hashApiKey(key));
-    return userId ? { accountId: `acct-${userId}`, clientRegion: clientRegionOf(req.headers as Record<string, unknown>), trace: newCallTrace() } : null;
+    return userId ? { accountId: `acct-${userId}`, clientRegion: clientRegionOf(req.headers as Record<string, unknown>), trace: newCallTrace(), call: callSizeOf(req.body) } : null;
   };
 
   // ── The endpoint ──
@@ -267,7 +278,7 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
       }
       const target = hostedTarget(model);
       if (!target) return { status: 400, error: "Unknown model. Leave it out (or auto) for the cheapest place that fits, or name one: network/<model>[@cpu|apple|gpu|gpu.dc|cloud], mine/<model> or reserved/<reservation>/<model>. GET /v1/models lists them." };
-      const placedFor = await networkForCall(ctx.accountId, target, ctx.clientRegion);
+      const placedFor = await networkForCall(ctx.accountId, target, ctx.clientRegion, ctx.call);
       const placed = { ...placedFor, deps: tracedNetworkDeps(placedFor.deps, ctx.trace, placedFor.url) };
       const region = ctx.clientRegion ? { clientRegion: ctx.clientRegion } : {};
       // #526: a named network call on a chosen coordinator may be sent on to a peer with a free slot for it (once).
@@ -287,7 +298,7 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
           },
         });
         const backend = drainFailoverBackend(redirecting, async (refusal) => {
-          const peer = await drainPeer(sentTo, refusal, need, ctx.clientRegion);
+          const peer = await drainPeer(sentTo, refusal, need, ctx.clientRegion, ctx.call);
           return peer ? onPeer(peer) : null;
         });
         return { backend, model: model! };
@@ -296,7 +307,7 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
         // No coordinator reported room for it: the default one (the first discovered) is asked.
         const backend = drainFailoverBackend(networkBackend(placed.deps, { ...target, ...region, drainFailover: true }), async (refusal) => {
           const [from] = await deps.discoverCoordinatorUrlsForPortal().catch(() => [] as string[]);
-          const peer = await drainPeer(from, refusal, need, ctx.clientRegion);
+          const peer = await drainPeer(from, refusal, need, ctx.clientRegion, ctx.call);
           return peer ? onPeer(peer) : null;
         });
         return { backend, model: model! };

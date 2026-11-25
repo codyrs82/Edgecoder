@@ -25,7 +25,8 @@
 
 import { request } from "undici";
 import { cleanRegion, coordinatorHost, type CoordinatorChoice } from "../common/coordinator-choice.js";
-import { chooseByLatency, latencyPolicyFromEnv, type FreeHost, type LatencyCandidate, type LatencyPolicy } from "./coordinator-latency.js";
+import { chooseByLatency, DEFAULT_CALL_TOKENS, latencyPolicyFromEnv, type CallSize, type FreeHost, type LatencyCandidate, type LatencyPolicy } from "./coordinator-latency.js";
+import { paramsB } from "../inference-api/auto-route.js";
 
 /**
  * - yes: it reports something to run the chat on.
@@ -188,10 +189,14 @@ export function httpCapacityProbe(opts: { serviceToken?: string; timeoutMs: numb
       const hosts = (v: unknown): FreeHost[] | undefined => {
         if (!Array.isArray(v)) return undefined;
         const out: FreeHost[] = [];
-        for (const h of v.slice(0, 32) as Array<{ region?: unknown; free?: unknown; rttMs?: unknown; serviceMs?: unknown } | null>) {
+        for (const h of v.slice(0, 32) as Array<{ region?: unknown; free?: unknown; rttMs?: unknown; serviceMs?: unknown; computeClass?: unknown; speed?: unknown; speedFrom?: unknown } | null>) {
           const region = cleanRegion(h?.region);
           if (!h || !region || !num(h.free) || h.free <= 0) continue;
-          out.push({ region, free: Math.min(1_000, Math.floor(h.free)), ...(num(h.rttMs) && h.rttMs >= 0 ? { rttMs: h.rttMs } : {}), ...(num(h.serviceMs) && h.serviceMs >= 0 ? { serviceMs: h.serviceMs } : {}) });
+          // Run 6: its class and speed (ms per ms of expectedWorkMs), for its time for the call being placed.
+          const cls = typeof h.computeClass === "string" && /^[a-z0-9.]{1,16}$/.test(h.computeClass) ? h.computeClass : undefined;
+          const from = h.speedFrom === "host" || h.speedFrom === "class" || h.speedFrom === "prior" ? h.speedFrom : undefined;
+          const speed = num(h.speed) && h.speed > 0 && h.speed <= 100 ? h.speed : undefined;
+          out.push({ region, free: Math.min(1_000, Math.floor(h.free)), ...(num(h.rttMs) && h.rttMs >= 0 ? { rttMs: h.rttMs } : {}), ...(num(h.serviceMs) && h.serviceMs >= 0 ? { serviceMs: h.serviceMs } : {}), ...(cls ? { computeClass: cls } : {}), ...(speed !== undefined && cls ? { speed, ...(from ? { speedFrom: from } : {}) } : {}) });
         }
         return out.length ? out : undefined;
       };
@@ -243,6 +248,33 @@ export interface ChatCapacityOptions {
 /** Where the call came from, recorded with the choice (common/coordinator-choice.ts clientRegionOf). */
 export interface PickContext {
   clientRegion?: string | null;
+  /**
+   * Run 6: the call's size, so free hosts are compared by their time for this call (their speed
+   * times its work), not a fixed reference call. Either may be unknown.
+   */
+  call?: { promptTokens?: number; maxTokens?: number };
+}
+
+/** Run 6: the output a call without max_tokens is compared on (the coordinator's COMPLETION_UNSET_MAX_TOKENS). */
+export const CALL_UNSET_MAX_TOKENS = 1_024;
+
+/** Prompt tokens of a call's messages (and tools), as the coordinator estimates them: its JSON bytes / 4. */
+export function promptTokensOf(messages: unknown, tools?: unknown): number {
+  try {
+    return Math.ceil(Buffer.byteLength(JSON.stringify({ messages: messages ?? [], tools: tools ?? [] }), "utf8") / 4);
+  } catch {
+    return DEFAULT_CALL_TOKENS.promptTokens;
+  }
+}
+
+/** The call size the latency step compares hosts on for `model` (DEFAULT_CALL_TOKENS for what is not known). */
+export function callSizeFor(model: string, call: PickContext["call"]): CallSize {
+  const n = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0;
+  return {
+    paramsB: paramsB(model),
+    promptTokens: n(call?.promptTokens) ? call!.promptTokens : DEFAULT_CALL_TOKENS.promptTokens,
+    outputTokens: n(call?.maxTokens) && call!.maxTokens > 0 ? call!.maxTokens : call ? CALL_UNSET_MAX_TOKENS : DEFAULT_CALL_TOKENS.outputTokens,
+  };
 }
 
 export interface ChatCapacityPick {
@@ -399,8 +431,8 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
   };
 
   /** The latency-aware step over what the load rule scored; `baseline` is the load rule's pick. */
-  const withLatency = (scored: Array<LatencyCandidate>, baseline: string, ctx: PickContext | undefined): CoordinatorChoice =>
-    chooseByLatency(scored, baseline, latency, { clientRegion: ctx?.clientRegion ?? null, portalRegion });
+  const withLatency = (scored: Array<LatencyCandidate>, baseline: string, ctx: PickContext | undefined, model?: string): CoordinatorChoice =>
+    chooseByLatency(scored, baseline, latency, { clientRegion: ctx?.clientRegion ?? null, portalRegion, ...(model ? { call: callSizeFor(model, ctx?.call) } : {}) });
 
   /**
    * Network calls: among coordinators that list the model and report their load, the one with the
@@ -452,7 +484,7 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
       for (const s of scored) if (!best || s.free / s.agents > best.free / best.agents || (s.free / s.agents === best.free / best.agents && s.agents > best.agents)) best = s;
     }
     if (!best) return null;
-    const choice = withLatency(scored, best.url, ctx);
+    const choice = withLatency(scored, best.url, ctx, model);
     const url = scored.find((s) => coordinatorHost(s.url) === choice.chosen)?.url ?? best.url;
     noteSent(url, model, ctx?.clientRegion);
     return { url, choice };

@@ -158,7 +158,25 @@ describe("named-model locality", () => {
     const row = res.json().models.find((m: { model: string }) => m.model === MODEL);
     const byRegion = Object.fromEntries(row.freeHosts.map((h: { region: string; serviceMs?: number }) => [h.region, h.serviceMs]));
     expect(byRegion).toEqual({ iad: work, syd: 2 * work });
+    // Run 6: also each host's class and speed, measured on its own calls, for the portal to scale to its call.
+    const speeds = Object.fromEntries(row.freeHosts.map((h: { region: string; computeClass: string; speed: number; speedFrom: string }) => [h.region, [h.computeClass, h.speed, h.speedFrom]]));
+    expect(speeds).toEqual({ iad: ["cpu", 1, "host"], syd: ["cpu", 2, "host"] });
     eta.agentServiceTimes.clear();
+  });
+
+  test("run 6: a host's speed says whether it is its own, its class's or the prior", async () => {
+    const eta = await import("../../src/swarm/coordinator/start-eta.js");
+    const now = Date.now();
+    eta.agentServiceTimes.clear();
+    eta.serviceTimes.clear();
+    expect(eta.hostSpeed(MODEL, iad.peerId, "cpu", now)).toBeNull();
+    expect(eta.hostSpeed(MODEL, iad.peerId, "cpu", now, 0.5)).toEqual({ speed: 0.5, from: "prior" });
+    for (let i = 0; i < 3; i++) eta.serviceTimes.record(MODEL, "cpu", 300, now, 1_000);
+    expect(eta.hostSpeed(MODEL, iad.peerId, "cpu", now, 0.5)).toEqual({ speed: 0.3, from: "class" });
+    for (let i = 0; i < 3; i++) eta.agentServiceTimes.record(MODEL, iad.peerId, 200, now, 1_000);
+    expect(eta.hostSpeed(MODEL, iad.peerId, "cpu", now, 0.5)).toEqual({ speed: 0.2, from: "host" });
+    eta.agentServiceTimes.clear();
+    eta.serviceTimes.clear();
   });
 });
 

@@ -69,7 +69,7 @@ import { recordMeshWork } from "../world-activity.js";
 import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
 import { armAutoReplace, overrunAlternativeExists, placeAfterOverrun, replaceAutoNow } from "../auto-replace.js";
 import { freeLocalHolders, LOCALITY_PREFER_MS, nearestFreeHolder, peerWithFreeCapacity } from "../locality.js";
-import { completionByClass, completionLimitMs, hostServiceMs, judgeCompletion, modelSlots, parseCompletionPrior, serviceTimes, startEtaLimitMs, startEtaMs } from "../start-eta.js";
+import { completionByClass, completionLimitMs, hostServiceMs, hostSpeed, type HostSpeedSource, judgeCompletion, modelSlots, parseCompletionPrior, serviceTimes, startEtaLimitMs, startEtaMs } from "../start-eta.js";
 
 // ── Network inference (chat completions on agents' local models, streamed) ──────────────────
 export const inferenceStreams = new InferenceStreams();
@@ -709,7 +709,7 @@ function medianRtt(values: number[]): number | null {
 }
 
 /** /inference/models freeHosts entry: one host with a free slot for the model. */
-type FreeHostReport = { region: string; free: number; rttMs?: number; serviceMs?: number };
+type FreeHostReport = { region: string; free: number; computeClass: string; rttMs?: number; serviceMs?: number; speed?: number; speedFrom?: HostSpeedSource };
 
 export function registerInferenceRoutes(app: CoordinatorApp): void {
   // Security research tier: entitlement pushes from the portal and the admin view (routes/restricted.ts).
@@ -757,9 +757,13 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         }
         // freeHosts: each free host's own region, free slots, round trip and time for a reference call of
         // the model (portal coordinator-latency.ts scores the free host nearest the buyer with its own numbers).
+        // Run 6: also its class and speed (ms per ms of expectedWorkMs) and where that comes from, so the
+        // portal scales it to the call it places and compares two hosts of one class by distance unless
+        // both have measured speeds. serviceMs (a reference call) stays for older portals.
         if (region && free > 0 && e.freeHosts.length < 32) {
-          const svc = hostServiceMs(m, id, cls, now, completionPrior()[cls]);
-          e.freeHosts.push({ region, free, ...(rtt !== null && Number.isFinite(rtt) ? { rttMs: Math.round(rtt) } : {}), ...(svc !== null ? { serviceMs: svc } : {}) });
+          const sp = hostSpeed(m, id, cls, now, completionPrior()[cls]);
+          const svc = sp === null ? null : hostServiceMs(m, id, cls, now, completionPrior()[cls]);
+          e.freeHosts.push({ region, free, computeClass: cls, ...(rtt !== null && Number.isFinite(rtt) ? { rttMs: Math.round(rtt) } : {}), ...(svc !== null ? { serviceMs: svc } : {}), ...(sp !== null ? { speed: Math.round(sp.speed * 1000) / 1000, speedFrom: sp.from } : {}) });
         }
         e.classes.add(cls);
         // The smallest window an agent serves the model with: what a caller can count on (agent loops compact to it).
