@@ -325,3 +325,85 @@ export function pinWeights(weights, pin) {
   if (!pin) return weights;
   return { [pin.includes("/") || pin === "auto" ? pin : `network/${pin}`]: 1 };
 }
+
+/** A named call's hold before its model has been seen charged (cSats); LOADGEN_HOLD_CSATS. */
+export const DEFAULT_HOLD_CSATS = 2;
+/** A call that may run on a cloud host (reasoning models, @cloud, "auto"); LOADGEN_HOLD_CLOUD_CSATS. Run 9 charged up to 18.6. */
+export const DEFAULT_HOLD_CLOUD_CSATS = 20;
+/** Learned holds are the worst seen, scaled to the call's tokens, times this. */
+export const HOLD_MARGIN = 1.5;
+/** Charges of a named model seen before its learned hold replaces the prior. */
+export const HOLD_LEARN_MIN = 3;
+
+/**
+ * Run 9: the whole-pool run spent 147.5 cSats on --budget 80, because only settled charges counted
+ * and dozens of cloud calls were already in flight when the budget ran out. The budget is now a hard
+ * cap: a call starts only when what was charged, plus every call in flight held at its worst-case
+ * charge, plus this call's worst case, fits. Worst case per call: the prior for its kind until its
+ * model has been charged HOLD_LEARN_MIN times, then the most it was charged (per token, scaled to
+ * this call's prompt and max_tokens) times HOLD_MARGIN; calls that may run on a cloud host never go
+ * below the cloud prior. A charge over its hold still counts in full, and the hold learns from it.
+ */
+export class SpendCap {
+  constructor({ cap, hold = DEFAULT_HOLD_CSATS, cloudHold = DEFAULT_HOLD_CLOUD_CSATS, cloudPatterns = [] }) {
+    this.cap = Number.isFinite(cap) && cap >= 0 ? cap : Infinity;
+    this.hold = hold;
+    this.cloudHold = cloudHold;
+    this.cloudPatterns = cloudPatterns;
+    this.settled = 0;
+    this.held = 0;
+    this.inflight = 0;
+    this.seen = new Map(); // model key -> { n, maxCharge, maxPerToken }
+  }
+
+  /** Whether a call for `modelId` may run on a cloud host. */
+  mayRunOnCloud(modelId) {
+    const { key, cls } = parseModelId(modelId);
+    return key === "auto" || cls === "cloud" || this.cloudPatterns.some((p) => key.includes(p));
+  }
+
+  /** The most this call can be charged, as far as the run knows (cSats). */
+  worstCase(modelId, { promptTokens = 0, maxTokens = 0 } = {}) {
+    const { key } = parseModelId(modelId);
+    const cloud = this.mayRunOnCloud(modelId);
+    const prior = cloud ? this.cloudHold : this.hold;
+    const s = this.seen.get(key);
+    if (!s || s.n < HOLD_LEARN_MIN) return cloud ? Math.max(prior, s ? s.maxCharge * HOLD_MARGIN : 0) : prior;
+    const learned = Math.max(s.maxCharge, s.maxPerToken * (Math.max(0, promptTokens) + Math.max(0, maxTokens))) * HOLD_MARGIN;
+    return cloud ? Math.max(prior, learned) : learned;
+  }
+
+  /** What is left for new calls once every call in flight is charged its worst case. */
+  get remaining() {
+    return this.cap - this.settled - this.held;
+  }
+
+  /**
+   * Hold `worst` for a call about to start: a function that settles it with its actual charge, or
+   * null when it does not fit under the cap (the call must not start).
+   */
+  tryHold(modelId, worst, tokens = {}) {
+    if (!(worst >= 0) || this.settled + this.held + worst > this.cap) return null;
+    this.held += worst;
+    this.inflight++;
+    let done = false;
+    return (charged = 0, used = {}) => {
+      if (done) return;
+      done = true;
+      this.held = Math.max(0, this.held - worst);
+      this.inflight--;
+      const c = Number.isFinite(charged) && charged > 0 ? charged : 0;
+      this.settled += c;
+      if (c > 0) this.learn(modelId, c, { promptTokens: used.promptTokens || tokens.promptTokens || 0, outputTokens: used.outputTokens || tokens.maxTokens || 0 });
+    };
+  }
+
+  learn(modelId, charged, { promptTokens = 0, outputTokens = 0 } = {}) {
+    const { key } = parseModelId(modelId);
+    const s = this.seen.get(key) ?? { n: 0, maxCharge: 0, maxPerToken: 0 };
+    s.n++;
+    s.maxCharge = Math.max(s.maxCharge, charged);
+    s.maxPerToken = Math.max(s.maxPerToken, charged / Math.max(1, promptTokens + outputTokens));
+    this.seen.set(key, s);
+  }
+}

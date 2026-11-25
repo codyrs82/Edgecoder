@@ -88,6 +88,12 @@
  * whose hosts for the model are nearest the buyer (hostRegions: the regions the portal has seen it
  * report free hosts in recently) unless another is expected to start it sooner by the margin
  * ("overflow"), as when the nearest has a free slot.
+ *
+ * Run 9: under the CPU ramp the load rule ("most free slots") won 18 calls while a host near the buyer
+ * was free (syd buyers to lhr, fra and lax). Whether a coordinator has a free slot is now judged by
+ * the free hosts it reports (/inference/models freeHosts, less the calls sent since): its free count
+ * subtracts calls waiting there and went negative while the near host sat free. The load rule applies
+ * only when no coordinator with a free host near the buyer is found this way.
  */
 
 import { coordinatorHost, type CoordinatorChoice, type CoordinatorChoiceCandidate } from "../common/coordinator-choice.js";
@@ -280,7 +286,18 @@ export function bestHost(c: LatencyCandidate, clientRegion: string | null | unde
   return { region, km, legMs: km !== null ? distanceRttMs(km) : Math.max(0, c.agentRttMs ?? 0), serviceMs: c.serviceMs ?? null, serviceKind: "model" };
 }
 
-type Scored = { c: LatencyCandidate; queueMs: number; expectedMs: number | null; host: BestHost | null };
+type Scored = { c: LatencyCandidate; queueMs: number; expectedMs: number | null; host: BestHost | null; room: boolean };
+
+/**
+ * Run 9: whether `c` has a free slot for this call. A coordinator that reports freeHosts is judged by
+ * them (after the calls sent since its report have taken theirs): its `free` count subtracts calls
+ * waiting there, which went negative while a host next to the buyer sat free (syd buyers sent to lhr,
+ * fra and lax on "most free slots", inf-1795635739909-427d6667). Without freeHosts (an older
+ * coordinator, or none free), the count decides.
+ */
+export function hasRoom(c: LatencyCandidate, open: readonly BestHost[] | null): boolean {
+  return c.freeHosts?.length ? (open?.length ?? 0) > 0 : c.free > 0;
+}
 
 /**
  * End to end for comparing two coordinators: portal <-> coordinator round trip + queueing + each one's
@@ -361,9 +378,13 @@ export function chooseByLatency(
   const call: CallSize | null = where.call ?? null;
   const scored = candidates.map((c) => {
     const open = openHosts(c, where.clientRegion, call);
+    const room = hasRoom(c, open);
     // Locality: the nearest of the free hosts still open (or of the free regions, older coordinators).
-    const nearKm = c.free <= 0 ? null : open?.length ? nearestKm(where.clientRegion, open.map((h) => h.region!)) : nearestKm(where.clientRegion, c.freeRegions);
-    return { c, ...expectedLatency(c, policy.maxReportAgeMs), nearKm, host: c.free > 0 ? bestHost(c, where.clientRegion, call) : null };
+    // Run 9: a coordinator whose reported free hosts are all taken has none, whatever its free regions say.
+    const nearKm = !room ? null : open !== null ? nearestKm(where.clientRegion, open.map((h) => h.region!)) : nearestKm(where.clientRegion, c.freeRegions);
+    // Queueing follows the same judgement: a free host takes the call now.
+    const queued = room === (c.free > 0) ? c : { ...c, free: room ? 1 : 0 };
+    return { c, ...expectedLatency(queued, policy.maxReportAgeMs), nearKm, host: room ? bestHost(c, where.clientRegion, call) : null, room };
   });
   const rows: CoordinatorChoiceCandidate[] = scored.map((s) => ({
     coordinator: coordinatorHost(s.c.url),
@@ -388,19 +409,23 @@ export function chooseByLatency(
   const ms = (n: number | null) => (n === null ? "?" : `${n} ms`);
   if (scored.length <= 1) return done(baselineUrl, "single", "only coordinator that can take it");
   const base = scored.find((s) => s.c.url === baselineUrl);
-  const loadReason = base && base.c.free <= 0 && !scored.some((s) => s.c.free > 0) ? "every coordinator busy: backlog shared by agents" : "most free slots for the model";
+  const loadReason = base && !base.room && !scored.some((s) => s.room) ? "every coordinator busy: backlog shared by agents" : "most free slots for the model";
   if (!policy.enabled) return done(baselineUrl, "load", `${loadReason} (latency-aware choice off)`);
   // Locality (#526): a free host nearer the buyer, when every coordinator with a free slot says where its are.
   const margin = policy.localityMarginKm ?? COORD_LOCALITY_DEFAULT_MARGIN_KM;
-  const open = scored.filter((s) => s.c.free > 0);
+  const open = scored.filter((s) => s.room);
   if (margin > 0 && where.clientRegion && open.length > 0 && open.every((s) => s.nearKm !== null)) {
     const near = open.reduce((a, b) => (b.nearKm! < a.nearKm! || (b.nearKm === a.nearKm && b.c.free > a.c.free) ? b : a));
     const km = (n: number) => (Number.isFinite(n) ? `${Math.round(n).toLocaleString("en-US")} km` : "no free host");
-    const baseKm = base && base.c.free > 0 ? base.nearKm! : Infinity;
+    const baseKm = base && base.room ? base.nearKm! : Infinity;
     // The load pick is itself the nearest: it holds when every other free host is farther by the margin.
     const runnerKm = Math.min(Infinity, ...open.filter((s) => s !== near).map((s) => s.nearKm!));
     const moves = near !== base && near.nearKm! + margin < baseKm;
     const holds = near === base && open.length > 1 && near.nearKm! + margin < runnerKm;
+    // Run 9: the only coordinator with a free slot, and its free host is near the buyer: say so (the
+    // call goes there either way; "load" is for a call with no free host near it).
+    const alone = near === base && open.length === 1 && near.nearKm! <= margin;
+    if (alone) return done(near.c.url, "locality", `free host nearest the buyer (${where.clientRegion}): ${km(near.nearKm!)}; no other coordinator has a free slot`);
     if (moves || holds) {
       const faster = clearlyFaster(near, open, policy);
       if (faster) {
@@ -418,11 +443,11 @@ export function chooseByLatency(
     if (queued) return done(queued.url, queued.rule, queued.reason);
   }
   if (!base || base.expectedMs === null) return done(baselineUrl, "load", `${loadReason}; its latency is not known (${base?.stale ? "stale load report" : "round trip not measured"})`);
-  const congested = base.c.free <= 0;
+  const congested = !base.room;
   let best: (typeof scored)[number] | undefined;
   for (const s of scored) {
     if (s === base || s.expectedMs === null) continue;
-    if (!(s.c.free > 0 || congested)) continue;
+    if (!(s.room || congested)) continue;
     if (!best || s.expectedMs < best.expectedMs! || (s.expectedMs === best.expectedMs && s.c.free > best.c.free)) best = s;
   }
   if (best) {
