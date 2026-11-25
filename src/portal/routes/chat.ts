@@ -12,7 +12,7 @@ import { ChatBackendError, type ChatPiece } from "../../inference-api/types.js";
 import type { Transport } from "../../apps/ide/network-inference.js";
 import { accountIdFor, chatComputeSchema, computeLabel, networkTargetFor, portalNetworkDeps, type ChatCompute } from "./compute.js";
 import { createChatCapacityDirectory, promptTokensOf, type ChatCapacityDirectory } from "../chat-capacity.js";
-import { clientRegionOf, type CoordinatorChoice } from "../../common/coordinator-choice.js";
+import { clientRegionOf, coordinatorHost, type CoordinatorChoice } from "../../common/coordinator-choice.js";
 import { moduleLogger } from "../../common/logger.js";
 import type { Served } from "../../common/served.js";
 import type { ReplyUsage } from "../reply-usage.js";
@@ -21,6 +21,7 @@ import type { IdeStreamEvent } from "../../apps/ide/tool-types.js";
 import { FREE_USED_NOTE, webSystemNote, webGrounding, WebToolSession, citedSources, forgetWebAvailability, isWebTool, sourcesMarkdown, webAvailability, webFooter, webReplyLimitsFromEnv, webStatusReason, webToolSchemas, type WebToolCall } from "../../web-tool/tools.js";
 import { modelCallsTools } from "../../web-tool/model-support.js";
 import { portalCoordinatorTransport } from "./compute.js";
+import { cancelOnClose } from "../cancel-on-close.js";
 import { swarmModelsFromInference } from "../network-models.js";
 import { askEveryCoordinator, drainingAnswer, getCoordinatorJson, mergeLocalModels, networkModelsFromEvery } from "../coordinator-fanout.js";
 
@@ -326,7 +327,8 @@ export function registerChatApiRoutes(
       const inner = pinned.transport!;
       // What became of the submit call: its HTTP status, or the error when no answer came back.
       const submit: { status?: number; error?: unknown } = {};
-      const transport: Transport = async (method, path, body, signal) => {
+      // The browser going away cancels the call on the coordinator at once (cancel-on-close.ts).
+      const transport: Transport = cancelOnClose(async (method, path, body, signal) => {
         if (path !== "/inference/submit") return inner(method, path, body, signal);
         try {
           const res = await inner(method, path, body, signal);
@@ -336,7 +338,7 @@ export function registerChatApiRoutes(
           submit.error = err;
           throw err;
         }
-      };
+      }, coordinatorHost(url));
       // A coordinator restarting for an update refuses before reserving anything: with another one to
       // ask, the refusal comes back at once and the loop sends the chat there (no wait on this one).
       const drainFailover = compute.target === "network" && known > 1 && tried.length < CHAT_MAX_COORDINATOR_ATTEMPTS;
@@ -584,7 +586,9 @@ export function registerChatApiRoutes(
           : await capacity.pick({ kind: "network", model: compute.model }, []).catch(() => ({ url: null }));
     if (!picked.url) return out.fail(503, { ...NO_COMPUTE_BODY, compute: computeLabel(compute) });
     const url = picked.url;
-    const pinned = portalNetworkDeps({ PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, accountId);
+    const pinnedDeps = portalNetworkDeps({ PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, accountId);
+    // The browser going away cancels the model call on the coordinator at once (cancel-on-close.ts).
+    const pinned = { ...pinnedDeps, transport: cancelOnClose(pinnedDeps.transport!, coordinatorHost(url)) };
     const backend = networkBackend(pinned, { ...networkTargetFor(compute), ...(picked.choice ? { coordinatorChoice: picked.choice } : {}) });
     const coordinator = portalCoordinatorTransport({ PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, accountId);
     const call: WebToolCall = (path, payload, signal) => coordinator("POST", path, { ...payload, accountId }, signal);

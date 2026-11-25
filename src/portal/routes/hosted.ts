@@ -36,6 +36,7 @@ import { apiKeyOf, registerCompatRoutes, wholeKeepaliveFromEnv, type CallOutcome
 import type { PortalStore } from "../store.js";
 import { withInvoiceQr } from "../invoice-qr.js";
 import { registerAgentRoutes } from "./agents.js";
+import { cancelOnClose } from "../cancel-on-close.js";
 import { COMPUTE_CLASSES, portalCoordinatorTransport, portalNetworkDeps, registerComputeRoutes } from "./compute.js";
 
 export const API_KEY_PREFIX = "eck_";
@@ -79,7 +80,7 @@ export interface CallTrace {
   /** The coordinator said the reply was done, and whether it ended with an error. */
   done: boolean;
   doneWithError?: boolean;
-  /** The portal asked the coordinator to cancel it (the reader went away before the reply ended). */
+  /** The portal sent the coordinator a cancel for it (the reader went away before the reply ended). */
   cancelled: boolean;
   /** A request to the coordinator that failed in the portal (the connection, a timeout): path and error code. */
   upstreamError?: string;
@@ -87,11 +88,14 @@ export interface CallTrace {
 
 export const newCallTrace = (): CallTrace => ({ taskIds: [], coordinators: [], reads: 0, done: false, cancelled: false });
 
-/** `d` with its coordinator requests noted in `trace`. */
+/**
+ * `d` with its coordinator requests noted in `trace`, and its calls cancelled on the coordinator the
+ * moment the buyer's connection closes before the reply ended (cancel-on-close.ts).
+ */
 export function tracedNetworkDeps(d: NetworkDeps, trace: CallTrace, url?: string): NetworkDeps {
   const inner = d.transport;
   if (!inner) return d;
-  const transport: Transport = async (method, path, body, signal) => {
+  const traced: Transport = async (method, path, body, signal) => {
     const code = (v: unknown) => (typeof v === "string" ? v.slice(0, 60) : undefined);
     if (path === "/inference/submit") {
       const taskId = code((body as { taskId?: unknown } | undefined)?.taskId);
@@ -99,6 +103,8 @@ export function tracedNetworkDeps(d: NetworkDeps, trace: CallTrace, url?: string
       const where = url ? coordinatorHost(url) : "default";
       if (!trace.coordinators.includes(where) && trace.coordinators.length < 4) trace.coordinators.push(where);
     }
+    // Noted when sent: the call's log line is written as the connection closes, before the answer.
+    if (path === "/inference/cancel") trace.cancelled = true;
     try {
       const r = await inner(method, path, body, signal);
       if (path === "/inference/submit") {
@@ -112,8 +118,6 @@ export function tracedNetworkDeps(d: NetworkDeps, trace: CallTrace, url?: string
           trace.done = true;
           trace.doneWithError = Boolean(r.json.error);
         }
-      } else if (path === "/inference/cancel") {
-        trace.cancelled = true;
       }
       return r;
     } catch (err) {
@@ -122,7 +126,7 @@ export function tracedNetworkDeps(d: NetworkDeps, trace: CallTrace, url?: string
       throw err;
     }
   };
-  return { ...d, transport };
+  return { ...d, transport: cancelOnClose(traced, url ? coordinatorHost(url) : undefined) };
 }
 
 /** Where a hosted request runs, from the model the tool named: network/<m>[@class] (or a bare model), mine/<m>, reserved/<lease>/<m>. */
