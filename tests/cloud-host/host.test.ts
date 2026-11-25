@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { CloudHost, DEFAULT_REASONING_ALLOWANCE, PROVIDER_ACCOUNT_ALERT_EVERY_MS, cloudHostConfigFromEnv, parseReasoningAllowance, providerAccountAlert, providerAccountProblem, spendAlert, type CloudHostConfig, type CloudHostEvent } from "../../src/cloud-host/host.js";
 import { CloudApiError } from "../../src/cloud-host/backend.js";
+import { BUILTIN_CLOUD_MODELS, parseCloudModelSpec } from "../../src/cloud-host/catalog.js";
 import { cloudHostEnv } from "../../src/cloud-host/main.js";
 import { classifyHardware } from "../../src/economy/compute-classes.js";
 import type { SpendEvent, SpendState } from "../../src/cloud-host/spend-guard.js";
@@ -83,14 +84,18 @@ describe("a call on the cloud host", () => {
     expect(h.guard.status().dayUsd).toBeGreaterThan(0);
   });
 
-  it("a reasoning-only reply fails as reasoning_only and still counts what the provider billed", async () => {
+  it("run 5: a reply still reasoning only after both attempts fails as a retryable overrun (not reasoning_only) and still counts what the provider billed", async () => {
     fake = await startFakeProvider([
       { stream: [{ choices: [{ index: 0, delta: { reasoning_content: "thinking" }, finish_reason: "length" }] }, { choices: [], usage: { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 } }, "[DONE]"] }
     ]);
     const h = host(fake.url);
-    await expect(run(h, "deepseek-v4.1-flash", 16)).rejects.toThrow(/^reasoning_only: /);
-    // Asked with the reasoning allowance, then once more with twice it.
+    const err = await run(h, "deepseek-v4.1-flash", 16).catch((e) => e);
+    expect(err.message).toMatch(/^cloud_reasoning_overrun: /);
+    expect(err.message).not.toMatch(/\breasoning_only\b/);
+    expect(err.status).toBe(503);
+    // Asked with the reasoning allowance, then once more with twice it, each also sent as DeepSeek's hard thinking budget.
     expect(fake.requests.map((r) => r.body.max_tokens)).toEqual([16 + 4_096, 16 + 8_192]);
+    expect(fake.requests.map((r) => r.body.reasoning_effort)).toEqual([4_096, 8_192]);
     // Both attempts billed by the provider, both counted: 2 × (1M × 0.30 + 1M × 1.20), per million.
     expect(h.guard.status().dayUsd).toBeCloseTo(3, 9);
   });
@@ -120,6 +125,8 @@ describe("a call on the cloud host", () => {
     expect(pieces.filter((p) => "delta" in p).map((p) => (p as { delta: string }).delta).join("")).toBe("done");
     // The coordinator gets the answered attempt's counts; the first attempt is the platform's cost (spend guard).
     expect(pieces.at(-1)).toMatchObject({ doneReason: "stop", promptTokens: 1_000_000, outputTokens: 1_000_000 });
+    // GLM ignores integer budgets (catalog thinkingBudget unset): none sent.
+    expect(fake.requests.every((r) => !("reasoning_effort" in r.body))).toBe(true);
     // 2 × (1M × 1.40 + 1M × 4.40), per million
     expect(h.guard.status().dayUsd).toBeCloseTo(11.6, 9);
   });
@@ -143,6 +150,14 @@ describe("a call on the cloud host", () => {
     expect(parseReasoningAllowance("0", models)).toEqual({});
     expect(() => parseReasoningAllowance("lots", models)).toThrow(/CLOUD_HOST_REASONING_ALLOWANCE/);
     expect(() => cloudHostConfigFromEnv({ CLOUD_HOST_API_KEY: KEY, CLOUD_HOST_REASONING_ALLOWANCE: "glm-5.3=-1" })).toThrow(/CLOUD_HOST_REASONING_ALLOWANCE/);
+  });
+
+  it("thinkingBudget: on for DeepSeek V4.1 Flash only, and readable from CLOUD_MODELS_JSON", () => {
+    expect(BUILTIN_CLOUD_MODELS.filter((m) => m.thinkingBudget).map((m) => m.id)).toEqual(["deepseek-v4.1-flash"]);
+    const base = { id: "x-1", providerModel: "accounts/fireworks/models/x", usdPerM: { input: 1, output: 1 } };
+    expect(parseCloudModelSpec({ ...base, thinkingBudget: true }).thinkingBudget).toBe(true);
+    expect(parseCloudModelSpec(base)).not.toHaveProperty("thinkingBudget");
+    expect(() => parseCloudModelSpec({ ...base, thinkingBudget: "yes" })).toThrow(/thinkingBudget/);
   });
 
   it("CLOUD_HOST_REASONING_EFFORT is sent as reasoning_effort", async () => {

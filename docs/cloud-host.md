@@ -115,14 +115,20 @@ thinking). So the host gives a reasoning model room to think:
   about a token, at least one per 4 characters). At the cap it closes the stream and the reply ends
   with finish `length`. The provider's counts then never arrive, so the tokens streamed so far
   (thinking and answer) are estimated the same way;
+- for a model whose provider takes an integer `reasoning_effort` as a hard thinking budget
+  (catalog `thinkingBudget`; DeepSeek V4.1 Flash: Fireworks ends the thinking after that many
+  tokens when the integer is 1024 or more), the allowance is also sent as that budget (at least
+  1024), so the answer always gets its room. Network run 5: without it, Flash thought past 6144 and
+  then 10240 tokens on a standard refactor at `max_tokens` 2048, and 3 of 8 calls ended
+  reasoning-only. If the provider refuses the integer, the call is asked again without it and the
+  host stops sending it for that model. GLM-5.3 ignores integers, so it gets no budget. When
+  `CLOUD_HOST_REASONING_EFFORT` is `none`, no budget is sent;
 - a reply that is still reasoning only is asked once more with twice the allowance (nothing has
-  reached the caller yet); only then does it fail as `reasoning_only: … send a larger max_tokens`
-  (HTTP 400 to the caller). That is the request's limit, so the coordinator neither retries it
-  elsewhere nor counts it against the host's circuit breaker.
-
-Fireworks also takes an integer `reasoning_effort` or `thinking.budget_tokens` as a hard cap on the
-thinking, but not for every model (DeepSeek V4.1 is listed as an exception), so the host does not
-rely on it; `CLOUD_HOST_REASONING_EFFORT` still sends a word such as `low` when set.
+  reached the caller yet). A second reasoning-only reply fails as `cloud_reasoning_overrun: …`
+  (HTTP 503). That is the host's limit, not the request's, so the coordinator may give the call to
+  another host and charges nothing for it. The host never ends a call with an allowance as
+  `reasoning_only`; that error (HTTP 400, never retried) now comes only from a call without
+  `max_tokens` or a model without an allowance.
 
 **Billing reasoning tokens.** The buyer is billed on the completion tokens the provider reports,
 the thinking included, through the usual pricing path, but never more than the call's own
@@ -133,7 +139,8 @@ attempt the provider billed to its spend guard, and nothing of it reaches the bu
 This keeps the ledger as it was (settlement never exceeds the hold) and the buyer's bill within the
 cap they set; billing only the answer's tokens would price most calls below the provider's cost.
 `CLOUD_HOST_REASONING_EFFORT` (unset: the provider's default) is sent as `reasoning_effort` with
-every call, e.g. `low`, or `none` where the provider can turn thinking off for the model.
+every call, e.g. `low`, or `none` where the provider can turn thinking off for the model. On a model
+with a thinking budget (above) the integer budget is sent in its place, unless the word is `none`.
 
 Circuit breaker (coordinator, `memory-admission.ts`): a host trips after consecutive failed calls,
 3 or half its slots (8 for a 16-slot cloud host). While open it gets no placements: a named call

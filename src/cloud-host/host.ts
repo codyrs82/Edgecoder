@@ -377,7 +377,9 @@ export class CloudHost {
    *
    * A reasoning model gets room to think (reasoningAllowance, backend.ts reasoningChat): the
    * provider is asked for max_tokens plus the allowance, the answer is capped at max_tokens, and a
-   * reasoning-only reply is asked once more with twice the allowance. The counts reported to the
+   * reasoning-only reply is asked once more with twice the allowance (a model with a hard thinking
+ * budget, catalog thinkingBudget, is sent each allowance as that budget too); still reasoning only,
+ * it fails as cloud_reasoning_overrun, retryable elsewhere, never reasoning_only. The counts reported to the
    * coordinator are the provider's (reasoning included); the coordinator bills output tokens only up
    * to the call's own max_tokens (inference-streams.ts boundTokenCounts), so the thinking past that,
    * and an attempt asked again, are the platform's cost: they go to the spend guard, never to the buyer.
@@ -395,7 +397,7 @@ export class CloudHost {
     try {
       const allowance = this.config.reasoningAllowance?.[spec.id] ?? 0;
       const billed = (u: NonNullable<CloudApiError["usage"]>) => this.guard.record(providerCostUsd(spec, u));
-      for await (const piece of reasoningChat(this.backend, { model: this.config.modelMap[spec.id] ?? spec.providerModel, ...req }, allowance, signal, timeoutMs, billed)) {
+      for await (const piece of reasoningChat(this.backend, { model: this.config.modelMap[spec.id] ?? spec.providerModel, ...req }, allowance, signal, timeoutMs, billed, { thinkingBudget: spec.thinkingBudget === true })) {
         if (!answered) {
           answered = true;
           this.guard.noteAuthOk();
@@ -408,7 +410,7 @@ export class CloudHost {
     } catch (err) {
       if (err instanceof CloudApiError && err.kind === "auth") this.guard.noteAuthFailure();
       this.noteAccountProblem(err);
-      // Reasoning only: the provider answered (and bills the thinking) though nothing reached the caller.
+      // Reasoning only / overrun: the provider answered (and bills the thinking) though nothing reached the caller.
       if (err instanceof CloudApiError && err.usage) {
         answered = true;
         usage = err.usage;
