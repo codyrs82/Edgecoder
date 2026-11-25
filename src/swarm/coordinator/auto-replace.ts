@@ -33,6 +33,22 @@
  * (routes/inference.ts completionCheck), on the time the call has left. A candidate that would not
  * finish in that time is skipped; when none would, and the call's current placement would not either,
  * the call is ended now (no_capacity "busy", refunded in full) instead of waiting out its claim bound.
+ *
+ * Run 9 (three standard Auto calls refused 25-48 s after submit: placed on a host that did not take
+ * them, re-placed after 12 s onto busy hosts, ended by the 45 s claim bound): with
+ * INFERENCE_CLAIM_DECISION_MS (default 2 s) an Auto call is decided as a named call is, within
+ * about 1.5 times that of its placement, a little more after a late re-placement (decideAuto):
+ *
+ * - at the decision time, still unclaimed: it waits once more (a quarter window) only while the host it
+ *   was placed on could claim it now (dispatch.ts couldClaimNow: live, a free slot by count and by its
+ *   report, not held back, the claim admission passes);
+ * - otherwise it is re-placed on the next candidate whose host could claim it now (never onto a busy
+ *   host: also for BEST_FIT_REPLACE_MS and the overrun re-placement), within its reserve and the
+ *   completion gate;
+ * - with no such candidate, or at its decision bound, it is refused now (no_capacity "busy", refunded
+ *   in full: nothing was charged).
+ *
+ * INFERENCE_CLAIM_DECISION_MS=0 restores the fixed BEST_FIT_REPLACE_MS wait above.
  */
 
 import type { JobDescriptor } from "../../inference-api/job-descriptor.js";
@@ -40,8 +56,10 @@ import { ACCEPTED_COMPUTE_CLASS_IDS, resolveRequestedClass, type ComputeClassId 
 import { msatToCSats } from "../../economy/job-pricing.js";
 import type { Candidate } from "./best-fit.js";
 import { app } from "./app.js";
-import { queue, taskBilling, usagePending } from "./context.js";
-import { preferAgent } from "./dispatch.js";
+import type { Subtask } from "../../common/types.js";
+import { CC, queue, taskBilling, usagePending } from "./context.js";
+import { couldClaimNow, preferAgent } from "./dispatch.js";
+import { agentHeldBack } from "./start-eta.js";
 import { MARKET_DEFAULT_BID_PREMIUM_BPS, orderBook, rateOracleConfig } from "./economy.js";
 import { agentUnavailable, circuitOpenSince, noteAgentOutcome as noteCircuitOutcome } from "./memory-admission.js";
 import { bestFitConfig, noteAgentOutcome as noteRoutingOutcome, noteReplaced, resolveAuto } from "./routing.js";
@@ -64,9 +82,20 @@ export interface AutoPlacement {
   replaced?: number;
   /** When it was (re)placed on its current agent. */
   placedAtMs?: number;
+  /** Run 9: by when it is claimed, or refused (decideAuto). */
+  decideBy?: number;
+  /** Run 9: it already waited once more on its current agent. */
+  graced?: boolean;
 }
 
-export type ReplaceOutcome = "claimed" | "same" | "none" | "replaced" | "refused";
+/** Run 9: the Auto decision window (INFERENCE_CLAIM_DECISION_MS); 0: the fixed BEST_FIT_REPLACE_MS wait. */
+export function autoDecisionMs(): number {
+  return CC.INFERENCE_CLAIM_DECISION_MS;
+}
+/** Run 9: an Auto call is claimed or refused within this many decision windows of its placement. */
+export const AUTO_DECISION_BOUND = 1.5;
+
+export type ReplaceOutcome = "claimed" | "same" | "none" | "replaced" | "refused" | "waiting";
 
 /**
  * Run 6: the completion gate for re-placements, registered by routes/inference.ts (which owns the
@@ -102,9 +131,21 @@ export function autoPlacementOf(subtaskId: string): AutoPlacement | undefined {
   return autoCalls.get(subtaskId);
 }
 
-/** Re-place the call if nobody picked it up within `ms` (bestFitConfig.replaceMs; 0: never). */
-export function armAutoReplace(p: AutoPlacement, ms = bestFitConfig.replaceMs, nowMs = Date.now()): void {
+/**
+ * Decide the call if nobody picked it up: run 9, within the decision window (autoDecisionMs,
+ * decideAuto); with that off, re-place it after `ms` (bestFitConfig.replaceMs; 0: never).
+ */
+export function armAutoReplace(p: AutoPlacement, ms?: number, nowMs = Date.now()): void {
   autoCalls.set(p.subtaskId, p);
+  const decision = autoDecisionMs();
+  if (decision > 0) {
+    if (p.decideBy === undefined) p.decideBy = nowMs + Math.round(decision * AUTO_DECISION_BOUND);
+    if (p.placedAtMs === undefined) p.placedAtMs = nowMs;
+    const wait = Math.max(0, Math.min(ms ?? decision, p.decideBy - nowMs));
+    schedule(p, wait, () => decideAuto(p));
+    return;
+  }
+  ms ??= bestFitConfig.replaceMs;
   if (!(ms > 0) || (p.replaced ?? 0) >= AUTO_REPLACE_MAX) return;
   const old = timers.get(p.subtaskId);
   if (old) clearTimeout(old);
@@ -123,16 +164,89 @@ export function armAutoReplace(p: AutoPlacement, ms = bestFitConfig.replaceMs, n
   timers.set(p.subtaskId, t);
 }
 
+function schedule(p: AutoPlacement, ms: number, run: () => Promise<ReplaceOutcome>): void {
+  const old = timers.get(p.subtaskId);
+  if (old) clearTimeout(old);
+  placements.set(p.subtaskId, p);
+  const t = setTimeout(() => {
+    timers.delete(p.subtaskId);
+    placements.delete(p.subtaskId);
+    void run().catch((err) => app.log.error({ err, subtaskId: p.subtaskId }, "auto_replace_failed"));
+  }, ms);
+  t.unref?.();
+  timers.set(p.subtaskId, t);
+}
+
+/** The call as it would be on `pick` (its model and class), to ask whether pick's host could claim it. */
+function asPlacedOn(st: Subtask, pick: Candidate): Subtask {
+  const cls = ACCEPTED_COMPUTE_CLASS_IDS.includes(pick.computeClass) ? pick.computeClass : "any";
+  return { ...st, requestedModel: pick.model, projectMeta: { ...st.projectMeta, computeClass: cls as ComputeClassId } };
+}
+
+/** Run 9: `agentId` could claim the call now (dispatch.ts couldClaimNow) and is not held back. */
+function hostCanStart(agentId: string, st: Subtask, nowMs: number): boolean {
+  return couldClaimNow(agentId, st, nowMs) && !agentHeldBack(agentId, queue.activeClaims().get(agentId)?.inference ?? 0, nowMs);
+}
+
+/** The host it waited on could have taken it, held nothing, and did not come: a pickup failure (circuit, routing). */
+function notePickupFailure(p: AutoPlacement, nowMs: number): void {
+  const waitedOn = p.tried[p.tried.length - 1];
+  const since = p.placedAtMs ?? nowMs - bestFitConfig.replaceMs;
+  if (waitedOn && (queue.activeClaims().get(waitedOn)?.all ?? 0) === 0 && !circuitOpenSince(waitedOn, since, nowMs) && !agentUnavailable(waitedOn, nowMs)) {
+    noteCircuitOutcome(waitedOn, false, nowMs);
+    noteRoutingOutcome(waitedOn, false);
+  }
+}
+
+/**
+ * Run 9: one decision on an unclaimed Auto call (armAutoReplace runs it at the decision time):
+ * "waiting" (once, while its host could claim it now), "replaced" / "same" (onto a host that could),
+ * or "refused" (nothing here can start it soon, or its decision bound is reached; refunded in full).
+ */
+export async function decideAuto(p: AutoPlacement, nowMs = Date.now()): Promise<ReplaceOutcome> {
+  const st = queue.getSubtask(p.subtaskId);
+  if (!st || !queue.isUnclaimed(p.subtaskId)) return "claimed";
+  const decision = autoDecisionMs();
+  const final = nowMs >= (p.decideBy ?? nowMs);
+  const current = p.tried[p.tried.length - 1];
+  const currentCan = !!current && hostCanStart(current, st, nowMs);
+  const quarter = Math.max(1, Math.round(decision / 4));
+  if (!final && currentCan && !p.graced) {
+    p.graced = true;
+    armAutoReplace(p, quarter, nowMs);
+    return "waiting";
+  }
+  if (currentCan && p.graced) notePickupFailure(p, nowMs);
+  const pick = !final && (p.replaced ?? 0) < AUTO_REPLACE_MAX ? await nextPick(p, nowMs) : undefined;
+  const out = pick ? moveTo(p, pick, nowMs, `re-placed: nobody picked it up within ${Math.round(Math.max(0, nowMs - (p.placedAtMs ?? nowMs)) / 100) / 10} s`) : "none";
+  if (out === "replaced" || out === "same") {
+    p.graced = false;
+    p.placedAtMs = nowMs;
+    // The new host is nudged first (preferAgent) and gets at least a quarter window to pull.
+    p.decideBy = Math.max(p.decideBy ?? nowMs, nowMs + quarter);
+    armAutoReplace(p, quarter, nowMs);
+    return out;
+  }
+  if (out === "claimed" || !queue.isUnclaimed(p.subtaskId)) return "claimed";
+  if (admission && (await admission.refuse(p))) {
+    app.log.warn({ taskId: p.taskId, subtaskId: p.subtaskId, tried: p.tried.length, final }, "auto_call_refused_no_host");
+    return "refused";
+  }
+  return "none";
+}
+
 /** The first local candidate best fit gives for the call without the agents it tried, within its reserve. */
 async function nextPick(p: AutoPlacement, nowMs: number): Promise<Candidate | undefined> {
   const { result } = await resolveAuto(p.job, { peers: false, requesterAccountId: p.accountId, excludeAgents: p.tried, clientRegion: p.clientRegion ?? null, ...(p.onlyClass ? { computeClass: p.onlyClass } : {}) }, nowMs);
   const billing = taskBilling.get(p.taskId);
   const budgetCSats = billing && billing.reservedMsat > 0 ? msatToCSats(billing.reservedMsat) : Infinity;
   const seen = new Set<Candidate>();
+  const st = queue.getSubtask(p.subtaskId);
   return [result.chosen, ...result.candidates].find((c): c is Candidate => {
     if (!c || seen.has(c)) return false;
     seen.add(c);
-    return c.local && c.estimate.cSats <= budgetCSats && (admission?.fits(p, c, nowMs) ?? true);
+    // Run 9: only onto a host that could claim it now (not a busy one).
+    return c.local && c.estimate.cSats <= budgetCSats && (admission?.fits(p, c, nowMs) ?? true) && (!st || hostCanStart(c.agentId, asPlacedOn(st, c), nowMs));
   });
 }
 
@@ -159,14 +273,9 @@ export async function placeAfterOverrun(subtaskId: string, cloudAgentId: string,
 /** One re-placement step (exported for tests; armAutoReplace runs it on its timer). */
 export async function replaceUnclaimedAuto(p: AutoPlacement, nowMs = Date.now()): Promise<ReplaceOutcome> {
   if (!queue.isUnclaimed(p.subtaskId)) return "claimed";
-  const waitedOn = p.tried[p.tried.length - 1];
   // A pickup timeout: the agent the call was placed on did not come although it held nothing, and
   // nothing on this side kept it away (its open circuit, memory pressure, a lost socket).
-  const since = p.placedAtMs ?? nowMs - bestFitConfig.replaceMs;
-  if (waitedOn && (queue.activeClaims().get(waitedOn)?.all ?? 0) === 0 && !circuitOpenSince(waitedOn, since, nowMs) && !agentUnavailable(waitedOn, nowMs)) {
-    noteCircuitOutcome(waitedOn, false, nowMs);
-    noteRoutingOutcome(waitedOn, false);
-  }
+  notePickupFailure(p, nowMs);
   const pick = await nextPick(p, nowMs);
   // Run 6: nothing that would finish it in the time left, and its current placement would not either: end it now.
   if (!pick && admission && queue.isUnclaimed(p.subtaskId) && !admission.currentFits(p, nowMs)) {
@@ -229,7 +338,9 @@ export async function replaceAutoNow(agentId: string, nowMs = Date.now()): Promi
       placements.delete(p.subtaskId);
     } else if (r === "replaced" || r === "same") {
       moved++;
-      armAutoReplace(p, bestFitConfig.replaceMs, nowMs);
+      p.graced = false;
+      if (autoDecisionMs() > 0) p.decideBy = Math.max(p.decideBy ?? nowMs, nowMs + Math.round(autoDecisionMs() / 4));
+      armAutoReplace(p, autoDecisionMs() > 0 ? Math.max(1, Math.round(autoDecisionMs() / 4)) : bestFitConfig.replaceMs, nowMs);
     }
   }
   return moved;

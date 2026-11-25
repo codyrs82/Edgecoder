@@ -329,6 +329,20 @@ export function setClaimAdmission(fn: ClaimAdmission | undefined): void {
   claimAdmission = fn;
 }
 
+/**
+ * Run 9 (Auto calls refused 25-48 s after submit): whether `agentId` could claim this model call now,
+ * as /pull would let it: live, not excluded from it, a free slot by count and by its last report, and
+ * the claim admission passes. Auto re-placement (auto-replace.ts) waits on a host only while this
+ * holds, and moves a call only onto a host for which it holds (never onto a busy one).
+ */
+export function couldClaimNow(agentId: string, subtask: Subtask, nowMs = Date.now(), claims: Claims = queue.activeClaims()): boolean {
+  if (queue.excludedAgents(subtask.id).includes(agentId)) return false;
+  if (!liveAgent(agentId, agentCapabilities.get(agentId), nowMs)) return false;
+  if (!hasRoomFor(agentId, subtask, claims, nowMs)) return false;
+  if (subtask.kind === "inference" && freeSlots(agentId, claims, true) === 0) return false;
+  return !claimAdmission || claimAdmission(agentId, subtask, nowMs);
+}
+
 export function mayTakeNow(agentId: string, subtask: Subtask, claims: Claims, nowMs = Date.now()): boolean {
   // Circuit breaker (memory-admission.ts): an agent that keeps failing cools down first, then takes
   // one call at a time (half open) until one succeeds.
