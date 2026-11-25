@@ -61,7 +61,7 @@ import { localLanAddresses } from "./lan-proximity.js";
 import { collectDesktopTelemetry } from "./desktop-telemetry.js";
 import { detectPlatform, getConfigDir, getLogDir, type PlatformInfo } from "../common/platform.js";
 import { computeDistHash, loadReleaseManifest, detectDistributionChannel } from "../security/release-integrity.js";
-import { answerChallenge, runLocalBenchmark, type AgentBenchmarkReport, type BenchmarkChallenge } from "./benchmark.js";
+import { answerChallenge, runLocalBenchmark, selfBenchmarkDue, type AgentBenchmarkReport, type BenchmarkChallenge } from "./benchmark.js";
 import { appVersion, isReleaseInstall } from "../common/app-version.js";
 import { createUpdateNudge } from "./update-nudge.js";
 import { autoUpdateSetting } from "../install/update-schedule.js";
@@ -376,8 +376,8 @@ const PEER_DIRECT_WORK_ITEMS = (W.PEER_DIRECT_WORK_ITEMS ??
   "help peer with lightweight test scaffolding||review edge case handling").split("||");
 const SANDBOX_MODE: SandboxMode = resolveSandboxMode(process.env);
 /**
- * Throughput benchmark (src/swarm/benchmark.ts): a < ~30 s self-benchmark at startup and every
- * AGENT_BENCHMARK_INTERVAL_MS (default 6 h), reported with the profile, plus answers to the
+ * Throughput benchmark (src/swarm/benchmark.ts): a < ~30 s self-benchmark once the agent has
+ * registered after startup and every AGENT_BENCHMARK_INTERVAL_MS (default 6 h), reported with the heartbeat, plus answers to the
  * coordinator's challenges, which are what actually grant a tier. AGENT_BENCHMARK=0 turns both off
  * (the agent then earns at its class base tier).
  */
@@ -2064,8 +2064,9 @@ async function loop(): Promise<void> {
           // Pinned-key trust: the coordinator proves possession of its key before any register,
           // heartbeat or pull (re-proven on URL change, on reconnect and when the check expires).
           await verifyCoordinatorOrThrow();
-          // Self-benchmark when due (startup, then every BENCHMARK_INTERVAL_MS), before any task runs alongside it.
-          if (BENCHMARK_ENABLED && Date.now() >= benchmarkDueAtMs) {
+          // Self-benchmark when due (right after the first registration, then every BENCHMARK_INTERVAL_MS),
+          // before this tick pulls work. Never before registering: a slow run kept a started machine off the network.
+          if (selfBenchmarkDue({ enabled: BENCHMARK_ENABLED, registered: registeredWithUrl !== null, nowMs: Date.now(), dueAtMs: benchmarkDueAtMs })) {
             benchmarkDueAtMs = Date.now() + BENCHMARK_INTERVAL_MS;
             try {
               const served = OPENAI_ENGINE && engineStatus?.ok ? engineStatus.model : undefined;

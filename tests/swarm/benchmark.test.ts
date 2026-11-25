@@ -15,6 +15,7 @@ import {
   knownBandwidthGbps,
   modelWeightsGb,
   runLocalBenchmark,
+  selfBenchmarkDue,
   solveCpuWork,
   verifyCpuSolutions,
   type CpuWorkSpec,
@@ -240,5 +241,18 @@ describe("local benchmark on a freshly loaded model", () => {
     expect(requests[1].num_predict).toBe(192);
     // 192 tokens in 4 s on a 3.3B-active MoE (1.98 GB per token).
     expect(r.gpu).toMatchObject({ model: "qwen3-coder:30b", tokensPerSec: 48, weightsGb: 1.98, bandwidthGbps: 95 });
+  });
+});
+
+describe("when the agent self-benchmarks", () => {
+  it("not before the agent has registered, so a slow run never holds back joining the network", () => {
+    // Startup: due at once, but only after registering.
+    expect(selfBenchmarkDue({ enabled: true, registered: false, nowMs: 1_000, dueAtMs: 0 })).toBe(false);
+    expect(selfBenchmarkDue({ enabled: true, registered: true, nowMs: 1_000, dueAtMs: 0 })).toBe(true);
+    // Periodic: not before it is due again; and a coordinator restart (not registered) waits for the re-registration.
+    expect(selfBenchmarkDue({ enabled: true, registered: true, nowMs: 1_000, dueAtMs: 2_000 })).toBe(false);
+    expect(selfBenchmarkDue({ enabled: true, registered: false, nowMs: 3_000, dueAtMs: 2_000 })).toBe(false);
+    expect(selfBenchmarkDue({ enabled: true, registered: true, nowMs: 3_000, dueAtMs: 2_000 })).toBe(true);
+    expect(selfBenchmarkDue({ enabled: false, registered: true, nowMs: 3_000, dueAtMs: 0 })).toBe(false);
   });
 });
