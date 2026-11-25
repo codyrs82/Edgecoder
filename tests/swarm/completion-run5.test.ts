@@ -186,7 +186,14 @@ describe("run 5 shapes on a real coordinator", () => {
     routing.setPeerWorldSource(undefined);
     await drain();
     eta.serviceTimes.clear();
+    eta.decodeRates.clear();
+    eta.prefillRates.clear();
   });
+
+  /** Run 7: the class's decode rate measured fast enough for a 1400-token tutorial (the 1.5b CPU prior is not). */
+  const fastDecode = () => {
+    for (let i = 0; i < 3; i++) eta.decodeRates.record(MODEL, "cpu", 20);
+  };
 
   test("heavy calls (e13b5460, 2e35fe93): refused at once although short calls had made the class look fast", async () => {
     shortSamples();
@@ -210,6 +217,7 @@ describe("run 5 shapes on a real coordinator", () => {
 
   test("a burst of long tutorials onto 2 hosts × 2 slots: one per host, the rest refused at once (no 45 s wait)", async () => {
     shortSamples();
+    fastDecode();
     const answers: number[] = [];
     for (let i = 0; i < 6; i++) answers.push((await submit(tutorial())).r.statusCode);
     expect(answers.slice(0, 2)).toEqual([200, 200]);
@@ -220,6 +228,7 @@ describe("run 5 shapes on a real coordinator", () => {
     // Real samples for calls this size say the class is fast enough...
     const work = eta.callWorkMs(MODEL, "cpu", 2_400, 1_400);
     for (let i = 0; i < 3; i++) eta.serviceTimes.record(MODEL, "cpu", work * 0.3, Date.now(), work);
+    fastDecode();
     expect((await submit(tutorial())).r.statusCode).toBe(200);
     await drain();
     // ...then four such calls time out with nothing sent: the median moves past the limit.

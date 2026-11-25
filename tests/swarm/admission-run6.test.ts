@@ -155,6 +155,8 @@ beforeEach(async () => {
   delete process.env.INFERENCE_COMPLETION_PRIOR_SPEED;
   await drain();
   eta.serviceTimes.clear();
+  eta.decodeRates.clear();
+  eta.prefillRates.clear();
   eta.modelPickups.clear();
 });
 
@@ -215,7 +217,14 @@ describe("2. Auto re-placement applies the completion gate on the time left (b89
     job: describeJob({ messages: body.messages as any, maxTokens: body.maxTokens }, {}, routing.complexityWeights),
   });
 
+  // Run 7: these hosts decode fast enough for the reply (the 1.5b CPU decode prior alone would refuse it at submit).
+  const fastDecode = () => {
+    for (let i = 0; i < 3; i++) eta.decodeRates.record(MODEL, "cpu", 40);
+    for (let i = 0; i < 3; i++) eta.prefillRates.record(MODEL, "cpu", 400);
+  };
+
   test("nothing would finish it and its placement would not either: refused now, refunded", async () => {
+    fastDecode();
     const body = tests();
     const before = creditEngine.balance(requester.peerId);
     const call = await submit(body);
@@ -231,6 +240,7 @@ describe("2. Auto re-placement applies the completion gate on the time left (b89
   });
 
   test("a candidate that would finish in the time left is still taken", async () => {
+    fastDecode();
     const body = tests();
     const call = await submit(body);
     expect(call.r.statusCode, call.r.body).toBe(200);
@@ -304,7 +314,7 @@ describe("3. a waiting call that cannot start in time is answered in ≤ 2 s, no
     const p = new ModelPickups();
     expect(p.etaMs("m", 1, 100_000)).toBeNull();
     p.noteSaturated("m", true, 100_000);
-    expect(p.etaMs("m", 1, 105_000)).toBeNull(); // too short a span to tell
+    expect(p.etaMs("m", 1, 102_000)).toBeNull(); // too short a span to tell (RATE_MIN_SPAN_MS)
     for (const t of [101_000, 106_000, 111_000]) p.record("m", t);
     // 3 pickups in 20 s: one every ~6.7 s.
     expect(p.etaMs("m", 3, 120_000)).toBe(20_000);

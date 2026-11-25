@@ -65,7 +65,7 @@
  */
 
 import type { ComputeClassId } from "../../economy/compute-classes.js";
-import { expectedWorkMs } from "../../economy/job-pricing.js";
+import { expectedWorkMs, SLOW_HOST_PREFILL_FACTOR } from "../../economy/job-pricing.js";
 import { CONTENTION_SHARE } from "./best-fit.js";
 import { paramsB } from "../../inference-api/auto-route.js";
 import { agentHasModel } from "../model-catalog.js";
@@ -204,6 +204,17 @@ export class ServiceTimes {
   typicalMs(model: string, computeClass: string, nowMs = Date.now()): number | null {
     const m = median(this.values(model, computeClass, nowMs, (s) => s.ms));
     return m === null ? null : Math.round(m);
+  }
+
+  /**
+   * Run 7: mean recent service time (how long a call holds a slot on average), null when too few are
+   * known. Slots free at slots ÷ mean hold time (Little's law); the median of a mix of short lookups
+   * and long replies says far less about when a slot frees, so the start estimate uses this.
+   */
+  meanMs(model: string, computeClass: string, nowMs = Date.now()): number | null {
+    const v = this.values(model, computeClass, nowMs, (s) => s.ms);
+    if (v.length < SERVICE_MIN_SAMPLES) return null;
+    return Math.round(v.reduce((a, b) => a + b, 0) / v.length);
   }
 
   /**
@@ -361,8 +372,13 @@ export function modelHolders(model: string, taskClass: ComputeClassId | "any", n
     if (taskClass !== "any" && cls !== taskClass) continue;
     const ctx = agentContextWindow(id);
     if (ctx !== undefined && neededTokens > ctx) continue;
-    const slots = Math.max(1, agentLoadReport(id)?.slots ?? cap.maxConcurrentTasks ?? 1);
-    const free = memoryAdmits(id, model, claims.get(id)?.inference ?? 0, nowMs) ? Math.max(0, freeModelSlots(id, claims)) : 0;
+    const held = claims.get(id)?.inference ?? 0;
+    const reported = Math.max(1, agentLoadReport(id)?.slots ?? cap.maxConcurrentTasks ?? 1);
+    // Run 7: slots a host withholds (it reports fewer free than it has idle: a throttled CPU, #563)
+    // take no call when they free up, so they are not counted as slots a waiting call could get.
+    const slots = Math.max(0, reported - withheldSlots(id, held, nowMs));
+    if (slots <= 0) continue;
+    const free = memoryAdmits(id, model, held, nowMs) ? Math.max(0, freeModelSlots(id, claims)) : 0;
     out.push({ agentId: id, computeClass: cls, slots, free });
   }
   return out;
@@ -424,7 +440,7 @@ export function classContention(computeClass: string, hosts: number, maxSlotsPer
  * were all ahead of it in proportion to its slots). `prior`: the prior speed per class (run 5;
  * parseCompletionPrior), none: a class with too few relevant samples is not judged.
  */
-export function completionByClass(input: { model: string; taskClass: ComputeClassId | "any"; neededTokens: number; promptTokens: number; outputTokens: number; waiting: number; prior?: Readonly<Record<string, number>> }, nowMs = Date.now()): ClassCompletion[] {
+export function completionByClass(input: { model: string; taskClass: ComputeClassId | "any"; neededTokens: number; promptTokens: number; outputTokens: number; waiting: number; prior?: Readonly<Record<string, number>>; decode?: boolean }, nowMs = Date.now()): ClassCompletion[] {
   const holders = modelHolders(input.model, input.taskClass, input.neededTokens, nowMs);
   const claims = queue.activeClaims();
   const totalSlots = holders.reduce((n, h) => n + h.slots, 0);
@@ -445,14 +461,22 @@ export function completionByClass(input: { model: string; taskClass: ComputeClas
     const est = serviceTimes.speedFor(input.model, cls, workMs, input.prior?.[cls], nowMs);
     // The calls running on the class's hosts, and the waiting ones that will take its free slots, run beside this one.
     const slowdown = classContention(cls, e.agents.length, e.maxSlots, e.running + Math.min(waiting, e.free));
-    const ownMs = est.speed === null ? null : est.speed * workMs * slowdown;
+    // Run 7: the decode-rate estimate (prefill + max_tokens ÷ the class's decode rate); the call is
+    // judged on the slower of the two, so a long reply is never judged at the speed of short calls.
+    // Only for a call that set its max_tokens (`decode` false: judged on a typical reply, the speed estimate alone).
+    const decode = input.decode === false ? null : decodeEstimateMs(input.model, cls, input.promptTokens, input.outputTokens, nowMs, input.prior?.[cls] !== undefined);
+    const bySpeed = est.speed === null ? null : est.speed * workMs;
+    const own = bySpeed === null && decode === null ? null : Math.max(bySpeed ?? 0, decode?.ms ?? 0);
+    const ownMs = own === null ? null : own * slowdown;
+    const priorOnly = decode !== null && decode.ms >= (bySpeed ?? 0) ? decode.prior && (bySpeed === null || est.prior) : est.prior;
     // With no service times known yet, a call ahead is taken to hold a slot about as long as this one.
-    const typicalMs = serviceTimes.typicalMs(input.model, cls, nowMs) ?? serviceTimes.typicalMs(input.model, "any", nowMs) ?? (ownMs !== null ? Math.round(ownMs) : null);
+    // Run 7: the mean hold (slots free at slots ÷ mean), not the median of mostly short calls.
+    const typicalMs = serviceTimes.meanMs(input.model, cls, nowMs) ?? serviceTimes.meanMs(input.model, "any", nowMs) ?? (ownMs !== null ? Math.round(ownMs) : null);
     const start = startEtaMs({ waiting, slots: e.slots, free: e.free, typicalMs }) ?? (e.free > waiting ? 0 : null);
     out.push({
       computeClass: cls, agents: e.agents, startEtaMs: start,
-      completionEtaMs: completionEtaMs({ startEtaMs: start, speed: est.speed === null ? null : est.speed * slowdown, workMs }),
-      priorOnly: est.prior, inFlight: e.running + waiting,
+      completionEtaMs: ownMs === null ? null : Math.round((start ?? 0) + ownMs),
+      priorOnly, inFlight: e.running + waiting,
     });
   }
   return out;
@@ -518,7 +542,12 @@ const TIMED_OUT_UNSET_MAX_TOKENS = 1_024;
  * re-judges each waiting call against the time left in its claim bound.
  */
 export const RATE_WINDOW_MS = 60_000;
-export const RATE_MIN_SPAN_MS = 10_000;
+/**
+ * Run 7: was 10 s. A burst that filled every slot was judged on the (short-call) median service time
+ * for those 10 s, then refused by the sweep (claim-time refusals at p50 8.5 s). Pickups over a few
+ * seconds are enough: with none, the estimate is one pickup per two spans (see etaMs).
+ */
+export const RATE_MIN_SPAN_MS = 3_000;
 
 export class ModelPickups {
   private readonly claims = new Map<string, number[]>();
@@ -561,3 +590,163 @@ export class ModelPickups {
 }
 
 export const modelPickups = new ModelPickups();
+
+/**
+ * Run 7 (long calls, inf-1795616749810-31c83bfe on gru and inf-1795616757465-36c23c3c on syd): a
+ * 1.5b CPU call with max_tokens 1400 was admitted on its nearest, unthrottled host and cut at the 180 s
+ * deadline after ~1400 tokens at 7-8 tok/s. Admission judged it at the class prior (0.5 × expectedWorkMs:
+ * ~103 s), i.e. a decode rate of ~28 tok/s: expectedWorkMs scales the slow-host rate by 7 / paramsB,
+ * which a 1.5b model on a 4-vCPU host does not reach (memory bandwidth and per-token overhead do not
+ * shrink with the model), and the speed samples it learns from are dominated by short calls.
+ *
+ * The completion estimate now also takes the decode rate itself: a call of max_tokens N on a class
+ * that decodes at R tok/s needs about N / R plus its prefill (prompt ÷ the prefill rate), and is
+ * judged on the slower of that and the speed estimate. R and the prefill rate are measured here per
+ * model and class from finished calls (first piece to last piece, and claim to first piece; see
+ * noteDecodeRate), normalised for the calls that shared the host; with fewer than SERVICE_MIN_SAMPLES
+ * the class prior fills in (COMPLETION_PRIOR_DECODE_TPS_7B, scaled by √(7 / paramsB) below 7B).
+ */
+export const COMPLETION_PRIOR_DECODE_TPS_7B: Readonly<Record<string, number>> = { cpu: 3 };
+/** A decode sample needs at least this many output tokens, and a prefill sample this many prompt tokens. */
+export const DECODE_SAMPLE_MIN_TOKENS = 64;
+export const PREFILL_SAMPLE_MIN_TOKENS = 256;
+
+/** The prior decode rate (tok/s) of `model` on `computeClass`, undefined when the class has none. */
+export function priorDecodeTps(model: string, computeClass: string): number | undefined {
+  const base = COMPLETION_PRIOR_DECODE_TPS_7B[computeClass];
+  if (!(base > 0)) return undefined;
+  const b = Math.max(0.3, paramsB(model) || 7);
+  return base * (b < 7 ? Math.sqrt(7 / b) : 7 / b);
+}
+
+/** Recent token rates (tok/s) per model and class (or agent), with the prior filling missing samples. */
+export class TokenRates {
+  private readonly byKey = new Map<string, Array<{ at: number; tps: number }>>();
+
+  record(model: string, key: string, tps: number, atMs = Date.now()): void {
+    if (!model || !key || !Number.isFinite(tps) || tps <= 0) return;
+    const k = `${model}|${key}`;
+    const list = this.byKey.get(k) ?? [];
+    list.push({ at: atMs, tps });
+    if (list.length > SERVICE_SAMPLES) list.splice(0, list.length - SERVICE_SAMPLES);
+    this.byKey.set(k, list);
+    if (this.byKey.size > 512) this.byKey.delete(this.byKey.keys().next().value as string);
+  }
+
+  /** Median recent rate, the prior in place of each missing sample below SERVICE_MIN_SAMPLES; null without enough. */
+  rate(model: string, key: string, prior: number | undefined, nowMs = Date.now()): { tps: number; samples: number; prior: boolean } | null {
+    const values = (this.byKey.get(`${model}|${key}`) ?? []).filter((s) => nowMs - s.at <= SERVICE_WINDOW_MS).map((s) => s.tps);
+    const samples = values.length;
+    const usePrior = prior !== undefined && prior > 0 && samples < SERVICE_MIN_SAMPLES;
+    if (usePrior) for (let i = samples; i < SERVICE_MIN_SAMPLES; i++) values.push(prior!);
+    const m = median(values);
+    return m === null ? null : { tps: m, samples, prior: usePrior };
+  }
+
+  clear(): void {
+    this.byKey.clear();
+  }
+}
+
+export const decodeRates = new TokenRates();
+export const prefillRates = new TokenRates();
+
+/**
+ * One finished call's rates: decode = output tokens ÷ (last piece − first piece), prefill = prompt
+ * tokens ÷ (first piece − claim). Each is scaled up by the contention the call ran under (`running`
+ * calls on the host, itself included; best-fit.ts CONTENTION_SHARE), so a class's rate is its rate
+ * for one call and completionByClass applies the contention of the moment.
+ */
+export function noteDecodeRate(model: string | undefined, agentId: string | undefined, claimedAtMs: number | undefined, firstPieceAtMs: number | undefined, nowMs: number, tokens: { promptTokens: number; outputTokens: number } | undefined, running = 1): void {
+  if (!model || !agentId || claimedAtMs === undefined || firstPieceAtMs === undefined || !tokens) return;
+  const cls = effectiveHardware(agentId)?.computeClass ?? agentCapabilities.get(agentId)?.computeClass ?? "cpu";
+  if (cls === "cloud") return;
+  // As the speed samples (#572): a call its host was stolen from during says nothing about the class.
+  if (stolenDuring(agentId, claimedAtMs)) return;
+  const contention = 1 + (CONTENTION_SHARE[cls] ?? CONTENTION_SHARE.cpu) * Math.max(0, running - 1);
+  const genMs = nowMs - firstPieceAtMs;
+  if (tokens.outputTokens >= DECODE_SAMPLE_MIN_TOKENS && genMs >= 1_000) decodeRates.record(model, cls, (tokens.outputTokens / (genMs / 1000)) * contention, nowMs);
+  const ttftMs = firstPieceAtMs - claimedAtMs;
+  if (tokens.promptTokens >= PREFILL_SAMPLE_MIN_TOKENS && ttftMs >= 500) prefillRates.record(model, cls, (tokens.promptTokens / (ttftMs / 1000)) * contention, nowMs);
+}
+
+/** Fixed time per call besides prefill and decode (first-token scheduling, a warm model's setup). */
+export const DECODE_ESTIMATE_OVERHEAD_MS = 2_000;
+
+/**
+ * When a call reading `promptTokens` and writing `outputTokens` would be done on one free host of
+ * `computeClass` (ms, no contention): prompt ÷ prefill rate + output ÷ decode rate + a small overhead,
+ * from the class's measured rates (prior-filled). `prior`: judged on the prior alone. Null when the
+ * class has neither samples nor a prior (it is then judged on the speed estimate only). `usePrior`
+ * false: measured rates only (admission passes false for a class whose speed prior is off,
+ * INFERENCE_COMPLETION_PRIOR_SPEED, so "off" turns off both priors).
+ */
+export function decodeEstimateMs(model: string, computeClass: string, promptTokens: number, outputTokens: number, nowMs = Date.now(), usePrior = true): { ms: number; prior: boolean; decodeTps: number } | null {
+  const prior = usePrior ? priorDecodeTps(model, computeClass) : undefined;
+  const decode = decodeRates.rate(model, computeClass, prior, nowMs);
+  if (decode === null) return null;
+  const prefillFactor = SLOW_HOST_PREFILL_FACTOR[computeClass] ?? SLOW_HOST_PREFILL_FACTOR.cpu;
+  const prefill = prefillRates.rate(model, computeClass, decode.tps * prefillFactor, nowMs);
+  const prefillTps = prefill?.tps ?? decode.tps * prefillFactor;
+  const ms = DECODE_ESTIMATE_OVERHEAD_MS + (Math.max(0, promptTokens) / prefillTps + Math.max(0, outputTokens) / decode.tps) * 1000;
+  return { ms: Math.round(ms), prior: decode.prior, decodeTps: decode.tps };
+}
+
+/** A load report older than this says nothing about withheld slots. */
+export const WITHHELD_REPORT_FRESH_MS = 15_000;
+
+/**
+ * Run 7 (CPU ramp): slots an agent holds back: idle by the coordinator's count (its slots less the
+ * calls it holds) but not reported free in its latest pull (a throttled CPU, #563; also memory or an
+ * engine that is down). 0 without a fresh report.
+ */
+export function withheldSlots(agentId: string, held: number, nowMs = Date.now()): number {
+  const load = agentLoadReport(agentId);
+  if (!load || load.reportedFree === undefined || nowMs - load.atMs > WITHHELD_REPORT_FRESH_MS) return 0;
+  return Math.max(0, Math.max(0, load.slots - held) - load.reportedFree);
+}
+
+/**
+ * Whether `agentId` is held back now: it withholds slots (withheldSlots > 0), or it reported CPU steal
+ * or its throttle guard within WITHHELD_REPORT_FRESH_MS (host-steal.ts, #572: sent with every pull and
+ * reply piece, so a host whose slots are all busy says so too). A call it claimed but has not started
+ * would run there stolen from.
+ */
+export function agentWithholding(agentId: string, nowMs = Date.now()): boolean {
+  const stolenAt = agentStolenAt(agentId);
+  if (stolenAt !== undefined && nowMs - stolenAt <= WITHHELD_REPORT_FRESH_MS) return true;
+  return withheldSlots(agentId, queue.activeClaims().get(agentId)?.inference ?? 0, nowMs) > 0;
+}
+
+/** Live agents that hold `model` but take no new call now (every slot withheld). */
+export function withholdingHolders(model: string, nowMs = Date.now()): string[] {
+  const claims = queue.activeClaims();
+  const out: string[] = [];
+  for (const [id, cap] of agentCapabilities) {
+    if (!agentHasModel(cap, model) || activeBlacklistRecord(id) || nowMs - cap.lastSeenMs > 60_000) continue;
+    const held = claims.get(id)?.inference ?? 0;
+    const slots = Math.max(1, agentLoadReport(id)?.slots ?? cap.maxConcurrentTasks ?? 1);
+    if (slots - withheldSlots(id, held, nowMs) <= 0) out.push(id);
+  }
+  return out;
+}
+
+/** A claimed call with no first piece is taken back after at least this long (stalledClaimMs). */
+export const STALL_MIN_MS = 20_000;
+
+/**
+ * Run 7 (inf-1795617240059-949e8a28, inf-1795617241236-f9c28e38: claimed at once by a host that then
+ * ran out of CPU credit, nothing sent in 180 s): how long a claimed call may go without its first
+ * piece before it is taken back: STALL_MIN_MS + 3 × (cold load + its prompt at the class's prefill
+ * rate). Null for a class with no rate known or prior (the cloud host: reasoning before the first
+ * piece), which is never taken back this way.
+ */
+export function stalledClaimMs(model: string, computeClass: string, promptTokens: number, nowMs = Date.now()): number | null {
+  const prior = priorDecodeTps(model, computeClass);
+  const decode = decodeRates.rate(model, computeClass, prior, nowMs);
+  if (decode === null) return null;
+  const prefillFactor = SLOW_HOST_PREFILL_FACTOR[computeClass] ?? SLOW_HOST_PREFILL_FACTOR.cpu;
+  const prefillTps = prefillRates.rate(model, computeClass, decode.tps * prefillFactor, nowMs)?.tps ?? decode.tps * prefillFactor;
+  const loadMs = 1_000 + (paramsB(model) || 7) * 400;
+  return Math.round(STALL_MIN_MS + 3 * (loadMs + (Math.max(0, promptTokens) / prefillTps) * 1000));
+}

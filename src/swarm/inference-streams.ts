@@ -32,6 +32,8 @@ interface Stream {
   /** Tool calls the model made (Ollama format), sent with the last piece. */
   toolCalls?: unknown[];
   openedAtMs: number;
+  /** When the first text or tool call arrived (run 7: the decode-rate sample, and stalled claims). */
+  firstPieceAtMs?: number;
 }
 
 export class InferenceStreams {
@@ -68,6 +70,11 @@ export class InferenceStreams {
     return t?.length ? Buffer.byteLength(JSON.stringify(t), "utf8") : 0;
   }
 
+  /** When the stream's first text or tool call arrived, undefined before (or when unknown). */
+  firstPieceAt(subtaskId: string): number | undefined {
+    return this.streams.get(subtaskId)?.firstPieceAtMs;
+  }
+
   has(subtaskId: string): boolean {
     return this.streams.has(subtaskId);
   }
@@ -87,6 +94,7 @@ export class InferenceStreams {
     const toolBytes = toolCalls?.length ? Buffer.byteLength(JSON.stringify(toolCalls), "utf8") : 0;
     if (s.bytes + Buffer.byteLength(delta, "utf8") + toolBytes > MAX_BYTES) return "too_large";
     s.nextSeq++;
+    if (s.firstPieceAtMs === undefined && (delta || toolCalls?.length)) s.firstPieceAtMs = Date.now();
     if (delta) {
       s.chunks.push(delta);
       s.chars += delta.length;
