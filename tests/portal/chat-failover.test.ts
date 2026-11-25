@@ -297,6 +297,18 @@ describe("network chat picks and fails over", () => {
     expect(us.paths("/inference/submit")).toHaveLength(1);
   });
 
+  it("sends the chat to the next coordinator at once when the first is restarting (no wait, one refused submit)", async () => {
+    const us = await coordinator({ name: "us", agentModels: ["m"], submit: { status: 503, error: "coordinator_draining" } });
+    const eu = await coordinator({ name: "eu", agentModels: ["m"] });
+    const t0 = Date.now();
+    const res = await portal([us.url, eu.url]).chat(network());
+    expect(res.statusCode).toBe(200);
+    expect(text(res.body)).toBe("eu-net");
+    expect(Date.now() - t0).toBeLessThan(1_500);
+    expect(us.paths("/inference/submit")).toHaveLength(1);
+    expect(eu.paths("/inference/submit")).toHaveLength(1);
+  });
+
   it("retries when the first coordinator cannot be reached for the submit", async () => {
     const us = await coordinator({ name: "us", agentModels: ["m"] });
     const eu = await coordinator({ name: "eu", agentModels: ["m"] });

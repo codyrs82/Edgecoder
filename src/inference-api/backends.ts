@@ -5,7 +5,7 @@
 
 import { cpus } from "node:os";
 import type { ServedBy } from "../swarm/served-by.js";
-import { AutoUnsupportedError, NetworkInferenceError, RouteElsewhereError, streamNetworkCompletion, type NetworkDeps, type NetworkTarget } from "../apps/ide/network-inference.js";
+import { AutoUnsupportedError, CoordinatorDrainingError, DRAIN_RETRY_MAX_WAIT_MS, NetworkInferenceError, RouteElsewhereError, streamNetworkCompletion, type NetworkDeps, type NetworkTarget } from "../apps/ide/network-inference.js";
 import { contextWindowFor, ollamaChat, type OllamaPiece } from "./ollama.js";
 import { ENGINE_PRESETS, EngineError, openAiEngineChat, type OpenAiEngine } from "./openai-engine.js";
 import { BEST_FIT_ROUTE, ComplexityWindow, bestFitRoute, cheapestNetworkEstimate, classOnline, classUnavailableMessage, networkAllowance, noRouteMessage, notEnoughCSatsMessage, planRoutes, routeModelId, sizeWorkload, type ComplexityFloors, type ComputePolicy, type PlanOptions, type QualityFloor, type Route, type RouteInputs } from "./auto-route.js";
@@ -92,6 +92,8 @@ export function networkBackend(deps: NetworkDeps, target: { model: string; compu
       if (err instanceof ChatBackendError) throw err;
       if (err instanceof RouteElsewhereError) throw new RouteElsewhere(err.message, err.url);
       if (err instanceof AutoUnsupportedError) throw new AutoUnsupported(err.message);
+      // Only a caller that fails over itself (drainFailover) gets the refusal as one it can act on.
+      if (err instanceof CoordinatorDrainingError && target.drainFailover) throw new CoordinatorDraining(err.message, err.retryAfterSec ?? 3, err.peerUrl);
       if (err instanceof NetworkInferenceError) throw new ChatBackendError(err.message, err.status, err.retryAfterSec, err.info);
       throw new ChatBackendError((err as Error).message, 502);
     }
@@ -123,6 +125,48 @@ export function redirectingNetworkBackend(opts: { url: string; allowed: (url: st
       const next = err.url.replace(/\/+$/, "");
       const follow = next !== opts.url.replace(/\/+$/, "") && (await Promise.resolve(opts.allowed(next)).catch(() => false));
       return yield* opts.run(follow ? next : opts.url, false)(req, signal);
+    }
+  };
+}
+
+/**
+ * The coordinator is restarting for an update and refused the call before reserving anything
+ * (a drainFailover call): `peerUrl` is the coordinator it named to go to now, if any.
+ */
+export class CoordinatorDraining extends ChatBackendError {
+  constructor(message: string, retryAfterSec: number, readonly peerUrl: string | undefined) {
+    super(message, 503, retryAfterSec);
+  }
+}
+
+/**
+ * A call that a restarting coordinator refuses (CoordinatorDraining: refused in its request gate,
+ * before anything was reserved or streamed) is sent at once, once, to `peer(refusal)`: the
+ * coordinator the refusal names when it is a known one, else another the caller knows. With no peer
+ * the same backend is asked once more after the refusal's short wait (its replacement may answer by
+ * then). A second refusal is the caller's 503 with Retry-After. Nothing is retried once a piece has
+ * been passed on, and any other error is passed through as is.
+ */
+export function drainFailoverBackend(
+  first: ChatBackend,
+  peer: (refusal: CoordinatorDraining) => Promise<ChatBackend | null>,
+  sleep: (ms: number) => Promise<unknown> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): ChatBackend {
+  return async function* (req, signal) {
+    let sent = false;
+    try {
+      for await (const p of first(req, signal)) {
+        sent = true;
+        yield p;
+      }
+      return;
+    } catch (err) {
+      if (!(err instanceof CoordinatorDraining) || sent || signal?.aborted) throw err;
+      const next = await peer(err).catch(() => null);
+      if (next) return yield* next(req, signal);
+      await sleep(Math.min(DRAIN_RETRY_MAX_WAIT_MS, Math.max(250, (err.retryAfterSec ?? 3) * 1000)));
+      if (signal?.aborted) throw err;
+      return yield* first(req, signal);
     }
   };
 }
