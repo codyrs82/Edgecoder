@@ -404,6 +404,8 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
         // C9: the model's own service time there when reported; the coordinator-wide p50 (submit to
         // done over 15 min, every model, queueing included) lags a burst and mixes models.
         callP50Ms: load.serviceMs ?? r.callP50Ms ?? null,
+        // End to end for locality vs latency (coordinator-latency.ts): only the model's own service time.
+        serviceMs: load.serviceMs ?? null,
         agentRttMs: load.agentRttMs ?? null,
         reportAgeMs: reportAge(urls[i]),
         ...(load.freeRegions ? { freeRegions: load.freeRegions } : {}),
