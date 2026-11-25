@@ -2331,6 +2331,8 @@ async function loop(): Promise<void> {
 
         if (pulled.subtask) {
           const st = pulled.subtask;
+          // A model call's timeout counts from here, as the coordinator's claim lease does (inference-runner.ts).
+          const claimedAtMs = Date.now();
 
           // Inference-only: never run task code, whatever the coordinator sent.
           const inferenceOnlyRefusal = inferenceOnlyRejection(INFERENCE_ONLY, st);
@@ -2385,7 +2387,7 @@ async function loop(): Promise<void> {
             const run = admission && !admission.ok
               ? Promise.resolve<SubtaskResult>({ subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID, ok: false, output: "", error: admission.error, durationMs: 0, executed: false })
               : st.kind === "inference"
-              ? runInferenceSubtask(st, { agentId: AGENT_ID, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: keepAliveFor(st.requestedModel), contextWindow: CONTEXT_WINDOW, signal: callAbort.signal, onDelta: serving?.delta, post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }), ...(OPENAI_ENGINE ? { chat: engineChat } : CLOUD_HOST ? { chat: (m, r, s, t) => CLOUD_HOST.chat(m, r, s, t) } : {}) })
+              ? runInferenceSubtask(st, { agentId: AGENT_ID, claimedAtMs, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: keepAliveFor(st.requestedModel), contextWindow: CONTEXT_WINDOW, signal: callAbort.signal, onDelta: serving?.delta, post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }), ...(OPENAI_ENGINE ? { chat: engineChat } : CLOUD_HOST ? { chat: (m, r, s, t) => CLOUD_HOST.chat(m, r, s, t) } : {}) })
               : runPolicedSubtask(st, { quiet: true });
             if (admission && !admission.ok) console.warn(`[agent:${AGENT_ID}] handed back inference ${st.id} on ${st.requestedModel}: ${admission.error}`);
             else if (st.kind === "inference") console.log(`[agent:${AGENT_ID}] running inference ${st.id} on ${st.requestedModel}`);

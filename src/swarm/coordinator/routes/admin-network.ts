@@ -36,7 +36,7 @@ import { agentSocketLost } from "../agent-liveness.js";
 import { effectiveHardware, hardwareVerifier } from "../economy.js";
 import { routableModels } from "../../model-catalog.js";
 import { noteServiceTime } from "../start-eta.js";
-import { inferenceCancelledForCapacity } from "./inference.js";
+import { inferenceCancelledForCapacity, inferenceStreams } from "./inference.js";
 import { bestFitConfig, complexityWeights, noteRoutedChunk, recentDecisions, restoreDecisions, ROUTING_LOG_SIZE, setCallDurationSource, setDecisionSink, storedDecision } from "../routing.js";
 import {
   InferenceTracker,
@@ -392,7 +392,7 @@ export type NetworkSnapshot = Awaited<ReturnType<typeof networkSnapshot>>;
 /** Read what /inference/submit and /inference/chunks answered; never changes the answer. */
 export function observeInference(url: string | undefined, status: number, body: unknown, payload: unknown, nowMs = Date.now()): void {
   if (url !== "/inference/submit" && url !== "/inference/chunks") return;
-  const b = (body ?? {}) as { model?: unknown; subtaskId?: unknown; done?: unknown; error?: unknown };
+  const b = (body ?? {}) as { model?: unknown; subtaskId?: unknown; done?: unknown; error?: unknown; promptTokens?: unknown; outputTokens?: unknown };
   const text = typeof payload === "string" ? payload : Buffer.isBuffer(payload) ? payload.toString("utf8") : "";
   if (url === "/inference/submit") {
     const model = typeof b.model === "string" ? b.model : "";
@@ -412,7 +412,17 @@ export function observeInference(url: string | undefined, status: number, body: 
   const claim = queue.getClaim(b.subtaskId);
   noteRoutedChunk(b.subtaskId, claim?.claimedBy, b.done === true, error, nowMs);
   // C9: how long the model holds a slot here (claim to last piece), for the start estimate at submit.
-  if (b.done === true && claim) noteServiceTime(claim.subtask.requestedModel, claim.claimedBy, claim.claimedAt, nowMs);
+  // With the tokens it read and wrote (the model's counts, else estimated from the bytes: a timed-out
+  // call has none), the sample also gives the class's speed, for the completion estimate.
+  if (b.done === true && claim) noteServiceTime(claim.subtask.requestedModel, claim.claimedBy, claim.claimedAt, nowMs, sampleTokens(b, claim.subtask.input, inferenceStreams.replyBytes(b.subtaskId) ?? 0));
+}
+
+/** A finished call's token counts for its speed sample: the reported ones, else ~4 bytes a token; none without output. */
+export function sampleTokens(b: { promptTokens?: unknown; outputTokens?: unknown }, input: string, replyBytes: number): { promptTokens: number; outputTokens: number } | undefined {
+  const count = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined);
+  const outputTokens = count(b.outputTokens) ?? (replyBytes > 0 ? Math.ceil(replyBytes / 4) : undefined);
+  if (outputTokens === undefined) return undefined;
+  return { promptTokens: count(b.promptTokens) ?? Math.ceil(Buffer.byteLength(input, "utf8") / 4), outputTokens };
 }
 
 const querySchema = z.object({ range: z.enum(Object.keys(SERIES_RANGES) as [SeriesRange, ...SeriesRange[]]).default("1h") });

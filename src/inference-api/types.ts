@@ -71,7 +71,17 @@ export type ChatPiece =
       usd?: number;
       /** Frontier calls: the model that answered (a server-side fallback may differ from the one asked). */
       servedBy?: string;
+      /** Why the reply ended early (a non-streamed reply cut at its deadline), for the client to read. */
+      note?: string;
     };
+
+/**
+ * The machine running a network call reported that it ran out its time (the agent's
+ * "timed out after N s", inference-runner.ts). Its `info.code`, when some of the reply was already
+ * sent: a non-streamed reply then returns that part as a reply cut at the limit (routes.ts).
+ */
+export const DEADLINE_ERROR_CODE = "timed_out";
+export const DEADLINE_ERROR = /^timed out after \d+ s$/;
 
 export class ChatBackendError extends Error {
   /**

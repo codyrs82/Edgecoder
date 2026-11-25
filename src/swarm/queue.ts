@@ -563,6 +563,12 @@ export class SwarmQueue {
     return Math.max(Math.min(hard, live), item.lateReturnUntilMs ?? 0);
   }
 
+  /** The claim that last lapsed on this item while it waits to be claimed again (holder, claim and lapse times). */
+  lapsedClaim(subtaskId: string): { agentId: string; claimedAt: number; atMs: number } | undefined {
+    const lapsed = this.tasks.find((t) => t.subtask.id === subtaskId)?.lapsed;
+    return lapsed ? { ...lapsed } : undefined;
+  }
+
   /**
    * Keep an item whose claim just lapsed from other agents until `untilMs` (it still waits for its
    * lapsed holder's late result: a model call with no time left for another agent to run it).
