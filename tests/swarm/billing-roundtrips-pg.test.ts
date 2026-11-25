@@ -149,6 +149,8 @@ describe.skipIf(!PG_URL)("a model call's database round trips (coordinator on Po
     await new Promise<void>((resolve) => portal.listen(0, "127.0.0.1", resolve));
     process.env.PORTAL_SERVICE_URL = `http://127.0.0.1:${(portal.address() as AddressInfo).port}`;
     process.env.MESH_AUTH_TOKEN = MESH;
+    // Run 5 prior speed off: completion admission is not what these test (start-eta.ts; tests/swarm/completion-run5.test.ts).
+    process.env.INFERENCE_COMPLETION_PRIOR_SPEED = "off";
     process.env.DATABASE_URL = PG_URL;
     process.env.COORDINATOR_PEER_ID = `coord-rt-${randomUUID().slice(0, 8)}`;
     process.env.RESULT_VERIFICATION_RATE = "0";
