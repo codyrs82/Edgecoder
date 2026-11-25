@@ -105,10 +105,33 @@ Provider errors: 429 and 5xx are retried with exponential backoff (Retry-After h
 another host. A prompt longer than the model's window fails as `context_too_long`.
 
 Reasoning: GLM-5.3 and DeepSeek V4.1 Flash stream their thinking (`reasoning_content`) before the
-answer, and the provider counts it as output. A call whose `max_tokens` runs out inside the
-reasoning fails as `reasoning_only: … send a larger max_tokens` (HTTP 400 to the caller): it is
-the request's limit, so the coordinator neither retries it elsewhere nor counts it against the
-host's circuit breaker, and the host still adds what the provider billed to its spend guard.
+answer, and the provider counts it as output: Fireworks' `max_tokens` covers the thinking and the
+answer together (network runs 3 and 4: calls at `max_tokens` 1024 and 2048 ended inside the
+thinking). So the host gives a reasoning model room to think:
+
+- it asks the provider for the call's `max_tokens` plus a reasoning allowance
+  (`CLOUD_HOST_REASONING_ALLOWANCE`; 4096 for Flash and 2048 for GLM-5.3 by default);
+- it passes on at most the call's own `max_tokens` of answer (estimated from the stream: a piece is
+  about a token, at least one per 4 characters). At the cap it closes the stream and the reply ends
+  with finish `length`. The provider's counts then never arrive, so the tokens streamed so far
+  (thinking and answer) are estimated the same way;
+- a reply that is still reasoning only is asked once more with twice the allowance (nothing has
+  reached the caller yet); only then does it fail as `reasoning_only: … send a larger max_tokens`
+  (HTTP 400 to the caller). That is the request's limit, so the coordinator neither retries it
+  elsewhere nor counts it against the host's circuit breaker.
+
+Fireworks also takes an integer `reasoning_effort` or `thinking.budget_tokens` as a hard cap on the
+thinking, but not for every model (DeepSeek V4.1 is listed as an exception), so the host does not
+rely on it; `CLOUD_HOST_REASONING_EFFORT` still sends a word such as `low` when set.
+
+**Billing reasoning tokens.** The buyer is billed on the completion tokens the provider reports,
+the thinking included, through the usual pricing path, but never more than the call's own
+`max_tokens` (+64): the coordinator bounds a cloud call's output by its `max_tokens`
+(`boundTokenCounts`), which is also what the hold at submit was sized on. Thinking past that, and
+an attempt asked again after a reasoning-only reply, are the platform's cost: the host adds every
+attempt the provider billed to its spend guard, and nothing of it reaches the buyer or the ledger.
+This keeps the ledger as it was (settlement never exceeds the hold) and the buyer's bill within the
+cap they set; billing only the answer's tokens would price most calls below the provider's cost.
 `CLOUD_HOST_REASONING_EFFORT` (unset: the provider's default) is sent as `reasoning_effort` with
 every call, e.g. `low`, or `none` where the provider can turn thinking off for the model.
 
@@ -161,12 +184,23 @@ asks for `quality: best` at top-tier complexity and its estimate is within the p
 price ceiling (`maxCSats`, a bot's budget left) below a cloud call's estimate leaves it out, and
 the no-route error then names the cheapest fitting model and its estimate.
 
-Both built-in cloud models reason before they answer (`reasoning_content`), so a call whose
-`max_tokens` is below a model's reasoning budget is never placed on it: the cap would end inside
-the thinking and the caller would get 400 `reasoning_only`. The budget is 1024 tokens for GLM-5.3
-and Flash by default; `AUTO_REASONING_MIN_TOKENS` changes it (`2048` for both,
-`glm-5.3=2048,deepseek-v4.1-flash=1024` per model, `off`). A call without `max_tokens` is not
+Both built-in cloud models reason before they answer (`reasoning_content`). The cloud host gives
+them room on top of the call's `max_tokens` (Reasoning, above), so best fit no longer keeps a
+small-`max_tokens` call off them. `AUTO_REASONING_MIN_TOKENS` still sets a minimum `max_tokens`
+for a reasoning model (`2048` for both, `glm-5.3=2048,deepseek-v4.1-flash=1024` per model), for a
+cloud host without the allowance; it is off by default. A call without `max_tokens` is never
 filtered.
+
+For a simple or standard call the cloud is overflow, decided before anything is scored: it is not
+a candidate at all while any network machine in the call's spill band has a free slot that would
+finish in time, whatever session affinity or the speed estimate say. In time means an estimated
+completion within `BEST_FIT_MAX_COMPLETION_MS` (120 s, two thirds of the 180 s call deadline). A
+machine slower than that is not counted as room, so the cloud takes the call. While the cloud can
+take it, such a machine is not placed on (network run 4: a 1.5b CPU host given a 2.5k-token tests
+call timed out at 180 s). Peers' machines count too: routing keeps using a peer coordinator's last
+good view for up to 60 s while a refresh is slow or failing. A decision that sends a call to the
+cloud as overflow says so: `(cloud overflow: no machine ≥ 1.5B has a free slot that finishes
+within 2.0 min)`.
 
 When nothing fits, the coordinator says why: `No machine on the network can run this job right
 now (needs a model ≥ 14B with tools; online: …)`, a price ceiling below every fitting model, or

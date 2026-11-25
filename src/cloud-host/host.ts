@@ -23,7 +23,7 @@ import { alertChannels } from "../alerting/index.js";
 import type { AlertConfig } from "../alerting/config.js";
 import type { AlertNotification } from "../alerting/types.js";
 import { cloudCatalog, cloudModelSpec, providerCostUsd, type CloudModelSpec, type CloudProviderId } from "./catalog.js";
-import { CloudApiError, probeKey, remoteChat, type RemoteBackendConfig } from "./backend.js";
+import { CloudApiError, probeKey, reasoningChat, type RemoteBackendConfig } from "./backend.js";
 import { DEFAULT_SPEND_GUARD, SpendGuard, type SpendEvent, type SpendGuardConfig, type SpendState } from "./spend-guard.js";
 
 export const PROVIDER_DEFAULTS: Record<CloudProviderId, { label: string; baseUrl: string }> = {
@@ -48,6 +48,47 @@ export interface CloudHostConfig {
   stateFile?: string;
   /** `reasoning_effort` sent with each call (CLOUD_HOST_REASONING_EFFORT); unset: the provider's default. */
   reasoningEffort?: string;
+  /**
+   * Reasoning models and the tokens of thinking asked for on top of each call's max_tokens
+   * (CLOUD_HOST_REASONING_ALLOWANCE; DEFAULT_REASONING_ALLOWANCE). A model not listed: none.
+   */
+  reasoningAllowance?: Record<string, number>;
+}
+
+/**
+ * Thinking room per built-in reasoning model, on top of the caller's max_tokens (run 4: DeepSeek
+ * V4.1 Flash still ran out inside its reasoning on a standard refactor at max_tokens 2048; GLM-5.3
+ * thinks less).
+ */
+export const DEFAULT_REASONING_ALLOWANCE: Readonly<Record<string, number>> = { "deepseek-v4.1-flash": 4_096, "glm-5.3": 2_048 };
+
+/**
+ * CLOUD_HOST_REASONING_ALLOWANCE: unset, DEFAULT_REASONING_ALLOWANCE; a number, every enabled model
+ * at that (0: none); "model=n" pairs, comma-separated, set those models over the defaults (model=0
+ * removes one); "off": none. Throws on anything else.
+ */
+export function parseReasoningAllowance(raw: string | undefined, models: readonly string[]): Record<string, number> {
+  const t = (raw ?? "").trim().toLowerCase();
+  if (t === "") return { ...DEFAULT_REASONING_ALLOWANCE };
+  if (t === "off" || t === "none") return {};
+  const ok = (n: number) => Number.isInteger(n) && n >= 0 && n <= 200_000;
+  const bad = () => new Error("CLOUD_HOST_REASONING_ALLOWANCE must be a token count (0-200000), model=tokens pairs separated by commas, or off");
+  const out: Record<string, number> = {};
+  if (/^\d+$/.test(t)) {
+    const n = Number(t);
+    if (!ok(n)) throw bad();
+    for (const m of models) out[m] = n;
+  } else {
+    Object.assign(out, DEFAULT_REASONING_ALLOWANCE);
+    for (const part of t.split(",").map((x) => x.trim()).filter(Boolean)) {
+      const eq = part.lastIndexOf("=");
+      const n = Number(part.slice(eq + 1).trim());
+      if (eq <= 0 || !ok(n)) throw bad();
+      out[part.slice(0, eq).trim()] = n;
+    }
+  }
+  for (const [m, n] of Object.entries(out)) if (n === 0) delete out[m];
+  return out;
 }
 
 /** The subset of the worker's validated env (src/config/worker.ts) a cloud host reads. */
@@ -66,6 +107,7 @@ export interface CloudHostEnv {
   CLOUD_HOST_AUTH_PROBE_MINUTES?: number;
   CLOUD_HOST_STATE_FILE?: string;
   CLOUD_HOST_REASONING_EFFORT?: string;
+  CLOUD_HOST_REASONING_ALLOWANCE?: string;
 }
 
 /** The cloud host's configuration (throws with the variable named when something is missing or wrong). */
@@ -116,7 +158,8 @@ export function cloudHostConfigFromEnv(env: CloudHostEnv, defaults: { stateFile?
     guard,
     authProbeMs: Math.max(1, env.CLOUD_HOST_AUTH_PROBE_MINUTES ?? 15) * 60_000,
     ...(stateFile ? { stateFile } : {}),
-    ...(reasoningEffort ? { reasoningEffort } : {})
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    reasoningAllowance: parseReasoningAllowance(env.CLOUD_HOST_REASONING_ALLOWANCE, models)
   };
 }
 
@@ -331,6 +374,13 @@ export class CloudHost {
    * "cloud_capacity_paused" while paused; a call longer than the model's window is a context
    * overflow (another host may serve it). Whatever it cost is added to the spend guard: the
    * provider's counts, else an estimate when the stream broke off before them.
+   *
+   * A reasoning model gets room to think (reasoningAllowance, backend.ts reasoningChat): the
+   * provider is asked for max_tokens plus the allowance, the answer is capped at max_tokens, and a
+   * reasoning-only reply is asked once more with twice the allowance. The counts reported to the
+   * coordinator are the provider's (reasoning included); the coordinator bills output tokens only up
+   * to the call's own max_tokens (inference-streams.ts boundTokenCounts), so the thinking past that,
+   * and an attempt asked again, are the platform's cost: they go to the spend guard, never to the buyer.
    */
   async *chat(model: string, req: { messages: ChatMessage[]; tools?: ToolSpec[]; maxTokens?: number; temperature?: number }, signal: AbortSignal, timeoutMs: number): AsyncGenerator<OllamaPiece> {
     const paused = this.guard.pausedError();
@@ -343,7 +393,9 @@ export class CloudHost {
     let outChars = 0;
     let usage: { promptTokens?: number; outputTokens?: number; cachedPromptTokens?: number } | undefined;
     try {
-      for await (const piece of remoteChat(this.backend, { model: this.config.modelMap[spec.id] ?? spec.providerModel, ...req }, signal, timeoutMs)) {
+      const allowance = this.config.reasoningAllowance?.[spec.id] ?? 0;
+      const billed = (u: NonNullable<CloudApiError["usage"]>) => this.guard.record(providerCostUsd(spec, u));
+      for await (const piece of reasoningChat(this.backend, { model: this.config.modelMap[spec.id] ?? spec.providerModel, ...req }, allowance, signal, timeoutMs, billed)) {
         if (!answered) {
           answered = true;
           this.guard.noteAuthOk();

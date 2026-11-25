@@ -63,6 +63,13 @@ export const WORLD_LOCAL_CACHE_MS = 5_000;
 /** A peer coordinator's view is fetched at most this often. */
 export const WORLD_PEER_CACHE_MS = 15_000;
 export const WORLD_PEER_TIMEOUT_MS = 3_000;
+/**
+ * Routing uses a peer's last good view up to this old while a fresh one is being fetched or the
+ * fetch failed (run 4: a slow or failed fetch left a coordinator routing without its peers for a
+ * whole cache period, so Auto saw its own CPU hosts full and sent simple calls to the cloud while the
+ * peer's hosts were idle).
+ */
+export const WORLD_PEER_ROUTING_STALE_MS = 60_000;
 export const WORLD_RATE_PER_MIN = 30;
 
 const maskKey = worldMaskKey(coordinatorKeys.privateKeyPem);
@@ -221,9 +228,12 @@ let peerFetch: PeerFetch = undiciFetch;
 export function setWorldPeerFetch(f: PeerFetch | null): void {
   peerFetch = f ?? undiciFetch;
   peerCache.clear();
+  peerLastGood.clear();
 }
 
-const peerCache = new Map<string, { atMs: number; value: Promise<LocalWorld | null> }>();
+const peerCache = new Map<string, { atMs: number; value: Promise<LocalWorld | null>; settled?: { world: LocalWorld | null } }>();
+/** Each peer's last good view and when it was fetched (routing's fallback). */
+const peerLastGood = new Map<string, { atMs: number; world: LocalWorld }>();
 
 function fetchPeerWorld(peer: { peerId: string; url: string }, nowMs: number): Promise<LocalWorld | null> {
   const hit = peerCache.get(peer.peerId);
@@ -241,8 +251,27 @@ function fetchPeerWorld(peer: { peerId: string; url: string }, nowMs: number): P
       return null;
     }
   })();
-  peerCache.set(peer.peerId, { atMs: nowMs, value });
+  const entry: { atMs: number; value: Promise<LocalWorld | null>; settled?: { world: LocalWorld | null } } = { atMs: nowMs, value };
+  void value.then((world) => {
+    entry.settled = { world };
+    if (world) peerLastGood.set(peer.peerId, { atMs: nowMs, world });
+  });
+  peerCache.set(peer.peerId, entry);
   for (const id of peerCache.keys()) if (!peerCoordinators().some((p) => p.peerId === id)) peerCache.delete(id);
+  for (const id of peerLastGood.keys()) if (!peerCoordinators().some((p) => p.peerId === id)) peerLastGood.delete(id);
+  return value;
+}
+
+/**
+ * A peer's view for routing: the cached one when it is in; else (being fetched, or the fetch failed)
+ * its last good view up to WORLD_PEER_ROUTING_STALE_MS old, at once; else the fetch.
+ */
+function peerWorldForRouting(peer: { peerId: string; url: string }, nowMs: number): Promise<LocalWorld | null> | LocalWorld | null {
+  const value = fetchPeerWorld(peer, nowMs);
+  const settled = peerCache.get(peer.peerId)?.settled;
+  if (settled?.world) return settled.world;
+  const last = peerLastGood.get(peer.peerId);
+  if (last && nowMs - last.atMs <= WORLD_PEER_ROUTING_STALE_MS) return last.world;
   return value;
 }
 
@@ -285,7 +314,7 @@ const portalQuery = z.object({ accountId: z.string().min(1).max(128).optional() 
 /** Peers' views for best-fit routing (cached like the world view's), with the link round trip. */
 async function peerWorldsForRouting(nowMs: number): Promise<Array<{ world: LocalWorld; linkRttMs: number | null }>> {
   const peers = peerCoordinators();
-  const views = await Promise.all(peers.map((p) => fetchPeerWorld(p, nowMs)));
+  const views = await Promise.all(peers.map((p) => peerWorldForRouting(p, nowMs)));
   const out: Array<{ world: LocalWorld; linkRttMs: number | null }> = [];
   views.forEach((world, i) => {
     if (world) out.push({ world, linkRttMs: linkRtt(peers[i].peerId, nowMs) });

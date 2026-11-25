@@ -88,43 +88,49 @@ function pool(o: { mac7Free?: number; mac9Free?: number; cpu?: boolean; cloud?: 
 }
 const isCloud = (m?: string) => m === GLM || m === FLASH;
 
-describe("C5: reasoning models need room in max_tokens", () => {
-  it("built-in budget 1024 for GLM-5.3 and DeepSeek V4.1 Flash; AUTO_REASONING_MIN_TOKENS sets it", () => {
-    expect(reasoningMinTokensFor(GLM)).toBe(1_024);
-    expect(reasoningMinTokensFor(FLASH)).toBe(1_024);
-    expect(reasoningMinTokensFor(M7)).toBeUndefined();
-    expect(outputRoomFor(GLM, 40)).toBe(false);
-    expect(outputRoomFor(GLM, 1_024)).toBe(true);
-    expect(outputRoomFor(GLM, undefined)).toBe(true); // the provider's default cap
-    expect(outputRoomFor(M7, 16)).toBe(true);
+describe("C5: reasoning models and max_tokens (AUTO_REASONING_MIN_TOKENS, off by default since run 4)", () => {
+  const C5 = { ...DEFAULT_BEST_FIT_CONFIG, reasoningMinTokens: parseReasoningMinTokens("1024") };
+  it("unset: no filter (the cloud host adds a reasoning allowance); a number or pairs set one", () => {
+    expect(reasoningMinTokensFor(GLM)).toBeUndefined();
+    expect(reasoningMinTokensFor(FLASH)).toBeUndefined();
+    expect(outputRoomFor(GLM, 40)).toBe(true);
+    expect(reasoningMinTokensFor(GLM, C5)).toBe(1_024);
+    expect(reasoningMinTokensFor(M7, C5)).toBeUndefined();
+    expect(outputRoomFor(GLM, 40, C5)).toBe(false);
+    expect(outputRoomFor(GLM, 1_024, C5)).toBe(true);
+    expect(outputRoomFor(GLM, undefined, C5)).toBe(true); // the provider's default cap
+    expect(outputRoomFor(M7, 16, C5)).toBe(true);
     expect(parseReasoningMinTokens("2048")).toEqual({ [GLM]: 2_048, [FLASH]: 2_048 });
-    expect(parseReasoningMinTokens(`${GLM}=4096, kimi-k3=1500`)).toEqual({ [GLM]: 4_096, [FLASH]: 1_024, "kimi-k3": 1_500 });
-    expect(parseReasoningMinTokens(`${FLASH}=0`)).toEqual({ [GLM]: 1_024 });
+    expect(parseReasoningMinTokens(`${GLM}=4096, kimi-k3=1500`)).toEqual({ [GLM]: 4_096, "kimi-k3": 1_500 });
+    expect(parseReasoningMinTokens(`1024, ${FLASH}=0`)).toEqual({ [GLM]: 1_024 });
     expect(parseReasoningMinTokens("off")).toEqual({});
-    expect(parseReasoningMinTokens("junk, glm-5.3=abc")).toEqual({ [GLM]: 1_024, [FLASH]: 1_024 });
+    expect(parseReasoningMinTokens("")).toEqual({});
+    expect(parseReasoningMinTokens("junk, glm-5.3=abc")).toEqual({});
     expect(bestFitConfigFromEnv({ AUTO_REASONING_MIN_TOKENS: "2048" }).reasoningMinTokens[FLASH]).toBe(2_048);
-    expect(bestFitConfigFromEnv({}).reasoningMinTokens).toEqual(DEFAULT_BEST_FIT_CONFIG.reasoningMinTokens);
+    expect(bestFitConfigFromEnv({}).reasoningMinTokens).toEqual({});
   });
 
-  it("a top-tier call with max_tokens 40 is not placed on a reasoning cloud model; with 4096 it is", () => {
+  it("with a filter set, a top-tier call with max_tokens 40 is not placed on a reasoning cloud model; with 4096 it is", () => {
     const small = describeJob({ ...MULTI_FILE_REFACTOR, maxTokens: 40 }, { complexity: "very_high" });
-    expect(isCloud(bestFit(small, pool()).chosen?.model)).toBe(false);
+    expect(isCloud(bestFit(small, pool(), C5).chosen?.model)).toBe(false);
+    // Off (the default): the cloud host gives the thinking room on top of the 40 tokens.
+    expect(isCloud(bestFit(small, pool()).chosen?.model)).toBe(true);
     const big = describeJob({ ...MULTI_FILE_REFACTOR, maxTokens: 4_096 }, { complexity: "very_high" });
-    expect(isCloud(bestFit(big, pool()).chosen?.model)).toBe(true);
+    expect(isCloud(bestFit(big, pool(), C5).chosen?.model)).toBe(true);
   });
 
-  it("run 3 (1f643318): a simple call with every Mac busy spilled to cloud DeepSeek at max_tokens 1024 under a 2048 budget; now it stays on the network", () => {
+  it("run 3 (1f643318): a simple call with every Mac busy, max_tokens 1024 under a 2048 budget, stays on the network", () => {
     const cfg = { ...DEFAULT_BEST_FIT_CONFIG, reasoningMinTokens: parseReasoningMinTokens("2048") };
     const job = describeJob({ ...SIMPLE_QA, maxTokens: 1_024 }, { minParamsB: 7 });
     const r = bestFit(job, pool({ mac7Free: 0, mac9Free: 0 }), cfg);
     expect(isCloud(r.chosen?.model)).toBe(false);
-    // With the default budget (1024) the cloud overflow is allowed again.
+    // Without the budget the cloud overflow is allowed again.
     expect(isCloud(bestFit(job, pool({ mac7Free: 0, mac9Free: 0 })).chosen?.model)).toBe(true);
   });
 
-  it("only reasoning models fit: the refusal says which max_tokens they need", () => {
+  it("only reasoning models fit and a filter is set: the refusal says which max_tokens they need", () => {
     const job = describeJob({ ...MULTI_FILE_REFACTOR, tools: TOOLS, maxTokens: 64 }, { complexity: "very_high" });
-    const r = bestFit(job, { ...pool({ cpu: false }), agents: pool({ cpu: false }).agents.filter((a) => a.computeClass === "cloud") });
+    const r = bestFit(job, { ...pool({ cpu: false }), agents: pool({ cpu: false }).agents.filter((a) => a.computeClass === "cloud") }, C5);
     expect(r.chosen).toBeNull();
     expect(r.rejected).toMatch(/deepseek-v4\.1-flash needs max_tokens ≥ 1024, glm-5\.3 needs max_tokens ≥ 1024/);
   });

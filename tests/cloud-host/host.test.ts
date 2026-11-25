@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { CloudHost, PROVIDER_ACCOUNT_ALERT_EVERY_MS, cloudHostConfigFromEnv, providerAccountAlert, providerAccountProblem, spendAlert, type CloudHostConfig, type CloudHostEvent } from "../../src/cloud-host/host.js";
+import { CloudHost, DEFAULT_REASONING_ALLOWANCE, PROVIDER_ACCOUNT_ALERT_EVERY_MS, cloudHostConfigFromEnv, parseReasoningAllowance, providerAccountAlert, providerAccountProblem, spendAlert, type CloudHostConfig, type CloudHostEvent } from "../../src/cloud-host/host.js";
 import { CloudApiError } from "../../src/cloud-host/backend.js";
 import { cloudHostEnv } from "../../src/cloud-host/main.js";
 import { classifyHardware } from "../../src/economy/compute-classes.js";
@@ -78,7 +78,8 @@ describe("a call on the cloud host", () => {
   it("a reply cut off before the counts is still counted (estimated from the text)", async () => {
     fake = await startFakeProvider([{ stream: [{ choices: [{ index: 0, delta: { content: "x".repeat(300) } }] }, { error: { message: "reset" } }] }]);
     const h = host(fake.url);
-    await expect(run(h, "deepseek-v4.1-flash")).rejects.toThrow(/reset/);
+    // max_tokens well above the 300 characters, so the answer cap does not end it first.
+    await expect(run(h, "deepseek-v4.1-flash", 1_000)).rejects.toThrow(/reset/);
     expect(h.guard.status().dayUsd).toBeGreaterThan(0);
   });
 
@@ -88,8 +89,60 @@ describe("a call on the cloud host", () => {
     ]);
     const h = host(fake.url);
     await expect(run(h, "deepseek-v4.1-flash", 16)).rejects.toThrow(/^reasoning_only: /);
-    // 1M × 0.30 + 1M × 1.20, per million
-    expect(h.guard.status().dayUsd).toBeCloseTo(1.5, 9);
+    // Asked with the reasoning allowance, then once more with twice it.
+    expect(fake.requests.map((r) => r.body.max_tokens)).toEqual([16 + 4_096, 16 + 8_192]);
+    // Both attempts billed by the provider, both counted: 2 × (1M × 0.30 + 1M × 1.20), per million.
+    expect(h.guard.status().dayUsd).toBeCloseTo(3, 9);
+  });
+
+  it("run 4: a reasoning model is asked for max_tokens plus its allowance, and the answer is capped at max_tokens", async () => {
+    const reasoning = Array.from({ length: 50 }, () => ({ choices: [{ index: 0, delta: { reasoning_content: "hm " } }] }));
+    const answer = Array.from({ length: 40 }, (_, i) => ({ choices: [{ index: 0, delta: { content: `w${i} ` } }] }));
+    fake = await startFakeProvider([{ stream: [...reasoning, ...answer, { choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }, { choices: [], usage: { prompt_tokens: 10, completion_tokens: 90 } }, "[DONE]"] }]);
+    const h = host(fake.url);
+    const pieces = await run(h, "deepseek-v4.1-flash", 16);
+    expect(fake.requests[0].body.max_tokens).toBe(16 + DEFAULT_REASONING_ALLOWANCE["deepseek-v4.1-flash"]);
+    const text = pieces.filter((p) => "delta" in p);
+    expect(text).toHaveLength(16);
+    // Cut at the caller's cap: "length", and the provider's counts never came, so the streamed tokens are estimated.
+    expect(pieces.at(-1)).toMatchObject({ doneReason: "length", outputTokens: 50 + 16 });
+    expect(h.guard.status().dayUsd).toBeGreaterThan(0);
+  });
+
+  it("run 4: a reasoning-only reply is asked once more with twice the allowance; the answer then goes through", async () => {
+    fake = await startFakeProvider([
+      { stream: [{ choices: [{ index: 0, delta: { reasoning_content: "thinking" }, finish_reason: "length" }] }, { choices: [], usage: { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 } }, "[DONE]"] },
+      { stream: [{ choices: [{ index: 0, delta: { reasoning_content: "more" } }] }, { choices: [{ index: 0, delta: { content: "done" }, finish_reason: "stop" }] }, { choices: [], usage: { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 } }, "[DONE]"] }
+    ]);
+    const h = host(fake.url);
+    const pieces = await run(h, "glm-5.3", 2_048);
+    expect(fake.requests.map((r) => r.body.max_tokens)).toEqual([2_048 + 2_048, 2_048 + 4_096]);
+    expect(pieces.filter((p) => "delta" in p).map((p) => (p as { delta: string }).delta).join("")).toBe("done");
+    // The coordinator gets the answered attempt's counts; the first attempt is the platform's cost (spend guard).
+    expect(pieces.at(-1)).toMatchObject({ doneReason: "stop", promptTokens: 1_000_000, outputTokens: 1_000_000 });
+    // 2 × (1M × 1.40 + 1M × 4.40), per million
+    expect(h.guard.status().dayUsd).toBeCloseTo(11.6, 9);
+  });
+
+  it("a call without max_tokens, or a model without an allowance, is sent as is", async () => {
+    fake = await startFakeProvider([streamReply({ text: ["ok"], usage: { prompt_tokens: 1, completion_tokens: 1 } })]);
+    const out: OllamaPiece[] = [];
+    for await (const p of host(fake.url).chat("glm-5.3", { messages: [{ role: "user", content: "hi" }] }, new AbortController().signal, 10_000)) out.push(p);
+    expect(fake.requests[0].body).not.toHaveProperty("max_tokens");
+    const cfg = cloudHostConfigFromEnv({ CLOUD_HOST_API_KEY: KEY, CLOUD_HOST_BASE_URL: fake.url, CLOUD_HOST_MAX_RETRIES: 0, CLOUD_HOST_REASONING_ALLOWANCE: "off" });
+    await run(new CloudHost(cfg, { store: { load: () => undefined, save: () => undefined } }), "glm-5.3", 50);
+    expect(fake.requests[1].body.max_tokens).toBe(50);
+  });
+
+  it("CLOUD_HOST_REASONING_ALLOWANCE: defaults, a number, model pairs, off", () => {
+    const models = ["glm-5.3", "deepseek-v4.1-flash"];
+    expect(parseReasoningAllowance(undefined, models)).toEqual({ "deepseek-v4.1-flash": 4_096, "glm-5.3": 2_048 });
+    expect(parseReasoningAllowance("8192", models)).toEqual({ "glm-5.3": 8_192, "deepseek-v4.1-flash": 8_192 });
+    expect(parseReasoningAllowance("glm-5.3=0, deepseek-v4.1-flash=6000", models)).toEqual({ "deepseek-v4.1-flash": 6_000 });
+    expect(parseReasoningAllowance("off", models)).toEqual({});
+    expect(parseReasoningAllowance("0", models)).toEqual({});
+    expect(() => parseReasoningAllowance("lots", models)).toThrow(/CLOUD_HOST_REASONING_ALLOWANCE/);
+    expect(() => cloudHostConfigFromEnv({ CLOUD_HOST_API_KEY: KEY, CLOUD_HOST_REASONING_ALLOWANCE: "glm-5.3=-1" })).toThrow(/CLOUD_HOST_REASONING_ALLOWANCE/);
   });
 
   it("CLOUD_HOST_REASONING_EFFORT is sent as reasoning_effort", async () => {

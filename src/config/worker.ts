@@ -114,6 +114,8 @@ export const workerConfigSchema = z.object({
   CLOUD_HOST_STATE_FILE: str(),
   /** reasoning_effort sent with each call (e.g. low; none where the provider can turn thinking off); unset: the provider's default. */
   CLOUD_HOST_REASONING_EFFORT: str(),
+  /** Tokens of thinking asked for on top of a call's max_tokens per reasoning model (deepseek-v4.1-flash=4096,glm-5.3=2048 by default; a number, model=n pairs, or off). */
+  CLOUD_HOST_REASONING_ALLOWANCE: str(),
   /** vLLM's OpenAI-compatible server. Default http://127.0.0.1:8000. */
   VLLM_URL: envUrl(),
   /** vLLM --api-key, when the server was started with one. */

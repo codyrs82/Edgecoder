@@ -287,6 +287,7 @@ export const bestFitEnv = {
   BEST_FIT_SESSION_TTL_MS: amount(),
   BEST_FIT_OVERSIZE_PENALTY: fraction(),
   BEST_FIT_PEERS: envFlag({ off: ["0", "false"] }),
+  BEST_FIT_MAX_COMPLETION_MS: envNumber(undefined, { min: 1_000, max: 3_600_000 }),
   BEST_FIT_COMPLEXITY_WEIGHTS_JSON: envJson(),
   /** Cloud models Auto may use: unset = every autoEligible catalog model, a comma list = only those, "off" = none. docs/cloud-host.md. */
   AUTO_CLOUD_MODELS: str(),

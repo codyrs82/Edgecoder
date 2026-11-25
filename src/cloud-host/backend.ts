@@ -24,6 +24,10 @@
  *   CloudApiError "reasoning_only" (REASONING_ONLY_ERROR): the caller's output cap was too small,
  *   not a host failure, so the coordinator neither retries it elsewhere nor counts it against the
  *   host. It carries the provider's token counts (the provider bills the reasoning).
+ * - Reasoning allowance (reasoningChat): for a reasoning model the provider is asked for the
+ *   caller's max_tokens plus an allowance for the thinking (the provider's max_tokens counts both),
+ *   and the answer passed on is capped at the caller's max_tokens (finish "length"). A reply that is
+ *   still reasoning only is asked once more with twice the allowance before it fails.
  * The key is sent only in the Authorization header and is scrubbed from any error text.
  */
 import { request } from "undici";
@@ -76,7 +80,16 @@ export interface RemoteChatRequest {
   tools?: ToolSpec[];
   maxTokens?: number;
   temperature?: number;
+  /**
+   * Answer tokens passed on at most (estimated from the stream: a piece is about a token, at least
+   * one per 4 characters); past it the stream is closed and the reply ends as "length". Set by
+   * reasoningChat to the caller's own max_tokens while the provider is asked for more.
+   */
+  contentCap?: number;
 }
+
+/** Tokens in a piece of streamed text, roughly: the pieces seen, at least one per 4 characters. */
+const estTokens = (pieces: number, chars: number) => Math.max(pieces, Math.ceil(chars / 4));
 
 function scrub(text: string, key: string): string {
   return key ? text.split(key).join("[redacted]") : text;
@@ -163,6 +176,7 @@ export async function* remoteChat(cfg: RemoteBackendConfig, req: RemoteChatReque
   const sleep = cfg.sleep ?? defaultSleep;
   const maxRetries = Math.max(0, cfg.maxRetries ?? 3);
   const url = `${cfg.baseUrl.replace(/\/+$/, "")}/chat/completions`;
+  const contentCap = req.contentCap !== undefined && req.contentCap > 0 ? Math.floor(req.contentCap) : undefined;
   const body = JSON.stringify({
     model: req.model,
     messages: toOpenAiMessages(req.messages),
@@ -206,6 +220,11 @@ export async function* remoteChat(cfg: RemoteBackendConfig, req: RemoteChatReque
   let usage: { promptTokens?: number; outputTokens?: number; cachedPromptTokens?: number } = {};
   let firstAt: number | undefined;
   let reasoningChars = 0;
+  let reasoningPieces = 0;
+  let contentChars = 0;
+  let contentPieces = 0;
+  /** The answer reached contentCap: nothing more is passed on and the stream is closed. */
+  let capped = false;
   let buf = "";
   let ended = false;
   const handle = function* (data: string): Generator<OllamaPiece> {
@@ -224,10 +243,23 @@ export async function* remoteChat(cfg: RemoteBackendConfig, req: RemoteChatReque
       throw new CloudApiError(`cloud_provider_error: ${cfg.label}: ${msg}`, 500, "server", isContextOverflowMessage(msg));
     }
     for (const c of chunk.choices ?? []) {
-      reasoningChars += (c.delta?.reasoning_content ?? c.delta?.reasoning ?? "").length;
-      const text = c.delta?.content;
+      const thought = c.delta?.reasoning_content ?? c.delta?.reasoning ?? "";
+      if (thought) {
+        reasoningChars += thought.length;
+        reasoningPieces++;
+      }
+      let text = c.delta?.content;
+      if (text && contentCap !== undefined && !capped) {
+        const left = contentCap - estTokens(contentPieces, contentChars);
+        if (estTokens(1, text.length) > left) {
+          text = text.slice(0, Math.max(0, left) * 4);
+          capped = true;
+        }
+      } else if (capped) text = "";
       if (text) {
         firstAt ??= Date.now();
+        contentChars += text.length;
+        contentPieces++;
         yield { delta: text };
       }
       for (const t of c.delta?.tool_calls ?? []) {
@@ -256,10 +288,12 @@ export async function* remoteChat(cfg: RemoteBackendConfig, req: RemoteChatReque
     for (const line of lines) {
       const l = line.trim();
       if (l.startsWith("data:")) yield* handle(l.slice(5).trim());
+      if (capped) break;
     }
-    if (ended) break;
+    // Capped: close the stream (leaving the loop ends the request) rather than wait for the rest.
+    if (ended || capped) break;
   }
-  if (!ended && buf.trim().startsWith("data:")) yield* handle(buf.trim().slice(5).trim());
+  if (!ended && !capped && buf.trim().startsWith("data:")) yield* handle(buf.trim().slice(5).trim());
   const toolCalls: ToolCall[] = [...calls.entries()]
     .sort((a, b) => a[0] - b[0])
     .filter(([, c]) => c.name)
@@ -271,11 +305,54 @@ export async function* remoteChat(cfg: RemoteBackendConfig, req: RemoteChatReque
     throw new CloudApiError(`${REASONING_ONLY_ERROR}: ${req.model} spent the reply${cap} reasoning and gave no answer; send a larger max_tokens`, 400, "bad_request", false, usage);
   }
   const end = Date.now();
+  // Closed at the cap, the provider's counts never came: the tokens streamed so far, estimated.
+  if (capped && usage.outputTokens === undefined) {
+    const promptChars = JSON.stringify(toOpenAiMessages(req.messages)).length + (req.tools?.length ? JSON.stringify(req.tools).length : 0);
+    usage = { promptTokens: Math.ceil(promptChars / 4), outputTokens: estTokens(reasoningPieces, reasoningChars) + estTokens(contentPieces, contentChars) };
+  }
   yield {
-    doneReason: finish === "length" ? "length" : "stop",
+    doneReason: finish === "length" || capped ? "length" : "stop",
     ...usage,
     ...(firstAt !== undefined ? { promptMs: firstAt - started, genMs: Math.max(0, end - firstAt) } : {})
   };
+}
+
+/** A reply that was reasoning only (REASONING_ONLY_ERROR). */
+export function isReasoningOnly(err: unknown): err is CloudApiError {
+  return err instanceof CloudApiError && err.message.startsWith(`${REASONING_ONLY_ERROR}:`);
+}
+
+/**
+ * A call on a reasoning model with room to think: the provider is asked for the caller's max_tokens
+ * plus `allowance` (its max_tokens counts the thinking too), and the answer passed on is capped at
+ * the caller's max_tokens (remoteChat contentCap). A reply that is reasoning only is asked once more
+ * with twice the allowance (nothing was passed on yet), then fails as reasoning_only. `onBilled`
+ * gets the provider's counts of a reasoning-only attempt that was asked again (the provider bills
+ * it). No max_tokens (the provider's default cap) or no allowance: one plain remoteChat.
+ */
+export async function* reasoningChat(
+  cfg: RemoteBackendConfig,
+  req: RemoteChatRequest,
+  allowance: number,
+  signal?: AbortSignal,
+  timeoutMs = 120_000,
+  onBilled?: (usage: NonNullable<CloudApiError["usage"]>) => void
+): AsyncGenerator<OllamaPiece> {
+  const max = req.maxTokens;
+  if (max === undefined || !(allowance > 0)) return yield* remoteChat(cfg, req, signal, timeoutMs);
+  const attempt = (room: number) => remoteChat(cfg, { ...req, maxTokens: max + room, contentCap: max }, signal, timeoutMs);
+  try {
+    return yield* attempt(allowance);
+  } catch (err) {
+    if (!isReasoningOnly(err) || signal?.aborted) throw err;
+    if (err.usage) onBilled?.(err.usage);
+  }
+  try {
+    return yield* attempt(allowance * 2);
+  } catch (err) {
+    if (!isReasoningOnly(err)) throw err;
+    throw new CloudApiError(`${REASONING_ONLY_ERROR}: ${req.model} gave no answer within ${max} tokens after up to ${allowance * 2} tokens of reasoning (asked twice); send a larger max_tokens or a lower reasoning effort`, 400, "bad_request", false, err.usage);
+  }
 }
 
 /** GET /models with the key: is it accepted? (The auth-pause probe.) Never throws. */
