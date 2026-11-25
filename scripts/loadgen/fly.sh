@@ -21,9 +21,11 @@
 #           --buyers st9,st10 (alias --users; default: accounts that host nothing, else every funded account)
 #           --buyer-cap CSATS (most one buyer spends in the run)  --min-rate N (per machine floor, default 0.02/s)
 #           --start-in SECONDS (default 150, so all regions start together)
-# Buyers: budget.mjs buyers picks them and, per buyer, the models its own agents hold (LOADGEN_AVOID),
-# which it never asks for, so its calls pay other accounts. A ledger snapshot (balances + who hosts
-# what) is saved before the run for the money report.
+# Buyers: budget.mjs buyers picks them. Buyers may call any model: since PR 529 a call served by the
+# buyer's own account is free and accrues nothing, and the money report splits buyer/host by account.
+# --self-avoid (opt-in) makes each buyer skip the models its own agents hold (LOADGEN_AVOID), so every
+# call pays another account; with --model that can leave hosting buyers with nothing to send.
+# A ledger snapshot (balances + who hosts what) is saved before the run for the money report.
 #           --oversub X (bulk models' in-flight cap = slots x X, default 1.5)  --auto-slots N (default 3)
 #           --auto-share F (share of calls sent as model "auto", best-fit routing; default 0.5, 0 = none)
 #           --model M (pin named-model calls to one model, e.g. qwen2.5-coder:1.5b; with --auto-share 0
@@ -75,13 +77,13 @@ case "$cmd" in
 
   run)
     profile=${1:?profile: smoke|steady|ramp|saturate|soak|sustain}; shift
-    regions=iad,lhr,sin,syd; duration=""; rate=""; max_rate=""; stage_minutes=""; loop=""; budget=2000; min_balance=1500; users=""; start_in=150; oversub=""; auto_slots=""; auto_share=""; buyer_cap=""; min_rate=""; model=""
+    regions=iad,lhr,sin,syd; duration=""; rate=""; max_rate=""; stage_minutes=""; loop=""; budget=2000; min_balance=1500; users=""; start_in=150; oversub=""; auto_slots=""; auto_share=""; buyer_cap=""; min_rate=""; model=""; self_avoid=""
     while [ $# -gt 0 ]; do case "$1" in
       --regions) regions=$2; shift 2;; --duration) duration=$2; shift 2;; --rate) rate=$2; shift 2;; --max-rate) max_rate=$2; shift 2;;
       --stage-minutes) stage_minutes=$2; shift 2;; --loop) loop=1; shift;; --budget) budget=$2; shift 2;;
       --min-balance) min_balance=$2; shift 2;; --users|--buyers) users=$2; shift 2;; --start-in) start_in=$2; shift 2;;
       --buyer-cap) buyer_cap=$2; shift 2;; --min-rate) min_rate=$2; shift 2;;
-      --oversub) oversub=$2; shift 2;; --auto-slots) auto_slots=$2; shift 2;; --auto-share) auto_share=$2; shift 2;; --model) model=$2; shift 2;;
+      --oversub) oversub=$2; shift 2;; --auto-slots) auto_slots=$2; shift 2;; --auto-share) auto_share=$2; shift 2;; --model) model=$2; shift 2;; --self-avoid) self_avoid=1; shift;;
       *) echo "unknown option $1" >&2; exit 2;; esac; done
     IFS=, read -r -a R <<<"$regions"
     run_id="lg-$(date -u +%Y%m%d%H%M)-$profile"
@@ -99,8 +101,12 @@ case "$cmd" in
     avoid="{}"
     if [ -n "$pick" ]; then
       users=$(printf '%s' "$pick" | node -e 'console.log(JSON.parse(require("fs").readFileSync(0,"utf8")).buyers.join(","))')
-      avoid=$(printf '%s' "$pick" | node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync(0,"utf8")).avoid))')
-      echo "buyers: $users ($(printf '%s' "$pick" | node -e 'const p=JSON.parse(require("fs").readFileSync(0,"utf8"));console.log(p.reason+"; avoid "+JSON.stringify(p.avoid))'))"
+      if [ -n "$self_avoid" ]; then
+        avoid=$(printf '%s' "$pick" | node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync(0,"utf8")).avoid))')
+        echo "buyers: $users ($(printf '%s' "$pick" | node -e 'const p=JSON.parse(require("fs").readFileSync(0,"utf8"));console.log(p.reason+"; --self-avoid: avoid "+JSON.stringify(p.avoid))'))"
+      else
+        echo "buyers: $users ($(printf '%s' "$pick" | node -e 'console.log(JSON.parse(require("fs").readFileSync(0,"utf8")).reason)'); any model, same-account calls are free)"
+      fi
     else
       blind "could not choose buyers, so every account would buy and self-dealing would not be avoided"
     fi

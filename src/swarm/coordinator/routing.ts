@@ -427,11 +427,13 @@ export function recordDecision(taskId: string, subtaskId: string, job: JobDescri
 }
 
 /**
- * A network call that named its model, sent here by the portal's latency-aware coordinator choice:
- * logged with that choice so the admin Network page shows which coordinator took it and why.
+ * A network call that named its model. With the portal's latency-aware coordinator choice it is
+ * logged with that choice; without one (a hosted /v1/chat/completions call the portal did not place,
+ * or a direct call) it is still logged so every billed named call has a decision to audit.
  */
-export function recordPlacement(taskId: string, subtaskId: string, call: { model: string; computeClass: string | null }, coordinatorChoice: CoordinatorChoice, nowMs = Date.now()): RoutingDecision {
-  const line = `${call.model} (named) sent to ${coordinatorChoice.chosen}: ${coordinatorChoice.reason}`.slice(0, 300);
+export function recordPlacement(taskId: string, subtaskId: string, call: { model: string; computeClass: string | null }, coordinatorChoice?: CoordinatorChoice, nowMs = Date.now()): RoutingDecision {
+  const reason = coordinatorChoice ? `coordinator: ${coordinatorChoice.reason}` : "named model; no portal coordinator choice";
+  const line = (coordinatorChoice ? `${call.model} (named) sent to ${coordinatorChoice.chosen}: ${coordinatorChoice.reason}` : `${call.model} (named) on ${identity.peerId}`).slice(0, 300);
   return logDecision({
     model: call.model,
     computeClass: call.computeClass,
@@ -441,10 +443,10 @@ export function recordPlacement(taskId: string, subtaskId: string, call: { model
     parts: null,
     estimate: null,
     alternatives: [],
-    reason: `coordinator: ${coordinatorChoice.reason}`.slice(0, 300),
+    reason: reason.slice(0, 300),
     line,
     pinned: true,
-    coordinatorChoice,
+    ...(coordinatorChoice ? { coordinatorChoice } : {}),
     atMs: nowMs,
     taskId,
     subtaskId,

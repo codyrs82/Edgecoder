@@ -757,8 +757,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         armAutoReplace({ taskId: body.taskId, subtaskId: subtask.id, job: routed.job, accountId, clientRegion, tried: [routed.result.chosen.agentId], ...(routed.onlyClass ? { onlyClass: routed.onlyClass } : {}), ...(body.maxBidMsatPerCredit !== undefined ? { maxBidMsatPerCredit: body.maxBidMsatPerCredit } : {}) });
       }
     } else {
-      if (portalChoice && billed) {
-        // A named model the portal placed here: log which coordinator and why (Network page, routing decisions).
+      if (billed) {
+        // A named model: log the decision (Network page, routing decisions), with the portal's
+        // coordinator choice when it placed the call. Hosted CLI calls without a choice are logged too.
         recordPlacement(body.taskId, subtask.id, { model: body.model, computeClass: taskClass === "any" ? null : taskClass }, portalChoice);
       }
       // #526: a named network call goes first to the free holder nearest the buyer (locality.ts).
