@@ -61,3 +61,21 @@ describe("the agent's deadline", () => {
     expect(r).toMatchObject({ ok: true, output: "whole" });
   });
 });
+
+describe("run 7: the host's CPU steal goes with each reply piece", () => {
+  it("adds the steal report to every piece when given", async () => {
+    const posted: any[] = [];
+    const r = await runInferenceSubtask(subtask(10_000), {
+      agentId: "a1", ollamaHost: "", post: async (_p, b) => { posted.push(b); return {}; },
+      cpuSteal: () => ({ cpuStealShare: 0.62, cpuThrottled: true }),
+      chat: () => (async function* (): AsyncGenerator<OllamaPiece> {
+        yield { delta: "whole" };
+        yield { doneReason: "stop", promptTokens: 3, outputTokens: 1 };
+      })(),
+    });
+    expect(r).toMatchObject({ ok: true });
+    expect(posted.length).toBeGreaterThan(0);
+    for (const p of posted) expect(p).toMatchObject({ cpuStealShare: 0.62, cpuThrottled: true });
+    expect(posted.at(-1)).toMatchObject({ done: true });
+  });
+});

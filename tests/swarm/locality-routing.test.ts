@@ -174,7 +174,7 @@ describe("named-model locality", () => {
     for (let i = 0; i < 3; i++) eta.serviceTimes.record(MODEL, "cpu", 300, now, 1_000);
     expect(eta.hostSpeed(MODEL, iad.peerId, "cpu", now, 0.5)).toEqual({ speed: 0.3, from: "class" });
     for (let i = 0; i < 3; i++) eta.agentServiceTimes.record(MODEL, iad.peerId, 200, now, 1_000);
-    expect(eta.hostSpeed(MODEL, iad.peerId, "cpu", now, 0.5)).toEqual({ speed: 0.2, from: "host" });
+    expect(eta.hostSpeed(MODEL, iad.peerId, "cpu", now, 0.5)).toEqual({ speed: 0.2, from: "host", ageMs: 0 });
     eta.agentServiceTimes.clear();
     eta.serviceTimes.clear();
   });

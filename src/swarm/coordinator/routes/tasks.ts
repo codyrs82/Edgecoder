@@ -126,6 +126,7 @@ import {
   INFERENCE_TIMED_OUT
 } from "../results.js";
 import { noteTimedOutCall } from "../start-eta.js";
+import { noteAgentSteal } from "../host-steal.js";
 import { closeUnreservedBillingRow } from "../billing-restore.js";
 import { clearClaimDeadline, inferenceStreams, judgeInferenceReply, retryInferenceElsewhere } from "./inference.js";
 import { isMemoryRefusal, noteAgentResult, noteDispatched } from "../memory-admission.js";
@@ -422,6 +423,8 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     const pullerAccount = await rewardAccountForAgent(body.agentId);
     // Fast dispatch (dispatch.ts): the agent's model slots, and whether it takes work_available nudges.
     noteAgentPull(body.agentId, body);
+    // Run 7: its CPU steal (host-steal.ts): speed samples from calls it ran while stolen from do not count.
+    noteAgentSteal(body.agentId, body);
     // Security research tier: only a signed pull can opt this agent in to restricted models.
     noteRestrictedOptIn(body.agentId, Boolean(verified), body.allowRestrictedModels, pullerAccount);
     const canTake = claimRule(body.agentId, capability, pullerAccount);

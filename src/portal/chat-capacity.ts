@@ -189,14 +189,16 @@ export function httpCapacityProbe(opts: { serviceToken?: string; timeoutMs: numb
       const hosts = (v: unknown): FreeHost[] | undefined => {
         if (!Array.isArray(v)) return undefined;
         const out: FreeHost[] = [];
-        for (const h of v.slice(0, 32) as Array<{ region?: unknown; free?: unknown; rttMs?: unknown; serviceMs?: unknown; computeClass?: unknown; speed?: unknown; speedFrom?: unknown } | null>) {
+        for (const h of v.slice(0, 32) as Array<{ region?: unknown; free?: unknown; rttMs?: unknown; serviceMs?: unknown; computeClass?: unknown; speed?: unknown; speedFrom?: unknown; speedAgeMs?: unknown } | null>) {
           const region = cleanRegion(h?.region);
           if (!h || !region || !num(h.free) || h.free <= 0) continue;
           // Run 6: its class and speed (ms per ms of expectedWorkMs), for its time for the call being placed.
           const cls = typeof h.computeClass === "string" && /^[a-z0-9.]{1,16}$/.test(h.computeClass) ? h.computeClass : undefined;
           const from = h.speedFrom === "host" || h.speedFrom === "class" || h.speedFrom === "prior" ? h.speedFrom : undefined;
           const speed = num(h.speed) && h.speed > 0 && h.speed <= 100 ? h.speed : undefined;
-          out.push({ region, free: Math.min(1_000, Math.floor(h.free)), ...(num(h.rttMs) && h.rttMs >= 0 ? { rttMs: h.rttMs } : {}), ...(num(h.serviceMs) && h.serviceMs >= 0 ? { serviceMs: h.serviceMs } : {}), ...(cls ? { computeClass: cls } : {}), ...(speed !== undefined && cls ? { speed, ...(from ? { speedFrom: from } : {}) } : {}) });
+          // Run 7: how old a measured speed is (the portal trusts only a fresh one).
+          const age = num(h.speedAgeMs) && h.speedAgeMs >= 0 ? h.speedAgeMs : undefined;
+          out.push({ region, free: Math.min(1_000, Math.floor(h.free)), ...(num(h.rttMs) && h.rttMs >= 0 ? { rttMs: h.rttMs } : {}), ...(num(h.serviceMs) && h.serviceMs >= 0 ? { serviceMs: h.serviceMs } : {}), ...(cls ? { computeClass: cls } : {}), ...(speed !== undefined && cls ? { speed, ...(from ? { speedFrom: from } : {}), ...(age !== undefined ? { speedAgeMs: age } : {}) } : {}) });
         }
         return out.length ? out : undefined;
       };

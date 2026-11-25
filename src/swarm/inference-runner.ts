@@ -49,6 +49,11 @@ export async function runInferenceSubtask(
     /** Signed POST to the coordinator. */
     post: (path: string, body: unknown) => Promise<unknown>;
     /**
+     * Run 7: this host's CPU steal now (cpu-steal.ts cpuStealReport), sent with each reply piece so the
+     * coordinator leaves a call that ran throttled out of the host's measured speed. Unset: not sent.
+     */
+    cpuSteal?: () => { cpuStealShare?: number; cpuThrottled?: boolean };
+    /**
      * Run the call on another engine than Ollama (vLLM / MLX: src/inference-api/openai-engine.ts).
      * `model` is the requested catalog tag; the engine maps it to the id it serves. Unset = Ollama.
      */
@@ -103,7 +108,7 @@ export async function runInferenceSubtask(
     pending = "";
     lastFlush = Date.now();
     try {
-      const res = await deps.post("/inference/chunks", { subtaskId: st.id, seq, delta, done, ...(error ? { error } : {}), ...(done && toolCalls.length ? { toolCalls } : {}), ...(done ? tokens : {}) });
+      const res = await deps.post("/inference/chunks", { subtaskId: st.id, seq, delta, done, ...(error ? { error } : {}), ...(done && toolCalls.length ? { toolCalls } : {}), ...(done ? tokens : {}), ...(deps.cpuSteal?.() ?? {}) });
       seq++;
       // The requester went away (coordinator inference-cancel.ts): stop generating; what was
       // produced so far is reported as the result and billed, nothing more.

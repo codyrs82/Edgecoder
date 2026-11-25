@@ -84,6 +84,7 @@ export class CpuStealGuard {
   private throttledUntilMs = 0;
   private wasThrottled = false;
   private lastShare: number | null = null;
+  private lastShareAtMs = 0;
   private readonly threshold: number;
   private readonly holdMs: number;
   private readonly windowMs: number;
@@ -105,7 +106,10 @@ export class CpuStealGuard {
       else if (nowMs - this.base.atMs >= this.windowMs) {
         share = stealShare(this.base.times, times);
         this.base = { atMs: nowMs, times };
-        if (share !== null) this.lastShare = share;
+        if (share !== null) {
+          this.lastShare = share;
+          this.lastShareAtMs = nowMs;
+        }
         if (share !== null && share >= this.threshold) this.throttledUntilMs = nowMs + this.holdMs;
       }
     }
@@ -119,6 +123,24 @@ export class CpuStealGuard {
   recentShare(): number | null {
     return this.lastShare;
   }
+
+  /**
+   * Run 7: what the agent tells the coordinator with each pull and reply piece (coordinator
+   * host-steal.ts): the share measured within the last `maxAgeMs` (default two reading spans; an
+   * older one, such as from before the host went idle, is left out) and whether the guard holds the
+   * host back. Takes no reading (sample() does, on the agent's loop tick).
+   */
+  report(nowMs = Date.now(), maxAgeMs = 2 * this.windowMs + 1_000): CpuStealReport {
+    const throttled = nowMs < this.throttledUntilMs;
+    const fresh = this.lastShare !== null && nowMs - this.lastShareAtMs <= maxAgeMs;
+    return { ...(fresh ? { cpuStealShare: Math.round(this.lastShare! * 100) / 100 } : {}), cpuThrottled: throttled };
+  }
+}
+
+/** Run 7: the steal fields an agent adds to its pull and reply pieces. */
+export interface CpuStealReport {
+  cpuStealShare?: number;
+  cpuThrottled?: boolean;
 }
 
 /**

@@ -842,7 +842,7 @@ function medianRtt(values: number[]): number | null {
 }
 
 /** /inference/models freeHosts entry: one host with a free slot for the model. */
-type FreeHostReport = { region: string; free: number; computeClass: string; rttMs?: number; serviceMs?: number; speed?: number; speedFrom?: HostSpeedSource };
+type FreeHostReport = { region: string; free: number; computeClass: string; rttMs?: number; serviceMs?: number; speed?: number; speedFrom?: HostSpeedSource; speedAgeMs?: number };
 
 export function registerInferenceRoutes(app: CoordinatorApp): void {
   // Security research tier: entitlement pushes from the portal and the admin view (routes/restricted.ts).
@@ -892,11 +892,12 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         // the model (portal coordinator-latency.ts scores the free host nearest the buyer with its own numbers).
         // Run 6: also its class and speed (ms per ms of expectedWorkMs) and where that comes from, so the
         // portal scales it to the call it places and compares two hosts of one class by distance unless
-        // both have measured speeds. serviceMs (a reference call) stays for older portals.
+        // both have measured speeds. serviceMs (a reference call) stays for older portals. Run 7: with a
+        // measured speed, how old its newest sample is (speedAgeMs): the portal trusts only a fresh one.
         if (region && free > 0 && e.freeHosts.length < 32) {
           const sp = hostSpeed(m, id, cls, now, completionPrior()[cls]);
           const svc = sp === null ? null : hostServiceMs(m, id, cls, now, completionPrior()[cls]);
-          e.freeHosts.push({ region, free, computeClass: cls, ...(rtt !== null && Number.isFinite(rtt) ? { rttMs: Math.round(rtt) } : {}), ...(svc !== null ? { serviceMs: svc } : {}), ...(sp !== null ? { speed: Math.round(sp.speed * 1000) / 1000, speedFrom: sp.from } : {}) });
+          e.freeHosts.push({ region, free, computeClass: cls, ...(rtt !== null && Number.isFinite(rtt) ? { rttMs: Math.round(rtt) } : {}), ...(svc !== null ? { serviceMs: svc } : {}), ...(sp !== null ? { speed: Math.round(sp.speed * 1000) / 1000, speedFrom: sp.from, ...(sp.ageMs !== undefined ? { speedAgeMs: Math.round(sp.ageMs) } : {}) } : {}) });
         }
         e.classes.add(cls);
         // The smallest window an agent serves the model with: what a caller can count on (agent loops compact to it).
