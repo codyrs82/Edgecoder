@@ -125,6 +125,29 @@ describe("hosted API: a call a restarting coordinator refuses", () => {
     expect(submits.map((s) => s.url)).toEqual([US, EU]);
   });
 
+  it("a start_eta route_elsewhere (#547) still goes once to the peer through the same call", async () => {
+    const submits = coordinators((url, body) =>
+      url === US && body.routeRedirect ? { status: 409, json: { error: "route_elsewhere", coordinatorUrl: EU, model: body.model, reason: "start_eta", startEtaMs: 90_000 } } : { status: 200, json: { taskId: body.taskId, subtaskId: "s-1" } },
+    );
+    const { app } = await hostedApp();
+    const r = await ask(app);
+    expect(r.statusCode).toBe(200);
+    expect(submits.map((s) => s.url)).toEqual([US, EU]);
+    expect(submits[1].body.routeRedirect).toBeUndefined();
+  });
+
+  it("a route_elsewhere peer that is restarting hands the call to another coordinator once", async () => {
+    const submits = coordinators((url, body) =>
+      url === US ? (body.routeRedirect ? { status: 409, json: { error: "route_elsewhere", coordinatorUrl: EU, model: body.model, reason: "start_eta" } } : { status: 200, json: { taskId: body.taskId, subtaskId: "s-1" } }) : { status: 503, json: drainingBody(US) },
+    );
+    const { app } = await hostedApp();
+    const r = await ask(app);
+    expect(r.statusCode).toBe(200);
+    // US sent it on, EU refused while restarting (nothing reserved), US then takes it without a redirect.
+    expect(submits.map((s) => s.url)).toEqual([US, EU, US]);
+    expect(submits[2].body.routeRedirect).toBeUndefined();
+  });
+
   it("model auto fails over too", async () => {
     const submits = coordinators((url, body) => (url === US ? { status: 503, json: drainingBody(EU) } : { status: 200, json: { taskId: body.taskId, subtaskId: "s-1", routing: { model: MODEL, line: "routed" } } }));
     const { app } = await hostedApp({
