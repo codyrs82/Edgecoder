@@ -312,6 +312,59 @@ describe("/result pricing (#38)", () => {
     expect(await floorCost(1)).toBe(one);
   });
 
+  test("a short call sharing a host with a long one pays for its own work, not the neighbour's (B6)", async () => {
+    // Two calls claimed at once by a 2-slot host. The long one generates for 30 s; the short one (12
+    // tokens) waited on the host behind it and finished at the same wall time, but its own prompt +
+    // generation took 0.7 s. Each is charged once, for its own seconds, and the ledger balances.
+    const balanceBefore = creditEngine.balance(requester.peerId);
+    const earnedBefore = await earnedMsat(worker.peerId);
+    const longId = `inf-${randomUUID()}`;
+    const shortId = `inf-${randomUUID()}`;
+    expect((await submitInference(longId)).statusCode).toBe(200);
+    expect((await submitInference(shortId)).statusCode).toBe(200);
+    const claim = async () => (await post("/pull", { agentId: worker.peerId, inferenceSlots: 2 }, worker)).json().subtask as { id: string; taskId: string };
+    const first = await claim();
+    const second = await claim();
+    const long = [first, second].find((s) => s?.taskId === longId)!;
+    const short = [first, second].find((s) => s?.taskId === shortId)!;
+    expect(long && short).toBeTruthy();
+    let reply = "";
+    while (reply.length < 2_000) reply += `${randomUUID()} `;
+    expect((await post("/inference/chunks", { subtaskId: long.id, seq: 0, delta: reply, done: true, promptTokens: 40, outputTokens: 500, promptMs: 1_000, genMs: 29_000 }, worker)).statusCode).toBe(200);
+    expect((await post("/inference/chunks", { subtaskId: short.id, seq: 0, delta: "ok", done: true, promptTokens: 10, outputTokens: 2, promptMs: 400, genMs: 300 }, worker)).statusCode).toBe(200);
+    expect((await resultAfter(30_000, { subtaskId: long.id, taskId: longId, agentId: worker.peerId, ok: true, output: reply, durationMs: 30_000 })).statusCode).toBe(200);
+    expect((await resultAfter(30_000, { subtaskId: short.id, taskId: shortId, agentId: worker.peerId, ok: true, output: "ok", durationMs: 30_000 })).statusCode).toBe(200);
+    const longAcc = await accrualsFor(long.id);
+    const shortAcc = await accrualsFor(short.id);
+    expect(longAcc).toHaveLength(1);
+    expect(shortAcc).toHaveLength(1);
+    // The long call pays its 30 s of power; the short one about 0.7 s of it, not the long call's 30 s.
+    expect(longAcc[0].pricingBasis).toBe("power_floor");
+    expect(shortAcc[0].costMsat).toBeGreaterThan(0);
+    expect(shortAcc[0].costMsat * 20).toBeLessThan(longAcc[0].costMsat);
+    // Charges = earnings + fee, for each call and in total, and the requester paid exactly that.
+    for (const acc of [longAcc[0], shortAcc[0]]) expect(acc.msat + acc.feeMsat).toBe(acc.costMsat);
+    expect((await earnedMsat(worker.peerId)) - earnedBefore).toBe(longAcc[0].msat + shortAcc[0].msat);
+    expect(balanceBefore - creditEngine.balance(requester.peerId)).toBeCloseTo((longAcc[0].costMsat + shortAcc[0].costMsat) / 1000, 6);
+    expect((await app.inject({ method: "GET", url: "/ledger/verify", remoteAddress: REMOTE, headers: { "x-mesh-token": MESH } })).json()).toEqual({ ok: true });
+  });
+
+  test("a call that reports no timings keeps the wall-time power floor (older agents)", async () => {
+    const floor = async (timings: Record<string, number>) => {
+      const taskId = `inf-${randomUUID()}`;
+      expect((await submitInference(taskId)).statusCode).toBe(200);
+      const st = (await post("/pull", { agentId: worker.peerId, inferenceSlots: 2 }, worker)).json().subtask as { id: string; taskId: string };
+      expect(st?.taskId).toBe(taskId);
+      expect((await post("/inference/chunks", { subtaskId: st.id, seq: 0, delta: "ok", done: true, promptTokens: 2, outputTokens: 1, ...timings }, worker)).statusCode).toBe(200);
+      expect((await resultAfter(30_000, { subtaskId: st.id, taskId, agentId: worker.peerId, ok: true, output: "ok", durationMs: 30_000 })).statusCode).toBe(200);
+      return (await accrualsFor(st.id))[0].costMsat as number;
+    };
+    const wall = await floor({});
+    // Timings above the wall time change nothing (the wall time stays the ceiling).
+    expect(await floor({ promptMs: 100_000, genMs: 100_000 })).toBe(wall);
+    expect(await floor({ promptMs: 3_000, genMs: 12_000 })).toBeCloseTo(wall / 2, -1);
+  });
+
   test("a replayed result earns nothing more", async () => {
     const { taskId, st, balanceBefore } = await submitJob();
     const body = { subtaskId: st.id, taskId, agentId: worker.peerId, ok: true, output: randomUUID(), durationMs: 5_000 };

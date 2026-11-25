@@ -290,6 +290,12 @@ export function enqueueReplica(req: ReplicaRequest): void {
   );
 }
 
+/** A model call's own work time (prompt + generation) as its agent reported it, when it did. */
+export function floorWorkMs(b: { promptMs?: number; genMs?: number } | undefined): number | undefined {
+  if (!b || (b.promptMs === undefined && b.genMs === undefined)) return undefined;
+  return (b.promptMs ?? 0) + (b.genMs ?? 0);
+}
+
 /**
  * What an accepted execution costs by the pricing formulas (job-pricing.ts), before it is capped by
  * what its payer set aside. Reads, never consumes, the trade price agreed at claim.
@@ -339,6 +345,9 @@ export function priceExecution(r: ExecutionResult<ResultMeta>) {
           durationMs,
           // The host's model load is not the buyer's: the floor counts the seconds after it.
           floorExcludeMs: taskBilling.get(taskId)?.loadMs,
+          // Nor is time the call spent waiting on the host while another call ran: the floor counts
+          // at most the call's own prompt + generation time, when the agent reports it (B6).
+          floorWorkMs: floorWorkMs(taskBilling.get(taskId)),
           // One machine's power, shared by the calls its slots run at once.
           floorSlots: agentLoadReport(r.agentId)?.slots,
           computeClass,

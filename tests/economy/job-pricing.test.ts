@@ -97,6 +97,27 @@ describe("per-token pricing for model calls", () => {
     expect(inferenceCostMsat({ ...call, durationMs: 4_900, floorExcludeMs: Number.NaN })).toEqual(inferenceCostMsat({ ...call, durationMs: 4_900 }));
   });
 
+  it("the power floor counts the call's own model time, not time it waited behind another call (B6)", () => {
+    // Run 2, 2026-11-24: a 12-token call on a 2-slot CPU host finished ~90 s after its claim because
+    // a long call held the host; its own prompt + generation took under a second.
+    const call = { paramsB: 1.5, btcUsd: 64_870, promptTokens: 10, outputTokens: 2, computeClass: "cpu", tierWeight: 1, floorSlots: 2, perSecondCostMsat: 0 };
+    const waited = inferenceCostMsat({ ...call, durationMs: 90_000 });
+    expect(waited).toMatchObject({ basis: "power_floor" });
+    expect(waited.costMsat).toBeGreaterThan(450);
+    const own = inferenceCostMsat({ ...call, durationMs: 90_000, floorWorkMs: 700 });
+    expect(own).toEqual(inferenceCostMsat({ ...call, durationMs: 700 }));
+    expect(own.costMsat).toBeLessThan(10);
+    // Never above the wall time (an over-report gains nothing), and load time is still left out.
+    expect(inferenceCostMsat({ ...call, durationMs: 5_000, floorWorkMs: 60_000 })).toEqual(inferenceCostMsat({ ...call, durationMs: 5_000 }));
+    expect(inferenceCostMsat({ ...call, durationMs: 5_000, floorExcludeMs: 4_000, floorWorkMs: 3_000 })).toEqual(inferenceCostMsat({ ...call, durationMs: 1_000 }));
+    // Not reported (older agents) or not a number: the wall time, as before.
+    expect(inferenceCostMsat({ ...call, durationMs: 90_000, floorWorkMs: Number.NaN })).toEqual(waited);
+    expect(inferenceCostMsat({ ...call, durationMs: 90_000, floorWorkMs: undefined })).toEqual(waited);
+    // The token price is untouched: a long reply is charged its tokens either way.
+    const big = { ...call, promptTokens: 20_000, outputTokens: 2_000, durationMs: 5_000 };
+    expect(inferenceCostMsat({ ...big, floorWorkMs: 1 })).toEqual(inferenceCostMsat(big));
+  });
+
   it("splits the power floor across the agent's parallel slots: one machine's power, not N", () => {
     // A tiny reply that ran 60 s on an Apple tier-2.5 machine: the floor applies.
     const call = { paramsB: 9, btcUsd: 100_000, promptTokens: 10, outputTokens: 5, durationMs: 60_000, computeClass: "apple", tierWeight: 2.5, perSecondCostMsat: 0 };
