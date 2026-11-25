@@ -199,11 +199,10 @@ describe("1. a call taken from the backlog gets the same admission as placement 
     dispatch.noteAgentPull(gru.peerId, { inferenceSlots: 2, freeInferenceSlots: 2, wake: false }, later);
     expect(inference.claimAdmits(gru.peerId, st, later)).toBe(false);
     dispatch.noteAgentPull(gru.peerId, { inferenceSlots: 2, freeInferenceSlots: 2, wake: false });
-    // The hosts slowed down while it waited (measured decode ~1 tok/s): refused at the pull now.
+    // The hosts slowed down while it waited (measured decode ~1 tok/s): the sweep ends it now (no class
+    // here would finish it, a free slot or not), refunded.
     eta.decodeRates.clear();
     for (let i = 0; i < 3; i++) eta.decodeRates.record(MODEL, "cpu", 1);
-    expect((await pullAs(gru)).id).toBeNull();
-    // And the sweep ends it now (no class here would finish it), refunded.
     await inference.sweepWaitingInference();
     expect((await read(call.taskId, st.id)).statusCode).toBe(503);
   });

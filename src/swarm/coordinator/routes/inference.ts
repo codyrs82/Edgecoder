@@ -903,7 +903,8 @@ function waitingCallFits(st: Subtask, model: string, cls: string, agentId: strin
  *  - not by a host that is held back (start-eta.ts agentStolenRecently: CPU steal or its throttle
  *    guard reported within WITHHELD_REPORT_FRESH_MS, including with this very pull);
  *  - not when it would no longer finish on that host's class in the time it has left (the completion
- *    gate on the time since submit, with nothing ahead of it: the host has a slot for it now).
+ *    gate on the time since submit, with nothing ahead of it: the host has a slot for it now), when
+ *    it would have at submit (a call let in without that judgement is left to the waiting sweep).
  * Left waiting, it goes to another host or is ended by the waiting sweep. Reserved and own-machine
  * calls run where they are placed; a call gossiped from a peer is judged by its origin.
  */
@@ -913,7 +914,11 @@ export function claimAdmits(agentId: string, st: Subtask, nowMs = Date.now()): b
   if (agentStolenRecently(agentId, nowMs)) return false;
   if (usagePending.get(st.taskId) === undefined) return true;
   const cls = effectiveHardware(agentId)?.computeClass ?? agentCapabilities.get(agentId)?.computeClass ?? "cpu";
-  return waitingCallFits(st, st.requestedModel, cls, agentId, nowMs, { waiting: 0 });
+  if (waitingCallFits(st, st.requestedModel, cls, agentId, nowMs, { waiting: 0 })) return true;
+  // Refused only for the time it spent waiting: a call that would not have fit this class at submit
+  // either was let in there (exploration, or no holder yet right after a restart) and is not second-guessed.
+  const submittedAtMs = usagePending.get(st.taskId)?.atMs ?? nowMs;
+  return !waitingCallFits(st, st.requestedModel, cls, agentId, submittedAtMs, { waiting: 0 });
 }
 setClaimAdmission(claimAdmits);
 
