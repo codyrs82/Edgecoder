@@ -171,6 +171,33 @@ describe("BHV006: a heartbeat gap is not misbehaviour", () => {
   }, 20_000);
 });
 
+describe("lease traffic has its own rate budget", () => {
+  test("pulls over the general budget never starve a lease heartbeat or a result; a refused one is logged apart", async () => {
+    const events: Array<{ event: string; details?: Record<string, unknown> }> = [];
+    const stop = ctx.securityLog.addListener((e) => events.push(e as never));
+    try {
+      while (ctx.agentRateLimiter.check(worker.peerId)) { /* use up the general budget */ }
+      expect((await post("/pull", { agentId: worker.peerId }, worker)).statusCode).toBe(429);
+      const lease = await post("/heartbeat", { agentId: worker.peerId, leaseOnly: true }, worker);
+      expect(lease.statusCode, lease.body).toBe(200);
+      const result = await post("/result", { subtaskId: `none-${randomUUID()}`, taskId: "x", agentId: worker.peerId, ok: true, output: "x", durationMs: 100 }, worker);
+      expect(result.statusCode).not.toBe(429);
+      expect(events.some((e) => e.event === "agent_lease_traffic_rate_limited")).toBe(false);
+      // The lease budget itself used up: refused, and logged as its own event (once a minute).
+      while (ctx.agentLeaseRateLimiter.check(worker.peerId)) { /* use up the lease budget */ }
+      expect((await post("/heartbeat", { agentId: worker.peerId, leaseOnly: true }, worker)).statusCode).toBe(429);
+      expect((await post("/result", { subtaskId: "y", taskId: "x", agentId: worker.peerId, ok: true, output: "x", durationMs: 1 }, worker)).statusCode).toBe(429);
+      const logged = events.filter((e) => e.event === "agent_lease_traffic_rate_limited");
+      expect(logged).toHaveLength(1);
+      expect(logged[0].details).toMatchObject({ route: "/heartbeat" });
+    } finally {
+      stop();
+      ctx.agentRateLimiter.reset(worker.peerId);
+      ctx.agentLeaseRateLimiter.reset(worker.peerId);
+    }
+  });
+});
+
 describe("admin blacklist listing and lift (admin token)", () => {
   const target = `agent-bhv006-listed-${randomUUID().slice(0, 8)}`;
   const get = (url: string, headers: Record<string, string> = {}) => app.inject({ method: "GET", url, headers });

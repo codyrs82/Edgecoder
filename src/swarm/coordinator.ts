@@ -83,7 +83,7 @@ import { startCoordinatorAlerting, stopCoordinatorAlerting } from "./coordinator
 import { registerAlertRoutes } from "./coordinator/routes/alerts.js";
 import { initCoordinator } from "./coordinator/init.js";
 import { onClaimable, pickupStats } from "./coordinator/dispatch.js";
-import { noteAgentOutcome } from "./coordinator/memory-admission.js";
+import { noteAgentLapse } from "./coordinator/memory-admission.js";
 import { envelopeStats } from "./envelope-policy.js";
 import { cancelUnclaimedForDrain, onInferenceClaimable } from "./coordinator/routes/inference.js";
 import { startLostAgentSweep } from "./coordinator/lost-agent-claims.js";
@@ -120,7 +120,7 @@ queue.onLeaseFailure((result) => {
 // A call its requester cancelled was being ended by the coordinator (inference-cancel.ts): the
 // buyer walked away, so its lapse is not the agent's abandoned claim.
 queue.onClaimAbandoned((claim) => {
-  noteAgentOutcome(claim.agentId, false, claim.atMs);
+  noteAgentLapse(claim.agentId, claim.atMs);
   if (requesterCancelled(claim.subtaskId)) return;
   recordAbandonedClaim(claim);
 });

@@ -7,6 +7,7 @@ export type SecurityEventType =
   | "failed_auth"
   | "auth_rate_limit_hit"
   | "agent_rate_limited"
+  | "agent_lease_traffic_rate_limited"
   | "replay_attempt"
   | "invalid_signature"
   | "manifest_signature_failure"
@@ -66,6 +67,9 @@ const SEVERITY_MAP: Record<SecurityEventType, SecurityLevel> = {
   auth_rate_limit_hit: "HIGH",
   // A proven agent over its own request budget: throttled with 429, not an attack signal.
   agent_rate_limited: "INFO",
+  // Its /result or lease heartbeat was refused: its claims may lapse and their calls be lost. An
+  // operations signal (the budget is too small for the host), logged at most once a minute per agent.
+  agent_lease_traffic_rate_limited: "WARN",
   replay_attempt: "HIGH",
   invalid_signature: "HIGH",
   manifest_signature_failure: "CRITICAL",

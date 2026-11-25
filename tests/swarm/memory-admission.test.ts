@@ -17,6 +17,8 @@ import {
   memoryAdmits,
   memoryLimited,
   noteAgentMemory,
+  noteAgentLapse,
+  CIRCUIT_LAPSE_BURST_MS,
   noteAgentOutcome,
   noteAgentResult,
   noteDispatched,
@@ -147,6 +149,28 @@ describe("circuit breaker", () => {
     expect(circuitOpen("a", T0 + 10)).toBe(false);
     for (let i = 0; i < 3; i++) noteAgentResult("a", "m", false, "ollama crashed", T0 + i);
     expect(circuitOpen("a", T0 + 10)).toBe(true);
+  });
+});
+
+describe("circuit breaker: lapsed claims", () => {
+  it("claims that lapse together (one stall of a host running calls at once) are one failure", () => {
+    for (let i = 0; i < 16; i++) noteAgentLapse("cloud", T0 + i * 500);
+    expect(circuitState("cloud", T0 + 10_000).recentFailures).toBe(1);
+    expect(circuitOpen("cloud", T0 + 10_000)).toBe(false);
+  });
+
+  it("separate lapse groups each count, so a host that keeps losing its calls still trips", () => {
+    for (let g = 0; g < 3; g++) for (let i = 0; i < 4; i++) noteAgentLapse("bad", T0 + g * CIRCUIT_LAPSE_BURST_MS + i * 100);
+    expect(circuitOpen("bad", T0 + 3 * CIRCUIT_LAPSE_BURST_MS)).toBe(true);
+  });
+
+  it("a success ends the group: a later lapse is a new failure", () => {
+    noteAgentLapse("h", T0);
+    noteAgentOutcome("h", true, T0 + 1_000);
+    noteAgentLapse("h", T0 + 2_000);
+    expect(circuitState("h", T0 + 3_000).recentFailures).toBe(1);
+    noteAgentLapse("h", T0 + 2_500);
+    expect(circuitState("h", T0 + 3_000).recentFailures).toBe(1);
   });
 });
 
