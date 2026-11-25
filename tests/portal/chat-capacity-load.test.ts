@@ -105,4 +105,28 @@ describe("load-aware coordinator pick for network calls", () => {
     t += 2_500;
     expect((await d.pick({ kind: "network", model: MODEL })).url).toBe(US);
   });
+
+  // C9 (network test run 3): Auto calls did not count the calls sent since the last report, so a
+  // burst inside one report window all went to the coordinator that looked emptiest.
+  it("model auto: spreads a burst inside one report window", async () => {
+    const t = 0;
+    const d = createChatCapacityDirectory({ candidates: async () => [EU, US], allowed: () => true, now: () => t, probe: async (url) => (url === EU ? slots(2, 2, 4) : slots(2, 2, 3)), ttlMs: 60_000 });
+    const picks: string[] = [];
+    for (let i = 0; i < 6; i++) picks.push((await d.pickAutoChoice!({})).url!);
+    expect(picks[0]).toBe(EU);
+    expect(picks.filter((u) => u === US).length).toBeGreaterThanOrEqual(2);
+    expect(picks.filter((u) => u === EU).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("estimates the queue with the model's own service time when the coordinator reports it", async () => {
+    const busy = (serviceMs?: number): CapacityReport => ({ reachable: true, agentModels: [MODEL], callP50Ms: 4_000, modelLoad: { [MODEL]: { agents: 2, idle: 0, free: 0, waiting: 1, ...(serviceMs ? { serviceMs } : {}) } } });
+    const queueOf = async (serviceMs?: number) => {
+      const d = createChatCapacityDirectory({ candidates: async () => [EU, US], allowed: () => true, probe: async (url) => (url === EU ? busy(serviceMs) : slots(7, 0, 0, 9)), ttlMs: 60_000 });
+      const r = await d.pick({ kind: "network", model: MODEL });
+      return r.choice!.candidates.find((c) => c.coordinator === new URL(EU).host)!.queueMs;
+    };
+    // One round of calls ahead (waiting 1, 2 agents): the coordinator-wide p50 without serviceMs, the model's own with it.
+    expect(await queueOf()).toBe(4_000);
+    expect(await queueOf(90_000)).toBe(90_000);
+  });
 });

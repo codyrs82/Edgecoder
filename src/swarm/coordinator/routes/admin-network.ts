@@ -35,6 +35,7 @@ import { agentContextWindow, agentLastPullMs, agentLoadReport, agentSocketConnec
 import { agentSocketLost } from "../agent-liveness.js";
 import { effectiveHardware, hardwareVerifier } from "../economy.js";
 import { routableModels } from "../../model-catalog.js";
+import { noteServiceTime } from "../start-eta.js";
 import { inferenceCancelledForCapacity } from "./inference.js";
 import { bestFitConfig, complexityWeights, noteRoutedChunk, recentDecisions, restoreDecisions, ROUTING_LOG_SIZE, setCallDurationSource, setDecisionSink, storedDecision } from "../routing.js";
 import {
@@ -408,7 +409,10 @@ export function observeInference(url: string | undefined, status: number, body: 
   if (status !== 200 || !text.includes('"ok"') || typeof b.subtaskId !== "string") return;
   const error = typeof b.error === "string" && b.error ? b.error : undefined;
   inferenceTracker.chunk(b.subtaskId, b.done === true, error, nowMs);
-  noteRoutedChunk(b.subtaskId, queue.getClaim(b.subtaskId)?.claimedBy, b.done === true, error, nowMs);
+  const claim = queue.getClaim(b.subtaskId);
+  noteRoutedChunk(b.subtaskId, claim?.claimedBy, b.done === true, error, nowMs);
+  // C9: how long the model holds a slot here (claim to last piece), for the start estimate at submit.
+  if (b.done === true && claim) noteServiceTime(claim.subtask.requestedModel, claim.claimedBy, claim.claimedAt, nowMs);
 }
 
 const querySchema = z.object({ range: z.enum(Object.keys(SERIES_RANGES) as [SeriesRange, ...SeriesRange[]]).default("1h") });

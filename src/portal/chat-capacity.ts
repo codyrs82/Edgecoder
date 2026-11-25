@@ -74,6 +74,8 @@ export interface ModelLoad {
   agentRttMs?: number;
   /** Regions of the hosts with a free slot for it (newer coordinators; #526 locality). */
   freeRegions?: string[];
+  /** Typical time a call of this model holds a slot there, ms (newer coordinators; C9). */
+  serviceMs?: number;
 }
 
 /** A model the network can run now, across coordinators: agents holding it and their classes. */
@@ -106,6 +108,8 @@ export const LOAD_REPORT_MAX_AGE_MS = 2_000;
 /** A "no" older than this is asked again before a chat is refused for lack of compute. */
 const RECHECK_NO_AFTER_MS = 3_000;
 const CANDIDATE_LIST_TTL_MS = 60_000;
+/** Key for Auto calls sent since a report (a model name never has this form). */
+const AUTO_SENT_KEY = "\u0000auto";
 /** Round trips kept per coordinator, and how long one counts. */
 const RTT_SAMPLES = 5;
 const RTT_MAX_AGE_MS = 5 * 60_000;
@@ -174,13 +178,13 @@ export function httpCapacityProbe(opts: { serviceToken?: string; timeoutMs: numb
         const out = v.map((r) => cleanRegion(r)).filter((r): r is string => r !== null).slice(0, 32);
         return out.length ? out : undefined;
       };
-      for (const m of json.models as Array<{ model?: unknown; agents?: unknown; idleAgents?: unknown; freeSlots?: unknown; waiting?: unknown; classes?: unknown; agentRttMs?: unknown; freeRegions?: unknown }>) {
+      for (const m of json.models as Array<{ model?: unknown; agents?: unknown; idleAgents?: unknown; freeSlots?: unknown; waiting?: unknown; classes?: unknown; agentRttMs?: unknown; freeRegions?: unknown; serviceMs?: unknown }>) {
         if (m && typeof m.model === "string" && typeof m.agents === "number" && m.agents > 0) {
           agentModels.push(m.model);
           if (Array.isArray(m.classes)) modelClasses[m.model] = m.classes.filter((c): c is string => typeof c === "string");
           if (num(m.idleAgents)) {
             const freeRegions = regions(m.freeRegions);
-            modelLoad[m.model] = { agents: m.agents, idle: m.idleAgents, ...(num(m.freeSlots) ? { free: m.freeSlots } : {}), waiting: num(m.waiting) ? m.waiting : 0, ...(num(m.agentRttMs) ? { agentRttMs: m.agentRttMs } : {}), ...(freeRegions ? { freeRegions } : {}) };
+            modelLoad[m.model] = { agents: m.agents, idle: m.idleAgents, ...(num(m.freeSlots) ? { free: m.freeSlots } : {}), waiting: num(m.waiting) ? m.waiting : 0, ...(num(m.agentRttMs) ? { agentRttMs: m.agentRttMs } : {}), ...(freeRegions ? { freeRegions } : {}), ...(num(m.serviceMs) ? { serviceMs: m.serviceMs } : {}) };
           }
         }
       }
@@ -397,7 +401,9 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
         agents: Math.max(1, load.agents ?? 1),
         rttMs: rttOf(urls[i]),
         pickupP90Ms: r.pickupP90Ms ?? null,
-        callP50Ms: r.callP50Ms ?? null,
+        // C9: the model's own service time there when reported; the coordinator-wide p50 (submit to
+        // done over 15 min, every model, queueing included) lags a burst and mixes models.
+        callP50Ms: load.serviceMs ?? r.callP50Ms ?? null,
         agentRttMs: load.agentRttMs ?? null,
         reportAgeMs: reportAge(urls[i]),
         ...(load.freeRegions ? { freeRegions: load.freeRegions } : {}),
@@ -452,7 +458,9 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
       const r = reports[i];
       if (!r.reachable || recentlyFailed(urls[i]) || !r.agentModels?.length) continue;
       const loads = Object.values(r.modelLoad ?? {});
-      const room = loads.reduce((n, l) => n + (l.free ?? l.idle) - l.waiting, 0);
+      // C9: Auto calls sent there since its report also take room (as chooseByLoad counts them per
+      // model), so a burst inside one report window spreads instead of piling onto one coordinator.
+      const room = loads.reduce((n, l) => n + (l.free ?? l.idle) - l.waiting, 0) - sentCount(urls[i], AUTO_SENT_KEY, cache.get(`network|${urls[i]}`)?.at ?? 0);
       if (!best || room > best.room) best = { url: urls[i], room };
       const agentRtts = loads.map((l) => l.agentRttMs).filter((n): n is number => typeof n === "number");
       scored.push({
@@ -471,7 +479,9 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
     }
     if (!best) return { url: urls[0] };
     const choice = withLatency(scored, best.url, ctx);
-    return { url: scored.find((s) => coordinatorHost(s.url) === choice.chosen)?.url ?? best.url, choice };
+    const url = scored.find((s) => coordinatorHost(s.url) === choice.chosen)?.url ?? best.url;
+    noteSent(url, AUTO_SENT_KEY, cache.get(`network|${url}`)?.at ?? 0);
+    return { url, choice };
   }
 
   return {
