@@ -69,6 +69,7 @@ import { recordMeshWork } from "../world-activity.js";
 import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
 import { armAutoReplace, replaceAutoNow } from "../auto-replace.js";
 import { freeLocalHolders, LOCALITY_PREFER_MS, nearestFreeHolder, peerWithFreeCapacity } from "../locality.js";
+import { modelSlots, serviceTimes, startEtaLimitMs, startEtaMs } from "../start-eta.js";
 
 // ── Network inference (chat completions on agents' local models, streamed) ──────────────────
 export const inferenceStreams = new InferenceStreams();
@@ -436,11 +437,11 @@ export function waitingBound(holderIds: string[], nowMs = Date.now()): number {
   return Math.max(16, Math.min(512, slots * WAITING_PER_SLOT));
 }
 
-function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: string) => { send: (b: unknown) => unknown } } }, c?: { reason: NoCapacityReason; computeClass?: string; model?: string; coordinatorUrl?: string; retryAfterSec?: number }) {
+function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: string) => { send: (b: unknown) => unknown } } }, c?: { reason: NoCapacityReason; computeClass?: string; model?: string; coordinatorUrl?: string; retryAfterSec?: number; startEtaMs?: number }) {
   const noneInClass = c?.reason === "none_in_class";
   const draining = c?.reason === "draining";
   const coolingDown = c?.reason === "cooling_down";
-  const retryAfterSec = draining ? 1 : coolingDown && c?.retryAfterSec !== undefined ? c.retryAfterSec : NO_CAPACITY_RETRY_AFTER_SEC;
+  const retryAfterSec = draining ? 1 : c?.retryAfterSec !== undefined ? c.retryAfterSec : NO_CAPACITY_RETRY_AFTER_SEC;
   return reply
     .code(503)
     .header("retry-after", String(retryAfterSec))
@@ -449,12 +450,15 @@ function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: 
       reason: c?.reason ?? "busy",
       ...(c?.computeClass ? { computeClass: c.computeClass } : {}),
       ...(c?.coordinatorUrl ? { coordinatorUrl: c.coordinatorUrl } : {}),
+      ...(c?.startEtaMs !== undefined ? { startEtaMs: c.startEtaMs } : {}),
       message: draining
         ? "This coordinator is restarting; the call had not started and nothing was charged. Send it again (to the coordinator named, if any)."
         : coolingDown
         ? `The machine serving ${c?.model ?? "this model"} is cooling down after failed calls; nothing was charged. Send it again shortly or pick another model.`
         : noneInClass
         ? `No ${c?.computeClass} machine runs ${c?.model ?? "this model"} right now; nothing was charged.`
+        : c?.startEtaMs !== undefined
+        ? `Every machine serving ${c?.model ?? "this model"} here is busy (it would start in about ${Math.round(c.startEtaMs / 1000)} s); nothing was charged. Send it again shortly.`
         : `No agent could take this call within ${Math.round(INFERENCE_CLAIM_TIMEOUT_MS / 1000)} s; nothing was charged.`,
       retryAfterSec,
     });
@@ -538,6 +542,21 @@ function namedClass(requested: string): ComputeClassId | "any" {
 }
 const sumFree = (hs: ReadonlyArray<{ free: number }>) => hs.reduce((n, h) => n + h.free, 0);
 
+/**
+ * C9: the call's estimated start here (start-eta.ts) when it is past the limit for its timeout,
+ * else null (a slot is left, too few service times are known, or the check is off).
+ */
+function startEtaOverLimit(model: string, taskClass: ComputeClassId | "any", neededTokens: number, timeoutMs: number, nowMs = Date.now()): { etaMs: number; limitMs: number; waiting: number; slots: number; free: number; typicalMs: number } | null {
+  const limitMs = startEtaLimitMs(timeoutMs, CC.INFERENCE_START_ETA_FRACTION, INFERENCE_CLAIM_TIMEOUT_MS);
+  if (!Number.isFinite(limitMs)) return null;
+  const { slots, free } = modelSlots(model, taskClass, neededTokens, nowMs);
+  const waiting = queue.waitingInference(model);
+  if (free > waiting) return null;
+  const typicalMs = serviceTimes.typicalMs(model, taskClass, nowMs);
+  const etaMs = startEtaMs({ waiting, slots, free, typicalMs });
+  return etaMs !== null && typicalMs !== null && etaMs > limitMs ? { etaMs, limitMs: Math.round(limitMs), waiting, slots, free, typicalMs } : null;
+}
+
 /** Median of the known round trips (ms), null when none is known. */
 function medianRtt(values: number[]): number | null {
   if (!values.length) return null;
@@ -619,7 +638,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
           // paramsB: billions of parameters (MoE total), for the portal's model list.
           const cloud = cloudModelSpec(model);
           const ctx = cloud ? Math.min(e.ctx ?? cloud.contextWindow, cloud.contextWindow) : e.ctx;
-          return { model, agents: e.agents, agentsByClass: e.byClass, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), classes: [...e.classes], paramsB: paramsB(model), cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD, modelTokenPrice(model)), ...(ctx ? { contextWindow: ctx } : {}), ...(cloud ? { origin: cloud.origin, hostedBy: cloud.provider, cloudRank: cloud.rank, ...(cloud.hint ? { cloudHint: cloud.hint } : {}) } : {}), ...(restricted ? { restricted } : {}), ...(agentRtt !== null ? { agentRttMs: agentRtt } : {}), ...(e.freeRegions.size ? { freeRegions: [...e.freeRegions] } : {}) };
+          // serviceMs: typical time a call of this model holds a slot here (C9; the portal's queue estimate).
+          const serviceMs = serviceTimes.typicalMs(model, "any", now);
+          return { model, agents: e.agents, agentsByClass: e.byClass, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), ...(serviceMs !== null ? { serviceMs } : {}), classes: [...e.classes], paramsB: paramsB(model), cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD, modelTokenPrice(model)), ...(ctx ? { contextWindow: ctx } : {}), ...(cloud ? { origin: cloud.origin, hostedBy: cloud.provider, cloudRank: cloud.rank, ...(cloud.hint ? { cloudHint: cloud.hint } : {}) } : {}), ...(restricted ? { restricted } : {}), ...(agentRtt !== null ? { agentRttMs: agentRtt } : {}), ...(e.freeRegions.size ? { freeRegions: [...e.freeRegions] } : {}) };
         })
         .sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model)), (r) => r.model, (r) => r.cloudRank),
       classes,
@@ -716,6 +737,18 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       }
       // Just restarted, agents not back yet: a known model's call waits for them (bounded, refunded if none comes).
       if (!holders.some(([id]) => !reservations.isHeld(id)) && !(holders.length === 0 && inStartupGrace() && knownModel(body.model))) return reply.code(409).send({ error: "no_agent_has_model", model: body.model });
+      // C9: a call that would not start here in time (start-eta.ts) goes to a peer with a free slot
+      // (route_elsewhere) or is refused now, retryable, before anything is reserved.
+      const overloaded = startEtaOverLimit(body.model, namedClass(body.computeClass), contextNeeded(body.messages as ChatMessage[], body.tools, body.maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS), body.timeoutMs);
+      if (overloaded) {
+        const peer = body.routeRedirect && !restrictedTier ? await peerWithFreeCapacity(body.model, body.computeClass, clientRegion).catch(() => null) : null;
+        req.log.info({ model: body.model, computeClass: body.computeClass, ...overloaded, peer: peer?.coordinatorId ?? null }, "inference_start_eta_over_limit");
+        if (peer) {
+          recordMeshWork(peer.coordinatorId);
+          return reply.code(409).send({ error: "route_elsewhere", coordinatorId: peer.coordinatorId, coordinatorUrl: peer.url, model: body.model, reason: "start_eta", startEtaMs: overloaded.etaMs, ...(routed ? { routing: routed.summary } : {}) });
+        }
+        return noCapacityReply(reply as any, { reason: "busy", model: body.model, retryAfterSec: Math.max(1, Math.min(60, Math.ceil(overloaded.etaMs / 2_000))), startEtaMs: overloaded.etaMs });
+      }
     }
     // B4: every machine holding the model has its circuit open (cooling down after failures): say so
     // now, retryable, rather than queue the call for the claim bound behind the breaker.

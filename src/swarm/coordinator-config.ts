@@ -232,6 +232,10 @@ export const coordinatorConfigSchema = z.object({
   // full, and the requester told 503 no_capacity: well under the 100 s a proxy in front of the
   // portal (Cloudflare) waits for a response, so an overloaded call fails cleanly instead.
   INFERENCE_CLAIM_TIMEOUT_MS: envInt(45_000, { min: 1_000, max: 600_000 }),
+  // C9: a network call whose estimated start here (calls ahead / slots × typical service time) is
+  // past this share of its timeout (and past the claim bound) is sent to a peer with a free slot
+  // (route_elsewhere) or answered 503 no_capacity, before anything is reserved. 0 turns it off.
+  INFERENCE_START_ETA_FRACTION: envNumber(0.5, { min: 0, max: 1 }),
   /** #524: after a restart, calls for a model nobody holds yet wait this long for agents to re-register (0 = off). */
   COORDINATOR_STARTUP_GRACE_MS: envInt(90_000, { min: 0, max: 600_000 }),
   // The web tool (docs/web-tool.md): the Brave Search API key (a secret; unset = the tool is off),
