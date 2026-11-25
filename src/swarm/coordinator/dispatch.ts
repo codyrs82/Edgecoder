@@ -36,6 +36,21 @@
  *    that reports no telemetry (the Fly CPU hosts) is never assumed cold, so it is not held back,
  *    and it counts as warm for a model it just ran. The preferred agent is exempt: whoever chose it
  *    (locality.ts, best fit) already weighed the cold load.
+ *
+ * 5. Locality against warm models (run 3, C3: the nearest host took 10.5% of calls under load).
+ *    A cold load is paid once; the model then stays warm there for WARM_MS and serves that region's
+ *    next calls, while distance is paid on every call, over several round trips. coldLoadKm turns a
+ *    load into the distance it is worth on that footing, so a near host with the model installed
+ *    loses to a far warm one only when its load clearly exceeds the extra round trips (a 1.5b load,
+ *    ~1.6 s, is worth 14,000 km: about 4 x 200 ms twice over). It counts only against a warm host
+ *    that is idle: once the warm hosts are running calls, warming a second host near the buyer adds
+ *    capacity where the demand is. Nudges put a known-cold agent last (an agent that reports nothing
+ *    is not assumed cold), and the locality choice stays first in line for nudges after its hold.
+ *
+ * 6. Silence (run 3, C4: Auto placed two calls on a Mac 45 s after it was last heard from).
+ *    Agents are heard every few seconds (idle pulls every 1-3 s, a lease heartbeat every 15 s while
+ *    busy). One silent for AGENT_SILENT_MS is not counted on for new work (agentRoutable), well before
+ *    the 2-minute connected window ends or its socket is seen to close.
  */
 
 import type { Subtask } from "../../common/types.js";
@@ -51,6 +66,7 @@ import { peerGrantAllowsClaim } from "./grants.js";
 import { restrictedClaimAllowed } from "./restricted.js";
 import { circuitBlocks, loadedModelsOf, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
 import { agentSocketLost, noteAgentHttpAlive } from "./agent-liveness.js";
+import { KM_PER_RTT_MS } from "../../common/geo-regions.js";
 
 /** Agents nudged per claimable subtask. */
 export const NUDGE_FANOUT = 2;
@@ -63,6 +79,12 @@ export const WARM_MS = 5 * 60_000;
 /** An agent nudged this recently, that has not pulled since, is not counted on to come twice. */
 const NUDGE_PENDING_MS = 2_000;
 const READY_KEEP_MS = 10 * 60_000;
+/** An agent not heard from (pull, heartbeat, result, register) this long gets no new work (C4). */
+export const AGENT_SILENT_MS = 30_000;
+/** Round trips between the buyer's side and the host that one call pays for distance (claim, first token, result, reply). */
+export const LOCALITY_CALL_ROUND_TRIPS = 4;
+/** A cold load outweighs distance only when it is this many times the extra round trips it saves. */
+export const COLD_LOAD_CLEAR_FACTOR = 2;
 const PICKUP_SAMPLES = 1_000;
 
 type Capability = NonNullable<ReturnType<typeof agentCapabilities.get>>;
@@ -104,6 +126,23 @@ const preferred = new Map<string, { agentId: string; untilMs: number }>();
 /** agentId -> model -> when it last claimed a call for that model. */
 const served = new Map<string, Map<string, number>>();
 let nudgesSent = 0;
+
+/**
+ * The distance (km) a cold load of `loadMs` is worth against locality: the load counts only past
+ * COLD_LOAD_CLEAR_FACTOR times the round trips a call pays for distance (see 5. above).
+ */
+export function coldLoadKm(loadMs: number): number {
+  return (Math.max(0, loadMs) * KM_PER_RTT_MS) / (LOCALITY_CALL_ROUND_TRIPS * COLD_LOAD_CLEAR_FACTOR);
+}
+
+/**
+ * The agent can be counted on for new work now: heard from (heartbeat, register, or pull) within
+ * AGENT_SILENT_MS and its socket not seen to close since (agent-liveness.ts). Best fit's candidates (routing.ts) and dispatch use it.
+ */
+export function agentRoutable(agentId: string, lastSeenMs: number, nowMs = Date.now()): boolean {
+  const heardMs = Math.max(lastSeenMs, lastPullAt.get(agentId) ?? 0);
+  return nowMs - heardMs <= AGENT_SILENT_MS && !agentSocketLost(agentId, nowMs);
+}
 
 /** /pull handed `agentId` a call for `model`: the model is warm there for WARM_MS. */
 export function noteModelServed(agentId: string, model: string | undefined, nowMs = Date.now()): void {
@@ -234,8 +273,8 @@ export function freeModelSlots(agentId: string, claims: Claims): number {
 function liveAgent(agentId: string, cap: Capability | undefined, nowMs: number): cap is Capability {
   if (!cap || activeBlacklistRecord(agentId)) return false;
   // #524: its socket closed and it has not been heard from since: gone, whatever lastSeenMs says.
-  if (agentSocketLost(agentId, nowMs)) return false;
-  return nowMs - cap.lastSeenMs <= LOAD_FRESH_MS;
+  // C4: silent for AGENT_SILENT_MS: not counted on either.
+  return agentRoutable(agentId, cap.lastSeenMs, nowMs);
 }
 
 /** Nudge-capable, connected, recently pulling. */
@@ -369,18 +408,20 @@ export function pickupStats(): { count: number; p50: number; p90: number; nudges
 /** Choose who to nudge for `subtask`: eligible, reachable, with room; least loaded first. */
 export function nudgeTargets(subtask: Subtask, nowMs = Date.now(), claims: Claims = queue.activeClaims()): string[] {
   const excluded = queue.excludedAgents(subtask.id);
-  const candidates: Array<{ id: string; busy: number; free: number; pending: boolean; at: number; loaded: boolean }> = [];
+  const candidates: Array<{ id: string; busy: number; free: number; pending: boolean; at: number; cold: boolean }> = [];
   for (const [id, cap] of agentCapabilities) {
     if (excluded.includes(id) || !reachable(id, nowMs) || !liveAgent(id, cap, nowMs)) continue;
     if (!hasRoomFor(id, subtask, claims, nowMs)) continue;
     if (!claimRule(id, cap, undefined, nowMs)(subtask)) continue;
     const at = nudgedAt.get(id);
-    candidates.push({ id, busy: claims.get(id)?.all ?? 0, free: freeSlots(id, claims, false) ?? 1, pending: at !== undefined && nowMs - at < NUDGE_PENDING_MS, at: at ?? 0, loaded: !!subtask.requestedModel && modelWarmOn(id, subtask.requestedModel, nowMs) });
+    candidates.push({ id, busy: claims.get(id)?.all ?? 0, free: freeSlots(id, claims, false) ?? 1, pending: at !== undefined && nowMs - at < NUDGE_PENDING_MS, at: at ?? 0, cold: !!subtask.requestedModel && modelKnownCold(id, subtask.requestedModel, nowMs) });
   }
-  // Agents with the model already loaded first (no load / unload thrash), then the least loaded.
-  candidates.sort((a, b) => Number(b.loaded) - Number(a.loaded) || a.busy - b.busy || Number(a.pending) - Number(b.pending) || b.free - a.free || a.at - b.at);
-  // The preferred agent (best-fit routing) is nudged first.
-  const pref = preferredAgentFor(subtask.id, nowMs);
+  // Agents known to be cold last (no load / unload thrash; one that reports nothing is not assumed
+  // cold, C3), then the least loaded.
+  candidates.sort((a, b) => Number(a.cold) - Number(b.cold) || a.busy - b.busy || Number(a.pending) - Number(b.pending) || b.free - a.free || a.at - b.at);
+  // The preferred agent (best fit, locality) is nudged first, also when its hold has just ended
+  // (the nudge at its end): it is still the one the call suits best.
+  const pref = preferred.get(subtask.id)?.agentId;
   const at = pref ? candidates.findIndex((c) => c.id === pref) : -1;
   if (at > 0) candidates.unshift(...candidates.splice(at, 1));
   return candidates.slice(0, NUDGE_FANOUT).map((c) => c.id);

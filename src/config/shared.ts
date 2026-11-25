@@ -289,7 +289,9 @@ export const bestFitEnv = {
   BEST_FIT_PEERS: envFlag({ off: ["0", "false"] }),
   BEST_FIT_COMPLEXITY_WEIGHTS_JSON: envJson(),
   /** Cloud models Auto may use: unset = every autoEligible catalog model, a comma list = only those, "off" = none. docs/cloud-host.md. */
-  AUTO_CLOUD_MODELS: str()
+  AUTO_CLOUD_MODELS: str(),
+  /** Reasoning models and the max_tokens a call needs before Auto places it on them ("2048", "glm-5.3=2048,...", "off"); best-fit.ts parseReasoningMinTokens. */
+  AUTO_REASONING_MIN_TOKENS: str()
 };
 
 /** Claim leases on queued subtasks (src/swarm/queue.ts). */
