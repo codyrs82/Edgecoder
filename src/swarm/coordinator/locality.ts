@@ -123,6 +123,8 @@ export interface PeerFit {
   limitMs: number;
   /** Prior speed per class (start-eta.ts COMPLETION_PRIOR_SPEED), for a class measured too little here. */
   prior?: Readonly<Record<string, number>>;
+  /** Run 7: false when the call set no max_tokens (its reply is not judged on the decode rate). */
+  decode?: boolean;
 }
 
 /** When a peer's agent would finish the call (ms from now), as above. */
@@ -133,7 +135,7 @@ export function peerCompletionMs(a: AgentView, model: string, fit: PeerFit, nowM
   const workMs = callWorkMs(model, a.computeClass, fit.promptTokens, fit.outputTokens);
   const known = serviceTimes.speedFor(model, a.computeClass, workMs, fit.prior?.[a.computeClass], nowMs).speed;
   // Run 7: and the decode-rate estimate for the class (start-eta.ts decodeEstimateMs: measured here, else the class prior).
-  const decode = decodeEstimateMs(model, a.computeClass, fit.promptTokens, fit.outputTokens, nowMs, fit.prior?.[a.computeClass] !== undefined);
+  const decode = fit.decode === false ? null : decodeEstimateMs(model, a.computeClass, fit.promptTokens, fit.outputTokens, nowMs, fit.prior?.[a.computeClass] !== undefined);
   return Math.round(Math.max(advertised, known === null ? 0 : known * workMs * slowdown, decode === null ? 0 : decode.ms * slowdown));
 }
 

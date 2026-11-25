@@ -826,7 +826,9 @@ export function completionCheck(
   const limitMs = completionLimitMs(timeoutMs, CC.INFERENCE_COMPLETION_ETA_FRACTION) - elapsedMs;
   if (!Number.isFinite(limitMs)) return { exclude: [], none: false, etaMs: null, limitMs };
   const { promptTokens, outputTokens } = completionWork(messages, tools, maxTokens);
-  const classes = completionByClass({ model, taskClass, neededTokens: contextNeeded(messages, tools, maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS), promptTokens, outputTokens, waiting: queue.waitingInference(model), prior: completionPrior() }, nowMs);
+  // Run 7: the decode-rate estimate judges a reply of the call's own max_tokens; a call that set none is
+  // judged on a typical long reply (COMPLETION_UNSET_MAX_TOKENS) at the speed estimate, as before.
+  const classes = completionByClass({ model, taskClass, neededTokens: contextNeeded(messages, tools, maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS), promptTokens, outputTokens, waiting: queue.waitingInference(model), prior: completionPrior(), decode: maxTokens !== undefined }, nowMs);
   return { ...judgeCompletion(classes, limitMs, opts.explore === false ? 0 : timeoutMs - elapsedMs), limitMs: Math.round(limitMs) };
 }
 
@@ -850,7 +852,7 @@ export function completionWork(messages: ChatMessage[], tools: unknown[] | undef
 
 /** Run 6: what a peer's free host must finish the call within to be sent it (locality.ts peerWithFreeCapacity). */
 function peerFit(messages: ChatMessage[], tools: unknown[] | undefined, maxTokens: number | undefined, timeoutMs: number): PeerFit {
-  return { ...completionWork(messages, tools, maxTokens), limitMs: completionLimitMs(timeoutMs, CC.INFERENCE_COMPLETION_ETA_FRACTION), prior: completionPrior() };
+  return { ...completionWork(messages, tools, maxTokens), limitMs: completionLimitMs(timeoutMs, CC.INFERENCE_COMPLETION_ETA_FRACTION), prior: completionPrior(), decode: maxTokens !== undefined };
 }
 
 /**

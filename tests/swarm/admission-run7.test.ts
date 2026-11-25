@@ -154,6 +154,11 @@ describe("1. a long reply is judged on max_tokens ÷ the decode rate (31c83bfe, 
     expect(creditEngine.balance(requester.peerId)).toBe(before);
   });
 
+  test("a call that sets no max_tokens is judged as before (a typical reply at the speed estimate), not on the decode rate", async () => {
+    const { r } = await submit({ model: MODEL, messages: longReply().messages });
+    expect(r.statusCode, r.body).toBe(200);
+  });
+
   test("submit: a short reply on the same hosts is still accepted", async () => {
     const { r } = await submit({ ...lookup(), maxTokens: 256 });
     expect(r.statusCode, r.body).toBe(200);

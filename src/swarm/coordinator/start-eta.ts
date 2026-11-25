@@ -440,7 +440,7 @@ export function classContention(computeClass: string, hosts: number, maxSlotsPer
  * were all ahead of it in proportion to its slots). `prior`: the prior speed per class (run 5;
  * parseCompletionPrior), none: a class with too few relevant samples is not judged.
  */
-export function completionByClass(input: { model: string; taskClass: ComputeClassId | "any"; neededTokens: number; promptTokens: number; outputTokens: number; waiting: number; prior?: Readonly<Record<string, number>> }, nowMs = Date.now()): ClassCompletion[] {
+export function completionByClass(input: { model: string; taskClass: ComputeClassId | "any"; neededTokens: number; promptTokens: number; outputTokens: number; waiting: number; prior?: Readonly<Record<string, number>>; decode?: boolean }, nowMs = Date.now()): ClassCompletion[] {
   const holders = modelHolders(input.model, input.taskClass, input.neededTokens, nowMs);
   const claims = queue.activeClaims();
   const totalSlots = holders.reduce((n, h) => n + h.slots, 0);
@@ -463,7 +463,8 @@ export function completionByClass(input: { model: string; taskClass: ComputeClas
     const slowdown = classContention(cls, e.agents.length, e.maxSlots, e.running + Math.min(waiting, e.free));
     // Run 7: the decode-rate estimate (prefill + max_tokens ÷ the class's decode rate); the call is
     // judged on the slower of the two, so a long reply is never judged at the speed of short calls.
-    const decode = decodeEstimateMs(input.model, cls, input.promptTokens, input.outputTokens, nowMs, input.prior?.[cls] !== undefined);
+    // Only for a call that set its max_tokens (`decode` false: judged on a typical reply, the speed estimate alone).
+    const decode = input.decode === false ? null : decodeEstimateMs(input.model, cls, input.promptTokens, input.outputTokens, nowMs, input.prior?.[cls] !== undefined);
     const bySpeed = est.speed === null ? null : est.speed * workMs;
     const own = bySpeed === null && decode === null ? null : Math.max(bySpeed ?? 0, decode?.ms ?? 0);
     const ownMs = own === null ? null : own * slowdown;
