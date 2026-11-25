@@ -353,7 +353,9 @@ export async function retryInferenceElsewhere(subtask: Subtask, agentId: string,
   if (error && NOT_RETRYABLE.test(error)) return false;
   const submittedAtMs = usagePending.get(subtask.taskId)?.atMs;
   if (submittedAtMs === undefined) return false;
-  const leftMs = rerunTimeoutMs(submittedTimeoutMs(subtask), submittedAtMs, nowMs);
+  // A run that used up its whole time with nothing sent ("timed out after N s") gets no re-run budget:
+  // the call already had its timeout; it is retried only within it, as before.
+  const leftMs = rerunTimeoutMs(submittedTimeoutMs(subtask), submittedAtMs, nowMs, error && /^timed out after \d+ s$/.test(error) ? 0 : CC.INFERENCE_RERUN_BUDGET_MS);
   if (leftMs < INFERENCE_RETRY_MIN_LEFT_MS) return false;
   // A reserved call runs only on its lease's agent.
   if (subtask.projectMeta.reservationId) return false;
