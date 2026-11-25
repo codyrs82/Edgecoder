@@ -69,7 +69,7 @@ import { recordMeshWork } from "../world-activity.js";
 import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
 import { armAutoReplace, autoPlacementOf, overrunAlternativeExists, placeAfterOverrun, replaceAutoNow, setReplaceAdmission, type AutoPlacement } from "../auto-replace.js";
 import { freeLocalHolders, LOCALITY_PREFER_MS, nearestFreeHolder, peerWithFreeCapacity, type PeerFit } from "../locality.js";
-import { completionByClass, completionLimitMs, hostServiceMs, hostSpeed, type HostSpeedSource, judgeCompletion, modelPickups, modelSlots, parseCompletionPrior, serviceTimes, startEtaLimitMs, startEtaMs } from "../start-eta.js";
+import { agentWithholding, completionByClass, completionLimitMs, hostServiceMs, hostSpeed, type HostSpeedSource, judgeCompletion, modelPickups, modelSlots, parseCompletionPrior, serviceTimes, stalledClaimMs, startEtaLimitMs, startEtaMs, withholdingHolders } from "../start-eta.js";
 
 // ── Network inference (chat completions on agents' local models, streamed) ──────────────────
 export const inferenceStreams = new InferenceStreams();
@@ -679,6 +679,9 @@ function startEtaOverLimit(model: string, taskClass: ComputeClassId | "any", nee
   const { slots, free } = modelSlots(model, taskClass, neededTokens, nowMs);
   const waiting = queue.waitingInference(model);
   if (free > waiting) return null;
+  // Run 7: every holder of the model withholds its slots (a throttled CPU, #563): nothing here will
+  // take the call for a while (the agent's hold is minutes), so it does not start within its timeout.
+  if (slots <= 0 && withholdingHolders(model, nowMs).length > 0) return { etaMs: timeoutMs, limitMs: Math.round(limitMs), waiting, slots, free, typicalMs: null, pickupEtaMs: null };
   const etaMs = startEtaOf(model, taskClass, waiting - free + 1, slots, nowMs);
   return etaMs !== null && etaMs.etaMs > limitMs ? { ...etaMs, limitMs: Math.round(limitMs), waiting, slots, free } : null;
 }
@@ -689,7 +692,9 @@ function startEtaOverLimit(model: string, taskClass: ComputeClassId | "any", nee
  * (start-eta.ts ModelPickups). Null when neither is known.
  */
 function startEtaOf(model: string, taskClass: ComputeClassId | "any", ahead: number, slots: number, nowMs: number): { etaMs: number; typicalMs: number | null; pickupEtaMs: number | null } | null {
-  const typicalMs = serviceTimes.typicalMs(model, taskClass, nowMs);
+  // Run 7: the mean hold, not the median (start-eta.ts ServiceTimes.meanMs): a few long calls hold
+  // the slots, and the median of mostly short lookups said they would free far sooner than they did.
+  const typicalMs = serviceTimes.meanMs(model, taskClass, nowMs);
   const byService = typicalMs !== null && slots > 0 ? Math.round((Math.max(1, ahead) / slots) * typicalMs) : null;
   const pickupEtaMs = modelPickups.etaMs(model, ahead, nowMs);
   if (byService === null && pickupEtaMs === null) return null;
@@ -735,17 +740,77 @@ export async function sweepWaitingInference(nowMs = Date.now()): Promise<number>
       if (deadlineAt === undefined) continue;
       const cls = (st.projectMeta.computeClass ?? "any") as ComputeClassId | "any";
       const room = modelSlots(model, cls, inferenceTokensNeededOf(st), nowMs);
-      if (room.slots <= 0 || i < room.free) continue;
+      // Run 7: no slot here will take it (every holder withholds its slots: a throttled CPU, #563): ended now.
+      if (room.slots <= 0) {
+        if (withholdingHolders(model, nowMs).length > 0 && (await cancelUnclaimedInference(st.taskId, st.id).catch(() => false))) {
+          ended++;
+          coordinatorApp.log.warn({ taskId: st.taskId, subtaskId: st.id, model, leftMs: deadlineAt - nowMs }, "inference_waiting_no_slot");
+        }
+        continue;
+      }
+      if (i < room.free) continue;
       const eta = startEtaOf(model, cls, i - room.free + 1, room.slots, nowMs);
-      if (eta === null || eta.etaMs <= deadlineAt - nowMs) continue;
-      if (await cancelUnclaimedInference(st.taskId, st.id, undefined, undefined, eta.etaMs).catch(() => false)) {
+      // Run 7: a start in time is not enough when it would not finish in the time it has left
+      // (completionCheck on the time since submit, as Auto re-placement does): ended now, not at the deadline.
+      const fits = waitingCallFits(st, model, cls, undefined, nowMs);
+      if (fits && (eta === null || eta.etaMs <= deadlineAt - nowMs)) continue;
+      if (await cancelUnclaimedInference(st.taskId, st.id, undefined, undefined, eta?.etaMs).catch(() => false)) {
         ended++;
-        coordinatorApp.log.warn({ taskId: st.taskId, subtaskId: st.id, model, startEtaMs: eta.etaMs, leftMs: deadlineAt - nowMs, ahead: i - room.free + 1 }, "inference_waiting_cannot_start");
+        coordinatorApp.log.warn({ taskId: st.taskId, subtaskId: st.id, model, startEtaMs: eta?.etaMs ?? null, leftMs: deadlineAt - nowMs, ahead: i - room.free + 1, ...(fits ? {} : { completion: "over_limit" }) }, "inference_waiting_cannot_start");
       }
     }
   }
+  ended += await takeBackStalledClaims(nowMs);
   return ended;
 }
+
+/**
+ * Run 7 (CPU ramp): inf-1795617240059-949e8a28 and inf-1795617241236-f9c28e38 were claimed within
+ * 3 s by a host whose CPU credit ran out as it started them; nothing came in 180 s and the sweep,
+ * which looked only at unclaimed calls, never saw them. Other ramp calls waited 14-37 s for their
+ * first piece on hosts that had just become throttled. A claimed network call with nothing sent yet
+ * is now taken back from its agent (once) when that agent withholds its slots (a throttled CPU,
+ * start-eta.ts agentWithholding), or when its first piece is overdue (stalledClaimMs). It goes back
+ * on the queue without that agent, with the time it has left, when it can still finish there
+ * (completionCheck on the time since submit); else it is ended now with a retryable no_capacity
+ * ("busy"), refunded in full. The agent's later pieces and result are refused (not the claimant).
+ * Returns how many were ended (re-queued calls are judged by the next sweep).
+ */
+export async function takeBackStalledClaims(nowMs = Date.now()): Promise<number> {
+  let ended = 0;
+  for (const c of queue.inferenceCalls()) {
+    if (!c.claimedBy) continue;
+    const claim = queue.getClaim(c.subtaskId);
+    const st = claim?.subtask;
+    const agentId = claim?.claimedBy;
+    if (!st || !agentId || claim.claimedAt === undefined || !st.requestedModel) continue;
+    if (st.projectMeta.reservationId || st.projectMeta.onlyAccountId || retriedInference.has(st.id) || requesterCancelled(st.id)) continue;
+    if (inferenceStreams.firstPieceAt(st.id) !== undefined || inferenceStreams.hasContent(st.id) || inferenceStreams.isDone(st.id)) continue;
+    const ageMs = nowMs - claim.claimedAt;
+    const cls = effectiveHardware(agentId)?.computeClass ?? agentCapabilities.get(agentId)?.computeClass ?? "cpu";
+    const throttled = ageMs >= STALL_REPORT_GRACE_MS && agentWithholding(agentId, nowMs);
+    const boundMs = throttled ? null : stalledClaimMs(st.requestedModel, cls, Math.ceil(Buffer.byteLength(st.input, "utf8") / 4), nowMs);
+    if (!throttled && (boundMs === null || ageMs < boundMs)) continue;
+    const submittedAtMs = usagePending.get(st.taskId)?.atMs;
+    if (submittedAtMs === undefined) continue;
+    if (!inferenceStreams.reopenIfEmpty(st.id) || !queue.releaseForRetry(st.id, agentId, nowMs)) continue;
+    retriedInference.set(st.id, nowMs);
+    claimedTradePrice.delete(st.id);
+    const leftMs = rerunTimeoutMs(submittedTimeoutMs(st), submittedAtMs, nowMs, 0);
+    const why = throttled ? "agent_withholding" : "first_piece_overdue";
+    if (leftMs < INFERENCE_RETRY_MIN_LEFT_MS || !waitingCallFits(st, st.requestedModel, st.projectMeta.computeClass ?? "any", undefined, nowMs)) {
+      if (await cancelUnclaimedInference(st.taskId, st.id).catch(() => false)) ended++;
+      coordinatorApp.log.warn({ taskId: st.taskId, subtaskId: st.id, agentId, ageMs, why, leftMs }, "inference_stalled_claim_ended");
+      continue;
+    }
+    startRerunBudget(st, leftMs);
+    armClaimDeadline(st.taskId, st.id, Math.min(INFERENCE_CLAIM_TIMEOUT_MS, leftMs));
+    coordinatorApp.log.warn({ taskId: st.taskId, subtaskId: st.id, agentId, ageMs, why, leftMs }, "inference_stalled_claim_requeued");
+  }
+  return ended;
+}
+/** A claim this young is not taken back for its agent's withheld slots (its report may predate the claim). */
+export const STALL_REPORT_GRACE_MS = 2_000;
 setInterval(() => void sweepWaitingInference().catch((err) => coordinatorApp.log.error({ err }, "inference_waiting_sweep_failed")), WAITING_SWEEP_MS).unref?.();
 
 /**

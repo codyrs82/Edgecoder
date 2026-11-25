@@ -35,7 +35,7 @@ import { agentContextWindow, agentLastPullMs, agentLoadReport, agentSocketConnec
 import { agentSocketLost } from "../agent-liveness.js";
 import { effectiveHardware, hardwareVerifier } from "../economy.js";
 import { routableModels } from "../../model-catalog.js";
-import { noteServiceTime } from "../start-eta.js";
+import { noteDecodeRate, noteServiceTime } from "../start-eta.js";
 import { noteAgentSteal } from "../host-steal.js";
 import { inferenceCancelledForCapacity, inferenceStreams } from "./inference.js";
 import { bestFitConfig, complexityWeights, noteRoutedChunk, recentDecisions, restoreDecisions, ROUTING_LOG_SIZE, setCallDurationSource, setDecisionSink, storedDecision } from "../routing.js";
@@ -417,7 +417,13 @@ export function observeInference(url: string | undefined, status: number, body: 
   // C9: how long the model holds a slot here (claim to last piece), for the start estimate at submit.
   // With the tokens it read and wrote (the model's counts, else estimated from the bytes: a timed-out
   // call has none), the sample also gives the class's speed, for the completion estimate.
-  if (b.done === true && claim) noteServiceTime(claim.subtask.requestedModel, claim.claimedBy, claim.claimedAt, nowMs, sampleTokens(b, claim.subtask.input, inferenceStreams.replyBytes(b.subtaskId) ?? 0));
+  if (b.done === true && claim) {
+    const tokens = sampleTokens(b, claim.subtask.input, inferenceStreams.replyBytes(b.subtaskId) ?? 0);
+    noteServiceTime(claim.subtask.requestedModel, claim.claimedBy, claim.claimedAt, nowMs, tokens);
+    // Run 7: the class's decode and prefill rates (first piece to last, claim to first piece).
+    const running = claim.claimedBy ? queue.activeClaims().get(claim.claimedBy)?.inference ?? 1 : 1;
+    noteDecodeRate(claim.subtask.requestedModel, claim.claimedBy, claim.claimedAt, inferenceStreams.firstPieceAt(b.subtaskId), nowMs, tokens, running);
+  }
 }
 
 /** A finished call's token counts for its speed sample: the reported ones, else ~4 bytes a token; none without output. */
