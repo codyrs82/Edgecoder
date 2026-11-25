@@ -158,12 +158,13 @@ describe("item 2: a long prompt's prefill is priced from its token count and the
     // Short prompts read fast (fixed overhead amortised, cached prefixes): they say little about 4.8k tokens.
     for (let i = 0; i < 5; i++) eta.prefillRates.record(MODEL, "cpu", 200, Date.now(), 400);
     const decode = eta.priorDecodeTps(MODEL, "cpu");
-    expect(eta.completionPrefillTps(MODEL, "cpu", prompt, decode)).toBeCloseTo(decode * eta.COMPLETION_PREFILL_FACTOR.cpu, 5);
+    // Run 10: the fallback is the lower of decode × COMPLETION_PREFILL_FACTOR and the class's prefill prior.
+    expect(eta.completionPrefillTps(MODEL, "cpu", prompt, decode).tps).toBeCloseTo(Math.min(decode * eta.COMPLETION_PREFILL_FACTOR.cpu, eta.priorPrefillTps(MODEL, "cpu")), 5);
     // ...but they do count for a prompt of their own size.
-    expect(eta.completionPrefillTps(MODEL, "cpu", 600, decode)).toBe(200);
+    expect(eta.completionPrefillTps(MODEL, "cpu", 450, decode)).toMatchObject({ tps: 200, from: "measured" });
     // Long prompts measured on a faster (4-core) host take over.
     for (let i = 0; i < 3; i++) eta.prefillRates.record(MODEL, "cpu", 80, Date.now(), 4_500);
-    expect(eta.completionPrefillTps(MODEL, "cpu", prompt, decode)).toBe(80);
+    expect(eta.completionPrefillTps(MODEL, "cpu", prompt, decode).tps).toBe(80);
   });
 
   test("a finished call's prefill sample keeps its prompt size", () => {
@@ -272,5 +273,93 @@ describe("item 5: an Auto call is judged on its expected reply, not its max_toke
   test("a named-model call keeps its max_tokens judgement (run 7)", async () => {
     const { r } = await submit({ ...chat(2_000), model: MODEL });
     expect(r.statusCode, r.body).toBe(503);
+  });
+});
+
+/*
+ * Network validation run 10 (scratchpad netval/run10/report.md, item 3): the same ~4.6k-token prompt
+ * (max_tokens 300) was admitted on the 2-core 1.5b CPU hosts again: inf-1795642903097-65a0dde5 (jnb)
+ * sent nothing in 180 s; lax, gru and iad took 125-144 s to the first token (26-37 tok/s reading the
+ * prompt) and wrote the reply at ~7-10 tok/s. With no long prompt measured, the prefill rate was
+ * decode × 4, and the decode rate measured on short calls was ~9-14 tok/s: ~150 s, under the 162 s limit.
+ * (The "~44 s" in the routing line is the portal's coordinator-choice estimate, not admission.)
+ */
+describe("run 10: a long prompt's prefill is not derived from a fast short-call decode rate", () => {
+  /** The run-10 long prompt (run10/lp-3.json, the jnb call: seed 3618, 150 functions, ~4.6k tokens). */
+  const lpModule = (seed = 3_618, lines = 150) =>
+    "Here is a module:\n" + Array.from({ length: lines }, (_, i) => `function y${seed}_${i}(a, b) { const r = a * ${seed + i} + b - ${(i * 5) % 13}; return r > ${i} ? r : b; }`).join("\n") + "\nSummarize what this module does in five sentences.";
+  const lp = () => ({ model: MODEL, maxTokens: 300, messages: [{ role: "user", content: lpModule() }] });
+  const measuredDecode = (tps: number) => {
+    for (let i = 0; i < 3; i++) eta.decodeRates.record(MODEL, "cpu", tps);
+  };
+  const measuredPrefill = (tps: number, prompt = 4_600) => {
+    for (let i = 0; i < 3; i++) eta.prefillRates.record(MODEL, "cpu", tps, Date.now(), prompt);
+  };
+
+  test("decode measured at 14 tok/s, no long prompt measured: read at the prefill prior (~24 tok/s), past the timeout; decode × 4 would have admitted it", () => {
+    measuredDecode(14);
+    const prompt = eta.promptTokenEstimate(jsonOf(lp()));
+    expect(prompt).toBeGreaterThan(4_300);
+    const est = eta.decodeEstimateMs(MODEL, "cpu", prompt, 300);
+    expect(est.decodeFrom).toBe("measured");
+    expect(est.prefillFrom).toBe("prior");
+    expect(est.prefillTps).toBeLessThan(26);
+    expect(est.ms).toBeGreaterThan(180_000);
+    // Run 10's estimate: decode × COMPLETION_PREFILL_FACTOR, short-context decode.
+    const old = eta.DECODE_ESTIMATE_OVERHEAD_MS + (prompt / (14 * eta.COMPLETION_PREFILL_FACTOR.cpu) + 300 / 14) * 1000;
+    expect(old).toBeLessThan(162_000);
+  });
+
+  for (const prefill of [27, 35]) {
+    test(`submit: hosts measured reading ~4.6k-token prompts at ${prefill} tok/s (decode 14 tok/s on short calls): refused at once, nothing reserved`, async () => {
+      measuredDecode(14);
+      measuredPrefill(prefill);
+      const before = creditEngine.balance(requester.peerId);
+      const { r, ms } = await submit(lp());
+      expect(r.statusCode, r.body).toBe(503);
+      expect(r.json()).toMatchObject({ error: "no_capacity", reason: "busy", limitMs: 162_000 });
+      expect(r.json().completionEtaMs).toBeGreaterThan(162_000);
+      expect(ms).toBeLessThan(2_000);
+      expect(creditEngine.balance(requester.peerId)).toBe(before);
+    });
+  }
+
+  test("a few fast measured samples never lift the prefill rate above the prior; short prompts do not count", () => {
+    const decode = 14;
+    for (let i = 0; i < 2; i++) eta.prefillRates.record(MODEL, "cpu", 80, Date.now(), 4_600);
+    for (let i = 0; i < 5; i++) eta.prefillRates.record(MODEL, "cpu", 120, Date.now(), 2_500); // under 3/4 of the prompt
+    const p = eta.completionPrefillTps(MODEL, "cpu", 4_600, decode);
+    expect(p.from).toBe("prior");
+    expect(p.tps).toBeCloseTo(eta.priorPrefillTps(MODEL, "cpu"), 5);
+  });
+
+  test("a reply after a long prompt is written slower than after a short one", () => {
+    expect(eta.decodeContextFactor("cpu", 40)).toBeLessThan(1.01);
+    expect(eta.decodeContextFactor("cpu", 4_600)).toBeGreaterThan(1.5);
+    measuredDecode(10);
+    expect(eta.decodeEstimateMs(MODEL, "cpu", 4_600, 300).effectiveDecodeTps).toBeLessThan(7);
+  });
+
+  test("a faster class measured on long prompts still gets the call", async () => {
+    measuredDecode(14);
+    measuredPrefill(120);
+    const { r, taskId } = await submit(lp());
+    expect(r.statusCode, r.body).toBe(200);
+    const pulled = await pullAs(iad);
+    expect(pulled.id).toBe(r.json().subtaskId);
+    await finish(iad, taskId, pulled.id!);
+  });
+
+  test("admission logs the estimate's parts (prompt tokens, prefill rate and source, decode rate, total)", () => {
+    measuredDecode(14);
+    const body = lp();
+    const check = inference.completionCheck(MODEL, "cpu", body.messages, undefined, 300, 180_000, Date.now(), { waiting: 0 });
+    const log = inference.completionEstimateLog(check);
+    expect(log).toMatchObject({ limitMs: 162_000, none: true });
+    const cls = (log.classes as any[])[0];
+    expect(cls).toMatchObject({ computeClass: "cpu", promptTokens: eta.promptTokenEstimate(jsonOf(body)), outputTokens: 300, prefillFrom: "prior", decodeFrom: "measured", decodeTps: 14 });
+    expect(cls.prefillTps).toBeGreaterThan(0);
+    expect(cls.rateMs).toBe(cls.prefillMs + cls.decodeMs + eta.DECODE_ESTIMATE_OVERHEAD_MS);
+    expect(cls.completionEtaMs).toBeGreaterThan(162_000);
   });
 });
