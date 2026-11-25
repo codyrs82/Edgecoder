@@ -155,11 +155,20 @@ function networkWorkerB(model: string): number | null {
   return paramsB(model.slice("network/".length).replace(/@[\w.]+$/, ""));
 }
 
-/** A note for an explicit network worker smaller than the helper floor (it often answers with nothing), or null. */
-export function smallWorkerWarning(model: string, minB: number): string | null {
+/** Whether `model` is an explicit network worker smaller than the helper floor `minB` (0: no floor). */
+export function underFloorWorker(model: string, minB: number): boolean {
   const b = networkWorkerB(model);
-  if (b === null || b >= minB) return null;
-  return `${model.slice("network/".length)} is under ${minB}B: small models often return nothing for helper work; an empty attempt retries on auto (a model of at least ${minB}B)`;
+  return minB > 0 && b !== null && b < minB;
+}
+
+/**
+ * The note for an explicit network worker under the helper floor (small models often answer helper
+ * work with nothing), or null: its helpers run on auto with the floor instead (tentacles.ts), unless
+ * EDGECODER_TENTACLES_MIN_B=0 keeps the explicit model.
+ */
+export function smallWorkerWarning(model: string, minB: number): string | null {
+  if (!underFloorWorker(model, minB)) return null;
+  return `${model.slice("network/".length)} is under ${minB}B: small models often return nothing for helper work, so helpers run on auto (a model of at least ${minB}B); set EDGECODER_TENTACLES_MIN_B=0 to keep ${model.slice("network/".length)}`;
 }
 
 /**
@@ -167,7 +176,7 @@ export function smallWorkerWarning(model: string, minB: number): string | null {
  * another machine at the same tier first (auto keeps its hints and the helper floor, so the retry
  * lands on another ≥ floor host before any cloud tier); a helper that changed no file moves auto up
  * a tier (its hints say quality best). An explicit network worker under the floor (`minB`) moves to
- * auto (with the floor); any other explicit worker keeps its model and asks for another machine (a
+ * auto (with the floor; tentacles.ts already moves one there before the first attempt); any other explicit worker keeps its model and asks for another machine (a
  * fresh session key, so affinity doesn't send it back to the same one). `nextTier`: whether the
  * retry's hints move up a tier.
  */
@@ -177,8 +186,7 @@ export function retryAfterEmpty(model: string, minB: number, why: "empty_reply" 
   const nextTier = why === "no_file";
   const floor = minB > 0 ? `a model of at least ${minB}B` : "another machine";
   if (model === "auto") return { model, freshHost: true, nextTier, note: nextTier ? `the helper ${what}; retrying on a stronger tier` : `the helper ${what}; retrying on another machine${minB > 0 ? ` (${floor})` : ""}` };
-  const b = networkWorkerB(model);
-  if (b !== null && b < minB) return { model: "auto", freshHost: true, nextTier, note: `${short} ${what}; retrying on auto (${floor})` };
+  if (underFloorWorker(model, minB)) return { model: "auto", freshHost: true, nextTier, note: `${short} ${what}; retrying on auto (${floor})` };
   return { model, freshHost: true, nextTier: false, note: `${short} ${what}; retrying on another machine` };
 }
 
@@ -195,7 +203,8 @@ export function isProviderTierError(modelError: string | undefined): boolean {
 /**
  * The smallest model (billions of parameters) a helper's network call on auto may run on: a hard
  * floor sent as the minParamsB hint (best fit never goes below it). Small models (qwen2.5-coder:1.5b
- * on CPU) returned empty replies for most helper turns. EDGECODER_TENTACLES_MIN_B overrides it (0: no floor).
+ * on CPU) returned empty replies for most helper turns. An explicit network worker under it runs on
+ * auto with the floor. EDGECODER_TENTACLES_MIN_B overrides it (0: no floor, an explicit worker is kept).
  */
 export const TENTACLE_HELPER_MIN_PARAMS_B = 7;
 

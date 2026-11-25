@@ -353,9 +353,10 @@ An attempt that came back empty (#525: 0 of 16 patches came back from `qwen2.5-c
 workers) is retried like this:
 
 - `auto`: one tier up, as above.
-- An explicit network worker under the helper floor (7B, `EDGECODER_TENTACLES_LOCAL_MIN_B`):
-  the retry goes to `auto`, which picks the next tier, within the same tentacle budget. The tentacle
-  says so when it starts ("small models often return nothing for helper work").
+- An explicit network worker under the helper floor (7B, `EDGECODER_TENTACLES_MIN_B`) never
+  gets here: its helpers run on `auto` with the floor from the first attempt, and the session warns
+  once ("small models often return nothing for helper work, so helpers run on auto").
+  `EDGECODER_TENTACLES_MIN_B=0` keeps the explicit model (no floor).
 - Any other explicit worker: the same model with a fresh session key, so affinity doesn't send it
   back to the machine that returned nothing.
 
