@@ -66,6 +66,7 @@ import {
   offeredToPeers,
   remoteGrants,
   REQUIRE_AGENT_SIGNED_FORWARDS,
+  agentPullRateLimiter,
   type ResultMeta
 } from "../context.js";
 import { mutable } from "../mutable-state.js";
@@ -128,9 +129,13 @@ import { clearClaimDeadline, inferenceStreams, judgeInferenceReply, retryInferen
 import { isMemoryRefusal, noteAgentResult, noteDispatched } from "../memory-admission.js";
 import { EMPTY_REPLY_ERROR } from "../../inference-runner.js";
 import { judgeResult } from "../../result-outcome.js";
-import { claimRule, mayTakeNow, noteAgentPull, noteClaimed, noteModelServed } from "../dispatch.js";
+import { agentLoadReport, claimRule, mayTakeNow, noteAgentPull, noteClaimed, noteModelServed } from "../dispatch.js";
 import { noteRestrictedOptIn, restrictedCalls, restrictedSubmitGate } from "../restricted.js";
 import type { RemoteGrant } from "../../remote-grants.js";
+
+// The pull budget grows with the slots the agent reports on /pull, as the other per-agent budgets
+// do (src/security/agent-rate-limiter.ts; at most 16 slots; none reported: the base only).
+agentPullRateLimiter.setSlotsLookup((id) => agentLoadReport(id)?.slots);
 
 /**
  * The account a job's failures are attributed to for the per-submitter failure cap: the billed

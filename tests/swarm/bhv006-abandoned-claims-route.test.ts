@@ -177,7 +177,7 @@ describe("lease traffic has its own rate budget", () => {
     const events: Array<{ event: string; details?: Record<string, unknown> }> = [];
     const stop = ctx.securityLog.addListener((e) => events.push(e as never));
     try {
-      while (ctx.agentRateLimiter.check(worker.peerId)) { /* use up the general budget */ }
+      while (ctx.agentPullRateLimiter.check(worker.peerId)) { /* use up the pull budget */ }
       expect((await post("/pull", { agentId: worker.peerId }, worker)).statusCode).toBe(429);
       const lease = await post("/heartbeat", { agentId: worker.peerId, leaseOnly: true }, worker);
       expect(lease.statusCode, lease.body).toBe(200);
@@ -193,8 +193,34 @@ describe("lease traffic has its own rate budget", () => {
       expect(logged[0].details).toMatchObject({ route: "/heartbeat" });
     } finally {
       stop();
-      ctx.agentRateLimiter.reset(worker.peerId);
+      ctx.agentPullRateLimiter.reset(worker.peerId);
       ctx.agentLeaseRateLimiter.reset(worker.peerId);
+    }
+  });
+
+  test("D6: agent-mesh traffic over the general budget never refuses a pull or a heartbeat", async () => {
+    try {
+      while (ctx.agentRateLimiter.check(worker.peerId)) { /* mesh connect/relay pings used up the general budget */ }
+      const relay = await post("/agent-mesh/relay", { token: "none", fromAgentId: worker.peerId, payload: "ping:1" }, worker);
+      expect(relay.statusCode).toBe(429);
+      const pull = await post("/pull", { agentId: worker.peerId, inferenceSlots: 16, freeInferenceSlots: 16 }, worker);
+      expect(pull.statusCode, pull.body).toBe(200);
+      const hb = await post("/heartbeat", { agentId: worker.peerId }, worker);
+      expect(hb.statusCode, hb.body).toBe(200);
+    } finally {
+      ctx.agentRateLimiter.reset(worker.peerId);
+      ctx.agentPullRateLimiter.reset(worker.peerId);
+    }
+  });
+
+  test("D6: the pull budget grows with the slots the agent reports on /pull", async () => {
+    try {
+      await post("/pull", { agentId: worker.peerId, inferenceSlots: 16, freeInferenceSlots: 16 }, worker);
+      expect(ctx.agentPullRateLimiter.limitFor(worker.peerId)).toBe(ctx.CC.AGENT_PULL_RATE_LIMIT_MAX + 16 * ctx.CC.AGENT_PULL_RATE_LIMIT_PER_SLOT);
+      await post("/pull", { agentId: worker.peerId, inferenceSlots: 2, freeInferenceSlots: 2 }, worker);
+      expect(ctx.agentPullRateLimiter.limitFor(worker.peerId)).toBe(ctx.CC.AGENT_PULL_RATE_LIMIT_MAX + 2 * ctx.CC.AGENT_PULL_RATE_LIMIT_PER_SLOT);
+    } finally {
+      ctx.agentPullRateLimiter.reset(worker.peerId);
     }
   });
 });

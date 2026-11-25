@@ -222,6 +222,12 @@ export const coordinatorConfigSchema = z.object({
   // A 16-slot host on 2 s calls: ~480 results and ~64 lease heartbeats a minute, plus retries.
   AGENT_LEASE_RATE_LIMIT_MAX: envInt(300, { min: 0 }),
   AGENT_LEASE_RATE_LIMIT_PER_SLOT: envInt(50, { min: 0 }),
+  // D6 (run 3c): /pull and non-lease heartbeats have their own budget too, so an agent's other
+  // signed traffic (agent-mesh connect/relay pings, sent in bursts on every pass) cannot refuse a
+  // pull while its slots are free. A 16-slot host on 2 s calls pulls ~480 times a minute plus a
+  // heartbeat per pass. An agent that reports no slots gets the base only.
+  AGENT_PULL_RATE_LIMIT_MAX: envInt(300, { min: 0 }),
+  AGENT_PULL_RATE_LIMIT_PER_SLOT: envInt(40, { min: 0 }),
   AGENT_RATE_LIMIT_WINDOW_MS: envInt(60000, { min: 1 }),
   // Streamed reply pieces (/inference/chunks) have their own budget: a fast GPU serving several
   // calls at once flushes a piece every ~150 ms per call, far above the general limit.

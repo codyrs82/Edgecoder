@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { AgentRateLimiter, RATE_LIMIT_MAX_SLOTS, isLeaseTraffic } from "../../src/security/agent-rate-limiter.js";
+import { AgentRateLimiter, RATE_LIMIT_MAX_SLOTS, isLeaseTraffic, isPullTraffic } from "../../src/security/agent-rate-limiter.js";
 
 describe("agent-rate-limiter", () => {
   test("allows requests within limit", () => {
@@ -93,5 +93,28 @@ describe("lease traffic (/result, lease-only heartbeats) has its own budget", ()
     expect(isLeaseTraffic("/heartbeat", JSON.stringify({ agentId: "a", leaseOnly: false }))).toBe(false);
     expect(isLeaseTraffic("/heartbeat", "{\"leaseOnly\": tru")).toBe(false);
     expect(isLeaseTraffic("/pull", JSON.stringify({ leaseOnly: true }))).toBe(false);
+  });
+});
+
+describe("pull traffic (/pull, non-lease heartbeats) has its own budget (D6)", () => {
+  test("isPullTraffic: /pull and heartbeats that are not lease-only; nothing else", () => {
+    expect(isPullTraffic("/pull", JSON.stringify({ agentId: "a", inferenceSlots: 16 }))).toBe(true);
+    expect(isPullTraffic("/heartbeat", JSON.stringify({ agentId: "a" }))).toBe(true);
+    expect(isPullTraffic("/heartbeat", undefined)).toBe(true);
+    expect(isPullTraffic("/heartbeat", JSON.stringify({ agentId: "a", leaseOnly: true }))).toBe(false);
+    for (const r of ["/agent-mesh/relay", "/agent-mesh/connect", "/register", "/result", "/inference/chunks"]) expect(isPullTraffic(r, "{}")).toBe(false);
+  });
+
+  test("run 3c: a 16-slot cloud host pulling ~1.5 times a second plus a heartbeat per pass stays inside its budget; a zero-slot agent gets the base only", () => {
+    const pull = new AgentRateLimiter({ maxRequests: 300, windowMs: 60_000, perSlot: 40 });
+    pull.setSlotsLookup((id) => (id === "cloud-fireworks-1" ? 16 : id === "huge" ? 500 : undefined));
+    expect(pull.limitFor("cloud-fireworks-1")).toBe(300 + 40 * 16);
+    expect(pull.limitFor("huge")).toBe(300 + 40 * RATE_LIMIT_MAX_SLOTS);
+    expect(pull.limitFor("unknown")).toBe(300);
+    // 60 s at 1.5 pull passes a second, each a heartbeat and a pull: 180 requests, well inside.
+    for (let i = 0; i < 180; i++) expect(pull.check("cloud-fireworks-1")).toBe(true);
+    // An agent that reports no slots is still held to the base.
+    for (let i = 0; i < 300; i++) expect(pull.check("unknown")).toBe(true);
+    expect(pull.check("unknown")).toBe(false);
   });
 });

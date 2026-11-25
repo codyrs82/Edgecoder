@@ -92,6 +92,14 @@ export function isLeaseTraffic(routePath: string, rawBody: string | undefined): 
 }
 
 /**
+ * The agent's work polling: /pull and a heartbeat that is not lease-only (isLeaseTraffic). They
+ * count against their own budget, apart from the agent's other signed requests.
+ */
+export function isPullTraffic(routePath: string, rawBody: string | undefined): boolean {
+  return routePath === "/pull" || (routePath === "/heartbeat" && !isLeaseTraffic(routePath, rawBody));
+}
+
+/**
  * A signed agent request over its per-identity limit. The signature checked out, so this is
  * the agent's own traffic: it is answered 429 with Retry-After (the coordinator's error handler,
  * src/swarm/coordinator/app.ts), not 401, and it is not a protocol violation. A 401 would tell

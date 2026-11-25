@@ -25,6 +25,7 @@ import {
   agentRateLimiter,
   agentChunkRateLimiter,
   agentLeaseRateLimiter,
+  agentPullRateLimiter,
   queue,
   OLLAMA_MODEL,
   securityLog,
@@ -151,6 +152,7 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
     agentRateLimiter.reset(body.agentId);
     agentChunkRateLimiter.reset(body.agentId);
     agentLeaseRateLimiter.reset(body.agentId);
+    agentPullRateLimiter.reset(body.agentId);
     const blacklisted = activeBlacklistRecord(body.agentId);
     if (blacklisted) {
       return reply.code(403).send({ error: "agent_blacklisted", reason: blacklisted.reason });

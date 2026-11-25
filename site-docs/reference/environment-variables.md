@@ -808,6 +808,8 @@ The schemas are collected in `src/config/index.ts`. `tests/common/env-docs.test.
 | `AGENT_RATE_LIMIT_PER_SLOT` | integer ≥ 0 (added to `AGENT_RATE_LIMIT_MAX` per slot the agent reports, up to 16; `0` keeps the budget flat) | `40` |
 | `AGENT_CHUNK_RATE_LIMIT_PER_SLOT` | integer ≥ 0 (added to `AGENT_CHUNK_RATE_LIMIT_MAX` per reported slot, up to 16; `0` keeps it flat) | `400` |
 | `AGENT_LEASE_RATE_LIMIT_MAX` | integer ≥ 0 (per-agent budget for `/result` and lease-only heartbeats, separate from pulls) | `300` |
+| `AGENT_PULL_RATE_LIMIT_MAX` | integer ≥ 0 (per-agent budget for `/pull` and heartbeats that are not lease-only, separate from the agent's other signed requests such as agent-mesh connect/relay) | `300` |
+| `AGENT_PULL_RATE_LIMIT_PER_SLOT` | integer ≥ 0 (added to `AGENT_PULL_RATE_LIMIT_MAX` per reported slot, up to 16; `0` keeps it flat) | `40` |
 | `AGENT_LEASE_RATE_LIMIT_PER_SLOT` | integer ≥ 0 (added to `AGENT_LEASE_RATE_LIMIT_MAX` per reported slot, up to 16; `0` keeps it flat) | `50` |
 | `INFERENCE_CLAIM_TIMEOUT_MS` | integer ms, 1000 to 600000 (a network inference call no agent claimed by then is cancelled, refunded in full and answered `503 no_capacity` with `Retry-After`) | `45000` |
 | `INFERENCE_START_ETA_FRACTION` | number 0 to 1 (a network model call whose estimated start on this coordinator, calls waiting ahead ÷ slots serving the model × its recent typical service time, is past this share of the call's `timeoutMs`, or past `INFERENCE_CLAIM_TIMEOUT_MS`, is answered `409 route_elsewhere` to a peer coordinator with a free slot when the caller allows redirects, else `503 no_capacity` with `Retry-After`; nothing is reserved; `0` turns it off) | `0.5` |

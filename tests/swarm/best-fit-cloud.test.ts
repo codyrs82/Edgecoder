@@ -166,3 +166,73 @@ describe("best fit with a cloud host on the network (default: on)", () => {
     expect(contextWindowOf({}, FLASH)).toBe(1_000_000);
   });
 });
+
+// C6 (2026-11-25 run 3c): at low load Auto sent 41 of 118 simple calls to deepseek-v4.1-flash on
+// the cloud host while CPU hosts sat idle. The decisions read "simple: fastest that fits" with the
+// Macs' 7b/9b busy: the cloud host was let in because no non-cloud machine of the preferred size
+// (3B) was free, so the idle 1.5b CPU hosts (the simple call's spill band) never got the call.
+describe("C6: the cloud host is overflow for simple and standard calls", () => {
+  /** The run-3c pool: 2-slot CPU hosts with 1.5b (one with 7b), two 2-slot Macs, the 16-slot cloud host. */
+  function run3cPool(): NetworkView {
+    const cpus = Array.from({ length: 8 }, (_, i) => agent({ agentId: `ec-st${i + 1}`, computeClass: "cpu", models: ["qwen2.5-coder:1.5b"], slots: 2, freeSlots: 2, tokensPerSec: 18, contextWindow: 16_384 }));
+    return {
+      agents: [
+        ...cpus,
+        agent({ agentId: "ec-st9", computeClass: "cpu", models: ["qwen2.5-coder:7b"], slots: 2, freeSlots: 2, tokensPerSec: 6, contextWindow: 16_384 }),
+        agent({ agentId: "maw", computeClass: "apple", models: ["qwen2.5-coder:7b", "qwen2.5-coder:1.5b"], slots: 2, freeSlots: 2, tokensPerSec: 22, contextWindow: 32_768 }),
+        agent({ agentId: "crs", computeClass: "apple", models: ["qwen3.5:9b"], slots: 2, freeSlots: 2, tokensPerSec: 20, contextWindow: 32_768 }),
+        agent({ agentId: "cloud-fireworks-1", computeClass: "cloud", models: [GLM, FLASH], slots: 16, freeSlots: 16, contextWindow: 1_000_000, rttMs: 30, tokensPerSec: 120 }),
+      ],
+      pickupP50Ms: 250,
+      waitingByModel: {},
+      btcUsd: 100_000,
+    };
+  }
+  const simple = (maxTokens?: number) => describeJob({ ...SIMPLE_QA, ...(maxTokens ? { maxTokens } : {}) }, {});
+  const fill = (view: NetworkView, ids: (id: string, cls: string) => boolean) => {
+    for (const a of view.agents) if (ids(a.agentId, a.computeClass)) a.freeSlots = 0;
+    return view;
+  };
+  const r0 = (q: ReturnType<typeof describeJob>) => bestFit(q, run3cPool(), DEFAULT_BEST_FIT_CONFIG);
+
+  it("a simple call with no or a large max_tokens stays off the cloud while CPU and Mac hosts are idle", () => {
+    for (const mt of [undefined, 4_096, 8_192]) {
+      const r = bestFit(simple(mt), run3cPool(), DEFAULT_BEST_FIT_CONFIG);
+      expect(r.complexityClass).toBe("simple");
+      expect(r.chosen?.computeClass).not.toBe("cloud");
+      expect(cloudOf(r)).toEqual([]);
+    }
+  });
+
+  it("the run-3c case: Macs and the 7b CPU full, 1.5b CPU hosts idle: the call spills to a 1.5b CPU host, not the cloud", () => {
+    const view = fill(run3cPool(), (id) => id === "maw" || id === "crs" || id === "ec-st9");
+    const r = bestFit(simple(), view, DEFAULT_BEST_FIT_CONFIG);
+    expect(pick(r)).toBe("qwen2.5-coder:1.5b@cpu");
+    expect(r.capacity).toBe("spill");
+    expect(cloudOf(r)).toEqual([]);
+  });
+
+  it("a standard call takes a free 7b CPU host before the cloud", () => {
+    const q = describeJob(SIMPLE_QA, { complexity: "medium" });
+    expect(r0(q).complexityClass).toBe("standard");
+    const view = fill(run3cPool(), (id) => id === "maw" || id === "crs");
+    const r = bestFit(q, view, DEFAULT_BEST_FIT_CONFIG);
+    expect(r.chosen?.computeClass).not.toBe("cloud");
+    expect(cloudOf(r)).toEqual([]);
+  });
+
+  it("every non-cloud host full: the cloud host takes the overflow; once a CPU host frees a slot it contracts", () => {
+    const view = fill(run3cPool(), (_id, cls) => cls !== "cloud");
+    expect(pick(bestFit(simple(), view, DEFAULT_BEST_FIT_CONFIG))).toBe(`${FLASH}@cloud`);
+    view.agents.find((a) => a.agentId === "ec-st3")!.freeSlots = 1;
+    const r = bestFit(simple(), view, DEFAULT_BEST_FIT_CONFIG);
+    expect(pick(r)).toBe("qwen2.5-coder:1.5b@cpu");
+    expect(cloudOf(r)).toEqual([]);
+  });
+
+  it("a complex call still goes to the cloud host with the CPU and Mac hosts idle", () => {
+    const r = bestFit(hard({ maxTokens: 4_096 }), run3cPool(), DEFAULT_BEST_FIT_CONFIG);
+    expect(r.complexityClass).toBe("complex");
+    expect(pick(r)).toBe(`${FLASH}@cloud`);
+  });
+});

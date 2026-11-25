@@ -79,7 +79,9 @@ agent's behaviour checks. A verified request over the agent's own rate limit
 against their own budget, `AGENT_CHUNK_RATE_LIMIT_MAX`, and so do results and lease-only heartbeats,
 `AGENT_LEASE_RATE_LIMIT_MAX`, so pulls cannot starve the requests that keep a claim's lease alive;
 a refused result or lease heartbeat is logged as `agent_lease_traffic_rate_limited` (WARN, once a
-minute per agent). Every budget grows by its `*_PER_SLOT` setting for each parallel model slot the
+minute per agent). `/pull` and heartbeats that are not lease-only have their own budget too,
+`AGENT_PULL_RATE_LIMIT_MAX`, so an agent's other signed traffic (agent-mesh connect and relay
+pings) cannot refuse its pulls. Every budget grows by its `*_PER_SLOT` setting for each parallel model slot the
 agent reports (at most 16). Workers wait the
 `Retry-After` and carry on; they do not re-register (re-registering on refusals is what the
 registration-storm rule BHV008 punishes).

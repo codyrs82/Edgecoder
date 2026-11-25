@@ -302,6 +302,8 @@ export const SECURITY_MAX_SKEW_MS = CC.SECURITY_MAX_SKEW_MS;
 export const agentRateLimiter = new AgentRateLimiter({ maxRequests: AGENT_RATE_LIMIT_MAX, windowMs: AGENT_RATE_LIMIT_WINDOW_MS, perSlot: CC.AGENT_RATE_LIMIT_PER_SLOT });
 /** /result and lease-only heartbeats: counted apart from pulls, so pull traffic cannot starve a claim's lease or its result. */
 export const agentLeaseRateLimiter = new AgentRateLimiter({ maxRequests: CC.AGENT_LEASE_RATE_LIMIT_MAX, windowMs: AGENT_RATE_LIMIT_WINDOW_MS, perSlot: CC.AGENT_LEASE_RATE_LIMIT_PER_SLOT });
+/** /pull and non-lease heartbeats: counted apart from the agent's other signed requests (agent-mesh pings, registration), so those cannot refuse a pull (D6). */
+export const agentPullRateLimiter = new AgentRateLimiter({ maxRequests: CC.AGENT_PULL_RATE_LIMIT_MAX, windowMs: AGENT_RATE_LIMIT_WINDOW_MS, perSlot: CC.AGENT_PULL_RATE_LIMIT_PER_SLOT });
 /** /inference/chunks only: streamed reply pieces, counted apart from the agent's other requests. */
 export const agentChunkRateLimiter = new AgentRateLimiter({ maxRequests: CC.AGENT_CHUNK_RATE_LIMIT_MAX, windowMs: AGENT_RATE_LIMIT_WINDOW_MS, perSlot: CC.AGENT_CHUNK_RATE_LIMIT_PER_SLOT });
 /** Signed requests that failed before the signer was proven, per client address. */

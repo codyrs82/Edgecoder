@@ -19,6 +19,7 @@ interface PoolOpts {
   mac7Free?: number;
   mac9Free?: number;
   gpuFree?: number;
+  cpuFree?: number;
   cloudUnhealthy?: boolean;
   noGpu?: boolean;
   waiting?: Record<string, number>;
@@ -26,7 +27,7 @@ interface PoolOpts {
 
 /** Run 2's pool, plus Patrick's GPU host: 7 CPU 1.5b (Fly), a 2-slot Mac 7b, a 2-slot Mac 9b, the cloud host, a GPU 30b. */
 function mixedPool(o: PoolOpts = {}): NetworkView {
-  const cpus = ["iad", "lax", "sin", "gru", "jnb", "nrt", "syd"].map((r) => agent({ agentId: `ec-${r}`, computeClass: "cpu", models: ["qwen2.5-coder:1.5b"], slots: 2, freeSlots: 2, contextWindow: 8_192, tokensPerSec: 18 }));
+  const cpus = ["iad", "lax", "sin", "gru", "jnb", "nrt", "syd"].map((r) => agent({ agentId: `ec-${r}`, computeClass: "cpu", models: ["qwen2.5-coder:1.5b"], slots: 2, freeSlots: o.cpuFree ?? 2, contextWindow: 8_192, tokensPerSec: 18 }));
   const agents: AgentView[] = [
     ...cpus,
     agent({ agentId: "mac-maw", computeClass: "apple", models: ["qwen2.5-coder:7b", "qwen2.5-coder:1.5b"], slots: 2, freeSlots: o.mac7Free ?? 2, contextWindow: 32_768, tokensPerSec: 25 }),
@@ -98,8 +99,11 @@ describe("Auto weighs free capacity across the pool (B5)", () => {
     expect(r.chosen?.model).not.toBe("qwen2.5-coder:7b");
   });
 
-  it("the cloud host is one more machine in the pool: a simple call spills there when the network's preferred models are full", () => {
-    const r = bestFit(chat(), mixedPool({ mac7Free: 0, mac9Free: 0, gpuFree: 0 }));
+  it("the cloud host is overflow (C6): a simple call spills to a free 1.5B CPU host first, and to the cloud only when those are full too", () => {
+    const cpu = bestFit(chat(), mixedPool({ mac7Free: 0, mac9Free: 0, gpuFree: 0 }));
+    expect(where(cpu)).toBe("qwen2.5-coder:1.5b@cpu");
+    expect(cpu.capacity).toBe("spill");
+    const r = bestFit(chat(), mixedPool({ mac7Free: 0, mac9Free: 0, gpuFree: 0, cpuFree: 0 }));
     expect(r.chosen?.computeClass).toBe("cloud");
     expect(r.chosen?.model).toBe(FLASH);
   });
