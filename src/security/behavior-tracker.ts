@@ -37,6 +37,14 @@ export interface TaskResultInput {
  */
 export const DEFAULT_ABANDONED_CLAIM_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * BHV006: claims that lapse within this long of each other are one lapse. An agent running several
+ * calls at once (a 16-slot cloud host) loses all of them to one stall, and that is one event, not
+ * that many "in a row". A lapse group starts at its first claim and never stretches past this, so
+ * spacing claims out cannot merge a run of lapses into one.
+ */
+export const DEFAULT_ABANDONED_BURST_MS = 30_000;
+
 /** Agent failures from one submitter that count toward the failure-rate rules per window (default). */
 export const DEFAULT_SUBMITTER_FAILURE_CAP = 3;
 
@@ -132,11 +140,12 @@ export interface AgentBehaviorStats {
   /** Abandoned claims (lease lapsed) in the abandoned-claim window (24 h by default). */
   abandonedClaimCount?: number;
   /**
-   * Abandoned claims since the agent last returned any result, within that window: the agent
-   * came back and kept claiming without completing anything.
+   * Lapses since the agent last returned any result, within that window: the agent came back and
+   * kept claiming without completing anything. Claims that lapsed together (within the burst
+   * window) count once, so concurrency does not multiply one stall.
    */
   abandonedClaimStreak?: number;
-  /** Abandoned claims in that window that ran past their hard deadline while the agent was heartbeating. */
+  /** Lapses in that window of claims that ran past their hard deadline while the agent was heartbeating (grouped the same way). */
   abandonedWhileActiveCount?: number;
 
   windowStartMs: number;
@@ -170,6 +179,20 @@ interface HeartbeatEvent extends TimestampedEvent {}
 
 interface AbandonedClaimEvent extends TimestampedEvent {
   whileActive: boolean;
+  /** The lapsed claim's subtask: a late result for it withdraws the event (forgiveAbandonedClaim). */
+  subtaskId?: string;
+}
+
+/** Lapse groups in time-ordered events: a group starts at an event and takes everything within `burstMs` of it. */
+function countLapseGroups(events: readonly AbandonedClaimEvent[], burstMs: number): number {
+  let groups = 0;
+  let groupStart = -Infinity;
+  for (const e of [...events].sort((a, b) => a.timestampMs - b.timestampMs)) {
+    if (e.timestampMs - groupStart < burstMs) continue;
+    groups += 1;
+    groupStart = e.timestampMs;
+  }
+  return groups;
 }
 
 const DEFAULT_WINDOW_MS = 60 * 60 * 1000; // 1 hour
@@ -182,6 +205,7 @@ export class AgentBehaviorTracker {
   private readonly windowMs: number;
   private readonly submitterFailureCap: number;
   private readonly abandonedClaimWindowMs: number;
+  private readonly abandonedBurstMs: number;
   private readonly agents = new Map<string, {
     tasks: TaskEvent[];
     protocolEvents: ProtocolEvent[];
@@ -195,10 +219,11 @@ export class AgentBehaviorTracker {
     concurrentClaimCount: number;
   }>();
 
-  constructor(windowMs: number = DEFAULT_WINDOW_MS, opts: { submitterFailureCap?: number; abandonedClaimWindowMs?: number } = {}) {
+  constructor(windowMs: number = DEFAULT_WINDOW_MS, opts: { submitterFailureCap?: number; abandonedClaimWindowMs?: number; abandonedBurstMs?: number } = {}) {
     this.windowMs = windowMs;
     this.submitterFailureCap = Math.max(1, Math.floor(opts.submitterFailureCap ?? DEFAULT_SUBMITTER_FAILURE_CAP));
     this.abandonedClaimWindowMs = Math.max(1, Math.floor(opts.abandonedClaimWindowMs ?? DEFAULT_ABANDONED_CLAIM_WINDOW_MS));
+    this.abandonedBurstMs = Math.max(0, Math.floor(opts.abandonedBurstMs ?? DEFAULT_ABANDONED_BURST_MS));
   }
 
   private getOrCreate(agentId: string) {
@@ -267,10 +292,23 @@ export class AgentBehaviorTracker {
    * A claim this agent held lapsed (src/swarm/queue.ts onClaimAbandoned) and went back on the
    * queue for others. `whileActive`: it ran past its hard deadline while the agent heartbeated.
    */
-  recordAbandonedClaim(agentId: string, opts: { whileActive?: boolean } = {}, nowMs: number = Date.now()): void {
+  recordAbandonedClaim(agentId: string, opts: { whileActive?: boolean; subtaskId?: string } = {}, nowMs: number = Date.now()): void {
     const entry = this.getOrCreate(agentId);
     entry.abandonedClaims = this.pruneWindow(entry.abandonedClaims, nowMs, this.abandonedClaimWindowMs);
-    entry.abandonedClaims.push({ timestampMs: nowMs, whileActive: Boolean(opts.whileActive) });
+    entry.abandonedClaims.push({ timestampMs: nowMs, whileActive: Boolean(opts.whileActive), ...(opts.subtaskId ? { subtaskId: opts.subtaskId } : {}) });
+  }
+
+  /**
+   * The agent's result for a claim that lapsed arrived after all (late: the lease had already
+   * lapsed). It returned the work, so that claim was not abandoned: its event is withdrawn. Only
+   * that claim's; the agent's other lapses still count. Returns whether one was withdrawn.
+   */
+  forgiveAbandonedClaim(agentId: string, subtaskId: string): boolean {
+    const entry = this.agents.get(agentId);
+    if (!entry) return false;
+    const before = entry.abandonedClaims.length;
+    entry.abandonedClaims = entry.abandonedClaims.filter((e) => e.subtaskId !== subtaskId);
+    return entry.abandonedClaims.length < before;
   }
 
   /** Forget an agent's abandoned claims (a BHV006 blacklist was issued: its expiry starts afresh). */
@@ -422,8 +460,8 @@ export class AgentBehaviorTracker {
 
     // Abandoned claims (BHV006)
     const abandonedClaimCount = entry.abandonedClaims.length;
-    const abandonedClaimStreak = entry.abandonedClaims.filter(e => e.timestampMs > entry.lastResultAtMs).length;
-    const abandonedWhileActiveCount = entry.abandonedClaims.filter(e => e.whileActive).length;
+    const abandonedClaimStreak = countLapseGroups(entry.abandonedClaims.filter(e => e.timestampMs > entry.lastResultAtMs), this.abandonedBurstMs);
+    const abandonedWhileActiveCount = countLapseGroups(entry.abandonedClaims.filter(e => e.whileActive), this.abandonedBurstMs);
 
     const windowStartMs = nowMs - this.windowMs;
 

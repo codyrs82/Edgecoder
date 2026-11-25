@@ -112,6 +112,47 @@ describe("BHV006: a heartbeat gap is not misbehaviour", () => {
     ctx.queue.removeHeld(subtaskId);
   }, 20_000);
 
+  test("several claims held at once that lapse together are one lapse; their late results withdraw them", async () => {
+    // 2026-11-25: a cloud host running several calls side by side was blacklisted when they lapsed together.
+    await post("/heartbeat", { agentId: worker.peerId }, worker);
+    const before = abandoned();
+    const ids: string[] = [];
+    for (let i = 0; i < 6; i++) ids.push(await submitAndClaim());
+    await sleep(LIVENESS_MS * 2.5);
+    await post("/heartbeat", { agentId: requester.peerId }, requester);
+    await sleep(0);
+    expect(abandoned()).toBe(before + 6);
+    expect(state.activeBlacklistRecord(worker.peerId)).toBeUndefined();
+    // The results arrive late: refused (the calls went back on the queue), but they were returned.
+    for (const subtaskId of ids) {
+      const late = await post("/result", { subtaskId, taskId: "x", agentId: worker.peerId, ok: true, output: "late", durationMs: 100 }, worker);
+      expect(late.statusCode).toBe(409);
+      expect(late.json().error).toBe("lease_expired");
+    }
+    expect(abandoned()).toBe(before);
+    for (const subtaskId of ids) ctx.queue.removeHeld(subtaskId);
+    // The lapses also opened the agent's routing circuit (memory-admission.ts), a separate mechanism: close it for the next test.
+    (await import("../../src/swarm/coordinator/memory-admission.js")).resetMemoryAdmission();
+  }, 30_000);
+
+  test("a call its requester cancelled is not the agent's abandoned claim when it lapses", async () => {
+    await post("/heartbeat", { agentId: worker.peerId }, worker);
+    const before = abandoned();
+    const taskId = `inf-${randomUUID()}`;
+    const sub = await post("/inference/submit", { taskId, submitterAccountId: requester.peerId, model: MODEL, messages: [{ role: "user", content: "hi" }], timeoutMs: 60_000 }, requester);
+    const subtaskId = sub.json().subtaskId as string;
+    const pulled = await post("/pull", { agentId: worker.peerId }, worker);
+    expect(pulled.json().subtask?.id ?? pulled.json().envelope?.subtaskId).toBe(subtaskId);
+    const cancel = await post("/inference/cancel", { taskId, subtaskId }, requester);
+    expect(cancel.json()).toMatchObject({ ok: true, outcome: "stopping" });
+    await sleep(LIVENESS_MS * 2.5);
+    await post("/heartbeat", { agentId: requester.peerId }, requester);
+    await sleep(0);
+    expect(abandoned()).toBe(before);
+    ctx.queue.removeHeld(subtaskId);
+    (await import("../../src/swarm/coordinator/memory-admission.js")).resetMemoryAdmission();
+  }, 20_000);
+
   test("going offline cleanly hands claims back at once and abandons nothing", async () => {
     const before = abandoned();
     const subtaskId = await submitAndClaim();

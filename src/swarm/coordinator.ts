@@ -47,6 +47,7 @@ import "./coordinator/payments.js";
 import "./coordinator/schemas.js";
 import { accrualsInFlight, finalizeFailedSubtask, settleTaskIfDone } from "./coordinator/results.js";
 import { registerInferenceRoutes } from "./coordinator/routes/inference.js";
+import { requesterCancelled } from "./coordinator/inference-cancel.js";
 import { registerAccountRoutes } from "./coordinator/routes/account.js";
 import { registerWebToolRoutes } from "./coordinator/routes/web-tools.js";
 import "./coordinator/ledger-verify.js";
@@ -116,8 +117,11 @@ queue.onLeaseFailure((result) => {
 
 // BHV006: a lapsed claim is requeued (above) and recorded as abandoned; only a pattern strikes.
 // A lapsed claim is also a timeout for the agent's circuit breaker (coordinator/memory-admission.ts).
+// A call its requester cancelled was being ended by the coordinator (inference-cancel.ts): the
+// buyer walked away, so its lapse is not the agent's abandoned claim.
 queue.onClaimAbandoned((claim) => {
   noteAgentOutcome(claim.agentId, false, claim.atMs);
+  if (requesterCancelled(claim.subtaskId)) return;
   recordAbandonedClaim(claim);
 });
 
