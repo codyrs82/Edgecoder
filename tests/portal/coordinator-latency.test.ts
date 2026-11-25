@@ -18,8 +18,14 @@ const cand = (o: Partial<LatencyCandidate> & { url: string }): LatencyCandidate 
 });
 
 describe("expected latency", () => {
-  it("is the round trip, the pickup p90 and the agent round trip when a slot is free", () => {
-    expect(expectedLatency(cand({ url: US, rttMs: 99 }), 2_000)).toEqual({ queueMs: 200, expectedMs: 319, stale: false });
+  it("is the round trip and the agent round trip when a slot is free: no queueing", () => {
+    expect(expectedLatency(cand({ url: US, rttMs: 99 }), 2_000)).toEqual({ queueMs: 0, expectedMs: 119, stale: false });
+  });
+  it("does not count a backlog-inflated pickup p90 while slots are free (run 4: US 2,103 ms with 14 free)", () => {
+    // inf-1795589138500-c70eb012: rtt 7, pickup p90 1,928, agent rtt 168, 14 free slots.
+    expect(expectedLatency(cand({ url: US, rttMs: 7, pickupP90Ms: 1_928, agentRttMs: 168, free: 14, agents: 7 }), 2_000)).toEqual({ queueMs: 0, expectedMs: 175, stale: false });
+    // The same coordinator with no free slot does wait for pickup and a round of calls.
+    expect(expectedLatency(cand({ url: US, rttMs: 7, pickupP90Ms: 1_928, agentRttMs: 168, free: 0, agents: 7, callP50Ms: 4_000 }), 2_000).queueMs).toBe(1_928 + 4_000);
   });
   it("adds a call duration per round of calls ahead when no slot is free", () => {
     // free -3 over 2 agents: (1 + 3) / 2 = 2 rounds of 8 s.
@@ -36,8 +42,8 @@ describe("chooseByLatency", () => {
     // Portal machine in Europe: the US pick (more free slots) is ~95 ms further away.
     const far = chooseByLatency([cand({ url: US, free: 5, agents: 9, rttMs: 100 }), cand({ url: EU, free: 1, rttMs: 5 })], US, POLICY, { clientRegion: "lhr", portalRegion: "cdg" });
     expect(far).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "latency", clientRegion: "lhr", portalRegion: "cdg" });
-    expect(far.reason).toMatch(/faster with a free slot: expected 225 ms vs 320 ms/);
-    expect(far.candidates.map((c) => c.expectedMs)).toEqual([320, 225]);
+    expect(far.reason).toMatch(/faster with a free slot: expected 25 ms vs 120 ms/);
+    expect(far.candidates.map((c) => c.expectedMs)).toEqual([120, 25]);
     // 25 ms faster: under the 30 ms margin, the load pick stands.
     const near = chooseByLatency([cand({ url: US, free: 5, rttMs: 30 }), cand({ url: EU, free: 1, rttMs: 5 })], US, POLICY);
     expect(near).toMatchObject({ chosen: "coordinator.example.com", rule: "load" });
@@ -165,7 +171,7 @@ describe("the portal's coordinator directory", () => {
     expect(p.url).toBe(US);
     expect(p.choice?.rule).toBe("load");
     expect(p.choice?.candidates.find((c) => c.coordinator === "coordinator-eu.example.com")).toMatchObject({ stale: true, expectedMs: null });
-    expect(p.choice?.candidates.find((c) => c.coordinator === "coordinator.example.com")?.expectedMs).toBe(320);
+    expect(p.choice?.candidates.find((c) => c.coordinator === "coordinator.example.com")?.expectedMs).toBe(120);
   });
 
   it("applies to model auto across all models", async () => {
@@ -265,5 +271,77 @@ describe("locality", () => {
     expect(c?.rule).toBe("locality");
     expect(c?.candidates[0].nearKm).toBe(12);
     expect(c?.candidates[1].nearKm).toBeUndefined();
+  });
+});
+
+/*
+ * Run 4 (3c under load, 1 of 22 nearest): the US coordinator was the load pick and had the free host
+ * nearest the buyer, so locality did nothing and the latency rule (time to start, with a pickup p90 of
+ * 1,928 ms counted while 14 slots were free) sent the call to the EU. Now the nearest free coordinator
+ * is kept unless another is clearly faster end to end (round trips + queueing + service time).
+ */
+describe("locality under load", () => {
+  // inf-1795589138500-c70eb012 (portal ord, buyer gru): the candidates as recorded.
+  const usRun4 = (o: Partial<LatencyCandidate> = {}) =>
+    cand({ url: US, rttMs: 7, pickupP90Ms: 1_928, agentRttMs: 168, free: 14, waiting: 0, agents: 7, callP50Ms: 4_000, serviceMs: 4_000, freeRegions: ["gru", "iad", "lax"], ...o });
+  const euRun4 = (o: Partial<LatencyCandidate> = {}) =>
+    cand({ url: EU, rttMs: 100, pickupP90Ms: 600, agentRttMs: 15, free: 3, waiting: 0, agents: 2, callP50Ms: 4_000, serviceMs: 4_000, freeRegions: ["lhr", "fra"], ...o });
+
+  it("keeps a São Paulo buyer on the US coordinator with 14 free slots 0 km away", () => {
+    const c = chooseByLatency([usRun4(), euRun4()], US, POLICY, { clientRegion: "gru", portalRegion: "ord" });
+    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "locality", clientRegion: "gru" });
+    // Time to start: US 7 + 0 + 168 = 175 ms, EU 100 + 0 + 15 = 115 ms (was 2,103 vs 715).
+    expect(c.candidates.map((x) => [x.queueMs, x.expectedMs])).toEqual([[0, 175], [0, 115]]);
+    // End to end with the same 4 s service: 4,175 vs 4,115 ms, 60 ms is under 15 %.
+    expect(c.reason).toMatch(/^free host nearest the buyer \(gru\): 0 km vs 9,\d{3} km; coordinator-eu\.example\.com not clearly faster end to end \(expected 4115 ms vs 4175 ms\)$/);
+  });
+
+  it("keeps the nearest when no service time is reported (both get the default)", () => {
+    const c = chooseByLatency([usRun4({ serviceMs: null }), euRun4({ serviceMs: null })], US, POLICY, { clientRegion: "gru" });
+    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
+    expect(c.reason).toMatch(/expected 15115 ms vs 15175 ms/);
+  });
+
+  it("also holds when the EU was the load pick: the buyer goes to the free host 0 km away", () => {
+    const c = chooseByLatency([usRun4(), euRun4({ free: 20 })], EU, POLICY, { clientRegion: "gru" });
+    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
+  });
+
+  it("moves when the other coordinator is clearly faster end to end", () => {
+    // The model takes 9 s on the US hosts and 3 s on the EU ones: 9,175 vs 3,115 ms.
+    const c = chooseByLatency([usRun4({ serviceMs: 9_000 }), euRun4({ serviceMs: 3_000 })], US, POLICY, { clientRegion: "gru" });
+    expect(c).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "latency" });
+    expect(c.reason).toBe("clearly faster end to end than the free host nearest the buyer (gru, 0 km on coordinator.example.com): expected 3115 ms vs 9175 ms");
+    // 4,175 vs 3,615 ms: 560 ms is under 15 % of 4,175 (626 ms), the nearest stays.
+    const close = chooseByLatency([usRun4({ serviceMs: 4_000 }), euRun4({ serviceMs: 3_500 })], US, POLICY, { clientRegion: "gru" });
+    expect(close).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
+  });
+
+  it("a locality move is also checked end to end", () => {
+    // London buyer, US the load pick: the EU free host is in London, but the model is far slower there.
+    const c = chooseByLatency(
+      [cand({ url: US, free: 9, agents: 9, rttMs: 2, serviceMs: 2_000, freeRegions: ["iad"] }), cand({ url: EU, free: 2, rttMs: 99, serviceMs: 12_000, freeRegions: ["lhr"] })],
+      US,
+      POLICY,
+      { clientRegion: "lhr" },
+    );
+    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "latency" });
+  });
+
+  it("a nearest coordinator with no free slot does not hold: the call overflows", () => {
+    // US full (queue 1,928 + 4,000 ms) and the EU free: locality counts only the EU's free hosts.
+    const c = chooseByLatency([usRun4({ free: 0, waiting: 5 }), euRun4()], US, POLICY, { clientRegion: "gru" });
+    expect(c.chosen).toBe("coordinator-eu.example.com");
+  });
+
+  it("the directory passes each model's service time through", async () => {
+    const withLoad = (r: CapacityReport, regions: string[], serviceMs: number): CapacityReport => ({ ...r, modelLoad: Object.fromEntries(Object.entries(r.modelLoad!).map(([m, l]) => [m, { ...l, freeRegions: regions, serviceMs }])) });
+    const { dir } = directory({
+      [US]: { ...withLoad(report({ rttMs: 7, free: 14, agents: 7 }), ["gru", "iad"], 4_000), pickupP90Ms: 1_928 },
+      [EU]: { ...withLoad(report({ rttMs: 100, free: 3, agents: 2 }), ["lhr", "fra"], 4_000), pickupP90Ms: 600 },
+    });
+    const p = await dir.pick({ kind: "network", model: M }, [], { clientRegion: "gru" });
+    expect(p).toMatchObject({ url: US, choice: { rule: "locality" } });
+    expect(p.choice?.reason).toMatch(/not clearly faster end to end \(expected 4120 ms vs 4027 ms\)/);
   });
 });
