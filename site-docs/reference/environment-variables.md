@@ -808,6 +808,8 @@ The schemas are collected in `src/config/index.ts`. `tests/common/env-docs.test.
 | `AGENT_RATE_LIMIT_PER_SLOT` | integer ≥ 0 (added to `AGENT_RATE_LIMIT_MAX` per slot the agent reports, up to 16; `0` keeps the budget flat) | `40` |
 | `AGENT_CHUNK_RATE_LIMIT_PER_SLOT` | integer ≥ 0 (added to `AGENT_CHUNK_RATE_LIMIT_MAX` per reported slot, up to 16; `0` keeps it flat) | `400` |
 | `AGENT_LEASE_RATE_LIMIT_MAX` | integer ≥ 0 (per-agent budget for `/result` and lease-only heartbeats, separate from pulls) | `300` |
+| `AGENT_PULL_RATE_LIMIT_MAX` | integer ≥ 0 (per-agent budget for `/pull` and heartbeats that are not lease-only, separate from the agent's other signed requests such as agent-mesh connect/relay) | `300` |
+| `AGENT_PULL_RATE_LIMIT_PER_SLOT` | integer ≥ 0 (added to `AGENT_PULL_RATE_LIMIT_MAX` per reported slot, up to 16; `0` keeps it flat) | `40` |
 | `AGENT_LEASE_RATE_LIMIT_PER_SLOT` | integer ≥ 0 (added to `AGENT_LEASE_RATE_LIMIT_MAX` per reported slot, up to 16; `0` keeps it flat) | `50` |
 | `INFERENCE_CLAIM_TIMEOUT_MS` | integer ms, 1000 to 600000 (a network inference call no agent claimed by then is cancelled, refunded in full and answered `503 no_capacity` with `Retry-After`) | `45000` |
 | `INFERENCE_DEFAULT_MAX_TOKENS` | integer tokens, 16 to 32768 (output cap for a network model call that sets no `maxTokens`; an agent is never paid for output past a call's cap) | `4096` |

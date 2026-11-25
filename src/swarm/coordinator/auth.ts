@@ -37,12 +37,13 @@ import {
   agentRateLimiter,
   agentChunkRateLimiter,
   agentLeaseRateLimiter,
+  agentPullRateLimiter,
   nonceStore,
   SECURITY_NONCE_TTL_MS,
   CC
 } from "./context.js";
 import { REQUIRE_SIGNED_AGENT_REQUESTS, agentCapabilities, behaviorTracker } from "./agent-state.js";
-import { isLeaseTraffic } from "../../security/agent-rate-limiter.js";
+import { isLeaseTraffic, isPullTraffic } from "../../security/agent-rate-limiter.js";
 
 // #5: an empty token means "open" only outside production; in production it is 503/denied.
 export function requireMeshToken(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => any }) {
@@ -341,8 +342,15 @@ export async function verifyAgentRequest(
   //    cannot starve what keeps a claim alive and returns its work; every budget grows with the
   //    agent's reported model slots. A refused result or lease heartbeat is logged apart
   //    (agent_lease_traffic_rate_limited, WARN, once a minute per agent): its claims may lapse.
+  //    /pull and other heartbeats have a budget of their own as well (agentPullRateLimiter, D6):
+  //    the agent-mesh connect/relay pings a busy multi-slot host sends on every pass cannot refuse
+  //    its pulls. An agent that reports no slots gets each budget's base only.
   const leaseTraffic = isLeaseTraffic(routePath, opts?.rawBody);
-  const limiter = routePath === "/inference/chunks" ? agentChunkRateLimiter : leaseTraffic ? agentLeaseRateLimiter : agentRateLimiter;
+  const limiter =
+    routePath === "/inference/chunks" ? agentChunkRateLimiter :
+    leaseTraffic ? agentLeaseRateLimiter :
+    isPullTraffic(routePath, opts?.rawBody) ? agentPullRateLimiter :
+    agentRateLimiter;
   if (!isLoopback && !limiter.check(agentId)) {
     const retryAfterMs = limiter.retryAfterMs(agentId);
     if (leaseTraffic && shouldLogLeaseLimit(agentId)) {

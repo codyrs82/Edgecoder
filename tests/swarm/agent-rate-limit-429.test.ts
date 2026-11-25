@@ -37,6 +37,7 @@ beforeAll(async () => {
   process.env.PORTAL_SERVICE_URL = `http://127.0.0.1:${(portal.address() as AddressInfo).port}`;
   process.env.MESH_AUTH_TOKEN = MESH;
   process.env.AGENT_RATE_LIMIT_MAX = String(LIMIT);
+  process.env.AGENT_PULL_RATE_LIMIT_MAX = String(LIMIT);
   process.env.AGENT_RATE_LIMIT_WINDOW_MS = "60000";
   delete process.env.COORDINATOR_TRUST_PROXY;
   delete process.env.FLY_APP_NAME;
@@ -50,6 +51,7 @@ afterAll(async () => {
   await app?.close();
   await new Promise<void>((resolve) => portal.close(() => resolve()));
   delete process.env.AGENT_RATE_LIMIT_MAX;
+  delete process.env.AGENT_PULL_RATE_LIMIT_MAX;
   delete process.env.AGENT_RATE_LIMIT_WINDOW_MS;
 });
 
@@ -94,8 +96,11 @@ describe("signed agent requests over the rate limit", () => {
   });
 
   test("a rate-limited /register is refused with 429 and is not counted as a registration", async () => {
-    // The limit is still exhausted from the previous test; a signed re-register proves the key
-    // (verifyAgentRequest) and so meets the limit too.
+    // Heartbeats spent the pull budget; register counts against the general one (as agent-mesh
+    // traffic does), so use that up too. A signed re-register proves the key (verifyAgentRequest)
+    // and so meets the limit.
+    const { agentRateLimiter } = await import("../../src/swarm/coordinator/context.js");
+    while (agentRateLimiter.check(agent.peerId)) { /* use up the general budget */ }
     const before = behaviorTracker.getStats(agent.peerId).registrationCount;
     for (let i = 0; i < 12; i++) expect((await register(agent)).statusCode).toBe(429);
     expect(behaviorTracker.getStats(agent.peerId).registrationCount).toBe(before);
