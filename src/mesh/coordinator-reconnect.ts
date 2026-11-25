@@ -142,3 +142,90 @@ export class CoordinatorReconnectState {
     if (nowMs >= this.registerAtMs) this.pendingSinceMs = null;
   }
 }
+
+/**
+ * A coordinator restart in progress, from the agent's side: opened by a verified reconnect frame,
+ * a mesh WebSocket closed with 1012 ("service restart"), or a /register refused with
+ * `coordinator_draining`; closed once the agent has registered again.
+ *
+ * While it is open, a failed register or heartbeat is the restart, not the coordinator being
+ * gone: the agent retries every RESTART_RETRY_MS (plus jitter) instead of the exponential backoff
+ * (3, 6, 12 s, then offline mode with a 15 s probe), which kept agents away for 10-20 s after
+ * the new instance was already up. The window is bounded: after RESTART_WINDOW_MS the usual
+ * backoff and offline mode apply again, and after RESTART_FAILOVER_AFTER_MS the agent may move
+ * to another coordinator (steering / registry) if its own is still not back.
+ */
+export const RESTART_WINDOW_MS = 90_000;
+export const RESTART_RETRY_MS = 1_000;
+export const RESTART_RETRY_JITTER_MS = 1_000;
+export const RESTART_FAILOVER_AFTER_MS = 30_000;
+/** A register or heartbeat during the restart answers fast or is retried (a held connection must not stall the agent). */
+export const RESTART_REQUEST_TIMEOUT_MS = 5_000;
+/** The mesh WebSocket's longest wait between attempts while a restart is in progress. */
+export const RESTART_WS_MAX_DELAY_MS = 2_000;
+
+/** 1012 "service restart" (the coordinator's drain), or the agent's own close on a reconnect frame. */
+export function isRestartClose(code: number, reason: string): boolean {
+  return code === 1012 || reason === "coordinator_restart" || reason === "coordinator_reconnect";
+}
+
+/** A /register or new-work refusal from a draining coordinator. */
+export function isDrainingError(error: unknown): boolean {
+  const e = error as { statusCode?: number; message?: string } | null;
+  return Boolean(e && e.statusCode === 503 && typeof e.message === "string" && e.message.includes("coordinator_draining"));
+}
+
+/**
+ * A failure the restart explains: no answer at all (refused, reset, timed out) or a 5xx from the
+ * proxy or the draining instance. A 4xx comes from a running coordinator and takes the usual path
+ * (retrying it every second would only add to the registration-storm count).
+ */
+export function isRestartTransientError(error: unknown): boolean {
+  const code = (error as { statusCode?: unknown } | null)?.statusCode;
+  return typeof code !== "number" || code >= 500;
+}
+
+export class CoordinatorRestartWindow {
+  private openedAtMs: number | null = null;
+  constructor(private readonly random: () => number = Math.random) {}
+
+  /** Start (or keep) the window; a second signal during the same restart does not extend it. */
+  open(nowMs = Date.now()): void {
+    if (!this.active(nowMs)) this.openedAtMs = nowMs;
+  }
+
+  /** The agent registered with a coordinator again. */
+  close(): void {
+    this.openedAtMs = null;
+  }
+
+  active(nowMs = Date.now()): boolean {
+    if (this.openedAtMs === null) return false;
+    if (nowMs - this.openedAtMs > RESTART_WINDOW_MS) this.openedAtMs = null;
+    return this.openedAtMs !== null;
+  }
+
+  /** The wait before the next try while the window is open. */
+  retryMs(): number {
+    return RESTART_RETRY_MS + Math.floor(this.random() * RESTART_RETRY_JITTER_MS);
+  }
+
+  /** True once the home coordinator has had RESTART_FAILOVER_AFTER_MS to come back. */
+  mayFailOver(nowMs = Date.now()): boolean {
+    return this.openedAtMs === null || nowMs - this.openedAtMs >= RESTART_FAILOVER_AFTER_MS;
+  }
+}
+
+/**
+ * The mesh WebSocket's next reconnect wait. Waiting for the agent's own registration is a local
+ * check, so it polls quickly and does not grow; during a restart failed opens are capped at
+ * RESTART_WS_MAX_DELAY_MS; otherwise the wait doubles up to maxMs as before.
+ */
+export function nextMeshWsDelay(current: number, opts: { waitingForRegistration: boolean; restarting: boolean; maxMs: number }): { waitMs: number; next: number } {
+  if (opts.waitingForRegistration) return { waitMs: 500, next: current };
+  if (opts.restarting) {
+    const waitMs = Math.min(current, RESTART_WS_MAX_DELAY_MS);
+    return { waitMs, next: Math.min(waitMs * 2, RESTART_WS_MAX_DELAY_MS) };
+  }
+  return { waitMs: current, next: Math.min(current * 2, opts.maxMs) };
+}

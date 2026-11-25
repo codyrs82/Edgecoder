@@ -77,7 +77,7 @@ import { ModelControlAgent, type CurrentModelSettings } from "../model/remote-co
 import { createOllamaAdmin, diskSpace, ollamaModelsDir, registryModelSize } from "../model/remote-control/ollama-admin.js";
 import { remoteControlEnabled, resolveAllowlist } from "../model/remote-control/policy.js";
 import { MODEL_CONTROL_FRAME_TYPE } from "../model/remote-control/protocol.js";
-import { COORDINATOR_RECONNECT_FRAME_TYPE, CoordinatorReconnectState, verifyCoordinatorReconnectFrame } from "../mesh/coordinator-reconnect.js";
+import { COORDINATOR_RECONNECT_FRAME_TYPE, CoordinatorReconnectState, CoordinatorRestartWindow, RESTART_REQUEST_TIMEOUT_MS, isDrainingError, isRestartTransientError, isRestartClose, nextMeshWsDelay, verifyCoordinatorReconnectFrame } from "../mesh/coordinator-reconnect.js";
 import { BOT_CONTROL_FRAME_TYPE, botRelayMode } from "../common/bot-relay.js";
 import { BotRelayAgent, httpProviderClient } from "./bot-relay-agent.js";
 import { CODE_CONTROL_FRAME_TYPE, codeRelayMode } from "../common/code-relay.js";
@@ -1395,6 +1395,8 @@ function idleWait(ms: number): Promise<void> {
 // the frame's jittered delay, registers again (the new instance knows nothing of it), and only
 // then reopens the mesh WebSocket, whose open republishes the relay snapshots and model state.
 const coordinatorReconnect = new CoordinatorReconnectState();
+// Open from the restart signal until registered again: failures retry every ~1-2 s, not 3/6/12 s + offline.
+const restartWindow = new CoordinatorRestartWindow();
 function onCoordinatorReconnectFrame(message: unknown, coordinatorUrl: string, ws: { close: (code?: number, reason?: string) => void }): void {
   let verified: { peerId: string; publicKeyPem: string } | null = null;
   try {
@@ -1409,6 +1411,7 @@ function onCoordinatorReconnectFrame(message: unknown, coordinatorUrl: string, w
   }
   const delayMs = coordinatorReconnect.accept(verdict.command);
   if (delayMs === null) return;
+  restartWindow.open();
   console.log(`[agent:${AGENT_ID}] coordinator restarting (${verdict.command.reason}); registering again in ${delayMs}ms, then reconnecting`);
   registeredWithUrl = null;
   try {
@@ -1463,9 +1466,12 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
     }
     // Only to a coordinator that has proven its key (it follows URL changes on reconnect), and only
     // once registered: the coordinator admits the connection by this agent's signed bind.
+    // Waiting for our own registration is a local check: poll it quickly, without growing the wait
+    // (a doubled wait used to leave the socket closed for up to 30 s after registering again).
     if (!registeredWithUrl || !coordinator.isVerified()) {
-      setTimeout(connect, reconnectDelay);
-      reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+      const d = nextMeshWsDelay(reconnectDelay, { waitingForRegistration: true, restarting: restartWindow.active(), maxMs: MAX_RECONNECT_DELAY });
+      reconnectDelay = d.next;
+      setTimeout(connect, d.waitMs);
       return;
     }
     // Token in a header only (never the URL, where proxies log it), and a signed bind so the
@@ -1622,9 +1628,20 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
         if (peer) peer.gossip.removeWebSocketForPeer(registeredPeerId);
         registeredPeerId = null;
       }
-      console.log(`[agent:${AGENT_ID}] mesh WebSocket closed, reconnecting in ${reconnectDelay}ms`);
-      setTimeout(connect, reconnectDelay);
-      reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+      // The coordinator is restarting (1012, or our own close on its reconnect frame): retry within
+      // ~2 s until it is back, and have the HTTP loop register again on its next tick.
+      if (isRestartClose(code, reason)) {
+        if (!restartWindow.active()) reconnectDelay = 1000;
+        restartWindow.open();
+        if (code === 1012 && registeredWithUrl === coordinatorUrl && !coordinatorReconnect.pending()) {
+          registeredWithUrl = null;
+          wakeLoop(false);
+        }
+      }
+      const d = nextMeshWsDelay(reconnectDelay, { waitingForRegistration: false, restarting: restartWindow.active(), maxMs: MAX_RECONNECT_DELAY });
+      reconnectDelay = d.next;
+      console.log(`[agent:${AGENT_ID}] mesh WebSocket closed, reconnecting in ${d.waitMs}ms`);
+      setTimeout(connect, d.waitMs);
     });
 
     ws.on("error", (err) => {
@@ -2090,8 +2107,11 @@ async function loop(): Promise<void> {
           }
           if (shouldRegister({ registeredWithUrl, lastRegisteredAtMs }, coordinator.url, Date.now(), REGISTER_REFRESH_MS)) {
             const registerBody = await buildRegisterBody(powerTelemetry);
+            // During a coordinator restart: no retries inside post() and a short timeout, so the loop's
+            // ~1-2 s restart retry decides the pace rather than a connection held by the proxy.
             const registerResponse = (await post("/register", registerBody, {
               signed: true,
+              ...(restartWindow.active() ? { retries: 0, timeoutMs: RESTART_REQUEST_TIMEOUT_MS } : {})
             })) as RegisterReply & {
               meshToken?: string;
               rewardAccountId?: string;
@@ -2101,6 +2121,8 @@ async function loop(): Promise<void> {
             registeredWithUrl = coordinator.url;
             lastRegisteredAtMs = Date.now();
             coordinatorReconnect.registered();
+            if (restartWindow.active()) console.log(`[agent:${AGENT_ID}] registered again after the coordinator restart`);
+            restartWindow.close();
             noteRegistered(freshRegistration);
             console.log(registeredLogLine(AGENT_ID, coordinator.url, registerResponse));
             updateDrain?.write();
@@ -2652,6 +2674,7 @@ async function loop(): Promise<void> {
             registeredWithUrl = coordinator.url;
             lastRegisteredAtMs = Date.now();
             coordinatorReconnect.registered();
+            restartWindow.close();
             noteRegistered(true);
             reconnectProbeIntervalMs = RECONNECT_PROBE_MIN_MS;
             console.log(`[agent:${AGENT_ID}] coordinator back online (probe latency: ${probeLatency}ms)`);
@@ -2790,6 +2813,23 @@ async function loop(): Promise<void> {
         registeredWithUrl = null;
         console.warn(`[agent:${AGENT_ID}] coordinator does not know this agent (restarted?): registering again now`);
         await new Promise((r) => setTimeout(r, 250));
+        continue;
+      }
+      // A coordinator restart (src/mesh/coordinator-reconnect.ts CoordinatorRestartWindow): the new
+      // instance is usually up within seconds, so retry every ~1-2 s without counting toward offline
+      // mode. Only once it has had RESTART_FAILOVER_AFTER_MS does the agent look for another coordinator.
+      if (coordinatorOnline && isDrainingError(error)) restartWindow.open();
+      if (coordinatorOnline && restartWindow.active() && isRestartTransientError(error)) {
+        registeredWithUrl = null;
+        if (restartWindow.mayFailOver()) {
+          const failover = await resolveCoordinatorUrl();
+          if (coordinator.set(failover.url, `failover:${failover.source}`)) {
+            console.warn(`[agent:${AGENT_ID}] coordinator still restarting; failover (${failover.source}): ${coordinator.url}`);
+          }
+        }
+        const wait = restartWindow.retryMs();
+        console.log(`[agent:${AGENT_ID}] coordinator restarting (${String(error).slice(0, 120)}); trying again in ${wait}ms`);
+        await new Promise((r) => setTimeout(r, wait));
         continue;
       }
       consecutiveFailures++;
