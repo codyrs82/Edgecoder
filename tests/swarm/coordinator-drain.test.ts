@@ -1,7 +1,7 @@
 import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
 import { CoordinatorDrain, installDrainHooks, installDrainSignals, RESTART_CLOSE_CODE, type DrainSocket } from "../../src/swarm/coordinator/drain.js";
-import { createCoordinatorReconnectFrame, verifyCoordinatorReconnectFrame } from "../../src/mesh/coordinator-reconnect.js";
+import { createCoordinatorDrainNoticeFrame, createCoordinatorReconnectFrame, verifyCoordinatorDrainNoticeFrame, verifyCoordinatorReconnectFrame } from "../../src/mesh/coordinator-reconnect.js";
 import { createPeerKeys } from "../../src/mesh/peer.js";
 
 /*
@@ -96,7 +96,8 @@ describe("coordinator drain", () => {
       expect(res.json()).toMatchObject({ error: "coordinator_draining", retryable: true, charged: false, coordinatorUrl: "https://coordinator-eu.example" });
     }
     // Claims: no work (agents keep polling calmly); registration goes to the next instance.
-    expect((await app.inject({ method: "POST", url: "/pull", payload: {} })).json()).toMatchObject({ subtask: null, draining: true });
+    // It names the peer, so an agent can serve through it meanwhile (drain-failover.ts).
+    expect((await app.inject({ method: "POST", url: "/pull", payload: {} })).json()).toMatchObject({ subtask: null, draining: true, coordinatorUrl: "https://coordinator-eu.example" });
     const reg = await app.inject({ method: "POST", url: "/register", payload: {} });
     expect(reg.statusCode).toBe(503);
     expect(reg.json().coordinatorUrl).toBeUndefined();
@@ -125,6 +126,45 @@ describe("coordinator drain", () => {
     const frame = JSON.parse(agentA.sent[0]);
     expect(verifyCoordinatorReconnectFrame(frame, { agentId: "agent-a", coordinator: coordKeys })).toMatchObject({ ok: true, command: { delayMs: 2_000, jitterMs: 8_000, reason: "draining" } });
     expect(verifyCoordinatorReconnectFrame(frame, { agentId: "agent-b", coordinator: coordKeys })).toEqual({ ok: false, reason: "wrong_agent" });
+  });
+
+  it("tells agents and hands back unclaimed calls as the drain starts, before waiting for running claims", async () => {
+    const drain = new CoordinatorDrain();
+    drain.peerUrl = () => "https://coordinator-eu.example";
+    const events: string[] = [];
+    let claims = 1;
+    const agentA = fakeSocket("agent-a", true, events);
+    const peer = fakeSocket("coord-2", false, events);
+    const done = drain.run({
+      drainMs: 5_000,
+      pollMs: 5,
+      flushMs: 1,
+      busy: () => ({ claims, accruals: 0 }),
+      onStart: async () => {
+        events.push("handed_back");
+        return 2;
+      },
+      noticeFor: (agentId) => JSON.stringify(createCoordinatorDrainNoticeFrame({ agentId, coordinatorId: coordKeys.peerId, privateKeyPem: coordKeys.privateKeyPem, peerUrl: drain.peerUrl() })),
+      settle: async () => {
+        events.push("settle");
+        return 0;
+      },
+      sockets: () => [agentA, peer],
+      frameFor: (agentId) => JSON.stringify(createCoordinatorReconnectFrame({ agentId, coordinatorId: coordKeys.peerId, privateKeyPem: coordKeys.privateKeyPem, delayMs: 2_000, jitterMs: 8_000 })),
+      close: async () => undefined,
+      exit: () => undefined,
+      log
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    // The claim is still running: the notice and the hand-back did not wait for it.
+    expect(events).toEqual(["frame:agent-a", "handed_back"]);
+    expect(peer.sent).toEqual([]);
+    const notice = verifyCoordinatorDrainNoticeFrame(JSON.parse(agentA.sent[0]), { agentId: "agent-a", coordinator: coordKeys });
+    expect(notice).toMatchObject({ ok: true, command: { peerUrl: "https://coordinator-eu.example" } });
+    claims = 0;
+    const report = await done;
+    expect(report).toMatchObject({ idle: true, noticeSent: 1, handedBack: 2, reconnectSent: 1 });
+    expect(events).toEqual(["frame:agent-a", "handed_back", "settle", "frame:agent-a", "close:agent-a", "close:coord-2"]);
   });
 
   it("waits for open requests, and exits at the deadline when work is still running", async () => {

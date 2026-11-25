@@ -110,9 +110,11 @@ describe("nextMeshWsDelay", () => {
 describe("worker wiring", () => {
   const src = readFileSync(new URL("../../src/swarm/worker-runner.ts", import.meta.url), "utf8");
   it("opens the window on a reconnect frame, a 1012 close and a draining refusal, and closes it on registering", () => {
-    expect(src).toMatch(/if \(delayMs === null\) return;\s*restartWindow\.open\(\);/);
-    expect(src).toMatch(/if \(isRestartClose\(code, reason\)\) \{[\s\S]{0,120}restartWindow\.open\(\);/);
-    expect(src).toContain("if (coordinatorOnline && isDrainingError(error)) restartWindow.open();");
+    // All three are planned drain signals (drain-failover.ts): onPlannedDrain opens the window as planned.
+    expect(src).toMatch(/if \(delayMs === null\) return;\s*onPlannedDrain\("reconnect_frame", coordinatorUrl\);/);
+    expect(src).toMatch(/if \(isRestartClose\(code, reason\)\) \{[\s\S]{0,300}onPlannedDrain\("restart_close", coordinatorUrl\);\s*else restartWindow\.open\(Date\.now\(\), true\);/);
+    expect(src).toContain('if (coordinatorOnline && isDrainingError(error)) onPlannedDrain("register_draining", coordinator.url);');
+    expect(src).toMatch(/function onPlannedDrain[\s\S]{0,300}restartWindow\.open\(Date\.now\(\), true\);/);
     expect(src.match(/coordinatorReconnect\.registered\(\);[\s\S]{0,200}restartWindow\.close\(\);/g)?.length).toBe(2);
   });
   it("retries fast inside the window before counting a failure", () => {

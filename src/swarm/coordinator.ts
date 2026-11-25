@@ -53,7 +53,7 @@ import { registerWebToolRoutes } from "./coordinator/routes/web-tools.js";
 import "./coordinator/ledger-verify.js";
 import { meshDrainSockets, registerMeshRoutes } from "./coordinator/routes/mesh.js";
 import { coordinatorDrain, installDrainHooks, installDrainSignals, RECONNECT_DELAY_MS, RECONNECT_JITTER_MS } from "./coordinator/drain.js";
-import { createCoordinatorReconnectFrame } from "../mesh/coordinator-reconnect.js";
+import { createCoordinatorDrainNoticeFrame, createCoordinatorReconnectFrame } from "../mesh/coordinator-reconnect.js";
 import { registerOrchestrationRoutes } from "./coordinator/routes/orchestration.js";
 import { registerModelControlRoutes } from "./coordinator/routes/model-control.js";
 import { registerBotRelayRoutes } from "./coordinator/routes/bot-relay.js";
@@ -303,6 +303,10 @@ export function installCoordinatorShutdown(opts: { exit?: (code: number) => void
         for (const c of queue.activeClaims().values()) claims += c.all;
         return { claims, accruals: accrualsInFlight.size };
       },
+      // At once: calls nobody claimed go back (refunded, requester pointed at the peer) rather than after the wait.
+      onStart: () => cancelUnclaimedForDrain(coordinatorDrain.peerUrl()),
+      noticeFor: (agentId) =>
+        JSON.stringify(createCoordinatorDrainNoticeFrame({ agentId, coordinatorId: identity.peerId, privateKeyPem: coordinatorKeys.privateKeyPem, peerUrl: coordinatorDrain.peerUrl() })),
       settle: async () => {
         // #524: calls nobody claimed cannot run here any more: refunded now, before exit.
         const cancelled = await cancelUnclaimedForDrain(coordinatorDrain.peerUrl()).catch(() => 0);
