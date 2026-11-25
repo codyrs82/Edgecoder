@@ -34,7 +34,8 @@ export function parseFileRef(ref: string): { path: string; start?: number; end?:
  * ends, answered or not (its hold is released). `maxTokens` caps each reply: a number, or sized
  * per call from its messages and tools (helperReplyTokens). A call refused as too long for every
  * host's context window, before any reply came, is sent once more with the minimum reply
- * (HELPER_MIN_REPLY_TOKENS) instead of failing the attempt.
+ * (HELPER_MIN_REPLY_TOKENS) instead of failing the attempt. `onError` sees every other failed call,
+ * including ones the agent loop then retries.
  */
 export function hintedChat(
   backend: ChatBackend,
@@ -42,7 +43,7 @@ export function hintedChat(
   signal: AbortSignal,
   onCall: (u: { cSats: number; where?: string; promptTokens?: number; outputTokens?: number; served?: ServedBy }) => void,
   guard?: () => void,
-  o: { maxTokens?: number | ((messages: ChatMessage[], tools?: unknown[]) => number); after?: () => void } = {},
+  o: { maxTokens?: number | ((messages: ChatMessage[], tools?: unknown[]) => number); after?: () => void; onError?: (err: unknown) => void } = {},
 ): ChatFn {
   return async ({ messages, tools }, onDelta) => {
     guard?.();
@@ -79,6 +80,7 @@ export function hintedChat(
             guard?.();
             continue;
           }
+          o.onError?.(err);
           throw err;
         }
         return { content, toolCalls };
@@ -157,22 +159,53 @@ function networkWorkerB(model: string): number | null {
 export function smallWorkerWarning(model: string, minB: number): string | null {
   const b = networkWorkerB(model);
   if (b === null || b >= minB) return null;
-  return `${model.slice("network/".length)} is under ${minB}B: small models often return nothing for helper work; an empty attempt retries on auto (a stronger tier)`;
+  return `${model.slice("network/".length)} is under ${minB}B: small models often return nothing for helper work; an empty attempt retries on auto (a model of at least ${minB}B)`;
 }
 
 /**
- * Where the retry goes after an attempt that came back with nothing: auto moves up a tier (its
- * hints say quality best); an explicit network worker under the floor (`minB`) escalates to auto,
- * which picks the next tier within the helper's budget; any other explicit worker keeps its model
- * and asks for another machine (a fresh session key, so affinity doesn't send it back to the same one).
+ * Where the retry goes after an attempt that came back with nothing. An empty reply is retried on
+ * another machine at the same tier first (auto keeps its hints and the helper floor, so the retry
+ * lands on another ≥ floor host before any cloud tier); a helper that changed no file moves auto up
+ * a tier (its hints say quality best). An explicit network worker under the floor (`minB`) moves to
+ * auto (with the floor); any other explicit worker keeps its model and asks for another machine (a
+ * fresh session key, so affinity doesn't send it back to the same one). `nextTier`: whether the
+ * retry's hints move up a tier.
  */
-export function retryAfterEmpty(model: string, minB: number, why: "empty_reply" | "no_file"): { model: string; freshHost: boolean; note: string } {
+export function retryAfterEmpty(model: string, minB: number, why: "empty_reply" | "no_file"): { model: string; freshHost: boolean; nextTier: boolean; note: string } {
   const what = why === "empty_reply" ? "returned an empty reply" : "changed no file";
   const short = model.replace(/^network\//, "");
-  if (model === "auto") return { model, freshHost: true, note: `the helper ${what}; retrying on a stronger tier` };
+  const nextTier = why === "no_file";
+  const floor = minB > 0 ? `a model of at least ${minB}B` : "another machine";
+  if (model === "auto") return { model, freshHost: true, nextTier, note: nextTier ? `the helper ${what}; retrying on a stronger tier` : `the helper ${what}; retrying on another machine${minB > 0 ? ` (${floor})` : ""}` };
   const b = networkWorkerB(model);
-  if (b !== null && b < minB) return { model: "auto", freshHost: true, note: `${short} ${what}; retrying on auto (a stronger tier than ${short})` };
-  return { model, freshHost: true, note: `${short} ${what}; retrying on another machine` };
+  if (b !== null && b < minB) return { model: "auto", freshHost: true, nextTier, note: `${short} ${what}; retrying on auto (${floor})` };
+  return { model, freshHost: true, nextTier: false, note: `${short} ${what}; retrying on another machine` };
+}
+
+/**
+ * Whether a failed call's error says the place it went to can't serve now: a cloud provider error,
+ * a 503, or every holder cooling down behind an open circuit (the coordinator's no_capacity
+ * "cooling_down"). The client sees no breaker state before a call, so a tier that answered this way
+ * is skipped by the session's next-tier retries for a while (tentacles.ts PROVIDER_ERROR_SKIP_MS).
+ */
+export function isProviderTierError(modelError: string | undefined): boolean {
+  return !!modelError && /cloud_provider_(error|rate_limited)|cooling_down|\b503\b|service unavailable/i.test(modelError);
+}
+
+/**
+ * The smallest model (billions of parameters) a helper's network call on auto may run on: a hard
+ * floor sent as the minParamsB hint (best fit never goes below it). Small models (qwen2.5-coder:1.5b
+ * on CPU) returned empty replies for most helper turns. EDGECODER_TENTACLES_MIN_B overrides it (0: no floor).
+ */
+export const TENTACLE_HELPER_MIN_PARAMS_B = 7;
+
+function minBFrom(v: string | undefined, dflt: number): number {
+  const n = Number(v);
+  return v && Number.isFinite(n) && n >= 0 ? n : dflt;
+}
+
+export function tentacleHelperMinParamsB(env: NodeJS.ProcessEnv = process.env): number {
+  return minBFrom(env.EDGECODER_TENTACLES_MIN_B, TENTACLE_HELPER_MIN_PARAMS_B);
 }
 
 /**
@@ -184,8 +217,7 @@ export function retryAfterEmpty(model: string, minB: number, why: "empty_reply" 
 export const TENTACLE_LOCAL_MIN_PARAMS_B = 7;
 
 export function tentacleLocalMinParamsB(env: NodeJS.ProcessEnv = process.env): number {
-  const n = Number(env.EDGECODER_TENTACLES_LOCAL_MIN_B);
-  return env.EDGECODER_TENTACLES_LOCAL_MIN_B && Number.isFinite(n) && n >= 0 ? n : TENTACLE_LOCAL_MIN_PARAMS_B;
+  return minBFrom(env.EDGECODER_TENTACLES_LOCAL_MIN_B, TENTACLE_LOCAL_MIN_PARAMS_B);
 }
 
 /**

@@ -53,12 +53,12 @@ import type { ChatBackend } from "../../inference-api/types.js";
 import type { ServedBy } from "../../swarm/served-by.js";
 import { formatCSatsShort, parseWhere, patchReturn, tentacleCallLine, tentacleRanOn, tentacleTotals, whereServed } from "./tentacle-format.js";
 
-import { emptyAttempt, hintedChat, parseFileRef, pickLocalHelperModel, retryAfterEmpty, smallWorkerWarning, TENTACLE_LOCAL_MIN_PARAMS_B, tentacleLocalMinParamsB, tentaclePrompt, tentacleSystemPrompt } from "./tentacle-chat.js";
+import { emptyAttempt, hintedChat, isProviderTierError, parseFileRef, pickLocalHelperModel, retryAfterEmpty, smallWorkerWarning, TENTACLE_HELPER_MIN_PARAMS_B, TENTACLE_LOCAL_MIN_PARAMS_B, tentacleHelperMinParamsB, tentacleLocalMinParamsB, tentaclePrompt, tentacleSystemPrompt } from "./tentacle-chat.js";
 import { acceptanceProbe, canAutoApply, modeOf, sessionAllowsShell, TENTACLE_SHELL_ALLOW, tentacleShellDecision } from "./tentacle-shell.js";
 import { CallHolds, ceilingRefusal, helperCallCeiling, helperContextWindow, helperReplyTokens, MIN_HELPER_CALL_CSATS, paidWorker, promptTokensOf } from "./tentacle-reserve.js";
 
 export { acceptanceProbe, canAutoApply, modeOf, sessionAllowsShell, TENTACLE_SHELL_ALLOW, tentacleShellDecision };
-export { pickLocalHelperModel, TENTACLE_LOCAL_MIN_PARAMS_B, tentacleLocalMinParamsB };
+export { pickLocalHelperModel, TENTACLE_HELPER_MIN_PARAMS_B, TENTACLE_LOCAL_MIN_PARAMS_B, tentacleHelperMinParamsB, tentacleLocalMinParamsB };
 export { formatCSatsShort, hintedChat, parseFileRef, parseWhere, patchReturn, tentacleCallLine, tentaclePrompt, tentacleRanOn, tentacleTotals, whereServed };
 import type { RoutingHints, JobType, Quality } from "../../inference-api/job-descriptor.js";
 import { isFrontierModelId } from "../../inference-api/frontier-models.js";
@@ -258,7 +258,26 @@ interface SessionState {
   waiters: Set<() => void>;
   /** The price ceilings of helper calls in flight (tentacle-reserve.ts). */
   holds: CallHolds;
+  /**
+   * When a helper call last failed with a provider error (a cloud provider error, a 503, every
+   * holder cooling down): for PROVIDER_ERROR_SKIP_MS after it, retries don't move up a tier.
+   */
+  providerErrorAt?: number;
 }
+
+/**
+ * How long a provider error keeps the session's helper retries off the next tier (on auto that is
+ * where a suspended cloud provider sits). The client gets no breaker state before a call, so a
+ * tier is skipped once it has answered with a provider error.
+ */
+export const PROVIDER_ERROR_SKIP_MS = 5 * 60_000;
+
+/**
+ * A helper's history is compacted once a call's prompt passes this many tokens (agent-loop.ts
+ * compactAtTokens): long histories pushed CPU hosts past their call timeout and helper calls out
+ * of the network's common 8K-16K windows.
+ */
+export const HELPER_COMPACT_AT_TOKENS = 12_000;
 
 const LEVELS = ["low", "medium", "high", "very_high"] as const;
 const READ_ONLY_KINDS: ReadonlySet<TentacleKind> = new Set(["search", "summarize"]);
@@ -319,7 +338,7 @@ export function tentacleComplexity(spec: Pick<TentacleSpec, "kind" | "complexity
 }
 
 /** Routing hints for a tentacle's model calls. */
-export function workerHints(spec: Pick<TentacleSpec, "kind" | "complexity"> & Partial<Pick<TentacleSpec, "files" | "readOnly" | "acceptance">>, o: { escalate?: boolean; promptChars?: number; maxCSats?: number; tentacleId?: string } = {}): RoutingHints {
+export function workerHints(spec: Pick<TentacleSpec, "kind" | "complexity"> & Partial<Pick<TentacleSpec, "files" | "readOnly" | "acceptance">>, o: { escalate?: boolean; promptChars?: number; maxCSats?: number; tentacleId?: string; minParamsB?: number } = {}): RoutingHints {
   const { level, score } = tentacleComplexity({ files: [], ...spec }, o);
   // The score (0..1) goes to the coordinator's best-fit routing as the job's complexity.
   const complexity = score;
@@ -335,6 +354,8 @@ export function workerHints(spec: Pick<TentacleSpec, "kind" | "complexity"> & Pa
     // to the window, so a helper prompt of a few thousand tokens fits the network's common 8K hosts.
     minContext: helperContextWindow(promptTokens),
     ...(o.maxCSats !== undefined ? { maxCSats: Math.max(0, Number(o.maxCSats.toFixed(6))) } : {}),
+    // The helper floor (tentacleHelperMinParamsB): a hard floor, best fit never goes below it.
+    ...(o.minParamsB && o.minParamsB > 0 ? { minParamsB: o.minParamsB } : {}),
     ...(o.tentacleId ? { sessionId: `tentacle:${o.tentacleId}` } : {}),
   };
 }
@@ -594,7 +615,8 @@ export class TentacleManager {
     // An attempt that came back with nothing may move the retry to auto (retryAfterEmpty).
     let model = workerModelOf({ workerModel: this.d.workerModelFor?.(s, cfg) ?? tentacleWorkerModel(s, cfg) });
     t.view.model = model;
-    const minB = tentacleLocalMinParamsB();
+    // The helper floor: auto's calls never run below it, and an explicit worker under it moves to auto on an empty attempt.
+    const minB = tentacleHelperMinParamsB();
     const calls: TentacleCall[] = [];
     t.view.calls = calls;
     let unverified: string | undefined;
@@ -631,10 +653,17 @@ export class TentacleManager {
         if (t.abort.signal.aborted) break;
         attempts++;
         const again = retry as ReturnType<typeof retryAfterEmpty> | null;
+        // Whether this attempt's hints move up a tier: the retry does, unless it follows an empty
+        // reply (another machine at this tier first) or a provider error was seen lately (the next
+        // tier is where a suspended cloud provider sits on auto).
+        let tierUp = false;
         if (escalate) {
           if (ws) resetWorkspace(ws);
           if (again) model = again.model;
-          this.progress(sessionId, t, again ? again.note : place === "local" ? "retrying on the network (a stronger tier)" : "retrying on a stronger tier");
+          const providerDown = st.providerErrorAt !== undefined && Date.now() - st.providerErrorAt < PROVIDER_ERROR_SKIP_MS;
+          tierUp = (again ? again.nextTier : true) && !providerDown;
+          const skipped = providerDown && (again ? again.nextTier : place !== "local");
+          this.progress(sessionId, t, skipped ? "retrying on another machine at this tier (the next tier's provider returned an error lately)" : again ? again.note : place === "local" ? "retrying on the network (a stronger tier)" : "retrying on a stronger tier");
         }
         checks.length = 0;
         let budgetHit = false;
@@ -667,7 +696,8 @@ export class TentacleManager {
           // attempt's retry goes to the network.
           place === "local" ? this.d.localBackend!(localModel) : this.d.workerBackend(model, sessionId, { role: "worker" }),
           async () => {
-            const hintsFor = (maxCSats: number) => workerHints(t.spec, { escalate, promptChars: prompt.length, maxCSats, tentacleId: escalate && again?.freshHost ? `${t.view.id}:retry` : t.view.id });
+            const hintsFor = (maxCSats: number) =>
+              workerHints(t.spec, { escalate: tierUp, promptChars: prompt.length, maxCSats, tentacleId: escalate && (again?.freshHost || !tierUp) ? `${t.view.id}:retry` : t.view.id, ...(place === "worker" && model === "auto" ? { minParamsB: minB } : {}) });
             // Free places hold nothing; a paid call's ceiling is sized from the budgets left (tentacle-reserve.ts).
             if (place !== "worker" || !paidWorker(model)) return hintsFor(Math.max(0, budget - t.spent));
             for (;;) {
@@ -724,6 +754,11 @@ export class TentacleManager {
               st.holds.release(holdKey);
               holdKey = undefined;
             },
+            // A provider error (seen even when the agent loop retries the call) keeps the session's
+            // retries off the next tier for a while.
+            onError: (err) => {
+              if (place === "worker" && isProviderTierError(err instanceof Error ? err.message : String(err))) st.providerErrorAt = Date.now();
+            },
           },
         );
         await runAgentLoop({
@@ -732,6 +767,8 @@ export class TentacleManager {
           messages: [{ role: "user", content: prompt }],
           native: true,
           maxIterations: this.d.maxIterations ?? 12,
+          // Keep a network helper's history short (C7: long histories timed out on CPU hosts).
+          ...(place === "worker" ? { compactAtTokens: HELPER_COMPACT_AT_TOKENS } : {}),
           // Like a bot run, nobody is there to say "go on" after a reply that only announces work.
           continueOnIntent: true,
           tools: schemasFor(toolNames),

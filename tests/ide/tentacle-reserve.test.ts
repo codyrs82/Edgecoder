@@ -4,15 +4,15 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CheckpointStore } from "../../src/apps/ide/checkpoints.js";
 import { SessionHub, type ClientRef, type SessionEvent } from "../../src/apps/ide/sessions.js";
-import { emptyAttempt, hintedChat, retryAfterEmpty, smallWorkerWarning, tentacleSystemPrompt } from "../../src/apps/ide/tentacle-chat.js";
+import { emptyAttempt, hintedChat, isProviderTierError, retryAfterEmpty, smallWorkerWarning, TENTACLE_HELPER_MIN_PARAMS_B, tentacleHelperMinParamsB, tentacleSystemPrompt } from "../../src/apps/ide/tentacle-chat.js";
 import { CallHolds, ceilingRefusal, helperCallCeiling, helperContextWindow, helperMaxTokens, helperReplyTokens, HELPER_FIT_WINDOW, HELPER_MAX_TOKENS, HELPER_MIN_REPLY_TOKENS, MIN_HELPER_CALL_CSATS, paidWorker, promptTokensOf } from "../../src/apps/ide/tentacle-reserve.js";
 import { contextNeeded } from "../../src/inference-api/ollama.js";
 import { tentacleRanOn, whereServed } from "../../src/apps/ide/tentacle-format.js";
 import type { ServedBy } from "../../src/swarm/served-by.js";
-import { patchReturn, TentacleManager, tentacleTotals, type TentacleConfig } from "../../src/apps/ide/tentacles.js";
+import { HELPER_COMPACT_AT_TOKENS, patchReturn, TentacleManager, tentacleTotals, workerHints, type TentacleConfig } from "../../src/apps/ide/tentacles.js";
 import { ChatBackendError, type ChatBackend, type ChatPiece, type ChatRequest } from "../../src/inference-api/types.js";
 
 const TERM: ClientRef = { clientId: "term-1", kind: "terminal", label: "Terminal" };
@@ -151,6 +151,12 @@ describe("empty helper attempts (#525)", { timeout: 60_000 }, () => {
     expect(retryAfterEmpty("network/qwen2.5-coder:1.5b", 7, "empty_reply")).toMatchObject({ model: "auto", freshHost: true, note: expect.stringMatching(/retrying on auto/) });
     expect(retryAfterEmpty("network/qwen3-coder:30b@gpu", 7, "no_file")).toMatchObject({ model: "network/qwen3-coder:30b@gpu", freshHost: true, note: expect.stringMatching(/another machine/) });
     expect(retryAfterEmpty("auto", 7, "empty_reply").model).toBe("auto");
+    // D4: an empty reply retries on another machine at the same tier (≥ the floor) before any
+    // higher (cloud) tier; a helper that changed no file moves auto up a tier.
+    expect(retryAfterEmpty("auto", 7, "empty_reply")).toMatchObject({ nextTier: false, freshHost: true, note: expect.stringMatching(/another machine \(a model of at least 7B\)/) });
+    expect(retryAfterEmpty("auto", 7, "no_file")).toMatchObject({ nextTier: true, note: expect.stringMatching(/stronger tier/) });
+    expect(retryAfterEmpty("network/qwen2.5-coder:1.5b", 7, "empty_reply")).toMatchObject({ nextTier: false, note: expect.stringMatching(/at least 7B/) });
+    expect(retryAfterEmpty("network/qwen3-coder:30b", 7, "empty_reply").nextTier).toBe(false);
     expect(smallWorkerWarning("network/qwen2.5-coder:1.5b@gpu", 7)).toMatch(/under 7B/);
     expect(smallWorkerWarning("network/qwen3-coder:30b", 7)).toBeNull();
     expect(smallWorkerWarning("auto", 7)).toBeNull();
@@ -169,7 +175,11 @@ describe("empty helper attempts (#525)", { timeout: 60_000 }, () => {
     const firstAuto = requests.findIndex((r) => r.model === "auto");
     expect(requests.slice(0, firstAuto).every((r) => r.model === "network/qwen2.5-coder:1.5b")).toBe(true);
     expect(requests.slice(firstAuto).map((r) => r.model)).toEqual(["auto", "auto"]);
-    expect(requests[firstAuto].req.hints).toMatchObject({ quality: "best", sessionId: `tentacle:${v.id}:retry` });
+    // The retry runs on auto with the helper floor, at the same tier (not straight to the cloud tier).
+    expect(requests[firstAuto].req.hints).toMatchObject({ minParamsB: 7, sessionId: `tentacle:${v.id}:retry` });
+    expect(requests[firstAuto].req.hints!.quality).not.toBe("best");
+    // The explicit 1.5B worker's own calls carry no floor (the user chose it).
+    expect(requests[0].req.hints!.minParamsB).toBeUndefined();
     const progress = events.filter((e) => e.type === "tentacle_progress").map((e) => String(e.progress));
     expect(progress.some((p) => /under 7B/.test(p))).toBe(true);
     expect(progress.some((p) => /empty reply; retrying on auto/.test(p))).toBe(true);
@@ -187,7 +197,7 @@ describe("empty helper attempts (#525)", { timeout: 60_000 }, () => {
   });
 
   it("a read-only helper's empty reply is retried instead of passing with nothing", async () => {
-    const { tentacles, s, requests } = setup(({ req }) => (req.hints?.quality === "best" ? { text: "it is in a.txt line 1" } : { text: "" }));
+    const { tentacles, s, requests } = setup(({ req }) => (req.hints?.sessionId?.endsWith(":retry") ? { text: "it is in a.txt line 1" } : { text: "" }));
     const v = tentacles.delegate(s.id, { task: "find alpha", kind: "search", files: [], instructions: "" });
     await tentacles.idle(s.id);
     const t = tentacles.get(s.id, v.id)!;
@@ -294,5 +304,93 @@ describe("where a helper ran (served-by, not \"unknown\")", { timeout: 60_000 },
     expect(tentacleRanOn(t.result!)).toBe("network/qwen2.5-coder:1.5b on apple · mac-•••30e5 Frankfurt");
     const notes = JSON.stringify(events);
     expect(notes).not.toMatch(/on unknown/);
+  });
+});
+
+describe("helper floor and provider errors (D3, D4, C7)", { timeout: 60_000 }, () => {
+  it("auto helper calls carry a ≥7B floor; EDGECODER_TENTACLES_MIN_B overrides it", async () => {
+    expect(TENTACLE_HELPER_MIN_PARAMS_B).toBe(7);
+    expect(tentacleHelperMinParamsB({})).toBe(7);
+    expect(tentacleHelperMinParamsB({ EDGECODER_TENTACLES_MIN_B: "14" })).toBe(14);
+    expect(tentacleHelperMinParamsB({ EDGECODER_TENTACLES_MIN_B: "0" })).toBe(0);
+    expect(tentacleHelperMinParamsB({ EDGECODER_TENTACLES_MIN_B: "x" })).toBe(7);
+    expect(workerHints({ kind: "tests" }, { minParamsB: 7 })).toMatchObject({ minParamsB: 7 });
+    expect(workerHints({ kind: "tests" }, { minParamsB: 0 }).minParamsB).toBeUndefined();
+    const { tentacles, s, requests } = setup(write("f.txt"), { workerModel: "auto" });
+    tentacles.delegate(s.id, { task: "f", kind: "code_edit", files: [], instructions: "" });
+    await tentacles.idle(s.id);
+    expect(requests.length).toBeGreaterThan(0);
+    expect(requests.every((r) => r.req.hints?.minParamsB === 7)).toBe(true);
+    vi.stubEnv("EDGECODER_TENTACLES_MIN_B", "14");
+    try {
+      const b = setup(write("g.txt"), { workerModel: "auto" });
+      b.tentacles.delegate(b.s.id, { task: "g", kind: "code_edit", files: [], instructions: "" });
+      await b.tentacles.idle(b.s.id);
+      expect(b.requests.every((r) => r.req.hints?.minParamsB === 14)).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("an empty reply on auto retries on another ≥7B machine at the same tier", async () => {
+    const { tentacles, s, requests, events } = setup(({ call, req }) => (!req.hints?.sessionId?.endsWith(":retry") ? { text: "" } : call === 0 ? { tool: ["write_file", { path: "h.txt", content: "h\n" }] } : { text: "wrote h" }), { workerModel: "auto" });
+    const v = tentacles.delegate(s.id, { task: "h", kind: "code_edit", files: [], instructions: "" });
+    await tentacles.idle(s.id);
+    expect(tentacles.get(s.id, v.id)!.status).toBe("passed");
+    const retry = requests.find((r) => r.req.hints?.sessionId === `tentacle:${v.id}:retry`)!;
+    expect(retry.req.hints).toMatchObject({ minParamsB: 7 });
+    expect(retry.req.hints!.quality).not.toBe("best");
+    const progress = events.filter((e) => e.type === "tentacle_progress").map((e) => String(e.progress));
+    expect(progress.some((p) => /empty reply; retrying on another machine \(a model of at least 7B\)/.test(p))).toBe(true);
+  });
+
+  it("tells provider errors apart", () => {
+    expect(isProviderTierError("cloud_provider_error: Fireworks HTTP 503: suspended")).toBe(true);
+    expect(isProviderTierError("cloud_provider_rate_limited: Fireworks HTTP 429")).toBe(true);
+    expect(isProviderTierError("no_capacity: cooling_down")).toBe(true);
+    expect(isProviderTierError("HTTP 503 Service Unavailable")).toBe(true);
+    expect(isProviderTierError("Not enough cSats")).toBe(false);
+    expect(isProviderTierError(undefined)).toBe(false);
+  });
+
+  it("after a provider error, the session's retries skip the next tier and go to another machine at this tier", async () => {
+    // The first helper's first attempt fails with a provider error; its retry stays at the tier (no quality best).
+    const SUSPENDED = { fail: "cloud_provider_error: Fireworks HTTP 503: account suspended" };
+    const { tentacles, s, requests, events } = setup(({ call, req }) => {
+      const task = /# Task\n(.*)/.exec(req.messages.find((m) => m.role === "user")?.content ?? "")?.[1];
+      const retry = !!req.hints?.sessionId?.endsWith(":retry");
+      if (req.hints?.quality === "best" || (task === "k" && !retry)) return SUSPENDED;
+      return call === 0 ? { tool: ["write_file", { path: `${task}.txt`, content: retry ? "right\n" : "wrong\n" }] } : { text: "wrote k" };
+    }, { workerModel: "auto" });
+    const v = tentacles.delegate(s.id, { task: "k", kind: "code_edit", files: [], instructions: "", acceptance: { kind: "grep", args: { pattern: "right", paths: ["k.txt"] } } });
+    await tentacles.idle(s.id);
+    expect(tentacles.get(s.id, v.id)!.status).toBe("passed");
+    expect(requests.some((r) => r.req.hints?.quality === "best")).toBe(false);
+    // A second helper in the session whose check fails: its retry skips the next tier too.
+    const w = tentacles.delegate(s.id, { task: "m", kind: "code_edit", files: [], instructions: "", acceptance: { kind: "grep", args: { pattern: "right", paths: ["m.txt"] } } });
+    await tentacles.idle(s.id);
+    expect(tentacles.get(s.id, w.id)!.status).toBe("passed");
+    expect(requests.some((r) => r.req.hints?.quality === "best")).toBe(false);
+    const progress = events.filter((e) => e.type === "tentacle_progress").map((e) => String(e.progress));
+    expect(progress.filter((p) => /another machine at this tier \(the next tier's provider returned an error lately\)/.test(p)).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("without a provider error, a failed check still moves up a tier", async () => {
+    const { tentacles, s, requests } = setup(({ call, req }) => (call === 0 ? { tool: ["write_file", { path: "n.txt", content: req.hints?.quality === "best" ? "right\n" : "wrong\n" }] } : { text: "wrote n" }), { workerModel: "auto" });
+    const v = tentacles.delegate(s.id, { task: "n", kind: "code_edit", files: [], instructions: "", acceptance: { kind: "grep", args: { pattern: "right", paths: ["n.txt"] } } });
+    await tentacles.idle(s.id);
+    expect(tentacles.get(s.id, v.id)!.status).toBe("passed");
+    expect(requests.at(-1)!.req.hints).toMatchObject({ quality: "best", minParamsB: 7 });
+  });
+
+  it("keeps a network helper's history short (compacts past HELPER_COMPACT_AT_TOKENS)", async () => {
+    writeFileSync(join(root, "big.txt"), "z".repeat(18_000));
+    const { tentacles, s, requests } = setup(({ call }) => (call < 6 ? { tool: ["read_file", { path: "big.txt" }] } : { text: "read it" }), { workerModel: "auto" });
+    tentacles.delegate(s.id, { task: "read big", kind: "search", files: [], instructions: "" });
+    await tentacles.idle(s.id);
+    expect(requests.length).toBeGreaterThanOrEqual(4);
+    // Six reads of ~6K tokens each would pass 36K tokens; compaction keeps each prompt under the bound.
+    const tokens = requests.map((r) => Math.ceil(r.req.messages.reduce((n, m) => n + m.content.length, 0) / 3));
+    expect(Math.max(...tokens)).toBeLessThanOrEqual(HELPER_COMPACT_AT_TOKENS);
   });
 });
