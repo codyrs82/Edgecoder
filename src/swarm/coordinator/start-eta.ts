@@ -62,6 +62,24 @@
  *   - steal: a sample from a call during which its host reported CPU steal (host-steal.ts) is kept
  *     out of every speed, and a host's own speed counts only samples taken after its last stolen
  *     report, so a speed measured while throttled does not linger once the throttling ends.
+ *
+ * Run 8 (2026-11-25): idle lhr buyers still went to iad on "iad 987 ms vs lhr 2273 ms"
+ * (inf-1795623629295-bac0c382, inf-1795623637550-c2e2e888); those calls took 1.6-2.0 s, lhr serves its
+ * own buyers in about 1.0 s. lhr's few samples were two calls that ran side by side on it (each at
+ * about half speed) and a call from the cancel test. A host's own speed now rests only on calls that
+ * completed normally and ran alone on it:
+ *
+ *   - normal only: a reply that ended with an error (cut at its deadline, the engine failed), a call
+ *     its requester cancelled (stopped part way), and a timed-out call (noteTimedOutCall) give no
+ *     sample of the host's own speed (admin-network observeInference; the class keeps the timed-out
+ *     lower bound for admission);
+ *   - alone: a call that shared its host with another (running at its end, or another call on the
+ *     host ended after it was claimed) says how fast the host is under contention, not how fast it is
+ *     for one call; it is left out of the host's own speed (the class keeps it);
+ *   - robust: a host's own speed is the plain median of at least SERVICE_MIN_SAMPLES such samples of
+ *     the last HOST_SPEED_WINDOW_MS (5 min, as the portal's freshness limit), without age weighting,
+ *     so a single outlier cannot make a host "measured 1.5x slower" (with weighting, the newest
+ *     sample alone could outweigh two older ones).
  */
 
 import type { ComputeClassId } from "../../economy/compute-classes.js";
@@ -79,8 +97,12 @@ import { agentStolenAt, stolenDuring } from "./host-steal.js";
 
 /** Run 7: a speed sample's weight halves every this many ms (0: every sample in the window weighs the same). */
 export const SPEED_HALF_LIFE_MS = 3 * 60_000;
-/** Run 7: a host's own speed counts only its samples of this window (a class's keeps SERVICE_WINDOW_MS). */
-export const HOST_SPEED_WINDOW_MS = 10 * 60_000;
+/**
+ * Run 7: a host's own speed counts only its samples of this window (a class's keeps SERVICE_WINDOW_MS).
+ * Run 8: 5 min (was 10), the portal's freshness limit (PORTAL_COORD_SPEED_FRESH_MS): a host's own speed
+ * needs SERVICE_MIN_SAMPLES fresh samples, not one fresh sample among older ones.
+ */
+export const HOST_SPEED_WINDOW_MS = 5 * 60_000;
 
 /** Positive integer ms from the environment, within [min, max]; `fallback` when unset or not a number. */
 function envMs(raw: string | undefined, fallback: number, min: number, max: number): number {
@@ -154,12 +176,21 @@ export interface SpeedEstimate {
 
 type Sample = { at: number; ms: number; speed?: number; work?: number; stolen?: boolean };
 
+/** Options of a ServiceTimes. */
+export interface ServiceTimesOptions {
+  /** Run 8: weight speed samples by age (SPEED_HALF_LIFE_MS); false: the plain median (one host's own speed). Default true. */
+  decay?: boolean;
+}
+
 /** Recent service times (claim to last reply piece) per model and compute class. */
 export class ServiceTimes {
   private readonly byKey = new Map<string, Sample[]>();
 
   /** `speedWindowMs`: how far back a speed looks (SERVICE_WINDOW_MS when not given; run 7: shorter for one host's own). */
-  constructor(private readonly speedWindowMs: () => number = () => SERVICE_WINDOW_MS) {}
+  constructor(
+    private readonly speedWindowMs: () => number = () => SERVICE_WINDOW_MS,
+    private readonly opts: ServiceTimesOptions = {},
+  ) {}
 
   /**
    * One sample. `expectedMs`: expectedWorkMs for the tokens the call read and wrote; with it the
@@ -194,7 +225,7 @@ export class ServiceTimes {
 
   /** Run 7: the speed samples (not stolen) of the speed window, each weighted by its age. */
   private speeds(model: string, computeClass: string, nowMs: number, keep: (s: Sample) => boolean = () => true, sinceMs?: number): Weighted[] {
-    const half = speedHalfLifeMs();
+    const half = this.opts.decay === false ? 0 : speedHalfLifeMs();
     return this.samples(model, computeClass, nowMs, this.speedWindowMs(), sinceMs)
       .filter((s) => s.speed !== undefined && !s.stolen && keep(s))
       .map((s) => ({ v: s.speed!, w: half > 0 ? Math.pow(0.5, Math.max(0, nowMs - s.at) / half) : 1 }));
@@ -290,8 +321,34 @@ export const serviceTimes = new ServiceTimes();
 /**
  * The same per model and agent (the agent id in the class slot): one host's own speed, for
  * /inference/models freeHosts (hostServiceMs). Run 7: its speed looks back HOST_SPEED_WINDOW_MS only.
+ * Run 8: only calls that completed normally and ran alone on the host are recorded here
+ * (noteServiceTime), and the speed is their plain median (no age weighting), at least
+ * SERVICE_MIN_SAMPLES of them.
  */
-export const agentServiceTimes = new ServiceTimes(hostSpeedWindowMs);
+export const agentServiceTimes = new ServiceTimes(hostSpeedWindowMs, { decay: false });
+
+/** Run 8: when each agent's latest call ended (any outcome), to tell a call that shared its host. */
+const agentLastEnd = new Map<string, number>();
+
+/**
+ * Run 8: a call on `agentId` ended at `nowMs`, whatever its outcome (a normal reply, an error, a
+ * cancel, a timeout). A call claimed before this that ends later shared the host with it.
+ */
+export function noteCallEnded(agentId: string | undefined, nowMs = Date.now()): void {
+  if (!agentId) return;
+  if ((agentLastEnd.get(agentId) ?? -Infinity) < nowMs) agentLastEnd.set(agentId, nowMs);
+  if (agentLastEnd.size > 4_096) agentLastEnd.delete(agentLastEnd.keys().next().value as string);
+}
+
+/** Run 8: whether a call on `agentId` claimed at `claimedAtMs` shared the host: another call running at its end, or one that ended after its claim. */
+export function callSharedHost(agentId: string, claimedAtMs: number, runningAtEnd = 1): boolean {
+  return runningAtEnd > 1 || (agentLastEnd.get(agentId) ?? -Infinity) > claimedAtMs;
+}
+
+/** Tests: forget when calls ended. */
+export function clearCallEnds(): void {
+  agentLastEnd.clear();
+}
 
 /** The reference call hostServiceMs is given for (tokens read and written). */
 export const REFERENCE_CALL_TOKENS = { promptTokens: 1_000, outputTokens: 200 } as const;
@@ -335,16 +392,21 @@ export function callWorkMs(model: string, computeClass: string, promptTokens: nu
 
 /**
  * A reply's last piece came from `agentId`, claimed at `claimedAtMs`: one service-time sample. With
- * the tokens the call read and wrote (`tokens`), the sample also gives the class's speed.
+ * the tokens the call read and wrote (`tokens`), the sample also gives the class's speed. Only a call
+ * that completed normally is a sample (run 8: observeInference leaves out errors and cancels).
+ * `runningAtEnd`: the calls the host held when this one ended, itself included.
+ * Run 8: a call that shared its host (callSharedHost) is not a sample of the host's own speed.
  */
-export function noteServiceTime(model: string | undefined, agentId: string | undefined, claimedAtMs: number | undefined, nowMs = Date.now(), tokens?: { promptTokens: number; outputTokens: number }): void {
+export function noteServiceTime(model: string | undefined, agentId: string | undefined, claimedAtMs: number | undefined, nowMs = Date.now(), tokens?: { promptTokens: number; outputTokens: number }, runningAtEnd = 1): void {
   if (!model || !agentId || claimedAtMs === undefined) return;
   const cls = effectiveHardware(agentId)?.computeClass ?? agentCapabilities.get(agentId)?.computeClass ?? "cpu";
   const expected = tokens && tokens.outputTokens > 0 ? callWorkMs(model, cls, tokens.promptTokens, tokens.outputTokens) : undefined;
   // Run 7: a call its host was stolen from during (host-steal.ts) gives no speed.
   const stolen = stolenDuring(agentId, claimedAtMs);
+  const shared = callSharedHost(agentId, claimedAtMs, runningAtEnd);
+  noteCallEnded(agentId, nowMs);
   serviceTimes.record(model, cls, nowMs - claimedAtMs, nowMs, expected, stolen);
-  agentServiceTimes.record(model, agentId, nowMs - claimedAtMs, nowMs, expected, stolen);
+  if (!shared) agentServiceTimes.record(model, agentId, nowMs - claimedAtMs, nowMs, expected, stolen);
 }
 
 /** Slots (all, and free now) of this coordinator's agents that could run `model` in `taskClass`. */
@@ -521,8 +583,9 @@ export function noteTimedOutCall(model: string | undefined, agentId: string | un
   // Run 7: not when its host was stolen from during the call (host-steal.ts).
   const stolen = stolenDuring(agentId, claimedAtMs);
   serviceTimes.record(model, cls, nowMs - claimedAtMs, nowMs, work, stolen);
-  // The host's own samples too (#558 hostServiceMs): it was at least this slow.
-  agentServiceTimes.record(model, agentId, nowMs - claimedAtMs, nowMs, work, stolen);
+  // Run 8: not the host's own speed. A lower bound from a call cut at its deadline (often one that
+  // shared its host or ran throttled) made lhr "measured" far slower than it is.
+  noteCallEnded(agentId, nowMs);
 }
 
 /** The reply a timed-out call without max_tokens is measured against (routes/inference.ts COMPLETION_UNSET_MAX_TOKENS). */

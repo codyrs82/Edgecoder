@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  agentServiceTimes, hostSpeed, HOST_SPEED_WINDOW_MS, noteServiceTime, serviceTimes, ServiceTimes, SPEED_HALF_LIFE_MS, weightedMedian,
+  agentServiceTimes, callSharedHost, clearCallEnds, hostSpeed, HOST_SPEED_WINDOW_MS, noteTimedOutCall, noteServiceTime, serviceTimes, ServiceTimes, SPEED_HALF_LIFE_MS, weightedMedian,
 } from "../../src/swarm/coordinator/start-eta.js";
 import { agentStolenAt, clearAgentSteal, noteAgentSteal, parseStealShare, SPEED_STEAL_SHARE, stolenDuring } from "../../src/swarm/coordinator/host-steal.js";
 
@@ -22,6 +22,7 @@ beforeEach(() => {
   agentServiceTimes.clear();
   serviceTimes.clear();
   clearAgentSteal();
+  clearCallEnds();
 });
 afterEach(() => {
   delete process.env.INFERENCE_SPEED_HALF_LIFE_MS;
@@ -57,7 +58,7 @@ describe("speed samples decay with age", () => {
   it("a host's own speed drops samples older than its window; a class's keeps them", () => {
     const now = 10_000_000;
     const old = now - HOST_SPEED_WINDOW_MS - 1_000;
-    for (let i = 0; i < 3; i++) noteServiceTime(MODEL, LHR, old - 2_160, old, { promptTokens: 20, outputTokens: 8 });
+    for (let i = 0; i < 3; i++) noteServiceTime(MODEL, LHR, old - 2_160 - (2 - i) * 3_000, old - (2 - i) * 3_000, { promptTokens: 20, outputTokens: 8 });
     expect(agentServiceTimes.speed(MODEL, LHR, now)).toBeNull();
     expect(serviceTimes.speed(MODEL, "cpu", now)).not.toBeNull();
     expect(hostSpeed(MODEL, LHR, "cpu", now)?.from).toBe("class");
@@ -68,7 +69,7 @@ describe("speed samples decay with age", () => {
 
   it("defaults", () => {
     expect(SPEED_HALF_LIFE_MS).toBe(180_000);
-    expect(HOST_SPEED_WINDOW_MS).toBe(600_000);
+    expect(HOST_SPEED_WINDOW_MS).toBe(300_000);
   });
 });
 
@@ -117,12 +118,12 @@ describe("samples from a host stolen from do not count", () => {
 
   it("a host's samples from before its last stolen report do not count", () => {
     const t0 = 10_000_000;
-    for (let i = 0; i < 3; i++) noteServiceTime(MODEL, LHR, t0 + i * 1_000, t0 + i * 1_000 + 2_000, tokens);
-    expect(hostSpeed(MODEL, LHR, "cpu", t0 + 5_000)?.from).toBe("host");
+    for (let i = 0; i < 3; i++) noteServiceTime(MODEL, LHR, t0 + i * 3_000, t0 + i * 3_000 + 2_000, tokens);
+    expect(hostSpeed(MODEL, LHR, "cpu", t0 + 9_000)?.from).toBe("host");
     // The guard reports throttling a few seconds later (its reading spans ~5 s).
-    noteAgentSteal(LHR, { cpuThrottled: true }, t0 + 6_000);
-    expect(agentStolenAt(LHR)).toBe(t0 + 6_000);
-    expect(hostSpeed(MODEL, LHR, "cpu", t0 + 7_000)?.from).toBe("class");
+    noteAgentSteal(LHR, { cpuThrottled: true }, t0 + 10_000);
+    expect(agentStolenAt(LHR)).toBe(t0 + 10_000);
+    expect(hostSpeed(MODEL, LHR, "cpu", t0 + 11_000)?.from).toBe("class");
   });
 
   it("a genuinely slower host with fresh, unthrottled samples keeps its speed", () => {
@@ -151,5 +152,69 @@ describe("samples from a host stolen from do not count", () => {
     noteAgentSteal(IAD, { cpuThrottled: true }, 1_000);
     delete process.env.INFERENCE_SPEED_STEAL_SHARE;
     expect(agentStolenAt(IAD)).toBeUndefined();
+  });
+});
+
+describe("run 8: a host's own speed needs three normal samples of its own, and one outlier cannot set it", () => {
+  /*
+   * Network run 8 (2026-11-25): lhr buyers went to iad on "iad 987 ms vs lhr 2273 ms"
+   * (inf-1795623629295-bac0c382, inf-1795623637550-c2e2e888) while lhr serves its own buyers in about
+   * 1.0 s; under CPU load an lhr buyer went to iad on "iad 3439 ms vs lhr 26457 ms"
+   * (inf-1795625872261-fd69eaf5).
+   */
+  const tokens = { promptTokens: 20, outputTokens: 8 };
+
+  it("one slow newest sample among older normal ones does not make the host slow (no age weighting)", () => {
+    const t0 = 10_000_000;
+    // Two normal calls 4 and 3.5 minutes ago, then one slow outlier just now.
+    noteServiceTime(MODEL, LHR, t0 - 240_000 - 1_000, t0 - 240_000, tokens);
+    noteServiceTime(MODEL, LHR, t0 - 210_000 - 1_000, t0 - 210_000, tokens);
+    noteServiceTime(MODEL, LHR, t0 - 2_300, t0, tokens);
+    const own = agentServiceTimes.speed(MODEL, LHR, t0)!;
+    expect(hostSpeed(MODEL, LHR, "cpu", t0)?.from).toBe("host");
+    // The median is a normal call's speed; with age weighting (as a class's speed) the outlier would set it.
+    const weighted = new ServiceTimes();
+    weighted.record(MODEL, "cpu", 1_000, t0 - 240_000, 1_000);
+    weighted.record(MODEL, "cpu", 1_000, t0 - 210_000, 1_000);
+    weighted.record(MODEL, "cpu", 2_300, t0, 1_000);
+    expect(weighted.speed(MODEL, "cpu", t0)).toBeCloseTo(2.3);
+    // iad, three normal 1.0 s calls: lhr is as fast, not "measured 2.3x slower".
+    noteServiceTime(MODEL, IAD, t0 - 100_000 - 1_000, t0 - 100_000, tokens);
+    noteServiceTime(MODEL, IAD, t0 - 90_000 - 1_000, t0 - 90_000, tokens);
+    noteServiceTime(MODEL, IAD, t0 - 80_000 - 1_000, t0 - 80_000, tokens);
+    expect(own / agentServiceTimes.speed(MODEL, IAD, t0)!).toBeCloseTo(1, 6);
+  });
+
+  it("two fresh samples are not a measurement: the class's speed stands in", () => {
+    const t0 = 10_000_000;
+    noteServiceTime(MODEL, LHR, t0 - 20_000, t0 - 17_700, tokens);
+    noteServiceTime(MODEL, LHR, t0 - 10_000, t0 - 7_700, tokens);
+    expect(hostSpeed(MODEL, LHR, "cpu", t0)?.from).not.toBe("host");
+    // A third sample older than the window (5 min) does not count either.
+    noteServiceTime(MODEL, IAD, t0 - HOST_SPEED_WINDOW_MS - 10_000, t0 - HOST_SPEED_WINDOW_MS - 9_000, tokens);
+    noteServiceTime(MODEL, IAD, t0 - 20_000, t0 - 19_000, tokens);
+    noteServiceTime(MODEL, IAD, t0 - 10_000, t0 - 9_000, tokens);
+    expect(hostSpeed(MODEL, IAD, "cpu", t0)?.from).not.toBe("host");
+    expect(hostSpeed(MODEL, IAD, "cpu", t0, 0.5)?.from).toBe("class");
+  });
+
+  it("a call that shared its host (running beside another) is no sample of the host's own speed", () => {
+    const t0 = 10_000_000;
+    for (let i = 0; i < 3; i++) noteServiceTime(MODEL, LHR, t0 + i * 10_000, t0 + i * 10_000 + 2_500, tokens, 2);
+    expect(agentServiceTimes.speed(MODEL, LHR, t0 + 40_000)).toBeNull();
+    expect(serviceTimes.speed(MODEL, "cpu", t0 + 40_000)).not.toBeNull();
+    // Another call on the host ended after this one was claimed: shared too.
+    noteServiceTime(MODEL, IAD, t0, t0 + 1_000, tokens);
+    expect(callSharedHost(IAD, t0 + 500)).toBe(true);
+    expect(callSharedHost(IAD, t0 + 1_500)).toBe(false);
+    expect(callSharedHost(IAD, t0 + 1_500, 2)).toBe(true);
+  });
+
+  it("a timed-out call is a lower bound for its class, not a sample of its host's own speed", () => {
+    const t0 = 10_000_000;
+    for (let i = 0; i < 3; i++) noteTimedOutCall(MODEL, LHR, t0 + i * 200_000, JSON.stringify({ messages: [{ role: "user", content: "hi" }], maxTokens: 50 }), t0 + i * 200_000 + 180_000);
+    const now = t0 + 600_000;
+    expect(agentServiceTimes.speed(MODEL, LHR, now)).toBeNull();
+    expect(serviceTimes.speed(MODEL, "cpu", now)).not.toBeNull();
   });
 });

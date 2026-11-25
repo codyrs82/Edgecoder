@@ -118,6 +118,11 @@ const CANDIDATE_LIST_TTL_MS = 60_000;
 export const SENT_REFLECT_MS = 2_000;
 /** Key for Auto calls sent since a report (a model name never has this form). */
 const AUTO_SENT_KEY = "\u0000auto";
+/**
+ * Run 8: how long a region a coordinator reported a free host in for a model counts as one of its
+ * hosts' regions (hostRegions), so a call can queue nearest its buyer when no coordinator has a free slot.
+ */
+export const HOST_REGIONS_KEEP_MS = 15 * 60_000;
 /** Round trips kept per coordinator, and how long one counts. */
 const RTT_SAMPLES = 5;
 const RTT_MAX_AGE_MS = 5 * 60_000;
@@ -421,6 +426,23 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
   };
 
   /**
+   * Run 8: the regions each coordinator has reported free hosts in for a model (freeRegions and
+   * freeHosts), with when last seen: its hosts' regions while every slot is busy (hostRegions).
+   */
+  const seenRegions = new Map<string, Map<string, number>>();
+  const hostRegionsOf = (url: string, model: string, load: ModelLoad): string[] | undefined => {
+    const key = sentKey(url, model);
+    const t = now();
+    const seen = seenRegions.get(key) ?? new Map<string, number>();
+    for (const r of [...(load.freeRegions ?? []), ...(load.freeHosts ?? []).map((h) => h.region)]) seen.set(r, t);
+    for (const [r, at] of seen) if (t - at > HOST_REGIONS_KEEP_MS) seen.delete(r);
+    if (seen.size) seenRegions.set(key, seen);
+    else seenRegions.delete(key);
+    if (seenRegions.size > 1_024) seenRegions.delete(seenRegions.keys().next().value as string);
+    return seen.size ? [...seen.keys()] : undefined;
+  };
+
+  /**
    * Network calls: among coordinators that list the model and report their load, the one with the
    * most free agents for it (idle minus waiting minus calls sent since its report); configured order
    * breaks ties. Inference runs where it is submitted, so this is what spreads calls across seeds.
@@ -456,6 +478,7 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
       const unreflected = sentSince(urls[i], model);
       // Free model slots when the coordinator reports them (agents run several calls at once), else idle agents.
       const room = load.free ?? load.idle;
+      const hostRegions = hostRegionsOf(urls[i], model, load);
       scored.push({
         url: urls[i],
         free: room - load.waiting - unreflected.length,
@@ -474,6 +497,7 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
         // Per-host numbers for end to end (coordinator-latency.ts); the unreflected calls have taken their buyers' nearest hosts.
         ...(load.freeHosts ? { freeHosts: load.freeHosts } : {}),
         ...(unreflected.length ? { sentFor: unreflected } : {}),
+        ...(hostRegions ? { hostRegions } : {}),
       });
     }
     let best: (typeof scored)[number] | null = null;

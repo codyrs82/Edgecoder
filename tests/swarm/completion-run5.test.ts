@@ -385,11 +385,12 @@ describe("the prior and #558's per-host speeds", () => {
     expect(eta.hostServiceMs(MODEL, "host-x", "cpu", Date.now(), 0.5)).toBe(Math.round(0.1 * work));
   });
 
-  test("a timed-out call is a sample for its host as well as its class", () => {
+  test("a timed-out call is a sample for its class (a lower bound for admission), not for its host's own speed (run 8)", () => {
     eta.serviceTimes.clear();
     eta.agentServiceTimes.clear();
     for (let i = 0; i < 3; i++) eta.noteTimedOutCall(MODEL, fra.peerId, Date.now() - 180_000, JSON.stringify(tutorial()));
-    expect(eta.agentServiceTimes.speed(MODEL, fra.peerId)).toBeGreaterThan(0.5);
-    eta.agentServiceTimes.clear();
+    expect(eta.serviceTimes.speed(MODEL, "cpu")).toBeGreaterThan(0.5);
+    expect(eta.agentServiceTimes.speed(MODEL, fra.peerId)).toBeNull();
+    eta.serviceTimes.clear();
   });
 });
