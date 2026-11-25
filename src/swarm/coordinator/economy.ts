@@ -6,7 +6,7 @@
  */
 import { randomInt } from "node:crypto";
 import type { PaymentIntent, PriceEpochRecord, ResourceClass } from "../../common/types.js";
-import { cSatsToMsat, inferenceReserveMsat, reserveMsat, WORK_PROMPT_TOKEN_ALLOWANCE } from "../../economy/job-pricing.js";
+import { CLOUD_PROMPT_BYTES_PER_TOKEN, cSatsToMsat, inferenceReserveMsat, reserveMsat, WORK_PROMPT_TOKEN_ALLOWANCE } from "../../economy/job-pricing.js";
 import { paramsB } from "../../inference-api/auto-route.js";
 import { configureCloudCatalog } from "../../cloud-host/catalog.js";
 import { configureCloudPricing, modelTokenPrice } from "../../economy/cloud-pricing.js";
@@ -74,6 +74,8 @@ export function subtaskReserveMsat(resourceClass: ResourceClass, taskClass: Comp
  * out); the power floor is the requested class's (every class for "any") at its top tier for the
  * work those tokens take on a slow host there, at most the call's timeout: the most it can be billed
  * for (job-pricing.ts expectedWorkMs). `maxCSats` (the buyer's ceiling) caps it.
+ * A cloud model (its own token price) holds its real worst case instead: the prompt at
+ * CLOUD_PROMPT_BYTES_PER_TOKEN + the template allowance, and max_tokens + OUTPUT_TOKEN_ALLOWANCE out.
  */
 export function inferenceCallReserve(input: { model: string; taskClass: ComputeClassId | "any"; timeoutMs: number; inputBytes: number; maxTokens: number; maxCSats?: number }) {
   const classes = (input.taskClass === "any" ? Object.keys(rateOracleConfig.computeClasses) : [input.taskClass]) as ComputeClassId[];
@@ -82,7 +84,7 @@ export function inferenceCallReserve(input: { model: string; taskClass: ComputeC
     paramsB: paramsB(input.model),
     ...(own ? { price: own } : {}),
     btcUsd: mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD,
-    promptTokensMax: Math.max(0, input.inputBytes) + PROMPT_TOKEN_ALLOWANCE,
+    promptTokensMax: own ? Math.ceil(Math.max(0, input.inputBytes) / CLOUD_PROMPT_BYTES_PER_TOKEN) + WORK_PROMPT_TOKEN_ALLOWANCE : Math.max(0, input.inputBytes) + PROMPT_TOKEN_ALLOWANCE,
     outputTokensMax: Math.max(0, input.maxTokens) + OUTPUT_TOKEN_ALLOWANCE,
     // The power floor's seconds: the work this many tokens take on a slow host of each class (C8).
     workPromptTokensMax: Math.max(0, input.inputBytes) + WORK_PROMPT_TOKEN_ALLOWANCE,
