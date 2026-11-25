@@ -829,6 +829,8 @@ const chatCapacity = createChatCapacityDirectory({
   allowed: (url) => coordinatorUrlAllowed(url, COORDINATOR_URL_POLICY),
   serviceToken: PORTAL_SERVICE_TOKEN,
   ...chatCapacityOptionsFromEnv(),
+  // Run 10: a coordinator_choice line per network call (each coordinator, its free hosts, the rule).
+  log: app.log,
 });
 const chatRouteDeps = { PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, everyCoordinatorUrl, getCurrentUser, store, chatCapacity, ownMachineModels: (userId: string) => ownMachineModels({ PORTAL_SERVICE_TOKEN, EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal: everyCoordinatorUrl, store }, userId) };
 export type ChatApiRoutesDeps = typeof chatRouteDeps;

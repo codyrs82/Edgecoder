@@ -246,9 +246,9 @@ describe("locality", () => {
     const busy = chooseByLatency([cand({ url: US, free: 9, rttMs: 2, freeRegions: ["iad"] }), cand({ url: EU, free: 0, rttMs: 99, freeRegions: ["lhr"] })], US, POLICY, { clientRegion: "lhr" });
     expect(busy.rule).not.toBe("locality");
     expect(busy.chosen).toBe("coordinator.example.com");
-    // lhr vs ams (~370 km): under the 700 km margin.
+    // Run 10: lhr vs ams (~370 km), both near the buyer: the nearest free host takes it.
     const close = chooseByLatency([cand({ url: US, free: 9, rttMs: 2, freeRegions: ["ams"] }), cand({ url: EU, free: 2, rttMs: 2, freeRegions: ["lhr"] })], US, POLICY, { clientRegion: "lhr" });
-    expect(close.rule).not.toBe("locality");
+    expect(close).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "locality" });
   });
 
   it("is not compared without the buyer's region, without every free coordinator's regions, or with the margin at 0", () => {
@@ -295,13 +295,13 @@ describe("locality under load", () => {
     expect(c.candidates.map((x) => [x.queueMs, x.expectedMs])).toEqual([[0, 175], [0, 115]]);
     // End to end with the same 4 s service: US 7 + 0 (gru host, 0 km) + 4,000; EU 100 + 135 (lhr host,
     // 9,459 km) + 4,000. The agent round trip is in the service time, so it is not added again.
-    expect(c.reason).toMatch(/^free host nearest the buyer \(gru\): 0 km vs 9,\d{3} km; coordinator-eu\.example\.com not clearly faster end to end \(expected 4235 ms vs 4007 ms, hosts lhr 4000 ms vs gru 4000 ms\)$/);
+    expect(c.reason).toMatch(/^free host nearest the buyer \(gru\): 0 km vs 9,\d{3} km; coordinator-eu\.example\.com not clearly faster end to end \(expected 4235 ms vs 4007 ms, choice-estimate hosts lhr ~4000 ms vs gru ~4000 ms\)$/);
   });
 
   it("keeps the nearest when no service time is reported (both get the default)", () => {
     const c = chooseByLatency([usRun4({ serviceMs: null }), euRun4({ serviceMs: null })], US, POLICY, { clientRegion: "gru" });
     expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
-    expect(c.reason).toMatch(/expected 15235 ms vs 15007 ms, hosts lhr vs gru\)/);
+    expect(c.reason).toMatch(/expected 15235 ms vs 15007 ms, choice-estimate hosts lhr vs gru\)/);
   });
 
   it("also holds when the EU was the load pick: the buyer goes to the free host 0 km away", () => {
@@ -309,25 +309,24 @@ describe("locality under load", () => {
     expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
   });
 
-  it("moves when the other coordinator is clearly faster end to end", () => {
-    // The model takes 9 s on the US hosts and 3 s on the EU ones: 9,007 vs 3,235 ms.
+  it("run 10: a free host near the buyer stays even when another coordinator looks faster end to end", () => {
+    // The model takes 9 s on the US hosts and 3 s on the EU ones (9,007 vs 3,235 ms): run 9 moved it; now the gru host keeps it.
     const c = chooseByLatency([usRun4({ serviceMs: 9_000 }), euRun4({ serviceMs: 3_000 })], US, POLICY, { clientRegion: "gru" });
-    expect(c).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "latency" });
-    expect(c.reason).toBe("clearly faster end to end than the free host nearest the buyer (gru, 0 km on coordinator.example.com): expected 3235 ms vs 9007 ms, hosts lhr 3000 ms vs gru 9000 ms");
+    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
     // 4,007 vs 3,735 ms: 272 ms is under 15 % of 4,007 (601 ms), the nearest stays.
     const close = chooseByLatency([usRun4({ serviceMs: 4_000 }), euRun4({ serviceMs: 3_500 })], US, POLICY, { clientRegion: "gru" });
     expect(close).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
   });
 
-  it("a locality move is also checked end to end", () => {
-    // London buyer, US the load pick: the EU free host is in London, but the model is far slower there.
+  it("run 10: a locality move to a free host near the buyer is not undone by end to end", () => {
+    // London buyer, US the load pick: the EU free host is in London; the model is slower there, it still goes there.
     const c = chooseByLatency(
       [cand({ url: US, free: 9, agents: 9, rttMs: 2, serviceMs: 2_000, freeRegions: ["iad"] }), cand({ url: EU, free: 2, rttMs: 99, serviceMs: 12_000, freeRegions: ["lhr"] })],
       US,
       POLICY,
       { clientRegion: "lhr" },
     );
-    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "latency" });
+    expect(c).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "locality" });
   });
 
   it("a nearest coordinator with no free slot does not hold: the call overflows", () => {
@@ -344,7 +343,7 @@ describe("locality under load", () => {
     });
     const p = await dir.pick({ kind: "network", model: M }, [], { clientRegion: "gru" });
     expect(p).toMatchObject({ url: US, choice: { rule: "locality" } });
-    expect(p.choice?.reason).toMatch(/not clearly faster end to end \(expected 4235 ms vs 4007 ms, hosts lhr 4000 ms vs gru 4000 ms\)/);
+    expect(p.choice?.reason).toMatch(/not clearly faster end to end \(expected 4235 ms vs 4007 ms, choice-estimate hosts lhr ~4000 ms vs gru ~4000 ms\)/);
   });
 });
 
@@ -373,7 +372,7 @@ describe("run 5: the nearest free host, scored by its own numbers", () => {
   ])("keeps a %s buyer on the free host in its region (%s went to the EU)", (region) => {
     const c = chooseByLatency([us(), eu()], US, POLICY, { clientRegion: region, portalRegion: "ord" });
     expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
-    expect(c.reason).toMatch(new RegExp(`hosts (lhr|fra) 1200 ms vs ${region} 1200 ms\\)$`));
+    expect(c.reason).toMatch(new RegExp(`choice-estimate hosts (lhr|fra) ~1200 ms vs ${region} ~1200 ms\\)$`));
   });
 
   it("keeps a London buyer on the London host (inf-1795600195510-5eb5428e went to US iad and timed out)", () => {
@@ -390,12 +389,14 @@ describe("run 5: the nearest free host, scored by its own numbers", () => {
     }
   });
 
-  it("still moves when the far coordinator's host is clearly faster", () => {
+  it("run 10: keeps the free sin host even when the far coordinator's host is clearly faster", () => {
     // The sin host takes 3 s for the reference call (far from its coordinator, or slower): the EU's 1.2 s
     // plus 98 ms and the sin <-> fra trip is faster by more than 15 %.
     const c = chooseByLatency([us({ freeHosts: [...hosts(["iad", "lax"]), { region: "sin", free: 2, rttMs: 230, serviceMs: 3_000 }] }), eu()], US, POLICY, { clientRegion: "sin" });
-    expect(c).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "latency" });
-    expect(c.reason).toMatch(/hosts (lhr|fra) 1200 ms vs sin 3000 ms$/);
+    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
+    // A buyer with no free host near it still goes by end to end: jnb (sin and fra both far).
+    const far = chooseByLatency([us({ freeHosts: [{ region: "sin", free: 2, rttMs: 230, serviceMs: 9_000 }] }), eu()], US, POLICY, { clientRegion: "jnb" });
+    expect(far.chosen).toBe("coordinator-eu.example.com");
   });
 
   it("a host without a reference time compares by round trips only", () => {
@@ -500,16 +501,16 @@ describe("run 6: hosts compared by their time for this call", () => {
     const cpu = host("lhr", 0.5, "prior", "cpu");
     const c = chooseByLatency([us([gpu]), eu([cpu])], EU, POLICY, { clientRegion: "lhr", call: big });
     expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "latency" });
-    expect(c.reason).toContain(`hosts iad ${hostCallMs(gpu, big)} ms (gpu, prior) vs lhr ${hostCallMs(cpu, big)} ms (cpu, prior)`);
+    expect(c.reason).toContain(`choice-estimate hosts iad ~${hostCallMs(gpu, big)} ms (gpu, prior) vs lhr ~${hostCallMs(cpu, big)} ms (cpu, prior)`);
     expect(hostCallMs(cpu, big)!).toBeGreaterThan(10 * hostCallMs(gpu, big)!);
   });
 
-  it("a same-class host measured much faster on its own calls can still win", () => {
+  it("run 10: a same-class host measured much faster no longer beats a free host near the buyer", () => {
     const mid = { paramsB: 1.5, promptTokens: 2_000, outputTokens: 1_000 };
     // Run 7: both measurements fresh (seconds old).
     const fresh = (h: FreeHost): FreeHost => ({ ...h, speedAgeMs: 30_000 });
     const c = chooseByLatency([us([fresh(host("iad", 0.15, "host"))]), eu([fresh(host("lhr", 0.6, "host"))])], EU, POLICY, { clientRegion: "lhr", call: mid });
-    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "latency" });
+    expect(c).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "locality" });
   });
 
   it("which hosts count as equally fast", () => {
@@ -540,7 +541,7 @@ describe("run 6: hosts compared by their time for this call", () => {
     const iadMs = hostCallMs({ computeClass: "cpu", speed: 0.337 }, size)!;
     const lhrMs = hostCallMs({ computeClass: "cpu", speed: 0.5 }, size)!;
     expect(lhrMs).toBeLessThan(5_000);
-    expect(pick.choice?.reason).toContain(`hosts iad ${iadMs} ms (cpu, class) vs lhr ${lhrMs} ms (cpu, prior)`);
+    expect(pick.choice?.reason).toContain(`choice-estimate hosts iad ~${iadMs} ms (cpu, class) vs lhr ~${lhrMs} ms (cpu, prior)`);
   });
 
   it("a /v1 call's size: prompt tokens as the coordinator counts them, and max_tokens when set", () => {
@@ -571,9 +572,9 @@ describe("run 7: only fresh measured speeds tell two hosts of one class apart", 
   const LHR_THROTTLED = 0.46;
 
   it("keeps the lhr buyer on lhr once lhr's throttled measurement is no longer fresh (inf-1795614734673-bec45a48)", () => {
-    // Fresh on both sides (as #562 judged it): iad wins, as before.
+    // Fresh on both sides (as #562 judged it, iad won): run 10, the free lhr host takes it anyway.
     const before = chooseByLatency([us([host("iad", IAD, 20_000)]), eu([host("lhr", LHR_THROTTLED, 60_000)])], US, POLICY, { clientRegion: "lhr", call: SMALL });
-    expect(before).toMatchObject({ chosen: "coordinator.example.com", rule: "latency" });
+    expect(before).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "locality" });
     // lhr's measurement is 6 minutes old (it got no calls since): distance decides.
     const after = chooseByLatency([us([host("iad", IAD, 20_000)]), eu([host("lhr", LHR_THROTTLED, 360_000)])], US, POLICY, { clientRegion: "lhr", call: SMALL });
     expect(after).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "locality" });
@@ -588,9 +589,10 @@ describe("run 7: only fresh measured speeds tell two hosts of one class apart", 
     expect(c).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "locality" });
   });
 
-  it("a genuinely slower host with fresh measurements still loses", () => {
+  it("a genuinely slower host with fresh measurements still loses, when no free host is near the buyer", () => {
     const mid = { paramsB: 1.5, promptTokens: 2_000, outputTokens: 1_000 };
-    const c = chooseByLatency([us([host("iad", 0.15, 30_000)]), eu([host("lhr", 0.6, 45_000)])], EU, POLICY, { clientRegion: "lhr", call: mid });
+    // A mad buyer (~1,260 km from lhr): no free host within the margin, so end to end decides.
+    const c = chooseByLatency([us([host("iad", 0.15, 30_000)]), eu([host("lhr", 0.6, 45_000)])], EU, POLICY, { clientRegion: "mad", call: mid });
     expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "latency" });
   });
 
@@ -617,7 +619,7 @@ describe("run 7: only fresh measured speeds tell two hosts of one class apart", 
         [EU]: { reachable: true, rttMs: 4, agentModels: [M15], modelLoad: load([{ region: "lhr", free: 2, rttMs: 10, computeClass: "cpu", speed: LHR_THROTTLED, speedFrom: "host", speedAgeMs: lhrAgeMs }]), pickupP90Ms: 200, callP50Ms: 1_000 },
       };
       const dir = createChatCapacityDirectory({ candidates: async () => [US, EU], allowed: () => true, ttlMs: 15_000, now: () => 1_000_000, probe: vi.fn(async (url: string) => reports[url]), latency: POLICY, portalRegion: "lhr" });
-      return dir.pick({ kind: "network", model: M15 }, [], { clientRegion: "lhr", call: { promptTokens: 20, maxTokens: 8 } });
+      return dir.pick({ kind: "network", model: M15 }, [], { clientRegion: "mad", call: { promptTokens: 2_000, maxTokens: 1_000 } });
     };
     expect((await pickWith(60_000)).url).toBe(US);
     expect((await pickWith(360_000)).url).toBe(EU);
@@ -744,5 +746,97 @@ describe("run 9: free capacity judged by the reported free hosts", () => {
     // inf-1795635566692-0e23c3c8: syd buyer, the US's nearest free host nrt (7,8xx km): no near free host, so the load rule.
     const far = chooseByLatency([usWaiting({ free: 2, waiting: 1, freeHosts: [host("nrt")] }), euFree({ free: 0, freeHosts: undefined })], US, POLICY, { clientRegion: "syd" });
     expect(far).toMatchObject({ chosen: "coordinator.example.com", rule: "load" });
+  });
+});
+
+/*
+ * Run 10 (nearest free host 63.6 %): replays of the logged choices (scratchpad netval/run10 dec.jsonl).
+ * - rule latency (17 misses): the portal found the free syd host 0 km from the buyer, then moved the call
+ *   to fra on "clearly faster end to end" from same-class measured speeds (fra ~1112 ms vs syd ~2000 ms).
+ *   A free host near the buyer now always takes the call; only a host of another class can still win.
+ * - rule load / overflow: the US report did not list the syd host as free (the coordinator held it back:
+ *   one slot busy and no pull for 44-102 s), so the portal saw no free host near the buyer. When a
+ *   coordinator does report one, it wins whatever its free count, the load pick or the queue estimates say.
+ */
+describe("run 10: a free host near the buyer always takes the call", () => {
+  const cpu = (region: string, speed: number, free = 1): FreeHost => ({ region, free, rttMs: 40, computeClass: "cpu", speed, speedFrom: "host", speedAgeMs: 30_000 });
+  const CALL = { paramsB: 1.5, promptTokens: 300, outputTokens: 64 };
+  const US_FREE = ["iad", "lax", "gru", "nrt", "sin", "jnb"];
+
+  it("inf-1795643800721-0f758b86: a syd buyer stays on the free syd host though fra was measured faster", () => {
+    const us = cand({ url: US, rttMs: 9, agentRttMs: 167, free: 13, waiting: 0, agents: 7, freeHosts: [cpu("syd", 1.0), ...US_FREE.map((r) => cpu(r, 1.0, 2))] });
+    const eu = cand({ url: EU, rttMs: 98, agentRttMs: 11, free: 1, waiting: 1, agents: 2, freeHosts: [cpu("fra", 0.55)] });
+    const c = chooseByLatency([us, eu], US, POLICY, { clientRegion: "syd", portalRegion: "ord", call: CALL });
+    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
+    expect(c.reason).toMatch(/^free host nearest the buyer \(syd\): 0 km vs 1\d,\d{3} km; /);
+    // Also when the EU was the load pick.
+    expect(chooseByLatency([us, eu], EU, POLICY, { clientRegion: "syd", call: CALL })).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
+  });
+
+  it("inf-1795644808831-ab5ecf4a: with the syd host not reported free the load rule stands; reported, it wins", () => {
+    // As logged: US free 0 (the syd host held back, not in freeHosts), EU free 1 on fra.
+    const usHeld = cand({ url: US, rttMs: 8, agentRttMs: 21, free: 0, waiting: 0, agents: 7, pickupP90Ms: 300, callP50Ms: 1_400 });
+    const eu = cand({ url: EU, rttMs: 96, agentRttMs: 12, free: 1, waiting: 0, agents: 2, freeHosts: [cpu("fra", 1.0)] });
+    expect(chooseByLatency([usHeld, eu], EU, POLICY, { clientRegion: "syd", call: CALL })).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "load" });
+    const usReported = cand({ ...usHeld, freeHosts: [cpu("syd", 1.0)] });
+    expect(chooseByLatency([usReported, eu], EU, POLICY, { clientRegion: "syd", call: CALL })).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
+  });
+
+  it("inf-1795645003691-3da32e8c: an iad buyer goes to a reported free iad host though the US count is -2 and the EU looks faster", () => {
+    const us = cand({ url: US, rttMs: 7, agentRttMs: 180, free: -2, waiting: 2, agents: 7, pickupP90Ms: 400, callP50Ms: 2_000, freeHosts: [cpu("iad", 1.0)] });
+    const eu = cand({ url: EU, rttMs: 98, agentRttMs: 10, free: 2, waiting: 0, agents: 2, freeHosts: [cpu("lhr", 0.5), cpu("fra", 0.5)] });
+    const c = chooseByLatency([us, eu], EU, POLICY, { clientRegion: "iad", call: CALL });
+    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
+  });
+
+  it("inf-1795644948347-ad5d93c5 (overflow) and every-coordinator-busy cases are unchanged: no free host near the buyer anywhere", () => {
+    const us = cand({ url: US, rttMs: 7, agentRttMs: 181, free: 0, waiting: 0, agents: 7, pickupP90Ms: 186, callP50Ms: 3_000 });
+    const eu = cand({ url: EU, rttMs: 94, agentRttMs: 11, free: 0, waiting: 0, agents: 2, pickupP90Ms: 44, callP50Ms: 2_500 });
+    const c = chooseByLatency([us, eu], US, POLICY, { clientRegion: "syd", call: CALL });
+    expect(c.rule).toBe("overflow");
+  });
+
+  it("a host of another class can still win a large call against a near free CPU host", () => {
+    const big = { paramsB: 1.5, promptTokens: 6_000, outputTokens: 2_000 };
+    const gpu: FreeHost = { region: "iad", free: 1, rttMs: 20, computeClass: "gpu", speed: 1, speedFrom: "prior" };
+    const c = chooseByLatency([cand({ url: US, rttMs: 7, free: 1, freeHosts: [gpu] }), cand({ url: EU, rttMs: 90, free: 1, freeHosts: [cpu("lhr", 1.0)] })], EU, POLICY, { clientRegion: "lhr", call: big });
+    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "latency" });
+    expect(c.reason).toContain("on another class");
+  });
+
+  it("host times in the record are labelled as coordinator-choice estimates (inf-1795642903097-65a0dde5 read 'jnb 44423 ms')", () => {
+    const us = cand({ url: US, rttMs: 16, free: 11, freeHosts: [{ ...cpu("jnb", 0.3), speedFrom: "class" }] });
+    const eu = cand({ url: EU, rttMs: 102, free: 4, freeHosts: [{ ...cpu("fra", 0.18), speedFrom: "class" }] });
+    const c = chooseByLatency([us, eu], US, POLICY, { clientRegion: "jnb", call: { paramsB: 1.5, promptTokens: 4_500, outputTokens: 300 } });
+    expect(c.reason).toMatch(/choice-estimate hosts fra ~\d+ ms \(cpu, class\) vs jnb ~\d+ ms \(cpu, class\)/);
+  });
+
+  it("logs one coordinator_choice line with every coordinator, its free hosts, the open ones, the nearest free km and the rule", async () => {
+    const M15 = "qwen2.5-coder:1.5b";
+    const load = (free: number, waiting: number, freeHosts?: unknown[]) => ({ [M15]: { agents: 7, idle: 0, free, waiting, agentRttMs: 60, serviceMs: 1_000, ...(freeHosts ? { freeHosts } : {}) } });
+    const reports: Record<string, CapacityReport> = {
+      [US]: { reachable: true, rttMs: 8, agentModels: [M15], modelLoad: load(1, 2, [{ region: "syd", free: 1, computeClass: "cpu", speed: 1, speedFrom: "prior" }]), pickupP90Ms: 200, callP50Ms: 1_000 },
+      [EU]: { reachable: true, rttMs: 96, agentModels: [M15], modelLoad: load(2, 0, [{ region: "fra", free: 2, computeClass: "cpu", speed: 1, speedFrom: "prior" }]), pickupP90Ms: 200, callP50Ms: 1_000 },
+    };
+    const lines: Array<{ obj: Record<string, unknown>; msg: string }> = [];
+    const dir = createChatCapacityDirectory({ candidates: async () => [US, EU], allowed: () => true, ttlMs: 15_000, now: () => 1_000_000, probe: vi.fn(async (url: string) => reports[url]), latency: POLICY, portalRegion: "ord", log: { info: (obj, msg) => void lines.push({ obj: obj as Record<string, unknown>, msg }) } });
+    const p = await dir.pick({ kind: "network", model: M15 }, [], { clientRegion: "syd", call: { promptTokens: 100, maxTokens: 32 } });
+    expect(p.url).toBe(US);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].msg).toBe("coordinator_choice");
+    expect(lines[0].obj.coordinatorChoice).toMatchObject({
+      model: M15,
+      clientRegion: "syd",
+      chosen: "coordinator.example.com",
+      rule: "locality",
+      considered: [
+        { coordinator: "coordinator.example.com", free: -1, waiting: 2, freeHosts: ["syd:1"], openHosts: ["syd"], nearestFreeKm: 0, sentFor: [] },
+        { coordinator: "coordinator-eu.example.com", free: 2, waiting: 0, freeHosts: ["fra:2"], openHosts: ["fra"], nearestFreeKm: expect.any(Number) },
+      ],
+    });
+    // The second call: the syd host is taken by the call just sent; the record says so.
+    await dir.pick({ kind: "network", model: M15 }, [], { clientRegion: "syd", call: { promptTokens: 100, maxTokens: 32 } });
+    const second = (lines[1].obj.coordinatorChoice as { considered: Array<{ openHosts: string[]; sentFor: unknown[] }> }).considered[0];
+    expect(second).toMatchObject({ openHosts: [], sentFor: ["syd"] });
   });
 });
