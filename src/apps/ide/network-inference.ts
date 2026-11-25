@@ -159,6 +159,12 @@ export interface NetworkTarget {
   clientRegion?: string;
   /** The portal's coordinator choice for this call (kept on its routing decision; portal service token only). */
   coordinatorChoice?: CoordinatorChoice;
+  /**
+   * The caller sends a refused call to another coordinator itself (the portal): a coordinator_draining
+   * refusal is thrown at once as CoordinatorDrainingError (with the peer it names, if any) instead of
+   * being waited out and asked again here. Nothing was reserved or streamed for it.
+   */
+  drainFailover?: boolean;
 }
 
 /**
@@ -198,6 +204,16 @@ export function noRouteInfo(json: Record<string, unknown>): NetworkFailureInfo {
 export class RouteElsewhereError extends NetworkInferenceError {
   constructor(readonly url: string, readonly routing: Record<string, unknown> | undefined) {
     super(`The best place for this request is on another coordinator (${url}).`, 409);
+  }
+}
+
+/**
+ * The coordinator is restarting for an update and refused the call before anything was reserved
+ * (503 coordinator_draining, `charged: false`). `peerUrl`: the coordinator it names to go to now.
+ */
+export class CoordinatorDrainingError extends NetworkInferenceError {
+  constructor(retryAfterSec: number, readonly peerUrl: string | undefined) {
+    super("The coordinator is restarting for an update. Nothing was charged; try again in a few seconds.", 503, retryAfterSec);
   }
 }
 
@@ -265,11 +281,11 @@ export function drainRetryWaitMs(json: Record<string, unknown>): number {
   const ms = typeof json.retryAfterMs === "number" && Number.isFinite(json.retryAfterMs) ? json.retryAfterMs : 2_000;
   return Math.min(DRAIN_RETRY_MAX_WAIT_MS, Math.max(250, ms));
 }
-async function submitRetryingDrain(d: NetworkDeps, body: unknown, signal?: AbortSignal, sleep = (ms: number) => new Promise((r) => setTimeout(r, ms)), followPeer = false) {
+async function submitRetryingDrain(d: NetworkDeps, body: unknown, signal?: AbortSignal, sleep = (ms: number) => new Promise((r) => setTimeout(r, ms)), followPeer = false, failover = false) {
   const first = await call(d, "POST", "/inference/submit", body, signal);
   if (!isDrainingAnswer(first) || signal?.aborted) return first;
-  // The caller will go to the named peer instead of waiting for this one.
-  if (followPeer && typeof first.json.coordinatorUrl === "string") return first;
+  // The caller will go to the named peer (or, failing over itself, to another one) instead of waiting for this one.
+  if (failover || (followPeer && typeof first.json.coordinatorUrl === "string")) return first;
   await sleep(drainRetryWaitMs(first.json));
   return call(d, "POST", "/inference/submit", body, signal);
 }
@@ -320,7 +336,10 @@ async function* streamSubmitted(
     ...(req.coordinatorChoice ? { coordinatorChoice: req.coordinatorChoice } : {}),
   };
   // A draining coordinator that names a peer: a caller that allows redirects goes there now (#524 test 6).
-  const sub = await submitRetryingDrain(d, submitBody, signal, undefined, Boolean(req.routeRedirect));
+  const sub = await submitRetryingDrain(d, submitBody, signal, undefined, Boolean(req.routeRedirect), Boolean(req.drainFailover));
+  const drainRetryAfterSec = () => Math.ceil(drainRetryWaitMs(sub.json) / 1000);
+  // The caller goes elsewhere itself: nothing was set aside on this coordinator (refused in its onRequest gate).
+  if (req.drainFailover && isDrainingAnswer(sub)) throw new CoordinatorDrainingError(drainRetryAfterSec(), typeof sub.json.coordinatorUrl === "string" ? sub.json.coordinatorUrl : undefined);
   if (req.routeRedirect && isDrainingAnswer(sub) && typeof sub.json.coordinatorUrl === "string") throw new RouteElsewhereError(sub.json.coordinatorUrl, undefined);
   if (sub.status !== 200) {
     const err = String(sub.json.error ?? `HTTP ${sub.status}`);
@@ -355,7 +374,7 @@ async function* streamSubmitted(
       err === "insufficient_credits" ? { code: err, ...(typeof sub.json.neededCSats === "number" ? { neededCSats: sub.json.neededCSats } : {}), ...(req.computeClass && req.computeClass !== "any" ? { computeClass: req.computeClass } : {}) } :
       err === "no_agent_in_class" || err === "no_agent_has_model" ? { code: err, ...(req.computeClass && req.computeClass !== "any" ? { computeClass: req.computeClass } : {}) } :
       undefined;
-    if (err === "coordinator_draining") throw new NetworkInferenceError(msg, 503, Math.ceil(drainRetryWaitMs(sub.json) / 1000));
+    if (err === "coordinator_draining") throw new CoordinatorDrainingError(drainRetryAfterSec(), typeof sub.json.coordinatorUrl === "string" ? sub.json.coordinatorUrl : undefined);
     throw new NetworkInferenceError(msg, sub.status === 402 ? 402 : sub.status === 409 || sub.status === 404 ? 404 : 502, undefined, info);
   }
   const subtaskId = String(sub.json.subtaskId);

@@ -336,7 +336,10 @@ export function registerChatApiRoutes(
           throw err;
         }
       };
-      pieces = networkBackend({ ...pinned, transport }, { ...networkTargetFor(compute), ...(choice ? { coordinatorChoice: choice } : {}) })({ messages }, ac.signal);
+      // A coordinator restarting for an update refuses before reserving anything: with another one to
+      // ask, the refusal comes back at once and the loop sends the chat there (no wait on this one).
+      const drainFailover = compute.target === "network" && known > 1 && tried.length < CHAT_MAX_COORDINATOR_ATTEMPTS;
+      pieces = networkBackend({ ...pinned, transport }, { ...networkTargetFor(compute), ...(choice ? { coordinatorChoice: choice } : {}), ...(drainFailover ? { drainFailover } : {}) })({ messages }, ac.signal);
       // Wait for the first piece so a refusal (no machine, not enough cSats, lease ended) is a plain HTTP error.
       try {
         first = await pieces.next();

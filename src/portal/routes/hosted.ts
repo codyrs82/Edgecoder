@@ -12,7 +12,7 @@
  * editing for signed-in users.
  */
 
-import { createChatCapacityDirectory, type ChatCapacityDirectory } from "../chat-capacity.js";
+import { createChatCapacityDirectory, type ChatCapacityDirectory, type ChatNeed } from "../chat-capacity.js";
 import { clientRegionOf, type CoordinatorChoice } from "../../common/coordinator-choice.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -29,7 +29,7 @@ import {
   parseNetworkModel,
   type NetworkDeps,
 } from "../../apps/ide/network-inference.js";
-import { autoBackend, coordinatorAutoBackend, networkBackend, redirectingNetworkBackend } from "../../inference-api/backends.js";
+import { autoBackend, coordinatorAutoBackend, drainFailoverBackend, networkBackend, redirectingNetworkBackend, type CoordinatorDraining } from "../../inference-api/backends.js";
 import { AUTO_MODEL_ID, isUnpinnedModel, planRoutes, routeInputsFrom, sizeWorkload } from "../../inference-api/auto-route.js";
 import { apiKeyOf, registerCompatRoutes, wholeKeepaliveFromEnv, type WholeKeepalive } from "../../inference-api/routes.js";
 import type { PortalStore } from "../store.js";
@@ -88,6 +88,26 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
     const { url, choice } = await capacity.pick({ kind: "network", model: target.model, computeClass: target.computeClass }, [], { clientRegion }).catch(() => ({ url: null, choice: undefined }));
     return url ? { deps: pinnedDeps(url, accountId), url, ...(choice ? { choice } : {}) } : { deps: networkFor(accountId) };
   };
+  /**
+   * Where a call a restarting coordinator (`from`) refused goes now: the peer its refusal names when
+   * that is a vetted coordinator, else the best other one for `need` (network calls), else any other
+   * vetted coordinator. Null when there is none. `from` is passed over for a while either way.
+   */
+  const drainPeer = async (from: string | undefined, refusal: CoordinatorDraining, need: ChatNeed | null, clientRegion: string | null): Promise<string | null> => {
+    const self = from?.replace(/\/+$/, "");
+    if (self) capacity.markFailed(self);
+    const named = refusal.peerUrl?.replace(/\/+$/, "");
+    if (named && named !== self && (await capacity.isKnown(named).catch(() => false))) return named;
+    if (need) {
+      const { url } = await capacity.pick(need, self ? [self] : [], { clientRegion }).catch(() => ({ url: null }));
+      if (url && url !== self) return url;
+    }
+    for (const raw of await deps.discoverCoordinatorUrlsForPortal().catch(() => [] as string[])) {
+      const url = raw.replace(/\/+$/, "");
+      if (url && url !== self && (await capacity.isKnown(url).catch(() => false))) return url;
+    }
+    return null;
+  };
   // Balance, reservations and the chat compute picker for signed-in users.
   registerComputeRoutes(app, deps);
 
@@ -140,7 +160,9 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
         });
         // Network calls: the coordinator picks model, class and agent (best-fit routing).
         let autoChoice: CoordinatorChoice | undefined;
-        const backend = coordinatorAutoBackend({
+        /** The coordinator the routed call was last sent to (a refusal from it while restarting goes to a peer). */
+        let autoUrl: string | undefined;
+        const routed = coordinatorAutoBackend({
           useClientSide: async (req) => {
             const first = planRoutes(sizeWorkload(req), await inputs(), "auto")[0];
             return !!first && first.placement !== "network";
@@ -152,15 +174,23 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
             return r.url;
           },
           allowed: (url) => capacity.isKnown(url),
-          run: (url, routeRedirect) =>
-            networkBackend(portalNetworkDeps({ PORTAL_SERVICE_TOKEN: deps.PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, ctx.accountId), {
+          run: (url, routeRedirect) => {
+            autoUrl = url;
+            return networkBackend(pinnedDeps(url, ctx.accountId), {
               model: AUTO_MODEL_ID,
               computeClass: "any",
               routeRedirect,
+              drainFailover: true,
               ...(ctx.clientRegion ? { clientRegion: ctx.clientRegion } : {}),
               // The portal's choice goes with the call it made (not with a route_elsewhere follow-up).
               ...(autoChoice && routeRedirect ? { coordinatorChoice: autoChoice } : {}),
-            }),
+            });
+          },
+        });
+        // Refused by a coordinator restarting for an update (nothing reserved): once, at once, on a peer.
+        const backend = drainFailoverBackend(routed, async (refusal) => {
+          const peer = await drainPeer(autoUrl, refusal, null, ctx.clientRegion);
+          return peer ? networkBackend(pinnedDeps(peer, ctx.accountId), { model: AUTO_MODEL_ID, computeClass: "any", drainFailover: true, ...(ctx.clientRegion ? { clientRegion: ctx.clientRegion } : {}) }) : null;
         });
         return { backend, model: AUTO_MODEL_ID };
       }
@@ -169,12 +199,33 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
       const placed = await networkForCall(ctx.accountId, target, ctx.clientRegion);
       const region = ctx.clientRegion ? { clientRegion: ctx.clientRegion } : {};
       // #526: a named network call on a chosen coordinator may be sent on to a peer with a free slot for it (once).
+      // A plain network call refused by a coordinator restarting for an update (nothing reserved, nothing
+      // streamed) goes once, at once, to a peer; a second refusal is a 503 with Retry-After.
+      const need: ChatNeed = { kind: "network", model: target.model, computeClass: target.computeClass };
+      const onPeer = (url: string) => networkBackend(pinnedDeps(url, ctx.accountId), { ...target, ...region, drainFailover: true });
       if (placed.url && !target.target && !target.reservationId) {
         const first = placed.url;
-        const backend = redirectingNetworkBackend({
+        let sentTo = first;
+        const redirecting = redirectingNetworkBackend({
           url: first,
           allowed: (url) => capacity.isKnown(url),
-          run: (url, routeRedirect) => networkBackend(url === first ? placed.deps : pinnedDeps(url, ctx.accountId), { ...target, ...region, routeRedirect, ...(placed.choice && url === first ? { coordinatorChoice: placed.choice } : {}) }),
+          run: (url, routeRedirect) => {
+            sentTo = url;
+            return networkBackend(url === first ? placed.deps : pinnedDeps(url, ctx.accountId), { ...target, ...region, routeRedirect, drainFailover: true, ...(placed.choice && url === first ? { coordinatorChoice: placed.choice } : {}) });
+          },
+        });
+        const backend = drainFailoverBackend(redirecting, async (refusal) => {
+          const peer = await drainPeer(sentTo, refusal, need, ctx.clientRegion);
+          return peer ? onPeer(peer) : null;
+        });
+        return { backend, model: model! };
+      }
+      if (!target.target && !target.reservationId) {
+        // No coordinator reported room for it: the default one (the first discovered) is asked.
+        const backend = drainFailoverBackend(networkBackend(placed.deps, { ...target, ...region, drainFailover: true }), async (refusal) => {
+          const [from] = await deps.discoverCoordinatorUrlsForPortal().catch(() => [] as string[]);
+          const peer = await drainPeer(from, refusal, need, ctx.clientRegion);
+          return peer ? onPeer(peer) : null;
         });
         return { backend, model: model! };
       }
