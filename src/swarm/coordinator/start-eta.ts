@@ -93,6 +93,7 @@ import { agentContextWindow, agentLoadReport, freeModelSlots } from "./dispatch.
 import { effectiveHardware } from "./economy.js";
 import { agentUnavailable, memoryAdmits } from "./memory-admission.js";
 import { agentFlapping } from "./agent-liveness.js";
+import { coordinatorDrain } from "./drain.js";
 import { agentStolenAt, stolenDuring } from "./host-steal.js";
 
 /** Run 7: a speed sample's weight halves every this many ms (0: every sample in the window weighs the same). */
@@ -836,6 +837,10 @@ export function clearHeldCounts(): void {
  */
 export function agentHeldBack(agentId: string, held: number, nowMs = Date.now()): boolean {
   if (agentStolenRecently(agentId, nowMs)) return true;
+  // Draining (a planned restart): agents stop pulling here on purpose and take new work from a peer
+  // while they finish what they hold here (src/mesh/drain-failover.ts). No pull is not a stalled
+  // host then, and nothing taken back could be claimed here again anyway.
+  if (coordinatorDrain.draining) return false;
   const load = agentLoadReport(agentId);
   if (!load || load.slots - held <= 0) return false;
   return nowMs - Math.max(load.atMs, heldUnchangedSince(agentId, held, nowMs)) > PULL_STALE_MS;

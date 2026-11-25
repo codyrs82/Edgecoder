@@ -23,7 +23,9 @@
  *   without `draining` is the restarted instance.
  * - returning: after another random delay (HOME_RETURN_JITTER_MS: the restarted instance gets its
  *   agents spread out, as the reconnect frame's jitter does) the worker switches back and registers
- *   at home. If that register fails as a restart failure does, it goes back to the peer and probes again.
+ *   at home, once the calls the peer gave it are done (at most HOME_RETURN_HOLD_MAX_MS; meanwhile it
+ *   takes nothing new). If that register fails as a restart failure does, it goes back to the peer
+ *   and probes again.
  *
  * Bounded: after DRAIN_AWAY_MAX_MS away the agent stops probing and stays where it is (steering
  * decides from then on, as for any other coordinator change).
@@ -36,6 +38,12 @@ export const HOME_RETURN_JITTER_MS = 3_000;
 /** No peer to go to (none answers, or the notice named none and steering is off): look again after this. */
 export const NO_PEER_RETRY_MS = 3_000;
 export const DRAIN_AWAY_MAX_MS = 10 * 60_000;
+/**
+ * Coming home while the peer's own calls still run here: the agent first lets them finish (pulling
+ * the peer with no free slot, so the peer neither hands it more nor sees an idle host that stopped
+ * pulling and takes them back, #577 agentHeldBack), for at most this long.
+ */
+export const HOME_RETURN_HOLD_MAX_MS = 60_000;
 
 export type DrainFailoverPhase = "idle" | "leaving" | "away" | "returning" | "homing";
 export type HomeProbeState = "up" | "draining" | "down";
@@ -162,6 +170,14 @@ export class DrainFailover {
 
   returnDue(nowMs = Date.now()): boolean {
     return this.phase === "returning" && nowMs >= this.dueAtMs;
+  }
+
+  /**
+   * Returning and the peer's calls (`peerCallsInFlight`) still run: take nothing new from the peer
+   * and wait, for at most HOME_RETURN_HOLD_MAX_MS after the return was due.
+   */
+  holdingForPeerCalls(peerCallsInFlight: number, nowMs = Date.now()): boolean {
+    return this.phase === "returning" && peerCallsInFlight > 0 && nowMs - this.dueAtMs < HOME_RETURN_HOLD_MAX_MS;
   }
 
   /** The worker switched back to the home and is registering there. */

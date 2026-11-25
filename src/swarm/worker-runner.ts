@@ -1310,6 +1310,11 @@ async function parseJsonBodySafe(res: { headers: Record<string, unknown>; body: 
  * to the coordinator that issued its claim (drain-failover.ts), not to whichever one is active now.
  */
 const claimIssuers = new Map<string, CoordinatorTarget>();
+/** Claims running now, per issuing coordinator URL (a drain failover comes home once the peer's are done). */
+const claimsInFlight = new Map<string, number>();
+function claimsInFlightFor(url: string | null): number {
+  return url ? (claimsInFlight.get(url) ?? 0) : 0;
+}
 function noteClaimIssuer(target: CoordinatorTarget): CoordinatorTarget {
   claimIssuers.set(target.url, target);
   if (claimIssuers.size > 16) claimIssuers.delete(claimIssuers.keys().next().value!);
@@ -1524,6 +1529,9 @@ async function stepDrainFailover(): Promise<void> {
     return;
   }
   if (home && drainFailover.returnDue(now)) {
+    // The peer's own calls first (the pull meanwhile reports no free slot, so the peer neither gives
+    // more nor takes them back as from a host that stopped pulling).
+    if (drainFailover.holdingForPeerCalls(claimsInFlightFor(drainFailover.away), now)) return;
     coordinator.set(home, "drain_return");
     registeredWithUrl = null;
     drainFailover.homing();
@@ -2433,7 +2441,9 @@ async function loop(): Promise<void> {
         // AGENT_ALLOW_RESTRICTED_MODELS: the owner lets this machine take restricted-model calls (security
         // research tier; the coordinator also needs the owner's admin-approved host entitlement).
         // Run 7: with its CPU steal (coordinator host-steal.ts).
-        const pullBody = { agentId: AGENT_ID, inferenceSlots: MAX_PARALLEL_INFERENCE, freeInferenceSlots, contextWindow: CONTEXT_WINDOW, wake: true, ...(W.AGENT_ALLOW_RESTRICTED_MODELS ? { allowRestrictedModels: true } : {}), ...(cpuSteal ? cpuSteal.report() : {}) };
+        // Coming home after a drain failover, the peer's calls still running: report no free slot (drain-failover.ts).
+        const drainReturnHold = drainFailover.holdingForPeerCalls(claimsInFlightFor(drainFailover.away));
+        const pullBody = { agentId: AGENT_ID, inferenceSlots: MAX_PARALLEL_INFERENCE, freeInferenceSlots: drainReturnHold ? 0 : freeInferenceSlots, contextWindow: CONTEXT_WINDOW, wake: true, ...(W.AGENT_ALLOW_RESTRICTED_MODELS ? { allowRestrictedModels: true } : {}), ...(cpuSteal ? cpuSteal.report() : {}) };
         if (!PULLS_FROM_COORDINATOR && !warnedNoSandbox) {
           warnedNoSandbox = true;
           console.warn(`[agent:${AGENT_ID}] SANDBOX_MODE=none: not pulling swarm tasks (install Docker and set SANDBOX_MODE=docker to contribute compute, or AGENT_INFERENCE_ONLY=1 to serve inference only)`);
@@ -2452,7 +2462,7 @@ async function loop(): Promise<void> {
         } catch {
           pullIssuer = null;
         }
-        const pulled = (PULLS_FROM_COORDINATOR && !sandboxDown && lifecycle.canPull() && memoryOk && !shuttingDown && !(INFERENCE_ONLY && freeInferenceSlots === 0 && !slotReport.reportAnyway)
+        const pulled = (PULLS_FROM_COORDINATOR && !sandboxDown && lifecycle.canPull() && memoryOk && !shuttingDown && !(INFERENCE_ONLY && freeInferenceSlots === 0 && !slotReport.reportAnyway && !drainReturnHold)
           ? await post("/pull", pullBody, { signed: true })
           : { subtask: null }) as {
           subtask: Subtask | null;
@@ -2534,7 +2544,7 @@ async function loop(): Promise<void> {
 
           // ── PRIMARY: Local execution (HTTP mesh is primary, BLE is last resort) ──
           const envelopeForTask = taskEnvelope;
-          const runAndReport = async () => {
+          const runAndReportClaim = async () => {
             try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, coordinator.url); } catch (e) { console.warn(`[db] task start write failed: ${e}`); }
             // #51: keep the coordinator's claim lease alive while the subtask runs.
             const stopLeaseHeartbeat = startLeaseHeartbeat(issuer);
@@ -2639,6 +2649,20 @@ async function loop(): Promise<void> {
               }
               try { localStore.enqueuePendingResult(result.subtaskId, encodePendingResult(resultPayload, issuer?.url)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
               console.warn(`[agent:${AGENT_ID}] result buffered for retry: ${result.subtaskId}`);
+            }
+          };
+          // Counted per issuing coordinator while it runs (a drain failover's return waits for the peer's).
+          const runAndReport = async () => {
+            const key = issuer?.url;
+            if (key) claimsInFlight.set(key, (claimsInFlight.get(key) ?? 0) + 1);
+            try {
+              await runAndReportClaim();
+            } finally {
+              if (key) {
+                const left = (claimsInFlight.get(key) ?? 1) - 1;
+                if (left > 0) claimsInFlight.set(key, left);
+                else claimsInFlight.delete(key);
+              }
             }
           };
           // Model calls run side by side (Ollama, vLLM and MLX serve several at once); code jobs one at a time.

@@ -6,6 +6,7 @@ import {
   DrainFailover,
   HOME_PROBE_JITTER_MS,
   HOME_PROBE_MS,
+  HOME_RETURN_HOLD_MAX_MS,
   HOME_RETURN_JITTER_MS,
   NO_PEER_RETRY_MS,
   homeProbeState
@@ -169,6 +170,18 @@ describe("drain failover", () => {
     expect(f.state).toBe("away");
   });
 
+  it("comes home only once the peer's own calls are done (bounded), so the peer does not take them back", () => {
+    const f = new DrainFailover(() => 0);
+    f.notice({ drainingUrl: US, reason: "drain_notice", nowMs: T0 });
+    f.moved(EU, T0);
+    expect(f.holdingForPeerCalls(2, T0)).toBe(false); // not returning yet: serving the peer as usual
+    f.onHomeProbe("up", T0 + 3_000);
+    expect(f.returnDue(T0 + 3_000)).toBe(true);
+    expect(f.holdingForPeerCalls(2, T0 + 3_000)).toBe(true);
+    expect(f.holdingForPeerCalls(0, T0 + 3_000)).toBe(false);
+    expect(f.holdingForPeerCalls(1, T0 + 3_000 + HOME_RETURN_HOLD_MAX_MS)).toBe(false);
+  });
+
   it("bounded: after DRAIN_AWAY_MAX_MS it stops probing and stays", () => {
     const f = new DrainFailover(() => 0);
     f.notice({ drainingUrl: US, reason: "drain_notice", nowMs: T0 });
@@ -298,6 +311,11 @@ describe("worker wiring", () => {
     expect(src).toContain('await post("/result", resultPayload, { signed: true, to: issuer });');
     expect(src).toContain("encodePendingResult(resultPayload, issuer?.url)");
     expect(src).toMatch(/pullIssuer = coordinator\.requireVerifiedIdentity\(\)[\s\S]{0,500}await post\("\/pull"/);
+  });
+  it("the return waits for the peer's calls and reports no free slot meanwhile", () => {
+    expect(src).toContain("if (drainFailover.holdingForPeerCalls(claimsInFlightFor(drainFailover.away), now)) return;");
+    expect(src).toContain("freeInferenceSlots: drainReturnHold ? 0 : freeInferenceSlots");
+    expect(src).toMatch(/claimsInFlight\.set\(key, \(claimsInFlight\.get\(key\) \?\? 0\) \+ 1\);\s*try \{\s*await runAndReportClaim\(\);/);
   });
   it("the generic in-window failover does not run during a planned drain failover (it comes home instead)", () => {
     expect(src).toContain("if (!drainFailover.active() && restartWindow.mayFailOver()) {");
