@@ -195,6 +195,9 @@ export async function cancelUnclaimedInference(taskId: string, subtaskId: string
   if (timer) clearTimeout(timer);
   claimDeadlines.delete(subtaskId);
   claimDeadlineAt.delete(subtaskId);
+  const decision = claimDecisions.get(subtaskId);
+  if (decision) clearTimeout(decision);
+  claimDecisions.delete(subtaskId);
   if (!queue.markRemoteClaimed(subtaskId)) return false;
   const accountId = taskBilling.get(taskId)?.accountId ?? usagePending.get(taskId)?.accountId ?? "";
   // Say which: every agent of the class was busy, or (now) no agent of the class holds the model.
@@ -456,6 +459,57 @@ export function clearClaimDeadline(subtaskId: string): void {
 }
 
 /** Cancel (and refund) the call if nobody claims it within `ms`; replaces an earlier bound. */
+/**
+ * Run 9 (CPU ramp: 57 calls refused "none could start this request in time" 6-82 s after submit,
+ * p50 6-55 s): a network call waited in the queue on a start estimate and was refused later. Now a
+ * call nobody claimed within INFERENCE_CLAIM_DECISION_MS of its submit is decided
+ * (decideUnclaimedCall): it keeps waiting only while a host here has a free slot for it (not held
+ * back, not excluded from it, and it would finish there), once; otherwise it is refused at once
+ * (retryable no_capacity "busy", refunded in full). Decided once, from submit: a claim ends it, and
+ * a call back on the queue later (a lapsed or taken-back claim, whose late result may still come)
+ * keeps its bound. Auto calls are re-placed (auto-replace.ts) and reserved, own-machine,
+ * startup-grace and peer calls keep their bounds, as before.
+ */
+export const INFERENCE_CLAIM_DECISION_MS = CC.INFERENCE_CLAIM_DECISION_MS;
+const claimDecisions = new Map<string, ReturnType<typeof setTimeout>>();
+
+function armClaimDecision(taskId: string, subtaskId: string, final = false, ms = INFERENCE_CLAIM_DECISION_MS): void {
+  const old = claimDecisions.get(subtaskId);
+  if (old) clearTimeout(old);
+  claimDecisions.delete(subtaskId);
+  if (!(ms > 0)) return;
+  const timer = setTimeout(() => {
+    claimDecisions.delete(subtaskId);
+    void decideUnclaimedCall(taskId, subtaskId, Date.now(), final).catch((err) => coordinatorApp.log.error({ err, taskId }, "inference_claim_decision_failed"));
+  }, ms);
+  timer.unref?.();
+  claimDecisions.set(subtaskId, timer);
+}
+
+/** Decide a network call still unclaimed (armClaimDecision): "waiting" for a free slot here (once), else "ended". */
+export async function decideUnclaimedCall(taskId: string, subtaskId: string, nowMs = Date.now(), final = false): Promise<"claimed" | "left" | "waiting" | "ended"> {
+  if (!queue.isUnclaimed(subtaskId) || !claimDeadlineAt.has(subtaskId)) return "claimed";
+  const st = queue.getSubtask(subtaskId);
+  if (!st?.requestedModel || st.projectMeta.reservationId || st.projectMeta.onlyAccountId || autoPlacementOf(st.id) || usagePending.get(st.taskId) === undefined) return "left";
+  const model = st.requestedModel;
+  const cls = (st.projectMeta.computeClass ?? "any") as ComputeClassId | "any";
+  const exclude = queue.excludedAgents(st.id);
+  const room = modelSlots(model, cls, inferenceTokensNeededOf(st), nowMs, exclude);
+  let ahead = 0;
+  for (const c of queue.inferenceCalls()) {
+    if (c.subtaskId === st.id) break;
+    if (!c.claimedBy && queue.getSubtask(c.subtaskId)?.requestedModel === model) ahead++;
+  }
+  if (!final && ahead < room.free && waitingCallFits(st, model, cls, undefined, nowMs, { exclude, waiting: 0 })) {
+    armClaimDecision(taskId, subtaskId, true);
+    return "waiting";
+  }
+  const eta = room.slots > 0 ? startEtaOf(model, cls, Math.max(1, ahead - room.free + 1), room.slots, nowMs) : null;
+  if (!(await cancelUnclaimedInference(taskId, subtaskId, undefined, undefined, eta?.etaMs).catch(() => false))) return "claimed";
+  coordinatorApp.log.warn({ taskId, subtaskId, model, ahead, slots: room.slots, free: room.free, final }, "inference_unclaimed_refused");
+  return "ended";
+}
+
 function armClaimDeadline(taskId: string, subtaskId: string, ms: number): void {
   const old = claimDeadlines.get(subtaskId);
   if (old) clearTimeout(old);
@@ -705,6 +759,10 @@ function startEtaOf(model: string, taskClass: ComputeClassId | "any", ahead: num
 // Run 6: each model's pickups, for the start estimate while it is saturated.
 queue.onClaimed((_agentId, st) => {
   if (st.kind === "inference" && st.requestedModel) modelPickups.record(st.requestedModel);
+  // Run 9: a claimed call is decided (armClaimDecision).
+  const decision = claimDecisions.get(st.id);
+  if (decision) clearTimeout(decision);
+  claimDecisions.delete(st.id);
 });
 
 /** How often the waiting calls are judged again (sweepWaitingInference). */
@@ -930,9 +988,15 @@ function waitingCallFits(st: Subtask, model: string, cls: string, agentId: strin
 export function claimAdmits(agentId: string, st: Subtask, nowMs = Date.now()): boolean {
   if (st.kind !== "inference" || !st.requestedModel) return true;
   if (st.projectMeta.reservationId || st.projectMeta.onlyAccountId) return true;
+  const cls = effectiveHardware(agentId)?.computeClass ?? agentCapabilities.get(agentId)?.computeClass ?? "cpu";
+  // Run 9 (three standard Auto calls refused "deepseek busy" after 25-48 s while the cloud host had
+  // 12-16 free slots): a cloud host runs the call on a hosted API. Its CPU is not what serves it, and
+  // its measured call times are mostly reasoning, which does not grow with max_tokens, so the
+  // completion estimate scaled them far past what best fit (the API's own rate) placed it on. With a
+  // free slot (mayTakeNow), it is admitted.
+  if (cls === "cloud") return true;
   if (agentStolenRecently(agentId, nowMs)) return false;
   if (usagePending.get(st.taskId) === undefined) return true;
-  const cls = effectiveHardware(agentId)?.computeClass ?? agentCapabilities.get(agentId)?.computeClass ?? "cpu";
   if (waitingCallFits(st, st.requestedModel, cls, agentId, nowMs, { waiting: 0 })) return true;
   // Refused only for the time it spent waiting: a call that would not have fit this class at submit
   // either was let in there (exploration, or no holder yet right after a restart) and is not second-guessed.
@@ -1356,7 +1420,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       });
     }
     inferenceStreams.open(subtask.id, body.taskId);
-    armClaimDeadline(body.taskId, subtask.id, holders.length === 0 && inStartupGrace() ? startupClaimBoundMs() : INFERENCE_CLAIM_TIMEOUT_MS);
+    const startupBound = holders.length === 0 && inStartupGrace();
+    armClaimDeadline(body.taskId, subtask.id, startupBound ? startupClaimBoundMs() : INFERENCE_CLAIM_TIMEOUT_MS);
+    armClaimDecision(body.taskId, subtask.id, false, !startupBound && !routed && billed ? INFERENCE_CLAIM_DECISION_MS : 0);
     app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, ...(sized ? { reserveTokenMsat: sized.tokenMsat, reserveFloorMsat: sized.floorMsat, reserveCappedByMaxCSats: sized.capped } : {}), holders: holders.length, ...(body.redirected ? { redirected: true } : {}) }, "inference_submitted");
     return reply.send({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second", ...(routed ? { routing: routed.summary } : {}) });
   });

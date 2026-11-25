@@ -350,6 +350,11 @@ export function mayTakeNow(agentId: string, subtask: Subtask, claims: Claims, no
   // it with the cold load weighed, and deferring it would hand the call to the warm one regardless.
   if (fresh && subtask.requestedModel && preferredAgentFor(subtask.id, nowMs) !== agentId && modelKnownCold(agentId, subtask.requestedModel, nowMs) && loadedTakerExists(subtask, claims, nowMs, agentId)) return false;
   if ((claims.get(agentId)?.all ?? 0) === 0) return true;
+  // Run 9 (nearest host 37% under load): the preferred agent (locality, best fit) takes its call with
+  // a free slot also while it runs others. It used to leave a fresh call to an idle agent elsewhere,
+  // which itself left the call to the preferred one: both waited, the hold ran out, and the far idle
+  // host took it (lhr buyer -> fra, iad -> lax / jnb).
+  if (preferredAgentFor(subtask.id, nowMs) === agentId) return true;
   if (!fresh) return true;
   return !idleTakerExists(subtask, claims, nowMs, agentId);
 }
@@ -389,12 +394,18 @@ export function preferredAgentFor(subtaskId: string, nowMs = Date.now()): string
   return p && nowMs < p.untilMs ? p.agentId : undefined;
 }
 
-/** Another agent is preferred for this call, and it is live, not excluded and has room for it. */
+/**
+ * Another agent is preferred for this call, and it is live, not excluded, has room for it and would
+ * be let take it. Run 9: room as it last reported it too (a host reporting no free slot cannot take
+ * the call, so others do not wait for it), and the claim admission (a held-back host is refused there).
+ */
 function leftForPreferred(agentId: string, subtask: Subtask, claims: Claims, nowMs: number): boolean {
   const pref = preferredAgentFor(subtask.id, nowMs);
   if (!pref || pref === agentId) return false;
   if (queue.excludedAgents(subtask.id).includes(pref)) return false;
-  return liveAgent(pref, agentCapabilities.get(pref), nowMs) && hasRoomFor(pref, subtask, claims, nowMs);
+  if (!liveAgent(pref, agentCapabilities.get(pref), nowMs) || !hasRoomFor(pref, subtask, claims, nowMs)) return false;
+  if (subtask.kind === "inference" && freeSlots(pref, claims, true) === 0) return false;
+  return !claimAdmission || claimAdmission(pref, subtask, nowMs);
 }
 
 function idleTakerExists(subtask: Subtask, claims: Claims, nowMs: number, except: string): boolean {

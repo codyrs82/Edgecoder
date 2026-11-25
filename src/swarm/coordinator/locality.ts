@@ -9,8 +9,8 @@
  * in the 2026-11-24 run). Now, when the buyer's region is known (the portal passes it; else the
  * request's Fly-Region / CF-IPCountry), the free holder nearest the buyer is preferred for a moment
  * (dispatch.ts preferAgent: it is nudged first and others leave the call to it while it has room).
- * Only agents with a free slot are candidates, scored by distance plus a load term, so a near host
- * that is busy does not hold the call: the call overflows to the next nearest free one, and after
+ * Only agents with a free slot are candidates, scored by distance plus a small load term (it only
+ * separates hosts about as near as each other, LOCALITY_LOAD_KM), so a near host that is busy does not hold the call: the call overflows to the next nearest free one, and after
  * the preference lapses anyone eligible may take it, as before.
  *
  * Warm models (2026-11-24 run 2: 22% nearest, every US 1.5b call on the owner's Mac): the preferred
@@ -44,8 +44,13 @@ import { agentRegionCode, peerWorldViews, peerAgentViews } from "./routing.js";
 
 /** How long the nearest free holder keeps a named-model call before anyone eligible may take it (longer than DEFER_MS). */
 export const LOCALITY_PREFER_MS = 2_000;
-/** A fully busy-but-free-slot agent counts as this many km farther (load against distance). */
-export const LOCALITY_LOAD_KM = 1_500;
+/**
+ * A fully busy-but-free-slot agent counts as this many km farther (load against distance). Run 9
+ * (nearest host 37% under load): it was 1,500 km, so a near host with one of two slots busy (+750 km)
+ * lost to an idle one 640 km farther (lhr buyer -> fra). The nearest host with a free slot now gets
+ * the call; load only chooses between hosts about as near as each other (the same metro).
+ */
+export const LOCALITY_LOAD_KM = 200;
 
 export interface LocalHolder {
   agentId: string;
