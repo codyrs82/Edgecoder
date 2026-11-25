@@ -50,6 +50,11 @@ export interface ChatRequest {
   hints?: RoutingHints;
   /** For Auto: the step's complexity when a caller already estimated it (so it isn't estimated twice). */
   complexity?: Complexity;
+  /**
+   * Run 6: this request follows a coordinator's route_elsewhere (backends.ts): the coordinator it is
+   * sent to is told so, and judges it without exploration (it refuses at once what it cannot finish).
+   */
+  redirected?: boolean;
 }
 
 /** What a backend yields: text as it is generated, the tool calls, then the end. */
@@ -73,6 +78,11 @@ export type ChatPiece =
       servedBy?: string;
       /** Why the reply ended early (a non-streamed reply cut at its deadline), for the client to read. */
       note?: string;
+      /**
+       * Run 6: what cut a reply that ended with stopReason "length": "deadline" (the call's time
+       * limit, routes.ts untilDeadline) or "max_tokens" (the caller's cap; the default for "length").
+       */
+      cut?: "deadline" | "max_tokens";
     };
 
 /**

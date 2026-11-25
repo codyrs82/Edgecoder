@@ -195,10 +195,13 @@ describe("a named model a peer coordinator has free", () => {
     routing.setPeerWorldSource(async () => peerWorld(1));
     try {
       const before = creditEngine.balance(requester.peerId);
-      const redirected = await submit({ model: PEER_ONLY, routeRedirect: true, clientRegion: "lhr" });
+      // Run 6: only a call the peer's free host would finish in time (a 7b CPU host writes 64 tokens well within 54 s)...
+      const redirected = await submit({ model: PEER_ONLY, routeRedirect: true, clientRegion: "lhr", maxTokens: 64 });
       expect(redirected.r.statusCode).toBe(409);
       expect(redirected.r.json()).toMatchObject({ error: "route_elsewhere", coordinatorId: "coord-peer-eu", coordinatorUrl: "https://eu.coord.example", model: PEER_ONLY });
       expect(creditEngine.balance(requester.peerId)).toBe(before);
+      // ...not one it would not (1,024 tokens at a CPU host's ~6 tok/s is past the limit).
+      expect((await submit({ model: PEER_ONLY, routeRedirect: true, clientRegion: "lhr" })).r.json().error).not.toBe("route_elsewhere");
       // Without routeRedirect: as before (no agent here has it).
       expect((await submit({ model: PEER_ONLY })).r.json().error).toBe("no_agent_has_model");
       // A model with a free slot here is not sent away.

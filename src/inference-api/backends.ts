@@ -79,7 +79,7 @@ export function networkBackend(deps: NetworkDeps, target: { model: string; compu
   return async function* (req, signal) {
     try {
       const routing = target.model === "auto" ? { routing: target.routing ?? req.hints } : namedModelCeiling(target.routing, req.hints);
-      for await (const p of streamNetworkCompletion(deps, { ...target, ...routing, computeClass: target.computeClass ?? "any", messages: req.messages, tools: req.tools, maxTokens: req.maxTokens, temperature: req.temperature }, signal)) {
+      for await (const p of streamNetworkCompletion(deps, { ...target, ...routing, computeClass: target.computeClass ?? "any", messages: req.messages, tools: req.tools, maxTokens: req.maxTokens, temperature: req.temperature, ...(req.redirected ? { redirected: true } : {}) }, signal)) {
         if (p.delta) yield { delta: p.delta };
         if (p.toolCalls?.length) yield { toolCalls: p.toolCalls };
         if (p.done) {
@@ -125,7 +125,8 @@ export function redirectingNetworkBackend(opts: { url: string; allowed: (url: st
       if (!(err instanceof RouteElsewhere)) throw err;
       const next = err.url.replace(/\/+$/, "");
       const follow = next !== opts.url.replace(/\/+$/, "") && (await Promise.resolve(opts.allowed(next)).catch(() => false));
-      return yield* opts.run(follow ? next : opts.url, false)(req, signal);
+      // Run 6: the coordinator it goes to is told it was sent there (it judges it without exploration).
+      return yield* opts.run(follow ? next : opts.url, false)(follow ? { ...req, redirected: true } : req, signal);
     }
   };
 }
@@ -215,7 +216,7 @@ export function coordinatorAutoBackend(opts: {
       if (err instanceof RouteElsewhere) {
         const next = err.url.replace(/\/+$/, "");
         const follow = next !== url && (await Promise.resolve(opts.allowed(next)).catch(() => false));
-        return yield* opts.run(follow ? next : url, false)(req, signal);
+        return yield* opts.run(follow ? next : url, false)(follow ? { ...req, redirected: true } : req, signal);
       }
       if (err instanceof AutoUnsupported) return yield* opts.clientSide(req, signal);
       throw err;

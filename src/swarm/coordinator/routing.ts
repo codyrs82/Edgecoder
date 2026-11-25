@@ -27,7 +27,7 @@ import { activeBlacklistRecord, agentCapabilities, AGENT_CONNECTED_WINDOW_MS } f
 import { autoMayUseCloudModel } from "../../cloud-host/catalog.js";
 import { bestFit, bestFitConfigFromEnv, routedLine, type AgentView, type BestFitConfig, type BestFitResult, type NetworkView, type SessionMemo } from "./best-fit.js";
 import { CC, FALLBACK_BTC_USD, queue, reservations, identity, usageListeners } from "./context.js";
-import { agentContextWindow, agentLastPullMs, agentLoadReport, agentRoutable, freeModelSlots, modelWarmOn, pickupStats } from "./dispatch.js";
+import { agentContextWindow, agentDependable, agentLastPullMs, agentLoadReport, freeModelSlots, modelWarmOn, pickupStats } from "./dispatch.js";
 import { distanceRttMs, regionDistanceKm } from "../../common/geo-regions.js";
 import { agentUnavailable, circuitBlocks, loadedModelsOf, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
 import { effectiveHardware, hardwareVerifier } from "./economy.js";
@@ -154,7 +154,8 @@ export function localAgentViews(nowMs = Date.now(), rttOf: (agentId: string) => 
       rttMs: rttOf(agentId),
       // #524: a closed socket with nothing heard since is gone now, not after the 2-minute window.
       // C4: one silent for AGENT_SILENT_MS is not a candidate either (dispatch.ts agentRoutable).
-      stale: !agentRoutable(agentId, cap.lastSeenMs, nowMs),
+      // Run 6: nor one that keeps dropping out and has just come back (agentDependable).
+      stale: !agentDependable(agentId, cap.lastSeenMs, nowMs),
       // #523: an agent that has not pulled recently (or ever) is less certain capacity (best-fit.ts).
       pullAgeMs: pullAge(agentId, nowMs),
       ...withClientRtt(clientRegion, agentRegionCode(cap)),

@@ -67,9 +67,9 @@ import { taskIdInUse, pricingInFlight, settleTaskIfDone, refundTaskSubmit, LATE_
 import { registerInferenceCancelRoute, requesterCancelled } from "../inference-cancel.js";
 import { recordMeshWork } from "../world-activity.js";
 import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
-import { armAutoReplace, overrunAlternativeExists, placeAfterOverrun, replaceAutoNow } from "../auto-replace.js";
-import { freeLocalHolders, LOCALITY_PREFER_MS, nearestFreeHolder, peerWithFreeCapacity } from "../locality.js";
-import { completionByClass, completionLimitMs, hostServiceMs, hostSpeed, type HostSpeedSource, judgeCompletion, modelSlots, parseCompletionPrior, serviceTimes, startEtaLimitMs, startEtaMs } from "../start-eta.js";
+import { armAutoReplace, autoPlacementOf, overrunAlternativeExists, placeAfterOverrun, replaceAutoNow, setReplaceAdmission, type AutoPlacement } from "../auto-replace.js";
+import { freeLocalHolders, LOCALITY_PREFER_MS, nearestFreeHolder, peerWithFreeCapacity, type PeerFit } from "../locality.js";
+import { completionByClass, completionLimitMs, hostServiceMs, hostSpeed, type HostSpeedSource, judgeCompletion, modelPickups, modelSlots, parseCompletionPrior, serviceTimes, startEtaLimitMs, startEtaMs } from "../start-eta.js";
 
 // ── Network inference (chat completions on agents' local models, streamed) ──────────────────
 export const inferenceStreams = new InferenceStreams();
@@ -145,7 +145,7 @@ export const INFERENCE_CLAIM_TIMEOUT_MS = CC.INFERENCE_CLAIM_TIMEOUT_MS;
 export const NO_CAPACITY_RETRY_AFTER_SEC = 15;
 const NO_CAPACITY_KEEP_MS = 10 * 60_000;
 type NoCapacityReason = "busy" | "none_in_class" | "draining" | "cooling_down";
-const noCapacity = new Map<string, { accountId: string; subtaskId: string; atMs: number; reason: NoCapacityReason; computeClass?: string; model?: string; coordinatorUrl?: string }>();
+const noCapacity = new Map<string, { accountId: string; subtaskId: string; atMs: number; reason: NoCapacityReason; computeClass?: string; model?: string; coordinatorUrl?: string; startEtaMs?: number }>();
 
 /** Granted classes of the online, unblacklisted agents that hold `model` (one entry per agent), free of a reservation unless `includeReserved`. */
 function holderClasses(model: string, nowMs = Date.now(), includeReserved = false): ComputeClassId[] {
@@ -171,6 +171,8 @@ export function contextTooLong(holders: Array<{ contextWindow?: number; computeC
   return Math.max(...eligible.map((h) => h.contextWindow ?? 0));
 }
 const claimDeadlines = new Map<string, ReturnType<typeof setTimeout>>();
+/** When each armed claim bound runs out (run 6: the waiting sweep judges a call against the time left). */
+const claimDeadlineAt = new Map<string, number>();
 
 function pruneNoCapacity(now = Date.now()): void {
   for (const [taskId, c] of noCapacity) if (now - c.atMs > NO_CAPACITY_KEEP_MS) noCapacity.delete(taskId);
@@ -187,10 +189,11 @@ export function inferenceCancelledForCapacity(taskId: string): boolean {
  * holds it: that call runs and is settled as usual. Removal from the queue is synchronous and only
  * of an unclaimed item, so a claim racing the cancel either got it first or finds nothing.
  */
-export async function cancelUnclaimedInference(taskId: string, subtaskId: string, draining?: { peerUrl: string | null }, why?: "cooling_down"): Promise<boolean> {
+export async function cancelUnclaimedInference(taskId: string, subtaskId: string, draining?: { peerUrl: string | null }, why?: "cooling_down", startEtaMs?: number): Promise<boolean> {
   const timer = claimDeadlines.get(subtaskId);
   if (timer) clearTimeout(timer);
   claimDeadlines.delete(subtaskId);
+  claimDeadlineAt.delete(subtaskId);
   if (!queue.markRemoteClaimed(subtaskId)) return false;
   const accountId = taskBilling.get(taskId)?.accountId ?? usagePending.get(taskId)?.accountId ?? "";
   // Say which: every agent of the class was busy, or (now) no agent of the class holds the model.
@@ -198,7 +201,7 @@ export async function cancelUnclaimedInference(taskId: string, subtaskId: string
   const gap = usage?.model && usage.computeClass ? capacityGap(usage.computeClass as ComputeClassId, holderClasses(usage.model)) : "busy";
   // Draining: the caller is told so, with a peer to send the call to (it was refunded here in full).
   const reason: NoCapacityReason = draining ? "draining" : why ?? (gap === "none_in_class" ? "none_in_class" : "busy");
-  noCapacity.set(taskId, { accountId, subtaskId, atMs: Date.now(), reason, ...(usage?.computeClass ? { computeClass: usage.computeClass } : {}), ...(usage?.model ? { model: usage.model } : {}), ...(draining?.peerUrl ? { coordinatorUrl: draining.peerUrl } : {}) });
+  noCapacity.set(taskId, { accountId, subtaskId, atMs: Date.now(), reason, ...(usage?.computeClass ? { computeClass: usage.computeClass } : {}), ...(usage?.model ? { model: usage.model } : {}), ...(draining?.peerUrl ? { coordinatorUrl: draining.peerUrl } : {}), ...(startEtaMs !== undefined ? { startEtaMs: Math.round(startEtaMs) } : {}) });
   // A failed result from the coordinator (like a lease failure), so the subtask is settled everywhere.
   queue.complete({ subtaskId, taskId, agentId: "coordinator", ok: false, output: "", error: "no_capacity", durationMs: 0 });
   inferenceStreams.finish(subtaskId, "no_capacity");
@@ -448,14 +451,17 @@ export function clearClaimDeadline(subtaskId: string): void {
   const timer = claimDeadlines.get(subtaskId);
   if (timer) clearTimeout(timer);
   claimDeadlines.delete(subtaskId);
+  claimDeadlineAt.delete(subtaskId);
 }
 
 /** Cancel (and refund) the call if nobody claims it within `ms`; replaces an earlier bound. */
 function armClaimDeadline(taskId: string, subtaskId: string, ms: number): void {
   const old = claimDeadlines.get(subtaskId);
   if (old) clearTimeout(old);
+  claimDeadlineAt.set(subtaskId, Date.now() + Math.max(0, ms));
   const deadline = setTimeout(() => {
     claimDeadlines.delete(subtaskId);
+    claimDeadlineAt.delete(subtaskId);
     void cancelUnclaimedInference(taskId, subtaskId).catch((err) => coordinatorApp.log.error({ err, taskId }, "inference_no_capacity_cancel_failed"));
   }, Math.max(0, ms));
   deadline.unref?.();
@@ -515,6 +521,7 @@ export async function endInferenceLostMidReply(subtask: Subtask, timedOut?: stri
   const timer = claimDeadlines.get(subtask.id);
   if (timer) clearTimeout(timer);
   claimDeadlines.delete(subtask.id);
+  claimDeadlineAt.delete(subtask.id);
   if (!queue.markRemoteClaimed(subtask.id)) return false;
   queue.complete({ subtaskId: subtask.id, taskId: subtask.taskId, agentId: "coordinator", ok: false, output: "", error: timedOut ?? "agent_lost_mid_reply", durationMs: 0 });
   inferenceStreams.finish(subtask.id, timedOut ?? AGENT_LOST_MID_REPLY);
@@ -604,6 +611,7 @@ setRestrictedCanceller(async (call, reason) => {
   const timer = claimDeadlines.get(call.subtaskId);
   if (timer) clearTimeout(timer);
   claimDeadlines.delete(call.subtaskId);
+  claimDeadlineAt.delete(call.subtaskId);
   if (queue.getSubtask(call.subtaskId)) {
     queue.complete({ subtaskId: call.subtaskId, taskId: call.taskId, agentId: "coordinator", ok: false, output: "", error: reason, durationMs: 0 });
   }
@@ -644,6 +652,11 @@ const inferenceSubmitSchema = z.object({
    * is there; a named network model when nothing here has a free slot for it and a peer does (#526).
    */
   routeRedirect: z.boolean().default(false),
+  /**
+   * Run 6: another coordinator sent this call here (route_elsewhere; backends.ts marks the follow-up).
+   * It is judged without exploration and refused at once when it would not finish in time.
+   */
+  redirected: z.boolean().default(false),
   /** Where the buyer is (a Fly region, or "cc-<country>"): free agents near it are preferred (#526). */
   clientRegion: z.string().max(40).optional(),
   /** The portal's latency-aware coordinator choice (common/coordinator-choice.ts); kept only from the portal. */
@@ -660,32 +673,152 @@ const sumFree = (hs: ReadonlyArray<{ free: number }>) => hs.reduce((n, h) => n +
  * C9: the call's estimated start here (start-eta.ts) when it is past the limit for its timeout,
  * else null (a slot is left, too few service times are known, or the check is off).
  */
-function startEtaOverLimit(model: string, taskClass: ComputeClassId | "any", neededTokens: number, timeoutMs: number, nowMs = Date.now()): { etaMs: number; limitMs: number; waiting: number; slots: number; free: number; typicalMs: number } | null {
+function startEtaOverLimit(model: string, taskClass: ComputeClassId | "any", neededTokens: number, timeoutMs: number, nowMs = Date.now()): { etaMs: number; limitMs: number; waiting: number; slots: number; free: number; typicalMs: number | null; pickupEtaMs: number | null } | null {
   const limitMs = startEtaLimitMs(timeoutMs, CC.INFERENCE_START_ETA_FRACTION, INFERENCE_CLAIM_TIMEOUT_MS);
   if (!Number.isFinite(limitMs)) return null;
   const { slots, free } = modelSlots(model, taskClass, neededTokens, nowMs);
   const waiting = queue.waitingInference(model);
   if (free > waiting) return null;
-  const typicalMs = serviceTimes.typicalMs(model, taskClass, nowMs);
-  const etaMs = startEtaMs({ waiting, slots, free, typicalMs });
-  return etaMs !== null && typicalMs !== null && etaMs > limitMs ? { etaMs, limitMs: Math.round(limitMs), waiting, slots, free, typicalMs } : null;
+  const etaMs = startEtaOf(model, taskClass, waiting - free + 1, slots, nowMs);
+  return etaMs !== null && etaMs.etaMs > limitMs ? { ...etaMs, limitMs: Math.round(limitMs), waiting, slots, free } : null;
 }
+
+/**
+ * When a call with `ahead` calls before it (itself included) on a saturated model would start: the
+ * later of the median-service estimate (C9) and, run 6, the model's actual pickup rate while saturated
+ * (start-eta.ts ModelPickups). Null when neither is known.
+ */
+function startEtaOf(model: string, taskClass: ComputeClassId | "any", ahead: number, slots: number, nowMs: number): { etaMs: number; typicalMs: number | null; pickupEtaMs: number | null } | null {
+  const typicalMs = serviceTimes.typicalMs(model, taskClass, nowMs);
+  const byService = typicalMs !== null && slots > 0 ? Math.round((Math.max(1, ahead) / slots) * typicalMs) : null;
+  const pickupEtaMs = modelPickups.etaMs(model, ahead, nowMs);
+  if (byService === null && pickupEtaMs === null) return null;
+  return { etaMs: Math.max(byService ?? 0, pickupEtaMs ?? 0), typicalMs, pickupEtaMs };
+}
+
+// Run 6: each model's pickups, for the start estimate while it is saturated.
+queue.onClaimed((_agentId, st) => {
+  if (st.kind === "inference" && st.requestedModel) modelPickups.record(st.requestedModel);
+});
+
+/** How often the waiting calls are judged again (sweepWaitingInference). */
+export const WAITING_SWEEP_MS = 1_000;
+
+/**
+ * Run 6 (CPU ramp: 16 "busy" refusals 40-50 s after submit, all from the 45 s claim bound): each
+ * waiting network call is judged again every WAITING_SWEEP_MS. A named call with no free slot for it
+ * whose estimated start (startEtaOf, from its place in the model's queue) is past the time left in
+ * its claim bound cannot start in time: it is ended now with a retryable no_capacity ("busy"),
+ * refunded in full, instead of when the bound runs out. Auto calls are left to re-placement
+ * (auto-replace.ts), reserved, own-machine and startup-grace calls to their bound. Also records
+ * which models are saturated (start-eta.ts ModelPickups). Returns how many were ended.
+ */
+export async function sweepWaitingInference(nowMs = Date.now()): Promise<number> {
+  const byModel = new Map<string, Subtask[]>();
+  for (const c of queue.inferenceCalls()) {
+    if (c.claimedBy) continue;
+    const st = queue.getSubtask(c.subtaskId);
+    if (!st?.requestedModel) continue;
+    const list = byModel.get(st.requestedModel) ?? [];
+    list.push(st);
+    byModel.set(st.requestedModel, list);
+  }
+  for (const model of modelPickups.saturatedModels()) if (!byModel.has(model)) modelPickups.noteSaturated(model, false, nowMs);
+  let ended = 0;
+  for (const [model, waiting] of byModel) {
+    const { slots, free } = modelSlots(model, "any", 0, nowMs);
+    modelPickups.noteSaturated(model, slots > 0 && free < waiting.length, nowMs);
+    for (let i = 0; i < waiting.length; i++) {
+      const st = waiting[i];
+      if (st.projectMeta.reservationId || st.projectMeta.onlyAccountId || autoPlacementOf(st.id)) continue;
+      const deadlineAt = claimDeadlineAt.get(st.id);
+      if (deadlineAt === undefined) continue;
+      const cls = (st.projectMeta.computeClass ?? "any") as ComputeClassId | "any";
+      const room = modelSlots(model, cls, inferenceTokensNeededOf(st), nowMs);
+      if (room.slots <= 0 || i < room.free) continue;
+      const eta = startEtaOf(model, cls, i - room.free + 1, room.slots, nowMs);
+      if (eta === null || eta.etaMs <= deadlineAt - nowMs) continue;
+      if (await cancelUnclaimedInference(st.taskId, st.id, undefined, undefined, eta.etaMs).catch(() => false)) {
+        ended++;
+        coordinatorApp.log.warn({ taskId: st.taskId, subtaskId: st.id, model, startEtaMs: eta.etaMs, leftMs: deadlineAt - nowMs, ahead: i - room.free + 1 }, "inference_waiting_cannot_start");
+      }
+    }
+  }
+  return ended;
+}
+setInterval(() => void sweepWaitingInference().catch((err) => coordinatorApp.log.error({ err }, "inference_waiting_sweep_failed")), WAITING_SWEEP_MS).unref?.();
 
 /**
  * Run 4: whether a call can finish here within its timeout (start-eta.ts completionByClass):
  * `exclude`, the agents of classes that would not finish it in time; `none`, no class here would;
  * `etaMs`, the soonest known completion. Nothing is judged without speed samples or with the check off.
  */
-export function completionCheck(model: string, taskClass: ComputeClassId | "any", messages: ChatMessage[], tools: unknown[] | undefined, maxTokens: number | undefined, timeoutMs: number, nowMs = Date.now()): { exclude: string[]; none: boolean; etaMs: number | null; limitMs: number } {
-  const limitMs = completionLimitMs(timeoutMs, CC.INFERENCE_COMPLETION_ETA_FRACTION);
+export function completionCheck(
+  model: string, taskClass: ComputeClassId | "any", messages: ChatMessage[], tools: unknown[] | undefined, maxTokens: number | undefined, timeoutMs: number, nowMs = Date.now(),
+  opts: CompletionCheckOptions = {},
+): { exclude: string[]; none: boolean; etaMs: number | null; limitMs: number } {
+  const elapsedMs = Math.max(0, opts.elapsedMs ?? 0);
+  const limitMs = completionLimitMs(timeoutMs, CC.INFERENCE_COMPLETION_ETA_FRACTION) - elapsedMs;
   if (!Number.isFinite(limitMs)) return { exclude: [], none: false, etaMs: null, limitMs };
+  const { promptTokens, outputTokens } = completionWork(messages, tools, maxTokens);
+  const classes = completionByClass({ model, taskClass, neededTokens: contextNeeded(messages, tools, maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS), promptTokens, outputTokens, waiting: queue.waitingInference(model), prior: completionPrior() }, nowMs);
+  return { ...judgeCompletion(classes, limitMs, opts.explore === false ? 0 : timeoutMs - elapsedMs), limitMs: Math.round(limitMs) };
+}
+
+/**
+ * Run 6: `elapsedMs`, time the call already used (a re-placement judges the time left: auto-replace.ts);
+ * `explore: false`, no exploration (a call another coordinator sent here: it is refused at once if
+ * this coordinator's estimate says it would not finish).
+ */
+export interface CompletionCheckOptions {
+  elapsedMs?: number;
+  explore?: boolean;
+}
+
+/** The tokens completion admission judges a call on: its prompt, and its reply (max_tokens, else COMPLETION_UNSET_MAX_TOKENS) × the output share. */
+export function completionWork(messages: ChatMessage[], tools: unknown[] | undefined, maxTokens: number | undefined): { promptTokens: number; outputTokens: number } {
   const promptTokens = Math.ceil(Buffer.byteLength(JSON.stringify({ messages, tools: tools ?? [] }), "utf8") / 4);
   // A call that sets no max_tokens is judged on a typical long reply, not the default cap (a billing bound).
   const judgedMax = maxTokens ?? Math.min(INFERENCE_DEFAULT_MAX_TOKENS, COMPLETION_UNSET_MAX_TOKENS);
-  const outputTokens = Math.max(1, Math.ceil(judgedMax * CC.INFERENCE_COMPLETION_OUTPUT_SHARE));
-  const classes = completionByClass({ model, taskClass, neededTokens: contextNeeded(messages, tools, maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS), promptTokens, outputTokens, waiting: queue.waitingInference(model), prior: completionPrior() }, nowMs);
-  return { ...judgeCompletion(classes, limitMs, timeoutMs), limitMs: Math.round(limitMs) };
+  return { promptTokens, outputTokens: Math.max(1, Math.ceil(judgedMax * CC.INFERENCE_COMPLETION_OUTPUT_SHARE)) };
 }
+
+/** Run 6: what a peer's free host must finish the call within to be sent it (locality.ts peerWithFreeCapacity). */
+function peerFit(messages: ChatMessage[], tools: unknown[] | undefined, maxTokens: number | undefined, timeoutMs: number): PeerFit {
+  return { ...completionWork(messages, tools, maxTokens), limitMs: completionLimitMs(timeoutMs, CC.INFERENCE_COMPLETION_ETA_FRACTION), prior: completionPrior() };
+}
+
+/**
+ * Run 6: whether a waiting call would finish on `model` in `cls` in the time it has left (since its
+ * submit), by the same completion check as a submit. A call's stored max_tokens equal to the default
+ * cap is taken as unset (judged on COMPLETION_UNSET_MAX_TOKENS, as at submit).
+ */
+function waitingCallFits(st: Subtask, model: string, cls: string, agentId: string | undefined, nowMs: number): boolean {
+  let input: { messages?: ChatMessage[]; tools?: unknown[]; maxTokens?: number };
+  try {
+    input = JSON.parse(st.input);
+  } catch {
+    return true;
+  }
+  if (!Array.isArray(input.messages)) return true;
+  const submittedAtMs = usagePending.get(st.taskId)?.atMs ?? nowMs;
+  const taskClass = ((ACCEPTED_COMPUTE_CLASS_IDS as readonly string[]).includes(cls) ? cls : "any") as ComputeClassId | "any";
+  const maxTokens = input.maxTokens === INFERENCE_DEFAULT_MAX_TOKENS ? undefined : input.maxTokens;
+  const check = completionCheck(model, taskClass, input.messages, input.tools, maxTokens, submittedTimeoutMs(st), nowMs, { elapsedMs: nowMs - submittedAtMs });
+  return agentId ? !check.exclude.includes(agentId) : !check.none;
+}
+
+setReplaceAdmission({
+  fits: (p: AutoPlacement, pick, nowMs) => {
+    const st = queue.getSubtask(p.subtaskId);
+    return !st || waitingCallFits(st, pick.model, pick.computeClass, pick.agentId, nowMs);
+  },
+  currentFits: (p: AutoPlacement, nowMs) => {
+    const st = queue.getSubtask(p.subtaskId);
+    return !st?.requestedModel || waitingCallFits(st, st.requestedModel, st.projectMeta.computeClass ?? "any", undefined, nowMs);
+  },
+  refuse: (p: AutoPlacement) => cancelUnclaimedInference(p.taskId, p.subtaskId),
+});
 
 /** Run 5: the output a call without max_tokens is judged on (it may write up to INFERENCE_DEFAULT_MAX_TOKENS). */
 export const COMPLETION_UNSET_MAX_TOKENS = 1_024;
@@ -834,7 +967,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       let late: { etaMs: number | null; limitMs: number } | undefined;
       for (let pick = 0; result.chosen?.local && !elsewhere; pick++) {
         const chosenClass = (ACCEPTED_COMPUTE_CLASS_IDS as readonly string[]).includes(result.chosen.computeClass) ? (result.chosen.computeClass as ComputeClassId) : "any";
-        const check = completionCheck(result.chosen.model, chosenClass, body.messages as ChatMessage[], body.tools, body.maxTokens, body.timeoutMs);
+        const check = completionCheck(result.chosen.model, chosenClass, body.messages as ChatMessage[], body.tools, body.maxTokens, body.timeoutMs, Date.now(), { explore: !body.redirected });
         const fresh = check.exclude.filter((id) => !slowAgents.includes(id));
         slowAgents = [...slowAgents, ...fresh];
         if (!check.exclude.includes(result.chosen.agentId)) break;
@@ -909,7 +1042,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       // A named network model with no free slot here that a peer has free (#526): resubmit there,
       // before anything is reserved (the same redirect as an Auto call whose best fit is on a peer).
       if (body.routeRedirect && !routed && !restrictedTier && sumFree(freeLocalHolders(body.model, namedClass(body.computeClass), contextNeeded(body.messages as ChatMessage[], body.tools, body.maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS))) <= queue.waitingInference(body.model)) {
-        const peer = await peerWithFreeCapacity(body.model, body.computeClass, clientRegion).catch(() => null);
+        const peer = await peerWithFreeCapacity(body.model, body.computeClass, clientRegion, Date.now(), peerFit(body.messages as ChatMessage[], body.tools, body.maxTokens, body.timeoutMs)).catch(() => null);
         if (peer) {
           recordMeshWork(peer.coordinatorId);
           return reply.code(409).send({ error: "route_elsewhere", coordinatorId: peer.coordinatorId, coordinatorUrl: peer.url, model: body.model });
@@ -921,7 +1054,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       // (route_elsewhere) or is refused now, retryable, before anything is reserved.
       const overloaded = startEtaOverLimit(body.model, namedClass(body.computeClass), contextNeeded(body.messages as ChatMessage[], body.tools, body.maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS), body.timeoutMs);
       if (overloaded) {
-        const peer = body.routeRedirect && !restrictedTier ? await peerWithFreeCapacity(body.model, body.computeClass, clientRegion).catch(() => null) : null;
+        const peer = body.routeRedirect && !restrictedTier ? await peerWithFreeCapacity(body.model, body.computeClass, clientRegion, Date.now(), peerFit(body.messages as ChatMessage[], body.tools, body.maxTokens, body.timeoutMs)).catch(() => null) : null;
         req.log.info({ model: body.model, computeClass: body.computeClass, ...overloaded, peer: peer?.coordinatorId ?? null }, "inference_start_eta_over_limit");
         if (peer) {
           recordMeshWork(peer.coordinatorId);
@@ -933,9 +1066,11 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       // that would not finish it do not get it; with none here in time it goes to a peer with a free
       // slot (route_elsewhere) or is refused now, retryable, before anything is reserved.
       if (!routed) {
-        const late = completionCheck(body.model, namedClass(body.computeClass), body.messages as ChatMessage[], body.tools, body.maxTokens, body.timeoutMs);
+        // Run 6: a call another coordinator sent here gets no exploration: refused now if it would not finish.
+        const late = completionCheck(body.model, namedClass(body.computeClass), body.messages as ChatMessage[], body.tools, body.maxTokens, body.timeoutMs, Date.now(), { explore: !body.redirected });
         if (late.none) {
-          const peer = body.routeRedirect && !restrictedTier ? await peerWithFreeCapacity(body.model, body.computeClass, clientRegion).catch(() => null) : null;
+          // Run 6: only to a peer whose free host would finish it (locality.ts peerCompletionMs), else 503 now.
+          const peer = body.routeRedirect && !restrictedTier ? await peerWithFreeCapacity(body.model, body.computeClass, clientRegion, Date.now(), peerFit(body.messages as ChatMessage[], body.tools, body.maxTokens, body.timeoutMs)).catch(() => null) : null;
           req.log.info({ model: body.model, computeClass: body.computeClass, completionEtaMs: late.etaMs, limitMs: late.limitMs, peer: peer?.coordinatorId ?? null }, "inference_completion_over_limit");
           if (peer) {
             recordMeshWork(peer.coordinatorId);
@@ -1081,7 +1216,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     }
     inferenceStreams.open(subtask.id, body.taskId);
     armClaimDeadline(body.taskId, subtask.id, holders.length === 0 && inStartupGrace() ? startupClaimBoundMs() : INFERENCE_CLAIM_TIMEOUT_MS);
-    app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, ...(sized ? { reserveTokenMsat: sized.tokenMsat, reserveFloorMsat: sized.floorMsat, reserveCappedByMaxCSats: sized.capped } : {}), holders: holders.length }, "inference_submitted");
+    app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, ...(sized ? { reserveTokenMsat: sized.tokenMsat, reserveFloorMsat: sized.floorMsat, reserveCappedByMaxCSats: sized.capped } : {}), holders: holders.length, ...(body.redirected ? { redirected: true } : {}) }, "inference_submitted");
     return reply.send({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second", ...(routed ? { routing: routed.summary } : {}) });
   });
 

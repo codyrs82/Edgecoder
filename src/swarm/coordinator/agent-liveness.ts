@@ -35,6 +35,20 @@ interface SocketState {
 const sockets = new Map<string, SocketState>();
 const httpAt = new Map<string, number>();
 
+/**
+ * Run 6 (inf-1795607920748-eb25b92f): an agent that keeps dropping out (the maw Mac: heard for a
+ * minute, silent for one or two, for hours) passed the 30 s silence check whenever it had just come
+ * back, and Auto placed a call on it that it never picked up. A silence longer than FLAP_GAP_MS
+ * (dispatch.ts AGENT_SILENT_MS) between two requests is a gap; FLAP_MIN_GAPS gaps within
+ * FLAP_WINDOW_MS make the agent flapping until it has been heard without a gap for FLAP_STEADY_MS.
+ * One restart (a single gap) is not flapping: a host that rejoins is routable at once, as before.
+ */
+export const FLAP_GAP_MS = 30_000;
+export const FLAP_WINDOW_MS = 10 * 60_000;
+export const FLAP_MIN_GAPS = 2;
+export const FLAP_STEADY_MS = 2 * 60_000;
+const gaps = new Map<string, number[]>();
+
 /** An authenticated mesh socket for `agentId` went live. */
 export function noteAgentSocketOpen(agentId: string, nowMs = Date.now()): void {
   sockets.set(agentId, { open: true, openedAtMs: nowMs });
@@ -48,7 +62,24 @@ export function noteAgentSocketClosed(agentId: string, nowMs = Date.now()): void
 
 /** A signed HTTP request from the agent (pull, heartbeat, chunk, result, register): it is alive. */
 export function noteAgentHttpAlive(agentId: string, nowMs = Date.now()): void {
+  const prev = httpAt.get(agentId);
+  if (prev !== undefined && nowMs - prev > FLAP_GAP_MS) {
+    const list = (gaps.get(agentId) ?? []).filter((at) => nowMs - at <= FLAP_WINDOW_MS);
+    list.push(nowMs);
+    gaps.set(agentId, list.slice(-8));
+  }
   httpAt.set(agentId, nowMs);
+}
+
+/**
+ * The agent came back from FLAP_MIN_GAPS or more silences within FLAP_WINDOW_MS, the last less than
+ * FLAP_STEADY_MS ago: not counted on for new placements (best fit, completion admission, locality).
+ */
+export function agentFlapping(agentId: string, nowMs = Date.now()): boolean {
+  const list = gaps.get(agentId);
+  if (!list?.length) return false;
+  const recent = list.filter((at) => nowMs - at <= FLAP_WINDOW_MS);
+  return recent.length >= FLAP_MIN_GAPS && nowMs - recent[recent.length - 1] < FLAP_STEADY_MS;
 }
 
 /** How long `agentId` has been lost (socket closed, nothing over HTTP since); null when it is not. */
@@ -77,6 +108,7 @@ export function agentsLostFor(minMs: number, nowMs = Date.now()): string[] {
 export function pruneAgentLiveness(nowMs = Date.now()): void {
   for (const [id, s] of sockets) if (!s.open && nowMs - (s.closedAtMs ?? s.openedAtMs) > KEEP_MS) sockets.delete(id);
   for (const [id, at] of httpAt) if (nowMs - at > KEEP_MS && !sockets.has(id)) httpAt.delete(id);
+  for (const [id, list] of gaps) if (!list.some((at) => nowMs - at <= FLAP_WINDOW_MS)) gaps.delete(id);
 }
 setInterval(() => pruneAgentLiveness(), 10 * 60_000).unref?.();
 
@@ -84,4 +116,5 @@ setInterval(() => pruneAgentLiveness(), 10 * 60_000).unref?.();
 export function resetAgentLiveness(): void {
   sockets.clear();
   httpAt.clear();
+  gaps.clear();
 }

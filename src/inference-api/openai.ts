@@ -100,9 +100,19 @@ export async function* openAiStream(pieces: AsyncIterable<ChatPiece>, model: str
  * served-by: masked machine label, class, region), so a client on the hosted endpoint can show
  * each call's served line (#525: it showed "unknown" without `served`).
  */
-export function edgecoderUsage(done: Pick<Extract<ChatPiece, { done: true }>, "cSatsSpent" | "where" | "served" | "note"> | undefined): { edgecoder?: Record<string, unknown> } {
-  if (!done || (done.cSatsSpent === undefined && !done.where && !done.served && !done.note)) return {};
-  return { edgecoder: { cSatsSpent: done.cSatsSpent, where: done.where, ...(done.served ? { served: done.served } : {}), ...(done.note ? { note: done.note } : {}) } };
+export function edgecoderUsage(done: Pick<Extract<ChatPiece, { done: true }>, "cSatsSpent" | "where" | "served" | "note" | "stopReason" | "cut"> | undefined): { edgecoder?: Record<string, unknown> } {
+  const cut = replyCut(done);
+  if (!done || (done.cSatsSpent === undefined && !done.where && !done.served && !done.note && !cut)) return {};
+  return { edgecoder: { cSatsSpent: done.cSatsSpent, where: done.where, ...(done.served ? { served: done.served } : {}), ...(done.note ? { note: done.note } : {}), ...(cut ? { cut } : {}) } };
+}
+
+/**
+ * Run 6: finish_reason "length" stays for both a deadline cut and a max_tokens cut (clients rely on
+ * it); `edgecoder.cut` says which: "deadline" when the call's time limit ended it, else "max_tokens".
+ */
+export function replyCut(done: Pick<Extract<ChatPiece, { done: true }>, "stopReason" | "cut"> | undefined): "deadline" | "max_tokens" | undefined {
+  if (!done || done.stopReason !== "length") return undefined;
+  return done.cut ?? "max_tokens";
 }
 
 /**

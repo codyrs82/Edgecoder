@@ -135,11 +135,11 @@ export class SwarmQueue {
    */
   private readyListener?: (subtask: Subtask, claimableAtMs: number) => void;
 
-  /** Called on every successful claim (the Network page counts calls per agent per minute). */
-  private claimedListener?: (agentId: string, subtask: Subtask) => void;
+  /** Called on every successful claim (the Network page counts calls per agent per minute; run 6: per-model pickup rate). */
+  private claimedListeners: Array<(agentId: string, subtask: Subtask) => void> = [];
 
   onClaimed(listener: (agentId: string, subtask: Subtask) => void): void {
-    this.claimedListener = listener;
+    this.claimedListeners.push(listener);
   }
 
   onClaimable(listener: (subtask: Subtask, claimableAtMs: number) => void): void {
@@ -402,10 +402,12 @@ export class SwarmQueue {
     this.agentClaimCount.set(agentId, (this.agentClaimCount.get(agentId) ?? 0) + 1);
     const { claimedAt, attempts } = item;
     this.persist(item.subtask.id, (store) => store.markSubtaskClaimed(item.subtask.id, agentId, claimedAt, attempts));
-    try {
-      this.claimedListener?.(agentId, item.subtask);
-    } catch {
-      // A listener never fails a claim.
+    for (const l of this.claimedListeners) {
+      try {
+        l(agentId, item.subtask);
+      } catch {
+        // A listener never fails a claim.
+      }
     }
     return item.subtask;
   }

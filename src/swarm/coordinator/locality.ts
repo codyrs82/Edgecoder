@@ -35,9 +35,11 @@ import { agentHasModel } from "../model-catalog.js";
 import { queue, reservations } from "./context.js";
 import { agentCapabilities, activeBlacklistRecord } from "./agent-state.js";
 import { agentContextWindow, agentLoadReport, coldLoadKm, freeModelSlots, modelKnownCold, modelWarmOn } from "./dispatch.js";
-import { coldLoadMs } from "./best-fit.js";
+import { coldLoadMs, contentionFactor, decodeTps, prefillTps, type AgentView } from "./best-fit.js";
+import { callWorkMs, serviceTimes } from "./start-eta.js";
 import { effectiveHardware } from "./economy.js";
 import { agentUnavailable, memoryAdmits } from "./memory-admission.js";
+import { agentFlapping } from "./agent-liveness.js";
 import { agentRegionCode, peerWorldViews, peerAgentViews } from "./routing.js";
 
 /** How long the nearest free holder keeps a named-model call before anyone eligible may take it (longer than DEFER_MS). */
@@ -70,6 +72,8 @@ export function freeLocalHolders(model: string, taskClass: ComputeClassId | "any
     if (!agentHasModel(cap, model)) continue;
     if (activeBlacklistRecord(id) || cap.hostApproved === false || reservations.isHeld(id, nowMs) || agentUnavailable(id, nowMs)) continue;
     if (nowMs - cap.lastSeenMs > 60_000) continue;
+    // Run 6: an agent that keeps dropping out is not capacity (agent-liveness.ts agentFlapping).
+    if (agentFlapping(id, nowMs)) continue;
     const cls = effectiveHardware(id, cap)?.computeClass ?? cap.computeClass ?? "cpu";
     if (taskClass !== "any" && cls !== taskClass) continue;
     const ctx = agentContextWindow(id);
@@ -102,10 +106,41 @@ export function nearestFreeHolder(candidates: ReadonlyArray<FreeHolder>, clientR
 }
 
 /**
+ * Run 6 (US→EU redirects inf-1795606903912-52ddd004, inf-1795606909897-ce81590e, inf-1795606915785-c31fb636):
+ * a call no host here could finish in time (a ~4.5k-token prompt, max_tokens 300, on 1.5b CPU hosts)
+ * was sent to the peer with a free slot, whose 1.5b CPU hosts could not finish it either: it ran to
+ * the 180 s deadline with nothing sent. A redirect now also needs the peer's free host to be expected
+ * to finish the call within `limitMs`: the slower of what the peer advertises for it (its measured
+ * decode rate in its world view, best-fit.ts decodeTps / prefillTps, else its class default) and
+ * what this coordinator has measured for the same model on the same class (start-eta.ts speedFor,
+ * with the class prior filling in for missing samples), slowed by the calls already running there
+ * (best-fit.ts contentionFactor). Otherwise the call is answered 503 busy at once.
+ */
+export interface PeerFit {
+  promptTokens: number;
+  outputTokens: number;
+  /** The call's completion limit (ms; Infinity: not judged). */
+  limitMs: number;
+  /** Prior speed per class (start-eta.ts COMPLETION_PRIOR_SPEED), for a class measured too little here. */
+  prior?: Readonly<Record<string, number>>;
+}
+
+/** When a peer's agent would finish the call (ms from now), as above. */
+export function peerCompletionMs(a: AgentView, model: string, fit: PeerFit, nowMs = Date.now()): number {
+  const slowdown = contentionFactor(a);
+  const advertised = ((fit.promptTokens / prefillTps(a, model) + fit.outputTokens / decodeTps(a, model)) * 1000) * slowdown;
+  if (a.computeClass === "cloud") return Math.round(advertised);
+  const workMs = callWorkMs(model, a.computeClass, fit.promptTokens, fit.outputTokens);
+  const known = serviceTimes.speedFor(model, a.computeClass, workMs, fit.prior?.[a.computeClass], nowMs).speed;
+  return Math.round(Math.max(advertised, known === null ? 0 : known * workMs * slowdown));
+}
+
+/**
  * A peer coordinator whose agents have a free slot for `model` (in the class), from the peers' world
  * views (bounded wait). Several: the one with the free agent nearest the buyer, else the most free slots.
+ * With `fit` (run 6), only agents expected to finish the call within its limit count.
  */
-export async function peerWithFreeCapacity(model: string, computeClass: string, clientRegion: string | null | undefined, nowMs = Date.now()): Promise<{ coordinatorId: string; url: string } | null> {
+export async function peerWithFreeCapacity(model: string, computeClass: string, clientRegion: string | null | undefined, nowMs = Date.now(), fit?: PeerFit): Promise<{ coordinatorId: string; url: string } | null> {
   const worlds = await peerWorldViews(nowMs);
   if (!worlds.length) return null;
   const family = computeClass === "any" ? null : classFamily(computeClass);
@@ -113,6 +148,8 @@ export async function peerWithFreeCapacity(model: string, computeClass: string, 
   for (const a of peerAgentViews(worlds, nowMs)) {
     if (a.stale || a.freeSlots <= 0 || !a.models.includes(model)) continue;
     if (family && !family.includes(a.computeClass)) continue;
+    // Run 6: only a host that would finish the call in time counts (peerCompletionMs).
+    if (fit && Number.isFinite(fit.limitMs) && peerCompletionMs(a, model, fit, nowMs) > fit.limitMs) continue;
     const world = worlds.find((w) => w.world.coordinator.id === a.coordinatorId)?.world;
     const agent = world?.agents.find((x) => x.agentId === a.agentId);
     const km = clientRegion ? regionDistanceKm(clientRegion, agent?.region || agent?.country || world?.coordinator.region || null) : null;

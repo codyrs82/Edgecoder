@@ -27,6 +27,12 @@
  * - If best fit names the same model and class again (another holder), the call stays as it is and
  *   that agent is preferred.
  * - At most AUTO_REPLACE_MAX times per call; the original claim bound still ends it.
+ *
+ * Run 6 (inf-1795607918429-b8995549: a ~2.5k-token call not picked up on qwen3.5:9b within 12 s was
+ * moved to a 1.5b CPU host and ran 193 s): a re-placement passes the same completion gate as a submit
+ * (routes/inference.ts completionCheck), on the time the call has left. A candidate that would not
+ * finish in that time is skipped; when none would, and the call's current placement would not either,
+ * the call is ended now (no_capacity "busy", refunded in full) instead of waiting out its claim bound.
  */
 
 import type { JobDescriptor } from "../../inference-api/job-descriptor.js";
@@ -60,7 +66,22 @@ export interface AutoPlacement {
   placedAtMs?: number;
 }
 
-export type ReplaceOutcome = "claimed" | "same" | "none" | "replaced";
+export type ReplaceOutcome = "claimed" | "same" | "none" | "replaced" | "refused";
+
+/**
+ * Run 6: the completion gate for re-placements, registered by routes/inference.ts (which owns the
+ * check and the refund): `fits`, the candidate would finish the call in the time it has left;
+ * `currentFits`, its current placement still could; `refuse`, end the waiting call now (refunded).
+ */
+export interface ReplaceAdmission {
+  fits(p: AutoPlacement, pick: Candidate, nowMs: number): boolean;
+  currentFits(p: AutoPlacement, nowMs: number): boolean;
+  refuse(p: AutoPlacement): Promise<boolean>;
+}
+let admission: ReplaceAdmission | undefined;
+export function setReplaceAdmission(a: ReplaceAdmission | undefined): void {
+  admission = a;
+}
 
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
 /** The Auto calls with a re-placement armed, by subtask id (replaceAutoNow). */
@@ -111,7 +132,7 @@ async function nextPick(p: AutoPlacement, nowMs: number): Promise<Candidate | un
   return [result.chosen, ...result.candidates].find((c): c is Candidate => {
     if (!c || seen.has(c)) return false;
     seen.add(c);
-    return c.local && c.estimate.cSats <= budgetCSats;
+    return c.local && c.estimate.cSats <= budgetCSats && (admission?.fits(p, c, nowMs) ?? true);
   });
 }
 
@@ -146,7 +167,15 @@ export async function replaceUnclaimedAuto(p: AutoPlacement, nowMs = Date.now())
     noteCircuitOutcome(waitedOn, false, nowMs);
     noteRoutingOutcome(waitedOn, false);
   }
-  return moveTo(p, await nextPick(p, nowMs), nowMs, `re-placed: nobody picked it up within ${Math.round(bestFitConfig.replaceMs / 1000)} s`);
+  const pick = await nextPick(p, nowMs);
+  // Run 6: nothing that would finish it in the time left, and its current placement would not either: end it now.
+  if (!pick && admission && queue.isUnclaimed(p.subtaskId) && !admission.currentFits(p, nowMs)) {
+    if (await admission.refuse(p)) {
+      app.log.warn({ taskId: p.taskId, subtaskId: p.subtaskId, tried: p.tried.length }, "auto_call_refused_no_fit");
+      return "refused";
+    }
+  }
+  return moveTo(p, pick, nowMs, `re-placed: nobody picked it up within ${Math.round(bestFitConfig.replaceMs / 1000)} s`);
 }
 
 function moveTo(p: AutoPlacement, pick: Candidate | undefined, nowMs: number, why: string): ReplaceOutcome {
@@ -193,7 +222,7 @@ export async function replaceAutoNow(agentId: string, nowMs = Date.now()): Promi
       app.log.error({ err, subtaskId: p.subtaskId }, "auto_replace_failed");
       return "none" as const;
     });
-    if (r === "claimed") {
+    if (r === "claimed" || r === "refused") {
       const t = timers.get(p.subtaskId);
       if (t) clearTimeout(t);
       timers.delete(p.subtaskId);

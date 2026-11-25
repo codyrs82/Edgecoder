@@ -159,6 +159,11 @@ export interface NetworkTarget {
   routeRedirect?: boolean;
   /** Where the buyer is (Fly region or "cc-<country>"): the coordinator prefers free agents near it (#526). */
   clientRegion?: string;
+  /**
+   * Run 6: the call was sent here by another coordinator's route_elsewhere: this coordinator judges it
+   * without exploration and refuses at once what it cannot finish in time.
+   */
+  redirected?: boolean;
   /** The portal's coordinator choice for this call (kept on its routing decision; portal service token only). */
   coordinatorChoice?: CoordinatorChoice;
   /**
@@ -335,6 +340,7 @@ async function* streamSubmitted(
     ...(req.model !== "auto" && req.routing?.maxCSats !== undefined ? { routing: { maxCSats: req.routing.maxCSats } } : {}),
     ...(req.routeRedirect && (req.model === "auto" || (!req.target && !req.reservationId)) ? { routeRedirect: true } : {}),
     ...(req.clientRegion ? { clientRegion: req.clientRegion.slice(0, 40) } : {}),
+    ...(req.redirected && !req.target && !req.reservationId ? { redirected: true } : {}),
     ...(req.coordinatorChoice ? { coordinatorChoice: req.coordinatorChoice } : {}),
   };
   // A draining coordinator that names a peer: a caller that allows redirects goes there now (#524 test 6).
