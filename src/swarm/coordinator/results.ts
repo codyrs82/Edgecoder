@@ -373,7 +373,7 @@ export function peerWorkCostMsat(r: ExecutionResult<ResultMeta>): number {
 }
 
 /** Accrue compute credits for one accepted execution (idempotent per executed subtask id, #44). */
-export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: { originChargedMsat?: number } = {}): Promise<void> {
+export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: { originChargedMsat?: number; onPriced?: () => void } = {}): Promise<void> {
   const { subtask, durationMs, reportedDurationMs, taskId } = r.meta;
   const rewardAccountId = await rewardAccountForAgent(r.agentId);
   noteUsageRun(taskId, r.agentId, r.ok, durationMs, effectiveHardware(r.agentId)?.computeClass ?? agentCapabilities.get(r.agentId)?.computeClass);
@@ -399,6 +399,9 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
   // (never more), before the store is awaited, so results settling together cannot both spend it.
   // Work nobody set anything aside for (an anonymous task) earns nothing.
   const costMsat = takeTaskBudget(taskId, r.subtaskId, priced.costMsat, opts.originChargedMsat);
+  // B2: the cost is on the task's billing now; the requester's stream read may answer with it while
+  // the ledger writes below finish (pricingInFlight).
+  opts.onPriced?.();
   // The reserve is an upper bound on the cost (job-pricing.ts inferenceReserveMsat); a cost above
   // what is left of it is settled at the reserve, never more. Logged: it should be rare.
   const billing = taskBilling.get(taskId);
@@ -492,8 +495,9 @@ export async function publishResult(result: SubtaskResult, agentEnvelope?: Agent
     subtaskId: result.subtaskId,
     actorId: result.agentId
   });
-  await pgStore?.persistLedgerRecord(completeRecord);
-  await persistStatsLedgerRecord(completeRecord);
+  // B2: the two tables are independent; written together (one round trip of wait, not two) since
+  // this sits between the agent's result and the requester's reply.
+  await Promise.all([pgStore?.persistLedgerRecord(completeRecord), persistStatsLedgerRecord(completeRecord)]);
 
   let originChargedMsat: number | undefined;
   const origin = taskOriginMap.get(result.subtaskId);
@@ -726,18 +730,36 @@ export async function chargePeerWork(taskId: string, wantMsat: number, agentId?:
   return take;
 }
 
-/** Results being paid, per task: the task is not settled (its unused reserve returned) under them. */
-export const accrualsInFlight = new Map<string, number>();
-export function holdSettlement(taskId: string): () => void {
-  accrualsInFlight.set(taskId, (accrualsInFlight.get(taskId) ?? 0) + 1);
+/** A per-task counter of work in flight; the returned function releases one hold (once). */
+function holdIn(counts: Map<string, number>, taskId: string): () => void {
+  counts.set(taskId, (counts.get(taskId) ?? 0) + 1);
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    const n = (accrualsInFlight.get(taskId) ?? 1) - 1;
-    if (n > 0) accrualsInFlight.set(taskId, n);
-    else accrualsInFlight.delete(taskId);
+    const n = (counts.get(taskId) ?? 1) - 1;
+    if (n > 0) counts.set(taskId, n);
+    else counts.delete(taskId);
   };
+}
+
+/** Results being paid, per task: the task is not settled (its unused reserve returned) under them. */
+export const accrualsInFlight = new Map<string, number>();
+export function holdSettlement(taskId: string): () => void {
+  return holdIn(accrualsInFlight, taskId);
+}
+
+/**
+ * B2: results whose cost is not yet on the task's billing entry (taken from its reserve). Released
+ * as soon as it is (accrueResultCredits onPriced), before the ledger writes: the requester's last
+ * stream read waits on this, not on accrualsInFlight, and settles the task in the background. The
+ * accrual and the refund still run in the result route; a process that dies before they are written
+ * leaves the task_billing row open, and the restore/sweep (billing-restore.ts) settles it from the
+ * ledger, as for any interrupted task.
+ */
+export const pricingInFlight = new Map<string, number>();
+export function holdPricing(taskId: string): () => void {
+  return holdIn(pricingInFlight, taskId);
 }
 
 /** Once a task has no open subtasks: return what was set aside but not used. */

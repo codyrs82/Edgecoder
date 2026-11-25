@@ -109,6 +109,7 @@ import {
   verificationAccountFor,
   enqueueReplica,
   settleVerification,
+  holdPricing,
   holdSettlement,
   publishResult,
   releaseDependents,
@@ -776,6 +777,8 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     // The result is visible to the requester's stream read from here on, and that read settles the
     // task: it must not return the reserve before this result's cost has been taken from it.
     const releaseSettlement = holdSettlement(body.taskId);
+    // Until this result's cost is on the task's billing (the stream read answers with it).
+    const releasePricing = holdPricing(body.taskId);
     let chargedMsat = 0;
     let recorded = false;
     try {
@@ -812,10 +815,11 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
         if (taskOpenCount(body.taskId) === 0) orderBook.removeBid(body.taskId);
       }
 
-      if (execution) await accrueResultCredits(execution, { originChargedMsat });
+      if (execution) await accrueResultCredits(execution, { originChargedMsat, onPriced: releasePricing });
     } finally {
       // Nothing recorded: the granted peer may send the result again.
       if (grantedForward && !recorded) remoteGrants.release(body.subtaskId);
+      releasePricing();
       releaseSettlement();
     }
     await settleTaskIfDone(body.taskId);

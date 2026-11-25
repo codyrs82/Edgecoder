@@ -267,6 +267,34 @@ export async function spendCredits(
   return debit(accountId, credits, reason, relatedTaskId, opts.idempotencyKey ? debitTxId(opts.idempotencyKey) : undefined);
 }
 
+/**
+ * A task's billing row (task_billing) and its reserve debit together: one database round trip
+ * instead of insertTaskBilling + spendCredits (~7). Same outcomes as those two in order: "conflict"
+ * when the id is billed elsewhere (nothing debited); throws DuplicateDebitError when the reserve
+ * key was already charged and `insufficient_credits: …` when the balance is short, writing nothing
+ * (not even the billing row). Without Postgres there is no billing row: a plain idempotent debit.
+ */
+export async function reserveTaskCredits(
+  row: { taskId: string; coordinatorId: string; accountId: string; kind: "job" | "inference"; perSubtaskReserveMsat: number; createdAtMs: number },
+  rawCredits: number,
+  reason: string,
+  opts: { idempotencyKey: string }
+): Promise<"inserted" | "same" | "conflict" | "memory"> {
+  if (!pgStore) {
+    await spendCredits(row.accountId, rawCredits, reason, row.taskId, opts);
+    return "memory";
+  }
+  assertAmount(rawCredits);
+  const credits = roundCredits(rawCredits);
+  assertAmount(credits);
+  const tx: CreditTransaction = { txId: debitTxId(opts.idempotencyKey), accountId: row.accountId, type: "spend", credits, reason, relatedTaskId: row.taskId, timestampMs: Date.now() };
+  const r = await pgStore.reserveTaskBillingDebit(row, tx);
+  if (r.billing === "conflict") return "conflict";
+  if (r.debit === "duplicate") throw new DuplicateDebitError(tx.txId);
+  if (r.debit === "insufficient") throw new Error(`insufficient_credits: ${r.balance} < ${credits}`);
+  return r.billing === "inserted" ? "inserted" : "same";
+}
+
 /** Deterministic tx id for an idempotent debit (same shape as refundTxId). */
 export function debitTxId(idempotencyKey: string): string {
   return `debit:${createHash("sha256").update(idempotencyKey).digest("hex").slice(0, 32)}`;
