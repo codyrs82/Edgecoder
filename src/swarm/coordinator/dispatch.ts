@@ -29,6 +29,13 @@
  *    session's cache, its speed). For a short while (preferAgent's `ms`, BEST_FIT_PREFER_MS) other
  *    agents leave the call to it while it is live and has room, and it is nudged first; after that
  *    anyone eligible may take it, as before.
+ *
+ * 4. Model affinity. An agent known not to have the call's model loaded (its memory telemetry lists
+ *    its loaded models, the model is not among them, and it has not served it within WARM_MS) leaves
+ *    a fresh call for DEFER_MS to one that has it warm: loaded, or served within WARM_MS. An agent
+ *    that reports no telemetry (the Fly CPU hosts) is never assumed cold, so it is not held back,
+ *    and it counts as warm for a model it just ran. The preferred agent is exempt: whoever chose it
+ *    (locality.ts, best fit) already weighed the cold load.
  */
 
 import type { Subtask } from "../../common/types.js";
@@ -42,7 +49,7 @@ import { agentCapabilities, activeBlacklistRecord } from "./agent-state.js";
 import { askCapabilityOf, orderBook } from "./economy.js";
 import { peerGrantAllowsClaim } from "./grants.js";
 import { restrictedClaimAllowed } from "./restricted.js";
-import { circuitBlocks, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
+import { circuitBlocks, loadedModelsOf, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
 import { agentSocketLost, noteAgentHttpAlive } from "./agent-liveness.js";
 
 /** Agents nudged per claimable subtask. */
@@ -51,6 +58,8 @@ export const NUDGE_FANOUT = 2;
 export const DEFER_MS = 1_500;
 /** A report (pull) older than this does not count: the agent is not taking work now. */
 const LOAD_FRESH_MS = 60_000;
+/** A model an agent ran this recently is still loaded there (Ollama's default keep_alive is 5 min). */
+export const WARM_MS = 5 * 60_000;
 /** An agent nudged this recently, that has not pulled since, is not counted on to come twice. */
 const NUDGE_PENDING_MS = 2_000;
 const READY_KEEP_MS = 10 * 60_000;
@@ -92,7 +101,32 @@ const nudgedAt = new Map<string, number>();
 const pickups: number[] = [];
 /** subtaskId -> the agent best-fit routing prefers, until when. */
 const preferred = new Map<string, { agentId: string; untilMs: number }>();
+/** agentId -> model -> when it last claimed a call for that model. */
+const served = new Map<string, Map<string, number>>();
 let nudgesSent = 0;
+
+/** /pull handed `agentId` a call for `model`: the model is warm there for WARM_MS. */
+export function noteModelServed(agentId: string, model: string | undefined, nowMs = Date.now()): void {
+  if (!model) return;
+  let m = served.get(agentId);
+  if (!m) served.set(agentId, (m = new Map()));
+  m.set(model, nowMs);
+}
+
+/** The model is warm on the agent: loaded (telemetry) or served within WARM_MS. */
+export function modelWarmOn(agentId: string, model: string, nowMs = Date.now()): boolean {
+  if (modelLoadedOn(agentId, model, nowMs)) return true;
+  const at = served.get(agentId)?.get(model);
+  return at !== undefined && nowMs - at <= WARM_MS;
+}
+
+/**
+ * The model is known to be cold on the agent: it reports what it has loaded, the model is not among
+ * it, and it has not served it lately. False when not known (no telemetry): no cold-load is assumed.
+ */
+export function modelKnownCold(agentId: string, model: string, nowMs = Date.now()): boolean {
+  return loadedModelsOf(agentId, nowMs) !== undefined && !modelWarmOn(agentId, model, nowMs);
+}
 
 export function setNudgeTransport(t: NudgeTransport | undefined): void {
   transport = t;
@@ -119,6 +153,7 @@ export function noteAgentPull(agentId: string, report: { inferenceSlots?: number
 export function forgetAgentLoad(agentId: string): void {
   loads.delete(agentId);
   nudgedAt.delete(agentId);
+  served.delete(agentId);
 }
 
 /**
@@ -249,20 +284,27 @@ export function mayTakeNow(agentId: string, subtask: Subtask, claims: Claims, no
   const ready = readyAt.get(subtask.id);
   const fresh = ready !== undefined && nowMs - ready < DEFER_MS;
   // Model affinity: an agent that would have to load the model leaves a fresh call briefly to one
-  // that has it loaded (no load / unload thrash).
-  if (fresh && subtask.requestedModel && !modelLoadedOn(agentId, subtask.requestedModel, nowMs) && loadedTakerExists(subtask, claims, nowMs, agentId)) return false;
+  // that has it warm (no load / unload thrash). Not the preferred agent: locality or best fit chose
+  // it with the cold load weighed, and deferring it would hand the call to the warm one regardless.
+  if (fresh && subtask.requestedModel && preferredAgentFor(subtask.id, nowMs) !== agentId && modelKnownCold(agentId, subtask.requestedModel, nowMs) && loadedTakerExists(subtask, claims, nowMs, agentId)) return false;
   if ((claims.get(agentId)?.all ?? 0) === 0) return true;
   if (!fresh) return true;
   return !idleTakerExists(subtask, claims, nowMs, agentId);
 }
 
-/** Another live agent has the call's model loaded, room for it, and would be admitted. */
+/**
+ * Another live agent has the call's model warm, room for it, and would be admitted. When `except`
+ * holds nothing, a warm agent that is already running something does not count: it leaves fresh
+ * calls to idle agents itself (idleTakerExists), so both would wait out DEFER_MS.
+ */
 function loadedTakerExists(subtask: Subtask, claims: Claims, nowMs: number, except: string): boolean {
   const model = subtask.requestedModel;
   if (!model) return false;
   const excluded = queue.excludedAgents(subtask.id);
+  const selfIdle = (claims.get(except)?.all ?? 0) === 0;
   for (const [id, cap] of agentCapabilities) {
-    if (id === except || excluded.includes(id) || !modelLoadedOn(id, model, nowMs)) continue;
+    if (id === except || excluded.includes(id) || !modelWarmOn(id, model, nowMs)) continue;
+    if (selfIdle && (claims.get(id)?.all ?? 0) > 0) continue;
     if (!reachable(id, nowMs) || !liveAgent(id, cap, nowMs)) continue;
     if (!hasRoomFor(id, subtask, claims, nowMs)) continue;
     if (subtask.projectMeta.onlyAccountId) continue;
@@ -333,7 +375,7 @@ export function nudgeTargets(subtask: Subtask, nowMs = Date.now(), claims: Claim
     if (!hasRoomFor(id, subtask, claims, nowMs)) continue;
     if (!claimRule(id, cap, undefined, nowMs)(subtask)) continue;
     const at = nudgedAt.get(id);
-    candidates.push({ id, busy: claims.get(id)?.all ?? 0, free: freeSlots(id, claims, false) ?? 1, pending: at !== undefined && nowMs - at < NUDGE_PENDING_MS, at: at ?? 0, loaded: !!subtask.requestedModel && modelLoadedOn(id, subtask.requestedModel, nowMs) });
+    candidates.push({ id, busy: claims.get(id)?.all ?? 0, free: freeSlots(id, claims, false) ?? 1, pending: at !== undefined && nowMs - at < NUDGE_PENDING_MS, at: at ?? 0, loaded: !!subtask.requestedModel && modelWarmOn(id, subtask.requestedModel, nowMs) });
   }
   // Agents with the model already loaded first (no load / unload thrash), then the least loaded.
   candidates.sort((a, b) => Number(b.loaded) - Number(a.loaded) || a.busy - b.busy || Number(a.pending) - Number(b.pending) || b.free - a.free || a.at - b.at);
@@ -383,6 +425,10 @@ export function pruneDispatch(nowMs = Date.now()): void {
   for (const [id, load] of loads) if (nowMs - load.atMs > READY_KEEP_MS) loads.delete(id);
   for (const [id, at] of lastPullAt) if (nowMs - at > READY_KEEP_MS) lastPullAt.delete(id);
   for (const [id, at] of nudgedAt) if (nowMs - at > READY_KEEP_MS) nudgedAt.delete(id);
+  for (const [id, m] of served) {
+    for (const [model, at] of m) if (nowMs - at > WARM_MS) m.delete(model);
+    if (!m.size) served.delete(id);
+  }
 }
 setInterval(() => pruneDispatch(), 60_000).unref?.();
 

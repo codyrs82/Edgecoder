@@ -182,6 +182,35 @@ describe("fast dispatch", () => {
     expect(huge.statusCode).toBe(413);
     expect(huge.json()).toMatchObject({ error: "context_too_long", largestContextWindow: 8192 });
   });
+  test("model affinity: a known-cold agent leaves a fresh call to a warm one, but not when it is the preferred agent (locality, best fit)", async () => {
+    const mem = await import("../../src/swarm/coordinator/memory-admission.js");
+    const dispatch = await import("../../src/swarm/coordinator/dispatch.js");
+    const GB = 1024 ** 3;
+    const tele = (loaded: string[]) => ({ totalBytes: 64 * GB, pressure: "normal" as const, budgetBytes: 32 * GB, usedBytes: 0, loadedModels: loaded.map((name) => ({ name, bytes: GB })), models: [{ name: MODEL, bytes: GB, contextWindow: 32_768, slots: 2 }], atMs: Date.now() });
+    dispatch.forgetAgentLoad(busy.peerId); // it has not served MODEL lately
+    for (const k of [busy, idle]) expect(await pull(k)).toBeNull();
+    mem.noteAgentMemory(busy.peerId, tele([]));
+    mem.noteAgentMemory(idle.peerId, tele([MODEL]));
+    try {
+      expect(dispatch.modelKnownCold(busy.peerId, MODEL)).toBe(true);
+      const a = await submit();
+      expect(await pull(busy)).toBeNull(); // cold, and idle has it loaded with room
+      expect(await pull(idle)).toBe(a.subtaskId);
+      await finish(idle, a);
+      // Run 2's B1: the nearest host was preferred for 1 s but deferred 1.5 s to the warm Mac.
+      const b = await submit();
+      dispatch.preferAgent(b.subtaskId, busy.peerId, 2_000);
+      expect(await pull(idle)).toBeNull(); // left to the preferred agent
+      expect(await pull(busy)).toBe(b.subtaskId); // not held back by affinity
+      await finish(busy, b);
+      // It ran MODEL just now: warm, whatever its telemetry said.
+      expect(dispatch.modelWarmOn(busy.peerId, MODEL)).toBe(true);
+      expect(dispatch.modelKnownCold(busy.peerId, MODEL)).toBe(false);
+    } finally {
+      mem.resetMemoryAdmission();
+    }
+  });
+
   test("/inference/models reports free model slots, so the portal can compare coordinators by room left", async () => {
     const models = async () => ((await app.inject({ method: "GET", url: "/inference/models", remoteAddress: REMOTE, headers: { "x-mesh-token": MESH } })).json().models as Array<{ model: string; freeSlots?: number; idleAgents: number }>).find((m) => m.model === MODEL)!;
     // Each of busy and idle reports 2 slots, both free.
