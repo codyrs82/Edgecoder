@@ -802,6 +802,10 @@ The schemas are collected in `src/config/index.ts`. `tests/common/env-docs.test.
 | `AGENT_RATE_LIMIT_MAX` | integer ≥ 0 | `300` |
 | `AGENT_RATE_LIMIT_WINDOW_MS` | integer ≥ 1 | `60000` |
 | `AGENT_CHUNK_RATE_LIMIT_MAX` | integer ≥ 0 | `3000` |
+| `AGENT_RATE_LIMIT_PER_SLOT` | integer ≥ 0 (added to `AGENT_RATE_LIMIT_MAX` per slot the agent reports, up to 16; `0` keeps the budget flat) | `40` |
+| `AGENT_CHUNK_RATE_LIMIT_PER_SLOT` | integer ≥ 0 (added to `AGENT_CHUNK_RATE_LIMIT_MAX` per reported slot, up to 16; `0` keeps it flat) | `400` |
+| `AGENT_LEASE_RATE_LIMIT_MAX` | integer ≥ 0 (per-agent budget for `/result` and lease-only heartbeats, separate from pulls) | `300` |
+| `AGENT_LEASE_RATE_LIMIT_PER_SLOT` | integer ≥ 0 (added to `AGENT_LEASE_RATE_LIMIT_MAX` per reported slot, up to 16; `0` keeps it flat) | `50` |
 | `INFERENCE_CLAIM_TIMEOUT_MS` | integer ms, 1000 to 600000 (a network inference call no agent claimed by then is cancelled, refunded in full and answered `503 no_capacity` with `Retry-After`) | `45000` |
 | `INFERENCE_DEFAULT_MAX_TOKENS` | integer tokens, 16 to 32768 (output cap for a network model call that sets no `maxTokens`; an agent is never paid for output past a call's cap) | `4096` |
 | `RESTRICTED_MODELS_JSON` | JSON object of model tag to tier, `{"<tag>": "security_research"}`; the operator's list of restricted models (listed and served only to entitled accounts, only on their own or leased machines). An unreadable value stops the coordinator | unset (no restricted models) |

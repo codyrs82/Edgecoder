@@ -35,6 +35,7 @@
 import { estimateModelBytes, type MemoryTelemetry, type PressureLevel } from "../memory-budget.js";
 import { isCloudModel } from "../../cloud-host/catalog.js";
 import { agentSocketLost } from "./agent-liveness.js";
+import { DEFAULT_ABANDONED_BURST_MS } from "../../security/behavior-tracker.js";
 
 /** Telemetry older than this is ignored (the agent is then treated like one that reports none). */
 export const MEMORY_FRESH_MS = 2 * 60_000;
@@ -78,7 +79,16 @@ interface Circuit {
   openUntilMs: number;
   /** When it last opened (0: never). */
   openedAtMs: number;
+  /** When the current group of lapsed claims started (noteAgentLapse); undefined: none open. */
+  lapseGroupAtMs?: number;
 }
+
+/**
+ * Claims that lapse within this long of the first in a group are one failure for the breaker, as
+ * for BHV006 (src/security/behavior-tracker.ts DEFAULT_ABANDONED_BURST_MS): one stall of an agent
+ * running several calls at once is one failure, not one per call.
+ */
+export const CIRCUIT_LAPSE_BURST_MS = DEFAULT_ABANDONED_BURST_MS;
 
 /** Parallel model slots of an agent, for its trip threshold (set by the coordinator: dispatch.ts agentLoadReport). */
 let slotsOf: (agentId: string) => number | undefined = () => undefined;
@@ -270,6 +280,7 @@ export function noteAgentOutcome(agentId: string, ok: boolean, nowMs = Date.now(
   let c = circuits.get(agentId);
   if (ok) {
     if (c) {
+      c.lapseGroupAtMs = undefined;
       c.failures = [];
       c.trips = 0;
       c.openUntilMs = 0;
@@ -288,6 +299,18 @@ export function noteAgentOutcome(agentId: string, ok: boolean, nowMs = Date.now(
   }
   c.failures = [...c.failures.filter((at) => nowMs - at <= CIRCUIT_WINDOW_MS), nowMs];
   if (c.failures.length >= circuitThreshold(agentId)) trip(agentId, c, nowMs);
+}
+
+/**
+ * A claim the agent held lapsed, or was moved off it because it was lost (lost-agent-claims.ts):
+ * a timeout for its breaker. Lapses within CIRCUIT_LAPSE_BURST_MS of the first in a group count once.
+ */
+export function noteAgentLapse(agentId: string, nowMs = Date.now()): void {
+  const c = circuits.get(agentId);
+  if (c?.lapseGroupAtMs !== undefined && nowMs >= c.lapseGroupAtMs && nowMs - c.lapseGroupAtMs < CIRCUIT_LAPSE_BURST_MS) return;
+  noteAgentOutcome(agentId, false, nowMs);
+  const after = circuits.get(agentId);
+  if (after) after.lapseGroupAtMs = nowMs;
 }
 
 /** A result error that is the agent saying no for memory (not a failure of the agent). */

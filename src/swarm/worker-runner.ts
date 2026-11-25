@@ -27,6 +27,7 @@ import { runInferenceSubtask } from "./inference-runner.js";
 import { warmOllamaModel } from "../inference-api/ollama.js";
 import { detectHardware, gpuNeedsOffloadProof, hardwareProfileFor, selectGpu, selectGpuPool, type Probe } from "../install/hardware.js";
 import { claimedProfile, decideGpuClaim, type GpuClaimDecision } from "./gpu-claim.js";
+import { flushPendingResultBuffer, isPermanentResultRefusal } from "./pending-results.js";
 import { enforceSandboxPolicy, inferenceOnlyRejection, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
 import { portalLabel, enrollmentBackoffMs, enrollmentRefusalFromError, enrollmentRefusalKey, enrollmentRefusalMessage, isAgentNotRegisteredError, isNotRegisteredWsClose, MESH_WS_REBIND_CLOSE_CODE, QuickReregisterGate, parseRetryAfterMs, rateLimitWaitMs, registeredLogLine, registerRefreshMsFromEnv, shouldLogEnrollmentRefusal, shouldRegister, type RegisterReply } from "./registration-policy.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
@@ -1274,21 +1275,11 @@ async function parseJsonBodySafe(res: { headers: Record<string, unknown>; body: 
 }
 
 async function flushPendingResults(): Promise<void> {
-  const pending = localStore.listPendingResults(20);
-  if (pending.length === 0) return;
-  console.log(`[agent:${AGENT_ID}] flushing ${pending.length} buffered result(s)`);
-  for (const row of pending) {
-    try {
-      const resultPayload = JSON.parse(row.payload);
-      await post("/result", resultPayload, { signed: true });
-      localStore.markResultSynced(row.subtaskId);
-      console.log(`[agent:${AGENT_ID}] flushed result: ${row.subtaskId}`);
-    } catch {
-      localStore.incrementResultAttempt(row.subtaskId);
-      console.warn(`[agent:${AGENT_ID}] flush failed for ${row.subtaskId} (attempt ${row.attempts + 1}), stopping`);
-      break;
-    }
-  }
+  // A result refused for good (lease_expired) is dropped, not retried forever (src/swarm/pending-results.ts).
+  await flushPendingResultBuffer(localStore, (payload) => post("/result", payload, { signed: true }), {
+    info: (m) => console.log(`[agent:${AGENT_ID}] ${m}`),
+    warn: (m) => console.warn(`[agent:${AGENT_ID}] ${m}`),
+  });
 }
 
 async function flushOfflineLedger(): Promise<void> {
@@ -2450,6 +2441,11 @@ async function loop(): Promise<void> {
             try {
               await post("/result", resultPayload, { signed: true });
             } catch (resultErr) {
+              // The claim lapsed before the result arrived: the coordinator will refuse it every time.
+              if (isPermanentResultRefusal(resultErr)) {
+                console.warn(`[agent:${AGENT_ID}] result for ${result.subtaskId} refused (lease_expired: the claim lapsed); not buffered`);
+                return;
+              }
               try { localStore.enqueuePendingResult(result.subtaskId, JSON.stringify(resultPayload)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
               console.warn(`[agent:${AGENT_ID}] result buffered for retry: ${result.subtaskId}`);
             }

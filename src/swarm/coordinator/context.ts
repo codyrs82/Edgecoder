@@ -299,9 +299,11 @@ const AGENT_RATE_LIMIT_MAX = CC.AGENT_RATE_LIMIT_MAX;
 const AGENT_RATE_LIMIT_WINDOW_MS = CC.AGENT_RATE_LIMIT_WINDOW_MS;
 export const SECURITY_NONCE_TTL_MS = CC.SECURITY_NONCE_TTL_MS;
 export const SECURITY_MAX_SKEW_MS = CC.SECURITY_MAX_SKEW_MS;
-export const agentRateLimiter = new AgentRateLimiter({ maxRequests: AGENT_RATE_LIMIT_MAX, windowMs: AGENT_RATE_LIMIT_WINDOW_MS });
+export const agentRateLimiter = new AgentRateLimiter({ maxRequests: AGENT_RATE_LIMIT_MAX, windowMs: AGENT_RATE_LIMIT_WINDOW_MS, perSlot: CC.AGENT_RATE_LIMIT_PER_SLOT });
+/** /result and lease-only heartbeats: counted apart from pulls, so pull traffic cannot starve a claim's lease or its result. */
+export const agentLeaseRateLimiter = new AgentRateLimiter({ maxRequests: CC.AGENT_LEASE_RATE_LIMIT_MAX, windowMs: AGENT_RATE_LIMIT_WINDOW_MS, perSlot: CC.AGENT_LEASE_RATE_LIMIT_PER_SLOT });
 /** /inference/chunks only: streamed reply pieces, counted apart from the agent's other requests. */
-export const agentChunkRateLimiter = new AgentRateLimiter({ maxRequests: CC.AGENT_CHUNK_RATE_LIMIT_MAX, windowMs: AGENT_RATE_LIMIT_WINDOW_MS });
+export const agentChunkRateLimiter = new AgentRateLimiter({ maxRequests: CC.AGENT_CHUNK_RATE_LIMIT_MAX, windowMs: AGENT_RATE_LIMIT_WINDOW_MS, perSlot: CC.AGENT_CHUNK_RATE_LIMIT_PER_SLOT });
 /** Signed requests that failed before the signer was proven, per client address. */
 export const preAuthFailures = new PreAuthFailureCounter(CC.PREAUTH_FAILURE_MAX_PER_IP, AGENT_RATE_LIMIT_WINDOW_MS);
 // Replay protection: Postgres when configured, so nonces survive restarts and are shared by every

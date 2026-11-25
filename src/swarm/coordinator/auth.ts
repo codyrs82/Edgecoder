@@ -36,11 +36,13 @@ import {
   SECURITY_MAX_SKEW_MS,
   agentRateLimiter,
   agentChunkRateLimiter,
+  agentLeaseRateLimiter,
   nonceStore,
   SECURITY_NONCE_TTL_MS,
   CC
 } from "./context.js";
 import { REQUIRE_SIGNED_AGENT_REQUESTS, agentCapabilities, behaviorTracker } from "./agent-state.js";
+import { isLeaseTraffic } from "../../security/agent-rate-limiter.js";
 
 // #5: an empty token means "open" only outside production; in production it is 503/denied.
 export function requireMeshToken(req: { headers: Record<string, unknown> }, reply: { code: (n: number) => any }) {
@@ -246,6 +248,17 @@ export function extractSignedHeaders(headers: Record<string, unknown>): SignedHe
   };
 }
 
+/** agentId -> when its last agent_lease_traffic_rate_limited event was logged. */
+const leaseLimitLoggedAt = new Map<string, number>();
+const LEASE_LIMIT_LOG_EVERY_MS = 60_000;
+function shouldLogLeaseLimit(agentId: string, nowMs = Date.now()): boolean {
+  const last = leaseLimitLoggedAt.get(agentId);
+  if (last !== undefined && nowMs - last < LEASE_LIMIT_LOG_EVERY_MS) return false;
+  if (leaseLimitLoggedAt.size > 10_000) leaseLimitLoggedAt.clear();
+  leaseLimitLoggedAt.set(agentId, nowMs);
+  return true;
+}
+
 export async function verifyAgentRequest(
   headers: Record<string, unknown>,
   routePath: string,
@@ -324,9 +337,24 @@ export async function verifyAgentRequest(
   //    Streamed reply pieces count against their own, larger budget, and a proven agent over its
   //    budget is logged as agent_rate_limited (INFO): auth_rate_limit_hit, which alerts, stays for
   //    addresses turned away before any signature checked out (step 2).
-  const limiter = routePath === "/inference/chunks" ? agentChunkRateLimiter : agentRateLimiter;
+  //    /result and lease-only heartbeats have a budget of their own (agentLeaseRateLimiter), so pulls
+  //    cannot starve what keeps a claim alive and returns its work; every budget grows with the
+  //    agent's reported model slots. A refused result or lease heartbeat is logged apart
+  //    (agent_lease_traffic_rate_limited, WARN, once a minute per agent): its claims may lapse.
+  const leaseTraffic = isLeaseTraffic(routePath, opts?.rawBody);
+  const limiter = routePath === "/inference/chunks" ? agentChunkRateLimiter : leaseTraffic ? agentLeaseRateLimiter : agentRateLimiter;
   if (!isLoopback && !limiter.check(agentId)) {
     const retryAfterMs = limiter.retryAfterMs(agentId);
+    if (leaseTraffic && shouldLogLeaseLimit(agentId)) {
+      securityLog.log({
+        level: securityLog.severity("agent_lease_traffic_rate_limited"),
+        event: "agent_lease_traffic_rate_limited",
+        source: { type: "agent", id: agentId, ip: clientIp },
+        details: { route: routePath, retryAfterMs, limitPerWindow: limiter.limitFor(agentId) },
+        action: "reject_request",
+        coordinatorId: identity.peerId,
+      });
+    }
     securityLog.log({
       level: securityLog.severity("agent_rate_limited"),
       event: "agent_rate_limited",

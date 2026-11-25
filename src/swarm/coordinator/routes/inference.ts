@@ -36,7 +36,7 @@ import { agentHasModel, agentHasModelForOwner, routableModels } from "../../mode
 import { agentsReportingInstalled } from "../model-control.js";
 import { rawBodyOf } from "../../../security/request-signing.js";
 import { app as coordinatorApp, type CoordinatorApp } from "../app.js";
-import { CC, FALLBACK_BTC_USD, claimedTradePrice, reservations, taskBilling, settledBilling, usagePending, queue, identity, securityLog, requestOrigin } from "../context.js";
+import { CC, FALLBACK_BTC_USD, claimedTradePrice, reservations, taskBilling, settledBilling, usagePending, queue, identity, securityLog, requestOrigin, agentRateLimiter, agentChunkRateLimiter, agentLeaseRateLimiter } from "../context.js";
 import { pickSameNetworkAgent } from "../../lan-proximity.js";
 import { mutable } from "../mutable-state.js";
 import { agentCapabilities, activeBlacklistRecord, autoBlacklister } from "../agent-state.js";
@@ -253,6 +253,8 @@ export async function moveCallsOffTrippedAgent(agentId: string, nowMs = Date.now
 
 // The breaker's trip threshold scales with the agent's slots, and a trip moves its waiting calls.
 setCircuitSlotsLookup((id) => agentLoadReport(id)?.slots);
+// Per-agent request budgets grow with the slots it reports too (src/security/agent-rate-limiter.ts).
+for (const limiter of [agentRateLimiter, agentChunkRateLimiter, agentLeaseRateLimiter]) limiter.setSlotsLookup((id) => agentLoadReport(id)?.slots);
 onCircuitTrip((agentId) => {
   queueMicrotask(() => void moveCallsOffTrippedAgent(agentId).catch((err) => coordinatorApp.log.error({ err, agentId }, "circuit_open_move_failed")));
 });

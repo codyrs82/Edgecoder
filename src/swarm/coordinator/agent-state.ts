@@ -320,7 +320,7 @@ export function evaluateAndEnforce(agentId: string): void {
  * runs inside the queue's lease bookkeeping.
  */
 export function recordAbandonedClaim(claim: AbandonedClaim): void {
-  behaviorTracker.recordAbandonedClaim(claim.agentId, { whileActive: claim.holderLive }, claim.atMs);
+  behaviorTracker.recordAbandonedClaim(claim.agentId, { whileActive: claim.holderLive, subtaskId: claim.subtaskId }, claim.atMs);
   securityLog.log({
     level: "INFO",
     event: "claim_abandoned",

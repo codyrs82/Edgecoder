@@ -4,14 +4,38 @@
 export interface RateLimitConfig {
   maxRequests: number;
   windowMs: number;
+  /**
+   * Added to maxRequests per parallel model slot the agent reports (setSlotsLookup), so a
+   * multi-slot host's budget grows with the calls it can run at once. 0 or absent: a flat limit.
+   */
+  perSlot?: number;
 }
+
+/** The most slots any agent's budget is scaled by, whatever it reports. */
+export const RATE_LIMIT_MAX_SLOTS = 16;
 
 export class AgentRateLimiter {
   private readonly config: RateLimitConfig;
   private readonly windows = new Map<string, number[]>();
+  private slotsOf: (agentId: string) => number | undefined = () => undefined;
 
   constructor(config: RateLimitConfig) {
     this.config = config;
+  }
+
+  /** Where the agent's reported parallel model slots come from (the coordinator's pull reports). */
+  setSlotsLookup(fn: (agentId: string) => number | undefined): void {
+    this.slotsOf = fn;
+  }
+
+  /** This agent's requests per window: the base, plus perSlot for each reported slot (at most RATE_LIMIT_MAX_SLOTS). */
+  limitFor(agentId: string): number {
+    const base = this.config.maxRequests;
+    const perSlot = this.config.perSlot ?? 0;
+    if (base <= 0 || perSlot <= 0) return base;
+    const raw = Number(this.slotsOf(agentId) ?? 0);
+    const slots = Number.isFinite(raw) ? Math.max(0, Math.min(RATE_LIMIT_MAX_SLOTS, Math.floor(raw))) : 0;
+    return base + perSlot * slots;
   }
 
   check(agentId: string): boolean {
@@ -29,7 +53,7 @@ export class AgentRateLimiter {
       timestamps.shift();
     }
 
-    if (timestamps.length >= this.config.maxRequests) {
+    if (timestamps.length >= this.limitFor(agentId)) {
       return false;
     }
 
@@ -39,16 +63,31 @@ export class AgentRateLimiter {
 
   /** How long until `agentId` may send again (0 when it may now). */
   retryAfterMs(agentId: string, now = Date.now()): number {
-    if (this.config.maxRequests <= 0) return this.config.windowMs;
+    const max = this.limitFor(agentId);
+    if (max <= 0) return this.config.windowMs;
     const timestamps = this.windows.get(agentId);
-    if (!timestamps || timestamps.length < this.config.maxRequests) return 0;
+    if (!timestamps || timestamps.length < max) return 0;
     // The request that frees a slot is the oldest one still counted in the window.
-    const oldestCounted = timestamps[timestamps.length - this.config.maxRequests];
+    const oldestCounted = timestamps[timestamps.length - max];
     return Math.max(0, oldestCounted + this.config.windowMs - now);
   }
 
   reset(agentId: string): void {
     this.windows.delete(agentId);
+  }
+}
+
+/**
+ * Requests that keep an agent's claims alive or return their work: /result, and a heartbeat sent
+ * with `leaseOnly` (the worker's renewal while a claim runs). They count against their own budget.
+ */
+export function isLeaseTraffic(routePath: string, rawBody: string | undefined): boolean {
+  if (routePath === "/result") return true;
+  if (routePath !== "/heartbeat" || !rawBody || !rawBody.includes("leaseOnly")) return false;
+  try {
+    return (JSON.parse(rawBody) as { leaseOnly?: unknown })?.leaseOnly === true;
+  } catch {
+    return false;
   }
 }
 

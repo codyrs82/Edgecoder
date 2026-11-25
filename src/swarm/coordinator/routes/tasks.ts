@@ -586,7 +586,16 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     }
     // ── #51: a result from a holder whose lease expired is late; reject before anything else ──
     const late = await lateResultRejectionDurable(queue, body.subtaskId, body.agentId);
-    if (late) return reply.code(late.statusCode).send(late.body);
+    if (late) {
+      // BHV006: the agent returned this claim's work after its lease lapsed. It is still refused (the
+      // subtask went back on the queue), but it was returned, not abandoned: the lapse recorded for
+      // it is withdrawn. Only on the agent's own signed request (the event exists only if it held
+      // that claim).
+      if (verified && verified.agentId === body.agentId && behaviorTracker.forgiveAbandonedClaim(body.agentId, body.subtaskId)) {
+        app.log.info({ subtaskId: body.subtaskId, agentId: body.agentId }, "late_result_withdraws_abandoned_claim");
+      }
+      return reply.code(late.statusCode).send(late.body);
+    }
     // ── #44: claim ownership, before anything is recorded ──
     const claim = queue.getClaim(body.subtaskId);
     // Results forwarded by a peer coordinator (gossip-offered subtask executed elsewhere) carry the

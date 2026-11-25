@@ -213,15 +213,18 @@ const bhv005ProtocolAbuse: AnomalyRule = (stats, config) => {
  * restarts to finish an update, a network drops. The claims it held are requeued at lease expiry
  * (src/swarm/queue.ts), and an agent that announces it is going offline hands them back at once and
  * abandons nothing. Only a pattern strikes: the agent keeps claiming and abandoning without ever
- * returning a result, or keeps holding claims past their deadline while heartbeating.
+ * returning a result, or keeps holding claims past their deadline while heartbeating. Both count
+ * lapses, not claims: claims that lapse together (one stall of an agent running several calls at
+ * once) are one (behavior-tracker.ts DEFAULT_ABANDONED_BURST_MS), and a claim whose result arrived
+ * late is not abandoned at all (forgiveAbandonedClaim).
  */
 const bhv006AbandonedClaims: AnomalyRule = (stats, config) => {
   const streak = stats.abandonedClaimStreak ?? 0;
   const whileActive = stats.abandonedWhileActiveCount ?? 0;
   if (streak < config.abandonedClaimThreshold && whileActive < config.abandonedClaimThreshold) return null;
   const description = streak >= config.abandonedClaimThreshold
-    ? `${streak} claims abandoned in a row without returning a result (lease lapsed; ${stats.abandonedClaimCount ?? streak} in the window)`
-    : `${whileActive} claims held past their deadline while heartbeating`;
+    ? `claims abandoned in a row without returning a result: ${streak} separate lapses (lease lapsed; ${stats.abandonedClaimCount ?? streak} claims in the window)`
+    : `claims held past their deadline while heartbeating: ${whileActive} separate lapses`;
   return {
     ruleId: "BHV006",
     ruleName: "Abandoned claims",

@@ -214,10 +214,20 @@ export const coordinatorConfigSchema = z.object({
   // Signed requests per agent per window. An idle worker heartbeats and pulls every ~1.2 s
   // (~100/min), so the limit must sit well above that or healthy agents read as bad signatures.
   AGENT_RATE_LIMIT_MAX: envInt(300, { min: 0 }),
+  // Added per reported parallel model slot (at most 16): a multi-slot host pulls once per call, so
+  // a 16-slot host turning calls over every 2 s pulls ~480 times a minute.
+  AGENT_RATE_LIMIT_PER_SLOT: envInt(40, { min: 0 }),
+  // /result and lease-only heartbeats have their own budget, so pulls can never starve the requests
+  // that keep claims alive and return their work (a starved lease lapses and the call is lost).
+  // A 16-slot host on 2 s calls: ~480 results and ~64 lease heartbeats a minute, plus retries.
+  AGENT_LEASE_RATE_LIMIT_MAX: envInt(300, { min: 0 }),
+  AGENT_LEASE_RATE_LIMIT_PER_SLOT: envInt(50, { min: 0 }),
   AGENT_RATE_LIMIT_WINDOW_MS: envInt(60000, { min: 1 }),
   // Streamed reply pieces (/inference/chunks) have their own budget: a fast GPU serving several
   // calls at once flushes a piece every ~150 ms per call, far above the general limit.
   AGENT_CHUNK_RATE_LIMIT_MAX: envInt(3000, { min: 0 }),
+  // Added per reported model slot (at most 16): ~400 pieces a minute per call streaming at once.
+  AGENT_CHUNK_RATE_LIMIT_PER_SLOT: envInt(400, { min: 0 }),
   // A network inference call no agent has claimed by then is cancelled, its reserve refunded in
   // full, and the requester told 503 no_capacity: well under the 100 s a proxy in front of the
   // portal (Cloudflare) waits for a response, so an overloaded call fails cleanly instead.

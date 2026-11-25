@@ -27,7 +27,7 @@
 import { queue } from "./context.js";
 import { app } from "./app.js";
 import { agentsLostFor, SOCKET_LOST_CLAIM_GRACE_MS } from "./agent-liveness.js";
-import { noteAgentOutcome } from "./memory-admission.js";
+import { noteAgentLapse } from "./memory-admission.js";
 import { inferenceStreams, retryInferenceElsewhere } from "./routes/inference.js";
 
 /** How often the coordinator looks for calls held by lost agents. */
@@ -46,8 +46,9 @@ export async function requeueLostAgentClaims(nowMs = Date.now(), graceMs = SOCKE
     const subtask = queue.getSubtask(call.subtaskId);
     if (!subtask) continue;
     if (!(await retryInferenceElsewhere(subtask, holder, "agent_socket_lost", nowMs))) continue;
-    // A lost holder is a timeout for its circuit breaker, as a lapsed lease would have been.
-    noteAgentOutcome(holder, false, nowMs);
+    // A lost holder is a timeout for its circuit breaker, as a lapsed lease would have been (its
+    // calls moved together count once).
+    noteAgentLapse(holder, nowMs);
     moved.push(call.subtaskId);
     app.log.warn({ taskId: subtask.taskId, subtaskId: subtask.id, agentId: holder }, "inference_requeued_from_lost_agent");
   }

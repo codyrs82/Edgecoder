@@ -11,8 +11,8 @@ import type { ExecutionPolicy } from "../../src/common/types.js";
  */
 
 const policy: ExecutionPolicy = { cpuCapPercent: 50, memoryLimitMb: 2048, idleOnly: false, maxConcurrentTasks: 1, allowedHours: { startHourUtc: 0, endHourUtc: 24 } };
-const enqueue = (q: SwarmQueue, timeoutMs = 60_000) =>
-  q.enqueueSubtask({ taskId: "t-1", kind: "micro_loop", language: "python", input: "x", timeoutMs, snapshotRef: "commit:abc", projectMeta: { projectId: "p-1", resourceClass: "cpu", priority: 50 } });
+const enqueue = (q: SwarmQueue, timeoutMs = 60_000, kind: "micro_loop" | "inference" = "micro_loop") =>
+  q.enqueueSubtask({ taskId: "t-1", kind, language: "python", input: "x", timeoutMs, snapshotRef: "commit:abc", projectMeta: { projectId: "p-1", resourceClass: "cpu", priority: 50 } });
 
 function harness() {
   const queue = new SwarmQueue(undefined, { livenessMs: 1_000, graceMs: 0 });
@@ -23,7 +23,7 @@ function harness() {
   const abandoned: AbandonedClaim[] = [];
   queue.onClaimAbandoned((c) => {
     abandoned.push(c);
-    tracker.recordAbandonedClaim(c.agentId, { whileActive: c.holderLive }, c.atMs);
+    tracker.recordAbandonedClaim(c.agentId, { whileActive: c.holderLive, subtaskId: c.subtaskId }, c.atMs);
     const stats = tracker.getStats(c.agentId, c.atMs);
     if (stats) blacklister.processAnomalies(c.agentId, detector.evaluate(stats), c.atMs);
   });
@@ -96,5 +96,82 @@ describe("BHV006 pattern leads to a blacklist", () => {
     }
     expect(tracker.getStats("mac", t + 2)!.abandonedClaimCount).toBe(12);
     expect(actions).toEqual([]);
+  });
+});
+
+/*
+ * 2026-11-25: a 16-slot cloud host returning model calls in seconds was blacklisted for "5 claims
+ * abandoned in a row" when several claims it held at once lapsed together. One stall of an agent
+ * running calls side by side is one lapse, and a result that arrives late was returned, not abandoned.
+ */
+describe("BHV006 under concurrent claims", () => {
+  it("claims held at once that lapse together are one lapse: no blacklist", () => {
+    const { queue, tracker, actions, abandoned } = harness();
+    for (let i = 0; i < 8; i++) enqueue(queue, 60_000, "inference");
+    for (let i = 0; i < 8; i++) expect(queue.claim("mac")).toBeDefined();
+    queue.expireLeases(Date.now() + 5_000);
+    expect(abandoned).toHaveLength(8);
+    const stats = tracker.getStats("mac", Date.now() + 5_001)!;
+    expect(stats.abandonedClaimCount).toBe(8);
+    expect(stats.abandonedClaimStreak).toBe(1);
+    expect(actions).toEqual([]);
+  });
+
+  it("lapses spread over a sweep window are still one lapse", () => {
+    const tracker = new AgentBehaviorTracker();
+    const t0 = 1_000_000_000;
+    for (let i = 0; i < 6; i++) tracker.recordAbandonedClaim("host", { subtaskId: `s-${i}` }, t0 + i * 2_000);
+    expect(tracker.getStats("host", t0 + 20_000)!.abandonedClaimStreak).toBe(1);
+  });
+
+  it("a late result withdraws that claim's lapse (it was returned, not abandoned)", () => {
+    const { queue, tracker, abandoned } = harness();
+    let t = Date.now();
+    for (let i = 0; i < 4; i++) {
+      enqueue(queue, 60_000, "inference");
+      queue.claim("mac");
+      t += 60_000;
+      queue.expireLeases(t);
+    }
+    expect(tracker.getStats("mac", t)!.abandonedClaimStreak).toBe(4);
+    // The results come in after their leases lapsed: refused as late, but returned, not abandoned.
+    const ids = [...new Set(abandoned.map((c) => c.subtaskId))];
+    for (const id of ids) expect(tracker.forgiveAbandonedClaim("mac", id)).toBe(true);
+    expect(tracker.forgiveAbandonedClaim("mac", ids[0])).toBe(false);
+    expect(tracker.forgiveAbandonedClaim("someone-else", ids[0])).toBe(false);
+    expect(tracker.getStats("mac", t)!.abandonedClaimStreak).toBe(0);
+  });
+
+  it("claims the coordinator hands back (retry elsewhere, requeue, cancel or re-place) are never abandoned", () => {
+    const { queue, abandoned } = harness();
+    const a = enqueue(queue, 60_000, "inference");
+    const b = enqueue(queue, 60_000, "inference");
+    const c = enqueue(queue, 60_000, "inference");
+    queue.claim("mac");
+    queue.claim("mac");
+    queue.claim("mac");
+    expect(queue.releaseForRetry(a.id, "mac")).toBe(true);
+    expect(queue.requeue(b.id)).toBe(true);
+    queue.complete({ subtaskId: c.id, taskId: c.taskId, agentId: "coordinator", ok: false, output: "", error: "cancelled_by_requester", durationMs: 0 });
+    // Re-placement only ever changes an unclaimed call.
+    expect(queue.reassignUnclaimed(b.id, { requestedModel: "other" })).toBeDefined();
+    queue.expireLeases(Date.now() + 10 * 60_000);
+    expect(abandoned).toEqual([]);
+  });
+
+  it("still blacklists an agent that claims many at once and never returns, round after round", () => {
+    const { queue, actions } = harness();
+    let t = Date.now();
+    let rounds = 0;
+    for (; rounds < 10 && actions.length === 0; rounds++) {
+      for (let i = 0; i < 16; i++) enqueue(queue, 60_000, "inference");
+      while (queue.claim("mac")) { /* take everything */ }
+      t += 60_000;
+      queue.expireLeases(t);
+    }
+    expect(rounds).toBe(5);
+    expect(actions.length).toBeGreaterThan(0);
+    expect(actions[0].reason).toContain("BHV006");
+    expect(actions[0].reason).toContain("abandoned in a row");
   });
 });
