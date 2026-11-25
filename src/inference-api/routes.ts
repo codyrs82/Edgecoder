@@ -42,7 +42,24 @@ function openAiErrorType(status: number): string {
   return status === 401 ? "invalid_api_key" : status === 503 ? "no_capacity" : status === 429 ? "rate_limit_exceeded" : "api_error";
 }
 
-function sendError(reply: FastifyReply, format: Format, status: number, message: string, retryAfterSec?: number, openAiType?: string) {
+/**
+ * Cloudflare, in front of the hosted endpoint, replaces an origin's 502 and 504 with its own HTML
+ * error page (network test 2026-11-24: ~70 "Cloudflare 502" pages with no request id were the
+ * coordinator's own JSON errors, e.g. "The machine running deepseek-v4.1-flash reported: ...").
+ * Those are answered as 503 with a short Retry-After and type "upstream_error", so the client gets
+ * the JSON error and can retry.
+ */
+export const UPSTREAM_ERROR_RETRY_AFTER_SEC = 2;
+function edgeSafe(status: number): number {
+  return status === 502 || status === 504 ? 503 : status;
+}
+
+function sendError(reply: FastifyReply, format: Format, rawStatus: number, message: string, retryAfterSec?: number, openAiType?: string) {
+  const status = edgeSafe(rawStatus);
+  if (status !== rawStatus) {
+    retryAfterSec ??= UPSTREAM_ERROR_RETRY_AFTER_SEC;
+    openAiType ??= "upstream_error";
+  }
   if (retryAfterSec !== undefined && (status === 429 || status === 503)) reply.header("retry-after", String(Math.max(1, Math.ceil(retryAfterSec))));
   return format === "anthropic"
     ? reply.code(status).send({ type: "error", error: { type: anthropicErrorType(status), message } })

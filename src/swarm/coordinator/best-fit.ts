@@ -49,7 +49,9 @@
  * when either the job wants the network's top tier (jobWantsTopTier: not a light job, complexity
  * >= AUTO_CLOUD_MIN_COMPLEXITY), or no other machine meets the job's hard requirements (tools,
  * context window, price ceiling, the size floor minParamsB): the automatic fallback when nothing
- * on the network fits. A light or simple job a network model can serve never goes to the cloud.
+ * on the network fits, or every other machine that meets it is busy (no free slot: the cloud host
+ * takes the overflow as more GPUs in the pool). A light or simple job a free network machine can
+ * serve never goes to the cloud.
  * Among cloud models the standard one (Flash) is kept over a premium one (catalog hint "premium",
  * GLM-5.3) unless the job asks for the best quality at top-tier complexity and the premium one
  * is within the price ceiling; a premium one is also used when it is the only cloud model that fits.
@@ -445,15 +447,17 @@ function scoreOf(parts: ScoreParts, w: BestFitWeights): number {
   return round3(w.quality * parts.quality + w.latency * parts.latency + w.price * parts.price + w.reliability * parts.reliability);
 }
 
-type Evaluated = Candidate & { cloud: boolean; contextOk: boolean; priceOk: boolean; toolsOk: boolean };
+type Evaluated = Candidate & { cloud: boolean; contextOk: boolean; priceOk: boolean; toolsOk: boolean; free?: boolean };
 
 /**
  * Cloud models are considered for this job: it wants the top tier, or no other machine meets its
  * hard requirements (tools, context, price ceiling, size floor): the fallback when nothing fits.
  */
-export function cloudConsidered(job: JobDescriptor, req: Requirements, all: ReadonlyArray<Pick<Evaluated, "cloud" | "toolsOk" | "contextOk" | "priceOk" | "paramsB">>): boolean {
+export function cloudConsidered(job: JobDescriptor, req: Requirements, all: ReadonlyArray<Pick<Evaluated, "cloud" | "toolsOk" | "contextOk" | "priceOk" | "paramsB" | "free">>): boolean {
   if (jobWantsTopTier(job)) return true;
-  return !all.some((c) => !c.cloud && c.toolsOk && c.contextOk && c.priceOk && c.paramsB >= req.minParamsB);
+  // Pool capacity (owner 2026-11-24: a healthy cloud host is more GPUs in the pool): also when every
+  // other machine that meets the job is busy, so load spills onto the cloud host instead of queueing.
+  return !all.some((c) => !c.cloud && c.toolsOk && c.contextOk && c.priceOk && c.paramsB >= req.minParamsB && c.free !== false);
 }
 
 /**
@@ -500,7 +504,7 @@ function evaluate(job: JobDescriptor, view: NetworkView, cfg: BestFitConfig, req
       };
       out.push({
         model, computeClass: a.computeClass, agentId: a.agentId, agentLabel: a.label, coordinatorId: a.coordinatorId, local: a.local,
-        paramsB: paramsB(model), score: scoreOf(parts, w), parts, estimate: est, belowFloor: false, cloud,
+        paramsB: paramsB(model), score: scoreOf(parts, w), parts, estimate: est, belowFloor: false, cloud, free: a.freeSlots > 0,
         toolsOk: !req.needsTools || callsTools(model),
         contextOk: req.contextTokens <= contextWindowOf(a, model),
         priceOk: job.maxCSats === undefined || est.cSats <= job.maxCSats,
@@ -573,7 +577,7 @@ export function bestFit(job: JobDescriptor, view: NetworkView, cfg: BestFitConfi
     if (!prev || c.score > prev.score || (c.score === prev.score && c.estimate.totalMs < prev.estimate.totalMs)) byPair.set(k, c);
   }
   const strip = (c: Candidate): Candidate => {
-    const { contextOk: _a, priceOk: _b, toolsOk: _c, cloud: _d, ...rest } = c as Candidate & { contextOk?: boolean; priceOk?: boolean; toolsOk?: boolean; cloud?: boolean };
+    const { contextOk: _a, priceOk: _b, toolsOk: _c, cloud: _d, free: _e, ...rest } = c as Candidate & { contextOk?: boolean; priceOk?: boolean; toolsOk?: boolean; cloud?: boolean; free?: boolean };
     return rest;
   };
   const ranked = [...byPair.values()].sort((a, b) => b.score - a.score || a.estimate.totalMs - b.estimate.totalMs).map(strip);

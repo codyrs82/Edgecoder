@@ -42,7 +42,7 @@ import { agentCapabilities, activeBlacklistRecord } from "./agent-state.js";
 import { askCapabilityOf, orderBook } from "./economy.js";
 import { peerGrantAllowsClaim } from "./grants.js";
 import { restrictedClaimAllowed } from "./restricted.js";
-import { circuitOpen, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
+import { circuitBlocks, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
 import { agentSocketLost, noteAgentHttpAlive } from "./agent-liveness.js";
 
 /** Agents nudged per claimable subtask. */
@@ -220,7 +220,7 @@ export function ownerOnlyCall(agentId: string, subtask: Subtask): boolean {
 
 /** An agent that could run `subtask` now, given what it holds. */
 function hasRoomFor(agentId: string, subtask: Subtask, claims: Claims, nowMs = Date.now()): boolean {
-  if (circuitOpen(agentId, nowMs)) return false;
+  if (circuitBlocks(agentId, claims.get(agentId)?.all ?? 0, nowMs)) return false;
   if (subtask.kind === "inference") {
     if (!memoryAdmits(agentId, subtask.requestedModel, claims.get(agentId)?.inference ?? 0, nowMs, { ownerOnly: ownerOnlyCall(agentId, subtask) })) return false;
     const free = freeSlots(agentId, claims, false);
@@ -236,8 +236,9 @@ function hasRoomFor(agentId: string, subtask: Subtask, claims: Claims, nowMs = D
  * `claims` is one snapshot for the whole pull.
  */
 export function mayTakeNow(agentId: string, subtask: Subtask, claims: Claims, nowMs = Date.now()): boolean {
-  // Circuit breaker (memory-admission.ts): an agent that keeps failing cools down first.
-  if (circuitOpen(agentId, nowMs)) return false;
+  // Circuit breaker (memory-admission.ts): an agent that keeps failing cools down first, then takes
+  // one call at a time (half open) until one succeeds.
+  if (circuitBlocks(agentId, claims.get(agentId)?.all ?? 0, nowMs)) return false;
   if (subtask.kind !== "inference") return true;
   // Host memory: the model must be loaded there (with a free slot for it) or fit its budget headroom
   // (not for the owner's own call on a model the agent keeps off the network: only pressure counts).

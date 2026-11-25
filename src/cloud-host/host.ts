@@ -46,6 +46,8 @@ export interface CloudHostConfig {
   authProbeMs: number;
   /** Where the spend totals are kept; unset = memory only. */
   stateFile?: string;
+  /** `reasoning_effort` sent with each call (CLOUD_HOST_REASONING_EFFORT); unset: the provider's default. */
+  reasoningEffort?: string;
 }
 
 /** The subset of the worker's validated env (src/config/worker.ts) a cloud host reads. */
@@ -63,6 +65,7 @@ export interface CloudHostEnv {
   CLOUD_HOST_AUTH_FAILURES?: number;
   CLOUD_HOST_AUTH_PROBE_MINUTES?: number;
   CLOUD_HOST_STATE_FILE?: string;
+  CLOUD_HOST_REASONING_EFFORT?: string;
 }
 
 /** The cloud host's configuration (throws with the variable named when something is missing or wrong). */
@@ -99,6 +102,8 @@ export function cloudHostConfigFromEnv(env: CloudHostEnv, defaults: { stateFile?
     authFailureLimit: env.CLOUD_HOST_AUTH_FAILURES ?? DEFAULT_SPEND_GUARD.authFailureLimit
   };
   const stateFile = env.CLOUD_HOST_STATE_FILE?.trim() || defaults.stateFile;
+  const reasoningEffort = env.CLOUD_HOST_REASONING_EFFORT?.trim().toLowerCase() || undefined;
+  if (reasoningEffort && !/^[a-z]{1,16}$/.test(reasoningEffort)) throw new Error("CLOUD_HOST_REASONING_EFFORT must be a word such as low, medium, high or none");
   return {
     provider,
     label: preset.label,
@@ -110,7 +115,8 @@ export function cloudHostConfigFromEnv(env: CloudHostEnv, defaults: { stateFile?
     maxRetries: env.CLOUD_HOST_MAX_RETRIES ?? 3,
     guard,
     authProbeMs: Math.max(1, env.CLOUD_HOST_AUTH_PROBE_MINUTES ?? 15) * 60_000,
-    ...(stateFile ? { stateFile } : {})
+    ...(stateFile ? { stateFile } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {})
   };
 }
 
@@ -202,7 +208,7 @@ export class CloudHost {
   ) {
     const store = deps.store ?? (config.stateFile ? fileStateStore(config.stateFile) : undefined);
     this.guard = new SpendGuard(config.guard, { ...(deps.now ? { now: deps.now } : {}), ...(store ?? {}), ...(deps.notify ? { notify: deps.notify } : {}) });
-    this.backend = { label: config.label, baseUrl: config.baseUrl, apiKey: config.apiKey, maxRetries: config.maxRetries, ...deps.backend };
+    this.backend = { label: config.label, baseUrl: config.baseUrl, apiKey: config.apiKey, maxRetries: config.maxRetries, ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}), ...deps.backend };
     this.lastAdvertised = this.advertisedModels().join(",");
   }
 
@@ -275,6 +281,11 @@ export class CloudHost {
       }
     } catch (err) {
       if (err instanceof CloudApiError && err.kind === "auth") this.guard.noteAuthFailure();
+      // Reasoning only: the provider answered (and bills the thinking) though nothing reached the caller.
+      if (err instanceof CloudApiError && err.usage) {
+        answered = true;
+        usage = err.usage;
+      }
       throw err;
     } finally {
       // The provider bills a call it answered, finished or not: count it.

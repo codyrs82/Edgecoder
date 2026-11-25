@@ -81,6 +81,25 @@ describe("a call on the cloud host", () => {
     expect(h.guard.status().dayUsd).toBeGreaterThan(0);
   });
 
+  it("a reasoning-only reply fails as reasoning_only and still counts what the provider billed", async () => {
+    fake = await startFakeProvider([
+      { stream: [{ choices: [{ index: 0, delta: { reasoning_content: "thinking" }, finish_reason: "length" }] }, { choices: [], usage: { prompt_tokens: 1_000_000, completion_tokens: 1_000_000 } }, "[DONE]"] }
+    ]);
+    const h = host(fake.url);
+    await expect(run(h, "deepseek-v4.1-flash", 16)).rejects.toThrow(/^reasoning_only: /);
+    // 1M × 0.30 + 1M × 1.20, per million
+    expect(h.guard.status().dayUsd).toBeCloseTo(1.5, 9);
+  });
+
+  it("CLOUD_HOST_REASONING_EFFORT is sent as reasoning_effort", async () => {
+    fake = await startFakeProvider([streamReply({ text: ["ok"], usage: { prompt_tokens: 1, completion_tokens: 1 } })]);
+    const cfg = cloudHostConfigFromEnv({ CLOUD_HOST_API_KEY: KEY, CLOUD_HOST_BASE_URL: fake.url, CLOUD_HOST_MAX_RETRIES: 0, CLOUD_HOST_REASONING_EFFORT: "None" });
+    expect(cfg.reasoningEffort).toBe("none");
+    await run(new CloudHost(cfg, { store: { load: () => undefined, save: () => undefined } }), "glm-5.3");
+    expect(fake.requests[0].body.reasoning_effort).toBe("none");
+    expect(() => cloudHostConfigFromEnv({ CLOUD_HOST_API_KEY: KEY, CLOUD_HOST_REASONING_EFFORT: "low; drop" })).toThrow(/CLOUD_HOST_REASONING_EFFORT/);
+  });
+
   it("refuses a model it does not serve and a call longer than the model's window", async () => {
     const h = host("http://127.0.0.1:9/v1");
     await expect(run(h, "qwen3-coder:30b")).rejects.toThrow(/^model_unavailable/);

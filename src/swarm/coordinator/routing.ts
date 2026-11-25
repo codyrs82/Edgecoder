@@ -30,7 +30,7 @@ import { CC, FALLBACK_BTC_USD, queue, reservations, identity, usageListeners } f
 import { agentContextWindow, agentLastPullMs, agentLoadReport, freeModelSlots, pickupStats } from "./dispatch.js";
 import { agentSocketLost } from "./agent-liveness.js";
 import { distanceRttMs, regionDistanceKm } from "../../common/geo-regions.js";
-import { agentUnavailable, loadedModelsOf, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
+import { agentUnavailable, circuitBlocks, loadedModelsOf, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
 import { effectiveHardware, hardwareVerifier } from "./economy.js";
 import { mutable } from "./mutable-state.js";
 import { restrictedCatalog } from "./restricted.js";
@@ -114,6 +114,9 @@ export function localAgentViews(nowMs = Date.now(), rttOf: (agentId: string) => 
   const out: AgentView[] = [];
   for (const [agentId, cap] of agentCapabilities) {
     if (activeBlacklistRecord(agentId) || cap.hostApproved === false || reservations.isHeld(agentId, nowMs)) continue;
+    // B4: an agent whose circuit is open (or half open with its probe running) gets no placement at
+    // all: a call placed on it waited out the claim bound behind the breaker.
+    if (circuitBlocks(agentId, claims.get(agentId)?.all ?? 0, nowMs)) continue;
     // Cloud hosts (src/cloud-host/): best fit sees each online one with the models AUTO_CLOUD_MODELS
     // allows (default: every autoEligible catalog model; "off": none), and places on them only
     // top-tier jobs or jobs nothing else on the network can take (best-fit.ts). Each call spends

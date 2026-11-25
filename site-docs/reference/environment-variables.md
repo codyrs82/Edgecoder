@@ -430,6 +430,7 @@ A cloud host is the agent serving models through a hosted API with the platform'
 | `CLOUD_HOST_AUTH_FAILURES` | `3` | Provider 401 / 403 answers in a row that pause the host with a critical alert (a bad or revoked key). |
 | `CLOUD_HOST_AUTH_PROBE_MINUTES` | `15` | While paused for the key, minutes between key checks; a good answer resumes the host. |
 | `CLOUD_HOST_STATE_FILE` | `<config dir>/cloud-host-spend.json` | Where the day's and month's spend are kept across restarts. Put it on a volume. |
+| `CLOUD_HOST_REASONING_EFFORT` | unset (the provider's default) | Sent as `reasoning_effort` with every call, e.g. `low`, or `none` where the provider can turn thinking off for the model. |
 | `CLOUD_MODELS_JSON` | unset (built-in list) | JSON array of cloud models layered over the built-in catalog by id (`id`, `providerModel`, `usdPerM` `{input, cachedInput, output}`, `contextWindow`, `paramsB`, `origin` `{vendor, country}`, `priceAsOf`, `rank`, `hint` `recommended`/`premium`, `autoEligible`, default true: `false` keeps a model out of Auto unless `AUTO_CLOUD_MODELS` names it). Read by the cloud host and the coordinators: set the same value on both. An unreadable value stops the service. |
 
 ## Model runtime: other settings

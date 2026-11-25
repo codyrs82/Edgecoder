@@ -43,7 +43,8 @@ describe("hosted endpoint", () => {
     expect(noKey.statusCode).toBe(401);
     // Valid key, no coordinator reachable: a clear 503 from the network, not an auth error.
     const r = await app.inject({ method: "POST", url: "/v1/messages", headers: { "x-api-key": key }, payload: { model: "network/m", max_tokens: 5, messages: [{ role: "user", content: "x" }] } });
-    expect(r.statusCode).toBe(502);
+    // (a 503, never a 502: Cloudflare replaces an origin 502 with its own page)
+    expect(r.statusCode).toBe(503);
     expect(r.json().error.message).toContain("no_coordinator");
   });
 

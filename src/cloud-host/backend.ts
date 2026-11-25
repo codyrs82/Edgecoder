@@ -19,6 +19,11 @@
  *   them and pauses (host.ts).
  * - 400 / 413 that say the prompt is too long are context overflows (the runner hands the call to
  *   another agent, like a local engine's).
+ * - A reply that is reasoning only (GLM-5.3 and DeepSeek V4.1 Flash stream their thinking as
+ *   `reasoning_content` before the answer; a small max_tokens can end the call inside it) is
+ *   CloudApiError "reasoning_only" (REASONING_ONLY_ERROR): the caller's output cap was too small,
+ *   not a host failure, so the coordinator neither retries it elsewhere nor counts it against the
+ *   host. It carries the provider's token counts (the provider bills the reasoning).
  * The key is sent only in the Authorization header and is scrubbed from any error text.
  */
 import { request } from "undici";
@@ -40,13 +45,25 @@ export interface RemoteBackendConfig {
   retryMaxMs?: number;
   /** Tests: replace the wait. */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  /** Sent as `reasoning_effort` when set (CLOUD_HOST_REASONING_EFFORT); unset: the provider's default. */
+  reasoningEffort?: string;
 }
+
+/** The error text of a reply that was reasoning only (no answer, no tool call). */
+export const REASONING_ONLY_ERROR = "reasoning_only";
 
 export type CloudErrorKind = "auth" | "rate_limit" | "server" | "bad_request" | "network";
 
 /** An error from the provider. An EngineError, so a context overflow is handled like a local engine's. */
 export class CloudApiError extends EngineError {
-  constructor(message: string, status: number, readonly kind: CloudErrorKind, contextOverflow = false) {
+  constructor(
+    message: string,
+    status: number,
+    readonly kind: CloudErrorKind,
+    contextOverflow = false,
+    /** The provider's token counts, when it answered before failing (it bills them). */
+    readonly usage?: { promptTokens?: number; outputTokens?: number; cachedPromptTokens?: number }
+  ) {
     super(message, status, contextOverflow);
   }
 }
@@ -132,7 +149,7 @@ function parseArgs(raw: string): Record<string, unknown> {
 }
 
 type SseChunk = {
-  choices?: Array<{ delta?: { content?: string | null; tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }> }; finish_reason?: string | null }>;
+  choices?: Array<{ delta?: { content?: string | null; reasoning_content?: string | null; reasoning?: string | null; tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }> }; finish_reason?: string | null }>;
   usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } | null } | null;
   error?: unknown;
 };
@@ -153,7 +170,8 @@ export async function* remoteChat(cfg: RemoteBackendConfig, req: RemoteChatReque
     stream: true,
     stream_options: { include_usage: true },
     ...(req.maxTokens !== undefined ? { max_tokens: req.maxTokens } : {}),
-    ...(req.temperature !== undefined ? { temperature: req.temperature } : {})
+    ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+    ...(cfg.reasoningEffort ? { reasoning_effort: cfg.reasoningEffort } : {})
   });
 
   let res: Awaited<ReturnType<typeof request>> | undefined;
@@ -187,6 +205,7 @@ export async function* remoteChat(cfg: RemoteBackendConfig, req: RemoteChatReque
   let finish: string | undefined;
   let usage: { promptTokens?: number; outputTokens?: number; cachedPromptTokens?: number } = {};
   let firstAt: number | undefined;
+  let reasoningChars = 0;
   let buf = "";
   let ended = false;
   const handle = function* (data: string): Generator<OllamaPiece> {
@@ -205,6 +224,7 @@ export async function* remoteChat(cfg: RemoteBackendConfig, req: RemoteChatReque
       throw new CloudApiError(`cloud_provider_error: ${cfg.label}: ${msg}`, 500, "server", isContextOverflowMessage(msg));
     }
     for (const c of chunk.choices ?? []) {
+      reasoningChars += (c.delta?.reasoning_content ?? c.delta?.reasoning ?? "").length;
       const text = c.delta?.content;
       if (text) {
         firstAt ??= Date.now();
@@ -245,6 +265,11 @@ export async function* remoteChat(cfg: RemoteBackendConfig, req: RemoteChatReque
     .filter(([, c]) => c.name)
     .map(([, c]) => ({ function: { name: c.name, arguments: parseArgs(c.args) } }));
   if (toolCalls.length) yield { toolCalls };
+  // Thinking and no answer: the output cap ran out inside the reasoning (or the model stopped there).
+  if (firstAt === undefined && reasoningChars > 0) {
+    const cap = req.maxTokens !== undefined ? ` (max_tokens ${req.maxTokens})` : "";
+    throw new CloudApiError(`${REASONING_ONLY_ERROR}: ${req.model} spent the reply${cap} reasoning and gave no answer; send a larger max_tokens`, 400, "bad_request", false, usage);
+  }
   const end = Date.now();
   yield {
     doneReason: finish === "length" ? "length" : "stop",

@@ -2,8 +2,17 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   agentMemory,
   agentMemoryRecord,
+  circuitBlocks,
+  circuitHalfOpen,
   circuitOpen,
+  circuitOpenSince,
+  circuitState,
+  circuitThreshold,
   CIRCUIT_BASE_COOLDOWN_MS,
+  CIRCUIT_MAX_COOLDOWN_MS,
+  CIRCUIT_TRIP_RESET_MS,
+  onCircuitTrip,
+  setCircuitSlotsLookup,
   MEMORY_FRESH_MS,
   memoryAdmits,
   memoryLimited,
@@ -138,6 +147,90 @@ describe("circuit breaker", () => {
     expect(circuitOpen("a", T0 + 10)).toBe(false);
     for (let i = 0; i < 3; i++) noteAgentResult("a", "m", false, "ollama crashed", T0 + i);
     expect(circuitOpen("a", T0 + 10)).toBe(true);
+  });
+});
+
+describe("circuit breaker: B4 (open circuit, half-open probe, slots)", () => {
+  const trip = (id: string, at: number) => {
+    for (let i = 0; i < circuitThreshold(id); i++) noteAgentOutcome(id, false, at + i);
+  };
+  beforeEach(() => setCircuitSlotsLookup(() => undefined));
+
+  it("a failure reported while the circuit is open is not a new trip", () => {
+    trip("a", T0);
+    expect(circuitState("a", T0 + 10).trips).toBe(1);
+    // Calls it held from before, and waits the open circuit itself caused, come back failed now.
+    for (let i = 0; i < 10; i++) noteAgentOutcome("a", false, T0 + 1_000 + i);
+    expect(circuitState("a", T0 + 2_000)).toMatchObject({ open: true, trips: 1, recentFailures: 0 });
+    expect(circuitOpen("a", T0 + 2 + CIRCUIT_BASE_COOLDOWN_MS + 1)).toBe(false);
+  });
+
+  it("after the cool-down it is half open: one call at a time; the probe's success closes it", () => {
+    trip("a", T0);
+    const after = T0 + 2 + CIRCUIT_BASE_COOLDOWN_MS + 1;
+    expect(circuitHalfOpen("a", after)).toBe(true);
+    expect(circuitBlocks("a", 0, after)).toBe(false);
+    expect(circuitBlocks("a", 1, after)).toBe(true);
+    noteAgentOutcome("a", true, after + 5);
+    expect(circuitHalfOpen("a", after + 6)).toBe(false);
+    expect(circuitBlocks("a", 4, after + 6)).toBe(false);
+    expect(circuitState("a", after + 6).trips).toBe(0);
+  });
+
+  it("a failed probe opens it again at once, for twice as long, capped", () => {
+    trip("a", T0);
+    let at = T0 + 2 + CIRCUIT_BASE_COOLDOWN_MS + 1;
+    noteAgentOutcome("a", false, at);
+    expect(circuitState("a", at)).toMatchObject({ open: true, trips: 2, openUntilMs: at + 2 * CIRCUIT_BASE_COOLDOWN_MS });
+    for (let i = 0; i < 6; i++) {
+      at = circuitState("a", at).openUntilMs! + 1;
+      noteAgentOutcome("a", false, at);
+    }
+    expect(circuitState("a", at).openUntilMs! - at).toBe(CIRCUIT_MAX_COOLDOWN_MS);
+  });
+
+  it("a trip count quiet long enough after its cool-down starts over", () => {
+    trip("a", T0);
+    const later = T0 + CIRCUIT_BASE_COOLDOWN_MS + CIRCUIT_TRIP_RESET_MS + 10;
+    expect(circuitHalfOpen("a", later)).toBe(false);
+    noteAgentOutcome("a", false, later);
+    expect(circuitOpen("a", later + 1)).toBe(false);
+    noteAgentOutcome("a", false, later + 1);
+    noteAgentOutcome("a", false, later + 2);
+    expect(circuitState("a", later + 3)).toMatchObject({ open: true, trips: 1, openUntilMs: later + 2 + CIRCUIT_BASE_COOLDOWN_MS });
+  });
+
+  it("a 16-slot host needs 8 failures in a row, a 2-slot one 3", () => {
+    setCircuitSlotsLookup((id) => (id === "cloud" ? 16 : 2));
+    expect(circuitThreshold("cloud")).toBe(8);
+    expect(circuitThreshold("mac")).toBe(3);
+    for (let i = 0; i < 7; i++) noteAgentOutcome("cloud", false, T0 + i);
+    expect(circuitOpen("cloud", T0 + 10)).toBe(false);
+    noteAgentOutcome("cloud", false, T0 + 8);
+    expect(circuitOpen("cloud", T0 + 10)).toBe(true);
+  });
+
+  it("tells listeners about each trip, once", () => {
+    const heard: string[] = [];
+    const stop = onCircuitTrip((id) => heard.push(id));
+    trip("a", T0);
+    for (let i = 0; i < 5; i++) noteAgentOutcome("a", false, T0 + 100 + i);
+    stop();
+    expect(heard).toEqual(["a"]);
+  });
+
+  it("knows whether the circuit was open during a wait", () => {
+    expect(circuitOpenSince("a", T0 - 12_000, T0)).toBe(false);
+    trip("a", T0);
+    expect(circuitOpenSince("a", T0 - 12_000, T0 + 5)).toBe(true);
+    // A wait that began after it closed again was not the breaker's doing.
+    const after = T0 + CIRCUIT_BASE_COOLDOWN_MS + 10;
+    expect(circuitOpenSince("a", after, after + 12_000)).toBe(false);
+  });
+
+  it("a reply that ended inside the model's reasoning (the caller's max_tokens) is neutral", () => {
+    for (let i = 0; i < 5; i++) noteAgentResult("a", "deepseek-v4.1-flash", false, "reasoning_only: spent the reply (max_tokens 16) reasoning", T0 + i);
+    expect(circuitState("a", T0 + 10)).toMatchObject({ open: false, recentFailures: 0 });
   });
 });
 

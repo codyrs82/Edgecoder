@@ -112,6 +112,8 @@ export const workerConfigSchema = z.object({
   CLOUD_HOST_AUTH_PROBE_MINUTES: envNumber(undefined, { min: 1, max: 1440 }),
   /** File the spend totals are kept in; default <config dir>/cloud-host-spend.json (use a volume on Fly). */
   CLOUD_HOST_STATE_FILE: str(),
+  /** reasoning_effort sent with each call (e.g. low; none where the provider can turn thinking off); unset: the provider's default. */
+  CLOUD_HOST_REASONING_EFFORT: str(),
   /** vLLM's OpenAI-compatible server. Default http://127.0.0.1:8000. */
   VLLM_URL: envUrl(),
   /** vLLM --api-key, when the server was started with one. */

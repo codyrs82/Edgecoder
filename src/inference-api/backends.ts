@@ -83,7 +83,8 @@ export function networkBackend(deps: NetworkDeps, target: { model: string; compu
         if (p.delta) yield { delta: p.delta };
         if (p.toolCalls?.length) yield { toolCalls: p.toolCalls };
         if (p.done) {
-          if (p.error) throw new ChatBackendError(`The machine running ${target.model} reported: ${p.error}`, 502);
+          // reasoning_only: the call's max_tokens ended inside the model's reasoning (src/cloud-host/backend.ts): the request, not the machine.
+          if (p.error) throw new ChatBackendError(`The machine running ${target.model} reported: ${p.error}`, /\breasoning_only\b/.test(p.error) ? 400 : 502);
           yield { done: true, ...(p.routed ? { where: p.routed } : {}), ...(p.creditsSpent !== undefined ? { cSatsSpent: p.creditsSpent } : {}), ...(p.promptTokens !== undefined ? { promptTokens: p.promptTokens } : {}), ...(p.outputTokens !== undefined ? { outputTokens: p.outputTokens } : {}), ...(p.served ? { served: p.served } : {}) };
         }
       }

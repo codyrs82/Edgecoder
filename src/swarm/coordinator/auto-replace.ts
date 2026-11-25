@@ -12,7 +12,11 @@
  * Now, when the call is still unclaimed after bestFitConfig.replaceMs (BEST_FIT_REPLACE_MS, 12 s):
  *
  * - The agent it was placed on counts a failure on its circuit breaker and its routing fail rate
- *   when it holds nothing (an idle agent that does not come is failing; a busy one is just busy).
+ *   when it holds nothing (an idle agent that does not come is failing; a busy one is just busy),
+ *   unless its circuit was open during the wait (B4: the breaker kept it from pulling; that wait
+ *   is not a new failure) or it is otherwise unavailable (memory pressure, socket lost).
+ * - When an agent's circuit trips, its waiting Auto calls are re-placed at once (replaceAutoNow),
+ *   not after the 12 s.
  * - Best fit runs again without the agents already tried (this coordinator's agents only: the
  *   requester is already waiting on this coordinator's stream). Cloud models are in it whenever
  *   policy allows (AUTO_CLOUD_MODELS and cloudConsidered), as for any Auto call.
@@ -33,7 +37,7 @@ import { app } from "./app.js";
 import { queue, taskBilling, usagePending } from "./context.js";
 import { preferAgent } from "./dispatch.js";
 import { MARKET_DEFAULT_BID_PREMIUM_BPS, orderBook, rateOracleConfig } from "./economy.js";
-import { noteAgentOutcome as noteCircuitOutcome } from "./memory-admission.js";
+import { agentUnavailable, circuitOpenSince, noteAgentOutcome as noteCircuitOutcome } from "./memory-admission.js";
 import { bestFitConfig, noteAgentOutcome as noteRoutingOutcome, noteReplaced, resolveAuto } from "./routing.js";
 
 /** Re-placements per call. */
@@ -52,19 +56,26 @@ export interface AutoPlacement {
   /** Agents the call was placed on so far, newest last. */
   tried: string[];
   replaced?: number;
+  /** When it was (re)placed on its current agent. */
+  placedAtMs?: number;
 }
 
 export type ReplaceOutcome = "claimed" | "same" | "none" | "replaced";
 
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
+/** The Auto calls with a re-placement armed, by subtask id (replaceAutoNow). */
+const placements = new Map<string, AutoPlacement>();
 
 /** Re-place the call if nobody picked it up within `ms` (bestFitConfig.replaceMs; 0: never). */
-export function armAutoReplace(p: AutoPlacement, ms = bestFitConfig.replaceMs): void {
+export function armAutoReplace(p: AutoPlacement, ms = bestFitConfig.replaceMs, nowMs = Date.now()): void {
   if (!(ms > 0) || (p.replaced ?? 0) >= AUTO_REPLACE_MAX) return;
   const old = timers.get(p.subtaskId);
   if (old) clearTimeout(old);
+  p.placedAtMs = nowMs;
+  placements.set(p.subtaskId, p);
   const t = setTimeout(() => {
     timers.delete(p.subtaskId);
+    placements.delete(p.subtaskId);
     void replaceUnclaimedAuto(p)
       .then((r) => {
         if (r === "replaced" || r === "same") armAutoReplace(p, ms);
@@ -79,8 +90,10 @@ export function armAutoReplace(p: AutoPlacement, ms = bestFitConfig.replaceMs): 
 export async function replaceUnclaimedAuto(p: AutoPlacement, nowMs = Date.now()): Promise<ReplaceOutcome> {
   if (!queue.isUnclaimed(p.subtaskId)) return "claimed";
   const waitedOn = p.tried[p.tried.length - 1];
-  // A pickup timeout: the agent the call was placed on did not come although it held nothing.
-  if (waitedOn && (queue.activeClaims().get(waitedOn)?.all ?? 0) === 0) {
+  // A pickup timeout: the agent the call was placed on did not come although it held nothing, and
+  // nothing on this side kept it away (its open circuit, memory pressure, a lost socket).
+  const since = p.placedAtMs ?? nowMs - bestFitConfig.replaceMs;
+  if (waitedOn && (queue.activeClaims().get(waitedOn)?.all ?? 0) === 0 && !circuitOpenSince(waitedOn, since, nowMs) && !agentUnavailable(waitedOn, nowMs)) {
     noteCircuitOutcome(waitedOn, false, nowMs);
     noteRoutingOutcome(waitedOn, false);
   }
@@ -125,8 +138,39 @@ export async function replaceUnclaimedAuto(p: AutoPlacement, nowMs = Date.now())
   return "replaced";
 }
 
+/**
+ * B4: re-place the waiting Auto calls placed on `agentId` now (its circuit just tripped), instead
+ * of after the re-placement wait. Returns how many moved; the rest keep their timers.
+ */
+export async function replaceAutoNow(agentId: string, nowMs = Date.now()): Promise<number> {
+  let moved = 0;
+  for (const p of [...placements.values()]) {
+    if (p.tried[p.tried.length - 1] !== agentId || (p.replaced ?? 0) >= AUTO_REPLACE_MAX) continue;
+    const r = await replaceUnclaimedAuto(p, nowMs).catch((err) => {
+      app.log.error({ err, subtaskId: p.subtaskId }, "auto_replace_failed");
+      return "none" as const;
+    });
+    if (r === "claimed") {
+      const t = timers.get(p.subtaskId);
+      if (t) clearTimeout(t);
+      timers.delete(p.subtaskId);
+      placements.delete(p.subtaskId);
+    } else if (r === "replaced" || r === "same") {
+      moved++;
+      armAutoReplace(p, bestFitConfig.replaceMs, nowMs);
+    }
+  }
+  return moved;
+}
+
+/** Waiting Auto calls placed on `agentId` (tests, the trip handler). */
+export function autoPlacedOn(agentId: string): string[] {
+  return [...placements.values()].filter((p) => p.tried[p.tried.length - 1] === agentId).map((p) => p.subtaskId);
+}
+
 /** Tests. */
 export function clearAutoReplaceTimers(): void {
   for (const t of timers.values()) clearTimeout(t);
   timers.clear();
+  placements.clear();
 }
