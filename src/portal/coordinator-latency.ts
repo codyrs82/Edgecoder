@@ -94,6 +94,12 @@
  * the free hosts it reports (/inference/models freeHosts, less the calls sent since): its free count
  * subtracts calls waiting there and went negative while the near host sat free. The load rule applies
  * only when no coordinator with a free host near the buyer is found this way.
+ *
+ * Run 10: a free host near the buyer (within localityMarginKm) takes the call, whichever coordinator
+ * reports it: the "clearly faster end to end" check no longer moves it to a same-class host elsewhere
+ * (17 syd buyers went to fra on measured speeds), and the load, latency and overflow rules run only
+ * when no coordinator reports one. Only a host of another class (a GPU for a large call) may still win.
+ * Host times in the record are the portal's coordinator-choice estimates, not admission ETAs.
  */
 
 import { coordinatorHost, type CoordinatorChoice, type CoordinatorChoiceCandidate } from "../common/coordinator-choice.js";
@@ -337,10 +343,12 @@ function freshMsOf(policy: LatencyPolicy): number {
 }
 
 /** The coordinator with a free slot that beats `near` end to end by both margins, if any. */
-function clearlyFaster(near: Scored, open: readonly Scored[], policy: LatencyPolicy): { s: Scored; e2e: number; nearE2e: number } | null {
+function clearlyFaster(near: Scored, open: readonly Scored[], policy: LatencyPolicy, onlyOtherClass = false): { s: Scored; e2e: number; nearE2e: number } | null {
   let best: { s: Scored; e2e: number; nearE2e: number } | null = null;
   for (const s of open) {
     if (s === near) continue;
+    // Run 10: against a free host near the buyer, only a host of another class (a GPU for a large call) may win.
+    if (onlyOtherClass && !(s.host?.computeClass && near.host?.computeClass && s.host.computeClass !== near.host.computeClass)) continue;
     const pair = endToEnd(near, s, freshMsOf(policy));
     if (!pair) continue;
     const [nearE2e, e2e] = pair;
@@ -351,9 +359,15 @@ function clearlyFaster(near: Scored, open: readonly Scored[], policy: LatencyPol
 }
 
 /** Which hosts the end to end compared (for the record). */
+/**
+ * Which hosts the end to end compared (for the record). Run 10: a host's time is the portal's
+ * coordinator-choice estimate (its speed times the work for the call's tokens, from mostly short
+ * calls), not an admission ETA: "jnb 44423 ms" read as one for a 4.5k-token prompt that took 125 s
+ * to start. The coordinator's completion check decides admission; this number only compares hosts.
+ */
 function hostNote(a: Scored, b: Scored): string {
-  const h = (s: Scored) => (s.host?.region ? `${s.host.region}${s.host.serviceMs !== null ? ` ${s.host.serviceMs} ms` : ""}${s.host.speedFrom ? ` (${s.host.computeClass ?? "?"}, ${s.host.speedFrom})` : ""}` : null);
-  return h(a) && h(b) ? `, hosts ${h(a)} vs ${h(b)}` : "";
+  const h = (s: Scored) => (s.host?.region ? `${s.host.region}${s.host.serviceMs !== null ? ` ~${s.host.serviceMs} ms` : ""}${s.host.speedFrom ? ` (${s.host.computeClass ?? "?"}, ${s.host.speedFrom})` : ""}` : null);
+  return h(a) && h(b) ? `, choice-estimate hosts ${h(a)} vs ${h(b)}` : "";
 }
 
 /** Why the nearest was kept, for the record: the best other end to end. */
@@ -414,9 +428,27 @@ export function chooseByLatency(
   // Locality (#526): a free host nearer the buyer, when every coordinator with a free slot says where its are.
   const margin = policy.localityMarginKm ?? COORD_LOCALITY_DEFAULT_MARGIN_KM;
   const open = scored.filter((s) => s.room);
+  const km = (n: number) => (Number.isFinite(n) ? `${Math.round(n).toLocaleString("en-US")} km` : "no free host");
+  // Run 10: a free host near the buyer (within the locality margin) takes the call, whichever coordinator
+  // reports it and whatever the others report. Load, latency and overflow apply only when none does.
+  // 17 of 59 misses in run 10 were syd buyers moved off a free syd host to fra on "clearly faster end
+  // to end" (measured same-class speeds, inf-1795643800721-0f758b86); only a host of another class may still win.
+  const nearFree = margin > 0 && where.clientRegion ? open.filter((s) => s.nearKm !== null && s.nearKm <= margin) : [];
+  if (nearFree.length > 0) {
+    const near = nearFree.reduce((a, b) => (b.nearKm! < a.nearKm! || (b.nearKm === a.nearKm && (b === base || (a !== base && b.c.free > a.c.free))) ? b : a));
+    const faster = clearlyFaster(near, open, policy, true);
+    if (faster) {
+      return done(faster.s.c.url, "latency", `clearly faster end to end than the free host nearest the buyer (${where.clientRegion}, ${km(near.nearKm!)} on ${coordinatorHost(near.c.url)}), on another class: expected ${faster.e2e} ms vs ${faster.nearE2e} ms${hostNote(faster.s, near)}`);
+    }
+    if (open.length === 1) return done(near.c.url, "locality", `free host nearest the buyer (${where.clientRegion}): ${km(near.nearKm!)}; no other coordinator has a free slot`);
+    const others = open.filter((s) => s !== near).map((s) => s.nearKm ?? Infinity);
+    const runnerKm = Math.min(Infinity, ...others);
+    return near === base
+      ? done(near.c.url, "locality", `free host nearest the buyer (${where.clientRegion}): ${km(near.nearKm!)} vs ${km(runnerKm)}; ${notFaster(near, open, freshMsOf(policy))}`)
+      : done(near.c.url, "locality", `free host nearest the buyer (${where.clientRegion}): ${km(near.nearKm!)} vs ${km(base && base.room ? base.nearKm ?? Infinity : Infinity)} on ${coordinatorHost(baselineUrl)}`);
+  }
   if (margin > 0 && where.clientRegion && open.length > 0 && open.every((s) => s.nearKm !== null)) {
     const near = open.reduce((a, b) => (b.nearKm! < a.nearKm! || (b.nearKm === a.nearKm && b.c.free > a.c.free) ? b : a));
-    const km = (n: number) => (Number.isFinite(n) ? `${Math.round(n).toLocaleString("en-US")} km` : "no free host");
     const baseKm = base && base.room ? base.nearKm! : Infinity;
     // The load pick is itself the nearest: it holds when every other free host is farther by the margin.
     const runnerKm = Math.min(Infinity, ...open.filter((s) => s !== near).map((s) => s.nearKm!));

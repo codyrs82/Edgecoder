@@ -25,7 +25,7 @@
 
 import { request } from "undici";
 import { cleanRegion, coordinatorHost, type CoordinatorChoice } from "../common/coordinator-choice.js";
-import { chooseByLatency, DEFAULT_CALL_TOKENS, latencyPolicyFromEnv, type CallSize, type FreeHost, type LatencyCandidate, type LatencyPolicy } from "./coordinator-latency.js";
+import { chooseByLatency, DEFAULT_CALL_TOKENS, latencyPolicyFromEnv, openHosts, type CallSize, type FreeHost, type LatencyCandidate, type LatencyPolicy } from "./coordinator-latency.js";
 import { paramsB } from "../inference-api/auto-route.js";
 
 /**
@@ -250,6 +250,39 @@ export interface ChatCapacityOptions {
   latency?: LatencyPolicy;
   /** Region of this portal machine (FLY_REGION), recorded with each choice. */
   portalRegion?: string | null;
+  /** Run 10: one `coordinator_choice` line per choice (every coordinator considered and why), e.g. the app's logger. */
+  log?: { info: (obj: object, msg: string) => void };
+}
+
+/**
+ * Run 10: the `coordinator_choice` log line: every coordinator considered, with its free count, the
+ * free hosts it reported and those still open after the calls already sent there, the nearest open
+ * free host to the buyer, the report's age, and the rule that decided. No account, key or prompt.
+ */
+export function coordinatorChoiceLog(scored: readonly LatencyCandidate[], choice: CoordinatorChoice, model: string, clientRegion: string | null | undefined, call?: CallSize | null) {
+  const byHost = new Map(choice.candidates.map((c) => [c.coordinator, c]));
+  return {
+    model,
+    clientRegion: clientRegion ?? null,
+    chosen: choice.chosen,
+    rule: choice.rule,
+    reason: choice.reason,
+    considered: scored.map((c) => {
+      const host = coordinatorHost(c.url);
+      const open = openHosts(c, clientRegion, call);
+      return {
+        coordinator: host,
+        free: c.free,
+        waiting: c.waiting,
+        reportAgeMs: Number.isFinite(c.reportAgeMs) ? Math.round(c.reportAgeMs) : null,
+        freeHosts: c.freeHosts ? c.freeHosts.map((h) => `${h.region}:${h.free}`) : null,
+        openHosts: open ? open.map((h) => h.region) : null,
+        sentFor: c.sentFor?.length ? c.sentFor : [],
+        nearestFreeKm: byHost.get(host)?.nearKm ?? null,
+        expectedMs: byHost.get(host)?.expectedMs ?? null,
+      };
+    }),
+  };
 }
 
 /** Where the call came from, recorded with the choice (common/coordinator-choice.ts clientRegionOf). */
@@ -455,8 +488,18 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
   };
 
   /** The latency-aware step over what the load rule scored; `baseline` is the load rule's pick. */
-  const withLatency = (scored: Array<LatencyCandidate>, baseline: string, ctx: PickContext | undefined, model?: string): CoordinatorChoice =>
-    chooseByLatency(scored, baseline, latency, { clientRegion: ctx?.clientRegion ?? null, portalRegion, ...(model ? { call: callSizeFor(model, ctx?.call) } : {}) });
+  const withLatency = (scored: Array<LatencyCandidate>, baseline: string, ctx: PickContext | undefined, model?: string): CoordinatorChoice => {
+    const call = model ? callSizeFor(model, ctx?.call) : null;
+    const choice = chooseByLatency(scored, baseline, latency, { clientRegion: ctx?.clientRegion ?? null, portalRegion, ...(call ? { call } : {}) });
+    if (opts.log) {
+      try {
+        opts.log.info({ coordinatorChoice: coordinatorChoiceLog(scored, choice, model ?? "auto", ctx?.clientRegion, call) }, "coordinator_choice");
+      } catch {
+        // A log line never breaks a choice.
+      }
+    }
+    return choice;
+  };
 
   /**
    * Network calls: among coordinators that list the model and report their load, the one with the
