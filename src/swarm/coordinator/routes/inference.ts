@@ -1366,6 +1366,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       const b = taskBilling.get(claim.subtask.taskId);
       if (b) {
         b.servedAgentId = verified.agentId;
+        b.servedModel = claim.subtask.requestedModel;
         if (b.submittedAtMs !== undefined && claim.claimedAt !== undefined) b.pickupMs = Math.max(0, claim.claimedAt - b.submittedAtMs);
         if (body.promptMs !== undefined) b.promptMs = Math.round(body.promptMs);
         if (body.genMs !== undefined) b.genMs = Math.round(body.genMs);
@@ -1419,8 +1420,10 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const agentId = r.done ? servedAgentId() : undefined;
     if (agentId && !servedP) servedP = servedBy(agentId, owner, billing);
     const served = servedP ? await servedP.catch(() => undefined) : undefined;
+    // The model the answering agent ran, so the requester's route line names that attempt's model, not submit's choice.
+    const servedModel = r.done ? billing.servedModel ?? queue.getSubtask(body.subtaskId)?.requestedModel : undefined;
     // The call's cost once priced (its result's cost is on the billing entry), the reserve until then.
     const priced = billing.refunded || (result !== undefined && !pricingInFlight.has(body.taskId));
-    return reply.send({ ...r, ...finish, ...(result ? { creditsSpent: msatToCSats(priced ? billing.costMsat : billing.reservedMsat), durationMs: result.durationMs, ...tokens } : {}), ...(served ? { served } : {}) });
+    return reply.send({ ...r, ...finish, ...(result ? { creditsSpent: msatToCSats(priced ? billing.costMsat : billing.reservedMsat), durationMs: result.durationMs, ...tokens } : {}), ...(served ? { served } : {}), ...(servedModel ? { servedModel } : {}) });
   });
 }

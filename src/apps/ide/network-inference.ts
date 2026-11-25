@@ -123,6 +123,23 @@ export interface CompletionPiece {
   served?: ServedBy;
 }
 
+/**
+ * The route line for the attempt that answered. Submit's line ("routed to <model> on <class> because …")
+ * names best fit's first choice; when the call was re-placed (another model or class answered), the
+ * line names the model the answering agent ran and its class, so the model, class and host shown
+ * all come from that one attempt.
+ */
+export function routedLine(routed: string | undefined, routedModel: string | undefined, servedModel: string | undefined, served: ServedBy | undefined): string | undefined {
+  if (!routed) return undefined;
+  const m = /routed to (\S+) on (\S+)/.exec(routed);
+  const firstModel = routedModel ?? m?.[1];
+  const firstClass = m?.[2]?.replace(/[,.;]$/, "");
+  const model = servedModel ?? firstModel;
+  const cls = served?.computeClass || (model === firstModel ? firstClass : undefined) || "any";
+  if (model === firstModel && (!served?.computeClass || cls === firstClass)) return routed;
+  return `routed to ${model} on ${cls} (re-placed from ${firstModel ?? "best fit's first choice"})`;
+}
+
 /** A coordinator's `served` object, kept only when it has the expected shape. */
 export function servedOf(v: unknown): ServedBy | undefined {
   if (!v || typeof v !== "object") return undefined;
@@ -410,7 +427,7 @@ async function* streamSubmitted(
       if (r.json.done) {
         ended = true;
         if (Array.isArray(r.json.toolCalls) && r.json.toolCalls.length) yield { toolCalls: r.json.toolCalls as ToolCall[] };
-        yield { done: true, ...(r.json.error ? { error: String(r.json.error) } : {}), ...(typeof r.json.creditsSpent === "number" ? { creditsSpent: r.json.creditsSpent } : {}), ...(typeof r.json.promptTokens === "number" ? { promptTokens: r.json.promptTokens } : {}), ...(typeof r.json.outputTokens === "number" ? { outputTokens: r.json.outputTokens } : {}), ...(r.json.finishReason === "length" || r.json.finishReason === "stop" ? { finishReason: r.json.finishReason } : {}), ...(routed ? { routed } : {}), ...(servedOf(r.json.served) ? { served: servedOf(r.json.served) } : {}) };
+        yield { done: true, ...(r.json.error ? { error: String(r.json.error) } : {}), ...(typeof r.json.creditsSpent === "number" ? { creditsSpent: r.json.creditsSpent } : {}), ...(typeof r.json.promptTokens === "number" ? { promptTokens: r.json.promptTokens } : {}), ...(typeof r.json.outputTokens === "number" ? { outputTokens: r.json.outputTokens } : {}), ...(r.json.finishReason === "length" || r.json.finishReason === "stop" ? { finishReason: r.json.finishReason } : {}), ...(routedLine(routed, routedModel, typeof r.json.servedModel === "string" ? r.json.servedModel : undefined, servedOf(r.json.served)) ? { routed: routedLine(routed, routedModel, typeof r.json.servedModel === "string" ? r.json.servedModel : undefined, servedOf(r.json.served)) } : {}), ...(servedOf(r.json.served) ? { served: servedOf(r.json.served) } : {}) };
         return;
       }
     }

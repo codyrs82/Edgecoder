@@ -44,10 +44,11 @@ export function whereServed(where: string | undefined, fallbackModel: string, se
   };
 }
 
-/** A finished helper's "ran on" text: `model on class · host` (the host from its latest served call), or `model on this computer`. */
+/** A finished helper's "ran on" text: `model on class · host` (the host from its latest call), or `model on this computer`. */
 export function tentacleRanOn(r: Pick<TentacleResult, "model" | "class"> & Partial<Pick<TentacleResult, "calls" | "place">>): string {
   if (r.place === "local" || r.class === "this computer") return `${r.model} on this computer`;
-  const served = [...(r.calls ?? [])].reverse().find((c) => c.served)?.served;
+  // The latest call's own host only: an earlier call's (another attempt's) host would mislabel it.
+  const served = r.calls?.[r.calls.length - 1]?.served;
   const cls = r.class && r.class !== "unknown" && r.class !== "any" ? r.class : served?.computeClass || r.class;
   const host = hostOf(served);
   return `${r.model} on ${cls}${host ? ` · ${host}` : ""}`;

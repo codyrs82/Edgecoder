@@ -126,6 +126,8 @@ interface TaskBilling {
   loadMs?: number;
   /** Where a model call ran, for the requester (served-by.ts): the agent, and how long each part took. */
   servedAgentId?: string;
+  /** The model that agent ran (the subtask's model when it answered: Auto re-placement can change it after submit). */
+  servedModel?: string;
   submittedAtMs?: number;
   pickupMs?: number;
   promptMs?: number;
