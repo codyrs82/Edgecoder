@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { backoffMs, CloudApiError, probeKey, reasoningChat, REASONING_ONLY_ERROR, remoteChat, retryAfterMs, type RemoteBackendConfig } from "../../src/cloud-host/backend.js";
+import { backoffMs, CloudApiError, isReasoningOnly, probeKey, reasoningChat, REASONING_ONLY_ERROR, REASONING_OVERRUN_ERROR, remoteChat, resetThinkingBudgetRefusals, retryAfterMs, type RemoteBackendConfig } from "../../src/cloud-host/backend.js";
 import type { OllamaPiece } from "../../src/inference-api/ollama.js";
 import { startFakeProvider, streamReply, type FakeProvider } from "./fake-provider.js";
 
@@ -14,6 +14,7 @@ let fake: FakeProvider | undefined;
 afterEach(async () => {
   await fake?.close();
   fake = undefined;
+  resetThinkingBudgetRefusals();
 });
 
 function cfg(url: string, extra: Partial<RemoteBackendConfig> = {}): RemoteBackendConfig {
@@ -141,7 +142,7 @@ describe("remoteChat", () => {
     expect(fake.requests[0].body.max_tokens).toBe(4_000);
   });
 
-  it("reasoningChat: another error is not asked again, and the second reasoning-only reply fails with the provider's counts", async () => {
+  it("reasoningChat: another error is not asked again, and the second reasoning-only reply fails as a retryable overrun with the provider's counts", async () => {
     fake = await startFakeProvider([{ status: 400, body: { error: "bad request" } }]);
     const err = await collect(reasoningChat(cfg(fake.url), { ...req, maxTokens: 64 }, 1_000)).catch((e) => e);
     expect(err.message).toMatch(/^cloud_provider_error: .*bad request/);
@@ -152,10 +153,80 @@ describe("remoteChat", () => {
     const billed: unknown[] = [];
     const err2 = await collect(reasoningChat(cfg(fake.url), { ...req, maxTokens: 64 }, 1_000, undefined, 10_000, (u) => billed.push(u))).catch((e) => e);
     expect(fake.requests.map((r) => r.body.max_tokens)).toEqual([1_064, 2_064]);
-    expect(err2.message.startsWith(`${REASONING_ONLY_ERROR}: `)).toBe(true);
-    expect(err2.status).toBe(400);
+    expect(err2.message.startsWith(`${REASONING_OVERRUN_ERROR}: `)).toBe(true);
+    expect(err2.message).not.toMatch(/reasoning_only/);
+    expect(isReasoningOnly(err2)).toBe(false);
+    expect(err2).toMatchObject({ status: 503, kind: "server" });
     expect(err2.usage).toEqual({ promptTokens: 7, outputTokens: 1_064 });
     expect(billed).toEqual([{ promptTokens: 7, outputTokens: 1_064 }]);
+    // No thinking budget unless asked for one.
+    expect(fake.requests.every((r) => !("reasoning_effort" in r.body))).toBe(true);
+  });
+
+  /** Run 5's shape: a long stream of reasoning_content pieces, finish "length" at the provider's max_tokens, its counts, no content. */
+  const thinksPastCap = (maxTokens: number, prompt = 2_558) => ({
+    stream: [
+      ...Array.from({ length: 200 }, () => ({ choices: [{ index: 0, delta: { role: "assistant", content: null, reasoning_content: "Let me consider the loop. " } }] })),
+      { choices: [{ index: 0, delta: {}, finish_reason: "length" }] },
+      { choices: [], usage: { prompt_tokens: prompt, completion_tokens: maxTokens } },
+      "[DONE]" as const
+    ]
+  });
+  /** The same model under a thinking budget: the thinking ends, then the answer. */
+  const thinksThenAnswers = (answer: string[]) => ({
+    stream: [
+      ...Array.from({ length: 50 }, () => ({ choices: [{ index: 0, delta: { content: null, reasoning_content: "hm " } }] })),
+      ...answer.map((t) => ({ choices: [{ index: 0, delta: { content: t, reasoning_content: null } }] })),
+      { choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+      { choices: [], usage: { prompt_tokens: 2_558, completion_tokens: 4_200 } },
+      "[DONE]" as const
+    ]
+  });
+
+  it("run 5: with thinkingBudget the allowance is sent as an integer reasoning_effort (a hard thinking cap) and the answer goes through", async () => {
+    fake = await startFakeProvider([thinksThenAnswers(["const helper", " = () => 1;"])]);
+    const pieces = await collect(reasoningChat(cfg(fake.url, { reasoningEffort: "low" }), { ...req, maxTokens: 2_048 }, 4_096, undefined, 10_000, undefined, { thinkingBudget: true }));
+    expect(fake.requests[0].body).toMatchObject({ max_tokens: 2_048 + 4_096, reasoning_effort: 4_096 });
+    expect(pieces.filter((p) => "delta" in p).map((p) => (p as { delta: string }).delta).join("")).toBe("const helper = () => 1;");
+    expect(pieces.at(-1)).toMatchObject({ doneReason: "stop", outputTokens: 4_200 });
+  });
+
+  it("run 5: an allowance below Fireworks' smallest budget is raised to 1024, and max_tokens leaves the answer its room", async () => {
+    fake = await startFakeProvider([thinksThenAnswers(["ok"])]);
+    await collect(reasoningChat(cfg(fake.url), { ...req, maxTokens: 64 }, 500, undefined, 10_000, undefined, { thinkingBudget: true }));
+    expect(fake.requests[0].body).toMatchObject({ max_tokens: 64 + 1_024, reasoning_effort: 1_024 });
+  });
+
+  it("run 5: a budgeted model that still thinks past the cap twice ends as a retryable overrun, never reasoning_only, both attempts billed", async () => {
+    fake = await startFakeProvider([thinksPastCap(2_048 + 4_096), thinksPastCap(2_048 + 8_192)]);
+    const billed: unknown[] = [];
+    const err = await collect(reasoningChat(cfg(fake.url), { ...req, model: "accounts/fireworks/models/deepseek-v4p1-flash", maxTokens: 2_048 }, 4_096, undefined, 10_000, (u) => billed.push(u), { thinkingBudget: true })).catch((e) => e);
+    expect(fake.requests.map((r) => [r.body.max_tokens, r.body.reasoning_effort])).toEqual([[6_144, 4_096], [10_240, 8_192]]);
+    expect(err).toBeInstanceOf(CloudApiError);
+    expect(err.message).toMatch(/^cloud_reasoning_overrun: accounts\/fireworks\/models\/deepseek-v4p1-flash was still thinking after up to 8192 tokens/);
+    expect(err.message).not.toMatch(/\breasoning_only\b/);
+    expect(err).toMatchObject({ status: 503, kind: "server", usage: { promptTokens: 2_558, outputTokens: 10_240 } });
+    expect(billed).toEqual([{ promptTokens: 2_558, outputTokens: 6_144 }]);
+  });
+
+  it("a provider that refuses the integer reasoning_effort is asked again without it, and not sent it again for that model", async () => {
+    fake = await startFakeProvider([
+      { status: 400, body: { error: { message: "Invalid reasoning_effort: integer values are not supported for this model" } } },
+      thinksThenAnswers(["a"]),
+      thinksThenAnswers(["b"])
+    ]);
+    const call = () => collect(reasoningChat(cfg(fake!.url), { ...req, maxTokens: 64 }, 2_048, undefined, 10_000, undefined, { thinkingBudget: true }));
+    const first = await call();
+    expect(first.filter((p) => "delta" in p)).toEqual([{ delta: "a" }]);
+    await call();
+    expect(fake.requests.map((r) => r.body.reasoning_effort)).toEqual([2_048, undefined, undefined]);
+    expect(fake.requests.map((r) => r.body.max_tokens)).toEqual([64 + 2_048, 64 + 2_048, 64 + 2_048]);
+  });
+
+  it("no thinking budget when the backend turns thinking off (reasoning_effort none)", async () => {
+    fake = await startFakeProvider([thinksThenAnswers(["ok"])]);
+    await collect(reasoningChat(cfg(fake.url, { reasoningEffort: "none" }), { ...req, maxTokens: 64 }, 2_048, undefined, 10_000, undefined, { thinkingBudget: true }));
+    expect(fake.requests[0].body.reasoning_effort).toBe("none");
   });
 
   it("probeKey reports whether the key is accepted", async () => {

@@ -26,8 +26,14 @@
  *   host. It carries the provider's token counts (the provider bills the reasoning).
  * - Reasoning allowance (reasoningChat): for a reasoning model the provider is asked for the
  *   caller's max_tokens plus an allowance for the thinking (the provider's max_tokens counts both),
- *   and the answer passed on is capped at the caller's max_tokens (finish "length"). A reply that is
- *   still reasoning only is asked once more with twice the allowance before it fails.
+ *   and the answer passed on is capped at the caller's max_tokens (finish "length"). For a model whose
+ *   provider takes an integer `reasoning_effort` as a hard thinking budget (DeepSeek V4.1 on
+ *   Fireworks: an integer >= 1024 ends the thinking after that many tokens), the allowance is also
+ *   sent as that budget, so the answer always gets its room. A reply that is still reasoning only is
+ *   asked once more with twice the allowance; a third reasoning-only reply ends as
+ *   REASONING_OVERRUN_ERROR, a retryable failure (503) that another host may take, never as
+ *   reasoning_only (run 5: DeepSeek thought past 6144 and 10240 tokens on a standard refactor at
+ *   max_tokens 2048 without a budget).
  * The key is sent only in the Authorization header and is scrubbed from any error text.
  */
 import { request } from "undici";
@@ -55,6 +61,17 @@ export interface RemoteBackendConfig {
 
 /** The error text of a reply that was reasoning only (no answer, no tool call). */
 export const REASONING_ONLY_ERROR = "reasoning_only";
+
+/**
+ * reasoningChat's error when the model was still thinking after both attempts: the host's limit, not
+ * the request's, so it is retryable (HTTP 503; the coordinator may give the call to another host and
+ * charges nothing for it). It must not contain "reasoning_only", which the coordinator treats as the
+ * request's own fault and never retries.
+ */
+export const REASONING_OVERRUN_ERROR = "cloud_reasoning_overrun";
+
+/** The smallest integer `reasoning_effort` Fireworks reads as a hard thinking-token budget. */
+export const MIN_THINKING_BUDGET = 1_024;
 
 export type CloudErrorKind = "auth" | "rate_limit" | "server" | "bad_request" | "network";
 
@@ -86,6 +103,8 @@ export interface RemoteChatRequest {
    * reasoningChat to the caller's own max_tokens while the provider is asked for more.
    */
   contentCap?: number;
+  /** Sent as `reasoning_effort` in place of the backend's own (an integer: a hard thinking budget). */
+  reasoningEffort?: string | number;
 }
 
 /** Tokens in a piece of streamed text, roughly: the pieces seen, at least one per 4 characters. */
@@ -185,7 +204,7 @@ export async function* remoteChat(cfg: RemoteBackendConfig, req: RemoteChatReque
     stream_options: { include_usage: true },
     ...(req.maxTokens !== undefined ? { max_tokens: req.maxTokens } : {}),
     ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
-    ...(cfg.reasoningEffort ? { reasoning_effort: cfg.reasoningEffort } : {})
+    ...(req.reasoningEffort !== undefined ? { reasoning_effort: req.reasoningEffort } : cfg.reasoningEffort ? { reasoning_effort: cfg.reasoningEffort } : {})
   });
 
   let res: Awaited<ReturnType<typeof request>> | undefined;
@@ -322,13 +341,39 @@ export function isReasoningOnly(err: unknown): err is CloudApiError {
   return err instanceof CloudApiError && err.message.startsWith(`${REASONING_ONLY_ERROR}:`);
 }
 
+/** The provider refused the thinking budget itself (an unknown or unsupported reasoning_effort). */
+function budgetRefused(err: unknown): boolean {
+  return err instanceof CloudApiError && err.kind === "bad_request" && !err.contextOverflow && /reasoning_effort|thinking/i.test(err.message);
+}
+
+/** Provider models that refused an integer reasoning_effort in this process: asked without one from then on. */
+const budgetRefusedModels = new Set<string>();
+
+/** Tests: forget which models refused a thinking budget. */
+export function resetThinkingBudgetRefusals(): void {
+  budgetRefusedModels.clear();
+}
+
+export interface ReasoningChatOptions {
+  /**
+   * The provider takes an integer reasoning_effort (>= MIN_THINKING_BUDGET) as a hard cap on the
+   * thinking for this model (catalog thinkingBudget): each attempt sends its allowance as that cap.
+   * Not sent when the backend's reasoning_effort is "none" (thinking off), or after the provider
+   * refused it once for the model (then the call goes on without it).
+   */
+  thinkingBudget?: boolean;
+}
+
 /**
  * A call on a reasoning model with room to think: the provider is asked for the caller's max_tokens
  * plus `allowance` (its max_tokens counts the thinking too), and the answer passed on is capped at
- * the caller's max_tokens (remoteChat contentCap). A reply that is reasoning only is asked once more
- * with twice the allowance (nothing was passed on yet), then fails as reasoning_only. `onBilled`
- * gets the provider's counts of a reasoning-only attempt that was asked again (the provider bills
- * it). No max_tokens (the provider's default cap) or no allowance: one plain remoteChat.
+ * the caller's max_tokens (remoteChat contentCap). With `opts.thinkingBudget` the allowance is also
+ * sent as an integer reasoning_effort, a hard cap on the thinking. A reply that is reasoning only is
+ * asked once more with twice the allowance (nothing was passed on yet); a second reasoning-only reply
+ * fails as REASONING_OVERRUN_ERROR (503, retryable), never reasoning_only. `onBilled` gets the
+ * provider's counts of a reasoning-only attempt that was asked again (the provider bills it); the
+ * last attempt's counts ride on the error. No max_tokens (the provider's default cap) or no
+ * allowance: one plain remoteChat.
  */
 export async function* reasoningChat(
   cfg: RemoteBackendConfig,
@@ -336,11 +381,26 @@ export async function* reasoningChat(
   allowance: number,
   signal?: AbortSignal,
   timeoutMs = 120_000,
-  onBilled?: (usage: NonNullable<CloudApiError["usage"]>) => void
+  onBilled?: (usage: NonNullable<CloudApiError["usage"]>) => void,
+  opts: ReasoningChatOptions = {}
 ): AsyncGenerator<OllamaPiece> {
   const max = req.maxTokens;
   if (max === undefined || !(allowance > 0)) return yield* remoteChat(cfg, req, signal, timeoutMs);
-  const attempt = (room: number) => remoteChat(cfg, { ...req, maxTokens: max + room, contentCap: max }, signal, timeoutMs);
+  const budgeted = () => opts.thinkingBudget === true && cfg.reasoningEffort !== "none" && !budgetRefusedModels.has(req.model);
+  const attempt = async function* (room: number): AsyncGenerator<OllamaPiece> {
+    const plain = { ...req, maxTokens: max + room, contentCap: max };
+    if (!budgeted()) return yield* remoteChat(cfg, plain, signal, timeoutMs);
+    // The budget is at least the provider's smallest, and the provider's max_tokens leaves the answer its room past it.
+    const budget = Math.max(MIN_THINKING_BUDGET, Math.floor(room));
+    try {
+      return yield* remoteChat(cfg, { ...req, maxTokens: max + budget, contentCap: max, reasoningEffort: budget }, signal, timeoutMs);
+    } catch (err) {
+      // Refused before anything streamed: remember it and ask without the budget.
+      if (!budgetRefused(err) || signal?.aborted) throw err;
+      budgetRefusedModels.add(req.model);
+      return yield* remoteChat(cfg, plain, signal, timeoutMs);
+    }
+  };
   try {
     return yield* attempt(allowance);
   } catch (err) {
@@ -351,7 +411,13 @@ export async function* reasoningChat(
     return yield* attempt(allowance * 2);
   } catch (err) {
     if (!isReasoningOnly(err)) throw err;
-    throw new CloudApiError(`${REASONING_ONLY_ERROR}: ${req.model} gave no answer within ${max} tokens after up to ${allowance * 2} tokens of reasoning (asked twice); send a larger max_tokens or a lower reasoning effort`, 400, "bad_request", false, err.usage);
+    throw new CloudApiError(
+      `${REASONING_OVERRUN_ERROR}: ${req.model} was still thinking after up to ${allowance * 2} tokens of reasoning (asked twice) and gave no answer; nothing was sent, another host may take the call`,
+      503,
+      "server",
+      false,
+      err.usage
+    );
   }
 }
 

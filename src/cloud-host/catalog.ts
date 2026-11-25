@@ -62,6 +62,12 @@ export interface CloudModelSpec {
    * names it. CLOUD_MODELS_JSON entries default to true. docs/cloud-host.md.
    */
   autoEligible: boolean;
+  /**
+   * The provider takes an integer `reasoning_effort` (>= 1024) as a hard cap on the model's
+   * thinking: the cloud host sends its reasoning allowance as that cap (backend.ts reasoningChat).
+   * Fireworks documents it for DeepSeek V4.1; GLM ignores integers. Unset: no cap sent.
+   */
+  thinkingBudget?: boolean;
 }
 
 /** Built-in cloud models. Prices and ids read from fireworks.ai/pricing and the model pages on 2026-11-23. */
@@ -97,6 +103,9 @@ export const BUILTIN_CLOUD_MODELS: readonly CloudModelSpec[] = [
     rank: 1,
     hint: "recommended",
     autoEligible: true,
+    // Fireworks: "An integer >= 1024 is sent as 'high' and is also a hard thinking-token budget" (run 5:
+    // without one it thought past 10k tokens on a standard refactor and ended reasoning_only).
+    thinkingBudget: true,
   },
 ];
 
@@ -142,9 +151,11 @@ export function parseCloudModelSpec(raw: unknown): CloudModelSpec {
   if (!Number.isInteger(rank) || rank < 0 || rank > 10_000) bad(`${id}: rank must be an integer from 0 to 10000`);
   if (r.hint !== undefined && r.hint !== "recommended" && r.hint !== "premium") bad(`${id}: hint must be "recommended" or "premium"`);
   if (r.autoEligible !== undefined && typeof r.autoEligible !== "boolean") bad(`${id}: autoEligible must be true or false`);
+  if (r.thinkingBudget !== undefined && typeof r.thinkingBudget !== "boolean") bad(`${id}: thinkingBudget must be true or false`);
   return {
     id, provider, providerModel: r.providerModel.trim(), usdPerM: { input, cachedInput, output }, priceAsOf: asOf, contextWindow: ctx, paramsB, origin: { vendor, country }, capabilities: caps,
     rank, ...(r.hint ? { hint: r.hint as "recommended" | "premium" } : {}), autoEligible: r.autoEligible !== false,
+    ...(r.thinkingBudget === true ? { thinkingBudget: true } : {}),
   };
 }
 
