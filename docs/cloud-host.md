@@ -161,6 +161,13 @@ asks for `quality: best` at top-tier complexity and its estimate is within the p
 price ceiling (`maxCSats`, a bot's budget left) below a cloud call's estimate leaves it out, and
 the no-route error then names the cheapest fitting model and its estimate.
 
+Both built-in cloud models reason before they answer (`reasoning_content`), so a call whose
+`max_tokens` is below a model's reasoning budget is never placed on it: the cap would end inside
+the thinking and the caller would get 400 `reasoning_only`. The budget is 1024 tokens for GLM-5.3
+and Flash by default; `AUTO_REASONING_MIN_TOKENS` changes it (`2048` for both,
+`glm-5.3=2048,deepseek-v4.1-flash=1024` per model, `off`). A call without `max_tokens` is not
+filtered.
+
 When nothing fits, the coordinator says why: `No machine on the network can run this job right
 now (needs a model ≥ 14B with tools; online: …)`, a price ceiling below every fitting model, or
 (after a routed call found no free machine in time) that the machines running the chosen model

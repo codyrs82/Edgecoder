@@ -34,9 +34,8 @@ import { regionDistanceKm } from "../../common/geo-regions.js";
 import { agentHasModel } from "../model-catalog.js";
 import { queue, reservations } from "./context.js";
 import { agentCapabilities, activeBlacklistRecord } from "./agent-state.js";
-import { agentContextWindow, agentLoadReport, freeModelSlots, modelKnownCold, modelWarmOn } from "./dispatch.js";
+import { agentContextWindow, agentLoadReport, coldLoadKm, freeModelSlots, modelKnownCold, modelWarmOn } from "./dispatch.js";
 import { coldLoadMs } from "./best-fit.js";
-import { KM_PER_RTT_MS } from "../../common/geo-regions.js";
 import { effectiveHardware } from "./economy.js";
 import { agentUnavailable, memoryAdmits } from "./memory-admission.js";
 import { agentRegionCode, peerWorldViews, peerAgentViews } from "./routing.js";
@@ -85,13 +84,13 @@ export function freeLocalHolders(model: string, taskClass: ComputeClassId | "any
 
 /**
  * The free holder to prefer for a buyer in `clientRegion`: the smallest distance plus load term,
- * plus the cold-load time (as distance) for a candidate known to be cold when another has the model
- * warm. Undefined when the region or every candidate's region is unknown (no locality then).
+ * plus the cold-load time (as distance, dispatch.ts coldLoadKm) for a candidate known to be cold
+ * when another has the model warm and idle (C3: under load a near host warms up instead). Undefined when the region or every candidate's region is unknown (no locality then).
  */
 export function nearestFreeHolder(candidates: ReadonlyArray<FreeHolder>, clientRegion: string | null | undefined, model?: string): LocalHolder | undefined {
   if (!clientRegion) return undefined;
-  const anyWarm = candidates.some((c) => c.warm);
-  const coldKm = model ? coldLoadMs(model) * KM_PER_RTT_MS : 0;
+  const anyWarm = candidates.some((c) => c.warm && c.free >= Math.max(1, c.slots));
+  const coldKm = model ? coldLoadKm(coldLoadMs(model)) : 0;
   let best: (LocalHolder & { score: number }) | undefined;
   for (const c of candidates) {
     const km = regionDistanceKm(clientRegion, c.region);

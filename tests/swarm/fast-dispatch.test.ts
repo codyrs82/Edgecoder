@@ -211,6 +211,21 @@ describe("fast dispatch", () => {
     }
   });
 
+  test("C3: the locality choice is still nudged first when its hold ends", async () => {
+    const dispatch = await import("../../src/swarm/coordinator/dispatch.js");
+    const { queue } = await import("../../src/swarm/coordinator/context.js");
+    for (const k of [busy, idle]) expect(await pull(k)).toBeNull();
+    // The other agent ran MODEL just now (warm); the preferred one reports nothing (not known cold).
+    dispatch.noteModelServed(idle.peerId, MODEL);
+    const c = await submit();
+    dispatch.preferAgent(c.subtaskId, busy.peerId, 1);
+    await sleep(10);
+    expect(dispatch.preferredAgentFor(c.subtaskId)).toBeUndefined();
+    expect(dispatch.nudgeTargets(queue.getSubtask(c.subtaskId)!)[0]).toBe(busy.peerId);
+    expect(await pull(busy)).toBe(c.subtaskId);
+    await finish(busy, c);
+  });
+
   test("/inference/models reports free model slots, so the portal can compare coordinators by room left", async () => {
     const models = async () => ((await app.inject({ method: "GET", url: "/inference/models", remoteAddress: REMOTE, headers: { "x-mesh-token": MESH } })).json().models as Array<{ model: string; freeSlots?: number; idleAgents: number }>).find((m) => m.model === MODEL)!;
     // Each of busy and idle reports 2 slots, both free.

@@ -211,3 +211,22 @@ describe("an HTTP pull-only agent (never had a socket)", () => {
     expect((await finish(pullOnly, c)).statusCode).toBe(200);
   });
 });
+
+describe("an agent gone silent with its socket still open (run 3, C4)", () => {
+  test("is not a best-fit candidate after AGENT_SILENT_MS, and is again as soon as it is heard from", async () => {
+    const { agentCapabilities } = await import("../../src/swarm/coordinator/agent-state.js");
+    const { AGENT_SILENT_MS, noteAgentPull } = await import("../../src/swarm/coordinator/dispatch.js");
+    const cap = agentCapabilities.get(b.peerId)!;
+    expect(view(b)?.stale).toBe(false);
+    // Last heard 45 s ago (no heartbeat, no pull), socket not seen to close: the Mac in run 3.
+    const then = Date.now() - 45_000;
+    cap.lastSeenMs = then;
+    noteAgentPull(b.peerId, { inferenceSlots: 2, freeInferenceSlots: 2, wake: true }, then);
+    expect(45_000).toBeGreaterThan(AGENT_SILENT_MS);
+    expect(agentSocketLost(b.peerId)).toBe(false);
+    expect(view(b)?.stale).toBe(true);
+    // It pulls: heard from, a candidate again.
+    expect(await pull(b)).toBeNull();
+    expect(view(b)?.stale).toBe(false);
+  });
+});

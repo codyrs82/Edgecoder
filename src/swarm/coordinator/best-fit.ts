@@ -52,6 +52,10 @@
  * on the network fits, or every other machine that meets it is busy (no free slot: the cloud host
  * takes the overflow as more GPUs in the pool). A light or simple job a free network machine can
  * serve never goes to the cloud.
+ * Reasoning models (GLM-5.3, DeepSeek V4.1 Flash: they think in `reasoning_content` before they
+ * answer) are left out for a call whose max_tokens is below their reasoning budget
+ * (reasoningMinTokensFor; AUTO_REASONING_MIN_TOKENS): a small output cap ends inside the thinking
+ * and the caller gets 400 reasoning_only (2026-11-25 run 3: max_tokens 40 and 1024).
  * Among cloud models the standard one (Flash) is kept over a premium one (catalog hint "premium",
  * GLM-5.3) unless the job asks for the best quality at top-tier complexity and the premium one
  * is within the price ceiling; a premium one is also used when it is the only cloud model that fits.
@@ -85,7 +89,9 @@ const CLOUD_PREFILL_FACTOR = 40;
 //             agentic tool-use turn over real code, several files, or several reasoning cues. It wants
 //             the network's top tier (GPU 30B-class or cloud models): its size floor is 14B and cloud
 //             models are candidates. It never spills below that floor; when nothing that size is
-//             healthy, the biggest available model is used and the decision says so (belowFloor).
+//             healthy, the biggest available model with a free slot (at least COMPLEX_FALLBACK_MIN_B)
+//             is used and the decision says so (belowFloor, capacity "spill"); only when none of
+//             those is free does it queue for the biggest busy one (capacity "queued").
 //
 // The class and the reason are recorded in each routing decision (routing.ts routingSummary).
 
@@ -100,6 +106,12 @@ export const LARGE_REPLY_TOKENS = 8_192;
 const AGENTIC_COMPLEX_PROMPT_TOKENS = 2_000;
 /** A simple call's spill floor: any model at least this size. */
 export const SIMPLE_SPILL_MIN_B = 1.5;
+/**
+ * D5 (run 3b): a complex call with nothing of its floor online takes the biggest model with a free
+ * slot down to this size, rather than queue behind the one busy bigger host (5 of 8 waited 46 s on
+ * a 2-slot 9b Mac and got 503 while a 7b Mac was free).
+ */
+export const COMPLEX_FALLBACK_MIN_B = 7;
 
 type ClassInput = Pick<JobDescriptor, "job" | "complexity"> & Partial<Pick<JobDescriptor, "needsTools" | "contextTokens" | "maxTokens" | "promptTokens">>;
 
@@ -253,6 +265,56 @@ export interface BestFitConfig {
    * model whose host is online), "off", or a list of ids. See the module comment for when.
    */
   autoCloudModels: AutoCloudModels;
+  /**
+   * Reasoning models and the smallest max_tokens a call needs for them (AUTO_REASONING_MIN_TOKENS):
+   * a call with a smaller max_tokens never goes to them. Empty: no such filter.
+   */
+  reasoningMinTokens: Record<string, number>;
+}
+
+/**
+ * Reasoning budget of the built-in reasoning models (run 3b: GLM-5.3 0/40 reasoning_only at 1024,
+ * 5/15 at 512; DeepSeek V4.1 Flash 1/40 at 512, and one at 1024 in run 3).
+ */
+export const DEFAULT_REASONING_MIN_TOKENS = 1_024;
+export const KNOWN_REASONING_MODELS: readonly string[] = ["glm-5.3", "deepseek-v4.1-flash"];
+
+/**
+ * AUTO_REASONING_MIN_TOKENS: unset, the built-in reasoning models at DEFAULT_REASONING_MIN_TOKENS; a
+ * number, every built-in reasoning model at that; "model=n,model=n", those models (added to or
+ * replacing the built-in ones; a bare number in the list sets the built-in ones); "off" or "0": none.
+ */
+export function parseReasoningMinTokens(raw: string | undefined): Record<string, number> {
+  const t = (raw ?? "").trim().toLowerCase();
+  const builtIn = (n: number) => Object.fromEntries(KNOWN_REASONING_MODELS.map((m) => [m, n]));
+  if (t === "") return builtIn(DEFAULT_REASONING_MIN_TOKENS);
+  if (t === "off" || t === "none" || t === "0" || t === "false") return {};
+  const out = builtIn(DEFAULT_REASONING_MIN_TOKENS);
+  const ok = (n: number) => Number.isInteger(n) && n >= 0 && n <= 1_000_000;
+  for (const part of t.split(",").map((x) => x.trim()).filter(Boolean)) {
+    const eq = part.lastIndexOf("=");
+    if (eq < 0) {
+      const n = Number(part);
+      if (ok(n)) for (const m of KNOWN_REASONING_MODELS) out[m] = n;
+      continue;
+    }
+    const model = part.slice(0, eq).trim();
+    const n = Number(part.slice(eq + 1).trim());
+    if (model && ok(n)) out[model] = n;
+  }
+  for (const [m, n] of Object.entries(out)) if (n === 0) delete out[m];
+  return out;
+}
+
+/** The max_tokens a call needs for `model` (a reasoning model); undefined: no minimum. */
+export function reasoningMinTokensFor(model: string, cfg: Pick<BestFitConfig, "reasoningMinTokens"> = DEFAULT_BEST_FIT_CONFIG): number | undefined {
+  return (cfg.reasoningMinTokens ?? {})[model];
+}
+
+/** The call's max_tokens leaves room for `model` to answer after its reasoning (no max_tokens: the provider's default, room). */
+export function outputRoomFor(model: string, maxTokens: number | undefined, cfg: Pick<BestFitConfig, "reasoningMinTokens"> = DEFAULT_BEST_FIT_CONFIG): boolean {
+  const min = reasoningMinTokensFor(model, cfg);
+  return min === undefined || maxTokens === undefined || maxTokens >= min;
 }
 
 export const DEFAULT_BEST_FIT_CONFIG: BestFitConfig = {
@@ -266,6 +328,7 @@ export const DEFAULT_BEST_FIT_CONFIG: BestFitConfig = {
   oversizePenalty: 0.25,
   peers: true,
   autoCloudModels: "all",
+  reasoningMinTokens: parseReasoningMinTokens(undefined),
 };
 
 /** The config from BEST_FIT_* variables; a missing or invalid value keeps its default. */
@@ -294,6 +357,7 @@ export function bestFitConfigFromEnv(env: Record<string, string | undefined> = p
     oversizePenalty: num(env.BEST_FIT_OVERSIZE_PENALTY, d.oversizePenalty, 0, 1),
     peers: !["0", "false"].includes((env.BEST_FIT_PEERS ?? "").trim().toLowerCase()),
     autoCloudModels: parseAutoCloudModels(env.AUTO_CLOUD_MODELS),
+    reasoningMinTokens: parseReasoningMinTokens(env.AUTO_REASONING_MIN_TOKENS),
   };
 }
 
@@ -576,6 +640,7 @@ function evaluate(job: JobDescriptor, view: NetworkView, cfg: BestFitConfig, req
   const holders = new Map<string, number>();
   for (const a of view.agents) if (!a.stale) for (const m of new Set(a.models)) holders.set(m, (holders.get(m) ?? 0) + 1);
   const out: Evaluated[] = [];
+  const shortOutput = new Set<string>();
   const target = job.latency === "batch" ? cfg.latencyTargetMs.batch : cfg.latencyTargetMs.interactive;
   for (const a of view.agents) {
     if (a.stale) continue;
@@ -585,6 +650,11 @@ function evaluate(job: JobDescriptor, view: NetworkView, cfg: BestFitConfig, req
       // may be used is bestFit's call (cloudConsidered).
       const cloud = a.computeClass === "cloud" || isCloudModel(model);
       if (cloud && !autoMayUseCloudModel(model, cfg.autoCloudModels ?? "all")) continue;
+      // C5: a reasoning model whose thinking alone would use up the call's max_tokens.
+      if (!outputRoomFor(model, job.maxTokens, cfg)) {
+        shortOutput.add(model);
+        continue;
+      }
       const cached = !!session && session.agentId === a.agentId && session.model === model;
       const held = holders.get(model) ?? 1;
       const est = estimate(job, a, model, view, held, cached);
@@ -605,7 +675,7 @@ function evaluate(job: JobDescriptor, view: NetworkView, cfg: BestFitConfig, req
       });
     }
   }
-  return out;
+  return Object.assign(out, { shortOutput });
 }
 
 const fmtS = (ms: number) => (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`);
@@ -652,11 +722,13 @@ export function bestFit(job: JobDescriptor, view: NetworkView, cfg: BestFitConfi
     const cloudNote = cfg.autoCloudModels === "off" ? "; cloud models are off (AUTO_CLOUD_MODELS=off)" : "";
     const fitting = all.filter((c) => c.toolsOk && c.contextOk && big(c));
     const cheapestC = rejectedCode === "price" && fitting.length ? fitting.reduce((a, b) => (b.estimate.cSats < a.estimate.cSats ? b : a)) : undefined;
+    // C5: reasoning models were online but the call's max_tokens leaves them no room to answer.
+    const shortNote = evaluated.shortOutput.size ? `; ${[...evaluated.shortOutput].sort().map((m) => `${m} needs max_tokens ≥ ${reasoningMinTokensFor(m, cfg)}`).join(", ")}` : "";
     const rejected =
-      rejectedCode === "none" ? `no agent with a model is online${cloudNote}` :
+      rejectedCode === "none" ? `no agent with a model is online${cloudNote}${shortNote}` :
       rejectedCode === "price"
         ? `every fitting model costs more than the ${job.maxCSats} cSats ceiling (the cheapest, ${cheapestC!.model} on ${cheapestC!.computeClass}, is about ${round3(cheapestC!.estimate.cSats)} cSats)`
-        : `No machine on the network can run this job right now (needs ${needs}; online: ${onlineModels(view, cfg)}${cloudNote})`;
+        : `No machine on the network can run this job right now (needs ${needs}; online: ${onlineModels(view, cfg)}${cloudNote}${shortNote})`;
     const cheapest = cheapestC ? round3(cheapestC.estimate.cSats) : undefined;
     return { chosen: null, candidates: [], requirements: req, weights: w, affinity: { status: "none" }, ...classInfo, reason: `${header}: nothing fits (${rejected})`, rejected, rejectedCode, ...(cheapest !== undefined ? { cheapestCSats: cheapest } : {}) };
   }
@@ -675,9 +747,12 @@ export function bestFit(job: JobDescriptor, view: NetworkView, cfg: BestFitConfi
     } else capacity = "queued";
   }
   if (pool.length === 0) {
-    // Nothing meets the minimum: the biggest available models, marked. A complex call takes the
-    // biggest even when it is busy; other calls the biggest with a free slot, if any.
-    const src = cc.cls !== "complex" && live.some((c) => c.free) ? live.filter((c) => c.free) : live;
+    // Nothing meets the minimum: the biggest available models, marked. Every call takes the biggest
+    // with a free slot, if any (a complex call only down to COMPLEX_FALLBACK_MIN_B, or the biggest
+    // online when that is smaller); else it queues for the biggest busy one.
+    const topAll = Math.max(...live.map((c) => c.paramsB));
+    const freeSrc = live.filter((c) => c.free && (cc.cls !== "complex" || c.paramsB >= Math.min(COMPLEX_FALLBACK_MIN_B, topAll)));
+    const src = freeSrc.length ? freeSrc : live;
     const top = Math.max(...src.map((c) => c.paramsB));
     pool = src.filter((c) => c.paramsB >= top).map((c) => ({ ...c, belowFloor: true }));
     capacity = pool.some((c) => c.free) ? "spill" : "queued";
