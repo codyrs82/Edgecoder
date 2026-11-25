@@ -589,6 +589,26 @@ describe("tentacles complexity for best-fit routing (6)", () => {
 });
 
 describe("tentacles served lines and totals (5)", () => {
+  it("a call without a route line keeps its own host and never takes an earlier call's model (run 6: a 7b label on the cloud host)", async () => {
+    const CPU: ServedBy = { ...GPU_ORD, computeClass: "cpu", label: "mac-•••30e5" };
+    const CLOUD: ServedBy = { ...GPU_ORD, computeClass: "cloud", label: "lin-•••85de" };
+    const { tentacles, s, events } = setup({
+      script: ({ call }) =>
+        call === 0
+          ? { tool: ["write_file", { path: "m.ts", content: "m\n" }], where: "routed to qwen2.5-coder:7b on cpu because fastest", served: CPU }
+          : { text: "wrote m", where: "", served: CLOUD },
+    });
+    const exec = tentacleExecutor(tentacles, s.id, async () => ({}));
+    await exec("delegate", { task: "Add m", kind: "code_edit", instructions: "m" }, { approved: false });
+    await exec("await_tentacles", { timeoutS: 10 }, { approved: false });
+    await until(() => events.some((e) => e.type === "tentacle_totals"));
+    const usage = events.filter((e) => e.type === "tentacle_usage");
+    expect(usage).toHaveLength(2);
+    expect(usage[0].line).toMatch(/^qwen2\.5-coder:7b · network cpu · mac-•••30e5/);
+    expect(usage[1].line).not.toContain("qwen2.5-coder:7b");
+    expect(usage[1].line).toContain("network cloud · lin-•••85de");
+  });
+
   it("each helper call has its own served line in the session events, the result, the note and the lead's results, with totals", async () => {
     const { tentacles, s, events, hub } = setup({
       script: ({ call }) =>

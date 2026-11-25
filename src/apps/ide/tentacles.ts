@@ -640,7 +640,8 @@ export class TentacleManager {
     // Where the latest attempt ran (local first), and the local model when it ran here.
     let place: "local" | "worker" = "worker";
     let localModel = "";
-    const whereNow = () => (place === "local" ? { model: localModel, class: "this computer", agentLabel: "this computer" } : whereServed(where, model, [...calls].reverse().find((c) => c.served)?.served));
+    // `served`: the call being recorded (not yet in `calls`), so its line never takes an earlier call's host.
+    const whereNow = (served?: ServedBy) => (place === "local" ? { model: localModel, class: "this computer", agentLabel: "this computer" } : whereServed(where, model, served ?? [...calls].reverse().find((c) => c.served)?.served));
     const checks: CheckResult[] = [];
     try {
       if (!t.spec.readOnly) {
@@ -738,8 +739,10 @@ export class TentacleManager {
             t.view.cSats = t.spent;
             tokens.prompt += u.promptTokens ?? 0;
             tokens.output += u.outputTokens ?? 0;
-            if (u.where) where = u.where;
-            const w = whereNow();
+            // This call's own route line: a call without one (a named cloud model) must not take the
+            // model of an earlier call's route ("qwen2.5-coder:7b · network cloud").
+            where = u.where;
+            const w = whereNow(u.served);
             t.view.model = w.model;
             const callPlace: TentaclePlace = place === "local" || u.served?.computeClass === "local" ? "local" : "network";
             const call: TentacleCall = { cSats: round(u.cSats), model: w.model, place: callPlace, ...(u.where ? { where: u.where } : {}), ...(u.served ? { served: u.served } : {}), ...(u.promptTokens !== undefined ? { promptTokens: u.promptTokens } : {}), ...(u.outputTokens !== undefined ? { outputTokens: u.outputTokens } : {}) };

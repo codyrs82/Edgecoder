@@ -131,6 +131,18 @@ export const SLOW_HOST_PREFILL_FACTOR: Record<string, number> = { cpu: 6, apple:
  * floor both use this bound, so the floor still never exceeds the hold.
  */
 export const WORK_PROMPT_TOKEN_ALLOWANCE = 256;
+
+/**
+ * Bytes of a cloud model call's queued input per prompt token, for its hold (economy.ts
+ * inferenceCallReserve). A cloud model is priced per token, so its hold is its real worst case:
+ * prompt tokens × input price + (max_tokens + allowance) × output price; the reasoning a cloud host
+ * asks the provider for past max_tokens is never billed (#554: output stays bounded by max_tokens).
+ * Bytes overstate tokens (code and prose run ~3.5–4 bytes per token, and the JSON escaping of the
+ * messages adds more); with INFERENCE_RESERVE_MARGIN the hold covers 2 bytes per token. Bounding the
+ * prompt at one token per byte + 2048 held glm-5.3 at ~66 cSats per call (run 6) and 402'd buyers
+ * with ~100 cSats. A count past the hold still settles at the hold (job_cost_capped_at_reserve).
+ */
+export const CLOUD_PROMPT_BYTES_PER_TOKEN = 3;
 /** Safety factor on the slow-host estimate, and a fixed allowance per call (first token, scheduling). */
 export const WORK_TIME_SAFETY = 2;
 export const WORK_TIME_OVERHEAD_MS = 5_000;
