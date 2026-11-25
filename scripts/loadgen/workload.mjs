@@ -198,3 +198,30 @@ export function codegenTask(r, n, contextTokens) {
     ok: (t) => t.includes(name) && t.includes(f.needle.name),
   };
 }
+
+/**
+ * Reasoning models (the cloud GLM and DeepSeek hosts) spend max_tokens on reasoning before any
+ * answer; a small budget ends inside the reasoning and the call fails 400 reasoning_only (run 3c:
+ * max_tokens 16/160/512). Matched by substring of the model key; --reasoning-models overrides.
+ */
+export const DEFAULT_REASONING_MODELS = ["glm-", "deepseek-v"];
+export const DEFAULT_REASONING_FLOOR = 1024;
+
+export function isReasoningModel(key, patterns = DEFAULT_REASONING_MODELS) {
+  const k = String(key ?? "").toLowerCase();
+  return patterns.some((p) => p && k.includes(String(p).toLowerCase()));
+}
+
+/**
+ * max_tokens for a call: at least `floor` on a reasoning model, and on "auto" when the network
+ * holds a reasoning model (best-fit may place it there: the cloud share) or no snapshot says.
+ */
+export function maxTokensFor(key, maxTokens, { floor = DEFAULT_REASONING_FLOOR, patterns = DEFAULT_REASONING_MODELS, capacity = null } = {}) {
+  if (!(floor > 0) || maxTokens >= floor) return maxTokens;
+  if (isReasoningModel(key, patterns)) return floor;
+  if (key === "auto") {
+    const held = Object.entries(capacity?.models ?? {}).filter(([, m]) => (m?.slots ?? 0) > 0).map(([k]) => k);
+    if (!held.length || held.some((k) => isReasoningModel(k, patterns))) return floor;
+  }
+  return maxTokens;
+}
