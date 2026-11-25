@@ -124,7 +124,7 @@ const MODULE = Array.from({ length: 230 }, (_, i) => `function probe_${i}(a, b) 
 const probe = () => ({ model: MODEL, maxTokens: 300, messages: [{ role: "user", content: `Explain this module briefly:\n${MODULE}` }] });
 const lookup = () => ({ model: MODEL, maxTokens: 48, messages: [{ role: "user", content: `Write a JS function named f${Math.floor(Math.random() * 100)} that returns its square. Code only.` }] });
 /** Tokens completion admission judges a body on (as routes/inference.ts completionWork). */
-const promptTokensOf = (b: { messages: unknown[] }) => Math.ceil(Buffer.byteLength(JSON.stringify({ messages: b.messages, tools: [] }), "utf8") / 4);
+const promptTokensOf = (b: { messages: unknown[] }): number => eta.promptTokenEstimate(JSON.stringify({ messages: b.messages, tools: [] }));
 
 const submit = async (body: Record<string, unknown>) => {
   const taskId = `inf-${randomUUID()}`;
@@ -197,6 +197,9 @@ describe("1. redirects check completion at both ends", () => {
     // completion limit (162 s) and the timeout (180 s) is let in once to learn the class's speed.
     const work = eta.callWorkMs(MODEL, "cpu", promptTokensOf(probe()), 300);
     process.env.INFERENCE_COMPLETION_PRIOR_SPEED = `cpu=${(170_000 / work).toFixed(6)}`;
+    // Run 9: fast measured token rates, so the speed prior (not the prefill + decode rates) judges it.
+    for (let i = 0; i < 3; i++) eta.decodeRates.record(MODEL, "cpu", 40);
+    for (let i = 0; i < 3; i++) eta.prefillRates.record(MODEL, "cpu", 400);
     const before = creditEngine.balance(requester.peerId);
     const sent = await submit({ ...probe(), redirected: true });
     expect(sent.r.statusCode, sent.r.body).toBe(503);
