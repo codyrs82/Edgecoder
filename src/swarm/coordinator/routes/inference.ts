@@ -69,7 +69,7 @@ import { recordMeshWork } from "../world-activity.js";
 import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
 import { armAutoReplace, autoPlacementOf, overrunAlternativeExists, placeAfterOverrun, replaceAutoNow, setReplaceAdmission, type AutoPlacement } from "../auto-replace.js";
 import { freeLocalHolders, LOCALITY_PREFER_MS, nearestFreeHolder, peerWithFreeCapacity, type PeerFit } from "../locality.js";
-import { agentHeldBack, agentStolenRecently, agentWithholding, completionByClass, completionLimitMs, hostServiceMs, hostSpeed, type HostSpeedSource, judgeCompletion, modelPickups, modelSlots, noteHeldCounts, parseCompletionPrior, promptTokenEstimate, serviceTimes, stalledClaimMs, startEtaLimitMs, startEtaMs, withholdingHolders } from "../start-eta.js";
+import { agentHeldBack, agentStolenRecently, agentWithholding, type ClassCompletion, completionByClass, completionLimitMs, hostServiceMs, hostSpeed, type HostSpeedSource, judgeCompletion, modelPickups, modelSlots, noteHeldCounts, parseCompletionPrior, promptTokenEstimate, serviceTimes, stalledClaimMs, startEtaLimitMs, startEtaMs, withholdingHolders } from "../start-eta.js";
 import { expectedOutputTokens, judgedOutputOf, noteJudgedOutput, pruneJudged } from "../expected-output.js";
 
 // ── Network inference (chat completions on agents' local models, streamed) ──────────────────
@@ -898,17 +898,38 @@ setInterval(() => void sweepWaitingInference().catch((err) => coordinatorApp.log
 export function completionCheck(
   model: string, taskClass: ComputeClassId | "any", messages: ChatMessage[], tools: unknown[] | undefined, maxTokens: number | undefined, timeoutMs: number, nowMs = Date.now(),
   opts: CompletionCheckOptions = {},
-): { exclude: string[]; none: boolean; etaMs: number | null; limitMs: number } {
+): { exclude: string[]; none: boolean; etaMs: number | null; limitMs: number; classes: ClassCompletion[] } {
   const elapsedMs = Math.max(0, opts.elapsedMs ?? 0);
   const limitMs = completionLimitMs(timeoutMs, CC.INFERENCE_COMPLETION_ETA_FRACTION) - elapsedMs;
-  if (!Number.isFinite(limitMs)) return { exclude: [], none: false, etaMs: null, limitMs };
+  if (!Number.isFinite(limitMs)) return { exclude: [], none: false, etaMs: null, limitMs, classes: [] };
   const { promptTokens, outputTokens } = completionWork(messages, tools, maxTokens, opts.outputTokens);
   // Run 7: the decode-rate estimate judges a reply of the call's own max_tokens; a call that set none is
   // judged on a typical long reply (COMPLETION_UNSET_MAX_TOKENS) at the speed estimate, as before.
   // Run 9: an Auto call is judged on its expected reply (expected-output.ts), at the decode rate too.
   const decode = maxTokens !== undefined || opts.outputTokens !== undefined;
   const classes = completionByClass({ model, taskClass, neededTokens: contextNeeded(messages, tools, maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS), promptTokens, outputTokens, waiting: opts.waiting ?? queue.waitingInference(model), prior: completionPrior(), decode, ...(opts.exclude?.length ? { exclude: opts.exclude } : {}) }, nowMs);
-  return { ...judgeCompletion(classes, limitMs, opts.explore === false ? 0 : timeoutMs - elapsedMs), limitMs: Math.round(limitMs) };
+  return { ...judgeCompletion(classes, limitMs, opts.explore === false ? 0 : timeoutMs - elapsedMs), limitMs: Math.round(limitMs), classes };
+}
+
+/**
+ * Run 10: the completion estimate's parts per class, for the admission log line
+ * (inference_completion_estimate), so a network run can check each against what the call did:
+ * prompt tokens, the prefill rate and where it came from, the decode rate (and after the prompt),
+ * the speed estimate, contention, start and total.
+ */
+export function completionEstimateLog(check: { classes: ClassCompletion[]; limitMs: number; none: boolean; exclude: string[] }): Record<string, unknown> {
+  return {
+    limitMs: check.limitMs, none: check.none, excluded: check.exclude.length,
+    classes: check.classes.map((c) => {
+      const p = c.parts;
+      const r = p?.rate ?? null;
+      return {
+        computeClass: c.computeClass, agents: c.agents.length, startEtaMs: c.startEtaMs, completionEtaMs: c.completionEtaMs, priorOnly: c.priorOnly ?? false,
+        ...(p ? { promptTokens: p.promptTokens, outputTokens: p.outputTokens, bySpeedMs: p.bySpeedMs, speedFrom: p.speedFrom, slowdown: p.slowdown } : {}),
+        ...(r ? { rateMs: r.ms, prefillTps: r.prefillTps, prefillFrom: r.prefillFrom, prefillSamples: r.prefillSamples, prefillMs: r.prefillMs, decodeTps: r.decodeTps, decodeFrom: r.decodeFrom, effectiveDecodeTps: r.effectiveDecodeTps, decodeMs: r.decodeMs } : {}),
+      };
+    }),
+  };
 }
 
 /**
@@ -1171,6 +1192,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       for (let pick = 0; result.chosen?.local && !elsewhere; pick++) {
         const chosenClass = (ACCEPTED_COMPUTE_CLASS_IDS as readonly string[]).includes(result.chosen.computeClass) ? (result.chosen.computeClass as ComputeClassId) : "any";
         const check = completionCheck(result.chosen.model, chosenClass, body.messages as ChatMessage[], body.tools, body.maxTokens, body.timeoutMs, Date.now(), { explore: !body.redirected, outputTokens: judgedOutput });
+        req.log.info({ taskId: body.taskId, model: result.chosen.model, auto: true, pick, ...completionEstimateLog(check) }, "inference_completion_estimate");
         const fresh = check.exclude.filter((id) => !slowAgents.includes(id));
         slowAgents = [...slowAgents, ...fresh];
         if (!check.exclude.includes(result.chosen.agentId)) break;
@@ -1271,6 +1293,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       if (!routed) {
         // Run 6: a call another coordinator sent here gets no exploration: refused now if it would not finish.
         const late = completionCheck(body.model, namedClass(body.computeClass), body.messages as ChatMessage[], body.tools, body.maxTokens, body.timeoutMs, Date.now(), { explore: !body.redirected });
+        req.log.info({ taskId: body.taskId, model: body.model, auto: false, ...completionEstimateLog(late) }, "inference_completion_estimate");
         if (late.none) {
           // Run 6: only to a peer whose free host would finish it (locality.ts peerCompletionMs), else 503 now.
           const peer = body.routeRedirect && !restrictedTier ? await peerWithFreeCapacity(body.model, body.computeClass, clientRegion, Date.now(), peerFit(body.messages as ChatMessage[], body.tools, body.maxTokens, body.timeoutMs)).catch(() => null) : null;

@@ -490,6 +490,21 @@ export interface ClassCompletion {
   priorOnly?: boolean;
   /** Calls of the model running or waiting on the class's hosts now. */
   inFlight?: number;
+  /** Run 10: the parts of the estimate, for the admission log. */
+  parts?: CompletionParts;
+}
+
+/** Run 10: what a class's completion estimate is made of (routes/inference.ts logs it at admission). */
+export interface CompletionParts {
+  promptTokens: number;
+  outputTokens: number;
+  /** The token-rate estimate (null: the class has no rates or prior). */
+  rate: DecodeEstimate | null;
+  /** The speed estimate (speed × expectedWorkMs; null: no speed known). */
+  bySpeedMs: number | null;
+  speedFrom: "measured" | "prior" | null;
+  /** Contention with the calls on the class's hosts (× the call's own time). */
+  slowdown: number;
 }
 
 /**
@@ -554,6 +569,10 @@ export function completionByClass(input: { model: string; taskClass: ComputeClas
       computeClass: cls, agents: e.agents, startEtaMs: start,
       completionEtaMs: ownMs === null ? null : Math.round((start ?? 0) + ownMs),
       priorOnly, inFlight: e.running + waiting,
+      parts: {
+        promptTokens: input.promptTokens, outputTokens: input.decode === false ? 0 : input.outputTokens, rate: decode,
+        bySpeedMs: bySpeed === null ? null : Math.round(bySpeed), speedFrom: est.speed === null ? null : est.prior ? "prior" : "measured", slowdown: Math.round(slowdown * 100) / 100,
+      },
     });
   }
   return out;
@@ -763,14 +782,54 @@ export const DECODE_ESTIMATE_OVERHEAD_MS = 2_000;
  * false: measured rates only (admission passes false for a class whose speed prior is off,
  * INFERENCE_COMPLETION_PRIOR_SPEED, so "off" turns off both priors).
  */
-export function decodeEstimateMs(model: string, computeClass: string, promptTokens: number, outputTokens: number, nowMs = Date.now(), usePrior = true): { ms: number; prior: boolean; decodeTps: number; prefillTps: number; prefillMs: number } | null {
+export function decodeEstimateMs(model: string, computeClass: string, promptTokens: number, outputTokens: number, nowMs = Date.now(), usePrior = true): DecodeEstimate | null {
   const prior = usePrior ? priorDecodeTps(model, computeClass) : undefined;
   const decode = decodeRates.rate(model, computeClass, prior, nowMs);
   if (decode === null) return null;
-  const prefillTps = completionPrefillTps(model, computeClass, promptTokens, decode.tps, nowMs);
-  const prefillMs = (Math.max(0, promptTokens) / prefillTps) * 1000;
-  const ms = DECODE_ESTIMATE_OVERHEAD_MS + prefillMs + (Math.max(0, outputTokens) / decode.tps) * 1000;
-  return { ms: Math.round(ms), prior: decode.prior, decodeTps: decode.tps, prefillTps, prefillMs: Math.round(prefillMs) };
+  const prompt = Math.max(0, promptTokens);
+  const prefill = completionPrefillTps(model, computeClass, prompt, decode.tps, nowMs, usePrior);
+  const prefillMs = (prompt / prefill.tps) * 1000;
+  // Run 10: the decode rate is measured on calls with short contexts; after a long prompt every token
+  // attends over it, so the reply is written slower (decodeContextFactor).
+  const contextFactor = decodeContextFactor(computeClass, prompt);
+  const effectiveDecodeTps = decode.tps / contextFactor;
+  const decodeMs = (Math.max(0, outputTokens) / effectiveDecodeTps) * 1000;
+  const ms = DECODE_ESTIMATE_OVERHEAD_MS + prefillMs + decodeMs;
+  return {
+    ms: Math.round(ms), prior: decode.prior, decodeTps: decode.tps, decodeFrom: decode.prior ? "prior" : "measured", effectiveDecodeTps: round2(effectiveDecodeTps), contextFactor: round2(contextFactor),
+    prefillTps: round2(prefill.tps), prefillFrom: prefill.from, prefillSamples: prefill.samples, prefillMs: Math.round(prefillMs), decodeMs: Math.round(decodeMs),
+  };
+}
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+/** The parts of a decode-rate estimate (logged at admission, run 10, so a run can check each one). */
+export interface DecodeEstimate {
+  ms: number;
+  /** Judged on the decode prior alone (fewer than SERVICE_MIN_SAMPLES decode samples). */
+  prior: boolean;
+  decodeTps: number;
+  decodeFrom: "measured" | "prior";
+  /** The decode rate after the prompt (decodeTps ÷ contextFactor). */
+  effectiveDecodeTps: number;
+  contextFactor: number;
+  prefillTps: number;
+  prefillFrom: PrefillSource;
+  /** Relevant measured prefill samples (prompts at least PREFILL_RELEVANT_SHARE of this one's). */
+  prefillSamples: number;
+  prefillMs: number;
+  decodeMs: number;
+}
+
+/**
+ * Run 10: how much slower a reply is written after a prompt of `promptTokens` than after a short one:
+ * 1 + promptTokens ÷ DECODE_CONTEXT_TOKENS of the class. On the 2-core CPU hosts a 300-token reply
+ * after a ~4.6k-token prompt came at ~7-10 tok/s, against the ~10-15 tok/s their short calls measure.
+ */
+export const DECODE_CONTEXT_TOKENS: Readonly<Record<string, number>> = { cpu: 8_192, apple: 32_768, gpu: 65_536, "gpu.dc": 131_072 };
+export function decodeContextFactor(computeClass: string, promptTokens: number): number {
+  const per = DECODE_CONTEXT_TOKENS[computeClass] ?? DECODE_CONTEXT_TOKENS.cpu;
+  return 1 + Math.max(0, promptTokens) / per;
 }
 
 /**
@@ -789,13 +848,51 @@ export function decodeEstimateMs(model: string, computeClass: string, promptToke
  * with decode × COMPLETION_PREFILL_FACTOR in place of each missing sample.
  */
 export const COMPLETION_PREFILL_FACTOR: Readonly<Record<string, number>> = { ...SLOW_HOST_PREFILL_FACTOR, cpu: 4 };
-/** Run 9: a prefill sample counts for a call when its prompt is at least this share of the call's. */
-export const PREFILL_RELEVANT_SHARE = 1 / 2;
+/**
+ * Run 9: a prefill sample counts for a call when its prompt is at least this share of the call's.
+ * Run 10: 3/4 (was 1/2): reading gets slower per token as the prompt grows.
+ */
+export const PREFILL_RELEVANT_SHARE = 3 / 4;
 
-/** The prefill rate (tok/s) the completion estimate reads a prompt of `promptTokens` at, given the class's decode rate. */
-export function completionPrefillTps(model: string, computeClass: string, promptTokens: number, decodeTps: number, nowMs = Date.now()): number {
-  const fallback = decodeTps * (COMPLETION_PREFILL_FACTOR[computeClass] ?? COMPLETION_PREFILL_FACTOR.cpu);
-  return prefillRates.rate(model, computeClass, fallback, nowMs, Math.max(0, promptTokens) * PREFILL_RELEVANT_SHARE)?.tps ?? fallback;
+/**
+ * Run 10 (inf-1795642903097-65a0dde5 on jnb: nothing in 180 s; three more took 125-144 s to the first
+ * token): the same ~4.6k-token prompt was admitted again. With no long prompt measured, its prefill
+ * rate was decode × COMPLETION_PREFILL_FACTOR, and the decode rate was measured: ~9-14 tok/s from
+ * short calls (normalised up for the calls sharing the host), so the prompt was read at ~40-55 tok/s
+ * (~150 s end to end, just under the 162 s limit). The hosts read it at 26-37 tok/s; a short call's
+ * decode rate says nothing about reading a long prompt.
+ *
+ * The prefill rate of a class without enough relevant measured samples is now never above the
+ * class's own prefill prior, COMPLETION_PRIOR_PREFILL_TPS_7B (scaled like the decode prior: √(7 / paramsB)
+ * below 7B; cpu 11, ~24 tok/s for 1.5b, under the slowest 2-core host seen), whatever the decode rate.
+ */
+export const COMPLETION_PRIOR_PREFILL_TPS_7B: Readonly<Record<string, number>> = { cpu: 11 };
+
+/** The prior prefill rate (tok/s) of `model` on `computeClass`, undefined when the class has none. */
+export function priorPrefillTps(model: string, computeClass: string): number | undefined {
+  const base = COMPLETION_PRIOR_PREFILL_TPS_7B[computeClass];
+  if (!(base > 0)) return undefined;
+  const b = Math.max(0.3, paramsB(model) || 7);
+  return base * (b < 7 ? Math.sqrt(7 / b) : 7 / b);
+}
+
+/** Where a prefill rate comes from: measured long prompts, the class's prefill prior, or decode × COMPLETION_PREFILL_FACTOR. */
+export type PrefillSource = "measured" | "prior" | "decode";
+
+/**
+ * The prefill rate (tok/s) the completion estimate reads a prompt of `promptTokens` at: the median of
+ * the class's measured rates on prompts at least PREFILL_RELEVANT_SHARE of its size, with at least
+ * SERVICE_MIN_SAMPLES of them; else the lower of decode × COMPLETION_PREFILL_FACTOR and the class's
+ * prefill prior (run 10), and never above that with only a few measured samples.
+ */
+export function completionPrefillTps(model: string, computeClass: string, promptTokens: number, decodeTps: number, nowMs = Date.now(), usePrior = true): { tps: number; from: PrefillSource; samples: number } {
+  const byDecode = decodeTps * (COMPLETION_PREFILL_FACTOR[computeClass] ?? COMPLETION_PREFILL_FACTOR.cpu);
+  const prior = usePrior ? priorPrefillTps(model, computeClass) : undefined;
+  const fallback = prior !== undefined && prior < byDecode ? { tps: prior, from: "prior" as const } : { tps: byDecode, from: "decode" as const };
+  const measured = prefillRates.rate(model, computeClass, fallback.tps, nowMs, Math.max(0, promptTokens) * PREFILL_RELEVANT_SHARE);
+  if (!measured) return { ...fallback, samples: 0 };
+  if (!measured.prior) return { tps: measured.tps, from: "measured", samples: measured.samples };
+  return measured.tps < fallback.tps ? { tps: measured.tps, from: "measured", samples: measured.samples } : { ...fallback, samples: measured.samples };
 }
 
 /**
