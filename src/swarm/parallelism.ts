@@ -16,13 +16,16 @@
  *   slots    = clamp(floor((usable − model) / per slot), 1, cap)
  * So a 4 GB CPU agent with a 1.5B model runs 2 calls; 8 GB with a 7B model, 1.
  *
+ * A host that runs the model on its CPU (no GPU at all) also gets at most one slot per
+ * CPUS_PER_CPU_SLOT logical CPUs (cpuSlotCap), when its CPU count is given: a 2-CPU host runs 1 call.
+ *
  * AGENT_PARALLEL_INFERENCE (1-16) overrides. When OLLAMA_NUM_PARALLEL is set (the same machine's
  * Ollama), the computed default never exceeds it: a call past Ollama's slots queues inside Ollama.
  */
 export function parallelInferenceFor(
   totalMemBytes: number,
   override?: string,
-  opts: { modelParamsB?: number; gpu?: boolean; ollamaNumParallel?: string } = {}
+  opts: { modelParamsB?: number; gpu?: boolean; ollamaNumParallel?: string; cpuOnly?: boolean; cpuCount?: number } = {}
 ): number {
   const n = Number(override);
   if (Number.isInteger(n) && n >= 1 && n <= 16) return n;
@@ -38,9 +41,28 @@ export function parallelInferenceFor(
   } else {
     slots = gb >= 31 ? 4 : gb >= 15 ? 2 : 1;
   }
+  if (opts.cpuOnly && !opts.gpu) slots = Math.min(slots, cpuSlotCap(opts.cpuCount));
   const ollama = Number(opts.ollamaNumParallel);
   if (Number.isInteger(ollama) && ollama >= 1) slots = Math.min(slots, ollama);
   return slots;
+}
+
+/**
+ * Network run 10: logical CPUs each parallel model call needs on a host that runs the model on its
+ * CPU. llama.cpp (Ollama) spreads one call over every core, so two calls on a 2-CPU host do not add
+ * throughput: each runs at about half speed (the coordinator's own estimate, best-fit.ts
+ * CONTENTION_SHARE.cpu, assumes exactly that). In run 10 the Fly performance-2x hosts (2 dedicated
+ * CPUs) ran two 1.5B calls side by side for 44-127 s each, where one alone takes a few seconds; the
+ * coordinator took calls back as their first piece was overdue, and the hosts sat with both slots
+ * busy on calls they no longer held. One slot per two CPUs keeps a call at full speed, and the host
+ * is either free (and pulling) or busy, never "one free" while it cannot start anything quickly.
+ */
+export const CPUS_PER_CPU_SLOT = 2;
+
+/** Most parallel model calls a CPU-only host with `cpuCount` logical CPUs runs by default; no cap when unknown. */
+export function cpuSlotCap(cpuCount: number | undefined): number {
+  if (cpuCount === undefined || !Number.isFinite(cpuCount) || cpuCount <= 0) return Number.POSITIVE_INFINITY;
+  return Math.max(1, Math.floor(cpuCount / CPUS_PER_CPU_SLOT));
 }
 
 /** Context windows an agent may serve with (tokens). */
