@@ -317,6 +317,18 @@ function hasRoomFor(agentId: string, subtask: Subtask, claims: Claims, nowMs = D
  * slot, and an agent already running something leaves a fresh call to an idle eligible agent.
  * `claims` is one snapshot for the whole pull.
  */
+/**
+ * Run 8 (CPU ramp): calls waiting in the backlog ("every coordinator busy: backlog shared by agents")
+ * were handed to whichever agent pulled next, judged only on its free slot: hosts that had just run
+ * out of CPU credit took them and ran them to the 180 s timeout. The admission routes/inference.ts
+ * registers here judges each network model call again at claim time, for the agent pulling it.
+ */
+export type ClaimAdmission = (agentId: string, subtask: Subtask, nowMs: number) => boolean;
+let claimAdmission: ClaimAdmission | undefined;
+export function setClaimAdmission(fn: ClaimAdmission | undefined): void {
+  claimAdmission = fn;
+}
+
 export function mayTakeNow(agentId: string, subtask: Subtask, claims: Claims, nowMs = Date.now()): boolean {
   // Circuit breaker (memory-admission.ts): an agent that keeps failing cools down first, then takes
   // one call at a time (half open) until one succeeds.
@@ -327,6 +339,9 @@ export function mayTakeNow(agentId: string, subtask: Subtask, claims: Claims, no
   if (!memoryAdmits(agentId, subtask.requestedModel, claims.get(agentId)?.inference ?? 0, nowMs, { ownerOnly: ownerOnlyCall(agentId, subtask) })) return false;
   const free = freeSlots(agentId, claims, true);
   if (free !== undefined && free <= 0) return false;
+  // Run 8: the admission placement applies (held-back hosts, completion in the time left), also for a
+  // call taken from the backlog (routes/inference.ts setClaimAdmission).
+  if (claimAdmission && !claimAdmission(agentId, subtask, nowMs)) return false;
   if (leftForPreferred(agentId, subtask, claims, nowMs)) return false;
   const ready = readyAt.get(subtask.id);
   const fresh = ready !== undefined && nowMs - ready < DEFER_MS;

@@ -36,7 +36,7 @@ import { queue, reservations } from "./context.js";
 import { agentCapabilities, activeBlacklistRecord } from "./agent-state.js";
 import { agentContextWindow, agentLoadReport, coldLoadKm, freeModelSlots, modelKnownCold, modelWarmOn } from "./dispatch.js";
 import { coldLoadMs, contentionFactor, decodeTps, prefillTps, type AgentView } from "./best-fit.js";
-import { callWorkMs, decodeEstimateMs, serviceTimes } from "./start-eta.js";
+import { agentHeldBack, callWorkMs, decodeEstimateMs, serviceTimes } from "./start-eta.js";
 import { effectiveHardware } from "./economy.js";
 import { agentUnavailable, memoryAdmits } from "./memory-admission.js";
 import { agentFlapping } from "./agent-liveness.js";
@@ -79,6 +79,8 @@ export function freeLocalHolders(model: string, taskClass: ComputeClassId | "any
     const ctx = agentContextWindow(id);
     if (ctx !== undefined && neededTokens > ctx) continue;
     if (!memoryAdmits(id, model, claims.get(id)?.inference ?? 0, nowMs)) continue;
+    // Run 8: a held-back host (CPU steal, or not pulling with an idle slot) is not a free holder (start-eta.ts agentHeldBack).
+    if (agentHeldBack(id, claims.get(id)?.inference ?? 0, nowMs)) continue;
     const free = freeModelSlots(id, claims);
     if (free <= 0) continue;
     out.push({ agentId: id, free, slots: Math.max(1, agentLoadReport(id)?.slots ?? cap.maxConcurrentTasks ?? 1), region: agentRegionCode(cap), warm: modelWarmOn(id, model, nowMs), cold: modelKnownCold(id, model, nowMs) });
