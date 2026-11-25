@@ -157,7 +157,7 @@ describe("/inference/submit with model auto", () => {
 
   test("a price ceiling nothing meets, and auto for your own machines, are refused", async () => {
     const capped = await submitAuto({ messages: [{ role: "user", content: "hello there" }], routing: { maxCSats: 0.0000001 } });
-    expect(capped.r.statusCode).toBe(409);
+    expect(capped.r.statusCode, capped.r.body).toBe(409);
     expect(capped.r.json()).toMatchObject({ error: "no_route_fits", detail: expect.stringMatching(/cSats ceiling/), routing: { model: null } });
     // reason "price": a money problem (the apps say "Not enough cSats"), with what the step needs.
     expect(capped.r.json()).toMatchObject({ reason: "price", neededCSats: expect.any(Number) });
@@ -257,6 +257,11 @@ describe("model auto and a call that would not finish in time (run 4)", () => {
     // (Samples of calls that size: run 5, a much smaller call says little about a long one.)
     serviceTimes.clear();
     for (let i = 0; i < 3; i++) serviceTimes.record("qwen2.5-coder:7b", "cpu", 140_000, Date.now(), 2_800_000);
+    // Run 9: an Auto call is judged on the reply calls of its job type are seen to write (not its
+    // max_tokens): here recent chats wrote their whole 4,096 tokens.
+    const { outputLengths, clearExpectedOutput } = await import("../../src/swarm/coordinator/expected-output.js");
+    clearExpectedOutput();
+    for (let i = 0; i < 3; i++) outputLengths.record("chat", 4_096);
     try {
       const question = () => [{ role: "user", content: "What is a closure in JavaScript? " + randomUUID() }];
       // Picked again without the 7b hosts: the 1.5b host (no speed known for it), and the 7b hosts may not take it.
@@ -286,6 +291,7 @@ describe("model auto and a call that would not finish in time (run 4)", () => {
       expect(short.r.json().model).toBe("qwen2.5-coder:7b");
     } finally {
       serviceTimes.clear();
+      clearExpectedOutput();
     }
   });
 });

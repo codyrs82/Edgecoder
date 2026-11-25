@@ -535,11 +535,17 @@ export function completionByClass(input: { model: string; taskClass: ComputeClas
     // Run 7: the decode-rate estimate (prefill + max_tokens ÷ the class's decode rate); the call is
     // judged on the slower of the two, so a long reply is never judged at the speed of short calls.
     // Only for a call that set its max_tokens (`decode` false: judged on a typical reply, the speed estimate alone).
-    const decode = input.decode === false ? null : decodeEstimateMs(input.model, cls, input.promptTokens, input.outputTokens, nowMs, input.prior?.[cls] !== undefined);
+    // Run 9: a call without max_tokens is still judged on its prompt's prefill at the class's rates
+    // (the decode estimate with no reply), so a heavy prompt is never judged at the speed of short calls.
+    const usePrior = input.prior?.[cls] !== undefined;
+    const decode = input.decode === false ? decodeEstimateMs(input.model, cls, input.promptTokens, 0, nowMs, usePrior) : decodeEstimateMs(input.model, cls, input.promptTokens, input.outputTokens, nowMs, usePrior);
     const bySpeed = est.speed === null ? null : est.speed * workMs;
     const own = bySpeed === null && decode === null ? null : Math.max(bySpeed ?? 0, decode?.ms ?? 0);
     const ownMs = own === null ? null : own * slowdown;
-    const priorOnly = decode !== null && decode.ms >= (bySpeed ?? 0) ? decode.prior && (bySpeed === null || est.prior) : est.prior;
+    // Run 9: a class judged on its token rates (the binding estimate is prefill + decode at the class's
+    // rates, prior-filled) is not explored past the limit: those priors are measured rates, not the
+    // pessimistic speed prior exploration exists for, and a call past them runs to its deadline.
+    const priorOnly = decode !== null && decode.ms >= (bySpeed ?? 0) ? false : est.prior;
     // With no service times known yet, a call ahead is taken to hold a slot about as long as this one.
     // Run 7: the mean hold (slots free at slots ÷ mean), not the median of mostly short calls.
     const typicalMs = serviceTimes.meanMs(input.model, cls, nowMs) ?? serviceTimes.meanMs(input.model, "any", nowMs) ?? (ownMs !== null ? Math.round(ownMs) : null);
@@ -579,16 +585,16 @@ export function judgeCompletion(classes: ClassCompletion[], limitMs: number, exp
 export function noteTimedOutCall(model: string | undefined, agentId: string | undefined, claimedAtMs: number | undefined, input: string, nowMs = Date.now()): void {
   if (!model || !agentId || claimedAtMs === undefined) return;
   const cls = effectiveHardware(agentId)?.computeClass ?? agentCapabilities.get(agentId)?.computeClass ?? "cpu";
-  let promptBytes = Buffer.byteLength(input, "utf8");
+  let promptTokens = promptTokenEstimate(input);
   let maxTokens: number = TIMED_OUT_UNSET_MAX_TOKENS;
   try {
     const parsed = JSON.parse(input) as { messages?: unknown; tools?: unknown; maxTokens?: unknown };
-    promptBytes = Buffer.byteLength(JSON.stringify({ messages: parsed.messages ?? [], tools: parsed.tools ?? [] }), "utf8");
+    promptTokens = promptTokenEstimate(JSON.stringify({ messages: parsed.messages ?? [], tools: parsed.tools ?? [] }));
     if (typeof parsed.maxTokens === "number" && parsed.maxTokens > 0) maxTokens = parsed.maxTokens;
   } catch {
-    // Not JSON: its bytes are the prompt.
+    // Not JSON: its text is the prompt.
   }
-  const work = callWorkMs(model, cls, Math.max(1, Math.ceil(promptBytes / 4)), maxTokens);
+  const work = callWorkMs(model, cls, promptTokens, maxTokens);
   // Run 7: not when its host was stolen from during the call (host-steal.ts).
   const stolen = stolenDuring(agentId, claimedAtMs);
   serviceTimes.record(model, cls, nowMs - claimedAtMs, nowMs, work, stolen);
@@ -693,21 +699,25 @@ export function priorDecodeTps(model: string, computeClass: string): number | un
 
 /** Recent token rates (tok/s) per model and class (or agent), with the prior filling missing samples. */
 export class TokenRates {
-  private readonly byKey = new Map<string, Array<{ at: number; tps: number }>>();
+  private readonly byKey = new Map<string, Array<{ at: number; tps: number; size?: number }>>();
 
-  record(model: string, key: string, tps: number, atMs = Date.now()): void {
+  /** `size` (run 9): the tokens the sample was measured on (a prefill sample's prompt), for relevance. */
+  record(model: string, key: string, tps: number, atMs = Date.now(), size?: number): void {
     if (!model || !key || !Number.isFinite(tps) || tps <= 0) return;
     const k = `${model}|${key}`;
     const list = this.byKey.get(k) ?? [];
-    list.push({ at: atMs, tps });
+    list.push({ at: atMs, tps, ...(size !== undefined && Number.isFinite(size) && size > 0 ? { size } : {}) });
     if (list.length > SERVICE_SAMPLES) list.splice(0, list.length - SERVICE_SAMPLES);
     this.byKey.set(k, list);
     if (this.byKey.size > 512) this.byKey.delete(this.byKey.keys().next().value as string);
   }
 
-  /** Median recent rate, the prior in place of each missing sample below SERVICE_MIN_SAMPLES; null without enough. */
-  rate(model: string, key: string, prior: number | undefined, nowMs = Date.now()): { tps: number; samples: number; prior: boolean } | null {
-    const values = (this.byKey.get(`${model}|${key}`) ?? []).filter((s) => nowMs - s.at <= SERVICE_WINDOW_MS).map((s) => s.tps);
+  /**
+   * Median recent rate, the prior in place of each missing sample below SERVICE_MIN_SAMPLES; null without enough.
+   * `minSize` (run 9): only samples measured on at least this many tokens count (a sample without a size always counts).
+   */
+  rate(model: string, key: string, prior: number | undefined, nowMs = Date.now(), minSize = 0): { tps: number; samples: number; prior: boolean } | null {
+    const values = (this.byKey.get(`${model}|${key}`) ?? []).filter((s) => nowMs - s.at <= SERVICE_WINDOW_MS && (s.size === undefined || s.size >= minSize)).map((s) => s.tps);
     const samples = values.length;
     const usePrior = prior !== undefined && prior > 0 && samples < SERVICE_MIN_SAMPLES;
     if (usePrior) for (let i = samples; i < SERVICE_MIN_SAMPLES; i++) values.push(prior!);
@@ -739,7 +749,7 @@ export function noteDecodeRate(model: string | undefined, agentId: string | unde
   const genMs = nowMs - firstPieceAtMs;
   if (tokens.outputTokens >= DECODE_SAMPLE_MIN_TOKENS && genMs >= 1_000) decodeRates.record(model, cls, (tokens.outputTokens / (genMs / 1000)) * contention, nowMs);
   const ttftMs = firstPieceAtMs - claimedAtMs;
-  if (tokens.promptTokens >= PREFILL_SAMPLE_MIN_TOKENS && ttftMs >= 500) prefillRates.record(model, cls, (tokens.promptTokens / (ttftMs / 1000)) * contention, nowMs);
+  if (tokens.promptTokens >= PREFILL_SAMPLE_MIN_TOKENS && ttftMs >= 500) prefillRates.record(model, cls, (tokens.promptTokens / (ttftMs / 1000)) * contention, nowMs, tokens.promptTokens);
 }
 
 /** Fixed time per call besides prefill and decode (first-token scheduling, a warm model's setup). */
@@ -753,15 +763,54 @@ export const DECODE_ESTIMATE_OVERHEAD_MS = 2_000;
  * false: measured rates only (admission passes false for a class whose speed prior is off,
  * INFERENCE_COMPLETION_PRIOR_SPEED, so "off" turns off both priors).
  */
-export function decodeEstimateMs(model: string, computeClass: string, promptTokens: number, outputTokens: number, nowMs = Date.now(), usePrior = true): { ms: number; prior: boolean; decodeTps: number } | null {
+export function decodeEstimateMs(model: string, computeClass: string, promptTokens: number, outputTokens: number, nowMs = Date.now(), usePrior = true): { ms: number; prior: boolean; decodeTps: number; prefillTps: number; prefillMs: number } | null {
   const prior = usePrior ? priorDecodeTps(model, computeClass) : undefined;
   const decode = decodeRates.rate(model, computeClass, prior, nowMs);
   if (decode === null) return null;
-  const prefillFactor = SLOW_HOST_PREFILL_FACTOR[computeClass] ?? SLOW_HOST_PREFILL_FACTOR.cpu;
-  const prefill = prefillRates.rate(model, computeClass, decode.tps * prefillFactor, nowMs);
-  const prefillTps = prefill?.tps ?? decode.tps * prefillFactor;
-  const ms = DECODE_ESTIMATE_OVERHEAD_MS + (Math.max(0, promptTokens) / prefillTps + Math.max(0, outputTokens) / decode.tps) * 1000;
-  return { ms: Math.round(ms), prior: decode.prior, decodeTps: decode.tps };
+  const prefillTps = completionPrefillTps(model, computeClass, promptTokens, decode.tps, nowMs);
+  const prefillMs = (Math.max(0, promptTokens) / prefillTps) * 1000;
+  const ms = DECODE_ESTIMATE_OVERHEAD_MS + prefillMs + (Math.max(0, outputTokens) / decode.tps) * 1000;
+  return { ms: Math.round(ms), prior: decode.prior, decodeTps: decode.tps, prefillTps, prefillMs: Math.round(prefillMs) };
+}
+
+/**
+ * Run 9 (inf-1795634348378-aae1b4b0 on iad: first token after 169 s; inf-1795634340227-4d5c15c3 on
+ * jnb: nothing in 180 s): a ~4.5k-token prompt with max_tokens 300 on the 2-core performance-2x 1.5b
+ * CPU hosts was admitted at an estimated ~128 s. Two things under-priced the prefill:
+ *
+ *   - the prompt was counted at 4 bytes a token (~3.1k), but code with numbers tokenizes far denser:
+ *     the model's tokenizer splits every digit (promptTokenEstimate counts each digit as a token);
+ *   - the prefill rate was decode × SLOW_HOST_PREFILL_FACTOR (6 for CPU, ~39 tok/s for 1.5b), while
+ *     the 2-core hosts read it at ~27 tok/s (≈ 4 × their ~6.5 tok/s decode).
+ *
+ * The completion estimate's prefill rate is now: the class's measured prefill rate from finished
+ * calls (claim to first piece, noteDecodeRate) whose prompt was at least PREFILL_RELEVANT_SHARE of
+ * this one's (a short prompt's rate says little about a long one: per-call overhead, cached prefixes),
+ * with decode × COMPLETION_PREFILL_FACTOR in place of each missing sample.
+ */
+export const COMPLETION_PREFILL_FACTOR: Readonly<Record<string, number>> = { ...SLOW_HOST_PREFILL_FACTOR, cpu: 4 };
+/** Run 9: a prefill sample counts for a call when its prompt is at least this share of the call's. */
+export const PREFILL_RELEVANT_SHARE = 1 / 2;
+
+/** The prefill rate (tok/s) the completion estimate reads a prompt of `promptTokens` at, given the class's decode rate. */
+export function completionPrefillTps(model: string, computeClass: string, promptTokens: number, decodeTps: number, nowMs = Date.now()): number {
+  const fallback = decodeTps * (COMPLETION_PREFILL_FACTOR[computeClass] ?? COMPLETION_PREFILL_FACTOR.cpu);
+  return prefillRates.rate(model, computeClass, fallback, nowMs, Math.max(0, promptTokens) * PREFILL_RELEVANT_SHARE)?.tps ?? fallback;
+}
+
+/**
+ * Run 9: prompt tokens of a call's text (its JSON as queued): ~4 bytes a token, but every digit is a
+ * token of its own (Qwen's tokenizer splits numbers into digits; others into groups of up to 3), so
+ * code full of numbers is counted at its real density rather than ~45% under it.
+ */
+export function promptTokenEstimate(text: string): number {
+  const bytes = Buffer.byteLength(text, "utf8");
+  let digits = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (c >= 48 && c <= 57) digits++;
+  }
+  return Math.max(1, Math.ceil((bytes - digits) / 4 + digits));
 }
 
 /** A load report older than this says nothing about withheld slots. */

@@ -36,6 +36,7 @@ import { agentSocketLost } from "../agent-liveness.js";
 import { effectiveHardware, hardwareVerifier } from "../economy.js";
 import { routableModels } from "../../model-catalog.js";
 import { noteCallEnded, noteDecodeRate, noteServiceTime } from "../start-eta.js";
+import { noteFinishedOutput } from "../expected-output.js";
 import { requesterCancelled } from "../inference-cancel.js";
 import { noteAgentSteal } from "../host-steal.js";
 import { inferenceCancelledForCapacity, inferenceStreams } from "./inference.js";
@@ -432,6 +433,8 @@ export function observeInference(url: string | undefined, status: number, body: 
     const running = claim.claimedBy ? queue.activeClaims().get(claim.claimedBy)?.inference ?? 1 : 1;
     noteServiceTime(claim.subtask.requestedModel, claim.claimedBy, claim.claimedAt, nowMs, tokens, running);
     noteDecodeRate(claim.subtask.requestedModel, claim.claimedBy, claim.claimedAt, inferenceStreams.firstPieceAt(b.subtaskId), nowMs, tokens, running);
+    // Run 9: an Auto call's output length, for the reply later calls of its job type are judged on.
+    noteFinishedOutput(b.subtaskId, tokens?.outputTokens, claim.claimedBy ? effectiveHardware(claim.claimedBy)?.computeClass ?? agentCapabilities.get(claim.claimedBy)?.computeClass : undefined, nowMs);
   }
 }
 

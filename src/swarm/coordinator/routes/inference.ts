@@ -69,7 +69,8 @@ import { recordMeshWork } from "../world-activity.js";
 import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
 import { armAutoReplace, autoPlacementOf, overrunAlternativeExists, placeAfterOverrun, replaceAutoNow, setReplaceAdmission, type AutoPlacement } from "../auto-replace.js";
 import { freeLocalHolders, LOCALITY_PREFER_MS, nearestFreeHolder, peerWithFreeCapacity, type PeerFit } from "../locality.js";
-import { agentHeldBack, agentStolenRecently, agentWithholding, completionByClass, completionLimitMs, hostServiceMs, hostSpeed, type HostSpeedSource, judgeCompletion, modelPickups, modelSlots, noteHeldCounts, parseCompletionPrior, serviceTimes, stalledClaimMs, startEtaLimitMs, startEtaMs, withholdingHolders } from "../start-eta.js";
+import { agentHeldBack, agentStolenRecently, agentWithholding, completionByClass, completionLimitMs, hostServiceMs, hostSpeed, type HostSpeedSource, judgeCompletion, modelPickups, modelSlots, noteHeldCounts, parseCompletionPrior, promptTokenEstimate, serviceTimes, stalledClaimMs, startEtaLimitMs, startEtaMs, withholdingHolders } from "../start-eta.js";
+import { expectedOutputTokens, judgedOutputOf, noteJudgedOutput, pruneJudged } from "../expected-output.js";
 
 // ── Network inference (chat completions on agents' local models, streamed) ──────────────────
 export const inferenceStreams = new InferenceStreams();
@@ -827,6 +828,7 @@ export const STALL_TAKE_BACKS = 2;
 const takenBack = new Map<string, number>();
 setInterval(() => {
   for (const id of takenBack.keys()) if (!queue.getSubtask(id)) takenBack.delete(id);
+  pruneJudged((id) => queue.getSubtask(id) !== undefined);
 }, 60_000).unref?.();
 setInterval(() => void sweepWaitingInference().catch((err) => coordinatorApp.log.error({ err }, "inference_waiting_sweep_failed")), WAITING_SWEEP_MS).unref?.();
 
@@ -842,10 +844,12 @@ export function completionCheck(
   const elapsedMs = Math.max(0, opts.elapsedMs ?? 0);
   const limitMs = completionLimitMs(timeoutMs, CC.INFERENCE_COMPLETION_ETA_FRACTION) - elapsedMs;
   if (!Number.isFinite(limitMs)) return { exclude: [], none: false, etaMs: null, limitMs };
-  const { promptTokens, outputTokens } = completionWork(messages, tools, maxTokens);
+  const { promptTokens, outputTokens } = completionWork(messages, tools, maxTokens, opts.outputTokens);
   // Run 7: the decode-rate estimate judges a reply of the call's own max_tokens; a call that set none is
   // judged on a typical long reply (COMPLETION_UNSET_MAX_TOKENS) at the speed estimate, as before.
-  const classes = completionByClass({ model, taskClass, neededTokens: contextNeeded(messages, tools, maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS), promptTokens, outputTokens, waiting: opts.waiting ?? queue.waitingInference(model), prior: completionPrior(), decode: maxTokens !== undefined, ...(opts.exclude?.length ? { exclude: opts.exclude } : {}) }, nowMs);
+  // Run 9: an Auto call is judged on its expected reply (expected-output.ts), at the decode rate too.
+  const decode = maxTokens !== undefined || opts.outputTokens !== undefined;
+  const classes = completionByClass({ model, taskClass, neededTokens: contextNeeded(messages, tools, maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS), promptTokens, outputTokens, waiting: opts.waiting ?? queue.waitingInference(model), prior: completionPrior(), decode, ...(opts.exclude?.length ? { exclude: opts.exclude } : {}) }, nowMs);
   return { ...judgeCompletion(classes, limitMs, opts.explore === false ? 0 : timeoutMs - elapsedMs), limitMs: Math.round(limitMs) };
 }
 
@@ -861,11 +865,24 @@ export interface CompletionCheckOptions {
   waiting?: number;
   /** Run 8: agents this call may not go to (not counted as capacity for it). */
   exclude?: readonly string[];
+  /**
+   * Run 9: the reply the call is judged on (tokens), in place of its max_tokens: an Auto call's
+   * expected output (expected-output.ts). Never above max_tokens.
+   */
+  outputTokens?: number;
 }
 
-/** The tokens completion admission judges a call on: its prompt, and its reply (max_tokens, else COMPLETION_UNSET_MAX_TOKENS) × the output share. */
-export function completionWork(messages: ChatMessage[], tools: unknown[] | undefined, maxTokens: number | undefined): { promptTokens: number; outputTokens: number } {
-  const promptTokens = Math.ceil(Buffer.byteLength(JSON.stringify({ messages, tools: tools ?? [] }), "utf8") / 4);
+/**
+ * The tokens completion admission judges a call on: its prompt, and its reply (max_tokens, else
+ * COMPLETION_UNSET_MAX_TOKENS) × the output share. Run 9: the prompt at its real density
+ * (start-eta.ts promptTokenEstimate: digits are tokens of their own); `expectedOutput`, an Auto call's
+ * expected reply (expected-output.ts), judged as it is (capped by max_tokens).
+ */
+export function completionWork(messages: ChatMessage[], tools: unknown[] | undefined, maxTokens: number | undefined, expectedOutput?: number): { promptTokens: number; outputTokens: number } {
+  const promptTokens = promptTokenEstimate(JSON.stringify({ messages, tools: tools ?? [] }));
+  if (expectedOutput !== undefined && Number.isFinite(expectedOutput) && expectedOutput > 0) {
+    return { promptTokens, outputTokens: Math.max(1, Math.ceil(maxTokens !== undefined ? Math.min(expectedOutput, maxTokens) : expectedOutput)) };
+  }
   // A call that sets no max_tokens is judged on a typical long reply, not the default cap (a billing bound).
   const judgedMax = maxTokens ?? Math.min(INFERENCE_DEFAULT_MAX_TOKENS, COMPLETION_UNSET_MAX_TOKENS);
   return { promptTokens, outputTokens: Math.max(1, Math.ceil(judgedMax * CC.INFERENCE_COMPLETION_OUTPUT_SHARE)) };
@@ -892,7 +909,9 @@ function waitingCallFits(st: Subtask, model: string, cls: string, agentId: strin
   const submittedAtMs = usagePending.get(st.taskId)?.atMs ?? nowMs;
   const taskClass = ((ACCEPTED_COMPUTE_CLASS_IDS as readonly string[]).includes(cls) ? cls : "any") as ComputeClassId | "any";
   const maxTokens = input.maxTokens === INFERENCE_DEFAULT_MAX_TOKENS ? undefined : input.maxTokens;
-  const check = completionCheck(model, taskClass, input.messages, input.tools, maxTokens, submittedTimeoutMs(st), nowMs, { elapsedMs: nowMs - submittedAtMs, ...opts });
+  // Run 9: an Auto call is judged on the reply it was placed on (expected-output.ts), as at submit.
+  const judgedOutput = judgedOutputOf(st.id);
+  const check = completionCheck(model, taskClass, input.messages, input.tools, maxTokens, submittedTimeoutMs(st), nowMs, { elapsedMs: nowMs - submittedAtMs, ...opts, ...(judgedOutput !== undefined ? { outputTokens: judgedOutput } : {}) });
   return agentId ? !check.exclude.includes(agentId) : !check.none;
 }
 
@@ -1067,13 +1086,17 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     // #526: the buyer's region (sent by the portal, else the request's edge headers): only a preference.
     const clientRegion = cleanRegion(body.clientRegion) ?? portalChoice?.clientRegion ?? clientRegionOf((req as any).headers ?? {});
     // model "auto": best-fit routing picks the model, the class and a preferred agent (routing.ts).
-    let routed: { job: JobDescriptor; result: BestFitResult; summary: RoutingSummary; onlyClass?: string } | undefined;
+    let routed: { job: JobDescriptor; result: BestFitResult; summary: RoutingSummary; judgedOutput: number; onlyClass?: string } | undefined;
     // Run 4: agents that would not finish this call within its timeout (completionCheck): they do not get it.
     let slowAgents: string[] = [];
     if (body.model === AUTO_MODEL_ID) {
       if (body.reservationId || body.target === "mine") return reply.code(400).send({ error: "auto_network_only", detail: "model auto routes network calls; name a model for your own machines or a reservation" });
       const hints = cleanHints(body.routing);
       const job = describeJob({ messages: body.messages as ChatMessage[], tools: body.tools, maxTokens: body.maxTokens }, hints, complexityWeights);
+      // Run 9: the completion check judges the reply the call is expected to write (the median of
+      // recent calls of its job type, else the descriptor's estimate; capped by max_tokens), not its
+      // max_tokens: a simple chat with a generous cap is not cloud overflow while a CPU host is free.
+      const judgedOutput = expectedOutputTokens(job);
       // A class named on the submit, else in the hints (a bot on "Network GPU only"), limits best fit to it.
       const onlyClass = body.computeClass !== "any" ? body.computeClass : hints.computeClass;
       const autoOpts = { peers: body.routeRedirect, requesterAccountId: accountId, clientRegion, ...(onlyClass ? { computeClass: onlyClass } : {}) };
@@ -1083,7 +1106,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       let late: { etaMs: number | null; limitMs: number } | undefined;
       for (let pick = 0; result.chosen?.local && !elsewhere; pick++) {
         const chosenClass = (ACCEPTED_COMPUTE_CLASS_IDS as readonly string[]).includes(result.chosen.computeClass) ? (result.chosen.computeClass as ComputeClassId) : "any";
-        const check = completionCheck(result.chosen.model, chosenClass, body.messages as ChatMessage[], body.tools, body.maxTokens, body.timeoutMs, Date.now(), { explore: !body.redirected });
+        const check = completionCheck(result.chosen.model, chosenClass, body.messages as ChatMessage[], body.tools, body.maxTokens, body.timeoutMs, Date.now(), { explore: !body.redirected, outputTokens: judgedOutput });
         const fresh = check.exclude.filter((id) => !slowAgents.includes(id));
         slowAgents = [...slowAgents, ...fresh];
         if (!check.exclude.includes(result.chosen.agentId)) break;
@@ -1109,7 +1132,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       const chosen = result.chosen;
       body.model = chosen.model;
       body.computeClass = (ACCEPTED_COMPUTE_CLASS_IDS as readonly string[]).includes(chosen.computeClass) ? (chosen.computeClass as typeof body.computeClass) : "any";
-      routed = { job, result, summary, ...(onlyClass ? { onlyClass } : {}) };
+      routed = { job, result, summary, judgedOutput, ...(onlyClass ? { onlyClass } : {}) };
     }
     // Security research tier: a restricted model needs an entitlement and your own or leased machines.
     const gate = await restrictedSubmitGate(accountId, body.model, { target: body.target, reservationId: body.reservationId });
@@ -1292,6 +1315,8 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       },
     }, routed || slowAgents.length ? { ...(routed ? { excludeAccounts: [accountId] } : {}), ...(slowAgents.length ? { excludeAgents: slowAgents } : {}) } : undefined);
     if (routed) {
+      // Run 9: judged on its expected reply from here on (claim time, the waiting sweep, re-placement).
+      noteJudgedOutput(subtask.id, routed.job.job, routed.judgedOutput);
       // A soft preference: the chosen agent gets the call for a moment, then anyone eligible may take it
       // (never the requester's own machines: excludeAccounts above, as in best-fit).
       if (routed.result.chosen?.local) preferAgent(subtask.id, routed.result.chosen.agentId, bestFitConfig.preferMs);
