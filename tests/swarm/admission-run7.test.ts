@@ -29,6 +29,7 @@ let portal: Server;
 let app: any;
 let eta: any;
 let inference: any;
+let hostSteal: any;
 const requester = createPeerKeys("agent-run7-requester");
 const gru = createPeerKeys("agent-run7-gru");
 const syd = createPeerKeys("agent-run7-syd");
@@ -56,6 +57,7 @@ beforeAll(async () => {
   ({ coordinatorServer: app } = await import("../../src/swarm/coordinator.js"));
   eta = await import("../../src/swarm/coordinator/start-eta.js");
   inference = await import("../../src/swarm/coordinator/routes/inference.js");
+  hostSteal = await import("../../src/swarm/coordinator/host-steal.js");
   await app.ready();
   await register(requester, []);
   await register(gru, [MODEL], "gru");
@@ -119,6 +121,7 @@ const submit = async (body: Record<string, unknown>) => {
 const read = (taskId: string, subtaskId: string) => post("/inference/stream", { taskId, subtaskId, after: 0, waitMs: 0 }, requester);
 
 beforeEach(async () => {
+  hostSteal.clearAgentSteal();
   await drain();
   // Both hosts idle and taking calls (a fresh report each).
   await pullAs(gru);
@@ -220,6 +223,22 @@ describe("2/4. a claimed call with nothing sent is taken back from a throttled o
     expect(again.id).toBe(subtaskId);
     // The first holder's late pieces are refused.
     expect((await post("/inference/chunks", { subtaskId, seq: 0, delta: "late" }, holder!)).statusCode).toBe(403);
+    await finish(other, call.taskId, subtaskId);
+  });
+
+  test("its host's every slot is busy but it reports its throttle guard (#572 host-steal): taken back too", async () => {
+    const call = await submit(lookup());
+    const subtaskId = call.r.json().subtaskId;
+    let holder: PeerKeys | undefined;
+    for (const k of [gru, syd]) if ((await pullAs(k, 1, 1)).id === subtaskId) holder = k;
+    expect(holder).toBeDefined();
+    // One slot, held: no withheld slot by count; the steal report alone says it is held back.
+    await post("/pull", { agentId: holder!.peerId, inferenceSlots: 1, freeInferenceSlots: 0, cpuThrottled: true, cpuStealShare: 0.7 }, holder!);
+    expect(eta.withheldSlots(holder!.peerId, 1)).toBe(0);
+    expect(eta.agentWithholding(holder!.peerId)).toBe(true);
+    await inference.takeBackStalledClaims(Date.now() + 3_000);
+    const other = holder === gru ? syd : gru;
+    expect((await pullAs(other)).id).toBe(subtaskId);
     await finish(other, call.taskId, subtaskId);
   });
 
