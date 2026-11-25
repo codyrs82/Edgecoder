@@ -92,6 +92,7 @@ and month, in `CLOUD_HOST_STATE_FILE` so a restart does not forget it.
 | 100 % of the daily (`CLOUD_HOST_DAILY_CAP_USD`, 200) or monthly (`CLOUD_HOST_MONTHLY_CAP_USD`, 2000) cap | critical alert; the host advertises no models, takes no calls, and refuses a call that still reaches it with `cloud_capacity_paused: … resumes at <time>` |
 | the next UTC day / month | resumes by itself, with a "serving again" alert |
 | 3 provider 401 / 403 in a row (`CLOUD_HOST_AUTH_FAILURES`) | critical alert; paused the same way until the key works again (checked every `CLOUD_HOST_AUTH_PROBE_MINUTES`, 15) |
+| the provider refuses a call for the account: HTTP 412 (Fireworks: account suspended), 402, or an error saying the account is suspended, out of credit or over its spending limit | critical alert (`cloud_provider_account`), at most once an hour per host; the host is not paused (the call fails as `cloud_provider_error` and the coordinator's breaker handles it as before). Fix the account in the provider's console |
 
 Alerts go through `src/alerting` (email via Resend to `ALERT_EMAILS`, and/or `ALERT_WEBHOOK_URL`),
 configured on the cloud host's app. A reply that breaks off before the provider's counts is

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { CloudHost, cloudHostConfigFromEnv, spendAlert, type CloudHostConfig } from "../../src/cloud-host/host.js";
+import { CloudHost, PROVIDER_ACCOUNT_ALERT_EVERY_MS, cloudHostConfigFromEnv, providerAccountAlert, providerAccountProblem, spendAlert, type CloudHostConfig, type CloudHostEvent } from "../../src/cloud-host/host.js";
+import { CloudApiError } from "../../src/cloud-host/backend.js";
 import { cloudHostEnv } from "../../src/cloud-host/main.js";
 import { classifyHardware } from "../../src/economy/compute-classes.js";
 import type { SpendEvent, SpendState } from "../../src/cloud-host/spend-guard.js";
@@ -18,7 +19,7 @@ afterEach(async () => {
   fake = undefined;
 });
 
-function host(url: string, opts: { guard?: Partial<CloudHostConfig["guard"]>; events?: SpendEvent[]; store?: { s?: SpendState } } = {}) {
+function host(url: string, opts: { guard?: Partial<CloudHostConfig["guard"]>; events?: CloudHostEvent[]; store?: { s?: SpendState } } = {}) {
   const cfg = cloudHostConfigFromEnv({ CLOUD_HOST_API_KEY: KEY, CLOUD_HOST_BASE_URL: url, CLOUD_HOST_MAX_RETRIES: 0 });
   cfg.guard = { ...cfg.guard, ...opts.guard };
   const store = opts.store ?? {};
@@ -134,6 +135,47 @@ describe("a call on the cloud host", () => {
     expect(events.map((e) => e.kind)).toEqual(["warn", "paused"]);
     expect(h.advertisedModels()).toEqual([]);
     await expect(run(h, "deepseek-v4.1-flash")).rejects.toThrow(/^cloud_capacity_paused: the daily cloud spend cap is reached; resumes at /);
+  });
+});
+
+describe("provider account problems (HTTP 412 suspended, 402, spending limit)", () => {
+  it("alert once per hour through the notifier, without pausing the host", async () => {
+    fake = await startFakeProvider([{ status: 412, body: { error: { message: "Account suspended" } } }]);
+    const cfg = cloudHostConfigFromEnv({ CLOUD_HOST_API_KEY: KEY, CLOUD_HOST_BASE_URL: fake.url, CLOUD_HOST_MAX_RETRIES: 0 });
+    let now = Date.UTC(2026, 10, 24, 3, 5);
+    const events: CloudHostEvent[] = [];
+    const store: { s?: SpendState } = {};
+    const h = new CloudHost(cfg, { notify: (e) => events.push(e), now: () => now, store: { load: () => store.s, save: (s) => (store.s = structuredClone(s)) }, backend: { sleep: async () => undefined } });
+    for (let i = 0; i < 3; i++) await expect(run(h, "glm-5.3")).rejects.toThrow(/^cloud_provider_error: Fireworks HTTP 412: Account suspended/);
+    expect(events).toEqual([{ kind: "provider_account", status: 412, message: expect.stringContaining("Account suspended") }]);
+    // Not a key problem: the host keeps advertising (the coordinator's breaker handles the failures).
+    expect(h.ready()).toBe(true);
+    now += PROVIDER_ACCOUNT_ALERT_EVERY_MS - 1;
+    await expect(run(h, "glm-5.3")).rejects.toThrow(/412/);
+    expect(events).toHaveLength(1);
+    now += 1;
+    await expect(run(h, "glm-5.3")).rejects.toThrow(/412/);
+    expect(events).toHaveLength(2);
+  });
+
+  it("recognises 402 and spending-limit wording; ignores ordinary errors", () => {
+    const err = (status: number, msg: string, kind: "auth" | "rate_limit" | "server" | "bad_request" = "bad_request") => new CloudApiError(`cloud_provider_error: Fireworks HTTP ${status}: ${msg}`, status, kind);
+    expect(providerAccountProblem(err(412, "x"))).toMatchObject({ status: 412 });
+    expect(providerAccountProblem(err(402, "Payment Required"))).toMatchObject({ status: 402 });
+    expect(providerAccountProblem(err(429, "You have reached your spending limit", "rate_limit"))).toMatchObject({ status: 429 });
+    expect(providerAccountProblem(err(403, "Your account has been suspended", "auth"))).toMatchObject({ status: 403 });
+    expect(providerAccountProblem(err(429, "rate limited", "rate_limit"))).toBeNull();
+    expect(providerAccountProblem(err(500, "internal", "server"))).toBeNull();
+    expect(providerAccountProblem(err(400, "prompt too long"))).toBeNull();
+    expect(providerAccountProblem(new Error("Account suspended"))).toBeNull();
+  });
+
+  it("the alert is critical, names the status and never carries the key", () => {
+    const n = providerAccountAlert({ kind: "provider_account", status: 412, message: "cloud_provider_error: Fireworks HTTP 412: Account suspended" }, { agentId: "cloud-fw-1", provider: "Fireworks", reporter: "cloud host cloud-fw-1", portalUrl: "https://edgecoder.io", nowMs: 1 });
+    expect(n.kind).toBe("firing");
+    expect(n.alert).toMatchObject({ severity: "critical", rule: "cloud_provider_account", key: "cloud_host_provider_account:cloud-fw-1", title: "Cloud host cloud-fw-1: Fireworks refused a call for the account (HTTP 412)" });
+    expect(n.alert.summary).toContain("suspended");
+    expect(JSON.stringify(n)).not.toContain(KEY);
   });
 });
 
