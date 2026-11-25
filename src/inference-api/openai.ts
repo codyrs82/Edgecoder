@@ -100,9 +100,9 @@ export async function* openAiStream(pieces: AsyncIterable<ChatPiece>, model: str
  * served-by: masked machine label, class, region), so a client on the hosted endpoint can show
  * each call's served line (#525: it showed "unknown" without `served`).
  */
-export function edgecoderUsage(done: Pick<Extract<ChatPiece, { done: true }>, "cSatsSpent" | "where" | "served"> | undefined): { edgecoder?: Record<string, unknown> } {
-  if (!done || (done.cSatsSpent === undefined && !done.where && !done.served)) return {};
-  return { edgecoder: { cSatsSpent: done.cSatsSpent, where: done.where, ...(done.served ? { served: done.served } : {}) } };
+export function edgecoderUsage(done: Pick<Extract<ChatPiece, { done: true }>, "cSatsSpent" | "where" | "served" | "note"> | undefined): { edgecoder?: Record<string, unknown> } {
+  if (!done || (done.cSatsSpent === undefined && !done.where && !done.served && !done.note)) return {};
+  return { edgecoder: { cSatsSpent: done.cSatsSpent, where: done.where, ...(done.served ? { served: done.served } : {}), ...(done.note ? { note: done.note } : {}) } };
 }
 
 /**

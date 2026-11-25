@@ -242,6 +242,15 @@ export const coordinatorConfigSchema = z.object({
   // past this share of its timeout (and past the claim bound) is sent to a peer with a free slot
   // (route_elsewhere) or answered 503 no_capacity, before anything is reserved. 0 turns it off.
   INFERENCE_START_ETA_FRACTION: envNumber(0.5, { min: 0, max: 1 }),
+  // Completion (run 4): a network call expected to finish (start estimate + the class's measured speed
+  // × its work for the prompt and this share of its max_tokens) past this share of its timeout is not
+  // given to that class; with no class here in time it goes to a peer or is refused (503), before
+  // anything is reserved. 0 turns it off.
+  INFERENCE_COMPLETION_ETA_FRACTION: envNumber(0.9, { min: 0, max: 1 }),
+  INFERENCE_COMPLETION_OUTPUT_SHARE: envNumber(1, { min: 0.05, max: 1 }),
+  // A call re-run after its agent was lost (or failed with nothing sent) gets a fresh timeout, but
+  // never ends later than its submit + timeoutMs + this. 0: no re-run past the original deadline.
+  INFERENCE_RERUN_BUDGET_MS: envInt(120_000, { min: 0, max: 600_000 }),
   /** #524: after a restart, calls for a model nobody holds yet wait this long for agents to re-register (0 = off). */
   COORDINATOR_STARTUP_GRACE_MS: envInt(90_000, { min: 0, max: 600_000 }),
   // The web tool (docs/web-tool.md): the Brave Search API key (a secret; unset = the tool is off),

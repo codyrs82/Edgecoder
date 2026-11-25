@@ -12,7 +12,7 @@ import { writeSseHead } from "../common/sse.js";
 import { anthropicResponse, anthropicStream, countTokens, fromAnthropic } from "./anthropic.js";
 import { fromOpenAi, openAiResponse, openAiStream } from "./openai.js";
 import { routingHintsFrom } from "./job-descriptor.js";
-import { ChatBackendError, type ChatBackend, type ChatPiece } from "./types.js";
+import { ChatBackendError, DEADLINE_ERROR_CODE, type ChatBackend, type ChatPiece } from "./types.js";
 
 export interface CompatRoutes<Ctx> {
   /** Who is calling (from the API key), or null to refuse. */
@@ -152,6 +152,32 @@ const retryAfterOf = (err: unknown) => (err instanceof ChatBackendError ? err.re
  */
 export const STREAM_KEEPALIVE_MS = 15_000;
 
+/** What a non-streamed reply cut at its deadline says (the `edgecoder.note` field of the reply). */
+export const DEADLINE_PARTIAL_NOTE = "The machine running this call reached the call's time limit; this is the reply up to that point (finish_reason length).";
+
+/**
+ * Non-streamed replies (run 4): a call that reached its deadline after part of the reply had arrived
+ * ended as HTTP 200 with only an error body, though the host was paid for that part (#544). The
+ * pieces so far are passed on; a deadline error after real content (text that is not only
+ * whitespace, or a tool call) ends them as a reply cut at the limit instead: stopReason "length"
+ * (OpenAI finish_reason "length", Anthropic stop_reason "max_tokens", the shapes a reply cut at
+ * max_tokens has) with DEADLINE_PARTIAL_NOTE. Any other error, or a deadline with nothing real
+ * sent, is thrown as before.
+ */
+export async function* untilDeadline(pieces: AsyncIterable<ChatPiece>): AsyncGenerator<ChatPiece> {
+  let content = false;
+  try {
+    for await (const p of pieces) {
+      if ("delta" in p && p.delta.trim()) content = true;
+      else if ("toolCalls" in p && p.toolCalls.length) content = true;
+      yield p;
+    }
+  } catch (err) {
+    if (!content || !(err instanceof ChatBackendError) || err.info?.code !== DEADLINE_ERROR_CODE) throw err;
+    yield { done: true, stopReason: "length", note: DEADLINE_PARTIAL_NOTE };
+  }
+}
+
 /** Run a request on a backend and answer in the tool's format, streamed or whole. */
 export async function respondWith(req: FastifyRequest, reply: FastifyReply, format: Format, backend: ChatBackend, model: string, opts: { keepaliveMs?: number; wholeKeepalive?: WholeKeepalive | null } = {}) {
   const body = (req.body ?? {}) as { stream?: boolean };
@@ -273,7 +299,7 @@ export async function respondWith(req: FastifyRequest, reply: FastifyReply, form
     if (!body.stream) {
       let answer: unknown;
       try {
-        answer = format === "anthropic" ? await anthropicResponse(all(), model) : await openAiResponse(all(), model);
+        answer = format === "anthropic" ? await anthropicResponse(untilDeadline(all()), model) : await openAiResponse(untilDeadline(all()), model);
       } catch (err) {
         if (finished) return reply;
         if (whole) return endWhole(wholeError(format, statusOf(err), (err as Error).message));

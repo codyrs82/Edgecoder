@@ -57,6 +57,13 @@ export async function runInferenceSubtask(
     signal?: AbortSignal;
     /** Each piece of reply text as it is generated (Active work's tokens-so-far). */
     onDelta?: (text: string) => void;
+    /**
+     * When this agent got the call (its /pull answer). The call's timeout counts from here, as the
+     * coordinator's claim lease does (claim + timeout + grace), not from when it starts running: a
+     * call that waited on this host (memory admission, a slot) ran past the lease and its reply
+     * was cut as agent_lost_mid_reply (run 4). Unset: from the start of the run.
+     */
+    claimedAtMs?: number;
   },
 ): Promise<SubtaskResult> {
   const started = Date.now();
@@ -113,10 +120,25 @@ export async function runInferenceSubtask(
   };
 
   const abort = new AbortController();
-  // The subtask's own deadline bounds the call; the HTTP client's timeouts sit just past it, so a
-  // cold model load (seconds to minutes on a CPU) is not cut off as a "Headers Timeout Error".
-  const deadlineMs = Math.max(5_000, st.timeoutMs);
+  // The subtask's own deadline bounds the call, counted from the claim; the HTTP client's timeouts sit
+  // just past it, so a cold model load (seconds to minutes on a CPU) is not cut off as a "Headers
+  // Timeout Error".
+  const waitedMs = deps.claimedAtMs !== undefined ? Math.max(0, started - deps.claimedAtMs) : 0;
+  const leftMs = st.timeoutMs - waitedMs;
+  const timedOutError = `timed out after ${Math.round(st.timeoutMs / 1000)} s`;
+  // Its time ran out before it could start here: nothing was sent, so the coordinator may run it elsewhere.
+  if (leftMs < 1_000) return { ...base, ok: false, output: "", error: timedOutError, durationMs: 0 };
+  const deadlineMs = leftMs;
   const timer = setTimeout(() => abort.abort(), deadlineMs);
+  // The deadline holds even when an engine does not stop on the abort signal (run 4: replies went on
+  // past the call's time until the coordinator's lease lapsed under them): the wait for the next
+  // piece ends when the call is aborted, whatever the engine does.
+  const abortedWait = new Promise<never>((_, reject) => {
+    const fail = () => reject(new Error("aborted"));
+    if (abort.signal.aborted) fail();
+    else abort.signal.addEventListener("abort", fail, { once: true });
+  });
+  abortedWait.catch(() => undefined);
   let cancelled = false;
   const onCancel = () => {
     cancelled = true;
@@ -124,11 +146,17 @@ export async function runInferenceSubtask(
   };
   if (deps.signal?.aborted) onCancel();
   else deps.signal?.addEventListener("abort", onCancel, { once: true });
+  let stopPieces = () => {};
   try {
     const pieces = deps.chat
       ? deps.chat(model, { messages: input.messages, tools: input.tools, maxTokens: input.maxTokens, temperature: input.temperature }, abort.signal, deadlineMs + 1_000)
       : ollamaChat(deps.ollamaHost, { model, messages: input.messages, tools: input.tools, maxTokens: input.maxTokens, temperature: input.temperature, keepAlive: deps.keepAlive, numCtx: deps.contextWindow }, abort.signal, deadlineMs + 1_000);
-    for await (const piece of pieces) {
+    const iterator = pieces[Symbol.asyncIterator]();
+    stopPieces = () => void iterator.return?.(undefined)?.catch?.(() => undefined);
+    for (;;) {
+      const next = await Promise.race([iterator.next(), abortedWait]);
+      if (next.done) break;
+      const piece = next.value;
       if ("toolCalls" in piece) toolCalls.push(...piece.toolCalls);
       else if ("doneReason" in piece) tokens = { promptTokens: piece.promptTokens, outputTokens: piece.outputTokens, ...(piece.cachedPromptTokens !== undefined ? { cachedPromptTokens: piece.cachedPromptTokens } : {}), ...(piece.loadMs !== undefined ? { loadMs: piece.loadMs } : {}), ...(piece.promptMs !== undefined ? { promptMs: piece.promptMs } : {}), ...(piece.genMs !== undefined ? { genMs: piece.genMs } : {}) };
       else if ("delta" in piece) {
@@ -161,7 +189,9 @@ export async function runInferenceSubtask(
     // The engine's own context check (vLLM counts exact tokens; the estimate above is rough): another
     // agent with a bigger window may serve it, as with the check above.
     const overflow = err instanceof EngineError && err.contextOverflow && !full && toolCalls.length === 0;
-    const msg = cancelled ? CANCELLED_FOR_MEMORY_ERROR : abort.signal.aborted ? `timed out after ${Math.round(st.timeoutMs / 1000)} s` : overflow ? `${CONTEXT_TOO_LONG_ERROR}: ${(err as Error).message}` : (err as Error).message;
+    // The engine may still be generating (it ignored the abort): stop reading it.
+    if (abort.signal.aborted) stopPieces();
+    const msg = cancelled ? CANCELLED_FOR_MEMORY_ERROR : abort.signal.aborted ? timedOutError : overflow ? `${CONTEXT_TOO_LONG_ERROR}: ${(err as Error).message}` : (err as Error).message;
     // Nothing reached the requester yet: leave the stream open, so the call can be retried elsewhere
     // (the failed result tells the coordinator, which ends the stream when it does not retry).
     if (full || toolCalls.length) await flush(true, msg);

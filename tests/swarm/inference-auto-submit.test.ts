@@ -246,3 +246,43 @@ describe("the portal's coordinator choice is kept on the routing decision", () =
     }
   });
 });
+
+describe("model auto and a call that would not finish in time (run 4)", () => {
+  test("best fit's pick that would not finish is dropped for one that would; with nothing in time: 503 before anything is reserved", async () => {
+    const { serviceTimes } = await import("../../src/swarm/coordinator/start-eta.js");
+    const { creditEngine } = await import("../../src/credits/store.js");
+    // The 7b CPU hosts here run at 0.05 × the slow-host estimate: a 4,096-token reply takes ~140 s.
+    serviceTimes.clear();
+    for (let i = 0; i < 3; i++) serviceTimes.record("qwen2.5-coder:7b", "cpu", 10_000, Date.now(), 200_000);
+    try {
+      const question = () => [{ role: "user", content: "What is a closure in JavaScript? " + randomUUID() }];
+      // Picked again without the 7b hosts: the 1.5b host (no speed known for it), and the 7b hosts may not take it.
+      const moved = await submitAuto({ messages: question(), maxTokens: 4_096 });
+      expect(moved.r.statusCode, moved.r.body).toBe(200);
+      expect(moved.r.json().model).toBe("qwen2.5-coder:1.5b");
+      await sleep(bestFitConfig.preferMs + 50);
+      expect(await pull(a7)).toBeNull();
+      expect(await pull(b7)).toBeNull();
+      expect(await pull(small)).toBe(moved.r.json().subtaskId);
+      await finish(small, moved.taskId, moved.r.json().subtaskId, "qwen2.5-coder:1.5b");
+      // The 1.5b host is as slow: nothing here would finish it in time.
+      serviceTimes.clear();
+      for (let i = 0; i < 3; i++) {
+        serviceTimes.record("qwen2.5-coder:7b", "cpu", 10_000, Date.now(), 200_000);
+        serviceTimes.record("qwen2.5-coder:1.5b", "cpu", 10_000, Date.now(), 20_000);
+      }
+      const before = creditEngine.balance(requester.peerId);
+      const { r } = await submitAuto({ messages: question(), maxTokens: 4_096 });
+      expect(r.statusCode, r.body).toBe(503);
+      expect(r.json()).toMatchObject({ error: "no_capacity", reason: "busy", limitMs: 54_000 });
+      expect(r.json().completionEtaMs).toBeGreaterThan(54_000);
+      expect(creditEngine.balance(requester.peerId)).toBe(before);
+      // A short reply on the same hosts fits.
+      const short = await submitAuto({ messages: question(), maxTokens: 256 });
+      expect(short.r.statusCode, short.r.body).toBe(200);
+      expect(short.r.json().model).toBe("qwen2.5-coder:7b");
+    } finally {
+      serviceTimes.clear();
+    }
+  });
+});

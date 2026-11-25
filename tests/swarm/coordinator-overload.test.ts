@@ -195,3 +195,89 @@ describe("a burst larger than this coordinator can start in time", () => {
     expect((await submit({})).r.statusCode).toBe(200);
   }, 30_000);
 });
+
+/*
+ * Run 4: calls that started in time but could not finish in time (a heavy prompt and a long reply on
+ * 2-slot CPU hosts) ran to the 180 s deadline. Each service sample also gives the class's speed
+ * (measured ÷ expectedWorkMs for its tokens); a call expected to finish past 0.9 × its timeout is not
+ * given to a class that slow, and with no class here in time it goes to a peer or is refused (503),
+ * before anything is reserved.
+ */
+describe("completion estimate (unit)", () => {
+  test("speed: median of measured ÷ expected per model and class, none with too few", () => {
+    const s = new eta.ServiceTimes();
+    s.record("m", "cpu", 10_000, 0, 20_000);
+    s.record("m", "cpu", 30_000, 0, 30_000);
+    s.record("m", "cpu", 5_000, 0); // no tokens known: a service time, no speed
+    expect(s.speed("m", "cpu", 0)).toBeNull();
+    s.record("m", "cpu", 40_000, 0, 20_000);
+    expect(s.speed("m", "cpu", 0)).toBe(1);
+    expect(s.typicalMs("m", "cpu", 0)).toBe(20_000);
+  });
+
+  test("completion = start + speed × the call's work; the work grows with max_tokens and the prompt", () => {
+    expect(eta.completionEtaMs({ startEtaMs: 10_000, speed: 0.5, workMs: 100_000 })).toBe(60_000);
+    expect(eta.completionEtaMs({ startEtaMs: null, speed: 0.5, workMs: 100_000 })).toBe(50_000);
+    expect(eta.completionEtaMs({ startEtaMs: 0, speed: null, workMs: 100_000 })).toBeNull();
+    const short = eta.callWorkMs("q:1.5b", "cpu", 100, 256);
+    expect(eta.callWorkMs("q:1.5b", "cpu", 100, 2_048)).toBeGreaterThan(short);
+    expect(eta.callWorkMs("q:1.5b", "cpu", 20_000, 256)).toBeGreaterThan(short);
+    expect(eta.completionLimitMs(180_000, 0.9)).toBe(162_000);
+    expect(eta.completionLimitMs(180_000, 0)).toBe(Infinity);
+  });
+
+  test("a class over the limit is excluded; none in time when every class is over; unknown classes are not judged", () => {
+    const cpu = { computeClass: "cpu", agents: ["c1", "c2"], startEtaMs: 0, completionEtaMs: 200_000 };
+    const gpu = { computeClass: "gpu", agents: ["g1"], startEtaMs: 0, completionEtaMs: 20_000 };
+    const apple = { computeClass: "apple", agents: ["a1"], startEtaMs: 0, completionEtaMs: null };
+    expect(eta.judgeCompletion([cpu, gpu], 162_000)).toEqual({ exclude: ["c1", "c2"], none: false, etaMs: 20_000 });
+    expect(eta.judgeCompletion([cpu], 162_000)).toEqual({ exclude: ["c1", "c2"], none: true, etaMs: 200_000 });
+    expect(eta.judgeCompletion([cpu, apple], 162_000)).toMatchObject({ exclude: ["c1", "c2"], none: false });
+    expect(eta.judgeCompletion([cpu], Infinity)).toEqual({ exclude: [], none: false, etaMs: null });
+  });
+});
+
+describe("a call that would not finish here in time", () => {
+  /** Calls of MODEL on this coordinator's CPU hosts run at `speed` × the slow-host estimate. */
+  const measured = (speed: number) => {
+    eta.serviceTimes.clear();
+    for (let i = 0; i < 3; i++) eta.serviceTimes.record(MODEL, "cpu", 10_000, Date.now(), 10_000 / speed);
+  };
+
+  test("refused (503, completionEtaMs) or sent to a free peer, before anything is reserved; a short one is accepted", async () => {
+    // The calls earlier tests left waiting are run, so this coordinator has free slots again.
+    for (let i = 0; i < 64; i++) {
+      const k = i % 2 ? syd : iad;
+      const r = (await post("/pull", { agentId: k.peerId, inferenceSlots: 2, freeInferenceSlots: 2 }, k)).json();
+      const id = r.subtask?.id ?? r.envelope?.subtaskId;
+      if (!id) {
+        if (i > 2) break;
+        continue;
+      }
+      await finish(k, r.subtask?.taskId ?? r.envelope?.taskId, id);
+    }
+    measured(0.2);
+    const before = creditEngine.balance(requester.peerId);
+    // 2,048 output tokens of a 1.5B model on these hosts: about 0.2 × 590 s, past 0.9 × 120 s.
+    const refused = (await submit({ maxTokens: 4_096 })).r;
+    expect(refused.statusCode, refused.body).toBe(503);
+    expect(refused.json()).toMatchObject({ error: "no_capacity", reason: "busy", limitMs: 108_000 });
+    expect(refused.json().completionEtaMs).toBeGreaterThan(108_000);
+    expect(refused.json().message).toContain("would finish");
+    routing.setPeerWorldSource(async () => peerWorld(2));
+    try {
+      const sent = (await submit({ maxTokens: 4_096, routeRedirect: true })).r;
+      expect(sent.statusCode, sent.body).toBe(409);
+      expect(sent.json()).toMatchObject({ error: "route_elsewhere", coordinatorId: "coord-peer-us", reason: "completion_eta" });
+    } finally {
+      routing.setPeerWorldSource(undefined);
+    }
+    expect(creditEngine.balance(requester.peerId)).toBe(before);
+    // A short reply fits: accepted.
+    expect((await submit({ maxTokens: 256 })).r.statusCode).toBe(200);
+    // Fast hosts: the long one fits too.
+    measured(0.05);
+    expect((await submit({ maxTokens: 4_096 })).r.statusCode).toBe(200);
+    eta.serviceTimes.clear();
+  }, 30_000);
+});

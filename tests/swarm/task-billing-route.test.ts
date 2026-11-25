@@ -52,6 +52,8 @@ beforeAll(async () => {
   process.env.PORTAL_SERVICE_URL = `http://127.0.0.1:${(portal.address() as AddressInfo).port}`;
   process.env.INFERENCE_URL = `http://127.0.0.1:${(inference.address() as AddressInfo).port}`;
   process.env.MESH_AUTH_TOKEN = MESH;
+  // Billing, not admission: calls with large max_tokens are not refused for their expected completion (start-eta.ts).
+  process.env.INFERENCE_COMPLETION_ETA_FRACTION = "0";
   delete process.env.COORDINATOR_TRUST_PROXY;
   delete process.env.FLY_APP_NAME;
   delete process.env.MESH_PEER_ALLOWLIST;
@@ -71,6 +73,7 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
+  delete process.env.INFERENCE_COMPLETION_ETA_FRACTION;
   await app?.close();
   await new Promise<void>((resolve) => portal.close(() => resolve()));
   await new Promise<void>((resolve) => inference.close(() => resolve()));

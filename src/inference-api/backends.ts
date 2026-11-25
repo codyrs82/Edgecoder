@@ -10,7 +10,7 @@ import { contextWindowFor, ollamaChat, type OllamaPiece } from "./ollama.js";
 import { ENGINE_PRESETS, EngineError, openAiEngineChat, type OpenAiEngine } from "./openai-engine.js";
 import { BEST_FIT_ROUTE, ComplexityWindow, bestFitRoute, cheapestNetworkEstimate, classOnline, classUnavailableMessage, networkAllowance, noRouteMessage, notEnoughCSatsMessage, planRoutes, routeModelId, sizeWorkload, type ComplexityFloors, type ComputePolicy, type PlanOptions, type QualityFloor, type Route, type RouteInputs } from "./auto-route.js";
 import { complexityWeightsFromEnv, contentComplexity, estimateComplexity } from "./job-complexity.js";
-import { ChatBackendError, type ChatBackend, type ChatPiece } from "./types.js";
+import { ChatBackendError, DEADLINE_ERROR, DEADLINE_ERROR_CODE, type ChatBackend, type ChatPiece } from "./types.js";
 import type { RoutingHints } from "./job-descriptor.js";
 
 /** "This computer (Apple M1 Max)": a call that ran on this machine's Ollama. */
@@ -84,7 +84,8 @@ export function networkBackend(deps: NetworkDeps, target: { model: string; compu
         if (p.toolCalls?.length) yield { toolCalls: p.toolCalls };
         if (p.done) {
           // reasoning_only: the call's max_tokens ended inside the model's reasoning (src/cloud-host/backend.ts): the request, not the machine.
-          if (p.error) throw new ChatBackendError(`The machine running ${target.model} reported: ${p.error}`, /\breasoning_only\b/.test(p.error) ? 400 : 502);
+          // A deadline: said as such (info.code), so a non-streamed reply can return what was sent (routes.ts).
+          if (p.error) throw new ChatBackendError(`The machine running ${target.model} reported: ${p.error}`, /\breasoning_only\b/.test(p.error) ? 400 : 502, undefined, DEADLINE_ERROR.test(p.error) ? { code: DEADLINE_ERROR_CODE } : undefined);
           yield { done: true, ...(p.routed ? { where: p.routed } : {}), ...(p.creditsSpent !== undefined ? { cSatsSpent: p.creditsSpent } : {}), ...(p.promptTokens !== undefined ? { promptTokens: p.promptTokens } : {}), ...(p.outputTokens !== undefined ? { outputTokens: p.outputTokens } : {}), ...(p.served ? { served: p.served } : {}) };
         }
       }
