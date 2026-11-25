@@ -15,7 +15,7 @@ import { catalogEntryForTag } from "../../../model/catalog.js";
 import { paramsB } from "../../../inference-api/auto-route.js";
 import { contextNeeded } from "../../../inference-api/ollama.js";
 import type { ChatMessage } from "../../../inference-api/types.js";
-import { agentContextWindow, agentLoadReport, freeModelSlots, preferAgent, setClaimAdmission } from "../dispatch.js";
+import { agentContextWindow, agentLoadReport, claimCandidates, freeModelSlots, preferAgent, preferenceOf, setClaimAdmission } from "../dispatch.js";
 import { agentUnavailable, circuitBlocks, circuitOpen, circuitState, memoryAdmits, modelLoadedOn, onCircuitTrip, setCircuitSlotsLookup } from "../memory-admission.js";
 import { AUTO_MODEL_ID } from "../../../inference-api/auto-route.js";
 import { cleanHints, describeJob, type JobDescriptor } from "../../../inference-api/job-descriptor.js";
@@ -67,8 +67,8 @@ import { taskIdInUse, pricingInFlight, settleTaskIfDone, refundTaskSubmit, LATE_
 import { registerInferenceCancelRoute, requesterCancelled } from "../inference-cancel.js";
 import { recordMeshWork } from "../world-activity.js";
 import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
-import { armAutoReplace, autoPlacementOf, overrunAlternativeExists, placeAfterOverrun, replaceAutoNow, setReplaceAdmission, type AutoPlacement } from "../auto-replace.js";
-import { freeLocalHolders, LOCALITY_PREFER_MS, nearestFreeHolder, peerWithFreeCapacity, type PeerFit } from "../locality.js";
+import { armAutoReplace, autoPlacementOf, overrunAlternativeExists, rearmAutoDecision, placeAfterOverrun, replaceAutoNow, setReplaceAdmission, type AutoPlacement } from "../auto-replace.js";
+import { freeLocalHolders, LOCALITY_PREFER_MS, LOCALITY_PULL_HOLD_MS, nearestFreeHolder, peerWithFreeCapacity, type PeerFit } from "../locality.js";
 import { agentHeldBack, agentStolenRecently, agentWithholding, type ClassCompletion, completionByClass, completionLimitMs, hostServiceMs, hostSpeed, type HostSpeedSource, judgeCompletion, modelPickups, modelSlots, noteHeldCounts, parseCompletionPrior, promptTokenEstimate, serviceTimes, stalledClaimMs, startEtaLimitMs, startEtaMs, withholdingHolders } from "../start-eta.js";
 import { expectedOutputTokens, judgedOutputOf, noteJudgedOutput, pruneJudged } from "../expected-output.js";
 
@@ -446,6 +446,7 @@ export async function retryInferenceElsewhere(subtask: Subtask, agentId: string,
   startRerunBudget(subtask, leftMs);
   armClaimDeadline(subtask.taskId, subtask.id, Math.min(INFERENCE_CLAIM_TIMEOUT_MS, leftMs));
   if (overrun) await placeAfterOverrun(subtask.id, agentId, nowMs).catch((err) => coordinatorApp.log.error({ err, subtaskId: subtask.id }, "overrun_replace_failed"));
+  armRequeueDecision(subtask, nowMs);
   coordinatorApp.log.warn({ taskId: subtask.taskId, subtaskId: subtask.id, agentId, error }, "inference_retry_elsewhere");
   return true;
 }
@@ -465,9 +466,9 @@ export function clearClaimDeadline(subtaskId: string): void {
  * call nobody claimed within INFERENCE_CLAIM_DECISION_MS of its submit is decided
  * (decideUnclaimedCall): it keeps waiting only while a host here has a free slot for it (not held
  * back, not excluded from it, and it would finish there), once; otherwise it is refused at once
- * (retryable no_capacity "busy", refunded in full). Decided once, from submit: a claim ends it, and
- * a call back on the queue later (a lapsed or taken-back claim, whose late result may still come)
- * keeps its bound. Auto calls are re-placed (auto-replace.ts) and reserved, own-machine,
+ * (retryable no_capacity "busy", refunded in full). A claim ends it. Run 10: a call taken back or
+ * re-run elsewhere is decided again (armRequeueDecision); one back after a lapsed claim (its holder
+ * went quiet; its late result may still come) keeps its bound. Auto calls are re-placed (auto-replace.ts) and reserved, own-machine,
  * startup-grace and peer calls keep their bounds, as before.
  */
 export const INFERENCE_CLAIM_DECISION_MS = CC.INFERENCE_CLAIM_DECISION_MS;
@@ -486,7 +487,14 @@ function armClaimDecision(taskId: string, subtaskId: string, final = false, ms =
   claimDecisions.set(subtaskId, timer);
 }
 
-/** Decide a network call still unclaimed (armClaimDecision): "waiting" for a free slot here (once), else "ended". */
+/**
+ * Decide a network call still unclaimed (armClaimDecision): "waiting" while a host here could claim it
+ * now (dispatch.ts claimCandidates: free slot, pulling within PULL_FRESH_MS, admitted), once, until
+ * its locality hold has ended plus a quarter window (at most one more window); else "ended".
+ * Run 10: the free slot is no longer judged from the model's slot count, which counted hosts that
+ * reported one free slot long ago and had not pulled since (23 calls refused at exactly 4.0 s in run
+ * 10 after waiting on such slots). Each refusal logs the hosts considered and why (inference_unclaimed_refused).
+ */
 export async function decideUnclaimedCall(taskId: string, subtaskId: string, nowMs = Date.now(), final = false): Promise<"claimed" | "left" | "waiting" | "ended"> {
   if (!queue.isUnclaimed(subtaskId) || !claimDeadlineAt.has(subtaskId)) return "claimed";
   const st = queue.getSubtask(subtaskId);
@@ -494,20 +502,34 @@ export async function decideUnclaimedCall(taskId: string, subtaskId: string, now
   const model = st.requestedModel;
   const cls = (st.projectMeta.computeClass ?? "any") as ComputeClassId | "any";
   const exclude = queue.excludedAgents(st.id);
-  const room = modelSlots(model, cls, inferenceTokensNeededOf(st), nowMs, exclude);
-  let ahead = 0;
-  for (const c of queue.inferenceCalls()) {
-    if (c.subtaskId === st.id) break;
-    if (!c.claimedBy && queue.getSubtask(c.subtaskId)?.requestedModel === model) ahead++;
-  }
-  if (!final && ahead < room.free && waitingCallFits(st, model, cls, undefined, nowMs, { exclude, waiting: 0 })) {
-    armClaimDecision(taskId, subtaskId, true);
+  const { ready, not } = claimCandidates(st, nowMs);
+  const pref = preferenceOf(st.id, nowMs);
+  const fits = ready.length > 0 && waitingCallFits(st, model, cls, undefined, nowMs, { exclude, waiting: 0 });
+  const elapsedMs = nowMs - (usagePending.get(st.taskId)?.atMs ?? nowMs);
+  if (!final && fits) {
+    const wait = Math.min(INFERENCE_CLAIM_DECISION_MS, Math.max(Math.round(INFERENCE_CLAIM_DECISION_MS / 2), (pref?.holdLeftMs ?? 0) + Math.round(INFERENCE_CLAIM_DECISION_MS / 4)));
+    armClaimDecision(taskId, subtaskId, true, wait);
+    coordinatorApp.log.info({ taskId, subtaskId, model, elapsedMs, waitMs: wait, ready, preferred: pref?.agentId ?? null, preferredHolding: pref?.holding ?? false }, "inference_unclaimed_waiting");
     return "waiting";
   }
-  const eta = room.slots > 0 ? startEtaOf(model, cls, Math.max(1, ahead - room.free + 1), room.slots, nowMs) : null;
+  const room = modelSlots(model, cls, inferenceTokensNeededOf(st), nowMs, exclude);
+  const eta = room.slots > 0 ? startEtaOf(model, cls, Math.max(1, queue.waitingInference(model) - room.free), room.slots, nowMs) : null;
   if (!(await cancelUnclaimedInference(taskId, subtaskId, undefined, undefined, eta?.etaMs).catch(() => false))) return "claimed";
-  coordinatorApp.log.warn({ taskId, subtaskId, model, ahead, slots: room.slots, free: room.free, final }, "inference_unclaimed_refused");
+  const reason = ready.length === 0 ? "no_host_can_claim" : !fits ? "would_not_finish" : "not_claimed_in_time";
+  coordinatorApp.log.warn({ taskId, subtaskId, model, reason, elapsedMs, final, ready, notReady: not, preferred: pref?.agentId ?? null }, "inference_unclaimed_refused");
   return "ended";
+}
+
+/**
+ * Run 10 (CPU ramp tail 39-118 s, the three "deepseek busy" Auto calls at ~48 s): a call taken back
+ * from its host or re-run elsewhere got only the 45 s claim bound again (armed outside the submit, so
+ * no decision window): it waited out that bound. It is now decided again as at submit: a named call
+ * by armClaimDecision, an Auto call by its re-placement decision (auto-replace.ts rearmAutoDecision).
+ */
+function armRequeueDecision(st: Subtask, nowMs = Date.now()): void {
+  if (st.projectMeta.reservationId || st.projectMeta.onlyAccountId || usagePending.get(st.taskId) === undefined) return;
+  if (autoPlacementOf(st.id)) rearmAutoDecision(st.id, nowMs);
+  else armClaimDecision(st.taskId, st.id);
 }
 
 function armClaimDeadline(taskId: string, subtaskId: string, ms: number): void {
@@ -856,7 +878,12 @@ export async function takeBackStalledClaims(nowMs = Date.now()): Promise<number>
     if (inferenceStreams.firstPieceAt(st.id) !== undefined || inferenceStreams.hasContent(st.id) || inferenceStreams.isDone(st.id)) continue;
     const ageMs = nowMs - claim.claimedAt;
     const cls = effectiveHardware(agentId)?.computeClass ?? agentCapabilities.get(agentId)?.computeClass ?? "cpu";
-    const throttled = ageMs >= STALL_REPORT_GRACE_MS && agentWithholding(agentId, nowMs);
+    // Run 10: never a cloud host for withheld slots. It runs calls on a hosted API (no CPU credit to run
+    // out of), reasons before its first piece, and its slot report lags its claims: the three run-10
+    // "deepseek busy" calls were taken back from it this way within seconds (the coordinator showed
+    // them unclaimed while the cloud host still ran them: idle, 13/16 free) and, excluded from the only
+    // deepseek host, waited out the 45 s bound.
+    const throttled = cls !== "cloud" && ageMs >= STALL_REPORT_GRACE_MS && agentWithholding(agentId, nowMs);
     const boundMs = throttled ? null : stalledClaimMs(st.requestedModel, cls, Math.ceil(Buffer.byteLength(st.input, "utf8") / 4), nowMs);
     if (!throttled && (boundMs === null || ageMs < boundMs)) continue;
     const submittedAtMs = usagePending.get(st.taskId)?.atMs;
@@ -874,6 +901,7 @@ export async function takeBackStalledClaims(nowMs = Date.now()): Promise<number>
     }
     startRerunBudget(st, leftMs);
     armClaimDeadline(st.taskId, st.id, Math.min(INFERENCE_CLAIM_TIMEOUT_MS, leftMs));
+    armRequeueDecision(st, nowMs);
     coordinatorApp.log.warn({ taskId: st.taskId, subtaskId: st.id, agentId, ageMs, why, leftMs }, "inference_stalled_claim_requeued");
   }
   return ended;
@@ -1421,7 +1449,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       // #526: a named network call goes first to the free holder nearest the buyer (locality.ts).
       const near = billed ? nearestFreeHolder(freeLocalHolders(body.model, taskClass, needTokens).filter((h) => !slowAgents.includes(h.agentId)), clientRegion, body.model) : undefined;
       if (near) {
-        preferAgent(subtask.id, near.agentId, LOCALITY_PREFER_MS);
+        preferAgent(subtask.id, near.agentId, LOCALITY_PREFER_MS, undefined, { untilPullMs: LOCALITY_PULL_HOLD_MS });
         namedPlacements.set(subtask.id, near.agentId);
       }
     }

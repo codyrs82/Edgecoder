@@ -57,7 +57,7 @@ import type { Subtask } from "../../common/types.js";
 import { meetsCapability } from "../../economy/order-book.js";
 import { contextNeeded } from "../../inference-api/ollama.js";
 import type { ChatMessage } from "../../inference-api/types.js";
-import { ownerOnlyModels, subtaskModelEligible } from "../model-catalog.js";
+import { agentHasModelForOwner, ownerOnlyModels, subtaskModelEligible } from "../model-catalog.js";
 import { agentMayClaim } from "../sandbox-enforcement.js";
 import { queue, reservations } from "./context.js";
 import { agentCapabilities, activeBlacklistRecord } from "./agent-state.js";
@@ -86,6 +86,12 @@ export const LOCALITY_CALL_ROUND_TRIPS = 4;
 /** A cold load outweighs distance only when it is this many times the extra round trips it saves. */
 export const COLD_LOAD_CLEAR_FACTOR = 2;
 const PICKUP_SAMPLES = 1_000;
+/**
+ * Run 10: an agent that has not pulled this long is not about to take a call, whatever it last
+ * reported. Fly CPU hosts pulled every ~3-5 s (time since the last pull: idle p50 2.7 s, p90 4.4 s);
+ * "free" hosts that had not pulled for 30-117 s (busy p90 33.9 s) were what calls waited on.
+ */
+export const PULL_FRESH_MS = 6_000;
 
 type Capability = NonNullable<ReturnType<typeof agentCapabilities.get>>;
 type Claims = Map<string, { all: number; inference: number }>;
@@ -121,8 +127,12 @@ const readyAt = new Map<string, number>();
 /** agentId -> when it was last nudged and has not pulled since. */
 const nudgedAt = new Map<string, number>();
 const pickups: number[] = [];
-/** subtaskId -> the agent best-fit routing prefers, until when. */
-const preferred = new Map<string, { agentId: string; untilMs: number }>();
+/**
+ * subtaskId -> the agent routing prefers, until when. Run 10: `untilPullMs`, a locality hold also
+ * lasts past `untilMs` (up to then) while the preferred agent, pulling lately, has not pulled since
+ * the hold began (`sinceMs`): its first pull decides.
+ */
+const preferred = new Map<string, { agentId: string; untilMs: number; sinceMs: number; untilPullMs?: number }>();
 /** agentId -> model -> when it last claimed a call for that model. */
 const served = new Map<string, Map<string, number>>();
 let nudgesSent = 0;
@@ -336,11 +346,50 @@ export function setClaimAdmission(fn: ClaimAdmission | undefined): void {
  * holds, and moves a call only onto a host for which it holds (never onto a busy one).
  */
 export function couldClaimNow(agentId: string, subtask: Subtask, nowMs = Date.now(), claims: Claims = queue.activeClaims()): boolean {
-  if (queue.excludedAgents(subtask.id).includes(agentId)) return false;
-  if (!liveAgent(agentId, agentCapabilities.get(agentId), nowMs)) return false;
-  if (!hasRoomFor(agentId, subtask, claims, nowMs)) return false;
-  if (subtask.kind === "inference" && freeSlots(agentId, claims, true) === 0) return false;
-  return !claimAdmission || claimAdmission(agentId, subtask, nowMs);
+  return claimReadiness(agentId, subtask, nowMs, claims) === "ready";
+}
+
+/**
+ * Why `agentId` could or could not claim the call now (couldClaimNow; the debug lines at claim and
+ * refusal). Run 10: "not_pulling", it has not pulled within PULL_FRESH_MS (it reported a free slot
+ * once, but is not about to take a call: a busy host whose slots all run calls does not pull).
+ */
+export type ClaimReadiness = "ready" | "excluded" | "not_live" | "no_room" | "reported_full" | "not_pulling" | "admission";
+export function claimReadiness(agentId: string, subtask: Subtask, nowMs = Date.now(), claims: Claims = queue.activeClaims()): ClaimReadiness {
+  if (queue.excludedAgents(subtask.id).includes(agentId)) return "excluded";
+  if (!liveAgent(agentId, agentCapabilities.get(agentId), nowMs)) return "not_live";
+  if (!hasRoomFor(agentId, subtask, claims, nowMs)) return "no_room";
+  if (subtask.kind === "inference" && freeSlots(agentId, claims, true) === 0) return "reported_full";
+  if (!pulledWithin(agentId, PULL_FRESH_MS, nowMs)) return "not_pulling";
+  return !claimAdmission || claimAdmission(agentId, subtask, nowMs) ? "ready" : "admission";
+}
+
+/** The agent pulled (any report) within `ms`. */
+export function pulledWithin(agentId: string, ms: number, nowMs = Date.now()): boolean {
+  const at = lastPullAt.get(agentId);
+  return at !== undefined && nowMs - at <= ms;
+}
+
+/**
+ * Run 10: the agents here that could claim this call now (claimRule for its model and placement,
+ * then claimReadiness), and why each other holder could not. The decision on an unclaimed call
+ * (routes/inference.ts decideUnclaimedCall) waits only while `ready` is not empty.
+ */
+export function claimCandidates(subtask: Subtask, nowMs = Date.now()): { ready: string[]; not: Record<string, ClaimReadiness | "rule"> } {
+  const claims = queue.activeClaims();
+  const ready: string[] = [];
+  const not: Record<string, ClaimReadiness | "rule"> = {};
+  for (const [id, cap] of agentCapabilities) {
+    if (subtask.requestedModel && !agentHasModelForOwner(cap, subtask.requestedModel)) continue;
+    if (!claimRule(id, cap, undefined, nowMs)(subtask)) {
+      not[id] = "rule";
+      continue;
+    }
+    const r = claimReadiness(id, subtask, nowMs, claims);
+    if (r === "ready") ready.push(id);
+    else not[id] = r;
+  }
+  return { ready, not };
 }
 
 export function mayTakeNow(agentId: string, subtask: Subtask, claims: Claims, nowMs = Date.now()): boolean {
@@ -395,17 +444,39 @@ function loadedTakerExists(subtask: Subtask, claims: Claims, nowMs: number, exce
 }
 
 /** Soft preference: keep `subtaskId` for `agentId` for `ms` (other agents leave it while that agent can take it). */
-export function preferAgent(subtaskId: string, agentId: string, ms: number, nowMs = Date.now()): void {
+export function preferAgent(subtaskId: string, agentId: string, ms: number, nowMs = Date.now(), opts: { untilPullMs?: number } = {}): void {
   if (!(ms > 0)) return;
-  preferred.set(subtaskId, { agentId, untilMs: nowMs + ms });
+  const untilPullMs = opts.untilPullMs !== undefined && opts.untilPullMs > ms ? nowMs + opts.untilPullMs : undefined;
+  preferred.set(subtaskId, { agentId, untilMs: nowMs + ms, sinceMs: nowMs, ...(untilPullMs !== undefined ? { untilPullMs } : {}) });
   // Agents turned away meanwhile are told again as soon as the call is open to all.
   setTimeout(() => nudge(subtaskId), ms + 50).unref?.();
+  if (untilPullMs !== undefined) setTimeout(() => nudge(subtaskId), untilPullMs - nowMs + 50).unref?.();
 }
 
-/** The agent a subtask is kept for right now, if any. */
+/**
+ * The agent a subtask is kept for right now, if any. Run 10 (nearest host 47% in the CPU ramp:
+ * "free host nearest the buyer, 0 km", served by another): Fly CPU hosts pull every ~3-5 s, so a
+ * 2 s hold often lapsed before the nearest host's next pull and whoever pulled first took the call.
+ * A locality hold (untilPullMs) now also lasts until the preferred agent's first pull after it began,
+ * while that agent is pulling (within PULL_FRESH_MS), up to untilPullMs.
+ */
 export function preferredAgentFor(subtaskId: string, nowMs = Date.now()): string | undefined {
   const p = preferred.get(subtaskId);
-  return p && nowMs < p.untilMs ? p.agentId : undefined;
+  if (!p) return undefined;
+  if (nowMs < p.untilMs) return p.agentId;
+  if (p.untilPullMs === undefined || nowMs >= p.untilPullMs) return undefined;
+  const at = lastPullAt.get(p.agentId);
+  // Its first pull since the hold began decided (it took the call, or could not); one not pulling lately is not waited for.
+  if (at === undefined || at > p.sinceMs || nowMs - at > PULL_FRESH_MS) return undefined;
+  return p.agentId;
+}
+
+/** Run 10: the call's preference as it stands (debug lines): the agent, and whether it still holds the call. */
+export function preferenceOf(subtaskId: string, nowMs = Date.now()): { agentId: string; holding: boolean; holdLeftMs: number } | undefined {
+  const p = preferred.get(subtaskId);
+  if (!p) return undefined;
+  const holding = preferredAgentFor(subtaskId, nowMs) === p.agentId;
+  return { agentId: p.agentId, holding, holdLeftMs: holding ? Math.max(0, Math.max(p.untilMs, p.untilPullMs ?? 0) - nowMs) : 0 };
 }
 
 /**
@@ -437,13 +508,16 @@ function idleTakerExists(subtask: Subtask, claims: Claims, nowMs: number, except
 }
 
 /** /pull handed `subtaskId` out: record how long it waited to be picked up. */
-export function noteClaimed(subtaskId: string, nowMs = Date.now()): void {
+export function noteClaimed(subtaskId: string, nowMs = Date.now(), agentId?: string): { waitedMs: number | null; preferred: string | null; preferredHolding: boolean; byPreferred: boolean } {
   const ready = readyAt.get(subtaskId);
+  const pref = preferenceOf(subtaskId, nowMs);
   readyAt.delete(subtaskId);
   preferred.delete(subtaskId);
-  if (ready === undefined) return;
+  const out = { waitedMs: ready === undefined ? null : Math.max(0, nowMs - ready), preferred: pref?.agentId ?? null, preferredHolding: pref?.holding ?? false, byPreferred: !!pref && pref.agentId === agentId };
+  if (ready === undefined) return out;
   pickups.push(Math.max(0, nowMs - ready));
   if (pickups.length > PICKUP_SAMPLES) pickups.splice(0, pickups.length - PICKUP_SAMPLES);
+  return out;
 }
 
 /** Pickup time (claimable to claimed) over the last PICKUP_SAMPLES claims, in ms. */
@@ -509,7 +583,7 @@ export function onClaimable(subtask: Subtask, claimableAtMs: number): void {
 /** Drop bookkeeping for subtasks long gone and agents that stopped pulling. */
 export function pruneDispatch(nowMs = Date.now()): void {
   for (const [id, at] of readyAt) if (nowMs - at > READY_KEEP_MS) readyAt.delete(id);
-  for (const [id, p] of preferred) if (nowMs >= p.untilMs) preferred.delete(id);
+  for (const [id, p] of preferred) if (nowMs >= Math.max(p.untilMs, p.untilPullMs ?? 0)) preferred.delete(id);
   for (const id of neededTokens.keys()) if (!queue.getSubtask(id)) neededTokens.delete(id);
   for (const [id, load] of loads) if (nowMs - load.atMs > READY_KEEP_MS) loads.delete(id);
   for (const [id, at] of lastPullAt) if (nowMs - at > READY_KEEP_MS) lastPullAt.delete(id);

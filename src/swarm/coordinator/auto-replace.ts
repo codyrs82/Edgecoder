@@ -58,7 +58,7 @@ import type { Candidate } from "./best-fit.js";
 import { app } from "./app.js";
 import type { Subtask } from "../../common/types.js";
 import { CC, queue, taskBilling, usagePending } from "./context.js";
-import { couldClaimNow, preferAgent } from "./dispatch.js";
+import { claimReadiness, couldClaimNow, preferAgent } from "./dispatch.js";
 import { agentHeldBack } from "./start-eta.js";
 import { MARKET_DEFAULT_BID_PREMIUM_BPS, orderBook, rateOracleConfig } from "./economy.js";
 import { agentUnavailable, circuitOpenSince, noteAgentOutcome as noteCircuitOutcome } from "./memory-admission.js";
@@ -229,10 +229,25 @@ export async function decideAuto(p: AutoPlacement, nowMs = Date.now()): Promise<
   }
   if (out === "claimed" || !queue.isUnclaimed(p.subtaskId)) return "claimed";
   if (admission && (await admission.refuse(p))) {
-    app.log.warn({ taskId: p.taskId, subtaskId: p.subtaskId, tried: p.tried.length, final }, "auto_call_refused_no_host");
+    app.log.warn({ taskId: p.taskId, subtaskId: p.subtaskId, reason: final ? "not_claimed_in_time" : "no_host_can_claim", elapsedMs: nowMs - (usagePending.get(p.taskId)?.atMs ?? nowMs), tried: p.tried, current: current ?? null, currentReadiness: current ? claimReadiness(current, st, nowMs) : null, final }, "auto_call_refused_no_host");
     return "refused";
   }
   return "none";
+}
+
+/**
+ * Run 10: the call is back on the queue (taken back from its host, or re-run elsewhere after a
+ * failure): decided again as at submit, from now (routes/inference.ts armRequeueDecision). Before, its
+ * decision had ended with the first claim and the call waited out the 45 s claim bound.
+ */
+export function rearmAutoDecision(subtaskId: string, nowMs = Date.now()): boolean {
+  const p = autoCalls.get(subtaskId);
+  if (!p || autoDecisionMs() <= 0) return false;
+  p.decideBy = undefined;
+  p.placedAtMs = undefined;
+  p.graced = false;
+  armAutoReplace(p, undefined, nowMs);
+  return true;
 }
 
 /** The first local candidate best fit gives for the call without the agents it tried, within its reserve. */
