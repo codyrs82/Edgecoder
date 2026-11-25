@@ -134,6 +134,29 @@ describe("named-model locality", () => {
     const res = await app.inject({ method: "GET", url: "/inference/models", remoteAddress: REMOTE, headers: { "x-mesh-token": MESH } });
     const row = res.json().models.find((m: { model: string }) => m.model === MODEL);
     expect([...row.freeRegions].sort()).toEqual(["iad", "syd"]);
+    // Each free host with its own numbers, for the portal's end to end score (coordinator-latency.ts).
+    const hosts = [...row.freeHosts].sort((a: { region: string }, b: { region: string }) => a.region.localeCompare(b.region));
+    expect(hosts.map((h: { region: string; free: number }) => [h.region, h.free])).toEqual([["iad", 2], ["syd", 2]]);
+    for (const h of hosts) if (h.serviceMs !== undefined) expect(h.serviceMs).toBeGreaterThan(0);
+  });
+
+  test("a free host's reference-call time is its own speed, not how large its recent calls were", async () => {
+    const eta = await import("../../src/swarm/coordinator/start-eta.js");
+    const now = Date.now();
+    const work = eta.callWorkMs(MODEL, "cpu", 1_000, 200);
+    eta.agentServiceTimes.clear(); // the calls above left samples of their own
+    // iad ran small calls at the estimate's speed; syd ran huge calls twice as slow per token.
+    for (let i = 0; i < 3; i++) {
+      eta.agentServiceTimes.record(MODEL, iad.peerId, 1_000, now, 1_000);
+      eta.agentServiceTimes.record(MODEL, syd.peerId, 60_000, now, 30_000);
+    }
+    expect(eta.hostServiceMs(MODEL, iad.peerId, "cpu", now)).toBe(work);
+    expect(eta.hostServiceMs(MODEL, syd.peerId, "cpu", now)).toBe(2 * work);
+    const res = await app.inject({ method: "GET", url: "/inference/models", remoteAddress: REMOTE, headers: { "x-mesh-token": MESH } });
+    const row = res.json().models.find((m: { model: string }) => m.model === MODEL);
+    const byRegion = Object.fromEntries(row.freeHosts.map((h: { region: string; serviceMs?: number }) => [h.region, h.serviceMs]));
+    expect(byRegion).toEqual({ iad: work, syd: 2 * work });
+    eta.agentServiceTimes.clear();
   });
 });
 

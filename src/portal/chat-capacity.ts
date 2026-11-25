@@ -25,7 +25,7 @@
 
 import { request } from "undici";
 import { cleanRegion, coordinatorHost, type CoordinatorChoice } from "../common/coordinator-choice.js";
-import { chooseByLatency, latencyPolicyFromEnv, type LatencyCandidate, type LatencyPolicy } from "./coordinator-latency.js";
+import { chooseByLatency, latencyPolicyFromEnv, type FreeHost, type LatencyCandidate, type LatencyPolicy } from "./coordinator-latency.js";
 
 /**
  * - yes: it reports something to run the chat on.
@@ -76,6 +76,8 @@ export interface ModelLoad {
   freeRegions?: string[];
   /** Typical time a call of this model holds a slot there, ms (newer coordinators; C9). */
   serviceMs?: number;
+  /** Its hosts with a free slot for it, each with its own region, round trip and service time (newer coordinators). */
+  freeHosts?: FreeHost[];
 }
 
 /** A model the network can run now, across coordinators: agents holding it and their classes. */
@@ -108,6 +110,11 @@ export const LOAD_REPORT_MAX_AGE_MS = 2_000;
 /** A "no" older than this is asked again before a chat is refused for lack of compute. */
 const RECHECK_NO_AFTER_MS = 3_000;
 const CANDIDATE_LIST_TTL_MS = 60_000;
+/**
+ * A call sent this long before a coordinator's load report was taken may still be missing from it
+ * (the portal's work before the submit, the trip there, the claim): it is still counted against it.
+ */
+export const SENT_REFLECT_MS = 2_000;
 /** Key for Auto calls sent since a report (a model name never has this form). */
 const AUTO_SENT_KEY = "\u0000auto";
 /** Round trips kept per coordinator, and how long one counts. */
@@ -178,13 +185,24 @@ export function httpCapacityProbe(opts: { serviceToken?: string; timeoutMs: numb
         const out = v.map((r) => cleanRegion(r)).filter((r): r is string => r !== null).slice(0, 32);
         return out.length ? out : undefined;
       };
-      for (const m of json.models as Array<{ model?: unknown; agents?: unknown; idleAgents?: unknown; freeSlots?: unknown; waiting?: unknown; classes?: unknown; agentRttMs?: unknown; freeRegions?: unknown; serviceMs?: unknown }>) {
+      const hosts = (v: unknown): FreeHost[] | undefined => {
+        if (!Array.isArray(v)) return undefined;
+        const out: FreeHost[] = [];
+        for (const h of v.slice(0, 32) as Array<{ region?: unknown; free?: unknown; rttMs?: unknown; serviceMs?: unknown } | null>) {
+          const region = cleanRegion(h?.region);
+          if (!h || !region || !num(h.free) || h.free <= 0) continue;
+          out.push({ region, free: Math.min(1_000, Math.floor(h.free)), ...(num(h.rttMs) && h.rttMs >= 0 ? { rttMs: h.rttMs } : {}), ...(num(h.serviceMs) && h.serviceMs >= 0 ? { serviceMs: h.serviceMs } : {}) });
+        }
+        return out.length ? out : undefined;
+      };
+      for (const m of json.models as Array<{ model?: unknown; agents?: unknown; idleAgents?: unknown; freeSlots?: unknown; waiting?: unknown; classes?: unknown; agentRttMs?: unknown; freeRegions?: unknown; serviceMs?: unknown; freeHosts?: unknown }>) {
         if (m && typeof m.model === "string" && typeof m.agents === "number" && m.agents > 0) {
           agentModels.push(m.model);
           if (Array.isArray(m.classes)) modelClasses[m.model] = m.classes.filter((c): c is string => typeof c === "string");
           if (num(m.idleAgents)) {
             const freeRegions = regions(m.freeRegions);
-            modelLoad[m.model] = { agents: m.agents, idle: m.idleAgents, ...(num(m.freeSlots) ? { free: m.freeSlots } : {}), waiting: num(m.waiting) ? m.waiting : 0, ...(num(m.agentRttMs) ? { agentRttMs: m.agentRttMs } : {}), ...(freeRegions ? { freeRegions } : {}), ...(num(m.serviceMs) ? { serviceMs: m.serviceMs } : {}) };
+            const freeHosts = hosts(m.freeHosts);
+            modelLoad[m.model] = { agents: m.agents, idle: m.idleAgents, ...(num(m.freeSlots) ? { free: m.freeSlots } : {}), waiting: num(m.waiting) ? m.waiting : 0, ...(num(m.agentRttMs) ? { agentRttMs: m.agentRttMs } : {}), ...(freeRegions ? { freeRegions } : {}), ...(num(m.serviceMs) ? { serviceMs: m.serviceMs } : {}), ...(freeHosts ? { freeHosts } : {}) };
           }
         }
       }
@@ -343,19 +361,29 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
   };
 
   /**
-   * Calls sent to a coordinator for a model since its report was taken: they occupy agents the
-   * report still counts as idle, so a burst inside one cache window spreads instead of piling up.
+   * Calls sent to a coordinator for a model that its report may not show yet: they occupy slots the
+   * report still counts as free, so a burst spreads instead of piling up. A call counts against every
+   * report taken less than SENT_REFLECT_MS after it was sent, not only the report it was chosen on:
+   * run 5's burst went 6 calls onto the EU's 4 slots because a report refreshed between the picks
+   * still showed the slots free.
    */
-  const sentSince = new Map<string, { reportAt: number; n: number }>();
+  const sent = new Map<string, Array<{ at: number; region: string | null }>>();
   const sentKey = (url: string, model: string) => `${url}|${model}`;
-  const sentCount = (url: string, model: string, reportAt: number) => {
-    const e = sentSince.get(sentKey(url, model));
-    return e && e.reportAt === reportAt ? e.n : 0;
+  /** The buyers' regions of the calls sent to `url` for `model` that its report may not show yet. */
+  const sentSince = (url: string, model: string): Array<string | null> => {
+    const list = sent.get(sentKey(url, model));
+    if (!list?.length) return [];
+    const since = (cache.get(`network|${url}`)?.takenAt ?? -Infinity) - SENT_REFLECT_MS;
+    return list.filter((e) => e.at > since).map((e) => e.region);
   };
-  const noteSent = (url: string, model: string, reportAt: number) => {
+  const sentCount = (url: string, model: string) => sentSince(url, model).length;
+  const noteSent = (url: string, model: string, region: string | null | undefined) => {
     const key = sentKey(url, model);
-    const e = sentSince.get(key);
-    sentSince.set(key, { reportAt, n: e && e.reportAt === reportAt ? e.n + 1 : 1 });
+    const t = now();
+    // Older than any report could still be missing it (a report is used for at most the cache TTL).
+    const keep = (sent.get(key) ?? []).filter((e) => t - e.at <= Math.max(ttlMs, LOAD_REPORT_MAX_AGE_MS) + SENT_REFLECT_MS);
+    keep.push({ at: t, region: region ?? null });
+    sent.set(key, keep.slice(-256));
   };
 
   /**
@@ -391,12 +419,12 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
       const r = reports[i];
       const load = r.modelLoad?.[model];
       if (!r.reachable || !load || recentlyFailed(urls[i]) || !r.agentModels?.includes(model) || !classOk(r, model, cls)) continue;
-      const reportAt = cache.get(`network|${urls[i]}`)?.at ?? 0;
+      const unreflected = sentSince(urls[i], model);
       // Free model slots when the coordinator reports them (agents run several calls at once), else idle agents.
       const room = load.free ?? load.idle;
       scored.push({
         url: urls[i],
-        free: room - load.waiting - sentCount(urls[i], model, reportAt),
+        free: room - load.waiting - unreflected.length,
         waiting: load.waiting,
         agents: Math.max(1, load.agents ?? 1),
         rttMs: rttOf(urls[i]),
@@ -409,6 +437,9 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
         agentRttMs: load.agentRttMs ?? null,
         reportAgeMs: reportAge(urls[i]),
         ...(load.freeRegions ? { freeRegions: load.freeRegions } : {}),
+        // Per-host numbers for end to end (coordinator-latency.ts); the unreflected calls have taken their buyers' nearest hosts.
+        ...(load.freeHosts ? { freeHosts: load.freeHosts } : {}),
+        ...(unreflected.length ? { sentFor: unreflected } : {}),
       });
     }
     let best: (typeof scored)[number] | null = null;
@@ -423,7 +454,7 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
     if (!best) return null;
     const choice = withLatency(scored, best.url, ctx);
     const url = scored.find((s) => coordinatorHost(s.url) === choice.chosen)?.url ?? best.url;
-    noteSent(url, model, cache.get(`network|${url}`)?.at ?? 0);
+    noteSent(url, model, ctx?.clientRegion);
     return { url, choice };
   }
 
@@ -462,7 +493,7 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
       const loads = Object.values(r.modelLoad ?? {});
       // C9: Auto calls sent there since its report also take room (as chooseByLoad counts them per
       // model), so a burst inside one report window spreads instead of piling onto one coordinator.
-      const room = loads.reduce((n, l) => n + (l.free ?? l.idle) - l.waiting, 0) - sentCount(urls[i], AUTO_SENT_KEY, cache.get(`network|${urls[i]}`)?.at ?? 0);
+      const room = loads.reduce((n, l) => n + (l.free ?? l.idle) - l.waiting, 0) - sentCount(urls[i], AUTO_SENT_KEY);
       if (!best || room > best.room) best = { url: urls[i], room };
       const agentRtts = loads.map((l) => l.agentRttMs).filter((n): n is number => typeof n === "number");
       scored.push({
@@ -482,7 +513,7 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
     if (!best) return { url: urls[0] };
     const choice = withLatency(scored, best.url, ctx);
     const url = scored.find((s) => coordinatorHost(s.url) === choice.chosen)?.url ?? best.url;
-    noteSent(url, AUTO_SENT_KEY, cache.get(`network|${url}`)?.at ?? 0);
+    noteSent(url, AUTO_SENT_KEY, ctx?.clientRegion);
     return { url, choice };
   }
 

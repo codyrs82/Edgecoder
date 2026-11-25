@@ -69,7 +69,7 @@ import { recordMeshWork } from "../world-activity.js";
 import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
 import { armAutoReplace, replaceAutoNow } from "../auto-replace.js";
 import { freeLocalHolders, LOCALITY_PREFER_MS, nearestFreeHolder, peerWithFreeCapacity } from "../locality.js";
-import { completionByClass, completionLimitMs, judgeCompletion, modelSlots, serviceTimes, startEtaLimitMs, startEtaMs } from "../start-eta.js";
+import { completionByClass, completionLimitMs, hostServiceMs, judgeCompletion, modelSlots, serviceTimes, startEtaLimitMs, startEtaMs } from "../start-eta.js";
 
 // ── Network inference (chat completions on agents' local models, streamed) ──────────────────
 export const inferenceStreams = new InferenceStreams();
@@ -627,6 +627,9 @@ function medianRtt(values: number[]): number | null {
   return Math.round(s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2);
 }
 
+/** /inference/models freeHosts entry: one host with a free slot for the model. */
+type FreeHostReport = { region: string; free: number; rttMs?: number; serviceMs?: number };
+
 export function registerInferenceRoutes(app: CoordinatorApp): void {
   // Security research tier: entitlement pushes from the portal and the admin view (routes/restricted.ts).
   registerRestrictedRoutes(app);
@@ -637,7 +640,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const now = Date.now();
     // Security research tier: a restricted model is listed only to an account entitled to it.
     const viewer = restrictedCatalog.size > 0 ? await modelViewerAccount(req) : undefined;
-    const byModel = new Map<string, { agents: number; idle: number; free: number; classes: Set<ComputeClassId>; byClass: Partial<Record<ComputeClassId, number>>; ctx?: number; rtts: number[]; freeRtts: number[]; freeRegions: Set<string> }>();
+    const byModel = new Map<string, { agents: number; idle: number; free: number; classes: Set<ComputeClassId>; byClass: Partial<Record<ComputeClassId, number>>; ctx?: number; rtts: number[]; freeRtts: number[]; freeRegions: Set<string>; freeHosts: FreeHostReport[] }>();
     const classAgents: Partial<Record<ComputeClassId, Set<string>>> = {};
     const claims = queue.activeClaims();
     for (const [id, cap] of agentCapabilities) {
@@ -655,7 +658,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         const tier = restrictedCatalog.tierOf(m);
         if (tier && !accountHoldsTier(viewer, tier, now)) continue;
         if (!memoryAdmits(id, m, held, now) && !modelLoadedOn(id, m, now) && !unavailable) continue;
-        const e = byModel.get(m) ?? { agents: 0, idle: 0, free: 0, classes: new Set<ComputeClassId>(), byClass: {}, rtts: [], freeRtts: [], freeRegions: new Set<string>() };
+        const e = byModel.get(m) ?? { agents: 0, idle: 0, free: 0, classes: new Set<ComputeClassId>(), byClass: {}, rtts: [], freeRtts: [], freeRegions: new Set<string>(), freeHosts: [] };
         e.agents++;
         e.byClass[cls] = (e.byClass[cls] ?? 0) + 1;
         (classAgents[cls] ??= new Set()).add(id);
@@ -670,6 +673,12 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         if (rtt !== null && Number.isFinite(rtt)) {
           e.rtts.push(rtt);
           if (free > 0) e.freeRtts.push(rtt);
+        }
+        // freeHosts: each free host's own region, free slots, round trip and time for a reference call of
+        // the model (portal coordinator-latency.ts scores the free host nearest the buyer with its own numbers).
+        if (region && free > 0 && e.freeHosts.length < 32) {
+          const svc = hostServiceMs(m, id, cls, now);
+          e.freeHosts.push({ region, free, ...(rtt !== null && Number.isFinite(rtt) ? { rttMs: Math.round(rtt) } : {}), ...(svc !== null ? { serviceMs: svc } : {}) });
         }
         e.classes.add(cls);
         // The smallest window an agent serves the model with: what a caller can count on (agent loops compact to it).
@@ -702,7 +711,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
           const ctx = cloud ? Math.min(e.ctx ?? cloud.contextWindow, cloud.contextWindow) : e.ctx;
           // serviceMs: typical time a call of this model holds a slot here (C9; the portal's queue estimate).
           const serviceMs = serviceTimes.typicalMs(model, "any", now);
-          return { model, agents: e.agents, agentsByClass: e.byClass, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), ...(serviceMs !== null ? { serviceMs } : {}), classes: [...e.classes], paramsB: paramsB(model), cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD, modelTokenPrice(model)), ...(ctx ? { contextWindow: ctx } : {}), ...(cloud ? { origin: cloud.origin, hostedBy: cloud.provider, cloudRank: cloud.rank, ...(cloud.hint ? { cloudHint: cloud.hint } : {}) } : {}), ...(restricted ? { restricted } : {}), ...(agentRtt !== null ? { agentRttMs: agentRtt } : {}), ...(e.freeRegions.size ? { freeRegions: [...e.freeRegions] } : {}) };
+          return { model, agents: e.agents, agentsByClass: e.byClass, idleAgents: e.idle, freeSlots: e.free, waiting: queue.waitingInference(model), ...(serviceMs !== null ? { serviceMs } : {}), classes: [...e.classes], paramsB: paramsB(model), cSatsPerMTokens: cSatsPerMTokens(paramsB(model), mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD, modelTokenPrice(model)), ...(ctx ? { contextWindow: ctx } : {}), ...(cloud ? { origin: cloud.origin, hostedBy: cloud.provider, cloudRank: cloud.rank, ...(cloud.hint ? { cloudHint: cloud.hint } : {}) } : {}), ...(restricted ? { restricted } : {}), ...(agentRtt !== null ? { agentRttMs: agentRtt } : {}), ...(e.freeRegions.size ? { freeRegions: [...e.freeRegions] } : {}), ...(e.freeHosts.length ? { freeHosts: e.freeHosts } : {}) };
         })
         .sort((a, b) => b.agents - a.agents || a.model.localeCompare(b.model)), (r) => r.model, (r) => r.cloudRank),
       classes,

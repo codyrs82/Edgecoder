@@ -57,10 +57,10 @@ function coordinators(submit: (url: string, body: Record<string, unknown>) => { 
   return submits;
 }
 
-async function hostedApp(capacity: Partial<ChatCapacityDirectory> & { failed?: string[] } = {}) {
+async function hostedApp(capacity: Partial<ChatCapacityDirectory> & { failed?: string[] } = {}, logLines?: string[]) {
   const Fastify = (await import("fastify")).default;
   const { hashApiKey, registerHostedRoutes } = await import("../../src/portal/routes/hosted.js");
-  const app = Fastify();
+  const app = logLines ? Fastify({ logger: { level: "info", stream: { write: (l: string) => void logLines.push(l) } } }) : Fastify();
   const failed: string[] = capacity.failed ?? [];
   registerHostedRoutes(app, {
     store: { userForApiKeyHash: async (h: string) => (h === hashApiKey(KEY) ? "u1" : null) } as never,
@@ -244,5 +244,51 @@ describe("drainFailoverBackend", () => {
     expect(err).not.toBeInstanceOf(CoordinatorDraining);
     expect(err.status).toBe(503);
     expect(calls).toEqual(["/inference/submit", "/inference/submit"]);
+  });
+});
+
+/*
+ * Run 5: a hosted call's connection was cut at 50 s and nothing in the logs said why. Each call now
+ * logs one hosted_call line: the task ids submitted, the coordinators, the upstream statuses, the
+ * timing and who closed it, without the prompt, the reply or the key.
+ */
+describe("hosted API: one log line per call", () => {
+  it("names the task, the coordinators and the upstream statuses, and leaves out the prompt and the key", async () => {
+    coordinators((url, body) => (url === US ? { status: 503, json: drainingBody(EU) } : { status: 200, json: { taskId: body.taskId, subtaskId: "s-1" } }));
+    const lines: string[] = [];
+    const { app } = await hostedApp({}, lines);
+    const r = await app.inject({ method: "POST", url: "/v1/chat/completions", headers: { authorization: `Bearer ${KEY}` }, payload: { model: `network/${MODEL}`, messages: [{ role: "user", content: "a secret prompt" }], stream: false } });
+    expect(r.statusCode).toBe(200);
+    const logged = lines.map((l) => JSON.parse(l)).filter((l) => l.msg === "hosted_call");
+    expect(logged).toHaveLength(1);
+    const call = logged[0].hostedCall;
+    expect(call).toMatchObject({
+      accountId: "acct-u1",
+      model: `network/${MODEL}`,
+      status: 200,
+      closedBy: "server",
+      committedEarly: false,
+      upstream: { coordinators: ["us.example", "eu.example"], submitStatus: 200, reads: 1, streamStatus: 200, done: true, cancelled: false },
+    });
+    // One task per coordinator it was submitted to (the US refused it while restarting).
+    expect(call.upstream.taskIds).toHaveLength(2);
+    for (const t of call.upstream.taskIds) expect(t).toMatch(/^inf-/);
+    expect(call.elapsedMs).toEqual(expect.any(Number));
+    const all = lines.join("\n");
+    expect(all).not.toContain("a secret prompt");
+    expect(all).not.toContain(KEY);
+    expect(all).not.toContain("hello");
+  });
+
+  it("notes a coordinator request that failed in the portal", async () => {
+    const { tracedNetworkDeps, newCallTrace } = await import("../../src/portal/routes/hosted.js");
+    const trace = newCallTrace();
+    const d = tracedNetworkDeps({ forwarder: "", token: () => "", agentId: "a", transport: async (_m, path) => {
+      if (path === "/inference/stream") throw Object.assign(new Error("closed"), { code: "UND_ERR_SOCKET" });
+      return { status: 503, json: { error: "no_capacity", detail: "Every machine is busy" } };
+    } }, trace, EU);
+    await d.transport!("POST", "/inference/submit", { taskId: "inf-1-x", messages: [{ role: "user", content: "p" }] });
+    await expect(d.transport!("POST", "/inference/stream", { taskId: "inf-1-x" })).rejects.toThrow();
+    expect(trace).toMatchObject({ taskIds: ["inf-1-x"], coordinators: ["eu.example"], submitStatus: 503, submitError: "no_capacity", upstreamError: "/inference/stream UND_ERR_SOCKET" });
   });
 });

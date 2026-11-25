@@ -1,6 +1,6 @@
 import Fastify from "fastify";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RESTARTING_MESSAGE, drainOpenRequests, openRequestCount, registerCompatRoutes, wholeKeepaliveFromEnv, WHOLE_KEEPALIVE_AFTER_MS, WHOLE_KEEPALIVE_EVERY_MS } from "../../src/inference-api/routes.js";
+import { RESTARTING_MESSAGE, drainOpenRequests, type CallOutcome, openRequestCount, registerCompatRoutes, wholeKeepaliveFromEnv, WHOLE_KEEPALIVE_AFTER_MS, WHOLE_KEEPALIVE_EVERY_MS } from "../../src/inference-api/routes.js";
 import { ChatBackendError, type ChatBackend } from "../../src/inference-api/types.js";
 
 /*
@@ -152,5 +152,113 @@ describe("wholeKeepaliveFromEnv", () => {
     expect(wholeKeepaliveFromEnv({ PORTAL_NONSTREAM_KEEPALIVE_AFTER_MS: "0" })).toBeNull();
     expect(wholeKeepaliveFromEnv({ PORTAL_NONSTREAM_KEEPALIVE_AFTER_MS: "5000", PORTAL_NONSTREAM_KEEPALIVE_MS: "10" })).toEqual({ afterMs: 5_000, everyMs: 1_000 });
     expect(wholeKeepaliveFromEnv({ PORTAL_NONSTREAM_KEEPALIVE_AFTER_MS: "junk" })).toEqual({ afterMs: 20_000, everyMs: 15_000 });
+  });
+});
+
+/*
+ * Run 5: a non-streamed hosted call (inf-1795599027496-de8dd861) had its connection terminated at
+ * 50 s with no answer, and the logs had rotated. Each call now reports how it ended (onCallDone):
+ * status, early commit, timing, who closed it and the backend's error class and code, with no prompt,
+ * reply or error message.
+ */
+describe("how a call ended (per-call log line)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+  const withLog = (backend: ChatBackend) => {
+    const outcomes: CallOutcome[] = [];
+    const app = Fastify();
+    registerCompatRoutes(app, {
+      authenticate: async () => ({ who: "acct-1" }),
+      models: async () => [],
+      resolve: async () => ({ backend, model: "m1" }),
+      wholeKeepalive: { afterMs: WHOLE_KEEPALIVE_AFTER_MS, everyMs: WHOLE_KEEPALIVE_EVERY_MS },
+      onCallDone: (ctx, o) => {
+        expect(ctx).toEqual({ who: "acct-1" });
+        outcomes.push(o);
+      },
+    });
+    return { app, outcomes };
+  };
+
+  it("a busy refusal after the early commit: 200, committed early, ended by the server, the error's class and status", async () => {
+    const c = controlled();
+    const { app, outcomes } = withLog(c.backend);
+    const pending = app.inject(openai);
+    await started();
+    await vi.advanceTimersByTimeAsync(45_600);
+    c.fail(new ChatBackendError("Every machine that runs m1 is busy and none could start this request in time.", 503, 15));
+    await pending;
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({ format: "openai", stream: false, status: 200, committedEarly: true, closedBy: "server", error: { status: 503, type: "ChatBackendError" } });
+    expect(outcomes[0].elapsedMs).toBeGreaterThanOrEqual(45_600);
+    expect(outcomes[0].firstPieceMs).toBeGreaterThanOrEqual(45_600);
+    // Spaces at 20, 35 s and the error body.
+    expect(outcomes[0].bytes).toBeGreaterThan(2);
+    expect(JSON.stringify(outcomes[0])).not.toContain("busy");
+  });
+
+  it("an answer before the commit: the status, no error, ended by the server", async () => {
+    const c = controlled();
+    const { app, outcomes } = withLog(c.backend);
+    const pending = app.inject(openai);
+    await started();
+    c.answer("hi");
+    expect((await pending).statusCode).toBe(200);
+    expect(outcomes[0]).toMatchObject({ status: 200, committedEarly: false, closedBy: "server", firstPieceMs: expect.any(Number) });
+    expect(outcomes[0].error).toBeUndefined();
+  });
+
+  it("a refusal before the commit keeps its HTTP status", async () => {
+    const c = controlled();
+    const { app, outcomes } = withLog(c.backend);
+    const pending = app.inject(openai);
+    await started();
+    c.fail(new ChatBackendError("no", 402));
+    expect((await pending).statusCode).toBe(402);
+    expect(outcomes[0]).toMatchObject({ status: 402, closedBy: "server", error: { status: 402 } });
+  });
+});
+
+describe("a connection closed under the reply", () => {
+  it("is recorded as closed by the client (or a proxy), with when it closed", async () => {
+    const outcomes: CallOutcome[] = [];
+    // Runs until the request is aborted (the connection closed).
+    const backend: ChatBackend = async function* (_req, signal) {
+      await new Promise<void>((r) => signal?.addEventListener("abort", () => r(), { once: true }));
+      throw new ChatBackendError("aborted", 499);
+    };
+    const app = Fastify();
+    registerCompatRoutes(app, {
+      authenticate: async () => ({}),
+      models: async () => [],
+      resolve: async () => ({ backend, model: "m1" }),
+      wholeKeepalive: { afterMs: 20, everyMs: 1_000 },
+      onCallDone: (_ctx, o) => void outcomes.push(o),
+    });
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    try {
+      const { port } = app.server.address() as { port: number };
+      const http = await import("node:http");
+      await new Promise<void>((resolve) => {
+        const req = http.request({ host: "127.0.0.1", port, method: "POST", path: "/v1/chat/completions", headers: { authorization: "Bearer k", "content-type": "application/json" } }, (res) => {
+          // The 200 head and the first space arrived (committed early): now the connection is cut.
+          res.once("data", () => {
+            req.destroy();
+            resolve();
+          });
+        });
+        req.on("error", () => undefined);
+        req.end(JSON.stringify({ messages: [{ role: "user", content: "x" }], stream: false }));
+      });
+      for (let i = 0; i < 200 && outcomes.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
+      expect(outcomes).toHaveLength(1);
+      expect(outcomes[0]).toMatchObject({ status: 200, committedEarly: true, closedBy: "client", closedAtMs: expect.any(Number) });
+    } finally {
+      await app.close();
+    }
   });
 });

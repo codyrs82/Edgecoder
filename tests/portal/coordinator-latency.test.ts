@@ -292,14 +292,15 @@ describe("locality under load", () => {
     expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "locality", clientRegion: "gru" });
     // Time to start: US 7 + 0 + 168 = 175 ms, EU 100 + 0 + 15 = 115 ms (was 2,103 vs 715).
     expect(c.candidates.map((x) => [x.queueMs, x.expectedMs])).toEqual([[0, 175], [0, 115]]);
-    // End to end with the same 4 s service: 4,175 vs 4,115 ms, 60 ms is under 15 %.
-    expect(c.reason).toMatch(/^free host nearest the buyer \(gru\): 0 km vs 9,\d{3} km; coordinator-eu\.example\.com not clearly faster end to end \(expected 4115 ms vs 4175 ms\)$/);
+    // End to end with the same 4 s service: US 7 + 0 (gru host, 0 km) + 4,000; EU 100 + 135 (lhr host,
+    // 9,459 km) + 4,000. The agent round trip is in the service time, so it is not added again.
+    expect(c.reason).toMatch(/^free host nearest the buyer \(gru\): 0 km vs 9,\d{3} km; coordinator-eu\.example\.com not clearly faster end to end \(expected 4235 ms vs 4007 ms, hosts lhr 4000 ms vs gru 4000 ms\)$/);
   });
 
   it("keeps the nearest when no service time is reported (both get the default)", () => {
     const c = chooseByLatency([usRun4({ serviceMs: null }), euRun4({ serviceMs: null })], US, POLICY, { clientRegion: "gru" });
     expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
-    expect(c.reason).toMatch(/expected 15115 ms vs 15175 ms/);
+    expect(c.reason).toMatch(/expected 15235 ms vs 15007 ms, hosts lhr vs gru\)/);
   });
 
   it("also holds when the EU was the load pick: the buyer goes to the free host 0 km away", () => {
@@ -308,11 +309,11 @@ describe("locality under load", () => {
   });
 
   it("moves when the other coordinator is clearly faster end to end", () => {
-    // The model takes 9 s on the US hosts and 3 s on the EU ones: 9,175 vs 3,115 ms.
+    // The model takes 9 s on the US hosts and 3 s on the EU ones: 9,007 vs 3,235 ms.
     const c = chooseByLatency([usRun4({ serviceMs: 9_000 }), euRun4({ serviceMs: 3_000 })], US, POLICY, { clientRegion: "gru" });
     expect(c).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "latency" });
-    expect(c.reason).toBe("clearly faster end to end than the free host nearest the buyer (gru, 0 km on coordinator.example.com): expected 3115 ms vs 9175 ms");
-    // 4,175 vs 3,615 ms: 560 ms is under 15 % of 4,175 (626 ms), the nearest stays.
+    expect(c.reason).toBe("clearly faster end to end than the free host nearest the buyer (gru, 0 km on coordinator.example.com): expected 3235 ms vs 9007 ms, hosts lhr 3000 ms vs gru 9000 ms");
+    // 4,007 vs 3,735 ms: 272 ms is under 15 % of 4,007 (601 ms), the nearest stays.
     const close = chooseByLatency([usRun4({ serviceMs: 4_000 }), euRun4({ serviceMs: 3_500 })], US, POLICY, { clientRegion: "gru" });
     expect(close).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
   });
@@ -342,6 +343,115 @@ describe("locality under load", () => {
     });
     const p = await dir.pick({ kind: "network", model: M }, [], { clientRegion: "gru" });
     expect(p).toMatchObject({ url: US, choice: { rule: "locality" } });
-    expect(p.choice?.reason).toMatch(/not clearly faster end to end \(expected 4120 ms vs 4027 ms\)/);
+    expect(p.choice?.reason).toMatch(/not clearly faster end to end \(expected 4235 ms vs 4007 ms, hosts lhr 4000 ms vs gru 4000 ms\)/);
+  });
+});
+
+/*
+ * Run 5 (3c: nearest free host 22 % idle, 48 % under load). The "clearly faster end to end" rule
+ * scored the US coordinator (ord) with its median over every 1.5b call there (~1,700 ms) plus the
+ * median round trip to all seven US hosts (163 ms), so iad, lax and sin buyers went to the EU while a
+ * free host sat in their own region. Now each coordinator is scored by its best free host with that
+ * host's own numbers (/inference/models freeHosts), and calls already sent take those hosts first.
+ */
+describe("run 5: the nearest free host, scored by its own numbers", () => {
+  const US_REGIONS = ["iad", "lax", "gru", "syd", "nrt", "jnb", "sin"];
+  // The same CPU machines everywhere: one reference-call time for all of them.
+  const hosts = (regions: string[], serviceMs = 1_200) => regions.map((region) => ({ region, free: 2, rttMs: 40, serviceMs }));
+  // inf-1795598700801-20aab089 (portal ord), as recorded: US median 1,699 ms, EU 1,320 ms.
+  const us = (o: Partial<LatencyCandidate> = {}) =>
+    cand({ url: US, rttMs: 5, agentRttMs: 162, free: 14, agents: 7, serviceMs: 1_699, callP50Ms: 1_699, freeRegions: US_REGIONS, freeHosts: hosts(US_REGIONS), ...o });
+  const eu = (o: Partial<LatencyCandidate> = {}) =>
+    cand({ url: EU, rttMs: 98, agentRttMs: 11, free: 4, agents: 2, serviceMs: 1_320, callP50Ms: 1_320, freeRegions: ["lhr", "fra"], freeHosts: hosts(["lhr", "fra"]), ...o });
+
+  it.each([
+    ["iad", "inf-1795598700801-20aab089"],
+    ["lax", "inf-1795598703741-61d690c7"],
+    ["sin", "inf-1795598706926-6b8874f7"],
+    ["nrt", "inf-1795599027496-de8dd861"],
+  ])("keeps a %s buyer on the free host in its region (%s went to the EU)", (region) => {
+    const c = chooseByLatency([us(), eu()], US, POLICY, { clientRegion: region, portalRegion: "ord" });
+    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
+    expect(c.reason).toMatch(new RegExp(`hosts (lhr|fra) 1200 ms vs ${region} 1200 ms\\)$`));
+  });
+
+  it("keeps a London buyer on the London host (inf-1795600195510-5eb5428e went to US iad and timed out)", () => {
+    // As recorded: US median 437 ms, EU 863 ms (heavier calls had run there); the hosts are alike.
+    const c = chooseByLatency([us({ rttMs: 6, free: 10, serviceMs: 437 }), eu({ rttMs: 107, serviceMs: 863 })], US, POLICY, { clientRegion: "lhr", portalRegion: "ord" });
+    expect(c).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "locality" });
+  });
+
+  it("older coordinators (no freeHosts): the nearest free region and the model's median, without the averaged agent round trip", () => {
+    const old = (c: LatencyCandidate) => ({ ...c, freeHosts: undefined });
+    for (const [region, euRtt] of [["iad", 98], ["lax", 201]] as const) {
+      const c = chooseByLatency([old(us()), old(eu({ rttMs: euRtt }))], US, POLICY, { clientRegion: region });
+      expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
+    }
+  });
+
+  it("still moves when the far coordinator's host is clearly faster", () => {
+    // The sin host takes 3 s for the reference call (far from its coordinator, or slower): the EU's 1.2 s
+    // plus 98 ms and the sin <-> fra trip is faster by more than 15 %.
+    const c = chooseByLatency([us({ freeHosts: [...hosts(["iad", "lax"]), { region: "sin", free: 2, rttMs: 230, serviceMs: 3_000 }] }), eu()], US, POLICY, { clientRegion: "sin" });
+    expect(c).toMatchObject({ chosen: "coordinator-eu.example.com", rule: "latency" });
+    expect(c.reason).toMatch(/hosts (lhr|fra) 1200 ms vs sin 3000 ms$/);
+  });
+
+  it("a host without a reference time compares by round trips only", () => {
+    const c = chooseByLatency([us({ freeHosts: US_REGIONS.map((region) => ({ region, free: 2 })) }), eu()], US, POLICY, { clientRegion: "iad" });
+    expect(c).toMatchObject({ chosen: "coordinator.example.com", rule: "locality" });
+  });
+
+  it("calls sent but not yet in the report take the best hosts first", () => {
+    // Two iad calls already sent to the US: its iad host is taken, the next nearest is lax.
+    const c = chooseByLatency([us({ free: 12, sentFor: ["iad", "iad"] }), eu()], US, POLICY, { clientRegion: "iad" });
+    expect(c.chosen).toBe("coordinator.example.com");
+    expect(c.candidates[0].nearKm).toBeGreaterThan(3_000);
+    // Calls for syd and gru buyers took their own hosts: the iad host is still free for this one.
+    expect(chooseByLatency([us({ free: 12, sentFor: ["syd", "gru"] }), eu()], US, POLICY, { clientRegion: "iad" }).candidates[0].nearKm).toBe(0);
+  });
+
+  /** A directory over run 5's two coordinators; reports never show the calls sent (as in a burst). */
+  function run5Directory() {
+    let t = 2_000_000;
+    const model = (free: number, regions: string[], serviceMs: number) => ({ [M]: { agents: regions.length, idle: 0, free, waiting: 0, agentRttMs: 160, serviceMs, freeRegions: regions, freeHosts: hosts(regions) } });
+    const reports: Record<string, CapacityReport> = {
+      [US]: { reachable: true, rttMs: 5, agentModels: [M], modelLoad: model(14, US_REGIONS, 1_699), pickupP90Ms: 200, callP50Ms: 1_699 },
+      [EU]: { reachable: true, rttMs: 98, agentModels: [M], modelLoad: model(4, ["lhr", "fra"], 1_320), pickupP90Ms: 200, callP50Ms: 1_320 },
+    };
+    const probe = vi.fn(async (url: string) => reports[url]);
+    const dir = createChatCapacityDirectory({ candidates: async () => [US, EU], allowed: () => true, ttlMs: 15_000, now: () => t, probe, latency: POLICY, portalRegion: "ord" });
+    return { dir, probe, advance: (ms: number) => void (t += ms) };
+  }
+
+  it("a burst from iad, syd, lax and gru buyers stays on the US hosts near them (inf-1795598815059-ceb6d2f3 and others went to the EU's 4 slots)", async () => {
+    const { dir } = run5Directory();
+    const buyers = ["iad", "syd", "lax", "gru", "iad", "lax"];
+    const picks = await Promise.all(buyers.map((clientRegion) => dir.pick({ kind: "network", model: M }, [], { clientRegion })));
+    expect(picks.map((p) => p.url)).toEqual(buyers.map(() => US));
+    expect(picks.every((p) => p.choice?.rule === "locality")).toBe(true);
+  });
+
+  it("calls sent still count after the report is refreshed, until it can show them", async () => {
+    // Frankfurt buyers: the EU's 4 slots fill, then the next call goes to the US, though a report
+    // taken in between (before the coordinator shows the calls) still says 4 free.
+    const { dir, probe, advance } = run5Directory();
+    const pick = () => dir.pick({ kind: "network", model: M }, [], { clientRegion: "fra" });
+    expect((await pick()).url).toBe(EU);
+    advance(1_900);
+    for (let i = 0; i < 3; i++) expect((await pick()).url).toBe(EU);
+    const probes = probe.mock.calls.length;
+    advance(200); // the report is now 2.1 s old: asked again, still 4 free
+    const fifth = await pick();
+    expect(probe.mock.calls.length).toBeGreaterThan(probes);
+    // The 3 calls from 200 ms ago count (the one from 2.1 s ago is taken as shown): 1 EU slot left.
+    expect(fifth.url).toBe(EU);
+    expect(fifth.choice?.candidates.find((c) => c.coordinator === "coordinator-eu.example.com")?.free).toBe(1);
+    const sixth = await pick();
+    expect(sixth.url).toBe(US);
+    expect(sixth.choice?.candidates.find((c) => c.coordinator === "coordinator-eu.example.com")?.free).toBe(0);
+    // Once a report is taken SENT_REFLECT_MS after them, they no longer count.
+    advance(2_100);
+    expect((await pick()).choice?.candidates.find((c) => c.coordinator === "coordinator-eu.example.com")?.free).toBe(4);
   });
 });

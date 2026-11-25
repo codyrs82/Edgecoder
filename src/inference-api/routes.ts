@@ -25,6 +25,35 @@ export interface CompatRoutes<Ctx> {
   keepaliveMs?: number;
   /** Non-streamed replies: commit 200 and send whitespace keepalives once a call runs this long (off when unset). */
   wholeKeepalive?: WholeKeepalive;
+  /** Each chat request once it has ended (answered, failed, or the connection closed): for a per-call log line. */
+  onCallDone?: (ctx: Ctx, outcome: CallOutcome, req: FastifyRequest) => void;
+}
+
+/**
+ * How a chat request ended, for the per-call log line (hosted endpoint). No prompt or reply text,
+ * and no error message (it can quote the call): only its status, class and code.
+ */
+export interface CallOutcome {
+  format: Format;
+  stream: boolean;
+  /** The HTTP status sent (200 once a stream, or an early-committed non-streamed reply, started); 0: none sent. */
+  status: number;
+  /** Non-streamed: 200 was committed early and whitespace keepalives sent (wholeKeepalive). */
+  committedEarly: boolean;
+  elapsedMs: number;
+  /** When the backend's first piece (or its error) came; null when none came. */
+  firstPieceMs: number | null;
+  /**
+   * Who ended it: "server" (the reply or its error was sent and ended here), "client" (the connection
+   * closed before the reply ended: the client, or a proxy in between), "restart" (the server stopping).
+   */
+  closedBy: "server" | "client" | "restart";
+  /** When the connection closed under the reply ("client"), ms after the request started. */
+  closedAtMs?: number;
+  /** The backend failed: its status, error class and code. */
+  error?: { status: number; type: string; code?: string };
+  /** Bytes written after the head (keepalives included; a reply sent whole is not counted). */
+  bytes: number;
 }
 
 /**
@@ -179,8 +208,18 @@ export async function* untilDeadline(pieces: AsyncIterable<ChatPiece>): AsyncGen
 }
 
 /** Run a request on a backend and answer in the tool's format, streamed or whole. */
-export async function respondWith(req: FastifyRequest, reply: FastifyReply, format: Format, backend: ChatBackend, model: string, opts: { keepaliveMs?: number; wholeKeepalive?: WholeKeepalive | null } = {}) {
+export async function respondWith(req: FastifyRequest, reply: FastifyReply, format: Format, backend: ChatBackend, model: string, opts: { keepaliveMs?: number; wholeKeepalive?: WholeKeepalive | null; onDone?: (outcome: CallOutcome) => void } = {}) {
   const body = (req.body ?? {}) as { stream?: boolean };
+  const startedMs = Date.now();
+  let firstPieceMs: number | null = null;
+  let closedAtMs: number | undefined;
+  let restarted = false;
+  let failure: CallOutcome["error"];
+  let bytes = 0;
+  const noteFailure = (err: unknown) => {
+    const code = (err as { info?: { code?: unknown } } | null)?.info?.code;
+    failure = { status: statusOf(err), type: (err as Error | null)?.constructor?.name ?? typeof err, ...(typeof code === "string" ? { code: code.slice(0, 60) } : {}) };
+  };
   const chat = format === "anthropic" ? fromAnthropic(body as never) : fromOpenAi(body as never);
   const hints = routingHintsFrom(body, req.headers as Record<string, unknown>);
   if (Object.keys(hints).length) chat.hints = hints;
@@ -188,7 +227,10 @@ export async function respondWith(req: FastifyRequest, reply: FastifyReply, form
   // The client went away when the response closes before it ended (the request's own "close"
   // fires as soon as its body has been read, which aborted fast requests).
   reply.raw.on("close", () => {
-    if (!reply.raw.writableEnded) abort.abort();
+    if (!reply.raw.writableEnded) {
+      closedAtMs ??= Date.now() - startedMs;
+      abort.abort();
+    }
   });
   const iter = backend(chat, abort.signal);
   const keepaliveMs = Math.max(10, opts.keepaliveMs ?? STREAM_KEEPALIVE_MS);
@@ -200,6 +242,7 @@ export async function respondWith(req: FastifyRequest, reply: FastifyReply, form
   const write = (chunk: string) => {
     if (finished || reply.raw.writableEnded || reply.raw.destroyed) return;
     lastWriteMs = Date.now();
+    bytes += Buffer.byteLength(chunk);
     reply.raw.write(chunk);
   };
   const end = () => {
@@ -257,6 +300,7 @@ export async function respondWith(req: FastifyRequest, reply: FastifyReply, form
     stop: () => {
       openRequests.delete(open);
       if (finished) return;
+      restarted = true;
       if (whole) {
         endWhole(wholeError(format, 503, RESTARTING_MESSAGE, "server_restarting"));
       } else if (streaming) {
@@ -276,7 +320,10 @@ export async function respondWith(req: FastifyRequest, reply: FastifyReply, form
     let first: IteratorResult<ChatPiece>;
     try {
       first = await iter.next();
+      firstPieceMs = Date.now() - startedMs;
     } catch (err) {
+      firstPieceMs = Date.now() - startedMs;
+      noteFailure(err);
       if (finished) return reply;
       if (whole) return endWhole(wholeError(format, statusOf(err), (err as Error).message));
       if (!streaming) {
@@ -301,6 +348,7 @@ export async function respondWith(req: FastifyRequest, reply: FastifyReply, form
       try {
         answer = format === "anthropic" ? await anthropicResponse(untilDeadline(all()), model) : await openAiResponse(untilDeadline(all()), model);
       } catch (err) {
+        noteFailure(err);
         if (finished) return reply;
         if (whole) return endWhole(wholeError(format, statusOf(err), (err as Error).message));
         stopWhole();
@@ -320,6 +368,7 @@ export async function respondWith(req: FastifyRequest, reply: FastifyReply, form
         write(line);
       }
     } catch (err) {
+      noteFailure(err);
       write(streamError(format, statusOf(err), (err as Error).message));
     }
     end();
@@ -328,6 +377,24 @@ export async function respondWith(req: FastifyRequest, reply: FastifyReply, form
     openRequests.delete(open);
     if (keepalive) clearInterval(keepalive);
     stopWhole();
+    if (opts.onDone) {
+      try {
+        opts.onDone({
+          format,
+          stream: Boolean(body.stream),
+          status: reply.raw.headersSent ? reply.raw.statusCode : finished || streaming || whole ? reply.statusCode : 0,
+          committedEarly: whole,
+          elapsedMs: Date.now() - startedMs,
+          firstPieceMs,
+          closedBy: restarted ? "restart" : closedAtMs !== undefined ? "client" : "server",
+          ...(closedAtMs !== undefined ? { closedAtMs } : {}),
+          ...(failure ? { error: failure } : {}),
+          bytes,
+        });
+      } catch {
+        // A log line never breaks a reply.
+      }
+    }
   }
 }
 
@@ -354,7 +421,8 @@ export function registerCompatRoutes<Ctx>(app: FastifyInstance, opts: CompatRout
     if (!Array.isArray(body.messages) || body.messages.length === 0) return sendError(reply, format, 400, "messages is required");
     const resolved = await opts.resolve(ctx, body.model);
     if ("error" in resolved) return sendError(reply, format, resolved.status, resolved.error);
-    return respondWith(req, reply, format, resolved.backend, resolved.model, { keepaliveMs: opts.keepaliveMs, wholeKeepalive: opts.wholeKeepalive });
+    const onCallDone = opts.onCallDone;
+    return respondWith(req, reply, format, resolved.backend, resolved.model, { keepaliveMs: opts.keepaliveMs, wholeKeepalive: opts.wholeKeepalive, ...(onCallDone ? { onDone: (o: CallOutcome) => onCallDone(ctx, o, req) } : {}) });
   };
 
   if (formats.openai !== false) app.post(`${prefix}/v1/chat/completions`, { bodyLimit: 16 * 1024 * 1024 }, (req, reply) => run(req, reply, "openai"));

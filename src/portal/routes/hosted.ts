@@ -13,7 +13,7 @@
  */
 
 import { createChatCapacityDirectory, type ChatCapacityDirectory, type ChatNeed } from "../chat-capacity.js";
-import { clientRegionOf, type CoordinatorChoice } from "../../common/coordinator-choice.js";
+import { clientRegionOf, coordinatorHost, type CoordinatorChoice } from "../../common/coordinator-choice.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { SecondFactorGate } from "./account-security.js";
@@ -28,10 +28,11 @@ import {
   NETWORK_PREFIX,
   parseNetworkModel,
   type NetworkDeps,
+  type Transport,
 } from "../../apps/ide/network-inference.js";
 import { autoBackend, coordinatorAutoBackend, drainFailoverBackend, networkBackend, redirectingNetworkBackend, type CoordinatorDraining } from "../../inference-api/backends.js";
 import { AUTO_MODEL_ID, isUnpinnedModel, planRoutes, routeInputsFrom, sizeWorkload } from "../../inference-api/auto-route.js";
-import { apiKeyOf, registerCompatRoutes, wholeKeepaliveFromEnv, type WholeKeepalive } from "../../inference-api/routes.js";
+import { apiKeyOf, registerCompatRoutes, wholeKeepaliveFromEnv, type CallOutcome, type WholeKeepalive } from "../../inference-api/routes.js";
 import type { PortalStore } from "../store.js";
 import { withInvoiceQr } from "../invoice-qr.js";
 import { registerAgentRoutes } from "./agents.js";
@@ -59,6 +60,71 @@ export interface HostedRoutesDeps {
   wholeKeepalive?: WholeKeepalive | null;
 }
 
+/**
+ * What the portal saw of one hosted call upstream, for its log line (hosted_call): the task ids it
+ * submitted, the coordinators, and the last status and error code of each kind of request. No prompt
+ * or reply text, no error message (an agent's can quote the call), no credential.
+ */
+export interface CallTrace {
+  taskIds: string[];
+  coordinators: string[];
+  submitStatus?: number;
+  /** The coordinator's error code when the submit was refused. */
+  submitError?: string;
+  /** Stream reads (long polls) made, and the last one's status. */
+  reads: number;
+  streamStatus?: number;
+  /** The coordinator's error code when a read was refused. */
+  streamError?: string;
+  /** The coordinator said the reply was done, and whether it ended with an error. */
+  done: boolean;
+  doneWithError?: boolean;
+  /** The portal asked the coordinator to cancel it (the reader went away before the reply ended). */
+  cancelled: boolean;
+  /** A request to the coordinator that failed in the portal (the connection, a timeout): path and error code. */
+  upstreamError?: string;
+}
+
+export const newCallTrace = (): CallTrace => ({ taskIds: [], coordinators: [], reads: 0, done: false, cancelled: false });
+
+/** `d` with its coordinator requests noted in `trace`. */
+export function tracedNetworkDeps(d: NetworkDeps, trace: CallTrace, url?: string): NetworkDeps {
+  const inner = d.transport;
+  if (!inner) return d;
+  const transport: Transport = async (method, path, body, signal) => {
+    const code = (v: unknown) => (typeof v === "string" ? v.slice(0, 60) : undefined);
+    if (path === "/inference/submit") {
+      const taskId = code((body as { taskId?: unknown } | undefined)?.taskId);
+      if (taskId && !trace.taskIds.includes(taskId) && trace.taskIds.length < 4) trace.taskIds.push(taskId);
+      const where = url ? coordinatorHost(url) : "default";
+      if (!trace.coordinators.includes(where) && trace.coordinators.length < 4) trace.coordinators.push(where);
+    }
+    try {
+      const r = await inner(method, path, body, signal);
+      if (path === "/inference/submit") {
+        trace.submitStatus = r.status;
+        trace.submitError = r.status === 200 ? undefined : code(r.json.error);
+      } else if (path === "/inference/stream") {
+        trace.reads++;
+        trace.streamStatus = r.status;
+        if (r.status !== 200) trace.streamError = code(r.json.error);
+        if (r.json.done === true) {
+          trace.done = true;
+          trace.doneWithError = Boolean(r.json.error);
+        }
+      } else if (path === "/inference/cancel") {
+        trace.cancelled = true;
+      }
+      return r;
+    } catch (err) {
+      const e = err as { code?: unknown; name?: unknown } | null;
+      trace.upstreamError = `${path} ${code(e?.code) ?? code(e?.name) ?? "error"}`;
+      throw err;
+    }
+  };
+  return { ...d, transport };
+}
+
 /** Where a hosted request runs, from the model the tool named: network/<m>[@class] (or a bare model), mine/<m>, reserved/<lease>/<m>. */
 export function hostedTarget(model: string | undefined) {
   if (!model) return null;
@@ -68,7 +134,8 @@ export function hostedTarget(model: string | undefined) {
 export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDeps): void {
   const { store } = deps;
 
-  const networkFor = (accountId: string): NetworkDeps => portalNetworkDeps(deps, accountId);
+  const networkForAccount = (accountId: string): NetworkDeps => portalNetworkDeps(deps, accountId);
+  const networkFor = networkForAccount;
   const capacity: ChatCapacityDirectory =
     deps.chatCapacity ?? createChatCapacityDirectory({ candidates: deps.discoverCoordinatorUrlsForPortal, allowed: () => true, serviceToken: deps.PORTAL_SERVICE_TOKEN });
   /**
@@ -76,7 +143,8 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
    * (chat-capacity.ts); inference runs where it is submitted, so this is what spreads API traffic
    * across seeds. Calls on your own machines or a lease stay with the default coordinator.
    */
-  const pinnedDeps = (url: string, accountId: string) => portalNetworkDeps({ PORTAL_SERVICE_TOKEN: deps.PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, accountId);
+  const pinnedDepsFor = (url: string, accountId: string) => portalNetworkDeps({ PORTAL_SERVICE_TOKEN: deps.PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: async () => [url] }, accountId);
+  const pinnedDeps = pinnedDepsFor;
   const networkForCall = async (
     accountId: string,
     target: { model: string; computeClass?: string; target?: "mine"; reservationId?: string },
@@ -124,7 +192,7 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
     const key = apiKeyOf(req);
     if (!store || !key.startsWith(API_KEY_PREFIX)) return null;
     const userId = await store.userForApiKeyHash(hashApiKey(key));
-    return userId ? { accountId: `acct-${userId}`, clientRegion: clientRegionOf(req.headers as Record<string, unknown>) } : null;
+    return userId ? { accountId: `acct-${userId}`, clientRegion: clientRegionOf(req.headers as Record<string, unknown>), trace: newCallTrace() } : null;
   };
 
   // ── The endpoint ──
@@ -138,6 +206,9 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
       return [AUTO_MODEL_ID, ...all.flatMap((m) => [`${NETWORK_PREFIX}${m.model}`, ...m.classes.map((c) => `${NETWORK_PREFIX}${m.model}@${c}`)])];
     },
     resolve: async (ctx, model) => {
+      // Every coordinator request this call makes is noted for its log line (onCallDone).
+      const networkFor = (accountId: string) => tracedNetworkDeps(networkForAccount(accountId), ctx.trace);
+      const pinnedDeps = (url: string, accountId: string) => tracedNetworkDeps(pinnedDepsFor(url, accountId), ctx.trace, url);
       // "auto" (also no model, or "default"): the cheapest place that fits each request: a reservation
       // you hold, your own machines (free), then the network's best fit (the coordinator picks).
       if (isUnpinnedModel(model)) {
@@ -196,7 +267,8 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
       }
       const target = hostedTarget(model);
       if (!target) return { status: 400, error: "Unknown model. Leave it out (or auto) for the cheapest place that fits, or name one: network/<model>[@cpu|apple|gpu|gpu.dc|cloud], mine/<model> or reserved/<reservation>/<model>. GET /v1/models lists them." };
-      const placed = await networkForCall(ctx.accountId, target, ctx.clientRegion);
+      const placedFor = await networkForCall(ctx.accountId, target, ctx.clientRegion);
+      const placed = { ...placedFor, deps: tracedNetworkDeps(placedFor.deps, ctx.trace, placedFor.url) };
       const region = ctx.clientRegion ? { clientRegion: ctx.clientRegion } : {};
       // #526: a named network call on a chosen coordinator may be sent on to a peer with a free slot for it (once).
       // A plain network call refused by a coordinator restarting for an update (nothing reserved, nothing
@@ -233,6 +305,14 @@ export function registerHostedRoutes(app: FastifyInstance, deps: HostedRoutesDep
     },
     // Long `stream: false` calls: commit 200 and send whitespace before Cloudflare's 100 s cut (524).
     wholeKeepalive: (deps.wholeKeepalive === undefined ? wholeKeepaliveFromEnv() : deps.wholeKeepalive) ?? undefined,
+    // One line per chat call: task id, coordinator, upstream statuses, timing and who closed it
+    // (run 5: a connection cut at 50 s could not be explained once the logs had rotated).
+    onCallDone: (ctx, outcome, req) => {
+      const model = String((req.body as { model?: unknown } | undefined)?.model ?? "auto").slice(0, 120);
+      const line = { accountId: ctx.accountId, model, clientRegion: ctx.clientRegion, ...outcome, upstream: ctx.trace };
+      if (outcome.closedBy !== "server" || outcome.error || ctx.trace.upstreamError) req.log.warn({ hostedCall: line }, "hosted_call");
+      else req.log.info({ hostedCall: line }, "hosted_call");
+    },
   });
 
   // ── The account behind a key (agents, scripts): balance, usage, top-up, reservations ──
