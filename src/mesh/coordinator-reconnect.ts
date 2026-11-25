@@ -75,9 +75,80 @@ export function createCoordinatorReconnectFrame(input: {
   return { type: COORDINATOR_RECONNECT_FRAME_TYPE, command, signature: signPayload(signingPayload(command), input.privateKeyPem) };
 }
 
+/**
+ * The drain notice: sent by a coordinator to each connected agent the moment its drain starts (not
+ * at the end, as the reconnect frame is). It says "serve through a peer meanwhile": the agent
+ * registers with another coordinator at once for new work, finishes the claims it holds here, and
+ * comes home once the restarted instance answers (src/mesh/drain-failover.ts). It is signed like
+ * the reconnect frame, names one agent, and may name a peer coordinator (a hint only: the agent
+ * still proves that coordinator's key before it sends it anything). Agents without this change
+ * ignore the type and still get the reconnect frame at the end.
+ */
+export const COORDINATOR_DRAIN_NOTICE_FRAME_TYPE = "coordinator_drain_notice";
+
+export interface CoordinatorDrainNoticeCommand {
+  v: typeof VERSION;
+  id: string;
+  agentId: string;
+  coordinatorId: string;
+  issuedAtMs: number;
+  expiresAtMs: number;
+  /** A peer coordinator's URL ("" when none is known). */
+  peerUrl: string;
+}
+
+export interface CoordinatorDrainNoticeFrame {
+  type: typeof COORDINATOR_DRAIN_NOTICE_FRAME_TYPE;
+  command: CoordinatorDrainNoticeCommand;
+  signature: string;
+}
+
+const noticeSigningPayload = (c: CoordinatorDrainNoticeCommand) =>
+  `edgecoder-coordinator-drain-notice-v1\n${[c.v, c.id, c.agentId, c.coordinatorId, c.issuedAtMs, c.expiresAtMs, c.peerUrl].join("\n")}`;
+
+export function createCoordinatorDrainNoticeFrame(input: { agentId: string; coordinatorId: string; privateKeyPem: string; peerUrl?: string | null; nowMs?: number }): CoordinatorDrainNoticeFrame {
+  const issuedAtMs = input.nowMs ?? Date.now();
+  const command: CoordinatorDrainNoticeCommand = {
+    v: VERSION,
+    id: randomUUID(),
+    agentId: input.agentId,
+    coordinatorId: input.coordinatorId,
+    issuedAtMs,
+    expiresAtMs: issuedAtMs + RECONNECT_FRAME_LIFETIME_MS,
+    peerUrl: (input.peerUrl ?? "").slice(0, 300)
+  };
+  return { type: COORDINATOR_DRAIN_NOTICE_FRAME_TYPE, command, signature: signPayload(noticeSigningPayload(command), input.privateKeyPem) };
+}
+
+export function verifyCoordinatorDrainNoticeFrame(
+  frame: unknown,
+  ctx: { agentId: string; coordinator: { peerId: string; publicKeyPem: string } | null; nowMs?: number }
+): { ok: true; command: CoordinatorDrainNoticeCommand } | { ok: false; reason: ReconnectFailure } {
+  const f = frame as Partial<CoordinatorDrainNoticeFrame> | null;
+  if (!f || typeof f !== "object" || f.type !== COORDINATOR_DRAIN_NOTICE_FRAME_TYPE || typeof f.signature !== "string") return { ok: false, reason: "malformed" };
+  const c = f.command as Partial<CoordinatorDrainNoticeCommand> | undefined;
+  if (
+    !c || typeof c !== "object" || c.v !== VERSION || typeof c.id !== "string" || c.id.length > 64 || typeof c.agentId !== "string" ||
+    typeof c.coordinatorId !== "string" || typeof c.peerUrl !== "string" || c.peerUrl.length > 300 || !isInt(c.issuedAtMs) || !isInt(c.expiresAtMs)
+  ) {
+    return { ok: false, reason: "malformed" };
+  }
+  const command = c as CoordinatorDrainNoticeCommand;
+  if (!ctx.coordinator) return { ok: false, reason: "no_verified_coordinator" };
+  if (command.coordinatorId !== ctx.coordinator.peerId) return { ok: false, reason: "wrong_coordinator" };
+  if (!verifyPayload(noticeSigningPayload(command), f.signature, ctx.coordinator.publicKeyPem)) return { ok: false, reason: "invalid_signature" };
+  if (command.agentId !== ctx.agentId) return { ok: false, reason: "wrong_agent" };
+  const now = ctx.nowMs ?? Date.now();
+  if (command.issuedAtMs > now + MAX_FUTURE_SKEW_MS) return { ok: false, reason: "from_future" };
+  if (now > command.expiresAtMs || command.expiresAtMs - command.issuedAtMs > RECONNECT_FRAME_LIFETIME_MS) return { ok: false, reason: "expired" };
+  return { ok: true, command };
+}
+
+type ReconnectFailure = "malformed" | "no_verified_coordinator" | "wrong_coordinator" | "invalid_signature" | "wrong_agent" | "expired" | "from_future";
+
 export type ReconnectVerdict =
   | { ok: true; command: CoordinatorReconnectCommand }
-  | { ok: false; reason: "malformed" | "no_verified_coordinator" | "wrong_coordinator" | "invalid_signature" | "wrong_agent" | "expired" | "from_future" };
+  | { ok: false; reason: ReconnectFailure };
 
 const isInt = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 0;
 
@@ -137,6 +208,15 @@ export class CoordinatorReconnectState {
     return this.pendingSinceMs !== null;
   }
 
+  /**
+   * The agent is serving through a peer coordinator for the drain (drain-failover.ts): the wait was
+   * for registering with the restarted home, so it does not hold the registration with the peer.
+   */
+  clear(): void {
+    this.pendingSinceMs = null;
+    this.registerAtMs = 0;
+  }
+
   /** The agent registered: the WebSocket may open now (a registration before the wait was up does not count). */
   registered(nowMs = Date.now()): void {
     if (nowMs >= this.registerAtMs) this.pendingSinceMs = null;
@@ -187,16 +267,33 @@ export function isRestartTransientError(error: unknown): boolean {
 
 export class CoordinatorRestartWindow {
   private openedAtMs: number | null = null;
+  private planned = false;
   constructor(private readonly random: () => number = Math.random) {}
 
-  /** Start (or keep) the window; a second signal during the same restart does not extend it. */
-  open(nowMs = Date.now()): void {
-    if (!this.active(nowMs)) this.openedAtMs = nowMs;
+  /**
+   * Start (or keep) the window; a second signal during the same restart does not extend it.
+   * `planned`: the coordinator said it is stopping (a drain notice, a reconnect frame, a 1012 close,
+   * a `coordinator_draining` refusal), so the agent may serve through a peer at once (mayFailOver).
+   * A planned signal upgrades an open window; nothing downgrades one.
+   */
+  open(nowMs = Date.now(), planned = false): void {
+    if (!this.active(nowMs)) {
+      this.openedAtMs = nowMs;
+      this.planned = planned;
+    } else if (planned) {
+      this.planned = true;
+    }
   }
 
   /** The agent registered with a coordinator again. */
   close(): void {
     this.openedAtMs = null;
+    this.planned = false;
+  }
+
+  /** The window was opened (or upgraded) by a planned drain signal. */
+  isPlanned(nowMs = Date.now()): boolean {
+    return this.active(nowMs) && this.planned;
   }
 
   active(nowMs = Date.now()): boolean {
@@ -210,9 +307,15 @@ export class CoordinatorRestartWindow {
     return RESTART_RETRY_MS + Math.floor(this.random() * RESTART_RETRY_JITTER_MS);
   }
 
-  /** True once the home coordinator has had RESTART_FAILOVER_AFTER_MS to come back. */
+  /**
+   * True at once for a planned drain (the agent serves through a peer meanwhile and comes home
+   * afterwards, drain-failover.ts); otherwise once the home coordinator has had
+   * RESTART_FAILOVER_AFTER_MS to come back, so a blip does not bounce agents between coordinators.
+   */
   mayFailOver(nowMs = Date.now()): boolean {
-    return this.openedAtMs === null || nowMs - this.openedAtMs >= RESTART_FAILOVER_AFTER_MS;
+    if (this.openedAtMs === null) return true;
+    if (this.isPlanned(nowMs)) return true;
+    return nowMs - this.openedAtMs >= RESTART_FAILOVER_AFTER_MS;
   }
 }
 

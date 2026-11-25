@@ -6,6 +6,11 @@
  * in memory (connected agents, relay snapshots, sockets), so a hard stop used to cut running jobs
  * and leave every agent looking offline until it noticed. Now it drains:
  *
+ *  0. Tells every connected agent at once with a signed drain notice (coordinator-reconnect.ts): an
+ *     agent with that support registers with a peer coordinator for new work right away, finishes
+ *     the claims it holds here (their leases, chunks and results still come here), and returns once
+ *     the restarted instance answers (src/mesh/drain-failover.ts). Calls nobody has claimed are
+ *     handed back at once (refunded, the requester told to use the peer), not after the wait.
  *  1. Stops taking new work. New jobs (/submit, /inference/submit, /portal/chat, /escalate) get a
  *     retryable 503 `coordinator_draining` (with a peer coordinator's URL when one is known, and
  *     nothing charged); /pull answers "no work, draining"; /register is refused so an agent
@@ -57,6 +62,13 @@ export interface DrainRunDeps {
   sockets(): DrainSocket[];
   /** The signed reconnect frame for one agent. */
   frameFor(agentId: string): string;
+  /** The signed drain notice for one agent, sent as the drain starts (omit: none is sent). */
+  noticeFor?(agentId: string): string;
+  /**
+   * Runs as the drain starts, before the wait: hand back calls nobody has claimed (they can never
+   * be claimed here now), so their requesters go to a peer at once rather than after the wait.
+   */
+  onStart?(): Promise<number>;
   /** Close the HTTP server (bounded by the caller). */
   close(): Promise<void>;
   exit(code: number): void;
@@ -71,6 +83,10 @@ export interface DrainRunDeps {
 
 export interface DrainReport {
   idle: boolean;
+  /** Drain notices sent as the drain started. */
+  noticeSent: number;
+  /** Unclaimed calls handed back as the drain started. */
+  handedBack: number;
   waitedMs: number;
   settled: number;
   reconnectSent: number;
@@ -107,7 +123,9 @@ export class CoordinatorDrain {
       return { status: 503, body: { error: "coordinator_draining", retryable: true, retryAfterMs: DRAIN_RETRY_AFTER_MS, ...(peer ? { coordinatorUrl: peer } : {}) }, retryAfterSec };
     }
     if (method === "POST" && path === "/pull") {
-      return { status: 200, body: { subtask: null, draining: true, retryAfterMs: DRAIN_RETRY_AFTER_MS }, retryAfterSec };
+      // Names a peer, so an agent can serve through it while this instance restarts (drain-failover.ts).
+      const peer = this.peerUrl();
+      return { status: 200, body: { subtask: null, draining: true, retryAfterMs: DRAIN_RETRY_AFTER_MS, ...(peer ? { coordinatorUrl: peer } : {}) }, retryAfterSec };
     }
     if (method === "POST" && (NEW_WORK_ROUTES.has(path) || path === "/register")) {
       const peer = path === "/register" ? null : this.peerUrl();
@@ -154,6 +172,28 @@ export class CoordinatorDrain {
       return { ...b, openRequests: this.open };
     };
     d.log.warn({ drainMs: d.drainMs, ...busyNow() }, "coordinator_draining");
+    // Tell the agents now: they serve through a peer while this instance finishes and restarts.
+    let noticeSent = 0;
+    if (d.noticeFor) {
+      for (const s of d.sockets()) {
+        if (!s.agent) continue;
+        try {
+          s.send(d.noticeFor(s.peerId));
+          noticeSent++;
+        } catch {
+          // closed under us
+        }
+      }
+    }
+    let handedBack = 0;
+    if (d.onStart) {
+      try {
+        handedBack = await d.onStart();
+      } catch (err) {
+        d.log.warn({ err: String(err) }, "coordinator_drain_start_failed");
+      }
+    }
+    if (noticeSent > 0 || handedBack > 0) d.log.warn({ noticeSent, handedBack }, "coordinator_drain_started");
     let idle = false;
     for (;;) {
       const b = busyNow();
@@ -191,7 +231,7 @@ export class CoordinatorDrain {
         /* already closed */
       }
     }
-    const report: DrainReport = { idle, waitedMs: now() - started, settled, reconnectSent, socketsClosed };
+    const report: DrainReport = { idle, noticeSent, handedBack, waitedMs: now() - started, settled, reconnectSent, socketsClosed };
     d.log.warn({ ...report, left: busyNow() }, "coordinator_drained");
     await Promise.race([d.close().catch(() => undefined), sleep(d.closeWaitMs ?? 3_000)]);
     d.exit(0);

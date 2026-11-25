@@ -3,7 +3,7 @@
 
 import { request as undiciRequest } from "undici";
 import type { ActiveCoordinator } from "./active-coordinator.js";
-import { AGENT_NONCE_HEADER, newAgentNonce, type ResponseVerifier } from "../trust/response-signing.js";
+import { AGENT_NONCE_HEADER, newAgentNonce, type ResponseVerifier, type VerifiedCoordinator } from "../trust/response-signing.js";
 
 /*
  * The one path the worker uses to talk to its coordinator (register, heartbeat, pull, results,
@@ -53,13 +53,31 @@ export interface CoordinatorCall {
   timeoutMs?: number;
 }
 
+/**
+ * A coordinator a claim is pinned to: the URL and key proven when the claim was pulled. Its lease
+ * renewals, chunks and result go there even after the agent moved to another coordinator for new
+ * work (a planned drain, src/mesh/drain-failover.ts): the issuing coordinator holds the claim, its
+ * lease and its billing.
+ */
+export interface CoordinatorTarget {
+  url: string;
+  identity: VerifiedCoordinator;
+}
+
 export function createCoordinatorClient(opts: CoordinatorClientOptions) {
   const doRequest: RequestFn = opts.request ?? (undiciRequest as unknown as RequestFn);
   const warned = new Set<string>();
 
-  async function call(c: CoordinatorCall): Promise<VerifiedResponse> {
+  /**
+   * `target`: send to the coordinator a claim was pinned to. While that is still the active, verified
+   * coordinator the active (freshly verified) identity is used, as for any call; otherwise (the agent
+   * moved, or is re-verifying) the key proven when the claim was pulled. A refused response from a pinned coordinator that is no
+   * longer the active one does not invalidate the active one.
+   */
+  async function call(c: CoordinatorCall, target?: CoordinatorTarget | null): Promise<VerifiedResponse> {
     // Never send agent credentials to a coordinator that has not proven its key.
-    const { url, identity } = opts.coordinator.requireVerifiedIdentity();
+    const pinned = target && (target.url !== opts.coordinator.url || !opts.coordinator.isVerified()) ? target : null;
+    const { url, identity } = pinned ?? opts.coordinator.requireVerifiedIdentity();
     const nonce = newAgentNonce();
     const headers: Record<string, string> = { ...(c.headers ?? {}), [AGENT_NONCE_HEADER]: nonce };
     const res = await doRequest(`${url}${c.path}`, {
@@ -77,8 +95,12 @@ export function createCoordinatorClient(opts: CoordinatorClientOptions) {
     );
     if (!decision.accept) {
       const err = new CoordinatorResponseRejectedError(decision.error, c.method, c.path);
-      opts.coordinator.invalidate();
-      opts.onRejected?.(err);
+      if (!pinned) {
+        opts.coordinator.invalidate();
+        opts.onRejected?.(err);
+      } else {
+        opts.warn?.(`refused a response from ${pinned.url} (${decision.error}) for ${c.method} ${c.path}`);
+      }
       throw err;
     }
     if (!decision.signed && !warned.has(identity.peerId)) {

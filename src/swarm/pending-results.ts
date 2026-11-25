@@ -16,6 +16,31 @@ export function isPermanentResultRefusal(error: unknown): boolean {
   return !!e && e.statusCode === 409 && typeof e.message === "string" && e.message.includes("lease_expired");
 }
 
+/**
+ * A buffered result remembers the coordinator that issued its claim (drain-failover.ts: an agent
+ * serving through a peer during a planned drain still owes its earlier claims' results to the home
+ * coordinator, which holds their leases and billing). Rows written before this change are the bare
+ * payload and go to the active coordinator, as before.
+ */
+const ISSUER_WRAP = "edgecoderPendingResult";
+
+export function encodePendingResult(payload: unknown, issuerUrl?: string | null): string {
+  return JSON.stringify(issuerUrl ? { [ISSUER_WRAP]: 1, issuerUrl, payload } : payload);
+}
+
+export function decodePendingResult(parsed: unknown): { payload: unknown; issuerUrl?: string } {
+  const w = parsed as Record<string, unknown> | null;
+  if (w && typeof w === "object" && w[ISSUER_WRAP] === 1 && typeof w.issuerUrl === "string" && "payload" in w) return { payload: w.payload, issuerUrl: w.issuerUrl };
+  return { payload: parsed };
+}
+
+/** Thrown by a flush's post when the result's coordinator cannot be reached from here yet: kept, skipped, no attempt counted. */
+export class ResultNotRoutableYetError extends Error {
+  constructor(issuerUrl: string) {
+    super(`result_not_routable_yet: ${issuerUrl}`);
+  }
+}
+
 export interface PendingResultStore {
   listPendingResults(limit?: number): Array<{ subtaskId: string; payload: string; attempts: number }>;
   markResultSynced(subtaskId: string): void;
@@ -25,6 +50,8 @@ export interface PendingResultStore {
 export interface FlushOutcome {
   flushed: string[];
   dropped: string[];
+  /** Kept for later: owed to a coordinator the agent cannot reach right now. */
+  skipped?: string[];
   /** The result the flush stopped at (a failure worth retrying later), if any. */
   stoppedAt?: string;
 }
@@ -36,7 +63,7 @@ export interface FlushOutcome {
  */
 export async function flushPendingResultBuffer(
   store: PendingResultStore,
-  post: (payload: unknown) => Promise<unknown>,
+  post: (payload: unknown, issuerUrl?: string) => Promise<unknown>,
   log: { info: (msg: string) => void; warn: (msg: string) => void },
   limit = 20
 ): Promise<FlushOutcome> {
@@ -46,8 +73,9 @@ export async function flushPendingResultBuffer(
   log.info(`flushing ${pending.length} buffered result(s)`);
   for (const row of pending) {
     let payload: unknown;
+    let issuerUrl: string | undefined;
     try {
-      payload = JSON.parse(row.payload);
+      ({ payload, issuerUrl } = decodePendingResult(JSON.parse(row.payload)));
     } catch {
       store.markResultSynced(row.subtaskId);
       outcome.dropped.push(row.subtaskId);
@@ -55,11 +83,16 @@ export async function flushPendingResultBuffer(
       continue;
     }
     try {
-      await post(payload);
+      await post(payload, issuerUrl);
       store.markResultSynced(row.subtaskId);
       outcome.flushed.push(row.subtaskId);
       log.info(`flushed result: ${row.subtaskId}`);
     } catch (error) {
+      // Its coordinator is not reachable from here yet (the agent is away from it): later.
+      if (error instanceof ResultNotRoutableYetError) {
+        (outcome.skipped ??= []).push(row.subtaskId);
+        continue;
+      }
       if (isPermanentResultRefusal(error)) {
         store.markResultSynced(row.subtaskId);
         outcome.dropped.push(row.subtaskId);

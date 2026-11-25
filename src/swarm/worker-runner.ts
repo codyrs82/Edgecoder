@@ -27,7 +27,7 @@ import { runInferenceSubtask } from "./inference-runner.js";
 import { warmOllamaModel } from "../inference-api/ollama.js";
 import { detectHardware, gpuNeedsOffloadProof, hardwareProfileFor, selectGpu, selectGpuPool, type Probe } from "../install/hardware.js";
 import { claimedProfile, decideGpuClaim, type GpuClaimDecision } from "./gpu-claim.js";
-import { flushPendingResultBuffer, isPermanentResultRefusal } from "./pending-results.js";
+import { encodePendingResult, flushPendingResultBuffer, isPermanentResultRefusal, ResultNotRoutableYetError } from "./pending-results.js";
 import { enforceSandboxPolicy, inferenceOnlyRejection, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
 import { portalLabel, enrollmentBackoffMs, enrollmentRefusalFromError, enrollmentRefusalKey, enrollmentRefusalMessage, isAgentNotRegisteredError, isNotRegisteredWsClose, MESH_WS_REBIND_CLOSE_CODE, QuickReregisterGate, parseRetryAfterMs, rateLimitWaitMs, registeredLogLine, registerRefreshMsFromEnv, shouldLogEnrollmentRefusal, shouldRegister, type RegisterReply } from "./registration-policy.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
@@ -36,7 +36,7 @@ import { hashResultOutput, signReceiptAsAgent } from "../receipts/receipt.js";
 import { withNetworkTrustDefaults } from "../trust/seed-keys.js";
 import { CoordinatorTrustGate, PinnedKeyStore, challengePolicyFromEnv, describeTrustFailure, DEFAULT_TRUST_REVERIFY_MS } from "../trust/pinned-keys.js";
 import { ActiveCoordinator, meshWsUrl } from "./active-coordinator.js";
-import { createCoordinatorClient, CoordinatorResponseRejectedError } from "./coordinator-client.js";
+import { createCoordinatorClient, CoordinatorResponseRejectedError, type CoordinatorTarget } from "./coordinator-client.js";
 import { ResponseVerifier, responseSigningPolicyFromEnv } from "../trust/response-signing.js";
 import { checkSnapshotPolicy, envelopeResultPayload, parseSnapshotEnforcement } from "./execution-policy.js";
 import { DIRECT_WORK_MARKET_HINT, isOwnAccountCall, workerAcceptsDirectWorkOffer } from "./direct-work-policy.js";
@@ -78,7 +78,8 @@ import { ModelControlAgent, type CurrentModelSettings } from "../model/remote-co
 import { createOllamaAdmin, diskSpace, ollamaModelsDir, registryModelSize } from "../model/remote-control/ollama-admin.js";
 import { remoteControlEnabled, resolveAllowlist } from "../model/remote-control/policy.js";
 import { MODEL_CONTROL_FRAME_TYPE } from "../model/remote-control/protocol.js";
-import { COORDINATOR_RECONNECT_FRAME_TYPE, CoordinatorReconnectState, CoordinatorRestartWindow, RESTART_REQUEST_TIMEOUT_MS, isDrainingError, isRestartTransientError, isRestartClose, nextMeshWsDelay, verifyCoordinatorReconnectFrame } from "../mesh/coordinator-reconnect.js";
+import { COORDINATOR_DRAIN_NOTICE_FRAME_TYPE, COORDINATOR_RECONNECT_FRAME_TYPE, CoordinatorReconnectState, CoordinatorRestartWindow, RESTART_REQUEST_TIMEOUT_MS, isDrainingError, isRestartTransientError, isRestartClose, nextMeshWsDelay, verifyCoordinatorDrainNoticeFrame, verifyCoordinatorReconnectFrame } from "../mesh/coordinator-reconnect.js";
+import { DrainFailover, homeProbeState } from "../mesh/drain-failover.js";
 import { BOT_CONTROL_FRAME_TYPE, botRelayMode } from "../common/bot-relay.js";
 import { BotRelayAgent, httpProviderClient } from "./bot-relay-agent.js";
 import { CODE_CONTROL_FRAME_TYPE, codeRelayMode } from "../common/code-relay.js";
@@ -1196,11 +1197,12 @@ const LEASE_HEARTBEAT_MS = Math.max(1_000, W.LEASE_HEARTBEAT_MS || 15_000);
  * Only wired around claims pulled from this coordinator: mesh-gossip tasks are
  * leased by their origin coordinator, and peer-direct/offline runs hold no lease.
  */
-function startLeaseHeartbeat(): () => void {
+function startLeaseHeartbeat(issuer: CoordinatorTarget | null): () => void {
   const claimEnded = lifecycle.claimStarted();
   const timer = setInterval(() => {
     const body = { agentId: AGENT_ID, sandboxMode: SANDBOX_MODE, leaseOnly: true };
-    void post("/heartbeat", body, { retries: 0, timeoutMs: 5000, signed: true }).catch(
+    // To the coordinator that issued the claim (it holds the lease), even after a drain failover.
+    void post("/heartbeat", body, { retries: 0, timeoutMs: 5000, signed: true, to: issuer }).catch(
       (e) => console.warn(`[agent:${AGENT_ID}] lease heartbeat failed: ${e}`)
     );
   }, LEASE_HEARTBEAT_MS);
@@ -1214,7 +1216,7 @@ function startLeaseHeartbeat(): () => void {
 async function post(
   path: string,
   body: unknown,
-  options?: { retries?: number; timeoutMs?: number; extraHeaders?: Record<string, string>; signed?: boolean }
+  options?: { retries?: number; timeoutMs?: number; extraHeaders?: Record<string, string>; signed?: boolean; to?: CoordinatorTarget | null }
 ): Promise<any> {
   const retries = Math.max(0, options?.retries ?? COORDINATOR_POST_RETRIES);
   const timeoutMs = Math.max(1000, options?.timeoutMs ?? COORDINATOR_HTTP_TIMEOUT_MS);
@@ -1233,7 +1235,7 @@ async function post(
         headers: { "content-type": "application/json", ...meshHeaders(), ...(options?.extraHeaders ?? {}), ...signature },
         timeoutMs,
         body: payload
-      });
+      }, options?.to);
       const parsed = (await parseJsonBodySafe(res)) as unknown;
       const rawText = typeof parsed === "string" ? parsed : JSON.stringify(parsed);
       if (res.statusCode < 200 || res.statusCode >= 300) {
@@ -1303,9 +1305,32 @@ async function parseJsonBodySafe(res: { headers: Record<string, unknown>; body: 
   }
 }
 
+/**
+ * Coordinators this agent pulled claims from, with the key each proved then: a buffered result goes
+ * to the coordinator that issued its claim (drain-failover.ts), not to whichever one is active now.
+ */
+const claimIssuers = new Map<string, CoordinatorTarget>();
+/** Claims running now, per issuing coordinator URL (a drain failover comes home once the peer's are done). */
+const claimsInFlight = new Map<string, number>();
+function claimsInFlightFor(url: string | null): number {
+  return url ? (claimsInFlight.get(url) ?? 0) : 0;
+}
+function noteClaimIssuer(target: CoordinatorTarget): CoordinatorTarget {
+  claimIssuers.set(target.url, target);
+  if (claimIssuers.size > 16) claimIssuers.delete(claimIssuers.keys().next().value!);
+  return target;
+}
+
 async function flushPendingResults(): Promise<void> {
   // A result refused for good (lease_expired) is dropped, not retried forever (src/swarm/pending-results.ts).
-  await flushPendingResultBuffer(localStore, (payload) => post("/result", payload, { signed: true }), {
+  // One owed to another coordinator than the active one goes there (its claim's issuer), or waits.
+  const deliver = (payload: unknown, issuerUrl?: string) => {
+    if (!issuerUrl || issuerUrl === coordinator.url) return post("/result", payload, { signed: true });
+    const to = claimIssuers.get(issuerUrl);
+    if (!to) return Promise.reject(new ResultNotRoutableYetError(issuerUrl));
+    return post("/result", payload, { signed: true, to });
+  };
+  await flushPendingResultBuffer(localStore, deliver, {
     info: (m) => console.log(`[agent:${AGENT_ID}] ${m}`),
     warn: (m) => console.warn(`[agent:${AGENT_ID}] ${m}`),
   });
@@ -1426,6 +1451,92 @@ function idleWait(ms: number): Promise<void> {
 const coordinatorReconnect = new CoordinatorReconnectState();
 // Open from the restart signal until registered again: failures retry every ~1-2 s, not 3/6/12 s + offline.
 const restartWindow = new CoordinatorRestartWindow();
+// A planned drain (src/mesh/drain-failover.ts): serve through a peer coordinator meanwhile, come home after.
+const drainFailover = new DrainFailover();
+/**
+ * A planned drain signal from `drainingUrl`: open the restart window as planned (no 30 s wait
+ * before failover) and start serving through a peer. Claims held there keep reporting there.
+ */
+function onPlannedDrain(reason: string, drainingUrl: string, peerUrl?: string | null): void {
+  // A late signal from a coordinator we already left (a stale socket's 1012) changes nothing.
+  if (drainingUrl.replace(/\/+$/, "") !== coordinator.url) return;
+  restartWindow.open(Date.now(), true);
+  if (!drainFailover.notice({ drainingUrl, peerUrl, reason })) return;
+  const waitMs = drainFailover.msUntilDue();
+  console.log(`[agent:${AGENT_ID}] coordinator ${drainingUrl} is draining (${reason}): serving through a peer coordinator in ${waitMs}ms; claims held there report there`);
+  setTimeout(() => wakeLoop(false), waitMs + 5).unref?.();
+  wakeLoop(false);
+}
+function onCoordinatorDrainNotice(message: unknown, coordinatorUrl: string): void {
+  let verified: { peerId: string; publicKeyPem: string } | null = null;
+  try {
+    verified = coordinator.url === coordinatorUrl ? coordinator.requireVerifiedIdentity().identity : null;
+  } catch {
+    verified = null;
+  }
+  const verdict = verifyCoordinatorDrainNoticeFrame(message, { agentId: AGENT_ID, coordinator: verified });
+  if (!verdict.ok) {
+    console.warn(`[agent:${AGENT_ID}] drain notice refused: ${verdict.reason}`);
+    return;
+  }
+  onPlannedDrain("drain_notice", coordinatorUrl, verdict.command.peerUrl || null);
+}
+/** GET /identity at the home coordinator (unauthenticated, costs nothing against registration budgets). */
+async function probeDrainHome(url: string): Promise<"up" | "draining" | "down"> {
+  try {
+    const res = await request(`${url}/identity`, { method: "GET", headersTimeout: 3_000, bodyTimeout: 3_000 });
+    const body = res.statusCode >= 200 && res.statusCode < 300 ? await res.body.json().catch(() => null) : (await res.body.dump(), null);
+    return homeProbeState(res.statusCode, body);
+  } catch {
+    return "down";
+  }
+}
+/**
+ * One step of a drain failover (drain-failover.ts), at the top of an online pass: move to a peer
+ * when due, probe the home while away, switch back once it answers without draining.
+ */
+async function stepDrainFailover(): Promise<void> {
+  const now = Date.now();
+  // Something else moved the agent meanwhile (steering, the usual failover): that choice stands.
+  if (drainFailover.state === "away" && coordinator.url !== drainFailover.away) {
+    console.log(`[agent:${AGENT_ID}] drain failover ended: now working for ${coordinator.url}`);
+    drainFailover.reset();
+    return;
+  }
+  if (drainFailover.failoverDue(now)) {
+    const steered = await steerCoordinator().catch(() => null);
+    const peer = drainFailover.pickPeer([steered?.url, drainFailover.peerHint]);
+    if (!peer) {
+      drainFailover.noPeer();
+      console.warn(`[agent:${AGENT_ID}] no peer coordinator to serve through while ${drainFailover.home} drains; waiting for it to come back`);
+      return;
+    }
+    coordinator.set(peer, `drain_failover:${drainFailover.reason}`);
+    // Register with the peer now (the reconnect hold was for the restarted home).
+    registeredWithUrl = null;
+    coordinatorReconnect.clear();
+    drainFailover.moved(peer);
+    console.warn(`[agent:${AGENT_ID}] serving through ${peer} while ${drainFailover.home} restarts`);
+    return;
+  }
+  const home = drainFailover.home;
+  if (home && drainFailover.homeProbeDue(now)) {
+    if (drainFailover.onHomeProbe(await probeDrainHome(home))) {
+      const waitMs = drainFailover.msUntilDue();
+      console.log(`[agent:${AGENT_ID}] ${home} is back: returning in ${waitMs}ms`);
+      setTimeout(() => wakeLoop(false), waitMs + 5).unref?.();
+    }
+    return;
+  }
+  if (home && drainFailover.returnDue(now)) {
+    // The peer's own calls first (the pull meanwhile reports no free slot, so the peer neither gives
+    // more nor takes them back as from a host that stopped pulling).
+    if (drainFailover.holdingForPeerCalls(claimsInFlightFor(drainFailover.away), now)) return;
+    coordinator.set(home, "drain_return");
+    registeredWithUrl = null;
+    drainFailover.homing();
+  }
+}
 function onCoordinatorReconnectFrame(message: unknown, coordinatorUrl: string, ws: { close: (code?: number, reason?: string) => void }): void {
   let verified: { peerId: string; publicKeyPem: string } | null = null;
   try {
@@ -1440,7 +1551,7 @@ function onCoordinatorReconnectFrame(message: unknown, coordinatorUrl: string, w
   }
   const delayMs = coordinatorReconnect.accept(verdict.command);
   if (delayMs === null) return;
-  restartWindow.open();
+  onPlannedDrain("reconnect_frame", coordinatorUrl);
   console.log(`[agent:${AGENT_ID}] coordinator restarting (${verdict.command.reason}); registering again in ${delayMs}ms, then reconnecting`);
   registeredWithUrl = null;
   try {
@@ -1564,6 +1675,11 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
           wakeLoop(true);
           return;
         }
+        // The coordinator starts draining (a deploy or restart): serve through a peer meanwhile.
+        if (message && typeof message === "object" && message.type === COORDINATOR_DRAIN_NOTICE_FRAME_TYPE) {
+          onCoordinatorDrainNotice(message, coordinatorUrl);
+          return;
+        }
         // The coordinator is stopping (a deploy): register again after the delay, then reconnect.
         if (message && typeof message === "object" && message.type === COORDINATOR_RECONNECT_FRAME_TYPE) {
           onCoordinatorReconnectFrame(message, coordinatorUrl, ws);
@@ -1661,7 +1777,9 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
       // ~2 s until it is back, and have the HTTP loop register again on its next tick.
       if (isRestartClose(code, reason)) {
         if (!restartWindow.active()) reconnectDelay = 1000;
-        restartWindow.open();
+        // A planned restart: serve through a peer meanwhile (our own close on a reconnect frame already did).
+        if (code === 1012) onPlannedDrain("restart_close", coordinatorUrl);
+        else restartWindow.open(Date.now(), true);
         if (code === 1012 && registeredWithUrl === coordinatorUrl && !coordinatorReconnect.pending()) {
           registeredWithUrl = null;
           wakeLoop(false);
@@ -2045,10 +2163,13 @@ async function loop(): Promise<void> {
 
       if (coordinatorOnline) {
         // ═══ ONLINE PATH: all coordinator HTTP calls ═══
-        // The coordinator said it is restarting: register again only once its delay is up.
+        // A planned drain: move to a peer, probe the home, come back (drain-failover.ts).
+        if (drainFailover.active()) await stepDrainFailover();
+        // The coordinator said it is restarting: register again only once its delay is up
+        // (while a drain failover is about to move us, only briefly).
         const reconnectHoldMs = coordinatorReconnect.holdMs();
         if (reconnectHoldMs > 0) {
-          await idleWait(reconnectHoldMs);
+          await idleWait(drainFailover.state === "leaving" ? Math.min(reconnectHoldMs, 250) : reconnectHoldMs);
           continue;
         }
         // A work_available nudge (fast dispatch) shortly after a full pass goes straight to the pull:
@@ -2153,6 +2274,12 @@ async function loop(): Promise<void> {
             coordinatorReconnect.registered();
             if (restartWindow.active()) console.log(`[agent:${AGENT_ID}] registered again after the coordinator restart`);
             restartWindow.close();
+            if (drainFailover.state === "homing") {
+              drainFailover.registered(coordinator.url);
+              console.log(`[agent:${AGENT_ID}] back with ${coordinator.url} after its restart`);
+              // Results owed to it that could not be delivered while it restarted.
+              void flushPendingResults().catch(() => undefined);
+            }
             noteRegistered(freshRegistration);
             console.log(registeredLogLine(AGENT_ID, coordinator.url, registerResponse));
             updateDrain?.write();
@@ -2314,7 +2441,9 @@ async function loop(): Promise<void> {
         // AGENT_ALLOW_RESTRICTED_MODELS: the owner lets this machine take restricted-model calls (security
         // research tier; the coordinator also needs the owner's admin-approved host entitlement).
         // Run 7: with its CPU steal (coordinator host-steal.ts).
-        const pullBody = { agentId: AGENT_ID, inferenceSlots: MAX_PARALLEL_INFERENCE, freeInferenceSlots, contextWindow: CONTEXT_WINDOW, wake: true, ...(W.AGENT_ALLOW_RESTRICTED_MODELS ? { allowRestrictedModels: true } : {}), ...(cpuSteal ? cpuSteal.report() : {}) };
+        // Coming home after a drain failover, the peer's calls still running: report no free slot (drain-failover.ts).
+        const drainReturnHold = drainFailover.holdingForPeerCalls(claimsInFlightFor(drainFailover.away));
+        const pullBody = { agentId: AGENT_ID, inferenceSlots: MAX_PARALLEL_INFERENCE, freeInferenceSlots: drainReturnHold ? 0 : freeInferenceSlots, contextWindow: CONTEXT_WINDOW, wake: true, ...(W.AGENT_ALLOW_RESTRICTED_MODELS ? { allowRestrictedModels: true } : {}), ...(cpuSteal ? cpuSteal.report() : {}) };
         if (!PULLS_FROM_COORDINATOR && !warnedNoSandbox) {
           warnedNoSandbox = true;
           console.warn(`[agent:${AGENT_ID}] SANDBOX_MODE=none: not pulling swarm tasks (install Docker and set SANDBOX_MODE=docker to contribute compute, or AGENT_INFERENCE_ONLY=1 to serve inference only)`);
@@ -2325,12 +2454,24 @@ async function loop(): Promise<void> {
         // Inference-only with every slot busy: nothing we could take; a finishing call wakes the loop.
         // (A throttled CPU with idle slots still pulls, to report that it has no free slot.)
         // Draining (a restart or quit is coming) or stopping: take nothing new (BHV006).
-        const pulled = (PULLS_FROM_COORDINATOR && !sandboxDown && lifecycle.canPull() && memoryOk && !shuttingDown && !(INFERENCE_ONLY && freeInferenceSlots === 0 && !slotReport.reportAnyway)
+        // The coordinator a claim from this pull belongs to (URL and proven key): its lease renewals,
+        // chunks and result go there even if the agent moves for a drain meanwhile (drain-failover.ts).
+        let pullIssuer: CoordinatorTarget | null = null;
+        try {
+          pullIssuer = coordinator.requireVerifiedIdentity();
+        } catch {
+          pullIssuer = null;
+        }
+        const pulled = (PULLS_FROM_COORDINATOR && !sandboxDown && lifecycle.canPull() && memoryOk && !shuttingDown && !(INFERENCE_ONLY && freeInferenceSlots === 0 && !slotReport.reportAnyway && !drainReturnHold)
           ? await post("/pull", pullBody, { signed: true })
           : { subtask: null }) as {
           subtask: Subtask | null;
           envelope?: TaskEnvelope;
+          draining?: boolean;
+          coordinatorUrl?: string;
         };
+        // "No work, draining": a planned restart; serve through a peer meanwhile.
+        if (pulled.draining === true && !pulled.subtask && pullIssuer) onPlannedDrain("pull_draining", pullIssuer.url, typeof pulled.coordinatorUrl === "string" ? pulled.coordinatorUrl : null);
 
         // Decrypt envelope if coordinator sent an encrypted task
         let taskEnvelope: TaskEnvelope | undefined;
@@ -2364,6 +2505,7 @@ async function loop(): Promise<void> {
 
         if (pulled.subtask) {
           const st = pulled.subtask;
+          const issuer = pullIssuer ? noteClaimIssuer(pullIssuer) : null;
           // A model call's timeout counts from here, as the coordinator's claim lease does (inference-runner.ts).
           const claimedAtMs = Date.now();
 
@@ -2402,10 +2544,10 @@ async function loop(): Promise<void> {
 
           // ── PRIMARY: Local execution (HTTP mesh is primary, BLE is last resort) ──
           const envelopeForTask = taskEnvelope;
-          const runAndReport = async () => {
+          const runAndReportClaim = async () => {
             try { localStore.recordTaskStart(st.id, st.taskId, st.input, st.language, currentProvider, coordinator.url); } catch (e) { console.warn(`[db] task start write failed: ${e}`); }
             // #51: keep the coordinator's claim lease alive while the subtask runs.
-            const stopLeaseHeartbeat = startLeaseHeartbeat();
+            const stopLeaseHeartbeat = startLeaseHeartbeat(issuer);
             // Host memory: the model must fit this host's budget next to what is loaded (idle network
             // models are unloaded first); otherwise the call is handed back with a memory_ error and
             // the coordinator gives it to another agent (memory-manager.ts).
@@ -2420,7 +2562,7 @@ async function loop(): Promise<void> {
             const run = admission && !admission.ok
               ? Promise.resolve<SubtaskResult>({ subtaskId: st.id, taskId: st.taskId, agentId: AGENT_ID, ok: false, output: "", error: admission.error, durationMs: 0, executed: false })
               : st.kind === "inference"
-              ? runInferenceSubtask(st, { agentId: AGENT_ID, claimedAtMs, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: keepAliveFor(st.requestedModel), contextWindow: CONTEXT_WINDOW, signal: callAbort.signal, onDelta: serving?.delta, post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true }), ...(cpuSteal ? { cpuSteal: cpuStealReport } : {}), ...(OPENAI_ENGINE ? { chat: engineChat } : CLOUD_HOST ? { chat: (m, r, s, t) => CLOUD_HOST.chat(m, r, s, t) } : {}) })
+              ? runInferenceSubtask(st, { agentId: AGENT_ID, claimedAtMs, ollamaHost: OLLAMA_HOST ?? "http://127.0.0.1:11434", keepAlive: keepAliveFor(st.requestedModel), contextWindow: CONTEXT_WINDOW, signal: callAbort.signal, onDelta: serving?.delta, post: (path, body) => post(path, body, { retries: 0, timeoutMs: 10_000, signed: true, to: issuer }), ...(cpuSteal ? { cpuSteal: cpuStealReport } : {}), ...(OPENAI_ENGINE ? { chat: engineChat } : CLOUD_HOST ? { chat: (m, r, s, t) => CLOUD_HOST.chat(m, r, s, t) } : {}) })
               : runPolicedSubtask(st, { quiet: true });
             if (admission && !admission.ok) console.warn(`[agent:${AGENT_ID}] handed back inference ${st.id} on ${st.requestedModel}: ${admission.error}`);
             else if (st.kind === "inference") console.log(`[agent:${AGENT_ID}] running inference ${st.id} on ${st.requestedModel}`);
@@ -2497,15 +2639,30 @@ async function loop(): Promise<void> {
             );
 
             try {
-              await post("/result", resultPayload, { signed: true });
+              // To the coordinator that issued the claim (it holds the lease and the billing).
+              await post("/result", resultPayload, { signed: true, to: issuer });
             } catch (resultErr) {
               // The claim lapsed before the result arrived: the coordinator will refuse it every time.
               if (isPermanentResultRefusal(resultErr)) {
                 console.warn(`[agent:${AGENT_ID}] result for ${result.subtaskId} refused (lease_expired: the claim lapsed); not buffered`);
                 return;
               }
-              try { localStore.enqueuePendingResult(result.subtaskId, JSON.stringify(resultPayload)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
+              try { localStore.enqueuePendingResult(result.subtaskId, encodePendingResult(resultPayload, issuer?.url)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
               console.warn(`[agent:${AGENT_ID}] result buffered for retry: ${result.subtaskId}`);
+            }
+          };
+          // Counted per issuing coordinator while it runs (a drain failover's return waits for the peer's).
+          const runAndReport = async () => {
+            const key = issuer?.url;
+            if (key) claimsInFlight.set(key, (claimsInFlight.get(key) ?? 0) + 1);
+            try {
+              await runAndReportClaim();
+            } finally {
+              if (key) {
+                const left = (claimsInFlight.get(key) ?? 1) - 1;
+                if (left > 0) claimsInFlight.set(key, left);
+                else claimsInFlight.delete(key);
+              }
             }
           };
           // Model calls run side by side (Ollama, vLLM and MLX serve several at once); code jobs one at a time.
@@ -2854,10 +3011,22 @@ async function loop(): Promise<void> {
       // A coordinator restart (src/mesh/coordinator-reconnect.ts CoordinatorRestartWindow): the new
       // instance is usually up within seconds, so retry every ~1-2 s without counting toward offline
       // mode. Only once it has had RESTART_FAILOVER_AFTER_MS does the agent look for another coordinator.
-      if (coordinatorOnline && isDrainingError(error)) restartWindow.open();
+      // Coming home after a drain failover, the restarted instance was not ready after all: back to
+      // the peer, which still has us registered, and probe again.
+      if (coordinatorOnline && drainFailover.state === "homing" && isRestartTransientError(error)) {
+        const peer = drainFailover.homeNotReady();
+        if (peer && coordinator.set(peer, "drain_return_not_ready")) {
+          registeredWithUrl = null;
+          console.warn(`[agent:${AGENT_ID}] ${drainFailover.home} not ready yet (${String(error).slice(0, 120)}); serving through ${peer} meanwhile`);
+          continue;
+        }
+      }
+      if (coordinatorOnline && isDrainingError(error)) onPlannedDrain("register_draining", coordinator.url);
       if (coordinatorOnline && restartWindow.active() && isRestartTransientError(error)) {
         registeredWithUrl = null;
-        if (restartWindow.mayFailOver()) {
+        // A planned drain moves through drain-failover.ts (and comes home); an unexplained loss waits
+        // RESTART_FAILOVER_AFTER_MS first, so a blip does not bounce the agent.
+        if (!drainFailover.active() && restartWindow.mayFailOver()) {
           const failover = await resolveCoordinatorUrl();
           if (coordinator.set(failover.url, `failover:${failover.source}`)) {
             console.warn(`[agent:${AGENT_ID}] coordinator still restarting; failover (${failover.source}): ${coordinator.url}`);
