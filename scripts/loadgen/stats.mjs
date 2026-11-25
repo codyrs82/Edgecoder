@@ -56,6 +56,8 @@ export function classifyError(status, body) {
   const t = String(body ?? "").toLowerCase();
   if (status === "timeout") return "timeout";
   if (status === 0 || status === "network") return "network_error";
+  // The call's max_tokens ended inside a reasoning model's reasoning: the request, not capacity.
+  if (t.includes("reasoning_only")) return "reasoning_only";
   if (t.includes("no_agent_in_class")) return "no_agent_in_class";
   if (t.includes("no machine on the network has")) return "no_agent_has_model";
   if (/no [a-z.]+ machine runs/.test(t)) return "no_agent_in_class";
@@ -234,4 +236,21 @@ export function table(rows) {
   const w = head.map((h, i) => Math.max(h.length, ...lines.map((l) => l[i].length)));
   const fmt = (cols) => cols.map((c, i) => c.padEnd(w[i])).join("  ");
   return [fmt(head), fmt(w.map((n) => "-".repeat(n))), ...lines.map(fmt)].join("\n");
+}
+
+/** Error types that mean the network had no room (expected under load, backed off). */
+export const CAPACITY_ERRORS = new Set(["no_capacity", "over_capacity", "timeout_over_capacity", "no_agent_in_class", "no_agent_has_model", "rate_limited"]);
+
+/**
+ * Failures of a digest's `errors` split into reasoning_only (max_tokens too small for a reasoning
+ * model: a load-generator setting), capacity and other, so a run never reads one as the other.
+ */
+export function failureCategories(errors = {}) {
+  const out = { reasoningOnly: 0, capacity: 0, other: 0 };
+  for (const [k, n] of Object.entries(errors)) {
+    if (k === "reasoning_only") out.reasoningOnly += n;
+    else if (CAPACITY_ERRORS.has(k)) out.capacity += n;
+    else out.other += n;
+  }
+  return out;
 }

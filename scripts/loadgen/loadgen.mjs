@@ -29,6 +29,10 @@
  *     for every buyer: best-fit routing never places a call on the requester's own agents.
  *   - --auto-share (LOADGEN_AUTO_SHARE, default 0.5): the share of calls sent as model "auto"
  *     (the coordinator's best-fit routing); 0 sends only named models.
+ *   - --reasoning-floor (LOADGEN_REASONING_FLOOR, default 1024): least max_tokens sent to a reasoning
+ *     model (--reasoning-models / LOADGEN_REASONING_MODELS, comma-separated substrings, default
+ *     "glm-,deepseek-v") and to "auto" calls while the network holds one; smaller budgets end inside
+ *     the reasoning (400 reasoning_only). 0 turns it off.
  *   - --model (LOADGEN_MODEL), e.g. qwen2.5-coder:1.5b: every named-model call asks for that model
  *     only (with --auto-share 0, every call does). Buyers whose own agents hold it skip it.
  *   - API keys are read from LOADGEN_KEYS (JSON {name: key}) or from account files; never printed.
@@ -48,7 +52,7 @@ import { HARD_MAX_RATE, PERSONAS, MODELS, buildSchedule, codingContext, parseDur
 import { StageStats, classifyCall, digestStage, isFailure, table } from "./stats.mjs";
 import { CapacityPlanner, RateGovernor, balanceAction, fatalStop, parseModelId, pickWithAutoShare, pinWeights } from "./planner.mjs";
 import { fetchCapacity } from "./capacity.mjs";
-import { CodingSession, codegenSize, codegenTask, modelMix, pickWeighted, question, rng } from "./workload.mjs";
+import { CodingSession, DEFAULT_REASONING_FLOOR, DEFAULT_REASONING_MODELS, codegenSize, codegenTask, maxTokensFor, modelMix, pickWeighted, question, rng } from "./workload.mjs";
 
 // ---------------------------------------------------------------------------- configuration
 const argv = process.argv.slice(2);
@@ -91,6 +95,10 @@ const AUTO_SLOTS = Number(opt("auto-slots", "LOADGEN_AUTO_SLOTS", 3));
 // 0 = every call names a model. The rest are spread over the model mix as before.
 const MODEL_PIN = (opt("model", "LOADGEN_MODEL", "") || "").trim();
 const AUTO_SHARE = Math.min(1, Math.max(0, Number(opt("auto-share", "LOADGEN_AUTO_SHARE", 0.5)) || 0));
+// Reasoning models (cloud GLM/DeepSeek) get max_tokens of at least this, as do "auto" calls when the
+// network holds one (workload.mjs maxTokensFor); 0 turns the floor off.
+const REASONING_FLOOR = Math.max(0, Number(opt("reasoning-floor", "LOADGEN_REASONING_FLOOR", DEFAULT_REASONING_FLOOR)) || 0);
+const REASONING_MODELS = (opt("reasoning-models", "LOADGEN_REASONING_MODELS", "") || "").split(",").map((x) => x.trim()).filter(Boolean);
 let initialCapacity = null;
 try { initialCapacity = env.LOADGEN_CAPACITY ? JSON.parse(env.LOADGEN_CAPACITY) : null; } catch { initialCapacity = null; }
 const UA = "edgecoder-loadgen/1.0 (+https://github.com/codyrs82/Edgecoder; regtest load test)";
@@ -379,7 +387,8 @@ async function plannedCall(u, m, body, opts) {
     await takeSlot();
     inflight++;
     u.inflight++;
-    try { r = await chatCall(u, { ...body, model: m.id }, opts); } finally { inflight--; u.inflight--; }
+    const max_tokens = body.max_tokens === undefined ? undefined : maxTokensFor(m.key, body.max_tokens, { floor: REASONING_FLOOR, patterns: REASONING_MODELS.length ? REASONING_MODELS : DEFAULT_REASONING_MODELS, capacity: planner.capacity });
+    try { r = await chatCall(u, { ...body, model: m.id, ...(max_tokens === undefined ? {} : { max_tokens }) }, opts); } finally { inflight--; u.inflight--; }
   } catch (e) {
     planner.finish(m.key, null, atCap);
     throw e;

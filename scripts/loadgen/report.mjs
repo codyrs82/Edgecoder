@@ -29,7 +29,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { digestStage, mergeStage, table } from "./stats.mjs";
+import { digestStage, failureCategories, mergeStage, table } from "./stats.mjs";
 import { chargesFrom, formatMoney, loadAccountKeys, moneyReport, snapshotLedger } from "./money.mjs";
 import { adminToken as adminTokenFromHost, fetchServerSeries, fetchSnapshots, flyEnv } from "./capacity.mjs";
 import { formatHostMemory, hostMemoryReport, hostsFromSnapshots } from "./memory.mjs";
@@ -146,7 +146,7 @@ const report = {
   cSatsSpent: Math.round(1000 * summaries.reduce((a, s) => a + (s.cSatsSpent ?? 0), 0)) / 1000,
   cSatsPerHour: elapsedH > 0 ? Math.round(summaries.reduce((a, s) => a + (s.cSatsSpent ?? 0), 0) / elapsedH) : null,
   charges, money,
-  stages: digests.map((d, i) => ({ ...d, server: serverWindow(stages[i].startMs, stages[i].endMs ?? stages[i].startMs), utilization: utilization(stages[i].startMs, stages[i].endMs ?? stages[i].startMs) })),
+  stages: digests.map((d, i) => ({ ...d, failures: failureCategories(d.errors), server: serverWindow(stages[i].startMs, stages[i].endMs ?? stages[i].startMs), utilization: utilization(stages[i].startMs, stages[i].endMs ?? stages[i].startMs) })),
   serverWholeRun: serverWindow(t0, t1),
   hostMemory,
 };
@@ -161,6 +161,14 @@ console.log("\nOffered vs achieved per model (calls/s):");
 for (const s of report.stages) {
   const parts = Object.entries(s.byModel).map(([k, g]) => `${k.replace("network/", "")} ${g.offeredPerSec}->${g.throughputPerSec}${g.errors.over_capacity ? ` (over capacity ${g.errors.over_capacity})` : ""}`);
   console.log(`  stage ${s.stage} (offered ${s.offeredRate}/s${s.utilPct !== null && s.utilPct !== undefined ? `, slot util ${s.utilPct}%` : ""}, sent ${s.offeredPerSec}/s, shed ${JSON.stringify(s.droppedBy)}): ${parts.join("; ")}`);
+}
+// reasoning_only is the load generator's max_tokens, not the network's capacity: never mixed.
+console.log("\nFailures by cause (reasoning_only = max_tokens too small for a reasoning model, not capacity):");
+for (const s of report.stages) {
+  const f = s.failures;
+  console.log(`  stage ${s.stage}: reasoning_only ${f.reasoningOnly}, capacity ${f.capacity}, other ${f.other}`);
+  const byModel = Object.entries(s.byModel).filter(([, g]) => g.errors.reasoning_only).map(([k, g]) => `${k.replace("network/", "")} ${g.errors.reasoning_only}`);
+  if (byModel.length) console.log(`    reasoning_only by model: ${byModel.join("; ")} (raise --reasoning-floor)`);
 }
 const crow = [];
 for (const d of digests) for (const [k, g] of Object.entries(d.byClass)) crow.push({ ...g, stage: `${d.stage} ${k}`, offeredRate: "" });
