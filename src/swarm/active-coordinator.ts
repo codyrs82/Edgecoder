@@ -49,6 +49,20 @@ export class ActiveCoordinator {
     return true;
   }
 
+  /**
+   * Switch to `url` with the identity just proven for it (the trust gate's own check, which stays
+   * cached): the return home after a drain registers there before it switches (drain-failover.ts
+   * ReturnHome), so the switch itself needs no new challenge.
+   */
+  adopt(url: string, identity: VerifiedCoordinator, reason: string): void {
+    const next = normalize(url);
+    const prev = this.current;
+    this.current = next;
+    this.verifiedUrl = next;
+    this.verifiedIdentity = identity;
+    if (prev !== next) this.onChange?.(prev, next, reason);
+  }
+
   /** Drop the verification (reconnect, failure): the next verify() challenges again. */
   invalidate(): void {
     this.verifiedUrl = null;

@@ -73,3 +73,16 @@ describe("mesh WebSocket URL", () => {
     expect(meshWsUrl("http://127.0.0.1:4301", "a b")).toBe("ws://127.0.0.1:4301/mesh/ws?peerId=a%20b");
   });
 });
+
+describe("ActiveCoordinator.adopt (run 15: the return home after a drain)", () => {
+  it("switches to a URL with the identity just proven for it, verified at once (no new challenge)", () => {
+    const changes: string[] = [];
+    const c2 = new ActiveCoordinator("https://b.example", { check: async () => ({ trusted: true, coordinatorUrl: "x" }), forget: () => undefined }, (from, to, why) => changes.push(`${from}->${to} ${why}`));
+    const identity = { peerId: "coord-a", publicKeyPem: a.publicKeyPem, responseSigning: true };
+    c2.adopt("https://a.example/", identity, "drain_return");
+    expect(c2.url).toBe("https://a.example");
+    expect(c2.isVerified()).toBe(true);
+    expect(c2.requireVerifiedIdentity()).toEqual({ url: "https://a.example", identity });
+    expect(changes).toEqual(["https://b.example->https://a.example drain_return"]);
+  });
+});

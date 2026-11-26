@@ -9,6 +9,7 @@ import {
   HOME_RETURN_HOLD_MAX_MS,
   HOME_RETURN_JITTER_MS,
   NO_PEER_RETRY_MS,
+  ReturnHome,
   homeProbeState
 } from "../../src/mesh/drain-failover.js";
 import {
@@ -314,7 +315,7 @@ describe("worker wiring", () => {
     expect(src).toMatch(/pullIssuer = coordinator\.requireVerifiedIdentity\(\)[\s\S]{0,500}await post\("\/pull"/);
   });
   it("the return waits for the peer's calls and reports no free slot meanwhile", () => {
-    expect(src).toContain("if (drainFailover.holdingForPeerCalls(claimsInFlightFor(drainFailover.away), now)) return;");
+    expect(src).toContain("peerCallsInFlight: () => claimsInFlightFor(drainFailover.away),");
     expect(src).toContain("freeInferenceSlots: drainReturnHold ? 0 : freeInferenceSlots");
     expect(src).toMatch(/claimsInFlight\.set\(key, \(claimsInFlight\.get\(key\) \?\? 0\) \+ 1\);\s*try \{\s*await runAndReportClaim\(\);/);
   });
@@ -323,7 +324,18 @@ describe("worker wiring", () => {
     expect(src).not.toContain('st.kind === "inference" && MAX_PARALLEL_INFERENCE > 1');
     // The notice wakes the loop, and each pass steps the failover before anything else (no pull needed).
     expect(src).toMatch(/function onPlannedDrain[\s\S]{0,900}wakeLoop\(false\);/);
-    expect(src).toMatch(/if \(coordinatorOnline\) \{[\s\S]{0,300}if \(drainFailover\.active\(\)\) await stepDrainFailover\(\);/);
+    expect(src).toMatch(/if \(coordinatorOnline\) \{[\s\S]{0,300}if \(drainFailover\.active\(\)\) await stepDrainFailover\(homeReturn\);/);
+  });
+  it("run 15: the return home registers at home beside the loop and switches only after (make before break)", () => {
+    expect(src).not.toContain('coordinator.set(home, "drain_return")');
+    expect(src).toContain('coordinator.adopt(reg.target.url, reg.target.identity, "drain_return");');
+    expect(src).toContain("{ signed: true, to: target, retries: 0, timeoutMs: HOME_REGISTER_TIMEOUT_MS }");
+    expect(src).toContain("if (home) homeReturn.step();");
+    // The old switch-then-register path and its error branch are gone.
+    expect(src).not.toContain("drain_return_not_ready");
+  });
+  it("run 15: with a peer named, the move waits for steering at most DRAIN_STEER_WAIT_MS", () => {
+    expect(src).toMatch(/drainFailover\.peerHint\s*\? await Promise\.race\(\[steering, new Promise<null>\(\(r\) => setTimeout\(\(\) => r\(null\), DRAIN_STEER_WAIT_MS\)/);
   });
   it("the generic in-window failover does not run during a planned drain failover (it comes home instead)", () => {
     expect(src).toContain("if (!drainFailover.active() && restartWindow.mayFailOver()) {");
@@ -413,5 +425,100 @@ describe("busy 1-slot host during a planned drain (run 11)", () => {
     expect(runsBesideLoop("inference", 4)).toBe(true);
     expect(runsBesideLoop("inference", 0)).toBe(false);
     expect(runsBesideLoop("single_step", 1)).toBe(false);
+  });
+});
+
+/*
+ * Network run 15 (3b): the US seed was back 8 s after its restart. Its agents left the EU peer as
+ * soon as it answered and then took 10-25 s to register on the just-booted instance (15 s timeout,
+ * two retries), listed by neither coordinator meanwhile. The return is now make before break.
+ */
+describe("return home, make before break (run 15)", () => {
+  const HOME = "https://us.example";
+  const PEER = "https://eu.example";
+  const flush = () => new Promise<void>((r) => setImmediate(r));
+
+  function setup(attempts: Array<{ resolveAtMs: number; ok: boolean }>) {
+    let now = 0;
+    const failover = new DrainFailover(() => 0.5);
+    let active = HOME;
+    const switches: number[] = [];
+    const started: number[] = [];
+    const pending: Array<{ at: number; ok: boolean; resolve: () => void; reject: (e: Error) => void }> = [];
+    const homeUpAtMs = 8_000;
+    const homeReturn = new ReturnHome({
+      failover,
+      peerCallsInFlight: () => 0,
+      registerAtHome: () => {
+        const plan = attempts[started.length] ?? { resolveAtMs: 1_000, ok: true };
+        started.push(now);
+        return new Promise<void>((resolve, reject) => pending.push({ at: now + plan.resolveAtMs, ok: plan.ok, resolve, reject }));
+      },
+      switchHome: (home) => {
+        active = home;
+        switches.push(now);
+      },
+      wake: () => undefined,
+      now: () => now
+    });
+    failover.notice({ drainingUrl: HOME, peerUrl: PEER, reason: "drain_notice", nowMs: 0 });
+    /** One worker pass every 100 ms, as stepDrainFailover drives it. */
+    async function run(untilMs: number, onTick?: (t: number) => void) {
+      for (; now <= untilMs; now += 100) {
+        for (const p of pending.splice(0)) {
+          if (now >= p.at) {
+            if (p.ok) p.resolve();
+            else p.reject(new Error("POST /register failed: timeout"));
+          } else pending.push(p);
+        }
+        await flush();
+        if (failover.failoverDue(now)) {
+          active = failover.pickPeer([PEER])!;
+          failover.moved(active, now);
+        }
+        if (failover.homeProbeDue(now)) failover.onHomeProbe(now >= homeUpAtMs ? "up" : "down", now);
+        if (failover.home) homeReturn.step();
+        onTick?.(now);
+      }
+    }
+    return { run, get active() { return active; }, switches, started, failover, homeReturn };
+  }
+
+  it("home back at 8 s, its first registration times out: the agent stays on the peer throughout, then switches once home takes it", async () => {
+    const sim = setup([{ resolveAtMs: 8_000, ok: false }, { resolveAtMs: 3_000, ok: true }]);
+    const onPeerWhileRegistering: boolean[] = [];
+    await sim.run(40_000, (t) => {
+      if (sim.homeReturn.registering) onPeerWhileRegistering.push(sim.active === PEER);
+      // Never between coordinators: on the peer until the switch, home after.
+      if (t >= 600) expect(sim.active === PEER || sim.active === HOME).toBe(true);
+    });
+    expect(sim.started.length).toBe(2);
+    // The first attempt starts after home answers (8 s) and the return jitter, while still on the peer.
+    expect(sim.started[0]).toBeGreaterThanOrEqual(8_000);
+    expect(onPeerWhileRegistering.length).toBeGreaterThan(0);
+    expect(onPeerWhileRegistering.every(Boolean)).toBe(true);
+    // One switch, right after the second registration succeeded; then the failover is over.
+    expect(sim.switches).toHaveLength(1);
+    expect(sim.switches[0]).toBeGreaterThanOrEqual(sim.started[1] + 3_000);
+    expect(sim.switches[0]).toBeLessThanOrEqual(sim.started[1] + 3_100);
+    expect(sim.active).toBe(HOME);
+    expect(sim.failover.state).toBe("idle");
+  });
+
+  it("a slow registration that succeeds: still on the peer until it does", async () => {
+    const sim = setup([{ resolveAtMs: 6_000, ok: true }]);
+    await sim.run(30_000);
+    expect(sim.started).toHaveLength(1);
+    expect(sim.switches).toEqual([sim.started[0] + 6_000]);
+  });
+
+  it("a new drain signal during the registration wins: its outcome is dropped", async () => {
+    const sim = setup([{ resolveAtMs: 2_000, ok: true }]);
+    await sim.run(9_600);
+    expect(sim.homeReturn.registering).toBe(true);
+    sim.failover.notice({ drainingUrl: HOME, peerUrl: PEER, reason: "drain_notice", nowMs: 9_600 });
+    await sim.run(12_000);
+    expect(sim.switches).toEqual([]);
+    expect(sim.failover.state).not.toBe("idle");
   });
 });
