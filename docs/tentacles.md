@@ -311,7 +311,12 @@ any of them, so every helper call waited for the few hosts with a larger window.
 `minContext` hint is that same window. A call the coordinator refuses as too long for every
 host's window is sent once more with a 1024-token reply. A call whose ceiling is under 0.05 cSats doesn't start: it waits while other
 helpers' calls hold the session's budget, and otherwise the tentacle stops with an error that says
-which budget is short. Calls on this computer, your machines or a lease hold nothing.
+which budget is short. A call the network refuses for its ceiling (`no_route_fits`, reason `price`,
+with what the cheapest fitting model needs) waits the same way for room for that much, when the
+tentacle's own budget covers it. The hosted endpoint sends that refusal as data too (`edgecoder` in
+the error: `code`, `reason`, `neededCSats`, `computeClass`), so helpers of `edgecoder code` with an
+API key wait as well; in network run 13 they got only the message and the last helper failed while
+the other helpers' calls held the budget. Calls on this computer, your machines or a lease hold nothing.
 
 None of these paths can use your frontier key. A frontier id as the worker becomes `auto`, the
 tentacle settings refuse one, a frontier id is never chosen as the local model, and a call
@@ -390,7 +395,7 @@ Tentacle: Write tests for parseFileRef · qwen3-coder:30b on gpu · passed (appl
 | Limit | Default | What happens |
 | --- | --- | --- |
 | Running at once per session | 4 | More wait in a queue (at most 32 waiting). |
-| Session budget | 100 cSats | `delegate` is refused once it is spent. |
+| Session budget | 100 cSats | `delegate` is refused once it is spent. When the helpers not finished could need more than is left (at each helper's own budget, or at the session's average once some finished), `delegate`'s note says how many it covers, for the lead to tell the user. |
 | Per tentacle | 25 cSats | The tentacle stops with `error` when it is reached. Can be set lower per `delegate` call. No call sets aside more than what is left of it. |
 | Agent steps per attempt | 12 | |
 

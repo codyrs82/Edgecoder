@@ -73,7 +73,32 @@ interface OpenAiChunk {
   choices?: Array<{ delta?: { content?: string | null; tool_calls?: Array<{ index?: number; function?: { name?: string; arguments?: string } }> }; finish_reason?: string | null }>;
   usage?: { prompt_tokens?: number; completion_tokens?: number };
   edgecoder?: { cSatsSpent?: number; where?: string; served?: unknown };
-  error?: { message?: string };
+  error?: { message?: string; edgecoder?: unknown };
+}
+
+type FailureInfo = NonNullable<ChatBackendError["info"]>;
+
+/**
+ * Why a hosted call could not start, as data: the `edgecoder` part of the error (code, reason,
+ * neededCSats, computeClass), else, from an endpoint that sends only the message, a price refusal
+ * read from its text. Run 13: helper tc4ce121 was refused with "every fitting model costs more than
+ * the 1.237 cSats ceiling (the cheapest, deepseek-v4.1-flash on cloud, is about 3.901 cSats)"; with
+ * the message alone it could not wait for the other helpers' holds to end, and failed.
+ */
+export function hostedErrorInfo(sent: unknown, message: string): FailureInfo | undefined {
+  if (sent && typeof sent === "object" && typeof (sent as { code?: unknown }).code === "string") {
+    const o = sent as Record<string, unknown>;
+    return {
+      code: String(o.code).slice(0, 60),
+      ...(typeof o.reason === "string" ? { reason: o.reason.slice(0, 40) } : {}),
+      ...(typeof o.neededCSats === "number" && Number.isFinite(o.neededCSats) ? { neededCSats: o.neededCSats } : {}),
+      ...(typeof o.computeClass === "string" ? { computeClass: o.computeClass.slice(0, 40) } : {}),
+    };
+  }
+  const price = /costs more than the [\d.]+ cSats ceiling(?: \(the cheapest, .*? on ([\w.]+), is about ([\d.]+) cSats\))?/.exec(message);
+  if (!price) return undefined;
+  const need = price[2] !== undefined ? Number(price[2]) : NaN;
+  return { code: "no_route_fits", reason: "price", ...(Number.isFinite(need) && need > 0 ? { neededCSats: need } : {}), ...(price[1] ? { computeClass: price[1] } : {}) };
 }
 
 /** A chat on the hosted endpoint: `model` is a hosted model id (auto, network/<m>[@class], mine/<m>, reserved/<id>/<m>). */
@@ -105,14 +130,17 @@ export function hostedBackend(cfg: HostedConfig, model: string): ChatBackend {
     if (res.statusCode >= 400) {
       const text = await res.body.text().catch(() => "");
       let message = text.slice(0, 500);
+      let sent: unknown;
       try {
-        const j = JSON.parse(text) as { error?: { message?: string } | string };
+        const j = JSON.parse(text) as { error?: { message?: string; edgecoder?: unknown } | string };
         message = typeof j.error === "string" ? j.error : j.error?.message ?? message;
+        if (j.error && typeof j.error === "object") sent = j.error.edgecoder;
       } catch {
         // plain text
       }
       if (res.statusCode === 401) message = "The hosted endpoint refused the API key (EDGECODER_API_KEY). Create a key on the portal under Settings, API keys.";
-      throw new ChatBackendError(message || `HTTP ${res.statusCode}`, res.statusCode);
+      const info = hostedErrorInfo(sent, message);
+      throw new ChatBackendError(message || `HTTP ${res.statusCode}`, res.statusCode, undefined, info);
     }
     // Tool calls arrive in pieces per index; their arguments are a JSON string built up across chunks.
     const calls = new Map<number, { name: string; args: string }>();
@@ -134,7 +162,7 @@ export function hostedBackend(cfg: HostedConfig, model: string): ChatBackend {
       } catch {
         return;
       }
-      if (chunk.error?.message) throw new ChatBackendError(chunk.error.message, 502);
+      if (chunk.error?.message) throw new ChatBackendError(chunk.error.message, 502, undefined, hostedErrorInfo(chunk.error.edgecoder, chunk.error.message));
       for (const c of chunk.choices ?? []) {
         if (c.delta?.content) pieces.push({ delta: c.delta.content });
         for (const tc of c.delta?.tool_calls ?? []) {
