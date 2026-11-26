@@ -53,7 +53,7 @@ import type { ChatBackend } from "../../inference-api/types.js";
 import type { ServedBy } from "../../swarm/served-by.js";
 import { formatCSatsShort, parseWhere, patchReturn, tentacleCallLine, tentacleRanOn, tentacleTotals, whereServed } from "./tentacle-format.js";
 
-import { emptyAttempt, hintedChat, isProviderTierError, parseFileRef, pickLocalHelperModel, retryAfterEmpty, smallWorkerWarning, TENTACLE_HELPER_MIN_PARAMS_B, TENTACLE_LOCAL_MIN_PARAMS_B, tentacleHelperMinParamsB, tentacleLocalMinParamsB, tentaclePrompt, tentacleSystemPrompt } from "./tentacle-chat.js";
+import { emptyAttempt, hintedChat, isDegenerateStop, isProviderTierError, TENTACLE_RETRY_MIN_PARAMS_B, parseFileRef, pickLocalHelperModel, retryAfterEmpty, smallWorkerWarning, TENTACLE_HELPER_MIN_PARAMS_B, TENTACLE_LOCAL_MIN_PARAMS_B, tentacleHelperMinParamsB, tentacleLocalMinParamsB, tentaclePrompt, tentacleSystemPrompt } from "./tentacle-chat.js";
 import { acceptanceProbe, canAutoApply, modeOf, sessionAllowsShell, TENTACLE_SHELL_ALLOW, tentacleShellDecision } from "./tentacle-shell.js";
 import { balanceShortMessage, CallHolds, ceilingRefusal, helperCallCeiling, helperCallMinimum, helperContextWindow, helperReplyTokens, paidWorker, promptTokensOf } from "./tentacle-reserve.js";
 
@@ -261,6 +261,8 @@ interface Internal {
   spent: number;
   /** Its budget, set when it starts: what it may still spend (budget - spent) is set aside from the session's. */
   budget?: number;
+  /** Run 19: the most this helper may grow to for its retry on a stronger model (one helper's budget for the piece, less earlier helpers' spend on it). */
+  retryCap?: number;
 }
 
 /**
@@ -269,6 +271,12 @@ interface Internal {
  * the helpers still queued stop with one message instead of failing call by call.
  */
 export const HELPER_START_MIN_CSATS = 4;
+
+/** Run 19: the same piece of work across re-delegations: its kind and files, else its task text. */
+function taskKey(spec: Pick<TentacleSpec, "kind" | "files" | "task">): string {
+  const files = [...(spec.files ?? [])].map((f) => f.trim()).filter(Boolean).sort();
+  return files.length ? `${spec.kind}:${files.join(",")}` : `${spec.kind}:${spec.task.trim().toLowerCase().replace(/\s+/g, " ")}`;
+}
 
 /** What the session's running helpers may still spend: their budgets less what they spent. */
 function committedBudget(st: SessionState): number {
@@ -279,6 +287,11 @@ function committedBudget(st: SessionState): number {
 
 interface SessionState {
   config: TentacleConfig;
+  /**
+   * Network run 19: cSats spent by earlier helpers on the same piece of work (taskKey). A
+   * re-delegation gets what is left of one helper's budget for it, not a fresh share of the session.
+   */
+  pieceSpent?: Map<string, number>;
   tentacles: Map<string, Internal>;
   queue: string[];
   running: number;
@@ -519,6 +532,19 @@ export class TentacleManager {
     // Run 15: less than one helper's start (HELPER_START_MIN_CSATS) left of what was not spent: none can start.
     if (left <= 0 || left < Math.min(HELPER_START_MIN_CSATS, st.config.budgetCSats)) throw new TentacleError("budget", `The session's tentacle budget (${formatCSatsShort(st.config.budgetCSats)}) is spent (${formatCSatsShort(Math.max(0, left))} left). Raise --tentacle-budget to delegate more.`);
     if (committed >= 32) throw new TentacleError("invalid", "Too many tentacles waiting; await some first.");
+    // Run 19: a re-delegated piece (the same kind and files, or task) spends what is left of one helper's
+    // budget for it, so one failing piece can't take the session from the others.
+    const key = taskKey(spec);
+    const before = st.pieceSpent?.get(key) ?? 0;
+    if (before > 0) {
+      const allowance = round((spec.budgetCSats ?? st.config.perTentacleCSats) - before);
+      if (allowance < HELPER_START_MIN_CSATS) {
+        throw new TentacleError("budget", `This piece already spent ${formatCSatsShort(before)} of its ${formatCSatsShort(spec.budgetCSats ?? st.config.perTentacleCSats)} helper budget (it was retried on a stronger model too): do it yourself, or delegate it with a larger budgetCSats.`);
+      }
+      spec = { ...spec, budgetCSats: allowance };
+    }
+    // A first helper may grow to one helper's budget for its retry; a re-delegation only to what is left of it.
+    const retryCap = before > 0 ? (spec.budgetCSats ?? 0) : Math.max(spec.budgetCSats ?? 0, st.config.perTentacleCSats);
     const readOnly = spec.readOnly === true || READ_ONLY_KINDS.has(spec.kind);
     const id = `t${randomUUID().slice(0, 7)}`;
     let resolveDone!: () => void;
@@ -530,6 +556,7 @@ export class TentacleManager {
       resolveDone,
       reported: false,
       spent: 0,
+      retryCap,
       view: { id, sessionId, task: spec.task, kind: spec.kind, readOnly, status: "queued", progress: "queued", createdAt: Date.now(), cSats: 0 },
     };
     st.tentacles.set(id, t);
@@ -830,6 +857,21 @@ export class TentacleManager {
           tierUp = (again ? again.nextTier : true) && !providerDown;
           const skipped = providerDown && (again ? again.nextTier : place !== "local");
           this.progress(sessionId, t, skipped ? "retrying on another machine at this tier (the next tier's provider returned an error lately)" : again ? again.note : place === "local" ? "retrying on the network (a stronger tier)" : "retrying on a stronger tier");
+          // Run 19: the retry runs within the session's budget: room for at least one call is taken from
+          // the session as for a price refusal (growBudget), waiting for running helpers to give some back.
+          if (paidWorker(model)) {
+            // Within one helper's budget for the piece (a re-delegation's share is what earlier helpers left).
+            const capped = t.retryCap !== undefined && round(t.spent + HELPER_START_MIN_CSATS) > t.retryCap && budget - t.spent < HELPER_START_MIN_CSATS;
+            let room = capped ? ("stop" as const) : growBudget(HELPER_START_MIN_CSATS);
+            for (let n = 0; room === "wait" && n < 5 && !t.abort.signal.aborted; n++) {
+              await helperFinished(60_000);
+              room = growBudget(HELPER_START_MIN_CSATS);
+            }
+            if (room !== "ok") {
+              outcome = { ...outcome, error: `${outcome.error ?? "The attempt failed."} No budget was left ${capped ? "of this piece's helper budget" : "in the session"} to retry it on a stronger model.` };
+              break;
+            }
+          }
         }
         checks.length = 0;
         let budgetHit = false;
@@ -867,7 +909,7 @@ export class TentacleManager {
           place === "local" ? this.d.localBackend!(localModel) : this.d.workerBackend(model, sessionId, { role: "worker" }),
           async () => {
             const hintsFor = (maxCSats: number) =>
-              workerHints(t.spec, { escalate: tierUp, promptChars: prompt.length, maxCSats, tentacleId: escalate && (again?.freshHost || !tierUp) ? `${t.view.id}:retry` : t.view.id, ...(place === "worker" && model === "auto" ? { minParamsB: minB } : {}) });
+              workerHints(t.spec, { escalate: tierUp, promptChars: prompt.length, maxCSats, tentacleId: escalate && (again?.freshHost || !tierUp) ? `${t.view.id}:retry` : t.view.id, ...(place === "worker" && model === "auto" ? { minParamsB: tierUp ? Math.max(minB, TENTACLE_RETRY_MIN_PARAMS_B) : minB } : {}) });
             // Run 15: after a busy refusal, back off first (its hold given back meanwhile, so others may use it).
             if (busyWaitMs > 0) {
               const ms = busyWaitMs;
@@ -1090,7 +1132,10 @@ export class TentacleManager {
         if (modelError && !summary) {
           outcome = { status: "error", summary, error: modelError };
           lastFailure = `The model call failed: ${modelError}`;
-          if (empty === "empty_reply") markEmpty(empty);
+          // Run 19 (isEven): a repetition / degenerate-output stop is the model, not the machine: the retry
+          // moves up (the stronger tier's size floor), not to another machine of the same size.
+          if (isDegenerateStop(modelError) && place === "worker") retry = { ...retryAfterEmpty(model, minB, "no_file"), note: "the helper's output degenerated (a repetition stop); retrying on a stronger model" };
+          else if (empty === "empty_reply") markEmpty(empty);
           continue;
         }
         if (empty === "empty_reply") {
@@ -1170,6 +1215,11 @@ export class TentacleManager {
 
   private finish(sessionId: string, t: Internal, status: TentacleStatus, result?: TentacleResult, why?: string, ws?: Workspace | null): void {
     if (["passed", "failed", "error", "cancelled"].includes(t.view.status)) return;
+    // Run 19: what this piece cost so far, for a re-delegation of it (delegate).
+    if (t.spent > 0) {
+      const stp = this.sessions.get(sessionId);
+      if (stp) (stp.pieceSpent ??= new Map()).set(taskKey(t.spec), round((stp.pieceSpent.get(taskKey(t.spec)) ?? 0) + t.spent));
+    }
     t.view.status = status;
     t.view.finishedAt = Date.now();
     t.view.cSats = round(t.spent);

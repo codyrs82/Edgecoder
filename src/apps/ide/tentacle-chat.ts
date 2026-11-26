@@ -248,6 +248,20 @@ export function isProviderTierError(modelError: string | undefined): boolean {
  */
 export const TENTACLE_HELPER_MIN_PARAMS_B = 7;
 
+/**
+ * Network run 19: the size floor of a helper's automatic retry on auto (the "stronger tier"). The
+ * retry used to keep the 7B floor, so it landed on the same kind of model: sumArray's 7B helper
+ * printed its test instead of writing it on both attempts, and isEven's 7B attempts both ended in a
+ * repetition stop. A writing helper starts at TENTACLE_HELPER_MIN_PARAMS_B (most 7B helpers passed in
+ * runs 18-19) and its retry asks for at least this (the GPU 30b or the cloud).
+ */
+export const TENTACLE_RETRY_MIN_PARAMS_B = 14;
+
+/** Whether a failed model call ended on degenerate output (a repetition or token-repeat stop: src/swarm/inference-degeneracy.ts). */
+export function isDegenerateStop(modelError: string | undefined): boolean {
+  return !!modelError && /degenerate|repeated_ngram|repeated_chars|dominant_token|repetition|token[- ]repeat|repeat limit/i.test(modelError);
+}
+
 function minBFrom(v: string | undefined, dflt: number): number {
   const n = Number(v);
   return v && Number.isFinite(n) && n >= 0 ? n : dflt;
