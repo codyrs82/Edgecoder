@@ -22,16 +22,23 @@
  *   jitter). Draining (`draining: true`) or no answer: keep serving through the peer. An answer
  *   without `draining` is the restarted instance.
  * - returning: after another random delay (HOME_RETURN_JITTER_MS: the restarted instance gets its
- *   agents spread out, as the reconnect frame's jitter does) the worker switches back and registers
- *   at home, once the calls the peer gave it are done (at most HOME_RETURN_HOLD_MAX_MS; meanwhile it
- *   takes nothing new). If that register fails as a restart failure does, it goes back to the peer
- *   and probes again.
+ *   agents spread out, as the reconnect frame's jitter does), once the calls the peer gave it are done
+ *   (at most HOME_RETURN_HOLD_MAX_MS; meanwhile it takes nothing new), it registers at home.
+ * - homing (make before break, ReturnHome below; network run 15): that registration runs beside the
+ *   loop while the agent stays registered, bound and pulling at the peer. Only once home has accepted
+ *   it does the worker switch to home (and rebind its mesh socket there). If it fails or takes longer
+ *   than HOME_REGISTER_TIMEOUT_MS, the agent never left the peer: it probes home again and retries.
  *
  * Bounded: after DRAIN_AWAY_MAX_MS away the agent stops probing and stays where it is (steering
  * decides from then on, as for any other coordinator change).
  */
 
 export const DRAIN_FAILOVER_JITTER_MS = 1_000;
+/**
+ * Moving to a peer the notice named: wait at most this for a steering round (network run 15: a
+ * round probes the draining home too, and a home already stopped can hold each probe to its timeout).
+ */
+export const DRAIN_STEER_WAIT_MS = 1_500;
 export const HOME_PROBE_MS = 2_000;
 export const HOME_PROBE_JITTER_MS = 1_000;
 export const HOME_RETURN_JITTER_MS = 3_000;
@@ -215,5 +222,84 @@ export class DrainFailover {
 
   private probeWait(): number {
     return HOME_PROBE_MS + Math.floor(this.random() * HOME_PROBE_JITTER_MS);
+  }
+}
+
+/**
+ * The home registration's bound (network run 15: the agent switched to a just-booted home and
+ * registered with the usual 15 s timeout and two retries, so it served nowhere for 10-25 s).
+ */
+export const HOME_REGISTER_TIMEOUT_MS = 8_000;
+
+export interface ReturnHomeDeps {
+  failover: DrainFailover;
+  /** Calls the peer gave this agent that still run. */
+  peerCallsInFlight(): number;
+  /** Prove home's key and register there, without switching to it; rejects on any failure. */
+  registerAtHome(home: string): Promise<void>;
+  /** Home accepted the registration: make it the active coordinator (and leave the peer). */
+  switchHome(home: string): void;
+  /** Wake the worker's loop (the registration ended). */
+  wake(): void;
+  log?(msg: string): void;
+  now?(): number;
+}
+
+export type ReturnHomeStep = "idle" | "holding" | "registering" | "switched" | "failed";
+
+/**
+ * The return home, make before break (network run 15, outage test 3b: the US seed was back 8 s after
+ * its restart; its agents left the EU peer as soon as it answered and then took 10-25 s to register
+ * on it, listed by neither coordinator meanwhile). Driven once per loop pass, after the failover's
+ * other steps; the registration itself runs beside the loop, so the agent keeps pulling the peer.
+ */
+export class ReturnHome {
+  private inFlight: Promise<void> | null = null;
+  private outcome: { ok: true } | { ok: false; error: string } | null = null;
+
+  constructor(private readonly d: ReturnHomeDeps) {}
+
+  /** A home registration is running. */
+  get registering(): boolean {
+    return this.inFlight !== null && this.outcome === null;
+  }
+
+  step(): ReturnHomeStep {
+    const f = this.d.failover;
+    const now = this.d.now?.() ?? Date.now();
+    const home = f.home;
+    if (this.outcome) {
+      const o = this.outcome;
+      this.outcome = null;
+      this.inFlight = null;
+      // A new drain signal or another coordinator change meanwhile: that one stands.
+      if (!home || f.state !== "homing") return "idle";
+      if (o.ok) {
+        this.d.switchHome(home);
+        f.registered(home);
+        return "switched";
+      }
+      f.homeNotReady(now);
+      this.d.log?.(`${home} did not take the registration yet (${o.error.slice(0, 160)}); still serving through ${f.away}`);
+      return "failed";
+    }
+    if (this.inFlight) return "registering";
+    if (!home || !f.returnDue(now)) return "idle";
+    // The peer's own calls first (the pull meanwhile reports no free slot, so the peer neither gives
+    // more nor takes them back as from a host that stopped pulling).
+    if (f.holdingForPeerCalls(this.d.peerCallsInFlight(), now)) return "holding";
+    f.homing();
+    this.inFlight = this.d
+      .registerAtHome(home)
+      .then(
+        () => {
+          this.outcome = { ok: true };
+        },
+        (err: unknown) => {
+          this.outcome = { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      )
+      .finally(() => this.d.wake());
+    return "registering";
   }
 }

@@ -82,7 +82,7 @@ import { createOllamaAdmin, diskSpace, ollamaModelsDir, registryModelSize } from
 import { remoteControlEnabled, resolveAllowlist } from "../model/remote-control/policy.js";
 import { MODEL_CONTROL_FRAME_TYPE } from "../model/remote-control/protocol.js";
 import { COORDINATOR_DRAIN_NOTICE_FRAME_TYPE, COORDINATOR_RECONNECT_FRAME_TYPE, CoordinatorReconnectState, CoordinatorRestartWindow, RESTART_REQUEST_TIMEOUT_MS, MESH_WS_REBIND_TERMINATE_MS, isDrainingError, isRestartTransientError, isRestartClose, nextMeshWsDelay, verifyCoordinatorDrainNoticeFrame, verifyCoordinatorReconnectFrame } from "../mesh/coordinator-reconnect.js";
-import { DrainFailover, homeProbeState } from "../mesh/drain-failover.js";
+import { DRAIN_STEER_WAIT_MS, DrainFailover, HOME_REGISTER_TIMEOUT_MS, homeProbeState, ReturnHome } from "../mesh/drain-failover.js";
 import { BOT_CONTROL_FRAME_TYPE, botRelayMode } from "../common/bot-relay.js";
 import { BotRelayAgent, httpProviderClient } from "./bot-relay-agent.js";
 import { CODE_CONTROL_FRAME_TYPE, codeRelayMode } from "../common/code-relay.js";
@@ -1518,7 +1518,7 @@ async function probeDrainHome(url: string): Promise<"up" | "draining" | "down"> 
  * One step of a drain failover (drain-failover.ts), at the top of an online pass: move to a peer
  * when due, probe the home while away, switch back once it answers without draining.
  */
-async function stepDrainFailover(): Promise<void> {
+async function stepDrainFailover(homeReturn: ReturnHome): Promise<void> {
   const now = Date.now();
   // Something else moved the agent meanwhile (steering, the usual failover): that choice stands.
   if (drainFailover.state === "away" && coordinator.url !== drainFailover.away) {
@@ -1527,7 +1527,12 @@ async function stepDrainFailover(): Promise<void> {
     return;
   }
   if (drainFailover.failoverDue(now)) {
-    const steered = await steerCoordinator().catch(() => null);
+    // Run 15: a steering round probes the draining home too, and a home already stopped can hold each
+    // probe up to its timeout; with a peer named by the notice, the move does not wait past DRAIN_STEER_WAIT_MS.
+    const steering = steerCoordinator().catch(() => null);
+    const steered = drainFailover.peerHint
+      ? await Promise.race([steering, new Promise<null>((r) => setTimeout(() => r(null), DRAIN_STEER_WAIT_MS).unref?.())])
+      : await steering;
     const peer = drainFailover.pickPeer([steered?.url, drainFailover.peerHint]);
     if (!peer) {
       drainFailover.noPeer();
@@ -1551,14 +1556,8 @@ async function stepDrainFailover(): Promise<void> {
     }
     return;
   }
-  if (home && drainFailover.returnDue(now)) {
-    // The peer's own calls first (the pull meanwhile reports no free slot, so the peer neither gives
-    // more nor takes them back as from a host that stopped pulling).
-    if (drainFailover.holdingForPeerCalls(claimsInFlightFor(drainFailover.away), now)) return;
-    coordinator.set(home, "drain_return");
-    registeredWithUrl = null;
-    drainFailover.homing();
-  }
+  // Back home, make before break: registered there first, beside the loop, then switched (ReturnHome).
+  if (home) homeReturn.step();
 }
 function onCoordinatorReconnectFrame(message: unknown, coordinatorUrl: string, ws: { close: (code?: number, reason?: string) => void }): void {
   let verified: { peerId: string; publicKeyPem: string } | null = null;
@@ -2187,6 +2186,45 @@ async function loop(): Promise<void> {
     };
   };
 
+  // The return home after a drain, make before break (drain-failover.ts ReturnHome): home proves its
+  // key and takes the registration while this agent still serves through the peer; then it switches.
+  let homeRegistration: { target: CoordinatorTarget; response: RegisterReply & { meshToken?: string; rewardAccountId?: string; updateAvailable?: string } } | null = null;
+  const homeReturn = new ReturnHome({
+    failover: drainFailover,
+    peerCallsInFlight: () => claimsInFlightFor(drainFailover.away),
+    registerAtHome: async (home) => {
+      homeRegistration = null;
+      const check = await coordinatorTrust.check(home);
+      if (!check.trusted || !check.peerId || !check.publicKeyPem) throw new Error(`home not verified: ${describeTrustFailure(check)}`);
+      const target: CoordinatorTarget = { url: home, identity: { peerId: check.peerId, publicKeyPem: check.publicKeyPem, responseSigning: check.responseSigning === true } };
+      const response = await post("/register", await buildRegisterBody(readAgentPowerTelemetry()), { signed: true, to: target, retries: 0, timeoutMs: HOME_REGISTER_TIMEOUT_MS });
+      homeRegistration = { target, response };
+    },
+    switchHome: (home) => {
+      const reg = homeRegistration;
+      homeRegistration = null;
+      if (!reg || reg.target.url !== home) return;
+      const peer = coordinator.url;
+      coordinator.adopt(reg.target.url, reg.target.identity, "drain_return");
+      registeredWithUrl = coordinator.url;
+      lastRegisteredAtMs = Date.now();
+      coordinatorReconnect.registered();
+      restartWindow.close();
+      console.log(`[agent:${AGENT_ID}] back with ${home} after its restart (registered there before leaving ${peer})`);
+      // Results owed to it that could not be delivered while it restarted.
+      void flushPendingResults().catch(() => undefined);
+      // The mesh socket moves home now (closeForRebind: within a fraction of a second).
+      noteRegistered(true);
+      console.log(registeredLogLine(AGENT_ID, coordinator.url, reg.response));
+      servingJobs.setGrant(reg.response?.hardwareVerification?.grantedClass, reg.response?.hardwareVerification?.grantedTier);
+      lifecycle.noteAccepted();
+      adoptMeshToken(reg.response.meshToken);
+      adoptRewardAccount(reg.response.rewardAccountId);
+    },
+    wake: () => wakeLoop(false),
+    log: (msg) => console.warn(`[agent:${AGENT_ID}] ${msg}`)
+  });
+
   let bleTaskTestDone = false;
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -2196,7 +2234,7 @@ async function loop(): Promise<void> {
       if (coordinatorOnline) {
         // ═══ ONLINE PATH: all coordinator HTTP calls ═══
         // A planned drain: move to a peer, probe the home, come back (drain-failover.ts).
-        if (drainFailover.active()) await stepDrainFailover();
+        if (drainFailover.active()) await stepDrainFailover(homeReturn);
         // The coordinator said it is restarting: register again only once its delay is up
         // (while a drain failover is about to move us, only briefly).
         const reconnectHoldMs = coordinatorReconnect.holdMs();
@@ -2306,12 +2344,6 @@ async function loop(): Promise<void> {
             coordinatorReconnect.registered();
             if (restartWindow.active()) console.log(`[agent:${AGENT_ID}] registered again after the coordinator restart`);
             restartWindow.close();
-            if (drainFailover.state === "homing") {
-              drainFailover.registered(coordinator.url);
-              console.log(`[agent:${AGENT_ID}] back with ${coordinator.url} after its restart`);
-              // Results owed to it that could not be delivered while it restarted.
-              void flushPendingResults().catch(() => undefined);
-            }
             noteRegistered(freshRegistration);
             console.log(registeredLogLine(AGENT_ID, coordinator.url, registerResponse));
             updateDrain?.write();
@@ -3078,14 +3110,6 @@ async function loop(): Promise<void> {
       // mode. Only once it has had RESTART_FAILOVER_AFTER_MS does the agent look for another coordinator.
       // Coming home after a drain failover, the restarted instance was not ready after all: back to
       // the peer, which still has us registered, and probe again.
-      if (coordinatorOnline && drainFailover.state === "homing" && isRestartTransientError(error)) {
-        const peer = drainFailover.homeNotReady();
-        if (peer && coordinator.set(peer, "drain_return_not_ready")) {
-          registeredWithUrl = null;
-          console.warn(`[agent:${AGENT_ID}] ${drainFailover.home} not ready yet (${String(error).slice(0, 120)}); serving through ${peer} meanwhile`);
-          continue;
-        }
-      }
       if (coordinatorOnline && isDrainingError(error)) onPlannedDrain("register_draining", coordinator.url);
       if (coordinatorOnline && restartWindow.active() && isRestartTransientError(error)) {
         registeredWithUrl = null;
