@@ -303,3 +303,62 @@ export class ReturnHome {
     return "registering";
   }
 }
+
+export interface HomeProbeDeps {
+  failover: DrainFailover;
+  /** GET /identity at home (bounded by its own timeout); "down" on any failure. */
+  probe(home: string): Promise<HomeProbeState>;
+  /** Home answered without draining: the return is scheduled in `waitMs`. */
+  onBack(home: string, waitMs: number): void;
+  /** Wake the worker's loop (the probe ended). */
+  wake(): void;
+  now?(): number;
+}
+
+/**
+ * The home probe while away, beside the loop (network run 19, outage 3b: while the US seed booted,
+ * Fly's proxy held each GET /identity for its full 3 s timeout, and the probe ran inside the loop
+ * every 2-3 s: the agents serving through the EU seed hardly pulled there, so calls held for a
+ * "ready" host there were refused at the decision bound). One probe at a time; driven once per pass.
+ */
+export class HomeProbe {
+  private inFlight = false;
+
+  constructor(private readonly d: HomeProbeDeps) {}
+
+  get probing(): boolean {
+    return this.inFlight;
+  }
+
+  step(): "idle" | "probing" | "started" {
+    const f = this.d.failover;
+    const home = f.home;
+    if (this.inFlight) return "probing";
+    if (!home || !f.homeProbeDue(this.d.now?.() ?? Date.now())) return "idle";
+    this.inFlight = true;
+    void this.d
+      .probe(home)
+      .catch((): HomeProbeState => "down")
+      .then((state) => {
+        // A new drain signal or another coordinator change meanwhile: onHomeProbe ignores it (not away).
+        if (f.home === home && f.onHomeProbe(state, this.d.now?.() ?? Date.now())) this.d.onBack(home, f.msUntilDue(this.d.now?.() ?? Date.now()));
+      })
+      .finally(() => {
+        this.inFlight = false;
+        this.d.wake();
+      });
+    return "started";
+  }
+}
+
+/**
+ * The last pull an agent sends the peer as it goes home (network run 19, outage 3b: iad switched
+ * home at 17:17:23; at 17:17:24.6 the EU seed still counted it ready (pulled 5 s before, its slot
+ * free by count) and held a call for it, refused at the decision bound, inf-1795713444539-5ce2d899).
+ * It reports no free slot and no nudges (`wake` false): the peer neither waits for it nor counts it
+ * as room, and the calls the peer gave it go on reporting there (nothing is released, unlike a
+ * goingOffline heartbeat).
+ */
+export function leavingPullBody(input: { agentId: string; slots: number; contextWindow?: number }): Record<string, unknown> {
+  return { agentId: input.agentId, inferenceSlots: Math.max(1, input.slots), freeInferenceSlots: 0, wake: false, ...(input.contextWindow ? { contextWindow: input.contextWindow } : {}) };
+}

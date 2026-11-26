@@ -130,3 +130,60 @@ describe("load-aware coordinator pick for network calls", () => {
     expect(await queueOf(90_000)).toBe(90_000);
   });
 });
+
+/*
+ * Network run 19, outage 3b: while the US seed booted, Fly's proxy held each capacity probe to it
+ * for the full 2 s timeout, and every pick waited for it before choosing the EU seed. The probes at
+ * +26.8 s and +35.8 s reached the EU seed 2.05 s after they were sent and were refused at 3.8 s.
+ */
+describe("a coordinator whose report hangs (run 19: booting behind the proxy)", () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  function hanging(slowMs: number) {
+    let usProbes = 0;
+    const d = createChatCapacityDirectory({
+      candidates: async () => [US, EU],
+      allowed: () => true,
+      ttlMs: 60_000,
+      slowReportGraceMs: 150,
+      probe: async (url) => {
+        if (url === US) {
+          usProbes++;
+          await sleep(slowMs);
+          return { reachable: false };
+        }
+        await sleep(20);
+        return report(3);
+      },
+    });
+    return { d, probes: () => usProbes };
+  }
+
+  it("a load pick does not wait out the slow report once another coordinator has answered", async () => {
+    const { d } = hanging(1_500);
+    const t0 = Date.now();
+    const pick = await d.pick({ kind: "network", model: MODEL });
+    expect(pick.url).toBe(EU);
+    expect(Date.now() - t0).toBeLessThan(600);
+  });
+
+  it("the slow probe goes on and fills the cache: the next pick in its window shares it, still bounded", async () => {
+    const { d, probes } = hanging(1_000);
+    await d.pick({ kind: "network", model: MODEL });
+    const t0 = Date.now();
+    expect((await d.pick({ kind: "network", model: MODEL })).url).toBe(EU);
+    expect(Date.now() - t0).toBeLessThan(600);
+    expect(probes()).toBe(1);
+  });
+
+  it("with every report slow, the pick still waits for them (nothing else to choose from)", async () => {
+    const d = createChatCapacityDirectory({ candidates: async () => [US, EU], allowed: () => true, ttlMs: 60_000, slowReportGraceMs: 50, probe: async () => (await sleep(300), report(2)) });
+    expect((await d.pick({ kind: "network", model: MODEL })).url).toBe(US);
+  });
+
+  it("model auto: the same bound", async () => {
+    const { d } = hanging(1_500);
+    const t0 = Date.now();
+    expect(await d.pickAuto()).toBe(EU);
+    expect(Date.now() - t0).toBeLessThan(600);
+  });
+});
