@@ -158,6 +158,9 @@ Listeners on an agent install:
     `/register` response; it refuses and logs everything else, including any offer from a
     coordinator that predates this check. A sending worker backs off an hour from a peer that
     refused it.
+  - Mesh tunnels follow the same rule: `/agent-mesh/peers/:agentId` lists only same-account peers,
+    `/agent-mesh/connect` refuses the rest (logged as `agent_mesh_connect_refused`, at most once an
+    hour per agent pair), and the worker skips a peer for an hour after a refused connect.
 
 **Residual risk**
 

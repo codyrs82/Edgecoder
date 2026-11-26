@@ -28,13 +28,29 @@ import {
   DIRECT_WORK_INPUT_MAX_CHARS
 } from "../agent-state.js";
 import { requireMeshToken, requireAgentSelf, agentSignatureAtGate } from "../auth.js";
-import { verifiedAccountOf } from "../agent-accounts.js";
+import { accountsFor, verifiedAccountOf } from "../agent-accounts.js";
 import { DIRECT_WORK_MARKET_HINT, directWorkAccountDecision, type DirectWorkAccountDecision } from "../../direct-work-policy.js";
 
 /** Direct work is unpaid: only between agents of the same verified account (src/swarm/direct-work-policy.ts). */
 async function directWorkAccounts(fromAgentId: string, toAgentId: string): Promise<DirectWorkAccountDecision> {
   const [from, to] = await Promise.all([verifiedAccountOf(fromAgentId), verifiedAccountOf(toAgentId)]);
   return directWorkAccountDecision(from, to);
+}
+
+/** A refused /agent-mesh/connect is logged at most once per agent pair per hour. */
+export const CONNECT_REFUSAL_LOG_INTERVAL_MS = 60 * 60_000;
+const connectRefusalLoggedAt = new Map<string, number>();
+
+export function shouldLogConnectRefusal(fromAgentId: string, toAgentId: string, nowMs: number): boolean {
+  const key = pairKey(fromAgentId, toAgentId);
+  const last = connectRefusalLoggedAt.get(key);
+  if (last !== undefined && nowMs - last < CONNECT_REFUSAL_LOG_INTERVAL_MS) return false;
+  if (connectRefusalLoggedAt.size >= 10_000) {
+    for (const [k, at] of connectRefusalLoggedAt) if (nowMs - at >= CONNECT_REFUSAL_LOG_INTERVAL_MS) connectRefusalLoggedAt.delete(k);
+    if (connectRefusalLoggedAt.size >= 10_000) connectRefusalLoggedAt.clear();
+  }
+  connectRefusalLoggedAt.set(key, nowMs);
+  return true;
 }
 
 export function registerAgentMeshRoutes(app: CoordinatorApp): void {
@@ -45,9 +61,13 @@ export function registerAgentMeshRoutes(app: CoordinatorApp): void {
     const signer = agentSignatureAtGate(headers, "GET", String(req.url ?? "").split("?")[0]);
     if (signer !== params.agentId && !requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
     if (activeBlacklistRecord(params.agentId)) return reply.code(403).send({ error: "agent_blacklisted" });
-    const peers = [...agentCapabilities.keys()].filter(
+    const candidates = [...agentCapabilities.keys()].filter(
       (id) => id !== params.agentId && !activeBlacklistRecord(id)
     );
+    // Only peers this agent may open a tunnel to (/agent-mesh/connect): same verified account.
+    const accounts = await accountsFor([params.agentId, ...candidates], Date.now());
+    const own = accounts.get(params.agentId) ?? null;
+    const peers = candidates.filter((id) => directWorkAccountDecision(own, accounts.get(id) ?? null).ok);
     return { peers };
   });
 
@@ -87,7 +107,9 @@ export function registerAgentMeshRoutes(app: CoordinatorApp): void {
     }
     const accounts = await directWorkAccounts(body.fromAgentId, body.toAgentId);
     if (!accounts.ok) {
-      app.log.warn({ fromAgentId: body.fromAgentId, toAgentId: body.toAgentId, reason: accounts.error }, "direct_work_offer_refused");
+      if (shouldLogConnectRefusal(body.fromAgentId, body.toAgentId, Date.now())) {
+        app.log.warn({ fromAgentId: body.fromAgentId, toAgentId: body.toAgentId, reason: accounts.error }, "agent_mesh_connect_refused");
+      }
       return reply.code(403).send({ error: accounts.error, message: DIRECT_WORK_MARKET_HINT, market: "/submit" });
     }
     const existing = tunnelByPairKey.get(pairKey(body.fromAgentId, body.toAgentId));
