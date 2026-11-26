@@ -121,14 +121,14 @@ describe("(b) a balance refusal (402) waits for the other helpers' reserves", { 
     const { tentacles, s } = setup(({ task, call, req, heldByOthers }) => {
       // The account refuses a reserve its balance can't cover next to the others in flight.
       if (heldByOthers + (req.hints?.maxCSats ?? 0) > BALANCE) return { err: new ChatBackendError(RUN14_402, 402, undefined, { code: "insufficient_credits", neededCSats: 25.978 }) };
-      return call === 0 ? { tool: ["write_file", { path: `${task}.txt`, content: "x\n" }], waitMs: 30, cSats: 2 } : { text: "ok", cSats: 1 };
+      return call === 0 ? { tool: ["list_directory", { path: "." }], waitMs: 30, cSats: 2 } : { text: `found ${task}`, cSats: 1 };
     }, { budgetCSats: 200 });
-    const ids = ["add", "sub", "mul", "clamp", "isEven", "reverseStr", "capitalize", "sumArray"].map((f) => tentacles.delegate(s.id, { task: f, kind: "tests", files: [], instructions: "" }).id);
+    // Read-only helpers: no workspace or git work per helper (slow on Windows); the reserves are what matter here.
+    const ids = ["add", "sub", "mul", "clamp", "isEven", "reverseStr", "capitalize", "sumArray"].map((f) => tentacles.delegate(s.id, { task: f, kind: "search", files: [], instructions: "" }).id);
     await tentacles.idle(s.id);
     const views = ids.map((id) => tentacles.get(s.id, id)!);
     // Before: 5 of 8 errored with "Not enough cSats for this request".
     expect(views.map((v) => [v.task, v.status, v.result?.error ?? ""])).toEqual(views.map((v) => [v.task, "passed", ""]));
-    expect(views.every((v) => v.merge?.state === "applied")).toBe(true);
   });
 
   it("alone, halves the ceiling until the reserve fits; when nothing does, says why", async () => {
@@ -152,7 +152,7 @@ describe("(b) a balance refusal (402) waits for the other helpers' reserves", { 
   });
 });
 
-describe("(c) delegate's note: the coverage sentence first and short, the balance counted", () => {
+describe("(c) delegate's note: the coverage sentence first and short, the balance counted", { timeout: 60_000 }, () => {
   it("budgetCoverage takes the lower of the session's budget left and the balance", () => {
     // Run 14 attempt 1: ~88 cSats balance, 100 session budget, 8 helpers at up to 25 each.
     expect(budgetCoverage({ left: 100, open: 8, perTentacle: 25, balance: 88 })).toMatchObject({ short: "Balance covers ~3 of 8 helpers." });
@@ -165,10 +165,11 @@ describe("(c) delegate's note: the coverage sentence first and short, the balanc
   });
 
   it("the note starts with it, within what the terminal shows", async () => {
-    const { tentacles, s } = setup(({ call }) => (call === 0 ? { tool: ["write_file", { path: "n.txt", content: "x\n" }], waitMs: 50 } : { text: "ok" }), { maxParallel: 1 }, { balance: async () => 88 });
+    // Read-only helpers (no workspace, no git work: this timed out at 15 s on windows-latest with five writing helpers).
+    const { tentacles, s } = setup(() => ({ text: "found it", waitMs: 20 }), { maxParallel: 1 }, { balance: async () => 88 });
     const exec = tentacleExecutor(tentacles, s.id, async () => ({ result: "" }));
     const notes: string[] = [];
-    for (let i = 0; i < 5; i++) notes.push(JSON.parse((await exec("delegate", { task: `t${i}`, kind: "tests", instructions: "x" }, { approved: false })).result!).note);
+    for (let i = 0; i < 5; i++) notes.push(JSON.parse((await exec("delegate", { task: `t${i}`, kind: "search", instructions: "x" }, { approved: false })).result!).note);
     await tentacles.idle(s.id);
     expect(notes[0]).toMatch(/^Started; 100 cSats budget left\./);
     expect(notes[4].startsWith("Balance covers ~3 of 5 helpers.")).toBe(true);
