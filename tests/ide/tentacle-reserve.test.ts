@@ -434,12 +434,12 @@ describe("helper floor and provider errors (D3, D4, C7)", { timeout: 60_000 }, (
     expect(progress.filter((p) => /another machine at this tier \(the next tier's provider returned an error lately\)/.test(p)).length).toBeGreaterThanOrEqual(2);
   });
 
-  it("without a provider error, a failed check still moves up a tier", async () => {
+  it("without a provider error, a failed check still moves up a tier, to the retry size floor (run 19: ≥14B)", async () => {
     const { tentacles, s, requests } = setup(({ call, req }) => (call === 0 ? { tool: ["write_file", { path: "n.txt", content: req.hints?.quality === "best" ? "right\n" : "wrong\n" }] } : { text: "wrote n" }), { workerModel: "auto" });
     const v = tentacles.delegate(s.id, { task: "n", kind: "code_edit", files: [], instructions: "", acceptance: { kind: "grep", args: { pattern: "right", paths: ["n.txt"] } } });
     await tentacles.idle(s.id);
     expect(tentacles.get(s.id, v.id)!.status).toBe("passed");
-    expect(requests.at(-1)!.req.hints).toMatchObject({ quality: "best", minParamsB: 7 });
+    expect(requests.at(-1)!.req.hints).toMatchObject({ quality: "best", minParamsB: 14 });
   });
 
   it("keeps a network helper's history short (compacts past HELPER_COMPACT_AT_TOKENS)", async () => {
