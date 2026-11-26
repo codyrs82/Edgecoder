@@ -241,7 +241,9 @@ export const coordinatorConfigSchema = z.object({
   // Run 9: a network call (a named model, not Auto, reserved or own-machine) nobody has claimed this
   // long after its submit is decided: refused now (503 busy, refunded in full) unless a host
   // with a free slot for it is about to take it, which gets one more such window. 0 turns it off.
-  INFERENCE_CLAIM_DECISION_MS: envInt(2_000, { min: 0, max: 60_000 }),
+  // Run 11: 1.5 s (was 2 s): refusals reached 3.44 s at the portal against a 2 s target; 87% of
+  // claims came within 0.5 s and a call with a host ready to claim it still waits (the second window).
+  INFERENCE_CLAIM_DECISION_MS: envInt(1_500, { min: 0, max: 60_000 }),
   // C9: a network call whose estimated start here (calls ahead / slots × typical service time) is
   // past this share of its timeout (and past the claim bound) is sent to a peer with a free slot
   // (route_elsewhere) or answered 503 no_capacity, before anything is reserved. 0 turns it off.

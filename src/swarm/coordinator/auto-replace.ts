@@ -36,7 +36,7 @@
  *
  * Run 9 (three standard Auto calls refused 25-48 s after submit: placed on a host that did not take
  * them, re-placed after 12 s onto busy hosts, ended by the 45 s claim bound): with
- * INFERENCE_CLAIM_DECISION_MS (default 2 s) an Auto call is decided as a named call is, within
+ * INFERENCE_CLAIM_DECISION_MS (default 1.5 s since run 11) an Auto call is decided as a named call is, within
  * about 1.5 times that of its placement, a little more after a late re-placement (decideAuto):
  *
  * - at the decision time, still unclaimed: it waits once more (a quarter window) only while the host it
@@ -49,6 +49,24 @@
  *   in full: nothing was charged).
  *
  * INFERENCE_CLAIM_DECISION_MS=0 restores the fixed BEST_FIT_REPLACE_MS wait above.
+ *
+ * Run 11 (simple Auto bursts: 14 of 40 refused "every machine that runs qwen2.5-coder:1.5b is busy"
+ * while the cloud host had 16/16 free). All 14 had been sent to the peer coordinator, which has no
+ * cloud host (fixed in routing.ts peerAgentViews: a peer's free slot is spoken for by the calls sent
+ * to it). Here too the overflow could be missed: best fit leaves the cloud out of a simple call while
+ * a non-cloud machine in its band has a free slot by count (best-fit.ts cloudConsidered), and the
+ * re-placement asked best fit with such machines still in its view (one excluded from the call, or
+ * one not pulling), so every candidate failed "could claim it now" and the call was refused; and the
+ * cloud was never tried at the decision bound or after the move limit. Now:
+ *
+ * - The re-placement leaves out the local hosts that could not claim the call now (nextPick): once
+ *   no non-cloud host is ready, the cloud host is overflow as best fit means it, and the call moves
+ *   there. Simple calls still stay off the cloud while a CPU/Mac host is ready (it is in the view).
+ * - Onto the cloud only when the call's reserve covers the cloud's worst case (inferenceCallReserve
+ *   for the cloud model); an Auto submit sets that much aside when a cloud host here could take its
+ *   overflow (cloudOverflowReserveMsat; the unused part is refunded at settle as always).
+ * - The cloud overflow is tried also at the decision bound and after AUTO_REPLACE_MAX moves (once):
+ *   the call is refused only when the cloud cannot take it either.
  */
 
 import type { JobDescriptor } from "../../inference-api/job-descriptor.js";
@@ -60,9 +78,10 @@ import type { Subtask } from "../../common/types.js";
 import { CC, queue, taskBilling, usagePending } from "./context.js";
 import { claimReadiness, couldClaimNow, preferAgent } from "./dispatch.js";
 import { agentHeldBack } from "./start-eta.js";
-import { MARKET_DEFAULT_BID_PREMIUM_BPS, orderBook, rateOracleConfig } from "./economy.js";
+import { inferenceCallReserve, MARKET_DEFAULT_BID_PREMIUM_BPS, orderBook, rateOracleConfig } from "./economy.js";
 import { agentUnavailable, circuitOpenSince, noteAgentOutcome as noteCircuitOutcome } from "./memory-admission.js";
-import { bestFitConfig, noteAgentOutcome as noteRoutingOutcome, noteReplaced, resolveAuto } from "./routing.js";
+import { bestFitConfig, localAgentViews, noteAgentOutcome as noteRoutingOutcome, noteReplaced, resolveAuto } from "./routing.js";
+import { classFamily } from "../../inference-api/auto-route.js";
 
 /** Re-placements per call. */
 export const AUTO_REPLACE_MAX = 2;
@@ -86,6 +105,8 @@ export interface AutoPlacement {
   decideBy?: number;
   /** Run 9: it already waited once more on its current agent. */
   graced?: boolean;
+  /** Run 11: it was moved to the cloud host as overflow past its decision bound or its move limit (once). */
+  overflowed?: boolean;
 }
 
 /** Run 9: the Auto decision window (INFERENCE_CLAIM_DECISION_MS); 0: the fixed BEST_FIT_REPLACE_MS wait. */
@@ -178,7 +199,7 @@ function schedule(p: AutoPlacement, ms: number, run: () => Promise<ReplaceOutcom
 }
 
 /** The call as it would be on `pick` (its model and class), to ask whether pick's host could claim it. */
-function asPlacedOn(st: Subtask, pick: Candidate): Subtask {
+function asPlacedOn(st: Subtask, pick: Pick<Candidate, "model" | "computeClass">): Subtask {
   const cls = ACCEPTED_COMPUTE_CLASS_IDS.includes(pick.computeClass) ? pick.computeClass : "any";
   return { ...st, requestedModel: pick.model, projectMeta: { ...st.projectMeta, computeClass: cls as ComputeClassId } };
 }
@@ -217,9 +238,13 @@ export async function decideAuto(p: AutoPlacement, nowMs = Date.now()): Promise<
     return "waiting";
   }
   if (currentCan && p.graced) notePickupFailure(p, nowMs);
-  const pick = !final && (p.replaced ?? 0) < AUTO_REPLACE_MAX ? await nextPick(p, nowMs) : undefined;
-  const out = pick ? moveTo(p, pick, nowMs, `re-placed: nobody picked it up within ${Math.round(Math.max(0, nowMs - (p.placedAtMs ?? nowMs)) / 100) / 10} s`) : "none";
+  const movesLeft = !final && (p.replaced ?? 0) < AUTO_REPLACE_MAX;
+  // Run 11: past its bound or its move limit, still the cloud overflow (once) before a refusal.
+  const pick = movesLeft ? await nextPick(p, nowMs) : !p.overflowed ? await nextPick(p, nowMs, { cloudOnly: true }) : undefined;
+  const waitedS = Math.round(Math.max(0, nowMs - (p.placedAtMs ?? nowMs)) / 100) / 10;
+  const out = pick ? moveTo(p, pick, nowMs, isCloudPick(pick) ? `re-placed: cloud overflow, no other host could start it within ${waitedS} s` : `re-placed: nobody picked it up within ${waitedS} s`) : "none";
   if (out === "replaced" || out === "same") {
+    if (!movesLeft) p.overflowed = true;
     p.graced = false;
     p.placedAtMs = nowMs;
     // The new host is nudged first (preferAgent) and gets at least a quarter window to pull.
@@ -228,11 +253,62 @@ export async function decideAuto(p: AutoPlacement, nowMs = Date.now()): Promise<
     return out;
   }
   if (out === "claimed" || !queue.isUnclaimed(p.subtaskId)) return "claimed";
+  // Before the refusal: it ends the call's pending usage, which holds its submit time.
+  const elapsedMs = nowMs - (usagePending.get(p.taskId)?.atMs ?? nowMs);
+  const currentReadiness = current ? claimReadiness(current, st, nowMs) : null;
   if (admission && (await admission.refuse(p))) {
-    app.log.warn({ taskId: p.taskId, subtaskId: p.subtaskId, reason: final ? "not_claimed_in_time" : "no_host_can_claim", elapsedMs: nowMs - (usagePending.get(p.taskId)?.atMs ?? nowMs), tried: p.tried, current: current ?? null, currentReadiness: current ? claimReadiness(current, st, nowMs) : null, final }, "auto_call_refused_no_host");
+    app.log.warn({ taskId: p.taskId, subtaskId: p.subtaskId, reason: final ? "not_claimed_in_time" : "no_host_can_claim", elapsedMs, tried: p.tried, current: current ?? null, currentReadiness, final }, "auto_call_refused_no_host");
     return "refused";
   }
   return "none";
+}
+
+const isCloudPick = (c: Pick<Candidate, "computeClass">) => c.computeClass === "cloud";
+
+/**
+ * Run 11: what an Auto call must have set aside to run on a cloud host here as overflow: the
+ * largest call reserve (economy.ts inferenceCallReserve, the call's worst case) among the cloud
+ * models best fit could move it to; 0 when no cloud host here could take it (none online, cloud
+ * models off for Auto, or the call is limited to a class without the cloud).
+ */
+export function cloudOverflowReserveMsat(call: { inputBytes: number; maxTokens: number; timeoutMs: number; maxCSats?: number; onlyClass?: string }, nowMs = Date.now()): number {
+  if (call.onlyClass && !classFamily(call.onlyClass).includes("cloud")) return 0;
+  let most = 0;
+  for (const a of localAgentViews(nowMs)) {
+    if (a.computeClass !== "cloud") continue;
+    for (const model of a.models) {
+      const r = inferenceCallReserve({ model, taskClass: "cloud", timeoutMs: call.timeoutMs, inputBytes: call.inputBytes, maxTokens: call.maxTokens, ...(call.maxCSats !== undefined ? { maxCSats: call.maxCSats } : {}) });
+      most = Math.max(most, r.reserveMsat);
+    }
+  }
+  return most;
+}
+
+/** The call's reserve covers `pick`'s worst case on the cloud (always true for a non-cloud pick: its estimate is checked). */
+function reserveCoversCloud(p: AutoPlacement, st: Subtask | undefined, pick: Candidate, reservedMsat: number): boolean {
+  if (!isCloudPick(pick) || !st || !(reservedMsat > 0)) return true;
+  let maxTokens = 0;
+  try {
+    maxTokens = Number(JSON.parse(st.input)?.maxTokens) || 0;
+  } catch {
+    maxTokens = 0;
+  }
+  const worst = inferenceCallReserve({ model: pick.model, taskClass: "cloud", timeoutMs: st.timeoutMs, inputBytes: Buffer.byteLength(st.input, "utf8"), maxTokens, ...(p.job.maxCSats !== undefined ? { maxCSats: p.job.maxCSats } : {}) });
+  return worst.reserveMsat <= reservedMsat;
+}
+
+/**
+ * Run 11: the local hosts that could not claim the call now on any model they hold (dispatch.ts
+ * couldClaimNow, not held back). Best fit leaves them out of a re-placement, so a host that is free
+ * by count but cannot start the call does not keep the cloud overflow out (cloudConsidered).
+ */
+function hostsNotReady(st: Subtask, skip: ReadonlySet<string>, nowMs: number): string[] {
+  const out: string[] = [];
+  for (const a of localAgentViews(nowMs)) {
+    if (skip.has(a.agentId)) continue;
+    if (!a.models.some((m) => hostCanStart(a.agentId, asPlacedOn(st, { model: m, computeClass: a.computeClass }), nowMs))) out.push(a.agentId);
+  }
+  return out;
 }
 
 /**
@@ -250,18 +326,27 @@ export function rearmAutoDecision(subtaskId: string, nowMs = Date.now()): boolea
   return true;
 }
 
-/** The first local candidate best fit gives for the call without the agents it tried, within its reserve. */
-async function nextPick(p: AutoPlacement, nowMs: number): Promise<Candidate | undefined> {
-  const { result } = await resolveAuto(p.job, { peers: false, requesterAccountId: p.accountId, excludeAgents: p.tried, clientRegion: p.clientRegion ?? null, ...(p.onlyClass ? { computeClass: p.onlyClass } : {}) }, nowMs);
-  const billing = taskBilling.get(p.taskId);
-  const budgetCSats = billing && billing.reservedMsat > 0 ? msatToCSats(billing.reservedMsat) : Infinity;
-  const seen = new Set<Candidate>();
+/**
+ * The first local candidate best fit gives for the call without the agents it tried and (run 11)
+ * without the hosts that could not claim it now, within its reserve (for a cloud host: the reserve
+ * covers the cloud's worst case). `cloudOnly`: only a cloud host (the overflow past the call's
+ * decision bound or move limit).
+ */
+async function nextPick(p: AutoPlacement, nowMs: number, opts: { cloudOnly?: boolean } = {}): Promise<Candidate | undefined> {
   const st = queue.getSubtask(p.subtaskId);
+  const tried = new Set(p.tried);
+  const excludeAgents = st ? [...tried, ...hostsNotReady(st, tried, nowMs)] : [...tried];
+  const { result } = await resolveAuto(p.job, { peers: false, requesterAccountId: p.accountId, excludeAgents, clientRegion: p.clientRegion ?? null, ...(p.onlyClass ? { computeClass: p.onlyClass } : {}) }, nowMs);
+  const billing = taskBilling.get(p.taskId);
+  const reservedMsat = billing?.reservedMsat ?? 0;
+  const budgetCSats = reservedMsat > 0 ? msatToCSats(reservedMsat) : Infinity;
+  const seen = new Set<Candidate>();
   return [result.chosen, ...result.candidates].find((c): c is Candidate => {
     if (!c || seen.has(c)) return false;
     seen.add(c);
+    if (opts.cloudOnly && !isCloudPick(c)) return false;
     // Run 9: only onto a host that could claim it now (not a busy one).
-    return c.local && c.estimate.cSats <= budgetCSats && (admission?.fits(p, c, nowMs) ?? true) && (!st || hostCanStart(c.agentId, asPlacedOn(st, c), nowMs));
+    return c.local && c.estimate.cSats <= budgetCSats && reserveCoversCloud(p, st, c, reservedMsat) && (admission?.fits(p, c, nowMs) ?? true) && (!st || hostCanStart(c.agentId, asPlacedOn(st, c), nowMs));
   });
 }
 
