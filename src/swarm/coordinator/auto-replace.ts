@@ -107,6 +107,8 @@ export interface AutoPlacement {
   graced?: boolean;
   /** Run 11: it was moved to the cloud host as overflow past its decision bound or its move limit (once). */
   overflowed?: boolean;
+  /** Run 14: its decision bound from its (re)placement: a later move does not extend it (only the cloud overflow does). */
+  boundAt?: number;
 }
 
 /** Run 9: the Auto decision window (INFERENCE_CLAIM_DECISION_MS); 0: the fixed BEST_FIT_REPLACE_MS wait. */
@@ -121,8 +123,13 @@ export function autoDecisionMs(): number {
  * quarter window to pull; past the bound only the cloud overflow is tried).
  */
 export const AUTO_FIRST_DECISION = 0.75;
-/** Run 9: an Auto call is claimed or refused within this many decision windows of its placement (run 12: 1.25, was 1.5). */
-export const AUTO_DECISION_BOUND = 1.25;
+/**
+ * Run 9: an Auto call is claimed or refused within this many decision windows of its placement
+ * (run 12: 1.25, was 1.5; run 14: 1.2, as named calls: a move onto another host late in the window
+ * gets what is left of it, not a quarter window past it). Only the cloud overflow, tried last, may
+ * run past it (its host claims at once).
+ */
+export const AUTO_DECISION_BOUND = 1.2;
 
 export type ReplaceOutcome = "claimed" | "same" | "none" | "replaced" | "refused" | "waiting";
 
@@ -168,7 +175,7 @@ export function armAutoReplace(p: AutoPlacement, ms?: number, nowMs = Date.now()
   autoCalls.set(p.subtaskId, p);
   const decision = autoDecisionMs();
   if (decision > 0) {
-    if (p.decideBy === undefined) p.decideBy = nowMs + Math.round(decision * AUTO_DECISION_BOUND);
+    if (p.decideBy === undefined) p.decideBy = p.boundAt = nowMs + Math.round(decision * AUTO_DECISION_BOUND);
     if (p.placedAtMs === undefined) p.placedAtMs = nowMs;
     const wait = Math.max(0, Math.min(ms ?? Math.round(decision * AUTO_FIRST_DECISION), p.decideBy - nowMs));
     schedule(p, wait, () => decideAuto(p));
@@ -255,9 +262,10 @@ export async function decideAuto(p: AutoPlacement, nowMs = Date.now()): Promise<
     if (!movesLeft) p.overflowed = true;
     p.graced = false;
     p.placedAtMs = nowMs;
-    // The new host is nudged first (preferAgent) and gets at least a quarter window to pull.
-    p.decideBy = Math.max(p.decideBy ?? nowMs, nowMs + quarter);
-    armAutoReplace(p, quarter, nowMs);
+    // The new host is nudged first (preferAgent) and gets up to a quarter window to pull: within the
+    // call's bound (run 14), except the cloud overflow tried last, which gets its quarter.
+    p.decideBy = !movesLeft ? nowMs + quarter : Math.max(p.decideBy ?? nowMs, Math.min(nowMs + quarter, p.boundAt ?? Infinity));
+    armAutoReplace(p, Math.max(1, Math.min(quarter, p.decideBy - nowMs)), nowMs);
     return out;
   }
   if (out === "claimed" || !queue.isUnclaimed(p.subtaskId)) return "claimed";
@@ -344,6 +352,11 @@ async function nextPick(p: AutoPlacement, nowMs: number, opts: { cloudOnly?: boo
   const st = queue.getSubtask(p.subtaskId);
   const tried = new Set(p.tried);
   const excluded = st ? [...tried, ...hostsNotReady(st, tried, nowMs)] : [...tried];
+  // Run 14 (inf-1795679848520-2a6a2a54: Mac, then the nrt CPU host, neither claimed; refused at
+  // 1.88 s with the cloud 16/16 free): the overflow step asked best fit with the other CPU hosts in
+  // its view, which kept the cloud out (cloudConsidered), and skipped every non-cloud candidate
+  // without leaving it out: nothing was found. It now leaves every non-cloud host out at once.
+  if (opts.cloudOnly) for (const a of localAgentViews(nowMs)) if (a.computeClass !== "cloud" && !excluded.includes(a.agentId)) excluded.push(a.agentId);
   const billing = taskBilling.get(p.taskId);
   const reservedMsat = billing?.reservedMsat ?? 0;
   const budgetCSats = reservedMsat > 0 ? msatToCSats(reservedMsat) : Infinity;

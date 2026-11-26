@@ -471,6 +471,17 @@ export function preferredAgentFor(subtaskId: string, nowMs = Date.now()): string
   return p.agentId;
 }
 
+/**
+ * Run 14: end the call's preference now and tell the other agents (the claim decision: the preferred
+ * host has not claimed it within the window, and the call must be decided within its bound, so the
+ * other ready hosts may take it instead of waiting out the hold). True when a preference was held.
+ */
+export function releasePreference(subtaskId: string, nowMs = Date.now()): boolean {
+  if (!preferred.delete(subtaskId)) return false;
+  nudge(subtaskId, nowMs);
+  return true;
+}
+
 /** Run 10: the call's preference as it stands (debug lines): the agent, and whether it still holds the call. */
 export function preferenceOf(subtaskId: string, nowMs = Date.now()): { agentId: string; holding: boolean; holdLeftMs: number } | undefined {
   const p = preferred.get(subtaskId);
