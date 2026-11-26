@@ -211,7 +211,7 @@ export function budgetCoverage(o: { left: number; open: number; perTentacle: num
   const basis = o.average !== undefined && o.average > 0 ? `this session's average of ${formatCSatsShort(per)} a helper` : `each helper's own budget (${formatCSatsShort(per)}), the most one may spend`;
   return {
     short: `${byBalance ? "Balance" : "Budget"} covers ~${k} of ${o.open} helpers.`,
-    detail: `At ${basis}, ${what} (${formatCSatsShort(left)}) covers about ${k} of the ${o.open} helpers not finished. They share it and wait for room${byBalance ? ", fewer running at once" : ""}; if it runs out, the rest stop with "budget reached". Tell the user before they run${byBalance ? "; adding cSats lifts the limit" : "; raising the session's tentacle budget lifts it"}.`,
+    detail: `At ${basis}, ${what} (${formatCSatsShort(left)}) covers about ${k} of the ${o.open} helpers not finished. ${byBalance ? "They share it and wait for room, fewer running at once" : `About ${Math.max(1, k)} run at once; the rest wait for what finished helpers give back`}; if it runs out, the rest stop with one message. Tell the user before they run${byBalance ? "; adding cSats lifts the limit" : "; raising the session's tentacle budget lifts it"}.`,
   };
 }
 

@@ -394,11 +394,12 @@ Tentacle: Write tests for parseFileRef · qwen3-coder:30b on gpu · passed (appl
 
 | Limit | Default | What happens |
 | --- | --- | --- |
-| Running at once per session | 4 | More wait in a queue (at most 32 waiting). |
+| Running at once per session | 4 | More wait in a queue (at most 32 waiting). A helper also starts only when the session's budget, less what the running helpers may still spend, covers its own budget; a helper that finishes under budget gives the rest back. With nothing running and less than 4 cSats left, the queued helpers stop with one message ("budget is spent … after N of M helpers; raise --tentacle-budget") (network run 15). |
 | Session budget | 100 cSats | `delegate` is refused once it is spent. When the helpers not finished could need more than is left (at each helper's own budget, or at the session's average once some finished), `delegate`'s note says how many it covers, for the lead to tell the user. |
 | Per tentacle | 25 cSats | The tentacle stops when it is reached. Can be set lower per `delegate` call. No call sets aside more than what is left of it. A helper that stops at a budget with a patch has it checked like a finished one: it merges when its check passes (or it has none), and otherwise waits for approval; it is never dropped (network run 14). |
 | Account balance | | A call refused because the balance can't cover its reserve (402) waits for the other helpers' calls to end, and the session runs fewer helpers at once; a helper alone halves its ceiling until the reserve fits, then stops saying the balance is too low. `delegate`'s note counts the balance as well as the session's budget, and its coverage sentence comes first ("Balance covers ~3 of 8 helpers."). |
 | Agent steps per attempt | 12 | |
+| Busy network | 3 retries | A call refused because every machine that fits is busy (503 `no_capacity`) is sent again after 2 s, 4 s and 8 s, its ceiling sized again each time, then the helper fails saying it was tried (network run 15). |
 
 Calls on this computer or your own machines cost 0 cSats and never trip a budget. Tentacle spend
 counts toward the session's total (`/cost`).

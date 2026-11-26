@@ -13,11 +13,11 @@ import { callsTools, fitScore, paramsB, type Workload } from "../../inference-ap
 import { isFrontierModelId } from "../../inference-api/frontier-models.js";
 import { catalogEntryForTag } from "../../model/catalog.js";
 import type { RoutingHints } from "../../inference-api/job-descriptor.js";
-import type { ChatBackend, ChatMessage } from "../../inference-api/types.js";
+import { ChatBackendError, type ChatBackend, type ChatMessage } from "../../inference-api/types.js";
 import type { ServedBy } from "../../swarm/served-by.js";
 import type { TentacleSpec } from "./tentacles.js";
 import { isContextTooLong } from "./context-budget.js";
-import { balanceRefusal, HELPER_MIN_REPLY_TOKENS, priceRefusalNeed } from "./tentacle-reserve.js";
+import { balanceRefusal, busyGaveUpMessage, busyRefusal, HELPER_BUSY_BACKOFF_MS, HELPER_MIN_REPLY_TOKENS, priceRefusalNeed } from "./tentacle-reserve.js";
 
 /** "path#L10-L40" → { path, start, end }. */
 export function parseFileRef(ref: string): { path: string; start?: number; end?: number } {
@@ -43,13 +43,15 @@ export function hintedChat(
   signal: AbortSignal,
   onCall: (u: { cSats: number; where?: string; promptTokens?: number; outputTokens?: number; served?: ServedBy }) => void,
   guard?: () => void,
-  o: { maxTokens?: number | ((messages: ChatMessage[], tools?: unknown[]) => number); after?: () => void; onError?: (err: unknown) => void; onPriceRefusal?: (neededCSats: number) => boolean; onBalanceRefusal?: (neededCSats?: number) => boolean } = {},
+  o: { maxTokens?: number | ((messages: ChatMessage[], tools?: unknown[]) => number); after?: () => void; onError?: (err: unknown) => void; onPriceRefusal?: (neededCSats: number) => boolean; onBalanceRefusal?: (neededCSats?: number) => boolean; onBusyRefusal?: (waitMs: number) => boolean } = {},
 ): ChatFn {
   return async ({ messages, tools }, onDelta) => {
     guard?.();
     let h = await hints();
     let priceRetries = 0;
     let balanceRetries = 0;
+    let busyRetries = 0;
+    let busyWaitedMs = 0;
     try {
       guard?.();
       const msgs = messages.map((m) => ({ ...m, role: (["system", "user", "assistant", "tool"].includes(m.role) ? m.role : "user") as "user" }));
@@ -99,6 +101,24 @@ export function hintedChat(
             h = await hints();
             guard?.();
             continue;
+          }
+          // Run 15: every machine that fits was busy (503 no_capacity): again after 2 s, 4 s, 8 s
+          // (onBusyRefusal; hints() waits, then sizes the ceiling again), then fail saying so.
+          if (busyRefusal(err) && !content && !toolCalls.length && !signal.aborted && o.onBusyRefusal) {
+            const wait = HELPER_BUSY_BACKOFF_MS[busyRetries];
+            if (wait !== undefined && o.onBusyRefusal(wait)) {
+              busyRetries++;
+              busyWaitedMs += wait;
+              h = await hints();
+              guard?.();
+              continue;
+            }
+            if (busyRetries > 0) {
+              const e = err as ChatBackendError;
+              const gaveUp = new ChatBackendError(busyGaveUpMessage(e.message ?? String(err), busyRetries + 1, busyWaitedMs), e.status ?? 503, e.retryAfterSec, e.info);
+              o.onError?.(gaveUp);
+              throw gaveUp;
+            }
           }
           o.onError?.(err);
           throw err;
