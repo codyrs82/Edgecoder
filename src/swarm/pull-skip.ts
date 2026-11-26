@@ -58,6 +58,19 @@ export function pullSkipReason(s: PullGateState): PullSkipReason | null {
   return null;
 }
 
+/**
+ * Network run 11: whether a pulled call runs beside the loop (counted in the agent's in-flight
+ * set) rather than inside it. A model call always does, whatever the slot count. It used to run
+ * inside the loop on a 1-slot host, so the loop (heartbeats, a drain failover's move to the peer
+ * coordinator, registering there) stopped until the call ended: agents of a restarted coordinator
+ * took 14-66 s to reach the peer instead of 2-3 s, and a busy host sent no heartbeat meanwhile.
+ * Beside the loop, a busy 1-slot host skips its pull (all_slots_busy) and the loop goes on.
+ * Code jobs still run one at a time inside the loop.
+ */
+export function runsBesideLoop(kind: string, slots: number): boolean {
+  return kind === "inference" && slots >= 1;
+}
+
 /** "slots 2, running 2, free 0, cpu throttled no". */
 export function describeSlots(s: Pick<PullGateState, "slots" | "inflight" | "free" | "cpuThrottled">): string {
   return `slots ${s.slots}, running ${s.inflight}, free ${s.free}, cpu throttled ${s.cpuThrottled ? "yes" : "no"}`;

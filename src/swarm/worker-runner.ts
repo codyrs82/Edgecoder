@@ -24,7 +24,7 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import { ensureSandboxImages, isDockerAvailable } from "../executor/docker-sandbox.js";
 import { CLAIM_TAKEN_BACK_ERROR, runInferenceSubtask } from "./inference-runner.js";
-import { describeSlots, pullSkipReason, PullSkipLog } from "./pull-skip.js";
+import { describeSlots, pullSkipReason, PullSkipLog, runsBesideLoop } from "./pull-skip.js";
 import { warmOllamaModel } from "../inference-api/ollama.js";
 import { detectHardware, gpuNeedsOffloadProof, hardwareProfileFor, selectGpu, selectGpuPool, type Probe } from "../install/hardware.js";
 import { claimedProfile, decideGpuClaim, type GpuClaimDecision } from "./gpu-claim.js";
@@ -2693,8 +2693,8 @@ async function loop(): Promise<void> {
               }
             }
           };
-          // Model calls run side by side (Ollama, vLLM and MLX serve several at once); code jobs one at a time.
-          if (st.kind === "inference" && MAX_PARALLEL_INFERENCE > 1) {
+          // Model calls run beside the loop, also on a 1-slot host (pull-skip.ts runsBesideLoop); code jobs one at a time.
+          if (runsBesideLoop(st.kind, MAX_PARALLEL_INFERENCE)) {
             while (inflightInference.size >= MAX_PARALLEL_INFERENCE) await Promise.race(inflightInference);
             const job: Promise<void> = runAndReport()
               .catch((e) => console.warn(`[agent:${AGENT_ID}] inference ${st.id} failed: ${String(e)}`))
