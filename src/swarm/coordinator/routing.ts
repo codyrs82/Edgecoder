@@ -27,7 +27,7 @@ import { activeBlacklistRecord, agentCapabilities, AGENT_CONNECTED_WINDOW_MS } f
 import { autoMayUseCloudModel } from "../../cloud-host/catalog.js";
 import { bestFit, bestFitConfigFromEnv, routedLine, type AgentView, type BestFitConfig, type BestFitResult, type NetworkView, type SessionMemo } from "./best-fit.js";
 import { CC, FALLBACK_BTC_USD, queue, reservations, identity, usageListeners } from "./context.js";
-import { agentContextWindow, agentDependable, agentLastPullMs, agentLoadReport, freeModelSlots, modelWarmOn, pickupStats } from "./dispatch.js";
+import { agentContextWindow, agentDependable, agentLastPullMs, agentLoadReport, agentSocketConnected, freeModelSlots, modelWarmOn, pickupStats, PULL_FRESH_MS } from "./dispatch.js";
 import { distanceRttMs, regionDistanceKm } from "../../common/geo-regions.js";
 import { agentUnavailable, circuitBlocks, loadedModelsOf, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
 import { effectiveHardware, hardwareVerifier } from "./economy.js";
@@ -118,6 +118,14 @@ export function localAgentViews(nowMs = Date.now(), rttOf: (agentId: string) => 
     // B4: an agent whose circuit is open (or half open with its probe running) gets no placement at
     // all: a call placed on it waited out the claim bound behind the breaker.
     if (circuitBlocks(agentId, claims.get(agentId)?.all ?? 0, nowMs)) continue;
+    // Run 15 (the crs Mac: no nudge socket, idle pulls 16-40 s apart; it claimed 7 of the 31 calls
+    // placed on it, and 12 price-capped tentacle calls for which it was the only fitting model were
+    // refused later as "busy"): a host that has not pulled within PULL_FRESH_MS and has no socket
+    // to be told about a call is not a candidate, as the claim decision already judges it
+    // (dispatch.ts claimReadiness "not_pulling"). With nothing else fitting, the call gets the
+    // clean answer at submit. A host that has not pulled yet (it just registered, or this
+    // coordinator just started) is kept: best fit counts it as unproven capacity.
+    if (pullStaleWithoutSocket(agentId, nowMs)) continue;
     // Cloud hosts (src/cloud-host/): best fit sees each online one with the models AUTO_CLOUD_MODELS
     // allows (default: every autoEligible catalog model; "off": none), and places on them only
     // top-tier jobs or jobs nothing else on the network can take (best-fit.ts). Each call spends
@@ -167,6 +175,12 @@ export function localAgentViews(nowMs = Date.now(), rttOf: (agentId: string) => 
     });
   }
   return out;
+}
+
+/** Run 15: it pulled before, not within PULL_FRESH_MS, and no socket is open to nudge it (localAgentViews). */
+export function pullStaleWithoutSocket(agentId: string, nowMs = Date.now()): boolean {
+  const at = agentLastPullMs(agentId);
+  return at !== undefined && nowMs - at > PULL_FRESH_MS && !agentSocketConnected(agentId);
 }
 
 function pullAge(agentId: string, nowMs: number): number | null {
