@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { request } from "undici";
-import { AgentLifecycle, announceGoingOffline, blacklistReasonFromError } from "../../src/swarm/agent-lifecycle.js";
+import { AgentLifecycle, announceGoingOffline, blacklistReasonFromError, handBackOnCriticalPressure } from "../../src/swarm/agent-lifecycle.js";
 import { createLocalForwarder } from "../../src/swarm/local-forwarder.js";
 
 describe("agent lifecycle (BHV006: drain before a restart, paused reason)", () => {
@@ -87,5 +87,14 @@ describe("local forwarder: lifecycle on /forward/health and /forward/drain", () 
     } finally {
       fwd.close();
     }
+  });
+});
+
+describe("critical memory pressure hand-back (network run 17)", () => {
+  it("hands claims back only when a network call was running to cancel", () => {
+    // Nothing running: any claim held is one whose finished result is on its way.
+    expect(handBackOnCriticalPressure(0)).toBe(false);
+    expect(handBackOnCriticalPressure(1)).toBe(true);
+    expect(handBackOnCriticalPressure(3)).toBe(true);
   });
 });

@@ -116,6 +116,17 @@ export function blacklistReasonFromError(error: unknown): string | null {
 }
 
 /**
+ * Critical memory pressure cancels the network calls running here and hands this agent's claims back.
+ * With no call running there is nothing to hand back: any claim still held is one whose result is
+ * already on its way (network run 17: a host handed a call back 3 ms after posting its finished
+ * result, and another host ran it again). A claim still waiting for memory admission is refused by
+ * that admission (a memory_ result), so it is handed back either way.
+ */
+export function handBackOnCriticalPressure(runningCalls: number): boolean {
+  return runningCalls > 0;
+}
+
+/**
  * Tell the coordinator this agent is going offline so its claims go to other agents now. Bounded
  * by `timeoutMs` and never throws: a stopping process can't wait long, and if the call fails the
  * claims are requeued at lease expiry anyway (one abandoned claim, never a blacklist on its own).

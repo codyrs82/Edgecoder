@@ -86,7 +86,7 @@ interface QueueItem {
    * The claim that last lapsed on this item while it waits to be claimed again: its holder's late
    * result may still be taken within a grace window (reclaimLapsed), as nobody else ran it.
    */
-  lapsed?: { agentId: string; claimedAt: number; atMs: number };
+  lapsed?: { agentId: string; claimedAt: number; atMs: number; handedBack?: boolean };
   /** A late result's claim given back (reclaimLapsed): its lease holds until then, whatever the deadline. */
   lateReturnUntilMs?: number;
 }
@@ -502,6 +502,12 @@ export class SwarmQueue {
     for (const item of this.tasks) {
       if (item.claimedBy !== agentId) continue;
       this.markExpired(item.subtask.id, agentId);
+      // Network run 17: a host handed its claims back (critical memory pressure) 3 ms after posting a
+      // finished result for one of them. Recorded like a lapse, so that result can still take the call
+      // back while nobody else has claimed it (reclaimLapsed with acceptHandedBack), and the call is
+      // not run twice.
+      if (item.claimedAt !== undefined) item.lapsed = { agentId, claimedAt: item.claimedAt, atMs: nowMs, handedBack: true };
+      item.lateReturnUntilMs = undefined;
       item.claimedBy = undefined;
       item.claimedAt = undefined;
       item.leaseRenewedAt = undefined;
@@ -565,10 +571,13 @@ export class SwarmQueue {
     return Math.max(Math.min(hard, live), item.lateReturnUntilMs ?? 0);
   }
 
-  /** The claim that last lapsed on this item while it waits to be claimed again (holder, claim and lapse times). */
+  /**
+   * The claim that last lapsed on this item while it waits to be claimed again (holder, claim and
+   * lapse times). A claim its holder handed back itself (releaseClaimsOf) is not a lapse here.
+   */
   lapsedClaim(subtaskId: string): { agentId: string; claimedAt: number; atMs: number } | undefined {
     const lapsed = this.tasks.find((t) => t.subtask.id === subtaskId)?.lapsed;
-    return lapsed ? { ...lapsed } : undefined;
+    return lapsed && !lapsed.handedBack ? { agentId: lapsed.agentId, claimedAt: lapsed.claimedAt, atMs: lapsed.atMs } : undefined;
   }
 
   /**
@@ -577,7 +586,7 @@ export class SwarmQueue {
    */
   holdForLateResult(subtaskId: string, untilMs: number): boolean {
     const item = this.tasks.find((t) => t.subtask.id === subtaskId);
-    if (!item || item.claimedBy || !item.lapsed) return false;
+    if (!item || item.claimedBy || !item.lapsed || item.lapsed.handedBack) return false;
     item.claimableAfterMs = Math.max(item.claimableAfterMs ?? 0, untilMs);
     return true;
   }
@@ -586,12 +595,15 @@ export class SwarmQueue {
    * A late result from the agent whose claim on this item lapsed, while nobody else has claimed it
    * and within `graceMs` of the lapse: the claim is given back to that agent (with its original claim
    * time) so its result is taken and settled once. False, changing nothing, otherwise (another agent
-   * holds or ran it, the item is gone, or the grace passed).
+   * holds or ran it, the item is gone, or the grace passed). A claim the holder handed back itself
+   * (releaseClaimsOf) is taken back only with `acceptHandedBack` (a completed result).
    */
-  reclaimLapsed(subtaskId: string, agentId: string, graceMs: number, nowMs = Date.now()): boolean {
+  reclaimLapsed(subtaskId: string, agentId: string, graceMs: number, nowMs = Date.now(), opts: { acceptHandedBack?: boolean } = {}): boolean {
     const item = this.tasks.find((t) => t.subtask.id === subtaskId);
     const lapsed = item?.lapsed;
     if (!item || item.claimedBy || item.leaseStatePending || !lapsed || lapsed.agentId !== agentId || nowMs - lapsed.atMs > graceMs) return false;
+    // A claim its holder handed back (releaseClaimsOf) comes back only for a finished result.
+    if (lapsed.handedBack && !opts.acceptHandedBack) return false;
     item.claimedBy = agentId;
     item.claimedAt = lapsed.claimedAt;
     item.leaseRenewedAt = nowMs;

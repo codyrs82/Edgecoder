@@ -167,9 +167,15 @@ describe("BHV006: a heartbeat gap is not misbehaviour", () => {
     await post("/heartbeat", { agentId: requester.peerId }, requester);
     await sleep(0);
     expect(abandoned()).toBe(before);
-    // A late result from the released claim is refused, as after a lease expiry.
+    // A failure from the released claim is refused, as after a lease expiry.
+    const failed = await post("/result", { subtaskId, taskId: "x", agentId: worker.peerId, ok: false, output: "", error: "stopped", durationMs: 100 }, worker);
+    expect(failed.statusCode).toBe(409);
+    expect(ctx.queue.isUnclaimed(subtaskId)).toBe(true);
+    // Network run 17: a finished result that was on its way is taken while nobody else has claimed
+    // the call (within LATE_RESULT_GRACE_MS), so the call is not run twice.
     const late = await post("/result", { subtaskId, taskId: "x", agentId: worker.peerId, ok: true, output: "late", durationMs: 100 }, worker);
-    expect(late.statusCode).toBeGreaterThanOrEqual(400);
+    expect(late.statusCode, late.body).toBe(200);
+    expect(ctx.queue.isUnclaimed(subtaskId)).toBe(false);
     ctx.queue.removeHeld(subtaskId);
   }, 20_000);
 });
