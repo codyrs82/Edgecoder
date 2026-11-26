@@ -523,6 +523,8 @@ const AGENT_DEVICE_ID = (() => {
 })();
 const keys = createPeerKeys(AGENT_ID);
 const envelopeKeys = generateX25519KeyPair();
+/** Recorded with a buffered sealed result: a new key pair each start, so one from before a restart is dropped (pending-results.ts). */
+const ENVELOPE_KEY_ID = envelopeKeys.publicKey.toString("base64");
 const peerTunnels = new Map<string, string>();
 const peerOfferCooldownMs = W.PEER_OFFER_COOLDOWN_MS;
 const lastOfferAtByPeer = new Map<string, number>();
@@ -1352,7 +1354,7 @@ async function flushPendingResults(): Promise<void> {
   await flushPendingResultBuffer(localStore, deliver, {
     info: (m) => console.log(`[agent:${AGENT_ID}] ${m}`),
     warn: (m) => console.warn(`[agent:${AGENT_ID}] ${m}`),
-  });
+  }, 20, { envelopeKeyId: ENVELOPE_KEY_ID });
 }
 
 async function flushOfflineLedger(): Promise<void> {
@@ -2769,7 +2771,7 @@ async function loop(): Promise<void> {
                 console.warn(`[agent:${AGENT_ID}] result for ${result.subtaskId} refused (lease_expired: the claim lapsed); not buffered`);
                 return;
               }
-              try { localStore.enqueuePendingResult(result.subtaskId, encodePendingResult(resultPayload, issuer?.url)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
+              try { localStore.enqueuePendingResult(result.subtaskId, encodePendingResult(resultPayload, issuer?.url, envelopeForTask ? ENVELOPE_KEY_ID : undefined)); } catch (e) { console.warn(`[db] pending result write failed: ${e}`); }
               console.warn(`[agent:${AGENT_ID}] result buffered for retry: ${result.subtaskId}`);
             }
           };

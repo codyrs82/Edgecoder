@@ -576,10 +576,20 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       }
       const opened = openEnvelopeResult(rawBody as unknown as EncryptedResult, candidates);
       if (!opened.ok) {
-        // Still refused: no key this agent shares for the subtask authenticates it. The claim is
-        // left as it is (nothing is re-queued here), so the claimant may send it again.
+        // Still refused: no key this agent shares for the subtask authenticates it.
         envelopeStats.decryptFailed += 1;
-        app.log.error({ ...diag(), tried: opened.tried, error: opened.error }, "envelope_result_decrypt_failed");
+        const d = diag();
+        if (d.claimant !== agentId) {
+          // Network run 19 (desktop-maw-mb-02, e62bda47): no claim here for this agent, so it could
+          // never be accepted; typically a result the agent buffered before it restarted, sealed for
+          // its envelope key of then. Refused for good (409), so the agent drops it instead of
+          // retrying it at the head of its buffer.
+          app.log.warn({ ...d, tried: opened.tried, error: opened.error }, "envelope_result_unusable");
+          return reply.code(409).send({ error: "envelope_result_unusable" });
+        }
+        // The claimant's own result: the claim is left as it is (nothing is re-queued here), so the
+        // claimant may send it again.
+        app.log.error({ ...d, tried: opened.tried, error: opened.error }, "envelope_result_decrypt_failed");
         return reply.code(400).send({ error: "envelope_decrypt_failed" });
       }
       if (opened.source === "rederived") envelopeStats.rederived += 1;

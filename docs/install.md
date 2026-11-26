@@ -289,8 +289,8 @@ Default budgets and what fits at the served window on a CPU or Apple silicon hos
 
 | Level | macOS | Linux | The agent |
 | --- | --- | --- | --- |
-| warning | kernel level 2, under 8% available, or the compressor holding 40% of RAM | under 10% `MemAvailable`, or PSI some avg10 ≥ 25 | takes no new network work, unloads its idle models |
-| critical | kernel level 4, or under 3% available | under 5%, or PSI full avg10 ≥ 10 | also cancels its running network calls and hands its claims back, unloads all but the owner's active model |
+| warning | kernel level 2, under 8% available, or the compressor holding 40% of RAM | under 10% `MemAvailable`, PSI some avg10 ≥ 25, or PSI full avg10 ≥ 10 with 20% or more available | takes no new network work, unloads its idle models |
+| critical | kernel level 4, or under 3% available | under 5%, or PSI full avg10 ≥ 10 with under 20% available | also cancels its running network calls and hands its claims back, unloads all but the owner's active model |
 
 It resumes once the pressure has stayed lower for 30 s. The desktop app shows "Paused: this Mac is
 low on memory" in Active work and Settings → Models, and Settings → Models lists what this machine

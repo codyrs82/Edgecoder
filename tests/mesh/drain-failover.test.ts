@@ -312,7 +312,7 @@ describe("worker wiring", () => {
     expect(src).toContain("startLeaseHeartbeat(issuer)");
     expect(src).toContain("signed: true, to: issuer })");
     expect(src).toContain('await post("/result", resultPayload, { signed: true, to: issuer });');
-    expect(src).toContain("encodePendingResult(resultPayload, issuer?.url)");
+    expect(src).toContain("encodePendingResult(resultPayload, issuer?.url, envelopeForTask ? ENVELOPE_KEY_ID : undefined)");
     expect(src).toMatch(/pullIssuer = coordinator\.requireVerifiedIdentity\(\)[\s\S]{0,500}await post\("\/pull"/);
   });
   it("the return waits for the peer's calls and reports no free slot meanwhile", () => {

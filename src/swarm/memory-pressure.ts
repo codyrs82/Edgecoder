@@ -15,8 +15,8 @@
  * Thresholds:
  *   macOS   critical: kernel level 4, or under 3% available;  warning: level 2, under 8% available,
  *           or the compressor holding 40% of RAM or more
- *   Linux   critical: MemAvailable under 5%, or PSI full avg10 >= 10;  warning: under 10%, or PSI
- *           some avg10 >= 25
+ *   Linux   critical: MemAvailable under 5%, or PSI full avg10 >= 10 with under 20% available;
+ *           warning: under 10%, PSI some avg10 >= 25, or PSI full avg10 >= 10 with 20% or more available
  *   other   critical: under 5% free;  warning: under 10% free
  *
  * PressureGuard adds hysteresis: worse readings take effect at once, better ones only after they
@@ -95,10 +95,21 @@ export function classifyMac(input: { kernelLevel?: number; availablePct?: number
   return "normal";
 }
 
+/**
+ * Above this share of MemAvailable, PSI "full" stalls alone are not critical (only a warning).
+ * Networks runs 17 and 19: a model loaded again just after being unloaded stalled its host on
+ * paging the model file in (PSI full avg10 10.9 / 15.0 with 76% / 49% of memory available); the
+ * guard read that as critical and cancelled the very call that was loading, which another host
+ * then ran again. Running out of memory still shows as MemAvailable falling.
+ */
+export const PSI_CRITICAL_MAX_AVAILABLE_PCT = 20;
+
 export function classifyLinux(input: { availablePct?: number; psi?: Psi }): PressureLevel {
   const { availablePct, psi } = input;
-  if ((availablePct !== undefined && availablePct < 5) || (psi?.fullAvg10 !== undefined && psi.fullAvg10 >= 10)) return "critical";
-  if ((availablePct !== undefined && availablePct < 10) || (psi !== undefined && psi.someAvg10 >= 25)) return "warning";
+  const psiFull = psi?.fullAvg10 !== undefined && psi.fullAvg10 >= 10;
+  if (availablePct !== undefined && availablePct < 5) return "critical";
+  if (psiFull && (availablePct === undefined || availablePct < PSI_CRITICAL_MAX_AVAILABLE_PCT)) return "critical";
+  if (psiFull || (availablePct !== undefined && availablePct < 10) || (psi !== undefined && psi.someAvg10 >= 25)) return "warning";
   return "normal";
 }
 
