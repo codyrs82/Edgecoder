@@ -486,12 +486,15 @@ const claimDecisions = new Map<string, ReturnType<typeof setTimeout>>();
 /**
  * Run 14 (4 named refusals at 2.27-2.47 s at the portal, logged at 2.25 s here: decided at 1.5 s
  * with a host "ready" that never came, then a second wait of 0.75 s): the whole decision, the wait
- * for a ready host included, ends within CLAIM_DECISION_BOUND windows (1.8 s by default) of its
+ * for a ready host included, ends within CLAIM_DECISION_BOUND windows (run 14: 1.8 s) of its
  * submit, or of the call being back on the queue. A call sent here by another coordinator
  * (route_elsewhere, `redirected`) spent part of its time there and on the way: its bound is
  * REDIRECT_ALLOWANCE windows shorter (1.5 s), so the portal still answers within 2 s.
+ * Run 16 (inf-1795695736422-911d2b62: decided at 1.801 s on the EU coordinator, 2.002 s at the
+ * portal; the portal-to-EU hop took ~0.2 s, Fly clients saw up to 2.24 s): 16/15 windows, 1.6 s by
+ * default (1.3 s for a redirected call), so the portal answers within 2 s with a ~0.3 s hop.
  */
-export const CLAIM_DECISION_BOUND = 1.2;
+export const CLAIM_DECISION_BOUND = 16 / 15;
 export const REDIRECT_ALLOWANCE = 0.2;
 /** A wait shorter than this is not armed: the call is decided now. */
 const MIN_DECISION_WAIT_MS = 50;

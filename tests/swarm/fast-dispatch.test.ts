@@ -1,12 +1,18 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { createPeerKeys, type PeerKeys } from "../../src/mesh/peer.js";
 import { signMeshWsBind } from "../../src/mesh/ws-auth.js";
 import { hashRequestBody, signRequest } from "../../src/security/request-signing.js";
 import { grantCredits } from "../../src/credits/store.js";
 import { DEFER_MS, pickupStats } from "../../src/swarm/coordinator/dispatch.js";
+
+// A call here waits past DEFER_MS (1.5 s) on purpose; the claim decision (1.6 s at the default since
+// run 16) is not what these test (tests/swarm/run14-decide.test.ts). Set before the static imports load the config.
+vi.hoisted(() => {
+  process.env.INFERENCE_CLAIM_DECISION_MS = "4000";
+});
 
 /*
  * Fast dispatch (real coordinator app, Fastify inject + injectWS): a new call is announced at once
@@ -63,6 +69,7 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
+  delete process.env.INFERENCE_CLAIM_DECISION_MS;
   for (const ws of sockets) ws.terminate();
   await app?.close();
   await new Promise<void>((resolve) => portal.close(() => resolve()));

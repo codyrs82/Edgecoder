@@ -206,8 +206,8 @@ describe("run 14, 1: after a move that is not claimed, the cloud before a refusa
   });
 });
 
-describe("run 14, 2: named refusals within 1.2 windows of the submit, the wait for a ready host included", () => {
-  test("inf-1795680063689-c0863702: a ready host that never claims: refused by 1.2 windows (was: 1.5 windows, 2.25 s)", async () => {
+describe("run 14, 2: named refusals within the bound (run 16: 16/15 windows) of the submit, the wait for a ready host included", () => {
+  test("inf-1795680063689-c0863702: a ready host that never claims: refused by the bound (was: 1.5 windows, 2.25 s)", async () => {
     const inference = await import("../../src/swarm/coordinator/routes/inference.js");
     const t0 = Date.now();
     const c = await submit({ model: MODEL });
@@ -219,6 +219,9 @@ describe("run 14, 2: named refusals within 1.2 windows of the submit, the wait f
     // It waited for the ready hosts after the first window, but only to the bound.
     expect(ms).toBeGreaterThanOrEqual(DECISION_MS);
     expect(ms).toBeLessThan(DECISION_MS * inference.CLAIM_DECISION_BOUND + 150);
+    // Run 16 (inf-1795695736422-911d2b62, 1.801 s here, 2.002 s at the portal): 1.6 s at the default window.
+    expect(Math.round(1_500 * inference.CLAIM_DECISION_BOUND)).toBe(1_600);
+    expect(Math.round(1_500 * (inference.CLAIM_DECISION_BOUND - inference.REDIRECT_ALLOWANCE))).toBe(1_300);
   });
 
   test("inf-1795680081294-bf1e872f: a call another coordinator sent on (redirected) is decided within one window", async () => {
@@ -236,15 +239,19 @@ describe("run 14, 2: named refusals within 1.2 windows of the submit, the wait f
     expect(dispatch.preferredAgentFor(c.subtaskId)).toBe(lhr.peerId);
     // Within the hold, fra (also ready) leaves it to lhr.
     expect((await pull(fra)).id).toBeNull();
-    await sleep(DECISION_MS + 50);
-    // lhr has not come; the decision ended the hold, so fra takes it inside the bound.
+    // lhr has not come by the decision (run here directly, as the window's timer does): it ends the
+    // hold and waits for the other ready host, which takes the call inside the bound.
+    const inference = await import("../../src/swarm/coordinator/routes/inference.js");
+    expect(await inference.decideUnclaimedCall(c.taskId, c.subtaskId)).toBe("waiting");
     expect(dispatch.preferredAgentFor(c.subtaskId)).toBeUndefined();
     expect((await pull(fra)).id).toBe(c.subtaskId);
   });
 
   test("a ready host that claims during the wait still gets the call", async () => {
+    const inference = await import("../../src/swarm/coordinator/routes/inference.js");
     const c = await submit({ model: MODEL });
-    await sleep(DECISION_MS + 50);
+    // Decided now (as at the window): a host here is ready, so it waits for it (within the bound).
+    expect(await inference.decideUnclaimedCall(c.taskId, c.subtaskId)).toBe("waiting");
     expect(ctx.queue.isUnclaimed(c.subtaskId)).toBe(true);
     const got = (await pull(lhr)).id ?? (await pull(fra)).id;
     expect(got).toBe(c.subtaskId);
