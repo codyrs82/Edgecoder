@@ -500,16 +500,25 @@ export const REDIRECT_ALLOWANCE = 0.2;
 const MIN_DECISION_WAIT_MS = 50;
 const decisionBoundAt = new Map<string, number>();
 
-function armClaimDecision(taskId: string, subtaskId: string, final = false, ms = INFERENCE_CLAIM_DECISION_MS, opts: { redirected?: boolean } = {}): void {
+/**
+ * Run 17 (inf-1795701115698-86c8011f: 665 ms, inf-1795701115520-4516c048: 821 ms between the
+ * completion estimate and inference_submitted during a burst, the credit reserve's database round
+ * trip; 2.17 s and 2.23 s at the portal though the decision kept its 1.5 s / 1.3 s window): the
+ * window and the bound run from when this coordinator received the submit (`receivedAtMs`), not
+ * from when the call was queued. What the submit itself took comes off the window.
+ */
+export function armClaimDecision(taskId: string, subtaskId: string, final = false, ms = INFERENCE_CLAIM_DECISION_MS, opts: { redirected?: boolean; receivedAtMs?: number } = {}): void {
   const old = claimDecisions.get(subtaskId);
   if (old) clearTimeout(old);
   claimDecisions.delete(subtaskId);
   if (!final) decisionBoundAt.delete(subtaskId);
   if (!(ms > 0)) return;
   if (!final) {
+    const nowMs = Date.now();
+    const startMs = Math.min(nowMs, opts.receivedAtMs ?? nowMs);
     const boundMs = Math.round(ms * (CLAIM_DECISION_BOUND - (opts.redirected ? REDIRECT_ALLOWANCE : 0)));
-    decisionBoundAt.set(subtaskId, Date.now() + boundMs);
-    ms = Math.min(ms, boundMs);
+    decisionBoundAt.set(subtaskId, startMs + boundMs);
+    ms = Math.max(1, Math.min(ms, boundMs) - (nowMs - startMs));
   }
   const timer = setTimeout(() => {
     claimDecisions.delete(subtaskId);
@@ -1232,6 +1241,8 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
   });
 
   app.post("/inference/submit", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply) => {
+    // Run 17: the claim decision's window runs from here (armClaimDecision, auto-replace.ts).
+    const receivedAtMs = Date.now();
     const body = inferenceSubmitSchema.parse(req.body);
     // Frontier models run on their owner's own API key in their own IDE provider, never on the network.
     if (isFrontierModelId(body.model)) return reply.code(400).send({ error: "frontier_model_not_routable", message: "frontier/<provider>/<model> runs only on your own key on your own computer; the network never serves it." });
@@ -1498,7 +1509,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       recordDecision(body.taskId, subtask.id, routed.job, routed.result, Date.now(), portalChoice);
       // #523: nobody picks it up within BEST_FIT_REPLACE_MS: the next candidate, not a 45 s wait (auto-replace.ts).
       if (routed.result.chosen?.local) {
-        armAutoReplace({ taskId: body.taskId, subtaskId: subtask.id, job: routed.job, accountId, clientRegion, tried: [...slowAgents.filter((id) => id !== routed!.result.chosen!.agentId), routed.result.chosen.agentId], ...(routed.onlyClass ? { onlyClass: routed.onlyClass } : {}), ...(body.maxBidMsatPerCredit !== undefined ? { maxBidMsatPerCredit: body.maxBidMsatPerCredit } : {}) });
+        armAutoReplace({ taskId: body.taskId, subtaskId: subtask.id, job: routed.job, accountId, clientRegion, receivedAtMs, tried: [...slowAgents.filter((id) => id !== routed!.result.chosen!.agentId), routed.result.chosen.agentId], ...(routed.onlyClass ? { onlyClass: routed.onlyClass } : {}), ...(body.maxBidMsatPerCredit !== undefined ? { maxBidMsatPerCredit: body.maxBidMsatPerCredit } : {}) });
       }
     } else {
       if (billed) {
@@ -1533,7 +1544,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     inferenceStreams.open(subtask.id, body.taskId);
     const startupBound = holders.length === 0 && inStartupGrace();
     armClaimDeadline(body.taskId, subtask.id, startupBound ? startupClaimBoundMs() : INFERENCE_CLAIM_TIMEOUT_MS);
-    armClaimDecision(body.taskId, subtask.id, false, !startupBound && !routed && billed ? INFERENCE_CLAIM_DECISION_MS : 0, { redirected: body.redirected });
+    armClaimDecision(body.taskId, subtask.id, false, !startupBound && !routed && billed ? INFERENCE_CLAIM_DECISION_MS : 0, { redirected: body.redirected, receivedAtMs });
     app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, ...(sized ? { reserveTokenMsat: sized.tokenMsat, reserveFloorMsat: sized.floorMsat, reserveCappedByMaxCSats: sized.capped } : {}), ...(overflowMsat > (sized?.reserveMsat ?? 0) ? { reserveCloudOverflowMsat: overflowMsat } : {}), holders: holders.length, ...(body.redirected ? { redirected: true } : {}) }, "inference_submitted");
     return reply.send({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second", ...(routed ? { routing: routed.summary } : {}) });
   });

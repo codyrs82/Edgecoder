@@ -100,6 +100,16 @@ export function freeLocalHolders(model: string, taskClass: ComputeClassId | "any
 }
 
 /**
+ * Run 17 (low-load tail, iad buyers only: nearest host 1/9): the iad host had unloaded
+ * qwen2.5-coder:1.5b under memory pressure and reported it cold; its estimated 1.6 s load counted as
+ * 14,000 km, so idle warm hosts in lax, gru, nrt and jnb got every call, and iad, never sent one,
+ * stayed cold. A small model loads in a second or two, once, and the nearest host then serves it
+ * warm: the cold-load term applies only to a model whose load is estimated at this long or more
+ * (best-fit.ts coldLoadMs: 14B and up), where a load is worth going around.
+ */
+export const COLD_PENALTY_MIN_LOAD_MS = 5_000;
+
+/**
  * The free holder to prefer for a buyer in `clientRegion`: the smallest distance plus load term,
  * plus the cold-load time (as distance, dispatch.ts coldLoadKm) for a candidate known to be cold
  * when another has the model warm and idle (C3: under load a near host warms up instead). Undefined when the region or every candidate's region is unknown (no locality then).
@@ -107,7 +117,8 @@ export function freeLocalHolders(model: string, taskClass: ComputeClassId | "any
 export function nearestFreeHolder(candidates: ReadonlyArray<FreeHolder>, clientRegion: string | null | undefined, model?: string): LocalHolder | undefined {
   if (!clientRegion) return undefined;
   const anyWarm = candidates.some((c) => c.warm && c.free >= Math.max(1, c.slots));
-  const coldKm = model ? coldLoadKm(coldLoadMs(model)) : 0;
+  const loadMs = model ? coldLoadMs(model) : 0;
+  const coldKm = loadMs >= COLD_PENALTY_MIN_LOAD_MS ? coldLoadKm(loadMs) : 0;
   let best: (LocalHolder & { score: number }) | undefined;
   for (const c of candidates) {
     const km = regionDistanceKm(clientRegion, c.region);

@@ -5,7 +5,7 @@ import {
   parseReasoningMinTokens, reasoningMinTokensFor, type AgentView, type NetworkView,
 } from "../../src/swarm/coordinator/best-fit.js";
 import { agentRoutable, AGENT_SILENT_MS, coldLoadKm, noteAgentPull } from "../../src/swarm/coordinator/dispatch.js";
-import { nearestFreeHolder } from "../../src/swarm/coordinator/locality.js";
+import { COLD_PENALTY_MIN_LOAD_MS, nearestFreeHolder } from "../../src/swarm/coordinator/locality.js";
 import { regionDistanceKm } from "../../src/common/geo-regions.js";
 import { MULTI_FILE_REFACTOR, SIMPLE_QA, TOOLS } from "../helpers/job-fixtures.js";
 import { agent } from "./helpers/best-fit-network.js";
@@ -19,6 +19,7 @@ const FLASH = "deepseek-v4.1-flash";
 const GLM = "glm-5.3";
 const M15 = "qwen2.5-coder:1.5b";
 const M7 = "qwen2.5-coder:7b";
+const M14 = "qwen2.5-coder:14b";
 
 describe("C3: locality against warm models", () => {
   it("a cold load counts as the distance it clearly outweighs: 4 round trips, twice over", () => {
@@ -28,13 +29,15 @@ describe("C3: locality against warm models", () => {
     expect(coldLoadKm(coldLoadMs(M7))).toBe(33_250);
   });
 
-  it("idle: a cold near host loses to an idle warm one only when the load clearly exceeds the extra round trips", () => {
+  it("idle: a cold near host loses to an idle warm one only when the load clearly exceeds the extra round trips (models that load slowly)", () => {
     const iadCold = { agentId: "iad", free: 2, slots: 2, region: "iad", cold: true };
-    // fra is ~6,500 km from an iad buyer: 1.6 s of load is more than twice 4 x ~93 ms, so the warm idle host wins.
-    expect(regionDistanceKm("iad", "fra")!).toBeLessThan(14_000);
-    expect(nearestFreeHolder([{ agentId: "fra", free: 2, slots: 2, region: "fra", warm: true }, iadCold], "iad", M15)?.agentId).toBe("fra");
-    // syd is ~15,700 km away: the load no longer clearly outweighs the distance, so the near host loads it.
-    expect(regionDistanceKm("iad", "syd")!).toBeGreaterThan(14_000);
+    // A 14B model (6.6 s of load, 57,750 km): fra (~6,500 km from an iad buyer) warm and idle wins.
+    expect(coldLoadMs(M14)).toBeGreaterThanOrEqual(COLD_PENALTY_MIN_LOAD_MS);
+    expect(nearestFreeHolder([{ agentId: "fra", free: 2, slots: 2, region: "fra", warm: true }, iadCold], "iad", M14)?.agentId).toBe("fra");
+    // Run 17: a 1.5b model (1.6 s of load, once) is loaded on the nearest host: the cold term does not
+    // apply below COLD_PENALTY_MIN_LOAD_MS (the iad host had stayed cold while lax, gru, nrt, jnb got every call).
+    expect(coldLoadMs(M15)).toBeLessThan(COLD_PENALTY_MIN_LOAD_MS);
+    expect(nearestFreeHolder([{ agentId: "fra", free: 2, slots: 2, region: "fra", warm: true }, iadCold], "iad", M15)?.agentId).toBe("iad");
     expect(nearestFreeHolder([{ agentId: "syd", free: 2, slots: 2, region: "syd", warm: true }, iadCold], "iad", M15)?.agentId).toBe("iad");
   });
 
@@ -46,8 +49,8 @@ describe("C3: locality against warm models", () => {
     // Even a warm host next door to the buyer loses only on distance and load, not on the cold load.
     const ordBusy = { agentId: "ord", free: 1, slots: 2, region: "ord", warm: true };
     expect(nearestFreeHolder([ordBusy, iadCold], "iad", M15)?.agentId).toBe("iad");
-    // An idle warm host nearby still wins: ord is ~950 km away, far less than 14,000 km.
-    expect(nearestFreeHolder([{ ...ordBusy, free: 2 }, iadCold], "iad", M15)?.agentId).toBe("ord");
+    // An idle warm host nearby still wins for a model that loads slowly: ord is ~950 km away, far less than 57,750 km.
+    expect(nearestFreeHolder([{ ...ordBusy, free: 2 }, iadCold], "iad", M14)?.agentId).toBe("ord");
   });
 });
 
