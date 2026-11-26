@@ -425,7 +425,8 @@ async function* streamSubmitted(
       if (r.status === 503 && r.json.error === "no_capacity") {
         ended = true;
         // Refunded by a coordinator that is going down before any agent took it: resubmit to its peer.
-        if (r.json.reason === "draining" && req.routeRedirect && typeof r.json.coordinatorUrl === "string") throw new RouteElsewhereError(r.json.coordinatorUrl, undefined);
+        // Run 20: or nothing there could start it but a peer can (reason "elsewhere"): send it there, once.
+        if ((r.json.reason === "draining" || r.json.reason === "elsewhere") && req.routeRedirect && typeof r.json.coordinatorUrl === "string") throw new RouteElsewhereError(r.json.coordinatorUrl, undefined);
         throw noCapacityError(r.json, req.model === "auto" ? routedModel ?? "the model best fit chose" : req.model);
       }
       if (r.status !== 200) throw new NetworkInferenceError(`Network stream failed: ${String(r.json.error ?? r.status)}`, 502);

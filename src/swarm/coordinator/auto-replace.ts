@@ -114,6 +114,8 @@ export interface AutoPlacement {
   boundAt?: number;
   /** Run 17: when this coordinator received the submit: the first window and the bound run from it. */
   receivedAtMs?: number;
+  /** Run 20: the caller follows a redirect (routeRedirect) and was not itself sent here by a peer (redirected): a refusal may hand it over. */
+  mayHandOver?: boolean;
 }
 
 /** Run 9: the Auto decision window (INFERENCE_CLAIM_DECISION_MS); 0: the fixed BEST_FIT_REPLACE_MS wait. */
@@ -147,7 +149,7 @@ export interface ReplaceAdmission {
   fits(p: AutoPlacement, pick: Candidate, nowMs: number): boolean;
   currentFits(p: AutoPlacement, nowMs: number): boolean;
   /** Run 19: `price`, the cloud host could start it but costs more than the call's price ceiling: what it needs. */
-  refuse(p: AutoPlacement, price?: { neededCSats: number }): Promise<boolean>;
+  refuse(p: AutoPlacement, price?: { neededCSats: number }, handover?: { peerUrl: string }): Promise<boolean>;
 }
 let admission: ReplaceAdmission | undefined;
 export function setReplaceAdmission(a: ReplaceAdmission | undefined): void {
@@ -282,9 +284,11 @@ export async function decideAuto(p: AutoPlacement, nowMs = Date.now()): Promise<
   const currentReadiness = current ? claimReadiness(current, st, nowMs) : null;
   // Run 19: the cloud host had room but was over the call's price ceiling: say what it needs, so the
   // caller can send it again with a ceiling that covers it (a tentacle helper waits for room, #594).
-  const price = await cloudPriceNeed(p, nowMs);
-  if (admission && (await admission.refuse(p, price))) {
-    app.log.warn({ taskId: p.taskId, subtaskId: p.subtaskId, reason: final ? "not_claimed_in_time" : "no_host_can_claim", elapsedMs, tried: p.tried, current: current ?? null, currentReadiness, final, ...(price ? { cloudNeedsCSats: price.neededCSats, maxCSats: p.job.maxCSats ?? null } : {}) }, "auto_call_refused_no_host");
+  // Run 20: a peer coordinator could start it (its cloud host, or a free host there): hand it over.
+  const handover = p.mayHandOver ? await peerHandover(p, nowMs) : undefined;
+  const price = handover ? undefined : await cloudPriceNeed(p, nowMs);
+  if (admission && (await admission.refuse(p, price, handover))) {
+    app.log.warn({ taskId: p.taskId, subtaskId: p.subtaskId, reason: final ? "not_claimed_in_time" : "no_host_can_claim", elapsedMs, tried: p.tried, current: current ?? null, currentReadiness, final, ...(price ? { cloudNeedsCSats: price.neededCSats, maxCSats: p.job.maxCSats ?? null } : {}), ...(handover ? { handedOverTo: handover.peerUrl } : {}) }, "auto_call_refused_no_host");
     return "refused";
   }
   return "none";
@@ -408,6 +412,23 @@ async function nextPick(p: AutoPlacement, nowMs: number, opts: { cloudOnly?: boo
     if (!more) return undefined;
   }
   return undefined;
+}
+
+/**
+ * Run 20 (inf-1795727244974-d5f19016, a fra buyer's simple Auto call in the burst: the EU
+ * coordinator, which has no cloud host, saw fra and lhr only, refused it at 1.0 s and the portal
+ * answered 503 at 1.35 s while the US cloud host was 16/16 free): before an Auto call nothing here
+ * can start is refused, best fit looks at the peers without this coordinator's hosts. When it picks
+ * a peer's host (its cloud host, or a free host there), the refusal names that coordinator
+ * (no_capacity reason "elsewhere", coordinatorUrl, refunded in full), and a caller that follows
+ * redirects sends the call there at once, as a route_elsewhere answer. Only for a call whose caller
+ * follows redirects and that no peer sent here (no ping-pong).
+ */
+async function peerHandover(p: AutoPlacement, nowMs: number): Promise<{ peerUrl: string } | undefined> {
+  const localIds = localAgentViews(nowMs).map((a) => a.agentId);
+  const r = await resolveAuto(p.job, { peers: true, requesterAccountId: p.accountId, excludeAgents: [...new Set([...p.tried, ...localIds])], clientRegion: p.clientRegion ?? null, ...(p.onlyClass ? { computeClass: p.onlyClass } : {}) }, nowMs).catch(() => undefined);
+  // Only to a host with a free slot there (not one it would queue for).
+  return r?.elsewhere?.url && r.result.capacity !== "queued" ? { peerUrl: r.elsewhere.url } : undefined;
 }
 
 /**
