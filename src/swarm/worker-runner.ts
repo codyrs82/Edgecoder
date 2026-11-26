@@ -82,7 +82,7 @@ import { createOllamaAdmin, diskSpace, ollamaModelsDir, registryModelSize } from
 import { remoteControlEnabled, resolveAllowlist } from "../model/remote-control/policy.js";
 import { MODEL_CONTROL_FRAME_TYPE } from "../model/remote-control/protocol.js";
 import { COORDINATOR_DRAIN_NOTICE_FRAME_TYPE, COORDINATOR_RECONNECT_FRAME_TYPE, CoordinatorReconnectState, CoordinatorRestartWindow, RESTART_REQUEST_TIMEOUT_MS, MESH_WS_REBIND_TERMINATE_MS, isDrainingError, isRestartTransientError, isRestartClose, nextMeshWsDelay, verifyCoordinatorDrainNoticeFrame, verifyCoordinatorReconnectFrame } from "../mesh/coordinator-reconnect.js";
-import { DRAIN_STEER_WAIT_MS, DrainFailover, HOME_REGISTER_TIMEOUT_MS, homeProbeState, ReturnHome } from "../mesh/drain-failover.js";
+import { DRAIN_STEER_WAIT_MS, DrainFailover, HOME_REGISTER_TIMEOUT_MS, HomeProbe, homeProbeState, leavingPullBody, ReturnHome } from "../mesh/drain-failover.js";
 import { BOT_CONTROL_FRAME_TYPE, botRelayMode } from "../common/bot-relay.js";
 import { BotRelayAgent, httpProviderClient } from "./bot-relay-agent.js";
 import { CODE_CONTROL_FRAME_TYPE, codeRelayMode } from "../common/code-relay.js";
@@ -1519,6 +1519,27 @@ async function probeDrainHome(url: string): Promise<"up" | "draining" | "down"> 
     return "down";
   }
 }
+/** The last pull to the coordinator this agent leaves for home: no free slot, no nudges (drain-failover.ts leavingPullBody). */
+async function tellPeerLeaving(peer: CoordinatorTarget): Promise<void> {
+  try {
+    const pulled = (await post("/pull", leavingPullBody({ agentId: AGENT_ID, slots: MAX_PARALLEL_INFERENCE, contextWindow: CONTEXT_WINDOW }), { signed: true, to: peer, retries: 0, timeoutMs: 3_000 })) as { subtask?: { id: string; taskId: string } | null; envelope?: { subtaskId: string; metadata?: { taskId?: string } } };
+    // Nothing is expected with no free slot; anything handed out anyway goes straight back, not run.
+    const id = pulled?.subtask?.id ?? pulled?.envelope?.subtaskId;
+    const taskId = pulled?.subtask?.taskId ?? pulled?.envelope?.metadata?.taskId ?? id;
+    if (id) await post("/result", { subtaskId: id, taskId, agentId: AGENT_ID, ok: false, output: "", error: "agent_moved_coordinator", durationMs: 0, executed: false }, { signed: true, to: peer, retries: 0, timeoutMs: 3_000 });
+  } catch {
+    // Best effort: the peer stops counting it once its last pull is PULL_FRESH_MS old anyway.
+  }
+}
+const homeProbe = new HomeProbe({
+  failover: drainFailover,
+  probe: (home) => probeDrainHome(home),
+  onBack: (home, waitMs) => {
+    console.log(`[agent:${AGENT_ID}] ${home} is back: returning in ${waitMs}ms`);
+    setTimeout(() => wakeLoop(false), waitMs + 5).unref?.();
+  },
+  wake: () => wakeLoop(false)
+});
 /**
  * One step of a drain failover (drain-failover.ts), at the top of an online pass: move to a peer
  * when due, probe the home while away, switch back once it answers without draining.
@@ -1553,14 +1574,8 @@ async function stepDrainFailover(homeReturn: ReturnHome): Promise<void> {
     return;
   }
   const home = drainFailover.home;
-  if (home && drainFailover.homeProbeDue(now)) {
-    if (drainFailover.onHomeProbe(await probeDrainHome(home))) {
-      const waitMs = drainFailover.msUntilDue();
-      console.log(`[agent:${AGENT_ID}] ${home} is back: returning in ${waitMs}ms`);
-      setTimeout(() => wakeLoop(false), waitMs + 5).unref?.();
-    }
-    return;
-  }
+  // Is home back? Probed beside the loop (HomeProbe), so a home that holds the probe does not stop the pulls here.
+  if (home) homeProbe.step();
   // Back home, make before break: registered there first, beside the loop, then switched (ReturnHome).
   if (home) homeReturn.step();
 }
@@ -2210,7 +2225,15 @@ async function loop(): Promise<void> {
       homeRegistration = null;
       if (!reg || reg.target.url !== home) return;
       const peer = coordinator.url;
+      let peerTarget: CoordinatorTarget | null = null;
+      try {
+        peerTarget = coordinator.requireVerifiedIdentity();
+      } catch {
+        peerTarget = null;
+      }
       coordinator.adopt(reg.target.url, reg.target.identity, "drain_return");
+      // Run 19: tell the peer this agent takes nothing more there (it counted it ready for ~6 s after).
+      if (peerTarget) void tellPeerLeaving(peerTarget);
       registeredWithUrl = coordinator.url;
       lastRegisteredAtMs = Date.now();
       coordinatorReconnect.registered();

@@ -9,6 +9,7 @@ import {
   HOME_RETURN_HOLD_MAX_MS,
   HOME_RETURN_JITTER_MS,
   NO_PEER_RETRY_MS,
+  HomeProbe,
   ReturnHome,
   homeProbeState
 } from "../../src/mesh/drain-failover.js";
@@ -334,6 +335,15 @@ describe("worker wiring", () => {
     // The old switch-then-register path and its error branch are gone.
     expect(src).not.toContain("drain_return_not_ready");
   });
+  it("run 19: going home, the agent sends the peer its leaving pull (pinned to the peer, before nothing else)", () => {
+    expect(src).toMatch(/peerTarget = coordinator\.requireVerifiedIdentity\(\);[\s\S]{0,200}coordinator\.adopt\(reg\.target\.url, reg\.target\.identity, "drain_return"\);[\s\S]{0,200}if \(peerTarget\) void tellPeerLeaving\(peerTarget\);/);
+    expect(src).toContain('post("/pull", leavingPullBody({ agentId: AGENT_ID, slots: MAX_PARALLEL_INFERENCE, contextWindow: CONTEXT_WINDOW }), { signed: true, to: peer, retries: 0, timeoutMs: 3_000 })');
+  });
+  it("run 19: the home probe runs beside the loop (HomeProbe), not awaited in the drain step", () => {
+    expect(src).not.toContain("onHomeProbe(await probeDrainHome(home))");
+    expect(src).toContain("if (home) homeProbe.step();");
+    expect(src).toContain("probe: (home) => probeDrainHome(home),");
+  });
   it("run 15: with a peer named, the move waits for steering at most DRAIN_STEER_WAIT_MS", () => {
     expect(src).toMatch(/drainFailover\.peerHint\s*\? await Promise\.race\(\[steering, new Promise<null>\(\(r\) => setTimeout\(\(\) => r\(null\), DRAIN_STEER_WAIT_MS\)/);
   });
@@ -520,5 +530,86 @@ describe("return home, make before break (run 15)", () => {
     await sim.run(12_000);
     expect(sim.switches).toEqual([]);
     expect(sim.failover.state).not.toBe("idle");
+  });
+});
+
+/*
+ * Network run 19 (outage 3b): while the US seed booted, Fly's proxy held each home probe (GET
+ * /identity) for its 3 s timeout, and the probe was awaited inside the loop every 2-3 s. The agents
+ * serving through the EU seed hardly pulled there: iad, preferred and "ready" for a call, did not
+ * pull for 1.4 s and the call was refused (inf-1795713435546-c2551d8d, not_claimed_in_time).
+ */
+describe("home probe beside the loop (run 19)", () => {
+  const HOME = "https://us.example";
+  const PEER = "https://eu.example";
+  const flush = () => new Promise<void>((r) => setImmediate(r));
+
+  function away(now = 0) {
+    const f = new DrainFailover(() => 0.5);
+    f.notice({ drainingUrl: HOME, peerUrl: PEER, reason: "drain_notice", nowMs: now });
+    f.moved(PEER, now + 500);
+    return f;
+  }
+
+  it("a probe that hangs does not hold the step; its answer is applied when it comes, one probe at a time", async () => {
+    let now = 0;
+    const f = away();
+    let release: (s: "up" | "down" | "draining") => void = () => undefined;
+    let probes = 0;
+    const back: number[] = [];
+    let wakes = 0;
+    const p = new HomeProbe({
+      failover: f,
+      probe: () => {
+        probes++;
+        return new Promise((r) => (release = r));
+      },
+      onBack: (_home, waitMs) => back.push(waitMs),
+      wake: () => wakes++,
+      now: () => now,
+    });
+    now = 500 + HOME_PROBE_MS + HOME_PROBE_JITTER_MS;
+    expect(p.step()).toBe("started");
+    // The loop goes on (pulls the peer) while the probe is out; no second probe meanwhile.
+    for (let i = 0; i < 30; i++) {
+      now += 100;
+      expect(p.step()).toBe("probing");
+    }
+    expect(probes).toBe(1);
+    release("up");
+    await flush();
+    expect(p.probing).toBe(false);
+    expect(f.state).toBe("returning");
+    expect(back).toHaveLength(1);
+    expect(back[0]).toBeLessThanOrEqual(HOME_RETURN_JITTER_MS);
+    expect(wakes).toBe(1);
+  });
+
+  it("home still down: probes again after the usual wait", async () => {
+    let now = 0;
+    const f = away();
+    const p = new HomeProbe({ failover: f, probe: async () => "down", onBack: () => undefined, wake: () => undefined, now: () => now });
+    now = 500 + HOME_PROBE_MS + HOME_PROBE_JITTER_MS;
+    expect(p.step()).toBe("started");
+    await flush();
+    expect(f.state).toBe("away");
+    expect(p.step()).toBe("idle");
+    now += HOME_PROBE_MS + HOME_PROBE_JITTER_MS;
+    expect(p.step()).toBe("started");
+  });
+
+  it("a new drain signal while the probe is out: its answer changes nothing", async () => {
+    let now = 0;
+    const f = away();
+    let release: (s: "up") => void = () => undefined;
+    const back: number[] = [];
+    const p = new HomeProbe({ failover: f, probe: () => new Promise((r) => (release = r)), onBack: (_h, w) => back.push(w), wake: () => undefined, now: () => now });
+    now = 500 + HOME_PROBE_MS + HOME_PROBE_JITTER_MS;
+    p.step();
+    f.notice({ drainingUrl: PEER, peerUrl: HOME, reason: "drain_notice", nowMs: now });
+    release("up");
+    await flush();
+    expect(back).toEqual([]);
+    expect(f.state).toBe("leaving");
   });
 });

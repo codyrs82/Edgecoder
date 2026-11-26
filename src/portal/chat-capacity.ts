@@ -108,6 +108,14 @@ export const CHAT_CAPACITY_DEFAULT_TIMEOUT_MS = 2_000;
 export const CHAT_CAPACITY_DEFAULT_TTL_MS = 15_000;
 /** Oldest load report a network pick uses (model slots free and calls waiting change in seconds). */
 export const LOAD_REPORT_MAX_AGE_MS = 2_000;
+/**
+ * Network run 19 (outage 3b): while the US seed booted, Fly's proxy held each capacity probe to it
+ * for the whole 2 s timeout, and every pick waited for it before choosing the EU seed: refusals took
+ * 3.8 s end to end (2 s here, then the EU's 1.5 s claim decision). A load pick now waits for a slow
+ * coordinator's report at most this long after another one has answered; the slow one is left out
+ * of that pick (its probe goes on and fills the cache for the next one).
+ */
+export const SLOW_REPORT_GRACE_MS = 300;
 /** A "no" older than this is asked again before a chat is refused for lack of compute. */
 const RECHECK_NO_AFTER_MS = 3_000;
 const CANDIDATE_LIST_TTL_MS = 60_000;
@@ -252,6 +260,8 @@ export interface ChatCapacityOptions {
   portalRegion?: string | null;
   /** Run 10: one `coordinator_choice` line per choice (every coordinator considered and why), e.g. the app's logger. */
   log?: { info: (obj: object, msg: string) => void };
+  /** Tests: SLOW_REPORT_GRACE_MS. */
+  slowReportGraceMs?: number;
 }
 
 /**
@@ -377,6 +387,35 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
   };
   const cache = new Map<string, CacheEntry>();
   const failedAt = new Map<string, number>();
+  const slowGraceMs = opts.slowReportGraceMs ?? SLOW_REPORT_GRACE_MS;
+  /**
+   * The reports for a load pick: all of them, or, once one coordinator has answered, those in within
+   * `slowGraceMs` more; a report still out then counts as unreachable for this pick (run 19).
+   */
+  const loadReports = (pending: Array<Promise<CapacityReport>>): Promise<CapacityReport[]> =>
+    new Promise((resolve) => {
+      const out: Array<CapacityReport | undefined> = new Array(pending.length);
+      let left = pending.length;
+      let graceTimer: ReturnType<typeof setTimeout> | undefined;
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        if (graceTimer) clearTimeout(graceTimer);
+        resolve(Array.from(out, (r) => r ?? { reachable: false }));
+      };
+      if (left === 0) return finish();
+      pending.forEach((p, i) =>
+        p.then(
+          (r) => r,
+          (): CapacityReport => ({ reachable: false })
+        ).then((r) => {
+          out[i] = r;
+          if (--left === 0) return finish();
+          if (r.reachable && !graceTimer) graceTimer = setTimeout(finish, slowGraceMs);
+        })
+      );
+    });
   let list: { at: number; urls: string[] } | undefined;
   let listPending: Promise<string[]> | undefined;
 
@@ -512,7 +551,7 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
   async function chooseByLoad(urls: string[], model: string, cls: string | undefined, maxAgeMs: number, ctx: PickContext | undefined): Promise<{ url: string; choice: CoordinatorChoice } | null> {
     // Load moves in seconds: a report older than LOAD_REPORT_MAX_AGE_MS is fetched again, so calls
     // that already finished are not still counted against a coordinator for the whole cache TTL.
-    const reports = await Promise.all(urls.map((u) => reportOf(u, "network", Math.min(maxAgeMs, LOAD_REPORT_MAX_AGE_MS))));
+    const reports = await loadReports(urls.map((u) => reportOf(u, "network", Math.min(maxAgeMs, LOAD_REPORT_MAX_AGE_MS))));
     const scored: Array<LatencyCandidate> = [];
     for (let i = 0; i < urls.length; i++) {
       const r = reports[i];
@@ -585,7 +624,7 @@ export function createChatCapacityDirectory(opts: ChatCapacityOptions): ChatCapa
   async function chooseAuto(ctx: PickContext | undefined): Promise<{ url: string | null; choice?: CoordinatorChoice }> {
     const urls = await knownUrls();
     if (urls.length === 0) return { url: null };
-    const reports = await Promise.all(urls.map((u) => reportOf(u, "network", LOAD_REPORT_MAX_AGE_MS)));
+    const reports = await loadReports(urls.map((u) => reportOf(u, "network", LOAD_REPORT_MAX_AGE_MS)));
     const scored: LatencyCandidate[] = [];
     let best: { url: string; room: number } | null = null;
     for (let i = 0; i < urls.length; i++) {
