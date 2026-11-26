@@ -20,7 +20,7 @@ import { agentUnavailable, circuitBlocks, circuitOpen, circuitState, memoryAdmit
 import { AUTO_MODEL_ID } from "../../../inference-api/auto-route.js";
 import { cleanHints, describeJob, type JobDescriptor } from "../../../inference-api/job-descriptor.js";
 import type { BestFitResult } from "../best-fit.js";
-import { agentRegionCode, agentRttMs, bestFitConfig, complexityWeights, coordinatorLoadSignals, localAgentViews, recordDecision, recordPlacement, resolveAuto, routingSummary, type RoutingSummary } from "../routing.js";
+import { agentFailRate, agentRegionCode, agentRttMs, bestFitConfig, complexityWeights, coordinatorLoadSignals, localAgentViews, recordDecision, recordPlacement, resolveAuto, routingSummary, type RoutingSummary } from "../routing.js";
 import { cleanRegion, clientRegionOf, sanitizeCoordinatorChoice } from "../../../common/coordinator-choice.js";
 import { InferenceStreams, boundTokenCounts, maxTokensOf } from "../../inference-streams.js";
 import { DegenerateReplyTracker, billableFraction, detectDegenerateOutput, type DegeneracyVerdict } from "../../inference-degeneracy.js";
@@ -146,8 +146,8 @@ export function judgeInferenceReply(
 export const INFERENCE_CLAIM_TIMEOUT_MS = CC.INFERENCE_CLAIM_TIMEOUT_MS;
 export const NO_CAPACITY_RETRY_AFTER_SEC = 15;
 const NO_CAPACITY_KEEP_MS = 10 * 60_000;
-type NoCapacityReason = "busy" | "none_in_class" | "draining" | "cooling_down";
-const noCapacity = new Map<string, { accountId: string; subtaskId: string; atMs: number; reason: NoCapacityReason; computeClass?: string; model?: string; coordinatorUrl?: string; startEtaMs?: number }>();
+type NoCapacityReason = "busy" | "none_in_class" | "draining" | "cooling_down" | "price";
+const noCapacity = new Map<string, { accountId: string; subtaskId: string; atMs: number; reason: NoCapacityReason; computeClass?: string; model?: string; coordinatorUrl?: string; startEtaMs?: number; neededCSats?: number }>();
 
 /** Granted classes of the online, unblacklisted agents that hold `model` (one entry per agent), free of a reservation unless `includeReserved`. */
 function holderClasses(model: string, nowMs = Date.now(), includeReserved = false): ComputeClassId[] {
@@ -191,7 +191,7 @@ export function inferenceCancelledForCapacity(taskId: string): boolean {
  * holds it: that call runs and is settled as usual. Removal from the queue is synchronous and only
  * of an unclaimed item, so a claim racing the cancel either got it first or finds nothing.
  */
-export async function cancelUnclaimedInference(taskId: string, subtaskId: string, draining?: { peerUrl: string | null }, why?: "cooling_down", startEtaMs?: number): Promise<boolean> {
+export async function cancelUnclaimedInference(taskId: string, subtaskId: string, draining?: { peerUrl: string | null }, why?: "cooling_down", startEtaMs?: number, price?: { neededCSats: number }): Promise<boolean> {
   const timer = claimDeadlines.get(subtaskId);
   if (timer) clearTimeout(timer);
   claimDeadlines.delete(subtaskId);
@@ -205,8 +205,8 @@ export async function cancelUnclaimedInference(taskId: string, subtaskId: string
   const usage = usagePending.get(taskId);
   const gap = usage?.model && usage.computeClass ? capacityGap(usage.computeClass as ComputeClassId, holderClasses(usage.model)) : "busy";
   // Draining: the caller is told so, with a peer to send the call to (it was refunded here in full).
-  const reason: NoCapacityReason = draining ? "draining" : why ?? (gap === "none_in_class" ? "none_in_class" : "busy");
-  noCapacity.set(taskId, { accountId, subtaskId, atMs: Date.now(), reason, ...(usage?.computeClass ? { computeClass: usage.computeClass } : {}), ...(usage?.model ? { model: usage.model } : {}), ...(draining?.peerUrl ? { coordinatorUrl: draining.peerUrl } : {}), ...(startEtaMs !== undefined ? { startEtaMs: Math.round(startEtaMs) } : {}) });
+  const reason: NoCapacityReason = draining ? "draining" : why ?? (price ? "price" : gap === "none_in_class" ? "none_in_class" : "busy");
+  noCapacity.set(taskId, { accountId, subtaskId, atMs: Date.now(), reason, ...(usage?.computeClass ? { computeClass: usage.computeClass } : {}), ...(usage?.model ? { model: usage.model } : {}), ...(draining?.peerUrl ? { coordinatorUrl: draining.peerUrl } : {}), ...(startEtaMs !== undefined ? { startEtaMs: Math.round(startEtaMs) } : {}), ...(price ? { neededCSats: Math.round(price.neededCSats * 1000) / 1000 } : {}) });
   // A failed result from the coordinator (like a lease failure), so the subtask is settled everywhere.
   queue.complete({ subtaskId, taskId, agentId: "coordinator", ok: false, output: "", error: "no_capacity", durationMs: 0 });
   inferenceStreams.finish(subtaskId, "no_capacity");
@@ -495,6 +495,9 @@ const claimDecisions = new Map<string, ReturnType<typeof setTimeout>>();
  * portal; the portal-to-EU hop took ~0.2 s, Fly clients saw up to 2.24 s): 16/15 windows, 1.6 s by
  * default (1.3 s for a redirected call), so the portal answers within 2 s with a ~0.3 s hop.
  */
+/** Run 19: a host failing this share of its recent calls (routing.ts agentFailRate) is not listed as a free host for the portal. */
+export const FREE_HOST_MAX_FAIL_RATE = 0.5;
+
 export const CLAIM_DECISION_BOUND = 16 / 15;
 export const REDIRECT_ALLOWANCE = 0.2;
 /** A wait shorter than this is not armed: the call is decided now. */
@@ -686,8 +689,9 @@ export function waitingBound(holderIds: string[], nowMs = Date.now()): number {
   return Math.max(16, Math.min(512, slots * WAITING_PER_SLOT));
 }
 
-function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: string) => { send: (b: unknown) => unknown } } }, c?: { reason: NoCapacityReason; computeClass?: string; model?: string; coordinatorUrl?: string; retryAfterSec?: number; startEtaMs?: number; completionEtaMs?: number; limitMs?: number }) {
+function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: string) => { send: (b: unknown) => unknown } } }, c?: { reason: NoCapacityReason; computeClass?: string; model?: string; coordinatorUrl?: string; retryAfterSec?: number; startEtaMs?: number; completionEtaMs?: number; limitMs?: number; neededCSats?: number }) {
   const noneInClass = c?.reason === "none_in_class";
+  const overPrice = c?.reason === "price";
   const draining = c?.reason === "draining";
   const coolingDown = c?.reason === "cooling_down";
   const retryAfterSec = draining ? 1 : c?.retryAfterSec !== undefined ? c.retryAfterSec : NO_CAPACITY_RETRY_AFTER_SEC;
@@ -702,7 +706,10 @@ function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: 
       ...(c?.startEtaMs !== undefined ? { startEtaMs: c.startEtaMs } : {}),
       ...(c?.completionEtaMs !== undefined ? { completionEtaMs: c.completionEtaMs } : {}),
       ...(c?.limitMs !== undefined ? { limitMs: c.limitMs } : {}),
-      message: draining
+      ...(c?.neededCSats !== undefined ? { neededCSats: c.neededCSats } : {}),
+      message: overPrice
+        ? `No machine within this call's price ceiling could start it in time; a cloud host could, for about ${c?.neededCSats ?? "?"} cSats. Nothing was charged. Send it again with a ceiling that covers that.`
+        : draining
         ? "This coordinator is restarting; the call had not started and nothing was charged. Send it again (to the coordinator named, if any)."
         : coolingDown
         ? `The machine serving ${c?.model ?? "this model"} is cooling down after failed calls; nothing was charged. Send it again shortly or pick another model.`
@@ -1136,7 +1143,7 @@ setReplaceAdmission({
     const st = queue.getSubtask(p.subtaskId);
     return !st?.requestedModel || waitingCallFits(st, st.requestedModel, st.projectMeta.computeClass ?? "any", undefined, nowMs);
   },
-  refuse: (p: AutoPlacement) => cancelUnclaimedInference(p.taskId, p.subtaskId),
+  refuse: (p: AutoPlacement, price?: { neededCSats: number }) => cancelUnclaimedInference(p.taskId, p.subtaskId, undefined, undefined, undefined, price),
 });
 
 /** Run 5: the output a call without max_tokens is judged on (it may write up to INFERENCE_DEFAULT_MAX_TOKENS). */
@@ -1214,7 +1221,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         // portal scales it to the call it places and compares two hosts of one class by distance unless
         // both have measured speeds. serviceMs (a reference call) stays for older portals. Run 7: with a
         // measured speed, how old its newest sample is (speedAgeMs): the portal trusts only a fresh one.
-        if (region && free > 0 && e.freeHosts.length < 32) {
+        // Run 19: a host that keeps failing calls or not picking them up (routing fail rate ≥ 0.5) is
+        // not offered as a free host: its speed (often a class prior) must not win the portal's latency rule.
+        if (region && free > 0 && e.freeHosts.length < 32 && !((agentFailRate(id) ?? 0) >= FREE_HOST_MAX_FAIL_RATE)) {
           const sp = hostSpeed(m, id, cls, now, completionPrior()[cls]);
           const svc = sp === null ? null : hostServiceMs(m, id, cls, now, completionPrior()[cls]);
           e.freeHosts.push({ region, free, computeClass: cls, ...(rtt !== null && Number.isFinite(rtt) ? { rttMs: Math.round(rtt) } : {}), ...(svc !== null ? { serviceMs: svc } : {}), ...(sp !== null ? { speed: Math.round(sp.speed * 1000) / 1000, speedFrom: sp.from, ...(sp.ageMs !== undefined ? { speedAgeMs: Math.round(sp.ageMs) } : {}) } : {}) });

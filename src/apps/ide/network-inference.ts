@@ -254,9 +254,14 @@ export class AutoUnsupportedError extends NetworkInferenceError {
  * The coordinator cancelled the call because no agent claimed it in time (503 no_capacity):
  * nothing was charged and it can be sent again after `retryAfterSec`.
  */
-function noCapacityError(json: Record<string, unknown>, model: string): NetworkInferenceError {
+export function noCapacityError(json: Record<string, unknown>, model: string): NetworkInferenceError {
   const retryAfterSec = typeof json.retryAfterSec === "number" && json.retryAfterSec > 0 ? Math.ceil(json.retryAfterSec) : 15;
   // The coordinator says whether the class had any machine with the model at all (older ones never do: "busy").
+  // Run 19: refused because the cloud host that could take it costs more than the call's ceiling: a
+  // price refusal, with what it needs (a tentacle helper waits for room and sends it again, #594).
+  if (json.reason === "price" && typeof json.neededCSats === "number") {
+    return new NetworkInferenceError(String(json.message ?? `No machine within this call's price ceiling could start it; it needs about ${json.neededCSats} cSats.`), 503, retryAfterSec, { code: "no_route_fits", reason: "price", neededCSats: json.neededCSats });
+  }
   if (json.reason === "none_in_class") {
     return new NetworkInferenceError(`No ${String(json.computeClass ?? "requested-class")} machine runs ${model} right now (machines of other classes do). Nothing was charged; try another class or try again later.`, 503, retryAfterSec);
   }

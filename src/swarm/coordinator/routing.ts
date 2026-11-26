@@ -90,14 +90,17 @@ export function agentPerf(agentId: string, claims = queue.activeClaims()): Agent
   };
 }
 
-/** This coordinator's hosting region (INFRA_HOST_REGION, COORDINATOR_REGION, FLY_REGION), as in /network/world. */
-function hostRegion(): string | null {
-  return CC.INFRA_HOST_REGION || process.env.COORDINATOR_REGION || process.env.FLY_REGION || null;
-}
-
-/** Where an agent is, for locality (#526): the region it reported, else its country, else this coordinator's region. */
-export function agentRegionCode(cap: { region?: string; countryCode?: string } | undefined): string | null {
-  return cap?.region || cap?.countryCode || hostRegion();
+/**
+ * Where an agent is, for locality (#526): the region it reported, else (run 19) the Fly edge region
+ * its registration came through, else its country; null when none is known.
+ *
+ * Run 19 (desktop-maw-mb-02, a Mac that reported no region): it was placed at this coordinator's
+ * own region (ord), so it was "0 km" from ord buyers and the portal's latency rule weighed it as an
+ * ord host. A host whose location is not known now has none: no distance advantage or penalty in
+ * locality (nearestFreeHolder skips it), no free-host region for the portal.
+ */
+export function agentRegionCode(cap: { region?: string; inferredRegion?: string; countryCode?: string } | undefined): string | null {
+  return cap?.region || cap?.inferredRegion || cap?.countryCode || null;
 }
 
 /** Estimated buyer <-> agent round trip from their regions; undefined when either is not known. */

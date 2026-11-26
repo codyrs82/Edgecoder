@@ -114,6 +114,8 @@ export const agentCapabilities = new Map<
     countryCode?: string;
     /** Self-reported hosting region code (e.g. a Fly region such as "sin"); display only. */
     region?: string;
+    /** Run 19: no region reported: the Fly edge region its registration came through (Fly-Region header), for locality. */
+    inferredRegion?: string;
     vpnDetected?: boolean;
     enrollmentReason?: string;
     /**
