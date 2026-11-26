@@ -1453,7 +1453,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const sized = billed ? inferenceCallReserve({ model: body.model, taskClass, timeoutMs: body.timeoutMs, inputBytes: Buffer.byteLength(input, "utf8"), maxTokens, ...(maxCSats !== undefined ? { maxCSats } : {}) }) : undefined;
     // Run 11: an Auto call may overflow to a cloud host here if nothing else can start it (auto-replace.ts):
     // its reserve covers that worst case too (the unused part is refunded at settle, as always).
-    const overflowMsat = routed && billed && taskClass !== "cloud" ? cloudOverflowReserveMsat({ inputBytes: Buffer.byteLength(input, "utf8"), maxTokens, timeoutMs: body.timeoutMs, ...(maxCSats !== undefined ? { maxCSats } : {}), ...(routed.onlyClass ? { onlyClass: routed.onlyClass } : {}) }) : 0;
+    const overflowMsat = routed && billed && taskClass !== "cloud" ? cloudOverflowReserveMsat({ inputBytes: Buffer.byteLength(input, "utf8"), maxTokens, timeoutMs: body.timeoutMs, ...(maxCSats !== undefined ? { maxCSats } : {}), ...(routed.onlyClass ? { onlyClass: routed.onlyClass } : {}), job: routed.job }) : 0;
     const reserve = Math.max(sized?.reserveMsat ?? 0, overflowMsat);
     // Optional "pay from your own wallet" (PAYMENTS_NWC): no debit; the reserve bounds the call's
     // cost against the buyer's exposure cap (unsettled tallies), and the cost goes on the tally.

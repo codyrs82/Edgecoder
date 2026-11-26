@@ -72,7 +72,7 @@
 import type { JobDescriptor } from "../../inference-api/job-descriptor.js";
 import { ACCEPTED_COMPUTE_CLASS_IDS, resolveRequestedClass, type ComputeClassId } from "../../economy/compute-classes.js";
 import { msatToCSats } from "../../economy/job-pricing.js";
-import type { Candidate } from "./best-fit.js";
+import { jobWantsPremiumCloud, type Candidate } from "./best-fit.js";
 import { app } from "./app.js";
 import type { Subtask } from "../../common/types.js";
 import { CC, queue, taskBilling, usagePending } from "./context.js";
@@ -82,6 +82,9 @@ import { inferenceCallReserve, MARKET_DEFAULT_BID_PREMIUM_BPS, orderBook, rateOr
 import { agentUnavailable, circuitOpenSince, noteAgentOutcome as noteCircuitOutcome } from "./memory-admission.js";
 import { bestFitConfig, localAgentViews, noteAgentOutcome as noteRoutingOutcome, noteReplaced, resolveAuto } from "./routing.js";
 import { classFamily } from "../../inference-api/auto-route.js";
+import { cloudModelSpec } from "../../cloud-host/catalog.js";
+
+const isPremiumCloudModel = (model: string) => cloudModelSpec(model)?.hint === "premium";
 
 /** Re-placements per call. */
 export const AUTO_REPLACE_MAX = 2;
@@ -290,16 +293,28 @@ const isCloudPick = (c: Pick<Candidate, "computeClass">) => c.computeClass === "
  * largest call reserve (economy.ts inferenceCallReserve, the call's worst case) among the cloud
  * models best fit could move it to; 0 when no cloud host here could take it (none online, cloud
  * models off for Auto, or the call is limited to a class without the cloud).
+ *
+ * Run 18 (inf-1795706687095-618212e7): best fit keeps the standard cloud model (Flash) over a
+ * premium one (GLM-5.3) unless the job asks for the best quality at top-tier complexity
+ * (best-fit.ts cloudTier, jobWantsPremiumCloud). The reserve took every cloud model online, so a
+ * complex Auto call placed on a GPU host held GLM's worst case (221.67 cSats) while the same call
+ * placed on the cloud directly held Flash's (54.97 cSats), and a buyer with 95 cSats got a 402.
+ * It now holds only the models of the tier best fit would pick: the premium tier only for a job
+ * that wants it, or when no standard cloud model is online here (without a job: every model). A
+ * premium pick the reserve does not cover is still kept off the call at re-placement
+ * (reserveCoversCloud), as for a call placed on the cloud directly.
  */
-export function cloudOverflowReserveMsat(call: { inputBytes: number; maxTokens: number; timeoutMs: number; maxCSats?: number; onlyClass?: string }, nowMs = Date.now()): number {
+export function cloudOverflowReserveMsat(call: { inputBytes: number; maxTokens: number; timeoutMs: number; maxCSats?: number; onlyClass?: string; job?: Pick<JobDescriptor, "job" | "complexity" | "quality"> }, nowMs = Date.now()): number {
   if (call.onlyClass && !classFamily(call.onlyClass).includes("cloud")) return 0;
+  const online = new Set<string>();
+  for (const a of localAgentViews(nowMs)) if (a.computeClass === "cloud") for (const model of a.models) online.add(model);
+  const premium = [...online].filter(isPremiumCloudModel);
+  const standard = [...online].filter((m) => !isPremiumCloudModel(m));
+  const models = !call.job || !premium.length || !standard.length ? [...online] : jobWantsPremiumCloud(call.job) ? premium : standard;
   let most = 0;
-  for (const a of localAgentViews(nowMs)) {
-    if (a.computeClass !== "cloud") continue;
-    for (const model of a.models) {
-      const r = inferenceCallReserve({ model, taskClass: "cloud", timeoutMs: call.timeoutMs, inputBytes: call.inputBytes, maxTokens: call.maxTokens, ...(call.maxCSats !== undefined ? { maxCSats: call.maxCSats } : {}) });
-      most = Math.max(most, r.reserveMsat);
-    }
+  for (const model of models) {
+    const r = inferenceCallReserve({ model, taskClass: "cloud", timeoutMs: call.timeoutMs, inputBytes: call.inputBytes, maxTokens: call.maxTokens, ...(call.maxCSats !== undefined ? { maxCSats: call.maxCSats } : {}) });
+    most = Math.max(most, r.reserveMsat);
   }
   return most;
 }
