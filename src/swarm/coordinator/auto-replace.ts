@@ -109,6 +109,8 @@ export interface AutoPlacement {
   overflowed?: boolean;
   /** Run 14: its decision bound from its (re)placement: a later move does not extend it (only the cloud overflow does). */
   boundAt?: number;
+  /** Run 17: when this coordinator received the submit: the first window and the bound run from it. */
+  receivedAtMs?: number;
 }
 
 /** Run 9: the Auto decision window (INFERENCE_CLAIM_DECISION_MS); 0: the fixed BEST_FIT_REPLACE_MS wait. */
@@ -175,9 +177,11 @@ export function armAutoReplace(p: AutoPlacement, ms?: number, nowMs = Date.now()
   autoCalls.set(p.subtaskId, p);
   const decision = autoDecisionMs();
   if (decision > 0) {
-    if (p.decideBy === undefined) p.decideBy = p.boundAt = nowMs + Math.round(decision * AUTO_DECISION_BOUND);
+    // Run 17: from the submit's receipt (what the submit took, e.g. the credit reserve under load, comes off the window).
+    const startMs = p.decideBy === undefined ? Math.min(nowMs, p.receivedAtMs ?? nowMs) : nowMs;
+    if (p.decideBy === undefined) p.decideBy = p.boundAt = startMs + Math.round(decision * AUTO_DECISION_BOUND);
     if (p.placedAtMs === undefined) p.placedAtMs = nowMs;
-    const wait = Math.max(0, Math.min(ms ?? Math.round(decision * AUTO_FIRST_DECISION), p.decideBy - nowMs));
+    const wait = Math.max(0, Math.min(ms ?? Math.round(decision * AUTO_FIRST_DECISION) - (nowMs - startMs), p.decideBy - nowMs));
     schedule(p, wait, () => decideAuto(p));
     return;
   }
@@ -337,6 +341,7 @@ export function rearmAutoDecision(subtaskId: string, nowMs = Date.now()): boolea
   if (!p || autoDecisionMs() <= 0) return false;
   p.decideBy = undefined;
   p.placedAtMs = undefined;
+  p.receivedAtMs = undefined;
   p.graced = false;
   armAutoReplace(p, undefined, nowMs);
   return true;
