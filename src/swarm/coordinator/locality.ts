@@ -34,7 +34,7 @@ import { regionDistanceKm } from "../../common/geo-regions.js";
 import { agentHasModel } from "../model-catalog.js";
 import { queue, reservations } from "./context.js";
 import { agentCapabilities, activeBlacklistRecord } from "./agent-state.js";
-import { agentContextWindow, agentLoadReport, coldLoadKm, freeModelSlots, modelKnownCold, modelWarmOn } from "./dispatch.js";
+import { agentContextWindow, agentLoadReport, coldLoadKm, freeModelSlots, modelKnownCold, modelWarmOn, PULL_FRESH_MS, pulledWithin } from "./dispatch.js";
 import { coldLoadMs, contentionFactor, decodeTps, prefillTps, type AgentView } from "./best-fit.js";
 import { agentHeldBack, callWorkMs, decodeEstimateMs, serviceTimes } from "./start-eta.js";
 import { effectiveHardware } from "./economy.js";
@@ -74,6 +74,11 @@ export interface FreeHolder {
   warm?: boolean;
   /** Known not to have the model loaded (dispatch.ts modelKnownCold): it would pay a cold load. */
   cold?: boolean;
+  /**
+   * It pulled here within PULL_FRESH_MS (dispatch.ts pulledWithin). False: free by this coordinator's
+   * count but not taking work here now (see nearestFreeHolder). Undefined: not known (counted as pulling).
+   */
+  pulling?: boolean;
 }
 
 export function freeLocalHolders(model: string, taskClass: ComputeClassId | "any", neededTokens: number, nowMs = Date.now()): FreeHolder[] {
@@ -94,7 +99,7 @@ export function freeLocalHolders(model: string, taskClass: ComputeClassId | "any
     if (agentHeldBack(id, claims.get(id)?.inference ?? 0, nowMs)) continue;
     const free = freeModelSlots(id, claims);
     if (free <= 0) continue;
-    out.push({ agentId: id, free, slots: Math.max(1, agentLoadReport(id)?.slots ?? cap.maxConcurrentTasks ?? 1), region: agentRegionCode(cap), warm: modelWarmOn(id, model, nowMs), cold: modelKnownCold(id, model, nowMs) });
+    out.push({ agentId: id, free, slots: Math.max(1, agentLoadReport(id)?.slots ?? cap.maxConcurrentTasks ?? 1), region: agentRegionCode(cap), warm: modelWarmOn(id, model, nowMs), cold: modelKnownCold(id, model, nowMs), pulling: pulledWithin(id, PULL_FRESH_MS, nowMs) });
   }
   return out;
 }
@@ -112,10 +117,19 @@ export const COLD_PENALTY_MIN_LOAD_MS = 5_000;
 /**
  * The free holder to prefer for a buyer in `clientRegion`: the smallest distance plus load term,
  * plus the cold-load time (as distance, dispatch.ts coldLoadKm) for a candidate known to be cold
- * when another has the model warm and idle (C3: under load a near host warms up instead). Undefined when the region or every candidate's region is unknown (no locality then).
+ * when another has the model warm and idle (C3: under load a near host warms up instead). Only
+ * candidates pulling here lately count (`pulling`). Undefined when the region or every candidate's
+ * region is unknown (no locality then).
  */
 export function nearestFreeHolder(candidates: ReadonlyArray<FreeHolder>, clientRegion: string | null | undefined, model?: string): LocalHolder | undefined {
   if (!clientRegion) return undefined;
+  // Network run 18 (outage 3b): a host that has not pulled here lately is not held a call for. During
+  // a planned drain the agents that moved to the peer were still running calls pinned to the draining
+  // coordinator, so the peer counted them free (it holds none of their claims); a busy 1-slot host
+  // does not pull. The US-region host nearest the buyers got every call's 2 s hold, never came, and
+  // the call was decided at its 1.6 s bound with ~0.1 s left for the hosts that were free: 17 of 130
+  // probes refused (as again after the return home, with calls pinned to the peer).
+  candidates = candidates.filter((c) => c.pulling !== false);
   const anyWarm = candidates.some((c) => c.warm && c.free >= Math.max(1, c.slots));
   const loadMs = model ? coldLoadMs(model) : 0;
   const coldKm = loadMs >= COLD_PENALTY_MIN_LOAD_MS ? coldLoadKm(loadMs) : 0;

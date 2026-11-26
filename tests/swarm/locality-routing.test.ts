@@ -246,6 +246,9 @@ describe("locality and warm models (network test run 2, B1)", () => {
     // Known cold (reports loaded models, not this one, not served lately): for a model that loads
     // slowly (14B and up) the load outweighs ~1,000 km; a small one (run 17) is loaded on the near host.
     expect(locality.nearestFreeHolder([farWarm, { ...near, cold: true }], "iad", "qwen-near:14b")?.agentId).toBe("mac-ord");
+    // Run 18: a host not pulling here lately (busy with a call another coordinator gave it) is not held a call for.
+    expect(locality.nearestFreeHolder([farWarm, { ...near, pulling: false }], "iad", MODEL)?.agentId).toBe("mac-ord");
+    expect(locality.nearestFreeHolder([{ ...near, pulling: false }], "iad", MODEL)).toBeUndefined();
     expect(locality.nearestFreeHolder([farWarm, { ...near, cold: true }], "iad", MODEL)?.agentId).toBe("iad");
     // Known cold but nobody has it warm: distance decides.
     expect(locality.nearestFreeHolder([{ ...farWarm, warm: false }, { ...near, cold: true }], "iad", MODEL)?.agentId).toBe("iad");
