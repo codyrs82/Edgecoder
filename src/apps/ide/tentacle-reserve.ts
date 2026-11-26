@@ -145,6 +145,9 @@ export function busyRefusal(err: unknown): boolean {
   const msg = typeof e.message === "string" ? e.message : "";
   if (/restarting/i.test(msg)) return false;
   if (e.info?.code === "no_capacity") return true;
+  // Run 17: no host for the call right now (#605 leaves out hosts that are not pulling): capacity, not price.
+  if (e.info?.code === "no_route_fits") return e.info && (e.info as { reason?: string }).reason === "none";
+  if (/No machine on the network can run this job right now/.test(msg)) return true;
   return e.status === 503 || /\bno_capacity\b|\bis busy\b/i.test(msg);
 }
 
