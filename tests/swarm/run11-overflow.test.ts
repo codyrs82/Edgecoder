@@ -231,13 +231,14 @@ describe("run 11, 1: simple Auto calls overflow to the cloud when no CPU host ca
 });
 
 describe("run 11, 1: a peer's free hosts are not counted twice for a burst", () => {
-  const peerWorld = (freeSlots: number, generatedAtMs = Date.now()) => [{
+  const peerCloud = { agentId: "eu-cloud", ownerTag: null, lastSeenMs: Date.now(), id: "abcdef0999", label: "cloud-•••0999", os: "linux", region: "fra", country: "DE", continent: "EU", computeClass: "cloud", tier: null, vramGb: null, models: [CLOUD_MODEL], modelsTotal: 1, activeModel: CLOUD_MODEL, status: "idle", slots: 16, slotsUsed: 0, coordinatorId: "coord-peer-eu", rttMs: 12, perf: { contextWindow: null, tokensPerSec: null, reliability: null, verified: true, freeSlots: 16, failRate: null, tierWeight: 1 }, activity: { callsNow: 0, streaming: 0, callsPerMin: 0 } };
+  const peerWorld = (freeSlots: number, generatedAtMs = Date.now(), withCloud = false) => [{
     linkRttMs: 90,
     world: {
       coordinator: { id: "coord-peer-eu", url: "https://eu.coord.example", region: "fra", country: "DE", continent: "EU", agents: 1, agentsOnline: 1 },
       links: [],
       generatedAtMs,
-      agents: [{ agentId: "eu-lhr", ownerTag: null, lastSeenMs: Date.now(), id: "abcdef0123", label: "lin-•••0123", os: "linux", region: "lhr", country: "GB", continent: "EU", computeClass: "cpu", tier: null, vramGb: null, models: [MODEL], modelsTotal: 1, activeModel: MODEL, status: "idle", slots: 1, slotsUsed: 0, coordinatorId: "coord-peer-eu", rttMs: 12, perf: { contextWindow: null, tokensPerSec: null, reliability: null, verified: true, freeSlots, failRate: null, tierWeight: 1 }, activity: { callsNow: 0, streaming: 0, callsPerMin: 0 } }],
+      agents: [{ agentId: "eu-lhr", ownerTag: null, lastSeenMs: Date.now(), id: "abcdef0123", label: "lin-•••0123", os: "linux", region: "lhr", country: "GB", continent: "EU", computeClass: "cpu", tier: null, vramGb: null, models: [MODEL], modelsTotal: 1, activeModel: MODEL, status: "idle", slots: 1, slotsUsed: 0, coordinatorId: "coord-peer-eu", rttMs: 12, perf: { contextWindow: null, tokensPerSec: null, reliability: null, verified: true, freeSlots, failRate: null, tierWeight: 1 }, activity: { callsNow: 0, streaming: 0, callsPerMin: 0 } }, ...(withCloud ? [peerCloud] : [])],
     },
   }];
 
@@ -255,7 +256,8 @@ describe("run 11, 1: a peer's free hosts are not counted twice for a burst", () 
   });
 
   test("the burst: the first call goes to the peer's free host, the next to the cloud here (was: every call sent to the peer, refused there)", async () => {
-    routing.setPeerWorldSource(async () => peerWorld(1));
+    // A peer with a cloud host of its own (run 12: a peer without one gets no Auto call while the cloud here is free).
+    routing.setPeerWorldSource(async () => peerWorld(1, Date.now(), true));
     // This coordinator's 1.5b hosts are full; the cloud host is free.
     expect((await pull(lhr, 1, 0)).id).toBeNull();
     expect((await pull(fra, 1, 0)).id).toBeNull();

@@ -371,7 +371,19 @@ export async function resolveAuto(
     waitingByModel: Object.fromEntries(queue.waitingInferenceByModel()),
     btcUsd: mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD,
   };
-  const result = bestFit(job, view, bestFitConfig, sessionMemo(job.sessionKey, nowMs), nowMs);
+  let result = bestFit(job, view, bestFitConfig, sessionMemo(job.sessionKey, nowMs), nowMs);
+  // Run 12 (inf-1795660835993-e96b2934: a simple Auto call sent to the EU coordinator, which has no
+  // cloud host, refused there after 2.25 s while this coordinator's cloud host had 14/16 free): a
+  // peer host's free slot comes from a view seconds old, and a call sent there that it cannot start
+  // has no overflow. While a cloud host here has a free slot, an Auto call is not sent to a peer
+  // that has no cloud host with a free slot of its own: best fit runs again without such peers, and
+  // the call overflows here as it would if those peer hosts were busy.
+  if (result.chosen && !result.chosen.local && view.agents.some((a) => a.local && a.computeClass === "cloud" && a.freeSlots > 0 && !a.unhealthy)) {
+    const noFallback = new Set(views.filter((v) => !v.world.agents.some((a) => a.computeClass === "cloud" && a.status !== "stale" && (a.perf?.freeSlots ?? 0) > 0)).map((v) => v.world.coordinator.id));
+    if (noFallback.has(result.chosen.coordinatorId)) {
+      result = bestFit(job, { ...view, agents: view.agents.filter((a) => a.local || !noFallback.has(a.coordinatorId)) }, bestFitConfig, sessionMemo(job.sessionKey, nowMs), nowMs);
+    }
+  }
   const c = result.chosen;
   if (c && !c.local) {
     const w = views.find((v) => v.world.coordinator.id === c.coordinatorId);

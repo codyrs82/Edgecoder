@@ -55,7 +55,7 @@ import { formatCSatsShort, parseWhere, patchReturn, tentacleCallLine, tentacleRa
 
 import { emptyAttempt, hintedChat, isProviderTierError, parseFileRef, pickLocalHelperModel, retryAfterEmpty, smallWorkerWarning, TENTACLE_HELPER_MIN_PARAMS_B, TENTACLE_LOCAL_MIN_PARAMS_B, tentacleHelperMinParamsB, tentacleLocalMinParamsB, tentaclePrompt, tentacleSystemPrompt } from "./tentacle-chat.js";
 import { acceptanceProbe, canAutoApply, modeOf, sessionAllowsShell, TENTACLE_SHELL_ALLOW, tentacleShellDecision } from "./tentacle-shell.js";
-import { CallHolds, ceilingRefusal, helperCallCeiling, helperContextWindow, helperReplyTokens, MIN_HELPER_CALL_CSATS, paidWorker, promptTokensOf } from "./tentacle-reserve.js";
+import { CallHolds, ceilingRefusal, helperCallCeiling, helperCallMinimum, helperContextWindow, helperReplyTokens, paidWorker, promptTokensOf } from "./tentacle-reserve.js";
 
 export { acceptanceProbe, canAutoApply, modeOf, sessionAllowsShell, TENTACLE_SHELL_ALLOW, tentacleShellDecision };
 export { pickLocalHelperModel, TENTACLE_HELPER_MIN_PARAMS_B, TENTACLE_LOCAL_MIN_PARAMS_B, tentacleHelperMinParamsB, tentacleLocalMinParamsB };
@@ -680,6 +680,8 @@ export class TentacleManager {
         let budgetHit = false;
         let budgetWhy = "";
         let holdKey: number | undefined;
+        // Run 12: what the network said the cheapest fitting model needs (a "price" refusal): calls wait for that much room.
+        let needCSats: number | undefined;
         let frontierRefused = false;
         let text = "";
         const read = (p: string) => readText(root, p);
@@ -711,15 +713,20 @@ export class TentacleManager {
               workerHints(t.spec, { escalate: tierUp, promptChars: prompt.length, maxCSats, tentacleId: escalate && (again?.freshHost || !tierUp) ? `${t.view.id}:retry` : t.view.id, ...(place === "worker" && model === "auto" ? { minParamsB: minB } : {}) });
             // Free places hold nothing; a paid call's ceiling is sized from the budgets left (tentacle-reserve.ts).
             if (place !== "worker" || !paidWorker(model)) return hintsFor(Math.max(0, budget - t.spent));
+            // A call sent again after a price refusal gives back its earlier hold first.
+            if (holdKey !== undefined) {
+              st.holds.release(holdKey);
+              holdKey = undefined;
+            }
             for (;;) {
               const ceiling = helperCallCeiling({ tentacleLeft: budget - t.spent, sessionLeft: cfg.budgetCSats - st.spent, heldByOthers: st.holds.total() });
-              const refusal = ceilingRefusal(ceiling, { tentacleBudget: budget, tentacleLeft: budget - t.spent });
+              const refusal = ceilingRefusal(ceiling, { tentacleBudget: budget, tentacleLeft: budget - t.spent, need: needCSats });
               if (!refusal) {
                 holdKey = st.holds.hold(ceiling);
                 return hintsFor(ceiling);
               }
               // Other helpers' calls hold the session's budget: wait for one to end.
-              if (budget - t.spent >= MIN_HELPER_CALL_CSATS && st.holds.total() > 0 && !t.abort.signal.aborted) {
+              if (budget - t.spent >= helperCallMinimum(needCSats) && st.holds.total() > 0 && !t.abort.signal.aborted) {
                 await st.holds.released(30_000, t.abort.signal);
                 continue;
               }
@@ -767,6 +774,19 @@ export class TentacleManager {
               st.holds.release(holdKey);
               holdKey = undefined;
             },
+            // Run 12: refused for its ceiling (the session's budget was held by other helpers' calls):
+            // send it again once the ceiling can cover the cheapest fitting model, if the tentacle's
+            // own budget can (a 5% margin over the network's estimate).
+            ...(place === "worker" && paidWorker(model)
+              ? {
+                  onPriceRefusal: (need: number) => {
+                    const want = Number((need * 1.05).toFixed(6));
+                    if (want > budget - t.spent || (needCSats !== undefined && want <= needCSats)) return false;
+                    needCSats = want;
+                    return true;
+                  },
+                }
+              : {}),
             // A provider error (seen even when the agent loop retries the call) keeps the session's
             // retries off the next tier for a while.
             onError: (err) => {

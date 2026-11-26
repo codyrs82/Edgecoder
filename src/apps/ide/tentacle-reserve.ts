@@ -80,13 +80,36 @@ export function helperCallCeiling(o: { tentacleLeft: number; sessionLeft: number
   return round(Math.min(o.tentacleLeft, o.sessionLeft - Math.max(0, o.heldByOthers)));
 }
 
-/** Why a paid helper call can't start on `ceiling`, or null when it can. */
-export function ceilingRefusal(ceiling: number, o: { tentacleBudget: number; tentacleLeft: number }): string | null {
-  if (ceiling >= MIN_HELPER_CALL_CSATS) return null;
+/**
+ * The smallest ceiling a helper call may start with: MIN_HELPER_CALL_CSATS, or (run 12) what the
+ * network said the cheapest model that fits the call needs (`need`, from a no_route_fits "price"
+ * refusal: nothing within the ceiling). Two helpers in network run 12 were sent with 1.139 cSats
+ * left of the session after the other helpers' holds, the cheapest fitting (≥ 7B) model needed
+ * ~3.9, and they failed instead of waiting for those holds to end.
+ */
+export function helperCallMinimum(need?: number): number {
+  return Math.max(MIN_HELPER_CALL_CSATS, need !== undefined && Number.isFinite(need) ? need : 0);
+}
+
+/** Why a paid helper call can't start on `ceiling` (at least helperCallMinimum(need)), or null when it can. */
+export function ceilingRefusal(ceiling: number, o: { tentacleBudget: number; tentacleLeft: number; need?: number }): string | null {
+  const min = helperCallMinimum(o.need);
+  if (ceiling >= min) return null;
   const fmt = (c: number) => `${c < 10 ? c.toFixed(2) : Math.round(c)} cSats`;
-  return o.tentacleLeft < MIN_HELPER_CALL_CSATS
-    ? `budget reached: ${fmt(Math.max(0, o.tentacleLeft))} of the tentacle's ${fmt(o.tentacleBudget)} is left, less than one call sets aside (${fmt(MIN_HELPER_CALL_CSATS)})`
-    : `budget reached: the session's tentacle budget left (${fmt(Math.max(0, ceiling))}) is less than one call sets aside (${fmt(MIN_HELPER_CALL_CSATS)})`;
+  const what = min > MIN_HELPER_CALL_CSATS ? `the cheapest model that fits this call needs (${fmt(min)})` : `one call sets aside (${fmt(min)})`;
+  return o.tentacleLeft < min
+    ? `budget reached: ${fmt(Math.max(0, o.tentacleLeft))} of the tentacle's ${fmt(o.tentacleBudget)} is left, less than ${what}`
+    : `budget reached: the session's tentacle budget left (${fmt(Math.max(0, ceiling))}) is less than ${what}`;
+}
+
+/**
+ * Run 12: the network refused a helper call for its price ceiling ("no_route_fits", reason "price")
+ * and said what the cheapest fitting model needs: that need, or undefined for any other failure.
+ */
+export function priceRefusalNeed(err: unknown): number | undefined {
+  const info = (err as { info?: { code?: string; reason?: string; neededCSats?: number } } | null)?.info;
+  if (!info || info.code !== "no_route_fits" || info.reason !== "price") return undefined;
+  return typeof info.neededCSats === "number" && Number.isFinite(info.neededCSats) && info.neededCSats > 0 ? info.neededCSats : undefined;
 }
 
 /** The ceilings of a session's helper calls in flight (held on the account until each call ends). */

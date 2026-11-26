@@ -17,7 +17,7 @@ import type { ChatBackend, ChatMessage } from "../../inference-api/types.js";
 import type { ServedBy } from "../../swarm/served-by.js";
 import type { TentacleSpec } from "./tentacles.js";
 import { isContextTooLong } from "./context-budget.js";
-import { HELPER_MIN_REPLY_TOKENS } from "./tentacle-reserve.js";
+import { HELPER_MIN_REPLY_TOKENS, priceRefusalNeed } from "./tentacle-reserve.js";
 
 /** "path#L10-L40" → { path, start, end }. */
 export function parseFileRef(ref: string): { path: string; start?: number; end?: number } {
@@ -43,11 +43,12 @@ export function hintedChat(
   signal: AbortSignal,
   onCall: (u: { cSats: number; where?: string; promptTokens?: number; outputTokens?: number; served?: ServedBy }) => void,
   guard?: () => void,
-  o: { maxTokens?: number | ((messages: ChatMessage[], tools?: unknown[]) => number); after?: () => void; onError?: (err: unknown) => void } = {},
+  o: { maxTokens?: number | ((messages: ChatMessage[], tools?: unknown[]) => number); after?: () => void; onError?: (err: unknown) => void; onPriceRefusal?: (neededCSats: number) => boolean } = {},
 ): ChatFn {
   return async ({ messages, tools }, onDelta) => {
     guard?.();
-    const h = await hints();
+    let h = await hints();
+    let priceRetries = 0;
     try {
       guard?.();
       const msgs = messages.map((m) => ({ ...m, role: (["system", "user", "assistant", "tool"].includes(m.role) ? m.role : "user") as "user" }));
@@ -77,6 +78,15 @@ export function hintedChat(
           // No host's window holds the prompt and this reply: once, with the smallest useful reply.
           if (maxTokens && maxTokens > HELPER_MIN_REPLY_TOKENS && !content && !toolCalls.length && !signal.aborted && isContextTooLong(err)) {
             maxTokens = HELPER_MIN_REPLY_TOKENS;
+            guard?.();
+            continue;
+          }
+          // Run 12: refused for its price ceiling before anything ran: once more, with a ceiling that
+          // covers what the network said the cheapest fitting model needs (hints() waits for room).
+          const need = priceRefusalNeed(err);
+          if (need !== undefined && !content && !toolCalls.length && !signal.aborted && priceRetries < 2 && o.onPriceRefusal?.(need)) {
+            priceRetries++;
+            h = await hints();
             guard?.();
             continue;
           }
