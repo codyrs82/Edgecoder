@@ -532,16 +532,28 @@ describe("tentacles and permission modes (3)", () => {
     expect(readFileSync(join(root, "h.ts"), "utf8")).toBe("h\n");
   });
 
-  it("mode auto-edits applies a clean patch, but one touching a protected path waits", async () => {
-    const { tentacles, s } = setup({ mode: "auto-edits", script: ({ task, call }) => (call === 0 ? { tool: ["write_file", { path: task === "ci" ? ".husky/pre-commit" : "i.ts", content: "i\n" }] } : { text: "ok" }) });
-    const a = tentacles.delegate(s.id, { task: "plain", kind: "code_edit", files: [], instructions: "i" });
+  // PR #600: this timed out at 15 s on windows-latest. It awaited idle() (no polling), but its time was
+  // git work, which the manager does synchronously per helper: a workspace for the plain helper, then
+  // one for the protected helper, whose only write the executor refuses, so its attempt changed
+  // nothing and it ran a second attempt (workspace reset, patch, merge again). One helper in one
+  // attempt now covers both: its clean file applies on its own in mode auto-edits, and its protected
+  // write is refused and never lands. The merge gate's own rule (a patch with a protected path waits
+  // for approval) is canAutoApply, tested above.
+  it("mode auto-edits applies a clean patch, but a protected path never lands on its own", async () => {
+    const { tentacles, s, worker } = setup({
+      mode: "auto-edits",
+      script: ({ call }) =>
+        call === 0 ? { tool: ["write_file", { path: ".husky/pre-commit", content: "i\n" }] } : call === 1 ? { tool: ["write_file", { path: "i.ts", content: "i\n" }] } : { text: "ok" },
+    });
+    const v = tentacles.delegate(s.id, { task: "plain and hook", kind: "code_edit", files: [], instructions: "i" });
     await tentacles.idle(s.id);
-    expect(tentacles.get(s.id, a.id)!.merge?.state).toBe("applied");
-    const b = tentacles.delegate(s.id, { task: "ci", kind: "code_edit", files: [], instructions: "ci" });
-    await tentacles.idle(s.id);
-    const t = tentacles.get(s.id, b.id)!;
-    // The executor may refuse the protected write outright; either way nothing protected lands on its own.
-    expect(["awaiting_approval", "not_applied"]).toContain(t.merge?.state);
+    const t = tentacles.get(s.id, v.id)!;
+    // The executor refuses the protected write: a helper never has explicit approval.
+    expect(worker.requests[1].messages.find((m) => m.role === "tool")?.content).toMatch(/Refusing to modify \.husky[\\/]pre-commit without explicit approval/);
+    // The clean change applies on its own, in one attempt, and nothing protected lands.
+    expect(t.result?.attempts).toBe(1);
+    expect(t.merge?.state).toBe("applied");
+    expect(readFileSync(join(root, "i.ts"), "utf8")).toBe("i\n");
     expect(existsSync(join(root, ".husky/pre-commit"))).toBe(false);
   });
 
