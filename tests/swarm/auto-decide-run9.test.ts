@@ -115,7 +115,8 @@ describe("run 9: Auto calls are decided within INFERENCE_CLAIM_DECISION_MS", () 
     expect(await pull(small)).toBeNull();
     const c = await submitAuto(prompt());
     expect(c.model).toBe(BIG);
-    await sleep(DECISION_MS + 60);
+    // Run 12: first decided at three quarters of the window; the grace runs to the window's end.
+    await sleep(DECISION_MS * 0.75 + 60);
     // Still placed on the 7b (it reports a free slot): not moved, not refused.
     expect(mods.context.queue.isUnclaimed(c.subtaskId)).toBe(true);
     expect(mods.context.usagePending.get(c.taskId)?.model).toBe(BIG);

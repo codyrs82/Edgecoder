@@ -37,7 +37,7 @@
  * Run 9 (three standard Auto calls refused 25-48 s after submit: placed on a host that did not take
  * them, re-placed after 12 s onto busy hosts, ended by the 45 s claim bound): with
  * INFERENCE_CLAIM_DECISION_MS (default 1.5 s since run 11) an Auto call is decided as a named call is, within
- * about 1.5 times that of its placement, a little more after a late re-placement (decideAuto):
+ * about 1.5 times that of its placement (run 12: within it, first at three quarters), a little more after a late re-placement (decideAuto):
  *
  * - at the decision time, still unclaimed: it waits once more (a quarter window) only while the host it
  *   was placed on could claim it now (dispatch.ts couldClaimNow: live, a free slot by count and by its
@@ -113,8 +113,16 @@ export interface AutoPlacement {
 export function autoDecisionMs(): number {
   return CC.INFERENCE_CLAIM_DECISION_MS;
 }
-/** Run 9: an Auto call is claimed or refused within this many decision windows of its placement. */
-export const AUTO_DECISION_BOUND = 1.5;
+/**
+ * Run 12 (Auto refusals 2.3-2.6 s at the portal against a 2 s target, named ones ≤ 1.86 s): an Auto
+ * call is first decided at AUTO_FIRST_DECISION of the window (1.125 s by default), so a host that
+ * could claim it gets its quarter-window grace within the window, and a call nothing can take is
+ * refused by then. Its bound is AUTO_DECISION_BOUND windows (a late move onto another host gets a
+ * quarter window to pull; past the bound only the cloud overflow is tried).
+ */
+export const AUTO_FIRST_DECISION = 0.75;
+/** Run 9: an Auto call is claimed or refused within this many decision windows of its placement (run 12: 1.25, was 1.5). */
+export const AUTO_DECISION_BOUND = 1.25;
 
 export type ReplaceOutcome = "claimed" | "same" | "none" | "replaced" | "refused" | "waiting";
 
@@ -162,7 +170,7 @@ export function armAutoReplace(p: AutoPlacement, ms?: number, nowMs = Date.now()
   if (decision > 0) {
     if (p.decideBy === undefined) p.decideBy = nowMs + Math.round(decision * AUTO_DECISION_BOUND);
     if (p.placedAtMs === undefined) p.placedAtMs = nowMs;
-    const wait = Math.max(0, Math.min(ms ?? decision, p.decideBy - nowMs));
+    const wait = Math.max(0, Math.min(ms ?? Math.round(decision * AUTO_FIRST_DECISION), p.decideBy - nowMs));
     schedule(p, wait, () => decideAuto(p));
     return;
   }
@@ -335,20 +343,38 @@ export function rearmAutoDecision(subtaskId: string, nowMs = Date.now()): boolea
 async function nextPick(p: AutoPlacement, nowMs: number, opts: { cloudOnly?: boolean } = {}): Promise<Candidate | undefined> {
   const st = queue.getSubtask(p.subtaskId);
   const tried = new Set(p.tried);
-  const excludeAgents = st ? [...tried, ...hostsNotReady(st, tried, nowMs)] : [...tried];
-  const { result } = await resolveAuto(p.job, { peers: false, requesterAccountId: p.accountId, excludeAgents, clientRegion: p.clientRegion ?? null, ...(p.onlyClass ? { computeClass: p.onlyClass } : {}) }, nowMs);
+  const excluded = st ? [...tried, ...hostsNotReady(st, tried, nowMs)] : [...tried];
   const billing = taskBilling.get(p.taskId);
   const reservedMsat = billing?.reservedMsat ?? 0;
   const budgetCSats = reservedMsat > 0 ? msatToCSats(reservedMsat) : Infinity;
-  const seen = new Set<Candidate>();
-  return [result.chosen, ...result.candidates].find((c): c is Candidate => {
-    if (!c || seen.has(c)) return false;
-    seen.add(c);
-    if (opts.cloudOnly && !isCloudPick(c)) return false;
-    // Run 9: only onto a host that could claim it now (not a busy one).
-    return c.local && c.estimate.cSats <= budgetCSats && reserveCoversCloud(p, st, c, reservedMsat) && (admission?.fits(p, c, nowMs) ?? true) && (!st || hostCanStart(c.agentId, asPlacedOn(st, c), nowMs));
-  });
+  // Run 12 (inf-1795660747963-7141aae5: a ~4.6k-token summary left on the Mac, refused while the
+  // cloud host was 16/16 free): best fit's own estimate had a 1.5b CPU host finish in time, so it
+  // kept the cloud out (cloudConsidered), but the completion gate (admission.fits) said it would
+  // not: no candidate passed. A candidate that fails the gate or cannot claim the call now is left
+  // out and best fit asked again, so the cloud overflow is reached.
+  for (let pass = 0; pass < NEXT_PICK_PASSES; pass++) {
+    const { result } = await resolveAuto(p.job, { peers: false, requesterAccountId: p.accountId, excludeAgents: excluded, clientRegion: p.clientRegion ?? null, ...(p.onlyClass ? { computeClass: p.onlyClass } : {}) }, nowMs);
+    const seen = new Set<Candidate>();
+    let more = false;
+    for (const c of [result.chosen, ...result.candidates]) {
+      if (!c || seen.has(c) || !c.local) continue;
+      seen.add(c);
+      if (opts.cloudOnly && !isCloudPick(c)) continue;
+      if (!(c.estimate.cSats <= budgetCSats) || !reserveCoversCloud(p, st, c, reservedMsat)) continue;
+      // Run 9: only onto a host that could claim it now (not a busy one), within the completion gate.
+      if ((admission?.fits(p, c, nowMs) ?? true) && (!st || hostCanStart(c.agentId, asPlacedOn(st, c), nowMs))) return c;
+      if (!isCloudPick(c) && !excluded.includes(c.agentId)) {
+        excluded.push(c.agentId);
+        more = true;
+      }
+    }
+    if (!more) return undefined;
+  }
+  return undefined;
 }
+
+/** Times nextPick asks best fit again without the candidates that could not take the call. */
+const NEXT_PICK_PASSES = 4;
 
 /**
  * #557 (run 5): a cloud host ran out of reasoning room on this Auto call (cloud_reasoning_overrun:

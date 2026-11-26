@@ -40,6 +40,8 @@
 # The code ships as a base64 tarball in the machine's environment (no image build): the image is
 # plain node:22-slim. The generated fly.toml goes to $LOADGEN_FLY_DIR (default a temp dir), never
 # into the repo. Machines stop by themselves LOADGEN_LINGER_SEC (default 1800) after the run ends.
+# Any other LOADGEN_* variable set when you call `run` (e.g. LOADGEN_MAX_INFLIGHT=16
+# LOADGEN_HOLD_CLOUD_CSATS=5) is passed to the machines' env as is (env-passthrough.mjs).
 set -euo pipefail
 APP=${LOADGEN_APP:-edgecoder-loadgen}
 ORG=${LOADGEN_ORG:-edgecoder}
@@ -113,6 +115,13 @@ case "$cmd" in
     node "$HERE/budget.mjs" ledger --out "$DIR/ledger-before-$run_id.json" >/dev/null 2>&1 && echo "ledger snapshot: $DIR/ledger-before-$run_id.json" || echo "warning: no ledger snapshot; the report will lack the money section" >&2
     tgz=$(tar czf - -C "$HERE/.." --exclude='*.sh' loadgen | base64 | tr -d '\n')
     toml="$DIR/fly.loadgen.toml"
+    # Every other LOADGEN_* variable set here (e.g. LOADGEN_MAX_INFLIGHT, LOADGEN_HOLD_CLOUD_CSATS)
+    # goes to the machines too (env-passthrough.mjs; not the local-only ones or LOADGEN_KEYS).
+    passthrough=$(node "$HERE/env-passthrough.mjs" LOADGEN_PROFILE LOADGEN_RUN_ID LOADGEN_START_AT LOADGEN_REGIONS LOADGEN_DURATION \
+      LOADGEN_BUDGET_CSATS LOADGEN_MIN_BALANCE LOADGEN_USERS LOADGEN_LINGER_SEC LOADGEN_RESULTS LOADGEN_TGZ LOADGEN_CAPACITY LOADGEN_AVOID \
+      LOADGEN_OVERSUB LOADGEN_AUTO_SLOTS LOADGEN_AUTO_SHARE LOADGEN_MODEL LOADGEN_BUYER_CAP_CSATS LOADGEN_MIN_RATE LOADGEN_RATE \
+      LOADGEN_MAX_RATE LOADGEN_STAGE_MINUTES LOADGEN_LOOP)
+    [ -n "$passthrough" ] && echo "passing through: $(printf '%s\n' "$passthrough" | sed 's/ = .*//' | tr -d ' ' | paste -sd, -)"
     cat >"$toml" <<TOML
 app = "$APP"
 primary_region = "${R[0]}"
@@ -141,6 +150,7 @@ $( [ -n "$rate" ] && echo "  LOADGEN_RATE = \"$rate\"" )
 $( [ -n "$max_rate" ] && echo "  LOADGEN_MAX_RATE = \"$max_rate\"" )
 $( [ -n "$stage_minutes" ] && echo "  LOADGEN_STAGE_MINUTES = \"$stage_minutes\"" )
 $( [ -n "$loop" ] && echo "  LOADGEN_LOOP = \"1\"" )
+$passthrough
 
 [processes]
   app = "sh -c 'mkdir -p /opt/lg && echo \"\$LOADGEN_TGZ\" | base64 -d | tar xzf - -C /opt/lg && exec node /opt/lg/loadgen/loadgen.mjs'"

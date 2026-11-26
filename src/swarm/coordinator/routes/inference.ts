@@ -251,6 +251,10 @@ export async function moveCallsOffTrippedAgent(agentId: string, nowMs = Date.now
     if (c.claimedBy) continue;
     const st = queue.getSubtask(c.subtaskId);
     if (!st?.requestedModel || st.projectMeta.reservationId || st.projectMeta.onlyAccountId) continue;
+    // Run 12 (inf-1795660747963-19ae1aba, -1795661418742-13214fc9: Auto calls on the Mac ended
+    // "cooling_down" when its circuit opened, while the cloud host was free): an Auto call is not
+    // ended here; its decision (auto-replace.ts) moves it, to the cloud overflow if need be, or refuses it.
+    if (autoPlacementOf(st.id)) continue;
     if (!agentHasModel(cap, st.requestedModel) || usableHolderExists(st, claims, nowMs)) continue;
     if (await cancelUnclaimedInference(st.taskId, st.id, undefined, "cooling_down").catch(() => false)) cancelled++;
   }
@@ -285,6 +289,10 @@ export async function moveCallsOffLostAgent(agentId: string, nowMs = Date.now())
     if (c.claimedBy) continue;
     const st = queue.getSubtask(c.subtaskId);
     if (!st?.requestedModel || st.projectMeta.reservationId || st.projectMeta.onlyAccountId) continue;
+    // Run 12 (inf-1795660747963-19ae1aba, -1795661418742-13214fc9: Auto calls on the Mac ended
+    // "cooling_down" when its circuit opened, while the cloud host was free): an Auto call is not
+    // ended here; its decision (auto-replace.ts) moves it, to the cloud overflow if need be, or refuses it.
+    if (autoPlacementOf(st.id)) continue;
     const placedHere = namedPlacements.get(st.id) === agentId;
     const heldHere = !!cap && agentHasModel(cap, st.requestedModel);
     if (!placedHere && !(heldHere && !usableHolderExists(st, claims, nowMs))) continue;

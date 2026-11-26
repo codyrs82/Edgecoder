@@ -33,7 +33,7 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-type Step = { tool?: [string, Record<string, unknown>]; text?: string; cSats?: number; fail?: string; wait?: number; served?: ServedBy };
+type Step = { tool?: [string, Record<string, unknown>]; text?: string; cSats?: number; fail?: string; err?: Error; wait?: number; served?: ServedBy };
 type Script = (ctx: { model: string; call: number; req: ChatRequest }) => Step;
 
 function setup(script: Script, config: Partial<TentacleConfig> = {}) {
@@ -53,6 +53,7 @@ function setup(script: Script, config: Partial<TentacleConfig> = {}) {
       try {
         const step = script({ model, call: req.messages.filter((m) => m.role === "assistant").length, req });
         if (step.wait) await new Promise((r) => setTimeout(r, step.wait));
+        if (step.err) throw step.err;
         if (step.fail) throw new ChatBackendError(step.fail, 502);
         if (step.text) yield { delta: step.text };
         if (step.tool) yield { toolCalls: [{ function: { name: step.tool[0], arguments: step.tool[1] } }] };
@@ -131,6 +132,37 @@ describe("helper call ceilings (tentacle-reserve.ts)", { timeout: 60_000 }, () =
     expect(requests).toHaveLength(0);
     expect(t.status).toBe("error");
     expect(t.result!.error).toMatch(/stopped before a call: budget reached: 0\.01 cSats of the tentacle's 0\.01 cSats is left/);
+  });
+
+  it("run 12: a call refused for its ceiling (others' holds) waits for room for the cheapest fitting model, then runs", async () => {
+    // The network's answer when nothing fits the ceiling (no_route_fits, reason price, neededCSats).
+    const priceRefusal = () => new ChatBackendError("No model on the network fits this request: every fitting model costs more than the ceiling", 404, undefined, { code: "no_route_fits", reason: "price", neededCSats: 3.9 });
+    const { tentacles, s, requests } = setup(({ req, call }) => {
+      const task = /# Task\n(.*)/.exec(req.messages.find((m) => m.role === "user")?.content ?? "")?.[1] ?? "";
+      if ((req.hints?.maxCSats ?? 0) < 3.9) return { err: priceRefusal() };
+      // The first helper's first call runs a while, holding 25 of the session's 28 cSats.
+      return call === 0 ? { tool: ["write_file", { path: `${task}.txt`, content: "x\n" }], wait: task === "slow" ? 300 : 0 } : { text: `wrote ${task}` };
+    }, { budgetCSats: 28, perTentacleCSats: 25 });
+    const a = tentacles.delegate(s.id, { task: "slow", kind: "code_edit", files: [], instructions: "" });
+    await new Promise((r) => setTimeout(r, 50));
+    const b = tentacles.delegate(s.id, { task: "second", kind: "code_edit", files: [], instructions: "" });
+    await tentacles.idle(s.id);
+    expect(tentacles.get(s.id, a.id)!.status).toBe("passed");
+    // Before, the second helper failed: "budget ceiling (3 cSats cap vs ~3.9 cSats cheapest model)".
+    const t = tentacles.get(s.id, b.id)!;
+    expect(t.status, t.result?.error).toBe("passed");
+    const second = requests.filter((r) => /# Task\nsecond/.test(r.req.messages.find((m) => m.role === "user")?.content ?? ""));
+    expect(second[0].req.hints!.maxCSats!).toBeLessThan(3.9);
+    expect(second[1].req.hints!.maxCSats!).toBeGreaterThanOrEqual(3.9 * 1.05 - 1e-9);
+  });
+
+  it("run 12: a tentacle budget below what the cheapest fitting model needs stops the helper, saying why", async () => {
+    const { tentacles, s } = setup(() => ({ err: new ChatBackendError("No model on the network fits this request", 404, undefined, { code: "no_route_fits", reason: "price", neededCSats: 3.9 }) }), { perTentacleCSats: 2 });
+    const v = tentacles.delegate(s.id, { task: "small budget", kind: "code_edit", files: [], instructions: "" });
+    await tentacles.idle(s.id);
+    expect(tentacles.get(s.id, v.id)!.status).toBe("error");
+    expect(ceilingRefusal(2, { tentacleBudget: 2, tentacleLeft: 2, need: 4.2 })).toMatch(/less than the cheapest model that fits this call needs \(4\.20 cSats\)/);
+    expect(ceilingRefusal(3, { tentacleBudget: 25, tentacleLeft: 25, need: 4.2 })).toMatch(/session's tentacle budget left \(3\.00 cSats\) is less than the cheapest model/);
   });
 
   it("free workers hold nothing and are not refused", async () => {
