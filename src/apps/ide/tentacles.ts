@@ -55,7 +55,7 @@ import { formatCSatsShort, parseWhere, patchReturn, tentacleCallLine, tentacleRa
 
 import { emptyAttempt, hintedChat, isProviderTierError, parseFileRef, pickLocalHelperModel, retryAfterEmpty, smallWorkerWarning, TENTACLE_HELPER_MIN_PARAMS_B, TENTACLE_LOCAL_MIN_PARAMS_B, tentacleHelperMinParamsB, tentacleLocalMinParamsB, tentaclePrompt, tentacleSystemPrompt } from "./tentacle-chat.js";
 import { acceptanceProbe, canAutoApply, modeOf, sessionAllowsShell, TENTACLE_SHELL_ALLOW, tentacleShellDecision } from "./tentacle-shell.js";
-import { CallHolds, ceilingRefusal, helperCallCeiling, helperCallMinimum, helperContextWindow, helperReplyTokens, paidWorker, promptTokensOf } from "./tentacle-reserve.js";
+import { balanceShortMessage, CallHolds, ceilingRefusal, helperCallCeiling, helperCallMinimum, helperContextWindow, helperReplyTokens, paidWorker, promptTokensOf } from "./tentacle-reserve.js";
 
 export { acceptanceProbe, canAutoApply, modeOf, sessionAllowsShell, TENTACLE_SHELL_ALLOW, tentacleShellDecision };
 export { pickLocalHelperModel, TENTACLE_HELPER_MIN_PARAMS_B, TENTACLE_LOCAL_MIN_PARAMS_B, tentacleHelperMinParamsB, tentacleLocalMinParamsB };
@@ -110,6 +110,11 @@ export interface TentacleResult {
   place?: TentaclePlace;
   /** The acceptance check didn't run: the session's mode would ask first (helpers can't ask). */
   unverified?: string;
+  /**
+   * Network run 14: the helper stopped at a budget (or the account's balance) with a patch: why. Its
+   * patch is merged like a passed one when its check passes (or it has none), else offered for approval.
+   */
+  partial?: string;
   error?: string;
 }
 
@@ -228,7 +233,15 @@ export interface TentacleDeps {
   maxIterations?: number;
   /** Acceptance checks (default runAcceptance); tests swap it. */
   runCheck?: typeof runAcceptance;
+  /**
+   * Network run 14: the account's cSat balance for delegate's coverage note (the agent's account, or
+   * the hosted API key's), or undefined when unknown. Unset: not said.
+   */
+  balance?: () => Promise<number | undefined>;
 }
+
+/** How long a balance read is reused by delegate's notes (a burst of delegates asks once). */
+export const BALANCE_CACHE_MS = 15_000;
 
 export class TentacleError extends Error {
   constructor(readonly code: "disabled" | "budget" | "invalid" | "not_found", message: string) {
@@ -265,6 +278,11 @@ interface SessionState {
   providerErrorAt?: number;
   /** Explicit workers under the helper floor already warned about (their helpers run on auto). */
   floorWarned?: Set<string>;
+  /**
+   * Network run 14: helpers running at once that the account's balance covers, learned from a
+   * balance refusal (402) while other helpers' calls held reserves; unset: config.maxParallel.
+   */
+  balanceParallel?: number;
 }
 
 /**
@@ -417,6 +435,27 @@ export class TentacleManager {
 
   config(sessionId: string): TentacleConfig {
     return { ...this.state(sessionId).config };
+  }
+
+  private balanceRead?: { atMs: number; value: Promise<number | undefined> };
+  /**
+   * The account's balance for the session's helpers (network run 14), or undefined when unknown or
+   * when the session's helpers run on free places (this computer, your machines, a lease). Reused
+   * for BALANCE_CACHE_MS; a read that takes over 2 s counts as unknown.
+   */
+  async accountBalance(sessionId: string, nowMs = Date.now()): Promise<number | undefined> {
+    if (!this.d.balance) return undefined;
+    const s = this.d.host.session(sessionId);
+    if (!s) return undefined;
+    const cfg = this.state(sessionId).config;
+    const model = workerModelOf({ workerModel: this.d.workerModelFor?.(s, cfg) ?? tentacleWorkerModel(s, cfg) });
+    if (!paidWorker(model)) return undefined;
+    if (!this.balanceRead || nowMs - this.balanceRead.atMs > BALANCE_CACHE_MS) {
+      const read = this.d.balance;
+      this.balanceRead = { atMs: nowMs, value: Promise.race([read().catch(() => undefined), new Promise<undefined>((r) => setTimeout(() => r(undefined), 2_000).unref?.())]) };
+    }
+    const v = await this.balanceRead.value;
+    return typeof v === "number" && Number.isFinite(v) ? v : undefined;
   }
 
   enabled(sessionId: string): boolean {
@@ -590,7 +629,7 @@ export class TentacleManager {
 
   private pump(sessionId: string): void {
     const st = this.state(sessionId);
-    while (st.running < st.config.maxParallel && st.queue.length) {
+    while (st.running < Math.min(st.config.maxParallel, st.balanceParallel ?? Infinity) && st.queue.length) {
       const id = st.queue.shift()!;
       const t = st.tentacles.get(id);
       if (!t || t.view.status !== "queued") continue;
@@ -644,6 +683,13 @@ export class TentacleManager {
     // earlier call's host; with none, the latest call's (a cloud reply without one read "network apple · mac-…" from a Mac attempt).
     const whereNow = (call?: { served?: ServedBy }) => (place === "local" ? { model: localModel, class: "this computer", agentLabel: "this computer" } : whereServed(where, model, (call ?? calls[calls.length - 1])?.served));
     const checks: CheckResult[] = [];
+    // Run 14: the account's balance refused a reserve: wait for the other helpers' calls (balanceWait),
+    // or, alone, halve the ceiling (balanceCap). `lastCeiling`: the ceiling of the call just refused.
+    let balanceCap = Infinity;
+    let balanceWait = false;
+    let lastCeiling = 0;
+    // Run 14: why the helper stopped at a budget with a patch (merged or offered, not dropped).
+    let partial: string | undefined;
     try {
       if (!t.spec.readOnly) {
         ws = createWorkspace(s.projectRoot, { tmpRoot: this.d.tmpRoot, label: t.view.id });
@@ -652,6 +698,25 @@ export class TentacleManager {
       const root = ws ? ws.root : s.projectRoot;
       const executor = new ToolExecutor(root);
       const toolNames = ws ? WRITE_TOOL_NAMES : READ_TOOL_NAMES;
+      // The check runs project code (tests, tsc) unless it is a grep: only when the session's mode
+      // would run that command without asking. Otherwise the patch comes back unverified and waits
+      // for the user's approval.
+      const verify = async (): Promise<{ ok: true } | { ok: false; check: CheckResult }> => {
+        const probe = t.spec.acceptance ? acceptanceProbe(t.spec.acceptance) : null;
+        const checkAllowed = !probe || t.spec.acceptance?.kind === "grep" || (riskOf(probe, root) === null && this.shellAllowed(s, probe, root));
+        if (t.spec.acceptance && t.spec.acceptance.kind !== "none" && !checkAllowed) {
+          unverified = `${t.spec.acceptance.kind} check not run: the session's permission mode (${modeOf(s)}) would ask before running \`${probe}\``;
+          this.progress(sessionId, t, unverified);
+        } else if (t.spec.acceptance && t.spec.acceptance.kind !== "none" && (ws || t.spec.acceptance.kind === "grep")) {
+          this.progress(sessionId, t, `checking: ${t.spec.acceptance.kind}`, "verifying");
+          const check = await (this.d.runCheck ?? runAcceptance)(t.spec.acceptance, root, { signal: t.abort.signal });
+          checks.push(check);
+          if (t.abort.signal.aborted) return { ok: true };
+          this.progress(sessionId, t, `${check.kind} ${check.passed ? "passed" : "failed"}`, "running");
+          if (!check.passed) return { ok: false, check };
+        }
+        return { ok: true };
+      };
       let lastFailure = "";
       let outcome: { status: "passed" | "failed" | "error"; summary: string; error?: string } = { status: "error", summary: "" };
       let attempts = 0;
@@ -718,11 +783,17 @@ export class TentacleManager {
               st.holds.release(holdKey);
               holdKey = undefined;
             }
+            // A balance refusal while other helpers' calls held reserves: wait for one to end first.
+            if (balanceWait) {
+              balanceWait = false;
+              if (st.holds.total() > 0 && !t.abort.signal.aborted) await st.holds.released(30_000, t.abort.signal);
+            }
             for (;;) {
-              const ceiling = helperCallCeiling({ tentacleLeft: budget - t.spent, sessionLeft: cfg.budgetCSats - st.spent, heldByOthers: st.holds.total() });
+              const ceiling = Math.min(balanceCap, helperCallCeiling({ tentacleLeft: budget - t.spent, sessionLeft: cfg.budgetCSats - st.spent, heldByOthers: st.holds.total() }));
               const refusal = ceilingRefusal(ceiling, { tentacleBudget: budget, tentacleLeft: budget - t.spent, need: needCSats });
               if (!refusal) {
                 holdKey = st.holds.hold(ceiling);
+                lastCeiling = ceiling;
                 return hintsFor(ceiling);
               }
               // Other helpers' calls hold the session's budget: wait for one to end.
@@ -787,6 +858,29 @@ export class TentacleManager {
                   },
                 }
               : {}),
+            // Run 14: refused for the account's balance (402): with other helpers' calls holding
+            // reserves, wait for one to end and run fewer helpers at once; alone, try half the ceiling
+            // (the coordinator caps the reserve at it) down to the smallest useful one, then stop, saying why.
+            ...(place === "worker" && paidWorker(model)
+              ? {
+                  onBalanceRefusal: (need?: number) => {
+                    if (st.holds.total(holdKey) > 0) {
+                      balanceWait = true;
+                      st.balanceParallel = Math.max(1, Math.min(st.balanceParallel ?? Infinity, st.running - 1));
+                      this.progress(sessionId, t, "waiting for other helpers' reserves: the account's balance doesn't cover them all at once");
+                      return true;
+                    }
+                    const next = round(lastCeiling / 2);
+                    if (next < helperCallMinimum(needCSats)) {
+                      budgetHit = true;
+                      budgetWhy = balanceShortMessage(next, need);
+                      return false;
+                    }
+                    balanceCap = next;
+                    return true;
+                  },
+                }
+              : {}),
             // A provider error (seen even when the agent loop retries the call) keeps the session's
             // retries off the next tier for a while.
             onError: (err) => {
@@ -833,7 +927,20 @@ export class TentacleManager {
           break; // never retried
         }
         if (budgetHit) {
-          outcome = { status: "error", summary, error: budgetWhy ? `The tentacle stopped before a call: ${budgetWhy}.` : `The tentacle's budget ran out (${formatCSatsShort(budget)}).` };
+          const stopped = budgetWhy ? `The tentacle stopped before a call: ${budgetWhy}.` : `The tentacle's budget ran out (${formatCSatsShort(budget)}).`;
+          // Run 14 (t482bda9): stopped at the session's budget with its file written; the lead applied
+          // the patch by hand. A patch is checked like a finished one: passed, it merges as usual (or
+          // waits for approval when unverified); failed, it is offered for approval (finish).
+          const files = ws && !t.spec.readOnly && t.spec.kind !== "review" ? workspacePatch(ws).files : [];
+          if (!files.length) {
+            outcome = { status: "error", summary, error: stopped };
+            break; // no escalation past a budget
+          }
+          partial = stopped;
+          this.progress(sessionId, t, "stopped at its budget with a patch: checking it");
+          const v = await verify();
+          if (t.abort.signal.aborted) break;
+          outcome = v.ok ? { status: "passed", summary } : { status: "error", summary, error: `${stopped} Its patch failed \`${v.check.command}\` (exit ${v.check.exitCode}).` };
           break; // no escalation past a budget
         }
         const empty = emptyAttempt({ modelError, summary, changedFiles: ws ? workspacePatch(ws).files.length : 0, writes: !!ws && t.spec.kind !== "review" });
@@ -850,25 +957,13 @@ export class TentacleManager {
           continue;
         }
         // Verify.
-        // The check runs project code (tests, tsc) unless it is a grep: only when the session's mode
-        // would run that command without asking. Otherwise the patch comes back unverified and waits
-        // for the user's approval.
-        const probe = t.spec.acceptance ? acceptanceProbe(t.spec.acceptance) : null;
-        const checkAllowed = !probe || t.spec.acceptance?.kind === "grep" || (riskOf(probe, root) === null && this.shellAllowed(s, probe, root));
-        if (t.spec.acceptance && t.spec.acceptance.kind !== "none" && !checkAllowed) {
-          unverified = `${t.spec.acceptance.kind} check not run: the session's permission mode (${modeOf(s)}) would ask before running \`${probe}\``;
-          this.progress(sessionId, t, unverified);
-        } else if (t.spec.acceptance && t.spec.acceptance.kind !== "none" && (ws || t.spec.acceptance.kind === "grep")) {
-          this.progress(sessionId, t, `checking: ${t.spec.acceptance.kind}`, "verifying");
-          const check = await (this.d.runCheck ?? runAcceptance)(t.spec.acceptance, root, { signal: t.abort.signal });
-          checks.push(check);
-          if (t.abort.signal.aborted) break;
-          this.progress(sessionId, t, `${check.kind} ${check.passed ? "passed" : "failed"}`, "running");
-          if (!check.passed) {
-            outcome = { status: "failed", summary, error: `${check.command} failed (exit ${check.exitCode})` };
-            lastFailure = `Your summary: ${summary.slice(0, 500)}\nThe check \`${check.command}\` failed:\n${check.output}`;
-            continue;
-          }
+        const v = await verify();
+        if (t.abort.signal.aborted) break;
+        if (!v.ok) {
+          const check = v.check;
+          outcome = { status: "failed", summary, error: `${check.command} failed (exit ${check.exitCode})` };
+          lastFailure = `Your summary: ${summary.slice(0, 500)}\nThe check \`${check.command}\` failed:\n${check.output}`;
+          continue;
         }
         if (ws && !t.spec.readOnly && t.spec.kind !== "review") {
           const { files } = workspacePatch(ws);
@@ -901,6 +996,7 @@ export class TentacleManager {
         calls: [...calls],
         place: placeOf(place, calls),
         ...(unverified ? { unverified } : {}),
+        ...(partial ? { partial } : {}),
         ...(outcome.error ? { error: outcome.error } : {}),
       };
       this.finish(sessionId, t, outcome.status, result, undefined, ws);
@@ -946,6 +1042,12 @@ export class TentacleManager {
       else t.view.merge = { state: "awaiting_approval" };
     } else if (status === "passed" || status === "cancelled") {
       t.view.merge = { state: status === "passed" ? "no_changes" : "not_applied" };
+    } else if (status === "error" && result?.partial && result.patch.trim() && s && (() => {
+      // Run 14: stopped at a budget with a patch whose check failed: offered for approval, never dropped.
+      const top = ws?.leadTop ?? repoTop(s.projectRoot);
+      return !!top && checkPatch(top, result.patch).ok;
+    })()) {
+      t.view.merge = { state: "awaiting_approval" };
     } else {
       t.view.merge = { state: "not_applied", ...(result?.error ? { error: result.error } : {}) };
     }

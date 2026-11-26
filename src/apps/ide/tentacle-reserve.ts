@@ -112,6 +112,26 @@ export function priceRefusalNeed(err: unknown): number | undefined {
   return typeof info.neededCSats === "number" && Number.isFinite(info.neededCSats) && info.neededCSats > 0 ? info.neededCSats : undefined;
 }
 
+/**
+ * Network run 14: the account's balance could not cover a helper call's reserve (402
+ * insufficient_credits, "it sets aside up to 25.978 cSats"; not_enough_csats from Auto): what the
+ * call asked to set aside, if said, or null for any other failure. Five of eight helpers failed this
+ * way on an account with ~88 cSats while four helpers' calls each set aside up to ~26.
+ */
+export function balanceRefusal(err: unknown): { neededCSats?: number } | null {
+  const e = err as { status?: number; info?: { code?: string; neededCSats?: number } } | null;
+  const code = e?.info?.code;
+  if (code !== "insufficient_credits" && code !== "not_enough_csats" && !(e?.status === 402 && code === undefined)) return null;
+  const need = e?.info?.neededCSats;
+  return typeof need === "number" && Number.isFinite(need) && need > 0 ? { neededCSats: need } : {};
+}
+
+/** Why a helper can't run on the account's balance, for its error and the lead. */
+export function balanceShortMessage(ceiling: number, need?: number): string {
+  const fmt = (c: number) => `${c < 10 ? c.toFixed(2) : Math.round(c)} cSats`;
+  return `the account's balance can't cover one helper call (it set aside up to ${fmt(need ?? ceiling)}, and ${fmt(ceiling)} after halving the ceiling was still refused): add cSats, or lower the tentacle budget`;
+}
+
 /** The ceilings of a session's helper calls in flight (held on the account until each call ends). */
 export class CallHolds {
   private readonly holds = new Map<number, number>();

@@ -145,13 +145,35 @@ describe("enrolment refusals: one clear line and a long back-off", () => {
     expect(enrollmentRefusalMessage("box-gpu", { reason: "registration_token_required" }, 1000)).toContain("--token box-gpu=<token>");
   });
 
-  it("backs off 1, 2, 4 ... minutes up to 15, and logs a refusal once an hour unless it changes", () => {
-    expect([1, 2, 3, 4, 5, 6, 20].map(enrollmentBackoffMs)).toEqual([60_000, 120_000, 240_000, 480_000, 900_000, 900_000, 900_000]);
+  it("backs off 1, 2, 4 ... minutes up to 30 (run 14), and logs a refusal once an hour unless it changes", () => {
+    expect([1, 2, 3, 4, 5, 6, 7, 20].map(enrollmentBackoffMs)).toEqual([60_000, 120_000, 240_000, 480_000, 960_000, 1_800_000, 1_800_000, 1_800_000]);
     const r = { reason: "node_not_enrolled" as const, tokenNodeId: "a-node" };
     expect(shouldLogEnrollmentRefusal(null, r, 0)).toBe(true);
     const last = { key: enrollmentRefusalKey(r), atMs: 0 };
     expect(shouldLogEnrollmentRefusal(last, r, 59 * 60_000)).toBe(false);
     expect(shouldLogEnrollmentRefusal(last, r, ENROLLMENT_LOG_REPEAT_MS)).toBe(true);
     expect(shouldLogEnrollmentRefusal(last, { reason: "registration_token_invalid" }, 1)).toBe(true);
+  });
+
+  it("run 14: the coordinator logs register_denied once per agent and reason per 10 min, counting the rest", async () => {
+    const { RegisterDeniedLog, REGISTER_DENIED_LOG_INTERVAL_MS } = await import("../../src/swarm/registration-policy.js");
+    const log = new RegisterDeniedLog();
+    // CRS-NODE-001 every ~0.7 s for 37 min (2,601 lines in run 14), and macbook-pro-crs-local-gpu every 15 s.
+    let lines = 0;
+    let suppressedReported = 0;
+    for (let t = 0; t < 37 * 60_000; t += 700) {
+      const r = log.take("CRS-NODE-001", "node_not_enrolled", t);
+      if (r) {
+        lines++;
+        suppressedReported += r.suppressed;
+      }
+    }
+    expect(lines).toBe(4); // 0, 10, 20, 30 min
+    expect(suppressedReported).toBeGreaterThan(2_500);
+    expect(log.take("macbook-pro-crs-local-gpu", "registration_token_required", 1)).toEqual({ suppressed: 0 });
+    expect(log.take("macbook-pro-crs-local-gpu", "registration_token_required", 15_001)).toBeNull();
+    // Another reason for the same agent is its own line.
+    expect(log.take("macbook-pro-crs-local-gpu", "registration_token_invalid", 15_002)).toEqual({ suppressed: 0 });
+    expect(log.take("macbook-pro-crs-local-gpu", "registration_token_required", REGISTER_DENIED_LOG_INTERVAL_MS + 1)).toEqual({ suppressed: 1 });
   });
 });

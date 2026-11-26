@@ -17,7 +17,7 @@ import type { ChatBackend, ChatMessage } from "../../inference-api/types.js";
 import type { ServedBy } from "../../swarm/served-by.js";
 import type { TentacleSpec } from "./tentacles.js";
 import { isContextTooLong } from "./context-budget.js";
-import { HELPER_MIN_REPLY_TOKENS, priceRefusalNeed } from "./tentacle-reserve.js";
+import { balanceRefusal, HELPER_MIN_REPLY_TOKENS, priceRefusalNeed } from "./tentacle-reserve.js";
 
 /** "path#L10-L40" → { path, start, end }. */
 export function parseFileRef(ref: string): { path: string; start?: number; end?: number } {
@@ -43,12 +43,13 @@ export function hintedChat(
   signal: AbortSignal,
   onCall: (u: { cSats: number; where?: string; promptTokens?: number; outputTokens?: number; served?: ServedBy }) => void,
   guard?: () => void,
-  o: { maxTokens?: number | ((messages: ChatMessage[], tools?: unknown[]) => number); after?: () => void; onError?: (err: unknown) => void; onPriceRefusal?: (neededCSats: number) => boolean } = {},
+  o: { maxTokens?: number | ((messages: ChatMessage[], tools?: unknown[]) => number); after?: () => void; onError?: (err: unknown) => void; onPriceRefusal?: (neededCSats: number) => boolean; onBalanceRefusal?: (neededCSats?: number) => boolean } = {},
 ): ChatFn {
   return async ({ messages, tools }, onDelta) => {
     guard?.();
     let h = await hints();
     let priceRetries = 0;
+    let balanceRetries = 0;
     try {
       guard?.();
       const msgs = messages.map((m) => ({ ...m, role: (["system", "user", "assistant", "tool"].includes(m.role) ? m.role : "user") as "user" }));
@@ -86,6 +87,15 @@ export function hintedChat(
           const need = priceRefusalNeed(err);
           if (need !== undefined && !content && !toolCalls.length && !signal.aborted && priceRetries < 2 && o.onPriceRefusal?.(need)) {
             priceRetries++;
+            h = await hints();
+            guard?.();
+            continue;
+          }
+          // Run 14: refused because the account's balance can't cover the reserve: once the other
+          // helpers' calls end (or with a smaller ceiling), as onBalanceRefusal decides (hints() waits).
+          const short = balanceRefusal(err);
+          if (short && !content && !toolCalls.length && !signal.aborted && balanceRetries < 12 && o.onBalanceRefusal?.(short.neededCSats)) {
+            balanceRetries++;
             h = await hints();
             guard?.();
             continue;

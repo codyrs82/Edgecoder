@@ -111,14 +111,14 @@ describe("run 13: the delegate note says what the session's budget left covers",
     // The 4th of 8: 4 × 25 fits 100, nothing to say.
     expect(budgetCoverage({ left: 100, open: 4, perTentacle: 25 })).toBeNull();
     // The 8th: 8 × 25 = 200 against 100.
-    const note = budgetCoverage({ left: 100, open: 8, perTentacle: 25 })!;
-    expect(note).toMatch(/The 8 helpers not finished may each spend up to 25 cSats \(200 cSats in all\): the budget left covers 4 at that most/);
-    expect(note).toMatch(/budget reached/);
+    const c = budgetCoverage({ left: 100, open: 8, perTentacle: 25 })!;
+    expect(c.short).toBe("Budget covers ~4 of 8 helpers.");
+    expect(c.detail).toMatch(/budget reached/);
   });
 
   it("with helpers finished: at their average (run 13's seven averaged ~9.1 cSats; 8 fit 100)", async () => {
     const { budgetCoverage } = await import("../../src/apps/ide/delegate.js");
     expect(budgetCoverage({ left: 36, open: 1, perTentacle: 25, average: 9.1 })).toBeNull();
-    expect(budgetCoverage({ left: 20, open: 4, perTentacle: 25, average: 9.1 })).toMatch(/covers about 2 of the 4 helpers not finished/);
+    expect(budgetCoverage({ left: 20, open: 4, perTentacle: 25, average: 9.1 })!.short).toBe("Budget covers ~2 of 4 helpers.");
   });
 });

@@ -53,6 +53,16 @@ final class SwarmRuntimeController: ObservableObject {
     private let api = APIClient.shared
     let modelManager = LocalModelManager()
     private var runtimeTask: Task<Void, Never>?
+    /// Network run 14: consecutive /register refusals only enrolment can fix (not enrolled, no or a
+    /// wrong token). The loop waits 5 s, 10 s, 20 s ... up to 30 min between tries instead of 5 s,
+    /// and says what to do once (a legacy id, CRS-NODE-001, was refused every ~0.7 s).
+    private var enrollmentRefusals = 0
+    static let enrollmentBackoffMaxSeconds: Double = 30 * 60
+
+    /// The wait after the n-th consecutive enrolment refusal (1-based).
+    static func enrollmentBackoffSeconds(_ refusals: Int) -> Double {
+        min(5 * pow(2, Double(max(0, min(refusals - 1, 20)))), enrollmentBackoffMaxSeconds)
+    }
     @Published var autoStartEnabled: Bool = true
     /// #64: Ed25519 key that signs every coordinator request; its public key is sent in /register.
     private var signingKey: Curve25519.Signing.PrivateKey?
@@ -394,7 +404,8 @@ final class SwarmRuntimeController: ObservableObject {
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
                 }
             } else {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                let wait = enrollmentRefusals > 0 ? Self.enrollmentBackoffSeconds(enrollmentRefusals) : 5
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
             }
         }
     }
@@ -437,6 +448,7 @@ final class SwarmRuntimeController: ObservableObject {
                 bleMeshManager.currentAccountId = rewardAccountId
             }
             isRegistered = true
+            enrollmentRefusals = 0
             appendEvent("Register succeeded.")
             return true
         } catch is CancellationError {
@@ -446,7 +458,9 @@ final class SwarmRuntimeController: ObservableObject {
                case .serverError(let message) = apiError,
                (message.contains("node_not_enrolled") ||
                 message.contains("registration_token_invalid") ||
+                message.contains("registration_token_required") ||
                 message.contains("node_not_activated")) {
+                enrollmentRefusals += 1
                 // Enrollment/token drift can happen after node-id migration or stale local token.
                 // Re-enroll and retry loop shortly.
                 meshToken = ""
@@ -454,9 +468,11 @@ final class SwarmRuntimeController: ObservableObject {
                 registrationToken = ""
                 persistRuntimeSettings()
                 await ensureEnrollment(force: true)
-                statusText = "Register blocked by enrollment state. Re-enrolled and retrying..."
+                let wait = Int(Self.enrollmentBackoffSeconds(enrollmentRefusals))
+                statusText = "This device (\(agentId)) isn't enrolled on the network. Sign in under Account, or enroll \"\(agentId)\" on the portal under Settings → Nodes. Retrying in \(wait) s."
                 lastRegisterError = statusText
-                appendEvent(statusText)
+                // Said once per run of refusals, not on every try.
+                if enrollmentRefusals == 1 { appendEvent(statusText) }
                 return false
             }
             statusText = "Register failed: \(error.localizedDescription)"

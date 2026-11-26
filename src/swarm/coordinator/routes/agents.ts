@@ -6,6 +6,7 @@
  */
 import { noteLocalWebReport } from "../local-web.js";
 import { z } from "zod";
+import { RegisterDeniedLog } from "../../registration-policy.js";
 import type { SandboxMode } from "../../../common/types.js";
 import { rewardAccountForAgent } from "../../../credits/store.js";
 import { pgStore } from "../../../db/store.js";
@@ -105,6 +106,10 @@ async function registerProvesStoredKey(
   return verified !== null && verified !== "rejected" && verified.agentId === agentId;
 }
 
+
+/** register_denied lines, deduplicated per agent and reason (network run 14). */
+export const registerDeniedLog = new RegisterDeniedLog();
+
 export function registerAgentRoutes(app: CoordinatorApp): void {
   app.post("/register", async (req, reply) => {
     const parsedRegister = registerSchema.safeParse(req.body);
@@ -145,7 +150,9 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
     });
     if (!activation.allowed) {
       if (!origin.loopback) preAuthFailures.record(failureKey);
-      app.log.warn({ agentId: body.agentId, reason: activation.reason }, "register_denied");
+      // Network run 14: once per agent and reason per 10 min (registration-policy.ts RegisterDeniedLog).
+      const logLine = registerDeniedLog.take(body.agentId, String(activation.reason ?? ""), Date.now());
+      if (logLine) app.log.warn({ agentId: body.agentId, reason: activation.reason, ...(logLine.suppressed ? { suppressedSinceLast: logLine.suppressed } : {}) }, "register_denied");
       // tokenNodeId: the agent's own token's node id (it named itself differently), so its log can say which name to use.
       return reply.code(403).send({ error: "node_not_activated", reason: activation.reason, ...(activation.tokenNodeId ? { tokenNodeId: activation.tokenNodeId } : {}) });
     }

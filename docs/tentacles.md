@@ -396,7 +396,8 @@ Tentacle: Write tests for parseFileRef · qwen3-coder:30b on gpu · passed (appl
 | --- | --- | --- |
 | Running at once per session | 4 | More wait in a queue (at most 32 waiting). |
 | Session budget | 100 cSats | `delegate` is refused once it is spent. When the helpers not finished could need more than is left (at each helper's own budget, or at the session's average once some finished), `delegate`'s note says how many it covers, for the lead to tell the user. |
-| Per tentacle | 25 cSats | The tentacle stops with `error` when it is reached. Can be set lower per `delegate` call. No call sets aside more than what is left of it. |
+| Per tentacle | 25 cSats | The tentacle stops when it is reached. Can be set lower per `delegate` call. No call sets aside more than what is left of it. A helper that stops at a budget with a patch has it checked like a finished one: it merges when its check passes (or it has none), and otherwise waits for approval; it is never dropped (network run 14). |
+| Account balance | | A call refused because the balance can't cover its reserve (402) waits for the other helpers' calls to end, and the session runs fewer helpers at once; a helper alone halves its ceiling until the reserve fits, then stops saying the balance is too low. `delegate`'s note counts the balance as well as the session's budget, and its coverage sentence comes first ("Balance covers ~3 of 8 helpers."). |
 | Agent steps per attempt | 12 | |
 
 Calls on this computer or your own machines cost 0 cSats and never trip a budget. Tentacle spend
