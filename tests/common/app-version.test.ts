@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { appVersion } from "../../src/common/app-version.js";
+import { appVersion, desktopAppVersion } from "../../src/common/app-version.js";
 import { readFileSync } from "fs";
 
 describe("appVersion", () => {
@@ -26,5 +26,14 @@ describe("appVersion", () => {
     const version2 = appVersion();
     
     expect(version1).toBe(version2);
+  });
+
+  it("network run 19: takes the desktop app's version (EDGECODER_APP_VERSION) when it is a plain semver", () => {
+    expect(desktopAppVersion("1.4.75")).toBe("1.4.75");
+    expect(desktopAppVersion(" 1.4.75-beta.1 ")).toBe("1.4.75-beta.1");
+    expect(desktopAppVersion(undefined)).toBeUndefined();
+    expect(desktopAppVersion("")).toBeUndefined();
+    expect(desktopAppVersion("latest")).toBeUndefined();
+    expect(desktopAppVersion("1.4")).toBeUndefined();
   });
 });

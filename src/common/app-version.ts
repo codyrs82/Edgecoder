@@ -9,12 +9,23 @@ let cached: string | undefined;
  * The agent's version, read once. A signed agent release (install.sh / install.ps1 /
  * `edgecoder-install update`) carries edgecoder-release.json with its tag (agent-v1.2.3 -> "1.2.3"):
  * package.json's version is not bumped per release, so the tag is what the portal compares with the
- * newest release. Otherwise (desktop app, source checkout) package.json's version.
+ * newest release. Otherwise the desktop app's version (EDGECODER_APP_VERSION, set by the app), else
+ * (source checkout) package.json's version.
  */
 export function appVersion(): string {
   if (cached !== undefined) return cached;
-  cached = releaseTagVersion(readText(new URL("../../edgecoder-release.json", import.meta.url))) ?? packageVersion();
+  cached = releaseTagVersion(readText(new URL("../../edgecoder-release.json", import.meta.url))) ?? desktopAppVersion(process.env.EDGECODER_APP_VERSION) ?? packageVersion();
   return cached;
+}
+
+/**
+ * Network run 19: the desktop app's agent registered as "1.0.0" (package.json) on desktop 1.4.75.
+ * The app passes its own version (Tauri package version) as EDGECODER_APP_VERSION when it starts
+ * the agent; a plain semver only.
+ */
+export function desktopAppVersion(raw: string | undefined): string | undefined {
+  const v = raw?.trim();
+  return v && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(v) ? v : undefined;
 }
 
 /** A signed agent release (its edgecoder-release.json names an agent-v tag): what `edgecoder-install update` updates. */

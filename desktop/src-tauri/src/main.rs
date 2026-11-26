@@ -587,6 +587,9 @@ fn spawn_agent_process(agent_dir: &PathBuf, tokens: &AgentTokens) -> Option<Chil
         .env("ECONOMY_PAYMENTS_ENABLED", "0")
         .env("INFERENCE_AUTH_TOKEN", &tokens.inference)
         .env("ADMIN_API_TOKEN", &tokens.admin)
+        // The app's own version, so the agent registers as it (src/common/app-version.ts); it reported
+        // the bundled package.json's 1.0.0 before (network run 19).
+        .envs(APP_VERSION.get().map(|v| ("EDGECODER_APP_VERSION", v.as_str())))
         // OLLAMA_HOST / DOCKER_HOST of the Ollama and Docker sandbox the app sets up (local_compute).
         .envs(local_compute::manager().agent_env())
         // Settings > General: BLE mesh on or off.
