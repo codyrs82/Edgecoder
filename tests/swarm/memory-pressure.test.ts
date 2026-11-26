@@ -53,11 +53,23 @@ describe("memory pressure", () => {
     expect(classifyLinux({ availablePct: 9 })).toBe("warning");
     expect(classifyLinux({ availablePct: 4 })).toBe("critical");
     expect(classifyLinux({ availablePct: 50, psi: { someAvg10: 30 } })).toBe("warning");
-    expect(classifyLinux({ availablePct: 50, psi: { someAvg10: 30, fullAvg10: 12 } })).toBe("critical");
+    expect(classifyLinux({ availablePct: 15, psi: { someAvg10: 30, fullAvg10: 12 } })).toBe("critical");
+    expect(classifyLinux({ psi: { someAvg10: 30, fullAvg10: 12 } })).toBe("critical");
+  });
+
+  it("network runs 17/19: PSI full stalls with plenty of memory available (a model paging in) are a warning, not critical", () => {
+    // ec-st1-iad 76.0% available, PSI full 10.86; ec-st2-lax 49.3%, PSI full 14.98: the running call was cancelled.
+    expect(classifyLinux({ availablePct: 76.0, psi: { someAvg10: 10.86, fullAvg10: 10.86 } })).toBe("warning");
+    expect(classifyLinux({ availablePct: 49.3, psi: { someAvg10: 14.98, fullAvg10: 14.98 } })).toBe("warning");
+    expect(classifyLinux({ availablePct: 50, psi: { someAvg10: 30, fullAvg10: 12 } })).toBe("warning");
+    // Memory actually running out is critical whatever PSI says.
+    expect(classifyLinux({ availablePct: 4, psi: { someAvg10: 0, fullAvg10: 0 } })).toBe("critical");
     expect(readMemoryPressure(linux(meminfo(65_536_000, 32_000_000), psi(0.5, 0))).level).toBe("normal");
     expect(readMemoryPressure(linux(meminfo(65_536_000, 6_000_000), psi(0.5, 0))).level).toBe("warning");
     expect(readMemoryPressure(linux(meminfo(65_536_000, 2_000_000), null)).level).toBe("critical");
-    expect(readMemoryPressure(linux(meminfo(65_536_000, 32_000_000), psi(40, 15))).level).toBe("critical");
+    // PSI full stalls: critical only with memory also short (run 17/19: a model paging in on an idle host).
+    expect(readMemoryPressure(linux(meminfo(65_536_000, 32_000_000), psi(40, 15))).level).toBe("warning");
+    expect(readMemoryPressure(linux(meminfo(65_536_000, 9_000_000), psi(40, 15))).level).toBe("critical");
   });
 
   it("other platforms: free memory", () => {
