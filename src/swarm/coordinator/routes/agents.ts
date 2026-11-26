@@ -76,6 +76,7 @@ import { noteAgentMemory } from "../memory-admission.js";
 import { meshWsAgentRegistered } from "../mesh-ws-bindings.js";
 import { agentUpdateHint } from "../agent-update-hint.js";
 import { noteAgentHttpAlive } from "../agent-liveness.js";
+import { agentSocketConnected } from "../dispatch.js";
 import {
   registerSchema,
   defaultPolicy,
@@ -472,6 +473,9 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       tunnelInvites,
       tunnelCloseNotices,
       directWorkOffers,
+      // Network run 12: whether this coordinator counts the agent's mesh socket (nudges go down it
+      // only then); an agent whose socket is open but not counted reopens it.
+      socketConnected: agentSocketConnected(body.agentId),
       blacklist: {
         version: mutable.blacklistVersion,
         agents: [...blacklistByAgent.keys()]

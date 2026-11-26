@@ -14,6 +14,7 @@ use sysinfo::{System, Disks};
 use serde::Serialize;
 
 mod agent_attest;
+mod app_nap;
 mod agent_guard;
 mod agent_settings;
 mod ide_guard;
@@ -748,6 +749,10 @@ fn main() {
     // token) that it is the agent an earlier launch started with the saved tokens.
     // After an update the agent left by the old version is never reused: the new version starts
     // its own (start_agent stops the old one), so the service runs the new code.
+    // Network run 12: no App Nap while the app (and the agent it runs) hosts; idle sleep still allowed.
+    if !app_nap::keep_app_awake_for_hosting() && cfg!(target_os = "macos") {
+        eprintln!("Couldn't declare the hosting activity; macOS may nap the app in the background");
+    }
     let mut context = tauri::generate_context!();
     let app_version = context.package_info().version.to_string();
     let _ = APP_VERSION.set(app_version.clone());
