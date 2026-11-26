@@ -278,7 +278,7 @@ describe("a call whose placement died is answered at once (3a probe)", () => {
     const stoppedAt = Date.now();
     liveness.noteAgentSocketClosed(lhr.peerId, stoppedAt);
     expect((await lostSweep.moveWaitingCallsOffLostAgents(stoppedAt + lostSweep.LOST_PLACEMENT_GRACE_MS)).cancelled).toBe(0);
-    await new Promise((r) => setTimeout(r, 2_100)); // the locality preference lapses
+    await new Promise((r) => setTimeout(r, 1_100)); // fra pulls again (lhr, held for it, is gone)
     expect(await pullAs(fra, 2, 2)).toBe(probe.r.json().subtaskId);
     await finish(fra, probe.taskId, probe.r.json().subtaskId);
     liveness.noteAgentSocketOpen(lhr.peerId);

@@ -15,7 +15,7 @@ import { catalogEntryForTag } from "../../../model/catalog.js";
 import { paramsB } from "../../../inference-api/auto-route.js";
 import { contextNeeded } from "../../../inference-api/ollama.js";
 import type { ChatMessage } from "../../../inference-api/types.js";
-import { agentContextWindow, agentLoadReport, claimCandidates, freeModelSlots, preferAgent, preferenceOf, setClaimAdmission } from "../dispatch.js";
+import { agentContextWindow, agentLoadReport, claimCandidates, freeModelSlots, preferAgent, preferenceOf, releasePreference, setClaimAdmission } from "../dispatch.js";
 import { agentUnavailable, circuitBlocks, circuitOpen, circuitState, memoryAdmits, modelLoadedOn, onCircuitTrip, setCircuitSlotsLookup } from "../memory-admission.js";
 import { AUTO_MODEL_ID } from "../../../inference-api/auto-route.js";
 import { cleanHints, describeJob, type JobDescriptor } from "../../../inference-api/job-descriptor.js";
@@ -465,6 +465,7 @@ export function clearClaimDeadline(subtaskId: string): void {
   if (timer) clearTimeout(timer);
   claimDeadlines.delete(subtaskId);
   claimDeadlineAt.delete(subtaskId);
+  decisionBoundAt.delete(subtaskId);
 }
 
 /** Cancel (and refund) the call if nobody claims it within `ms`; replaces an earlier bound. */
@@ -482,11 +483,31 @@ export function clearClaimDeadline(subtaskId: string): void {
 export const INFERENCE_CLAIM_DECISION_MS = CC.INFERENCE_CLAIM_DECISION_MS;
 const claimDecisions = new Map<string, ReturnType<typeof setTimeout>>();
 
-function armClaimDecision(taskId: string, subtaskId: string, final = false, ms = INFERENCE_CLAIM_DECISION_MS): void {
+/**
+ * Run 14 (4 named refusals at 2.27-2.47 s at the portal, logged at 2.25 s here: decided at 1.5 s
+ * with a host "ready" that never came, then a second wait of 0.75 s): the whole decision, the wait
+ * for a ready host included, ends within CLAIM_DECISION_BOUND windows (1.8 s by default) of its
+ * submit, or of the call being back on the queue. A call sent here by another coordinator
+ * (route_elsewhere, `redirected`) spent part of its time there and on the way: its bound is
+ * REDIRECT_ALLOWANCE windows shorter (1.5 s), so the portal still answers within 2 s.
+ */
+export const CLAIM_DECISION_BOUND = 1.2;
+export const REDIRECT_ALLOWANCE = 0.2;
+/** A wait shorter than this is not armed: the call is decided now. */
+const MIN_DECISION_WAIT_MS = 50;
+const decisionBoundAt = new Map<string, number>();
+
+function armClaimDecision(taskId: string, subtaskId: string, final = false, ms = INFERENCE_CLAIM_DECISION_MS, opts: { redirected?: boolean } = {}): void {
   const old = claimDecisions.get(subtaskId);
   if (old) clearTimeout(old);
   claimDecisions.delete(subtaskId);
+  if (!final) decisionBoundAt.delete(subtaskId);
   if (!(ms > 0)) return;
+  if (!final) {
+    const boundMs = Math.round(ms * (CLAIM_DECISION_BOUND - (opts.redirected ? REDIRECT_ALLOWANCE : 0)));
+    decisionBoundAt.set(subtaskId, Date.now() + boundMs);
+    ms = Math.min(ms, boundMs);
+  }
   const timer = setTimeout(() => {
     claimDecisions.delete(subtaskId);
     void decideUnclaimedCall(taskId, subtaskId, Date.now(), final).catch((err) => coordinatorApp.log.error({ err, taskId }, "inference_claim_decision_failed"));
@@ -504,9 +525,16 @@ function armClaimDecision(taskId: string, subtaskId: string, final = false, ms =
  * 10 after waiting on such slots). Each refusal logs the hosts considered and why (inference_unclaimed_refused).
  */
 export async function decideUnclaimedCall(taskId: string, subtaskId: string, nowMs = Date.now(), final = false): Promise<"claimed" | "left" | "waiting" | "ended"> {
-  if (!queue.isUnclaimed(subtaskId) || !claimDeadlineAt.has(subtaskId)) return "claimed";
+  const boundAt = decisionBoundAt.get(subtaskId);
+  if (!queue.isUnclaimed(subtaskId) || !claimDeadlineAt.has(subtaskId)) {
+    decisionBoundAt.delete(subtaskId);
+    return "claimed";
+  }
   const st = queue.getSubtask(subtaskId);
-  if (!st?.requestedModel || st.projectMeta.reservationId || st.projectMeta.onlyAccountId || autoPlacementOf(st.id) || usagePending.get(st.taskId) === undefined) return "left";
+  if (!st?.requestedModel || st.projectMeta.reservationId || st.projectMeta.onlyAccountId || autoPlacementOf(st.id) || usagePending.get(st.taskId) === undefined) {
+    decisionBoundAt.delete(subtaskId);
+    return "left";
+  }
   const model = st.requestedModel;
   const cls = (st.projectMeta.computeClass ?? "any") as ComputeClassId | "any";
   const exclude = queue.excludedAgents(st.id);
@@ -514,12 +542,18 @@ export async function decideUnclaimedCall(taskId: string, subtaskId: string, now
   const pref = preferenceOf(st.id, nowMs);
   const fits = ready.length > 0 && waitingCallFits(st, model, cls, undefined, nowMs, { exclude, waiting: 0 });
   const elapsedMs = nowMs - (usagePending.get(st.taskId)?.atMs ?? nowMs);
-  if (!final && fits) {
-    const wait = Math.min(INFERENCE_CLAIM_DECISION_MS, Math.max(Math.round(INFERENCE_CLAIM_DECISION_MS / 2), (pref?.holdLeftMs ?? 0) + Math.round(INFERENCE_CLAIM_DECISION_MS / 4)));
+  // Run 14: the wait for a ready host ends by the call's decision bound.
+  const wait = Math.min(INFERENCE_CLAIM_DECISION_MS, Math.max(Math.round(INFERENCE_CLAIM_DECISION_MS / 2), (pref?.holdLeftMs ?? 0) + Math.round(INFERENCE_CLAIM_DECISION_MS / 4)), boundAt === undefined ? Infinity : boundAt - nowMs);
+  if (!final && fits && wait >= MIN_DECISION_WAIT_MS) {
+    // Run 14: the nearest host held for it has not taken it within the window; the call ends by its
+    // bound, so other ready hosts may take it now rather than wait out the hold.
+    const released = !!pref?.holding && ready.some((id) => id !== pref.agentId) && releasePreference(subtaskId, nowMs);
+    if (released) coordinatorApp.log.info({ taskId, subtaskId, preferred: pref?.agentId ?? null }, "inference_preference_released");
     armClaimDecision(taskId, subtaskId, true, wait);
     coordinatorApp.log.info({ taskId, subtaskId, model, elapsedMs, waitMs: wait, ready, preferred: pref?.agentId ?? null, preferredHolding: pref?.holding ?? false }, "inference_unclaimed_waiting");
     return "waiting";
   }
+  decisionBoundAt.delete(subtaskId);
   const room = modelSlots(model, cls, inferenceTokensNeededOf(st), nowMs, exclude);
   const eta = room.slots > 0 ? startEtaOf(model, cls, Math.max(1, queue.waitingInference(model) - room.free), room.slots, nowMs) : null;
   if (!(await cancelUnclaimedInference(taskId, subtaskId, undefined, undefined, eta?.etaMs).catch(() => false))) return "claimed";
@@ -1496,7 +1530,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     inferenceStreams.open(subtask.id, body.taskId);
     const startupBound = holders.length === 0 && inStartupGrace();
     armClaimDeadline(body.taskId, subtask.id, startupBound ? startupClaimBoundMs() : INFERENCE_CLAIM_TIMEOUT_MS);
-    armClaimDecision(body.taskId, subtask.id, false, !startupBound && !routed && billed ? INFERENCE_CLAIM_DECISION_MS : 0);
+    armClaimDecision(body.taskId, subtask.id, false, !startupBound && !routed && billed ? INFERENCE_CLAIM_DECISION_MS : 0, { redirected: body.redirected });
     app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, ...(sized ? { reserveTokenMsat: sized.tokenMsat, reserveFloorMsat: sized.floorMsat, reserveCappedByMaxCSats: sized.capped } : {}), ...(overflowMsat > (sized?.reserveMsat ?? 0) ? { reserveCloudOverflowMsat: overflowMsat } : {}), holders: holders.length, ...(body.redirected ? { redirected: true } : {}) }, "inference_submitted");
     return reply.send({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second", ...(routed ? { routing: routed.summary } : {}) });
   });
