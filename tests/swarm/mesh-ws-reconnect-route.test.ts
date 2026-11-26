@@ -136,7 +136,24 @@ describe("coordinator restart: fresh state, agent with an old registration", () 
     expect((await register(k)).statusCode).toBe(200);
     expect(await until(() => connected(k.peerId))).toBe(true);
     expect(again.state.closed).toBeNull();
-    expect((await signedPost(k, "/heartbeat", { agentId: k.peerId })).statusCode).toBe(200);
+    const hb = await signedPost(k, "/heartbeat", { agentId: k.peerId });
+    expect(hb.statusCode).toBe(200);
+    // Network run 12: the heartbeat reply says the coordinator counts this socket.
+    expect(hb.json().socketConnected).toBe(true);
+  });
+
+  test("network run 12: a heartbeat says when the coordinator holds no socket for the agent", async () => {
+    const k = createPeerKeys("agent-reconnect-nosocket");
+    expect((await register(k)).statusCode).toBe(200);
+    const none = await signedPost(k, "/heartbeat", { agentId: k.peerId });
+    expect(none.statusCode).toBe(200);
+    expect(none.json().socketConnected).toBe(false);
+    const { ws } = await openWs(k);
+    expect(await until(() => connected(k.peerId))).toBe(true);
+    expect((await signedPost(k, "/heartbeat", { agentId: k.peerId })).json().socketConnected).toBe(true);
+    ws.terminate();
+    expect(await until(() => !connected(k.peerId))).toBe(true);
+    expect((await signedPost(k, "/heartbeat", { agentId: k.peerId })).json().socketConnected).toBe(false);
   });
 
   test("an unsigned request to an agent route still gets the bare refusal", async () => {

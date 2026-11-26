@@ -66,6 +66,7 @@ import { CpuStealGuard, CPU_STEAL_HOLD_MS, modelSlotReport, type CpuStealReport 
 import { answerChallenge, runLocalBenchmark, selfBenchmarkDue, type AgentBenchmarkReport, type BenchmarkChallenge } from "./benchmark.js";
 import { appVersion, isReleaseInstall } from "../common/app-version.js";
 import { createUpdateNudge } from "./update-nudge.js";
+import { IdleWaitLateness, MeshSocketConfirmation } from "./mesh-socket-health.js";
 import { autoUpdateSetting } from "../install/update-schedule.js";
 import { startUpdateDrain } from "./update-drain.js";
 import { createLocalForwarder } from "./local-forwarder.js";
@@ -1401,6 +1402,14 @@ const IDLE_POLL_MS = 1_200;
 /** A nudged pass skips registration/heartbeat/tunnels when a full pass ran this recently. */
 const QUICK_PULL_WINDOW_MS = 5_000;
 let meshWsOpen = false;
+/** When the current mesh socket opened (null while none is open). */
+let meshWsOpenedAtMs: number | null = null;
+/** Network run 12: whether the coordinator counts our socket (heartbeat `socketConnected`), mesh-socket-health.ts. */
+const meshSocketConfirm = new MeshSocketConfirmation();
+/** A hung upgrade (no answer, no error) left the socket CONNECTING forever: give up and reconnect after this. */
+const MESH_WS_HANDSHAKE_TIMEOUT_MS = 10_000;
+/** Idle waits the OS stretched (App Nap, timer coalescing): reported once a minute. */
+const idleWaitLateness = new IdleWaitLateness();
 /**
  * Registration epochs: bumped by every registration made from the unregistered state (first
  * start, after a coordinator restart / 401 agent_not_registered, after offline recovery). A mesh
@@ -1576,6 +1585,8 @@ function onCoordinatorReconnectFrame(message: unknown, coordinatorUrl: string, w
 /** What /heartbeat answers (the fields the worker uses). */
 type HeartbeatReply = {
   ok?: boolean;
+  /** The coordinator holds an authenticated open mesh socket for us (network run 12; absent from older coordinators). */
+  socketConnected?: boolean;
   blacklisted?: boolean;
   reason?: string;
   orchestration?: {
@@ -1628,7 +1639,10 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
     // Token in a header only (never the URL, where proxies log it), and a signed bind so the
     // coordinator ties this connection to AGENT_ID's registered key (src/mesh/ws-auth.ts).
     const coordinatorUrl = coordinator.url;
-    const ws = new WebSocket(meshWsUrl(coordinatorUrl, AGENT_ID), { headers: { ...meshHeaders(), ...signMeshWsBind(AGENT_ID, keys.privateKeyPem) } });
+    const ws = new WebSocket(meshWsUrl(coordinatorUrl, AGENT_ID), {
+      headers: { ...meshHeaders(), ...signMeshWsBind(AGENT_ID, keys.privateKeyPem) },
+      handshakeTimeout: MESH_WS_HANDSHAKE_TIMEOUT_MS
+    });
     currentMeshWs = ws;
     const openedInEpoch = registrationEpoch;
 
@@ -1660,6 +1674,8 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
       }, MESH_WS_PING_MS);
       liveness.unref?.();
       meshWsOpen = true;
+      meshWsOpenedAtMs = Date.now();
+      meshSocketConfirm.socketChanged();
       meshWsEpoch = openedInEpoch;
       console.log(`[agent:${AGENT_ID}] mesh WebSocket connected to ${coordinatorUrl}`);
       reconnectDelay = 1000;
@@ -1770,6 +1786,8 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
       if (liveness) clearInterval(liveness);
       if (currentMeshWs === ws) currentMeshWs = null;
       meshWsOpen = false;
+      meshWsOpenedAtMs = null;
+      meshSocketConfirm.socketChanged();
       // The coordinator does not know our key (it restarted): register again now rather than after
       // the HTTP loop has counted its way into offline mode; the reconnect below waits for it.
       const reason = reasonBuf?.toString?.() ?? "";
@@ -2315,6 +2333,15 @@ async function loop(): Promise<void> {
           const hbLocalWeb = await localWeb.capability().catch(() => undefined);
           const hbBody = { agentId: AGENT_ID, ...(hbLocalWeb ? { localWeb: hbLocalWeb } : {}), powerTelemetry, sandboxMode: SANDBOX_MODE, ...(hbModels.length || CLOUD_MODE ? { installedModels: hbModels } : {}), ...(hbOwnerModels ? { ownerModels: hbOwnerModels } : {}), ...(hbActive && hbModels.includes(hbActive) ? { activeModel: hbActive, activeModelParamSize: paramsB(hbActive) } : {}), ...(hbMemory ? { memory: hbMemory } : {}), ...(benchmarkUnreported && lastBenchmark ? { benchmark: lastBenchmark } : {}) };
           hb = (await post("/heartbeat", hbBody, { signed: true })) as HeartbeatReply;
+          // Network run 12: a socket we think is open but the coordinator does not count gets no
+          // nudges; reopen it (mesh-socket-health.ts). Older coordinators do not say: nothing changes.
+          if (meshSocketConfirm.observe({ localOpen: meshWsOpen, openedAtMs: meshWsOpenedAtMs, coordinatorSays: hb?.socketConnected, nowMs: Date.now() }) === "reopen") {
+            const stale = currentMeshWs;
+            if (stale) {
+              console.warn(`[agent:${AGENT_ID}] coordinator holds no mesh socket for us although ours is open: reopening it`);
+              stale.terminate();
+            }
+          }
           updateNudge?.onHint(hb?.updateAvailable);
           if ("benchmark" in hbBody) benchmarkUnreported = false;
           try { localStore.recordHeartbeat(coordinator.url, hb.blacklisted ? "blacklisted" : "ok", Date.now() - hbStart); } catch (e) { console.warn(`[db] heartbeat write failed: ${e}`); }
@@ -2996,9 +3023,12 @@ async function loop(): Promise<void> {
       }
 
       const idleDelayMs = coordinatorOnline
-        ? (OS === "ios" && !allowPeerDirectWork(powerTelemetry) ? 2500 : meshWsOpen ? IDLE_POLL_WITH_NUDGES_MS : IDLE_POLL_MS)
+        ? (OS === "ios" && !allowPeerDirectWork(powerTelemetry) ? 2500 : meshSocketConfirm.nudgesExpected(meshWsOpen) ? IDLE_POLL_WITH_NUDGES_MS : IDLE_POLL_MS)
         : 5000;
+      const idleStartedAtMs = Date.now();
       await idleWait(idleDelayMs);
+      const lateLine = idleWaitLateness.note(idleDelayMs, Date.now() - idleStartedAtMs, Date.now());
+      if (lateLine) console.warn(`[agent:${AGENT_ID}] ${lateLine}`);
     } catch (error) {
       // 429: the coordinator is fine and knows us; we are only sending too fast. Back off for its
       // Retry-After without counting a failure: failures lead to offline mode and re-registering,
