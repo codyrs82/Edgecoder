@@ -76,7 +76,7 @@ import { jobWantsPremiumCloud, type Candidate } from "./best-fit.js";
 import { app } from "./app.js";
 import type { Subtask } from "../../common/types.js";
 import { CC, queue, taskBilling, usagePending } from "./context.js";
-import { claimReadiness, couldClaimNow, preferAgent } from "./dispatch.js";
+import { agentSocketConnected, claimReadiness, couldClaimNow, preferAgent, pulledWithin } from "./dispatch.js";
 import { agentHeldBack } from "./start-eta.js";
 import { inferenceCallReserve, MARKET_DEFAULT_BID_PREMIUM_BPS, orderBook, rateOracleConfig } from "./economy.js";
 import { agentUnavailable, circuitOpenSince, noteAgentOutcome as noteCircuitOutcome } from "./memory-admission.js";
@@ -146,7 +146,8 @@ export type ReplaceOutcome = "claimed" | "same" | "none" | "replaced" | "refused
 export interface ReplaceAdmission {
   fits(p: AutoPlacement, pick: Candidate, nowMs: number): boolean;
   currentFits(p: AutoPlacement, nowMs: number): boolean;
-  refuse(p: AutoPlacement): Promise<boolean>;
+  /** Run 19: `price`, the cloud host could start it but costs more than the call's price ceiling: what it needs. */
+  refuse(p: AutoPlacement, price?: { neededCSats: number }): Promise<boolean>;
 }
 let admission: ReplaceAdmission | undefined;
 export function setReplaceAdmission(a: ReplaceAdmission | undefined): void {
@@ -279,8 +280,11 @@ export async function decideAuto(p: AutoPlacement, nowMs = Date.now()): Promise<
   // Before the refusal: it ends the call's pending usage, which holds its submit time.
   const elapsedMs = nowMs - (usagePending.get(p.taskId)?.atMs ?? nowMs);
   const currentReadiness = current ? claimReadiness(current, st, nowMs) : null;
-  if (admission && (await admission.refuse(p))) {
-    app.log.warn({ taskId: p.taskId, subtaskId: p.subtaskId, reason: final ? "not_claimed_in_time" : "no_host_can_claim", elapsedMs, tried: p.tried, current: current ?? null, currentReadiness, final }, "auto_call_refused_no_host");
+  // Run 19: the cloud host had room but was over the call's price ceiling: say what it needs, so the
+  // caller can send it again with a ceiling that covers it (a tentacle helper waits for room, #594).
+  const price = await cloudPriceNeed(p, nowMs);
+  if (admission && (await admission.refuse(p, price))) {
+    app.log.warn({ taskId: p.taskId, subtaskId: p.subtaskId, reason: final ? "not_claimed_in_time" : "no_host_can_claim", elapsedMs, tried: p.tried, current: current ?? null, currentReadiness, final, ...(price ? { cloudNeedsCSats: price.neededCSats, maxCSats: p.job.maxCSats ?? null } : {}) }, "auto_call_refused_no_host");
     return "refused";
   }
   return "none";
@@ -395,7 +399,7 @@ async function nextPick(p: AutoPlacement, nowMs: number, opts: { cloudOnly?: boo
       if (opts.cloudOnly && !isCloudPick(c)) continue;
       if (!(c.estimate.cSats <= budgetCSats) || !reserveCoversCloud(p, st, c, reservedMsat)) continue;
       // Run 9: only onto a host that could claim it now (not a busy one), within the completion gate.
-      if ((admission?.fits(p, c, nowMs) ?? true) && (!st || hostCanStart(c.agentId, asPlacedOn(st, c), nowMs))) return c;
+      if ((admission?.fits(p, c, nowMs) ?? true) && (!st || hostCanStart(c.agentId, asPlacedOn(st, c), nowMs)) && (isCloudPick(c) || reachableInTime(c.agentId, p, nowMs))) return c;
       if (!isCloudPick(c) && !excluded.includes(c.agentId)) {
         excluded.push(c.agentId);
         more = true;
@@ -404,6 +408,41 @@ async function nextPick(p: AutoPlacement, nowMs: number, opts: { cloudOnly?: boo
     if (!more) return undefined;
   }
   return undefined;
+}
+
+/**
+ * Run 19 (inf-1795719570184-e99775d0, a tentacle helper call refused at 1.79 s with the cloud 16/16
+ * free): its price ceiling (maxCSats 5.374, what the session's helper budget had left after the
+ * other helpers' holds) was under the cloud's expected cost, so best fit never offered the cloud,
+ * at submit or as the last step. The refusal now says so: what the cheapest cloud host that could
+ * start it now would cost (undefined when the call has no ceiling, or the cloud could not take it anyway).
+ */
+async function cloudPriceNeed(p: AutoPlacement, nowMs: number): Promise<{ neededCSats: number } | undefined> {
+  if (p.job.maxCSats === undefined) return undefined;
+  const st = queue.getSubtask(p.subtaskId);
+  if (!st) return undefined;
+  const nonCloud = localAgentViews(nowMs).filter((a) => a.computeClass !== "cloud").map((a) => a.agentId);
+  const { result } = await resolveAuto({ ...p.job, maxCSats: undefined }, { peers: false, requesterAccountId: p.accountId, excludeAgents: [...new Set([...p.tried, ...nonCloud])], clientRegion: p.clientRegion ?? null, ...(p.onlyClass ? { computeClass: p.onlyClass } : {}) }, nowMs).catch(() => ({ result: { chosen: null, candidates: [] as Candidate[] } }));
+  let need: number | undefined;
+  for (const c of [result.chosen, ...result.candidates]) {
+    if (!c || !c.local || !isCloudPick(c) || c.estimate.cSats <= p.job.maxCSats) continue;
+    if (!hostCanStart(c.agentId, asPlacedOn(st, c), nowMs)) continue;
+    need = need === undefined ? c.estimate.cSats : Math.min(need, c.estimate.cSats);
+  }
+  return need === undefined ? undefined : { neededCSats: need };
+}
+
+/**
+ * Run 19 (the same call: moved at 1.5 s to the new Mac's 7b, which had pulled within 6 s but polls
+ * without a socket; with 0.3 s of its bound left it never pulled again): a move with less than a
+ * quarter window left goes only to a host that can be told about the call at once (an open
+ * socket) or that polls that often; otherwise the cloud overflow comes next.
+ */
+function reachableInTime(agentId: string, p: AutoPlacement, nowMs: number): boolean {
+  const quarter = Math.round(autoDecisionMs() / 4);
+  const left = (p.boundAt ?? Infinity) - nowMs;
+  // Or one polling that often (it pulled within the last quarter window).
+  return left >= quarter || agentSocketConnected(agentId) || pulledWithin(agentId, quarter, nowMs);
 }
 
 /** Times nextPick asks best fit again without the candidates that could not take the call. */

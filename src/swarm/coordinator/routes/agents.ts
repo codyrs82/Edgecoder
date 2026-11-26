@@ -8,6 +8,7 @@ import { noteLocalWebReport } from "../local-web.js";
 import { z } from "zod";
 import { RegisterDeniedLog } from "../../registration-policy.js";
 import type { SandboxMode } from "../../../common/types.js";
+import { cleanRegion } from "../../../common/coordinator-choice.js";
 import { rewardAccountForAgent } from "../../../credits/store.js";
 import { pgStore } from "../../../db/store.js";
 import { classifyHardware } from "../../../economy/compute-classes.js";
@@ -208,6 +209,8 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       countryCode: activation.countryCode,
       // Self-reported hosting region (FLY_REGION or AGENT_REGION): coarse display only (GET /network/world).
       ...(body.region ? { region: body.region } : {}),
+      // Run 19: none reported (a desktop app): the Fly edge region the registration came through, for locality.
+      ...(!body.region && cleanRegion(((req as any).headers ?? {})["fly-region"]) ? { inferredRegion: cleanRegion(((req as any).headers ?? {})["fly-region"])! } : {}),
       vpnDetected: activation.vpnDetected,
       enrollmentReason: activation.reason,
       // The portal's host approval; a registration the portal did not answer keeps the last one known.
