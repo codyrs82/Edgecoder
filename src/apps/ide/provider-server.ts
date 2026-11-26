@@ -74,7 +74,7 @@ import { chooseLeadModel, estimateTokens, parseLeadCandidates } from "./lead-mod
 import { compactHistory, compactPaidTokens, estimateTokens as estimateContextTokens, isPaidLead } from "./context-budget.js";
 import { registerSessionRoutes } from "./session-routes.js";
 import { autoSandboxFor, registerSandboxRoutes } from "./sandbox-settings.js";
-import { hostedBackend, hostedConfigFromEnv } from "./hosted-backend.js";
+import { hostedBackend, hostedBalance, hostedConfigFromEnv } from "./hosted-backend.js";
 import { GitHubDeviceLogins } from "./github-device.js";
 import { FrontierAccess, autoWithFrontier, botSpendKey, frontierChat, type FrontierAccountState, type FrontierRequest } from "./frontier-access.js";
 import { botFrontierChat } from "./bot-frontier.js";
@@ -1903,6 +1903,8 @@ const tentacles: TentacleManager = new TentacleManager({
     recordNote: (id, note) => (chatHelpers.has(id) ? null : sessions.recordNote(id, note)),
   },
   workerBackend: (model) => tentacleWorkerBackend(model),
+  // Run 14: the balance helpers' reserves come out of (delegate's coverage note).
+  balance: async () => (networkDeps ? (await computeOverview(networkDeps).catch(() => null))?.account?.cSats : hosted ? hostedBalance(hosted) : undefined),
   // Local first: a capable model on this computer for low-complexity helpers on auto (Auto's view of
   // the installed models and their tool support, routeInputsHere), else null and the network.
   localModelFor: async (need) => pickLocalHelperModel((await routeInputsHere()).localModels, need),

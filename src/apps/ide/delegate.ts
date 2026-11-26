@@ -164,6 +164,8 @@ export function describeTentacle(t: TentacleView): Record<string, unknown> {
     if (r.calls?.length) out.served = r.calls.map(tentacleCallLine);
     out.cSats = r.cSats;
     if (r.unverified) out.unverified = r.unverified;
+    // Run 14: stopped at a budget with a patch (merged when its check passed, else waiting for approval).
+    if (r.partial) out.partial = r.partial;
     out.attempts = r.attempts;
     if (r.error) out.error = r.error;
     // The patch matters when it wasn't merged: the lead decides what to do with it.
@@ -174,27 +176,43 @@ export function describeTentacle(t: TentacleView): Record<string, unknown> {
   if (merge === "awaiting_approval") out.note = "Passed and applies cleanly; waiting for the user to approve merging it.";
   if (merge === "conflict") out.note = "Doesn't apply to the project as it is now: re-delegate, apply it yourself, or drop it.";
   if (t.status === "failed") out.note = "Its check failed after a retry on a stronger tier: re-delegate with clearer instructions, fix it yourself, or drop it.";
+  // Run 14: a helper stopped at its budget with work done: say what happened to the patch; don't apply it by hand.
+  if (r?.partial && merge === "applied") out.note = "Stopped at its budget, but its patch passed its check and was merged (undoable with /undo). Don't apply it again.";
+  if (r?.partial && merge === "awaiting_approval") out.note = "Stopped at its budget with a patch; it is waiting for the user to approve merging it. Don't apply it by hand.";
   return out;
 }
 
 /**
- * Network run 13: what the session's tentacle budget left covers, said when a helper is delegated
- * (the lead passes it on before the helpers run), or null when it covers every helper not finished.
- * With helpers finished (and paid), at their average cost; before that, at each helper's own budget
- * (`perTentacle`), the most one may spend. Helpers share the budget and wait for room in it, so a
- * shortfall here is a warning, not a refusal: the helpers left when it is spent stop with "budget reached".
+ * About what one helper needs on the account to run at all: the cheapest fitting (≥ 7B) model's call
+ * was ~3.9 cSats in network runs 12-13 (a helper call's reserve is capped at its ceiling).
  */
-export function budgetCoverage(o: { left: number; open: number; perTentacle: number; average?: number }): string | null {
-  const left = Math.max(0, o.left);
+export const HELPER_BALANCE_FLOOR_CSATS = 4;
+
+/**
+ * What the session's tentacle budget left, and the account's balance, cover when a helper is delegated
+ * (network runs 13-14), or null when they cover every helper not finished. `short` comes first in the
+ * note (the terminal cuts it after a few dozen characters); `detail` follows. With helpers finished
+ * (and paid), at their average cost; before that, at each helper's own budget (`perTentacle`), the
+ * most one may spend. Helpers share the budget and wait for room, and with a short balance run fewer
+ * at once, so a shortfall is a warning: the helpers left when it is spent stop with "budget reached".
+ */
+export function budgetCoverage(o: { left: number; open: number; perTentacle: number; average?: number; balance?: number }): { short: string; detail: string } | null {
   if (o.open <= 0) return null;
-  if (o.average !== undefined && o.average > 0) {
-    const k = Math.floor(left / o.average);
-    if (k >= o.open) return null;
-    return `At this session's average of ${formatCSatsShort(o.average)} a helper, that covers about ${k} of the ${o.open} helpers not finished; the rest stop with "budget reached". Tell the user, and raise the session's tentacle budget or do the rest yourself if every helper must run.`;
+  const balance = o.balance !== undefined && Number.isFinite(o.balance) ? Math.max(0, o.balance) : undefined;
+  if (balance !== undefined && balance < HELPER_BALANCE_FLOOR_CSATS) {
+    return { short: `Balance ${formatCSatsShort(balance)}: can't run a helper.`, detail: `The account's balance can't cover one helper call (about ${formatCSatsShort(HELPER_BALANCE_FLOOR_CSATS)}): helpers will stop. Tell the user to add cSats, or do the work yourself.` };
   }
-  if (!(o.perTentacle > 0) || o.open * o.perTentacle <= left) return null;
-  const k = Math.floor(left / o.perTentacle);
-  return `The ${o.open} helpers not finished may each spend up to ${formatCSatsShort(o.perTentacle)} (${formatCSatsShort(o.open * o.perTentacle)} in all): the budget left covers ${k} at that most, and they share it (a helper waits for room). If it runs out, the helpers left stop with "budget reached": tell the user.`;
+  const byBalance = balance !== undefined && balance < Math.max(0, o.left);
+  const left = byBalance ? balance! : Math.max(0, o.left);
+  const what = byBalance ? "the account's balance" : "the session's tentacle budget left";
+  const per = o.average !== undefined && o.average > 0 ? o.average : o.perTentacle > 0 ? o.perTentacle : 0;
+  if (!per || o.open * per <= left) return null;
+  const k = Math.floor(left / per);
+  const basis = o.average !== undefined && o.average > 0 ? `this session's average of ${formatCSatsShort(per)} a helper` : `each helper's own budget (${formatCSatsShort(per)}), the most one may spend`;
+  return {
+    short: `${byBalance ? "Balance" : "Budget"} covers ~${k} of ${o.open} helpers.`,
+    detail: `At ${basis}, ${what} (${formatCSatsShort(left)}) covers about ${k} of the ${o.open} helpers not finished. They share it and wait for room${byBalance ? ", fewer running at once" : ""}; if it runs out, the rest stop with "budget reached". Tell the user before they run${byBalance ? "; adding cSats lifts the limit" : "; raising the session's tentacle budget lifts it"}.`,
+  };
 }
 
 /** Answer a tentacle tool call for `sessionId`; other tools go to `inner`. */
@@ -209,13 +227,18 @@ export function tentacleExecutor(manager: TentacleManager, sessionId: string, in
         const listed = manager.list(sessionId);
         const left = cfg.budgetCSats - listed.spentCSats;
         const done = listed.tentacles.filter((t) => (t.status === "passed" || t.status === "failed" || t.status === "error") && t.cSats > 0);
+        // Run 14: the account's balance too (helpers on paid models only; null when unknown).
+        const balance = await manager.accountBalance(sessionId).catch(() => undefined);
         const cover = budgetCoverage({
           left,
           open: listed.tentacles.filter((t) => t.status === "queued" || t.status === "running" || t.status === "verifying").length,
           perTentacle: cfg.perTentacleCSats,
           ...(done.length ? { average: done.reduce((n, t) => n + t.cSats, 0) / done.length } : {}),
+          ...(balance !== undefined ? { balance } : {}),
         });
-        return { result: JSON.stringify({ id: v.id, status: v.status, note: `Started. ${formatCSatsShort(Math.max(0, left))} of the session's tentacle budget left.${cover ? ` ${cover}` : ""} Collect it with await_tentacles.` }) };
+        // Run 14 (c): the terminal cuts the note after a few dozen characters: the coverage goes first, short.
+        const note = cover ? `${cover.short} ${cover.detail} Collect it with await_tentacles.` : `Started; ${formatCSatsShort(Math.max(0, left))} budget left. Collect it with await_tentacles.`;
+        return { result: JSON.stringify({ id: v.id, status: v.status, note }) };
       }
       if (tool === "await_tentacles") {
         const ids = Array.isArray(args.ids) ? args.ids.filter((x): x is string => typeof x === "string") : typeof args.ids === "string" && args.ids ? args.ids.split(/[,\s]+/).filter(Boolean) : undefined;

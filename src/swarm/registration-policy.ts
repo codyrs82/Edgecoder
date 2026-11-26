@@ -206,8 +206,9 @@ export function enrollmentRefusalMessage(agentId: string, refusal: EnrollmentRef
 }
 
 export const ENROLLMENT_BACKOFF_BASE_MS = 60_000;
-export const ENROLLMENT_BACKOFF_MAX_MS = 15 * 60_000;
-/** Wait after the n-th consecutive enrolment refusal (1-based): 1, 2, 4, 8 ... minutes, at most 15. */
+/** Network run 14: at most 30 minutes (was 15); an enrolment problem only the owner can fix. */
+export const ENROLLMENT_BACKOFF_MAX_MS = 30 * 60_000;
+/** Wait after the n-th consecutive enrolment refusal (1-based): 1, 2, 4, 8, 16 ... minutes, at most 30. */
 export function enrollmentBackoffMs(refusals: number): number {
   return Math.min(ENROLLMENT_BACKOFF_BASE_MS * 2 ** Math.max(0, Math.min(refusals - 1, 10)), ENROLLMENT_BACKOFF_MAX_MS);
 }
@@ -221,4 +222,32 @@ export function shouldLogEnrollmentRefusal(last: { key: string; atMs: number } |
 }
 export function enrollmentRefusalKey(refusal: EnrollmentRefusal): string {
   return `${refusal.reason}:${refusal.tokenNodeId ?? ""}`;
+}
+
+/**
+ * Network run 14: the coordinator logged ~709 register_denied lines per 10 min (2,601 node_not_enrolled
+ * from one legacy iOS id, CRS-NODE-001, every ~0.7 s). A denial is logged once per agent and reason
+ * per REGISTER_DENIED_LOG_INTERVAL_MS, with how many were left out since; the 403 is unchanged.
+ */
+export const REGISTER_DENIED_LOG_INTERVAL_MS = 10 * 60_000;
+export class RegisterDeniedLog {
+  private readonly seen = new Map<string, { atMs: number; suppressed: number }>();
+  constructor(private readonly intervalMs = REGISTER_DENIED_LOG_INTERVAL_MS, private readonly maxKeys = 10_000) {}
+
+  /** Whether to log this denial now, and how many of the same were not logged since the last line; null: skip it. */
+  take(agentId: string, reason: string, nowMs: number): { suppressed: number } | null {
+    const key = `${agentId}\u0000${reason}`;
+    const e = this.seen.get(key);
+    if (e && nowMs - e.atMs < this.intervalMs) {
+      e.suppressed++;
+      return null;
+    }
+    if (!e && this.seen.size >= this.maxKeys) {
+      for (const [k, v] of this.seen) if (nowMs - v.atMs >= this.intervalMs) this.seen.delete(k);
+      if (this.seen.size >= this.maxKeys) this.seen.clear();
+    }
+    const suppressed = e?.suppressed ?? 0;
+    this.seen.set(key, { atMs: nowMs, suppressed: 0 });
+    return { suppressed };
+  }
 }

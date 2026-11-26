@@ -95,6 +95,12 @@ export function hostedErrorInfo(sent: unknown, message: string): FailureInfo | u
       ...(typeof o.computeClass === "string" ? { computeClass: o.computeClass.slice(0, 40) } : {}),
     };
   }
+  // Run 14: "Not enough cSats for this request (it sets aside up to 25.978 cSats; unused cSats come back)".
+  const balance = /Not enough cSats for this request \(it sets aside up to ([\d.]+) cSats/.exec(message);
+  if (balance) {
+    const need = Number(balance[1]);
+    return { code: "insufficient_credits", ...(Number.isFinite(need) && need > 0 ? { neededCSats: need } : {}) };
+  }
   const price = /costs more than the [\d.]+ cSats ceiling(?: \(the cheapest, .*? on ([\w.]+), is about ([\d.]+) cSats\))?/.exec(message);
   if (!price) return undefined;
   const need = price[2] !== undefined ? Number(price[2]) : NaN;
@@ -210,4 +216,19 @@ export function hostedBackend(cfg: HostedConfig, model: string): ChatBackend {
     }
     yield { done: true, stopReason: stop, ...(spent !== undefined ? { cSatsSpent: spent } : {}), ...(where ? { where } : {}), ...(served ? { served } : {}), ...(promptTokens !== undefined ? { promptTokens } : {}), ...(outputTokens !== undefined ? { outputTokens } : {}) };
   };
+}
+
+/** Network run 14: the API key's account balance in cSats (GET /v1/account), or undefined when it can't be read. */
+export async function hostedBalance(cfg: HostedConfig, signal?: AbortSignal): Promise<number | undefined> {
+  try {
+    const res = await request(`${cfg.baseUrl}/v1/account`, { method: "GET", headers: { authorization: `Bearer ${cfg.apiKey()}` }, headersTimeout: 5_000, bodyTimeout: 5_000, ...(signal ? { signal } : {}) });
+    if (res.statusCode !== 200) {
+      await res.body.text().catch(() => "");
+      return undefined;
+    }
+    const j = (await res.body.json()) as { cSats?: unknown };
+    return typeof j.cSats === "number" && Number.isFinite(j.cSats) ? j.cSats : undefined;
+  } catch {
+    return undefined;
+  }
 }
