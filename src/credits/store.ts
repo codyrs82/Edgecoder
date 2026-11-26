@@ -6,6 +6,7 @@ import { CreditEngine } from "./engine.js";
 import { ComputeContributionReport, CreditTransaction } from "../common/types.js";
 import { contributionCredits, splitNetworkFee, LoadSnapshot } from "./pricing.js";
 import { pgStore } from "../db/store.js";
+import { splitJobCost, type FeeRounding } from "../economy/job-pricing.js";
 
 export const creditEngine = new CreditEngine();
 
@@ -81,6 +82,67 @@ export async function accruePricedJob(
   creditEngine.record(tx);
   if (feeTx) creditEngine.record(feeTx);
   return tx;
+}
+
+/**
+ * accruePricedJob for a job whose cost may be above what its buyer set aside: `baseCostMsat` is the
+ * part taken from the reserve, `overflow.wantMsat` the rest, taken from the buyer's balance (up to
+ * what it holds) in the same transaction as the earn rows, under the buyer's credit lock and the
+ * overflow's deterministic tx id (PostgresStore.persistContributionWithOverflow). The network fee is
+ * split from the whole covered cost. Idempotent on `report.reportId`: null when already recorded (or
+ * nothing to pay), and then nothing was debited either.
+ */
+export async function accruePricedJobWithOverflow(
+  report: ComputeContributionReport,
+  cost: { baseCostMsat: number; feeBps: number; rounding?: FeeRounding },
+  overflow?: { payerAccountId: string; wantMsat: number; reason: string }
+): Promise<{ tx: CreditTransaction; costMsat: number; coveredMsat: number; agentMsat: number; feeMsat: number } | null> {
+  const base = Math.max(0, Math.round(cost.baseCostMsat));
+  const want = overflow && Number.isFinite(overflow.wantMsat) ? Math.max(0, Math.floor(overflow.wantMsat)) : 0;
+  if (base + want <= 0) return null;
+  const now = Date.now();
+  let built: { tx: CreditTransaction; feeTx?: CreditTransaction; costMsat: number; agentMsat: number; feeMsat: number } | undefined;
+  const build = (coveredMsat: number) => {
+    const costMsat = base + coveredMsat;
+    const { agentMsat, feeMsat } = splitJobCost(costMsat, cost.feeBps, cost.rounding);
+    const tx: CreditTransaction = { txId: randomUUID(), accountId: report.agentId, type: "earn", credits: roundCredits(agentMsat / 1000), reason: "compute_contribution", relatedTaskId: report.taskId, timestampMs: now, msat: Math.round(agentMsat) };
+    const feeTx: CreditTransaction | undefined =
+      feeMsat > 0 ? { txId: randomUUID(), accountId: NETWORK_FEE_POOL_ACCOUNT, type: "earn", credits: roundCredits(feeMsat / 1000), reason: `network_fee:${report.taskId}`, relatedTaskId: report.taskId, timestampMs: now, msat: Math.round(feeMsat) } : undefined;
+    built = { tx, ...(feeTx ? { feeTx } : {}), costMsat, agentMsat, feeMsat };
+    return { tx, ...(feeTx ? { feeTx } : {}) };
+  };
+  const overflowTxId = debitTxId(`overflow:${report.reportId}`);
+  if (pgStore) {
+    const seconds = report.resourceClass === "gpu" ? report.gpuSeconds : report.cpuSeconds;
+    const r = await pgStore.persistContributionWithOverflow(
+      {
+        report,
+        accountId: report.agentId,
+        sourceAgentId: report.sourceAgentId ?? report.agentId,
+        reliabilityScore: report.success ? 1 : 0.75,
+        weightedContribution: Number((seconds * (report.hardwareWeight ?? 1)).toFixed(6)),
+      },
+      build,
+      { accountId: overflow?.payerAccountId ?? "", wantMsat: want, txId: overflowTxId, reason: overflow?.reason ?? "", relatedTaskId: report.taskId, timestampMs: now }
+    );
+    const b = built as typeof built | undefined;
+    if (!r.inserted || !b) return null;
+    return { tx: b.tx, costMsat: b.costMsat, coveredMsat: r.coveredMsat, agentMsat: b.agentMsat, feeMsat: b.feeMsat };
+  }
+  if (!creditEngine.claimReport(report.reportId)) return null;
+  let coveredMsat = 0;
+  if (overflow && want > 0) {
+    const heldMsat = Math.max(0, Math.floor(creditEngine.balance(overflow.payerAccountId) * 1000 + 1e-6));
+    coveredMsat = Math.min(want, heldMsat);
+    if (coveredMsat > 0) {
+      creditEngine.addIfAbsent({ txId: overflowTxId, accountId: overflow.payerAccountId, type: "spend", credits: roundCredits(coveredMsat / 1000), reason: overflow.reason, relatedTaskId: report.taskId, timestampMs: now });
+    }
+  }
+  const b = build(coveredMsat);
+  if (!(built!.agentMsat > 0)) return null;
+  creditEngine.record(b.tx);
+  if (b.feeTx) creditEngine.record(b.feeTx);
+  return { tx: b.tx, costMsat: built!.costMsat, coveredMsat, agentMsat: built!.agentMsat, feeMsat: built!.feeMsat };
 }
 
 export async function accrueCredits(

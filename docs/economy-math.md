@@ -95,7 +95,9 @@ reserve is now an upper bound on the call's own cost (`inferenceReserveMsat` in
 `src/economy/job-pricing.ts`, `inferenceCallReserve` in `src/swarm/coordinator/economy.ts`):
 
 ```
-promptMax  = bytes of the queued request (messages, tools, max_tokens) + PROMPT_TOKEN_ALLOWANCE (2048)
+promptMax  = local model: min(max(promptTokenEstimate × 1.25, bytes / 2), bytes) + PROMPT_TOKEN_ALLOWANCE (2048)
+             (since 2026-11-26; was bytes + 2048. promptTokenEstimate: ~4 bytes a token, each digit a token)
+             cloud model: bytes / 3 + 256
 outputMax  = max_tokens (default INFERENCE_DEFAULT_MAX_TOKENS, 4096) + OUTPUT_TOKEN_ALLOWANCE (64)
 tokenBound = price(paramsB) for promptMax in and outputMax out
 floorBound = max over the requested class (every class for "any") of
@@ -103,9 +105,9 @@ floorBound = max over the requested class (every class for "any") of
 reserve    = min(1.5 × usdToMsat(max(tokenBound, floorBound)), maxCSats)
 ```
 
-The token bounds are the same caps `/inference/chunks` puts on reported counts, and the billed
-seconds never exceed the call's timeout, so at the same BTC price no settlement can exceed the
-bound; the 1.5× margin (`INFERENCE_RESERVE_MARGIN`) covers the BTC price falling by up to a third
+The output bound is the same cap `/inference/chunks` puts on reported counts. The prompt bound is
+a cautious estimate, below that cap (bytes + 2048), which still bounds what a host can report; the
+1.5× margin (`INFERENCE_RESERVE_MARGIN`) covers the BTC price falling by up to a third
 between submit and settlement. `maxCSats` is the buyer's ceiling (`x-edgecoder-max-csats`, or
 `routing.maxCSats` on `/inference/submit`, for any model, not only `auto`).
 
@@ -114,10 +116,18 @@ At 100,000 USD/BTC with the default 180 s timeout and 4,096-token cap and a shor
 model on class `any` at least about 33 cSats (the `gpu.dc` top-tier floor); a 30B call with a
 200,000-character prompt about 180 cSats. A shorter timeout or output cap lowers it.
 
-Settlement still takes at most what is left of the reserve (`takeTaskBudget`). A cost above it
-(BTC fell by more than a third, a reserve capped by `maxCSats`, an agent that reports no token
-counts and is priced per second) is settled at the reserve and logged
-(`job_cost_capped_at_reserve`). Code jobs keep the per-second worst case (`reserveMsat`).
+Settlement takes the cost from what is left of the reserve (`takeTaskBudget`). A model call's cost
+above it (a prompt denser than its bound, BTC fell by more than a third, a reserve capped by
+`maxCSats`) is taken from the buyer's balance at settle time, up to what it holds, in the same
+database transaction as the host's earning (`accruePricedJobWithOverflow`,
+`PostgresStore.persistContributionWithOverflow`: the buyer's credit lock, a deterministic tx id per
+report). The overflow spend has the reserve's own reason (`inference_reserve`) and task, so ledger
+checks count it as set aside. The host is paid in full; only what the balance cannot cover goes
+unpaid, logged (`job_cost_over_reserve_unpaid`) and recorded on the billing entry, the usage record
+(`unpaidMsat`) and the accrual's ledger record (`pricedMsat`, `overflowMsat`, `unpaidMsat`). A peer
+coordinator's subtask, a call paid from the buyer's own wallet and code jobs keep the cap
+(`job_cost_capped_at_reserve`). The 402 for a balance short of the reserve states both the reserve
+(`neededCSats`) and the expected cost (`expectedCSats`).
 
 Every way a call ends returns what it did not use: a result (success or failure) settles it
 (`settleTaskIfDone`); no agent claiming it within `INFERENCE_CLAIM_TIMEOUT_MS`, or its holder's

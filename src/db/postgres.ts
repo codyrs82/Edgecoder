@@ -1715,6 +1715,31 @@ SELECT seen.dup, bal.balance, bal.enough, st.fresh, st.same, st.go,
     tx: CreditTransaction,
     feeTx?: CreditTransaction
   ): Promise<boolean> {
+    return (await this.persistContributionWithOverflow(input, () => ({ tx, ...(feeTx ? { feeTx } : {}) }))).inserted;
+  }
+
+  /**
+   * A priced job's report and its earn rows (persistContributionWithCredit), plus, when its cost is
+   * above what its buyer set aside, the rest taken from the buyer's balance, all in one transaction:
+   * - the report row first: an id already recorded (#44) writes nothing and debits nothing;
+   * - then, under the buyer's advisory lock (CREDIT_LOCK_NAMESPACE, as every debit), the overflow
+   *   spend: `wantMsat` or what the balance holds, whichever is less, under its deterministic tx id
+   *   (a second insert of the same id fails the whole transaction rather than debit twice), with the
+   *   reserve's own reason and task, so ledger checks count it as part of the task's reserve;
+   * - then the earn rows `build` returns for the covered amount.
+   * Returns whether the report was new and how much of `wantMsat` the balance covered.
+   */
+  async persistContributionWithOverflow(
+    input: {
+      report: ComputeContributionReport;
+      accountId: string;
+      sourceAgentId: string;
+      reliabilityScore: number;
+      weightedContribution: number;
+    },
+    build: (coveredMsat: number) => { tx: CreditTransaction; feeTx?: CreditTransaction },
+    overflow?: { accountId: string; wantMsat: number; txId: string; reason: string; relatedTaskId: string; timestampMs: number }
+  ): Promise<{ inserted: boolean; coveredMsat: number }> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -1741,7 +1766,32 @@ SELECT seen.dup, bal.balance, bal.enough, st.fresh, st.same, st.go,
       );
       if ((result.rowCount ?? 0) === 0) {
         await client.query("ROLLBACK");
-        return false;
+        return { inserted: false, coveredMsat: 0 };
+      }
+      let coveredMsat = 0;
+      const want = overflow && Number.isFinite(overflow.wantMsat) ? Math.max(0, Math.floor(overflow.wantMsat)) : 0;
+      if (overflow && want > 0) {
+        await client.query("SELECT pg_advisory_xact_lock($1, hashtext($2))", [CREDIT_LOCK_NAMESPACE, overflow.accountId]);
+        const bal = await client.query(
+          `SELECT COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END), 0)::text AS balance FROM credit_transactions WHERE account_id = $1`,
+          [overflow.accountId]
+        );
+        // Whole msat the balance holds (credits are cSats to 6 places; 1 msat = 0.001).
+        const heldMsat = Math.max(0, Math.floor(Number(bal.rows[0]?.balance ?? 0) * 1000 + 1e-6));
+        coveredMsat = Math.min(want, heldMsat);
+        if (coveredMsat > 0) {
+          await client.query(
+            `INSERT INTO credit_transactions (tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms)
+             VALUES ($1,$2,'spend',$3,$4,$5,$6)`,
+            [overflow.txId, overflow.accountId, (coveredMsat / 1000).toFixed(3), overflow.reason, overflow.relatedTaskId, overflow.timestampMs]
+          );
+        }
+      }
+      const { tx, feeTx } = build(coveredMsat);
+      if (overflow && !(tx.credits > 0) && !(feeTx && feeTx.credits > 0)) {
+        // Nothing to pay after all (nothing left of the reserve and an empty balance): no report either.
+        await client.query("ROLLBACK");
+        return { inserted: false, coveredMsat: 0 };
       }
       for (const row of [tx, ...(feeTx ? [feeTx] : [])]) {
         if (row.credits <= 0) continue;
@@ -1753,7 +1803,7 @@ SELECT seen.dup, bal.balance, bal.enough, st.fresh, st.same, st.go,
         );
       }
       await client.query("COMMIT");
-      return true;
+      return { inserted: true, coveredMsat };
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;

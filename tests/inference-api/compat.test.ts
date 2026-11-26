@@ -149,6 +149,16 @@ describe("compatible routes", () => {
       expect((await makeWith(busy()).inject({ method: "POST", url: "/v1/chat/completions", headers: { authorization: "Bearer k" }, payload: { messages: [{ role: "user", content: "x" }] } })).json().error.edgecoder).toBeUndefined();
     });
 
+    it("a call refused for the balance says what it sets aside and what it is expected to cost, as data", async () => {
+      const msg = "Not enough cSats for this request (it sets aside up to 83.525 cSats; expected cost about 18 cSats; unused cSats come back).";
+      const refused: ChatBackend = async function* () {
+        throw new ChatBackendError(msg, 402, undefined, { code: "insufficient_credits", neededCSats: 83.525, expectedCSats: 18.407 });
+      };
+      const o = await makeWith(refused).inject({ method: "POST", url: "/v1/chat/completions", headers: { authorization: "Bearer k" }, payload: { messages: [{ role: "user", content: "x" }] } });
+      expect(o.statusCode).toBe(402);
+      expect(o.json().error).toMatchObject({ message: msg, edgecoder: { code: "insufficient_credits", neededCSats: 83.525, expectedCSats: 18.407 } });
+    });
+
     it("answers an upstream 502/504 as a JSON 503 (Cloudflare would replace a 502 with its own page)", async () => {
       const agentFailed: ChatBackend = async function* () {
         throw new ChatBackendError("The machine running deepseek-v4.1-flash reported: empty_reply", 502);

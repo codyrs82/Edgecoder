@@ -132,7 +132,7 @@ describe("size-aware model-call reserve", () => {
     expect(creditEngine.balance(small.peerId)).toBeCloseTo(20, 6);
   });
 
-  test("never under the settled cost: the worst token counts an agent can report settle within the reserve", async () => {
+  test("the worst token counts an agent can report are bounded at /inference/chunks and settled at their priced cost", async () => {
     const before = creditEngine.balance(requester.peerId);
     const taskId = `inf-${randomUUID()}`;
     const sub = await submit(taskId, { model: BIG, content: "y".repeat(4_000), maxTokens: 256 });
@@ -149,10 +149,11 @@ describe("size-aware model-call reserve", () => {
     const spent = before - creditEngine.balance(requester.peerId);
     expect(earned).toBeGreaterThan(0);
     expect(spent).toBeGreaterThan(0);
-    // Settled at its priced cost (not cut at the reserve), and never more than was set aside.
+    // Settled at its priced cost. The prompt is held at bytes / 2 (+ allowance) now, not one token per
+    // byte: these bounded counts still fit this call's hold, and a cost past a hold is taken from the
+    // balance at settle (tests/swarm/reserve-overflow-settle.test.ts).
     expect(spent).toBeLessThanOrEqual(reservedCSats + 1e-9);
     expect(spent * 1000).toBeGreaterThanOrEqual(earned);
-    expect(spent).toBeLessThan(reservedCSats / 1.5 + 1e-6);
     expect(taskBilling.has(taskId)).toBe(false);
   });
 

@@ -134,6 +134,19 @@ interface TaskBilling {
   genMs?: number;
   /** Why the reply ended: "length" when it was cut at the call's max_tokens (the requester's finish_reason). */
   finishReason?: "stop" | "length";
+  /**
+   * A model call whose cost was past its reserve: what was taken from the buyer's balance at settle
+   * time for it (also counted in reservedMsat and costMsat), and what the balance could not cover,
+   * left unpaid to the host (results.ts accrueResultCredits).
+   */
+  overflowMsat?: number;
+  unpaidMsat?: number;
+  /**
+   * A model call billed in cSats at submit: the most it may cost in all, past its reserve, from the
+   * buyer's balance at settle (the buyer's maxCSats, else Number.MAX_SAFE_INTEGER). Unset (code jobs,
+   * entries restored after a restart): settled at the reserve, never past it.
+   */
+  overflowCapMsat?: number;
 }
 export const taskBilling = new Map<string, TaskBilling>();
 /**

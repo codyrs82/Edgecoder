@@ -147,6 +147,16 @@ describe("streamNetworkCompletion", () => {
     await expect(streamNetworkCompletion(plain, { model: "x", computeClass: "any", target: "mine", messages: [{ role: "user", content: "hi" }] }).next()).rejects.toThrow(/None of your own machines has x/);
   });
 
+  it("a 402 says what the call sets aside and what it is expected to cost (an older coordinator: the reserve only)", async () => {
+    const message = "Not enough cSats for this request (it sets aside up to 83.525 cSats; expected cost about 18 cSats; unused cSats come back).";
+    const deps = await fakeForwarder(() => ({ status: 402, json: { error: "insufficient_credits", neededCSats: 83.525, expectedCSats: 18.407, message } }));
+    const err = await streamNetworkCompletion(deps, { model: "qwen3-coder:30b", computeClass: "gpu", messages: [{ role: "user", content: "hi" }] }).next().catch((e) => e as { status: number; message: string; info?: unknown });
+    expect(err).toMatchObject({ status: 402, message, info: { code: "insufficient_credits", neededCSats: 83.525, expectedCSats: 18.407, computeClass: "gpu" } });
+    const older = await fakeForwarder(() => ({ status: 402, json: { error: "insufficient_credits", neededCSats: 25.978 } }));
+    const e2 = await streamNetworkCompletion(older, { model: "m", computeClass: "any", messages: [{ role: "user", content: "hi" }] }).next().catch((e) => e as { message: string; info?: unknown });
+    expect(e2).toMatchObject({ message: "Not enough cSats for this request (it sets aside up to 25.978 cSats; unused cSats come back).", info: { code: "insufficient_credits", neededCSats: 25.978 } });
+  });
+
   it("a lease that ended (or isn't the caller's) is a 404 that says so, not a 502", async () => {
     const deps = await fakeForwarder(() => ({ status: 404, json: { error: "reservation_not_active" } }));
     const err = await streamNetworkCompletion(deps, { model: "m", computeClass: "any", reservationId: "res-1", messages: [{ role: "user", content: "hi" }] })

@@ -14,7 +14,8 @@
  *   refunds the whole reserve (nothing ran);
  * - claimed call: marks it cancelled. The agent's next /inference/chunks answer says `cancelled`; an
  *   agent that understands it stops generating and reports what it produced as its result, which is
- *   settled as any call (priced on the tokens and seconds it reports, capped at the reserve; the
+ *   settled as any call (priced on the tokens and seconds it reports, within the bound on reported
+ *   counts; a cost past the reserve comes from the buyer's balance; the
  *   unused reserve comes back). An agent that does not (an older release) keeps going, so when no
  *   result has come within CANCEL_GRACE_MS the call is ended: its claim is closed (later pieces and
  *   the result are refused), nothing is paid and the reserve comes back in full.

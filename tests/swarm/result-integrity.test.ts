@@ -183,6 +183,50 @@ describe("/result integrity (#44)", () => {
       expect(calls).toContain("ROLLBACK");
       expect(calls).not.toContain("COMMIT");
     });
+
+    describe("persistContributionWithOverflow: a cost past the reserve, from the buyer's balance in the same transaction", () => {
+      function overflowStore(balance: string, reportRowCount = 1) {
+        const calls: Array<{ sql: string; params?: unknown[] }> = [];
+        const client = {
+          async query(sql: string, params?: unknown[]) {
+            calls.push({ sql: sql.trim().split(/\s+/).slice(0, 3).join(" "), params });
+            if (sql.includes("INSERT INTO compute_contribution_reports")) return { rowCount: reportRowCount, rows: [] };
+            if (sql.includes("AS balance")) return { rowCount: 1, rows: [{ balance }] };
+            return { rowCount: 1, rows: [] };
+          },
+          release() {},
+        };
+        return { store: new PostgresStore({ connect: async () => client } as any), calls };
+      }
+      const overflow = { accountId: "buyer", wantMsat: 3_000, txId: "debit:ovf", reason: "inference_reserve", relatedTaskId: "t", timestampMs: 1 };
+      const build = (covered: number) => ({ tx: { ...tx, credits: (10_000 + covered) / 1000, msat: 10_000 + covered } as any });
+
+      test("covered: report, buyer's lock, balance, spend, earn, COMMIT", async () => {
+        const { store, calls } = overflowStore("50.000000");
+        expect(await store.persistContributionWithOverflow(input as any, build, overflow)).toEqual({ inserted: true, coveredMsat: 3_000 });
+        expect(calls.map((c) => c.sql)).toEqual(["BEGIN", "INSERT INTO compute_contribution_reports", "SELECT pg_advisory_xact_lock($1, hashtext($2))", "SELECT COALESCE(SUM(CASE WHEN", "INSERT INTO credit_transactions", "INSERT INTO credit_transactions", "COMMIT"]);
+        expect(calls[2].params?.[1]).toBe("buyer");
+        expect(calls[4].params).toEqual(["debit:ovf", "buyer", "3.000", "inference_reserve", "t", 1]);
+      });
+
+      test("a balance short of it: only what it holds", async () => {
+        const { store, calls } = overflowStore("1.234567");
+        expect(await store.persistContributionWithOverflow(input as any, build, overflow)).toEqual({ inserted: true, coveredMsat: 1_234 });
+        expect(calls[4].params?.[2]).toBe("1.234");
+      });
+
+      test("an empty balance: no spend row, the earn on the reserve alone", async () => {
+        const { store, calls } = overflowStore("0");
+        expect(await store.persistContributionWithOverflow(input as any, build, overflow)).toEqual({ inserted: true, coveredMsat: 0 });
+        expect(calls.filter((c) => c.sql === "INSERT INTO credit_transactions")).toHaveLength(1);
+      });
+
+      test("a report already recorded: no lock, no debit", async () => {
+        const { store, calls } = overflowStore("50", 0);
+        expect(await store.persistContributionWithOverflow(input as any, build, overflow)).toEqual({ inserted: false, coveredMsat: 0 });
+        expect(calls.map((c) => c.sql)).toEqual(["BEGIN", "INSERT INTO compute_contribution_reports", "ROLLBACK"]);
+      });
+    });
   });
 });
 

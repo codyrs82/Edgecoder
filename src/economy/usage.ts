@@ -30,6 +30,9 @@ export interface UsageRecord {
   /** Tokens the model read and wrote (inference, when the agent reported them). */
   promptTokens?: number;
   outputTokens?: number;
+  /** A model call whose cost was past its reserve: what the balance covered at settle (part of costMsat), and what it could not. */
+  overflowMsat?: number;
+  unpaidMsat?: number;
   /** For a `model: "auto"` call: "routed to <model> on <class> because <reason>". */
   routing?: string;
   /** kind "web": the day's free web searches and page reads (src/swarm/coordinator/routes/web-tools.ts). */
