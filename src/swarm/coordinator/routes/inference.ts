@@ -146,7 +146,7 @@ export function judgeInferenceReply(
 export const INFERENCE_CLAIM_TIMEOUT_MS = CC.INFERENCE_CLAIM_TIMEOUT_MS;
 export const NO_CAPACITY_RETRY_AFTER_SEC = 15;
 const NO_CAPACITY_KEEP_MS = 10 * 60_000;
-type NoCapacityReason = "busy" | "none_in_class" | "draining" | "cooling_down" | "price";
+type NoCapacityReason = "busy" | "none_in_class" | "draining" | "cooling_down" | "price" | "elsewhere";
 const noCapacity = new Map<string, { accountId: string; subtaskId: string; atMs: number; reason: NoCapacityReason; computeClass?: string; model?: string; coordinatorUrl?: string; startEtaMs?: number; neededCSats?: number }>();
 
 /** Granted classes of the online, unblacklisted agents that hold `model` (one entry per agent), free of a reservation unless `includeReserved`. */
@@ -191,7 +191,7 @@ export function inferenceCancelledForCapacity(taskId: string): boolean {
  * holds it: that call runs and is settled as usual. Removal from the queue is synchronous and only
  * of an unclaimed item, so a claim racing the cancel either got it first or finds nothing.
  */
-export async function cancelUnclaimedInference(taskId: string, subtaskId: string, draining?: { peerUrl: string | null }, why?: "cooling_down", startEtaMs?: number, price?: { neededCSats: number }): Promise<boolean> {
+export async function cancelUnclaimedInference(taskId: string, subtaskId: string, draining?: { peerUrl: string | null }, why?: "cooling_down", startEtaMs?: number, price?: { neededCSats: number }, handover?: { peerUrl: string }): Promise<boolean> {
   const timer = claimDeadlines.get(subtaskId);
   if (timer) clearTimeout(timer);
   claimDeadlines.delete(subtaskId);
@@ -205,8 +205,9 @@ export async function cancelUnclaimedInference(taskId: string, subtaskId: string
   const usage = usagePending.get(taskId);
   const gap = usage?.model && usage.computeClass ? capacityGap(usage.computeClass as ComputeClassId, holderClasses(usage.model)) : "busy";
   // Draining: the caller is told so, with a peer to send the call to (it was refunded here in full).
-  const reason: NoCapacityReason = draining ? "draining" : why ?? (price ? "price" : gap === "none_in_class" ? "none_in_class" : "busy");
-  noCapacity.set(taskId, { accountId, subtaskId, atMs: Date.now(), reason, ...(usage?.computeClass ? { computeClass: usage.computeClass } : {}), ...(usage?.model ? { model: usage.model } : {}), ...(draining?.peerUrl ? { coordinatorUrl: draining.peerUrl } : {}), ...(startEtaMs !== undefined ? { startEtaMs: Math.round(startEtaMs) } : {}), ...(price ? { neededCSats: Math.round(price.neededCSats * 1000) / 1000 } : {}) });
+  const reason: NoCapacityReason = draining ? "draining" : why ?? (handover ? "elsewhere" : price ? "price" : gap === "none_in_class" ? "none_in_class" : "busy");
+  const peerUrl = draining?.peerUrl ?? handover?.peerUrl;
+  noCapacity.set(taskId, { accountId, subtaskId, atMs: Date.now(), reason, ...(usage?.computeClass ? { computeClass: usage.computeClass } : {}), ...(usage?.model ? { model: usage.model } : {}), ...(peerUrl ? { coordinatorUrl: peerUrl } : {}), ...(startEtaMs !== undefined ? { startEtaMs: Math.round(startEtaMs) } : {}), ...(price ? { neededCSats: Math.round(price.neededCSats * 1000) / 1000 } : {}) });
   // A failed result from the coordinator (like a lease failure), so the subtask is settled everywhere.
   queue.complete({ subtaskId, taskId, agentId: "coordinator", ok: false, output: "", error: "no_capacity", durationMs: 0 });
   inferenceStreams.finish(subtaskId, "no_capacity");
@@ -692,9 +693,10 @@ export function waitingBound(holderIds: string[], nowMs = Date.now()): number {
 function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: string) => { send: (b: unknown) => unknown } } }, c?: { reason: NoCapacityReason; computeClass?: string; model?: string; coordinatorUrl?: string; retryAfterSec?: number; startEtaMs?: number; completionEtaMs?: number; limitMs?: number; neededCSats?: number }) {
   const noneInClass = c?.reason === "none_in_class";
   const overPrice = c?.reason === "price";
+  const elsewhere = c?.reason === "elsewhere";
   const draining = c?.reason === "draining";
   const coolingDown = c?.reason === "cooling_down";
-  const retryAfterSec = draining ? 1 : c?.retryAfterSec !== undefined ? c.retryAfterSec : NO_CAPACITY_RETRY_AFTER_SEC;
+  const retryAfterSec = draining || c?.reason === "elsewhere" ? 1 : c?.retryAfterSec !== undefined ? c.retryAfterSec : NO_CAPACITY_RETRY_AFTER_SEC;
   return reply
     .code(503)
     .header("retry-after", String(retryAfterSec))
@@ -707,7 +709,9 @@ function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: 
       ...(c?.completionEtaMs !== undefined ? { completionEtaMs: c.completionEtaMs } : {}),
       ...(c?.limitMs !== undefined ? { limitMs: c.limitMs } : {}),
       ...(c?.neededCSats !== undefined ? { neededCSats: c.neededCSats } : {}),
-      message: overPrice
+      message: elsewhere
+        ? "Nothing here could start this call, but another coordinator can; nothing was charged. Send it there (coordinatorUrl)."
+        : overPrice
         ? `No machine within this call's price ceiling could start it in time; a cloud host could, for about ${c?.neededCSats ?? "?"} cSats. Nothing was charged. Send it again with a ceiling that covers that.`
         : draining
         ? "This coordinator is restarting; the call had not started and nothing was charged. Send it again (to the coordinator named, if any)."
@@ -1143,7 +1147,7 @@ setReplaceAdmission({
     const st = queue.getSubtask(p.subtaskId);
     return !st?.requestedModel || waitingCallFits(st, st.requestedModel, st.projectMeta.computeClass ?? "any", undefined, nowMs);
   },
-  refuse: (p: AutoPlacement, price?: { neededCSats: number }) => cancelUnclaimedInference(p.taskId, p.subtaskId, undefined, undefined, undefined, price),
+  refuse: (p: AutoPlacement, price?: { neededCSats: number }, handover?: { peerUrl: string }) => cancelUnclaimedInference(p.taskId, p.subtaskId, undefined, undefined, undefined, price, handover),
 });
 
 /** Run 5: the output a call without max_tokens is judged on (it may write up to INFERENCE_DEFAULT_MAX_TOKENS). */
@@ -1546,7 +1550,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       recordDecision(body.taskId, subtask.id, routed.job, routed.result, Date.now(), portalChoice);
       // #523: nobody picks it up within BEST_FIT_REPLACE_MS: the next candidate, not a 45 s wait (auto-replace.ts).
       if (routed.result.chosen?.local) {
-        armAutoReplace({ taskId: body.taskId, subtaskId: subtask.id, job: routed.job, accountId, clientRegion, receivedAtMs, tried: [...slowAgents.filter((id) => id !== routed!.result.chosen!.agentId), routed.result.chosen.agentId], ...(routed.onlyClass ? { onlyClass: routed.onlyClass } : {}), ...(body.maxBidMsatPerCredit !== undefined ? { maxBidMsatPerCredit: body.maxBidMsatPerCredit } : {}) });
+        armAutoReplace({ taskId: body.taskId, subtaskId: subtask.id, job: routed.job, accountId, clientRegion, receivedAtMs, mayHandOver: body.routeRedirect && !body.redirected, tried: [...slowAgents.filter((id) => id !== routed!.result.chosen!.agentId), routed.result.chosen.agentId], ...(routed.onlyClass ? { onlyClass: routed.onlyClass } : {}), ...(body.maxBidMsatPerCredit !== undefined ? { maxBidMsatPerCredit: body.maxBidMsatPerCredit } : {}) });
       }
     } else {
       if (billed) {
