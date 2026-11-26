@@ -408,6 +408,8 @@ async function* streamSubmitted(
       err === "no_agent_in_class" || err === "no_agent_has_model" ? { code: err, ...(req.computeClass && req.computeClass !== "any" ? { computeClass: req.computeClass } : {}) } :
       undefined;
     if (err === "coordinator_draining") throw new CoordinatorDrainingError(drainRetryAfterSec(), typeof sub.json.coordinatorUrl === "string" ? sub.json.coordinatorUrl : undefined);
+    // Run 21: a request over a size limit (413) or malformed (400) is the caller's to fix: said as such, with the coordinator's words.
+    if ((sub.status === 413 || sub.status === 400) && (err === "request_too_large" || err === "invalid_request")) throw new NetworkInferenceError(String(sub.json.message ?? msg), sub.status, undefined, { code: err });
     throw new NetworkInferenceError(msg, sub.status === 402 ? 402 : sub.status === 409 || sub.status === 404 ? 404 : 502, undefined, info);
   }
   const subtaskId = String(sub.json.subtaskId);

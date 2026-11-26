@@ -764,16 +764,53 @@ setRestrictedCanceller(async (call, reason) => {
   coordinatorApp.log.warn({ taskId: call.taskId, subtaskId: call.subtaskId, agentId: call.agentId, reason }, "restricted_call_cancelled");
 });
 
+/** Run 21: the submit's size limits, by the field a refusal names. */
+export const SUBMIT_LIMITS = { messageChars: 400_000, messages: 2000, tools: 256, toolCallsPerMessage: 64 } as const;
+
+/**
+ * Run 21: a submit the schema refuses. Over a size limit (a message's content, the number of
+ * messages, tools or tool calls): 413 request_too_large, saying which limit and by how much; any
+ * other malformed field: 400 invalid_request. Nothing is reserved or charged either way.
+ */
+function invalidSubmitReply(reply: { code: (n: number) => { send: (b: unknown) => unknown } }, error: z.ZodError, raw: unknown) {
+  const tooBig = error.issues.find((i) => i.code === "too_big" && (i.path[0] === "messages" || i.path[0] === "tools"));
+  if (tooBig) {
+    const [field, index, sub, subIndex] = tooBig.path;
+    const msgs = (raw as { messages?: Array<{ content?: unknown; tool_calls?: unknown[] }> } | null)?.messages;
+    const tools = (raw as { tools?: unknown[] } | null)?.tools;
+    const fmt = (n: number) => n.toLocaleString("en-US");
+    let what: { limit: string; size: number; max: number; message: string };
+    if (field === "messages" && typeof index === "number" && sub === "content") {
+      const size = typeof msgs?.[index]?.content === "string" ? (msgs[index].content as string).length : 0;
+      what = { limit: "message_chars", size, max: SUBMIT_LIMITS.messageChars, message: `The prompt is too large: message ${index + 1} has ${fmt(size)} characters, the limit is ${fmt(SUBMIT_LIMITS.messageChars)} per message. Nothing was charged.` };
+    } else if (field === "messages" && typeof index === "number" && sub === "tool_calls") {
+      const size = Array.isArray(msgs?.[index]?.tool_calls) ? msgs[index].tool_calls!.length : 0;
+      what = { limit: "tool_calls", size, max: SUBMIT_LIMITS.toolCallsPerMessage, message: `Too many tool calls: message ${index + 1} has ${fmt(size)}, the limit is ${SUBMIT_LIMITS.toolCallsPerMessage} per message. Nothing was charged.` };
+    } else if (field === "messages" && subIndex === undefined && index === undefined) {
+      const size = Array.isArray(msgs) ? msgs.length : 0;
+      what = { limit: "messages", size, max: SUBMIT_LIMITS.messages, message: `Too many messages: ${fmt(size)}, the limit is ${fmt(SUBMIT_LIMITS.messages)}. Nothing was charged.` };
+    } else if (field === "tools") {
+      const size = Array.isArray(tools) ? tools.length : 0;
+      what = { limit: "tools", size, max: SUBMIT_LIMITS.tools, message: `Too many tools: ${fmt(size)}, the limit is ${SUBMIT_LIMITS.tools}. Nothing was charged.` };
+    } else {
+      what = { limit: tooBig.path.join("."), size: 0, max: Number((tooBig as { maximum?: unknown }).maximum ?? 0), message: `The request is too large (${tooBig.path.join(".")}). Nothing was charged.` };
+    }
+    return reply.code(413).send({ error: "request_too_large", ...what });
+  }
+  const first = error.issues[0];
+  return reply.code(400).send({ error: "invalid_request", message: `Invalid request: ${first ? `${first.path.join(".") || "body"}: ${first.message}` : "malformed body"}. Nothing was charged.`, issues: error.issues.slice(0, 5).map((i) => ({ path: i.path.join("."), code: i.code })) });
+}
+
 const inferenceSubmitSchema = z.object({
   taskId: z.string().min(1).max(200),
   submitterAccountId: z.string().min(1).max(200),
   model: z.string().min(1).max(200),
   // Ollama chat format: tool calls on assistant turns, tool results as role "tool".
   messages: z
-    .array(z.object({ role: z.enum(["system", "user", "assistant", "tool"]), content: z.string().max(400_000), tool_calls: z.array(z.unknown()).max(64).optional(), tool_name: z.string().max(200).optional() }))
+    .array(z.object({ role: z.enum(["system", "user", "assistant", "tool"]), content: z.string().max(SUBMIT_LIMITS.messageChars), tool_calls: z.array(z.unknown()).max(SUBMIT_LIMITS.toolCallsPerMessage).optional(), tool_name: z.string().max(200).optional() }))
     .min(1)
-    .max(2000),
-  tools: z.array(z.unknown()).max(256).optional(),
+    .max(SUBMIT_LIMITS.messages),
+  tools: z.array(z.unknown()).max(SUBMIT_LIMITS.tools).optional(),
   maxTokens: z.number().int().positive().max(32_768).optional(),
   temperature: z.number().min(0).max(2).optional(),
   computeClass: z.enum([...(ACCEPTED_COMPUTE_CLASS_IDS as [string, ...string[]]), "any"]).default("any"),
@@ -1275,7 +1312,12 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
   app.post("/inference/submit", { bodyLimit: 8 * 1024 * 1024 }, async (req, reply) => {
     // Run 17: the claim decision's window runs from here (armClaimDecision, auto-replace.ts).
     const receivedAtMs = Date.now();
-    const body = inferenceSubmitSchema.parse(req.body);
+    // Run 21: a request over a size limit (a prompt over 400,000 characters) was a zod throw, a 500
+    // (the portal showed 503): it is a clean 413 now, and any other malformed request a 400, both
+    // before anything is reserved.
+    const parsed = inferenceSubmitSchema.safeParse(req.body);
+    if (!parsed.success) return invalidSubmitReply(reply as any, parsed.error, req.body);
+    const body = parsed.data;
     // Frontier models run on their owner's own API key in their own IDE provider, never on the network.
     if (isFrontierModelId(body.model)) return reply.code(400).send({ error: "frontier_model_not_routable", message: "frontier/<provider>/<model> runs only on your own key on your own computer; the network never serves it." });
     const submitter = await resolveSubmitterAccount(req as any, body.submitterAccountId, "/inference/submit");
@@ -1310,9 +1352,19 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         const check = completionCheck(result.chosen.model, chosenClass, body.messages as ChatMessage[], body.tools, body.maxTokens, body.timeoutMs, Date.now(), { explore: !body.redirected, outputTokens: judgedOutput });
         req.log.info({ taskId: body.taskId, model: result.chosen.model, auto: true, pick, ...completionEstimateLog(check) }, "inference_completion_estimate");
         const fresh = check.exclude.filter((id) => !slowAgents.includes(id));
+        // Run 21 (inf-1795733394312-f30ff6e4: best fit picked qwen3-coder:30b, which had no slot this
+        // coordinator counts for the call, and the start-ETA check below refused it at submit while the
+        // cloud was 16/16 free): a pick that would not start in time is left out and best fit asked again.
+        const startLate = !check.exclude.includes(result.chosen.agentId) && result.chosen.computeClass !== "cloud"
+          ? startEtaOverLimit(result.chosen.model, chosenClass, contextNeeded(body.messages as ChatMessage[], body.tools, body.maxTokens ?? INFERENCE_DEFAULT_MAX_TOKENS), body.timeoutMs)
+          : null;
+        if (startLate) {
+          req.log.info({ taskId: body.taskId, model: result.chosen.model, computeClass: chosenClass, auto: true, ...startLate }, "inference_start_eta_over_limit");
+          if (!slowAgents.includes(result.chosen.agentId) && !fresh.includes(result.chosen.agentId)) fresh.push(result.chosen.agentId);
+        }
         slowAgents = [...slowAgents, ...fresh];
-        if (!check.exclude.includes(result.chosen.agentId)) break;
-        late = { etaMs: check.etaMs, limitMs: check.limitMs };
+        if (!check.exclude.includes(result.chosen.agentId) && !startLate) break;
+        late = startLate ? { etaMs: startLate.etaMs, limitMs: startLate.limitMs } : { etaMs: check.etaMs, limitMs: check.limitMs };
         if (pick + 1 >= AUTO_COMPLETION_PICKS || fresh.length === 0) {
           result = { ...result, chosen: null };
           break;
@@ -1329,10 +1381,15 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
           req.log.info({ taskId: body.taskId, model: last.result.chosen.model, slowAgents: slowAgents.length, ...(late ?? {}) }, "inference_completion_cloud_overflow");
           result = last.result;
           elsewhere = undefined;
+        } else if (!last.result.chosen && last.result.rejectedCode === "price" && last.result.cheapestCSats !== undefined) {
+          // Run 21: the cloud host could take it but costs more than the call's price ceiling: say so,
+          // with what it needs (a tentacle helper then waits for room and sends it again, #594, #621).
+          req.log.info({ taskId: body.taskId, slowAgents: slowAgents.length, neededCSats: last.result.cheapestCSats, maxCSats: job.maxCSats ?? null }, "inference_cloud_over_price_ceiling");
+          return noCapacityReply(reply as any, { reason: "price", model: AUTO_MODEL_ID, retryAfterSec: NO_CAPACITY_RETRY_AFTER_SEC, neededCSats: last.result.cheapestCSats });
         }
       }
       if (!result.chosen && slowAgents.length > 0) {
-        // Only machines that would not finish it in time: refused now, retryable, nothing reserved.
+        // Only machines that would not finish (or start) it in time: refused now, retryable, nothing reserved.
         req.log.info({ computeClass: onlyClass ?? null, slowAgents: slowAgents.length, ...(late ?? {}) }, "inference_completion_over_limit");
         return noCapacityReply(reply as any, { reason: "busy", model: AUTO_MODEL_ID, retryAfterSec: NO_CAPACITY_RETRY_AFTER_SEC, ...(late?.etaMs != null ? { completionEtaMs: late.etaMs } : {}), limitMs: late?.limitMs ?? Math.round(completionLimitMs(body.timeoutMs, CC.INFERENCE_COMPLETION_ETA_FRACTION)) });
       }
