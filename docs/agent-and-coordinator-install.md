@@ -192,13 +192,62 @@ Recommended:
 - keep coordinator sizing near `performance-2x / 8GB` for Ollama-local workloads
 - set `OLLAMA_AUTO_INSTALL=false` and pre-pull models
 
-Linux `systemd` managed coordinator option:
+Linux `systemd` managed coordinator option (Debian/Ubuntu). The commands run from a checkout of the
+repository, so clone it first:
+
+```bash
+git clone https://github.com/<your-org>/Edgecoder.git && cd Edgecoder
+```
+
+Either build and install the unit yourself:
 
 ```bash
 npm install
 npm run build
 sudo bash scripts/linux/systemd/install-systemd.sh coordinator "$(pwd)"
-sudo nano /etc/edgecoder/coordinator.env
+```
+
+or let the host bootstrap install Node.js, clone into `/opt/edgecoder/app`, build and install the unit:
+
+```bash
+sudo bash deploy/linux/bootstrap-host.sh coordinator https://github.com/<your-org>/Edgecoder.git main /opt/edgecoder/app
+```
+
+The installer copies `scripts/linux/systemd/coordinator.env.example` to `/etc/edgecoder/coordinator.env`
+and enables the unit. When it has just created that file from the template it does not start the
+service: the template's placeholders cannot run. Before the first start, set up:
+
+1. **A database.** A production coordinator needs its own Postgres (`DATABASE_URL`). On the same host:
+
+   ```bash
+   sudo apt-get install -y postgresql
+   sudo -u postgres psql -c "CREATE ROLE edgecoder LOGIN PASSWORD '<random>';" -c "CREATE DATABASE edgecoder OWNER edgecoder;"
+   # DATABASE_URL=postgres://edgecoder:<random>@127.0.0.1:5432/edgecoder
+   ```
+
+   The schema is created on first start. Set `BITCOIN_NETWORK` before that first start: the coordinator
+   records the ledger's network in the database and refuses to start later with a different one.
+
+2. **HTTPS.** The coordinator listens on `127.0.0.1:4301` (set `HOST` to change it) and has no TLS of
+   its own; agents and peers need `https://`. Put a reverse proxy in front, for example Caddy, which
+   gets a Let's Encrypt certificate by itself once ports 80 and 443 reach the host:
+
+   ```bash
+   sudo apt-get install -y caddy
+   printf '%s {\n\treverse_proxy 127.0.0.1:4301\n}\n' <your-coordinator-hostname> | sudo tee /etc/caddy/Caddyfile
+   sudo systemctl reload caddy
+   ```
+
+3. **The env file** (`sudo nano /etc/edgecoder/coordinator.env`): every value the template lists,
+   `NODE_ENV=production`, and a stable identity key. Without `COORDINATOR_PRIVATE_KEY_PEM` the
+   coordinator makes a new key on every restart. Generate one with
+   `openssl genpkey -algorithm ed25519` and put it in the env file as one double-quoted value over
+   several lines (`COORDINATOR_PRIVATE_KEY_PEM="-----BEGIN PRIVATE KEY-----` ... `-----END PRIVATE KEY-----"`);
+   systemd reads multi-line quoted values. Keep the file `chmod 600`, owned by `edgecoder`.
+
+Then start it:
+
+```bash
 sudo systemctl restart io.edgecoder.coordinator.service
 ```
 
@@ -207,14 +256,16 @@ Useful checks:
 ```bash
 sudo systemctl status io.edgecoder.coordinator.service
 sudo journalctl -u io.edgecoder.coordinator.service -f
+curl -s https://<your-coordinator-hostname>/identity     # public: peerId, fingerprint, trustEntry
 ```
 
-Coordinator host bootstrap:
+The `coordinator` role runs the coordinator only (`dist/swarm/coordinator.js`). The control plane,
+with `/network/coordinators` and the approval routes, runs in the all-in-one runtime (role `seed`,
+`EDGE_RUNTIME_MODE=all-in-one`); a `coordinator`-role host doesn't serve them.
 
-```bash
-sudo bash deploy/linux/bootstrap-host.sh coordinator https://github.com/<your-org>/Edgecoder.git main /opt/edgecoder/app
-sudo systemctl restart io.edgecoder.coordinator.service
-```
+An agent on a Linux host without Docker takes no work with the default `SANDBOX_MODE=docker`
+(its log says `pull skipped: sandbox_down`). To serve model calls only, set `SANDBOX_MODE=none` and
+`AGENT_INFERENCE_ONLY=1` in `/etc/edgecoder/agent.env`.
 
 ### 3) Approval
 
