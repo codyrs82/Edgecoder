@@ -678,10 +678,15 @@ export class TentacleManager {
   }
 
   /** Run 15: the session's budget can't start another helper: every queued one stops with the same message. */
-  private stopQueued(sessionId: string, st: SessionState): void {
+  /** Run 15/17: the one message for a helper the session's budget can't run (`what`: why this one stopped). */
+  private budgetSpentMessage(st: SessionState, what: string): string {
     const all = [...st.tentacles.values()];
     const ran = all.filter((x) => x.view.status === "passed" || x.view.status === "failed" || x.view.status === "error").length;
-    const why = `The session's tentacle budget is spent (${formatCSatsShort(st.spent)} of ${formatCSatsShort(st.config.budgetCSats)}) after ${ran} of ${all.length} helpers; this one did not start. Raise --tentacle-budget (EDGECODER_TENTACLES_BUDGET_CSATS) to run the rest.`;
+    return `The session's tentacle budget is spent (${formatCSatsShort(st.spent)} of ${formatCSatsShort(st.config.budgetCSats)}) after ${ran} of ${all.length} helpers; ${what}. Raise --tentacle-budget (EDGECODER_TENTACLES_BUDGET_CSATS) to run the rest.`;
+  }
+
+  private stopQueued(sessionId: string, st: SessionState): void {
+    const why = this.budgetSpentMessage(st, "this one did not start");
     const ids = st.queue.splice(0);
     for (const id of ids) {
       const t = st.tentacles.get(id);
@@ -721,8 +726,40 @@ export class TentacleManager {
       this.progress(sessionId, t, small);
     }
     // Run 15: within what the session has left after the other running helpers' budgets (pump).
-    const budget = Math.max(0, Math.min(t.spec.budgetCSats ?? cfg.perTentacleCSats, cfg.budgetCSats - st.spent - committedBudget(st)));
+    // Run 17: grows (growBudget) when the network says the cheapest fitting model needs more than is left of it.
+    let budget = Math.max(0, Math.min(t.spec.budgetCSats ?? cfg.perTentacleCSats, cfg.budgetCSats - st.spent - committedBudget(st)));
     t.budget = budget;
+    /**
+     * Network run 17 (tbe07b4a): the cheapest model that fits a call (`want`) costs more than is left
+     * of this helper's budget. Take the difference from the session's budget nobody has set aside
+     * ("ok"); else, while other helpers run, wait for what they give back ("wait"); else nothing can
+     * cover it ("stop").
+     */
+    const growBudget = (want: number): "ok" | "wait" | "stop" => {
+      const extra = round(want - (budget - t.spent));
+      if (extra <= 0) return "ok";
+      const free = round(cfg.budgetCSats - st.spent - committedBudget(st));
+      if (extra <= free) {
+        budget = round(budget + extra);
+        t.budget = budget;
+        return "ok";
+      }
+      const othersRunning = [...st.tentacles.values()].some((x) => x !== t && (x.view.status === "running" || x.view.status === "verifying"));
+      return othersRunning ? "wait" : "stop";
+    };
+    /** Resolves when another helper finishes (it gives back what it didn't spend), or after `ms`. */
+    const helperFinished = (ms: number) =>
+      new Promise<void>((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          st.waiters.delete(done);
+          t.abort.signal.removeEventListener("abort", done);
+          resolve();
+        };
+        const timer = setTimeout(done, ms);
+        st.waiters.add(done);
+        t.abort.signal.addEventListener("abort", done, { once: true });
+      });
     let ws: Workspace | null = null;
     const started = Date.now();
     const tokens = { prompt: 0, output: 0 };
@@ -797,6 +834,8 @@ export class TentacleManager {
         checks.length = 0;
         let budgetHit = false;
         let budgetWhy = "";
+        // Run 17: the session's budget can't cover the cheapest fitting model: this exact message is the error.
+        let budgetSpent: string | undefined;
         let holdKey: number | undefined;
         // Run 12: what the network said the cheapest fitting model needs (a "price" refusal): calls wait for that much room.
         let needCSats: number | undefined;
@@ -860,6 +899,21 @@ export class TentacleManager {
             if (balanceWait) {
               balanceWait = false;
               if (st.holds.total() > 0 && !t.abort.signal.aborted) await st.holds.released(30_000, t.abort.signal);
+            }
+            // Run 17: the network said the cheapest fitting model needs more than this helper has left:
+            // grow its budget from the session's (waiting for other helpers to give some back), or stop
+            // with the session's one "budget is spent" message instead of a per-call ceiling error.
+            while (needCSats !== undefined && !t.abort.signal.aborted) {
+              const g = growBudget(needCSats);
+              if (g === "ok") break;
+              if (g === "wait") {
+                this.progress(sessionId, t, `waiting for budget: the cheapest model that fits needs about ${formatCSatsShort(needCSats)}`);
+                await helperFinished(60_000);
+                continue;
+              }
+              budgetHit = true;
+              budgetSpent = this.budgetSpentMessage(st, `what is left can't cover the cheapest model that fits this helper's call (about ${formatCSatsShort(needCSats)})`);
+              throw new Error(budgetSpent);
             }
             for (;;) {
               const ceiling = Math.min(balanceCap, helperCallCeiling({ tentacleLeft: budget - t.spent, sessionLeft: cfg.budgetCSats - st.spent, heldByOthers: st.holds.total() }));
@@ -925,7 +979,10 @@ export class TentacleManager {
               ? {
                   onPriceRefusal: (need: number) => {
                     const want = Number((need * 1.05).toFixed(6));
-                    if (want > budget - t.spent || (needCSats !== undefined && want <= needCSats)) return false;
+                    // Refused again for no more than was already allowed for: something else is wrong.
+                    if (needCSats !== undefined && want <= needCSats) return false;
+                    // Run 17: more than this helper has left is fine: hints() grows its budget from the
+                    // session's, or stops it with the session's message (growBudget).
                     needCSats = want;
                     return true;
                   },
@@ -1013,7 +1070,7 @@ export class TentacleManager {
           break; // never retried
         }
         if (budgetHit) {
-          const stopped = budgetWhy ? `The tentacle stopped before a call: ${budgetWhy}.` : `The tentacle's budget ran out (${formatCSatsShort(budget)}).`;
+          const stopped = budgetSpent ?? (budgetWhy ? `The tentacle stopped before a call: ${budgetWhy}.` : `The tentacle's budget ran out (${formatCSatsShort(budget)}).`);
           // Run 14 (t482bda9): stopped at the session's budget with its file written; the lead applied
           // the patch by hand. A patch is checked like a finished one: passed, it merges as usual (or
           // waits for approval when unverified); failed, it is offered for approval (finish).

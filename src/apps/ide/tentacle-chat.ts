@@ -87,7 +87,7 @@ export function hintedChat(
           // Run 12: refused for its price ceiling before anything ran: once more, with a ceiling that
           // covers what the network said the cheapest fitting model needs (hints() waits for room).
           const need = priceRefusalNeed(err);
-          if (need !== undefined && !content && !toolCalls.length && !signal.aborted && priceRetries < 2 && o.onPriceRefusal?.(need)) {
+          if (need !== undefined && !content && !toolCalls.length && !signal.aborted && priceRetries < 4 && o.onPriceRefusal?.(need)) {
             priceRetries++;
             h = await hints();
             guard?.();
