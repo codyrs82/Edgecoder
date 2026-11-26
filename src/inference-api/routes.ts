@@ -115,16 +115,35 @@ function edgeSafe(status: number): number {
   return status === 502 || status === 504 ? 503 : status;
 }
 
+/**
+ * Why a call could not start, as data (ChatBackendError.info: code, reason, neededCSats, computeClass),
+ * sent as `edgecoder` inside the error. Run 13: a hosted helper (`edgecoder code` with an API key)
+ * only got the message, so a price refusal ("every fitting model costs more than the 1.237 cSats
+ * ceiling") could not wait for room in the session's budget, and the helper failed.
+ */
+export type ErrorInfo = { code: string; reason?: string; neededCSats?: number; computeClass?: string };
+export function errorInfoOf(err: unknown): ErrorInfo | undefined {
+  const info = err instanceof ChatBackendError ? err.info : undefined;
+  if (!info || typeof info.code !== "string" || !info.code) return undefined;
+  return {
+    code: info.code.slice(0, 60),
+    ...(typeof info.reason === "string" ? { reason: info.reason.slice(0, 40) } : {}),
+    ...(typeof info.neededCSats === "number" && Number.isFinite(info.neededCSats) ? { neededCSats: info.neededCSats } : {}),
+    ...(typeof info.computeClass === "string" ? { computeClass: info.computeClass.slice(0, 40) } : {}),
+  };
+}
+const withInfo = (info?: ErrorInfo) => (info ? { edgecoder: info } : {});
+
 /** A non-streamed reply's error body once 200 has been committed (see WholeKeepalive). */
-function wholeError(format: Format, rawStatus: number, message: string, openAiType?: string): string {
+function wholeError(format: Format, rawStatus: number, message: string, openAiType?: string, info?: ErrorInfo): string {
   const status = edgeSafe(rawStatus);
   if (status !== rawStatus) openAiType ??= "upstream_error";
   return format === "anthropic"
-    ? JSON.stringify({ type: "error", error: { type: anthropicErrorType(status), message } })
-    : JSON.stringify({ error: { message, type: openAiType ?? openAiErrorType(status), code: status } });
+    ? JSON.stringify({ type: "error", error: { type: anthropicErrorType(status), message, ...withInfo(info) } })
+    : JSON.stringify({ error: { message, type: openAiType ?? openAiErrorType(status), code: status, ...withInfo(info) } });
 }
 
-function sendError(reply: FastifyReply, format: Format, rawStatus: number, message: string, retryAfterSec?: number, openAiType?: string) {
+function sendError(reply: FastifyReply, format: Format, rawStatus: number, message: string, retryAfterSec?: number, openAiType?: string, info?: ErrorInfo) {
   const status = edgeSafe(rawStatus);
   if (status !== rawStatus) {
     retryAfterSec ??= UPSTREAM_ERROR_RETRY_AFTER_SEC;
@@ -132,15 +151,15 @@ function sendError(reply: FastifyReply, format: Format, rawStatus: number, messa
   }
   if (retryAfterSec !== undefined && (status === 429 || status === 503)) reply.header("retry-after", String(Math.max(1, Math.ceil(retryAfterSec))));
   return format === "anthropic"
-    ? reply.code(status).send({ type: "error", error: { type: anthropicErrorType(status), message } })
-    : reply.code(status).send({ error: { message, type: openAiType ?? openAiErrorType(status), code: status } });
+    ? reply.code(status).send({ type: "error", error: { type: anthropicErrorType(status), message, ...withInfo(info) } })
+    : reply.code(status).send({ error: { message, type: openAiType ?? openAiErrorType(status), code: status, ...withInfo(info) } });
 }
 
 /** An error inside a stream that has already started (status 200 sent): the format's error event. */
-function streamError(format: Format, status: number, message: string, openAiType?: string): string {
+function streamError(format: Format, status: number, message: string, openAiType?: string, info?: ErrorInfo): string {
   return format === "anthropic"
-    ? `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: anthropicErrorType(status), message } })}\n\n`
-    : `data: ${JSON.stringify({ error: { message, type: openAiType ?? openAiErrorType(status), code: status } })}\n\ndata: [DONE]\n\n`;
+    ? `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: anthropicErrorType(status), message, ...withInfo(info) } })}\n\n`
+    : `data: ${JSON.stringify({ error: { message, type: openAiType ?? openAiErrorType(status), code: status, ...withInfo(info) } })}\n\ndata: [DONE]\n\n`;
 }
 
 /** What a request still open when the server stops is told (the client may send it again). */
@@ -326,12 +345,12 @@ export async function respondWith(req: FastifyRequest, reply: FastifyReply, form
       firstPieceMs = Date.now() - startedMs;
       noteFailure(err);
       if (finished) return reply;
-      if (whole) return endWhole(wholeError(format, statusOf(err), (err as Error).message));
+      if (whole) return endWhole(wholeError(format, statusOf(err), (err as Error).message, undefined, errorInfoOf(err)));
       if (!streaming) {
         finished = true;
-        return sendError(reply, format, statusOf(err), (err as Error).message, retryAfterOf(err));
+        return sendError(reply, format, statusOf(err), (err as Error).message, retryAfterOf(err), undefined, errorInfoOf(err));
       }
-      write(streamError(format, statusOf(err), (err as Error).message));
+      write(streamError(format, statusOf(err), (err as Error).message, undefined, errorInfoOf(err)));
       end();
       return reply;
     }
@@ -351,10 +370,10 @@ export async function respondWith(req: FastifyRequest, reply: FastifyReply, form
       } catch (err) {
         noteFailure(err);
         if (finished) return reply;
-        if (whole) return endWhole(wholeError(format, statusOf(err), (err as Error).message));
+        if (whole) return endWhole(wholeError(format, statusOf(err), (err as Error).message, undefined, errorInfoOf(err)));
         stopWhole();
         finished = true;
-        return sendError(reply, format, statusOf(err), (err as Error).message, retryAfterOf(err));
+        return sendError(reply, format, statusOf(err), (err as Error).message, retryAfterOf(err), undefined, errorInfoOf(err));
       }
       if (finished) return reply;
       if (whole) return endWhole(JSON.stringify(answer));
@@ -370,7 +389,7 @@ export async function respondWith(req: FastifyRequest, reply: FastifyReply, form
       }
     } catch (err) {
       noteFailure(err);
-      write(streamError(format, statusOf(err), (err as Error).message));
+      write(streamError(format, statusOf(err), (err as Error).message, undefined, errorInfoOf(err)));
     }
     end();
     return reply;

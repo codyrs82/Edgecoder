@@ -250,3 +250,21 @@ describe("locality and warm models (network test run 2, B1)", () => {
   });
 });
 
+
+describe("run 13: fra/lhr buyers sent on to the US coordinator went to jnb because nearer hosts were busy", () => {
+  // inf-1795669456036-5273e41d (fra buyer): the EU hosts fra and lhr had been taken 170 ms before by two
+  // other EU buyers of the same burst (inf-1795669455694-382ae56b, -b68cc4ec), so the EU coordinator sent
+  // it on (route_elsewhere). On the US coordinator iad and lax had been claimed 170-200 ms before by the
+  // iad/lax buyers. Free there: gru, sin, nrt, syd, jnb. Every lhr->jnb hold in ramp B had iad and lax busy too.
+  const usFree = ["gru", "sin", "nrt", "syd", "jnb"].map((r) => ({ agentId: `ec-${r}`, free: 1, slots: 1, region: r }));
+
+  test("jnb is then the free US host nearest a fra or lhr buyer (the region coordinates are right)", () => {
+    expect(locality.nearestFreeHolder(usFree, "fra", MODEL)?.agentId).toBe("ec-jnb");
+    expect(locality.nearestFreeHolder(usFree, "lhr", MODEL)?.agentId).toBe("ec-jnb");
+    // With iad or lax free, that one.
+    expect(locality.nearestFreeHolder([...usFree, { agentId: "ec-iad", free: 1, slots: 1, region: "iad" }], "fra", MODEL)?.agentId).toBe("ec-iad");
+    expect(locality.nearestFreeHolder([...usFree, { agentId: "ec-lax", free: 1, slots: 1, region: "lax" }], "lhr", MODEL)?.agentId).toBe("ec-lax");
+    // ramp B, inf-1795671345733-1d7d2a7a (syd buyer; sin, nrt, syd, gru, lax busy): jnb before iad.
+    expect(locality.nearestFreeHolder([{ agentId: "ec-jnb", free: 1, slots: 1, region: "jnb" }, { agentId: "ec-iad", free: 1, slots: 1, region: "iad" }], "syd", MODEL)?.agentId).toBe("ec-jnb");
+  });
+});

@@ -177,6 +177,26 @@ export function describeTentacle(t: TentacleView): Record<string, unknown> {
   return out;
 }
 
+/**
+ * Network run 13: what the session's tentacle budget left covers, said when a helper is delegated
+ * (the lead passes it on before the helpers run), or null when it covers every helper not finished.
+ * With helpers finished (and paid), at their average cost; before that, at each helper's own budget
+ * (`perTentacle`), the most one may spend. Helpers share the budget and wait for room in it, so a
+ * shortfall here is a warning, not a refusal: the helpers left when it is spent stop with "budget reached".
+ */
+export function budgetCoverage(o: { left: number; open: number; perTentacle: number; average?: number }): string | null {
+  const left = Math.max(0, o.left);
+  if (o.open <= 0) return null;
+  if (o.average !== undefined && o.average > 0) {
+    const k = Math.floor(left / o.average);
+    if (k >= o.open) return null;
+    return `At this session's average of ${formatCSatsShort(o.average)} a helper, that covers about ${k} of the ${o.open} helpers not finished; the rest stop with "budget reached". Tell the user, and raise the session's tentacle budget or do the rest yourself if every helper must run.`;
+  }
+  if (!(o.perTentacle > 0) || o.open * o.perTentacle <= left) return null;
+  const k = Math.floor(left / o.perTentacle);
+  return `The ${o.open} helpers not finished may each spend up to ${formatCSatsShort(o.perTentacle)} (${formatCSatsShort(o.open * o.perTentacle)} in all): the budget left covers ${k} at that most, and they share it (a helper waits for room). If it runs out, the helpers left stop with "budget reached": tell the user.`;
+}
+
 /** Answer a tentacle tool call for `sessionId`; other tools go to `inner`. */
 export function tentacleExecutor(manager: TentacleManager, sessionId: string, inner: ToolRunnerDeps["execute"]): ToolRunnerDeps["execute"] {
   return async (tool: ToolName, args, opts) => {
@@ -186,8 +206,16 @@ export function tentacleExecutor(manager: TentacleManager, sessionId: string, in
         const spec = parseDelegateArgs(args);
         const v = manager.delegate(sessionId, spec);
         const cfg = manager.config(sessionId);
-        const left = cfg.budgetCSats - manager.list(sessionId).spentCSats;
-        return { result: JSON.stringify({ id: v.id, status: v.status, note: `Started. ${formatCSatsShort(Math.max(0, left))} of the session's tentacle budget left. Collect it with await_tentacles.` }) };
+        const listed = manager.list(sessionId);
+        const left = cfg.budgetCSats - listed.spentCSats;
+        const done = listed.tentacles.filter((t) => (t.status === "passed" || t.status === "failed" || t.status === "error") && t.cSats > 0);
+        const cover = budgetCoverage({
+          left,
+          open: listed.tentacles.filter((t) => t.status === "queued" || t.status === "running" || t.status === "verifying").length,
+          perTentacle: cfg.perTentacleCSats,
+          ...(done.length ? { average: done.reduce((n, t) => n + t.cSats, 0) / done.length } : {}),
+        });
+        return { result: JSON.stringify({ id: v.id, status: v.status, note: `Started. ${formatCSatsShort(Math.max(0, left))} of the session's tentacle budget left.${cover ? ` ${cover}` : ""} Collect it with await_tentacles.` }) };
       }
       if (tool === "await_tentacles") {
         const ids = Array.isArray(args.ids) ? args.ids.filter((x): x is string => typeof x === "string") : typeof args.ids === "string" && args.ids ? args.ids.split(/[,\s]+/).filter(Boolean) : undefined;

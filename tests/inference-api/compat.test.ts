@@ -137,6 +137,18 @@ describe("compatible routes", () => {
       expect(a.json()).toMatchObject({ type: "error", error: { type: "overloaded_error" } });
     });
 
+    it("run 13: a call refused for its price ceiling says so as data (code, reason, neededCSats), for hosted helpers to wait for room", async () => {
+      const refused: ChatBackend = async function* () {
+        throw new ChatBackendError("No model on the network fits this request: every fitting model costs more than the 1.237 cSats ceiling (the cheapest, deepseek-v4.1-flash on cloud, is about 3.901 cSats).", 404, undefined, { code: "no_route_fits", reason: "price", neededCSats: 3.901, computeClass: "cloud" });
+      };
+      const app = makeWith(refused);
+      const o = await app.inject({ method: "POST", url: "/v1/chat/completions", headers: { authorization: "Bearer k" }, payload: { stream: true, messages: [{ role: "user", content: "x" }] } });
+      expect(o.statusCode).toBe(404);
+      expect(o.json().error).toMatchObject({ code: 404, edgecoder: { code: "no_route_fits", reason: "price", neededCSats: 3.901, computeClass: "cloud" } });
+      // An error without data is as before.
+      expect((await makeWith(busy()).inject({ method: "POST", url: "/v1/chat/completions", headers: { authorization: "Bearer k" }, payload: { messages: [{ role: "user", content: "x" }] } })).json().error.edgecoder).toBeUndefined();
+    });
+
     it("answers an upstream 502/504 as a JSON 503 (Cloudflare would replace a 502 with its own page)", async () => {
       const agentFailed: ChatBackend = async function* () {
         throw new ChatBackendError("The machine running deepseek-v4.1-flash reported: empty_reply", 502);
