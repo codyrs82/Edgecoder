@@ -41,6 +41,7 @@ import { createCoordinatorClient, CoordinatorResponseRejectedError, type Coordin
 import { ResponseVerifier, responseSigningPolicyFromEnv } from "../trust/response-signing.js";
 import { checkSnapshotPolicy, envelopeResultPayload, parseSnapshotEnforcement } from "./execution-policy.js";
 import { DIRECT_WORK_MARKET_HINT, isOwnAccountCall, workerAcceptsDirectWorkOffer } from "./direct-work-policy.js";
+import { MeshConnectBackoff } from "./mesh-connect-backoff.js";
 import { BleRequestGuard, bleRequestProof } from "../mesh/ble/ble-request-guard.js";
 import { selectCoordinatorFromEnv } from "../discovery/index.js";
 import { createCoordinatorSteering, registryUrlsFor, type SteeringResult } from "../discovery/steering.js";
@@ -525,6 +526,8 @@ const envelopeKeys = generateX25519KeyPair();
 const peerTunnels = new Map<string, string>();
 const peerOfferCooldownMs = W.PEER_OFFER_COOLDOWN_MS;
 const lastOfferAtByPeer = new Map<string, number>();
+/** /agent-mesh/connect targets, with an hour's back-off from peers the coordinator refused. */
+const meshConnectBackoff = new MeshConnectBackoff();
 /** Direct-work offers already refused (logged once each). */
 const refusedDirectOffers = new Set<string>();
 let peerWorkCursor = 0;
@@ -2385,11 +2388,16 @@ async function loop(): Promise<void> {
           const idlePeersResponse = await coordinatorGet(`/agent-mesh/peers/${AGENT_ID}`);
           if (idlePeersResponse.statusCode >= 200 && idlePeersResponse.statusCode < 300) {
             const peersJson = (await parseJsonBodySafe(idlePeersResponse)) as { peers?: string[] };
-            for (const peerId of (peersJson.peers ?? []).slice(0, 2)) {
-              if (blacklistSet.has(peerId)) continue;
-              if (peerId === AGENT_ID) continue;
-              if (peerTunnels.has(peerId)) continue;
+            const targets = meshConnectBackoff.pick(peersJson.peers ?? [], {
+              self: AGENT_ID,
+              nowMs: Date.now(),
+              blacklisted: (id) => blacklistSet.has(id),
+              hasTunnel: (id) => peerTunnels.has(id)
+            });
+            for (const peerId of targets) {
               const connect = await signedJsonPost("/agent-mesh/connect", { fromAgentId: AGENT_ID, toAgentId: peerId });
+              // 403: another account's agent (or no verified account); skip it for an hour.
+              meshConnectBackoff.note(peerId, connect.statusCode, Date.now());
               if (connect.statusCode >= 200 && connect.statusCode < 300) {
                 const body = (await parseJsonBodySafe(connect)) as { token?: string };
                 if (body.token) peerTunnels.set(peerId, body.token);
