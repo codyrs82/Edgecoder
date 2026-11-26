@@ -219,3 +219,51 @@ describe("routing facts (perf) between coordinators", () => {
     expect("perf" in pub.agents[0]).toBe(false);
   });
 });
+
+describe("agents known to two coordinators", () => {
+  const ids = (pub: ReturnType<typeof toPublicWorld>) => pub.agents.map((a) => a.coordinatorId);
+  const coord = (pub: ReturnType<typeof toPublicWorld>, id: string) => pub.coordinators.find((c) => c.id === id)!;
+
+  it("drops the stale copy when the agent is live elsewhere, even if the stale copy was seen later", () => {
+    const us = world("coord-us", "https://us.example", [facts("ec-st6-fra", { connected: false, lastSeenMs: NOW - 500 })]);
+    const eu = world("coord-eu", "https://eu.example", [facts("ec-st6-fra", { lastSeenMs: NOW - 2_000 })]);
+    for (const [self, peer] of [[us, eu], [eu, us]] as const) {
+      const pub = toPublicWorld(self, [{ url: peer.coordinator.url, id: peer.coordinator.id, world: peer, rttMs: 80 }], null, NOW);
+      expect(ids(pub)).toEqual(["coord-eu"]);
+      expect(pub.agents[0].status).toBe("idle");
+      expect(coord(pub, "coord-us")).toMatchObject({ agents: 0, agentsOnline: 0 });
+      expect(coord(pub, "coord-eu")).toMatchObject({ agents: 1, agentsOnline: 1 });
+      expect(pub.totals).toMatchObject({ agents: 1, online: 1 });
+    }
+  });
+
+  it("keeps the most recently seen copy when the agent is stale everywhere", () => {
+    const us = world("coord-us", "https://us.example", [facts("ec-st5-lhr", { connected: false, lastSeenMs: NOW - 600_000 })]);
+    const eu = world("coord-eu", "https://eu.example", [facts("ec-st5-lhr", { connected: false, lastSeenMs: NOW - 300_000 })]);
+    const pub = toPublicWorld(us, [{ url: "https://eu.example", id: "coord-eu", world: eu, rttMs: 80 }], null, NOW);
+    expect(ids(pub)).toEqual(["coord-eu"]);
+    expect(pub.agents[0].status).toBe("stale");
+    expect(coord(pub, "coord-us").agents).toBe(0);
+    expect(coord(pub, "coord-eu")).toMatchObject({ agents: 1, agentsOnline: 0 });
+    expect(pub.totals).toMatchObject({ agents: 1, online: 0 });
+  });
+
+  it("keeps one copy, the one seen last, when the agent is live on both", () => {
+    const us = world("coord-us", "https://us.example", [facts("ec-st6-fra", { lastSeenMs: NOW - 5_000 })]);
+    const eu = world("coord-eu", "https://eu.example", [facts("ec-st6-fra", { claims: 1, lastSeenMs: NOW - 1_000 })]);
+    const pub = toPublicWorld(us, [{ url: "https://eu.example", id: "coord-eu", world: eu, rttMs: 80 }], null, NOW);
+    expect(ids(pub)).toEqual(["coord-eu"]);
+    expect(pub.agents[0].status).toBe("busy");
+    expect(coord(pub, "coord-us").agents).toBe(0);
+    expect(pub.totals).toMatchObject({ agents: 1, online: 1, busy: 1 });
+  });
+
+  it("keeps the mine marking on the surviving copy", () => {
+    const us = world("coord-us", "https://us.example", [facts("ec-st6-fra", { ownerAccountId: "acct-1", connected: false, lastSeenMs: NOW - 500 })]);
+    const eu = world("coord-eu", "https://eu.example", [facts("ec-st6-fra", { ownerAccountId: "acct-1" })]);
+    const pub = toPublicWorld(us, [{ url: "https://eu.example", id: "coord-eu", world: eu, rttMs: 80 }], "acct-1", NOW);
+    expect(pub.agents).toHaveLength(1);
+    expect(pub.agents[0]).toMatchObject({ mine: true, name: "ec-st6-fra", coordinatorId: "coord-eu" });
+    expect(pub.totals.mine).toBe(1);
+  });
+});

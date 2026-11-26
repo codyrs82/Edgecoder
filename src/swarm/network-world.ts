@@ -340,6 +340,14 @@ function agentActivity(callsNow: unknown, streaming: unknown, callsPerMin: unkno
 }
 
 const STATUS_ORDER: Record<WorldStatus, number> = { busy: 0, idle: 1, stale: 2 };
+
+/** True when copy `a` of an agent should replace copy `b` in the merged view (live beats stale, then latest seen). */
+export function preferAgentCopy(a: LocalWorldAgent, b: LocalWorldAgent): boolean {
+  const aLive = a.status !== "stale";
+  const bLive = b.status !== "stale";
+  if (aLive !== bLive) return aLive;
+  return a.lastSeenMs > b.lastSeenMs;
+}
 const REQUEST_ORDER: Record<WorldRequestState, number> = { streaming: 0, starting: 1, queued: 2 };
 
 /**
@@ -383,12 +391,14 @@ export function toPublicWorld(
   };
   takeRequests(self);
 
-  // An agent known to two coordinators (it moved) is shown where it was seen last.
+  // An agent known to two coordinators (it moved) is shown once: a live copy (idle or busy) always
+  // wins over a stale one wherever each was seen, so a coordinator it left cannot show it twice;
+  // between two live or two stale copies, the one seen last wins.
   const byAgent = new Map<string, LocalWorldAgent>();
   const take = (a: LocalWorldAgent) => {
     if (nowMs - a.lastSeenMs > WORLD_AGENT_TTL_MS) return;
     const prev = byAgent.get(a.agentId);
-    if (!prev || a.lastSeenMs > prev.lastSeenMs) byAgent.set(a.agentId, a);
+    if (!prev || preferAgentCopy(a, prev)) byAgent.set(a.agentId, a);
   };
   self.agents.forEach(take);
 
