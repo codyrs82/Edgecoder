@@ -32,12 +32,11 @@ import { resultModelMismatch } from "../../model-catalog.js";
 import { evaluateAgentPowerPolicy, iosAgentNotCharging } from "../../power-policy.js";
 import {
   createTaskEnvelope,
-  decryptResult as decryptEnvelopeResult,
-  rederiveEnvelopeSharedKey,
   type EncryptedResult,
   type TaskEnvelope
 } from "../../../security/envelope.js";
 import { envelopePolicyAllows, envelopeStats } from "../../envelope-policy.js";
+import { envelopeResultKeyCandidates, openEnvelopeResult } from "../../envelope-result-keys.js";
 import { rawBodyOf } from "../../../security/request-signing.js";
 import { lateResultRejectionDurable } from "../../lease-gate.js";
 import type { CoordinatorApp } from "../app.js";
@@ -459,7 +458,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
           { rootSecret: ENVELOPE_ROOT_SECRET }
         );
         envelope = built.envelope;
-        envelopeSharedKeys.set(task.id, { key: built.sharedKey, createdAtMs: Date.now() });
+        envelopeSharedKeys.set(task.id, { key: built.sharedKey, createdAtMs: Date.now(), agentId: body.agentId });
         const now = Date.now();
         for (const [sid, entry] of envelopeSharedKeys) {
           if (now - entry.createdAtMs > ENVELOPE_KEY_TTL_MS) envelopeSharedKeys.delete(sid);
@@ -550,37 +549,46 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
 
     // Check if this is an encrypted envelope result
     const isEncrypted = typeof rawBody.subtaskId === "string" && typeof rawBody.encryptedPayload === "string";
-    let sharedKey = isEncrypted ? envelopeSharedKeys.get(rawBody.subtaskId as string)?.key : undefined;
-    if (isEncrypted && !sharedKey) {
-      // Not cached (this coordinator restarted since the claim, or the cache entry expired): the
-      // key is re-derived from the coordinator's envelope root and the agent's registered key. A
-      // restarted coordinator has the agent's key again once it re-registers, which it must do
-      // before its signed result is accepted at all.
-      const agentId = verified ? verified.agentId : typeof rawBody.agentId === "string" ? rawBody.agentId : undefined;
-      const agentX25519 = agentId ? agentCapabilities.get(agentId)?.x25519PublicKey : undefined;
-      if (agentX25519) {
-        try {
-          sharedKey = rederiveEnvelopeSharedKey(ENVELOPE_ROOT_SECRET, rawBody.subtaskId as string, Buffer.from(agentX25519, "base64"));
-          envelopeStats.rederived += 1;
-        } catch {
-          sharedKey = undefined;
-        }
-      }
-    }
     let body: z.infer<typeof resultSchema>;
     let envelopeKey: Buffer | undefined;
-    if (isEncrypted && !sharedKey) {
-      envelopeStats.decryptFailed += 1;
-      app.log.error({ subtaskId: rawBody.subtaskId }, "envelope_result_key_unavailable");
-      return reply.code(400).send({ error: "envelope_decrypt_failed" });
-    }
-    if (sharedKey && isEncrypted) {
+    if (isEncrypted) {
+      // The key for the agent that sent the result (src/swarm/envelope-result-keys.ts): the cached
+      // one only if it was made for this agent's claim, else re-derived from the coordinator's
+      // envelope root and the agent's registered key (a restart, an expired cache entry, or another
+      // agent's later claim on the same subtask). A restarted coordinator has the agent's key again
+      // once it re-registers, which it must do before its signed result is accepted at all.
+      const subtaskId = rawBody.subtaskId as string;
+      const agentId = verified ? verified.agentId : typeof rawBody.agentId === "string" ? rawBody.agentId : undefined;
+      const cached = envelopeSharedKeys.get(subtaskId);
+      const candidates = envelopeResultKeyCandidates({
+        cached,
+        subtaskId,
+        agentId,
+        agentX25519: agentId ? agentCapabilities.get(agentId)?.x25519PublicKey : undefined,
+        rootSecret: ENVELOPE_ROOT_SECRET
+      });
+      // What the logs need to tell a stale or foreign key from a corrupt result.
+      const diag = () => ({ subtaskId, agentId, claimant: queue.getClaim(subtaskId)?.claimedBy ?? null, cachedFor: cached ? cached.agentId ?? "unknown" : null, payloadBytes: (rawBody.encryptedPayload as string).length });
+      if (candidates.length === 0) {
+        envelopeStats.decryptFailed += 1;
+        app.log.error(diag(), "envelope_result_key_unavailable");
+        return reply.code(400).send({ error: "envelope_decrypt_failed" });
+      }
+      const opened = openEnvelopeResult(rawBody as unknown as EncryptedResult, candidates);
+      if (!opened.ok) {
+        // Still refused: no key this agent shares for the subtask authenticates it. The claim is
+        // left as it is (nothing is re-queued here), so the claimant may send it again.
+        envelopeStats.decryptFailed += 1;
+        app.log.error({ ...diag(), tried: opened.tried, error: opened.error }, "envelope_result_decrypt_failed");
+        return reply.code(400).send({ error: "envelope_decrypt_failed" });
+      }
+      if (opened.source === "rederived") envelopeStats.rederived += 1;
+      // Only this agent's own cache entry is spent; another agent's later claim keeps its key.
+      if (opened.source === "cache") envelopeSharedKeys.delete(subtaskId);
+      envelopeKey = opened.key;
       try {
-        const decrypted = decryptEnvelopeResult(rawBody as unknown as EncryptedResult, sharedKey);
-        envelopeSharedKeys.delete(rawBody.subtaskId as string);
-        envelopeKey = sharedKey;
         body = resultSchema.parse({
-          ...decrypted,
+          ...opened.result,
           subtaskId: rawBody.subtaskId,
           taskId: rawBody.taskId,
           agentId: rawBody.agentId,
@@ -589,12 +597,12 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
           model: rawBody.model,
           receipt: rawBody.receipt,
         });
-        app.log.info({ subtaskId: body.subtaskId }, "result_decrypted_from_envelope");
-      } catch (decryptErr) {
+      } catch (parseErr) {
         envelopeStats.decryptFailed += 1;
-        app.log.error({ subtaskId: rawBody.subtaskId, error: String(decryptErr) }, "envelope_result_decrypt_failed");
+        app.log.error({ ...diag(), error: String(parseErr) }, "envelope_result_invalid");
         return reply.code(400).send({ error: "envelope_decrypt_failed" });
       }
+      app.log.info({ subtaskId: body.subtaskId, ...(opened.source === "rederived" ? { key: "rederived" } : {}) }, "result_decrypted_from_envelope");
     } else {
       body = resultSchema.parse(rawBody);
     }
@@ -619,14 +627,14 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       }
       // A model call nobody else has taken since, within the grace (results.ts LATE_RESULT_GRACE_MS):
       // the claim goes back to this agent and its result is settled (paid once) like an on-time one.
-      if (!ownRequest || !reclaimLateInferenceResult(body.subtaskId, body.agentId)) return reply.code(late.statusCode).send(late.body);
+      if (!ownRequest || !reclaimLateInferenceResult(body.subtaskId, body.agentId, Date.now(), { completedResult: body.ok })) return reply.code(late.statusCode).send(late.body);
       clearClaimDeadline(body.subtaskId);
       app.log.info({ subtaskId: body.subtaskId, agentId: body.agentId }, "late_result_accepted");
     }
     // ── #44: claim ownership, before anything is recorded ──
     let claim = queue.getClaim(body.subtaskId);
     // The lease lapsed just now (this lookup expired it): the same late-result rule as above.
-    if (claim && !claim.claimedBy && verified && verified.agentId === body.agentId && reclaimLateInferenceResult(body.subtaskId, body.agentId)) {
+    if (claim && !claim.claimedBy && verified && verified.agentId === body.agentId && reclaimLateInferenceResult(body.subtaskId, body.agentId, Date.now(), { completedResult: body.ok })) {
       clearClaimDeadline(body.subtaskId);
       app.log.info({ subtaskId: body.subtaskId, agentId: body.agentId }, "late_result_accepted");
       claim = queue.getClaim(body.subtaskId);

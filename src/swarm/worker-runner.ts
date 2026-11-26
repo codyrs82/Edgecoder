@@ -72,7 +72,7 @@ import { autoUpdateSetting } from "../install/update-schedule.js";
 import { startUpdateDrain } from "./update-drain.js";
 import { createLocalForwarder } from "./local-forwarder.js";
 import { ServingJobs } from "./serving-jobs.js";
-import { AgentLifecycle, DEFAULT_DRAIN_MS, announceGoingOffline, blacklistReasonFromError, type GoingOfflineReason } from "./agent-lifecycle.js";
+import { AgentLifecycle, DEFAULT_DRAIN_MS, announceGoingOffline, blacklistReasonFromError, handBackOnCriticalPressure, type GoingOfflineReason } from "./agent-lifecycle.js";
 import { resolveIdeToken } from "../apps/ide/ide-auth.js";
 import { loadConfigOrExit } from "../common/config.js";
 import { workerConfigSchema } from "../config/worker.js";
@@ -837,8 +837,13 @@ const hostMemory = new HostMemoryManager({
   // Critical pressure: cancel the running model calls (each fails with a memory_ error, so the
   // coordinator gives it to another agent) and hand every claim back (BHV006 going-offline path).
   onCritical: async () => {
+    const running = networkCallAborts.size;
     for (const a of networkCallAborts) a.abort();
     if (!registeredWithUrl) return;
+    if (!handBackOnCriticalPressure(running)) {
+      console.warn(`[agent:${AGENT_ID}] critical memory pressure: no network call running; claims kept for results on their way`);
+      return;
+    }
     const r = await announceGoingOffline((body) => post("/heartbeat", body, { retries: 0, timeoutMs: 4_000, signed: true }), AGENT_ID, "drain", 5_000);
     console.warn(`[agent:${AGENT_ID}] critical memory pressure: network calls cancelled${r.ok ? `, ${r.released} claim(s) handed back` : ""}`);
   },

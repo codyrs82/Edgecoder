@@ -67,6 +67,35 @@ describe("queue: abandoned claims and clean release", () => {
     // The agent is not barred: it may take the subtask again when it is back.
     expect(queue.claim("mac")?.id).toBe(st.id);
   });
+
+  it("network run 17: a finished result in flight during the hand-back may take the call back while nobody else has", () => {
+    const { queue } = harness();
+    queue.registerAgent("syd", policy);
+    const st = enqueue(queue, 60_000, "inference");
+    queue.claim("mac");
+    const claimedAt = queue.getClaim(st.id)?.claimedAt;
+    queue.releaseClaimsOf("mac");
+    // Not a lapse for the late-result hold or re-run budget, and not for a failure or a streamed piece.
+    expect(queue.lapsedClaim(st.id)).toBeUndefined();
+    expect(queue.holdForLateResult(st.id, Date.now() + 30_000)).toBe(false);
+    expect(queue.reclaimLapsed(st.id, "mac", 60_000)).toBe(false);
+    expect(queue.reclaimLapsed(st.id, "syd", 60_000, Date.now(), { acceptHandedBack: true })).toBe(false);
+    // A completed result, within the grace: the claim goes back to it with its claim time.
+    expect(queue.reclaimLapsed(st.id, "mac", 60_000, Date.now(), { acceptHandedBack: true })).toBe(true);
+    expect(queue.getClaim(st.id)).toMatchObject({ claimedBy: "mac", claimedAt });
+    expect(queue.leaseExpiredFor(st.id, "mac")).toBe(false);
+  });
+
+  it("network run 17: once another agent claimed the handed-back call, the first one's result cannot take it", () => {
+    const { queue } = harness();
+    queue.registerAgent("syd", policy);
+    const st = enqueue(queue, 60_000, "inference");
+    queue.claim("mac");
+    queue.releaseClaimsOf("mac");
+    expect(queue.claim("syd")?.id).toBe(st.id);
+    expect(queue.reclaimLapsed(st.id, "mac", 60_000, Date.now(), { acceptHandedBack: true })).toBe(false);
+    expect(queue.getClaim(st.id)?.claimedBy).toBe("syd");
+  });
 });
 
 describe("BHV006 pattern leads to a blacklist", () => {

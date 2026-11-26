@@ -306,12 +306,14 @@ export const LATE_RESULT_GRACE_MS = 60_000;
  * billed, so /result takes and settles it as usual, and the lapse no longer counts against the agent
  * (BHV006). False otherwise (the call is refused as before).
  */
-export function reclaimLateInferenceResult(subtaskId: string, agentId: string, nowMs = Date.now()): boolean {
+export function reclaimLateInferenceResult(subtaskId: string, agentId: string, nowMs = Date.now(), opts: { completedResult?: boolean } = {}): boolean {
   const subtask = queue.getSubtask(subtaskId);
   if (subtask?.kind !== "inference") return false;
   const billing = taskBilling.get(subtask.taskId);
   if (billing?.refunded) return false;
-  if (!queue.reclaimLapsed(subtaskId, agentId, LATE_RESULT_GRACE_MS, nowMs)) return false;
+  // A claim the agent handed back itself (going offline) is taken back only by a finished result
+  // that was already on its way (network run 17), never by a failure or a streamed piece.
+  if (!queue.reclaimLapsed(subtaskId, agentId, LATE_RESULT_GRACE_MS, nowMs, { acceptHandedBack: opts.completedResult === true })) return false;
   // BHV006: returned, not abandoned (as a refused late result is, #539).
   behaviorTracker.forgiveAbandonedClaim(agentId, subtaskId);
   return true;
