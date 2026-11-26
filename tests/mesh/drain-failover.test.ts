@@ -23,6 +23,7 @@ import { createPeerKeys } from "../../src/mesh/peer.js";
 import { ActiveCoordinator } from "../../src/swarm/active-coordinator.js";
 import { createCoordinatorClient, type RequestFn } from "../../src/swarm/coordinator-client.js";
 import { decodePendingResult, encodePendingResult, flushPendingResultBuffer, ResultNotRoutableYetError } from "../../src/swarm/pending-results.js";
+import { pullSkipReason, runsBesideLoop } from "../../src/swarm/pull-skip.js";
 
 /*
  * Outage test 3b (run 8): a planned restart of the US seed left its agents unused for 39-45 s while
@@ -317,7 +318,100 @@ describe("worker wiring", () => {
     expect(src).toContain("freeInferenceSlots: drainReturnHold ? 0 : freeInferenceSlots");
     expect(src).toMatch(/claimsInFlight\.set\(key, \(claimsInFlight\.get\(key\) \?\? 0\) \+ 1\);\s*try \{\s*await runAndReportClaim\(\);/);
   });
+  it("run 11: a model call runs beside the loop on any slot count, so a busy host still moves for a drain", () => {
+    expect(src).toContain("if (runsBesideLoop(st.kind, MAX_PARALLEL_INFERENCE)) {");
+    expect(src).not.toContain('st.kind === "inference" && MAX_PARALLEL_INFERENCE > 1');
+    // The notice wakes the loop, and each pass steps the failover before anything else (no pull needed).
+    expect(src).toMatch(/function onPlannedDrain[\s\S]{0,900}wakeLoop\(false\);/);
+    expect(src).toMatch(/if \(coordinatorOnline\) \{[\s\S]{0,300}if \(drainFailover\.active\(\)\) await stepDrainFailover\(\);/);
+  });
   it("the generic in-window failover does not run during a planned drain failover (it comes home instead)", () => {
     expect(src).toContain("if (!drainFailover.active() && restartWindow.mayFailOver()) {");
+  });
+});
+
+/*
+ * Network run 11 (1 slot per host since #589): after a planned restart of the US seed its agents took
+ * 14-66 s to reach the EU peer, against 2-3 s in run 9 at 2 slots. A 1-slot host ran its model call
+ * inside the loop, so the loop that moves to the peer and registers there waited for the call. A
+ * miniature of the loop: each pass steps the failover, registers where it works now, then pulls if it
+ * has a free slot; model calls run beside it (runsBesideLoop), their result going to their issuer.
+ */
+describe("busy 1-slot host during a planned drain (run 11)", () => {
+  const HOME = "https://us.example";
+  const PEER = "https://eu.example";
+  const CALL_MS = 60_000;
+
+  function simulate(besideLoop: (kind: string, slots: number) => boolean) {
+    let now = 0;
+    const slots = 1;
+    const failover = new DrainFailover(() => 0.5);
+    let url = HOME;
+    let registeredWith = HOME;
+    let registeredPeerAt: number | null = null;
+    let inflight: { endsAt: number; issuer: string } | null = null;
+    const results: Array<{ issuer: string; at: number }> = [];
+    const pulls: Array<{ url: string; at: number }> = [];
+    let noticeAt: number | null = 500;
+    let loopFreeAt = 0;
+    const finishCall = () => {
+      if (inflight && now >= inflight.endsAt) {
+        results.push({ issuer: inflight.issuer, at: inflight.endsAt });
+        inflight = null;
+      }
+    };
+    while (now <= 120_000) {
+      finishCall();
+      if (noticeAt !== null && now >= noticeAt) {
+        failover.notice({ drainingUrl: HOME, peerUrl: PEER, reason: "drain_notice", nowMs: now });
+        noticeAt = null;
+      }
+      if (now >= loopFreeAt) {
+        if (failover.failoverDue(now)) {
+          url = failover.pickPeer([PEER])!;
+          failover.moved(url, now);
+        }
+        if (registeredWith !== url) {
+          registeredWith = url;
+          if (url === PEER && registeredPeerAt === null) registeredPeerAt = now;
+        }
+        const busy = inflight ? 1 : 0;
+        const skip = pullSkipReason({
+          pullsFromCoordinator: true, sandboxDown: false, lifecycleCanPull: true, memoryOk: true, shuttingDown: false, inferenceOnly: true,
+          slots, inflight: busy, free: slots - busy, reportAnyway: false, drainReturnHold: false, cpuThrottled: false
+        });
+        // The home hands it a call before the drain (and nothing once draining); the peer, one per pull.
+        if (skip === null && (now === 0 || url === PEER)) {
+          pulls.push({ url, at: now });
+          inflight = { endsAt: now + CALL_MS, issuer: url };
+          // Inside the loop: the loop is held until the call ends.
+          if (!besideLoop("inference", slots)) loopFreeAt = inflight.endsAt;
+        }
+      }
+      now += 100;
+    }
+    return { registeredPeerAt, results, pulls };
+  }
+
+  it("beside the loop: registers with the peer within about a second while its call runs; the call finishes at its issuer", () => {
+    const r = simulate(runsBesideLoop);
+    expect(r.registeredPeerAt).not.toBeNull();
+    expect(r.registeredPeerAt! - 500).toBeLessThanOrEqual(DRAIN_FAILOVER_JITTER_MS + 100);
+    // The call the home issued finishes and reports to the home.
+    expect(r.results[0]).toEqual({ issuer: HOME, at: CALL_MS });
+    // Its next pull, once the slot is free, goes to the peer.
+    expect(r.pulls[1]).toEqual({ url: PEER, at: CALL_MS });
+  });
+
+  it("inside the loop (the old 1-slot path): the move waits for the running call", () => {
+    const r = simulate((kind, slots) => kind === "inference" && slots > 1);
+    expect(r.registeredPeerAt).toBe(CALL_MS);
+  });
+
+  it("runsBesideLoop: model calls on any slot count; code jobs never", () => {
+    expect(runsBesideLoop("inference", 1)).toBe(true);
+    expect(runsBesideLoop("inference", 4)).toBe(true);
+    expect(runsBesideLoop("inference", 0)).toBe(false);
+    expect(runsBesideLoop("single_step", 1)).toBe(false);
   });
 });
