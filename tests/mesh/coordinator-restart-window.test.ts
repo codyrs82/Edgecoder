@@ -1,7 +1,11 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { WebSocket, WebSocketServer } from "ws";
+import { closeForRebind, MESH_WS_REBIND_CLOSE_CODE } from "../../src/swarm/registration-policy.js";
 import {
   CoordinatorRestartWindow,
+  MESH_WS_REBIND_RECONNECT_MS,
+  MESH_WS_REBIND_TERMINATE_MS,
   isDrainingError,
   isRestartClose,
   isRestartTransientError,
@@ -101,9 +105,52 @@ describe("nextMeshWsDelay", () => {
     expect(nextMeshWsDelay(16_000, { waitingForRegistration: false, restarting: true, maxMs: max })).toEqual({ waitMs: RESTART_WS_MAX_DELAY_MS, next: RESTART_WS_MAX_DELAY_MS });
     expect(nextMeshWsDelay(1_000, { waitingForRegistration: false, restarting: true, maxMs: max })).toEqual({ waitMs: 1_000, next: RESTART_WS_MAX_DELAY_MS });
   });
+  it("run 12: a socket the agent closed to bind again reopens at once, whatever the restart state", () => {
+    expect(nextMeshWsDelay(8_000, { waitingForRegistration: false, restarting: false, rebind: true, maxMs: max })).toEqual({ waitMs: MESH_WS_REBIND_RECONNECT_MS, next: 8_000 });
+    expect(nextMeshWsDelay(1_000, { waitingForRegistration: false, restarting: true, rebind: true, maxMs: max })).toEqual({ waitMs: MESH_WS_REBIND_RECONNECT_MS, next: 1_000 });
+  });
   it("doubles up to the cap otherwise (as before)", () => {
     expect(nextMeshWsDelay(1_000, { waitingForRegistration: false, restarting: false, maxMs: max })).toEqual({ waitMs: 1_000, next: 2_000 });
     expect(nextMeshWsDelay(20_000, { waitingForRegistration: false, restarting: false, maxMs: max })).toEqual({ waitMs: 20_000, next: max });
+  });
+});
+
+/*
+ * Network run 12 (3b): an agent registered with the peer ~2 s after the drain notice, but its mesh
+ * socket reached the peer only ~6 s later: the old socket's graceful close took ~5 s
+ * ("registered again: reopening the mesh WebSocket" 01:07:44, "mesh WebSocket closed" 01:07:49).
+ */
+describe("closing the mesh socket to bind again (run 12)", () => {
+  it("sends the rebind close, then drops the socket if the close has not completed", () => {
+    const calls: string[] = [];
+    const timers: Array<{ fn: () => void; ms: number }> = [];
+    const ws = { readyState: 2, close: (code: number, reason: string) => calls.push(`close ${code} ${reason}`), terminate: () => calls.push("terminate") };
+    closeForRebind(ws, { closedState: 3, terminateAfterMs: MESH_WS_REBIND_TERMINATE_MS, setTimer: (fn, ms) => timers.push({ fn, ms }) });
+    expect(calls).toEqual([`close ${MESH_WS_REBIND_CLOSE_CODE} rebind_after_register`]);
+    expect(timers.map((t) => t.ms)).toEqual([MESH_WS_REBIND_TERMINATE_MS]);
+    timers[0].fn();
+    expect(calls).toEqual([`close ${MESH_WS_REBIND_CLOSE_CODE} rebind_after_register`, "terminate"]);
+  });
+  it("leaves a socket that already closed", () => {
+    const calls: string[] = [];
+    const ws = { readyState: 0, close: () => { ws.readyState = 3; calls.push("close"); }, terminate: () => calls.push("terminate") };
+    closeForRebind(ws, { closedState: 3, terminateAfterMs: 10, setTimer: (fn) => fn() });
+    expect(calls).toEqual(["close"]);
+  });
+  it("a peer that never answers the close: the socket is closed within the bound, not ws's 30 s", async () => {
+    const wss = new WebSocketServer({ port: 0 });
+    // The server stops reading: the client's close frame is never answered.
+    wss.on("connection", (s) => (s as unknown as { _socket: { pause(): void } })._socket.pause());
+    const port = (wss.address() as { port: number }).port;
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    await new Promise<void>((resolve) => ws.once("open", () => resolve()));
+    const started = Date.now();
+    const closed = new Promise<number>((resolve) => ws.once("close", () => resolve(Date.now() - started)));
+    closeForRebind(ws, { closedState: WebSocket.CLOSED, terminateAfterMs: MESH_WS_REBIND_TERMINATE_MS });
+    const ms = await closed;
+    expect(ms).toBeLessThan(MESH_WS_REBIND_TERMINATE_MS + 1_000);
+    for (const c of wss.clients) c.terminate();
+    await new Promise<void>((resolve) => wss.close(() => resolve()));
   });
 });
 
@@ -116,6 +163,11 @@ describe("worker wiring", () => {
     expect(src).toContain('if (coordinatorOnline && isDrainingError(error)) onPlannedDrain("register_draining", coordinator.url);');
     expect(src).toMatch(/function onPlannedDrain[\s\S]{0,300}restartWindow\.open\(Date\.now\(\), true\);/);
     expect(src.match(/coordinatorReconnect\.registered\(\);[\s\S]{0,200}restartWindow\.close\(\);/g)?.length).toBe(2);
+  });
+  it("run 12: the rebind close is bounded and its socket reopens at once", () => {
+    expect(src).toContain("closeForRebind(ws, { closedState: WebSocket.CLOSED, terminateAfterMs: MESH_WS_REBIND_TERMINATE_MS });");
+    expect(src).toMatch(/rebindingMeshWs\.add\(ws\);\s*closeForRebind/);
+    expect(src).toContain("rebind: rebindingMeshWs.has(ws)");
   });
   it("retries fast inside the window before counting a failure", () => {
     const i = src.indexOf("if (coordinatorOnline && restartWindow.active() && isRestartTransientError(error)) {");

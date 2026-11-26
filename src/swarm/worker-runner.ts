@@ -30,7 +30,7 @@ import { detectHardware, gpuNeedsOffloadProof, hardwareProfileFor, selectGpu, se
 import { claimedProfile, decideGpuClaim, type GpuClaimDecision } from "./gpu-claim.js";
 import { encodePendingResult, flushPendingResultBuffer, isPermanentResultRefusal, ResultNotRoutableYetError } from "./pending-results.js";
 import { enforceSandboxPolicy, inferenceOnlyRejection, resolveSandboxMode, swarmExecutionEnabled } from "./sandbox-enforcement.js";
-import { portalLabel, enrollmentBackoffMs, enrollmentRefusalFromError, enrollmentRefusalKey, enrollmentRefusalMessage, isAgentNotRegisteredError, isNotRegisteredWsClose, MESH_WS_REBIND_CLOSE_CODE, QuickReregisterGate, parseRetryAfterMs, rateLimitWaitMs, registeredLogLine, registerRefreshMsFromEnv, shouldLogEnrollmentRefusal, shouldRegister, type RegisterReply } from "./registration-policy.js";
+import { portalLabel, enrollmentBackoffMs, enrollmentRefusalFromError, enrollmentRefusalKey, enrollmentRefusalMessage, isAgentNotRegisteredError, isNotRegisteredWsClose, closeForRebind, QuickReregisterGate, parseRetryAfterMs, rateLimitWaitMs, registeredLogLine, registerRefreshMsFromEnv, shouldLogEnrollmentRefusal, shouldRegister, type RegisterReply } from "./registration-policy.js";
 import { createPeerKeys, signPayload } from "../mesh/peer.js";
 import { signMeshWsBind } from "../mesh/ws-auth.js";
 import { hashResultOutput, signReceiptAsAgent } from "../receipts/receipt.js";
@@ -79,7 +79,7 @@ import { ModelControlAgent, type CurrentModelSettings } from "../model/remote-co
 import { createOllamaAdmin, diskSpace, ollamaModelsDir, registryModelSize } from "../model/remote-control/ollama-admin.js";
 import { remoteControlEnabled, resolveAllowlist } from "../model/remote-control/policy.js";
 import { MODEL_CONTROL_FRAME_TYPE } from "../model/remote-control/protocol.js";
-import { COORDINATOR_DRAIN_NOTICE_FRAME_TYPE, COORDINATOR_RECONNECT_FRAME_TYPE, CoordinatorReconnectState, CoordinatorRestartWindow, RESTART_REQUEST_TIMEOUT_MS, isDrainingError, isRestartTransientError, isRestartClose, nextMeshWsDelay, verifyCoordinatorDrainNoticeFrame, verifyCoordinatorReconnectFrame } from "../mesh/coordinator-reconnect.js";
+import { COORDINATOR_DRAIN_NOTICE_FRAME_TYPE, COORDINATOR_RECONNECT_FRAME_TYPE, CoordinatorReconnectState, CoordinatorRestartWindow, RESTART_REQUEST_TIMEOUT_MS, MESH_WS_REBIND_TERMINATE_MS, isDrainingError, isRestartTransientError, isRestartClose, nextMeshWsDelay, verifyCoordinatorDrainNoticeFrame, verifyCoordinatorReconnectFrame } from "../mesh/coordinator-reconnect.js";
 import { DrainFailover, homeProbeState } from "../mesh/drain-failover.js";
 import { BOT_CONTROL_FRAME_TYPE, botRelayMode } from "../common/bot-relay.js";
 import { BotRelayAgent, httpProviderClient } from "./bot-relay-agent.js";
@@ -1410,6 +1410,8 @@ let meshWsOpen = false;
 let registrationEpoch = 0;
 let meshWsEpoch = -1;
 let currentMeshWs: WebSocket | null = null;
+/** Sockets the agent closed itself to bind again after registering (they reopen at once). */
+const rebindingMeshWs = new WeakSet<WebSocket>();
 /** One immediate re-registration per window (registration-policy.ts), shared by HTTP 401s and WS refusals. */
 const quickReregister = new QuickReregisterGate();
 
@@ -1420,11 +1422,8 @@ function noteRegistered(fresh: boolean): void {
   const ws = currentMeshWs;
   if (ws && ws.readyState === WebSocket.OPEN && meshWsEpoch < registrationEpoch) {
     console.log(`[agent:${AGENT_ID}] registered again: reopening the mesh WebSocket for a fresh bind`);
-    try {
-      ws.close(MESH_WS_REBIND_CLOSE_CODE, "rebind_after_register");
-    } catch {
-      /* the close handler reconnects either way */
-    }
+    rebindingMeshWs.add(ws);
+    closeForRebind(ws, { closedState: WebSocket.CLOSED, terminateAfterMs: MESH_WS_REBIND_TERMINATE_MS });
   }
 }
 let wokenByNudge = false;
@@ -1797,9 +1796,9 @@ function connectMeshWebSocket(getMeshPeer: () => MeshPeer | null): void {
           wakeLoop(false);
         }
       }
-      const d = nextMeshWsDelay(reconnectDelay, { waitingForRegistration: false, restarting: restartWindow.active(), maxMs: MAX_RECONNECT_DELAY });
+      const d = nextMeshWsDelay(reconnectDelay, { waitingForRegistration: false, restarting: restartWindow.active(), rebind: rebindingMeshWs.has(ws), maxMs: MAX_RECONNECT_DELAY });
       reconnectDelay = d.next;
-      console.log(`[agent:${AGENT_ID}] mesh WebSocket closed, reconnecting in ${d.waitMs}ms`);
+      console.log(`[agent:${AGENT_ID}] mesh WebSocket closed (${code}), reconnecting in ${d.waitMs}ms`);
       setTimeout(connect, d.waitMs);
     });
 

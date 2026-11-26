@@ -243,6 +243,16 @@ export const RESTART_FAILOVER_AFTER_MS = 30_000;
 export const RESTART_REQUEST_TIMEOUT_MS = 5_000;
 /** The mesh WebSocket's longest wait between attempts while a restart is in progress. */
 export const RESTART_WS_MAX_DELAY_MS = 2_000;
+/**
+ * Network run 12: after the agent registered somewhere new (a drain failover's move to the peer,
+ * the return home, a restarted coordinator) it reopens its mesh socket for a fresh bind. The old
+ * socket's graceful close took ~5 s to complete, and only then did the new one open: agents were
+ * registered with the peer ~2 s after the drain notice but had no socket there for another ~6 s
+ * (no work_available nudges, shown as "polling"). The old socket is now dropped after
+ * MESH_WS_REBIND_TERMINATE_MS if its close has not completed, and the new one opens after this.
+ */
+export const MESH_WS_REBIND_RECONNECT_MS = 100;
+export const MESH_WS_REBIND_TERMINATE_MS = 250;
 
 /** 1012 "service restart" (the coordinator's drain), or the agent's own close on a reconnect frame. */
 export function isRestartClose(code: number, reason: string): boolean {
@@ -321,11 +331,14 @@ export class CoordinatorRestartWindow {
 
 /**
  * The mesh WebSocket's next reconnect wait. Waiting for the agent's own registration is a local
- * check, so it polls quickly and does not grow; during a restart failed opens are capped at
+ * check, so it polls quickly and does not grow; a socket the agent closed to bind again reopens at
+ * once (MESH_WS_REBIND_RECONNECT_MS); during a restart failed opens are capped at
  * RESTART_WS_MAX_DELAY_MS; otherwise the wait doubles up to maxMs as before.
  */
-export function nextMeshWsDelay(current: number, opts: { waitingForRegistration: boolean; restarting: boolean; maxMs: number }): { waitMs: number; next: number } {
+export function nextMeshWsDelay(current: number, opts: { waitingForRegistration: boolean; restarting: boolean; maxMs: number; rebind?: boolean }): { waitMs: number; next: number } {
   if (opts.waitingForRegistration) return { waitMs: 500, next: current };
+  // The agent closed it itself to bind again (already registered): open the new one now.
+  if (opts.rebind) return { waitMs: MESH_WS_REBIND_RECONNECT_MS, next: current };
   if (opts.restarting) {
     const waitMs = Math.min(current, RESTART_WS_MAX_DELAY_MS);
     return { waitMs, next: Math.min(waitMs * 2, RESTART_WS_MAX_DELAY_MS) };

@@ -75,6 +75,30 @@ export function isNotRegisteredWsClose(code: number, reason: string): boolean {
 /** Client close code the agent uses to reopen its socket after registering again (a fresh bind). */
 export const MESH_WS_REBIND_CLOSE_CODE = 4000;
 
+/** The parts of a WebSocket closeForRebind uses (the `ws` client in the worker). */
+export interface RebindableSocket {
+  readyState: number;
+  close(code: number, reason: string): void;
+  terminate(): void;
+}
+
+/**
+ * Close the mesh socket to bind again after registering, and drop it after `terminateAfterMs` if
+ * its close has not completed by then (network run 12: the graceful close took ~5 s, and the socket
+ * to the new coordinator waited for it). `closedState` is WebSocket.CLOSED.
+ */
+export function closeForRebind(ws: RebindableSocket, opts: { closedState: number; terminateAfterMs: number; setTimer?: (fn: () => void, ms: number) => void }): void {
+  try {
+    ws.close(MESH_WS_REBIND_CLOSE_CODE, "rebind_after_register");
+  } catch {
+    /* the close handler reconnects either way */
+  }
+  const setTimer = opts.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms).unref?.());
+  setTimer(() => {
+    if (ws.readyState !== opts.closedState) ws.terminate();
+  }, opts.terminateAfterMs);
+}
+
 /** Longest a worker waits on one 429 before trying again (a bad Retry-After must not park it). */
 export const MAX_RATE_LIMIT_WAIT_MS = 60_000;
 /** Wait used when a 429 carries no usable Retry-After. */
