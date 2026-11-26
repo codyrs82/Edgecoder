@@ -239,20 +239,19 @@ describe("run 14, 2: named refusals within the bound (run 16: 16/15 windows) of 
     expect(dispatch.preferredAgentFor(c.subtaskId)).toBe(lhr.peerId);
     // Within the hold, fra (also ready) leaves it to lhr.
     expect((await pull(fra)).id).toBeNull();
-    await sleep(DECISION_MS - 100);
-    // lhr has not come; the decision (at one window) ends the hold, so fra takes it inside the bound.
-    let got: string | null = null;
-    for (let i = 0; i < 40 && !got; i++) {
-      got = (await pull(fra)).id;
-      if (!got) await sleep(10);
-    }
-    expect(got).toBe(c.subtaskId);
+    // lhr has not come by the decision (run here directly, as the window's timer does): it ends the
+    // hold and waits for the other ready host, which takes the call inside the bound.
+    const inference = await import("../../src/swarm/coordinator/routes/inference.js");
+    expect(await inference.decideUnclaimedCall(c.taskId, c.subtaskId)).toBe("waiting");
     expect(dispatch.preferredAgentFor(c.subtaskId)).toBeUndefined();
+    expect((await pull(fra)).id).toBe(c.subtaskId);
   });
 
   test("a ready host that claims during the wait still gets the call", async () => {
+    const inference = await import("../../src/swarm/coordinator/routes/inference.js");
     const c = await submit({ model: MODEL });
-    await sleep(DECISION_MS + 50);
+    // Decided now (as at the window): a host here is ready, so it waits for it (within the bound).
+    expect(await inference.decideUnclaimedCall(c.taskId, c.subtaskId)).toBe("waiting");
     expect(ctx.queue.isUnclaimed(c.subtaskId)).toBe(true);
     const got = (await pull(lhr)).id ?? (await pull(fra)).id;
     expect(got).toBe(c.subtaskId);
