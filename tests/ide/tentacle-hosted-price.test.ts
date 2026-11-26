@@ -99,8 +99,8 @@ describe("run 13: a hosted helper refused for its ceiling waits for the other he
       const t = tentacles.get(s.id, b.id)!;
       // Before: "error", the run-13 message, and the lead wrote the file itself.
       expect(t.status, t.result?.error).toBe("passed");
-      expect(ceilings.second[0]).toBeLessThan(3.901);
-      expect(ceilings.second[1]).toBeGreaterThanOrEqual(3.901 * 1.05 - 1e-9);
+      // Run 15: the second helper waits its turn (28 - 25 left < its 25 budget), so its ceiling covers the model at once.
+      expect(ceilings.second[0]).toBeGreaterThanOrEqual(3.901);
     });
   }
 });
@@ -113,7 +113,7 @@ describe("run 13: the delegate note says what the session's budget left covers",
     // The 8th: 8 × 25 = 200 against 100.
     const c = budgetCoverage({ left: 100, open: 8, perTentacle: 25 })!;
     expect(c.short).toBe("Budget covers ~4 of 8 helpers.");
-    expect(c.detail).toMatch(/budget reached/);
+    expect(c.detail).toMatch(/run at once.*one message/);
   });
 
   it("with helpers finished: at their average (run 13's seven averaged ~9.1 cSats; 8 fit 100)", async () => {

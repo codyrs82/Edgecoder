@@ -346,11 +346,8 @@ describe("tentacle runner", () => {
     expect(t.status).toBe("error");
     expect(t.result!.error).toMatch(/budget ran out/);
     expect(t.cSats).toBe(4); // two calls, then the guard stops the third
-    const b = tentacles.delegate(s.id, { task: "Loop2", kind: "code_edit", files: [], instructions: "", budgetCSats: 50 });
-    await tentacles.idle(s.id);
-    expect(tentacles.list(s.id).spentCSats).toBeGreaterThanOrEqual(5);
-    expect(tentacles.get(s.id, b.id)!.result!.error).toMatch(/budget/);
-    expect(() => tentacles.delegate(s.id, { task: "More", kind: "code_edit", files: [], instructions: "" })).toThrow(/budget/);
+    // 1 cSat left: less than a helper starts with (run 15), so no new helper is taken.
+    expect(() => tentacles.delegate(s.id, { task: "Loop2", kind: "code_edit", files: [], instructions: "", budgetCSats: 50 })).toThrow(/budget .*is spent/);
   });
 
   it("stopping the session cancels its tentacles and removes their workspaces", async () => {

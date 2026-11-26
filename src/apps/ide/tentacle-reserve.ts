@@ -132,6 +132,30 @@ export function balanceShortMessage(ceiling: number, need?: number): string {
   return `the account's balance can't cover one helper call (it set aside up to ${fmt(need ?? ceiling)}, and ${fmt(ceiling)} after halving the ceiling was still refused): add cSats, or lower the tentacle budget`;
 }
 
+/**
+ * Network run 15: a transient "busy" refusal (503 no_capacity: "Every machine that runs qwen3.5:9b is
+ * busy", "Network request failed: no_capacity"). Helper td0bcfe6 failed on one while its price cap
+ * left only a Mac that was not pulling; it is retried after HELPER_BUSY_BACKOFF_MS, its ceiling
+ * recomputed each time (wider once other helpers' calls end, so the next fitting model can take it).
+ * A coordinator restarting is not "busy" (its own failover handles it).
+ */
+export function busyRefusal(err: unknown): boolean {
+  const e = err as { status?: number; info?: { code?: string }; message?: string } | null;
+  if (!e) return false;
+  const msg = typeof e.message === "string" ? e.message : "";
+  if (/restarting/i.test(msg)) return false;
+  if (e.info?.code === "no_capacity") return true;
+  return e.status === 503 || /\bno_capacity\b|\bis busy\b/i.test(msg);
+}
+
+/** Waits before the helper sends a call refused as busy again: 2 s, 4 s, 8 s; then it fails, saying so. */
+export const HELPER_BUSY_BACKOFF_MS = [2_000, 4_000, 8_000] as const;
+
+/** The error after the last busy retry: the network's words, and that it was tried again. */
+export function busyGaveUpMessage(message: string, tries: number, waitedMs: number): string {
+  return `${message.replace(/[.\s]+$/, "")} (tried ${tries} times over ${Math.round(waitedMs / 1000)} s: every machine that fits this helper's price ceiling stayed busy)`;
+}
+
 /** The ceilings of a session's helper calls in flight (held on the account until each call ends). */
 export class CallHolds {
   private readonly holds = new Map<number, number>();

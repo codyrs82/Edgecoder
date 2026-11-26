@@ -152,8 +152,10 @@ describe("helper call ceilings (tentacle-reserve.ts)", { timeout: 60_000 }, () =
     const t = tentacles.get(s.id, b.id)!;
     expect(t.status, t.result?.error).toBe("passed");
     const second = requests.filter((r) => /# Task\nsecond/.test(r.req.messages.find((m) => m.role === "user")?.content ?? ""));
-    expect(second[0].req.hints!.maxCSats!).toBeLessThan(3.9);
-    expect(second[1].req.hints!.maxCSats!).toBeGreaterThanOrEqual(3.9 * 1.05 - 1e-9);
+    // Run 15: the second helper no longer starts beside the first (28 - 25 left < its 25 budget): it waits
+    // its turn and its first call's ceiling covers the cheapest fitting model, with nothing refused.
+    expect(second[0].req.hints!.maxCSats!).toBeGreaterThanOrEqual(3.9);
+    expect(requests.some((r) => (r.req.hints?.maxCSats ?? 0) < 3.9)).toBe(false);
   });
 
   it("run 12: a tentacle budget below what the cheapest fitting model needs stops the helper, saying why", async () => {

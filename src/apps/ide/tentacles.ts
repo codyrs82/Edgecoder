@@ -259,6 +259,22 @@ interface Internal {
   reported: boolean;
   /** Spent by this tentacle (all attempts). */
   spent: number;
+  /** Its budget, set when it starts: what it may still spend (budget - spent) is set aside from the session's. */
+  budget?: number;
+}
+
+/**
+ * Network run 15: the smallest share of the session's budget a helper is started with (about one call
+ * of the cheapest fitting ≥ 7B model, ~3.9 cSats in runs 12-13). Less than this left with nothing running:
+ * the helpers still queued stop with one message instead of failing call by call.
+ */
+export const HELPER_START_MIN_CSATS = 4;
+
+/** What the session's running helpers may still spend: their budgets less what they spent. */
+function committedBudget(st: SessionState): number {
+  let n = 0;
+  for (const t of st.tentacles.values()) if (t.budget !== undefined && (t.view.status === "running" || t.view.status === "verifying")) n += Math.max(0, t.budget - t.spent);
+  return round(n);
 }
 
 interface SessionState {
@@ -500,7 +516,8 @@ export class TentacleManager {
     if (!st.config.enabled) throw new TentacleError("disabled", "Tentacles are off for this session.");
     const committed = [...st.tentacles.values()].filter((t) => t.view.status === "queued" || t.view.status === "running" || t.view.status === "verifying").length;
     const left = st.config.budgetCSats - st.spent;
-    if (left <= 0) throw new TentacleError("budget", `The session's tentacle budget (${formatCSatsShort(st.config.budgetCSats)}) is spent.`);
+    // Run 15: less than one helper's start (HELPER_START_MIN_CSATS) left of what was not spent: none can start.
+    if (left <= 0 || left < Math.min(HELPER_START_MIN_CSATS, st.config.budgetCSats)) throw new TentacleError("budget", `The session's tentacle budget (${formatCSatsShort(st.config.budgetCSats)}) is spent (${formatCSatsShort(Math.max(0, left))} left). Raise --tentacle-budget to delegate more.`);
     if (committed >= 32) throw new TentacleError("invalid", "Too many tentacles waiting; await some first.");
     const readOnly = spec.readOnly === true || READ_ONLY_KINDS.has(spec.kind);
     const id = `t${randomUUID().slice(0, 7)}`;
@@ -627,17 +644,49 @@ export class TentacleManager {
     return this.d.shellAllowed ? this.d.shellAllowed(fresh, command) : sessionAllowsShell(fresh, command, root);
   }
 
+  /**
+   * Start queued helpers while there is room. Network run 15: also budget room. With
+   * --tentacle-budget 30 the note said "Budget covers ~1 of 8 helpers", yet 4 ran at once and the
+   * last ones failed call by call (no_capacity, then the price ceiling). A helper starts only when the
+   * session's budget, less what the running helpers may still spend, covers its budget; one that
+   * finishes under budget gives the rest back. With nothing running and less than
+   * HELPER_START_MIN_CSATS left, the queued helpers stop with one message.
+   */
   private pump(sessionId: string): void {
     const st = this.state(sessionId);
     while (st.running < Math.min(st.config.maxParallel, st.balanceParallel ?? Infinity) && st.queue.length) {
-      const id = st.queue.shift()!;
+      const id = st.queue[0];
       const t = st.tentacles.get(id);
-      if (!t || t.view.status !== "queued") continue;
+      if (!t || t.view.status !== "queued") {
+        st.queue.shift();
+        continue;
+      }
+      const free = round(st.config.budgetCSats - st.spent - committedBudget(st));
+      const want = Math.min(t.spec.budgetCSats ?? st.config.perTentacleCSats, st.config.budgetCSats);
+      if (st.running > 0 && free < want) break; // a running helper gives back what it doesn't spend
+      if (st.running === 0 && free < Math.min(want, HELPER_START_MIN_CSATS)) {
+        this.stopQueued(sessionId, st);
+        break;
+      }
+      st.queue.shift();
       st.running++;
       void this.run(sessionId, st, t).finally(() => {
         st.running--;
         this.pump(sessionId);
       });
+    }
+  }
+
+  /** Run 15: the session's budget can't start another helper: every queued one stops with the same message. */
+  private stopQueued(sessionId: string, st: SessionState): void {
+    const all = [...st.tentacles.values()];
+    const ran = all.filter((x) => x.view.status === "passed" || x.view.status === "failed" || x.view.status === "error").length;
+    const why = `The session's tentacle budget is spent (${formatCSatsShort(st.spent)} of ${formatCSatsShort(st.config.budgetCSats)}) after ${ran} of ${all.length} helpers; this one did not start. Raise --tentacle-budget (EDGECODER_TENTACLES_BUDGET_CSATS) to run the rest.`;
+    const ids = st.queue.splice(0);
+    for (const id of ids) {
+      const t = st.tentacles.get(id);
+      if (!t || t.view.status !== "queued") continue;
+      this.finish(sessionId, t, "error", { status: "error", patch: "", summary: "", filesTouched: [], checks: [], model: t.view.model ?? "auto", class: "", agentLabel: "", tokens: { prompt: 0, output: 0 }, cSats: 0, durationMs: 0, attempts: 0, calls: [], error: why }, "budget spent before it started");
     }
   }
 
@@ -671,7 +720,9 @@ export class TentacleManager {
       (st.floorWarned ??= new Set()).add(smallModel);
       this.progress(sessionId, t, small);
     }
-    const budget = Math.max(0, Math.min(t.spec.budgetCSats ?? cfg.perTentacleCSats, cfg.budgetCSats - st.spent));
+    // Run 15: within what the session has left after the other running helpers' budgets (pump).
+    const budget = Math.max(0, Math.min(t.spec.budgetCSats ?? cfg.perTentacleCSats, cfg.budgetCSats - st.spent - committedBudget(st)));
+    t.budget = budget;
     let ws: Workspace | null = null;
     const started = Date.now();
     const tokens = { prompt: 0, output: 0 };
@@ -687,6 +738,8 @@ export class TentacleManager {
     // or, alone, halve the ceiling (balanceCap). `lastCeiling`: the ceiling of the call just refused.
     let balanceCap = Infinity;
     let balanceWait = false;
+    // Run 15: a busy refusal (503 no_capacity): wait this long before the call goes again.
+    let busyWaitMs = 0;
     let lastCeiling = 0;
     // Run 14: why the helper stopped at a budget with a patch (merged or offered, not dropped).
     let partial: string | undefined;
@@ -776,6 +829,26 @@ export class TentacleManager {
           async () => {
             const hintsFor = (maxCSats: number) =>
               workerHints(t.spec, { escalate: tierUp, promptChars: prompt.length, maxCSats, tentacleId: escalate && (again?.freshHost || !tierUp) ? `${t.view.id}:retry` : t.view.id, ...(place === "worker" && model === "auto" ? { minParamsB: minB } : {}) });
+            // Run 15: after a busy refusal, back off first (its hold given back meanwhile, so others may use it).
+            if (busyWaitMs > 0) {
+              const ms = busyWaitMs;
+              busyWaitMs = 0;
+              if (holdKey !== undefined) {
+                st.holds.release(holdKey);
+                holdKey = undefined;
+              }
+              if (!t.abort.signal.aborted) {
+                await new Promise<void>((resolve) => {
+                  const done = () => {
+                    clearTimeout(timer);
+                    t.abort.signal.removeEventListener("abort", done);
+                    resolve();
+                  };
+                  const timer = setTimeout(done, ms);
+                  t.abort.signal.addEventListener("abort", done, { once: true });
+                });
+              }
+            }
             // Free places hold nothing; a paid call's ceiling is sized from the budgets left (tentacle-reserve.ts).
             if (place !== "worker" || !paidWorker(model)) return hintsFor(Math.max(0, budget - t.spent));
             // A call sent again after a price refusal gives back its earlier hold first.
@@ -877,6 +950,19 @@ export class TentacleManager {
                       return false;
                     }
                     balanceCap = next;
+                    return true;
+                  },
+                }
+              : {}),
+            // Run 15 (td0bcfe6): every machine that fits was busy (503 no_capacity): back off 2 s, 4 s,
+            // 8 s, the ceiling sized again each time (wider once other helpers' calls end, so the next
+            // fitting model can take it), then fail saying it was tried.
+            ...(place === "worker"
+              ? {
+                  onBusyRefusal: (waitMs: number) => {
+                    if (t.abort.signal.aborted) return false;
+                    busyWaitMs = waitMs;
+                    this.progress(sessionId, t, `every machine that fits is busy: trying again in ${Math.round(waitMs / 1000)} s`);
                     return true;
                   },
                 }
