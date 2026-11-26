@@ -1,7 +1,7 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { createPeerKeys, type PeerKeys } from "../../src/mesh/peer.js";
 import { signMeshWsBind } from "../../src/mesh/ws-auth.js";
 import { hashRequestBody, signRequest } from "../../src/security/request-signing.js";
@@ -9,6 +9,13 @@ import { grantCredits } from "../../src/credits/store.js";
 import { DEFER_MS } from "../../src/swarm/coordinator/dispatch.js";
 import { agentMemory } from "../../src/swarm/coordinator/memory-admission.js";
 import type { MemoryTelemetry } from "../../src/swarm/memory-budget.js";
+
+// The calls here wait past DEFER_MS (1.5 s) on purpose; the claim decision (1.5 s by default since
+// run 11) is not what these test (tests/swarm/run11-overflow.test.ts). Set before the static imports
+// above load the coordinator config.
+vi.hoisted(() => {
+  process.env.INFERENCE_CLAIM_DECISION_MS = "4000";
+});
 
 /*
  * Coordinator admission control on the real app (heartbeat telemetry -> /pull): a call goes to an
@@ -60,6 +67,7 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
+  delete process.env.INFERENCE_CLAIM_DECISION_MS;
   for (const ws of sockets) ws.terminate();
   await app?.close();
   await new Promise<void>((resolve) => portal.close(() => resolve()));

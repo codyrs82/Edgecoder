@@ -434,7 +434,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     // checked too, so a task gossiped from a peer (no local bid) still cannot go to an under-spec agent.
     // A model call also needs a free slot, and is left briefly to an idle agent when this one is busy.
     // Task privacy: with ENVELOPE_REQUIRED an agent without an envelope key takes no user data.
-    const mayTake = (subtask: Subtask) => canTake(subtask) && mayTakeNow(body.agentId, subtask, claims, nowMs) && envelopePolicyAllows(capability, subtask, ENVELOPE_REQUIRED);
+    const mayTake: (subtask: Subtask) => boolean = (subtask) => canTake(subtask) && mayTakeNow(body.agentId, subtask, claims, nowMs) && envelopePolicyAllows(capability, subtask, ENVELOPE_REQUIRED);
     // Claim hoarding: open claims per agent are bounded by what it declared, never below the
     // worker's parallel-inference ceiling (16) and never above the schema's 64.
     const maxOpen = Math.max(capability?.maxConcurrentTasks ?? 1, MAX_OPEN_CLAIMS_FLOOR);
