@@ -9,7 +9,7 @@ import { creditEngine, earnedMsat, grantCredits } from "../../src/credits/store.
 /*
  * #523 (real coordinator app, Fastify inject): Auto does not count on an agent that has never pulled
  * work, and a call placed on an agent that does not come is re-placed on the next candidate after
- * INFERENCE_CLAIM_DECISION_MS (run 9: 2 s, plus a quarter window while it reports a free slot) instead of failing after 45 s. One reserve, settled once by the
+ * INFERENCE_CLAIM_DECISION_MS (run 9: 2 s, 1.5 s since run 11, plus a quarter window while it reports a free slot) instead of failing after 45 s. One reserve, settled once by the
  * agent that ran it; nothing paid to the one that did not come, which counts a failure on its circuit.
  */
 
@@ -126,8 +126,8 @@ describe("Auto and agents that do not pull", () => {
     expect(mods.context.usagePending.get(c.taskId)?.model).toBe(SMALL);
     const d = mods.routing.recentDecisions(5).find((x: { taskId: string }) => x.taskId === c.taskId);
     expect(d).toMatchObject({ model: SMALL });
-    // Run 9: decided within INFERENCE_CLAIM_DECISION_MS (2 s) plus a quarter window, not BEST_FIT_REPLACE_MS.
-    expect(d.reason).toMatch(/^re-placed: nobody picked it up within 2\.\d s; was qwen2\.5-coder:7b/);
+    // Run 9: decided within INFERENCE_CLAIM_DECISION_MS (1.5 s since run 11) plus a quarter window, not BEST_FIT_REPLACE_MS.
+    expect(d.reason).toMatch(/^re-placed: nobody picked it up within 1\.\d s; was qwen2\.5-coder:7b/);
     // A pickup timeout on an idle agent counts on its circuit breaker.
     expect(mods.memory.circuitState(big.peerId).recentFailures).toBeGreaterThanOrEqual(1);
     await finish(small, c.taskId, c.subtaskId, SMALL);

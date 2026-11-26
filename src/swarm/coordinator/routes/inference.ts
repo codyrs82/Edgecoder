@@ -20,7 +20,7 @@ import { agentUnavailable, circuitBlocks, circuitOpen, circuitState, memoryAdmit
 import { AUTO_MODEL_ID } from "../../../inference-api/auto-route.js";
 import { cleanHints, describeJob, type JobDescriptor } from "../../../inference-api/job-descriptor.js";
 import type { BestFitResult } from "../best-fit.js";
-import { agentRegionCode, agentRttMs, bestFitConfig, complexityWeights, coordinatorLoadSignals, recordDecision, recordPlacement, resolveAuto, routingSummary, type RoutingSummary } from "../routing.js";
+import { agentRegionCode, agentRttMs, bestFitConfig, complexityWeights, coordinatorLoadSignals, localAgentViews, recordDecision, recordPlacement, resolveAuto, routingSummary, type RoutingSummary } from "../routing.js";
 import { cleanRegion, clientRegionOf, sanitizeCoordinatorChoice } from "../../../common/coordinator-choice.js";
 import { InferenceStreams, boundTokenCounts, maxTokensOf } from "../../inference-streams.js";
 import { DegenerateReplyTracker, billableFraction, detectDegenerateOutput, type DegeneracyVerdict } from "../../inference-degeneracy.js";
@@ -67,7 +67,7 @@ import { taskIdInUse, pricingInFlight, settleTaskIfDone, refundTaskSubmit, LATE_
 import { registerInferenceCancelRoute, requesterCancelled } from "../inference-cancel.js";
 import { recordMeshWork } from "../world-activity.js";
 import { agentSocketLost, noteAgentHttpAlive } from "../agent-liveness.js";
-import { armAutoReplace, autoPlacementOf, overrunAlternativeExists, rearmAutoDecision, placeAfterOverrun, replaceAutoNow, setReplaceAdmission, type AutoPlacement } from "../auto-replace.js";
+import { armAutoReplace, autoPlacementOf, cloudOverflowReserveMsat, overrunAlternativeExists, rearmAutoDecision, placeAfterOverrun, replaceAutoNow, setReplaceAdmission, type AutoPlacement } from "../auto-replace.js";
 import { freeLocalHolders, LOCALITY_PREFER_MS, LOCALITY_PULL_HOLD_MS, nearestFreeHolder, peerWithFreeCapacity, type PeerFit } from "../locality.js";
 import { agentHeldBack, agentStolenRecently, agentWithholding, type ClassCompletion, completionByClass, completionLimitMs, hostServiceMs, hostSpeed, type HostSpeedSource, judgeCompletion, modelPickups, modelSlots, noteHeldCounts, parseCompletionPrior, promptTokenEstimate, serviceTimes, stalledClaimMs, startEtaLimitMs, startEtaMs, withholdingHolders } from "../start-eta.js";
 import { expectedOutputTokens, judgedOutputOf, noteJudgedOutput, pruneJudged } from "../expected-output.js";
@@ -1232,6 +1232,18 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
         ({ result, elsewhere } = await resolveAuto(job, { ...autoOpts, excludeAgents: slowAgents }));
       }
       if (!result.chosen && slowAgents.length > 0) {
+        // Run 11: a long prompt no machine here would finish in time goes to a cloud host here when
+        // one is online with room (the overflow), not a 503: best fit once more without every
+        // non-cloud machine. A named call keeps its clean 503.
+        const nonCloud = localAgentViews().filter((a) => a.computeClass !== "cloud").map((a) => a.agentId);
+        const last = await resolveAuto(job, { ...autoOpts, peers: false, excludeAgents: [...new Set([...slowAgents, ...nonCloud])] });
+        if (last.result.chosen?.local && last.result.chosen.computeClass === "cloud") {
+          req.log.info({ taskId: body.taskId, model: last.result.chosen.model, slowAgents: slowAgents.length, ...(late ?? {}) }, "inference_completion_cloud_overflow");
+          result = last.result;
+          elsewhere = undefined;
+        }
+      }
+      if (!result.chosen && slowAgents.length > 0) {
         // Only machines that would not finish it in time: refused now, retryable, nothing reserved.
         req.log.info({ computeClass: onlyClass ?? null, slowAgents: slowAgents.length, ...(late ?? {}) }, "inference_completion_over_limit");
         return noCapacityReply(reply as any, { reason: "busy", model: AUTO_MODEL_ID, retryAfterSec: NO_CAPACITY_RETRY_AFTER_SEC, ...(late?.etaMs != null ? { completionEtaMs: late.etaMs } : {}), limitMs: late?.limitMs ?? Math.round(completionLimitMs(body.timeoutMs, CC.INFERENCE_COMPLETION_ETA_FRACTION)) });
@@ -1383,7 +1395,10 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     // by the buyer's maxCSats; was 180 s at the top of the dearest band (~750 cSats) for every call.
     const maxCSats = cleanHints(body.routing).maxCSats ?? routed?.job.maxCSats;
     const sized = billed ? inferenceCallReserve({ model: body.model, taskClass, timeoutMs: body.timeoutMs, inputBytes: Buffer.byteLength(input, "utf8"), maxTokens, ...(maxCSats !== undefined ? { maxCSats } : {}) }) : undefined;
-    const reserve = sized?.reserveMsat ?? 0;
+    // Run 11: an Auto call may overflow to a cloud host here if nothing else can start it (auto-replace.ts):
+    // its reserve covers that worst case too (the unused part is refunded at settle, as always).
+    const overflowMsat = routed && billed && taskClass !== "cloud" ? cloudOverflowReserveMsat({ inputBytes: Buffer.byteLength(input, "utf8"), maxTokens, timeoutMs: body.timeoutMs, ...(maxCSats !== undefined ? { maxCSats } : {}), ...(routed.onlyClass ? { onlyClass: routed.onlyClass } : {}) }) : 0;
+    const reserve = Math.max(sized?.reserveMsat ?? 0, overflowMsat);
     // Optional "pay from your own wallet" (PAYMENTS_NWC): no debit; the reserve bounds the call's
     // cost against the buyer's exposure cap (unsettled tallies), and the cost goes on the tally.
     const nwcSpot = billed && nwcSpotBuyer(accountId);
@@ -1474,7 +1489,7 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     const startupBound = holders.length === 0 && inStartupGrace();
     armClaimDeadline(body.taskId, subtask.id, startupBound ? startupClaimBoundMs() : INFERENCE_CLAIM_TIMEOUT_MS);
     armClaimDecision(body.taskId, subtask.id, false, !startupBound && !routed && billed ? INFERENCE_CLAIM_DECISION_MS : 0);
-    app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, ...(sized ? { reserveTokenMsat: sized.tokenMsat, reserveFloorMsat: sized.floorMsat, reserveCappedByMaxCSats: sized.capped } : {}), holders: holders.length, ...(body.redirected ? { redirected: true } : {}) }, "inference_submitted");
+    app.log.info({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, computeClass: taskClass, reserveMsat: reserve, ...(sized ? { reserveTokenMsat: sized.tokenMsat, reserveFloorMsat: sized.floorMsat, reserveCappedByMaxCSats: sized.capped } : {}), ...(overflowMsat > (sized?.reserveMsat ?? 0) ? { reserveCloudOverflowMsat: overflowMsat } : {}), holders: holders.length, ...(body.redirected ? { redirected: true } : {}) }, "inference_submitted");
     return reply.send({ taskId: body.taskId, subtaskId: subtask.id, model: body.model, reservedCSats: msatToCSats(reserve), billing: reservationId ? "reservation" : onlyAccountId ? "own_machine" : "per_second", ...(routed ? { routing: routed.summary } : {}) });
   });
 

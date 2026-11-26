@@ -132,7 +132,7 @@ import { clearClaimDeadline, inferenceStreams, judgeInferenceReply, retryInferen
 import { isMemoryRefusal, noteAgentResult, noteDispatched } from "../memory-admission.js";
 import { EMPTY_REPLY_ERROR } from "../../inference-runner.js";
 import { judgeResult } from "../../result-outcome.js";
-import { agentLoadReport, claimRule, mayTakeNow, noteAgentPull, noteClaimed, noteModelServed } from "../dispatch.js";
+import { agentLoadReport, claimRule, mayTakeNow, noteAgentPull, noteClaimed, noteModelServed, preferredAgentFor } from "../dispatch.js";
 import { noteRestrictedOptIn, restrictedCalls, restrictedSubmitGate } from "../restricted.js";
 import type { RemoteGrant } from "../../remote-grants.js";
 
@@ -430,19 +430,20 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
     const canTake = claimRule(body.agentId, capability, pullerAccount);
     const claims = queue.activeClaims();
     const nowMs = Date.now();
-    const task = queue.claim(
-      body.agentId,
-      capability?.activeModel,
-      pullerAccount,
-      // The book enforces the bid's class, price and constraints. The subtask's own constraints are
-      // checked too, so a task gossiped from a peer (no local bid) still cannot go to an under-spec agent.
-      // A model call also needs a free slot, and is left briefly to an idle agent when this one is busy.
-      // Task privacy: with ENVELOPE_REQUIRED an agent without an envelope key takes no user data.
-      (subtask) => canTake(subtask) && mayTakeNow(body.agentId, subtask, claims, nowMs) && envelopePolicyAllows(capability, subtask, ENVELOPE_REQUIRED),
-      // Claim hoarding: open claims per agent are bounded by what it declared, never below the
-      // worker's parallel-inference ceiling (16) and never above the schema's 64.
-      Math.max(capability?.maxConcurrentTasks ?? 1, MAX_OPEN_CLAIMS_FLOOR)
-    );
+    // The book enforces the bid's class, price and constraints. The subtask's own constraints are
+    // checked too, so a task gossiped from a peer (no local bid) still cannot go to an under-spec agent.
+    // A model call also needs a free slot, and is left briefly to an idle agent when this one is busy.
+    // Task privacy: with ENVELOPE_REQUIRED an agent without an envelope key takes no user data.
+    const mayTake = (subtask: Subtask) => canTake(subtask) && mayTakeNow(body.agentId, subtask, claims, nowMs) && envelopePolicyAllows(capability, subtask, ENVELOPE_REQUIRED);
+    // Claim hoarding: open claims per agent are bounded by what it declared, never below the
+    // worker's parallel-inference ceiling (16) and never above the schema's 64.
+    const maxOpen = Math.max(capability?.maxConcurrentTasks ?? 1, MAX_OPEN_CLAIMS_FLOOR);
+    // Run 11 (inf-1795652230416-401ddacd, two buyers each held for their nearest EU host): the lhr
+    // host pulled while fra (just full) was preferred for the older call, so it took fra's buyer's
+    // call and its own lhr buyers waited, one refused. A call held for this agent goes first.
+    const task =
+      queue.claim(body.agentId, capability?.activeModel, pullerAccount, (subtask) => preferredAgentFor(subtask.id, nowMs) === body.agentId && mayTake(subtask), maxOpen) ??
+      queue.claim(body.agentId, capability?.activeModel, pullerAccount, mayTake, maxOpen);
     // Envelope encryption: an agent that registered an X25519 key only ever gets the subtask
     // encrypted. Built before anything about the claim is recorded, so a failure hands the subtask
     // straight back (it stays claimable for others) and nothing is sent in plaintext.
@@ -476,7 +477,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       // (the nearest free host, best fit's pick): the next run can tell a lapsed hold from a race.
       if (task.kind === "inference") {
         const submittedAtMs = usagePending.get(task.taskId)?.atMs;
-        app.log.info({ taskId: task.taskId, subtaskId: task.id, agentId: body.agentId, model: task.requestedModel ?? null, elapsedMs: submittedAtMs === undefined ? null : nowMs - submittedAtMs, waitedMs: claimed.waitedMs, preferred: claimed.preferred, preferredHolding: claimed.preferredHolding, reason: claimed.preferred === null ? "no_preference" : claimed.byPreferred ? "preferred" : "preference_lapsed" }, "inference_claimed");
+        app.log.info({ taskId: task.taskId, subtaskId: task.id, agentId: body.agentId, model: task.requestedModel ?? null, elapsedMs: submittedAtMs === undefined ? null : nowMs - submittedAtMs, waitedMs: claimed.waitedMs, preferred: claimed.preferred, preferredHolding: claimed.preferredHolding, reason: claimed.preferred === null ? "no_preference" : claimed.byPreferred ? "preferred" : claimed.preferredHolding ? "preferred_cannot_take" : "preference_lapsed" }, "inference_claimed");
       }
     }
     // Host memory: a call for a model not loaded there counts against the agent's headroom until it shows as loaded.

@@ -179,11 +179,46 @@ function withClientRtt(clientRegion: string | null | undefined, agentRegion: str
   return rtt === undefined ? {} : { clientRttMs: rtt };
 }
 
+/**
+ * Run 11 (40 simple Auto calls in two bursts: 14 refused "every machine that runs
+ * qwen2.5-coder:1.5b is busy" while this coordinator's cloud host had 16/16 free): with its own
+ * 1.5b hosts full, best fit sent each call to the peer's two CPU hosts (route_elsewhere), whose
+ * world view (fetched up to WORLD_PEER_CACHE_MS ago, built up to WORLD_LOCAL_CACHE_MS before that)
+ * still showed them free. Every call of the burst went there; the peer has no cloud host, so it
+ * refused all but the two it could run. A peer agent's free slots now count the Auto calls this
+ * coordinator sent it since its view was built (and within PEER_REDIRECT_DEBIT_MS): once they are
+ * spoken for, the cloud overflow here (cloudConsidered) takes the rest.
+ */
+export const PEER_REDIRECT_DEBIT_MS = 20_000;
+/** A call sent this long before the peer built its view may not be in it yet (portal round trip). */
+const PEER_REDIRECT_INFLIGHT_MS = 1_000;
+const peerRedirects = new Map<string, number[]>();
+
+/** An Auto call was sent to `agentId` on a peer coordinator (route_elsewhere). */
+export function notePeerRedirect(agentId: string, nowMs = Date.now()): void {
+  const kept = (peerRedirects.get(agentId) ?? []).filter((t) => nowMs - t < PEER_REDIRECT_DEBIT_MS);
+  kept.push(nowMs);
+  peerRedirects.set(agentId, kept);
+  if (peerRedirects.size > MAX_OUTCOMES) peerRedirects.delete(peerRedirects.keys().next().value as string);
+}
+
+/** Auto calls sent to the peer agent that its view (built at `viewAtMs`) may not show yet. */
+export function peerRedirectsPending(agentId: string, viewAtMs: number, nowMs = Date.now()): number {
+  const since = Math.max(viewAtMs - PEER_REDIRECT_INFLIGHT_MS, nowMs - PEER_REDIRECT_DEBIT_MS);
+  return (peerRedirects.get(agentId) ?? []).filter((t) => t >= since && t <= nowMs).length;
+}
+
+/** Tests. */
+export function clearPeerRedirects(): void {
+  peerRedirects.clear();
+}
+
 /** Agents of peer coordinators from their world views (only those that sent `perf`). */
 export function peerAgentViews(worlds: Array<{ world: LocalWorld; linkRttMs: number | null }>, nowMs = Date.now(), clientRegion?: string | null): AgentView[] {
   const out: AgentView[] = [];
   for (const { world, linkRttMs } of worlds) {
     if (world.coordinator.id === identity.peerId) continue;
+    const viewAtMs = Number.isFinite(world.generatedAtMs) ? world.generatedAtMs : 0;
     for (const a of world.agents) {
       const perf = a.perf;
       if (!perf || a.status === "stale" || !a.models.length) continue;
@@ -197,7 +232,8 @@ export function peerAgentViews(worlds: Array<{ world: LocalWorld; linkRttMs: num
         models: a.models,
         activeModel: a.activeModel,
         slots: a.slots,
-        freeSlots: perf.freeSlots,
+        // Run 11: less the Auto calls sent to it that its view does not show yet.
+        freeSlots: Math.max(0, perf.freeSlots - peerRedirectsPending(a.agentId, viewAtMs, nowMs)),
         ...(perf.contextWindow !== null ? { contextWindow: perf.contextWindow } : {}),
         ...(perf.tokensPerSec !== null ? { tokensPerSec: perf.tokensPerSec } : {}),
         ...(perf.reliability !== null ? { reliability: perf.reliability } : {}),
@@ -339,7 +375,11 @@ export async function resolveAuto(
   const c = result.chosen;
   if (c && !c.local) {
     const w = views.find((v) => v.world.coordinator.id === c.coordinatorId);
-    if (w?.world.coordinator.url) return { result, elsewhere: { coordinatorId: c.coordinatorId, url: w.world.coordinator.url } };
+    if (w?.world.coordinator.url) {
+      // Run 11: its slot is spoken for until the peer's view shows the call (peerAgentViews).
+      notePeerRedirect(c.agentId, nowMs);
+      return { result, elsewhere: { coordinatorId: c.coordinatorId, url: w.world.coordinator.url } };
+    }
   }
   return { result };
 }
