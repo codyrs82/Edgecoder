@@ -140,9 +140,34 @@ export const WORK_PROMPT_TOKEN_ALLOWANCE = 256;
  * Bytes overstate tokens (code and prose run ~3.5–4 bytes per token, and the JSON escaping of the
  * messages adds more); with INFERENCE_RESERVE_MARGIN the hold covers 2 bytes per token. Bounding the
  * prompt at one token per byte + 2048 held glm-5.3 at ~66 cSats per call (run 6) and 402'd buyers
- * with ~100 cSats. A count past the hold still settles at the hold (job_cost_capped_at_reserve).
+ * with ~100 cSats. A count past the hold is settled in full from the buyer's balance at settle time
+ * (results.ts accrueResultCredits), within the bound on reported counts (inference-streams.ts
+ * boundTokenCounts: request bytes + PROMPT_TOKEN_ALLOWANCE).
  */
 export const CLOUD_PROMPT_BYTES_PER_TOKEN = 3;
+
+/**
+ * A local model call's (GPU, CPU, Apple) prompt bound for its hold: the larger of the digit-aware
+ * token estimate of its queued input (start-eta.ts promptTokenEstimate) × LOCAL_PROMPT_ESTIMATE_FACTOR
+ * and its bytes / LOCAL_PROMPT_BYTES_PER_TOKEN, plus the chat-template allowance, and never above
+ * what /inference/chunks accepts (bytes + PROMPT_TOKEN_ALLOWANCE). It was one token per byte: run 18's
+ * 62,015-byte prompt (~18k tokens) on qwen3-coder:30b held 127.1 cSats, of which ~85 was its prompt
+ * counted at ~3.4 times its size. A call whose real count is past the hold (a dense prompt: minified
+ * JSON, short keys) is still paid in full: the rest comes from the buyer's balance at settle time.
+ */
+export const LOCAL_PROMPT_ESTIMATE_FACTOR = 1.25;
+export const LOCAL_PROMPT_BYTES_PER_TOKEN = 2;
+
+/**
+ * The prompt tokens a local model call is held for (see LOCAL_PROMPT_ESTIMATE_FACTOR): `estimate` is
+ * the digit-aware token estimate of the queued input; without one, bytes / 4.
+ */
+export function localPromptTokensMax(inputBytes: number, estimate: number | undefined, allowance: number): number {
+  const bytes = Math.max(0, inputBytes);
+  const est = estimate !== undefined && Number.isFinite(estimate) && estimate > 0 ? estimate : Math.ceil(bytes / 4);
+  const bound = Math.max(Math.ceil(est * LOCAL_PROMPT_ESTIMATE_FACTOR), Math.ceil(bytes / LOCAL_PROMPT_BYTES_PER_TOKEN));
+  return Math.min(bound, bytes) + allowance;
+}
 /** Safety factor on the slow-host estimate, and a fixed allowance per call (first token, scheduling). */
 export const WORK_TIME_SAFETY = 2;
 export const WORK_TIME_OVERHEAD_MS = 5_000;
@@ -293,11 +318,13 @@ export const INFERENCE_RESERVE_MARGIN = 1.5;
  *   Settlement bills the floor on at most expectedWorkMs of the counts the call reported
  *   (inferenceCostMsat floorMaxMs), never more than this bound.
  *
- * Settlement never takes more than the reserve (results.ts takeTaskBudget): a hold is not topped up
- * after the fact, as the buyer's balance may already be spent on other calls and a top-up that fails
- * would leave the host's earning without a matching charge. A cost above it (the BTC price fell by
- * over a third, a capped maxCSats, an agent that reports no token counts and is priced per second) is
- * settled at the reserve and logged (job_cost_capped_at_reserve).
+ * A model call's cost above its reserve (a prompt denser than its bound, the BTC price fell by over a
+ * third, a capped maxCSats) is settled from the buyer's balance at settle time, up to what it holds,
+ * in the same database transaction as the host's earning (results.ts accrueResultCredits): the host
+ * is paid in full, and only what the buyer cannot cover goes unpaid (logged as
+ * job_cost_over_reserve_unpaid and recorded on the billing entry, the usage record and the accrual's
+ * ledger record). The counts it is priced on stay bounded by what the request and reply can hold
+ * (inference-streams.ts boundTokenCounts), whatever the reserve.
  */
 export function inferenceReserveMsat(input: {
   paramsB: number;

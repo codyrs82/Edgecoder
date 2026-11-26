@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { BUILTIN_CLOUD_MODELS } from "../../src/cloud-host/catalog.js";
-import { CLOUD_PROMPT_BYTES_PER_TOKEN, INFERENCE_RESERVE_MARGIN, WORK_PROMPT_TOKEN_ALLOWANCE, usdToMsat } from "../../src/economy/job-pricing.js";
+import { CLOUD_PROMPT_BYTES_PER_TOKEN, INFERENCE_RESERVE_MARGIN, LOCAL_PROMPT_BYTES_PER_TOKEN, LOCAL_PROMPT_ESTIMATE_FACTOR, localPromptTokensMax, tokenPriceUsdPerM, WORK_PROMPT_TOKEN_ALLOWANCE, usdToMsat } from "../../src/economy/job-pricing.js";
 import { modelTokenPrice } from "../../src/economy/cloud-pricing.js";
 import { inferenceCallReserve } from "../../src/swarm/coordinator/economy.js";
 import { OUTPUT_TOKEN_ALLOWANCE, PROMPT_TOKEN_ALLOWANCE } from "../../src/swarm/inference-streams.js";
@@ -47,10 +47,41 @@ describe("cloud model call hold", () => {
     expect(b.reserveMsat).toBeLessThan(a.reserveMsat);
   });
 
-  it("a local model keeps its byte bound (unchanged)", () => {
-    const r = inferenceCallReserve({ model: "qwen3-coder:30b", taskClass: "any", timeoutMs: 180_000, inputBytes: 16_000, maxTokens: 2048 });
-    expect(r.tokenMsat).toBeGreaterThan(0);
-    expect(r.reserveMsat).toBeGreaterThanOrEqual(Math.ceil(Math.max(r.tokenMsat, r.floorMsat)));
+  describe("a local model holds its prompt at max(estimate × 1.25, bytes / 2) + the template allowance", () => {
+    const local = (inputBytes: number, promptTokens?: number) =>
+      inferenceCallReserve({ model: "qwen3-coder:30b", taskClass: "gpu", timeoutMs: 180_000, inputBytes, maxTokens: 2048, ...(promptTokens !== undefined ? { promptTokens } : {}) });
+    const tokenBound = (promptTokens: number) => {
+      const p = tokenPriceUsdPerM(30);
+      return Math.ceil(usdToMsat((promptTokens * p.input + (2048 + OUTPUT_TOKEN_ALLOWANCE) * p.output) / 1e6, FALLBACK_BTC_USD));
+    };
+
+    it("prose (~4 bytes a token): bytes / 2, under the old one token per byte", () => {
+      const r = local(16_000, 4_000);
+      expect(r.tokenMsat).toBe(tokenBound(16_000 / LOCAL_PROMPT_BYTES_PER_TOKEN + PROMPT_TOKEN_ALLOWANCE));
+      expect(r.tokenMsat).toBeLessThan(tokenBound(16_000 + PROMPT_TOKEN_ALLOWANCE));
+      expect(r.reserveMsat).toBeGreaterThanOrEqual(Math.ceil(Math.max(r.tokenMsat, r.floorMsat)));
+    });
+
+    it("digit-heavy text (the estimate past bytes / 2): estimate × 1.25", () => {
+      const r = local(16_000, 7_000);
+      expect(r.tokenMsat).toBe(tokenBound(Math.ceil(7_000 * LOCAL_PROMPT_ESTIMATE_FACTOR) + PROMPT_TOKEN_ALLOWANCE));
+    });
+
+    it("never above what /inference/chunks accepts (bytes + allowance), even for all digits", () => {
+      const r = local(16_000, 16_000);
+      expect(r.tokenMsat).toBe(tokenBound(16_000 + PROMPT_TOKEN_ALLOWANCE));
+    });
+
+    it("without an estimate: bytes / 2", () => {
+      expect(local(16_000).tokenMsat).toBe(tokenBound(8_000 + PROMPT_TOKEN_ALLOWANCE));
+    });
+
+    it("the bound itself", () => {
+      expect(localPromptTokensMax(62_015, 18_151, PROMPT_TOKEN_ALLOWANCE)).toBe(31_008 + PROMPT_TOKEN_ALLOWANCE);
+      expect(localPromptTokensMax(10_000, 5_000, 0)).toBe(6_250);
+      expect(localPromptTokensMax(10_000, 9_999, 0)).toBe(10_000);
+      expect(localPromptTokensMax(0, 0, 0)).toBe(0);
+    });
   });
 
   it("the buyer's maxCSats still caps it", () => {

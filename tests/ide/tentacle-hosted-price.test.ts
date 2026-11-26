@@ -47,6 +47,12 @@ describe("hosted price refusals as data", () => {
     expect(hostedErrorInfo(undefined, "No machine on the network can run qwen3:8b")).toBeUndefined();
   });
 
+  it("a balance refusal: the reserve from the data (expected cost too), or from the message's words", () => {
+    const msg = "Not enough cSats for this request (it sets aside up to 83.525 cSats; expected cost about 18 cSats; unused cSats come back).";
+    expect(hostedErrorInfo({ code: "insufficient_credits", neededCSats: 83.525, expectedCSats: 18.407 }, msg)).toEqual({ code: "insufficient_credits", neededCSats: 83.525, expectedCSats: 18.407 });
+    expect(hostedErrorInfo(undefined, msg)).toEqual({ code: "insufficient_credits", neededCSats: 83.525 });
+  });
+
   it("takes the endpoint's own data first", () => {
     expect(hostedErrorInfo({ code: "no_route_fits", reason: "price", neededCSats: 4.2, computeClass: "gpu" }, RUN13)).toEqual({ code: "no_route_fits", reason: "price", neededCSats: 4.2, computeClass: "gpu" });
   });

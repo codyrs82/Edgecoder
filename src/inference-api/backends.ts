@@ -346,10 +346,10 @@ export function autoBackend(opts: {
     }
     const money = errs.find((e): e is ChatBackendError => e instanceof ChatBackendError && (e.info?.code === "insufficient_credits" || (e.info?.code === "no_route_fits" && e.info.reason === "price") || e.status === 402));
     if (money && (policy === "network_only" || policy === "model" || routes.every((r) => r.placement === "network"))) {
-      const est = money.info?.neededCSats !== undefined ? { cSats: money.info.neededCSats, computeClass: money.info.computeClass } : cheapestNetworkEstimate(workload, inputs, cls);
+      const est: { cSats: number; computeClass?: string; expectedCSats?: number } | undefined = money.info?.neededCSats !== undefined ? { cSats: money.info.neededCSats, computeClass: money.info.computeClass, ...(money.info.expectedCSats !== undefined ? { expectedCSats: money.info.expectedCSats } : {}) } : cheapestNetworkEstimate(workload, inputs, cls);
       const msg = notEnoughCSatsMessage(inputs, planOpts, est ? { ...est, computeClass: cls ?? est.computeClass } : undefined);
       const tail = policy === "network_only" || policy === "model" ? "" : " No model on this computer or your machines can take it instead: install one in Settings > Models, or buy cSats.";
-      throw new ChatBackendError(msg + tail, 402, undefined, { code: "not_enough_csats", ...(est?.cSats !== undefined ? { neededCSats: est.cSats } : {}), ...(cls ? { computeClass: cls } : {}) });
+      throw new ChatBackendError(msg + tail, 402, undefined, { code: "not_enough_csats", ...(est?.cSats !== undefined ? { neededCSats: est.cSats } : {}), ...(est?.expectedCSats !== undefined ? { expectedCSats: est.expectedCSats } : {}), ...(cls ? { computeClass: cls } : {}) });
     }
     throw lastErr instanceof ChatBackendError ? lastErr :new ChatBackendError((lastErr as Error)?.message ?? "Auto couldn't start anywhere", 502);
   };

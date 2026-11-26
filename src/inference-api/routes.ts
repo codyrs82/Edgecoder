@@ -121,7 +121,7 @@ function edgeSafe(status: number): number {
  * only got the message, so a price refusal ("every fitting model costs more than the 1.237 cSats
  * ceiling") could not wait for room in the session's budget, and the helper failed.
  */
-export type ErrorInfo = { code: string; reason?: string; neededCSats?: number; computeClass?: string };
+export type ErrorInfo = { code: string; reason?: string; neededCSats?: number; expectedCSats?: number; computeClass?: string };
 export function errorInfoOf(err: unknown): ErrorInfo | undefined {
   const info = err instanceof ChatBackendError ? err.info : undefined;
   if (!info || typeof info.code !== "string" || !info.code) return undefined;
@@ -129,6 +129,7 @@ export function errorInfoOf(err: unknown): ErrorInfo | undefined {
     code: info.code.slice(0, 60),
     ...(typeof info.reason === "string" ? { reason: info.reason.slice(0, 40) } : {}),
     ...(typeof info.neededCSats === "number" && Number.isFinite(info.neededCSats) ? { neededCSats: info.neededCSats } : {}),
+    ...(typeof info.expectedCSats === "number" && Number.isFinite(info.expectedCSats) ? { expectedCSats: info.expectedCSats } : {}),
     ...(typeof info.computeClass === "string" ? { computeClass: info.computeClass.slice(0, 40) } : {}),
   };
 }

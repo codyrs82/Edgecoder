@@ -92,6 +92,7 @@ export function hostedErrorInfo(sent: unknown, message: string): FailureInfo | u
       code: String(o.code).slice(0, 60),
       ...(typeof o.reason === "string" ? { reason: o.reason.slice(0, 40) } : {}),
       ...(typeof o.neededCSats === "number" && Number.isFinite(o.neededCSats) ? { neededCSats: o.neededCSats } : {}),
+      ...(typeof o.expectedCSats === "number" && Number.isFinite(o.expectedCSats) ? { expectedCSats: o.expectedCSats } : {}),
       ...(typeof o.computeClass === "string" ? { computeClass: o.computeClass.slice(0, 40) } : {}),
     };
   }

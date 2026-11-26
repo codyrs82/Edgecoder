@@ -9,7 +9,7 @@ import { request } from "undici";
 import type { Subtask, SubtaskResult } from "../../common/types.js";
 import { signForwardedResult } from "../../mesh/peer-trust.js";
 import type { AgentResultEnvelope } from "../../mesh/forwarded-agent-envelope.js";
-import { accruePricedJob, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, sameAccountGroup } from "../../credits/store.js";
+import { accruePricedJobWithOverflow, grantCreditsIdempotent, refundTxId, rewardAccountForAgent, sameAccountGroup } from "../../credits/store.js";
 import { modelTokenPrice } from "../../economy/cloud-pricing.js";
 import {
   clampToBand,
@@ -452,21 +452,31 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
   }
   const { cap, eff, computeClass, hardwareWeight, modelParamSizeB, perCredit, rateMsat, priced } = priceExecution(r);
   claimedTradePrice.delete(r.subtaskId);
+  // Paid out of a peer coordinator's charge (takeTaskBudget), not a reserve here.
+  const peerOffered = peerOfferBudgetMsat.has(r.subtaskId);
   // What is paid is what the requester is charged: taken out of what was set aside for the task
-  // (never more), before the store is awaited, so results settling together cannot both spend it.
-  // Work nobody set anything aside for (an anonymous task) earns nothing.
-  const costMsat = takeTaskBudget(taskId, r.subtaskId, priced.costMsat, opts.originChargedMsat);
-  // B2: the cost is on the task's billing now; the requester's stream read may answer with it while
-  // the ledger writes below finish (pricingInFlight).
-  opts.onPriced?.();
-  // The reserve is an upper bound on the cost (job-pricing.ts inferenceReserveMsat); a cost above
-  // what is left of it is settled at the reserve, never more. Logged: it should be rare.
+  // before the store is awaited, so results settling together cannot both spend it. Work nobody set
+  // anything aside for (an anonymous task) earns nothing.
+  const takenMsat = takeTaskBudget(taskId, r.subtaskId, priced.costMsat, opts.originChargedMsat);
   const billing = taskBilling.get(taskId);
-  if (billing && !billing.refunded && Number.isFinite(priced.costMsat) && Math.round(priced.costMsat) > costMsat) {
-    app.log.warn({ taskId, subtaskId: r.subtaskId, kind: subtask.kind, model: subtask.requestedModel, pricedMsat: Math.round(priced.costMsat), settledMsat: costMsat, reservedMsat: billing.reservedMsat, basis: priced.basis }, "job_cost_capped_at_reserve");
+  const pricedMsat = Number.isFinite(priced.costMsat) ? Math.round(priced.costMsat) : 0;
+  // A model call's cost past its reserve (a prompt denser than its bound, job-pricing.ts
+  // inferenceReserveMsat): the rest is taken from the buyer's balance with the host's earning, in one
+  // transaction (accruePricedJobWithOverflow), so the host is paid in full, up to the buyer's own
+  // ceiling for the call (maxCSats, billing.overflowCapMsat). Only a model call billed here in cSats
+  // at submit: a peer's subtask is paid what its origin charged, a wallet-paid call goes on its tally,
+  // and a code job or an entry restored after a restart (no ceiling known) is settled at the reserve.
+  const overReserveMsat = Math.max(0, pricedMsat - takenMsat);
+  const overflowOk = subtask.kind === "inference" && !!billing && !billing.refunded && !billing.nwc && !peerOffered && billing.overflowCapMsat !== undefined;
+  const overflowWantMsat = overflowOk ? Math.min(overReserveMsat, Math.max(0, billing!.overflowCapMsat! - billing!.costMsat)) : 0;
+  // B2: the cost is on the task's billing now; the requester's stream read may answer with it while
+  // the ledger writes below finish (pricingInFlight). With an overflow, once that is settled too.
+  if (overflowWantMsat === 0) opts.onPriced?.();
+  if (!overflowOk && billing && !billing.refunded && overReserveMsat > 0) {
+    app.log.warn({ taskId, subtaskId: r.subtaskId, kind: subtask.kind, model: subtask.requestedModel, pricedMsat, settledMsat: takenMsat, reservedMsat: billing.reservedMsat, basis: priced.basis }, "job_cost_capped_at_reserve");
   }
-  const { agentMsat, feeMsat } = splitJobCost(costMsat, NETWORK_FEE_BPS);
   if (billing?.nwc) {
+    const { agentMsat, feeMsat } = splitJobCost(takenMsat, NETWORK_FEE_BPS);
     // Paid from the buyer's own wallet: a tally to the host and to EdgeCoder's fee, settled over
     // Lightning (direct-payments.ts). No cSats move.
     await recordNwcCall(billing.accountId, rewardAccountId, agentMsat, feeMsat);
@@ -474,9 +484,9 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
     return;
   }
   const valuation = { msatPerCredit: Math.round(perCredit), networkFeeBps: NETWORK_FEE_BPS };
-  let accrued: Awaited<ReturnType<typeof accruePricedJob>> = null;
+  let accrued: Awaited<ReturnType<typeof accruePricedJobWithOverflow>> = null;
   try {
-    accrued = await accruePricedJob(
+    accrued = await accruePricedJobWithOverflow(
       {
         reportId: resultReportId(r.subtaskId),
         agentId: rewardAccountId,
@@ -491,11 +501,31 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
         modelParamSizeB,
         hardwareWeight
       },
-      { agentMsat, feeMsat }
+      { baseCostMsat: takenMsat, feeBps: NETWORK_FEE_BPS },
+      overflowWantMsat > 0 && billing ? { payerAccountId: billing.accountId, wantMsat: overflowWantMsat, reason: "inference_reserve" /* db/postgres.ts reserveReasonForKind("inference") */ } : undefined
     );
   } finally {
     // Nothing was paid (already recorded, #44, or the store failed): the task is not charged for it.
-    if (!accrued) returnTaskBudget(taskId, costMsat);
+    if (!accrued) returnTaskBudget(taskId, takenMsat);
+  }
+  // What the balance covered past the reserve is part of the task's reserve from here on (its spend
+  // row has the reserve's reason): set aside and used, so the refund at settle is unchanged.
+  const coveredMsat = accrued?.coveredMsat ?? 0;
+  const costMsat = takenMsat + coveredMsat;
+  // What the host was not paid: past the buyer's ceiling (maxCSats), or past what its balance held.
+  const overReserve = overflowOk && overReserveMsat > 0 && !!accrued;
+  const unpaidMsat = overReserve ? overReserveMsat - coveredMsat : 0;
+  if (billing && coveredMsat > 0) {
+    billing.reservedMsat += coveredMsat;
+    billing.costMsat += coveredMsat;
+    billing.overflowMsat = (billing.overflowMsat ?? 0) + coveredMsat;
+  }
+  if (billing && unpaidMsat > 0) billing.unpaidMsat = (billing.unpaidMsat ?? 0) + unpaidMsat;
+  if (overflowWantMsat > 0) opts.onPriced?.();
+  if (overReserve) {
+    const log = { taskId, subtaskId: r.subtaskId, model: subtask.requestedModel, accountId: billing?.accountId, pricedMsat, reservedMsat: takenMsat, overflowMsat: coveredMsat, unpaidMsat, overCeilingMsat: overReserveMsat - overflowWantMsat, basis: priced.basis };
+    if (unpaidMsat > 0) app.log.warn(log, "job_cost_over_reserve_unpaid");
+    else app.log.info(log, "job_cost_over_reserve_settled");
   }
   if (accrued) {
     // Market volume stays in credits of work (base-tier seconds).
@@ -509,10 +539,12 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
       payloadJson: JSON.stringify({
         sourceAgentId: r.agentId,
         accountId: rewardAccountId,
-        credits: accrued.credits,
-        msat: accrued.msat,
+        credits: accrued.tx.credits,
+        msat: accrued.tx.msat,
         costMsat,
-        feeMsat,
+        feeMsat: accrued.feeMsat,
+        // A cost past the reserve: what the buyer's balance covered, and what it could not (unpaid).
+        ...(overReserve ? { pricedMsat, reserveMsat: takenMsat, overflowMsat: coveredMsat, ...(unpaidMsat > 0 ? { unpaidMsat } : {}) } : {}),
         pricingBasis: priced.basis,
         ratePerSecondMsat: rateMsat,
         msatPerCredit: valuation?.msatPerCredit,
@@ -533,7 +565,7 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
     await pgStore?.persistLedgerRecord(earningsRecord);
     await persistStatsLedgerRecord(earningsRecord);
     // Work receipt (architecture step 2): countersign the agent's claim for what was just credited.
-    await recordWorkReceipt(r, accrued.credits, computeClass, valuation?.msatPerCredit).catch((error) => app.log.warn({ error, subtaskId: r.subtaskId }, "work_receipt_failed"));
+    await recordWorkReceipt(r, accrued.tx.credits, computeClass, valuation?.msatPerCredit).catch((error) => app.log.warn({ error, subtaskId: r.subtaskId }, "work_receipt_failed"));
   }
 }
 
@@ -843,6 +875,9 @@ export async function refundTaskSubmit(taskId: string): Promise<boolean> {
       if (usage) {
         usagePending.delete(taskId);
         usage.costMsat = billing.costMsat;
+        // A cost past the reserve: what the balance covered and what went unpaid (reports show both).
+        if (billing.overflowMsat) usage.overflowMsat = billing.overflowMsat;
+        if (billing.unpaidMsat) usage.unpaidMsat = billing.unpaidMsat;
         void saveUsage(usage);
       }
       rememberSettled(taskId, billing);

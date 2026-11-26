@@ -129,6 +129,18 @@ describe("not enough cSats", () => {
     expect(err.message).toMatch(/^Not enough cSats: your balance is 50 cSats\. This step needs about 60 cSats on the network\. No model on this computer/);
   });
 
+  it("a named model refused for its reserve: what it sets aside and what it is expected to cost", async () => {
+    const b = autoBackend({
+      inputs: async () => ({ ...today, balanceCSats: 50 }),
+      policy: "network_only",
+      run: () => async function* () { throw new ChatBackendError("Not enough cSats for this request (it sets aside up to 88 cSats; expected cost about 9 cSats; unused cSats come back).", 402, undefined, { code: "insufficient_credits", neededCSats: 88, expectedCSats: 9.2 }); },
+    });
+    const err = await drain(b).catch((e) => e as ChatBackendError);
+    expect(err.message).toBe("Not enough cSats: your balance is 50 cSats. This step sets aside up to 88 cSats on the network; expected cost about 9.2 cSats; unused cSats come back.");
+    expect(err.status).toBe(402);
+    expect(err.info).toMatchObject({ code: "not_enough_csats", neededCSats: 88, expectedCSats: 9.2 });
+  });
+
   it("older coordinators: the reason is read from the detail text", () => {
     expect(noRouteInfo({ detail: "every fitting model costs more than the 0.012 cSats ceiling" })).toEqual({ code: "no_route_fits", reason: "price" });
     expect(noRouteInfo({ detail: "no agent with a model is online" })).toEqual({ code: "no_route_fits", reason: "none" });

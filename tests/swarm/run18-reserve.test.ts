@@ -32,6 +32,7 @@ let economy: any;
 let autoReplace: any;
 let mutable: any;
 let ctx: any;
+let promptTokenEstimate: (text: string) => number;
 const cloud = createPeerKeys("agent-run18-cloud");
 
 /** The run-18 complex prompt (cx.mjs complex(1)) and the input the coordinator queues for it. */
@@ -56,6 +57,8 @@ const TIMEOUT_MS = 180_000;
 const inputBytes = Buffer.byteLength(JSON.stringify({ messages, tools, maxTokens: MAX_TOKENS, temperature: 0 }), "utf8");
 const call = { inputBytes, maxTokens: MAX_TOKENS, timeoutMs: TIMEOUT_MS };
 const cSats = (msat: number) => msat / 1000;
+/** The 30b call's hold at the run's BTC/USD with the prompt bound of 2026-11-26. */
+const RUN18_30B_RESERVE_CSATS = 83.525;
 
 beforeAll(async () => {
   portal = createServer((req, res) => {
@@ -83,6 +86,7 @@ beforeAll(async () => {
   autoReplace = await import("../../src/swarm/coordinator/auto-replace.js");
   ({ mutable } = await import("../../src/swarm/coordinator/mutable-state.js"));
   ctx = await import("../../src/swarm/coordinator/context.js");
+  ({ promptTokenEstimate } = await import("../../src/swarm/coordinator/start-eta.js"));
   await app.ready();
   // The run's cloud host serves both catalog models.
   await register(cloud, "token-cloud", { installedModels: ["deepseek-v4.1-flash", "glm-5.3"], hardwareProfile: { platform: "linux", arch: "x64", cpuCores: 2, ramGb: 2, cloud: { provider: "fireworks" } } });
@@ -151,6 +155,46 @@ describe("run 18: a complex Auto call holds the worst case of where it can run",
       expect(reserve).toBe(own);
       expect(cSats(reserve)).toBeGreaterThan(54.968);
       expect(cSats(reserve)).toBeLessThan(221.665 * 0.6);
+    } finally {
+      mutable.latestRateEpoch = null;
+    }
+  });
+
+  test("the 30b call's own hold: its prompt at bytes / 2 (the estimate × 1.25 is less), not one token per byte", () => {
+    const queued = JSON.stringify({ messages, tools, maxTokens: MAX_TOKENS, temperature: 0 });
+    expect(inputBytes).toBe(62_015);
+    const estimate = promptTokenEstimate(queued);
+    expect(estimate).toBe(18_151);
+    const btcUsd = runBtcUsd();
+    expect(btcUsd).toBeGreaterThan(60_800);
+    expect(btcUsd).toBeLessThan(60_900);
+    mutable.latestRateEpoch = { btcUsd };
+    try {
+      const r = economy.inferenceCallReserve({ model: "qwen3-coder:30b", taskClass: "gpu", ...call, promptTokens: estimate });
+      // 127.1 cSats in the run; the prompt bound is now 31,008 + 2,048 tokens (was 62,015 + 2,048).
+      expect(cSats(r.reserveMsat)).toBeCloseTo(RUN18_30B_RESERVE_CSATS, 3);
+      expect(cSats(r.reserveMsat)).toBeLessThan(127.1 * 0.7);
+      // Flash's worst case is still below it, so an Auto call placed on the 30b holds this.
+      expect(r.reserveMsat).toBeGreaterThan(economy.inferenceCallReserve({ model: "deepseek-v4.1-flash", taskClass: "cloud", ...call }).reserveMsat);
+    } finally {
+      mutable.latestRateEpoch = null;
+    }
+  });
+
+  test("st1's 402 would say what the 30b call sets aside and what it is expected to cost", async () => {
+    const { completionWork, insufficientCreditsBody } = await import("../../src/swarm/coordinator/routes/inference.js");
+    const { expectedOutputTokens } = await import("../../src/swarm/coordinator/expected-output.js");
+    mutable.latestRateEpoch = { btcUsd: runBtcUsd() };
+    try {
+      const job = describeJob({ messages: messages as any, tools: tools as any, maxTokens: MAX_TOKENS }, {});
+      const work = completionWork(messages as any, tools, MAX_TOKENS, expectedOutputTokens(job));
+      const reserve = economy.inferenceCallReserve({ model: "qwen3-coder:30b", taskClass: "gpu", ...call, promptTokens: promptTokenEstimate(JSON.stringify({ messages, tools, maxTokens: MAX_TOKENS, temperature: 0 })) }).reserveMsat;
+      const expected = economy.inferenceCallExpectedMsat({ model: "qwen3-coder:30b", taskClass: "gpu", timeoutMs: TIMEOUT_MS, ...work });
+      const body = insufficientCreditsBody(reserve, expected);
+      expect(body.neededCSats).toBeCloseTo(RUN18_30B_RESERVE_CSATS, 3);
+      expect(body.expectedCSats).toBeGreaterThan(0);
+      expect(body.expectedCSats).toBeCloseTo(18.407, 3);
+      expect(body.message).toBe(`Not enough cSats for this request (it sets aside up to ${body.neededCSats} cSats; expected cost about ${Math.round(body.expectedCSats)} cSats; unused cSats come back).`);
     } finally {
       mutable.latestRateEpoch = null;
     }

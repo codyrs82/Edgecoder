@@ -194,12 +194,14 @@ export interface NetworkTarget {
 /**
  * Why a network call couldn't start, as data (the apps word it): `code` the coordinator's error
  * ("no_route_fits", "insufficient_credits"), `reason` for no_route_fits ("none": no machine,
- * "price": nothing within what may be spent), `neededCSats` about what the step needs.
+ * "price": nothing within what may be spent), `neededCSats` about what the step needs (for
+ * insufficient_credits: what the call sets aside), `expectedCSats` what it is expected to cost.
  */
 export interface NetworkFailureInfo {
   code: string;
   reason?: string;
   neededCSats?: number;
+  expectedCSats?: number;
   computeClass?: string;
 }
 
@@ -389,14 +391,15 @@ async function* streamSubmitted(
       err === "no_agent_in_class" ? `No ${String(sub.json.computeClass ?? req.computeClass)} machine runs ${req.model} right now; it runs on: ${((sub.json.availableClasses as string[]) ?? []).join(", ") || "no class"}. Nothing was charged.` :
       err === "reservation_not_active" ? "That reservation isn't active: it ended, or it belongs to another account. Reserve again on the Compute page." :
       err === "reserved_agent_lacks_model" ? `The reserved machine doesn't have ${req.model}; it has: ${((sub.json.models as string[]) ?? []).join(", ") || "no models"}.` :
-      err === "insufficient_credits" ? `Not enough cSats for this request (it sets aside up to ${sub.json.neededCSats} cSats; unused cSats come back).` :
+      err === "insufficient_credits"
+        ? typeof sub.json.message === "string" && sub.json.message.startsWith("Not enough cSats") ? sub.json.message.slice(0, 300) : `Not enough cSats for this request (it sets aside up to ${sub.json.neededCSats} cSats; unused cSats come back).` :
       err === "agent_not_registered" ? "This computer's agent isn't connected to the network yet." :
       err === "coordinator_draining" ? "The coordinator is restarting for an update. Nothing was charged; try again in a few seconds." :
       `Network request failed: ${err}`;
     // 404 (reservation_not_active) stays a 404: as a 502 the edge (Cloudflare) swaps the body for its
     // own error page, so an API caller never sees why.
     const info: NetworkFailureInfo | undefined =
-      err === "insufficient_credits" ? { code: err, ...(typeof sub.json.neededCSats === "number" ? { neededCSats: sub.json.neededCSats } : {}), ...(req.computeClass && req.computeClass !== "any" ? { computeClass: req.computeClass } : {}) } :
+      err === "insufficient_credits" ? { code: err, ...(typeof sub.json.neededCSats === "number" ? { neededCSats: sub.json.neededCSats } : {}), ...(typeof sub.json.expectedCSats === "number" && Number.isFinite(sub.json.expectedCSats) ? { expectedCSats: sub.json.expectedCSats } : {}), ...(req.computeClass && req.computeClass !== "any" ? { computeClass: req.computeClass } : {}) } :
       err === "no_agent_in_class" || err === "no_agent_has_model" ? { code: err, ...(req.computeClass && req.computeClass !== "any" ? { computeClass: req.computeClass } : {}) } :
       undefined;
     if (err === "coordinator_draining") throw new CoordinatorDrainingError(drainRetryAfterSec(), typeof sub.json.coordinatorUrl === "string" ? sub.json.coordinatorUrl : undefined);

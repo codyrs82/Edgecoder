@@ -8,7 +8,7 @@ import { nwcSpotBuyer, nwcTally } from "../direct-payments.js";
 import { z } from "zod";
 import type { ResourceClass, Subtask } from "../../../common/types.js";
 import { DuplicateDebitError, reserveTaskCredits, rewardAccountForAgent, taskReserveKey } from "../../../credits/store.js";
-import { cSatsPerMTokens, msatToCSats, ratePerSecondMsat } from "../../../economy/job-pricing.js";
+import { cSatsPerMTokens, cSatsToMsat, msatToCSats, ratePerSecondMsat } from "../../../economy/job-pricing.js";
 import { modelTokenPrice } from "../../../economy/cloud-pricing.js";
 import { cloudModelSpec, isCloudModel, orderCloudModels } from "../../../cloud-host/catalog.js";
 import { catalogEntryForTag } from "../../../model/catalog.js";
@@ -56,6 +56,7 @@ import {
   effectiveHardware,
   rateOracleConfig,
   classRefMsatPerCredit,
+  inferenceCallExpectedMsat,
   inferenceCallReserve,
   orderBook,
   MARKET_DEFAULT_BID_PREMIUM_BPS
@@ -1033,6 +1034,24 @@ export interface CompletionCheckOptions {
   outputTokens?: number;
 }
 
+/** An "about" cSats figure for a message: 2 decimals under 10, whole above. */
+const fmtCSats = (c: number) => (c < 10 ? c.toFixed(2).replace(/\.?0+$/, "") : String(Math.round(c)));
+
+/**
+ * The 402 a model call gets when the buyer's balance can't cover its reserve: what it sets aside
+ * (`neededCSats`) and what it is expected to cost (`expectedCSats`), as data and in words.
+ */
+export function insufficientCreditsBody(reserveMsat: number, expectedMsat: number): { error: "insufficient_credits"; neededCSats: number; expectedCSats: number; message: string } {
+  const neededCSats = msatToCSats(reserveMsat);
+  const expectedCSats = Number(msatToCSats(Math.max(0, Math.min(reserveMsat, expectedMsat))).toFixed(3));
+  return {
+    error: "insufficient_credits",
+    neededCSats,
+    expectedCSats,
+    message: `Not enough cSats for this request (it sets aside up to ${neededCSats} cSats; expected cost about ${fmtCSats(expectedCSats)} cSats; unused cSats come back).`,
+  };
+}
+
 /**
  * The tokens completion admission judges a call on: its prompt, and its reply (max_tokens, else
  * COMPLETION_UNSET_MAX_TOKENS) × the output share. Run 9: the prompt at its real density
@@ -1450,7 +1469,9 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
     // price for its input and output cap, or the class power floor for its timeout, × 1.5), capped
     // by the buyer's maxCSats; was 180 s at the top of the dearest band (~750 cSats) for every call.
     const maxCSats = cleanHints(body.routing).maxCSats ?? routed?.job.maxCSats;
-    const sized = billed ? inferenceCallReserve({ model: body.model, taskClass, timeoutMs: body.timeoutMs, inputBytes: Buffer.byteLength(input, "utf8"), maxTokens, ...(maxCSats !== undefined ? { maxCSats } : {}) }) : undefined;
+    // The prompt is held at its digit-aware estimate × 1.25 or bytes / 2, whichever is more (a local
+    // model; a cloud model at bytes / 3): a cost past the hold is settled from the balance at settle.
+    const sized = billed ? inferenceCallReserve({ model: body.model, taskClass, timeoutMs: body.timeoutMs, inputBytes: Buffer.byteLength(input, "utf8"), maxTokens, promptTokens: promptTokenEstimate(input), ...(maxCSats !== undefined ? { maxCSats } : {}) }) : undefined;
     // Run 11: an Auto call may overflow to a cloud host here if nothing else can start it (auto-replace.ts):
     // its reserve covers that worst case too (the unused part is refunded at settle, as always).
     const overflowMsat = routed && billed && taskClass !== "cloud" ? cloudOverflowReserveMsat({ inputBytes: Buffer.byteLength(input, "utf8"), maxTokens, timeoutMs: body.timeoutMs, ...(maxCSats !== undefined ? { maxCSats } : {}), ...(routed.onlyClass ? { onlyClass: routed.onlyClass } : {}), job: routed.job }) : 0;
@@ -1473,12 +1494,19 @@ export function registerInferenceRoutes(app: CoordinatorApp): void {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         if (err instanceof DuplicateDebitError) return reply.code(409).send({ error: "duplicate_task", taskId: body.taskId });
-        if (message.startsWith("insufficient_credits")) return reply.code(402).send({ error: "insufficient_credits", neededCSats: msatToCSats(reserve) });
+        if (message.startsWith("insufficient_credits")) {
+          // What the call sets aside and what it is expected to cost, so the buyer sees both.
+          const work = completionWork(body.messages as ChatMessage[], body.tools, body.maxTokens, routed?.judgedOutput);
+          const expectedMsat = Math.min(reserve, inferenceCallExpectedMsat({ model: body.model, taskClass, timeoutMs: body.timeoutMs, ...work }));
+          return reply.code(402).send(insufficientCreditsBody(reserve, expectedMsat));
+        }
         req.log.error({ err, taskId: body.taskId }, "inference_debit_failed");
         return reply.code(500).send({ error: "credit_debit_failed" });
       }
     }
-    taskBilling.set(body.taskId, { accountId, reservedMsat: reserve, perSubtaskReserveMsat: reserve, costMsat: 0, refunded: false, submittedAtMs: Date.now(), ...(nwcSpot ? { nwc: true } : {}) });
+    // A cost past the reserve is taken from the balance at settle, up to the buyer's maxCSats (results.ts).
+    const overflowCapMsat = maxCSats !== undefined && Number.isFinite(maxCSats) && maxCSats > 0 ? Math.max(reserve, Math.floor(cSatsToMsat(maxCSats))) : Number.MAX_SAFE_INTEGER;
+    taskBilling.set(body.taskId, { accountId, reservedMsat: reserve, perSubtaskReserveMsat: reserve, costMsat: 0, refunded: false, submittedAtMs: Date.now(), ...(nwcSpot ? { nwc: true } : reserve > 0 ? { overflowCapMsat } : {}) });
     usagePending.set(body.taskId, {
       id: body.taskId, accountId, atMs: Date.now(), kind: "inference", placement: reservationId ? "reserved" : onlyAccountId ? "mine" : "network",
       model: body.model, ...(taskClass !== "any" ? { computeClass: taskClass } : {}), ok: false, durationMs: 0, costMsat: 0, ...(body.source ? { source: body.source } : {}),

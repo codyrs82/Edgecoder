@@ -715,7 +715,7 @@ export function classUnavailableMessage(cls: string, inp: RouteInputs, model?: s
  * cSats (Harry's budget has 6 left today). This step needs about 0.4 cSats on a Datacenter GPU."
  * Every one starts "Not enough cSats" (the apps key their Buy cSats action on it).
  */
-export function notEnoughCSatsMessage(inp: RouteInputs, opts: PlanOptions = {}, need?: { cSats?: number; computeClass?: string }): string {
+export function notEnoughCSatsMessage(inp: RouteInputs, opts: PlanOptions = {}, need?: { cSats?: number; computeClass?: string; expectedCSats?: number }): string {
   const parts: string[] = [];
   const bal = inp.balanceCSats;
   const left = opts.allowanceCSats;
@@ -724,7 +724,10 @@ export function notEnoughCSatsMessage(inp: RouteInputs, opts: PlanOptions = {}, 
   else if (budget) parts.push(`${budget}.`);
   else parts.push("there aren't enough cSats for this step.");
   const where = need?.computeClass && need.computeClass !== "any" ? ` on a${/^[AEIOU]/i.test(className(need.computeClass)) ? "n" : ""} ${className(need.computeClass)}` : " on the network";
-  if (need?.cSats !== undefined && need.cSats > 0) parts.push(`This step needs about ${fmtCSats(need.cSats)} cSats${where}.`);
+  // A call refused for its reserve (402 insufficient_credits) says what it sets aside and what it is expected to cost.
+  if (need?.cSats !== undefined && need.cSats > 0 && need.expectedCSats !== undefined && need.expectedCSats >= 0) {
+    parts.push(`This step sets aside up to ${fmtCSats(need.cSats)} cSats${where}; expected cost about ${fmtCSats(need.expectedCSats)} cSats; unused cSats come back.`);
+  } else if (need?.cSats !== undefined && need.cSats > 0) parts.push(`This step needs about ${fmtCSats(need.cSats)} cSats${where}.`);
   return `Not enough cSats: ${parts.join(" ")}`;
 }
 

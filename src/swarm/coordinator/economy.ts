@@ -6,7 +6,7 @@
  */
 import { randomInt } from "node:crypto";
 import type { PaymentIntent, PriceEpochRecord, ResourceClass } from "../../common/types.js";
-import { CLOUD_PROMPT_BYTES_PER_TOKEN, cSatsToMsat, inferenceReserveMsat, reserveMsat, WORK_PROMPT_TOKEN_ALLOWANCE } from "../../economy/job-pricing.js";
+import { CLOUD_PROMPT_BYTES_PER_TOKEN, cSatsToMsat, expectedWorkMs, inferenceCostMsat, inferenceReserveMsat, localPromptTokensMax, reserveMsat, WORK_PROMPT_TOKEN_ALLOWANCE, WORK_TIME_SAFETY } from "../../economy/job-pricing.js";
 import { paramsB } from "../../inference-api/auto-route.js";
 import { configureCloudCatalog } from "../../cloud-host/catalog.js";
 import { configureCloudPricing, modelTokenPrice } from "../../economy/cloud-pricing.js";
@@ -68,23 +68,25 @@ export function subtaskReserveMsat(resourceClass: ResourceClass, taskClass: Comp
 }
 
 /**
- * What to set aside for one model call (job-pricing.ts inferenceReserveMsat): an upper bound on its
- * settled cost from its own size. Token bounds are the ones /inference/chunks applies to reported
- * counts (the queued input's bytes + PROMPT_TOKEN_ALLOWANCE in, maxTokens + OUTPUT_TOKEN_ALLOWANCE
- * out); the power floor is the requested class's (every class for "any") at its top tier for the
+ * What to set aside for one model call (job-pricing.ts inferenceReserveMsat): a cautious bound on its
+ * settled cost from its own size. The prompt is held at the larger of its digit-aware token estimate
+ * (`promptTokens`, start-eta.ts promptTokenEstimate of the queued input) × 1.25 and bytes / 2, plus
+ * PROMPT_TOKEN_ALLOWANCE (job-pricing.ts localPromptTokensMax), the output at maxTokens +
+ * OUTPUT_TOKEN_ALLOWANCE; a cost past that is settled from the buyer's balance at settle time. The
+ * power floor is the requested class's (every class for "any") at its top tier for the
  * work those tokens take on a slow host there, at most the call's timeout: the most it can be billed
  * for (job-pricing.ts expectedWorkMs). `maxCSats` (the buyer's ceiling) caps it.
  * A cloud model (its own token price) holds its real worst case instead: the prompt at
  * CLOUD_PROMPT_BYTES_PER_TOKEN + the template allowance, and max_tokens + OUTPUT_TOKEN_ALLOWANCE out.
  */
-export function inferenceCallReserve(input: { model: string; taskClass: ComputeClassId | "any"; timeoutMs: number; inputBytes: number; maxTokens: number; maxCSats?: number }) {
+export function inferenceCallReserve(input: { model: string; taskClass: ComputeClassId | "any"; timeoutMs: number; inputBytes: number; maxTokens: number; maxCSats?: number; promptTokens?: number }) {
   const classes = (input.taskClass === "any" ? Object.keys(rateOracleConfig.computeClasses) : [input.taskClass]) as ComputeClassId[];
   const own = modelTokenPrice(input.model);
   return inferenceReserveMsat({
     paramsB: paramsB(input.model),
     ...(own ? { price: own } : {}),
     btcUsd: mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD,
-    promptTokensMax: own ? Math.ceil(Math.max(0, input.inputBytes) / CLOUD_PROMPT_BYTES_PER_TOKEN) + WORK_PROMPT_TOKEN_ALLOWANCE : Math.max(0, input.inputBytes) + PROMPT_TOKEN_ALLOWANCE,
+    promptTokensMax: own ? Math.ceil(Math.max(0, input.inputBytes) / CLOUD_PROMPT_BYTES_PER_TOKEN) + WORK_PROMPT_TOKEN_ALLOWANCE : localPromptTokensMax(input.inputBytes, input.promptTokens, PROMPT_TOKEN_ALLOWANCE),
     outputTokensMax: Math.max(0, input.maxTokens) + OUTPUT_TOKEN_ALLOWANCE,
     // The power floor's seconds: the work this many tokens take on a slow host of each class (C8).
     workPromptTokensMax: Math.max(0, input.inputBytes) + WORK_PROMPT_TOKEN_ALLOWANCE,
@@ -92,6 +94,25 @@ export function inferenceCallReserve(input: { model: string; taskClass: ComputeC
     floorClasses: classes.map((c) => ({ computeClass: c, maxTierWeight: Math.max(1, ...(rateOracleConfig.computeClasses[c]?.tiers ?? []).map((t) => t.creditsPerSecond)) })),
     ...(input.maxCSats !== undefined ? { capMsat: cSatsToMsat(input.maxCSats) } : {}),
   });
+}
+
+/**
+ * What a model call is expected to cost (msat), for the buyer's 402 next to its reserve: its
+ * estimated prompt and expected reply (inference.ts completionWork) at the model's token price, or
+ * the power floor for the work they take on a base-tier host, whichever is more (inferenceCostMsat),
+ * in the cheapest class it may run in, at most the call's timeout. No margin: the reserve is the cautious bound, this is "about".
+ */
+export function inferenceCallExpectedMsat(input: { model: string; taskClass: ComputeClassId | "any"; promptTokens: number; outputTokens: number; timeoutMs: number }): number {
+  const classes = (input.taskClass === "any" ? Object.keys(rateOracleConfig.computeClasses) : [input.taskClass]) as ComputeClassId[];
+  const own = modelTokenPrice(input.model);
+  const b = paramsB(input.model);
+  const btcUsd = mutable.latestRateEpoch?.btcUsd ?? FALLBACK_BTC_USD;
+  const costs = classes.map((computeClass) => {
+    // A typical host: the slow-host estimate without its safety factor.
+    const durationMs = Math.min(Math.max(0, input.timeoutMs), expectedWorkMs({ paramsB: b, computeClass, promptTokens: input.promptTokens, outputTokens: input.outputTokens }) / WORK_TIME_SAFETY);
+    return inferenceCostMsat({ promptTokens: input.promptTokens, outputTokens: input.outputTokens, ...(own ? { price: own } : {}), paramsB: b, btcUsd, durationMs, computeClass, tierWeight: 1, perSecondCostMsat: 0 }).costMsat;
+  });
+  return costs.length ? Math.max(0, Math.min(...costs)) : 0;
 }
 
 export const paymentIntents = new Map<string, PaymentIntent>();
