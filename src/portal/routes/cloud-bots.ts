@@ -42,6 +42,7 @@ import {
   type CloudMessage,
   type CloudRun,
 } from "../cloud-bots/types.js";
+import { randomBitAvatarId } from "../../common/bit-avatars.js";
 
 export const CLOUD_ACTIONS = ["message", "pause", "resume", "check_now", "stop", "update_settings", "delete", "messages", "history", "memory"] as const;
 export type CloudAction = (typeof CLOUD_ACTIONS)[number];
@@ -159,6 +160,7 @@ export class CloudBotService {
       name: bot.name,
       role: bot.role,
       color: bot.config.color,
+      ...(bot.config.avatarShape ? { avatarShape: bot.config.avatarShape } : {}),
       status,
       ...(active ? { activity: active.status === "queued" ? "Starting…" : (active.activity ?? "Working…") } : {}),
       enabled: !bot.paused,
@@ -221,13 +223,14 @@ export class CloudBotService {
     const existing = await this.d.store.getBot(userId, botId);
     if (existing) return { status: 200, body: { ok: true, botId, agentId: CLOUD_AGENT_ID, state: "created", runtime: "cloud" } };
     const nowMs = this.now();
-    if (!this.creates.take(userId, nowMs)) return { status: 429, body: { error: "rate_limited", message: "Too many new bots; try again later." } };
+    if (!this.creates.take(userId, nowMs)) return { status: 429, body: { error: "rate_limited", message: "Too many new bits; try again later." } };
     const max = this.d.maxBotsPerAccount ?? 20;
-    if ((await this.d.store.countBots(userId)) >= max) return { status: 429, body: { error: "too_many_bots", message: `An account can have at most ${max} cloud bots.` } };
+    if ((await this.d.store.countBots(userId)) >= max) return { status: 429, body: { error: "too_many_bots", message: `An account can have at most ${max} cloud bits.` } };
     const token = this.sealToken(botId, b.github?.token);
     if (token.error) return token.error;
     const config: CloudBotConfig = {
       color: b.color ?? defaultColor(botId),
+      avatarShape: b.avatarShape ?? randomBitAvatarId(),
       web: b.web,
       schedule: b.schedule ?? null,
       github: b.github ? { repo: b.github.repo, triggers: normalizeTriggers(b.github.triggers ?? []) } : null,
@@ -273,7 +276,7 @@ export class CloudBotService {
   async command(userId: string, botId: string, action: string, args: Record<string, unknown>): Promise<Answer> {
     if (!(CLOUD_ACTIONS as readonly string[]).includes(action)) {
       return (BOT_CONTROL_ACTIONS as readonly string[]).includes(action)
-        ? this.refused("not_supported", "Cloud bots don't do that.")
+        ? this.refused("not_supported", "Cloud bits don't do that.")
         : this.refused("invalid_command", "Unknown action.");
     }
     const bot = await this.d.store.getBot(userId, botId);
@@ -336,6 +339,7 @@ export class CloudBotService {
     if (u.compute !== undefined) patch.compute = u.compute;
     if (u.web !== undefined) config.web = u.web;
     if (u.color !== undefined) config.color = u.color;
+    if (u.avatarShape !== undefined) config.avatarShape = u.avatarShape;
     if (u.budgetCSatsPerDay !== undefined) config.limits.budgetCSatsPerDay = u.budgetCSatsPerDay;
     if (u.budgetCSatsPerRun !== undefined) config.limits.budgetCSatsPerRun = u.budgetCSatsPerRun;
     if (u.maxRunsPerDay !== undefined) config.limits.maxRunsPerDay = u.maxRunsPerDay;

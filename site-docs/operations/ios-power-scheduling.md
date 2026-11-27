@@ -1,6 +1,6 @@
 # iOS App — Power & Background Behavior
 
-This page covers what the current iOS app does about battery, power and background work, and how the coordinator treats a phone's power readings. For using the app (the **Chat**, **Bots**, **Wallet**, **Machines** and **Network** tabs), see the [iOS app guide](/guide/ios-app).
+This page covers what the current iOS app does about battery, power and background work, and how the coordinator treats a phone's power readings. For using the app (the **Chat**, **Bits**, **Wallet**, **Machines** and **Network** tabs), see the [iOS app guide](/guide/ios-app).
 
 ::: warning Removed from the app
 Older builds had a three-way compute mode picker (**Off / On / Bluetooth Local**) in a **Swarm** tab, an automatic switch to Bluetooth Local when the internet dropped, and an **IDE** tab that listed tasks a Mac sent to the phone over Bluetooth. None of these exist in the current app. The IDE tab was replaced by **Machines** in build 34 (#429).

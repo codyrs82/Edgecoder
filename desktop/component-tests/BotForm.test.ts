@@ -15,6 +15,7 @@ vi.mock("../src/lib/api", () => api);
 
 import BotForm from "../src/components/BotForm.svelte";
 import type { Bot } from "../src/lib/bots";
+import { BIT_AVATAR_IDS } from "../src/lib/bit-avatars";
 
 const harry = (over: Partial<Bot> = {}): Bot => ({
   id: "bot_h",
@@ -243,5 +244,32 @@ describe("BotForm: lead with your frontier key", () => {
     await fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(onSaved).toHaveBeenCalled());
     expect(api.updateBot.mock.calls[0][1].frontierLead).toBeNull();
+  });
+});
+
+describe("BotForm: Bits avatars", () => {
+  it("a new bit starts on a Bits character, drawn as SVG with its face", () => {
+    render(BotForm, { bot: null, onClose: vi.fn(), onSaved: vi.fn() });
+    expect(screen.getByRole("heading", { name: "New bit" })).toBeTruthy();
+    const picked = screen.getByRole("radiogroup", { name: "Bits avatar" }).querySelector('[aria-checked="true"]');
+    expect(picked).toBeTruthy();
+    expect(BIT_AVATAR_IDS).toContain(picked!.getAttribute("data-shape"));
+    // The preview: the body markup is real SVG (not HTML elements inside an <svg>).
+    const preview = document.querySelector(`svg.bot-avatar[data-shape="${picked!.getAttribute("data-shape")}"]`)!;
+    const body = preview.querySelector(".body > *")!;
+    expect(body.namespaceURI).toBe("http://www.w3.org/2000/svg");
+    // Bits characters have their own colours: no colour swatches for them.
+    expect(screen.queryByRole("radiogroup", { name: "Color" })).toBeNull();
+  });
+
+  it("an existing bit with no avatar keeps its classic shape until another is picked, then saves it", async () => {
+    const onSaved = open(harry());
+    api.updateBot.mockImplementation(async (_id: string, patch: Partial<Bot>) => harry(patch));
+    expect(screen.getByRole("radiogroup", { name: "Classic shape" }).querySelector('[aria-checked="true"]')).toBeTruthy();
+    expect(screen.getByRole("radiogroup", { name: "Color" })).toBeTruthy();
+    await fireEvent.click(screen.getByRole("radio", { name: "Zap" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSaved).toHaveBeenCalled());
+    expect(api.updateBot.mock.calls[0][1].avatarShape).toBe("bolt");
   });
 });

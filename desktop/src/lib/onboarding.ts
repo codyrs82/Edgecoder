@@ -145,7 +145,7 @@ export const GOAL_OPTIONS: Array<{ id: OnboardingGoal; title: string; desc: stri
 
 /** The tutorial cards (step "how"). */
 export const HOW_CARDS: Array<{ title: string; body: string }> = [
-  { title: "You ask", body: "A chat, a Code task, a bot, or a call to the API." },
+  { title: "You ask", body: "A chat, a Code task, a bit, or a call to the API." },
   { title: "The coordinator picks the best fit", body: "It matches the job to a model and a machine by capability, speed and price." },
   { title: "A machine runs it", body: "One of yours (free), a machine you leased (already paid), or a host's machine (paid per token)." },
   { title: "Encrypted on the way", body: "Jobs travel encrypted between the coordinator and the machine. Work on this computer never leaves it." },
@@ -154,7 +154,7 @@ export const HOW_CARDS: Array<{ title: string; body: string }> = [
 
 /** More to know, under the cards. */
 export const HOW_MORE: Array<{ title: string; body: string }> = [
-  { title: "Bots", body: "Run on a schedule with a daily budget in cSats, so they never overspend." },
+  { title: "Bits", body: "Run on a schedule with a daily budget in cSats, so they never overspend." },
   { title: "Code", body: "An agent that reads and edits a project, runs tests and opens pull requests when you allow it." },
   { title: "Tentacles", body: "Helpers on cheap models that take parts of a big task at once." },
   { title: "Remote co-editing", body: "Type /remote in edgecoder code and keep working on the same session in the app." },
@@ -303,7 +303,7 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
   {
     id: "models",
     title: "Choose models and where they run",
-    body: "Auto suits most people. Agents (Code, bots) need tool-capable models; the app only gives them those.",
+    body: "Auto suits most people. Agents (Code, bits) need tool-capable models; the app only gives them those.",
     checklist: [{ id: "routing", label: "Choose where things run", input: true }],
     actions: [
       { id: "models", label: "Manage models", desktop: "settings:models", web: "/portal/settings/nodes" },
@@ -356,7 +356,7 @@ export const ONBOARDING_STEPS: OnboardingStep[] = [
     actions: [
       { id: "chat", label: "Ask in Chat", desktop: "run:try-chat", web: "/portal/chat?new=1", primary: true },
       { id: "code", label: "Explain a file in Code", desktop: "run:open-code" },
-      { id: "bot", label: "Create a bot", desktop: "run:new-bot" },
+      { id: "bot", label: "Create a bit", desktop: "run:new-bot" },
     ],
     skip: "Skip",
     goals: [],

@@ -70,7 +70,7 @@ describe("task history: merging sources", () => {
     expect(by("Split auth")).toMatchObject({ kind: "code", promptTokens: 1200, outputTokens: 300, cSats: 2, durationMs: 10_000, steps: ["edit_file src/auth.ts"] });
     expect(by("Split auth").where).toContain("us-east");
     expect(by("Write auth tests")).toMatchObject({ status: "failed", error: "vitest exited 1", durationMs: 3000, model: "qwen3:8b" });
-    expect(by("Tidied the README")).toMatchObject({ status: "failed", error: "Stopped at the bot's daily budget", context: "Harry", durationMs: 60_000 });
+    expect(by("Tidied the README")).toMatchObject({ status: "failed", error: "Stopped at the bit's daily budget", context: "Harry", durationMs: 60_000 });
     expect(by("Tidied the README").steps).toContain("opened https://github.com/a/b/pull/3");
     expect(by("qwen3:32b")).toMatchObject({ context: "Cursor", status: "failed", cSats: 0, promptTokens: 10 });
   });

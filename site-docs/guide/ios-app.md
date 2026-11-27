@@ -1,12 +1,12 @@
 ---
 title: iOS App
-description: Use EdgeCoder on iPhone and iPad - chat, code sessions on your computers, bots, your machines and the network.
+description: Use EdgeCoder on iPhone and iPad - chat, code sessions on your computers, bits, your machines and the network.
 ---
 
 # iOS App
 
 EdgeCoder for iPhone and iPad is a coding assistant in your pocket. You can chat with a model, drive a
-coding session that runs on one of your computers, message your bots, and check your machines and the
+coding session that runs on one of your computers, message your bits, and check your machines and the
 network.
 
 ## Install and sign in
@@ -17,7 +17,7 @@ network.
 3. That's it. After you sign in, the app enrolls this device with your account by itself. There is no
    coordinator address or token to paste.
 
-The app has five tabs: **Chat**, **Bots**, **Wallet**, **Machines** and **Network**.
+The app has five tabs: **Chat**, **Bits**, **Wallet**, **Machines** and **Network**.
 
 ## Chat and Code
 
@@ -77,7 +77,7 @@ outside the project are refused. An approval offers **Allow** (this call), **All
 branch) and **Deny**. Allow for this session never covers pushes, pull requests, secrets, files
 outside the project or refused commands, and it isn't kept after the session. The phone never adds an
 "always allow" rule for the project; that is done in the desktop app. Very long commands must be
-approved on the computer. A bot's approval offers **Allow for this run** the same way.
+approved on the computer. A bit's approval offers **Allow for this run** the same way.
 
 See [Terminal: `edgecoder code`](/guide/terminal) for how sessions work on the computer.
 
@@ -114,23 +114,23 @@ long commands must be approved on the computer. Nothing from a session runs in t
 If a computer is offline, or **Code from your phone** is **Off** or **View only**, the page says so:
 open the EdgeCoder desktop app on it, go to **Settings**, and set **Code from your phone** to **On**.
 
-## Bots
+## Bits
 
-The **Bots** tab lists your bots: cloud bots, which run on EdgeCoder's servers with no machine of
-yours, and desktop bots, which run on one of your machines. You can:
+The **Bits** tab lists your bits: cloud bits, which run on EdgeCoder's servers with no machine of
+yours, and desktop bits, which run on one of your machines. You can:
 
-- read a bot's conversation and send it a message;
+- read a bit's conversation and send it a message;
 - pause or resume it, and answer its approvals when its machine allows control from the web;
-- tap **New bot** to create one in the **Cloud** or on one of your machines, with a schedule
+- tap **New bit** to create one in the **Cloud** or on one of your machines, with a schedule
   (**None**, **Every few hours** or **Daily**) and an optional GitHub repository.
 
-A GitHub token you enter for a cloud bot is sent once to create the bot and isn't saved on the
-device. See [Bots, cloud bots and web search](/guide/bots).
+A GitHub token you enter for a cloud bit is sent once to create the bit and isn't saved on the
+device. See [Bits, cloud bits and web search](/guide/bots).
 
 ## Machines
 
 The **Machines** tab lists the machines signed in to your account: each one's name, whether it is
-online (or when it was last seen), the model it serves and how many bots run on it. Pull down to
+online (or when it was last seen), the model it serves and how many bits run on it. Pull down to
 refresh.
 
 No machines yet? Add one with the [desktop app](/guide/install-desktop) on a Mac or Windows PC, or

@@ -1169,7 +1169,7 @@ const bots = new BotManager({
             signal: ctx.signal,
             allow: () => {
               const left = ctx.budgetLeft();
-              return left !== null && left <= 0 ? "Today's budget for this bot is spent, so the web tool is off until tomorrow." : null;
+              return left !== null && left <= 0 ? "Today's budget for this bit is spent, so the web tool is off until tomorrow." : null;
             },
           })
         : null,

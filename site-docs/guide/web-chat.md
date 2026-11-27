@@ -40,7 +40,7 @@ are answered without searching. Answers list their sources with links, and a foo
   answers without the web and the indicator says **needs cSats**.
 - A chat that runs on your own machine searches for free, within a daily allowance.
 
-More in [Bots, cloud bots and web search](/guide/bots#web-search).
+More in [Bits, cloud bits and web search](/guide/bots#web-search).
 
 ## Your conversations
 

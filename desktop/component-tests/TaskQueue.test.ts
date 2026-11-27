@@ -62,7 +62,7 @@ describe("Tasks", () => {
     seed();
     render(TaskQueue);
     await screen.findByText(/Summarize the changelog/);
-    await fireEvent.click(screen.getByRole("button", { name: "Bot" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Bit" }));
     expect(screen.getAllByRole("row")).toHaveLength(2);
     await fireEvent.click(screen.getByRole("button", { name: "All" }));
     const status = screen.getByLabelText("Status") as HTMLSelectElement;

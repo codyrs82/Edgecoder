@@ -29,7 +29,7 @@ Then: [paying from common wallets](#paying-from-common-wallets),
 - **Where your cSats go:** when you use someone else's machine, 95 % goes to that machine's owner
   (the host) and EdgeCoder keeps 5 %. Buying cSats has no purchase fee unless the Wallet page
   shows one.
-- **Bots have a daily budget**, so a bot never spends more than you allow.
+- **Bits have a daily budget**, so a bit never spends more than you allow.
 
 ## Before you start
 

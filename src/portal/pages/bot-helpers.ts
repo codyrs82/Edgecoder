@@ -8,6 +8,8 @@
  * Every value from a bot goes through escapeHtml before it reaches innerHTML; the avatar colour is
  * set through the CSSOM (no style attributes: the portal's style-src has no 'unsafe-inline').
  */
+import { BIT_AVATAR_IDS } from "../../common/bit-avatars.js";
+
 export const CLIENT_BOT_HELPERS_JS = String.raw`
     var BOT_SCHEDULE_PRESETS = [["", "No fixed schedule (check-ins)"], ["every 30 minutes", "Every 30 minutes"], ["hourly", "Every hour"], ["every 6 hours", "Every 6 hours"], ["daily at 09:00", "Daily at 09:00"], ["0 9 * * 1-5", "Weekdays at 09:00"]];
     var BOT_HEARTBEAT_OPTIONS = [["15", "Every 15 minutes"], ["30", "Every 30 minutes"], ["60", "Every hour"], ["240", "Every 4 hours"], ["", "Never (only messages and triggers)"]];
@@ -116,12 +118,17 @@ export const CLIENT_BOT_HELPERS_JS = String.raw`
     /** A run's "Ran on": the actual model and machine when the Mac sent them, else its route ("Network · best fit"). */
     function botRanOn(r) { return botServedText(r && r.served, false) || (r && r.where) || ""; }
     /** The avatar: initial, shape, status dot. The colour is painted by paintBotAvatars (CSSOM). */
+    var BIT_AVATAR_IDS = ${JSON.stringify(BIT_AVATAR_IDS)};
     function botAvatarHtml(b, online, size) {
       var chip = botStatusChip(b);
+      var dot = '<span class="bot-dot ' + (online ? "tone-" + chip.tone : "offline") + '"></span></span>';
+      // A Bits avatar: its picture (/assets/bits/<id>.svg, src/common/bit-avatars.ts).
+      if (BIT_AVATAR_IDS.indexOf(b.avatarShape) >= 0) {
+        return '<span class="bot-ava bit-ava' + (size ? " " + size : "") + '" aria-hidden="true"><img src="/assets/bits/' + b.avatarShape + '.svg" alt="" width="40" height="40" />' + dot;
+      }
       var shape = /^(robot|orb|hex|block)$/.test(b.avatarShape || "") ? " shape-" + b.avatarShape : "";
       var color = /^#[0-9a-fA-F]{6}$/.test(b.color || "") ? b.color : "";
-      return '<span class="bot-ava' + shape + (size ? " " + size : "") + '" data-bot-color="' + escapeHtml(color) + '" aria-hidden="true">' + escapeHtml(botInitial(b.name)) +
-        '<span class="bot-dot ' + (online ? "tone-" + chip.tone : "offline") + '"></span></span>';
+      return '<span class="bot-ava' + shape + (size ? " " + size : "") + '" data-bot-color="' + escapeHtml(color) + '" aria-hidden="true">' + escapeHtml(botInitial(b.name)) + dot;
     }
     function paintBotAvatars(root) {
       (root || document).querySelectorAll("[data-bot-color]").forEach(function(el) {

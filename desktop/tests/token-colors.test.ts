@@ -25,6 +25,9 @@ const FILES = walk(SRC).map((abs) => ({ rel: relative(SRC, abs).replace(/\\/g, "
 const ALLOWED: Record<string, RegExp[]> = {
   // Bot identity colours picked by the user, and the ink chosen to contrast with them.
   "lib/bot-avatar.ts": [/#[0-9a-fA-F]{3,6}\b/],
+  // The Bits characters' own flat colours (Bitcoin orange and its complements), the same in both
+  // themes: each sits on its own body, not on a theme surface.
+  "lib/bit-avatars.ts": [/#[0-9a-fA-F]{3,6}\b/],
   // The avatar illustration's eyes and highlights sit on the bot's own colour, not on a theme surface.
   "components/BotAvatar.svelte": [/#fff\b/, /#1d1d1f\b/, /#ffffff\b/],
   // The HTML preview is a browser canvas: pages without a background expect white in either theme.

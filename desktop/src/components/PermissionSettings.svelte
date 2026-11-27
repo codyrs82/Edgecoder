@@ -81,7 +81,7 @@
     <div class="full-confirm">
       <h2>Make Full access the default?</h2>
       <p>New chats and sessions would start in Full access. {FULL_ACCESS_WARNING}</p>
-      <p class="muted">Bots keep their own mode, and the phone, the web and other accounts never get Full access.</p>
+      <p class="muted">Bits keep their own mode, and the phone, the web and other accounts never get Full access.</p>
       <div class="actions">
         <button type="button" class="btn" onclick={cancelFullDefault}>Cancel</button>
         <button type="button" class="btn btn--primary" onclick={confirmFullDefault}>Make it the default</button>
@@ -96,7 +96,7 @@
     <div class="sp-row">
       <div class="sp-text">
         <span class="sp-title">Default mode for new chats</span>
-        <span class="sp-desc">{MODE_OPTIONS.find((o) => o.engine === mode)?.desc} Each chat, session and bot keeps its own; change it with the picker under the message box.</span>
+        <span class="sp-desc">{MODE_OPTIONS.find((o) => o.engine === mode)?.desc} Each chat, session and bit keeps its own; change it with the picker under the message box.</span>
       </div>
       <div class="sp-controls">
         <Select

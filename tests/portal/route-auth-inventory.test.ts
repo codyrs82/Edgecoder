@@ -77,6 +77,7 @@ const PUBLIC: Record<string, string> = {
   "GET /assets/tokens.css": "static asset",
   "GET /assets/theme.js": "static asset",
   "GET /assets/videos/:file": "static asset (Getting started explainer videos)",
+  "GET /assets/bits/:file": "static asset (the Bits avatars and mark)",
   "GET /portal/vendor/lightweight-charts.js": "static asset",
   // Page shells: static HTML with no user data; the page's script calls the protected APIs.
   "GET /portal": "sign-in page shell",

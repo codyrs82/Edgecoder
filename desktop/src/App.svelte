@@ -34,7 +34,8 @@
   import { getWebStatus } from "./lib/api";
   import { chatWebMode, webAutoStore, type WebStatus } from "./lib/web-tool";
   import { computeChoice } from "./lib/compute-choice";
-  import { Settings as SettingsIcon, Plus, SquarePen, FolderPlus, FolderOpen, FolderGit2, Folder, Bot, PanelLeft } from "@lucide/svelte";
+  import { Settings as SettingsIcon, Plus, SquarePen, FolderPlus, FolderOpen, FolderGit2, Folder, PanelLeft } from "@lucide/svelte";
+  import BitsMark from "./components/BitsMark.svelte";
   import ProjectSidebar from "./components/ProjectSidebar.svelte";
   import LiveSessionPanel from "./components/LiveSessionPanel.svelte";
   import { listPublishedSessions, type SessionSummary } from "./lib/api";
@@ -652,7 +653,7 @@
                 {/each}
                 <div class="menu-sep" role="separator"></div>
               {/if}
-              <button role="menuitem" onclick={() => { newMenuOpen = false; botForm = "new"; }} title="A named bot that owns a job in a project, on Auto compute"><Bot size={15} /> New bot</button>
+              <button role="menuitem" onclick={() => { newMenuOpen = false; botForm = "new"; }} title="A named bit that owns a job in a project, on Auto compute"><BitsMark size={15} /> New bit</button>
             </div>
           {/if}
         </div>

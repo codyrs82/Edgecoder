@@ -36,7 +36,7 @@ machines makes funding optional.
 
 ## 2. How EdgeCoder works
 
-1. **You ask.** A chat, a Code task, a bot, or a call to the API.
+1. **You ask.** A chat, a Code task, a bit, or a call to the API.
 2. **The coordinator picks the best fit.** It matches the job to a model and a machine by
    capability, speed and price.
 3. **A machine runs it.** One of yours (free), a machine you leased (already paid), or a host's
@@ -47,7 +47,7 @@ machines makes funding optional.
 5. **You pay per token.** Network calls cost cSats by model size; 1 cSat = 1 sat. Hosts get 95 %,
    the network 5 %.
 
-Also: **bots** run on a schedule with a daily budget; **Code** is an agent that reads and edits a
+Also: **bits** run on a schedule with a daily budget; **Code** is an agent that reads and edits a
 project; **tentacles** are helpers on cheap models that take parts of a big task at once
 ([tentacles.md](tentacles.md)); **remote co-editing** (`/remote` in `edgecoder code`) continues a
 terminal session in the app ([terminal.md](terminal.md)).
@@ -111,8 +111,8 @@ on the web, where you can change them remotely.
 | My machines only | This computer and your other machines. Free, never the network. |
 | Specific model | Always the model you pick in the chat's compute menu. |
 
-In the app, Auto and This computer only set the chat's compute menu. Bots have their own setting
-in the bot form. Agents (Code, bots) run only on tool-capable models.
+In the app, Auto and This computer only set the chat's compute menu. Bits have their own setting
+in the bit form. Agents (Code, bits) run only on tool-capable models.
 
 Optional: bring your own frontier key (Settings → General in the app) to lead with a frontier
 model. Only your account uses it and the provider bills you ([frontier-keys.md](frontier-keys.md)).
@@ -141,7 +141,7 @@ disappears on mainnet.
 
 - **Fund with Bitcoin** (on-chain): shown as "Coming soon" until it is turned on
   (`ONCHAIN_ENABLED`).
-- Bots have a daily budget, so a bot never spends more than you allow.
+- Bits have a daily budget, so a bit never spends more than you allow.
 
 The step's buttons:
 
@@ -174,7 +174,7 @@ Skip this step if you only use your own machines.
 
 ## 8. Try it
 
-Ask for something small: a question in Chat, "explain this file" in Code, or a bot with a small
+Ask for something small: a question in Chat, "explain this file" in Code, or a bit with a small
 daily budget. Each reply ends with where it ran (your machine or the network) and what it cost.
 
 ## 9. Host for the network (optional)

@@ -261,7 +261,7 @@ describe("the page", () => {
     expect(html).toContain("text-transform:none");
     // Machines, not Macs or computers.
     expect(html).toContain("The first of my machines that comes online");
-    expect(html).toContain("Cloned on the machine that runs the bot, once its folder is set.");
+    expect(html).toContain("Cloned on the machine that runs the bit, once its folder is set.");
     expect(html).toContain("Auto (confirm on the machine)");
     const dialog = html.slice(html.indexOf('id="bnDialog"'), html.indexOf("</dialog>", html.indexOf('id="bnDialog"')));
     expect(dialog).not.toMatch(/\bMacs?\b|computer/);

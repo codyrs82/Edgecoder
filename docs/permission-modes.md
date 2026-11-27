@@ -1,7 +1,7 @@
 # Permission modes
 
 How much the agent asks before it acts. Every chat (the Chat view and the Code view's chat), every
-live session (`edgecoder code`, shown in the app) and every bot has its own mode. Pick it with the
+live session (`edgecoder code`, shown in the app) and every bit has its own mode. Pick it with the
 button under the message box (number keys **1–5** while the list is open), with **Shift+Tab** or
 `/mode` in the terminal, or with `--mode` when starting `edgecoder code`. New chats start in the
 default from **Settings → General → Permissions** (Accept edits unless you change it).
@@ -32,15 +32,15 @@ In every mode but Full access (which has [its own section](#full-access)):
 - The tool executor's own checks still apply after any "yes".
 
 - The web tool (`web_search`, `read_page`) is offered only when the chat is on **Web: Auto** (the
-  default; **Off for this chat** turns it off) or the bot has the **Search the web** permission (on
-  for new bots), which is its allowance: Auto, Accept edits, Plan and Full access run
+  default; **Off for this chat** turns it off) or the bit has the **Search the web** permission (on
+  for new bits), which is its allowance: Auto, Accept edits, Plan and Full access run
   it, Manual asks for each call. After a page is read, commands and other actions that would have
   run on their own ask first for the rest of the reply or run; edits inside the project that the
   mode applies still apply (undoable), and the card offers **Allow for the rest of this run**
   ([web tool](web-tool.md#prompt-injection)). Full access skips this guard.
 
 The decision is made in one place, `src/apps/ide/permission-policy.ts` (`decideToolCall`,
-`classifyCommand`), for chats, sessions and bots alike.
+`classifyCommand`), for chats, sessions and bits alike.
 
 ## Auto
 
@@ -134,7 +134,7 @@ Still refused, never asked (the same classes Auto refuses; nothing new):
   `*.pem`, `id_rsa`, `.npmrc`, `credentials.json`, …) or content that looks like a key
 - the executor's own refusals (writes into `.git`, paths that escape the project, and the like)
 
-Also unchanged: Plan mode still means Plan; using a frontier key for a bot still asks (that is a
+Also unchanged: Plan mode still means Plan; using a frontier key for a bit still asks (that is a
 key approval, not a permission ask). Full access skips the [web tool](web-tool.md#prompt-injection)'s
 prompt-injection guard: after `read_page` reads a web page, everything still runs as Full access
 decides (the hard refusals above stay).
@@ -162,7 +162,7 @@ Where it is offered:
 - **Not for another account**: in a shared session only the owner's account (or this computer's
   own clients) can turn it on, and a message from another account's client runs as Accept edits,
   the way a frontier lead serves only the owner.
-- **Not for bots** in this version: bots keep their own mode (Manual, Accept edits, Auto, Plan).
+- **Not for bits** in this version: bits keep their own mode (Manual, Accept edits, Auto, Plan).
 
 ## Node versions
 
@@ -209,7 +209,7 @@ to investigate and reply with a plan (a summary, then numbered steps naming the 
 will verify the work). The reply is marked as a plan, and the app shows **Approve plan** (with the
 mode to continue in, Accept edits by default) and **Revise**:
 
-- **Approve plan** switches the chat, session or bot to the chosen mode and sends "The plan is
+- **Approve plan** switches the chat, session or bit to the chosen mode and sends "The plan is
   approved. Carry it out now…", which starts the turn that does the work. In the terminal: `/approve
   [ask|auto-edits|auto]`. API: `POST /v1/ide/sessions/:id/plan {mode}`.
 - **Revise** puts the cursor in the message box: say what to change and the agent plans again (it
@@ -261,7 +261,7 @@ An approval card for a command offers **Allow**, **Always allow `npm test …` i
 Every approval card that the mode asks about (in the desktop app's chats and live sessions, the
 terminal, the web Code page and the iPhone) also offers **Allow for this session**, labelled with
 what it covers. One tap approves the call and lets later calls of the same kind run without asking
-until the session ends. A bot's card offers **Allow for this run** instead (until the run ends).
+until the session ends. A bit's card offers **Allow for this run** instead (until the run ends).
 
 | Kind | Example label | Covers |
 | --- | --- | --- |
@@ -290,21 +290,21 @@ summary); the session lists what it allows ("Allowed this session: npm test comm
 desktop, the web and the iPhone. **Always allow** on the desktop is unchanged and still the way to
 keep a rule for the project.
 
-## Bots
+## Bits
 
-A bot's mode is set with the same picker under its message box and kept with the bot (`mode` in
-`~/.edgecoder/bots.json`; the older `autoApproveEdits` switch follows it). The bot's own tool
-list still limits what it may use at all. Full access isn't offered for bots (a hand-edited
+A bit's mode is set with the same picker under its message box and kept with the bit (`mode` in
+`~/.edgecoder/bots.json`; the older `autoApproveEdits` switch follows it). The bit's own tool
+list still limits what it may use at all. Full access isn't offered for bits (a hand-edited
 `"full"` runs as Accept edits).
 
-A bot that runs on its own (schedule, check-ins, GitHub triggers) has nobody watching. In Auto it
-does what Auto runs; anything that would ask is queued on the bot as **Needs approval** (the bot's
+A bit that runs on its own (schedule, check-ins, GitHub triggers) has nobody watching. In Auto it
+does what Auto runs; anything that would ask is queued on the bit as **Needs approval** (the bit's
 status and avatar say so, in the app and on the web) and waits for your Allow / Always allow / Deny.
 It never blocks forever: after 24 hours unanswered the call is denied and the run goes on to its
 summary. Changing the mode while a call waits lets it go ahead when the new mode would run it
 (not a call the web-page guard asked about: that waits for your answer, or for Full access in a
 chat or session).
 
-On the web portal and the iPhone a bot's approvals can be answered (Approve / Deny, and **Allow for
+On the web portal and the iPhone a bit's approvals can be answered (Approve / Deny, and **Allow for
 this run** when the Mac offers it), but its mode, tools and always-allow rules are changed on the
 Mac only.

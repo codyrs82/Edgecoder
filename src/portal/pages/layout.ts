@@ -143,7 +143,7 @@ export function portalAuthedPageHtml(input: {
         .nav-link.active::before { content: ""; position: absolute; left: -10px; top: 7px; bottom: 7px; width: 3px; border-radius: 0 2px 2px 0; background: var(--brand); }
         .nav-link .icon { flex: none; opacity: 0.9; }
         .nav-link .nav-ext { margin-left: auto; opacity: 0.5; }
-        /* ── Bots: the bots on your desktop machines (pages/bots.ts) ── */
+        /* ── Bits: the bits on your desktop machines (pages/bots.ts) ── */
         .nav-group-link { display: flex; align-items: center; gap: 6px; border-radius: var(--radius-sm); }
         .nav-group-link:hover, .nav-group-link.active { color: var(--text); background: var(--bg-elevated); }
         .bot-nav-list { display: flex; flex-direction: column; }
@@ -161,6 +161,8 @@ export function portalAuthedPageHtml(input: {
           background: color-mix(in srgb, var(--bot-color) 22%, var(--bg-surface)); color: var(--text); border: 1.5px solid var(--bot-color);
           font-size: 11px; font-weight: 700; position: relative; user-select: none;
         }
+        .bot-ava.bit-ava { background: none; border: 0; }
+        .bot-ava.bit-ava img { width: 100%; height: 100%; display: block; }
         .bot-ava.shape-block { border-radius: 6px; } .bot-ava.shape-hex { border-radius: 30%; } .bot-ava.shape-robot { border-radius: 8px 8px 50% 50%; }
         .bot-ava .bot-dot { position: absolute; right: -2px; bottom: -2px; width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--bg-soft); background: var(--muted); }
         .bot-dot.tone-accent { background: var(--brand); } .bot-dot.tone-warn { background: var(--yellow); } .bot-dot.tone-err { background: var(--danger); } .bot-dot.tone-ok { background: var(--ok); }
@@ -255,7 +257,7 @@ export function portalAuthedPageHtml(input: {
             </div>
             <div class="nav-group">${primaryHtml}</div>
             <div class="nav-group bots-nav" role="group" aria-labelledby="botsNavLabel">
-              <a class="nav-group-label nav-group-link${input.activeTab === "bots" ? " active" : ""}" id="botsNavLabel" href="/portal/bots"${input.activeTab === "bots" ? ' aria-current="page"' : ""}>${icon("bot", 14)}<span>Bots</span></a>
+              <a class="nav-group-label nav-group-link${input.activeTab === "bots" ? " active" : ""}" id="botsNavLabel" href="/portal/bots"${input.activeTab === "bots" ? ' aria-current="page"' : ""}><img class="bits-mark" src="/assets/bits/bits-mark.svg" alt="" width="14" height="14" /><span>Bits</span></a>
               <div class="bot-nav-list" id="botNavList"></div>
             </div>
             <div class="nav-group chat-only" role="group" aria-label="Recent chats">
@@ -612,7 +614,7 @@ export function portalAuthedPageHtml(input: {
               return '<a class="bot-nav-item' + (active ? " active" : "") + '" href="' + botHref(b.machine.agentId, b.id) + '"' + (active ? ' aria-current="page"' : "") + ' title="' + escapeHtml(botTitle(b) + " · on " + b.machine.machineName + (b.machine.online ? "" : " · offline")) + '">' +
                 botAvatarHtml(b, b.machine.online) +
                 '<span class="bot-nav-text"><span class="bot-nav-name">' + escapeHtml(b.name) + '</span><span class="bot-nav-sub">' + escapeHtml(sub) + "</span></span></a>";
-            }).join("") : '<div class="conv-empty">Bots on your desktop show here</div>';
+            }).join("") : '<div class="conv-empty">Bits on your desktop show here</div>';
             paintBotAvatars(list);
           } catch { /* signed out, or no machines yet */ }
         }

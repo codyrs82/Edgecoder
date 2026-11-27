@@ -173,7 +173,7 @@
         {:else if loading && !snap}
           <div class="sp-row"><span class="sp-muted">Loading…</span></div>
         {:else}
-          <EmptyNote title="Nothing of yours is running." description="Chats, Code turns, bot runs, helpers and API calls show here while they run, with where each one is running." />
+          <EmptyNote title="Nothing of yours is running." description="Chats, Code turns, bit runs, helpers and API calls show here while they run, with where each one is running." />
         {/if}
       </div>
     </section>

@@ -1,8 +1,10 @@
 <script lang="ts">
-  // A bot's character: a soft shape in its color, with a face that follows its state.
+  // A bit's character: a Bits body (bit-avatars.ts, its own colours) or a classic soft shape in its
+  // color, with a face that follows its state.
   // idle: calm (an occasional blink) · working: eyes scan, the light pulses · needs you: wide eyes
   // and a badge · failed: a worried face · paused: asleep. Motion stops under prefers-reduced-motion.
-  import { MOOD_TEXT, inkFor, moodFor, shapeFor, type AvatarShape, type Mood } from "../lib/bot-avatar";
+  import { MOOD_TEXT, inkFor, isBitShape, moodFor, shapeFor, type AvatarShape, type Mood } from "../lib/bot-avatar";
+  import { bitAvatar } from "../lib/bit-avatars";
   import type { BotStatus } from "../lib/bots";
 
   interface Props {
@@ -20,7 +22,9 @@
 
   const form = $derived<AvatarShape>(shapeFor({ name, avatarShape: shape }));
   const mood = $derived<Mood>(moodOverride ?? moodFor(status));
-  const ink = $derived(inkFor(color));
+  /** A Bits character: its body is static markup from bit-avatars.ts (no user input in it). */
+  const bit = $derived(isBitShape(form) ? bitAvatar(form) : undefined);
+  const ink = $derived(inkFor(bit ? bit.base : color));
   const label = $derived(`${name} (${MOOD_TEXT[mood]})`);
 </script>
 
@@ -37,7 +41,9 @@
 >
   {#if !decorative}<title>{label}</title>{/if}
   <g class="body">
-    {#if form === "robot"}
+    {#if bit}
+      {@html bit.body}
+    {:else if form === "robot"}
       <line x1="24" y1="12" x2="24" y2="6" stroke={color} stroke-width="2.4" stroke-linecap="round" />
       <circle class="light" cx="24" cy="5" r="3" fill={color} />
       <rect x="7" y="12" width="34" height="30" rx="10" fill={color} />

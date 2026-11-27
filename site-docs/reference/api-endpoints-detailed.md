@@ -135,21 +135,21 @@ Session cookie auth. Source: `src/portal/routes/chat.ts`, `src/portal/routes/con
 
 Messages and titles are encrypted at rest; see [Web chat privacy](/security/trust-and-security#web-chat-privacy).
 
-### Bots
+### Bits
 
-Session cookie auth. Cloud bots use `agentId: "cloud"`. Source: `src/portal/routes/bots.ts`, `src/portal/routes/cloud-bots.ts`.
+Session cookie auth. Cloud bits use `agentId: "cloud"`. Source: `src/portal/routes/bots.ts`, `src/portal/routes/cloud-bots.ts`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/portal/bots` | the bots page |
-| GET | `/portal/api/bots` | every bot of the account (cloud and desktop, `runtime: "cloud" \| "desktop"`) and where new ones can run (`targets`) |
-| POST | `/portal/api/bots/new` | create a bot: `{ requestId, agentId, bot }`; `agentId: "cloud"` creates a cloud bot at once |
+| GET | `/portal/bots` | the bits page |
+| GET | `/portal/api/bots` | every bit of the account (cloud and desktop, `runtime: "cloud" \| "desktop"`) and where new ones can run (`targets`) |
+| POST | `/portal/api/bots/new` | create a bit: `{ requestId, agentId, bot }`; `agentId: "cloud"` creates a cloud bit at once |
 | DELETE | `/portal/api/bots/pending/:requestId` | cancel a pending create on a machine |
-| GET | `/portal/api/bots/cloud/:botId` | a cloud bot's detail and latest messages |
+| GET | `/portal/api/bots/cloud/:botId` | a cloud bit's detail and latest messages |
 | POST | `/portal/api/bots/cloud/:botId/commands` | `{ action, args }`: `message`, `pause`, `resume`, `check_now`, `stop`, `update_settings`, `delete`, `messages`, `history`, `memory` |
 | GET | `/portal/api/bots/cloud/commands/:commandId` | a cloud command's state |
-| GET | `/portal/api/bots/:agentId/:botId` | a desktop bot's detail (relayed from its machine) |
-| POST | `/portal/api/bots/:agentId/:botId/commands` | a command for a desktop bot |
+| GET | `/portal/api/bots/:agentId/:botId` | a desktop bit's detail (relayed from its machine) |
+| POST | `/portal/api/bots/:agentId/:botId/commands` | a command for a desktop bit |
 | GET | `/portal/api/bots/:agentId/commands/:commandId` | a desktop command's state |
 
 ### Code from your phone
@@ -168,7 +168,7 @@ the desktop app (`src/common/code-relay.ts`). The desktop app saves them in the 
 `.edgecoder/attachments`. Send them only to a machine whose session summary says `images: true`. A
 cost check shows as a pending approval with the tool `cost_check`: approve keeps going, deny stops.
 
-Lookups of live machines (chat models, compute options, machines, bots and the code relay) ask
+Lookups of live machines (chat models, compute options, machines, bits and the code relay) ask
 every allowlisted coordinator, the healthy one first (`src/portal/coordinator-fanout.ts`), so they
 keep working while one coordinator restarts.
 
@@ -265,8 +265,8 @@ Local to the desktop app (`127.0.0.1:4304`), IDE token required, loopback only.
 | POST | `/v1/ide/sessions/:id/{messages,unqueue,approve,settings,publish,trust,cancel,undo,clear,delete}` | writes from any attached client |
 | POST | `/v1/ide/sessions/:id/compact` | summarize all but the last few messages now (`/compact`) → `{ compacted, savedTokens?, … }` |
 | POST | `/v1/ide/compact` | the desktop Chat and Code views' compaction: summarizes older messages on the worker model when a paid lead's history passed `EDGECODER_COMPACT_PAID_TOKENS`, or at once with `force`; always returns `tokens` |
-| GET / POST | `/v1/ide/bots` | desktop bots |
-| POST | `/v1/ide/bots/:id/frontier` | the owner's answer to "Use Claude for this run?": `{ callId, choice: run \| day \| decline }` ([frontier keys](https://github.com/codyrs82/Edgecoder/blob/main/docs/frontier-keys.md#bots-and-your-key)) |
+| GET / POST | `/v1/ide/bots` | desktop bits |
+| POST | `/v1/ide/bots/:id/frontier` | the owner's answer to "Use Claude for this run?": `{ callId, choice: run \| day \| decline }` ([frontier keys](https://github.com/codyrs82/Edgecoder/blob/main/docs/frontier-keys.md#bits-and-your-key)) |
 | POST | `/v1/ide/code-chats/sync` | the desktop Code view's chat (its messages, mode and model) mirrored as a session for Code from your phone; marks the folder as used in the Code view |
 | GET | `/v1/ide/code/remote/snapshot` | Code from your phone: trusted projects and sessions for the account signed in on this machine |
 | POST | `/v1/ide/code/remote/command` | Code from your phone: one command (`create`, `message`, `approve`, `cancel`, `undo`, `plan`, `settings`, `unqueue`, or a read such as `snapshot`) |

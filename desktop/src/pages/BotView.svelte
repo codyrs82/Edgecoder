@@ -417,7 +417,7 @@
 
   <!-- #24: bits-ui Tabs; the root is display: contents so the column layout is unchanged. -->
   <Tabs.Root class="contents" bind:value={view}>
-  <Tabs.List aria-label="Bot views">
+  <Tabs.List aria-label="Bit views">
     {#snippet child({ props })}
       <div {...props} class="tabs">
         <Tabs.Trigger value="chat"><MessageSquare size={13} /> Conversation</Tabs.Trigger>
@@ -684,7 +684,7 @@
                 <Zap size={15} />
                 <div class="routine-text">
                   <div class="routine-title">{triggerText(t)}</div>
-                  <div class="routine-sub">{!bot.enabled && t.enabled ? "Paused with the bot" : triggerStatusText(t.id ? bot.triggerStatus?.[t.id] : undefined, t.enabled)}</div>
+                  <div class="routine-sub">{!bot.enabled && t.enabled ? "Paused with the bit" : triggerStatusText(t.id ? bot.triggerStatus?.[t.id] : undefined, t.enabled)}</div>
                 </div>
                 <button class="switch" role="switch" aria-checked={t.enabled} aria-label="Trigger: {triggerText(t)}" onclick={() => toggleTrigger(t.id)}></button>
               </div>
@@ -740,7 +740,7 @@
             <div class="d-sub muted">Loading…</div>
           {:else if memory.trim()}
             <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-            <pre class="memory" tabindex="0" aria-label="Bot memory">{memory}</pre>
+            <pre class="memory" tabindex="0" aria-label="Bit memory">{memory}</pre>
           {:else}
             <div class="d-sub muted">Nothing yet. It saves notes with its remember tool as it works.</div>
           {/if}

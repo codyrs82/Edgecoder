@@ -13,7 +13,7 @@
 
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 
-export const BOT_SECRETS_DISABLED_MESSAGE = "GitHub for cloud bots isn't set up on this server yet (PORTAL_BOT_SECRETS_KEY).";
+export const BOT_SECRETS_DISABLED_MESSAGE = "GitHub for cloud bits isn't set up on this server yet (PORTAL_BOT_SECRETS_KEY).";
 const VERSION = "v1";
 
 /** The 32-byte key from PORTAL_BOT_SECRETS_KEY, or null when unset or malformed. */

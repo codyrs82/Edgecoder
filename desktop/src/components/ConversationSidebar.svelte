@@ -14,6 +14,7 @@
   import { bots, cloudBots } from "../lib/bots-store";
   import { botStatusLine } from "../lib/bots";
   import BotAvatar from "./BotAvatar.svelte";
+  import BitsMark from "./BitsMark.svelte";
   import { parseChoice } from "../lib/compute-choice";
   import ProfileMenu from "./ProfileMenu.svelte";
   import { menu } from "../lib/menu";
@@ -295,13 +296,13 @@
   </nav>
 
   {#if onSelectBot}
-    <div class="bots-section" aria-label="Bots">
+    <div class="bots-section" aria-label="Bits">
       <div class="group-label bots-label">
-        <span>Bots</span>
-        {#if onNewBot}<button class="bots-add" type="button" title="New bot" aria-label="New bot" onclick={onNewBot}><Plus size={13} /></button>{/if}
+        <span class="bits-title"><BitsMark size={14} /> Bits</span>
+        {#if onNewBot}<button class="bots-add" type="button" title="New bit" aria-label="New bit" onclick={onNewBot}><Plus size={13} /></button>{/if}
       </div>
       {#if $bots.length === 0 && (!onSelectCloudBot || $cloudBots.length === 0)}
-        {#if onNewBot}<button class="bot-row empty-bot" type="button" onclick={onNewBot}>Create a bot that owns a job</button>{/if}
+        {#if onNewBot}<button class="bot-row empty-bot" type="button" onclick={onNewBot}>Create a bit that owns a job</button>{/if}
       {:else}
         {#each $bots as bot (bot.id)}
           <button
@@ -330,7 +331,7 @@
             onclick={() => { onSelectCloudBot?.(bot.id); if (!inline) onClose(); }}
             title="{bot.name}{bot.role ? ` · ${bot.role}` : ''}: runs in the cloud"
           >
-            <BotAvatar name={bot.name} color={bot.color} status={bot.status === "running" ? "running" : bot.status === "error" ? "error" : "idle"} size={26} decorative />
+            <BotAvatar name={bot.name} color={bot.color} shape={bot.avatarShape} status={bot.status === "running" ? "running" : bot.status === "error" ? "error" : "idle"} size={26} decorative />
             <span class="bot-text">
               <span class="bot-name">{bot.name}{#if bot.role}<span class="bot-role"> · {bot.role}</span>{/if}</span>
               <span class="bot-status"><span class="cloud-chip">Cloud</span> {bot.status === "running" ? (bot.activity ?? "Working…") : bot.enabled ? "Idle" : "Paused"}</span>
@@ -882,4 +883,9 @@
 
   /* Issue 161: no red color-mix() tint behind "Delete": a 10% wash dropped the red text below 4.5:1
      in both themes. The neutral hover above keeps AA contrast (and needs no WebKitGTK fallback). */
+  .bits-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
 </style>

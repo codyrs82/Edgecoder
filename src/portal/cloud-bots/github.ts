@@ -83,7 +83,7 @@ export function protectedRepoPath(p: string): boolean {
 
 function failure(r: { status: number; json: any }, what: string): string {
   const msg = typeof r.json?.message === "string" ? r.json.message.slice(0, 200) : `HTTP ${r.status}`;
-  if (r.status === 401) return `GitHub refused the bot's token (${msg}). Update the token in the bot's settings.`;
+  if (r.status === 401) return `GitHub refused the bit's token (${msg}). Update the token in the bit's settings.`;
   if (r.status === 403 || r.status === 404) return `GitHub said ${r.status} for ${what}: ${msg}. The token may not have access to it.`;
   return `GitHub couldn't ${what}: ${msg}`;
 }
@@ -248,14 +248,14 @@ export class GithubTools {
     const edits = files.map((f: any) => {
       const path = safeRepoPath(f?.path);
       if (!path) throw new Error("Each file needs a path.");
-      if (protectedRepoPath(path)) throw new Error(`${path}: bots don't change .github/ or git metadata.`);
+      if (protectedRepoPath(path)) throw new Error(`${path}: bits don't change .github/ or git metadata.`);
       if (typeof f?.content !== "string") throw new Error(`${path}: content must be the file's full text.`);
       bytes += Buffer.byteLength(f.content);
       return { path, content: f.content as string };
     });
     if (bytes > MAX_EDIT_BYTES) throw new Error(`At most ${MAX_EDIT_BYTES / 1000} KB of edits per pull request.`);
     const base = await this.branchOfDefault();
-    if (branch === base) throw new Error("A bot never commits to the default branch.");
+    if (branch === base) throw new Error("A bit never commits to the default branch.");
     const head = await this.http("GET", `${this.base}/git/ref/heads/${base.split("/").map(seg).join("/")}`);
     if (head.status !== 200) throw new Error(failure(head, `read ${base}`));
     const created = await this.http("POST", `${this.base}/git/refs`, { ref: `refs/heads/${branch}`, sha: head.json?.object?.sha });
@@ -267,7 +267,7 @@ export class GithubTools {
       const put = await this.http("PUT", `${this.base}/contents/${path}`, { message: `${title} (${e.path})`, content: Buffer.from(e.content, "utf8").toString("base64"), branch, ...(sha ? { sha } : {}) });
       if (put.status !== 200 && put.status !== 201) throw new Error(failure(put, `write ${e.path}`));
     }
-    const body = `${String(a.body ?? "").slice(0, 20_000)}\n\n_Opened by an EdgeCoder cloud bot._`.trim();
+    const body = `${String(a.body ?? "").slice(0, 20_000)}\n\n_Opened by an EdgeCoder cloud bit._`.trim();
     const pr = await this.http("POST", `${this.base}/pulls`, { title, head: branch, base, body });
     if (pr.status !== 201) throw new Error(failure(pr, "open the pull request"));
     this.made.push({ url: String(pr.json?.html_url ?? ""), number: Number(pr.json?.number) || undefined, title });

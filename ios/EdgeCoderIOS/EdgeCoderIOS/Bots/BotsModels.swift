@@ -85,6 +85,8 @@ struct BotSummary: Decodable, Equatable, Identifiable {
     let name: String
     let role: String?
     let color: String?
+    /// Its avatar: a Bits character ("coin", "bolt", …) or a classic shape; absent on older bits.
+    let avatarShape: String?
     let status: String
     let activity: String?
     let enabled: Bool
@@ -111,10 +113,13 @@ struct BotSummary: Decodable, Equatable, Identifiable {
 
     enum CodingKeys: String, CodingKey {
         case botId = "id"
-        case name, role, color, status, activity, enabled, folderName, schedule, runsToday, maxRunsPerDay
+        case name, role, color, avatarShape, status, activity, enabled, folderName, schedule, runsToday, maxRunsPerDay
         case budgetCSatsPerDay, spentTodayCSats, held, lastRun, pending, queuedMessages, tail, machine
         case runtime, agentId, cloud
     }
+
+    /// The asset catalog image for its Bits avatar (Assets.xcassets/Bits), or nil for a classic shape.
+    var bitAvatarImageName: String? { avatarShape.flatMap { BotsFormat.bitAvatarIds.contains($0) ? "bit-\($0)" : nil } }
 
     /// Runs in the cloud, not on one of your machines.
     var isCloud: Bool { runtime == "cloud" || agentId == BotTarget.cloudId || machine?.agentId == BotTarget.cloudId }
@@ -471,21 +476,24 @@ struct BotCommandResponse: Decodable {
 }
 
 enum BotsFormat {
+    /// The Bits avatars (src/common/bit-avatars.ts BIT_AVATAR_IDS), drawn from Assets.xcassets/Bits/bit-<id>.
+    static let bitAvatarIds: Set<String> = ["coin", "bolt", "stack", "chain", "miner", "node", "pill", "vault", "moon", "key", "hash", "jar"]
+
     /// Plain words for a bot command refusal from the portal or coordinator.
     static func commandError(_ code: String?, message: String? = nil) -> String {
         switch code {
         case "agent_not_connected": return "That machine isn't connected right now. Try again when it's online."
         case "not_your_machine": return "That machine isn't on this account."
-        case "no_such_bot": return "That bot isn't on this machine anymore."
+        case "no_such_bot": return "That bit isn't on this machine anymore."
         case "coordinator_unreachable": return "Couldn't reach the EdgeCoder network. Try again in a moment."
         case "relay_view_only", "view_only": return "This machine is view-only from the web. Change it on the machine itself."
         case "not_authenticated": return "Your session ended. Sign in again."
         case "invalid_command", "invalid_bot": return message ?? "That wasn't accepted."
-        case "too_many_pending": return "Too many new bots are waiting for a machine."
-        case "github_unavailable": return "GitHub isn't set up for cloud bots yet."
+        case "too_many_pending": return "Too many new bits are waiting for a machine."
+        case "github_unavailable": return "GitHub isn't set up for cloud bits yet."
         case "too_many_bots", "rate_limited": return message ?? "Too many right now. Try again later."
-        case "not_supported": return "Cloud bots don't do that."
-        case "cloud_bots_unavailable", "cloud_unavailable", "cloud_not_enabled": return "Cloud bots aren't available yet. Pick one of your machines."
+        case "not_supported": return "Cloud bits don't do that."
+        case "cloud_bots_unavailable", "cloud_unavailable", "cloud_not_enabled": return "Cloud bits aren't available yet. Pick one of your machines."
         case "busy": return "Try again."
         case nil: return message ?? "The command didn't go through."
         default: return message ?? "The command didn't go through (\(code!))."

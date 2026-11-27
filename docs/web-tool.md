@@ -1,6 +1,6 @@
 # Web tool
 
-Live, real-world information for chats and bots: the model can **search the web** (`web_search`)
+Live, real-world information for chats and bits: the model can **search the web** (`web_search`)
 and **read a page** (`read_page`), and its answer cites the sources it used.
 
 - **Automatic in chats** (desktop app and web chat). When web search is set up, the chat's model
@@ -18,8 +18,8 @@ and **read a page** (`read_page`), and its answer cites the sources it used.
   small menu has **Auto** and **Off for this chat** (kept per chat). **Settings → General → Search
   the web automatically** (on by default) sets it for chats that haven't chosen; it's kept on that
   computer or in that browser (`edgecoder.web.auto`).
-- **Bots**: a **Search the web** permission in the bot's settings (What it may do), **on for new
-  bots**. Existing bots keep what they were given.
+- **Bits**: a **Search the web** permission in the bit's settings (What it may do), **on for new
+  bits**. Existing bits keep what they were given.
 - **Tool-capable models only.** With a model that can't call tools (`src/web-tool/model-support.ts`
   `modelCallsTools`), and on the web chat for EdgeCoder's own default chat, the indicator is dimmed
   ("Web: unavailable with this model") and the chat answers without the web. Auto on your own
@@ -52,7 +52,7 @@ and **read a page** (`read_page`), and its answer cites the sources it used.
 Small and medium open models (qwen2.5/3/3.5, qwen3-coder) don't reliably decide to call a tool, and
 often answer "as an AI I don't have real-time access" with the tool in front of them. So the shared
 web layer (`webGrounding` in `src/web-tool/tools.ts`, used by the portal chat, the desktop app's
-chats and bots) does two things around the agent loop:
+chats and bits) does two things around the agent loop:
 
 - **Search first.** Before the first model turn, `needsFreshInfo` (a cheap, deterministic check of the
   latest user message) decides whether it needs fresh information. It fires on a URL; on an explicit
@@ -67,7 +67,7 @@ chats and bots) does two things around the agent loop:
   may search or read more. It goes through the same `WebToolSession.run` as a model's call: same
   billing to the account, same hourly cap, and it counts toward the reply's searches; the reply shows
   "Searching the web…" and the sources as usual. Not in **Manual** (web calls ask first), and for
-  bots only on a message the owner wrote (a schedule's or GitHub's prompt never becomes a search on
+  bits only on a message the owner wrote (a schedule's or GitHub's prompt never becomes a search on
   its own). Coding questions don't trigger it, so they cost nothing.
 - **Post-check.** Once web results were provided, a sentence such as "I don't have access to
   real-time data" or "As an AI I can't browse the internet" is dropped from the streamed answer
@@ -81,7 +81,7 @@ The portal's `portal_web_loop` log line carries `grounded: true` when the server
 
 On EdgeCoder's servers, except for an own-machine chat whose machine has local web (see
 [Searches on your own machine](#searches-on-your-own-machine)). The model's tool calls go from the desktop app's
-IDE server, a bot or the web portal's chat to a coordinator:
+IDE server, a bit or the web portal's chat to a coordinator:
 
 | Endpoint (coordinator) | Body | Answer |
 | --- | --- | --- |
@@ -220,10 +220,10 @@ updated with agent releases.
 - Everything the tools return is wrapped as untrusted data (`<<<untrusted_web_content …>>>`, with
   any marker inside the page neutralised), and the system prompt says web content is information,
   never instructions.
-- After `read_page` has put a page's text into the context, the rest of that reply or bot run is
+- After `read_page` has put a page's text into the context, the rest of that reply or bit run is
   guarded (`makeToolRunner` in `src/apps/ide/agent-loop.ts`): a command, git call or other action
   the mode (or an "Always allow" rule) would have run asks first, so page text alone can never make
-  the agent run anything. A bot running on its own queues it as **Needs approval**.
+  the agent run anything. A bit running on its own queues it as **Needs approval**.
   - **Edits inside the project still apply** when the mode applies them anyway (Accept edits, Auto):
     each one is in the turn's checkpoint and can be undone. Protected paths (git hooks, files tooling
     runs), secrets files and files outside the project ask (or are refused) as the mode says.
@@ -248,8 +248,8 @@ updated with agent releases.
 
 ## Permission modes
 
-A chat on **Web: Auto** and a bot with **Search the web** have the allowance, and network access
-needs it: the web tools aren't offered to a chat that's **Off for this chat** or a bot without the
+A chat on **Web: Auto** and a bit with **Search the web** have the allowance, and network access
+needs it: the web tools aren't offered to a chat that's **Off for this chat** or a bit without the
 permission. With it:
 
 | Mode | web_search / read_page |
@@ -267,10 +267,10 @@ permission. With it:
   falls by exactly the cSats of the calls that returned something. No balance: `402 needs_csats`.
 - Per account per hour (sliding, per coordinator): `WEB_SEARCH_PER_HOUR` searches (60) and
   `WEB_READ_PER_HOUR` page reads (120); over it: `429 rate_limited`.
-- Bots: web calls count toward the bot's daily cSat budget; once it's spent the web tool refuses and
+- Bits: web calls count toward the bit's daily cSat budget; once it's spent the web tool refuses and
   the run stops like any over-budget run.
 - Per reply (IDE server and portal): `WEB_MAX_SEARCHES_PER_REPLY` (3) and `WEB_MAX_READS_PER_REPLY`
-  (4), each 0 to 50; a bot run counts as one reply.
+  (4), each 0 to 50; a bit run counts as one reply.
 - Prices: `WEB_SEARCH_CSATS` (0.5) and `WEB_READ_CSATS` (0.2). Free on your own machine within
   the daily caps (`WEB_FREE_OWN_MACHINE_SEARCHES_PER_DAY`, `WEB_FREE_OWN_MACHINE_READS_PER_DAY`,
   `WEB_FREE_GLOBAL_PER_DAY`). All these variables are in the

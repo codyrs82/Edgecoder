@@ -23,22 +23,22 @@ struct BotsView: View {
         NavigationStack {
             List {
                 if !sessionStore.isAuthenticated {
-                    Text("Sign in to see your bots.").foregroundColor(Theme.textSecondary)
+                    Text("Sign in to see your bits.").foregroundColor(Theme.textSecondary)
                 } else if !error.isEmpty {
                     Text(error).foregroundColor(Theme.red)
                 } else if loaded && bots.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("No bots yet").font(.headline).foregroundColor(Theme.textPrimary)
+                        Text("No bits yet").font(.headline).foregroundColor(Theme.textPrimary)
                         Text(cloudTarget != nil
-                             ? "Tap + to create one. A cloud bot needs no machine."
+                             ? "Tap + to create one. A cloud bit needs no machine."
                              : machines.isEmpty
-                                ? "Tap + to create one, or sign in to the EdgeCoder desktop app on one of your machines and its bots show up here."
+                                ? "Tap + to create one, or sign in to the EdgeCoder desktop app on one of your machines and its bits show up here."
                                 : "Tap + to create one on one of your machines, or create it in the EdgeCoder desktop app.")
                             .font(.footnote).foregroundColor(Theme.textSecondary)
                     }
                 }
                 if !pending.isEmpty {
-                    Section("New bots") {
+                    Section("New bits") {
                         ForEach(pending) { p in
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(p.name).font(.subheadline.weight(.medium)).foregroundColor(Theme.textPrimary)
@@ -83,12 +83,12 @@ struct BotsView: View {
                 }
             }
             .overlay { if loading && !loaded { ProgressView() } }
-            .navigationTitle("Bots")
+            .navigationTitle("Bits")
             .toolbar {
                 if sessionStore.isAuthenticated {
                     ToolbarItem(placement: .primaryAction) {
                         Button { showNew = true } label: { Image(systemName: "plus") }
-                            .accessibilityLabel("New bot")
+                            .accessibilityLabel("New bit")
                     }
                 }
             }
@@ -114,7 +114,7 @@ struct BotsView: View {
             cloudGitHub = r.cloudGitHub
             error = ""
         } catch {
-            self.error = "Couldn't load your bots: \(error.localizedDescription)"
+            self.error = "Couldn't load your bits: \(error.localizedDescription)"
         }
     }
 }
@@ -123,9 +123,14 @@ private struct BotRow: View {
     let bot: BotSummary
     var body: some View {
         HStack(spacing: 10) {
-            Circle().fill(Color(hex: bot.color) ?? Theme.accent).frame(width: 28, height: 28)
-                .overlay(Text(String(bot.name.prefix(1)).uppercased()).font(.caption.weight(.bold)).foregroundColor(.white))
-                .accessibilityHidden(true)
+            if let image = bot.bitAvatarImageName {
+                Image(image).resizable().scaledToFit().frame(width: 28, height: 28)
+                    .accessibilityHidden(true)
+            } else {
+                Circle().fill(Color(hex: bot.color) ?? Theme.accent).frame(width: 28, height: 28)
+                    .overlay(Text(String(bot.name.prefix(1)).uppercased()).font(.caption.weight(.bold)).foregroundColor(.white))
+                    .accessibilityHidden(true)
+            }
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(bot.name).font(.subheadline.weight(.medium)).foregroundColor(Theme.textPrimary)
@@ -209,7 +214,7 @@ struct BotDetailView: View {
                         }
                         .disabled(sending)
                     } else {
-                        Text(machine?.online == false ? "This machine is offline. You can read, but not control, its bots." : "View only: approve and control this bot on its machine.")
+                        Text(machine?.online == false ? "This machine is offline. You can read, but not control, its bits." : "View only: approve and control this bit on its machine.")
                             .font(.footnote).foregroundColor(Theme.textSecondary)
                     }
                 }
@@ -276,7 +281,7 @@ struct BotDetailView: View {
                 }
                 if isCloud && canControl {
                     Section {
-                        Button("Delete bot", role: .destructive) { confirmDelete = true }
+                        Button("Delete bit", role: .destructive) { confirmDelete = true }
                             .disabled(sending)
                     }
                 }
@@ -287,7 +292,7 @@ struct BotDetailView: View {
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .confirmationDialog("Delete \(title)?", isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button("Delete bot", role: .destructive) {
+            Button("Delete bit", role: .destructive) {
                 Task {
                     if await command("delete", reload: false) {
                         onChanged()
@@ -297,7 +302,7 @@ struct BotDetailView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("The bot and its messages are removed. This can't be undone.")
+            Text("The bit and its messages are removed. This can't be undone.")
         }
         .safeAreaInset(edge: .bottom) {
             if canControl {
@@ -538,7 +543,7 @@ private struct NewBotSheet: View {
                     TextField("Role (optional)", text: $role)
                 }
                 Section("Instructions") {
-                    TextField("What should this bot do?", text: $instructions, axis: .vertical).lineLimit(4...10)
+                    TextField("What should this bit do?", text: $instructions, axis: .vertical).lineLimit(4...10)
                 }
                 Section {
                     if hasTargets {
@@ -554,14 +559,14 @@ private struct NewBotSheet: View {
                             }
                         }
                     } else {
-                        Text("There's nowhere to run a bot yet. Cloud bots aren't available yet, and none of your machines can host bots. Sign in to the EdgeCoder desktop app on one of your machines to run bots there.")
+                        Text("There's nowhere to run a bit yet. Cloud bits aren't available yet, and none of your machines can host bits. Sign in to the EdgeCoder desktop app on one of your machines to run bits there.")
                             .font(.footnote).foregroundColor(Theme.textSecondary)
                     }
                 } footer: {
                     if hasTargets {
                         Text(isCloud
                              ? "No machine needed. It runs in the cloud."
-                             : "The bot is created on that machine the next time EdgeCoder runs there. You pick its project folder on that machine.")
+                             : "The bit is created on that machine the next time EdgeCoder runs there. You pick its project folder on that machine.")
                     }
                 }
                 Section {
@@ -617,13 +622,13 @@ private struct NewBotSheet: View {
                     Text("GitHub (optional)")
                 } footer: {
                     if gitHubUnavailable {
-                        Text("GitHub isn't set up for cloud bots yet.")
+                        Text("GitHub isn't set up for cloud bits yet.")
                     } else if repoTrimmed.isEmpty {
                         Text("Add a repository to use triggers.")
                     } else if normalizedRepo == nil {
                         Text("Enter the repository as owner/name.")
                     } else if showsToken {
-                        Text("The token is sent once to create the bot and isn't saved on this device.")
+                        Text("The token is sent once to create the bit and isn't saved on this device.")
                     } else {
                         Text("The machine uses the GitHub account signed in there.")
                     }
@@ -633,7 +638,7 @@ private struct NewBotSheet: View {
                 }
                 if !error.isEmpty { Text(error).foregroundColor(Theme.red) }
             }
-            .navigationTitle("New bot")
+            .navigationTitle("New bit")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { token = ""; dismiss() } }
@@ -686,7 +691,7 @@ private struct NewBotSheet: View {
             onCreated()
             dismiss()
         } catch {
-            self.error = "Couldn't create the bot: \(error.localizedDescription)"
+            self.error = "Couldn't create the bit: \(error.localizedDescription)"
         }
     }
 }

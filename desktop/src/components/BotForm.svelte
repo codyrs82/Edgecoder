@@ -8,7 +8,8 @@
   import { RESTARTING_TEXT, localServiceRestarting } from "../lib/local-service";
   import ComputePicker from "./ComputePicker.svelte";
   import BotAvatar from "./BotAvatar.svelte";
-  import { AVATAR_COLORS, AVATAR_SHAPES, AVATAR_SHAPE_LABELS, colorFromName, shapeFor, type AvatarShape } from "../lib/bot-avatar";
+  import { AVATAR_COLORS, AVATAR_SHAPE_LABELS, CLASSIC_SHAPES, colorFromName, isBitShape, shapeFor, type AvatarShape } from "../lib/bot-avatar";
+  import { BIT_AVATARS, randomBitAvatarId } from "../lib/bit-avatars";
   import {
     DEFAULT_BOT_FRONTIER_DAILY_CAP_USD, DEFAULT_BOT_FRONTIER_LEAD, DEFAULT_BOT_FRONTIER_RUN_CAP_USD,
     BOT_TOOL_GROUPS, CI_SCOPE_OPTIONS, COMPUTE_POLICY_OPTIONS, DEFAULT_COMPUTE, DEFAULT_HEARTBEAT_MINUTES, DEFAULT_MAX_RUNS_PER_DAY, HEARTBEAT_OPTIONS, SCHEDULE_PRESETS, TRIGGER_KIND_OPTIONS, botCompute, computeChoiceOf, computeFromChoice, groupsOf, networkModelId, toolsFor,
@@ -108,9 +109,10 @@
   const showFrontier = $derived(frontierModels.length > 0 || !!initial?.frontierLead);
   /** GitHub triggers let other people start it: no frontier key then. */
   const frontierBlocked = $derived(triggers.length > 0);
-  // The avatar: follows the name until you pick a color or shape.
+  // The avatar: a new bit starts as a random Bits character; an existing one keeps its look (a
+  // classic shape from its name when none was ever picked) until you pick another.
   let pickedColor = $state<string | null>(initial?.color ?? null);
-  let pickedShape = $state<AvatarShape | null>((initial?.avatarShape as AvatarShape | undefined) ?? null);
+  let pickedShape = $state<AvatarShape | null>(initial ? ((initial.avatarShape as AvatarShape | undefined) ?? null) : randomBitAvatarId());
   const avatarColor = $derived(pickedColor ?? colorFromName(name || "bot"));
   const avatarShape = $derived<AvatarShape>(pickedShape ?? shapeFor({ name: name || "bot" }));
   let memory = $state("");
@@ -124,7 +126,7 @@
   async function chooseFolder() {
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
-      const selected = await open({ directory: true, title: "Bot's project folder" });
+      const selected = await open({ directory: true, title: "Bit's project folder" });
       if (selected && typeof selected === "string") projectRoot = selected;
     } catch {
       // outside the desktop shell: type the path
@@ -140,7 +142,7 @@
       return;
     }
     if (policy === "model" && !computeModel) {
-      error = "Pick the model this bot runs on, or choose another compute option.";
+      error = "Pick the model this bit runs on, or choose another compute option.";
       return;
     }
     const maxRuns = Number(maxRunsText);
@@ -164,7 +166,7 @@
     let frontier: { frontierLead?: string | null; frontierRunCapUsd?: number; frontierDailyCapUsd?: number } = {};
     if (frontierOn && showFrontier) {
       if (frontierBlocked) {
-        error = "A bot with GitHub triggers can't use your frontier key: anyone could start it. Remove the triggers or turn the frontier lead off.";
+        error = "A bit with GitHub triggers can't use your frontier key: anyone could start it. Remove the triggers or turn the frontier lead off.";
         return;
       }
       const runCap = Number(runCapText);
@@ -210,8 +212,8 @@
 
 <Dialog labelledby="bf-title" width="680px" {onClose}>
   <form class="sp bf-form" onsubmit={save}>
-    <h1 id="bf-title">{initial ? `Edit ${initial.name}` : "New bot"}</h1>
-    <p class="sp-lead">A bot owns a job and keeps its own home folder. It works on its own: it starts when you save it, checks in on its project (or runs on its schedule), follows up on unfinished work, and answers your messages, on the compute you choose below. Pause it any time.</p>
+    <h1 id="bf-title">{initial ? `Edit ${initial.name}` : "New bit"}</h1>
+    <p class="sp-lead">A bit owns a job and keeps its own home folder. It works on its own: it starts when you save it, checks in on its project (or runs on its schedule), follows up on unfinished work, and answers your messages, on the compute you choose below. Pause it any time.</p>
 
     <div class="sp-group">
       <div class="sp-group-title">Who it is</div>
@@ -225,20 +227,29 @@
           <input type="text" bind:value={role} placeholder="Engineer" maxlength="80" />
         </label>
         <div class="sp-row bf-look">
-          <BotAvatar name={name || "Bot"} color={avatarColor} shape={avatarShape} size={56} />
+          <BotAvatar name={name || "Bit"} color={avatarColor} shape={avatarShape} size={56} />
           <div class="bf-look-controls">
-            <div class="bf-swatches" role="radiogroup" aria-label="Color">
-              {#each AVATAR_COLORS as c (c)}
-                <button type="button" class="bf-swatch" role="radio" aria-checked={avatarColor === c} aria-label="Color {c}" style="background: {c}" onclick={() => (pickedColor = c)}></button>
-              {/each}
-            </div>
-            <div class="bf-shapes" role="radiogroup" aria-label="Shape">
-              {#each AVATAR_SHAPES as s (s)}
-                <button type="button" class="bf-shape" role="radio" aria-checked={avatarShape === s} aria-label={AVATAR_SHAPE_LABELS[s]} title={AVATAR_SHAPE_LABELS[s]} onclick={() => (pickedShape = s)}>
-                  <BotAvatar name={name || "Bot"} color={avatarColor} shape={s} size={30} decorative />
+            <div class="bf-shapes" role="radiogroup" aria-label="Bits avatar">
+              {#each BIT_AVATARS as a (a.id)}
+                <button type="button" class="bf-shape" role="radio" aria-checked={avatarShape === a.id} aria-label={a.label} title="{a.label}: {a.blurb}" data-shape={a.id} onclick={() => (pickedShape = a.id)}>
+                  <BotAvatar name={name || "Bit"} color={avatarColor} shape={a.id} size={30} decorative />
                 </button>
               {/each}
             </div>
+            <div class="bf-shapes" role="radiogroup" aria-label="Classic shape">
+              {#each CLASSIC_SHAPES as s (s)}
+                <button type="button" class="bf-shape" role="radio" aria-checked={avatarShape === s} aria-label={AVATAR_SHAPE_LABELS[s]} title={AVATAR_SHAPE_LABELS[s]} data-shape={s} onclick={() => (pickedShape = s)}>
+                  <BotAvatar name={name || "Bit"} color={avatarColor} shape={s} size={30} decorative />
+                </button>
+              {/each}
+            </div>
+            {#if !isBitShape(avatarShape)}
+              <div class="bf-swatches" role="radiogroup" aria-label="Color">
+                {#each AVATAR_COLORS as c (c)}
+                  <button type="button" class="bf-swatch" role="radio" aria-checked={avatarColor === c} aria-label="Color {c}" style="background: {c}" onclick={() => (pickedColor = c)}></button>
+                {/each}
+              </div>
+            {/if}
           </div>
         </div>
         <label class="sp-row stack">
@@ -247,7 +258,7 @@
         </label>
         {#if initial}
           <label class="sp-row stack">
-            <span class="sp-text"><span class="sp-title">Memory</span><span class="sp-desc">Notes the bot saved for itself. Edit or clear them here.</span></span>
+            <span class="sp-text"><span class="sp-title">Memory</span><span class="sp-desc">Notes the bit saved for itself. Edit or clear them here.</span></span>
             <textarea bind:value={memory} rows="4" maxlength="8000"></textarea>
           </label>
         {/if}
@@ -296,7 +307,7 @@
       <div class="sp-group-title">Triggers</div>
       <div class="sp-card">
         <div class="sp-row stack">
-          <span class="sp-text"><span class="sp-title">GitHub events</span><span class="sp-desc">Each one starts a run. Checked every 2 minutes while EdgeCoder is open, through your GitHub CLI login. Pausing the bot pauses them.</span></span>
+          <span class="sp-text"><span class="sp-title">GitHub events</span><span class="sp-desc">Each one starts a run. Checked every 2 minutes while EdgeCoder is open, through your GitHub CLI login. Pausing the bit pauses them.</span></span>
         </div>
         {#each triggers as t, i (i)}
           <div class="sp-row bf-trigger">
@@ -389,7 +400,7 @@
               <span class="sp-title">Lead with {frontierName(leadModel)} (your key)</span>
               <span class="sp-desc">
                 {frontierBlocked
-                  ? "Off while it has GitHub triggers: anyone who opens a pull request or issue could start it. Bots use your key only when only you can start them."
+                  ? "Off while it has GitHub triggers: anyone who opens a pull request or issue could start it. Bits use your key only when only you can start them."
                   : "It asks you in its chat before each run that would use your key (approve this run, approve for today, or decline), and stops at the caps below. Its compute above does the rest. The provider bills you."}
               </span>
             </span>
@@ -401,7 +412,7 @@
               <input type="number" min="0.01" max="1000" step="any" bind:value={runCapText} class="bf-num" aria-label="Frontier cap per run (USD)" />
             </label>
             <label class="sp-row">
-              <span class="sp-text"><span class="sp-title">Per day</span><span class="sp-desc">USD a day for this bot, within your key's own daily cap.</span></span>
+              <span class="sp-text"><span class="sp-title">Per day</span><span class="sp-desc">USD a day for this bit, within your key's own daily cap.</span></span>
               <input type="number" min="0.01" max="1000" step="any" bind:value={dailyCapText} class="bf-num" aria-label="Frontier cap per day (USD)" />
             </label>
           {/if}
@@ -432,7 +443,7 @@
     {#if error}<div class="sp-err" role="alert">{error}</div>{/if}
     <div class="bf-actions">
       <button type="button" class="ghost" onclick={onClose}>Cancel</button>
-      <button type="submit" class="primary" disabled={saving || !name.trim() || !projectRoot.trim()}>{saving ? "Saving…" : initial ? "Save" : "Create bot"}</button>
+      <button type="submit" class="primary" disabled={saving || !name.trim() || !projectRoot.trim()}>{saving ? "Saving…" : initial ? "Save" : "Create bit"}</button>
     </div>
   </form>
 </Dialog>

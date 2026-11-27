@@ -36,7 +36,7 @@ export interface TaskRow {
   store: "conversations" | "sessions" | "bots" | "tentacles" | "recent" | "usage";
 }
 
-export const KIND_LABEL: Record<TaskKind, string> = { chat: "Chat", code: "Code", bot: "Bot", tentacle: "Helper", api: "API" };
+export const KIND_LABEL: Record<TaskKind, string> = { chat: "Chat", code: "Code", bot: "Bit", tentacle: "Helper", api: "API" };
 export const STATUS_LABEL: Record<TaskStatus, string> = { done: "Done", failed: "Failed", cancelled: "Cancelled", running: "Running" };
 
 const firstLine = (s: string | undefined, n = 140) => {
@@ -149,7 +149,7 @@ export function botTasks(bot: { id: string; name: string }, runs: BotRun[]): Tas
     outputTokens: null,
     cSats: r.cSats,
     status: BOT_STATUS[r.status] ?? "done",
-    ...(r.error ? { error: firstLine(r.error, 300) } : r.status === "budget" ? { error: "Stopped at the bot's daily budget" } : {}),
+    ...(r.error ? { error: firstLine(r.error, 300) } : r.status === "budget" ? { error: "Stopped at the bit's daily budget" } : {}),
     durationMs: r.endedAtMs !== undefined ? r.endedAtMs - r.startedAtMs : null,
     steps: [
       `trigger: ${r.trigger}${r.source ? ` (${r.source})` : ""}`,

@@ -163,7 +163,7 @@ export function attachmentsText(list: AttachmentPayload[], vision: Vision, saved
       const f = fence(a.text ?? "");
       parts.push(`Attached file ${a.name}${saved}:\n${f}\n${a.text ?? ""}\n${f}`);
     } else if (a.kind === "archive") {
-      parts.push(`[Attached zip ${a.name}${a.fileCount !== undefined ? ` (${a.fileCount} files)` : ""}${saved}. Its contents can't be opened in this chat; say so if the request depends on them, and suggest opening a project or messaging a bot instead.]`);
+      parts.push(`[Attached zip ${a.name}${a.fileCount !== undefined ? ` (${a.fileCount} files)` : ""}${saved}. Its contents can't be opened in this chat; say so if the request depends on them, and suggest opening a project or messaging one of their bits (background agents) instead.]`);
     } else if (a.kind === "document") {
       parts.push(`[Attached document ${a.name}${saved}. It can't be read in this chat; say so if the request depends on it, and suggest opening a project or pasting the text.]`);
     } else if ((a.kind === "image" && !vision.images) || (a.kind === "pdf" && !vision.pdf)) {

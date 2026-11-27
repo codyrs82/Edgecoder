@@ -278,7 +278,7 @@ for (const vp of VIEWPORTS) {
     test("bot form", async ({ page }) => {
       await openApp(page);
       await page.getByRole("button", { name: "New", exact: true }).click();
-      await page.getByRole("menuitem", { name: "New bot" }).click();
+      await page.getByRole("menuitem", { name: "New bit" }).click();
       const dialog = page.getByRole("dialog");
       await expect(dialog).toBeVisible();
       await settle(dialog);

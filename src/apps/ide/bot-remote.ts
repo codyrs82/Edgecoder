@@ -132,7 +132,7 @@ type Outcome = Omit<BotControlResult, "commandId">;
 
 /** Carries out one verified command from the web on this computer's bots. */
 export function runRemoteBotCommand(bots: BotManager, botId: string, request: BotControlRequest, controls: RelayControls, ctx: { requestedBy?: string } = {}): Outcome {
-  if (controls !== "on" && !BOT_READ_ACTIONS.has(request.action)) return { status: "refused", error: "view_only", message: "This Mac shows its bots on the web read-only. Change it on the Mac." };
+  if (controls !== "on" && !BOT_READ_ACTIONS.has(request.action)) return { status: "refused", error: "view_only", message: "This Mac shows its bits on the web read-only. Change it on the Mac." };
   try {
     if (request.action === "create") return createFromWeb(bots, botId, request.args, ctx.requestedBy);
     const bot = bots.get(botId);
@@ -147,7 +147,7 @@ export function runRemoteBotCommand(bots: BotManager, botId: string, request: Bo
         return { status: "done" };
       case "check_now": {
         const r = bots.runNow(botId, "manual");
-        if (!r.started) return { status: "refused", error: r.reason ?? "busy", message: r.reason === "budget" ? "Today's budget for this bot is spent." : "The bot is already running." };
+        if (!r.started) return { status: "refused", error: r.reason ?? "busy", message: r.reason === "budget" ? "Today's budget for this bit is spent." : "The bit is already running." };
         return { status: "done", data: { started: true } };
       }
       case "stop":
@@ -159,7 +159,7 @@ export function runRemoteBotCommand(bots: BotManager, botId: string, request: Bo
         // Permissions (tools, auto-approval, the permission mode) and the frontier lead change on the Mac only.
         const { projectRoot, repository, allowedTools, autoApproveEdits, mode, frontierLead, frontierRunCapUsd, frontierDailyCapUsd, ...safe } = patch.data;
         if (frontierLead !== undefined || frontierRunCapUsd !== undefined || frontierDailyCapUsd !== undefined) {
-          return { status: "refused", error: "change_on_mac", message: "A bot's frontier lead (your own key) is turned on and off in the EdgeCoder app on the Mac." };
+          return { status: "refused", error: "change_on_mac", message: "A bit's frontier lead (your own key) is turned on and off in the EdgeCoder app on the Mac." };
         }
         if (projectRoot !== undefined || repository !== undefined || allowedTools !== undefined || autoApproveEdits !== undefined || mode !== undefined) {
           return { status: "refused", error: "change_on_mac", message: "The folder, repository, tools and auto-approval are changed on the Mac." };
@@ -221,7 +221,7 @@ function createFromWeb(bots: BotManager, botId: string, args: Extract<BotControl
   if (!requestedBy) return { status: "refused", error: "not_this_account" };
   // One bot per request and account, whatever the retries; a frame naming another id is refused.
   if (botId !== webBotId(requestedBy, args.requestId)) return { status: "refused", error: "bad_bot_id" };
-  if (isFrontierModel(args.compute?.model)) return { status: "refused", error: "invalid_settings", message: "A bot's compute can't be a frontier model. Turn on its frontier lead in the EdgeCoder app on the Mac." };
+  if (isFrontierModel(args.compute?.model)) return { status: "refused", error: "invalid_settings", message: "A bit's compute can't be a frontier model. Turn on its frontier lead in the EdgeCoder app on the Mac." };
   // The desktop form's validation of every field (a folder is never part of a web create).
   const { requestId, suggestedFolder, ...fields } = args;
   const checked = botPatchSchema.safeParse(fields);

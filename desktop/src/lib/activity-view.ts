@@ -70,7 +70,7 @@ export function runningWhere(i: Pick<ActivityItem, "calls" | "model">): string {
   return i.model ? `${shortModel(i.model.replace(/^(network|mine)\//, ""))} · waiting for the first reply` : "Starting…";
 }
 
-export const KIND_TEXT: Record<ActivityItem["kind"], string> = { chat: "Chat", code: "Code", bot: "Bot", tentacle: "Helper", api: "API call" };
+export const KIND_TEXT: Record<ActivityItem["kind"], string> = { chat: "Chat", code: "Code", bot: "Bit", tentacle: "Helper", api: "API call" };
 
 /** For the polite live region: changes only when the counts do. */
 export function liveSummary(s: ActivitySnapshot | null): string {

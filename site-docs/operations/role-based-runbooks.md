@@ -85,7 +85,7 @@ Step by step: [Run EdgeCoder on a cloud GPU or Linux server](/guide/cloud-gpu-se
 
 1. Install EdgeCoder from the App Store.
 2. Sign in with your EdgeCoder account. The app enrolls the device with your account by itself after sign-in; there is no coordinator URL or token to paste.
-3. The tabs are **Chat**, **Bots**, **Wallet**, **Machines** and **Network**. See the [iOS app guide](/guide/ios-app).
+3. The tabs are **Chat**, **Bits**, **Wallet**, **Machines** and **Network**. See the [iOS app guide](/guide/ios-app).
 
 Your own machines run your own work for free. Running other people's work needs host approval: see [Hosting](/guide/hosting).
 

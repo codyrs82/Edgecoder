@@ -388,7 +388,7 @@
                 </label>
               {/each}
             </fieldset>
-            <p class="wz-muted">Auto and This computer only set the chat's compute menu. Bots have their own setting in the bot form; pick a specific model in the chat's compute menu.</p>
+            <p class="wz-muted">Auto and This computer only set the chat's compute menu. Bits have their own setting in the bit form; pick a specific model in the chat's compute menu.</p>
             <h3 class="wz-sub">Bring your own frontier key (optional)</h3>
             <p>Add your own Anthropic or OpenAI-compatible key to lead with a frontier model. Only your account uses it, and the provider bills you.</p>
           {:else if step.id === "fund"}
@@ -432,7 +432,7 @@
                 <button class="wz-btn" disabled aria-describedby="wz-onchain-soon">Fund with Bitcoin</button><span id="wz-onchain-soon" class="wz-muted">Coming soon</span>
               {/if}
             </div>
-            <p class="wz-muted">Bots have a daily budget, so a bot never spends more than you allow.</p>
+            <p class="wz-muted">Bits have a daily budget, so a bit never spends more than you allow.</p>
           {:else if step.id === "tools"}
             <h3 class="wz-sub">GitHub</h3>
             <p>Clone repositories and open pull requests (Code → New project → Clone from GitHub).</p>
@@ -449,7 +449,7 @@
             <ul class="wz-list">
               <li><strong>Ask in Chat</strong> sends a short question, so you can see the reply and where it ran.</li>
               <li><strong>Explain a file in Code</strong>: open a project and ask about any file.</li>
-              <li><strong>Create a bot</strong> with a small daily budget.</li>
+              <li><strong>Create a bit</strong> with a small daily budget.</li>
             </ul>
             <p class="wz-muted">Each reply ends with where it ran (your machine or the network) and what it cost.</p>
           {:else if step.id === "host"}
