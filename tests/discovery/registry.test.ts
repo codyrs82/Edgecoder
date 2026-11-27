@@ -44,8 +44,10 @@ function payload(over: Partial<RegistryPayload> = {}): RegistryPayload {
 }
 
 describe("signed coordinator registry", () => {
-  it("ships no built-in registry key until the operator publishes one", () => {
-    expect(DEFAULT_REGISTRY_PUBLIC_KEYS).toEqual([]);
+  it("ships EdgeCoder's two registry keys (signing + cold rotation), as 64-hex raw Ed25519 keys", () => {
+    expect(DEFAULT_REGISTRY_PUBLIC_KEYS).toHaveLength(2);
+    for (const k of DEFAULT_REGISTRY_PUBLIC_KEYS) expect(k).toMatch(/^[0-9a-f]{64}$/);
+    expect(new Set(DEFAULT_REGISTRY_PUBLIC_KEYS).size).toBe(2);
   });
 
   it("verifies a registry signed with the pinned key", () => {

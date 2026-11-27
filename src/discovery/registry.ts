@@ -27,7 +27,12 @@ export const REGISTRY_FORMAT = "edgecoder-registry/1";
  * Override or extend with EDGECODER_REGISTRY_PUBLIC_KEYS (PEM, or 64-hex raw Ed25519 key; comma or
  * semicolon separated, for rotation).
  */
-export const DEFAULT_REGISTRY_PUBLIC_KEYS: readonly string[] = [];
+export const DEFAULT_REGISTRY_PUBLIC_KEYS: readonly string[] = [
+  // Signing key (held only in the portal's REGISTRY_SIGNING_KEY_PEM), generated offline 2026-11-27.
+  "e0c144cdce5b246b8142c8979fbc6080628a6056f8f1d44183d597f1eab96b40",
+  // Cold rotation key, generated offline 2026-11-27; private half held offline by the owner.
+  "0d09751d38e1819cdc1dc721753835cab15b8be84501129cee54354337ebd7c2",
+];
 
 export type RegistryHealthStatus = "healthy" | "unhealthy" | "unknown";
 export type OperatorKind = "edgecoder" | "community";
