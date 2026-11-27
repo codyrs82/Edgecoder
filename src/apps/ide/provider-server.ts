@@ -44,6 +44,8 @@ import { registerRemoteBotRoutes } from "./bot-remote.js";
 import { allowanceOffer, sharedAllowances, withAllowances } from "./session-allowances.js";
 import { BotManager, agentBotRunner, botBranchPrefix, botComputeChat, botWorkRoot, registerBotRoutes, type ApprovalEntry } from "./bots.js";
 import { autoBackend, localBackend, networkBackend } from "../../inference-api/backends.js";
+import { forwarderBluetoothLink } from "../../inference-api/bluetooth-failover.js";
+import { loadBleOfflineConsent, saveBleOfflineConsent } from "../../mesh/ble/ble-offline-consent.js";
 import { registerCompatRoutes, respondWith } from "../../inference-api/routes.js";
 import type { RoutingHints } from "../../inference-api/job-descriptor.js";
 import { AUTO_MODEL_ID, AUTO_POLICIES, autoPolicyFromEnv, isUnpinnedModel, routeInputsFrom, routeLabel, routeSummary, type ComputePolicy, type PlanOptions, type Route, type RouteInputs } from "../../inference-api/auto-route.js";
@@ -202,6 +204,34 @@ const networkDeps: NetworkDeps | null = C.SWARM_VIA_LOCAL_AGENT_URL
   ? { forwarder: C.SWARM_VIA_LOCAL_AGENT_URL.replace(/\/$/, ""), token: () => (ideToken ??= resolveIdeToken()), agentId: C.AGENT_ACCOUNT_ID ?? C.AGENT_ID ?? "local-agent" }
   : null;
 
+/** Bluetooth failover for bots (bluetooth-failover.ts): through this machine's agent, which holds the radio. */
+const bluetoothLink = networkDeps ? forwarderBluetoothLink(networkDeps) : null;
+
+// "Use my nearby devices over Bluetooth when offline" and the devices allowed (ble-offline-consent.ts).
+app.get("/v1/ide/bluetooth/offline", async () => loadBleOfflineConsent());
+app.post("/v1/ide/bluetooth/offline", async (req, reply) => {
+  try {
+    return saveBleOfflineConsent(req.body);
+  } catch (err) {
+    return reply.code(500).send({ error: "save_failed", message: (err as Error).message });
+  }
+});
+// EdgeCoder devices nearby now (from this machine's agent), to choose which to allow.
+app.get("/v1/ide/bluetooth/nearby", async () => {
+  if (!networkDeps) return { peers: [], available: false };
+  try {
+    const res = await undiciRequest(`${networkDeps.forwarder}/forward/ble/nearby`, { method: "GET", headers: { authorization: `Bearer ${networkDeps.token()}` }, headersTimeout: 3_000, bodyTimeout: 3_000 });
+    if (res.statusCode !== 200) {
+      await res.body.dump().catch(() => undefined);
+      return { peers: [], available: false };
+    }
+    const body = (await res.body.json()) as { peers?: unknown[] };
+    return { peers: Array.isArray(body.peers) ? body.peers : [], available: true };
+  } catch {
+    return { peers: [], available: false };
+  }
+});
+
 // --- Frontier models on the user's own key (docs/frontier-keys.md, frontier-access.ts) ---
 
 /** The hosted endpoint and the user's API key (EDGECODER_API_KEY / _FILE), for network models without an enrolled agent. */
@@ -336,7 +366,7 @@ function runRoute(r: Route, source = "localhost:4304"): ChatBackend {
  * (default "auto"; "mine_only" keeps chat and API Auto on free machines). Each step's complexity
  * sizes the free places (auto-route.ts); `hysteresis` "session" is for a backend many clients share.
  */
-const autoHere = (onRoute?: (r: Route) => void, source?: string, policy?: ComputePolicy, plan?: () => PlanOptions, hysteresis?: "backend" | "session") =>
+const autoHere = (onRoute?: (r: Route) => void, source?: string, policy?: ComputePolicy, plan?: () => PlanOptions, hysteresis?: "backend" | "session", bluetooth = false) =>
   autoBackend({
     inputs: routeInputsHere,
     run: (r) => runRoute(r, source),
@@ -344,6 +374,9 @@ const autoHere = (onRoute?: (r: Route) => void, source?: string, policy?: Comput
     policy: policy ?? autoPolicyFromEnv(),
     plan,
     ...(hysteresis ? { hysteresis } : {}),
+    // Bots on Network only: with the network out of reach and nothing here to run it, the user's
+    // allowed nearby devices over Bluetooth (bluetooth-failover.ts; the agent holds the radio).
+    ...(bluetooth && bluetoothLink ? { bluetooth: bluetoothLink } : {}),
     ...(networkDeps ? { networkBestFit: (routing: RoutingHints) => networkBackend(networkDeps!, { model: AUTO_MODEL_ID, computeClass: routing.computeClass ?? "any", routing, source: source ?? "localhost:4304" }) } : {}),
   });
 
@@ -1137,7 +1170,7 @@ const bots = new BotManager({
         bot: ctx.bot,
         trigger: ctx.trigger ?? "manual",
         access: frontier,
-        worker: botComputeChat(ctx, (policy, plan, onRoute) => autoHere(onRoute, `bot ${ctx.bot.name}`, policy, plan)),
+        worker: botComputeChat(ctx, (policy, plan, onRoute) => autoHere(onRoute, `bot ${ctx.bot.name}`, policy, plan, undefined, true)),
         hooks: ctx.frontier,
         sendEvent: ctx.sendEvent,
         signal: ctx.signal,

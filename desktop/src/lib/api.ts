@@ -1432,6 +1432,38 @@ export interface SandboxSettingView {
 export const getSandboxSetting = () => fsCall<SandboxSettingView>("GET", "/v1/ide/sandbox");
 export const setSandboxSetting = (enabled: boolean) => fsCall<SandboxSettingView>("POST", "/v1/ide/sandbox", { enabled });
 
+/**
+ * Settings → General → "Use my nearby devices over Bluetooth when offline" (src/mesh/ble/ble-offline-consent.ts):
+ * bots on Network only run on these devices when the network and this computer can't take a call.
+ */
+export interface BleOfflineDevice {
+  agentId: string;
+  name: string;
+  /** The device's seal key, pinned when you allow it: prompts are sealed to it. */
+  sealKey: string;
+}
+export interface BleOfflineSetting {
+  enabled: boolean;
+  devices: BleOfflineDevice[];
+}
+export interface BleNearbyDevice {
+  agentId: string;
+  name: string;
+  /** Absent on a device whose EdgeCoder version can't take sealed requests yet (it can't be allowed). */
+  sealKey?: string;
+  model: string;
+  deviceType: "phone" | "laptop" | "workstation";
+  rssi: number;
+  allowed: boolean;
+  /** On your list. */
+  pinned?: boolean;
+  /** On your list: whether it still advertises the key pinned when you allowed it. */
+  keyMatches?: boolean;
+}
+export const getBleOfflineSetting = () => fsCall<BleOfflineSetting>("GET", "/v1/ide/bluetooth/offline");
+export const setBleOfflineSetting = (s: BleOfflineSetting) => fsCall<BleOfflineSetting>("POST", "/v1/ide/bluetooth/offline", s);
+export const listBleNearby = () => fsCall<{ peers: BleNearbyDevice[]; available: boolean }>("GET", "/v1/ide/bluetooth/nearby");
+
 export interface IdeStreamEvent {
   type: "text" | "status" | "tool_call" | "tool_result" | "diff" | "shell_request" | "shell_output" | "plan" | "turn" | "file_change" | "usage" | "web" | "web_off" | "context" | "compacted" | "cost_note" | "done";
   [key: string]: unknown;

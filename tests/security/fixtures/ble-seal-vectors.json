@@ -1,0 +1,35 @@
+{
+  "domain": "edgecoder-ble-seal/v1",
+  "responderPrivateHex": "d74056d6d972f2d7fe87327a80433551762f8f94452feddcbfb2faef2ba3ddad",
+  "responderPublicB64": "rmli5KWTKHv8axZVPJj16qDB2N7tDkFEw/Wadz3LiQU=",
+  "senderPrivateHex": "4f349f4a6f6daddea0615a80726d77c7a974a68cbcaec8df84a988e4954b4afe",
+  "senderPublicB64": "w/8XAvakvBmHqhyjz99RCjAj2Qk6QvF7PacyeE7gMiA=",
+  "ephemeralPrivateHex": "a2bee17f7b8aecb33e0551047caaf2bb15c7eee06b081733ea3a1825450b1172",
+  "requestId": "ble-offline-0b1c2d3e",
+  "requesterId": "mac-agent-1",
+  "providerId": "ios-agent-2",
+  "requestPlaintext": "{\"task\":\"System: You are Trader Boy.\\n\\nUser: What moved the market today? (ünïcödé ✓)\\n\\nAssistant:\",\"issuedAtMs\":1796000000000}",
+  "requestNonceB64": "ev0inabAIHLp4xJY",
+  "replyPlaintext": "{\"status\":\"completed\",\"output\":\"Futures are up 0.4%.\",\"cpuSeconds\":1.25}",
+  "replyNonceB64": "bWQDHjN+EJu58YL0",
+  "replyKeyHex": "a62b232ce293fa5242e1278e2775b430a5d0ec1aec29ed1bda193e033d28cd43",
+  "request": {
+    "type": "sealed_task",
+    "v": 1,
+    "requestId": "ble-offline-0b1c2d3e",
+    "requesterId": "mac-agent-1",
+    "epk": "/YGgBElsDTXTm0MbxYGAD63IbSQkoWPMhufRjZjNolQ=",
+    "spk": "w/8XAvakvBmHqhyjz99RCjAj2Qk6QvF7PacyeE7gMiA=",
+    "rpk": "rmli5KWTKHv8axZVPJj16qDB2N7tDkFEw/Wadz3LiQU=",
+    "nonce": "ev0inabAIHLp4xJY",
+    "ct": "tl3VusO6CudnSQVcvn59Wl+6xenE5Te5gZZuki8RzKUrmIxQQlowzGUgyJJxkEb5fm52x3aAOae2BoWAnlwrtzlwjLlOGDrcQ4QDBDyvjSrP8RTyn/Ovx4ALocovYC5h8AeM5XWUkGktGElQ799xOeWuWmSeu0IFZ8QvNi8XX5FgKx481gcu1FIrkfXIOvMT1tG2x0IzDQ=="
+  },
+  "reply": {
+    "type": "sealed_result",
+    "v": 1,
+    "requestId": "ble-offline-0b1c2d3e",
+    "providerId": "ios-agent-2",
+    "nonce": "bWQDHjN+EJu58YL0",
+    "ct": "EK6vbpuoBSpp3WTtDolB+oAKj5jQPQ0+4WetXZ0hYqI+y+R2YEJdGy0DgBDVMrA7ndyClFXs03PiMwM05KNSwMpc3Rckz7gmUnRJ95SWdAy6qYrt62TeMw=="
+  }
+}

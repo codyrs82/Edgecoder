@@ -757,6 +757,8 @@ function placementText(s: Served, model: string | undefined, runCSats: number): 
   if (s.computeClass === "frontier") return `${model ? frontierName(model) : s.hardware.split(" · ")[0]} · your key`;
   const m = model && model !== "auto" ? model.replace(/^(network|mine)\//, "").replace(/^reserved\/[^/]+\//, "").replace(/@[\w.]+$/, "") : "";
   if (s.computeClass === "local") return [s.hardware, m, "free"].filter(Boolean).join(" · ");
+  // A nearby device the user allowed, while the network was out of reach (src/inference-api/bluetooth-failover.ts).
+  if (s.computeClass === "bluetooth") return [s.hardware, m, "free", "network unavailable"].filter(Boolean).join(" · ");
   if (s.own) return [s.label.replace(/^your/, "Your"), hardwareShort(s).replace(/ · your machine$/, ""), m, "free"].filter(Boolean).join(" · ");
   return ["Network", hardwareShort(s), m, runCSats > 0 ? fmtCSats(runCSats) : "cSats"].filter(Boolean).join(" · ");
 }

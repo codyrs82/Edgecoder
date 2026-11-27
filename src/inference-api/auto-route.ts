@@ -59,6 +59,11 @@ export interface Route {
   why?: string;
   /** The step's complexity as Auto counted it (after hysteresis), when Auto chose. */
   complexity?: ComplexityLevel;
+  /**
+   * Ran over Bluetooth on this nearby device (its name) while the network was out of reach
+   * (bluetooth-failover.ts): free, like this computer, so placement "local".
+   */
+  bluetooth?: string;
 }
 
 export interface RouteInputs {
@@ -421,6 +426,7 @@ export function routeLabel(r: Route): string {
   const cls = r.computeClass ? CLASS_NAMES[r.computeClass] ?? r.computeClass : "";
   if (r.bestFit) return `Network${cls ? ` ${cls}` : ""} · best fit`;
   const where =
+    r.bluetooth ? `Over Bluetooth: ${r.bluetooth}` :
     r.placement === "local" ? "This computer" :
     r.placement === "mine" ? "My machines" :
     r.placement === "reserved" ? `Reserved${cls ? ` ${cls}` : ""}` :

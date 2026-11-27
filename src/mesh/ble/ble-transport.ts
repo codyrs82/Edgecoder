@@ -12,6 +12,8 @@ export interface BLEAdvertisement {
   currentLoad: number;
   deviceType: "phone" | "laptop" | "workstation";
   meshTokenHash?: string;
+  /** This device's seal key (base64), published in the identity characteristic (ble-seal.ts). */
+  sealKey?: string;
 }
 
 export type TaskRequestHandler = (req: BLETaskRequest) => Promise<BLETaskResponse>;
@@ -89,7 +91,8 @@ export class MockBLETransport implements BLETransport {
         currentLoad: ad.currentLoad,
         deviceType: ad.deviceType,
         rssi: -50,
-        lastSeenMs: Date.now()
+        lastSeenMs: Date.now(),
+        ...(ad.sealKey ? { sealKey: ad.sealKey } : {})
       });
     }
     return peers;

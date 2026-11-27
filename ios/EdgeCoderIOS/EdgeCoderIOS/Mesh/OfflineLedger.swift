@@ -197,3 +197,110 @@ final class OfflineLedger {
         }
     }
 }
+
+// MARK: - Sealed BLE requests (edgecoder-ble-seal/v1)
+
+/// Sealed BLE requests: the responder side of src/mesh/ble/ble-seal.ts (same wire format, checked
+/// against tests/security/fixtures/ble-seal-vectors.json by BLESealVectorCheck). A Mac seals a
+/// prompt to this device's seal key, which the user pinned when allowing this device on the Mac, so
+/// only this device can read it; the reply is sealed back so the Mac knows this device wrote it.
+/// Kept in this file because it is built into both the app and the unit-test target.
+///
+///   ikm  = X25519(E, R) || X25519(S, R), salt = E.pub || S.pub || R.pub
+///   kReq = HKDF-SHA256(ikm, salt, "edgecoder-ble-seal/v1 request", 32), kRep = "... reply"
+///   AES-256-GCM, 12-byte nonce, ct = ciphertext || tag, aad "edgecoder-ble-seal/v1|<requestId>|<requesterId>"
+///   and "edgecoder-ble-seal/v1 reply|<requestId>".
+enum BLESeal {
+    enum SealError: Error, Equatable {
+        case malformed
+        case keyMismatch
+        case invalid
+    }
+
+    struct OpenedRequest {
+        let requestId: String
+        let requesterId: String
+        /// The requester's static seal key (proven: the static-static term only opens with it).
+        let senderKey: Data
+        let plaintext: Data
+        let task: String
+        let issuedAtMs: Double
+        let replyKey: SymmetricKey
+    }
+
+    /// This device's seal key, derived from its agent signing key so it stays the same across launches.
+    static func sealKey(from signingKey: Curve25519.Signing.PrivateKey) -> Curve25519.KeyAgreement.PrivateKey {
+        let derived = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: SymmetricKey(data: signingKey.rawRepresentation),
+            salt: Data("edgecoder-ble-seal-key".utf8),
+            info: Data("edgecoder-ble-seal-key/v1".utf8),
+            outputByteCount: 32
+        )
+        let raw = derived.withUnsafeBytes { Data($0) }
+        // 32 bytes is always a valid X25519 private key.
+        return try! Curve25519.KeyAgreement.PrivateKey(rawRepresentation: raw)
+    }
+
+    private static func key(_ b64: Any?) -> Data? {
+        guard let s = b64 as? String, let d = Data(base64Encoded: s), d.count == 32 else { return nil }
+        return d
+    }
+
+    private static func keys(own: Curve25519.KeyAgreement.PrivateKey, epk: Data, spk: Data, rpk: Data) throws -> (req: SymmetricKey, rep: SymmetricKey) {
+        let e = try own.sharedSecretFromKeyAgreement(with: Curve25519.KeyAgreement.PublicKey(rawRepresentation: epk))
+        let s = try own.sharedSecretFromKeyAgreement(with: Curve25519.KeyAgreement.PublicKey(rawRepresentation: spk))
+        var ikm = e.withUnsafeBytes { Data($0) }
+        ikm.append(s.withUnsafeBytes { Data($0) })
+        let salt = epk + spk + rpk
+        let ikmKey = SymmetricKey(data: ikm)
+        let req = HKDF<SHA256>.deriveKey(inputKeyMaterial: ikmKey, salt: salt, info: Data("edgecoder-ble-seal/v1 request".utf8), outputByteCount: 32)
+        let rep = HKDF<SHA256>.deriveKey(inputKeyMaterial: ikmKey, salt: salt, info: Data("edgecoder-ble-seal/v1 reply".utf8), outputByteCount: 32)
+        return (req, rep)
+    }
+
+    /// Open a `sealed_task` message with this device's seal key.
+    static func openRequest(_ json: [String: Any], own: Curve25519.KeyAgreement.PrivateKey) throws -> OpenedRequest {
+        guard json["type"] as? String == "sealed_task", (json["v"] as? NSNumber)?.intValue == 1,
+              let requestId = json["requestId"] as? String, let requesterId = json["requesterId"] as? String,
+              let epk = key(json["epk"]), let spk = key(json["spk"]), let rpk = key(json["rpk"]),
+              let nonceB64 = json["nonce"] as? String, let nonce = Data(base64Encoded: nonceB64), nonce.count == 12,
+              let ctB64 = json["ct"] as? String, let ct = Data(base64Encoded: ctB64), ct.count >= 16 else {
+            throw SealError.malformed
+        }
+        guard rpk == own.publicKey.rawRepresentation else { throw SealError.keyMismatch }
+        let plaintext: Data
+        let k: (req: SymmetricKey, rep: SymmetricKey)
+        do {
+            k = try keys(own: own, epk: epk, spk: spk, rpk: rpk)
+            let box = try AES.GCM.SealedBox(nonce: AES.GCM.Nonce(data: nonce), ciphertext: ct.prefix(ct.count - 16), tag: ct.suffix(16))
+            plaintext = try AES.GCM.open(box, using: k.req, authenticating: Data("edgecoder-ble-seal/v1|\(requestId)|\(requesterId)".utf8))
+        } catch {
+            throw SealError.invalid
+        }
+        guard let body = try? JSONSerialization.jsonObject(with: plaintext) as? [String: Any],
+              let task = body["task"] as? String, let issued = (body["issuedAtMs"] as? NSNumber)?.doubleValue, issued.isFinite else {
+            throw SealError.malformed
+        }
+        return OpenedRequest(requestId: requestId, requesterId: requesterId, senderKey: spk, plaintext: plaintext, task: task, issuedAtMs: issued, replyKey: k.rep)
+    }
+
+    /// The sealed answer (`sealed_result`). `nonce` is for the shared test vectors only.
+    static func sealReply(replyKey: SymmetricKey, requestId: String, providerId: String, plaintext: Data, nonce: Data? = nil) throws -> [String: Any] {
+        let n = try nonce.map { try AES.GCM.Nonce(data: $0) } ?? AES.GCM.Nonce()
+        let box = try AES.GCM.seal(plaintext, using: replyKey, nonce: n, authenticating: Data("edgecoder-ble-seal/v1 reply|\(requestId)".utf8))
+        return [
+            "type": "sealed_result",
+            "v": 1,
+            "requestId": requestId,
+            "providerId": providerId,
+            "nonce": n.withUnsafeBytes { Data($0) }.base64EncodedString(),
+            "ct": (box.ciphertext + box.tag).base64EncodedString()
+        ]
+    }
+
+    /// The reply body as JSON bytes (status, output, cpuSeconds).
+    static func replyPlaintext(ok: Bool, output: String, cpuSeconds: Double) -> Data {
+        let body: [String: Any] = ["status": ok ? "completed" : "failed", "output": output, "cpuSeconds": cpuSeconds]
+        return (try? JSONSerialization.data(withJSONObject: body)) ?? Data("{\"status\":\"failed\",\"output\":\"\",\"cpuSeconds\":0}".utf8)
+    }
+}

@@ -18,6 +18,11 @@
  *                                                                serving: the jobs running now, serving-jobs.ts)
  *   POST /forward/drain   {resume?}                           -> stop taking work and hand claims back before
  *                                                                the app restarts (BHV006); resume: take work again
+ *   GET  /forward/ble/peers                                   -> nearby devices the user allowed (Bluetooth failover,
+ *                                                                src/inference-api/bluetooth-failover.ts)
+ *   GET  /forward/ble/nearby                                  -> every EdgeCoder device nearby, for choosing which to allow
+ *   POST /forward/ble/run  {agentId, prompt}                  -> run one prompt on an allowed device over Bluetooth (free)
+ *   (the /forward/ble routes work while the agent isn't registered: that is when they're needed)
  *
  * Every route needs `Authorization: Bearer <IDE token>`; browser requests (an Origin header)
  * are refused, and the server binds 127.0.0.1 only.
@@ -82,6 +87,56 @@ export interface LocalForwarderDeps {
   nudgeRegistration?: () => void;
   /** How long such a call waits for the registration before answering 503 agent_not_registered (default 8 s). */
   registrationWaitMs?: number;
+  /** This agent's Bluetooth mesh, once it runs one (macOS with Bluetooth on); null until then. */
+  ble?: () => LocalForwarderBle | null;
+}
+
+/** A nearby device as the /forward/ble routes describe it (no prompt or account data). */
+export interface ForwarderBlePeer {
+  agentId: string;
+  name: string;
+  model: string;
+  modelParamSize: number;
+  deviceType: "phone" | "laptop" | "workstation";
+  rssi: number;
+  /** The seal key it publishes (base64; src/mesh/ble/ble-seal.ts), pinned when the user allows it. */
+  sealKey?: string;
+  /** Usable now: allowed, sending on, and advertising the key pinned for it. */
+  allowed: boolean;
+  /** On the user's list (whatever key it advertises now). */
+  pinned?: boolean;
+  /** On the list: whether it advertises the pinned key. */
+  keyMatches?: boolean;
+}
+
+export interface LocalForwarderBle {
+  /** Every EdgeCoder device nearby now, each marked whether the user allowed it. */
+  nearby(): ForwarderBlePeer[];
+  /** Run `prompt` sealed to `agentId`'s pinned key; refuses (not_allowed, key_mismatch) before sending anything. */
+  run(agentId: string, prompt: string): Promise<{ ok: true; output: string; ms: number } | { ok: false; error: "not_allowed" | "key_mismatch" | "failed"; detail?: string }>;
+}
+
+const MAX_BLE_PROMPT_BYTES = 64 * 1024;
+
+async function handleBle(deps: LocalForwarderDeps, req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
+  const ble = deps.ble?.() ?? null;
+  if (!ble) return send(res, 404, { error: "bluetooth_unavailable" });
+  if (req.method === "GET" && path === "/forward/ble/nearby") return send(res, 200, { peers: ble.nearby() });
+  if (req.method === "GET" && path === "/forward/ble/peers") return send(res, 200, { peers: ble.nearby().filter((p) => p.allowed) });
+  if (req.method === "POST" && path === "/forward/ble/run") {
+    let body: { agentId?: unknown; prompt?: unknown };
+    try {
+      body = JSON.parse(await readBody(req)) as typeof body;
+    } catch {
+      return send(res, 400, { error: "invalid_json" });
+    }
+    if (typeof body.agentId !== "string" || typeof body.prompt !== "string" || !body.prompt) return send(res, 400, { error: "agentId_and_prompt_required" });
+    if (Buffer.byteLength(body.prompt, "utf8") > MAX_BLE_PROMPT_BYTES) return send(res, 413, { error: "prompt_too_large" });
+    const r = await ble.run(body.agentId, body.prompt);
+    if (r.ok) return send(res, 200, { output: r.output, ms: r.ms });
+    return send(res, r.error === "not_allowed" || r.error === "key_mismatch" ? 403 : 502,{ error: r.error, ...(r.detail ? { detail: r.detail } : {}) });
+  }
+  return send(res, 404, { error: "not_found" });
 }
 
 /** How often a waiting call looks whether the agent has registered. */
@@ -152,6 +207,7 @@ export function createLocalForwarder(deps: LocalForwarderDeps): Server {
         }
         return send(res, 200, { ok: true, ...(await deps.drain(resume)) });
       }
+      if (path.startsWith("/forward/ble/")) return await handleBle(deps, req, res, path);
       // Not registered right now: have it register, and give it a few seconds before saying so.
       if (!coordinator) coordinator = await waitForRegistration(deps, deps.registrationWaitMs ?? 8_000);
       if (!coordinator) return send(res, 503, { error: "agent_not_registered", retryAfterMs: NOT_REGISTERED_RETRY_AFTER_MS });
