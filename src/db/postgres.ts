@@ -4043,6 +4043,13 @@ SELECT seen.dup, bal.balance, bal.enough, st.fresh, st.same, st.go,
     };
   }
 
+  /** The coordinator (peer id) of each of these ledger-service tasks (wallet views name who routed a call). */
+  async ledgerServiceTaskPeers(taskIds: string[]): Promise<Map<string, string>> {
+    if (taskIds.length === 0) return new Map();
+    const r = await this.pool.query(`SELECT task_id, peer_id FROM ledger_service_tasks WHERE task_id = ANY($1::text[])`, [taskIds]);
+    return new Map(r.rows.map((row) => [String(row.task_id), String(row.peer_id)]));
+  }
+
   /** Open ledger-service tasks reserved before `createdBeforeMs` (the expiry sweep). */
   async ledgerServiceExpiredTasks(createdBeforeMs: number, limit = 200): Promise<Array<{ taskId: string; peerId: string }>> {
     const r = await this.pool.query(

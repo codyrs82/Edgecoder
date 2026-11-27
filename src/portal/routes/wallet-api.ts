@@ -75,6 +75,8 @@ export function walletOverviewView(input: {
     accountId: typeof acct?.accountId === "string" ? acct.accountId : null,
     cSats: num(acct?.cSats),
     earnedSats: num(acct?.earnedSats),
+    /** Of what was earned, the routing fees of calls the account's coordinators routed (ledger service). */
+    routingFeeSats: num(acct?.routingFeeSats),
     recent: Array.isArray(acct?.recent) ? acct!.recent : [],
     btcUsd: num(epoch?.btcUsd),
     rateAsOfMs: num(epoch?.createdAtMs),

@@ -21,7 +21,7 @@
   import { scrollRegion } from "../lib/scroll-region";
   import { callsForCSats, FUND_EXAMPLE_CLASS, INSTALL_LINKS, testNetworkNote } from "../lib/onboarding";
   import { addressQr, invoiceQr, QR_DARK, QR_LIGHT, QR_QUIET } from "../lib/qr";
-  import { countdown, fmtMsat, fmtNum, fmtSats, fmtUsd, networkInfo, pct, purchasePreview, reasonText } from "../lib/wallet-format";
+  import { activityText, countdown, fmtMsat, fmtNum, fmtSats, fmtUsd, networkInfo, pct, purchasePreview, routingFeeNote } from "../lib/wallet-format";
 
   type Invoice = { intentId: string; invoice: string; amountSats: number; cSats: number; feeSats: number; network: string; expiresInSeconds: number };
 
@@ -115,6 +115,8 @@
   let buysCalls = $derived(valid ? callsForCSats(previewed.get, FUND_EXAMPLE_CLASS, { models: local?.models ?? [], btcUsd }) : null);
   let balance = $derived(local?.connected && local.account ? local.account.cSats : wallet?.cSats ?? null);
   let earned = $derived(local?.account?.earnedSats ?? wallet?.earnedSats ?? null);
+  // Routing fees (an operator's share of the calls its coordinator routed): earnings, paid out like host earnings.
+  let routingNote = $derived(routingFeeNote(local?.account?.routingFeeSats ?? wallet?.routingFeeSats ?? 0));
   let pb = $derived(wallet?.payouts?.balance ?? null);
   let policy = $derived(wallet?.payouts?.policy ?? null);
   let paused = $derived(policy?.paused === true);
@@ -353,7 +355,7 @@
         <div class="wl-amount"><span class="big">{balance === null ? "–" : fmtNum(balance)}</span><span class="unit">cSats</span></div>
         <div class="wl-sub">{balance !== null && btcUsd ? `${fmtUsd(balance, btcUsd)} · BTC $${fmtSats(btcUsd)}${wallet?.rateStale ? " (rate is stale)" : ""}` : " "}</div>
         <div class="wl-mini">
-          <div><div class="k">Earned by your machines</div><div class="v">{pb ? `${fmtMsat(pb.earnedMsat)} sats` : earned === null ? "–" : `${fmtSats(earned)} sats`}</div></div>
+          <div><div class="k">Earned by your machines</div><div class="v">{pb ? `${fmtMsat(pb.earnedMsat)} sats` : earned === null ? "–" : `${fmtSats(earned)} sats`}</div>{#if routingNote}<div class="wl-faint">{routingNote}</div>{/if}</div>
           <div><div class="k">Available to withdraw</div><div class="v">{pb ? `${fmtMsat(pb.payableMsat)} sats` : "–"}</div></div>
         </div>
         <p class="wl-faint">Spend it on model calls, code jobs and reserved machines. Earnings from your machines can be withdrawn below; purchased cSats are for spending.</p>
@@ -541,7 +543,7 @@
       <p class="wl-banner" role="alert"><TriangleAlert size={15} /> Withdrawals are paused on this coordinator while it is checked. Your earnings are safe and keep counting; buying cSats still works.</p>
     {/if}
     <div class="wl-kpis">
-      <div><div class="k">Earned</div><div class="v">{pb ? fmtMsat(pb.earnedMsat) : "–"} sats</div><div class="d">All time</div></div>
+      <div><div class="k">Earned</div><div class="v">{pb ? fmtMsat(pb.earnedMsat) : "–"} sats</div><div class="d">{routingNote || "All time"}</div></div>
       <div class="held"><div class="k"><Clock size={12} /> Held</div><div class="v">{pb ? fmtMsat(pb.heldMsat) : "–"} sats</div>
         <div class="d">{pb && pb.heldMsat > 0 && pb.maturesAtMs ? `Available ${when(pb.maturesAtMs)}` : policy?.network === "bitcoin" ? "Earnings wait 24 h" : "No hold on this network"}</div></div>
       <div class="avail"><div class="k">Available</div><div class="v">{pb ? fmtMsat(pb.payableMsat) : "–"} sats</div><div class="d">Ready to withdraw</div></div>
@@ -685,7 +687,7 @@
             <tbody>
               {#each recent as r (r.atMs + r.reason)}
                 <tr>
-                  <td>{reasonText(r.reason)}</td>
+                  <td>{activityText(r)}</td>
                   <td class="sp-muted">{when(r.atMs)}</td>
                   <td class="num" class:wl-pos={r.type === "earn"}>{r.type === "earn" ? "+" : "−"}{fmtNum(Math.abs(r.cSats), 3)}</td>
                 </tr>

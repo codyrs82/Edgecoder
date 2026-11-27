@@ -128,7 +128,15 @@ export const settleRequestSchema = z.object({
   durationMs: z.number().nonnegative().max(86_400_000),
   success: z.boolean(),
   /** The agent's signed work claim for this subtask (src/receipts/receipt.ts). Required. */
-  receipt: agentReceiptClaimSchema.optional()
+  receipt: agentReceiptClaimSchema.optional(),
+  /**
+   * Peer work: the caller took the buyer and owns the task, and another coordinator (a seed or
+   * another member) ran this subtask on one of its hosts (the execution grant, swarm/remote-grants.ts).
+   * The caller still gets the routing share; the host is the agent's owner as the shared database
+   * knows it (hostAccountId only when it knows none), and a claim the database cannot match is
+   * refused as a dispute, not an anomaly, since the caller relays the executor's claim.
+   */
+  peerWork: z.object({ executorPeerId: id }).optional()
 });
 export type SettleRequest = z.infer<typeof settleRequestSchema>;
 
@@ -139,6 +147,12 @@ export const balanceRequestSchema = z.object({
   atLeastMsat: msat,
   buyerProof: buyerProofSchema.optional()
 });
+
+/**
+ * A forwarded result's answer `hostPaidBy`: the origin (the coordinator that took the buyer) already
+ * paid the executing coordinator's host for it on the shared ledger, so the executor pays nothing.
+ */
+export const PEER_WORK_HOST_PAID_BY_ORIGIN = "origin" as const;
 
 export interface SettleResponse {
   status: "settled" | "duplicate";

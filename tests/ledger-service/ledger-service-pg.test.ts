@@ -347,4 +347,115 @@ describe.skipIf(!PG_URL)("ledger service: outside coordinators bill through the 
     await expect(client(outside, seedA).refund("x")).rejects.toBeInstanceOf(LedgerServiceError);
     await expect(client(outside, seedA).refund("x")).rejects.toMatchObject({ status: 503, error: "ledger_service_disabled" });
   });
+
+  describe("peer work: a subtask of one coordinator's task run on another coordinator's host", () => {
+    // The executing coordinator's host: its own agent, known to the shared database (owner and key).
+    const peerAgent = createPeerKeys("agent-peer-host");
+    const peerReceipt = (taskId: string, subtaskId: string, keys = peerAgent) => receipt(taskId, subtaskId, keys);
+    const peerSettle = (taskId: string, subtaskId: string, baseCostMsat: number, extra: Record<string, unknown> = {}) => ({
+      taskId, subtaskId, agentId: peerAgent.peerId, hostAccountId: peerAgent.peerId, baseCostMsat, overflowWantMsat: 0, resourceClass: "cpu" as const, durationMs: 1000, success: true,
+      receipt: peerReceipt(taskId, subtaskId), peerWork: { executorPeerId: "seed-or-member-b" }, ...extra
+    });
+    const rows = async (taskId: string) =>
+      (await db.poolA.query(`SELECT account_id, reason, msat::int AS msat FROM credit_transactions WHERE related_task_id = $1 AND tx_type = 'earn' ORDER BY account_id`, [taskId])).rows;
+
+    beforeAll(async () => {
+      await db.a.linkAgentOwnership({ agentId: peerAgent.peerId, accountId: "acct-peer-host", ownerUserId: "peer-host-user" });
+      await db.a.recordAgentSigningKey(peerAgent.peerId, peerAgent.publicKeyPem, "seed-b");
+    });
+
+    it("the origin settles it through the service: host pay to the agent's owner, the routing share to the origin's operator, verify passes", async () => {
+      await fund("buyer-p1", 100);
+      const origin = createPeerKeys("outside-origin-p1");
+      members.set(origin.peerId, entry(origin));
+      const c = client(origin, seedA);
+      await c.reserve({ taskId: "tp1", accountId: "buyer-p1", kind: "job", msat: 10_000, idempotencyKey: "reserve:tp1", buyerProof: proof("buyer-p1") });
+      // The executor named the agent id as the host (it has no database): the owner the shared database knows is paid.
+      const s = await c.settle(peerSettle("tp1", "sp1", 6_000));
+      const split = splitJobCost(6_000, FEE_BPS);
+      const routing = splitRoutingFee(split.feeMsat, 4000);
+      expect(s).toMatchObject({ status: "settled", costMsat: 6_000, agentMsat: split.agentMsat, routingFeeMsat: routing.routingMsat });
+      expect(await rows("tp1")).toEqual([
+        { account_id: `acct-op-${origin.peerId}`, reason: "routing_fee:tp1", msat: routing.routingMsat },
+        { account_id: "acct-peer-host", reason: "compute_contribution", msat: split.agentMsat },
+        { account_id: FEE_POOL, reason: "network_fee:tp1", msat: routing.poolMsat }
+      ]);
+      // The routing share is earnings like a host's: in the earned (and so payable) total, and the
+      // wallet views can name the coordinator that routed the call.
+      expect(await db.b.earnedMsat(`acct-op-${origin.peerId}`)).toBe(routing.routingMsat);
+      expect(await db.b.ledgerServiceTaskPeers(["tp1", "no-such-task"])).toEqual(new Map([["tp1", origin.peerId]]));
+      // A re-sent settle pays nothing more.
+      expect((await c.settle(peerSettle("tp1", "sp1", 6_000))).status).toBe("duplicate");
+      expect((await c.refund("tp1")).refundMsat).toBe(4_000);
+      expect(await balance("buyer-p1")).toBeCloseTo(94, 6);
+      expect(alerts).toEqual([]);
+      const v = await verify();
+      expect(v.discrepancies).toEqual([]);
+    });
+
+    it("never paid twice: a seed that already credited its host locally for the subtask makes the origin's settle a duplicate", async () => {
+      await fund("buyer-p2", 100);
+      const origin = createPeerKeys("outside-origin-p2");
+      members.set(origin.peerId, entry(origin));
+      const c = client(origin, seedB);
+      await c.reserve({ taskId: "tp2", accountId: "buyer-p2", kind: "job", msat: 10_000, idempotencyKey: "reserve:tp2", buyerProof: proof("buyer-p2") });
+      // The executing seed paid its host on the shared database first (results.ts accrueResultCredits), report result:sp2.
+      const { agentMsat, feeMsat } = splitJobCost(5_000, FEE_BPS);
+      const nowLocal = Date.now();
+      const r = await db.a.persistContributionWithOverflow(
+        { report: { reportId: "result:sp2", agentId: "acct-peer-host", sourceAgentId: peerAgent.peerId, taskId: "tp2", resourceClass: "cpu", cpuSeconds: 1, gpuSeconds: 0, success: true, qualityScore: 1, timestampMs: nowLocal }, accountId: "acct-peer-host", sourceAgentId: peerAgent.peerId, reliabilityScore: 1, weightedContribution: 1 },
+        () => ({
+          tx: { txId: randomUUID(), accountId: "acct-peer-host", type: "earn", credits: agentMsat / 1000, reason: "compute_contribution", relatedTaskId: "tp2", timestampMs: nowLocal, msat: agentMsat },
+          feeTx: { txId: randomUUID(), accountId: FEE_POOL, type: "earn", credits: feeMsat / 1000, reason: "network_fee:tp2", relatedTaskId: "tp2", timestampMs: nowLocal, msat: feeMsat }
+        })
+      );
+      expect(r.inserted).toBe(true);
+      const record = chain.append({ eventType: "earnings_accrual", taskId: "tp2", subtaskId: "sp2", actorId: "acct-peer-host", coordinatorId: SEED_ID, payloadJson: JSON.stringify({ accountId: "acct-peer-host", credits: agentMsat / 1000, msat: agentMsat, costMsat: 5_000, feeMsat, networkFeeBps: FEE_BPS, feeRounding: "nearest", pricingBasis: "token" }) });
+      await db.a.persistLedgerRecord(record);
+      if (await db.a.persistStatsLedgerRecord(record)) await db.a.incrementCoordinatorEarningsProjection({ accountId: "acct-peer-host", credits: agentMsat / 1000, taskCountDelta: 1, updatedAtMs: Date.now() });
+      const before = await balance("acct-peer-host");
+      expect((await c.settle(peerSettle("tp2", "sp2", 5_000))).status).toBe("duplicate");
+      expect(await balance("acct-peer-host")).toBeCloseTo(before, 6);
+      expect(await rows("tp2")).toHaveLength(2); // no routing row, no second host row
+      expect((await c.refund("tp2")).refundMsat).toBe(5_000);
+      expect((await verify()).discrepancies).toEqual([]);
+    });
+
+    it("receipts are required; a claim the database cannot match is refused as a dispute, not a suspension", async () => {
+      await fund("buyer-p3", 100);
+      const origin = createPeerKeys("outside-origin-p3");
+      members.set(origin.peerId, entry(origin));
+      const c = client(origin, seedA);
+      await c.reserve({ taskId: "tp3", accountId: "buyer-p3", kind: "job", msat: 10_000, idempotencyKey: "reserve:tp3", buyerProof: proof("buyer-p3") });
+      // Signed with a key the shared database does not list for this agent (the executor's claim, relayed).
+      const other = createPeerKeys(peerAgent.peerId);
+      await expect(c.settle(peerSettle("tp3", "sp3", 1_000, { receipt: peerReceipt("tp3", "sp3", other) }))).rejects.toMatchObject({ status: 403, error: "receipt_invalid" });
+      expect(await db.a.ledgerServiceMember(origin.peerId)).toMatchObject({ suspendedAtMs: null, disputes: 1 });
+      expect(await rows("tp3")).toEqual([]);
+      // No claim at all: the origin never sends one, so it is the anomaly it is for any settle.
+      const { receipt: _r, ...noReceipt } = peerSettle("tp3", "sp3", 1_000);
+      await expect(c.settle(noReceipt as never)).rejects.toMatchObject({ status: 403, error: "receipt_required" });
+      expect(await rows("tp3")).toEqual([]);
+    });
+
+    it("a seed's own task run by a coordinator billing through the service: the seed pays the host, the whole fee to the pool, once", async () => {
+      await fund("buyer-p4", 100);
+      // The seed's own reserve for the task (as reserveTaskCredits writes it on a seed).
+      await db.a.persistCreditTransaction({ txId: randomUUID(), accountId: "buyer-p4", type: "spend", credits: 10, reason: "task_reserve", relatedTaskId: "tp4", timestampMs: Date.now() });
+      const input = { taskId: "tp4", subtaskId: "sp4", agentId: peerAgent.peerId, hostAccountId: peerAgent.peerId, chargedMsat: 4_000, resourceClass: "cpu" as const, durationMs: 1000, executorPeerId: "outside-exec" };
+      expect(await services[0].settleSeedPeerWork({ ...input, receipt: undefined })).toEqual({ status: "refused", error: "receipt_required" });
+      expect(await services[0].settleSeedPeerWork({ ...input, receipt: peerReceipt("tp4", "other-subtask") })).toEqual({ status: "refused", error: "receipt_invalid" });
+      expect(await rows("tp4")).toEqual([]);
+      const r = await services[0].settleSeedPeerWork({ ...input, receipt: peerReceipt("tp4", "sp4") });
+      const split = splitJobCost(4_000, FEE_BPS);
+      expect(r).toMatchObject({ status: "settled", agentMsat: split.agentMsat, feeMsat: split.feeMsat });
+      // The other seed, or a retry, pays nothing more.
+      expect(await services[1].settleSeedPeerWork({ ...input, receipt: peerReceipt("tp4", "sp4") })).toEqual({ status: "duplicate" });
+      expect(await rows("tp4")).toEqual([
+        { account_id: "acct-peer-host", reason: "compute_contribution", msat: split.agentMsat },
+        { account_id: FEE_POOL, reason: "network_fee:tp4", msat: split.feeMsat }
+      ]);
+      expect((await verify()).discrepancies).toEqual([]);
+    });
+  });
 });

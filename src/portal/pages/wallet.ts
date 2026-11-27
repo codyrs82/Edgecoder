@@ -177,7 +177,7 @@ export const WALLET_CONTENT = `
         <div class="wl-amount"><span class="big" id="balanceValue"><span class="wl-skel">00,000</span></span><span class="unit">cSats</span></div>
         <div class="wl-sub" id="balanceUsd">&nbsp;</div>
         <div class="wl-mini">
-          <div><div class="k">Earned by your machines</div><div class="v" id="balanceEarned">–</div></div>
+          <div><div class="k">Earned by your machines</div><div class="v" id="balanceEarned">–</div><div class="wl-faint" id="balanceEarnedNote"></div></div>
           <div><div class="k">Available to withdraw</div><div class="v" id="balancePayable">–</div></div>
         </div>
         <div class="wl-faint" id="balanceNote">Spend it on model calls, code jobs and reserved machines. Models on your own machines are free.</div>
@@ -320,7 +320,7 @@ ${WALLET_DIRECT_CONTENT}
     <p class="set-lead">What your machines earned: 95 % of what their work was paid (EdgeCoder keeps 5 %). Purchased cSats can be spent but not withdrawn.</p>
     <div class="wl-banner danger hidden" id="payoutPausedBanner" role="alert">${icon("alert", 16)}<span>Withdrawals are paused on this coordinator while it is checked. Your earnings are safe and keep counting; buying cSats still works.</span></div>
     <div class="wl-kpis">
-      <div><div class="k">Earned</div><div class="v" id="payoutEarned">–</div><div class="d">All time</div></div>
+      <div><div class="k">Earned</div><div class="v" id="payoutEarned">–</div><div class="d" id="payoutEarnedNote">All time</div></div>
       <div class="held"><div class="k">${icon("clock", 12)}Held</div><div class="v" id="payoutHeld">–</div><div class="d" id="payoutHeldNote">Earnings wait before they can leave</div></div>
       <div class="avail"><div class="k">Available</div><div class="v" id="payoutPayable">–</div><div class="d">Ready to withdraw</div></div>
       <div><div class="k">Paid out</div><div class="v" id="payoutPaid">–</div><div class="d" id="payoutPendingNote">&nbsp;</div></div>
@@ -490,9 +490,14 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + W
       credit_purchase: "Bought cSats", inference_reserve: "Model call (set aside)", inference: "Model call", task_submit: "Code job (set aside)",
       task_submit_refund: "Unused set-aside returned", compute_reservation: "Reserved a machine", reservation_refund: "Reservation time returned",
       compute_contribution: "Earned running jobs", reservation_earning: "Earned from a reservation", payout: "Withdrawal",
-      payout_refund: "Withdrawal returned", payout_fee_excess: "Withdrawal routing fee", fee_pool_distribution: "Infrastructure host share", faucet: "Test sats grant"
+      payout_refund: "Withdrawal returned", payout_fee_excess: "Withdrawal routing fee", fee_pool_distribution: "Infrastructure host share", faucet: "Test sats grant",
+      routing_fee: "Routing fee"
     };
     function reasonText(r) { if (/^credit_purchase:onchain:/.test(String(r || ""))) return "Bitcoin deposit"; const base = String(r || "").replace(/:.*/, ""); return REASONS[base] || base.replace(/_/g, " ") || "–"; }
+    /** A ledger row in words; a routing fee names the coordinator that routed the call. */
+    function activityText(t) { const base = reasonText(t.reason); return /^routing_fee:/.test(String(t.reason || "")) && t.coordinator ? base + " (coordinator " + t.coordinator + ")" : base; }
+    /** "incl. 1.2 sats routing fees" when some of the earnings are routing fees. */
+    function routingNote(sats) { return sats > 0 ? "incl. " + fmtNum(sats, 3) + " sats routing fees" : ""; }
 
     /* ── Add funds ── */
     // The coordinator's purchase fee; 0 (free) is the default when it does not say.
@@ -750,6 +755,9 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + W
       // The payout balance carries msat; earnedSats is whole sats only, so it is the fallback.
       const earnedMsat = o.payouts && o.payouts.balance ? o.payouts.balance.earnedMsat : null;
       $("balanceEarned").textContent = earnedMsat !== null && earnedMsat !== undefined ? fmtMsat(earnedMsat) + " sats" : o.earnedSats !== null ? fmtSats(o.earnedSats) + " sats" : "–";
+      // Routing fees (an operator's share of the calls its coordinator routed) count as earnings and pay out the same way.
+      $("balanceEarnedNote").textContent = routingNote(Number(o.routingFeeSats) || 0);
+      $("payoutEarnedNote").textContent = routingNote(Number(o.routingFeeSats) || 0) || "All time";
       const nf = o.fees && o.fees.networkFeeBps !== null && o.fees.networkFeeBps !== undefined ? o.fees.networkFeeBps : 500;
       $("splitOwnerText").textContent = pct(10000 - nf) + " to the machine's owner (the compute host)";
       $("splitNetText").textContent = pct(nf) + " kept by EdgeCoder (the network fee)";
@@ -795,7 +803,7 @@ export const WALLET_SCRIPT = SETTINGS_HELPERS_SCRIPT + WALLET_HELPERS_SCRIPT + W
     }
     function renderLedger(recent, legacy) {
       const rows = recent.length
-        ? recent.map((t) => { const earn = t.type === "earn"; return "<tr><td>" + escapeHtml(fmtTime(t.atMs)) + "</td><td>" + escapeHtml(reasonText(t.reason)) + "</td><td class='num" + (earn ? " pos" : "") + "'>" + (earn ? "+" : "−") + escapeHtml(fmtNum(Math.abs(Number(t.cSats) || 0), 3)) + "</td></tr>"; })
+        ? recent.map((t) => { const earn = t.type === "earn"; return "<tr><td>" + escapeHtml(fmtTime(t.atMs)) + "</td><td>" + escapeHtml(activityText(t)) + "</td><td class='num" + (earn ? " pos" : "") + "'>" + (earn ? "+" : "−") + escapeHtml(fmtNum(Math.abs(Number(t.cSats) || 0), 3)) + "</td></tr>"; })
         : (legacy || []).map((t) => "<tr><td>" + escapeHtml(fmtTime(t.timestampMs)) + "</td><td>" + escapeHtml(reasonText(t.reason) + " · " + t.type) + "</td><td class='num'>" + escapeHtml(t.credits) + "</td></tr>");
       $("creditHistoryBody").innerHTML = rows.length ? rows.join("") : "<tr><td colspan='3' class='muted'>Nothing yet. Buy cSats or connect a machine to get started.</td></tr>";
     }

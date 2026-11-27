@@ -1044,6 +1044,8 @@ export interface WalletOverview {
   networkSource: "coordinator" | "portal";
   cSats: number | null;
   earnedSats: number | null;
+  /** Of the earnings, routing fees (newer portals). */
+  routingFeeSats?: number | null;
   btcUsd: number | null;
   rateStale: boolean;
   fees: { purchaseFeeBps: number | null; networkFeeBps: number | null };
@@ -1905,7 +1907,10 @@ export interface ComputeOverview {
     accountId: string;
     cSats: number;
     earnedSats: number;
-    recent: Array<{ type: string; cSats: number; reason: string; taskId?: string; atMs: number }>;
+    /** Of the earnings, routing fees (newer coordinators). */
+    routingFeeSats?: number;
+    /** coordinator: on a routing-fee row, the coordinator that routed the call. */
+    recent: Array<{ type: string; cSats: number; reason: string; taskId?: string; atMs: number; coordinator?: string }>;
     machines?: Machine[];
     networkAgents?: number;
     coordinator?: { peerId: string; url: string };

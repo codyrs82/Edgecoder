@@ -6,7 +6,8 @@ import { createPeerKeys, type PeerKeys } from "../../src/mesh/peer.js";
 import { publicKeyFingerprint, signForwardedResult, signRegistration, verifyPeerRequest } from "../../src/mesh/peer-trust.js";
 import { MeshProtocol } from "../../src/mesh/protocol.js";
 import { hashRequestBody, signRequest } from "../../src/security/request-signing.js";
-import { creditEngine, earnedMsat, grantCredits } from "../../src/credits/store.js";
+import { creditEngine, earnedMsat, grantCredits, setRemoteLedger } from "../../src/credits/store.js";
+import { hashResultOutput, signReceiptAsAgent } from "../../src/receipts/receipt.js";
 const creditBalance = async (id: string) => creditEngine.balance(id);
 
 /*
@@ -40,7 +41,9 @@ const peerState = {
   /** Raw requests the stand-in peer received (for checking the coordinator signed them). */
   requests: [] as Array<{ method: string; url: string; headers: Record<string, unknown>; raw: string }>,
   grant: true,
-  chargedMsat: 0
+  chargedMsat: 0,
+  /** "origin": the origin answers that it paid the host on the shared ledger itself. */
+  hostPaidBy: undefined as string | undefined
 };
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -75,7 +78,7 @@ beforeAll(async () => {
     }
     if (req.url === "/result") {
       peerState.forwarded.push(body);
-      return res.end(JSON.stringify({ ok: true, chargedMsat: peerState.chargedMsat }));
+      return res.end(JSON.stringify({ ok: true, chargedMsat: peerState.chargedMsat, ...(peerState.hostPaidBy ? { hostPaidBy: peerState.hostPaidBy } : {}) }));
     }
     res.end("{}");
   });
@@ -116,6 +119,7 @@ beforeEach(() => {
   peerState.requests.length = 0;
   peerState.grant = true;
   peerState.chargedMsat = 0;
+  peerState.hostPaidBy = undefined;
 });
 
 function post(url: string, body: unknown, signer?: PeerKeys, headers: Record<string, string> = {}) {
@@ -225,6 +229,58 @@ describe("origin: a subtask offered to peers runs on one coordinator only", () =
     expect((await post("/result", { subtaskId: st!.id, taskId, agentId: worker.peerId, ok: true, output: "1\n", durationMs: 1000 }, worker)).statusCode).toBe(200);
   }, 20_000);
 
+  describe("peer work when this coordinator bills through the ledger service", () => {
+    const hostAgent = createPeerKeys("agent-on-peer-signed");
+    const claimFor = (taskId: string, subtaskId: string) =>
+      signReceiptAsAgent({ taskId, subtaskId, agentId: hostAgent.peerId, agentPublicKeyPem: hostAgent.publicKeyPem, startedAtMs: Date.now() - 1000, finishedAtMs: Date.now(), resultHash: hashResultOutput("1\n") }, hostAgent.privateKeyPem);
+    /** A stand-in ledger service client: records settles, closes tasks. */
+    function fakeLedger(answer: () => Promise<Record<string, unknown>>) {
+      const settles: Array<Record<string, unknown>> = [];
+      setRemoteLedger({ settle: async (i: Record<string, unknown>) => (settles.push(i), answer()), refund: async () => ({ status: "refunded", refundMsat: 0 }) } as never);
+      return settles;
+    }
+    async function granted() {
+      const taskId = randomUUID();
+      const { subtasks } = await submit(taskId);
+      await sleep(50);
+      expect((await fromPeer("task_claim", { subtaskId: subtasks[0], taskId, claimedByCoordinator: PEER_ID })).json()).toMatchObject({ granted: true });
+      return { taskId, subtaskId: subtasks[0] };
+    }
+
+    test("the origin settles the peer's host there as peer work (routing share its own) and tells the peer it paid", async () => {
+      const { taskId, subtaskId } = await granted();
+      const settles = fakeLedger(async () => ({ status: "settled", routingFeeMsat: 0 }));
+      try {
+        const res = await forward({ subtaskId, taskId, agentId: hostAgent.peerId, ok: true, output: "1\n", durationMs: 1200, peerCostMsat: 9, hostAccountId: "acct-peer-host", receipt: claimFor(taskId, subtaskId) });
+        expect(res.statusCode, res.body).toBe(200);
+        expect(res.json()).toMatchObject({ ok: true, chargedMsat: 9, hostPaidBy: "origin" });
+        expect(settles).toEqual([
+          expect.objectContaining({ taskId, subtaskId, agentId: hostAgent.peerId, hostAccountId: "acct-peer-host", baseCostMsat: 9, overflowWantMsat: 0, success: true, peerWork: { executorPeerId: PEER_ID } })
+        ]);
+      } finally {
+        setRemoteLedger(null);
+      }
+    });
+
+    test("without the agent's claim, or when the service refuses, nothing is charged and the peer pays nothing", async () => {
+      const a = await granted();
+      const b = await granted();
+      const settles = fakeLedger(async () => {
+        throw new Error("ledger_service_409: task_closed");
+      });
+      try {
+        const noClaim = await forward({ subtaskId: a.subtaskId, taskId: a.taskId, agentId: hostAgent.peerId, ok: true, output: "1\n", durationMs: 1200, peerCostMsat: 9 });
+        expect(noClaim.json()).toEqual({ ok: true, chargedMsat: 0 });
+        expect(settles).toEqual([]);
+        const refused = await forward({ subtaskId: b.subtaskId, taskId: b.taskId, agentId: hostAgent.peerId, ok: true, output: "1\n", durationMs: 1200, peerCostMsat: 9, receipt: claimFor(b.taskId, b.subtaskId) });
+        expect(refused.json()).toEqual({ ok: true, chargedMsat: 0 });
+        expect(settles).toHaveLength(1);
+      } finally {
+        setRemoteLedger(null);
+      }
+    });
+  });
+
   test("a claim for another coordinator, or naming someone else, is refused", async () => {
     const res = await fromPeer("task_claim", { subtaskId: randomUUID(), claimedByCoordinator: "coord-other" });
     expect(res.statusCode).toBe(403);
@@ -299,6 +355,24 @@ describe("peer: an offered subtask is run only once granted, and paid only what 
     const fwd = peerState.forwarded.find((f) => f.subtaskId === subtaskId);
     expect(typeof fwd?.peerCostMsat).toBe("number");
     expect(fwd!.peerCostMsat).toBeGreaterThan(0);
+  });
+
+  test("the origin paid the host on the shared ledger: nothing is paid here, and the forward names the host", { timeout: 10_000 }, async () => {
+    peerState.chargedMsat = 3;
+    peerState.hostPaidBy = "origin";
+    const subtaskId = randomUUID();
+    const taskId = randomUUID();
+    await offer(subtaskId, taskId);
+    await sleep(200);
+    expect((await pull())?.id).toBe(subtaskId);
+    await sleep(1_100);
+    const before = await earnedMsat(worker.peerId);
+    expect((await post("/result", { subtaskId, taskId, agentId: worker.peerId, ok: true, output: "2\n", durationMs: 30_000 }, worker)).statusCode).toBe(200);
+    expect((await earnedMsat(worker.peerId)) - before).toBe(0);
+    const fwd = peerState.forwarded.find((f) => f.subtaskId === subtaskId);
+    // No database here: the agent's owner is not known, so the agent id is named; this coordinator bills locally.
+    expect(fwd).toMatchObject({ hostAccountId: worker.peerId });
+    expect(fwd!.executorBilling).toBeUndefined();
   });
 
   test("stress finding 4: the requester's bid ceiling holds here too", async () => {

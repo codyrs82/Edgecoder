@@ -11,6 +11,9 @@ import { signForwardedResult } from "../../mesh/peer-trust.js";
 import type { AgentResultEnvelope } from "../../mesh/forwarded-agent-envelope.js";
 import { accruePricedJobWithOverflow, refundTaskReserve, refundTxId, remoteLedger, rewardAccountForAgent, sameAccountGroup } from "../../credits/store.js";
 import type { SignedAgentReceiptClaim } from "../../receipts/receipt.js";
+import { claimMatches } from "../../ledger-service/server.js";
+import { PEER_WORK_HOST_PAID_BY_ORIGIN } from "../../ledger-service/protocol.js";
+import { ledgerService } from "./ledger-service.js";
 import { modelTokenPrice } from "../../economy/cloud-pricing.js";
 import {
   clampToBand,
@@ -139,6 +142,12 @@ export function isPeerOffered(subtaskId: string): boolean {
 
 const FORWARD_RETRY_DELAYS_MS = [1_000, 3_000, 6_000];
 
+/** The forward's billing fields: the agent's owner as known here, and whether this coordinator bills through the ledger service. */
+async function peerBillingFields(agentId: string): Promise<{ hostAccountId?: string; executorBilling?: "ledger_service" }> {
+  const hostAccountId = await rewardAccountForAgent(agentId).catch(() => agentId);
+  return { hostAccountId, ...(remoteLedger() ? { executorBilling: "ledger_service" as const } : {}) };
+}
+
 /**
  * Send a result for a peer-offered subtask back to its origin and return what the origin charged its
  * requester for it (msat): all an agent here may be paid for the work. 0 when the origin refused it
@@ -149,10 +158,14 @@ async function forwardResultToOrigin(
   result: SubtaskResult,
   agentEnvelope?: AgentResultEnvelope,
   peerCostMsat?: number
-): Promise<number> {
+): Promise<OriginCharge> {
+  const none: OriginCharge = { chargedMsat: 0, hostPaidByOrigin: false };
   // peerCostMsat: what the work cost here by the pricing formulas, which the origin charges its
-  // requester (never more than it set aside); covered by our forward signature.
-  const forwardJson = JSON.stringify({ ...result, ...(agentEnvelope ? { agentEnvelope } : {}), ...(peerCostMsat !== undefined ? { peerCostMsat } : {}) });
+  // requester (never more than it set aside); covered by our forward signature. With it, who the
+  // host is here and whether this coordinator bills through the ledger service: then the origin
+  // pays the host on the shared ledger (chargeAndPayPeerWork), since there is no ledger here to.
+  const billing = result.ok ? await peerBillingFields(result.agentId) : {};
+  const forwardJson = JSON.stringify({ ...result, ...(agentEnvelope ? { agentEnvelope } : {}), ...(peerCostMsat !== undefined ? { peerCostMsat } : {}), ...billing });
   for (let attempt = 0; ; attempt++) {
     let retry = false;
     try {
@@ -177,19 +190,20 @@ async function forwardResultToOrigin(
       }
       if (res.statusCode >= 200 && res.statusCode < 300) {
         const charged = typeof body.chargedMsat === "number" && Number.isFinite(body.chargedMsat) ? Math.max(0, body.chargedMsat) : 0;
-        app.log.info({ subtaskId: result.subtaskId, to: origin.coordinatorUrl, chargedMsat: charged }, "result_forwarded_to_origin");
-        return charged;
+        const hostPaidByOrigin = body.hostPaidBy === PEER_WORK_HOST_PAID_BY_ORIGIN;
+        app.log.info({ subtaskId: result.subtaskId, to: origin.coordinatorUrl, chargedMsat: charged, ...(hostPaidByOrigin ? { hostPaidBy: "origin" } : {}) }, "result_forwarded_to_origin");
+        return { chargedMsat: charged, hostPaidByOrigin };
       }
       retry = res.statusCode === 409 && body.error === "forward_in_progress";
       if (!retry) {
         app.log.warn({ subtaskId: result.subtaskId, originUrl: origin.coordinatorUrl, status: res.statusCode, error: body.error }, "result_forward_refused");
-        return 0;
+        return none;
       }
     } catch (e) {
       retry = true;
       app.log.warn({ subtaskId: result.subtaskId, originUrl: origin.coordinatorUrl, err: String(e) }, "result_forward_failed");
     }
-    if (!retry || attempt >= FORWARD_RETRY_DELAYS_MS.length) return 0;
+    if (!retry || attempt >= FORWARD_RETRY_DELAYS_MS.length) return none;
     await new Promise((r) => setTimeout(r, FORWARD_RETRY_DELAYS_MS[attempt]));
   }
 }
@@ -432,7 +446,7 @@ export function peerWorkCostMsat(r: ExecutionResult<ResultMeta>): number {
 }
 
 /** Accrue compute credits for one accepted execution (idempotent per executed subtask id, #44). */
-export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: { originChargedMsat?: number; onPriced?: () => void } = {}): Promise<void> {
+export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: { originCharge?: OriginCharge; onPriced?: () => void } = {}): Promise<void> {
   const { subtask, durationMs, reportedDurationMs, taskId } = r.meta;
   const rewardAccountId = await rewardAccountForAgent(r.agentId);
   noteUsageRun(taskId, r.agentId, r.ok, durationMs, effectiveHardware(r.agentId)?.computeClass ?? agentCapabilities.get(r.agentId)?.computeClass);
@@ -456,17 +470,23 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
   claimedTradePrice.delete(r.subtaskId);
   // Paid out of a peer coordinator's charge (takeTaskBudget), not a reserve here.
   const peerOffered = peerOfferBudgetMsat.has(r.subtaskId);
-  if (peerOffered && remoteLedger()) {
-    // Billing through the ledger service covers this coordinator's own tasks only: another
-    // coordinator's subtask is not charged or paid here.
+  if (peerOffered && (opts.originCharge?.hostPaidByOrigin || remoteLedger())) {
+    // The origin paid the host on the shared ledger (chargeAndPayPeerWork): nothing is paid here.
+    // A coordinator billing through the ledger service never pays another coordinator's subtask
+    // itself: the origin does, or (an origin that does not yet) nobody does.
     peerOfferBudgetMsat.delete(r.subtaskId);
-    app.log.info({ taskId, subtaskId: r.subtaskId }, "ledger_service_peer_subtask_unpaid");
+    if (opts.originCharge?.hostPaidByOrigin) {
+      marketHistory.settleTrade(r.subtaskId, Number(((durationMs / 1000) * hardwareWeight).toFixed(6)));
+      app.log.info({ taskId, subtaskId: r.subtaskId, chargedMsat: opts.originCharge.chargedMsat }, "peer_subtask_host_paid_by_origin");
+    } else {
+      app.log.info({ taskId, subtaskId: r.subtaskId }, "ledger_service_peer_subtask_unpaid");
+    }
     return;
   }
   // What is paid is what the requester is charged: taken out of what was set aside for the task
   // before the store is awaited, so results settling together cannot both spend it. Work nobody set
   // anything aside for (an anonymous task) earns nothing.
-  const takenMsat = takeTaskBudget(taskId, r.subtaskId, priced.costMsat, opts.originChargedMsat);
+  const takenMsat = takeTaskBudget(taskId, r.subtaskId, priced.costMsat, opts.originCharge?.chargedMsat);
   const billing = taskBilling.get(taskId);
   const pricedMsat = Number.isFinite(priced.costMsat) ? Math.round(priced.costMsat) : 0;
   // A model call's cost past its reserve (a prompt denser than its bound, job-pricing.ts
@@ -585,7 +605,7 @@ export async function accrueResultCredits(r: ExecutionResult<ResultMeta>, opts: 
  * the origin coordinator (gossiped subtasks) and result_announce. #50: for results held
  * for verification this runs only at settle time, with the verified output.
  */
-export async function publishResult(result: SubtaskResult, agentEnvelope?: AgentResultEnvelope, peerCostMsat?: number): Promise<number | undefined> {
+export async function publishResult(result: SubtaskResult, agentEnvelope?: AgentResultEnvelope, peerCostMsat?: number): Promise<OriginCharge | undefined> {
   queue.complete(result);
   // Market: a task's bid leaves the book once its last subtask has a result.
   if (taskOpenCount(result.taskId) === 0) orderBook.removeBid(result.taskId);
@@ -599,7 +619,7 @@ export async function publishResult(result: SubtaskResult, agentEnvelope?: Agent
   // this sits between the agent's result and the requester's reply.
   await Promise.all([pgStore?.persistLedgerRecord(completeRecord), persistStatsLedgerRecord(completeRecord)]);
 
-  let originChargedMsat: number | undefined;
+  let originCharge: OriginCharge | undefined;
   const origin = taskOriginMap.get(result.subtaskId);
   if (origin && origin.coordinatorId !== identity.peerId) {
     taskOriginMap.delete(result.subtaskId);
@@ -610,7 +630,7 @@ export async function publishResult(result: SubtaskResult, agentEnvelope?: Agent
       if (pem) attestAgentSigningKey(agentEnvelope.headers["x-agent-id"], pem);
     }
     // Awaited: what the origin charged its requester is what the agent here may be paid.
-    originChargedMsat = await forwardResultToOrigin(origin, result, agentEnvelope, result.ok ? peerCostMsat ?? 0 : 0);
+    originCharge = await forwardResultToOrigin(origin, result, agentEnvelope, result.ok ? peerCostMsat ?? 0 : 0);
   }
 
   void mesh.broadcast(
@@ -621,7 +641,7 @@ export async function publishResult(result: SubtaskResult, agentEnvelope?: Agent
       coordinatorKeys.privateKeyPem
     )
   );
-  return originChargedMsat;
+  return originCharge;
 }
 
 /**
@@ -699,12 +719,12 @@ export async function settleVerification(outcome: VerificationOutcome<ResultMeta
   // A peer-offered subtask: the origin is asked for what the paid original execution cost (replicas
   // have no budget here, results.ts takeTaskBudget).
   const paidOriginal = peerOffered ? payable.find((w) => w.subtaskId === outcome.originalSubtaskId) : undefined;
-  const originChargedMsat = await publishResult(
+  const originCharge = await publishResult(
     { ...original.meta.report, ok: outcome.ok, output: outcome.output },
     ref?.meta.agentEnvelope,
     peerOffered ? (paidOriginal ? peerWorkCostMsat(paidOriginal) : 0) : undefined
   );
-  if (peerOffered) for (const w of payable) await accrueResultCredits(w, { originChargedMsat });
+  if (peerOffered) for (const w of payable) await accrueResultCredits(w, { originCharge });
   releaseDependents(outcome.originalSubtaskId, outcome.output);
   // The verified result was the task's last open subtask: return what it set aside and did not use
   // (/result returns early for held results, so nothing else settles it).
@@ -828,6 +848,81 @@ export async function chargePeerWork(taskId: string, wantMsat: number, agentId?:
   const take = Math.min(want, Math.max(0, billing.reservedMsat - billing.costMsat));
   billing.costMsat += take;
   return take;
+}
+
+/** What the origin answered a forwarded result with: the charge, and whether it paid the host itself. */
+export interface OriginCharge {
+  chargedMsat: number;
+  hostPaidByOrigin: boolean;
+}
+
+/**
+ * Origin side: a granted peer ran a subtask of `taskId`. Charge the requester (chargePeerWork) and,
+ * when either side bills through EdgeCoder's ledger service, pay the executing coordinator's host on
+ * the shared ledger here, so it is paid once and never by both:
+ * - this coordinator bills through the service: it settles the subtask there as peer work (it took
+ *   the buyer and owns the task, so the routing share is its operator's; the host gets host pay);
+ * - this is a seed and the executor bills through the service (it said so in its signed forward):
+ *   the seed pays the host on its own database (LedgerService.settleSeedPeerWork), the fee to the pool;
+ * - otherwise (seed to seed) the executor pays its host on the shared database, as before.
+ * Either payment is recorded under the report `result:<subtaskId>`, the id the executor's own
+ * accrual uses too, so a second attempt from anywhere pays nothing. When the payment is refused or
+ * fails, nothing is charged (the reserve goes back at settle) and the executor pays nothing.
+ */
+export async function chargeAndPayPeerWork(input: {
+  taskId: string;
+  subtaskId: string;
+  agentId: string;
+  wantMsat: number;
+  executorPeerId: string;
+  /** The host account the executor named (its view of the agent's owner). */
+  hostAccountId?: string;
+  /** "ledger_service" when the executor bills through the ledger service. */
+  executorBilling?: string;
+  receipt?: SignedAgentReceiptClaim;
+  resourceClass: "cpu" | "gpu";
+  durationMs: number;
+}): Promise<OriginCharge> {
+  const charged = await chargePeerWork(input.taskId, input.wantMsat, input.agentId);
+  if (!(charged > 0)) return { chargedMsat: 0, hostPaidByOrigin: false };
+  const remote = remoteLedger();
+  const seed = !remote && input.executorBilling === "ledger_service" ? ledgerService : null;
+  if (!remote && !seed) return { chargedMsat: charged, hostPaidByOrigin: false };
+  const undo = (reason: string, detail: Record<string, unknown> = {}): OriginCharge => {
+    returnTaskBudget(input.taskId, charged);
+    app.log.warn({ taskId: input.taskId, subtaskId: input.subtaskId, executorPeerId: input.executorPeerId, reason, ...detail }, "peer_work_host_payment_refused");
+    return { chargedMsat: 0, hostPaidByOrigin: false };
+  };
+  // Never settle without the agent's own claim for exactly this execution.
+  const claim = input.receipt;
+  if (!claim) return undo("receipt_required");
+  if (!claimMatches(claim, input)) return undo("receipt_invalid");
+  const hostAccountId = input.hostAccountId || input.agentId;
+  try {
+    if (remote) {
+      const r = await remote.settle({
+        taskId: input.taskId,
+        subtaskId: input.subtaskId,
+        agentId: input.agentId,
+        hostAccountId,
+        baseCostMsat: charged,
+        overflowWantMsat: 0,
+        resourceClass: input.resourceClass,
+        durationMs: input.durationMs,
+        success: true,
+        receipt: claim,
+        peerWork: { executorPeerId: input.executorPeerId }
+      });
+      app.log.info({ taskId: input.taskId, subtaskId: input.subtaskId, executorPeerId: input.executorPeerId, status: r.status, chargedMsat: charged, routingFeeMsat: r.routingFeeMsat }, "peer_work_settled_through_ledger_service");
+      return { chargedMsat: charged, hostPaidByOrigin: true };
+    }
+    const r = await seed!.settleSeedPeerWork({ ...input, hostAccountId, chargedMsat: charged, receipt: claim });
+    if (r.status === "refused") return undo(r.error);
+    app.log.info({ taskId: input.taskId, subtaskId: input.subtaskId, executorPeerId: input.executorPeerId, status: r.status, chargedMsat: charged }, "peer_work_host_paid_by_origin");
+    return { chargedMsat: charged, hostPaidByOrigin: true };
+  } catch (err) {
+    return undo("settle_failed", { error: String(err) });
+  }
 }
 
 /** A per-task counter of work in flight; the returned function releases one hold (once). */

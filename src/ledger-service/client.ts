@@ -82,6 +82,8 @@ export class LedgerServiceClient {
     durationMs: number;
     success: boolean;
     receipt?: SignedAgentReceiptClaim;
+    /** Peer work: another coordinator ran the subtask of this coordinator's task (protocol.ts). */
+    peerWork?: { executorPeerId: string };
   }): Promise<SettleResponse> {
     return (await this.call(LEDGER_SERVICE_PATHS.settle, { ...input, baseCostMsat: Math.max(0, Math.round(input.baseCostMsat)), overflowWantMsat: Math.max(0, Math.floor(input.overflowWantMsat)) })) as unknown as SettleResponse;
   }

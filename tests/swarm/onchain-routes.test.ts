@@ -75,6 +75,16 @@ describe("Fund with Bitcoin", () => {
   });
 });
 
+describe("routing-fee earnings in the account summary", () => {
+  test("a routing_fee:<task> earn row is listed, totalled apart, and counted in the earnings", async () => {
+    const { creditEngine } = await import("../../src/credits/store.js");
+    creditEngine.record({ txId: "rf-1", accountId: "acct-operator-rf", type: "earn", credits: 2.4, reason: "routing_fee:task-rf", relatedTaskId: "task-rf", timestampMs: Date.now(), msat: 2_400 });
+    const summary = (await post("/account/summary", { accountId: "acct-operator-rf" })).json();
+    expect(summary).toMatchObject({ earnedSats: 2, routingFeeSats: 2.4, cSats: 2.4 });
+    expect(summary.recent).toEqual([expect.objectContaining({ type: "earn", cSats: 2.4, reason: "routing_fee:task-rf", taskId: "task-rf" })]);
+  });
+});
+
 describe("on-chain payout destination", () => {
   test("validates the address for the network, stores it and replaces a Lightning address", async () => {
     const good = taprootAddressFor("regtest", new Uint8Array(32).fill(9));
