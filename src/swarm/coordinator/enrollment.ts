@@ -7,7 +7,7 @@
 import { request } from "undici";
 import { pgStore } from "../../db/store.js";
 import { app } from "./app.js";
-import { identity, COORDINATOR_REGISTRATION_TOKEN, PORTAL_SERVICE_URL, PORTAL_OUTBOUND_TOKEN } from "./context.js";
+import { identity, COORDINATOR_REGISTRATION_TOKEN, PORTAL_SERVICE_URL, PORTAL_OUTBOUND_TOKEN, portalOutboundSigning } from "./context.js";
 import { portalOutboundHeaders } from "./portal-credentials.js";
 import { ordering, agentCapabilities } from "./agent-state.js";
 import { persistStatsLedgerRecord } from "./stats-ledger.js";
@@ -168,21 +168,23 @@ export async function validatePortalNode(input: {
     await appendValidationEvent(outcome);
     return outcome;
   }
-  const headers = portalOutboundHeaders(identity.peerId, COORDINATOR_REGISTRATION_TOKEN, PORTAL_OUTBOUND_TOKEN);
+  const validateUrl = `${PORTAL_SERVICE_URL}/internal/nodes/validate`;
+  const validateBody = JSON.stringify({
+    nodeId: input.nodeId,
+    nodeKind: input.nodeKind,
+    registrationToken: input.registrationToken,
+    deviceId: input.deviceId,
+    sourceIp: input.sourceIp
+  });
+  const headers = portalOutboundHeaders(identity.peerId, COORDINATOR_REGISTRATION_TOKEN, PORTAL_OUTBOUND_TOKEN, portalOutboundSigning("POST", validateUrl, validateBody));
   try {
     const portalValidationTimeoutMs = 5_000;
-    const res = await request(`${PORTAL_SERVICE_URL}/internal/nodes/validate`, {
+    const res = await request(validateUrl, {
       method: "POST",
       headers,
       headersTimeout: portalValidationTimeoutMs,
       bodyTimeout: portalValidationTimeoutMs,
-      body: JSON.stringify({
-        nodeId: input.nodeId,
-        nodeKind: input.nodeKind,
-        registrationToken: input.registrationToken,
-        deviceId: input.deviceId,
-        sourceIp: input.sourceIp
-      })
+      body: validateBody
     });
     const payload = (await res.body.json()) as {
       allowed?: boolean;
@@ -295,13 +297,15 @@ export async function refreshHostApprovals(
 
 async function portalLookup(nodeIds: string[]): Promise<Array<{ nodeId: string; hostApproved?: boolean }>> {
   if (!PORTAL_SERVICE_URL || nodeIds.length === 0) return [];
-  const headers = portalOutboundHeaders(identity.peerId, COORDINATOR_REGISTRATION_TOKEN, PORTAL_OUTBOUND_TOKEN);
-  const res = await request(`${PORTAL_SERVICE_URL}/internal/nodes/lookup`, {
+  const lookupUrl = `${PORTAL_SERVICE_URL}/internal/nodes/lookup`;
+  const lookupBody = JSON.stringify({ nodeIds });
+  const headers = portalOutboundHeaders(identity.peerId, COORDINATOR_REGISTRATION_TOKEN, PORTAL_OUTBOUND_TOKEN, portalOutboundSigning("POST", lookupUrl, lookupBody));
+  const res = await request(lookupUrl, {
     method: "POST",
     headers,
     headersTimeout: 5_000,
     bodyTimeout: 5_000,
-    body: JSON.stringify({ nodeIds })
+    body: lookupBody
   });
   const payload = (await res.body.json()) as { nodes?: Array<{ nodeId: string; hostApproved?: boolean }> };
   if (res.statusCode < 200 || res.statusCode >= 300) throw new Error(`portal_lookup_failed_${res.statusCode}`);

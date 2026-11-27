@@ -14,7 +14,8 @@ import { PORTAL_ACTION_HEADER, parseSigningKey, signPortalAction, type PortalAct
 
 let cache: { raw: string; key: KeyObject | null } | undefined;
 
-function signingKey(env: NodeJS.ProcessEnv): KeyObject | null {
+/** PORTAL_ACTION_SIGNING_KEY, parsed once; also signs the portal's calls to coordinators (coordinator-request.ts). */
+export function signingKey(env: NodeJS.ProcessEnv = process.env): KeyObject | null {
   const raw = (env.PORTAL_ACTION_SIGNING_KEY ?? "").trim();
   if (cache?.raw === raw) return cache.key;
   cache = { raw, key: raw ? parseSigningKey(raw) : null };

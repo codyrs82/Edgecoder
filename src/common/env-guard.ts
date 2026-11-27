@@ -37,12 +37,24 @@ export function coordinatorRequiredProdEnv(paymentsEnabled: boolean): string[] {
   return [
     "MESH_AUTH_TOKEN",
     "PORTAL_SERVICE_URL",
-    "PORTAL_SERVICE_TOKEN",
     "ADMIN_API_TOKEN",
     "PAYMENT_WEBHOOK_SECRET",
     "DATABASE_URL",
     ...(paymentsEnabled ? ["LIGHTNING_PROVIDER"] : [])
   ];
+}
+
+/**
+ * How a production coordinator recognises the portal: its signature (PORTAL_ACTION_VERIFY_KEYS, what
+ * outside coordinators set) or the legacy service token (the seeds, during the migration).
+ */
+export const COORDINATOR_PORTAL_INBOUND_ENV = ["PORTAL_ACTION_VERIFY_KEYS", "PORTAL_SERVICE_TOKEN"];
+
+/** Throws in production when none of `names` is set; no-op elsewhere. */
+export function requireProdEnvOneOf(service: string, names: string[], env: NodeJS.ProcessEnv = process.env): void {
+  if (env.NODE_ENV !== "production") return;
+  if (names.some((n) => (env[n] ?? "").trim())) return;
+  throw new Error(`[${service}] missing required production env: one of ${names.join(", ")}`);
 }
 
 export type SharedTokenCheck = "ok" | "unauthorized" | "not_configured";

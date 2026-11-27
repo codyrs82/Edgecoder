@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { createHash } from "node:crypto";
-import { request } from "undici";
+import { coordinatorRequest } from "./coordinator-request.js";
 import { moduleLogger } from "../common/logger.js";
 
 const logger = moduleLogger("portal-account-admin");
@@ -220,7 +220,7 @@ export interface BalanceDeps {
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 
 async function getJson(url: string, method: "GET" | "POST", token: string, timeoutMs: number, body?: object): Promise<{ status: number; json: any }> {
-  const res = await request(url, {
+  const res = await coordinatorRequest(url, {
     method,
     headers: { ...(token ? { "x-portal-service-token": token } : {}), ...(body ? { "content-type": "application/json" } : {}) },
     body: body ? JSON.stringify(body) : undefined,

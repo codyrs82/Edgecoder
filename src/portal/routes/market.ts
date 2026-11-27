@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import type { FastifyInstance } from "fastify";
-import { request } from "undici";
+import { coordinatorRequest } from "../coordinator-request.js";
 import { z } from "zod";
 import type { MarketRoutesDeps } from "../server.js";
 import { registerHostedRoutes } from "./hosted.js";
@@ -33,7 +33,7 @@ export function registerMarketRoutes(app: FastifyInstance, deps: MarketRoutesDep
   async function proxyGet(path: string, reply: any): Promise<unknown> {
     const base = await coordinator();
     if (!base) return reply.code(503).send({ error: "no_coordinator" });
-    const res = await request(`${base}${path}`, { method: "GET", headers: headers(), headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS, bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS });
+    const res = await coordinatorRequest(`${base}${path}`, { method: "GET", headers: headers(), headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS, bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS });
     const body = await res.body.json().catch(() => ({}));
     return reply.code(res.statusCode).send(body);
   }
@@ -76,7 +76,7 @@ export function registerMarketRoutes(app: FastifyInstance, deps: MarketRoutesDep
       .parse(req.body);
     const base = await coordinator();
     if (!base) return reply.code(503).send({ error: "no_coordinator" });
-    const res = await request(`${base}/economy/market/orders`, {
+    const res = await coordinatorRequest(`${base}/economy/market/orders`, {
       method: "POST",
       headers: { "content-type": "application/json", ...headers() },
       headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,

@@ -94,7 +94,8 @@ Held by: the portal, both seeds (coordinator and control plane), and the backup-
 5. Check: the wallet page, a chat, a node validation (`/internal/nodes/validate` from a seed).
 6. Unset the `_PREVIOUS` values and `TOKEN_PREVIOUS_UNTIL` on all three apps.
 
-`PORTAL_COORDINATOR_TOKEN` (if set) has no previous-value support. Rotate it by unsetting it on
+`PORTAL_COORDINATOR_TOKEN` is deprecated (coordinators sign their calls; turn it off with
+`PORTAL_COORDINATOR_TOKEN_ACCEPTED=false` on the portal). While it is still set it has no previous-value support. Rotate it by unsetting it on
 the seeds first (they then send `PORTAL_SERVICE_TOKEN`, which the portal accepts), setting the new
 value on the portal, then setting it on the seeds.
 

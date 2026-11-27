@@ -41,7 +41,7 @@ import { CC, FALLBACK_BTC_USD, claimedTradePrice, reservations, taskBilling, set
 import { pickSameNetworkAgent } from "../../lan-proximity.js";
 import { mutable } from "../mutable-state.js";
 import { agentCapabilities, activeBlacklistRecord, autoBlacklister } from "../agent-state.js";
-import { agentSignatureAtGate, hasPortalServiceToken, resolveSubmitterAccount, verifyAgentRequest } from "../auth.js";
+import { agentSignatureAtGate, hasPortalServiceToken, resolveSubmitterAccount, verifyAgentRequest, isPortalCaller } from "../auth.js";
 import { readHeaderValue } from "../../coordinator-utils.js";
 import {
   RESTRICTED_LOG_PROMPTS,
@@ -764,7 +764,7 @@ function noCapacityReply(reply: { code: (n: number) => { header: (k: string, v: 
 /** Whose /inference/models this is: the account the portal names, or the signing agent's owner. */
 async function modelViewerAccount(req: { headers: Record<string, unknown> }): Promise<string | undefined> {
   const h = (req.headers ?? {}) as Record<string, unknown>;
-  if (h["x-portal-service-token"] !== undefined && hasPortalServiceToken(h)) return readHeaderValue(h, "x-edgecoder-account") || undefined;
+  if (isPortalCaller(h)) return readHeaderValue(h, "x-edgecoder-account") || undefined;
   const agentId = agentSignatureAtGate(h, "GET", "/inference/models");
   if (!agentId) return undefined;
   return (await pgStore?.getAgentOwnership(agentId))?.accountId ?? agentId;

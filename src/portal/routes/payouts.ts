@@ -4,7 +4,7 @@
 import { portalActionHeaders } from "../portal-action-signer.js";
 import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
-import { request } from "undici";
+import { coordinatorRequest } from "../coordinator-request.js";
 import { z } from "zod";
 import { decodeBolt11 } from "../../economy/bolt11.js";
 import type { MarketRoutesDeps } from "../server.js";
@@ -106,7 +106,7 @@ export function registerPayoutRoutes(
     const base = await coordinator();
     if (!base) return { error: { status: 503, body: { error: "no_coordinator" } } };
     try {
-      const res = await request(`${base}${path}`, {
+      const res = await coordinatorRequest(`${base}${path}`, {
         method,
         headers: { ...headers(), ...extraHeaders },
         body: body === undefined ? undefined : JSON.stringify(body),

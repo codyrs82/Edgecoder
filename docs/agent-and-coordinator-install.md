@@ -206,7 +206,9 @@ COORDINATOR_PRIVATE_KEY_PEM=<your Ed25519 PKCS#8 key; keep it stable>
 # from the network you join
 MESH_AUTH_TOKEN=<mesh token of the network>
 PORTAL_SERVICE_URL=<your-portal>
-PORTAL_SERVICE_TOKEN=<token the portal operator issues for coordinators (PORTAL_COORDINATOR_TOKEN on the portal)>
+# The portal's public key (raw Ed25519, base64), from the portal operator. Portal calls are signed for
+# this coordinator, and this coordinator signs its own calls to the portal: no portal token is shared.
+PORTAL_ACTION_VERIFY_KEYS=<portal public key>
 ```
 
 Plus the join settings:
@@ -343,7 +345,11 @@ approving coordinator's `ADMIN_API_TOKEN`. In the all-in-one runtime the control
 - Credits live in each coordinator's own database. A coordinator with its own `DATABASE_URL` does not see
   balances held on the network's ledger, so a network-billed call it starts itself is refused with
   `insufficient_credits`. Calls a user runs on their own machines (`target: "mine"`) are not billed and work.
-- `PORTAL_COORDINATOR_TOKEN` is a single value on the portal, shared by every outside coordinator.
+- Portal access is per coordinator: it signs its `/internal` calls with its own key, and the portal trusts
+  that key once the coordinator's first call carries its registration token (or the signed registry lists
+  it). Scopes: validating agents that register to it, looking up the nodes it validated, and network
+  counts. An admin can revoke it; a registry suspension stops it at once. The shared
+  `PORTAL_COORDINATOR_TOKEN` is deprecated and still accepted while `PORTAL_COORDINATOR_TOKEN_ACCEPTED` is on.
 
 ### 4) Verify mesh joining
 

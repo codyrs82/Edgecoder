@@ -14,7 +14,7 @@
  */
 
 import type { FastifyInstance } from "fastify";
-import { request } from "undici";
+import { coordinatorRequest } from "../coordinator-request.js";
 import { z } from "zod";
 import { MODEL_CATALOG } from "../../model/catalog.js";
 import { modelControlRequestSchema, MODEL_CONTROL_ACTIONS, SETTINGS_AUTO_MIN_AGENT_VERSION } from "../../model/remote-control/protocol.js";
@@ -85,7 +85,7 @@ export async function ownMachineModels(deps: Omit<MachineRoutesDeps, "getCurrent
   const answers = await Promise.all(
     urls.map(async (base) => {
       try {
-        const res = await request(`${base}/agent-control/machines`, {
+        const res = await coordinatorRequest(`${base}/agent-control/machines`, {
           method: "POST",
           headers: { "content-type": "application/json", ...(deps.PORTAL_SERVICE_TOKEN ? { "x-portal-service-token": deps.PORTAL_SERVICE_TOKEN } : {}) },
           body: JSON.stringify({ accountId: `acct-${userId}`, agentIds }),
@@ -155,7 +155,7 @@ export function registerMachineRoutes(app: FastifyInstance, deps: MachineRoutesD
     return [...new Set((await deps.discoverCoordinatorUrlsForPortal()).map((u) => u.replace(/\/$/, "")))].slice(0, MAX_COORDINATORS);
   }
   async function postJson(url: string, body: unknown): Promise<{ status: number; body: any }> {
-    const res = await request(url, {
+    const res = await coordinatorRequest(url, {
       method: "POST",
       headers: headers(),
       body: JSON.stringify(body),

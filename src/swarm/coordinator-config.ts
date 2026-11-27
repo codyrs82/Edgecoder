@@ -127,6 +127,12 @@ export const coordinatorConfigSchema = z.object({
       }
     }),
   REQUIRE_PORTAL_ACTION_SIGNATURE: envBool(false),
+  // Portal-signed requests (src/security/service-request-signing.ts). true (default, migration):
+  // the portal's PORTAL_SERVICE_TOKEN is still accepted inbound next to a portal signature; false:
+  // only a request the portal signed for this coordinator counts as the portal.
+  PORTAL_SERVICE_TOKEN_INBOUND: envBool(true),
+  /** Extra origins (comma list) a portal-signed request may name as its audience, besides COORDINATOR_PUBLIC_URL. */
+  PORTAL_REQUEST_AUDIENCES: str(),
   // HMAC key and identity keys: validated as present/absent only and read byte-for-byte where used.
   PAYMENT_WEBHOOK_SECRET: str(),
   COORDINATOR_PRIVATE_KEY_PEM: str(),

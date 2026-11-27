@@ -3,7 +3,7 @@
 
 import { portalActionHeaders } from "../portal-action-signer.js";
 import type { FastifyInstance } from "fastify";
-import { request } from "undici";
+import { coordinatorRequest } from "../coordinator-request.js";
 import { z } from "zod";
 import type { BitcoinNetwork } from "../../common/types.js";
 import { payableDestinationKinds, validatePayoutDestination } from "../../economy/payout-destination.js";
@@ -103,7 +103,7 @@ export function createPayoutRegistrar(cfg: {
 }): PayoutRegistrar & { clear: (accountId: string) => Promise<RegistrationStatus> } {
   async function post(url: string, headers: Record<string, string>, body: unknown): Promise<RegistrationStatus> {
     try {
-      const res = await request(url, {
+      const res = await coordinatorRequest(url, {
         method: "POST",
         headers: { "content-type": "application/json", ...headers },
         body: JSON.stringify(body),

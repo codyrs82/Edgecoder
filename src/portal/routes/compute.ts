@@ -8,7 +8,7 @@
  */
 
 import type { FastifyInstance } from "fastify";
-import { request } from "undici";
+import { coordinatorRequest } from "../coordinator-request.js";
 import { z } from "zod";
 import { RESERVATION_MAX_MINUTES, RESERVATION_MIN_MINUTES } from "../../economy/reservations.js";
 import {
@@ -46,7 +46,7 @@ export function portalCoordinatorTransport(deps: Pick<ComputeRoutesDeps, "PORTAL
     const [base] = await deps.discoverCoordinatorUrlsForPortal();
     if (!base) return { status: 503, json: { error: "no_coordinator" } };
     const payload = body !== undefined && path.startsWith("/account/") ? { ...(body as object), accountId } : body;
-    const res = await request(`${base.replace(/\/$/, "")}${path}`, {
+    const res = await coordinatorRequest(`${base.replace(/\/$/, "")}${path}`, {
       method,
       // x-edgecoder-account: whose view a read is (GET /inference/models lists restricted models only to entitled accounts).
       headers: { ...(deps.PORTAL_SERVICE_TOKEN ? { "x-portal-service-token": deps.PORTAL_SERVICE_TOKEN } : {}), "x-edgecoder-account": accountId, ...(payload !== undefined ? { "content-type": "application/json" } : {}) },

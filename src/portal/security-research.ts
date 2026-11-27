@@ -19,7 +19,7 @@
  */
 
 import type { FastifyInstance } from "fastify";
-import { request } from "undici";
+import { coordinatorRequest } from "./coordinator-request.js";
 import { z } from "zod";
 import { moduleLogger } from "../common/logger.js";
 import { ENTITLEMENT_KINDS, type EntitlementKind } from "../swarm/restricted-models.js";
@@ -72,7 +72,7 @@ export async function pushToCoordinators(urls: string[], serviceToken: string | 
   const results = await Promise.all(
     urls.map(async (url) => {
       try {
-        const res = await request(`${url.replace(/\/+$/, "")}/account/restricted-access/update`, {
+        const res = await coordinatorRequest(`${url.replace(/\/+$/, "")}/account/restricted-access/update`, {
           method: "POST",
           headers: { "content-type": "application/json", ...(serviceToken ? { "x-portal-service-token": serviceToken } : {}) },
           body: JSON.stringify(change),

@@ -47,7 +47,8 @@ import { pgStore } from "../../db/store.js";
 import type { ComputeClassId } from "../../economy/compute-classes.js";
 import { MemoryUsageStore, type UsageRecord } from "../../economy/usage.js";
 import { ReservationBook } from "../../economy/reservations.js";
-import { coordinatorRequiredProdEnv, isProduction, requireProdEnv } from "../../common/env-guard.js";
+import { coordinatorRequiredProdEnv, COORDINATOR_PORTAL_INBOUND_ENV, isProduction, requireProdEnv, requireProdEnvOneOf } from "../../common/env-guard.js";
+import { portalRequestAudiences, type PortalInboundSignatureConfig, type PortalOutboundSigning } from "./portal-credentials.js";
 import { economyPaymentsEnabled } from "../../economy/lightning.js";
 import { reconcileConfigFromEnv, requiredConfirmationsFromEnv } from "../../economy/anchoring.js";
 import { assertPaymentWebhookSecret } from "../../economy/payment-settlement.js";
@@ -332,6 +333,20 @@ export const ADMIN_ORIGIN_POLICY: AdminOriginPolicy = adminOriginPolicyFromEnv(p
 export const PORTAL_ACTION_KEYS = parseVerifyKeys(CC.PORTAL_ACTION_VERIFY_KEYS);
 /** true: withdraw / payout destination routes refuse the service token without a portal assertion. */
 export const REQUIRE_PORTAL_ACTION_SIGNATURE = CC.REQUIRE_PORTAL_ACTION_SIGNATURE;
+/**
+ * Inbound portal auth (coordinator/portal-credentials.ts): requests the portal signed for this
+ * coordinator, checked with PORTAL_ACTION_VERIFY_KEYS against this coordinator's own origins.
+ */
+export const PORTAL_INBOUND_SIGNATURES: PortalInboundSignatureConfig = {
+  keys: PORTAL_ACTION_KEYS,
+  audiences: portalRequestAudiences(CC.COORDINATOR_PUBLIC_URL, CC.PORTAL_REQUEST_AUDIENCES, isProduction())
+};
+/** Migration flag (default true): the portal's PORTAL_SERVICE_TOKEN still counts as the portal inbound. */
+export const PORTAL_SERVICE_TOKEN_INBOUND = CC.PORTAL_SERVICE_TOKEN_INBOUND;
+/** What signs one outbound call to the portal: this coordinator's own identity key. */
+export function portalOutboundSigning(method: string, url: string, body?: string | null): PortalOutboundSigning {
+  return { privateKeyPem: coordinatorKeys.privateKeyPem, publicKeyPem: identity.publicKeyPem, method, url, body };
+}
 // What this coordinator presents to the portal's read/validate /internal routes. Defaults to
 // PORTAL_SERVICE_TOKEN; once PORTAL_COORDINATOR_TOKEN is set here and on the portal, coordinators
 // no longer need the portal's own service token for those calls.
@@ -372,6 +387,9 @@ export const PAYMENT_WEBHOOK_SECRET = process.env.PAYMENT_WEBHOOK_SECRET ?? "";
 // LIGHTNING_PROVIDER is only required while payments are enabled (see #43 ECONOMY_PAYMENTS_ENABLED).
 // #55: DATABASE_URL too, so replay/idempotency keys are never held only in memory in production.
 requireProdEnv("coordinator", coordinatorRequiredProdEnv(economyPaymentsEnabled()));
+// The portal is recognised by its signature (PORTAL_ACTION_VERIFY_KEYS) or, on the seeds during
+// the migration, its service token: one of the two is enough.
+requireProdEnvOneOf("coordinator", COORDINATOR_PORTAL_INBOUND_ENV);
 export const IS_PROD = isProduction();
 // #42: production must verify webhook HMACs.
 assertPaymentWebhookSecret();

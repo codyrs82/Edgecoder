@@ -45,6 +45,9 @@ import { request } from "undici";
 import { z } from "zod";
 import { LISTEN_HOST, portalAllowOpenInternal } from "../common/env-guard.js";
 import { createInternalAuth } from "./internal-auth.js";
+import { configurePortalCoordinatorAuth, coordinatorRequest, serviceTokenHostPolicy } from "./coordinator-request.js";
+import { outsideMemberHosts, registryFanoutUrls } from "./registry-coordinators.js";
+import { portalCoordinatorCredentials } from "./coordinator-credentials.js";
 import { coordinatorUrlAllowed, coordinatorUrlPolicyFromEnv, filterCoordinatorUrls } from "./coordinator-url-policy.js";
 import { chatCapacityOptionsFromEnv, createChatCapacityDirectory } from "./chat-capacity.js";
 import {
@@ -362,9 +365,10 @@ const PORTAL_ALLOW_OPEN_INTERNAL = portalAllowOpenInternal();
 // #40: empty token -> 503 (open only with PORTAL_ALLOW_OPEN_INTERNAL=1 outside production);
 // constant-time compare. Reads accept the service or coordinator token; approval mutations also
 // need the control-plane admin credential (src/portal/internal-auth.ts).
-const { requireInternalToken, requireControlPlaneAdmin, callerKind } = createInternalAuth({
-  serviceToken: PORTAL_SERVICE_TOKEN,
-  coordinatorToken: C.PORTAL_COORDINATOR_TOKEN,
+// Coordinators sign their /internal calls with their own key; PORTAL_COORDINATOR_TOKEN is deprecated (coordinator-credentials.ts).
+const coordinatorCredentials = portalCoordinatorCredentials({ pool: store?.pool ?? null, registryMembers: () => portalRegistry?.members() ?? [], enrollment: async (id) => (store ? store.getNodeEnrollment(id) : null), sha256Hex, log: (msg, extra) => app.log.info(extra, msg) });
+const { requireInternalToken, gateInternal, verifyInternalCaller, signedCoordinatorOf, requireControlPlaneAdmin, callerKind } = createInternalAuth({
+  serviceToken: PORTAL_SERVICE_TOKEN, coordinatorToken: C.PORTAL_COORDINATOR_TOKEN, acceptCoordinatorToken: C.PORTAL_COORDINATOR_TOKEN_ACCEPTED, coordinatorCredentials, log: app.log,
   adminToken: CONTROL_PLANE_ADMIN_TOKEN,
   allowOpenWhenUnset: PORTAL_ALLOW_OPEN_INTERNAL, serviceTokenPrevious: C.PORTAL_SERVICE_TOKEN_PREVIOUS, adminTokenPrevious: C.CONTROL_PLANE_ADMIN_TOKEN_PREVIOUS, previousUntil: C.TOKEN_PREVIOUS_UNTIL // rotation
 });
@@ -614,6 +618,10 @@ async function discoverCoordinatorUrlsForPortal(): Promise<string[]> {
 const allowlistedCoordinatorUrls = async () => [...COORDINATOR_DISCOVERY_URLS, ...(await controlPlaneCoordinatorUrls())].filter((url) => coordinatorUrlAllowed(url, COORDINATOR_URL_POLICY));
 // Lookups of live machines ask every coordinator, the healthy pick first (coordinator-fanout.ts).
 const everyCoordinatorUrl = everyCoordinator(discoverCoordinatorUrlsForPortal, allowlistedCoordinatorUrls);
+// PORTAL_REGISTRY_COORDINATORS: the registry's active outside members join the machine lookups (registry-coordinators.ts).
+const everyCoordinatorUrlWithRegistry = everyCoordinator(discoverCoordinatorUrlsForPortal, async () => [...(await allowlistedCoordinatorUrls()), ...registryFanoutUrls(portalRegistry?.snapshot().coordinators ?? [], { enabled: C.PORTAL_REGISTRY_COORDINATORS })]);
+// Portal calls are signed per coordinator; the service token never goes to an outside registry member (coordinator-request.ts).
+configurePortalCoordinatorAuth({ tokenAllowed: serviceTokenHostPolicy(COORDINATOR_URL_POLICY, () => outsideMemberHosts(portalRegistry?.members() ?? [])) });
 
 /** The control plane's coordinator list, allowlisted; empty when it is not configured or did not answer. */
 async function controlPlaneCoordinatorUrls(): Promise<string[]> {
@@ -686,7 +694,7 @@ async function fetchCoordinatorFederatedSummary(input: {
   const responses = await Promise.all(
     coordinatorUrls.map(async (baseUrl) => {
       try {
-        const res = await request(`${baseUrl.replace(/\/$/, "")}/stats/projections/summary${ownerEmailQuery}`, {
+        const res = await coordinatorRequest(`${baseUrl.replace(/\/$/, "")}/stats/projections/summary${ownerEmailQuery}`, {
           method: "GET",
           headers,
           headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
@@ -877,7 +885,7 @@ const marketRouteDeps = { EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discov
 export type MarketRoutesDeps = typeof marketRouteDeps;
 registerMarketRoutes(app, marketRouteDeps);
 const { service: cloudBots, runner: cloudBotRunner } = createCloudBots({ pool: store?.pool ?? null, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal, capacity: chatCapacity, ownMachineModels: chatRouteDeps.ownMachineModels, log: app.log }); // Cloud bots (docs/cloud-bots.md): run here, with no machine
-registerMachineRoutes(app, { PORTAL_SERVICE_TOKEN, EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal: everyCoordinatorUrl, getCurrentUser, store, cloud: cloudBots, latestAgentVersion: createLatestAgentVersion() }); // Settings > Nodes > Machines (remote model control, routes/machines.ts; with the machines' bots and cloud bots, routes/bots.ts) and Settings > Network (the world view, routes/network-world.ts).
+registerMachineRoutes(app, { PORTAL_SERVICE_TOKEN, EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal: everyCoordinatorUrlWithRegistry, getCurrentUser, store, cloud: cloudBots, latestAgentVersion: createLatestAgentVersion() }); // Settings > Nodes > Machines (remote model control, routes/machines.ts; with the machines' bots and cloud bots, routes/bots.ts) and Settings > Network (the world view, routes/network-world.ts).
 registerNetworkWorldRoutes(app, { PORTAL_SERVICE_TOKEN, EXTERNAL_HTTP_TIMEOUT_MS, discoverCoordinatorUrlsForPortal: everyCoordinatorUrl, getCurrentUser }); // every coordinator, the healthy pick first
 // The Wallet screens (web, desktop, iOS): one read-only overview, and a session-bound Lightning top-up.
 registerWalletApiRoutes(app, { ...marketRouteDeps, fallbackNetwork: WALLET_DEFAULT_NETWORK });
@@ -948,7 +956,7 @@ startUnverifiedPurge(
 registerPortalPages(app, { getPricing: coordinatorPricingSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: everyCoordinatorUrl }), getReserves: coordinatorReservesSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: everyCoordinatorUrl }) }); // the first that answers
 
 // #40: every /internal/* route lives in this plugin, so new internal routes inherit the token check.
-const internalRouteDeps = { autoRequestHost, callerKind, deleteDnsRecord, deriveIosDeviceIdFromNodeId, hostApprovedFor, requireControlPlaneAdmin, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store };
+const internalRouteDeps = { autoRequestHost, callerKind, deleteDnsRecord, deriveIosDeviceIdFromNodeId, hostApprovedFor, requireControlPlaneAdmin, requireInternalToken, gateInternal, verifyInternalCaller, signedCoordinatorOf, credentialStore: coordinatorCredentials.store, resolveIpIntelligence, secureCompare, sha256Hex, store };
 export type InternalRoutesDeps = typeof internalRouteDeps;
 await app.register(async (internal) => {
   registerInternalRoutes(internal, internalRouteDeps);

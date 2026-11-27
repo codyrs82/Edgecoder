@@ -187,7 +187,8 @@ services:
       INFERENCE_AUTH_TOKEN: ${INFERENCE_AUTH_TOKEN}
       PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET}
       PORTAL_SERVICE_URL: ${PORTAL_SERVICE_URL}
-      PORTAL_SERVICE_TOKEN: ${PORTAL_SERVICE_TOKEN}
+      # The portal's public key: portal calls are signed, no shared portal token (src/security/service-request-signing.ts).
+      PORTAL_ACTION_VERIFY_KEYS: ${PORTAL_ACTION_VERIFY_KEYS}
       COORDINATOR_REGISTRATION_TOKEN: ${COORDINATOR_REGISTRATION_TOKEN}
       COORDINATOR_BOOTSTRAP_URLS: ${COORDINATOR_BOOTSTRAP_URLS}
       # Fee-pool heartbeat (POST /economy/hosts/heartbeat, self-sent by the coordinator).

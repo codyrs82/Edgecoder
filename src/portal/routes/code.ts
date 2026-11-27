@@ -22,7 +22,7 @@
  */
 
 import type { FastifyInstance, FastifyReply } from "fastify";
-import { request } from "undici";
+import { coordinatorRequest } from "../coordinator-request.js";
 import { z } from "zod";
 import { CODE_COMMAND_BODY_LIMIT, CODE_CONTROL_ACTIONS, codeControlRequestSchema, type CodeSnapshot } from "../../common/code-relay.js";
 
@@ -127,7 +127,7 @@ export function registerCodeRoutes(app: FastifyInstance, deps: CodeRoutesDeps): 
     return [...new Set((await deps.discoverCoordinatorUrlsForPortal()).map((u) => u.replace(/\/$/, "")))].slice(0, MAX_COORDINATORS);
   }
   async function postJson(url: string, body: unknown): Promise<{ status: number; body: any }> {
-    const res = await request(url, { method: "POST", headers: headers(), body: JSON.stringify(body), headersTimeout: deps.EXTERNAL_HTTP_TIMEOUT_MS, bodyTimeout: deps.EXTERNAL_HTTP_TIMEOUT_MS });
+    const res = await coordinatorRequest(url, { method: "POST", headers: headers(), body: JSON.stringify(body), headersTimeout: deps.EXTERNAL_HTTP_TIMEOUT_MS, bodyTimeout: deps.EXTERNAL_HTTP_TIMEOUT_MS });
     return { status: res.statusCode, body: await res.body.json().catch(() => ({})) };
   }
   async function agentNodes(userId: string): Promise<string[]> {

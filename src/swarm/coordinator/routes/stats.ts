@@ -15,8 +15,11 @@ import {
   ANCHOR_REQUIRED_CONFIRMATIONS,
   STATS_ANCHOR_MIN_CONFIRMATIONS,
   PORTAL_SERVICE_URL,
-  PORTAL_OUTBOUND_TOKEN
+  PORTAL_OUTBOUND_TOKEN,
+  COORDINATOR_REGISTRATION_TOKEN,
+  portalOutboundSigning
 } from "../context.js";
+import { portalOutboundHeaders } from "../portal-credentials.js";
 import { ordering, agentCapabilities, directWorkById, activeTunnels } from "../agent-state.js";
 import { requireMeshToken, authorizeAdmin, hasMeshToken, hasPortalServiceToken } from "../auth.js";
 import { requirePeerCredential } from "../peer-auth.js";
@@ -221,9 +224,9 @@ export function registerStatsRoutes(app: CoordinatorApp): void {
     let portalCounts: { users: { total: number; verified: number }; nodes: { total: number; approved: number; active: number; agents: number; coordinators: number } } | null = null;
     if (PORTAL_SERVICE_URL) {
       try {
-        const headers: Record<string, string> = { "content-type": "application/json" };
-        if (PORTAL_OUTBOUND_TOKEN) headers["x-portal-service-token"] = PORTAL_OUTBOUND_TOKEN;
-        const res = await request(`${PORTAL_SERVICE_URL}/internal/stats/counts`, {
+        const countsUrl = `${PORTAL_SERVICE_URL}/internal/stats/counts`;
+        const headers = portalOutboundHeaders(identity.peerId, COORDINATOR_REGISTRATION_TOKEN, PORTAL_OUTBOUND_TOKEN, portalOutboundSigning("GET", countsUrl));
+        const res = await request(countsUrl, {
           method: "GET",
           headers,
           headersTimeout: 5_000,

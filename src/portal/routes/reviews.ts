@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import type { FastifyInstance } from "fastify";
-import { request } from "undici";
+import { coordinatorRequest } from "../coordinator-request.js";
 import { z } from "zod";
 import type { ReviewRoutesDeps } from "../server.js";
 import { moduleLogger } from "../../common/logger.js";
@@ -35,7 +35,7 @@ export function registerReviewRoutes(app: FastifyInstance, { EXTERNAL_HTTP_TIMEO
     if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
 
     try {
-      const res = await request(`${coordinatorUrl}/escalate`, {
+      const res = await coordinatorRequest(`${coordinatorUrl}/escalate`, {
         method: "GET",
         headers,
         headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
@@ -81,7 +81,7 @@ export function registerReviewRoutes(app: FastifyInstance, { EXTERNAL_HTTP_TIMEO
     if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
 
     try {
-      const res = await request(`${coordinatorUrl}/escalate/${encodeURIComponent(taskId)}`, {
+      const res = await coordinatorRequest(`${coordinatorUrl}/escalate/${encodeURIComponent(taskId)}`, {
         method: "GET",
         headers,
         headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
@@ -148,7 +148,7 @@ export function registerReviewRoutes(app: FastifyInstance, { EXTERNAL_HTTP_TIMEO
     const improvedCode = body.decision === "edit" ? body.editedCode : undefined;
 
     try {
-      const res = await request(`${coordinatorUrl}/escalate/${encodeURIComponent(taskId)}/result`, {
+      const res = await coordinatorRequest(`${coordinatorUrl}/escalate/${encodeURIComponent(taskId)}/result`, {
         method: "POST",
         headers,
         body: JSON.stringify({

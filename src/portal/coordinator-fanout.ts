@@ -10,7 +10,7 @@
  * timeout per coordinator, a coordinator that fails is left out) and merge the answers. Lookups of
  * shared database state (balances, prices, reserves) still ask one, falling over to the next.
  */
-import { request } from "undici";
+import { coordinatorRequest } from "./coordinator-request.js";
 import { drainRetryWaitMs } from "../apps/ide/network-inference.js";
 
 /** At most this many coordinators are asked per lookup. */
@@ -164,7 +164,7 @@ export function mergeLocalModels<T extends { name: string; running?: boolean }>(
 
 /** GET a JSON document from one coordinator as the portal (service token; `account`: whose view it is). */
 export async function getCoordinatorJson(base: string, path: string, opts: { serviceToken?: string; account?: string; signal?: AbortSignal; timeoutMs?: number }): Promise<Record<string, unknown>> {
-  const res = await request(`${norm(base)}${path}`, {
+  const res = await coordinatorRequest(`${norm(base)}${path}`, {
     method: "GET",
     headers: { ...(opts.serviceToken ? { "x-portal-service-token": opts.serviceToken } : {}), ...(opts.account ? { "x-edgecoder-account": opts.account } : {}) },
     headersTimeout: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,

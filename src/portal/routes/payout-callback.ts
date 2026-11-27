@@ -4,7 +4,7 @@
 import { portalActionHeaders } from "../portal-action-signer.js";
 import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
-import { request } from "undici";
+import { coordinatorRequest } from "../coordinator-request.js";
 import { z } from "zod";
 import type { PayoutDestinationStore } from "./payout-destination.js";
 
@@ -38,7 +38,7 @@ export function createPayoutCallbackClient(cfg: { portalServiceToken?: string; t
     const urls = await cfg.discoverCoordinatorUrls().catch(() => [] as string[]);
     if (!urls.length) return null;
     try {
-      const res = await request(`${urls[0].replace(/\/$/, "")}${path}`, {
+      const res = await coordinatorRequest(`${urls[0].replace(/\/$/, "")}${path}`, {
         method,
         headers: { "x-portal-service-token": cfg.portalServiceToken, ...(body ? { "content-type": "application/json" } : {}), ...extraHeaders },
         body: body ? JSON.stringify(body) : undefined,

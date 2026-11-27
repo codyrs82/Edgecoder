@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { checkSharedToken, requireProdEnv, resolveListenHost } from "../../src/common/env-guard.js";
+import { checkSharedToken, COORDINATOR_PORTAL_INBOUND_ENV, coordinatorRequiredProdEnv, requireProdEnv, requireProdEnvOneOf, resolveListenHost } from "../../src/common/env-guard.js";
 
 describe("env-guard (#5)", () => {
   test("production + missing vars -> throws listing the names", () => {
@@ -33,5 +33,25 @@ describe("env-guard (#5)", () => {
     expect(checkSharedToken("secret", "secret", true)).toBe("ok");
     expect(checkSharedToken("secret", "wrong", true)).toBe("unauthorized");
     expect(checkSharedToken("secret", undefined, false)).toBe("unauthorized");
+  });
+});
+
+describe("production coordinator: how it recognises the portal", () => {
+  const outside = { NODE_ENV: "production", MESH_AUTH_TOKEN: "m", PORTAL_SERVICE_URL: "u", ADMIN_API_TOKEN: "a", PAYMENT_WEBHOOK_SECRET: "w", DATABASE_URL: "postgresql://x" };
+
+  test("an outside coordinator needs no PORTAL_SERVICE_TOKEN, only the portal's public key", () => {
+    expect(coordinatorRequiredProdEnv(false)).not.toContain("PORTAL_SERVICE_TOKEN");
+    expect(coordinatorRequiredProdEnv(false)).not.toContain("PORTAL_COORDINATOR_TOKEN");
+    expect(() => requireProdEnv("coordinator", coordinatorRequiredProdEnv(false), outside)).not.toThrow();
+    expect(() => requireProdEnvOneOf("coordinator", COORDINATOR_PORTAL_INBOUND_ENV, { ...outside, PORTAL_ACTION_VERIFY_KEYS: "a2V5" })).not.toThrow();
+  });
+
+  test("the seeds keep working on the service token during the migration", () => {
+    expect(() => requireProdEnvOneOf("coordinator", COORDINATOR_PORTAL_INBOUND_ENV, { ...outside, PORTAL_SERVICE_TOKEN: "p" })).not.toThrow();
+  });
+
+  test("neither: refuses to start in production, fine elsewhere", () => {
+    expect(() => requireProdEnvOneOf("coordinator", COORDINATOR_PORTAL_INBOUND_ENV, outside)).toThrow("one of PORTAL_ACTION_VERIFY_KEYS, PORTAL_SERVICE_TOKEN");
+    expect(() => requireProdEnvOneOf("coordinator", COORDINATOR_PORTAL_INBOUND_ENV, { NODE_ENV: "development" })).not.toThrow();
   });
 });

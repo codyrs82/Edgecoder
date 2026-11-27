@@ -30,7 +30,7 @@ import type { CoordinatorApp } from "../app.js";
 import { identity, coordinatorKeys, mesh, CC, queue, requestOrigin, registryTrust, MESH_PEER_ALLOWLIST } from "../context.js";
 import { networkTag } from "../../lan-proximity.js";
 import { agentCapabilities, activeBlacklistRecord, AGENT_CONNECTED_WINDOW_MS } from "../agent-state.js";
-import { agentAccount, agentSignatureAtGate, hasMeshToken, hasPortalServiceToken } from "../auth.js";
+import { agentAccount, agentSignatureAtGate, hasMeshToken, isPortalCaller } from "../auth.js";
 import { peerRequestHeaders, requirePeerCredential } from "../peer-auth.js";
 import { agentLoadReport } from "../dispatch.js";
 import { agentSocketLost } from "../agent-liveness.js";
@@ -425,7 +425,7 @@ export function registerNetworkWorldRoutes(app: CoordinatorApp): void {
     let callerKey: string;
     // LAN facts about the caller's own machines go only to a signed agent (the desktop app).
     let lanFor: { callerNetTag: string | null } | undefined;
-    if (headers["x-portal-service-token"] !== undefined && hasPortalServiceToken(headers)) {
+    if (isPortalCaller(headers)) {
       const q = portalQuery.safeParse(req.query ?? {});
       if (!q.success) return reply.code(400).send({ error: "invalid_account" });
       account = q.data.accountId ?? null;

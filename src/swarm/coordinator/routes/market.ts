@@ -16,7 +16,7 @@ import { CANDLE_INTERVALS, MarketHistory, type MarketOrder } from "../../../econ
 import type { CoordinatorApp } from "../app.js";
 import { mutable } from "../mutable-state.js";
 import { agentCapabilities } from "../agent-state.js";
-import { requireMeshOrPortalToken, hasPortalServiceToken, callerAccount } from "../auth.js";
+import { requireMeshOrPortalToken, callerAccount, isPortalCaller } from "../auth.js";
 import {
   orderBook,
   MARKET_DEFAULT_BID_PREMIUM_BPS,
@@ -83,7 +83,7 @@ export function registerMarketRoutes(app: CoordinatorApp): void {
     // orders only for its own linked account. The mesh token alone is not enough.
     const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
     const requestedAccount = (req.body as { accountId?: unknown } | undefined)?.accountId;
-    if (!(headers["x-portal-service-token"] !== undefined && hasPortalServiceToken(headers))) {
+    if (!isPortalCaller(headers)) {
       const caller = await callerAccount(req, "/economy/market/orders", typeof requestedAccount === "string" ? requestedAccount : undefined);
       if ("error" in caller) return reply.code(caller.status).send({ error: caller.error });
       if (caller.accountId !== requestedAccount) return reply.code(403).send({ error: "account_mismatch" });

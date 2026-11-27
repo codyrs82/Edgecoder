@@ -3,6 +3,7 @@
 
 import type { FastifyInstance } from "fastify";
 import { request } from "undici";
+import { coordinatorRequest } from "../coordinator-request.js";
 import { z } from "zod";
 import type { CoordinatorOpsRoutesDeps } from "../server.js";
 
@@ -334,7 +335,7 @@ export function registerCoordinatorOpsRoutes(app: FastifyInstance, { autoRequest
     const responses = await Promise.all(
       coordinatorUrls.map(async (baseUrl) => {
         try {
-          const res = await request(`${baseUrl.replace(/\/$/, "")}/agent/diagnostics/${encodeURIComponent(agentId)}`, {
+          const res = await coordinatorRequest(`${baseUrl.replace(/\/$/, "")}/agent/diagnostics/${encodeURIComponent(agentId)}`, {
             method: "GET",
             headers
           });

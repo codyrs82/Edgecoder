@@ -86,7 +86,7 @@ export const INFRA_ENV_VARS: InfraEnvVar[] = [
   { name: "POSTGRES_DB", kind: "value", description: "Postgres database name." },
   { name: "COORDINATOR_PUBLIC_URL", kind: "value", description: "URL agents and peers reach this coordinator on (port 4301, ideally behind TLS)." },
   { name: "PORTAL_SERVICE_URL", kind: "value", description: "Portal the coordinator reports to (default: the public EdgeCoder portal)." },
-  { name: "PORTAL_SERVICE_TOKEN", kind: "value", description: "Service token issued by the portal for this coordinator; the portal operator provides it." },
+  { name: "PORTAL_ACTION_VERIFY_KEYS", kind: "value", description: "The portal's public key (raw Ed25519, base64): this coordinator accepts portal calls the portal signed for it. No portal token is needed." },
   { name: "COORDINATOR_REGISTRATION_TOKEN", kind: "value", description: "Token that lets this coordinator join the existing mesh (from the network operator)." },
   { name: "COORDINATOR_BOOTSTRAP_URLS", kind: "value", description: "Comma list of coordinators to peer with at start." },
   { name: "MESH_AUTH_TOKEN", kind: "secret", description: "Shared secret agents present to this coordinator (x-mesh-token)." },
@@ -115,7 +115,8 @@ export interface InfraEnvOptions {
   dbcacheMib?: number;
   coordinatorPublicUrl: string;
   portalServiceUrl?: string;
-  portalServiceToken?: string;
+  /** The portal's public key(s) (PORTAL_ACTION_VERIFY_KEYS), single line: raw Ed25519 base64 or hex. */
+  portalVerifyKeys?: string;
   coordinatorRegistrationToken?: string;
   coordinatorBootstrapUrls?: string[];
   accountId?: string;
@@ -224,7 +225,7 @@ export function renderInfraEnv(opts: InfraEnvOptions): string {
     POSTGRES_DB: opts.postgresDb ?? INFRA_DEFAULTS.postgresDb,
     COORDINATOR_PUBLIC_URL: opts.coordinatorPublicUrl,
     PORTAL_SERVICE_URL: opts.portalServiceUrl ?? INFRA_DEFAULTS.portalServiceUrl,
-    PORTAL_SERVICE_TOKEN: opts.portalServiceToken ?? "",
+    PORTAL_ACTION_VERIFY_KEYS: opts.portalVerifyKeys ?? "",
     COORDINATOR_REGISTRATION_TOKEN: opts.coordinatorRegistrationToken ?? "",
     COORDINATOR_BOOTSTRAP_URLS: (opts.coordinatorBootstrapUrls ?? [...INFRA_DEFAULTS.coordinatorBootstrapUrls]).join(","),
     MESH_AUTH_TOKEN: secret("MESH_AUTH_TOKEN", 32),
