@@ -312,9 +312,15 @@ in the portal and give it `AGENT_REGISTRATION_TOKEN` like any other agent, or se
 directly to `127.0.0.1:4301` (not through the proxy) register without a portal enrollment. Only
 the all-in-one runtime's own embedded worker registers without either.
 
-An agent that should work for your coordinator needs `COORDINATOR_URL` set to it and no `PORTAL_URL`:
-with `PORTAL_URL` set, the agent asks the portal for a coordinator at start and moves to the one the
-portal names (always one of the network's own coordinators), whatever `COORDINATOR_URL` says.
+Your agents should set `COORDINATOR_URL` to your coordinator. Steering and portal discovery respect
+it: an agent whose `COORDINATOR_URL` is anything other than `https://coordinator.edgecoder.io` keeps
+that coordinator while it answers `/identity` and is trusted (listed in the signed registry with
+that key, or accepted by the agent's own trust settings, such as `TRUSTED_COORDINATOR_KEYS`). Its log
+says `steering: keeping configured coordinator <url>`. Only while your coordinator is unreachable or
+not trusted does the agent steer to the nearest healthy platform coordinator (`configured coordinator
+<url> unreachable; steering to <other>`), and it comes back on a later steering round. With
+`PORTAL_URL` set, the portal's coordinator suggestion is ignored for such an agent. You no longer
+need `EDGECODER_STEERING=off` to keep agents on your coordinator.
 
 An agent on a Linux host without Docker takes no work with the default `SANDBOX_MODE=docker`
 (its log says `pull skipped: sandbox_down`). To serve model calls only, set `SANDBOX_MODE=none` and

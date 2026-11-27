@@ -44,7 +44,8 @@ import { DIRECT_WORK_MARKET_HINT, isOwnAccountCall, workerAcceptsDirectWorkOffer
 import { MeshConnectBackoff } from "./mesh-connect-backoff.js";
 import { BleRequestGuard, bleRequestProof } from "../mesh/ble/ble-request-guard.js";
 import { selectCoordinatorFromEnv } from "../discovery/index.js";
-import { createCoordinatorSteering, registryUrlsFor, type SteeringResult } from "../discovery/steering.js";
+import { createCoordinatorSteering, explicitCoordinatorUrl, registryUrlsFor, type SteeringResult } from "../discovery/steering.js";
+import { applyStartupDiscovery, describeSteering } from "../discovery/configured-coordinator.js";
 import { registryPublicKeysFromEnv } from "../discovery/registry.js";
 import { ensureOllamaModelInstalled, isOllamaLibraryModelName } from "../model/ollama-installer.js";
 import { NobleBLETransport } from "../mesh/ble/noble-ble-transport.js";
@@ -150,6 +151,12 @@ process.once("SIGTERM", () => void shutdownGracefully("shutdown"));
 process.once("SIGINT", () => void shutdownGracefully("shutdown", 130));
 
 const COORDINATOR_BOOTSTRAP_URL = W.COORDINATOR_URL ?? "http://127.0.0.1:4301";
+/**
+ * The operator's own coordinator (COORDINATOR_URL set to something other than the platform URL),
+ * or null for default installs. Steering keeps it while it answers and is trusted, and portal
+ * discovery never replaces it (src/discovery/configured-coordinator.ts).
+ */
+const EXPLICIT_COORDINATOR_URL = explicitCoordinatorUrl(W.COORDINATOR_URL);
 const SNAPSHOT_ENFORCEMENT = parseSnapshotEnforcement(W.SNAPSHOT_ENFORCEMENT);
 const CONTROL_PLANE_URL = W.CONTROL_PLANE_URL ?? "";
 const COORDINATOR_DISCOVERY_URL =
@@ -598,6 +605,8 @@ const coordinatorSteering = STEERING_ENABLED
       registryUrls: registryUrlsFor(COORDINATOR_BOOTSTRAP_URL, PORTAL_URL || undefined),
       publicKeys: REGISTRY_PUBLIC_KEYS,
       fallbackUrl: COORDINATOR_BOOTSTRAP_URL,
+      configuredUrl: EXPLICIT_COORDINATOR_URL ?? undefined,
+      trustsConfigured: (peerId, publicKeyPem) => coordinatorTrustStore.wouldTrust(peerId, publicKeyPem),
       cache: {
         read: () => localStore.getConfig("coordinator_registry") ?? null,
         write: (text) => localStore.setConfig("coordinator_registry", text)
@@ -608,24 +617,20 @@ const coordinatorSteering = STEERING_ENABLED
 let steeringStatus: SteeringResult | null = null;
 let lastSteeredAtMs = 0;
 /** True once the signed registry chose the coordinator (unsigned discovery must not override it). */
-const steeredByRegistry = (): boolean => steeringStatus?.source === "registry";
+const steeredByRegistry = (): boolean => steeringStatus?.source === "registry" || steeringStatus?.source === "configured";
 
-/** One steering round; returns the registry pick, or null when steering is off or fell back. */
+/** One steering round; returns the pick (registry or kept configured coordinator), or null when steering is off or fell back. */
 async function steerCoordinator(): Promise<SteeringResult | null> {
   if (!coordinatorSteering) return null;
   lastSteeredAtMs = Date.now();
+  const previous = steeringStatus;
   const result = await coordinatorSteering.steer();
   steeringStatus = result;
   // Coordinators the signed registry lists are trusted with exactly the listed key.
   coordinatorTrustStore.setRegistryEntries(coordinatorSteering.trustedEntries());
-  if (result.source === "registry") {
-    if (!result.kept || result.url !== coordinator.url) {
-      console.log(`[worker] steering: ${result.url} (${result.peerId}, region=${result.region}, ${result.latencyMs}ms${result.kept ? ", kept" : ""}; registry from ${result.registry?.from})`);
-    }
-    return result;
-  }
-  console.log(`[worker] steering fell back to ${result.url}: ${result.reason}`);
-  return null;
+  const line = describeSteering(result, previous, coordinator.url);
+  if (line) console.log(`[worker] ${line}`);
+  return result.source === "fallback" ? null : result;
 }
 
 // Coordinator discovery at startup. It starts now, but its pick is applied by the loop (after it
@@ -644,7 +649,10 @@ const startupDiscovery: Promise<{ url: string; source: string } | null> = (async
       pick = { url: picked.url, source: `discovery:${picked.source}` };
     }
   }
-  if (PORTAL_URL && AGENT_REGISTRATION_TOKEN) {
+  // The portal hands out a coordinator for default installs; an operator's own COORDINATOR_URL stands.
+  if (PORTAL_URL && AGENT_REGISTRATION_TOKEN && EXPLICIT_COORDINATOR_URL) {
+    console.log(`[worker] Portal discovery skipped: keeping configured coordinator ${EXPLICIT_COORDINATOR_URL}`);
+  } else if (PORTAL_URL && AGENT_REGISTRATION_TOKEN) {
     const discovered = await discoverCoordinatorFromPortal();
     if (discovered) {
       console.log(`[worker] Discovered coordinator from portal: ${discovered}`);
@@ -1217,9 +1225,12 @@ async function discoverCoordinatorUrlFromRegistry(): Promise<string | null> {
   }
 }
 
-async function resolveCoordinatorUrl(): Promise<{ url: string; source: "steering" | "registry" | "cache" | "bootstrap" }> {
+async function resolveCoordinatorUrl(opts: { startup?: boolean } = {}): Promise<{ url: string; source: "steering" | "configured" | "registry" | "cache" | "bootstrap" }> {
   const steered = await steerCoordinator();
-  if (steered) return { url: steered.url, source: "steering" };
+  if (steered) return { url: steered.url, source: steered.source === "configured" ? "configured" : "steering" };
+  // At startup an operator's own coordinator is used as configured; unsigned discovery and the
+  // cache only come into it on failover, once that coordinator stops answering.
+  if (opts.startup && EXPLICIT_COORDINATOR_URL) return { url: COORDINATOR_BOOTSTRAP_URL, source: "configured" };
   const discovered = await discoverCoordinatorUrlFromRegistry();
   if (discovered) return { url: discovered, source: "registry" };
   const cached = readCachedCoordinatorUrl();
@@ -1882,13 +1893,17 @@ async function loop(): Promise<void> {
   console.log(`[agent:${AGENT_ID}] platform: os=${platformInfo.os} arch=${platformInfo.arch} docker=${platformInfo.isDocker} wsl=${platformInfo.isWSL} systemd=${platformInfo.hasSystemd} pkg=${platformInfo.packageManager} shell=${platformInfo.shell}`);
   console.log(`[agent:${AGENT_ID}] configDir=${PLATFORM_CONFIG_DIR} logDir=${PLATFORM_LOG_DIR}`);
 
-  const coordinatorSelection = await resolveCoordinatorUrl();
+  const coordinatorSelection = await resolveCoordinatorUrl({ startup: true });
   coordinator.set(coordinatorSelection.url, coordinatorSelection.source);
   // Startup discovery settles before the loop starts; a signed-registry pick (steering) wins over it.
-  const discoveredAtStartup = await startupDiscovery;
-  if (discoveredAtStartup && !steeredByRegistry()) coordinator.set(discoveredAtStartup.url, discoveredAtStartup.source);
+  const discoveredAtStartup = applyStartupDiscovery({
+    discovered: await startupDiscovery,
+    steering: steeringStatus,
+    explicitUrl: EXPLICIT_COORDINATOR_URL
+  });
+  if (discoveredAtStartup) coordinator.set(discoveredAtStartup.url, discoveredAtStartup.source);
   cacheCoordinatorUrl(coordinator.url);
-  console.log(`[agent:${AGENT_ID}] coordinator selected (${discoveredAtStartup && !steeredByRegistry() ? discoveredAtStartup.source : coordinatorSelection.source}): ${coordinator.url}`);
+  console.log(`[agent:${AGENT_ID}] coordinator selected (${discoveredAtStartup ? discoveredAtStartup.source : coordinatorSelection.source}): ${coordinator.url}`);
 
   await ensureOllamaModelInstalled({
     enabled: PROVIDER === "ollama-local" && !OPENAI_ENGINE && !CLOUD_MODE,

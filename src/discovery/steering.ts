@@ -9,7 +9,7 @@
 // usable, the configured URL (the seeds) is used. Steering, not proxying: the client talks to the
 // chosen coordinator directly.
 
-import { fingerprintMatches } from "../security/key-fingerprint.js";
+import { fingerprintMatches, publicKeyFingerprint } from "../security/key-fingerprint.js";
 import type { FetchLike } from "./selector.js";
 import { normalizeCoordinatorUrl } from "./types.js";
 import { memberSteerable, memberTrusted, verifySignedRegistry, type RegistryEntry, type RegistryPayload } from "./registry.js";
@@ -227,8 +227,11 @@ export function chooseCandidate(
 
 export interface SteeringResult {
   url: string;
-  /** registry: chosen from the signed registry; fallback: the configured URL. */
-  source: "registry" | "fallback";
+  /**
+   * registry: chosen from the signed registry; configured: the operator's own COORDINATOR_URL,
+   * kept because it answered and is trusted; fallback: the configured URL, steering found nothing.
+   */
+  source: "registry" | "configured" | "fallback";
   peerId?: string;
   publicKeyFingerprint?: string;
   region?: string;
@@ -238,6 +241,8 @@ export interface SteeringResult {
   kept?: boolean;
   /** Why the fallback was used, or "" for a registry pick. */
   reason: string;
+  /** With `configuredUrl`: that coordinator and why it was not kept (unreachable, not trusted, draining). */
+  configuredProblem?: { url: string; problem: string };
   registry?: { issuedAtMs: number; expiresAtMs: number; from: string; coordinators: number; healthy: number; verified: number };
   decidedAtMs: number;
 }
@@ -260,6 +265,76 @@ export interface SteeringOptions {
    * coordinators are picked, as long as outside coordinators cannot bill (docs/discovery.md).
    */
   includeOutside?: boolean;
+  /**
+   * A coordinator the operator chose explicitly (COORDINATOR_URL other than the platform URL).
+   * Steering keeps it while it answers /identity and is trusted: listed in the verified registry
+   * with that key, or accepted by `trustsConfigured` (the agent's own allowlist). Only when it is
+   * unreachable or not trusted does steering pick from the registry instead.
+   */
+  configuredUrl?: string;
+  /** Whether the agent's trust settings accept this key (not consulted for a registry-listed peer). */
+  trustsConfigured?: (peerId: string, publicKeyPem: string) => boolean;
+}
+
+/** The platform URL every default install points at; steering is free to move agents off it. */
+export const PLATFORM_COORDINATOR_URL = "https://coordinator.edgecoder.io";
+
+/**
+ * The operator's explicitly configured coordinator, or null for a default install: unset, the
+ * platform URL (installer and desktop default), or a loopback coordinator (steering is off there).
+ */
+export function explicitCoordinatorUrl(configured: string | undefined | null): string | null {
+  const url = configured ? normalizeCoordinatorUrl(configured) : null;
+  if (!url) return null;
+  if (url === normalizeCoordinatorUrl(PLATFORM_COORDINATOR_URL)) return null;
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host === "localhost" || host === "::1" || host === "[::1]" || host.startsWith("127.")) return null;
+  } catch {
+    return null;
+  }
+  return url;
+}
+
+type ConfiguredCheck =
+  | { ok: true; url: string; peerId: string; publicKeyFingerprint: string; latencyMs: number }
+  | { ok: false; url: string; problem: string };
+
+/** One /identity round trip to the configured coordinator, judged against the registry and the allowlist. */
+async function checkConfigured(
+  url: string,
+  registry: RegistryPayload | null,
+  opts: Pick<SteeringOptions, "fetch" | "now" | "timeoutMs" | "trustsConfigured">
+): Promise<ConfiguredCheck> {
+  const fetchImpl = opts.fetch ?? (globalThis.fetch as unknown as FetchLike);
+  const now = opts.now ?? Date.now;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), opts.timeoutMs ?? 3000);
+  const started = now();
+  let body: { peerId?: unknown; publicKeyPem?: unknown; draining?: unknown } | null;
+  try {
+    const res = await fetchImpl(`${url}/identity`, { method: "GET", headers: { accept: "application/json" }, signal: ctl.signal });
+    body = (await res.json().catch(() => null)) as typeof body;
+    if (res.status < 200 || res.status >= 300) return { ok: false, url, problem: `unreachable (http_${res.status})` };
+  } catch {
+    return { ok: false, url, problem: "unreachable" };
+  } finally {
+    clearTimeout(timer);
+  }
+  const latencyMs = now() - started;
+  if (!body || typeof body.peerId !== "string" || typeof body.publicKeyPem !== "string") return { ok: false, url, problem: "unreachable (malformed identity)" };
+  if (body.draining === true) return { ok: false, url, problem: "draining" };
+  const peerId = body.peerId;
+  const pem = body.publicKeyPem;
+  const listed = registry?.coordinators.find((c) => c.peerId === peerId);
+  if (listed) {
+    // The registry speaks for this peer: its key must match, and a suspended member is not trusted.
+    if (!fingerprintMatches(listed.publicKeyFingerprint, pem)) return { ok: false, url, problem: "not trusted (identity_mismatch with the registry)" };
+    if (!memberTrusted(listed)) return { ok: false, url, problem: "not trusted (suspended in the registry)" };
+    return { ok: true, url, peerId, publicKeyFingerprint: listed.publicKeyFingerprint, latencyMs };
+  }
+  if (opts.trustsConfigured?.(peerId, pem)) return { ok: true, url, peerId, publicKeyFingerprint: publicKeyFingerprint(pem), latencyMs };
+  return { ok: false, url, problem: "not trusted (not in the registry and not allowlisted)" };
 }
 
 export interface CoordinatorSteering {
@@ -289,9 +364,30 @@ export function createCoordinatorSteering(opts: SteeringOptions): CoordinatorSte
     decidedAtMs: now()
   });
 
+  const configuredUrl = opts.configuredUrl ? normalizeCoordinatorUrl(opts.configuredUrl) : null;
+  const keepConfigured = (c: Extract<ConfiguredCheck, { ok: true }>, registry?: SteeringResult["registry"]): SteeringResult => {
+    current = null;
+    return {
+      url: c.url,
+      source: "configured",
+      peerId: c.peerId,
+      publicKeyFingerprint: c.publicKeyFingerprint,
+      latencyMs: c.latencyMs,
+      reason: "",
+      registry,
+      decidedAtMs: now()
+    };
+  };
+
   const steer = async (): Promise<SteeringResult> => {
     try {
-      if (opts.publicKeys.length === 0) return (last = fallback("no_registry_key"));
+      if (opts.publicKeys.length === 0) {
+        if (configuredUrl) {
+          const c = await checkConfigured(configuredUrl, null, opts);
+          if (c.ok) return (last = keepConfigured(c));
+        }
+        return (last = fallback("no_registry_key"));
+      }
       const loaded = await loadRegistry({
         urls: opts.registryUrls,
         publicKeys: opts.publicKeys,
@@ -301,11 +397,34 @@ export function createCoordinatorSteering(opts: SteeringOptions): CoordinatorSte
         timeoutMs: opts.timeoutMs,
         minIssuedAtMs: highestIssuedAt
       });
-      if (!loaded.ok) return (last = fallback(`registry_unavailable: ${loaded.errors.join("; ").slice(0, 300)}`));
+      if (!loaded.ok) {
+        const reason = `registry_unavailable: ${loaded.errors.join("; ").slice(0, 300)}`;
+        if (configuredUrl) {
+          const c = await checkConfigured(configuredUrl, null, opts);
+          if (c.ok) return (last = keepConfigured(c));
+          return (last = { ...fallback(reason), configuredProblem: { url: c.url, problem: c.problem } });
+        }
+        return (last = fallback(reason));
+      }
       const reg = loaded.loaded.registry;
       highestIssuedAt = Math.max(highestIssuedAt, reg.issuedAtMs);
       // Suspended members are listed so peers drop them; they are never trusted or picked.
       entries = new Map(reg.coordinators.filter((c) => memberTrusted(c)).map((c) => [c.peerId, c.publicKeyFingerprint]));
+      let configuredProblem: SteeringResult["configuredProblem"];
+      if (configuredUrl) {
+        const c = await checkConfigured(configuredUrl, reg, opts);
+        if (c.ok) {
+          return (last = keepConfigured(c, {
+            issuedAtMs: reg.issuedAtMs,
+            expiresAtMs: reg.expiresAtMs,
+            from: loaded.loaded.from,
+            coordinators: reg.coordinators.length,
+            healthy: reg.coordinators.filter((e) => e.health.status === "healthy").length,
+            verified: 0
+          }));
+        }
+        configuredProblem = { url: c.url, problem: c.problem };
+      }
       const healthy = reg.coordinators.filter((c) => c.health.status === "healthy" && memberSteerable(c, opts.includeOutside === true));
       const pairs: Array<{ entry: RegistryEntry; url: string }> = [];
       for (const entry of healthy) {
@@ -331,7 +450,7 @@ export function createCoordinatorSteering(opts: SteeringOptions): CoordinatorSte
         verified: new Set(measured.map((m) => m.entry.peerId)).size
       };
       const choice = chooseCandidate(measured, current, hysteresis);
-      if (!choice) return (last = fallback(healthy.length === 0 ? "no_healthy_coordinators" : "no_verified_coordinators", summary));
+      if (!choice) return (last = { ...fallback(healthy.length === 0 ? "no_healthy_coordinators" : "no_verified_coordinators", summary), configuredProblem });
       const { pick, kept } = choice;
       current = { peerId: pick.entry.peerId, url: pick.url };
       return (last = {
@@ -344,6 +463,7 @@ export function createCoordinatorSteering(opts: SteeringOptions): CoordinatorSte
         operator: pick.entry.operator,
         kept,
         reason: "",
+        configuredProblem,
         registry: summary,
         decidedAtMs: now()
       });
