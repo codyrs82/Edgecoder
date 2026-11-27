@@ -65,6 +65,15 @@ export function memberSteerable(entry: { status?: RegistryMemberStatus; operator
   return entry.operator.kind === "edgecoder" || includeOutside;
 }
 
+/**
+ * Whether EdgeCoder's ledger service bills network calls for this member (phase 4, B1): a community
+ * member that is `active` (past probation) and has `billingEnabled` set by the owner's passkey
+ * approval. EdgeCoder's own coordinators bill on the shared database, not through the service.
+ */
+export function memberBillable(entry: { status?: RegistryMemberStatus; operator: { kind: OperatorKind }; billingEnabled?: boolean }): boolean {
+  return entry.operator.kind === "community" && memberStatus(entry) === "active" && entry.billingEnabled === true;
+}
+
 export interface RegistryHealth {
   status: RegistryHealthStatus;
   checkedAtMs: number | null;
@@ -95,6 +104,8 @@ export interface RegistryEntry {
   health: RegistryHealth;
   /** Absent in registries from before statuses (read as active). */
   status?: RegistryMemberStatus;
+  /** Set by the owner's passkey approval: the ledger service bills for it once it is active. Absent: off. */
+  billingEnabled?: boolean;
 }
 
 export interface RegistryPayload {
@@ -146,7 +157,8 @@ export const registryEntrySchema = z.object({
     reason: z.string().max(256).optional(),
     consecutiveFailures: z.number().int().nonnegative().optional()
   }),
-  status: z.enum(["probation", "active", "suspended"]).optional()
+  status: z.enum(["probation", "active", "suspended"]).optional(),
+  billingEnabled: z.boolean().optional()
 });
 
 export const registryPayloadSchema = z.object({

@@ -144,6 +144,22 @@ export const coordinatorConfigSchema = z.object({
   // Signed peer auth: true (default) keeps the mesh token required on peer routes; false also
   // admits a request signed by an allowlisted peer coordinator's key without the token.
   MESH_TOKEN_REQUIRED_FOR_PEERS: envBool(true),
+  // Ledger service (src/ledger-service, phase 4). Seeds: LEDGER_SERVICE_ENABLED (default off) serves
+  // /ledger/v1/* to outside coordinators that are active registry members with billing approved.
+  LEDGER_SERVICE_ENABLED: envBool(false),
+  /** The routing coordinator operator's share of the network fee, in bps of the fee (4000 = 40 %). */
+  LEDGER_SERVICE_ROUTING_SHARE_BPS: envInt(4000, { min: 0, max: 10_000 }),
+  LEDGER_SERVICE_MAX_OPEN_RESERVES: envInt(200, { min: 1 }),
+  LEDGER_SERVICE_MAX_OPEN_RESERVE_MSAT: envInt(50_000_000, { min: 1 }),
+  LEDGER_SERVICE_MAX_MSAT_PER_HOUR: envInt(200_000_000, { min: 1 }),
+  /** A model call's cost past its reserve is at most this % of the reserve (with the buyer's own ceiling below it). */
+  LEDGER_SERVICE_OVERFLOW_MAX_PCT: envInt(100, { min: 0, max: 1000 }),
+  /** Refused calls per member in 24 h before its billing is suspended. */
+  LEDGER_SERVICE_MAX_DISPUTES: envInt(5, { min: 1 }),
+  /** An open task older than this is closed and its unused reserve refunded. */
+  LEDGER_SERVICE_RESERVE_TTL_MS: envInt(6 * 3_600_000, { min: 60_000 }),
+  /** Outside coordinators: bill through this ledger service instead of a database of their own. */
+  LEDGER_SERVICE_URL: envUrl(),
   MESH_REQUIRE_AGENT_SIGNED_RESULTS: envFlagWord(),
   MESH_WS_REQUIRE_SIGNED: envFlag({ on: ["true"], ci: true }),
   /** WebSocket ping interval on each mesh socket, for the round trip in GET /network/world; 0 turns pings off. */

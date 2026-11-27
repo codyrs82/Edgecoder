@@ -519,6 +519,7 @@ export function securityRules(authFailuresPer10Min: number): Record<string, Secu
     bot_control_not_owner: once("bot_control_not_owner", "warning", "Bot control attempted by a non-owner", "a portal session tried to control a bot on a machine its account does not own"),
     code_control_not_owner: once("code_control_not_owner", "warning", "Code control attempted by a non-owner", "a portal session tried to drive a coding session on a machine its account does not own"),
     model_control_not_owner: once("model_control_not_owner", "warning", "Model control attempted by a non-owner", "a portal session tried to control a machine its account does not own"),
+    ledger_service_member_suspended: once("ledger_service_member_suspended", "warning", "Outside coordinator billing suspended", "the ledger service stopped billing for an outside coordinator (an anomaly or the dispute limit)"),
     restricted_access_suspended: once("restricted_access_suspended", "warning", "Restricted model access suspended", "an account's security-research access was suspended"),
     failed_auth: { key: "auth_failures", threshold: authFailuresPer10Min, windowMs: M10, severity: "warning", title: "Repeated authentication failures", what: "failed authentications" },
     auth_rate_limit_hit: { key: "auth_rate_limited", threshold: 10, windowMs: M10, severity: "warning", title: "Authentication rate limit hit repeatedly", what: "auth rate-limit hits" },

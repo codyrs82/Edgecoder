@@ -52,6 +52,7 @@ import { requesterCancelled } from "./coordinator/inference-cancel.js";
 import { registerAccountRoutes } from "./coordinator/routes/account.js";
 import { registerWebToolRoutes } from "./coordinator/routes/web-tools.js";
 import "./coordinator/ledger-verify.js";
+import { registerLedgerService } from "./coordinator/ledger-service.js";
 import { meshDrainSockets, registerMeshRoutes } from "./coordinator/routes/mesh.js";
 import { coordinatorDrain, installDrainHooks, installDrainSignals, RECONNECT_DELAY_MS, RECONNECT_JITTER_MS } from "./coordinator/drain.js";
 import { createCoordinatorDrainNoticeFrame, createCoordinatorReconnectFrame } from "../mesh/coordinator-reconnect.js";
@@ -205,6 +206,9 @@ app.addHook("onRequest", async (req, reply) => {
   // #147: the desktop shell checks a leftover :4301 agent holds its admin token (loopback only, see route).
   if (reqPath === LOCAL_ATTEST_PATH && (req as any).method === "POST") return;
   if (reqPath === "/discovery/announcement" || reqPath === "/discovery/peers") return;
+  // Ledger service (phase 4): outside coordinators sign each call with their own key; the route
+  // checks the signature, the registry (active, billing approved) and the local suspension itself.
+  if (reqPath?.startsWith("/ledger/v1/") && (req as any).method === "POST") return;
   // Mirror of the signed coordinator registry (clients verify the signature; no auth needed).
   if (reqPath === "/network/registry") return;
   // Proof of reserves: aggregate totals only, cached and rate limited per IP in the route (routes/reserves.ts).
@@ -272,6 +276,8 @@ registerWebToolRoutes(app);
 registerInferenceRoutes(app);
 registerStatusRoutes(app);
 registerEconomyRoutes(app);
+// POST /ledger/v1/* (seeds, LEDGER_SERVICE_ENABLED) and billing through LEDGER_SERVICE_URL (outside coordinators).
+registerLedgerService(app);
 registerMarketRoutes(app);
 registerPricingRoutes(app);
 registerDirectPaymentRoutes(app);

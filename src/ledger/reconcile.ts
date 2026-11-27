@@ -23,6 +23,10 @@
  *    (row count = report count, credits and msat sums); per task the network-fee rows must match
  *    the accruals' feeMsat. Reservation leases (report `reservation:<id>`, no ledger record) must
  *    have paid agent + fee = the lease's usedMsat.
+ *  - Routing share (ledger service, src/ledger-service): an accrual an outside coordinator routed
+ *    records routingFeeMsat, the part of its feeMsat paid to that coordinator's operator on a
+ *    routing_fee:<task> row; the fee pool's rows for the task are then feeMsat - routingFeeMsat, and
+ *    the routing rows must equal the accruals' routingFeeMsat.
  *  - Task reserves: per task with a reserve (task_reserve / inference_reserve spends), what it paid
  *    out (compute_contribution + network_fee:<task> earns) plus what was refunded to the requester
  *    (task_submit_refund:<task>) must not exceed the reserve. More would be cSats created from
@@ -49,6 +53,8 @@ export interface ReconcileInput {
   earnRows: Array<{ accountId: string; taskId: string | null; rows: number; credits: string | number; msat: string | number | null; msatRows: number }>;
   /** Fee-pool earn rows grouped by reason (network_fee:<taskId>). */
   feeRows: Array<{ taskId: string; rows: number; msat: string | number | null }>;
+  /** Routing-share earn rows grouped by task (routing_fee:<taskId>, ledger service). */
+  routingRows?: Array<{ taskId: string; rows: number; msat: string | number | null }>;
   /** coordinator_earnings_projection. */
   projections: Array<{ accountId: string; totalCredits: string | number }>;
   /** Per task with a reserve: reserved, paid out (work + network fee) and refunded, in cSats. */
@@ -78,6 +84,7 @@ export type DiscrepancyKind =
   | "duplicate_credit_rows"
   | "credit_amount_mismatch"
   | "fee_mismatch"
+  | "routing_fee_mismatch"
   | "reservation_settlement_mismatch"
   | "task_overpaid"
   | "ledger_chain_fork"
@@ -165,6 +172,7 @@ export function reconcileLedger(input: ReconcileInput, opts: { maxDiscrepancies?
   type Expected = { reports: number; credits: number; msat: number; msatKnown: boolean; comparable: boolean };
   const expected = new Map<string, Expected>();
   const expectedFeeByTask = new Map<string, number>();
+  const expectedRoutingByTask = new Map<string, number>();
   /** Tasks whose fee rows can't be compared: a legacy, unrecorded or unpriced accrual among them. */
   const feeIncomparable = new Set<string>();
   const reportSubtasks = new Set<string>();
@@ -245,7 +253,10 @@ export function reconcileLedger(input: ReconcileInput, opts: { maxDiscrepancies?
       tokenPricedSplitOnly++;
     }
     if (Object.keys(problems).length) flag({ kind: "accrual_pricing_mismatch", accountId: rep.accountId, taskId: rep.taskId, reportId: rep.reportId, detail: problems });
-    expectedFeeByTask.set(rep.taskId, (expectedFeeByTask.get(rep.taskId) ?? 0) + split.feeMsat);
+    // Part of the fee may have gone to the routing coordinator (ledger service): the pool holds the rest.
+    const routing = Math.max(0, Math.min(split.feeMsat, num(p.routingFeeMsat) ?? 0));
+    expectedFeeByTask.set(rep.taskId, (expectedFeeByTask.get(rep.taskId) ?? 0) + split.feeMsat - routing);
+    if (routing > 0) expectedRoutingByTask.set(rep.taskId, (expectedRoutingByTask.get(rep.taskId) ?? 0) + routing);
   }
 
   // Ledger records with no report: a credited accrual that never happened, or one made by a
@@ -293,6 +304,17 @@ export function reconcileLedger(input: ReconcileInput, opts: { maxDiscrepancies?
     const row = feeRows.get(taskId);
     const paid = Number(row?.msat ?? 0);
     if (paid !== feeMsat) flag({ kind: "fee_mismatch", accountId: opts.feePoolAccountId, taskId, detail: { rowsMsat: row ? paid : null, accrualsMsat: feeMsat, rows: row?.rows ?? 0 } });
+  }
+
+  // ── Routing-share rows vs accruals ──
+  const routingTasks = new Set<string>([...expectedRoutingByTask.keys(), ...(input.routingRows ?? []).map((r) => r.taskId)]);
+  const routingRows = new Map((input.routingRows ?? []).map((r) => [r.taskId, r]));
+  for (const taskId of routingTasks) {
+    if (feeIncomparable.has(taskId)) continue;
+    const row = routingRows.get(taskId);
+    const paid = Number(row?.msat ?? 0);
+    const expectedMsat = expectedRoutingByTask.get(taskId) ?? 0;
+    if (paid !== expectedMsat) flag({ kind: "routing_fee_mismatch", taskId, detail: { rowsMsat: row ? paid : null, accrualsMsat: expectedMsat, rows: row?.rows ?? 0 } });
   }
 
   // ── Reservation leases: agent + fee = what the lease used ──

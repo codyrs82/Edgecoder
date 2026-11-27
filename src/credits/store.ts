@@ -7,6 +7,21 @@ import { ComputeContributionReport, CreditTransaction } from "../common/types.js
 import { contributionCredits, splitNetworkFee, LoadSnapshot } from "./pricing.js";
 import { pgStore } from "../db/store.js";
 import { splitJobCost, type FeeRounding } from "../economy/job-pricing.js";
+import { LedgerServiceError, type LedgerServiceClient } from "../ledger-service/client.js";
+import type { BuyerProof } from "../ledger-service/protocol.js";
+import type { SignedAgentReceiptClaim } from "../receipts/receipt.js";
+
+/**
+ * Phase 4: an outside coordinator bills through EdgeCoder's ledger service (src/ledger-service)
+ * instead of its own database. Set once at startup (LEDGER_SERVICE_URL); null: local billing.
+ */
+let remote: LedgerServiceClient | null = null;
+export function setRemoteLedger(client: LedgerServiceClient | null): void {
+  remote = client;
+}
+export function remoteLedger(): LedgerServiceClient | null {
+  return remote;
+}
 
 export const creditEngine = new CreditEngine();
 
@@ -95,12 +110,35 @@ export async function accruePricedJob(
 export async function accruePricedJobWithOverflow(
   report: ComputeContributionReport,
   cost: { baseCostMsat: number; feeBps: number; rounding?: FeeRounding },
-  overflow?: { payerAccountId: string; wantMsat: number; reason: string }
+  overflow?: { payerAccountId: string; wantMsat: number; reason: string },
+  /** For the ledger service: the executed subtask, its agent and the agent's signed claim. */
+  execution?: { subtaskId: string; agentId: string; durationMs: number; receipt?: SignedAgentReceiptClaim }
 ): Promise<{ tx: CreditTransaction; costMsat: number; coveredMsat: number; agentMsat: number; feeMsat: number } | null> {
   const base = Math.max(0, Math.round(cost.baseCostMsat));
   const want = overflow && Number.isFinite(overflow.wantMsat) ? Math.max(0, Math.floor(overflow.wantMsat)) : 0;
   if (base + want <= 0) return null;
   const now = Date.now();
+  if (remote) {
+    // Charged on EdgeCoder's ledger: the host's earning, the fee pool and this coordinator's routing
+    // share are written there, from the fee the service computes. Nothing is written here.
+    if (!execution?.receipt) return null; // never settle without the agent's signed claim
+    const r = await remote.settle({
+      taskId: report.taskId,
+      subtaskId: execution.subtaskId,
+      agentId: execution.agentId,
+      hostAccountId: report.agentId,
+      baseCostMsat: base,
+      overflowWantMsat: want,
+      resourceClass: report.resourceClass,
+      durationMs: execution.durationMs,
+      success: report.success,
+      receipt: execution.receipt
+    });
+    if (r.status !== "settled") return null;
+    const agentMsat = Number(r.agentMsat ?? 0);
+    const tx: CreditTransaction = { txId: `ledger-service:${report.reportId}`, accountId: report.agentId, type: "earn", credits: Number(r.credits ?? roundCredits(agentMsat / 1000)), reason: "compute_contribution", relatedTaskId: report.taskId, timestampMs: now, msat: agentMsat };
+    return { tx, costMsat: Number(r.costMsat ?? base), coveredMsat: Number(r.coveredMsat ?? 0), agentMsat, feeMsat: Number(r.feeMsat ?? 0) };
+  }
   let built: { tx: CreditTransaction; feeTx?: CreditTransaction; costMsat: number; agentMsat: number; feeMsat: number } | undefined;
   const build = (coveredMsat: number) => {
     const costMsat = base + coveredMsat;
@@ -340,8 +378,25 @@ export async function reserveTaskCredits(
   row: { taskId: string; coordinatorId: string; accountId: string; kind: "job" | "inference"; perSubtaskReserveMsat: number; createdAtMs: number },
   rawCredits: number,
   reason: string,
-  opts: { idempotencyKey: string }
+  opts: { idempotencyKey: string; overflowCapMsat?: number; buyerProof?: BuyerProof | null; reserveMsat?: number }
 ): Promise<"inserted" | "same" | "conflict" | "memory"> {
+  if (remote) {
+    try {
+      const r = await remote.reserve({
+        taskId: row.taskId,
+        accountId: row.accountId,
+        kind: row.kind,
+        msat: opts.reserveMsat ?? Math.round(roundCredits(rawCredits) * 1000),
+        idempotencyKey: opts.idempotencyKey,
+        perSubtaskReserveMsat: row.perSubtaskReserveMsat,
+        ...(opts.overflowCapMsat !== undefined ? { overflowCapMsat: opts.overflowCapMsat } : {}),
+        buyerProof: opts.buyerProof
+      });
+      return r.status;
+    } catch (err) {
+      throw remoteReserveError(err, opts.idempotencyKey);
+    }
+  }
   if (!pgStore) {
     await spendCredits(row.accountId, rawCredits, reason, row.taskId, opts);
     return "memory";
@@ -355,6 +410,48 @@ export async function reserveTaskCredits(
   if (r.debit === "duplicate") throw new DuplicateDebitError(tx.txId);
   if (r.debit === "insufficient") throw new Error(`insufficient_credits: ${r.balance} < ${credits}`);
   return r.billing === "inserted" ? "inserted" : "same";
+}
+
+/** A ledger-service refusal as the local billing would have thrown it. */
+function remoteReserveError(err: unknown, idempotencyKey: string): unknown {
+  if (!(err instanceof LedgerServiceError)) return err;
+  if (err.error === "insufficient_credits") return new Error("insufficient_credits: remote");
+  if (err.error === "duplicate_reserve") return new DuplicateDebitError(debitTxId(idempotencyKey));
+  if (err.error === "duplicate_task" || err.error === "task_closed") return new DuplicateDebitError(debitTxId(idempotencyKey));
+  return err;
+}
+
+/**
+ * A top-up of a task's reserve (a job split into more subtasks), under its own idempotency key.
+ * Through the ledger service when one is set, else a plain idempotent debit as before.
+ */
+export async function topUpTaskReserve(
+  row: { taskId: string; accountId: string; kind: "job" | "inference"; perSubtaskReserveMsat: number },
+  msat: number,
+  reason: string,
+  idempotencyKey: string
+): Promise<void> {
+  if (remote) {
+    try {
+      await remote.reserve({ taskId: row.taskId, accountId: row.accountId, kind: row.kind, msat: Math.round(msat), idempotencyKey, perSubtaskReserveMsat: row.perSubtaskReserveMsat });
+    } catch (err) {
+      throw remoteReserveError(err, idempotencyKey);
+    }
+    return;
+  }
+  await spendCredits(row.accountId, Math.round(msat) / 1000, reason, row.taskId, { idempotencyKey });
+}
+
+/**
+ * Return what a task set aside and did not use, once (refundTxId). Through the ledger service the
+ * amount is the service's own count (reserve minus what its work was paid), not `unusedMsat`.
+ */
+export async function refundTaskReserve(accountId: string, taskId: string, unusedMsat: number): Promise<void> {
+  if (remote) {
+    await remote.refund(taskId);
+    return;
+  }
+  if (unusedMsat > 0) await grantCreditsIdempotent(accountId, Math.round(unusedMsat) / 1000, `task_submit_refund:${taskId}`, refundTxId(taskId));
 }
 
 /** Deterministic tx id for an idempotent debit (same shape as refundTxId). */

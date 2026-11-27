@@ -50,7 +50,8 @@ export type SecurityEventType =
   | "code_session_mode_change"
   | "restricted_model_call"
   | "restricted_model_refused"
-  | "restricted_access_suspended";
+  | "restricted_access_suspended"
+  | "ledger_service_member_suspended";
 
 export interface SecurityEvent {
   timestamp: string;
@@ -118,7 +119,9 @@ const SEVERITY_MAP: Record<SecurityEventType, SecurityLevel> = {
   // Security research tier (docs/security-research-tier.md): every restricted-model call is recorded.
   restricted_model_call: "INFO",
   restricted_model_refused: "WARN",
-  restricted_access_suspended: "HIGH"
+  restricted_access_suspended: "HIGH",
+  // An outside coordinator's billing through the ledger service was suspended (src/ledger-service).
+  ledger_service_member_suspended: "HIGH"
 };
 
 export class SecurityEventLogger {

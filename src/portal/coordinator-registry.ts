@@ -26,6 +26,7 @@ import { z } from "zod";
 import { fingerprintMatches, publicKeyFingerprint, tryPublicKeyFingerprint } from "../security/key-fingerprint.js";
 import { verifyPayload } from "../mesh/peer.js";
 import { normalizeCoordinatorUrl } from "../discovery/types.js";
+import { registerRegistryBillingRoute, setMemberBilling } from "./coordinator-registry-billing.js";
 import type { FetchResponseLike } from "../discovery/selector.js";
 import { newChallengeNonce, verifyIdentityChallenge, IDENTITY_CHALLENGE_PATH } from "../trust/identity-challenge.js";
 import {
@@ -567,7 +568,9 @@ export class CoordinatorRegistryService {
           admission: m.admission,
           admittedAtMs: m.admittedAtMs ?? m.createdAtMs,
           health,
-          status
+          status,
+          // Phase 4: the ledger service bills for an active community member with this set.
+          ...(m.operatorKind === "community" && m.billingEnabled === true ? { billingEnabled: true } : {})
         };
       });
     return { v: 1, network: this.network, issuedAtMs, expiresAtMs: issuedAtMs + this.ttlMs, coordinators, fallbackUrls: this.fallbackUrls };
@@ -688,6 +691,8 @@ export class CoordinatorRegistryService {
         cleanDayDirty: true,
         identityFailingSinceMs: null,
         suspensionReason: null,
+        // Billing is approved on its own, after probation (setBilling).
+        billingEnabled: false,
         updatedAtMs: now
       };
       const detail: Record<string, unknown> = { from: row.status, confirmedWith: "passkey" };
@@ -711,12 +716,17 @@ export class CoordinatorRegistryService {
     const saved = await this.store.transact(nodeId, (row) => {
       if (!row || row.status === "suspended") return { member: null };
       return {
-        member: { ...row, status: "suspended", suspensionReason: reason, updatedAtMs: now },
+        member: { ...row, status: "suspended", suspensionReason: reason, billingEnabled: false, updatedAtMs: now },
         audit: this.audit(actorUserId, "suspended", nodeId, { from: row.status, reason })
       };
     });
     await this.load();
     return saved ? { ok: true, member: saved } : { ok: false, status: 404, error: "not_found" };
+  }
+
+  /** Ledger-service billing on or off for a community member (coordinator-registry-billing.ts). */
+  setBilling(nodeId: string, actorUserId: string, enabled: boolean): Promise<ServiceResult<{ member: StoredMember }>> {
+    return setMemberBilling(this, nodeId, actorUserId, enabled, this.now());
   }
 
   /**
@@ -821,7 +831,8 @@ function memberView(m: StoredMember) {
     admittedAtMs: m.admittedAtMs,
     probationStartedAtMs: m.probationStartedAtMs,
     cleanDays: m.cleanDays,
-    suspensionReason: m.suspensionReason
+    suspensionReason: m.suspensionReason,
+    billingEnabled: m.billingEnabled === true
   };
 }
 
@@ -836,6 +847,7 @@ function memberView(m: StoredMember) {
  *   POST /admin/network/registry/passkey-options           owner: a passkey challenge for one approval
  *   POST /admin/network/registry/approve                   owner: { nodeId, publicKeyFingerprint?, challengeId, response }
  *   POST /admin/network/registry/suspend                   owner: { nodeId, reason }
+ *   POST /admin/network/registry/billing                   owner: { nodeId, enabled, challengeId?, response? } (passkey to turn on)
  */
 export function registerRegistryRoutes(app: FastifyInstance, { service, requireAdmin, currentUser, passkey }: RegistryRouteDeps): void {
   app.get("/network/registry", async (_req, reply) => {
@@ -923,6 +935,8 @@ export function registerRegistryRoutes(app: FastifyInstance, { service, requireA
     const r = await service.approve(body.data.nodeId, admin.userId, { publicKeyFingerprint: body.data.publicKeyFingerprint });
     return send(reply, r, () => ({ ok: true, member: r.ok ? memberView(r.member) : null }));
   });
+
+  registerRegistryBillingRoute(app, { service, requireAdmin, passkey, view: memberView });
 
   app.post("/admin/network/registry/suspend", async (req, reply) => {
     const admin = await requireAdmin(req, reply);

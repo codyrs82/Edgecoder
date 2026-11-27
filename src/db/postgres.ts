@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { randomUUID } from "node:crypto";
-import { escapeLiteral, type Pool } from "pg";
+import { escapeLiteral, type Pool, type PoolClient } from "pg";
 import { createPgPool } from "./pool.js";
 import { QueueDataCodec } from "./queue-data-codec.js";
 import type { WorkReceipt } from "../receipts/receipt.js";
@@ -106,6 +106,8 @@ export const LEDGER_VERIFY_LOCK_KEY = 1;
 export const TASK_BILLING_SWEEP_LOCK_NAMESPACE = 0x45430007;
 /** Credit purchases: one account's cap check and invoice creation at a time, across coordinators; key = hashtext(account id). */
 export const PURCHASE_LOCK_NAMESPACE = 0x45430010;
+/** Ledger service (src/ledger-service): one outside coordinator's reserve and cap check at a time; key = hashtext(peer id). */
+export const LEDGER_SERVICE_LOCK_NAMESPACE = 0x45430011;
 /** Read-side dedupe bucket for issuance epochs when the caller does not pass its recalc interval. */
 export const DEFAULT_ISSUANCE_BUCKET_MS = 3_600_000;
 /** Event types that sign the stats ledger rather than record work; never a checkpoint target. */
@@ -798,6 +800,40 @@ CREATE TABLE IF NOT EXISTS task_billing (
 );
 CREATE INDEX IF NOT EXISTS idx_task_billing_open ON task_billing (coordinator_id) WHERE settled_at_ms IS NULL;
 
+-- Ledger service (src/ledger-service, phase 4): outside coordinators bill network calls through the
+-- seeds. One row per task an outside coordinator reserved for: who reserved it (peer_id, also the
+-- task_billing coordinator_id), how much in all (reserve plus top-ups, msat), the most its cost may
+-- reach with the overflow past the reserve, and when it was closed (refunded and settled).
+CREATE TABLE IF NOT EXISTS ledger_service_tasks (
+  task_id TEXT PRIMARY KEY,
+  peer_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  reserved_msat BIGINT NOT NULL DEFAULT 0,
+  overflow_cap_msat BIGINT NOT NULL DEFAULT 0,
+  created_at_ms BIGINT NOT NULL,
+  closed_at_ms BIGINT
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_service_tasks_open ON ledger_service_tasks (peer_id) WHERE closed_at_ms IS NULL;
+CREATE INDEX IF NOT EXISTS idx_ledger_service_tasks_recent ON ledger_service_tasks (peer_id, created_at_ms);
+-- Per outside coordinator: billing suspended here (an anomaly, or the operator's admin call) and the
+-- refused calls counted toward the dispute limit. Not money: kept across a ledger network reset.
+CREATE TABLE IF NOT EXISTS ledger_service_members (
+  peer_id TEXT PRIMARY KEY,
+  suspended_at_ms BIGINT,
+  suspended_reason TEXT,
+  disputes INT NOT NULL DEFAULT 0,
+  disputes_since_ms BIGINT,
+  updated_at_ms BIGINT NOT NULL
+);
+-- Single-use nonces of ledger service requests and of the portal signatures they carry, shared by
+-- every seed on this database.
+CREATE TABLE IF NOT EXISTS ledger_service_nonces (
+  nonce_key TEXT PRIMARY KEY,
+  expires_at_ms BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_service_nonces_expiry ON ledger_service_nonces (expires_at_ms);
+
 -- The Bitcoin network this database's ledger belongs to (src/db/ledger-network.ts). One row, written
 -- by the first coordinator start that checks it (assertLedgerNetwork); a coordinator configured for
 -- another network refuses to start. Changed only by scripts/ledger-reset-network.ts, which wipes
@@ -869,6 +905,76 @@ export const INVALIDATE_SERVER_SEED_WALLETS_SQL = `UPDATE wallet_accounts
   SET legacy_payout_address = payout_address, payout_address = NULL, encrypted_secret_ref = NULL, payout_invalidated_at_ms = $1
   WHERE encrypted_secret_ref LIKE 'seed-sha256:%'
      OR (wallet_type = 'lightning' AND payout_address ~* '^(bc1|tb1|bcrt1)[a-z0-9]+$')`;
+
+export type ReserveTaskBillingResult = { billing: "inserted" | "same" | "conflict" | "none"; debit: "applied" | "insufficient" | "duplicate" | "skipped"; balance: number };
+
+/** Caps on one outside coordinator's reserves through the ledger service (src/ledger-service). */
+export interface LedgerServiceCaps {
+  /** Open (not yet closed) reserves at once. */
+  maxOpenReserves: number;
+  /** msat held in open reserves at once. */
+  maxOpenReserveMsat: number;
+  /** msat reserved over the last hour. */
+  maxReserveMsatPerHour: number;
+}
+
+export type LedgerServiceReserveOutcome =
+  | { status: "applied"; billing: "inserted" | "same"; balance: number }
+  | { status: "conflict" | "duplicate" | "closed" }
+  | { status: "insufficient"; balance: number }
+  | { status: "suspended"; reason: string }
+  | { status: "over_cap"; cap: keyof LedgerServiceCaps; limit: number; value: number };
+
+export type LedgerServiceSettleOutcome =
+  | { status: "settled"; coveredMsat: number; reservedMsat: number; paidBeforeMsat: number }
+  | { status: "duplicate" }
+  | { status: "refused"; error: "task_not_found" | "not_your_task" | "task_closed" | "over_reserve" | "over_overflow_cap" | "nothing_to_pay"; detail?: Record<string, unknown> };
+
+/** Thrown inside a settle transaction to roll it back with a reason (persistContributionWithOverflow precheck). */
+export class LedgerSettleRefusal extends Error {
+  constructor(readonly error: Extract<LedgerServiceSettleOutcome, { status: "refused" }>["error"], readonly detail?: Record<string, unknown>) {
+    super(`ledger_settle_refused: ${error}`);
+    this.name = "LedgerSettleRefusal";
+  }
+}
+
+/**
+ * Per task (one or many): reserved (the billing row's own account and kind), paid out for its work
+ * (compute_contribution, network_fee:<task> and routing_fee:<task> earns) and refunded (its one
+ * refund row). Shared by taskLedgerTotals and the ledger service's settle and refund.
+ */
+async function taskTotalsOn(
+  q: { query: (sql: string, args?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> },
+  tasks: Array<{ taskId: string; refundTxId: string; accountId: string; kind: string }>
+): Promise<Map<string, { reservedMsat: number; paidMsat: number; refundedMsat: number }>> {
+  const out = new Map<string, { reservedMsat: number; paidMsat: number; refundedMsat: number }>();
+  if (tasks.length === 0) return out;
+  for (const t of tasks) out.set(t.taskId, { reservedMsat: 0, paidMsat: 0, refundedMsat: 0 });
+  const r = await q.query(
+    `WITH t(task_id, account_id, reserve_reason) AS (SELECT * FROM unnest($1::text[], $2::text[], $3::text[]))
+     SELECT t.task_id,
+            COALESCE(SUM(c.credits) FILTER (WHERE c.tx_type = 'spend' AND c.account_id = t.account_id AND c.reason = t.reserve_reason), 0)::text AS reserved,
+            COALESCE(SUM(c.credits) FILTER (WHERE c.tx_type = 'earn' AND (c.reason = 'compute_contribution' OR c.reason = 'network_fee:' || t.task_id OR c.reason = 'routing_fee:' || t.task_id)), 0)::text AS paid
+       FROM t JOIN credit_transactions c ON c.related_task_id = t.task_id GROUP BY t.task_id`,
+    [tasks.map((t) => t.taskId), tasks.map((t) => t.accountId), tasks.map((t) => reserveReasonForKind(t.kind))]
+  );
+  for (const row of r.rows) {
+    const e = out.get(String(row.task_id));
+    if (e) {
+      e.reservedMsat = Math.round(Number(row.reserved) * 1000);
+      e.paidMsat = Math.round(Number(row.paid) * 1000);
+    }
+  }
+  const refunds = await q.query(`SELECT tx_id, account_id, credits::text AS credits FROM credit_transactions WHERE tx_id = ANY($1::text[]) AND tx_type = 'earn'`, [tasks.map((t) => t.refundTxId)]);
+  const byTx = new Map(tasks.map((t) => [t.refundTxId, t]));
+  for (const row of refunds.rows) {
+    const t = byTx.get(String(row.tx_id));
+    if (!t || t.accountId !== row.account_id) continue;
+    const e = out.get(t.taskId);
+    if (e) e.refundedMsat += Math.round(Number(row.credits) * 1000);
+  }
+  return out;
+}
 
 /** Balance and "enough to cover $2" computed in SQL on NUMERIC, so no float comparison (#108). */
 const BALANCE_CHECK_SQL = `SELECT COALESCE(SUM(CASE WHEN tx_type = 'spend' THEN -credits ELSE credits END), 0) AS balance,
@@ -1525,7 +1631,16 @@ export class PostgresStore {
   async reserveTaskBillingDebit(
     row: { taskId: string; coordinatorId: string; accountId: string; kind: "job" | "inference"; perSubtaskReserveMsat: number; createdAtMs: number },
     tx: CreditTransaction
-  ): Promise<{ billing: "inserted" | "same" | "conflict" | "none"; debit: "applied" | "insufficient" | "duplicate" | "skipped"; balance: number }> {
+  ): Promise<ReserveTaskBillingResult> {
+    const sql = this.reserveTaskBillingDebitSql(row, tx);
+    return this.reserveTaskBillingDebitResult((await this.pool.query(sql)) as unknown as Array<{ rows: Array<Record<string, unknown>> }>, tx);
+  }
+
+  /** The one multi-statement batch of reserveTaskBillingDebit (also run inside the ledger service's own transaction). */
+  private reserveTaskBillingDebitSql(
+    row: { taskId: string; coordinatorId: string; accountId: string; kind: "job" | "inference"; perSubtaskReserveMsat: number; createdAtMs: number },
+    tx: CreditTransaction
+  ): string {
     if (tx.type !== "spend") throw new Error("reserveTaskBillingDebit requires a spend transaction");
     if (!Number.isFinite(tx.credits) || tx.credits <= 0) throw new Error("invalid_credit_amount");
     if (tx.accountId !== row.accountId || tx.relatedTaskId !== row.taskId) throw new Error("reserve_row_mismatch");
@@ -1566,7 +1681,10 @@ debit AS (
 SELECT seen.dup, bal.balance, bal.enough, st.fresh, st.same, st.go,
        EXISTS (SELECT 1 FROM ins) AS inserted, EXISTS (SELECT 1 FROM debit) AS applied
   FROM seen, bal, st;`;
-    const results = (await this.pool.query(sql)) as unknown as Array<{ rows: Array<Record<string, unknown>> }>;
+    return sql;
+  }
+
+  private reserveTaskBillingDebitResult(results: Array<{ rows: Array<Record<string, unknown>> }>, tx: CreditTransaction): ReserveTaskBillingResult {
     const r = results[results.length - 1]?.rows[0];
     if (!r) throw new Error("reserve_no_result");
     const balance = Number(r.balance ?? 0);
@@ -1728,6 +1846,11 @@ SELECT seen.dup, bal.balance, bal.enough, st.fresh, st.same, st.go,
    *   reserve's own reason and task, so ledger checks count it as part of the task's reserve;
    * - then the earn rows `build` returns for the covered amount.
    * Returns whether the report was new and how much of `wantMsat` the balance covered.
+   *
+   * The ledger service (src/ledger-service) adds `guard`: after the report row, under the lock of
+   * `guard.lockAccountId` (the buyer), `guard.check` runs inside the same transaction and may throw
+   * (LedgerSettleRefusal) to roll everything back; `build` may return extra earn rows (the routing
+   * coordinator's share of the network fee).
    */
   async persistContributionWithOverflow(
     input: {
@@ -1737,8 +1860,9 @@ SELECT seen.dup, bal.balance, bal.enough, st.fresh, st.same, st.go,
       reliabilityScore: number;
       weightedContribution: number;
     },
-    build: (coveredMsat: number) => { tx: CreditTransaction; feeTx?: CreditTransaction },
-    overflow?: { accountId: string; wantMsat: number; txId: string; reason: string; relatedTaskId: string; timestampMs: number }
+    build: (coveredMsat: number) => { tx: CreditTransaction; feeTx?: CreditTransaction; extraTxs?: CreditTransaction[] },
+    overflow?: { accountId: string; wantMsat: number; txId: string; reason: string; relatedTaskId: string; timestampMs: number },
+    guard?: { lockAccountId: string; check: (q: PoolClient) => Promise<void> }
   ): Promise<{ inserted: boolean; coveredMsat: number }> {
     const client = await this.pool.connect();
     try {
@@ -1768,6 +1892,10 @@ SELECT seen.dup, bal.balance, bal.enough, st.fresh, st.same, st.go,
         await client.query("ROLLBACK");
         return { inserted: false, coveredMsat: 0 };
       }
+      if (guard) {
+        await client.query("SELECT pg_advisory_xact_lock($1, hashtext($2))", [CREDIT_LOCK_NAMESPACE, guard.lockAccountId]);
+        await guard.check(client);
+      }
       let coveredMsat = 0;
       const want = overflow && Number.isFinite(overflow.wantMsat) ? Math.max(0, Math.floor(overflow.wantMsat)) : 0;
       if (overflow && want > 0) {
@@ -1787,13 +1915,13 @@ SELECT seen.dup, bal.balance, bal.enough, st.fresh, st.same, st.go,
           );
         }
       }
-      const { tx, feeTx } = build(coveredMsat);
-      if (overflow && !(tx.credits > 0) && !(feeTx && feeTx.credits > 0)) {
+      const { tx, feeTx, extraTxs } = build(coveredMsat);
+      if (overflow && !(tx.credits > 0) && !(feeTx && feeTx.credits > 0) && !(extraTxs ?? []).some((t) => t.credits > 0)) {
         // Nothing to pay after all (nothing left of the reserve and an empty balance): no report either.
         await client.query("ROLLBACK");
         return { inserted: false, coveredMsat: 0 };
       }
-      for (const row of [tx, ...(feeTx ? [feeTx] : [])]) {
+      for (const row of [tx, ...(feeTx ? [feeTx] : []), ...(extraTxs ?? [])]) {
         if (row.credits <= 0) continue;
         await client.query(
           `INSERT INTO credit_transactions (
@@ -3342,6 +3470,12 @@ SELECT seen.dup, bal.balance, bal.enough, st.fresh, st.same, st.go,
           GROUP BY reason`,
         [feePoolAccountId]
       );
+      const routing = await client.query(
+        `SELECT related_task_id AS task_id, COUNT(*)::int AS rows, SUM(msat)::text AS msat
+           FROM credit_transactions
+          WHERE tx_type = 'earn' AND reason LIKE 'routing\_fee:%' AND related_task_id IS NOT NULL
+          GROUP BY related_task_id`
+      );
       const projections = await client.query(`SELECT account_id, total_credits FROM coordinator_earnings_projection`);
       // Per task with a reserve: reserved vs paid out (work + network fee) vs refunded.
       const taskReserves = await client.query(
@@ -3350,7 +3484,7 @@ SELECT seen.dup, bal.balance, bal.enough, st.fresh, st.same, st.go,
             WHERE tx_type = 'spend' AND reason IN ('task_reserve', 'inference_reserve') AND related_task_id IS NOT NULL GROUP BY 1),
          work AS (
            SELECT COALESCE(related_task_id, substring(reason FROM 13)) AS task_id, SUM(credits) AS paid FROM credit_transactions
-            WHERE tx_type = 'earn' AND (reason = 'compute_contribution' OR reason LIKE 'network\\_fee:%') GROUP BY 1),
+            WHERE tx_type = 'earn' AND (reason = 'compute_contribution' OR reason LIKE 'network\\_fee:%' OR reason LIKE 'routing\\_fee:%') GROUP BY 1),
          refund AS (
            SELECT substring(reason FROM 20) AS task_id, SUM(credits) AS refunded FROM credit_transactions
             WHERE tx_type = 'earn' AND reason LIKE 'task\\_submit\\_refund:%' GROUP BY 1)
@@ -3388,6 +3522,7 @@ SELECT seen.dup, bal.balance, bal.enough, st.fresh, st.same, st.go,
         })),
         earnRows: earn.rows.map((r) => ({ accountId: r.account_id, taskId: r.related_task_id ?? null, rows: r.rows, credits: r.credits, msat: r.msat ?? null, msatRows: r.msat_rows })),
         feeRows: fees.rows.map((r) => ({ taskId: r.task_id, rows: r.rows, msat: r.msat ?? null })),
+        routingRows: routing.rows.map((r) => ({ taskId: r.task_id, rows: r.rows, msat: r.msat ?? null })),
         taskReserves: taskReserves.rows.map((r) => ({ taskId: r.task_id, reserved: r.reserved, paid: r.paid, refunded: r.refunded })),
         projections: projections.rows.map((r) => ({ accountId: r.account_id, totalCredits: r.total_credits })),
         reservations: reservations.rows.flatMap((r) => {
@@ -3811,33 +3946,286 @@ SELECT seen.dup, bal.balance, bal.enough, st.fresh, st.same, st.go,
    * refunded) here.
    */
   async taskLedgerTotals(tasks: Array<{ taskId: string; refundTxId: string; accountId: string; kind: string }>): Promise<Map<string, { reservedMsat: number; paidMsat: number; refundedMsat: number }>> {
-    const out = new Map<string, { reservedMsat: number; paidMsat: number; refundedMsat: number }>();
-    if (tasks.length === 0) return out;
-    for (const t of tasks) out.set(t.taskId, { reservedMsat: 0, paidMsat: 0, refundedMsat: 0 });
-    const r = await this.pool.query(
-      `WITH t(task_id, account_id, reserve_reason) AS (SELECT * FROM unnest($1::text[], $2::text[], $3::text[]))
-       SELECT t.task_id,
-              COALESCE(SUM(c.credits) FILTER (WHERE c.tx_type = 'spend' AND c.account_id = t.account_id AND c.reason = t.reserve_reason), 0)::text AS reserved,
-              COALESCE(SUM(c.credits) FILTER (WHERE c.tx_type = 'earn' AND (c.reason = 'compute_contribution' OR c.reason = 'network_fee:' || t.task_id)), 0)::text AS paid
-         FROM t JOIN credit_transactions c ON c.related_task_id = t.task_id GROUP BY t.task_id`,
-      [tasks.map((t) => t.taskId), tasks.map((t) => t.accountId), tasks.map((t) => reserveReasonForKind(t.kind))]
+    return taskTotalsOn(this.pool, tasks);
+  }
+
+  // ── Ledger service (src/ledger-service, phase 4) ──
+  // Outside coordinators bill network calls through the seeds: the same rows, locks and dedupe as a
+  // seed's own billing (reserveTaskBillingDebit, persistContributionWithOverflow, the refund's
+  // deterministic tx id), plus per-coordinator caps and a ledger_service_tasks row per task.
+
+  /** One outside coordinator's ledger-service state here (null: never seen). */
+  async ledgerServiceMember(peerId: string): Promise<{ peerId: string; suspendedAtMs: number | null; suspendedReason: string | null; disputes: number; disputesSinceMs: number | null } | null> {
+    const r = await this.pool.query(`SELECT * FROM ledger_service_members WHERE peer_id = $1`, [peerId]);
+    const row = r.rows[0];
+    if (!row) return null;
+    return {
+      peerId,
+      suspendedAtMs: row.suspended_at_ms === null ? null : Number(row.suspended_at_ms),
+      suspendedReason: row.suspended_reason ?? null,
+      disputes: Number(row.disputes ?? 0),
+      disputesSinceMs: row.disputes_since_ms === null ? null : Number(row.disputes_since_ms)
+    };
+  }
+
+  /** Stop billing for a coordinator here (anomaly or admin). Keeps the first reason while suspended. */
+  async ledgerServiceSuspend(peerId: string, reason: string, nowMs: number): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO ledger_service_members (peer_id, suspended_at_ms, suspended_reason, updated_at_ms) VALUES ($1, $2, $3, $2)
+       ON CONFLICT (peer_id) DO UPDATE SET
+         suspended_reason = CASE WHEN ledger_service_members.suspended_at_ms IS NULL THEN EXCLUDED.suspended_reason ELSE ledger_service_members.suspended_reason END,
+         suspended_at_ms = COALESCE(ledger_service_members.suspended_at_ms, EXCLUDED.suspended_at_ms),
+         updated_at_ms = EXCLUDED.updated_at_ms`,
+      [peerId, nowMs, reason.slice(0, 500)]
     );
-    for (const row of r.rows) {
-      const e = out.get(row.task_id);
-      if (e) {
-        e.reservedMsat = Math.round(Number(row.reserved) * 1000);
-        e.paidMsat = Math.round(Number(row.paid) * 1000);
+  }
+
+  /** Lift a suspension here and clear the dispute count (admin only). */
+  async ledgerServiceReinstate(peerId: string, nowMs: number): Promise<void> {
+    await this.pool.query(
+      `UPDATE ledger_service_members SET suspended_at_ms = NULL, suspended_reason = NULL, disputes = 0, disputes_since_ms = NULL, updated_at_ms = $2 WHERE peer_id = $1`,
+      [peerId, nowMs]
+    );
+  }
+
+  /** Count one refused call toward the dispute limit (a window of `windowMs`); returns the count in the window. */
+  async ledgerServiceNoteDispute(peerId: string, nowMs: number, windowMs: number): Promise<number> {
+    const r = await this.pool.query(
+      `INSERT INTO ledger_service_members (peer_id, disputes, disputes_since_ms, updated_at_ms) VALUES ($1, 1, $2, $2)
+       ON CONFLICT (peer_id) DO UPDATE SET
+         disputes = CASE WHEN ledger_service_members.disputes_since_ms IS NULL OR ledger_service_members.disputes_since_ms < $2 - $3 THEN 1 ELSE ledger_service_members.disputes + 1 END,
+         disputes_since_ms = CASE WHEN ledger_service_members.disputes_since_ms IS NULL OR ledger_service_members.disputes_since_ms < $2 - $3 THEN $2 ELSE ledger_service_members.disputes_since_ms END,
+         updated_at_ms = $2
+       RETURNING disputes`,
+      [peerId, nowMs, windowMs]
+    );
+    return Number(r.rows[0]?.disputes ?? 1);
+  }
+
+  /** True the first time `key` is claimed (until it expires); every seed on this database shares the set. */
+  async ledgerServiceClaimNonce(key: string, expiresAtMs: number): Promise<boolean> {
+    const r = await this.pool.query(`INSERT INTO ledger_service_nonces (nonce_key, expires_at_ms) VALUES ($1, $2) ON CONFLICT (nonce_key) DO NOTHING RETURNING nonce_key`, [key, expiresAtMs]);
+    return (r.rowCount ?? 0) > 0;
+  }
+
+  async ledgerServicePruneNonces(nowMs: number): Promise<number> {
+    const r = await this.pool.query(`DELETE FROM ledger_service_nonces WHERE expires_at_ms < $1`, [nowMs]);
+    return r.rowCount ?? 0;
+  }
+
+  /** What a coordinator holds open and reserved over the last hour (msat). */
+  async ledgerServiceUsage(peerId: string, nowMs: number, q: Pick<Pool, "query"> | PoolClient = this.pool): Promise<{ openReserves: number; openReserveMsat: number; lastHourMsat: number }> {
+    const r = await q.query(
+      `SELECT COUNT(*) FILTER (WHERE closed_at_ms IS NULL)::int AS open_count,
+              COALESCE(SUM(reserved_msat) FILTER (WHERE closed_at_ms IS NULL), 0)::text AS open_msat,
+              COALESCE(SUM(reserved_msat) FILTER (WHERE created_at_ms > $2), 0)::text AS hour_msat
+         FROM ledger_service_tasks WHERE peer_id = $1 AND (closed_at_ms IS NULL OR created_at_ms > $2)`,
+      [peerId, nowMs - 3_600_000]
+    );
+    const row = r.rows[0] ?? {};
+    return { openReserves: Number(row.open_count ?? 0), openReserveMsat: Number(row.open_msat ?? 0), lastHourMsat: Number(row.hour_msat ?? 0) };
+  }
+
+  /** A task's ledger-service row (null: not reserved through the service). */
+  async ledgerServiceTask(taskId: string): Promise<{ taskId: string; peerId: string; accountId: string; kind: "job" | "inference"; reservedMsat: number; overflowCapMsat: number; createdAtMs: number; closedAtMs: number | null } | null> {
+    const r = await this.pool.query(`SELECT * FROM ledger_service_tasks WHERE task_id = $1`, [taskId]);
+    const row = r.rows[0];
+    if (!row) return null;
+    return {
+      taskId,
+      peerId: row.peer_id,
+      accountId: row.account_id,
+      kind: row.kind === "job" ? "job" : "inference",
+      reservedMsat: Number(row.reserved_msat),
+      overflowCapMsat: Number(row.overflow_cap_msat),
+      createdAtMs: Number(row.created_at_ms),
+      closedAtMs: row.closed_at_ms === null ? null : Number(row.closed_at_ms)
+    };
+  }
+
+  /** Open ledger-service tasks reserved before `createdBeforeMs` (the expiry sweep). */
+  async ledgerServiceExpiredTasks(createdBeforeMs: number, limit = 200): Promise<Array<{ taskId: string; peerId: string }>> {
+    const r = await this.pool.query(
+      `SELECT task_id, peer_id FROM ledger_service_tasks WHERE closed_at_ms IS NULL AND created_at_ms < $1 ORDER BY created_at_ms LIMIT $2`,
+      [createdBeforeMs, limit]
+    );
+    return r.rows.map((row) => ({ taskId: row.task_id, peerId: row.peer_id }));
+  }
+
+  /**
+   * An outside coordinator's reserve (or top-up of its own open task): under the coordinator's lock
+   * the caps are checked, then reserveTaskBillingDebit's batch runs in the same transaction (the
+   * buyer's credit lock, balance check, billing row and debit under the reserve's idempotency key),
+   * and the ledger_service_tasks row records the amount. Anything refused writes nothing.
+   */
+  async ledgerServiceReserve(input: {
+    peerId: string;
+    row: { taskId: string; accountId: string; kind: "job" | "inference"; perSubtaskReserveMsat: number; createdAtMs: number };
+    tx: CreditTransaction;
+    reserveMsat: number;
+    overflowCapMsat: number;
+    caps: LedgerServiceCaps;
+    nowMs: number;
+  }): Promise<LedgerServiceReserveOutcome> {
+    const { peerId, row, tx } = input;
+    const reserveMsat = Math.round(input.reserveMsat);
+    if (!(reserveMsat > 0)) throw new Error("invalid_reserve_amount");
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock($1, hashtext($2))", [LEDGER_SERVICE_LOCK_NAMESPACE, peerId]);
+      const member = await client.query(`SELECT suspended_at_ms, suspended_reason FROM ledger_service_members WHERE peer_id = $1`, [peerId]);
+      if (member.rows[0] && member.rows[0].suspended_at_ms !== null) {
+        await client.query("ROLLBACK");
+        return { status: "suspended", reason: String(member.rows[0].suspended_reason ?? "suspended") };
       }
+      const existing = await client.query(`SELECT peer_id, account_id, kind, closed_at_ms FROM ledger_service_tasks WHERE task_id = $1 FOR UPDATE`, [row.taskId]);
+      const ex = existing.rows[0];
+      if (ex && (ex.peer_id !== peerId || ex.account_id !== row.accountId || ex.kind !== row.kind)) {
+        await client.query("ROLLBACK");
+        return { status: "conflict" };
+      }
+      if (ex && ex.closed_at_ms !== null) {
+        await client.query("ROLLBACK");
+        return { status: "closed" };
+      }
+      const usage = await this.ledgerServiceUsage(peerId, input.nowMs, client);
+      const checks: Array<[keyof LedgerServiceCaps, number, number]> = [
+        ["maxOpenReserves", input.caps.maxOpenReserves, usage.openReserves + (ex ? 0 : 1)],
+        ["maxOpenReserveMsat", input.caps.maxOpenReserveMsat, usage.openReserveMsat + reserveMsat],
+        ["maxReserveMsatPerHour", input.caps.maxReserveMsatPerHour, usage.lastHourMsat + reserveMsat]
+      ];
+      for (const [cap, limit, value] of checks) {
+        if (value > limit) {
+          await client.query("ROLLBACK");
+          return { status: "over_cap", cap, limit, value };
+        }
+      }
+      const results = (await client.query(this.reserveTaskBillingDebitSql({ ...row, coordinatorId: peerId }, tx))) as unknown as Array<{ rows: Array<Record<string, unknown>> }>;
+      const r = this.reserveTaskBillingDebitResult(results, tx);
+      if (r.billing === "conflict") {
+        await client.query("ROLLBACK");
+        return { status: "conflict" };
+      }
+      if (r.debit !== "applied") {
+        await client.query("ROLLBACK");
+        return r.debit === "duplicate" ? { status: "duplicate" } : { status: "insufficient", balance: r.balance };
+      }
+      await client.query(
+        `INSERT INTO ledger_service_tasks (task_id, peer_id, account_id, kind, reserved_msat, overflow_cap_msat, created_at_ms)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (task_id) DO UPDATE SET reserved_msat = ledger_service_tasks.reserved_msat + EXCLUDED.reserved_msat,
+           overflow_cap_msat = GREATEST(ledger_service_tasks.overflow_cap_msat, EXCLUDED.overflow_cap_msat)`,
+        [row.taskId, peerId, row.accountId, row.kind, reserveMsat, Math.max(0, Math.round(input.overflowCapMsat)), input.nowMs]
+      );
+      await client.query("COMMIT");
+      return { status: "applied", billing: r.billing === "inserted" ? "inserted" : "same", balance: r.balance };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
     }
-    const refunds = await this.pool.query(`SELECT tx_id, account_id, credits::text AS credits FROM credit_transactions WHERE tx_id = ANY($1::text[]) AND tx_type = 'earn'`, [tasks.map((t) => t.refundTxId)]);
-    const byTx = new Map(tasks.map((t) => [t.refundTxId, t]));
-    for (const row of refunds.rows) {
-      const t = byTx.get(row.tx_id);
-      if (!t || t.accountId !== row.account_id) continue;
-      const e = out.get(t.taskId);
-      if (e) e.refundedMsat += Math.round(Number(row.credits) * 1000);
+  }
+
+  /**
+   * An outside coordinator's charge for one execution of its task (persistContributionWithOverflow
+   * with a guard): the report row first (an id already recorded charges nothing: "duplicate"), then
+   * under the buyer's credit lock the task must be this coordinator's and open, the base cost must
+   * fit what its reserve still holds and the overflow what the task's cost cap still allows, all
+   * counted from the ledger. Then the overflow spend and the earn rows `build` returns.
+   */
+  async ledgerServiceSettle(input: {
+    peerId: string;
+    taskId: string;
+    report: ComputeContributionReport;
+    sourceAgentId: string;
+    baseCostMsat: number;
+    overflowWantMsat: number;
+    overflowTxId: string;
+    refundTxId: string;
+    build: (coveredMsat: number) => { tx: CreditTransaction; feeTx?: CreditTransaction; extraTxs?: CreditTransaction[] };
+  }): Promise<LedgerServiceSettleOutcome> {
+    const task = await this.ledgerServiceTask(input.taskId);
+    if (!task) return { status: "refused", error: "task_not_found" };
+    if (task.peerId !== input.peerId) return { status: "refused", error: "not_your_task" };
+    const base = Math.max(0, Math.round(input.baseCostMsat));
+    const want = Math.max(0, Math.floor(input.overflowWantMsat));
+    let seen = { reservedMsat: 0, paidBeforeMsat: 0 };
+    try {
+      const r = await this.persistContributionWithOverflow(
+        { report: input.report, accountId: input.report.agentId, sourceAgentId: input.sourceAgentId, reliabilityScore: input.report.success ? 1 : 0.75, weightedContribution: Number((input.report.gpuSeconds + input.report.cpuSeconds).toFixed(6)) },
+        input.build,
+        want > 0 ? { accountId: task.accountId, wantMsat: want, txId: input.overflowTxId, reason: reserveReasonForKind(task.kind), relatedTaskId: input.taskId, timestampMs: input.report.timestampMs } : undefined,
+        {
+          lockAccountId: task.accountId,
+          check: async (q) => {
+            const cur = await q.query(
+              `SELECT ls.closed_at_ms, ls.overflow_cap_msat, tb.settled_at_ms, tb.coordinator_id FROM ledger_service_tasks ls JOIN task_billing tb ON tb.task_id = ls.task_id WHERE ls.task_id = $1`,
+              [input.taskId]
+            );
+            const c = cur.rows[0];
+            if (!c || c.coordinator_id !== input.peerId) throw new LedgerSettleRefusal("not_your_task");
+            if (c.closed_at_ms !== null || c.settled_at_ms !== null) throw new LedgerSettleRefusal("task_closed");
+            const totals = (await taskTotalsOn(q, [{ taskId: input.taskId, refundTxId: input.refundTxId, accountId: task.accountId, kind: task.kind }])).get(input.taskId)!;
+            seen = { reservedMsat: totals.reservedMsat, paidBeforeMsat: totals.paidMsat };
+            const left = totals.reservedMsat - totals.paidMsat - totals.refundedMsat;
+            // 1 msat of slack: credits are stored to 6 places (a whole msat), costs are rounded per row.
+            if (base > left + 1) throw new LedgerSettleRefusal("over_reserve", { baseCostMsat: base, leftMsat: left });
+            if (want > 0) {
+              const capLeft = task.kind === "inference" ? Math.max(0, Number(c.overflow_cap_msat) - totals.paidMsat - base) : 0;
+              if (want > capLeft + 1) throw new LedgerSettleRefusal("over_overflow_cap", { overflowWantMsat: want, capLeftMsat: capLeft });
+            }
+          }
+        }
+      );
+      if (!r.inserted) return { status: "duplicate" };
+      return { status: "settled", coveredMsat: r.coveredMsat, ...seen };
+    } catch (err) {
+      if (err instanceof LedgerSettleRefusal) return { status: "refused", error: err.error, ...(err.detail ? { detail: err.detail } : {}) };
+      throw err;
     }
-    return out;
+  }
+
+  /**
+   * Close an outside coordinator's task: under the buyer's credit lock, what its reserve holds and
+   * was not paid out (or refunded) goes back to the buyer as the one refund row (deterministic tx
+   * id), and the billing rows are marked settled. Idempotent: a closed task refunds nothing more.
+   */
+  async ledgerServiceRefund(input: { peerId: string; taskId: string; refundTxId: string; nowMs: number }): Promise<
+    { status: "refunded" | "already_closed"; refundMsat: number; reservedMsat: number; paidMsat: number } | { status: "task_not_found" | "not_your_task" }
+  > {
+    const task = await this.ledgerServiceTask(input.taskId);
+    if (!task) return { status: "task_not_found" };
+    if (task.peerId !== input.peerId) return { status: "not_your_task" };
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock($1, hashtext($2))", [CREDIT_LOCK_NAMESPACE, task.accountId]);
+      const cur = await client.query(`SELECT closed_at_ms FROM ledger_service_tasks WHERE task_id = $1 FOR UPDATE`, [input.taskId]);
+      const totals = (await taskTotalsOn(client, [{ taskId: input.taskId, refundTxId: input.refundTxId, accountId: task.accountId, kind: task.kind }])).get(input.taskId)!;
+      if (cur.rows[0]?.closed_at_ms !== null && cur.rows[0]?.closed_at_ms !== undefined) {
+        await client.query("ROLLBACK");
+        return { status: "already_closed", refundMsat: totals.refundedMsat, reservedMsat: totals.reservedMsat, paidMsat: totals.paidMsat };
+      }
+      const unused = Math.max(0, totals.reservedMsat - totals.paidMsat - totals.refundedMsat);
+      if (unused > 0) {
+        await client.query(
+          `INSERT INTO credit_transactions (tx_id, account_id, tx_type, credits, reason, related_task_id, timestamp_ms)
+           VALUES ($1, $2, 'earn', $3, $4, NULL, $5) ON CONFLICT (tx_id) DO NOTHING`,
+          [input.refundTxId, task.accountId, (unused / 1000).toFixed(3), `task_submit_refund:${input.taskId}`, input.nowMs]
+        );
+      }
+      await client.query(`UPDATE task_billing SET settled_at_ms = $2 WHERE task_id = $1 AND settled_at_ms IS NULL AND coordinator_id = $3`, [input.taskId, input.nowMs, input.peerId]);
+      await client.query(`UPDATE ledger_service_tasks SET closed_at_ms = $2 WHERE task_id = $1`, [input.taskId, input.nowMs]);
+      await client.query("COMMIT");
+      return { status: "refunded", refundMsat: totals.refundedMsat + unused, reservedMsat: totals.reservedMsat, paidMsat: totals.paidMsat };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   /** Queue rows of these subtasks with no recorded result (a restart resumes them). */
