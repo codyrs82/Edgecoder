@@ -251,6 +251,8 @@ export const REQUIRE_PORTAL_ACTION_SIGNATURE = CC.REQUIRE_PORTAL_ACTION_SIGNATUR
 // PORTAL_SERVICE_TOKEN; once PORTAL_COORDINATOR_TOKEN is set here and on the portal, coordinators
 // no longer need the portal's own service token for those calls.
 export const PORTAL_OUTBOUND_TOKEN = CC.PORTAL_COORDINATOR_TOKEN || PORTAL_SERVICE_TOKEN;
+/** Outbound only: never accepted inbound as the portal (src/swarm/coordinator/portal-credentials.ts). */
+export const PORTAL_COORDINATOR_TOKEN = CC.PORTAL_COORDINATOR_TOKEN ?? "";
 export const COORDINATOR_FEE_BPS = CC.COORDINATOR_FEE_BPS;
 export const COORDINATOR_FEE_ACCOUNT = CC.COORDINATOR_FEE_ACCOUNT;
 export const BITCOIN_NETWORK = CC.BITCOIN_NETWORK;

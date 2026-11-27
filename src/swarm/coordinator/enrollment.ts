@@ -7,7 +7,8 @@
 import { request } from "undici";
 import { pgStore } from "../../db/store.js";
 import { app } from "./app.js";
-import { identity, PORTAL_SERVICE_URL, PORTAL_OUTBOUND_TOKEN } from "./context.js";
+import { identity, COORDINATOR_REGISTRATION_TOKEN, PORTAL_SERVICE_URL, PORTAL_OUTBOUND_TOKEN } from "./context.js";
+import { portalOutboundHeaders } from "./portal-credentials.js";
 import { ordering, agentCapabilities } from "./agent-state.js";
 import { persistStatsLedgerRecord } from "./stats-ledger.js";
 
@@ -161,8 +162,7 @@ export async function validatePortalNode(input: {
     await appendValidationEvent(outcome);
     return outcome;
   }
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  if (PORTAL_OUTBOUND_TOKEN) headers["x-portal-service-token"] = PORTAL_OUTBOUND_TOKEN;
+  const headers = portalOutboundHeaders(identity.peerId, COORDINATOR_REGISTRATION_TOKEN, PORTAL_OUTBOUND_TOKEN);
   try {
     const portalValidationTimeoutMs = 5_000;
     const res = await request(`${PORTAL_SERVICE_URL}/internal/nodes/validate`, {
@@ -288,8 +288,7 @@ export async function refreshHostApprovals(
 
 async function portalLookup(nodeIds: string[]): Promise<Array<{ nodeId: string; hostApproved?: boolean }>> {
   if (!PORTAL_SERVICE_URL || nodeIds.length === 0) return [];
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  if (PORTAL_OUTBOUND_TOKEN) headers["x-portal-service-token"] = PORTAL_OUTBOUND_TOKEN;
+  const headers = portalOutboundHeaders(identity.peerId, COORDINATOR_REGISTRATION_TOKEN, PORTAL_OUTBOUND_TOKEN);
   const res = await request(`${PORTAL_SERVICE_URL}/internal/nodes/lookup`, {
     method: "POST",
     headers,

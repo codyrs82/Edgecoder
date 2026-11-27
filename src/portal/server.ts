@@ -76,7 +76,9 @@ import {
 } from "./portal-utils.js";
 import { clientIp, parseOriginList, registerPortalSecurity } from "./security.js";
 import { createCoordinatorPicker, discoveryConfigured, parseDiscoveryUrls, registerPortalRegistry } from "./coordinator-discovery.js";
-import { getCoordinatorHostname, isDnsConfigured, deleteDnsRecord, syncCoordinatorDns } from "./dns-manager.js";
+import { getCoordinatorHostname, deleteDnsRecord } from "./dns-manager.js";
+import { createPlatformCoordinatorPicker, parsePlatformCoordinators } from "./platform-coordinators.js";
+import type { CoordinatorRegistryService } from "./coordinator-registry.js";
 import { nativeRedirectMatches } from "./native-app-auth.js";
 import { autoRequestHosting, autoRequestHostingSafe, hostApprovalPolicyFromEnv, isApprovedHost, registerHostRequestRoutes } from "./host-requests.js";
 import { renderHostFormResult } from "./pages/host.js";
@@ -137,6 +139,23 @@ const CONTROL_PLANE_ADMIN_TOKEN = C.CONTROL_PLANE_ADMIN_TOKEN ?? "";
 const COORDINATOR_DISCOVERY_URLS = parseDiscoveryUrls();
 const pickDiscoveryCoordinator = createCoordinatorPicker({
   urls: COORDINATOR_DISCOVERY_URLS,
+  probe: async (url) => {
+    const res = await request(`${url}/health/runtime`, {
+      method: "GET",
+      headersTimeout: EXTERNAL_HTTP_TIMEOUT_MS,
+      bodyTimeout: EXTERNAL_HTTP_TIMEOUT_MS
+    });
+    await res.body.dump();
+    return res.statusCode >= 200 && res.statusCode < 300;
+  }
+});
+// New agents are pointed only at the platform's own coordinators (src/portal/platform-coordinators.ts):
+// PORTAL_PLATFORM_COORDINATOR_URLS, else COORDINATOR_DISCOVERY_URLS, plus verified EdgeCoder members of
+// the signed registry once it is configured (set below, where the registry routes are registered).
+let portalRegistry: CoordinatorRegistryService | null = null;
+const pickPlatformCoordinator = createPlatformCoordinatorPicker({
+  coordinators: parsePlatformCoordinators(),
+  registry: () => portalRegistry,
   probe: async (url) => {
     const res = await request(`${url}/health/runtime`, {
       method: "GET",
@@ -337,7 +356,7 @@ const PORTAL_ALLOW_OPEN_INTERNAL = portalAllowOpenInternal();
 // #40: empty token -> 503 (open only with PORTAL_ALLOW_OPEN_INTERNAL=1 outside production);
 // constant-time compare. Reads accept the service or coordinator token; approval mutations also
 // need the control-plane admin credential (src/portal/internal-auth.ts).
-const { requireInternalToken, requireControlPlaneAdmin } = createInternalAuth({
+const { requireInternalToken, requireControlPlaneAdmin, callerKind } = createInternalAuth({
   serviceToken: PORTAL_SERVICE_TOKEN,
   coordinatorToken: C.PORTAL_COORDINATOR_TOKEN,
   adminToken: CONTROL_PLANE_ADMIN_TOKEN,
@@ -811,7 +830,7 @@ registerPayoutDestinationRoutes(app, {
   store, getCurrentUser, network: WALLET_DEFAULT_NETWORK, onchainEnabled: C.ONCHAIN_ENABLED, emailConfigured: Boolean(RESEND_API_KEY && RESEND_FROM_EMAIL), register: payoutRegistrar,
   security: accountSecurity, secondFactor, sendConfirm: sendPayoutDestinationConfirmEmail, sendAdded: sendPayoutDestinationAddedEmail, callbackChange: (a, dest) => payoutCallbackClient.pendingChange(a, dest)
 });
-const accountRouteDeps = { discoverCoordinatorUrlsForPortal, everyCoordinatorUrl, fetchCoordinatorFederatedSummary, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, loadIosAgentActivity, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store };
+const accountRouteDeps = { discoverCoordinatorUrlsForPortal, everyCoordinatorUrl, fetchCoordinatorFederatedSummary, CONTROL_PLANE_ADMIN_TOKEN, CONTROL_PLANE_URL, EXTERNAL_HTTP_TIMEOUT_MS, buildAccessContext, controlPlaneHeaders, deleteDnsRecord, deriveIosDeviceIdFromNodeId, ensureCreditAccountForUser, getCoordinatorHostname, getCurrentUser, pickPlatformCoordinator, loadIosAgentActivity, loadIosNetworkSummary, loadNetworkInsightsForUser, loadWalletSnapshotForUser, sha256Hex, store };
 export type AccountApiRoutesDeps = typeof accountRouteDeps;
 registerAccountApiRoutes(app, accountRouteDeps);
 function autoRequestHost(node: Parameters<typeof autoRequestHosting>[1]) { return autoRequestHostingSafe({ store, policy: HOST_APPROVAL_POLICY, log: app.log }, node); }
@@ -916,7 +935,7 @@ startUnverifiedPurge(
 registerPortalPages(app, { getPricing: coordinatorPricingSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: everyCoordinatorUrl }), getReserves: coordinatorReservesSource({ EXTERNAL_HTTP_TIMEOUT_MS, PORTAL_SERVICE_TOKEN, discoverCoordinatorUrlsForPortal: everyCoordinatorUrl }) }); // the first that answers
 
 // #40: every /internal/* route lives in this plugin, so new internal routes inherit the token check.
-const internalRouteDeps = { autoRequestHost, deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, hostApprovedFor, isDnsConfigured, requireControlPlaneAdmin, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns };
+const internalRouteDeps = { autoRequestHost, callerKind, deleteDnsRecord, deriveIosDeviceIdFromNodeId, hostApprovedFor, requireControlPlaneAdmin, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store };
 export type InternalRoutesDeps = typeof internalRouteDeps;
 await app.register(async (internal) => {
   registerInternalRoutes(internal, internalRouteDeps);
@@ -924,7 +943,7 @@ await app.register(async (internal) => {
   registerSecurityResearchInternalRoute(internal, { store }); portalAlerting.registerInternal(internal); // + POST /internal/alerts/backup-report
 }); // end /internal plugin (#40)
 
-registerEscalationRoutes(app, { getCurrentUser, buildAccessContext }); registerPortalRegistry(app, requireCoordinatorOperationsUser); // signed coordinator registry
+registerEscalationRoutes(app, { getCurrentUser, buildAccessContext }); portalRegistry = registerPortalRegistry(app, requireCoordinatorOperationsUser); // signed coordinator registry
 
 // DNS staleness sweep (src/portal/dns-sweep.ts).
 startDnsStaleSweep(store);

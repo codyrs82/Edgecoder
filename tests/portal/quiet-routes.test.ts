@@ -34,7 +34,7 @@ describe("quiet routes", () => {
     const { a, logs } = await app();
     const headers = { "content-type": "application/json", "x-portal-service-token": "coord" };
     expect((await a.inject({ method: "POST", url: "/internal/nodes/validate", headers, payload: { nodeId: "n-1", nodeKind: "agent", registrationToken: "tok-unknown-1" } })).statusCode).toBe(404);
-    expect((await a.inject({ method: "POST", url: "/internal/nodes/lookup", headers, payload: { nodeIds: ["n-1"] } })).statusCode).toBe(200);
+    expect((await a.inject({ method: "POST", url: "/internal/nodes/lookup", headers: { ...headers, "x-portal-service-token": "svc" }, payload: { nodeIds: ["n-1"] } })).statusCode).toBe(200);
     expect((await a.inject({ url: "/health" })).statusCode).toBe(200);
     expect(forUrl(logs, "/internal/nodes/validate")).toEqual([]);
     expect(forUrl(logs, "/internal/nodes/lookup")).toEqual([]);

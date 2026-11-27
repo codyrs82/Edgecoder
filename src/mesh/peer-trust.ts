@@ -286,3 +286,8 @@ export function verifyForwardedResult(input: {
   }
   return { ok: true, mode: "allowlist", fromPeerId };
 }
+
+/** Log level for a bootstrap /mesh/register-peer answer: info when the peer accepted us, warn otherwise. */
+export function bootstrapRegisterLogLevel(statusCode: number): "info" | "warn" {
+  return statusCode >= 200 && statusCode < 300 ? "info" : "warn";
+}

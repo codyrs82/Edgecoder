@@ -1,0 +1,136 @@
+// Copyright (c) 2025 EdgeCoder
+// SPDX-License-Identifier: BUSL-1.1
+
+// Which coordinator GET /nodes/discover-coordinator hands a new agent: only the platform's own
+// coordinators. Candidates are a configured list (PORTAL_PLATFORM_COORDINATOR_URLS, else
+// COORDINATOR_DISCOVERY_URLS, else the US and EU seeds) plus, when the signed registry is configured
+// (REGISTRY_SIGNING_KEY_PEM), its EdgeCoder-operated members that passed the registry's identity and
+// health check. Enrolled coordinators are never picked by recency or by their DNS records.
+
+import { normalizeCoordinatorUrl } from "../discovery/types.js";
+import type { RegistryPayload } from "../discovery/registry.js";
+import { discoveryConfigured, parseDiscoveryUrls } from "./coordinator-discovery.js";
+
+export interface PlatformCoordinator {
+  url: string;
+  /** Region code ("us", "eu", ...) or "unknown". */
+  region: string;
+  /** The registry member's peerId, when it came from the registry. */
+  nodeId?: string;
+  source: "config" | "registry";
+}
+
+/** The US and EU seeds; PORTAL_PLATFORM_COORDINATOR_URLS or COORDINATOR_DISCOVERY_URLS override it. */
+export const DEFAULT_PLATFORM_COORDINATOR_URLS = "https://coordinator.edgecoder.io=us,https://coordinator-eu.edgecoder.io=eu";
+
+const REGION_CODES = new Set(["us", "eu", "ap", "sa", "af", "me", "oc"]);
+
+/** A region code from a hostname label (coordinator-eu.example -> "eu"), else "unknown". */
+export function regionFromUrl(url: string): string {
+  try {
+    const labels = new URL(url).hostname.toLowerCase().split(/[-.]/);
+    return labels.find((l) => REGION_CODES.has(l)) ?? "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * The configured platform coordinators: `url[=region]` entries, comma separated. A missing region is
+ * read from the hostname (a `-eu` / `.us.` label), else "unknown".
+ */
+export function parsePlatformCoordinators(env: NodeJS.ProcessEnv = process.env): PlatformCoordinator[] {
+  const explicit = (env.PORTAL_PLATFORM_COORDINATOR_URLS ?? "").trim();
+  const raw = explicit || (discoveryConfigured(env) ? parseDiscoveryUrls(env).join(",") : DEFAULT_PLATFORM_COORDINATOR_URLS);
+  const out: PlatformCoordinator[] = [];
+  for (const entry of raw.split(",").map((s) => s.trim()).filter(Boolean)) {
+    const eq = entry.lastIndexOf("=");
+    const rawUrl = eq > 0 ? entry.slice(0, eq) : entry;
+    const url = normalizeCoordinatorUrl(rawUrl);
+    if (!url || out.some((c) => c.url === url)) continue;
+    const region = eq > 0 ? entry.slice(eq + 1).trim().toLowerCase() || "unknown" : regionFromUrl(url);
+    out.push({ url, region, source: "config" });
+  }
+  return out;
+}
+
+
+const EUROPE = new Set(
+  "AD AL AT BA BE BG BY CH CY CZ DE DK EE ES FI FO FR GB GG GI GR HR HU IE IM IS IT JE LI LT LU LV MC MD ME MK MT NL NO PL PT RO RS SE SI SK SM UA VA XK".split(" ")
+);
+const NORTH_AMERICA = new Set("US CA MX PR".split(" "));
+
+/** The region an agent's country maps to ("eu", "us"), or null when unknown. */
+export function regionForCountry(countryCode: string | undefined | null): string | null {
+  const cc = (countryCode ?? "").trim().toUpperCase();
+  if (EUROPE.has(cc)) return "eu";
+  if (NORTH_AMERICA.has(cc)) return "us";
+  return null;
+}
+
+export interface PlatformPickerOptions {
+  coordinators: PlatformCoordinator[];
+  /** Resolves true when `url` is healthy; must apply its own timeout. */
+  probe: (url: string) => Promise<boolean>;
+  /** The signed registry, when wired: used only while it is configured (a signing key is set). */
+  registry?: () => { configured: boolean; snapshot(): RegistryPayload } | null;
+  ttlMs?: number;
+  negativeTtlMs?: number;
+  now?: () => number;
+}
+
+/** Registry members EdgeCoder runs that the registry's last check found healthy (identity verified). */
+export function verifiedRegistryCoordinators(registry: { configured: boolean; snapshot(): RegistryPayload } | null | undefined): PlatformCoordinator[] {
+  if (!registry?.configured) return [];
+  return registry
+    .snapshot()
+    .coordinators.filter((c) => c.operator.kind === "edgecoder" && c.health.status === "healthy" && c.urls.length > 0)
+    .map((c) => ({ url: normalizeCoordinatorUrl(c.urls[0]) ?? c.urls[0], region: (c.region || "unknown").toLowerCase(), nodeId: c.peerId, source: "registry" as const }));
+}
+
+/**
+ * Picks a platform coordinator for an agent: candidates in the agent's region first, then the rest
+ * in configured order; the first healthy one wins. Configured URLs are probed in parallel and each
+ * result cached (60 s healthy, 15 s unhealthy); registry members carry the registry's own check.
+ */
+export function createPlatformCoordinatorPicker(opts: PlatformPickerOptions): (agent: { countryCode?: string | null }) => Promise<PlatformCoordinator | null> {
+  const ttl = opts.ttlMs ?? 60_000;
+  const negTtl = opts.negativeTtlMs ?? 15_000;
+  const now = opts.now ?? Date.now;
+  const cache = new Map<string, { ok: boolean; at: number }>();
+  const inFlight = new Map<string, Promise<boolean>>();
+
+  const healthy = (url: string): Promise<boolean> => {
+    const c = cache.get(url);
+    if (c && now() - c.at < (c.ok ? ttl : negTtl)) return Promise.resolve(c.ok);
+    let p = inFlight.get(url);
+    if (!p) {
+      p = opts
+        .probe(url)
+        .catch(() => false)
+        .then((ok) => {
+          cache.set(url, { ok, at: now() });
+          return ok;
+        })
+        .finally(() => inFlight.delete(url));
+      inFlight.set(url, p);
+    }
+    return p;
+  };
+
+  return async (agent) => {
+    const fromRegistry = verifiedRegistryCoordinators(opts.registry?.() ?? null);
+    const candidates = opts.coordinators.map((c) => ({ ...c }));
+    for (const r of fromRegistry) {
+      const same = candidates.find((c) => c.url === r.url);
+      if (same) Object.assign(same, { nodeId: same.nodeId ?? r.nodeId });
+      else candidates.push(r);
+    }
+    const region = regionForCountry(agent.countryCode);
+    const ordered = region ? [...candidates.filter((c) => c.region === region), ...candidates.filter((c) => c.region !== region)] : candidates;
+    const registryUrls = new Set(fromRegistry.map((r) => r.url));
+    const results = await Promise.all(ordered.map((c) => (registryUrls.has(c.url) ? Promise.resolve(true) : healthy(c.url))));
+    const index = results.findIndex(Boolean);
+    return index >= 0 ? { ...ordered[index] } : null;
+  };
+}

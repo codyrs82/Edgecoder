@@ -35,8 +35,7 @@ async function buildPortal(opts: { coordinatorToken?: string; adminToken?: strin
       isDnsConfigured: () => false,
       resolveIpIntelligence: async () => ({}),
       secureCompare: (a: string, b: string) => a === b,
-      sha256Hex: (v: string) => v,
-      syncCoordinatorDns: async () => undefined
+      sha256Hex: (v: string) => v
     } as any);
   });
   return { app, approvals };
@@ -86,7 +85,9 @@ describe("the coordinator token is read/validate only", () => {
   test("it reads pending nodes and stats", async () => {
     const { app } = await buildPortal();
     expect((await app.inject({ method: "GET", url: "/internal/nodes/pending", headers: { "x-portal-service-token": COORD } })).statusCode).toBe(200);
-    expect((await app.inject({ method: "POST", url: "/internal/nodes/lookup", headers: { "x-portal-service-token": COORD }, payload: { nodeIds: ["a"] } })).statusCode).toBe(200);
+    // Lookup with the coordinator token also needs the caller's coordinator identity (internal-node-scope.test.ts).
+    expect((await app.inject({ method: "POST", url: "/internal/nodes/lookup", headers: { "x-portal-service-token": COORD }, payload: { nodeIds: ["a"] } })).statusCode).toBe(403);
+    expect((await app.inject({ method: "POST", url: "/internal/nodes/lookup", headers: { "x-portal-service-token": SERVICE }, payload: { nodeIds: ["a"] } })).statusCode).toBe(200);
   });
 
   test("a wrong token is refused", async () => {

@@ -60,6 +60,8 @@ export type NodeEnrollment = {
   dnsStatus?: "pending" | "active" | "nat" | "error" | "stale";
   dnsIp?: string;
   dnsLastUpdatedMs?: number;
+  /** Enrolled node id of the coordinator whose coordinator-token validate call last saw this node (scopes /internal/nodes/lookup). */
+  lastValidatedByCoordinator?: string;
   createdAtMs: number;
   updatedAtMs: number;
 };
@@ -214,6 +216,7 @@ CREATE TABLE IF NOT EXISTS portal_node_enrollments (
   dns_status TEXT,
   dns_ip TEXT,
   dns_last_updated_ms BIGINT,
+  last_validated_by_coordinator TEXT,
   created_at_ms BIGINT NOT NULL,
   updated_at_ms BIGINT NOT NULL
 );
@@ -380,6 +383,9 @@ export class PortalStore {
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_status TEXT`);
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_ip TEXT`);
     await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS dns_last_updated_ms BIGINT`);
+    // The coordinator (by its enrolled node id) whose coordinator-token call last validated this node;
+    // NULL when the last validation came with the platform service token. Scopes /internal/nodes/lookup.
+    await this.pool.query(`ALTER TABLE portal_node_enrollments ADD COLUMN IF NOT EXISTS last_validated_by_coordinator TEXT`);
     // Owner-approved 2026-11-17: the web chat reply footer survives a reload (nullable; old rows show cost only).
     await this.pool.query(`ALTER TABLE portal_messages ADD COLUMN IF NOT EXISTS usage_meta JSONB`);
     // Consent to share chat context to improve EdgeCoder (opt-in, default off; chat stays encrypted either way).
@@ -1022,6 +1028,7 @@ export class PortalStore {
       dnsStatus: row.dns_status ?? undefined,
       dnsIp: row.dns_ip ?? undefined,
       dnsLastUpdatedMs: row.dns_last_updated_ms ? Number(row.dns_last_updated_ms) : undefined,
+      lastValidatedByCoordinator: row.last_validated_by_coordinator ?? undefined,
       createdAtMs: Number(row.created_at_ms),
       updatedAtMs: Number(row.updated_at_ms),
     };
@@ -1752,7 +1759,7 @@ export class PortalStore {
         node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
         email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
         last_vpn_detected, dns_hostname, dns_status, dns_ip, dns_last_updated_ms,
-        created_at_ms, updated_at_ms
+        last_validated_by_coordinator, created_at_ms, updated_at_ms
        FROM portal_node_enrollments
        WHERE node_id = $1`,
       [nodeId]
@@ -1914,16 +1921,20 @@ export class PortalStore {
     sourceIp?: string;
     countryCode?: string;
     vpnDetected?: boolean;
+    /** The validating coordinator's enrolled node id; null (service token) clears it. Omitted keeps it. */
+    validatedByCoordinator?: string | null;
   }): Promise<void> {
+    const setValidator = input.validatedByCoordinator !== undefined;
     await this.pool.query(
       `UPDATE portal_node_enrollments
        SET last_seen_ms = $2,
            last_ip = COALESCE($3, last_ip),
            last_country_code = COALESCE($4, last_country_code),
            last_vpn_detected = COALESCE($5, last_vpn_detected),
+           last_validated_by_coordinator = CASE WHEN $6::boolean THEN $7::text ELSE last_validated_by_coordinator END,
            updated_at_ms = $2
        WHERE node_id = $1`,
-      [input.nodeId, Date.now(), input.sourceIp ?? null, input.countryCode ?? null, input.vpnDetected ?? null]
+      [input.nodeId, Date.now(), input.sourceIp ?? null, input.countryCode ?? null, input.vpnDetected ?? null, setValidator, input.validatedByCoordinator ?? null]
     );
   }
 
@@ -1968,23 +1979,6 @@ export class PortalStore {
        WHERE node_id = $1`,
       [input.nodeId, input.dnsHostname, input.dnsStatus, input.dnsIp, Date.now()]
     );
-  }
-
-  async listActiveCoordinators(): Promise<NodeEnrollment[]> {
-    const result = await this.pool.query(
-      `SELECT
-        node_id, device_id, node_kind, owner_user_id, owner_email, registration_token_hash,
-        email_verified, node_approved, active, last_seen_ms, last_ip, last_country_code,
-        last_vpn_detected, dns_hostname, dns_status, dns_ip, dns_last_updated_ms,
-        created_at_ms, updated_at_ms
-       FROM portal_node_enrollments
-       WHERE node_kind = 'coordinator'
-         AND active = TRUE
-         AND dns_status = 'active'
-         AND dns_ip IS NOT NULL
-       ORDER BY last_seen_ms DESC NULLS LAST`
-    );
-    return result.rows.map((row: any) => this.mapNodeRow(row));
   }
 
   async markStaleCoordinatorDns(staleThresholdMs: number): Promise<number> {
