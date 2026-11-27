@@ -50,6 +50,7 @@ import {
   CI_SCOPES, TRIGGER_KINDS, TRIGGER_POLL_MS, ghApiCli, parseGitHubRepo, pollTrigger, untrustedEventBlock,
   type BotGitHubTrigger, type GhApi, type TriggerCursor, type TriggerEvent,
 } from "./bot-triggers.js";
+import { DATA_TOOLS, GroundingGuard, GROUNDING_REMINDER, groundingRules, type GroundingWarning } from "./bot-grounding.js";
 import { blockedResult, outcomeOf, runFailureClass, projectCheck, runsDigest, stuckProblem, updateBlocks, actionKey, STUCK_RUNS, type KnownBlock, type RunOutcome } from "./bot-outcomes.js";
 import { normalizeRemoteUrl } from "./git-setup.js";
 import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
@@ -467,6 +468,10 @@ export interface BotRun {
   error?: string;
   /** What it tried, what failed and what you answered, and how it ended (bot-outcomes.ts). */
   outcome?: RunOutcome;
+  /** Soft grounding warnings ("Unverified figures in notes.md: 2.4%"): bot-grounding.ts. */
+  warnings?: string[];
+  /** It said it made something up and didn't correct it in the run (bot-grounding.ts). */
+  needsReview?: true;
 }
 
 export interface PendingCall {
@@ -622,6 +627,8 @@ export interface BotRunContext {
   budgetLeft: () => number | null;
   /** Asks the owner before the run uses their frontier key (bot-frontier.ts). */
   frontier?: BotFrontierHooks;
+  /** A grounding warning for the run log (bot-grounding.ts); unset: written into the reply. */
+  warn?: (w: GroundingWarning) => void;
 }
 
 export type BotRunner = (ctx: BotRunContext) => Promise<void>;
@@ -732,6 +739,7 @@ export function botSystemPrompt(bot: BotConfig, memory: string, digest = ""): st
     `Do the work in this run with your tools; don't stop after saying what you'll do. If there's more to do than fits in one run, call \`follow_up\` with {"in_minutes": 2, "reason": "..."} and you'll get another run to continue.`,
     orientation(bot, memory),
     bot.instructions.trim() ? `Your instructions:\n${bot.instructions.trim()}` : "",
+    groundingRules(),
     `Your memory (notes you saved on earlier runs):\n${memory.trim() || "(empty)"}`,
     digest,
     `To save a short note for future runs (what you did, what to check next time), call the \`remember\` tool with {"note": "..."}. Keep notes brief.`,
@@ -778,7 +786,7 @@ export function orientation(bot: Pick<BotConfig, "projectRoot" | "repository" | 
 
 /** The conversation label and the prompt for a run nobody typed. */
 export function runPrompt(trigger: Exclude<BotTrigger, "message" | "github">, reason?: string): { label: string; text: string } {
-  const end = "When you're done, reply with a short summary of what you did and anything that needs my attention.";
+  const end = `${GROUNDING_REMINDER} When you're done, reply with a short summary of what you did and anything that needs my attention.`;
   switch (trigger) {
     case "start":
       return { label: "Started work", text: `You're starting work (just set up or resumed). First orient yourself with your tools: list your folder, read its README, TODO and task files (and open issues if you have a repository), and save what you learned with \`remember\`. Then decide what your job needs first and start on it now with your tools; don't just describe what you'll do and don't ask me what to do. ${end}` };
@@ -2248,6 +2256,11 @@ export class BotManager {
           return cap == null ? null : Math.max(0, cap - this.spentToday(id));
         },
         frontier,
+        warn: (w) => {
+          const list = (act.run.warnings ??= []);
+          if (list.length < 5 && !list.includes(w.message)) list.push(w.message);
+          if (w.review) act.run.needsReview = true;
+        },
       });
     } catch (err) {
       error = (err as Error).message ?? String(err);
@@ -2280,6 +2293,14 @@ export class BotManager {
         if (blocked.length) auto.blocked = blocked;
         else delete auto.blocked;
       }
+    }
+    // Grounding warnings: in the run log under the reply (after its summary is taken) and on the run.
+    if (run.warnings?.length) {
+      for (const w of run.warnings) {
+        act.reply.content += `${act.reply.content ? "\n\n" : ""}_${w}_`;
+        act.reply.events!.push({ type: "text", content: `${act.reply.events!.length ? "\n\n" : ""}_${w}_` });
+      }
+      run.note = [run.warnings[0], run.note].filter(Boolean).join(" · ");
     }
     if (run.status !== "done" && run.status !== "failed") {
       act.reply.content += `${act.reply.content ? "\n\n" : ""}_${run.summary}_`;
@@ -2685,6 +2706,47 @@ export function agentBotRunner(d: {
     });
     const chat: BotChatFn = d.chat(ctx);
     const planning = botMode(ctx.bot) === "plan";
+    // Grounding (bot-grounding.ts): figures it writes that no source this run has, and files it said it made up.
+    const root = botWorkRoot(ctx.bot);
+    const guard = new GroundingGuard({
+      checkFigures: DATA_TOOLS.some((t) => allowed.has(t)),
+      seed: [...ctx.messages.map((m) => m.content), ctx.memory, ctx.bot.instructions],
+      readBefore: (path) => {
+        try {
+          const f = resolve(root, path);
+          return existsSync(f) && statSync(f).size <= 1_000_000 ? readFileSync(f, "utf8") : null;
+        } catch {
+          return null;
+        }
+      },
+    });
+    const sendEvent = (e: IdeStreamEvent) => {
+      if (e.type === "text") guard.text(e.content);
+      ctx.sendEvent(e);
+    };
+    const callTool = async (tool: ToolName, args: Record<string, unknown>): Promise<string> => {
+      if ((tool as string) === "follow_up") {
+        const callId = `tc_${randomUUID().slice(0, 8)}`;
+        ctx.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: false });
+        ctx.followUp(Number(args.in_minutes ?? FOLLOW_UP_DELAY_MS / MINUTE), String(args.reason ?? ""));
+        const result = "A follow-up run is scheduled; finish this run with a short summary.";
+        ctx.sendEvent({ type: "tool_result", id: callId, result });
+        return result;
+      }
+      if ((tool as string) === "remember") {
+        const callId = `tc_${randomUUID().slice(0, 8)}`;
+        ctx.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: false });
+        ctx.remember(String(args.note ?? ""));
+        ctx.sendEvent({ type: "tool_result", id: callId, result: "Saved to memory." });
+        return "Saved to memory.";
+      }
+      if (!allowed.has(tool)) return `[Error]: ${tool} isn't allowed for this bot. Ask the user to allow it in the bot's settings.`;
+      return inner(tool, args);
+    };
+    const runTool = async (tool: ToolName, args: Record<string, unknown>): Promise<string> => {
+      guard.before();
+      return guard.after(tool, args, await callTool(tool, args));
+    };
     await runAgentLoop({
       chat,
       ...(chat.escalate ? { escalate: chat.escalate } : {}),
@@ -2695,33 +2757,19 @@ export function agentBotRunner(d: {
       // Web grounding for a bot allowed to search, on a message the owner wrote (a schedule's or
       // GitHub's prompt never becomes a search on its own), and not in Manual, where web calls ask first.
       ...(web && allowed.has("web_search") ? webGrounding(web, ctx.messages, { skip: botMode(ctx.bot) === "ask" || ctx.trigger !== "message" }) : {}),
-      sendEvent: ctx.sendEvent,
+      sendEvent,
       isCancelled: ctx.isCancelled,
       tools,
       // Nobody is watching to say "go on": a reply that only announces work gets one "go ahead"
       // (not in plan mode, where the plan is the answer).
       continueOnIntent: !planning,
       plan: planning,
-      runTool: async (tool, args) => {
-        if ((tool as string) === "follow_up") {
-          const callId = `tc_${randomUUID().slice(0, 8)}`;
-          ctx.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: false });
-          ctx.followUp(Number(args.in_minutes ?? FOLLOW_UP_DELAY_MS / MINUTE), String(args.reason ?? ""));
-          const result = "A follow-up run is scheduled; finish this run with a short summary.";
-          ctx.sendEvent({ type: "tool_result", id: callId, result });
-          return result;
-        }
-        if ((tool as string) === "remember") {
-          const callId = `tc_${randomUUID().slice(0, 8)}`;
-          ctx.sendEvent({ type: "tool_call", id: callId, tool, args, requires_approval: false });
-          ctx.remember(String(args.note ?? ""));
-          ctx.sendEvent({ type: "tool_result", id: callId, result: "Saved to memory." });
-          return "Saved to memory.";
-        }
-        if (!allowed.has(tool)) return `[Error]: ${tool} isn't allowed for this bot. Ask the user to allow it in the bot's settings.`;
-        return inner(tool, args);
-      },
+      runTool,
     });
+    for (const w of guard.finish()) {
+      if (ctx.warn) ctx.warn(w);
+      else ctx.sendEvent({ type: "text", content: `\n\n_${w.message}_` });
+    }
   };
 }
 
