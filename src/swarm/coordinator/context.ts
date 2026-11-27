@@ -55,6 +55,9 @@ import { FallbackNonceStore, InMemoryNonceStore, type NonceStore } from "../../s
 import { AgentRateLimiter } from "../../security/agent-rate-limiter.js";
 import { SecurityEventLogger } from "../../audit/security-events.js";
 import { PullTracker } from "../../model/pull-tracker.js";
+import { createRegistryMirror } from "../../discovery/registry-mirror.js";
+import { registryPublicKeysFromEnv } from "../../discovery/registry.js";
+import { RegistryTrust } from "../../discovery/registry-trust.js";
 import { app } from "./app.js";
 
 // #15: numeric, boolean, enum and URL settings validated once at startup (see coordinator-config.ts).
@@ -67,7 +70,8 @@ export const mesh = new GossipMesh();
 mesh.setAdmission((peer, existing, opts) =>
   admitPeer({
     allowlist: MESH_PEER_ALLOWLIST,
-    pins: MESH_PEER_URL_PINS,
+    trusted: trustedPeerKey,
+    pins: peerUrlPins(),
     production: isProduction(),
     peer,
     existing,
@@ -230,12 +234,49 @@ export const MESH_PEER_ALLOWLIST: PeerAllowlist = (() => {
 // #118 review: optional `@url` on each allowlist entry pins that peer's endpoint.
 const MESH_PEER_URL_PINS: PeerUrlPins = parsePeerUrlPins(CC.MESH_PEER_ALLOWLIST);
 export const PEER_ALLOWLIST_ENFORCED = allowlistEnforced(MESH_PEER_ALLOWLIST, isProduction());
+// The portal's signed coordinator registry, mirrored so the one platform URL serves it too
+// (src/discovery/registry-mirror.ts). REGISTRY_UPSTREAM_URL overrides the source.
+export const registryMirror = createRegistryMirror({
+  upstreamUrl: CC.REGISTRY_UPSTREAM_URL || `${(CC.PORTAL_SERVICE_URL || CC.PORTAL_PUBLIC_URL).replace(/\/+$/, "")}/network/registry`
+});
 /**
- * Which coordinator keys this coordinator trusts for signed peer requests. Today: the static
- * allowlist. The signed coordinator registry (verified, non-suspended members) plugs in here as
- * the second source when it is turned on; until then it adds nothing.
+ * The verified registry, for peer trust (src/discovery/registry-trust.ts): pinned keys from
+ * DEFAULT_REGISTRY_PUBLIC_KEYS plus EDGECODER_REGISTRY_PUBLIC_KEYS (none pinned: adds nothing).
+ * Refreshed on its signed TTL; a peer that loses registry trust (suspended) and is not in the
+ * allowlist is dropped from the peer table.
  */
-export const trustedPeerKey: PeerKeyTrust = peerKeyTrust(MESH_PEER_ALLOWLIST /* , signedRegistryTrust */);
+export const registryTrust = new RegistryTrust({
+  load: () => registryMirror.get(),
+  publicKeys: registryPublicKeysFromEnv(process.env),
+  onRevoked: (peerIds) => {
+    for (const peerId of peerIds) {
+      if (MESH_PEER_ALLOWLIST.has(peerId)) continue;
+      mesh.removePeer(peerId);
+      app.log.warn({ peerId }, "registry_peer_trust_removed");
+    }
+  },
+  log: (msg, extra) => app.log.warn(extra ?? {}, msg)
+});
+if (registryTrust.enabled && !process.env.VITEST) registryTrust.start();
+/**
+ * Which coordinator keys this coordinator trusts for signed peer requests, registration and the
+ * peer table: the static allowlist, or the signed registry's members on probation or active.
+ */
+export const trustedPeerKey: PeerKeyTrust = peerKeyTrust(MESH_PEER_ALLOWLIST, registryTrust.trusts);
+/** Whether a peer is trusted at all by key (allowlist entries, or a pinned registry key). */
+export const PEER_KEY_TRUST_CONFIGURED = (): boolean => MESH_PEER_ALLOWLIST.size > 0 || registryTrust.enabled;
+/**
+ * Whether a peer coordinator may take billed work from here (subtask grants). Registry members
+ * that are not in the allowlist may peer and show in the world view, but get no billed calls
+ * until outside billing exists. Without an allowlist (development) every peer may.
+ */
+export function peerMayTakeBilledWork(peerId: string): boolean {
+  return MESH_PEER_ALLOWLIST.size === 0 || MESH_PEER_ALLOWLIST.has(peerId);
+}
+/** Endpoint pins: the allowlist's `@url` wins over the registry's verified URL. */
+export function peerUrlPins(): PeerUrlPins {
+  return new Map([...registryTrust.urlPins(), ...MESH_PEER_URL_PINS]);
+}
 /** false: a peer route also admits a request signed by a trusted peer key without the mesh token. */
 export const MESH_TOKEN_REQUIRED_FOR_PEERS = CC.MESH_TOKEN_REQUIRED_FOR_PEERS;
 /** #118 review: forwarded-result replay protection and the subtasks we actually offered to peers. */

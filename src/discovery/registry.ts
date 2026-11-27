@@ -19,9 +19,11 @@ import { publicKeyFingerprint, tryPublicKeyFingerprint } from "../security/key-f
 export const REGISTRY_FORMAT = "edgecoder-registry/1";
 
 /**
- * EdgeCoder's registry public keys, pinned in every client. Empty until the operator generates the
- * registry key and publishes its public half here (docs/discovery.md, "Turning steering on"):
- * with no key pinned, clients never accept a registry and keep using the configured URL.
+ * EdgeCoder's registry public keys, pinned in every client and coordinator (the signing key and a
+ * cold second key for rotation). Empty until the owner generates the registry keys offline and
+ * publishes their public halves here (docs/discovery.md, "Turning steering on"): with no key
+ * pinned, clients never accept a registry and keep using the configured URL, and coordinators
+ * trust peers by MESH_PEER_ALLOWLIST alone.
  * Override or extend with EDGECODER_REGISTRY_PUBLIC_KEYS (PEM, or 64-hex raw Ed25519 key; comma or
  * semicolon separated, for rotation).
  */
@@ -29,6 +31,34 @@ export const DEFAULT_REGISTRY_PUBLIC_KEYS: readonly string[] = [];
 
 export type RegistryHealthStatus = "healthy" | "unhealthy" | "unknown";
 export type OperatorKind = "edgecoder" | "community";
+/**
+ * Where a member stands in the registry: `probation` (admitted, serving its first clean days:
+ * peers may trust it, nothing steers to it or bills through it), `active`, or `suspended` (listed
+ * so peers and the world view drop it; never trusted). EdgeCoder's own coordinators are `active`.
+ * Registries from before statuses carry none: read that as `active`.
+ */
+export type RegistryMemberStatus = "probation" | "active" | "suspended";
+export const REGISTRY_MEMBER_STATUSES: readonly RegistryMemberStatus[] = ["probation", "active", "suspended"];
+
+/** A member's status, `active` when the registry predates statuses. */
+export function memberStatus(entry: { status?: RegistryMemberStatus }): RegistryMemberStatus {
+  return entry.status ?? "active";
+}
+
+/** Whether a peer coordinator may trust this member's key: probation or active, never suspended. */
+export function memberTrusted(entry: { status?: RegistryMemberStatus }): boolean {
+  const s = memberStatus(entry);
+  return s === "probation" || s === "active";
+}
+
+/**
+ * Whether clients may steer new agents to this member: EdgeCoder's own active coordinators, and
+ * community members only when `includeOutside` is on (off until outside billing exists) and active.
+ */
+export function memberSteerable(entry: { status?: RegistryMemberStatus; operator: { kind: OperatorKind } }, includeOutside = false): boolean {
+  if (memberStatus(entry) !== "active") return false;
+  return entry.operator.kind === "edgecoder" || includeOutside;
+}
 
 export interface RegistryHealth {
   status: RegistryHealthStatus;
@@ -58,6 +88,8 @@ export interface RegistryEntry {
   admission: RegistryAdmission;
   admittedAtMs: number;
   health: RegistryHealth;
+  /** Absent in registries from before statuses (read as active). */
+  status?: RegistryMemberStatus;
 }
 
 export interface RegistryPayload {
@@ -108,7 +140,8 @@ export const registryEntrySchema = z.object({
     latencyMs: z.number().nonnegative().nullable(),
     reason: z.string().max(256).optional(),
     consecutiveFailures: z.number().int().nonnegative().optional()
-  })
+  }),
+  status: z.enum(["probation", "active", "suspended"]).optional()
 });
 
 export const registryPayloadSchema = z.object({

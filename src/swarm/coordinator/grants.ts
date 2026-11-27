@@ -10,6 +10,7 @@ import { agentMayClaim } from "../sandbox-enforcement.js";
 import { remoteGrantTtlMs, type GrantDecision } from "../remote-grants.js";
 import { app } from "./app.js";
 import {
+  peerMayTakeBilledWork,
   queue,
   protocol,
   identity,
@@ -40,6 +41,8 @@ const LIVE_AGENT_WINDOW_MS = 30_000;
  * or when the same peer already holds the grant. Anything else is refused.
  */
 export function grantSubtaskToPeer(subtaskId: string, peerId: string, nowMs = Date.now()): GrantDecision {
+  // Registry-only peers (not in MESH_PEER_ALLOWLIST) peer and gossip, but take no billed work yet.
+  if (!peerMayTakeBilledWork(peerId)) return { granted: false, reason: "peer_not_billable" };
   const again = remoteGrants.regrant(subtaskId, peerId, nowMs);
   if (again) return again;
   const offeredUntil = offeredToPeers.get(subtaskId);

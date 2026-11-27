@@ -124,6 +124,25 @@ export interface WorldCoordinator {
   reachable: boolean;
   /** True for the coordinator that answered. */
   self: boolean;
+  /**
+   * How the signed coordinator registry lists it: "platform" (EdgeCoder's own), "probation",
+   * "active" or "suspended". Absent when the registry does not list it or none is held.
+   */
+  registryStatus?: WorldRegistryStatus;
+}
+
+export type WorldRegistryStatus = "platform" | "probation" | "active" | "suspended";
+
+/** Label each coordinator with its registry listing (src/discovery/registry-trust.ts). */
+export function withRegistryStatus(world: PublicWorld, listing: (coordinatorId: string) => WorldRegistryStatus | null): PublicWorld {
+  return {
+    ...world,
+    coordinators: world.coordinators.map((c) => {
+      const status = listing(c.id);
+      const { registryStatus: _drop, ...rest } = c;
+      return status ? { ...rest, registryStatus: status } : rest;
+    })
+  };
 }
 
 export interface WorldLink {

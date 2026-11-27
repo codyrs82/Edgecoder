@@ -241,6 +241,24 @@ describe("createCoordinatorSteering", () => {
     expect(calls.some((u) => u.startsWith("https://ord.example"))).toBe(false);
   });
 
+  it("steers only to EdgeCoder's own active coordinators unless outside steering is on; never trusts a suspended one", async () => {
+    const { key, ord, fra, coords } = world();
+    const community = { id: "op", name: "Op", kind: "community" as const };
+    const doc = signRegistry(
+      registryPayload([entry(ord, "https://ord.example", { operator: community, status: "active" }), entry(fra, "https://fra.example", { operator: community, status: "probation" })]),
+      key
+    );
+    const off = createCoordinatorSteering({ registryUrls: [REG_URL], publicKeys: [key.publicKeyPem], fallbackUrl: PLATFORM, fetch: fakeNet(coords, { [REG_URL]: doc }) });
+    expect(await off.steer()).toMatchObject({ source: "fallback", reason: "no_healthy_coordinators" });
+    const on = createCoordinatorSteering({ registryUrls: [REG_URL], publicKeys: [key.publicKeyPem], fallbackUrl: PLATFORM, fetch: fakeNet(coords, { [REG_URL]: doc }), includeOutside: true });
+    expect(await on.steer()).toMatchObject({ source: "registry", url: "https://ord.example" }); // the probation member is never picked
+    const suspendedDoc = signRegistry(registryPayload([entry(ord, "https://ord.example"), entry(fra, "https://fra.example", { operator: community, status: "suspended" })]), key);
+    const s = createCoordinatorSteering({ registryUrls: [REG_URL], publicKeys: [key.publicKeyPem], fallbackUrl: PLATFORM, fetch: fakeNet(coords, { [REG_URL]: suspendedDoc }) });
+    await s.steer();
+    expect(s.trustedEntries().has("coord-fra")).toBe(false);
+    expect(s.trustedEntries().has("coord-ord")).toBe(true);
+  });
+
   it("skips a listed coordinator that presents another key", async () => {
     const { key, ord, fra, coords } = world();
     ord.presentKeys = createPeerKeys("coord-ord");

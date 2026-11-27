@@ -147,10 +147,14 @@ function cleanCoordinator(raw: unknown): Json | null {
     agentsOnline: count(c.agentsOnline),
     reachable: c.reachable !== false,
     self: c.self === true,
+    // The signed registry's listing, for the label on the Network page.
+    registryStatus: REGISTRY_STATUSES.has(c.registryStatus as string) ? (c.registryStatus as string) : null,
     myRttMs: null,
     pingUrl: c.reachable === false ? null : pingUrlFor(url)
   };
 }
+
+const REGISTRY_STATUSES: ReadonlySet<string> = new Set(["platform", "probation", "active", "suspended"]);
 
 /** The coordinator's /network/world answer, rebuilt from the allowlist. */
 export function cleanWorld(raw: unknown): Json {

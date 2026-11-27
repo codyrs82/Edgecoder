@@ -6,6 +6,7 @@ import { settingRow, settingsPage } from "./settings-shell.js";
 import { HOST_ADMIN_JS } from "./host-admin.js";
 import { machinesPageScript, machinesSectionHtml } from "./settings-machines.js";
 import { securityResearchScript, securityResearchSectionHtml } from "./settings-security-research.js";
+import { registryAdminScript, registryAdminSectionHtml } from "./settings-registry-admin.js";
 import { INSTALL_LINKS, serverInstallCommand } from "../../common/onboarding.js";
 
 /** Settings > Nodes (/portal/settings/nodes) and Settings > Admin (/portal/settings/admin). */
@@ -281,6 +282,7 @@ app.get("/portal/settings/admin", async (_req, reply) => {
     </div>
     </div>
     ${securityResearchSectionHtml}
+    ${registryAdminSectionHtml}
     <div id="userMgmtSection" class="hidden">
     <div class="card">
       <h2 class="u-mt-0">User management</h2>
@@ -654,6 +656,7 @@ app.get("/portal/settings/admin", async (_req, reply) => {
     });
 
     ${securityResearchScript}
+    ${registryAdminScript}
     /* ── User management (admin only; routes/admin-users.ts) ── */
     // ?user=<email or id> (the new sign-up alert links here) opens the list searched for that account.
     const userView = { filter: "all", q: (new URLSearchParams(location.search).get("user") || "").trim().slice(0, 200), page: 1, pages: 1, selfUserId: "" };
@@ -827,6 +830,8 @@ app.get("/portal/settings/admin", async (_req, reply) => {
       loadHostRequests();
       document.getElementById("securityResearchSection").classList.remove("hidden");
       loadSecurityResearch();
+      document.getElementById("registryAdminSection").classList.remove("hidden");
+      loadRegistryAdmin();
       await loadHostDirectory();
       onHostDirectoryChange(function() { loadUserManagement(); loadHostRequests(); renderApproved(); });
       document.getElementById("userMgmtSection").classList.remove("hidden");

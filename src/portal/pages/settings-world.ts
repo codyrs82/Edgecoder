@@ -324,10 +324,19 @@ export const WORLD_RENDER_SCRIPT = `
       }).join("") + "</ul>";
     }
 
+    /* The signed registry's listing: EdgeCoder's own, a community coordinator on probation, active, or suspended. */
+    function wvRegistryLabel(status) {
+      if (status === "platform") return " · EdgeCoder";
+      if (status === "probation") return " · community, on probation";
+      if (status === "active") return " · community";
+      if (status === "suspended") return " · suspended";
+      return "";
+    }
+
     function wvCoordsHtml(view) {
       var rows = view.coordinators.map(function (c) {
         return "<div class='wv-crow'><span class='wv-cdot" + (c.reachable ? " on" : " err") + "' aria-hidden='true'></span>" +
-          "<div class='wv-ctext'><span class='wv-ctitle'>" + escapeHtml(hostOf(c.url) + (c.self ? " · answering" : "")) + "</span>" +
+          "<div class='wv-ctext'><span class='wv-ctitle'>" + escapeHtml(hostOf(c.url) + (c.self ? " · answering" : "") + wvRegistryLabel(c.registryStatus)) + "</span>" +
           "<span class='wv-desc'>" + escapeHtml((c.region || "region unknown") + (c.continent ? " · " + continentName(c.continent) : "") + " · " + (c.reachable ? wvPlural(c.agentsOnline, "machine") + " online" : "not reachable right now")) + "</span></div>" +
           "<span class='wv-desc'>Your round trip " + escapeHtml(formatMs(c.myRttMs)) + "</span></div>";
       });

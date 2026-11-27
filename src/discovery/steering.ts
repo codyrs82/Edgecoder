@@ -12,7 +12,7 @@
 import { fingerprintMatches } from "../security/key-fingerprint.js";
 import type { FetchLike } from "./selector.js";
 import { normalizeCoordinatorUrl } from "./types.js";
-import { verifySignedRegistry, type RegistryEntry, type RegistryPayload } from "./registry.js";
+import { memberSteerable, memberTrusted, verifySignedRegistry, type RegistryEntry, type RegistryPayload } from "./registry.js";
 
 export interface RegistryCache {
   read(): string | null;
@@ -255,6 +255,11 @@ export interface SteeringOptions {
   hysteresis?: Partial<Hysteresis>;
   /** Most entries probed per round (default 16). */
   maxProbes?: number;
+  /**
+   * Also steer to active community (outside) coordinators. Off: only EdgeCoder's own active
+   * coordinators are picked, as long as outside coordinators cannot bill (docs/discovery.md).
+   */
+  includeOutside?: boolean;
 }
 
 export interface CoordinatorSteering {
@@ -299,8 +304,9 @@ export function createCoordinatorSteering(opts: SteeringOptions): CoordinatorSte
       if (!loaded.ok) return (last = fallback(`registry_unavailable: ${loaded.errors.join("; ").slice(0, 300)}`));
       const reg = loaded.loaded.registry;
       highestIssuedAt = Math.max(highestIssuedAt, reg.issuedAtMs);
-      entries = new Map(reg.coordinators.map((c) => [c.peerId, c.publicKeyFingerprint]));
-      const healthy = reg.coordinators.filter((c) => c.health.status === "healthy");
+      // Suspended members are listed so peers drop them; they are never trusted or picked.
+      entries = new Map(reg.coordinators.filter((c) => memberTrusted(c)).map((c) => [c.peerId, c.publicKeyFingerprint]));
+      const healthy = reg.coordinators.filter((c) => c.health.status === "healthy" && memberSteerable(c, opts.includeOutside === true));
       const pairs: Array<{ entry: RegistryEntry; url: string }> = [];
       for (const entry of healthy) {
         for (const raw of entry.urls.slice(0, 2)) {

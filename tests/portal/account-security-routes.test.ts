@@ -191,6 +191,9 @@ describe("admin actions and 2FA", () => {
     expect(isAdminActionRoute("POST", "/portal/api/admin/hosts")).toBe(true);
     expect(isAdminActionRoute("DELETE", "/coordinator/ops/x")).toBe(true);
     expect(isAdminActionRoute("POST", "/admin/network/registry/suspend")).toBe(true);
+    // registry approvals carry their own passkey assertion for that approval (coordinator-registry.ts)
+    expect(isAdminActionRoute("POST", "/admin/network/registry/approve")).toBe(false);
+    expect(isAdminActionRoute("POST", "/admin/network/registry/passkey-options")).toBe(false);
     expect(isAdminActionRoute("GET", "/portal/api/admin/users")).toBe(false);
     expect(isAdminActionRoute("POST", "/portal/api/keys")).toBe(false);
   });
