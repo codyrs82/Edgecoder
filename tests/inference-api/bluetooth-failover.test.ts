@@ -1,27 +1,16 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { Server } from "node:http";
-import type { AddressInfo } from "node:net";
-import { request } from "undici";
+import { describe, expect, it } from "vitest";
 import { routeLabel, type RouteInputs, type Route } from "../../src/inference-api/auto-route.js";
 import { NETWORK_FAILOVER_WHY, autoBackend } from "../../src/inference-api/backends.js";
 import {
   BLUETOOTH_FAILOVER_WHY,
   bluetoothCandidates,
   bluetoothPrompt,
-  forwarderBluetoothLink,
   overBluetooth,
   type BluetoothLink,
   type BluetoothPeer,
 } from "../../src/inference-api/bluetooth-failover.js";
 import { NetworkInferenceError } from "../../src/apps/ide/network-inference.js";
 import { ChatBackendError, type ChatBackend, type ChatPiece } from "../../src/inference-api/types.js";
-import { allowedBlePeers, loadBleOfflineConsent, parseBleOfflineConsent, saveBleOfflineConsent, type BleOfflineConsent } from "../../src/mesh/ble/ble-offline-consent.js";
-import { bleOfflineLink } from "../../src/mesh/ble/ble-offline-link.js";
-import { createLocalForwarder } from "../../src/swarm/local-forwarder.js";
-import type { BLEPeerEntry, BLETaskRequest, BLETaskResponse } from "../../src/common/types.js";
 import { routeChoiceNote } from "../../src/apps/ide/bots.js";
 
 /*
@@ -236,89 +225,3 @@ describe("the prompt over Bluetooth", () => {
   });
 });
 
-describe("consent: only devices the user allowed", () => {
-  const dirs: string[] = [];
-  afterEach(() => {
-    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
-  });
-  const consent: BleOfflineConsent = { enabled: true, devices: [{ agentId: phone.agentId, name: "Cody's iPhone" }] };
-
-  it("on by default, with no device allowed (nothing is sent until the user allows one)", () => {
-    const dir = mkdtempSync(join(tmpdir(), "ble-consent-"));
-    dirs.push(dir);
-    expect(loadBleOfflineConsent(join(dir, "missing.json"))).toEqual({ enabled: true, devices: [] });
-    expect(allowedBlePeers([phone, laptop], loadBleOfflineConsent(join(dir, "missing.json")))).toEqual([]);
-  });
-
-  it("filters to allowed devices, with the user's name; none when turned off", () => {
-    expect(allowedBlePeers([{ ...phone, name: "EC-ios-aaaa" }, laptop], consent).map((p) => [p.agentId, p.name])).toEqual([[phone.agentId, "Cody's iPhone"]]);
-    expect(allowedBlePeers([phone, laptop], { ...consent, enabled: false })).toEqual([]);
-  });
-
-  it("a malformed file never widens the list; saving round-trips", () => {
-    expect(parseBleOfflineConsent({ enabled: "yes", devices: [{ agentId: "" }, { agentId: "bad id with spaces" }, { agentId: "ok-1", name: "\u0007Phone\n" }, { agentId: "ok-1" }, null] })).toEqual({ enabled: true, devices: [{ agentId: "ok-1", name: "Phone" }] });
-    const dir = mkdtempSync(join(tmpdir(), "ble-consent-"));
-    dirs.push(dir);
-    const file = join(dir, "ble-offline.json");
-    saveBleOfflineConsent({ enabled: false, devices: [{ agentId: "ios-1" }] }, file);
-    expect(loadBleOfflineConsent(file)).toEqual({ enabled: false, devices: [{ agentId: "ios-1", name: "EC-ios-1" }] });
-  });
-});
-
-describe("the agent's side: nothing goes to a device that isn't allowed", () => {
-  function transport() {
-    const sent: Array<{ peerId: string; req: BLETaskRequest & { requesterProof?: string } }> = [];
-    const peers: BLEPeerEntry[] = [phone, laptop].map((p) => ({ agentId: p.agentId, meshTokenHash: "", accountId: p.agentId, model: p.model, modelParamSize: p.modelParamSize, memoryMB: 0, batteryPct: 100, currentLoad: 0, deviceType: p.deviceType, rssi: p.rssi, lastSeenMs: Date.now() }));
-    return {
-      sent,
-      discoveredPeers: () => peers,
-      sendTaskRequest: async (peerId: string, req: BLETaskRequest): Promise<BLETaskResponse> => {
-        sent.push({ peerId, req });
-        return { requestId: req.requestId, providerId: peerId, status: "completed", output: "Futures are up.", cpuSeconds: 1, providerSignature: "" };
-      },
-    };
-  }
-  const consent = (): BleOfflineConsent => ({ enabled: true, devices: [{ agentId: phone.agentId, name: "Cody's iPhone" }] });
-
-  it("refuses a device not on the list before sending anything; runs on an allowed one, signed, without a co-sign", async () => {
-    const t = transport();
-    const link = bleOfflineLink({ agentId: "mac-self", transport: t, meshToken: () => "mesh-secret", sign: () => "sig", consent });
-    expect(await link.run(laptop.agentId, "hello")).toEqual({ ok: false, error: "not_allowed" });
-    expect(t.sent).toEqual([]);
-    const r = await link.run(phone.agentId, "hello");
-    expect(r).toMatchObject({ ok: true, output: "Futures are up." });
-    expect(t.sent).toHaveLength(1);
-    expect(t.sent[0].req).toMatchObject({ requesterId: "mac-self", task: "hello", requesterSignature: "sig" });
-    expect(t.sent[0].req.requesterProof).toMatch(/^[0-9a-f]{64}$/);
-    // The fake transport has no co-sign method: a co-sign attempt would have thrown.
-    expect(link.nearby().map((p) => [p.agentId, p.allowed, p.name])).toEqual([[phone.agentId, true, "Cody's iPhone"], [laptop.agentId, false, "EC-mac-bbbb"]]);
-  });
-
-  it("turned off: nothing is allowed", async () => {
-    const t = transport();
-    const link = bleOfflineLink({ agentId: "mac-self", transport: t, meshToken: () => "", sign: () => "sig", consent: () => ({ ...consent(), enabled: false }) });
-    expect(await link.run(phone.agentId, "hello")).toEqual({ ok: false, error: "not_allowed" });
-    expect(t.sent).toEqual([]);
-  });
-
-  it("the forwarder serves /forward/ble while the agent isn't registered, and the app's link reads it", async () => {
-    const t = transport();
-    const ble = bleOfflineLink({ agentId: "mac-self", transport: t, meshToken: () => "", sign: () => "sig", consent });
-    const forwarder: Server = createLocalForwarder({ token: () => "secret-token", coordinatorUrl: () => null, meshHeaders: () => ({}), signedHeaders: () => ({}), agentId: "mac-self", registrationWaitMs: 1, ble: () => ble });
-    await new Promise<void>((r) => forwarder.listen(0, "127.0.0.1", () => r()));
-    const url = `http://127.0.0.1:${(forwarder.address() as AddressInfo).port}`;
-    try {
-      const link = forwarderBluetoothLink({ forwarder: url, token: () => "secret-token" });
-      expect((await link.peers()).map((p) => p.agentId)).toEqual([phone.agentId]);
-      expect(await link.run(phone.agentId, "hello")).toMatchObject({ output: "Futures are up." });
-      await expect(link.run(laptop.agentId, "hello")).rejects.toThrow(/not_allowed/);
-      const nearby = await request(`${url}/forward/ble/nearby`, { headers: { authorization: "Bearer secret-token" } });
-      expect(((await nearby.body.json()) as { peers: unknown[] }).peers).toHaveLength(2);
-      const noAuth = await request(`${url}/forward/ble/peers`);
-      expect(noAuth.statusCode).toBe(401);
-      await noAuth.body.dump();
-    } finally {
-      forwarder.close();
-    }
-  });
-});

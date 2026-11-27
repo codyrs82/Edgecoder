@@ -124,7 +124,7 @@ export class NobleBLETransport implements BLETransport {
   /** Current identity and capabilities, read when a peer asks (so updates need no re-registration). */
   private identityBytes(): Buffer {
     const ad = this.advertisement;
-    return Buffer.from(JSON.stringify({ agentId: ad?.agentId, model: ad?.model, modelParamSize: ad?.modelParamSize, meshTokenHash: ad?.meshTokenHash ?? "" }));
+    return Buffer.from(JSON.stringify({ agentId: ad?.agentId, model: ad?.model, modelParamSize: ad?.modelParamSize, meshTokenHash: ad?.meshTokenHash ?? "", ...(ad?.sealKey ? { sealKey: ad.sealKey } : {}) }));
   }
 
   private capabilityBytes(): Buffer {
@@ -691,6 +691,8 @@ export class NobleBLETransport implements BLETransport {
                       deviceType: "phone",
                       rssi: peripheral.rssi ?? -60,
                       lastSeenMs: Date.now(),
+                      // Its seal key (ble-seal.ts), checked against the key pinned when it was allowed.
+                      ...(typeof parsed.sealKey === "string" && /^[A-Za-z0-9+/]{43}=$/.test(parsed.sealKey) ? { sealKey: parsed.sealKey } : {}),
                     };
                     this.peers.set(agentId, peer);
                     // Store peripheral ref for task routing

@@ -624,6 +624,8 @@ export interface BLEPeerEntry {
   lastSeenMs: number;
   taskSuccessCount?: number;
   taskFailCount?: number;
+  /** The X25519 seal key it publishes (base64; src/mesh/ble/ble-seal.ts); absent on older versions. */
+  sealKey?: string;
 }
 
 export interface BLETaskRequest {

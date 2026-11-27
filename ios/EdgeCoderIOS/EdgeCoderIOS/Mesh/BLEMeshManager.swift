@@ -63,6 +63,11 @@ final class BLEMeshManager: NSObject, ObservableObject {
     var currentAccountId: String?
     /// The Keychain agent key (KeychainEd25519): signs this device's side of BLE credit transactions.
     var signingKey: Curve25519.Signing.PrivateKey?
+    /// This device's seal key for sealed requests, derived from the agent key (stable across launches).
+    private var sealKey: Curve25519.KeyAgreement.PrivateKey? { signingKey.map(BLESeal.sealKey(from:)) }
+    /// Sealed requests already answered (requestId -> when it goes stale), so one can't be replayed.
+    private var sealedSeen: [String: Date] = [:]
+    private static let sealedMaxSkew: TimeInterval = 120
     /// Tasks served recently, by requestId, for the co-sign step.
     private var servedTasks: [String: ServedBLETask] = [:]
     private static let servedTaskTTL: TimeInterval = 15 * 60
@@ -202,11 +207,17 @@ final class BLEMeshManager: NSObject, ObservableObject {
 
         let service = CBMutableService(type: BLEMeshConstants.serviceUUID, primary: true)
 
-        let identityData = try? JSONSerialization.data(withJSONObject: [
+        var identity: [String: Any] = [
             "agentId": agentId,
             "model": model,
             "modelParamSize": modelParamSize
-        ])
+        ]
+        // The seal key a Mac pins when its user allows this device; it then seals prompts to it
+        // (BLESeal in OfflineLedger.swift, src/mesh/ble/ble-seal.ts).
+        if let key = sealKey {
+            identity["sealKey"] = key.publicKey.rawRepresentation.base64EncodedString()
+        }
+        let identityData = try? JSONSerialization.data(withJSONObject: identity)
 
         let identityChar = CBMutableCharacteristic(
             type: BLEMeshConstants.peerIdentityUUID,
@@ -320,6 +331,10 @@ final class BLEMeshManager: NSObject, ObservableObject {
             handleCosignRequest(json, central: central)
             return
         }
+        if json["type"] as? String == "sealed_task" {
+            handleSealedTaskRequest(json, central: central)
+            return
+        }
         guard let requestId = json["requestId"] as? String,
               let task = json["task"] as? String,
               let requesterId = json["requesterId"] as? String else {
@@ -407,6 +422,56 @@ final class BLEMeshManager: NSObject, ObservableObject {
             await MainActor.run {
                 if result.ok { bleTasksCompleted += 1 }
             }
+        }
+    }
+
+    /// A sealed request (BLESeal): only this device can read the prompt, and the answer is sealed back
+    /// so the requester knows this device wrote it. Same limits as a plain request (serving only while
+    /// charging, one at a time, 5 s apart, 16 KiB prompts), plus freshness and no replays. Refusals
+    /// before opening are plain and carry nothing of the prompt; nothing is co-signed or paid.
+    private func handleSealedTaskRequest(_ json: [String: Any], central: CBCentral) {
+        let requestId = (json["requestId"] as? String) ?? ""
+        let providerId = currentAgentId ?? "unknown"
+        func refuse(_ reason: String) {
+            print("[BLE] sealed request \(requestId.prefix(64)) refused: \(reason)")
+            let refusal: [String: Any] = ["requestId": requestId, "providerId": providerId, "status": "failed", "output": reason, "cpuSeconds": 0, "providerSignature": ""]
+            if let data = try? JSONSerialization.data(withJSONObject: refusal) { sendNotify(data, to: central, label: "sealed \(requestId)") }
+        }
+        guard isServing else { return refuse(HostingPowerPolicy.notChargingReply) }
+        guard let own = sealKey, let handler = taskHandler else { return refuse("unavailable") }
+        let opened: BLESeal.OpenedRequest
+        do {
+            opened = try BLESeal.openRequest(json, own: own)
+        } catch BLESeal.SealError.keyMismatch {
+            return refuse("key_mismatch")
+        } catch {
+            return refuse("seal_invalid")
+        }
+        let now = Date()
+        sealedSeen = sealedSeen.filter { $0.value > now }
+        guard abs(now.timeIntervalSince1970 * 1000 - opened.issuedAtMs) <= Self.sealedMaxSkew * 1000 else { return refuse("proof_expired") }
+        guard sealedSeen[opened.requestId] == nil else { return refuse("request_replayed") }
+        guard !bleTaskInFlight else { return refuse("busy") }
+        let centralId = central.identifier
+        if let last = lastBleTaskAt[centralId], now.timeIntervalSince(last) < Self.bleTaskMinInterval { return refuse("rate_limited") }
+        sealedSeen[opened.requestId] = now.addingTimeInterval(Self.sealedMaxSkew)
+        lastBleTaskAt[centralId] = now
+        let reply = { (ok: Bool, output: String, cpuSeconds: Double) in
+            if let sealed = try? BLESeal.sealReply(replyKey: opened.replyKey, requestId: opened.requestId, providerId: providerId, plaintext: BLESeal.replyPlaintext(ok: ok, output: output, cpuSeconds: cpuSeconds)),
+               let data = try? JSONSerialization.data(withJSONObject: sealed) {
+                self.sendNotify(data, to: central, label: "sealed \(opened.requestId)")
+            }
+        }
+        guard opened.task.utf8.count <= Self.bleTaskMaxPromptBytes else { return reply(false, "task_too_large", 0) }
+        bleTaskInFlight = true
+        bleTasksReceived += 1
+        // The prompt is not logged: it is the requester's data.
+        print("[BLE] sealed task \(opened.requestId) from \(opened.requesterId) (\(opened.task.utf8.count) bytes)")
+        Task {
+            defer { bleTaskInFlight = false }
+            let result = await handler(opened.task)
+            reply(result.ok, result.output, Double(max(0, result.durationMs)) / 1000.0)
+            if result.ok { bleTasksCompleted += 1 }
         }
     }
 

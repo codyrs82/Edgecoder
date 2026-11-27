@@ -145,6 +145,8 @@
   // default, but only devices allowed here are ever sent a bot's prompt. Applies at once.
   let bleOffline = $state<BleOfflineSetting>({ enabled: true, devices: [] });
   let bleNearby = $state<BleNearbyDevice[]>([]);
+  /** Allowed devices nearby that now advertise a different key than the one pinned: skipped. */
+  let bleMismatch = $state<string[]>([]);
   let bleOfflineNote = $state("");
   let bleOfflineSaving = $state(false);
   $effect(() => {
@@ -154,7 +156,8 @@
   async function refreshBleNearby() {
     try {
       const r = await listBleNearby();
-      bleNearby = r.peers.filter((p) => !p.allowed);
+      bleNearby = r.peers.filter((p) => !p.pinned);
+      bleMismatch = r.peers.filter((p) => p.pinned && p.keyMatches === false).map((p) => p.name);
       if (!r.available) bleOfflineNote = "Nearby devices show here while this computer's agent runs with Bluetooth on.";
     } catch {
       bleNearby = [];
@@ -177,9 +180,12 @@
   }
   /** The name typed for each nearby device before allowing it (shown as "Over Bluetooth: <name>"). */
   let bleNameDraft = $state<Record<string, string>>({});
+  // Allowing pins the key the device advertises now: prompts are sealed to it, and a device that
+  // later shows another key is skipped (src/mesh/ble/ble-seal.ts).
   function allowBleDevice(d: BleNearbyDevice) {
+    if (!d.sealKey) return;
     const name = (bleNameDraft[d.agentId] ?? "").trim() || d.name;
-    void saveBleOffline({ ...bleOffline, devices: [...bleOffline.devices, { agentId: d.agentId, name }] });
+    void saveBleOffline({ ...bleOffline, devices: [...bleOffline.devices, { agentId: d.agentId, name, sealKey: d.sealKey }] });
   }
 
   // Code from your phone (src/common/code-relay.ts): the app keeps the choice and restarts its agent
@@ -574,7 +580,7 @@
             When this Mac can't reach EdgeCoder over the internet, it can find nearby EdgeCoder devices over Bluetooth and get AI prompts answered by them; nearby devices can find this Mac too. Payment is signed by both devices and settled once one of them is back online.
           </span>
           <span class="sp-desc">
-            Prompts and answers travel to the nearby device without encryption, so don't send secrets. This Mac runs prompts for others only if an operator has set a mesh token (off by default), and never runs code from Bluetooth. Early feature: macOS and iOS only. It scans only while offline; advertising uses little power.
+            Plain prompts and answers travel to the nearby device without encryption, so don't send secrets; bots' offline calls (below) are encrypted to the device you allowed. This Mac runs prompts for others only if an operator has set a mesh token (off by default) or the request is encrypted by a device you allowed below, and never runs code from Bluetooth. Early feature: macOS and iOS only. It scans only while offline; advertising uses little power.
             <button class="link-inline" onclick={() => openPortalPage("/bluetooth")}>Learn more ↗</button>
           </span>
           {#if bleNote}<span class="sp-desc" role="status">{bleNote}</span>{/if}
@@ -587,8 +593,11 @@
         <div class="sp-text">
           <span class="sp-title">Use my nearby devices over Bluetooth when offline</span>
           <span class="sp-desc" data-testid="ble-offline-description">
-            When a bot on Network only can't reach the network and this computer can't run the call, one of the devices you allow below runs it over Bluetooth, free, and the bot goes back to the network once it's reachable. Only devices you allow here are ever sent a prompt. The prompt goes as plain text (no tools), unencrypted, and an iPhone answers only while it's charging.
+            When a bot on Network only can't reach the network and this computer can't run the call, one of the devices you allow below runs it over Bluetooth, free, and the bot goes back to the network once it's reachable. Allowing a device saves its key: prompts are encrypted to that key, so only that device can read them, and a device showing a different key is skipped. Prompts go as text (no tools), and an iPhone answers only while it's charging. Devices you allow here can also send this computer their own sealed requests.
           </span>
+          {#each bleMismatch as name (name)}
+            <span class="sp-desc" role="status">{name} is nearby but shows a different key than when you allowed it, so it's skipped. If you reinstalled EdgeCoder on it, remove it and allow it again.</span>
+          {/each}
           {#if bleOffline.devices.length}
             <span class="sp-desc">Allowed:</span>
             {#each bleOffline.devices as d (d.agentId)}
@@ -600,7 +609,7 @@
           {#if bleNearby.length}
             <span class="sp-desc">Nearby now:</span>
             {#each bleNearby as d (d.agentId)}
-              <span class="sp-desc">{d.name} · {d.model || "no model"} · {d.deviceType} <input type="text" placeholder="Name (e.g. My iPhone)" aria-label={`Name for ${d.name}`} maxlength="60" bind:value={bleNameDraft[d.agentId]} /> <button class="link-inline" disabled={bleOfflineSaving} onclick={() => allowBleDevice(d)}>Allow</button></span>
+              <span class="sp-desc">{d.name} · {d.model || "no model"} · {d.deviceType} <input type="text" placeholder="Name (e.g. My iPhone)" aria-label={`Name for ${d.name}`} maxlength="60" bind:value={bleNameDraft[d.agentId]} /> {#if d.sealKey}<button class="link-inline" disabled={bleOfflineSaving} onclick={() => allowBleDevice(d)}>Allow</button>{:else}(needs a newer EdgeCoder version to be allowed){/if}</span>
             {/each}
           {/if}
           <span class="sp-desc"><button class="link-inline" onclick={() => void refreshBleNearby()}>Look for nearby devices</button></span>

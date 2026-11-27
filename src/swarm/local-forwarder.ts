@@ -99,14 +99,21 @@ export interface ForwarderBlePeer {
   modelParamSize: number;
   deviceType: "phone" | "laptop" | "workstation";
   rssi: number;
+  /** The seal key it publishes (base64; src/mesh/ble/ble-seal.ts), pinned when the user allows it. */
+  sealKey?: string;
+  /** Usable now: allowed, sending on, and advertising the key pinned for it. */
   allowed: boolean;
+  /** On the user's list (whatever key it advertises now). */
+  pinned?: boolean;
+  /** On the list: whether it advertises the pinned key. */
+  keyMatches?: boolean;
 }
 
 export interface LocalForwarderBle {
   /** Every EdgeCoder device nearby now, each marked whether the user allowed it. */
   nearby(): ForwarderBlePeer[];
-  /** Run `prompt` on `agentId`; refuses (not_allowed) a device the user hasn't allowed. */
-  run(agentId: string, prompt: string): Promise<{ ok: true; output: string; ms: number } | { ok: false; error: "not_allowed" | "failed"; detail?: string }>;
+  /** Run `prompt` sealed to `agentId`'s pinned key; refuses (not_allowed, key_mismatch) before sending anything. */
+  run(agentId: string, prompt: string): Promise<{ ok: true; output: string; ms: number } | { ok: false; error: "not_allowed" | "key_mismatch" | "failed"; detail?: string }>;
 }
 
 const MAX_BLE_PROMPT_BYTES = 64 * 1024;
@@ -127,7 +134,7 @@ async function handleBle(deps: LocalForwarderDeps, req: IncomingMessage, res: Se
     if (Buffer.byteLength(body.prompt, "utf8") > MAX_BLE_PROMPT_BYTES) return send(res, 413, { error: "prompt_too_large" });
     const r = await ble.run(body.agentId, body.prompt);
     if (r.ok) return send(res, 200, { output: r.output, ms: r.ms });
-    return send(res, r.error === "not_allowed" ? 403 : 502, { error: r.error, ...(r.detail ? { detail: r.detail } : {}) });
+    return send(res, r.error === "not_allowed" || r.error === "key_mismatch" ? 403 : 502,{ error: r.error, ...(r.detail ? { detail: r.detail } : {}) });
   }
   return send(res, 404, { error: "not_found" });
 }

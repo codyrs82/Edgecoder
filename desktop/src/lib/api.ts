@@ -1439,16 +1439,26 @@ export const setSandboxSetting = (enabled: boolean) => fsCall<SandboxSettingView
 export interface BleOfflineDevice {
   agentId: string;
   name: string;
+  /** The device's seal key, pinned when you allow it: prompts are sealed to it. */
+  sealKey: string;
 }
 export interface BleOfflineSetting {
   enabled: boolean;
   devices: BleOfflineDevice[];
 }
-export interface BleNearbyDevice extends BleOfflineDevice {
+export interface BleNearbyDevice {
+  agentId: string;
+  name: string;
+  /** Absent on a device whose EdgeCoder version can't take sealed requests yet (it can't be allowed). */
+  sealKey?: string;
   model: string;
   deviceType: "phone" | "laptop" | "workstation";
   rssi: number;
   allowed: boolean;
+  /** On your list. */
+  pinned?: boolean;
+  /** On your list: whether it still advertises the key pinned when you allowed it. */
+  keyMatches?: boolean;
 }
 export const getBleOfflineSetting = () => fsCall<BleOfflineSetting>("GET", "/v1/ide/bluetooth/offline");
 export const setBleOfflineSetting = (s: BleOfflineSetting) => fsCall<BleOfflineSetting>("POST", "/v1/ide/bluetooth/offline", s);

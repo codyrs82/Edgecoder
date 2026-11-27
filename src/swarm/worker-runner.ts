@@ -73,6 +73,10 @@ import { autoUpdateSetting } from "../install/update-schedule.js";
 import { startUpdateDrain } from "./update-drain.js";
 import { createLocalForwarder, type LocalForwarderBle } from "./local-forwarder.js";
 import { bleOfflineLink as makeBleOfflineLink } from "../mesh/ble/ble-offline-link.js";
+import { loadBleOfflineConsent, pinnedSealKey } from "../mesh/ble/ble-offline-consent.js";
+import { bleSealKeyPairFromPem } from "../mesh/ble/ble-seal.js";
+import { bleSealedResponder } from "../mesh/ble/ble-sealed-responder.js";
+import type { BLETaskResponse } from "../common/types.js";
 import { ServingJobs } from "./serving-jobs.js";
 import { AgentLifecycle, DEFAULT_DRAIN_MS, announceGoingOffline, blacklistReasonFromError, handBackOnCriticalPressure, type GoingOfflineReason } from "./agent-lifecycle.js";
 import { resolveIdeToken } from "../apps/ide/ide-auth.js";
@@ -2099,6 +2103,7 @@ async function loop(): Promise<void> {
   if (OS === "macos" && !W.EDGECODER_BLE) console.log(`[agent:${AGENT_ID}] BLE mesh off (turned off in settings)`);
   if (OS === "macos" && W.EDGECODER_BLE) {
     try {
+      const bleSealKey = bleSealKeyPairFromPem(keys.privateKeyPem);
       bleTransport = new NobleBLETransport(AGENT_ID);
       await bleTransport.init();
       bleMesh = new BLEMeshManager(AGENT_ID, rewardAccountId, bleTransport, localStore, { privateKeyPem: keys.privateKeyPem });
@@ -2121,18 +2126,30 @@ async function loop(): Promise<void> {
         currentLoad: 0,
         deviceType: "laptop",
         meshTokenHash: computeMeshTokenHash(),
+        // Published so the user can pin it when allowing this Mac on another device (ble-seal.ts).
+        sealKey: bleSealKey.publicKey.toString("base64"),
       });
       bleTransport.startScanning();
-      // The app's calls while the network is out of reach: allowed nearby devices only, free (no co-sign).
-      bleOfflineLink = makeBleOfflineLink({
+      // The app's calls while the network is out of reach: allowed nearby devices only, sealed to the
+      // key pinned for each, free (no co-sign).
+      bleOfflineLink = makeBleOfflineLink({ agentId: AGENT_ID, transport: bleTransport, ownKey: bleSealKey });
+      // Sealed requests: admitted without a mesh token from a device on this Mac's own list whose
+      // pinned key the request proves (ble-sealed-responder.ts). Free: no co-sign.
+      const answerSealed = bleSealedResponder({
         agentId: AGENT_ID,
-        transport: bleTransport,
-        meshToken: () => meshAuthToken,
-        sign: (payload) => signPayload(payload, keys.privateKeyPem),
+        ownKey: bleSealKey,
+        senderAllowed: (requesterId, senderKey) => pinnedSealKey(requesterId, loadBleOfflineConsent()) === senderKey.toString("base64"),
+        run: async (task) => {
+          const started = Date.now();
+          const response = await providers.current().generate({ prompt: task });
+          return { ok: true, output: response.text, durationMs: Date.now() - started };
+        },
+        log: (line) => console.warn(line),
       });
 
       // Register handler for incoming BLE task requests (from iOS peers)
       bleTransport.onTaskRequest(async (req) => {
+        if ((req as { type?: unknown }).type === "sealed_task") return (await answerSealed(req)) as unknown as BLETaskResponse;
         // Admission: no mesh token here means no remote BLE work at all; otherwise the request must
         // carry a proof keyed with the mesh token (the advertised hash is public, not a
         // credential), within size and rate limits. See src/mesh/ble/ble-request-guard.ts.

@@ -5,16 +5,19 @@
  * Which nearby devices may run this computer's model calls over Bluetooth while the network can't
  * be reached (src/inference-api/bluetooth-failover.ts), and whether that is on at all.
  *
- * The BLE mesh can't prove that a nearby device belongs to the same owner account: a device's agent
- * id is read from its own identity characteristic (self-asserted), there is no pairing, and the
- * co-sign step (ble-cosign.ts) only signs after the prompt was already sent. So nothing is trusted
- * by default: only devices the user allowed by hand are used, and an empty list means no Bluetooth
- * failover at all. The setting itself ("Use my nearby devices over Bluetooth when offline") is on
- * by default.
+ * A device's agent id over BLE is self-asserted, so an allowed device is pinned by its seal key
+ * (ble-seal.ts: the X25519 key it publishes in its identity characteristic, derived from its agent
+ * key) at the moment the user allows it. Prompts are sealed to that pinned key, so only that device
+ * can read them, and only a reply sealed back with it counts. A device advertising another key is
+ * skipped. A device without a seal key (an older version) can't be allowed and is never sent to.
+ *
+ * The same list says which devices this computer answers sealed requests from without a mesh token
+ * (ble-sealed-responder.ts). Nothing is allowed by default; the setting "Use my nearby devices over
+ * Bluetooth when offline" is on by default.
  *
  * Kept in ~/.edgecoder/ble-offline.json (EDGECODER_BLE_OFFLINE_FILE overrides), read by both the
- * app's local server (which edits it) and this computer's agent (which sends the calls and checks
- * the list again before sending anything).
+ * app's local server (which edits it) and this computer's agent (which checks it again, with the
+ * pinned key, before sending anything).
  */
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -26,6 +29,8 @@ export interface BleOfflineDevice {
   agentId: string;
   /** What the user calls it ("Cody's iPhone"); shown as "Over Bluetooth: <name>". */
   name: string;
+  /** The seal key pinned when the user allowed it (base64, 32 raw X25519 bytes). */
+  sealKey: string;
 }
 
 export interface BleOfflineConsent {
@@ -38,13 +43,14 @@ export interface BleOfflineConsent {
 export const DEFAULT_BLE_OFFLINE_CONSENT: BleOfflineConsent = { enabled: true, devices: [] };
 export const MAX_BLE_OFFLINE_DEVICES = 32;
 const AGENT_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
+const SEAL_KEY_RE = /^[A-Za-z0-9+/]{43}=$/;
 
 /** A short name for a device the user didn't name: its Bluetooth name, "EC-" and the id's first 8 characters. */
 export function defaultDeviceName(agentId: string): string {
   return `EC-${agentId.slice(0, 8)}`;
 }
 
-/** A consent from untrusted JSON: anything malformed is dropped, never widened. */
+/** A consent from untrusted JSON: anything malformed (or without a pinned key) is dropped, never widened. */
 export function parseBleOfflineConsent(raw: unknown): BleOfflineConsent {
   const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   const enabled = typeof o.enabled === "boolean" ? o.enabled : DEFAULT_BLE_OFFLINE_CONSENT.enabled;
@@ -52,11 +58,12 @@ export function parseBleOfflineConsent(raw: unknown): BleOfflineConsent {
   const seen = new Set<string>();
   for (const d of Array.isArray(o.devices) ? (o.devices as Array<Record<string, unknown> | null>) : []) {
     const agentId = typeof d?.agentId === "string" ? d.agentId.trim() : "";
-    if (!AGENT_ID_RE.test(agentId) || seen.has(agentId)) continue;
+    const sealKey = typeof d?.sealKey === "string" ? d.sealKey.trim() : "";
+    if (!AGENT_ID_RE.test(agentId) || !SEAL_KEY_RE.test(sealKey) || seen.has(agentId)) continue;
     seen.add(agentId);
     // eslint-disable-next-line no-control-regex
     const name = typeof d?.name === "string" ? d.name.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60) : "";
-    devices.push({ agentId, name: name || defaultDeviceName(agentId) });
+    devices.push({ agentId, name: name || defaultDeviceName(agentId), sealKey });
     if (devices.length >= MAX_BLE_OFFLINE_DEVICES) break;
   }
   return { enabled, devices };
@@ -84,17 +91,22 @@ export function saveBleOfflineConsent(consent: unknown, file = bleOfflineConsent
   return clean;
 }
 
-/**
- * The nearby peers a call may go to: only those the user allowed, with the name the user gave them.
- * None when the setting is off.
- */
-export function allowedBlePeers<T extends { agentId: string }>(peers: readonly T[], consent: BleOfflineConsent): Array<T & { name: string }> {
-  if (!consent.enabled) return [];
-  const names = new Map(consent.devices.map((d) => [d.agentId, d.name]));
-  return peers.filter((p) => names.has(p.agentId)).map((p) => ({ ...p, name: names.get(p.agentId)! }));
+/** The key pinned for `agentId`, when the user allowed it (whether or not sending is on). */
+export function pinnedSealKey(agentId: string, consent: BleOfflineConsent): string | null {
+  return consent.devices.find((d) => d.agentId === agentId)?.sealKey ?? null;
 }
 
-/** Whether a call may go to `agentId` right now. */
+/**
+ * The nearby peers a call may go to: only those the user allowed that advertise the key pinned for
+ * them, with the name the user gave them. None when the setting is off.
+ */
+export function allowedBlePeers<T extends { agentId: string; sealKey?: string }>(peers: readonly T[], consent: BleOfflineConsent): Array<T & { name: string }> {
+  if (!consent.enabled) return [];
+  const byId = new Map(consent.devices.map((d) => [d.agentId, d]));
+  return peers.filter((p) => byId.get(p.agentId)?.sealKey === p.sealKey).map((p) => ({ ...p, name: byId.get(p.agentId)!.name }));
+}
+
+/** Whether a call may go to `agentId` right now (allowed and sending on; the key is checked when sending). */
 export function bleOfflineAllowed(agentId: string, consent: BleOfflineConsent): boolean {
   return consent.enabled && consent.devices.some((d) => d.agentId === agentId);
 }

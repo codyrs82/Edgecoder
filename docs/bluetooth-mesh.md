@@ -37,9 +37,10 @@ The internet path is always preferred. Bluetooth is used only when the coordinat
 
 ## Security and privacy
 
-- **Bluetooth traffic is not encrypted by EdgeCoder.** Devices don't pair, and prompts and outputs travel as plain text. Anyone nearby with Bluetooth tools could capture them, and the device that runs your prompt can read it. **Don't send secrets over Bluetooth mesh.**
-- **Macs refuse incoming Bluetooth work unless an operator sets a mesh token.** Without a token (the default), a Mac still advertises and can be discovered, but it turns down every request. With a token (the `MESH_AUTH_TOKEN` setting), a request must carry a proof made with the same token, issued within the last 2 minutes and never seen before, so it can't be replayed. Prompts are limited to 64 KiB, and each sender to 6 requests a minute (30 a minute in total).
-- **iPhones and iPads** serve nearby devices only while they are charging (or full on the charger). They accept prompts from any nearby EdgeCoder device; requester authentication is not built there yet. They limit prompts to 16 KiB, run one Bluetooth request at a time, and require at least 5 seconds between requests from the same device. The iOS app doesn't log Bluetooth prompts.
+- **Plain Bluetooth requests are not encrypted.** Devices don't pair, and a plain request's prompt and output travel as plain text. Anyone nearby with Bluetooth tools could capture them, and the device that runs your prompt can read it. **Don't send secrets in plain Bluetooth requests.** Sealed requests (below) are encrypted.
+- **Sealed requests.** Each device has a seal key, derived from its agent key, and shows its public half when another device reads its Bluetooth identity. When you allow a device in the desktop app, the app saves (pins) that key. Requests to an allowed device are encrypted to the pinned key, so only that device can read the prompt, and the answer comes back encrypted too, so the app knows that device wrote it. A device that shows a different key is skipped, and a plain-text answer is never used.
+- **Macs refuse incoming Bluetooth work unless an operator sets a mesh token, or the request is sealed by a device on the Mac's own allowed list.** For a sealed request, the request itself proves the sender holds the key the Mac's user pinned for it. Without a token (the default), a Mac still advertises and can be discovered, but it turns down every other request. With a token (the `MESH_AUTH_TOKEN` setting), a request must carry a proof made with the same token, issued within the last 2 minutes and never seen before, so it can't be replayed. Prompts are limited to 64 KiB, and each sender to 6 requests a minute (30 a minute in total).
+- **iPhones and iPads** serve nearby devices only while they are charging (or full on the charger). They accept prompts from any nearby EdgeCoder device; requester authentication is not built there yet. From the next iOS version they also answer sealed requests (iOS 1.0.3 and earlier can't, so a Mac skips them rather than send in plain text). They limit prompts to 16 KiB, run one Bluetooth request at a time, and require at least 5 seconds between requests from the same device. The iOS app doesn't log Bluetooth prompts.
 - **Local history.** A Mac keeps Bluetooth prompts and outputs it ran in its local job history, like other jobs.
 - **Payment records are signed by both sides.** A device signs only a record that matches the work it actually did, and only once per job. The coordinator verifies both signatures against the devices' registered keys and the accounts they belong to. A payer can't claim more CPU time than the request actually took (on Macs). Each record is capped at 100 credits.
 
@@ -69,10 +70,10 @@ Bluetooth mesh is an **early feature**. Built today:
 
 Not built yet, or limited:
 
-- **A Mac does not yet send its own work over Bluetooth** in normal use. It discovers peers and can run work for them, but nothing in the app queues outgoing Bluetooth work yet.
+- **A Mac sends its own work over Bluetooth only for bots.** A bot on Network only whose call can't reach the network, and that this computer can't run either, sends that call sealed to a nearby device you allowed (Settings > General > "Use my nearby devices over Bluetooth when offline", on by default, with no device allowed until you add one). These calls are free: no payment record is made. They carry text only (no tool calls), and a Mac only lists nearby devices while it can't reach the coordinator. Nothing else in the app sends work over Bluetooth yet.
 - **iPhones can't yet send work to Macs.** iOS requests don't carry the mesh-token proof, so Macs refuse them. iPhone-to-iPhone works.
 - iOS devices don't yet check who is sending a request, and the iOS requester doesn't yet cap the CPU time it signs for.
-- No Bluetooth encryption or pairing.
+- No pairing, and plain requests aren't encrypted (sealed requests are). A device's key is trusted when you allow it, so allow a device only when it's yours and nearby.
 - macOS and iOS only: no Linux or Windows support.
 - A Mac currently advertises its model size as unknown, so it earns at the lowest model-size multiplier (0.3) for Bluetooth work.
 - No scan duty cycling, and no separate Bluetooth switch in the iOS app.
@@ -81,5 +82,5 @@ Not built yet, or limited:
 
 - **Desktop app (macOS):** Settings > General > Bluetooth mesh. It is on by default; switching it restarts the agent.
 - **Agent without the app:** set `EDGECODER_BLE=0` to turn it off.
-- **Accepting work on a Mac:** in addition, an operator must set `MESH_AUTH_TOKEN` on the agent, with the same value on every Mac allowed to send it work. Without it the Mac never runs Bluetooth requests.
+- **Accepting work on a Mac:** in addition, an operator must set `MESH_AUTH_TOKEN` on the agent, with the same value on every Mac allowed to send it work. Without it the Mac runs only sealed requests from devices on its own allowed list.
 - **iOS:** the phone serves nearby devices over Bluetooth while hosting runs (Settings > Hosting) and the phone is charging, the same rule as network jobs from the coordinator. On battery it neither advertises nor runs Bluetooth requests. To stop Bluetooth altogether, stop hosting in the app, or turn off Bluetooth access for EdgeCoder in iOS Settings > Privacy & Security > Bluetooth.
