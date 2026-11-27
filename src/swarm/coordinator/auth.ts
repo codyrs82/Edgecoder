@@ -13,6 +13,7 @@ import {
 } from "../coordinator-utils.js";
 import { pgStore } from "../../db/store.js";
 import { checkTokenSet } from "../../common/env-guard.js";
+import { checkPortalInboundToken } from "./portal-credentials.js";
 import { matchesTokenSet } from "../../common/token-rotation.js";
 import { adminOriginDecision, socketAddressOf } from "../../common/admin-origin.js";
 import { PORTAL_ACTION_HEADER, verifyPortalAction, type PortalAction } from "../../security/portal-action.js";
@@ -25,6 +26,7 @@ import {
   MESH_AUTH_TOKENS,
   IS_PROD,
   PORTAL_SERVICE_TOKENS,
+  PORTAL_COORDINATOR_TOKEN,
   ADMIN_API_TOKENS,
   ADMIN_ORIGIN_POLICY,
   PORTAL_ACTION_KEYS,
@@ -58,7 +60,8 @@ export function hasMeshToken(headers: Record<string, unknown>): boolean {
 }
 
 export function hasPortalServiceToken(headers: Record<string, unknown>): boolean {
-  return checkTokenSet(PORTAL_SERVICE_TOKENS, headers["x-portal-service-token"], IS_PROD) === "ok";
+  // The shared outside-coordinator token (PORTAL_COORDINATOR_TOKEN) is never taken as the portal.
+  return checkPortalInboundToken(PORTAL_SERVICE_TOKENS, PORTAL_COORDINATOR_TOKEN, headers["x-portal-service-token"], IS_PROD) === "ok";
 }
 
 /*

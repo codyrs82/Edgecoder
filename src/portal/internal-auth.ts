@@ -11,6 +11,9 @@ import { matchesTokenSet, tokenSet } from "../common/token-rotation.js";
  * - Read and validate routes (nodes/validate, nodes/lookup, nodes/pending, stats/counts) accept the
  *   portal service token (PORTAL_SERVICE_TOKEN) or, when set, the coordinator token
  *   (PORTAL_COORDINATOR_TOKEN). Coordinators should be given only the coordinator token.
+ * - Callers holding the coordinator token (the one shared by every outside coordinator) are scoped:
+ *   /internal/nodes/lookup answers them only about nodes their own coordinator validated, and
+ *   never with owner email, IP or country (routes/internal.ts). `callerKind` tells the two apart.
  * - Mutation routes (node approval) also need the control-plane admin credential
  *   (CONTROL_PLANE_ADMIN_TOKEN, sent as x-admin-token or Authorization: Bearer). A service or
  *   coordinator token alone is refused.
@@ -73,5 +76,18 @@ export function createInternalAuth(cfg: InternalAuthConfig) {
     return false;
   }
 
-  return { requireInternalToken, requireControlPlaneAdmin };
+  /**
+   * Which credential a request that passed requireInternalToken carries. The platform service token
+   * wins when both values match (a misconfiguration that gives the coordinator token full reach).
+   * "open" only when internal auth is unset and PORTAL_ALLOW_OPEN_INTERNAL allows it.
+   */
+  function callerKind(req: Req): "service" | "coordinator" | "open" | null {
+    const provided = header(req.headers, "x-portal-service-token");
+    if (checkTokenSet(serviceTokens, provided, true) === "ok") return "service";
+    if (coordinatorToken && typeof provided === "string" && safeTokenEqual(provided, coordinatorToken)) return "coordinator";
+    if (checkTokenSet(serviceTokens, provided, !cfg.allowOpenWhenUnset) === "ok") return "open";
+    return null;
+  }
+
+  return { requireInternalToken, requireControlPlaneAdmin, callerKind };
 }

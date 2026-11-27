@@ -13,7 +13,21 @@ export { QUIET_ROUTE };
 const logger = moduleLogger("portal-internal");
 
 /** #16: Service-to-service /internal/* routes (#40); registered inside the token-checked plugin. Moved unchanged from server.ts; server.ts passes in what it needs. */
-export function registerInternalRoutes(internal: FastifyInstance, { autoRequestHost, deleteDnsRecord, deriveIosDeviceIdFromNodeId, getCoordinatorHostname, hostApprovedFor, isDnsConfigured, requireControlPlaneAdmin, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store, syncCoordinatorDns }: InternalRoutesDeps): void {
+export function registerInternalRoutes(internal: FastifyInstance, { autoRequestHost, callerKind, deleteDnsRecord, deriveIosDeviceIdFromNodeId, hostApprovedFor, requireControlPlaneAdmin, requireInternalToken, resolveIpIntelligence, secureCompare, sha256Hex, store }: InternalRoutesDeps): void {
+  /**
+   * The calling coordinator's enrolled node id, from x-coordinator-node-id plus its own registration
+   * token (x-coordinator-registration-token, the COORDINATOR_REGISTRATION_TOKEN the portal issued
+   * for it). Null when either is missing or they do not match a coordinator enrollment.
+   */
+  async function callingCoordinator(headers: Record<string, unknown>): Promise<string | null> {
+    const nodeId = typeof headers["x-coordinator-node-id"] === "string" ? headers["x-coordinator-node-id"].trim() : "";
+    const token = typeof headers["x-coordinator-registration-token"] === "string" ? headers["x-coordinator-registration-token"].trim() : "";
+    if (!store || nodeId.length < 3 || token.length < 10) return null;
+    const node = await store.getNodeEnrollment(nodeId);
+    if (!node || node.nodeKind !== "coordinator") return null;
+    return secureCompare(node.registrationTokenHash, sha256Hex(token)) ? node.nodeId : null;
+  }
+
   internal.addHook("onRequest", async (req, reply) => {
     if (!requireInternalToken(req as any, reply)) return reply;
   });
@@ -57,45 +71,22 @@ export function registerInternalRoutes(internal: FastifyInstance, { autoRequestH
     if (!secureCompare(node.registrationTokenHash, sha256Hex(body.registrationToken))) {
       return reply.code(403).send({ allowed: false, reason: "registration_token_invalid" });
     }
+    // Who validated: a platform-token call clears the record; a coordinator-token call that names
+    // its own enrollment sets it (what /internal/nodes/lookup scopes the coordinator token by).
+    const kind = callerKind(req as any);
+    const validatedByCoordinator = kind === "coordinator" ? (await callingCoordinator(req.headers as Record<string, unknown>)) ?? undefined : null;
     const intelligence = await resolveIpIntelligence(body.sourceIp);
     await store.touchNodeValidation({
       nodeId: node.nodeId,
       sourceIp: body.sourceIp,
       countryCode: intelligence.countryCode,
-      vpnDetected: intelligence.vpnDetected
+      vpnDetected: intelligence.vpnDetected,
+      validatedByCoordinator
     });
     const refreshed = await store.getNodeEnrollment(node.nodeId);
     if (!refreshed) return reply.code(404).send({ allowed: false, reason: "node_missing_after_touch" });
-
-    // Sync DNS for coordinator nodes (fire-and-forget)
-    if (
-      refreshed.nodeKind === "coordinator" &&
-      refreshed.active &&
-      body.sourceIp &&
-      isDnsConfigured() &&
-      store &&
-      // Never point a name another coordinator's node ID also maps to (pre-check enrollments).
-      dnsLabelConflicts(refreshed.nodeId, await store.listCoordinatorNodeIds()).length === 0
-    ) {
-      syncCoordinatorDns({
-        nodeId: refreshed.nodeId,
-        sourceIp: body.sourceIp,
-        currentDnsIp: refreshed.dnsIp ?? null,
-        dnsLastUpdatedMs: refreshed.dnsLastUpdatedMs ?? null,
-      })
-        .then(async (result) => {
-          const hostname = refreshed.dnsHostname || getCoordinatorHostname(refreshed.nodeId);
-          await store.updateNodeDns({
-            nodeId: refreshed.nodeId,
-            dnsHostname: hostname,
-            dnsStatus: result.dnsStatus,
-            dnsIp: result.dnsIp,
-          });
-        })
-        .catch((err) =>
-          logger.error({ nodeId: refreshed.nodeId, err }, "DNS sync failed")
-        );
-    }
+    // Coordinator DNS names are not updated from validation calls: body.sourceIp is reported by the
+    // calling coordinator (and on Fly is an egress address, not the ingress one).
 
     const reason = !refreshed.emailVerified
       ? "email_unverified"
@@ -167,19 +158,23 @@ export function registerInternalRoutes(internal: FastifyInstance, { autoRequestH
     if (!store) return reply.code(503).send({ error: "portal_database_not_configured" });
     if (!requireInternalToken(req as any, reply)) return;
     const body = z.object({ nodeIds: z.array(z.string()).max(200) }).parse(req.body);
-    const nodes = (await Promise.all(body.nodeIds.map((nodeId) => store.getNodeEnrollment(nodeId)))).filter((n): n is NonNullable<typeof n> => Boolean(n));
+    // The shared coordinator token answers only about nodes the caller's own coordinator validated,
+    // and without owner email, IP or country. The platform service token keeps the full answer.
+    const scopedTo = callerKind(req as any) === "coordinator" ? await callingCoordinator(req.headers as Record<string, unknown>) : undefined;
+    if (scopedTo === null) return reply.code(403).send({ error: "coordinator_identity_required" });
+    const found = (await Promise.all(body.nodeIds.map((nodeId) => store.getNodeEnrollment(nodeId)))).filter((n): n is NonNullable<typeof n> => Boolean(n));
+    const nodes = scopedTo === undefined ? found : found.filter((n) => n.lastValidatedByCoordinator === scopedTo);
     const hostApproved = await Promise.all(nodes.map((n) => hostApprovedFor(n.ownerEmail)));
     return reply.send({
       nodes: nodes.map((n, i) => ({
         nodeId: n.nodeId,
         nodeKind: n.nodeKind,
-        ownerEmail: n.ownerEmail,
+        ...(scopedTo === undefined ? { ownerEmail: n.ownerEmail } : {}),
         emailVerified: n.emailVerified,
         nodeApproved: n.nodeApproved,
         hostApproved: hostApproved[i],
         active: n.active,
-        sourceIp: n.lastIp,
-        countryCode: n.lastCountryCode,
+        ...(scopedTo === undefined ? { sourceIp: n.lastIp, countryCode: n.lastCountryCode } : {}),
         vpnDetected: n.lastVpnDetected ?? false,
         lastSeenMs: n.lastSeenMs
       }))

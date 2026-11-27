@@ -9,7 +9,7 @@ import { dirname } from "node:path";
 import { request } from "undici";
 import { normalizeUrl } from "../coordinator-utils.js";
 import type { NetworkMode } from "../../common/types.js";
-import { bootstrapAdmissionOutcome, signRegistration } from "../../mesh/peer-trust.js";
+import { bootstrapAdmissionOutcome, bootstrapRegisterLogLevel, signRegistration } from "../../mesh/peer-trust.js";
 import { app } from "./app.js";
 import {
   COORDINATOR_PEER_CACHE_FILE,
@@ -182,8 +182,10 @@ export async function bootstrapPeerMesh(): Promise<void> {
         signal: AbortSignal.timeout(8_000)
       });
       await registerRes.body.text().catch(() => undefined);
-      app.log.info({ peerUrl, registerStatus: registerRes.statusCode, remotePeerId: remote.peerId }, "mesh_bootstrap_registered");
-      if (registerRes.statusCode >= 200 && registerRes.statusCode < 300) {
+      const registered = registerRes.statusCode >= 200 && registerRes.statusCode < 300;
+      // A refused registration (401/403 and other non-2xx) means this peer will not route to us: warn.
+      app.log[bootstrapRegisterLogLevel(registerRes.statusCode)]({ peerUrl, registerStatus: registerRes.statusCode, remotePeerId: remote.peerId }, "mesh_bootstrap_registered");
+      if (registered) {
         discoveredForCache.add(peerUrl);
       }
     } catch (err) {

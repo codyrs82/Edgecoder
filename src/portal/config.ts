@@ -190,6 +190,8 @@ export const portalConfigSchema = z.object({
   // ---- coordinator picker and registry (coordinator-discovery.ts, coordinator-registry.ts) ----
   PORTAL_DISCOVERY: envEnumCi(["selector", "ordered"]),
   PORTAL_DISCOVERY_SOURCES: optStr,
+  /** Coordinators /nodes/discover-coordinator may hand new agents (src/portal/platform-coordinators.ts). */
+  PORTAL_PLATFORM_COORDINATOR_URLS: optStr,
   REGISTRY_TTL_MS: envNumber(undefined, { min: 0 }),
   REGISTRY_HEALTH_INTERVAL_MS: envNumber(undefined, { min: 0 }),
   REGISTRY_FALLBACK_URLS: optStr,

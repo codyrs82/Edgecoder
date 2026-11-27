@@ -18,7 +18,8 @@ function setup() {
     getNodeEnrollmentByDeviceId: async () => null,
     getNodeEnrollmentByRegistrationTokenHash: async (h: string) => [...nodes.values()].find((n) => n.registrationTokenHash === h) ?? null,
     listCoordinatorNodeIds: async () => [...nodes.values()].filter((n) => n.nodeKind === "coordinator").map((n) => n.nodeId),
-    listActiveCoordinators: async () => [{ nodeId: "seed-1", dnsHostname: "seed-1.coord.edgecoder.io", dnsStatus: "active" }],
+    // An active, DNS-active enrolled coordinator: discover-coordinator must never hand it out.
+    listActiveCoordinators: async () => [{ nodeId: "community-1", dnsHostname: "community-1.coord.edgecoder.io", dnsStatus: "active" }],
     upsertNodeEnrollment: async (r: any) => {
       const prev = nodes.get(r.nodeId);
       if (prev && prev.ownerUserId !== r.ownerUserId) return null;
@@ -30,8 +31,10 @@ function setup() {
     updateNodeDns: async (i: any) => { nodes.set(i.nodeId, { ...nodes.get(i.nodeId), dnsHostname: i.dnsHostname }); },
     deleteNodeEnrollment: async (id: string) => nodes.delete(id)
   };
+  const pickPlatformCoordinator = vi.fn(async (_agent: { countryCode?: string | null }): Promise<any> => ({ url: "https://coordinator.edgecoder.io", region: "us", source: "config" }));
   const app = Fastify();
   registerAccountApiRoutes(app, {
+    pickPlatformCoordinator,
     store,
     getCurrentUser: async (req: any) => users[String(req.headers.authorization)] ?? null,
     buildAccessContext: async () => ({ isSystemAdmin: false, isCoordinatorAdmin: false }),
@@ -42,7 +45,7 @@ function setup() {
   } as never);
   const enroll = (who: string, nodeId: string, nodeKind = "coordinator") =>
     app.inject({ method: "POST", url: "/nodes/enroll", headers: { authorization: `Bearer ${who}` }, payload: { nodeId, nodeKind } });
-  return { app, nodes, enroll, deleteDnsRecord };
+  return { app, nodes, enroll, deleteDnsRecord, pickPlatformCoordinator };
 }
 
 describe("node ID rules", () => {
@@ -97,7 +100,27 @@ describe("GET /nodes/discover-coordinator", () => {
     expect(bad.json().error).toBe("registration_token_invalid");
     const ok = await app.inject({ url: "/nodes/discover-coordinator", headers: { authorization: `Bearer ${token}` } });
     expect(ok.statusCode).toBe(200);
-    expect(ok.json()).toMatchObject({ coordinatorUrl: "https://seed-1.coord.edgecoder.io" });
+    expect(ok.json()).toMatchObject({ coordinatorUrl: "https://coordinator.edgecoder.io" });
+  });
+
+  it("returns only a platform coordinator, picked by the agent's country, in the old shape", async () => {
+    const { app, enroll, nodes, pickPlatformCoordinator } = setup();
+    const token = (await enroll("alice", "box-gpu1", "agent")).json().registrationToken as string;
+    nodes.set("box-gpu1", { ...nodes.get("box-gpu1"), lastCountryCode: "DE" });
+    pickPlatformCoordinator.mockResolvedValueOnce({ url: "https://coordinator-eu.edgecoder.io", region: "eu", source: "config" });
+    const res = await app.inject({ url: "/nodes/discover-coordinator", headers: { authorization: `Bearer ${token}` } });
+    expect(pickPlatformCoordinator).toHaveBeenCalledWith({ countryCode: "DE" });
+    expect(res.json()).toEqual({ coordinatorUrl: "https://coordinator-eu.edgecoder.io", coordinatorNodeId: null, dnsStatus: "active", region: "eu", source: "config" });
+    expect(JSON.stringify(res.json())).not.toContain("community-1");
+  });
+
+  it("returns no coordinator when no platform coordinator is healthy", async () => {
+    const { app, enroll, pickPlatformCoordinator } = setup();
+    const token = (await enroll("alice", "box-gpu2", "agent")).json().registrationToken as string;
+    pickPlatformCoordinator.mockResolvedValueOnce(null);
+    const res = await app.inject({ url: "/nodes/discover-coordinator", headers: { authorization: `Bearer ${token}` } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ coordinatorUrl: null, reason: "no_healthy_platform_coordinator" });
   });
 });
 
