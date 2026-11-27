@@ -1,6 +1,23 @@
 import { readFileSync } from "node:fs";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { IDE_ROUTES } from "../../src/apps/ide/routes.js";
+
+// The run path executes model output in the Docker sandbox. On a runner with Docker (windows-latest)
+// that probes Docker and builds the sandbox images, which can exceed the test timeout. This is a
+// route-shape contract test, so stub the executor and assert the agent asked for the sandbox.
+const runCode = vi.hoisted(() =>
+  vi.fn(async (language: string) => ({
+    language,
+    ok: true,
+    stdout: "hello\n",
+    stderr: "",
+    exitCode: 0,
+    durationMs: 1,
+    queueForCloud: false,
+    executed: true
+  }))
+);
+vi.mock("../../src/executor/run.js", async (orig) => ({ ...(await orig<typeof import("../../src/executor/run.js")>()), runCode }));
 
 const TOKEN = "contract-test-token";
 process.env.IDE_PROVIDER_TOKEN = TOKEN;
@@ -104,7 +121,8 @@ describe("IDE extension ↔ provider server contract (#36)", () => {
     expect(typeof body.generatedCode).toBe("string");
     expect(body.runResult).toHaveProperty("exitCode");
     expect(body.ran).toBe(true);
-  }, 30_000);
+    expect(runCode).toHaveBeenCalledWith("python", expect.any(String), expect.any(Number), "docker", undefined, "local");
+  });
 
   it("POST /run/swarm without mesh config → 503 swarm_unavailable", async () => {
     const res = await app.inject({ method: "POST", url: "/run/swarm", headers, payload: { task: "x", language: "python" } });
