@@ -276,9 +276,10 @@ service: the template's placeholders cannot run. Before the first start, set up:
    sudo systemctl reload caddy
    ```
 
-   Set `COORDINATOR_TRUST_PROXY=127.0.0.1` (the proxy's address) in the env file. Without it the
-   coordinator takes every request that comes through the proxy for a local caller, and an agent
-   from anywhere registers without the portal check.
+   Set `COORDINATOR_TRUST_PROXY=127.0.0.1` (the proxy's address) in the env file, so the coordinator
+   logs and geolocates the client's address instead of the proxy's. A request that comes through
+   the proxy is never treated as a local caller, with or without this setting: the proxy adds
+   forwarding headers, and any of them rules loopback out.
 
 3. **The env file** (`sudo nano /etc/edgecoder/coordinator.env`): every value the template lists,
    `NODE_ENV=production`, and a stable identity key. Without `COORDINATOR_PRIVATE_KEY_PEM` the
@@ -304,6 +305,12 @@ curl -s https://<your-coordinator-hostname>/identity     # public: peerId, finge
 The `coordinator` role runs the coordinator only (`dist/swarm/coordinator.js`). The control plane,
 with `/network/coordinators` and the approval routes, runs in the all-in-one runtime (role `seed`,
 `EDGE_RUNTIME_MODE=all-in-one`); a `coordinator`-role host doesn't serve them.
+
+An agent on the coordinator's own machine is not admitted by its address in production. Enroll it
+in the portal and give it `AGENT_REGISTRATION_TOKEN` like any other agent, or set
+`COORDINATOR_LOOPBACK_SELF_REGISTRATION=true` in `coordinator.env` to let agents that connect
+directly to `127.0.0.1:4301` (not through the proxy) register without a portal enrollment. Only
+the all-in-one runtime's own embedded worker registers without either.
 
 An agent that should work for your coordinator needs `COORDINATOR_URL` set to it and no `PORTAL_URL`:
 with `PORTAL_URL` set, the agent asks the portal for a coordinator at start and moves to the one the
