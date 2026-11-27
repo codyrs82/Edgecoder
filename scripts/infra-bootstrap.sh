@@ -49,7 +49,8 @@ Options:
   --coordinator-url URL              COORDINATOR_PUBLIC_URL (what agents and peers connect to).
   --account-id ID                    INFRA_HOST_ACCOUNT_ID (portal account that is paid).
   --lightning-address ADDR           INFRA_HOST_LIGHTNING_ADDRESS (user@domain payouts go to).
-  --portal-key KEY                   PORTAL_ACTION_VERIFY_KEYS: the portal's public key (from the portal operator).
+  --portal-key KEY                   Optional PORTAL_ACTION_VERIFY_KEYS override. Default: the portal's public key
+                                     is read from the signed coordinator registry.
   --registration-token TOKEN         COORDINATOR_REGISTRATION_TOKEN from the network operator.
   --external-ip HOST[:PORT]          LND_EXTERNAL_IP advertised for inbound channels.
   --alias NAME                       LND_ALIAS.
@@ -205,7 +206,6 @@ case "$coordinator_url" in
   *CHANGE-ME*|'') warn "COORDINATOR_PUBLIC_URL is not set; pass --coordinator-url https://<your host>:4301 (agents and peers need it)" ;;
 esac
 [ -n "$(get_env INFRA_HOST_ACCOUNT_ID)" ] || warn "INFRA_HOST_ACCOUNT_ID is empty: this host will heartbeat but cannot be paid (--account-id)"
-[ -n "$(get_env PORTAL_ACTION_VERIFY_KEYS)" ] || warn "PORTAL_ACTION_VERIFY_KEYS is empty: the coordinator refuses to start in production without the portal's public key (--portal-key)"
 
 # ---- 3. render bitcoin.conf and lnd.conf ---------------------------------------------------
 # rpcauth = user:salt$HMAC_SHA256(key = salt, msg = password), the same as share/rpcauth/rpcauth.py.

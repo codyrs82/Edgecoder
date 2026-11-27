@@ -116,6 +116,12 @@ export interface RegistryPayload {
   coordinators: RegistryEntry[];
   /** Where clients go when nothing in the pool is usable (the seeds behind the platform URL). */
   fallbackUrls: string[];
+  /**
+   * The portal's action-signing public keys (raw Ed25519, base64): the current one first, then the
+   * previous one while a rotation overlaps. Coordinators without PORTAL_ACTION_VERIFY_KEYS verify
+   * portal-signed calls with these. Public halves only; absent when the portal signs nothing.
+   */
+  portalActionKeys?: string[];
 }
 
 export interface SignedRegistry {
@@ -167,7 +173,8 @@ export const registryPayloadSchema = z.object({
   issuedAtMs: z.number().int().nonnegative(),
   expiresAtMs: z.number().int().nonnegative(),
   coordinators: z.array(registryEntrySchema).max(512),
-  fallbackUrls: z.array(urlSchema).max(16).default([])
+  fallbackUrls: z.array(urlSchema).max(16).default([]),
+  portalActionKeys: z.array(z.string().regex(/^[A-Za-z0-9+/]{43}=$/)).max(8).optional()
 });
 
 const signedRegistrySchema = z.object({

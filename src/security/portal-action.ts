@@ -101,7 +101,7 @@ export function parseVerifyKeys(raw: string | undefined): KeyObject[] {
 
 /** The raw public key (base64) for a signing key: what goes into PORTAL_ACTION_VERIFY_KEYS. */
 export function publicKeyBase64(signingKey: KeyObject): string {
-  const der = createPublicKey(signingKey).export({ format: "der", type: "spki" }) as Buffer;
+  const der = (signingKey.type === "public" ? signingKey : createPublicKey(signingKey)).export({ format: "der", type: "spki" }) as Buffer;
   return der.subarray(SPKI_ED25519.length).toString("base64");
 }
 
@@ -141,7 +141,7 @@ export type NonceOnce = (nonce: string, expiresAtMs: number) => Promise<boolean>
 export async function verifyPortalAction(
   header: string,
   expected: { accountId: string; action: PortalAction; body: Record<string, unknown> },
-  ctx: { keys: KeyObject[]; nowMs?: number; nonceOnce: NonceOnce }
+  ctx: { keys: readonly KeyObject[]; nowMs?: number; nonceOnce: NonceOnce }
 ): Promise<{ ok: true; payload: PortalActionPayload } | { ok: false; reason: PortalActionRefusal }> {
   const now = ctx.nowMs ?? Date.now();
   const parts = header.trim().split(".");

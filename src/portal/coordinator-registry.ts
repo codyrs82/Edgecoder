@@ -25,6 +25,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { fingerprintMatches, publicKeyFingerprint, tryPublicKeyFingerprint } from "../security/key-fingerprint.js";
 import { verifyPayload } from "../mesh/peer.js";
+import { parseSigningKey, parseVerifyKeys, publicKeyBase64 } from "../security/portal-action.js";
 import { normalizeCoordinatorUrl } from "../discovery/types.js";
 import { registerRegistryBillingRoute, setMemberBilling } from "./coordinator-registry-billing.js";
 import type { FetchResponseLike } from "../discovery/selector.js";
@@ -376,6 +377,11 @@ export interface RegistryServiceOptions {
   /** Looks up an applicant's account: verified email and passkeys are required to apply. */
   operatorAccount?: (userId: string) => Promise<OperatorAccount>;
   log?: (msg: string, extra?: Record<string, unknown>) => void;
+  /**
+   * The portal's action-signing public keys to publish (raw Ed25519, base64): the current key's
+   * public half, then PORTAL_ACTION_PREVIOUS_VERIFY_KEYS during a rotation. Never a private key.
+   */
+  portalActionKeys?: string[];
 }
 
 export type ServiceResult<T = Record<string, never>> = ({ ok: true } & T) | { ok: false; status: number; error: string; problems?: string[] };
@@ -402,6 +408,7 @@ export class CoordinatorRegistryService {
   readonly maxMembersPerOperator: number;
   private readonly operatorAccount: ((userId: string) => Promise<OperatorAccount>) | null;
   private readonly log: (msg: string, extra?: Record<string, unknown>) => void;
+  private readonly portalKeys: string[];
   private readonly health = new Map<string, MemberHealth>();
   private cache: StoredMember[] = [];
   private seeded = false;
@@ -427,6 +434,12 @@ export class CoordinatorRegistryService {
     this.maxMembersPerOperator = Math.max(1, opts.maxMembersPerOperator ?? DEFAULT_MAX_MEMBERS_PER_OPERATOR);
     this.operatorAccount = opts.operatorAccount ?? null;
     this.log = opts.log ?? (() => {});
+    this.portalKeys = [...new Set(opts.portalActionKeys ?? [])];
+  }
+
+  /** The portal's action-signing public keys this registry publishes (current first). */
+  portalActionKeys(): string[] {
+    return [...this.portalKeys];
   }
 
   get configured(): boolean {
@@ -573,7 +586,15 @@ export class CoordinatorRegistryService {
           ...(m.operatorKind === "community" && m.billingEnabled === true ? { billingEnabled: true } : {})
         };
       });
-    return { v: 1, network: this.network, issuedAtMs, expiresAtMs: issuedAtMs + this.ttlMs, coordinators, fallbackUrls: this.fallbackUrls };
+    return {
+      v: 1,
+      network: this.network,
+      issuedAtMs,
+      expiresAtMs: issuedAtMs + this.ttlMs,
+      coordinators,
+      fallbackUrls: this.fallbackUrls,
+      ...(this.portalKeys.length > 0 ? { portalActionKeys: [...this.portalKeys] } : {})
+    };
   }
 
   /** The signed registry, re-signed after each round or change, or when a third of its lifetime has passed. */
@@ -767,6 +788,18 @@ export class CoordinatorRegistryService {
   }
 }
 
+/**
+ * The portal action keys to publish: the public half of PORTAL_ACTION_SIGNING_KEY, then each key in
+ * PORTAL_ACTION_PREVIOUS_VERIFY_KEYS (the old public key while a rotation overlaps). Raw base64.
+ */
+export function portalActionKeysFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  const out: string[] = [];
+  const signing = (env.PORTAL_ACTION_SIGNING_KEY ?? "").trim();
+  if (signing) out.push(publicKeyBase64(parseSigningKey(signing)));
+  for (const k of parseVerifyKeys(env.PORTAL_ACTION_PREVIOUS_VERIFY_KEYS)) out.push(publicKeyBase64(k));
+  return [...new Set(out)];
+}
+
 /** Build the service from REGISTRY_* environment variables. */
 export function registryServiceFromEnv(
   env: NodeJS.ProcessEnv = process.env,
@@ -789,6 +822,7 @@ export function registryServiceFromEnv(
     probationDays: num(env.REGISTRY_PROBATION_DAYS),
     maxMembersPerOperator: num(env.REGISTRY_MAX_MEMBERS_PER_OPERATOR),
     identitySuspendAfterMs: num(env.REGISTRY_IDENTITY_SUSPEND_AFTER_MS),
+    portalActionKeys: portalActionKeysFromEnv(env),
     ...extra
   });
 }
@@ -839,6 +873,7 @@ function memberView(m: StoredMember) {
 /**
  *   GET  /network/registry                                 signed registry (public; 503 until the key is set)
  *   GET  /network/registry/public-key                      the registry key's public half and keyId
+ *   GET  /network/portal-keys                              the portal's action-signing public keys
  *   POST /portal/api/coordinators/registry/apply           operator: apply (key challenge now; pending)
  *   POST /portal/api/coordinators/registry/rotate-key      operator: new key, signed by the current key
  *   GET  /portal/api/coordinators/registry/mine            operator: own members and their status
@@ -860,6 +895,12 @@ export function registerRegistryRoutes(app: FastifyInstance, { service, requireA
     const key = service.publicKey();
     if (!key) return reply.code(503).send({ error: "registry_not_configured" });
     return reply.send(key);
+  });
+
+  // The portal's action-signing public keys, for convenience. The same list is inside the signed
+  // registry, which is what coordinators trust.
+  app.get("/network/portal-keys", async (_req, reply) => {
+    return reply.header("cache-control", "public, max-age=60").send({ keys: service.portalActionKeys(), format: "ed25519-raw-base64" });
   });
 
   app.post("/portal/api/coordinators/registry/apply", async (req, reply) => {

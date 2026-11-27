@@ -206,10 +206,15 @@ COORDINATOR_PRIVATE_KEY_PEM=<your Ed25519 PKCS#8 key; keep it stable>
 # from the network you join
 MESH_AUTH_TOKEN=<mesh token of the network>
 PORTAL_SERVICE_URL=<your-portal>
-# The portal's public key (raw Ed25519, base64), from the portal operator. Portal calls are signed for
-# this coordinator, and this coordinator signs its own calls to the portal: no portal token is shared.
-PORTAL_ACTION_VERIFY_KEYS=<portal public key>
 ```
+
+Portal calls are signed for this coordinator, and this coordinator signs its own calls to the
+portal: no portal token is shared. The portal's public key is published in the signed coordinator
+registry (`portalActionKeys`, checked against the registry keys every coordinator pins), so you do
+not set it by hand: the coordinator reads it from the registry it already mirrors, and picks up the
+new key on its own when the portal rotates (the registry lists the current and the previous key
+during the overlap). `GET <portal>/network/portal-keys` shows the same list. Set
+`PORTAL_ACTION_VERIFY_KEYS` only to override the registry.
 
 Plus the join settings:
 

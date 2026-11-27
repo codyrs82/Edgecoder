@@ -117,6 +117,12 @@ export class RegistryTrust {
     return this.current()?.coordinators.find((c) => c.peerId === peerId);
   }
 
+  /** The portal's action-signing public keys the verified, unexpired registry publishes (raw base64). */
+  portalActionKeys(): string[] {
+    this.maybeRefresh();
+    return this.current()?.portalActionKeys ?? [];
+  }
+
   /** PeerKeyTrust: the registry lists this peer, on probation or active, with this key. */
   readonly trusts = (peerId: string, publicKeyPem: string): boolean => {
     this.maybeRefresh();
