@@ -19,6 +19,7 @@ import {
 } from "../context.js";
 import { ordering, agentCapabilities, directWorkById, activeTunnels } from "../agent-state.js";
 import { requireMeshToken, authorizeAdmin, hasMeshToken, hasPortalServiceToken } from "../auth.js";
+import { requirePeerCredential } from "../peer-auth.js";
 import {
   statsQuorumThreshold,
   ingestStatsLedgerRecords,
@@ -30,7 +31,7 @@ import {
 export function registerStatsRoutes(app: CoordinatorApp): void {
   app.get("/ledger/snapshot", async () => ({ records: ordering.snapshot(), proof: ordering.latestProof() }));
   app.get("/stats/ledger/head", async (req, reply) => {
-    if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+    if (!requirePeerCredential(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
     const [head, checkpoint] = await Promise.all([
       pgStore?.latestStatsLedgerHead(),
       pgStore?.latestStatsCheckpoint(),
@@ -49,7 +50,7 @@ export function registerStatsRoutes(app: CoordinatorApp): void {
     };
   });
   app.get("/stats/ledger/range", async (req, reply) => {
-    if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+    if (!requirePeerCredential(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
     const query = z
       .object({
         sinceIssuedAtMs: z.coerce.number().int().min(0).default(0),
@@ -60,7 +61,7 @@ export function registerStatsRoutes(app: CoordinatorApp): void {
     return { records: records ?? [] };
   });
   app.post("/stats/ledger/ingest", async (req, reply) => {
-    if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+    if (!requirePeerCredential(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
     const body = z
       .object({
         records: z.array(

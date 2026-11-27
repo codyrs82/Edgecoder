@@ -277,4 +277,28 @@ describe("startReceiptReplication", () => {
       handle.stop();
     }
   });
+
+  it("signs every page request when a signer is given, next to the mesh token", async () => {
+    const seen: Array<{ url: string; headers: Record<string, string> }> = [];
+    const handle = startReceiptReplication({
+      peers: () => [{ peerId: "p1", coordinatorUrl: "http://p1.test", publicKeyPem: coordA.publicKeyPem }],
+      store: new MemoryReceiptStore(),
+      intervalMs: 60_000,
+      meshToken: MESH_TOKEN,
+      signRequest: (method, url) => ({ "x-peer-signature": `${method} ${url}` }),
+      fetch: async (url, init) => {
+        seen.push({ url, headers: init?.headers ?? {} });
+        return { ok: false, status: 503, json: async () => ({}) };
+      }
+    });
+    try {
+      await handle.pullOnce();
+      expect(seen).toHaveLength(1);
+      expect(seen[0].headers["x-mesh-token"]).toBe(MESH_TOKEN);
+      expect(seen[0].headers["x-peer-signature"]).toBe(`GET ${seen[0].url}`);
+      expect(seen[0].url).toMatch(/^http:\/\/p1\.test\/receipts\/since\?cursor=/);
+    } finally {
+      handle.stop();
+    }
+  });
 });

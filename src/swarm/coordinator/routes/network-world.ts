@@ -27,10 +27,11 @@
 import { request } from "undici";
 import { z } from "zod";
 import type { CoordinatorApp } from "../app.js";
-import { identity, coordinatorKeys, mesh, MESH_AUTH_TOKEN, CC, queue, requestOrigin } from "../context.js";
+import { identity, coordinatorKeys, mesh, CC, queue, requestOrigin } from "../context.js";
 import { networkTag } from "../../lan-proximity.js";
 import { agentCapabilities, activeBlacklistRecord, AGENT_CONNECTED_WINDOW_MS } from "../agent-state.js";
-import { agentAccount, agentSignatureAtGate, hasMeshToken, hasPortalServiceToken, requireMeshToken } from "../auth.js";
+import { agentAccount, agentSignatureAtGate, hasMeshToken, hasPortalServiceToken } from "../auth.js";
+import { peerRequestHeaders, requirePeerCredential } from "../peer-auth.js";
 import { agentLoadReport } from "../dispatch.js";
 import { agentSocketLost } from "../agent-liveness.js";
 import { effectiveHardware } from "../economy.js";
@@ -241,7 +242,8 @@ function fetchPeerWorld(peer: { peerId: string; url: string }, nowMs: number): P
   const value = (async () => {
     const started = performance.now();
     try {
-      const r = await peerFetch(`${peer.url}/network/world/local`, MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}, WORLD_PEER_TIMEOUT_MS);
+      const url = `${peer.url}/network/world/local`;
+      const r = await peerFetch(url, peerRequestHeaders("GET", url), WORLD_PEER_TIMEOUT_MS);
       if (r.status !== 200) return null;
       peerFetchMs.set(peer.peerId, { ms: Math.round(performance.now() - started), atMs: Date.now() });
       const world = parseLocalWorld(r.json);
@@ -327,7 +329,7 @@ export function registerNetworkWorldRoutes(app: CoordinatorApp): void {
   queue.onClaimed((agentId) => agentCalls.record(agentId));
 
   app.get("/network/world/local", async (req, reply) => {
-    if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+    if (!requirePeerCredential(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
     reply.header("cache-control", "no-store");
     return cachedLocalWorld(Date.now());
   });

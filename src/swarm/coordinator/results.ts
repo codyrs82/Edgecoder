@@ -42,6 +42,7 @@ import {
 } from "../verification.js";
 import { app } from "./app.js";
 import { agentLoadReport } from "./dispatch.js";
+import { peerRequestHeaders } from "./peer-auth.js";
 import {
   rememberSettled,
   queue,
@@ -57,7 +58,6 @@ import {
   usagePending,
   FALLBACK_BTC_USD,
   taskOriginMap,
-  MESH_AUTH_TOKEN,
   taskBilling,
   peerOfferBudgetMsat,
   saveUsage,
@@ -159,7 +159,8 @@ async function forwardResultToOrigin(
         method: "POST",
         headers: {
           "content-type": "application/json",
-          ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}),
+          // Signed peer request plus the mesh token while one is configured (peer-auth.ts).
+          ...peerRequestHeaders("POST", `${origin.coordinatorUrl}/result`, forwardJson),
           // #52: the origin checks this against our allowlisted key (signed per attempt: replay cache).
           ...signForwardedResult(identity.peerId, coordinatorKeys.privateKeyPem, forwardJson)
         },

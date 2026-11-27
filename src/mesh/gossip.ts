@@ -23,6 +23,8 @@ export class GossipMesh {
   private peers = new Map<string, MeshPeerIdentity>();
   private wsPeers = new Map<string, WebSocket>();
   private meshToken: string | undefined;
+  /** Signs each HTTP request to a peer (coordinators: their own key, src/swarm/coordinator/peer-auth.ts). */
+  private requestSigner?: (method: string, url: string, body: string) => Record<string, string>;
   private failureCounts = new Map<string, number>();
 
   /** Peers whose coordinatorUrl is unreachable (behind NAT/firewall). */
@@ -54,6 +56,19 @@ export class GossipMesh {
 
   setMeshToken(token: string): void {
     this.meshToken = token;
+  }
+
+  /** Sign every HTTP request to a peer (each attempt anew; the signature's nonce is single-use). */
+  setRequestSigner(fn: (method: string, url: string, body: string) => Record<string, string>): void {
+    this.requestSigner = fn;
+  }
+
+  /** Headers for one POST to a peer: content type, the mesh token while set, and the signature. */
+  private postHeaders(url: string, body: string): Record<string, string> {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (this.meshToken) headers["x-mesh-token"] = this.meshToken;
+    if (this.requestSigner) Object.assign(headers, this.requestSigner("POST", url, body));
+    return headers;
   }
 
   /**
@@ -116,11 +131,6 @@ export class GossipMesh {
     let delivered = 0;
     let failed = 0;
 
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (this.meshToken) {
-      headers["x-mesh-token"] = this.meshToken;
-    }
-
     const serialized = JSON.stringify(message);
 
     await Promise.all(
@@ -146,9 +156,10 @@ export class GossipMesh {
         // Skip HTTP for peers we know are behind NAT — go straight to relay
         if (!this.natPeers.has(peer.peerId)) {
           try {
-            const res = await request(`${peer.coordinatorUrl}/mesh/ingest`, {
+            const url = `${peer.coordinatorUrl}/mesh/ingest`;
+            const res = await request(url, {
               method: "POST",
-              headers,
+              headers: this.postHeaders(url, serialized),
               body: serialized,
               signal: AbortSignal.timeout(10_000)
             });
@@ -193,13 +204,13 @@ export class GossipMesh {
   async send(peerId: string, message: MeshMessage, timeoutMs = 8_000): Promise<{ statusCode: number; body: Record<string, unknown> | null } | null> {
     const peer = this.peers.get(peerId);
     if (!peer || !this.httpAllowed(peerId)) return null;
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (this.meshToken) headers["x-mesh-token"] = this.meshToken;
+    const url = `${peer.coordinatorUrl}/mesh/ingest`;
+    const payload = JSON.stringify(message);
     try {
-      const res = await request(`${peer.coordinatorUrl}/mesh/ingest`, {
+      const res = await request(url, {
         method: "POST",
-        headers,
-        body: JSON.stringify(message),
+        headers: this.postHeaders(url, payload),
+        body: payload,
         signal: AbortSignal.timeout(timeoutMs)
       });
       const text = await res.body.text().catch(() => "");
@@ -222,9 +233,6 @@ export class GossipMesh {
    * coordinator that might be able to forward it.
    */
   private async relayViaConnectedPeer(targetPeerId: string, serialized: string): Promise<boolean> {
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (this.meshToken) headers["x-mesh-token"] = this.meshToken;
-
     // Ask each WS-connected coordinator to relay to the target
     for (const [connectedId, ws] of this.wsPeers) {
       if (connectedId === targetPeerId) continue;
@@ -235,10 +243,12 @@ export class GossipMesh {
       if (!connectedPeer || !this.httpAllowed(connectedId)) continue;
 
       try {
-        const res = await request(`${connectedPeer.coordinatorUrl}/mesh/relay-gossip`, {
+        const url = `${connectedPeer.coordinatorUrl}/mesh/relay-gossip`;
+        const body = JSON.stringify({ targetPeerId, message: serialized });
+        const res = await request(url, {
           method: "POST",
-          headers,
-          body: JSON.stringify({ targetPeerId, message: serialized }),
+          headers: this.postHeaders(url, body),
+          body,
           signal: AbortSignal.timeout(8_000)
         });
         await res.body.text().catch(() => "");

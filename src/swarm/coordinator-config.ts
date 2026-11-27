@@ -133,6 +133,9 @@ export const coordinatorConfigSchema = z.object({
   COORDINATOR_PEER_CACHE_FILE: str(),
   /** `<peerId>=<public key>[@url]` entries (src/mesh/peer-allowlist.ts parses and rejects bad ones). */
   MESH_PEER_ALLOWLIST: str(),
+  // Signed peer auth: true (default) keeps the mesh token required on peer routes; false also
+  // admits a request signed by an allowlisted peer coordinator's key without the token.
+  MESH_TOKEN_REQUIRED_FOR_PEERS: envBool(true),
   MESH_REQUIRE_AGENT_SIGNED_RESULTS: envFlagWord(),
   MESH_WS_REQUIRE_SIGNED: envFlag({ on: ["true"], ci: true }),
   /** WebSocket ping interval on each mesh socket, for the round trip in GET /network/world; 0 turns pings off. */

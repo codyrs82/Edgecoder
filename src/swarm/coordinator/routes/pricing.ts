@@ -21,8 +21,9 @@ import {
   verifyPriceQuote
 } from "../../../economy/price-epoch-guard.js";
 import type { CoordinatorApp } from "../app.js";
-import { queue, identity, peerScore, coordinatorKeys, mesh, MESH_PEER_ALLOWLIST, MESH_AUTH_TOKEN } from "../context.js";
+import { queue, identity, peerScore, coordinatorKeys, mesh, MESH_PEER_ALLOWLIST } from "../context.js";
 import { authorizeAdmin, requireMeshToken } from "../auth.js";
+import { peerRequestHeaders, requirePeerCredential } from "../peer-auth.js";
 import {
   recalibrateRateEpoch,
   previousPriceEpochSats,
@@ -61,7 +62,7 @@ export function registerPricingRoutes(app: CoordinatorApp): void {
   });
 
   app.get("/economy/price/quote", async (req, reply) => {
-    if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+    if (!requirePeerCredential(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
     const query = z
       .object({
         resourceClass: z.enum(["cpu", "gpu"]).default("cpu"),
@@ -182,7 +183,7 @@ export function registerPricingRoutes(app: CoordinatorApp): void {
             url.searchParams.set("activeAgents", String(inputs.activeAgents));
             const res = await request(url.toString(), {
               method: "GET",
-              headers: MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : undefined
+              headers: peerRequestHeaders("GET", url.toString())
             });
             if (res.statusCode < 200 || res.statusCode >= 300) return;
             const quote = (await res.body.json()) as {

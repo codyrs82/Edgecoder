@@ -85,7 +85,8 @@ import {
   evaluateAndEnforce,
   fastResultVerificationFlags
 } from "../agent-state.js";
-import { resolveSubmitterAccount, verifyAgentRequest, extractSignedHeaders, hasMeshToken } from "../auth.js";
+import { resolveSubmitterAccount, verifyAgentRequest, extractSignedHeaders } from "../auth.js";
+import { hasAcceptedPeerSignature, hasPeerCredential } from "../peer-auth.js";
 import {
   rateOracleConfig,
   subtaskReserveMsat,
@@ -535,7 +536,7 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
   app.post("/result", { bodyLimit: RESULT_ROUTE_BODY_LIMIT_BYTES }, async (req, reply) => {
     {
       const h = (req as any).headers ?? {};
-      const peerForwardCandidate = !extractSignedHeaders(h) && hasMeshToken(h);
+      const peerForwardCandidate = !extractSignedHeaders(h) && hasPeerCredential(req);
       if (resultBodyTooLarge(Buffer.byteLength(rawBodyOf(req)), peerForwardCandidate)) {
         return reply.code(413).send({ error: "payload_too_large" });
       }
@@ -657,8 +658,9 @@ export function registerTaskRoutes(app: CoordinatorApp): void {
       // #44 review: "locally owned" only if a local agent actually claimed it; an unclaimed
       // queued copy of a gossiped subtask must still accept the relayed result.
       hasLocalClaim: Boolean(claim?.claimedBy),
-      meshTokenConfigured: MESH_AUTH_TOKEN !== "",
-      meshTokenValid: hasMeshToken((req as any).headers ?? {}),
+      meshTokenConfigured: MESH_AUTH_TOKEN !== "" || hasAcceptedPeerSignature(req),
+      // The mesh token, or a verified peer signature once MESH_TOKEN_REQUIRED_FOR_PEERS is off.
+      meshTokenValid: hasPeerCredential(req as any),
       requireSigned: REQUIRE_SIGNED_AGENT_REQUESTS
     });
     if (resultAuth === "reject") return reply.code(401).send({ error: "signature_required" });

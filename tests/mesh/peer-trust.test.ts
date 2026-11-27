@@ -12,7 +12,12 @@ import {
   publicKeyFingerprint,
   signForwardedResult,
   signRegistration,
-  verifyForwardedResult
+  verifyForwardedResult,
+  isAllowlistedKey,
+  peerKeyTrust,
+  signPeerRequest,
+  verifyPeerRequest,
+  PEER_REQUEST_HEADERS
 } from "../../src/mesh/peer-trust.js";
 
 const A = createPeerKeys("coord-a");
@@ -115,7 +120,7 @@ describe("peer table admission (#118 review)", () => {
   }
 
   it("parses an optional @url pin per allowlist entry", () => {
-    expect(parsePeerAllowlist(pinnedRaw)).toEqual(new Map([["coord-a", fpA]]));
+    expect(parsePeerAllowlist(pinnedRaw)).toEqual(new Map([["coord-a", [fpA]]]));
     expect(pins).toEqual(new Map([["coord-a", "https://a.example"]]));
     expect(parsePeerUrlPins(`coord-a:${fpA}`)).toEqual(new Map());
     expect(() => parsePeerAllowlist(`coord-a:${fpA}@ftp://x`)).toThrow(/bad url/);
@@ -235,5 +240,103 @@ describe("ReplayCache", () => {
     expect(c.firstSeen("k", 0)).toBe(true);
     expect(c.firstSeen("k", 500)).toBe(false);
     expect(c.firstSeen("k", 1001)).toBe(true);
+  });
+});
+
+describe("signed peer requests", () => {
+  const B = createPeerKeys("coord-b");
+  const trusted = peerKeyTrust(allow);
+  const body = JSON.stringify({ hello: "world" });
+  const URL = "https://origin.example/receipts/since?cursor=&limit=5";
+  const sign = (keys = A, opts: { url?: string; body?: string; nowMs?: number; method?: string } = {}) =>
+    signPeerRequest({ peerId: keys.peerId, privateKeyPem: keys.privateKeyPem, publicKeyPem: keys.publicKeyPem, method: opts.method ?? "POST", url: opts.url ?? URL, body: opts.body ?? body, nowMs: opts.nowMs ?? NOW });
+  const verify = (headers: Record<string, string>, opts: { path?: string; rawBody?: string | null; method?: string; replay?: (p: string, n: string) => boolean } = {}) =>
+    verifyPeerRequest({ headers, method: opts.method ?? "POST", path: opts.path ?? "/receipts/since?cursor=&limit=5", rawBody: opts.rawBody === null ? undefined : opts.rawBody ?? body, trusted, replay: opts.replay, nowMs: NOW });
+
+  it("signs peer id, timestamp, nonce, method, path with query and body hash, and carries the key", () => {
+    const h = sign();
+    expect(h[PEER_REQUEST_HEADERS.id]).toBe("coord-a");
+    expect(h[PEER_REQUEST_HEADERS.ts]).toBe(String(NOW));
+    expect(h[PEER_REQUEST_HEADERS.nonce]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(Buffer.from(h[PEER_REQUEST_HEADERS.key], "base64").toString("utf8")).toBe(A.publicKeyPem);
+    expect(sign()[PEER_REQUEST_HEADERS.nonce]).not.toBe(h[PEER_REQUEST_HEADERS.nonce]);
+  });
+
+  it("accepts a valid signature by an allowlisted key", async () => {
+    await expect(verify(sign())).resolves.toMatchObject({ ok: true, peerId: "coord-a" });
+    // Headers only (the transport gate, before the body is read).
+    await expect(verify(sign(), { rawBody: null })).resolves.toMatchObject({ ok: true });
+  });
+
+  it("refuses an expired signature", async () => {
+    await expect(verify(sign(A, { nowMs: NOW - 6 * 60_000 }))).resolves.toMatchObject({ ok: false, code: 401, error: "peer_signature_stale" });
+  });
+
+  it("refuses a replayed nonce (after the signature verified)", async () => {
+    const seen = new Set<string>();
+    const replay = (p: string, n: string) => (seen.has(`${p}:${n}`) ? false : (seen.add(`${p}:${n}`), true));
+    const h = sign();
+    await expect(verify(h, { replay })).resolves.toMatchObject({ ok: true });
+    await expect(verify(h, { replay })).resolves.toMatchObject({ ok: false, code: 409, error: "peer_signature_replayed" });
+  });
+
+  it("refuses a wrong body, method or path", async () => {
+    await expect(verify(sign(), { rawBody: JSON.stringify({ hello: "mars" }) })).resolves.toMatchObject({ ok: false, error: "peer_body_mismatch" });
+    const tamperedHash = { ...sign(), [PEER_REQUEST_HEADERS.body]: "0".repeat(64) };
+    await expect(verify(tamperedHash, { rawBody: null })).resolves.toMatchObject({ ok: false, error: "peer_signature_invalid" });
+    await expect(verify(sign(), { method: "GET" })).resolves.toMatchObject({ ok: false, error: "peer_signature_invalid" });
+    await expect(verify(sign(), { path: "/receipts/since?cursor=x&limit=5" })).resolves.toMatchObject({ ok: false, error: "peer_signature_invalid" });
+  });
+
+  it("refuses a signature by the wrong key (an allowlisted id with another key, or a swapped key header)", async () => {
+    await expect(verify(sign(EVIL))).resolves.toMatchObject({ ok: false, code: 403, error: "peer_not_allowlisted" });
+    // Allowlisted key in the header, signed by another key.
+    const forged = { ...sign(EVIL), [PEER_REQUEST_HEADERS.key]: Buffer.from(A.publicKeyPem).toString("base64") };
+    await expect(verify(forged)).resolves.toMatchObject({ ok: false, code: 401, error: "peer_signature_invalid" });
+  });
+
+  it("refuses a peer that is not allowlisted, and a request with no signature", async () => {
+    await expect(verify(sign(B))).resolves.toMatchObject({ ok: false, code: 403, error: "peer_not_allowlisted" });
+    await expect(verify({})).resolves.toMatchObject({ ok: false, code: 401, error: "peer_signature_required" });
+  });
+
+  it("a second trust source (the registry hook) can admit a key the allowlist does not name", async () => {
+    const withRegistry = peerKeyTrust(allow, (id, key) => id === "coord-b" && key === B.publicKeyPem);
+    const decision = await verifyPeerRequest({ headers: sign(B), method: "POST", path: "/receipts/since?cursor=&limit=5", rawBody: body, trusted: withRegistry, nowMs: NOW });
+    expect(decision).toMatchObject({ ok: true, peerId: "coord-b" });
+  });
+});
+
+describe("allowlist key rotation", () => {
+  const OLD = createPeerKeys("coord-r");
+  const NEW = createPeerKeys("coord-r");
+  const THIRD = createPeerKeys("coord-r");
+  const fpOld = publicKeyFingerprint(OLD.publicKeyPem);
+  const fpNew = publicKeyFingerprint(NEW.publicKeyPem);
+
+  it("lists up to two keys per peer and trusts both during the overlap", async () => {
+    const rotating = parsePeerAllowlist(`coord-r:${fpNew}+${fpOld}@https://r.example`);
+    expect(rotating.get("coord-r")).toEqual([fpNew, fpOld]);
+    expect(parsePeerUrlPins(`coord-r:${fpNew}+${fpOld}@https://r.example`)).toEqual(new Map([["coord-r", "https://r.example"]]));
+    expect(isAllowlistedKey(rotating, "coord-r", OLD.publicKeyPem)).toBe(true);
+    expect(isAllowlistedKey(rotating, "coord-r", NEW.publicKeyPem)).toBe(true);
+    expect(isAllowlistedKey(rotating, "coord-r", THIRD.publicKeyPem)).toBe(false);
+    const trusted = peerKeyTrust(rotating);
+    for (const keys of [OLD, NEW]) {
+      const h = signPeerRequest({ peerId: "coord-r", privateKeyPem: keys.privateKeyPem, publicKeyPem: keys.publicKeyPem, method: "GET", url: "/stats/ledger/head", nowMs: NOW });
+      await expect(verifyPeerRequest({ headers: h, method: "GET", path: "/stats/ledger/head", rawBody: "", trusted, nowMs: NOW })).resolves.toMatchObject({ ok: true });
+    }
+    // Registration and forwarded results accept either key too.
+    const base = { peerId: "coord-r", publicKeyPem: OLD.publicKeyPem, coordinatorUrl: "https://r.example" };
+    expect(checkPeerRegistration({ body: { ...base, ...signRegistration(base, OLD.privateKeyPem, NOW) }, allowlist: rotating, production: true, nowMs: NOW }).ok).toBe(true);
+    // After the overlap the old key is dropped from the entry and refused.
+    expect(isAllowlistedKey(parsePeerAllowlist(`coord-r:${fpNew}`), "coord-r", OLD.publicKeyPem)).toBe(false);
+  });
+
+  it("rejects more than two keys, a repeated key or a bad one", () => {
+    const fp3 = publicKeyFingerprint(THIRD.publicKeyPem);
+    expect(() => parsePeerAllowlist(`coord-r:${fpNew}+${fpOld}+${fp3}`)).toThrow(/at most 2 keys/);
+    expect(() => parsePeerAllowlist(`coord-r:${fpNew}+${fpNew}`)).toThrow(/repeated fingerprint/);
+    expect(() => parsePeerAllowlist(`coord-r:${fpNew}+xyz`)).toThrow(/bad fingerprint/);
   });
 });

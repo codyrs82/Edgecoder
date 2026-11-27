@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { createPeerKeys, type PeerKeys } from "../../src/mesh/peer.js";
-import { publicKeyFingerprint, signForwardedResult, signRegistration } from "../../src/mesh/peer-trust.js";
+import { publicKeyFingerprint, signForwardedResult, signRegistration, verifyPeerRequest } from "../../src/mesh/peer-trust.js";
 import { MeshProtocol } from "../../src/mesh/protocol.js";
 import { hashRequestBody, signRequest } from "../../src/security/request-signing.js";
 import { creditEngine, earnedMsat, grantCredits } from "../../src/credits/store.js";
@@ -37,6 +37,8 @@ const worker = createPeerKeys("agent-grants-worker");
 const peerState = {
   ingested: [] as Array<Record<string, any>>,
   forwarded: [] as Array<Record<string, any>>,
+  /** Raw requests the stand-in peer received (for checking the coordinator signed them). */
+  requests: [] as Array<{ method: string; url: string; headers: Record<string, unknown>; raw: string }>,
   grant: true,
   chargedMsat: 0
 };
@@ -62,7 +64,9 @@ beforeAll(async () => {
     res.end(JSON.stringify({ subtasks: [{ taskId: body.taskId, kind: "single_step", input: "print(1)", language: "python", timeoutMs: 30_000, snapshotRef: "commit:test" }] }));
   });
   fakePeer = createServer(async (req, res) => {
-    const body = JSON.parse((await readBody(req)) || "{}");
+    const raw = await readBody(req);
+    peerState.requests.push({ method: req.method ?? "", url: req.url ?? "", headers: req.headers as Record<string, unknown>, raw });
+    const body = JSON.parse(raw || "{}");
     res.writeHead(200, { "content-type": "application/json" });
     if (req.url === "/mesh/ingest") {
       peerState.ingested.push(body);
@@ -109,6 +113,7 @@ afterAll(async () => {
 beforeEach(() => {
   peerState.ingested.length = 0;
   peerState.forwarded.length = 0;
+  peerState.requests.length = 0;
   peerState.grant = true;
   peerState.chargedMsat = 0;
 });
@@ -257,6 +262,24 @@ describe("peer: an offered subtask is run only once granted, and paid only what 
     expect((await post("/result", { subtaskId, taskId, agentId: worker.peerId, ok: true, output: "2\n", durationMs: 1000 }, worker)).statusCode).toBe(200);
     expect(peerState.forwarded.some((f) => f.subtaskId === subtaskId)).toBe(true);
     expect((await earnedMsat(worker.peerId)) - before).toBe(0);
+  });
+
+  test("signed peer requests: the claim (gossip) and the forwarded result carry this coordinator's signature and the token", async () => {
+    const subtaskId = randomUUID();
+    const taskId = randomUUID();
+    await offer(subtaskId, taskId);
+    await sleep(200);
+    expect((await pull())?.id).toBe(subtaskId);
+    expect((await post("/result", { subtaskId, taskId, agentId: worker.peerId, ok: true, output: "2\n", durationMs: 1000 }, worker)).statusCode).toBe(200);
+    const self = (await app.inject({ method: "GET", url: "/identity" })).json() as { peerId: string; publicKeyPem: string };
+    const checked = new Set<string>();
+    for (const r of peerState.requests.filter((x) => x.url === "/mesh/ingest" || x.url === "/result")) {
+      expect(r.headers["x-mesh-token"]).toBe(MESH);
+      const d = await verifyPeerRequest({ headers: r.headers, method: r.method, path: r.url, rawBody: r.raw, trusted: (id, key) => id === self.peerId && key === self.publicKeyPem });
+      expect(d, r.url).toMatchObject({ ok: true, peerId: self.peerId });
+      checked.add(r.url);
+    }
+    expect([...checked].sort()).toEqual(["/mesh/ingest", "/result"]);
   });
 
   test("granted and charged: the agent earns at most the charge (minus the network fee)", { timeout: 10_000 }, async () => {

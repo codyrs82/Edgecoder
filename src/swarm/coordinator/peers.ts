@@ -11,6 +11,7 @@ import { normalizeUrl } from "../coordinator-utils.js";
 import type { NetworkMode } from "../../common/types.js";
 import { bootstrapAdmissionOutcome, bootstrapRegisterLogLevel, signRegistration } from "../../mesh/peer-trust.js";
 import { app } from "./app.js";
+import { peerRequestHeaders } from "./peer-auth.js";
 import {
   COORDINATOR_PEER_CACHE_FILE,
   COORDINATOR_DISCOVERY_URL,
@@ -161,13 +162,8 @@ export async function bootstrapPeerMesh(): Promise<void> {
       discoveredForCache.add(outcome === "known" ? existing!.coordinatorUrl : gossipUrl!);
 
       const selfUrl = normalizeUrl(COORDINATOR_PUBLIC_URL) ?? COORDINATOR_PUBLIC_URL;
-      const registerRes = await request(`${peerUrl}/mesh/register-peer`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {})
-        },
-        body: JSON.stringify({
+      const registerUrl = `${peerUrl}/mesh/register-peer`;
+      const registerBody = JSON.stringify({
           peerId: identity.peerId,
           publicKeyPem: identity.publicKeyPem,
           coordinatorUrl: selfUrl,
@@ -178,7 +174,12 @@ export async function bootstrapPeerMesh(): Promise<void> {
             { peerId: identity.peerId, publicKeyPem: identity.publicKeyPem, coordinatorUrl: selfUrl, networkMode },
             coordinatorKeys.privateKeyPem
           )
-        }),
+      });
+      const registerRes = await request(registerUrl, {
+        method: "POST",
+        // Signed by our key (a peer that no longer needs the token admits us by it), plus the token while set.
+        headers: { "content-type": "application/json", ...peerRequestHeaders("POST", registerUrl, registerBody) },
+        body: registerBody,
         signal: AbortSignal.timeout(8_000)
       });
       await registerRes.body.text().catch(() => undefined);

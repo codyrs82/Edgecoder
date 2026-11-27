@@ -64,7 +64,9 @@ import {
   taskOriginMap,
   nonceStore,
   SECURITY_NONCE_TTL_MS,
-  securityLog
+  securityLog,
+  trustedPeerKey,
+  MESH_TOKEN_REQUIRED_FOR_PEERS
 } from "../context.js";
 import {
   ordering,
@@ -73,11 +75,10 @@ import {
   federatedCapabilities,
   agentCapabilities
 } from "../agent-state.js";
-import { ADMIN_API_TOKEN, requireMeshToken, hasMeshToken } from "../auth.js";
+import { ADMIN_API_TOKEN, hasMeshToken } from "../auth.js";
+import { requirePeerCredential, verifiedPeerOf } from "../peer-auth.js";
 import { subtaskReserveMsat, rateOracleConfig } from "../economy.js";
 import { persistStatsLedgerRecord } from "../stats-ledger.js";
-import { validatePortalNode } from "../enrollment.js";
-import { portalOwnerKnown } from "../portal-credentials.js";
 import { grantSubtaskToPeer, hasLiveAgentFor, requestOfferGrant } from "../grants.js";
 import { recordMeshMessage } from "../world-activity.js";
 
@@ -593,44 +594,27 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
   });
 
   app.post("/mesh/register-peer", async (req, reply) => {
-    if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+    // The mesh token, or (MESH_TOKEN_REQUIRED_FOR_PEERS off) a request signed by a trusted peer key.
+    if (!requirePeerCredential(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
     const body = peerSchema.parse(req.body);
     const origin = requestOrigin(req);
     const sourceIp = origin.clientIp;
 
-    // Coordinators that authenticate with a valid mesh token are trusted peers —
-    // skip portal validation (same pattern as loopback self-registration for agents).
-    // The mesh token IS the shared secret that proves membership in this coordinator mesh.
-    const meshTokenProvided = MESH_AUTH_TOKEN !== "" && hasMeshToken((req.headers ?? {}) as Record<string, unknown>);
-    let activationReason = "mesh_token_peer";
-
-    if (meshTokenProvided) {
-      // #52: the shared token alone is not enough; the peer's key must be allowlisted.
-      const trust = checkPeerRegistration({ body, allowlist: MESH_PEER_ALLOWLIST, production: isProduction() });
-      if (!trust.ok) {
-        app.log.warn({ peerId: body.peerId, error: trust.error }, "peer_registration_rejected");
-        return reply.code(trust.code).send({ error: trust.error });
-      }
-      activationReason = trust.mode === "allowlist" ? "mesh_peer_allowlisted" : "mesh_token_peer_legacy";
+    // A signed request speaks for the peer that signed it only.
+    const signedBy = verifiedPeerOf(req);
+    if (signedBy !== null && signedBy !== body.peerId) {
+      app.log.warn({ peerId: body.peerId, signedBy }, "peer_registration_rejected");
+      return reply.code(403).send({ error: "peer_id_mismatch" });
     }
-
-    if (!meshTokenProvided) {
-      const activation = await validatePortalNode({
-        nodeId: body.peerId,
-        nodeKind: "coordinator",
-        registrationToken: body.registrationToken,
-        sourceIp,
-        loopback: origin.loopback
-      });
-      if (!activation.allowed) {
-        return reply.code(403).send({ error: "coordinator_not_activated", reason: activation.reason });
-      }
-      // An owner is required; with the shared coordinator token the portal names it by user id only.
-      if (PORTAL_SERVICE_URL && !portalOwnerKnown(activation)) {
-        return reply.code(403).send({ error: "coordinator_not_activated", reason: "owner_email_required" });
-      }
-      activationReason = activation.reason ?? "portal_validated";
+    // #52: a credential alone is not enough; the peer's key must be allowlisted and the
+    // registration signed with it. (Coordinators are never admitted here by a portal token.)
+    const trust = checkPeerRegistration({ body, allowlist: MESH_PEER_ALLOWLIST, production: isProduction(), trusted: trustedPeerKey });
+    if (!trust.ok) {
+      app.log.warn({ peerId: body.peerId, error: trust.error }, "peer_registration_rejected");
+      return reply.code(trust.code).send({ error: trust.error });
     }
+    const activationReason =
+      trust.mode === "legacy_token" ? "mesh_token_peer_legacy" : hasMeshToken((req.headers ?? {}) as Record<string, unknown>) ? "mesh_peer_allowlisted" : "mesh_peer_signed";
 
     // Only the identity is kept: the registration token is checked above and not stored.
     const { issuedAtMs: _issuedAtMs, signature: _signature, registrationToken: _registrationToken, ...peerIdentity } = body;
@@ -658,7 +642,7 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
   });
 
   app.post("/mesh/ingest", async (req, reply) => {
-    if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+    if (!requirePeerCredential(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
     const message = meshIngestSchema.parse(req.body);
     const result = await handleMeshIngest(message);
     if (result.ok) {
@@ -674,7 +658,7 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
   // When a peer can't reach another peer via HTTP (NAT/firewall), it asks a
   // coordinator that has a WS connection to that peer to forward the message.
   app.post("/mesh/relay-gossip", async (req, reply) => {
-    if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+    if (!requirePeerCredential(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
     const body = z.object({
       targetPeerId: z.string(),
       message: z.string(),
@@ -715,6 +699,8 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
     const token = readHeaderValue(req.headers as Record<string, unknown>, "x-mesh-token") || url.searchParams.get("token");
     const peerId = url.searchParams.get("peerId");
     const tokenValid = !MESH_AUTH_TOKEN || (Boolean(token) && matchesTokenSet(String(token), MESH_AUTH_TOKENS));
+    // A coordinator peer without the token (MESH_TOKEN_REQUIRED_FOR_PEERS off) may bind with a
+    // signature by its own key, when that key is trusted for its id (checked by decideMeshWsBind below).
     // Agents hold no mesh token: a registered agent connects with a signed bind by its own key.
     // A coordinator peer's id binds with that peer's key only, never with an agent key registered
     // under the same id (an agent named like a coordinator would otherwise take its gossip).
@@ -722,6 +708,7 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
     const registeredAgentKey = peerId && !meshPeerKey ? agentCapabilities.get(peerId)?.publicKeyPem : undefined;
     const signature = readHeaderValue(req.headers as Record<string, unknown>, "x-mesh-ws-signature") || null;
     const issuedAtMs = readHeaderValue(req.headers as Record<string, unknown>, "x-mesh-ws-ts") || null;
+    const signedPeerBind = !MESH_TOKEN_REQUIRED_FOR_PEERS && !!signature && !!issuedAtMs && !!peerId && !!meshPeerKey && trustedPeerKey(peerId, meshPeerKey);
     // A signed bind for an agent this process does not know yet (it restarted; the agent's socket came
     // back before its re-registration): kept, and checked against the key the agent registers.
     const pending = peerId && !meshPeerKey && !registeredAgentKey ? pendingBindFrom(signature, issuedAtMs) : null;
@@ -729,7 +716,7 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
     const existingBind = peerId ? meshWsBindings.get(peerId) : undefined;
     const replaceable = !existingBind || existingBind.held === true || existingBind.socket.readyState !== 1;
     const hold = !tokenValid && !!pending && replaceable && meshWsBindings.heldCount() < MESH_WS_MAX_HELD_BINDS;
-    if (!peerId || (!tokenValid && !registeredAgentKey && !hold)) {
+    if (!peerId || (!tokenValid && !registeredAgentKey && !signedPeerBind && !hold)) {
       socket.close(4001, "mesh_unauthorized");
       return;
     }
@@ -864,7 +851,7 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
   });
 
   app.get("/mesh/capabilities", async (req, reply) => {
-    if (!requireMeshToken(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
+    if (!requirePeerCredential(req as any, reply)) return reply.send({ error: "mesh_unauthorized" });
     const model = (req.query as Record<string, string>).model;
     const entries = [...federatedCapabilities.values()];
     if (model) {
