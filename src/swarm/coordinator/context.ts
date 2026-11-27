@@ -32,7 +32,9 @@ import {
   assertUrlPinsForProduction,
   type PeerUrlPins,
   ReplayCache,
-  type PeerAllowlist
+  peerKeyTrust,
+  type PeerAllowlist,
+  type PeerKeyTrust
 } from "../../mesh/peer-trust.js";
 import { requireAgentSignedForwards, type AgentResultEnvelope } from "../../mesh/forwarded-agent-envelope.js";
 import { MeshProtocol } from "../../mesh/protocol.js";
@@ -217,6 +219,14 @@ export const MESH_PEER_ALLOWLIST: PeerAllowlist = (() => {
 // #118 review: optional `@url` on each allowlist entry pins that peer's endpoint.
 const MESH_PEER_URL_PINS: PeerUrlPins = parsePeerUrlPins(CC.MESH_PEER_ALLOWLIST);
 export const PEER_ALLOWLIST_ENFORCED = allowlistEnforced(MESH_PEER_ALLOWLIST, isProduction());
+/**
+ * Which coordinator keys this coordinator trusts for signed peer requests. Today: the static
+ * allowlist. The signed coordinator registry (verified, non-suspended members) plugs in here as
+ * the second source when it is turned on; until then it adds nothing.
+ */
+export const trustedPeerKey: PeerKeyTrust = peerKeyTrust(MESH_PEER_ALLOWLIST /* , signedRegistryTrust */);
+/** false: a peer route also admits a request signed by a trusted peer key without the mesh token. */
+export const MESH_TOKEN_REQUIRED_FOR_PEERS = CC.MESH_TOKEN_REQUIRED_FOR_PEERS;
 /** #118 review: forwarded-result replay protection and the subtasks we actually offered to peers. */
 export const forwardReplayCache = new ReplayCache();
 const OFFERED_SUBTASK_TTL_MS = 24 * 60 * 60 * 1000;

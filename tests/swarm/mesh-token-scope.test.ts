@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { createPeerKeys, type PeerKeys } from "../../src/mesh/peer.js";
-import { publicKeyFingerprint, signRegistration } from "../../src/mesh/peer-trust.js";
+import { publicKeyFingerprint, signPeerRequest, signRegistration } from "../../src/mesh/peer-trust.js";
 import { hashRequestBody, signRequest } from "../../src/security/request-signing.js";
 import { mayRelayOverWs } from "../../src/swarm/coordinator-utils.js";
 import { MeshProtocol } from "../../src/mesh/protocol.js";
@@ -337,5 +337,35 @@ describe("peer gossip speaks for its sender only", () => {
     });
     expect(res.statusCode).toBe(403);
     expect(res.json().error).toBe("blacklist_source_mismatch");
+  });
+});
+
+describe("signed peer requests while MESH_TOKEN_REQUIRED_FOR_PEERS is on (the default)", () => {
+  const sig = (method: string, url: string, body = "", keys: PeerKeys = peerKey) =>
+    signPeerRequest({ peerId: keys.peerId, privateKeyPem: keys.privateKeyPem, publicKeyPem: keys.publicKeyPem, method, url, body });
+
+  test("a signature alone does not replace the token yet", async () => {
+    const res = await app.inject({ method: "GET", url: "/network/world/local", remoteAddress: REMOTE, headers: sig("GET", "/network/world/local") });
+    expect(res.statusCode).toBe(401);
+    const fields = { peerId: peerKey.peerId, publicKeyPem: peerKey.publicKeyPem, coordinatorUrl: "https://peer.invalid", networkMode: "public_mesh" as const };
+    const payload = JSON.stringify({ ...fields, ...signRegistration(fields, peerKey.privateKeyPem) });
+    const reg = await app.inject({ method: "POST", url: "/mesh/register-peer", remoteAddress: REMOTE, headers: { "content-type": "application/json", ...sig("POST", "/mesh/register-peer", payload) }, payload });
+    expect(reg.statusCode).toBe(401);
+  });
+
+  test("token plus a valid signature passes; token plus a signature over another body is refused", async () => {
+    // (/stats/ledger/head: this file mocks agent accounts, which the world view reads.)
+    const ok = await app.inject({ method: "GET", url: "/stats/ledger/head", remoteAddress: REMOTE, headers: { "x-mesh-token": MESH, ...sig("GET", "/stats/ledger/head") } });
+    expect(ok.statusCode).toBe(200);
+    const payload = JSON.stringify({ receipts: [] });
+    const bad = await app.inject({
+      method: "POST",
+      url: "/receipts/replicate",
+      remoteAddress: REMOTE,
+      headers: { "content-type": "application/json", "x-mesh-token": MESH, ...sig("POST", "/receipts/replicate", JSON.stringify({ receipts: [1] })) },
+      payload
+    });
+    expect(bad.statusCode).toBe(401);
+    expect(bad.json().reason).toBe("peer_body_mismatch");
   });
 });

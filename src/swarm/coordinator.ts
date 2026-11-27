@@ -34,6 +34,7 @@ import { startAdminListener } from "./coordinator/admin-listener.js";
 import "./coordinator/mutable-state.js";
 import { agentCapabilities, connectedAgentCount, recordAbandonedClaim } from "./coordinator/agent-state.js";
 import { hasMeshToken, hasPortalServiceToken, requireMeshToken, isAgentGateRoute, agentSignatureAtGate, agentGateRefusalReason } from "./coordinator/auth.js";
+import { checkPeerRequest, peerSignatureAdmits, peerSignatureHeaders, requirePeerCredential } from "./coordinator/peer-auth.js";
 import { isPaymentGatedRequest } from "./coordinator/economy.js";
 import { ECONOMY_PAYMENTS_ENABLED, lightningProvider, payoutReconciler } from "./coordinator/payouts.js";
 import { robotQueue, receiptStore, discoveryAnnouncer } from "./coordinator/services.js";
@@ -147,7 +148,8 @@ if (robotQueue) {
 registerReceiptRoutes(app, {
   store: receiptStore,
   coordinatorId: identity.peerId,
-  requireMeshToken: (req, reply) => requireMeshToken(req, reply),
+  // Peer routes (/receipts/since, /receipts/replicate) also take a verified peer signature (peer-auth.ts).
+  requireMeshToken: (req, reply) => requirePeerCredential(req, reply),
   sign: (payload) => signPayload(payload, coordinatorKeys.privateKeyPem),
   coordinatorPublicKeyFor: (id) => coordinatorPublicKeyById(id),
   log: app.log
@@ -177,6 +179,7 @@ app.addHook("onReady", async () => {
     fetch: (url, init) => fetch(url, init),
     selfId: identity.peerId,
     meshToken: MESH_AUTH_TOKEN || undefined,
+    signRequest: (method, url) => peerSignatureHeaders(method, url),
     coordinatorPublicKeyFor: (id) => coordinatorPublicKeyById(id),
     log: app.log
   });
@@ -224,6 +227,10 @@ app.addHook("onRequest", async (req, reply) => {
   }
   const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
   if (hasMeshToken(headers)) return;
+  // A peer coordinator signs its requests with its own key (peer-auth.ts). Once
+  // MESH_TOKEN_REQUIRED_FOR_PEERS is off, a valid signature by a trusted peer key admits it to the
+  // peer routes (isPeerGateRoute) without the mesh token. The body and nonce are checked in preValidation.
+  if (await peerSignatureAdmits(headers, req.method, String(reqPath ?? ""))) return;
   // Agents never hold the coordinators' mesh token: a registered agent passes with its own key,
   // and only on the routes agents use (auth.ts isAgentGateRoute). Everything else (fleet-wide
   // reads, gossip ingest, receipts, escalation) stays coordinator/operator-only.
@@ -234,6 +241,13 @@ app.addHook("onRequest", async (req, reply) => {
     return reply.send(reason ? { error: "mesh_unauthorized", reason } : { error: "mesh_unauthorized" });
   }
 });
+
+// A peer signature that is present is verified in full once the body is in (body hash, nonce),
+// with or without a token next to it (peer-auth.ts checkPeerRequest).
+app.addHook("preValidation", async (req, reply) => {
+  if (!(await checkPeerRequest(req as any, reply as any))) return reply;
+});
+mesh.setRequestSigner((method, url, body) => peerSignatureHeaders(method, url, body));
 
 // Graceful stop (coordinator/drain.ts): while draining, new work is refused (retryable) and the
 // requests still open are counted so the drain can wait for them.

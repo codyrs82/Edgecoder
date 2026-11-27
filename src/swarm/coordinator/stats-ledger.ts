@@ -31,9 +31,9 @@ import {
   ANCHOR_REQUIRED_CONFIRMATIONS,
   ANCHOR_CONFIRM_POLL_MS,
   ANCHOR_RECONCILE_CONFIG,
-  STATS_ANCHOR_MIN_CONFIRMATIONS,
-  MESH_AUTH_TOKEN
+  STATS_ANCHOR_MIN_CONFIRMATIONS
 } from "./context.js";
+import { peerRequestHeaders } from "./peer-auth.js";
 import { agentCapabilities, ordering } from "./agent-state.js";
 import { receiptStore } from "./services.js";
 import { coordinatorPublicKeyById, isApprovedCoordinator } from "./peers.js";
@@ -350,10 +350,10 @@ export async function ingestStatsLedgerRecords(records: QueueEventRecord[]): Pro
 export async function syncStatsLedgerFromPeer(peer: { peerId: string; coordinatorUrl: string }): Promise<void> {
   if (!pgStore) return;
   try {
-    const meshHeaders = MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : undefined;
-    const headRes = await request(`${peer.coordinatorUrl}/stats/ledger/head`, {
+    const headUrl = `${peer.coordinatorUrl}/stats/ledger/head`;
+    const headRes = await request(headUrl, {
       method: "GET",
-      headers: meshHeaders,
+      headers: peerRequestHeaders("GET", headUrl),
       headersTimeout: 8_000,
       bodyTimeout: 8_000,
     });
@@ -366,11 +366,12 @@ export async function syncStatsLedgerFromPeer(peer: { peerId: string; coordinato
     const localHead = await pgStore.latestStatsLedgerHead();
     const sinceIssuedAtMs = localHead?.issuedAtMs ?? 0;
     if (remoteHead.issuedAtMs <= sinceIssuedAtMs) return;
+    const rangeUrl = `${peer.coordinatorUrl}/stats/ledger/range?sinceIssuedAtMs=${encodeURIComponent(String(sinceIssuedAtMs))}&limit=1000`;
     const rangeRes = await request(
-      `${peer.coordinatorUrl}/stats/ledger/range?sinceIssuedAtMs=${encodeURIComponent(String(sinceIssuedAtMs))}&limit=1000`,
+      rangeUrl,
       {
         method: "GET",
-        headers: meshHeaders,
+        headers: peerRequestHeaders("GET", rangeUrl),
         headersTimeout: 15_000,
         bodyTimeout: 15_000,
       }

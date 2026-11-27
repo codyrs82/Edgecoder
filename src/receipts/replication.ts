@@ -103,7 +103,10 @@ export function verifyReceiptPage(page: SignedReceiptPage, coordinatorPublicKeyP
 export interface ReceiptRouteDeps extends ReceiptAcceptOptions {
   store: ReceiptStore;
   coordinatorId: string;
-  /** Returns true when the request carries a valid mesh token; otherwise it has already set the status code. */
+  /**
+   * Returns true when the request carries a valid mesh token (or, on the coordinator, a verified
+   * peer signature when MESH_TOKEN_REQUIRED_FOR_PEERS is off); otherwise it has set the status code.
+   */
   requireMeshToken: (req: { headers: Record<string, unknown> }, reply: { code: (n: number) => unknown }) => boolean;
   /** Sign a page payload with the coordinator key. */
   sign: (payload: string) => string;
@@ -184,6 +187,8 @@ export interface ReceiptReplicationOptions extends ReceiptAcceptOptions {
   /** Our own id: pages claiming to come from it are ignored. */
   selfId?: string;
   meshToken?: string;
+  /** Signature headers for one peer request (coordinators sign with their own key; peer-auth.ts). */
+  signRequest?: (method: string, url: string) => Record<string, string>;
   pageLimit?: number;
   /** Pages pulled from one peer per tick before yielding (default 10). */
   maxPagesPerTick?: number;
@@ -217,7 +222,11 @@ export function startReceiptReplication(opts: ReceiptReplicationOptions): Receip
       let page: SignedReceiptPage;
       try {
         const res = await opts.fetch(url, {
-          headers: { accept: "application/json", ...(opts.meshToken ? { "x-mesh-token": opts.meshToken } : {}) },
+          headers: {
+            accept: "application/json",
+            ...(opts.meshToken ? { "x-mesh-token": opts.meshToken } : {}),
+            ...(opts.signRequest ? opts.signRequest("GET", url) : {})
+          },
           signal: controller?.signal
         });
         if (!res.ok) {
