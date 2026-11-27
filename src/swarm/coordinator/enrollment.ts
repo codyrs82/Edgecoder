@@ -75,6 +75,8 @@ export async function validatePortalNode(input: {
   sourceIp?: string;
   /** The TCP peer is this machine (embedded worker). Decided from the socket, never headers. */
   loopback?: boolean;
+  /** false: loopback, but not allowed to skip the portal (production without proof or opt-in). */
+  selfRegistration?: boolean;
   /**
    * The request is signed by the public key this coordinator already holds for the agent, and does
    * not change that key. Only then may an agent re-register without a portal-validated token.
@@ -148,8 +150,10 @@ export async function validatePortalNode(input: {
     return outcome;
   }
   // Allow loopback registrations: the embedded worker self-registers against its own coordinator.
-  // input.loopback comes from the socket address; a forwarded-IP header cannot set it.
-  if (input.loopback === true) {
+  // input.loopback comes from the socket address with no proxy headers; a header cannot set it.
+  // In production a loopback caller also needs the embedded worker's secret or the operator's
+  // opt-in (input.selfRegistration, requestOrigin); otherwise it registers like any agent.
+  if (input.loopback === true && input.selfRegistration !== false) {
     const outcome = { allowed: true, reason: "loopback_self_registration" };
     await appendValidationEvent(outcome);
     return outcome;

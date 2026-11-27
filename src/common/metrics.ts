@@ -3,6 +3,7 @@
 
 import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import { carriesProxyHeaders } from "./proxy-headers.js";
 // The only importer of prom-client, so the library can be swapped in one file.
 import { collectDefaultMetrics, Counter, Gauge, Histogram, Registry } from "prom-client";
 
@@ -142,10 +143,6 @@ function isLoopbackHost(host: unknown): boolean {
   return name === "localhost" || name === "[::1]" || isLoopbackAddress(name);
 }
 
-// A proxy on the same machine (cloudflared, nginx, a sidecar) connects from 127.0.0.1 on behalf
-// of the internet. Any of these headers means the request was relayed.
-const PROXY_HEADERS = ["x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded", "via", "cf-connecting-ip", "cf-ray", "fly-client-ip"];
-
 /**
  * True only for a direct connection from this machine: loopback peer address (the socket's, not
  * `req.ip`, which trustProxy can make client-controlled), no proxy headers, and a loopback Host
@@ -153,7 +150,7 @@ const PROXY_HEADERS = ["x-forwarded-for", "x-forwarded-host", "x-real-ip", "forw
  */
 export function isLoopbackCaller(req: Pick<FastifyRequest, "headers" | "socket">): boolean {
   if (!isLoopbackAddress(req.socket?.remoteAddress)) return false;
-  if (PROXY_HEADERS.some((h) => req.headers[h] !== undefined)) return false;
+  if (carriesProxyHeaders(req.headers)) return false;
   return isLoopbackHost(req.headers.host);
 }
 

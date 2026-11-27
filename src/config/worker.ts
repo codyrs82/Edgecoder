@@ -71,6 +71,11 @@ export const workerConfigSchema = z.object({
    * They are shown only to the machine's owner. Default on; off/0/false turns it off.
    */
   AGENT_LAN_HINTS: envFlag({ off: ["off", "0", "false"], ci: true }),
+  /**
+   * Set by the all-in-one entry for the worker it forks: a per-process secret the worker sends on
+   * /register to its own loopback coordinator, so it registers without a portal token. Never set by hand.
+   */
+  EDGECODER_SELF_AGENT_SECRET: str(),
   /** Loopback port for the IDE's swarm forwarder; unset or 0 = off. */
   LOCAL_FORWARD_PORT: envPort(undefined),
 

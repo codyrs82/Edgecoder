@@ -76,6 +76,7 @@ import { AgentLifecycle, DEFAULT_DRAIN_MS, announceGoingOffline, blacklistReason
 import { resolveIdeToken } from "../apps/ide/ide-auth.js";
 import { loadConfigOrExit } from "../common/config.js";
 import { workerConfigSchema } from "../config/worker.js";
+import { SELF_AGENT_HEADER } from "./self-agent-secret.js";
 import { layerOverrides, loadOverrides, overridesPath, saveOverrides, withoutKeys, type EnvModelSettings, type ModelOverridesFile } from "../model/remote-control/overrides.js";
 import { ModelControlAgent, type CurrentModelSettings } from "../model/remote-control/agent-controller.js";
 import { createOllamaAdmin, diskSpace, ollamaModelsDir, registryModelSize } from "../model/remote-control/ollama-admin.js";
@@ -1159,6 +1160,16 @@ function normalizeUrl(value: string | undefined): string | null {
   }
 }
 
+/**
+ * The embedded worker's proof to its own coordinator (src/swarm/self-agent-secret.ts): only when
+ * the all-in-one entry gave it the secret and the coordinator is on this machine.
+ */
+function selfAgentHeaders(): Record<string, string> {
+  const secret = W.EDGECODER_SELF_AGENT_SECRET;
+  if (!secret || !isLoopbackUrl(COORDINATOR_BOOTSTRAP_URL)) return {};
+  return { [SELF_AGENT_HEADER]: secret };
+}
+
 function isLoopbackUrl(url: string): boolean {
   try {
     const host = new URL(url).hostname;
@@ -1253,7 +1264,7 @@ async function post(
       const res = await coordinatorClient.call({
         method: "POST",
         path,
-        headers: { "content-type": "application/json", ...meshHeaders(), ...(options?.extraHeaders ?? {}), ...signature },
+        headers: { "content-type": "application/json", ...meshHeaders(), ...(path === "/register" && !options?.to ? selfAgentHeaders() : {}), ...(options?.extraHeaders ?? {}), ...signature },
         timeoutMs,
         body: payload
       }, options?.to);

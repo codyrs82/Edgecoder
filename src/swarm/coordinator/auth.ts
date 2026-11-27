@@ -32,6 +32,7 @@ import {
   PORTAL_ACTION_KEYS,
   REQUIRE_PORTAL_ACTION_SIGNATURE,
   CLIENT_IP_TRUST,
+  requestOrigin,
   preAuthFailures,
   securityLog,
   identity,
@@ -281,7 +282,7 @@ export async function verifyAgentRequest(
   const agentId = signed["x-agent-id"];
 
   // 1. Skip rate limiting for loopback (embedded worker is trusted)
-  const isLoopback = isLoopbackSocket(sourceIp, CLIENT_IP_TRUST);
+  const isLoopback = isLoopbackSocket(sourceIp, CLIENT_IP_TRUST, headers);
   const clientIp = extractClientIp(headers, sourceIp, CLIENT_IP_TRUST) ?? "unknown";
   const rejectUnproven = (event: SecurityEventType, reason: string, countFailure = true): "rejected" => {
     if (!isLoopback && countFailure) preAuthFailures.record(clientIp);
@@ -419,7 +420,8 @@ export async function resolveSubmitterAccount(
     portalService,
     signature: verified === "rejected" ? "rejected" : signer ? { agentId: signer } : null,
     ownerAccountId: signer ? (await pgStore?.getAgentOwnership(signer))?.accountId : undefined,
-    loopback: req.ip === "127.0.0.1" || req.ip === "::1" || req.ip === "::ffff:127.0.0.1"
+    // Same rule as registration: the socket is this machine and no proxy relayed the request.
+    loopback: requestOrigin(req).loopback
   });
 }
 

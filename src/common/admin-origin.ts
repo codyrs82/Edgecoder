@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 import { BlockList, isIPv4, isIPv6 } from "node:net";
+import { carriesProxyHeaders } from "./proxy-headers.js";
 
 /*
  * Where operator (admin-token) requests may come from. The token is still required; this decides
@@ -17,7 +18,9 @@ import { BlockList, isIPv4, isIPv6 } from "node:net";
  *
  * Headers can only refuse: Fly's edge sets Fly-Client-IP and Fly-Forwarded-Port on every public
  * request, so a request carrying either came (or claims to come) through the public proxy and is
- * refused. Sending them from inside only locks the sender out.
+ * refused. Sending them from inside only locks the sender out. Any other proxy header
+ * (X-Forwarded-For, Forwarded, X-Real-IP, Via, ...) means a proxy relayed the request, so it is
+ * refused as via_proxy whatever the socket address: a same-host proxy connects from loopback.
  */
 
 export interface AdminOriginPolicy {
@@ -109,10 +112,11 @@ export function adminOriginDecision(remoteAddress: string | undefined, headers: 
   if (!ip || !(isIPv4(ip) || isIPv6(ip))) return { ok: false, reason: "no_socket_address" };
   if (policy.trustedProxies.includes(ip)) return { ok: false, reason: "via_proxy" };
   const l = lists(policy);
-  if (contains(l.loopback, ip)) return { ok: true, via: "loopback" };
-  if (contains(l.privateNet, ip)) return { ok: true, via: "private_network" };
-  if (contains(l.extra, ip)) return { ok: true, via: "allowlist" };
-  return { ok: false, reason: "not_internal" };
+  const via = contains(l.loopback, ip) ? "loopback" : contains(l.privateNet, ip) ? "private_network" : contains(l.extra, ip) ? "allowlist" : null;
+  if (!via) return { ok: false, reason: "not_internal" };
+  // An internal socket that relays someone else (a same-host or LAN proxy) is not internal.
+  if (carriesProxyHeaders(headers)) return { ok: false, reason: "via_proxy" };
+  return { ok: true, via };
 }
 
 /** The TCP peer address of a Fastify / Node request (never a header). */

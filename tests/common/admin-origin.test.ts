@@ -40,6 +40,15 @@ describe("admin origin: decided by the socket, headers can only refuse", () => {
     expect(adminOriginDecision(undefined, h, offFly)).toEqual({ ok: false, reason: "no_socket_address" });
   });
 
+  test("an internal socket carrying proxy headers relays someone else and is refused", () => {
+    for (const h of [{ "x-forwarded-for": "198.51.100.4" }, { forwarded: "for=198.51.100.4" }, { "x-real-ip": "198.51.100.4" }, { via: "1.1 Caddy" }]) {
+      expect(adminOriginDecision("127.0.0.1", h, offFly)).toEqual({ ok: false, reason: "via_proxy" });
+      expect(adminOriginDecision("10.1.2.3", h, offFly)).toEqual({ ok: false, reason: "via_proxy" });
+    }
+    // A public socket stays "not_internal" whatever it sends.
+    expect(adminOriginDecision("203.0.113.9", { via: "1.1 x" }, offFly)).toEqual({ ok: false, reason: "not_internal" });
+  });
+
   test("a configured reverse proxy is the outside world, even on loopback", () => {
     const p = adminOriginPolicyFromEnv({ COORDINATOR_TRUST_PROXY: "127.0.0.1" });
     expect(adminOriginDecision("127.0.0.1", {}, p)).toEqual({ ok: false, reason: "via_proxy" });

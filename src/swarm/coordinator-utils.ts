@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 
 export { safeTokenEqual } from "../common/crypto-utils.js";
+import { carriesProxyHeaders } from "../common/proxy-headers.js";
 
 export function normalizeIpCandidate(raw: string): string | undefined {
   const value = raw.trim();
@@ -41,7 +42,8 @@ export function isLoopbackAddress(address: string | undefined): boolean {
  * - On Fly (FLY_APP_NAME set by the Fly runtime) the edge proxy sets Fly-Client-IP, and that one
  *   header is read; the others are ignored.
  * The result is for display, geolocation and audit only. It never grants trust: the loopback
- * self-registration exemption is decided from the socket (see isLoopbackSocket).
+ * self-registration exemption is decided from the socket (see isLoopbackSocket), and proxy
+ * headers can only take loopback status away.
  */
 export interface ClientIpTrust {
   trustedProxies: string[];
@@ -65,13 +67,45 @@ export function socketRemoteAddress(req: { socket?: { remoteAddress?: string }; 
 }
 
 /**
- * True when the TCP peer is this machine and not a configured reverse proxy: the embedded
- * worker registering with its own coordinator. Headers play no part.
+ * True when the TCP peer is this machine, is not a configured reverse proxy, and the request
+ * carries no proxy headers (X-Forwarded-For, Forwarded, X-Real-IP, Via, ...): a same-host proxy
+ * connects from 127.0.0.1 for every internet caller, so a relayed request is never "self", with
+ * or without COORDINATOR_TRUST_PROXY. Headers can only take loopback status away, never grant it.
  */
-export function isLoopbackSocket(socketIp: string | undefined, trust: ClientIpTrust = NO_PROXY_TRUST): boolean {
+export function isLoopbackSocket(
+  socketIp: string | undefined,
+  trust: ClientIpTrust = NO_PROXY_TRUST,
+  headers?: Record<string, unknown>
+): boolean {
   if (!isLoopbackAddress(socketIp)) return false;
+  if (carriesProxyHeaders(headers)) return false;
   const normalized = normalizeIpCandidate(socketIp!);
   return !trust.trustedProxies.includes(normalized ?? "");
+}
+
+/**
+ * True for a loopback request that relays an outside caller while COORDINATOR_TRUST_PROXY is
+ * unset: the coordinator sits behind a same-host proxy it was not told about (worth a warning).
+ */
+export function untrustedLocalProxy(socketIp: string | undefined, headers: Record<string, unknown> | undefined, trust: ClientIpTrust): boolean {
+  return !trust.onFly && trust.trustedProxies.length === 0 && isLoopbackAddress(socketIp) && carriesProxyHeaders(headers);
+}
+
+/**
+ * Whether a loopback /register may skip portal validation. Outside production any loopback caller
+ * may (development, tests, the desktop app's local coordinator). In production the caller must be
+ * the embedded worker this process started (it proves the per-process secret) or the operator must
+ * opt in with COORDINATOR_LOOPBACK_SELF_REGISTRATION=true for a separately run agent on the same
+ * machine. Everyone else registers with a portal enrollment token like any agent.
+ */
+export function loopbackSelfRegistrationAllowed(input: {
+  loopback: boolean;
+  selfAgentProof: boolean;
+  production: boolean;
+  optIn: boolean;
+}): boolean {
+  if (!input.loopback) return false;
+  return input.selfAgentProof || !input.production || input.optIn;
 }
 
 /** Client IP for display, geolocation and audit. See ClientIpTrust for which headers count. */

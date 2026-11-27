@@ -148,6 +148,7 @@ export function registerAgentRoutes(app: CoordinatorApp): void {
       deviceId: body.deviceId,
       sourceIp,
       loopback: origin.loopback,
+      selfRegistration: origin.selfRegistration,
       proofOfKey
     });
     if (!activation.allowed) {
