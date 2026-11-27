@@ -188,7 +188,9 @@ fly postgres attach <your-app>-db -a <your-app>     # sets DATABASE_URL (the out
 
 Keep your `fly.toml` outside the repository if you like, but `[build] dockerfile` is resolved relative
 to the directory of the `fly.toml`, so point it into your checkout (`<checkout>/deploy/docker/Dockerfile.agent`
-as a relative path). Use `deploy/fly/fly.seed-node.toml` as the template for a coordinator without a
+as a relative path). The build context is the directory `fly deploy` is given, so pass the checkout and
+an absolute config path: `fly deploy <checkout> -c /abs/path/fly.toml` (otherwise the build fails with
+`deploy/docker/agent-entrypoint.sh: not found`). Use `deploy/fly/fly.seed-node.toml` as the template for a coordinator without a
 local model (`SKIP_OLLAMA=true`, `DISABLE_SELF_AGENT=1`). Do not run agents as extra machines in the
 coordinator's app: every machine in a Fly app receives the app's secrets.
 
@@ -274,6 +276,10 @@ service: the template's placeholders cannot run. Before the first start, set up:
    sudo systemctl reload caddy
    ```
 
+   Set `COORDINATOR_TRUST_PROXY=127.0.0.1` (the proxy's address) in the env file. Without it the
+   coordinator takes every request that comes through the proxy for a local caller, and an agent
+   from anywhere registers without the portal check.
+
 3. **The env file** (`sudo nano /etc/edgecoder/coordinator.env`): every value the template lists,
    `NODE_ENV=production`, and a stable identity key. Without `COORDINATOR_PRIVATE_KEY_PEM` the
    coordinator makes a new key on every restart. Generate one with
@@ -298,6 +304,10 @@ curl -s https://<your-coordinator-hostname>/identity     # public: peerId, finge
 The `coordinator` role runs the coordinator only (`dist/swarm/coordinator.js`). The control plane,
 with `/network/coordinators` and the approval routes, runs in the all-in-one runtime (role `seed`,
 `EDGE_RUNTIME_MODE=all-in-one`); a `coordinator`-role host doesn't serve them.
+
+An agent that should work for your coordinator needs `COORDINATOR_URL` set to it and no `PORTAL_URL`:
+with `PORTAL_URL` set, the agent asks the portal for a coordinator at start and moves to the one the
+portal names (always one of the network's own coordinators), whatever `COORDINATOR_URL` says.
 
 An agent on a Linux host without Docker takes no work with the default `SANDBOX_MODE=docker`
 (its log says `pull skipped: sandbox_down`). To serve model calls only, set `SANDBOX_MODE=none` and
