@@ -45,9 +45,9 @@ export function servedCost(n: number): string {
   return `${n.toLocaleString(undefined, { maximumFractionDigits: 3 })} cSats`;
 }
 
-/** "Datacenter GPU 2×A16", or "This computer (Apple M1 Max)". */
+/** "Datacenter GPU 2×A16", "This computer (Apple M1 Max)", or "Over Bluetooth: My iPhone". */
 export function hardwareShort(s: Served): string {
-  if (s.computeClass === "local") return s.hardware;
+  if (s.computeClass === "local" || s.computeClass === "bluetooth") return s.hardware;
   const cls = s.hardware.replace(/\s*\([^)]*\)\s*$/, "");
   const gpu = s.gpu ? s.gpu.replace(/^(\d+)× /, "$1×").replace(/^(\d+×)?(NVIDIA|AMD|Apple|Intel) /, "$1") : "";
   return `${cls}${gpu ? ` ${gpu}` : s.tier ? ` (${s.tier})` : ""}${s.own ? " · your machine" : ""}`;
@@ -79,7 +79,7 @@ export function servedLine(calls: CallUsage[] | undefined): string | null {
   if (calls.length > 1) bits.push(`${calls.length} calls`);
   const total = calls.reduce((n, c) => n + (Number.isFinite(c.cSats) ? c.cSats : 0), 0);
   const anyFrontier = calls.some((c) => c.served?.computeClass === "frontier");
-  if (!anyFrontier || total > 0) bits.push((s.computeClass === "local" || s.computeClass === "edgecoder" || s.own) && total === 0 ? "free" : servedCost(total));
+  if (!anyFrontier || total > 0) bits.push((s.computeClass === "local" || s.computeClass === "bluetooth" || s.computeClass === "edgecoder" || s.own) && total === 0 ? "free" : servedCost(total));
   if (anyFrontier) {
     const usd = calls.reduce((n, c) => n + (c.served?.usd ?? 0), 0);
     bits.push(usd > 0 && usd < 0.01 ? "<$0.01" : `$${usd.toFixed(2)}`);

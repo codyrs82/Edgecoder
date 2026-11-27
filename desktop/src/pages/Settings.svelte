@@ -150,15 +150,20 @@
   let bleOfflineNote = $state("");
   let bleOfflineSaving = $state(false);
   $effect(() => {
-    getBleOfflineSetting().then((s) => (bleOffline = s)).catch(() => {});
+    getBleOfflineSetting().then((s) => (bleOffline = normalBleOffline(s))).catch(() => {});
     void refreshBleNearby();
   });
+  /** The setting as the server sent it, or the default (on, nothing allowed) for anything else (an older server). */
+  function normalBleOffline(s: Partial<BleOfflineSetting> | null | undefined): BleOfflineSetting {
+    return { enabled: s?.enabled !== false, devices: Array.isArray(s?.devices) ? s.devices : [] };
+  }
   async function refreshBleNearby() {
     try {
       const r = await listBleNearby();
-      bleNearby = r.peers.filter((p) => !p.pinned);
-      bleMismatch = r.peers.filter((p) => p.pinned && p.keyMatches === false).map((p) => p.name);
-      if (!r.available) bleOfflineNote = "Nearby devices show here while this computer's agent runs with Bluetooth on.";
+      const peers = Array.isArray(r?.peers) ? r.peers : [];
+      bleNearby = peers.filter((p) => !p.pinned);
+      bleMismatch = peers.filter((p) => p.pinned && p.keyMatches === false).map((p) => p.name);
+      if (!r?.available) bleOfflineNote = "Nearby devices show here while this computer's agent runs with Bluetooth on.";
     } catch {
       bleNearby = [];
     }
@@ -169,7 +174,7 @@
     bleOfflineSaving = true;
     bleOfflineNote = "";
     try {
-      bleOffline = await setBleOfflineSetting(next);
+      bleOffline = normalBleOffline(await setBleOfflineSetting(next));
       await refreshBleNearby();
     } catch (e) {
       bleOffline = before;
