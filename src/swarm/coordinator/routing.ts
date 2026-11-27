@@ -26,7 +26,7 @@ import { accountsFor } from "./agent-accounts.js";
 import { activeBlacklistRecord, agentCapabilities, AGENT_CONNECTED_WINDOW_MS } from "./agent-state.js";
 import { autoMayUseCloudModel } from "../../cloud-host/catalog.js";
 import { bestFit, bestFitConfigFromEnv, routedLine, type AgentView, type BestFitConfig, type BestFitResult, type NetworkView, type SessionMemo } from "./best-fit.js";
-import { CC, FALLBACK_BTC_USD, queue, reservations, identity, usageListeners } from "./context.js";
+import { CC, FALLBACK_BTC_USD, peerMayBillCalls, queue, reservations, identity, usageListeners } from "./context.js";
 import { agentContextWindow, agentDependable, agentLastPullMs, agentLoadReport, agentSocketConnected, freeModelSlots, modelWarmOn, pickupStats, PULL_FRESH_MS } from "./dispatch.js";
 import { distanceRttMs, regionDistanceKm } from "../../common/geo-regions.js";
 import { agentUnavailable, circuitBlocks, loadedModelsOf, memoryAdmits, modelLoadedOn } from "./memory-admission.js";
@@ -385,7 +385,8 @@ export async function resolveAuto(
   // or a URL that is ours): a route_elsewhere naming the caller's own coordinator is not followed, and
   // the portal ran the call here again without redirects.
   const ownUrl = normUrl(CC.COORDINATOR_PUBLIC_URL);
-  const views = (opts.peers && bestFitConfig.peers ? await peerViews(nowMs) : []).filter((v) => !v.world.coordinator.url || normUrl(v.world.coordinator.url) !== ownUrl);
+  // Run 24: an Auto call is billed: only peers that can bill it (context.ts peerMayBillCalls).
+  const views = (opts.peers && bestFitConfig.peers ? await peerViews(nowMs) : []).filter((v) => (!v.world.coordinator.url || normUrl(v.world.coordinator.url) !== ownUrl) && peerMayBillCalls(v.world.coordinator.id));
   const excluded = new Set(opts.excludeAgents ?? []);
   const local = localAgentViews(nowMs, rttSource, opts.clientRegion).filter((a) => !excluded.has(a.agentId));
   const owners = opts.requesterAccountId ? await ownerSource(local.map((a) => a.agentId), nowMs).catch(() => new Map<string, string | null>()) : new Map<string, string | null>();

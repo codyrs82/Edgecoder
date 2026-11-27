@@ -57,7 +57,7 @@ import { AgentRateLimiter } from "../../security/agent-rate-limiter.js";
 import { SecurityEventLogger } from "../../audit/security-events.js";
 import { PullTracker } from "../../model/pull-tracker.js";
 import { createRegistryMirror } from "../../discovery/registry-mirror.js";
-import { registryPublicKeysFromEnv } from "../../discovery/registry.js";
+import { memberBillable, registryPublicKeysFromEnv } from "../../discovery/registry.js";
 import { RegistryTrust } from "../../discovery/registry-trust.js";
 import { app } from "./app.js";
 
@@ -273,6 +273,30 @@ export const PEER_KEY_TRUST_CONFIGURED = (): boolean => MESH_PEER_ALLOWLIST.size
  */
 export function peerMayTakeBilledWork(peerId: string): boolean {
   return MESH_PEER_ALLOWLIST.size === 0 || MESH_PEER_ALLOWLIST.has(peerId);
+}
+/**
+ * Network run 24: whether a buyer's billed network call (named or Auto) may be placed on, redirected
+ * to, or handed over to a peer coordinator. EU's best fit and handover sent calls to two outside
+ * coordinators (edgecoder-coord-sin.fly.dev, edgecoder-coord3-jnb on Azure) that cannot bill them
+ * (402); the portal, rightly, did not follow (75 times). A peer bills when the signed registry lists
+ * it as a platform coordinator, or as an active community member with billingEnabled while this
+ * coordinator runs the ledger service (#649); a peer the registry does not list, when it is in the
+ * allowlist (peerMayTakeBilledWork: the platform's own seeds; every peer in development).
+ * Outside coordinators stay peers for gossip, the world view and own-machine calls.
+ */
+export function peerMayBillCalls(peerId: string): boolean {
+  const listing = registryTrust.enabled ? registryTrust.listing(peerId) : null;
+  if (listing === "platform") return true;
+  if (listing !== null) {
+    const m = registryTrust.member(peerId);
+    return !!m && memberBillable(m) && ledgerServiceOn;
+  }
+  return peerMayTakeBilledWork(peerId);
+}
+let ledgerServiceOn = false;
+/** Set by ledger-service.ts: this coordinator runs EdgeCoder's ledger service (it bills community members' calls). */
+export function setLedgerServiceOn(on: boolean): void {
+  ledgerServiceOn = on;
 }
 /** Endpoint pins: the allowlist's `@url` wins over the registry's verified URL. */
 export function peerUrlPins(): PeerUrlPins {
