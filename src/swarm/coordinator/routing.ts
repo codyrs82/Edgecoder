@@ -310,6 +310,8 @@ async function peerViews(nowMs: number): Promise<Array<{ world: LocalWorld; link
 }
 
 /** Peers' world views for routing (bounded wait); none when BEST_FIT_PEERS is off. */
+const normUrl = (u: string | undefined | null) => (u ?? "").trim().replace(/\/+$/, "").toLowerCase();
+
 export function peerWorldViews(nowMs = Date.now()): Promise<Array<{ world: LocalWorld; linkRttMs: number | null }>> {
   return bestFitConfig.peers ? peerViews(nowMs) : Promise.resolve([]);
 }
@@ -379,7 +381,11 @@ export async function resolveAuto(
   opts: { peers?: boolean; computeClass?: string; requesterAccountId?: string; clientRegion?: string | null; excludeAgents?: readonly string[] } = {},
   nowMs = Date.now(),
 ): Promise<Resolution> {
-  const views = opts.peers && bestFitConfig.peers ? await peerViews(nowMs) : [];
+  // Run 23: never a "peer" that is this coordinator itself (a view under another id after a restart,
+  // or a URL that is ours): a route_elsewhere naming the caller's own coordinator is not followed, and
+  // the portal ran the call here again without redirects.
+  const ownUrl = normUrl(CC.COORDINATOR_PUBLIC_URL);
+  const views = (opts.peers && bestFitConfig.peers ? await peerViews(nowMs) : []).filter((v) => !v.world.coordinator.url || normUrl(v.world.coordinator.url) !== ownUrl);
   const excluded = new Set(opts.excludeAgents ?? []);
   const local = localAgentViews(nowMs, rttSource, opts.clientRegion).filter((a) => !excluded.has(a.agentId));
   const owners = opts.requesterAccountId ? await ownerSource(local.map((a) => a.agentId), nowMs).catch(() => new Map<string, string | null>()) : new Map<string, string | null>();
