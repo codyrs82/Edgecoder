@@ -17,7 +17,7 @@ import { LedgerServiceClient, ledgerServiceUrlFromEnv } from "../../ledger-servi
 import { rawBodyOf } from "../../security/request-signing.js";
 import { DEFAULT_DISCOVERY_URL } from "../../portal/coordinator-discovery.js";
 import { app, type CoordinatorApp } from "./app.js";
-import { CC, coordinatorKeys, identity, portalActionKeys, registryTrust, securityLog } from "./context.js";
+import { CC, coordinatorKeys, identity, portalActionKeys, registryTrust, securityLog, setLedgerServiceOn } from "./context.js";
 import { ordering } from "./agent-state.js";
 import { persistStatsLedgerRecord } from "./stats-ledger.js";
 
@@ -54,6 +54,8 @@ export const ledgerService: LedgerService | null = pgStore
       log: (msg, detail) => app.log.warn(detail ?? {}, msg)
     })
   : null;
+// Run 24: peers that are billable community members get billed calls only while this runs (context.ts peerMayBillCalls).
+setLedgerServiceOn(ledgerService !== null);
 
 /** Where this coordinator bills, when not on its own database (outside coordinators). */
 export const ledgerServiceUrl = ledgerServiceUrlFromEnv({ LEDGER_SERVICE_URL: CC.LEDGER_SERVICE_URL, DATABASE_URL: process.env.DATABASE_URL, NODE_ENV: process.env.NODE_ENV }, DEFAULT_DISCOVERY_URL);

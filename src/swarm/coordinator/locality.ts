@@ -32,7 +32,7 @@ import type { ComputeClassId } from "../../economy/compute-classes.js";
 import { classFamily } from "../../inference-api/auto-route.js";
 import { regionDistanceKm } from "../../common/geo-regions.js";
 import { agentHasModel } from "../model-catalog.js";
-import { queue, reservations } from "./context.js";
+import { peerMayBillCalls, queue, reservations } from "./context.js";
 import { agentCapabilities, activeBlacklistRecord } from "./agent-state.js";
 import { agentContextWindow, agentLoadReport, coldLoadKm, freeModelSlots, modelKnownCold, modelWarmOn, PULL_FRESH_MS, pulledWithin } from "./dispatch.js";
 import { coldLoadMs, contentionFactor, decodeTps, prefillTps, type AgentView } from "./best-fit.js";
@@ -190,7 +190,8 @@ export function peerCompletionMs(a: AgentView, model: string, fit: PeerFit, nowM
  * With `fit` (run 6), only agents expected to finish the call within its limit count.
  */
 export async function peerWithFreeCapacity(model: string, computeClass: string, clientRegion: string | null | undefined, nowMs = Date.now(), fit?: PeerFit): Promise<{ coordinatorId: string; url: string } | null> {
-  const worlds = await peerWorldViews(nowMs);
+  // Run 24: a named network call is billed: only to a peer that can bill it (context.ts peerMayBillCalls).
+  const worlds = (await peerWorldViews(nowMs)).filter((w) => peerMayBillCalls(w.world.coordinator.id));
   if (!worlds.length) return null;
   const family = computeClass === "any" ? null : classFamily(computeClass);
   const by = new Map<string, { free: number; km: number }>();
