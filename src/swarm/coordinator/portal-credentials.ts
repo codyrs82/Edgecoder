@@ -32,3 +32,11 @@ export function portalOutboundHeaders(peerId: string, registrationToken: string,
   }
   return headers;
 }
+
+/**
+ * Whether a portal validation named the node's owner. Portals answer the shared coordinator token
+ * with the owner's user id only (no email), so either one counts.
+ */
+export function portalOwnerKnown(activation: { ownerEmail?: string; ownerUserId?: string }): boolean {
+  return Boolean(activation.ownerEmail || activation.ownerUserId);
+}

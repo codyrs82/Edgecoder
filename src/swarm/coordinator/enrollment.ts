@@ -84,6 +84,8 @@ export async function validatePortalNode(input: {
   allowed: boolean;
   reason?: string;
   ownerEmail?: string;
+  /** The owner's portal user id; portals give it even when they withhold the email (coordinator token). */
+  ownerUserId?: string;
   sourceIp?: string;
   countryCode?: string;
   vpnDetected?: boolean;
@@ -234,6 +236,7 @@ export async function validatePortalNode(input: {
       allowed: payload.allowed === true,
       reason: payload.reason,
       ownerEmail: payload.node?.ownerEmail,
+      ownerUserId: payload.node?.ownerUserId,
       sourceIp: payload.node?.sourceIp,
       countryCode: payload.node?.countryCode,
       vpnDetected: payload.node?.vpnDetected,

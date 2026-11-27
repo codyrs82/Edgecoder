@@ -77,6 +77,7 @@ import { ADMIN_API_TOKEN, requireMeshToken, hasMeshToken } from "../auth.js";
 import { subtaskReserveMsat, rateOracleConfig } from "../economy.js";
 import { persistStatsLedgerRecord } from "../stats-ledger.js";
 import { validatePortalNode } from "../enrollment.js";
+import { portalOwnerKnown } from "../portal-credentials.js";
 import { grantSubtaskToPeer, hasLiveAgentFor, requestOfferGrant } from "../grants.js";
 import { recordMeshMessage } from "../world-activity.js";
 
@@ -624,7 +625,8 @@ export function registerMeshRoutes(app: CoordinatorApp): void {
       if (!activation.allowed) {
         return reply.code(403).send({ error: "coordinator_not_activated", reason: activation.reason });
       }
-      if (PORTAL_SERVICE_URL && !activation.ownerEmail) {
+      // An owner is required; with the shared coordinator token the portal names it by user id only.
+      if (PORTAL_SERVICE_URL && !portalOwnerKnown(activation)) {
         return reply.code(403).send({ error: "coordinator_not_activated", reason: "owner_email_required" });
       }
       activationReason = activation.reason ?? "portal_validated";

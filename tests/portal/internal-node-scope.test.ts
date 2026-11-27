@@ -24,11 +24,15 @@ function buildPortal() {
   add({ nodeId: "coord-b", nodeKind: "coordinator", registrationTokenHash: "h(coord-b-registration)" });
   add({ nodeId: "agent-1", nodeKind: "agent", registrationTokenHash: "h(agent-1-registration)" });
   add({ nodeId: "agent-2", nodeKind: "agent", registrationTokenHash: "h(agent-2-registration)", lastValidatedByCoordinator: "coord-b" });
+  add({ nodeId: "pending-a", nodeKind: "agent", ownerUserId: "user-pa", registrationTokenHash: "h(pending-a-registration)", nodeApproved: false, active: false, lastValidatedByCoordinator: "coord-a" });
+  add({ nodeId: "pending-b", nodeKind: "agent", registrationTokenHash: "h(pending-b-registration)", nodeApproved: false, active: false, lastValidatedByCoordinator: "coord-b" });
   const updateNodeDns = vi.fn(async () => undefined);
   const store = {
     getNodeEnrollment: async (id: string) => (nodes.has(id) ? { ...nodes.get(id) } : null),
     getNodeEnrollmentByDeviceId: async () => null,
-    getNodeEnrollmentByRegistrationTokenHash: async () => null,
+    getNodeEnrollmentByRegistrationTokenHash: async (h: string) => [...nodes.values()].find((n) => n.registrationTokenHash === h) ?? null,
+    listPendingNodes: async (o: { validatedByCoordinator?: string } = {}) =>
+      [...nodes.values()].filter((n) => !n.nodeApproved && (!o.validatedByCoordinator || n.lastValidatedByCoordinator === o.validatedByCoordinator)).map((n) => ({ ...n })),
     listCoordinatorNodeIds: async () => ["coord-a", "coord-b"],
     updateNodeDns,
     touchNodeValidation: async (i: { nodeId: string; sourceIp?: string; validatedByCoordinator?: string | null }) => {
@@ -117,6 +121,51 @@ describe("/internal/nodes/lookup", () => {
     const nodes = res.json().nodes;
     expect(nodes.map((n: any) => n.nodeId)).toEqual(["agent-1"]);
     expect(nodes[0]).toMatchObject({ nodeKind: "agent", hostApproved: true, active: true });
+    for (const field of ["ownerEmail", "sourceIp", "countryCode"]) expect(nodes[0]).not.toHaveProperty(field);
+  });
+});
+
+describe("no owner email, IP or country for the coordinator token", () => {
+  test("the validate answer omits them for the coordinator token and keeps them for the service token", async () => {
+    const { app } = buildPortal();
+    const payload = { nodeId: "agent-1", nodeKind: "agent", registrationToken: "agent-1-registration", sourceIp: "203.0.113.5" };
+    const coord = (await validate(app, { "x-portal-service-token": COORD, ...coordA }, payload)).json();
+    expect(coord.allowed).toBe(true);
+    expect(coord.node).toMatchObject({ nodeId: "agent-1", hostApproved: true, active: true });
+    for (const field of ["ownerEmail", "sourceIp", "countryCode"]) expect(coord.node).not.toHaveProperty(field);
+    // Without an identity too.
+    const anon = (await validate(app, { "x-portal-service-token": COORD }, payload)).json();
+    for (const field of ["ownerEmail", "sourceIp", "countryCode"]) expect(anon.node).not.toHaveProperty(field);
+    const svc = (await validate(app, { "x-portal-service-token": SERVICE }, payload)).json();
+    expect(svc.node).toMatchObject({ ownerEmail: "agent-1@x.io", sourceIp: "203.0.113.5", countryCode: "DE" });
+  });
+
+  test("a mismatched node name names the token's node, without the owner's email for the coordinator token", async () => {
+    const { app } = buildPortal();
+    const payload = { nodeId: "renamed-box", nodeKind: "agent", registrationToken: "agent-1-registration" };
+    const coord = await validate(app, { "x-portal-service-token": COORD, ...coordA }, payload);
+    expect(coord.statusCode).toBe(404);
+    expect(coord.json().tokenNode).toEqual({ nodeId: "agent-1" });
+    const svc = await validate(app, { "x-portal-service-token": SERVICE }, payload);
+    expect(svc.json().tokenNode).toEqual({ nodeId: "agent-1", ownerEmail: "agent-1@x.io" });
+  });
+
+  test("pending: the service token keeps the full list", async () => {
+    const { app } = buildPortal();
+    const res = await app.inject({ url: "/internal/nodes/pending", headers: { "x-portal-service-token": SERVICE } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().nodes.map((n: any) => n.nodeId).sort()).toEqual(["pending-a", "pending-b"]);
+    expect(res.json().nodes[0]).toHaveProperty("ownerEmail");
+    expect(res.json().nodes[0]).toHaveProperty("sourceIp");
+  });
+
+  test("pending: the coordinator token needs its identity and sees only its own nodes, stripped", async () => {
+    const { app } = buildPortal();
+    expect((await app.inject({ url: "/internal/nodes/pending", headers: { "x-portal-service-token": COORD } })).statusCode).toBe(403);
+    const res = await app.inject({ url: "/internal/nodes/pending", headers: { "x-portal-service-token": COORD, ...coordA } });
+    expect(res.statusCode).toBe(200);
+    const nodes = res.json().nodes;
+    expect(nodes.map((n: any) => n.nodeId)).toEqual(["pending-a"]);
     for (const field of ["ownerEmail", "sourceIp", "countryCode"]) expect(nodes[0]).not.toHaveProperty(field);
   });
 });

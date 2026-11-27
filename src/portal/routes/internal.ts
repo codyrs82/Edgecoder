@@ -59,10 +59,12 @@ export function registerInternalRoutes(internal: FastifyInstance, { autoRequestH
       // enrolment's owner (their Nodes page shows it) and tell the agent the name its token is for.
       // Matched by the token's hash only: nobody else's enrolment is ever named.
       const tokenNode = await Promise.resolve(store.getNodeEnrollmentByRegistrationTokenHash?.(sha256Hex(body.registrationToken))).catch(() => null);
+      // The shared coordinator token never gets the owner's email (only the node id the token is for).
+      const shareEmail = callerKind(req as any) !== "coordinator";
       return reply.code(404).send({
         allowed: false,
         reason: "node_not_enrolled",
-        ...(tokenNode && tokenNode.nodeKind === body.nodeKind ? { tokenNode: { nodeId: tokenNode.nodeId, ownerEmail: tokenNode.ownerEmail } } : {})
+        ...(tokenNode && tokenNode.nodeKind === body.nodeKind ? { tokenNode: { nodeId: tokenNode.nodeId, ...(shareEmail ? { ownerEmail: tokenNode.ownerEmail } : {}) } } : {})
       });
     }
     if (node.nodeKind !== body.nodeKind) {
@@ -99,6 +101,8 @@ export function registerInternalRoutes(internal: FastifyInstance, { autoRequestH
     const hostApproved = await hostApprovedFor(refreshed.ownerEmail);
     // First connect of a machine whose owner is not a host: file a pending host request (deduped per email).
     if (!hostApproved && !node.lastSeenMs && autoRequestHost) void autoRequestHost({ nodeId: refreshed.nodeId, nodeKind: refreshed.nodeKind, ownerEmail: refreshed.ownerEmail, lastCountryCode: refreshed.lastCountryCode });
+    // The shared coordinator token gets no owner email, IP or country (ownerUserId identifies the owner).
+    const full = kind !== "coordinator";
     return reply.send({
       allowed: refreshed.active,
       reason,
@@ -107,14 +111,13 @@ export function registerInternalRoutes(internal: FastifyInstance, { autoRequestH
         deviceId: refreshed.deviceId,
         nodeKind: refreshed.nodeKind,
         ownerUserId: refreshed.ownerUserId,
-        ownerEmail: refreshed.ownerEmail,
+        ...(full ? { ownerEmail: refreshed.ownerEmail } : {}),
         emailVerified: refreshed.emailVerified,
         nodeApproved: refreshed.nodeApproved,
         // Host approval (src/portal/host-requests.ts): false = this node runs only its owner's own work.
         hostApproved,
         active: refreshed.active,
-        sourceIp: refreshed.lastIp,
-        countryCode: refreshed.lastCountryCode,
+        ...(full ? { sourceIp: refreshed.lastIp, countryCode: refreshed.lastCountryCode } : {}),
         vpnDetected: refreshed.lastVpnDetected ?? false
       }
     });
@@ -190,17 +193,20 @@ export function registerInternalRoutes(internal: FastifyInstance, { autoRequestH
         limit: z.coerce.number().int().positive().max(500).default(200)
       })
       .parse(req.query);
-    const nodes = await store.listPendingNodes({ nodeKind: query.nodeKind, limit: query.limit });
+    // Like lookup: the shared coordinator token sees only nodes its own coordinator validated, without
+    // owner email, IP or country. The platform service token keeps the full list.
+    const scopedTo = callerKind(req as any) === "coordinator" ? await callingCoordinator(req.headers as Record<string, unknown>) : undefined;
+    if (scopedTo === null) return reply.code(403).send({ error: "coordinator_identity_required" });
+    const nodes = await store.listPendingNodes({ nodeKind: query.nodeKind, limit: query.limit, ...(scopedTo ? { validatedByCoordinator: scopedTo } : {}) });
     return reply.send({
       nodes: nodes.map((n) => ({
         nodeId: n.nodeId,
         nodeKind: n.nodeKind,
-        ownerEmail: n.ownerEmail,
+        ...(scopedTo === undefined ? { ownerEmail: n.ownerEmail } : {}),
         emailVerified: n.emailVerified,
         nodeApproved: n.nodeApproved,
         active: n.active,
-        sourceIp: n.lastIp,
-        countryCode: n.lastCountryCode,
+        ...(scopedTo === undefined ? { sourceIp: n.lastIp, countryCode: n.lastCountryCode } : {}),
         vpnDetected: n.lastVpnDetected ?? false,
         lastSeenMs: n.lastSeenMs,
         updatedAtMs: n.updatedAtMs
