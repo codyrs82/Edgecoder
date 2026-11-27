@@ -37,6 +37,18 @@ export const portalConfigSchema = z.object({
   PORTAL_SERVICE_TOKEN: optStr,
   /** Read/validate-only token coordinators present to /internal/* (src/portal/internal-auth.ts). */
   PORTAL_COORDINATOR_TOKEN: optStr,
+  /**
+   * Deprecated-token migration flag (default on): PORTAL_COORDINATOR_TOKEN is still accepted on
+   * /internal (logged as portal_coordinator_token_deprecated). Turn it off once every outside
+   * coordinator signs its calls with its own key (src/portal/coordinator-credentials.ts).
+   */
+  PORTAL_COORDINATOR_TOKEN_ACCEPTED: envFlag({ off: ["0", "false"] }),
+  /**
+   * Off by default. On: the signed registry's active outside members join the coordinators the
+   * portal asks about a user's machines (machine, bot and code routes). They get only signed requests,
+   * never PORTAL_SERVICE_TOKEN (src/portal/coordinator-request.ts).
+   */
+  PORTAL_REGISTRY_COORDINATORS: envFlag({ on: ["1", "true"] }),
   /** Hosts the portal may send credentials to (src/portal/coordinator-url-policy.ts); default: COORDINATOR_DISCOVERY_URLS hosts. */
   PORTAL_COORDINATOR_HOSTS: optStr,
   PORTAL_EXTERNAL_HTTP_TIMEOUT_MS: envInt(7000, { min: 100, max: 120_000 }),

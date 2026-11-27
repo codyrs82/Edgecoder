@@ -70,6 +70,19 @@ describe("infra role: renderInfraEnv", () => {
     expect(text.includes("$")).toBe(false);
   });
 
+  it("an outside coordinator gets the portal's public key, and no shared portal token", () => {
+    const env = parseEnvFile(renderInfraEnv({ ...base, portalVerifyKeys: "MCowBQYDK2VwAyEA+key/base64=" }));
+    expect(env.PORTAL_ACTION_VERIFY_KEYS).toBe("MCowBQYDK2VwAyEA+key/base64=");
+    expect(env.PORTAL_SERVICE_TOKEN).toBeUndefined();
+    expect(env.PORTAL_COORDINATOR_TOKEN).toBeUndefined();
+    expect(parseEnvFile(renderInfraEnv(base)).PORTAL_ACTION_VERIFY_KEYS).toBe("");
+    for (const file of ["deploy/infra/docker-compose.yml", "deploy/infra/.env.example", "scripts/infra-bootstrap.sh"]) {
+      const text = read(file);
+      expect(text, file).not.toMatch(/PORTAL_SERVICE_TOKEN|PORTAL_COORDINATOR_TOKEN/);
+      expect(text, file).toMatch(/PORTAL_ACTION_VERIFY_KEYS/);
+    }
+  });
+
   it("keeps secrets it is given and maps mainnet with pruning", () => {
     const env = parseEnvFile(renderInfraEnv({ ...base, network: "bitcoin", pruneMib: 50000, paymentsEnabled: true, secrets: { MESH_AUTH_TOKEN: "keep-me", POSTGRES_PASSWORD: " pg " } }));
     expect(env.MESH_AUTH_TOKEN).toBe("keep-me");

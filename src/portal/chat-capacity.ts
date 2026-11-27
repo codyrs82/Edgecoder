@@ -23,7 +23,7 @@
  * Only URLs that pass the coordinator URL policy (coordinator-url-policy.ts) are probed.
  */
 
-import { request } from "undici";
+import { coordinatorRequest } from "./coordinator-request.js";
 import { cleanRegion, coordinatorHost, type CoordinatorChoice } from "../common/coordinator-choice.js";
 import { chooseByLatency, DEFAULT_CALL_TOKENS, latencyPolicyFromEnv, openHosts, type CallSize, type FreeHost, type LatencyCandidate, type LatencyPolicy } from "./coordinator-latency.js";
 import { paramsB } from "../inference-api/auto-route.js";
@@ -158,7 +158,7 @@ export function httpCapacityProbe(opts: { serviceToken?: string; timeoutMs: numb
     try {
       if (kind === "chat") {
         // Public route: no credential is attached.
-        const res = await request(`${base}/health/runtime`, {
+        const res = await coordinatorRequest(`${base}/health/runtime`, {
           method: "GET",
           headersTimeout: opts.timeoutMs,
           bodyTimeout: opts.timeoutMs,
@@ -175,7 +175,7 @@ export function httpCapacityProbe(opts: { serviceToken?: string; timeoutMs: numb
         return { reachable: true, ownModelCount: o.reachable ? count : 0 };
       }
       const started = performance.now();
-      const res = await request(`${base}/inference/models`, {
+      const res = await coordinatorRequest(`${base}/inference/models`, {
         method: "GET",
         headers: opts.serviceToken ? { "x-portal-service-token": opts.serviceToken } : {},
         headersTimeout: opts.timeoutMs,

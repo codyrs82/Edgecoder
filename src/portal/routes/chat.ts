@@ -4,7 +4,7 @@
 import { writeSseHead } from "../../common/sse.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { randomUUID } from "node:crypto";
-import { request } from "undici";
+import { coordinatorRequest } from "../coordinator-request.js";
 import { z } from "zod";
 import type { ChatApiRoutesDeps } from "../server.js";
 import { networkBackend } from "../../inference-api/backends.js";
@@ -398,7 +398,7 @@ export function registerChatApiRoutes(
     if (PORTAL_SERVICE_TOKEN) headers["x-portal-service-token"] = PORTAL_SERVICE_TOKEN;
     let res;
     try {
-      res = await request(`${url.replace(/\/+$/, "")}/portal/chat`, {
+      res = await coordinatorRequest(`${url.replace(/\/+$/, "")}/portal/chat`, {
         method: "POST",
         headers,
         body: JSON.stringify(payload),

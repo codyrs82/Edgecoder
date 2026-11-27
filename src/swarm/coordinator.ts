@@ -33,7 +33,7 @@ import { queue, identity, coordinatorKeys, CC, mesh, meshTokenFor, COORDINATOR_P
 import { startAdminListener } from "./coordinator/admin-listener.js";
 import "./coordinator/mutable-state.js";
 import { agentCapabilities, connectedAgentCount, recordAbandonedClaim } from "./coordinator/agent-state.js";
-import { hasMeshToken, hasPortalServiceToken, requireMeshToken, isAgentGateRoute, agentSignatureAtGate, agentGateRefusalReason } from "./coordinator/auth.js";
+import { hasMeshToken, hasPortalServiceToken, requireMeshToken, isAgentGateRoute, agentSignatureAtGate, agentGateRefusalReason, portalSignedAtGate, checkPortalRequest } from "./coordinator/auth.js";
 import { checkPeerRequest, peerSignatureAdmits, peerSignatureHeaders, requirePeerCredential } from "./coordinator/peer-auth.js";
 import { isPaymentGatedRequest } from "./coordinator/economy.js";
 import { ECONOMY_PAYMENTS_ENABLED, lightningProvider, payoutReconciler } from "./coordinator/payouts.js";
@@ -218,9 +218,12 @@ app.addHook("onRequest", async (req, reply) => {
   // WebSocket upgrade: auth handled inside the WS handler via query params
   if (reqPath?.startsWith("/mesh/ws")) return;
   // The portal's calls: it submits, reads and cancels (inference-cancel.ts; the route checks the
-  // account it names owns the call) with its service token, as it reads its accounts.
+  // account it names owns the call), as it reads its accounts. The portal signs each call for this
+  // coordinator (checked in full in preValidation: checkPortalRequest); during the migration its
+  // service token is still accepted (PORTAL_SERVICE_TOKEN_INBOUND).
+  const portalHeaders = ((req as any).headers ?? {}) as Record<string, unknown>;
   if (
-    hasPortalServiceToken(((req as any).headers ?? {}) as Record<string, unknown>) &&
+    (hasPortalServiceToken(portalHeaders) || (await portalSignedAtGate(portalHeaders, (req as any).method, String(reqPath ?? "")))) &&
     (reqPath?.startsWith("/stats/projections/summary") || reqPath?.startsWith("/agent/diagnostics/") || reqPath === "/portal/chat" || reqPath?.startsWith("/account/") || reqPath?.startsWith("/v1/tools/web/") || reqPath === "/inference/submit" || reqPath === "/inference/stream" || reqPath === "/inference/cancel" || reqPath === "/inference/models" || reqPath?.split("?")[0] === "/network/world" || reqPath?.startsWith("/economy/market/") || reqPath === "/economy/rates/current" || reqPath?.startsWith("/economy/payouts") || reqPath?.startsWith("/economy/hosts") || reqPath?.startsWith("/economy/fee-pool") || reqPath?.startsWith("/escalate/") || reqPath === "/agent-control/machines" || /^\/agent-control\/agents\/[^/?]+\/commands$/.test(reqPath ?? "") || reqPath === "/agent-control/bots" || /^\/agent-control\/agents\/[^/?]+\/bot-commands$/.test(reqPath ?? "") || /^\/agent-control\/bot-commands\/[^/?]+$/.test(reqPath ?? "") || reqPath === "/agent-control/code" || /^\/agent-control\/agents\/[^/?]+\/code-commands$/.test(reqPath ?? "") || /^\/agent-control\/code-commands\/[^/?]+$/.test(reqPath ?? ""))
   ) {
     return;
@@ -246,6 +249,9 @@ app.addHook("onRequest", async (req, reply) => {
 // with or without a token next to it (peer-auth.ts checkPeerRequest).
 app.addHook("preValidation", async (req, reply) => {
   if (!(await checkPeerRequest(req as any, reply as any))) return reply;
+  // A portal signature that is present is verified in full (audience, body hash, nonce) before any
+  // route takes the request as the portal's (auth.ts checkPortalRequest).
+  if (!(await checkPortalRequest(req as any, reply as any))) return reply;
 });
 mesh.setRequestSigner((method, url, body) => peerSignatureHeaders(method, url, body));
 

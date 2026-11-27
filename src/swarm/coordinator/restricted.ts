@@ -32,7 +32,8 @@ import {
   type RestrictedTier
 } from "../restricted-models.js";
 import { app } from "./app.js";
-import { CC, PORTAL_OUTBOUND_TOKEN, PORTAL_SERVICE_URL, identity, securityLog } from "./context.js";
+import { CC, PORTAL_OUTBOUND_TOKEN, PORTAL_SERVICE_URL, identity, securityLog, portalOutboundSigning } from "./context.js";
+import { portalOutboundHeaders } from "./portal-credentials.js";
 
 export const restrictedCatalog = RestrictedCatalog.fromEnv(CC.RESTRICTED_MODELS_JSON);
 export const restrictedEntitlements = new EntitlementBook(CC.RESTRICTED_ACCESS_MAX_STALE_MS);
@@ -226,9 +227,9 @@ export function refreshRestrictedEntitlements(opts: { minAgeMs?: number } = {}):
   if (!PORTAL_SERVICE_URL) return Promise.resolve(false);
   if (opts.minAgeMs !== undefined && Date.now() - restrictedEntitlements.lastSyncMs < opts.minAgeMs) return Promise.resolve(false);
   syncing ??= (async () => {
-    const headers: Record<string, string> = {};
-    if (PORTAL_OUTBOUND_TOKEN) headers["x-portal-service-token"] = PORTAL_OUTBOUND_TOKEN;
-    const res = await request(`${PORTAL_SERVICE_URL.replace(/\/+$/, "")}/internal/security-research/entitlements`, {
+    const url = `${PORTAL_SERVICE_URL.replace(/\/+$/, "")}/internal/security-research/entitlements`;
+    const { "content-type": _ct, ...headers } = portalOutboundHeaders(identity.peerId, "", PORTAL_OUTBOUND_TOKEN, portalOutboundSigning("GET", url));
+    const res = await request(url, {
       method: "GET", headers, headersTimeout: 5_000, bodyTimeout: 5_000,
     });
     const json = (await res.body.json().catch(() => null)) as { entitlements?: unknown } | null;

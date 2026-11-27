@@ -49,7 +49,7 @@ Options:
   --coordinator-url URL              COORDINATOR_PUBLIC_URL (what agents and peers connect to).
   --account-id ID                    INFRA_HOST_ACCOUNT_ID (portal account that is paid).
   --lightning-address ADDR           INFRA_HOST_LIGHTNING_ADDRESS (user@domain payouts go to).
-  --portal-token TOKEN               PORTAL_SERVICE_TOKEN issued by the portal operator.
+  --portal-key KEY                   PORTAL_ACTION_VERIFY_KEYS: the portal's public key (from the portal operator).
   --registration-token TOKEN         COORDINATOR_REGISTRATION_TOKEN from the network operator.
   --external-ip HOST[:PORT]          LND_EXTERNAL_IP advertised for inbound channels.
   --alias NAME                       LND_ALIAS.
@@ -60,7 +60,7 @@ EOF
 }
 
 network="" prune="" electrs="" coordinator_url="" account_id="" lightning_address=""
-portal_token="" registration_token="" external_ip="" alias="" no_up=0 no_wallet=0
+portal_key="" registration_token="" external_ip="" alias="" no_up=0 no_wallet=0
 value_of() { [ $# -ge 2 ] || die "$1 needs a value"; printf '%s' "$2"; }
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -77,8 +77,8 @@ while [ $# -gt 0 ]; do
     --account-id=*) account_id="${1#*=}" ;;
     --lightning-address) lightning_address=$(value_of "$@"); shift ;;
     --lightning-address=*) lightning_address="${1#*=}" ;;
-    --portal-token) portal_token=$(value_of "$@"); shift ;;
-    --portal-token=*) portal_token="${1#*=}" ;;
+    --portal-key) portal_key=$(value_of "$@"); shift ;;
+    --portal-key=*) portal_key="${1#*=}" ;;
     --registration-token) registration_token=$(value_of "$@"); shift ;;
     --registration-token=*) registration_token="${1#*=}" ;;
     --external-ip) external_ip=$(value_of "$@"); shift ;;
@@ -182,12 +182,12 @@ set_env INFRA_HOST_SERVICES "$services"
 set_if_given COORDINATOR_PUBLIC_URL "$coordinator_url"
 set_if_given INFRA_HOST_ACCOUNT_ID "$account_id"
 set_if_given INFRA_HOST_LIGHTNING_ADDRESS "$lightning_address"
-set_if_given PORTAL_SERVICE_TOKEN "$portal_token"
+set_if_given PORTAL_ACTION_VERIFY_KEYS "$portal_key"
 set_if_given COORDINATOR_REGISTRATION_TOKEN "$registration_token"
 set_if_given LND_EXTERNAL_IP "$external_ip"
 set_if_given LND_ALIAS "$alias"
 for name in BITCOIND_RPC_USER BITCOIND_WALLET_NAME LND_ALIAS LND_EXTERNAL_IP LND_REST_BIND ELECTRS_BIND \
-            POSTGRES_USER POSTGRES_DB COORDINATOR_PUBLIC_URL PORTAL_SERVICE_URL INFRA_HOST_ACCOUNT_ID \
+            POSTGRES_USER POSTGRES_DB COORDINATOR_PUBLIC_URL PORTAL_SERVICE_URL PORTAL_ACTION_VERIFY_KEYS INFRA_HOST_ACCOUNT_ID \
             INFRA_HOST_LIGHTNING_ADDRESS COORDINATOR_BOOTSTRAP_URLS; do
   check_clean "$name" "$(get_env "$name")"
 done
@@ -205,7 +205,7 @@ case "$coordinator_url" in
   *CHANGE-ME*|'') warn "COORDINATOR_PUBLIC_URL is not set; pass --coordinator-url https://<your host>:4301 (agents and peers need it)" ;;
 esac
 [ -n "$(get_env INFRA_HOST_ACCOUNT_ID)" ] || warn "INFRA_HOST_ACCOUNT_ID is empty: this host will heartbeat but cannot be paid (--account-id)"
-[ -n "$(get_env PORTAL_SERVICE_TOKEN)" ] || warn "PORTAL_SERVICE_TOKEN is empty: the coordinator refuses to start in production without it (--portal-token)"
+[ -n "$(get_env PORTAL_ACTION_VERIFY_KEYS)" ] || warn "PORTAL_ACTION_VERIFY_KEYS is empty: the coordinator refuses to start in production without the portal's public key (--portal-key)"
 
 # ---- 3. render bitcoin.conf and lnd.conf ---------------------------------------------------
 # rpcauth = user:salt$HMAC_SHA256(key = salt, msg = password), the same as share/rpcauth/rpcauth.py.

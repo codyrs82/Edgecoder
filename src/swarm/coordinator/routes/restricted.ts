@@ -10,7 +10,7 @@
  */
 import { z } from "zod";
 import type { CoordinatorApp } from "../app.js";
-import { authorizeAdmin, hasPortalServiceToken } from "../auth.js";
+import { authorizeAdmin, isPortalCaller } from "../auth.js";
 import {
   RESTRICTED_LOG_PROMPTS,
   applyEntitlementChange,
@@ -24,7 +24,7 @@ export function registerRestrictedRoutes(app: CoordinatorApp): void {
   app.post("/account/restricted-access/update", async (req, reply) => {
     const headers = ((req as { headers?: Record<string, unknown> }).headers ?? {}) as Record<string, unknown>;
     // The portal only: the header must be present (with no token configured, development, it would match anything).
-    if (headers["x-portal-service-token"] === undefined || !hasPortalServiceToken(headers)) return reply.code(401).send({ error: "portal_service_token_required" });
+    if (!isPortalCaller(headers)) return reply.code(401).send({ error: "portal_service_token_required" });
     const parsed = z.union([entitlementSchema, z.object({ entitlements: z.array(entitlementSchema).max(500) })]).safeParse(req.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: "invalid_entitlement" });
     const changes = "entitlements" in parsed.data ? parsed.data.entitlements : [parsed.data];

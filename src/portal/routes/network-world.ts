@@ -28,7 +28,7 @@
  */
 
 import type { FastifyInstance } from "fastify";
-import { request } from "undici";
+import { coordinatorRequest } from "../coordinator-request.js";
 import { MASKED_LABEL_RE } from "../../swarm/network-world.js";
 
 export interface NetworkWorldRoutesDeps {
@@ -207,7 +207,7 @@ export function registerNetworkWorldRoutes(app: FastifyInstance, deps: NetworkWo
     // Any coordinator answers for the whole network (it merges its peers' views); the first that does wins.
     for (const base of bases) {
       try {
-        const res = await request(`${base}/network/world?accountId=${encodeURIComponent(accountId)}`, {
+        const res = await coordinatorRequest(`${base}/network/world?accountId=${encodeURIComponent(accountId)}`, {
           method: "GET",
           headers: deps.PORTAL_SERVICE_TOKEN ? { "x-portal-service-token": deps.PORTAL_SERVICE_TOKEN } : {},
           headersTimeout: deps.EXTERNAL_HTTP_TIMEOUT_MS,

@@ -28,6 +28,7 @@ import {
   type LightningProvider
 } from "../../economy/lightning.js";
 import { app } from "./app.js";
+import { portalOutboundHeaders } from "./portal-credentials.js";
 import {
   BITCOIN_NETWORK,
   securityLog,
@@ -35,7 +36,8 @@ import {
   PORTAL_SERVICE_URL,
   PORTAL_OUTBOUND_TOKEN,
   CC,
-  COORDINATOR_FEE_ACCOUNT
+  COORDINATOR_FEE_ACCOUNT,
+  portalOutboundSigning
 } from "./context.js";
 import { mutable } from "./mutable-state.js";
 import { ordering } from "./agent-state.js";
@@ -133,14 +135,15 @@ const payoutProvider: LightningProvider = {
 export const callbackPins: CallbackPinStore = pgStore ? pgStore.callbackPinStore() : new MemoryCallbackPinStore();
 async function notifyPortalCallbackChanged(info: { accountId: string; destination: string; previousOrigin: string; newOrigin: string }): Promise<boolean> {
   if (!PORTAL_SERVICE_URL) return false;
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  if (PORTAL_OUTBOUND_TOKEN) headers["x-portal-service-token"] = PORTAL_OUTBOUND_TOKEN;
-  const res = await request(`${PORTAL_SERVICE_URL.replace(/\/+$/, "")}/internal/payouts/callback-changed`, {
+  const url = `${PORTAL_SERVICE_URL.replace(/\/+$/, "")}/internal/payouts/callback-changed`;
+  const body = JSON.stringify(info);
+  const headers = portalOutboundHeaders(identity.peerId, "", PORTAL_OUTBOUND_TOKEN, portalOutboundSigning("POST", url, body));
+  const res = await request(url, {
     method: "POST",
     headers,
     headersTimeout: 5_000,
     bodyTimeout: 5_000,
-    body: JSON.stringify(info)
+    body
   });
   await res.body.dump();
   return res.statusCode >= 200 && res.statusCode < 300;

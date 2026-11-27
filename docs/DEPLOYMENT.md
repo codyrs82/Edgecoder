@@ -164,8 +164,10 @@ fly secrets set -a <seed app> \
   COORDINATOR_BOOTSTRAP_URLS="https://<seed-eu app>.fly.dev" \
   DATABASE_URL="postgresql://..."
 # same for <seed-eu app> (same MESH_AUTH_TOKEN / PORTAL_SERVICE_TOKEN; bootstrap URL = the other seed)
-# Optional, recommended: PORTAL_COORDINATOR_TOKEN="<token>" on both seeds and the portal. Coordinators
-# then present it, not PORTAL_SERVICE_TOKEN, to the portal's read/validate /internal routes.
+# PORTAL_COORDINATOR_TOKEN is deprecated: coordinators sign their /internal calls with their own key
+# (per-coordinator credentials in the portal Postgres). The portal signs its calls to coordinators with
+# PORTAL_ACTION_SIGNING_KEY; set PORTAL_ACTION_VERIFY_KEYS on every coordinator. After the deploy, set
+# PORTAL_SERVICE_TOKEN_INBOUND=false on the seeds and PORTAL_COORDINATOR_TOKEN_ACCEPTED=false on the portal.
 # The portal sends PORTAL_SERVICE_TOKEN only to https coordinators on PORTAL_COORDINATOR_HOSTS
 # (default: the COORDINATOR_DISCOVERY_URLS hosts). Node approval needs CONTROL_PLANE_ADMIN_TOKEN.
 

@@ -28,7 +28,7 @@
 import { z } from "zod";
 import { app as coordinatorApp, type CoordinatorApp } from "./app.js";
 import { readHeaderValue } from "../coordinator-utils.js";
-import { hasPortalServiceToken, resolveSubmitterAccount } from "./auth.js";
+import { resolveSubmitterAccount, isPortalCaller } from "./auth.js";
 import { claimedTradePrice, queue, taskBilling } from "./context.js";
 import { orderBook } from "./economy.js";
 import { refundTaskSubmit } from "./results.js";
@@ -108,7 +108,7 @@ export function registerInferenceCancelRoute(app: CoordinatorApp): void {
     // The portal names the account it acts for (x-edgecoder-account): it must be the call's owner.
     // A signed agent (desktop, IDE, local forwarder) is checked against its owner.
     const headers = ((req as any).headers ?? {}) as Record<string, unknown>;
-    const portalNamed = headers["x-portal-service-token"] !== undefined && hasPortalServiceToken(headers) ? readHeaderValue(headers, "x-edgecoder-account") : undefined;
+    const portalNamed = isPortalCaller(headers) ? readHeaderValue(headers, "x-edgecoder-account") : undefined;
     const caller = await resolveSubmitterAccount(req as any, portalNamed || owner, "/inference/cancel");
     if ("error" in caller || caller.accountId !== owner) return reply.code(403).send({ error: "not_requester" });
     return reply.send({ ok: true, outcome: await cancelInferenceCall(body.taskId, body.subtaskId) });

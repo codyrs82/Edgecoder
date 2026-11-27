@@ -13,7 +13,8 @@ import {
 } from "../coordinator-utils.js";
 import { pgStore } from "../../db/store.js";
 import { checkTokenSet } from "../../common/env-guard.js";
-import { checkPortalInboundToken } from "./portal-credentials.js";
+import { legacyPortalTokenAccepted, portalSignatureAtGate, portalSignaturesChecked, portalSignatureOutcome, verifyPortalInFull } from "./portal-credentials.js";
+import { hasPortalRequestSignature, SERVICE_REQUEST_MAX_SKEW_MS } from "../../security/service-request-signing.js";
 import { matchesTokenSet } from "../../common/token-rotation.js";
 import { adminOriginDecision, socketAddressOf } from "../../common/admin-origin.js";
 import { PORTAL_ACTION_HEADER, verifyPortalAction, type PortalAction } from "../../security/portal-action.js";
@@ -27,6 +28,8 @@ import {
   IS_PROD,
   PORTAL_SERVICE_TOKENS,
   PORTAL_COORDINATOR_TOKEN,
+  PORTAL_INBOUND_SIGNATURES,
+  PORTAL_SERVICE_TOKEN_INBOUND,
   ADMIN_API_TOKENS,
   ADMIN_ORIGIN_POLICY,
   PORTAL_ACTION_KEYS,
@@ -60,9 +63,81 @@ export function hasMeshToken(headers: Record<string, unknown>): boolean {
   return checkTokenSet(MESH_AUTH_TOKENS, headers["x-mesh-token"], IS_PROD) === "ok";
 }
 
+/*
+ * The portal, inbound (src/security/service-request-signing.ts). A request is the portal's when:
+ * - it carries a portal signature that verified in full (checkPortalRequest, preValidation: key,
+ *   audience = this coordinator, fresh, body hash, single-use nonce). The account it acts for
+ *   (x-edgecoder-account, or named in the path or body) is covered by that signature; or
+ * - during the migration (PORTAL_SERVICE_TOKEN_INBOUND, default on), it carries the portal's
+ *   service token. Turn the flag off once the portal signs every call.
+ * The shared outside-coordinator token (PORTAL_COORDINATOR_TOKEN) is never taken as the portal.
+ */
+const portalSignedRequests = new WeakSet<object>();
+
+/** The legacy service-token check alone (honours PORTAL_SERVICE_TOKEN_INBOUND). */
+export function hasLegacyPortalToken(headers: Record<string, unknown>, acceptToken = PORTAL_SERVICE_TOKEN_INBOUND): boolean {
+  return legacyPortalTokenAccepted(PORTAL_SERVICE_TOKENS, PORTAL_COORDINATOR_TOKEN, headers["x-portal-service-token"], IS_PROD, acceptToken);
+}
+
+/** Whether this request is the portal's: a verified portal signature, or (migration flag) its token. */
 export function hasPortalServiceToken(headers: Record<string, unknown>): boolean {
-  // The shared outside-coordinator token (PORTAL_COORDINATOR_TOKEN) is never taken as the portal.
-  return checkPortalInboundToken(PORTAL_SERVICE_TOKENS, PORTAL_COORDINATOR_TOKEN, headers["x-portal-service-token"], IS_PROD) === "ok";
+  if (portalSignedRequests.has(headers)) return true;
+  return hasLegacyPortalToken(headers);
+}
+
+/**
+ * hasPortalServiceToken for routes that must not take an unconfigured development token as the
+ * portal: the request presents a credential (a verified signature or the token header).
+ */
+export function isPortalCaller(headers: Record<string, unknown>): boolean {
+  if (portalSignedRequests.has(headers)) return true;
+  return headers["x-portal-service-token"] !== undefined && hasLegacyPortalToken(headers);
+}
+
+/** Transport gate (onRequest): a portal signature over this method, path and audience; the rest is checked in preValidation. */
+export async function portalSignedAtGate(headers: Record<string, unknown>, method: string, url: string): Promise<boolean> {
+  return portalSignatureAtGate(headers, method, url, PORTAL_INBOUND_SIGNATURES);
+}
+
+let portalSignatureFallbackLoggedAt = 0;
+
+/**
+ * preValidation: a portal signature that is present is verified in full. Valid: the request is the
+ * portal's. Invalid: refused, unless the legacy service token is valid and still accepted (logged).
+ * Sends the refusal and returns false. Nothing happens without a signature or without keys.
+ */
+export async function checkPortalRequest(
+  req: { method: string; url: string; headers: Record<string, unknown>; log?: { warn: (o: unknown, m: string) => void } },
+  reply: { code: (n: number) => { send: (b: unknown) => unknown } }
+): Promise<boolean> {
+  const headers = (req.headers ?? {}) as Record<string, unknown>;
+  if (!portalSignaturesChecked(PORTAL_INBOUND_SIGNATURES) || !hasPortalRequestSignature(headers)) return true;
+  const decision = await verifyPortalInFull(headers, req.method, String(req.url ?? ""), rawBodyOf(req), PORTAL_INBOUND_SIGNATURES, async (nonce, issuedAtMs) =>
+    (
+      await verifyNonce(nonceStore, {
+        nonce: `portal-req:${nonce}`,
+        sourceId: "portal",
+        timestampMs: issuedAtMs,
+        maxSkewMs: SERVICE_REQUEST_MAX_SKEW_MS,
+        ttlMs: Math.max(SECURITY_NONCE_TTL_MS, 2 * SERVICE_REQUEST_MAX_SKEW_MS)
+      })
+    ).valid
+  );
+  const outcome = portalSignatureOutcome(decision, hasLegacyPortalToken(headers));
+  if (outcome === "signed") {
+    portalSignedRequests.add(headers);
+    return true;
+  }
+  const reason = decision.ok ? "ok" : decision.error;
+  if (outcome === "token") {
+    if (Date.now() - portalSignatureFallbackLoggedAt > 60_000) {
+      portalSignatureFallbackLoggedAt = Date.now();
+      req.log?.warn({ reason, route: String(req.url ?? "").split("?")[0] }, "portal_signature_refused_token_accepted");
+    }
+    return true;
+  }
+  reply.code(decision.ok ? 401 : decision.code).send({ error: "portal_unauthorized", reason });
+  return false;
 }
 
 /*
@@ -436,7 +511,7 @@ export async function callerAccount(req: any, routePath: string, requested?: str
   const headers = (req.headers ?? {}) as Record<string, unknown>;
   // The portal path needs the header itself: with no token configured (development) every request
   // would otherwise count as the portal's.
-  if (headers["x-portal-service-token"] !== undefined && hasPortalServiceToken(headers)) return requested ? { accountId: requested, via: "portal" } : { status: 400, error: "account_required" };
+  if (isPortalCaller(headers)) return requested ? { accountId: requested, via: "portal" } : { status: 400, error: "account_required" };
   const verified = await verifyAgentRequest(headers, routePath, req.ip, { requireSigned: true, rawBody: rawBodyOf(req) });
   if (!verified || verified === "rejected") return { status: 401, error: "signature_invalid" };
   const ownerAccountId = (await pgStore?.getAgentOwnership(verified.agentId))?.accountId ?? null;

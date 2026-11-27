@@ -7,6 +7,7 @@ import type { Pool } from "pg";
 import { createPgPool } from "../db/pool.js";
 import { migrateCloudBots } from "./cloud-bots/store.js";
 import { migrateCoordinatorRegistry } from "./coordinator-registry-store.js";
+import { migrateCoordinatorCredentials } from "./coordinator-credentials.js";
 import { RATE_LIMIT_SCHEMA_SQL } from "./rate-limit-store.js";
 import { compactReplyUsage, type ReplyUsage } from "./reply-usage.js";
 import { ChatCipher, messageAad, titleAad } from "./chat-crypto.js";
@@ -404,6 +405,8 @@ export class PortalStore {
     await migrateCloudBots(this.pool);
     // The signed coordinator registry's members and append-only audit chain (coordinator-registry-store.ts).
     await migrateCoordinatorRegistry(this.pool);
+    // Per-coordinator portal credentials and their single-use nonces (coordinator-credentials.ts). Owner-approved 2026-11-26.
+    await migrateCoordinatorCredentials(this.pool);
   }
 
   /**
