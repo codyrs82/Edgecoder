@@ -39,6 +39,7 @@ import {
 import { requireAgentSignedForwards, type AgentResultEnvelope } from "../../mesh/forwarded-agent-envelope.js";
 import { MeshProtocol } from "../../mesh/protocol.js";
 import { GossipMesh } from "../../mesh/gossip.js";
+import { meshTokenAllowedFor, meshTokenForUrl, parseMeshTokenScope, type MeshTokenScope } from "../../mesh/mesh-token-scope.js";
 import { pgStore } from "../../db/store.js";
 import type { ComputeClassId } from "../../economy/compute-classes.js";
 import { MemoryUsageStore, type UsageRecord } from "../../economy/usage.js";
@@ -79,8 +80,15 @@ mesh.onBroadcast((message) => {
   for (const [id, exp] of offeredToPeers) if (exp <= now) offeredToPeers.delete(id);
   offeredToPeers.set(subtaskId, now + OFFERED_SUBTASK_TTL_MS);
 });
+/** Peer URLs that receive MESH_AUTH_TOKEN (null: every peer). Others get signed requests only. */
+export const MESH_TOKEN_SCOPE: MeshTokenScope = parseMeshTokenScope(CC.MESH_TOKEN_PEER_URLS);
+/** The mesh token for one outbound request to a peer at `url`, or "" when it must not go there. */
+export function meshTokenFor(url: string): string {
+  return meshTokenForUrl(CC.MESH_AUTH_TOKEN ?? "", MESH_TOKEN_SCOPE, url) ?? "";
+}
 if (CC.MESH_AUTH_TOKEN) {
   mesh.setMeshToken(CC.MESH_AUTH_TOKEN);
+  mesh.setMeshTokenScope((url) => meshTokenAllowedFor(MESH_TOKEN_SCOPE, url));
 }
 export const peerScore = new Map<string, number>();
 export const peerMessageWindow = new Map<string, { windowMs: number; count: number }>();

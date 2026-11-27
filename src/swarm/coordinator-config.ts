@@ -98,6 +98,8 @@ export const coordinatorConfigSchema = z.object({
   NETWORK_HISTORY_DAYS: envNumber(7, { min: 1, max: 90 }),
   // Tokens: required in production by requireProdEnv() in coordinator/context.ts (#5).
   MESH_AUTH_TOKEN: str(),
+  // Peer URLs that receive MESH_AUTH_TOKEN; unset: every peer (src/mesh/mesh-token-scope.ts).
+  MESH_TOKEN_PEER_URLS: str(),
   ADMIN_API_TOKEN: str(),
   INFERENCE_AUTH_TOKEN: str(),
   PORTAL_SERVICE_TOKEN: str(),

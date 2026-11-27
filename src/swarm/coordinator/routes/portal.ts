@@ -15,7 +15,7 @@ import {
   identity,
   COORDINATOR_BOOTSTRAP_URLS,
   COORDINATOR_PUBLIC_URL,
-  MESH_AUTH_TOKEN,
+  meshTokenFor,
   queue,
   coordinatorPullTracker
 } from "../context.js";
@@ -49,7 +49,8 @@ async function tryMeshPeerChat(
       // The mesh token only: peers already hold it, and it is what /portal/chat accepts from them. The
       // portal service token names any account and must never leave this coordinator.
       const fwdHeaders: Record<string, string> = { "content-type": "application/json" };
-      if (MESH_AUTH_TOKEN) fwdHeaders["x-mesh-token"] = MESH_AUTH_TOKEN;
+      const chatToken = meshTokenFor(`${peerUrl.replace(/\/$/, "")}/portal/chat`);
+      if (chatToken) fwdHeaders["x-mesh-token"] = chatToken;
       const peerRes = await request(`${peerUrl.replace(/\/$/, "")}/portal/chat`, {
         method: "POST",
         headers: fwdHeaders,

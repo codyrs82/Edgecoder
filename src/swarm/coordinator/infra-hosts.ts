@@ -15,7 +15,7 @@ import {
 } from "../../economy/host-attestation.js";
 import { probeElectrum } from "../../economy/service-probes.js";
 import { app } from "./app.js";
-import { CC, identity, COORDINATOR_PUBLIC_URL, coordinatorKeys, MESH_AUTH_TOKEN } from "./context.js";
+import { CC, identity, COORDINATOR_PUBLIC_URL, coordinatorKeys, meshTokenFor } from "./context.js";
 import {
   memoryPayoutStore,
   INFRA_HOST_SERVICES,
@@ -128,7 +128,7 @@ export async function selfInfraHeartbeat(): Promise<void> {
     const body = signHostHeartbeat(fields, coordinatorKeys.privateKeyPem);
     void fetch(`${url}/economy/hosts/heartbeat`, {
       method: "POST",
-      headers: { "content-type": "application/json", ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}) },
+      headers: { "content-type": "application/json", ...(meshTokenFor(url) ? { "x-mesh-token": meshTokenFor(url) } : {}) },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(15_000)
     })

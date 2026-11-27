@@ -186,7 +186,8 @@ export interface ReceiptReplicationOptions extends ReceiptAcceptOptions {
   fetch: ReplicationFetch;
   /** Our own id: pages claiming to come from it are ignored. */
   selfId?: string;
-  meshToken?: string;
+  /** The mesh token, or per peer URL the token to send (empty/undefined: none). */
+  meshToken?: string | ((url: string) => string | undefined);
   /** Signature headers for one peer request (coordinators sign with their own key; peer-auth.ts). */
   signRequest?: (method: string, url: string) => Record<string, string>;
   pageLimit?: number;
@@ -220,11 +221,12 @@ export function startReceiptReplication(opts: ReceiptReplicationOptions): Receip
       const controller = typeof AbortController !== "undefined" ? new AbortController() : undefined;
       const timer = controller ? setTimeout(() => controller.abort(), opts.requestTimeoutMs ?? 10_000) : undefined;
       let page: SignedReceiptPage;
+      const meshToken = typeof opts.meshToken === "function" ? opts.meshToken(url) : opts.meshToken;
       try {
         const res = await opts.fetch(url, {
           headers: {
             accept: "application/json",
-            ...(opts.meshToken ? { "x-mesh-token": opts.meshToken } : {}),
+            ...(meshToken ? { "x-mesh-token": meshToken } : {}),
             ...(opts.signRequest ? opts.signRequest("GET", url) : {})
           },
           signal: controller?.signal
