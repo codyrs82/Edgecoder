@@ -86,5 +86,5 @@ enum MachinesDirectory {
         return d == 1 ? "1 day ago" : "\(d) days ago"
     }
 
-    static func botsLabel(_ n: Int) -> String { n == 1 ? "1 bot" : "\(n) bots" }
+    static func botsLabel(_ n: Int) -> String { n == 1 ? "1 bit" : "\(n) bits" }
 }

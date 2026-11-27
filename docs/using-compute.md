@@ -1,6 +1,6 @@
 # Using EdgeCoder compute
 
-This guide covers running models through EdgeCoder from the desktop app and from your own tools: connections, where requests run, reservations, the usage page, persistent bots and pricing.
+This guide covers running models through EdgeCoder from the desktop app and from your own tools: connections, where requests run, reservations, the usage page, persistent bits and pricing.
 
 All amounts are in cSats. 1 cSat = 1 sat of prepaid compute.
 
@@ -140,28 +140,28 @@ The hosted endpoint serves the same OpenAI and Anthropic routes and suits server
 
 On the desktop, `http://127.0.0.1:4304/v1` with this computer's key (under "Other ways in") reaches every model on one address, chosen by the same model names plus local model tags.
 
-## Persistent bots
+## Persistent bits
 
-A bot is a named, long-lived agent that owns a job in one project folder. Each run is one agent turn in that folder on Auto compute. Bots are managed in the desktop app (and over `/v1/ide/bots` on the local IDE server).
+A bit is a named, long-lived agent that owns a job in one project folder. Each run is one agent turn in that folder on Auto compute. Bits are managed in the desktop app (and over `/v1/ide/bots` on the local IDE server).
 
 | Setting | Details |
 | --- | --- |
 | Name, Role | Role is shown next to the name. |
 | Instructions | Its job, added to the agent's instructions on every run. |
-| Memory | Notes the bot saves for itself with a remember tool (kept to 8 KB). You can edit or clear them. |
+| Memory | Notes the bit saves for itself with a remember tool (kept to 8 KB). You can edit or clear them. |
 | Project folder | An absolute path to an existing folder. It reads and edits files only there. |
 | Schedule | See below. Empty means it runs only when asked. |
 | Daily budget | cSats a day (default 100, or no limit). A run stops when it's spent. Runs on this computer are free. |
 | Tools | Reading the project is always on. Optional: Edit files, Run commands, Commit and push. |
 | Apply edits without asking | On by default. Each run keeps the originals so you can review and undo. |
 
-Schedules accept `every N minutes`, `every N hours`, `every N days`, `hourly`, `daily` (09:00), `daily at HH:MM` (or `9am`, `6:30pm`), or a 5-field cron expression such as `0 9 * * 1-5`. Bots run at most every 5 minutes. Times are local.
+Schedules accept `every N minutes`, `every N hours`, `every N days`, `hourly`, `daily` (09:00), `daily at HH:MM` (or `9am`, `6:30pm`), or a 5-field cron expression such as `0 9 * * 1-5`. Bits run at most every 5 minutes. Times are local.
 
 **Approvals.** Shell commands, commits and pushes always ask first. The run pauses with the status **Needs approval** until you approve or reject; an unanswered approval is rejected after 24 hours. Turn off "Apply edits without asking" to make file edits ask too.
 
-**Running.** A bot works on its own; there's no button to press. A bot with a job (a role or instructions) starts working when you create or resume it, then checks in on its project every 30 minutes (change it under **Check in**, or set a schedule instead). While nothing in the project changes, check-ins wait longer each time (1 h, 2 h, 4 h, up to 8 h); any change brings it back to 30 minutes. A run that ends with more to do continues a couple of minutes later (at most 5 follow-ups in a row). It also runs when you message it and on its GitHub triggers. Never two runs at once; at most **Runs a day** (48 by default) runs it starts on its own, and its daily cSat budget still applies. The header says what it's doing or when it next works ("Working…", "Next check in 12 min", "Paused"). **Pause** stops everything it does on its own (messages still get answers); **Resume** starts it working again. **Stop** ends the current run (pending approvals are rejected). **Check now** in the ⋯ menu nudges it without waiting. The run history lists each run's trigger (Started work, Check-in, Follow-up, Schedule, Message, Check now, or the GitHub event), status, summary and cost.
+**Running.** A bit works on its own; there's no button to press. A bit with a job (a role or instructions) starts working when you create or resume it, then checks in on its project every 30 minutes (change it under **Check in**, or set a schedule instead). While nothing in the project changes, check-ins wait longer each time (1 h, 2 h, 4 h, up to 8 h); any change brings it back to 30 minutes. A run that ends with more to do continues a couple of minutes later (at most 5 follow-ups in a row). It also runs when you message it and on its GitHub triggers. Never two runs at once; at most **Runs a day** (48 by default) runs it starts on its own, and its daily cSat budget still applies. The header says what it's doing or when it next works ("Working…", "Next check in 12 min", "Paused"). **Pause** stops everything it does on its own (messages still get answers); **Resume** starts it working again. **Stop** ends the current run (pending approvals are rejected). **Check now** in the ⋯ menu nudges it without waiting. The run history lists each run's trigger (Started work, Check-in, Follow-up, Schedule, Message, Check now, or the GitHub event), status, summary and cost.
 
-Bot config and history live in `~/.edgecoder/bots.json`; each bot's conversation and memory are under `~/.edgecoder/bots/<id>/`.
+Bit config and history live in `~/.edgecoder/bots.json`; each bit's conversation and memory are under `~/.edgecoder/bots/<id>/`.
 
 ## Large models
 

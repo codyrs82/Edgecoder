@@ -71,7 +71,7 @@ export function registerBotsPage(app: FastifyInstance): void {
       .bots-empty h3 { color:var(--text-secondary); margin:0 0 8px; font-size:16px; }
       .bots-empty p { max-width:420px; margin:0 auto; font-size:13px; line-height:1.6; }
 
-      /* ── One bot (the desktop's BotView layout) ── */
+      /* ── One bit (the desktop's BotView layout) ── */
       .bot-view { display:flex; height:calc(100vh - var(--topbar-h)); height:calc(100dvh - var(--topbar-h)); min-height:0; }
       .bot-main { flex:1; min-width:0; display:flex; flex-direction:column; }${QUOTE_SELECTION_CSS}      .bot-head { display:flex; gap:12px; align-items:flex-start; padding:14px 20px; border-bottom:1px solid var(--card-border); }
       .bot-head .who { flex:1; min-width:0; }
@@ -200,13 +200,13 @@ export function registerBotsPage(app: FastifyInstance): void {
     </style>
     <section id="botList" aria-labelledby="botListHeading" hidden>
       <div class="bots-list-wrap">
-        <h2 id="botListHeading" class="visually-hidden">Your bots</h2>
-        <div class="bots-toolbar"><button type="button" class="primary sm" id="bnOpen" hidden>${icons.plus}<span>New bot</span></button></div>
-        <div id="botCards"><div class="loading-state"><span class="loading-spinner sm"></span> Loading your bots…</div></div>
+        <h2 id="botListHeading" class="visually-hidden">Your bits</h2>
+        <div class="bots-toolbar"><button type="button" class="primary sm" id="bnOpen" hidden>${icons.plus}<span>New bit</span></button></div>
+        <div id="botCards"><div class="loading-state"><span class="loading-spinner sm"></span> Loading your bits…</div></div>
       </div>
       <dialog class="bot-edit" id="bnDialog" aria-labelledby="bnTitle">
         <form id="bnForm" method="dialog" novalidate>
-          <h3 id="bnTitle" class="u-m-0">New bot</h3>
+          <h3 id="bnTitle" class="u-m-0">New bit</h3>
           <p class="muted u-fs-12 u-m-0" id="bnIntro">It runs on one of your machines. When it gets there, the EdgeCoder app asks for its folder; it starts once you pick one there.</p>
           <label>Start from<select name="template" id="bnTemplate"></select></label>
           <div class="row2">
@@ -230,7 +230,7 @@ export function registerBotsPage(app: FastifyInstance): void {
             <label id="bnClassWrap" hidden>Network class<select name="computeClass" id="bnClass"></select></label>
           </div>
           <label>Permissions<select name="mode" id="bnMode"></select><span class="hint" id="bnModeHint"></span></label>
-          <label>GitHub repository (optional)<input name="repository" maxlength="500" placeholder="owner/repo" autocomplete="off" /><span class="hint">Cloned on the machine that runs the bot, once its folder is set.</span></label>
+          <label>GitHub repository (optional)<input name="repository" maxlength="500" placeholder="owner/repo" autocomplete="off" /><span class="hint">Cloned on the machine that runs the bit, once its folder is set.</span></label>
           <fieldset class="u-m-0" id="bnTriggers" disabled><legend>GitHub triggers</legend>
             <span class="hint" id="bnTriggersHint">Add a repository to use triggers</span>
             <label class="trig"><input type="checkbox" name="trigPr" />PR opened or updated by others</label>
@@ -239,7 +239,7 @@ export function registerBotsPage(app: FastifyInstance): void {
           </fieldset>
           </div>
           <div id="bnError" class="callout danger u-m-0" role="alert" hidden></div>
-          <div class="foot"><button type="button" id="bnCancel">Cancel</button><button type="submit" class="primary" id="bnSave">Create bot</button></div>
+          <div class="foot"><button type="button" id="bnCancel">Cancel</button><button type="submit" class="primary" id="bnSave">Create bit</button></div>
         </form>
       </dialog>
     </section>
@@ -264,7 +264,7 @@ export function registerBotsPage(app: FastifyInstance): void {
             </div>
           </header>
           <div class="callout warn offline-note" id="bpOffline" role="status" hidden></div>
-          <div class="bot-tabs" role="tablist" aria-label="Bot views">
+          <div class="bot-tabs" role="tablist" aria-label="Bit views">
             <button type="button" role="tab" id="tabChat" aria-controls="bpConv" aria-selected="true">Conversation</button>
             <button type="button" role="tab" id="tabRuns" aria-controls="bpRuns" aria-selected="false" tabindex="-1">Runs</button>
           </div>
@@ -277,14 +277,14 @@ export function registerBotsPage(app: FastifyInstance): void {
           </div>
           <div class="composer" id="bpComposer">
             <div class="composer-pill">
-              <label for="bpInput" class="visually-hidden">Message the bot</label>
+              <label for="bpInput" class="visually-hidden">Message the bit</label>
               <textarea id="bpInput" rows="1" placeholder="Message…" autocomplete="off"></textarea>
               <button type="button" class="primary send" id="bpSend" aria-label="Send">${icons.send}</button>
             </div>
             <div class="controls"><span id="bpComposerNote">Enter to send, Shift+Enter for a new line</span><span id="bpWorking"></span></div>
           </div>
         </div>
-        <aside class="details" id="bpDetails" aria-label="Bot details">
+        <aside class="details" id="bpDetails" aria-label="Bit details">
           <div class="d-who"><span id="bpDAva"></span><div class="d-name" id="bpDName"></div><div class="d-role" id="bpDRole"></div><span class="chip" id="bpDChip"></span></div>
           <div class="d-tabs" role="tablist" aria-label="Details">
             <button type="button" role="tab" id="dTabDetails" aria-controls="bpDBody" aria-selected="true">Details</button>
@@ -295,7 +295,7 @@ export function registerBotsPage(app: FastifyInstance): void {
       </div>
       <dialog class="bot-edit" id="bpEditDialog" aria-labelledby="bpEditTitle">
         <form id="bpEditForm" method="dialog">
-          <h3 id="bpEditTitle" class="u-m-0">Edit bot</h3>
+          <h3 id="bpEditTitle" class="u-m-0">Edit bit</h3>
           <div class="row2">
             <label>Name<input name="name" maxlength="60" required /></label>
             <label>Role<input name="role" maxlength="80" /></label>
@@ -335,10 +335,10 @@ export function registerBotsPage(app: FastifyInstance): void {
     `;
     return reply.type("text/html").send(
       portalAuthedPageHtml({
-        title: "EdgeCoder | Bots",
+        title: "EdgeCoder | Bits",
         activeTab: "bots",
-        heading: "Bots",
-        subtitle: "Bots in the cloud and on your machines",
+        heading: "Bits",
+        subtitle: "Bits in the cloud and on your machines",
         content,
         script,
       }),
@@ -380,7 +380,7 @@ const BOTS_PAGE_JS = String.raw`
     }
     function commandError(err) {
       var m = String((err && err.message) || err);
-      var words = { agent_not_connected: "Your machine is offline.", not_your_machine: "That bot isn't on one of your machines.", rate_limited: "Too many changes at once; try again in a minute.", view_only: "This machine shows its bots read-only." };
+      var words = { agent_not_connected: "Your machine is offline.", not_your_machine: "That bit isn't on one of your machines.", rate_limited: "Too many changes at once; try again in a minute.", view_only: "This machine shows its bits read-only." };
       showToast(words[m] || m, true);
     }
 
@@ -405,7 +405,7 @@ const BOTS_PAGE_JS = String.raw`
         clearTimeout(listState.timer);
         if (pending.length) listState.timer = setTimeout(showList, 8000);
         if (!bots.length && !pending.length) {
-          box.innerHTML = '<div class="bots-empty"><div class="empty-icon">' + BOT_ICONS.bot + '</div><h3>No bots yet</h3><p>Create one with New bot. It can run in the cloud, with no machine needed, or on one of your machines with its folder and tools. From here you can message it, pause it and change its settings.</p></div>';
+          box.innerHTML = '<div class="bots-empty"><div class="empty-icon">' + BOT_ICONS.bot + '</div><h3>No bits yet</h3><p>Create one with New bit. It can run in the cloud, with no machine needed, or on one of your machines with its folder and tools. From here you can message it, pause it and change its settings.</p></div>';
           return;
         }
         box.innerHTML = '<div class="bot-cards">' + pending.map(function(p) {
@@ -424,7 +424,7 @@ const BOTS_PAGE_JS = String.raw`
         }).join("") + "</div>";
         paintBotAvatars(box);
       } catch (err) {
-        box.innerHTML = '<div class="callout danger" role="alert">Couldn\'t load your bots. ' + escapeHtml(err.message || "") + "</div>";
+        box.innerHTML = '<div class="callout danger" role="alert">Couldn\'t load your bits. ' + escapeHtml(err.message || "") + "</div>";
       }
     }
 
@@ -461,7 +461,7 @@ const BOTS_PAGE_JS = String.raw`
       var useCloud = hasCloud && !ready.length;
       document.getElementById("bnTarget").innerHTML = (hasCloud ? '<option value="cloud"' + (useCloud ? " selected" : "") + ">Cloud (no machine needed)</option>" : "") +
         '<option value=""' + (useCloud ? "" : " selected") + ">" + escapeHtml(ready.length ? "First available: " + ready[0].machineName : "The first of my machines that comes online") + "</option>" +
-        machines.map(function(t) { return '<option value="' + escapeHtml(t.agentId) + '">' + escapeHtml(t.machineName + (t.canCreate ? "" : t.online ? " (update the app to create bots)" : " (offline: waits for it)")) + "</option>"; }).join("");
+        machines.map(function(t) { return '<option value="' + escapeHtml(t.agentId) + '">' + escapeHtml(t.machineName + (t.canCreate ? "" : t.online ? " (update the app to create bits)" : " (offline: waits for it)")) + "</option>"; }).join("");
       if (hasCloud) loadCloudCompute("bnCloudCompute", "auto");
       newFormChanged();
       document.getElementById("bnError").hidden = true;
@@ -529,7 +529,7 @@ const BOTS_PAGE_JS = String.raw`
         var j = null;
         try { j = await res.json(); } catch {}
         if (!res.ok) {
-          var words = { invalid_bot: "Check the fields: ", not_your_machine: "That machine isn't one of yours.", too_many_pending: "", rate_limited: "Too many new bots at once; try again in a minute.", portal_database_not_configured: "Creating bots from the web isn't available here." };
+          var words = { invalid_bot: "Check the fields: ", not_your_machine: "That machine isn't one of yours.", too_many_pending: "", rate_limited: "Too many new bits at once; try again in a minute.", portal_database_not_configured: "Creating bits from the web isn't available here." };
           throw new Error((words[j && j.error] || "") + ((j && (j.detail || j.message)) || (j && j.error) || res.status));
         }
         document.getElementById("bnDialog").close();
@@ -607,7 +607,7 @@ const BOTS_PAGE_JS = String.raw`
         note.textContent = "Needs folder: open the EdgeCoder app on " + m.machineName + " and choose " + b.name + "'s folder. It doesn't run until then." + (b.setup && b.setup.autoRequested ? " Auto mode is confirmed there too." : "");
       } else if (m.controls !== "on") {
         note.hidden = false;
-        note.textContent = m.machineName + " shows its bots on the web read-only. Message, approve and change it on the machine.";
+        note.textContent = m.machineName + " shows its bits on the web read-only. Message, approve and change it on the machine.";
       } else note.hidden = true;
       var input = document.getElementById("bpInput"), send = document.getElementById("bpSend");
       var noFolder = b.status === "needs_folder";
@@ -690,8 +690,8 @@ const BOTS_PAGE_JS = String.raw`
       if (state.dtab === "memory") {
         body.innerHTML = '<div class="d-section"><div class="d-label">Notes it saved for itself</div>' +
           (state.memory === null ? '<div class="d-sub muted">' + (online() ? "Loading…" : "Its memory stays on the machine while it's offline.") + "</div>"
-            : state.memory.trim() ? '<pre class="memory" tabindex="0" aria-label="Bot memory">' + escapeHtml(state.memory) + "</pre>"
-            : '<div class="d-sub muted">' + (isCloud ? "Cloud bots don't keep notes yet: their conversation is what they remember." : "Nothing yet. It saves notes with its remember tool as it works.") + "</div>") + "</div>";
+            : state.memory.trim() ? '<pre class="memory" tabindex="0" aria-label="Bit memory">' + escapeHtml(state.memory) + "</pre>"
+            : '<div class="d-sub muted">' + (isCloud ? "Cloud bits don't keep notes yet: their conversation is what they remember." : "Nothing yet. It saves notes with its remember tool as it works.") + "</div>") + "</div>";
         return;
       }
       var routine = String(b.schedule || "").trim()
@@ -702,7 +702,7 @@ const BOTS_PAGE_JS = String.raw`
       var triggers = (b.triggers || []).length
         ? b.triggers.map(function(t) {
             var st = (b.triggerStatus || {})[t.id] || {};
-            var sub = !t.enabled ? "Off" : !b.enabled ? "Paused with the bot" : st.error ? st.error : st.lastCheckedAtMs ? "Checked " + botRelative(st.lastCheckedAtMs) : "Checks GitHub every " + (isCloud ? 3 : 2) + " minutes";
+            var sub = !t.enabled ? "Off" : !b.enabled ? "Paused with the bit" : st.error ? st.error : st.lastCheckedAtMs ? "Checked " + botRelative(st.lastCheckedAtMs) : "Checks GitHub every " + (isCloud ? 3 : 2) + " minutes";
             return '<div class="routine"><div class="routine-text"><div class="routine-title">' + escapeHtml(botTriggerText(t)) + '</div><div class="routine-sub">' + escapeHtml(sub) + '</div></div><button type="button" class="switch" role="switch" data-toggle-trigger="' + escapeHtml(t.id) + '" aria-checked="' + (t.enabled ? "true" : "false") + '" aria-label="' + escapeHtml("Trigger: " + botTriggerText(t)) + '"' + (ctl ? "" : " disabled") + "></button></div>";
           }).join("")
         : '<div class="routine-sub">' + (isCloud ? "No triggers: add a repository and triggers in Edit." : b.repository ? "No triggers: add one on the machine to run on PRs, CI failures or labeled issues." : "Set a repository on the machine to run on GitHub events.") + "</div>";
@@ -752,7 +752,7 @@ const BOTS_PAGE_JS = String.raw`
           document.getElementById("botPage").hidden = true;
           var list = document.getElementById("botList");
           list.hidden = false;
-          document.getElementById("botCards").innerHTML = '<div class="callout warn" role="alert">' + (String(err.message) === "no_such_bot" ? "That bot isn't on any of your machines (or its machine hasn't shared it yet)." : "Couldn't load that bot: " + escapeHtml(err.message || "")) + ' <a href="/portal/bots">All bots</a></div>';
+          document.getElementById("botCards").innerHTML = '<div class="callout warn" role="alert">' + (String(err.message) === "no_such_bot" ? "That bit isn't on any of your machines (or its machine hasn't shared it yet)." : "Couldn't load that bit: " + escapeHtml(err.message || "")) + ' <a href="/portal/bots">All bots</a></div>';
         }
       }
     }

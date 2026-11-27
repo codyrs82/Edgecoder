@@ -5,7 +5,7 @@ description: Install EdgeCoder on a Mac or Windows PC, sign in, link your machin
 
 # Install the Desktop App
 
-The EdgeCoder desktop app is a coding assistant and the agent in one: chat, the Code view, bots and
+The EdgeCoder desktop app is a coding assistant and the agent in one: chat, the Code view, bits and
 your connections to other tools, plus the agent and Ollama that let this computer run models. There
 is nothing else to install.
 
@@ -87,6 +87,6 @@ Install command-line tool**. See [Terminal: `edgecoder code`](/guide/terminal).
 ## Next steps
 
 - [Use network compute and reservations](/guide/using-compute)
-- [Bots, cloud bots and web search](/guide/bots)
+- [Bits, cloud bits and web search](/guide/bots)
 - [Buy cSats](/guide/buy-csats)
 - [Host for the network](/guide/hosting)

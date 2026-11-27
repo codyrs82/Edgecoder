@@ -65,6 +65,7 @@ import { servedFromWhere } from "../../common/bot-relay.js";
 import { FRONTIER_ASK_TIMEOUT_MS, FRONTIER_ASK_TOOL, frontierAskQuestion, type BotFrontierHooks, type FrontierAnswer, type FrontierAsk, type FrontierChoice } from "./bot-frontier.js";
 import { frontierLeadName } from "./frontier-access.js";
 import { webSystemNote, webGrounding, isWebTool, webToolSchemas, type WebToolSession } from "../../web-tool/tools.js";
+import { ALL_AVATAR_SHAPES, randomBitAvatarId } from "../../common/bit-avatars.js";
 
 // ---------------------------------------------------------------------------
 // Schedules: "every 30 minutes", "every 2 hours", "hourly", "daily at 09:00", or 5-field cron
@@ -124,7 +125,7 @@ export function parseSchedule(text: string | undefined | null): Schedule | null 
     const unit = every[2].replace(/s$/, "");
     const ms = n * UNIT_MS[unit];
     if (!Number.isFinite(ms) || n < 1) throw new ScheduleError(`"${text}": the interval must be at least 1`);
-    if (ms < 5 * MINUTE) throw new ScheduleError(`"${text}": bots run at most every 5 minutes`);
+    if (ms < 5 * MINUTE) throw new ScheduleError(`"${text}": bits run at most every 5 minutes`);
     return { kind: "every", ms };
   }
   const daily = /^(?:daily|every day) at (.+)$/.exec(s);
@@ -403,7 +404,8 @@ export interface BotCompute {
   model?: string;
   computeClass?: NetworkClass;
 }
-export const BOT_AVATAR_SHAPES = ["robot", "orb", "hex", "block"] as const;
+/** The Bits characters and the classic shapes (src/common/bit-avatars.ts). */
+export const BOT_AVATAR_SHAPES = ALL_AVATAR_SHAPES;
 export type BotAvatarShape = (typeof BOT_AVATAR_SHAPES)[number];
 /**
  * New bots run on Auto: free places with a capable model first, else the network's best fit (the
@@ -840,7 +842,7 @@ export interface BotChangeSource {
 }
 
 /** Why the frontier lead can't be on with GitHub triggers. */
-export const GITHUB_TRIGGER_REFUSAL = "A bot with GitHub triggers can't use your frontier key: anyone who opens a pull request or issue could start it. Remove its GitHub triggers first.";
+export const GITHUB_TRIGGER_REFUSAL = "A bit with GitHub triggers can't use your frontier key: anyone who opens a pull request or issue could start it. Remove its GitHub triggers first.";
 
 /** The fields only the desktop app may change. */
 const FRONTIER_FIELDS = ["frontierLead", "frontierRunCapUsd", "frontierDailyCapUsd"] as const;
@@ -963,7 +965,7 @@ export class BotManager {
   /** The bot's verdict on a call: its mode (read live, so a change applies to the next call), then the project's rules. */
   decide(id: string, tool: ToolName, args: Record<string, unknown>): Decision {
     const bot = this.bots.find((b) => b.id === id);
-    if (!bot) return { action: "ask", reason: "the bot is gone" };
+    if (!bot) return { action: "ask", reason: "the bit is gone" };
     const root = botWorkRoot(bot);
     const p = this.permissions.get(root);
     const verdict = decideToolCall(tool, args, { mode: botMode(bot), root, rules: p.rules ?? [], legacyNames: p.shell, branch: () => branchOf(root), sandbox: this.deps.sandbox?.(root) === true }, (c) => riskOf(c, root));
@@ -1524,7 +1526,7 @@ export class BotManager {
       }
     }
     if (input.triggers !== undefined) {
-      if (input.triggers.length > MAX_TRIGGERS) throw new BotError(`A bot can have at most ${MAX_TRIGGERS} triggers`);
+      if (input.triggers.length > MAX_TRIGGERS) throw new BotError(`A bit can have at most ${MAX_TRIGGERS} triggers`);
       for (const t of input.triggers) {
         if (!TRIGGER_KINDS.includes(t.kind)) throw new BotError(`Unknown trigger "${String(t.kind)}"`);
         if (t.kind === "issue_labeled" && !t.label?.trim()) throw new BotError("Pick the label the issue trigger watches for");
@@ -1554,7 +1556,7 @@ export class BotManager {
     }
     if (input.compute !== undefined) {
       if (!COMPUTE_POLICIES.includes(input.compute.policy)) throw new BotError(`Unknown compute policy "${input.compute.policy}"`);
-      if (input.compute.policy === "model" && !input.compute.model?.trim()) throw new BotError("Pick the model this bot runs on (or choose another compute option)");
+      if (input.compute.policy === "model" && !input.compute.model?.trim()) throw new BotError("Pick the model this bit runs on (or choose another compute option)");
       if (input.compute.computeClass !== undefined && !isNetworkClass(input.compute.computeClass)) throw new BotError(`Unknown compute class "${input.compute.computeClass}" (one of ${NETWORK_CLASSES.join(", ")})`);
     }
   }
@@ -1598,7 +1600,7 @@ export class BotManager {
     const owner = source.account || undefined;
     if (FRONTIER_FIELDS.some((k) => input[k] !== undefined) && !source.desktop) throw new BotError("The frontier lead is set in the EdgeCoder app on this computer.", 403);
     if (input.frontierLead) {
-      if (!owner) throw new BotError("Sign in to EdgeCoder on this computer to let a bot use your frontier key.", 409);
+      if (!owner) throw new BotError("Sign in to EdgeCoder on this computer to let a bit use your frontier key.", 409);
       if (input.triggers?.length) throw new BotError(GITHUB_TRIGGER_REFUSAL, 409);
     }
     const bot: BotConfig = {
@@ -1620,7 +1622,8 @@ export class BotManager {
       autoApproveEdits: input.autoApproveEdits ?? true,
       compute: input.compute ? BotManager.compute(input.compute) : { ...DEFAULT_BOT_COMPUTE },
       color: input.color ?? COLORS[this.bots.length % COLORS.length],
-      ...(input.avatarShape ? { avatarShape: input.avatarShape } : {}),
+      // A new bit gets a random Bits avatar unless one was picked.
+      avatarShape: input.avatarShape ?? randomBitAvatarId(),
       createdAtMs: now,
       updatedAtMs: now,
       ...(owner ? { ownerAccount: owner } : {}),
@@ -1648,11 +1651,11 @@ export class BotManager {
   createFromWeb(input: WebBotInput): { bot: BotView; created: boolean } {
     const existing = this.bots.find((b) => b.id === input.id);
     if (existing) {
-      if (existing.setup?.requestedBy !== undefined && existing.setup.requestedBy !== input.requestedBy) throw new BotError("No bot with that id", 404);
+      if (existing.setup?.requestedBy !== undefined && existing.setup.requestedBy !== input.requestedBy) throw new BotError("No bit with that id", 404);
       return { bot: this.view(existing), created: false };
     }
-    if (!/^bot_w[0-9a-f]{12}$/.test(input.id)) throw new BotError("Bad bot id");
-    if (this.bots.length >= MAX_BOTS) throw new BotError(`At most ${MAX_BOTS} bots on one computer`, 409);
+    if (!/^bot_w[0-9a-f]{12}$/.test(input.id)) throw new BotError("Bad bit id");
+    if (this.bots.length >= MAX_BOTS) throw new BotError(`At most ${MAX_BOTS} bits on one computer`, 409);
     // The frontier lead is never set from the web.
     const { id, requestId, requestedBy, suggestedFolder, mode, frontierLead: _fl, frontierRunCapUsd: _fr, frontierDailyCapUsd: _fd, ...fields } = input;
     this.validate({ ...fields, projectRoot: undefined });
@@ -1680,7 +1683,7 @@ export class BotManager {
       mode: safeMode,
       compute: fields.compute ? BotManager.compute(fields.compute) : { ...DEFAULT_BOT_COMPUTE },
       color: fields.color ?? COLORS[this.bots.length % COLORS.length],
-      ...(fields.avatarShape ? { avatarShape: fields.avatarShape } : {}),
+      avatarShape: fields.avatarShape ?? randomBitAvatarId(),
       createdAtMs: now,
       updatedAtMs: now,
       // The relay checked that the account asking is the one signed in here.
@@ -1745,7 +1748,7 @@ export class BotManager {
     if (patch.frontierLead && patch.frontierLead !== bot.frontierLead) {
       const triggersAfter = patch.triggers !== undefined ? patch.triggers : bot.triggers;
       if (triggersAfter.length) throw new BotError(GITHUB_TRIGGER_REFUSAL, 409);
-      if (!source.account) throw new BotError("Sign in to EdgeCoder on this computer to let a bot use your frontier key.", 409);
+      if (!source.account) throw new BotError("Sign in to EdgeCoder on this computer to let a bit use your frontier key.", 409);
       if (bot.ownerAccount && bot.ownerAccount !== source.account) throw new BotError(`${bot.name} belongs to another account, so it can't use your frontier key.`, 403);
     }
     // A folder set from this computer's form (the web can't send one: bot-remote.ts) is the confirmation.
@@ -1871,7 +1874,7 @@ export class BotManager {
 
   private find(id: string): BotConfig {
     const bot = this.bots.find((b) => b.id === id);
-    if (!bot) throw new BotError("No bot with that id", 404);
+    if (!bot) throw new BotError("No bit with that id", 404);
     return bot;
   }
 
@@ -2765,14 +2768,14 @@ export function registerBotRoutes(app: FastifyInstance, bots: BotManager, deps: 
     handle(reply, () => {
       const id = idParams.parse(req.params).id;
       const r = bots.runNow(id, "manual");
-      if (!r.started) return reply.status(409).send({ error: r.reason === "busy" ? "The bot is already running." : "Today's budget for this bot is spent.", reason: r.reason });
+      if (!r.started) return reply.status(409).send({ error: r.reason === "busy" ? "The bit is already running." : "Today's budget for this bit is spent.", reason: r.reason });
       return { ...r, bot: bots.get(id) };
     }),
   );
   app.post("/v1/ide/bots/:id/repository/sync", (req, reply) =>
     handle(reply, async () => {
       const id = idParams.parse(req.params).id;
-      if (!bots.get(id).repository) return reply.status(409).send({ error: "This bot has no repository." });
+      if (!bots.get(id).repository) return reply.status(409).send({ error: "This bit has no repository." });
       // Runs in the background; the bot's `repo` says cloning, ready or what went wrong.
       void bots.syncRepository(id);
       return { bot: bots.get(id) };

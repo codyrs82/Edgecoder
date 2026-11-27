@@ -1,11 +1,25 @@
-// Bot avatars: a small generated character per bot (a shape, a color and a face). The color and
-// shape come from the bot (set in its form) or, when unset, from its name, so a bot always looks
-// the same. The face follows the bot's state.
+// Bit avatars: a small character per bit (a shape, a color and a face). The shape is one of the
+// Bits characters (bit-avatars.ts: their own colours) or a classic shape in the bit's color. A bit
+// with no shape set looks as it always has: a classic shape picked from its name. New bits get a
+// random Bits character (the form and the server pick one). The face follows the bit's state.
 import type { BotStatus } from "./bots";
+import { BIT_AVATARS, BIT_AVATAR_IDS, type BitAvatarId } from "./bit-avatars";
 
-export const AVATAR_SHAPES = ["robot", "orb", "hex", "block"] as const;
-export type AvatarShape = (typeof AVATAR_SHAPES)[number];
-export const AVATAR_SHAPE_LABELS: Record<AvatarShape, string> = { robot: "Robot", orb: "Orb", hex: "Hex", block: "Block" };
+/** The shapes from before Bits, drawn in the bit's own color. */
+export const CLASSIC_SHAPES = ["robot", "orb", "hex", "block"] as const;
+export type ClassicShape = (typeof CLASSIC_SHAPES)[number];
+export const AVATAR_SHAPES = [...BIT_AVATAR_IDS, ...CLASSIC_SHAPES] as const;
+export type AvatarShape = BitAvatarId | ClassicShape;
+export const AVATAR_SHAPE_LABELS: Record<AvatarShape, string> = {
+  ...(Object.fromEntries(BIT_AVATARS.map((a) => [a.id, a.label])) as Record<BitAvatarId, string>),
+  robot: "Robot",
+  orb: "Orb",
+  hex: "Hex",
+  block: "Block",
+};
+export function isBitShape(shape: string): shape is BitAvatarId {
+  return (BIT_AVATAR_IDS as readonly string[]).includes(shape);
+}
 /** The same palette the server assigns new bots from. */
 export const AVATAR_COLORS = ["#e5484d", "#f76b15", "#ffc53d", "#46a758", "#12a594", "#0090ff", "#6e56cf", "#d6409f"];
 
@@ -23,7 +37,8 @@ export function nameHash(name: string): number {
 
 export function shapeFor(bot: { name: string; avatarShape?: string }): AvatarShape {
   if (bot.avatarShape && (AVATAR_SHAPES as readonly string[]).includes(bot.avatarShape)) return bot.avatarShape as AvatarShape;
-  return AVATAR_SHAPES[nameHash(bot.name) % AVATAR_SHAPES.length];
+  // Unset: the classic shape it has always had (not the Bits characters, so existing bits keep their look).
+  return CLASSIC_SHAPES[nameHash(bot.name) % CLASSIC_SHAPES.length];
 }
 
 export function colorFromName(name: string): string {

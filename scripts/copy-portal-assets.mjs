@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // #89: copy the shared design tokens into the built portal, where src/portal/assets.ts serves them
 // at /assets/tokens.css, and the Getting started explainer videos (src/portal/assets/videos, served
-// at /assets/videos/). Runs after `tsc` in `npm run build` (and so in the server Docker image).
+// at /assets/videos/), and the Bits avatars (src/portal/assets/bits, served at /assets/bits/). Runs after `tsc` in `npm run build` (and so in the server Docker image).
 // Usage: node scripts/copy-portal-assets.mjs [outDir]   (default: dist/portal/assets)
 import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -25,4 +25,13 @@ if (existsSync(videos)) {
   mkdirSync(join(outDir, "videos"), { recursive: true });
   for (const f of files) copyFileSync(join(videos, f), join(outDir, "videos", f));
   console.log(`copy-portal-assets: ${files.length} video files -> ${join(outDir, "videos")}`);
+}
+
+// The Bits avatars and mark (src/portal/assets/bits, served at /assets/bits/).
+const bits = join(root, "src/portal/assets/bits");
+if (existsSync(bits)) {
+  const files = readdirSync(bits).filter((f) => /\.svg$/.test(f));
+  mkdirSync(join(outDir, "bits"), { recursive: true });
+  for (const f of files) copyFileSync(join(bits, f), join(outDir, "bits", f));
+  console.log(`copy-portal-assets: ${files.length} Bits files -> ${join(outDir, "bits")}`);
 }

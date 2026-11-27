@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { AVATAR_COLORS, AVATAR_SHAPES, colorFromName, inkFor, moodFor, nameHash, shapeFor } from "../src/lib/bot-avatar";
+import { AVATAR_COLORS, AVATAR_SHAPES, CLASSIC_SHAPES, colorFromName, inkFor, isBitShape, moodFor, nameHash, shapeFor } from "../src/lib/bot-avatar";
+import { BIT_AVATARS, BIT_AVATAR_IDS, bitAvatar, randomBitAvatarId } from "../src/lib/bit-avatars";
 import { askCards } from "../src/lib/bots";
 
 describe("bot avatars", () => {
@@ -12,6 +13,21 @@ describe("bot avatars", () => {
     expect(AVATAR_COLORS).toContain(colorFromName("Harry"));
     // Different names spread over the shapes.
     expect(new Set(["Harry", "Billing", "Sec", "Docs", "Ops", "Ana", "Q"].map((n) => shapeFor({ name: n }))).size).toBeGreaterThan(1);
+  });
+
+  it("keeps a bit with no shape set on its classic shape; Bits characters are picked or assigned", () => {
+    // Existing bits (no avatarShape) keep the look they had before Bits.
+    for (const n of ["Harry", "Billing", "Sec", "Docs", "Ops", "Ana", "Q", "Trader Boy"]) expect(CLASSIC_SHAPES).toContain(shapeFor({ name: n }));
+    expect(shapeFor({ name: "Harry", avatarShape: "coin" })).toBe("coin");
+    expect(isBitShape("coin")).toBe(true);
+    expect(isBitShape("hex")).toBe(false);
+    expect(AVATAR_SHAPES).toEqual([...BIT_AVATAR_IDS, ...CLASSIC_SHAPES]);
+    expect(BIT_AVATARS.map((a) => a.id)).toEqual([...BIT_AVATAR_IDS]);
+    expect(BIT_AVATARS).toHaveLength(12);
+    expect(randomBitAvatarId(() => 0)).toBe("coin");
+    expect(randomBitAvatarId(() => 0.9999)).toBe("jar");
+    expect(bitAvatar("bolt")?.label).toBe("Zap");
+    expect(bitAvatar("hex")).toBeUndefined();
   });
 
   it("maps state to a mood, and picks readable ink", () => {

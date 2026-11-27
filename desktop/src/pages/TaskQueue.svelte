@@ -97,7 +97,7 @@
 
 <div class="sp sp-wide">
   <h1>Tasks</h1>
-  <p class="sp-lead">Everything you ran from this computer: chats, Code turns, bot runs, helper jobs and API calls, with where each ran and what it cost.</p>
+  <p class="sp-lead">Everything you ran from this computer: chats, Code turns, bit runs, helper jobs and API calls, with where each ran and what it cost.</p>
 
   <section class="sp-group" aria-labelledby="tq-history">
     <h2 class="sp-group-title" id="tq-history">
@@ -137,7 +137,7 @@
       {#if loading && !rows.length}
         <div class="sp-row"><span class="sp-muted">Loading…</span></div>
       {:else if !rows.length}
-        <EmptyNote title="No tasks yet." description="Chats, Code turns, bot runs, helper jobs and API calls you run from this computer show here, with where each ran, its tokens and its cost." />
+        <EmptyNote title="No tasks yet." description="Chats, Code turns, bit runs, helper jobs and API calls you run from this computer show here, with where each ran, its tokens and its cost." />
       {:else if !shown.length}
         <EmptyNote title="Nothing matches these filters." description="Try another kind, status or time range, or clear the search." />
       {:else}

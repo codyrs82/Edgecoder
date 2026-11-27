@@ -34,13 +34,13 @@ EdgeCoder for iPhone and iPad, on the App Store, with Chat and Code modes; see [
 
 With **Code from your phone** on in the desktop app, the iOS app drives coding sessions on that computer, relayed through the coordinator; `/remote` in `edgecoder code` continues a terminal session in the desktop app.
 
-### Bots and Cloud Bots
+### Bits and Cloud Bits
 
-Bots answer messages, run on a schedule and react to GitHub events: desktop bots run on your machine with its folder and tools, cloud bots run on EdgeCoder's servers with no machine needed ([docs/cloud-bots.md](https://github.com/codyrs82/Edgecoder/blob/main/docs/cloud-bots.md)).
+Bits answer messages, run on a schedule and react to GitHub events: desktop bits run on your machine with its folder and tools, cloud bits run on EdgeCoder's servers with no machine needed ([docs/cloud-bots.md](https://github.com/codyrs82/Edgecoder/blob/main/docs/cloud-bots.md)).
 
 ### Web Search
 
-Chats and bots can search the web and read pages when the model needs current information, and the answer lists its sources ([docs/web-tool.md](https://github.com/codyrs82/Edgecoder/blob/main/docs/web-tool.md)).
+Chats and bits can search the web and read pages when the model needs current information, and the answer lists its sources ([docs/web-tool.md](https://github.com/codyrs82/Edgecoder/blob/main/docs/web-tool.md)).
 
 ### Reservations
 

@@ -122,7 +122,7 @@ export function botFrontierChat(o: {
 
   const turnOff = (note: string) => {
     off = note;
-    o.sendEvent({ type: "status", message: `${note}. The bot's own compute runs the rest of this run.`, note });
+    o.sendEvent({ type: "status", message: `${note}. The bit's own compute runs the rest of this run.`, note });
   };
 
   const viaKey = async (): Promise<ChatFn | null> => {

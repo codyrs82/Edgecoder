@@ -184,7 +184,7 @@ const PAGES: Case[] = [
 const OVERLAYS: Case[] = [
   ["Settings dialog", SECTION_SHOWS["General"], SettingsOverlay, { user: USER, onClose: noop, onLogout: noop }],
   ["Getting started guide", "Choose models and where they run", OnboardingWizard, { onClose: noop, onOpenSettings: noop, onRun: noop }],
-  ["Bot form", "New bot", BotForm, { onClose: noop, onSaved: noop }],
+  ["Bot form", "New bit", BotForm, { onClose: noop, onSaved: noop }],
   ["Quick open", "Type to search the project", QuickOpen, { onOpen: noop, onClose: noop }],
   ["Diff", "Undo this file", DiffModal, { path: "src/app.ts", before: "let a = 1;\n", after: "let a = 2;\n", onClose: noop, onUndo: noop }],
   ["Local compute setup", "Setting up local compute", LocalComputeSetup, { status: SETUP, onStatus: noop, onDismiss: noop }],

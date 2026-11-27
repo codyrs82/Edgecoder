@@ -2437,6 +2437,8 @@ export interface CloudBotSummary {
   name: string;
   role: string;
   color: string;
+  /** Its Bits avatar (bit-avatars.ts); absent on older cloud bits (a classic shape from the name). */
+  avatarShape?: string;
   status: string;
   activity?: string;
   enabled: boolean;

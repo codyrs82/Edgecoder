@@ -199,7 +199,7 @@ describe("cloud bots API", () => {
     for (let i = 0; i < 10; i++) await post("u1", "/portal/api/bots/new", { requestId: `req-many-${String(i).padStart(4, "0")}`, agentId: null, bot: { name: `B${i}` } });
     const r = await post("u1", "/portal/api/bots/new", { requestId: "req-many-9999", agentId: null, bot: { name: "One more" } });
     expect(r.statusCode).toBe(429);
-    expect(r.json().message).toBe("At most 10 new bots can wait for a machine.");
+    expect(r.json().message).toBe("At most 10 new bits can wait for a machine.");
   });
 });
 

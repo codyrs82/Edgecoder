@@ -165,7 +165,7 @@
     <div class="full-confirm">
       <h2 id="{uid}-full-title"><ShieldAlert size={16} aria-hidden="true" /> Turn on Full access?</h2>
       <p>{FULL_ACCESS_WARNING}</p>
-      <p class="muted">Asked once per project. Bots, the phone and other accounts never get Full access.</p>
+      <p class="muted">Asked once per project. Bits, the phone and other accounts never get Full access.</p>
       <div class="actions">
         <button type="button" class="btn" onclick={() => { confirming = false; trigger?.focus(); }}>Cancel</button>
         <button type="button" class="btn btn--primary" onclick={confirmFull}>Turn on Full access</button>

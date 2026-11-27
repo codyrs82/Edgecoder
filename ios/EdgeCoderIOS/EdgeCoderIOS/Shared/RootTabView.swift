@@ -21,7 +21,7 @@ struct RootTabView: View {
             BotsView()
                 .tag(AppTab.bots)
                 .tabItem {
-                    Label("Bots", systemImage: "person.2.wave.2")
+                    Label("Bits", systemImage: "person.2.wave.2")
                 }
 
             NavigationStack {
@@ -118,7 +118,7 @@ private struct LoginSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    Text("Sign in to chat on your machines and the EdgeCoder network, and to see your bots and wallet.")
+                    Text("Sign in to chat on your machines and the EdgeCoder network, and to see your bits and wallet.")
                         .font(.subheadline)
                         .foregroundColor(Theme.textSecondary)
                 }

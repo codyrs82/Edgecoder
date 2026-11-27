@@ -282,7 +282,7 @@ export class CloudBotRunner {
     // Renew the lease, see Stop, Pause-with-delete, and keep the run's cost and activity current.
     const touch = async (activity?: string) => {
       const t = await this.d.store.touchRun(run.id, { leaseUntilMs: this.now() + this.limits.leaseMs, activity: activity ?? null, cSats: Number(spent.toFixed(6)), where });
-      if (!t.botExists) halt(new StopRun("cancelled", "The bot was deleted."));
+      if (!t.botExists) halt(new StopRun("cancelled", "The bit was deleted."));
       if (t.cancelRequested) halt(new StopRun("cancelled", "Stopped."));
     };
     const heartbeat = setInterval(() => void touch().catch(() => undefined), Math.max(5_000, Math.floor(this.limits.leaseMs / 3)));
@@ -352,7 +352,7 @@ export class CloudBotRunner {
             void touch(`${name.replace(/_/g, " ")}`).catch(() => undefined);
             out = await gh.run(name, args);
           }
-        } else out = { error: `${name} isn't available to a cloud bot.` };
+        } else out = { error: `${name} isn't available to a cloud bit.` };
         events.push({ type: "tool_result", id, ...(out.error ? { error: out.error } : { result: (out.result ?? "").slice(0, 200) }) });
         return out.error ? `[Error]: ${out.error}` : (out.result ?? "(no output)");
       };
@@ -389,7 +389,7 @@ export class CloudBotRunner {
     const status: CloudRunStatus = stop ? stop.status : failedText && !text.trim() ? "failed" : "done";
     const meta = { status, steps, usage: { cSats, where, outputTokens }, ...(gh?.made.length ? { pullRequests: gh.made } : {}) };
     let reply = text.trim();
-    if (stop?.status === "cancelled" && stop.message === "The bot was deleted.") {
+    if (stop?.status === "cancelled" && stop.message === "The bit was deleted.") {
       await this.d.store.finishRun(run.id, { status: "cancelled", endedAtMs: this.now(), cSats, summary: "", where }).catch(() => undefined);
       return;
     }

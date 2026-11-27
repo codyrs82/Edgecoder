@@ -8,6 +8,7 @@
 
 import { z } from "zod";
 import { isFrontierModel } from "../../common/bot-relay.js";
+import { ALL_AVATAR_SHAPES, type AvatarShapeId } from "../../common/bit-avatars.js";
 
 /** The agentId every cloud bot answers to, so the desktop bots' /portal/api/bots/:agentId/:botId routes fit them. */
 export const CLOUD_AGENT_ID = "cloud";
@@ -36,6 +37,8 @@ export const DEFAULT_LIMITS: CloudBotLimits = { maxTurns: 12, budgetCSatsPerRun:
 /** What a cloud bot is configured to do (stored as one JSON column). Never holds a secret. */
 export interface CloudBotConfig {
   color: string;
+  /** Its avatar (src/common/bit-avatars.ts); new cloud bits get a random Bits one. Absent on older ones. */
+  avatarShape?: AvatarShapeId;
   web: boolean;
   schedule: CloudSchedule | null;
   github: { repo: string; triggers: CloudTrigger[] } | null;
@@ -176,7 +179,7 @@ const githubSchema = z
 const computeSchema = z.unknown().transform((v, ctx) => {
   const c = normalizeCompute(v);
   if (!c) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'auto, "mine:<model>" or "network:<model>" (cloud bots never use a frontier key)' });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'auto, "mine:<model>" or "network:<model>" (cloud bits never use a frontier key)' });
     return z.NEVER;
   }
   return c;
@@ -191,6 +194,7 @@ const common = {
   schedule: scheduleSchema.nullable(),
   github: githubSchema.nullable(),
   color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  avatarShape: z.enum(ALL_AVATAR_SHAPES),
   budgetCSatsPerDay: z.number().positive().max(100_000),
   budgetCSatsPerRun: z.number().positive().max(100_000),
   maxRunsPerDay: z.number().int().min(1).max(500),
@@ -207,7 +211,7 @@ export const cloudBotCreateSchema = z
       if (v === undefined || v === null) return "auto";
       const c = normalizeCompute(v);
       if (!c) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'auto, "mine:<model>" or "network:<model>" (cloud bots never use a frontier key)' });
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'auto, "mine:<model>" or "network:<model>" (cloud bits never use a frontier key)' });
         return z.NEVER;
       }
       return c;
@@ -216,6 +220,7 @@ export const cloudBotCreateSchema = z
     schedule: scheduleSchema.nullable().optional(),
     github: githubSchema.nullable().optional(),
     color: common.color.optional(),
+    avatarShape: common.avatarShape.optional(),
     budgetCSatsPerDay: common.budgetCSatsPerDay.optional(),
     budgetCSatsPerRun: common.budgetCSatsPerRun.optional(),
     maxRunsPerDay: common.maxRunsPerDay.optional(),

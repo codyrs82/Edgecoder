@@ -178,6 +178,13 @@ describe("the Bots page", () => {
     expect(ava).not.toContain("<b>");
     expect(ava).toContain('data-bot-color=""');
     expect(ava).toContain("offline");
+    // A Bits avatar is its picture; an unknown shape never reaches the URL.
+    const bit = vm.runInContext(`botAvatarHtml({ name: "Zed", status: "idle", avatarShape: "bolt" }, true, "lg")`, ctx);
+    expect(bit).toContain('<img src="/assets/bits/bolt.svg"');
+    expect(bit).toContain("bit-ava lg");
+    const odd = vm.runInContext(`botAvatarHtml({ name: "Zed", status: "idle", avatarShape: 'x"><script>' }, true)`, ctx);
+    expect(odd).not.toContain("/assets/bits/");
+    expect(odd).not.toContain("<script>");
   });
 });
 

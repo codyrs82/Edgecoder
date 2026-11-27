@@ -178,7 +178,7 @@ export const WELCOME_RENDER_SCRIPT = `
       }
       if (step.id === "models") {
         return wzRadios("wzRouting", ROUTING_OPTIONS, s.routing || "auto", "Where things run") +
-          "<p class='wz-muted'>Bots have their own setting in the bot form. In the app, Auto is in the chat's compute menu.</p>" +
+          "<p class='wz-muted'>Bits have their own setting in the bit form. In the app, Auto is in the chat's compute menu.</p>" +
           "<h3 class='wz-sub'>Bring your own frontier key (optional)</h3><p>In the desktop app (Settings → General), add your own Anthropic or OpenAI-compatible key to lead with a frontier model. Only your account uses it; the provider bills you.</p>";
       }
       if (step.id === "fund") {
@@ -195,7 +195,7 @@ export const WELCOME_RENDER_SCRIPT = `
           "<h3 class='wz-sub'>Reserve a machine</h3><p>To hold a machine for your jobs only, use Settings → <a href='/portal/settings/compute#sec-reservations'>Compute</a>. It's paid from the same cSats balance; unused time comes back when you cancel.</p>" +
           // The estimator stays right before the buttons: the fund video's script focuses ".wz-estimator + .wz-actions".
           wzEstimator(ctx) + "<div class='wz-actions'><a class='wz-btn primary' href='/portal/settings/plan'>Fund with Lightning</a>" + chain + "</div>" +
-          "<p class='wz-muted'>Bots have a daily budget, so a bot never spends more than you allow.</p>";
+          "<p class='wz-muted'>Bits have a daily budget, so a bit never spends more than you allow.</p>";
       }
       if (step.id === "tools") {
         return "<h3 class='wz-sub'>GitHub</h3><p>Connect GitHub to clone repositories and open pull requests (Code → New project → Clone from GitHub).</p>" +
@@ -208,7 +208,7 @@ export const WELCOME_RENDER_SCRIPT = `
           "<p>Type <code>/remote</code> in a session to keep working on it in the app's Code view.</p>";
       }
       if (step.id === "try") {
-        return "<p>Ideas to start with:</p><ul class='wz-list'><li>In Chat: \\"Explain what a Lightning invoice is in two sentences.\\"</li><li>In the app's Code view: open a project and ask it to explain a file.</li><li>Create a bot with a small daily budget.</li></ul>" +
+        return "<p>Ideas to start with:</p><ul class='wz-list'><li>In Chat: \\"Explain what a Lightning invoice is in two sentences.\\"</li><li>In the app's Code view: open a project and ask it to explain a file.</li><li>Create a bit with a small daily budget.</li></ul>" +
           "<p class='wz-muted'>Each reply ends with where it ran (your machine or the network) and what it cost.</p>";
       }
       if (step.id === "host") {

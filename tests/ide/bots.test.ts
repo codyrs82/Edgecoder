@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { FALLBACK_NOTE } from "../../src/inference-api/auto-route.js";
 import { BOT_AGENT_MIN_PARAMS_B, BotManager, DEFAULT_BOT_COMPUTE, botSystemPrompt, orientation, toolsLine, type BotConfig, MAX_REPLY_TEXT, REPLY_TRIMMED, agentBotRunner, botComputeChat, nextRunAt, parseSchedule, registerBotRoutes, summarize, type BotRunContext, type BotRunner } from "../../src/apps/ide/bots.js";
 import type { ChatFn } from "../../src/apps/ide/agent-loop.js";
+import { BIT_AVATAR_IDS } from "../../src/common/bit-avatars.js";
 
 const dir = () => mkdtempSync(join(tmpdir(), "bots-"));
 const at = (y: number, mo: number, d: number, h = 0, mi = 0) => new Date(y, mo - 1, d, h, mi).getTime();
@@ -404,7 +405,9 @@ describe("bot compute policy", () => {
     const b = m.create({ name: "Harry", projectRoot: dir(), avatarShape: "hex", color: "#46a758" });
     expect(b).toMatchObject({ avatarShape: "hex", color: "#46a758" });
     expect(m.update(b.id, { avatarShape: "orb" }).avatarShape).toBe("orb");
-    expect(m.create({ name: "Plain", projectRoot: dir() }).avatarShape).toBeUndefined();
+    // A new bit with none picked gets a random Bits avatar.
+    expect(BIT_AVATAR_IDS).toContain(m.create({ name: "Plain", projectRoot: dir() }).avatarShape);
+    expect(m.update(b.id, { avatarShape: "coin" }).avatarShape).toBe("coin");
     const app = Fastify();
     registerBotRoutes(app, m);
     const bad = await app.inject({ method: "PATCH", url: `/v1/ide/bots/${b.id}`, payload: { avatarShape: "blob" } });

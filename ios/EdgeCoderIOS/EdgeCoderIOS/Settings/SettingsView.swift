@@ -99,7 +99,7 @@ struct SettingsView: View {
                     }
                     Button("Cancel", role: .cancel) {}
                 } message: {
-                    Text("This sends a deletion request for your account, its machines, conversations and bots to support@edgecoder.io. Withdraw any earnings first: unspent cSats cannot be refunded after deletion.")
+                    Text("This sends a deletion request for your account, its machines, conversations and bits to support@edgecoder.io. Withdraw any earnings first: unspent cSats cannot be refunded after deletion.")
                 }
             } else {
                 HStack(spacing: 14) {

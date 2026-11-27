@@ -63,7 +63,7 @@ export const CLOUD_BOTS_PAGE_JS = String.raw`
       f.cloudToken.disabled = !gh;
       document.getElementById(p + "CloudTriggers").disabled = !hasRepo || !gh;
       document.getElementById(p + "CloudTriggersHint").hidden = hasRepo && gh;
-      setText(p + "CloudTriggersHint", gh ? "Add a repository to use triggers" : "GitHub for cloud bots isn't set up on this server yet.");
+      setText(p + "CloudTriggersHint", gh ? "Add a repository to use triggers" : "GitHub for cloud bits isn't set up on this server yet.");
     }
     function cloudSpec(f, keepToken) {
       var bot = { compute: f.cloudCompute.value || "auto", web: !!f.cloudWeb.checked };

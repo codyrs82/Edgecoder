@@ -18,6 +18,9 @@
  *   src/portal/assets/videos/, copied to dist/portal/assets/videos/ by copy-portal-assets.mjs).
  *   Byte ranges for seeking (Safari needs them), a one-day cache (the URLs carry no hash), and
  *   `Access-Control-Allow-Origin: *` so docs.edgecoder.io can load the captions.
+ * - /assets/bits/<name>.svg: the Bits avatars, the Bits mark and wordmark (written from
+ *   desktop/src/lib/bit-avatars.ts by scripts/gen-bits-assets.ts into src/portal/assets/bits/,
+ *   copied to dist/portal/assets/bits/ by copy-portal-assets.mjs). A one-day cache.
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -191,6 +194,27 @@ export function parseByteRange(header: string, size: number): [number, number] |
   return start <= end && start < size ? [start, end] : null;
 }
 
+/** Built server: dist/portal/assets/bits; from source: src/portal/assets/bits. */
+export const BITS_DIR = fileURLToPath(new URL("./assets/bits/", import.meta.url));
+const BITS_FILE = /^[a-z]+(?:-[a-z]+)*\.svg$/;
+const bitsCache = new Map<string, Buffer | null>();
+
+/** A Bits SVG's bytes, or null when there is no such file. Read once: the files only change on deploy. */
+function bitsFile(name: string): Buffer | null {
+  if (!BITS_FILE.test(name)) return null;
+  if (!bitsCache.has(name)) {
+    let body: Buffer | null = null;
+    try {
+      body = readFileSync(`${BITS_DIR}${name}`);
+    } catch {
+      body = null;
+    }
+    if (bitsCache.size < 64) bitsCache.set(name, body);
+    return body;
+  }
+  return bitsCache.get(name) ?? null;
+}
+
 export function registerPortalAssets(app: FastifyInstance): void {
   const css = portalTokensCss();
   app.get("/assets/tokens.css", async (_req, reply) => {
@@ -200,6 +224,11 @@ export function registerPortalAssets(app: FastifyInstance): void {
   app.get("/assets/theme.js", async (_req, reply) => {
     reply.header("cache-control", LONG_CACHE).type("text/javascript; charset=utf-8");
     return THEME_JS;
+  });
+  app.get<{ Params: { file: string } }>("/assets/bits/:file", async (req, reply) => {
+    const body = bitsFile(req.params.file);
+    if (!body) return reply.code(404).type("text/plain; charset=utf-8").send("not found");
+    return reply.header("cache-control", "public, max-age=86400").header("x-content-type-options", "nosniff").type("image/svg+xml").send(body);
   });
   app.get<{ Params: { file: string } }>("/assets/videos/:file", async (req, reply) => {
     const body = videoFile(req.params.file);

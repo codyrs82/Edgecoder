@@ -209,14 +209,14 @@ export class FrontierAccess {
     const parsed = parseFrontierModelId(c.model);
     if (!parsed) return off("bad_id", `${c.model} isn't a frontier model id`);
     if (!BOT_FRONTIER_TRIGGERS.includes(c.trigger)) return off("trigger", c.trigger === "github" ? "GitHub trigger" : `${c.trigger} run`);
-    if (c.githubTriggers > 0) return off("github_trigger", "the bot has GitHub triggers");
+    if (c.githubTriggers > 0) return off("github_trigger", "the bit has GitHub triggers");
     const account = await this.d.account().catch(() => null);
     if (!account) return off("not_signed_in", "nobody is signed in on this computer");
-    if (!c.ownerAccount) return off("no_owner", "turn the switch on again in the bot's settings to confirm it's yours");
-    if (c.ownerAccount !== account) return off("other_account", "the bot belongs to another account");
+    if (!c.ownerAccount) return off("no_owner", "turn the switch on again in the bit's settings to confirm it's yours");
+    if (c.ownerAccount !== account) return off("other_account", "the bit belongs to another account");
     if (!this.d.store.usable(parsed.provider, account)) return off("no_key", `no ${parsed.provider} key for your account on this computer`);
     const botToday = this.d.spend.todayFor(botSpendKey(c.botId));
-    if (botToday >= c.dailyCapUsd) return off("bot_daily_cap", `the bot's daily cap is reached (${formatUsd(botToday)} of ${formatUsd(c.dailyCapUsd)})`);
+    if (botToday >= c.dailyCapUsd) return off("bot_daily_cap", `the bit's daily cap is reached (${formatUsd(botToday)} of ${formatUsd(c.dailyCapUsd)})`);
     const settings = this.d.store.settings();
     const dayUsd = this.d.spend.totals().dayUsd;
     if (settings.dailyCapUsd !== null && dayUsd >= settings.dailyCapUsd) return off("daily_cap", `your daily cap is reached (${formatUsd(dayUsd)} of ${formatUsd(settings.dailyCapUsd)})`);

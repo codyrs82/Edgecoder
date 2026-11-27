@@ -35,7 +35,7 @@ export default withMermaid(defineConfig({
           { text: "Run on a Cloud GPU or Linux Server", link: "/guide/cloud-gpu-server" },
           { text: "Buy cSats (pay for network compute)", link: "/guide/buy-csats" },
           { text: "Web Chat and Privacy", link: "/guide/web-chat" },
-          { text: "Bots, Cloud Bots and Web Search", link: "/guide/bots" },
+          { text: "Bits, Cloud Bits and Web Search", link: "/guide/bots" },
           { text: "Terminal: edgecoder code", link: "/guide/terminal" },
           { text: "Using Network Compute and Reservations", link: "/guide/using-compute" },
           { text: "Hosting", link: "/guide/hosting" },

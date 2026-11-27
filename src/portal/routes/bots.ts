@@ -401,7 +401,7 @@ export function registerBotRoutes(app: FastifyInstance, deps: BotRoutesDeps): vo
     const body = z.object({ requestId: botRequestIdSchema, agentId: agentIdSchema.nullable().default(null), bot: z.record(z.string(), z.unknown()) }).strict().safeParse(req.body ?? {});
     if (!body.success) return reply.code(400).send({ error: "invalid_bot" });
     if (body.data.agentId === CLOUD_AGENT_ID) {
-      if (!cloud) return reply.code(503).send({ error: "cloud_bots_unavailable", message: "Cloud bots aren't available here." });
+      if (!cloud) return reply.code(503).send({ error: "cloud_bots_unavailable", message: "Cloud bits aren't available here." });
       const a = await cloud.create(user.userId, body.data.requestId, body.data.bot);
       return reply.code(a.status).send(a.body);
     }
@@ -420,7 +420,7 @@ export function registerBotRoutes(app: FastifyInstance, deps: BotRoutesDeps): vo
       const machines = await machinesFor(user.userId);
       const made = machines.find((m) => m.bots.some((b) => b.id === botId));
       if (made) return reply.send({ ok: true, botId, agentId: made.machine.agentId, state: "created" });
-      if (list.length >= MAX_PENDING_BOTS) return reply.code(429).send({ error: "too_many_pending", message: `At most ${MAX_PENDING_BOTS} new bots can wait for a machine.` });
+      if (list.length >= MAX_PENDING_BOTS) return reply.code(429).send({ error: "too_many_pending", message: `At most ${MAX_PENDING_BOTS} new bits can wait for a machine.` });
       const entry: PendingBot = { requestId: body.data.requestId, botId, target: body.data.agentId, spec: spec.data, state: "waiting", createdAtMs: now() };
       if (!(await store.savePendingBots(user.userId, [...list, entry], version, now()))) return reply.code(409).send({ error: "busy", message: "Try again." });
       const after = await reconcile(user.userId, machines);

@@ -81,7 +81,7 @@ final class MachinesTests: XCTestCase {
         XCTAssertEqual(MachinesDirectory.status(row(1_700_000_000_000 - 3 * 3_600_000), now: now), "Offline · last seen 3 h ago")
         XCTAssertEqual(MachinesDirectory.status(row(1_700_000_000_000 - 86_400_000), now: now), "Offline · last seen 1 day ago")
         XCTAssertEqual(MachinesDirectory.status(row(1_700_000_000_000 - 3 * 86_400_000), now: now), "Offline · last seen 3 days ago")
-        XCTAssertEqual(MachinesDirectory.botsLabel(1), "1 bot")
-        XCTAssertEqual(MachinesDirectory.botsLabel(4), "4 bots")
+        XCTAssertEqual(MachinesDirectory.botsLabel(1), "1 bit")
+        XCTAssertEqual(MachinesDirectory.botsLabel(4), "4 bits")
     }
 }

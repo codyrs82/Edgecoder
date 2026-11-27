@@ -113,7 +113,7 @@ describe("FrontierAccess.forBot: every refusal path, in order", () => {
     const { access, spend, store } = await frontier(acct);
     for (const trigger of ["message", "manual", "schedule", "heartbeat", "start", "follow_up"]) expect(await access.forBot({ ...base, trigger })).toEqual({ ok: true, runCapReached: false });
     expect(await access.forBot({ ...base, trigger: "github" })).toMatchObject({ ok: false, reason: "trigger", note: "Claude lead off: GitHub trigger" });
-    expect(await access.forBot({ ...base, githubTriggers: 1 })).toMatchObject({ ok: false, reason: "github_trigger", note: "Claude lead off: the bot has GitHub triggers" });
+    expect(await access.forBot({ ...base, githubTriggers: 1 })).toMatchObject({ ok: false, reason: "github_trigger", note: "Claude lead off: the bit has GitHub triggers" });
     expect(await access.forBot({ ...base, ownerAccount: undefined })).toMatchObject({ ok: false, reason: "no_owner" });
     expect(await access.forBot({ ...base, ownerAccount: "acct-bob" })).toMatchObject({ ok: false, reason: "other_account" });
     expect(await access.forBot({ ...base, model: "frontier/openai/gpt-5" })).toMatchObject({ ok: false, reason: "no_key" });
@@ -324,7 +324,7 @@ describe("approval: the owner approves each use", () => {
     m.message(b.id, "hi");
     await m.idle(b.id);
     expect(answered[0]).toEqual(["worker"]);
-    expect(m.history(b.id)[0].note).toBe("Claude lead off: the bot belongs to another account");
+    expect(m.history(b.id)[0].note).toBe("Claude lead off: the bit belongs to another account");
   });
 
   it("the web relay answers with approve_frontier / decline_frontier, checked against the owner", async () => {

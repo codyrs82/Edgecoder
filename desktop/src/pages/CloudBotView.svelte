@@ -74,9 +74,9 @@
   }
 </script>
 
-<section class="cloud-bot" aria-label="{shown.name}, a cloud bot">
+<section class="cloud-bot" aria-label="{shown.name}, a cloud bit">
   <header class="cb-head">
-    <BotAvatar name={shown.name} color={shown.color} status={working ? "running" : shown.status === "error" ? "error" : "idle"} size={32} decorative />
+    <BotAvatar name={shown.name} color={shown.color} shape={shown.avatarShape} status={working ? "running" : shown.status === "error" ? "error" : "idle"} size={32} decorative />
     <div class="cb-who">
       <h2>{shown.name}{#if shown.role}<span class="cb-role"> · {shown.role}</span>{/if}</h2>
       <p class="cb-sub"><span class="cb-chip">Cloud</span> Runs on EdgeCoder's servers{shown.repository ? ` · ${shown.repository}` : ""}{working ? ` · ${shown.activity ?? "Working…"}` : shown.enabled ? "" : " · Paused"}</p>
@@ -103,7 +103,7 @@
     <textarea id="cloud-bot-input" rows="2" bind:value={draft} placeholder="Message {shown.name}…" onkeydown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); void send(); } }}></textarea>
     <button class="btn" type="submit" disabled={sending || !draft.trim()}>Send</button>
   </form>
-  <p class="cb-note">Change its settings on the web (Bots) or in the EdgeCoder iOS app.</p>
+  <p class="cb-note">Change its settings on the web (Bits) or in the EdgeCoder iOS app.</p>
 </section>
 
 <style>
