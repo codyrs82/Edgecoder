@@ -29,7 +29,7 @@ import { LISTEN_HOST } from "../common/env-guard.js";
 import { registerReceiptRoutes, startReceiptReplication } from "../receipts/replication.js";
 import { anchorEpoch, closeEpoch } from "../receipts/epochs.js";
 import { app, metrics } from "./coordinator/app.js";
-import { queue, identity, coordinatorKeys, CC, mesh, MESH_AUTH_TOKEN, COORDINATOR_PUBLIC_URL, taskBilling } from "./coordinator/context.js";
+import { queue, identity, coordinatorKeys, CC, mesh, meshTokenFor, COORDINATOR_PUBLIC_URL, taskBilling } from "./coordinator/context.js";
 import { startAdminListener } from "./coordinator/admin-listener.js";
 import "./coordinator/mutable-state.js";
 import { agentCapabilities, connectedAgentCount, recordAbandonedClaim } from "./coordinator/agent-state.js";
@@ -178,7 +178,7 @@ app.addHook("onReady", async () => {
     intervalMs: CC.RECEIPT_REPLICATION_MS,
     fetch: (url, init) => fetch(url, init),
     selfId: identity.peerId,
-    meshToken: MESH_AUTH_TOKEN || undefined,
+    meshToken: (url) => meshTokenFor(url) || undefined,
     signRequest: (method, url) => peerSignatureHeaders(method, url),
     coordinatorPublicKeyFor: (id) => coordinatorPublicKeyById(id),
     log: app.log

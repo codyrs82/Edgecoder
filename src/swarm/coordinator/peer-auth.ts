@@ -8,7 +8,8 @@
  * registry later, context.ts trustedPeerKey).
  *
  * Migration without downtime:
- * - Outbound: every peer call is signed, and still carries MESH_AUTH_TOKEN while one is configured.
+ * - Outbound: every peer call is signed, and still carries MESH_AUTH_TOKEN while one is configured,
+ *   to the peers MESH_TOKEN_PEER_URLS allows (every peer when it is unset).
  * - Inbound: a signature that is present is always verified (headers, body hash, single-use nonce);
  *   a bad one is refused even next to a valid token. (One by a key this coordinator does not trust
  *   is ignored when a valid token came with it, so token-only peers keep working.) With MESH_TOKEN_REQUIRED_FOR_PEERS=true (the
@@ -27,7 +28,7 @@ import { rawBodyOf } from "../../security/request-signing.js";
 import {
   identity,
   coordinatorKeys,
-  MESH_AUTH_TOKEN,
+  meshTokenFor,
   MESH_TOKEN_REQUIRED_FOR_PEERS,
   MESH_PEER_ALLOWLIST,
   trustedPeerKey,
@@ -174,7 +175,11 @@ export function peerSignatureHeaders(method: string, url: string, body?: string 
   });
 }
 
-/** Everything an outbound peer request carries: the signature, plus the mesh token while one is configured. */
+/**
+ * Everything an outbound peer request carries: the signature, plus the mesh token while one is
+ * configured and the peer is one it may go to (MESH_TOKEN_PEER_URLS).
+ */
 export function peerRequestHeaders(method: string, url: string, body?: string | Buffer | null): Record<string, string> {
-  return { ...peerSignatureHeaders(method, url, body), ...(MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : {}) };
+  const token = meshTokenFor(url);
+  return { ...peerSignatureHeaders(method, url, body), ...(token ? { "x-mesh-token": token } : {}) };
 }

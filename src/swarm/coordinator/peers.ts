@@ -17,7 +17,7 @@ import {
   COORDINATOR_DISCOVERY_URL,
   COORDINATOR_BOOTSTRAP_URLS,
   COORDINATOR_PUBLIC_URL,
-  MESH_AUTH_TOKEN,
+  meshTokenFor,
   identity,
   mesh,
   PEER_ALLOWLIST_ENFORCED,
@@ -103,7 +103,7 @@ export async function bootstrapPeerMesh(): Promise<void> {
     try {
       const identityRes = await request(`${peerUrl}/identity`, {
         method: "GET",
-        headers: MESH_AUTH_TOKEN ? { "x-mesh-token": MESH_AUTH_TOKEN } : undefined,
+        headers: meshTokenFor(`${peerUrl}/identity`) ? { "x-mesh-token": meshTokenFor(`${peerUrl}/identity`) } : undefined,
         signal: AbortSignal.timeout(8_000)
       });
       if (identityRes.statusCode < 200 || identityRes.statusCode >= 300) {

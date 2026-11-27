@@ -23,6 +23,8 @@ export class GossipMesh {
   private peers = new Map<string, MeshPeerIdentity>();
   private wsPeers = new Map<string, WebSocket>();
   private meshToken: string | undefined;
+  /** Which peer URLs get the mesh token (default: every peer; src/mesh/mesh-token-scope.ts). */
+  private meshTokenAllowed: (url: string) => boolean = () => true;
   /** Signs each HTTP request to a peer (coordinators: their own key, src/swarm/coordinator/peer-auth.ts). */
   private requestSigner?: (method: string, url: string, body: string) => Record<string, string>;
   private failureCounts = new Map<string, number>();
@@ -58,6 +60,11 @@ export class GossipMesh {
     this.meshToken = token;
   }
 
+  /** Send the mesh token only to the peer URLs `fn` allows; the others get the signature alone. */
+  setMeshTokenScope(fn: (url: string) => boolean): void {
+    this.meshTokenAllowed = fn;
+  }
+
   /** Sign every HTTP request to a peer (each attempt anew; the signature's nonce is single-use). */
   setRequestSigner(fn: (method: string, url: string, body: string) => Record<string, string>): void {
     this.requestSigner = fn;
@@ -66,7 +73,7 @@ export class GossipMesh {
   /** Headers for one POST to a peer: content type, the mesh token while set, and the signature. */
   private postHeaders(url: string, body: string): Record<string, string> {
     const headers: Record<string, string> = { "content-type": "application/json" };
-    if (this.meshToken) headers["x-mesh-token"] = this.meshToken;
+    if (this.meshToken && this.meshTokenAllowed(url)) headers["x-mesh-token"] = this.meshToken;
     if (this.requestSigner) Object.assign(headers, this.requestSigner("POST", url, body));
     return headers;
   }

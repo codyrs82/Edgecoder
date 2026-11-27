@@ -312,8 +312,11 @@ approving coordinator's `ADMIN_API_TOKEN`. In the all-in-one runtime the control
 
 ### Current limits for coordinators run by other operators
 
-- Peering needs the network's shared `MESH_AUTH_TOKEN`: `/mesh/register-peer` and `/mesh/ingest` check it
-  before anything else, so the portal registration token alone does not admit a coordinator.
+- Peering without the network's `MESH_AUTH_TOKEN`: every coordinator signs its peer requests with its own
+  key. A coordinator that sets `MESH_TOKEN_REQUIRED_FOR_PEERS=false` admits a peer whose key is on its
+  `MESH_PEER_ALLOWLIST` without the token. Coordinators still send their token to every peer unless
+  `MESH_TOKEN_PEER_URLS` lists the peers that may receive it, so the mesh operator sets that (to its own
+  coordinators' URLs) on each of its coordinators before allowlisting one run by another operator.
 - Credits live in each coordinator's own database. A coordinator with its own `DATABASE_URL` does not see
   balances held on the network's ledger, so a network-billed call it starts itself is refused with
   `insufficient_credits`. Calls a user runs on their own machines (`target: "mine"`) are not billed and work.
