@@ -10,6 +10,7 @@
 // chosen coordinator directly.
 
 import { fingerprintMatches, publicKeyFingerprint } from "../security/key-fingerprint.js";
+import { EDGECODER_NETWORK_DOMAIN } from "../trust/seed-keys.js";
 import type { FetchLike } from "./selector.js";
 import { normalizeCoordinatorUrl } from "./types.js";
 import { memberSteerable, memberTrusted, verifySignedRegistry, type RegistryEntry, type RegistryPayload } from "./registry.js";
@@ -276,8 +277,8 @@ export interface SteeringOptions {
   trustsConfigured?: (peerId: string, publicKeyPem: string) => boolean;
 }
 
-/** The platform URL every default install points at; steering is free to move agents off it. */
-export const PLATFORM_COORDINATOR_URL = "https://coordinator.edgecoder.io";
+/** The platform URL every default install points at (DEFAULT_COORDINATOR_URL); steering is free to move agents off it. */
+export const PLATFORM_COORDINATOR_URL = `https://coordinator.${EDGECODER_NETWORK_DOMAIN}`;
 
 /**
  * The operator's explicitly configured coordinator, or null for a default install: unset, the

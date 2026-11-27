@@ -176,3 +176,11 @@ describe("applyStartupDiscovery", () => {
     expect(applyStartupDiscovery({ discovered: portal, steering: { ...fallback, source: "registry", reason: "" }, explicitUrl: null })).toBeNull();
   });
 });
+
+describe("PLATFORM_COORDINATOR_URL", () => {
+  it("matches the installer default", async () => {
+    const { DEFAULT_COORDINATOR_URL } = await import("../../src/install/options.js");
+    const { PLATFORM_COORDINATOR_URL } = await import("../../src/discovery/steering.js");
+    expect(PLATFORM_COORDINATOR_URL).toBe(DEFAULT_COORDINATOR_URL);
+  });
+});
