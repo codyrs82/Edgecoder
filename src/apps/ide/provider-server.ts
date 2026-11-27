@@ -24,7 +24,7 @@ import { ollamaTags } from "../../model/swap.js";
 import { PullTracker } from "../../model/pull-tracker.js";
 import { ToolExecutor, hasGitHubOrigin, preparePullRequestArgs } from "./tool-executor.js";
 import { MAX_EDITOR_FILE_BYTES, ProjectFs, ProjectFsError, findPaths, readProjectRules } from "./project-fs.js";
-import { CheckpointStore } from "./checkpoints.js";
+import { CheckpointStore, isTurnId } from "./checkpoints.js";
 import { cleanInlineEdit, inlineEditMessages } from "./inline-edit.js";
 import { backendChat, makeToolRunner, ollamaChat, runAgentLoop, toolSchemas, type ChatFn } from "./agent-loop.js";
 import { completeAt } from "./complete.js";
@@ -691,15 +691,21 @@ app.get("/v1/ide/fs/git-status", (_req, reply) =>
 // Agent turn checkpoints: what a turn changed, and undo (checkpoints.ts).
 const checkpoints = new CheckpointStore();
 
+// A turn id the store can't hold (checkpoints.ts isTurnId) is the caller's mistake: 400 that says so, not a 500.
+const badTurnId = (reply: { status: (n: number) => { send: (b: unknown) => unknown } }) =>
+  reply.status(400).send({ error: "invalid_turn_id", message: "turnId must be a turn's UUID or a bot run id (run_…)." });
+
 app.get("/v1/ide/checkpoints/:turnId", async (req, reply) => {
-  const { turnId } = z.object({ turnId: z.string().uuid() }).parse(req.params);
+  const turnId = (req.params as { turnId?: unknown }).turnId;
+  if (!isTurnId(turnId)) return badTurnId(reply);
   const changes = checkpoints.changes(turnId);
   if (!changes) return reply.status(404).send({ error: "unknown_turn" });
   return reply.send({ turnId, changes });
 });
 
 app.post("/v1/ide/checkpoints/:turnId/revert", async (req, reply) => {
-  const { turnId } = z.object({ turnId: z.string().uuid() }).parse(req.params);
+  const turnId = (req.params as { turnId?: unknown }).turnId;
+  if (!isTurnId(turnId)) return badTurnId(reply);
   const { paths } = z.object({ paths: z.array(z.string().max(4096)).max(500).optional() }).parse(req.body ?? {});
   try {
     const reverted = checkpoints.revert(turnId, paths);

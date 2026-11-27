@@ -690,6 +690,8 @@ const RECONNECT_PROBE_MAX_MS = 5 * 60_000;
 let reconnectProbeIntervalMs = RECONNECT_PROBE_MIN_MS;
 const COORDINATOR_CACHE_TTL_MS = 5 * 60_000; // 5 minutes
 let lastReconnectProbeMs = 0;
+/** The last time a waiting local call asked the agent to register now (local-forwarder.ts nudgeRegistration). */
+let lastRegistrationNudgeMs = 0;
 
 // ── Registration state (see registration-policy.ts for why this is not every tick) ──
 const REGISTER_REFRESH_MS = registerRefreshMsFromEnv();
@@ -725,7 +727,19 @@ if (LOCAL_FORWARD_PORT > 0) {
     },
     meshHeaders,
     signedHeaders,
-    agentId: AGENT_ID
+    agentId: AGENT_ID,
+    // The app is waiting on a call: offline, probe now rather than at the next backoff step (up to 5
+    // min); online but unregistered, register on the next tick. At most once per RECONNECT_PROBE_MIN_MS.
+    nudgeRegistration: () => {
+      const now = Date.now();
+      if (now - lastRegistrationNudgeMs < RECONNECT_PROBE_MIN_MS) return;
+      lastRegistrationNudgeMs = now;
+      if (!coordinatorOnline) {
+        lastReconnectProbeMs = 0;
+        reconnectProbeIntervalMs = RECONNECT_PROBE_MIN_MS;
+      }
+      wakeLoop(false);
+    }
   })
     .on("error", (err) => console.warn(`[agent:${AGENT_ID}] local forwarder unavailable: ${String(err)}`))
     .listen(LOCAL_FORWARD_PORT, "127.0.0.1", () =>

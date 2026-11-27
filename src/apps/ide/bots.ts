@@ -50,7 +50,7 @@ import {
   CI_SCOPES, TRIGGER_KINDS, TRIGGER_POLL_MS, ghApiCli, parseGitHubRepo, pollTrigger, untrustedEventBlock,
   type BotGitHubTrigger, type GhApi, type TriggerCursor, type TriggerEvent,
 } from "./bot-triggers.js";
-import { blockedResult, outcomeOf, projectCheck, runsDigest, stuckProblem, updateBlocks, actionKey, STUCK_RUNS, type KnownBlock, type RunOutcome } from "./bot-outcomes.js";
+import { blockedResult, outcomeOf, runFailureClass, projectCheck, runsDigest, stuckProblem, updateBlocks, actionKey, STUCK_RUNS, type KnownBlock, type RunOutcome } from "./bot-outcomes.js";
 import { normalizeRemoteUrl } from "./git-setup.js";
 import { gitExecEnv, hardenedGitArgs } from "./git-safe.js";
 import { PermissionStore, riskOf, type PermissionMode } from "./permissions.js";
@@ -222,6 +222,15 @@ const UNREADABLE_FINGERPRINT = "unreadable";
 export const FOLLOW_UP_DELAY_MS = 2 * 60_000;
 /** Follow-ups in a row before the bot waits for you (or its next check-in). */
 export const MAX_FOLLOW_UPS_IN_A_ROW = 5;
+/**
+ * A run that couldn't reach the network (bot-outcomes.ts runFailureClass "transient": this
+ * computer's agent reconnecting, a coordinator restarting, every machine busy) runs again by itself
+ * after these waits, the last one repeating until it gets through. Nobody has to press Resume.
+ */
+export const UNAVAILABLE_RETRY_STEPS_MS: readonly number[] = [15_000, 60_000, 5 * 60_000];
+export function unavailableRetryMs(attempt: number): number {
+  return UNAVAILABLE_RETRY_STEPS_MS[Math.min(Math.max(0, attempt), UNAVAILABLE_RETRY_STEPS_MS.length - 1)];
+}
 /** Runs the bot starts on its own (they count against maxRunsPerDay). */
 export const AUTO_TRIGGERS: readonly BotTrigger[] = ["start", "schedule", "heartbeat", "follow_up", "github"];
 const MAX_RUNS = 50;
@@ -380,6 +389,8 @@ export interface BotAutoState {
    * resume or message it. The balance it saw then, when known.
    */
   outOfCSats?: { atMs: number; day: number; balanceCSats?: number };
+  /** Starts or follow-ups in a row that couldn't reach the network; sets the wait before the next try. */
+  unavailableRetries?: number;
 }
 
 /** A run's failure for lack of cSats (auto-route.ts notEnoughCSatsMessage). */
@@ -476,7 +487,7 @@ export interface BotMessage {
   attachments?: SavedAttachment[];
 }
 
-export type BotStatus = "idle" | "running" | "needs_approval" | "paused" | "over_budget" | "out_of_csats" | "error" | "needs_folder";
+export type BotStatus = "idle" | "running" | "needs_approval" | "paused" | "over_budget" | "out_of_csats" | "waiting_network" | "error" | "needs_folder";
 
 /** What it runs next on its own: kind and when (absent: nothing until a message or GitHub event). */
 export interface BotNextRun {
@@ -1215,7 +1226,7 @@ export class BotManager {
    */
   tick(now = this.now()): string[] {
     const started: string[] = [];
-    let changed = false;
+    let changed = this.releaseTransientStucks(now);
     this.checkTopUp(now);
     for (const bot of this.bots) {
       // Paused, or made on the web and still waiting for its folder.
@@ -1827,6 +1838,7 @@ export class BotManager {
     if (resumed) this.unstick(bot);
     // Edited (a bigger budget, other compute) or resumed: try again rather than wait for a top-up.
     delete auto.outOfCSats;
+    if (resumed) delete auto.unavailableRetries;
     if (scheduleChanged || resumed || heartbeatChanged) {
       bot.nextRunAtMs = this.nextFor(bot);
       auto.idleStreak = 0;
@@ -1898,6 +1910,8 @@ export class BotManager {
         ? "over_budget"
         : bot.enabled && bot.auto?.outOfCSats
           ? "out_of_csats"
+        : bot.enabled && bot.auto?.unavailableRetries && lastRun?.status === "failed"
+          ? "waiting_network"
           : !bot.enabled
           ? "paused"
           : lastRun?.status === "failed"
@@ -2333,6 +2347,7 @@ export class BotManager {
       delete auto.due;
       return;
     }
+    if (this.retryUnavailable(bot, run, now)) return;
     if (this.pauseIfStuck(bot, run)) return;
     if (run.status !== "done" || !bot.enabled) return;
     // A reply that only says what it'll do next continues soon, but only when the run did something:
@@ -2346,6 +2361,50 @@ export class BotManager {
       return;
     }
     auto.due = { atMs: now + wants.minutes * MINUTE, kind: "follow_up", reason: wants.reason };
+  }
+
+  /**
+   * A run that couldn't reach the network (this computer's agent wasn't connected, a coordinator was
+   * restarting, every machine was busy: bot-outcomes.ts runFailureClass "transient") isn't the bot's
+   * problem: it never counts toward a stuck pause (sameOutcome), and the bot tries again by itself
+   * after unavailableRetryMs (15 s, 1 min, then every 5 min; the daily run limit still holds), status
+   * "waiting_network" meanwhile. A run on its own continues as a follow-up; a run you started (Run
+   * now, a message) is tried again as a start. Any other ending resets the wait. Returns whether it
+   * scheduled a retry.
+   */
+  private retryUnavailable(bot: BotConfig, run: BotRun, now: number): boolean {
+    const auto = (bot.auto ??= { idleStreak: 0, followUps: 0 });
+    if (!(run.status === "failed" && run.outcome?.unavailable)) {
+      delete auto.unavailableRetries;
+      return false;
+    }
+    if (!bot.enabled || !hasGoal(bot)) return false;
+    const n = auto.unavailableRetries ?? 0;
+    const wait = unavailableRetryMs(n);
+    auto.unavailableRetries = n + 1;
+    auto.due = { atMs: now + wait, kind: run.trigger === "follow_up" ? "follow_up" : "start" };
+    if (n === 0) this.note(bot.id, `Waiting for the network (${run.error ?? "it couldn't be reached"}): retrying automatically.`);
+    return true;
+  }
+
+  /**
+   * Bots a stuck pause stopped for a problem that was only the network being out of reach (saved by
+   * an older version, which counted those): they work on their own again, starting soon, as if
+   * resumed. Returns whether any changed.
+   */
+  private releaseTransientStucks(now: number): boolean {
+    let changed = false;
+    for (const bot of this.bots) {
+      const stuck = bot.auto?.stuck;
+      if (!stuck || bot.enabled || runFailureClass(stuck.problem) !== "transient") continue;
+      this.unstick(bot);
+      bot.enabled = true;
+      bot.auto!.unavailableRetries = 1;
+      if (hasGoal(bot)) bot.auto!.due = { atMs: now + unavailableRetryMs(0), kind: "start" };
+      this.note(bot.id, `Resumed: ${bot.name} was paused only because the network couldn't be reached; retrying automatically.`);
+      changed = true;
+    }
+    return changed;
   }
 
   /**

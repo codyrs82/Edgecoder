@@ -13,7 +13,9 @@
  *   - KnownBlock: those commands (same command, same folder). Runs the bot starts on its own don't
  *     ask for them again; the tool result says it failed before (or that you said no).
  *   - stuckProblem: the same problem (same action, same failure, a near-identical message) three
- *     runs in a row pauses the bot until you message it or resume it.
+ *     runs in a row pauses the bot until you message it or resume it. A run that failed only because
+ *     the network couldn't be reached right now (networkUnavailable) never counts: nothing the bot
+ *     does would change it, so it waits and tries again instead (bots.ts).
  *   - projectCheck: npm, git, pytest, cargo … in a folder that isn't a code project are refused
  *     before anyone is asked, with a tool result that says so and what to do instead.
  */
@@ -21,6 +23,9 @@
 import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { IdeStreamEvent } from "./tool-types.js";
+import { runFailureClass } from "../../common/run-failures.js";
+
+export { runFailureClass, type RunFailureClass } from "../../common/run-failures.js";
 
 /** What happened to one tool call in a run. */
 export interface RunAction {
@@ -41,7 +46,21 @@ export interface RunOutcome {
   problem?: string;
   /** The run's final message, shortened. */
   reply: string;
+  /** It failed only because the network couldn't be reached right now (networkUnavailable): not the bot's problem. */
+  unavailable?: true;
 }
+
+/**
+ * A run error that says the network couldn't be reached right now, not that the bot did anything
+ * wrong: this computer's agent isn't connected (it is starting, reconnecting after sleep or a
+ * network change, or its coordinator is restarting), the coordinator is restarting for an update,
+ * every machine for the model is busy, or the local agent didn't answer. Waiting fixes these.
+ * (Out of cSats is not one of them: bots.ts handles it on its own.)
+ */
+export function networkUnavailable(error: string | undefined): boolean {
+  return runFailureClass(error) === "transient";
+}
+
 
 /** A command not to ask about again in this bot: it failed after you allowed it, or you said no. */
 export interface KnownBlock {
@@ -178,7 +197,7 @@ export function outcomeOf(opts: {
       : undefined;
   // The interesting calls first: those that asked you or failed.
   const kept = [...order.filter((a) => a.approval !== "auto" || a.error), ...order.filter((a) => a.approval === "auto" && !a.error)].slice(0, MAX_ACTIONS);
-  return { actions: kept, ...(problem ? { problem } : {}), reply: clip(oneLine(lastParagraphs(opts.reply)), MAX_REPLY) };
+  return { actions: kept, ...(problem ? { problem } : {}), reply: clip(oneLine(lastParagraphs(opts.reply)), MAX_REPLY), ...(networkUnavailable(opts.runError) ? { unavailable: true as const } : {}) };
 }
 
 /** The end of a reply (its conclusion), where a looping bot repeats itself. */
@@ -190,6 +209,8 @@ function lastParagraphs(text: string): string {
 /** Two runs that came to the same thing: the same failing action(s), the same problem, a near-identical message. */
 export function sameOutcome(a: RunOutcome, b: RunOutcome): boolean {
   if (!a.problem || !b.problem) return false;
+  // The network was out of reach: waiting fixes it, so it never makes a streak.
+  if (a.unavailable || b.unavailable) return false;
   if (normalizeText(a.problem) !== normalizeText(b.problem)) return false;
   const failing = (o: RunOutcome) => o.actions.filter((x) => x.error || x.approval === "unanswered" || x.approval === "denied").map((x) => x.key).sort().join("\n");
   if (failing(a) !== failing(b)) return false;

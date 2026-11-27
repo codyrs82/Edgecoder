@@ -6,7 +6,7 @@ import { bots, refreshBots } from "./bots-store";
 import type { Bot } from "./bots";
 import { BACK_ONLINE_TEXT, BACK_ONLINE_TOAST_MS, reachEdgeCoder, startConnectivityMonitor, stopConnectivityMonitor } from "./connectivity";
 import { coordinatorUrl, portalUrl } from "./endpoints";
-import { offlinePausedIds, pauseNetworkBots, resumeNetworkBots } from "./offline-bots";
+import { offlinePausedIds, resumeNetworkBots } from "./offline-bots";
 import { inDesktopShell } from "./service-status";
 import { notify } from "./toast";
 
@@ -21,12 +21,14 @@ export interface ConnectivityHandlerDeps {
 
 export function connectivityHandlers(d: ConnectivityHandlerDeps) {
   return {
-    /** Network-only bots pause (status "Offline"); everything on this computer keeps working. */
+    /**
+     * Nothing is paused: a Network only bot runs on this computer's models while the network is out
+     * of reach, or waits and retries by itself (src/apps/ide/bots.ts retryUnavailable). Only the views refresh.
+     */
     onOffline: async () => {
-      await pauseNetworkBots(d.bots(), d.update, ...(d.store !== undefined ? [d.store] : []));
       await d.refresh().catch(() => undefined);
     },
-    /** A short "Back online" toast; the bots the app paused resume. Pages refresh via onBackOnline. */
+    /** A short "Back online" toast; bots an older version paused while offline resume. Pages refresh via onBackOnline. */
     onOnline: async () => {
       d.notify(BACK_ONLINE_TEXT, "success", "back-online", BACK_ONLINE_TOAST_MS);
       await resumeNetworkBots(d.update, ...(d.store !== undefined ? [d.store] : []));

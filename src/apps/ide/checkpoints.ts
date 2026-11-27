@@ -13,6 +13,15 @@ import { ProjectFs, MAX_EDITOR_FILE_BYTES } from "./project-fs.js";
 
 const MAX_TURNS = 50;
 
+/**
+ * A turn's id: a chat or session turn's UUID, or a bot run's id ("run_76eb1886", bots.ts), which is
+ * its turn id too (agentBotRunner). The desktop's Changes card asks for either.
+ */
+export const TURN_ID_RE = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|run_[A-Za-z0-9]{1,40})$/i;
+export function isTurnId(id: unknown): id is string {
+  return typeof id === "string" && TURN_ID_RE.test(id);
+}
+
 export interface FileChange {
   path: string;
   /** Content before the turn; null when the file did not exist. */

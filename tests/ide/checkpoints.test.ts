@@ -55,3 +55,12 @@ describe("CheckpointStore", () => {
     expect(store.capture(TURN, "a.txt")).toBeNull();
   });
 });
+
+describe("turn ids", () => {
+  it("accepts a chat turn's UUID and a bot run's id (its turn id), and nothing else", async () => {
+    const { isTurnId } = await import("../../src/apps/ide/checkpoints.js");
+    expect(isTurnId("0b5c2a1e-6f1d-4a33-9a0e-2f4c3b1d9e77")).toBe(true);
+    expect(isTurnId("run_76eb1886")).toBe(true);
+    for (const bad of ["", "run_", "run_../x", "../etc", "inf-1-abc", "x".repeat(200), 5, null]) expect(isTurnId(bad)).toBe(false);
+  });
+});
